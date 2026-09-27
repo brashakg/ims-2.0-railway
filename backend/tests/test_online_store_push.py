@@ -395,9 +395,11 @@ def test_push_image_live_attaches_media_and_writes_the_map(monkeypatch):
     img = db["product_images"].find_one({"image_id": "I1"})
     res = _run(shopify_push.push_image(db, img))
     assert res.ok is True and res.shopify_id == "gid://shopify/MediaImage/900"
+    # The design row's map entry carries the queue row's image_id: the lane
+    # marker the product press keeps its hands off.
     assert db["catalog_products"].find_one({"id": "P1"})["ecom"]["media_map"] == [
         {"url": "https://cdn.example.com/p.jpg", "id": "gid://shopify/MediaImage/1"},
-        {"url": "http://x/edited.jpg", "id": "gid://shopify/MediaImage/900"},
+        {"url": "http://x/edited.jpg", "id": "gid://shopify/MediaImage/900", "image_id": "I1"},
     ]
     assert db["product_images"].find_one({"image_id": "I1"}).get("shopify_image_id") is None
     # The read came first; the create carries ONLY the new asset, and prefers

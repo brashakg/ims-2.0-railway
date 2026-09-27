@@ -30,7 +30,10 @@ Mounted at /api/v1/online-store/push:
   POST /product/{product_id}      push a catalog product (+ ecom + variants)
   POST /collection/{collection_id} push an ecom_collections doc (+ smart ruleSet)
   POST /menu/{menu_id}            push an ecom_menus doc (the nav / mega-menu)
-  POST /image/{image_id}          push ONE APPROVED product image (productCreateMedia)
+  POST /image/{image_id}          press ONE APPROVED design-queue image onto its
+                                  parent's listing (the shared media pass: no-op
+                                  when already mapped, drops the asset the row
+                                  mapped before it was replaced)
   POST /stock                     write the pooled quantity of every changed listing
   GET  /status                    per-entity pushed-vs-pending + the current mode
   GET  /locations                 Shopify's locations, joined to the shop each maps to
@@ -244,10 +247,13 @@ async def push_image(
     image_id: str,
     current_user: dict = Depends(require_roles(*_PUSH_ROLES)),
 ) -> Dict[str, Any]:
-    """Push ONE APPROVED product image to Shopify (productCreateMedia onto its
-    parent product). DARK by default; LIVE behind the gates. Writes a chained
-    audit row. Unknown image -> 404. A non-APPROVED image is NOT a route error
-    (the engine returns ok=false action=skip) so the audit still records the
+    """Press ONE APPROVED design-queue image onto its parent product's listing
+    through the shared media pass (read -> attach -> delete -> reorder): a
+    no-op when the parent's media_map already carries the url, an attach
+    otherwise, and the drop of the asset this row mapped before it was
+    replaced. DARK by default; LIVE behind the gates. Writes a chained audit
+    row. Unknown image -> 404. A non-APPROVED image is NOT a route error (the
+    engine returns ok=false action=skip) so the audit still records the
     refusal."""
     db = _require_db()
     repo = _image_repo(db)
