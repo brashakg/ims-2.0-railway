@@ -13,7 +13,7 @@ import {
 } from '../../../services/api/vendorAp';
 import { useToast } from '../../../context/ToastContext';
 import { useAuth } from '../../../context/AuthContext';
-import { inr, EXCEPTION_APPROVE_ROLES } from './shared';
+import { inr, APPROVE_ROLES } from './shared';
 
 // ============================================================================
 // P3: Variance-Approval panel
@@ -184,7 +184,7 @@ export function ExceptionsPanel({
   const { hasRole } = useAuth();
   const [approveTarget, setApproveTarget] = useState<PurchaseInvoice | null>(null);
 
-  const canApprove = hasRole(EXCEPTION_APPROVE_ROLES);
+  const canApprove = hasRole(APPROVE_ROLES);
   const exceptions = invoices.filter((pi) => pi.match_status === 'ON_HOLD_EXCEPTION');
 
   if (exceptions.length === 0) return null;

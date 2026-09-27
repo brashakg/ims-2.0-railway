@@ -1,6 +1,6 @@
 // ============================================================================
 // Purchase Invoices - shared helpers (INR formatting, GST state-code / IGST
-// rule, GST rate list, approval role lists). MOVED verbatim out of
+// rule, GST rate list, approval role list). MOVED verbatim out of
 // ../PurchaseInvoicesTab.tsx by the Wave 6 file diet; nothing rewritten.
 // ============================================================================
 
@@ -47,8 +47,6 @@ export function isInterstate(placeOfSupply?: string, recipientGstin?: string): b
   if (!pos || !rec) return false;
   return pos !== rec;
 }
-
-export const EXCEPTION_APPROVE_ROLES: UserRole[] = ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'];
 
 // Roles allowed to approve a 3-way-match exception (release an ON_HOLD invoice
 // for payment despite a variance). Mirrors the _AP_ROLES backend gate.
