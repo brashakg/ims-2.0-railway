@@ -69,7 +69,7 @@ import logging
 import os
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -377,6 +377,65 @@ def _ims_cancel_door_ran(order: Dict[str, Any]) -> bool:
     return bool(order.get("cancelled_by")) or "cancel_stock_released" in order
 
 
+def _cap_restock_to_returnable(
+    lines: List[Any], order: Dict[str, Any], refund_id: str
+) -> Tuple[List[Any], bool]:
+    """Restock no more units of an order line than are still out with the
+    buyer, by the counter return door's own answer: the line's purchased qty
+    less returns._already_returned_qty over every OTHER return doc of the order
+    (this refund's own claim doc excluded). A unit a counter return already
+    took back is on the shelf again -- restocking it finds no SOLD unit and
+    MINTS a phantom. A restock line over the cap splits: the part still
+    returnable restocks, the rest does not. Returns (lines, overlapped):
+    overlapped = IMS already booked a return for some of these units, so the
+    counter may already have refunded their money. Never raises -- an
+    unreadable answer leaves the lines as they are."""
+    try:
+        from ..routers.returns import (
+            _already_returned_qty,
+            _line_purchased_qty,
+            _order_line_index,
+            _resolve_original_line,
+        )
+
+        idx = _order_line_index(order)
+        left: Dict[str, float] = {}
+        out: List[Any] = []
+        overlapped = False
+        for line in lines:
+            orig = _resolve_original_line(line, idx)
+            if orig is None:
+                out.append(line)
+                continue
+            item_id = orig.get("item_id") or orig.get("id")
+            key = str(item_id or orig.get("product_id"))
+            if key not in left:
+                left[key] = _line_purchased_qty(orig) - _already_returned_qty(
+                    order.get("order_id"),
+                    item_id,
+                    orig.get("product_id"),
+                    exclude_shopify_refund_id=refund_id,
+                )
+            keep = max(0.0, min(line.return_qty, left[key]))
+            left[key] -= keep
+            if keep >= line.return_qty:
+                out.append(line)
+                continue
+            overlapped = True
+            if not line.restock:
+                out.append(line)
+                continue
+            if keep > 0:
+                out.append(line.model_copy(update={"return_qty": keep}))
+            out.append(
+                line.model_copy(update={"return_qty": line.return_qty - keep, "restock": False})
+            )
+        return out, overlapped
+    except Exception:  # noqa: BLE001
+        logger.debug("[SHOPIFY_REFUND] returnable-qty cap failed", exc_info=True)
+        return lines, False
+
+
 def _build_return_lines(
     payload: Dict[str, Any], order: Dict[str, Any]
 ) -> List[Any]:
@@ -623,6 +682,9 @@ def handle_shopify_refund(
                 "refund_id": refund_id,
                 "shopify_order_id": shopify_order_id,
             }
+        return_lines, counter_returned = _cap_restock_to_returnable(
+            return_lines, order, refund_id
+        )
 
         # --- GST credit note math: REUSE the in-store return machinery ----------
         # _priced_return_lines recovers the GST-INCLUSIVE gross the customer paid
@@ -690,10 +752,24 @@ def handle_shopify_refund(
             )
 
         door_cancelled = _ims_cancel_door_ran(order)
-        if door_cancelled or not _refund_auto_enabled(db):
+        if door_cancelled:
+            note = (
+                "Cancelled in IMS before this Shopify refund: its units are "
+                "already back on the shelf (no restock) -- confirm the credit "
+                "note only if the counter did not settle this money."
+            )
+        elif counter_returned:
+            note = (
+                "IMS already booked a return for some of these units (no second "
+                "restock for them) -- confirm the credit note only if the counter "
+                "did not already refund this money."
+            )
+        else:
+            note = "Awaiting accountant confirmation (SHOPIFY_REFUND_AUTO off)."
+        if door_cancelled or counter_returned or not _refund_auto_enabled(db):
             # DEFAULT: accountant review queue. NO ledger, NO stock movement.
-            # An order staff cancelled in IMS is queued even under AUTO: the
-            # counter may already have settled this money.
+            # An order staff cancelled, or took a return of, in IMS is queued
+            # even under AUTO: the counter may already have settled this money.
             return _queue_review(
                 db,
                 refund_id=refund_id,
@@ -703,13 +779,7 @@ def handle_shopify_refund(
                 restock_lines=return_lines,
                 restock_store=restock_store,
                 status="PENDING",
-                note=(
-                    "Cancelled in IMS before this Shopify refund: its units are "
-                    "already back on the shelf (no restock) -- confirm the credit "
-                    "note only if the counter did not settle this money."
-                    if door_cancelled
-                    else "Awaiting accountant confirmation (SHOPIFY_REFUND_AUTO off)."
-                ),
+                note=note,
             )
 
         # AUTO: post the credit note + restock automatically (opt-in only).
@@ -982,8 +1052,11 @@ def _post_credit_and_restock(
     # time, because the door can run AFTER the refund was queued (staff cancel
     # while the accountant's review row still proposes the restock): the SOLD
     # unit is gone by the confirm, and the restock would mint a phantom.
+    # Likewise a counter return taken after the refund was queued: its unit is
+    # on the shelf again (the returnable-qty answer, asked again now).
     if _ims_cancel_door_ran(order):
         return_lines = [line.model_copy(update={"restock": False}) for line in return_lines]
+    return_lines, _ = _cap_restock_to_returnable(return_lines, order, refund_id)
     restock_result: Dict[str, Any] = {
         "restocked": [],
         "restock_stock_ids": [],
@@ -1180,6 +1253,9 @@ _FULFILMENT_CONTEXT_KEYS = (
     # after the review row was queued means the units are already back.
     "cancelled_by",
     "cancel_stock_released",
+    # The order lines, for the returnable-qty cap (_cap_restock_to_returnable):
+    # a counter return taken after the row was queued put its unit back too.
+    "items",
 )
 
 

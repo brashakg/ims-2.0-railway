@@ -335,6 +335,125 @@ def test_a_queued_refund_confirmed_after_the_ims_cancel_door_ran_restocks_nothin
 
 
 # ---------------------------------------------------------------------------
+# Rule: a Shopify refund restocks no unit the COUNTER return door already took
+# back -- capped by that door's own returnable-qty answer
+# (returns._already_returned_qty), asked when the refund is queued AND when it
+# is posted; an overlap is queued for the accountant even under AUTO
+# ---------------------------------------------------------------------------
+
+
+def _delivered_with_units(swept, oid, qty=1, **over):
+    line = {**_pulled(oid)["line_items"][0], "quantity": qty}
+    doc = _book(swept, oid, line_items=[line], **over)
+    _claim_unit(swept, doc)
+    for n in range(2, qty + 1):
+        swept["stock_repo"].units.append({**swept["stock_repo"].units[0], "stock_id": f"stk-{n}"})
+    swept["orders"].update_one(
+        {"shopify_order_id": str(oid)},
+        {"$set": {"status": "DELIVERED", "fulfillment_status": "FULFILLED"}},
+    )
+    return line
+
+
+def _counter_return(swept, oid, qty=1):
+    """What the counter return door (returns.create_return) leaves behind for
+    `qty` unit(s) of the frame line: its returns doc (the priced lines, keyed
+    by the order line), the line's returned_qty claim, and the unit(s) back on
+    the shelf through the SAME _restock_good_items."""
+    from api.routers import returns as returns_router
+
+    doc = _doc(swept, oid)
+    item = doc["items"][0]
+    line = returns_router.ReturnLine(
+        order_item_id=item["item_id"], product_id="IMS-P-1", return_qty=qty, unit_price=0.0
+    )
+    swept["returns"].insert_one({
+        "return_id": f"RET-C-{oid}", "order_id": doc["order_id"], "return_type": "RETURN",
+        "items": returns_router._priced_return_lines([line], doc), "status": "COMPLETED",
+    })
+    swept["orders"].update_one(
+        {"shopify_order_id": str(oid)}, {"$set": {"items": [{**item, "returned_qty": qty}]}}
+    )
+    returns_router._restock_good_items(
+        [line], doc["store_id"], f"RET-C-{oid}", order_id=doc["order_id"], order=doc
+    )
+
+
+def _units(swept):
+    return [(u["stock_id"], u["status"]) for u in swept["stock_repo"].units]
+
+
+@pytest.mark.parametrize("auto", [False, True])
+def test_a_refund_of_a_unit_the_counter_already_took_back_restocks_nothing(swept, monkeypatch, auto):
+    """Staff took the return at the counter (the door booked it and put the
+    unit back), then Shopify refunds the same unit. Nothing is left to
+    restock, so no phantom -- and even under AUTO the credit is queued for the
+    accountant, saying why: the counter may already have refunded it (no
+    second GST reversal without a human)."""
+    if auto:
+        monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "1")
+    _delivered_with_units(swept, 41005)
+    _counter_return(swept, 41005)
+    assert _units(swept) == [("stk-1", "AVAILABLE")]
+
+    swept["state"]["orders"] = [_pulled(
+        41005, financial_status="refunded", fulfillment_status="fulfilled",
+        refunds=[_refund(741005, 41005, restock_type="return")],
+    )]
+    p = swept["run"]().payload
+
+    assert p["status_failed"] == [] and swept["refund_calls"] == ["741005"]
+    assert swept["returns"].count_documents({}) == 1 and swept["ledger"].count_documents({}) == 0
+    review = swept["review"].find_one({"shopify_refund_id": "741005"})
+    assert review["status"] == "PENDING" and "already booked a return" in review["note"]
+    assert [r["restock"] for r in review["proposed_restock"]] == [False]
+    res = shopify_refund.post_from_review(swept["db"], review)
+    assert res["status"] == "credited" and _units(swept) == [("stk-1", "AVAILABLE")]
+
+
+def test_a_queued_refund_confirmed_after_a_counter_return_restocks_nothing(swept):
+    """The counter can take the return AFTER the refund was queued (the review
+    row still proposes the restock): the confirm asks the returnable-qty
+    answer again and restocks nothing -- the SOLD unit is gone."""
+    _delivered_with_units(swept, 41006)
+    swept["state"]["orders"] = [_pulled(
+        41006, financial_status="partially_refunded", fulfillment_status="fulfilled",
+        refunds=[_refund(741006, 41006, restock_type="return")],
+    )]
+    swept["run"]()
+    review = swept["review"].find_one({"shopify_refund_id": "741006"})
+    assert [r["restock"] for r in review["proposed_restock"]] == [True]
+
+    _counter_return(swept, 41006)
+    res = shopify_refund.post_from_review(swept["db"], review)
+
+    assert res["status"] == "credited" and _units(swept) == [("stk-1", "AVAILABLE")]
+
+
+def test_a_refund_over_a_partial_counter_return_restocks_only_the_rest(swept):
+    """Two frames on one line, one returned at the counter, both refunded on
+    Shopify: the refund restocks the ONE still out with the buyer (the line
+    splits), and the credit note still covers both units."""
+    line = _delivered_with_units(swept, 41007, qty=2)
+    _counter_return(swept, 41007)
+    assert _units(swept) == [("stk-1", "AVAILABLE"), ("stk-2", "SOLD")]
+    refund = _refund(741007, 41007, restock_type="return", amount="1998.00")
+    refund["refund_line_items"][0].update(quantity=2, subtotal=1902.86, total_tax=95.14)
+
+    swept["state"]["orders"] = [_pulled(
+        41007, line_items=[line], financial_status="refunded", fulfillment_status="fulfilled",
+        refunds=[refund],
+    )]
+    swept["run"]()
+
+    review = swept["review"].find_one({"shopify_refund_id": "741007"})
+    assert review["status"] == "PENDING" and review["gross_refund"] == 1998.0
+    assert [(r["return_qty"], r["restock"]) for r in review["proposed_restock"]] == [(1, True), (1, False)]
+    shopify_refund.post_from_review(swept["db"], review)
+    assert _units(swept) == [("stk-1", "AVAILABLE"), ("stk-2", "AVAILABLE")]
+
+
+# ---------------------------------------------------------------------------
 # Rule: paid on Shopify -> the payment is recorded once (the mapper's money leg)
 # ---------------------------------------------------------------------------
 

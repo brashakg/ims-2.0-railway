@@ -399,9 +399,11 @@ def _already_returned_qty(
     order_id: Optional[str],
     item_id: Optional[str],
     product_id: Optional[str],
+    exclude_shopify_refund_id: Optional[str] = None,
 ) -> float:
     """Sum the quantities ALREADY returned for one (order, line) across the
-    `returns` collection.
+    `returns` collection. `exclude_shopify_refund_id`: leave out that Shopify
+    refund's own doc (the refund handler asks while it holds its claim doc).
 
     A line is identified by its original order `item_id` when known, otherwise
     by `product_id`. We scan completed return docs for the same order and add up
@@ -418,6 +420,10 @@ def _already_returned_qty(
     total = 0.0
     try:
         for doc in coll.find({"order_id": order_id}, {"_id": 0}):
+            if exclude_shopify_refund_id and (
+                doc.get("shopify_refund_id") == exclude_shopify_refund_id
+            ):
+                continue
             for prior in doc.get("items") or []:
                 if not isinstance(prior, dict):
                     continue
