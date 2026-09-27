@@ -732,14 +732,23 @@ def _derive_statuses(payload: Dict[str, Any]) -> Dict[str, Any]:
 def _terminal_status_withheld(existing_status: Any, derived_status: str) -> bool:
     """ONE rule for the webhook drain AND the hourly pull sweep (which reports
     it): a terminal IMS status (DELIVERED / CANCELLED / REFUNDED / VOID) is
-    never knocked back to CONFIRMED. CONFIRMED is only _derive_statuses'
-    DEFAULT -- "nothing on the Shopify body says cancelled / refunded /
-    fulfilled" -- not a Shopify fact: staff delivered at the counter, or
-    cancelled in IMS, and Shopify never learned it. The real facts (cancelled /
-    refunded / delivered) still land over one another, as they always did."""
+    replaced only by a Shopify cancellation or refund. Withheld:
+      * CONFIRMED -- only _derive_statuses' DEFAULT ("nothing on the Shopify
+        body says cancelled / refunded / fulfilled"), not a Shopify fact: staff
+        delivered at the counter, or cancelled in IMS, and Shopify never
+        learned it;
+      * DELIVERED over CANCELLED / REFUNDED / VOID -- the fulfilment reconcile
+        (shopify_fulfillment, `current_status not in _TERMINAL_STATUSES`)
+        already refuses that flip; the mapper said yes to the same body, so a
+        staff-cancelled order came back DELIVERED with its units released.
+    cancelled / refunded still land over any status, as they always did."""
     from .shopify_fulfillment import _TERMINAL_STATUSES
 
-    return derived_status == "CONFIRMED" and existing_status in _TERMINAL_STATUSES
+    return (
+        existing_status in _TERMINAL_STATUSES
+        and derived_status != existing_status
+        and derived_status not in ("CANCELLED", "REFUNDED")
+    )
 
 
 def _shopify_payload_stale(existing: Dict[str, Any], payload: Dict[str, Any]) -> bool:
@@ -1003,10 +1012,10 @@ def _sync_existing_order_status(
     if _terminal_status_withheld(existing.get("status"), order_status):
         logger.info(
             "[ONLINE_MAP] shopify_order=%s is %s in IMS -- withheld the "
-            "order_status knock-back to CONFIRMED (payment/fulfillment status "
-            "still synced)",
+            "order_status flip to %s (payment/fulfillment status still synced)",
             shopify_order_id,
             existing.get("status"),
+            order_status,
         )
         order_status = existing["status"]
 

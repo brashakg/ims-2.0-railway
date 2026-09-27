@@ -498,11 +498,11 @@ def test_a_newer_fulfilment_replaces_the_stamped_one(swept):
 
 
 # ---------------------------------------------------------------------------
-# Rule: a terminal IMS status is never knocked back to CONFIRMED -- ONE rule in
-# the mapper (_terminal_status_withheld) that the webhook drain enforces and
-# the sweep reports; the payment / fulfilment facts still land, and the
-# Shopify-owned terminal facts (cancelled / refunded / delivered) still land
-# over one another
+# Rule: a terminal IMS status is replaced only by a Shopify cancellation or
+# refund (never knocked back to CONFIRMED, never DELIVERED over a cancelled
+# order) -- ONE rule in the mapper (_terminal_status_withheld) that the webhook
+# drain enforces and the sweep reports; the payment / fulfilment facts still
+# land, and cancelled / refunded still land over any status
 # ---------------------------------------------------------------------------
 
 
@@ -521,6 +521,14 @@ def test_a_newer_fulfilment_replaces_the_stamped_one(swept):
             {"status": "CANCELLED"},
             {"financial_status": "partially_refunded"},
             {"payment_status": "PARTIAL_REFUND"},
+        ),
+        # Cancelled by staff in IMS (units released); Shopify fulfils it later
+        # -> the mapper derives DELIVERED; the fulfilment reconcile already
+        # refuses that flip, and so does the mapper now. The tracking lands.
+        (
+            {"status": "CANCELLED", "cancelled_at": "2026-09-05T10:00:00Z"},
+            {"fulfillment_status": "fulfilled", "fulfillments": [_fulfilment(30005, 41)]},
+            {"fulfillment_status": "FULFILLED", "awb": "AWB30005"},
         ),
     ],
 )
@@ -546,24 +554,31 @@ def test_terminal_ims_status_is_never_knocked_back(swept, ims_state, shopify_bod
     assert swept["seen"] == []
 
 
-def test_the_webhook_drain_shares_the_terminal_rule(swept):
+@pytest.mark.parametrize(
+    "ims_status, ims_ful, shopify_ful, topic, landed",
+    [
+        ("DELIVERED", "FULFILLED", "restocked", "orders/updated", "RESTOCKED"),
+        ("CANCELLED", "UNFULFILLED", "fulfilled", "orders/fulfilled", "FULFILLED"),
+    ],
+)
+def test_the_webhook_drain_shares_the_terminal_rule(swept, ims_status, ims_ful, shopify_ful, topic, landed):
     """The same body through the REAL webhook path (map_shopify_order as
     nexus._dispatch_shopify_order calls it) keeps the terminal status too --
     the rule lives in the mapper, not in the sweep."""
     _book(swept, 30026)
     swept["orders"].update_one(
         {"shopify_order_id": "30026"},
-        {"$set": {"status": "DELIVERED", "fulfillment_status": "FULFILLED"}},
+        {"$set": {"status": ims_status, "fulfillment_status": ims_ful}},
     )
 
     res = swept["real_map"](
-        _pulled(30026, fulfillment_status="restocked"), swept["db"],
-        webhook_id="real-upd-1", topic="orders/updated",
+        _pulled(30026, fulfillment_status=shopify_ful), swept["db"],
+        webhook_id="real-upd-1", topic=topic,
     )
 
     assert res["status"] == "duplicate" and res["status_synced"] is True
     doc = _doc(swept, 30026)
-    assert doc["status"] == "DELIVERED" and doc["fulfillment_status"] == "RESTOCKED"
+    assert doc["status"] == ims_status and doc["fulfillment_status"] == landed
 
 
 def _refunded_after_delivery(oid):
