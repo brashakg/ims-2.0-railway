@@ -307,6 +307,13 @@ export function SyncChip({
 // the SIMULATED-vs-LIVE distinction explicit (so a dry-run is never mistaken for
 // a live write) and surfacing the shopify_id when present.
 // ----------------------------------------------------------------------------
+// SOLD OUT is the WRITER's word (backend push_skus_stock `stock.sold_out`:
+// a LIVE press Shopify accepted where every number written was 0). Correct
+// (IMS is master, the shelf really is empty) but the listing is now live and
+// SOLD OUT, and the press flips tracked=true + DENY before it publishes, so a
+// clean `ok` with no code read as a plain success. This used to be re-derived
+// here from `stock.quantities` while the sweep's tally spelled it a second way
+// (recheck round 2): one stamp, printed on the toast and on the sweep line.
 export function formatPushResult(label: string, r: PushResult): string {
   const where = r.mode === 'LIVE' ? 'LIVE' : 'dry-run (SIMULATED)';
   // An ok result that carries a code (PRICE_NOT_SYNCED: live, at the OLD
@@ -317,5 +324,20 @@ export function formatPushResult(label: string, r: PushResult): string {
   }
   const idPart = r.shopify_id ? ` · ${r.shopify_id}` : '';
   const actionPart = r.action ? ` (${r.action})` : '';
-  return `${label}: ${where}${actionPart}${idPart}`;
+  const soldOut = r.stock?.sold_out ? ' — 0 at every shop, so it is live and SOLD OUT' : '';
+  return `${label}: ${where}${actionPart}${idPart}${soldOut}`;
+}
+
+// ----------------------------------------------------------------------------
+// pushToastLevel — how LOUD that line should be, in ONE place. An ok result
+// carrying a code did all it could but not all it was pressed for: the product
+// is live at the OLD price (PRICE_NOT_SYNCED), or live with its stock refused
+// (STORE_UNMAPPED — tracked + DENY behind no quantity, i.e. sold out at every
+// location until a shop is mapped). formatPushResult already puts that on the
+// line; a GREEN toast over it is how the owner's first press on a fresh
+// catalogue read as a clean success.
+// ----------------------------------------------------------------------------
+export function pushToastLevel(r: PushResult): 'success' | 'warning' | 'error' {
+  if (!r.ok) return 'error';
+  return r.code ? 'warning' : 'success';
 }

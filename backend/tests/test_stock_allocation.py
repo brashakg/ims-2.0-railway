@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from api.services.stock_allocation import (  # noqa: E402
     recommend_allocation, classify, reconcile_items,
-    OVERSELL_RISK, OVER_ALLOCATED, LISTED_UNKNOWN, OK, NOT_ONLINE,
+    OVERSELL_RISK, OVER_ALLOCATED, ONHAND_UNKNOWN, LISTED_UNKNOWN, OK, NOT_ONLINE,
 )
 
 
@@ -75,3 +75,27 @@ def test_reconcile_empty():
     r = reconcile_items([])
     assert r["summary"]["total"] == 0
     assert r["items"] == []
+
+
+def test_classify_unknown_on_hand_is_never_oversell():
+    """Recheck round 1: an online SKU whose ON-HAND is unknown (in_store=None
+    -- the shop list or the stock read failed) is ONHAND_UNKNOWN, never a
+    confident 0 + OVERSELL_RISK. Not-online still wins (nothing to assess)."""
+    assert classify(None, 5, None, True) == ONHAND_UNKNOWN
+    assert classify(None, None, None, True) == ONHAND_UNKNOWN
+    assert classify(None, 5, None, False) == NOT_ONLINE
+
+
+def test_reconcile_unknown_on_hand_rows():
+    items = [
+        {"sku": "A", "in_store": None, "online": 5, "is_online": True},  # on-hand unknown
+        {"sku": "B", "in_store": 2, "online": 5, "is_online": True},     # a real oversell by 3
+    ]
+    r = reconcile_items(items, safety_buffer=0)
+    by_sku = {i["sku"]: i for i in r["items"]}
+    assert by_sku["A"]["status"] == ONHAND_UNKNOWN
+    assert by_sku["A"]["in_store"] is None and by_sku["A"]["recommended"] is None and by_sku["A"]["delta"] is None
+    s = r["summary"]
+    assert s["onhand_unknown"] == 1 and s["oversell_risk"] == 1 and s["oversell_risk_units"] == 3
+    # A real oversell sorts above an unknown; an unknown above OK.
+    assert r["items"][0]["sku"] == "B"

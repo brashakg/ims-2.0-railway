@@ -64,6 +64,10 @@ const LOCATIONS = {
     { id: 'gid://shopify/Location/2', name: 'Gangadham Pune', isActive: true, mapped_store_id: null },
     // exact name match for BV-RNC-01, but ANOTHER shop already holds it
     { id: 'gid://shopify/Location/5', name: 'Ranchi Main', isActive: true, mapped_store_id: 'BV-RNC-02', mapped_store_code: 'BV-RNC-02' },
+    // exact name match for BV-BOK-03, but TWO shops claim it: the writer writes
+    // it for neither (mapped_store_id null), so it is not free either
+    { id: 'gid://shopify/Location/7', name: 'Sector 4', isActive: true, mapped_store_id: null,
+      claimed_by: ['WIZ-BOK-01', 'WIZ-BOK-02'] },
   ],
 };
 
@@ -110,6 +114,24 @@ describe('StoreModal Shopify location', () => {
     const taken = screen.getByRole('option', { name: /Better Vision Sector 4/ }) as HTMLOptionElement;
     expect(taken.disabled).toBe(true);
     expect(taken.textContent).toContain('mapped to BV-BOK-02');
+  });
+
+  // RECHECK ROUND 1 (display): the route stamped `mapped_store_id` from the RAW
+  // gid (last holder wins) while scoring the same row "maps to no shop" through
+  // the writer, so this dropdown said "(mapped to WIZ-BOK-02)" for a location
+  // the writer writes for nobody. The route now names every claimant and no
+  // holder; the option says so, is offered to nobody else, and is never a
+  // preselect. Drop the `claimed_by` branch -> the option is enabled and
+  // unlabelled, and "Sector 4" preselects it -> this fails.
+  it('a location two shops claim says "claimed by", is disabled, and is never preselected', async () => {
+    render(<OrganizationPage />);
+    await openStore('Sector 4');
+    const select = (await screen.findByLabelText('Shopify location')) as HTMLSelectElement;
+    const contested = (await screen.findByRole('option', { name: /claimed by/ })) as HTMLOptionElement;
+    expect(contested.disabled).toBe(true);
+    expect(contested.textContent).toContain('claimed by WIZ-BOK-01, WIZ-BOK-02');
+    expect(contested.textContent).not.toContain('mapped to');
+    expect(select.value).toBe('');
   });
 
   it('never preselects a location another shop already holds, even on an exact name match', async () => {

@@ -24,6 +24,7 @@ const toastCalls: { kind: string; msg: string }[] = [];
 vi.mock('../../../services/api/onlineStore', () => ({
   pushApi: {
     getStatus: vi.fn(),
+    getLocations: vi.fn().mockResolvedValue({ mode: 'SIMULATED', reason: null, locations: [] }),
     pushAllPending: vi.fn(),
     getHistory: vi.fn(),
   },
@@ -34,7 +35,12 @@ vi.mock('../../../services/api/onlineStore', () => ({
   },
 }));
 
-vi.mock('../../../components/online-store/OnlineStoreSyncBanner', () => ({
+// The banner itself is stubbed out, but `pushToastLevel` is kept REAL: the
+// sweep panel decides its per-row tick with it, and a hand-rolled copy in the
+// mock would be exactly the second implementation this page just stopped
+// carrying.
+vi.mock('../../../components/online-store/OnlineStoreSyncBanner', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
   __esModule: true,
   default: () => null,
   formatPushResult: (label: string) => label,
@@ -156,6 +162,121 @@ describe('the bulk press reports what it refused', () => {
     expect(toastCalls.some((t) => t.kind === 'success')).toBe(false);
   });
 
+  // PANEL ROUND 7 (first-push). The bulk press SWALLOWED the stock code: a
+  // product that published with its quantities written NOWHERE tallied as a
+  // plain `pushed`, so refused/withheld/failed all read 0 and this screen fired
+  // toast.success with a green tick beside each row. On prod's day-1 state that
+  // is the NORMAL path -- Gangadham Pune fulfils online orders and is mapped to
+  // no shop by the owner's own decision, so every one of the 121 presses carries
+  // a stock code, and the owner could not tell from the sweep whether 1 or 121
+  // listings went live reading SOLD OUT.
+  //
+  // RECHECK ROUND 1: that bucket was "stock not OK", not "nothing written", so
+  // on day 1 (Pune ticked + unmapped, the three mapped shops WRITTEN) the toast
+  // read "12 live with NO stock written (sold out)" beside a line quoting the
+  // opposite. The backend now splits on what Shopify accepted; this screen
+  // says which it was.
+  it('shows the listings that went live with a stock WARNING (their shops were written), and does not call it green', async () => {
+    (pushApi.pushAllPending as any).mockResolvedValue({
+      ...sweep({ pushed: 12, failed: 0, noop: 0, stock_warning: 12 }, 12),
+      results: [
+        {
+          entity: 'product',
+          target_id: 'P1',
+          ok: true,
+          code: 'SHOPIFY_LOCATION_UNMAPPED',
+          error: 'Shopify location(s) that fulfil online orders but map to no shop: Gangadham Pune',
+        },
+      ],
+    });
+
+    await pressProducts();
+
+    expect(await screen.findByText(/12 live with a stock warning/i)).toBeTruthy();
+    expect(screen.queryByText(/NO stock written/i)).toBeNull();
+    expect(toastCalls.some((t) => t.kind === 'success')).toBe(false);
+    const msg = toastCalls.map((t) => t.msg).join(' | ');
+    expect(msg).toMatch(/12 live with a stock warning/i);
+    expect(msg).not.toMatch(/sold out/i);
+    expect(msg).toMatch(/SHOPIFY_LOCATION_UNMAPPED/);
+    // ...and the row itself is not ticked green. `r.ok` alone painted it that
+    // way; the rule is pushToastLevel, the same one the drawer press uses.
+    const row = (await screen.findByText('product P1')).closest('li') as HTMLElement;
+    expect(row.querySelector('.text-green-600')).toBeNull();
+    expect(row.querySelector('.text-amber-600')).toBeTruthy();
+  });
+
+  // RECHECK ROUND 2 (one rule, display). A clean press whose every accepted
+  // number was 0 landed in `pushed` and the summary line said nothing, while
+  // the drawer toast for the same press said "live and SOLD OUT" from its own
+  // TypeScript re-derivation. The backend writer now stamps `sold_out` and the
+  // tally counts it; this line prints the count. Drop the `sold_out` term from
+  // the summary line -> this fails.
+  it('shows the listings that went live cleanly but SOLD OUT (0 at every shop)', async () => {
+    (pushApi.pushAllPending as any).mockResolvedValue(
+      sweep({ pushed: 7, failed: 0, noop: 0, sold_out: 7 }, 7),
+    );
+
+    await pressProducts();
+
+    const msg = toastCalls.map((t) => t.msg).join(' | ');
+    expect(msg).toMatch(/7 live and SOLD OUT \(0 at every shop\)/);
+    expect(msg).not.toMatch(/NO stock written/i);
+  });
+
+  it('shows the listings that went live with NO stock written (sold out), and does not call it green', async () => {
+    (pushApi.pushAllPending as any).mockResolvedValue({
+      ...sweep({ pushed: 3, failed: 0, noop: 0, stock_not_written: 3 }, 3),
+      results: [
+        {
+          entity: 'product',
+          target_id: 'P1',
+          ok: true,
+          code: 'STORE_UNMAPPED',
+          error: 'no shop has a Shopify location -- nothing written',
+        },
+      ],
+    });
+
+    await pressProducts();
+
+    expect(await screen.findByText(/3 live with NO stock written/i)).toBeTruthy();
+    expect(toastCalls.some((t) => t.kind === 'success')).toBe(false);
+    const msg = toastCalls.map((t) => t.msg).join(' | ');
+    expect(msg).toMatch(/3 live with NO stock written \(sold out\)/i);
+    expect(msg).toMatch(/STORE_UNMAPPED/);
+  });
+
+  // RECHECK ROUND 1: the products press ends with its OWN whole-catalogue stock
+  // pass, whose verdict is over EVERY listing -- a stray SKU on an UNCHANGED
+  // listing lives there and in no product row. The backend returned it as
+  // `stock`; the screen read it nowhere and toasted "25 processed" over it.
+  it("renders the press's own stock pass and never calls a NOT-ok one green", async () => {
+    (pushApi.pushAllPending as any).mockResolvedValue({
+      ...sweep({ pushed: 25, failed: 0, noop: 0 }, 25),
+      stock: {
+        mode: 'LIVE',
+        entity: 'stock',
+        action: 'noop',
+        ok: false,
+        code: 'STOCK_BASELINE_STRAY',
+        error: 'the website is still showing a quantity for SP-1-L, which this listing no longer lists',
+        payload: { changed: 0, synced: 0, failed: 0 },
+      },
+    });
+
+    await pressProducts();
+
+    const line = await screen.findByTestId('sweep-stock-line');
+    expect(line.textContent).toMatch(/NOT ok/);
+    expect(line.textContent).toMatch(/STOCK_BASELINE_STRAY/);
+    expect(line.textContent).toMatch(/0 changed · 0 written · 0 failed/);
+    expect(toastCalls.some((t) => t.kind === 'success')).toBe(false);
+    const msg = toastCalls.map((t) => t.msg).join(' | ');
+    expect(msg).toMatch(/stock pass NOT ok \[STOCK_BASELINE_STRAY\]/);
+    expect(msg).toMatch(/SP-1-L/);
+  });
+
   it('says nothing about refusals when there were none', async () => {
     (pushApi.pushAllPending as any).mockResolvedValue(
       sweep({ pushed: 25, failed: 0, noop: 0 }, 25),
@@ -166,6 +287,8 @@ describe('the bulk press reports what it refused', () => {
     await screen.findByText(/25 processed/);
     expect(screen.queryByText(/refused/i)).toBeNull();
     expect(screen.queryByText(/NOT made visible/i)).toBeNull();
+    expect(screen.queryByText(/stock warning/i)).toBeNull();
+    expect(screen.queryByTestId('sweep-stock-line')).toBeNull();
     expect(toastCalls.some((t) => t.kind === 'success')).toBe(true);
   });
 });
@@ -318,5 +441,72 @@ describe('the cap notice must not promise progress a repeat press cannot make', 
     const info = toastCalls.filter((t) => t.kind === 'info').map((t) => t.msg).join(' | ');
     expect(info).toMatch(/run again to continue/i);
     expect(screen.queryByText(/pressing again will not help/i)).toBeNull();
+  });
+});
+
+// Recheck round 3: ONE endpoint, TWO toasts. "Push all pending to live
+// storefront" -- the page's largest green button on deploy day -- calls the same
+// POST /push/all-pending as the per-entity Push button and answered with an
+// unconditional green "N objects processed": it read none of the buckets nor
+// the sweep's stock pass, and never showed the sweep, so its own "the lines
+// below say why" pointed at nothing. Both buttons now speak through ONE builder
+// (sweepToast). Put the unconditional toast.success back and the first two
+// tests fail; the third keeps the builder from turning permanently amber.
+describe('the cutover press speaks through the same builder as the per-entity press', () => {
+  async function pressCutover() {
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    render(<OnlineShopifySyncPage />);
+    await waitFor(() => expect(pushApi.getStatus).toHaveBeenCalled());
+    const button = await screen.findByRole('button', { name: /push all pending to live storefront/i });
+    await waitFor(() => expect(button).not.toBeDisabled());
+    await userEvent.click(button);
+    await waitFor(() => expect(pushApi.pushAllPending).toHaveBeenCalledWith(undefined, 500));
+  }
+
+  it('is a WARNING over the day-1 configuration, with the buckets and the stock pass on the line', async () => {
+    (pushApi.pushAllPending as any).mockResolvedValue({
+      ...sweep({}, 28),
+      summary: {
+        products: { pushed: 25, failed: 0, noop: 0, stock_warning: 25 },
+        collections: { pushed: 3, failed: 0, noop: 0 },
+      },
+      stock: {
+        ok: false,
+        code: 'SHOPIFY_LOCATION_NOT_SELLING',
+        error: 'mapped shop(s) whose Shopify location cannot sell online: BV-A -- listings read SOLD OUT',
+        payload: { changed: 25, synced: 25, failed: 0 },
+      },
+    });
+
+    await pressCutover();
+
+    await waitFor(() => expect(toastCalls.some((t) => t.kind === 'warning')).toBe(true));
+    const warn = toastCalls.find((t) => t.kind === 'warning')!;
+    expect(warn.msg).toContain('Cutover push');
+    expect(warn.msg).toContain('28 processed');
+    expect(warn.msg).toContain('25 live with a stock warning');
+    expect(warn.msg).toContain('SHOPIFY_LOCATION_NOT_SELLING');
+    expect(warn.msg).toContain('SOLD OUT');
+    expect(toastCalls.filter((t) => t.kind === 'success')).toEqual([]);
+    // ...and the press is SHOWN: the Products card carries its stock pass.
+    expect(await screen.findByTestId('sweep-stock-line')).toHaveTextContent('SHOPIFY_LOCATION_NOT_SELLING');
+  });
+
+  it('is a WARNING over a withheld publish', async () => {
+    (pushApi.pushAllPending as any).mockResolvedValue(
+      sweep({ pushed: 0, failed: 0, noop: 0, publish_withheld: 2 }, 0),
+    );
+    await pressCutover();
+    await waitFor(() => expect(toastCalls.some((t) => t.kind === 'warning')).toBe(true));
+    expect(toastCalls.find((t) => t.kind === 'warning')!.msg).toContain('2 NOT made visible');
+    expect(toastCalls.filter((t) => t.kind === 'success')).toEqual([]);
+  });
+
+  it('is green over a clean cutover', async () => {
+    (pushApi.pushAllPending as any).mockResolvedValue(sweep({ pushed: 25, failed: 0, noop: 0 }, 25));
+    await pressCutover();
+    await waitFor(() => expect(toastCalls.some((t) => t.kind === 'success')).toBe(true));
+    expect(toastCalls.filter((t) => t.kind === 'warning')).toEqual([]);
+    expect(toastCalls.find((t) => t.kind === 'success')!.msg).toContain('25 processed');
   });
 });
