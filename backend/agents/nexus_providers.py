@@ -293,7 +293,9 @@ def _catch_up_one(db, order: Dict[str, Any], sid: str, live: bool) -> tuple:
 # Units of a cancelled order come back the way they do on the webhook path --
 # through the cancel Refund's restock (accountant queue by default) -- a
 # mapper-side release would clear the unit's order_id first and the refund's
-# restock would then MINT a phantom second unit.
+# restock would then MINT a phantom second unit. When the IMS cancel door
+# already put them back, the refund handler restocks nothing and queues the
+# credit for the accountant (shopify_refund._ims_cancel_door_ran).
 
 # Handler verdicts that mean "the handler owns this now" (applied, or its own
 # idempotency says it already was). Anything else is surfaced as a failure.

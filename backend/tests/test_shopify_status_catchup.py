@@ -265,6 +265,38 @@ def test_cancel_refund_puts_the_claimed_unit_back_once_under_auto_posture(swept,
     assert swept["refund_calls"] == ["700302"]
 
 
+def test_a_refund_on_an_order_the_ims_cancel_door_released_restocks_nothing(swept, monkeypatch):
+    """Staff cancelled at the counter (the IMS cancel door put the unit back and
+    stamped the order), Shopify cancels later with a restocking Refund. Even
+    under AUTO the handler queues it for the accountant (no ledger, no returns
+    doc) with NO restock proposed -- so the accountant's confirm posts the
+    credit without minting a phantom second unit."""
+    monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "1")
+    doc = _book(swept, 30032)
+    _claim_unit(swept, doc)
+    swept["orders"].update_one(
+        {"shopify_order_id": "30032"},
+        {"$set": {"status": "CANCELLED", "cancelled_at": "2026-09-05T10:00:00Z",
+                  "cancelled_by": "staff-1", "cancel_stock_released": ["stk-1"]}},
+    )
+    swept["stock_repo"].units[0].update(status="AVAILABLE", order_id=None)
+
+    swept["state"]["orders"] = [
+        _pulled(30032, cancelled_at=CANCELLED_AT, financial_status="refunded",
+                refunds=[_refund(740030, 30032)])
+    ]
+    p = swept["run"]().payload
+    assert p["status_failed"] == [] and swept["refund_calls"] == ["740030"]
+
+    assert swept["returns"].count_documents({}) == 0 and swept["ledger"].count_documents({}) == 0
+    review = swept["review"].find_one({"shopify_refund_id": "740030"})
+    assert review["status"] == "PENDING"
+    assert [r["restock"] for r in review["proposed_restock"]] == [False]
+
+    shopify_refund.post_from_review(swept["db"], review)
+    assert [(u["stock_id"], u["status"]) for u in swept["stock_repo"].units] == [("stk-1", "AVAILABLE")]
+
+
 # ---------------------------------------------------------------------------
 # Rule: paid on Shopify -> the payment is recorded once (the mapper's money leg)
 # ---------------------------------------------------------------------------

@@ -366,17 +366,31 @@ def _match_ims_item(
     return None
 
 
+def _ims_cancel_door_ran(order: Dict[str, Any]) -> bool:
+    """True when staff cancelled the order through the IMS cancel door
+    (routers/orders/cancel.py): its claim stamps `cancelled_by`, its release
+    stamps `cancel_stock_released` (the retry door on a Shopify-cancelled order
+    stamps only the latter). That door already put every SOLD unit of the order
+    back -- and owns the retry of any it could not -- so a refund restock now
+    finds no SOLD unit and MINTS a phantom second one; and the refund money may
+    already have been settled at the counter."""
+    return bool(order.get("cancelled_by")) or "cancel_stock_released" in order
+
+
 def _build_return_lines(
     payload: Dict[str, Any], order: Dict[str, Any]
 ) -> List[Any]:
     """Map Shopify refund_line_items -> IMS return lines (pydantic ReturnLine),
     each matched to its original IMS order line so the SHARED return machinery
     resolves the billed gross + GST rate + restock decision. Lines that can't be
-    matched to an order line are skipped (logged). Never raises."""
+    matched to an order line are skipped (logged). Never raises. An order the
+    IMS cancel door already released restocks nothing (_ims_cancel_door_ran) --
+    on the AUTO post AND on the accountant's confirm of the proposed restock."""
     from ..routers.returns import ReturnLine
 
     order_items = [i for i in (order.get("items") or []) if isinstance(i, dict)]
     refund_level_restock = bool(payload.get("restock", True))
+    door_released = _ims_cancel_door_ran(order)
     lines: List[Any] = []
     for rl in payload.get("refund_line_items") or []:
         if not isinstance(rl, dict):
@@ -410,7 +424,7 @@ def _build_return_lines(
                 # tax reversal), so the till-supplied price is never trusted here.
                 unit_price=0.0,
                 condition="GOOD",
-                restock=_line_restock_flag(rl, refund_level_restock),
+                restock=_line_restock_flag(rl, refund_level_restock) and not door_released,
                 reason="Shopify refund",
             )
         )
@@ -675,8 +689,11 @@ def handle_shopify_refund(
                 ),
             )
 
-        if not _refund_auto_enabled(db):
+        door_cancelled = _ims_cancel_door_ran(order)
+        if door_cancelled or not _refund_auto_enabled(db):
             # DEFAULT: accountant review queue. NO ledger, NO stock movement.
+            # An order staff cancelled in IMS is queued even under AUTO: the
+            # counter may already have settled this money.
             return _queue_review(
                 db,
                 refund_id=refund_id,
@@ -686,7 +703,13 @@ def handle_shopify_refund(
                 restock_lines=return_lines,
                 restock_store=restock_store,
                 status="PENDING",
-                note="Awaiting accountant confirmation (SHOPIFY_REFUND_AUTO off).",
+                note=(
+                    "Cancelled in IMS before this Shopify refund: its units are "
+                    "already back on the shelf (no restock) -- confirm the credit "
+                    "note only if the counter did not settle this money."
+                    if door_cancelled
+                    else "Awaiting accountant confirmation (SHOPIFY_REFUND_AUTO off)."
+                ),
             )
 
         # AUTO: post the credit note + restock automatically (opt-in only).
