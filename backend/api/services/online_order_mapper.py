@@ -730,6 +730,19 @@ def _derive_statuses(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _terminal_status_withheld(existing_status: Any, derived_status: str) -> bool:
+    """ONE rule for the webhook drain AND the hourly pull sweep (which reports
+    it): a terminal IMS status (DELIVERED / CANCELLED / REFUNDED / VOID) is
+    never knocked back to CONFIRMED. CONFIRMED is only _derive_statuses'
+    DEFAULT -- "nothing on the Shopify body says cancelled / refunded /
+    fulfilled" -- not a Shopify fact: staff delivered at the counter, or
+    cancelled in IMS, and Shopify never learned it. The real facts (cancelled /
+    refunded / delivered) still land over one another, as they always did."""
+    from .shopify_fulfillment import _TERMINAL_STATUSES
+
+    return derived_status == "CONFIRMED" and existing_status in _TERMINAL_STATUSES
+
+
 def _sync_existing_order_status(
     db, shopify_order_id: str, payload: Dict[str, Any]
 ) -> bool:
@@ -826,6 +839,15 @@ def _sync_existing_order_status(
         )
         _raise_hold_conflict_task(db, existing, source="ONLINE_MAP")
         order_status = existing.get("status") or order_status
+    if _terminal_status_withheld(existing.get("status"), order_status):
+        logger.info(
+            "[ONLINE_MAP] shopify_order=%s is %s in IMS -- withheld the "
+            "order_status knock-back to CONFIRMED (payment/fulfillment status "
+            "still synced)",
+            shopify_order_id,
+            existing.get("status"),
+        )
+        order_status = existing["status"]
 
     # LIFECYCLE fields never depend on the payments snapshot (only on the
     # payload + `now`), so they are computed and written ONCE, unconditionally
