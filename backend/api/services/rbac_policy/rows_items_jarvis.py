@@ -281,28 +281,11 @@ ROWS: List[Dict[str, object]] = [
             "SUPERADMIN",
         ],
     },
-    {
-        "method": "GET",
-        "path": "/api/v1/inventory/transfers",
-        "allowed": "AUTHENTICATED",
-    },
-    {
-        "method": "POST",
-        "path": "/api/v1/inventory/transfers",
-        "allowed": [
-            "ADMIN",
-            "AREA_MANAGER",
-            "CATALOG_MANAGER",
-            "STORE_MANAGER",
-            "WORKSHOP_STAFF",
-        ],
-    },
-    # BUG-018: /api/v1/inventory/transfers/{transfer_id}/receive and .../send
-    # were dead-stub endpoints (returned fake success, moved no stock) and have
-    # been REMOVED. The real, stock-moving workflow is at
-    # POST /api/v1/transfers/{transfer_id}/ship and .../receive (catalogued
-    # below under "/api/v1/transfers"). No policy rows are needed for routes that
-    # no longer exist (test_no_stale_policy_entries enforces this).
+    # /api/v1/inventory/transfers (GET list, POST create) and their
+    # /{transfer_id}/send|receive siblings were dead stubs (fake TRF- number,
+    # empty list, no stock moved) and have been REMOVED (BUG-018, A6 2026-09-27).
+    # The real workflow is catalogued below under "/api/v1/transfers". No policy
+    # rows for routes that no longer exist (test_no_stale_policy_entries).
     # --- /api/v1/jarvis ---
     {"method": "GET", "path": "/api/v1/jarvis", "allowed": ["SUPERADMIN"]},
     {"method": "GET", "path": "/api/v1/jarvis/", "allowed": ["SUPERADMIN"]},

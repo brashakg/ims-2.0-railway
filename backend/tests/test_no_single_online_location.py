@@ -144,6 +144,22 @@ def test_the_env_pin_allow_list_only_shrinks():
         )
 
 
+def test_no_second_place_to_type_a_location():
+    """Multi-location PR 3: the last two places that could hold "the" Shopify
+    location outside the store record are gone -- the Integrations page's
+    Shopify "Location ID" box (integrations.shopify.config.location_id, read by
+    nothing) and the per-variant catalog_variants.shopify_location_id column.
+    Put either back -> red."""
+    from api.routers.settings import _INTEGRATION_CATALOG
+    from database.schemas import CATALOG_VARIANT_SCHEMA
+
+    shopify = next(e for e in _INTEGRATION_CATALOG if e["type"] == "shopify")
+    keys = [f["key"] for f in shopify["fields"]]
+    assert "shop_url" in keys, keys  # the entry is real, not an empty stub
+    assert not [k for k in keys if "location" in k.lower()], keys
+    assert "shopify_location_id" not in CATALOG_VARIANT_SCHEMA["properties"]
+
+
 def test_the_pooled_on_hand_shape_is_an_offence(tmp_path):
     """The guard's own discriminating power (round-6 P5). Every other dead rule
     in the #1125 world is pinned by NAME; the pooled call is a LIVE shape of a

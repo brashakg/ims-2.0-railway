@@ -1,7 +1,8 @@
 """
 IMS 2.0 - HR Router
 ====================
-Real database queries for attendance, leaves, and payroll
+Real database queries for attendance, leaves, shifts and employee documents.
+Payroll has ONE door: routers/payroll.py (/payroll/run|approve|lock).
 """
 
 import io
@@ -18,15 +19,10 @@ from ..dependencies import (
     get_attendance_repository,
     get_audit_repository,
     get_leave_repository,
-    get_payroll_repository,
     get_user_repository,
     validate_store_access,
     user_store_scope,
 )
-# The salary-access rule lives in ONE place: the payroll router defines it and
-# this router reuses it (owner ruling 2026-08-09). payroll.py imports nothing
-# from hr.py, so this direction cannot cycle.
-from .payroll import _assert_salary_admin, _assert_self_or_salary_admin
 from ..services import attendance_engine
 from ..services.file_store import (
     ANY_KIND,
@@ -732,7 +728,7 @@ async def get_attendance_grid(
         employees = _roster_from_users(users, pinned_store, reachable_stores)
 
     # Pull the month's attendance records (string date range mirrors the actual
-    # write path in POST /attendance/mark and payroll/generate).
+    # write path in POST /attendance/mark).
     records = []
     if attendance_repo is not None:
         n_days = _days_in_month(year, mon)
@@ -1871,185 +1867,6 @@ async def get_leave_balance(
     current_user: dict = Depends(get_current_user),
 ):
     return {"employeeId": employee_id, "year": year, "balance": {}}
-
-
-@router.get("/payroll")
-async def list_payroll(
-    year: int = Query(...),
-    month: int = Query(...),
-    store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(require_roles(*_HR_READ_ROLES)),
-):
-    """List payroll records for a month.
-
-    OWNER RULING 2026-08-09: ADMIN/SUPERADMIN only. Each record carries
-    base_salary, gross_salary, deductions and net_salary for a named employee.
-    Reuses payroll._assert_salary_admin so this router and the payroll router
-    cannot drift into two different definitions of "may see salary".
-    """
-    _assert_salary_admin(current_user)
-    payroll_repo = get_payroll_repository()
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
-
-    if payroll_repo is None:
-        return {"payroll": [], "total": 0}
-
-    records = payroll_repo.find_many(
-        {"store_id": active_store, "year": year, "month": month}
-    )
-
-    return {"payroll": records or [], "total": len(records) if records else 0}
-
-
-@router.post("/payroll/generate")
-async def generate_payroll(
-    year: int = Query(...),
-    month: int = Query(...),
-    store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(require_roles(*_HR_READ_ROLES)),
-):
-    """Generate payroll for a month.
-
-    OWNER RULING 2026-08-09/10, applied to the WRITE side: ADMIN/SUPERADMIN only,
-    matching its read sibling GET /hr/payroll.
-
-    This authored DRAFT payroll rows from a naive base_salary/26 * present_days
-    with a flat 10% deduction, for anyone _HR_READ_ROLES admitted. A
-    STORE_MANAGER could therefore create rows they are not allowed to read back,
-    which an ADMIN then approves in bulk (POST /payroll/approve flips every DRAFT
-    row in the month) and which flow into the PF ECR, the Tally JV and the
-    statutory filing. That is the exact inverse of the rubber-stamp argument this
-    module already makes about approving figures you cannot see.
-    """
-    _assert_salary_admin(current_user, "generate payroll")
-    payroll_repo = get_payroll_repository()
-    user_repo = get_user_repository()
-    attendance_repo = get_attendance_repository()
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
-
-    if not payroll_repo or not user_repo:
-        return {"message": "Payroll generation initiated", "count": 0}
-
-    # Get all employees for the store
-    employees = user_repo.find_many({"store_ids": active_store})
-
-    generated_count = 0
-    for employee in employees or []:
-        # Check if payroll already exists
-        existing = payroll_repo.find_one(
-            {"employee_id": employee.get("user_id"), "year": year, "month": month}
-        )
-
-        if existing is not None:
-            continue
-
-        # Calculate attendance
-        working_days = 0
-        present_days = 0
-        if attendance_repo is not None:
-            attendance = attendance_repo.find_many(
-                {
-                    "employee_id": employee.get("user_id"),
-                    "date": {
-                        "$gte": f"{year}-{month:02d}-01",
-                        "$lt": (
-                            f"{year}-{month+1:02d}-01"
-                            if month < 12
-                            else f"{year+1}-01-01"
-                        ),
-                    },
-                }
-            )
-            working_days = len(attendance) if attendance else 26
-            present_days = len(
-                [a for a in (attendance or []) if a.get("status") == "PRESENT"]
-            )
-
-        # Basic payroll calculation
-        base_salary = employee.get("salary", 0) or 25000
-        daily_rate = base_salary / 26
-        gross = daily_rate * present_days
-        deductions = gross * 0.1  # 10% deductions
-        net = gross - deductions
-
-        payroll_repo.create(
-            {
-                "payroll_id": str(uuid.uuid4()),
-                "employee_id": employee.get("user_id"),
-                "employee_name": employee.get("full_name"),
-                "store_id": active_store,
-                "year": year,
-                "month": month,
-                "working_days": working_days,
-                "present_days": present_days,
-                "base_salary": base_salary,
-                "gross_salary": round(gross, 2),
-                "deductions": round(deductions, 2),
-                "net_salary": round(net, 2),
-                "status": "DRAFT",
-                "generated_by": current_user.get("user_id"),
-                "generated_at": datetime.now().isoformat(),
-            }
-        )
-        generated_count += 1
-
-    return {
-        "message": "Payroll generated",
-        "count": generated_count,
-        "year": year,
-        "month": month,
-    }
-
-
-@router.post("/payroll/{payroll_id}/approve")
-async def approve_payroll(
-    payroll_id: str,
-    current_user: dict = Depends(require_roles(*_HR_READ_ROLES)),
-):
-    """Approve payroll for payment.
-
-    OWNER RULING 2026-08-10: ADMIN/SUPERADMIN only. This is the SECOND approve
-    route in the payroll family (the other is POST /payroll/approve) and it had
-    the widest gate of the two -- _HR_READ_ROLES let a STORE_MANAGER or
-    AREA_MANAGER approve a payroll record as well as the ACCOUNTANT. Whoever
-    signs payroll off must be able to see what they are signing.
-    """
-    _assert_salary_admin(current_user, "approve a payroll record")
-    payroll_repo = get_payroll_repository()
-
-    if payroll_repo is not None:
-        record = payroll_repo.find_by_id(payroll_id)
-        if not record:
-            raise HTTPException(status_code=404, detail="Payroll record not found")
-        validate_store_access(record.get("store_id"), current_user)
-
-        payroll_repo.update(
-            payroll_id,
-            {
-                "status": "APPROVED",
-                "approved_by": current_user.get("user_id"),
-                "approved_at": datetime.now().isoformat(),
-            },
-        )
-
-    return {"message": "Payroll approved", "payroll_id": payroll_id}
-
-
-@router.get("/employee/{employee_id}/salary-slip")
-async def get_salary_slip(
-    employee_id: str,
-    year: int,
-    month: int,
-    current_user: dict = Depends(require_roles(*_HR_READ_ROLES)),
-):
-    """Salary slip by employee. STUB -- returns an empty salarySlip today.
-
-    Gated anyway (OWNER RULING 2026-08-09, SELF or ADMIN/SUPERADMIN): it is a
-    salary-named route with no frontend caller, and the cheapest moment to put
-    the rule on it is before somebody fills the stub in.
-    """
-    _assert_self_or_salary_admin(employee_id, current_user, "salary slip")
-    return {"employeeId": employee_id, "year": year, "month": month, "salarySlip": {}}
 
 
 # ============================================================================
