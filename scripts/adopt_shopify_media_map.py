@@ -148,10 +148,11 @@ Round 2:
     ... --ids <id>,<id> --rule connector-prefix [--apply]
     ... --ids <id>,<id> --replace-photos-from-shopify [--reversal-dir <dir>] [--apply]
 
-REVERSAL (ledger only): delete the ADOPTED docs of the printed ids --
-    db.online_media.deleteMany({product_id: {$in: [<ids>]}, how: "adopted"})
-(the photo pass then goes back to hands-off on them; nothing on Shopify moves;
-a doc the pass minted or settled since is kept.)
+REVERSAL (ledger only): delete EVERY ledger doc of the printed ids --
+    db.online_media.deleteMany({"product_id": {"$in": [<ids>]}})
+(the photo pass then goes back to hands-off on them, as before the adoption;
+nothing on Shopify moves: a media the pass attached since stays up,
+unmanaged, like every other media on a hands-off listing.)
 
 Connection: MONGO_PUBLIC_URL, else MONGO_URL (the vars `railway run` injects);
 Shopify creds resolve from the same injected env. Nothing secret is printed.
@@ -194,9 +195,17 @@ _URL = re.compile(r"https?://\S+|\S*myshopify\.com\S*")
 RULES = {"exact": ("exact",), "connector-prefix": ("exact", "connector_prefix")}
 
 
+def reversal_filter(ids: List[str]) -> Dict[str, Any]:
+    """The ledger docs the reversal deletes: EVERY doc of the products. Only
+    a product with no live doc is hands-off (media.plan_product_media), so
+    keeping a doc the pass minted or settled since would leave the pass
+    managing the listing and attach every rolled-back photo a second time."""
+    return {"product_id": {"$in": list(ids)}}
+
+
 def reversal_line(ids: List[str]) -> str:
-    """The one-line mongosh reversal: delete ONLY the adopted docs."""
-    return 'db.%s.deleteMany({product_id: {$in: %s}, how: "adopted"})' % (MEDIA_COLLECTION, list(ids))
+    """The one-line mongosh reversal (JSON is valid mongosh)."""
+    return "db.%s.deleteMany(%s)" % (MEDIA_COLLECTION, json.dumps(reversal_filter(ids)))
 
 
 class _Conn:

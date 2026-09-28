@@ -24,7 +24,8 @@ repeated url counts once, hand uploads unmanaged and PRINTED, partial = no
 write, position / count never match, dry-run = no write, --ids required,
 already-mapped skipped (an empty map is not a map), transport failure
 reported not fatal. T18: the adoption inserts adopted docs, is idempotent,
-never overwrites a live doc, and its reversal removes only adopted docs.
+never overwrites a live doc, and its printed reversal puts the photo pass
+back to hands-off (every doc of the product, minted since included).
 
 ROUND 2 (owner rulings 2026-09-06), both OPT-IN: R3b (--rule connector-prefix)
 claims a media named '<the product's OWN Shopify id>__<nn>__<basename>' when
@@ -171,7 +172,7 @@ def test_exact_match_adopts_in_ims_order(db, monkeypatch):
     audit = list(db["audit_logs"].find({}))
     assert len(audit) == 1 and audit[0]["action"] == "MEDIA_MAP_ADOPT"
     assert audit[0]["entity_id"] == "P1" and audit[0]["after_state"]["media"] == row["map"]
-    assert 'how: "adopted"' in audit[0]["reversal"]
+    assert audit[0]["reversal"] == script.reversal_line(["P1"])
     assert shop.calls == [{"id": GID}]
 
 
@@ -419,12 +420,10 @@ def test_a_pending_doc_or_legacy_twin_field_is_not_owned_media(db, monkeypatch):
     assert audit[0]["before_state"] == {"media": []}
 
 
-def test_adoption_is_idempotent_never_overwrites_and_reverses_only_what_it_adopted(db, monkeypatch, capsys):
+def test_adoption_is_idempotent_and_never_overwrites(db, monkeypatch):
     """T18. (a) A second --apply is a no-op (already_mapped, no new doc).
     (b) A live doc landing between the report and the write (the pass
     minted one) refuses the write under the lease -- never a duplicate.
-    (c) The printed reversal deletes ONLY the adopted docs: a doc the pass
-    minted since stays.
     REVERT-PROOF: _adopt without the under-lease re-check -> (b) red."""
     shop = _wire(monkeypatch, [_node(1, OID1 + ".png")])
     _seed(db, [U1])
@@ -447,12 +446,34 @@ def test_adoption_is_idempotent_never_overwrites_and_reverses_only_what_it_adopt
     assert out["rows"][0]["status"] == "adopt" and out["written"] == []
     assert _adopted(db2) == [{"url": U2, "id": _m(77)}], "never overwritten, never duplicated"
 
-    db[LEDGER].insert_one(media_doc("P1", U2, _m(78)))
-    printed = capsys.readouterr().out
+
+def test_the_printed_reversal_puts_the_pass_back_to_hands_off(db, monkeypatch, capsys):
+    """T18c. A and B adopted (media 1, 2); a later press minted C (media 3)
+    and a pending attach D is on record. The operator runs the PRINTED
+    reversal: the photo pass must be back to hands-off on that listing --
+    nothing attached, deleted or reordered -- exactly as before the adoption
+    (main's reversal unset the whole map). The line printed is the filter
+    applied here, so the runbook and the test cannot drift.
+    REVERT-PROOF: a reversal of the adopted docs only -> the minted doc keeps
+    the pass managing: A and B attached a second time, the originals
+    unmanaged."""
+    _wire(monkeypatch, [_node(1, OID1 + ".png"), _node(2, OID2 + ".png")])
+    _seed(db, [U1, U2])
+    assert _run(db, apply=True)["written"] == ["P1"]
+    db["catalog_products"].update_one({"id": "P1"}, {"$set": {"images": [U1, U2, U3]}})
+    db[LEDGER].insert_one(media_doc("P1", U3, _m(3)))
+    db[LEDGER].insert_one(media_doc("P1", APP + "6a56343d7edfd8bd742b5ea1"))
     line = script.reversal_line(["P1"])
-    assert line in printed and line == 'db.online_media.deleteMany({product_id: {$in: [\'P1\']}, how: "adopted"})'
-    db[LEDGER].delete_many({"product_id": {"$in": ["P1"]}, "how": "adopted"})
-    assert _adopted(db) == [{"url": U2, "id": _m(78)}]
+    assert line in capsys.readouterr().out
+    assert line == "db.online_media.deleteMany(%s)" % json.dumps(script.reversal_filter(["P1"]))
+
+    db[LEDGER].delete_many(script.reversal_filter(["P1"]))
+
+    listing = [_node(1, OID1 + ".png"), _node(2, OID2 + ".png"), _node(3, OID3 + ".png")]
+    rows = shopify_push.media_rows(db, "P1")
+    plan = shopify_push.plan_product_media(rows, [U1, U2, U3], [U1, U2, U3], listing)
+    assert plan["hands_off"] is True, plan
+    assert plan["attach"] == [] and plan["delete"] == [] and plan["reorder"] == []
 
 
 def test_transport_failure_is_reported_not_fatal(db, monkeypatch):
