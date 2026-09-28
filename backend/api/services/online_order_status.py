@@ -51,6 +51,7 @@ TERMINAL = frozenset({"DELIVERED", "CANCELLED", "REFUNDED", "VOID", "VOIDED"})
 # Targets an active Rx / stock hold withholds (the deliver-guard's own rule).
 _HOLDABLE = frozenset({"SHIPPED", "DELIVERED"})
 _VERB = {CANCEL: "cancelled", REFUND: "refunded", DELETE: "deleted"}
+_ALREADY = frozenset({(DELETE, "VOIDED"), (SHIP, "DELIVERED")})
 
 
 def _low(value: Any) -> str:
@@ -101,7 +102,9 @@ def decide(order: Dict[str, Any], fact: Optional[str]) -> Tuple[Optional[str], O
     if cell == TASK:
         return None, "conflict"
     if cell is KEEP:
-        same = _LIVE[fact] == frm or (fact == DELETE and frm == "VOIDED")
+        # The status already holds the fact, or went past it (ruling 1: a
+        # delivered order was shipped) -- no disagreement to report.
+        same = _LIVE[fact] == frm or (fact, frm) in _ALREADY
         return None, ("withheld" if frm in TERMINAL and not same else None)
     if cell in _HOLDABLE:
         from ..routers.orders import order_has_active_rx_hold

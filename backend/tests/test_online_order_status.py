@@ -38,7 +38,7 @@ GOLDEN = {
     "PROCESSING": _OPEN,
     "READY": _OPEN,
     "SHIPPED": {**_OPEN, oos.SHIP: (None, None)},
-    "DELIVERED": {oos.SHIP: _W, oos.DELIVER: (None, None),
+    "DELIVERED": {oos.SHIP: (None, None), oos.DELIVER: (None, None),
                   oos.CANCEL: _C, oos.REFUND: _C, oos.DELETE: _C},
     "CANCELLED": {**{f: _W for f in FACTS}, oos.CANCEL: (None, None)},
     "REFUNDED": {**{f: _W for f in FACTS}, oos.REFUND: (None, None)},
@@ -190,6 +190,26 @@ def test_a_courier_delivered_fulfilment_is_the_delivery(swept):
     assert doc["status_updated_by"] == "system:SHOPIFY_FULFILL"
     assert [(h["status"], h["changed_by"]) for h in doc["status_history"]] == [
         ("DELIVERED", "system:SHOPIFY_FULFILL")]
+
+
+def test_a_delivered_order_shopify_calls_fulfilled_is_no_disagreement(swept):
+    """Ruling 1: fulfilled (= shipped) is behind DELIVERED, not against it. A
+    sweep whose body is fulfilled with a courier-delivered fulfilment lands
+    DELIVERED and reports nothing; a counter-delivered pickup order Shopify
+    then marks fulfilled is not reported as IMS and Shopify disagreeing."""
+    _book(swept, 60015)
+    swept["state"]["orders"] = [_pulled(60015, fulfillment_status="fulfilled",
+                                        fulfillments=[_fulfilment(60015, 1, shipment_status="delivered")])]
+    p = swept["run"]().payload
+    assert p["status_synced"] == ["60015"] and p["status_skipped_terminal"] == []
+    assert _doc(swept, 60015)["status"] == "DELIVERED"
+
+    _book(swept, 60016)
+    _set(swept, 60016, status="DELIVERED")
+    res = swept["real_map"](_pulled(60016, fulfillment_status="fulfilled"), swept["db"],
+                            webhook_id="ful-60016", topic="orders/fulfilled")
+    assert res["status_synced"] is True and res["terminal_withheld"] is False
+    assert _doc(swept, 60016)["status"] == "DELIVERED"
 
 
 def test_a_cancelled_fulfilment_with_tracking_never_ships(swept):

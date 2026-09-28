@@ -902,11 +902,6 @@ _SHIPPED_THEN_STAFF_CANCELLED = {
         {"fulfillment_status": None, "fulfillments": [_fulfilment(40011, 46, status="open")]},
         {"shopify_fulfillment_id": "46", "awb": "AWB40011"},
     ),
-    (
-        {"status": "DELIVERED", "fulfillment_status": "FULFILLED"},
-        {"fulfillment_status": "fulfilled", "fulfillments": [_fulfilment(40011, 47, shipment_status="in_transit")]},
-        {"shopify_fulfillment_id": "47", "shipment_status": "in_transit"},
-    ),
 ])
 def test_a_terminal_status_the_fulfilment_leg_held_back_is_reported(swept, ims_state, shopify_body, landed):
     """The fulfilment reconcile decides with the mapper's ONE terminal rule and
@@ -928,6 +923,25 @@ def test_a_terminal_status_the_fulfilment_leg_held_back_is_reported(swept, ims_s
     # The drain's answer for the same fulfilment is the same rule's.
     again = shopify_fulfillment.reconcile_fulfillment(swept["db"], shopify_body["fulfillments"][0])
     assert again["terminal_withheld"] is True and _doc(swept, 40011)["status"] == ims_state["status"]
+
+
+def test_a_shipped_fulfilment_on_a_delivered_order_is_no_disagreement(swept):
+    """Ruling 1: a fulfilment states SHIP, which DELIVERED is already past (a
+    counter-delivered pickup order Shopify then fulfils). Its tracking lands,
+    the status stays DELIVERED, and nothing is reported -- sweep and drain."""
+    _book(swept, 40012)
+    swept["orders"].update_one({"shopify_order_id": "40012"},
+                               {"$set": {"status": "DELIVERED", "fulfillment_status": "FULFILLED"}})
+    f = _fulfilment(40012, 47, shipment_status="in_transit")
+
+    swept["state"]["orders"] = [_pulled(40012, fulfillment_status="fulfilled", fulfillments=[f])]
+    p = swept["run"]().payload
+    assert p["status_synced"] == ["40012"] and p["status_skipped_terminal"] == []
+    doc = _doc(swept, 40012)
+    assert (doc["status"], doc["shopify_fulfillment_id"], doc["shipment_status"]) == (
+        "DELIVERED", "47", "in_transit")
+    again = shopify_fulfillment.reconcile_fulfillment(swept["db"], f)
+    assert again["terminal_withheld"] is False and _doc(swept, 40012)["status"] == "DELIVERED"
 
 
 def test_a_delivered_order_and_a_newer_delivered_fulfilment_is_no_terminal_hold(swept):
