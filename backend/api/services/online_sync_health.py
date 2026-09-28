@@ -183,30 +183,46 @@ def _on_hand_by_product(
     return out
 
 
-def rule_by_location(db, skus: List[str], *, safety_buffer: Optional[int] = None):
-    """``(quantities, mapped)`` for an IMS-vs-Shopify comparison PER LOCATION:
+def rule_by_location(db, skus: List[str], *, store_id: Optional[str] = None):
+    """``(shelf, sent, mapped)`` for an IMS-vs-Shopify comparison PER LOCATION:
     THE ONE RULE per shop (online_stock_writeback.online_quantities_for_skus,
-    the writer's own call -- ``safety_buffer=0`` reads the shelf, block-aware)
+    the writer's own call, block-aware) read twice -- ``shelf`` at buffer 0
+    (what backs a listing: the OVERSELL line) and ``sent`` at the writer's own
+    buffer (what the writer sends: sellable / recommended / OVER-ALLOCATED) --
     and the writer's own shop -> Shopify location map (inventory._mapped).
+    With ``store_id`` the map is that shop's own entry only ({} for a shop
+    with no usable location), so another shop's failed read never blanks it.
 
-    None when either is UNKNOWN (the shop list, the block, the buffer or any
-    MAPPED shop's shelf could not be read): unknown is never a 0 behind a
-    listing. Never raises."""
+    ``shelf`` / ``sent`` are None when UNKNOWN (the shop list, the block, the
+    buffer or any shop in the map could not be read): unknown is never a 0
+    behind a listing. The whole answer is None only when the map itself could
+    not be read. Never raises. ponytail: every shop's shelf is read twice per
+    page load; one read + a derived buffer if a page ever measures slow."""
     try:
         from .online_stock_writeback import online_quantities_for_skus
         from .shopify_push.inventory import _mapped, _stores
 
         mapped = _mapped(_stores(db))
-        quantities = online_quantities_for_skus(db, skus, safety_buffer=safety_buffer)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[STOCK_TALLY] per-location rule unreadable: %s", exc)
+        logger.warning("[STOCK_TALLY] shop -> location map unreadable: %s", exc)
         return None
-    if skus and not quantities:
-        return None
-    # A shop whose shelf read failed is absent from EVERY sku's inner dict.
-    if any(sid not in per_shop for per_shop in quantities.values() for sid in mapped):
-        return None
-    return quantities, mapped
+    if store_id is not None:
+        mapped = {store_id: mapped[store_id]} if store_id in mapped else {}
+
+    def known(buffer):
+        try:
+            quantities = online_quantities_for_skus(db, skus, safety_buffer=buffer)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[STOCK_TALLY] per-location rule unreadable: %s", exc)
+            return None
+        if skus and not quantities:
+            return None
+        # A shop whose shelf read failed is absent from EVERY sku's inner dict.
+        if any(sid not in per_shop for per_shop in quantities.values() for sid in mapped):
+            return None
+        return quantities
+
+    return known(0), known(None), mapped
 
 
 def pending_reconcile_summary(
@@ -375,11 +391,13 @@ def stock_tally_summary(
                             the SUPERADMIN online block) summed over the MAPPED
                             shops -- what IMS lets the website sell
       - recommended_buffer: a conservative reserve suggestion (not enforced)
-      - oversell_risk     : some Shopify location lists more than IMS backs
-                            THERE (shopify_stock_parity.unbacked_units), only
-                            when the listed qty is actually known. Per
-                            location, never pooled: the nightly parity and
-                            this page read the same pairs.
+      - oversell_risk     : some Shopify location lists more than the SHELF
+                            behind it (the rule at buffer 0; the same line the
+                            reconciliation screen draws), counted by
+                            shopify_stock_parity.unbacked_units, only when the
+                            listed qty is actually known -- a location listing
+                            against a shop IMS could not read is a risk, never
+                            "no risk". Per location, never pooled.
 
     Plus a summary {skus_checked, at_risk_count, total_online_listed,
     total_on_hand, total_reserved, total_sellable, online_configured,
@@ -437,15 +455,16 @@ def stock_tally_summary(
     skus = [p.get("sku") for p in products if p.get("sku")]
     on_hand = _on_hand_by_product(db, pids)
     # The rule already carries the SUPERADMIN online block (0 at every shop).
-    rule = rule_by_location(db, skus) if on_hand is not None else None
-    if on_hand is None or rule is None:
+    shelf, sent, mapped = (rule_by_location(db, skus) if on_hand is not None else None) or (None, None, {})
+    if on_hand is None or shelf is None or sent is None:
         # UNKNOWN is not "every shelf empty": nothing is tallied, and the
         # page says why instead of printing 0 on hand for every listed SKU.
         base["summary"]["on_hand_unknown"] = True
         return base
-    quantities, mapped = rule
+    # OVERSELL is judged against the SHELF (buffer 0), exactly as the
+    # reconciliation screen judges it; the buffer is what `sellable` shows.
     unbacked = (
-        unbacked_units(live.get("variants") or [], quantities, live.get("levels") or {}, mapped)
+        unbacked_units(live.get("variants") or [], shelf, live.get("levels") or {}, mapped)
         if live
         else {}
     )
@@ -470,14 +489,16 @@ def stock_tally_summary(
         # What the WRITER sends to the mapped shops' locations. RESERVED is a
         # different status from on hand, so it was never inside the rule's
         # shelf count -- subtracting it would count every reservation twice.
-        per_shop = quantities.get(sku) or {}
+        per_shop = sent.get(sku) or {}
         sellable = sum(int(per_shop.get(sid, 0) or 0) for sid in mapped)
         # Listed qty: only from a live Shopify read (online_qty). Unknown ->
         # None, and an unknown quantity can never flag (or hide) a risk row.
         listed: Optional[int] = None
         if online_qty is not None and online_qty.get(sku) is not None:
             listed = int(online_qty.get(sku) or 0)
-        risk = listed is not None and (unbacked.get(sku) or 0) > 0
+        # None = a location lists units against a shelf IMS could not read:
+        # unknown is never "no risk".
+        risk = listed is not None and unbacked.get(sku, 0) != 0
         if risk:
             at_risk += 1
         tot_listed += listed or 0

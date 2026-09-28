@@ -67,6 +67,7 @@ def classify(
     recommended: Optional[int],
     is_online: bool,
     over: Any = _ONE_LOCATION,
+    excess: Any = _ONE_LOCATION,
 ) -> str:
     """online=None means the listed quantity is UNKNOWN (the live read did not
     cover this SKU) -> LISTED_UNKNOWN, never a confident OK. in_store=None
@@ -77,7 +78,10 @@ def classify(
     LOCATION by the caller (shopify_stock_parity.unbacked_units) when the row
     spans several Shopify locations -- a pooled online > in_store would let
     one shop's shelf (or unmapped Pune's) back another shop's listing. None =
-    a shop behind a listing could not be read -> ONHAND_UNKNOWN."""
+    a shop behind a listing could not be read -> ONHAND_UNKNOWN.
+
+    ``excess``: the same count against the WRITER's number (its buffer, its
+    online block) instead of the shelf -> OVER_ALLOCATED; None is unknown."""
     if not is_online:
         return NOT_ONLINE
     if in_store is None:
@@ -90,7 +94,11 @@ def classify(
         return ONHAND_UNKNOWN
     if over > 0:
         return OVERSELL_RISK
-    if online > recommended:
+    if excess is _ONE_LOCATION:
+        excess = online - recommended
+    if excess is None:
+        return ONHAND_UNKNOWN
+    if excess > 0:
         return OVER_ALLOCATED
     return OK
 
@@ -100,9 +108,12 @@ def reconcile_items(
     safety_buffer: int = 0,
     max_online: Optional[int] = None,
 ) -> dict:
-    """items: [{sku, name?, in_store, online, is_online, unbacked?}] where
-    online may be None = listed qty unknown and in_store may be None = on-hand
-    unknown; ``unbacked`` (optional) is classify's per-location ``over``.
+    """items: [{sku, name?, in_store, online, is_online, unbacked?, excess?,
+    recommended?}] where online may be None = listed qty unknown and in_store
+    may be None = on-hand unknown; ``unbacked`` / ``excess`` (optional) are
+    classify's per-location ``over`` / ``excess``, and a row that carries its
+    own ``recommended`` (the writer's number, None = unknown) is never
+    re-derived from ``in_store`` and ``safety_buffer``.
     Returns per-SKU rows (recommended allocation + status + delta) sorted
     worst-first, plus a summary. `delta` = online - recommended (positive =>
     listed more than is safe); None when either side is unknown."""
@@ -126,10 +137,12 @@ def reconcile_items(
         online: Optional[int] = None if online_raw is None else _int(online_raw)
         is_online = bool(it.get("is_online"))
         rec: Optional[int] = (
-            None if in_store is None else recommend_allocation(in_store, safety_buffer, max_online)
+            it["recommended"]
+            if "recommended" in it
+            else None if in_store is None else recommend_allocation(in_store, safety_buffer, max_online)
         )
         over = it.get("unbacked", _ONE_LOCATION)
-        status = classify(in_store, online, rec, is_online, over)
+        status = classify(in_store, online, rec, is_online, over, it.get("excess", _ONE_LOCATION))
         counts[status] = counts.get(status, 0) + 1
         if status == OVERSELL_RISK:
             oversell_units += (online or 0) - (in_store or 0) if over is _ONE_LOCATION else over

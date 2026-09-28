@@ -2,9 +2,10 @@
 // IMS 2.0 - Online vs In-store Stock (prevent overselling)
 // ============================================================================
 // Compares in-store physical on-hand (IMS) with online-listed stock (a live
-// Shopify read via the IMS catalog mapping) per SKU, flags overselling risk,
-// and recommends a safe online allocation (on-hand minus a safety buffer you
-// control).
+// Shopify read via the IMS catalog mapping) per SKU, location by location,
+// flags overselling risk, and shows what IMS sends to the website
+// ("Recommended": each mapped shop's shelf minus the Shopify integration's
+// safety buffer -- the writer's own number; this page has no second buffer).
 
 import { useCallback, useEffect, useState } from 'react';
 import { RefreshCcw, Loader2, AlertTriangle, CheckCircle2, ShoppingCart } from 'lucide-react';
@@ -36,7 +37,6 @@ export default function OnlineStockPage() {
   const [data, setData] = useState<ReconcileResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [storeId, setStoreId] = useState('');
-  const [buffer, setBuffer] = useState(0);
   const [stores, setStores] = useState<StoreOpt[]>([]);
   const [onlyRisk, setOnlyRisk] = useState(true);
 
@@ -47,11 +47,11 @@ export default function OnlineStockPage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      setData(await onlineStockApi.reconcile({ store_id: storeId || undefined, safety_buffer: buffer }));
+      setData(await onlineStockApi.reconcile({ store_id: storeId || undefined }));
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Failed to load reconciliation');
     } finally { setLoading(false); }
-  }, [storeId, buffer, toast]);
+  }, [storeId, toast]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -70,7 +70,7 @@ export default function OnlineStockPage() {
           <RefreshCcw className="w-4 h-4" /> Refresh
         </button>
       </div>
-      <p className="text-sm text-gray-500 mb-4">Stops you selling the same item online and in-store. "Recommended" = on-hand minus your safety buffer.</p>
+      <p className="text-sm text-gray-500 mb-4">Stops you selling the same item online and in-store. "Recommended" = what IMS sends to the website: each shop's shelf minus the safety buffer{typeof s.safety_buffer === 'number' ? ` (${s.safety_buffer})` : ''}, for the shops mapped to a Shopify location.</p>
 
       {data && data.online_configured === false && (
         <div className="flex items-center gap-2 text-sm rounded-lg px-3 py-2 border bg-blue-50 border-blue-200 text-blue-800 mb-4">
@@ -104,11 +104,6 @@ export default function OnlineStockPage() {
             {stores.map((st) => <option key={st.store_id} value={st.store_id}>{st.store_name || st.store_code || st.store_id}</option>)}
           </select>
         </div>
-        <div>
-          <label className="block text-xs font-medium text-gray-600 mb-1">Safety buffer (units held back from online)</label>
-          <input type="number" aria-label="Safety buffer (units held back from online)" min={0} value={buffer} onChange={(e) => setBuffer(Math.max(0, parseInt(e.target.value, 10) || 0))}
-            className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm w-28" />
-        </div>
         <label className="text-sm text-gray-600 flex items-center gap-1.5 pb-1.5">
           <input type="checkbox" checked={onlyRisk} onChange={(e) => setOnlyRisk(e.target.checked)} /> Show only at-risk
         </label>
@@ -127,7 +122,7 @@ export default function OnlineStockPage() {
             <div className="bg-white border border-amber-200 rounded-lg p-4">
               <p className="text-xs text-gray-500 mb-1">Over-allocated</p>
               <p className="text-xl font-semibold text-amber-700">{s.over_allocated || 0}</p>
-              <p className="text-xs text-gray-400 mt-1">listed above the safe buffer</p>
+              <p className="text-xs text-gray-400 mt-1">listed above what IMS sends</p>
             </div>
             <div className="bg-white border border-green-200 rounded-lg p-4">
               <p className="text-xs text-gray-500 mb-1 flex items-center gap-1"><CheckCircle2 className="w-3 h-3" /> OK</p>

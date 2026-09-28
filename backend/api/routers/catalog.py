@@ -119,26 +119,30 @@ async def online_stock_reconcile(
     store_id: Optional[str] = Query(
         None, description="Limit in-store on-hand to one store"
     ),
-    safety_buffer: int = Query(
-        0, ge=0, le=1000, description="Units to hold back from online"
-    ),
     limit: int = Query(1000, ge=1, le=5000),
     current_user: dict = Depends(get_current_user),
 ):
     """Reconcile in-store physical on-hand (IMS) vs online-listed stock
-    (Shopify) per SKU and flag overselling risk + a recommended safe online
-    allocation (on-hand minus safety_buffer).
+    (Shopify) per SKU, PER SHOPIFY LOCATION, against THE ONE RULE the writer
+    sends (online_sync_health.rule_by_location).
 
     Post-BVI: "which SKUs are online" comes from the IMS catalog (Mongo), and
     the LISTED quantity is read LIVE from Shopify for the online-mapped SKUs
-    (creds-gated, read-only, capped to the MAPPED set), PER LOCATION. With
+    (creds-gated, read-only, capped to the MAPPED set), per location. With
     ``store_id`` the row is that shop's own Shopify location (an unmapped shop
-    lists 0); without it the row sums every location, and OVERSELL_RISK is
-    still decided location by location (shopify_stock_parity.unbacked_units
-    against the shelf rule) -- never one shop's (or unmapped Pune's) shelf
-    backing another shop's listing. Honesty contract
-    (audit fix-round P1): an online SKU the live read did NOT cover carries
-    online=null and classifies LISTED_UNKNOWN -- never a confident 0/OK.
+    lists 0 and is recommended 0); without it the row sums every location.
+    Either way the verdict is decided location by location
+    (shopify_stock_parity.unbacked_units) -- never one shop's (or unmapped
+    Pune's) shelf backing another shop's listing:
+      * OVERSELL_RISK  -- a location lists beyond the shelf behind it;
+      * OVER_ALLOCATED -- a location lists beyond what the writer sends there
+        (its safety buffer, the SUPERADMIN online block);
+      * ``recommended`` -- what the writer sends, summed over the mapped shops
+        in view. The buffer is the writer's own (the Shopify integration's
+        safety_buffer); this page has no second one.
+    Honesty contract (audit fix-round P1): an online SKU the live read did NOT
+    cover carries online=null and classifies LISTED_UNKNOWN; a rule IMS could
+    not read classifies ONHAND_UNKNOWN -- never a confident 0/OK.
     listed_qty_live is True only on FULL mapped coverage;
     listed_live_rows / listed_mapped_rows expose partial coverage.
     Read-only + fail-soft."""
@@ -171,22 +175,26 @@ async def online_stock_reconcile(
 
     # Live Shopify listed quantities PER LOCATION: mapped SKUs first, cap on
     # the mapped set, coverage counts carried through (None when unavailable).
+    from ..services.online_stock_writeback import _safety_buffer
     from ..services.online_sync_health import live_listed_qty_for_skus, rule_by_location
     from ..services.shopify_stock_parity import unbacked_units
 
     live = await live_listed_qty_for_skus(db, skus)
     variants = (live or {}).get("variants") or []
     levels = (live or {}).get("levels") or {}
-    # The shelf per shop (the rule at buffer 0, block-aware) + the writer's
-    # own shop -> location map. None = unknown -> ONHAND_UNKNOWN, never clean.
-    rule = rule_by_location(db, skus, safety_buffer=0)
-    quantities, mapped = rule or ({}, {})
+    # The shelf and the writer's number per shop + the writer's own shop ->
+    # location map (one shop's entry with store_id). None = unknown ->
+    # ONHAND_UNKNOWN, never clean.
+    shelf, sent, mapped = rule_by_location(db, skus, store_id=store_id) or (None, None, None)
     if store_id:
         # ONE shop = its OWN location only; a shop with no location lists 0.
-        gid = mapped.get(store_id)
-        levels = {inv: ({gid: per.get(gid, 0)} if gid else {}) for inv, per in levels.items()}
-        mapped = {store_id: gid} if gid else {}
-    unbacked = unbacked_units(variants, quantities, levels, mapped) if rule else {}
+        # An unreadable map = which location is unknown -> listed unknown.
+        gid = (mapped or {}).get(store_id)
+        levels = {} if mapped is None else {
+            inv: ({gid: per.get(gid, 0)} if gid else {}) for inv, per in levels.items()
+        }
+    over = None if shelf is None else unbacked_units(variants, shelf, levels, mapped)
+    excess = None if sent is None else unbacked_units(variants, sent, levels, mapped)
     inv_of = {v["sku"]: v["inventory_item_id"] for v in variants}
 
     items = []
@@ -198,6 +206,7 @@ async def online_stock_reconcile(
         # confident 0. Offline SKUs carry 0 (they are not assessed anyway).
         per_location = levels.get(inv_of.get(sku))
         listed = None if per_location is None else sum(int(q) for q in per_location.values())
+        per_shop = None if sent is None else sent.get(sku)
         items.append(
             {
                 "sku": sku,
@@ -206,12 +215,17 @@ async def online_stock_reconcile(
                 "in_store": None if on_hand is None else on_hand.get(p.get("product_id"), 0),
                 "online": (listed if is_online else 0),
                 "is_online": is_online,
-                # Listed beyond the shelf, location by location (None: unknown).
-                "unbacked": unbacked.get(sku) if is_online else 0,
+                # What the writer sends to the mapped shops in view (None: unknown).
+                "recommended": None if per_shop is None else sum(int(per_shop.get(sid, 0)) for sid in mapped),
+                # Listed beyond the shelf / beyond the writer's number, location
+                # by location (None: unknown).
+                "unbacked": (None if over is None else over.get(sku)) if is_online else 0,
+                "excess": (None if excess is None else excess.get(sku)) if is_online else 0,
             }
         )
 
-    result = stock_allocation.reconcile_items(items, safety_buffer=safety_buffer)
+    result = stock_allocation.reconcile_items(items)
+    result["summary"]["safety_buffer"] = _safety_buffer(db)
     result["online_configured"] = online_mapping_available(db)
     live_rows = int(live["live"]) if live else 0
     mapped_rows = int(live["mapped"]) if live else 0

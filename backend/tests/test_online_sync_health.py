@@ -657,7 +657,7 @@ def test_the_catalog_reconciliation_screen_reads_the_same_on_hand_as_the_tile(mo
 
     out = asyncio.run(
         catalog.online_stock_reconcile(
-            store_id=None, safety_buffer=0, limit=1000, current_user={"user_id": "u1"}
+            store_id=None, limit=1000, current_user={"user_id": "u1"}
         )
     )
     row = out["items"][0]
@@ -814,7 +814,7 @@ def test_R9_the_reconciliation_screen_shows_an_unknown_on_hand_as_unknown(monkey
     monkeypatch.setattr(sh, "live_listed_qty_for_skus", _listed)
     out = asyncio.run(
         catalog.online_stock_reconcile(
-            store_id=None, safety_buffer=0, limit=1000, current_user={"user_id": "u1"}
+            store_id=None, limit=1000, current_user={"user_id": "u1"}
         )
     )
     row = out["items"][0]

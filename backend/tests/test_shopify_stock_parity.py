@@ -562,15 +562,26 @@ def test_unbacked_units_per_location_never_pooled():
     assert out == {"SKU-1": 5, "SKU-2": None}
 
 
-def _tally_and_parity(monkeypatch, db, levels):
+def _tally(monkeypatch, db, levels):
     from api.services import online_catalog, online_sync_health as osh
 
     monkeypatch.setattr(online_catalog, "online_status_for_skus", lambda db, skus: {s: {"online": True} for s in skus})
-    fake = _shopify(levels)
-    monkeypatch.setattr("api.services.shopify_push._graphql", fake)
-    tally = _run(osh.stock_tally_live(db))
-    parity = _run(sp.run_parity_tick(db, graphql=fake))
+    monkeypatch.setattr("api.services.shopify_push._graphql", _shopify(levels))
+    return _run(osh.stock_tally_live(db))
+
+
+def _tally_and_parity(monkeypatch, db, levels):
+    tally = _tally(monkeypatch, db, levels)
+    parity = _run(sp.run_parity_tick(db, graphql=_shopify(levels)))
     return {r["sku"]: r for r in tally["items"]}, parity
+
+
+def _fail_shelf(monkeypatch, store_id):
+    """That shop's on-hand read fails (the rule's STRICT {}); others read."""
+    from api.services import online_stock_writeback as wb
+
+    real = wb._on_hand_for_skus
+    monkeypatch.setattr(wb, "_on_hand_for_skus", lambda db, skus, sid: {} if sid == store_id else real(db, skus, sid))
 
 
 def test_tally_pune_never_backs_another_shops_listing(monkeypatch):
@@ -596,16 +607,22 @@ def test_tally_a_swapped_pair_is_a_risk_not_a_pooled_match(monkeypatch):
     assert rows["SKU-1"]["sellable"] == 3 and rows["SKU-1"]["oversell_risk"] is True
 
 
-def _reconcile(monkeypatch, db, levels, store_id):
+def _reconcile_page(monkeypatch, db, levels, store_id):
     from api.routers import catalog
 
     monkeypatch.setattr(catalog, "_get_db", lambda: db)
     monkeypatch.setattr(catalog, "online_status_for_skus", lambda db, skus: {s: {"online": True} for s in skus})
     monkeypatch.setattr(catalog, "online_mapping_available", lambda db: True)
     monkeypatch.setattr("api.services.shopify_push._graphql", _shopify(levels))
-    out = _run(catalog.online_stock_reconcile(store_id=store_id, safety_buffer=0, limit=1000,
-                                              current_user={"user_id": "u1"}))
-    return {r["sku"]: r for r in out["items"]}
+    return _run(catalog.online_stock_reconcile(store_id=store_id, limit=1000, current_user={"user_id": "u1"}))
+
+
+def _reconcile(monkeypatch, db, levels, store_id):
+    return {r["sku"]: r for r in _reconcile_page(monkeypatch, db, levels, store_id)["items"]}
+
+
+def _cols(row, *keys):
+    return tuple(row[k] for k in keys)
 
 
 def test_reconcile_one_shop_reads_its_own_location_only(monkeypatch):
@@ -632,6 +649,127 @@ def test_reconcile_all_shops_is_decided_location_by_location(monkeypatch):
     db = _db({"SKU-1": {"BV-A": 0, "BV-B": 0}}, pune_units=5)
     row = _reconcile(monkeypatch, db, {INV_1: {LOC_A: 3, LOC_B: 0}, INV_2: {}}, None)["SKU-1"]
     assert (row["in_store"], row["online"], row["status"]) == (5, 3, "OVERSELL_RISK")
+
+
+def test_reconcile_recommended_is_what_the_writer_sends_per_location(monkeypatch):
+    """Panel probe A. Writer buffer 2, BV-A 3, BV-B 3: the writer sends 1 and
+    1; Shopify lists 2 and 2, so parity at tolerance 0 flags both locations.
+    The page agrees: 'recommended' is the writer's number (2 over the mapped
+    shops, 1 for BV-A) and both views say OVER_ALLOCATED -- never 'OK, within
+    safe allocation'. The correct system (1 and 1) is OK. Put back the
+    pooled `in_store - buffer` recommendation with `online > recommended`
+    (drop the row's `recommended` / `excess`) -> recommended 6, OK -> fails."""
+    monkeypatch.setenv("ONLINE_STOCK_SAFETY_BUFFER", "2")
+    monkeypatch.setenv("SHOPIFY_STOCK_PARITY_TOLERANCE", "0")
+    db = _db({"SKU-1": {"BV-A": 3, "BV-B": 3}})
+    levels = {INV_1: {LOC_A: 2, LOC_B: 2}, INV_2: {}}
+    parity = _run(sp.run_parity_tick(db, graphql=_shopify(levels)))
+    assert sorted((d["store_id"], d["ims"], d["shopify"]) for d in parity["drift"]) == [
+        ("BV-A", 1, 2), ("BV-B", 1, 2)]
+    page = _reconcile_page(monkeypatch, db, levels, None)
+    row = page["items"][0]
+    assert _cols(row, "sku", "in_store", "online", "recommended", "delta", "status") == (
+        "SKU-1", 6, 4, 2, 2, "OVER_ALLOCATED")
+    assert page["summary"]["safety_buffer"] == 2
+    row = _reconcile(monkeypatch, db, levels, "BV-A")["SKU-1"]
+    assert _cols(row, "in_store", "online", "recommended", "status") == (3, 2, 1, "OVER_ALLOCATED")
+    row = _reconcile(monkeypatch, db, {INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {}}, None)["SKU-1"]
+    assert _cols(row, "recommended", "delta", "status") == (2, 0, "OK")
+
+
+def test_reconcile_unmapped_pune_never_backs_a_recommendation(monkeypatch):
+    """Panel probe B. Buffer 1, BV-A 0, BV-B 2, Pune (unmapped) 5: the writer
+    sends BV-B 1. LOC_B listing 2 is over the writer's number -> recommended
+    1, delta 1, OVER_ALLOCATED (the pooled page said recommended 6, OK: Pune's
+    shelf backed BV-B's buffer). LOC_B listing 1 is OK. Sum `recommended`
+    over every shop the rule read instead of the MAPPED ones -> 5 -> fails."""
+    monkeypatch.setenv("ONLINE_STOCK_SAFETY_BUFFER", "1")
+    db = _db({"SKU-1": {"BV-A": 0, "BV-B": 2}}, pune_units=5)
+    row = _reconcile(monkeypatch, db, {INV_1: {LOC_A: 0, LOC_B: 2}, INV_2: {}}, None)["SKU-1"]
+    assert _cols(row, "in_store", "online", "recommended", "delta", "status") == (7, 2, 1, 1, "OVER_ALLOCATED")
+    row = _reconcile(monkeypatch, db, {INV_1: {LOC_A: 0, LOC_B: 1}, INV_2: {}}, None)["SKU-1"]
+    assert _cols(row, "recommended", "status") == (1, "OK")
+
+
+def test_reconcile_recommended_carries_the_online_block(monkeypatch):
+    """SKU-1 is in a SUPERADMIN online-blocked collection: the writer sends 0
+    at every shop and Shopify holds 0 -- a correct system. 'recommended' is
+    0, not the 9 on the shelves. Re-derive it from the shelf -> 9 -> fails."""
+    db = _db({"SKU-1": {"BV-A": 5, "BV-B": 4}})
+    db.seed("ecom_collections", [{"collection_id": "C-BAN", "collection_type": "CUSTOM",
+                                  "online_sync_blocked": True, "products": [{"sku": "SKU-1"}]}])
+    row = _reconcile(monkeypatch, db, {INV_1: {LOC_A: 0, LOC_B: 0}, INV_2: {}}, None)["SKU-1"]
+    assert _cols(row, "in_store", "online", "recommended", "status") == (9, 0, 0, "OK")
+
+
+def test_tally_and_reconcile_draw_the_same_oversell_line(monkeypatch):
+    """Both screens call it OVERSELL only past the SHELF behind a location;
+    the writer's buffer only moves `sellable` / `recommended` (and, on the
+    reconciliation screen, OVER_ALLOCATED). Buffer 1, BV-B shelf 2:
+      LOC_B lists 2 -> tally sellable 1, no oversell; page OVER_ALLOCATED;
+      LOC_B lists 3 -> tally oversell; page OVERSELL_RISK.
+    Tally at the writer's buffer (mutation 3) -> listing 2 is a risk ->
+    fails. Page at the writer's buffer (mutation 4) -> OVERSELL_RISK at 2 ->
+    fails. Tally `sellable` from the shelf -> 2 -> fails."""
+    monkeypatch.setenv("ONLINE_STOCK_SAFETY_BUFFER", "1")
+    db = _db({"SKU-1": {"BV-A": 0, "BV-B": 2}})
+    at_2 = {INV_1: {LOC_A: 0, LOC_B: 2}, INV_2: {}}
+    at_3 = {INV_1: {LOC_A: 0, LOC_B: 3}, INV_2: {}}
+    row = {r["sku"]: r for r in _tally(monkeypatch, db, at_2)["items"]}["SKU-1"]
+    assert _cols(row, "online_listed_qty", "sellable", "oversell_risk") == (2, 1, False)
+    assert _reconcile(monkeypatch, db, at_2, None)["SKU-1"]["status"] == "OVER_ALLOCATED"
+    row = {r["sku"]: r for r in _tally(monkeypatch, db, at_3)["items"]}["SKU-1"]
+    assert _cols(row, "online_listed_qty", "sellable", "oversell_risk") == (3, 1, True)
+    assert _reconcile(monkeypatch, db, at_3, None)["SKU-1"]["status"] == "OVERSELL_RISK"
+
+
+def test_tally_a_mapped_shop_ims_could_not_read_is_unknown_never_a_row(monkeypatch):
+    """Panel input: BV-A shelf 1, BV-B's on-hand read FAILS; Shopify LOC_A 1,
+    LOC_B 3 -- three units selling at the location of a shop IMS could not
+    read. The tally says on_hand_unknown and lists nothing (never sellable 1
+    beside a clean row). Delete the rule_by_location guard (`any(sid not in
+    per_shop ...)`) -> rows come back -> fails."""
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 0}})
+    _fail_shelf(monkeypatch, "BV-B")
+    out = _tally(monkeypatch, db, {INV_1: {LOC_A: 1, LOC_B: 3}, INV_2: {}})
+    assert out["items"] == [] and out["summary"]["on_hand_unknown"] is True
+
+
+def test_tally_a_listing_ims_has_no_rule_for_is_a_risk(monkeypatch):
+    """Panel input: a products row SKU-9 with no product_id (so the rule has
+    no answer for it) and Shopify LOC_A listing 4 of it. unbacked_units says
+    None (unknown); the tally flags it -- unknown is never "no risk". Read
+    None as 0 again (`(unbacked.get(sku) or 0) > 0`) -> False -> fails."""
+    inv_9 = "gid://shopify/InventoryItem/99"
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 0}})
+    db.seed("products", [{"sku": "SKU-9"}])
+    db.seed("catalog_variants", [{"sku": "SKU-9", "shopify_inventory_item_id": inv_9}])
+    out = _tally(monkeypatch, db, {INV_1: {LOC_A: 1, LOC_B: 0}, INV_2: {}, inv_9: {LOC_A: 4}})
+    rows = {r["sku"]: r for r in out["items"]}
+    assert _cols(rows["SKU-9"], "online_listed_qty", "sellable", "oversell_risk") == (4, 0, True)
+    assert rows["SKU-1"]["oversell_risk"] is False
+
+
+def test_reconcile_one_shop_is_never_blanked_by_another_shops_failed_read(monkeypatch):
+    """Panel input: BV-A 2, BV-B 3; Shopify LOC_A 2, LOC_B 3.
+      * BV-B's read fails, page filtered to BV-A -> BV-A's own row, OK
+        (another shop's failed read never blanks it);
+      * the same, "All stores" -> ONHAND_UNKNOWN with the 5 Shopify lists;
+      * BV-A's OWN read fails, filtered to BV-A -> ONHAND_UNKNOWN, online
+        still the 2 Shopify lists there -- never a confident 0 (delta -2).
+    Drop the store_id narrowing in rule_by_location -> the first case is
+    ONHAND_UNKNOWN -> fails. Throw the map away with the rule (`mapped = {}`
+    when the rule is unknown) -> online 0 -> fails."""
+    db = _db({"SKU-1": {"BV-A": 2, "BV-B": 3}})
+    levels = {INV_1: {LOC_A: 2, LOC_B: 3}, INV_2: {}}
+    _fail_shelf(monkeypatch, "BV-B")
+    row = _reconcile(monkeypatch, db, levels, "BV-A")["SKU-1"]
+    assert _cols(row, "in_store", "online", "recommended", "status") == (2, 2, 2, "OK")
+    row = _reconcile(monkeypatch, db, levels, None)["SKU-1"]
+    assert _cols(row, "online", "recommended", "delta", "status") == (5, None, None, "ONHAND_UNKNOWN")
+    _fail_shelf(monkeypatch, "BV-A")
+    row = _reconcile(monkeypatch, db, levels, "BV-A")["SKU-1"]
+    assert _cols(row, "in_store", "online", "recommended", "delta", "status") == (2, 2, None, None, "ONHAND_UNKNOWN")
 
 
 # ---------------------------------------------------------------------------
