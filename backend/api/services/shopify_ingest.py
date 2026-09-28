@@ -351,9 +351,11 @@ def _extract_line_rx(line: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _online_store_id(payload: Dict[str, Any]) -> str:
-    """Store the online channel bills under. Configurable via the shopify
-    integration config (`online_store_id`); defaults to a stable virtual store
-    so the invoice serial counter + reports have a consistent bucket."""
+    """The ONLINE billing bucket (configurable via the shopify integration
+    config `online_store_id`; defaults to a stable virtual store). Since
+    multi-location PR 5 a live order is billed by its SHIPPING SHOP
+    (online_fulfillment_route.route_order); this bucket bills only a
+    historical import and an order no shop could be found for (route NONE)."""
     import os
 
     return (
@@ -363,151 +365,40 @@ def _online_store_id(payload: Dict[str, Any]) -> str:
     )
 
 
-def _online_fulfillment_store_id(payload: Dict[str, Any]) -> str:
-    """The PHYSICAL store an online order draws stock from (the online billing
-    store above is a virtual bucket with no serialized stock_units). The decrement
-    + Shopify write-back claim units at THIS store. Configurable via
-    ONLINE_FULFILLMENT_STORE_ID (env) / the shopify integration config; falls
-    back to the online billing store (so a single-store setup works by pointing
-    ONLINE_STORE_ID at the real fulfilling store). Empty -> no decrement (logged)."""
-    import os
-
-    return (
-        str(payload.get("_ims_fulfillment_store_id") or "").strip()
-        or os.getenv("ONLINE_FULFILLMENT_STORE_ID", "").strip()
-        or _online_store_id(payload)
-    )
-
-
-def _fallback_enabled() -> bool:
-    """Multi-store fulfillment fallback (owner 2026-07-05): when the preferred
-    online fulfillment store can't cover a line, claim the units from whichever
-    OTHER store actually holds them. Default ON; set
-    ONLINE_FULFILLMENT_FALLBACK=off to pin claims to the preferred store only."""
-    import os
-
-    return (os.getenv("ONLINE_FULFILLMENT_FALLBACK") or "on").strip().lower() not in (
-        "off",
-        "0",
-        "false",
-        "no",
-    )
-
-
-def _available_stores_for_product(db, product_id: str) -> List[str]:
-    """PHYSICAL store ids holding AVAILABLE serialized units of this product,
-    most stock first. Fail-soft -> []. Deterministic tie-break on store_id so
-    re-ingests behave identically.
-
-    ONLINE stores are EXCLUDED. They are pooled and stockless -- no shelf, no
-    staff, POS blocked -- so a unit sitting on one cannot be picked or shipped.
-    Without this exclusion a phantom AVAILABLE unit on BV-ONLINE-01 is a valid
-    fallback candidate (and 'BV-ONLINE-01' even sorts AHEAD of 'BV-PUN-01' /
-    'BV-RANCHI-01' on a count tie), so the next online sale CLAIMS the phantom:
-    claimed == expected, the under-claim fail-loud below never fires, the ship
-    task goes to a store with no shelf, and the real physical unit is never
-    decremented -- a paid order silently mapped to a unit nobody has.
-
-    Excluding online stores from the pooled count we publish to Shopify
-    (online_stock_writeback) only fixes what Shopify is TOLD; this is what stops
-    IMS from CONSUMING a phantom, converting a silent misroute into a loud miss.
-    """
-    from .stores_util import is_online_store
-    from .item_events import on_hand_match
-
-    try:
-        coll = (
-            db.get_collection("stock_units")
-            if hasattr(db, "get_collection")
-            else db["stock_units"]
-        )
-        rows = list(
-            coll.aggregate(
-                [
-                    {"$match": {"product_id": product_id, **on_hand_match()}},
-                    {"$group": {"_id": "$store_id", "n": {"$sum": 1}}},
-                    {"$sort": {"n": -1, "_id": 1}},
-                ]
-            )
-        )
-        out: List[str] = []
-        for r in rows:
-            sid = r.get("_id")
-            if not sid:
-                continue
-            if is_online_store(db, str(sid)):
-                logger.warning(
-                    "[SHOPIFY_INGEST] skipping ONLINE store %s as a fulfilment "
-                    "candidate for %s -- it holds no pickable stock (phantom "
-                    "unit on a pooled store)",
-                    sid,
-                    product_id,
-                )
-                continue
-            out.append(str(sid))
-        return out
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "[SHOPIFY_INGEST] fallback store lookup failed for %s: %s",
-            product_id,
-            exc,
-        )
-        return []
-
-
-def _claim_units_multistore(
+def _claim_units_at(
     db,
     order_id: str,
     decrement_items: List[Dict[str, Any]],
-    preferred_store: str,
+    store_id: Optional[str],
 ):
-    """Claim sold units for an online order, preferring `preferred_store` and
-    falling back per line to whichever other store holds AVAILABLE units
-    (largest holding first). Returns (claimed_total, breakdown) where breakdown
-    rows are {product_id, store_id, qty}. Reuses the atomic FIFO claim in
-    orders._mark_units_sold, so two concurrent orders can never grab the same
-    unit even across the fallback path.
+    """Claim an online order's sold units at ONE shop -- the shipping shop
+    online_fulfillment_route.route_order chose (multi-location PR 5: one shop
+    per order, Q2; the per-line cross-shop fallback that split an order over
+    several shops, and so over several sellers, is gone). Returns
+    (claimed_total, breakdown rows {product_id, store_id, qty}). Reuses the
+    atomic FIFO claim in orders._mark_units_sold, so two concurrent orders
+    can never grab the same unit.
 
-    An ONLINE `preferred_store` is skipped for the same reason the fallback
-    candidates are filtered: it is pooled and stockless, so any AVAILABLE unit
-    there is a phantom and claiming it fakes a fulfilment nobody can ship. With
-    it skipped the claim falls through to the real shops, and if none of them
-    hold the units the under-claim guard fires LOUDLY instead of silently
-    "succeeding" against a unit that does not exist."""
+    An ONLINE (pooled, stockless) store is never claimed against: any
+    AVAILABLE unit there is a phantom, and claiming it would fake a
+    fulfilment nobody can ship. Nothing is claimed and the under-claim guard
+    fires LOUDLY instead."""
     from ..routers.orders import _mark_units_sold
     from .stores_util import is_online_store
 
     breakdown: List[Dict[str, Any]] = []
     claimed_total = 0
-    if preferred_store and is_online_store(db, preferred_store):
-        logger.warning(
-            "[SHOPIFY_INGEST] preferred fulfilment store %s is an ONLINE "
-            "(stockless) store -- claiming from the physical shops instead. "
-            "Set ONLINE_FULFILLMENT_STORE_ID to a real shop.",
-            preferred_store,
-        )
-        preferred_store = ""
+    if not store_id or is_online_store(db, store_id):
+        return 0, breakdown
     for line in decrement_items:
         pid = line.get("product_id") or ""
         qty = int(line.get("quantity") or 1)
         if not pid or qty < 1:
             continue
-        remaining = qty
-        stores: List[str] = [preferred_store] if preferred_store else []
-        if _fallback_enabled():
-            for s in _available_stores_for_product(db, pid):
-                if s not in stores:
-                    stores.append(s)
-        for s in stores:
-            if remaining <= 0:
-                break
-            marked = _mark_units_sold(order_id, [{**line, "quantity": remaining}], s)
-            if marked:
-                claimed_total += len(marked)
-                breakdown.append(
-                    {"product_id": pid, "store_id": s, "qty": len(marked)}
-                )
-                remaining -= len(marked)
+        marked = _mark_units_sold(order_id, [{**line, "quantity": qty}], store_id)
+        if marked:
+            claimed_total += len(marked)
+            breakdown.append({"product_id": pid, "store_id": store_id, "qty": len(marked)})
     return claimed_total, breakdown
 
 
@@ -518,8 +409,11 @@ def _raise_fallback_ship_tasks(
     breakdown: List[Dict[str, Any]],
     preferred: str,
 ) -> None:
-    """One task per NON-preferred store that fulfilled units, so its staff know
-    to ship them (deduped per order+store). Fail-soft side channel."""
+    """One task per store that claimed units, other than ``preferred`` (the
+    ONLINE_FULFILLMENT_STORE_ID dispatch default, which watches the online
+    orders screen anyway), so its staff know to ship them (deduped per
+    order+store). Since PR 5 that is the shop Shopify routed the order to, or
+    the shop IMS moved it to. Fail-soft side channel."""
     stores = sorted(
         {
             str(r["store_id"])
@@ -541,9 +435,10 @@ def _raise_fallback_ship_tasks(
                 repo,
                 title=f"Online order {order_ref}: ship {units} unit(s) from your store",
                 description=(
-                    "The preferred online fulfillment store did not have stock, so "
-                    f"{units} unit(s) of this paid online order were allocated from "
-                    "your store. Pack and hand them to dispatch. Products: "
+                    f"{units} unit(s) of this paid online order were allocated to "
+                    "your store (the shop it ships from, and the GSTIN its tax "
+                    "invoice is issued from). Pack and hand them to dispatch. "
+                    "Products: "
                     + ", ".join(str(r.get("product_id")) for r in lines)
                 ),
                 priority="P2",
@@ -1656,7 +1551,34 @@ def ingest_shopify_order(
     grand_total = round(taxable + tax, 2)
     subtotal = round(sum(_f(i.get("item_total")) for i in items), 2)
 
-    store_id = _online_store_id(payload)
+    # THE SELLER (multi-location PR 5, owner Q1): a live online order is billed
+    # by the SHOP THAT SHIPS IT -- the order's store_id is the shipping shop
+    # online_fulfillment_route.route_order picks (Shopify's assigned location,
+    # or the shop IMS moves the order to when that one is short). Everything
+    # downstream reads order.store_id: the GST split below (seller GSTIN +
+    # state -> CGST+SGST vs IGST), the per-(shop, FY) invoice series, the
+    # printed legal entity (print_identity) and credit notes -- so no second
+    # GSTIN picker exists. The stockless online bucket bills only a HISTORICAL
+    # import (units shipped long ago) or an order no shop could be found for
+    # (route reason NONE, stamped on the order).
+    route: Optional[Dict[str, Any]] = None
+    if not historical:
+        try:
+            from .online_fulfillment_route import route_order
+
+            route = route_order(db, items, payload.get("_ims_routing"))
+        except Exception as exc:  # noqa: BLE001 -- never lose the paid sale
+            logger.error("[SHOPIFY_INGEST] fulfilment routing failed: %s", exc)
+            route = {
+                "store_id": None,
+                "reason": "NONE",
+                "fulfillment_order_ids": None,
+                "moves": [],
+                "problems": [
+                    {"code": "ROUTING_UNREAD", "message": f"Routing failed: {exc}"}
+                ],
+            }
+    store_id = (route or {}).get("store_id") or _online_store_id(payload)
 
     # Place-of-supply split (IGST vs CGST+SGST) reusing the SAME offline logic.
     store_doc: Optional[Dict[str, Any]] = None
@@ -1668,6 +1590,12 @@ def ingest_shopify_order(
             store_doc = store_repo.find_by_id(store_id)
     except Exception:  # noqa: BLE001
         store_doc = None
+    if route is not None and route.get("store_id"):
+        from .online_fulfillment_route import gstin_problem
+
+        bad_gstin = gstin_problem(store_doc)
+        if bad_gstin:
+            route["problems"].append(bad_gstin)
 
     # Synthesize a customer-shaped dict carrying the buyer's delivery state so
     # the shared splitter resolves the place of supply.
@@ -1847,6 +1775,11 @@ def ingest_shopify_order(
         # split (see gst_split_fields above); a failed split omits them so the
         # heuristic fallback is not frozen out by a definitive interstate=False.
         **gst_split_fields,
+        # Multi-location PR 5: which shop ships (and so bills) this order, how
+        # it was chosen, the Shopify fulfillment orders it may fulfil, planned
+        # moves and every problem (each also tasked). Absent on a historical
+        # import.
+        **({"fulfillment_route": route} if route is not None else {}),
         # OS-030: one synthesized SETTLED gateway payment row for the money
         # Shopify already collected, so tender breakdowns / payments_collected
         # reconcile with the online channel. Nothing collected yet -> [].
@@ -1944,7 +1877,7 @@ def ingest_shopify_order(
                 db,
                 order_id=order_id,
                 order_ref=order_doc.get("order_number") or shopify_order_id,
-                store_id=_online_fulfillment_store_id(payload),
+                store_id=store_id,
                 channel="shopify",
                 evaluation=rx_eval,
             )
@@ -1956,13 +1889,15 @@ def ingest_shopify_order(
     # ONLINE-SALE STOCK DECREMENT (oversell fix). An online order previously
     # booked the GST invoice but NEVER reduced physical stock -> a walk-in and an
     # online buyer could sell the SAME serialized unit. Now we (1) FIFO-claim the
-    # sold serialized units at the online FULFILLMENT store (reusing the POS
+    # sold serialized units at the SHIPPING SHOP -- the billing store_id above,
+    # chosen by online_fulfillment_route.route_order (reusing the POS
     # _mark_units_sold atomic-claim path), then (2) push the reduced available
     # qty to Shopify so the online listing can't oversell either. BOTH fail-soft:
     # Shopify already took payment, so a stock-side error must NEVER raise out of
     # ingestion -- the invoice is booked regardless and the reconcile sweep
-    # (online_sync_health) catches any miss.
-    fulfillment_store = _online_fulfillment_store_id(payload)
+    # (online_sync_health) catches any miss. With no shop (route NONE) store_id
+    # is the stockless online bucket: nothing is claimed and the miss is loud.
+    fulfillment_store = store_id
     fulfilled_stores: List[str] = []
     try:
         # _mark_units_sold claims by IMS product_id; map each line's resolved
@@ -1975,10 +1910,9 @@ def ingest_shopify_order(
         ]
         if decrement_items:
             expected = sum(int(it.get("quantity") or 1) for it in decrement_items)
-            # Owner 2026-07-05: multi-store fulfillment. Prefer the configured
-            # fulfillment store, then claim any shortfall from whichever other
-            # store actually holds the units (see _claim_units_multistore).
-            claimed, breakdown = _claim_units_multistore(
+            # ONE shop per order (Q2): route_order already moved the order to
+            # a shop that covers every line when the assigned one was short.
+            claimed, breakdown = _claim_units_at(
                 db, order_id, decrement_items, fulfillment_store
             )
             fulfilled_stores.extend(sorted({str(r["store_id"]) for r in breakdown}))
@@ -2004,16 +1938,18 @@ def ingest_shopify_order(
                         order_id,
                         exc,
                     )
+                from .online_fulfillment_route import fallback_store_id
+
                 _raise_fallback_ship_tasks(
                     db,
                     order_id,
                     order_doc.get("order_number") or shopify_order_id,
                     breakdown,
-                    fulfillment_store,
+                    fallback_store_id() or "",
                 )
             # FAIL LOUD on an under-claim: we booked a paid online order but could
-            # NOT decrement every serialized unit (no store in the chain had
-            # enough physical on-hand). The invoice stands (Shopify took payment)
+            # NOT decrement every serialized unit (neither the assigned shop nor
+            # any mapped shop holds every unit -- route_order never splits). The invoice stands (Shopify took payment)
             # but this is an oversell that needs operator action -- record it
             # loudly so the sync-health tile + Sentry surface it instead of it
             # slipping by as a warning.
@@ -2027,17 +1963,21 @@ def ingest_shopify_order(
                         "expected": expected,
                         "claimed": claimed,
                         "stores_tried": fulfilled_stores or [fulfillment_store],
+                        "route": (route or {}).get("reason"),
                     },
                 )
     except Exception as exc:  # noqa: BLE001
         _record_stock_miss(db, order_id, fulfillment_store, "exception", str(exc))
+    if route is not None:
+        from .online_fulfillment_route import raise_problem_tasks
+
+        raise_problem_tasks(db, order_doc)
     try:
         from .online_stock_writeback import writeback_after_sale
 
-        # ONE write-back for the whole order: the pushed quantity is the POOLED
-        # all-store on-hand (store_id is context only), so per-store pushes
-        # would be identical writes racing each other. The preferred
-        # fulfillment store rides along purely as logging context.
+        # ONE write-back for the whole order: quantities are per shop by
+        # construction (the shipping shop's own location goes down); the
+        # store rides along purely as logging context.
         writeback_after_sale(db, items, fulfillment_store)
     except Exception as exc:  # noqa: BLE001
         logger.warning(

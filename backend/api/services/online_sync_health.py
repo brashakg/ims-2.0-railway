@@ -626,25 +626,26 @@ def failed_webhook_summary(db) -> Dict[str, Any]:
 
 
 def fulfillment_store_health(db) -> Dict[str, Any]:
-    """R6 guard: does the resolved ONLINE fulfillment store actually carry
+    """R6 guard: does the FALLBACK online fulfillment shop actually carry
     serialized stock_units?
 
-    An online order decrements physical stock at the fulfillment store
-    (shopify_ingest._mark_units_sold -> StockRepository on db.stock_units, status
-    "AVAILABLE"). If that resolves to the virtual billing bucket (BV-ONLINE-01)
-    or any store holding ZERO available units, every online-order decrement
-    SILENTLY no-ops -> the online listing can oversell physical stock. This
-    surfaces that misconfiguration BEFORE the cutover instead of after the first
-    lost sale.
+    Since multi-location PR 5 an online order ships from (and is billed and
+    claimed at) the shop mapped to the Shopify location Shopify assigned it to
+    (online_fulfillment_route.route_order). ONLINE_FULFILLMENT_STORE_ID is the
+    documented fallback used only while that assignment is unusable (the
+    location maps to no shop -- Pune until its opening stock lands -- or the
+    fulfillment orders could not be read). If the fallback is the virtual
+    billing bucket (BV-ONLINE-01) or a shop holding ZERO available units, every
+    order that falls back under-claims (loud, held) -- surfaced here first.
 
-    Resolution mirrors shopify_ingest._online_fulfillment_store_id: the
-    ONLINE_FULFILLMENT_STORE_ID env wins, else the resolved online billing store
-    (integration config / ONLINE_STORE_ID / settings / primary store / the
-    BV-ONLINE-01 default).
+    Resolution: online_fulfillment_route.fallback_store_id, the ONE reader;
+    unset -> the online billing store (integration config / ONLINE_STORE_ID /
+    settings / primary store / the BV-ONLINE-01 default) is REPORTED, which
+    ingest never claims at when it is an ONLINE store.
 
     Read-only + fail-soft -> never raises, never 500s the status tile.
     """
-    import os
+    from .online_fulfillment_route import fallback_store_id
 
     out: Dict[str, Any] = {
         "checked": False,
@@ -655,7 +656,7 @@ def fulfillment_store_health(db) -> Dict[str, Any]:
         "warning": None,
     }
 
-    store_id = (os.getenv("ONLINE_FULFILLMENT_STORE_ID") or "").strip()
+    store_id = fallback_store_id() or ""
     source = "ONLINE_FULFILLMENT_STORE_ID" if store_id else None
     if not store_id:
         try:
@@ -684,11 +685,12 @@ def fulfillment_store_health(db) -> Dict[str, Any]:
             out["checked"] = True
             if count == 0:
                 out["warning"] = (
-                    f"Online fulfillment store '{store_id}' holds 0 AVAILABLE "
-                    f"serialized stock units -- every online-order stock decrement "
-                    f"will SILENTLY no-op (oversell risk). Set "
-                    f"ONLINE_FULFILLMENT_STORE_ID to the physical store that fulfils "
-                    f"online orders before go-live."
+                    f"Fallback online fulfillment store '{store_id}' holds 0 "
+                    f"AVAILABLE serialized stock units -- an online order routed "
+                    f"to an unmapped Shopify location will no-op its stock "
+                    f"decrement (oversell risk, held for a human). Set "
+                    f"ONLINE_FULFILLMENT_STORE_ID to the physical store that "
+                    f"fulfils those orders, or map the location to its shop."
                 )
             elif out["is_virtual_default"]:
                 out["warning"] = (

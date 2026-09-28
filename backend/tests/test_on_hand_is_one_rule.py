@@ -302,7 +302,7 @@ def _sellable_readers(mongo_db, pid, sku) -> Dict[str, int]:
     from api.routers.buy_desk import _on_hand_map
     from api.routers.inventory import _on_hand_by_product
     from api.services import collection_insights, inventory_balancing
-    from api.services import online_stock_writeback, online_sync_health, shopify_ingest
+    from api.services import online_fulfillment_route, online_stock_writeback, online_sync_health
 
     db = _DBProxy(mongo_db)
     out: Dict[str, int] = {}
@@ -336,8 +336,8 @@ def _sellable_readers(mongo_db, pid, sku) -> Dict[str, int]:
         (online_stock_writeback.online_quantities_for_skus(db, [sku]).get(sku) or {}).get(STORE, 0) or 0
     )
     # a fulfilment candidate is a store that HAS a sellable unit
-    stores = shopify_ingest._available_stores_for_product(db, pid)
-    out["shopify_ingest._available_stores_for_product"] = 1 if STORE in stores else 0
+    held = online_fulfillment_route._stock_by_store(db, pid)
+    out["online_fulfillment_route._stock_by_store"] = int(held.get(STORE, 0) or 0)
     # the ledger's on-hand column is the sellable half of the same bucketing
     out["stock ledger (quantity column)"] = int(
         _ledger_row_for(mongo_db, pid).get("quantity", 0)

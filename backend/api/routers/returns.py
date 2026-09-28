@@ -1530,10 +1530,11 @@ def _audit_stock_transition(
 # ONLINE store.
 # ---------------------------------------------------------------------------
 # The refund's store is DERIVED FROM THE ORDER (see the IDOR guard in
-# create_return), and an online order's `store_id` is the VIRTUAL online billing
-# bucket -- shopify_ingest._online_store_id() stamps BV-ONLINE-01 while the
-# serialized units are claimed at a PHYSICAL fulfilment store
-# (_online_fulfillment_store_id / _claim_units_multistore). So for a return
+# create_return). Since multi-location PR 5 a live online order's `store_id` IS
+# its physical shipping shop, so it restocks there directly; but a LEGACY online
+# order's `store_id` is the VIRTUAL online billing bucket --
+# shopify_ingest._online_store_id() stamped BV-ONLINE-01 while the serialized
+# units were claimed at a PHYSICAL fulfilment store. So for a return
 # against an online order the restock below used to:
 #   * look for the original SOLD unit AT the online store -> never finds one
 #     (the online store owns no serialized stock at all), therefore
@@ -1633,12 +1634,15 @@ def _load_order_for_restock(order_id: Optional[str]) -> Optional[Dict[str, Any]]
 
 
 def _configured_online_fulfilment_store() -> Optional[str]:
-    """ONLINE_FULFILLMENT_STORE_ID -- the physical shop shopify_ingest draws
-    online stock from by default. Read here (not imported from shopify_ingest)
-    so the returns path has no import edge onto the ingest module."""
-    import os
+    """ONLINE_FULFILLMENT_STORE_ID through its ONE reader
+    (online_fulfillment_route.fallback_store_id; no import edge onto the
+    ingest module). Only a LEGACY online order reaches it: since
+    multi-location PR 5 a live online order is billed by its shipping shop,
+    a physical store, so its return restocks there directly (the first
+    branch of _resolve_restock_store)."""
+    from ..services.online_fulfillment_route import fallback_store_id
 
-    return (os.getenv("ONLINE_FULFILLMENT_STORE_ID") or "").strip() or None
+    return fallback_store_id()
 
 
 def _resolve_restock_store(
