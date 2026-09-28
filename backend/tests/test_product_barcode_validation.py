@@ -261,6 +261,14 @@ class TestBarcodeUpdateEndpoint:
         saved = mongo_db["products"].find_one({"product_id": pid})
         assert saved["barcode"] == _VALID_A
 
+    def test_gtin_is_stored_without_separators(self, mongo_db, patch_db):
+        """One GTIN is one value: '4006381 333931' typed from the box is saved
+        as 4006381333931, so the uniqueness check and the Shopify push see it."""
+        pid = _create("BC-SEP")["product_id"]
+        _update(pid, barcode="4006381 333931")
+        saved = mongo_db["products"].find_one({"product_id": pid})
+        assert saved["barcode"] == _VALID_A
+
     def test_malformed_barcode_rejected_400(self, mongo_db, patch_db):
         pid = _create("BC-BAD")["product_id"]
         with pytest.raises(HTTPException) as ei:
