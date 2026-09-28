@@ -105,19 +105,23 @@ ROUND 2 (owner rulings 2026-09-06) -- two OPT-IN doors, each REQUIRES --ids
     as 'TWIN DID NOT FOLLOW', the media NOT adopted -- still leaves the
     before-state on disk. To reverse: put the saved ``spine_images`` back
     through the same door (PUT /products/{spine_id} images=[...]; a null
-    means the spine had no images key) and delete the product's adopted
-    ledger docs (REVERSAL below); a twin without a spine takes its
-    ``twin_images`` back on catalog_products.images directly.
+    means the spine had no images key) and run the ledger REVERSAL below --
+    it takes EVERY ledger doc of the product, not only the adopted ones (a
+    doc a press minted since would keep the pass managing the listing, and
+    it would attach the rolled-back photos a second time); a twin without a
+    spine takes its ``twin_images`` back on catalog_products.images
+    directly.
 
 SCOPE
 -----
   - reads the twin (catalog_products) and, through the app's own transport,
     the product's media on Shopify -- a QUERY, never a mutation
   - writes ONLY the online_media ledger: one LIVE doc per claimed media,
-    ``how: "adopted"``, under the product's media_lease (the lease every
-    press holds, so no photo pass plans on half an adoption); never the twin,
-    never locally_modified. The replace mode ALSO writes the photo list,
-    through the product edit door (above).
+    ``how: "adopted"``, ALL OR NOTHING per product (one insert; a failure
+    takes back whatever part of it landed, and says so), under the product's
+    media_lease (the lease every press holds, so no photo pass plans on half
+    an adoption); never the twin, never locally_modified. The replace mode
+    ALSO writes the photo list, through the product edit door (above).
   - a product IMS already owns media on (a live ledger doc) is skipped, and
     the write re-checks that under the lease: an adoption never overwrites
     or duplicates a live doc, and a re-run is a no-op
@@ -147,12 +151,21 @@ Apply:
 Round 2:
     ... --ids <id>,<id> --rule connector-prefix [--apply]
     ... --ids <id>,<id> --replace-photos-from-shopify [--reversal-dir <dir>] [--apply]
+Reverse (the ledger only, under the lease):
+    ... --ids <id>,<id> --reverse [--apply]
 
-REVERSAL (ledger only): delete EVERY ledger doc of the printed ids --
-    db.online_media.deleteMany({"product_id": {"$in": [<ids>]}})
-(the photo pass then goes back to hands-off on them, as before the adoption;
-nothing on Shopify moves: a media the pass attached since stays up,
-unmanaged, like every other media on a hands-off listing.)
+REVERSAL (ledger only): run the printed line --
+    ... scripts/adopt_shopify_media_map.py --reverse --ids <id>,<id> --apply
+It deletes EVERY ledger doc of each product (the filter reversal_filter
+prints) UNDER the product's media_lease, the lease every press holds -- so no
+press is between its read of the ledger and its own record of an attach when
+the docs go. Never a raw deleteMany in mongosh: a press running at that moment
+records its attach after the delete, the product is no longer hands-off, and
+the next press attaches every rolled-back photo a second time. Without
+--apply it only lists what it would delete. (The photo pass then goes back to
+hands-off on them, as before the adoption; nothing on Shopify moves: a media
+the pass attached since stays up, unmanaged, like every other media on a
+hands-off listing.)
 
 Connection: MONGO_PUBLIC_URL, else MONGO_URL (the vars `railway run` injects);
 Shopify creds resolve from the same injected env. Nothing secret is printed.
@@ -204,8 +217,35 @@ def reversal_filter(ids: List[str]) -> Dict[str, Any]:
 
 
 def reversal_line(ids: List[str]) -> str:
-    """The one-line mongosh reversal (JSON is valid mongosh)."""
-    return "db.%s.deleteMany(%s)" % (MEDIA_COLLECTION, json.dumps(reversal_filter(ids)))
+    """The one-line reversal: this script's --reverse, which deletes
+    reversal_filter(ids) under each product's media lease (see REVERSAL)."""
+    return (
+        'railway run --service ims-2.0-railway -- ".venv\\Scripts\\python.exe" '
+        "scripts/adopt_shopify_media_map.py --reverse --ids %s --apply" % ",".join(ids)
+    )
+
+
+async def reverse(db, ids: List[str], apply: bool) -> List[str]:
+    """THE REVERSAL: delete EVERY ledger doc of each product (reversal_filter)
+    UNDER its media_lease -- the lease every press holds from before it reads
+    the ledger until its pass is done, so the docs never go while a press is
+    between that read and its own record of an attach. Dry-run (apply False)
+    lists what would go. Returns the ids reversed; a product whose lease or
+    delete fails is reported and left for a re-run."""
+    done: List[str] = []
+    for pid in ids:
+        try:
+            async with media_lease(db, pid):
+                docs = list(db[MEDIA_COLLECTION].find(reversal_filter([pid])))
+                if apply:
+                    db[MEDIA_COLLECTION].delete_many(reversal_filter([pid]))
+            print(f"  {'REVERSED' if apply else 'would reverse'} {pid}: {len(docs)} ledger doc(s)")
+            done.append(pid)
+        except Exception as exc:  # noqa: BLE001 -- reported per product, the run goes on
+            print(f"  REVERSAL FAILED {pid}: {_redact(exc)} -- nothing deleted for it; run again")
+    if not apply:
+        print("DRY RUN - nothing deleted. Re-run with --apply to reverse.")
+    return done
 
 
 class _Conn:
@@ -323,31 +363,49 @@ def _owned(db, product_id: str) -> List[Dict[str, str]]:
 
 async def _adopt(db, product_id: str, pairs: List[Dict[str, str]]) -> bool:
     """Write the claimed pairs as LIVE ledger docs (how="adopted") under the
-    product's media lease. False -- nothing written -- when the ledger
-    already holds a live doc for the product (checked under the lease: an
-    adoption never overwrites or duplicates one) or the write fails."""
+    product's media lease, ALL OR NOTHING: one insert, and when it fails
+    whatever part of it landed is deleted again under the same lease (a half
+    adoption would put the pass in charge of a listing whose other photos it
+    then attaches a second time -- and a re-run would skip it as
+    already_mapped). False -- nothing written -- when the ledger already
+    holds a live doc for the product (checked under the lease: an adoption
+    never overwrites or duplicates one) or the write fails; if even the
+    take-back fails, the product's REVERSAL line is printed with it."""
+    now = datetime.now(tz=timezone.utc)
+    docs = [
+        {
+            "_id": uuid.uuid4().hex,
+            "product_id": product_id,
+            "url": pair["url"],
+            "image_id": None,
+            "gid": pair["id"],
+            "how": "adopted",
+            "sent_at": now,
+            "at": now,
+        }
+        for pair in pairs
+    ]
+    coll = db[MEDIA_COLLECTION]
     try:
         async with media_lease(db, product_id):
             if owned_media(media_rows(db, product_id), []):
                 print(f"  SKIPPED {product_id}: IMS already owns media on it")
                 return False
-            now = datetime.now(tz=timezone.utc)
-            for pair in pairs:
-                db[MEDIA_COLLECTION].insert_one(
-                    {
-                        "_id": uuid.uuid4().hex,
-                        "product_id": product_id,
-                        "url": pair["url"],
-                        "image_id": None,
-                        "gid": pair["id"],
-                        "how": "adopted",
-                        "sent_at": now,
-                        "at": now,
-                    }
-                )
+            try:
+                coll.insert_many(docs)
+            except Exception as exc:  # noqa: BLE001 -- take back the part that landed
+                try:
+                    coll.delete_many({"_id": {"$in": [d["_id"] for d in docs]}})
+                except Exception:  # noqa: BLE001
+                    print(
+                        f"  PARTIAL WRITE {product_id}: {_redact(exc)} -- some of its ledger docs may be "
+                        f"live; REVERSAL: {reversal_line([product_id])}"
+                    )
+                    return False
+                raise
         return True
     except Exception as exc:  # noqa: BLE001 -- reported per product, the run goes on
-        print(f"  WRITE FAILED {product_id}: {_redact(exc)}")
+        print(f"  WRITE FAILED {product_id}: {_redact(exc)} -- nothing adopted")
         return False
 
 
@@ -645,6 +703,11 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="Replace the IMS photo list with the product's ONE Shopify image and adopt it (refused when media count != 1).",
     )
     parser.add_argument(
+        "--reverse",
+        action="store_true",
+        help="Delete EVERY ledger doc of the ids under each product's media lease (the REVERSAL); lists only without --apply.",
+    )
+    parser.add_argument(
         "--reversal-dir",
         default=".",
         help="Where --replace-photos-from-shopify --apply saves adopt_replace_reversal_<UTC>.json (default: cwd; "
@@ -653,6 +716,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.replace_photos_from_shopify and args.rule != "exact":
         parser.error("--replace-photos-from-shopify takes no --rule: the single Shopify image is adopted as-is.")
+    if args.reverse and (args.replace_photos_from_shopify or args.rule != "exact"):
+        parser.error("--reverse takes only --ids (and --apply).")
     return args
 
 
@@ -683,6 +748,9 @@ def main(argv=None):
     # a non-ASCII CDN file name must not crash the report under cp1252
     sys.stdout.reconfigure(errors="backslashreplace")
     db = _connect()
+    if args.reverse:
+        asyncio.run(reverse(db, ids, apply=args.apply))
+        return
     asyncio.run(
         run(
             db,

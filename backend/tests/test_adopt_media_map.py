@@ -452,8 +452,9 @@ def test_the_printed_reversal_puts_the_pass_back_to_hands_off(db, monkeypatch, c
     and a pending attach D is on record. The operator runs the PRINTED
     reversal: the photo pass must be back to hands-off on that listing --
     nothing attached, deleted or reordered -- exactly as before the adoption
-    (main's reversal unset the whole map). The line printed is the filter
-    applied here, so the runbook and the test cannot drift.
+    (main's reversal unset the whole map). The line printed runs the
+    script's own --reverse, which is what runs here, so the runbook and the
+    test cannot drift.
     REVERT-PROOF: a reversal of the adopted docs only -> the minted doc keeps
     the pass managing: A and B attached a second time, the originals
     unmanaged."""
@@ -465,9 +466,12 @@ def test_the_printed_reversal_puts_the_pass_back_to_hands_off(db, monkeypatch, c
     db[LEDGER].insert_one(media_doc("P1", APP + "6a56343d7edfd8bd742b5ea1"))
     line = script.reversal_line(["P1"])
     assert line in capsys.readouterr().out
-    assert line == "db.online_media.deleteMany(%s)" % json.dumps(script.reversal_filter(["P1"]))
+    assert line.endswith("scripts/adopt_shopify_media_map.py --reverse --ids P1 --apply")
+    args = script.parse_args(line.split("adopt_shopify_media_map.py ", 1)[1].split())
+    assert args.reverse and args.apply and script.parse_ids(args.ids) == ["P1"]
 
-    db[LEDGER].delete_many(script.reversal_filter(["P1"]))
+    assert asyncio.run(script.reverse(db, ["P1"], apply=True)) == ["P1"]
+    assert list(db[LEDGER].find({"product_id": "P1"})) == []
 
     listing = [_node(1, OID1 + ".png"), _node(2, OID2 + ".png"), _node(3, OID3 + ".png")]
     rows = shopify_push.media_rows(db, "P1")
@@ -1002,3 +1006,107 @@ def test_replace_reversal_file_survives_a_crash_between_products(db, monkeypatch
     assert _spine(db)["images"] == [ONE] and _adopted(db) == [{"url": ONE, "id": _m(1)}]
     assert db["products"].find_one({"product_id": "SP2"})["images"] == STALE
     assert db["catalog_products"].find_one({"id": "P2"})["images"] == STALE
+
+
+def test_the_reversal_holds_the_media_lease(db, monkeypatch, capsys):
+    """Round 4. The reversal deletes UNDER the product's media lease -- the
+    lease every press holds from before it reads the ledger until its pass
+    is done -- so it can never land between a press's read and its own
+    record of an attach (that press would record its attach after the
+    delete; the product would no longer be hands-off and the next press
+    would attach every rolled-back photo a second time). While a press
+    holds the lease the reversal waits, then refuses and deletes nothing;
+    once the press is done it deletes every doc. Without --apply it lists.
+    REVERT-PROOF: the delete outside the lease -> the docs go while the
+    press holds it."""
+    from pymongo.errors import DuplicateKeyError
+
+    from api.services.shopify_push import media as media_mod
+
+    _wire(monkeypatch, [_node(1, OID1 + ".png"), _node(2, OID2 + ".png")])
+    _seed(db, [U1, U2])
+    assert _run(db, apply=True)["written"] == ["P1"]
+    monkeypatch.setattr(media_mod, "_LEASE_WAIT_SECONDS", 0.3)
+    leases = db[media_mod.LEASES_COLLECTION]
+    plain_insert = leases.insert_one
+
+    def _unique_id(doc):  # real Mongo's unique _id: the lease IS that claim
+        if leases.find_one({"_id": doc["_id"]}) is not None:
+            raise DuplicateKeyError("E11000 duplicate key error")
+        return plain_insert(doc)
+
+    leases.insert_one = _unique_id
+
+    async def _press_holds_the_lease():
+        async with media_mod.media_lease(db, "P1"):
+            return await script.reverse(db, ["P1"], apply=True)
+
+    assert asyncio.run(_press_holds_the_lease()) == []
+    assert "REVERSAL FAILED P1" in capsys.readouterr().out
+    assert len(_adopted(db)) == 2, "nothing deleted while a press holds the lease"
+
+    assert asyncio.run(script.reverse(db, ["P1"], apply=False)) == ["P1"] and len(_adopted(db)) == 2
+    assert asyncio.run(script.reverse(db, ["P1"], apply=True)) == ["P1"] and _adopted(db) == []
+
+
+def test_an_adoption_write_is_all_or_nothing(db, monkeypatch, capsys):
+    """Round 4. The claimed pairs go in ONE insert; when it fails part-way
+    (an AutoReconnect after the first doc landed) the part that landed is
+    taken back under the same lease: no half adoption stays live (a half
+    adoption puts the pass in charge of the listing, and it attaches the
+    photo that was not adopted a second time -- and a re-run would skip the
+    product as already_mapped). A re-run then adopts it whole. If even the
+    take-back fails, the product's REVERSAL line is printed with it.
+    REVERT-PROOF: no take-back -> the ledger keeps U1 -> media 1 live, the
+    re-run reports already_mapped, nothing names the product for reversal."""
+    from pymongo.errors import AutoReconnect
+
+    _wire(monkeypatch, [_node(1, OID1 + ".png"), _node(2, OID2 + ".png")])
+    _seed(db, [U1, U2])
+    coll = db[LEDGER]
+    real_insert_many = coll.insert_many
+
+    def _half(docs):
+        coll.insert_one(docs[0])
+        raise AutoReconnect("connection reset")
+
+    coll.insert_many = _half
+    out = _run(db, apply=True)
+
+    assert out["written"] == [] and _adopted(db) == [], "the half that landed is taken back"
+    assert "WRITE FAILED P1" in capsys.readouterr().out
+
+    coll.insert_many = real_insert_many
+    again = _run(db, apply=True)
+    assert again["rows"][0]["status"] == "adopt" and again["written"] == ["P1"]
+    assert _adopted(db) == [{"url": U1, "id": _m(1)}, {"url": U2, "id": _m(2)}]
+
+    db2 = type(db)()
+    _seed(db2, [U1, U2])
+    coll2 = db2[LEDGER]
+
+    def _half2(docs):
+        coll2.insert_one(docs[0])
+        raise AutoReconnect("connection reset")
+
+    def _no_take_back(*_a, **_k):
+        raise AutoReconnect("still down")
+
+    coll2.insert_many, coll2.delete_many = _half2, _no_take_back
+    _run(db2, apply=True)
+    printed = capsys.readouterr().out
+    assert "PARTIAL WRITE P1" in printed and script.reversal_line(["P1"]) in printed
+
+
+def test_the_runbook_names_one_reversal_and_it_takes_every_doc():
+    """Round 4. The docstring's reversal prose must be the reversal the code
+    runs: EVERY ledger doc of the product, through --reverse (under the
+    lease) -- never 'delete the adopted docs' (an operator who follows that
+    keeps a doc the pass minted since, so the listing is not hands-off and
+    the next pass attaches the rolled-back photos a second time).
+    REVERT-PROOF: the round-3 replace-mode sentence ('delete the product's
+    adopted ledger docs') back in the docstring -> red."""
+    doc = " ".join(script.__doc__.split())
+    assert "adopted ledger docs" not in doc and "delete the product's adopted" not in doc
+    assert "--reverse --ids" in doc and "EVERY ledger doc" in doc
+    assert script.reversal_filter(["P1"]) == {"product_id": {"$in": ["P1"]}}
