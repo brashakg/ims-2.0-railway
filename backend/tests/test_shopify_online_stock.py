@@ -4102,3 +4102,27 @@ def test_F5b_the_presss_stray_question_never_names_a_size_whose_row_read_died(mo
     _live(monkeypatch, _Spy(_responses()))
     out = _run(shopify_push.push_skus_stock(db, ["SP-1"], source="product_push", product_id="cat-1"))
     assert out["stray_skus"] == [] and out["code"] != shopify_push.STOCK_BASELINE_STRAY, out
+
+
+def test_F7_online_status_for_skus_threads_strict_to_every_key_lookup():
+    """TEST TRUTH (#1141 fix-six recheck, lens r1:first-push). 5a38526 said
+    `online_status_for_skus(strict=True)` threads strict to all three key
+    lookups, but only the PARENTS lookup was pinned: with `strict=strict`
+    dropped from `_products_by_key` and `_variants_by_key` 217 tests still
+    passed. Each lookup is pinned alone here -- the other two have nothing to
+    read, so a dead lookup that fails soft returns {} with no error at all.
+    Drop `strict=strict` from either call -> its half fails."""
+    from api.services import online_catalog as oc
+
+    db = _listed(_db())
+    db._collections["catalog_products"] = _DeadFind(db.get_collection("catalog_products"), lambda f: True, "products died")
+    with pytest.raises(RuntimeError, match="products died"):
+        oc.online_status_for_skus(db, ["SP-1"], strict=True)
+    assert oc.online_status_for_skus(db, ["SP-1"]) == {}, "fail-soft without strict (the display callers)"
+    db2 = _db()
+    db2.seed("catalog_products", [])
+    db2.seed("catalog_variants", [{"sku": "SP-1", "parent_product_id": "cat-1"}])
+    db2._collections["catalog_variants"] = _DeadFind(db2.get_collection("catalog_variants"), lambda f: True, "variants died")
+    with pytest.raises(RuntimeError, match="variants died"):
+        oc.online_status_for_skus(db2, ["SP-1"], strict=True)
+    assert oc.online_status_for_skus(db2, ["SP-1"]) == {}
