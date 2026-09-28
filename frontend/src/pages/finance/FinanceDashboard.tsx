@@ -182,6 +182,13 @@ export default function FinanceDashboard() {
   const canSeeStorePayroll = (user?.roles || []).some(
     (r) => r === 'ADMIN' || r === 'SUPERADMIN',
   );
+  // F60 (2026-09-28): per-vendor payables (GET /finance/vendor-payments) answer
+  // ADMIN / ACCOUNTANT only, the same as the vendor ledger and /ap-aging. A
+  // manager gets no tab and no schedule rather than an empty list that reads as
+  // "we owe nobody".
+  const canSeePayables = (user?.roles || []).some(
+    (r) => r === 'ADMIN' || r === 'SUPERADMIN' || r === 'ACCOUNTANT',
+  );
 
   // Tab management
   const [activeTab, setActiveTab] = useState<TabType>('revenue-pl');
@@ -249,7 +256,7 @@ export default function FinanceDashboard() {
         financeApi.getOutstanding({ store_id: storeId }),
         financeApi.getCashFlow({ period: 'month', store_id: storeId }),
         financeApi.getBudget(),
-        financeApi.getVendorPayments(),
+        canSeePayables ? financeApi.getVendorPayments() : Promise.resolve([]),
       ]);
 
       setRevenueData(rev.status === 'fulfilled' ? mapRevenue(rev.value) : []);
@@ -437,6 +444,7 @@ export default function FinanceDashboard() {
           onDateToChange={setDateTo}
           activeTab={activeTab}
           onTabChange={setActiveTab}
+          canSeePayables={canSeePayables}
         />
 
         {/* Tab Content */}
@@ -581,7 +589,10 @@ export default function FinanceDashboard() {
             </>
           )}
           {activeTab === 'outstanding' && (
-            <OutstandingPanel outstanding={outstanding} vendorPayments={vendorPayments} />
+            <OutstandingPanel
+              outstanding={outstanding}
+              vendorPayments={canSeePayables ? vendorPayments : null}
+            />
           )}
           {activeTab === 'cash-flow' && (
             <>
@@ -615,7 +626,7 @@ export default function FinanceDashboard() {
               <BudgetPanel budgets={budgets} selectedYear={selectedYear} />
             </>
           )}
-          {activeTab === 'vendor-payments' && (
+          {activeTab === 'vendor-payments' && canSeePayables && (
             <VendorPayments vendorPayments={vendorPayments} />
           )}
           {activeTab === 'journal-entries' && <JournalEntriesPanel />}
