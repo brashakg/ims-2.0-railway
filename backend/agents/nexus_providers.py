@@ -295,8 +295,10 @@ def _catch_up_one(db, order: Dict[str, Any], sid: str, live: bool) -> tuple:
 # "whether" is asked of the mapper's own helpers (_recompute_money for money,
 # _shopify_payload_stale for a body that lost the race with a webhook): the
 # handlers keep their own idempotency ($set of the same values, refund-id
-# dedupe, Rx hold, the never-knock-back rules for a terminal status and for a
-# lesser Shopify money state), so a re-run re-applies nothing.
+# dedupe, the ONE transition table for the lifecycle status -- online_order_
+# status: never backwards, a finished order stays finished, a held order is
+# not shipped -- and the lesser-Shopify-money rule), so a re-run re-applies
+# nothing.
 # Units of a cancelled order come back the way they do on the webhook path --
 # through the cancel Refund's restock (accountant queue by default) -- a
 # mapper-side release would clear the unit's order_id first and the refund's
@@ -365,12 +367,16 @@ def _order_topic(
     "the handler would change the doc": Shopify's lesser money state comes
     back empty (the mapper's rule, not a copy of it here), a second partial
     payment comes back as a bigger amount_paid. Triggers ONLY on Shopify-owned
-    facts, never on `status != derived`: the mapper has no forward guard, so
-    that trigger would re-fire hourly on every order staff advanced
-    (PROCESSING/READY) and knock it back to CONFIRMED. `ful_stale`: the body's
+    facts, never on the lifecycle status: the transition table
+    (online_order_status) keeps a status the body states no fact against, so
+    a status trigger would re-fire hourly on every order staff advanced. The
+    cancel trigger reads Shopify's own cancel fact as IMS recorded it
+    (shopify_cancelled_at; cancelled_at on older docs), not the status: a
+    DELIVERED order Shopify cancelled stays DELIVERED (owner ruling
+    2026-09-28) and is fed once, not every hour. `ful_stale`: the body's
     fulfilments are older than the one IMS applied (the reconcile's own
     watermark), so its fulfillment_status is no fact that moved."""
-    if st["cancelled"] and existing.get("status") != "CANCELLED":
+    if st["cancelled"] and not (existing.get("shopify_cancelled_at") or existing.get("cancelled_at")):
         return "orders/cancelled"
     # bill_type follows payment_status and the create path never stamps it --
     # it alone is not a Shopify fact that moved (it lands with the next one).
@@ -466,15 +472,15 @@ def _sweep_booked_order(db, order, raw, existing, sid: str, live: bool) -> tuple
             # Fulfilment first, then the order facts -- both compared against
             # the doc as it stood BEFORE the sweep, exactly the pair of deliveries
             # Shopify makes (fulfillments/create, then orders/fulfilled|updated),
-            # so the end state is the drain's (the mapper's fulfilled ->
-            # DELIVERED lands over the reconcile's SHIPPED, as it does there).
+            # so the end state is the drain's (both legs decide through the ONE
+            # transition table, online_order_status).
             f = _newest_fulfilment(raw)
             # No fulfilment on the body at all: the body itself predates the one
             # IMS holds when it is older than that fulfilment's stamp.
             ful_stale = _shopify_payload_stale(existing, f or raw, field=FULFILLMENT_WATERMARK)
             if f is not None and not ful_stale and _fulfilment_moved(f, existing):
                 res = feed("fulfillments/update", f, lambda: reconcile_fulfillment(db, f, topic="fulfillments/update"))
-                # The same terminal rule held the SHIPPED / DELIVERED flip back.
+                # The same transition table held the SHIPPED / DELIVERED flip back.
                 if res.get("terminal_withheld"):
                     buckets.add("status_skipped_terminal")
             st = _derive_statuses(raw)
@@ -485,8 +491,8 @@ def _sweep_booked_order(db, order, raw, existing, sid: str, live: bool) -> tuple
             topic = _order_topic(st, money, existing, ful_stale)
             if topic:
                 res = feed(topic, raw, lambda: map_shopify_order(order, db, webhook_id=None, topic=topic))
-                # The mapper's own terminal rule kept the lifecycle status while
-                # the payment / fulfilment facts landed: reported, so the
+                # The transition table kept a finished status while the
+                # payment / fulfilment facts landed: reported, so the
                 # operator sees the order IMS and Shopify disagree on. Its
                 # verdict, decided on the doc the fulfilment leg just wrote --
                 # never the rule re-asked of the pre-sweep snapshot.

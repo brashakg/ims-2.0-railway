@@ -57,6 +57,9 @@ def _match(doc, filter_) -> bool:
                 elif op == "$exists":
                     if (actual is not None) != bool(op_val):
                         return False
+                elif op == "$in":
+                    if actual not in (op_val or []):
+                        return False
                 else:
                     return False
         else:
@@ -87,6 +90,8 @@ class FakeCollection:
             if _match(d, filter_):
                 for k, v in (update.get("$set") or {}).items():
                     d[k] = v
+                for k, v in (update.get("$push") or {}).items():
+                    d.setdefault(k, []).append(v)
                 return type("R", (), {"modified_count": 1, "matched_count": 1})()
         if upsert:
             doc = dict(filter_)

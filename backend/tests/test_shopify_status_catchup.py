@@ -17,8 +17,9 @@ is hollow: every rule has a test that goes red when that rule alone is
 reverted (table in the PR body). Even the "whether" is the mapper's own: the money
 trigger is what _recompute_money WOULD write, the stale skip is
 _shopify_payload_stale, the terminal report is the handlers' own
-terminal_withheld verdict (both decide with _terminal_status_withheld) --
-each pinned on the webhook drain in the same test that pins the sweep.
+terminal_withheld verdict (every leg decides through the ONE transition table,
+online_order_status) -- each pinned on the webhook drain in the same test that
+pins the sweep.
 """
 
 from __future__ import annotations
@@ -585,9 +586,8 @@ def test_a_second_partial_payment_on_shopify_lands(swept):
 # ---------------------------------------------------------------------------
 # Rule: a fulfilment IMS never saw lands EXACTLY what the drain lands for the
 # pair of deliveries Shopify makes -- fulfillments/create (the reconcile: AWB,
-# tracking, SHIPPED) then orders/fulfilled (the mapper: fulfilled -> DELIVERED,
-# its pre-existing rule; whether Shopify "fulfilled" should mean DELIVERED or
-# SHIPPED is an owner call for BOTH paths, never a sweep-only rule)
+# tracking, SHIPPED) then orders/fulfilled (the mapper: fulfilled -> SHIPPED,
+# owner ruling 2026-09-28 on BOTH paths; DELIVERED is the courier's)
 # ---------------------------------------------------------------------------
 
 
@@ -622,7 +622,8 @@ def test_fulfilment_ims_missed_lands_like_the_drain_once(swept):
     swept["real_map"](body, swept["db"], webhook_id="real-ful-1", topic="orders/fulfilled")
 
     doc = _doc(swept, 30004)
-    assert doc["status"] == "DELIVERED" and doc["fulfillment_status"] == "FULFILLED"
+    assert doc["status"] == "SHIPPED" and doc["fulfillment_status"] == "FULFILLED"
+    assert "delivered_at" not in doc
     assert doc["awb"] == "AWB30004" and doc["tracking_company"] == "Delhivery"
     assert doc["shopify_fulfillment_id"] == "88804"
     drain = _shipping_snap(_doc(swept, 30027))
@@ -727,42 +728,46 @@ def test_a_newest_fulfilment_without_shipment_status_is_reconciled_once(swept, o
 
 
 # ---------------------------------------------------------------------------
-# Rule: a terminal IMS status is replaced only by a Shopify cancellation or
-# refund (never knocked back to CONFIRMED, never DELIVERED over a cancelled
-# order) -- ONE rule in the mapper (_terminal_status_withheld) that the webhook
-# drain enforces and the sweep reports from each handler's own verdict
-# (terminal_withheld on the mapper and the reconcile); the payment / fulfilment facts still
-# land, and cancelled / refunded still land over any status
+# Rule: a finished IMS status is never moved by a Shopify fact (never knocked
+# back to CONFIRMED, never DELIVERED over a cancelled order; a DELIVERED order
+# Shopify cancels / refunds stays DELIVERED with one task) -- ONE transition
+# table (online_order_status) that the webhook drain enforces and the sweep
+# reports from each handler's own verdict (terminal_withheld on the mapper and
+# the reconcile); the payment / fulfilment facts still land. A body that
+# states no lifecycle fact (restocked, partially refunded) is no report.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    "ims_state, shopify_body, landed",
+    "ims_state, shopify_body, landed, reported",
     [
         # Delivered at the counter; Shopify later shows the fulfilment restocked
-        # -> the mapper derives CONFIRMED (its default); the fact lands.
+        # -> no lifecycle fact (the table writes nothing); the fact lands.
         (
             {"status": "DELIVERED", "fulfillment_status": "FULFILLED"},
             {"fulfillment_status": "restocked"},
             {"fulfillment_status": "RESTOCKED"},
+            False,
         ),
-        # Cancelled by staff in IMS; Shopify (still open there) partially refunds.
+        # Cancelled by staff in IMS; Shopify (still open there) partially refunds
+        # -> no lifecycle fact; the money lands.
         (
             {"status": "CANCELLED"},
             {"financial_status": "partially_refunded"},
             {"payment_status": "PARTIAL_REFUND"},
+            False,
         ),
         # Cancelled by staff in IMS (units released); Shopify fulfils it later
-        # -> the mapper derives DELIVERED; the fulfilment reconcile already
-        # refuses that flip, and so does the mapper now. The tracking lands.
+        # -> SHIP on a finished order: kept, and reported. The tracking lands.
         (
             {"status": "CANCELLED", "cancelled_at": "2026-09-05T10:00:00Z"},
             {"fulfillment_status": "fulfilled", "fulfillments": [_fulfilment(30005, 41)]},
             {"fulfillment_status": "FULFILLED", "awb": "AWB30005"},
+            True,
         ),
     ],
 )
-def test_terminal_ims_status_is_never_knocked_back(swept, ims_state, shopify_body, landed):
+def test_terminal_ims_status_is_never_knocked_back(swept, ims_state, shopify_body, landed, reported):
     _book(swept, 30005)
     swept["orders"].update_one({"shopify_order_id": "30005"}, {"$set": ims_state})
 
@@ -770,9 +775,10 @@ def test_terminal_ims_status_is_never_knocked_back(swept, ims_state, shopify_bod
     res = swept["run"]()
 
     p = res.payload
-    assert p["status_synced"] == ["30005"] and p["status_skipped_terminal"] == ["30005"]
+    assert p["status_synced"] == ["30005"]
+    assert p["status_skipped_terminal"] == (["30005"] if reported else [])
     assert p["status_failed"] == []
-    assert "terminal-skipped 1" in res.notes
+    assert ("terminal-skipped 1" in res.notes) is reported
     doc = _doc(swept, 30005)
     assert doc["status"] == ims_state["status"]
     for field, value in landed.items():
@@ -820,10 +826,12 @@ def _refunded_after_delivery(oid):
     )
 
 
-def test_a_refund_after_delivery_lands_refunded_on_both_paths(swept):
-    """The most common refund -- after delivery. REFUNDED is a Shopify-owned
-    fact over DELIVERED, never withheld: the sweep and the webhook drain land
-    the same doc, and the sweep does not report it as terminal-skipped hourly."""
+def test_a_refund_after_delivery_stays_delivered_with_one_task_on_both_paths(swept):
+    """The most common refund -- after delivery. Owner ruling 2026-09-28: an
+    order IMS holds DELIVERED stays DELIVERED (the customer has the goods) and
+    ONE task asks a person refund / return / Shopify mistake; the refund money
+    lands and the refund itself waits in the review queue. The sweep and the
+    webhook drain land the same doc; the sweep reports it once, not hourly."""
     for oid in (30022, 30023):
         _book(swept, oid)
         swept["orders"].update_one(
@@ -834,14 +842,18 @@ def test_a_refund_after_delivery_lands_refunded_on_both_paths(swept):
     swept["state"]["orders"] = [_refunded_after_delivery(30022)]
     p = swept["run"]().payload
     assert p["status_synced"] == ["30022"]
-    assert p["status_skipped_terminal"] == [] and p["status_failed"] == []
-    swept["real_map"](
+    assert p["status_skipped_terminal"] == ["30022"] and p["status_failed"] == []
+    drain = swept["real_map"](
         _refunded_after_delivery(30023), swept["db"], webhook_id="real-upd-2", topic="orders/updated"
     )
+    assert drain["terminal_withheld"] is True
 
+    tasks = swept["db"]["tasks"]
     for oid in (30022, 30023):
         doc = _doc(swept, oid)
-        assert (doc["status"], doc["payment_status"]) == ("REFUNDED", "REFUNDED")
+        assert (doc["status"], doc["payment_status"]) == ("DELIVERED", "REFUNDED")
+        assert tasks.count_documents(
+            {"order_id": doc["order_id"], "task_type": "online_status_conflict"}) == 1
     assert swept["review"].find_one({"shopify_refund_id": "730022"})["status"] == "PENDING"
     p2 = swept["run"]().payload
     assert p2["status_synced"] == [] and p2["status_skipped_terminal"] == []
@@ -942,9 +954,9 @@ def test_a_delivered_order_and_a_newer_delivered_fulfilment_is_no_terminal_hold(
 def test_the_report_is_the_mappers_own_verdict_after_the_fulfilment_leg(swept):
     """The report is what the handler DID, not the rule re-asked of the doc as
     it stood before the sweep: the fulfilment leg lands DELIVERED (a delivered
-    parcel), then the mapper's terminal rule keeps it over Shopify's
-    'partially fulfilled' -- and the operator is told. The drain's mapper
-    returns the same verdict for the same body."""
+    parcel -- the courier's fact), then the mapper sees Shopify's 'partially
+    fulfilled', which states no lifecycle fact: nothing moves and nothing is
+    reported. The drain's mapper returns the same verdict for the same body."""
     _book(swept, 53001)
     body = _pulled(53001, fulfillment_status="partial", fulfillments=[
         _fulfilment(53001, 61, shipment_status="delivered", tracking_number="AWB53001")])
@@ -953,12 +965,13 @@ def test_the_report_is_the_mappers_own_verdict_after_the_fulfilment_leg(swept):
     res = swept["run"]()
 
     p = res.payload
-    assert p["status_synced"] == ["53001"] and p["status_skipped_terminal"] == ["53001"]
-    assert "terminal-skipped 1" in res.notes
+    assert p["status_synced"] == ["53001"] and p["status_skipped_terminal"] == []
     doc = _doc(swept, 53001)
     assert (doc["status"], doc["fulfillment_status"]) == ("DELIVERED", "PARTIAL")
+    assert doc["delivered_at"] and doc["status_history"][-1]["changed_by"] == "system:SHOPIFY_FULFILL"
     drain = swept["real_map"](body, swept["db"], webhook_id="real-upd-53001", topic="orders/updated")
-    assert drain["status_synced"] is True and drain["terminal_withheld"] is True
+    assert drain["status_synced"] is True and drain["terminal_withheld"] is False
+    assert _doc(swept, 53001)["status"] == "DELIVERED"
 
 
 # ---------------------------------------------------------------------------

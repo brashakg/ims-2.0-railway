@@ -24,7 +24,8 @@ DESIGN: count-once, do NOT fork.
          with the resolved `customer_id` so CRM / loyalty / AR see the same buyer.
       3. STATUS SYNC on re-ingest -- a replayed / updated / cancelled Shopify order
          for an EXISTING IMS order does NOT create a 2nd order; instead it UPDATES
-         payment_status / fulfillment_status / status in place (orders/updated,
+         payment_status / fulfillment_status in place and hands the body's ONE
+         lifecycle fact to online_order_status.apply_fact (orders/updated,
          orders/cancelled). The hard order-id guard in ingest already prevents the
          double-create; the mapper layers the status update on the duplicate path.
 
@@ -77,9 +78,8 @@ _FULFILLMENT_STATUS_MAP = {
     "": "UNFULFILLED",
 }
 
-# Shopify cancelled / fulfilled -> the IMS order lifecycle `status`.
-# A cancelled Shopify order maps the IMS order to CANCELLED so finance excludes it.
-_DELIVERED_FULFILLMENT = {"fulfilled"}
+# The IMS order lifecycle `status` is NOT derived here: a body reduces to one
+# fact (online_order_status.order_fact) and the ONE transition table decides.
 
 # Money-panel P1 follow-up: bounded retry count for _sync_existing_order_status's
 # snapshot-conditional money write. A single miss-and-give-up on a racing staff
@@ -670,85 +670,19 @@ def _match_existing_customer(db, buyer: Dict[str, str]) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 
-def _raise_hold_conflict_task(db, order: Dict[str, Any], *, source: str) -> None:
-    """Best-effort: (re)raise the Rx-hold follow-up task so staff see why a
-    re-ingested Shopify payload could NOT flip this order to DELIVERED. Reuses
-    the SAME idempotent task-raiser ingest already uses (services.
-    online_rx_hold.raise_rx_hold_task -> the canonical ``tasks`` collection) --
-    a call for an order that already carries the task (the normal case; ingest
-    raised it when the hold was first stamped) is a no-op. Never raises -- a
-    task-side failure must never break the webhook / remap flow."""
-    try:
-        from .online_rx_hold import raise_rx_hold_task
-
-        raise_rx_hold_task(
-            db,
-            order_id=order.get("order_id"),
-            order_ref=order.get("order_number") or order.get("order_id"),
-            store_id=order.get("store_id"),
-            channel=str(order.get("channel") or "ONLINE"),
-            evaluation={
-                "reasons": order.get("rx_hold_reasons") or [],
-                "lines": [],
-                "detail": order.get("rx_hold_reason") or "",
-            },
-        )
-    except Exception:  # noqa: BLE001
-        logger.debug(
-            "[%s] rx-hold conflict task raise skipped for order=%s",
-            source,
-            order.get("order_id"),
-            exc_info=True,
-        )
-
-
 def _derive_statuses(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Canonical (payment_status, fulfillment_status, order_status) from a Shopify
-    payload's financial_status / fulfillment_status / cancelled_at."""
+    """Canonical (payment_status, fulfillment_status, cancelled) from a Shopify
+    payload's financial_status / fulfillment_status / cancelled_at. The
+    lifecycle status is the transition table's (online_order_status)."""
     fin = _norm(payload.get("financial_status")).lower()
     ful = _norm(payload.get("fulfillment_status")).lower()
     cancelled_at = payload.get("cancelled_at")
 
-    payment_status = _PAYMENT_STATUS_MAP.get(fin, "UNPAID")
-    fulfillment_status = _FULFILLMENT_STATUS_MAP.get(ful, "UNFULFILLED")
-
-    if cancelled_at:
-        order_status = "CANCELLED"
-    elif fin == "refunded":
-        order_status = "REFUNDED"
-    elif ful in _DELIVERED_FULFILLMENT:
-        order_status = "DELIVERED"
-    else:
-        order_status = "CONFIRMED"
-
     return {
-        "payment_status": payment_status,
-        "fulfillment_status": fulfillment_status,
-        "order_status": order_status,
+        "payment_status": _PAYMENT_STATUS_MAP.get(fin, "UNPAID"),
+        "fulfillment_status": _FULFILLMENT_STATUS_MAP.get(ful, "UNFULFILLED"),
         "cancelled": bool(cancelled_at),
     }
-
-
-def _terminal_status_withheld(existing_status: Any, derived_status: str) -> bool:
-    """ONE rule for the webhook drain AND the hourly pull sweep (which reports
-    it): a terminal IMS status (DELIVERED / CANCELLED / REFUNDED / VOID) is
-    replaced only by a Shopify cancellation or refund. Withheld:
-      * CONFIRMED -- only _derive_statuses' DEFAULT ("nothing on the Shopify
-        body says cancelled / refunded / fulfilled"), not a Shopify fact: staff
-        delivered at the counter, or cancelled in IMS, and Shopify never
-        learned it;
-      * DELIVERED over CANCELLED / REFUNDED / VOID -- the fulfilment reconcile
-        (shopify_fulfillment, `current_status not in _TERMINAL_STATUSES`)
-        already refuses that flip; the mapper said yes to the same body, so a
-        staff-cancelled order came back DELIVERED with its units released.
-    cancelled / refunded still land over any status, as they always did."""
-    from .shopify_fulfillment import _TERMINAL_STATUSES
-
-    return (
-        existing_status in _TERMINAL_STATUSES
-        and derived_status != existing_status
-        and derived_status not in ("CANCELLED", "REFUNDED")
-    )
 
 
 def _shopify_payload_stale(
@@ -943,13 +877,15 @@ def _sync_existing_order_status(
 ) -> bool:
     """Update an EXISTING IMS order's status fields from a re-ingested Shopify
     payload (orders/updated, orders/paid, orders/cancelled). Does NOT touch money
-    lines / the GST invoice (those are immutable once minted) -- only the lifecycle
-    status, payment_status, fulfillment_status, balance_due + amount_paid on a
+    lines / the GST invoice (those are immutable once minted) -- only
+    payment_status, fulfillment_status, balance_due + amount_paid on a
     paid/partial transition (plus the ingest-synthesized gateway payment row kept
-    coherent with amount_paid), and cancelled_at. Returns True on a write.
-    `verdict`, when given, gets terminal_withheld=True when the terminal rule
-    kept the doc's status -- decided HERE, on the doc as it is now, so the
-    pull sweep reports the handler's own answer. Fail-soft."""
+    coherent with amount_paid), shopify_cancelled_at, and the lifecycle status
+    through the ONE transition table (online_order_status.apply_fact, which also
+    stamps cancelled_at on a real move to CANCELLED). Returns True on a write.
+    `verdict`, when given, gets the table's terminal_withheld -- decided HERE,
+    on the doc as it is now, so the pull sweep reports the handler's own
+    answer. Fail-soft."""
     if db is None or not shopify_order_id:
         return False
     try:
@@ -996,47 +932,20 @@ def _sync_existing_order_status(
     incoming_updated = _parse_dt(payload.get("updated_at")) if _parse_dt else None
 
     st = _derive_statuses(payload)
+    # The lifecycle status is ONE rule (online_order_status): this body states
+    # one fact or none, and the transition table decides what it does to the
+    # status IMS holds (never backwards; DELIVERED is the courier's; a
+    # finished order stays finished) -- after the money leg below.
+    from .online_order_status import CANCEL, apply_fact, order_fact
 
-    order_status = st["order_status"]
-    # Clinical Rx FLAG-AND-HOLD (owner decision 2026-06-30): a re-ingested
-    # Shopify payload (orders/updated webhook, or the ADMIN/SUPERADMIN remap
-    # endpoint replaying map_shopify_order) must NOT be able to silently flip a
-    # still-HELD order (rx_pending / fulfillment_hold) to DELIVERED -- that is
-    # exactly the escape the deliver-guard (orders.py mark_ready/deliver_order,
-    # shipping.py book_shipment) exists to close. CANCELLED/REFUNDED are NOT
-    # withheld (a cancellation must still land regardless of the hold). The
-    # payment_status / fulfillment_status fields below are unaffected -- only
-    # the terminal order_status flip is held back; order.status stays as-is.
-    from ..routers.orders import order_has_active_rx_hold
-
-    if order_status == "DELIVERED" and order_has_active_rx_hold(existing):
-        logger.warning(
-            "[ONLINE_MAP] shopify_order=%s is on an active Rx hold -- withheld "
-            "the order_status flip to DELIVERED (payment/fulfillment status "
-            "still synced). Clear the hold via clear-rx-hold to let this "
-            "complete.",
-            shopify_order_id,
-        )
-        _raise_hold_conflict_task(db, existing, source="ONLINE_MAP")
-        order_status = existing.get("status") or order_status
-    if _terminal_status_withheld(existing.get("status"), order_status):
-        logger.info(
-            "[ONLINE_MAP] shopify_order=%s is %s in IMS -- withheld the "
-            "order_status flip to %s (payment/fulfillment status still synced)",
-            shopify_order_id,
-            existing.get("status"),
-            order_status,
-        )
-        order_status = existing["status"]
-        if verdict is not None:
-            verdict["terminal_withheld"] = True
+    fact = order_fact(payload)
 
     # LIFECYCLE fields never depend on the payments snapshot (only on the
     # payload + `now`), so they are computed and written ONCE, unconditionally
-    # -- no race window to close here.
+    # -- no race window to close here. No `status` and no `cancelled_at`: those
+    # land only with a real move to CANCELLED, through apply_fact's claim.
     lifecycle_update: Dict[str, Any] = {
         "fulfillment_status": st["fulfillment_status"],
-        "status": order_status,
         # NAIVE-UTC DATETIME, matching how ingest stamps order date fields -- an
         # ISO string here would flip backfilled datetime updated_at values back
         # to strings on every status webhook (mixed-type regeneration).
@@ -1047,8 +956,10 @@ def _sync_existing_order_status(
     # always applied, even if the money leg below has to retry/defer.
     if incoming_updated is not None:
         lifecycle_update["shopify_updated_at"] = incoming_updated
+    # Shopify's own cancel fact, kept even when the table keeps the status (a
+    # DELIVERED order): the hourly sweep reads it, so it feeds the cancel once.
     if st["cancelled"]:
-        lifecycle_update["cancelled_at"] = _norm(payload.get("cancelled_at"))
+        lifecycle_update["shopify_cancelled_at"] = _norm(payload.get("cancelled_at"))
 
     try:
         if lifecycle_update:
@@ -1126,11 +1037,25 @@ def _sync_existing_order_status(
                 shopify_order_id,
             )
 
+        res = apply_fact(
+            db,
+            {**existing, **lifecycle_update},
+            fact,
+            source="ONLINE_MAP",
+            extra=(
+                {"cancelled_at": _norm(payload.get("cancelled_at"))} if fact == CANCEL else None
+            ),
+        )
+        # Decided HERE, on the doc as it is now, so the pull sweep reports the
+        # handler's own answer (status_skipped_terminal).
+        if verdict is not None:
+            verdict["terminal_withheld"] = res["terminal_withheld"]
+
         logger.info(
             "[ONLINE_MAP] synced status for shopify_order=%s -> status=%s payment=%s "
             "fulfillment=%s",
             shopify_order_id,
-            st["order_status"],
+            res["to"] or existing.get("status"),
             st["payment_status"],
             st["fulfillment_status"],
         )
@@ -1215,8 +1140,8 @@ def map_shopify_order(
     Returns the ingest result dict, augmented:
       {... , "customer_id": <id or None>, "store_id": <bucket>,
        "status_synced": <bool, only on a re-ingest>,
-       "terminal_withheld": <bool, only on a re-ingest: the terminal rule kept
-       the IMS status (_terminal_status_withheld)>}.
+       "terminal_withheld": <bool, only on a re-ingest: the transition table
+       kept a finished IMS status against a different fact>}.
 
     NEVER raises -- a bad payload yields {"status": "skipped", "reason": ...}. The
     NEXUS drain loop relies on this.

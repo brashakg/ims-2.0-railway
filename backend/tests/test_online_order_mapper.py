@@ -87,6 +87,14 @@ def _match(doc, filter_) -> bool:
     return True
 
 
+def _push_unset(doc, update) -> None:
+    """$push (append; status_history is asserted on) and $unset."""
+    for k, v in ((update or {}).get("$push") or {}).items():
+        doc.setdefault(k, []).append(v)
+    for k in ((update or {}).get("$unset") or {}):
+        doc.pop(k, None)
+
+
 class _Cursor:
     def __init__(self, docs):
         self._docs = docs
@@ -170,6 +178,7 @@ class FakeCollection:
             elif op == "$set":
                 for k, v in fields.items():
                     target[k] = v
+        _push_unset(target, update)
         return dict(target)
 
     def update_one(self, filter_, update, upsert=False):
@@ -177,6 +186,7 @@ class FakeCollection:
             if _match(d, filter_):
                 for k, v in (update.get("$set") or {}).items():
                     d[k] = v
+                _push_unset(d, update)
                 return type("R", (), {"modified_count": 1, "matched_count": 1})()
         if upsert:
             doc = dict(filter_)
@@ -347,7 +357,9 @@ def test_status_only_update_without_line_items_syncs_existing(wired):
     assert res["status_synced"] is True
     order = wired["orders"].find_one({"shopify_order_id": "10003"})
     assert order["fulfillment_status"] == "FULFILLED"
-    assert order["status"] == "DELIVERED"
+    # Owner ruling 2026-09-28: Shopify "fulfilled" means SHIPPED; DELIVERED
+    # comes only from the courier.
+    assert order["status"] == "SHIPPED"
 
 
 # ---------------------------------------------------------------------------
@@ -413,7 +425,7 @@ def test_held_order_status_proceeds_after_hold_cleared(wired):
 
     assert res["status"] == "status_synced"
     order = wired["orders"].find_one({"shopify_order_id": "10103"})
-    assert order["status"] == "DELIVERED"
+    assert order["status"] == "SHIPPED"  # fulfilled == shipped (ruling 2026-09-28)
 
 
 def test_held_order_cancellation_still_lands(wired):

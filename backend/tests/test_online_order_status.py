@@ -122,3 +122,220 @@ def test_fulfilment_fact(ful, shipment, awb, fact):
 ])
 def test_courier_fact_is_an_exact_delivered(courier, fact):
     assert oos.courier_fact(courier) == fact
+
+
+# ---------------------------------------------------------------------------
+# End to end: every leg (the mapper on the drain and the sweep, the fulfilment
+# reconcile, the delete handler) decides through the table. Rig: the status
+# catch-up `swept` fixture (mapper FakeDB + the REAL mapper / ingest / refund
+# handler, a faked Shopify fetch).
+# ---------------------------------------------------------------------------
+
+import copy  # noqa: E402
+
+from test_online_order_mapper import wired  # noqa: E402,F401 (fixture chain)
+from test_shopify_order_catchup import _pulled, pull  # noqa: E402,F401 (fixture chain)
+from test_shopify_status_catchup import (  # noqa: E402,F401
+    CANCELLED_AT,
+    _book,
+    _doc,
+    _fulfilment,
+    swept,
+)
+
+from api.services import shopify_fulfillment, shopify_order_delete  # noqa: E402
+
+LATER = "2026-09-06T02:00:00Z"
+
+
+def _set(swept, oid, **fields):
+    swept["orders"].update_one({"shopify_order_id": str(oid)}, {"$set": fields})
+
+
+def _tasks(swept, oid, task_type):
+    return swept["db"]["tasks"].count_documents(
+        {"order_id": _doc(swept, oid)["order_id"], "task_type": task_type})
+
+
+def test_shopify_fulfilled_is_shipped_on_the_drain_and_the_sweep(swept):
+    """Ruling 1: a fulfilled body (no fulfilment rows: the mapper's own fact)
+    lands SHIPPED -- never DELIVERED, no delivered_at -- on both paths."""
+    _book(swept, 60020)
+    _book(swept, 60021)
+    res = swept["real_map"](_pulled(60020, fulfillment_status="fulfilled"), swept["db"],
+                            webhook_id="ful-60020", topic="orders/fulfilled")
+    assert res["status_synced"] is True
+    swept["state"]["orders"] = [_pulled(60021, fulfillment_status="fulfilled")]
+    assert swept["run"]().payload["status_synced"] == ["60021"]
+
+    for oid in (60020, 60021):
+        doc = _doc(swept, oid)
+        assert (doc["status"], doc["fulfillment_status"]) == ("SHIPPED", "FULFILLED")
+        assert "delivered_at" not in doc
+        last = doc["status_history"][-1]
+        assert (last["status"], last["changed_by"]) == ("SHIPPED", "system:ONLINE_MAP")
+
+
+def test_a_courier_delivered_fulfilment_is_the_delivery(swept):
+    """Ruling 1: DELIVERED comes from shipment_status 'delivered', through the
+    staff door's own claim -- delivered_at and a status_history entry land."""
+    _book(swept, 60010)
+    res = shopify_fulfillment.reconcile_fulfillment(
+        swept["db"], _fulfilment(60010, 1, shipment_status="delivered"), topic="fulfillments/update")
+
+    assert res["order_status"] == "DELIVERED" and res["terminal_withheld"] is False
+    doc = _doc(swept, 60010)
+    assert doc["status"] == "DELIVERED" and doc["delivered_at"]
+    assert doc["status_updated_by"] == "system:SHOPIFY_FULFILL"
+    assert [(h["status"], h["changed_by"]) for h in doc["status_history"]] == [
+        ("DELIVERED", "system:SHOPIFY_FULFILL")]
+
+
+def test_a_cancelled_fulfilment_with_tracking_never_ships(swept):
+    _book(swept, 60070)
+    res = shopify_fulfillment.reconcile_fulfillment(
+        swept["db"], _fulfilment(60070, 1, status="cancelled"), topic="fulfillments/update")
+
+    assert res["order_status"] == "CONFIRMED"
+    doc = _doc(swept, 60070)
+    assert (doc["status"], doc["fulfillment_status"], doc["awb"]) == ("CONFIRMED", "CANCELLED", "AWB60070")
+    assert "status_history" not in doc
+
+
+@pytest.mark.parametrize("staff_status, body_over", [
+    ("READY", {"financial_status": "paid"}),
+    ("PROCESSING", {"note": "gift wrap please", "financial_status": "pending"}),
+    ("SHIPPED", {"fulfillment_status": "partial"}),
+    ("READY", {"fulfillment_status": None}),
+])
+def test_a_shopify_edit_never_moves_an_order_backwards(swept, staff_status, body_over):
+    """Ruling 3: a body that states no lifecycle fact writes no status -- a
+    staff-set PROCESSING / READY / SHIPPED is never reset to CONFIRMED, on the
+    drain or the sweep, and nothing is pushed to the history."""
+    for oid in (60030, 60031):
+        _book(swept, oid, financial_status="pending")
+        _set(swept, oid, status=staff_status)
+    res = swept["real_map"](_pulled(60030, updated_at=LATER, **body_over), swept["db"],
+                            webhook_id="edit-60030", topic="orders/updated")
+    assert res["status_synced"] is True
+    swept["state"]["orders"] = [_pulled(60031, updated_at=LATER, **body_over)]
+    swept["run"]()
+
+    for oid in (60030, 60031):
+        doc = _doc(swept, oid)
+        assert doc["status"] == staff_status and "status_history" not in doc
+
+
+def test_a_staff_cancelled_order_is_never_flipped_to_refunded(swept):
+    """Finding (a): staff cancelled at the counter; Shopify then refunds. The
+    money lands (REFUNDED), the status stays CANCELLED, and the operator is
+    told (terminal_withheld) -- on the drain and the sweep."""
+    for oid in (60040, 60041):
+        _book(swept, oid)
+        _set(swept, oid, status="CANCELLED", cancelled_by="staff-1",
+             cancelled_at="2026-09-05T10:00:00Z")
+    res = swept["real_map"](_pulled(60040, financial_status="refunded"), swept["db"],
+                            webhook_id="ref-60040", topic="orders/updated")
+    assert res["terminal_withheld"] is True
+    swept["state"]["orders"] = [_pulled(60041, financial_status="refunded")]
+    assert swept["run"]().payload["status_skipped_terminal"] == ["60041"]
+
+    for oid in (60040, 60041):
+        doc = _doc(swept, oid)
+        assert (doc["status"], doc["payment_status"]) == ("CANCELLED", "REFUNDED")
+        assert "status_history" not in doc
+
+
+@pytest.mark.parametrize("leg", ["mapper", "reconcile"])
+def test_a_held_order_the_table_asks_finished_first_then_the_hold(swept, leg):
+    """Finding (b): both legs ask the same function, finished status first. A
+    held CANCELLED order is kept (reported) and raises no Rx task; a held
+    CONFIRMED order is kept and raises exactly one."""
+    for oid, status in ((60050, "CANCELLED"), (60051, "CONFIRMED")):
+        _book(swept, oid)
+        _set(swept, oid, status=status, rx_pending=True, fulfillment_hold=True,
+             rx_hold_reasons=["RX_MISSING"])
+
+    def feed(oid, n):
+        if leg == "mapper":
+            return swept["real_map"](_pulled(oid, fulfillment_status="fulfilled"), swept["db"],
+                                     webhook_id=f"ful-{oid}-{n}", topic="orders/fulfilled")
+        return shopify_fulfillment.reconcile_fulfillment(swept["db"], _fulfilment(oid, n))
+
+    assert feed(60050, 1)["terminal_withheld"] is True
+    assert _doc(swept, 60050)["status"] == "CANCELLED"
+    assert _tasks(swept, 60050, "online_rx_hold") == 0
+    for n in (1, 2):
+        assert feed(60051, n)["terminal_withheld"] is False
+    assert _doc(swept, 60051)["status"] == "CONFIRMED"
+    assert _tasks(swept, 60051, "online_rx_hold") == 1
+
+
+@pytest.mark.parametrize("finished", ["CANCELLED", "REFUNDED"])
+def test_a_delete_on_a_finished_order_keeps_it(swept, finished):
+    """Finance leaves VOID in revenue: voiding a cancelled / refunded order
+    would count it again. The delete marker still lands."""
+    _book(swept, 60060)
+    _set(swept, 60060, status=finished)
+    res = shopify_order_delete.handle_shopify_order_delete(swept["db"], {"id": 60060}, topic="orders/delete")
+
+    assert res["status"] == "kept" and res["terminal_withheld"] is True and res["conflict_task"] is False
+    doc = _doc(swept, 60060)
+    assert doc["status"] == finished and doc["shopify_deleted_at"]
+    assert "status_before_void" not in doc and "void_reason" not in doc
+
+
+def test_an_open_order_deleted_on_shopify_is_voided_through_the_claim(swept):
+    _book(swept, 60061)
+    _set(swept, 60061, status="SHIPPED")
+    res = shopify_order_delete.handle_shopify_order_delete(swept["db"], {"id": 60061}, topic="orders/delete")
+
+    assert res["status"] == "voided" and res["status_before_void"] == "SHIPPED"
+    doc = _doc(swept, 60061)
+    assert (doc["status"], doc["status_before_void"], doc["void_reason"]) == (
+        "VOID", "SHIPPED", "Shopify orders/delete webhook")
+    assert doc["status_history"][-1]["changed_by"] == "system:SHOPIFY_ORDER_DELETE"
+
+
+@pytest.mark.parametrize("variant", ["cancel", "refund"])
+def test_a_delivered_order_shopify_cancels_stays_delivered_with_one_task_forever(swept, variant):
+    """Ruling 2: DELIVERED stays DELIVERED; ONE task for a person, claimed by
+    a marker on the order -- the drain twice, two sweeps, a remap, an
+    orders/delete, and a replay after the task was closed raise no second
+    one, and the sweep does not re-feed the order every hour."""
+    oid = 60080
+    _book(swept, oid)
+    _set(swept, oid, status="DELIVERED", fulfillment_status="FULFILLED")
+    over = {"financial_status": "refunded", "fulfillment_status": "fulfilled"}
+    if variant == "cancel":
+        over["cancelled_at"] = CANCELLED_AT
+    body = _pulled(oid, **over)
+    topic = "orders/cancelled" if variant == "cancel" else "orders/updated"
+
+    for n in (1, 2):
+        res = swept["real_map"](copy.deepcopy(body), swept["db"], webhook_id=f"w-{n}", topic=topic)
+        assert res["status_synced"] is True and res["terminal_withheld"] is True
+    swept["state"]["orders"] = [copy.deepcopy(body)]
+    for _ in range(2):
+        swept["seen"].clear()
+        p = swept["run"]().payload
+        assert p["status_failed"] == [] and swept["seen"] == [], "never re-fed every hour"
+    swept["real_map"](copy.deepcopy(body), swept["db"], webhook_id=None, topic=topic)  # a remap
+    deleted = shopify_order_delete.handle_shopify_order_delete(swept["db"], {"id": oid}, topic="orders/delete")
+    assert deleted["status"] == "kept" and deleted["conflict_task"] is True
+    swept["db"]["tasks"].update_one({"task_type": "online_status_conflict"}, {"$set": {"status": "COMPLETED"}})
+    swept["real_map"](copy.deepcopy(body), swept["db"], webhook_id="w-1", topic=topic)  # replay
+
+    doc = _doc(swept, oid)
+    assert (doc["status"], doc["payment_status"]) == ("DELIVERED", "REFUNDED")
+    assert "cancelled_at" not in doc and "status_history" not in doc
+    assert doc.get("shopify_cancelled_at") == (CANCELLED_AT if variant == "cancel" else None)
+    fact = oos.CANCEL if variant == "cancel" else oos.REFUND
+    assert doc["status_conflict_fact"] == fact and doc["shopify_deleted_at"]
+    rows = list(swept["db"]["tasks"].find({"order_id": doc["order_id"]}))
+    assert [(r["task_type"], r["shopify_fact"], r["priority"]) for r in rows] == [
+        ("online_status_conflict", fact, "P1")]
+    verb = "cancelled" if variant == "cancel" else "refunded"
+    assert rows[0]["title"].startswith(f"Shopify {verb} order ")
+    assert "decide: refund, return or Shopify mistake" in rows[0]["title"]
+    assert "counter return door" in rows[0]["description"]
