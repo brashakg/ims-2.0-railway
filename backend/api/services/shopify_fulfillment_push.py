@@ -367,27 +367,43 @@ async def push_fulfillment(
 
     order_node, open_fos, existing_fuls = _parse_fulfillment_orders(body)
     # Multi-location PR 5: IMS fulfils ONLY the shipping shop's fulfillment
-    # orders -- the ones Shopify has at that shop's location NOW (so an FO a
-    # human moved there in Shopify admin after a failed move counts), or, for
-    # the fallback shop that has no location, the ones online_fulfillment_route
-    # recorded. Another shop's open fulfillment order is not IMS's to close. A
-    # route with no recorded list (None: routing was never read, e.g. a
-    # pre-PR-5 order) keeps the legacy all-open push.
-    recorded = (order.get("fulfillment_route") or {}).get("fulfillment_order_ids")
+    # orders, by the ONE rule online_fulfillment_route.fo_is_shops applied to
+    # where Shopify has each one NOW (so an FO a human moved there after a
+    # failed move counts; the booking-time record is never needed, and an
+    # order whose routing was never read -- unread, dark at booking -- is
+    # judged the same way). Another shop's open fulfillment order is not
+    # IMS's to close. Only an order booked before PR 5 (no fulfillment_route
+    # at all) keeps the legacy all-open push.
+    route = order.get("fulfillment_route")
     others_open = 0
-    if isinstance(recorded, list):
-        from .online_fulfillment_route import shop_location
+    if isinstance(route, dict):
+        from .online_fulfillment_route import fo_is_shops, shop_locations
 
-        shop_loc = shop_location(db, order.get("store_id"))
+        locs = shop_locations(db)
+        if locs is None:
+            return FulfillmentPushResult(
+                mode=MODE_LIVE,
+                action="create",
+                target_id=shopify_order_id,
+                ok=False,
+                payload=plan,
+                error="the shops' Shopify locations could not be read, so the "
+                "shipping shop's fulfillment orders are unknown -- nothing closed",
+            )
         loc_of = {
             (e.get("node") or {}).get("id"): (
                 ((e.get("node") or {}).get("assignedLocation") or {}).get("location") or {}
             ).get("id")
             for e in ((order_node or {}).get("fulfillmentOrders") or {}).get("edges") or []
         }
+        mapped_locs = set(locs.values())
         ours = [
             f for f in open_fos
-            if (_as_shopify_gid(loc_of.get(f) or "", "Location") == shop_loc if shop_loc else f in recorded)
+            if fo_is_shops(
+                _as_shopify_gid(loc_of.get(f) or "", "Location") or None,
+                locs.get(order.get("store_id")),
+                mapped_locs,
+            )
         ]
         others_open = len(open_fos) - len(ours)
         open_fos = ours
@@ -477,6 +493,36 @@ async def push_fulfillment(
     new_fid = ful.get("id")
     if new_fid:
         _writeback_fulfillment(db, order, new_fid)
+    if any(m.get("status") == "FAILED" for m in (route or {}).get("moves") or []):
+        # A human moved the fulfillment order after IMS's move failed: the
+        # move shifted Shopify's committed unit AFTER the booking-time
+        # write-back, leaving the old shop a phantom unit. Re-assert the
+        # absolute per-shop numbers now. ponytail: the phantom lives from the
+        # human's move until dispatch (or the 01:00/09:00 pass); a Shopify
+        # fulfillment_orders/moved webhook would close it sooner.
+        try:
+            from .online_stock_writeback import writeback_after_sale
+
+            writeback_after_sale(db, order.get("items") or [], order.get("store_id"))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[FULFILLMENT_PUSH] stock write-back skipped: %s", exc)
+    if others_open:
+        # The shipping shop's parcel is recorded, but another shop's
+        # fulfillment order is still open on Shopify: it could ship the same
+        # units again from Shopify admin. Loud, never a silent success.
+        return FulfillmentPushResult(
+            mode=MODE_LIVE,
+            action="create",
+            target_id=shopify_order_id,
+            ok=False,
+            shopify_id=new_fid,
+            payload=mutation_vars,
+            error=(
+                f"fulfilled the shipping shop's fulfillment order(s), but "
+                f"{others_open} more stay OPEN at another shop's Shopify location "
+                "-- close or cancel them in Shopify admin"
+            ),
+        )
     return FulfillmentPushResult(
         mode=MODE_LIVE,
         action="create",

@@ -1776,7 +1776,17 @@ def ingest_shopify_order(
         "rx_pending": rx_eval.get("rx_pending", False),
         "rx_hold_reasons": rx_eval.get("reasons", []),
         "rx_hold_reason": rx_eval.get("detail", ""),
-        "fulfillment_hold": rx_eval.get("rx_pending", False),
+        # ROUTE HOLD (multi-location PR 5): a pending fulfillment-order move,
+        # or one left at another shop, holds the order from dispatch too --
+        # under the stock hold's own reason field (orders.order_hold_kinds).
+        "fulfillment_hold": bool(
+            rx_eval.get("rx_pending", False) or (route or {}).get("hold_reason")
+        ),
+        **(
+            {"stock_hold_reason": route["hold_reason"]}
+            if (route or {}).get("hold_reason")
+            else {}
+        ),
         "place_of_supply": gst_split.get("place_of_supply", buyer_state),
         "place_of_supply_assumed": gst_split.get("place_of_supply_assumed", False),
         # interstate / tax_summary / tax_totals are stamped ONLY on a successful
@@ -1986,8 +1996,12 @@ def ingest_shopify_order(
 
         # ONE write-back for the whole order: quantities are per shop by
         # construction (the shipping shop's own location goes down); the
-        # store rides along purely as logging context.
-        writeback_after_sale(db, items, fulfillment_store)
+        # store rides along purely as logging context. With a fulfillment-
+        # order move pending, online_fulfillment_route.move_fulfillment_orders
+        # writes back AFTER the move instead (absolute per-location numbers
+        # written before a move go stale the moment it lands).
+        if not any(m.get("status") == "PLANNED" for m in (route or {}).get("moves") or []):
+            writeback_after_sale(db, items, fulfillment_store)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "[SHOPIFY_INGEST] online stock writeback skipped for %s: %s",
