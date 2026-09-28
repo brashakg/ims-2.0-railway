@@ -379,14 +379,15 @@ def _ims_cancel_door_ran(order: Dict[str, Any]) -> bool:
 
 def _cap_restock_to_returnable(
     lines: List[Any], order: Dict[str, Any], refund_id: str
-) -> Tuple[List[Any], bool]:
+) -> Tuple[List[Any], bool, bool]:
     """Restock only a unit that is really out with the buyer: first the
     counter return door's own answer (_cap_restock_to_unreturned), then the
     order's own SOLD units (_cap_restock_to_sold_units). Both postures -- the
     webhook's proposal and the post (AUTO or the accountant's confirm) --
-    ask it."""
+    ask it. Returns (lines, overlapped, unknown)."""
     lines, overlapped = _cap_restock_to_unreturned(lines, order, refund_id)
-    return _cap_restock_to_sold_units(lines, order), overlapped
+    lines, unknown = _cap_restock_to_sold_units(lines, order)
+    return lines, overlapped, unknown
 
 
 def _split_restock(line: Any, keep: float) -> List[Any]:
@@ -398,18 +399,26 @@ def _split_restock(line: Any, keep: float) -> List[Any]:
     return head + [line.model_copy(update={"return_qty": line.return_qty - keep, "restock": False})]
 
 
-def _cap_restock_to_sold_units(lines: List[Any], order: Dict[str, Any]) -> List[Any]:
+def _cap_restock_to_sold_units(
+    lines: List[Any], order: Dict[str, Any]
+) -> Tuple[List[Any], bool]:
     """Restock no more units of an IMS product (summed over the refund's
     lines) than the order still holds SOLD in stock. An oversold or
     under-claimed line (no unit was ever taken for it) has nothing to put
-    back: the restock would find no SOLD unit and MINT a phantom. Fails
-    CLOSED -- an unreadable stock answer counts 0: no restock, never a new
-    unit. A HISTORICAL order (our own Shopify order-history import) never
-    claimed stock rows, so it keeps the restock it proposes."""
+    back: the restock would find no SOLD unit and MINT a phantom. A HISTORICAL
+    order (our own Shopify order-history import) never claimed stock rows, so
+    it keeps the restock it proposes.
+
+    An unreadable stock answer is NO answer, never 0: the line is left as it
+    is and `unknown` comes back True. The proposal keeps its restock for the
+    post to ask again; the post restocks nothing and leaves the restock OPEN
+    (applied=False, a task, the /returns/{id}/restock retry). Counting it 0
+    finalized "applied" with the unit still SOLD and no way back."""
     if order.get("historical"):
-        return lines
-    sold: Dict[str, float] = {}
+        return lines, False
+    sold: Dict[str, Optional[float]] = {}
     out: List[Any] = []
+    unknown = False
     for line in lines:
         if not line.restock:
             out.append(line)
@@ -417,15 +426,21 @@ def _cap_restock_to_sold_units(lines: List[Any], order: Dict[str, Any]) -> List[
         pid = line.product_id or ""
         if pid not in sold:
             sold[pid] = _sold_units(order.get("order_id"), pid)
-        keep = max(0.0, min(line.return_qty, sold[pid]))
-        sold[pid] -= keep
+        left = sold[pid]
+        if left is None:
+            unknown = True
+            out.append(line)
+            continue
+        keep = max(0.0, min(line.return_qty, left))
+        sold[pid] = left - keep
         out.extend(_split_restock(line, keep))
-    return out
+    return out, unknown
 
 
-def _sold_units(order_id: Any, product_id: str) -> float:
-    """How many stock units of `product_id` this order still holds SOLD (0 on
-    any doubt). Read through the returns router's own repository accessor."""
+def _sold_units(order_id: Any, product_id: str) -> Optional[float]:
+    """How many stock units of `product_id` this order still holds SOLD; None
+    when the stock cannot be read. Read through the returns router's own
+    repository accessor."""
     if not order_id or not product_id:
         return 0.0
     try:
@@ -433,13 +448,13 @@ def _sold_units(order_id: Any, product_id: str) -> float:
 
         repo = _r.get_stock_repository()
         if repo is None:
-            return 0.0
+            return None
         rows = repo.find_many({"order_id": order_id, "product_id": product_id, "status": "SOLD"})
         return float(len(rows or []))
-    except Exception:  # noqa: BLE001 -- fail closed: no restock, never a phantom
-        logger.warning("[SHOPIFY_REFUND] SOLD-unit read failed for order=%s -- no restock",
-                       order_id, exc_info=True)
-        return 0.0
+    except Exception:  # noqa: BLE001 -- no answer: the caller keeps the restock open
+        logger.warning("[SHOPIFY_REFUND] SOLD-unit read failed for order=%s", order_id,
+                       exc_info=True)
+        return None
 
 
 def _cap_restock_to_unreturned(
@@ -748,7 +763,8 @@ def handle_shopify_refund(
                 "refund_id": refund_id,
                 "shopify_order_id": shopify_order_id,
             }
-        return_lines, counter_returned = _cap_restock_to_returnable(
+        # An unreadable SOLD answer keeps the proposal's restock: the post asks again.
+        return_lines, counter_returned, _ = _cap_restock_to_returnable(
             return_lines, order, refund_id
         )
 
@@ -1135,7 +1151,11 @@ def _post_credit_and_restock(
     # on the shelf again (the returnable-qty answer, asked again now).
     if _ims_cancel_door_ran(order):
         return_lines = [line.model_copy(update={"restock": False}) for line in return_lines]
-    return_lines, _ = _cap_restock_to_returnable(return_lines, order, refund_id)
+    return_lines, _, unknown = _cap_restock_to_returnable(return_lines, order, refund_id)
+    # An unreadable SOLD answer: restock nothing now and keep the restock OPEN
+    # (applied=False, a task, the /returns/{id}/restock retry) -- the same
+    # posture as an order that cannot be read.
+    restock_unverified = restock_unverified or unknown
     restock_result: Dict[str, Any] = {
         "restocked": [],
         "restock_stock_ids": [],
@@ -1170,9 +1190,9 @@ def _post_credit_and_restock(
             ),
             "restock_store_reason": (prior_doc or {}).get("restock_store_reason"),
         }
-    elif restock_unverified:
-        # We could not read the real order, so we do NOT know which shop shipped
-        # which unit. There is no safe fallback -- a single-store guess strands
+    elif restock_unverified and any(line.restock for line in return_lines):
+        # We could not read the real order (or its SOLD units), so we do NOT
+        # know which shop shipped which unit, or whether it is still out. There is no safe fallback -- a single-store guess strands
         # the other shop's real unit SOLD forever and mints a phantom on a live
         # shelf, while reporting success. Restock NOTHING, fail loud, and let the
         # blocked units surface as a task + the /returns/{id}/restock retry.
@@ -1185,7 +1205,7 @@ def _post_credit_and_restock(
 
         logger.error(
             "[SHOPIFY_REFUND] restock BLOCKED for refund=%s order=%s: the order "
-            "could not be read, so the fulfilling shop for each unit is unknown. "
+            "or its SOLD units could not be read, so where each unit goes is unknown. "
             "Nothing restocked (a single-store guess would strand one shop's "
             "unit and mint a phantom on another). Credit note still posted.",
             refund_id,
@@ -1197,7 +1217,8 @@ def _post_credit_and_restock(
                 "sku": getattr(line, "sku", ""),
                 "product_name": getattr(line, "product_name", ""),
             }
-            for line in (return_lines or [])
+            for line in return_lines
+            if line.restock
         ]
         restock_result = {
             "restocked": _restock_intent_rows(units),
@@ -1433,3 +1454,4 @@ def post_from_review(db, review: Dict[str, Any]) -> Dict[str, Any]:
         # posts and the blocked units become a visible, retryable task.
         restock_unverified=not verified,
     )
+

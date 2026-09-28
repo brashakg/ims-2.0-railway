@@ -723,3 +723,68 @@ def test_a_delivered_orders_cancel_line_is_proposed_without_a_restock(swept, res
     row = swept["review"].find_one({"shopify_refund_id": "700350"})
     assert row["status"] == "PENDING"
     assert [line["restock"] for line in row["proposed_restock"]] == [restock]
+
+
+# ---------------------------------------------------------------------------
+# An unreadable SOLD answer is no answer (panel P2): the restock stays OPEN
+# (applied=False) and the retry door puts the unit back -- never a finalized
+# "applied" with the unit still SOLD and the counter door blocked.
+# ---------------------------------------------------------------------------
+
+from api.routers import returns as returns_router  # noqa: E402
+
+_ACCT = {"user_id": "acct-1", "roles": ["ACCOUNTANT"], "active_store_id": "BV-GANGA-01"}
+
+
+def _one_unit_refund(swept, oid, rid, **order_set):
+    doc = _book(swept, oid)
+    _claim_unit(swept, doc)
+    if order_set:
+        _set(swept, oid, **order_set)
+    shopify_refund.handle_shopify_refund(swept["db"], _refund(rid, oid), webhook_id=None,
+                                         topic="refunds/create")
+    return swept["review"].find_one({"shopify_refund_id": str(rid)})
+
+
+def _read_fails_once(monkeypatch, repo):
+    real, calls = repo.find_many, []
+
+    def flaky(query):
+        calls.append(query)
+        if len(calls) == 1:
+            _raise_read()
+        return real(query)
+
+    monkeypatch.setattr(repo, "find_many", flaky)
+
+
+def _units(swept):
+    return [(u["stock_id"], u["status"]) for u in swept["stock_repo"].units]
+
+
+def test_a_blip_in_the_sold_read_at_the_confirm_leaves_the_restock_open(swept, monkeypatch):
+    row = _one_unit_refund(swept, 60160, 700360)
+    assert [line["restock"] for line in row["proposed_restock"]] == [True]
+    _read_fails_once(monkeypatch, swept["stock_repo"])
+    res = shopify_refund.post_from_review(swept["db"], row)
+
+    assert res["status"] == "credited" and res["restock_applied"] is False
+    assert _units(swept) == [("stk-1", "SOLD")]
+    ret = swept["returns"].find_one({"shopify_refund_id": "700360"})
+    assert ret["restock_applied"] is False, "open, so the retry door can run"
+    out = asyncio.run(returns_router.retry_restock(ret["return_id"], current_user=_ACCT))
+    assert out["restock_applied"] is True and _units(swept) == [("stk-1", "AVAILABLE")]
+
+
+def test_a_blip_in_the_sold_read_at_the_webhook_keeps_the_proposed_restock(swept, monkeypatch):
+    doc = _book(swept, 60161)
+    _claim_unit(swept, doc)
+    _read_fails_once(monkeypatch, swept["stock_repo"])
+    shopify_refund.handle_shopify_refund(swept["db"], _refund(700361, 60161), webhook_id=None,
+                                         topic="refunds/create")
+    row = swept["review"].find_one({"shopify_refund_id": "700361"})
+    assert [line["restock"] for line in row["proposed_restock"]] == [True]
+
+    res = shopify_refund.post_from_review(swept["db"], row)
+    assert res["restock_applied"] is True and _units(swept) == [("stk-1", "AVAILABLE")]
+
