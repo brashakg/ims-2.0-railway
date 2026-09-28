@@ -92,10 +92,15 @@ def merge_variant_rows(*groups: Optional[List[Dict[str, Any]]]) -> List[Dict[str
     return [out[k] for k in sorted(out)]
 
 
-def variant_rows_for_product(db, product: Dict[str, Any]) -> List[Dict[str, Any]]:
+def variant_rows_for_product(
+    db, product: Dict[str, Any], *, strict: bool = False
+) -> List[Dict[str, Any]]:
     """Every catalog_variants row of ``product`` -- the UNION of its
     ``parent_product_id`` and ``parent_sku`` links (see
-    :func:`merge_variant_rows`). Fail-soft -> []. Read-only; ``_id`` stripped."""
+    :func:`merge_variant_rows`). Fail-soft -> [] -- or, ``strict``, a raised
+    read: [] is "this listing has no size rows", which the stray question
+    turns into "every size the site still shows is a STRAY" (#1141 fix-six
+    recheck). Read-only; ``_id`` stripped."""
     coll = _coll(db, "catalog_variants")
     if coll is None or not isinstance(product, dict):
         return []
@@ -109,6 +114,8 @@ def variant_rows_for_product(db, product: Dict[str, Any]) -> List[Dict[str, Any]
         if sku:
             by_sku = list(coll.find({"parent_sku": sku}))
     except Exception as exc:  # noqa: BLE001 -- a read never raises into a push
+        if strict:
+            raise
         logger.warning("[ONLINE_CATALOG] variant read failed for %s: %s", pid or sku, exc)
     rows = merge_variant_rows(by_pid, by_sku)
     for r in rows:

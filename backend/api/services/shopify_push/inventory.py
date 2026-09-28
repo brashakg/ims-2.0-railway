@@ -383,7 +383,9 @@ def listing_strays(db, listing_ids: Iterable[str]) -> List[str]:
     website' press, the drawer preview and the sale's own run row all read
     green over a size the site kept selling (recheck round 1). Fail-soft: a
     report never blocks a write, and the next sweep names what a failed read
-    here could not."""
+    here could not -- but never as a STRAY: the size-row read is strict, so a
+    dead one is no answer at all, not "this listing has no sizes" (#1141
+    fix-six recheck)."""
     from ..online_catalog import variant_rows_for_product
 
     out: set = set()
@@ -392,7 +394,7 @@ def listing_strays(db, listing_ids: Iterable[str]) -> List[str]:
         for pid in listing_ids:
             doc = coll.find_one({"id": pid})
             if doc:
-                out.update(baseline_strays(doc, product_skus(doc, variant_rows_for_product(db, doc))))
+                out.update(baseline_strays(doc, product_skus(doc, variant_rows_for_product(db, doc, strict=True))))
     except Exception as exc:  # noqa: BLE001 -- a report never raises
         logger.warning("[SHOPIFY_STOCK] stray read failed for the listing(s): %s", exc)
     return sorted(out)
@@ -406,26 +408,28 @@ def stray_baseline_skus(db, skus: Iterable[str]) -> List[str]:
     so ``listings_for_skus`` cannot name its listing and ``listing_strays``
     is never asked (recheck round 2). The SAME predicate as the sweep and the
     press (``baseline_strays`` over ``product_skus``), never a second one.
-    Fail-soft: a report never blocks a write. ponytail: one scan of the
-    listings that carry a baseline (121 docs today), only on a sale whose SKU
-    has no target -- a query on a dynamic ``quantities.<sku>`` key scans the
-    same collection without an index and cannot take a dotted SKU."""
+
+    STRICT -- it RAISES (#1141 fix-six recheck). Its one caller runs on the
+    sale's no-target branch, where there is no write to block, beside
+    ``_alert_unmapped_online``, strict because "a read that died is not a SKU
+    that is not online"; fail-soft here it answered the opposite way inside
+    the same door, and the phantom's last unit sold during a dead scan left
+    no row. ponytail: one scan of the listings that carry a baseline (121
+    docs today), only on a sale whose SKU has no target -- a query on a
+    dynamic ``quantities.<sku>`` key scans the same collection without an
+    index and cannot take a dotted SKU."""
     from ..online_catalog import variant_rows_for_product
 
     wanted = {str(s) for s in skus if s}
     out: set = set()
     if not wanted:
         return []
-    try:
-        coll = db["catalog_products"]
-        for doc in coll.find({"ecom.online_stock.quantities": {"$exists": True}}):
-            carried = set((_last_sent(doc).get("quantities") or {}).keys())
-            if not (carried & wanted):
-                continue
-            strays = baseline_strays(doc, product_skus(doc, variant_rows_for_product(db, doc)))
-            out.update(s for s in strays if s in wanted)
-    except Exception as exc:  # noqa: BLE001 -- a report never raises
-        logger.warning("[SHOPIFY_STOCK] stray read failed for the SKU(s): %s", exc)
+    for doc in db["catalog_products"].find({"ecom.online_stock.quantities": {"$exists": True}}):
+        carried = set((_last_sent(doc).get("quantities") or {}).keys())
+        if not (carried & wanted):
+            continue
+        strays = baseline_strays(doc, product_skus(doc, variant_rows_for_product(db, doc, strict=True)))
+        out.update(s for s in strays if s in wanted)
     return sorted(out)
 
 
@@ -2076,33 +2080,34 @@ async def sync_product_stock(
 
 
 def _gid_products_with_variants(db) -> List[Tuple[Dict[str, Any], List[Dict[str, Any]]]]:
-    """Every catalog product already on Shopify, with its variant rows."""
+    """Every catalog product already on Shopify, with its variant rows.
+
+    STRICT -- both reads RAISE (#1141 fix-six recheck); the sweep names the
+    failure STOCK_ONHAND_UNKNOWN. Fail-soft, a dead catalog_products read was
+    "nothing on Shopify" -- a green noop over the 01:00 / 09:00 net that
+    re-sends what a failed POS write-back left stale -- and a dead
+    catalog_variants read shrank every listing to its own SKU, so every live
+    size with a positive baseline was reported STOCK_BASELINE_STRAY ('the row
+    that carried the Shopify id is gone'), a false statement about the data."""
     out: List[Tuple[Dict[str, Any], List[Dict[str, Any]]]] = []
-    try:
-        # A size variant (is_variant_of) never owns a listing: its SKU rides
-        # the parent's row set below. Filtered even if a repair script ever
-        # stamps the parent gid on the child twin (a double stock write and a
-        # second ledger otherwise).
-        products = [
-            d
-            for d in db["catalog_products"].find({})
-            if (d.get("ecom") or {}).get("shopify_product_id") and not is_variant_of(d)
-        ]
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[SHOPIFY_STOCK] catalog read failed: %s", exc)
-        return []
+    # A size variant (is_variant_of) never owns a listing: its SKU rides
+    # the parent's row set below. Filtered even if a repair script ever
+    # stamps the parent gid on the child twin (a double stock write and a
+    # second ledger otherwise).
+    products = [
+        d
+        for d in db["catalog_products"].find({})
+        if (d.get("ecom") or {}).get("shopify_product_id") and not is_variant_of(d)
+    ]
     if not products:
         return []
     by_pid: Dict[str, List[Dict[str, Any]]] = {}
     by_sku: Dict[str, List[Dict[str, Any]]] = {}
-    try:
-        for v in db["catalog_variants"].find({}):
-            if v.get("parent_product_id"):
-                by_pid.setdefault(str(v["parent_product_id"]), []).append(v)
-            if v.get("parent_sku"):
-                by_sku.setdefault(str(v["parent_sku"]), []).append(v)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[SHOPIFY_STOCK] variant read failed: %s", exc)
+    for v in db["catalog_variants"].find({}):
+        if v.get("parent_product_id"):
+            by_pid.setdefault(str(v["parent_product_id"]), []).append(v)
+        if v.get("parent_sku"):
+            by_sku.setdefault(str(v["parent_sku"]), []).append(v)
     from ..online_catalog import merge_variant_rows
 
     for p in products:
@@ -2144,7 +2149,21 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
     from ..online_catalog import inventory_items_for_skus
     from ..online_stock_writeback import online_quantities_for_skus, orphan_stock_stores
 
-    pairs = _gid_products_with_variants(db)
+    try:
+        pairs = _gid_products_with_variants(db)
+    except Exception as exc:  # noqa: BLE001 -- the sweep never raises; it names
+        return PushResult(
+            mode=MODE_SIMULATED,
+            entity="stock",
+            action="sync",
+            ok=False,
+            code=STOCK_ONHAND_UNKNOWN,
+            error=(
+                f"the catalogue (which listings are on Shopify, and their size "
+                f"rows) could not be read -- nothing written this pass: {exc}"
+            ),
+            payload={"candidates": None},  # unknown is never 0
+        )
     all_skus: List[str] = []
     for product, variants in pairs:
         for sku in product_skus(product, variants):

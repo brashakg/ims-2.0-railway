@@ -3971,3 +3971,134 @@ def test_F6_a_dead_status_read_after_an_accepted_write_never_says_nothing_writte
     for text in (s["error"], run["error"]):
         assert "nothing written" not in text, text
         assert "sellable on the website" in text and "status read died" in text and "SP-2" in text, text
+
+
+class _DeadFind(StrictCollection):
+    """A collection whose `find` dies when ``when(filter)`` says so."""
+
+    def __init__(self, base, when, message="cursor died"):
+        super().__init__(base.name, base.docs)
+        self.when = when
+        self.message = message
+
+    def find(self, filter=None, *a, **k):
+        if self.when(filter or {}):
+            raise RuntimeError(self.message)
+        return super().find(filter, *a, **k)
+
+
+def _parent_link_read(f):
+    return "parent_product_id" in f or "parent_sku" in f
+
+
+def test_F4_the_sweep_over_a_dead_catalogue_read_is_UNKNOWN_never_a_green_noop_or_a_false_stray(monkeypatch):
+    """SILENT FALLBACK + A DEAD READ SPELLED AS A DATA DEFECT (#1141 fix-six
+    recheck, two lenses). `_gid_products_with_variants` -- the sweep's
+    catalogue reader -- was fail-soft on both of its reads:
+      * catalog_products dead -> [] -> action='noop', ok=True, code=None: the
+        01:00 / 09:00 net that re-sends a number a failed POS write-back left
+        stale was silently green;
+      * catalog_variants dead -> every listing's SKU list shrank to its own SKU,
+        and `baseline_strays` named every live size with a positive baseline
+        STOCK_BASELINE_STRAY -- 'the row that carried the Shopify id is gone
+        ... delete the variant in Shopify admin', untrue: the row exists.
+    Both reads are STRICT now and the sweep names them STOCK_ONHAND_UNKNOWN.
+    Put either fail-soft back -> this fails."""
+    # 1. catalog_products dead, while a stale number waits to be re-sent.
+    db = _sold_at_b()
+    db._collections["catalog_products"] = _DeadFind(db.get_collection("catalog_products"), lambda f: f == {})
+    spy = _Spy(_responses())
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.sync_stock_levels(db))
+    assert res.ok is False and res.code == shopify_push.STOCK_ONHAND_UNKNOWN, res
+    assert "catalogue" in res.error and "cursor died" in res.error, res.error
+    assert spy.writes() == []
+    # 2. catalog_variants dead under a listing with a live size.
+    db2 = _db(a=2, b=1, c=0)
+    db2.seed("products", [{"product_id": "spine-S", "sku": "SP-1-S"}])
+    db2.get_collection("stock_units").insert_one(
+        {"stock_id": "S1", "product_id": "spine-S", "store_id": "BV-A", "status": "AVAILABLE"}
+    )
+    sent = {"quantities": {"SP-1": {"BV-A": 2, "BV-B": 1, "BV-C": 0}, "SP-1-S": {"BV-A": 1, "BV-B": 0, "BV-C": 0}},
+            "tracked": True, "policy": "DENY"}
+    db2.seed("catalog_products", [_catalog_row("cat-1", "SP-1", gid=True, status="PUBLISHED", online_stock=sent)])
+    db2.seed("catalog_variants", [
+        {"sku": "SP-1", "parent_product_id": "cat-1", "shopify_variant_id": VARIANT_GID, "shopify_inventory_item_id": INV_GID},
+        {"sku": "SP-1-S", "parent_product_id": "cat-1", "shopify_variant_id": "gid://shopify/ProductVariant/6", "shopify_inventory_item_id": INV_TWO},
+    ])
+    ctrl = _run(shopify_push.sync_stock_levels(db2, dry_run=True))
+    assert ctrl.code is None and ctrl.payload["stray_skus"] == [], ctrl  # healthy: nothing stray
+    db2._collections["catalog_variants"] = _DeadFind(db2.get_collection("catalog_variants"), lambda f: True, "variants died")
+    for dry in (True, False):
+        res2 = _run(shopify_push.sync_stock_levels(db2, dry_run=dry))
+        assert res2.ok is False and res2.code == shopify_push.STOCK_ONHAND_UNKNOWN, res2
+        assert "variants died" in res2.error and "delete the variant in Shopify admin" not in res2.error, res2.error
+        assert "SP-1-S" not in (res2.payload or {}).get("stray_skus", []), res2.payload
+
+
+def _phantom_size_world(*, row_exists):
+    """cat-1 LIVE; its baseline still advertises size SP-1-L = 1 at A. With
+    ``row_exists`` SP-1-L still has its size row (no Shopify item yet), so it
+    is NOT a stray; without it the row is gone (the round-7 phantom)."""
+    db = _db(a=1, b=0, c=0)
+    db.seed("products", [{"product_id": "spine-L", "sku": "SP-1-L"}])
+    sent = {"quantities": {"SP-1": {"BV-A": 1, "BV-B": 0, "BV-C": 0}, "SP-1-L": {"BV-A": 1, "BV-B": 0, "BV-C": 0}},
+            "tracked": True, "policy": "DENY"}
+    db.seed("catalog_products", [_catalog_row("cat-1", "SP-1", gid=True, status="PUBLISHED", online_stock=sent)])
+    db.seed("catalog_variants", [{"sku": "SP-1-L", "parent_product_id": "cat-1"}] if row_exists else [])
+    return db
+
+
+def test_F5_the_no_target_sales_stray_read_is_strict_like_its_neighbour(monkeypatch):
+    """OPPOSITE POLARITY INSIDE ONE DOOR (#1141 fix-six recheck, lens
+    r1:oversell). On the sale's no-target branch `stray_baseline_skus`
+    swallowed a dead read into [] ('a report never blocks a write' -- there is
+    no write there to block), right beside `_alert_unmapped_online`, made
+    STRICT because 'a read that died is not a SKU that is not online'. The
+    phantom's last unit sold alone during a dead baseline scan: no code, no
+    row, no task. And one read down, `variant_rows_for_product` swallowed a
+    dead size-row read into [], so a size whose row EXISTS was named a
+    STOCK_BASELINE_STRAY. Both strict now: STOCK_ONHAND_UNKNOWN naming the read
+    that died, one not-ok row. Put either fail-soft back -> this fails."""
+    # 1. The baseline scan dies (the phantom's last unit sells alone).
+    db = _phantom_size_world(row_exists=False)
+    db._collections["catalog_products"] = _DeadFind(
+        db.get_collection("catalog_products"), lambda f: "ecom.online_stock.quantities" in f
+    )
+    _live(monkeypatch, _Spy(_responses()))
+    s = _run(wb.writeback_skus(db, ["SP-1-L"], "BV-A"))
+    runs = list(db.get_collection("sync_runs").find({}))
+    assert s.get("code") == shopify_push.STOCK_ONHAND_UNKNOWN and "cursor died" in s["error"], s
+    assert "still shows a number" in s["error"] and "nothing written" not in s["error"], s["error"]
+    assert len(runs) == 1 and runs[0]["ok"] is False, runs
+    # 2. The size-row read dies: SP-1-L's row exists, so it is NOT a stray.
+    db2 = _phantom_size_world(row_exists=True)
+    ctrl = _run(wb.writeback_skus(db2, ["SP-1-L"], "BV-A"))
+    assert ctrl.get("code") != shopify_push.STOCK_BASELINE_STRAY, ctrl
+    db3 = _phantom_size_world(row_exists=True)
+    db3._collections["catalog_variants"] = _DeadFind(db3.get_collection("catalog_variants"), _parent_link_read)
+    s3 = _run(wb.writeback_skus(db3, ["SP-1-L"], "BV-A"))
+    assert s3.get("code") == shopify_push.STOCK_ONHAND_UNKNOWN and "stray_skus" not in s3, s3
+    assert "delete the variant in Shopify admin" not in s3["error"], s3["error"]
+
+
+def test_F5b_the_presss_stray_question_never_names_a_size_whose_row_read_died(monkeypatch):
+    """The same false stray on the PRESS (`listing_strays` over
+    `variant_rows_for_product`): a dead size-row read shrank the listing to its
+    own SKU and every live size with a positive baseline was named
+    STOCK_BASELINE_STRAY. Fail-soft stays the press's contract (a report never
+    blocks a write, the sweep names the dead read), but never as a data
+    defect. Read the rows fail-soft again -> this fails."""
+    db = _db(a=2, b=1, c=0)
+    db.seed("products", [{"product_id": "spine-S", "sku": "SP-1-S"}])
+    sent = {"quantities": {"SP-1": {"BV-A": 2, "BV-B": 1, "BV-C": 0}, "SP-1-S": {"BV-A": 1, "BV-B": 0, "BV-C": 0}},
+            "tracked": True, "policy": "DENY"}
+    db.seed("catalog_products", [_catalog_row("cat-1", "SP-1", gid=True, status="PUBLISHED", online_stock=sent)])
+    db.seed("catalog_variants", [
+        {"sku": "SP-1", "parent_product_id": "cat-1", "shopify_variant_id": VARIANT_GID, "shopify_inventory_item_id": INV_GID},
+        {"sku": "SP-1-S", "parent_product_id": "cat-1", "shopify_variant_id": "gid://shopify/ProductVariant/6", "shopify_inventory_item_id": INV_TWO},
+    ])
+    db._collections["catalog_variants"] = _DeadFind(db.get_collection("catalog_variants"), _parent_link_read)
+    _live(monkeypatch, _Spy(_responses()))
+    out = _run(shopify_push.push_skus_stock(db, ["SP-1"], source="product_push", product_id="cat-1"))
+    assert out["stray_skus"] == [] and out["code"] != shopify_push.STOCK_BASELINE_STRAY, out

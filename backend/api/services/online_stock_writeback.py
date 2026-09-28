@@ -649,7 +649,19 @@ def _name_baseline_strays(
     )
 
     said = set(named)
-    strays = [s for s in stray_baseline_skus(db, skus) if s not in said]
+    try:
+        found = stray_baseline_skus(db, skus)
+    except Exception as exc:  # noqa: BLE001 -- the sale path never raises; it names
+        # STRICT like its neighbour (#1141 fix-six recheck): a dead scan is not
+        # "nothing stray".
+        _say_unknown(
+            summary,
+            f"whether the website still shows a number for {', '.join(skus[:5])} could "
+            f"not be read (the last-sent stock read died) -- a size the site keeps "
+            f"selling is not ruled out: {exc}",
+        )
+        return
+    strays = [s for s in found if s not in said]
     if not strays:
         return
     summary["stray_skus"] = strays
