@@ -25,12 +25,14 @@ Pins, each with its revert named in the test:
     shop's listing, a swapped pair is a risk, one shop's filter reads its own
     location only; OVERSELL is past the shelf on both, 'recommended' /
     'sellable' / OVER_ALLOCATED are the writer's number (buffer, block).
-  * round 4: both screens order and report delta per location; an empty
-    store_id is all stores.
   * the sample goes through the writer's item resolver (the ecom fallback);
-    the drift task names the press that re-sends (Send to website) and keeps
-    every SKU still owed across a refresh; a tasks read failure files no
-    second task.
+    the drift task names the press that re-sends (Send to website) and who
+    can press it, and keeps every SKU still owed across a refresh; a tasks
+    read failure files no second task.
+  * round 4: a task whose SKUs left the catalogue (or an empty catalogue)
+    closes; a night that compared nothing still retires a shop that left
+    the map; only a task write that succeeded is reported; both screens
+    order and report delta per location; an empty store_id is all stores.
 
 StrictDB + injected Shopify boundary -- no network, no production.
 """
@@ -430,15 +432,122 @@ def test_tick_a_drifted_sku_that_was_not_re_read_keeps_its_task_open():
     assert out["tasks"]["closed"] == ["BV-A"] and _tasks(db)[0]["status"] == "COMPLETED"
 
 
-def test_tick_a_drifted_sku_whose_ims_side_went_unknown_keeps_its_task_open():
-    """Same gate, IMS side: SKU-2 drifted, then its spine row is gone (IMS
-    unknown) while SKU-1 compares clean -> still owed, still OPEN."""
+def test_tick_a_drifted_sku_whose_ims_side_went_unknown_keeps_its_task_open(monkeypatch):
+    """Same gate, IMS side: SKU-2 drifted and is STILL in the online
+    catalogue, but tonight the rule has no answer for it (unknown) while
+    SKU-1 compares clean -> still owed, still OPEN. (A SKU that LEFT the
+    catalogue is a different night: see the next test.) Drop `not owed` ->
+    closed -> fails."""
+    from api.services import online_stock_writeback as wb
+
     db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 5, "BV-B": 0}})
     shop = _shopify({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 0, LOC_B: 0}})
     _run(sp.run_parity_tick(db, graphql=shop))
-    db.get_collection("products").delete_many({"sku": "SKU-2"})
+    real = wb.online_quantities_for_skus
+    monkeypatch.setattr(wb, "online_quantities_for_skus",
+                        lambda db, skus, **k: {s: q for s, q in real(db, skus, **k).items() if s != "SKU-2"})
     out = _run(sp.run_parity_tick(db, graphql=shop))
+    assert out["compared"] == 2 and out["unknown"] == 2
     assert out["tasks"]["closed"] == [] and _tasks(db)[0]["status"] == "OPEN"
+
+
+@pytest.mark.parametrize("gone_from", [("products",), ("catalog_variants",), ("products", "catalog_variants")])
+def test_tick_a_task_whose_sku_left_the_catalogue_is_closed(gone_from):
+    """Round 4 P5, the stuck July task one shop at a time. Night 1: SKU-2
+    drifts at BV-A (IMS 5 vs Shopify 0), the task names SKU-2. SKU-2 then
+    leaves the online catalogue (its spine row, its Shopify item mapping, or
+    both deleted). Night 2 compares the 2 rows left, all clean: there is no
+    drift left to measure, and parity would never compare SKU-2 again ->
+    CLOSED. Drop `& set(mapped_skus)` from `owed` -> OPEN forever -> fails."""
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 5, "BV-B": 0}})
+    shop = _shopify({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 0, LOC_B: 0}})
+    _run(sp.run_parity_tick(db, graphql=shop))
+    assert _tasks(db)[0]["payload"]["skus"] == ["SKU-2"]
+    for name in gone_from:
+        db.get_collection(name).delete_many({"sku": "SKU-2"})
+    out = _run(sp.run_parity_tick(db, graphql=shop))
+    assert out["compared"] == 2 and out["drift_count"] == 0
+    assert out["tasks"]["closed"] == ["BV-A"] and _tasks(db)[0]["status"] == "COMPLETED"
+
+
+def test_tick_an_empty_catalogue_still_closes_every_task():
+    """Round 4 P6, probe P1: night 1 files BV-A's task; the catalogue is then
+    emptied. Every SKU the task names is gone -> closed, on a night that
+    reads 'no online-mapped variants' (checked). Put back the early return on
+    an empty sample -> the task stays OPEN for ever -> fails."""
+    db = _db({"SKU-1": {"BV-A": 5, "BV-B": 1}})
+    _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {}})))
+    assert _tasks(db)[0]["payload"]["skus"] == ["SKU-1"]
+    db.get_collection("products").delete_many({})
+    out = _run(sp.run_parity_tick(db, graphql=_shopify({})))
+    assert out["checked"] is True and out["reason"] == "no online-mapped variants" and out["sampled"] == 0
+    assert out["tasks"] == {"filed": [], "refreshed": [], "closed": ["BV-A"]}
+    assert _tasks(db)[0]["status"] == "COMPLETED"
+
+
+def test_tick_an_empty_catalogue_still_retires_a_shop_that_left_the_map():
+    """Probe P2: BV-A's location is cleared AND the catalogue is empty -> its
+    task is retired (retiring needs the map, not the sample)."""
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}})
+    db.seed("tasks", [{"task_id": "T-1", "source_ref": "shopify-stock-parity-drift:BV-A", "status": "ESCALATED"}])
+    db.get_collection("stores").update_one({"store_id": "BV-A"}, {"$unset": {"shopify_location_id": ""}})
+    db.get_collection("products").delete_many({})
+    out = _run(sp.run_parity_tick(db, graphql=_shopify({})))
+    assert out["tasks"]["closed"] == ["BV-A"] and _tasks(db)[0]["status"] == "COMPLETED"
+
+
+@pytest.mark.parametrize("failure", ["catalog", "shopify", "creds"])
+def test_tick_a_night_that_compared_nothing_still_retires_a_shop_that_left_the_map(monkeypatch, failure):
+    """Round 4 P6: the catalog-read failure, the Shopify-read failure and the
+    no-creds night compare nothing, so no MAPPED shop's task moves (BV-B's
+    stays OPEN) -- but the shop map IS known, so BV-A, whose location was
+    cleared, has its task retired. Return without the retire (`closed = []`
+    in not_compared) -> BV-A OPEN -> fails."""
+    from api.services import online_catalog
+
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}})
+    db.seed("tasks", [
+        {"task_id": "T-A", "source_ref": "shopify-stock-parity-drift:BV-A", "status": "ESCALATED"},
+        {"task_id": "T-B", "source_ref": "shopify-stock-parity-drift:BV-B", "status": "OPEN"},
+    ])
+    db.get_collection("stores").update_one({"store_id": "BV-A"}, {"$unset": {"shopify_location_id": ""}})
+    if failure == "catalog":
+        def boom(db, skus):
+            raise RuntimeError("catalog_variants read died")
+
+        monkeypatch.setattr(online_catalog, "inventory_items_for_skus", boom)
+    if failure == "creds":
+        monkeypatch.setattr("api.services.shopify_push._has_shopify_creds", lambda db, *a, **k: False)
+    out = _run(sp.run_parity_tick(db, graphql=_shopify({}, fail=failure == "shopify")))
+    assert out["checked"] is False and out["compared"] == 0
+    assert out["tasks"] == {"filed": [], "refreshed": [], "closed": ["BV-A"]}
+    assert {t["task_id"]: t["status"] for t in _tasks(db)} == {"T-A": "COMPLETED", "T-B": "OPEN"}
+
+
+def test_tick_counts_only_task_writes_that_succeeded():
+    """Round 4 P8: BaseRepository.update swallows a rejected write into False
+    (and complete_task returns it). Night 1 files BV-A's task; then every
+    tasks write is rejected. Night 2 (drift persists) must NOT report
+    'refreshed', night 3 (clean) must NOT report 'closed', and a retire that
+    did not land is not 'closed' either -- the task is still OPEN. Ignore the
+    write's return again -> the snapshot lists the shop -> fails."""
+    db = _db({"SKU-1": {"BV-A": 5, "BV-B": 1}})
+    _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {}})))
+    coll = db.get_collection("tasks")
+
+    def rejected(*_a, **_k):
+        raise RuntimeError("write rejected")
+
+    coll.update_one = rejected
+    out = _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 0, LOC_B: 1}, INV_2: {}})))
+    assert out["tasks"] == {"filed": [], "refreshed": [], "closed": []}
+    assert "IMS 5 vs Shopify 1" in _tasks(db)[0]["description"]
+    out = _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 5, LOC_B: 1}, INV_2: {}})))
+    assert out["tasks"] == {"filed": [], "refreshed": [], "closed": []}
+    db.get_collection("stores").update_one({"store_id": "BV-A"}, {"$unset": {"shopify_location_id": ""}})
+    out = _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_B: 1}, INV_2: {}})))
+    assert out["tasks"]["closed"] == []
+    assert _tasks(db)[0]["status"] == "OPEN"
 
 
 def test_tick_a_drifted_sku_that_fell_out_of_the_sample_keeps_its_task_open():
@@ -855,6 +964,15 @@ def test_drift_task_names_the_press_that_re_sends_the_numbers():
     (task,) = _tasks(db)
     assert "press Send to website" in task["description"]
     assert "re-send only numbers IMS changed" in task["description"]
+    # Round 4 P7: the task carries the shop's store_id, so its first owner is
+    # that shop's STORE_MANAGER (task_escalation), and Send to website is
+    # SUPERADMIN / ADMIN only (CatalogProductDrawer.tsx `canPush`). The text
+    # names what the store manager CAN do: check the shelf, ask an admin.
+    # Put back 'open each product named here and press Send to website' as
+    # the whole instruction -> fails.
+    assert task["store_id"] == "BV-A"
+    assert "Store manager: check each product named here on the shelf" in task["description"]
+    assert "ask an ADMIN or SUPERADMIN" in task["description"]
 
 
 def test_tick_a_refreshed_task_keeps_every_sku_still_owed():
@@ -892,7 +1010,7 @@ def test_a_tasks_read_failure_files_no_second_task():
     coll.find = dead
     summary = {"drift_count": 1, "drift": [{"sku": "SKU-1", "ims": 5, "shopify": 1, "delta": 4}],
                "tolerance": 2, "max_delta": 4, "compared": 1, "clean_skus": []}
-    assert sp.sync_drift_task(TaskRepository(coll), {"store_id": "BV-A"}, summary) is None
+    assert sp.sync_drift_task(TaskRepository(coll), {"store_id": "BV-A"}, summary, mapped_skus={"SKU-1"}) is None
     assert len(coll.docs) == 1
 
 

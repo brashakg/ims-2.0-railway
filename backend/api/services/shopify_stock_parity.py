@@ -30,13 +30,17 @@ the shelf, so they are in no row here either.
 
 Tasks: ONE per shop (source_ref ``shopify-stock-parity-drift:<store_id>``) --
 filed on drift, refreshed (description + payload) while the drift persists,
-completed when a later tick compares EVERY SKU the task names clean at that
-shop (payload.skus: a SKU leaves the task only by comparing clean -- one
-Shopify skipped, that fell out of the sample or whose IMS side was unknown is
-still owed). A shop that leaves the mapped set (location cleared, claimed by
-two shops, shop deactivated) has its task closed: parity no longer compares
+completed when a later tick finds EVERY SKU the task names either compared
+clean at that shop or GONE from the online catalogue (deleted, or its Shopify
+item unmapped: nothing is left to measure, so an empty catalogue closes every
+task too). payload.skus: a SKU leaves the task only that way -- one Shopify
+skipped, that fell out of the capped sample or whose IMS side was unknown is
+still owed. A shop that leaves the mapped set (location cleared, claimed by
+two shops, shop deactivated) has its task closed on EVERY tick that could read
+the shop map, whether or not anything was compared: parity no longer compares
 it, and the writer's own STORE_UNMAPPED / STORE_LOCATION_DUPLICATE task names
-what is left. The pre-PR-4 POOLED task (the bare
+what is left. A task counts as filed / refreshed / closed only when the
+write succeeded. The pre-PR-4 POOLED task (the bare
 ``shopify-stock-parity-drift`` ref) is never filed again;
 scripts/close_pooled_parity_task.py closes the stuck one.
 
@@ -46,7 +50,7 @@ Contract (mirrors the rest of the Shopify bridge):
   * READ-ONLY vs Shopify (single boundary: shopify_push._graphql, injectable).
     Half an answer is no answer: when any Shopify batch fails (a raise, no
     nodes, or top-level `errors` beside a partial nodes list), nothing is
-    compared and no task is filed OR closed.
+    compared and no MAPPED shop's task is filed OR closed.
   * The row builder and the comparator are PURE (parity_rows,
     compare_location_parity, unclaimed_locations): unit-tested without a DB
     or Shopify.
@@ -284,14 +288,17 @@ def unbacked_units(
 # ---------------------------------------------------------------------------
 
 
-def _sample_variants(db, limit: int = _DEFAULT_SAMPLE) -> Optional[List[Dict[str, Any]]]:
-    """Up to `limit` IMS SKUs (the spine ``products``, the rule's own SKU
-    list) that map to a Shopify inventory item through THE WRITER's resolver,
+def _sample_variants(db) -> Optional[List[Dict[str, Any]]]:
+    """EVERY IMS SKU (the spine ``products``, the rule's own SKU list) that
+    maps to a Shopify inventory item through THE WRITER's resolver,
     online_catalog.inventory_items_for_skus (catalog_variants first, then the
-    catalog_products ``ecom`` fallback) -- mapped first, then capped. Returns
-    [{sku, inventory_item_id}]; None when a read failed (unknown, never "no
-    online-mapped variants"). ponytail: resolves every spine SKU; cap the
-    scan if the catalogue grows past a few thousand."""
+    catalog_products ``ecom`` fallback), in spine order and UNCAPPED: the tick
+    caps what it reads from Shopify, and the full list is what tells a SKU
+    that is GONE (a task may drop it) from one that merely fell outside
+    tonight's cap (still owed). Returns [{sku, inventory_item_id}]; None when
+    a read failed (unknown, never "no online-mapped variants"). ponytail:
+    resolves every spine SKU; cap the scan if the catalogue grows past a few
+    thousand."""
     coll = _coll(db, "products")
     if coll is None:
         return None
@@ -306,7 +313,7 @@ def _sample_variants(db, limit: int = _DEFAULT_SAMPLE) -> Optional[List[Dict[str
     except Exception as exc:  # noqa: BLE001
         logger.warning("[STOCK_PARITY] variant sample failed: %s", exc)
         return None
-    return [{"sku": s, "inventory_item_id": items[s]} for s in skus if s in items][: int(limit)]
+    return [{"sku": s, "inventory_item_id": items[s]} for s in skus if s in items]
 
 
 async def shopify_levels_by_item(
@@ -400,21 +407,31 @@ def _task_skus(task: Dict[str, Any]) -> List[str]:
     return list(payload.get("skus") or [d.get("sku") for d in payload.get("drift") or []])
 
 
-def sync_drift_task(repo, store: Dict[str, Any], summary: Dict[str, Any]) -> Optional[str]:
+def sync_drift_task(
+    repo, store: Dict[str, Any], summary: Dict[str, Any], *, mapped_skus: Iterable[str]
+) -> Optional[str]:
     """ONE shop's drift task, from that shop's own ``compare_location_parity``
-    summary (source_ref ``shopify-stock-parity-drift:<store_id>``):
+    summary (source_ref ``shopify-stock-parity-drift:<store_id>``).
+    ``mapped_skus``: EVERY online-mapped SKU in the catalogue tonight
+    (_sample_variants, uncapped) -- a SKU the task names that is not in it is
+    GONE (deleted, or its Shopify item unmapped): parity can never compare it
+    again, so it is no longer owed.
 
       * drift             -> refresh every ACTIVE task's description + payload,
                              or file one when none is active (never a second);
-      * 0 drift, every SKU the task names compared CLEAN tonight
-                          -> complete every active task (the drift cleared);
+      * 0 drift, every SKU the task names compared CLEAN tonight or is GONE
+                          -> complete every active task (the drift cleared,
+                             or nothing is left to measure);
       * otherwise         -> leave it alone (unknown is not clear: a drifted
-                             SKU Shopify skipped, that fell out of the sample
-                             or whose IMS side was unknown is still owed).
+                             SKU Shopify skipped, that fell out of the capped
+                             sample or whose IMS side was unknown is still
+                             owed).
 
     payload.skus carries every SKU still owed: tonight's drift plus any
-    earlier one not yet compared clean. Returns "filed" | "refreshed" |
-    "closed" | None. Fail-soft."""
+    earlier one not yet compared clean and not gone. Returns "filed" |
+    "refreshed" | "closed" only when EVERY write it made succeeded (the
+    repository returns False on a rejected write, never raises), else None.
+    Fail-soft."""
     from .task_triggers import active_tasks
 
     sid = str(store.get("store_id") or "")
@@ -422,7 +439,8 @@ def sync_drift_task(repo, store: Dict[str, Any], summary: Dict[str, Any]) -> Opt
     ref = _DRIFT_TASK_REF.format(store_id=sid)
     try:
         active = active_tasks(repo, ref)
-        owed = {s for t in active for s in _task_skus(t)} - set(summary.get("clean_skus") or [])
+        named = {s for t in active for s in _task_skus(t)}
+        owed = (named & set(mapped_skus)) - set(summary.get("clean_skus") or [])
         if summary.get("drift_count"):
             worst = (summary.get("drift") or [])[:5]
             lines = ", ".join(
@@ -433,8 +451,9 @@ def sync_drift_task(repo, store: Dict[str, Any], summary: Dict[str, Any]) -> Opt
                 f"drifted beyond tolerance {summary.get('tolerance')} unit(s); worst delta "
                 f"{summary.get('max_delta')}. Top: {lines}. The 01:00 / 09:00 IST pass and "
                 f"Push stock re-send only numbers IMS changed, so they never undo a change "
-                f"made on Shopify: open each product named here and press Send to website "
-                f"to re-send IMS's numbers."
+                f"made on Shopify. Store manager: check each product named here on the "
+                f"shelf, then ask an ADMIN or SUPERADMIN (only they have the button) to "
+                f"open it and press Send to website to re-send IMS's numbers."
             )
             payload = {
                 "store_id": sid,
@@ -444,9 +463,10 @@ def sync_drift_task(repo, store: Dict[str, Any], summary: Dict[str, Any]) -> Opt
                 "max_delta": summary.get("max_delta"),
             }
             if active:
-                for t in active:
-                    repo.update(t.get("task_id"), {"description": description, "payload": payload})
-                return "refreshed"
+                # A list, not a generator: every task is written even after one fails.
+                ok = all([repo.update(t.get("task_id"), {"description": description, "payload": payload})
+                          for t in active])
+                return "refreshed" if ok else None
             from .task_triggers import create_system_task
 
             created = create_system_task(
@@ -460,13 +480,15 @@ def sync_drift_task(repo, store: Dict[str, Any], summary: Dict[str, Any]) -> Opt
                 extra={"payload": payload},
             )
             return "filed" if created else None
-        if active and not owed and summary.get("compared"):
-            for t in active:
-                repo.complete_task(
-                    t.get("task_id"),
-                    notes=f"Auto-closed: {label} compared clean ({summary.get('compared')} SKU(s)).",
-                )
-            return "closed"
+        # A task that names no SKU (an old payload) closes only on a night
+        # that compared something at this shop.
+        if active and not owed and (named or summary.get("compared")):
+            notes = (
+                f"Auto-closed: every SKU this task named at {label} compared clean or left "
+                f"the online catalogue ({summary.get('compared') or 0} SKU(s) compared)."
+            )
+            ok = all([repo.complete_task(t.get("task_id"), notes=notes) for t in active])
+            return "closed" if ok else None
     except Exception as exc:  # noqa: BLE001
         logger.warning("[STOCK_PARITY] drift task sync failed for %s: %s", sid, exc)
     return None
@@ -479,7 +501,7 @@ def retire_unmapped_drift_tasks(repo, mapped: Dict[str, str]) -> List[str]:
     this its task was never refreshed nor closed -- OPEN, then ESCALATED,
     forever: the stuck July pooled task all over again. The writer's own
     STORE_UNMAPPED / STORE_LOCATION_DUPLICATE task names what is left.
-    Returns the store ids closed. Fail-soft -> []."""
+    Returns the store ids whose close was WRITTEN. Fail-soft -> []."""
     from .task_triggers import active_tasks
 
     prefix = _DRIFT_TASK_REF.format(store_id="")
@@ -488,7 +510,7 @@ def retire_unmapped_drift_tasks(repo, mapped: Dict[str, str]) -> List[str]:
         for t in active_tasks(repo, {"$regex": "^" + prefix}):
             sid = str(t.get("source_ref") or "")[len(prefix):]
             if sid and sid not in mapped:
-                repo.complete_task(
+                done = repo.complete_task(
                     t.get("task_id"),
                     notes=(
                         f"Auto-closed: {sid} no longer has a usable Shopify location "
@@ -496,7 +518,7 @@ def retire_unmapped_drift_tasks(repo, mapped: Dict[str, str]) -> List[str]:
                         "so its stock is no longer compared."
                     ),
                 )
-                if sid not in out:
+                if done and sid not in out:
                     out.append(sid)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[STOCK_PARITY] unmapped drift-task retire failed: %s", exc)
@@ -577,33 +599,38 @@ async def run_parity_tick(
     }
 
     try:
+        from .online_stock_writeback import online_quantities_for_skus
+        from .shopify_push.inventory import _mapped, _stores, unmapped_holders
+
+        # The shop map first: a shop that left it has its task retired on
+        # every return below, compared or not -- retiring needs the map and
+        # nothing else (a raising shop list is a tick error: an unknown map
+        # retires nothing).
+        stores = _stores(db)
+        mapped = _mapped(stores)
+        repo = _task_repo(db)
+
+        def not_compared(reason: str) -> Dict[str, Any]:
+            closed = retire_unmapped_drift_tasks(repo, mapped) if repo is not None else []
+            snap = {**base, "reason": reason, "tasks": {"filed": [], "refreshed": [], "closed": closed}}
+            _store_snapshot(db, snap)
+            return snap
+
         # Gate on creds so we don't mint tokens / call Shopify when unconfigured.
         try:
             from .shopify_push import _has_shopify_creds
 
-            if not _has_shopify_creds(db):
-                snap = {**base, "reason": "shopify creds not configured"}
-                _store_snapshot(db, snap)
-                return snap
+            creds = _has_shopify_creds(db)
         except Exception as exc:  # noqa: BLE001
-            return {**base, "reason": f"creds check failed: {exc}"}
+            return not_compared(f"creds check failed: {exc}")
+        if not creds:
+            return not_compared("shopify creds not configured")
 
-        variants = _sample_variants(db, sample_limit)
-        if variants is None:
-            snap = {**base, "reason": "catalog read failed -- nothing compared, no task touched"}
-            _store_snapshot(db, snap)
-            return snap
+        catalogue = _sample_variants(db)
+        if catalogue is None:
+            return not_compared("catalog read failed -- nothing compared, no mapped shop's task touched")
+        variants = catalogue[: int(sample_limit)]
         base["sampled"] = len(variants)
-        if not variants:
-            snap = {**base, "checked": True, "reason": "no online-mapped variants"}
-            _store_snapshot(db, snap)
-            return snap
-
-        from .online_stock_writeback import online_quantities_for_skus
-        from .shopify_push.inventory import _mapped, _stores, unmapped_holders
-
-        stores = _stores(db)
-        mapped = _mapped(stores)
         skus = [v["sku"] for v in variants]
         # The writer's own call (inventory.push_skus_stock): same rule, same
         # buffer -- so a non-zero safety buffer is never read as drift.
@@ -612,9 +639,7 @@ async def run_parity_tick(
             db, [v["inventory_item_id"] for v in variants], graphql=graphql
         )
         if levels is None:
-            snap = {**base, "reason": "shopify inventory read failed -- nothing compared, no task touched"}
-            _store_snapshot(db, snap)
-            return snap
+            return not_compared("shopify inventory read failed -- nothing compared, no mapped shop's task touched")
 
         cmp = compare_location_parity(parity_rows(variants, quantities, levels, mapped), tolerance)
         # The writer's own definition (inventory._mapped): a location two shops
@@ -625,6 +650,9 @@ async def run_parity_tick(
         snapshot = {
             **base,
             "checked": True,
+            # An empty catalogue is still a checked night: every task naming a
+            # SKU is closed below (all of them are gone).
+            "reason": None if variants else "no online-mapped variants",
             "compared": cmp["compared"],
             "unknown": cmp["unknown"],
             "drift_count": cmp["drift_count"],
@@ -648,12 +676,12 @@ async def run_parity_tick(
             "tasks": {"filed": [], "refreshed": [], "closed": []},
         }
 
-        repo = _task_repo(db)
         if repo is not None:
+            mapped_skus = {v["sku"] for v in catalogue}
             for store in stores:
                 sid = str(store.get("store_id") or "")
                 if sid in mapped:
-                    outcome = sync_drift_task(repo, store, per_store.get(sid) or {})
+                    outcome = sync_drift_task(repo, store, per_store.get(sid) or {}, mapped_skus=mapped_skus)
                     if outcome:
                         snapshot["tasks"][outcome].append(sid)
             snapshot["tasks"]["closed"] += retire_unmapped_drift_tasks(repo, mapped)
