@@ -81,6 +81,22 @@ def fallback_store_id() -> Optional[str]:
     return (os.getenv("ONLINE_FULFILLMENT_STORE_ID") or "").strip() or None
 
 
+def shop_location(db, store_id: Optional[str]) -> Optional[str]:
+    """The Shopify location gid a shop is mapped to (the ONE mapping,
+    shopify_push.inventory._mapped over stores_util.physical_stores), else
+    None. Fail-soft -> None."""
+    if not store_id:
+        return None
+    try:
+        from .shopify_push.inventory import _mapped
+        from .stores_util import physical_stores
+
+        return _mapped(physical_stores(db)).get(store_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[ONLINE_ROUTE] shop location unreadable for %s: %s", store_id, exc)
+        return None
+
+
 def _relocation_enabled() -> bool:
     """ONLINE_FULFILLMENT_FALLBACK=off pins every order to its assigned shop
     (no relocation, a short shop fails loud). Default ON."""
@@ -445,20 +461,21 @@ async def map_routed_order(
     topic: Optional[str] = None,
 ) -> Dict[str, Any]:
     """THE door every live online-order create goes through (webhook drain,
-    missed-webhook pull, Re-map): read Shopify's routing for an order IMS has
-    not booked yet, hand it to the (sync) mapper -> ingest, then send the
-    planned moves. Returns the mapper's result. Never raises."""
+    missed-webhook pull, Re-map): read Shopify's routing FRESH for an order
+    IMS has not booked yet (a stamp left on a stored payload is never
+    trusted), hand it to the (sync) mapper -> ingest, then send the planned
+    moves. Returns the mapper's result. Never raises."""
     from . import online_order_mapper
     from .shopify_ingest import order_payload_refusal
 
     payload = payload if isinstance(payload, dict) else {}
+    payload.pop("_ims_routing", None)  # only a read made HERE is ever trusted
     sid = str(payload.get("id") or "").strip()
     try:
         if (
             db is not None
             and sid
             and payload.get("line_items")
-            and "_ims_routing" not in payload
             and not order_payload_refusal(payload, booking=True)
             and _orders(db).find_one({"shopify_order_id": sid}) is None
         ):

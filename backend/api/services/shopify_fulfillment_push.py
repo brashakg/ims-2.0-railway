@@ -115,7 +115,7 @@ query imsOrderFulfillmentOrders($id: ID!, $foPage: Int!, $fulPage: Int!) {
     id
     fulfillments(first: $fulPage) { id status }
     fulfillmentOrders(first: $foPage) {
-      edges { node { id status } }
+      edges { node { id status assignedLocation { location { id } } } }
     }
   }
 }
@@ -367,15 +367,30 @@ async def push_fulfillment(
 
     order_node, open_fos, existing_fuls = _parse_fulfillment_orders(body)
     # Multi-location PR 5: IMS fulfils ONLY the shipping shop's fulfillment
-    # orders -- the ones online_fulfillment_route recorded at that shop's
-    # location (or moved there). Another shop's open fulfillment order is not
-    # IMS's to close from here. A route with no recorded list (None: routing
-    # was never read, e.g. a pre-PR-5 order) keeps the legacy all-open push.
-    ours = (order.get("fulfillment_route") or {}).get("fulfillment_order_ids")
+    # orders -- the ones Shopify has at that shop's location NOW (so an FO a
+    # human moved there in Shopify admin after a failed move counts), or, for
+    # the fallback shop that has no location, the ones online_fulfillment_route
+    # recorded. Another shop's open fulfillment order is not IMS's to close. A
+    # route with no recorded list (None: routing was never read, e.g. a
+    # pre-PR-5 order) keeps the legacy all-open push.
+    recorded = (order.get("fulfillment_route") or {}).get("fulfillment_order_ids")
     others_open = 0
-    if isinstance(ours, list):
-        others_open = len([f for f in open_fos if f not in ours])
-        open_fos = [f for f in open_fos if f in ours]
+    if isinstance(recorded, list):
+        from .online_fulfillment_route import shop_location
+
+        shop_loc = shop_location(db, order.get("store_id"))
+        loc_of = {
+            (e.get("node") or {}).get("id"): (
+                ((e.get("node") or {}).get("assignedLocation") or {}).get("location") or {}
+            ).get("id")
+            for e in ((order_node or {}).get("fulfillmentOrders") or {}).get("edges") or []
+        }
+        ours = [
+            f for f in open_fos
+            if (_as_shopify_gid(loc_of.get(f) or "", "Location") == shop_loc if shop_loc else f in recorded)
+        ]
+        others_open = len(open_fos) - len(ours)
+        open_fos = ours
     if order_node is None:
         return FulfillmentPushResult(
             mode=MODE_LIVE,

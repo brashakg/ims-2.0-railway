@@ -467,7 +467,9 @@ def test_move_is_not_sent_when_the_gate_closes(world, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _push(world, order):
+def _push(world, order, fo_locations):
+    """push_fulfillment against a mocked transcript whose open fulfillment
+    orders sit at ``fo_locations`` = {fo_id: location gid}."""
     from api.services.shopify_fulfillment_push import push_fulfillment
 
     world["shop"].calls.clear()
@@ -476,14 +478,14 @@ def _push(world, order):
         world["shop"].calls.append((query, variables))
         if "imsOrderFulfillmentOrders" in query:
             return {"data": {"order": {"id": "x", "fulfillments": [], "fulfillmentOrders": {"edges": [
-                {"node": {"id": FO_1, "status": "OPEN"}},
-                {"node": {"id": FO_2, "status": "OPEN"}},
+                {"node": {"id": fo, "status": "OPEN", "assignedLocation": {"location": {"id": loc}}}}
+                for fo, loc in fo_locations.items()
             ]}}}}
         return {"data": {"fulfillmentCreateV2": {"fulfillment": {"id": "gid://shopify/Fulfillment/1"}, "userErrors": []}}}
 
     shopify_push._graphql = answer
     try:
-        return asyncio.run(push_fulfillment(None, order))
+        return asyncio.run(push_fulfillment(world["db"], order))
     finally:
         shopify_push._graphql = world["shop"].graphql
 
@@ -498,16 +500,29 @@ def _fulfilled(world):
 
 def test_push_fulfils_only_the_shipping_shops_fulfillment_orders(world):
     base = {"order_id": "o1", "source": "shopify", "shopify_order_id": "51012"}
+    split = {FO_1: LOC_BOK, FO_2: LOC_RAN}
+    routed = {"fulfillment_route": {"fulfillment_order_ids": []}}
 
-    res = _push(world, {**base, "fulfillment_route": {"fulfillment_order_ids": [FO_2]}})
-    assert res.ok and _fulfilled(world) == [[FO_2]]
+    # Bokaro ships: only the FO Shopify has at Bokaro's location NOW -- which
+    # also covers one a human moved there after a failed move (none recorded).
+    res = _push(world, {**base, **routed, "store_id": "BV-BOK-01"}, split)
+    assert res.ok and _fulfilled(world) == [[FO_1]]
 
-    res = _push(world, {**base, "fulfillment_route": {"fulfillment_order_ids": []}})
+    # Nothing at the shipping shop's location: loud, nothing closed.
+    res = _push(world, {**base, **routed, "store_id": "BV-BOK-01"}, {FO_2: LOC_RAN})
     assert not res.ok and _fulfilled(world) == []
     assert "another shop" in res.error
 
+    # The fallback shop has no location: the FOs route_order recorded.
+    res = _push(
+        world,
+        {**base, "store_id": PUNE, "fulfillment_route": {"fulfillment_order_ids": [FO_2]}},
+        {FO_1: LOC_PUNE_SHOPIFY, FO_2: LOC_PUNE_SHOPIFY},
+    )
+    assert res.ok and _fulfilled(world) == [[FO_2]]
+
     # A pre-PR-5 order (routing never read) keeps the legacy all-open push.
-    res = _push(world, dict(base))
+    res = _push(world, {**base, "store_id": "BV-ONLINE-01"}, split)
     assert res.ok and _fulfilled(world) == [[FO_1, FO_2]]
 
 
