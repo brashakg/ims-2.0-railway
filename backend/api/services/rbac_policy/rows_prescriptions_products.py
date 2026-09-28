@@ -45,11 +45,6 @@ ROWS: List[Dict[str, object]] = [
     },
     {
         "method": "GET",
-        "path": "/api/v1/prescriptions/optometrist/{optometrist_id}/stats",
-        "allowed": "AUTHENTICATED",
-    },
-    {
-        "method": "GET",
         "path": "/api/v1/prescriptions/patient/{patient_id}",
         "allowed": "AUTHENTICATED",
     },
