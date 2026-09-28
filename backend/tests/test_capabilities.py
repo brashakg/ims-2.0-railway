@@ -17,6 +17,8 @@ from __future__ import annotations
 import os
 import sys
 
+import pytest
+
 os.environ.setdefault("JWT_SECRET_KEY", "test")
 os.environ.setdefault("ENVIRONMENT", "test")
 
@@ -75,6 +77,31 @@ def test_po_draft_carveout_keeps_catalog_manager_out_of_vendors_write():
     assert "CATALOG_MANAGER" in C.capability_roles("vendors:po-draft")
     assert "CATALOG_MANAGER" not in C.capability_roles("vendors:write")
     assert "vendors:po-draft" in C.module_deny_to_capability_denies({"vendors": False})
+
+
+@pytest.mark.parametrize("role", ["STORE_MANAGER", "ACCOUNTANT"])
+def test_a_vendors_write_deny_still_blocks_raising_a_draft(role):
+    """Before the carve-out, an explicit per-user deny of vendors:write blocked
+    creating a PO. Moving that route to vendors:po-draft must not quietly lift
+    the deny: the carved key answers to its parent's deny (and grant), exactly
+    as it did on main. PUT / cancel / send on the same account stay denied."""
+    from api.services.permission_resolver import apply_user_permissions
+
+    deny = {"deny": {"vendors:write": True}}
+    for method, path in [
+        ("POST", "/api/v1/vendors/purchase-orders"),
+        ("PUT", "/api/v1/vendors/purchase-orders/po1"),
+        ("POST", "/api/v1/vendors/purchase-orders/po1/cancel"),
+        ("POST", "/api/v1/vendors/purchase-orders/po1/send"),
+    ]:
+        role_ok = P.check_access(method, path, [role])
+        assert role_ok, (method, path)
+        cap = C.capability_for(method, path)
+        assert apply_user_permissions(role_ok, cap, deny, None) is False, (method, path)
+    # A vendors:write GRANT still lets a role outside the gate raise a draft.
+    cap = C.capability_for("POST", "/api/v1/vendors/purchase-orders")
+    grant = {"grant": {"vendors:write": True}}
+    assert apply_user_permissions(False, cap, grant, None) is True
 
 
 def test_clear_rx_hold_is_curated_capability():

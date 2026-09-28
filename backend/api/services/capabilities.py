@@ -270,6 +270,15 @@ MODULE_EXTRA_DENY_CAPABILITIES: Dict[str, List[str]] = {
     "vendors": ["vendors:po-draft"],
 }
 
+# A carved key that still answers to the generic key it was carved out of, for
+# the per-user override layer only: an explicit deny (or grant) of the parent
+# covers the carved route exactly as it did before the carve-out, so moving a
+# route to its own key never quietly lifts a deny. Override-only -- this never
+# feeds a role union (the grant guard's reasoning is untouched).
+CAPABILITY_PARENT: Dict[str, str] = {
+    "vendors:po-draft": "vendors:write",
+}
+
 
 def module_deny_to_capability_denies(module_access: Optional[Dict[str, bool]]) -> Set[str]:
     """Translate a legacy deny-only ``module_access`` map into the set of
