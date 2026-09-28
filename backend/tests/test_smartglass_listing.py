@@ -461,7 +461,13 @@ def _fe_field_names(code):
     src = _FE_SHARED.read_text(encoding="utf-8")
     start = src.index(f"\n  {code}: [")
     end = src.index("\n  ],", start)
-    return re.findall(r"\{ name: '([a-z0-9_]+)'", src[start:end])
+    block = src[start:end]
+    names = re.findall(r"\bname:\s*['\"]([^'\"]+)['\"]", block)
+    # Every `name:` key must parse, whatever its shape (multi-line, double
+    # quotes, template literal); one the regex cannot read FAILS the pin
+    # instead of slipping a form-only field past it.
+    assert len(names) == len(re.findall(r"\bname\s*:", block)), (code, names)
+    return names
 
 
 def _fe_picker_tiles():
@@ -469,7 +475,10 @@ def _fe_picker_tiles():
     src = _FE_SHARED.read_text(encoding="utf-8")
     start = src.index("export const CATEGORIES = [")
     picker = src[start : src.index("] as const", start)]
-    return re.findall(r"\{ code: '([A-Z]+)', name: '([^']+)'", picker)
+    tiles = re.findall(r"\{\s*code:\s*['\"]([A-Z]+)['\"],\s*name:\s*['\"]([^'\"]+)['\"]", picker)
+    # Same guard as _fe_field_names: an unreadable tile fails, never skips.
+    assert len(tiles) == len(re.findall(r"\bcode\s*:", picker)), tiles
+    return tiles
 
 
 @pytest.mark.skipif(not _FRONTEND.exists(), reason="frontend not checked out")
