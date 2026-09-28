@@ -14,7 +14,11 @@ exactly as the screens do:
   * The vendor LIST stays open because the workshop job (WORKSHOP_STAFF), vendor
     returns and the buy desk (CATALOG_MANAGER) pick a vendor by name -- but any
     role outside ``_VENDOR_ROLES`` now gets names only (no GSTIN, contacts,
-    bank or terms).
+    bank or terms), and it searches only those keys (no GSTIN oracle).
+  * Vendor returns / RTV debit notes -> writers + WORKSHOP_STAFF (the Vendor
+    Returns screen); vendor RMAs -> writers only (no screen).
+  * /finance/vendor-payments -> the same accounts set as the vendor ledger:
+    one payables rule, and the Finance dashboard hides it from managers.
 
 Each gate is asserted three ways so reverting any one layer turns a test red:
 the HTTP answer, the route's own ``require_roles`` dependency, and the
@@ -404,3 +408,51 @@ def test_vendor_payments_handler_gate(role):
     with pytest.raises(HTTPException) as exc:
         asyncio.run(receivables.get_vendor_payments(current_user={"roles": [role]}))
     assert exc.value.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# 8. The human-readable matrix says the same as the rows this change moved
+# ---------------------------------------------------------------------------
+# rbac_policy's docstring: "if routes change ... update
+# docs/reference/RBAC_MATRIX.md". Every GET row F60 changed must be in the
+# doc, with the same roles (SUPERADMIN implied) and the same S column.
+_DOC = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "..",
+    "..",
+    "docs",
+    "reference",
+    "RBAC_MATRIX.md",
+)
+_DOC_ROW = re.compile(r"^\| `(\w+)` \| `([^`]+)` \| ([^|]*)\| ([^|]*)\|", re.M)
+F60_GET_ROWS = sorted(
+    {t for _c, t in PURCHASE_READS + PAYABLE_READS}
+    | {t for _c, t, _a in SIBLING_READS}
+    | {"/api/v1/vendors", "/api/v1/vendors/"}
+)
+
+
+def _doc_cell(row):
+    allowed = row["allowed"]
+    if allowed == "AUTHENTICATED":
+        return "AUTH"
+    return allowed if isinstance(allowed, str) else set(allowed) - {"SUPERADMIN"}
+
+
+@pytest.mark.skipif(not os.path.exists(_DOC), reason="docs/ not shipped here")
+def test_rbac_matrix_doc_matches_the_rows_f60_moved():
+    with open(_DOC, encoding="utf-8") as fh:
+        doc = {
+            (m, p): (cell.strip(), s.strip())
+            for m, p, cell, s in _DOC_ROW.findall(fh.read())
+        }
+    drift = []
+    for path in F60_GET_ROWS:
+        row = rbac.policy_for("GET", path)
+        want = (_doc_cell(row), "S" if row.get("store_scoped") else "")
+        got = doc.get(("GET", path))
+        if got is not None and got[0] not in ("AUTH", "PUBLIC"):
+            got = ({r.strip() for r in got[0].split(",")} - {"SUPERADMIN"}, got[1])
+        if got != want:
+            drift.append((path, got, want))
+    assert not drift, drift
