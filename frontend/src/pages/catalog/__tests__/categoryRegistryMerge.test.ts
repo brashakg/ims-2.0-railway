@@ -1,4 +1,5 @@
-// Unit tests for the canonical category-registry merge in productAddShared.
+// Unit tests for the canonical category-registry merge in domain/catalog/productAdd/categoryFields.ts
+// (imported here through the pages/catalog/productAddShared re-export shim).
 //
 // Catalog field-parity (#17): the three product-entry doors (Quick Add, Guided,
 // Rapid Grid) derive their REQUIRED/optional flags from the backend canonical
@@ -10,7 +11,7 @@
 //
 // The registry fetch is mocked so the merge logic is tested deterministically
 // (no network). vitest runs each file in isolation, so the module-level
-// registry cache in productAddShared starts empty here.
+// registry cache in categoryFields.ts starts empty here.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
