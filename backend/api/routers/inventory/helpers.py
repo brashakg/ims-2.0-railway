@@ -41,7 +41,15 @@ def _reject_stock_mint_on_online_store(store_id: Optional[str], action: str) -> 
     PO delivery-store, GRN-accept and till guards -- so there is exactly ONE
     definition of "online store" in the backend, including its fail-open
     convention (an unknown id / flaky lookup never false-blocks a physical
-    shop, while the two known online ids are caught with no DB at all)."""
+    shop, while the two known online ids are caught with no DB at all).
+
+    No shop picked at all is refused too: a unit must belong to a shop, and its
+    IMS barcode takes the shop's prefix (services/barcode.mint_unit_barcode)."""
+    if not store_id:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No shop is selected. Pick your shop, then {action}.",
+        )
     if is_online_store(_get_db(), store_id):
         raise HTTPException(
             status_code=400,
