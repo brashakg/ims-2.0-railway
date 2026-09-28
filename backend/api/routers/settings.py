@@ -290,8 +290,8 @@ _INTEGRATION_CATALOG = [
             {"key": "webhook_secret", "label": "Webhook Secret", "secret": True,
              "placeholder": "For verifying Shopify webhook signatures",
              "optional": True},
-            {"key": "location_id", "label": "Location ID", "secret": False,
-             "placeholder": "Shopify location ID for inventory", "optional": True},
+            # No location field: each shop's Shopify location lives on its
+            # store record (Organization page), owner ruling 2026-09-06.
         ],
     },
     {

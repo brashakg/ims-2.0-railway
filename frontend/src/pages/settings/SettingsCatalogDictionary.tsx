@@ -26,7 +26,7 @@ import {
   type CatalogDictionaryResponse,
 } from '../../services/api/catalogDictionary';
 import { productApi, type CategoryRegistryEntry } from '../../services/api/products';
-import { CATEGORY_FIELDS } from '../catalog/productAddShared';
+import { CATEGORY_FIELDS } from '../../domain/catalog/productAdd';
 
 const ALL_SCOPE = '*';
 

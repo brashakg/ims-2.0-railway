@@ -34,7 +34,8 @@ WARRANTY_URL = "https://bettervision.in/pages/warranty"
 
 # Attribute key -> row label, in render order, per section. Only rows whose
 # attribute is filled are rendered. Keys are the IMS Add-Product field names
-# (productAddShared CATEGORY_FIELDS / product_master registry).
+# (CATEGORY_FIELDS in frontend/src/domain/catalog/productAdd/categoryFields.ts
+# / the product_master registry).
 TECH_SPEC_ROWS: List[Tuple[str, str]] = [
     ("frame_type", "Frame Type"),
     ("frame_material", "Frame Material"),
