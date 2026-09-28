@@ -29,23 +29,22 @@ export function errMsg(e: unknown, fb: string) {
   return e instanceof Error ? e.message : fb;
 }
 
-// Pull a 2-digit state code from a place_of_supply ("27", "27-Maharashtra")
-// or a GSTIN (first two chars). Mirrors backend itc_reconcile._state_code so
-// the FE preview matches how the server will route the tax.
+// The 2-digit state code of a GSTIN (its first two characters).
 export function stateCode(value?: string): string {
   if (!value) return '';
   const m = String(value).trim().match(/\d{2}/);
   return m ? m[0] : '';
 }
 
-// True when the supplier's place_of_supply state differs from our recipient
-// GSTIN's state -> the supply is inter-state -> IGST. Missing either side
-// defaults to intra-state (CGST/SGST), matching the backend fallback.
-export function isInterstate(placeOfSupply?: string, recipientGstin?: string): boolean {
-  const pos = stateCode(placeOfSupply);
+// THE bill's tax-head rule, as the server applies it
+// (purchase_invoice_engine.compute_invoice): the supplier's GSTIN state vs our
+// GSTIN's state. Different -> inter-state -> IGST. Missing either GSTIN ->
+// intra-state (CGST/SGST), the server's fallback.
+export function isInterstate(supplierGstin?: string, recipientGstin?: string): boolean {
+  const sup = stateCode(supplierGstin);
   const rec = stateCode(recipientGstin);
-  if (!pos || !rec) return false;
-  return pos !== rec;
+  if (!sup || !rec) return false;
+  return sup !== rec;
 }
 
 // Roles allowed to approve a 3-way-match exception (release an ON_HOLD invoice

@@ -3,7 +3,7 @@
 // GST line math. MOVED verbatim out of ../PurchaseInvoicesTab.tsx (Wave 6 diet).
 // ============================================================================
 
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Plus, X, Loader2, FileText, Trash2 } from 'lucide-react';
 import {
   purchaseInvoicesApi,
@@ -68,7 +68,6 @@ export function InvoiceFormDrawer({
   const [vendorId, setVendorId] = useState(prefill.vendor_id ?? '');
   const [vendorInvoiceNo, setVendorInvoiceNo] = useState(prefill.vendor_invoice_no ?? '');
   const [vendorInvoiceDate, setVendorInvoiceDate] = useState((prefill.vendor_invoice_date ?? today).slice(0, 10));
-  const [placeOfSupply, setPlaceOfSupply] = useState(prefill.place_of_supply ?? '');
   const [recipientGstin, setRecipientGstin] = useState(prefill.recipient_gstin ?? '');
   const [notes, setNotes] = useState('');
   const [lines, setLines] = useState<EditLine[]>(initialLines);
@@ -83,21 +82,14 @@ export function InvoiceFormDrawer({
   const receiptLinked = locked || Boolean(prefillDcIds && prefillDcIds.length);
   const [billKind, setBillKind] = useState<'' | 'GOODS' | 'SERVICES'>('');
 
-  // Default place_of_supply from the chosen vendor's state (the supplier's
-  // state IS the place of supply for a purchase). Only auto-fill when empty so
-  // a GRN-prefilled or hand-typed value is never clobbered.
+  // The tax head is decided by the two GST numbers on the bill -- the
+  // supplier's and ours -- exactly as the server books it (F6). The supplier's
+  // comes from the draft (server) or the chosen supplier; there is no
+  // place-of-supply box to contradict it.
   const selectedVendor = useMemo(() => suppliers.find((s) => s.id === vendorId), [suppliers, vendorId]);
-  useEffect(() => {
-    if (!placeOfSupply && selectedVendor) {
-      const fromGstin = stateCode(selectedVendor.gstNumber);
-      if (fromGstin) setPlaceOfSupply(fromGstin);
-      else if (selectedVendor.state) setPlaceOfSupply(selectedVendor.state);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [vendorId]);
-
-  const inter = isInterstate(placeOfSupply, recipientGstin);
-  const posKnown = Boolean(stateCode(placeOfSupply)) && Boolean(stateCode(recipientGstin));
+  const supplierGstin = (prefill.vendor_gstin || selectedVendor?.gstNumber || '').trim();
+  const inter = isInterstate(supplierGstin, recipientGstin);
+  const posKnown = Boolean(stateCode(supplierGstin)) && Boolean(stateCode(recipientGstin));
 
   const taxable = lines.reduce((s, l) => s + lineTaxable(l), 0);
   const tax = lines.reduce((s, l) => s + lineTax(l), 0);
@@ -156,7 +148,6 @@ export function InvoiceFormDrawer({
         vendor_id: vendorId,
         vendor_invoice_no: vendorInvoiceNo.trim(),
         vendor_invoice_date: vendorInvoiceDate,
-        place_of_supply: placeOfSupply.trim() || undefined,
         recipient_gstin: recipientGstin.trim() || undefined,
         po_id: prefill.po_id,
         grn_id: prefill.grn_id,
@@ -244,8 +235,8 @@ export function InvoiceFormDrawer({
               <input className={cls} type="date" value={vendorInvoiceDate} onChange={(e) => setVendorInvoiceDate(e.target.value)} />
             </div>
             <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">Place of supply (state)</label>
-              <input className={cls} value={placeOfSupply} onChange={(e) => setPlaceOfSupply(e.target.value)} placeholder="e.g. 27 or 27-Maharashtra" />
+              <label className="block text-xs font-medium text-gray-600 mb-1">Supplier GSTIN</label>
+              <div className="border border-gray-200 bg-gray-50 rounded px-2 py-1.5 text-sm text-gray-700">{supplierGstin || 'Not on file'}</div>
             </div>
             <div>
               <label className="block text-xs font-medium text-gray-600 mb-1">Recipient GSTIN (our entity)</label>
@@ -256,9 +247,9 @@ export function InvoiceFormDrawer({
               <div className={`w-full rounded-lg px-3 py-2 text-sm border ${posKnown ? (inter ? 'bg-purple-50 border-purple-200 text-purple-800' : 'bg-blue-50 border-blue-200 text-blue-800') : 'bg-amber-50 border-amber-200 text-amber-800'}`}>
                 {posKnown
                   ? (inter
-                      ? <>Inter-state supply: <span className="font-semibold">IGST</span> (place of supply {stateCode(placeOfSupply)} differs from recipient {stateCode(recipientGstin)})</>
-                      : <>Intra-state supply: <span className="font-semibold">CGST + SGST</span> (both state {stateCode(placeOfSupply)})</>)
-                  : <>Enter place of supply and recipient GSTIN to classify CGST/SGST vs IGST.</>}
+                      ? <>Inter-state supply: <span className="font-semibold">IGST</span> (supplier state {stateCode(supplierGstin)}, ours {stateCode(recipientGstin)})</>
+                      : <>Intra-state supply: <span className="font-semibold">CGST + SGST</span> (both state {stateCode(supplierGstin)})</>)
+                  : <>Needs the supplier&apos;s GSTIN and ours to classify; booked as CGST + SGST until then.</>}
               </div>
             </div>
           </div>

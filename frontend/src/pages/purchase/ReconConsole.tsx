@@ -91,7 +91,7 @@ const DEFAULT_RECON: ReconBlock = {
 };
 
 export function invoiceRowId(inv: PurchaseInvoice): string {
-  return inv.purchase_invoice_id ?? inv.bill_id ?? '';
+  return inv.purchase_invoice_id;
 }
 
 // ---- Queue classification (exported for tests) ------------------------------

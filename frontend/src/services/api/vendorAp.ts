@@ -72,11 +72,9 @@ export interface DebitNote {
 // ---- Purchase Invoice (first-class AP + ITC document) -------------------
 // A purchase invoice is the supplier's tax invoice booked into AP. Unlike the
 // header-only VendorBill, it carries line items (with HSN + per-rate GST) and
-// an explicit place_of_supply so the tax is split correctly:
-//   intra-state  -> CGST + SGST
-//   inter-state  -> IGST    (place_of_supply state != recipient/entity state)
-// place_of_supply being WRITTEN here is the fix for the long-standing bug
-// where every inter-state purchase was mis-booked as CGST+SGST.
+// a tax head decided by the server from the supplier's GSTIN state vs ours:
+//   same state  -> CGST + SGST
+//   different   -> IGST
 export interface PurchaseInvoiceLine {
   product_id?: string;
   product_name: string;
@@ -243,7 +241,10 @@ export interface PurchaseInvoiceCreate {
   vendor_id: string;
   vendor_invoice_no: string;
   vendor_invoice_date: string;
-  place_of_supply?: string;
+  // Our GSTIN as printed on the supplier's bill. The server decides the tax
+  // head from the supplier's GSTIN vs this one -- there is no place-of-supply
+  // input (F6: the draft's supplier-state value, sent back under that name,
+  // was read as OUR state and flipped IGST bills to CGST+SGST).
   recipient_gstin?: string;
   po_id?: string;
   grn_id?: string;
@@ -390,6 +391,9 @@ function mapInvoiceFromApi(doc: Record<string, any>): PurchaseInvoice {
   const igst = doc.igst ?? doc.igst_total ?? 0;
   return {
     ...doc,
+    // The stored doc carries bill_id / invoice_id; every Approve / match /
+    // recon door acts on purchase_invoice_id (F7: they POSTed /undefined/).
+    purchase_invoice_id: doc.purchase_invoice_id ?? doc.bill_id ?? doc.invoice_id,
     vendor_invoice_no: doc.vendor_invoice_no ?? doc.invoice_number ?? doc.bill_number ?? '',
     vendor_invoice_date: doc.vendor_invoice_date ?? doc.invoice_date ?? doc.bill_date ?? '',
     cgst,
@@ -397,6 +401,26 @@ function mapInvoiceFromApi(doc: Record<string, any>): PurchaseInvoice {
     igst,
     is_interstate: doc.is_interstate ?? doc.interstate ?? igst > 0,
   } as PurchaseInvoice;
+}
+
+// A server DRAFT (from-grn / from-dcs) uses the create() wire keys -- header
+// invoice_number / invoice_date, lines description / hsn / qty. Alias them onto
+// the FE keys, the exact reverse of create(), so the form shows the receipt's
+// products, HSNs and accepted quantities (F37: they arrived blank, qty 1).
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function mapDraftFromApi(d: Record<string, any>): PurchaseInvoiceDraft {
+  return {
+    ...d,
+    vendor_invoice_no: d.vendor_invoice_no ?? d.invoice_number ?? '',
+    vendor_invoice_date: d.vendor_invoice_date ?? d.invoice_date ?? '',
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    lines: ((d.lines ?? []) as Record<string, any>[]).map((l) => ({
+      ...l,
+      product_name: l.product_name ?? l.description ?? '',
+      hsn_code: l.hsn_code ?? l.hsn ?? '',
+      quantity: l.quantity ?? l.qty ?? 0,
+    })),
+  } as PurchaseInvoiceDraft;
 }
 
 export const purchaseInvoicesApi = {
@@ -427,7 +451,6 @@ export const purchaseInvoicesApi = {
       vendor_id: payload.vendor_id,
       invoice_number: payload.vendor_invoice_no,
       invoice_date: payload.vendor_invoice_date,
-      place_of_supply: payload.place_of_supply,
       recipient_gstin: payload.recipient_gstin,
       po_id: payload.po_id,
       grn_id: payload.grn_id,
@@ -451,17 +474,10 @@ export const purchaseInvoicesApi = {
   // Returns a server-prepared DRAFT prefilled from the ACCEPTED GRN (+ its PO).
   // Nothing is booked until create() is called with the reviewed draft.
   // Backend route is GET /from-grn/{grn_id} (it doesn't persist) -- a POST 405s.
-  // The draft uses invoice_number / invoice_date; alias them to the FE's
-  // vendor_invoice_no / vendor_invoice_date so the form prefill works.
+  // mapDraftFromApi aliases the draft's wire keys onto the form's.
   createFromGrn: async (grnId: string) => {
     const res = await api.get(`/vendors/purchase-invoices/from-grn/${grnId}`);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const d = res.data as Record<string, any>;
-    return {
-      ...d,
-      vendor_invoice_no: d.vendor_invoice_no ?? d.invoice_number ?? '',
-      vendor_invoice_date: d.vendor_invoice_date ?? d.invoice_date ?? '',
-    } as PurchaseInvoiceDraft;
+    return mapDraftFromApi(res.data);
   },
   // Ruling 15: the invoice gate refuses an incomplete product, and an
   // accountant holds no products:write. This raises the P2 task for the
@@ -505,13 +521,7 @@ export const purchaseInvoicesApi = {
     const res = await api.get('/vendors/purchase-invoices/from-dcs', {
       params: { dc_ids: dcIds.join(','), vendor_id: vendorId },
     });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const d = res.data as Record<string, any>;
-    return {
-      ...d,
-      vendor_invoice_no: d.vendor_invoice_no ?? d.invoice_number ?? '',
-      vendor_invoice_date: d.vendor_invoice_date ?? d.invoice_date ?? '',
-    } as PurchaseInvoiceDraft;
+    return mapDraftFromApi(res.data);
   },
   // Phase 2: the 3-way match breakdown for one invoice. The backend returns an
   // envelope { invoice_id, match_status, match_detail, po_id, grn_id }; we unwrap
