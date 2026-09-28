@@ -674,7 +674,9 @@ def test_doors_delegate_not_reimplement():
     a renamed second copy still fails the runtime tests above.)"""
     import inspect
 
-    ws_src = inspect.getsource(wm)
+    # workshop is a package (Wave 6 split): scan every sub-module, i.e. the
+    # same code the single workshop.py held.
+    ws_src = "".join(inspect.getsource(m) for m in wm._SUBMODULES)
     lb_src = inspect.getsource(labels_mod)
     sp_src = inspect.getsource(shipping_mod)
 
