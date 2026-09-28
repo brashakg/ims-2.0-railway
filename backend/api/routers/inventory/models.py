@@ -3,7 +3,6 @@
 from ._shared import (
     BaseModel,
     Field,
-    List,
     Optional,
     date,
 )
@@ -25,12 +24,6 @@ class StockAddRequest(BaseModel):
     batch_code: Optional[str] = None
     lot: Optional[str] = None  # alias accepted alongside batch_code (CL)
     expiry_date: Optional[date] = None
-
-
-class StockTransferRequest(BaseModel):
-    from_store_id: str
-    to_store_id: str
-    items: List[dict]  # stock_id, quantity
 
 
 class StockCountItem(BaseModel):

@@ -51,7 +51,7 @@ def test_registry_covers_every_canonical_category():
 
 def test_each_entry_carries_the_render_ready_contract():
     for entry in pm.all_category_specs():
-        # Keys the FE doors rely on (productAddShared.getCategoryRegistry).
+        # Keys the FE doors rely on (getCategoryFields in frontend categoryFields.ts).
         for key in (
             "code",
             "sku_prefix",

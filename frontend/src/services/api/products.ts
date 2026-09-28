@@ -380,7 +380,8 @@ export const productApi = {
   // THE canonical per-category field registry (single source of truth). Drives
   // the required/optional fields all three product-entry doors render + validate,
   // sourced from the backend product_master CATEGORY_SPECS the create gate
-  // enforces. See productAddShared.ts loadCategoryRegistry (cached once).
+  // enforces. See loadCategoryRegistry in
+  // domain/catalog/productAdd/categoryFields.ts (cached once).
   getCategoryRegistry: async (): Promise<CategoryRegistryResponse> => {
     const response = await api.get('/products/categories');
     return response.data;
@@ -645,43 +646,6 @@ export const pricingApi = {
 
   bulkOffer: async (payload: BulkOfferPayload): Promise<BulkResponse> => {
     const response = await api.post('/products/bulk-offer', payload);
-    return response.data;
-  },
-};
-
-// ============================================================================
-// Admin API - Product Master
-// ----------------------------------------------------------------------------
-// WRITE methods (create / update / delete) were REMOVED. They posted raw
-// camelCase to the unvalidated `/admin/products` endpoints, which wrote the
-// `products` collection with no category / MRP / GST validation and stored
-// camelCase keys (offerPrice vs offer_price) -> split-brain. All product
-// writes now go through the single validated `productApi` (`/products`,
-// `/products/bulk-create`, `PUT /products/{id}`). The reads below + the
-// CSV file-stash helper are kept (they are not product writers). The old
-// generateSku helper (POST /admin/products/generate-sku, uuid-random SKUs)
-// was removed with its endpoint: SKUs are minted by the backend create door;
-// the deterministic preview is POST /products/sku-preview.
-// ============================================================================
-
-export const adminProductApi = {
-  getProducts: async (params?: { category?: string; brand?: string; status?: string; page?: number; pageSize?: number }) => {
-    const response = await api.get('/admin/products', { params });
-    return response.data;
-  },
-
-  getProduct: async (productId: string) => {
-    const response = await api.get(`/admin/products/${productId}`);
-    return response.data;
-  },
-
-  bulkImportProducts: async (file: File, category: string) => {
-    const formData = new FormData();
-    formData.append('file', file);
-    formData.append('category', category);
-    const response = await api.post('/admin/products/bulk-import', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    });
     return response.data;
   },
 };

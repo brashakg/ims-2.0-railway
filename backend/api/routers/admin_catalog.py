@@ -1119,6 +1119,8 @@ async def download_bulk_import_file(job_id: str):
 # `/products` (products.py), but admin pages weren't reaching them.
 # These thin aliases route admin-prefixed calls to the same `products`
 # Mongo collection so the catalog page works end-to-end.
+# A6 (2026-09-27): the frontend `adminProductApi` client itself was deleted
+# (zero consumers); these read aliases now have no frontend caller either.
 
 
 @router.get("/products")
@@ -1180,5 +1182,6 @@ async def get_product(product_id: str):
 #   POST   /api/v1/products/bulk-create  (batch create, same validators)
 #   PUT    /api/v1/products/{id}         (update -- incl. barcode + reorder fields)
 # The frontend callers (adminProductApi writes, reorderApi) were repointed to
-# productApi accordingly. The GET reads above + bulk-import (file-stash
-# only; not a product writer) remain for backwards-compat.
+# productApi accordingly (the read-only client was deleted in A6, 2026-09-27).
+# The GET reads above + bulk-import (file-stash only; not a product writer)
+# remain for backwards-compat.

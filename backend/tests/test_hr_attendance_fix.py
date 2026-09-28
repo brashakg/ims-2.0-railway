@@ -154,7 +154,6 @@ def _make_app(
     )
     monkeypatch.setattr(hr, "get_user_repository", lambda: user_repo)
     monkeypatch.setattr(hr, "get_leave_repository", lambda: None)
-    monkeypatch.setattr(hr, "get_payroll_repository", lambda: None)
     monkeypatch.setattr(hr, "get_audit_repository", lambda: audit_repo)
     # Geo + shift never fail in these tests.
     monkeypatch.setattr(
