@@ -380,6 +380,71 @@ def _ims_cancel_door_ran(order: Dict[str, Any]) -> bool:
 def _cap_restock_to_returnable(
     lines: List[Any], order: Dict[str, Any], refund_id: str
 ) -> Tuple[List[Any], bool]:
+    """Restock only a unit that is really out with the buyer: first the
+    counter return door's own answer (_cap_restock_to_unreturned), then the
+    order's own SOLD units (_cap_restock_to_sold_units). Both postures -- the
+    webhook's proposal and the post (AUTO or the accountant's confirm) --
+    ask it."""
+    lines, overlapped = _cap_restock_to_unreturned(lines, order, refund_id)
+    return _cap_restock_to_sold_units(lines, order), overlapped
+
+
+def _split_restock(line: Any, keep: float) -> List[Any]:
+    """A restock line capped at `keep` units: the part within the cap restocks,
+    the rest is proposed with restock=False."""
+    if keep >= line.return_qty:
+        return [line]
+    head = [line.model_copy(update={"return_qty": keep})] if keep > 0 else []
+    return head + [line.model_copy(update={"return_qty": line.return_qty - keep, "restock": False})]
+
+
+def _cap_restock_to_sold_units(lines: List[Any], order: Dict[str, Any]) -> List[Any]:
+    """Restock no more units of an IMS product (summed over the refund's
+    lines) than the order still holds SOLD in stock. An oversold or
+    under-claimed line (no unit was ever taken for it) has nothing to put
+    back: the restock would find no SOLD unit and MINT a phantom. Fails
+    CLOSED -- an unreadable stock answer counts 0: no restock, never a new
+    unit. A HISTORICAL order (our own Shopify order-history import) never
+    claimed stock rows, so it keeps the restock it proposes."""
+    if order.get("historical"):
+        return lines
+    sold: Dict[str, float] = {}
+    out: List[Any] = []
+    for line in lines:
+        if not line.restock:
+            out.append(line)
+            continue
+        pid = line.product_id or ""
+        if pid not in sold:
+            sold[pid] = _sold_units(order.get("order_id"), pid)
+        keep = max(0.0, min(line.return_qty, sold[pid]))
+        sold[pid] -= keep
+        out.extend(_split_restock(line, keep))
+    return out
+
+
+def _sold_units(order_id: Any, product_id: str) -> float:
+    """How many stock units of `product_id` this order still holds SOLD (0 on
+    any doubt). Read through the returns router's own repository accessor."""
+    if not order_id or not product_id:
+        return 0.0
+    try:
+        from ..routers import returns as _r
+
+        repo = _r.get_stock_repository()
+        if repo is None:
+            return 0.0
+        rows = repo.find_many({"order_id": order_id, "product_id": product_id, "status": "SOLD"})
+        return float(len(rows or []))
+    except Exception:  # noqa: BLE001 -- fail closed: no restock, never a phantom
+        logger.warning("[SHOPIFY_REFUND] SOLD-unit read failed for order=%s -- no restock",
+                       order_id, exc_info=True)
+        return 0.0
+
+
+def _cap_restock_to_unreturned(
+    lines: List[Any], order: Dict[str, Any], refund_id: str
+) -> Tuple[List[Any], bool]:
     """Restock no more units of an order line than are still out with the
     buyer, by the counter return door's own answer: the line's purchased qty
     less returns._already_returned_qty over every OTHER return doc of the order
@@ -422,14 +487,7 @@ def _cap_restock_to_returnable(
                 out.append(line)
                 continue
             overlapped = True
-            if not line.restock:
-                out.append(line)
-                continue
-            if keep > 0:
-                out.append(line.model_copy(update={"return_qty": keep}))
-            out.append(
-                line.model_copy(update={"return_qty": line.return_qty - keep, "restock": False})
-            )
+            out.extend(_split_restock(line, keep) if line.restock else [line])
         return out, overlapped
     except Exception:  # noqa: BLE001
         logger.debug("[SHOPIFY_REFUND] returnable-qty cap failed", exc_info=True)
@@ -450,6 +508,10 @@ def _build_return_lines(
     order_items = [i for i in (order.get("items") or []) if isinstance(i, dict)]
     refund_level_restock = bool(payload.get("restock", True))
     door_released = _ims_cancel_door_ran(order)
+    # A Shopify cancel on an order IMS holds DELIVERED (owner ruling
+    # 2026-09-28): the customer has the goods, so a "cancel" line restocks
+    # nothing. If they come back, the counter return door restocks them.
+    delivered = str(order.get("status") or "").strip().upper() == "DELIVERED"
     lines: List[Any] = []
     for rl in payload.get("refund_line_items") or []:
         if not isinstance(rl, dict):
@@ -483,7 +545,11 @@ def _build_return_lines(
                 # tax reversal), so the till-supplied price is never trusted here.
                 unit_price=0.0,
                 condition="GOOD",
-                restock=_line_restock_flag(rl, refund_level_restock) and not door_released,
+                restock=(
+                    _line_restock_flag(rl, refund_level_restock)
+                    and not door_released
+                    and not (delivered and _norm(rl.get("restock_type")).lower() == "cancel")
+                ),
                 reason="Shopify refund",
             )
         )
@@ -766,7 +832,20 @@ def handle_shopify_refund(
             )
         else:
             note = "Awaiting accountant confirmation (SHOPIFY_REFUND_AUTO off)."
-        if door_cancelled or counter_returned or not _refund_auto_enabled(db):
+        # Goods out with the courier or the customer: a person decides, even
+        # under AUTO -- the units are not on any shelf to put back yet.
+        goods_out = bool(
+            str(order.get("status") or "").strip().upper() in ("SHIPPED", "DELIVERED")
+            or order.get("awb")
+            or order.get("shopify_fulfillment_id")
+        )
+        if goods_out and not (door_cancelled or counter_returned):
+            note = (
+                "Goods are with the courier or the customer: restock only when "
+                "they physically come back (counter return). For a DELIVERED "
+                "order see its status-conflict task."
+            )
+        if door_cancelled or counter_returned or goods_out or not _refund_auto_enabled(db):
             # DEFAULT: accountant review queue. NO ledger, NO stock movement.
             # An order staff cancelled, or took a return of, in IMS is queued
             # even under AUTO: the counter may already have settled this money.
@@ -1256,6 +1335,8 @@ _FULFILMENT_CONTEXT_KEYS = (
     # The order lines, for the returnable-qty cap (_cap_restock_to_returnable):
     # a counter return taken after the row was queued put its unit back too.
     "items",
+    # The SOLD-unit cap's exemption (_cap_restock_to_sold_units).
+    "historical",
 )
 
 

@@ -1450,7 +1450,9 @@ def test_webhook_door_on_stampless_order_mints_nothing_on_the_online_store(monke
     must not claim the units went to the online store."""
     from api.services import shopify_refund as sr
 
-    order = dict(_ONLINE_ORDER, order_id="ORD-ONL-7")
+    # historical: our own order-history import claimed no stock rows, so the
+    # SOLD-unit cap exempts it and THIS guard is what stops the mint.
+    order = dict(_ONLINE_ORDER, order_id="ORD-ONL-7", historical=True)
     ctx = _build_ctx(
         monkeypatch, order=order, stock_units=[], active_store=PHYSICAL_COUNTER_STORE
     )

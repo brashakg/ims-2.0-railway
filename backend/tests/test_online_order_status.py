@@ -435,3 +435,101 @@ def test_the_signed_shiprocket_webhook_delivers_on_a_known_awb(swept):
     assert doc["status"] == "DELIVERED" and doc["delivered_at"]
     assert doc["status_history"][-1]["changed_by"] == "system:SHIPROCKET_WEBHOOK"
     assert _doc(swept, 60121)["status"] == "SHIPPED"
+
+
+# ---------------------------------------------------------------------------
+# The refund leg. Finding (d): a Shopify cancel refund restocks no unit the
+# order does not hold SOLD (an oversold / under-claimed line would MINT a
+# phantom), in both postures. Goods out with the courier or the customer: a
+# person decides, even under AUTO; a DELIVERED order's "cancel" line never
+# restocks (the customer has the goods).
+# ---------------------------------------------------------------------------
+
+from test_online_order_mapper import _frame_order  # noqa: E402
+from test_shopify_status_catchup import _claim_unit, _refund  # noqa: E402
+
+from api.services import shopify_refund  # noqa: E402
+
+
+def _two_unit_order_one_sold(swept, oid):
+    """A quantity-2 frame line of which ingest claimed ONE serialized unit."""
+    doc = _book(swept, oid, line_items=[{**_frame_order(oid)["line_items"][0], "quantity": 2}])
+    _claim_unit(swept, doc)
+    return _doc(swept, oid)
+
+
+def _refund_both(rid, oid):
+    r = _refund(rid, oid, amount="1998.00")
+    r["refund_line_items"][0].update(quantity=2, subtotal=1902.86, total_tax=95.14)
+    r["refund_line_items"][0]["line_item"]["quantity"] = 2
+    return r
+
+
+def _post(swept, rid, oid, posture):
+    res = shopify_refund.handle_shopify_refund(swept["db"], _refund_both(rid, oid), webhook_id=None,
+                                               topic="refunds/create")
+    if posture == "queue":
+        assert res["status"] == "queued"
+        row = swept["review"].find_one({"shopify_refund_id": str(rid)})
+        assert [(line["return_qty"], line["restock"]) for line in row["proposed_restock"]] == [
+            (1, True), (1, False)]
+        shopify_refund.post_from_review(swept["db"], row)
+    return res
+
+
+@pytest.mark.parametrize("posture", ["auto", "queue"])
+def test_a_cancel_refund_restocks_only_the_units_the_order_holds_sold(swept, monkeypatch, posture):
+    if posture == "auto":
+        monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "1")
+    _two_unit_order_one_sold(swept, 60130)
+    _post(swept, 700330, 60130, posture)
+
+    units = swept["stock_repo"].units
+    assert [(u["stock_id"], u["status"]) for u in units] == [("stk-1", "AVAILABLE")], "no phantom minted"
+    ret = swept["returns"].find_one({"shopify_refund_id": "700330"})
+    assert ret is not None and ret["status"] == "COMPLETED"
+
+
+def test_an_unreadable_stock_answer_restocks_nothing(swept, monkeypatch):
+    monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "1")
+    _two_unit_order_one_sold(swept, 60131)
+    repo = swept["stock_repo"]
+    creates = []
+    monkeypatch.setattr(repo, "find_many", lambda q: _raise_read())
+    monkeypatch.setattr(repo, "create", lambda d: creates.append(d))
+    shopify_refund.handle_shopify_refund(swept["db"], _refund_both(700331, 60131), webhook_id=None,
+                                         topic="refunds/create")
+
+    assert creates == [] and [(u["stock_id"], u["status"]) for u in repo.units] == [("stk-1", "SOLD")]
+
+
+def _raise_read():
+    raise RuntimeError("stock read down")
+
+
+def test_a_refund_on_goods_out_waits_for_a_person_even_under_auto(swept, monkeypatch):
+    monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "1")
+    doc = _book(swept, 60140)
+    _claim_unit(swept, doc)
+    _set(swept, 60140, status="SHIPPED", awb="AWB60140")
+    res = shopify_refund.handle_shopify_refund(swept["db"], _refund(700340, 60140), webhook_id=None,
+                                               topic="refunds/create")
+
+    assert res["status"] == "queued"
+    row = swept["review"].find_one({"shopify_refund_id": "700340"})
+    assert row["status"] == "PENDING" and "Goods are with the courier or the customer" in row["note"]
+    assert [(u["stock_id"], u["status"]) for u in swept["stock_repo"].units] == [("stk-1", "SOLD")]
+    assert swept["returns"].count_documents({}) == 0 and swept["ledger"].count_documents({}) == 0
+
+
+@pytest.mark.parametrize("restock_type, restock", [("cancel", False), ("return", True)])
+def test_a_delivered_orders_cancel_line_is_proposed_without_a_restock(swept, restock_type, restock):
+    doc = _book(swept, 60150)
+    _claim_unit(swept, doc)
+    _set(swept, 60150, status="DELIVERED")
+    shopify_refund.handle_shopify_refund(swept["db"], _refund(700350, 60150, restock_type=restock_type),
+                                         webhook_id=None, topic="refunds/create")
+
+    row = swept["review"].find_one({"shopify_refund_id": "700350"})
+    assert row["status"] == "PENDING"
+    assert [line["restock"] for line in row["proposed_restock"]] == [restock]
