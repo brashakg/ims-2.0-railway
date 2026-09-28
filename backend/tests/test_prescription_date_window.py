@@ -134,7 +134,9 @@ def test_every_call_site_uses_the_shared_builder():
     this string field, so one returned an empty list and the other aggregated
     an empty set -- silently, for every optometrist, forever. Guard the
     DELETION of the copies, not just the fix: assert the class builds no date
-    bound of its own anywhere.
+    bound of its own anywhere. (get_optometrist_stats was deleted 2026-09-27
+    with its only caller, the un-gated prescriptions stats twin; the live stats
+    are GET /clinical/optometrist/{id}/stats.)
     """
     import inspect
 
@@ -143,7 +145,7 @@ def test_every_call_site_uses_the_shared_builder():
         "a prescription_date bound is being built by hand again -- route it "
         "through _clinical_date_filter instead"
     )
-    for fn in ("find_by_optometrist", "find_by_store", "get_optometrist_stats"):
+    for fn in ("find_by_optometrist", "find_by_store"):
         body = src[src.index("def " + fn):]
         nxt = body.find(os.linesep.join(["", "    def "]), 1)
         if nxt == -1:

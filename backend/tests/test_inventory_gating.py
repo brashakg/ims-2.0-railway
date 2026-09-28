@@ -53,11 +53,10 @@ WRITES = [
     ("post", "/api/v1/inventory/stock-count/start"),
     ("post", "/api/v1/inventory/stock-count/c1/items"),
     ("post", "/api/v1/inventory/stock-count/c1/complete"),
-    ("post", "/api/v1/inventory/transfers"),
-    # NOTE: the /inventory/transfers/{id}/send|receive stub endpoints were
-    # REMOVED (dead stubs that returned fake success and moved no stock) -- the
-    # real transfer ship/receive lives at /api/v1/transfers/{id}/ship|receive
-    # (gated + tested in test_idor_transfers / test_transfer_stock_movement).
+    # NOTE: the /inventory/transfers stubs (list, create, {id}/send|receive)
+    # were REMOVED (dead stubs: fake TRF- number, empty list, no stock moved) --
+    # the real transfer workflow lives at /api/v1/transfers (gated + tested in
+    # test_idor_transfers / test_transfer_stock_movement).
     ("post", "/api/v1/inventory/stock-count-scan"),
     ("post", "/api/v1/inventory/serials"),
     ("patch", "/api/v1/inventory/serials/s1"),

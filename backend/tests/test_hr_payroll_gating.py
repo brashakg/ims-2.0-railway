@@ -2,9 +2,10 @@
 IMS 2.0 — hr + payroll router role gating
 =========================================
 The HR router was world-readable: any authenticated user could read leaves /
-attendance / payroll lists and call approve-leave / generate-payroll directly,
-even though the frontend `hr` and `hr/payroll` routes are restricted to
-finance/management roles. The router is now gated to mirror those guards.
+attendance and call approve-leave directly, even though the frontend `hr`
+routes are restricted to finance/management roles. The router is now gated to
+mirror those guards. (The legacy /hr/payroll/* generator was DELETED 2026-09-27;
+payroll has one door, routers/payroll.py -- see test_payroll_hr_scope_guards.)
 
 payroll's create-salary-config is admin-only and previously used a manual
 `if "ADMIN" not in roles` check that wrongly rejected SUPERADMIN — now fixed
@@ -39,10 +40,6 @@ class TestHrRouterGating:
         resp = client.get("/api/v1/hr/attendance", headers=staff_headers)
         assert resp.status_code == 403
 
-    def test_staff_blocked_on_payroll_list(self, client, staff_headers):
-        resp = client.get("/api/v1/hr/payroll", headers=staff_headers)
-        assert resp.status_code == 403
-
     def test_accountant_allowed_on_leaves(self, client):
         resp = client.get("/api/v1/hr/leaves", headers=_headers(["ACCOUNTANT"]))
         assert resp.status_code != 403
@@ -51,106 +48,9 @@ class TestHrRouterGating:
         resp = client.get("/api/v1/hr/attendance", headers=_headers(["STORE_MANAGER"]))
         assert resp.status_code != 403
 
-    def test_superadmin_allowed_on_payroll_list(self, client, auth_headers):
-        resp = client.get("/api/v1/hr/payroll", headers=auth_headers)
-        assert resp.status_code != 403
-
     def test_unauthenticated_rejected(self, client):
         resp = client.get("/api/v1/hr/leaves")
         assert resp.status_code in (401, 403)
-
-
-class TestLegacyHrPayrollRouteGating:
-    """SEC-2: The three legacy /hr/payroll/* routes (list, generate, approve)
-    and /hr/employee/{id}/salary-slip must be role-gated to HR_READ_ROLES.
-    Previously they used get_current_user (any authenticated user could call
-    them). This test class confirms the fix is in place."""
-
-    def test_sales_staff_blocked_on_payroll_generate(self, client, staff_headers):
-        """SALES_STAFF must not be able to trigger payroll generation."""
-        resp = client.post(
-            "/api/v1/hr/payroll/generate",
-            headers=staff_headers,
-            params={"year": 2026, "month": 6},
-        )
-        assert resp.status_code == 403
-
-    def test_sales_staff_blocked_on_payroll_approve(self, client, staff_headers):
-        """SALES_STAFF must not be able to approve a payroll record."""
-        resp = client.post(
-            "/api/v1/hr/payroll/fake-id/approve",
-            headers=staff_headers,
-        )
-        assert resp.status_code == 403
-
-    def test_sales_staff_blocked_on_salary_slip(self, client, staff_headers):
-        """SALES_STAFF must not be able to fetch another employee's salary slip."""
-        resp = client.get(
-            "/api/v1/hr/employee/emp-1/salary-slip",
-            headers=staff_headers,
-            params={"year": 2026, "month": 6},
-        )
-        assert resp.status_code == 403
-
-    def test_accountant_now_blocked_on_payroll_list(self, client):
-        """ACCOUNTANT may no longer LIST payroll records.
-
-        This asserted "not 403" until 2026-08-09. GET /hr/payroll returns
-        base_salary / gross_salary / deductions / net_salary for named
-        employees, and the owner ruled that only ADMIN/SUPERADMIN may see
-        another person's salary. The accountant keeps their _HR_READ_ROLES
-        reach for everything in this router that is NOT salary (attendance,
-        leave, shifts); this one route moved.
-        """
-        resp = client.get(
-            "/api/v1/hr/payroll",
-            headers=_headers(["ACCOUNTANT"]),
-            params={"year": 2026, "month": 6},
-        )
-        assert resp.status_code == 403
-
-    def test_admin_still_allowed_on_payroll_list(self, client, auth_headers):
-        """...and the data is still reachable by the role that may see it."""
-        resp = client.get(
-            "/api/v1/hr/payroll",
-            headers=auth_headers,
-            params={"year": 2026, "month": 6},
-        )
-        assert resp.status_code != 403
-
-    def test_accountant_now_blocked_on_payroll_generate(self, client):
-        """ACCOUNTANT may no longer AUTHOR payroll rows.
-
-        This asserted "not 403" until 2026-08-10. POST /hr/payroll/generate
-        creates DRAFT payroll rows (base_salary/26 * present_days, flat 10%
-        deduction) that the author cannot read back, that an ADMIN approves in
-        bulk, and that feed the PF ECR and the statutory filing. Under the
-        owner's ruling it matches its read sibling GET /hr/payroll: ADMIN only.
-        """
-        resp = client.post(
-            "/api/v1/hr/payroll/generate",
-            headers=_headers(["ACCOUNTANT"]),
-            params={"year": 2026, "month": 6},
-        )
-        assert resp.status_code == 403
-
-    def test_admin_still_allowed_on_payroll_generate(self, client, auth_headers):
-        """...and the role that may author still can."""
-        resp = client.post(
-            "/api/v1/hr/payroll/generate",
-            headers=auth_headers,
-            params={"year": 2026, "month": 6},
-        )
-        assert resp.status_code != 403
-
-    def test_superadmin_allowed_on_payroll_approve(self, client, auth_headers):
-        """SUPERADMIN auto-passes require_roles, so should not be 403."""
-        # The route will 404 (no such payroll record) -- that's fine; not 403.
-        resp = client.post(
-            "/api/v1/hr/payroll/nonexistent-id/approve",
-            headers=auth_headers,
-        )
-        assert resp.status_code != 403
 
 
 _CONFIG_BODY = {"employee_id": "emp-test-1", "basic_salary": 25000.0}
