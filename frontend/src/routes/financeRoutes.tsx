@@ -1,10 +1,27 @@
 // Finance routes. Moved verbatim from App.tsx (route-registry split);
 // paths, elements and role gates are unchanged.
 import { lazy } from 'react';
-import { Route, Navigate } from 'react-router-dom';
+import { Route, Navigate, useSearchParams } from 'react-router-dom';
 import { ProtectedRoute } from '../components/layout/ProtectedRoute';
+import { legacyTabTarget } from '../pages/finance/expenses/legacyTabRedirect';
+import {
+  EXPENSE_APPROVER_ROLES,
+  EXPENSE_ACCOUNTANT_ROLES,
+  FLOAT_VIEW_ROLES,
+} from '../pages/finance/expenses/expenseShared';
 
+// The Expenses layout (header, cards, section nav, Add-expense modal). The old
+// page path is kept as a re-export shim of ExpensesLayout.
 const ExpenseTracker = lazy(() => import('../pages/finance/ExpenseTracker'));
+const MyExpensesSection = lazy(() => import('../pages/finance/expenses/MyExpensesSection').then(m => ({ default: m.MyExpensesSection })));
+const ExpenseApprovalsSection = lazy(() => import('../pages/finance/expenses/ExpenseApprovalsSection').then(m => ({ default: m.ExpenseApprovalsSection })));
+const ExpenseEntrySection = lazy(() => import('../pages/finance/expenses/ExpenseEntrySection').then(m => ({ default: m.ExpenseEntrySection })));
+const ExpenseAgingSection = lazy(() => import('../pages/finance/expenses/ExpenseAgingSection').then(m => ({ default: m.ExpenseAgingSection })));
+const ExpenseDuplicatesSection = lazy(() => import('../pages/finance/expenses/ExpenseDuplicatesSection').then(m => ({ default: m.ExpenseDuplicatesSection })));
+const ExpenseAdvancesSection = lazy(() => import('../pages/finance/expenses/ExpenseAdvancesSection').then(m => ({ default: m.ExpenseAdvancesSection })));
+const PettyCashFloatSection = lazy(() => import('../pages/finance/expenses/PettyCashFloatSection').then(m => ({ default: m.PettyCashFloatSection })));
+const DaySettlementSection = lazy(() => import('../pages/finance/expenses/DaySettlementSection').then(m => ({ default: m.DaySettlementSection })));
+const ExpenseSummarySection = lazy(() => import('../pages/finance/expenses/ExpenseSummarySection').then(m => ({ default: m.ExpenseSummarySection })));
 const FinanceDashboard = lazy(() => import('../pages/finance/FinanceDashboard'));
 const CashFlowPage = lazy(() => import('../pages/finance/CashFlowPage'));
 const ItcReconcilePage = lazy(() => import('../pages/finance/ItcReconcilePage'));
@@ -16,10 +33,20 @@ const BudgetingPage = lazy(() => import('../pages/finance/BudgetingPage'));
 const B2BTallyExport = lazy(() => import('../pages/finance/B2BTallyExport'));
 const B2BTallyWorklist = lazy(() => import('../pages/finance/B2BTallyWorklist'));
 
+// Bare /finance/expenses IS My Expenses. A legacy ?tab=<x> link forwards to
+// that section's own URL (mapper in pages/finance/expenses/legacyTabRedirect).
+function ExpensesIndex() {
+  const [searchParams] = useSearchParams();
+  if (!searchParams.has('tab')) return <MyExpensesSection />;
+  return <Navigate to={legacyTabTarget(searchParams)} replace />;
+}
+
 export const financeRoutes = (
   <>
-    {/* Expenses — any authenticated user can submit + see their own;
-        ownership scoping + role-gated approval/entry happen inside. */}
+    {/* Expenses — any authenticated user can submit + see their own
+        (ownership scoping happens server-side). Wave 6 split: one URL per
+        section; each section's allowedRoles is the role gate its tab's JSX
+        used to carry (lists in pages/finance/expenses/expenseShared.ts). */}
     <Route
       path="finance/expenses"
       element={
@@ -27,7 +54,60 @@ export const financeRoutes = (
           <ExpenseTracker />
         </ProtectedRoute>
       }
-    />
+    >
+      <Route index element={<ExpensesIndex />} />
+      <Route
+        path="approvals"
+        element={
+          <ProtectedRoute allowedRoles={EXPENSE_APPROVER_ROLES}>
+            <ExpenseApprovalsSection />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="entry"
+        element={
+          <ProtectedRoute allowedRoles={EXPENSE_ACCOUNTANT_ROLES}>
+            <ExpenseEntrySection />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="aging"
+        element={
+          <ProtectedRoute allowedRoles={EXPENSE_ACCOUNTANT_ROLES}>
+            <ExpenseAgingSection />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="duplicates"
+        element={
+          <ProtectedRoute allowedRoles={EXPENSE_APPROVER_ROLES}>
+            <ExpenseDuplicatesSection />
+          </ProtectedRoute>
+        }
+      />
+      {/* Advances and the category summary had no role gate on the old page. */}
+      <Route path="advances" element={<ExpenseAdvancesSection />} />
+      <Route
+        path="float"
+        element={
+          <ProtectedRoute allowedRoles={FLOAT_VIEW_ROLES}>
+            <PettyCashFloatSection />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="settle"
+        element={
+          <ProtectedRoute allowedRoles={FLOAT_VIEW_ROLES}>
+            <DaySettlementSection />
+          </ProtectedRoute>
+        }
+      />
+      <Route path="summary" element={<ExpenseSummarySection />} />
+    </Route>
 
     {/* Bare /finance → /finance/dashboard. QA 2026-05-27 reported a 404
         on /finance because no route was defined. Same for the sidebar's
