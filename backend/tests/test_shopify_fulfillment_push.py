@@ -398,18 +398,36 @@ def test_hook_swallows_push_error_never_blocks(monkeypatch):
 
 class _OrderShopify:
     """A PRODUCTION-SHAPED order on Shopify: one FulfillmentOrder. A create
-    naming an OPEN one closes it and adds a Fulfillment; on one that is not
-    open it answers a userError and creates nothing (the FulfillmentOrder
-    model). ``refuse``: HTTP statuses answered to the next creates BEFORE
-    anything applies (an edge refusal). ``lose``: exceptions raised AFTER
-    the next creates applied (the answer is lost)."""
+    naming an OPEN one closes it and adds a Fulfillment carrying the
+    create's tracking number; on one that is not open it answers a userError
+    and creates nothing (the FulfillmentOrder model). ``refuse``: HTTP
+    statuses answered to the next creates BEFORE anything applies (an edge
+    refusal). ``lose``: exceptions raised AFTER the next creates applied
+    (the answer is lost). ``late``: HTTP statuses answered to the next
+    creates while Shopify is STILL COMMITTING them -- each lands right after
+    the next read has answered (the read saw the FulfillmentOrder open).
+    ``cancelled``: Fulfillments already on the order, cancelled in the
+    admin. ``log`` interleaves the reads, creates and the backoff sleeps."""
 
     def __init__(self):
         self.posts = []
+        self.log = []
+        self.sleeps = []
         self.fo_status = "OPEN"
         self.fulfillments = []
+        self.tracking = {}
+        self.cancelled = []
         self.refuse = []
         self.lose = []
+        self.late = []
+        self._committing = None
+
+    def _commit(self, variables):
+        self.fo_status = "CLOSED"
+        fid = "gid://shopify/Fulfillment/%d" % (900 + len(self.fulfillments))
+        self.fulfillments.append(fid)
+        self.tracking[fid] = ((variables["fulfillment"].get("trackingInfo") or {}).get("number"))
+        return fid
 
     async def post_once(self, url, headers, payload):
         import httpx
@@ -417,24 +435,35 @@ class _OrderShopify:
         query, variables = payload["query"], payload["variables"]
         if "imsFulfillmentCreate" not in query:
             self.posts.append("read")
-            return httpx.Response(200, json={"data": {"order": {
+            self.log.append("read")
+            answer = httpx.Response(200, json={"data": {"order": {
                 "id": variables["id"],
-                "fulfillments": [{"id": f, "status": "SUCCESS"} for f in self.fulfillments],
+                "fulfillments": [{"id": f, "status": "CANCELLED", "trackingInfo": []} for f in self.cancelled]
+                + [
+                    {"id": f, "status": "SUCCESS", "trackingInfo": [{"number": self.tracking.get(f)}]}
+                    for f in self.fulfillments
+                ],
                 "fulfillmentOrders": {"edges": [
                     {"node": {"id": "gid://shopify/FulfillmentOrder/1", "status": self.fo_status}}
                 ]},
             }}})
+            if self._committing is not None:
+                self._commit(self._committing)
+                self._committing = None
+            return answer
         self.posts.append("create")
+        self.log.append("create")
         if self.refuse:
             return httpx.Response(self.refuse.pop(0), text="service unavailable")
+        if self.late:
+            self._committing = variables
+            return httpx.Response(self.late.pop(0), text="gateway timeout")
         if self.fo_status != "OPEN":
             return httpx.Response(200, json={"data": {"fulfillmentCreateV2": {
                 "fulfillment": None,
                 "userErrors": [{"field": ["fulfillment"], "message": "Fulfillment order has an unfulfillable status= closed."}],
             }}})
-        self.fo_status = "CLOSED"
-        fid = "gid://shopify/Fulfillment/%d" % (900 + len(self.fulfillments))
-        self.fulfillments.append(fid)
+        fid = self._commit(variables)
         if self.lose:
             raise self.lose.pop(0)
         return httpx.Response(200, json={"data": {"fulfillmentCreateV2": {
@@ -453,8 +482,9 @@ def _through_transport(monkeypatch):
     )
     monkeypatch.setattr(shopify_push, "_post_once", shop.post_once)
 
-    async def _no_sleep(_s):
-        return None
+    async def _no_sleep(s):
+        shop.log.append("sleep")
+        shop.sleeps.append(s)
 
     monkeypatch.setattr(asyncio, "sleep", _no_sleep)
     db = _FakeDB()
@@ -485,7 +515,7 @@ def test_a_lost_answer_of_an_applied_create_is_never_sent_again(monkeypatch):
 
     res = _run(sfp.push_fulfillment(db, _online_order(), tracking={"number": "AWB1"}))
 
-    assert res.ok is True and res.reason == "already_fulfilled_on_shopify", res.error
+    assert res.ok is True and res.reason == "ims_create_landed", res.error
     assert shop.posts == ["read", "create", "read"], "the re-read found it applied: no second create"
     assert shop.fulfillments == ["gid://shopify/Fulfillment/900"] and _stamp(db) == "gid://shopify/Fulfillment/900"
 
@@ -499,3 +529,61 @@ def test_a_shopify_that_keeps_refusing_is_given_up_on_after_a_bounded_number_of_
     assert res.ok is False and "not retried" in (res.error or "")
     assert shop.posts == ["read", "create"] * shopify_push._MAX_RETRIES
     assert shop.fulfillments == [] and _stamp(db) is None
+
+
+def test_the_next_pass_backs_off_like_the_transport_before_it_reads(monkeypatch):
+    """Round 4 (R6 / R10). After a lost answer the next pass WAITS the
+    transport's own first backoff (1s + jitter) before it reads the order: a
+    read right after a client timeout is the read most likely to miss a
+    create Shopify is still committing.
+    REVERT-PROOF: the sleep before the next pass removed -> the log reads
+    read, create, read -- no wait."""
+    import httpx
+
+    shop, db = _through_transport(monkeypatch)
+    shop.lose = [httpx.ReadTimeout("read timed out")]
+
+    res = _run(sfp.push_fulfillment(db, _online_order(), tracking={"number": "AWB1"}))
+
+    assert res.ok is True, res.error
+    assert shop.log == ["read", "create", "sleep", "read"]
+    assert 1.0 <= shop.sleeps[0] <= 1.5
+
+
+def test_a_create_that_lands_after_the_re_read_is_read_again_not_failed(monkeypatch):
+    """Round 4. Pass 1's create answers 504 while Shopify is still committing
+    it; pass 2 reads the FulfillmentOrder still OPEN, the first create then
+    lands, and pass 2's create is refused ('unfulfillable status= closed').
+    That refusal is read again, never reported as a plain failure: the
+    fulfilment Shopify holds -- IMS's, by its tracking number -- is stamped,
+    and there is exactly one.
+    REVERT-PROOF: a later pass's userError returned as is -> ok=False, the
+    applied fulfilment unstamped (and the booking hook never runs again)."""
+    shop, db = _through_transport(monkeypatch)
+    shop.late = [504]
+
+    res = _run(sfp.push_fulfillment(db, _online_order(), tracking={"number": "AWB1"}))
+
+    assert res.ok is True and res.reason == "ims_create_landed", res.error
+    assert shop.posts == ["read", "create", "read", "create", "read"]
+    assert shop.fulfillments == ["gid://shopify/Fulfillment/900"] and _stamp(db) == res.shopify_id
+
+
+def test_a_cancelled_fulfilment_is_never_stamped_as_ims_own(monkeypatch):
+    """Round 4. The order already carries a Fulfillment cancelled in the
+    Shopify admin (Fulfillment/1) and an OPEN FulfillmentOrder. IMS's create
+    commits and its answer is lost: the next pass stamps IMS's own
+    fulfilment (900, its tracking number), never the cancelled one, and says
+    it is IMS's create that landed -- not an out-of-band fulfilment.
+    REVERT-PROOF: stamp the first Fulfillment whatever its status ->
+    Fulfillment/1 stamped, reason already_fulfilled_on_shopify."""
+    import httpx
+
+    shop, db = _through_transport(monkeypatch)
+    shop.cancelled = ["gid://shopify/Fulfillment/1"]
+    shop.lose = [httpx.ReadTimeout("read timed out")]
+
+    res = _run(sfp.push_fulfillment(db, _online_order(), tracking={"number": "AWB1"}))
+
+    assert res.ok is True and res.shopify_id == "gid://shopify/Fulfillment/900", res
+    assert res.reason == "ims_create_landed" and _stamp(db) == "gid://shopify/Fulfillment/900"
