@@ -925,6 +925,47 @@ def test_goods_back_that_cannot_read_the_stock_can_be_pressed_again(swept, monke
     assert _units(swept) == [("stk-1", "AVAILABLE")]
 
 
+# One frame, one unit, whichever doors run. The confirm of a goods-out refund
+# (a SHIPPED order) that cannot read the stock leaves the restock OPEN and a
+# task sends a person to the /returns/{id}/restock retry door; Goods back may
+# already have put the unit back, before or after that confirm. The retry door
+# holds the same cap as every Shopify restock, so it never mints a second one.
+
+
+def _open_restock(swept, monkeypatch, oid, rid, goods_first):
+    row = _one_unit_refund(swept, oid, rid, status="SHIPPED", awb=f"AWB{oid}")
+    assert row["status"] == "PENDING" and [line["restock"] for line in row["proposed_restock"]] == [True]
+    if goods_first:
+        assert _goods_back(row)["result"]["status"] == "restocked"
+    _read_fails_once(monkeypatch, swept["stock_repo"])
+    res = shopify_refund.post_from_review(swept["db"], row)
+    assert res["status"] == "credited" and res["restock_applied"] is False
+    if not goods_first:
+        assert _goods_back(row)["result"]["status"] == "restocked"
+    assert _units(swept) == [("stk-1", "AVAILABLE")]
+    return swept["returns"].find_one({"shopify_refund_id": str(rid)})
+
+
+def _retry(ret):
+    return asyncio.run(returns_router.retry_restock(ret["return_id"], current_user=_ACCT))
+
+
+@pytest.mark.parametrize("goods_first", [False, True])
+def test_goods_back_and_the_restock_retry_put_one_unit_back(swept, monkeypatch, goods_first):
+    ret = _open_restock(swept, monkeypatch, 60172, 700372, goods_first)
+    assert _retry(ret)["restock_applied"] is True
+    assert _units(swept) == [("stk-1", "AVAILABLE")], "no phantom minted"
+
+
+def test_a_restock_retry_that_cannot_read_the_stock_restocks_nothing(swept, monkeypatch):
+    ret = _open_restock(swept, monkeypatch, 60173, 700373, goods_first=True)
+    _read_fails_once(monkeypatch, swept["stock_repo"])
+    assert _retry(ret)["restock_applied"] is False
+    assert _units(swept) == [("stk-1", "AVAILABLE")]
+    assert _retry(ret)["restock_applied"] is True, "left open, not stuck in progress"
+    assert _units(swept) == [("stk-1", "AVAILABLE")]
+
+
 # ---------------------------------------------------------------------------
 # Ruling 1 leaves a fulfilled online order SHIPPED (it used to be DELIVERED).
 # Every report that picks orders by status reads the ONE pair of sets in

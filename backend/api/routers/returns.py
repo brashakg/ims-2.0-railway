@@ -3685,6 +3685,28 @@ async def retry_restock(
             ),
         }
 
+    # A Shopify refund's restock holds the SAME cap as every Shopify restock
+    # (shopify_refund._cap_restock_to_returnable): only units the order still
+    # holds SOLD. Goods back may have put them back since the confirm left
+    # this restock open; restocking them again here MINTS a phantom on a live
+    # shelf. An unreadable stock answer restocks nothing and stays open.
+    refund_id = claim.get("shopify_refund_id")
+    if refund_id and retry_order is not None:
+        from ..services.shopify_refund import _cap_restock_to_returnable
+
+        lines, _, unknown = _cap_restock_to_returnable(lines, retry_order, str(refund_id))
+        if unknown:
+            try:
+                coll.update_one({"return_id": return_id}, {"$set": {"restock_in_progress": False}})
+            except Exception:  # noqa: BLE001
+                pass
+            return {
+                "return_id": return_id,
+                "restock_applied": False,
+                "restock_stock_ids": existing_ids,
+                "message": "Could not read the stock just now - nothing was restocked. Retry shortly.",
+            }
+
     try:
         restock_result = _restock_good_items(
             lines,
