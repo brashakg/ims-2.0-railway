@@ -575,6 +575,56 @@ def test_a_routing_stamp_on_a_stored_payload_is_never_trusted(world):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("bokaro_unit", [
+    {},  # no status field (a legacy minted row)
+    {"status": "available"},  # lowercase: on hand, but the claim wants AVAILABLE
+    {"status": "AVAILABLE", "expiry_date": "2020-01-01"},  # expired: F2 unclaimable
+])
+def test_a_unit_the_claim_refuses_does_not_keep_the_order_at_that_shop(world, bokaro_unit):
+    """P2: the routing count asks the claim's question. Bokaro's only unit is
+    one claim_one_available will not take, so Ranchi (a real AVAILABLE unit)
+    ships it -- not a held order at Bokaro."""
+    db = world["db"]
+    db.stock_units.insert_one({"stock_id": "U-BOK", "product_id": "P-RB",
+                               "store_id": "BV-BOK-01", **bokaro_unit})
+    _stock(db, "BV-RAN-01", "P-RB", 1)
+    world["shop"].fo(FO_1, LOC_BOK)
+
+    res, order = _book(world, _order(52004))
+
+    assert order["store_id"] == "BV-RAN-01"
+    assert order["fulfillment_route"]["reason"] == "MOVED"
+    assert _sold_at(db, res["order_id"]) == ["BV-RAN-01"]
+    assert order["fulfillment_hold"] is False
+
+
+@pytest.mark.parametrize("shape", [
+    {"status": "AVAILABLE"},
+    {"status": "available"},
+    {"status": " available "},
+    {"status": "IN_STOCK"},
+    {},
+    {"status": None},
+    {"status": "RESERVED"},
+    {"status": "SOLD"},
+    {"status": "AVAILABLE", "expiry_date": "2020-01-01"},
+    {"status": "AVAILABLE", "expiry_date": "2999-01-01"},
+    {"status": "AVAILABLE", "expiry_date": "31/12/2025"},  # unreadable: fail-open
+])
+def test_routing_count_and_the_claim_are_one_rule(world, shape):
+    """The differential: for every stored shape, the shop count route_order
+    decides with == what claim_one_available actually takes."""
+    from database.repositories.product_repository import StockRepository
+
+    db = world["db"]
+    db.stock_units.insert_one({"stock_id": "U-1", "product_id": "P-X", "store_id": "BV-BOK-01", **shape})
+
+    counted = route_mod._stock_by_store(db, "P-X").get("BV-BOK-01", 0)
+    claimed = StockRepository(db.stock_units).claim_one_available("P-X", "BV-BOK-01", "o-diff")
+
+    assert counted == (1 if claimed else 0), (shape, counted, claimed)
+
+
 def test_no_shop_named_bills_the_bucket_loudly(world):
     """[PR-5 design] live, Shopify routed to Pune's unmapped location, no
     fallback set, no mapped shop holds it: billed from the bucket -- and the

@@ -109,11 +109,20 @@ def _relocation_enabled() -> bool:
 
 
 def _stock_by_store(db, product_id: str) -> Dict[str, int]:
-    """``{store_id: AVAILABLE units}`` of one product at every PHYSICAL shop,
+    """``{store_id: CLAIMABLE units}`` of one product at every PHYSICAL shop,
     most stock first (tie: store_id). ONLINE stores are excluded: they are
     pooled and stockless, a unit parked there is a phantom nobody can ship.
-    Fail-soft -> {} (logged)."""
-    from .item_events import on_hand_match
+    Fail-soft -> {} (logged).
+
+    "Claimable" is the CLAIM's own rule (StockRepository.sellable_filter:
+    status exactly AVAILABLE and not past its expiry -- what
+    claim_one_available will actually hand this order), not the looser
+    on-hand match (item_events.on_hand_match also counts a status-less,
+    lowercase or expired unit). Counting with the looser rule sent orders to
+    a shop whose units the claim then refused: held, while another shop
+    could have shipped it."""
+    from database.repositories.product_repository import StockRepository
+
     from .stores_util import is_online_store
 
     try:
@@ -122,9 +131,14 @@ def _stock_by_store(db, product_id: str) -> Dict[str, int]:
             if hasattr(db, "get_collection")
             else db["stock_units"]
         )
+        claimable = {
+            k: v
+            for k, v in StockRepository(coll).sellable_filter(product_id, None).items()
+            if k != "store_id"  # every shop, grouped below
+        }
         rows = coll.aggregate(
             [
-                {"$match": {"product_id": product_id, **on_hand_match()}},
+                {"$match": claimable},
                 {"$group": {"_id": "$store_id", "n": {"$sum": 1}}},
                 {"$sort": {"n": -1, "_id": 1}},
             ]
