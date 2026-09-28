@@ -183,11 +183,14 @@ def _on_hand_by_product(
 
 def rule_by_location(db, skus: List[str], *, store_id: Optional[str] = None):
     """``(shelf, sent, mapped)`` for an IMS-vs-Shopify comparison PER LOCATION:
-    THE ONE RULE per shop (online_stock_writeback.online_quantities_for_skus,
-    the writer's own call, block-aware) read twice -- ``shelf`` at buffer 0
-    (what backs a listing: the OVERSELL line) and ``sent`` at the writer's own
-    buffer (what the writer sends: sellable / recommended / OVER-ALLOCATED) --
-    and the writer's own shop -> Shopify location map (inventory._mapped).
+    ``shelf`` is each shop's physical shelf (online_stock_writeback.
+    shelf_quantities_for_skus: what backs a listing, the OVERSELL line -- no
+    buffer, no online block: a blocked SKU's shelf still backs what is
+    listed, so listing it is OVER-ALLOCATED, never an oversell); ``sent`` is
+    THE ONE RULE at the writer's own buffer with the block
+    (online_quantities_for_skus: sellable / recommended / OVER-ALLOCATED);
+    ``mapped`` is the writer's own shop -> Shopify location map
+    (inventory._mapped). Both reads are the writer's own functions.
     With ``store_id`` the map is that shop's own entry only ({} for a shop
     with no usable location), so another shop's failed read never blanks it.
     An EMPTY store_id is no filter -- all stores -- exactly as the route and
@@ -201,7 +204,7 @@ def rule_by_location(db, skus: List[str], *, store_id: Optional[str] = None):
     not be read. Never raises. ponytail: every shop's shelf is read twice per
     page load; one read + a derived buffer if a page ever measures slow."""
     try:
-        from .online_stock_writeback import online_quantities_for_skus
+        from .online_stock_writeback import online_quantities_for_skus, shelf_quantities_for_skus
         from .shopify_push.inventory import _mapped, _stores
 
         mapped = _mapped(_stores(db))
@@ -211,9 +214,9 @@ def rule_by_location(db, skus: List[str], *, store_id: Optional[str] = None):
     if store_id:
         mapped = {store_id: mapped[store_id]} if store_id in mapped else {}
 
-    def known(buffer):
+    def known(read):
         try:
-            quantities = online_quantities_for_skus(db, skus, safety_buffer=buffer)
+            quantities = read(db, skus)
         except Exception as exc:  # noqa: BLE001
             logger.warning("[STOCK_TALLY] per-location rule unreadable: %s", exc)
             return None
@@ -224,7 +227,7 @@ def rule_by_location(db, skus: List[str], *, store_id: Optional[str] = None):
             return None
         return quantities
 
-    return known(0), known(None), mapped
+    return known(shelf_quantities_for_skus), known(online_quantities_for_skus), mapped
 
 
 def _reserved_by_product(
@@ -315,7 +318,8 @@ def stock_tally_summary(
                             shops -- what IMS lets the website sell
       - recommended_buffer: a conservative reserve suggestion (not enforced)
       - oversell_risk     : some Shopify location lists more than the SHELF
-                            behind it (the rule at buffer 0; the same line the
+                            behind it (the physical shelf -- no buffer, no
+                            online block; the same line the
                             reconciliation screen draws), counted by
                             shopify_stock_parity.unbacked_units, only when the
                             listed qty is actually known -- a location listing
@@ -377,14 +381,14 @@ def stock_tally_summary(
     pids = [p.get("product_id") for p in products if p.get("product_id")]
     skus = [p.get("sku") for p in products if p.get("sku")]
     on_hand = _on_hand_by_product(db, pids)
-    # The rule already carries the SUPERADMIN online block (0 at every shop).
+    # `sent` carries the SUPERADMIN online block (0 at every shop); `shelf` does not.
     shelf, sent, mapped = (rule_by_location(db, skus) if on_hand is not None else None) or (None, None, {})
     if on_hand is None or shelf is None or sent is None:
         # UNKNOWN is not "every shelf empty": nothing is tallied, and the
         # page says why instead of printing 0 on hand for every listed SKU.
         base["summary"]["on_hand_unknown"] = True
         return base
-    # OVERSELL is judged against the SHELF (buffer 0), exactly as the
+    # OVERSELL is judged against the SHELF (no buffer, no block), exactly as the
     # reconciliation screen judges it; the buffer is what `sellable` shows.
     # The same two per-location counts the reconciliation screen sorts by:
     # beyond the shelf (the risk) and beyond the writer's number (the order).

@@ -368,31 +368,18 @@ def _blocked_online(db, skus: List[str]) -> Optional[set]:
         return None
 
 
-def online_quantities_for_skus(
-    db, skus: List[str], *, safety_buffer: Optional[int] = None
-) -> Dict[str, Dict[str, int]]:
-    """THE online quantity rule -- what the website lists for a SKU at EACH
-    shop's Shopify location: ``{sku: {store_id: recommend_allocation(on_hand
-    at that shop, safety_buffer)}}`` for every ACTIVE PHYSICAL shop
-    (stores_util.physical_stores -- mapped or not; the writer decides what to
-    do with an unmapped holder). ONLINE stores are excluded structurally: they
-    are never in the loop. The buffer applies PER SHOP (Shopify routes per
-    shelf). A SKU blocked from online sale (online_block) is 0 at EVERY shop
-    whatever the shelves hold -- the block is part of the rule, not a caller's
-    override, so no pass can write the shelf count back after the POS door
-    wrote 0.
+def shelf_quantities_for_skus(db, skus: List[str]) -> Dict[str, Dict[str, int]]:
+    """The rule's INPUT: ``{sku: {store_id: AVAILABLE units on that shop's
+    shelf}}`` for every ACTIVE PHYSICAL shop, before the buffer and the online
+    block -- what physically backs a listing at that shop's Shopify location
+    (the OVERSELL line). online_quantities_for_skus is this plus the buffer
+    and the block; there is no second shelf loop.
 
     STRICT, per shop: a shop whose ``_on_hand_for_skus`` call returned ``{}``
-    for a non-empty request is ABSENT from every SKU's inner dict (unknown ->
-    never written as 0; the other shops still go out). A SKU absent from the
-    result has no spine row (unknown). ``{}`` for a non-empty request means
-    the shop list could not be read or EVERY shop failed -- the whole-batch
-    abort. Zero physical shops -> ``{sku: {}}`` (known, nothing to list).
-
-    ponytail: one aggregate per shop (six small indexed reads twice a day
-    plus one per sale) -- the strict fake refuses a composite $group and the
-    per-shop STRICT contract comes free; one composite aggregate + a
-    strict_fakes extension if a pass ever measures slow."""
+    for a non-empty request is ABSENT from every SKU's inner dict (unknown,
+    never 0). A SKU absent from the result has no spine row. ``{}`` for a
+    non-empty request = the shop list could not be read or EVERY shop failed.
+    Zero physical shops -> ``{sku: {}}`` (known, nothing on any shelf)."""
     clean = [s for s in dict.fromkeys(skus or []) if s]
     if db is None or not clean:
         return {}
@@ -403,13 +390,9 @@ def online_quantities_for_skus(
     except Exception as exc:  # noqa: BLE001
         logger.warning("[STOCK_WRITEBACK] shop list unknown (STRICT -> batch abort): %s", exc)
         return {}
-    from . import stock_allocation
-
-    buf = _safety_buffer(db) if safety_buffer is None else max(0, int(safety_buffer))
-    if buf is None:
-        return {}  # the buffer is part of the rule: unknown -> the rule is unknown
+    if not stores:
+        return {sku: {} for sku in clean}
     out: Dict[str, Dict[str, int]] = {}
-    read: List[str] = []
     for store in stores:
         sid = str(store.get("store_id") or "").strip()
         if not sid:
@@ -421,10 +404,45 @@ def online_quantities_for_skus(
                 "nowhere this pass", sid,
             )
             continue
-        read.append(sid)
         for sku, q in on_hand.items():
-            out.setdefault(sku, {})[sid] = stock_allocation.recommend_allocation(q, buf)
-    if stores and not read:
+            out.setdefault(sku, {})[sid] = q
+    return out
+
+
+def online_quantities_for_skus(
+    db, skus: List[str], *, safety_buffer: Optional[int] = None
+) -> Dict[str, Dict[str, int]]:
+    """THE online quantity rule -- what the website lists for a SKU at EACH
+    shop's Shopify location: ``{sku: {store_id: recommend_allocation(on_hand
+    at that shop, safety_buffer)}}`` for every ACTIVE PHYSICAL shop
+    (shelf_quantities_for_skus -- mapped or not; the writer decides what to
+    do with an unmapped holder). ONLINE stores are excluded structurally: they
+    are never in the loop. The buffer applies PER SHOP (Shopify routes per
+    shelf). A SKU blocked from online sale (online_block) is 0 at EVERY shop
+    whatever the shelves hold -- the block is part of the rule, not a caller's
+    override, so no pass can write the shelf count back after the POS door
+    wrote 0.
+
+    STRICT, per shop, exactly as shelf_quantities_for_skus: a shop whose read
+    failed is ABSENT from every SKU's inner dict (unknown -> never written as
+    0; the other shops still go out); ``{}`` for a non-empty request is the
+    whole-batch abort (also when the buffer or the block is unknown). Zero
+    physical shops -> ``{sku: {}}`` (known, nothing to list).
+
+    ponytail: one aggregate per shop (six small indexed reads twice a day
+    plus one per sale) -- the strict fake refuses a composite $group and the
+    per-shop STRICT contract comes free; one composite aggregate + a
+    strict_fakes extension if a pass ever measures slow."""
+    clean = [s for s in dict.fromkeys(skus or []) if s]
+    if db is None or not clean:
+        return {}
+    from . import stock_allocation
+
+    buf = _safety_buffer(db) if safety_buffer is None else max(0, int(safety_buffer))
+    if buf is None:
+        return {}  # the buffer is part of the rule: unknown -> the rule is unknown
+    shelves = shelf_quantities_for_skus(db, clean)
+    if not shelves:
         return {}
     # The block writes 0 -- but ONLY where the pass actually read the shelf. A
     # shop whose read failed stays absent from EVERY sku (unknown is never
@@ -434,10 +452,13 @@ def online_quantities_for_skus(
     blocked = _blocked_online(db, clean)
     if blocked is None:
         return {}  # the block is part of the rule: unknown -> the rule is unknown
+    read = {sid for per_shop in shelves.values() for sid in per_shop}
+    out = {
+        sku: {sid: stock_allocation.recommend_allocation(q, buf) for sid, q in per_shop.items()}
+        for sku, per_shop in shelves.items()
+    }
     for sku in blocked:
-        out[sku] = {sid: 0 for sid in read}
-    if not stores:
-        return {sku: {} for sku in clean}
+        out[sku] = dict.fromkeys(read, 0)
     return out
 
 

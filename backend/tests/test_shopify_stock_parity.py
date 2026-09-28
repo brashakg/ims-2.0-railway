@@ -33,6 +33,10 @@ Pins, each with its revert named in the test:
     closes; a night that compared nothing still retires a shop that left
     the map; only a task write that succeeded is reported; both screens
     order and report delta per location; an empty store_id is all stores.
+  * round 5: the OVERSELL line is the physical shelf (a SUPERADMIN-blocked
+    SKU listed within its shelf is OVER_ALLOCATED); both screens' second
+    (units no shelf backs) and third (units past the writer, per location)
+    sort keys are pinned.
 
 StrictDB + injected Shopify boundary -- no network, no production.
 """
@@ -816,6 +820,25 @@ def test_reconcile_recommended_carries_the_online_block(monkeypatch):
                                   "online_sync_blocked": True, "products": [{"sku": "SKU-1"}]}])
     row = _reconcile(monkeypatch, db, {INV_1: {LOC_A: 0, LOC_B: 0}, INV_2: {}}, None)["SKU-1"]
     assert _cols(row, "in_store", "online", "recommended", "status") == (9, 0, 0, "OK")
+
+
+def test_a_blocked_sku_listed_within_its_shelf_is_over_allocated_never_an_oversell(monkeypatch):
+    """Round 5, the panel's input: SKU-1 is SUPERADMIN-blocked, shelves BV-A 5
+    / BV-B 4, Shopify LOC_A 2 / LOC_B 0. The writer sends 0 (the block), but
+    the 5 on BV-A's shelf back the 2 listed there: OVER_ALLOCATED (listed
+    past the writer's number, within the shelf), 0 units unbacked; the tally
+    shows no oversell and sellable 0. Read the shelf through the rule again
+    (block included) -> OVERSELL_RISK, 2 units 'beyond stock' -> fails."""
+    db = _db({"SKU-1": {"BV-A": 5, "BV-B": 4}})
+    db.seed("ecom_collections", [{"collection_id": "C-BAN", "collection_type": "CUSTOM",
+                                  "online_sync_blocked": True, "products": [{"sku": "SKU-1"}]}])
+    levels = {INV_1: {LOC_A: 2, LOC_B: 0}, INV_2: {}}
+    page = _reconcile_page(monkeypatch, db, levels, None)
+    row = {r["sku"]: r for r in page["items"]}["SKU-1"]
+    assert _cols(row, "in_store", "online", "recommended", "delta", "status") == (9, 2, 0, 2, "OVER_ALLOCATED")
+    assert page["summary"]["oversell_risk_units"] == 0 and page["summary"]["over_allocated"] == 1
+    row = {r["sku"]: r for r in _tally(monkeypatch, db, levels)["items"]}["SKU-1"]
+    assert _cols(row, "online_listed_qty", "sellable", "oversell_risk") == (2, 0, False)
 
 
 def test_tally_and_reconcile_draw_the_same_oversell_line(monkeypatch):
