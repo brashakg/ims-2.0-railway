@@ -507,21 +507,30 @@ async def list_units(
     """
     if not product_id and not grn_id:
         raise HTTPException(status_code=400, detail="Provide product_id or grn_id")
-    active_store = validate_store_access(store_id, current_user)
-    if not active_store:
-        raise HTTPException(status_code=400, detail="Pick a store first")
+    flt: Dict = {}
+    # A receipt's units sit at the shop it was received into, which need not be
+    # the caller's active store (an admin receiving for another shop). Without
+    # an explicit store, a receipt read is scoped per unit below instead.
+    if store_id or not grn_id:
+        active_store = validate_store_access(store_id, current_user)
+        if not active_store:
+            raise HTTPException(status_code=400, detail="Pick a store first")
+        flt["store_id"] = active_store
     stock_repo = get_stock_repository()
     product_repo = get_product_repository()
     if stock_repo is None or product_repo is None:
         return {"units": [], "total": 0}
 
-    flt: Dict = {"store_id": active_store}
     if product_id:
         flt["product_id"] = product_id
     if grn_id:
         flt["source_type"] = "GRN"
         flt["source_id"] = grn_id
-    docs = stock_repo.find_many(flt, limit=_UNITS_LIMIT)
+    docs = [
+        d
+        for d in stock_repo.find_many(flt, limit=_UNITS_LIMIT)
+        if can_access_store_scoped(d.get("store_id"), current_user)
+    ]
     # Units still in the shop first (the ones that need a label), oldest first.
     docs.sort(
         key=lambda d: (not is_on_hand(d.get("status")), str(d.get("created_at") or ""))

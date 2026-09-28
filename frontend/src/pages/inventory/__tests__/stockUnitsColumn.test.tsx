@@ -50,13 +50,13 @@ vi.mock('../inventoryQueries', async (importOriginal) => {
 
 import { InventoryStockPage } from '../InventoryStockPage';
 
-function renderPage() {
+function renderPage(storeId = 'BV-DHN-02') {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
       <MemoryRouter initialEntries={['/inventory/stock']}>
         <Routes>
-          <Route element={<Outlet context={{ storeId: 'BV-DHN-02', isOnlineStoreView: false, stores: [] }} />}>
+          <Route element={<Outlet context={{ storeId, isOnlineStoreView: false, stores: [] }} />}>
             <Route path="/inventory/stock" element={<InventoryStockPage />} />
           </Route>
         </Routes>
@@ -71,8 +71,17 @@ describe('the stock ledger row (F27)', () => {
     renderPage();
     expect(screen.queryByText('BV--00F1D2CC')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /9 units/ }));
-    expect(getUnits).toHaveBeenCalledWith({ store_id: 'BV-DHN-02', product_id: 'P-CARRERA', grn_id: undefined });
+    expect(getUnits).toHaveBeenCalledWith({ store_id: 'BV-DHN-02', product_id: 'P-CARRERA' });
     expect(await screen.findByRole('dialog', { name: 'Carrera CA 8895' })).toBeInTheDocument();
+  });
+
+  it('lists the units of the shop the ledger is showing, not the active shop', async () => {
+    // An admin browsing another shop's ledger: the row counts THAT shop's
+    // units, so its units view must read that shop too.
+    getUnits.mockResolvedValue({ units: [], total: 0 });
+    renderPage('BV-BOK-01');
+    fireEvent.click(screen.getByRole('button', { name: /9 units/ }));
+    expect(getUnits).toHaveBeenCalledWith({ store_id: 'BV-BOK-01', product_id: 'P-CARRERA' });
   });
 
   it('the drawer shows units on hand and links to them', async () => {

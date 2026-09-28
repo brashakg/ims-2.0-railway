@@ -72,7 +72,7 @@ describe('the units view (from the stock ledger)', () => {
     apiMock.getUnits.mockResolvedValue({ units: [unit(1), unit(2, { status: 'SOLD' })], total: 2 });
     render(<UnitLabelsModal productId="P1" title="Carrera CA 8895" onClose={() => {}} />);
     expect(await screen.findByText('BV--00000001')).toBeInTheDocument();
-    expect(apiMock.getUnits).toHaveBeenCalledWith({ store_id: 'BV-DHN-02', product_id: 'P1', grn_id: undefined });
+    expect(apiMock.getUnits).toHaveBeenCalledWith({ store_id: 'BV-DHN-02', product_id: 'P1' });
     const sold = screen.getByText('BV--00000002').closest('tr')!;
     expect(within(sold).getByText('Sold')).toBeInTheDocument();
     expect(within(sold).getByText('RCPT/BV-DHN-02/26-27/0009')).toBeInTheDocument();
@@ -135,7 +135,9 @@ describe('the dialog after receiving (grn door)', () => {
   it('prints ALL units the receipt put on the shelf', async () => {
     apiMock.getUnits.mockResolvedValue({ units: [unit(1), unit(2), unit(3)], total: 3 });
     render(<UnitLabelsModal grnId="GRN-9" title="Print stock labels?" onClose={() => {}} />);
-    expect(apiMock.getUnits).toHaveBeenCalledWith({ store_id: 'BV-DHN-02', product_id: undefined, grn_id: 'GRN-9' });
+    // A receipt is read by its own id: its units are at the shop it was
+    // received into, which need not be the active one (the server scopes it).
+    expect(apiMock.getUnits).toHaveBeenCalledWith({ grn_id: 'GRN-9' });
     fireEvent.click(await screen.findByRole('button', { name: /print 3 labels/i }));
     expect(printedBarcodes()).toEqual(['BV--00000001', 'BV--00000002', 'BV--00000003']);
     await waitFor(() => expect(apiMock.markBarcodePrinted).toHaveBeenCalledWith(['STK-1', 'STK-2', 'STK-3']));

@@ -699,6 +699,7 @@ export function InventoryStockPage() {
       {unitsFor && (
         <UnitLabelsModal
           productId={unitsFor.id}
+          storeId={storeId}
           title={unitsFor.name}
           onClose={() => setUnitsFor(null)}
         />

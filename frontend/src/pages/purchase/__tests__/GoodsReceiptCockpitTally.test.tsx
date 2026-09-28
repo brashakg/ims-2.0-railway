@@ -226,7 +226,7 @@ describe('GoodsReceiptCockpit two-step receive - ruling 14 (the tally)', () => {
     fireEvent.click(screen.getByRole('button', { name: /create goods receipt/i }));
 
     await screen.findByRole('dialog', { name: /print stock labels/i });
-    expect(getUnitsMock).toHaveBeenCalledWith({ store_id: 'S1', product_id: undefined, grn_id: 'G1' });
+    expect(getUnitsMock).toHaveBeenCalledWith({ grn_id: 'G1' });
     // Nothing was printed, so nothing may claim it was.
     expect(await screen.findByText(/nothing to print/i)).toBeInTheDocument();
     expect(toastMock.success).not.toHaveBeenCalledWith(expect.stringMatching(/label/i));

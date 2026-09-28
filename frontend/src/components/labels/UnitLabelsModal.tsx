@@ -38,6 +38,8 @@ const money = (n: number) => `₹${n.toLocaleString('en-IN', { maximumFractionDi
 interface UnitLabelsModalProps {
   /** Units of this product at the shop (stock ledger door)... */
   productId?: string;
+  /** ...the shop the ledger is showing (defaults to the active shop)... */
+  storeId?: string;
   /** ...or the units one goods receipt put on the shelf (after receiving). */
   grnId?: string;
   title: string;
@@ -45,7 +47,7 @@ interface UnitLabelsModalProps {
   onClose: () => void;
 }
 
-export function UnitLabelsModal({ productId, grnId, title, subtitle, onClose }: UnitLabelsModalProps) {
+export function UnitLabelsModal({ productId, storeId: shopId, grnId, title, subtitle, onClose }: UnitLabelsModalProps) {
   const { user, hasRole } = useAuth();
   const toast = useToast();
   const canPrint = hasRole(LABEL_ROLES);
@@ -55,13 +57,17 @@ export function UnitLabelsModal({ productId, grnId, title, subtitle, onClose }: 
   const [failed, setFailed] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
-  const storeId = user?.activeStoreId;
+  const storeId = shopId || user?.activeStoreId;
 
   useEffect(() => {
     let alive = true;
     (async () => {
       try {
-        const res = await inventoryApi.getUnits({ store_id: storeId, product_id: productId, grn_id: grnId });
+        // A receipt is read by its id alone: its units sit at the shop it was
+        // received into, which need not be the active one (server scopes it).
+        const res = await inventoryApi.getUnits(
+          grnId ? { grn_id: grnId } : { store_id: storeId, product_id: productId },
+        );
         if (!alive) return;
         setUnits(res.units || []);
         // After receiving, every piece just shelved is what needs a label.

@@ -272,7 +272,7 @@ describe('ExpressReceivePanel - labels after the box is on the shelf (F26)', () 
     fireEvent.click(screen.getByRole('button', { name: /put on shelf & send to accounts/i }));
     fireEvent.click(await screen.findByRole('button', { name: /print labels/i }));
     expect(await screen.findByRole('dialog', { name: /print stock labels/i })).toBeInTheDocument();
-    expect(getUnitsMock).toHaveBeenCalledWith({ store_id: 'BV-BOK-01', product_id: undefined, grn_id: 'grn-1' });
+    expect(getUnitsMock).toHaveBeenCalledWith({ grn_id: 'grn-1' });
   });
 });
 

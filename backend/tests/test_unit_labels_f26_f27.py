@@ -190,6 +190,27 @@ def test_units_view_by_receipt_lists_only_that_receipt(world):
     assert [u["barcode"] for u in r.json()["units"]] == ["BV--RCPT0009"]
 
 
+def test_units_view_by_receipt_follows_the_receipts_shop(world):
+    # An admin whose active store is elsewhere receives a PO for BV-DHN-02: the
+    # dialog after receiving must list that receipt's units, not the (empty)
+    # set at the admin's active store.
+    world["unit"]("BV--RCPTSHOP")
+    world["as_user"](dict(ADMIN, active_store_id=OTHER))
+    r = world["http"].get("/inventory/units", params={"grn_id": GRN})
+    assert r.status_code == 200, r.text
+    assert [u["barcode"] for u in r.json()["units"]] == ["BV--RCPTSHOP"]
+
+
+def test_units_view_by_receipt_never_leaks_another_shops_units(world):
+    world["unit"]("BV--NOTYOURS")
+    world["as_user"](
+        dict(MANAGER, user_id="mgr_bok", store_ids=[OTHER], active_store_id=OTHER)
+    )
+    r = world["http"].get("/inventory/units", params={"grn_id": GRN})
+    assert r.status_code == 200, r.text
+    assert r.json()["units"] == []
+
+
 def test_units_view_shows_cost_only_to_roles_that_see_cost(world):
     world["unit"]("BV--COST0001")
     r = world["http"].get("/inventory/units", params={"product_id": world["pid"]})
