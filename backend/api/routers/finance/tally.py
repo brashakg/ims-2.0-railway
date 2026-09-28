@@ -205,6 +205,7 @@ def _b2b_invoices(
     customer is B2B, with the per-invoice GST split + needs_eway + tally_status
     + age/overdue reminder fields. Fail-soft: a DB error yields []."""
     from ...routers.orders import _build_invoice_gst_split  # reuse GST math
+    from ...utils.online_gst import order_place_of_supply
 
     cust_map = _b2b_customer_map(db)
     store_state = _store_state_map(db)
@@ -250,7 +251,9 @@ def _b2b_invoices(
         }
         cust_doc = {"gstin": cust.get("gstin"), "state": cust.get("state")}
         try:
-            split = _build_invoice_gst_split(o.get("items") or [], store_doc, cust_doc)
+            split = _build_invoice_gst_split(
+                o.get("items") or [], store_doc, cust_doc, order_place_of_supply(o)
+            )
         except Exception:  # noqa: BLE001 -- never let one bad order kill the list
             split = {
                 "totals": {},
@@ -307,6 +310,7 @@ def _b2b_fetch_orders(db, order_ids: List[str]) -> List[dict]:
     store_state = _store_state_map(db)
     try:
         from ...routers.orders import _build_invoice_gst_split
+        from ...utils.online_gst import order_place_of_supply
 
         docs = list(
             db.get_collection("orders").find(
@@ -337,7 +341,9 @@ def _b2b_fetch_orders(db, order_ids: List[str]) -> List[dict]:
         }
         cust_doc = {"gstin": cust.get("gstin"), "state": cust.get("state")}
         try:
-            split = _build_invoice_gst_split(o.get("items") or [], store_doc, cust_doc)
+            split = _build_invoice_gst_split(
+                o.get("items") or [], store_doc, cust_doc, order_place_of_supply(o)
+            )
             totals = split.get("totals") or {}
         except Exception:  # noqa: BLE001
             totals = {}

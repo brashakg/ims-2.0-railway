@@ -60,11 +60,17 @@ def _customer_state_code(customer: Optional[dict]) -> str:
 
 
 def _build_invoice_gst_split(
-    items: list, store: Optional[dict], customer: Optional[dict]
+    items: list,
+    store: Optional[dict],
+    customer: Optional[dict],
+    place_of_supply: Optional[str] = None,
 ) -> dict:
     """C-6 (DELTA 4): per-rate CGST/SGST/IGST breakup for an order invoice.
 
     Place of supply = the CUSTOMER's state; supplier state = the STORE's state.
+    ``place_of_supply`` (the order's OWN persisted one, utils.online_gst
+    .order_place_of_supply -- an online order's delivery state) wins over the
+    customer doc when given, so the invoice prints what GSTR-1/3B file.
       * intra-state (or customer state unknown -> safe default for a single-
         state retailer): each rate's tax splits into CGST + SGST (each rate/2).
       * inter-state (both states known and different): the full tax is IGST.
@@ -93,7 +99,7 @@ def _build_invoice_gst_split(
     )
 
     supplier_state = _invoice_state_code(store.get("state_code"), store_gstin)
-    customer_state = _customer_state_code(customer)
+    customer_state = _invoice_state_code(place_of_supply) or _customer_state_code(customer)
 
     # Inter-state only when BOTH states are known and differ. Missing customer
     # state -> assume intra (CGST+SGST), the safe default for a single-state
@@ -253,8 +259,10 @@ def _assemble_invoice(order_id: str, current_user: dict):
         items_formatted = [item_to_frontend(item) for item in order.get("items", [])]
 
         # C-6 (DELTA 4): per-rate CGST/SGST/IGST tax summary + place of supply.
+        from ...utils.online_gst import order_place_of_supply
+
         gst_split = _build_invoice_gst_split(
-            order.get("items", []), store_doc, customer_doc
+            order.get("items", []), store_doc, customer_doc, order_place_of_supply(order)
         )
 
         payload = {

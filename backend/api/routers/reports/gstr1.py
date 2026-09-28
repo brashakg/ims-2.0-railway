@@ -12,6 +12,7 @@ from ..auth import require_roles
 from ...dependencies import (
     validate_store_access,
 )
+from ...utils.online_gst import order_place_of_supply
 from ._shared import (
     _REPORT_FINANCE_ROLES,
     _cdnr_note_number,
@@ -193,7 +194,17 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                 # STRING created_at untouched by design (unknown frame), which
                 # is exactly the old behaviour for the migrated orders.
                 invoice_date = ist_date_str(created_raw) if created_raw else month + "-01"
-                place_of_supply = customer_state or store_state or "Unknown"
+                # The order's OWN persisted place of supply first (an online
+                # order's delivery state -- the same record its IGST flag
+                # above comes from); the customer doc's state is a returning
+                # buyer's FIRST delivery state and filed IGST rows with the
+                # supplier's own state as the place of supply.
+                place_of_supply = (
+                    order_place_of_supply(order)
+                    or customer_state
+                    or store_state
+                    or "Unknown"
+                )
 
                 # HSN: pull from the first line item if available; fallback
                 # to 9004 (frames/lenses default per CBIC). GSTR-1 row-level

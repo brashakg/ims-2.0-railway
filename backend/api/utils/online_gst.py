@@ -68,3 +68,24 @@ def order_interstate_flag(order: Dict[str, Any]) -> Optional[bool]:
     """
     flag = order.get("interstate")
     return flag if isinstance(flag, bool) else None
+
+
+def order_place_of_supply(order: Dict[str, Any]) -> Optional[str]:
+    """Return the order doc's OWN persisted place of supply (the buyer's
+    DELIVERY state, stamped at online ingest) when it is DEFINITIVE, else
+    ``None`` (the caller then applies its customer-state fallback).
+
+    The place-of-supply twin of ``order_interstate_flag``: the online ingest
+    persists ``interstate`` AND ``place_of_supply`` from the delivery address,
+    and GSTR-1/3B file the IGST head off the persisted flag -- so a reader that
+    re-derived the place of supply from ``customers.state`` (a returning buyer's
+    FIRST delivery state; the mapper never overwrites it) printed CGST+SGST on
+    an invoice filed as IGST, and filed an IGST row whose place of supply was
+    the supplier's own state. ``place_of_supply_assumed`` (the buyer's state
+    was unknown at ingest) is NOT definitive. POS orders never persist the key,
+    so this answers ``None`` for them and their rule is unchanged.
+    """
+    pos = str(order.get("place_of_supply") or "").strip()
+    if not pos or order.get("place_of_supply_assumed"):
+        return None
+    return pos
