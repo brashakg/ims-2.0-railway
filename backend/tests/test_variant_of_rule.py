@@ -494,7 +494,8 @@ def test_gid_door_ignores_a_child_even_if_a_repair_stamps_the_parent_gid_on_it()
     db = _world()
     child = db["catalog_products"].find_one({"id": "tw-child"})
     child["ecom"]["shopify_product_id"] = P_GID  # what a twin-repair-by-SKU script would do
-    pairs = shopify_push.inventory._gid_products_with_variants(db)
+    pairs, unread = shopify_push.inventory._gid_products_with_variants(db)
+    assert unread == {}
     assert [p["id"] for p, _rows in pairs] == ["tw-parent"]
     assert sorted(r["sku"] for r in pairs[0][1]) == sorted([PARENT_SKU, CHILD_SKU])
 

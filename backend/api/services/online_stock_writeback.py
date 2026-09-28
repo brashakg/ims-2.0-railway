@@ -645,6 +645,7 @@ def _name_baseline_strays(
     from .shopify_push.inventory import (
         STOCK_BASELINE_STRAY,
         _stray_sku_error,
+        _strays_unread_error,
         stray_baseline_skus,
     )
 
@@ -653,13 +654,10 @@ def _name_baseline_strays(
         found = stray_baseline_skus(db, skus)
     except Exception as exc:  # noqa: BLE001 -- the sale path never raises; it names
         # STRICT like its neighbour (#1141 fix-six recheck): a dead scan is not
-        # "nothing stray".
-        _say_unknown(
-            summary,
-            f"whether the website still shows a number for {', '.join(skus[:5])} could "
-            f"not be read (the last-sent stock read died) -- a size the site keeps "
-            f"selling is not ruled out: {exc}",
-        )
+        # "nothing stray". The writer's own words, and the raise names WHICH
+        # read died -- a hard-coded "(the last-sent stock read died)" blamed
+        # that read for a dead size-row read too (recheck 2).
+        _say_unknown(summary, _strays_unread_error(skus, exc))
         return
     strays = [s for s in found if s not in said]
     if not strays:
