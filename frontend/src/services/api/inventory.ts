@@ -784,8 +784,48 @@ export const vendorsApi = {
     return response.data;
   },
 
+  // Cancel an order WITH a reason (the timeline shows it beside the person).
+  // A part-received order cancels only what is still due. Returns the updated
+  // order as `po`.
   cancelPurchaseOrder: async (poId: string, reason: string) => {
     const response = await api.post(`/vendors/purchase-orders/${poId}/cancel`, null, { params: { reason } });
+    return response.data;
+  },
+
+  // Cancel what is still due on ONE line. `productId` is the product the person
+  // saw on that line: a stale screen is refused (409), never mis-applied.
+  // Returns the updated order.
+  cancelPurchaseOrderLine: async (poId: string, lineIndex: number, reason: string, productId?: string) => {
+    const response = await api.post(
+      `/vendors/purchase-orders/${poId}/items/${lineIndex}/cancel`,
+      { reason, product_id: productId },
+    );
+    return response.data;
+  },
+
+  // Edit a DRAFT (quantity, unit cost, add / remove lines). Same line shape as
+  // create; the server prices it by the same rule. Returns the updated order.
+  updatePurchaseOrder: async (poId: string, po: {
+    vendor_id?: string;
+    items: Array<{
+      product_id?: string;
+      product_name?: string;
+      sku?: string;
+      new_product?: {
+        category: string;
+        brand: string;
+        model: string;
+        colour: string;
+        size: string;
+        mrp: number;
+      };
+      quantity: number;
+      unit_price: number;
+    }>;
+    expected_date?: string;
+    notes?: string;
+  }) => {
+    const response = await api.put(`/vendors/purchase-orders/${poId}`, po);
     return response.data;
   },
 

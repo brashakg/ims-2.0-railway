@@ -2,14 +2,17 @@
 // IMS 2.0 - Purchase Management Types
 // ============================================================================
 
+import type { UserRole } from '../../types';
+
 export type TabType = 'purchase-orders' | 'purchase-invoices' | 'variance' | 'suppliers' | 'vendor-returns' | 'analytics';
+// The statuses the server actually writes. There is NO approval step (owner
+// ruling 2026-09-28): a DRAFT is sent straight to the vendor, so the old
+// PENDING / APPROVED / ORDERED words are gone -- they only ever existed on
+// screen. PARTIAL is the legacy spelling of PARTIALLY_RECEIVED.
 export type POStatus =
   | 'DRAFT'
-  | 'PENDING'
-  | 'APPROVED'
   | 'SENT'
   | 'ACKNOWLEDGED'
-  | 'ORDERED'
   | 'PARTIAL'
   | 'PARTIALLY_RECEIVED'
   | 'RECEIVED'
@@ -66,6 +69,11 @@ export interface PurchaseOrder {
   approvedBy?: string;
   receivedDate?: string;
   notes?: string;
+  /** Why the order was cancelled (the timeline shows who and when). */
+  cancellationReason?: string;
+  /** Set on drafts generated automatically (lens top-up / forecast): their
+   *  lines carry data the edit form cannot hold, so they are not editable. */
+  source?: string;
 }
 
 export interface POItem {
@@ -80,6 +88,10 @@ export interface POItem {
    *  header received_qty_by_product for pre-S1 POs). Drives the "N of M
    *  lines received" progress chip on the PO list. */
   receivedQty?: number;
+  /** Units withdrawn from this line by a cancel (never received stock). */
+  cancelledQty?: number;
+  /** Server line status: OPEN / PARTIAL / RECEIVED / CANCELLED. */
+  lineStatus?: string;
 }
 
 // An audit stamp names a PERSON. The backend resolves the raw user id it
@@ -91,6 +103,20 @@ export function byPerson(name?: string | null, id?: string | null): string {
   const who = name || id;
   return who ? ` by ${who}` : '';
 }
+
+/** The managers who send orders to vendors and receive goods into stock
+ *  (owner ruling 2026-09-28: receiving stays with them; workshop staff hand the
+ *  box to one of them, the catalogue manager only raises drafts). ONE list for
+ *  the receive routes, every Receive button, the blocked page that names them
+ *  and the Buy Desk's "who sends it" hint; mirrors the backend _VENDOR_ROLES
+ *  gate (+ SUPERADMIN). */
+export const PURCHASE_MANAGER_ROLES: readonly UserRole[] = [
+  'SUPERADMIN',
+  'ADMIN',
+  'AREA_MANAGER',
+  'STORE_MANAGER',
+  'ACCOUNTANT',
+];
 
 /** PO statuses the Goods-Receipt cockpit can receive against (mirrors the
  *  backend _RECEIVABLE_PO_STATUSES tuple in vendors.py). */

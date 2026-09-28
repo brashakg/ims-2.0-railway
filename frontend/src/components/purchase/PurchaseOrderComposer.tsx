@@ -120,6 +120,9 @@ export interface PurchaseOrderComposerProps {
   vendorsLoading?: boolean;
   initialVendorId?: string;
   initialLines?: ComposerLine[];
+  /** Editing a saved draft: its delivery date and notes. */
+  initialExpectedDate?: string;
+  initialNotes?: string;
   /** Note shown under the vendor picker (e.g. Buy Desk's one-vendor-per-draft
    *  hint). Omit for none. */
   vendorHint?: ReactNode;
@@ -273,6 +276,8 @@ export function PurchaseOrderComposer({
   vendorsLoading = false,
   initialVendorId = '',
   initialLines,
+  initialExpectedDate = '',
+  initialNotes = '',
   vendorHint,
   renderProductCell,
   allowAddLine = false,
@@ -287,8 +292,8 @@ export function PurchaseOrderComposer({
   const toast = useToast();
 
   const [vendorId, setVendorId] = useState(initialVendorId);
-  const [expectedDate, setExpectedDate] = useState('');
-  const [notes, setNotes] = useState('');
+  const [expectedDate, setExpectedDate] = useState(initialExpectedDate);
+  const [notes, setNotes] = useState(initialNotes);
   const [lines, setLines] = useState<ComposerLine[]>(
     initialLines && initialLines.length > 0 ? initialLines : [blankLine()],
   );

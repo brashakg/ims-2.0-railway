@@ -30,12 +30,14 @@ import {
   Circle,
   Truck,
   RefreshCw,
+  Pencil,
+  MinusCircle,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { vendorsApi } from '../../services/api/inventory';
 import { useAuth } from '../../context/AuthContext';
 import { PurchaseStatusChip } from './PurchaseStatusChip';
-import { RECEIVABLE_PO_STATUSES } from '../../pages/purchase/purchaseTypes';
+import { RECEIVABLE_PO_STATUSES, PURCHASE_MANAGER_ROLES } from '../../pages/purchase/purchaseTypes';
 import type { POStatus } from '../../pages/purchase/purchaseTypes';
 
 // ---------------------------------------------------------------------------
@@ -45,6 +47,8 @@ import type { POStatus } from '../../pages/purchase/purchaseTypes';
 export type POTimelineEventKind =
   | 'ordered'
   | 'sent'
+  | 'edited'
+  | 'line_cancelled'
   | 'cancelled'
   | 'box_received'
   | 'on_shelf'
@@ -109,6 +113,8 @@ export interface POLifecycleDrawerProps {
 const EVENT_ICONS: Record<string, typeof FileText> = {
   ordered: FileText,
   sent: Send,
+  edited: Pencil,
+  line_cancelled: MinusCircle,
   cancelled: XCircle,
   box_received: Package,
   on_shelf: CheckCircle2,
@@ -118,6 +124,8 @@ const EVENT_ICONS: Record<string, typeof FileText> = {
 const EVENT_ICON_CLASSES: Record<string, string> = {
   ordered: 'bg-gray-100 text-gray-600',
   sent: 'bg-indigo-50 text-indigo-600',
+  edited: 'bg-gray-100 text-gray-600',
+  line_cancelled: 'bg-red-50 text-red-600',
   cancelled: 'bg-red-50 text-red-600',
   box_received: 'bg-amber-50 text-amber-600',
   on_shelf: 'bg-green-50 text-green-600',
@@ -137,10 +145,6 @@ function fmtDateTime(at: string | null | undefined): string {
     minute: '2-digit',
   });
 }
-
-/** Mirrors the /purchase/receive ProtectedRoute gate in App.tsx -- never hand
- *  a role a button that lands on /unauthorized. */
-const RECEIVE_ROLES = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] as const;
 
 /** AP-capable roles (mirrors the /purchase/recon-console gate -- the invoice
  *  booking surface is an accountant function). */
@@ -244,7 +248,7 @@ export function POLifecycleDrawer({ poId, poNumber, onClose, onSendToVendor }: P
   const nextStep = timeline
     ? deriveNextStep(timeline, {
         canSend: Boolean(onSendToVendor),
-        canReceive: hasRole([...RECEIVE_ROLES]),
+        canReceive: hasRole([...PURCHASE_MANAGER_ROLES]),
         canBookInvoice: hasRole([...AP_ROLES]),
       })
     : null;

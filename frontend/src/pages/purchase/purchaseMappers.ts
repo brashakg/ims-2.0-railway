@@ -82,6 +82,8 @@ export function mapPOtoPurchaseOrder(po: any): PurchaseOrder {
         (item.unit_price ?? item.unit_cost ?? 0) *
         (1 + (item.tax_rate ?? impliedRate) / 100),
     receivedQty: item.received_qty ?? headerReceived[item.product_id ?? ''] ?? 0,
+    cancelledQty: item.cancelled_qty ?? 0,
+    lineStatus: item.line_status,
   }));
 
   return {
@@ -104,5 +106,7 @@ export function mapPOtoPurchaseOrder(po: any): PurchaseOrder {
     approvedBy: po.approved_by,
     receivedDate: po.received_date ?? po.received_at?.split('T')[0],
     notes: po.notes,
+    cancellationReason: po.cancellation_reason ?? undefined,
+    source: po.source ?? undefined,
   };
 }

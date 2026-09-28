@@ -13,9 +13,21 @@ import { useAuth } from '../../context/AuthContext';
 import { vendorsApi } from '../../services/api';
 import { PurchaseTable } from './PurchaseTable';
 import { PurchaseOrderForm } from './PurchaseOrderForm';
-import { PurchaseOrderDetail } from './PurchaseOrderDetail';
+import { PurchaseOrderDetail, type POAction, type POActionOptions } from './PurchaseOrderDetail';
 import { useSuppliers, usePurchaseOrdersQuery, purchaseOrdersQueryKey } from './purchaseQueries';
+import { mapPOtoPurchaseOrder } from './purchaseMappers';
 import type { POStatus, PurchaseOrder } from './purchaseTypes';
+
+// The filter words ARE the badge words (audit F23): the old list offered
+// Pending / Approved / Ordered, which the server never produces, and had no
+// way to find orders with the vendor. Each word covers its legacy twin.
+const STATUS_FILTERS: { value: POStatus; label: string; matches: POStatus[] }[] = [
+  { value: 'DRAFT', label: 'Draft', matches: ['DRAFT'] },
+  { value: 'SENT', label: 'Sent', matches: ['SENT', 'ACKNOWLEDGED'] },
+  { value: 'PARTIALLY_RECEIVED', label: 'Partly received', matches: ['PARTIALLY_RECEIVED', 'PARTIAL'] },
+  { value: 'RECEIVED', label: 'Received', matches: ['RECEIVED'] },
+  { value: 'CANCELLED', label: 'Cancelled', matches: ['CANCELLED'] },
+];
 
 export function PurchaseOrdersSection() {
   const toast = useToast();
@@ -27,6 +39,7 @@ export function PurchaseOrdersSection() {
   const [statusFilter, setStatusFilter] = useState<POStatus | 'ALL'>('ALL');
   const [showCreatePO, setShowCreatePO] = useState(false);
   const [selectedPO, setSelectedPO] = useState<PurchaseOrder | null>(null);
+  const [editingPO, setEditingPO] = useState<PurchaseOrder | null>(null);
 
   // Cached across section switches (owner: switching felt like a reload).
   // First visit fetches; later visits render instantly + refresh in background.
@@ -59,40 +72,46 @@ export function PurchaseOrdersSection() {
     void posQ.refetch();
   };
 
+  const statusMatches = STATUS_FILTERS.find((f) => f.value === statusFilter)?.matches;
   const filteredPOs = purchaseOrders.filter(po => {
     const matchesSearch = po.poNumber.toLowerCase().includes(searchQuery.toLowerCase()) ||
                           po.supplierName.toLowerCase().includes(searchQuery.toLowerCase());
-    const matchesStatus = statusFilter === 'ALL' || po.status === statusFilter;
+    const matchesStatus = !statusMatches || statusMatches.includes(po.status);
     return matchesSearch && matchesStatus;
   });
 
-  // ---- PO Status Action handler ----
-  // P0-4 (launch gate): state mutates ONLY after the API succeeds, and a
-  // refusal is TOASTED, never swallowed. The old catch discarded the server's
-  // refusal and then flipped the row + fired toast.success('') anyway — a
-  // manager believed a PO reached the vendor that never did, so goods were
-  // never ordered. The approve/order/receive "actions" called no API at all
-  // (local status theater that evaporated on reload); their buttons are
-  // removed in PurchaseOrderDetail, and this handler no longer knows them.
-  const handlePOAction = async (po: PurchaseOrder, action: string) => {
-    let newStatus: POStatus;
-    let message: string;
+  // Put the server's copy of an order everywhere it shows (list + open modal).
+  const showSaved = (updated: PurchaseOrder) => {
+    patchPOs(prev => prev.map(p => p.id === updated.id ? updated : p));
+    setSelectedPO(updated);
+  };
 
+  // ---- PO action handler ----
+  // P0-4 (launch gate): state mutates ONLY after the API succeeds, and a
+  // refusal is TOASTED, never swallowed. Owner rulings 2026-09-28: there is no
+  // approval step (a draft is SENT to the vendor), a draft is editable, and an
+  // order or one line is cancelled WITH the reason the person typed -- the
+  // server's copy of the order is what the screen then shows.
+  const handlePOAction = async (po: PurchaseOrder, action: POAction, opts: POActionOptions = {}) => {
+    if (action === 'edit') {
+      setSelectedPO(null);
+      setEditingPO(po);
+      return;
+    }
     try {
-      switch (action) {
-        case 'submit':
-          // Backend uses 'send' to transition DRAFT -> SENT; map to PENDING for UI
-          await vendorsApi.sendPurchaseOrder(po.id);
-          newStatus = 'PENDING';
-          message = `${po.poNumber} submitted for approval`;
-          break;
-        case 'reject':
-          await vendorsApi.cancelPurchaseOrder(po.id, 'Rejected by approver');
-          newStatus = 'CANCELLED';
-          message = `${po.poNumber} rejected`;
-          break;
-        default:
-          return;
+      if (action === 'send') {
+        await vendorsApi.sendPurchaseOrder(po.id);
+        showSaved({ ...po, status: 'SENT' });
+        toast.success(`${po.poNumber} sent to vendor`);
+      } else if (action === 'cancel') {
+        const resp = await vendorsApi.cancelPurchaseOrder(po.id, opts.reason ?? '');
+        showSaved(resp?.po ? mapPOtoPurchaseOrder(resp.po) : { ...po, status: 'CANCELLED', cancellationReason: opts.reason });
+        toast.success(`${po.poNumber} cancelled`);
+      } else if (action === 'cancel-line' && opts.lineIndex !== undefined) {
+        const line = po.items[opts.lineIndex];
+        const saved = await vendorsApi.cancelPurchaseOrderLine(po.id, opts.lineIndex, opts.reason ?? '', line?.productId);
+        showSaved(mapPOtoPurchaseOrder(saved));
+        toast.success(`${line?.productName ?? 'Line'} cancelled on ${po.poNumber}`);
       }
     } catch (err) {
       toast.error(
@@ -100,14 +119,7 @@ export function PurchaseOrdersSection() {
           ? err.message
           : `${po.poNumber} was NOT updated — the server refused the request.`,
       );
-      return;
     }
-
-    const updatedPO: PurchaseOrder = { ...po, status: newStatus };
-
-    patchPOs(prev => prev.map(p => p.id === po.id ? updatedPO : p));
-    setSelectedPO(updatedPO);
-    toast.success(message);
   };
 
   return (
@@ -144,15 +156,13 @@ export function PurchaseOrdersSection() {
         <select
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value as POStatus | 'ALL')}
+          aria-label="Filter by status"
           className="input-field w-auto"
         >
           <option value="ALL">All Status</option>
-          <option value="DRAFT">Draft</option>
-          <option value="PENDING">Pending</option>
-          <option value="APPROVED">Approved</option>
-          <option value="ORDERED">Ordered</option>
-          <option value="RECEIVED">Received</option>
-          <option value="CANCELLED">Cancelled</option>
+          {STATUS_FILTERS.map((f) => (
+            <option key={f.value} value={f.value}>{f.label}</option>
+          ))}
         </select>
       </div>
 
@@ -174,6 +184,20 @@ export function PurchaseOrdersSection() {
           onCreated={(newPO) => {
             patchPOs(prev => [newPO, ...prev]);
             setShowCreatePO(false);
+          }}
+        />
+      )}
+
+      {/* Edit a draft -- the same form, the same pricing rule */}
+      {editingPO && (
+        <PurchaseOrderForm
+          suppliers={suppliers}
+          existingPOCount={purchaseOrders.length}
+          editing={editingPO}
+          onClose={() => setEditingPO(null)}
+          onCreated={(saved) => {
+            setEditingPO(null);
+            showSaved(saved);
           }}
         />
       )}

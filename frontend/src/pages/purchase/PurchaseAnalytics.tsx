@@ -60,9 +60,11 @@ export function PurchaseAnalytics({ purchaseOrders, suppliers }: PurchaseAnalyti
               <Clock className="w-5 h-5 text-orange-600" />
             </div>
             <div>
-              <p className="text-sm text-gray-600">Pending Approval</p>
+              {/* No approval step (owner 2026-09-28): what waits is a draft
+                  nobody has sent to the vendor yet. */}
+              <p className="text-sm text-gray-600">Drafts not sent</p>
               <p className="text-2xl font-bold text-gray-900">
-                {purchaseOrders.filter(po => po.status === 'PENDING').length}
+                {purchaseOrders.filter(po => po.status === 'DRAFT').length}
               </p>
             </div>
           </div>
