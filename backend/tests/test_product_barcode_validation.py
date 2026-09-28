@@ -201,7 +201,21 @@ def patch_db(mongo_db, monkeypatch):
         mongo_db["products"].delete_many({})
     except Exception:  # noqa: BLE001
         pass
+    return _point_get_db_at(mongo_db, monkeypatch)
 
+
+@pytest.fixture
+def mock_db(monkeypatch):
+    """A fresh in-memory mongomock db behind get_db(): these tests run
+    everywhere, with or without a mongo server."""
+    import mongomock
+
+    db = mongomock.MongoClient().db
+    _point_get_db_at(db, monkeypatch)
+    return db
+
+
+def _point_get_db_at(mongo_db, monkeypatch):
     proxy = _DBProxy(mongo_db)
     import api.dependencies as deps
     from database import connection as conn
@@ -296,3 +310,55 @@ class TestBarcodeUpdateEndpoint:
         # must not 409 against itself.
         res = _update(pid, barcode=_VALID_A, brand="NewBrand")
         assert res["product_id"] == pid
+
+
+# ============================================================================
+# The GTIN attribute -- the manufacturer barcode that actually goes out
+# ============================================================================
+# Manage Barcode edits attributes.gtin, the one field the Add-Product form's
+# "GTIN (mfr)" box writes and the Shopify push reads (through the catalog twin's
+# `gtin`). products.barcode never reached the twin, so a code saved there was
+# never sent anywhere.
+
+
+class TestGtinAttributeOnTheEditDoor:
+    @pytest.mark.parametrize(
+        "junk", [_INTERNAL, "TW003HG14", _BAD_CHECK, _RANDOM_GENERATED]
+    )
+    def test_edit_door_refuses_a_junk_gtin(self, mock_db, junk):
+        pid = _create("GT-JUNK")["product_id"]
+        with pytest.raises(HTTPException) as ei:
+            _update(pid, attributes={"gtin": junk})
+        assert ei.value.status_code == 422
+        assert "not a valid GTIN" in str(ei.value.detail)
+        saved = mock_db["products"].find_one({"product_id": pid})
+        assert "gtin" not in (saved.get("attributes") or {})
+
+    def test_a_saved_gtin_reaches_the_shopify_push(self, mock_db):
+        from api.services.shopify_push.product_input import (
+            _variants_for_price_push,
+            build_variant_price_inputs,
+        )
+
+        created = _create("GT-OK")
+        pid = created["product_id"]
+        _update(pid, attributes={"gtin": _VALID_A})
+
+        spine = mock_db["products"].find_one({"product_id": pid})
+        assert spine["attributes"]["gtin"] == _VALID_A
+        twin_id = spine.get("pim_product_id") or pid
+        twin = mock_db["catalog_products"].find_one({"id": twin_id})
+        assert twin is not None, "the create door makes the catalog twin"
+        assert twin["gtin"] == _VALID_A
+        assert (twin.get("ecom") or {}).get("locally_modified") is True
+        # Once the product is on Shopify, the push sends it as the barcode.
+        twin.setdefault("ecom", {})["shopify_variant_id"] = "gid://shopify/ProductVariant/1"
+        rows, _ = build_variant_price_inputs(twin, _variants_for_price_push(twin, []))
+        assert rows and rows[0].get("barcode") == _VALID_A
+
+    def test_clearing_the_gtin_is_allowed(self, mock_db):
+        pid = _create("GT-CLR")["product_id"]
+        _update(pid, attributes={"gtin": _VALID_A})
+        _update(pid, attributes={"gtin": ""})
+        saved = mock_db["products"].find_one({"product_id": pid})
+        assert not saved["attributes"].get("gtin")

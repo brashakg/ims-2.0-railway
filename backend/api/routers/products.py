@@ -3411,6 +3411,15 @@ async def update_product(
             # save, including ones the owner had corrected by hand.
             _patch = update_data["attributes"] or {}
             _patch = _pm.apply_field_casing(_patch, only=set(_patch.keys()))
+            # The GTIN is the barcode that goes to Shopify and Google: the edit
+            # door refuses junk exactly like the create door (same guard, strict).
+            # Only the keys this submit carries are checked.
+            try:
+                _patch = _pm._guard_gtin_attribute(_patch, strict=True)
+            except _pm.ProductMasterError as err:
+                raise HTTPException(
+                    status_code=err.status, detail=_pm_error_detail(err)
+                ) from err
             update_data["attributes"] = {
                 **(existing.get("attributes") or {}),
                 **_patch,
