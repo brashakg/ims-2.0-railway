@@ -1508,6 +1508,7 @@ def ingest_shopify_order(
             "order_id": (existing or {}).get("order_id"),
             "invoice_number": (existing or {}).get("invoice_number"),
             "shopify_order_id": shopify_order_id,
+            "store_id": (existing or {}).get("store_id"),
         }
 
     # --- Layer 1: Shopify-order-id guard (hard backstop) --------------------
@@ -1522,6 +1523,7 @@ def ingest_shopify_order(
             "order_id": existing.get("order_id"),
             "invoice_number": existing.get("invoice_number"),
             "shopify_order_id": shopify_order_id,
+            "store_id": existing.get("store_id"),
         }
         if historical:
             # SELF-HEAL: a prior apply run may have inserted the order but
@@ -1817,6 +1819,7 @@ def ingest_shopify_order(
                     "invoice_number", invoice_number
                 ),
                 "shopify_order_id": shopify_order_id,
+                "store_id": (existing or {}).get("store_id"),
             }
             if historical:
                 # SELF-HEAL (see the Layer-1 duplicate guard): re-invoke the
@@ -1991,6 +1994,9 @@ def ingest_shopify_order(
         "order_id": order_id,
         "invoice_number": invoice_number,
         "shopify_order_id": shopify_order_id,
+        # The shop that ships and bills it (the order's own store_id), so no
+        # caller reports the online bucket for a routed order.
+        "store_id": store_id,
         "interstate": order_doc.get("interstate"),
         "place_of_supply": order_doc["place_of_supply"],
         "grand_total": grand_total,

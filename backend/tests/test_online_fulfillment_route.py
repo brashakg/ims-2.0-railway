@@ -568,3 +568,24 @@ def test_a_routing_stamp_on_a_stored_payload_is_never_trusted(world):
 
     assert order["store_id"] == "BV-BOK-01"
     assert order["fulfillment_route"]["fulfillment_order_ids"] == [FO_1]
+
+
+# ---------------------------------------------------------------------------
+# R11 -- money panel, round 2
+# ---------------------------------------------------------------------------
+
+
+def test_every_door_result_names_the_orders_own_shop(world):
+    """[Stale second answer] the mapper result (NEXUS log, missed-webhook pull,
+    Re-map audit) names the shop the order is billed at, not the bucket --
+    on the create and on a later delivery of the same order."""
+    db = world["db"]
+    _stock(db, "BV-BOK-01", "P-RB", 1)
+    world["shop"].fo(FO_1, LOC_BOK)
+
+    res, order = _book(world, _order(52012))
+    again = asyncio.run(route_mod.map_routed_order(_order(52012), db, topic="orders/updated"))
+
+    assert order["store_id"] == "BV-BOK-01"
+    assert res["store_id"] == "BV-BOK-01"
+    assert again["status"] == "duplicate" and again["store_id"] == "BV-BOK-01"
