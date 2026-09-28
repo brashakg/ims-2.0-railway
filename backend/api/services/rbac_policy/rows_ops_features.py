@@ -339,7 +339,9 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/finance/vendor-payments",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        # F60: per-vendor payables = the vendor ledger's answer (handler enforces
+        # _require_finance_admin), not the finance router's manager set.
+        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
     },
     # FIN-1: GST e-invoice (IRN generation). Narrower than the router-level finance
     # gate (no AREA_MANAGER / STORE_MANAGER; matching the inline role check in

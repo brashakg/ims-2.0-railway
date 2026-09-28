@@ -361,3 +361,46 @@ def test_vendor_return_detail_is_store_scoped(monkeypatch):
     assert exc.value.status_code == 403
     own = dict(mgr, store_ids=["BV-OTHER-01"], active_store_id="BV-OTHER-01")
     assert asyncio.run(vr.get_vendor_return("VR-1", current_user=own))["return_id"] == "VR-1"
+
+
+# ---------------------------------------------------------------------------
+# 7. ONE payables rule: every per-vendor payables read answers the same roles
+# ---------------------------------------------------------------------------
+# /finance/vendor-payments returns the same per-vendor paid / debit-note /
+# balance / PO figures as the vendor ledger, for ALL vendors. The ledger went
+# to accounts while this stayed on the finance router's manager set: one rule,
+# two answers, and the ledger gate did nothing. The accounts set wins (it is
+# already /ap-aging, the purchase-invoice reads and the Cash flow screen).
+PAYABLE_READS = AP_READS + [
+    ("/api/v1/vendors/ap-aging", "/api/v1/vendors/ap-aging"),
+    ("/api/v1/finance/vendor-payments", "/api/v1/finance/vendor-payments"),
+]
+
+
+@pytest.mark.parametrize("concrete,template", PAYABLE_READS)
+@pytest.mark.parametrize("role", ("STORE_MANAGER", "AREA_MANAGER"))
+def test_payables_one_answer_managers_refused(client, role, concrete, template):
+    assert client.get(concrete, headers=_headers(role)).status_code == 403
+
+
+@pytest.mark.parametrize("concrete,template", PAYABLE_READS)
+def test_payables_one_answer_policy_row(concrete, template):
+    row = rbac.policy_for("GET", concrete)
+    assert row["path"] == template
+    assert set(row["allowed"]) - {"SUPERADMIN"} == set(_AP_ROLES)
+
+
+@pytest.mark.parametrize("role", _AP_ROLES + ("SUPERADMIN",))
+def test_vendor_payments_still_reach_accounts(client, role):
+    resp = client.get("/api/v1/finance/vendor-payments", headers=_headers(role))
+    assert resp.status_code == 200
+
+
+@pytest.mark.parametrize("role", ("STORE_MANAGER", "AREA_MANAGER"))
+def test_vendor_payments_handler_gate(role):
+    # The handler's own gate, independent of the RBAC middleware row.
+    from api.routers.finance import receivables
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(receivables.get_vendor_payments(current_user={"roles": [role]}))
+    assert exc.value.status_code == 403

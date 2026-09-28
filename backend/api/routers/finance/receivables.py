@@ -16,6 +16,7 @@ from ._shared import (
     _REAL_ORDER_STATUS_FILTER,
     _get_db,
     _order_total,
+    _require_finance_admin,
     _scope_store,
     router,
 )
@@ -188,7 +189,13 @@ async def get_outstanding(
 async def get_vendor_payments(current_user: dict = Depends(get_current_user)):
     """Per-vendor accounts-payable summary from REAL bills / payments / debit
     notes (via ap_engine). `balance` is the true outstanding payable; PO totals
-    are kept only as context. Sorted by largest payable first."""
+    are kept only as context. Sorted by largest payable first.
+
+    F60: the same per-vendor payables the vendor ledger / bills / payments /
+    debit notes and /vendors/ap-aging carry, for every vendor -> the same
+    accounts-only answer (ADMIN / ACCOUNTANT), not the finance router's
+    manager set. One payables rule."""
+    _require_finance_admin(current_user)
     db = _get_db()
     if db is None:
         return []
