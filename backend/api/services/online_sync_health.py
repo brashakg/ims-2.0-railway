@@ -527,7 +527,7 @@ async def live_listed_qty_for_skus(
         if not _has_shopify_creds(db):
             return None
         from .online_catalog import inventory_items_for_skus
-        from .shopify_stock_parity import _shopify_available_by_item
+        from .shopify_stock_parity import shopify_levels_by_item
 
         clean = [str(s).strip() for s in (skus or []) if str(s or "").strip()]
         # Mapped FIRST, then cap -- preserving the caller's SKU order.
@@ -538,14 +538,15 @@ async def live_listed_qty_for_skus(
         cap = max(0, int(cap))
         capped = len(mapped_ordered) > cap
         inv_map = {s: inv_map_full[s] for s in mapped_ordered[:cap]}
-        avail = await _shopify_available_by_item(
-            db, sorted(set(inv_map.values()))
-        )
+        levels = await shopify_levels_by_item(db, sorted(set(inv_map.values())))
+        if levels is None:
+            return None
+        # LISTED is what the storefront can sell: every location summed.
         qty: Dict[str, int] = {}
         for sku, inv in inv_map.items():
-            q = avail.get(inv)
-            if q is not None:
-                qty[sku] = int(q)
+            per_location = levels.get(inv)
+            if per_location is not None:
+                qty[sku] = sum(int(q) for q in per_location.values())
         if not qty:
             return None
         return {

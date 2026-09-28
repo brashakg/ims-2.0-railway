@@ -473,10 +473,10 @@ def test_live_listed_qty_filters_mapped_first_then_caps(monkeypatch):
         lambda db, s: {k: f"inv-{k}" for k in s if k.startswith("M")},
     )
 
-    async def _avail(db, inv_ids):
-        return {i: 5 for i in inv_ids}
+    async def _levels(db, inv_ids):
+        return {i: {"gid://shopify/Location/1": 2, "gid://shopify/Location/2": 3} for i in inv_ids}
 
-    monkeypatch.setattr(shopify_stock_parity, "_shopify_available_by_item", _avail)
+    monkeypatch.setattr(shopify_stock_parity, "shopify_levels_by_item", _levels)
 
     out = asyncio.run(sh.live_listed_qty_for_skus(object(), skus, cap=500))
     assert out is not None
@@ -486,6 +486,15 @@ def test_live_listed_qty_filters_mapped_first_then_caps(monkeypatch):
     # The cap is spent ONLY on mapped SKUs -- the first 500 in input order.
     assert set(out["qty"]) == set(mapped[:500])
     assert not any(k.startswith("U") for k in out["qty"])
+    # LISTED is what the storefront sells: every location summed (2 + 3).
+    assert set(out["qty"].values()) == {5}
+
+    # A failed Shopify read (the reader's None) is "live read unavailable".
+    async def _dead(db, inv_ids):
+        return None
+
+    monkeypatch.setattr(shopify_stock_parity, "shopify_levels_by_item", _dead)
+    assert asyncio.run(sh.live_listed_qty_for_skus(object(), skus, cap=500)) is None
 
 
 # ---------------------------------------------------------------------------

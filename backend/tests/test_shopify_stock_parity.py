@@ -1,11 +1,23 @@
 """
-Nightly Shopify stock-parity tests.
-Pins: the PURE comparator (drift only when |IMS - Shopify| exceeds tolerance;
-Shopify-unknown rows never count as drift; sorted worst-first), the deduped
-SYSTEM-task filing (one active drift task at a time), snapshot pruning, and a
-fail-soft run_parity_tick orchestration smoke.
+Nightly Shopify stock parity, PER LOCATION (multi-location PR 4).
 
-In-memory fakes + injected Shopify boundary -- no DB, no network.
+Pins, each with its revert named in the test:
+  * the PURE comparator: drift only past tolerance; an unknown on EITHER side
+    is never drift; worst first.
+  * the PURE row builder compares per (SKU, mapped shop) against THAT shop's
+    location -- a pooled compare would call a swapped pair of shelves clean.
+  * an item Shopify returned but has not stocked at a mapped location reads 0
+    there; an item Shopify did not return is unknown.
+  * unmapped holders (Pune) and unclaimed Shopify locations are REPORTED,
+    never drift, never a drift task.
+  * the IMS side is the writer's own call: a non-zero safety buffer is not
+    drift.
+  * ONE drift task PER SHOP: filed, refreshed while drift persists (never a
+    second one), closed when the shop compares clean; the old pooled ref is
+    never filed; a failed Shopify read or an unread shop closes nothing.
+  * fail-soft: no creds, a raising shop list -> a reason, never a raise.
+
+StrictDB + injected Shopify boundary -- no network, no production.
 """
 
 import asyncio
@@ -13,184 +25,377 @@ import os
 import sys
 import types
 
-os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import pytest
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+os.environ.setdefault("JWT_SECRET_KEY", "test")
+os.environ.setdefault("ENVIRONMENT", "test")
+
+from strict_fakes import StrictDB  # noqa: E402
 from api.services import shopify_stock_parity as sp  # noqa: E402
+
+LOC_A = "gid://shopify/Location/1001"
+LOC_B = "gid://shopify/Location/1002"
+LOC_STRAY = "gid://shopify/Location/7777"
+INV_1 = "gid://shopify/InventoryItem/91"
+INV_2 = "gid://shopify/InventoryItem/92"
 
 
 def _run(coro):
     return asyncio.run(coro)
 
 
+@pytest.fixture(autouse=True)
+def _env(monkeypatch):
+    for k in ("ONLINE_STOCK_SAFETY_BUFFER", "SHOPIFY_STOCK_PARITY_TOLERANCE"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr("api.services.shopify_push._has_shopify_creds", lambda db, *a, **k: True)
+
+
+def _store(sid, loc=None, store_type="RETAIL"):
+    row = {"store_id": sid, "store_code": sid, "store_name": "Shop " + sid, "store_type": store_type, "is_active": True}
+    if loc:
+        row["shopify_location_id"] = loc
+    return row
+
+
+def _db(shelves, *, pune_units=0):
+    """Two MAPPED shops (BV-A at LOC_A, BV-B at LOC_B), an UNMAPPED BV-PUN
+    holding `pune_units` of SKU-1, and the ONLINE store. `shelves` is
+    {sku: {store_id: available units}}; SKU-1 -> INV_1, SKU-2 -> INV_2."""
+    db = StrictDB()
+    db.seed(
+        "stores",
+        [_store("BV-A", LOC_A), _store("BV-B", LOC_B), _store("BV-PUN"), _store("BV-ONLINE-01", store_type="ONLINE")],
+    )
+    db.seed("products", [{"product_id": "p1", "sku": "SKU-1"}, {"product_id": "p2", "sku": "SKU-2"}])
+    db.seed(
+        "catalog_variants",
+        [{"sku": "SKU-1", "shopify_inventory_item_id": INV_1}, {"sku": "SKU-2", "shopify_inventory_item_id": INV_2}],
+    )
+    pid = {"SKU-1": "p1", "SKU-2": "p2"}
+    units = []
+    shelves = {k: dict(v) for k, v in shelves.items()}
+    if pune_units:
+        shelves.setdefault("SKU-1", {})["BV-PUN"] = pune_units
+    for sku, per in shelves.items():
+        for sid, n in per.items():
+            units += [
+                {"stock_id": f"{sku}-{sid}-{i}", "product_id": pid[sku], "store_id": sid, "status": "AVAILABLE"}
+                for i in range(n)
+            ]
+    db.seed("stock_units", units)
+    return db
+
+
+def _shopify(levels, *, fail=False):
+    """A fake _graphql answering the levels query from {item_gid: {loc: qty}}."""
+    calls = []
+
+    async def gql(db, query, variables):  # noqa: ARG001
+        calls.append(variables)
+        if fail:
+            raise RuntimeError("throttled")
+        return {
+            "data": {
+                "nodes": [
+                    {
+                        "id": gid,
+                        "inventoryLevels": {
+                            "edges": [
+                                {"node": {"location": {"id": loc}, "quantities": [{"name": "available", "quantity": q}]}}
+                                for loc, q in per.items()
+                            ]
+                        },
+                    }
+                    for gid, per in levels.items()
+                    if gid in variables["ids"]
+                ]
+            }
+        }
+
+    gql.calls = calls
+    return gql
+
+
+def _tasks(db):
+    return db.get_collection("tasks").docs
+
+
 # ---------------------------------------------------------------------------
-# Pure comparator
+# Pure comparator + row builder
 # ---------------------------------------------------------------------------
 
-def test_compare_variant_parity_respects_tolerance_and_unknowns():
+
+def test_compare_respects_tolerance_and_unknown_on_either_side():
     rows = [
-        {"sku": "A", "inventory_item_id": "1", "ims_available": 10, "shopify_available": 10},  # 0
-        {"sku": "B", "inventory_item_id": "2", "ims_available": 10, "shopify_available": 8},   # 2 == tol
-        {"sku": "C", "inventory_item_id": "3", "ims_available": 10, "shopify_available": 7},   # 3 > tol
-        {"sku": "D", "inventory_item_id": "4", "ims_available": 20, "shopify_available": 5},   # 15 > tol
-        {"sku": "E", "inventory_item_id": "5", "ims_available": 10, "shopify_available": None},  # unknown
+        {"sku": "A", "store_id": "S", "ims_available": 10, "shopify_available": 10},  # 0
+        {"sku": "B", "store_id": "S", "ims_available": 10, "shopify_available": 8},  # 2 == tol
+        {"sku": "C", "store_id": "S", "ims_available": 10, "shopify_available": 7},  # 3 > tol
+        {"sku": "D", "store_id": "S", "ims_available": 20, "shopify_available": 5},  # 15 > tol
+        {"sku": "E", "store_id": "S", "ims_available": 10, "shopify_available": None},  # Shopify unknown
+        {"sku": "F", "store_id": "S", "ims_available": None, "shopify_available": 5},  # IMS unknown
     ]
     out = sp.compare_variant_parity(rows, tolerance=2)
-    assert out["compared"] == 4          # E is unknown, excluded
-    assert out["unknown"] == 1
-    assert out["drift_count"] == 2       # C and D (B is exactly at tolerance, OK)
-    assert out["max_delta"] == 15
-    # Sorted worst-first.
+    assert out["compared"] == 4 and out["unknown"] == 2
+    assert out["drift_count"] == 2 and out["max_delta"] == 15
     assert [d["sku"] for d in out["drift"]] == ["D", "C"]
-    assert out["tolerance"] == 2
+    assert out["drift"][0]["store_id"] == "S"
 
 
-def test_compare_variant_parity_empty_is_clean():
-    out = sp.compare_variant_parity([], tolerance=2)
-    assert out["drift_count"] == 0 and out["max_delta"] == 0 and out["compared"] == 0
+def test_ims_unknown_is_never_read_as_zero():
+    """A shop whose on-hand read failed is absent from the rule's answer. Revert
+    the comparator to `int(r.get("ims_available") or 0)` -> IMS 0 vs Shopify 5
+    -> a false drift row and a task on a shop IMS simply could not read."""
+    out = sp.compare_variant_parity(
+        [{"sku": "F", "store_id": "S", "ims_available": None, "shopify_available": 5}], tolerance=2
+    )
+    assert out["drift_count"] == 0 and out["unknown"] == 1 and out["compared"] == 0
+
+
+def test_rows_compare_each_shop_with_its_own_location_never_a_sum():
+    """The PR 4 rule. Shelves A=3, B=0; Shopify holds them SWAPPED (A=0, B=3).
+    Pooled that is 3 vs 3 -- clean -- while each location sells the other
+    shop's number. Revert parity_rows to compare against the sum of the item's
+    levels (or the rule's sum) -> no drift -> this fails."""
+    rows = sp.parity_rows(
+        [{"sku": "SKU-1", "inventory_item_id": INV_1}],
+        {"SKU-1": {"BV-A": 3, "BV-B": 0}},
+        {INV_1: {LOC_A: 0, LOC_B: 3}},
+        {"BV-A": LOC_A, "BV-B": LOC_B},
+    )
+    out = sp.compare_location_parity(rows, tolerance=2)
+    assert out["drift_count"] == 2
+    assert {d["store_id"] for d in out["drift"]} == {"BV-A", "BV-B"}
+    assert out["stores"]["BV-A"]["drift"][0]["ims"] == 3
+    assert out["stores"]["BV-A"]["drift"][0]["shopify"] == 0
+
+
+def test_rows_not_stocked_at_a_location_is_zero_but_a_missing_item_is_unknown():
+    """Revert `int(item_levels.get(gid, 0))` to `.get(gid)` -> the not-stocked
+    location reads unknown and its 5 unsellable units never drift."""
+    rows = sp.parity_rows(
+        [{"sku": "SKU-1", "inventory_item_id": INV_1}, {"sku": "SKU-2", "inventory_item_id": INV_2}],
+        {"SKU-1": {"BV-A": 5, "BV-B": 1}, "SKU-2": {"BV-A": 4, "BV-B": 4}},
+        {INV_1: {LOC_B: 1}},  # INV_1 not stocked at LOC_A; INV_2 not returned at all
+        {"BV-A": LOC_A, "BV-B": LOC_B},
+    )
+    out = sp.compare_location_parity(rows, tolerance=2)
+    assert out["drift_count"] == 1 and out["drift"][0]["store_id"] == "BV-A"
+    assert out["unknown"] == 2  # both SKU-2 rows
+
+
+def test_unclaimed_locations_are_reported_with_their_units():
+    out = sp.unclaimed_locations(
+        [{"sku": "SKU-1", "inventory_item_id": INV_1}],
+        {INV_1: {LOC_A: 3, LOC_STRAY: 4, "gid://shopify/Location/8": 0}},
+        {LOC_A, LOC_B},
+    )
+    assert out == [{"location_id": LOC_STRAY, "units": 4, "skus": ["SKU-1"]}]
 
 
 def test_parity_tolerance_env_override(monkeypatch):
     monkeypatch.setenv("SHOPIFY_STOCK_PARITY_TOLERANCE", "5")
     assert sp.parity_tolerance() == 5
     monkeypatch.setenv("SHOPIFY_STOCK_PARITY_TOLERANCE", "junk")
-    assert sp.parity_tolerance() == 2  # bad value -> default
-    monkeypatch.delenv("SHOPIFY_STOCK_PARITY_TOLERANCE", raising=False)
     assert sp.parity_tolerance() == 2
 
 
 # ---------------------------------------------------------------------------
-# Deduped SYSTEM task
+# The Shopify reader
 # ---------------------------------------------------------------------------
 
-class _FakeRepo:
-    """Matches the create_system_task contract: find_many + create."""
 
-    def __init__(self, existing=None):
-        self.existing = existing or []
-        self.created = []
+def test_levels_reader_keys_by_location_and_normalises_bare_ids():
+    async def gql(db, query, variables):  # noqa: ARG001
+        return {"data": {"nodes": [{"id": INV_1, "inventoryLevels": {"edges": [
+            {"node": {"location": {"id": "1001"}, "quantities": [{"name": "available", "quantity": 2}]}},
+            {"node": {"location": {"id": LOC_B}, "quantities": [{"name": "available", "quantity": 5}]}},
+        ]}}]}}
 
-    def find_many(self, query):
-        # create_system_task looks up by source_ref; return our seeded rows.
-        return list(self.existing)
-
-    def create(self, doc):
-        self.created.append(doc)
-        return doc
+    assert _run(sp.shopify_levels_by_item(None, [INV_1], graphql=gql)) == {INV_1: {LOC_A: 2, LOC_B: 5}}
 
 
-_DRIFT_SUMMARY = {
-    "drift": [
-        {"sku": "D", "inventory_item_id": "4", "ims": 20, "shopify": 5, "delta": 15},
-        {"sku": "C", "inventory_item_id": "3", "ims": 10, "shopify": 7, "delta": 3},
-    ],
-    "drift_count": 2,
-    "max_delta": 15,
-    "tolerance": 2,
-}
+def test_levels_reader_is_none_when_any_batch_fails(monkeypatch):
+    """Half an answer is no answer. Revert the failed-batch `return None` to
+    `continue` -> the reader returns the other batch -> this fails (and the
+    tick would close a drifted shop's task on the half it did read)."""
+    monkeypatch.setattr(sp, "_INV_BATCH", 1)
+    seen = []
+
+    async def gql(db, query, variables):  # noqa: ARG001
+        seen.append(variables["ids"])
+        if len(seen) == 2:
+            raise RuntimeError("throttled")
+        return {"data": {"nodes": []}}
+
+    assert _run(sp.shopify_levels_by_item(None, [INV_1, INV_2], graphql=gql)) is None
+    assert _run(sp.shopify_levels_by_item(None, [INV_1], graphql=_shopify({}))) == {}
 
 
-def test_file_drift_task_creates_when_none_active():
-    repo = _FakeRepo(existing=[])
-    task = sp.file_drift_task(repo, _DRIFT_SUMMARY)
-    assert task is not None
-    assert task["source_ref"] == sp._DRIFT_TASK_REF
-    assert task["priority"] == "P2"
-    assert task["source"] == "SYSTEM"
-    assert len(repo.created) == 1
+# ---------------------------------------------------------------------------
+# The tick, end to end on the real rule (StrictDB)
+# ---------------------------------------------------------------------------
 
 
-def test_file_drift_task_dedupes_when_active_task_open():
-    # An OPEN task already exists for the same source_ref -> no new task.
-    repo = _FakeRepo(existing=[{"source_ref": sp._DRIFT_TASK_REF, "status": "OPEN"}])
-    task = sp.file_drift_task(repo, _DRIFT_SUMMARY)
-    assert task is None
-    assert repo.created == []
+def test_tick_clean_system_files_nothing():
+    db = _db({"SKU-1": {"BV-A": 2, "BV-B": 1}, "SKU-2": {"BV-A": 0, "BV-B": 4}})
+    out = _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 2, LOC_B: 1}, INV_2: {LOC_A: 0, LOC_B: 4}})))
+    assert out["checked"] is True and out["reason"] is None
+    assert out["compared"] == 4 and out["drift_count"] == 0
+    assert [s["store_id"] for s in out["stores"]] == ["BV-A", "BV-B"]
+    assert out["task_filed"] is False and _tasks(db) == []
+    assert db.get_collection("shopify_stock_parity_snapshots").docs  # snapshot persisted
 
 
-def test_file_drift_task_refiles_after_prior_resolved():
-    # Prior drift task is COMPLETED -> a fresh drift may file again.
-    repo = _FakeRepo(existing=[{"source_ref": sp._DRIFT_TASK_REF, "status": "COMPLETED"}])
-    task = sp.file_drift_task(repo, _DRIFT_SUMMARY)
-    assert task is not None
-    assert len(repo.created) == 1
+def test_tick_unmapped_holder_is_reported_never_drift():
+    """Pune (no location) holds 3 units. It is reported as an unmapped holder
+    and appears in NO drift row and NO task. Revert run_parity_tick to build
+    rows over every physical shop (not `mapped`) -> a BV-PUN row with IMS 3 vs
+    Shopify unknown/0 -> this fails."""
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}}, pune_units=3)
+    out = _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 0, LOC_B: 0}})))
+    assert out["drift_count"] == 0
+    assert [h["store_id"] for h in out["unmapped_holders"]] == ["BV-PUN"]
+    assert out["unmapped_holders"][0]["units"] == 3
+    assert all(s["store_id"] != "BV-PUN" for s in out["stores"])
+    assert _tasks(db) == []
+
+
+def test_tick_unclaimed_location_is_reported_never_drift():
+    """Shopify holds 6 units at a location no shop carries."""
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}})
+    out = _run(sp.run_parity_tick(
+        db, graphql=_shopify({INV_1: {LOC_A: 1, LOC_B: 1, LOC_STRAY: 6}, INV_2: {}})
+    ))
+    assert out["drift_count"] == 0
+    assert out["unclaimed_locations"] == [{"location_id": LOC_STRAY, "units": 6, "skus": ["SKU-1"]}]
+    assert _tasks(db) == []
+
+
+def test_tick_reads_ims_with_the_writers_buffer(monkeypatch):
+    """Safety buffer 3, shelf 5 at BV-A: the writer sends 2, Shopify holds 2 --
+    a correct system. Revert the tick's call to
+    `online_quantities_for_skus(db, skus, safety_buffer=0)` -> IMS 5 vs 2 ->
+    delta 3 > tolerance 2 -> a false drift task -> this fails."""
+    monkeypatch.setenv("ONLINE_STOCK_SAFETY_BUFFER", "3")
+    db = _db({"SKU-1": {"BV-A": 5, "BV-B": 0}})
+    out = _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 2, LOC_B: 0}, INV_2: {LOC_A: 0, LOC_B: 0}})))
+    assert out["compared"] == 4
+    assert out["drift_count"] == 0, out["drift"]
+
+
+def test_tick_one_task_per_shop_filed_refreshed_then_closed():
+    """BV-A drifts (IMS 5, Shopify 1); BV-B is clean.
+      tick 1 -> ONE task, ref ...:BV-A, store_id BV-A; none for BV-B; never the
+                bare pooled ref.
+      tick 2 -> the drift persists with a new number -> NO second task, the
+                open one's description + payload are refreshed.
+      tick 3 -> Shopify matches -> the task is COMPLETED.
+    Revert the refresh branch (fall through to create_system_task) -> tick 2
+    leaves the stale description -> fails. Revert the close branch -> tick 3
+    leaves it OPEN -> fails."""
+    db = _db({"SKU-1": {"BV-A": 5, "BV-B": 1}})
+    out = _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {}})))
+    assert out["tasks"] == {"filed": ["BV-A"], "refreshed": [], "closed": []}
+    assert out["task_filed"] is True
+    (task,) = _tasks(db)
+    assert task["source_ref"] == "shopify-stock-parity-drift:BV-A"
+    assert task["source_ref"] != "shopify-stock-parity-drift"
+    assert task["store_id"] == "BV-A" and task["status"] == "OPEN"
+    assert "IMS 5 vs Shopify 1" in task["description"]
+
+    out = _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 0, LOC_B: 1}, INV_2: {}})))
+    assert out["tasks"] == {"filed": [], "refreshed": ["BV-A"], "closed": []}
+    (task,) = _tasks(db)
+    assert "IMS 5 vs Shopify 0" in task["description"]
+    assert task["payload"]["max_delta"] == 5
+
+    out = _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 5, LOC_B: 1}, INV_2: {}})))
+    assert out["tasks"] == {"filed": [], "refreshed": [], "closed": ["BV-A"]}
+    (task,) = _tasks(db)
+    assert task["status"] == "COMPLETED"
+
+
+def test_tick_an_escalated_task_is_refreshed_not_duplicated():
+    db = _db({"SKU-1": {"BV-A": 5, "BV-B": 1}})
+    db.seed("tasks", [{"task_id": "T-1", "source_ref": "shopify-stock-parity-drift:BV-A", "status": "ESCALATED",
+                       "description": "old"}])
+    out = _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {}})))
+    assert out["tasks"]["refreshed"] == ["BV-A"] and len(_tasks(db)) == 1
+    assert _tasks(db)[0]["status"] == "ESCALATED" and _tasks(db)[0]["description"] != "old"
+
+
+def test_tick_a_partial_shopify_read_closes_nothing(monkeypatch):
+    """BV-A's open task is about SKU-2. Tonight SKU-1's batch reads clean and
+    SKU-2's batch fails. Half an answer is no answer: nothing is compared and
+    the task stays OPEN. Revert the reader's failed-batch `return None` to
+    `continue` -> BV-A compares 1 clean row (SKU-2 unknown) -> its task is
+    closed on a read that skipped the drifted SKU -> this fails."""
+    monkeypatch.setattr(sp, "_INV_BATCH", 1)
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 5, "BV-B": 0}})
+    db.seed("tasks", [{"task_id": "T-1", "source_ref": "shopify-stock-parity-drift:BV-A", "status": "OPEN"}])
+    clean = _shopify({INV_1: {LOC_A: 1, LOC_B: 1}})
+
+    async def gql(db_, query, variables):
+        if INV_2 in variables["ids"]:
+            raise RuntimeError("throttled")
+        return await clean(db_, query, variables)
+
+    out = _run(sp.run_parity_tick(db, graphql=gql))
+    assert out["checked"] is False and "read failed" in out["reason"]
+    assert out["tasks"]["closed"] == []
+    assert _tasks(db)[0]["status"] == "OPEN"
+
+
+def test_tick_a_shop_ims_could_not_read_keeps_its_task_open(monkeypatch):
+    """BV-A's on-hand read fails: its rows are unknown, compared 0 -> its open
+    task stays open. Revert the close condition to `if active:` (drop the
+    `compared` check) -> the unread shop's task is closed -> fails."""
+    db = _db({"SKU-1": {"BV-A": 5, "BV-B": 1}})
+    db.seed("tasks", [{"task_id": "T-1", "source_ref": "shopify-stock-parity-drift:BV-A", "status": "OPEN"}])
+    from api.services import online_stock_writeback as wb
+
+    real = wb._on_hand_for_skus
+    monkeypatch.setattr(wb, "_on_hand_for_skus", lambda db, skus, sid: {} if sid == "BV-A" else real(db, skus, sid))
+    out = _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 5, LOC_B: 1}, INV_2: {}})))
+    assert next(s for s in out["stores"] if s["store_id"] == "BV-A")["compared"] == 0
+    assert out["tasks"]["closed"] == []
+    assert _tasks(db)[0]["status"] == "OPEN"
+
+
+def test_tick_no_creds_is_fail_soft(monkeypatch):
+    monkeypatch.setattr("api.services.shopify_push._has_shopify_creds", lambda db, *a, **k: False)
+    out = _run(sp.run_parity_tick(StrictDB()))
+    assert out["checked"] is False and "creds" in out["reason"]
+
+
+def test_tick_never_raises_into_sentinel(monkeypatch):
+    import api.services.shopify_push.inventory as inv
+
+    def boom(db):
+        raise RuntimeError("mongo down")
+
+    monkeypatch.setattr(inv, "_stores", boom)
+    out = _run(sp.run_parity_tick(_db({"SKU-1": {"BV-A": 1}}), graphql=_shopify({})))
+    assert out["checked"] is False and "tick error" in out["reason"]
 
 
 # ---------------------------------------------------------------------------
 # Snapshot pruning
 # ---------------------------------------------------------------------------
 
-class _FakePruneColl:
-    def __init__(self):
-        self.deleted_query = None
-
-    def delete_many(self, query):
-        self.deleted_query = query
-        return types.SimpleNamespace(deleted_count=3)
-
 
 def test_prune_snapshots_uses_iso_cutoff():
-    coll = _FakePruneColl()
-    n = sp.prune_snapshots(coll, retention_days=30)
-    assert n == 3
-    assert "generated_at" in coll.deleted_query
+    class _Coll:
+        deleted_query = None
+
+        def delete_many(self, query):
+            self.deleted_query = query
+            return types.SimpleNamespace(deleted_count=3)
+
+    coll = _Coll()
+    assert sp.prune_snapshots(coll, retention_days=30) == 3
     assert "$lt" in coll.deleted_query["generated_at"]
-
-
-def test_prune_snapshots_none_coll_is_zero():
     assert sp.prune_snapshots(None) == 0
-
-
-# ---------------------------------------------------------------------------
-# Orchestration smoke (fail-soft, injected boundaries)
-# ---------------------------------------------------------------------------
-
-def test_run_parity_tick_files_task_on_drift(monkeypatch):
-    # creds present
-    monkeypatch.setattr("api.services.shopify_push._has_shopify_creds", lambda db, *a, **k: True)
-    # sampled variants
-    monkeypatch.setattr(
-        sp, "_sample_variants",
-        lambda db, limit=500: [
-            {"sku": "C", "inventory_item_id": "3"},
-            {"sku": "D", "inventory_item_id": "4"},
-        ],
-    )
-    # pooled IMS availability
-    monkeypatch.setattr(sp, "_pooled_availability", lambda db, skus: {"C": 10, "D": 20})
-    # captured snapshot
-    stored = {}
-    monkeypatch.setattr(sp, "_store_snapshot", lambda db, snap: stored.update(snap))
-    # repo for the drift task
-    repo = _FakeRepo(existing=[])
-    monkeypatch.setattr(sp, "_task_repo", lambda db: repo)
-
-    async def fake_gql(db, query, variables):
-        # Shopify reports C=7 (delta 3), D=5 (delta 15) -> both drift beyond tol 2.
-        return {
-            "data": {
-                "nodes": [
-                    {"id": "gid://shopify/InventoryItem/3", "inventoryLevels": {"edges": [
-                        {"node": {"location": {"id": "L"}, "quantities": [{"name": "available", "quantity": 7}]}}]}},
-                    {"id": "gid://shopify/InventoryItem/4", "inventoryLevels": {"edges": [
-                        {"node": {"location": {"id": "L"}, "quantities": [{"name": "available", "quantity": 5}]}}]}},
-                ]
-            }
-        }
-
-    out = _run(sp.run_parity_tick(None, graphql=fake_gql))
-    assert out["checked"] is True
-    assert out["sampled"] == 2
-    assert out["drift_count"] == 2
-    assert out["max_delta"] == 15
-    assert out["task_filed"] is True
-    assert len(repo.created) == 1
-    assert stored.get("drift_count") == 2  # snapshot persisted
-
-
-def test_run_parity_tick_no_creds_is_fail_soft(monkeypatch):
-    monkeypatch.setattr("api.services.shopify_push._has_shopify_creds", lambda db, *a, **k: False)
-    monkeypatch.setattr(sp, "_store_snapshot", lambda db, snap: None)
-    out = _run(sp.run_parity_tick(None))
-    assert out["checked"] is False
-    assert "creds" in (out["reason"] or "")
