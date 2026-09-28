@@ -23,7 +23,8 @@ task for both, so parity only reports):
     listed stock (Pune, by design, until its opening stock lands). The
     writer's own inventory.unmapped_holders answers it.
   * unclaimed_locations -- Shopify locations holding stock of a sampled item
-    that no IMS shop carries.
+    that no MAPPED shop carries (a location two shops claim is mapped by
+    neither -- the writer's own definition, inventory._mapped).
 In-transit units count at neither location (owner accepted): the rule reads
 the shelf, so they are in no row here either.
 

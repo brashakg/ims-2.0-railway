@@ -434,6 +434,18 @@ def test_tick_a_drifted_sku_whose_ims_side_went_unknown_keeps_its_task_open():
     assert out["tasks"]["closed"] == [] and _tasks(db)[0]["status"] == "OPEN"
 
 
+def test_tick_a_drifted_sku_that_fell_out_of_the_sample_keeps_its_task_open():
+    """The sample is capped (_sample_variants): SKU-2 drifted at BV-A, then
+    tonight's sample holds SKU-1 only, which compares clean. SKU-2 was never
+    compared -> still owed, still OPEN. Drop `not owed` -> closed -> fails."""
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 5, "BV-B": 0}})
+    shop = _shopify({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 0, LOC_B: 0}})
+    _run(sp.run_parity_tick(db, graphql=shop))
+    out = _run(sp.run_parity_tick(db, graphql=shop, sample_limit=1))
+    assert out["sampled"] == 1 and out["compared"] == 2
+    assert out["tasks"]["closed"] == [] and _tasks(db)[0]["status"] == "OPEN"
+
+
 def test_tick_ims_side_carries_the_online_block():
     """SKU-1 is in a SUPERADMIN online-blocked collection: the writer sends 0
     at every shop, Shopify holds 0 -- a correct system. The IMS side must be
