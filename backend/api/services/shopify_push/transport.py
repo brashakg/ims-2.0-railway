@@ -49,10 +49,17 @@ _RETRY_MAX_DELAY = 30.0  # cap, also applied to a vendor Retry-After
 # Send-once today: imsProductCreate, imsProductCreateMedia,
 # imsVariantsBulkCreate, imsCollectionCreate, imsMenuCreate,
 # imsFulfillmentCreate, imsWebhookSubscriptionCreate. A lost answer raises
-# SentOnce; whoever sent it owns the NEXT pass, which reads Shopify first
-# (the photo pass settles by name on the product's next press; the
-# fulfilment re-reads its FulfillmentOrders before it creates again).
-_OP = re.compile(r"\s*mutation\s+(\w+)")
+# SentOnce; whoever sent it owns the NEXT pass, which reads Shopify first:
+# the photo pass settles a pending attach by its send window (media._settle);
+# the product / collection / menu create finds its lost create through the
+# create journal (creates.py) before it sends another; the fulfilment
+# re-reads its FulfillmentOrders; the variant create matches the variants
+# the product write answers; the webhook registrar lists before it creates.
+# A document is read WHOLE for this: every `mutation` operation in it, after
+# its comments are dropped -- a leading comment or fragment never makes a
+# create read as a query.
+_COMMENT = re.compile(r"#[^\n]*")
+_MUTATION = re.compile(r"\bmutation\b\s*(\w*)")
 _REPLAY_SAFE = frozenset(
     {
         "imsProductUpdate",
@@ -80,16 +87,23 @@ class SentOnce(ValueError):
     Shopify holds before it sends again -- never re-send blind."""
 
 
+def _mutations(query: str) -> list:
+    """The name of every `mutation` operation in a document ('' for an
+    anonymous one), comments dropped. Pure."""
+    return _MUTATION.findall(_COMMENT.sub("", query or ""))
+
+
 def _replay_safe(query: str) -> bool:
     """May this operation be sent again after Shopify may have applied it? A
-    query yes; a mutation only when _REPLAY_SAFE names it (default deny)."""
-    m = _OP.match(query or "")
-    return (m.group(1) in _REPLAY_SAFE) if m else not (query or "").lstrip().startswith("mutation")
+    document with no mutation yes; one with a mutation only when _REPLAY_SAFE
+    names every mutation in it (default deny: an anonymous or unlisted one is
+    sent once)."""
+    return all(n in _REPLAY_SAFE for n in _mutations(query))
 
 
 def _op_name(query: str) -> str:
-    m = _OP.match(query or "")
-    return m.group(1) if m else "operation"
+    names = _mutations(query)
+    return (names[0] or "operation") if names else "operation"
 
 
 _version_logged = False

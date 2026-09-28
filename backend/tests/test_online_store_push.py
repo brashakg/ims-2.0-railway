@@ -1281,6 +1281,37 @@ def test_the_replay_list_names_real_mutations_and_every_create_is_send_once():
     assert transport._replay_safe("mutation imsSomethingNew { x }") is False, "default deny"
 
 
+def test_replay_safe_reads_every_real_document_whole():
+    """Round 4: _replay_safe is asked of the REAL documents IMS sends (every
+    `query ims...` / `mutation ...` string constant under backend/api), and
+    answers the same with a leading comment or a fragment in front -- a
+    create must never read as a query and be replayed blind after a lost
+    answer (the duplicate-media bug the send-once rule exists for).
+    REVERT-PROOF: the round-3 `startswith('mutation')` reading -> the
+    comment-led and fragment-led creates answer True (replayed)."""
+    import ast
+    import pathlib
+    import re as _re
+
+    from api.services.shopify_push import transport
+
+    api = pathlib.Path(__file__).resolve().parents[1] / "api"
+    docs = []
+    for f in api.rglob("*.py"):
+        for node in ast.walk(ast.parse(f.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                if _re.match(r"\s*(query\s+ims\w*|mutation\s+\w+)\s*[({]", node.value):
+                    docs.append(node.value)
+    creates = [d for d in docs if _re.match(r"\s*mutation\s+\w*Create\w*", d)]
+    assert len(docs) > 20 and len(creates) >= 7, (len(docs), len(creates))
+    for d in docs:
+        m = _re.match(r"\s*mutation\s+(\w+)", d)
+        want = (m.group(1) in transport._REPLAY_SAFE) if m else True
+        for doc in (d, "# a note\n" + d, "fragment F on Media { id }\n" + d):
+            assert transport._replay_safe(doc) is want, doc[:80]
+    assert transport._replay_safe("mutation ($x: ID!) { productCreate { id } }") is False, "anonymous: deny"
+
+
 # --- register_webhooks ------------------------------------------------------
 
 
