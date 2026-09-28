@@ -150,20 +150,23 @@ export function printHtmlFallback(htmlDocument: string): PrintResult {
     win.document.open();
     win.document.write(htmlDocument);
     win.document.close();
-    // Give the barcode SVG a tick to render before invoking print.
-    win.onload = () => {
-      win.focus();
-      win.print();
-    };
-    // Safety: some browsers don't fire onload for document.write.
-    setTimeout(() => {
+    // Give the barcode SVG a tick to render before invoking print. onload OR
+    // the timer (some browsers never fire onload for document.write) -- but
+    // only ONE of them: both firing opened the dialog twice, and a second
+    // dialog on a label printer is a second set of labels.
+    let asked = false;
+    const printOnce = () => {
+      if (asked) return;
+      asked = true;
       try {
         win.focus();
         win.print();
       } catch {
         /* ignore */
       }
-    }, 400);
+    };
+    win.onload = printOnce;
+    setTimeout(printOnce, 400);
     return { method: 'html', message: 'Opened label in a print window.' };
   } catch {
     return { method: 'failed', message: 'HTML print failed.' };
