@@ -47,7 +47,7 @@ from api.routers.auth import get_current_user  # noqa: E402
 
 
 CATEGORIES_TSX = ts_constants.frontend_path(
-    "pages", "finance", "ExpenseTracker.tsx"
+    "pages", "finance", "expenses", "expenseShared.ts"
 )
 
 

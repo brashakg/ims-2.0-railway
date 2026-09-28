@@ -471,7 +471,7 @@ def compute_aging(expenses: list, now: datetime) -> dict:
 # all, so nothing downstream has to hide it.
 #
 # THESE VALUES ARE THE ONES THE UI ALREADY SUBMITS, verbatim, from CATEGORIES in
-# frontend/src/pages/finance/ExpenseTracker.tsx. The eight everyday heads are
+# frontend/src/pages/finance/expenses/expenseShared.ts. The eight everyday heads are
 # lowercase and PETTY_CASH is uppercase -- that inconsistency is pre-existing and
 # is deliberately PRESERVED rather than tidied, because _PETTY_CASH_CATEGORY,
 # every stored document, every spend cap keyed by category and the finance
@@ -483,8 +483,8 @@ def compute_aging(expenses: list, now: datetime) -> dict:
 # warning, no nudge. He was offered a capped variant and removal and chose to
 # keep it unchanged. Do not add a guard to it.
 #
-# frontend/.../ExpenseTracker.tsx is the list the user sees; THIS tuple is what
-# the server enforces. test_expense_category_fixed_list.py reads that .tsx file
+# frontend/.../expenses/expenseShared.ts is the list the user sees; THIS tuple is
+# what the server enforces. test_expense_category_fixed_list.py reads that file
 # and fails if the two ever differ.
 EXPENSE_CATEGORIES = (
     "utilities",
