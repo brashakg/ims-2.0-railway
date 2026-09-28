@@ -27,7 +27,6 @@ from . import stock_count
 from . import stock_count_items
 from . import stock_count_reconcile
 from . import accountability
-from . import transfer_stubs
 from . import non_moving
 from . import scan
 from . import contact_lenses
@@ -53,7 +52,6 @@ _SUBMODULES = (
     stock_count_items,
     stock_count_reconcile,
     accountability,
-    transfer_stubs,
     non_moving,
     scan,
     contact_lenses,

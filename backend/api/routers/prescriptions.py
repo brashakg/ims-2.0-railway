@@ -920,23 +920,6 @@ async def get_expiring_prescriptions(
     return {"prescriptions": [], "total": 0}
 
 
-@router.get("/optometrist/{optometrist_id}/stats")
-async def get_optometrist_stats(
-    optometrist_id: str,
-    from_date: date = Query(...),
-    to_date: date = Query(...),
-    current_user: dict = Depends(get_current_user),
-):
-    """Get prescription statistics for an optometrist"""
-    repo = get_prescription_repository()
-
-    if repo is not None:
-        stats = repo.get_optometrist_stats(optometrist_id, from_date, to_date)
-        return stats
-
-    return {"total": 0, "tested_at_store": 0}
-
-
 @router.get("")
 @router.get("/")
 async def list_prescriptions(

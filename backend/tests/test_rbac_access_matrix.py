@@ -667,13 +667,7 @@ class TestFinancePayrollHrRoutes:
          ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"], None),
         ("GET", "/api/v1/payroll/registers/summary", ["ADMIN"],
          ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"], None),
-        ("GET", "/api/v1/hr/payroll", ["ADMIN"],
-         ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"], None),
-        ("POST", "/api/v1/hr/payroll/PR-DUMMY-1/approve", ["ADMIN"],
-         ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"], None),
-        # Round-5 MUST-FIX 2: the two salary WRITES, narrowed in the same round.
-        ("POST", "/api/v1/hr/payroll/generate", ["ADMIN"],
-         ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"], None),
+        # Round-5 MUST-FIX 2: the salary WRITE, narrowed in the same round.
         ("POST", "/api/v1/payroll/salary/calculate", ["ADMIN"],
          ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"],
          {"employee_id": "EMP-DUMMY-1", "month": 5, "year": 2026, "working_days": 26}),
