@@ -40,7 +40,8 @@ vi.mock('../../../services/api/buyDesk', () => ({
           readiness: { complete: true, missing: [], blockers: [], purchasable: true },
           ecom_state: 'NOT_LISTED',
           on_hand: 0,
-          on_order: 0,
+          on_order: 3,
+          in_draft: 4,
           buy_signal: 2,
           purchasable: true,
           hsn_code: '900311',
@@ -64,5 +65,18 @@ describe('Buy Desk row Purchase (F61)', () => {
     expect(container.querySelector('a[href="/purchase"]')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: /^purchase$/i }));
     expect(await screen.findByText(/create draft po · 1 product/i)).toBeInTheDocument();
+  });
+});
+
+describe('Buy Desk on order vs in draft (owner D11, 2026-09-29)', () => {
+  it('shows only what was sent as on order, and drafts apart as "in draft"', async () => {
+    render(
+      <MemoryRouter>
+        <BuyDeskPage />
+      </MemoryRouter>,
+    );
+    await screen.findByText('Carrera CA8895');
+    const cell = screen.getByText('4 in draft').closest('td');
+    expect(cell?.textContent).toBe('34 in draft');
   });
 });

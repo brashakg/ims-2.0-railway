@@ -251,7 +251,7 @@ export default function BuyDeskPage() {
                 <th className="px-4 py-2.5">Catalog</th>
                 <th className="px-4 py-2.5">Online</th>
                 <th className="px-4 py-2.5 text-right">On hand</th>
-                <th className="px-4 py-2.5 text-right">On order</th>
+                <th className="px-4 py-2.5 text-right" title="Sent to the vendor, not yet arrived. Drafts are shown underneath, not counted.">On order</th>
                 <th className="px-4 py-2.5 text-right">Buy</th>
                 <th className="px-4 py-2.5 text-right">Action</th>
               </tr>
@@ -279,7 +279,12 @@ export default function BuyDeskPage() {
                   <td className="px-4 py-2.5">{readinessChip(r)}</td>
                   <td className="px-4 py-2.5">{ecomChip(r.ecom_state)}</td>
                   <td className="px-4 py-2.5 text-right tabular-nums">{r.on_hand}</td>
-                  <td className="px-4 py-2.5 text-right tabular-nums text-gray-500">{r.on_order}</td>
+                  <td className="px-4 py-2.5 text-right tabular-nums text-gray-500">
+                    {r.on_order}
+                    {(r.in_draft ?? 0) > 0 && (
+                      <span className="block text-xs text-amber-700">{r.in_draft} in draft</span>
+                    )}
+                  </td>
                   <td className="px-4 py-2.5 text-right tabular-nums font-semibold text-gray-900">
                     {r.buy_signal === null ? '—' : r.buy_signal}
                   </td>
