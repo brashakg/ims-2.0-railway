@@ -215,10 +215,17 @@ class NexusAgent(JarvisAgent):
         updated = delivered = 0
         for order in shipped_with_awb:
             awb = order.get("awb")
-            r = await shiprocket_track_awb(self.db, awb)
+            try:
+                r = await shiprocket_track_awb(self.db, awb)
+            except Exception as e:  # noqa: BLE001 -- one bad AWB / answer never stops the poll
+                # An unexpected tracking JSON shape, or an AWB httpx refuses
+                # (InvalidURL is no HTTPError), raises out of the call. Left
+                # unstamped it would sort first and abort every run.
+                logger.warning(f"[NEXUS] Shiprocket track failed for AWB {awb!r}: {e}")
+                r = None
             now = datetime.now(timezone.utc).isoformat()
             stamp = {"tracking_polled_at": now}  # asked, answered or not: to the back
-            new_status = (r.payload or {}).get("latest_status") if r.ok else None
+            new_status = (r.payload or {}).get("latest_status") if r and r.ok else None
             if new_status and new_status != order.get("tracking_status"):
                 stamp.update(tracking_status=new_status, tracking_updated_at=now)
             try:

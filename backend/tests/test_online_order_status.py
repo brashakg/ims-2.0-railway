@@ -665,6 +665,35 @@ def test_the_shiprocket_poll_rotates_past_orders_the_courier_never_delivers(swep
     assert doc["status"] == "DELIVERED" and doc["delivered_at"]
 
 
+def test_one_awb_whose_track_call_raises_never_stops_the_poll(swept, monkeypatch):
+    """An unexpected tracking JSON shape (AttributeError / KeyError) or an AWB
+    httpx refuses (InvalidURL is no HTTPError) raises out of the track call.
+    That order goes to the back like any unanswered one and the poll goes on:
+    a later order the courier delivered is delivered on the same run. Left
+    unstamped, the poisoned order sorted first and aborted every run."""
+    for oid, awb in (("A", "AWB-TRANSIT"), ("P", "AWB-POISON")):
+        swept["orders"].insert_one({"_id": oid, "order_id": oid, "status": "SHIPPED", "awb": awb})
+    _book(swept, 60127)
+    _set(swept, 60127, status="SHIPPED", awb="AWB-LATE")
+    asked = []
+
+    async def fake_track(db, awb):
+        asked.append(awb)
+        if awb == "AWB-POISON":
+            raise AttributeError("'str' object has no attribute 'get'")
+        latest = "DELIVERED" if awb == "AWB-LATE" else "IN TRANSIT"
+        return SyncResult(ok=True, provider="shiprocket", kind="pull", payload={"latest_status": latest})
+
+    monkeypatch.setattr(nexus_module, "shiprocket_track_awb", fake_track)
+    agent = nexus_module.NexusAgent(db=swept["db"])
+    for _ in range(2):
+        asyncio.run(agent._run_integration_sync("shiprocket"))
+
+    assert asked == ["AWB-TRANSIT", "AWB-POISON", "AWB-LATE", "AWB-TRANSIT", "AWB-POISON"]
+    assert _doc(swept, 60127)["status"] == "DELIVERED"
+    assert swept["orders"].find_one({"order_id": "P"})["tracking_polled_at"]
+
+
 def test_the_signed_shiprocket_webhook_delivers_on_a_known_awb(swept):
     for oid, awb in ((60120, "AWB-W1"), (60121, "AWB-W2")):
         _book(swept, oid)
