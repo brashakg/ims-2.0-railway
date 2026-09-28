@@ -1,35 +1,33 @@
 // ============================================================================
-// IMS 2.0 - Barcode Management Modal
+// IMS 2.0 - Manufacturer Barcode Modal
 // ============================================================================
-// Generate, edit, and print barcodes for products
+// Owner ruling 2026-09-28: IMS keeps stock through its OWN per-unit barcodes
+// (minted at receipt, printed on unit labels). The product's barcode holds only
+// the manufacturer's UPC / EAN (GTIN) -- for reference and what goes to
+// Shopify / Google. So nothing here invents a code: no random Generate, no
+// symbology picker. The server (services/gtin.py) decides what is a GTIN and
+// its refusal is shown in words.
 
 import { useState, useEffect } from 'react';
-import { X, RefreshCw, AlertCircle, CheckCircle } from 'lucide-react';
-import { BarcodeGenerator } from './BarcodeGenerator';
+import { X, AlertCircle, CheckCircle } from 'lucide-react';
 import clsx from 'clsx';
 
 interface BarcodeManagementModalProps {
   isOpen: boolean;
   onClose: () => void;
-  productId?: string;
   productName: string;
   currentBarcode?: string;
-  price?: number;
   onSave: (barcode: string) => Promise<void>;
 }
-
-type BarcodeFormat = 'CODE128' | 'EAN13' | 'UPC' | 'CODE39';
 
 export function BarcodeManagementModal({
   isOpen,
   onClose,
   productName,
   currentBarcode,
-  price,
   onSave,
 }: BarcodeManagementModalProps) {
   const [barcode, setBarcode] = useState(currentBarcode || '');
-  const [format, setFormat] = useState<BarcodeFormat>('CODE128');
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
@@ -42,87 +40,9 @@ export function BarcodeManagementModal({
     }
   }, [isOpen, currentBarcode]);
 
-  const generateRandomBarcode = (format: BarcodeFormat): string => {
-    // Use crypto for secure random generation
-    const randomDigits = (len: number): string => {
-      const arr = new Uint8Array(len);
-      crypto.getRandomValues(arr);
-      return Array.from(arr, b => b % 10).join('');
-    };
-
-    switch (format) {
-      case 'EAN13': {
-        const ean = randomDigits(12);
-        let sum = 0;
-        for (let i = 0; i < 12; i++) {
-          sum += parseInt(ean[i]) * (i % 2 === 0 ? 1 : 3);
-        }
-        const checkDigit = (10 - (sum % 10)) % 10;
-        return ean + checkDigit;
-      }
-
-      case 'UPC': {
-        const upc = randomDigits(11);
-        let upcSum = 0;
-        for (let i = 0; i < 11; i++) {
-          upcSum += parseInt(upc[i]) * (i % 2 === 0 ? 3 : 1);
-        }
-        const upcCheck = (10 - (upcSum % 10)) % 10;
-        return upc + upcCheck;
-      }
-
-      case 'CODE39': {
-        const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-        const arr = new Uint8Array(8);
-        crypto.getRandomValues(arr);
-        return Array.from(arr, b => chars[b % chars.length]).join('');
-      }
-
-      case 'CODE128':
-      default:
-        return randomDigits(12);
-    }
-  };
-
-  const handleGenerate = () => {
-    const newBarcode = generateRandomBarcode(format);
-    setBarcode(newBarcode);
-    setError(null);
-    setSuccess(false);
-  };
-
-  const handleFormatChange = (newFormat: BarcodeFormat) => {
-    setFormat(newFormat);
-    if (barcode) {
-      // Try to convert existing barcode if possible
-      // For now, just clear it to avoid format errors
-      setBarcode('');
-    }
-  };
-
-  const validateBarcode = (value: string): boolean => {
-    switch (format) {
-      case 'EAN13':
-        return /^\d{13}$/.test(value);
-      case 'UPC':
-        return /^\d{12}$/.test(value);
-      case 'CODE39':
-        return /^[A-Z0-9]{4,}$/.test(value);
-      case 'CODE128':
-        return value.length >= 4; // Any ASCII (CODE128 supports full ASCII range)
-      default:
-        return value.length >= 4;
-    }
-  };
-
   const handleSave = async () => {
     if (!barcode.trim()) {
-      setError('Please enter or generate a barcode');
-      return;
-    }
-
-    if (!validateBarcode(barcode)) {
-      setError(`Invalid barcode format for ${format}`);
+      setError("Type the barcode printed on the manufacturer's box");
       return;
     }
 
@@ -130,7 +50,7 @@ export function BarcodeManagementModal({
     setError(null);
 
     try {
-      await onSave(barcode);
+      await onSave(barcode.trim());
       setSuccess(true);
       setTimeout(() => {
         onClose();
@@ -150,78 +70,42 @@ export function BarcodeManagementModal({
         {/* Header */}
         <div className="flex items-center justify-between p-6 border-b border-gray-200">
           <div>
-            <h2 className="text-xl font-bold text-gray-900">Barcode Management</h2>
+            <h2 className="text-xl font-bold text-gray-900">Manufacturer barcode</h2>
             <p className="text-sm text-gray-500 mt-1">{productName}</p>
           </div>
           <button
             onClick={onClose}
             className="p-2 text-gray-500 hover:text-gray-600 transition-colors"
+            aria-label="Close"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
         {/* Content */}
-        <div className="flex-1 overflow-y-auto p-6 space-y-6">
-          {/* Format Selection */}
+        <div className="flex-1 overflow-y-auto p-6 space-y-4">
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Barcode Format
+            <label htmlFor="mfr-barcode" className="block text-sm font-medium text-gray-700 mb-2">
+              Manufacturer barcode (UPC / EAN)
             </label>
-            <div className="grid grid-cols-2 tablet:grid-cols-4 gap-2">
-              {(['CODE128', 'EAN13', 'UPC', 'CODE39'] as BarcodeFormat[]).map((f) => (
-                <button
-                  key={f}
-                  onClick={() => handleFormatChange(f)}
-                  className={clsx(
-                    'px-4 py-2 text-sm font-medium rounded-lg border transition-colors',
-                    format === f
-                      ? 'border-bv-red-600 bg-bv-red-50 text-bv-red-700'
-                      : 'border-gray-200 hover:border-gray-300 text-gray-600'
-                  )}
-                >
-                  {f}
-                </button>
-              ))}
-            </div>
-            <p className="text-xs text-gray-500 mt-2">
-              {format === 'CODE128' && 'Most common format, supports all ASCII characters'}
-              {format === 'EAN13' && 'European Article Number (13 digits), used globally'}
-              {format === 'UPC' && 'Universal Product Code (12 digits), used in retail'}
-              {format === 'CODE39' && 'Alphanumeric format, widely used in inventory'}
-            </p>
-          </div>
-
-          {/* Barcode Input */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Barcode Value
-            </label>
-            <div className="flex gap-2">
-              <input
-                type="text"
-                value={barcode}
-                onChange={(e) => {
-                  setBarcode(e.target.value.toUpperCase());
-                  setError(null);
-                  setSuccess(false);
-                }}
-                placeholder={`Enter ${format} barcode`}
-                className={clsx(
-                  'input-field flex-1',
-                  error && 'border-red-500',
-                  success && 'border-green-500'
-                )}
-                maxLength={format === 'EAN13' ? 13 : format === 'UPC' ? 12 : 20}
-              />
-              <button
-                onClick={handleGenerate}
-                className="btn-outline flex items-center gap-2"
-              >
-                <RefreshCw className="w-4 h-4" />
-                Generate
-              </button>
-            </div>
+            <input
+              id="mfr-barcode"
+              type="text"
+              inputMode="numeric"
+              value={barcode}
+              onChange={(e) => {
+                setBarcode(e.target.value);
+                setError(null);
+                setSuccess(false);
+              }}
+              placeholder="e.g. 8056597720373"
+              className={clsx(
+                'input-field w-full',
+                error && 'border-red-500',
+                success && 'border-green-500'
+              )}
+              maxLength={20}
+            />
             {error && (
               <p className="text-sm text-red-600 mt-1 flex items-center gap-1">
                 <AlertCircle className="w-4 h-4" />
@@ -236,30 +120,11 @@ export function BarcodeManagementModal({
             )}
           </div>
 
-          {/* Barcode Preview */}
-          {barcode && validateBarcode(barcode) && (
-            <div className="border border-gray-200 rounded-lg p-4">
-              <h3 className="text-sm font-medium text-gray-700 mb-3">Preview & Print</h3>
-              <BarcodeGenerator
-                value={barcode}
-                format={format}
-                productName={productName}
-                price={price}
-              />
-            </div>
-          )}
-
-          {/* Info Box */}
-          <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-            <h4 className="text-sm font-medium text-blue-900 mb-2">Barcode Best Practices</h4>
-            <ul className="text-xs text-blue-700 space-y-1 list-disc list-inside">
-              <li>Use unique barcodes for each product variant (frame color, size, etc.)</li>
-              <li>CODE128 is recommended for optical products (frames, lenses)</li>
-              <li>EAN13/UPC are required for products to be sold online or in major retailers</li>
-              <li>Print labels at high resolution (300 DPI) for reliable scanning</li>
-              <li>Test scanned barcodes with your POS scanner before printing in bulk</li>
-            </ul>
-          </div>
+          <p className="text-sm text-gray-600">
+            The 8, 12, 13 or 14-digit code printed on the maker&apos;s box. It is kept for
+            reference and sent to Shopify and Google. IMS scans and labels each unit with its
+            own IMS barcode, minted when the stock is received.
+          </p>
         </div>
 
         {/* Footer */}
@@ -273,7 +138,7 @@ export function BarcodeManagementModal({
           </button>
           <button
             onClick={handleSave}
-            disabled={isSaving || !barcode || !validateBarcode(barcode)}
+            disabled={isSaving || !barcode.trim()}
             className="btn-primary disabled:opacity-50"
           >
             {isSaving ? 'Saving...' : 'Save Barcode'}

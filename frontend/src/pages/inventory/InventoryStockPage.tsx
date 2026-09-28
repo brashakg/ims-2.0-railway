@@ -289,16 +289,17 @@ export function InventoryStockPage() {
     }
   };
 
-  // Handle barcode save through the SINGLE validated product-update path.
+  // Handle barcode save through the SINGLE validated product-update path. The
+  // server decides what is a manufacturer GTIN; its reason reaches the modal.
   const handleSaveBarcode = async (barcode: string) => {
     if (!selectedProduct) return;
     try {
       await productApi.updateProduct(selectedProduct.id, { barcode });
       toast.success(`Barcode saved for ${selectedProduct.name}`);
       await reloadInventory();
-    } catch {
-      toast.error('Failed to save barcode. Please try again.');
-      throw new Error('Failed to save barcode');
+    } catch (err) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      throw new Error(detail || 'Failed to save barcode. Please try again.');
     }
   };
 
@@ -677,10 +678,8 @@ export function InventoryStockPage() {
             setShowBarcodeModal(false);
             setSelectedProduct(null);
           }}
-          productId={selectedProduct.id}
           productName={selectedProduct.name}
           currentBarcode={selectedProduct.barcode}
-          price={selectedProduct.offerPrice || selectedProduct.mrp}
           onSave={handleSaveBarcode}
         />
       )}

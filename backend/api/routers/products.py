@@ -234,41 +234,44 @@ def _assert_mrp_ge_offer(mrp, offer_price) -> None:
         raise HTTPException(status_code=400, detail="Offer price cannot exceed MRP")
 
 
-def _validate_product_barcode_or_400(barcode, repo, this_product_id: str) -> None:
-    """Validate a scan-to-sell product barcode, failing LOUDLY on a bad value.
+def _validate_product_barcode_or_400(barcode, repo, this_product_id: str):
+    """Validate the product's barcode -- the MANUFACTURER's UPC/EAN -- loudly.
 
-    A product master barcode must be a real, scannable code that resolves to
-    exactly one product, so:
-      - Format + check digit: it must be a valid 13-digit EAN-13 (the symbology
-        every other unit barcode in the system uses -- see services/barcode.py).
-        A malformed / wrong-check-digit value is rejected with HTTP 400 instead
-        of being silently persisted (a scanner would never decode it -> the
-        product becomes un-scannable, the exact Fail-Loudly violation this
-        guards against).
+    Owner ruling 2026-09-28: IMS keeps its own stock through the per-unit IMS
+    barcodes (services/barcode.mint_unit_barcode); the product-level barcode
+    holds only the manufacturer's GTIN, for reference and for Shopify/Google.
+    So:
+      - Format: it must be a publishable GTIN (services/gtin.py -- 8, 12, 13 or
+        14 digits, valid check digit, NOT our own GS1 20-29 in-store range).
+        Anything else is rejected with HTTP 400 rather than saved.
       - Uniqueness: a barcode already on a DIFFERENT product is rejected with
         HTTP 409 (the DB also enforces this via the unique sparse index; this
         check gives a clear message before the write).
 
-    A blank / null barcode means "no change / clear it" and is intentionally
-    allowed (skipped) -- only a non-empty value is validated.
+    Returns the GTIN with spaces/hyphens dropped (store that, so one GTIN is one
+    value), or None for a blank / null barcode ("no change / clear it").
     """
     if barcode is None:
-        return
+        return None
     code = str(barcode).strip()
     if not code:
         # Explicit clear -- nothing to validate.
-        return
+        return None
 
-    from ..services import barcode as barcode_svc
+    from ..services.gtin import classify_gtin, normalise_candidate
 
-    if not barcode_svc.validate_ean13(code):
+    reason = classify_gtin(code)
+    if reason:
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Invalid barcode '{code}'. A product barcode must be a valid "
-                "13-digit EAN-13 (numeric, with a correct check digit)."
+                f"'{code[:40]}' is not a manufacturer barcode ({reason}). Enter the "
+                "UPC / EAN printed on the maker's box: 8, 12, 13 or 14 digits with "
+                "a valid check digit. IMS barcodes (and codes starting 20-29) "
+                "belong on units, not here."
             ),
         )
+    code = normalise_candidate(code)
 
     if repo is not None:
         clash = repo.find_one({"barcode": code})
@@ -281,6 +284,7 @@ def _validate_product_barcode_or_400(barcode, repo, this_product_id: str) -> Non
                     "Barcodes must be unique."
                 ),
             )
+    return code
 
 
 # Fields persisted top-level on the product doc only when provided (additive).
@@ -3438,13 +3442,16 @@ async def update_product(
                 detail=f"Invalid modality. Allowed: {', '.join(CL_MODALITIES)}",
             )
 
-        # Validate a scan-to-sell product barcode (EAN-13 format + check digit +
-        # uniqueness) the moment one is set, so a malformed/duplicate barcode is
-        # rejected loudly instead of silently saved (which would make the
-        # product un-scannable at POS). Only runs when `barcode` is in the
-        # payload; a blank value (clear) is allowed.
+        # The product barcode is the manufacturer's GTIN (format + check digit +
+        # uniqueness), validated the moment one is set and stored without
+        # separators. Only runs when `barcode` is in the payload; a blank value
+        # (clear) is allowed and left as sent.
         if "barcode" in update_data:
-            _validate_product_barcode_or_400(update_data["barcode"], repo, product_id)
+            _gtin = _validate_product_barcode_or_400(
+                update_data["barcode"], repo, product_id
+            )
+            if _gtin:
+                update_data["barcode"] = _gtin
 
         # Validate MRP >= Offer Price using the EFFECTIVE post-update values.
         # The old check only fired when BOTH fields were in the payload, so a

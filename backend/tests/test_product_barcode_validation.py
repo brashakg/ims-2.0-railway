@@ -1,12 +1,14 @@
 """
 IMS 2.0 -- product barcode validation + uniqueness (PUT /products/{id})
 ======================================================================
-A scan-to-sell product barcode must be a real, scannable code that resolves
-to exactly ONE product. Two guards back that:
+Owner ruling 2026-09-28: the product-level barcode holds ONLY the
+manufacturer's UPC / EAN (GTIN) -- it is what goes to Shopify and Google. Our
+own IMS barcodes live on each unit (stock_units.barcode), never here. Two
+guards back that:
 
-  - format: a malformed / wrong-check-digit value is rejected (HTTP 400) so an
-    un-scannable barcode can never be silently persisted (the Fail-Loudly
-    rule -- a scanner would never decode it, breaking POS scan).
+  - format: anything that is not a publishable GTIN (services/gtin.py) is
+    rejected (HTTP 400): wrong check digit, wrong length, and our own GS1
+    20-29 in-store range, which is by definition not a manufacturer code.
   - uniqueness: a barcode already on a DIFFERENT product is rejected (HTTP 409).
     The DB unique sparse index on products.barcode is the backstop; this check
     gives a clear message before the write.
@@ -27,12 +29,18 @@ import pytest
 
 from fastapi import HTTPException
 
-# Valid in-store EAN-13s minted by services/barcode.format_ean13 (prefix 20).
-_VALID_A = "2000000000015"  # seq 1
-_VALID_B = "2000000000022"  # seq 2
-# Same 12-digit payload as _VALID_A but a deliberately WRONG check digit.
-_BAD_CHECK = "2000000000016"
-_TOO_SHORT = "200000000001"  # only 12 digits
+# Real manufacturer GTINs (valid GS1 check digits).
+_VALID_A = "4006381333931"  # EAN-13
+_VALID_B = "5901234123457"  # EAN-13
+_UPC_A = "036000291452"  # UPC-A, 12 digits
+_EAN_8 = "96385074"  # GTIN-8
+# Same payload as _VALID_A but a deliberately WRONG check digit.
+_BAD_CHECK = "4006381333932"
+_TOO_SHORT = "40063813339"  # 11 digits: no GTIN has that length
+# Our own in-store range (GS1 20-29): a valid EAN-13, never a manufacturer code.
+_INTERNAL = "2000000000015"
+# What Inventory > Manage Barcode > Generate produced in the audit (F115).
+_RANDOM_GENERATED = "930713281508"
 
 
 # ============================================================================
@@ -81,6 +89,40 @@ class TestBarcodeValidatorPure:
         with pytest.raises(HTTPException) as ei:
             _validate_product_barcode_or_400(_TOO_SHORT, _FakeRepo([]), "p1")
         assert ei.value.status_code == 400
+
+    def test_manufacturer_upc_and_ean8_accepted(self):
+        from api.routers.products import _validate_product_barcode_or_400
+
+        _validate_product_barcode_or_400(_UPC_A, _FakeRepo([]), "p1")
+        _validate_product_barcode_or_400(_EAN_8, _FakeRepo([]), "p1")
+
+    def test_our_internal_20_prefix_code_is_refused(self):
+        from api.routers.products import _validate_product_barcode_or_400
+
+        with pytest.raises(HTTPException) as ei:
+            _validate_product_barcode_or_400(_INTERNAL, _FakeRepo([]), "p1")
+        assert ei.value.status_code == 400
+
+    def test_a_random_generated_number_is_refused(self):
+        from api.routers.products import _validate_product_barcode_or_400
+
+        with pytest.raises(HTTPException) as ei:
+            _validate_product_barcode_or_400(_RANDOM_GENERATED, _FakeRepo([]), "p1")
+        assert ei.value.status_code == 400
+
+    def test_separators_are_dropped_so_one_gtin_is_one_value(self):
+        from api.routers.products import _validate_product_barcode_or_400
+
+        # '4006381 333931' is the same GTIN as _VALID_A: stored bare, and it
+        # clashes with the product that already carries it.
+        assert (
+            _validate_product_barcode_or_400("4006381 333931", _FakeRepo([]), "p1")
+            == _VALID_A
+        )
+        repo = _FakeRepo([{"product_id": "OTHER", "sku": "SKU-X", "barcode": _VALID_A}])
+        with pytest.raises(HTTPException) as ei:
+            _validate_product_barcode_or_400("4006381-333931", repo, "p1")
+        assert ei.value.status_code == 409
 
     def test_duplicate_on_other_product_rejected_409(self):
         from api.routers.products import _validate_product_barcode_or_400
