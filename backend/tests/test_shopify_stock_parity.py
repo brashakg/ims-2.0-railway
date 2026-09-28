@@ -554,6 +554,25 @@ def test_tick_counts_only_task_writes_that_succeeded():
     assert _tasks(db)[0]["status"] == "OPEN"
 
 
+def test_tick_a_rejected_task_insert_is_never_reported_filed():
+    """Round 5, the panel's input: BV-A drifts (IMS 5 vs Shopify 1) and
+    tasks.insert_one raises. BaseRepository.create swallows it into None; the
+    tick must report nothing filed and task_filed False -- the collection is
+    empty. Put back `return created or task` in create_system_task -> 'filed':
+    ['BV-A'] -> fails."""
+    db = _db({"SKU-1": {"BV-A": 5, "BV-B": 1}})
+    coll = db.get_collection("tasks")
+
+    def rejected(*_a, **_k):
+        raise RuntimeError("write rejected")
+
+    coll.insert_one = rejected
+    out = _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {}})))
+    assert out["drift_count"] == 1
+    assert out["tasks"] == {"filed": [], "refreshed": [], "closed": []} and out["task_filed"] is False
+    assert _tasks(db) == []
+
+
 def test_tick_a_drifted_sku_that_fell_out_of_the_sample_keeps_its_task_open():
     """The sample is capped (_sample_variants): SKU-2 drifted at BV-A, then
     tonight's sample holds SKU-1 only, which compares clean. SKU-2 was never

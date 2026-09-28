@@ -187,7 +187,9 @@ def create_system_task(
 ) -> Optional[Dict[str, Any]]:
     """Create a SYSTEM task, deduped by source_ref: if an ACTIVE task already
     exists for the same source_ref, do nothing (avoids a task per re-run).
-    Returns the created task, or None if deduped / no repo.
+    Returns the created task, or None if deduped / no repo / the insert
+    failed -- BaseRepository.create swallows a rejected insert into None, and
+    handing back the unsaved dict then reported a task nobody can open.
 
     ``extra``: optional ADDITIVE fields merged onto the task doc (e.g. a deep
     ``link`` path or a structured ``payload`` the frontend keys on). Extra keys
@@ -239,7 +241,6 @@ def create_system_task(
         for k, v in extra.items():
             task.setdefault(k, v)
     try:
-        created = repo.create(task)
-        return created or task
+        return repo.create(task) or None
     except Exception:  # noqa: BLE001
         return None

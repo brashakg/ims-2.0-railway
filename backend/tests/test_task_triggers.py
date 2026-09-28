@@ -118,6 +118,25 @@ def test_create_system_task_dedupes_past_100_closed_episodes():
     assert len(db.get_collection("tasks").docs) == 101
 
 
+def test_create_system_task_a_rejected_insert_is_none_never_the_unsaved_dict():
+    """BaseRepository.create swallows an insert_one failure into None. Put
+    back `return created or task` -> the unsaved dict comes back, the caller
+    reports a task that is not in the collection -> this fails."""
+    from strict_fakes import StrictDB
+    from database.repositories.task_repository import TaskRepository
+
+    db = StrictDB()
+    coll = db.get_collection("tasks")
+
+    def rejected(*_a, **_k):
+        raise RuntimeError("write rejected")
+
+    coll.insert_one = rejected
+    assert create_system_task(TaskRepository(coll), title="x", description="d", priority="P2",
+                              category="Inventory", store_id="s1", dedupe_ref="r1") is None
+    assert coll.docs == []
+
+
 def _client_as(roles):
     app = FastAPI()
     app.include_router(tasks.router, prefix="/tasks")
