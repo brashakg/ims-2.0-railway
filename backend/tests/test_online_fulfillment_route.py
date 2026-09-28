@@ -780,8 +780,10 @@ def test_a_move_a_crash_left_planned_holds_the_order_and_the_next_delivery_sends
 
 
 def test_two_deliveries_never_send_one_move_twice(world, monkeypatch):
-    """The retry above must not race the creator: both senders run at once,
-    exactly one fulfillmentOrderMove goes out."""
+    """The retry above must not race the creator. Another worker process read
+    the order while its move was still PLANNED (a stale read no in-process
+    lock can see); when it gets to send, the move is already claimed and sent
+    -- exactly one fulfillmentOrderMove goes out."""
     db = world["db"]
     _stock(db, "BV-RAN-01", "P-RB", 1)
     world["shop"].fo(FO_1, LOC_BOK)
@@ -791,13 +793,19 @@ def test_two_deliveries_never_send_one_move_twice(world, monkeypatch):
         return {"moved": 0, "failed": 0}
 
     monkeypatch.setattr(route_mod, "move_fulfillment_orders", later)
-    res, _order_doc = _book(world, _order(52007))
+    res, stale = _book(world, _order(52007))
     monkeypatch.setattr(route_mod, "move_fulfillment_orders", real)
+    asyncio.run(real(db, res["order_id"]))  # the creator sends it
 
-    async def both():
-        await asyncio.gather(real(db, res["order_id"]), real(db, res["order_id"]))
+    class _StaleRead:  # the other worker's view: read before the send
+        def find_one(self, *_a, **_k):
+            return stale
 
-    asyncio.run(both())
+        def update_one(self, *a, **k):
+            return db.orders.update_one(*a, **k)
+
+    monkeypatch.setattr(route_mod, "_orders", lambda _db: _StaleRead())
+    asyncio.run(real(db, res["order_id"]))
 
     assert world["shop"].moves() == [{"id": FO_1, "newLocationId": LOC_RAN}]
     stored = db.orders.find_one({"order_id": res["order_id"]})
