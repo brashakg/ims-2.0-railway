@@ -930,6 +930,44 @@ def test_reconcile_and_tally_put_the_worst_swapped_pair_first(monkeypatch):
     assert [(r["sku"], r["oversell_risk"]) for r in tally["items"]] == [("SKU-1", True), ("SKU-2", True)]
 
 
+def test_both_screens_put_the_most_units_no_shelf_backs_first(monkeypatch):
+    """Round 5, the panel's input (the second sort key). Buffer 4, so the
+    writer sends 0 everywhere. SKU-1: BV-A shelf 4 vs LOC_A 5 -> 1 unit no
+    shelf backs, 5 past the writer. SKU-2: BV-A shelf 0 vs LOC_A 3 -> 3
+    unbacked, 3 past the writer. Both OVERSELL_RISK; SKU-2 leads on both
+    screens. Drop `-(over or 0)` from reconcile_items' key, or
+    `-(unbacked.get(sku) or 0)` from the Stock Tally's -> SKU-1 (delta 5)
+    first -> fails."""
+    monkeypatch.setenv("ONLINE_STOCK_SAFETY_BUFFER", "4")
+    db = _db({"SKU-1": {"BV-A": 4, "BV-B": 0}, "SKU-2": {"BV-A": 0, "BV-B": 0}})
+    levels = {INV_1: {LOC_A: 5, LOC_B: 0}, INV_2: {LOC_A: 3, LOC_B: 0}}
+    page = _reconcile_page(monkeypatch, db, levels, None)
+    assert [_cols(r, "sku", "status", "delta") for r in page["items"]] == [
+        ("SKU-2", "OVERSELL_RISK", 3), ("SKU-1", "OVERSELL_RISK", 5)]
+    tally = _tally(monkeypatch, db, levels)
+    assert [(r["sku"], r["oversell_risk"]) for r in tally["items"]] == [("SKU-2", True), ("SKU-1", True)]
+
+
+def test_both_screens_order_over_allocated_rows_per_location_never_pooled(monkeypatch):
+    """Round 5, the panel's input (the third sort key, which orders the whole
+    OVER_ALLOCATED band: every row there has 0 units unbacked). Buffer 2.
+    SKU-1: shelves 3 / 5 (the writer sends 1 / 3) vs LOC_A 3 / LOC_B 1 -> 2
+    units past the writer at LOC_A, while the totals match (4 vs 4). SKU-2:
+    shelves 3 / 3 (sends 1 / 1) vs 2 / 1 -> 1 unit past the writer. SKU-1
+    leads on both screens. Put back the pooled forms, `-((online or 0) -
+    recommended)` in reconcile_items or `-((listed or 0) - sellable)` in the
+    Stock Tally -> SKU-2 first -> fails."""
+    monkeypatch.setenv("ONLINE_STOCK_SAFETY_BUFFER", "2")
+    db = _db({"SKU-1": {"BV-A": 3, "BV-B": 5}, "SKU-2": {"BV-A": 3, "BV-B": 3}})
+    levels = {INV_1: {LOC_A: 3, LOC_B: 1}, INV_2: {LOC_A: 2, LOC_B: 1}}
+    page = _reconcile_page(monkeypatch, db, levels, None)
+    assert [_cols(r, "sku", "online", "recommended", "delta", "status") for r in page["items"]] == [
+        ("SKU-1", 4, 4, 2, "OVER_ALLOCATED"), ("SKU-2", 3, 2, 1, "OVER_ALLOCATED")]
+    tally = _tally(monkeypatch, db, levels)
+    assert [_cols(r, "sku", "online_listed_qty", "sellable", "oversell_risk") for r in tally["items"]] == [
+        ("SKU-1", 4, 4, False), ("SKU-2", 3, 2, False)]
+
+
 def test_reconcile_an_empty_store_id_is_all_stores(monkeypatch):
     """Round 4 P4: `?store_id=` (an empty string). The route and the on-hand
     reader read it as 'all stores'; rule_by_location narrowed the map to {}
