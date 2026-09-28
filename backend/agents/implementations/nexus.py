@@ -187,8 +187,14 @@ class NexusAgent(JarvisAgent):
     async def _sync_shiprocket_outbound(self) -> SyncResult:
         """
         For each order in SHIPPED state with an AWB, pull the latest
-        tracking status from Shiprocket and update orders if changed.
+        tracking status from Shiprocket and update orders if changed. A
+        courier DELIVERED is the delivery (owner ruling 2026-09-28): it moves
+        the order through the ONE transition table (online_order_status) --
+        asked on every poll, not only on a tracking change, so a held order or
+        a lost race retries next hour (the query only returns SHIPPED orders).
         """
+        from api.services.online_order_status import DELIVER, apply_fact, courier_fact
+
         orders_coll = self.get_collection("orders")
         if orders_coll is None:
             return SyncResult(ok=True, provider="shiprocket", kind="pull",
@@ -201,7 +207,7 @@ class NexusAgent(JarvisAgent):
         except Exception as e:
             return SyncResult(ok=False, provider="shiprocket", kind="pull", error=str(e))
 
-        updated = 0
+        updated = delivered = 0
         for order in shipped_with_awb:
             awb = order.get("awb")
             r = await shiprocket_track_awb(self.db, awb)
@@ -218,11 +224,15 @@ class NexusAgent(JarvisAgent):
                     updated += 1
                 except Exception as e:
                     logger.warning(f"[NEXUS] Order tracking update failed: {e}")
+            if courier_fact(new_status) == DELIVER and apply_fact(
+                self.db, order, DELIVER, source="SHIPROCKET"
+            )["to"]:
+                delivered += 1
 
         return SyncResult(
             ok=True, provider="shiprocket", kind="pull",
             items_synced=updated,
-            notes=f"Checked {len(shipped_with_awb)} AWBs, {updated} status changes",
+            notes=f"Checked {len(shipped_with_awb)} AWBs, {updated} status changes, {delivered} delivered",
         )
 
     async def _build_tally_export(self, target_date: Optional[datetime] = None,
@@ -1106,8 +1116,21 @@ class NexusAgent(JarvisAgent):
             logger.warning(f"[NEXUS] shopify app-uninstalled handling failed: {e}")
 
     async def _handle_shiprocket_webhook(self, payload: Dict[str, Any]):
+        """A signed Shiprocket status push. A courier DELIVERED on a known AWB
+        is the delivery: the ONE transition table (online_order_status)
+        decides. Field names are Shiprocket's documented ones (awb,
+        current_status); the hourly poll is the path that is known to work."""
+        from api.services.online_order_status import DELIVER, apply_fact, courier_fact
+
         evt = payload.get("current_status") or payload.get("event") or "unknown"
         logger.info(f"[NEXUS] shiprocket webhook status={evt}")
+        awb = str(payload.get("awb") or "").strip()
+        if not awb or courier_fact(payload.get("current_status")) != DELIVER:
+            return
+        orders = self.get_collection("orders")
+        order = orders.find_one({"awb": awb}) if orders is not None else None
+        if order:
+            apply_fact(self.db, order, DELIVER, source="SHIPROCKET_WEBHOOK")
 
     async def run(self, query: str, context: AgentContext) -> AgentResponse:
         """On-demand: report recent sync runs."""

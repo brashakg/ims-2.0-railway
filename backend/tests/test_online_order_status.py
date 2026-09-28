@@ -386,3 +386,52 @@ def test_an_order_first_seen_through_a_status_topic_gets_its_real_status(swept):
     assert p["mapped"] == ["60101"] and swept["seen"] == ["60101"], "one mapper call"
     assert _doc(swept, 60101)["status"] == "SHIPPED"
     assert len(swept["orders"].docs) == 2
+
+
+# ---------------------------------------------------------------------------
+# Ruling 1, the courier half: Shiprocket's DELIVERED (the NEXUS poll, or the
+# signed webhook) is the delivery -- an exact match, never "RTO DELIVERED".
+# ---------------------------------------------------------------------------
+
+import asyncio  # noqa: E402
+
+from agents.implementations import nexus as nexus_module  # noqa: E402
+from agents.nexus_providers import SyncResult  # noqa: E402
+
+
+def test_the_shiprocket_poll_delivers_only_on_an_exact_delivered(swept, monkeypatch):
+    latest = {"AWB-D": "Delivered", "AWB-RTO": "RTO DELIVERED", "AWB-OFD": "OUT FOR DELIVERY"}
+    for oid, awb in ((60110, "AWB-D"), (60111, "AWB-RTO"), (60112, "AWB-OFD")):
+        _book(swept, oid)
+        _set(swept, oid, status="SHIPPED", awb=awb)
+
+    async def fake_track(db, awb):
+        return SyncResult(ok=True, provider="shiprocket", kind="pull",
+                          payload={"latest_status": latest[awb]})
+
+    monkeypatch.setattr(nexus_module, "shiprocket_track_awb", fake_track)
+    res = asyncio.run(nexus_module.NexusAgent(db=swept["db"])._sync_shiprocket_outbound())
+
+    assert "1 delivered" in res.notes
+    doc = _doc(swept, 60110)
+    assert (doc["status"], doc["tracking_status"]) == ("DELIVERED", "Delivered") and doc["delivered_at"]
+    assert doc["status_history"][-1]["changed_by"] == "system:SHIPROCKET"
+    for oid, courier in ((60111, "RTO DELIVERED"), (60112, "OUT FOR DELIVERY")):
+        doc = _doc(swept, oid)
+        assert (doc["status"], doc["tracking_status"]) == ("SHIPPED", courier)
+        assert "delivered_at" not in doc and "status_history" not in doc
+
+
+def test_the_signed_shiprocket_webhook_delivers_on_a_known_awb(swept):
+    for oid, awb in ((60120, "AWB-W1"), (60121, "AWB-W2")):
+        _book(swept, oid)
+        _set(swept, oid, status="SHIPPED", awb=awb)
+    agent = nexus_module.NexusAgent(db=swept["db"])
+    asyncio.run(agent._handle_shiprocket_webhook({"awb": "AWB-W1", "current_status": "DELIVERED"}))
+    asyncio.run(agent._handle_shiprocket_webhook({"awb": "AWB-W2", "current_status": "RTO DELIVERED"}))
+    asyncio.run(agent._handle_shiprocket_webhook({"awb": "AWB-NONE", "current_status": "DELIVERED"}))
+
+    doc = _doc(swept, 60120)
+    assert doc["status"] == "DELIVERED" and doc["delivered_at"]
+    assert doc["status_history"][-1]["changed_by"] == "system:SHIPROCKET_WEBHOOK"
+    assert _doc(swept, 60121)["status"] == "SHIPPED"

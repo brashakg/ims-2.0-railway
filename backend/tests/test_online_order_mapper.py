@@ -79,6 +79,12 @@ def _match(doc, filter_) -> bool:
                 elif op == "$in":
                     if actual not in (op_val or []):
                         return False
+                elif op == "$ne":
+                    if actual == op_val:
+                        return False
+                elif op == "$exists":
+                    if (k in doc) != bool(op_val):
+                        return False
                 else:
                     return False
         else:
