@@ -49,6 +49,9 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
   const [cancelTarget, setCancelTarget] = useState<{ lineIndex?: number } | null>(null);
   const [reason, setReason] = useState('');
   const [busy, setBusy] = useState(false);
+  // Set once THIS modal sent the draft: the send step then offers Print PO
+  // right there (owner 2026-09-29) -- the vendor needs the paper or the PDF.
+  const [sentHere, setSentHere] = useState(false);
 
   const isDraft = po.status === 'DRAFT';
   const partReceived = PART_RECEIVED.has(po.status);
@@ -75,6 +78,16 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
         await onAction(po, 'cancel', { reason: why });
       }
       closeCancel();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const send = async () => {
+    setBusy(true);
+    try {
+      await onAction(po, 'send');
+      setSentHere(true);
     } finally {
       setBusy(false);
     }
@@ -363,6 +376,23 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
           </div>
         )}
 
+        {/* Only once the server took it (a refused send leaves it a DRAFT). */}
+        {sentHere && po.status === 'SENT' && (
+          <div role="status" className="px-6 py-4 border-t border-blue-200 bg-blue-50 flex flex-wrap items-center justify-between gap-2">
+            <p className="text-sm text-blue-900">
+              Sent to {po.supplierName}. Print the PO to hand over, or save it as a PDF to share with them.
+            </p>
+            <button
+              type="button"
+              onClick={() => setShowPrint(true)}
+              className="btn-primary flex items-center gap-2"
+            >
+              <Printer className="w-4 h-4" />
+              Print PO now
+            </button>
+          </div>
+        )}
+
         {/* Footer - Action Buttons */}
         <div className="flex flex-wrap items-center justify-between gap-2 p-6 border-t border-gray-200">
           <button
@@ -407,8 +437,9 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
             {isDraft && (
               <button
                 type="button"
-                onClick={() => onAction(po, 'send')}
-                className="btn-primary flex items-center gap-2"
+                onClick={send}
+                disabled={busy}
+                className="btn-primary flex items-center gap-2 disabled:opacity-50"
               >
                 <Send className="w-4 h-4" />
                 Send to vendor

@@ -11,6 +11,7 @@
 // P0-4 still holds: the old Approve / Mark-as-Ordered / Mark-as-Received
 // theater buttons stay gone.
 
+import { useState } from 'react';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi } from 'vitest';
@@ -56,6 +57,30 @@ describe('PO detail modal - one honest word: Send to vendor (F20)', () => {
     expect(screen.queryByRole('button', { name: /submit for approval/i })).not.toBeInTheDocument();
     await userEvent.setup().click(screen.getByRole('button', { name: /send to vendor/i }));
     expect(onAction).toHaveBeenCalledWith(expect.objectContaining({ id: 'PO1' }), 'send');
+  });
+
+  it('once sent, the send step offers Print PO right there (owner 2026-09-29)', async () => {
+    function Sending() {
+      const [cur, setCur] = useState(po('DRAFT'));
+      return (
+        <PurchaseOrderDetail
+          po={cur}
+          onClose={vi.fn()}
+          onAction={async () => setCur(po('SENT'))}
+        />
+      );
+    }
+    render(<Sending />);
+    expect(screen.queryByRole('button', { name: /print po now/i })).not.toBeInTheDocument();
+    await userEvent.setup().click(screen.getByRole('button', { name: /send to vendor/i }));
+    expect(await screen.findByRole('status')).toHaveTextContent(/sent to essilor india/i);
+    expect(screen.getByRole('button', { name: /print po now/i })).toBeInTheDocument();
+  });
+
+  it('a refused send offers no print prompt (it is still a draft)', async () => {
+    show(po('DRAFT'), vi.fn().mockResolvedValue(undefined));
+    await userEvent.setup().click(screen.getByRole('button', { name: /send to vendor/i }));
+    expect(screen.queryByRole('button', { name: /print po now/i })).not.toBeInTheDocument();
   });
 
   it('the theater buttons stay gone (P0-4)', () => {
