@@ -114,6 +114,30 @@ def test_fulfillment_store_health_ok_when_stock_present(monkeypatch):
     assert out["is_virtual_default"] is False
 
 
+def test_fulfillment_store_health_counts_by_the_claims_own_rule(monkeypatch):
+    """Money panel round 3 (low): the tile counts what the CLAIM will take
+    (StockRepository.sellable_filter -- status exactly AVAILABLE, not
+    expired), the same rule route_order counts with. A shelf of status-less,
+    lowercase or expired units is ZERO claimable stock: every order that
+    falls back here would go on stock-miss hold, so the tile must warn."""
+    import pytest
+
+    mongomock = pytest.importorskip("mongomock")  # the expiry rule needs $type
+    monkeypatch.setenv("ONLINE_FULFILLMENT_STORE_ID", "BV-BOK-01")
+    db = mongomock.MongoClient()["ims_tile"]
+    db.stock_units.insert_many(
+        [
+            {"store_id": "BV-BOK-01"},  # no status (a legacy minted row)
+            {"store_id": "BV-BOK-01", "status": "available"},  # lowercase
+            {"store_id": "BV-BOK-01", "status": "AVAILABLE", "expiry_date": "2020-01-01"},
+        ]
+    )
+    out = sh.fulfillment_store_health(db)
+    assert out["checked"] is True
+    assert out["available_units"] == 0
+    assert out["warning"] is not None
+
+
 def test_fulfillment_store_health_flags_virtual_default(monkeypatch):
     """Resolving to the virtual default bucket is flagged even when it has stock."""
     monkeypatch.setenv("ONLINE_FULFILLMENT_STORE_ID", "BV-ONLINE-01")

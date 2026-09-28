@@ -678,9 +678,14 @@ def fulfillment_store_health(db) -> Dict[str, Any]:
     try:
         coll = _coll(db, "stock_units")
         if coll is not None:
-            count = int(
-                coll.count_documents({"store_id": store_id, **on_hand_match()})
-            )
+            # The CLAIM's own rule (StockRepository.sellable_filter, the one
+            # route_order counts with): a unit the claim refuses is no stock
+            # for an order that falls back here.
+            from database.repositories.product_repository import StockRepository
+
+            claimable = StockRepository(coll).sellable_filter(None, store_id)
+            claimable.pop("product_id")
+            count = int(coll.count_documents(claimable))
             out["available_units"] = count
             out["checked"] = True
             if count == 0:
