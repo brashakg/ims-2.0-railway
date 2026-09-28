@@ -32,7 +32,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
-from .auth import get_current_user, require_roles
+from .auth import require_roles
+from .vendor_returns import _VENDOR_RETURN_READERS
 from ..dependencies import (
     get_db,
     resolve_store_scope,
@@ -183,7 +184,7 @@ async def list_debit_notes(
     vendor_id: Optional[str] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_VENDOR_RETURN_READERS)),
 ):
     """List issued debit notes. Store-scoped: an explicit ?store_id is validated;
     a store-role caller is pinned to their reach; HQ roles see all."""
@@ -235,7 +236,8 @@ async def issue_debit_note(
 
 @router.get("/{debit_note_id}")
 async def get_debit_note(
-    debit_note_id: str, current_user: dict = Depends(get_current_user)
+    debit_note_id: str,
+    current_user: dict = Depends(require_roles(*_VENDOR_RETURN_READERS)),
 ):
     """Get a single debit note. Store-IDOR guarded (cross-store -> 403)."""
     eng = _engine()
@@ -248,7 +250,8 @@ async def get_debit_note(
 
 @router.get("/{debit_note_id}/print", response_class=HTMLResponse)
 async def print_debit_note(
-    debit_note_id: str, current_user: dict = Depends(get_current_user)
+    debit_note_id: str,
+    current_user: dict = Depends(require_roles(*_VENDOR_RETURN_READERS)),
 ):
     """Printable GST debit-note HTML. Store-IDOR guarded."""
     eng = _engine()

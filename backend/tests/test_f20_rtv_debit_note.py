@@ -657,7 +657,7 @@ def test_cashier_cannot_issue_403():
 def test_rbac_policy_rows_present():
     # The policy registry must catalogue every F20 route (so the request-time RBAC
     # middleware + the access-matrix test see them) -- issue/tally gated to AP, the
-    # reads AUTHENTICATED + store_scoped.
+    # reads go to the Vendor Returns readers (F60) + store_scoped.
     from api.services.rbac_policy import POLICY
 
     by_path = {(p["method"], p["path"]): p for p in POLICY
@@ -668,4 +668,7 @@ def test_rbac_policy_rows_present():
     tally = by_path[("GET", "/api/v1/rtv-debit-notes/{debit_note_id}/tally")]
     assert "SALES_CASHIER" not in tally["allowed"]
     listing = by_path[("GET", "/api/v1/rtv-debit-notes")]
-    assert listing["allowed"] == "AUTHENTICATED" and listing.get("store_scoped") is True
+    assert set(listing["allowed"]) == {
+        "ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER", "WORKSHOP_STAFF"
+    }
+    assert listing.get("store_scoped") is True

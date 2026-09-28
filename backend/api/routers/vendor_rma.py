@@ -34,7 +34,7 @@ from typing import List, Optional, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from .auth import get_current_user, require_roles
+from .auth import require_roles
 from ..dependencies import get_db, resolve_store_scope, validate_store_access, user_store_scope
 from ..services.vendor_rma import (
     VendorRMAEngine,
@@ -175,7 +175,7 @@ async def list_rmas(
     status: Optional[str] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_VENDOR_RMA_ROLES)),
 ):
     """List vendor RMAs. Store-scoped: an explicit ?store_id is validated; a
     store-role caller is pinned to their own reach; HQ roles see all."""
@@ -234,7 +234,9 @@ async def raise_rma(
 
 
 @router.get("/{rma_id}")
-async def get_rma(rma_id: str, current_user: dict = Depends(get_current_user)):
+async def get_rma(
+    rma_id: str, current_user: dict = Depends(require_roles(*_VENDOR_RMA_ROLES))
+):
     """Get a single RMA. Store-IDOR guarded (cross-store -> 403)."""
     eng = _engine()
     doc = eng.get(rma_id)

@@ -30,14 +30,45 @@ ROWS: List[Dict[str, object]] = [
         "allowed": "PUBLIC",
     },
     # --- /api/v1/vendor-returns ---
-    {"method": "GET", "path": "/api/v1/vendor-returns", "allowed": "AUTHENTICATED"},
+    # F60: reads carry unit costs -> the writers plus the Vendor Returns screen
+    # (WORKSHOP_STAFF logs defective pairs). Store-scoped in the handler.
+    {
+        "method": "GET",
+        "path": "/api/v1/vendor-returns",
+        "allowed": [
+            "ACCOUNTANT",
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "WORKSHOP_STAFF",
+        ],
+        "store_scoped": True,
+    },
     {"method": "POST", "path": "/api/v1/vendor-returns", "allowed": "AUTHENTICATED"},
-    {"method": "GET", "path": "/api/v1/vendor-returns/", "allowed": "AUTHENTICATED"},
+    {
+        "method": "GET",
+        "path": "/api/v1/vendor-returns/",
+        "allowed": [
+            "ACCOUNTANT",
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "WORKSHOP_STAFF",
+        ],
+        "store_scoped": True,
+    },
     {"method": "POST", "path": "/api/v1/vendor-returns/", "allowed": "AUTHENTICATED"},
     {
         "method": "GET",
         "path": "/api/v1/vendor-returns/{return_id}",
-        "allowed": "AUTHENTICATED",
+        "allowed": [
+            "ACCOUNTANT",
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "WORKSHOP_STAFF",
+        ],
+        "store_scoped": True,
     },
     {
         "method": "PATCH",
@@ -48,19 +79,18 @@ ROWS: List[Dict[str, object]] = [
     # An RMA + its vendor credit note are financial instruments against a
     # vendor; create + every lifecycle transition is gated to the same vendor/AP
     # role set vendor_returns hardened to (SUPERADMIN implicit via require_roles).
-    # GET list/detail are AUTHENTICATED but store-scoped per object in the
-    # handler (validate_store_access / resolve_store_scope), so a cashier can
-    # read but never authorize an RMA or record a credit.
+    # F60: GET list/detail carry the expected vendor credit, so they go to the
+    # same set (no screen reads RMAs), store-scoped per object in the handler.
     {
         "method": "GET",
         "path": "/api/v1/vendor-rma",
-        "allowed": "AUTHENTICATED",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
         "store_scoped": True,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendor-rma/",
-        "allowed": "AUTHENTICATED",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
         "store_scoped": True,
     },
     {
@@ -78,7 +108,7 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/vendor-rma/{rma_id}",
-        "allowed": "AUTHENTICATED",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
         "store_scoped": True,
     },
     {
@@ -115,18 +145,31 @@ ROWS: List[Dict[str, object]] = [
     # The GST-compliant debit-note DOCUMENT issued to a vendor when goods are
     # returned. Issuing + Tally export are gated to the same vendor/AP role set
     # vendor_returns / vendor_rma use (a cashier can NEVER issue a debit note).
-    # GET list/detail/print are AUTHENTICATED but store-scoped per object in the
-    # handler (validate_store_access / resolve_store_scope).
+    # F60: GET list/detail/print carry the vendor GSTIN and the note total, so
+    # they go to the Vendor Returns readers (vendor_returns._VENDOR_RETURN_READERS),
+    # store-scoped per object in the handler.
     {
         "method": "GET",
         "path": "/api/v1/rtv-debit-notes",
-        "allowed": "AUTHENTICATED",
+        "allowed": [
+            "ACCOUNTANT",
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "WORKSHOP_STAFF",
+        ],
         "store_scoped": True,
     },
     {
         "method": "GET",
         "path": "/api/v1/rtv-debit-notes/",
-        "allowed": "AUTHENTICATED",
+        "allowed": [
+            "ACCOUNTANT",
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "WORKSHOP_STAFF",
+        ],
         "store_scoped": True,
     },
     {
@@ -138,13 +181,25 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/rtv-debit-notes/{debit_note_id}",
-        "allowed": "AUTHENTICATED",
+        "allowed": [
+            "ACCOUNTANT",
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "WORKSHOP_STAFF",
+        ],
         "store_scoped": True,
     },
     {
         "method": "GET",
         "path": "/api/v1/rtv-debit-notes/{debit_note_id}/print",
-        "allowed": "AUTHENTICATED",
+        "allowed": [
+            "ACCOUNTANT",
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "WORKSHOP_STAFF",
+        ],
         "store_scoped": True,
     },
     {

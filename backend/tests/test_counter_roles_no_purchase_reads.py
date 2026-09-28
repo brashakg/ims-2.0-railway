@@ -248,3 +248,116 @@ def test_names_only_search_is_not_a_gstin_oracle(client, real_vendor_repo, role)
 @pytest.mark.parametrize("role", _VENDOR_ROLES + ("SUPERADMIN",))
 def test_purchase_roles_still_find_a_vendor_by_gstin(client, real_vendor_repo, role):
     assert _search(client, role, "27AAPFU")[0]["gstin"] == "27AAPFU0939F1ZV"
+
+
+# ---------------------------------------------------------------------------
+# 6. Sibling reads: vendor returns, RMAs, RTV debit notes
+# ---------------------------------------------------------------------------
+# Same data class as the PO reads (unit cost of a returned frame, expected
+# vendor credit, vendor GSTIN + debit-note total). Readers = the roles that
+# write them plus the Vendor Returns screen (/purchase/vendor-returns also lets
+# WORKSHOP_STAFF in: it logs defective pairs). RMAs have no screen, so only
+# their writers read them.
+_RETURN_WRITERS = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
+_RETURN_READERS = _RETURN_WRITERS + ("WORKSHOP_STAFF",)
+
+SIBLING_READS = [
+    ("/api/v1/vendor-returns", "/api/v1/vendor-returns", _RETURN_READERS),
+    ("/api/v1/vendor-returns/", "/api/v1/vendor-returns/", _RETURN_READERS),
+    (
+        "/api/v1/vendor-returns/VR-1",
+        "/api/v1/vendor-returns/{return_id}",
+        _RETURN_READERS,
+    ),
+    ("/api/v1/rtv-debit-notes", "/api/v1/rtv-debit-notes", _RETURN_READERS),
+    ("/api/v1/rtv-debit-notes/", "/api/v1/rtv-debit-notes/", _RETURN_READERS),
+    (
+        "/api/v1/rtv-debit-notes/DN-1",
+        "/api/v1/rtv-debit-notes/{debit_note_id}",
+        _RETURN_READERS,
+    ),
+    (
+        "/api/v1/rtv-debit-notes/DN-1/print",
+        "/api/v1/rtv-debit-notes/{debit_note_id}/print",
+        _RETURN_READERS,
+    ),
+    ("/api/v1/vendor-rma", "/api/v1/vendor-rma", _RETURN_WRITERS),
+    ("/api/v1/vendor-rma/", "/api/v1/vendor-rma/", _RETURN_WRITERS),
+    ("/api/v1/vendor-rma/RMA-1", "/api/v1/vendor-rma/{rma_id}", _RETURN_WRITERS),
+]
+
+
+def _refused(allowed):
+    return [r for r in COUNTER_ROLES + ("CATALOG_MANAGER",) if r not in allowed]
+
+
+def _route_allows(app, template, role):
+    """Every require_roles gate on the GET route lets `role` through."""
+    for route in app.routes:
+        if getattr(route, "path", None) == template and "GET" in getattr(
+            route, "methods", ()
+        ):
+            try:
+                for dep in route.dependant.dependencies:
+                    if getattr(dep.call, "__name__", "") == "_dep":
+                        asyncio.run(dep.call(current_user={"roles": [role]}))
+            except HTTPException as exc:
+                assert exc.status_code == 403
+                return False
+            return True
+    raise AssertionError(f"no GET route {template}")
+
+
+@pytest.mark.parametrize("concrete,template,allowed", SIBLING_READS)
+def test_sibling_reads_refuse_roles_without_a_screen(
+    client, concrete, template, allowed
+):
+    # The panel's probe: SALES_STAFF / CASHIER / OPTOMETRIST got 200 on all.
+    assert {"SALES_STAFF", "CASHIER", "OPTOMETRIST"} <= set(_refused(allowed))
+    for role in _refused(allowed):
+        assert client.get(concrete, headers=_headers(role)).status_code == 403, role
+    for role in allowed:
+        assert client.get(concrete, headers=_headers(role)).status_code != 403, role
+
+
+@pytest.mark.parametrize("concrete,template,allowed", SIBLING_READS)
+def test_sibling_route_gate(app, concrete, template, allowed):
+    for role in _refused(allowed):
+        assert not _route_allows(app, template, role), role
+    for role in allowed + ("SUPERADMIN",):
+        assert _route_allows(app, template, role), role
+
+
+@pytest.mark.parametrize("concrete,template,allowed", SIBLING_READS)
+def test_sibling_policy_row(concrete, template, allowed):
+    row = rbac.policy_for("GET", concrete)
+    assert row is not None and row["path"] == template
+    assert set(row["allowed"]) - {"SUPERADMIN"} == set(allowed)
+    assert row.get("store_scoped") is True
+
+
+def test_vendor_return_detail_is_store_scoped(monkeypatch):
+    # The row says store_scoped; the detail read now checks the return's store
+    # like its RMA / debit-note siblings (the list already did).
+    from api.routers import vendor_returns as vr
+
+    doc = {"return_id": "VR-1", "store_id": "BV-OTHER-01", "total_value": 4321.87}
+
+    class _Db:
+        def get_collection(self, _name):
+            return self
+
+        def find_one(self, _q):
+            return dict(doc)
+
+    monkeypatch.setattr(vr, "_get_db", lambda: _Db())
+    mgr = {
+        "roles": ["STORE_MANAGER"],
+        "store_ids": ["BV-TEST-01"],
+        "active_store_id": "BV-TEST-01",
+    }
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(vr.get_vendor_return("VR-1", current_user=mgr))
+    assert exc.value.status_code == 403
+    own = dict(mgr, store_ids=["BV-OTHER-01"], active_store_id="BV-OTHER-01")
+    assert asyncio.run(vr.get_vendor_return("VR-1", current_user=own))["return_id"] == "VR-1"
