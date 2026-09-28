@@ -13,6 +13,7 @@ from ...dependencies import (
     validate_store_access,
 )
 from ...utils.online_gst import order_place_of_supply
+from ...services.org_validation import resolve_state_code
 from ._shared import (
     _REPORT_FINANCE_ROLES,
     _cdnr_note_number,
@@ -274,7 +275,14 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                     for rate, line_taxable, line_tax in _b2cs_rate_lines(
                         items, taxable_value, total_tax
                     ):
-                        key = f"{place_of_supply}|{rate}"
+                        # The portal's key: (supply type, place of supply,
+                        # rate), the place by its state CODE -- a POS row names
+                        # the state ('Jharkhand'), an online row its persisted
+                        # code ('20'); one consolidated row, never two.
+                        key = (
+                            f"{resolve_state_code(place_of_supply) or place_of_supply}"
+                            f"|{rate}|{is_inter_state}"
+                        )
                         if key not in b2cs_map:
                             b2cs_map[key] = {
                                 "placeOfSupply": place_of_supply,
