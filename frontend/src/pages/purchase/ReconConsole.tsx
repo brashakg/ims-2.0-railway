@@ -41,7 +41,7 @@ import { PurchaseStatusChip } from '../../components/purchase/PurchaseStatusChip
 import { byPerson } from './purchaseTypes';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
-import type { UserRole } from '../../types';
+import { APPROVE_ROLES } from './invoices/shared';
 
 // ---- helpers ---------------------------------------------------------------
 
@@ -282,8 +282,7 @@ function NoteControl({
 // ---- Approve-exception modal ---------------------------------------------------
 // Same server contract as the Purchase Invoices tab: POST /{id}/approve-exception
 // with a mandatory reason (>= 10 chars, written to the immutable audit log).
-
-const EXCEPTION_APPROVE_ROLES: UserRole[] = ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'];
+// Who may approve is the tab's own list: invoices/shared APPROVE_ROLES.
 
 function ApproveExceptionModal({
   invoice,
@@ -975,7 +974,7 @@ export default function ReconConsole() {
   const { user, hasRole } = useAuth();
   const toast = useToast();
   const storeId = user?.activeStoreId;
-  const canApprove = hasRole(EXCEPTION_APPROVE_ROLES);
+  const canApprove = hasRole(APPROVE_ROLES);
 
   // Queue: invoices + their recon blocks
   const [invoices, setInvoices] = useState<PurchaseInvoice[]>([]);
