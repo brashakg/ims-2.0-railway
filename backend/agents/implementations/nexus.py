@@ -200,10 +200,14 @@ class NexusAgent(JarvisAgent):
             return SyncResult(ok=True, provider="shiprocket", kind="pull",
                               notes="orders collection unavailable — heartbeat")
         try:
+            # Least-recently polled first (never polled sorts first): an order
+            # the courier never reports DELIVERED (an RTO, an AWB Shiprocket
+            # cannot track) stays SHIPPED, and without the rotation 50 of them
+            # would hold every slot and starve each later delivery.
             shipped_with_awb = list(orders_coll.find({
                 "status": "SHIPPED",
                 "awb": {"$exists": True, "$ne": ""},
-            }).limit(50))
+            }).sort("tracking_polled_at", 1).limit(50))
         except Exception as e:
             return SyncResult(ok=False, provider="shiprocket", kind="pull", error=str(e))
 
@@ -211,19 +215,16 @@ class NexusAgent(JarvisAgent):
         for order in shipped_with_awb:
             awb = order.get("awb")
             r = await shiprocket_track_awb(self.db, awb)
-            if not r.ok:
-                continue
-            new_status = (r.payload or {}).get("latest_status")
+            now = datetime.now(timezone.utc).isoformat()
+            stamp = {"tracking_polled_at": now}  # asked, answered or not: to the back
+            new_status = (r.payload or {}).get("latest_status") if r.ok else None
             if new_status and new_status != order.get("tracking_status"):
-                try:
-                    orders_coll.update_one(
-                        {"_id": order["_id"]},
-                        {"$set": {"tracking_status": new_status,
-                                  "tracking_updated_at": datetime.now(timezone.utc).isoformat()}},
-                    )
-                    updated += 1
-                except Exception as e:
-                    logger.warning(f"[NEXUS] Order tracking update failed: {e}")
+                stamp.update(tracking_status=new_status, tracking_updated_at=now)
+            try:
+                orders_coll.update_one({"_id": order["_id"]}, {"$set": stamp})
+                updated += "tracking_status" in stamp
+            except Exception as e:
+                logger.warning(f"[NEXUS] Order tracking update failed: {e}")
             if courier_fact(new_status) == DELIVER and apply_fact(
                 self.db, order, DELIVER, source="SHIPROCKET"
             )["to"]:

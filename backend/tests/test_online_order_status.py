@@ -516,6 +516,37 @@ def test_the_shiprocket_poll_delivers_only_on_an_exact_delivered(swept, monkeypa
         assert "delivered_at" not in doc and "status_history" not in doc
 
 
+def test_the_shiprocket_poll_rotates_past_orders_the_courier_never_delivers(swept, monkeypatch):
+    """50 SHIPPED orders that never reach DELIVERED (RTO, or an AWB Shiprocket
+    cannot track) were booked first; a 51st is Delivered. The poll reads 50 a
+    run, least-recently polled first, so the 51st lands on the second run."""
+    for i in range(50):
+        swept["orders"].insert_one({"_id": f"STUCK-{i}", "order_id": f"STUCK-{i}",
+                                    "status": "SHIPPED", "awb": f"AWB-S{i}"})
+    _book(swept, 60125)
+    _set(swept, 60125, status="SHIPPED", awb="AWB-LATE")
+    asked = []
+
+    async def fake_track(db, awb):
+        asked.append(awb)
+        if awb == "AWB-LATE":
+            return SyncResult(ok=True, provider="shiprocket", kind="pull",
+                              payload={"latest_status": "DELIVERED"})
+        if awb.endswith(("0", "2", "4", "6", "8")):
+            return SyncResult(ok=False, provider="shiprocket", kind="pull", error="AWB not found")
+        return SyncResult(ok=True, provider="shiprocket", kind="pull",
+                          payload={"latest_status": "RTO DELIVERED"})
+
+    monkeypatch.setattr(nexus_module, "shiprocket_track_awb", fake_track)
+    agent = nexus_module.NexusAgent(db=swept["db"])
+    for _ in range(2):
+        asyncio.run(agent._sync_shiprocket_outbound())
+
+    assert len(asked) == 100 and "AWB-LATE" in asked
+    doc = _doc(swept, 60125)
+    assert doc["status"] == "DELIVERED" and doc["delivered_at"]
+
+
 def test_the_signed_shiprocket_webhook_delivers_on_a_known_awb(swept):
     for oid, awb in ((60120, "AWB-W1"), (60121, "AWB-W2")):
         _book(swept, oid)
