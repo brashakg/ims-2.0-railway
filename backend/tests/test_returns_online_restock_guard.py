@@ -2090,8 +2090,9 @@ def test_claim_candidates_still_list_every_physical_shop():
 
 def test_online_preferred_store_is_skipped_and_claim_falls_through(monkeypatch):
     """An ONLINE fallback fulfilment store must never ship an order: the route
-    moves the order to the physical shop that holds the unit, and the claim
-    itself refuses an ONLINE store outright instead of faking a fulfilment."""
+    refuses it as a fallback (FALLBACK_INVALID -- and, with no routing, never
+    guesses another shop from stock counts), and the claim itself refuses an
+    ONLINE store outright instead of faking a fulfilment."""
     from api.services import online_fulfillment_route as route_mod
     from api.services import shopify_ingest as si
 
@@ -2114,10 +2115,11 @@ def test_online_preferred_store_is_skipped_and_claim_falls_through(monkeypatch):
     monkeypatch.setenv("ONLINE_FULFILLMENT_STORE_ID", ONLINE_STORE)
 
     route = route_mod.route_order(db, [{"ims_product_id": "PRD-1", "quantity": 1}], None)
-    assert route["store_id"] == PHYSICAL_COUNTER_STORE
+    assert route["store_id"] is None and route["reason"] == "NONE"
+    assert [p["code"] for p in route["problems"]] == ["FALLBACK_INVALID"]
     lines = [{"product_id": "PRD-1", "quantity": 1}]
     assert si._claim_units_at(db, "ORD-X", lines, ONLINE_STORE) == (0, [])
-    claimed, breakdown = si._claim_units_at(db, "ORD-X", lines, route["store_id"])
+    claimed, breakdown = si._claim_units_at(db, "ORD-X", lines, PHYSICAL_COUNTER_STORE)
     assert ONLINE_STORE not in tried
     assert claimed == 1
     assert breakdown == [

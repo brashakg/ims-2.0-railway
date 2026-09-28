@@ -18,7 +18,8 @@ Rules pinned (each was reverted in the source and seen red, see the PR notes):
      loud (order flag + one deduped task)
   R4 no shop holds every unit -> never split, stock-miss hold + task
   R5 seller GSTIN / CGST+SGST vs IGST / invoice series follow the shipping shop
-  R6 a shipping shop with no GSTIN for its state -> loud
+  R6 a shipping shop with no GSTIN for its state -> loud AND held; the
+     invoice door refuses it
   R7 a failed move -> loud, and the fulfillment order is not the shop's
   R8 dark gate -> zero Shopify calls, documented fallback
   R9 the fulfilment push closes only the shipping shop's fulfillment orders
@@ -29,6 +30,13 @@ Rules pinned (each was reverted in the source and seen red, see the PR notes):
      move holds the order, a crash-left move is retried; the stock write-back
      lands after the move; no shop named -> SELLER_UNKNOWN; the door result
      names the order's own shop
+  R12 (money panel, round 3) Shopify's own split is claimed at each shop (no
+     move, no hold) and shipped/restocked per shop, held only across GSTINs; a
+     move lifts only its own hold and reads the Rx hold as stored; a planned
+     move is skipped for a cancelled, human-released or short-claimed order;
+     the dispatch rewrites stock after ANY human move; dark/unread never
+     guesses a seller from stock counts; the fallback must be an ACTIVE
+     physical shop; the claim is at the shipping shop, never at the fallback
 """
 
 from __future__ import annotations
@@ -97,13 +105,22 @@ class _Shopify:
         self.move_error = None
         self.read_error = None
 
-    def fo(self, fo_id, location_id, units=1, status="OPEN", name="loc"):
+    def fo(self, fo_id, location_id, units=1, status="OPEN", name="loc", lines=None):
+        """``lines`` = [(order line item id, qty)] names WHICH order lines the
+        fulfillment order carries (a Shopify split); without it the lines are
+        anonymous, as in the older transcripts."""
+        nodes = (
+            [{"remainingQuantity": q, "lineItem": {"id": f"gid://shopify/LineItem/{lid}"}}
+             for lid, q in lines]
+            if lines
+            else [{"remainingQuantity": units}]
+        )
         self.fos.append(
             {
                 "id": fo_id,
                 "status": status,
                 "assignedLocation": {"name": name, "location": {"id": location_id}},
-                "lineItems": {"nodes": [{"remainingQuantity": units}]},
+                "lineItems": {"nodes": nodes},
             }
         )
 
@@ -384,7 +401,7 @@ def test_seller_gstin_and_tax_split_follow_the_shipping_shop(world, location, bu
         ("27AAAAA0000A1Z5", "20"),  # a GSTIN registered in ANOTHER state
     ],
 )
-def test_shop_without_a_gstin_for_its_state_is_loud(world, gstin, state):
+def test_shop_without_a_gstin_for_its_state_is_loud(world, monkeypatch, gstin, state):
     db = world["db"]
     db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": {"gstin": gstin, "state_code": state}})
     _stock(db, "BV-BOK-01", "P-RB", 1)
@@ -395,6 +412,19 @@ def test_shop_without_a_gstin_for_its_state_is_loud(world, gstin, state):
     assert order["store_id"] == "BV-BOK-01"  # the paid order still books
     assert [p["code"] for p in order["fulfillment_route"]["problems"]] == ["SHOP_GSTIN_MISSING"]
     assert world["tasks"].refs("online_route:") == [f"online_route:SHOP_GSTIN_MISSING:{res['order_id']}"]
+    # ...and it is HELD: the goods must not leave before a tax invoice can be
+    # issued from the shop's own GSTIN (round 3: it used to be only tasked).
+    assert order["fulfillment_hold"] is True
+    assert order["stock_hold_reason"] == order["fulfillment_route"]["problems"][0]["message"]
+    # The invoice door refuses it too (a wrong-state GSTIN used to print CGST+SGST).
+    from fastapi import HTTPException
+    from api.routers.orders import invoices as inv_mod
+    from database.repositories.order_repository import OrderRepository
+
+    monkeypatch.setattr(inv_mod, "get_order_repository", lambda: OrderRepository(db.orders))
+    with pytest.raises(HTTPException) as ei:
+        inv_mod._assemble_invoice(res["order_id"], {"roles": ["SUPERADMIN"]})
+    assert ei.value.status_code == 400
 
 
 # ---------------------------------------------------------------------------
@@ -629,14 +659,16 @@ def test_a_routing_stamp_on_a_stored_payload_is_never_trusted(world):
 
 
 def test_a_split_no_single_shop_covers_moves_nothing_into_a_short_shop(world):
-    """P1: Shopify split RB->Bokaro, OA->Ranchi and each shop holds only its
-    half. IMS never moves Ranchi's FO INTO Bokaro (which cannot ship OA); the
-    left FO is loud and the order is held."""
+    """P1: Shopify split RB->Bokaro, OA->Ranchi; Bokaro holds RB, but Ranchi
+    cannot ship its own part (it holds RB, not OA) and no shop holds the whole
+    order. IMS never moves Ranchi's FO INTO Bokaro (which cannot ship OA); the
+    left FO is loud and the order is held. (When each shop DOES hold its own
+    part, Shopify's split ships as it is -- R12 below.)"""
     db = world["db"]
     _stock(db, "BV-BOK-01", "P-RB", 1)
-    _stock(db, "BV-RAN-01", "P-OA", 1)
-    world["shop"].fo(FO_1, LOC_BOK)
-    world["shop"].fo(FO_2, LOC_RAN)
+    _stock(db, "BV-RAN-01", "P-RB", 1)
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 1)])
+    world["shop"].fo(FO_2, LOC_RAN, lines=[(9001, 1)])
 
     res, order = _book(world, _order(52001, lines=(("RB-1234", 1), ("OA-5", 1))))
 
@@ -886,3 +918,293 @@ def test_every_door_result_names_the_orders_own_shop(world):
     assert order["store_id"] == "BV-BOK-01"
     assert res["store_id"] == "BV-BOK-01"
     assert again["status"] == "duplicate" and again["store_id"] == "BV-BOK-01"
+
+
+
+# ---------------------------------------------------------------------------
+# R12 -- money panel, round 3
+# ---------------------------------------------------------------------------
+
+LOC_PUN = "gid://shopify/Location/103"
+
+
+async def _died(_db, _order_id):
+    """A process that died between booking and the move: the move stays PLANNED."""
+    return {"moved": 0, "failed": 0}
+
+
+def _book_with_a_planned_move(world, monkeypatch, order_id):
+    """Ranchi holds the unit, Shopify assigned Bokaro -> a move is PLANNED and
+    the order booked HELD; the process dies before sending it."""
+    _stock(world["db"], "BV-RAN-01", "P-RB", 1)
+    world["shop"].fo(FO_1, LOC_BOK)
+    real = route_mod.move_fulfillment_orders
+    monkeypatch.setattr(route_mod, "move_fulfillment_orders", _died)
+    res, order = _book(world, _order(order_id))
+    monkeypatch.setattr(route_mod, "move_fulfillment_orders", real)
+    assert order["fulfillment_route"]["moves"][0]["status"] == "PLANNED"
+    assert order["fulfillment_hold"] is True
+    return res["order_id"], real
+
+
+def test_shopifys_own_split_is_claimed_at_each_shop_and_nothing_moves(world):
+    """P1 (Q2 allows Shopify's split, Q4 moves only a SHORT shop): each shop
+    holds its own part, so each claims it -- Ranchi's OA unit is SOLD, not left
+    on sale while Shopify has it committed to FO_2 -- nothing moves, nothing is
+    held, and the dispatch and the return treat each shop's part as its own."""
+    db = world["db"]
+    _stock(db, "BV-BOK-01", "P-RB", 1)
+    _stock(db, "BV-RAN-01", "P-OA", 1)
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 1)])
+    world["shop"].fo(FO_2, LOC_RAN, lines=[(9001, 1)])
+
+    res, order = _book(world, _order(53001, lines=(("RB-1234", 1), ("OA-5", 1))))
+
+    route = order["fulfillment_route"]
+    assert _sold_at(db, res["order_id"]) == ["BV-BOK-01", "BV-RAN-01"]
+    assert db.stock_units.count_documents({"status": "AVAILABLE"}) == 0
+    assert world["shop"].moves() == [] and route["moves"] == []
+    assert route["problems"] == [] and order["fulfillment_hold"] is False
+    assert "stock_hold_reason" not in order
+    # One invoice from one GSTIN: both shops are the same registration.
+    assert order["store_id"] == "BV-BOK-01" and "/BV-BOK-01/" in order["invoice_number"]
+    assert route["fulfillment_order_ids"] == [FO_1, FO_2]
+    assert sorted(world["tasks"].refs("online_fallback_ship:")) == [
+        f"online_fallback_ship:{res['order_id']}:BV-BOK-01",
+        f"online_fallback_ship:{res['order_id']}:BV-RAN-01",
+    ]
+    # Each returned unit goes back to the shop it left from.
+    from api.routers import returns
+
+    for pid, shop in (("P-RB", "BV-BOK-01"), ("P-OA", "BV-RAN-01")):
+        hit = returns._resolve_restock_store(
+            order["store_id"], order["order_id"], order=order, product_id=pid
+        )
+        assert hit["store_id"] == shop, (pid, hit)
+    # The dispatch closes BOTH shops' fulfillment orders -- none is left open
+    # at a shop that could ship it again.
+    pushed = _push(world, order, {FO_1: LOC_BOK, FO_2: LOC_RAN})
+    assert pushed.ok and _fulfilled(world) == [[FO_1, FO_2]]
+
+
+def test_a_split_across_two_gstins_is_held_for_the_accountant(world):
+    """One order, one tax invoice, one GSTIN (Q1): Shopify split it between a
+    Jharkhand shop and a Maharashtra shop -> each still claims its own part
+    (the units are committed there), but the order is HELD and tasked."""
+    db = world["db"]
+    db.stores.update_one({"store_id": PUNE}, {"$set": {"shopify_location_id": LOC_PUN}})
+    _stock(db, "BV-BOK-01", "P-RB", 1)
+    _stock(db, PUNE, "P-OA", 1)
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 1)])
+    world["shop"].fo(FO_2, LOC_PUN, lines=[(9001, 1)])
+
+    res, order = _book(world, _order(53002, lines=(("RB-1234", 1), ("OA-5", 1))))
+
+    assert _sold_at(db, res["order_id"]) == sorted(["BV-BOK-01", PUNE])
+    assert [p["code"] for p in order["fulfillment_route"]["problems"]] == ["SPLIT_SELLERS"]
+    assert order["fulfillment_hold"] is True
+    assert "different GSTINs" in order["stock_hold_reason"]
+    assert world["tasks"].refs("online_route:") == [f"online_route:SPLIT_SELLERS:{res['order_id']}"]
+
+
+def test_a_successful_move_lifts_only_its_own_pending_move_hold(world):
+    """P2 (hollow before): Ranchi has no GSTIN, so its seller hold owns the
+    order's hold reason. The move to Ranchi succeeds -- and must NOT release
+    the seller hold with it."""
+    db = world["db"]
+    db.stores.update_one({"store_id": "BV-RAN-01"}, {"$set": {"gstin": ""}})
+    _stock(db, "BV-RAN-01", "P-RB", 1)
+    world["shop"].fo(FO_1, LOC_BOK)
+
+    _res, order = _book(world, _order(53003))
+
+    route = order["fulfillment_route"]
+    assert world["shop"].moves() == [{"id": FO_1, "newLocationId": LOC_RAN}]
+    assert route["moves"][0]["status"] == "MOVED" and route["hold_reason"] is None
+    assert [p["code"] for p in route["problems"]] == ["SHOP_GSTIN_MISSING"]
+    assert order["fulfillment_hold"] is True
+    assert order["stock_hold_reason"] == route["problems"][0]["message"]
+
+
+def test_no_move_into_a_shop_whose_claim_came_up_short(world, monkeypatch):
+    """P2 race (probe H): routing counted Ranchi's one unit, a walk-in sale took
+    it before the claim. The order is held as a stock miss, and the move is
+    SKIPPED -- never sent INTO a short shop -- so the paid order with zero
+    units claimed stays held."""
+    db = world["db"]
+    _stock(db, "BV-RAN-01", "P-RB", 1)
+    world["shop"].fo(FO_1, LOC_BOK)
+    real_route = route_mod.route_order
+
+    def route_then_a_walk_in_sale(db_, items, routing):
+        out = real_route(db_, items, routing)
+        db.stock_units.update_many({"store_id": "BV-RAN-01"}, {"$set": {"status": "SOLD"}})
+        return out
+
+    monkeypatch.setattr(route_mod, "route_order", route_then_a_walk_in_sale)
+
+    res, order = _book(world, _order(53004))
+
+    assert _sold_at(db, res["order_id"]) == []
+    assert world["shop"].moves() == []
+    assert order["fulfillment_route"]["moves"][0]["status"] == "SKIPPED"
+    assert order["fulfillment_hold"] is True
+    assert "Stock could not be claimed" in order["stock_hold_reason"]
+
+
+@pytest.mark.parametrize("cleared_mid_flight", [True, False])
+def test_the_move_lift_reads_the_rx_hold_as_stored_after_the_move(world, monkeypatch, cleared_mid_flight):
+    """An admin clears the Rx hold (clear-rx-hold) while fulfillmentOrderMove is
+    on the wire: the lift must not bring the cleared hold back from its stale
+    read. Still Rx-pending -> stays held."""
+    db = world["db"]
+    oid, real = _book_with_a_planned_move(world, monkeypatch, 53005)
+    db.orders.update_one({"order_id": oid}, {"$set": {"rx_pending": True}})
+    graphql = world["shop"].graphql
+
+    async def admin_clears_rx_during_the_move(db_, query, variables):
+        if "imsFulfillmentOrderMove" in query and cleared_mid_flight:
+            db.orders.update_one({"order_id": oid}, {"$set": {
+                "rx_pending": False, "fulfillment_hold": False, "rx_hold_cleared": True}})
+        return await graphql(db_, query, variables)
+
+    monkeypatch.setattr(shopify_push, "_graphql", admin_clears_rx_during_the_move)
+    asyncio.run(real(db, oid))
+
+    order = db.orders.find_one({"order_id": oid})
+    assert order["fulfillment_route"]["moves"][0]["status"] == "MOVED"
+    assert "stock_hold_reason" not in order
+    assert order["fulfillment_hold"] is (not cleared_mid_flight)
+
+
+def test_a_planned_move_is_never_sent_for_a_cancelled_order(world, monkeypatch):
+    """P3 (probe C): the move a crash left PLANNED is not retried by the
+    orders/cancelled delivery -- no move for a CANCELLED order, no MOVE_FAILED
+    hold or P1 task on it."""
+    db = world["db"]
+    oid, _real = _book_with_a_planned_move(world, monkeypatch, 53006)
+    world["shop"].move_error = "Fulfillment order is closed"  # what Shopify would say
+    cancelled = {**_order(53006), "cancelled_at": "2026-09-28T10:00:00+05:30"}
+
+    asyncio.run(route_mod.map_routed_order(cancelled, db, topic="orders/cancelled"))
+
+    order = db.orders.find_one({"order_id": oid})
+    assert order["status"] == "CANCELLED"
+    assert world["shop"].moves() == []
+    assert order["fulfillment_route"]["moves"][0]["status"] == "SKIPPED"
+    assert world["tasks"].refs("online_route:MOVE_FAILED") == []
+
+
+def test_a_planned_move_is_never_sent_once_a_human_released_the_order(world, monkeypatch):
+    """P3: the hold text tells a human to move it in Shopify admin and clear
+    the hold. Once they have, the next orders/updated delivery must not send
+    the stale move (nor re-hold the order when Shopify refuses it)."""
+    db = world["db"]
+    oid, _real = _book_with_a_planned_move(world, monkeypatch, 53007)
+    db.orders.update_one({"order_id": oid}, {"$set": {"rx_pending": False, "fulfillment_hold": False}})
+    world["shop"].move_error = "Fulfillment order is already at that location"
+
+    asyncio.run(route_mod.map_routed_order(_order(53007), db, topic="orders/updated"))
+
+    order = db.orders.find_one({"order_id": oid})
+    assert world["shop"].moves() == []
+    assert order["fulfillment_route"]["moves"][0]["status"] == "SKIPPED"
+    assert order["fulfillment_hold"] is False
+    assert world["tasks"].refs("online_route:MOVE_FAILED") == []
+
+
+@pytest.mark.parametrize("booked_ids,now_at,rewrites", [
+    ([FO_1], {FO_1: LOC_BOK, FO_2: LOC_BOK}, True),  # FO_AT_OTHER_SHOP: a human moved FO_2 in
+    (None, {FO_1: LOC_BOK}, True),  # routing unread at booking: unknown -> rewrite
+    ([FO_1], {FO_1: LOC_BOK}, False),  # nothing moved since booking: no extra write
+])
+def test_the_dispatch_rewrites_stock_after_any_human_move(world, monkeypatch, booked_ids, now_at, rewrites):
+    """P3 (probe D): a fulfillment order IMS closes that was not the shop's at
+    booking was moved by a human AFTER the booking write-back -- Shopify's
+    committed unit left the other shop, whose 'available' is now one phantom
+    unit high until the dispatch re-asserts the per-shop numbers."""
+    import api.services.online_stock_writeback as wb
+
+    wrote = []
+    monkeypatch.setattr(wb, "writeback_after_sale", lambda db, items, store: wrote.append(store))
+    order = {"order_id": "o4", "source": "shopify", "shopify_order_id": "53008",
+             "store_id": "BV-BOK-01", "items": [{"sku": "OA-5", "quantity": 1}],
+             "fulfillment_route": {"fulfillment_order_ids": booked_ids, "moves": [],
+                                   "problems": [{"code": "FO_AT_OTHER_SHOP", "message": "x"}]}}
+
+    res = _push(world, order, now_at)
+
+    assert res.ok and _fulfilled(world) == [list(now_at)]
+    assert wrote == (["BV-BOK-01"] if rewrites else [])
+
+
+@pytest.mark.parametrize("mode", ["dark", "unread"])
+@pytest.mark.parametrize("holders", [
+    [("WO-OLD-01", 1)],  # the only claimable unit sits at a CLOSED shop
+    [(PUNE, 3), ("BV-RAN-01", 1)],  # the old guess: the unmapped shop with the most stock
+])
+def test_no_routing_never_guesses_a_seller_from_stock_counts(world, monkeypatch, mode, holders):
+    """P2 + medium: with the gate dark (or the routing read failed) and no
+    fallback set, IMS has no routing to follow. It must not pick a seller --
+    whose GSTIN issues the tax invoice -- by counting stock (a closed shop, or
+    an unmapped one Shopify never assigned): the bucket bills it, LOUDLY."""
+    db = world["db"]
+    db.stores.insert_one({"store_id": "WO-OLD-01", "store_code": "WO-OLD-01", "store_name": "Old",
+                          "store_type": "RETAIL", "is_active": False, "state_code": "27",
+                          "gstin": "27CCCCC0000C1Z5"})
+    if mode == "dark":
+        monkeypatch.setattr(shopify_push, "_live_or_reason", lambda _db: (False, "writes_disabled"))
+    else:
+        world["shop"].read_error = "status 503"
+    for shop, n in holders:
+        _stock(db, shop, "P-RB", n)
+
+    res, order = _book(world, _order(53010 + len(holders)))
+
+    route = order["fulfillment_route"]
+    assert order["store_id"] == "BV-ONLINE-01" and route["reason"] == "NONE"
+    assert "/BV-ONLINE-01/" in order["invoice_number"]
+    expected = ["SELLER_UNKNOWN"] if mode == "dark" else ["ROUTING_UNREAD", "SELLER_UNKNOWN"]
+    assert [p["code"] for p in route["problems"]] == expected
+    assert _sold_at(db, res["order_id"]) == []  # nothing claimed behind the bill's back
+    assert order["fulfillment_hold"] is True
+
+
+@pytest.mark.parametrize("fallback", ["WO-OLD-01", "BV-TYPO-99", "BV-ONLINE-01"])
+def test_the_fallback_must_be_an_active_physical_shop(world, monkeypatch, fallback):
+    """PLAUSIBLE low + P2: ONLINE_FULFILLMENT_STORE_ID naming a closed shop, a
+    typo or the stockless ONLINE store never becomes the seller -- and says so."""
+    db = world["db"]
+    db.stores.insert_one({"store_id": "WO-OLD-01", "store_code": "WO-OLD-01", "store_name": "Old",
+                          "store_type": "RETAIL", "is_active": False, "state_code": "20",
+                          "gstin": "20CCCCC0000C1Z5"})
+    monkeypatch.setenv("ONLINE_FULFILLMENT_STORE_ID", fallback)
+    _stock(db, fallback, "P-RB", 1)
+    world["shop"].fo(FO_1, LOC_PUNE_SHOPIFY, name="Pune warehouse")
+
+    res, order = _book(world, _order(53020))
+
+    route = order["fulfillment_route"]
+    assert order["store_id"] == "BV-ONLINE-01" and route["reason"] == "NONE"
+    assert [p["code"] for p in route["problems"]] == [
+        "LOCATION_UNMAPPED", "FALLBACK_INVALID", "SELLER_UNKNOWN"]
+    assert fallback in route["problems"][1]["message"]
+    assert _sold_at(db, res["order_id"]) == []
+
+
+def test_the_claim_is_at_the_shipping_shop_never_at_the_fallback(world, monkeypatch):
+    """Medium (hollow before): the fallback names Pune, Shopify assigned
+    Bokaro, both hold a unit. Bokaro bills it AND gives up the unit Shopify
+    committed there; Pune's unit stays on sale."""
+    db = world["db"]
+    monkeypatch.setenv("ONLINE_FULFILLMENT_STORE_ID", PUNE)
+    _stock(db, "BV-BOK-01", "P-RB", 1)
+    _stock(db, PUNE, "P-RB", 1)
+    world["shop"].fo(FO_1, LOC_BOK)
+
+    res, order = _book(world, _order(53030))
+
+    assert order["store_id"] == "BV-BOK-01" and "/BV-BOK-01/" in order["invoice_number"]
+    assert _sold_at(db, res["order_id"]) == ["BV-BOK-01"]
+    assert db.stock_units.find_one({"store_id": PUNE})["status"] == "AVAILABLE"
+    assert order["fulfillment_hold"] is False

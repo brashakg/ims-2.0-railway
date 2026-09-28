@@ -1583,7 +1583,7 @@ def _order_fulfilment_stores(
 
     A LEGACY online order can SPAN SHOPS (the pre-multi-location-PR-5 claim,
     _claim_units_multistore, fell back per line to whichever store held the
-    units; a PR 5 order is claimed at ONE shop), so when a
+    units; a PR 5 order spans shops only when Shopify split it), so when a
     ``product_id`` is given the `fulfillment_breakdown` row for THAT product
     wins -- otherwise a two-shop order would book every returned unit back to
     one shop and leave the other shop's unit stranded SOLD."""
@@ -1683,7 +1683,10 @@ def _resolve_restock_store(
     Any candidate that is itself an ONLINE store is skipped at every step.
     """
     db = _get_db()
-    if not is_online_store(db, store_id):
+    # A physical shop restocks its own return -- unless Shopify split the
+    # order (multi-location PR 5): its units left from SEVERAL shops, so each
+    # goes back to the shop it left from, exactly like a legacy online order.
+    if not is_online_store(db, store_id) and len(_order_fulfilment_stores(order)) < 2:
         return {
             "store_id": store_id,
             "redirected_from": None,
@@ -2014,8 +2017,8 @@ def _restock_good_items(
         return result
 
     # F9 refinement -- ONLY on the redirected (online-order) path: an online
-    # order booked before multi-location PR 5 can have been fulfilled from
-    # SEVERAL shops (the deleted _claim_units_multistore), so
+    # order booked before multi-location PR 5 (the deleted
+    # _claim_units_multistore), or one Shopify split, left SEVERAL shops, so
     # each UNIT goes back to the shop it actually left from. Two layers:
     #   * a per-UNIT queue expanded from fulfillment_breakdown's qty (so ONE
     #     line split 1+1 across two shops sends one unit to each), and

@@ -372,9 +372,9 @@ def _claim_units_at(
     store_id: Optional[str],
 ):
     """Claim an online order's sold units at ONE shop -- the shipping shop
-    online_fulfillment_route.route_order chose (multi-location PR 5: one shop
-    per order, Q2; the per-line cross-shop fallback that split an order over
-    several shops, and so over several sellers, is gone). Returns
+    online_fulfillment_route.route_order chose, or one leg of an order
+    Shopify itself split (multi-location PR 5; the per-line cross-shop
+    fallback that split an order over any shop holding stock is gone). Returns
     (claimed_total, breakdown rows {product_id, store_id, qty}). Reuses the
     atomic FIFO claim in orders._mark_units_sold, so two concurrent orders
     can never grab the same unit.
@@ -1584,6 +1584,7 @@ def ingest_shopify_order(
 
     # Place-of-supply split (IGST vs CGST+SGST) reusing the SAME offline logic.
     store_doc: Optional[Dict[str, Any]] = None
+    store_repo = None
     try:
         from ..dependencies import get_store_repository
 
@@ -1592,18 +1593,37 @@ def ingest_shopify_order(
             store_doc = store_repo.find_by_id(store_id)
     except Exception:  # noqa: BLE001
         store_doc = None
+    # A named shipping shop whose GSTIN cannot issue this order's tax invoice
+    # (none, another state's, or a Shopify split across GSTINs) HOLDS the
+    # order: goods must not leave before their invoice can be issued. It owns
+    # the stock-hold reason; route["hold_reason"] stays the pending-move text a
+    # move lifts, so a successful move never releases a seller hold.
+    seller_hold: Optional[str] = None
     if route is not None:
         # Q1 on the seller actually billed: the shipping shop's own GSTIN, or
         # -- no shop named -- the bucket, which is never right and always loud.
-        from .online_fulfillment_route import gstin_problem, seller_unknown_problem
+        from .online_fulfillment_route import (
+            gstin_problem,
+            seller_unknown_problem,
+            split_seller_problem,
+        )
 
         bad_seller = (
             gstin_problem(store_doc)
             if route.get("store_id")
             else seller_unknown_problem(store_id)
         )
+        if route.get("store_id") and not bad_seller and route.get("split"):
+            legs = sorted({r["store_id"] for r in route["split"]} - {store_id})
+            try:
+                leg_docs = [store_repo.find_by_id(s) for s in legs]
+            except Exception:  # noqa: BLE001 -- unreadable = not provably the same GSTIN
+                leg_docs = [None for _ in legs]
+            bad_seller = split_seller_problem(store_doc, leg_docs)
         if bad_seller:
             route["problems"].append(bad_seller)
+            if route.get("store_id"):
+                seller_hold = bad_seller["message"]
 
     # Synthesize a customer-shaped dict carrying the buyer's delivery state so
     # the shared splitter resolves the place of supply.
@@ -1780,11 +1800,13 @@ def ingest_shopify_order(
         # or one left at another shop, holds the order from dispatch too --
         # under the stock hold's own reason field (orders.order_hold_kinds).
         "fulfillment_hold": bool(
-            rx_eval.get("rx_pending", False) or (route or {}).get("hold_reason")
+            rx_eval.get("rx_pending", False)
+            or seller_hold
+            or (route or {}).get("hold_reason")
         ),
         **(
-            {"stock_hold_reason": route["hold_reason"]}
-            if (route or {}).get("hold_reason")
+            {"stock_hold_reason": seller_hold or route["hold_reason"]}
+            if seller_hold or (route or {}).get("hold_reason")
             else {}
         ),
         "place_of_supply": gst_split.get("place_of_supply", buyer_state),
@@ -1930,10 +1952,23 @@ def ingest_shopify_order(
         if decrement_items:
             expected = sum(int(it.get("quantity") or 1) for it in decrement_items)
             # ONE shop per order (Q2): route_order already moved the order to
-            # a shop that covers every line when the assigned one was short.
-            claimed, breakdown = _claim_units_at(
-                db, order_id, decrement_items, fulfillment_store
-            )
+            # a shop that covers every line when the assigned one was short --
+            # unless Shopify itself split it, when each shop claims the lines
+            # of its own fulfillment orders (the units Shopify committed there).
+            plan: Dict[str, List[Dict[str, Any]]] = {}
+            if (route or {}).get("split"):
+                by_line = {str(it.get("shopify_line_item_id")): it for it in decrement_items}
+                for r in route["split"]:
+                    plan.setdefault(r["store_id"], []).append(
+                        {**by_line[r["line_item_id"]], "quantity": r["qty"]}
+                    )
+            else:
+                plan[fulfillment_store] = decrement_items
+            claimed, breakdown = 0, []
+            for shop, lines in plan.items():
+                n, rows = _claim_units_at(db, order_id, lines, shop)
+                claimed += n
+                breakdown.extend(rows)
             fulfilled_stores.extend(sorted({str(r["store_id"]) for r in breakdown}))
             if breakdown:
                 try:
@@ -1968,7 +2003,8 @@ def ingest_shopify_order(
                 )
             # FAIL LOUD on an under-claim: we booked a paid online order but could
             # NOT decrement every serialized unit (neither the assigned shop nor
-            # any mapped shop holds every unit -- route_order never splits). The invoice stands (Shopify took payment)
+            # any mapped shop holds every unit -- IMS never splits an order
+            # itself, only follows Shopify's split). The invoice stands (Shopify took payment)
             # but this is an oversell that needs operator action -- record it
             # loudly so the sync-health tile + Sentry surface it instead of it
             # slipping by as a warning.

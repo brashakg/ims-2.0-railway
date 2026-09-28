@@ -397,12 +397,20 @@ async def push_fulfillment(
             for e in ((order_node or {}).get("fulfillmentOrders") or {}).get("edges") or []
         }
         mapped_locs = set(locs.values())
+        # The billing shop, plus every shop of a Shopify split (each ships
+        # the fulfillment orders of the units it claimed).
+        shops = [order.get("store_id")] + [
+            r.get("store_id") for r in route.get("split") or [] if isinstance(r, dict)
+        ]
         ours = [
             f for f in open_fos
-            if fo_is_shops(
-                _as_shopify_gid(loc_of.get(f) or "", "Location") or None,
-                locs.get(order.get("store_id")),
-                mapped_locs,
+            if any(
+                fo_is_shops(
+                    _as_shopify_gid(loc_of.get(f) or "", "Location") or None,
+                    locs.get(s),
+                    mapped_locs,
+                )
+                for s in shops
             )
         ]
         others_open = len(open_fos) - len(ours)
@@ -493,13 +501,14 @@ async def push_fulfillment(
     new_fid = ful.get("id")
     if new_fid:
         _writeback_fulfillment(db, order, new_fid)
-    if any(m.get("status") == "FAILED" for m in (route or {}).get("moves") or []):
-        # A human moved the fulfillment order after IMS's move failed: the
-        # move shifted Shopify's committed unit AFTER the booking-time
-        # write-back, leaving the old shop a phantom unit. Re-assert the
-        # absolute per-shop numbers now. ponytail: the phantom lives from the
-        # human's move until dispatch (or the 01:00/09:00 pass); a Shopify
-        # fulfillment_orders/moved webhook would close it sooner.
+    if isinstance(route, dict) and set(open_fos) - set(route.get("fulfillment_order_ids") or []):
+        # A fulfillment order IMS just fulfilled was not the shop's at booking
+        # (a human moved it after a failed move, an FO_AT_OTHER_SHOP hold, or
+        # routing unread): that move shifted Shopify's committed unit AFTER
+        # the booking-time write-back, leaving the old shop a phantom unit.
+        # Re-assert the absolute per-shop numbers now. ponytail: the phantom
+        # lives from the human's move until dispatch (or the 01:00/09:00
+        # pass); a Shopify fulfillment_orders/moved webhook would close it sooner.
         try:
             from .online_stock_writeback import writeback_after_sale
 
