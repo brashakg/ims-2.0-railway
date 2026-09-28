@@ -482,6 +482,25 @@ def test_an_order_first_seen_through_a_status_topic_gets_its_real_status(swept):
     assert len(swept["orders"].docs) == 2
 
 
+def test_a_late_create_retry_never_rewinds_the_money_the_pull_booked(swept):
+    """The pull books a paid order (a body with no lifecycle fact, so no
+    status sync runs); Shopify then retries the ORIGINAL orders/create body --
+    partially_paid, older. The create stamped the order watermark, so the
+    retry is stale and the booked money stands."""
+    swept["state"]["orders"] = [_pulled(71001)]
+    assert swept["run"]().payload["mapped"] == ["71001"]
+    booked = _doc(swept, 71001)
+    assert (booked["payment_status"], booked["amount_paid"]) == ("PAID", 999.0)
+
+    retry = _pulled(71001, financial_status="partially_paid", total_outstanding="800.00",
+                    updated_at="2026-09-06T00:30:00Z")
+    swept["real_map"](retry, swept["db"], webhook_id="create-71001", topic="orders/create")
+
+    doc = _doc(swept, 71001)
+    assert (doc["payment_status"], doc["amount_paid"], doc["balance_due"]) == ("PAID", 999.0, 0.0)
+    assert [p["amount"] for p in doc["payments"]] == [999.0]
+
+
 # ---------------------------------------------------------------------------
 # Ruling 1, the courier half: Shiprocket's DELIVERED (the NEXUS poll, or the
 # signed webhook) is the delivery -- an exact match, never "RTO DELIVERED".
