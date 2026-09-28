@@ -92,6 +92,20 @@ describe('the unit label page', () => {
     expect(text).toMatch(/MRP\s*₹\s*8,990/);
   });
 
+  it('lets a long brand + model or colour + size take two lines, and never clips the MRP', () => {
+    // ~20 mm is left beside the bars: "Ray-Ban RB5154 Clubmaster Optics" or
+    // "2000 Black/Gold / 51-21-145" on one ellipsised line lost the SIZE.
+    // Measured in Chromium at 203 dpi: 2 + 2 + 1 lines at 6.5 pt fit 15 mm.
+    const html = unitLabelsDocument([CARRERA]);
+    const info = parse(html).querySelector('.info')!;
+    const [title, variant, mrp] = Array.from(info.children);
+    expect(title.className).toContain('two');
+    expect(variant.className).toContain('two');
+    expect(mrp.className).not.toContain('two');
+    expect(html).toMatch(/\.two\s*{[^}]*-webkit-line-clamp:\s*2/);
+    expect(html).toMatch(/\.info\s*{[^}]*font-size:\s*6\.5pt/);
+  });
+
   it('escapes product text (it lands in innerHTML of the print window)', () => {
     const html = unitLabelsDocument([{ ...CARRERA, brand: '<img src=x onerror=alert(1)>' }]);
     expect(parse(html).querySelector('img')).toBeNull();

@@ -113,7 +113,7 @@ function labelHtml(u: UnitLabelData, offsetMm: number, extraClass = ''): string 
   return (
     `<div class="lbl"><div class="win${extraClass}" style="left:${offsetMm}mm">` +
     `<div class="code">${barcodeSvg(u.barcode, 8)}<div class="txt">${esc(u.barcode)}</div></div>` +
-    `<div class="info"><div class="b">${esc(title)}</div><div>${esc(variant)}</div>` +
+    `<div class="info"><div class="b two">${esc(title)}</div><div class="two">${esc(variant)}</div>` +
     `<div class="b">${esc(mrpText(u.mrp))}</div></div></div></div>`
   );
 }
@@ -132,8 +132,12 @@ body { font-family: Arial, Helvetica, sans-serif; }
 .code { flex: none; text-align: center; }
 .code svg { display: block; }
 .txt { font-family: 'Courier New', monospace; font-size: 7pt; line-height: 1.1; letter-spacing: 0.3px; }
-.info { flex: 1; min-width: 0; font-size: 7pt; line-height: 1.2; }
+.info { flex: 1; min-width: 0; font-size: 6.5pt; line-height: 1.15; }
 .info div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* ~20 mm beside the bars: a long model or colour/size wraps once instead of
+   losing its tail (the size); 2 + 2 + 1 lines at 6.5 pt fit the 15 mm. */
+.info .two { white-space: normal; overflow-wrap: anywhere; display: -webkit-box;
+  -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .b { font-weight: 700; }
 </style></head><body>${body}</body></html>`;
 }
