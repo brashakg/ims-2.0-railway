@@ -239,7 +239,9 @@ def _validate_product_barcode_or_400(barcode, repo, this_product_id: str):
 
     Owner ruling 2026-09-28: IMS keeps its own stock through the per-unit IMS
     barcodes (services/barcode.mint_unit_barcode); the product-level barcode
-    holds only the manufacturer's GTIN, for reference and for Shopify/Google.
+    holds only the manufacturer's GTIN. (What goes to Shopify/Google is the
+    `gtin` ATTRIBUTE -- mirrored to the catalog twin -- which Inventory >
+    Manage Barcode and the Add Product form edit; this field is not mirrored.)
     So:
       - Format: it must be a publishable GTIN (services/gtin.py -- 8, 12, 13 or
         14 digits, valid check digit, NOT our own GS1 20-29 in-store range).

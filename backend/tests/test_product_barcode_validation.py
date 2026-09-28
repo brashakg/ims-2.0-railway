@@ -2,8 +2,9 @@
 IMS 2.0 -- product barcode validation + uniqueness (PUT /products/{id})
 ======================================================================
 Owner ruling 2026-09-28: the product-level barcode holds ONLY the
-manufacturer's UPC / EAN (GTIN) -- it is what goes to Shopify and Google. Our
-own IMS barcodes live on each unit (stock_units.barcode), never here. Two
+manufacturer's UPC / EAN (GTIN). Our own IMS barcodes live on each unit
+(stock_units.barcode), never here. (The GTIN that goes to Shopify and Google is
+the `gtin` attribute -- see TestGtinAttributeOnTheEditDoor at the bottom.) Two
 guards back that:
 
   - format: anything that is not a publishable GTIN (services/gtin.py) is
