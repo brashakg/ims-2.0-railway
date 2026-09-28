@@ -1544,7 +1544,7 @@ def _audit_stock_transition(
 # no shelf and no POS (PR #941 blocks POS on online stores) so nobody can ever
 # sell it, and it still counts toward the POOLED on-hand that
 # online_stock_writeback pushes to Shopify -- Shopify then offers a unit that no
-# shop can pick. Worse, shopify_ingest._available_stores_for_product does not
+# shop can pick. Worse, the (since deleted) claim-candidate reader did not
 # exclude online stores, so the next online sale silently CLAIMS the phantom
 # (claimed == expected -> no under-claim / oversell miss recorded).
 #
@@ -1581,8 +1581,9 @@ def _order_fulfilment_stores(
     candidate first. Empty for an in-store sale / a historical import that never
     ran the decrement. Pure; never raises.
 
-    Online fulfilment can SPAN SHOPS (shopify_ingest._claim_units_multistore
-    falls back to whichever store held the units, ON by default), so when a
+    A LEGACY online order can SPAN SHOPS (the pre-multi-location-PR-5 claim,
+    _claim_units_multistore, fell back per line to whichever store held the
+    units; a PR 5 order is claimed at ONE shop), so when a
     ``product_id`` is given the `fulfillment_breakdown` row for THAT product
     wins -- otherwise a two-shop order would book every returned unit back to
     one shop and leave the other shop's unit stranded SOLD."""
@@ -1719,8 +1720,8 @@ def _fulfilment_unit_queue(
     """ONE physical store id PER UNIT this product was actually shipped from,
     in breakdown order, honouring each row's ``qty``.
 
-    `_claim_units_multistore` splits a SINGLE order line across shops whenever
-    the preferred shop is short (fallback is ON by default), stamping one
+    The pre-PR-5 `_claim_units_multistore` split a SINGLE order line across
+    shops whenever the preferred shop was short, stamping one
     `fulfillment_breakdown` row per (product, store) with its qty. Routing at
     product granularity would send BOTH returned units of a 2-way split back to
     one shop -- minting a phantom there while the other shop's real unit stayed
@@ -2013,7 +2014,8 @@ def _restock_good_items(
         return result
 
     # F9 refinement -- ONLY on the redirected (online-order) path: an online
-    # order can be fulfilled from SEVERAL shops (_claim_units_multistore), so
+    # order booked before multi-location PR 5 can have been fulfilled from
+    # SEVERAL shops (the deleted _claim_units_multistore), so
     # each UNIT goes back to the shop it actually left from. Two layers:
     #   * a per-UNIT queue expanded from fulfillment_breakdown's qty (so ONE
     #     line split 1+1 across two shops sends one unit to each), and

@@ -367,10 +367,16 @@ def test_seller_gstin_and_tax_split_follow_the_shipping_shop(world, location, bu
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("gstin", ["", "27AAAAA0000A1Z5"])
-def test_shop_without_a_gstin_for_its_state_is_loud(world, gstin):
+@pytest.mark.parametrize(
+    "gstin,state",
+    [
+        ("", None),  # no GSTIN at all (and no state to check one against)
+        ("27AAAAA0000A1Z5", "20"),  # a GSTIN registered in ANOTHER state
+    ],
+)
+def test_shop_without_a_gstin_for_its_state_is_loud(world, gstin, state):
     db = world["db"]
-    db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": {"gstin": gstin}})
+    db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": {"gstin": gstin, "state_code": state}})
     _stock(db, "BV-BOK-01", "P-RB", 1)
     world["shop"].fo(FO_1, LOC_BOK)
 
