@@ -550,3 +550,21 @@ def test_webhook_drain_and_missed_webhook_pull_both_route(world, monkeypatch):
         order = db.orders.find_one({"shopify_order_id": sid})
         assert order["store_id"] == "BV-BOK-01"
         assert order["fulfillment_route"]["reason"] == "ASSIGNED"
+
+
+def test_a_routing_stamp_on_a_stored_payload_is_never_trusted(world):
+    """A replayed/stored payload may carry an old _ims_routing stamp; only the
+    door's own fresh read decides the shop."""
+    db = world["db"]
+    _stock(db, "BV-BOK-01", "P-RB", 1)
+    _stock(db, "BV-RAN-01", "P-RB", 1)
+    world["shop"].fo(FO_1, LOC_BOK)
+    stale = _order(51015)
+    stale["_ims_routing"] = {"fulfillment_orders": [
+        {"id": FO_2, "status": "OPEN", "location_id": LOC_RAN, "units": 1}
+    ]}
+
+    _res, order = _book(world, stale)
+
+    assert order["store_id"] == "BV-BOK-01"
+    assert order["fulfillment_route"]["fulfillment_order_ids"] == [FO_1]
