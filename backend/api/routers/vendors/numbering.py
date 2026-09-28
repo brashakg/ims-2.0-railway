@@ -133,6 +133,22 @@ def compute_po_receipt_state(
     return "RECEIVED"
 
 
+def po_line_status(item: dict, received) -> str:
+    """A PO line's receiving status from what has arrived against it.
+
+    A line someone CANCELLED stays cancelled: a later receipt against another
+    line of the same order re-derives every line's status, and must not turn a
+    withdrawn line back into an 'OPEN' one that looks due.
+    """
+    if (item or {}).get("line_status") == "CANCELLED":
+        return "CANCELLED"
+    ordered = (item or {}).get("ordered_qty", (item or {}).get("quantity", 0)) or 0
+    recv = received or 0
+    if ordered and recv >= ordered:
+        return "RECEIVED"
+    return "PARTIAL" if recv > 0 else "OPEN"
+
+
 def grn_has_discrepancy(grn: dict, qty_tolerance: int = 0) -> bool:
     """True if a goods-receipt note shows a receiving variance worth a task.
 

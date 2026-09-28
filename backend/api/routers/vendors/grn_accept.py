@@ -25,6 +25,7 @@ from .numbering import (
     _grn_barcode,
     _grn_stock_audit,
     compute_po_receipt_state,
+    po_line_status,
 )
 from .grn_accept_lock import (
     _GRN_MINT_DUPLICATE,
@@ -559,17 +560,12 @@ def _accept_grn_claimed(
             # "open POs" / "pending not-received" panels).
             updated_items = []
             for it in po_items:
-                ordered = it.get("ordered_qty", it.get("quantity", 0)) or 0
                 recv = received_by_product.get(it.get("product_id"), 0)
                 updated_items.append(
                     {
                         **it,
                         "received_qty": recv,
-                        "line_status": (
-                            "RECEIVED"
-                            if ordered and recv >= ordered
-                            else ("PARTIAL" if recv > 0 else "OPEN")
-                        ),
+                        "line_status": po_line_status(it, recv),
                     }
                 )
             po_repo.update(

@@ -423,9 +423,10 @@ class TestCancelPOLifecycle:
         # 404 from DB or 503 (no DB) is acceptable; a 200 would be a bug.
         assert r.status_code not in (200, 201), r.text
 
-    @pytest.mark.parametrize(
-        "status", ["PARTIALLY_RECEIVED", "PARTIAL", "RECEIVED", "CANCELLED"]
-    )
+    # Owner ruling 2026-09-28: a PART-received order is no longer refused -- it
+    # cancels only what is still due (see test_part_received_cancels_only_*
+    # below and test_po_edit_cancel_send.py). Received / cancelled stay refused.
+    @pytest.mark.parametrize("status", ["RECEIVED", "CANCELLED"])
     def test_cancel_is_refused_for_received_states(self, monkeypatch, status):
         """BEHAVIOURAL: actually POST the cancel and assert the server refuses
         it AND leaves the PO untouched.
@@ -481,6 +482,55 @@ class TestCancelPOLifecycle:
         assert r.status_code == 200, r.text
         assert coll.docs[0]["status"] == "CANCELLED"
         assert coll.docs[0]["cancellation_reason"] == "vendor out of stock"
+
+    @pytest.mark.parametrize("status", ["PARTIALLY_RECEIVED", "PARTIAL"])
+    def test_part_received_cancels_only_what_is_still_due(self, monkeypatch, status):
+        """BEHAVIOURAL, through the real repository: the undelivered remainder
+        is withdrawn, what arrived is never un-received, and the order closes
+        as received. Nothing still due -> refused, PO untouched."""
+        import api.routers.vendors as v
+        from database.repositories.vendor_repository import PurchaseOrderRepository
+        from strict_fakes import StrictCollection
+
+        coll = StrictCollection(
+            "purchase_orders",
+            [
+                {
+                    "po_id": "po-3",
+                    "delivery_store_id": "S1",
+                    "status": status,
+                    "items": [
+                        {"product_id": "P1", "quantity": 5, "ordered_qty": 5,
+                         "unit_price": 100.0, "tax_rate": 5, "received_qty": 2},
+                    ],
+                    "received_qty_by_product": {"P1": 2},
+                }
+            ],
+        )
+        monkeypatch.setattr(
+            v, "get_purchase_order_repository", lambda: PurchaseOrderRepository(coll)
+        )
+        monkeypatch.setattr(v, "get_grn_repository", lambda: None)
+        r = _cli.post(
+            "/api/v1/vendors/purchase-orders/po-3/cancel",
+            params={"reason": "vendor out of stock"},
+        )
+        assert r.status_code == 200, r.text
+        doc = coll.docs[0]
+        assert doc["status"] == "RECEIVED"
+        assert doc["items"][0]["quantity"] == 2
+        assert doc["items"][0]["cancelled_qty"] == 3
+        assert doc["received_qty_by_product"] == {"P1": 2}
+        assert "cancelled_at" not in doc
+
+        doc["status"] = status  # nothing is due any more -> refused, untouched
+        before = dict(doc)
+        r = _cli.post(
+            "/api/v1/vendors/purchase-orders/po-3/cancel",
+            params={"reason": "vendor out of stock"},
+        )
+        assert r.status_code == 400, r.text
+        assert coll.docs[0]["items"] == before["items"]
 
 
 # ===========================================================================

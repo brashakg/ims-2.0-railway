@@ -330,42 +330,16 @@ async def create_pos_from_forecast(
         }
 
 
-@router.post("/purchase-orders", status_code=201)
-async def create_po(
-    po: POCreate, current_user: dict = Depends(require_roles(*_VENDOR_ROLES))
-):
-    """Create a new purchase order"""
-    po_repo = get_purchase_order_repository()
-    vendor_repo = get_vendor_repository()
+def price_po_lines(items, vendor, delivery_store_id, current_user):
+    """ONE path from the lines a person typed to the lines a PO stores.
 
-    # F2 store boundary: a store-scoped role may only raise a PO for a store it
-    # can access. validate_store_access 403s another store; ADMIN / AREA_MANAGER /
-    # SUPERADMIN pass. Without this, delivery_store_id came straight off the
-    # request body, so a store-scoped user could craft a PO against another
-    # store's inventory.
-    validate_store_access(po.delivery_store_id, current_user)
-
-    # W1.4 / OS-006: an ONLINE store (pooled, stockless) can never be the
-    # delivery store -- receiving there would mint phantom owned stock that
-    # corrupts the pooled-inventory model feeding the live storefront.
-    if is_online_store(None, po.delivery_store_id):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Online stores hold no stock - choose a physical shop as the "
-                "delivery store for this purchase order."
-            ),
-        )
-
-    po_id = str(uuid.uuid4())
-    po_number = generate_po_number(po.delivery_store_id)
-
-    # Validate vendor exists
-    if vendor_repo is not None:
-        vendor = vendor_repo.find_by_id(po.vendor_id)
-        if vendor is None:
-            raise HTTPException(status_code=404, detail="Vendor not found")
-
+    Both doors that take typed lines -- create (POST) and the draft edit (PUT)
+    -- call this, so an edited order is priced, gated and costed exactly as a
+    new one: typed-in new products are materialised through the product door,
+    the catalogue gate runs, GST is built per line (build_po_gst), and the rate
+    fills a missing product cost. Mutates `items` (a typed-in line gets its new
+    product_id). Returns (build_po_gst result, cost_filled list).
+    """
     # Ruling 13 -- BUY FIRST, CATALOGUE LATER. Any line that carried typed-in
     # identity instead of a product_id becomes a REAL row on the products spine
     # here, through the ONE product door, born provisional: inactive, no selling
@@ -373,7 +347,7 @@ async def create_po(
     # receiving, the stock mint, the invoice and the 3-way match, instead of
     # forking identity into a second placeholder system.
     product_repo = get_product_repository()
-    for it in po.items:
+    for it in items:
         if it.new_product is None:
             continue
         np = it.new_product
@@ -435,7 +409,7 @@ async def create_po(
     if product_repo is not None and _po_catalog_gate_on():
         unknown = [
             it.product_id
-            for it in po.items
+            for it in items
             if product_repo.find_by_id(it.product_id) is None
         ]
         if unknown:
@@ -455,33 +429,25 @@ async def create_po(
     # calculated according to interstate or intrastate as per GST norms").
     # Read the delivery store -- with 3 entities over 4 GSTINs in 2 states,
     # "our state" is never a constant.
-    _, store_doc = po_gst_context(po.delivery_store_id, None)
+    _, store_doc = po_gst_context(delivery_store_id, None)
 
     # Per-line GST + place-of-supply split: ONE shared computation, the same
     # one both automatic PO doors call (see build_po_gst). Products are fetched
     # ONCE here and reused for the cost promote below.
     products = {}
     if product_repo is not None:
-        for it in po.items:
+        for it in items:
             if it.product_id not in products:
                 products[it.product_id] = product_repo.find_by_id(it.product_id)
     computed = build_po_gst(
         # A typed-in new product was minted onto the spine above and its line
         # given a real product_id; the spent `new_product: None` payload must
         # not ride through **line onto the stored item.
-        [it.model_dump(exclude={"new_product"}) for it in po.items],
+        [it.model_dump(exclude={"new_product"}) for it in items],
         products.get,
-        vendor if vendor_repo is not None else None,
+        vendor,
         store_doc,
     )
-    stored_items = computed["items"]
-    subtotal = computed["subtotal"]
-    tax = computed["tax"]
-    total = computed["total"]
-    gst_summary = computed["gst_summary"]
-    parties = computed["parties"]
-    interstate = computed["interstate"]
-    gst_warnings = computed["warnings"]
 
     # Owner ruling 2026-08-26: the rate typed on the PO IS the cost, so raising
     # the PO finishes the cataloguing. Done on CREATE, not on send: the buyer
@@ -489,7 +455,7 @@ async def create_po(
     # sent, and the next of 40 lines should already see the product as costed.
     # Never overwrites an existing cost.
     cost_filled = []
-    for item in po.items:
+    for item in items:
         prod = products.get(item.product_id)
         if _promote_cost_from_rate(
             item.product_id,
@@ -509,6 +475,90 @@ async def create_po(
                 "cost_price": round(item.unit_price, 2),
                 "cost_source": _PO_PROVISIONAL_COST_SOURCE,
             }
+
+    return computed, cost_filled
+
+
+def audit_cost_filled(po_id, po_number, cost_filled, current_user) -> None:
+    """Audit the cost figures a PO wrote onto the product spine -- cost feeds
+    margin and valuation, so "who set this cost and from where" must be
+    answerable. Fail-soft: an audit failure never undoes the PO write."""
+    if not cost_filled:
+        return
+    try:
+        audit = get_audit_repository()
+        if audit is not None:
+            audit.create(
+                {
+                    "action": "purchase.cost_from_po_rate",
+                    "entity_type": "purchase_order",
+                    "entity_id": po_id,
+                    "user_id": current_user.get("user_id"),
+                    "detail": {"po_number": po_number, "products": cost_filled},
+                }
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+# Owner ruling 2026-09-28: the CATALOGUE MANAGER raises a DRAFT from the Buy
+# Desk and the store manager checks and sends it. This door only ever writes a
+# DRAFT, so adding the role here grants exactly "draft" -- sending, editing and
+# cancelling stay on _VENDOR_ROLES (the rbac row carves this route its own
+# capability key so the vendors:write union does not grow; see capabilities).
+_PO_DRAFT_ROLES = (*_VENDOR_ROLES, "CATALOG_MANAGER")
+
+
+@router.post("/purchase-orders", status_code=201)
+async def create_po(
+    po: POCreate, current_user: dict = Depends(require_roles(*_PO_DRAFT_ROLES))
+):
+    """Create a new purchase order (always a DRAFT)."""
+    po_repo = get_purchase_order_repository()
+    vendor_repo = get_vendor_repository()
+
+    # F2 store boundary: a store-scoped role may only raise a PO for a store it
+    # can access. validate_store_access 403s another store; ADMIN / AREA_MANAGER /
+    # SUPERADMIN pass. Without this, delivery_store_id came straight off the
+    # request body, so a store-scoped user could craft a PO against another
+    # store's inventory.
+    validate_store_access(po.delivery_store_id, current_user)
+
+    # W1.4 / OS-006: an ONLINE store (pooled, stockless) can never be the
+    # delivery store -- receiving there would mint phantom owned stock that
+    # corrupts the pooled-inventory model feeding the live storefront.
+    if is_online_store(None, po.delivery_store_id):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Online stores hold no stock - choose a physical shop as the "
+                "delivery store for this purchase order."
+            ),
+        )
+
+    po_id = str(uuid.uuid4())
+    po_number = generate_po_number(po.delivery_store_id)
+
+    # Validate vendor exists
+    if vendor_repo is not None:
+        vendor = vendor_repo.find_by_id(po.vendor_id)
+        if vendor is None:
+            raise HTTPException(status_code=404, detail="Vendor not found")
+
+    computed, cost_filled = price_po_lines(
+        po.items,
+        vendor if vendor_repo is not None else None,
+        po.delivery_store_id,
+        current_user,
+    )
+    stored_items = computed["items"]
+    subtotal = computed["subtotal"]
+    tax = computed["tax"]
+    total = computed["total"]
+    gst_summary = computed["gst_summary"]
+    parties = computed["parties"]
+    interstate = computed["interstate"]
+    gst_warnings = computed["warnings"]
 
     if po_repo is not None:
         po_repo.create(
@@ -536,24 +586,7 @@ async def create_po(
             }
         )
 
-    # Audit the cost figures this PO wrote onto the product spine -- cost feeds
-    # margin and valuation, so "who set this cost and from where" must be
-    # answerable. Fail-soft: an audit failure never un-creates the PO.
-    if cost_filled:
-        try:
-            audit = get_audit_repository()
-            if audit is not None:
-                audit.create(
-                    {
-                        "action": "purchase.cost_from_po_rate",
-                        "entity_type": "purchase_order",
-                        "entity_id": po_id,
-                        "user_id": current_user.get("user_id"),
-                        "detail": {"po_number": po_number, "products": cost_filled},
-                    }
-                )
-        except Exception:  # noqa: BLE001
-            pass
+    audit_cost_filled(po_id, po_number, cost_filled, current_user)
 
     return {
         "po_id": po_id,

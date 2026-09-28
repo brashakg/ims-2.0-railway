@@ -73,6 +73,13 @@ WRITES = [
     ("post", "/api/v1/vendors/purchase-orders", _PO_BODY, None),
     ("post", "/api/v1/vendors/purchase-orders/po1/send", None, None),
     ("post", "/api/v1/vendors/purchase-orders/po1/cancel", None, {"reason": "dup"}),
+    ("put", "/api/v1/vendors/purchase-orders/po1", {"items": _PO_BODY["items"]}, None),
+    (
+        "post",
+        "/api/v1/vendors/purchase-orders/po1/items/0/cancel",
+        {"reason": "vendor out of stock"},
+        None,
+    ),
     ("post", "/api/v1/vendors/grn", _GRN_BODY, None),
     ("post", "/api/v1/vendors/grn/g1/accept", None, None),
     ("post", "/api/v1/vendors/grn/g1/escalate", None, {"note": "short"}),
@@ -113,3 +120,27 @@ class TestVendorReadsStayOpen:
     def test_staff_can_list_purchase_orders(self, client, staff_headers):
         resp = client.get("/api/v1/vendors/purchase-orders", headers=staff_headers)
         assert resp.status_code != 403
+
+
+class TestCatalogManagerRaisesDraftOnly:
+    """Owner ruling 2026-09-28: the catalogue manager raises a DRAFT from the
+    Buy Desk; the store manager checks and sends it. Everything that changes an
+    order after that stays with the managers."""
+
+    def test_catalog_manager_may_raise_a_draft(self, client):
+        resp = client.post(
+            "/api/v1/vendors/purchase-orders",
+            json=_PO_BODY,
+            headers=_headers(["CATALOG_MANAGER"]),
+        )
+        assert resp.status_code != 403
+
+    @pytest.mark.parametrize(
+        "method,path,body,params",
+        [w for w in WRITES if "/purchase-orders/po1" in w[1]],
+    )
+    def test_catalog_manager_cannot_send_edit_or_cancel(
+        self, client, method, path, body, params
+    ):
+        resp = _send(client, method, path, body, params, _headers(["CATALOG_MANAGER"]))
+        assert resp.status_code == 403

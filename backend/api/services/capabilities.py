@@ -133,6 +133,14 @@ def capability_for(method: str, path: str) -> Optional[str]:
     # in the module deny.
     if mod == "online-store" and tmpl.endswith("/clear-rx-hold"):
         return "online-store:rx-clear"
+    # Curated finer capability: raising a DRAFT purchase order. The owner lets
+    # the CATALOG_MANAGER raise one (2026-09-28); collapsing this route into
+    # vendors:write would add that role to the union the grant guard reasons
+    # from, and a catalogue manager could then grant vendor / send / receive
+    # writes to anyone. A 'vendors' module deny still covers it (see
+    # MODULE_EXTRA_DENY_CAPABILITIES).
+    if tmpl == "/api/v1/vendors/purchase-orders" and method.upper() == "POST":
+        return "vendors:po-draft"
     verb = "read" if method.upper() in _READ_METHODS else "write"
     return f"{mod}:{verb}"
 
@@ -259,6 +267,7 @@ MODULE_TO_CAPABILITY_MODULES: Dict[str, List[str]] = {
 # (the rbac capability-union gotcha concerns POLICY rows, not this map).
 MODULE_EXTRA_DENY_CAPABILITIES: Dict[str, List[str]] = {
     "online-store": ["online-store:rx-clear"],
+    "vendors": ["vendors:po-draft"],
 }
 
 

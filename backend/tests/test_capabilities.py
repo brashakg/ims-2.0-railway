@@ -54,12 +54,27 @@ def test_every_non_public_route_maps_to_exactly_one_capability():
 
 def test_capability_universe_nonempty_and_verb_shaped():
     """Every key is ``<module>:read|write`` or a curated key
-    (approvals:approve, products:qc, online-store:rx-clear)."""
+    (approvals:approve, products:qc, online-store:rx-clear, vendors:po-draft)."""
     assert C.VALID_CAPABILITY_KEYS
     for key in C.VALID_CAPABILITY_KEYS:
         assert ":" in key, key
         verb = key.rsplit(":", 1)[1]
-        assert verb in ("read", "write", "approve", "qc", "rx-clear"), key
+        assert verb in ("read", "write", "approve", "qc", "rx-clear", "po-draft"), key
+
+
+def test_po_draft_carveout_keeps_catalog_manager_out_of_vendors_write():
+    """Owner ruling 2026-09-28: the catalogue manager may raise a DRAFT purchase
+    order. That route gets its own key, so CATALOG_MANAGER never joins the
+    vendors:write union the grant guard reasons from (a catalogue manager must
+    not be able to grant vendor / send / receive writes). A 'vendors' module
+    deny still blocks raising a draft."""
+    assert (
+        C.capability_for("POST", "/api/v1/vendors/purchase-orders")
+        == "vendors:po-draft"
+    )
+    assert "CATALOG_MANAGER" in C.capability_roles("vendors:po-draft")
+    assert "CATALOG_MANAGER" not in C.capability_roles("vendors:write")
+    assert "vendors:po-draft" in C.module_deny_to_capability_denies({"vendors": False})
 
 
 def test_clear_rx_hold_is_curated_capability():

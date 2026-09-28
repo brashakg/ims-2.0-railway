@@ -364,10 +364,20 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/vendors/last-cost",
         "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
+    # Owner ruling 2026-09-28: the catalogue manager raises a DRAFT from the Buy
+    # Desk (this door only ever writes a DRAFT); the store manager checks and
+    # sends it. capabilities.capability_for carves this route its own key
+    # (vendors:po-draft) so CATALOG_MANAGER never joins the vendors:write union.
     {
         "method": "POST",
         "path": "/api/v1/vendors/purchase-orders",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": [
+            "ACCOUNTANT",
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "CATALOG_MANAGER",
+        ],
     },
     {
         "method": "POST",
@@ -386,9 +396,21 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/vendors/purchase-orders/{po_id}/timeline",
         "allowed": "AUTHENTICATED",
     },
+    # Edit a DRAFT (qty, cost, lines). The handler refuses anything not DRAFT.
+    {
+        "method": "PUT",
+        "path": "/api/v1/vendors/purchase-orders/{po_id}",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+    },
     {
         "method": "POST",
         "path": "/api/v1/vendors/purchase-orders/{po_id}/cancel",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+    },
+    # Cancel what is still due on one line, with a reason.
+    {
+        "method": "POST",
+        "path": "/api/v1/vendors/purchase-orders/{po_id}/items/{line_index}/cancel",
         "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
     {
