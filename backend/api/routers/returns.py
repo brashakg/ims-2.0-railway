@@ -2871,7 +2871,13 @@ async def create_return(
         purchased = _line_purchased_qty(orig_line)
         item_id = orig_line.get("item_id") or orig_line.get("id")
         product_id = orig_line.get("product_id")
-        already = _already_returned_qty(resolved_order_id, item_id, product_id)
+        # The line's returned_qty is the atomic claim's own count (step 2b); it
+        # also holds the units Goods back put back on a Shopify refund, which
+        # write no return doc -- read it here too, for the clear 400.
+        already = max(
+            _already_returned_qty(resolved_order_id, item_id, product_id),
+            float(orig_line.get("returned_qty") or 0),
+        )
         remaining = round(purchased - already, 4)
         if ret_line.return_qty > remaining + 1e-9:
             name = ret_line.product_name or orig_line.get("product_name") or product_id

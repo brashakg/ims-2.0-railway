@@ -1006,3 +1006,76 @@ def test_no_report_keeps_its_own_copy_of_the_sale_status_sets():
             for c in copies if p.name != "online_order_status.py" and c in p.read_text(encoding="utf-8")]
     assert hits == []
     assert "SHIPPED" in oos.SALE_DONE_STATUSES and "SHIPPED" in oos.BOOKED_STATUSES
+
+
+# ---------------------------------------------------------------------------
+# The counter return door sees a Goods back. Goods back writes no return doc,
+# so the units it puts back are booked returned on the order line -- the
+# count the counter's own atomic claim reads. The counter then cannot take the
+# same unit back a second time (a phantom unit on a live shelf, and the money
+# paid twice); a unit the customer still holds stays returnable.
+# ---------------------------------------------------------------------------
+
+_ADMIN = {"user_id": "adm-1", "roles": ["ADMIN"], "active_store_id": "BV-GANGA-01"}
+
+
+def _counter_return(swept, oid):
+    from api.routers.returns import ReturnCreate, ReturnLine
+
+    doc = _doc(swept, oid)
+    line = doc["items"][0]
+    body = ReturnCreate(order_id=doc["order_id"], return_type="CREDIT_NOTE", items=[ReturnLine(
+        order_item_id=line.get("item_id"), product_id=line.get("ims_product_id"),
+        product_name=line.get("product_name") or "", return_qty=1, unit_price=0.0,
+        condition="GOOD")])
+    return asyncio.run(returns_router.create_return(body=body, current_user=_ADMIN,
+                                                    idempotency_key=None))
+
+
+def _refused(swept, oid):
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as refused:
+        _counter_return(swept, oid)
+    assert refused.value.status_code == 400, refused.value.detail
+    assert "exceeds the returnable quantity 0" in refused.value.detail
+
+
+def test_the_counter_cannot_take_back_the_unit_goods_back_put_back(swept):
+    row = _one_unit_refund(swept, 60174, 700374, status="DELIVERED", payment_status="PARTIAL_REFUND")
+    assert _goods_back(row)["result"]["status"] == "restocked"
+    _refused(swept, 60174)
+    assert _units(swept) == [("stk-1", "AVAILABLE")], "no phantom minted"
+    assert swept["ledger"].count_documents({}) == 0, "no second refund"
+
+
+def test_the_counter_still_takes_back_the_unit_the_customer_holds(swept):
+    """Two frames sold, Shopify refunded one and it came back through Goods
+    back: the counter takes back the OTHER frame, once."""
+    doc = _book(swept, 60175, line_items=[{**_frame_order(60175)["line_items"][0], "quantity": 2}])
+    _claim_unit(swept, doc)
+    swept["stock_repo"].units.append({**swept["stock_repo"].units[0], "stock_id": "stk-2"})
+    _set(swept, 60175, status="DELIVERED", payment_status="PARTIAL_REFUND")
+    shopify_refund.handle_shopify_refund(swept["db"], _refund(700375, 60175), webhook_id=None,
+                                         topic="refunds/create")
+    row = swept["review"].find_one({"shopify_refund_id": "700375"})
+    assert _goods_back(row)["result"]["status"] == "restocked"
+    assert _units(swept) == [("stk-1", "AVAILABLE"), ("stk-2", "SOLD")]
+
+    assert _counter_return(swept, 60175)["return_id"]
+    _refused(swept, 60175)
+    assert _units(swept) == [("stk-1", "AVAILABLE"), ("stk-2", "AVAILABLE")], "no phantom minted"
+
+
+def test_a_goods_back_that_did_not_land_books_nothing_returned(swept, monkeypatch):
+    """No unit went back on a shelf (the restock did not land): the press is
+    released for another go, and so is the returned count -- else the counter
+    would refuse the customer's real return of a unit still SOLD."""
+    from fastapi import HTTPException
+
+    row = _one_unit_refund(swept, 60176, 700376, status="DELIVERED")
+    monkeypatch.setattr(returns_router, "_restock_good_items", lambda *a, **kw: {"applied": False})
+    with pytest.raises(HTTPException) as first:
+        _goods_back(row)
+    assert first.value.status_code == 503 and _units(swept) == [("stk-1", "SOLD")]
+    assert not _doc(swept, 60176)["items"][0].get("returned_qty")

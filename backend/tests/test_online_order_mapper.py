@@ -85,6 +85,11 @@ def _match(doc, filter_) -> bool:
                 elif op == "$exists":
                     if (k in doc) != bool(op_val):
                         return False
+                elif op == "$elemMatch":
+                    # An array element matching the whole sub-filter (the
+                    # returnable-qty claim on an order line).
+                    if not any(isinstance(e, dict) and _match(e, op_val) for e in (actual or [])):
+                        return False
                 else:
                     return False
         else:
@@ -180,7 +185,14 @@ class FakeCollection:
         for op, fields in (update or {}).items():
             if op == "$inc":
                 for k, v in fields.items():
-                    target[k] = (target.get(k) or 0) + v
+                    arr, _, leaf = k.partition(".$.")
+                    if leaf:
+                        # Positional: the first element the $elemMatch matched.
+                        cond = filter_[arr]["$elemMatch"]
+                        el = next(e for e in target[arr] if isinstance(e, dict) and _match(e, cond))
+                        el[leaf] = (el.get(leaf) or 0) + v
+                    else:
+                        target[k] = (target.get(k) or 0) + v
             elif op == "$set":
                 for k, v in fields.items():
                     target[k] = v
