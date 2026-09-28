@@ -19,8 +19,9 @@ POST /online-store/repush-oversell), the second sku -> listing resolver
 (`_products_for_skus`; `online_catalog.listings_for_skus` is the one) and
 the second baseline writer (`zero_stock_ledger_entry`; push_skus_stock's
 write-back is the one), and the pooled parity with its pooled on-hand helper
-(`_pooled_availability`, `_shopify_available_by_item`, `_online_store_ids`;
-multi-location PR 4 compares per location).
+(`_pooled_availability`, `_shopify_available_by_item`, `_online_store_ids`)
+and its pooled task filer (`file_drift_task`; multi-location PR 4 compares
+per location and syncs one task per shop).
 
 Pure-Python AST walk (no rg/grep binary needed), the
 test_no_legacy_stock_collection.py pattern. ONE allowed read of the env
@@ -56,6 +57,8 @@ DEAD_CALLS = {
     "_pooled_availability",
     "_shopify_available_by_item",
     "_online_store_ids",
+    # the pooled drift-task filer (one bare-ref task for the whole chain)
+    "file_drift_task",
 }
 DEAD_NAMES = {"_online_location_cache"}
 # DEAD CALL SHAPES: a live function that must never be called a particular way.

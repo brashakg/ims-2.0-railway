@@ -29,15 +29,22 @@ the shelf, so they are in no row here either.
 
 Tasks: ONE per shop (source_ref ``shopify-stock-parity-drift:<store_id>``) --
 filed on drift, refreshed (description + payload) while the drift persists,
-completed when a later tick compares that shop clean. The pre-PR-4 POOLED task
-(the bare ``shopify-stock-parity-drift`` ref) is never filed again;
+completed when a later tick compares EVERY SKU the task names clean at that
+shop (payload.skus: a SKU leaves the task only by comparing clean -- one
+Shopify skipped, that fell out of the sample or whose IMS side was unknown is
+still owed). A shop that leaves the mapped set (location cleared, claimed by
+two shops, shop deactivated) has its task closed: parity no longer compares
+it, and the writer's own STORE_UNMAPPED / STORE_LOCATION_DUPLICATE task names
+what is left. The pre-PR-4 POOLED task (the bare
+``shopify-stock-parity-drift`` ref) is never filed again;
 scripts/close_pooled_parity_task.py closes the stuck one.
 
 Contract (mirrors the rest of the Shopify bridge):
   * 100% FAIL-SOFT, end to end. No creds / no DB / Shopify error -> a
     structured reason, never a raise. It must NEVER take down SENTINEL.
   * READ-ONLY vs Shopify (single boundary: shopify_push._graphql, injectable).
-    Half an answer is no answer: when any Shopify batch fails, nothing is
+    Half an answer is no answer: when any Shopify batch fails (a raise, no
+    nodes, or top-level `errors` beside a partial nodes list), nothing is
     compared and no task is filed OR closed.
   * The row builder and the comparator are PURE (parity_rows,
     compare_location_parity, unclaimed_locations): unit-tested without a DB
@@ -63,8 +70,6 @@ _SNAPSHOT_RETENTION_DAYS = 30
 _DEFAULT_TOLERANCE = 2
 # Stable dedupe key: at most ONE active parity-drift task PER SHOP.
 _DRIFT_TASK_REF = "shopify-stock-parity-drift:{store_id}"
-# create_system_task's own "still active" statuses (it dedupes on these).
-_ACTIVE_TASK_STATUSES = {"OPEN", "IN_PROGRESS", "ESCALATED"}
 
 # GraphQL: live available per InventoryItem, PER LOCATION.
 # quantities(names:["available"]) is the current Shopify Admin API shape.
@@ -158,11 +163,13 @@ def compare_variant_parity(
     shopify_available}, return the drift summary. A row whose either side is
     None (or junk) is counted as UNKNOWN and never a drift.
 
-    Returns {compared, unknown, drift[], drift_count, max_delta, tolerance}
-    where drift is [{sku, inventory_item_id, store_id, ims, shopify, delta}]
-    sorted by the biggest delta first."""
+    Returns {compared, unknown, drift[], drift_count, max_delta, tolerance,
+    clean_skus[]} where drift is [{sku, inventory_item_id, store_id, ims,
+    shopify, delta}] sorted by the biggest delta first and clean_skus are the
+    SKUs compared within tolerance (what may clear a drift task)."""
     tol = max(0, int(tolerance or 0))
     drift: List[Dict[str, Any]] = []
+    clean: List[Any] = []
     compared = 0
     unknown = 0
     max_delta = 0
@@ -180,7 +187,9 @@ def compare_variant_parity(
         delta = abs(ims - shop)
         if delta > max_delta:
             max_delta = delta
-        if delta > tol:
+        if delta <= tol:
+            clean.append(r.get("sku"))
+        else:
             drift.append(
                 {
                     "sku": r.get("sku"),
@@ -199,6 +208,7 @@ def compare_variant_parity(
         "drift_count": len(drift),
         "max_delta": max_delta,
         "tolerance": tol,
+        "clean_skus": clean,
     }
 
 
@@ -295,8 +305,10 @@ async def shopify_levels_by_item(
         try:
             body = await gql(db, _INV_LEVELS_QUERY, {"ids": chunk})
             nodes = (body.get("data") or {}).get("nodes")
-            if not isinstance(nodes, list):
-                raise ValueError(f"no nodes in the answer: {body.get('errors')}")
+            # Top-level `errors` beside a nodes list is a PARTIAL answer (a
+            # node Shopify failed to resolve comes back null): half an answer.
+            if not isinstance(nodes, list) or body.get("errors"):
+                raise ValueError(f"no full nodes answer: {body.get('errors')}")
         except Exception as exc:  # noqa: BLE001
             logger.warning("[STOCK_PARITY] shopify inventory query failed: %s", exc)
             return None
@@ -343,25 +355,36 @@ def _task_repo(db):
         return None
 
 
+def _task_skus(task: Dict[str, Any]) -> List[str]:
+    """The SKUs an open drift task is about: payload.skus (every drifted SKU),
+    else the SKUs of its top-5 payload.drift rows."""
+    payload = task.get("payload") or {}
+    return list(payload.get("skus") or [d.get("sku") for d in payload.get("drift") or []])
+
+
 def sync_drift_task(repo, store: Dict[str, Any], summary: Dict[str, Any]) -> Optional[str]:
     """ONE shop's drift task, from that shop's own ``compare_location_parity``
     summary (source_ref ``shopify-stock-parity-drift:<store_id>``):
 
       * drift             -> refresh every ACTIVE task's description + payload,
                              or file one when none is active (never a second);
-      * compared, 0 drift -> complete every active task (the drift cleared);
-      * nothing compared  -> leave it alone (unknown is not clear).
+      * 0 drift, every SKU the task names compared CLEAN tonight
+                          -> complete every active task (the drift cleared);
+      * otherwise         -> leave it alone (unknown is not clear: a drifted
+                             SKU Shopify skipped, that fell out of the sample
+                             or whose IMS side was unknown is still owed).
 
-    Returns "filed" | "refreshed" | "closed" | None. Fail-soft."""
+    payload.skus carries every SKU still owed: tonight's drift plus any
+    earlier one not yet compared clean. Returns "filed" | "refreshed" |
+    "closed" | None. Fail-soft."""
+    from .task_triggers import active_tasks
+
     sid = str(store.get("store_id") or "")
     label = store.get("store_code") or store.get("store_name") or sid
     ref = _DRIFT_TASK_REF.format(store_id=sid)
     try:
-        active = [
-            t
-            for t in (repo.find_many({"source_ref": ref}) or [])
-            if str(t.get("status", "")).upper() in _ACTIVE_TASK_STATUSES
-        ]
+        active = active_tasks(repo, ref)
+        owed = {s for t in active for s in _task_skus(t)} - set(summary.get("clean_skus") or [])
         if summary.get("drift_count"):
             worst = (summary.get("drift") or [])[:5]
             lines = ", ".join(
@@ -376,6 +399,7 @@ def sync_drift_task(repo, store: Dict[str, Any], summary: Dict[str, Any]) -> Opt
             payload = {
                 "store_id": sid,
                 "drift": worst,
+                "skus": sorted(owed | {d.get("sku") for d in summary.get("drift") or []}),
                 "drift_count": summary.get("drift_count"),
                 "max_delta": summary.get("max_delta"),
             }
@@ -396,7 +420,7 @@ def sync_drift_task(repo, store: Dict[str, Any], summary: Dict[str, Any]) -> Opt
                 extra={"payload": payload},
             )
             return "filed" if created else None
-        if active and summary.get("compared"):
+        if active and not owed and summary.get("compared"):
             for t in active:
                 repo.complete_task(
                     t.get("task_id"),
@@ -406,6 +430,37 @@ def sync_drift_task(repo, store: Dict[str, Any], summary: Dict[str, Any]) -> Opt
     except Exception as exc:  # noqa: BLE001
         logger.warning("[STOCK_PARITY] drift task sync failed for %s: %s", sid, exc)
     return None
+
+
+def retire_unmapped_drift_tasks(repo, mapped: Dict[str, str]) -> List[str]:
+    """Close the ACTIVE per-shop drift tasks of shops that are no longer in
+    ``mapped`` (location cleared, one location claimed by two shops, shop
+    deactivated or gone). Parity never compares such a shop again, so without
+    this its task was never refreshed nor closed -- OPEN, then ESCALATED,
+    forever: the stuck July pooled task all over again. The writer's own
+    STORE_UNMAPPED / STORE_LOCATION_DUPLICATE task names what is left.
+    Returns the store ids closed. Fail-soft -> []."""
+    from .task_triggers import active_tasks
+
+    prefix = _DRIFT_TASK_REF.format(store_id="")
+    out: List[str] = []
+    try:
+        for t in active_tasks(repo, {"$regex": "^" + prefix}):
+            sid = str(t.get("source_ref") or "")[len(prefix):]
+            if sid and sid not in mapped:
+                repo.complete_task(
+                    t.get("task_id"),
+                    notes=(
+                        f"Auto-closed: {sid} no longer has a usable Shopify location "
+                        "(cleared, shared with another shop, or the shop is inactive), "
+                        "so its stock is no longer compared."
+                    ),
+                )
+                if sid not in out:
+                    out.append(sid)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[STOCK_PARITY] unmapped drift-task retire failed: %s", exc)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -518,7 +573,10 @@ async def run_parity_tick(
             return snap
 
         cmp = compare_location_parity(parity_rows(variants, quantities, levels, mapped), tolerance)
-        claimed = {str(s.get("shopify_location_id") or "") for s in stores} - {""}
+        # The writer's own definition (inventory._mapped): a location two shops
+        # claim is mapped by neither, so the units Shopify sells there are
+        # unclaimed -- never silently "someone's".
+        claimed = set(mapped.values())
         per_store = cmp["stores"]
         snapshot = {
             **base,
@@ -554,6 +612,7 @@ async def run_parity_tick(
                     outcome = sync_drift_task(repo, store, per_store.get(sid) or {})
                     if outcome:
                         snapshot["tasks"][outcome].append(sid)
+            snapshot["tasks"]["closed"] += retire_unmapped_drift_tasks(repo, mapped)
         snapshot["task_filed"] = bool(snapshot["tasks"]["filed"])
 
         _store_snapshot(db, snapshot)

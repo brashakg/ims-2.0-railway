@@ -156,6 +156,17 @@ def _as_dt(v: Any) -> Optional[datetime]:
 # ---------------------------------------------------------------------------
 
 
+def active_tasks(repo: Any, source_ref: Any) -> List[Dict[str, Any]]:
+    """The ACTIVE (open / in progress / escalated) tasks on ``source_ref`` --
+    THE dedupe read. The status filter is IN the query: the repository's
+    default page is 100 rows, so a ref with 100 closed episodes pushed its one
+    open row off the page and every re-run filed a new task (and a closer
+    found none to close). ``source_ref`` may be a Mongo condition (a prefix
+    ``$regex``). Raises on a read error; callers decide."""
+    rows = repo.find_many({"source_ref": source_ref, "status": {"$in": sorted(_ACTIVE)}}) or []
+    return [t for t in rows if str(t.get("status", "")).upper() in _ACTIVE]
+
+
 def create_system_task(
     repo: Any,
     *,
@@ -179,11 +190,7 @@ def create_system_task(
     if repo is None:
         return None
     try:
-        existing = repo.find_many({"source_ref": dedupe_ref}) or []
-        if any(
-            str(t.get("status", "")).upper() in {"OPEN", "IN_PROGRESS", "ESCALATED"}
-            for t in existing
-        ):
+        if active_tasks(repo, dedupe_ref):
             return None
     except Exception:  # noqa: BLE001
         pass  # dedupe is best-effort

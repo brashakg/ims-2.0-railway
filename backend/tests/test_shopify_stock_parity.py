@@ -11,10 +11,14 @@ Pins, each with its revert named in the test:
   * unmapped holders (Pune) and unclaimed Shopify locations are REPORTED,
     never drift, never a drift task.
   * the IMS side is the writer's own call: a non-zero safety buffer is not
-    drift.
+    drift, and neither is the SUPERADMIN online block.
+  * a location two shops claim is UNCLAIMED (the writer's definition).
   * ONE drift task PER SHOP: filed, refreshed while drift persists (never a
-    second one), closed when the shop compares clean; the old pooled ref is
-    never filed; a failed Shopify read or an unread shop closes nothing.
+    second one), closed only when every SKU it names compares clean, filed
+    AGAIN when the drift returns; the old pooled ref is never filed; a failed
+    or partial Shopify read, a skipped drifted SKU or an unread shop closes
+    nothing; a shop that leaves the mapped set has its task closed; an open
+    task is found past 100 closed ones.
   * fail-soft: no creds, a raising shop list -> a reason, never a raise.
 
 StrictDB + injected Shopify boundary -- no network, no production.
@@ -317,6 +321,13 @@ def test_tick_one_task_per_shop_filed_refreshed_then_closed():
     (task,) = _tasks(db)
     assert task["status"] == "COMPLETED"
 
+    # tick 4 -> the drift RETURNS -> a NEW open task (the closed one is history,
+    # never "refreshed" out of sight). Count COMPLETED as active -> tick 4
+    # reports `refreshed` onto the closed task and nobody sees an open one.
+    out = _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 0, LOC_B: 1}, INV_2: {}})))
+    assert out["tasks"] == {"filed": ["BV-A"], "refreshed": [], "closed": []}
+    assert sorted(t["status"] for t in _tasks(db)) == ["COMPLETED", "OPEN"]
+
 
 def test_tick_an_escalated_task_is_refreshed_not_duplicated():
     db = _db({"SKU-1": {"BV-A": 5, "BV-B": 1}})
@@ -347,6 +358,139 @@ def test_tick_a_partial_shopify_read_closes_nothing(monkeypatch):
     assert out["checked"] is False and "read failed" in out["reason"]
     assert out["tasks"]["closed"] == []
     assert _tasks(db)[0]["status"] == "OPEN"
+
+
+def test_levels_reader_top_level_errors_beside_nodes_is_a_failed_read():
+    """Shopify can answer a list of nodes WITH top-level `errors` (a node it
+    failed to resolve comes back null). Half an answer is no answer. Drop the
+    `or body.get("errors")` -> the reader returns INV_1 alone -> this fails."""
+
+    async def gql(db, query, variables):  # noqa: ARG001
+        return {
+            "data": {"nodes": [{"id": INV_1, "inventoryLevels": {"edges": []}}, None]},
+            "errors": [{"message": "Internal error", "path": ["nodes", 1]}],
+        }
+
+    assert _run(sp.shopify_levels_by_item(None, [INV_1, INV_2], graphql=gql)) is None
+
+
+def _partial(levels, *, errors=False):
+    """INV_1 answered from `levels`, INV_2 answered null (a deleted item, or a
+    per-node failure when `errors`)."""
+    clean = _shopify(levels)
+
+    async def gql(db_, query, variables):
+        body = await clean(db_, query, variables)
+        body["data"]["nodes"].append(None)
+        if errors:
+            body["errors"] = [{"message": "Internal error", "path": ["nodes", 1]}]
+        return body
+
+    return gql
+
+
+def test_tick_a_partial_answer_with_errors_closes_nothing():
+    """The panel's P3 input: BV-A's open task is about SKU-2 (IMS 5 vs
+    Shopify 0). Tonight Shopify answers INV_1 and a null INV_2 plus a
+    top-level error. Nothing is compared and the task stays OPEN."""
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 5, "BV-B": 0}})
+    _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 0, LOC_B: 0}})))
+    (task,) = _tasks(db)
+    assert task["payload"]["skus"] == ["SKU-2"]
+    out = _run(sp.run_parity_tick(db, graphql=_partial({INV_1: {LOC_A: 1, LOC_B: 1}}, errors=True)))
+    assert out["checked"] is False and out["tasks"]["closed"] == []
+    assert _tasks(db)[0]["status"] == "OPEN"
+
+
+def test_tick_a_drifted_sku_that_was_not_re_read_keeps_its_task_open():
+    """Night 1: SKU-2 drifts at BV-A. Night 2: a CLEAN answer (no errors) but
+    INV_2 comes back null (deleted item), SKU-1 compares clean. The task names
+    SKU-2, SKU-2 was never re-read -> the task stays OPEN; night 3 re-reads
+    SKU-2 clean -> closed. Revert the close gate to `if active and
+    summary.get("compared"):` (drop `not owed`) -> night 2 closes it on a read
+    that skipped the drifted SKU -> this fails."""
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 5, "BV-B": 0}})
+    _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 0, LOC_B: 0}})))
+    out = _run(sp.run_parity_tick(db, graphql=_partial({INV_1: {LOC_A: 1, LOC_B: 1}})))
+    bva = next(s for s in out["stores"] if s["store_id"] == "BV-A")
+    assert out["checked"] is True and bva["compared"] == 1 and bva["unknown"] == 1
+    assert out["tasks"]["closed"] == [] and _tasks(db)[0]["status"] == "OPEN"
+    out = _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 5, LOC_B: 0}})))
+    assert out["tasks"]["closed"] == ["BV-A"] and _tasks(db)[0]["status"] == "COMPLETED"
+
+
+def test_tick_a_drifted_sku_whose_ims_side_went_unknown_keeps_its_task_open():
+    """Same gate, IMS side: SKU-2 drifted, then its spine row is gone (IMS
+    unknown) while SKU-1 compares clean -> still owed, still OPEN."""
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 5, "BV-B": 0}})
+    shop = _shopify({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 0, LOC_B: 0}})
+    _run(sp.run_parity_tick(db, graphql=shop))
+    db.get_collection("products").delete_many({"sku": "SKU-2"})
+    out = _run(sp.run_parity_tick(db, graphql=shop))
+    assert out["tasks"]["closed"] == [] and _tasks(db)[0]["status"] == "OPEN"
+
+
+def test_tick_ims_side_carries_the_online_block():
+    """SKU-1 is in a SUPERADMIN online-blocked collection: the writer sends 0
+    at every shop, Shopify holds 0 -- a correct system. The IMS side must be
+    the writer's own call. A second computation that loops the shops with
+    recommend_allocation(_on_hand_for_skus(...), _safety_buffer(db)) keeps the
+    buffer but drops the block -> IMS 5 / 4 vs 0 -> drift tasks at BV-A and
+    BV-B -> this fails."""
+    db = _db({"SKU-1": {"BV-A": 5, "BV-B": 4}})
+    db.seed("ecom_collections", [{"collection_id": "C-BAN", "collection_type": "CUSTOM",
+                                  "online_sync_blocked": True, "products": [{"sku": "SKU-1"}]}])
+    out = _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 0, LOC_B: 0}, INV_2: {LOC_A: 0, LOC_B: 0}})))
+    assert out["compared"] == 4
+    assert out["drift_count"] == 0, out["drift"]
+    assert _tasks(db) == []
+
+
+def test_tick_a_location_two_shops_claim_is_unclaimed():
+    """BV-B and BV-C both point at LOC_B (a doc written around the 409 door):
+    the writer maps NEITHER, so the 7 units Shopify sells at LOC_B are
+    written by nobody. Parity reports them. Revert `claimed` to the raw set of
+    every shop's location -> LOC_B counts as claimed -> a fully green check ->
+    this fails."""
+    db = _db({"SKU-1": {"BV-A": 1}})
+    db.seed("stores", [_store("BV-C", LOC_B)])
+    out = _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 1, LOC_B: 7}, INV_2: {}})))
+    assert [s["store_id"] for s in out["stores"]] == ["BV-A"]
+    assert out["unclaimed_locations"] == [{"location_id": LOC_B, "units": 7, "skus": ["SKU-1"]}]
+
+
+def test_tick_a_shop_that_left_the_mapped_set_has_its_task_closed():
+    """BV-A has an open drift task; its location is then cleared. Parity never
+    compares BV-A again, so nothing would ever refresh or close the task. The
+    tick closes it. Drop the retire call -> tasks all empty, the task OPEN
+    forever -> this fails. The pooled ref is not touched (the script's job)."""
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}})
+    db.seed("tasks", [
+        {"task_id": "T-1", "source_ref": "shopify-stock-parity-drift:BV-A", "status": "ESCALATED"},
+        {"task_id": "T-0", "source_ref": "shopify-stock-parity-drift", "status": "ESCALATED"},
+    ])
+    db.get_collection("stores").update_one({"store_id": "BV-A"}, {"$unset": {"shopify_location_id": ""}})
+    out = _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_B: 1}, INV_2: {}})))
+    assert out["tasks"]["closed"] == ["BV-A"]
+    by_id = {t["task_id"]: t["status"] for t in _tasks(db)}
+    assert by_id == {"T-1": "COMPLETED", "T-0": "ESCALATED"}
+
+
+def test_tick_finds_the_open_task_past_100_closed_ones():
+    """100 closed episodes, then an OPEN task, on BV-A's ref. The repo's
+    default page is 100 rows: without the status filter IN the query the OPEN
+    row falls off it -> every drifting night files a NEW task and a clean
+    night closes none. Drop the status filter from task_triggers.active_tasks
+    -> this fails."""
+    db = _db({"SKU-1": {"BV-A": 5, "BV-B": 1}})
+    ref = "shopify-stock-parity-drift:BV-A"
+    db.seed("tasks", [{"task_id": f"T-{i}", "source_ref": ref, "status": "COMPLETED"} for i in range(100)]
+            + [{"task_id": "T-OPEN", "source_ref": ref, "status": "OPEN"}])
+    out = _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {}})))
+    assert out["tasks"] == {"filed": [], "refreshed": ["BV-A"], "closed": []}
+    out = _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 5, LOC_B: 1}, INV_2: {}})))
+    assert out["tasks"]["closed"] == ["BV-A"]
+    assert [t for t in _tasks(db) if t["status"] != "COMPLETED"] == []
 
 
 def test_tick_a_shop_ims_could_not_read_keeps_its_task_open(monkeypatch):

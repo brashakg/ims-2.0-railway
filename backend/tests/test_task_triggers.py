@@ -18,6 +18,7 @@ from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from api.services.task_triggers import (  # noqa: E402
     create_system_task,
@@ -98,6 +99,23 @@ def test_create_system_task_creates_and_dedupes():
                               category="Inventory", store_id="s1",
                               dedupe_ref="stockcount:c1") is None
     assert repo2.created is None
+
+
+def test_create_system_task_dedupes_past_100_closed_episodes():
+    """100 closed episodes, then ONE open task, on one ref (a real
+    TaskRepository over StrictDB). The repo's default page is 100 rows: with
+    no status filter IN the dedupe query the open row falls off the page and a
+    duplicate is filed. Drop the filter from active_tasks -> this fails."""
+    from strict_fakes import StrictDB
+    from database.repositories.task_repository import TaskRepository
+
+    db = StrictDB()
+    db.seed("tasks", [{"task_id": f"T-{i}", "source_ref": "r1", "status": "COMPLETED"} for i in range(100)]
+            + [{"task_id": "T-OPEN", "source_ref": "r1", "status": "OPEN"}])
+    repo = TaskRepository(db.get_collection("tasks"))
+    assert create_system_task(repo, title="x", description="d", priority="P2",
+                              category="Inventory", store_id="s1", dedupe_ref="r1") is None
+    assert len(db.get_collection("tasks").docs) == 101
 
 
 def _client_as(roles):
