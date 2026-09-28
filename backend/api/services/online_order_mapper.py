@@ -937,20 +937,27 @@ def _sync_existing_order_status(
     # status IMS holds (never backwards; DELIVERED is the courier's; a
     # finished order stays finished) -- after the money leg below.
     from .online_order_status import CANCEL, apply_fact, order_fact
+    from .shopify_fulfillment import fulfilment_body_stale
 
-    fact = order_fact(payload)
+    # The body's fulfilments run on the reconcile's clock, not the order's: a
+    # body older than the fulfilment IMS applied (a pulled body, or a retried
+    # orders/paid, landing after a fulfillments/update) states no
+    # fulfillment_status -- even when its payment or cancel fact still lands.
+    ful_stale = fulfilment_body_stale(existing, payload)
+    fact = order_fact(payload, ful_stale=ful_stale)
 
     # LIFECYCLE fields never depend on the payments snapshot (only on the
     # payload + `now`), so they are computed and written ONCE, unconditionally
     # -- no race window to close here. No `status` and no `cancelled_at`: those
     # land only with a real move to CANCELLED, through apply_fact's claim.
     lifecycle_update: Dict[str, Any] = {
-        "fulfillment_status": st["fulfillment_status"],
         # NAIVE-UTC DATETIME, matching how ingest stamps order date fields -- an
         # ISO string here would flip backfilled datetime updated_at values back
         # to strings on every status webhook (mixed-type regeneration).
         "updated_at": datetime.now(timezone.utc).replace(tzinfo=None),
     }
+    if not ful_stale:
+        lifecycle_update["fulfillment_status"] = st["fulfillment_status"]
     # Persist the applied staleness watermark (the payload's own updated_at) so a
     # later STALE re-delivery is detected by the guard above. Lifecycle field --
     # always applied, even if the money leg below has to retry/defer.
@@ -1285,6 +1292,15 @@ def map_shopify_order(
         # can never dedup is recorded as an unidentified sale, NOT a phantom record.
         if status == "created":
             _stamp_order_customer(db, shopify_order_id, customer_id)
+            # An order first seen through orders/cancelled | fulfilled |
+            # updated (the create webhook was missed) gets its real status now,
+            # on the drain as on the pull's catch-up: the body's ONE lifecycle
+            # fact through the transition table. The "created" result keeps
+            # its shape.
+            from .online_order_status import order_fact
+
+            if order_fact(payload) is not None:
+                _sync_existing_order_status(db, shopify_order_id, payload)
 
         # On a duplicate / replayed delivery the order already exists -> SYNC its
         # status from this payload (it may be an orders/updated or orders/paid that

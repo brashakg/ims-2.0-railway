@@ -55,6 +55,33 @@ def _norm(value: Any) -> str:
 FULFILLMENT_WATERMARK = "shopify_fulfillment_updated_at"
 
 
+def newest_fulfilment(order: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The newest fulfilment on a Shopify order body (None when it carries
+    none). reconcile_fulfillment stores exactly ONE fulfilment id per order,
+    so only the newest one is compared."""
+    from .shopify_ingest import _to_naive_utc
+
+    rows = [f for f in (order.get("fulfillments") or []) if isinstance(f, dict) and f.get("id")]
+    if not rows:
+        return None
+    return max(
+        rows,
+        key=lambda f: _to_naive_utc(f.get("updated_at") or f.get("created_at")) or datetime.min,
+    )
+
+
+def fulfilment_body_stale(existing: Dict[str, Any], body: Dict[str, Any]) -> bool:
+    """ONE fulfilment-clock check for the mapper and the hourly pull sweep: an
+    order body whose newest fulfilment (the body itself when it carries none)
+    is STRICTLY older than the fulfilment IMS last applied (the reconcile's
+    FULFILLMENT_WATERMARK) states no fulfillment_status fact -- writing it
+    would rewind SHIPPED / FULFILLED. Only the reconcile moves the watermark;
+    this only reads it. Fail-open (the mapper's stale rule)."""
+    from .online_order_mapper import _shopify_payload_stale
+
+    return _shopify_payload_stale(existing, newest_fulfilment(body) or body, field=FULFILLMENT_WATERMARK)
+
+
 def _tracking_fields(payload: Dict[str, Any]) -> Dict[str, str]:
     """The tracking fields a fulfilment payload $sets on the IMS order -- only
     the NON-EMPTY ones: an empty one never clears what an older fulfilment

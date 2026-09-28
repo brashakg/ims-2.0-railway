@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import datetime
 
 import pytest
 
@@ -339,3 +340,49 @@ def test_a_delivered_order_shopify_cancels_stays_delivered_with_one_task_forever
     assert rows[0]["title"].startswith(f"Shopify {verb} order ")
     assert "decide: refund, return or Shopify mistake" in rows[0]["title"]
     assert "counter return door" in rows[0]["description"]
+
+
+NEWER = "2026-09-06T03:00:00Z"
+
+
+def test_a_stale_body_never_rewinds_a_fulfilment_when_its_money_lands(swept):
+    """Finding (c): the reconcile applied FULFILLED / in_transit at 03:00; a
+    body stamped 01:00 (unfulfilled, now paid) arrives through the sweep and
+    through the drain. Its payment is a fact and lands; its fulfillment_status
+    predates the fulfilment IMS applied (the reconcile's clock, read by the
+    mapper itself) and never rewinds it -- SHIPPED stays SHIPPED."""
+    for oid in (60090, 60091):
+        _book(swept, oid, financial_status="pending")
+        shopify_fulfillment.reconcile_fulfillment(
+            swept["db"], _fulfilment(oid, 1, shipment_status="in_transit", updated_at=NEWER))
+        assert (_doc(swept, oid)["status"], _doc(swept, oid)["fulfillment_status"]) == ("SHIPPED", "FULFILLED")
+
+    swept["state"]["orders"] = [_pulled(60090)]
+    assert swept["run"]().payload["status_synced"] == ["60090"]
+    res = swept["real_map"](_pulled(60091), swept["db"], webhook_id="paid-60091", topic="orders/paid")
+    assert res["status_synced"] is True
+
+    for oid in (60090, 60091):
+        doc = _doc(swept, oid)
+        assert (doc["payment_status"], doc["fulfillment_status"], doc["status"]) == (
+            "PAID", "FULFILLED", "SHIPPED")
+        assert doc["shopify_fulfillment_updated_at"] == datetime(2026, 9, 6, 3, 0), "the mapper never moves it"
+
+
+def test_an_order_first_seen_through_a_status_topic_gets_its_real_status(swept):
+    """The create webhook was missed: an orders/cancelled on the drain books
+    the order AND lands CANCELLED (it used to stay CONFIRMED); the pull's
+    catch-up does the same in ONE mapper call."""
+    res = swept["real_map"](_pulled(60100, cancelled_at=CANCELLED_AT, financial_status="refunded"),
+                            swept["db"], webhook_id="c-60100", topic="orders/cancelled")
+    assert res["status"] == "created" and res["order_id"]
+    doc = _doc(swept, 60100)
+    assert (doc["status"], doc["cancelled_at"], doc["shopify_cancelled_at"]) == (
+        "CANCELLED", CANCELLED_AT, CANCELLED_AT)
+    assert doc["status_history"][-1]["changed_by"] == "system:ONLINE_MAP"
+
+    swept["state"]["orders"] = [_pulled(60101, fulfillment_status="fulfilled")]
+    p = swept["run"]().payload
+    assert p["mapped"] == ["60101"] and swept["seen"] == ["60101"], "one mapper call"
+    assert _doc(swept, 60101)["status"] == "SHIPPED"
+    assert len(swept["orders"].docs) == 2

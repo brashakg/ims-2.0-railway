@@ -265,9 +265,8 @@ def _catch_up_one(db, order: Dict[str, Any], sid: str, live: bool) -> tuple:
         result = map_shopify_order(order, db, webhook_id=None, topic="orders/create")
         status = result.get("status")
         if status == "created":
-            # The orders/updated delivery that already followed on Shopify's
-            # side: lands paid / cancelled / fulfilled onto the fresh order.
-            map_shopify_order(order, db, webhook_id=None, topic="orders/updated")
+            # The create path itself lands the body's lifecycle fact
+            # (cancelled / refunded / fulfilled) through the transition table.
             return "mapped", None
         if status in ("duplicate", "replayed") and result.get("order_id"):
             return "already_in_ims", None  # booked between the pre-check and the mapper
@@ -325,17 +324,10 @@ _SWEEP_SETTLED = {
 
 
 def _newest_fulfilment(order: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """reconcile_fulfillment stores exactly ONE fulfilment id per order, so
-    only the newest Shopify fulfilment is compared."""
-    from api.services.shopify_ingest import _to_naive_utc
+    """The sweep's hook onto shopify_fulfillment.newest_fulfilment."""
+    from api.services.shopify_fulfillment import newest_fulfilment
 
-    rows = [f for f in (order.get("fulfillments") or []) if isinstance(f, dict) and f.get("id")]
-    if not rows:
-        return None
-    return max(
-        rows,
-        key=lambda f: _to_naive_utc(f.get("updated_at") or f.get("created_at")) or datetime.min,
-    )
+    return newest_fulfilment(order)
 
 
 def _fulfilment_moved(f: Dict[str, Any], existing: Dict[str, Any]) -> bool:
@@ -405,7 +397,7 @@ def _sweep_booked_order(db, order, raw, existing, sid: str, live: bool) -> tuple
         _shopify_payload_stale,
         map_shopify_order,
     )
-    from api.services.shopify_fulfillment import FULFILLMENT_WATERMARK, reconcile_fulfillment
+    from api.services.shopify_fulfillment import fulfilment_body_stale, reconcile_fulfillment
     from api.services.shopify_refund import _refund_already_processed, handle_shopify_refund
 
     key = f"pull:{sid}:{raw.get('updated_at') or ''}"
@@ -475,9 +467,10 @@ def _sweep_booked_order(db, order, raw, existing, sid: str, live: bool) -> tuple
             # so the end state is the drain's (both legs decide through the ONE
             # transition table, online_order_status).
             f = _newest_fulfilment(raw)
-            # No fulfilment on the body at all: the body itself predates the one
-            # IMS holds when it is older than that fulfilment's stamp.
-            ful_stale = _shopify_payload_stale(existing, f or raw, field=FULFILLMENT_WATERMARK)
+            # The mapper's own fulfilment-clock check (no fulfilment on the
+            # body at all: the body itself predates the one IMS holds when it
+            # is older than that fulfilment's stamp).
+            ful_stale = fulfilment_body_stale(existing, raw)
             if f is not None and not ful_stale and _fulfilment_moved(f, existing):
                 res = feed("fulfillments/update", f, lambda: reconcile_fulfillment(db, f, topic="fulfillments/update"))
                 # The same transition table held the SHIPPED / DELIVERED flip back.
