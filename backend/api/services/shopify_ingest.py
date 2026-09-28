@@ -355,7 +355,8 @@ def _online_store_id(payload: Dict[str, Any]) -> str:
     config `online_store_id`; defaults to a stable virtual store). Since
     multi-location PR 5 a live order is billed by its SHIPPING SHOP
     (online_fulfillment_route.route_order); this bucket bills only a
-    historical import and an order no shop could be found for (route NONE)."""
+    historical import and an order no shop could be found for (route NONE,
+    which claims nothing and is held under SELLER_UNKNOWN)."""
     import os
 
     return (
@@ -436,8 +437,7 @@ def _raise_fallback_ship_tasks(
                 title=f"Online order {order_ref}: ship {units} unit(s) from your store",
                 description=(
                     f"{units} unit(s) of this paid online order were allocated to "
-                    "your store (the shop it ships from, and the GSTIN its tax "
-                    "invoice is issued from). Pack and hand them to dispatch. "
+                    "your store to ship. Pack and hand them to dispatch. "
                     "Products: "
                     + ", ".join(str(r.get("product_id")) for r in lines)
                 ),
@@ -544,14 +544,16 @@ def _record_stock_miss(db, order_id, store_id, reason, detail=None) -> None:
 
         order_ref = (order or {}).get("order_number") or order_id
         expected = claimed = None
+        short_at: List[str] = []
         if isinstance(detail, dict):
             expected = detail.get("expected")
             claimed = detail.get("claimed")
+            short_at = [str(s) for s in detail.get("short_stores") or []]
         units_bit = (
             f" Units: {claimed} of {expected} claimed."
             if expected is not None
             else ""
-        )
+        ) + (f" Short at: {', '.join(short_at)}." if short_at else "")
         create_system_task(
             get_task_repository(),
             title=f"Online order {order_ref}: PAID but stock could not be claimed",
@@ -1562,7 +1564,7 @@ def ingest_shopify_order(
     # printed legal entity (print_identity) and credit notes -- so no second
     # GSTIN picker exists. The stockless online bucket bills only a HISTORICAL
     # import (units shipped long ago) or an order no shop could be found for
-    # (route reason NONE, stamped on the order).
+    # (route reason NONE: nothing claimed, held under SELLER_UNKNOWN).
     route: Optional[Dict[str, Any]] = None
     if not historical:
         try:
@@ -1593,37 +1595,25 @@ def ingest_shopify_order(
             store_doc = store_repo.find_by_id(store_id)
     except Exception:  # noqa: BLE001
         store_doc = None
-    # A named shipping shop whose GSTIN cannot issue this order's tax invoice
-    # (none, another state's, or a Shopify split across GSTINs) HOLDS the
-    # order: goods must not leave before their invoice can be issued. It owns
-    # the stock-hold reason; route["hold_reason"] stays the pending-move text a
-    # move lifts, so a successful move never releases a seller hold.
+    # An order whose seller cannot issue its tax invoice (no shop named; a
+    # shipping or split-leg shop without its own state's GSTIN; a Shopify
+    # split across GSTINs) HOLDS the order: goods must not leave before their
+    # invoice can be issued. online_fulfillment_route.seller_problem is THE
+    # check -- the invoice door, the challan, the e-invoice and GSTR-1 refuse
+    # on the same one. It owns the stock-hold reason; route["hold_reason"]
+    # stays the pending-move text a move lifts, so a move never releases it.
     seller_hold: Optional[str] = None
     if route is not None:
-        # Q1 on the seller actually billed: the shipping shop's own GSTIN, or
-        # -- no shop named -- the bucket, which is never right and always loud.
-        from .online_fulfillment_route import (
-            gstin_problem,
-            seller_unknown_problem,
-            split_seller_problem,
-        )
+        from .online_fulfillment_route import seller_problem
 
-        bad_seller = (
-            gstin_problem(store_doc)
-            if route.get("store_id")
-            else seller_unknown_problem(store_id)
+        bad_seller = seller_problem(
+            {"store_id": store_id, "fulfillment_route": route},
+            store_doc,
+            getattr(store_repo, "find_by_id", lambda _sid: None),
         )
-        if route.get("store_id") and not bad_seller and route.get("split"):
-            legs = sorted({r["store_id"] for r in route["split"]} - {store_id})
-            try:
-                leg_docs = [store_repo.find_by_id(s) for s in legs]
-            except Exception:  # noqa: BLE001 -- unreadable = not provably the same GSTIN
-                leg_docs = [None for _ in legs]
-            bad_seller = split_seller_problem(store_doc, leg_docs)
         if bad_seller:
             route["problems"].append(bad_seller)
-            if route.get("store_id"):
-                seller_hold = bad_seller["message"]
+            seller_hold = bad_seller["message"]
 
     # Synthesize a customer-shaped dict carrying the buyer's delivery state so
     # the shared splitter resolves the place of supply.
@@ -1936,10 +1926,13 @@ def ingest_shopify_order(
     # qty to Shopify so the online listing can't oversell either. BOTH fail-soft:
     # Shopify already took payment, so a stock-side error must NEVER raise out of
     # ingestion -- the invoice is booked regardless and the reconcile sweep
-    # (online_sync_health) catches any miss. With no shop (route NONE) store_id
-    # is the stockless online bucket: nothing is claimed and the miss is loud.
-    fulfillment_store = store_id
+    # (online_sync_health) catches any miss. Units are claimed ONLY at a shop
+    # route_order named: with none (route NONE) nothing is claimed -- never at
+    # the bill store, which then comes from the mapper's bucket picker -- the
+    # miss is loud and SELLER_UNKNOWN holds the order.
+    fulfillment_store = (route or {}).get("store_id")
     fulfilled_stores: List[str] = []
+    breakdown: List[Dict[str, Any]] = []
     try:
         # _mark_units_sold claims by IMS product_id; map each line's resolved
         # ims_product_id onto product_id (the Shopify product_id is NOT the IMS
@@ -1964,34 +1957,16 @@ def ingest_shopify_order(
                     )
             else:
                 plan[fulfillment_store] = decrement_items
-            claimed, breakdown = 0, []
+            claimed = 0
+            short: List[Any] = []  # the shops that could not claim their own part
             for shop, lines in plan.items():
                 n, rows = _claim_units_at(db, order_id, lines, shop)
                 claimed += n
                 breakdown.extend(rows)
+                if n < sum(int(ln.get("quantity") or 1) for ln in lines):
+                    short.append(shop)
             fulfilled_stores.extend(sorted({str(r["store_id"]) for r in breakdown}))
             if breakdown:
-                try:
-                    coll = (
-                        db.get_collection("orders")
-                        if hasattr(db, "get_collection")
-                        else db["orders"]
-                    )
-                    coll.update_one(
-                        {"order_id": order_id},
-                        {
-                            "$set": {
-                                "fulfillment_breakdown": breakdown,
-                                "fulfillment_stores": fulfilled_stores,
-                            }
-                        },
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "[SHOPIFY_INGEST] breakdown persist skipped for %s: %s",
-                        order_id,
-                        exc,
-                    )
                 from .online_fulfillment_route import fallback_store_id
 
                 _raise_fallback_ship_tasks(
@@ -2009,20 +1984,38 @@ def ingest_shopify_order(
             # loudly so the sync-health tile + Sentry surface it instead of it
             # slipping by as a warning.
             if claimed < expected:
+                # Tasked at the SHORT shop (a split leg's own shop, not the
+                # billing one) and named. No shop at all (route NONE): no
+                # shop's staff are told to find goods for an order no shop
+                # was named for -- the task is HQ's, like SELLER_UNKNOWN's.
+                # ponytail: one task per order -- a split short at two shops
+                # tasks the first and names both.
+                short_shops = [s for s in short if s]
                 _record_stock_miss(
                     db,
                     order_id,
-                    fulfillment_store,
+                    (short_shops or [fulfillment_store])[0],
                     "under_claim",
                     {
                         "expected": expected,
                         "claimed": claimed,
-                        "stores_tried": fulfilled_stores or [fulfillment_store],
+                        "stores_tried": [s for s in plan if s],
+                        "short_stores": short_shops,
                         "route": (route or {}).get("reason"),
                     },
                 )
     except Exception as exc:  # noqa: BLE001
         _record_stock_miss(db, order_id, fulfillment_store, "exception", str(exc))
+    # The claim is SETTLED: its record -- even an empty one -- is what
+    # online_fulfillment_route.move_fulfillment_orders waits for before it
+    # judges a planned move (a duplicate delivery can reach it mid-claim).
+    try:
+        orders_coll.update_one(
+            {"order_id": order_id},
+            {"$set": {"fulfillment_breakdown": breakdown, "fulfillment_stores": fulfilled_stores}},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[SHOPIFY_INGEST] breakdown persist skipped for %s: %s", order_id, exc)
     if route is not None:
         from .online_fulfillment_route import raise_problem_tasks
 

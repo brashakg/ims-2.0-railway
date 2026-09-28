@@ -201,6 +201,7 @@ def _assemble_invoice(order_id: str, current_user: dict):
         # GST compliance: store must have GSTIN configured before generating invoice
         store_id = order.get("store_id") or current_user.get("active_store_id")
         store_doc = None
+        store_repo = None
         if store_id:
             try:
                 from ...dependencies import get_store_repository
@@ -208,28 +209,27 @@ def _assemble_invoice(order_id: str, current_user: dict):
                 store_repo = get_store_repository()
                 if store_repo:
                     store_doc = store_repo.find_by_id(store_id)
-                    if store_doc and not store_doc.get("gstin"):
-                        raise HTTPException(
-                            status_code=400,
-                            detail="Cannot generate invoice: store GSTIN is not configured. "
-                            "Update store settings with a valid GSTIN first.",
-                        )
-                    # A routed online order is invoiced from its shipping
-                    # shop's OWN GSTIN for the shop's state (owner Q1) -- the
-                    # same rule its booking held it on. POS keeps the check above.
-                    if store_doc and order.get("fulfillment_route"):
-                        from ...services.online_fulfillment_route import gstin_problem
-
-                        bad = gstin_problem(store_doc)
-                        if bad:
-                            raise HTTPException(
-                                status_code=400,
-                                detail=f"Cannot generate invoice: {bad['message']}",
-                            )
-            except HTTPException:
-                raise
             except Exception:
-                pass  # don't block invoice if store lookup fails
+                pass  # don't block a POS invoice if store lookup fails
+        if store_doc and not store_doc.get("gstin"):
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot generate invoice: store GSTIN is not configured. "
+                "Update store settings with a valid GSTIN first.",
+            )
+        # A routed online order: THE seller check its booking held it on
+        # (owner Q1 -- the shipping shop's and every split-leg shop's OWN
+        # GSTIN, one GSTIN per order, a named shop). An unreadable shop is
+        # not provably fine: refused.
+        from ...services.online_fulfillment_route import seller_problem
+
+        bad = seller_problem(
+            order, store_doc, getattr(store_repo, "find_by_id", lambda _sid: None)
+        )
+        if bad:
+            raise HTTPException(
+                status_code=400, detail=f"Cannot generate invoice: {bad['message']}"
+            )
 
         # C-6 (DELTA 4): resolve the customer so the CGST/SGST/IGST split can
         # use the customer's state as the place of supply. Fail-soft: a missing

@@ -23,15 +23,18 @@ orders sitting at that shop's location).
                      covers its OWN fulfillment orders' lines: every shop claims
                      and ships its own part (``split``), nothing moves (Q2 allows
                      Shopify's split, Q4 moves only a short shop); the largest
-                     fulfillment order's shop bills it, and shops under another
-                     GSTIN hold the order (SPLIT_SELLERS).
+                     fulfillment order's shop bills it, and a leg shop under
+                     another GSTIN or without its own state's GSTIN holds the
+                     order (``seller_problem``, the one seller check).
     shipping shop  = otherwise assigned if it covers, else the first MAPPED shop
                      that covers the whole order (most stock first), else the
                      assigned shop (the claim under-claims and
                      shopify_ingest._record_stock_miss holds the order + tasks
                      the shop: fail loud, IMS never splits an order itself).
                      No fulfillment orders read (dark / unread): the fallback
-                     below or no shop -- never a guess from stock counts.
+                     below or no shop -- never a guess from stock counts. No
+                     shop: nothing is claimed and the order is held
+                     (SELLER_UNKNOWN).
     moves          = a fulfillment order that is not the shipping shop's
                      (fo_is_shops) is moved to the shipping shop's location ONLY
                      when that shop holds every unit of the order (Q4: never
@@ -469,16 +472,60 @@ def gstin_problem(store_doc: Optional[Dict[str, Any]]) -> Optional[Dict[str, str
 
 
 def seller_unknown_problem(bucket_id: Optional[str]) -> Dict[str, str]:
-    """No shipping shop could be named (route NONE, or routing itself failed),
-    so the order is billed from the stockless online bucket -- whose GSTIN is
-    not a shipping shop's (Q1). Always loud; the re-issue is the accountant's."""
+    """No shipping shop could be named (route NONE, or routing itself failed):
+    nothing is claimed and the order is HELD -- its invoice number came from
+    the online bucket's series, whose GSTIN is not a shipping shop's (Q1), so
+    no door issues or files a tax invoice from it. The re-issue is the
+    accountant's."""
     return _problem(
         "SELLER_UNKNOWN",
-        "IMS could not name the shop that ships this order, so its tax invoice "
-        f"was issued from the online billing store {bucket_id}'s GSTIN, not the "
-        "shipping shop's (owner ruling Q1). Find the shop that ships it; the "
-        "accountant must then cancel this invoice and re-issue it from that "
-        "shop's GSTIN.",
+        "IMS could not name the shop that ships this order, so no stock was "
+        f"claimed and the order is on hold. Its invoice number was taken from "
+        f"the online billing store {bucket_id}'s series, but no tax invoice can "
+        "be issued from that GSTIN (owner ruling Q1). Find the shop that ships "
+        "it; the accountant must then cancel this invoice number and re-issue "
+        "it from that shop's GSTIN.",
+    )
+
+
+def seller_problem(
+    order: Dict[str, Any], store_doc: Optional[Dict[str, Any]], find_store
+) -> Optional[Dict[str, str]]:
+    """THE seller check of a routed online order (Q1: one order, one tax
+    invoice, from the shipping shop's OWN GSTIN). ONE rule for the booking
+    hold (shopify_ingest), the invoice door (JSON + PDF), the delivery
+    challan, the e-invoice and GSTR-1 -- so no door issues or files what the
+    booking held. None when fine, and for an order never routed (POS, a
+    historical import: their doors keep their own rules).
+
+      * no shop named (route NONE) -> SELLER_UNKNOWN;
+      * the seller AND every shop shipping a leg of Shopify's split invoice
+        from their OWN GSTIN for their own state (gstin_problem): goods
+        leaving a Maharashtra shop need a Maharashtra registration;
+      * every leg shop shares the seller's GSTIN (split_seller_problem).
+
+    ``store_doc`` is the order's own shop (order.store_id), whose ``gstin`` is
+    the GSTIN every one of those doors issues from; ``find_store(id)`` reads a
+    leg shop. A leg that cannot be read is not provably fine: a problem."""
+    route = order.get("fulfillment_route")
+    if not isinstance(route, dict):
+        return None
+    if not route.get("store_id"):
+        return seller_unknown_problem(order.get("store_id"))
+    leg_docs = []
+    for sid in sorted(
+        {r.get("store_id") for r in route.get("split") or [] if isinstance(r, dict)}
+        - {order.get("store_id"), None}
+    ):
+        try:
+            doc = find_store(sid)
+        except Exception:  # noqa: BLE001 -- unreadable = not provably fine
+            doc = None
+        leg_docs.append(doc or {"store_id": sid})
+    return (
+        gstin_problem(store_doc)
+        or next((p for p in map(gstin_problem, leg_docs) if p), None)
+        or split_seller_problem(store_doc, leg_docs)
     )
 
 
@@ -594,6 +641,16 @@ async def move_fulfillment_orders(db, order_id: str) -> Dict[str, Any]:
     planned = [m for m in moves if m.get("status") == "PLANNED"]
     if not planned:
         return {"moved": 0, "failed": 0}
+    # The booking's claim has not settled yet (shopify_ingest stamps
+    # fulfillment_breakdown, possibly [], once it has): a duplicate delivery
+    # racing the creator between its insert and its claim. Leave the moves
+    # PLANNED -- judged now they would be SKIPPED as short-claimed and the
+    # stock written back before the claim; the creator sends them (and writes
+    # stock back) right after its claim.
+    # ponytail: a creator that dies before settling leaves them PLANNED, the
+    # order held under the pending-move text; add a lease if that happens.
+    if "fulfillment_breakdown" not in order:
+        return {"moved": 0, "failed": 0}
     stale = _stale_move(order)
     try:
         claimed = _orders(db).update_one(
@@ -680,7 +737,9 @@ async def move_fulfillment_orders(db, order_id: str) -> Dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         logger.warning("[ONLINE_ROUTE] route write-back failed for %s: %s", order_id, exc)
     if failed:
-        raise_problem_tasks(db, {**order, "fulfillment_route": route})
+        # Only the NEW problem: the booking-time ones were tasked at booking,
+        # and a human may already have closed them.
+        raise_problem_tasks(db, {**order, "fulfillment_route": {**route, "problems": [problem]}})
     _stock_write_back(db, order)
     return {"moved": len(planned) - len(failed), "failed": len(failed)}
 

@@ -98,6 +98,7 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
     store_gstin = ""
     store_legal_name = ""
     store_state = ""
+    store_doc = None
 
     db = _get_raw_db()
     if db is not None:
@@ -142,7 +143,27 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                 "created_at": {"$gte": from_dt, "$lt": to_dt},
             }
 
+            from ...services.online_fulfillment_route import seller_problem
+
+            def _find_store(sid):
+                return db["stores"].find_one({"store_id": sid})
+
             for order in orders_col.find(query):
+                # A routed online order its booking HELD on the seller check
+                # (no shop named, a shop or split leg without its own state's
+                # GSTIN, a split across GSTINs) is never filed under this
+                # GSTIN: the accountant decides how it is invoiced first.
+                held = seller_problem(order, store_doc, _find_store)
+                if held:
+                    validation_issues.append(
+                        {
+                            "level": "error",
+                            "invoice": order.get("invoice_number")
+                            or order.get("order_number"),
+                            "issue": "Not filed: " + held["message"],
+                        }
+                    )
+                    continue
                 cust_id = str(order.get("customer_id", ""))
                 cust_info = cust_map.get(cust_id, {})
                 customer_gstin = cust_info.get("gstin", "")

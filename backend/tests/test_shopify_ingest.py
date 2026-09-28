@@ -596,9 +596,11 @@ def test_lens_line_no_rx_creates_order_flagged_and_one_task(wired, monkeypatch):
 
 def test_lens_line_with_valid_rx_no_flag_no_task(wired, monkeypatch):
     """(b) spectacle-lens line, valid customer-matching non-expired Rx ->
-    no flag, no task."""
+    no flag, no task. (A named shop ships it: an order no shop is named for
+    is held on SELLER_UNKNOWN whatever its Rx.)"""
     import api.dependencies as deps
 
+    monkeypatch.setenv("ONLINE_FULFILLMENT_STORE_ID", "ST-MAIN-1")
     repo = _RxRepo(by_id={"RX-1": _valid_rx("RX-1", "555")})
     monkeypatch.setattr(deps, "get_prescription_repository", lambda: repo)
 
