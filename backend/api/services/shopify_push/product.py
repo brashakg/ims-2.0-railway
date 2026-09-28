@@ -53,7 +53,14 @@ from .inventory import (
     push_skus_stock,
     sync_product_stock,
 )
-from .media import media_lease, media_rows, plan_product_media, product_photo_urls, sync_product_media
+from .media import (
+    media_lease,
+    media_rows,
+    photo_outcome,
+    plan_product_media,
+    product_photo_urls,
+    sync_product_media,
+)
 from .writeback import _requeue_unpublished, _writeback_product
 
 # ===========================================================================
@@ -524,19 +531,19 @@ async def push_product(
         # (nothing reached its baseline), so the next pass retries it.
         stock_not_written = bool(stock_summary) and not stock_summary.get("ok")
         # ...AND SO ARE THE PHOTOGRAPHS. The attach is sent ONCE (transport):
-        # a 502 or a lost answer, or a hold (MEDIA_SETTLING / _NAMING_DRIFT),
-        # leaves the listing short of what IMS says -- the old photo still up,
-        # or both -- and only a NEXT pass settles it. Nothing but this flag
-        # schedules one for the product lane.
-        media_unsettled = bool(photo_summary) and bool(
-            photo_summary.get("error") or photo_summary.get("code")
-        )
+        # a 502 or a lost answer, or an attach still settling, leaves the
+        # listing short of what IMS says -- the old photo still up, or both --
+        # and only a NEXT pass settles it: the row stays queued for it. A hold
+        # only a PERSON can clear (MEDIA_HELD, MEDIA_NAMING_DRIFT) is not
+        # re-queued -- every 01:00/09:00 sync would re-press it for nothing --
+        # it is SAID: its code and line ride the result like the price's.
+        media_code, media_line, media_retry = photo_outcome(photo_summary)
         # THE ONE RE-QUEUE RULE. The press reached Shopify but did not do all
         # it was pressed for -- the product is not visible, it is visible at
         # the wrong price, or its photographs have not settled. The row goes
         # BACK in the queue so the next press / scheduled sync retries it. See
         # _requeue_unpublished for why this is not the ping-pong hazard.
-        if pid and (not published_ok or price_not_synced or media_unsettled):
+        if pid and (not published_ok or price_not_synced or media_retry):
             _requeue_unpublished(db, pid)
         return PushResult(
             mode=MODE_LIVE,
@@ -557,6 +564,7 @@ async def push_product(
                         for line in (
                             _PRICE_NOT_SYNCED_MSG if price_not_synced else None,
                             (stock_summary or {}).get("error") if stock_not_written else None,
+                            media_line,
                         )
                         if line
                     )
@@ -573,7 +581,7 @@ async def push_product(
                 (
                     PRICE_NOT_SYNCED
                     if price_not_synced
-                    else ((stock_summary or {}).get("code") if stock_not_written else None)
+                    else (((stock_summary or {}).get("code") if stock_not_written else None) or media_code)
                 )
                 if published_ok
                 else (pub_summary or {}).get("code")

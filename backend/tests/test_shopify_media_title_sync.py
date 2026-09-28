@@ -308,7 +308,7 @@ def test_a_repress_with_nothing_changed_touches_no_media(db, gates, monkeypatch)
     assert fake.media_ops() == [], fake.ops()
     assert res.photos == {
         "attached": 0, "deleted": 0, "reordered": False, "unmanaged": 0, "adopted": 0,
-        "dropped": 0, "held": [], "hands_off": False, "on_shopify": 2, "attached_map": [],
+        "dropped": 0, "held": [], "review": [], "hands_off": False, "on_shopify": 2, "attached_map": [],
     }
 
 

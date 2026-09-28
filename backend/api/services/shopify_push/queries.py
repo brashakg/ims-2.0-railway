@@ -178,7 +178,9 @@ mutation imsProductReorderMedia($id: ID!, $moves: [MoveInput!]!) {
 # runbook's (scripts/adopt_shopify_media_map.py). `status` says whether
 # Shopify has fetched the bytes (UPLOADED / PROCESSING / READY / FAILED);
 # image.url is the CDN copy, and its FILE NAME is how IMS recognises its own
-# attach (media._same_file): Shopify keeps the source file's name. NOT read:
+# attach (media._same_file): Shopify keeps the source file's name. createdAt
+# (Shopify's clock) says WHEN the media was made: a lost attach is settled
+# only onto a media made while IMS's send was in flight (media._settle). NOT read:
 # originalSource (in production it is Shopify's own storage copy, never the
 # url IMS sent -- measured 2026-09-06) and alt (IMS attaches every photo
 # with alt '', so an alt can never identify one). 250 is Shopify's
@@ -188,7 +190,7 @@ query imsProductMedia($id: ID!) {
   product(id: $id) {
     id
     media(first: 250) {
-      nodes { id status ... on MediaImage { image { url } } }
+      nodes { id status ... on MediaImage { createdAt image { url } } }
     }
   }
 }

@@ -100,11 +100,8 @@ def test_auto_edit_success_moves_to_review(monkeypatch):
 def test_a_re_edit_gets_a_new_ims_unique_url(monkeypatch):
     """T12. Each auto-edit stores the asset under a NEW uuid4 name: a re-edit
     (the reviewer rejected the first) never reuses the url, so the design
-    press sees a different image and replaces the old one on Shopify -- and
-    the name is one the photo pass can settle a lost attach by.
+    press sees a different image and replaces the old one on Shopify.
     REVERT-PROOF: the old key <product_id>/<image_id>.png -> one url, red."""
-    from api.services.shopify_push.media import _ims_unique
-
     repo = _FakeImgRepo({"image_id": "I1", "product_id": "P1", "url": "https://x/raw.png", "status": "QUEUED"})
     _wire(monkeypatch, repo, _FakeEditor())
     first = _run(imod.auto_edit_image("I1", current_user=USER))["image"]["edited_url"]
@@ -112,7 +109,7 @@ def test_a_re_edit_gets_a_new_ims_unique_url(monkeypatch):
     second = _run(imod.auto_edit_image("I1", current_user=USER))["image"]["edited_url"]
 
     assert first != second
-    assert _ims_unique(first) and _ims_unique(second)
+    assert all(re.fullmatch(r"https://cdn\.example/P1/[0-9a-f]{32}\.png", u) for u in (first, second))
 
 
 def test_auto_edit_approved_is_409(monkeypatch):

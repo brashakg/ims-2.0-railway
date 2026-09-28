@@ -770,9 +770,7 @@ async def auto_edit_image(
         edited = await editor.edit(raw, EditSpec.from_env())
         # A NEW name on every edit (the upload key's shape): a re-edit stored
         # over the same key kept the same url, so the press saw the design
-        # already on the listing and the old pixels stayed on Shopify; and a
-        # uuid4 name is IMS-unique, the only kind the photo pass settles a
-        # lost attach by (shopify_push.media._ims_unique).
+        # already on the listing and the old pixels stayed on Shopify.
         key = f"{img.get('product_id') or 'product'}/{uuid.uuid4().hex}.png"
         edited_url = storage.put(key, edited, "image/png")
 
