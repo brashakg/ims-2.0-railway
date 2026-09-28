@@ -347,6 +347,7 @@ export default function BuyDeskPage() {
           onCreated={() => {
             setShowDraftModal(false);
             clearSelection();
+            void load(); // the new draft shows as "in draft" straight away
           }}
         />
       )}
