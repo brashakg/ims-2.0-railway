@@ -462,14 +462,13 @@ async def map_routed_order(
 ) -> Dict[str, Any]:
     """THE door every live online-order create goes through (webhook drain,
     missed-webhook pull, Re-map): read Shopify's routing FRESH for an order
-    IMS has not booked yet (a stamp left on a stored payload is never
-    trusted), hand it to the (sync) mapper -> ingest, then send the planned
-    moves. Returns the mapper's result. Never raises."""
+    IMS has not booked yet (the read always overwrites any stamp a stored
+    payload carries), hand it to the (sync) mapper -> ingest, then send the
+    planned moves. Returns the mapper's result. Never raises."""
     from . import online_order_mapper
     from .shopify_ingest import order_payload_refusal
 
     payload = payload if isinstance(payload, dict) else {}
-    payload.pop("_ims_routing", None)  # only a read made HERE is ever trusted
     sid = str(payload.get("id") or "").strip()
     try:
         if (
