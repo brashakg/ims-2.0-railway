@@ -23,7 +23,12 @@ Pins, each with its revert named in the test:
   * the Stock Tally page and the catalog reconciliation screen read the SAME
     per-location pairs (unbacked_units): unmapped Pune never backs another
     shop's listing, a swapped pair is a risk, one shop's filter reads its own
-    location only.
+    location only; OVERSELL is past the shelf on both, 'recommended' /
+    'sellable' / OVER_ALLOCATED are the writer's number (buffer, block).
+  * the sample goes through the writer's item resolver (the ecom fallback);
+    the drift task names the press that re-sends (Send to website) and keeps
+    every SKU still owed across a refresh; a tasks read failure files no
+    second task.
 
 StrictDB + injected Shopify boundary -- no network, no production.
 """
@@ -770,6 +775,69 @@ def test_reconcile_one_shop_is_never_blanked_by_another_shops_failed_read(monkey
     _fail_shelf(monkeypatch, "BV-A")
     row = _reconcile(monkeypatch, db, levels, "BV-A")["SKU-1"]
     assert _cols(row, "in_store", "online", "recommended", "delta", "status") == (2, 2, None, None, "ONHAND_UNKNOWN")
+
+
+def test_tick_samples_through_the_writers_item_resolver():
+    """Panel input: SKU-1's inventory item lives only on catalog_products.ecom
+    (the resolver's documented fallback) -- the writer finds INV_1 there and
+    plans BV-A 1 / BV-B 0. Shopify holds 9 at each location: parity must
+    see it. The old catalog_variants-only sample never sampled SKU-1 ->
+    compared 0, 'no online-mapped variants' -> fails."""
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 0}})
+    db.get_collection("catalog_variants").delete_many({"sku": "SKU-1"})
+    db.seed("catalog_products", [{"id": "c1", "sku": "SKU-1", "ecom": {"shopify_inventory_item_id": INV_1}}])
+    out = _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 9, LOC_B: 9}, INV_2: {}})))
+    assert out["sampled"] == 2
+    assert sorted((d["sku"], d["store_id"], d["ims"], d["shopify"]) for d in out["drift"]) == [
+        ("SKU-1", "BV-A", 1, 9), ("SKU-1", "BV-B", 0, 9)]
+
+
+def test_tick_an_unreadable_catalog_touches_no_task(monkeypatch):
+    """The item resolver is STRICT: a read failure is UNKNOWN, reported as
+    such, never 'checked, no online-mapped variants'. Fail soft to [] -> the
+    tick reads checked True -> fails."""
+    from api.services import online_catalog
+
+    def boom(db, skus):
+        raise RuntimeError("catalog_variants read died")
+
+    monkeypatch.setattr(online_catalog, "inventory_items_for_skus", boom)
+    db = _db({"SKU-1": {"BV-A": 1}})
+    db.seed("tasks", [{"task_id": "T-1", "source_ref": "shopify-stock-parity-drift:BV-A", "status": "OPEN"}])
+    out = _run(sp.run_parity_tick(db, graphql=_shopify({})))
+    assert out["checked"] is False and "catalog read failed" in out["reason"]
+    assert _tasks(db)[0]["status"] == "OPEN"
+
+
+def test_drift_task_names_the_press_that_re_sends_the_numbers():
+    """The 01:00 / 09:00 pass and Push stock (sync_stock_levels) send only
+    products whose IMS number CHANGED since the recorded baseline
+    (test_shopify_online_stock.py::test_T6), so neither undoes a hand edit on
+    Shopify; Send to website (push_product -> sync_product_stock) always
+    re-sends. The task must say so. Put back 'The next stock push (01:00 /
+    09:00 IST, or Push stock) re-sends IMS's numbers.' -> fails."""
+    db = _db({"SKU-1": {"BV-A": 5, "BV-B": 1}})
+    _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {}})))
+    (task,) = _tasks(db)
+    assert "press Send to website" in task["description"]
+    assert "re-send only numbers IMS changed" in task["description"]
+
+
+def test_tick_a_refreshed_task_keeps_every_sku_still_owed():
+    """Night 1: SKU-2 drifts at BV-A (IMS 5, Shopify 0) -> the task names
+    SKU-2. Night 2: SKU-1 drifts at BV-A (IMS 1, Shopify 5) and Shopify
+    answers INV_2 as a null node (no errors) -> refreshed, and the task names
+    SKU-1 AND SKU-2. Night 3: SKU-1 clean, INV_2 still null -> SKU-2 is still
+    owed, the task stays OPEN. Drop `owed |` from payload.skus -> night 2
+    names SKU-1 only and night 3 closes it -> fails."""
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 5, "BV-B": 0}})
+    _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 0, LOC_B: 0}})))
+    assert _tasks(db)[0]["payload"]["skus"] == ["SKU-2"]
+    out = _run(sp.run_parity_tick(db, graphql=_partial({INV_1: {LOC_A: 5, LOC_B: 1}})))
+    assert out["tasks"]["refreshed"] == ["BV-A"]
+    assert _tasks(db)[0]["payload"]["skus"] == ["SKU-1", "SKU-2"]
+    out = _run(sp.run_parity_tick(db, graphql=_partial({INV_1: {LOC_A: 1, LOC_B: 1}})))
+    assert out["tasks"]["closed"] == [] and _tasks(db)[0]["status"] == "OPEN"
 
 
 # ---------------------------------------------------------------------------

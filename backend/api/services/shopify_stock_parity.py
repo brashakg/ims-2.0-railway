@@ -284,27 +284,29 @@ def unbacked_units(
 # ---------------------------------------------------------------------------
 
 
-def _sample_variants(db, limit: int = _DEFAULT_SAMPLE) -> List[Dict[str, Any]]:
-    """Up to `limit` catalog_variants that carry a Shopify inventory item id.
-    Returns [{sku, inventory_item_id}]. Fail-soft -> []."""
-    coll = _coll(db, "catalog_variants")
+def _sample_variants(db, limit: int = _DEFAULT_SAMPLE) -> Optional[List[Dict[str, Any]]]:
+    """Up to `limit` IMS SKUs (the spine ``products``, the rule's own SKU
+    list) that map to a Shopify inventory item through THE WRITER's resolver,
+    online_catalog.inventory_items_for_skus (catalog_variants first, then the
+    catalog_products ``ecom`` fallback) -- mapped first, then capped. Returns
+    [{sku, inventory_item_id}]; None when a read failed (unknown, never "no
+    online-mapped variants"). ponytail: resolves every spine SKU; cap the
+    scan if the catalogue grows past a few thousand."""
+    coll = _coll(db, "products")
     if coll is None:
-        return []
-    out: List[Dict[str, Any]] = []
+        return None
     try:
-        cursor = coll.find(
-            {"shopify_inventory_item_id": {"$exists": True, "$nin": [None, ""]}},
-            {"_id": 0, "sku": 1, "shopify_inventory_item_id": 1},
-        ).limit(int(limit))
-        for doc in cursor:
-            sku = str(doc.get("sku") or "").strip()
-            inv = str(doc.get("shopify_inventory_item_id") or "").strip()
-            if sku and inv:
-                out.append({"sku": sku, "inventory_item_id": inv})
+        from .online_catalog import inventory_items_for_skus
+
+        skus = list(dict.fromkeys(
+            str(d.get("sku") or "").strip()
+            for d in coll.find({"sku": {"$nin": [None, ""]}}, {"_id": 0, "sku": 1})
+        ))
+        items = inventory_items_for_skus(db, [s for s in skus if s])
     except Exception as exc:  # noqa: BLE001
         logger.warning("[STOCK_PARITY] variant sample failed: %s", exc)
-        return []
-    return out
+        return None
+    return [{"sku": s, "inventory_item_id": items[s]} for s in skus if s in items][: int(limit)]
 
 
 async def shopify_levels_by_item(
@@ -429,8 +431,10 @@ def sync_drift_task(repo, store: Dict[str, Any], summary: Dict[str, Any]) -> Opt
             description = (
                 f"{summary.get('drift_count')} online SKU(s) at {label}'s Shopify location "
                 f"drifted beyond tolerance {summary.get('tolerance')} unit(s); worst delta "
-                f"{summary.get('max_delta')}. Top: {lines}. The next stock push "
-                f"(01:00 / 09:00 IST, or Push stock) re-sends IMS's numbers."
+                f"{summary.get('max_delta')}. Top: {lines}. The 01:00 / 09:00 IST pass and "
+                f"Push stock re-send only numbers IMS changed, so they never undo a change "
+                f"made on Shopify: open each product named here and press Send to website "
+                f"to re-send IMS's numbers."
             )
             payload = {
                 "store_id": sid,
@@ -585,6 +589,10 @@ async def run_parity_tick(
             return {**base, "reason": f"creds check failed: {exc}"}
 
         variants = _sample_variants(db, sample_limit)
+        if variants is None:
+            snap = {**base, "reason": "catalog read failed -- nothing compared, no task touched"}
+            _store_snapshot(db, snap)
+            return snap
         base["sampled"] = len(variants)
         if not variants:
             snap = {**base, "checked": True, "reason": "no online-mapped variants"}
