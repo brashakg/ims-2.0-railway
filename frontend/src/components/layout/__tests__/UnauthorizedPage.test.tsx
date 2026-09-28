@@ -5,60 +5,61 @@
 // don't have permission" when he tried to receive goods. Receiving stays with
 // the managers (owner ruling 2026-09-28) -- but the page now says who can
 // receive, so he knows whom to hand the box to.
+//
+// Mounts the REAL purchaseRoutes, so widening a receive route's roles or
+// dropping its hint turns this red (a hand-built <ProtectedRoute> would not).
 
+import { Suspense } from 'react';
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 
+const ROLES = ['WORKSHOP_STAFF'];
 vi.mock('../../../context/AuthContext', () => ({
   useAuth: () => ({
     isAuthenticated: true,
     isLoading: false,
-    hasRole: () => false,
+    hasRole: (roles?: string[]) => !roles || roles.some((r) => ROLES.includes(r)),
     hasPermission: () => true,
     hasModuleAccess: () => true,
   }),
 }));
 
-import { ProtectedRoute } from '../ProtectedRoute';
 import { UnauthorizedPage } from '../UnauthorizedPage';
-import { PURCHASE_MANAGER_ROLES } from '../../../pages/purchase/purchaseTypes';
+import { purchaseRoutes } from '../../../routes/purchaseRoutes';
 
-function renderBlocked(path: string, element: React.ReactNode) {
+function renderAt(path: string) {
   return render(
     <MemoryRouter initialEntries={[path]}>
-      <Routes>
-        <Route path={path} element={element} />
-        <Route path="/unauthorized" element={<UnauthorizedPage />} />
-      </Routes>
+      <Suspense fallback={<div>loading</div>}>
+        <Routes>
+          {purchaseRoutes}
+          <Route path="/unauthorized" element={<UnauthorizedPage />} />
+        </Routes>
+      </Suspense>
     </MemoryRouter>,
   );
 }
 
 describe('403 page names who can receive goods (F5)', () => {
-  it('a blocked receive route says only managers receive, and names them', () => {
-    renderBlocked(
-      '/purchase/receive',
-      <ProtectedRoute allowedRoles={[...PURCHASE_MANAGER_ROLES]} deniedHint="Only managers receive goods into stock.">
-        <div>receive screen</div>
-      </ProtectedRoute>,
-    );
-    expect(screen.queryByText('receive screen')).not.toBeInTheDocument();
-    expect(screen.getByText(/only managers receive goods/i)).toBeInTheDocument();
-    expect(screen.getByText(/store manager/i)).toBeInTheDocument();
-    expect(screen.getByText(/area manager/i)).toBeInTheDocument();
-    // Receiving is NOT opened to workshop staff.
-    expect(screen.queryByText(/workshop/i)).not.toBeInTheDocument();
-  });
+  it.each(['/purchase/receive', '/purchase/grn'])(
+    '%s: workshop staff get the blocked page, which names who receives',
+    async (path) => {
+      renderAt(path);
+      expect(await screen.findByText('403')).toBeInTheDocument();
+      expect(screen.getByText(/hand the delivery to one of them/i)).toBeInTheDocument();
+      // The hint and the list agree: the list IS the rule. It names the
+      // accountant, so the hint must not say "only managers".
+      expect(screen.getByText(/^Who can:/)).toHaveTextContent(
+        'Who can: Admin, Area manager, Store manager, Accountant.',
+      );
+      expect(screen.queryByText(/only managers/i)).not.toBeInTheDocument();
+    },
+  );
 
-  it('any other blocked page still says who can open it', () => {
-    renderBlocked(
-      '/purchase/recon-console',
-      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'ACCOUNTANT']}>
-        <div>recon</div>
-      </ProtectedRoute>,
-    );
-    expect(screen.getByText(/accountant/i)).toBeInTheDocument();
+  it('any other blocked page still says who can open it', async () => {
+    renderAt('/purchase/recon-console');
+    expect(await screen.findByText(/^Who can:/)).toHaveTextContent('Who can: Admin, Accountant.');
   });
 
   it('opened directly (no blocked page behind it) it stays the plain message', () => {

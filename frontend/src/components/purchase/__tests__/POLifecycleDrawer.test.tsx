@@ -289,3 +289,22 @@ describe('POLifecycleDrawer — fail-soft + close behaviour', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('POLifecycleDrawer - times show in IST (owner ruling: saved with zone, shown in IST)', () => {
+  it('a change saved with its zone, and an older zoneless stamp, both read as IST', async () => {
+    getPOTimeline.mockResolvedValue(
+      makeTimeline({
+        events: [
+          // 14:03 IST, saved with its zone (every edit / cancel since 2026-09-29)
+          { kind: 'cancelled', label: 'Cancelled', at: '2026-09-29T08:33:00+00:00', detail: 'Reason: vendor closed' },
+          // an older naive stamp: the server's UTC wall clock, no zone
+          { kind: 'sent', label: 'Sent', at: '2026-09-28T04:30:00' },
+        ],
+      }),
+    );
+    renderDrawer();
+    await screen.findAllByTestId('po-timeline-event');
+    expect(screen.getByText(/29 Sept? 2026, 2:03\s?pm/i)).toBeInTheDocument();
+    expect(screen.getByText(/28 Sept? 2026, 10:00\s?am/i)).toBeInTheDocument();
+  });
+});

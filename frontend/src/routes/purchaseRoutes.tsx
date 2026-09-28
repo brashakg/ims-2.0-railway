@@ -13,8 +13,9 @@ import { PURCHASE_MANAGER_ROLES } from '../pages/purchase/purchaseTypes';
 import type { UserRole } from '../types';
 
 // What the blocked page tells anyone else who opens a receiving screen
-// (audit F5): receiving stays with the managers -- say so, and it names them.
-const RECEIVE_DENIED_HINT = 'Only managers receive goods into stock. Hand the delivery to one of them.';
+// (audit F5). The page lists who can right under it (PURCHASE_MANAGER_ROLES,
+// the accountant included), so the hint points at that list, never a title.
+const RECEIVE_DENIED_HINT = 'Goods are received into stock by the people listed below. Hand the delivery to one of them.';
 
 const PurchaseLayout = lazy(() => import('../pages/purchase/PurchaseLayout').then(m => ({ default: m.PurchaseLayout })));
 const PurchaseOrdersSection = lazy(() => import('../pages/purchase/PurchaseOrdersSection').then(m => ({ default: m.PurchaseOrdersSection })));

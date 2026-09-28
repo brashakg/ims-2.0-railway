@@ -26,6 +26,7 @@ vi.mock('../../../components/print/storeIdentity', () => ({
 
 import { PurchaseOrderDetail } from '../PurchaseOrderDetail';
 import type { PurchaseOrder } from '../purchaseTypes';
+import { mapPOtoPurchaseOrder } from '../purchaseMappers';
 
 const po = (status: string, over: Partial<PurchaseOrder> = {}) =>
   ({
@@ -167,5 +168,24 @@ describe('PO detail modal - cancel with a reason (F4)', () => {
   it('a cancelled order says why', () => {
     show(po('CANCELLED', { cancellationReason: 'qty typo' } as Partial<PurchaseOrder>));
     expect(screen.getByText(/qty typo/)).toBeInTheDocument();
+  });
+});
+
+describe('PO detail modal - no approval wording anywhere (owner 2026-09-28)', () => {
+  it('an older order that still carries approved_by shows no "Approved By"', () => {
+    show(
+      mapPOtoPurchaseOrder({
+        po_id: 'PO9',
+        po_number: 'PO-2026-0009',
+        vendor_name: 'Essilor India',
+        status: 'SENT',
+        created_at: '2026-08-01T10:00:00',
+        expected_date: '2026-08-10',
+        approved_by: 'u-approver',
+        items: [],
+      }),
+    );
+    expect(screen.queryByText(/approved/i)).not.toBeInTheDocument();
+    expect(screen.queryByText('u-approver')).not.toBeInTheDocument();
   });
 });

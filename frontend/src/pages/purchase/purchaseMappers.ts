@@ -103,7 +103,6 @@ export function mapPOtoPurchaseOrder(po: any): PurchaseOrder {
     // is the one that gets filed.
     gstSummary: po.gst_summary ?? undefined,
     interstate: typeof po.interstate === 'boolean' ? po.interstate : undefined,
-    approvedBy: po.approved_by,
     receivedDate: po.received_date ?? po.received_at?.split('T')[0],
     notes: po.notes,
     cancellationReason: po.cancellation_reason ?? undefined,

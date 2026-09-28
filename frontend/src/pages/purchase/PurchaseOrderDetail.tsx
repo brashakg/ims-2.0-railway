@@ -209,12 +209,6 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
               <p className="text-xs text-gray-600 mb-1">Expected Delivery</p>
               <p className="text-sm font-medium text-gray-900">{new Date(po.expectedDelivery).toLocaleDateString()}</p>
             </div>
-            {po.approvedBy && (
-              <div>
-                <p className="text-xs text-gray-600 mb-1">Approved By</p>
-                <p className="text-sm font-medium text-gray-900">{po.approvedBy}</p>
-              </div>
-            )}
             {po.receivedDate && (
               <div>
                 <p className="text-xs text-gray-600 mb-1">Received Date</p>

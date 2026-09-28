@@ -66,7 +66,6 @@ export interface PurchaseOrder {
   /** true = IGST, false = CGST + SGST, undefined = the order predates the
    *  split (or the server could not tell). */
   interstate?: boolean;
-  approvedBy?: string;
   receivedDate?: string;
   notes?: string;
   /** Why the order was cancelled (the timeline shows who and when). */

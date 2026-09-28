@@ -37,6 +37,7 @@ import { useNavigate } from 'react-router-dom';
 import { vendorsApi } from '../../services/api/inventory';
 import { useAuth } from '../../context/AuthContext';
 import { PurchaseStatusChip } from './PurchaseStatusChip';
+import { formatDateTimeIST } from '../../utils/datetime';
 import { RECEIVABLE_PO_STATUSES, PURCHASE_MANAGER_ROLES } from '../../pages/purchase/purchaseTypes';
 import type { POStatus } from '../../pages/purchase/purchaseTypes';
 
@@ -132,19 +133,9 @@ const EVENT_ICON_CLASSES: Record<string, string> = {
   bill_settled: 'bg-teal-50 text-teal-600',
 };
 
-/** Humanised date+time, e.g. "16 Jun 2026, 2:45 pm". Fail-soft on bad input. */
-function fmtDateTime(at: string | null | undefined): string {
-  if (!at) return '';
-  const d = new Date(at);
-  if (Number.isNaN(d.getTime())) return String(at);
-  return d.toLocaleString('en-IN', {
-    day: 'numeric',
-    month: 'short',
-    year: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  });
-}
+/** Date+time in IST, e.g. "16 Jun 2026, 2:45 pm" (a zoneless stamp is the
+ *  server's UTC clock -- see utils/datetime). Blank when there is none. */
+const fmtDateTime = (at: string | null | undefined) => formatDateTimeIST(at, '');
 
 /** AP-capable roles (mirrors the /purchase/recon-console gate -- the invoice
  *  booking surface is an accountant function). */
