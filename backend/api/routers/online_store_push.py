@@ -884,7 +884,7 @@ async def push_all_pending(
         "summary": summary,
         # The stock pass that rode this press (products selected only); None
         # when no products were swept. {mode, action, ok, payload{changed,
-        # synced, failed, location_id, ...}, code, error}.
+        # synced, failed, stores_mapped, ...}, code, error}.
         "stock": stock,
         "results": results,
     }
