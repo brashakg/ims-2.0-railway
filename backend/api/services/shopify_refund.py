@@ -382,8 +382,8 @@ def _cap_restock_to_returnable(
 ) -> Tuple[List[Any], bool, bool]:
     """Restock only a unit that is really out with the buyer: first the
     counter return door's own answer (_cap_restock_to_unreturned), then the
-    order's own SOLD units (_cap_restock_to_sold_units). Both postures -- the
-    webhook's proposal and the post (AUTO or the accountant's confirm) --
+    order's own SOLD units (_cap_restock_to_sold_units). The webhook's
+    proposal, the post (AUTO or the accountant's confirm) and Goods back all
     ask it. Returns (lines, overlapped, unknown)."""
     lines, overlapped = _cap_restock_to_unreturned(lines, order, refund_id)
     lines, unknown = _cap_restock_to_sold_units(lines, order)
@@ -525,7 +525,7 @@ def _build_return_lines(
     door_released = _ims_cancel_door_ran(order)
     # A Shopify cancel on an order IMS holds DELIVERED (owner ruling
     # 2026-09-28): the customer has the goods, so a "cancel" line restocks
-    # nothing. If they come back, the counter return door restocks them.
+    # nothing. If they come back, Goods back on the review row restocks them.
     delivered = str(order.get("status") or "").strip().upper() == "DELIVERED"
     lines: List[Any] = []
     for rl in payload.get("refund_line_items") or []:
@@ -857,9 +857,10 @@ def handle_shopify_refund(
         )
         if goods_out and not (door_cancelled or counter_returned):
             note = (
-                "Goods are with the courier or the customer: restock only when "
-                "they physically come back (counter return). For a DELIVERED "
-                "order see its status-conflict task."
+                "Goods are with the courier or the customer: when they physically "
+                "come back, press Goods back here (never a counter return -- "
+                "Shopify already refunded this money). For a DELIVERED order see "
+                "its status-conflict task."
             )
         if door_cancelled or counter_returned or goods_out or not _refund_auto_enabled(db):
             # DEFAULT: accountant review queue. NO ledger, NO stock movement.
@@ -1341,6 +1342,9 @@ def _post_credit_and_restock(
         "restock_store_id": restock_result.get("restock_store_id"),
         "restock_store_ids": restock_result.get("restock_store_ids", []),
         "restock_store_reason": restock_result.get("restock_store_reason"),
+        # Empty with restock_applied=True: nothing was put back (the goods are
+        # still out) -- the screen says so and points at Goods back.
+        "restock_stock_ids": restock_result.get("restock_stock_ids", []),
     }
 
 
@@ -1455,3 +1459,82 @@ def post_from_review(db, review: Dict[str, Any]) -> Dict[str, Any]:
         restock_unverified=not verified,
     )
 
+
+def goods_back(db, review: Dict[str, Any], *, user_id: Optional[str]) -> Dict[str, Any]:
+    """A person says the goods of this Shopify refund physically came back:
+    put its units back in stock. This is the goods leg of a refund whose goods
+    were out -- a DELIVERED order Shopify cancels or refunds stays DELIVERED
+    (owner ruling 2026-09-28) and its lines are held at the confirm. The money
+    is the confirm's, never this door's; the counter return door would refund
+    it a second time.
+
+    Every line is asked to restock, capped like every restock
+    (_cap_restock_to_returnable): no unit a counter return already took back,
+    no more than the order still holds SOLD -- so a second press, or a press
+    before or after the confirm, never mints a phantom. ONE press per row,
+    claimed on the row (goods_back_at); a restock that did not land releases
+    the claim so it can be pressed again. NEVER raises. Returns
+    {"status": "restocked" | "duplicate" | "not_restocked", ...}."""
+    review_id = review.get("review_id")
+    refund_id = _norm(review.get("shopify_refund_id"))
+    try:
+        coll = db.get_collection(_REVIEW_COLLECTION)
+        claim = coll.update_one(
+            {"review_id": review_id, "goods_back_at": None},
+            {"$set": {"goods_back_at": datetime.now(timezone.utc).isoformat(),
+                      "goods_back_by": user_id}},
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("[SHOPIFY_REFUND] goods-back claim failed for review=%s", review_id,
+                       exc_info=True)
+        return {"status": "not_restocked", "review_id": review_id, "reason": "claim_failed"}
+    if not getattr(claim, "modified_count", 0):
+        return {"status": "duplicate", "review_id": review_id}
+
+    result: Dict[str, Any] = {"applied": False}
+    reason = "order_unreadable"
+    try:
+        order = {k: review.get(k) for k in ("order_id", "store_id", "shopify_order_id")}
+        if _merge_fulfilment_context(order):
+            lines = [
+                line.model_copy(update={"restock": True})
+                for line in _return_lines_from_proposed(review.get("proposed_restock") or [])
+            ]
+            lines, _, unknown = _cap_restock_to_returnable(lines, order, refund_id)
+            reason = "stock_unreadable" if unknown else "not_routed"
+            if not unknown:
+                from ..routers.returns import _restock_good_items
+
+                result = _restock_good_items(
+                    lines,
+                    order.get("store_id"),
+                    review.get("return_id") or refund_id,
+                    order_id=order.get("order_id"),
+                    user_id=user_id,
+                    processing_store_id=None,
+                    order=order,
+                )
+    except Exception:  # noqa: BLE001
+        reason = "error"
+        logger.warning("[SHOPIFY_REFUND] goods-back restock failed for review=%s", review_id,
+                       exc_info=True)
+
+    out = {
+        "review_id": review_id,
+        "restock_applied": bool(result.get("applied")),
+        "restock_stock_ids": result.get("restock_stock_ids", []),
+        "restock_store_id": result.get("restock_store_id"),
+        "restock_store_ids": result.get("restock_store_ids", []),
+    }
+    # Landed: record it. Nothing landed: release the press so it can be pressed
+    # again (the caps make a re-press safe even after a partial restock).
+    stamp = ({"goods_restock": out} if out["restock_applied"]
+             else {"goods_back_at": None, "goods_back_by": None})
+    try:
+        coll.update_one({"review_id": review_id}, {"$set": stamp})
+    except Exception:  # noqa: BLE001
+        logger.warning("[SHOPIFY_REFUND] goods-back stamp failed for review=%s", review_id,
+                       exc_info=True)
+    if out["restock_applied"]:
+        return {"status": "restocked", **out}
+    return {"status": "not_restocked", "reason": reason, **out}

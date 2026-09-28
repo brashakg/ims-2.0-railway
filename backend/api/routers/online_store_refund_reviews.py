@@ -16,6 +16,8 @@ This router lets the accountant SEE the queue and ACT on it:
                                _issue_store_credit + _restock_good_items the AUTO
                                path uses) and stamp {status:POSTED, resolved:true}
   POST /{review_id}/reject     stamp {status:REJECTED, resolved:true} -- no posting
+  POST /{review_id}/goods-back the refunded goods physically came back: restock
+                               them (shopify_refund.goods_back); no money moves
 
 Mounted at /api/v1/online-store/refund-reviews. ROLE GATE (router-level +
 rbac_policy.POLICY, in lock-step): ACCOUNTANT / ADMIN / SUPERADMIN (SUPERADMIN
@@ -344,6 +346,47 @@ async def confirm_refund_review(
         )
 
     return {"review_id": review_id, "status": new_status, "result": result}
+
+
+# ---------------------------------------------------------------------------
+# POST /{review_id}/goods-back
+# ---------------------------------------------------------------------------
+
+
+@router.post("/{review_id}/goods-back")
+async def goods_back_refund_review(
+    review_id: str,
+    current_user: dict = Depends(require_roles(*_REVIEW_ROLES)),
+) -> Dict[str, Any]:
+    """The refunded goods physically came back: put them back in stock
+    (shopify_refund.goods_back), before or after the confirm. The money is the
+    confirm's, never this door's. 409 once already done or on a row with no
+    order / a rejected row; 503 when nothing could be put back (press again)."""
+    db = _get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Refund reviews unavailable (no DB)")
+    row = _load_review(db, review_id, current_user)
+    status = str(row.get("status") or "").upper()
+    if not row.get("order_id") or status not in _CONFIRMABLE | {"POSTED"}:
+        raise HTTPException(
+            status_code=409,
+            detail=f"A refund review in status {status or 'UNKNOWN'} cannot take goods back.",
+        )
+    from ..services.shopify_refund import goods_back
+
+    result = goods_back(db, row, user_id=current_user.get("user_id"))
+    if result["status"] == "duplicate":
+        raise HTTPException(status_code=409, detail="The goods of this refund were already put back.")
+    _write_audit("SHOPIFY_REFUND_REVIEW_GOODS_BACK", review_id, row, result, current_user)
+    if result["status"] != "restocked":
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"The goods were not put back in stock ({result.get('reason')}). "
+                "Press Goods back again."
+            ),
+        )
+    return {"review_id": review_id, "result": result}
 
 
 # ---------------------------------------------------------------------------

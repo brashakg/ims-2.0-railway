@@ -28,6 +28,7 @@ import {
   XCircle,
   User,
   Store,
+  PackageCheck,
 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import {
@@ -146,7 +147,7 @@ export default function RefundReviewsPage() {
   );
 
   const act = useCallback(
-    async (review: RefundReview, action: 'confirm' | 'reject') => {
+    async (review: RefundReview, action: 'confirm' | 'reject' | 'goods-back') => {
       setActingId(review.review_id);
       try {
         if (action === 'confirm') {
@@ -162,6 +163,7 @@ export default function RefundReviewsPage() {
             restock_applied?: boolean;
             restock_store_id?: string | null;
             restock_store_ids?: string[] | null;
+            restock_stock_ids?: string[] | null;
             return_id?: string | null;
           };
           // An idempotent re-confirm returns {status:'duplicate'} with NO
@@ -177,7 +179,12 @@ export default function RefundReviewsPage() {
             result.restock_store_ids && result.restock_store_ids.length > 0
               ? result.restock_store_ids.join(', ')
               : result.restock_store_id || '';
-          if (result.restock_applied) {
+          if (result.restock_applied && result.restock_stock_ids?.length === 0) {
+            // Nothing to put back now: the goods are still with the customer.
+            toast.success(
+              'Credit note posted. No stock was put back - if the goods physically come back, press Goods back.',
+            );
+          } else if (result.restock_applied) {
             toast.success(
               landed
                 ? `Credit note posted. Stock put back at ${landed}.`
@@ -201,6 +208,9 @@ export default function RefundReviewsPage() {
                   ],
             );
           }
+        } else if (action === 'goods-back') {
+          await refundReviewsApi.goodsBack(review.review_id);
+          toast.success('Goods put back in stock.');
         } else {
           await refundReviewsApi.reject(review.review_id);
           toast.success('Refund review rejected.');
@@ -372,6 +382,11 @@ export default function RefundReviewsPage() {
             const meta = metaFor(s);
             const isOpen = OPEN_STATUSES.includes(s);
             const acting = actingId === r.review_id;
+            // The goods leg of a refund (owner ruling 2026-09-28): a person says
+            // the refunded goods physically came back, before or after the
+            // confirm. Not on a rejected / unmatched row, and once only.
+            const canGoodsBack =
+              !!r.order_id && !r.goods_back_at && (isOpen || s === 'POSTED');
             // OS-061: prefer the display name the backend resolves from the
             // stores registry; fall back to the raw code.
             const restockLabel =
@@ -469,6 +484,18 @@ export default function RefundReviewsPage() {
                     // OS-062: an unrecognised status is not "resolved" — say
                     // plainly that this build has no action for it.
                     <span className="text-xs text-gray-400">No action available</span>
+                  )}
+                  {canGoodsBack && (
+                    <button
+                      type="button"
+                      onClick={() => act(r, 'goods-back')}
+                      disabled={acting}
+                      className="btn-outline inline-flex items-center gap-1.5 text-xs disabled:opacity-60"
+                      title="The refunded items physically came back and can be sold again: put them back in stock (no money moves)"
+                    >
+                      {acting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <PackageCheck className="w-3.5 h-3.5" />}
+                      Goods back
+                    </button>
                   )}
                 </div>
               </div>

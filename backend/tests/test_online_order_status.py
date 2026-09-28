@@ -479,7 +479,8 @@ def test_a_delivered_order_shopify_cancels_stays_delivered_with_one_task_forever
     verb = "cancelled" if variant == "cancel" else "refunded"
     assert rows[0]["title"].startswith(f"Shopify {verb} order ")
     assert "decide: refund, return or Shopify mistake" in rows[0]["title"]
-    assert "counter return door" in rows[0]["description"]
+    assert "press Goods back" in rows[0]["description"]
+    assert "never refund it again at the counter" in rows[0]["description"]
 
 
 NEWER = "2026-09-06T03:00:00Z"
@@ -731,6 +732,7 @@ def test_a_delivered_orders_cancel_line_is_proposed_without_a_restock(swept, res
 # "applied" with the unit still SOLD and the counter door blocked.
 # ---------------------------------------------------------------------------
 
+from api.routers import online_store_refund_reviews as reviews_router  # noqa: E402
 from api.routers import returns as returns_router  # noqa: E402
 
 _ACCT = {"user_id": "acct-1", "roles": ["ACCOUNTANT"], "active_store_id": "BV-GANGA-01"}
@@ -788,3 +790,55 @@ def test_a_blip_in_the_sold_read_at_the_webhook_keeps_the_proposed_restock(swept
     res = shopify_refund.post_from_review(swept["db"], row)
     assert res["restock_applied"] is True and _units(swept) == [("stk-1", "AVAILABLE")]
 
+
+# ---------------------------------------------------------------------------
+# Ruling 2's "return" option (panel P1). A DELIVERED order Shopify refunds stays
+# DELIVERED and its cancel line is held (the customer has the goods). The money
+# is the confirm's; the goods come back through Goods back on the review row,
+# before or after the confirm -- one credit note, one unit, no phantom -- and
+# never through the counter door (test_returns_refund_cap: it refuses an order
+# Shopify refunded in full).
+# ---------------------------------------------------------------------------
+
+
+def _confirm(row):
+    return asyncio.run(reviews_router.confirm_refund_review(row["review_id"], current_user=_ACCT))
+
+
+def _goods_back(row):
+    return asyncio.run(reviews_router.goods_back_refund_review(row["review_id"], current_user=_ACCT))
+
+
+@pytest.mark.parametrize("order", ["confirm_first", "goods_first"])
+def test_the_goods_of_a_delivered_orders_refund_come_back_once(swept, order):
+    from fastapi import HTTPException
+
+    row = _one_unit_refund(swept, 60170, 700370, status="DELIVERED", payment_status="REFUNDED")
+    assert [line["restock"] for line in row["proposed_restock"]] == [False], "held: goods are out"
+    if order == "confirm_first":
+        res = _confirm(row)["result"]
+        assert res["restock_applied"] is True and res["restock_stock_ids"] == []
+        assert _units(swept) == [("stk-1", "SOLD")], "the confirm restocks nothing"
+    got = _goods_back(swept["review"].find_one({"review_id": row["review_id"]}))
+    assert got["result"]["status"] == "restocked" and _units(swept) == [("stk-1", "AVAILABLE")]
+    with pytest.raises(HTTPException) as again:
+        _goods_back(row)
+    assert again.value.status_code == 409
+    if order == "goods_first":
+        _confirm(swept["review"].find_one({"review_id": row["review_id"]}))
+
+    assert _units(swept) == [("stk-1", "AVAILABLE")], "one unit, no phantom"
+    assert swept["ledger"].count_documents({}) == 1, "one credit note"
+    assert _doc(swept, 60170)["status"] == "DELIVERED"
+
+
+def test_goods_back_that_cannot_read_the_stock_can_be_pressed_again(swept, monkeypatch):
+    from fastapi import HTTPException
+
+    row = _one_unit_refund(swept, 60171, 700371, status="DELIVERED")
+    _read_fails_once(monkeypatch, swept["stock_repo"])
+    with pytest.raises(HTTPException) as first:
+        _goods_back(row)
+    assert first.value.status_code == 503 and _units(swept) == [("stk-1", "SOLD")]
+    assert _goods_back(row)["result"]["status"] == "restocked"
+    assert _units(swept) == [("stk-1", "AVAILABLE")]
