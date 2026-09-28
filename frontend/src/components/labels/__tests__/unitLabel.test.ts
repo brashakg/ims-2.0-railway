@@ -143,6 +143,19 @@ describe('the test label', () => {
   });
 });
 
+describe('one stock-label renderer', () => {
+  it('the workshop label module no longer builds a product / frame / CL-box tag', async () => {
+    // Its 50 x 25 mm QZ/ZPL frame tag was a second stock-label renderer on the
+    // wrong stock, reachable from no screen. Stock labels = unitLabel.ts only.
+    const templates: Record<string, unknown> = await import('../labelTemplates');
+    const printers: Record<string, unknown> = await import('../printLabel');
+    ['buildProductLabel', 'frameHtml', 'frameZpl', 'clHtml', 'clZpl'].forEach((k) =>
+      expect(templates[k], k).toBeUndefined(),
+    );
+    expect(printers.printProductLabel).toBeUndefined();
+  });
+});
+
 describe('the print dialog', () => {
   it('opens ONCE per print (a second dialog is a second set of labels)', () => {
     vi.useFakeTimers();
