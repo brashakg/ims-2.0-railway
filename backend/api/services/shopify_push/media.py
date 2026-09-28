@@ -465,7 +465,9 @@ async def _attach_one(
 #
 # ORDER OF OPERATIONS is attach -> delete -> reorder, and a failed step stops
 # the pass: a replacement is on Shopify BEFORE the photo it replaces comes
-# down, so a listing never loses its last photograph to a half-done pass.
+# down, so a listing never loses its last photograph to a half-done pass. A
+# HELD attach is a step not done: while any url of the photo list is held,
+# the pass deletes no photograph (a FAILED media is none).
 # Before any delete the {product_id, media_gid, url, shopify_url, deleted_at}
 # row goes to ``online_media_tombstones`` -- the never-lose-bytes lesson.
 # ---------------------------------------------------------------------------
@@ -734,7 +736,8 @@ def plan_product_media(
     ``design_row`` it governs the docs stamped with THAT row's image_id only.
     A doc of the other lane is never attached, deleted or reordered here. A
     url ``photos`` names that is live in EITHER lane is on the listing and is
-    not attached again; one whose attach is HELD is not attached again either.
+    not attached again; one whose attach is HELD is not attached again either,
+    and while one is held no photograph is deleted (ORDER OF OPERATIONS).
 
     Returns {attach: [url], delete: [{url, id, shopify_url, ...}], reorder:
     [gid] (the desired order of the IMS-owned media, [] when in order),
@@ -765,8 +768,11 @@ def plan_product_media(
     if listing is None:
         on_record = {r["url"] for r in owned} | {p["url"] for p in pending}
         out["attach"] = [u for u in photos if u not in on_record]
+        waiting = any(p["url"] in photos for p in pending)
         out["delete"] = [
-            {**r, "shopify_url": None} for r in owned if _governed(r) and r["url"] not in photos
+            {**r, "shopify_url": None}
+            for r in owned
+            if _governed(r) and r["url"] not in photos and not waiting
         ]
         out["held"] = [p["url"] for p in pending]
         return out
@@ -794,13 +800,16 @@ def plan_product_media(
     by_url = {r["url"]: r["id"] for r in live if not (r["id"] in failed and _governed(r))}
     held_urls = {p["url"] for p in held}
     attach = [] if hands_off else [u for u in photos if u not in by_url and u not in held_urls]
+    # ORDER OF OPERATIONS: a photograph whose attach is HELD has not landed,
+    # so no photograph comes down this pass (only a FAILED media, which is none).
+    waiting = not held_urls.isdisjoint(photos)
     delete = (
         []
         if hands_off
         else [
             {**r, "shopify_url": _cdn(nodes.get(r["id"])) or None}
             for r in live
-            if _governed(r) and (r["url"] not in photos or r["id"] in failed)
+            if _governed(r) and ((r["url"] not in photos and not waiting) or r["id"] in failed)
         ]
     )
     desired = [by_url[u] for u in photos if u in by_url]

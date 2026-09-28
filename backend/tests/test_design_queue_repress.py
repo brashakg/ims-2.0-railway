@@ -50,6 +50,8 @@ were run red against it before they counted):
   T14 test_the_dark_press_plans...            (read before the gate)       -> red
   T15 test_one_rejected_photo_...             no grace / stop-on-error     -> red
   T17 test_no_media_state_lives_on_the_twin   put a media_map constant back-> red
+  T18 test_a_held_replacement_... (x2) /      delete not gated on a held   -> the replaced
+      test_the_dark_plan_keeps_the_photo...     photograph                    photo deleted
   old test_the_old_originalsource_identity... (documents the production shape)
   and the ported round 1-6 tests, each with the revert it names.
 
@@ -1822,6 +1824,80 @@ def test_one_rejected_photo_stays_on_record_and_is_attached_once_after_the_grace
     assert late.photos["dropped"] == 1 and late.photos["attached"] == 1
     assert fake.attached() == [U1, U2, U2]
     assert _ledger(db) == {(OWN, _m(1), None), (U1, _m(100), None), (U2, _m(101), None)}
+
+
+def test_a_held_replacement_never_lets_the_photo_it_replaces_come_down(gates, monkeypatch):
+    """T18, the product door. The product's only photograph A is replaced on
+    the twin by U1, and Shopify rejects U1 (mediaUserErrors): the pass stops,
+    A stays, U1 stays pending. The press again (as the error asks) holds U1
+    -- and A must STAY: nothing replaces it yet, and the listing stays
+    published. It comes down only in the pass that lands U1.
+    REVERT-PROOF: delete not gated on a held photograph -> A tombstoned and
+    deleted on the second press, the listing empty and still published."""
+    fake = _live(monkeypatch, [_node(1, OWN)])
+    fake.reject = {U1}
+    db = _DB()
+    _seed(db, _product([U1]), (OWN, 1))
+
+    first = _run(shopify_push.push_product(db, _parent(db), []))
+    assert "mediaUserErrors" in first.photos["error"] and fake.listing() == [_m(1)]
+
+    again = _run(shopify_push.push_product(db, _parent(db), []))
+
+    assert again.photos["held"] == [U1] and again.photos["deleted"] == 0, again.photos
+    assert fake.listing() == [_m(1)] and fake.calls_of("imsProductDeleteMedia") == []
+    assert list(db[TOMB].find({})) == [] and again.photos["on_shopify"] == 1
+
+    _age(db, U1, 20)
+    late = _run(shopify_push.push_product(db, _parent(db), []))
+    assert late.photos["dropped"] == 1 and fake.listing() == [_m(1)], "re-sent, rejected: A stays"
+
+    fake.reject = set()
+    _age(db, U1, 20)
+    done = _run(shopify_push.push_product(db, _parent(db), []))
+
+    assert done.ok is True and done.photos["deleted"] == 1, done.photos
+    assert fake.listing() == [_m(100)] and _ledger(db) == {(U1, _m(100), None)}
+    assert [t["media_gid"] for t in db[TOMB].find({})] == [_m(1)]
+
+
+def test_a_held_replacement_keeps_the_design_asset_it_replaces(gates, monkeypatch):
+    """T18b, the design door, through the REAL transport. Row I1 live on U1 is
+    re-pointed to U2; U2's attach dies before it reaches Shopify
+    (httpx.ConnectError). The next press holds U2 -- and U1 must stay on the
+    listing: deleted 0, the row's old asset still its record.
+    REVERT-PROOF: delete not gated on a held photograph -> deleted 1, U1 gone
+    with nothing replacing it."""
+    fake = _wire(monkeypatch, [_node(1, OWN), _node(5, U1)])
+    db = _DB()
+    _seed(db, _product([OWN]), (OWN, 1), (U1, 5, "I1"))
+    _image(db, "I1", U2)
+
+    def _dies():
+        raise httpx.ConnectError("connection refused")
+
+    fake.before["imsProductCreateMedia"] = _dies
+    first = _run(shopify_push.push_image(db, _row(db, "I1")))
+    assert first.ok is False and _pending(db) == {(U2, "I1")}
+
+    again = _run(shopify_push.push_image(db, _row(db, "I1")))
+
+    assert again.ok is False and again.photos["held"] == [U2], again.photos
+    assert again.photos["deleted"] == 0 and fake.listing() == [_m(1), _m(5)]
+    assert fake.calls_of("imsProductDeleteMedia") == [] and list(db[TOMB].find({})) == []
+    assert _ledger(db) == {(OWN, _m(1), None), (U1, _m(5), "I1")}
+
+
+def test_the_dark_plan_keeps_the_photo_a_pending_replacement_replaces():
+    """T18c, the dark plan (listing unknown) answers the same rule: A live, its
+    replacement U1 pending -> nothing to delete; U1 live -> A is dropped.
+    REVERT-PROOF: the dark delete not gated -> delete [A]."""
+    a = media_doc("P1", OWN, _m(1))
+    u1 = media_doc("P1", U1, None, sent_at=_ago(0))
+    plan = shopify_push.plan_product_media([a, u1], [U1], [U1])
+    assert plan["delete"] == [] and plan["held"] == [U1] and plan["attach"] == []
+    plan = shopify_push.plan_product_media([a, media_doc("P1", U1, _m(2))], [U1], [U1])
+    assert [d["url"] for d in plan["delete"]] == [OWN]
 
 
 def test_no_media_state_lives_on_the_twin():
