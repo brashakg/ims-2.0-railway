@@ -894,3 +894,45 @@ def test_goods_back_that_cannot_read_the_stock_can_be_pressed_again(swept, monke
     assert first.value.status_code == 503 and _units(swept) == [("stk-1", "SOLD")]
     assert _goods_back(row)["result"]["status"] == "restocked"
     assert _units(swept) == [("stk-1", "AVAILABLE")]
+
+
+# ---------------------------------------------------------------------------
+# Ruling 1 leaves a fulfilled online order SHIPPED (it used to be DELIVERED).
+# Every report that picks orders by status reads the ONE pair of sets in
+# online_order_status; the Tally export and the commission ledgers are pinned
+# in test_tally_export / test_order_attribution_sweep, the widgets here.
+# ---------------------------------------------------------------------------
+
+
+def test_a_shipped_online_sale_counts_in_the_revenue_widgets(monkeypatch):
+    from datetime import timezone
+
+    from strict_fakes import StrictDB
+
+    from api.routers import dashboard_widgets as dw
+
+    db = StrictDB()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    db.seed("orders", [
+        {"order_id": "O1", "store_id": "S1", "status": "SHIPPED", "created_at": now, "grand_total": 999.0},
+        {"order_id": "O2", "store_id": "S1", "status": "CANCELLED", "created_at": now, "grand_total": 5.0},
+    ])
+    monkeypatch.setattr(dw, "_coll", lambda name: db.get_collection(name))
+    user = {"user_id": "u-1", "roles": ["ADMIN"], "active_store_id": "S1"}
+    month = asyncio.run(dw.finance_summary_month(store_id="S1", current_user=user))
+    assert month == {"revenue_month": 999.0, "orders_month": 1}
+    today = asyncio.run(dw.analytics_store_target_today(store_id="S1", current_user=user))
+    assert today["achieved_today"] == 999.0
+
+
+def test_no_report_keeps_its_own_copy_of_the_sale_status_sets():
+    """A local copy is how SHIPPED went missing from the Tally export, the
+    commission ledgers and the revenue widgets in the first place."""
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    copies = ('"COMPLETED", "DELIVERED", "PAID"', '"CONFIRMED", "PROCESSING", "READY", "DELIVERED"')
+    hits = [f"{p.relative_to(root)}: {c}" for d in ("api", "agents") for p in (root / d).rglob("*.py")
+            for c in copies if p.name != "online_order_status.py" and c in p.read_text(encoding="utf-8")]
+    assert hits == []
+    assert "SHIPPED" in oos.SALE_DONE_STATUSES and "SHIPPED" in oos.BOOKED_STATUSES

@@ -15,6 +15,7 @@ from typing import Optional, Dict, Any, List
 from datetime import datetime
 
 from ..utils.ist import ist_day_start_utc, ist_today, now_ist
+from ..services.online_order_status import BOOKED_STATUSES
 from .auth import get_current_user, require_roles
 
 # /admin/* widgets surface cross-store escalations + system status and were
@@ -75,7 +76,7 @@ def _today() -> str:
     return ist_today().isoformat()
 
 
-_COUNTED = {"CONFIRMED", "PROCESSING", "READY", "DELIVERED"}
+_COUNTED = BOOKED_STATUSES
 
 
 # ── Tasks ──────────────────────────────────────────────────────────────────

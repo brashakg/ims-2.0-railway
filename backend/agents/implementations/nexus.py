@@ -31,6 +31,7 @@ import logging
 
 from ..base import JarvisAgent, AgentType, AgentResponse, AgentContext
 from api.utils.ist import ist_day_start_utc, ist_today, now_ist
+from api.services.online_order_status import SALE_DONE_STATUSES
 from ..nexus_providers import (
     SyncResult,
     TallyExportError,
@@ -381,7 +382,7 @@ class NexusAgent(JarvisAgent):
             try:
                 orders = list(orders_coll.find({
                     "$or": created_or,
-                    "status": {"$in": ["COMPLETED", "DELIVERED", "PAID"]},
+                    "status": {"$in": SALE_DONE_STATUSES},
                     "store_id": sid,
                 }))
             except Exception as e:
@@ -646,7 +647,7 @@ class NexusAgent(JarvisAgent):
                     {"created_at": {"$gte": ds_dt, "$lt": de_dt}},
                     {"created_at": {"$gte": ds_dt.isoformat(), "$lt": de_dt.isoformat()}},
                 ],
-                "status": {"$in": ["COMPLETED", "DELIVERED", "PAID"]},
+                "status": {"$in": SALE_DONE_STATUSES},
             }))
         except Exception as e:
             return SyncResult(ok=False, provider="tally", kind="export", error=str(e))

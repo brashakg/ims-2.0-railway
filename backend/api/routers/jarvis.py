@@ -27,6 +27,7 @@ from ..services.reorder_policy import auto_reorder_disabled as _reorder_disabled
 # IST (TZ-P3): the server clock is UTC; every business "today" key below must be
 # the IST calendar day or the 00:00-05:30 IST window reads the PREVIOUS day.
 from ..utils.ist import ist_date_str, ist_day_start_utc, ist_today, now_ist
+from ..services.online_order_status import BOOKED_STATUSES
 
 logger = logging.getLogger(__name__)
 
@@ -149,7 +150,7 @@ class JarvisAnalyticsEngine:
             month_start = now.strftime("%Y-%m-01")
             ly_month_start = f"{now.year - 1:04d}-{now.month:02d}-01"
             ly_month_end = f"{now.year - 1:04d}-{now.month:02d}-31"
-            counted = {"CONFIRMED", "PROCESSING", "READY", "DELIVERED"}
+            counted = BOOKED_STATUSES
 
             rev_today = rev_month = rev_lastyear = 0.0
             orders_today = orders_month = 0
@@ -338,7 +339,7 @@ class JarvisAnalyticsEngine:
             # moved BACKWARD into the stored naive-UTC frame (BOUND rule), so
             # a sale at 00:30 IST on the 1st lands in the right month.
             month_start = ist_day_start_utc(ist_today().replace(day=1))
-            counted = {"CONFIRMED", "PROCESSING", "READY", "DELIVERED"}
+            counted = BOOKED_STATUSES
             cat_sales: Dict[str, float] = {}
             cat_units: Dict[str, int] = {}
             prod_rev: Dict[str, Dict[str, Any]] = {}
@@ -1032,7 +1033,7 @@ class JarvisAnalyticsEngine:
                         "$match": {
                             "created_at": {"$gte": cutoff},
                             "status": {
-                                "$in": ["CONFIRMED", "PROCESSING", "READY", "DELIVERED"]
+                                "$in": list(BOOKED_STATUSES)
                             },
                         }
                     },

@@ -48,6 +48,13 @@ TABLE: Dict[str, Dict[str, Optional[str]]] = {
     "DELIVERED": {CANCEL: TASK, REFUND: TASK, DELETE: TASK},
 }
 TERMINAL = frozenset({"DELIVERED", "CANCELLED", "REFUNDED", "VOID", "VOIDED"})
+# Ruling 1 leaves every fulfilled online order SHIPPED until the courier
+# delivers it; before the ruling it was DELIVERED. For the books it is the
+# same sale, so every report that picks orders by status reads these sets,
+# never a local copy: a done sale (the nightly Tally export, the commission
+# ledgers) and a booked sale (the revenue widgets: all but DRAFT / CANCELLED).
+SALE_DONE_STATUSES = ("COMPLETED", "DELIVERED", "PAID", "SHIPPED")
+BOOKED_STATUSES = frozenset({"CONFIRMED", "PROCESSING", "READY", "SHIPPED", "DELIVERED"})
 # Targets an active Rx / stock hold withholds (the deliver-guard's own rule).
 _HOLDABLE = frozenset({"SHIPPED", "DELIVERED"})
 _VERB = {CANCEL: "cancelled", REFUND: "refunded", DELETE: "deleted"}

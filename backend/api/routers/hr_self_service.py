@@ -33,6 +33,7 @@ from .auth import get_current_user
 from ..dependencies import get_leave_repository
 from ..utils.ist import ist_date_str, ist_month_window_utc
 from ..services.name_resolver import order_actor_id
+from ..services.online_order_status import SALE_DONE_STATUSES
 
 # The ONE leave-apply door lives in hr.py (validation, overlap 409, F26
 # fast-path approval request, manager bell). It is self-pinned (employee taken
@@ -425,7 +426,7 @@ async def my_commission(
         store_id = current_user.get("active_store_id")
 
         order_query = {
-            "status": {"$in": ["COMPLETED", "DELIVERED", "PAID"]},
+            "status": {"$in": SALE_DONE_STATUSES},
             "created_at": {"$gte": from_dt, "$lte": to_dt},
             # Superset pre-filter; order_actor_id below decides which field
             # actually credits the sale (same single rule the manager ledger
