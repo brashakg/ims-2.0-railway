@@ -9,7 +9,12 @@
 import { lazy } from 'react';
 import { Route, Navigate, useSearchParams } from 'react-router-dom';
 import { ProtectedRoute } from '../components/layout/ProtectedRoute';
+import { PURCHASE_MANAGER_ROLES } from '../pages/purchase/purchaseTypes';
 import type { UserRole } from '../types';
+
+// What the blocked page tells anyone else who opens a receiving screen
+// (audit F5): receiving stays with the managers -- say so, and it names them.
+const RECEIVE_DENIED_HINT = 'Only managers receive goods into stock. Hand the delivery to one of them.';
 
 const PurchaseLayout = lazy(() => import('../pages/purchase/PurchaseLayout').then(m => ({ default: m.PurchaseLayout })));
 const PurchaseOrdersSection = lazy(() => import('../pages/purchase/PurchaseOrdersSection').then(m => ({ default: m.PurchaseOrdersSection })));
@@ -136,7 +141,7 @@ export const purchaseRoutes = (
     <Route
       path="purchase/grn"
       element={
-        <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
+        <ProtectedRoute allowedRoles={[...PURCHASE_MANAGER_ROLES]} deniedHint={RECEIVE_DENIED_HINT}>
           <GoodsReceiptNote />
         </ProtectedRoute>
       }
@@ -149,7 +154,7 @@ export const purchaseRoutes = (
     <Route
       path="purchase/receive"
       element={
-        <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
+        <ProtectedRoute allowedRoles={[...PURCHASE_MANAGER_ROLES]} deniedHint={RECEIVE_DENIED_HINT}>
           <GoodsReceiptCockpit />
         </ProtectedRoute>
       }

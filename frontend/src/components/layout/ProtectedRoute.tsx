@@ -15,6 +15,9 @@ interface ProtectedRouteProps {
    *  derived from the current path via moduleForPath. Pass `null` to opt a
    *  route OUT of module gating entirely (rare). */
   requireModule?: ModuleKey | null;
+  /** One line the blocked page shows above the list of who CAN open this
+   *  route (e.g. "Only managers receive goods into stock."). */
+  deniedHint?: string;
 }
 
 export function ProtectedRoute({
@@ -22,6 +25,7 @@ export function ProtectedRoute({
   allowedRoles,
   requirePermission,
   requireModule,
+  deniedHint,
 }: ProtectedRouteProps) {
   const { isAuthenticated, isLoading, hasRole, hasPermission, hasModuleAccess } = useAuth();
   const location = useLocation();
@@ -46,7 +50,10 @@ export function ProtectedRoute({
   // Check role-based access
   if (allowedRoles && allowedRoles.length > 0) {
     if (!hasRole(allowedRoles)) {
-      return <Navigate to="/unauthorized" state={{ from: location }} replace />;
+      // Tell the blocked page who CAN open this, so it can name them.
+      return (
+        <Navigate to="/unauthorized" state={{ from: location, allowedRoles, deniedHint }} replace />
+      );
     }
   }
 

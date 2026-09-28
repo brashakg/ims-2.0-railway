@@ -17,6 +17,7 @@ import { AppearanceProvider } from './context/AppearanceContext';
 import { AppLayout } from './components/layout/AppLayout';
 import { ProtectedRoute } from './components/layout/ProtectedRoute';
 import { ErrorBoundary } from './components/layout/ErrorBoundary';
+import { UnauthorizedPage } from './components/layout/UnauthorizedPage';
 import { SessionExpiryWarning } from './components/common/SessionExpiryWarning';
 // SpeedInsights removed — INP overlay disrupts user experience in production
 // import { SpeedInsights } from '@vercel/speed-insights/react';
@@ -65,18 +66,6 @@ const queryClient = new QueryClient({
 });
 
 // Unauthorized page
-const UnauthorizedPage = () => (
-  <div className="min-h-screen flex items-center justify-center bg-gray-50">
-    <div className="text-center">
-      <h1 className="text-4xl font-bold text-gray-900 mb-2">403</h1>
-      <p className="text-gray-500 mb-4">You don't have permission to access this page.</p>
-      <a href="/dashboard" className="btn-primary">
-        Go to Dashboard
-      </a>
-    </div>
-  </div>
-);
-
 // Not Found page
 const NotFoundPage = () => (
   <div className="min-h-screen flex items-center justify-center bg-gray-50">
