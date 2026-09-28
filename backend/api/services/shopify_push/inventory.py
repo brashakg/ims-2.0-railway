@@ -1677,8 +1677,17 @@ async def push_skus_stock(
     # tally spelled "sold out" as `set == 0` under a code and the summary
     # line said nothing. One fact, one stamp; both screens print it. Nothing
     # written is NOT this (that is the code's line, "NO stock written").
-    summary["sold_out"] = bool(written_per_sku) and all(
-        int(q) == 0 for rows in written_per_sku.values() for q in rows.values()
+    #
+    # "0 AT EVERY SHOP" MEANS EVERY SHOP (#1141 fix-six recheck): every listed
+    # SKU accepted at EVERY mapped shop, every number 0, and no unmapped shop
+    # holding a unit. A mapped shop the writer did not write -- its read died,
+    # Shopify refused it, the SKU has no target -- keeps its last number on
+    # Shopify and is still selling it; "every ACCEPTED number was 0" claimed
+    # SOLD OUT over it.
+    summary["sold_out"] = (
+        not holders
+        and all(set(written_per_sku.get(s) or {}) == set(mapped) for s in distinct)
+        and all(int(q) == 0 for rows in written_per_sku.values() for q in rows.values())
     )
     summary["ok"] = _rows_ok(summary, holders, conflicts, mapped, locations)
     if summary["errors"] and not summary["error"]:

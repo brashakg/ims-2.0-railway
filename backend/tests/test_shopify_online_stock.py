@@ -3829,3 +3829,62 @@ def test_R13_the_writer_stamps_sold_out_once_and_the_screens_print_it(monkeypatc
     db.seed("catalog_products", [_catalog_row("cat-1", "SP-1", gid=False)])
     res = _run(shopify_push.push_product(db, db.get_collection("catalog_products").find_one({"id": "cat-1"}), []))
     assert res.ok is True and res.code is None and (res.stock or {}).get("sold_out") is True, res
+
+
+# ---------------------------------------------------------------------------
+# #1141 fix-six recheck follow-ups (2026-09-29): what the lenses listed and
+# the old panel script did not count
+# ---------------------------------------------------------------------------
+
+
+class _RefuseAt(_Spy):
+    """Shopify refuses every inventorySetQuantities row at ONE location (a
+    location deleted under a live mapping); every other call as usual."""
+
+    def __init__(self, responses, location):
+        super().__init__(responses)
+        self.location = location
+
+    async def __call__(self, db, query, variables):  # noqa: ARG002
+        if "inventorySetQuantities" in query and any(
+            r["locationId"] == self.location for r in variables["input"]["quantities"]
+        ):
+            self.calls.append({"query": query, "variables": variables})
+            return _set_error("INVALID_LOCATION", "location refused")
+        return await super().__call__(db, query, variables)
+
+
+def test_F2_sold_out_is_never_claimed_over_a_mapped_shop_the_writer_did_not_write(monkeypatch):
+    """TRUTH OF SCREEN, oversell direction (#1141 fix-six recheck, three
+    lenses). `sold_out` stamped "every number Shopify ACCEPTED was 0", and the
+    sync page prints it as 'live and SOLD OUT (0 at every shop)'. A mapped shop
+    the writer did NOT write keeps its last number on Shopify -- so the listing
+    is still on sale there -- and was invisible to the stamp: a location
+    Shopify refused, a shop whose shelf read died, a listed SKU with no
+    target, and an unmapped shop holding the unit. The stamp now means 0 at
+    EVERY mapped shop for EVERY listed SKU, all of it accepted, with no shop
+    holding a unit IMS could not write. Stamp it from the accepted rows alone
+    again -> every case below fails; the control stays True."""
+    shown_b = {"quantities": {"SP-1": {"BV-A": 0, "BV-B": 1, "BV-C": 0}}, "tracked": True, "policy": "DENY"}
+    # 1. Shopify refused B's row: B keeps showing 1.
+    _live(monkeypatch, _RefuseAt(_responses(), LOC_B))
+    refused = _run(shopify_push.push_skus_stock(_listed(_db(a=0, b=0, c=0), online_stock=shown_b), ["SP-1"], source="sale"))
+    assert refused["code"] == shopify_push.STOCK_WRITE_FAILED and refused["quantities"] == {"SP-1": {"BV-A": 0, "BV-C": 0}}
+    assert refused["sold_out"] is False, "B was refused and still shows 1"
+    # 2. B's shelf read died: written nowhere, Shopify keeps B's last number.
+    _live(monkeypatch, _Spy(_responses()))
+    db = _listed(_db(a=0, b=0, c=0), online_stock=shown_b)
+    _break_shop(db, "BV-B")
+    unknown = _run(shopify_push.push_skus_stock(db, ["SP-1"], source="sale"))
+    assert unknown["unknown_stores"] == ["BV-B"] and unknown["sold_out"] is False, unknown
+    # 3. A listed SKU with no Shopify target is written nowhere.
+    db = _listed(_db(a=0, b=0, c=0))
+    db.get_collection("products").insert_one({"product_id": "spine-2", "sku": "SP-2"})
+    no_target = _run(shopify_push.push_skus_stock(db, ["SP-1", "SP-2"], source="product_push", product_id="cat-1"))
+    assert no_target["target_missing"] == ["SP-2"] and no_target["sold_out"] is False, no_target
+    # 4. An unmapped shop holds the one unit: "0 at every shop" is false.
+    holder = _run(shopify_push.push_skus_stock(_listed(_db(a=0, b=0, c=0, d=1)), ["SP-1"], source="sale"))
+    assert holder["code"] == shopify_push.STORE_UNMAPPED and holder["set"] == 3 and holder["sold_out"] is False, holder
+    # CONTROL: every mapped shop written 0, nothing held anywhere else.
+    clean = _run(shopify_push.push_skus_stock(_listed(_db(a=0, b=0, c=0)), ["SP-1"], source="sale"))
+    assert clean["ok"] is True and clean["set"] == 3 and clean["sold_out"] is True, clean
