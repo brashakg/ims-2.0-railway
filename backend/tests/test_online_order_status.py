@@ -212,6 +212,52 @@ def test_a_delivered_order_shopify_calls_fulfilled_is_no_disagreement(swept):
     assert _doc(swept, 60016)["status"] == "DELIVERED"
 
 
+def test_a_pickup_order_shopify_fulfilled_is_delivered_at_the_counter(swept, monkeypatch):
+    """Ruling 1, the counter half: a click-and-collect order at READY that
+    Shopify marks fulfilled (picked up) is SHIPPED, and the counter's Mark
+    Delivered takes it to DELIVERED through the same claim. The door used to
+    refuse anything but READY, so nothing ever delivered it."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from api.routers import orders as om
+    from api.routers import workshop as wm
+    from api.routers.auth import get_current_user
+    from database.repositories.order_repository import OrderRepository
+
+    _book(swept, 60017)
+    _set(swept, 60017, status="READY")
+    swept["real_map"](_pulled(60017, fulfillment_status="fulfilled"), swept["db"],
+                      webhook_id="ful-60017", topic="orders/fulfilled")
+    doc = _doc(swept, 60017)
+    assert doc["status"] == "SHIPPED"
+
+    class _NoJobs:
+        def find_by_id(self, _):
+            return None
+
+        def find_by_order(self, _):
+            return []
+
+    monkeypatch.setattr(om, "get_order_repository", lambda: OrderRepository(swept["orders"]))
+    monkeypatch.setattr(wm, "get_workshop_repository", lambda: _NoJobs())
+    app = FastAPI()
+    app.include_router(om.router, prefix="/api/v1/orders")
+
+    async def _user():
+        return {"user_id": "u1", "username": "counter", "roles": ["SALES_CASHIER"],
+                "store_ids": [doc["store_id"]], "active_store_id": doc["store_id"]}
+
+    app.dependency_overrides[get_current_user] = _user
+    resp = TestClient(app).post(f"/api/v1/orders/{doc['order_id']}/deliver")
+
+    assert resp.status_code == 200, resp.text
+    doc = _doc(swept, 60017)
+    assert doc["status"] == "DELIVERED" and doc["delivered_at"]
+    assert [(h["status"], h["changed_by"]) for h in doc["status_history"]] == [
+        ("SHIPPED", "system:ONLINE_MAP"), ("DELIVERED", "u1")]
+
+
 def test_a_cancelled_fulfilment_with_tracking_never_ships(swept):
     _book(swept, 60070)
     res = shopify_fulfillment.reconcile_fulfillment(

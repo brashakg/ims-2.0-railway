@@ -30,7 +30,7 @@ import { marketingApi } from '../../services/api/marketing';
 import { printDocumentsApi } from '../../services/api/printDocuments';
 import { formatDateIST, formatTimeIST } from '../../utils/datetime';
 import { useAuth } from '../../context/AuthContext';
-import { canCloseHandover } from './handoverRoles';
+import { canCloseHandover, canMarkDelivered } from './handoverRoles';
 import { useToast } from '../../context/ToastContext';
 import { Pagination } from '../../components/common/Pagination';
 import clsx from 'clsx';
@@ -46,6 +46,7 @@ const ORDER_STATUS_CONFIG: Record<OrderStatus, { label: string; color: string; b
   CONFIRMED: { label: 'Confirmed', color: 'text-blue-700', bgColor: 'bg-blue-50', icon: CheckCircle },
   PROCESSING: { label: 'Processing', color: 'text-amber-700', bgColor: 'bg-amber-50', icon: Clock },
   READY: { label: 'Ready', color: 'text-green-700', bgColor: 'bg-green-50', icon: Package },
+  SHIPPED: { label: 'Shipped', color: 'text-indigo-700', bgColor: 'bg-indigo-50', icon: Truck },
   DELIVERED: { label: 'Delivered', color: 'text-green-700', bgColor: 'bg-green-50', icon: Truck },
   CANCELLED: { label: 'Cancelled', color: 'text-red-700', bgColor: 'bg-red-50', icon: XCircle },
 };
@@ -148,7 +149,7 @@ export function OrdersPage() {
   useEffect(() => {
     const statusParam = searchParams.get('status');
     if (statusParam && statusParam !== statusFilter) {
-      const validStatuses: (OrderStatus | 'ALL')[] = ['ALL', 'DRAFT', 'CONFIRMED', 'PROCESSING', 'READY', 'DELIVERED', 'CANCELLED'];
+      const validStatuses: (OrderStatus | 'ALL')[] = ['ALL', 'DRAFT', 'CONFIRMED', 'PROCESSING', 'READY', 'SHIPPED', 'DELIVERED', 'CANCELLED'];
       if (validStatuses.includes(statusParam as OrderStatus)) {
         setStatusFilter(statusParam as OrderStatus);
       }
@@ -482,6 +483,7 @@ export function OrdersPage() {
               <option value="CONFIRMED">Confirmed</option>
               <option value="PROCESSING">Processing</option>
               <option value="READY">Ready</option>
+              <option value="SHIPPED">Shipped</option>
               <option value="DELIVERED">Delivered</option>
               <option value="CANCELLED">Cancelled</option>
             </select>
@@ -852,7 +854,7 @@ export function OrdersPage() {
                       front of the customer with no in-app escalation. The
                       backend stays the authority; this only stops offering an
                       action it will reject. */}
-                  {canCloseHandover(user) && selectedOrder.orderStatus === 'READY' && selectedOrder.paymentStatus !== 'PENDING' && (
+                  {canCloseHandover(user) && canMarkDelivered(selectedOrder.orderStatus) && selectedOrder.paymentStatus !== 'PENDING' && (
                     <button
                       onClick={() => openDeliverModal(selectedOrder)}
                       disabled={isOnRxHold(selectedOrder)}

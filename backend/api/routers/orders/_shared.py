@@ -447,6 +447,10 @@ VALID_TRANSITIONS = {
     },  # READY for quick-sale (no workshop)
     "PROCESSING": {"READY", "CANCELLED"},
     "READY": {"DELIVERED", "CANCELLED"},
+    # An online order Shopify fulfilled is SHIPPED (owner ruling 2026-09-28);
+    # the counter delivers it when a person hands it over (click-and-collect)
+    # or confirms a parcel no courier feed reports delivered.
+    "SHIPPED": {"DELIVERED"},
     "DELIVERED": set(),  # Terminal
     "CANCELLED": set(),  # Terminal
 }
