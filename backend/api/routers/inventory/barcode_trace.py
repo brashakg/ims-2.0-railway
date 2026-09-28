@@ -4,6 +4,7 @@ from ._shared import (
     Depends,
     Dict,
     Optional,
+    barcode_svc,
     get_current_user,
     logger,
     router,
@@ -66,7 +67,7 @@ async def barcode_lifecycle_trace(
 
     try:
         # 1. Stock unit
-        su = db.get_collection("stock_units").find_one({"barcode": barcode})
+        su = db.get_collection("stock_units").find_one(barcode_svc.unit_barcode_match(barcode))
         if su:
             result["stock_unit"] = _scrub(dict(su))
             stock_id = str(su.get("stock_id") or su.get("stock_unit_id") or su.get("_id") or "")

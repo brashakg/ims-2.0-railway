@@ -11,8 +11,9 @@ Owner ruling 2026-09-28: a unit barcode is letters and digits only, e.g.
 (frontend/src/components/pos/BarcodeScanner.tsx). `mint_unit_barcode` is the ONE
 minter -- GRN accept, /stock/add, opening stock, return restock and serial
 capture all call it. Codes minted before the ruling ('BV--91FA3858' from GRN,
-'2000000000015' EAN-13s from /stock/add) stay on their units; every lookup is an
-exact match on stock_units.barcode, so both formats still resolve.
+'2000000000015' EAN-13s from /stock/add) stay on their units. Every
+stock_units.barcode lookup goes through `unit_barcode_match`, so a code typed in
+lower case (a tablet keyboard) still finds its unit, in either format.
 
 Only `allocate_sequence` touches Mongo, and it fails soft (None) so a stock
 intake is never blocked by the counter.
@@ -76,3 +77,15 @@ def mint_unit_barcode(db, store_id: Optional[str]) -> str:
     # only runs when Mongo is unreachable (the insert then fails anyway).
     body = str(seq).zfill(10) if seq is not None else uuid.uuid4().hex[:10].upper()
     return _NOT_ALNUM.sub("", str(store_id or "").upper())[:2] + body
+
+
+def unit_barcode_match(code: Optional[str]) -> dict:
+    """THE stock_units filter for a scanned or typed unit code.
+
+    Every minted unit code is upper case, but a hand-typed one may not be
+    ('bv0000000001', or 'Bv0000000001' from a tablet that capitalises the first
+    letter). Match the code as typed OR upper-cased, so any case finds the unit
+    and a legacy row stored in lower case still matches itself.
+    """
+    raw = str(code or "").strip()
+    return {"barcode": {"$in": list(dict.fromkeys([raw, raw.upper()]))}}

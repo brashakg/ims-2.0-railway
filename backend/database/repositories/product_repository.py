@@ -9,6 +9,7 @@ import re
 from typing import List, NamedTuple, Optional, Dict
 from datetime import datetime, date, timedelta
 
+from api.services.barcode import unit_barcode_match
 from api.utils.ist import ist_today
 
 from .base_repository import BaseRepository
@@ -294,7 +295,7 @@ class StockRepository(BaseRepository):
         return "stock_id"
 
     def find_by_barcode(self, barcode: str) -> Optional[Dict]:
-        return self.find_one({"barcode": barcode})
+        return self.find_one(unit_barcode_match(barcode))
 
     def find_by_product_store(self, product_id: str, store_id: str) -> List[Dict]:
         return self.find_many(

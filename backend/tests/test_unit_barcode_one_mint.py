@@ -8,8 +8,9 @@ codes: GRN (store + uuid) vs /stock/add + opening stock (a GS1 20-prefix EAN-13)
 
 Now ONE minter, ``services.barcode.mint_unit_barcode``: the store's two-letter
 prefix + the chain-wide atomic counter ('BV0000000042'). Every door that creates
-a stock_units row calls it. Existing units keep their old codes and every lookup
-is an exact match, so both formats still resolve.
+a stock_units row calls it. Existing units keep their old codes, and every unit
+lookup (services.barcode.unit_barcode_match) takes the code as typed or
+upper-cased, so both formats resolve in any letter case.
 """
 
 from __future__ import annotations
@@ -153,8 +154,8 @@ def test_serial_capture_without_a_label_gets_a_minted_barcode(monkeypatch):
 
 
 def test_till_lookup_still_finds_old_and_new_codes(monkeypatch):
-    """Existing units keep their codes: the lookup is an exact match, so an old
-    hyphenated code, an old EAN-13 and a new code all resolve."""
+    """Existing units keep their codes: an old hyphenated code, an old EAN-13
+    and a new code all resolve, typed in any letter case."""
     from api.routers import inventory as inv
     from database.repositories.product_repository import StockRepository
 
@@ -175,5 +176,30 @@ def test_till_lookup_still_finds_old_and_new_codes(monkeypatch):
     monkeypatch.setattr(inv, "get_product_repository", lambda: None)
 
     for code in codes:
-        hit = _run(inv.get_stock_by_barcode_short(code, None, _MGR))
-        assert hit["barcode"] == code
+        # As printed, all lower case (typed), and first letter only capitalised
+        # (a tablet keyboard): the till finds the same unit every time.
+        for typed in (code, code.lower(), code[:1] + code[1:].lower()):
+            hit = _run(inv.get_stock_by_barcode_short(typed, None, _MGR))
+            assert hit["barcode"] == code, typed
+
+
+def test_stock_count_scan_finds_a_unit_typed_in_lower_case(monkeypatch):
+    """The stock count's scan door uses the same unit lookup as the till."""
+    import mongomock
+    from api.routers import inventory as inv
+
+    db = mongomock.MongoClient().db
+    db.stock_units.insert_one(
+        {"barcode": "BV0000000001", "product_id": "P1", "store_id": STORE,
+         "status": "AVAILABLE"}
+    )
+    db.products.insert_one({"_id": "P1", "sku": "S1", "brand": "B", "model": "M"})
+    monkeypatch.setattr(inv, "_get_db", lambda: db)
+
+    out = _run(
+        inv.scan_barcode_for_count(
+            inv.BarcodeScanRequest(barcode="bv0000000001", physical_count=1), None, _MGR
+        )
+    )
+    assert out["product_id"] == "P1"
+    assert out["system_count"] == 1
