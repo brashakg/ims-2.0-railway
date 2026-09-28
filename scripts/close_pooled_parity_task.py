@@ -17,7 +17,7 @@ when PR 4 merges.
 
 WHAT IT TOUCHES
 ---------------
-ONE collection, `tasks` (asserted before any read). ONLY rows whose
+ONE collection, `tasks` (checked before any read; SystemExit otherwise). ONLY rows whose
 source_ref EQUALS "shopify-stock-parity-drift" (an exact match: the per-shop
 ":<store_id>" refs are never touched) and whose status is still active
 (OPEN / IN_PROGRESS / ESCALATED). Closing = what TaskRepository.complete_task
@@ -64,14 +64,20 @@ def resolve_mongo_uri(explicit: Optional[str]) -> Optional[str]:
 
 def close_pooled(coll, *, commit: bool, now: Optional[datetime] = None) -> List[Dict[str, Any]]:
     """Print, and with ``commit`` close, every ACTIVE task whose source_ref is
-    exactly POOLED_REF. Returns the rows it matched. Refuses (AssertionError)
-    any collection but `tasks`."""
+    exactly POOLED_REF. Returns the rows it matched. Refuses (SystemExit)
+    any collection but `tasks`, and any matched row whose ref is not exactly
+    POOLED_REF. Explicit checks, not `assert`: `python -O` strips asserts."""
     name = getattr(coll, "name", None)
-    assert name == COLLECTION, f"refusing: pointed at {name!r}, only {COLLECTION!r} is allowed"
+    if name != COLLECTION:
+        raise SystemExit(f"refusing: pointed at {name!r}, only {COLLECTION!r} is allowed")
     flt = {"source_ref": POOLED_REF, "status": {"$in": ACTIVE}}
     rows = list(
         coll.find(flt, {"_id": 0, "task_id": 1, "title": 1, "status": 1, "created_at": 1, "source_ref": 1})
     )
+    # Belt and braces behind the exact-ref filter, before ANY row is written.
+    stray = [r.get("task_id") for r in rows if r.get("source_ref") != POOLED_REF]
+    if stray:
+        raise SystemExit(f"refusing: {stray!r} matched without source_ref == {POOLED_REF!r}")
     print(f"{len(rows)} active task(s) with source_ref == {POOLED_REF!r}:")
     for r in rows:
         print(f"  {r.get('task_id')}  {r.get('status'):12}  created {r.get('created_at')}  {r.get('title')}")
@@ -81,7 +87,6 @@ def close_pooled(coll, *, commit: bool, now: Optional[datetime] = None) -> List[
     now = now or datetime.now()
     closed = 0
     for r in rows:
-        assert r.get("source_ref") == POOLED_REF  # belt and braces: exact ref only
         res = coll.update_one(
             {"task_id": r["task_id"], "source_ref": POOLED_REF, "status": r["status"]},
             {

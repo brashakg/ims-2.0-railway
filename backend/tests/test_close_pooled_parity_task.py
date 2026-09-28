@@ -8,7 +8,10 @@ Pins (each red when its rule is removed):
     never a per-shop ":<store_id>" ref, never another ref, never a row that is
     already closed (revert the filter to a prefix/regex match -> the per-shop
     task is closed -> red);
-  * it refuses any collection but `tasks` (drop the assert -> red).
+  * it refuses any collection but `tasks`, and any matched row whose ref is
+    not exactly the pooled one, with SystemExit -- never a bare `assert`,
+    which `python -O` strips (put either `assert` back -> AssertionError is
+    not SystemExit -> red).
 
 StrictCollection only -- no network, no production.
 """
@@ -68,9 +71,22 @@ def test_commit_closes_only_the_exact_pooled_ref():
 
 def test_refuses_any_collection_but_tasks():
     other = StrictCollection("stock_units", [{"source_ref": "shopify-stock-parity-drift", "status": "OPEN"}])
-    with pytest.raises(AssertionError, match="refusing"):
+    with pytest.raises(SystemExit, match="refusing"):
         script.close_pooled(other, commit=True)
     assert other.docs[0]["status"] == "OPEN"
+
+
+def test_refuses_a_matched_row_that_is_not_the_exact_pooled_ref():
+    """Belt and braces behind the exact-ref filter: a `tasks` collection that
+    answers the find with the pooled row AND a per-shop row (a filter that
+    drifted to a prefix) writes NOTHING -- not even the pooled row first --
+    and exits."""
+    coll = _tasks()
+    rows = [dict(d) for d in coll.docs if d["task_id"] in ("T-JULY", "T-SHOP")]
+    coll.find = lambda *_a, **_k: [dict(r) for r in rows]
+    with pytest.raises(SystemExit, match="refusing"):
+        script.close_pooled(coll, commit=True)
+    assert _status(coll)["T-JULY"] == "ESCALATED" and _status(coll)["T-SHOP"] == "OPEN"
 
 
 def test_no_connection_is_a_clean_exit(monkeypatch):
