@@ -1,6 +1,7 @@
 """
-BVI safety-net tests: drift detector, oversell repush sweep, parity oracle,
-uploads audit (Steps 3, 4, 6 of the BVI merge completion).
+BVI safety-net tests: drift detector, parity oracle, uploads audit (Steps 3
+and 6 of the BVI merge completion; the Step-4 pooled repush was deleted with
+the per-store Shopify locations).
 
 All tests use in-memory fakes (no real DB, no real Shopify). The Shopify
 network boundary (shopify_push._graphql) is monkeypatched so no HTTP call
@@ -284,71 +285,6 @@ def test_detect_drift_no_timestamp_counted_separately():
 
 
 # ---------------------------------------------------------------------------
-# STEP 4: repush_oversell_risk tests
-# ---------------------------------------------------------------------------
-
-
-def test_repush_oversell_risk_dark_no_writes_enabled():
-    """When IMS_SHOPIFY_WRITES is off (default), repush returns the plan without writing."""
-    db = _FakeDb({"products": _FakeColl([])})
-
-    result = _run(sh.repush_oversell_risk(db, dry_run=True))
-    assert result["dry_run"] is True
-    assert result["repushed"] == []
-    assert result["skipped_reason"] is not None
-
-
-def test_repush_oversell_risk_dry_run_returns_plan_not_write():
-    """dry_run=True returns would_repush entries without calling Shopify, even if
-    writes are enabled."""
-    db = _FakeDb({
-        "products": _FakeColl([
-            {"product_id": "P1", "sku": "SKU-A", "is_active": True}
-        ]),
-        "stock_units": _FakeColl([]),
-    })
-
-    with patch("agents.nexus_providers.ims_shopify_writes_enabled", return_value=True), \
-         patch("api.services.online_catalog.online_status_for_skus",
-               return_value={"SKU-A": {"online": True, "online_stock": 5}}), \
-         patch("api.services.stock_allocation.reconcile_items",
-               return_value={
-                   "items": [{"sku": "SKU-A", "status": "OVERSELL_RISK",
-                               "in_store": 0, "online": 5}],
-                   "summary": {}
-               }):
-        result = _run(sh.repush_oversell_risk(db, dry_run=True))
-
-    assert result["dry_run"] is True
-    # would_repush should list the oversell SKU
-    assert any(r.get("sku") == "SKU-A" for r in result["would_repush"])
-    # no actual Shopify calls were made
-    assert result["repushed"] == []
-    assert result["skipped_reason"] is not None  # "dry_run=True ..."
-
-
-def test_repush_oversell_risk_none_db():
-    """None db -> no crash, skipped_reason set."""
-    result = _run(sh.repush_oversell_risk(None, dry_run=True))
-    assert result["dry_run"] is True
-    assert result["skipped_reason"] is not None
-
-
-def test_repush_oversell_risk_no_oversell_skus():
-    """When no SKUs are oversell-risk, would_repush is empty."""
-    db = _FakeDb({"products": _FakeColl([])})
-
-    with patch("agents.nexus_providers.ims_shopify_writes_enabled", return_value=True), \
-         patch("api.services.online_catalog.online_status_for_skus", return_value={}), \
-         patch("api.services.stock_allocation.reconcile_items",
-               return_value={"items": [], "summary": {}}):
-        result = _run(sh.repush_oversell_risk(db, dry_run=True))
-
-    assert result["would_repush"] == []
-    assert result["repushed"] == []
-
-
-# ---------------------------------------------------------------------------
 # STEP 6a: parity_summary tests
 # ---------------------------------------------------------------------------
 
@@ -487,7 +423,6 @@ def test_sync_health_includes_drift_block():
 # ---------------------------------------------------------------------------
 
 _DRIFT_EP = "/api/v1/admin/online-store/drift"
-_REPUSH_EP = "/api/v1/admin/online-store/repush-oversell"
 _PARITY_EP = "/api/v1/admin/online-store/parity"
 
 
@@ -527,23 +462,6 @@ def test_drift_endpoint_admin_forbidden(client):
 
 def test_drift_endpoint_sales_staff_forbidden(client):
     r = client.get(_DRIFT_EP, headers=_token(["SALES_STAFF"]))
-    assert r.status_code == 403
-
-
-def test_repush_endpoint_superadmin_dry_run(client):
-    """SUPERADMIN POST with dry_run=True returns would_repush plan, no Shopify call."""
-    with patch("agents.nexus_providers.ims_shopify_writes_enabled", return_value=False):
-        r = client.post(_REPUSH_EP + "?dry_run=true", headers=_token(["SUPERADMIN"]))
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert "dry_run" in body
-    assert body["dry_run"] is True
-    assert "would_repush" in body
-    assert "repushed" in body
-
-
-def test_repush_endpoint_admin_forbidden(client):
-    r = client.post(_REPUSH_EP, headers=_token(["ADMIN"]))
     assert r.status_code == 403
 
 

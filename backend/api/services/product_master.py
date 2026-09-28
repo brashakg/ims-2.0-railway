@@ -176,6 +176,11 @@ _SMARTGLASS_TECH: tuple = (
     "year_of_launch",
 )
 
+# TWO-REGISTRY RULE: a category field lives here AND in the frontend's
+# CATEGORY_FIELDS (frontend/src/domain/catalog/productAdd/categoryFields.ts);
+# add it to both, plus a label in _FIELD_LABELS below.
+# tests/test_smartglass_listing.py pins the two lists for every category.
+#
 # canonical -> CategorySpec. `required` folds the Excel/CATEGORY_FIELDS rules.
 # HEARING_AID adds serial_no as REQUIRED (the catalog CATEGORY_FIELDS had it
 # optional) per the PM packet, and is forced NON_DISCOUNTABLE.
@@ -391,6 +396,8 @@ def category_spec(category: Any) -> Optional[CategorySpec]:
     return _CATEGORY_SPECS[canonical]
 
 
+# (Two-registry rule: see the note above _CATEGORY_SPECS - a new field also
+# goes into frontend/src/domain/catalog/productAdd/categoryFields.ts.)
 # Human-friendly labels for the canonical attribute keys, so the GET
 # /products/categories endpoint can hand the FE a complete, render-ready field
 # spec (label + required flag) from this ONE registry -- the FE no longer has to

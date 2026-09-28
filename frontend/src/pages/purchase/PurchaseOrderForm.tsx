@@ -21,7 +21,7 @@ import type {
   ComposerVendorOption,
   ComposerNewProduct,
 } from '../../components/purchase/PurchaseOrderComposer';
-import { CATEGORIES } from '../catalog/productAddShared';
+import { CATEGORIES } from '../../domain/catalog/productAdd';
 import type { Supplier, PurchaseOrder, POItem } from './purchaseTypes';
 
 interface PickedProduct {

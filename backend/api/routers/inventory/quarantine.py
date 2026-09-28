@@ -164,6 +164,19 @@ async def quarantine_stock_unit(
     if not stock_repo.update(stock_id, update):
         raise HTTPException(status_code=500, detail="Failed to quarantine stock unit")
 
+    # Per-store online stock (owner ruling 2026-09-06): an AVAILABLE unit just
+    # left this shop's shelf, so its Shopify location goes down now, like a
+    # POS sale. Fire-and-forget, fail-soft (never raises into the quarantine).
+    if current_status == "AVAILABLE":
+        try:
+            from ...services.online_stock_writeback import writeback_after_units_left
+
+            writeback_after_units_left(
+                _get_db(), [unit.get("product_id")], store_id, source="quarantine_in"
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug("[INVENTORY] quarantine online stock write-back skipped: %s", e)
+
     _quarantine_audit(
         "STOCK_QUARANTINED",
         stock_id,

@@ -111,7 +111,8 @@ export const HSN_CODES: Record<string, HSNCode> = {
 // server (gstRuntime reads GET /products/gst-rates; the offline last resort is
 // getGSTRateByCategory below). It exists for two jobs the runtime path cannot
 // do:
-//   1. COMPILE-TIME completeness -- productAddShared.CATEGORIES is typed
+//   1. COMPILE-TIME completeness -- CATEGORIES (in
+//      domain/catalog/productAdd/categoryFields.ts) is typed
 //      against TaxedCategory, so adding a picker category without declaring
 //      its HSN + rate here fails `tsc`, naming it, instead of silently
 //      falling through to a default (CCL did exactly that: 18% on screen,
@@ -192,8 +193,8 @@ export const CATEGORY_TAX = {
 
 /** Every category spelling this table prices.
  *
- *  The Add-Product picker's list (`pages/catalog/productAddShared.CATEGORIES`)
- *  is typed against this, so a category the screen can offer CANNOT fall
+ *  The Add-Product picker's list (`CATEGORIES` in
+ *  `domain/catalog/productAdd/categoryFields.ts`) is typed against this, so a category the screen can offer CANNOT fall
  *  through to the unknown-category defaults below -- adding one without pricing
  *  it here fails `tsc` instead of silently quoting 18% under helper text that
  *  promises the HSN settles it. */

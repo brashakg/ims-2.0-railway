@@ -50,7 +50,11 @@ STATE_DELIST_FAILED = "DELIST_FAILED"
 CODE_DELIST_FAILED = "DELIST_FAILED"
 # Every twin key this module stamps; a successful publish clears them all
 # (shopify_push.writeback), as does a reactivation.
-DELIST_KEYS = ("online_state", "delisted_at", "delist_reason", "delist_error")
+# ``delist_mode`` is the push mode the DELISTED stamp came from: only a LIVE
+# take-down proves the twin is off Shopify (a DARK delist is a SIMULATED no-op
+# with zero network), and the stock writer's claim read
+# (online_catalog.skus_claiming_inventory_items) reads exactly that.
+DELIST_KEYS = ("online_state", "delisted_at", "delist_reason", "delist_error", "delist_mode")
 
 
 def _raw_db(db):
@@ -163,6 +167,7 @@ async def delist_if_live(
                 delisted_at=shopify_push._now(),
                 delist_reason=reason,
                 delist_error=None,
+                delist_mode=data.get("mode"),
             )
         else:
             data["code"] = data.get("code") or CODE_DELIST_FAILED
@@ -173,6 +178,7 @@ async def delist_if_live(
                 delisted_at=None,
                 delist_reason=reason,
                 delist_error=data.get("error") or CODE_DELIST_FAILED,
+                delist_mode=data.get("mode"),
             )
         write_push_audit(data, actor)
         return data

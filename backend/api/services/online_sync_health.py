@@ -16,7 +16,6 @@ the SUPERADMIN integrations/status surface (council D10). It answers:
 
 Additional callables (NEXUS / endpoint use):
   detect_drift(db, limit)          -- async, per-gid Shopify updatedAt check.
-  repush_oversell_risk(db, dry_run)-- async, re-push absolute inv for oversell SKUs.
   parity_summary(db)               -- sync, IMS-vs-Shopify catalog count diff.
   uploads_image_audit(db)          -- sync, images with local /uploads/ URLs.
 
@@ -28,8 +27,8 @@ Online-truth source (post-BVI): BVI + its Postgres were deleted 2026-07-20.
 Contract (mirrors the rest of the consolidation bridge):
 - 100% FAIL-SOFT. Missing DB / creds -> zeros + flags, NEVER raises, never
   500s the status page.
-- READ-ONLY for detect_drift / parity / uploads_audit.
-  repush_oversell_risk respects the TRIPLE gate; dry_run=True is the safe default.
+- READ-ONLY for detect_drift / parity / uploads_audit. Nothing here writes
+  a quantity: the ONE stock writer is shopify_push.inventory.push_skus_stock.
 - The Shopify drift read uses shopify_push._graphql (the single network boundary).
   No Shopify creds -> checked:False, never raises.
 """
@@ -113,11 +112,36 @@ def last_successful_shopify_sync_at(db) -> Optional[str]:
 
 def _on_hand_by_product(
     db, product_ids: List[str], store_id: Optional[str] = None
-) -> Dict[str, int]:
+) -> Optional[Dict[str, int]]:
     """Count on-hand units per product from the serialized `stock_units`
     collection (one row per unit). Same shape as inventory._on_hand_by_product,
     reading the SAME on-hand decision, without a router dependency.
-    Fail-soft -> {}."""
+    Fail-soft -> {} for nothing to count; ``None`` when the count could not be
+    made (shop list or aggregate unreadable) -- UNKNOWN, which every consumer
+    carries as ``in_store=None`` (ONHAND_UNKNOWN), never as a confident 0:
+    one unreadable shop list turned every online SKU on the reconciliation
+    screen into on-hand 0 + OVERSELL_RISK (recheck round 1).
+
+    With NO ``store_id`` this is the POOLED count over the WRITER's own shop
+    list -- ``stores_util.physical_stores``: ACTIVE and not ONLINE -- exactly
+    the shops online_stock_writeback publishes (online_quantities_for_skus
+    loops that list and nothing else). It did not, and the two readers
+    disagreed about the same unit: an AVAILABLE unit parked on BV-ONLINE-01 is
+    unpickable (the online store has no shelf and POS is blocked on it), so the
+    writer publishes 0 while this reader counted 1 -- and this reader is what
+    feeds the oversell-risk tile and the catalog reconciliation screen, so a
+    listing of 1 against a shelf of 0 classified as OK and a REAL oversell was
+    hidden. The first fix excluded the online stores through
+    ``_online_store_ids`` and left the OTHER axis open (recheck round 2): a
+    unit at a DEACTIVATED shop is published nowhere by the writer (T14,
+    "inactive shop never counts anywhere") and was still on hand here. One
+    rule, one reader: the shops the writer writes are the shops this counts.
+    An unreadable shop list is UNKNOWN -> None, never "every unit counts" and
+    never "no unit counts".
+
+    Still POOLED, though (PR 4's job): it compares an IMS total that includes
+    the deliberately unmapped Gangadham Pune against a per-location Shopify
+    sum, so Pune's shelf still reads as covered online when it is invisible."""
     if db is None or not product_ids:
         return {}
     match: Dict[str, Any] = {
@@ -126,11 +150,20 @@ def _on_hand_by_product(
     }
     if store_id:
         match["store_id"] = store_id
+    else:
+        from .stores_util import physical_stores
+
+        try:
+            shops = [str(s.get("store_id") or "") for s in physical_stores(db)]
+        except Exception as exc:  # noqa: BLE001 -- UNKNOWN, never "all shops"
+            logger.warning("[SYNC_HEALTH] shop list unknown for on-hand: %s", exc)
+            return None
+        match["store_id"] = {"$in": [s for s in shops if s]}
     out: Dict[str, int] = {}
     try:
         coll = _coll(db, "stock_units")
         if coll is None:
-            return {}
+            return None
         for row in coll.aggregate(
             [
                 {"$match": match},
@@ -145,7 +178,7 @@ def _on_hand_by_product(
             out[row.get("_id")] = int(row.get("n") or 0)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[SYNC_HEALTH] on-hand aggregate failed: %s", exc)
-        return {}
+        return None
     return out
 
 
@@ -171,6 +204,7 @@ def pending_reconcile_summary(
         "over_allocated": 0,
         "pending": 0,
         "oversell_risk_units": 0,
+        "onhand_unknown": 0,
         "online_configured": online_mapping_available(db),
     }
     if db is None:
@@ -203,7 +237,8 @@ def pending_reconcile_summary(
         items.append(
             {
                 "sku": sku,
-                "in_store": on_hand.get(p.get("product_id"), 0),
+                # UNKNOWN on-hand is None (ONHAND_UNKNOWN), never 0.
+                "in_store": None if on_hand is None else on_hand.get(p.get("product_id"), 0),
                 # Listed qty is unknown without a live Shopify read (None -> 0
                 # in the pure reconciler; an unknown qty can never false-flag).
                 "online": int(o.get("online_stock") or 0),
@@ -221,6 +256,7 @@ def pending_reconcile_summary(
         "over_allocated": over_alloc,
         "pending": oversell + over_alloc,
         "oversell_risk_units": int(summary.get("oversell_risk_units") or 0),
+        "onhand_unknown": int(summary.get("onhand_unknown") or 0),
         "online_configured": online_mapping_available(db),
     }
 
@@ -369,6 +405,11 @@ def stock_tally_summary(
 
     pids = [p.get("product_id") for p in products if p.get("product_id")]
     on_hand = _on_hand_by_product(db, pids)
+    if on_hand is None:
+        # UNKNOWN is not "every shelf empty": nothing is tallied, and the
+        # page says why instead of printing 0 on hand for every listed SKU.
+        base["summary"]["on_hand_unknown"] = True
+        return base
     reserved = _reserved_by_product(db, pids)
     skus = [p.get("sku") for p in products if p.get("sku")]
     online = online_status_for_skus(db, skus)  # {} on any failure
@@ -986,238 +1027,6 @@ def _drift_sync_shim(db, limit: int = _DRIFT_SCAN_LIMIT) -> Dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         logger.debug("[DRIFT] sync shim error: %s", exc)
         return {**_fallback, "reason": f"async run error: {exc}"}
-
-
-# ===========================================================================
-# STEP 4 -- Re-push SWEEP for oversell-risk SKUs (NEXUS-callable)
-# ===========================================================================
-# For each SKU whose LIVE Shopify availability exceeds physical on-hand
-# (read via live_listed_qty_for_skus -- IMS Mongo mapping + a real Shopify
-# read), push the absolute on-hand quantity back to Shopify via
-# nexus_providers.shopify_set_inventory_available so the live qty cannot
-# go below zero.
-#
-# DARK by default (dry_run=True). Respects ims_shopify_writes_enabled();
-# when writes are off OR dry_run, returns the PLAN without touching Shopify.
-# Never raises.
-
-
-async def repush_oversell_risk(db, dry_run: bool = True) -> Dict[str, Any]:
-    """Re-push the absolute inventory quantity for every SKU that is flagged
-    as oversell_risk (online qty > physical on-hand).
-
-    Returns:
-        {
-            "dry_run": bool,
-            "would_repush": [{"sku", "in_store", "online", "product_id"}],
-            "repushed": [{"sku", "result"}],
-            "skipped_reason": str | None,  # why we did nothing
-        }
-
-    DARK by default (dry_run=True). Respects the TRIPLE gate:
-      ims_shopify_writes_enabled() AND DISPATCH_MODE=live AND creds.
-    When any gate is off OR dry_run=True -> returns the plan, no Shopify call.
-    Fail-soft: errors become structured entries in repushed, never raise.
-    """
-    base: Dict[str, Any] = {
-        "dry_run": dry_run,
-        "would_repush": [],
-        "repushed": [],
-        "skipped_reason": None,
-    }
-
-    try:
-        from agents.nexus_providers import (
-            ims_shopify_writes_enabled,
-            shopify_set_inventory_available,
-        )
-        from agents.providers import dispatch_mode as _dispatch_mode
-    except Exception as exc:  # noqa: BLE001
-        return {**base, "skipped_reason": f"import error: {exc}"}
-
-    if not ims_shopify_writes_enabled():
-        base["skipped_reason"] = (
-            "IMS_SHOPIFY_WRITES is OFF -- Shopify writes are disabled; "
-            "set IMS_SHOPIFY_WRITES=1 to enable"
-        )
-
-    # Build the oversell-risk list from the existing reconcile engine.
-    try:
-        from . import stock_allocation
-    except Exception as exc:  # noqa: BLE001
-        return {**base, "skipped_reason": f"import error: {exc}"}
-
-    if db is None:
-        return {**base, "skipped_reason": "no db"}
-
-    try:
-        products = list(
-            _coll(db, "products")
-            .find(
-                {"sku": {"$nin": [None, ""]}, "is_active": {"$ne": False}},
-                {"_id": 0, "product_id": 1, "sku": 1},
-            )
-            .limit(_RECONCILE_SCAN_LIMIT)
-        )
-    except Exception as exc:  # noqa: BLE001
-        return {**base, "skipped_reason": f"products scan failed: {exc}"}
-
-    if not products:
-        return {**base, "skipped_reason": "no active products found"}
-
-    pids = [p.get("product_id") for p in products if p.get("product_id")]
-    on_hand = _on_hand_by_product(db, pids)
-    skus = [p.get("sku") for p in products if p.get("sku")]
-    # Oversell detection post-BVI: the listed quantity lives ONLY on Shopify, so
-    # read it LIVE for the online-mapped SKUs (creds-gated, read-only, fail-soft
-    # -> None). An unknown listed qty can never flag a false OVERSELL_RISK.
-    live = await live_listed_qty_for_skus(db, skus)
-    online_qty = (live or {}).get("qty") or {}
-    if live is None:
-        if not base["skipped_reason"]:
-            base["skipped_reason"] = (
-                "live Shopify availability unavailable (creds/mapping) -- "
-                "no oversell candidates can be detected"
-            )
-    elif live.get("capped"):
-        # Partial sweep is still a sweep -- record coverage without hijacking
-        # skipped_reason (which explains why NOTHING ran).
-        base["coverage_note"] = (
-            f"live availability read capped: {live.get('live')} of "
-            f"{live.get('mapped')} mapped SKU(s) checked this sweep"
-        )
-
-    items = []
-    for p in products:
-        sku = p.get("sku")
-        listed = online_qty.get(sku)
-        items.append(
-            {
-                "sku": sku,
-                "in_store": on_hand.get(p.get("product_id"), 0),
-                "online": int(listed or 0),
-                "is_online": listed is not None,
-                "product_id": p.get("product_id"),
-            }
-        )
-
-    result = stock_allocation.reconcile_items(items, safety_buffer=0)
-    oversell_items = [
-        i for i in result.get("items", []) if i.get("status") == "OVERSELL_RISK"
-    ]
-    base["would_repush"] = [
-        {
-            "sku": i.get("sku"),
-            "in_store": i.get("in_store", 0),
-            "online": i.get("online", 0),
-            "product_id": next(
-                (p.get("product_id") for p in products if p.get("sku") == i.get("sku")),
-                None,
-            ),
-        }
-        for i in oversell_items
-    ]
-
-    if not ims_shopify_writes_enabled() or dry_run:
-        reason = base["skipped_reason"] or (
-            "dry_run=True -- set dry_run=False to push (also requires "
-            "IMS_SHOPIFY_WRITES=1 + DISPATCH_MODE=live + creds)"
-        )
-        base["skipped_reason"] = reason
-        return base
-
-    # ---- LIVE path ---------------------------------------------------------
-    # For each oversell SKU, look up its catalog_products variant inventory ids
-    # and call the absolute writeback.
-    location_id = _shopify_online_location(db)
-    if not location_id:
-        return {
-            **base,
-            "skipped_reason": (
-                "SHOPIFY_ONLINE_LOCATION_ID not configured -- "
-                "set it on the integrations.shopify config doc"
-            ),
-        }
-
-    repushed: List[Dict[str, Any]] = []
-    for item in base["would_repush"]:
-        sku = item.get("sku") or ""
-        in_store = int(item.get("in_store") or 0)
-        inv_item_id = _inventory_item_id_for_sku(db, sku)
-        if not inv_item_id:
-            repushed.append(
-                {
-                    "sku": sku,
-                    "result": {
-                        "ok": False,
-                        "error": "no shopify inventory_item_id found for sku",
-                    },
-                }
-            )
-            continue
-        try:
-            sync_result = await shopify_set_inventory_available(
-                db, inv_item_id, location_id, in_store
-            )
-            repushed.append(
-                {
-                    "sku": sku,
-                    "result": {
-                        "ok": sync_result.ok,
-                        "notes": sync_result.notes,
-                        "error": sync_result.error,
-                    },
-                }
-            )
-        except Exception as exc:  # noqa: BLE001
-            repushed.append({"sku": sku, "result": {"ok": False, "error": str(exc)}})
-
-    base["repushed"] = repushed
-    return base
-
-
-def _shopify_online_location(db) -> Optional[str]:
-    """Read SHOPIFY_ONLINE_LOCATION_ID from the integrations.shopify config
-    doc, or fall back to the env var. Fail-soft -> None."""
-    import os
-
-    env_val = os.getenv("SHOPIFY_ONLINE_LOCATION_ID", "").strip()
-    if env_val:
-        return env_val
-    try:
-        from agents.nexus_providers import _load_integration_config
-
-        cfg = _load_integration_config(db, "shopify") or {}
-        return cfg.get("online_location_id") or None
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def _inventory_item_id_for_sku(db, sku: str) -> Optional[str]:
-    """Look up the Shopify inventoryItemId for a SKU from catalog_variants
-    (field shopify_inventory_item_id). Fail-soft -> None."""
-    if not sku or db is None:
-        return None
-    try:
-        doc = _coll(db, "catalog_variants").find_one(
-            {
-                "sku": sku,
-                "shopify_inventory_item_id": {"$exists": True, "$nin": [None, ""]},
-            },
-            {"_id": 0, "shopify_inventory_item_id": 1},
-        )
-        if doc:
-            return str(doc["shopify_inventory_item_id"])
-        # Fallback: check catalog_products ecom sub-doc for the inventory item id.
-        p = _coll(db, "catalog_products").find_one(
-            {"sku": sku},
-            {"_id": 0, "ecom.shopify_inventory_item_id": 1},
-        )
-        if p:
-            return (p.get("ecom") or {}).get("shopify_inventory_item_id") or None
-    except Exception:  # noqa: BLE001
-        return None
-    return None
 
 
 # ===========================================================================

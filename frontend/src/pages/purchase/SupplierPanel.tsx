@@ -33,7 +33,7 @@ import type { Supplier } from './purchaseTypes';
 // fail-open, so a junk "88..." GSTIN printed "Other state - IGST" whenever
 // the state list had not arrived. NOT the only inter/intra decider in the
 // frontend: print/legalPrimitives.hsnTaxSummary (printed invoice) and
-// PurchaseInvoicesTab.isInterstate (bill preview, mirrors itc_reconcile's
+// invoices/shared.isInterstate (bill preview, mirrors itc_reconcile's
 // intra fallback) still answer with their own parsers, outside this chain.
 //
 // Both states are read from GSTINs and NOTHING else -- the same source

@@ -30,7 +30,14 @@ from ..services.gst_rates import gst_rate_for_category, hsn_for_category
 from ..services import product_master as _pm
 from ..services import online_delist as _delist
 from ..services.shopify_push import is_variant_of as _is_variant_of
-from .inventory import _on_hand_by_product
+# THE ONLINE on-hand reader, the one the oversell-risk tile reads (panel round
+# 7, one-rule P4). The reconciliation screen compares IMS against the WEBSITE's
+# listed number, and read the router's physical counter instead -- which does
+# not exclude the ONLINE stores, so an AVAILABLE unit parked on BV-ONLINE-01
+# (unpickable: no shelf, POS blocked) counted as in-store here while the writer
+# publishes 0 for it, and a real oversell classified OK on this screen after the
+# tile had stopped hiding it. Two online screens, one reader.
+from ..services.online_sync_health import _on_hand_by_product
 
 router = APIRouter()
 
@@ -176,7 +183,8 @@ async def online_stock_reconcile(
             {
                 "sku": sku,
                 "name": f"{p.get('brand', '') or ''} {p.get('model', '') or ''}".strip(),
-                "in_store": on_hand.get(p.get("product_id"), 0),
+                # UNKNOWN on-hand is None (ONHAND_UNKNOWN), never a confident 0.
+                "in_store": None if on_hand is None else on_hand.get(p.get("product_id"), 0),
                 "online": (listed if is_online else 0),
                 "is_online": is_online,
             }
@@ -2153,20 +2161,6 @@ async def update_catalog_product(
     else:
         _save_catalog_product(to_write)
 
-    # Sync audit gap #2 (owner, 2026-09-06): is_active off -> take it OFF
-    # Shopify; back on -> queue it for the next press / live sync. The ONE
-    # rule lives in services/online_delist; runs AFTER the save (the full-doc
-    # $set above would clobber the take-down's own ecom write-back).
-    # Fail-soft: the catalog save stands even if Shopify says no.
-    if product.is_active is not None:
-        await _delist.on_active_flip(
-            _get_db(),
-            to_write,
-            was_active=pre_edit.get("is_active", True),
-            now_active=product.is_active,
-            actor=current_user,
-        )
-
     # Compact field-classified audit row (cataloguing scorecard corrections):
     # local mirror of the spine PUT's twin in products.update_product -- keep
     # the two in sync (no shared helper: routers deliberately don't import each
@@ -2280,6 +2274,24 @@ async def update_catalog_product(
     except Exception:  # noqa: BLE001
         logger.warning(
             "[CATALOG] spine sync on update skipped for %s", product_id, exc_info=True
+        )
+
+    # Sync audit gap #2 (owner, 2026-09-06): is_active off -> take it OFF
+    # Shopify; back on -> queue it for the next press / live sync. The ONE
+    # rule lives in services/online_delist; runs AFTER the save (the full-doc
+    # $set above would clobber the take-down's own ecom write-back) AND AFTER
+    # the spine mirror above (recheck round 2): the spine's is_active is the
+    # only off-sale marker the quantity rule reads, and the delist row now
+    # refuses to be green while it is still active -- so the marker goes first
+    # and the take-down second, the order the DELETE door already uses.
+    # Fail-soft: the catalog save stands even if Shopify says no.
+    if product.is_active is not None:
+        await _delist.on_active_flip(
+            _get_db(),
+            to_write,
+            was_active=pre_edit.get("is_active", True),
+            now_active=product.is_active,
+            actor=current_user,
         )
 
     # A SIZE VARIANT (variant-of rule, owner 2026-09-06) owns no listing: its

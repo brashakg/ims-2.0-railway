@@ -9,8 +9,11 @@ and looked up for WARRANTY / RECALL.
 
 INVENTORY writes only -- the at-sale transition stamps order_id/customer/sold_at on
 the stock_unit; it does NOT touch the order total or any payment (POS money capture
-is unchanged). Every route store-scopes; a cashier can never mint / relabel / recall
-a serial (only read a warranty).
+is unchanged). Every status change here moves the shop's on-hand, so each one ends
+in ``_sync_online_stock`` (the Shopify per-shop write-back), the same door the POS
+sale uses -- these routes write stock_units directly, so no ledger hook fires.
+Every route store-scopes; a cashier can never mint / relabel / recall a serial
+(only read a warranty).
 
 No emoji (Windows cp1252).
 """
@@ -70,6 +73,27 @@ def _get_policy(key, scope=None, *, default=None):
         return get_policy(key, scope, default=default)
     except Exception:  # noqa: BLE001
         return default
+
+
+def _sync_online_stock(unit: Dict[str, Any], *, source: str) -> None:
+    """A serial that changes status MOVES that shop's on-hand (IN_STOCK is an
+    on-hand alias), so the website's quantity for its SKU must be recomputed --
+    exactly like a POS sale. These endpoints write ``stock_units`` with a raw
+    ``find_one_and_update``, so neither the item_events ledger hook nor any POS
+    door fires for them: without this the shop sells the unit and Shopify keeps
+    the pre-sale number (an oversell). Absolute rule, so direction does not
+    matter -- one call covers sold, recalled, returned and captured.
+    Fail-soft, fire-and-forget: it can never block a stock write."""
+    try:
+        from ..services.online_stock_writeback import writeback_after_units_left
+
+        pid = (unit or {}).get("product_id")
+        if pid:
+            writeback_after_units_left(
+                _get_db(), [str(pid)], (unit or {}).get("store_id"), source=source
+            )
+    except Exception:  # noqa: BLE001
+        return
 
 
 def _audit(action, *, entity_id, actor, store_id, detail):
@@ -137,6 +161,7 @@ async def capture(body: CaptureBody, current_user: Dict[str, Any] = Depends(get_
         _raise(exc)
     _audit("serial.capture", entity_id=unit.get("serial"), actor=current_user,
            store_id=body.store_id, detail={"product_id": body.product_id})
+    _sync_online_stock(unit, source="serial_capture")
     return unit
 
 
@@ -158,6 +183,7 @@ async def mark_sold(serial: str, body: MarkSoldBody, current_user: Dict[str, Any
         raise HTTPException(status_code=409, detail="serial is not in stock (already sold or recalled)")
     _audit("serial.sold", entity_id=updated.get("serial"), actor=current_user,
            store_id=unit.get("store_id"), detail={"order_id": body.order_id})
+    _sync_online_stock(updated, source="serial_sold")
     return updated
 
 
@@ -177,6 +203,7 @@ async def recall(serial: str, body: RecallBody, current_user: Dict[str, Any] = D
         _raise(exc)
     _audit("serial.recall", entity_id=serial, actor=current_user,
            store_id=unit.get("store_id"), detail={"reason": body.reason})
+    _sync_online_stock(updated, source="serial_recall")
     return updated
 
 
@@ -193,6 +220,7 @@ async def return_unit(serial: str, current_user: Dict[str, Any] = Depends(get_cu
                                         store_id=unit.get("store_id"), actor=current_user.get("user_id"))
     except svc.SerialError as exc:
         _raise(exc)
+    _sync_online_stock(updated, source="serial_return")
     return updated
 
 
