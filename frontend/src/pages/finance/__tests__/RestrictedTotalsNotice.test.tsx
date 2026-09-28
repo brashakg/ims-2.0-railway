@@ -24,6 +24,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { MemoryRouter, Routes, Route } from 'react-router-dom';
 
 vi.mock('../../../services/api/finance', () => ({
   financeApi: {
@@ -57,9 +58,29 @@ vi.mock('../../../context/ToastContext', () => ({
 }));
 
 import FinanceDashboard from '../FinanceDashboard';
+import { FinanceRevenuePlPage } from '../FinanceRevenuePlPage';
+import { FinanceBudgetsTabPage } from '../FinanceBudgetsTabPage';
+import { FinanceCashFlowTabPage } from '../FinanceCashFlowTabPage';
 import { financeApi } from '../../../services/api/finance';
 
 const api = financeApi as unknown as Record<string, ReturnType<typeof vi.fn>>;
+
+// The dashboard is a layout with one page per section (Wave 6 split), so it is
+// mounted the way the app mounts it: the layout route, its sections as
+// children, and the section nav really navigating between them.
+function renderDashboard() {
+  return render(
+    <MemoryRouter initialEntries={['/finance/dashboard']}>
+      <Routes>
+        <Route path="/finance/dashboard" element={<FinanceDashboard />}>
+          <Route index element={<FinanceRevenuePlPage />} />
+          <Route path="budgets" element={<FinanceBudgetsTabPage />} />
+          <Route path="cash-flow" element={<FinanceCashFlowTabPage />} />
+        </Route>
+      </Routes>
+    </MemoryRouter>,
+  );
+}
 
 // A payroll-EXCLUSIVE P&L, exactly the shape finance.py returns to a store
 // manager: no payroll_cost, no net_profit, and total_expenses already short.
@@ -125,7 +146,7 @@ describe('FinanceDashboard - incomplete expense totals are declared', () => {
 
   it('shows the banner when the backend says the panel is short', async () => {
     primeApi(PNL_SHORT, BUDGET_SHORT);
-    render(<FinanceDashboard />);
+    renderDashboard();
     await waitFor(() => expect(api.getPnl).toHaveBeenCalled());
     const notice = await screen.findByTestId(NOTICE);
     expect(notice).toBeInTheDocument();
@@ -137,7 +158,7 @@ describe('FinanceDashboard - incomplete expense totals are declared', () => {
     // THE OTHER DIRECTION. Without this, a banner hardcoded to always render
     // would pass the test above and be worthless on the shop floor.
     primeApi(PNL_WHOLE, BUDGET_WHOLE);
-    render(<FinanceDashboard />);
+    renderDashboard();
     await waitFor(() => expect(api.getPnl).toHaveBeenCalled());
     await waitFor(() =>
       expect(screen.queryByTestId(NOTICE)).not.toBeInTheDocument(),
@@ -148,7 +169,7 @@ describe('FinanceDashboard - incomplete expense totals are declared', () => {
     // On a 1-5 person store the head plus a number IS somebody's pay packet.
     // The reader is told THAT something is missing, never WHAT or HOW MUCH.
     primeApi(PNL_SHORT, BUDGET_SHORT);
-    render(<FinanceDashboard />);
+    renderDashboard();
     const notice = await screen.findByTestId(NOTICE);
     const text = notice.textContent?.toLowerCase() || '';
     for (const word of ['salary', 'salaries', 'wage', 'payroll', 'pf', 'esi']) {
@@ -164,7 +185,7 @@ describe('FinanceDashboard - incomplete expense totals are declared', () => {
     primeApi(PNL_SHORT, BUDGET_SHORT);
     api.getPnl.mockRejectedValue(new Error('boom'));
     api.getBudget.mockRejectedValue(new Error('boom'));
-    render(<FinanceDashboard />);
+    renderDashboard();
     await waitFor(() => expect(api.getPnl).toHaveBeenCalled());
     await waitFor(() =>
       expect(screen.queryByTestId(NOTICE)).not.toBeInTheDocument(),
@@ -187,7 +208,7 @@ describe('FinanceDashboard budgets tab - the short budget declares itself', () =
 
   async function openBudgetsTab() {
     const user = userEvent.setup();
-    render(<FinanceDashboard />);
+    renderDashboard();
     await waitFor(() => expect(api.getBudget).toHaveBeenCalled());
     // findByRole, not getByRole: the waitFor above only proves the FETCH was
     // CALLED, not that the resolved data has rendered. The tab button appears
@@ -248,7 +269,7 @@ describe('FinanceDashboard cash flow tab - the short outflow declares itself', (
 
   async function openCashFlowTab() {
     const user = userEvent.setup();
-    render(<FinanceDashboard />);
+    renderDashboard();
     await waitFor(() => expect(api.getCashFlow).toHaveBeenCalled());
     // Same race as the budgets tab above -- see the note there.
     await user.click(await screen.findByRole('button', { name: /cash flow/i }));

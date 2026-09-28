@@ -1,0 +1,517 @@
+// ============================================================================
+// IMS 2.0 - Finance & Accounting module layout
+// ============================================================================
+// Wave 6 split: the old FinanceDashboard held eight sections behind one
+// useState, so no section was linkable. Each section is now a real page with
+// its own URL under /finance/dashboard (Revenue & P&L is the index).
+//
+// This layout keeps what was ALWAYS on screen - the editorial header, the
+// Tally export, the FY / date bar and the section nav - and the one loader
+// the old page ran. Everything below is the old FinanceDashboard moved
+// verbatim; the only change is that `activeTab` is read off the URL instead
+// of useState. Section pages read the data and handlers off the outlet
+// context (useFinanceContext).
+
+import { useState, useEffect, useMemo } from 'react';
+import { Loader2 } from 'lucide-react';
+import { Outlet, useLocation, useNavigate, useOutletContext } from 'react-router-dom';
+import { useAuth } from '../../context/AuthContext';
+import { useToast } from '../../context/ToastContext';
+
+import type { TabType } from './financeTypes';
+import { FINANCE_TAB_PATHS } from './financeTypes';
+import type {
+  RevenueData,
+  ProfitLossStatement,
+  GSTSummaryData,
+  OutstandingReceivable,
+  CashFlowData,
+  BudgetData,
+  VendorPaymentData,
+} from './financeTypes';
+import { financeApi } from '../../services/api/finance';
+
+// ---- Mappers: real finance.py responses -> dashboard panel types ----------
+// The backend returns aggregate/summary shapes; the panels expect these
+// normalised types. Each mapper is defensive (handles missing fields) so a
+// thin/empty response renders an honest empty panel rather than crashing.
+function mapRevenue(d: any): RevenueData[] {
+  if (!d) return [];
+  const net = Number(d.total_revenue || 0);
+  const deductions = Number(d.total_discount || 0);
+  if (!net && !deductions && !d.total_tax) return [];
+  return [{
+    period: `Current ${d.period || 'month'}`,
+    gross_sales: net + deductions,
+    deductions,
+    net_revenue: net,
+    gst_collected: Number(d.total_tax || 0),
+  }];
+}
+
+function mapPnl(d: any, from: string, to: string): ProfitLossStatement | null {
+  if (!d) return null;
+  const revenue = Number(d.revenue || 0);
+  const cogs = Number(d.cogs || 0);
+  const grossProfit = Number(d.gross_profit ?? revenue - cogs);
+  const opex = Number(d.total_expenses || 0);
+  // net_profit is ABSENT for any role below ADMIN -- it is revenue - COGS -
+  // expenses - PAYROLL, so the backend strips it as a payroll-derived figure.
+  // This used to fall back to `grossProfit - opex`, which quietly reported a
+  // profit with the whole wage bill missing and labelled it "Net Profit". Show
+  // nothing rather than a number that is wrong by a month's salaries.
+  const netProfit = d.net_profit === undefined || d.net_profit === null
+    ? null
+    : Number(d.net_profit);
+  return {
+    revenue,
+    cost_of_goods: cogs,
+    gross_profit: grossProfit,
+    operating_expenses: opex,
+    operating_profit: grossProfit - opex,
+    tax_expense: 0,
+    net_profit: netProfit,
+    profit_margin:
+      d.net_margin !== undefined && d.net_margin !== null
+        ? Number(d.net_margin)
+        : netProfit !== null && revenue
+          ? (netProfit / revenue) * 100
+          : null,
+    period_start: from,
+    period_end: to,
+  };
+}
+
+function mapGst(d: any): GSTSummaryData | null {
+  if (!d) return null;
+  // OS-010: igst_collected was hardcoded to 0, so the "IGST (inter-state)"
+  // card could never show the inter-state tax the backend computes.
+  // finance.py splits output tax into cgst/sgst/igst precisely so these
+  // cards reconcile to gst_collected — map the real value and derive the
+  // type from it.
+  const igst = Number(d.igst || 0);
+  return {
+    period: `${d.month ?? ''}/${d.year ?? ''}`,
+    cgst_collected: Number(d.cgst || 0),
+    sgst_collected: Number(d.sgst || 0),
+    igst_collected: igst,
+    total_gst: Number(d.gst_collected || 0),
+    gst_payable: Number(d.net_gst_payable || 0),
+    input_tax_credit: Number(d.gst_input_credit || 0),
+    gst_type: igst > 0 ? 'IGST' : 'CGST_SGST',
+  };
+}
+
+function mapOutstanding(d: any): OutstandingReceivable[] {
+  const items = Array.isArray(d?.items) ? d.items : [];
+  return items.map((o: any) => ({
+    id: o.order_id || '',
+    customer_name: o.customer_name || 'Unknown',
+    amount: Number(o.amount || 0),
+    gst_amount: 0,
+    due_date: o.due_date || '',
+    days_overdue: Number(o.days_overdue || 0),
+    status: (Number(o.days_overdue || 0) > 30 ? 'overdue' : 'active') as OutstandingReceivable['status'],
+  }));
+}
+
+function mapCashFlow(d: any): CashFlowData[] {
+  if (!d) return [];
+  const inflow = Number(d.inflows || 0);
+  const outflow = Number(d.outflows || 0);
+  if (!inflow && !outflow) return [];
+  return [{
+    period: d.period || 'This month',
+    opening_balance: 0,
+    cash_inflows: inflow,
+    cash_outflows: outflow,
+    closing_balance: Number(d.net_cash_flow ?? inflow - outflow),
+    free_cash_flow: Number(d.net_cash_flow ?? inflow - outflow),
+  }];
+}
+
+function mapBudget(d: any): BudgetData[] {
+  const cats = d?.categories || {};
+  return Object.entries(cats).map(([category, v]: [string, any]) => {
+    const allocated = Number(v?.budget || 0);
+    const spent = Number(v?.actual || 0);
+    return {
+      category,
+      allocated,
+      spent,
+      remaining: allocated - spent,
+      variance: allocated - spent,
+      variance_percent: allocated ? ((allocated - spent) / allocated) * 100 : 0,
+    };
+  });
+}
+
+function mapVendorPayments(d: any): VendorPaymentData[] {
+  const list = Array.isArray(d) ? d : [];
+  return list.map((v: any) => {
+    const due = Number(v.balance || 0);
+    return {
+      id: v.vendor_id || '',
+      vendor_name: v.vendor_name || '',
+      amount_due: due,
+      due_date: '',
+      days_overdue: 0,
+      status: (due <= 0 ? 'paid' : Number(v.total_paid || 0) > 0 ? 'partial' : 'pending') as VendorPaymentData['status'],
+    };
+  });
+}
+
+// NOTE: the old mapReconciliation() fabricated bank_amount/system_amount/
+// difference as 0 from inter-store transfer rows — there is no bank-statement
+// reconciliation backend, so it has been removed (SYSTEM_INTENT: never show
+// fabricated money). The Reconciliation tab + the Cash Flow "Bank Reconciliation
+// Status" block that consumed it are gone too.
+
+import FinanceFilters, { currentFyLabelIST } from './FinanceFilters';
+
+/** What the section pages read off the outlet context. */
+export type FinanceContext = ReturnType<typeof useFinanceDashboard>;
+
+export function useFinanceContext() {
+  return useOutletContext<FinanceContext>();
+}
+
+// The old FinanceDashboard component body, as a hook so the layout and the
+// section pages share ONE copy of the state, the loader and the handlers.
+function useFinanceDashboard() {
+  const { user } = useAuth();
+  const toast = useToast();
+  const { pathname } = useLocation();
+  const navigate = useNavigate();
+
+  // OWNER DECISION 2026-08-13: the store-by-store profit table is ADMIN /
+  // SUPERADMIN only, because every row carries that store's monthly wage bill
+  // and a 1-5 person store's payroll total IS an individual's pay. Mirrors the
+  // backend gate (finance.get_pnl_by_store + the rbac_policy row) so a store
+  // manager gets a plain-English explanation instead of a 403 toast or an
+  // empty table that looks broken.
+  const canSeeStorePayroll = (user?.roles || []).some(
+    (r) => r === 'ADMIN' || r === 'SUPERADMIN',
+  );
+
+  // Tab management - the section is the URL now, not useState. Same two
+  // names, so the loader's deps and the FinanceFilters wiring are unchanged.
+  const activeTab: TabType =
+    (Object.keys(FINANCE_TAB_PATHS) as TabType[]).find(
+      (t) => FINANCE_TAB_PATHS[t] === pathname.replace(/\/$/, ''),
+    ) ?? 'revenue-pl';
+  const setActiveTab = (tab: TabType) => navigate(FINANCE_TAB_PATHS[tab]);
+
+  // Date filters
+  const [dateFrom, setDateFrom] = useState(
+    new Date(new Date().getFullYear(), 3, 1).toISOString().split('T')[0] // Financial year start: April 1
+  );
+  const [dateTo, setDateTo] = useState(new Date().toISOString().split('T')[0]);
+
+  // Data states
+  const [revenueData, setRevenueData] = useState<RevenueData[]>([]);
+  const [plStatement, setPLStatement] = useState<ProfitLossStatement | null>(null);
+  const [gstSummary, setGSTSummary] = useState<GSTSummaryData | null>(null);
+  const [outstanding, setOutstanding] = useState<OutstandingReceivable[]>([]);
+  const [cashFlow, setCashFlow] = useState<CashFlowData[]>([]);
+  const [budgets, setBudgets] = useState<BudgetData[]>([]);
+  const [vendorPayments, setVendorPayments] = useState<VendorPaymentData[]>([]);
+  const [pnlByStore, setPnlByStore] = useState<Array<{ store_id?: string; store_name?: string; entity_id?: string; revenue?: number; cogs?: number; expenses?: number; payroll?: number; net_profit?: number; net_margin?: number }>>([]);
+  // Sortable per-store P&L. Default highest-revenue-first (mirrors the backend's
+  // own sort) but every column header is clickable to re-sort.
+  const [pnlStoreSort, setPnlStoreSort] = useState<{ key: 'store_id' | 'revenue' | 'cogs' | 'gross_profit' | 'margin' | 'expenses' | 'payroll' | 'net_profit'; dir: 'asc' | 'desc' }>({ key: 'revenue', dir: 'desc' });
+  const [pnlByCategory, setPnlByCategory] = useState<Array<{ category?: string; revenue?: number; cogs?: number; gross_profit?: number }>>([]);
+  const [gstRecon, setGstRecon] = useState<Array<{ entity_name?: string; gst_collected?: number; input_credit?: number; net_payable?: number }>>([]);
+  // The backend tells us when it has withheld an expense head from this reader.
+  // THREE separate flags on three separate responses -- /pnl, /budget and
+  // /cash-flow -- and they are kept as three pieces of state on purpose: two of
+  // them share the key name `expenses_partially_restricted`, so a single shared
+  // flag would look correct in any test that varies only one at a time and would
+  // put a notice on a tab whose total is whole. Carrying them into state is what
+  // stops a shortened total rendering as the truth -- see RestrictedTotalsNotice.
+  const [expensesRestricted, setExpensesRestricted] = useState(false);
+  const [budgetRestricted, setBudgetRestricted] = useState(false);
+  // THE THIRD ONE, and the easiest to miss. /finance/cash-flow strips the same
+  // pay heads below ADMIN and sets the SAME flag name as /pnl (finance.py:1500)
+  // -- but mapCashFlow() below keeps only the four numbers and drops the rest
+  // of the body, so the flag was arriving and being thrown away. "Total
+  // outflows" then rendered short, with nothing on screen saying so.
+  const [cashFlowRestricted, setCashFlowRestricted] = useState(false);
+
+  // UI states
+  const [isLoading, setIsLoading] = useState(true);
+  // OS-054: default to the CURRENT Indian FY (computed from the IST date)
+  // instead of a hardcoded year that goes stale every April.
+  const [selectedYear, setSelectedYear] = useState(currentFyLabelIST());
+  const [periodLocked, setPeriodLocked] = useState(false);
+
+  useEffect(() => {
+    loadFinanceData();
+    // user?.activeStoreId is load-bearing — without it the topbar store-switch
+    // updates AuthContext but the finance data stays pinned to the old store.
+  }, [activeTab, dateFrom, dateTo, selectedYear, user?.activeStoreId]);
+
+  const loadFinanceData = async () => {
+    setIsLoading(true);
+    const storeId = user?.activeStoreId;
+    try {
+      // Real finance.py endpoints, fetched in parallel. Each section
+      // fail-soft independently so one slow/empty endpoint doesn't blank
+      // the whole dashboard.
+      const [rev, pnl, gst, out, cf, bud, vend] = await Promise.allSettled([
+        financeApi.getRevenue({ period: 'month', store_id: storeId }),
+        financeApi.getPnl({ store_id: storeId, from_date: dateFrom, to_date: dateTo }),
+        financeApi.getGstSummary(),
+        financeApi.getOutstanding({ store_id: storeId }),
+        financeApi.getCashFlow({ period: 'month', store_id: storeId }),
+        financeApi.getBudget(),
+        financeApi.getVendorPayments(),
+      ]);
+
+      setRevenueData(rev.status === 'fulfilled' ? mapRevenue(rev.value) : []);
+      setPLStatement(pnl.status === 'fulfilled' ? mapPnl(pnl.value, dateFrom, dateTo) : null);
+      setGSTSummary(gst.status === 'fulfilled' ? mapGst(gst.value) : null);
+      setOutstanding(out.status === 'fulfilled' ? mapOutstanding(out.value) : []);
+      setCashFlow(cf.status === 'fulfilled' ? mapCashFlow(cf.value) : []);
+      setBudgets(bud.status === 'fulfilled' ? mapBudget(bud.value) : []);
+      setVendorPayments(vend.status === 'fulfilled' ? mapVendorPayments(vend.value) : []);
+      // A failed/absent call must NOT leave a stale "incomplete" banner up, and
+      // must not invent one either — default false on anything but an explicit
+      // true from the backend.
+      setExpensesRestricted(
+        pnl.status === 'fulfilled' && !!(pnl.value as any)?.expenses_partially_restricted,
+      );
+      setBudgetRestricted(
+        bud.status === 'fulfilled' && !!(bud.value as any)?.categories_partially_restricted,
+      );
+      setCashFlowRestricted(
+        cf.status === 'fulfilled' && !!(cf.value as any)?.expenses_partially_restricted,
+      );
+
+      // Reflect the real period-lock state for the selected month.
+      try {
+        const d = new Date(dateTo);
+        const ps = await financeApi.getPeriodStatus(d.getMonth() + 1, d.getFullYear());
+        setPeriodLocked(!!ps?.locked);
+      } catch {
+        /* non-fatal */
+      }
+
+      // P&L breakdowns + GST reconciliation (Phase 2/3 endpoints, fail-soft).
+      try {
+        const d = new Date(dateTo);
+        const [ps2, pc2, gr2] = await Promise.allSettled([
+          // Not requested at all for a non-admin: the endpoint would 403, and
+          // firing a call we know will be refused just to discard the answer
+          // makes the network log look like a bug.
+          canSeeStorePayroll
+            ? financeApi.getPnlByStore({ from_date: dateFrom, to_date: dateTo })
+            : Promise.resolve({ stores: [] }),
+          financeApi.getPnlByCategory({ from_date: dateFrom, to_date: dateTo, store_id: storeId }),
+          financeApi.getGstReconciliation({ month: d.getMonth() + 1, year: d.getFullYear() }),
+        ]);
+        setPnlByStore(ps2.status === 'fulfilled' ? (ps2.value?.stores || []) : []);
+        setPnlByCategory(pc2.status === 'fulfilled' ? (pc2.value?.categories || []) : []);
+        setGstRecon(gr2.status === 'fulfilled' ? (gr2.value?.entities || []) : []);
+      } catch {
+        /* non-fatal */
+      }
+    } catch (error) {
+      toast.error('Failed to load financial data');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Per-store P&L rows enriched with gross profit (revenue - COGS) + margin %,
+  // then sorted by the active column. Gross profit / margin aren't returned by
+  // the endpoint so they're derived here.
+  const pnlStoreRows = useMemo(() => {
+    const enriched = pnlByStore.map((s) => {
+      const revenue = s.revenue || 0;
+      const cogs = s.cogs || 0;
+      const grossProfit = revenue - cogs;
+      return {
+        ...s,
+        revenue,
+        cogs,
+        gross_profit: grossProfit,
+        // Gross margin %. Backend ships net_margin (after expenses + payroll);
+        // this is the gross-level figure the column header asks for.
+        margin: revenue > 0 ? (grossProfit / revenue) * 100 : 0,
+      };
+    });
+    const { key, dir } = pnlStoreSort;
+    const factor = dir === 'asc' ? 1 : -1;
+    const numeric = (row: (typeof enriched)[number]): number => {
+      switch (key) {
+        case 'revenue': return row.revenue;
+        case 'cogs': return row.cogs;
+        case 'gross_profit': return row.gross_profit;
+        case 'margin': return row.margin;
+        case 'expenses': return row.expenses || 0;
+        case 'payroll': return row.payroll || 0;
+        case 'net_profit': return row.net_profit || 0;
+        default: return 0;
+      }
+    };
+    return enriched.sort((a, b) => {
+      if (key === 'store_id') {
+        return (a.store_id || '').localeCompare(b.store_id || '') * factor;
+      }
+      return (numeric(a) - numeric(b)) * factor;
+    });
+  }, [pnlByStore, pnlStoreSort]);
+
+  const togglePnlStoreSort = (key: typeof pnlStoreSort.key) => {
+    setPnlStoreSort((prev) =>
+      prev.key === key
+        ? { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' }
+        : { key, dir: key === 'store_id' ? 'asc' : 'desc' },
+    );
+  };
+
+  const handleLockPeriod = async () => {
+    const role = user?.activeRole;
+    if (role !== 'ACCOUNTANT' && role !== 'ADMIN' && role !== 'SUPERADMIN') {
+      toast.error('Only accountants and admins can lock periods');
+      return;
+    }
+    const d = new Date(dateTo);
+    try {
+      await financeApi.lockPeriod(d.getMonth() + 1, d.getFullYear());
+      setPeriodLocked(true);
+      toast.success(`Period ${d.getMonth() + 1}/${d.getFullYear()} locked`);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to lock period');
+    }
+  };
+
+  const handleUnlockPeriod = () => {
+    // Locked periods are intentionally permanent (closed-book integrity); there
+    // is no unlock endpoint. Surface that instead of faking a local toggle.
+    toast.info('Locked periods are permanent for audit integrity — no unlock.');
+  };
+
+  const handleTallyExport = async () => {
+    try {
+      const blob = await financeApi.downloadTallySalesJv({
+        from_date: dateFrom,
+        to_date: dateTo,
+        store_id: user?.activeStoreId,
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `sales_jv_${dateFrom}_${dateTo}.xml`;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast.success('Tally sales voucher exported');
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Tally export failed');
+    }
+  };
+
+  // NOTE: Budget-allocate, vendor-Pay, Mark-Matched and Import-Statement were
+  // toast-only no-ops (no write path on /finance/*). They've been removed rather
+  // than fake success. Budget planning lives in the dedicated Budgets module
+  // (/budgets) and vendor payments in the Cash Flow vendor ledger.
+
+  return {
+    // What the layout itself draws: the loader state, header, FY / date bar
+    // and the section nav.
+    isLoading,
+    handleTallyExport,
+    selectedYear,
+    setSelectedYear,
+    dateFrom,
+    dateTo,
+    setDateFrom,
+    setDateTo,
+    activeTab,
+    setActiveTab,
+    // What the section pages draw.
+    canSeeStorePayroll,
+    revenueData,
+    plStatement,
+    gstSummary,
+    outstanding,
+    cashFlow,
+    budgets,
+    vendorPayments,
+    pnlByStore,
+    pnlStoreSort,
+    pnlStoreRows,
+    togglePnlStoreSort,
+    pnlByCategory,
+    gstRecon,
+    expensesRestricted,
+    budgetRestricted,
+    cashFlowRestricted,
+    periodLocked,
+    handleLockPeriod,
+    handleUnlockPeriod,
+  };
+}
+
+export default function FinanceLayout() {
+  const ctx = useFinanceDashboard();
+  const {
+    isLoading,
+    handleTallyExport,
+    selectedYear,
+    setSelectedYear,
+    dateFrom,
+    dateTo,
+    setDateFrom,
+    setDateTo,
+    activeTab,
+    setActiveTab,
+  } = ctx;
+
+  // Loading state
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
+        <div className="text-center">
+          <Loader2 className="w-12 h-12 text-blue-500 animate-spin mx-auto mb-4" />
+          <p className="text-gray-500">Loading financial data...</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="inv-body">
+      {/* Editorial header */}
+      <div className="inv-head">
+        <div>
+          <div className="eyebrow mb-1.5">Finance &amp; Accounting</div>
+          <h1>The books, in real time.</h1>
+          <div className="hint">Revenue, P&amp;L, GST collected / payable, outstanding aging, cash flow, period lock after month-end. Tally export on sync.</div>
+        </div>
+        <div>
+          <button className="btn-secondary" onClick={handleTallyExport}>Export to Tally</button>
+        </div>
+      </div>
+
+      <div>
+        <FinanceFilters
+          selectedYear={selectedYear}
+          onYearChange={setSelectedYear}
+          dateFrom={dateFrom}
+          dateTo={dateTo}
+          onDateFromChange={setDateFrom}
+          onDateToChange={setDateTo}
+          activeTab={activeTab}
+          onTabChange={setActiveTab}
+        />
+
+        {/* Tab Content */}
+        <div className="animate-fadeIn">
+          <Outlet context={ctx} />
+        </div>
+      </div>
+    </div>
+  );
+}

@@ -1,11 +1,29 @@
 // Finance routes. Moved verbatim from App.tsx (route-registry split);
 // paths, elements and role gates are unchanged.
+//
+// Wave 6 split: the old /finance/dashboard tab container is now a layout
+// (FinanceDashboard -> FinanceLayout) with one REAL page per section:
+//   /finance/dashboard (Revenue & P&L, the index) · /finance/dashboard/gst ·
+//   /finance/dashboard/outstanding · /finance/dashboard/cash-flow ·
+//   /finance/dashboard/period · /finance/dashboard/budgets ·
+//   /finance/dashboard/vendor-payments · /finance/dashboard/journal-entries
+// Legacy /finance/dashboard?tab=<x> links forward via FinanceDashboardIndex.
+// The sections inherit the dashboard's role gate from the layout route.
 import { lazy } from 'react';
-import { Route, Navigate } from 'react-router-dom';
+import { Route, Navigate, useSearchParams } from 'react-router-dom';
 import { ProtectedRoute } from '../components/layout/ProtectedRoute';
+import { FINANCE_TAB_PATHS } from '../pages/finance/financeTypes';
 
 const ExpenseTracker = lazy(() => import('../pages/finance/ExpenseTracker'));
 const FinanceDashboard = lazy(() => import('../pages/finance/FinanceDashboard'));
+const FinanceRevenuePlPage = lazy(() => import('../pages/finance/FinanceRevenuePlPage').then(m => ({ default: m.FinanceRevenuePlPage })));
+const FinanceGstPage = lazy(() => import('../pages/finance/FinanceGstPage').then(m => ({ default: m.FinanceGstPage })));
+const FinanceOutstandingPage = lazy(() => import('../pages/finance/FinanceOutstandingPage').then(m => ({ default: m.FinanceOutstandingPage })));
+const FinanceCashFlowTabPage = lazy(() => import('../pages/finance/FinanceCashFlowTabPage').then(m => ({ default: m.FinanceCashFlowTabPage })));
+const FinancePeriodPage = lazy(() => import('../pages/finance/FinancePeriodPage').then(m => ({ default: m.FinancePeriodPage })));
+const FinanceBudgetsTabPage = lazy(() => import('../pages/finance/FinanceBudgetsTabPage').then(m => ({ default: m.FinanceBudgetsTabPage })));
+const FinanceVendorPaymentsPage = lazy(() => import('../pages/finance/FinanceVendorPaymentsPage').then(m => ({ default: m.FinanceVendorPaymentsPage })));
+const FinanceJournalEntriesPage = lazy(() => import('../pages/finance/FinanceJournalEntriesPage').then(m => ({ default: m.FinanceJournalEntriesPage })));
 const CashFlowPage = lazy(() => import('../pages/finance/CashFlowPage'));
 const ItcReconcilePage = lazy(() => import('../pages/finance/ItcReconcilePage'));
 const GstCrossCheckPage = lazy(() => import('../pages/finance/GstCrossCheckPage'));
@@ -15,6 +33,20 @@ const CashReconciliationPage = lazy(() => import('../pages/finance/CashReconcili
 const BudgetingPage = lazy(() => import('../pages/finance/BudgetingPage'));
 const B2BTallyExport = lazy(() => import('../pages/finance/B2BTallyExport'));
 const B2BTallyWorklist = lazy(() => import('../pages/finance/B2BTallyWorklist'));
+
+// Legacy /finance/dashboard?tab=<x> -> that section's own URL, carrying every
+// other query param along. No ?tab= (or an unknown one) is the index itself:
+// Revenue & P&L, which is what the old page always opened on.
+function FinanceDashboardIndex() {
+  const [searchParams] = useSearchParams();
+  const tab = searchParams.get('tab');
+  const target = Object.entries(FINANCE_TAB_PATHS).find(([id]) => id === tab)?.[1];
+  if (!target) return <FinanceRevenuePlPage />;
+  const rest = new URLSearchParams(searchParams);
+  rest.delete('tab');
+  const suffix = rest.toString() ? `?${rest.toString()}` : '';
+  return <Navigate to={`${target}${suffix}`} replace />;
+}
 
 export const financeRoutes = (
   <>
@@ -42,7 +74,7 @@ export const financeRoutes = (
       element={<Navigate to="/finance/cash-flow" replace />}
     />
 
-    {/* Finance Dashboard */}
+    {/* Finance Dashboard — layout + one page per section */}
     <Route
       path="finance/dashboard"
       element={
@@ -50,7 +82,16 @@ export const financeRoutes = (
           <FinanceDashboard />
         </ProtectedRoute>
       }
-    />
+    >
+      <Route index element={<FinanceDashboardIndex />} />
+      <Route path="gst" element={<FinanceGstPage />} />
+      <Route path="outstanding" element={<FinanceOutstandingPage />} />
+      <Route path="cash-flow" element={<FinanceCashFlowTabPage />} />
+      <Route path="period" element={<FinancePeriodPage />} />
+      <Route path="budgets" element={<FinanceBudgetsTabPage />} />
+      <Route path="vendor-payments" element={<FinanceVendorPaymentsPage />} />
+      <Route path="journal-entries" element={<FinanceJournalEntriesPage />} />
+    </Route>
     <Route
       path="finance/cash-flow"
       element={

@@ -12,6 +12,18 @@ export type TabType =
   | 'vendor-payments'
   | 'journal-entries';
 
+/** Each dashboard section's own URL. Revenue & P&L is the index route. */
+export const FINANCE_TAB_PATHS: Record<TabType, string> = {
+  'revenue-pl': '/finance/dashboard',
+  gst: '/finance/dashboard/gst',
+  outstanding: '/finance/dashboard/outstanding',
+  'cash-flow': '/finance/dashboard/cash-flow',
+  period: '/finance/dashboard/period',
+  budgets: '/finance/dashboard/budgets',
+  'vendor-payments': '/finance/dashboard/vendor-payments',
+  'journal-entries': '/finance/dashboard/journal-entries',
+};
+
 // F17/#25 Maker-checker journal entries
 export type JeStatus =
   | 'DRAFT'
