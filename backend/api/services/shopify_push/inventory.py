@@ -30,8 +30,9 @@ Fail loud, never pool, never silently skip:
     never blocks.
   * STOCK_ONHAND_UNKNOWN -- a shop whose on-hand read failed is written
     NOWHERE in that pass (unknown is never written as 0); every other shop's
-    true numbers still go out, and the baseline omits the unknown shop so the
-    next pass re-sends it.
+    true numbers still go out, and the baseline keeps the unknown shop's last
+    ACCEPTED number -- what Shopify still shows there -- so the diff re-sends
+    it once it reads differently, and a release still zeroes it.
   * STOCK_TARGET_MISSING -- the SKU has no Shopify inventory item yet.
   * STOCK_ACTIVATION_FAILED -- Shopify said ITEM_NOT_STOCKED_AT_LOCATION, the
     item was activated at the chunk's locations, and the retry still failed.
@@ -753,13 +754,22 @@ def _writeback_stock(
     *,
     policy: Optional[str] = None,
     tracked: Optional[bool] = None,
+    carry: Iterable[str] = (),
 ) -> None:
-    """Persist what was just sent (ecom.online_stock) so the next levels pass
-    can diff against it: ``quantities = {sku: {store_id: qty}}``, read-merge-
-    write per SKU -- a POS write-back for one SKU REPLACES only that SKU's
-    per-store row, and a shop whose read failed is simply absent from it so
-    the next pass re-sends that shop. NEVER touches locally_modified.
-    Fail-soft."""
+    """Persist what Shopify now SHOWS (ecom.online_stock) so the next levels
+    pass can diff against it: ``quantities = {sku: {store_id: qty}}``, read-
+    merge-write per SKU -- a POS write-back for one SKU touches only that
+    SKU's row -- and per SHOP: a shop in ``carry`` (the mapped shops) that
+    this write did not cover keeps its last ACCEPTED number.
+
+    MERGED, never replaced (#1141 fix-six recheck, oversell): a shop whose
+    read was unknown, or whose row Shopify refused, was written nowhere and
+    Shopify still shows its old number. Replaced, the row forgot it, and
+    ``release_store_location`` -- which zeroes what the baseline says Shopify
+    shows -- zeroed nothing and let the gid walk away still selling it (the
+    round-6 P1 state). A shop no longer mapped is dropped (nothing writes it,
+    so its number would mark the listing changed on every pass). NEVER
+    touches locally_modified. Fail-soft."""
     try:
         coll = db["catalog_products"]
         doc = coll.find_one({"id": product_id})
@@ -774,8 +784,10 @@ def _writeback_stock(
             for sku, rows in dict(prev.get("quantities") or {}).items()
             if isinstance(rows, dict)
         }
+        keep = set(carry)
         for sku, rows in per_sku.items():
-            quantities[sku] = {sid: int(q) for sid, q in rows.items()}
+            kept = {sid: q for sid, q in (quantities.get(sku) or {}).items() if sid in keep}
+            quantities[sku] = {**kept, **{sid: int(q) for sid, q in rows.items()}}
         ecom["online_stock"] = {
             "quantities": quantities,
             "policy": policy if policy is not None else prev.get("policy"),
@@ -1659,13 +1671,14 @@ async def push_skus_stock(
             sku, sid = key_of[(inv_gid, loc)]
             written_per_sku.setdefault(sku, {})[sid] = qty
     # What was accepted goes to the baseline -- per listing, only the SKUs
-    # written, only the shops written (a failed or unknown shop is omitted so
-    # the next pass re-sends it).
+    # written, only the shops written; a MAPPED shop this pass did not write
+    # (unknown, refused) keeps its last ACCEPTED number, which is what Shopify
+    # still shows there (see _writeback_stock).
     if written_per_sku:
         for pid, pid_skus in by_product.items():
             rows_for = {s: written_per_sku[s] for s in pid_skus if s in written_per_sku}
             if rows_for:
-                _writeback_stock(db, pid, rows_for, policy=policy, tracked=tracked)
+                _writeback_stock(db, pid, rows_for, policy=policy, tracked=tracked, carry=mapped)
     # What Shopify ACCEPTED, not what was planned: the sync page prints these
     # as the per-shop "last written" numbers, and a refused chunk must not
     # read as written (the baseline above already only takes the accepted rows).

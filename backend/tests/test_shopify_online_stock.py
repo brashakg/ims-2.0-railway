@@ -3888,3 +3888,54 @@ def test_F2_sold_out_is_never_claimed_over_a_mapped_shop_the_writer_did_not_writ
     # CONTROL: every mapped shop written 0, nothing held anywhere else.
     clean = _run(shopify_push.push_skus_stock(_listed(_db(a=0, b=0, c=0)), ["SP-1"], source="sale"))
     assert clean["ok"] is True and clean["set"] == 3 and clean["sold_out"] is True, clean
+
+
+def _sold_at_b():
+    """A listing Shopify shows at A:2 B:1 C:0 (the baseline), and B's one
+    unit has just SOLD at the counter."""
+    db = _db(a=2, b=1, c=0)
+    _listed(db, online_stock={"quantities": {"SP-1": {"BV-A": 2, "BV-B": 1, "BV-C": 0}}, "tracked": True, "policy": "DENY"})
+    db.get_collection("stock_units").update_one({"stock_id": "BV-B-u0"}, {"$set": {"status": "SOLD"}})
+    return db
+
+
+def test_F3_a_shop_the_writer_did_not_write_keeps_its_last_accepted_number_so_a_release_still_zeroes_it(monkeypatch):
+    """PHANTOM STOCK at a released location (#1141 fix-six recheck, lens
+    r1:oversell -- the round-6 P1 state by a new route). `_writeback_stock`
+    REPLACED each SKU's per-shop row with the shops accepted THIS pass, so a
+    shop whose read was UNKNOWN, or whose row Shopify refused, lost its last
+    ACCEPTED number from the baseline. `release_store_location` reads the
+    baseline as 'what Shopify is showing', so it zeroed nothing, forgot the
+    shop and let the gid walk away with Shopify still selling 1 there. The
+    write MERGES now: a mapped shop not written this pass keeps its last
+    accepted number. REPLACE the row again -> both halves fail."""
+    from strict_fakes import StrictCollection as _SC
+
+    # 1. B's read dies during the sale's write-back.
+    db = _sold_at_b()
+    units = db.get_collection("stock_units")
+    _break_shop(db, "BV-B")
+    spy = _Spy(_responses())
+    _live(monkeypatch, spy)
+    _run(wb.writeback_skus(db, ["SP-1"], "BV-B"))
+    assert (INV_GID, LOC_B, 0) not in spy.rows(), "unknown is never written"
+    assert _baseline(db)["quantities"]["SP-1"] == {"BV-A": 2, "BV-B": 1, "BV-C": 0}, "B still shows its last accepted 1"
+    db._collections["stock_units"] = _SC("stock_units", units.docs)  # the read recovers
+    rel_spy = _Spy(_responses())
+    _live(monkeypatch, rel_spy)
+    out = _run(shopify_push.release_store_location(db, "BV-B", LOC_B))
+    assert out["ok"] is True and (INV_GID, LOC_B, 0) in rel_spy.rows(), (out, rel_spy.rows())
+    # 2. Shopify refuses B's row on the same sale.
+    db2 = _sold_at_b()
+    _live(monkeypatch, _RefuseAt(_responses(), LOC_B))
+    _run(wb.writeback_skus(db2, ["SP-1"], "BV-B"))
+    assert _baseline(db2)["quantities"]["SP-1"] == {"BV-A": 2, "BV-B": 1, "BV-C": 0}, "the refusal changed nothing on Shopify"
+    rel2 = _Spy(_responses())
+    _live(monkeypatch, rel2)
+    out2 = _run(shopify_push.release_store_location(db2, "BV-B", LOC_B))
+    assert out2["ok"] is True and (INV_GID, LOC_B, 0) in rel2.rows(), (out2, rel2.rows())
+    # A shop that WAS written takes the new number (the merge never keeps a stale one).
+    db3 = _sold_at_b()
+    _live(monkeypatch, _Spy(_responses()))
+    _run(wb.writeback_skus(db3, ["SP-1"], "BV-B"))
+    assert _baseline(db3)["quantities"]["SP-1"] == {"BV-A": 2, "BV-B": 0, "BV-C": 0}
