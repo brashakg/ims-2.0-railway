@@ -1871,3 +1871,33 @@ def test_a_bulk_press_counts_the_listings_that_went_live_sold_out_from_the_write
     monkeypatch.setattr(shopify_push, "push_product", _clean_with_a_unit)
     s2 = client.post("/api/v1/online-store/push/all-pending?entities=products", headers=auth_headers).json()["summary"]["products"]
     assert s2["pushed"] == 1 and "sold_out" not in s2, s2
+
+
+def test_the_status_counts_read_each_products_media_once(monkeypatch):
+    """Round 4. The Online Store status counts plan EVERY design-queue row;
+    they write nothing between rows, so each product's facts (twin, ledger,
+    push-lock, block) are read ONCE, not once per row (at the old catalogue
+    size that was ~22k ledger reads per screen load).
+    REVERT-PROOF: _image_counts without the per-product facts -> 5 ledger
+    reads for 5 rows of one product."""
+    from api.routers import online_store_push as router
+    from api.services.shopify_push import media as media_mod
+
+    db = _EngineDB()
+    db["catalog_products"].insert_one(
+        {"id": "P1", "images": ["https://cdn.example.com/p.jpg"], "ecom": {"shopify_product_id": "gid://shopify/Product/1"}}
+    )
+    db["online_media"].insert_one(media_doc("P1", "https://cdn.example.com/p.jpg", "gid://shopify/MediaImage/1"))
+    db["online_media"].insert_one(media_doc("P1", "https://x/a1.jpg", "gid://shopify/MediaImage/2", image_id="I1"))
+    for i in range(1, 6):
+        db["product_images"].insert_one(
+            {"image_id": "I%d" % i, "product_id": "P1", "url": "https://x/a%d.jpg" % i, "status": "APPROVED"}
+        )
+    reads = []
+    real = media_mod.media_rows
+    monkeypatch.setattr(media_mod, "media_rows", lambda d, pid: reads.append(pid) or real(d, pid))
+
+    counts = router._image_counts(db)
+
+    assert reads == ["P1"], reads
+    assert counts == {"approved": 5, "pushed": 1, "pending": 4}

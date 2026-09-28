@@ -930,14 +930,15 @@ def _doc_counts(db, name: str, shopify_field: str) -> Dict[str, int]:
     return {"total": total, "pushed": pushed, "pending": pending}
 
 
-def _press_plan(db, doc: Dict[str, Any]) -> Dict[str, Any]:
+def _press_plan(db, doc: Dict[str, Any], facts: Optional[Dict[Any, tuple]] = None) -> Dict[str, Any]:
     """The ONE 'what does a press of this design-queue image do' rule
     (media.image_press_plan) read off the parent twin and its media ledger
     docs by the press's own reader (media.read_image_press: the parent's push-lock
     and online block included): the sweep skips a row only when the press
     itself would be a no-op or a refusal, and the counts call a row pending
-    on the same answer. The row itself carries no Shopify id."""
-    return shopify_push.read_image_press(db, doc)[2]
+    on the same answer. The row itself carries no Shopify id. ``facts``:
+    see read_image_press (the counts read each product once)."""
+    return shopify_push.read_image_press(db, doc, facts)[2]
 
 
 def _image_counts(db) -> Dict[str, int]:
@@ -946,9 +947,10 @@ def _image_counts(db) -> Dict[str, int]:
     not yet on the listing, or a replaced asset still to take down -- never
     a row the press refuses, which no sweep will ever send)."""
     approved = pushed = pending = 0
+    facts: Dict[Any, tuple] = {}  # one read of each product, not one per row
     for doc in _all_docs(db, "product_images"):
         is_approved = str(doc.get("status") or "").upper() == "APPROVED"
-        plan = _press_plan(db, doc)
+        plan = _press_plan(db, doc, facts)
         if is_approved:
             approved += 1
             if plan["action"] in ("create", "update"):

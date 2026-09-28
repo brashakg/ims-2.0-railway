@@ -334,21 +334,35 @@ def image_press_plan(
     return {**plan, "action": "skip", "reason": skip[0], "error": skip[1]}
 
 
-def read_image_press(db, image: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[str], Dict[str, Any]]:
+def read_image_press(
+    db, image: Dict[str, Any], facts: Optional[Dict[Any, tuple]] = None
+) -> Tuple[Optional[Dict[str, Any]], Optional[str], Dict[str, Any]]:
     """(parent twin, its push-lock, image_press_plan): the db facts the one
     predicate needs -- the parent, its ledger docs, its push_lock_reason and
     its online-block status -- read HERE, the one way, for the press and for
     the sweep's skip and the counts alike. Never raises (an unreadable
-    ledger is rows=None: the plan refuses)."""
-    parent = _resolve_product_doc(db, image.get("product_id"))
+    ledger is rows=None: the plan refuses). ``facts`` ({product_id: facts})
+    lets a caller that plans MANY rows and writes nothing between them (the
+    status counts) read each product's facts once instead of once per row."""
+    pid = image.get("product_id")
+    got = facts.get(pid) if facts is not None else None
+    if got is None:
+        parent = _resolve_product_doc(db, pid)
+        rows: Optional[List[Dict[str, Any]]] = None
+        lock = blocked = None
+        if parent is not None:
+            try:
+                rows = media_rows(db, pid)
+            except Exception:  # noqa: BLE001 -- fail closed in the plan
+                rows = None
+            lock = push_lock_reason(db, "product", parent)
+            blocked = online_block_status(db, parent)
+        got = (parent, rows, lock, blocked)
+        if facts is not None:
+            facts[pid] = got
+    parent, rows, lock, blocked = got
     if parent is None:
         return None, None, image_press_plan(None, image, [])
-    try:
-        rows: Optional[List[Dict[str, Any]]] = media_rows(db, image.get("product_id"))
-    except Exception:  # noqa: BLE001 -- fail closed in the plan
-        rows = None
-    lock = push_lock_reason(db, "product", parent)
-    blocked = online_block_status(db, parent)
     return parent, lock, image_press_plan(parent, image, rows, lock=lock, blocked=blocked)
 
 
