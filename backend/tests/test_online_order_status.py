@@ -318,6 +318,80 @@ def test_an_open_order_deleted_on_shopify_is_voided_through_the_claim(swept):
     assert doc["status_history"][-1]["changed_by"] == "system:SHOPIFY_ORDER_DELETE"
 
 
+# ---------------------------------------------------------------------------
+# An event's markers ride its status claim: a write that fails (a Mongo
+# failover inside the claim) leaves no marker, so the event is retried -- by
+# the re-delivered webhook, or by the hourly sweep that sees the fact unapplied.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def blip(monkeypatch):
+    """The status claim raises once, then works."""
+    from api.routers.orders import release
+
+    real, left = release._claim_order_status, [1]
+
+    def claim(*a, **kw):
+        if left and left.pop():
+            raise RuntimeError("mongo failover")
+        return real(*a, **kw)
+
+    monkeypatch.setattr(release, "_claim_order_status", claim)
+
+
+def test_a_blip_in_the_delete_claim_is_retried_by_the_redelivery(swept, blip):
+    _book(swept, 60130)
+    first = shopify_order_delete.handle_shopify_order_delete(swept["db"], {"id": 60130}, topic="orders/delete")
+    assert first["status"] == "error"
+    doc = _doc(swept, 60130)
+    assert doc["status"] == "CONFIRMED" and "shopify_deleted_at" not in doc
+
+    again = shopify_order_delete.handle_shopify_order_delete(swept["db"], {"id": 60130}, topic="orders/delete")
+    assert again["status"] == "voided"
+    doc = _doc(swept, 60130)
+    assert doc["status"] == "VOID" and doc["shopify_deleted_at"]
+
+
+def test_a_blip_in_the_cancel_claim_is_refed_by_the_sweep(swept, blip):
+    _book(swept, 60140)
+    body = _pulled(60140, cancelled_at=CANCELLED_AT)
+    res = swept["real_map"](copy.deepcopy(body), swept["db"], webhook_id="c-60140", topic="orders/cancelled")
+    assert res["status_synced"] is False, "a failed write is never reported as synced"
+    doc = _doc(swept, 60140)
+    assert doc["status"] == "CONFIRMED" and "shopify_cancelled_at" not in doc
+
+    swept["state"]["orders"] = [copy.deepcopy(body)]
+    assert swept["run"]().payload["status_synced"] == ["60140"]
+    doc = _doc(swept, 60140)
+    assert (doc["status"], doc["shopify_cancelled_at"], doc["cancelled_at"]) == (
+        "CANCELLED", CANCELLED_AT, CANCELLED_AT)
+
+
+def test_a_blip_in_the_fulfilment_claim_is_refed_by_the_sweep(swept, blip):
+    _book(swept, 60150)
+    f = _fulfilment(60150, 1)
+    res = shopify_fulfillment.reconcile_fulfillment(swept["db"], copy.deepcopy(f), topic="fulfillments/create")
+    assert res["status"] == "error"
+    doc = _doc(swept, 60150)
+    assert doc["status"] == "CONFIRMED" and "awb" not in doc and "shopify_fulfillment_id" not in doc
+
+    swept["state"]["orders"] = [_pulled(60150, fulfillment_status="fulfilled", fulfillments=[f])]
+    assert swept["run"]().payload["status_synced"] == ["60150"]
+    doc = _doc(swept, 60150)
+    assert (doc["status"], doc["awb"], doc["fulfillment_status"]) == ("SHIPPED", "AWB60150", "FULFILLED")
+
+
+def test_three_lost_races_write_nothing_and_say_so(swept, monkeypatch):
+    from api.routers.orders import release
+
+    _book(swept, 60160)
+    monkeypatch.setattr(release, "_claim_order_status", lambda *a, **kw: False)
+    res = oos.apply_fact(swept["db"], _doc(swept, 60160), oos.SHIP, source="T", marks={"awb": "A1"})
+    assert res["failed"] is True and res["to"] is None
+    assert "awb" not in _doc(swept, 60160)
+
+
 @pytest.mark.parametrize("variant", ["cancel", "refund"])
 def test_a_delivered_order_shopify_cancels_stays_delivered_with_one_task_forever(swept, variant):
     """Ruling 2: DELIVERED stays DELIVERED; ONE task for a person, claimed by

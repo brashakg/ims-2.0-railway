@@ -10,8 +10,9 @@ must, or an online order that has actually shipped would stay CONFIRMED forever.
 CONTRACT:
   * Match the IMS order by shopify_order_id. NOT found -> log + no-op (fail-soft;
     never crash the NEXUS drain loop).
-  * $set the tracking fields + fulfillment_status. Because we only $set (never
-    increment), a re-delivered webhook is naturally idempotent.
+  * $set the tracking fields + fulfillment_status, riding the status claim
+    (apply_fact `marks`). Because we only $set (never increment), a
+    re-delivered webhook is naturally idempotent.
   * The lifecycle status is the table's (online_order_status.apply_fact): a
     fulfilment states SHIP, or DELIVER when shipment_status is "delivered"
     (owner ruling 2026-09-28: DELIVERED only from the courier), or nothing (a
@@ -177,22 +178,22 @@ def reconcile_fulfillment(
         if watermark is not None:
             update[FULFILLMENT_WATERMARK] = watermark
 
-        try:
-            coll = db.get_collection("orders")
-            coll.update_one({"shopify_order_id": shopify_order_id}, {"$set": update})
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[SHOPIFY_FULFILL] order update failed: %s", exc)
-            return {"status": "error", "error": str(exc)}
-
         # The lifecycle status: this fulfilment's ONE fact through the ONE
-        # transition table (the mapper's and the courier's too).
+        # transition table (the mapper's and the courier's too). The tracking,
+        # fulfillment_status and watermark ride the same claim (or land alone
+        # when the table keeps the status): a failed write leaves the
+        # fulfilment unapplied, so the hourly sweep sees it moved and re-feeds it.
         current_status = _norm(order.get("status")).upper()
         res = apply_fact(
             db,
-            {**order, **update},
+            order,
             fulfilment_fact(ful_status, shipment_status, tracking_number),
             source="SHOPIFY_FULFILL",
+            marks=update,
         )
+        if res["failed"]:
+            return {"status": "error", "error": "status write failed",
+                    "order_id": order.get("order_id"), "fulfillment_id": fulfillment_id}
         order_status = res["to"] or current_status
 
         logger.info(

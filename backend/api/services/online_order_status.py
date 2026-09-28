@@ -116,12 +116,16 @@ def decide(order: Dict[str, Any], fact: Optional[str]) -> Tuple[Optional[str], O
 
 def apply_fact(
     db, order: Dict[str, Any], fact: Optional[str], *, source: str,
-    extra: Optional[Dict[str, Any]] = None,
+    extra: Optional[Dict[str, Any]] = None, marks: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Decide and write. Returns {"to", "why", "terminal_withheld"}; `extra`
-    rides the same atomic write, so it lands only when the claim wins. Never
-    raises."""
-    out: Dict[str, Any] = {"to": None, "why": None, "terminal_withheld": False}
+    """Decide and write. Returns {"to", "why", "terminal_withheld", "failed"}.
+    `extra` rides the claim only. `marks` are the event's own markers (what a
+    replay or the hourly sweep reads to know the event landed): they ride the
+    same atomic claim when the table moves the status, and land alone when it
+    keeps it -- never before the claim, so a write that fails leaves the event
+    unmarked and it is retried. failed=True: nothing was written (an error, or
+    three lost races). Never raises."""
+    out: Dict[str, Any] = {"to": None, "why": None, "terminal_withheld": False, "failed": False}
     try:
         from database.repositories.order_repository import OrderRepository
 
@@ -135,18 +139,27 @@ def apply_fact(
                 _raise_rx_task(db, order, source)
             elif why == "conflict":
                 _raise_conflict_task(db, order, fact, source)
-            if not to or not order.get("order_id"):
+            oid = order.get("order_id")
+            if not oid:
+                return out
+            if not to:
+                if marks:
+                    repo.collection.update_one({"order_id": oid}, {"$set": marks})
                 return out
             if _claim_order_status(
-                repo, order["order_id"], to, [order.get("status")], f"system:{source}", extra=extra
+                repo, oid, to, [order.get("status")], f"system:{source}",
+                extra={**(marks or {}), **(extra or {})} or None,
             ):
                 out["to"] = to
                 return out
             # Lost a race (staff moved it): read again and decide again.
-            order = repo.collection.find_one({"order_id": order["order_id"]}) or {}
+            order = repo.collection.find_one({"order_id": oid}) or {}
+        logger.warning("[ONLINE_STATUS] %s %s lost three races for order=%s", source, fact,
+                       order.get("order_id"))
     except Exception:  # noqa: BLE001 -- a status write never breaks a drain / sweep
         logger.warning("[ONLINE_STATUS] %s %s failed for order=%s", source, fact,
                        (order or {}).get("order_id"), exc_info=True)
+    out["failed"] = True
     return out
 
 

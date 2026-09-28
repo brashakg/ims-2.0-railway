@@ -935,7 +935,7 @@ def _sync_existing_order_status(
     # The lifecycle status is ONE rule (online_order_status): this body states
     # one fact or none, and the transition table decides what it does to the
     # status IMS holds (never backwards; DELIVERED is the courier's; a
-    # finished order stays finished) -- after the money leg below.
+    # finished order stays finished).
     from .online_order_status import CANCEL, apply_fact, order_fact
     from .shopify_fulfillment import fulfilment_body_stale
 
@@ -947,9 +947,11 @@ def _sync_existing_order_status(
     fact = order_fact(payload, ful_stale=ful_stale)
 
     # LIFECYCLE fields never depend on the payments snapshot (only on the
-    # payload + `now`), so they are computed and written ONCE, unconditionally
-    # -- no race window to close here. No `status` and no `cancelled_at`: those
-    # land only with a real move to CANCELLED, through apply_fact's claim.
+    # payload + `now`). They are this event's markers (the watermark, and the
+    # facts the hourly sweep compares), so they ride the status claim itself
+    # (apply_fact `marks`): the status and its markers land together or not at
+    # all, and a failed write leaves the sweep something to re-feed. No
+    # `cancelled_at`: that lands only with a real move to CANCELLED.
     lifecycle_update: Dict[str, Any] = {
         # NAIVE-UTC DATETIME, matching how ingest stamps order date fields -- an
         # ISO string here would flip backfilled datetime updated_at values back
@@ -960,7 +962,7 @@ def _sync_existing_order_status(
         lifecycle_update["fulfillment_status"] = st["fulfillment_status"]
     # Persist the applied staleness watermark (the payload's own updated_at) so a
     # later STALE re-delivery is detected by the guard above. Lifecycle field --
-    # always applied, even if the money leg below has to retry/defer.
+    # applied before the money leg, even if that leg has to retry/defer.
     if incoming_updated is not None:
         lifecycle_update["shopify_updated_at"] = incoming_updated
     # Shopify's own cancel fact, kept even when the table keeps the status (a
@@ -969,10 +971,24 @@ def _sync_existing_order_status(
         lifecycle_update["shopify_cancelled_at"] = _norm(payload.get("cancelled_at"))
 
     try:
-        if lifecycle_update:
-            orders_coll.update_one(
-                {"shopify_order_id": shopify_order_id}, {"$set": lifecycle_update}
-            )
+        moved = apply_fact(
+            db,
+            existing,
+            fact,
+            source="ONLINE_MAP",
+            extra=(
+                {"cancelled_at": _norm(payload.get("cancelled_at"))} if fact == CANCEL else None
+            ),
+            marks=lifecycle_update,
+        )
+        if moved["failed"]:
+            # Nothing landed -- not the status, not one marker -- so the next
+            # sweep (or a replay) sees the same facts still to apply.
+            return False
+        # Decided HERE, on the doc as it is now, so the pull sweep reports the
+        # handler's own answer (status_skipped_terminal).
+        if verdict is not None:
+            verdict["terminal_withheld"] = moved["terminal_withheld"]
 
         # MONEY LEG -- BOUNDED RETRY (money-panel P1 follow-up). The payments
         # array + header write is snapshot-conditional (a concurrent staff
@@ -1044,25 +1060,11 @@ def _sync_existing_order_status(
                 shopify_order_id,
             )
 
-        res = apply_fact(
-            db,
-            {**existing, **lifecycle_update},
-            fact,
-            source="ONLINE_MAP",
-            extra=(
-                {"cancelled_at": _norm(payload.get("cancelled_at"))} if fact == CANCEL else None
-            ),
-        )
-        # Decided HERE, on the doc as it is now, so the pull sweep reports the
-        # handler's own answer (status_skipped_terminal).
-        if verdict is not None:
-            verdict["terminal_withheld"] = res["terminal_withheld"]
-
         logger.info(
             "[ONLINE_MAP] synced status for shopify_order=%s -> status=%s payment=%s "
             "fulfillment=%s",
             shopify_order_id,
-            res["to"] or existing.get("status"),
+            moved["to"] or existing.get("status"),
             st["payment_status"],
             st["fulfillment_status"],
         )

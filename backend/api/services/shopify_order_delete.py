@@ -17,11 +17,12 @@ CONTRACT (mirrors shopify_fulfillment.reconcile_fulfillment exactly):
   * Match the IMS order by shopify_order_id (the `orders/delete` payload is just
     {"id": <order_id>}). NOT found -> log + no-op (fail-soft; never crash the
     NEXUS drain loop).
-  * NEVER hard-delete. We $set shopify_deleted_at, and the table's VOID (with
-    the prior lifecycle status in status_before_void for the audit trail) rides
-    the same claim. Because we only $set a marker, a re-delivered webhook is
-    naturally IDEMPOTENT: once shopify_deleted_at is present we return
-    "duplicate" and touch nothing.
+  * NEVER hard-delete. shopify_deleted_at rides the table's VOID claim (with
+    the prior lifecycle status in status_before_void for the audit trail), or
+    lands alone when the table keeps the status. Because we only $set a
+    marker, a re-delivered webhook is naturally IDEMPOTENT: once
+    shopify_deleted_at is present we return "duplicate" and touch nothing; a
+    write that failed left no marker, so the re-delivery retries it.
   * HISTORICAL import orders (bvi_import) are skipped -- they were settled outside
     IMS books and must never be flipped.
 
@@ -151,15 +152,6 @@ def handle_shopify_order_delete(
 
         now = datetime.now(timezone.utc).isoformat()
         prior_status = _norm(order.get("status")).upper() or None
-        try:
-            coll = db.get_collection("orders")
-            coll.update_one(
-                {"shopify_order_id": shopify_order_id},
-                {"$set": {"shopify_deleted_at": now, "updated_at": now}},
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[SHOPIFY_ORDER_DELETE] order update failed: %s", exc)
-            return {"status": "error", "error": str(exc)}
 
         from .online_order_status import DELETE, apply_fact
 
@@ -168,7 +160,16 @@ def handle_shopify_order_delete(
         # void is auditable / reversible (we never overwrite an existing snapshot).
         if prior_status and not order.get("status_before_void"):
             extra["status_before_void"] = prior_status
-        res = apply_fact(db, order, DELETE, source="SHOPIFY_ORDER_DELETE", extra=extra)
+        # The marker rides the status claim (or lands alone when the table
+        # keeps the status): a failed write leaves no marker, so a re-delivered
+        # orders/delete retries instead of returning "duplicate".
+        res = apply_fact(
+            db, order, DELETE, source="SHOPIFY_ORDER_DELETE", extra=extra,
+            marks={"shopify_deleted_at": now, "updated_at": now},
+        )
+        if res["failed"]:
+            return {"status": "error", "error": "status write failed",
+                    "shopify_order_id": shopify_order_id, "order_id": order.get("order_id")}
 
         logger.info(
             "[SHOPIFY_ORDER_DELETE] order=%s shopify_order=%s -> %s (was status=%s)",
