@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import sys
 
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
@@ -169,7 +170,7 @@ class _VendorRepo:
     def find_many(self, _flt, skip=0, limit=50):
         return [dict(_FULL_VENDOR)]
 
-    def search_vendors(self, _q):
+    def search_vendors(self, _q, fields=None):
         return [dict(_FULL_VENDOR)]
 
 
@@ -195,3 +196,55 @@ def test_vendor_list_full_for_purchase_roles(client, vendor_repo, role):
     resp = client.get("/api/v1/vendors/", headers=_headers(role))
     assert resp.status_code == 200
     assert resp.json()["vendors"][0]["gstin"] == "27AAPFU0939F1ZV"
+
+
+# ---------------------------------------------------------------------------
+# 5. Vendor list SEARCH is not a GSTIN oracle for names-only callers
+# ---------------------------------------------------------------------------
+# Hiding the gstin key was not enough while ?search still matched the gstin
+# field: whether Acme came back answered "does its GSTIN start with 27AAPFU?",
+# and a per-character walk recovered the whole number (panel: 217 requests as
+# CASHIER). The REAL VendorRepository builds the real prefix query here; only
+# the store is swapped for a one-document list the query is run against.
+def _mongo_match(doc, query):
+    """The subset of Mongo the tokenised prefix search emits: $and of $or of
+    {field: {$regex: ^token, $options: i}}. A non-string field never matches."""
+    return all(
+        any(
+            isinstance(doc.get(f), str)
+            and re.match(cond[f]["$regex"], doc[f], re.I) is not None
+            for cond in clause["$or"]
+            for f in cond
+        )
+        for clause in query["$and"]
+    )
+
+
+@pytest.fixture
+def real_vendor_repo(monkeypatch):
+    from database.repositories.vendor_repository import VendorRepository
+
+    repo = VendorRepository(None)
+    repo.find_many = lambda query, skip=0, limit=100, sort=None: [
+        dict(_FULL_VENDOR) for _ in [0] if _mongo_match(_FULL_VENDOR, query)
+    ]
+    monkeypatch.setattr(vendors_mod, "get_vendor_repository", lambda: repo)
+
+
+def _search(client, role, q):
+    resp = client.get("/api/v1/vendors", params={"search": q}, headers=_headers(role))
+    assert resp.status_code == 200
+    return resp.json()["vendors"]
+
+
+@pytest.mark.parametrize("role", COUNTER_ROLES + ("CATALOG_MANAGER",))
+def test_names_only_search_is_not_a_gstin_oracle(client, real_vendor_repo, role):
+    assert _search(client, role, "acme")  # a name still finds the vendor
+    assert _search(client, role, "VEN-0001")  # so does the code it is shown
+    for q in ("27", "27AAPFU", "27AAPFU0939F1ZV"):
+        assert _search(client, role, q) == [], q
+
+
+@pytest.mark.parametrize("role", _VENDOR_ROLES + ("SUPERADMIN",))
+def test_purchase_roles_still_find_a_vendor_by_gstin(client, real_vendor_repo, role):
+    assert _search(client, role, "27AAPFU")[0]["gstin"] == "27AAPFU0939F1ZV"

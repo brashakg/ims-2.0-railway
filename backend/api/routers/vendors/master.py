@@ -59,15 +59,22 @@ async def list_vendors(
     if is_active is not None:
         filter_dict["is_active"] = is_active
 
+    roles = set(current_user.get("roles") or [])
+    names_only = not roles & {"SUPERADMIN", *_VENDOR_ROLES}
+
     if search:
-        # Search in name, trade name, or mobile
-        vendors = vendor_repo.search_vendors(search)
+        # A names-only caller searches only the keys it is shown. Matching the
+        # hidden gstin made ?search an oracle: "does the GSTIN start with X?"
+        # walked one character at a time recovered the whole number.
+        if names_only:
+            vendors = vendor_repo.search_vendors(search, fields=_VENDOR_NAME_FIELDS)
+        else:
+            vendors = vendor_repo.search_vendors(search)
     else:
         vendors = vendor_repo.find_many(filter_dict, skip=skip, limit=limit)
     vendors = vendors or []
 
-    roles = set(current_user.get("roles") or [])
-    if not roles & {"SUPERADMIN", *_VENDOR_ROLES}:
+    if names_only:
         vendors = [{k: v[k] for k in _VENDOR_NAME_FIELDS if k in v} for v in vendors]
 
     return {"vendors": vendors, "total": len(vendors)}
