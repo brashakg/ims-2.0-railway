@@ -135,12 +135,80 @@ class TestCatalogManagerRaisesDraftOnly:
         )
         assert resp.status_code != 403
 
+
+
+# The managers who send, edit and cancel an order (SUPERADMIN passes every gate).
+_ORDER_MANAGERS = {"ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT"}
+
+
+def _everyone_else():
+    from api.services.rbac_policy import ALL_ROLES
+
+    return [r for r in ALL_ROLES if r != "SUPERADMIN" and r not in _ORDER_MANAGERS]
+
+
+class TestOnlyManagersChangeAnOrder:
+    """Send, edit, cancel and line-cancel stay with the managers: every other
+    role -- cashier and workshop staff included, the catalogue manager too --
+    is refused on every one of them."""
+
+    @pytest.mark.parametrize("role", _everyone_else())
     @pytest.mark.parametrize(
         "method,path,body,params",
         [w for w in WRITES if "/purchase-orders/po1" in w[1]],
     )
-    def test_catalog_manager_cannot_send_edit_or_cancel(
-        self, client, method, path, body, params
-    ):
-        resp = _send(client, method, path, body, params, _headers(["CATALOG_MANAGER"]))
-        assert resp.status_code == 403
+    def test_refused(self, client, role, method, path, body, params):
+        resp = _send(client, method, path, body, params, _headers([role]))
+        assert resp.status_code == 403, (role, method, path)
+
+    def test_the_refused_list_covers_the_counter_and_the_workshop(self):
+        assert {"CASHIER", "WORKSHOP_STAFF", "SALES_STAFF", "CATALOG_MANAGER"} <= set(
+            _everyone_else()
+        )
+
+
+def _code_gate(dependant):
+    """The roles a route's own require_roles dependency lets in (None if the
+    route has none). Nested dependencies intersect, like the requests do."""
+    import inspect
+
+    gates = []
+
+    def walk(dep):
+        for d in dep.dependencies:
+            fn = d.call
+            if getattr(fn, "__qualname__", "") == "require_roles.<locals>._dep":
+                gates.append(set(inspect.getclosurevars(fn).nonlocals["allowed"]))
+            walk(d)
+
+    walk(dependant)
+    return set.intersection(*gates) - {"SUPERADMIN"} if gates else None
+
+
+def test_every_vendors_policy_row_matches_its_code_gate(app):
+    """Two gates guard each vendors write: the policy row (middleware, and the
+    role union the grant guard reasons from) and the route's require_roles.
+    A row that drifts from its code gate is invisible to a 403 test -- the other
+    gate still answers 403 -- so compare them directly."""
+    from fastapi.routing import APIRoute
+
+    from api.services import rbac_policy
+
+    drift, checked = [], 0
+    for route in app.routes:
+        if not isinstance(route, APIRoute) or not route.path.startswith("/api/v1/vendors"):
+            continue
+        code = _code_gate(route.dependant)
+        if code is None:
+            continue
+        for method in route.methods:
+            checked += 1
+            row = rbac_policy.policy_for(method, route.path) or {}
+            allowed = row.get("allowed")
+            row_roles = (
+                set(allowed) - {"SUPERADMIN"} if isinstance(allowed, (list, tuple, set)) else allowed
+            )
+            if row_roles != code:
+                drift.append((method, route.path, sorted(code), row_roles))
+    assert checked >= 5  # the PO change routes alone are five
+    assert not drift, drift
