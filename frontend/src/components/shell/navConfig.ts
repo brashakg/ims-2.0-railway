@@ -14,6 +14,7 @@ import {
   INVENTORY_MANAGE_ROLES,
   POWER_GRID_ROLES,
 } from '../../pages/inventory/inventoryRoles';
+import { CATALOGUING_MANAGER_ROLES } from '../../pages/catalog/cataloguing/shared';
 import type { IconName } from './Icon';
 import type { NavBadgeKey } from './NavBadge';
 import type { UserRole } from '../../types';
@@ -133,10 +134,9 @@ export const NAV_GROUPS: NavGroup[] = [
       { id: 'catalog-review', label: 'Needs review', to: '/catalog/review', icon: 'clipboard', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'], badge: 'catalog-review' },
       { id: 'catalog-missing-photos', label: 'Missing photos', to: '/catalog/missing-photos', icon: 'eye', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'], badge: 'catalog-missing-photos' },
       // Cataloguing Scorecard + QC review (attribution phase 2), two pages.
-      // requireRoles mirrors the /catalog/scorecard and /catalog/qc
-      // ProtectedRoute gates + backend rbac rows.
-      { id: 'catalog-scorecard', label: 'Scorecard', to: '/catalog/scorecard', icon: 'chart', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER'] },
-      { id: 'catalog-qc', label: 'QC review', to: '/catalog/qc', icon: 'clipboard', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER'] },
+      // Gate IMPORTED from the one list both routes use, never re-typed here.
+      { id: 'catalog-scorecard', label: 'Scorecard', to: '/catalog/scorecard', icon: 'chart', requireRoles: CATALOGUING_MANAGER_ROLES },
+      { id: 'catalog-qc', label: 'QC review', to: '/catalog/qc', icon: 'clipboard', requireRoles: CATALOGUING_MANAGER_ROLES },
       // Catalog Autopilot was REMOVED entirely (owner 2026-08-30: unused). The
       // "Auto-fill from web" panel), so its standalone nav item was removed. The
       // /catalog/autopilot route still resolves (redirects to /catalog/add)

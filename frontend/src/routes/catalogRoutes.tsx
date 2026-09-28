@@ -4,6 +4,7 @@ import { lazy } from 'react';
 import { Route, Navigate, useSearchParams } from 'react-router-dom';
 import { ProtectedRoute } from '../components/layout/ProtectedRoute';
 import { legacyReviewRedirect } from '../pages/catalog/reviewQueue';
+import { CATALOGUING_MANAGER_ROLES } from '../pages/catalog/cataloguing/shared';
 
 // /catalog — the Catalog Manager: the product list over the billing spine,
 // with the slide-over drawer (view / edit / approve). ONE page component serves
@@ -93,15 +94,7 @@ export const catalogRoutes = (
     <Route
       path="catalog/scorecard"
       element={
-        <ProtectedRoute
-          allowedRoles={[
-            'SUPERADMIN',
-            'ADMIN',
-            'AREA_MANAGER',
-            'STORE_MANAGER',
-            'CATALOG_MANAGER',
-          ]}
-        >
+        <ProtectedRoute allowedRoles={CATALOGUING_MANAGER_ROLES}>
           <CataloguingScorecardPage />
         </ProtectedRoute>
       }
@@ -112,15 +105,7 @@ export const catalogRoutes = (
     <Route
       path="catalog/qc"
       element={
-        <ProtectedRoute
-          allowedRoles={[
-            'SUPERADMIN',
-            'ADMIN',
-            'AREA_MANAGER',
-            'STORE_MANAGER',
-            'CATALOG_MANAGER',
-          ]}
-        >
+        <ProtectedRoute allowedRoles={CATALOGUING_MANAGER_ROLES}>
           <CataloguingQcPage />
         </ProtectedRoute>
       }
