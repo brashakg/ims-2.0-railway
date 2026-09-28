@@ -71,8 +71,13 @@ export function BarcodeScanner({
   const handleSubmit = () => {
     if (!value.trim()) return;
 
-    // If it looks like a barcode (numeric or alphanumeric, 8+ chars)
-    const isBarcodeFormat = /^[A-Z0-9]{8,}$/i.test(value.trim());
+    // If it looks like a barcode (numeric or alphanumeric, 8+ chars), or a unit
+    // label printed before 2026-09-28 ('BV--91FA3858', fallback 'BC-' + 12 hex),
+    // which a cashier may still type by hand. Letter case does not matter: the
+    // server matches a unit code in any case.
+    const isBarcodeFormat = /^([A-Z0-9]{8,}|[A-Z0-9-]{3}-[0-9A-F]{8}|BC-[0-9A-F]{12})$/i.test(
+      value.trim(),
+    );
 
     if (isBarcodeFormat || isScanning) {
       // Treat as barcode scan
