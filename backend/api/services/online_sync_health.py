@@ -1070,8 +1070,9 @@ def parity_summary(db) -> Dict[str, Any]:
             },
         },
         # product_images is NOT a row here: a design-queue image's Shopify
-        # identity is the parent twin's ecom.media_map row for its url (no
-        # per-row gid a Mongo filter could count). The push status screen's
+        # identity is its live online_media ledger doc (shopify_push.media),
+        # keyed on the parent's listing lane, not a gid on the row a Mongo
+        # filter could count. The push status screen's
         # images pushed/pending (online_store_push._image_counts) answers it.
     }
 

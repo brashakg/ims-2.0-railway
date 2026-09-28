@@ -251,9 +251,9 @@ async def push_image(
 ) -> Dict[str, Any]:
     """Press ONE APPROVED design-queue image onto its parent product's listing
     through the shared media pass (read -> attach -> delete -> reorder): a
-    no-op when the parent's media_map already carries the url, an attach
-    otherwise, and the drop of the asset this row mapped before it was
-    replaced. DARK by default; LIVE behind the gates. Writes a chained audit
+    no-op when the media ledger (online_media) already holds the url live
+    on the parent's listing, an attach otherwise, and the drop of the asset
+    this row held before it was replaced. DARK by default; LIVE behind the gates. Writes a chained audit
     row. Unknown image -> 404. A non-APPROVED image is NOT a route error (the
     engine returns ok=false action=skip) so the audit still records the
     refusal."""
@@ -932,8 +932,8 @@ def _doc_counts(db, name: str, shopify_field: str) -> Dict[str, int]:
 
 def _press_plan(db, doc: Dict[str, Any]) -> Dict[str, Any]:
     """The ONE 'what does a press of this design-queue image do' rule
-    (media.image_press_plan) read off the parent twin and its ecom.media_map
-    by the press's own reader (media.read_image_press: the parent's push-lock
+    (media.image_press_plan) read off the parent twin and its media ledger
+    docs by the press's own reader (media.read_image_press: the parent's push-lock
     and online block included): the sweep skips a row only when the press
     itself would be a no-op or a refusal, and the counts call a row pending
     on the same answer. The row itself carries no Shopify id."""
@@ -941,8 +941,8 @@ def _press_plan(db, doc: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _image_counts(db) -> Dict[str, int]:
-    """approved (push-eligible) / pushed (on the parent's listing per its
-    media_map) / pending (APPROVED and a press would still SEND something:
+    """approved (push-eligible) / pushed (on the parent's listing per the
+    media ledger) / pending (APPROVED and a press would still SEND something:
     not yet on the listing, or a replaced asset still to take down -- never
     a row the press refuses, which no sweep will ever send)."""
     approved = pushed = pending = 0

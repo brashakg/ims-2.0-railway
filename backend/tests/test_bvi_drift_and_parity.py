@@ -324,8 +324,8 @@ def test_parity_summary_counts_correctly():
 
 def test_parity_summary_all_entities_present():
     """Shape check: the three gid-carrying entity keys are always present.
-    product_images is NOT one: a design-queue image's Shopify identity is the
-    parent twin's ecom.media_map row (no per-row gid a filter could count);
+    product_images is NOT one: a design-queue image's Shopify identity is its
+    live online_media ledger doc (no per-row gid a filter could count);
     the push status screen's images pushed/pending answers it."""
     result = sh.parity_summary(_FakeDb())
     assert set(result["entities"].keys()) == {

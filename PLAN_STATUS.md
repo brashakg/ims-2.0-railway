@@ -337,6 +337,10 @@ What the five page-split waves left, measured 2026-09-27 (owner page "Wave Six")
 | A8 GST/money rule convergence · A11 retire the classic goods-receipt screen | **TODO** — waits for the procurement audit report |
 | A7 one timestamp rule for the backend | **BLOCKED** — owner picks IST wall-clock or UTC |
 
+## 4r. Website photos pressed twice — PR #1152 DRAFT, not merged
+
+The design-queue photo press could put the same photograph on a Shopify listing twice. Rebuilt on the branch (2026-09-28), not merged, not on the website: IMS now keeps its record of which Shopify photos it owns in a place of its own (other product saves can no longer erase it); it recognises its own photo on Shopify by the file name, the one thing production Shopify keeps; a photo upload that times out is never sent a second time; and a catalogue edit no longer writes back stale website fields it did not change. The PR stays a draft until an adversarial review panel clears it.
+
 ## 5. Waiting on the owner
 
 | Question | Why it matters |

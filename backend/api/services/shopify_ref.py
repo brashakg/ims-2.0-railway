@@ -14,7 +14,7 @@ that every current caller already uses -- unchanged, in place:
     ecom_collections     :  shopify_collection_id
     ecom_menus           :  shopify_menu_id
     product_images       :  (none -- a design-queue image is identified on
-                             Shopify by its parent twin's ecom.media_map row)
+                             Shopify by its live online_media ledger doc)
 For BV, get/set here are exactly `doc.get(field)` / `doc[field] = value` -- so
 routing an existing BV call site through this accessor changes NOTHING on disk.
 
