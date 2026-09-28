@@ -468,6 +468,27 @@ def test_a_staff_cancel_that_lands_first_wins_over_a_stale_shopify_fulfilment(sw
     assert _doc(swept, 60166)["status"] == "CANCELLED"
 
 
+def test_the_orders_screen_can_filter_on_shipped(monkeypatch):
+    """The table writes SHIPPED on every fulfilled online order, and the Orders
+    screen's Shipped filter sends GET /orders?status=SHIPPED. The endpoint
+    validates ?status= against OrderStatus: a status missing there is a 422
+    and the screen shows 'Failed to load orders'."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from api.routers.auth import get_current_user
+    from api.routers.orders import _shared, lists
+
+    app = FastAPI()
+    app.include_router(_shared.router, prefix="/api/v1/orders")
+    app.dependency_overrides[get_current_user] = lambda: {
+        "user_id": "u-1", "roles": ["SUPERADMIN"], "active_store_id": None}
+    monkeypatch.setattr(lists, "get_order_repository", lambda: None)
+    monkeypatch.setattr(lists, "validate_store_access", lambda sid, user: None)
+    client = TestClient(app)
+    for status in ("READY", "SHIPPED", "DELIVERED"):
+        assert client.get(f"/api/v1/orders?status={status}").status_code == 200, status
+
 
 @pytest.mark.parametrize("variant", ["cancel", "refund"])
 def test_a_delivered_order_shopify_cancels_stays_delivered_with_one_task_forever(swept, variant):

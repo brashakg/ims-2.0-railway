@@ -433,6 +433,10 @@ class OrderStatus(str, Enum):
     CONFIRMED = "CONFIRMED"
     PROCESSING = "PROCESSING"
     READY = "READY"
+    # Every online order Shopify fulfilled, until the courier delivers it
+    # (owner ruling 2026-09-28). GET /orders validates ?status= against this
+    # enum, so the Orders screen's Shipped filter needs it.
+    SHIPPED = "SHIPPED"
     DELIVERED = "DELIVERED"
     CANCELLED = "CANCELLED"
 
