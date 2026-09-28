@@ -10,7 +10,8 @@ from typing import Any, Dict, List
 from agents.nexus_providers import _as_shopify_gid
 
 from ._shared import MODE_LIVE, MODE_SIMULATED, PushResult, _live_or_reason
-from .transport import _graphql, _user_errors
+from .transport import SentOnce, _graphql, _user_errors
+from .creates import clear_create, record_create, settle_lost_create
 from .queries import _MENU_CREATE, _MENU_UPDATE
 from .writeback import _writeback_simple
 
@@ -77,7 +78,39 @@ async def push_menu(db, menu: Dict[str, Any]) -> PushResult:
         query, field_name = _MENU_CREATE, "menuCreate"
         variables = {"title": title, "handle": handle, "items": items}
     try:
-        body = await _graphql(db, query, variables)
+        # NEVER A BLIND RE-CREATE (creates.py): a menuCreate whose answer was
+        # lost is looked for first (a menu handle is unique on the shop).
+        creating = not existing_gid
+        if creating:
+            verdict, found, why = await settle_lost_create(db, "menu", mid)
+            if verdict == "refuse":
+                return PushResult(
+                    mode=MODE_LIVE,
+                    entity="menu",
+                    action=action,
+                    target_id=mid,
+                    ok=False,
+                    payload=payload,
+                    error=why,
+                    reason="create_unsettled",
+                )
+            if verdict == "found":
+                creating = False
+                existing_gid = found
+                query, field_name = _MENU_UPDATE, "menuUpdate"
+                variables = {"id": found, "title": title, "handle": handle, "items": items}
+            else:
+                record_create(db, "menu", mid, title, handle)
+        try:
+            body = await _graphql(db, query, variables)
+        except SentOnce:
+            raise  # the intent stays: the next press looks for it first
+        except Exception:
+            if creating:
+                clear_create(db, "menu", mid)
+            raise
+        if creating:
+            clear_create(db, "menu", mid)
         err = _user_errors(body, field_name)
         if err:
             return PushResult(

@@ -26,8 +26,9 @@ from ._shared import (
     price_on_update_enabled,
     push_lock_reason,
 )
-from .transport import _graphql, _user_errors
+from .transport import SentOnce, _graphql, _user_errors
 from .queries import _PRODUCT_CREATE, _PRODUCT_UPDATE
+from .creates import clear_create, record_create, settle_lost_create
 from .product_input import (
     _has_publishable_price,
     _set_product_metafields,
@@ -246,7 +247,39 @@ async def push_product(
     lease = AsyncExitStack()
     try:
         renew = await lease.enter_async_context(media_lease(db, pid))
-        body = await _graphql(db, query, {"input": payload})
+        # NEVER A BLIND RE-CREATE (creates.py): productCreate is sent once, so
+        # a create whose answer was lost is looked for on Shopify first -- a
+        # product it made is linked and UPDATED, never created a second time.
+        creating = not existing_gid
+        if creating:
+            verdict, found, why = await settle_lost_create(db, "product", pid)
+            if verdict == "refuse":
+                return PushResult(
+                    mode=MODE_LIVE,
+                    entity="product",
+                    action=action,
+                    target_id=pid,
+                    ok=False,
+                    payload=payload,
+                    error=why,
+                    reason="create_unsettled",
+                )
+            if verdict == "found":
+                creating = False
+                existing_gid = payload["id"] = found
+                query, field_name = _PRODUCT_UPDATE, "productUpdate"
+            else:
+                record_create(db, "product", pid, payload.get("title"))
+        try:
+            body = await _graphql(db, query, {"input": payload})
+        except SentOnce:
+            raise  # the intent stays: the next press looks for it first
+        except Exception:
+            if creating:
+                clear_create(db, "product", pid)  # refused unapplied: nothing to find
+            raise
+        if creating:
+            clear_create(db, "product", pid)
         err = _user_errors(body, field_name)
         if err:
             return PushResult(
