@@ -597,8 +597,9 @@ def _settle(
     """PURE: settle the pending docs against the listing's FREE nodes (the
     nodes no live doc names) -> (claims, drops, held, drift, nameless).
       claim  exactly ONE READY free node carries the pending url's file name
-             (_same_file), no other pending doc hits that node, and the name
-             is IMS-unique -- at any age;
+             (_same_file), no other pending doc hits that node, the name is
+             IMS-unique, and no image-less node is still UPLOADED/PROCESSING
+             (it may be IMS's own copy, the READY one a human's) -- at any age;
       drop   ('never landed': the url may be attached again) zero hits, no
              image-less node still UPLOADED/PROCESSING on the listing, and
              older than _SETTLE_GRACE;
@@ -631,7 +632,7 @@ def _settle(
         young = not isinstance(sent, datetime) or now - _utc(sent) < _SETTLE_GRACE
         if drift:
             held.append(p)
-        elif len(ids) == 1 and load[ids[0]] == 1 and _ims_unique(p["url"]):
+        elif len(ids) == 1 and load[ids[0]] == 1 and _ims_unique(p["url"]) and not nameless:
             claims.append({**p, "id": ids[0]})
         elif not ids and not nameless and not young:
             drops.append(p)

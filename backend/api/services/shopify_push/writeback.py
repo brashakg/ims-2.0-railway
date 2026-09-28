@@ -110,8 +110,9 @@ def _writeback_product(
 
 def _requeue_unpublished(db, product_id: str) -> None:
     """Put a row BACK in the push queue after a press that reached Shopify but
-    did NOT make the product visible (publish withheld: unpriced, the photograph
-    did not attach, the Online Store publication could not be resolved).
+    did NOT do all it was pressed for (publish withheld: unpriced, the photograph
+    did not attach, the Online Store publication could not be resolved; live at
+    the old price; the photo pass did not settle).
 
     THIS IS NOT THE PING-PONG HAZARD. _writeback_product must never set the flag,
     because that write is the push's own book-keeping and would re-queue a press
@@ -119,7 +120,7 @@ def _requeue_unpublished(db, product_id: str) -> None:
     do what it was pressed for. Clearing the flag anyway would leave the product
     ON Shopify, INVISIBLE, and OUT of the queue -- `pending: 0` next to an empty
     brand page, which is the exact lie this whole change exists to end. It
-    re-queues ONLY on the not-published branch, so a successful publish still
+    re-queues ONLY a press that fell short, so a clean one still
     drains the queue (the control test), and the batch cap bounds how often a
     stubbornly-unpublishable row can be retried per press.
 

@@ -53,6 +53,10 @@ were run red against it before they counted):
   T18 test_a_held_replacement_... (x2) /      delete not gated on a held   -> the replaced
       test_the_dark_plan_keeps_the_photo...     photograph                    photo deleted
   T19 test_a_lost_attach_that_went_failed...  hands_off counts FAILED      -> locked hands-off
+  T20 test_a_photo_pass_that_did_not_settle.. re-queue only unpublished /  -> drained: the old
+      (502, read-timeout)                       unpriced                      photo up for good
+  T21 test_a_hand_copy_of_a_lost_attach_...   claim without `not nameless` -> hand upload
+                                                                              claimed, deleted
   old test_the_old_originalsource_identity... (documents the production shape)
   and the ported round 1-6 tests, each with the revert it names.
 
@@ -78,7 +82,7 @@ import pytest  # noqa: E402
 from pymongo.errors import DuplicateKeyError  # noqa: E402
 
 from database.connection import MockCollection  # noqa: E402
-from api.services import shopify_push  # noqa: E402
+from api.services import shopify_live_sync, shopify_push  # noqa: E402
 from api.services.shopify_push import media as _media  # noqa: E402
 from tests.strict_fakes import media_doc  # noqa: E402
 
@@ -203,6 +207,7 @@ class _Shopify:
         self._commit_then = None
         self.on_read = None
         self.before = {}
+        self.status_once = {}  # {op: HTTP status} answered once by _wire, nothing applied
 
     @staticmethod
     def _name(node):
@@ -373,6 +378,9 @@ def _wire(monkeypatch, media_nodes=None):
     fake = _Shopify(media_nodes)
 
     async def _post_once(url, headers, payload):
+        status = fake.status_once.pop(fake._op(payload["query"]), None)
+        if status:
+            return httpx.Response(status, text="bad gateway")
         return httpx.Response(200, json=await fake(None, payload["query"], payload["variables"]))
 
     monkeypatch.setattr(shopify_push, "_post_once", _post_once)
@@ -1928,6 +1936,91 @@ def test_a_lost_attach_that_went_failed_never_locks_a_bare_listing(gates, monkey
     assert again.ok is True and len(fake.calls_of("imsPublishablePublish")) == 1
     assert fake.listing() == [_m(100), _m(101)] and _ledger(db) == {(U1, _m(101), None)}
     assert again.photos["unmanaged"] == 1, "the FAILED copy stays unmanaged: not IMS's by any proof"
+
+
+# ===========================================================================
+# Round 3: a photo pass that did not settle keeps its product queued; the
+# settle never claims while an image-less node may still be IMS's own attach
+# ===========================================================================
+
+
+def _queued(db, pid="P1"):
+    return [d["id"] for d in shopify_live_sync.select_dirty_products(db)[0]] == [pid]
+
+
+@pytest.mark.parametrize("fault", ["502", "read-timeout"])
+def test_a_photo_pass_that_did_not_settle_keeps_the_product_queued(gates, monkeypatch, fault):
+    """T20, the product door through the REAL transport. A live, published
+    product: IMS owns photo A; the operator replaces it with U1. The press's
+    productCreateMedia is sent once and (a) answers 502 (nothing applied) or
+    (b) commits and the answer is lost (ReadTimeout). The product IS live, so
+    the press is ok -- but its photographs are not what IMS says, so the row
+    must stay in the queue (the 01:00/09:00 sync selects by that flag): a
+    press inside the grace holds U1 (MEDIA_SETTLING) and keeps it queued too;
+    the pass after the grace lands or claims U1, takes A down, and only then
+    drains the queue.
+    REVERT-PROOF: re-queue only an unpublished / unpriced press -> the flag is
+    cleared by the first press: (a) A stays up for good, U1 never attached;
+    (b) A and U1 both stay up."""
+    fake = _wire(monkeypatch, [_node(1, OWN)])
+    db = _DB()
+    _seed(db, _product([U1]), (OWN, 1))
+    if fault == "502":
+        fake.status_once["imsProductCreateMedia"] = 502
+    else:
+        fake.commit_then(httpx.ReadTimeout("read timed out"))
+
+    first = _run(shopify_push.push_product(db, _parent(db), []))
+
+    assert first.ok is True and "not retried" in (first.photos.get("error") or ""), first.photos
+    assert fake.listing() == ([_m(1)] if fault == "502" else [_m(1), _m(100)])
+    assert _queued(db), "the photo pass did not settle: the product stays queued"
+
+    held = _run(shopify_push.push_product(db, _parent(db), []))
+    assert held.photos["held"] == [U1] and held.photos["code"] == "MEDIA_SETTLING", held.photos
+    assert _queued(db), "a held attach keeps the product queued"
+
+    fake.ready()
+    _age(db, U1, 20)
+    done = _run(shopify_push.push_product(db, _parent(db), []))
+
+    assert done.ok is True and done.photos.get("code") is None and fake.listing() == [_m(100)], done.photos
+    assert _ledger(db) == {(U1, _m(100), None)} and _pending(db) == set()
+    assert not _queued(db), "settled: the queue drains"
+
+
+def test_a_hand_copy_of_a_lost_attach_is_never_claimed_while_ims_own_node_is_processing(gates, monkeypatch):
+    """T21. The press's attach of U1 commits and the answer is lost: IMS's
+    media 100 is UPLOADED, no image yet. The operator then uploads the same
+    file by hand (saved from IMS, so its CDN name is U1's): media 7, READY.
+    One READY hit is NOT proof while an image-less node may still be IMS's
+    own copy: the next press holds U1 (the drop branch's own rule), claims
+    nothing -- and once 100 turns READY there are two hits, still held. When
+    IMS then replaces U1, the hand upload is never tombstoned or deleted.
+    REVERT-PROOF: the claim branch without `not nameless` -> 7 claimed as U1
+    (adopted 1), then deleted by the replacement while IMS's own copy of the
+    replaced photograph (100) stays on the storefront, unmanaged."""
+    fake = _wire(monkeypatch, [_node(1, OWN)])
+    db = _DB()
+    _seed(db, _product([OWN, U1]), (OWN, 1))
+    fake.commit_then(httpx.ReadTimeout("read timed out"))
+    _run(shopify_push.push_product(db, _parent(db), []))
+    assert fake.listing() == [_m(1), _m(100)] and _pending(db) == {(U1, None)}
+    fake.media_nodes.append(_node(7, U1))
+    fake.files.add(_cdn_name(U1))
+
+    again = _run(shopify_push.push_product(db, _parent(db), []))
+
+    assert again.photos["adopted"] == 0 and again.photos["held"] == [U1], again.photos
+    assert again.photos["code"] == "MEDIA_SETTLING" and _pending(db) == {(U1, None)}
+
+    fake.ready()
+    db["catalog_products"].update_one({"id": "P1"}, {"$set": {"images": [OWN, U2]}})
+    late = _run(shopify_push.push_product(db, _parent(db), []))
+
+    assert _m(7) in fake.listing() and _m(100) in fake.listing(), late.photos
+    assert all(_m(7) not in c["variables"]["mediaIds"] for c in fake.calls_of("imsProductDeleteMedia"))
+    assert [t["media_gid"] for t in db[TOMB].find({})] == []
 
 
 def test_no_media_state_lives_on_the_twin():

@@ -84,8 +84,11 @@ class _ShopifyPriceFails(_Shopify):
 def _live_product(db):
     """Already on Shopify with its photograph there (IMS owns media 1 -- a
     LIVE doc in ``db``'s media ledger -- and it is on the product), edited
-    since -> a LIVE update that publishes and then pushes the price."""
-    db[shopify_push.MEDIA_COLLECTION].insert_one(media_doc("P1", U1, _m(1)))
+    since -> a LIVE update that publishes and then pushes the price.
+    how=adopted: the rig's CDN name ('1.jpg') is not the url's, which on a
+    MINTED doc is a naming drift -- held, and so re-queued (see _own in
+    test_shopify_media_title_sync)."""
+    db[shopify_push.MEDIA_COLLECTION].insert_one(media_doc("P1", U1, _m(1), how="adopted"))
     return _product([U1])
 
 

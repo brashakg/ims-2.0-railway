@@ -523,12 +523,20 @@ async def push_product(
         # them. No re-queue: the stock diff still sees this product as changed
         # (nothing reached its baseline), so the next pass retries it.
         stock_not_written = bool(stock_summary) and not stock_summary.get("ok")
+        # ...AND SO ARE THE PHOTOGRAPHS. The attach is sent ONCE (transport):
+        # a 502 or a lost answer, or a hold (MEDIA_SETTLING / _NAMING_DRIFT),
+        # leaves the listing short of what IMS says -- the old photo still up,
+        # or both -- and only a NEXT pass settles it. Nothing but this flag
+        # schedules one for the product lane.
+        media_unsettled = bool(photo_summary) and bool(
+            photo_summary.get("error") or photo_summary.get("code")
+        )
         # THE ONE RE-QUEUE RULE. The press reached Shopify but did not do all
-        # it was pressed for -- the product is not visible, or it is visible at
-        # the wrong price. Either way the row goes BACK in the queue so the next
-        # press / scheduled sync retries it. See _requeue_unpublished for why
-        # this is not the ping-pong hazard.
-        if pid and (not published_ok or price_not_synced):
+        # it was pressed for -- the product is not visible, it is visible at
+        # the wrong price, or its photographs have not settled. The row goes
+        # BACK in the queue so the next press / scheduled sync retries it. See
+        # _requeue_unpublished for why this is not the ping-pong hazard.
+        if pid and (not published_ok or price_not_synced or media_unsettled):
             _requeue_unpublished(db, pid)
         return PushResult(
             mode=MODE_LIVE,
