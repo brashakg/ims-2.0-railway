@@ -25,6 +25,8 @@ Pins, each with its revert named in the test:
     shop's listing, a swapped pair is a risk, one shop's filter reads its own
     location only; OVERSELL is past the shelf on both, 'recommended' /
     'sellable' / OVER_ALLOCATED are the writer's number (buffer, block).
+  * round 4: both screens order and report delta per location; an empty
+    store_id is all stores.
   * the sample goes through the writer's item resolver (the ecom fallback);
     the drift task names the press that re-sends (Send to website) and keeps
     every SKU still owed across a refresh; a tasks read failure files no
@@ -775,6 +777,38 @@ def test_reconcile_one_shop_is_never_blanked_by_another_shops_failed_read(monkey
     _fail_shelf(monkeypatch, "BV-A")
     row = _reconcile(monkeypatch, db, levels, "BV-A")["SKU-1"]
     assert _cols(row, "in_store", "online", "recommended", "delta", "status") == (2, 2, None, None, "ONHAND_UNKNOWN")
+
+
+def test_reconcile_and_tally_put_the_worst_swapped_pair_first(monkeypatch):
+    """Round 4 P1 + P2, the panel's input. SKU-1: BV-A 3 / BV-B 0 on the
+    shelf against Shopify LOC_A 0 / LOC_B 3 -- 3 units unbacked at LOC_B
+    (the totals match, 3 vs 3). SKU-2: BV-A 0 / BV-B 1 against 1 / 1 -- 1
+    unit unbacked. Both screens lead with SKU-1, and the reconciliation row
+    reports delta 3 (never 'listed total - recommended total' = 0 on an
+    OVERSELL_RISK row). Put back the pooled `online - rec` delta/sort ->
+    SKU-2 first, SKU-1 delta 0 -> fails; put back the tally's
+    -(listed - sellable) sort -> SKU-2 first -> fails."""
+    db = _db({"SKU-1": {"BV-A": 3, "BV-B": 0}, "SKU-2": {"BV-A": 0, "BV-B": 1}})
+    levels = {INV_1: {LOC_A: 0, LOC_B: 3}, INV_2: {LOC_A: 1, LOC_B: 1}}
+    page = _reconcile_page(monkeypatch, db, levels, None)
+    assert [_cols(r, "sku", "status", "delta") for r in page["items"]] == [
+        ("SKU-1", "OVERSELL_RISK", 3), ("SKU-2", "OVERSELL_RISK", 1)]
+    assert page["summary"]["oversell_risk_units"] == 4
+    tally = _tally(monkeypatch, db, levels)
+    assert [(r["sku"], r["oversell_risk"]) for r in tally["items"]] == [("SKU-1", True), ("SKU-2", True)]
+
+
+def test_reconcile_an_empty_store_id_is_all_stores(monkeypatch):
+    """Round 4 P4: `?store_id=` (an empty string). The route and the on-hand
+    reader read it as 'all stores'; rule_by_location narrowed the map to {}
+    (`is not None`), so every listing looked unclaimed. BV-A 2 / BV-B 1 /
+    Pune 5 against LOC_A 2 / LOC_B 1 must read 8 / 3 / 3 / OK both ways. Put
+    back `if store_id is not None:` -> recommended 0, OVERSELL_RISK -> fails."""
+    db = _db({"SKU-1": {"BV-A": 2, "BV-B": 1}}, pune_units=5)
+    levels = {INV_1: {LOC_A: 2, LOC_B: 1}, INV_2: {}}
+    for sid in (None, ""):
+        row = _reconcile(monkeypatch, db, levels, sid)["SKU-1"]
+        assert _cols(row, "in_store", "online", "recommended", "status") == (8, 3, 3, "OK"), sid
 
 
 def test_tick_samples_through_the_writers_item_resolver():

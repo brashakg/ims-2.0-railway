@@ -1957,7 +1957,7 @@ export const pushApi = {
 // fail-soft here: any error (403 non-superadmin / 404 stale deploy / network)
 // resolves to a safe "unavailable" shape so a tile renders empty rather than
 // crashing the page. NONE of these arm or bypass the push gates.
-//   - GET /admin/online-store/sync-health   last sync / reconcile / webhooks / drift
+//   - GET /admin/online-store/sync-health   last sync / webhooks / drift
 //   - GET /admin/online-store/parity        IMS catalog counts vs what has a gid
 //   - GET /admin/online-store/drift         live dual-writer drift check (needs creds)
 // Import DIRECTLY from this module (NOT the api barrel — TS2614, per past sessions).
@@ -1996,7 +1996,6 @@ export interface SyncHealth {
     last_pushed_at?: string | null;
     pushed_products?: number;
   } | null;
-  reconcile?: { checked?: boolean; oversell_risk?: number; count?: number } | null;
   webhooks?: { checked?: boolean; failed?: number; skipped?: number } | null;
   drift?: { checked?: boolean; reason?: string | null } | null;
   stock_miss?: { checked?: boolean; unresolved?: number } | null;

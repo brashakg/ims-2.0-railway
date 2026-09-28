@@ -17,6 +17,8 @@ export interface ReconcileItem {
   /** What IMS sends to the website for the mapped shops in view (the writer's
    *  own rule: its buffer, the online block); null = unknown. */
   recommended: number | null;
+  /** Units listed beyond what IMS sends, counted Shopify location by location
+   *  (never listed total minus recommended total); null = unknown. */
   delta: number | null;
   status: 'OVERSELL_RISK' | 'OVER_ALLOCATED' | 'ONHAND_UNKNOWN' | 'LISTED_UNKNOWN' | 'OK' | 'NOT_ONLINE';
 }

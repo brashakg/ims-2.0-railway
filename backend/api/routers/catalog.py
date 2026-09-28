@@ -139,7 +139,9 @@ async def online_stock_reconcile(
         (its safety buffer, the SUPERADMIN online block);
       * ``recommended`` -- what the writer sends, summed over the mapped shops
         in view. The buffer is the writer's own (the Shopify integration's
-        safety_buffer); this page has no second one.
+        safety_buffer); this page has no second one;
+      * ``delta`` -- units listed beyond what the writer sends, counted
+        location by location (never listed-total minus recommended-total).
     Honesty contract (audit fix-round P1): an online SKU the live read did NOT
     cover carries online=null and classifies LISTED_UNKNOWN; a rule IMS could
     not read classifies ONHAND_UNKNOWN -- never a confident 0/OK.

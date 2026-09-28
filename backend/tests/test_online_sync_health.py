@@ -141,13 +141,13 @@ def test_sync_health_none_db_is_failsoft():
         "online_configured",
         "last_shopify_sync",
         "last_successful_shopify_sync_at",
-        "reconcile",
         "webhooks",
     }
+    # The pooled `reconcile` block is gone (multi-location PR 4): it compared
+    # nothing and was a second, pooled copy of the per-location oversell rule.
+    assert "reconcile" not in out
     assert out["last_shopify_sync"] == {"found": False}
     assert out["last_successful_shopify_sync_at"] is None
-    assert out["reconcile"]["pending"] == 0
-    assert out["reconcile"]["oversell_risk"] == 0
     assert out["webhooks"] == {"failed": 0, "skipped": 0, "pending": 0}
     # online_configured = IMS Mongo carries Shopify-mapped objects; no DB -> False.
     assert out["online_configured"] is False
@@ -218,15 +218,6 @@ def test_failed_webhook_summary_counts_each_bucket():
     assert out["failed"] == 1     # one handler_error row
     assert out["skipped"] == 1    # one skipped_reason row
     assert out["pending"] == 2    # two processed != True
-
-
-def test_pending_reconcile_failsoft_with_no_products():
-    """Empty/absent products collection -> zeros, never raises."""
-    db = _FakeDb({"products": _FakeColl([])})
-    out = sh.pending_reconcile_summary(db)
-    assert out["pending"] == 0
-    assert out["scanned"] == 0
-    assert "online_configured" in out
 
 
 # ---------------------------------------------------------------------------
@@ -548,10 +539,9 @@ def test_endpoint_superadmin_ok_shape(client):
         "online_configured",
         "last_shopify_sync",
         "last_successful_shopify_sync_at",
-        "reconcile",
         "webhooks",
     }
-    assert "pending" in body["reconcile"]
+    assert "reconcile" not in body
     assert "failed" in body["webhooks"]
 
 
@@ -770,7 +760,7 @@ def _unknown_shelf_db(**product_extra):
     )
 
 
-def test_R9_an_unknown_on_hand_is_never_a_confident_0_on_the_tile_or_the_tally(monkeypatch):
+def test_R9_an_unknown_on_hand_is_never_a_confident_0_on_the_tally(monkeypatch):
     """Display fallback, unknown printed as 0 (recheck round 1).
     `_on_hand_by_product` returned {} when the shop list could not be read
     (its docstring: 'the tile shows no number') -- and BOTH consumers
@@ -779,16 +769,13 @@ def test_R9_an_unknown_on_hand_is_never_a_confident_0_on_the_tile_or_the_tally(m
     that said the on-hand numbers were live. The writer's own forbidden line
     ('never 0 for unknown'), one reader over.
 
-    UNKNOWN is None: the tile counts it as onhand_unknown (never oversell),
-    the tally says on_hand_unknown and tallies nothing. Return {} from the
-    unknown branch again -> in_store 0 against a listed 3 -> OVERSELL_RISK ->
-    this fails."""
+    UNKNOWN is None: the tally says on_hand_unknown and tallies nothing (the
+    pooled sync-health tile that also read it is deleted). Return {} from the
+    unknown branch again -> on hand 0 against a listed 3 -> a tallied risk
+    row -> this fails."""
     _patch_online(monkeypatch, {"SKU-REAL": {"online": True, "online_stock": 3}})
     db = _unknown_shelf_db()
     assert sh._on_hand_by_product(db, ["P8"]) is None
-    tile = sh.pending_reconcile_summary(db)
-    assert tile["scanned"] == 1 and tile["onhand_unknown"] == 1, tile
-    assert tile["oversell_risk"] == 0 and tile["pending"] == 0 and tile["oversell_risk_units"] == 0, tile
     tally = sh.stock_tally_summary(db, live=_live({"SKU-REAL": 3}))
     assert tally["items"] == [] and tally["summary"]["on_hand_unknown"] is True, tally
     assert tally["summary"]["at_risk_count"] == 0 and tally["summary"]["total_on_hand"] == 0
