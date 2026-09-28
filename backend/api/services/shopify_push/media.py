@@ -429,7 +429,10 @@ async def _attach_one(
 # and left exactly where it is. When IMS owns nothing on a product that
 # already carries media, the pass keeps its hands off entirely (no attach
 # either): that stops a re-press from minting a duplicate of every
-# photograph on a listing that went live before the ledger existed.
+# photograph on a listing that went live before the ledger existed. A FAILED
+# media is no photograph and does not count: IMS's own lost attach that went
+# FAILED has no CDN file to be named by, so it stays unmanaged, and counting
+# it would lock the listing for good.
 #
 # TWO LANES. A doc is either the product's own photograph (no ``image_id``)
 # or a design-queue media (the queue row's ``image_id``, stamped when the
@@ -793,8 +796,11 @@ def plan_product_media(
     ]
     claimed = {c["id"] for c in claims}
     unmanaged = [str(n["id"]) for n in free if str(n["id"]) not in claimed]
-    hands_off = not live and bool(unmanaged)
     failed = {i for i, n in nodes.items() if _is_failed(n)}
+    # Hands off guards the photographs a human put up; a FAILED media is none
+    # (IMS's own lost attach that went FAILED can never be named, so it would
+    # otherwise lock the listing for good).
+    hands_off = not live and any(i not in failed for i in unmanaged)
     # A FAILED media of this lane is not a photograph: its url is attached
     # again (before the FAILED one is deleted, below).
     by_url = {r["url"]: r["id"] for r in live if not (r["id"] in failed and _governed(r))}

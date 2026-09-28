@@ -52,6 +52,7 @@ were run red against it before they counted):
   T17 test_no_media_state_lives_on_the_twin   put a media_map constant back-> red
   T18 test_a_held_replacement_... (x2) /      delete not gated on a held   -> the replaced
       test_the_dark_plan_keeps_the_photo...     photograph                    photo deleted
+  T19 test_a_lost_attach_that_went_failed...  hands_off counts FAILED      -> locked hands-off
   old test_the_old_originalsource_identity... (documents the production shape)
   and the ported round 1-6 tests, each with the revert it names.
 
@@ -1898,6 +1899,35 @@ def test_the_dark_plan_keeps_the_photo_a_pending_replacement_replaces():
     assert plan["delete"] == [] and plan["held"] == [U1] and plan["attach"] == []
     plan = shopify_push.plan_product_media([a, media_doc("P1", U1, _m(2))], [U1], [U1])
     assert [d["url"] for d in plan["delete"]] == [OWN]
+
+
+def test_a_lost_attach_that_went_failed_never_locks_a_bare_listing(gates, monkeypatch):
+    """T19, through the REAL transport. A bare listing, twin [U1]: the product
+    press's productCreateMedia commits and the answer is lost (ReadTimeout,
+    sent once); Shopify later marks that media FAILED. A FAILED media has no
+    CDN file, so the pending doc can never be claimed by name: after the
+    grace it is dropped. The FAILED media is left unmanaged -- but it is not a
+    photograph, so it must not put the listing hands-off: the url is
+    attached again, and the listing is published on it.
+    REVERT-PROOF: hands_off counting FAILED unmanaged media -> hands_off,
+    nothing attached, on_shopify 0, the publish withheld on every press."""
+    fake = _wire(monkeypatch, [])
+    db = _DB()
+    _seed(db, _product([U1]))
+    fake.commit_then(httpx.ReadTimeout("read timed out"))
+
+    first = _run(shopify_push.push_product(db, _parent(db), []))
+    assert first.ok is False and fake.listing() == [_m(100)] and _pending(db) == {(U1, None)}
+    fake.fail(_m(100))
+    _age(db, U1, 60)
+
+    again = _run(shopify_push.push_product(db, _parent(db), []))
+
+    assert again.photos["hands_off"] is False and again.photos["dropped"] == 1, again.photos
+    assert again.photos["attached"] == 1 and again.photos["on_shopify"] == 1
+    assert again.ok is True and len(fake.calls_of("imsPublishablePublish")) == 1
+    assert fake.listing() == [_m(100), _m(101)] and _ledger(db) == {(U1, _m(101), None)}
+    assert again.photos["unmanaged"] == 1, "the FAILED copy stays unmanaged: not IMS's by any proof"
 
 
 def test_no_media_state_lives_on_the_twin():
