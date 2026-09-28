@@ -400,7 +400,12 @@ def test_inventory_transfer_send_receive_stubs_removed():
 
     assert not hasattr(inventory, "send_transfer")
     assert not hasattr(inventory, "receive_transfer")
+    # A6 2026-09-27: the list/create stubs (fake TRF- number, wrote nothing)
+    # followed them out.
+    assert not hasattr(inventory, "list_transfers")
+    assert not hasattr(inventory, "create_transfer")
     stub_paths = {
+        "/transfers",
         "/transfers/{transfer_id}/send",
         "/transfers/{transfer_id}/receive",
     }

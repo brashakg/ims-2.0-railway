@@ -533,15 +533,11 @@ are the exact current gate (SUPERADMIN always implied).
 | `GET` | `/api/v1/hr/attendance/late-marks` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
 | `POST` | `/api/v1/hr/attendance/mark` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `POST` | `/api/v1/hr/attendance/{attendance_id}/check-out` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/hr/employee/{employee_id}/salary-slip` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `GET` | `/api/v1/hr/leaves` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `POST` | `/api/v1/hr/leaves` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `GET` | `/api/v1/hr/leaves/balance/{employee_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `POST` | `/api/v1/hr/leaves/{leave_id}/approve` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `POST` | `/api/v1/hr/leaves/{leave_id}/reject` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/hr/payroll` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `POST` | `/api/v1/hr/payroll/generate` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `POST` | `/api/v1/hr/payroll/{payroll_id}/approve` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `GET` | `/api/v1/hr/reports/lwp` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
 | `GET` | `/api/v1/hr/shifts` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
 | `POST` | `/api/v1/hr/shifts` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
@@ -607,8 +603,6 @@ are the exact current gate (SUPERADMIN always implied).
 | `POST` | `/api/v1/inventory/stock/add` | ADMIN, AREA_MANAGER, STORE_MANAGER, CATALOG_MANAGER, WORKSHOP_STAFF |  |
 | `GET` | `/api/v1/inventory/stock/barcode/{barcode}` | AUTH |  |
 | `GET` | `/api/v1/inventory/transfer-recommendations` | ADMIN, AREA_MANAGER, STORE_MANAGER, CATALOG_MANAGER, WORKSHOP_STAFF |  |
-| `GET` | `/api/v1/inventory/transfers` | AUTH |  |
-| `POST` | `/api/v1/inventory/transfers` | ADMIN, AREA_MANAGER, STORE_MANAGER, CATALOG_MANAGER, WORKSHOP_STAFF |  |
 
 ### `/api/v1/jarvis`
 
@@ -822,7 +816,6 @@ are the exact current gate (SUPERADMIN always implied).
 | `POST` | `/api/v1/prescriptions/` | SUPERADMIN, ADMIN, STORE_MANAGER, OPTOMETRIST |  |
 | `GET` | `/api/v1/prescriptions/customer/{customer_id}/progression` | AUTH |  |
 | `GET` | `/api/v1/prescriptions/expiring` | AUTH |  |
-| `GET` | `/api/v1/prescriptions/optometrist/{optometrist_id}/stats` | AUTH |  |
 | `GET` | `/api/v1/prescriptions/patient/{patient_id}` | AUTH |  |
 | `GET` | `/api/v1/prescriptions/patient/{patient_id}/latest` | AUTH |  |
 | `GET` | `/api/v1/prescriptions/patient/{patient_id}/valid` | AUTH |  |
