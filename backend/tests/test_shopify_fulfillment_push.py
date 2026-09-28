@@ -13,6 +13,9 @@ Coverage:
   - LIVE userErrors            -> ok=False, no write-back.
   - already-fulfilled (no open FulfillmentOrder) -> SKIP + stamp existing gid.
   - idempotent re-call         -> stamped id short-circuits, NO network.
+  - send-once create, its next pass (REAL transport): a lost answer re-reads
+    the order before re-sending -- an applied create is stamped, never sent
+    twice; an unapplied one is sent again; bounded.
   - non-online order           -> clean skip (source!=shopify / no id).
   - dispatch hook (shipping._maybe_push_online_fulfillment) fires EXACTLY once,
     never fires for a non-online / FAILED booking, and swallows any push error
@@ -377,3 +380,122 @@ def test_hook_swallows_push_error_never_blocks(monkeypatch):
     _run(shipping._maybe_push_online_fulfillment(
         None, _online_order(), _ShipResult(), {"user_id": "u1"}
     ))
+
+
+# ===========================================================================
+# SEND-ONCE and its next pass: through the REAL transport (_graphql over
+# _post_once). imsFulfillmentCreate is sent once (a lost answer may have been
+# applied), so push_fulfillment READS the order again before it re-sends:
+# a create that landed has closed its FulfillmentOrder, one that did not is
+# still open. Never a blind re-send.
+# REVERT-PROOF: (a) no next pass -> the 503 case ends ok=False, the order
+# Unfulfilled on Shopify (the booking hook runs once). (b) a blind re-send
+# (imsFulfillmentCreate on _REPLAY_SAFE, or a re-create without the re-read)
+# -> the lost-answer case sends a second create onto the CLOSED
+# FulfillmentOrder: a userError, ok=False, the applied fulfilment unstamped.
+# ===========================================================================
+
+
+class _OrderShopify:
+    """A PRODUCTION-SHAPED order on Shopify: one FulfillmentOrder. A create
+    naming an OPEN one closes it and adds a Fulfillment; on one that is not
+    open it answers a userError and creates nothing (the FulfillmentOrder
+    model). ``refuse``: HTTP statuses answered to the next creates BEFORE
+    anything applies (an edge refusal). ``lose``: exceptions raised AFTER
+    the next creates applied (the answer is lost)."""
+
+    def __init__(self):
+        self.posts = []
+        self.fo_status = "OPEN"
+        self.fulfillments = []
+        self.refuse = []
+        self.lose = []
+
+    async def post_once(self, url, headers, payload):
+        import httpx
+
+        query, variables = payload["query"], payload["variables"]
+        if "imsFulfillmentCreate" not in query:
+            self.posts.append("read")
+            return httpx.Response(200, json={"data": {"order": {
+                "id": variables["id"],
+                "fulfillments": [{"id": f, "status": "SUCCESS"} for f in self.fulfillments],
+                "fulfillmentOrders": {"edges": [
+                    {"node": {"id": "gid://shopify/FulfillmentOrder/1", "status": self.fo_status}}
+                ]},
+            }}})
+        self.posts.append("create")
+        if self.refuse:
+            return httpx.Response(self.refuse.pop(0), text="service unavailable")
+        if self.fo_status != "OPEN":
+            return httpx.Response(200, json={"data": {"fulfillmentCreateV2": {
+                "fulfillment": None,
+                "userErrors": [{"field": ["fulfillment"], "message": "Fulfillment order has an unfulfillable status= closed."}],
+            }}})
+        self.fo_status = "CLOSED"
+        fid = "gid://shopify/Fulfillment/%d" % (900 + len(self.fulfillments))
+        self.fulfillments.append(fid)
+        if self.lose:
+            raise self.lose.pop(0)
+        return httpx.Response(200, json={"data": {"fulfillmentCreateV2": {
+            "fulfillment": {"id": fid, "status": "SUCCESS", "trackingInfo": []},
+            "userErrors": [],
+        }}})
+
+
+def _through_transport(monkeypatch):
+    shop = _OrderShopify()
+    monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: True)
+    monkeypatch.setattr(shopify_push, "shopify_dispatch_mode", lambda: "live")
+    monkeypatch.setattr(
+        shopify_push, "resolve_shopify_credentials",
+        lambda db, storefront_id="BV": {"shop_url": "t.myshopify.com", "access_token": "shpat_t", "source": "vault"},
+    )
+    monkeypatch.setattr(shopify_push, "_post_once", shop.post_once)
+
+    async def _no_sleep(_s):
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    db = _FakeDB()
+    db.get_collection("orders").insert_one(_online_order())
+    return shop, db
+
+
+def _stamp(db):
+    return db.get_collection("orders").find_one({"shopify_order_id": "123"}).get("shopify_fulfillment_id")
+
+
+def test_an_edge_refusal_of_the_create_is_sent_again_after_a_fresh_read(monkeypatch):
+    shop, db = _through_transport(monkeypatch)
+    shop.refuse = [503]
+
+    res = _run(sfp.push_fulfillment(db, _online_order(), tracking={"number": "AWB1"}))
+
+    assert res.ok is True and res.shopify_id == "gid://shopify/Fulfillment/900", res.error
+    assert shop.posts == ["read", "create", "read", "create"]
+    assert shop.fulfillments == ["gid://shopify/Fulfillment/900"] and _stamp(db) == res.shopify_id
+
+
+def test_a_lost_answer_of_an_applied_create_is_never_sent_again(monkeypatch):
+    import httpx
+
+    shop, db = _through_transport(monkeypatch)
+    shop.lose = [httpx.ReadTimeout("read timed out")]
+
+    res = _run(sfp.push_fulfillment(db, _online_order(), tracking={"number": "AWB1"}))
+
+    assert res.ok is True and res.reason == "already_fulfilled_on_shopify", res.error
+    assert shop.posts == ["read", "create", "read"], "the re-read found it applied: no second create"
+    assert shop.fulfillments == ["gid://shopify/Fulfillment/900"] and _stamp(db) == "gid://shopify/Fulfillment/900"
+
+
+def test_a_shopify_that_keeps_refusing_is_given_up_on_after_a_bounded_number_of_passes(monkeypatch):
+    shop, db = _through_transport(monkeypatch)
+    shop.refuse = [503] * 20
+
+    res = _run(sfp.push_fulfillment(db, _online_order(), tracking={"number": "AWB1"}))
+
+    assert res.ok is False and "not retried" in (res.error or "")
+    assert shop.posts == ["read", "create"] * shopify_push._MAX_RETRIES
+    assert shop.fulfillments == [] and _stamp(db) is None

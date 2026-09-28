@@ -162,6 +162,7 @@ from ._shared import (  # noqa: F401
     _PRICE_NOT_SYNCED_MSG,
 )
 from .transport import (  # noqa: F401
+    SentOnce,
     _MAX_RETRIES,
     _RETRY_BASE_DELAY,
     _RETRY_MAX_DELAY,

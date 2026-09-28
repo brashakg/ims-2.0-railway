@@ -48,7 +48,10 @@ _RETRY_MAX_DELAY = 30.0  # cap, also applied to a vendor Retry-After
 # unapplied) are retried for every operation, as before.
 # Send-once today: imsProductCreate, imsProductCreateMedia,
 # imsVariantsBulkCreate, imsCollectionCreate, imsMenuCreate,
-# imsFulfillmentCreate, imsWebhookSubscriptionCreate.
+# imsFulfillmentCreate, imsWebhookSubscriptionCreate. A lost answer raises
+# SentOnce; whoever sent it owns the NEXT pass, which reads Shopify first
+# (the photo pass settles by name on the product's next press; the
+# fulfilment re-reads its FulfillmentOrders before it creates again).
 _OP = re.compile(r"\s*mutation\s+(\w+)")
 _REPLAY_SAFE = frozenset(
     {
@@ -69,6 +72,12 @@ _REPLAY_SAFE = frozenset(
         "imsWebhookSubscriptionDelete",
     }
 )
+
+
+class SentOnce(ValueError):
+    """A send-once mutation left and its answer was lost (a read timeout or a
+    5xx): Shopify may have applied it. The caller's next pass must READ what
+    Shopify holds before it sends again -- never re-send blind."""
 
 
 def _replay_safe(query: str) -> bool:
@@ -183,7 +192,7 @@ async def _graphql(db, query: str, variables: Dict[str, Any]) -> Dict[str, Any]:
             resp = await _post_once(url, headers, payload)
         except httpx.TimeoutException as e:
             if not safe and not isinstance(e, (httpx.ConnectTimeout, httpx.PoolTimeout)):
-                raise ValueError(sent_once % ("timed out after sending (%s)" % e))
+                raise SentOnce(sent_once % ("timed out after sending (%s)" % e))
             last_error = f"timeout: {e}"
             if attempt >= _MAX_RETRIES:
                 raise ValueError(
@@ -219,7 +228,7 @@ async def _graphql(db, query: str, variables: Dict[str, Any]) -> Dict[str, Any]:
             return body
 
         if status >= 500 and not safe:
-            raise ValueError(sent_once % ("answered status %d (%s)" % (status, resp.text[:200])))
+            raise SentOnce(sent_once % ("answered status %d (%s)" % (status, resp.text[:200])))
         if status == 429 or status >= 500:
             last_error = f"status {status}: {resp.text[:200]}"
             if attempt >= _MAX_RETRIES:

@@ -46,6 +46,7 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
+import asyncio
 import logging
 
 # Reuse the code-verified Shopify writer primitives -- NEVER a second gate/boundary.
@@ -271,6 +272,7 @@ async def push_fulfillment(
     *,
     tracking: Optional[Dict[str, Any]] = None,
     notify_customer: bool = True,
+    _pass: int = 1,
 ) -> FulfillmentPushResult:
     """Push an ONLINE order's fulfilment + tracking to Shopify. Never raises.
 
@@ -287,6 +289,12 @@ async def push_fulfillment(
       4. LIVE: resolve the order's OPEN FulfillmentOrder(s); if none remain the
          order is already fulfilled -> skip (echo/stamp the existing gid); else
          fulfillmentCreateV2 with trackingInfo, write the new gid back.
+      5. THE NEXT PASS. The create is sent ONCE (a lost answer may have been
+         applied -- shopify_push.SentOnce), and the booking hook runs once, so
+         a lost answer starts step 4 again here: the order is READ first, and
+         a create that landed has closed its FulfillmentOrder (4b stamps it),
+         one that did not is still open (4c sends it again). Never a blind
+         re-send; at most _MAX_RETRIES passes, backing off like the transport.
     """
     order = order or {}
     shopify_order_id = _norm(order.get("shopify_order_id"))
@@ -414,6 +422,12 @@ async def push_fulfillment(
     try:
         body = await shopify_push._graphql(db, _FULFILLMENT_CREATE, mutation_vars)
     except Exception as exc:  # noqa: BLE001 -- fail-soft, never propagate
+        if isinstance(exc, shopify_push.SentOnce) and _pass < shopify_push._MAX_RETRIES:
+            # 5. THE NEXT PASS: read the order again, then create only if open.
+            await asyncio.sleep(shopify_push._retry_delay(_pass, None))
+            return await push_fulfillment(
+                db, order, tracking=tracking, notify_customer=notify_customer, _pass=_pass + 1
+            )
         return FulfillmentPushResult(
             mode=MODE_LIVE,
             action="create",
