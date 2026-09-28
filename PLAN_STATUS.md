@@ -1,5 +1,7 @@
 # IMS 2.0 — live plan status
 
+Updated **2026-09-27**. **#1141 MERGED** — the per-store website stock writer (multi-location PR 2 of 6): each shop's own quantity goes to its own Shopify location through one rule and one writer, after 13+ rounds of adversarial review and a clean final recheck (section 4p). **#1148 MERGED** — the backend's Railway sleep setting is now OFF (owner ruling 2026-09-27; the app never actually slept) and the keepalive service it needed is removed. Wave 6 of the modularization work is in build; nothing of it is merged yet (section 4q).
+
 Updated **2026-09-07**. **THE CATALOGUE WAS RESET TO EMPTY ON 2026-09-07 (section 4o).** On the owner's ruling every product was deleted: 43 listings removed outright from Shopify and every product, twin, variant, stock unit and product-image record removed from IMS. bettervision.in serves no products; IMS holds none. Orders (934), customers, stores, entities, users and the audit trail are untouched, and the historical GST invoices are intact because every order line carries its own snapshot of name, SKU, price and tax. The owner re-adds the catalogue fresh through IMS, which makes IMS the only source from the first product on. Every product count, product name and "live on the site" statement written below is history, not current state. All the sync code shipped on 2026-09-06 stands and applies to whatever is added next.
 
 Updated **2026-09-06**. Thirteen more squash-merged on 2026-09-06 (section 4l), and with them **all five waves of the 2026-08-30 page-split plan are on main**: **#1110** sales roles book eye tests (closes the last section-5 decision), **#1111** + **#1112** the Wave 1/2 loose ends (last `?tab=` links gone; recalls at `/customers/recalls`), **#1113-#1115** the Wave 3 file diets (QuickAdd, Jarvis, Workshop pages), **#1116-#1122** the Wave 5 backend packages (finance, vendors, reports, inventory, orders, rbac_policy, shopify_push — every one a pure move, byte-identical API, 1,313 routes throughout). On prod (read-only, 2026-09-06): the 6 live products are untracked on Shopify and on sale at quantity 0, 0 Shopify orders since the 27 Aug cut-over, all 11 webhooks point at IMS — the sync-path audit's five gaps are the next queue, website stock first (section 4b). Then three more on 2026-09-06: **#1124** the scheduled live sync + manual button + Superadmin settings, **#1125** website stock made real, **#1126** delist on retire (section 4m). The first "Push stock" press is **NOT done** — it is blocked on two owner decisions (section 5): Shopify has two locations fulfilling online orders, and IMS's ledger holds 1 unit against 49 on Shopify, so a press today would mark the whole website sold out. Then **#1128** photos and the title follow IMS onto live products, **#1129** tags ownership, **#1130** missed-order catch-up — so **all five sync-audit gaps the owner ordered are on main** (section 4m). Then **#1132**: a failed price push keeps the product queued and says so (audit item 7). Then the evening's owner rulings turned into work (section 4n): **#1134** + **#1137** adopt the photos of products already live into the media map (35 of 42 now follow IMS), **#1135** + **#1136** a Shopify location per shop (PR 1 of the multi-location plan; 3 of 4 stores mapped, Pune deliberately last). On prod the same evening: 38 opening-stock units entered at Pune through the app door, and two Shopify locations created for the Dhanbad shops. In flight: the variant-of rule for the 11 Large-size smartglass units (no PR yet). The multi-location stock writer (PR 2 of 6) is designed, not built. The 09-05/06 wave (#1094, #1102-#1108, sections 4j-4k) is all on main. Section 5: nothing owed. This file is the single place to see what is done, what
@@ -313,6 +315,28 @@ A hard delete was necessary rather than a soft one: the product-creation door bl
 
 Also ruled 2026-09-07: the accountant **confirmed the GST rates as applied** (5% on frames, optical lenses and contact lenses; 18% on sunglasses, watches and accessories), closing a long-open question; the accountant **confirmed invoicing from the shipping shop's own GSTIN**, which unblocks the last multi-location piece; and the take-down button is **not** to be tested on a live listing.
 
+## 4p. Merged 2026-09-17 .. 2026-09-27 (all squash-merged to main)
+
+| PR | What it does |
+|---|---|
+| **#1141** | Multi-location PR 2 of 6: per-store website stock. Each shop's own quantity is written to its own Shopify location by ONE writer from ONE quantity rule; an unmapped shop or an unreadable stock count fails loud instead of writing a guess; a sale, a receipt, a transfer or a delist all feed the same writer. 13+ adversarial review rounds; the final three-reviewer recheck (oversell, one-rule, first push) was clean. No effect on the website yet: none of the 121 products is published. Pune stays unmapped on purpose until its opening stock is entered with the live sync off. |
+| **#1145 / #1146** | A keepalive cron service to wake the sleeping backend before each scheduled job. #1146's repo-root `railway.json` broke the backend deploy (Railway applies a root config to every service). |
+| **#1147** | Moved that config into `ops/keepalive/`; backend deploys healthy again. |
+| **#1148** | Removed the keepalive service: measured on 2026-09-27, the backend never slept (it always holds database connections, which Railway counts as activity), and the owner turned sleep off. |
+
+## 4q. Wave 6 of the modularization work — IN BUILD, nothing merged
+
+What the five page-split waves left, measured 2026-09-27 (owner page "Wave Six"). Owner rulings the same day: the finance dashboard's cash-flow and budgets become links to the existing standalone pages (one door); the customers list KEEPS its in-place panel; the Payroll module's Run is the one payroll door and the older HR generator is deleted; the classic goods-receipt screen retires once Receive Goods covers a delivery challan without an invoice.
+
+| Item | Status |
+|---|---|
+| A3 purchase-invoices screen split into files · A4 add-product rules moved to one package | **WIP** |
+| A6 delete dead endpoints (HR payroll generator, fake-success transfer stubs, duplicate routes) | **WIP** |
+| A1 expenses page → nine addressed sections · A2 finance dashboard → addressed sections · A10 QC queue gets its own address | **WIP** (queued) |
+| A9 products router + product service become packages | **WIP** (queued) |
+| A8 GST/money rule convergence · A11 retire the classic goods-receipt screen | **TODO** — waits for the procurement audit report |
+| A7 one timestamp rule for the backend | **BLOCKED** — owner picks IST wall-clock or UTC |
+
 ## 5. Waiting on the owner
 
 | Question | Why it matters |
@@ -323,7 +347,7 @@ Also ruled 2026-09-07: the accountant **confirmed the GST rates as applied** (5%
 | **Split `orders.py` in Wave 5** — the POS/money door; POS work is ask-first | **DECIDED 2026-09-06: approved.** **MERGED #1120** — pure move, byte-identical API (section 4l) |
 | **Website stock: which location, and whose numbers?** — (a) Shopify lists two locations that fulfil online orders; the sync refuses to guess. Pin Gangadham Pune (where all 49 units sit and the only one that ships) or un-tick Sector 4 in Shopify admin > Settings > Locations. (b) IMS holds 1 unit for the 41 mapped products; Shopify holds 49 (typed in by the connector). Pressing "Push stock" now would mark the website sold out. Options: enter the 49 units into IMS as opening stock at Pune, then press; press now and accept sold-out until stock is entered; or leave website stock un-synced for now | **OPEN 2026-09-06.** Until answered the location stays unpinned, so neither the button nor the 01:00/09:00 sync writes any quantity |
 | **Re-add the catalogue through IMS** — the store has no products until he does; first publish of each stays a human press | **OPEN 2026-09-07** — his own work, on the Add-a-Product screen |
-| **The multi-location stock writer (PR 2 of 6)** — the money PR: per-store quantities to each shop's own Shopify location, one writer, every on-hand door feeding it; adversarial review before it leaves draft | **DESIGNED 2026-09-06**, not built; build order 2 -> 3 -> 4, then 5 (claim at Shopify's assigned shop + invoice from the shipping shop's GSTIN, the owner's ruling) |
+| **The multi-location stock writer (PR 2 of 6)** — the money PR: per-store quantities to each shop's own Shopify location, one writer, every on-hand door feeding it; adversarial review before it leaves draft | **MERGED #1141 (2026-09-27)** — see section 4p. PRs 3 -> 4, then 5 (claim at Shopify's assigned shop + invoice from the shipping shop's GSTIN, the owner's ruling) are not built |
 | **One real test order on bettervision.in before live selling** — the whole web-order path (webhook → mapper → IMS order with a GST invoice → unit claim) has never run live, and #1130's catch-up should then count it once as already-in-IMS | **OPEN 2026-09-06** — an owner action, not code |
 | **`app.uniparallel.com` move** | Passkeys bind to the web address; the device gate must not be enrolled before a domain change |
 | **Commission Leaderboard** shows per-staff revenue and commission in rupees to 5 roles | **RULED 09-03**: ADMIN/SUPERADMIN see all; everyone else, managers included, sees own figures + rank. **MERGED #1104** — one trim (`points.self_only_rows`) on `/payroll/commission/leaderboard`, `/payroll/commission/summary`, `/analytics-v2/staff-leaderboard` (which had NO gate) and the `/incentive/points` boards; SALES_STAFF/CASHIER can now open `/incentive/leaderboard` for their own standing, still not `/hr/leaderboard` (finance-only mount) |
@@ -334,6 +358,14 @@ Also ruled 2026-09-07: the accountant **confirmed the GST rates as applied** (5%
 ---
 
 ## 6. Decided — recorded so they are not re-litigated
+
+| Decision (2026-09-27) | Ruling |
+|---|---|
+| Railway "sleep when inactive" on the backend | **OFF.** The app never slept (it holds database connections); the keepalive service is cancelled. Supersedes the 2026-09-17 "leave it on" ruling |
+| Wave 6: finance dashboard cash-flow and budgets | **One door**: links to the standalone Cash Flow and Budgeting pages |
+| Wave 6: customers list detail | **Keep the in-place panel** |
+| Wave 6: payroll | **Payroll module's Run is the one door**; the HR generator is deleted |
+| Wave 6: classic goods receipt | **Retire it** once Receive Goods covers a delivery challan without an invoice |
 
 | Decision (2026-09-06 evening) | Ruling |
 |---|---|

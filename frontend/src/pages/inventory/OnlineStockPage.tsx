@@ -17,6 +17,7 @@ interface StoreOpt { store_id: string; store_name?: string; store_code?: string;
 const STATUS_STYLE: Record<string, string> = {
   OVERSELL_RISK: 'bg-red-100 text-red-800 border-red-200',
   OVER_ALLOCATED: 'bg-amber-100 text-amber-800 border-amber-200',
+  ONHAND_UNKNOWN: 'bg-blue-50 text-blue-700 border-blue-200',
   LISTED_UNKNOWN: 'bg-blue-50 text-blue-700 border-blue-200',
   OK: 'bg-green-100 text-green-800 border-green-200',
   NOT_ONLINE: 'bg-gray-100 text-gray-500 border-gray-200',
@@ -24,6 +25,7 @@ const STATUS_STYLE: Record<string, string> = {
 const STATUS_LABEL: Record<string, string> = {
   OVERSELL_RISK: 'Oversell risk',
   OVER_ALLOCATED: 'Over-allocated',
+  ONHAND_UNKNOWN: 'On-hand unknown',
   LISTED_UNKNOWN: 'Unverified',
   OK: 'OK',
   NOT_ONLINE: 'Not online',
@@ -83,7 +85,14 @@ export default function OnlineStockPage() {
           <AlertTriangle className="w-4 h-4 shrink-0" />
           {(data.listed_live_rows ?? 0) > 0
             ? `Live Shopify quantities cover ${data.listed_live_rows} of ${data.listed_mapped_rows} online SKUs on this page. Rows marked "Unverified" (Online = —) were not covered and cannot be cleared as OK.`
-            : 'Live Shopify quantities are unavailable right now, so online SKUs show "Unverified" (Online = —) and oversell flags can\'t fire. On-hand and recommended numbers are live.'}
+            : `Live Shopify quantities are unavailable right now, so online SKUs show "Unverified" (Online = —) and oversell flags can't fire.${(s.onhand_unknown ?? 0) > 0 ? '' : ' On-hand and recommended numbers are live.'}`}
+        </div>
+      )}
+
+      {data && (s.onhand_unknown ?? 0) > 0 && (
+        <div className="flex items-center gap-2 text-sm rounded-lg px-3 py-2 border bg-amber-50 border-amber-200 text-amber-800 mb-4">
+          <AlertTriangle className="w-4 h-4 shrink-0" />
+          IMS could not read the shops' on-hand right now, so {s.onhand_unknown} online SKU{s.onhand_unknown === 1 ? '' : 's'} show "On-hand unknown" (In-store = —) and are not classified — an unreadable shelf is never shown as 0. Refresh, or check the sync-health tile.
         </div>
       )}
 
@@ -148,9 +157,9 @@ export default function OnlineStockPage() {
                   <tr key={it.sku} className={it.status === 'OVERSELL_RISK' ? 'bg-red-50/40' : ''}>
                     <td className="px-3 py-2 font-mono text-xs text-gray-700">{it.sku}</td>
                     <td className="px-3 py-2 text-gray-700">{it.name}</td>
-                    <td className="px-3 py-2 text-right">{it.in_store}</td>
+                    <td className="px-3 py-2 text-right">{typeof it.in_store === 'number' ? it.in_store : '—'}</td>
                     <td className="px-3 py-2 text-right">{typeof it.online === 'number' ? it.online : '—'}</td>
-                    <td className="px-3 py-2 text-right font-medium">{it.recommended}</td>
+                    <td className="px-3 py-2 text-right font-medium">{typeof it.recommended === 'number' ? it.recommended : '—'}</td>
                     <td className="px-3 py-2">
                       <span className={`inline-flex items-center text-xs border rounded-full px-2 py-0.5 ${STATUS_STYLE[it.status]}`}>
                         {STATUS_LABEL[it.status]}

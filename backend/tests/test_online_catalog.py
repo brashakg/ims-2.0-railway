@@ -18,7 +18,6 @@ from api.services.online_catalog import (  # noqa: E402
     online_mapping_available,
     online_status_for_skus,
     online_summary,
-    online_variant_targets_for_skus,
     reconcile_store_barcodes,
 )
 
@@ -164,7 +163,6 @@ def test_normalize_sku():
 
 def test_everything_failsoft_without_db():
     assert online_status_for_skus(None, ["A"]) == {}
-    assert online_variant_targets_for_skus(None, ["A"]) == {}
     assert inventory_items_for_skus(None, ["A"]) == {}
     assert online_mapping_available(None) is False
     assert online_summary(None) == {"configured": False, "reachable": False}
@@ -173,7 +171,6 @@ def test_everything_failsoft_without_db():
 def test_failsoft_on_broken_db_object():
     broken = object()  # neither get_collection nor subscript
     assert online_status_for_skus(broken, ["A"]) == {}
-    assert online_variant_targets_for_skus(broken, ["A"]) == {}
     assert online_mapping_available(broken) is False
 
 
@@ -504,41 +501,9 @@ def test_identifier_priority_product_sku_beats_other_products_barcode():
 
 
 # ---------------------------------------------------------------------------
-# write-back target resolution (the oversell-guard mapping, audit OS-015)
+# write-back target resolution -- the ONE target reader (per-store locations:
+# the location is per SHOP on the store record, never per variant)
 # ---------------------------------------------------------------------------
-
-
-def test_targets_resolved_from_catalog_variants(monkeypatch):
-    monkeypatch.delenv("SHOPIFY_ONLINE_LOCATION_ID", raising=False)
-    out = online_variant_targets_for_skus(_db(), ["SKU-PUSHED"])
-    # Variant's own shopify_location_id used when no env override.
-    assert out["SKU-PUSHED"] == {
-        "inventory_item_id": "999",
-        "location_id": "loc-77",
-    }
-
-
-def test_targets_env_location_wins(monkeypatch):
-    monkeypatch.setenv("SHOPIFY_ONLINE_LOCATION_ID", "loc-env")
-    out = online_variant_targets_for_skus(_db(), ["SKU-PUSHED", "VAR-2"])
-    assert out["SKU-PUSHED"]["location_id"] == "loc-env"
-    # VAR-2 has no per-variant location; env supplies it.
-    assert out["VAR-2"] == {"inventory_item_id": "888", "location_id": "loc-env"}
-
-
-def test_targets_skip_variant_without_location(monkeypatch):
-    # No env, no per-variant location, no integration config -> skipped (the
-    # caller treats a missing target as not-online; the writeback layer alerts
-    # separately when the SKU IS online).
-    monkeypatch.delenv("SHOPIFY_ONLINE_LOCATION_ID", raising=False)
-    out = online_variant_targets_for_skus(_db(), ["VAR-2"])
-    assert "VAR-2" not in out
-
-
-def test_targets_unmapped_sku_absent(monkeypatch):
-    monkeypatch.setenv("SHOPIFY_ONLINE_LOCATION_ID", "loc-env")
-    out = online_variant_targets_for_skus(_db(), ["SKU-DRAFT", "NOPE"])
-    assert out == {}
 
 
 def test_inventory_items_for_skus_maps_by_requested_key():

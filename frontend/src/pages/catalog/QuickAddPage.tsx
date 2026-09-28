@@ -12,8 +12,9 @@
 //   - Product Images placeholder section (parity with Guided)
 //   - Live Review summary rail (lists every filled attribute, like Guided's review)
 //   - Ctrl+Enter = Save ; Ctrl+Shift+Enter = Save + New (keeps category + brand)
-// Shares CATEGORY_FIELDS + the create payload mapping via productAddShared.ts so
-// the create contract + per-category required-field enforcement are unchanged.
+// Shares CATEGORY_FIELDS + the create payload mapping via
+// domain/catalog/productAdd so the create contract + per-category
+// required-field enforcement are unchanged.
 //
 // WAVE 3 FILE DIET: this file was ~3,200 lines - the largest in the app. What
 // is left is the COMPOSITION. Every block MOVED, unchanged, into ./quickadd/:

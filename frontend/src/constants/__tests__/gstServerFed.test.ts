@@ -142,7 +142,7 @@ async function load(withServerData: boolean, payload: object = SERVER) {
   vi.resetModules();
   mockGet.mockReset();
   const runtime = await import('../gstRuntime');
-  const shared = await import('../../pages/catalog/productAddShared');
+  const shared = await import('../../domain/catalog/productAdd');
   if (withServerData) {
     mockGet.mockResolvedValue({ data: payload });
     await runtime.loadHsnRates();
