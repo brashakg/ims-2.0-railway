@@ -154,6 +154,10 @@ ROWS: List[Dict[str, object]] = [
         "store_scoped": True,
     },
     # --- /api/v1/vendors ---
+    # F60: the list stays AUTHENTICATED because the workshop job, vendor returns
+    # and the buy desk pick a vendor by name -- but the handler returns names
+    # only (no GSTIN / contacts / bank / terms) to anyone outside the purchase
+    # roles. Every other read below that carries cost or payable data is gated.
     {"method": "GET", "path": "/api/v1/vendors", "allowed": "AUTHENTICATED"},
     {
         "method": "POST",
@@ -352,10 +356,11 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/vendors/recon/credit-notes/{credit_note_number}/mark-received",
         "allowed": ["ACCOUNTANT", "ADMIN"],
     },
+    # F60: POs carry unit cost prices -> the purchase roles (the screens' gate).
     {
         "method": "GET",
         "path": "/api/v1/vendors/purchase-orders",
-        "allowed": "AUTHENTICATED",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
     # Last-paid price lookup for the PO / Buy-Desk form (vendor roles; the
     # endpoint additionally store-scopes each PO it reads).
@@ -377,14 +382,14 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/vendors/purchase-orders/{po_id}",
-        "allowed": "AUTHENTICATED",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
     # PO lifecycle timeline (read-only; the endpoint store-scopes the PO like
-    # get_po). Any authenticated user, same as reading the PO itself.
+    # get_po). The purchase roles, same as reading the PO itself (F60).
     {
         "method": "GET",
         "path": "/api/v1/vendors/purchase-orders/{po_id}/timeline",
-        "allowed": "AUTHENTICATED",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
     {
         "method": "POST",
@@ -420,17 +425,19 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/vendors/{vendor_id}",
-        "allowed": "AUTHENTICATED",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
     {
         "method": "PUT",
         "path": "/api/v1/vendors/{vendor_id}",
         "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
+    # F60: bills / debit notes / ledger / payments are what the owner owes a
+    # vendor -> ACCOUNTANT/ADMIN, the same gate as /ap-aging (their aggregate).
     {
         "method": "GET",
         "path": "/api/v1/vendors/{vendor_id}/bills",
-        "allowed": "AUTHENTICATED",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
     },
     {
         "method": "POST",
@@ -440,7 +447,7 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/vendors/{vendor_id}/debit-notes",
-        "allowed": "AUTHENTICATED",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
     },
     {
         "method": "POST",
@@ -450,12 +457,12 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/vendors/{vendor_id}/ledger",
-        "allowed": "AUTHENTICATED",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
     },
     {
         "method": "GET",
         "path": "/api/v1/vendors/{vendor_id}/payments",
-        "allowed": "AUTHENTICATED",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
     },
     {
         "method": "POST",
@@ -481,12 +488,12 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/vendors/{vendor_id}/performance",
-        "allowed": "AUTHENTICATED",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
     {
         "method": "GET",
         "path": "/api/v1/vendors/{vendor_id}/purchase-history",
-        "allowed": "AUTHENTICATED",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
     {
         "method": "GET",

@@ -25,6 +25,17 @@ from .models import VendorCreate, VendorUpdate
 # VENDOR ENDPOINTS
 # ============================================================================
 
+# F60: the vendor list stays open because the workshop job, vendor returns and
+# the buy desk pick a vendor BY NAME. Anyone outside the purchase roles gets only
+# these keys -- never GSTIN, contacts, bank details or terms.
+_VENDOR_NAME_FIELDS = (
+    "vendor_id",
+    "vendor_code",
+    "legal_name",
+    "trade_name",
+    "is_active",
+)
+
 
 # Both "" and "/" — the app uses redirect_slashes=False, so bare + slashed
 # forms must both resolve. Audit Run #2: Purchase page was 404'ing because
@@ -53,8 +64,13 @@ async def list_vendors(
         vendors = vendor_repo.search_vendors(search)
     else:
         vendors = vendor_repo.find_many(filter_dict, skip=skip, limit=limit)
+    vendors = vendors or []
 
-    return {"vendors": vendors or [], "total": len(vendors) if vendors else 0}
+    roles = set(current_user.get("roles") or [])
+    if not roles & {"SUPERADMIN", *_VENDOR_ROLES}:
+        vendors = [{k: v[k] for k in _VENDOR_NAME_FIELDS if k in v} for v in vendors]
+
+    return {"vendors": vendors, "total": len(vendors)}
 
 
 @router.post("", status_code=201)
@@ -113,7 +129,9 @@ async def create_vendor(
 # to this handler with `vendor_id="purchase-orders"` and return 404
 # ("Vendor not found"). Same class of bug as the tasks.py route-order
 # fix in PR #103.
-async def get_vendor(vendor_id: str, current_user: dict = Depends(get_current_user)):
+async def get_vendor(
+    vendor_id: str, current_user: dict = Depends(require_roles(*_VENDOR_ROLES))
+):
     """Get vendor details"""
     vendor_repo = get_vendor_repository()
 

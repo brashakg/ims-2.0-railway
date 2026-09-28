@@ -3,13 +3,14 @@
 from ._shared import (
     Depends,
     Query,
+    _VENDOR_ROLES,
     _get_db,
     datetime,
-    get_current_user,
     get_vendor_repository,
     ist_date_str,
     logger,
     now_ist,
+    require_roles,
     router,
     timedelta,
 )
@@ -132,7 +133,7 @@ async def vendor_performance(
         le=24,
         description="Number of rolling months to include in the score window.",
     ),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
 ):
     """Return a performance score for the vendor over the last `months` months (INV-13).
 
@@ -313,7 +314,7 @@ async def vendor_purchase_history(
         le=36,
         description="Rolling-months window for the purchase-history report.",
     ),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
 ):
     """Return purchase-history analytics for one vendor (INV-13).
 
