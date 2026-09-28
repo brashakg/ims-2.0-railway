@@ -117,7 +117,7 @@ class PushResult:
     photos: Optional[Any] = None
     # Product pushes only: the STOCK side channel (owner ruling 2026-09-07 --
     # make website quantities real). SIMULATED -> the plan {policy, quantities,
-    # location}; LIVE -> {ok, tracked, set, quantities, location_id, errors}.
+    # stores_mapped}; LIVE -> {ok, tracked, set, quantities, stores_mapped, errors}.
     # None when the push never reached it (refusal, ARCHIVED, transport error).
     stock: Optional[Any] = None
     # Product pushes only: the TAG side channel (sync audit gap #4 -- IMS

@@ -13,11 +13,9 @@ inventory targets the stock write-back needs -- reading ONLY the IMS catalog:
                              (the same fields online_sync_health + the parity
                              monitor already consume). NOT
                              shopify_location_id: the location is per SHOP on
-                             the store record (owner ruling 2026-09-06) and
-                             that per-variant column is dead -- it is no
-                             longer projected, so no reader can drift back to
-                             it while design 3.6 waits to drop the column in
-                             PR 3.
+                             the store record (owner ruling 2026-09-06); the
+                             per-variant column is dropped from the schema and
+                             never projected.
 
 Design rules (unchanged from the old bridge contract):
 - Fully FAIL-SOFT. Missing DB / collection -> empty result, never raise,

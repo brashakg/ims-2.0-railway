@@ -1691,7 +1691,8 @@ CATALOG_VARIANT_SCHEMA = {
         # the catalog never carries Shopify GIDs). All optional until mapped.
         "shopify_variant_id": {"bsonType": "string"},
         "shopify_inventory_item_id": {"bsonType": "string"},
-        "shopify_location_id": {"bsonType": "string"},
+        # No shopify_location_id: the location is per SHOP
+        # (stores.shopify_location_id), never per variant (owner ruling 2026-09-06).
         # Two-barcode model: gtin/barcode = GTIN pushed to Shopify
         # inventoryItem.barcode; store_barcode = physical join key to
         # stock_units.barcode (NEVER pushed to Shopify).
