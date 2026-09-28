@@ -2834,6 +2834,19 @@ async def create_return(
                 f"order is returnable."
             ),
         )
+    # A DELIVERED online order stays DELIVERED when Shopify refunds it in full
+    # (owner ruling 2026-09-28), so the status check above no longer stops it.
+    # The money already went back on Shopify: a counter refund here would pay
+    # the customer twice (and a second credit note would reverse the GST twice).
+    if str(order.get("payment_status") or "").upper() == "REFUNDED":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Shopify already refunded this order in full, so the counter "
+                "cannot refund it again. If the goods came back, press Goods back "
+                "on its refund in Online Store > Refund reviews."
+            ),
+        )
 
     line_idx = _order_line_index(order)
     resolved_order_id = body.order_id or order.get("order_id")
