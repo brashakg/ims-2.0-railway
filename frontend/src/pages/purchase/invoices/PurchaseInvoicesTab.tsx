@@ -29,10 +29,10 @@ import {
 import { useToast } from '../../../context/ToastContext';
 import { useAuth } from '../../../context/AuthContext';
 import type { Supplier } from '../purchaseTypes';
-import { inr, errMsg } from './shared';
+import { inr, errMsg, blankLine, type EditLine } from './shared';
 import { ExceptionsPanel } from './ExceptionsPanel';
 import { GrnPickerModal, DcPickerModal } from './pickers';
-import { InvoiceFormDrawer, blankLine, type EditLine } from './InvoiceFormDrawer';
+import { InvoiceFormDrawer } from './InvoiceFormDrawer';
 import { InvoiceDetailDrawer, MatchBadge, ConfigNote } from './InvoiceDetailDrawer';
 
 // ============================================================================

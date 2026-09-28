@@ -1,6 +1,7 @@
 // ============================================================================
-// Purchase Invoices - the booking form drawer + its editable-line shape and
-// GST line math. MOVED verbatim out of ../PurchaseInvoicesTab.tsx (Wave 6 diet).
+// Purchase Invoices - the booking form drawer + its GST line math (the
+// editable-line shape and blankLine live in ./shared). MOVED verbatim out of
+// ../PurchaseInvoicesTab.tsx (Wave 6 diet).
 // ============================================================================
 
 import { useEffect, useMemo, useState } from 'react';
@@ -14,7 +15,7 @@ import {
 import { useToast } from '../../../context/ToastContext';
 import { useAuth } from '../../../context/AuthContext';
 import type { Supplier } from '../purchaseTypes';
-import { inr, GST_RATES, errMsg, stateCode, isInterstate } from './shared';
+import { inr, GST_RATES, errMsg, stateCode, isInterstate, blankLine, type EditLine } from './shared';
 
 // The product ids a PRODUCT_NOT_CATALOGUED refusal names, so the accountant can
 // ask the cataloguer without retyping them.
@@ -26,21 +27,6 @@ function blockedProductIds(e: unknown): string[] {
   if (det.code !== 'PRODUCT_NOT_CATALOGUED') return [];
   return (det.lines || []).map((l) => l.product_id).filter((x): x is string => !!x);
 }
-
-// ---------------------------------------------------------------------------
-// Editable line shape (string inputs while typing, coerced on submit)
-// ---------------------------------------------------------------------------
-export interface EditLine {
-  product_id?: string;
-  product_name: string;
-  sku?: string;
-  hsn_code?: string;
-  quantity: string;
-  unit_price: string;
-  gst_rate: string;
-}
-
-export const blankLine = (): EditLine => ({ product_name: '', sku: '', hsn_code: '', quantity: '1', unit_price: '0', gst_rate: '5' });
 
 function lineTaxable(l: EditLine): number {
   return (parseFloat(l.quantity) || 0) * (parseFloat(l.unit_price) || 0);

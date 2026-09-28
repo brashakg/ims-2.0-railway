@@ -1,6 +1,6 @@
 // ============================================================================
 // Purchase Invoices - shared helpers (INR formatting, GST state-code / IGST
-// rule, GST rate list, approval role list). MOVED verbatim out of
+// rule, GST rate list, approval role list, editable invoice line). MOVED verbatim out of
 // ../PurchaseInvoicesTab.tsx by the Wave 6 file diet; nothing rewritten.
 // ============================================================================
 
@@ -51,3 +51,18 @@ export function isInterstate(placeOfSupply?: string, recipientGstin?: string): b
 // Roles allowed to approve a 3-way-match exception (release an ON_HOLD invoice
 // for payment despite a variance). Mirrors the _AP_ROLES backend gate.
 export const APPROVE_ROLES: UserRole[] = ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'];
+
+// ---------------------------------------------------------------------------
+// Editable line shape (string inputs while typing, coerced on submit)
+// ---------------------------------------------------------------------------
+export interface EditLine {
+  product_id?: string;
+  product_name: string;
+  sku?: string;
+  hsn_code?: string;
+  quantity: string;
+  unit_price: string;
+  gst_rate: string;
+}
+
+export const blankLine = (): EditLine => ({ product_name: '', sku: '', hsn_code: '', quantity: '1', unit_price: '0', gst_rate: '5' });
