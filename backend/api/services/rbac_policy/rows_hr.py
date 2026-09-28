@@ -217,11 +217,6 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/hr/attendance/{attendance_id}/check-out",
         "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
-    {
-        "method": "GET",
-        "path": "/api/v1/hr/employee/{employee_id}/salary-slip",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
-    },
     # Employee onboarding documents (govt-ID + HR paperwork). SENSITIVE PII --
     # owner directive: SUPERADMIN + ADMIN ONLY (SUPERADMIN auto-passes the
     # middleware). The route handlers gate with require_roles("ADMIN"); each also
@@ -283,21 +278,6 @@ ROWS: List[Dict[str, object]] = [
         "method": "POST",
         "path": "/api/v1/hr/leaves/{leave_id}/approve-remote",
         "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
-    },
-    {
-        "method": "GET",
-        "path": "/api/v1/hr/payroll",
-        "allowed": ["ADMIN"],
-    },
-    {
-        "method": "POST",
-        "path": "/api/v1/hr/payroll/generate",
-        "allowed": ["ADMIN"],
-    },
-    {
-        "method": "POST",
-        "path": "/api/v1/hr/payroll/{payroll_id}/approve",
-        "allowed": ["ADMIN"],
     },
     {
         "method": "GET",

@@ -650,43 +650,6 @@ export const pricingApi = {
 };
 
 // ============================================================================
-// Admin API - Product Master
-// ----------------------------------------------------------------------------
-// WRITE methods (create / update / delete) were REMOVED. They posted raw
-// camelCase to the unvalidated `/admin/products` endpoints, which wrote the
-// `products` collection with no category / MRP / GST validation and stored
-// camelCase keys (offerPrice vs offer_price) -> split-brain. All product
-// writes now go through the single validated `productApi` (`/products`,
-// `/products/bulk-create`, `PUT /products/{id}`). The reads below + the
-// CSV file-stash helper are kept (they are not product writers). The old
-// generateSku helper (POST /admin/products/generate-sku, uuid-random SKUs)
-// was removed with its endpoint: SKUs are minted by the backend create door;
-// the deterministic preview is POST /products/sku-preview.
-// ============================================================================
-
-export const adminProductApi = {
-  getProducts: async (params?: { category?: string; brand?: string; status?: string; page?: number; pageSize?: number }) => {
-    const response = await api.get('/admin/products', { params });
-    return response.data;
-  },
-
-  getProduct: async (productId: string) => {
-    const response = await api.get(`/admin/products/${productId}`);
-    return response.data;
-  },
-
-  bulkImportProducts: async (file: File, category: string) => {
-    const formData = new FormData();
-    formData.append('file', file);
-    formData.append('category', category);
-    const response = await api.post('/admin/products/bulk-import', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    });
-    return response.data;
-  },
-};
-
-// ============================================================================
 // Categories are a FIXED reference (CATEGORY_DEFINITIONS) that drives GST via
 // the HSN/GST master -- there is no category CRUD. The old adminCategoryApi
 // (/admin/categories writer) was removed: it had zero consumers and was a
