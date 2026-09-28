@@ -8,13 +8,13 @@
 // This layout keeps what was ALWAYS on screen - the editorial header, the
 // Tally export, the FY / date bar and the section nav - and the one loader
 // the old page ran. Everything below is the old FinanceDashboard moved
-// verbatim; the only change is that `activeTab` is read off the URL instead
-// of useState. Section pages read the data and handlers off the outlet
-// context (useFinanceContext).
+// verbatim, except that `activeTab` and the FY / date range are read off the
+// URL instead of useState (so the range survives section changes). Section
+// pages read the data and handlers off the outlet context (useFinanceContext).
 
 import { useState, useEffect, useMemo } from 'react';
 import { Loader2 } from 'lucide-react';
-import { Outlet, useLocation, useNavigate, useOutletContext } from 'react-router-dom';
+import { Outlet, useLocation, useNavigate, useOutletContext, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 
@@ -181,7 +181,7 @@ export function useFinanceContext() {
 function useFinanceDashboard() {
   const { user } = useAuth();
   const toast = useToast();
-  const { pathname } = useLocation();
+  const { pathname, search } = useLocation();
   const navigate = useNavigate();
 
   // OWNER DECISION 2026-08-13: the store-by-store profit table is ADMIN /
@@ -200,13 +200,33 @@ function useFinanceDashboard() {
     (Object.keys(FINANCE_TAB_PATHS) as TabType[]).find(
       (t) => FINANCE_TAB_PATHS[t] === pathname.replace(/\/$/, ''),
     ) ?? 'revenue-pl';
-  const setActiveTab = (tab: TabType) => navigate(FINANCE_TAB_PATHS[tab]);
+  const setActiveTab = (tab: TabType) => navigate({ pathname: FINANCE_TAB_PATHS[tab], search });
+
+  // The FY / date bar lives in the URL (?from= &to= &fy=), NOT in useState.
+  // AppLayout keys every page on its pathname, so each section change
+  // REMOUNTS this layout and state held here would snap back to the defaults
+  // on every click. setActiveTab above carries the query string across. The
+  // defaults are the old useState initialisers, unchanged.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const urlFilter = (key: string, fallback: string) => searchParams.get(key) ?? fallback;
+  const setUrlFilter = (key: string) => (value: string) =>
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.set(key, value);
+        return next;
+      },
+      { replace: true },
+    );
 
   // Date filters
-  const [dateFrom, setDateFrom] = useState(
-    new Date(new Date().getFullYear(), 3, 1).toISOString().split('T')[0] // Financial year start: April 1
+  const dateFrom = urlFilter(
+    'from',
+    new Date(new Date().getFullYear(), 3, 1).toISOString().split('T')[0], // Financial year start: April 1
   );
-  const [dateTo, setDateTo] = useState(new Date().toISOString().split('T')[0]);
+  const setDateFrom = setUrlFilter('from');
+  const dateTo = urlFilter('to', new Date().toISOString().split('T')[0]);
+  const setDateTo = setUrlFilter('to');
 
   // Data states
   const [revenueData, setRevenueData] = useState<RevenueData[]>([]);
@@ -242,7 +262,8 @@ function useFinanceDashboard() {
   const [isLoading, setIsLoading] = useState(true);
   // OS-054: default to the CURRENT Indian FY (computed from the IST date)
   // instead of a hardcoded year that goes stale every April.
-  const [selectedYear, setSelectedYear] = useState(currentFyLabelIST());
+  const selectedYear = urlFilter('fy', currentFyLabelIST());
+  const setSelectedYear = setUrlFilter('fy');
   const [periodLocked, setPeriodLocked] = useState(false);
 
   useEffect(() => {
