@@ -367,9 +367,11 @@ def test_successful_push_clears_the_flag_and_pending_returns_to_zero(db, monkeyp
                 # fixture has to answer the media call too or the flag
                 # lifecycle under test never happens.
                 "productCreateMedia": {
-                    "media": [{"id": "gid://shopify/MediaImage/1"}],
+                    "media": [{"id": "gid://shopify/MediaImage/1", "status": "UPLOADED"}],
                     "mediaUserErrors": [],
                 },
+                # ... and the photo pass's read of the listing (bare today).
+                "product": {"id": "gid://shopify/Product/111", "media": {"nodes": []}},
             }
         },
     )
@@ -408,9 +410,11 @@ def test_shopify_writeback_never_requeues_the_row(db, monkeypatch):
                 # fixture has to answer the media call too or the flag
                 # lifecycle under test never happens.
                 "productCreateMedia": {
-                    "media": [{"id": "gid://shopify/MediaImage/1"}],
+                    "media": [{"id": "gid://shopify/MediaImage/1", "status": "UPLOADED"}],
                     "mediaUserErrors": [],
                 },
+                # ... and the photo pass's read of the listing (bare today).
+                "product": {"id": "gid://shopify/Product/111", "media": {"nodes": []}},
             }
         },
     )

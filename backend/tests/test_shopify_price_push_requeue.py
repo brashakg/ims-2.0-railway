@@ -55,6 +55,7 @@ from test_shopify_media_title_sync import (  # noqa: E402,F401
 )
 
 from api.services.shopify_push import product as product_mod  # noqa: E402
+from strict_fakes import media_doc  # noqa: E402
 
 CODE = shopify_push.PRICE_NOT_SYNCED
 
@@ -80,11 +81,12 @@ class _ShopifyPriceFails(_Shopify):
         return body
 
 
-def _live_product():
-    """Already on Shopify with its photograph there (IMS owns media 1, and it
-    is on the product), edited since -> a LIVE update that publishes and then
-    pushes the price."""
-    return _product([U1], media_map=[(U1, _m(1))])
+def _live_product(db):
+    """Already on Shopify with its photograph there (IMS owns media 1 -- a
+    LIVE doc in ``db``'s media ledger -- and it is on the product), edited
+    since -> a LIVE update that publishes and then pushes the price."""
+    db[shopify_push.MEDIA_COLLECTION].insert_one(media_doc("P1", U1, _m(1)))
+    return _product([U1])
 
 
 def _flag(db, pid="P1"):
@@ -118,7 +120,7 @@ def test_failed_price_push_keeps_the_product_queued_and_carries_the_code(
     db, gates, monkeypatch
 ):
     fake = _install(monkeypatch, fail_prices=True)
-    doc = _seed(db, _live_product())
+    doc = _seed(db, _live_product(db))
 
     res = _run(shopify_push.push_product(db, doc, []))
 
@@ -144,7 +146,7 @@ def test_successful_price_push_clears_the_flag_and_carries_no_code(
 ):
     """The control: the same press with the price landing drains the queue."""
     fake = _install(monkeypatch, fail_prices=False)
-    doc = _seed(db, _live_product())
+    doc = _seed(db, _live_product(db))
 
     res = _run(shopify_push.push_product(db, doc, []))
 
@@ -160,7 +162,7 @@ def test_dark_press_is_unchanged_and_makes_no_call(db, monkeypatch):
 
     monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: False)
     monkeypatch.setattr(shopify_push, "_graphql", _boom)
-    doc = _seed(db, _live_product())
+    doc = _seed(db, _live_product(db))
 
     res = _run(shopify_push.push_product(db, doc, []))
 
@@ -175,7 +177,7 @@ def test_dark_press_is_unchanged_and_makes_no_call(db, monkeypatch):
 
 def test_audit_row_carries_the_code_and_is_a_warning(db, gates, monkeypatch):
     _install(monkeypatch, fail_prices=True)
-    doc = _seed(db, _live_product())
+    doc = _seed(db, _live_product(db))
     audit = _Audit()
     from api import dependencies as deps
 
@@ -208,7 +210,7 @@ def _live_world(world, monkeypatch, fail_prices):
     )
     shopify_push._publication_id_cache.clear()
     fake = _install(monkeypatch, fail_prices=fail_prices)
-    db.seed("catalog_products", [_live_product()])
+    db.seed("catalog_products", [_live_product(db)])
     return db, audit, fake
 
 
@@ -253,7 +255,7 @@ def test_sweep_summary_has_its_own_price_not_synced_line(
     client, auth_headers, patched_db, monkeypatch
 ):
     conn, _ = patched_db
-    conn.db["catalog_products"].insert_one(_live_product())
+    conn.db["catalog_products"].insert_one(_live_product(conn.db))
 
     async def _live_at_old_price(db, product, variants, blocked=None):
         return shopify_push.PushResult(

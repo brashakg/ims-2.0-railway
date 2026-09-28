@@ -614,3 +614,33 @@ class StrictDB:
         if name.startswith("_"):
             raise AttributeError(name)
         return self.get_collection(name)
+
+
+def media_doc(
+    product_id: str,
+    url: str,
+    gid: Optional[str] = None,
+    *,
+    image_id: Optional[str] = None,
+    how: Optional[str] = None,
+    sent_at=None,
+    _id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """ONE ``online_media`` ledger doc, the shape shopify_push.media writes:
+    ``gid`` None = a PENDING attach (recorded, no answer yet), set = LIVE.
+    ``how`` defaults to "minted" for a live doc (Shopify's own answer named
+    the gid). ``sent_at`` defaults to now, tz-aware UTC."""
+    import uuid
+    from datetime import datetime, timezone
+
+    at = sent_at or datetime.now(timezone.utc)
+    return {
+        "_id": _id or uuid.uuid4().hex,
+        "product_id": product_id,
+        "url": url,
+        "image_id": image_id,
+        "gid": gid,
+        "how": how or ("minted" if gid else None),
+        "sent_at": at,
+        "at": at,
+    }

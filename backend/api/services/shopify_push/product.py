@@ -53,7 +53,7 @@ from .inventory import (
     push_skus_stock,
     sync_product_stock,
 )
-from .media import media_lease, plan_product_media, product_photo_urls, sync_product_media
+from .media import media_lease, media_rows, plan_product_media, product_photo_urls, sync_product_media
 from .writeback import _requeue_unpublished, _writeback_product
 
 # ===========================================================================
@@ -161,10 +161,10 @@ async def push_product(
             reason="no_photo",
         )
     # ``photos`` is the product's OWN photographs only. A design-queue media
-    # the design press attached sits on the same map as an ``image_id`` row,
-    # and the photo pass below keeps it without ever attaching, deleting or
-    # reordering it (media.plan_product_media): this press -- and the
-    # 01:00/09:00 sync that runs it -- never reads the design queue, so a
+    # the design press attached is an online_media doc carrying its row's
+    # ``image_id``, and the photo pass below keeps it without ever attaching,
+    # deleting or reordering it (media.plan_product_media): this press -- and
+    # the 01:00/09:00 sync that runs it -- never reads the design queue, so a
     # design image reaches or leaves Shopify only through a human press.
 
     existing_gid = ecom.get("shopify_product_id")
@@ -209,6 +209,10 @@ async def push_product(
             seed_plan = plan_variant_seed(product, variants)
         elif repair_only:
             seed_plan = plan_variant_seed(product, variants, repair_only=True)
+        try:
+            photo_plan: Dict[str, Any] = plan_product_media(media_rows(db, pid), photos, photos)
+        except Exception as exc:  # noqa: BLE001 -- a dry run never fails on its plan
+            photo_plan = {"error": "the media record could not be read: %s" % exc}
         return PushResult(
             mode=MODE_SIMULATED,
             entity="product",
@@ -222,19 +226,19 @@ async def push_product(
             variant_prices=vp_plan,
             variants_seeded=seed_plan,
             stock=await plan_product_stock(db, product, variants),
-            photos=plan_product_media(product, photos),
+            photos=photo_plan,
             tags=plan_product_tags(product, ims_tags),
         )
 
     query = _PRODUCT_UPDATE if existing_gid else _PRODUCT_CREATE
     field_name = "productUpdate" if existing_gid else "productCreate"
     # ONE MEDIA PASS PER PRODUCT (media.media_lease): the lease is held from
-    # BEFORE the write whose response is this press's read of the listing
-    # until the photo pass has written the map -- a design press (or another
-    # sweep) on this product waits, and never plans on half of this one.
+    # BEFORE the product write until the photo pass is done -- a design press
+    # (or another sweep) on this product waits, and never plans on half of
+    # this one; the pass renews it before every attach.
     lease = AsyncExitStack()
     try:
-        await lease.enter_async_context(media_lease(db, pid))
+        renew = await lease.enter_async_context(media_lease(db, pid))
         body = await _graphql(db, query, {"input": payload})
         err = _user_errors(body, field_name)
         if err:
@@ -336,18 +340,16 @@ async def push_product(
         # visible before its photo arrived. The refusal above proved IMS has a
         # photograph; this puts it on Shopify before anything is published.
         #
-        # Sync audit gap #3 (owner 2026-09-06): the pass now DIFFS IMS's photo
-        # list against the media IMS owns on Shopify (read straight off the
-        # create/update response's media selection -- no extra query) --
-        # attaching what is missing, deleting what IMS dropped, reordering to
-        # IMS order -- instead of attaching only onto a bare product. The
-        # ownership rule (media.py) keeps hand-uploaded media untouched.
-        existing_media = ((prod.get("media") or {}).get("nodes")) or []
+        # Sync audit gap #3 (owner 2026-09-06): the pass DIFFS the twin's
+        # photo list (re-read under the lease: a sweep's doc may be minutes
+        # old) against the media IMS owns on the listing it reads -- attaching
+        # what is missing, deleting what IMS dropped, reordering to IMS order.
+        # The ownership rule (media.py) keeps hand-uploaded media untouched. A
+        # refusal (no photograph now, twin or ledger unreadable) reports
+        # on_shopify 0, so the publish below is withheld.
         photo_summary = None
         if new_gid:
-            photo_summary = await sync_product_media(
-                db, product, new_gid, photos, existing_media
-            )
+            photo_summary = await sync_product_media(db, pid, new_gid, renew=renew)
         photo_on_shopify = bool((photo_summary or {}).get("on_shopify"))
         # STOCK, IN THIS SAME PRESS, BEFORE THE PUBLISH (owner ruling
         # 2026-09-07 -- the website sells only what the shops can ship). Every

@@ -34,8 +34,9 @@ shopify_collection_id / shopify_menu_id), keyed on the IMS join key (never
 Mongo _id), so a re-push UPDATES the same Shopify object instead of creating a
 duplicate. The presence of a stored Shopify id is what selects
 create-vs-update in the mutation. A design-queue IMAGE has no row id of its
-own: its identity is the parent twin's ecom.media_map row for its url, and a
-press whose url is already mapped is a no-op (media.push_image).
+own: its identity is its live online_media doc (media.py, the media ledger)
+for its url, and a press whose url is already on record is a no-op
+(media.push_image).
 
 VARIANT SEEDING ON CREATE (2026-07 fix -- IMS is the sole Shopify writer):
 ProductInput carries NO price and NO sku (the 2024-04+ product model moved both
@@ -303,7 +304,8 @@ from .media import (  # noqa: F401
     TOMBSTONES_COLLECTION,
     MEDIA_LIMIT_CODE,
     product_photo_urls,
-    _attach_product_photos,
+    MEDIA_COLLECTION,
+    media_rows,
     owned_media,
     pending_media,
     match_media_to_photos,

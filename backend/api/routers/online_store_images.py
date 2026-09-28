@@ -8,7 +8,8 @@ them, folded into IMS (BVI_MERGE_PLAN.md A.1 / Phase 4).
 PUSH-DARK: every route here stores/edits image records + drives their design
 lifecycle inside IMS Mongo ONLY. No Shopify network write happens here (the
 press is online_store_push / shopify_push.push_image; an image's identity on
-Shopify is the parent twin's ecom.media_map row, never a field on this row).
+Shopify is its live online_media doc (the media ledger), never a field on
+this row).
 
 One row = one image of a product (variant_id=null) or a specific variant
 (variant_id set). The design QUEUE is just `GET /` filtered by status/assignee.
@@ -312,17 +313,27 @@ async def list_images(
         limit=limit,
     )
     # `shopify_media_id` -- the Synced chip on the card -- is READ off the
-    # parent twin's ecom.media_map (shopify_push.image_media_gid, the one
-    # identity a pushed design image has); never stored on the row. One
-    # parent read per product, whatever the page size.
+    # media ledger (shopify_push.image_media_gid, the one identity a pushed
+    # design image has); never stored on the row. One parent read and one
+    # ledger read per product, whatever the page size.
     from ..services import shopify_push
 
     db = _get_db()
     parents: Dict = {}
+    ledgers: Dict = {}
     for pid in {row.get("product_id") for row in rows}:
         parents[pid] = shopify_push._resolve_product_doc(db, pid)
+        try:
+            ledgers[pid] = shopify_push.media_rows(db, pid)
+        except Exception:  # noqa: BLE001 -- unreadable: no chip, never a 500
+            ledgers[pid] = None
     rows = [
-        {**row, "shopify_media_id": shopify_push.image_media_gid(parents[row.get("product_id")], row)}
+        {
+            **row,
+            "shopify_media_id": shopify_push.image_media_gid(
+                parents[row.get("product_id")], row, ledgers[row.get("product_id")]
+            ),
+        }
         for row in rows
     ]
     return {"images": _with_id(rows), "count": len(rows), "db_connected": True}
@@ -504,30 +515,29 @@ async def delete_image(
     current_user: dict = Depends(require_roles(*_ECOM_ROLES)),
 ) -> Dict:
     """Delete a queue row -- REFUSED (409) while any media of its lane is on
-    the parent's Shopify listing (the twin's media_map rows stamped with its
+    the parent's Shopify listing (live online_media docs stamped with its
     image_id -- the asset it carries now OR one it carried before it was
     edited): the design press takes a media down only through its row, so
-    deleting the row first would leave the media up and its map row orphaned
-    forever, with no door able to remove either. REFUSED too while an attach
-    made for it never heard back (the twin's media_pending row in its lane:
-    the media may be on the listing with no map row) -- a press of the image
-    or the product settles it. Take it down first (remove
-    it in the Shopify admin and press the product, which prunes the map),
-    then delete. A row whose url is one of the product's own photographs
-    maps nothing in its lane (that media is the product's) and deletes --
-    and the map is first STORED that way (a stamp the map still carries for
-    it is dropped), so no later read can put that media back in a lane whose
-    row is gone.
+    deleting the row first would leave the media up and its ledger doc
+    orphaned forever, with no door able to remove either. REFUSED too while
+    an attach made for it never heard back (a PENDING doc in its lane: the
+    media may be on the listing) -- a press of the image or the product
+    settles it. Take it down first (remove it in the Shopify admin and press
+    the product, which prunes the ledger), then delete. A row whose url is
+    one of the product's own photographs holds nothing in its lane (that
+    media is the product's) and deletes -- and every doc still stamped with
+    its image_id (pending or live) is first STORED in the product's lane, so
+    no later read can put that media back in a lane whose row is gone.
 
     The check and the delete run under the product's media lease (no press
-    lands in between), and the parent is read directly: a read that FAILS is
-    a 503, never an empty lane."""
+    lands in between), and the parent and the ledger are read directly: a
+    read that FAILS is a 503, never an empty lane."""
     repo = _require_repo()
     existing = repo.get_by_id(image_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="Image not found")
     from ..services import shopify_push
-    from ..services.shopify_push.media import MediaBusy, _writeback_media_map, media_lease
+    from ..services.shopify_push.media import MEDIA_COLLECTION, MediaBusy, media_lease, media_rows
 
     db = _get_db()
     pid = existing.get("product_id")
@@ -535,11 +545,12 @@ async def delete_image(
         async with media_lease(db, pid):
             try:
                 parent = db["catalog_products"].find_one({"id": pid}) if pid and db is not None else None
+                rows = media_rows(db, pid)
             except Exception as exc:  # noqa: BLE001 -- fail CLOSED
                 raise HTTPException(
                     status_code=503, detail="Could not read the parent product (%s); try again" % exc
                 )
-            lane = shopify_push.image_lane_media(parent, existing)
+            lane = shopify_push.image_lane_media(parent, existing, rows)
             if any(not r.get("id") for r in lane):
                 raise HTTPException(
                     status_code=409,
@@ -558,10 +569,15 @@ async def delete_image(
                         % ", ".join(r["id"] for r in lane)
                     ),
                 )
-            if parent is not None and not _writeback_media_map(db, pid, lambda rows: rows):
-                raise HTTPException(
-                    status_code=503, detail="Could not store the product's media map; try again"
-                )
+            if db is not None and pid:
+                try:
+                    db[MEDIA_COLLECTION].update_many(
+                        {"product_id": pid, "image_id": image_id}, {"$set": {"image_id": None}}
+                    )
+                except Exception as exc:  # noqa: BLE001 -- fail CLOSED
+                    raise HTTPException(
+                        status_code=503, detail="Could not store the product's media record (%s); try again" % exc
+                    )
             if not repo.delete(image_id):
                 raise HTTPException(status_code=500, detail="Failed to delete image")
     except MediaBusy as exc:

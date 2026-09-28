@@ -1,13 +1,14 @@
 """
-Adopting a live product's Shopify media into ecom.media_map  (owner 2026-09-06)
-=============================================================================
-PR #1128's photo pass manages ONLY the media in ``ecom.media_map``; the 42
-products that went live before the map existed have none, so their photos
-never follow IMS until adopted. scripts/adopt_shopify_media_map.py claims a
-media as IMS-owned ONLY on a positive identity match -- a claimed media can
-later be DELETED by the pass when IMS drops the photo -- through the ONE rule
-shopify_push.media.match_media_to_photos, and writes through the ONE writer
-the pass uses (media._writeback_media_map).
+Adopting a live product's Shopify media into the online_media ledger (owner 2026-09-06)
+=====================================================================================
+PR #1128's photo pass manages ONLY the media IMS owns: the LIVE docs of the
+``online_media`` ledger (shopify_push.media); the products that went live
+before the ledger existed have none, so their photos never follow IMS until
+adopted. scripts/adopt_shopify_media_map.py claims a media as IMS-owned ONLY
+on a positive identity match -- a claimed media can later be DELETED by the
+pass when IMS drops the photo -- through the ONE rule
+shopify_push.media.match_media_to_photos, and writes one LIVE doc per claim
+(how="adopted") under the product's media lease.
 
 ***** SAFETY-CRITICAL: shopify_push._graphql is monkeypatched with a fake that
 EXPLODES on any mutation; the adoption is a query, never a write to Shopify.
@@ -17,11 +18,13 @@ Discriminating power (each test goes red when its rule is removed -- table in
 the PR): file name equality (R3) and its edges (CDN-side ``_<uuid>`` only,
 extension agreement with NO case folding, no ``_WxH`` / bare-hex / ``.v2``
 normalising; a same-named hand upload IS claimed by design and pinned),
-originalSource url (R1), NO alt rule, IMS order, 1:1 (ambiguity refused),
+NO originalSource rule (production's originalSource is Shopify's own
+storage copy -- pinned), NO alt rule, IMS order, 1:1 (ambiguity refused),
 repeated url counts once, hand uploads unmanaged and PRINTED, partial = no
 write, position / count never match, dry-run = no write, --ids required,
 already-mapped skipped (an empty map is not a map), transport failure
-reported not fatal.
+reported not fatal. T18: the adoption inserts adopted docs, is idempotent,
+never overwrites a live doc, and its reversal removes only adopted docs.
 
 ROUND 2 (owner rulings 2026-09-06), both OPT-IN: R3b (--rule connector-prefix)
 claims a media named '<the product's OWN Shopify id>__<nn>__<basename>' when
@@ -61,6 +64,9 @@ from api.services import shopify_push  # noqa: E402
 from api.services.shopify_push.media import match_media_to_photos  # noqa: E402
 from database.repositories.product_repository import ProductRepository  # noqa: E402
 from test_online_push_dirty_flag import _DB  # noqa: E402
+from strict_fakes import media_doc  # noqa: E402
+
+LEDGER = shopify_push.MEDIA_COLLECTION
 
 GID = "gid://shopify/Product/900"
 APP = "https://ims-20-railway-production.up.railway.app/api/v1/products/image/"
@@ -102,11 +108,22 @@ class _Shopify:
         return {"data": {"product": {"id": variables["id"], "media": {"nodes": self.nodes}}}}
 
 
-def _seed(db, photos, media_map=None):
+def _seed(db, photos, media=None):
+    """The twin, and the media IMS already owns on it: [{url, id}] as LIVE
+    ledger docs (how=minted)."""
     ecom = {"shopify_product_id": GID, "locally_modified": False}
-    if media_map is not None:
-        ecom["media_map"] = media_map
     db["catalog_products"].insert_one({"id": "P1", "sku": "SKU1", "images": list(photos), "ecom": ecom})
+    for m in media or []:
+        db[LEDGER].insert_one(media_doc("P1", m["url"], m["id"]))
+
+
+def _adopted(db, pid="P1", how=None):
+    """The LIVE ledger docs of a product as [{url, id}], in write order."""
+    return [
+        {"url": d["url"], "id": d["gid"]}
+        for d in db[LEDGER].find({"product_id": pid})
+        if d.get("gid") and (how is None or d.get("how") == how)
+    ]
 
 
 def _run(db, apply, ids=("P1",), **kw):
@@ -147,24 +164,28 @@ def test_exact_match_adopts_in_ims_order(db, monkeypatch):
     assert row["unmanaged"] == [] and row["unmatched"] == []
     assert out["written"] == ["P1"]
     twin = _twin(db)
-    assert twin["ecom"]["media_map"] == row["map"]
+    assert _adopted(db, how="adopted") == row["map"]
+    assert set(twin["ecom"]) == {"shopify_product_id", "locally_modified"}, "the twin is not written"
     assert twin["ecom"]["locally_modified"] is False
     assert twin["images"] == [U1, U2, U3]
     audit = list(db["audit_logs"].find({}))
     assert len(audit) == 1 and audit[0]["action"] == "MEDIA_MAP_ADOPT"
-    assert audit[0]["entity_id"] == "P1" and audit[0]["after_state"]["media_map"] == row["map"]
-    assert "$unset" in audit[0]["reversal"]
+    assert audit[0]["entity_id"] == "P1" and audit[0]["after_state"]["media"] == row["map"]
+    assert 'how: "adopted"' in audit[0]["reversal"]
     assert shop.calls == [{"id": GID}]
 
 
-def test_original_source_url_matches(db, monkeypatch):
-    """R1: the media's originalSource IS the IMS url -- a positive match even
-    when the CDN file name says nothing."""
+def test_original_source_is_not_an_identity(db, monkeypatch):
+    """The old R1 (originalSource IS the IMS url) is gone: in production
+    originalSource is Shopify's own storage copy (measured 09-06, it matched
+    nothing), so even a node that DID carry the IMS url there -- which
+    production never does -- claims nothing; only the file name does.
+    REVERT-PROOF: put R1 back -> adopted."""
     photo = "https://photos.example.com/rb/front.jpg"
     _wire(monkeypatch, [_node(7, "renamed-by-shopify_a1b2c3d4e5f6a7b8c9d0.png", source=photo)])
     _seed(db, [photo])
-    row = _run(db, apply=False)["rows"][0]
-    assert row["status"] == "adopt" and row["map"] == [{"url": photo, "id": _m(7)}]
+    row = _run(db, apply=True)["rows"][0]
+    assert row["status"] == "unmatched" and row["map"] == [] and _adopted(db) == []
 
 
 def test_alt_never_matches(db, monkeypatch):
@@ -179,7 +200,7 @@ def test_alt_never_matches(db, monkeypatch):
     row = _run(db, apply=True)["rows"][0]
     assert row["status"] == "unmatched" and row["map"] == []
     assert row["unmanaged"] == [_m(1), _m(2)]
-    assert "media_map" not in _twin(db)["ecom"]
+    assert _adopted(db) == []
 
 
 def test_file_name_rule_edges():
@@ -228,8 +249,8 @@ def test_hand_upload_stays_unmanaged(db, monkeypatch, capsys):
     printed = capsys.readouterr().out
     assert "+ %s -> %s (%s.png)" % (U1, _m(1), OID1) in printed
     assert "- unmanaged %s (hero-shot-by-hand.png)" % _m(9) in printed
-    assert _twin(db)["ecom"]["media_map"] == [{"url": U1, "id": _m(1)}]
-    assert _m(9) not in str(_twin(db)["ecom"]["media_map"])
+    assert _adopted(db) == [{"url": U1, "id": _m(1)}]
+    assert _m(9) not in str(list(db[LEDGER].find({})))
 
 
 def test_partial_match_writes_nothing(db, monkeypatch):
@@ -242,7 +263,7 @@ def test_partial_match_writes_nothing(db, monkeypatch):
     assert row["status"] == "partial"
     assert row["map"] == [{"url": U1, "id": _m(1)}] and row["unmatched"] == [U2]
     assert out["written"] == []
-    assert "media_map" not in _twin(db)["ecom"]
+    assert _adopted(db) == []
     assert list(db["audit_logs"].find({})) == []
 
 
@@ -256,7 +277,7 @@ def test_position_and_count_never_match(db, monkeypatch):
     row = out["rows"][0]
     assert row["status"] == "unmatched"
     assert row["map"] == [] and row["unmatched"] == [U1, U2] and row["unmanaged"] == [_m(1), _m(2)]
-    assert out["written"] == [] and "media_map" not in _twin(db)["ecom"]
+    assert out["written"] == [] and _adopted(db) == []
 
 
 def test_ambiguity_is_not_a_claim():
@@ -289,7 +310,7 @@ def test_dry_run_writes_nothing(db, monkeypatch):
     out = _run(db, apply=False)
     assert out["rows"][0]["status"] == "adopt" and out["rows"][0]["map"] == [{"url": U1, "id": _m(1)}]
     assert out["written"] == []
-    assert "media_map" not in _twin(db)["ecom"]
+    assert _adopted(db) == []
     assert list(db["audit_logs"].find({})) == []
 
 
@@ -308,13 +329,13 @@ def test_ids_required_and_all_refused():
 
 
 def test_already_mapped_is_skipped_without_a_shopify_call(db, monkeypatch):
-    """The attach wrote this map; adoption never overwrites it."""
+    """The attach recorded this media; adoption never overwrites it."""
     shop = _wire(monkeypatch, [_node(1, OID1 + ".png")])
     existing = [{"url": U1, "id": _m(55)}]
-    _seed(db, [U1], media_map=existing)
+    _seed(db, [U1], media=existing)
     out = _run(db, apply=True)
     assert out["rows"][0]["status"] == "already_mapped" and out["written"] == []
-    assert _twin(db)["ecom"]["media_map"] == existing
+    assert _adopted(db) == existing
     assert shop.calls == []
 
 
@@ -380,18 +401,58 @@ def test_repeated_photo_url_counts_once():
     assert out["map"] == [{"url": U1, "id": _m(1)}] and out["unmatched_photos"] == []
 
 
-def test_empty_or_malformed_map_is_not_already_mapped(db, monkeypatch):
-    """ecom.media_map == [] (the pass pruned it) or rows without url/id are
-    NO map: owned_media drops them, so the twin is adopted, not skipped."""
+def test_a_pending_doc_or_legacy_twin_field_is_not_owned_media(db, monkeypatch):
+    """A PENDING ledger doc (an attach that never heard back, no gid) is not
+    media IMS owns, and a legacy map on the twin is dead data nothing reads:
+    the product is adopted, not skipped -- and the pending doc stays for the
+    pass to settle."""
     shop = _wire(monkeypatch, [_node(1, OID1 + ".png")])
-    _seed(db, [U1], media_map=[{"id": "no-url"}, "junk"])
+    _seed(db, [U1])
+    db[LEDGER].insert_one(media_doc("P1", U2))
+    db["catalog_products"].update_one({"id": "P1"}, {"$set": {"ecom.media_map": [{"url": U1, "id": _m(9)}]}})
     out = _run(db, apply=True)
     assert out["rows"][0]["status"] == "adopt" and out["written"] == ["P1"]
-    assert _twin(db)["ecom"]["media_map"] == [{"url": U1, "id": _m(1)}]
+    assert _adopted(db) == [{"url": U1, "id": _m(1)}]
+    assert [d["url"] for d in db[LEDGER].find({}) if not d.get("gid")] == [U2]
     assert shop.calls == [{"id": GID}]
-    # the audit row records what was REALLY there before, not an empty list
     audit = list(db["audit_logs"].find({}))
-    assert audit[0]["before_state"] == {"media_map": [{"id": "no-url"}, "junk"]}
+    assert audit[0]["before_state"] == {"media": []}
+
+
+def test_adoption_is_idempotent_never_overwrites_and_reverses_only_what_it_adopted(db, monkeypatch, capsys):
+    """T18. (a) A second --apply is a no-op (already_mapped, no new doc).
+    (b) A live doc landing between the report and the write (the pass
+    minted one) refuses the write under the lease -- never a duplicate.
+    (c) The printed reversal deletes ONLY the adopted docs: a doc the pass
+    minted since stays.
+    REVERT-PROOF: _adopt without the under-lease re-check -> (b) red."""
+    shop = _wire(monkeypatch, [_node(1, OID1 + ".png")])
+    _seed(db, [U1])
+    assert _run(db, apply=True)["written"] == ["P1"]
+    again = _run(db, apply=True)
+    assert again["rows"][0]["status"] == "already_mapped" and again["written"] == []
+    assert _adopted(db) == [{"url": U1, "id": _m(1)}] and len(list(db[LEDGER].find({}))) == 1
+
+    db2 = _DB()
+    _seed(db2, [U1])
+    real = shop.__call__
+
+    async def _minted_meanwhile(db_, query, variables):
+        body = await real(db_, query, variables)
+        db2[LEDGER].insert_one(media_doc("P1", U2, _m(77)))
+        return body
+
+    monkeypatch.setattr(shopify_push, "_graphql", _minted_meanwhile)
+    out = _run(db2, apply=True)
+    assert out["rows"][0]["status"] == "adopt" and out["written"] == []
+    assert _adopted(db2) == [{"url": U2, "id": _m(77)}], "never overwritten, never duplicated"
+
+    db[LEDGER].insert_one(media_doc("P1", U2, _m(78)))
+    printed = capsys.readouterr().out
+    line = script.reversal_line(["P1"])
+    assert line in printed and line == 'db.online_media.deleteMany({product_id: {$in: [\'P1\']}, how: "adopted"})'
+    db[LEDGER].delete_many({"product_id": {"$in": ["P1"]}, "how": "adopted"})
+    assert _adopted(db) == [{"url": U2, "id": _m(78)}]
 
 
 def test_transport_failure_is_reported_not_fatal(db, monkeypatch):
@@ -409,7 +470,7 @@ def test_transport_failure_is_reported_not_fatal(db, monkeypatch):
     assert [r["status"] for r in out["rows"]] == ["graphql_error", "no_photos"]
     assert out["rows"][0]["error"].startswith("ValueError: status 401: <url>")
     assert "myshopify" not in out["rows"][0]["error"]
-    assert out["written"] == [] and "media_map" not in _twin(db)["ecom"]
+    assert out["written"] == [] and _adopted(db) == []
 
 
 def test_extension_case_is_not_folded():
@@ -560,13 +621,13 @@ def test_script_rule_connector_prefix_adopts_and_leaves_the_rest_unmanaged(db, m
     )
     out = _run(db, apply=True)
     assert out["rows"][0]["status"] == "unmatched" and out["written"] == []
-    assert "media_map" not in _twin(db)["ecom"]
+    assert _adopted(db) == []
     out = _run(db, apply=True, rules=R3B)
     row = out["rows"][0]
     assert row["status"] == "adopt" and row["map"] == [{"url": RB, "id": _m(1)}]
     assert row["unmanaged"] == [_m(2), _m(3), _m(4), _m(5)] and out["written"] == ["P1"]
     twin = _twin(db)
-    assert twin["ecom"]["media_map"] == [{"url": RB, "id": _m(1)}]
+    assert _adopted(db) == [{"url": RB, "id": _m(1)}]
     assert twin["ecom"]["locally_modified"] is False and twin["images"] == [RB]
     assert shop.calls == [{"id": OWN}, {"id": OWN}]
     audit = list(db["audit_logs"].find({}))
@@ -610,12 +671,12 @@ ONE = CDN + ONE_NAME + "?v=1785322878"
 ONE_NODE = {"id": _m(1), "alt": "front view", "image": {"url": ONE}, "originalSource": {"url": "https://x/y.png"}}
 
 
-def _seed_bvi(db, photos=STALE, spine=True, media_map=None, pid="P1", spine_id="SP1", source="bvi_import", **twin_extra):
+def _seed_bvi(db, photos=STALE, spine=True, media=None, pid="P1", spine_id="SP1", source="bvi_import", **twin_extra):
     ecom = {"shopify_product_id": BVI, "locally_modified": False, "status": "PUBLISHED"}
     if source is not None:
         ecom["source"] = source
-    if media_map is not None:
-        ecom["media_map"] = media_map
+    for m in media or []:
+        db[LEDGER].insert_one(media_doc(pid, m["url"], m["id"]))
     db["catalog_products"].insert_one({"id": pid, "sku": "SKU1", "images": list(photos), "ecom": ecom, **twin_extra})
     if spine:
         db["products"].insert_one(
@@ -646,7 +707,7 @@ def _no_reversal_file(tmp_path):
 def test_replace_writes_through_the_spine_door_without_queuing(db, monkeypatch, tmp_path, capsys):
     """The one Shopify image becomes the photo list ON THE SPINE (the door),
     the mirror copies it to the twin, the twin is NOT queued
-    (mark_dirty=False), the map lands as {url: cdn url, id: gid}, an audit
+    (mark_dirty=False), the media is adopted as {url: cdn url, id: gid}, an audit
     row carries the before list, and the reversal is printed AND saved."""
     monkeypatch.chdir(tmp_path)
     shop = _wire(monkeypatch, [ONE_NODE])
@@ -659,13 +720,13 @@ def test_replace_writes_through_the_spine_door_without_queuing(db, monkeypatch, 
     twin = _twin(db)
     assert twin["images"] == [ONE], "the mirror must have copied it"
     assert twin["ecom"]["locally_modified"] is False, "nothing may queue: Shopify already shows this image"
-    assert twin["ecom"]["media_map"] == [{"url": ONE, "id": _m(1)}]
+    assert _adopted(db, how="adopted") == [{"url": ONE, "id": _m(1)}]
     assert twin["ecom"]["status"] == "PUBLISHED"
     assert shop.calls == [{"id": BVI}]
     audit = list(db["audit_logs"].find({}))
     assert len(audit) == 1 and audit[0]["action"] == "PHOTOS_REPLACED_FROM_SHOPIFY"
-    assert audit[0]["before_state"] == {"photos": STALE, "spine_images": STALE, "media_map": None}
-    assert audit[0]["after_state"] == {"photos": [ONE], "media_map": [{"url": ONE, "id": _m(1)}]}
+    assert audit[0]["before_state"] == {"photos": STALE, "spine_images": STALE, "media": []}
+    assert audit[0]["after_state"] == {"photos": [ONE], "media": [{"url": ONE, "id": _m(1)}]}
     printed = capsys.readouterr().out
     for u in STALE:
         assert "before " + u in printed
@@ -684,9 +745,9 @@ def test_replace_writes_through_the_spine_door_without_queuing(db, monkeypatch, 
             "spine_images": STALE,
             "twin_photos": STALE,
             "twin_images": STALE,
-            "media_map_before": None,
+            "media_before": [],
             "photo_after": ONE,
-            "media_map_after": [{"url": ONE, "id": _m(1)}],
+            "media_after": [{"url": ONE, "id": _m(1)}],
         }
     ]
 
@@ -736,7 +797,7 @@ def test_replace_without_a_spine_uses_the_same_mirror_helper(db, monkeypatch, tm
     assert calls == [{"product_id": "P1", "current": {}, "patch": {"images": [ONE]}, "mark_dirty": False}]
     twin = _twin(db)
     assert twin["images"] == [ONE] and twin["ecom"]["locally_modified"] is False
-    assert twin["ecom"]["media_map"] == [{"url": ONE, "id": _m(1)}]
+    assert _adopted(db) == [{"url": ONE, "id": _m(1)}]
     assert db["products"].find_one({"pim_product_id": "P1"}) is None
     with open(out["reversal_path"], encoding="utf-8") as fh:
         assert json.load(fh)["products"][0]["spine_id"] is None
@@ -745,7 +806,7 @@ def test_replace_without_a_spine_uses_the_same_mirror_helper(db, monkeypatch, tm
 def test_replace_refuses_a_media_count_other_than_one(monkeypatch, tmp_path, capsys):
     """The ruling covers ONE connector image per product: zero or two media
     is not that product -- reported (each media's name printed), nothing
-    written on the spine, the twin or the map."""
+    written on the spine, the twin or the ledger."""
     monkeypatch.chdir(tmp_path)
     two = [ONE_NODE, _node(2, _conn(BVI_ID, 1, "0rw4006__601_71__p21__shad__lt.png"))]
     for nodes in ([], two):
@@ -757,28 +818,28 @@ def test_replace_refuses_a_media_count_other_than_one(monkeypatch, tmp_path, cap
         assert row["status"] == "not_one_media" and row["media"] == len(nodes) and row["map"] == []
         assert out["written"] == [] and out["reversal_path"] is None
         assert _spine(db)["images"] == STALE and _twin(db)["images"] == STALE
-        assert "media_map" not in _twin(db)["ecom"] and list(db["audit_logs"].find({})) == []
+        assert _adopted(db) == [] and list(db["audit_logs"].find({})) == []
     assert _no_reversal_file(tmp_path)
     printed = capsys.readouterr().out
     assert "- media %s (%s)" % (_m(2), _conn(BVI_ID, 1, "0rw4006__601_71__p21__shad__lt.png")) in printed
 
 
 def test_replace_refuses_an_existing_map_and_a_twin_the_door_cannot_clear(monkeypatch, tmp_path):
-    """A map already there means the attach (or round 1) owns the answer; a
+    """Media IMS already owns means the attach (or round 1) owns the answer; a
     singular image_url would survive the door's images[] write and the list
     would not be the one photo. Both are refused BEFORE the Shopify query."""
     monkeypatch.chdir(tmp_path)
     db = _DB()
     shop = _wire(monkeypatch, [ONE_NODE])
-    _seed_bvi(db, media_map=[{"url": STALE[0], "id": _m(9)}])
+    _seed_bvi(db, media=[{"url": STALE[0], "id": _m(9)}])
     out = _run(db, apply=True, replace=True)
     assert out["rows"][0]["status"] == "already_mapped" and out["written"] == []
-    assert _twin(db)["ecom"]["media_map"] == [{"url": STALE[0], "id": _m(9)}] and _spine(db)["images"] == STALE
+    assert _adopted(db) == [{"url": STALE[0], "id": _m(9)}] and _spine(db)["images"] == STALE
     db = _DB()
     _seed_bvi(db, image_url=STALE[0])
     out = _run(db, apply=True, replace=True)
     assert out["rows"][0]["status"] == "twin_has_image_url" and out["written"] == []
-    assert _twin(db)["images"] == STALE and "media_map" not in _twin(db)["ecom"]
+    assert _twin(db)["images"] == STALE and _adopted(db) == []
     assert shop.calls == []
     assert _no_reversal_file(tmp_path)
 
@@ -792,7 +853,7 @@ def test_replace_dry_run_writes_nothing(db, monkeypatch, tmp_path, capsys):
     assert row["status"] == "replace" and row["map"] == [{"url": ONE, "id": _m(1)}] and row["photos"] == STALE
     assert out["written"] == [] and out["reversal_path"] is None
     assert _spine(db)["images"] == STALE and _twin(db)["images"] == STALE
-    assert "media_map" not in _twin(db)["ecom"] and _twin(db)["ecom"]["locally_modified"] is False
+    assert _adopted(db) == [] and _twin(db)["ecom"]["locally_modified"] is False
     assert list(db["audit_logs"].find({})) == [] and _no_reversal_file(tmp_path)
     assert "DRY RUN - nothing written" in capsys.readouterr().out
 
@@ -802,7 +863,7 @@ def test_replace_refuses_a_spine_that_mirrors_elsewhere(db, monkeypatch, tmp_pat
     twin would carry the photo to that foreign product (the mirror keys the
     twin on pim_product_id first) -- refused BEFORE the Shopify query and
     before any write: this twin, the foreign twin and the spine keep their
-    lists, no map, no audit, no reversal file. (Round-2 verifier: the
+    lists, no ledger doc, no audit, no reversal file. (Round-2 verifier: the
     post-write gate used to catch this only AFTER the spine and the foreign
     twin were overwritten.)"""
     monkeypatch.chdir(tmp_path)
@@ -818,7 +879,7 @@ def test_replace_refuses_a_spine_that_mirrors_elsewhere(db, monkeypatch, tmp_pat
     assert row["status"] == "spine_points_elsewhere" and row["spine_id"] is None
     assert out["written"] == [] and out["reversal_path"] is None and shop.calls == []
     assert db["products"].find_one({"product_id": "P1"})["images"] == STALE, "the spine must be left alone"
-    assert _twin(db)["images"] == STALE and "media_map" not in _twin(db)["ecom"]
+    assert _twin(db)["images"] == STALE and _adopted(db) == []
     kept = {k: v for k, v in db["catalog_products"].find_one({"id": "ELSEWHERE"}).items() if k != "_id"}
     assert kept == foreign, "a foreign product's photo must never move"
     assert list(db["audit_logs"].find({})) == [] and _no_reversal_file(tmp_path)
@@ -836,7 +897,7 @@ def test_replace_refuses_an_unkeyed_spine(db, monkeypatch, tmp_path):
     out = _run(db, apply=True, replace=True)
     assert out["rows"][0]["status"] == "spine_unkeyed" and out["written"] == [] and shop.calls == []
     assert db["products"].find_one({"pim_product_id": "P1"})["images"] == STALE
-    assert _twin(db)["images"] == STALE and "media_map" not in _twin(db)["ecom"] and _no_reversal_file(tmp_path)
+    assert _twin(db)["images"] == STALE and _adopted(db) == [] and _no_reversal_file(tmp_path)
 
 
 def test_replace_refuses_products_outside_the_ruling(monkeypatch, tmp_path):
@@ -861,7 +922,7 @@ def test_replace_refuses_products_outside_the_ruling(monkeypatch, tmp_path):
         assert out["rows"][0]["status"] == status and out["written"] == [], (photos, source)
         assert shop.calls == []
         assert _spine(db)["images"] == list(photos) and _twin(db)["images"] == list(photos)
-        assert "media_map" not in _twin(db)["ecom"] and list(db["audit_logs"].find({})) == []
+        assert _adopted(db) == [] and list(db["audit_logs"].find({})) == []
     assert _no_reversal_file(tmp_path)
 
 
@@ -880,7 +941,7 @@ def test_replace_reversal_is_on_disk_before_the_write_and_a_twin_that_did_not_fo
     out = _run(db, apply=True, replace=True)
     assert out["rows"][0]["status"] == "replace" and out["written"] == []
     assert _spine(db)["images"] == [ONE]
-    assert _twin(db)["images"] == STALE and "media_map" not in _twin(db)["ecom"]
+    assert _twin(db)["images"] == STALE and _adopted(db) == []
     assert list(db["audit_logs"].find({})) == []
     printed = capsys.readouterr().out
     assert "TWIN DID NOT FOLLOW P1" in printed and "spine written to [" + ONE + "]" in printed
@@ -902,10 +963,10 @@ def test_replace_reversal_file_survives_a_crash_between_products(db, monkeypatch
     _seed_bvi(db, pid="P2", spine_id="SP2")
     real = script._replace
 
-    def crash_on_second(db_, row):
+    async def crash_on_second(db_, row):
         if row["product_id"] == "P2":
             raise RuntimeError("simulated crash between products")
-        return real(db_, row)
+        return await real(db_, row)
 
     monkeypatch.setattr(script, "_replace", crash_on_second)
     rev = tmp_path / "rev"
@@ -917,6 +978,6 @@ def test_replace_reversal_file_survives_a_crash_between_products(db, monkeypatch
         saved = json.load(fh)
     assert [p["product_id"] for p in saved["products"]] == ["P1", "P2"] and saved["applied"] == []
     assert all(p["spine_images"] == STALE and p["twin_images"] == STALE for p in saved["products"])
-    assert _spine(db)["images"] == [ONE] and _twin(db)["ecom"]["media_map"] == [{"url": ONE, "id": _m(1)}]
+    assert _spine(db)["images"] == [ONE] and _adopted(db) == [{"url": ONE, "id": _m(1)}]
     assert db["products"].find_one({"product_id": "SP2"})["images"] == STALE
     assert db["catalog_products"].find_one({"id": "P2"})["images"] == STALE

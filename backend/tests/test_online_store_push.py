@@ -40,6 +40,10 @@ import pytest  # noqa: E402
 from database.connection import MockCollection  # noqa: E402
 from api.services import shopify_push  # noqa: E402
 from api.services import rbac_policy as rbac  # noqa: E402
+from tests.strict_fakes import media_doc  # noqa: E402
+
+LEDGER = shopify_push.MEDIA_COLLECTION
+_BARE_LISTING = {"id": "gid://shopify/Product/111", "media": {"nodes": []}}
 
 
 # ===========================================================================
@@ -221,8 +225,8 @@ def test_push_collection_menu_image_simulated_no_network(monkeypatch):
     # (image_press_plan's refusals). The press re-reads its queue row.
     db["catalog_products"].insert_one(
         {"id": "P1", "images": ["https://cdn.example.com/p.jpg"],
-         "ecom": {"shopify_product_id": "gid://shopify/Product/111", "media_map": [
-             {"url": "https://cdn.example.com/p.jpg", "id": "gid://shopify/MediaImage/1"}]}})
+         "ecom": {"shopify_product_id": "gid://shopify/Product/111"}})
+    db[LEDGER].insert_one(media_doc("P1", "https://cdn.example.com/p.jpg", "gid://shopify/MediaImage/1"))
     db["product_images"].insert_one(dict(img))
 
     rc = _run(shopify_push.push_collection(db, coll))
@@ -261,7 +265,7 @@ def test_push_product_live_creates_and_writes_back_gid(monkeypatch):
         "data": {"productCreate": {
             "product": {"id": "gid://shopify/Product/111", "handle": "rb"},
             "userErrors": [],
-        }}
+        }, "product": _BARE_LISTING}
     })
     db = _EngineDB()
     db["catalog_products"].insert_one(
@@ -277,13 +281,14 @@ def test_push_product_live_creates_and_writes_back_gid(monkeypatch):
     assert res.ok is False and res.reason == "publish_withheld"
     assert res.action == "create"
     assert res.shopify_id == "gid://shopify/Product/111"
-    # The network boundary WAS hit: the product, then its photograph (the photo
-    # rides the SAME press since 2026-08-25). Nothing else: this fixture's
-    # productCreate returns no variant, so there is no tracking call, and the
-    # per-store writer reads its locations from Mongo, never from Shopify.
-    assert len(spy.calls) == 2
+    # The network boundary WAS hit: the product, the listing read, then its
+    # photograph (the photo rides the SAME press since 2026-08-25). Nothing
+    # else: this fixture's productCreate returns no variant, so there is no
+    # tracking call, and the per-store writer reads its locations from Mongo.
+    assert len(spy.calls) == 3
     assert "imsProductCreate(" in spy.calls[0]["query"]
-    assert "productCreateMedia" in spy.calls[1]["query"]
+    assert "imsProductMedia(" in spy.calls[1]["query"]
+    assert "productCreateMedia" in spy.calls[2]["query"]
 
     # Idempotency write-back: the gid is now on the doc.
     saved = db["catalog_products"].find_one({"id": "P1"})
@@ -380,8 +385,8 @@ def test_push_menu_live_writes_back_gid(monkeypatch):
 def test_push_image_live_attaches_media_and_writes_the_map(monkeypatch):
     """An APPROVED image whose parent product is already on Shopify goes through
     the listing's photo pass: one media read, one productCreateMedia for the
-    edited asset, and the MediaImage gid lands in the parent's ecom.media_map
-    (the ONE writer) -- never on the image row."""
+    edited asset, and the MediaImage gid lands in the online_media ledger
+    (the ONE writer) -- never on the image row or the twin."""
     spy = _force_live(monkeypatch, {
         "data": {
             "product": {"id": "gid://shopify/Product/111",
@@ -397,9 +402,9 @@ def test_push_image_live_attaches_media_and_writes_the_map(monkeypatch):
     # its own photograph is already on the listing and mapped.
     db["catalog_products"].insert_one(
         {"id": "P1", "images": ["https://cdn.example.com/p.jpg"],
-         "ecom": {"shopify_product_id": "gid://shopify/Product/111",
-                  "media_map": [{"url": "https://cdn.example.com/p.jpg", "id": "gid://shopify/MediaImage/1"}]}}
+         "ecom": {"shopify_product_id": "gid://shopify/Product/111"}}
     )
+    db[LEDGER].insert_one(media_doc("P1", "https://cdn.example.com/p.jpg", "gid://shopify/MediaImage/1"))
     db["product_images"].insert_one(
         {"image_id": "I1", "product_id": "P1", "url": "http://x/raw.jpg",
          "edited_url": "http://x/edited.jpg", "status": "APPROVED"}
@@ -407,12 +412,13 @@ def test_push_image_live_attaches_media_and_writes_the_map(monkeypatch):
     img = db["product_images"].find_one({"image_id": "I1"})
     res = _run(shopify_push.push_image(db, img))
     assert res.ok is True and res.shopify_id == "gid://shopify/MediaImage/900"
-    # The design row's map entry carries the queue row's image_id: the lane
+    # The design row's ledger doc carries the queue row's image_id: the lane
     # marker the product press keeps its hands off.
-    assert db["catalog_products"].find_one({"id": "P1"})["ecom"]["media_map"] == [
-        {"url": "https://cdn.example.com/p.jpg", "id": "gid://shopify/MediaImage/1"},
-        {"url": "http://x/edited.jpg", "id": "gid://shopify/MediaImage/900", "image_id": "I1"},
+    assert sorted((d["url"], d["gid"], d["image_id"]) for d in db[LEDGER].find({})) == [
+        ("http://x/edited.jpg", "gid://shopify/MediaImage/900", "I1"),
+        ("https://cdn.example.com/p.jpg", "gid://shopify/MediaImage/1", None),
     ]
+    assert set(db["catalog_products"].find_one({"id": "P1"})["ecom"]) == {"shopify_product_id"}
     assert db["product_images"].find_one({"image_id": "I1"}).get("shopify_image_id") is None
     # The read came first; the create carries ONLY the new asset, and prefers
     # the EDITED asset as the source.
@@ -716,9 +722,9 @@ def _seed_pending(conn):
          "ecom": {"status": "PUBLISHED", "handle": "rb", "locally_modified": True,
                   # On Shopify, so I1 below is a press the sweep makes (a row
                   # whose parent is not on Shopify is a refusal, never swept).
-                  "shopify_product_id": "gid://shopify/Product/1",
-                  # I2 below is already on the listing: its url is in the map.
-                  "media_map": [{"url": "http://x/b.jpg", "id": "gid://shopify/MediaImage/9"}]}})
+                  "shopify_product_id": "gid://shopify/Product/1"}})
+    # I2 below is already on the listing: its url is on record in the ledger.
+    conn.db[LEDGER].insert_one(media_doc("P1", "http://x/b.jpg", "gid://shopify/MediaImage/9"))
     conn.db["catalog_products"].insert_one(  # clean -> NOT swept
         {"id": "P2", "images": ["https://cdn.example.com/p.jpg"], "ecom": {"shopify_product_id": "gid://shopify/Product/2"}})
     conn.db["ecom_collections"].insert_one(
@@ -976,6 +982,7 @@ def test_live_push_sets_metafields_after_create(monkeypatch):
                     "product": {"id": "gid://shopify/Product/222"},
                     "userErrors": [],
                 },
+                "product": _BARE_LISTING,
                 "metafieldsSet": {
                     "metafields": [{"id": "gid://shopify/Metafield/1", "key": "frame_material"},
                                     {"id": "gid://shopify/Metafield/2", "key": "uv_protection"}],
@@ -998,13 +1005,14 @@ def test_live_push_sets_metafields_after_create(monkeypatch):
     assert res.mode == "LIVE"
     # (Unpriced fixture -> the publish is withheld; the metafield side channel
     # below is what this test is about.)
-    # Three network calls: productCreate, ONE metafieldsSet chunk and the
-    # photograph (which rides the same press since 2026-08-25). The stock step
-    # adds none here: no variant came back to track, and the per-store writer
-    # reads its locations from Mongo.
-    assert len(spy.calls) == 3
+    # Four network calls: productCreate, ONE metafieldsSet chunk, the
+    # listing read and the photograph (which rides the same press since
+    # 2026-08-25). The stock step adds none here: no variant came back to
+    # track, and the per-store writer reads its locations from Mongo.
+    assert len(spy.calls) == 4
     assert "metafieldsSet" in spy.calls[1]["query"]
-    assert "productCreateMedia" in spy.calls[2]["query"]
+    assert "imsProductMedia(" in spy.calls[2]["query"]
+    assert "productCreateMedia" in spy.calls[3]["query"]
     mfs = spy.calls[1]["variables"]["metafields"]
     assert all(m["ownerId"] == "gid://shopify/Product/222" for m in mfs)
     assert sorted(m["key"] for m in mfs) == ["frame_material", "uv_protection"]
@@ -1622,11 +1630,9 @@ def test_push_all_pending_presses_a_mapped_image_whose_old_asset_is_still_up(cli
     _force_dark(monkeypatch, "writes_off")
     conn.db["catalog_products"].insert_one(
         {"id": "P1", "images": ["https://cdn.example.com/p.jpg"],
-         "ecom": {"shopify_product_id": "gid://shopify/Product/1",
-                  "media_map": [
-                      {"url": "http://x/new.jpg", "id": "gid://shopify/MediaImage/9", "image_id": "I1"},
-                      {"url": "http://x/old.jpg", "id": "gid://shopify/MediaImage/8", "image_id": "I1"},
-                  ]}})
+         "ecom": {"shopify_product_id": "gid://shopify/Product/1"}})
+    conn.db[LEDGER].insert_one(media_doc("P1", "http://x/new.jpg", "gid://shopify/MediaImage/9", image_id="I1"))
+    conn.db[LEDGER].insert_one(media_doc("P1", "http://x/old.jpg", "gid://shopify/MediaImage/8", image_id="I1"))
     conn.db["product_images"].insert_one(
         {"image_id": "I1", "product_id": "P1", "url": "http://x/new.jpg", "status": "APPROVED"})
 

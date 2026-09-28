@@ -35,6 +35,9 @@ from database.repositories.product_image_repository import (  # noqa: E402
     VALID_TRANSITIONS,
 )
 from api.services import rbac_policy as rbac  # noqa: E402
+from tests.strict_fakes import media_doc  # noqa: E402
+
+LEDGER = "online_media"
 
 
 # ===========================================================================
@@ -65,7 +68,7 @@ def test_create_then_get_roundtrip_with_defaults(repo):
     assert created["reviewed_by"] is None
     assert created["approved_at"] is None
     # No Shopify id on the row: once pressed, its identity on Shopify is the
-    # parent twin's ecom.media_map row (shopify_push.media), never a field here.
+    # live online_media doc (shopify_push.media), never a field here.
     assert "shopify_image_id" not in created
     assert "created_at" in created and "updated_at" in created
 
@@ -491,13 +494,14 @@ def test_live_get_and_delete_unknown_is_404(client, auth_headers, patched_db):
 
 def test_live_delete_is_refused_while_the_rows_media_is_on_the_listing(client, auth_headers, patched_db):
     """Round 4 P3: the design press takes a media down only through its row,
-    so deleting a row whose lane still maps media on the parent's listing
-    (here the asset it carried BEFORE it was edited -- its current url maps
-    nothing, so 'has a gid' alone would let it through) would leave that
-    media up and its map row orphaned forever. 409, the row kept. Once the
-    media is off the listing (the product press prunes the row), it deletes.
-    A row whose url is one of the product's own photographs maps nothing in
-    its lane (that media is the product's) and deletes.
+    so deleting a row whose lane still holds media on the parent's listing
+    (here the asset it carried BEFORE it was edited -- its current url is on
+    record for nothing, so 'has a gid' alone would let it through) would
+    leave that media up and its ledger doc orphaned forever. 409, the row
+    kept. Once the media is off the listing (the product press prunes the
+    doc), it deletes. A row whose url is one of the product's own
+    photographs holds nothing in its lane (that media is the product's) and
+    deletes.
     REVERT-PROOF: drop the lane refusal in delete_image -> red (200)."""
     conn, _ = patched_db
     base = "/api/v1/online-store/images"
@@ -506,11 +510,10 @@ def test_live_delete_is_refused_while_the_rows_media_is_on_the_listing(client, a
         "product_id": "P1", "url": "https://cdn.example.com/design-v2.jpg"}).json()["image"]["image_id"]
     own_iid = client.post(base, headers=auth_headers, json={
         "product_id": "P1", "url": own}).json()["image"]["image_id"]
-    ecom = {"shopify_product_id": "gid://shopify/Product/1", "media_map": [
-        {"url": own, "id": "gid://shopify/MediaImage/1", "image_id": own_iid},
-        {"url": v1, "id": "gid://shopify/MediaImage/100", "image_id": iid},
-    ]}
+    ecom = {"shopify_product_id": "gid://shopify/Product/1"}
     conn.db["catalog_products"].insert_one({"id": "P1", "images": [own], "ecom": ecom})
+    conn.db[LEDGER].insert_one(media_doc("P1", own, "gid://shopify/MediaImage/1", image_id=own_iid))
+    conn.db[LEDGER].insert_one(media_doc("P1", v1, "gid://shopify/MediaImage/100", image_id=iid, _id="v1"))
 
     r = client.delete(f"{base}/{iid}", headers=auth_headers)
     assert r.status_code == 409, r.text
@@ -519,8 +522,7 @@ def test_live_delete_is_refused_while_the_rows_media_is_on_the_listing(client, a
 
     assert client.delete(f"{base}/{own_iid}", headers=auth_headers).status_code == 200, "the product's lane"
 
-    ecom["media_map"] = ecom["media_map"][:1]
-    conn.db["catalog_products"].update_one({"id": "P1"}, {"$set": {"ecom": ecom}})
+    conn.db[LEDGER].delete_one({"_id": "v1"})
     assert client.delete(f"{base}/{iid}", headers=auth_headers).status_code == 200
     assert client.get(f"{base}/{iid}", headers=auth_headers).status_code == 404
 
@@ -652,15 +654,15 @@ def test_admin_can_sign_off(client, auth_headers, patched_db):
     assert r.json()["image"]["status"] == "APPROVED"
 
 
-def test_live_list_reads_the_synced_chip_off_the_parents_media_map(client, auth_headers, patched_db):
+def test_live_list_reads_the_synced_chip_off_the_media_ledger(client, auth_headers, patched_db):
     """`shopify_media_id` on a listed row -- the Synced chip on the Design
-    Queue card -- is the parent twin's ecom.media_map gid for the row's
-    source url (the one identity a pushed design image has), read at list
+    Queue card -- is the live online_media gid for the row's source url on
+    its parent (the one identity a pushed design image has), read at list
     time and never stored on the row. A row not on the listing reads null."""
     conn, _ = patched_db
-    conn.db["catalog_products"].insert_one(
-        {"id": "P1", "ecom": {"media_map": [
-            {"url": "http://x/edited.jpg", "id": "gid://shopify/MediaImage/900", "image_id": "I1"}]}})
+    conn.db["catalog_products"].insert_one({"id": "P1", "ecom": {}})
+    conn.db[LEDGER].insert_one(
+        media_doc("P1", "http://x/edited.jpg", "gid://shopify/MediaImage/900", image_id="I1"))
     conn.db["product_images"].insert_one(
         {"image_id": "I1", "product_id": "P1", "url": "http://x/raw.jpg",
          "edited_url": "http://x/edited.jpg", "status": "APPROVED"})

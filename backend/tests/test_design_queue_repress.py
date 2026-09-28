@@ -1,82 +1,56 @@
 """
 The design-queue press (shopify_push.push_image) and the product press share
-ONE identity for a photograph on Shopify: the parent twin's ``ecom.media_map``.
+ONE identity for a photograph on Shopify: its doc in the ``online_media``
+ledger (shopify_push.media).
 
-THE BUG THIS LOCKS DOWN (sync audit 2026-09-06, item 10)
---------------------------------------------------------
-push_image used to call productCreateMedia on every LIVE press and record the
-minted gid on the image row (``product_images.shopify_image_id``) -- a second
-"which Shopify media is this IMS photo" writer beside the twin's media_map.
-productCreateMedia is a pure create, the press never consulted the map, so a
-re-press attached the same source url AGAIN (duplicate media on the listing)
-and the row overwrite dropped the earlier gid with no tombstone: 24 orphan
-rows with dead media ids.
+THE BUGS THIS LOCKS DOWN
+------------------------
+Sync audit 2026-09-06, item 10: push_image called productCreateMedia on every
+LIVE press; a re-press attached the same url again. Rounds 1-8 then kept the
+media state on the twin (``ecom.media_map`` / ``ecom.media_pending``) and
+recognised IMS's own attach by ``originalSource.url == the IMS url``. Three
+root causes the round-5..8 panels exposed, each pinned below:
 
-THE RULE NOW: a design-queue image is on Shopify iff the parent twin's
-media_map maps its source url, and what a press does is read off that map by
-ONE predicate (media.image_press_plan: noop | update | create) the press, the
-sweep's skip and the pushed/pending counts all share. The LIVE press runs the
-SAME photo pass the product press runs (sync_product_media, against the media
-the listing carries right now) in the DESIGN LANE: photos = this row's url
-alone, design_row = the row. Two lanes, one map: a row with an image_id is the
-design lane, a row without is the product's; each press governs its own lane
-(attach / delete / reorder) and KEEPS the other exactly where it is. The
-product press (and so the 01:00/09:00 sync) never reads the design queue;
-the design press never attaches an own photograph the product press has not
-put up, never drops one IMS removed, never reorders. A url that is one of the
-product's own photographs is the product's lane whichever door attached it.
-The pass writes the map on EVERY run, so a media that left Shopify behind
-IMS's back is pruned on the next press of either door.
+  (1) IDENTITY. In production originalSource is Shopify's OWN storage copy
+      (scripts/adopt_shopify_media_map.py: measured 2026-09-06, 42 twins, 180
+      media), never the url IMS sent -- so every lost-answer repair matched
+      nothing and duplicated. The fake here is PRODUCTION-SHAPED: a create
+      answers UPLOADED with no image, originalSource is a
+      shopify-shop-assets storage url, and the CDN copy (after ``ready()``)
+      keeps the source FILE NAME (+ ``_<uuid>`` on a Files collision). A
+      pending attach is settled BY FILE NAME (media._settle).
+  (2) RETRY. The transport replayed a timed-out productCreateMedia: two media.
+      It is sent once now (test_online_store_push covers the transport; T1
+      here runs the REAL _graphql through _post_once).
+  (3) MANY WRITERS. Whole-doc and whole-ecom writers of the twin wrote the
+      map back from stale copies. The state lives in its own collection now
+      (T8, T17), so no twin writer can touch it.
+  (4) A stale sweep doc re-added a photo the twin no longer had (T10); the
+      delete gate normalised live rows but not pending ones (T11).
 
-Every Shopify call is MOCKED (shopify_push._graphql is monkeypatched to a
-transcript fake); no real network request is ever made.
+Every Shopify call is MOCKED (shopify_push._graphql, or _post_once under the
+real _graphql); no real network request is ever made.
 
-REVERT-PROOF (each test names the one-line revert that turns it red):
-  test_a_first_press...            revert the map write (row writer)          -> red
-  test_a_repress...                drop the image_press_plan no-op check      -> red
-  test_a_replaced_asset...         attach without the pass (old create)       -> red
-  test_a_failed_delete_keeps...    map written from owned, not owned+pending  -> red
-  test_hand_uploaded...            skip the media read (pass current=[])      -> red
-  test_a_listing_ims_owns...       attach blind on hands_off                  -> red
-  test_pressing_one_image...       union every APPROVED row into the list     -> red
-  test_the_product_press_never..   any product_images read in push_product    -> red
-  test_the_product_press_neither.. delete rule without the lane (_governed)   -> red
-  test_the_product_press_leaves..  reorder compared over keep, not desired    -> red
-  test_door_a_then_owns...         prune the other lane in _in_ims_order      -> red
-  test_dark_press...               read the media before the gate             -> red
-  test_a_map_writeback_failure..   trust the pass instead of re-reading       -> red
-  test_an_unfetchable_asset...     image_source_url without _photo_url        -> red
-  test_the_in_app_url...           image_source_url without _photo_url        -> red
-  test_a_size_variant_twin...      _listing_map without the is_variant_of     -> red
-  -- round 2 --
-  test_a_product_without_a_photo.. drop the product_photo_urls gate (P1)      -> red
-  test_a_public_url_drift...       same gate, the config-drift shape (P1)     -> red
-  test_the_design_press_never_gov. _governed without the lane split (P1 root) -> red
-  test_the_rows_alt_text...        _attach_product_photos without alts (P2)   -> red
-  test_a_design_press_of_an_own..  stamp image_id on an own-photo url (P3)    -> red
-  test_a_replaced_asset_already..  map written only on attach/delete (P4)     -> red
-  test_a_design_media_deleted...   same: the no-change product press writes   -> red
-  test_the_press_the_sweep...      sweep/counts on image_media_gid alone (P5) -> red
-  -- round 4 --
-  test_a_design_asset_promoted...  owned_media without the by-url lane (P1)    -> red
-  test_a_product_press_on_a_stale. map written from the snapshot, no merge (P2) -> red
-  test_a_design_press_on_a_stale.. same revert, the other door (P2)           -> red
-  test_the_refusals_are_the_plans. image_press_plan without the skip fold (P4) -> red
-  -- round 5 --
-  test_a_listing_ims_owns_nothing.. image_press_plan without hands_off (P3)    -> red
-  test_a_row_whose_lane_flips...    _merge by lane, not by id (P1)             -> red
-  test_two_presses_on_one_product.. media_lease that claims nothing (P1/P2)    -> red
-  test_the_press_reads_the_queue..  press the passed copy, no re-read          -> red
-  test_replacing_one_rows_asset...  heirs={} (P2 sibling)                      -> red
-  test_an_attach_whose_answer...    plan_product_media without adopt           -> red
-  test_a_row_delete_waits...        media_lease that claims nothing (P4)       -> red
-  test_deleting_a_promoted_rows...  delete_image without the map write (P1)    -> red
-  test_the_delete_gate_fails...     the gate on _resolve_product_doc (P2)      -> red
-  -- round 6 --
-  test_a_rows_delete_is_refused..   image_lane_media without pending_media     -> red
-  test_a_map_writeback_failure..    the attach sent with no pending record     -> red
-  test_a_lost_attach_of_a_row_re..  plan_product_media without the settle      -> red
-  test_a_product_blocked_from_on..  image_press_plan without the block refusal -> red
+REVERT-PROOF (each test names the revert that turns it red; the new ones
+were run red against it before they counted):
+  T1  test_a_lost_answer_is_one_media...      transport retry-all          -> 2 media
+                                              hits never match by name     -> 2nd attach
+  T3  test_a_node_still_processing...         nameless counted as absent   -> attach
+  T4  test_a_pending_attach_is_dropped_...    no grace                     -> attach at 5 min
+  T5  test_a_generic_name_is_never_claimed    _ims_unique -> True          -> hand upload deleted
+  T6  test_two_hits_hold / ..._one_node       len(ids)==1 / load check off -> claimed
+  T7  test_a_naming_drift_holds_every...      canary off                   -> re-attach
+  T8  test_stale_whole_doc_writers...         (structural: T17)
+  T9  test_a_stolen_lease_sends_nothing       renew() -> True              -> 1 send
+  T10 test_a_stale_sweep_doc_never...         drop the NO_PHOTO refusal    -> deletes
+  T11 test_the_delete_gate_clears_the_stamp.. normalise live docs only     -> red
+  T13 test_a_failed_media_is_replaced... /    on_shopify counts FAILED     -> published
+      test_a_failed_only_listing_...
+  T14 test_the_dark_press_plans...            (read before the gate)       -> red
+  T15 test_one_rejected_photo_...             no grace / stop-on-error     -> red
+  T17 test_no_media_state_lives_on_the_twin   put a media_map constant back-> red
+  old test_the_old_originalsource_identity... (documents the production shape)
+  and the ported round 1-6 tests, each with the revert it names.
 
 Run: JWT_SECRET_KEY=test python -m pytest backend/tests/test_design_queue_repress.py -q
 """
@@ -90,22 +64,37 @@ os.environ.setdefault("ENVIRONMENT", "test")
 
 import asyncio  # noqa: E402
 import copy  # noqa: E402
+import re  # noqa: E402
+import uuid  # noqa: E402
+from datetime import datetime, timedelta, timezone  # noqa: E402
+from urllib.parse import urlsplit  # noqa: E402
 
+import httpx  # noqa: E402
 import pytest  # noqa: E402
 from pymongo.errors import DuplicateKeyError  # noqa: E402
 
 from database.connection import MockCollection  # noqa: E402
 from api.services import shopify_push  # noqa: E402
 from api.services.shopify_push import media as _media  # noqa: E402
+from tests.strict_fakes import media_doc  # noqa: E402
 
 TOMB = shopify_push.TOMBSTONES_COLLECTION
+LEDGER = shopify_push.MEDIA_COLLECTION
 GID = "gid://shopify/Product/900"
 OWN = "https://cdn.example.com/rb-front.jpg"  # the product's own photograph
 OWN2 = "https://cdn.example.com/rb-side.jpg"  # a second own photograph
 OLD = "https://cdn.example.com/design-v1.jpg"  # a design asset pressed earlier
 NEW = "https://cdn.example.com/design-v2.jpg"  # the designer's replacement
 OTHER = "https://cdn.example.com/design-other.jpg"  # a sibling design row's asset
-HAND = "gid://shopify/MediaImage/7"  # a human's upload -- never in the map
+# IMS-minted names (a uuid4 hex upload key; the in-app uploader's ObjectId):
+# the only names a pending attach may be settled by.
+U1 = "https://img.example.com/P1/3f2a9c1e5b7d4e6f8a0b1c2d3e4f5a6b.png"
+U2 = "https://img.example.com/P1/9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d.png"
+OID = "https://api.example.com/api/v1/products/image/65f1a2b3c4d5e6f7a8b9c0d1"
+HAND = "gid://shopify/MediaImage/7"  # a human's upload -- never in the ledger
+CDN = "https://cdn.shopify.com/s/files/1/0000/0001/files/"
+STORAGE = "https://shopify-shop-assets.storage.googleapis.com/s/files/"
+_EXT = re.compile(r"\.(jpe?g|png|gif|webp)$", re.I)
 
 
 def _m(n):
@@ -116,11 +105,16 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+def _ago(minutes, naive=False):
+    at = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+    return at.replace(tzinfo=None) if naive else at
+
+
 class _Coll:
-    """A MockCollection read with real Mongo's semantics: find_one hands back
-    a COPY, so a doc a press read is a snapshot a later write does not mutate
-    (MockCollection returns the stored dict itself, which would hide every
-    interleaving between two presses). Everything else is delegated."""
+    """A MockCollection read with real Mongo's semantics: find_one / find hand
+    back COPIES, so a doc a press read is a snapshot a later write does not
+    mutate. insert_one refuses a duplicate _id (the media lease is exactly
+    that claim; MockCollection would overwrite). Everything else delegates."""
 
     def __init__(self, name):
         self._m = MockCollection(name)
@@ -128,9 +122,10 @@ class _Coll:
     def find_one(self, *args, **kwargs):
         return copy.deepcopy(self._m.find_one(*args, **kwargs))
 
+    def find(self, *args, **kwargs):
+        return [copy.deepcopy(d) for d in self._m.find(*args, **kwargs)]
+
     def insert_one(self, doc):
-        # Mongo's unique _id: a second insert of one _id is REFUSED (the media
-        # lease is exactly that claim; MockCollection would overwrite).
         if doc.get("_id") is not None and self._m.find_one({"_id": doc["_id"]}) is not None:
             raise DuplicateKeyError("E11000 duplicate key error")
         return self._m.insert_one(doc)
@@ -158,28 +153,57 @@ class _NoQueueDB(_DB):
         return super().__getitem__(name)
 
 
+def _cdn_name(url):
+    name = urlsplit(url).path.rsplit("/", 1)[-1]
+    return name if _EXT.search(name) else name + ".png"
+
+
+def _node(i, url=None, status="READY", name=None):
+    """A media already on the listing, as the listing query answers it: READY
+    with its CDN copy named after ``url`` (a hand upload when url is None)."""
+    name = name or (_cdn_name(url) if url else "hand-upload-%d.jpg" % i)
+    return {
+        "id": _m(i),
+        "status": status,
+        "image": {"url": CDN + name + "?v=1700000000"} if status == "READY" else None,
+    }
+
+
 class _Shopify:
-    """A fake Shopify that routes on the operation and keeps a transcript.
-    ``media_nodes`` is what the listing carries before the press; a create
-    mints one MediaImage per input (100, 101, ...) and a delete removes them,
-    so the fake's listing is what the next read returns. ``fail_delete_once``
-    answers the next productDeleteMedia with a mediaUserError and removes
-    nothing. ``on_read`` (once) runs just before the next media read answers:
-    another door's press landing inside this press's window; ``before[op]``
-    (once) does the same for any operation. ``lose_create_once`` lands the
-    next productCreateMedia on the listing and then raises, as the transport
-    does when the response is lost (a timeout after Shopify accepted it).
+    """A PRODUCTION-SHAPED fake Shopify that routes on the operation and keeps
+    a transcript.
+      * productCreateMedia mints one MediaImage per input (100, 101, ...):
+        status UPLOADED, NO image, originalSource = Shopify's own storage
+        copy (never the url IMS sent); it answers {id, status: UPLOADED}.
+      * ready() makes every UPLOADED/PROCESSING node READY with its CDN url:
+        the source file name (+ '.png' when it has no image extension), with
+        '_<uuid4>' before the extension when that name is already in Files
+        (Files keeps a name after its media is deleted).
+      * fail(gid) marks a node FAILED; commit_then(exc) lets the NEXT create
+        commit its node and then raises exc (the answer is lost); ``reject``
+        (a set of urls) answers mediaUserErrors and creates nothing.
+      * the listing read (imsProductMedia) answers id/status/image only, in
+        insertion order -- what the query selects.
+      * ``on_read`` (once) runs just before the next listing read answers;
+        ``before[op]`` (once) before any operation.
     Every call AWAITS once, as the real transport does, so two presses
     gathered on one loop interleave exactly as two workers would."""
 
     def __init__(self, media_nodes=None):
         self.calls = []
-        self.media_nodes = list(media_nodes or [])
+        self.media_nodes = [dict(n) for n in media_nodes or []]
+        self.files = {self._name(n) for n in self.media_nodes if self._name(n)}
         self.next_media = 100
         self.fail_delete_once = False
-        self.lose_create_once = False
+        self.reject = set()
+        self._commit_then = None
         self.on_read = None
         self.before = {}
+
+    @staticmethod
+    def _name(node):
+        url = ((node.get("image") or {}).get("url")) or ""
+        return urlsplit(url).path.rsplit("/", 1)[-1] if url else None
 
     @staticmethod
     def _op(query):
@@ -202,11 +226,36 @@ class _Shopify:
                 return name
         return "unknown"
 
+    def commit_then(self, exc):
+        self._commit_then = exc
+
+    def ready(self):
+        for n in self.media_nodes:
+            if n.get("status") in ("UPLOADED", "PROCESSING"):
+                name = _cdn_name(n["src"])
+                if name in self.files:
+                    stem, ext = os.path.splitext(name)
+                    name = "%s_%s%s" % (stem, uuid.uuid4(), ext)
+                self.files.add(name)
+                n["status"] = "READY"
+                n["image"] = {"url": CDN + name + "?v=1700000001"}
+
+    def fail(self, gid):
+        for n in self.media_nodes:
+            if n["id"] == gid:
+                n["status"], n["image"] = "FAILED", None
+
+    def node(self, gid):
+        return next(n for n in self.media_nodes if n["id"] == gid)
+
     def ops(self):
         return [c["op"] for c in self.calls]
 
     def calls_of(self, op):
         return [c for c in self.calls if c["op"] == op]
+
+    def attached(self):
+        return [m["originalSource"] for c in self.calls_of("imsProductCreateMedia") for m in c["variables"]["media"]]
 
     def listing(self):
         return [n["id"] for n in self.media_nodes]
@@ -228,27 +277,37 @@ class _Shopify:
             hook, self.on_read = self.on_read, None
             if hook:
                 hook()
-            return {
-                "data": {
-                    "product": {"id": variables["id"], "media": {"nodes": copy.deepcopy(self.media_nodes)}}
-                }
-            }
+            nodes = [{"id": n["id"], "status": n.get("status"), "image": copy.deepcopy(n.get("image"))} for n in self.media_nodes]
+            return {"data": {"product": {"id": variables["id"], "media": {"nodes": nodes}}}}
         if op == "imsProductCreateMedia":
             out = []
             for m in variables.get("media") or []:
+                src = m["originalSource"]
+                if src in self.reject:
+                    return {
+                        "data": {
+                            "productCreateMedia": {
+                                "media": [],
+                                "mediaUserErrors": [{"field": ["media", "0", "originalSource"], "message": "Image URL is invalid"}],
+                            }
+                        }
+                    }
                 gid = _m(self.next_media)
                 self.next_media += 1
-                out.append({"id": gid, "status": "PROCESSING"})
+                out.append({"id": gid, "status": "UPLOADED", "mediaErrors": []})
                 self.media_nodes.append(
                     {
                         "id": gid,
-                        "image": {"url": "https://cdn.shopify.com/%s.jpg" % gid.rsplit("/", 1)[-1]},
-                        "originalSource": {"url": m["originalSource"]},
+                        "status": "UPLOADED",
+                        "image": None,
+                        "src": src,
+                        "alt": m.get("alt"),
+                        "originalSource": {"url": STORAGE + uuid.uuid4().hex + "/" + urlsplit(src).path.rsplit("/", 1)[-1]},
                     }
                 )
-            if self.lose_create_once:
-                self.lose_create_once = False
-                raise RuntimeError("shopify request failed after 3 attempts (timeout)")
+            if self._commit_then is not None:
+                exc, self._commit_then = self._commit_then, None
+                raise exc
             return {"data": {"productCreateMedia": {"media": out, "mediaUserErrors": []}}}
         if op == "imsProductDeleteMedia":
             if self.fail_delete_once:
@@ -264,12 +323,7 @@ class _Shopify:
             return {
                 "data": {
                     field: {
-                        "product": {
-                            "id": GID,
-                            "handle": "h",
-                            "variants": {"nodes": [variant]},
-                            "media": {"nodes": copy.deepcopy(self.media_nodes)},
-                        },
+                        "product": {"id": GID, "handle": "h", "variants": {"nodes": [variant]}},
                         "userErrors": [],
                     }
                 }
@@ -308,26 +362,25 @@ def _live(monkeypatch, media_nodes=None):
     return fake
 
 
-def _nodes(*ids):
-    return [{"id": _m(i), "image": {"url": "https://cdn.shopify.com/%d.jpg" % i}} for i in ids]
+def _wire(monkeypatch, media_nodes=None):
+    """The fake behind the REAL _graphql: _post_once answers from it (a raise
+    in the fake is a raise of the HTTP call), so the transport's send-once
+    rule is in the path."""
+    fake = _Shopify(media_nodes)
+
+    async def _post_once(url, headers, payload):
+        return httpx.Response(200, json=await fake(None, payload["query"], payload["variables"]))
+
+    monkeypatch.setattr(shopify_push, "_post_once", _post_once)
+    return fake
 
 
 def _hand():
-    return [{"id": HAND, "image": {"url": "https://cdn.shopify.com/hand-upload.jpg"}}]
+    return [_node(7)]
 
 
-def _row_of(entry):
-    """A media_map row from a (url, gid) or (url, gid, image_id) tuple: the
-    third element marks a design-queue press's media."""
-    row = {"url": entry[0], "id": entry[1]}
-    if len(entry) > 2:
-        row["image_id"] = entry[2]
-    return row
-
-
-def _product(photos, media_map=None, pid="P1", **over):
-    """A product LIVE on Shopify with the given IMS photo list and the media
-    IMS recorded as its own (None = a pre-map listing)."""
+def _product(photos, pid="P1", **over):
+    """A product LIVE on Shopify with the given IMS photo list."""
     doc = {
         "id": pid,
         "sku": "SKU-1",
@@ -344,15 +397,25 @@ def _product(photos, media_map=None, pid="P1", **over):
             "shopify_variant_id": "gid://shopify/ProductVariant/901",
         },
     }
-    if media_map is not None:
-        doc["ecom"]["media_map"] = [_row_of(e) for e in media_map]
     doc["ecom"].update(over)
     return doc
 
 
-def _seed(db, doc):
+def _seed(db, doc, *ledger, pid=None):
+    """The twin, and the media IMS owns on its listing: (url, n[, image_id])
+    live docs (how=minted) -- none = a listing IMS owns nothing on."""
     db["catalog_products"].insert_one(copy.deepcopy(doc))
+    for e in ledger:
+        _own(db, *e, pid=pid or doc["id"])
     return copy.deepcopy(doc)
+
+
+def _own(db, url, n, image_id=None, pid="P1", how=None):
+    db[LEDGER].insert_one(media_doc(pid, url, _m(n), image_id=image_id, how=how))
+
+
+def _pend(db, url, image_id=None, pid="P1", minutes=0, naive=False):
+    db[LEDGER].insert_one(media_doc(pid, url, None, image_id=image_id, sent_at=_ago(minutes, naive)))
 
 
 def _image(db, iid, url, **over):
@@ -362,8 +425,21 @@ def _image(db, iid, url, **over):
     return db["product_images"].find_one({"image_id": iid})
 
 
-def _map_of(db, pid="P1"):
-    return (db["catalog_products"].find_one({"id": pid}) or {})["ecom"].get("media_map")
+def _docs(db, pid="P1"):
+    return [d for d in db[LEDGER].find({}) if d.get("product_id") == pid]
+
+
+def _ledger(db, pid="P1"):
+    """The LIVE docs as {(url, gid, image_id)}."""
+    return {(d["url"], d["gid"], d.get("image_id")) for d in _docs(db, pid) if d.get("gid")}
+
+
+def _pending(db, pid="P1"):
+    return {(d["url"], d.get("image_id")) for d in _docs(db, pid) if not d.get("gid")}
+
+
+def _rows(db, pid="P1"):
+    return shopify_push.media_rows(db, pid)
 
 
 def _row(db, iid):
@@ -374,39 +450,63 @@ def _parent(db, pid="P1"):
     return db["catalog_products"].find_one({"id": pid})
 
 
+def _plan(db, img, pid="P1"):
+    return shopify_push.image_press_plan(_parent(db, pid), img, _rows(db, pid))
+
+
+def _gid(db, img, pid="P1"):
+    return shopify_push.image_media_gid(_parent(db, pid), img, _rows(db, pid))
+
+
+def _age(db, url, minutes, naive=False, pid="P1"):
+    """Push a pending doc's sent_at back -- the clock moving on."""
+    db[LEDGER].update_many({"product_id": pid, "url": url}, {"$set": {"sent_at": _ago(minutes, naive)}})
+
+
+def _delete_route(monkeypatch, db):
+    """DELETE /online-store/images/{id} bound to this test's db."""
+    from api.routers import online_store_images as images
+
+    monkeypatch.setattr(images, "_get_db", lambda: db)
+    return lambda iid: images.delete_image(iid, current_user={})
+
+
 # ===========================================================================
 # ONE identity, ONE writer
 # ===========================================================================
 
 
-def test_a_first_press_attaches_once_and_writes_only_the_map(gates, monkeypatch):
-    """The press reads the listing, attaches ONLY the new asset, and records
-    the gid in the parent's media_map WITH the row's image_id (the lane
-    marker). The row carries no Shopify id."""
-    fake = _live(monkeypatch, _nodes(1))
+def test_a_first_press_attaches_once_and_writes_only_the_ledger(gates, monkeypatch):
+    """The press reads the listing, attaches ONLY the new asset and records it
+    live in the ledger WITH the row's image_id (the lane marker), minted from
+    Shopify's own answer. The row carries no Shopify id; the twin carries no
+    media state at all."""
+    fake = _live(monkeypatch, [_node(1, OWN)])
     db = _DB()
-    _seed(db, _product([OWN], media_map=[(OWN, _m(1))]))
+    _seed(db, _product([OWN]), (OWN, 1))
     img = _image(db, "I1", "https://cdn.example.com/raw.jpg", edited_url=NEW)
 
     res = _run(shopify_push.push_image(db, img))
 
-    assert res.ok is True and res.mode == "LIVE" and res.action == "create"
+    assert res.ok is True and res.mode == "LIVE" and res.action == "create", res.error
     assert res.shopify_id == _m(100)
     assert fake.ops() == ["imsProductMedia", "imsProductCreateMedia"]
-    (att,) = fake.calls_of("imsProductCreateMedia")
-    assert [m["originalSource"] for m in att["variables"]["media"]] == [NEW], "the edited asset, once"
-    assert _map_of(db) == [{"url": OWN, "id": _m(1)}, {"url": NEW, "id": _m(100), "image_id": "I1"}]
-    assert _row(db, "I1").get("shopify_image_id") is None, "the map is the ONLY writer"
+    assert fake.attached() == [NEW], "the edited asset, once"
+    assert _ledger(db) == {(OWN, _m(1), None), (NEW, _m(100), "I1")}
+    assert [d["how"] for d in _docs(db) if d["gid"] == _m(100)] == ["minted"]
+    assert _pending(db) == set()
+    assert _row(db, "I1").get("shopify_image_id") is None, "the ledger is the ONLY writer"
+    assert set(_parent(db)["ecom"]) == {"status", "locally_modified", "shopify_product_id", "shopify_variant_id"}
     assert res.photos["attached"] == 1 and res.photos["deleted"] == 0
 
 
 def test_a_repress_is_a_noop_with_zero_calls(gates, monkeypatch):
     """The exact 09-06 finding: pressing Publish twice must not mint a second
     MediaImage. The second press reports 'already on the listing' with the
-    gid, and makes no call at all -- not even the read."""
-    fake = _live(monkeypatch, _nodes(1))
+    gid and makes no call at all -- not even the read."""
+    fake = _live(monkeypatch, [_node(1, OWN)])
     db = _DB()
-    _seed(db, _product([OWN], media_map=[(OWN, _m(1))]))
+    _seed(db, _product([OWN]), (OWN, 1))
     img = _image(db, "I1", NEW)
     first = _run(shopify_push.push_image(db, img))
     assert first.ok and first.action == "create" and first.shopify_id == _m(100)
@@ -419,45 +519,43 @@ def test_a_repress_is_a_noop_with_zero_calls(gates, monkeypatch):
     assert again.reason == "already on the listing"
     assert len(fake.calls) == calls_before, "zero mutations, zero reads"
     assert fake.listing() == [_m(1), _m(100)], "exactly one copy on the listing"
-    assert _map_of(db) == [{"url": OWN, "id": _m(1)}, {"url": NEW, "id": _m(100), "image_id": "I1"}]
 
 
 def test_a_replaced_asset_tombstones_deletes_the_old_and_attaches_the_new_once(gates, monkeypatch):
     """The designer replaced the asset on the same row (edited_url OLD -> NEW).
-    The press attaches NEW first, tombstones OLD, deletes it -- the SAME
-    attach -> delete order and primitives the product press uses -- and the
-    map swaps the row. Nothing is attached twice, nothing is lost silently."""
-    fake = _live(monkeypatch, _nodes(1, 2))
+    The press attaches NEW first, tombstones OLD, deletes it, and the ledger
+    swaps the doc. Nothing is attached twice, nothing is lost silently."""
+    fake = _live(monkeypatch, [_node(1, OWN), _node(2, OLD)])
     db = _DB()
-    _seed(db, _product([OWN], media_map=[(OWN, _m(1)), (OLD, _m(2), "I1")]))
+    _seed(db, _product([OWN]), (OWN, 1), (OLD, 2, "I1"))
     img = _image(db, "I1", "https://cdn.example.com/raw.jpg", edited_url=NEW)
 
     res = _run(shopify_push.push_image(db, img))
 
     assert res.ok is True and res.action == "create" and res.shopify_id == _m(100)
     assert fake.ops() == ["imsProductMedia", "imsProductCreateMedia", "imsProductDeleteMedia"]
-    (att,) = fake.calls_of("imsProductCreateMedia")
-    assert [m["originalSource"] for m in att["variables"]["media"]] == [NEW]
+    assert fake.attached() == [NEW]
     (dele,) = fake.calls_of("imsProductDeleteMedia")
     assert dele["variables"]["mediaIds"] == [_m(2)]
     stones = list(db[TOMB].find({}))
     assert [(s["product_id"], s["media_gid"], s["url"]) for s in stones] == [("P1", _m(2), OLD)]
-    assert stones[0]["deleted_at"].tzinfo is not None, "tz-aware UTC"
+    assert stones[0]["shopify_url"].startswith(CDN) and stones[0]["deleted_at"].tzinfo is not None
     assert fake.listing() == [_m(1), _m(100)]
-    assert _map_of(db) == [{"url": OWN, "id": _m(1)}, {"url": NEW, "id": _m(100), "image_id": "I1"}]
+    assert _ledger(db) == {(OWN, _m(1), None), (NEW, _m(100), "I1")}
     assert res.photos["attached"] == 1 and res.photos["deleted"] == 1
 
 
-def test_a_failed_delete_keeps_the_old_asset_mapped_until_a_re_press_takes_it_down(gates, monkeypatch):
+def test_a_failed_delete_keeps_the_old_asset_on_record_until_a_re_press_takes_it_down(gates, monkeypatch):
     """Shopify refuses the delete of the replaced asset. The press is loud
-    (ok=False) and the map STILL holds OLD -- a row leaves the map only after
-    its media is off Shopify -- so the re-press is not a no-op over an
-    orphan: it runs the pass again, deletes OLD, attaches nothing. In
-    between, the product press keeps its hands off both design rows."""
-    fake = _live(monkeypatch, _nodes(1, 2))
+    (ok=False) and the ledger STILL holds OLD -- a doc leaves only after its
+    media is off Shopify -- so the re-press runs the pass again, deletes OLD,
+    attaches nothing. In between, the product press keeps its hands off both
+    design docs.
+    REVERT-PROOF: prune the ledger before the delete call -> red."""
+    fake = _live(monkeypatch, [_node(1, OWN), _node(2, OLD)])
     fake.fail_delete_once = True
     db = _DB()
-    _seed(db, _product([OWN], media_map=[(OWN, _m(1)), (OLD, _m(2), "I1")]))
+    _seed(db, _product([OWN]), (OWN, 1), (OLD, 2, "I1"))
     img = _image(db, "I1", "https://cdn.example.com/raw.jpg", edited_url=NEW)
 
     first = _run(shopify_push.push_image(db, img))
@@ -465,16 +563,12 @@ def test_a_failed_delete_keeps_the_old_asset_mapped_until_a_re_press_takes_it_do
     assert first.ok is False and "mediaUserErrors" in (first.error or "")
     assert first.shopify_id == _m(100), "the minted gid rides the audit row"
     assert fake.listing() == [_m(1), _m(2), _m(100)]
-    assert _map_of(db) == [
-        {"url": OWN, "id": _m(1)},
-        {"url": OLD, "id": _m(2), "image_id": "I1"},
-        {"url": NEW, "id": _m(100), "image_id": "I1"},
-    ], "OLD stays mapped: its delete has not happened"
+    assert _ledger(db) == {(OWN, _m(1), None), (OLD, _m(2), "I1"), (NEW, _m(100), "I1")}
 
     n = len(fake.calls)
     prod = _run(shopify_push.push_product(db, _parent(db), []))
-    assert prod.ok is True and not [o for o in fake.ops()[n:] if o.endswith("Media")]
-    assert fake.listing() == [_m(1), _m(2), _m(100)] and len(_map_of(db)) == 3
+    assert prod.ok is True and not [o for o in fake.ops()[n:] if o.endswith("Media") and o != "imsProductMedia"]
+    assert fake.listing() == [_m(1), _m(2), _m(100)] and len(_ledger(db)) == 3
 
     n = len(fake.calls)
     again = _run(shopify_push.push_image(db, _row(db, "I1")))
@@ -482,51 +576,45 @@ def test_a_failed_delete_keeps_the_old_asset_mapped_until_a_re_press_takes_it_do
     assert again.ok is True and again.action == "update" and again.shopify_id == _m(100)
     assert fake.ops()[n:] == ["imsProductMedia", "imsProductDeleteMedia"], "no second attach"
     assert fake.listing() == [_m(1), _m(100)]
-    assert _map_of(db) == [{"url": OWN, "id": _m(1)}, {"url": NEW, "id": _m(100), "image_id": "I1"}]
+    assert _ledger(db) == {(OWN, _m(1), None), (NEW, _m(100), "I1")}
     assert _run(shopify_push.push_image(db, _row(db, "I1"))).action == "noop"
 
 
 def test_hand_uploaded_media_is_never_touched_and_own_photos_never_re_attached(gates, monkeypatch):
-    """A listing carrying a human's upload (not in the map) and the product's
-    own mapped photo: the press attaches ONLY the design asset -- the hand
-    upload is neither deleted nor moved, and the own photo is not attached a
-    second time (the pass diffs against what the listing carries NOW)."""
-    fake = _live(monkeypatch, _nodes(1) + _hand())
+    """T16. A listing carrying a human's upload (not in the ledger) and the
+    product's own photo: the press attaches ONLY the design asset -- the hand
+    upload is neither deleted nor moved nor claimed, and the own photo is not
+    attached a second time."""
+    fake = _live(monkeypatch, [_node(1, OWN)] + _hand())
     db = _DB()
-    _seed(db, _product([OWN], media_map=[(OWN, _m(1))]))
+    _seed(db, _product([OWN]), (OWN, 1))
     img = _image(db, "I1", NEW)
 
     res = _run(shopify_push.push_image(db, img))
 
     assert res.ok is True
     assert fake.ops() == ["imsProductMedia", "imsProductCreateMedia"], "no delete, no reorder"
-    (att,) = fake.calls_of("imsProductCreateMedia")
-    assert [m["originalSource"] for m in att["variables"]["media"]] == [NEW]
+    assert fake.attached() == [NEW]
     assert fake.listing() == [_m(1), HAND, _m(100)]
     assert list(db[TOMB].find({})) == []
     assert res.photos["unmanaged"] == 1
-    assert HAND not in str(_map_of(db))
+    assert HAND not in {g for _u, g, _i in _ledger(db)}
 
 
 def test_a_listing_ims_owns_nothing_on_is_refused_not_attached_to_blind(gates, monkeypatch):
-    """A pre-map listing (hand uploads, no media_map): the product press keeps
+    """T16. A pre-ledger listing (hand uploads only): the product press keeps
     its hands off, and so does this one -- a loud refusal pointing at the
-    adoption runbook, ZERO mutations. Attaching blind here is exactly how the
-    24 orphan rows were minted.
-    Round 5 (P3): the refusal is read off the TWIN, so it is part of the one
-    predicate -- the plan says skip/hands_off, the counts do not call the row
-    pending, and the press refuses with ZERO calls (it used to read the
-    listing first, answer 'create' everywhere else, and so stay pending and
-    be re-pressed by every images sweep forever).
+    adoption runbook, ZERO calls. The refusal is part of the one predicate:
+    the counts do not call the row pending.
     REVERT-PROOF: drop the hands_off branch of image_press_plan -> red."""
     from api.routers import online_store_push as router
 
     fake = _live(monkeypatch, _hand())
     db = _DB()
-    _seed(db, _product([OWN]))  # no map
+    _seed(db, _product([OWN]))  # IMS owns nothing
     img = _image(db, "I1", NEW)
 
-    plan = shopify_push.image_press_plan(_parent(db), img)
+    plan = _plan(db, img)
     assert (plan["action"], plan["reason"]) == ("skip", "hands_off")
     assert router._image_counts(db) == {"approved": 1, "pushed": 0, "pending": 0}
     res = _run(shopify_push.push_image(db, img))
@@ -534,8 +622,12 @@ def test_a_listing_ims_owns_nothing_on_is_refused_not_attached_to_blind(gates, m
     assert (res.ok, res.action, res.reason) == (False, "skip", "hands_off")
     assert "adopt" in (res.error or "") and "hands off" in (res.error or "")
     assert fake.calls == [], "zero calls, not even the read"
-    assert fake.listing() == [HAND]
-    assert _map_of(db) is None
+    assert fake.listing() == [HAND] and _docs(db) == []
+
+    prod = _run(shopify_push.push_product(db, _parent(db), []))
+
+    assert prod.photos["hands_off"] is True and prod.photos["unmanaged"] == 1
+    assert fake.attached() == [] and fake.listing() == [HAND]
 
 
 # ===========================================================================
@@ -544,23 +636,19 @@ def test_a_listing_ims_owns_nothing_on_is_refused_not_attached_to_blind(gates, m
 
 
 def test_pressing_one_image_never_attaches_a_sibling_row(gates, monkeypatch):
-    """Two APPROVED rows on the product; the human presses I1. Only I1's asset
-    reaches Shopify and the map; I2 stays pending -- its own press, its own
-    audit row."""
-    fake = _live(monkeypatch, _nodes(1))
+    fake = _live(monkeypatch, [_node(1, OWN)])
     db = _DB()
-    _seed(db, _product([OWN], media_map=[(OWN, _m(1))]))
+    _seed(db, _product([OWN]), (OWN, 1))
     img = _image(db, "I1", NEW)
     _image(db, "I2", OTHER)
 
     res = _run(shopify_push.push_image(db, img))
 
     assert res.ok is True and res.shopify_id == _m(100)
-    (att,) = fake.calls_of("imsProductCreateMedia")
-    assert [m["originalSource"] for m in att["variables"]["media"]] == [NEW]
+    assert fake.attached() == [NEW]
     assert fake.listing() == [_m(1), _m(100)]
-    assert _map_of(db) == [{"url": OWN, "id": _m(1)}, {"url": NEW, "id": _m(100), "image_id": "I1"}]
-    assert shopify_push.image_media_gid(_parent(db), _row(db, "I2")) is None, "I2 still pending"
+    assert _ledger(db) == {(OWN, _m(1), None), (NEW, _m(100), "I1")}
+    assert _gid(db, _row(db, "I2")) is None, "I2 still pending"
 
 
 # ===========================================================================
@@ -571,93 +659,80 @@ def test_pressing_one_image_never_attaches_a_sibling_row(gates, monkeypatch):
 def test_the_product_press_never_reads_the_design_queue(gates, monkeypatch):
     """A Mongo timeout on product_images during the 01:00/09:00 sync must not
     be able to turn into a delete plan: the product press does not consult
-    the queue at all. Here the queue RAISES on any touch, and the press runs
-    clean, keeps the design media and touches no media."""
-    fake = _live(monkeypatch, _nodes(1, 100))
+    the queue at all."""
+    fake = _live(monkeypatch, [_node(1, OWN), _node(100, NEW)])
     db = _NoQueueDB()
-    _seed(db, _product([OWN], media_map=[(OWN, _m(1)), (NEW, _m(100), "I1")]))
+    _seed(db, _product([OWN]), (OWN, 1), (NEW, 100, "I1"))
 
     res = _run(shopify_push.push_product(db, _parent(db), []))
 
     assert res.ok is True and res.mode == "LIVE", res.error
-    assert not [o for o in fake.ops() if o.endswith("Media")], fake.ops()
+    assert fake.attached() == [] and fake.calls_of("imsProductDeleteMedia") == []
     assert fake.listing() == [_m(1), _m(100)]
-    assert _map_of(db) == [{"url": OWN, "id": _m(1)}, {"url": NEW, "id": _m(100), "image_id": "I1"}]
+    assert _ledger(db) == {(OWN, _m(1), None), (NEW, _m(100), "I1")}
     assert res.photos["deleted"] == 0 and res.photos["on_shopify"] == 2
 
 
 def test_the_product_press_neither_attaches_nor_drops_design_media(gates, monkeypatch):
-    """IMS dropped its own side shot (OWN2) -- that one comes down, as before.
-    The design media NEW stays although its queue row no longer exists, and
-    the APPROVED-but-unpressed sibling OTHER is NOT attached: a design image
-    reaches or leaves Shopify only through a press of its row."""
-    fake = _live(monkeypatch, _nodes(1, 2, 100))
+    """IMS dropped its own side shot (OWN2) -- that one comes down. The design
+    media NEW stays although its queue row no longer exists, and the
+    APPROVED-but-unpressed sibling OTHER is NOT attached."""
+    fake = _live(monkeypatch, [_node(1, OWN), _node(2, OWN2), _node(100, NEW)])
     db = _DB()
-    _seed(db, _product([OWN], media_map=[(OWN, _m(1)), (OWN2, _m(2)), (NEW, _m(100), "I1")]))
-    _image(db, "I2", OTHER)  # APPROVED, never pressed; I1's row is gone
+    _seed(db, _product([OWN]), (OWN, 1), (OWN2, 2), (NEW, 100, "I1"))
+    _image(db, "I2", OTHER)
 
     res = _run(shopify_push.push_product(db, _parent(db), []))
 
     assert res.ok is True, res.error
-    assert fake.calls_of("imsProductCreateMedia") == [], "no attach without a press"
+    assert fake.attached() == [], "no attach without a press"
     (dele,) = fake.calls_of("imsProductDeleteMedia")
     assert dele["variables"]["mediaIds"] == [_m(2)], "only the dropped OWN photo"
     assert [(s["media_gid"], s["url"]) for s in db[TOMB].find({})] == [(_m(2), OWN2)]
     assert fake.listing() == [_m(1), _m(100)]
-    assert _map_of(db) == [{"url": OWN, "id": _m(1)}, {"url": NEW, "id": _m(100), "image_id": "I1"}]
+    assert _ledger(db) == {(OWN, _m(1), None), (NEW, _m(100), "I1")}
     assert res.photos == {
-        "attached": 0, "deleted": 1, "reordered": False,
-        "unmanaged": 0, "adopted": 0, "hands_off": False, "on_shopify": 2,
+        "attached": 0, "deleted": 1, "reordered": False, "unmanaged": 0, "adopted": 0,
+        "dropped": 0, "held": [], "hands_off": False, "on_shopify": 2, "attached_map": [],
     }
 
 
 def test_the_product_press_leaves_a_design_media_in_its_slot(gates, monkeypatch):
     """The design media leads the listing (a human put it first in the admin).
     The product press wants its own photos in IMS order -- among themselves:
-    the design row keeps slot 0, no reorder is sent."""
-    fake = _live(monkeypatch, _nodes(100, 1))
+    the design doc keeps slot 0, no reorder is sent."""
+    fake = _live(monkeypatch, [_node(100, NEW), _node(1, OWN)])
     db = _DB()
-    _seed(db, _product([OWN], media_map=[(OWN, _m(1)), (NEW, _m(100), "I1")]))
+    _seed(db, _product([OWN]), (OWN, 1), (NEW, 100, "I1"))
     _image(db, "I1", NEW)
 
     res = _run(shopify_push.push_product(db, _parent(db), []))
 
-    assert res.ok is True and not [o for o in fake.ops() if o.endswith("Media")], fake.ops()
+    assert res.ok is True and fake.calls_of("imsProductReorderMedia") == [], fake.ops()
     assert res.photos["reordered"] is False and fake.listing() == [_m(100), _m(1)]
-    plan = shopify_push.plan_product_media(_parent(db), [OWN], fake.media_nodes)
-    assert plan == {
-        "attach": [], "delete": [], "reorder": [], "unmanaged": 0, "hands_off": False,
-        "owned": [{"url": OWN, "id": _m(1)}, {"url": NEW, "id": _m(100), "image_id": "I1"}],
-        "adopt": [],
-    }
+    plan = shopify_push.plan_product_media(_rows(db), [OWN], [OWN], fake.media_nodes)
+    assert (plan["attach"], plan["delete"], plan["reorder"], plan["hands_off"]) == ([], [], [], False)
+    assert {(r["url"], r["id"], r["image_id"]) for r in plan["owned"]} == _ledger(db)
     assert _run(shopify_push.push_image(db, _row(db, "I1"))).action == "noop"
 
 
 def test_door_a_then_owns_the_design_media(gates, monkeypatch):
-    """After a design press the PRODUCT press sees that media as its own: its
-    diff keeps it (no delete, no re-attach), the map survives the press with
-    the image_id row intact, and the design press behind it is a no-op."""
-    fake = _live(monkeypatch, _nodes(1))
+    """After a design press the PRODUCT press keeps that media (no delete, no
+    re-attach), and the design press behind it is a no-op."""
+    fake = _live(monkeypatch, [_node(1, OWN)])
     db = _DB()
-    _seed(db, _product([OWN], media_map=[(OWN, _m(1))]))
-    img = _image(db, "I1", NEW)
-    assert _run(shopify_push.push_image(db, img)).ok
+    _seed(db, _product([OWN]), (OWN, 1))
+    assert _run(shopify_push.push_image(db, _image(db, "I1", NEW))).ok
+    fake.ready()
     n = len(fake.calls)
 
     res = _run(shopify_push.push_product(db, _parent(db), []))
 
     assert res.ok is True and res.mode == "LIVE"
-    media_ops = [o for o in fake.ops()[n:] if o.endswith("Media")]
-    assert media_ops == [], media_ops
+    assert [o for o in fake.ops()[n:] if o.endswith("Media")] == ["imsProductMedia"]
     assert res.photos["attached"] == 0 and res.photos["deleted"] == 0 and res.photos["on_shopify"] == 2
-    assert _map_of(db) == [{"url": OWN, "id": _m(1)}, {"url": NEW, "id": _m(100), "image_id": "I1"}]
-    # The pure diff door A runs, over the product's OWN photographs:
-    parent = _parent(db)
-    plan = shopify_push.plan_product_media(parent, shopify_push.product_photo_urls(parent), fake.media_nodes)
-    assert plan["attach"] == [] and plan["delete"] == []
-    assert {"url": NEW, "id": _m(100), "image_id": "I1"} in plan["owned"]
-    # ... and the map writer keeps the row even when a write names own photos only:
-    assert _media._in_ims_order(plan["owned"], [OWN]) == plan["owned"]
+    assert res.photos.get("code") is None, "the canary is quiet: the CDN copy carries the url's name"
+    assert _ledger(db) == {(OWN, _m(1), None), (NEW, _m(100), "I1")}
     again = _run(shopify_push.push_image(db, _row(db, "I1")))
     assert again.action == "noop" and again.shopify_id == _m(100)
 
@@ -667,11 +742,12 @@ def test_door_a_then_owns_the_design_media(gates, monkeypatch):
 # ===========================================================================
 
 
-def test_dark_press_makes_zero_network_calls(monkeypatch):
-    """Gates closed: an unmapped image is a SIMULATED create carrying the media
-    input; a mapped one is a SIMULATED no-op carrying its gid; a mapped one
-    whose row still maps a replaced asset is a SIMULATED update naming the
-    drop. None reads or writes Shopify, none touches the map."""
+def test_the_dark_press_plans_with_zero_network_calls(monkeypatch):
+    """T14. Gates closed: an unmapped image is a SIMULATED create carrying the
+    media input; a mapped one a SIMULATED no-op with its gid; one whose lane
+    still holds a replaced asset a SIMULATED update naming the drop. The
+    product press's dry run carries its photo plan. None reads or writes
+    Shopify (_graphql raises on any call), none touches the ledger."""
     monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: False)
     monkeypatch.setattr(shopify_push, "shopify_dispatch_mode", lambda: "live")
     monkeypatch.setattr(
@@ -685,12 +761,13 @@ def test_dark_press_makes_zero_network_calls(monkeypatch):
 
     monkeypatch.setattr(shopify_push, "_graphql", _boom)
     db = _DB()
-    before = [(OWN, _m(1)), (OLD, _m(2), "I2"), (OTHER, _m(3), "I3"), (NEW, _m(4), "I3")]
-    _seed(db, _product([OWN], media_map=before))
+    _seed(db, _product([OWN, OWN2]), (OWN, 1), (OLD, 2, "I2"), (OTHER, 3, "I3"), (NEW, 4, "I3"))
+    before = copy.deepcopy(_docs(db))
 
     fresh = _run(shopify_push.push_image(db, _image(db, "I1", "https://cdn.example.com/fresh.jpg")))
     mapped = _run(shopify_push.push_image(db, _image(db, "I2", OLD)))
     pending = _run(shopify_push.push_image(db, _image(db, "I3", NEW)))
+    prod = _run(shopify_push.push_product(db, _parent(db), []))
 
     assert fresh.mode == "SIMULATED" and fresh.ok and fresh.action == "create"
     assert fresh.payload["media"][0]["originalSource"] == "https://cdn.example.com/fresh.jpg"
@@ -699,63 +776,49 @@ def test_dark_press_makes_zero_network_calls(monkeypatch):
     assert mapped.shopify_id == _m(2) and mapped.payload["media_gid"] == _m(2)
     assert pending.mode == "SIMULATED" and pending.ok and pending.action == "update"
     assert pending.shopify_id == _m(4) and pending.payload["drop"] == [OTHER]
-    assert _map_of(db) == [_row_of(e) for e in before]
+    assert prod.mode == "SIMULATED" and prod.ok, prod.error
+    assert prod.photos["attach"] == [OWN2] and prod.photos["delete"] == []
+    assert _docs(db) == before
 
 
-def _die_after_the_record(monkeypatch):
-    """The pass's record of its attach (media_pending, written BEFORE
-    productCreateMedia) lands; every media write after it fails -- the twin
-    stops taking writes, or the worker dies right after the attach."""
-    real = _media._writeback_media_map
-    state = {"recorded": False}
-
-    def _write(db, pid, rows, pending=None):
-        if state["recorded"] or not pending:
-            return False
-        state["recorded"] = True
-        return real(db, pid, rows, pending=pending)
-
-    monkeypatch.setattr(_media, "_writeback_media_map", _write)
-    return lambda: monkeypatch.setattr(_media, "_writeback_media_map", real)
-
-
-def _pending_of(db, pid="P1"):
-    return (db["catalog_products"].find_one({"id": pid}) or {})["ecom"].get("media_pending") or []
-
-
-def test_a_map_writeback_failure_is_loud_and_keeps_the_gid(gates, monkeypatch):
-    """The media attached on Shopify but the twin could not record it: ok=False
-    (a silent ok=True on an un-recorded create is exactly what let a re-run
-    duplicate media), the minted gid kept on the result for reconcile -- and
-    the attach's pending row, written before the call, stays for the next
-    press to settle. When even that record cannot be written, nothing is
-    sent: no record, no attach."""
-    fake = _live(monkeypatch, _nodes(1))
-    _die_after_the_record(monkeypatch)
+def test_a_ledger_write_failure_after_the_attach_is_loud_and_keeps_the_gid(gates, monkeypatch):
+    """The media attached on Shopify but its ledger doc could not be turned
+    live: ok=False, the minted gid kept on the result -- and the doc,
+    recorded BEFORE the call, stays pending for the next press to settle
+    (the row's delete is refused meanwhile). When even that record cannot
+    be written, nothing is sent: no record, no attach.
+    REVERT-PROOF: attach before the pending insert -> the second half red."""
+    fake = _live(monkeypatch, [_node(1, OWN)])
     db = _DB()
-    _seed(db, _product([OWN], media_map=[(OWN, _m(1))]))
-    img = _image(db, "I1", NEW)
+    _seed(db, _product([OWN]), (OWN, 1))
+    img = _image(db, "I1", U1)
 
+    def _no_live(*args, **kwargs):
+        raise RuntimeError("online_media write timed out")
+
+    db[LEDGER].update_one = _no_live
     res = _run(shopify_push.push_image(db, img))
+    del db[LEDGER].update_one
 
-    assert res.ok is False and "write-back failed" in (res.error or "")
-    assert res.shopify_id == _m(100), "the orphaned gid rides the audit row"
+    assert res.ok is False and "write-back failed" in (res.error or ""), res.error
+    assert res.shopify_id == _m(100), "the gid rides the audit row"
     assert fake.listing() == [_m(1), _m(100)]
-    assert _map_of(db) == [{"url": OWN, "id": _m(1)}], "the map did not change"
-    assert _pending_of(db) == [{"url": NEW, "image_id": "I1"}], "the attach stays on record"
-    # ... so the row it was made for is not deletable (a dead worker's lease
-    # has expired by now; the gate reads the record, not the lease)
+    assert _ledger(db) == {(OWN, _m(1), None)} and _pending(db) == {(U1, "I1")}
     from fastapi import HTTPException
 
     with pytest.raises(HTTPException) as refused:
         _run(_delete_route(monkeypatch, db)("I1"))
     assert refused.value.status_code == 409 and _row(db, "I1") is not None
+    fake.ready()
+    settled = _run(shopify_push.push_image(db, _row(db, "I1")))
+    assert settled.ok and settled.shopify_id == _m(100) and settled.photos["adopted"] == 1
+    assert len(fake.calls_of("imsProductCreateMedia")) == 1
 
-    fake = _live(monkeypatch, _nodes(1))
-    monkeypatch.setattr(_media, "_writeback_media_map", lambda db, pid, rows, pending=None: False)
+    fake = _live(monkeypatch, [_node(1, OWN)])
     db = _DB()
-    _seed(db, _product([OWN], media_map=[(OWN, _m(1))]))
+    _seed(db, _product([OWN]), (OWN, 1))
     img = _image(db, "I1", NEW)
+    monkeypatch.setattr(db[LEDGER], "insert_one", _no_live)
 
     res = _run(shopify_push.push_image(db, img))
 
@@ -764,13 +827,10 @@ def test_a_map_writeback_failure_is_loud_and_keeps_the_gid(gates, monkeypatch):
 
 
 def test_an_unfetchable_asset_is_refused_before_the_network(gates, monkeypatch):
-    """A relative /uploads path is not a photograph Shopify can fetch (the same
-    rule product_photo_urls applies): a skip with the reason, zero calls,
-    dark or live."""
     monkeypatch.delenv("PUBLIC_API_BASE_URL", raising=False)
-    fake = _live(monkeypatch, _nodes(1))
+    fake = _live(monkeypatch, [_node(1, OWN)])
     db = _DB()
-    _seed(db, _product([OWN], media_map=[(OWN, _m(1))]))
+    _seed(db, _product([OWN]), (OWN, 1))
     img = _image(db, "I1", "/uploads/design.jpg")
 
     res = _run(shopify_push.push_image(db, img))
@@ -782,43 +842,37 @@ def test_an_unfetchable_asset_is_refused_before_the_network(gates, monkeypatch):
 
 
 def test_the_in_app_url_is_one_identity_in_every_helper(gates, monkeypatch):
-    """A row stored with the in-app serve path. The product press maps it under
-    the PUBLIC_API_BASE_URL-rewritten absolute url (product_photo_urls); the
-    design press, the sweep's skip and the pushed/pending counts must key on
-    that SAME spelling -- or a media that IS on the listing reads as pending
-    and the sweep re-presses it every run forever."""
+    """A row stored with the in-app serve path. The product press records it
+    under the PUBLIC_API_BASE_URL-rewritten absolute url; the design press,
+    the sweep's skip and the pushed/pending counts key on that SAME spelling."""
     from api.routers import online_store_push as router
 
     monkeypatch.setenv("PUBLIC_API_BASE_URL", "https://api.example.com")
-    path = "/api/v1/products/image/abc123"
-    absolute = "https://api.example.com" + path
-    fake = _live(monkeypatch, _nodes(1))
+    path = "/api/v1/products/image/65f1a2b3c4d5e6f7a8b9c0d1"
+    fake = _live(monkeypatch, [_node(1, OID)])
     db = _DB()
-    _seed(db, _product([path], media_map=[(absolute, _m(1))]))
+    _seed(db, _product([path]), (OID, 1))
     img = _image(db, "I1", path)
 
-    assert shopify_push.product_photo_urls(_parent(db)) == [absolute]
-    assert shopify_push.image_source_url(img) == absolute
-    assert shopify_push.image_media_gid(_parent(db), img) == _m(1)
+    assert shopify_push.product_photo_urls(_parent(db)) == [OID]
+    assert shopify_push.image_source_url(img) == OID
+    assert _gid(db, img) == _m(1)
     assert router._press_plan(db, img) == {"gid": _m(1), "drop": [], "action": "noop"}
     assert router._image_counts(db) == {"approved": 1, "pushed": 1, "pending": 0}
     res = _run(shopify_push.push_image(db, img))
     assert res.action == "noop" and res.shopify_id == _m(1) and fake.calls == []
 
 
-def test_a_size_variant_twin_never_answers_noop_off_a_copied_map(gates, monkeypatch):
-    """A size-variant twin owns no listing. A twin repair that copied the
-    parent's ecom copied its media_map too: the child's press must not answer
-    'already on the listing' with the PARENT's gid -- it is refused, zero
-    calls, exactly as _resolve_product_gid refuses the twin."""
-    fake = _live(monkeypatch, _nodes(1, 5))
+def test_a_size_variant_twin_never_answers_noop_off_a_copied_record(gates, monkeypatch):
+    """A size-variant twin owns no listing: even with docs under its id, its
+    press is refused with zero calls and no gid."""
+    fake = _live(monkeypatch, [_node(1, OWN), _node(5, NEW)])
     db = _DB()
-    twin = _product([OWN], media_map=[(OWN, _m(1)), (NEW, _m(5), "I0")], variant_of={"product_id": "P0"})
-    _seed(db, twin)
+    _seed(db, _product([OWN], variant_of={"product_id": "P0"}), (OWN, 1), (NEW, 5, "I0"))
     img = _image(db, "I1", NEW)
 
     assert shopify_push.is_variant_of(_parent(db)) is True
-    assert shopify_push.image_media_gid(_parent(db), img) is None
+    assert _gid(db, img) is None
     res = _run(shopify_push.push_image(db, img))
 
     assert (res.action, res.ok) == ("skip", False) and fake.calls == []
@@ -826,19 +880,14 @@ def test_a_size_variant_twin_never_answers_noop_off_a_copied_map(gates, monkeypa
 
 
 # ===========================================================================
-# Round 2: the gate, the lanes, the alt, the converging map, one predicate
+# Round 2: the gate, the lanes, the alt, one predicate
 # ===========================================================================
 
 
 def test_a_product_without_a_photograph_refuses_the_design_press_like_the_product_press(gates, monkeypatch):
-    """P1. IMS removed the product's own photos (images=[]); two are still
-    mapped and up on the listing. The product press refuses (no_photo) and
-    never reaches its delete step -- so must the design press: a refusal with
-    the SAME reason, zero calls, the listing and the map untouched. Without
-    this gate one design press stripped both own photographs off the listing."""
-    fake = _live(monkeypatch, _nodes(1, 2))
+    fake = _live(monkeypatch, [_node(1, OWN), _node(2, OWN2)])
     db = _DB()
-    _seed(db, _product([], media_map=[(OWN, _m(1)), (OWN2, _m(2))]))
+    _seed(db, _product([]), (OWN, 1), (OWN2, 2))
     img = _image(db, "I1", NEW)
 
     prod = _run(shopify_push.push_product(db, _parent(db), []))
@@ -848,58 +897,44 @@ def test_a_product_without_a_photograph_refuses_the_design_press_like_the_produc
     assert (res.reason, res.ok, res.action, res.mode) == ("no_photo", False, "skip", "BLOCKED")
     assert fake.calls == [], "zero calls"
     assert fake.listing() == [_m(1), _m(2)]
-    assert _map_of(db) == [{"url": OWN, "id": _m(1)}, {"url": OWN2, "id": _m(2)}]
+    assert _ledger(db) == {(OWN, _m(1), None), (OWN2, _m(2), None)}
     assert list(db[TOMB].find({})) == []
 
 
 def test_a_public_url_drift_refuses_the_design_press_instead_of_stripping_the_listing(gates, monkeypatch):
-    """P1, the config-drift shape: the own photo is the in-app serve path,
-    mapped under the absolute PUBLIC_API_BASE_URL spelling; the env var is
-    unset on this deploy, so product_photo_urls() is empty. The product press
-    refuses; so does the design press -- and the images sweep, which presses
-    every APPROVED row a press would act on, therefore strips nothing."""
     monkeypatch.delenv("PUBLIC_API_BASE_URL", raising=False)
-    path = "/api/v1/products/image/abc123"
-    absolute = "https://api.example.com" + path
-    fake = _live(monkeypatch, _nodes(1))
+    path = "/api/v1/products/image/65f1a2b3c4d5e6f7a8b9c0d1"
+    fake = _live(monkeypatch, [_node(1, OID)])
     db = _DB()
-    _seed(db, _product([path], media_map=[(absolute, _m(1))]))
+    _seed(db, _product([path]), (OID, 1))
     img = _image(db, "I1", NEW)
 
     res = _run(shopify_push.push_image(db, img))
 
     assert (res.action, res.reason, res.ok) == ("skip", "no_photo", False)
     assert fake.calls == [] and fake.listing() == [_m(1)]
-    assert _map_of(db) == [{"url": absolute, "id": _m(1)}]
+    assert _ledger(db) == {(OID, _m(1), None)}
 
 
 def test_the_design_press_never_governs_the_products_own_photographs(gates, monkeypatch):
-    """The lanes (P1's root). The product has a second photo the product press
-    has not put up yet (OWN2, unmapped) and a photo IMS removed whose media is
-    still up (OWN3, mapped, off the product). The design press attaches ONLY
-    its own asset: OWN2 is not attached and OWN3 is not dropped -- both are
-    the product press's calls, under its own gate -- and no reorder is sent.
-    The map keeps every row it had and gains the design row. The product
-    press then does exactly its own lane's work and keeps the design row."""
+    """The product has a second photo the product press has not put up yet
+    (OWN2) and a photo IMS removed whose media is still up (OWN3). The design
+    press attaches ONLY its own asset; the product press then does exactly
+    its own lane's work and keeps the design doc."""
     own3 = "https://cdn.example.com/rb-removed.jpg"
-    fake = _live(monkeypatch, _nodes(1, 3))
+    fake = _live(monkeypatch, [_node(1, OWN), _node(3, own3)])
     db = _DB()
-    _seed(db, _product([OWN, OWN2], media_map=[(OWN, _m(1)), (own3, _m(3))]))
+    _seed(db, _product([OWN, OWN2]), (OWN, 1), (own3, 3))
     img = _image(db, "I1", NEW)
 
     res = _run(shopify_push.push_image(db, img))
 
     assert res.ok is True and res.action == "create"
     assert fake.ops() == ["imsProductMedia", "imsProductCreateMedia"], "no delete, no reorder"
-    (att,) = fake.calls_of("imsProductCreateMedia")
-    assert [m["originalSource"] for m in att["variables"]["media"]] == [NEW], "OWN2 is not this press's"
+    assert fake.attached() == [NEW], "OWN2 is not this press's"
     assert fake.listing() == [_m(1), _m(3), _m(100)], "OWN3 stays up: the product press drops it"
     assert list(db[TOMB].find({})) == []
-    assert _map_of(db) == [
-        {"url": OWN, "id": _m(1)},
-        {"url": own3, "id": _m(3)},
-        {"url": NEW, "id": _m(100), "image_id": "I1"},
-    ]
+    assert _ledger(db) == {(OWN, _m(1), None), (own3, _m(3), None), (NEW, _m(100), "I1")}
 
     prod = _run(shopify_push.push_product(db, _parent(db), []))
 
@@ -907,20 +942,13 @@ def test_the_design_press_never_governs_the_products_own_photographs(gates, monk
     assert prod.photos["attached"] == 1 and prod.photos["deleted"] == 1 and prod.photos["reordered"] is False
     assert fake.listing() == [_m(1), _m(100), _m(101)]
     assert [(s["media_gid"], s["url"]) for s in db[TOMB].find({})] == [(_m(3), own3)]
-    assert _map_of(db) == [
-        {"url": OWN, "id": _m(1)},
-        {"url": OWN2, "id": _m(101)},
-        {"url": NEW, "id": _m(100), "image_id": "I1"},
-    ]
+    assert _ledger(db) == {(OWN, _m(1), None), (OWN2, _m(101), None), (NEW, _m(100), "I1")}
 
 
 def test_the_rows_alt_text_reaches_shopify(gates, monkeypatch):
-    """P2. The designer's alt text on the row is what productCreateMedia
-    carries -- the same alt the audit payload records. (The product's own
-    photographs keep alt '': match_media_to_photos relies on that.)"""
-    fake = _live(monkeypatch, _nodes(1))
+    fake = _live(monkeypatch, [_node(1, OWN)])
     db = _DB()
-    _seed(db, _product([OWN], media_map=[(OWN, _m(1))]))
+    _seed(db, _product([OWN]), (OWN, 1))
     img = _image(db, "I1", NEW, alt_text="Ray-Ban RB2140 front view")
 
     res = _run(shopify_push.push_image(db, img))
@@ -934,22 +962,19 @@ def test_the_rows_alt_text_reaches_shopify(gates, monkeypatch):
 
 
 def test_a_design_press_of_an_own_photograph_leaves_it_in_the_products_lane(gates, monkeypatch):
-    """P3. The design row's url IS one of the product's own photographs (B),
-    pressed before the product press put B up. The press attaches B but
-    stamps NO image_id: B is the product's lane whichever door attached it,
-    so when the operator removes B from the product the product press takes
-    it down -- 'removing a photo updates Shopify' (sync-audit gap #3) does
-    not depend on which door pressed first."""
+    """The design row's url IS one of the product's own photographs (B). The
+    press attaches B but stamps NO image_id, so when the operator removes B
+    from the product the product press takes it down."""
     b = "https://cdn.example.com/rb-b.jpg"
-    fake = _live(monkeypatch, _nodes(1))
+    fake = _live(monkeypatch, [_node(1, OWN)])
     db = _DB()
-    _seed(db, _product([OWN, b], media_map=[(OWN, _m(1))]))
+    _seed(db, _product([OWN, b]), (OWN, 1))
     img = _image(db, "I1", b)
 
     res = _run(shopify_push.push_image(db, img))
 
     assert res.ok is True and res.shopify_id == _m(100)
-    assert _map_of(db) == [{"url": OWN, "id": _m(1)}, {"url": b, "id": _m(100)}], "no image_id: the product's lane"
+    assert _ledger(db) == {(OWN, _m(1), None), (b, _m(100), None)}, "no image_id: the product's lane"
     assert _run(shopify_push.push_image(db, _row(db, "I1"))).action == "noop"
     prod = _run(shopify_push.push_product(db, _parent(db), []))
     assert prod.ok and prod.photos["attached"] == 0 and prod.photos["deleted"] == 0, "its own, already up"
@@ -958,21 +983,19 @@ def test_a_design_press_of_an_own_photograph_leaves_it_in_the_products_lane(gate
     prod = _run(shopify_push.push_product(db, _parent(db), []))
 
     assert prod.ok and prod.photos["deleted"] == 1
-    assert fake.listing() == [_m(1)] and _map_of(db) == [{"url": OWN, "id": _m(1)}]
+    assert fake.listing() == [_m(1)] and _ledger(db) == {(OWN, _m(1), None)}
     assert [(s["media_gid"], s["url"]) for s in db[TOMB].find({})] == [(_m(100), b)]
 
 
 def test_a_replaced_asset_already_gone_from_shopify_is_pruned_by_the_press(gates, monkeypatch):
-    """P4. The row's old asset is still mapped for deletion but its media is
-    already off the listing (the delete landed and the response was lost, or
-    an admin removed it). The press reads, finds nothing to attach or drop,
-    and STILL writes the map -- the dead row is pruned -- so the next press
-    is a no-op with zero calls and the counts stop calling the row pending."""
+    """The row's old asset is still on record for deletion but its media is
+    already off the listing. The press reads, finds nothing to attach or
+    drop, and PRUNES the dead doc -- so the next press is a no-op."""
     from api.routers import online_store_push as router
 
-    fake = _live(monkeypatch, _nodes(1, 100))
+    fake = _live(monkeypatch, [_node(1, OWN), _node(100, NEW)])
     db = _DB()
-    _seed(db, _product([OWN], media_map=[(OWN, _m(1)), (NEW, _m(100), "I1"), (OLD, _m(2), "I1")]))
+    _seed(db, _product([OWN]), (OWN, 1), (NEW, 100, "I1"), (OLD, 2, "I1"))
     img = _image(db, "I1", NEW)
     assert router._image_counts(db) == {"approved": 1, "pushed": 1, "pending": 1}
 
@@ -980,49 +1003,43 @@ def test_a_replaced_asset_already_gone_from_shopify_is_pruned_by_the_press(gates
 
     assert res.ok is True and res.action == "update" and res.shopify_id == _m(100)
     assert fake.ops() == ["imsProductMedia"], "a read, no mutation"
-    assert _map_of(db) == [{"url": OWN, "id": _m(1)}, {"url": NEW, "id": _m(100), "image_id": "I1"}]
+    assert _ledger(db) == {(OWN, _m(1), None), (NEW, _m(100), "I1")}
     n = len(fake.calls)
     assert _run(shopify_push.push_image(db, _row(db, "I1"))).action == "noop" and len(fake.calls) == n
     assert router._image_counts(db) == {"approved": 1, "pushed": 1, "pending": 0}
 
 
 def test_a_design_media_deleted_in_the_admin_comes_back_after_the_product_press(gates, monkeypatch):
-    """P6. An admin deleted the design media in the Shopify admin. The map
-    still holds it, so the design press answers no-op (it reads nothing: the
-    documented ceiling). The product press ALWAYS writes the map from what
-    the listing carries, even when it attached and dropped nothing, so it
-    prunes the dead row -- and the next design press puts the image back."""
-    fake = _live(monkeypatch, _nodes(1))
+    """An admin deleted the design media in the Shopify admin. The design
+    press answers no-op off the ledger (the documented ceiling); the product
+    press prunes the dead doc from what the listing carries, and the next
+    design press puts the image back."""
+    fake = _live(monkeypatch, [_node(1, OWN)])
     db = _DB()
-    _seed(db, _product([OWN], media_map=[(OWN, _m(1)), (NEW, _m(50), "I1")]))  # 50 is gone
+    _seed(db, _product([OWN]), (OWN, 1), (NEW, 50, "I1"))  # 50 is gone
     img = _image(db, "I1", NEW)
 
     assert _run(shopify_push.push_image(db, img)).action == "noop" and fake.calls == []
     prod = _run(shopify_push.push_product(db, _parent(db), []))
-    assert prod.ok is True and not [o for o in fake.ops() if o.endswith("Media")]
-    assert _map_of(db) == [{"url": OWN, "id": _m(1)}], "the dead row is pruned by a no-change press"
+    assert prod.ok is True and fake.attached() == []
+    assert _ledger(db) == {(OWN, _m(1), None)}, "the dead doc is pruned by a no-change press"
 
     again = _run(shopify_push.push_image(db, _row(db, "I1")))
 
     assert again.ok is True and again.action == "create" and again.shopify_id == _m(100)
     assert fake.listing() == [_m(1), _m(100)]
-    assert _map_of(db) == [{"url": OWN, "id": _m(1)}, {"url": NEW, "id": _m(100), "image_id": "I1"}]
+    assert _ledger(db) == {(OWN, _m(1), None), (NEW, _m(100), "I1")}
 
 
 def test_the_press_the_sweep_and_the_counts_read_one_predicate(gates, monkeypatch):
-    """P5. The failed-delete state: NEW is mapped and up, OLD still mapped for
-    deletion. One predicate (image_press_plan) answers everyone: the press
-    runs ('update', drop OLD), the sweep's skip (router._press_plan) says
-    the same, the counts call the row pending -- and pushed, since NEW IS on
-    the listing. After the press all three say no-op / not pending."""
     from api.routers import online_store_push as router
 
-    _live(monkeypatch, _nodes(1, 2, 100))
+    _live(monkeypatch, [_node(1, OWN), _node(2, OLD), _node(100, NEW)])
     db = _DB()
-    _seed(db, _product([OWN], media_map=[(OWN, _m(1)), (NEW, _m(100), "I1"), (OLD, _m(2), "I1")]))
+    _seed(db, _product([OWN]), (OWN, 1), (NEW, 100, "I1"), (OLD, 2, "I1"))
     img = _image(db, "I1", NEW)
 
-    plan = shopify_push.image_press_plan(_parent(db), img)
+    plan = _plan(db, img)
     assert plan == {"gid": _m(100), "drop": [OLD], "action": "update"}
     assert router._press_plan(db, img) == plan
     assert router._image_counts(db) == {"approved": 1, "pushed": 1, "pending": 1}
@@ -1033,60 +1050,48 @@ def test_the_press_the_sweep_and_the_counts_read_one_predicate(gates, monkeypatc
 
 
 # ===========================================================================
-# Round 4: the lane is decided by url, the map merges by lane, refusals are
-# part of the one predicate
+# Round 4-6: lane by url, stale copies, the lease, hand-over, the delete gate
 # ===========================================================================
 
 
 def test_a_design_asset_promoted_to_a_product_photo_is_never_deleted_by_its_old_rows_press(gates, monkeypatch):
-    """P1. OLD was pressed through row I1 (stamped I1 on the map), then the
-    operator made it one of the product's own photographs, and the designer
-    replaced I1's asset with NEW. A url that is one of the product's own
-    photographs is the product's lane whichever door attached it -- decided
-    by url on every read of the map -- so I1's press attaches NEW and deletes
-    NOTHING: OLD is a photograph the product lists and IMS never removed. The
-    map stores OLD in the product's lane from then on, and the product press
-    behind it has nothing to do."""
-    fake = _live(monkeypatch, _nodes(1, 2))
+    """OLD was pressed through row I1, then the operator made it one of the
+    product's own photographs, and the designer replaced I1's asset with
+    NEW. The lane is decided by url: I1's press attaches NEW and deletes
+    NOTHING, and the pass STORES OLD in the product's lane.
+    REVERT-PROOF: owned_media without the by-url lane -> red."""
+    fake = _live(monkeypatch, [_node(1, OWN), _node(2, OLD)])
     db = _DB()
-    _seed(db, _product([OWN, OLD], media_map=[(OWN, _m(1)), (OLD, _m(2), "I1")]))
+    _seed(db, _product([OWN, OLD]), (OWN, 1), (OLD, 2, "I1"))
     img = _image(db, "I1", OLD, edited_url=NEW)
 
-    assert shopify_push.image_press_plan(_parent(db), img) == {"gid": None, "drop": [], "action": "create"}
+    assert _plan(db, img) == {"gid": None, "drop": [], "action": "create"}
     res = _run(shopify_push.push_image(db, img))
 
     assert res.ok is True and res.action == "create" and res.shopify_id == _m(100)
     assert fake.ops() == ["imsProductMedia", "imsProductCreateMedia"], "no delete"
     assert list(db[TOMB].find({})) == []
-    assert fake.listing() == [_m(1), _m(2), _m(100)]
-    assert _map_of(db) == [
-        {"url": OWN, "id": _m(1)},
-        {"url": OLD, "id": _m(2)},
-        {"url": NEW, "id": _m(100), "image_id": "I1"},
-    ]
+    assert _ledger(db) == {(OWN, _m(1), None), (OLD, _m(2), None), (NEW, _m(100), "I1")}
     n = len(fake.calls)
     prod = _run(shopify_push.push_product(db, _parent(db), []))
-    assert prod.ok is True and not [o for o in fake.ops()[n:] if o.endswith("Media")], fake.ops()[n:]
-    assert fake.listing() == [_m(1), _m(2), _m(100)]
+    assert prod.ok is True and fake.ops()[n:].count("imsProductCreateMedia") == 0
+    assert fake.calls_of("imsProductDeleteMedia") == []
 
 
-def test_a_product_press_on_a_stale_snapshot_keeps_the_design_row_written_since(gates, monkeypatch):
-    """P2, door A over door B. The 01:00/09:00 sweep loads its docs up front;
-    a human presses a design image inside that window. The product press
-    then writes the map from a snapshot that never held the design row: it
-    must keep that row (the other lane is taken from the twin at write time),
-    or the next design press attaches the image a second time and the first
-    copy is unmanaged forever."""
-    fake = _live(monkeypatch, _nodes(1))
+def test_a_product_press_on_a_stale_snapshot_keeps_the_design_doc_written_since(gates, monkeypatch):
+    """The 01:00/09:00 sweep loads its docs up front; a human presses a design
+    image inside that window. The product press on the old doc must keep
+    that media, or the next design press attaches it a second time."""
+    fake = _live(monkeypatch, [_node(1, OWN)])
     db = _DB()
-    _seed(db, _product([OWN], media_map=[(OWN, _m(1))]))
+    _seed(db, _product([OWN]), (OWN, 1))
     stale = _parent(db)
     assert _run(shopify_push.push_image(db, _image(db, "I1", NEW))).shopify_id == _m(100)
 
     prod = _run(shopify_push.push_product(db, stale, []))
 
     assert prod.ok is True, prod.error
-    assert _map_of(db) == [{"url": OWN, "id": _m(1)}, {"url": NEW, "id": _m(100), "image_id": "I1"}]
+    assert _ledger(db) == {(OWN, _m(1), None), (NEW, _m(100), "I1")}
     n = len(fake.calls)
     again = _run(shopify_push.push_image(db, _row(db, "I1")))
     assert again.action == "noop" and len(fake.calls) == n
@@ -1094,48 +1099,39 @@ def test_a_product_press_on_a_stale_snapshot_keeps_the_design_row_written_since(
 
 
 def test_a_design_press_on_a_stale_parent_keeps_the_product_photo_attached_since(gates, monkeypatch):
-    """P2, door B over door A. The design press read the parent; before it
-    writes the map a product press puts OWN2 up and maps it. The design
-    press's write must keep OWN2's row, or the next product press attaches
-    OWN2 a second time."""
-    fake = _live(monkeypatch, _nodes(1))
+    """The design press read the parent; before its pass ends a product press
+    puts OWN2 up and records it. The design press must not lose that doc, or
+    the next product press attaches OWN2 a second time."""
+    fake = _live(monkeypatch, [_node(1, OWN)])
     db = _DB()
-    _seed(db, _product([OWN], media_map=[(OWN, _m(1))]))
+    _seed(db, _product([OWN]), (OWN, 1))
     img = _image(db, "I1", NEW)
 
     def _product_press_lands():
-        fake.media_nodes += _nodes(50)
-        ecom = dict(_parent(db)["ecom"], media_map=[{"url": OWN, "id": _m(1)}, {"url": OWN2, "id": _m(50)}])
-        db["catalog_products"].update_one({"id": "P1"}, {"$set": {"images": [OWN, OWN2], "ecom": ecom}})
+        fake.media_nodes.append(_node(50, OWN2))
+        _own(db, OWN2, 50)
+        db["catalog_products"].update_one({"id": "P1"}, {"$set": {"images": [OWN, OWN2]}})
 
     fake.on_read = _product_press_lands
     res = _run(shopify_push.push_image(db, img))
 
     assert res.ok is True and res.shopify_id == _m(100)
-    assert _map_of(db) == [
-        {"url": OWN, "id": _m(1)},
-        {"url": OWN2, "id": _m(50)},
-        {"url": NEW, "id": _m(100), "image_id": "I1"},
-    ]
+    assert _ledger(db) == {(OWN, _m(1), None), (OWN2, _m(50), None), (NEW, _m(100), "I1")}
     prod = _run(shopify_push.push_product(db, _parent(db), []))
     assert prod.ok is True and prod.photos["attached"] == 0, prod.photos
     assert fake.listing() == [_m(1), _m(50), _m(100)], "OWN2 once"
 
 
 def test_the_refusals_are_the_plans_answer_and_the_press_sends_nothing(gates, monkeypatch):
-    """P4. Every refusal the press makes before it sends anything is part of
-    image_press_plan's answer ('skip' + reason), so the press, the sweep's
-    skip and the counts agree: none of these rows reads 'create' while the
-    LIVE press refuses it with zero network."""
     from api.services import policy_engine
 
     monkeypatch.setattr(
         policy_engine, "get_policy",
         lambda key, default=None: {"brands": ["Cartier"]} if key == "ecom.shopify_push_locks" else default,
     )
-    fake = _live(monkeypatch, _nodes(1))
+    fake = _live(monkeypatch, [_node(1, OWN)])
     db = _DB()
-    _seed(db, _product([OWN], media_map=[(OWN, _m(1))]))
+    _seed(db, _product([OWN]), (OWN, 1))
     _seed(db, _product([OWN], pid="P2", shopify_product_id=None))
     _seed(db, _product([], pid="P3"))
     _seed(db, dict(_product([OWN], pid="P4"), brand="Cartier"))
@@ -1148,40 +1144,43 @@ def test_the_refusals_are_the_plans_answer_and_the_press_sends_nothing(gates, mo
     for iid, (pid, url, _r) in rows.items():
         img = _image(db, iid, url, product_id=pid)
         lock = shopify_push.push_lock_reason(db, "product", _parent(db, pid))
-        plan = shopify_push.image_press_plan(_parent(db, pid), img, lock=lock)
+        plan = shopify_push.image_press_plan(_parent(db, pid), img, _rows(db, pid), lock=lock)
         assert (plan["action"], plan["reason"]) == ("skip", rows[iid][2]), iid
         res = _run(shopify_push.push_image(db, img))
         assert (res.action, res.ok) == ("skip", False), (iid, res)
     assert fake.calls == [], "zero network"
 
 
-# ===========================================================================
-# Round 5: one pass per product (the lease), the map merged by id, the row
-# pressed as it is now, a shared image handed over, a lost attach adopted,
-# the delete gate closed
-# ===========================================================================
-
-
-def _delete_route(monkeypatch, db):
-    """DELETE /online-store/images/{id} bound to this test's db."""
-    from api.routers import online_store_images as images
-
-    monkeypatch.setattr(images, "_get_db", lambda: db)
-    return lambda iid: images.delete_image(iid, current_user={})
-
-
-def test_a_row_whose_lane_flips_mid_pass_is_never_dropped_from_the_map(gates, monkeypatch):
-    """P1 (lane re-derived at write time). The product press plans while OLD
-    is a design media (stamped I1); while its attach is in flight the
-    operator makes OLD one of the product's photographs. The write keeps
-    every stored row BY ID -- a lane worked out again at write time put OLD
-    in neither list and dropped it, and the next press attached OLD a
-    second time over a media no door governs any more.
-    REVERT-PROOF: _merge by lane (mine from the plan, theirs from the write
-    read) -> red."""
-    fake = _live(monkeypatch, _nodes(1, 2))
+def test_an_unreadable_ledger_refuses_every_door(gates, monkeypatch):
+    """Fail closed: a ledger read error is never 'IMS owns nothing' -- the
+    design press refuses (map_unreadable) with zero calls, and the product
+    press's pass sends no media mutation and withholds the publish.
+    REVERT-PROOF: media_rows swallowing the error (-> []) -> red."""
+    fake = _live(monkeypatch, [_node(1, OWN)])
     db = _DB()
-    _seed(db, _product([OWN, OWN2], media_map=[(OWN, _m(1)), (OLD, _m(2), "I1")]))
+    _seed(db, _product([OWN]), (OWN, 1))
+    img = _image(db, "I1", NEW)
+
+    def _down(*args, **kwargs):
+        raise RuntimeError("online_media read timed out")
+
+    monkeypatch.setattr(db[LEDGER], "find", _down)
+    res = _run(shopify_push.push_image(db, img))
+    prod = _run(shopify_push.push_product(db, _parent(db), []))
+
+    assert (res.action, res.reason) == ("skip", "map_unreadable") and res.ok is False
+    assert prod.photos["code"] == "MAP_UNREADABLE" and prod.photos["on_shopify"] == 0
+    assert prod.ok is False and prod.reason == "publish_withheld"
+    assert fake.attached() == [] and fake.calls_of("imsPublishablePublish") == []
+
+
+def test_a_row_whose_lane_flips_mid_pass_is_never_dropped(gates, monkeypatch):
+    """The product press plans while OLD is a design media (stamped I1);
+    while its attach is in flight the operator makes OLD one of the product's
+    photographs. OLD's doc stays IMS's, and the next press attaches nothing."""
+    fake = _live(monkeypatch, [_node(1, OWN), _node(2, OLD)])
+    db = _DB()
+    _seed(db, _product([OWN, OWN2]), (OWN, 1), (OLD, 2, "I1"))
 
     def _promote():
         db["catalog_products"].update_one({"id": "P1"}, {"$set": {"images": [OWN, OWN2, OLD]}})
@@ -1191,24 +1190,20 @@ def test_a_row_whose_lane_flips_mid_pass_is_never_dropped_from_the_map(gates, mo
 
     assert prod.ok is True, prod.error
     assert fake.listing() == [_m(1), _m(2), _m(100)]
-    assert sorted(r["id"] for r in _map_of(db)) == [_m(1), _m(100), _m(2)], "OLD stays IMS's"
+    assert {g for _u, g, _i in _ledger(db)} == {_m(1), _m(2), _m(100)}, "OLD stays IMS's"
     again = _run(shopify_push.push_product(db, _parent(db), []))
     assert again.ok is True and again.photos["attached"] == 0, again.photos
     assert fake.listing() == [_m(1), _m(2), _m(100)], "OLD once"
 
 
 def test_two_presses_on_one_product_run_one_at_a_time(gates, monkeypatch):
-    """P1/P2 (interleaved presses). A double click reaching two workers, the
-    images sweep beside a human press, the 01:00/09:00 sweep beside a human
-    press: every pair planned on one listing and read the other's half-done
-    attach as foreign media -> a duplicate on the storefront and an orphan
-    no door governs. Under the product's media lease the second press waits
-    and then reads a listing and a map that agree.
+    """Under the product's media lease the second press waits and then reads
+    a listing and a ledger that agree.
     REVERT-PROOF: media_lease that yields without claiming -> red."""
     # (H) two presses of ONE row
-    fake = _live(monkeypatch, _nodes(1))
+    fake = _live(monkeypatch, [_node(1, OWN)])
     db = _DB()
-    _seed(db, _product([OWN], media_map=[(OWN, _m(1))]))
+    _seed(db, _product([OWN]), (OWN, 1))
     _image(db, "I1", NEW)
 
     async def _twice():
@@ -1220,13 +1215,13 @@ def test_two_presses_on_one_product_run_one_at_a_time(gates, monkeypatch):
     assert sorted([a.action, b.action]) == ["create", "noop"] and a.ok and b.ok
     assert len(fake.calls_of("imsProductCreateMedia")) == 1
     assert fake.listing() == [_m(1), _m(100)]
-    assert _map_of(db) == [{"url": OWN, "id": _m(1)}, {"url": NEW, "id": _m(100), "image_id": "I1"}]
+    assert _ledger(db) == {(OWN, _m(1), None), (NEW, _m(100), "I1")}
 
     # (C) the sweep's product press (a doc loaded before OWN2 was added) and a
     # human design press of OWN2 -- an own photograph -- on the same product
-    fake = _live(monkeypatch, _nodes(1))
+    fake = _live(monkeypatch, [_node(1, OWN)])
     db = _DB()
-    _seed(db, _product([OWN], media_map=[(OWN, _m(1))]))
+    _seed(db, _product([OWN]), (OWN, 1))
     stale = _parent(db)
     db["catalog_products"].update_one({"id": "P1"}, {"$set": {"images": [OWN, OWN2]}})
     _image(db, "I1", OWN2)
@@ -1238,24 +1233,19 @@ def test_two_presses_on_one_product_run_one_at_a_time(gates, monkeypatch):
 
     prod, img = _run(_both())
     assert prod.ok is True and img.ok is True, (prod.error, img.error)
-    attached = [m["originalSource"] for c in fake.calls_of("imsProductCreateMedia") for m in c["variables"]["media"]]
-    assert attached == [OWN2], "OWN2 attached once"
+    assert fake.attached() == [OWN2], "OWN2 attached once"
     assert fake.listing() == [_m(1), _m(100)]
-    assert _map_of(db) == [{"url": OWN, "id": _m(1)}, {"url": OWN2, "id": _m(100)}]
+    assert _ledger(db) == {(OWN, _m(1), None), (OWN2, _m(100), None)}
 
 
 def test_a_row_delete_waits_for_a_press_of_its_product(gates, monkeypatch):
-    """P4 (a delete inside a press's window). The press read the listing and
-    is attaching; the delete's lane check still read empty, so the row went
-    and the media it pressed stayed up with no door able to take it down.
-    The delete runs under the same lease: it waits, sees the lane, 409.
-    REVERT-PROOF: media_lease that yields without claiming -> red."""
+    """REVERT-PROOF: media_lease that yields without claiming -> red."""
     from fastapi import HTTPException
 
-    fake = _live(monkeypatch, _nodes(1))
+    fake = _live(monkeypatch, [_node(1, OWN)])
     db = _DB()
     delete = _delete_route(monkeypatch, db)
-    _seed(db, _product([OWN], media_map=[(OWN, _m(1))]))
+    _seed(db, _product([OWN]), (OWN, 1))
     _image(db, "I1", NEW)
 
     async def _both():
@@ -1271,18 +1261,13 @@ def test_a_row_delete_waits_for_a_press_of_its_product(gates, monkeypatch):
 
 
 def test_a_held_lease_refuses_every_door_and_an_expired_one_is_taken_over(gates, monkeypatch):
-    """The lease itself: while another worker holds the product's lease the
-    design press, the product press and the row delete all refuse with
-    'press again' and send nothing; a lease a dead worker left behind
-    expires and the next press takes it over, then releases it."""
-    from datetime import datetime, timedelta, timezone
     from fastapi import HTTPException
 
     monkeypatch.setattr(_media, "_LEASE_WAIT_SECONDS", 0.05)
-    fake = _live(monkeypatch, _nodes(1))
+    fake = _live(monkeypatch, [_node(1, OWN)])
     db = _DB()
     delete = _delete_route(monkeypatch, db)
-    _seed(db, _product([OWN], media_map=[(OWN, _m(1))]))
+    _seed(db, _product([OWN]), (OWN, 1))
     _image(db, "I1", NEW)
     leases = db[_media.LEASES_COLLECTION]
     leases.insert_one({"_id": "P1", "token": "other", "until": datetime.now(timezone.utc) + timedelta(minutes=5)})
@@ -1303,17 +1288,31 @@ def test_a_held_lease_refuses_every_door_and_an_expired_one_is_taken_over(gates,
     assert leases.find_one({"_id": "P1"}) is None, "released"
 
 
-def test_the_press_reads_the_queue_row_as_it_is_now_not_the_sweeps_copy(gates, monkeypatch):
-    """The images sweep loads every row up front and presses each copy. (a) A
-    row deleted since (its lane was empty, so the delete was allowed) must
-    not be pressed from the copy: that minted a media for a row that no
-    longer exists. (b) A row re-pointed and pressed since must not be pressed
-    from its old url: that took the new asset down and put the replaced one
-    back up.
-    REVERT-PROOF: _press_image on the passed copy (no re-read) -> red."""
-    fake = _live(monkeypatch, _nodes(1))
+def test_a_stolen_lease_sends_nothing(gates, monkeypatch):
+    """T9. Another worker took the lease over while this pass was reading
+    the listing (its lease had run out). The pass renews before every
+    attach, finds it lost, and sends NOTHING.
+    REVERT-PROOF: renew() -> True -> 1 send."""
+    fake = _live(monkeypatch, [_node(1, OWN)])
     db = _DB()
-    _seed(db, _product([OWN], media_map=[(OWN, _m(1))]))
+    _seed(db, _product([OWN]), (OWN, 1))
+    _image(db, "I1", NEW)
+
+    def _thief():
+        db[_media.LEASES_COLLECTION].update_one({"_id": "P1"}, {"$set": {"token": "another-worker"}})
+
+    fake.on_read = _thief
+    res = _run(shopify_push.push_image(db, _row(db, "I1")))
+
+    assert res.ok is False and "lost the media lease" in (res.error or ""), res.error
+    assert fake.calls_of("imsProductCreateMedia") == [] and _docs(db) and _pending(db) == set()
+
+
+def test_the_press_reads_the_queue_row_as_it_is_now_not_the_sweeps_copy(gates, monkeypatch):
+    """REVERT-PROOF: _press_image on the passed copy (no re-read) -> red."""
+    fake = _live(monkeypatch, [_node(1, OWN)])
+    db = _DB()
+    _seed(db, _product([OWN]), (OWN, 1))
     gone = _image(db, "I2", OLD)
     db["product_images"].delete_one({"image_id": "I2"})
 
@@ -1330,18 +1329,15 @@ def test_the_press_reads_the_queue_row_as_it_is_now_not_the_sweeps_copy(gates, m
 
     assert res.action == "noop" and res.shopify_id == _m(100) and len(fake.calls) == n
     assert fake.listing() == [_m(1), _m(100)] and list(db[TOMB].find({})) == []
-    assert _map_of(db) == [{"url": OWN, "id": _m(1)}, {"url": NEW, "id": _m(100), "image_id": "I1"}]
 
 
 def test_replacing_one_rows_asset_hands_a_shared_image_to_its_sibling(gates, monkeypatch):
-    """P2 (two identities for one media). I1 and I2 both source OLD; I1's
-    press put it up (m100, stamped I1) and I2's press read it by url (noop,
-    Synced). Replacing I1's asset used to delete m100 -- I2's image too. The
-    media is HANDED to I2's lane instead, and both rows read no-op after.
+    """I1 and I2 both source OLD; I1's press put it up (stamped I1). Replacing
+    I1's asset hands the media to I2's lane instead of deleting it.
     REVERT-PROOF: push_image with heirs={} -> red."""
-    fake = _live(monkeypatch, _nodes(1))
+    fake = _live(monkeypatch, [_node(1, OWN)])
     db = _DB()
-    _seed(db, _product([OWN], media_map=[(OWN, _m(1))]))
+    _seed(db, _product([OWN]), (OWN, 1))
     _image(db, "I1", OLD)
     _image(db, "I2", OLD)
     assert _run(shopify_push.push_image(db, _row(db, "I1"))).shopify_id == _m(100)
@@ -1353,211 +1349,82 @@ def test_replacing_one_rows_asset_hands_a_shared_image_to_its_sibling(gates, mon
     assert res.ok is True and res.shopify_id == _m(101)
     assert fake.calls_of("imsProductDeleteMedia") == [] and list(db[TOMB].find({})) == []
     assert fake.listing() == [_m(1), _m(100), _m(101)]
-    assert _map_of(db) == [
-        {"url": OWN, "id": _m(1)},
-        {"url": OLD, "id": _m(100), "image_id": "I2"},
-        {"url": NEW, "id": _m(101), "image_id": "I1"},
-    ]
+    assert _ledger(db) == {(OWN, _m(1), None), (OLD, _m(100), "I2"), (NEW, _m(101), "I1")}
     for iid, gid in (("I1", _m(101)), ("I2", _m(100))):
-        plan = shopify_push.image_press_plan(_parent(db), _row(db, iid))
+        plan = _plan(db, _row(db, iid))
         assert (plan["action"], plan["gid"]) == ("noop", gid), iid
 
 
-def test_an_attach_whose_answer_was_lost_is_adopted_not_attached_again(gates, monkeypatch):
-    """A crash or a lost response between the Shopify call and the map write:
-    the media is on the listing, the map never heard of it. The next press
-    of either door recognises its own attach by the originalSource IMS
-    handed over (match_media_to_photos' R1) and MAPS it -- it used to attach
-    the url a second time and leave the first copy unmanaged forever.
-    REVERT-PROOF: plan_product_media without the adopt pass -> red."""
-    from api.services.shopify_push import queries
-
-    fake = _live(monkeypatch, _nodes(1))
-    fake.lose_create_once = True
-    db = _DB()
-    _seed(db, _product([OWN], media_map=[(OWN, _m(1))]))
-    _image(db, "I1", NEW)
-
-    first = _run(shopify_push.push_image(db, _row(db, "I1")))
-    assert first.ok is False and "timeout" in (first.error or "")
-    assert fake.listing() == [_m(1), _m(100)] and _map_of(db) == [{"url": OWN, "id": _m(1)}]
-    assert _pending_of(db) == [{"url": NEW, "image_id": "I1"}]
-
-    again = _run(shopify_push.push_image(db, _row(db, "I1")))
-
-    assert again.ok is True and again.shopify_id == _m(100) and again.photos["adopted"] == 1
-    assert len(fake.calls_of("imsProductCreateMedia")) == 1, "never attached twice"
-    assert _map_of(db) == [{"url": OWN, "id": _m(1)}, {"url": NEW, "id": _m(100), "image_id": "I1"}]
-    assert _pending_of(db) == [], "settled"
-
-    # the product door: the worker dies after the attach, before the map write
-    db["catalog_products"].update_one({"id": "P1"}, {"$set": {"images": [OWN, OWN2]}})
-    restore = _die_after_the_record(monkeypatch)
-    _run(shopify_push.push_product(db, _parent(db), []))
-    restore()
-    assert fake.listing() == [_m(1), _m(100), _m(101)] and len(_map_of(db)) == 2
-    assert _pending_of(db) == [{"url": OWN2}]
-
-    prod = _run(shopify_push.push_product(db, _parent(db), []))
-
-    assert prod.photos["attached"] == 0 and prod.photos["adopted"] == 1, prod.photos
-    assert fake.listing() == [_m(1), _m(100), _m(101)]
-    assert {"url": OWN2, "id": _m(101)} in _map_of(db) and _pending_of(db) == []
-    # ... which needs the source url on the product press's own read of the listing
-    for mutation in (queries._PRODUCT_CREATE, queries._PRODUCT_UPDATE):
-        assert "originalSource { url }" in mutation
-
-
-def test_deleting_a_promoted_rows_queue_entry_stores_the_map_as_it_reads(gates, monkeypatch):
-    """P1 (the delete gate read the by-url lane; the stored stamp outlived it).
-    I1's media m100 is stamped I1; the operator makes NEW one of the
-    product's photos, so the lane reads empty and the delete is allowed --
-    but the map still stored the I1 stamp, so when NEW was later removed
-    from the product the stamp put m100 back in the (deleted) row's lane and
-    no press could take it down. The delete now stores the map as it reads.
-    REVERT-PROOF: drop the normalising write in delete_image -> red."""
+def test_the_delete_gate_fails_closed_on_a_parent_or_ledger_read_error(gates, monkeypatch):
+    """A transient read error is a 503 and the row stays -- never an empty
+    lane. REVERT-PROOF: the gate on _resolve_product_doc (swallows) -> red."""
     from fastapi import HTTPException
 
-    fake = _live(monkeypatch, _nodes(1, 100))
+    _live(monkeypatch, [_node(1, OWN), _node(100, NEW)])
     db = _DB()
     delete = _delete_route(monkeypatch, db)
-    _seed(db, _product([OWN], media_map=[(OWN, _m(1)), (NEW, _m(100), "I1")]))
+    _seed(db, _product([OWN]), (OWN, 1), (NEW, 100, "I1"))
     _image(db, "I1", NEW)
-    with pytest.raises(HTTPException) as refused:
-        _run(delete("I1"))
-    assert refused.value.status_code == 409
+    for coll, method in (("catalog_products", "find_one"), (LEDGER, "find")):
+        real = getattr(db[coll], method)
+        fails = {"left": 1}
 
-    db["catalog_products"].update_one({"id": "P1"}, {"$set": {"images": [OWN, NEW]}})
-    assert _run(delete("I1"))["deleted"] is True
-    assert _map_of(db) == [{"url": OWN, "id": _m(1)}, {"url": NEW, "id": _m(100)}], "the product's lane, stored"
+        def _flaky(*args, _real=real, _fails=fails, **kwargs):
+            if _fails["left"]:
+                _fails["left"] -= 1
+                raise RuntimeError("read timed out")
+            return _real(*args, **kwargs)
 
-    db["catalog_products"].update_one({"id": "P1"}, {"$set": {"images": [OWN]}})
-    prod = _run(shopify_push.push_product(db, _parent(db), []))
+        monkeypatch.setattr(db[coll], method, _flaky)
+        with pytest.raises(HTTPException) as failed:
+            _run(delete("I1"))
+        assert failed.value.status_code == 503, coll
+        assert _row(db, "I1") is not None
+    assert _ledger(db) == {(OWN, _m(1), None), (NEW, _m(100), "I1")}
 
-    assert prod.ok is True and prod.photos["deleted"] == 1, prod.photos
-    assert fake.listing() == [_m(1)] and _map_of(db) == [{"url": OWN, "id": _m(1)}]
 
-
-def test_the_delete_gate_fails_closed_on_a_parent_read_error(gates, monkeypatch):
-    """P2 (the gate failed OPEN). A transient error reading the parent read as
-    'no parent, empty lane' and the row was deleted while its media was on
-    the listing. It is a 503 now and the row stays.
-    REVERT-PROOF: the gate on _resolve_product_doc (swallows) -> red."""
+def test_the_delete_gate_refuses_while_the_lane_holds_media_and_clears_the_stamp_after(gates, monkeypatch):
+    """T11. (a) A PENDING doc in the row's lane (an attach that never heard
+    back) refuses the delete (409), as does a live one. (b) A row whose url
+    became one of the product's photographs holds nothing in its lane and
+    deletes -- and EVERY doc still stamped with its image_id, pending AND
+    live, is stored in the product's lane first, so no later read can put
+    that media back in a lane whose row is gone.
+    REVERT-PROOF: clear the stamp on live docs only -> red."""
     from fastapi import HTTPException
 
-    _live(monkeypatch, _nodes(1, 100))
+    _live(monkeypatch, [_node(1, OWN), _node(100, NEW)])
     db = _DB()
     delete = _delete_route(monkeypatch, db)
-    _seed(db, _product([OWN], media_map=[(OWN, _m(1)), (NEW, _m(100), "I1")]))
+    _seed(db, _product([OWN]), (OWN, 1), (NEW, 100, "I1"))
+    _pend(db, U1, "I1")
     _image(db, "I1", NEW)
-    parents = db["catalog_products"]
-    real_find_one = parents.find_one
-    fails = {"left": 1}
-
-    def _flaky(*args, **kwargs):
-        if fails["left"]:
-            fails["left"] -= 1
-            raise RuntimeError("catalog_products read timed out")
-        return real_find_one(*args, **kwargs)
-
-    monkeypatch.setattr(parents, "find_one", _flaky)
-    with pytest.raises(HTTPException) as failed:
-        _run(delete("I1"))
-
-    assert failed.value.status_code == 503
-    assert _row(db, "I1") is not None
-    assert _map_of(db) == [{"url": OWN, "id": _m(1)}, {"url": NEW, "id": _m(100), "image_id": "I1"}]
-
-
-# ===========================================================================
-# Round 6: a lost attach is on record until a press settles it (the delete
-# gate honours it); a product blocked from online takes no design image
-# ===========================================================================
-
-
-def _lost_attach(monkeypatch, db):
-    """I1 (url NEW) pressed on P1 (listing [m1], map [{OWN, m1}]); the
-    productCreateMedia lands as m100 and its answer is lost."""
-    fake = _live(monkeypatch, _nodes(1))
-    fake.lose_create_once = True
-    _seed(db, _product([OWN], media_map=[(OWN, _m(1))]))
-    _image(db, "I1", NEW)
-    first = _run(shopify_push.push_image(db, _row(db, "I1")))
-    assert first.ok is False and "timeout" in (first.error or "")
-    assert fake.listing() == [_m(1), _m(100)] and _map_of(db) == [{"url": OWN, "id": _m(1)}]
-    return fake
-
-
-def test_a_rows_delete_is_refused_while_its_lost_attach_is_unsettled(gates, monkeypatch):
-    """R2 P1 (the delete orphaned a lost attach). The press's productCreateMedia
-    reached Shopify but its answer was lost, so the map never heard of m100;
-    the delete gate read the map alone, deleted the row -- the only repair
-    path -- and m100 stayed on the storefront as unmanaged forever. The
-    attach is recorded (media_pending, in I1's lane) BEFORE the call: the
-    delete is refused, and the next press of either door maps m100 in I1's
-    lane, where the gate sees it as on the listing.
-    REVERT-PROOF: image_lane_media without pending_media -> red."""
-    from fastapi import HTTPException
-
-    db = _DB()
-    delete = _delete_route(monkeypatch, db)
-    fake = _lost_attach(monkeypatch, db)
-    assert shopify_push.image_press_plan(_parent(db), _row(db, "I1"))["action"] == "create"
 
     with pytest.raises(HTTPException) as refused:
         _run(delete("I1"))
-
     assert refused.value.status_code == 409 and "never heard back" in refused.value.detail
-    assert _row(db, "I1") is not None
-
-    prod = _run(shopify_push.push_product(db, _parent(db), []))
-
-    assert prod.ok is True, prod.error
-    assert (prod.photos["unmanaged"], prod.photos["adopted"], prod.photos["attached"]) == (0, 1, 0)
-    assert fake.listing() == [_m(1), _m(100)]
-    assert _map_of(db) == [{"url": OWN, "id": _m(1)}, {"url": NEW, "id": _m(100), "image_id": "I1"}]
-    assert _pending_of(db) == []
+    db[LEDGER].delete_many({"gid": None})
     with pytest.raises(HTTPException) as on_listing:
         _run(delete("I1"))
     assert on_listing.value.status_code == 409 and _m(100) in on_listing.value.detail
-    assert _run(shopify_push.push_image(db, _row(db, "I1"))).action == "noop"
 
+    _pend(db, U1, "I1")
+    db["catalog_products"].update_one({"id": "P1"}, {"$set": {"images": [OWN, NEW, U1]}})
+    assert _run(delete("I1"))["deleted"] is True
+    assert {(d["url"], d.get("image_id")) for d in _docs(db)} == {(OWN, None), (NEW, None), (U1, None)}
 
-def test_a_lost_attach_of_a_row_re_pointed_since_is_taken_down_by_its_press(gates, monkeypatch):
-    """The lost attach's row is re-pointed before anything settles it: R1
-    adoption only knows the row's url NOW, so m100 (the old url) would never
-    be claimed. The pending row names it: the press maps it in I1's lane and,
-    since I1 no longer sources it, tombstones and deletes it after the new
-    asset lands -- one media on the listing for the row, nothing orphaned.
-    REVERT-PROOF: plan_product_media without the pending settle -> red."""
-    db = _DB()
-    fake = _lost_attach(monkeypatch, db)
-    db["product_images"].update_one({"image_id": "I1"}, {"$set": {"url": OTHER}})
-    plan = shopify_push.image_press_plan(_parent(db), _row(db, "I1"))
-    assert (plan["action"], plan["drop"]) == ("create", [NEW])
-
-    res = _run(shopify_push.push_image(db, _row(db, "I1")))
-
-    assert res.ok is True and res.shopify_id == _m(101), res.error
-    assert fake.listing() == [_m(1), _m(101)], "the lost attach taken down"
-    assert [t["media_gid"] for t in db[TOMB].find({})] == [_m(100)]
-    assert _map_of(db) == [{"url": OWN, "id": _m(1)}, {"url": OTHER, "id": _m(101), "image_id": "I1"}]
-    assert _pending_of(db) == []
+    db["catalog_products"].update_one({"id": "P1"}, {"$set": {"images": [OWN]}})
+    prod = _run(shopify_push.push_product(db, _parent(db), []))
+    assert prod.ok is True and prod.photos["deleted"] == 1, prod.photos
 
 
 def test_a_product_blocked_from_online_takes_no_design_image(gates, monkeypatch):
-    """R2 (the design press wrote to a product the product press refuses). P1
-    is on Shopify (delisted to DRAFT, gid kept) and a member of an
-    online_sync_blocked collection: push_product refuses it with zero calls,
-    and so must the design press -- the one predicate refuses it the same
-    way, so the sweep skips it and the counts never call it pending. An
-    unreadable block config refuses too (fail closed).
-    REVERT-PROOF: image_press_plan without the online-block refusal -> red."""
+    """REVERT-PROOF: image_press_plan without the online-block refusal -> red."""
     from api.routers import online_store_push as router
 
-    fake = _live(monkeypatch, _nodes(1))
+    fake = _live(monkeypatch, [_node(1, OWN)])
     db = _DB()
-    _seed(db, _product([OWN], media_map=[(OWN, _m(1))], status="DRAFT"))
+    _seed(db, _product([OWN], status="DRAFT"), (OWN, 1))
     _image(db, "I1", NEW)
     db["ecom_collections"].insert_one(
         {"collection_id": "C-BAN", "collection_type": "CUSTOM", "online_sync_blocked": True,
@@ -1580,4 +1447,382 @@ def test_a_product_blocked_from_online_takes_no_design_image(gates, monkeypatch)
     img = _run(shopify_push.push_image(db, _row(db, "I1")))
 
     assert (img.action, img.ok, img.reason) == ("skip", False, "block_status_unverifiable")
-    assert fake.calls == [] and _map_of(db) == [{"url": OWN, "id": _m(1)}]
+    assert fake.calls == [] and _ledger(db) == {(OWN, _m(1), None)}
+
+
+# ===========================================================================
+# ROOT CAUSE 1+2: identity by file name, one send -- the lost answer
+# ===========================================================================
+
+
+def test_the_old_originalsource_identity_matches_nothing_on_a_production_shaped_listing(gates, monkeypatch):
+    """What production Shopify does with an attach (measured 2026-09-06): the
+    media's originalSource is Shopify's OWN storage copy, never the url IMS
+    sent, and the listing query does not even carry it now. An identity keyed
+    on originalSource == the IMS url (the round 1-8 settle) recognises 0 of
+    IMS's own attaches; the CDN copy's FILE NAME recognises all of them."""
+    fake = _live(monkeypatch, [_node(1, OWN)])
+    db = _DB()
+    _seed(db, _product([OWN]), (OWN, 1))
+    _image(db, "I1", U1)
+    _image(db, "I2", OID)
+    for iid in ("I1", "I2"):
+        assert _run(shopify_push.push_image(db, _row(db, iid))).ok
+    fake.ready()
+
+    mine = [fake.node(_m(100)), fake.node(_m(101))]
+    assert [n["originalSource"]["url"].startswith(STORAGE) for n in mine] == [True, True]
+    by_source = [n for n in mine if n["originalSource"]["url"] in (U1, OID)]
+    assert by_source == [], "the old IMS-url assumption: nothing matches"
+    listing = _run(_media._product_media(db, GID))
+    assert all("originalSource" not in n for n in listing)
+    by_name = shopify_push.match_media_to_photos([U1, OID], listing)
+    assert by_name["map"] == [{"url": U1, "id": _m(100)}, {"url": OID, "id": _m(101)}]
+    for q in (shopify_push.queries._PRODUCT_CREATE, shopify_push.queries._PRODUCT_UPDATE,
+              shopify_push.queries._PRODUCT_MEDIA_QUERY):
+        assert "originalSource" not in q
+
+
+def test_a_lost_answer_is_one_media_and_the_next_press_settles_it_by_name(gates, monkeypatch):
+    """T1, END TO END through the REAL transport: productCreateMedia commits on
+    Shopify, then the answer is lost (ReadTimeout after the send). Exactly ONE
+    POST and ONE media -- the transport never replays a create -- and the
+    doc, recorded before the send, stays pending. Once the media is READY
+    (and even long after the 15-minute grace) the next press recognises it by
+    its CDN file name and records it live (how=settled): no second attach.
+    REVERT-PROOF: (a) _replay_safe -> True: 2 POSTs, 2 media. (b) the settle
+    never matching a name (the originalSource-era identity): the old pending
+    doc is dropped and the url attached a second time."""
+    fake = _wire(monkeypatch, [_node(1, OWN)])
+    db = _DB()
+    _seed(db, _product([OWN]), (OWN, 1))
+    _image(db, "I1", U1)
+    fake.commit_then(httpx.ReadTimeout("read timed out"))
+
+    first = _run(shopify_push.push_image(db, _row(db, "I1")))
+
+    assert first.ok is False and "not retried" in (first.error or ""), first.error
+    assert len(fake.calls_of("imsProductCreateMedia")) == 1, "one POST"
+    assert fake.listing() == [_m(1), _m(100)], "one media"
+    assert _pending(db) == {(U1, "I1")} and _ledger(db) == {(OWN, _m(1), None)}
+
+    fake.ready()
+    _age(db, U1, 60)
+    again = _run(shopify_push.push_image(db, _row(db, "I1")))
+
+    assert again.ok is True and again.shopify_id == _m(100), again.error
+    assert again.photos["adopted"] == 1 and again.photos["attached"] == 0
+    assert len(fake.calls_of("imsProductCreateMedia")) == 1, "never attached twice"
+    assert _ledger(db) == {(OWN, _m(1), None), (U1, _m(100), "I1")} and _pending(db) == set()
+    assert [d["how"] for d in _docs(db) if d["gid"] == _m(100)] == ["settled"]
+    assert _run(shopify_push.push_image(db, _row(db, "I1"))).action == "noop"
+
+
+def test_a_lost_attach_of_the_product_lane_settles_on_the_product_press(gates, monkeypatch):
+    """The product door: a lost answer on the product press, a READY media
+    carrying the uploader's ObjectId name (Shopify added the .png), settled
+    by the next product press -- attached once, published."""
+    monkeypatch.setenv("PUBLIC_API_BASE_URL", "https://api.example.com")
+    fake = _live(monkeypatch, [_node(1, OWN)])
+    db = _DB()
+    _seed(db, _product([OWN, "/api/v1/products/image/65f1a2b3c4d5e6f7a8b9c0d1"]), (OWN, 1))
+    fake.commit_then(RuntimeError("shopify imsProductCreateMedia timed out after sending; not retried"))
+
+    first = _run(shopify_push.push_product(db, _parent(db), []))
+    assert first.photos["error"] and _pending(db) == {(OID, None)}
+
+    fake.ready()
+    prod = _run(shopify_push.push_product(db, _parent(db), []))
+
+    assert prod.ok is True and prod.photos["adopted"] == 1 and prod.photos["attached"] == 0, prod.photos
+    assert fake.attached() == [OID] and fake.node(_m(100))["image"]["url"].split("/")[-1].startswith(
+        "65f1a2b3c4d5e6f7a8b9c0d1.png"
+    )
+    assert _ledger(db) == {(OWN, _m(1), None), (OID, _m(100), None)}
+
+
+def test_a_lost_attach_of_a_row_re_pointed_since_is_taken_down_by_its_press(gates, monkeypatch):
+    """The lost attach's row is re-pointed before anything settles it. The
+    pending doc names the old url: the press settles it in I1's lane by name
+    and, since I1 no longer sources it, tombstones and deletes it after the
+    new asset lands -- one media on the listing for the row."""
+    fake = _live(monkeypatch, [_node(1, OWN)])
+    db = _DB()
+    _seed(db, _product([OWN]), (OWN, 1))
+    _image(db, "I1", U1)
+    fake.commit_then(RuntimeError("lost"))
+    assert _run(shopify_push.push_image(db, _row(db, "I1"))).ok is False
+    fake.ready()
+    db["product_images"].update_one({"image_id": "I1"}, {"$set": {"url": U2}})
+    plan = _plan(db, _row(db, "I1"))
+    assert (plan["action"], plan["drop"]) == ("create", [U1])
+
+    res = _run(shopify_push.push_image(db, _row(db, "I1")))
+
+    assert res.ok is True and res.shopify_id == _m(101), res.error
+    assert fake.listing() == [_m(1), _m(101)], "the lost attach taken down"
+    assert [t["media_gid"] for t in db[TOMB].find({})] == [_m(100)]
+    assert _ledger(db) == {(OWN, _m(1), None), (U2, _m(101), "I1")} and _pending(db) == set()
+
+
+def test_a_node_still_processing_holds_an_old_pending_attach(gates, monkeypatch):
+    """T3. A pending doc 20 minutes old, no READY node carries its name -- but
+    an image-less node is still PROCESSING on the listing: it may be that
+    very attach. Held: nothing attached, reported MEDIA_SETTLING.
+    REVERT-PROOF: count an image-less node as absent -> the url is attached."""
+    fake = _live(monkeypatch, [_node(1, OWN), _node(9, status="PROCESSING")])
+    db = _DB()
+    _seed(db, _product([OWN, U1]), (OWN, 1))
+    _pend(db, U1, minutes=20)
+
+    prod = _run(shopify_push.push_product(db, _parent(db), []))
+
+    assert fake.attached() == [], "held, not attached again"
+    assert prod.photos["held"] == [U1] and prod.photos["code"] == "MEDIA_SETTLING"
+    assert _pending(db) == {(U1, None)}
+
+
+def test_a_pending_attach_is_dropped_only_after_the_grace(gates, monkeypatch):
+    """T4. Nothing on the listing carries the name and nothing is processing:
+    at 5 minutes the attach may still land -- held; at 20 minutes (a NAIVE
+    sent_at, as pymongo hands it back) it never landed -- dropped, and the
+    url attached exactly once.
+    REVERT-PROOF: no grace (young always False) -> an attach at 5 minutes."""
+    fake = _live(monkeypatch, [_node(1, OWN)])
+    db = _DB()
+    _seed(db, _product([OWN, U1]), (OWN, 1))
+    _pend(db, U1, minutes=5)
+
+    early = _run(shopify_push.push_product(db, _parent(db), []))
+
+    assert fake.attached() == [] and early.photos["held"] == [U1]
+
+    _age(db, U1, 20, naive=True)
+    late = _run(shopify_push.push_product(db, _parent(db), []))
+
+    assert late.photos["dropped"] == 1 and late.photos["attached"] == 1, late.photos
+    assert fake.attached() == [U1]
+    assert _ledger(db) == {(OWN, _m(1), None), (U1, _m(100), None)} and _pending(db) == set()
+
+
+def test_a_generic_name_is_never_claimed(gates, monkeypatch):
+    """T5. A pending attach of '.../front.jpg' (a name anyone's upload can
+    carry) and a READY hand upload 'front.jpg' on the listing: NOT claimed
+    (it may be the human's), nothing attached, MEDIA_SETTLING. When IMS then
+    removes that photograph, the hand upload survives -- it was never IMS's.
+    REVERT-PROOF: _ims_unique -> True: claimed, then DELETED."""
+    front = "https://cdn.example.com/p/front.jpg"
+    fake = _live(monkeypatch, [_node(1, OWN), _node(7, name="front.jpg")])
+    db = _DB()
+    _seed(db, _product([OWN, front]), (OWN, 1))
+    _pend(db, front, minutes=60)
+
+    prod = _run(shopify_push.push_product(db, _parent(db), []))
+
+    assert fake.attached() == [] and prod.photos["code"] == "MEDIA_SETTLING"
+    assert prod.photos["held"] == [front] and prod.photos["unmanaged"] == 1
+
+    db["catalog_products"].update_one({"id": "P1"}, {"$set": {"images": [OWN]}})
+    prod = _run(shopify_push.push_product(db, _parent(db), []))
+
+    assert HAND in fake.listing() and fake.calls_of("imsProductDeleteMedia") == []
+    assert list(db[TOMB].find({})) == []
+
+
+def test_two_hits_hold(gates, monkeypatch):
+    """T6a. Two READY nodes carry the pending url's name (the second a Files
+    collision copy): which is IMS's is a guess, and a guess is never a claim.
+    REVERT-PROOF: claim the first hit (drop len(ids) == 1) -> claimed."""
+    fake = _live(monkeypatch, [_node(1, OWN), _node(8, U1), _node(9, name="3f2a9c1e5b7d4e6f8a0b1c2d3e4f5a6b_%s.png" % uuid.uuid4())])
+    db = _DB()
+    _seed(db, _product([OWN, U1]), (OWN, 1))
+    _pend(db, U1, minutes=60)
+
+    prod = _run(shopify_push.push_product(db, _parent(db), []))
+
+    assert prod.photos["held"] == [U1] and prod.photos["adopted"] == 0
+    assert fake.attached() == [] and _pending(db) == {(U1, None)}
+
+
+def test_two_pending_docs_on_one_node_hold(gates, monkeypatch):
+    """T6b. Two pending attaches (two hosts, one IMS file name) and ONE READY
+    node carrying that name: it can only be one of them -- both held.
+    REVERT-PROOF: drop the load check -> the first is claimed."""
+    twin = "https://mirror.example.com/x/3f2a9c1e5b7d4e6f8a0b1c2d3e4f5a6b.png"
+    fake = _live(monkeypatch, [_node(1, OWN), _node(8, U1)])
+    db = _DB()
+    _seed(db, _product([OWN, U1, twin]), (OWN, 1))
+    _pend(db, U1, minutes=60)
+    _pend(db, twin, minutes=60)
+
+    prod = _run(shopify_push.push_product(db, _parent(db), []))
+
+    assert sorted(prod.photos["held"]) == sorted([U1, twin]) and prod.photos["adopted"] == 0
+    assert fake.attached() == [] and len(_pending(db)) == 2
+
+
+def test_a_naming_drift_holds_every_pending_attach(gates, monkeypatch):
+    """T7, the canary. A READY media IMS minted whose CDN name no longer
+    carries its url's name means Shopify's naming changed -- a name match is
+    then evidence of nothing. An old pending doc with 0 hits is NOT dropped
+    (its media may be on the listing under a name IMS cannot recognise):
+    held, nothing attached, MEDIA_NAMING_DRIFT.
+    REVERT-PROOF: canary off -> dropped and attached again."""
+    fake = _live(monkeypatch, [_node(1, name="IMG_0001.jpg"), _node(2, name="IMG_0002.jpg")])
+    db = _DB()
+    _seed(db, _product([OWN, U1]), (OWN, 1))
+    _pend(db, U1, minutes=60)
+
+    prod = _run(shopify_push.push_product(db, _parent(db), []))
+
+    assert prod.photos["code"] == "MEDIA_NAMING_DRIFT" and prod.photos["held"] == [U1]
+    assert fake.attached() == [] and _pending(db) == {(U1, None)}
+
+
+# ===========================================================================
+# ROOT CAUSE 3 + 4: the twin's writers, the stale sweep doc, FAILED media
+# ===========================================================================
+
+
+def test_stale_whole_doc_writers_cannot_touch_the_media_record(gates, monkeypatch):
+    """T8. A catalog save of a doc loaded BEFORE the press, and a whole-ecom
+    $set from a stale copy (the stock / discount / delist write-back idiom),
+    land after the press. Neither can erase what IMS owns: the record is not
+    on the twin. The next press sends no productCreateMedia.
+    (The structural guard is T17: no media state constant on the twin.)"""
+    from api.routers import catalog
+
+    fake = _live(monkeypatch, [_node(1, OWN)])
+    db = _DB()
+    _seed(db, _product([OWN]), (OWN, 1))
+    monkeypatch.setattr(catalog, "_catalog_coll", lambda: db["catalog_products"])
+    stale = _parent(db)
+    assert _run(shopify_push.push_image(db, _image(db, "I1", NEW))).ok
+    assert _run(shopify_push.push_product(db, _parent(db), [])).ok
+
+    catalog._save_catalog_product(copy.deepcopy(stale))
+    db["catalog_products"].update_one({"id": "P1"}, {"$set": {"ecom": copy.deepcopy(stale["ecom"])}})
+    n = len(fake.calls_of("imsProductCreateMedia"))
+    prod = _run(shopify_push.push_product(db, _parent(db), []))
+    img = _run(shopify_push.push_image(db, _row(db, "I1")))
+
+    assert prod.ok and img.action == "noop"
+    assert len(fake.calls_of("imsProductCreateMedia")) == n == 1
+    assert _ledger(db) == {(OWN, _m(1), None), (NEW, _m(100), "I1")}
+
+
+def test_a_stale_sweep_doc_never_re_adds_or_strips_a_photo(gates, monkeypatch):
+    """T10. The sweep's doc lists [A, B]; the twin NOW lists nothing: the pass
+    plans only on the twin -- zero media mutations, NO_PHOTO, the publish
+    withheld (it used to fall back to the sweep's list and re-attach B, or
+    with an empty list strip A). With the twin at [A] (A on record) the
+    stale B is not attached either.
+    REVERT-PROOF: drop the NO_PHOTO refusal -> A deleted off the listing."""
+    a, b = OWN, OWN2
+    fake = _live(monkeypatch, [_node(1, a)])
+    db = _DB()
+    _seed(db, _product([a, b]), (a, 1))
+    sweep = _parent(db)
+    db["catalog_products"].update_one({"id": "P1"}, {"$set": {"images": []}})
+
+    prod = _run(shopify_push.push_product(db, sweep, []))
+
+    assert prod.photos["code"] == "NO_PHOTO" and prod.photos["on_shopify"] == 0
+    assert prod.ok is False and prod.reason == "publish_withheld"
+    assert [o for o in fake.ops() if o.startswith("imsProduct") and "Media" in o] == []
+    assert fake.calls_of("imsPublishablePublish") == [] and fake.listing() == [_m(1)]
+
+    db["catalog_products"].update_one({"id": "P1"}, {"$set": {"images": [a]}})
+    prod = _run(shopify_push.push_product(db, sweep, []))
+
+    assert prod.ok is True and fake.attached() == [], "B is not the twin's"
+    assert fake.listing() == [_m(1)]
+
+
+def test_a_failed_media_is_replaced_before_it_is_deleted(gates, monkeypatch):
+    """T13a. The media IMS owns for OWN went FAILED (Shopify could not fetch
+    the bytes). It is not a photograph: the url is attached again FIRST, then
+    the FAILED media is tombstoned and deleted."""
+    fake = _live(monkeypatch, [_node(1, OWN)])
+    fake.fail(_m(1))
+    db = _DB()
+    _seed(db, _product([OWN]), (OWN, 1))
+
+    prod = _run(shopify_push.push_product(db, _parent(db), []))
+
+    assert prod.ok is True, prod.error
+    ops = [o for o in fake.ops() if o in ("imsProductCreateMedia", "imsProductDeleteMedia")]
+    assert ops == ["imsProductCreateMedia", "imsProductDeleteMedia"]
+    assert fake.calls_of("imsProductDeleteMedia")[0]["variables"]["mediaIds"] == [_m(1)]
+    assert fake.listing() == [_m(100)] and _ledger(db) == {(OWN, _m(100), None)}
+    assert prod.photos["on_shopify"] == 1
+
+
+def test_a_failed_only_listing_withholds_the_publish(gates, monkeypatch):
+    """T13b. The only media is FAILED and the re-attach is rejected: nothing
+    on the listing is a photograph, so the publish is withheld.
+    REVERT-PROOF: on_shopify counting FAILED media -> published."""
+    fake = _live(monkeypatch, [_node(1, OWN)])
+    fake.fail(_m(1))
+    fake.reject = {OWN}
+    db = _DB()
+    _seed(db, _product([OWN]), (OWN, 1))
+
+    prod = _run(shopify_push.push_product(db, _parent(db), []))
+
+    assert prod.photos["on_shopify"] == 0 and "mediaUserErrors" in prod.photos["error"]
+    assert prod.ok is False and prod.reason == "publish_withheld"
+    assert fake.calls_of("imsPublishablePublish") == []
+
+
+def test_one_rejected_photo_stays_on_record_and_is_attached_once_after_the_grace(gates, monkeypatch):
+    """T15. Two new photographs; Shopify rejects the second (mediaUserErrors).
+    The first is live; the second stays pending (recorded before the send)
+    and is NOT re-sent on an immediate re-press; after the grace it is
+    dropped and attached exactly once.
+    REVERT-PROOF: no grace -> re-sent on the immediate re-press."""
+    fake = _live(monkeypatch, [_node(1, OWN)])
+    fake.reject = {U2}
+    db = _DB()
+    _seed(db, _product([OWN, U1, U2]), (OWN, 1))
+
+    first = _run(shopify_push.push_product(db, _parent(db), []))
+
+    assert "mediaUserErrors" in first.photos["error"]
+    assert _ledger(db) == {(OWN, _m(1), None), (U1, _m(100), None)} and _pending(db) == {(U2, None)}
+    fake.reject = set()
+    fake.ready()
+    again = _run(shopify_push.push_product(db, _parent(db), []))
+    assert fake.attached() == [U1, U2], "U2 once (the rejected send), none more yet"
+    assert again.photos["held"] == [U2]
+
+    _age(db, U2, 20)
+    late = _run(shopify_push.push_product(db, _parent(db), []))
+
+    assert late.photos["dropped"] == 1 and late.photos["attached"] == 1
+    assert fake.attached() == [U1, U2, U2]
+    assert _ledger(db) == {(OWN, _m(1), None), (U1, _m(100), None), (U2, _m(101), None)}
+
+
+def test_no_media_state_lives_on_the_twin():
+    """T17, structural. The media record has ONE home: the string constant
+    'online_media' appears only in shopify_push/media.py, and no code under
+    backend/api or scripts names ``media_map`` / ``media_pending`` (the twin
+    fields every whole-ecom writer clobbered).
+    REVERT-PROOF: any constant 'ecom.media_map' or 'media_pending' -> red."""
+    import ast
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[2]
+    bad = re.compile(r"(^|\.)media_(map|pending)$")
+    homes, names = set(), []
+    for base in (root / "backend" / "api", root / "scripts"):
+        for f in base.rglob("*.py"):
+            for node in ast.walk(ast.parse(f.read_text(encoding="utf-8"))):
+                if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                    if node.value == "online_media":
+                        homes.add(f.relative_to(root).as_posix())
+                    if bad.search(node.value):
+                        names.append((f.relative_to(root).as_posix(), node.value))
+    assert homes == {"backend/api/services/shopify_push/media.py"}, homes
+    assert names == [], names

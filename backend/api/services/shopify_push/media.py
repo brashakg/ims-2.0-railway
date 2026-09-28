@@ -1,8 +1,8 @@
 """Shopify push -- media
 
-Images/media: the `product_photo_urls` photo predicate, the media diff pass
-BOTH doors run (the product press and the design-queue press), media inputs
-and `push_image`.
+Images/media: the `product_photo_urls` photo predicate, the media ledger
+(``online_media``), the media diff pass BOTH doors run (the product press and
+the design-queue press), media inputs and `push_image`.
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections import Counter
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 import asyncio
 import os
@@ -80,8 +80,8 @@ def product_photo_urls(product: Dict[str, Any]) -> List[str]:
     only photo lives in the design queue is refused rather than published
     bare -- conservative, and the operator fixes it by putting the photo on
     the product (the design press refuses such a product too: same gate,
-    same reason). Once pressed, a design-queue media is remembered on the
-    same ``ecom.media_map`` as an ``image_id`` row -- its own lane, which the
+    same reason). Once pressed, a design-queue media is an ``online_media``
+    doc carrying the queue row's ``image_id`` -- its own lane, which the
     product press keeps and never touches (see plan_product_media)."""
     out: List[str] = []
 
@@ -120,34 +120,136 @@ def image_source_url(image: Dict[str, Any]) -> Optional[str]:
     http(s), the in-app path rewritten through PUBLIC_API_BASE_URL exactly
     as product_photo_urls rewrites it), or None when Shopify could not fetch
     it. THE identity of that row on the listing -- the media input, the
-    media_map row and the 'already on the listing' check all key on this one
-    value, so a row can never be mapped under one spelling and looked up
-    under another. Pure."""
+    online_media doc and the 'already on the listing' check all key on this
+    one value, so a row can never be recorded under one spelling and looked
+    up under another. Pure."""
     return _photo_url(image.get("edited_url") or image.get("url"))
 
 
-def _listing_map(parent: Optional[Dict[str, Any]]) -> List[Dict[str, str]]:
-    """The media_map a design-queue press may consult: the parent twin's --
-    or NOTHING for a size-variant twin, which owns no listing whatever its
-    ecom carries (a twin repair that copies the parent's ecom copies the map
-    too, and a copied row must not make the child's press a no-op that
-    claims the parent's media). Pure."""
+# ---------------------------------------------------------------------------
+# THE MEDIA LEDGER (2026-09-28). What IMS attached to a Shopify listing lives
+# in its OWN collection, one doc per attach:
+#     {_id, product_id, url, image_id, gid, how, sent_at, at}
+# ``gid`` None = PENDING (the attach was recorded before it was sent and no
+# answer has named its media yet); set = LIVE (IMS owns that MediaImage).
+# ``how`` says how IMS came to own it: "minted" (Shopify's own answer named
+# the gid), "settled" (a pending attach recognised on the listing by its file
+# name -- see _settle), "adopted" (the runbook,
+# scripts/adopt_shopify_media_map.py).
+# Nothing about media lives on catalog_products any more, so none of the
+# whole-doc or whole-ecom writers of the twin (the catalog PUT, the stock and
+# discount write-backs, delist, the collections requeue, ...) can erase,
+# revert or resurrect it; and every write here is a single-doc insert,
+# update or delete, so there is no map to merge. The only writers are the
+# pass (sync_product_media), the design-queue row delete and the adoption
+# runbook, each under the product's media_lease.
+# ---------------------------------------------------------------------------
+
+MEDIA_COLLECTION = "online_media"
+
+
+def media_rows(db, product_id: Optional[str]) -> List[Dict[str, Any]]:
+    """Every ledger doc of one product (pending and live). RAISES on a db
+    error -- a caller that cannot read the ledger must fail closed, never
+    read it as 'IMS owns nothing'. No db or no product: []."""
+    if db is None or not product_id:
+        return []
+    return [
+        r
+        for r in db[MEDIA_COLLECTION].find({"product_id": str(product_id)})
+        if isinstance(r, dict) and isinstance(r.get("url"), str) and r.get("url")
+    ]
+
+
+def owned_media(rows: Optional[List[Dict[str, Any]]], own: List[str]) -> List[Dict[str, Any]]:
+    """The LIVE ledger docs as ``{_id, url, id: gid, image_id, how}``. THE
+    LANE IS DECIDED HERE, BY URL: a doc whose url is one of the product's own
+    photographs ``own`` is the product's lane whichever door attached it
+    (_lane_of). Pure."""
+    return [
+        {
+            "_id": r.get("_id"),
+            "url": r["url"],
+            "id": str(r["gid"]),
+            "image_id": _lane_of(r["url"], r.get("image_id"), own),
+            "how": r.get("how"),
+        }
+        for r in rows or []
+        if r.get("gid")
+    ]
+
+
+def pending_media(rows: Optional[List[Dict[str, Any]]], own: List[str]) -> List[Dict[str, Any]]:
+    """The PENDING ledger docs (an attach recorded, no gid yet) as ``{_id,
+    url, image_id, sent_at}`` -- lane by url, as owned_media. Pure."""
+    return [
+        {
+            "_id": r.get("_id"),
+            "url": r["url"],
+            "image_id": _lane_of(r["url"], r.get("image_id"), own),
+            "sent_at": r.get("sent_at"),
+        }
+        for r in rows or []
+        if not r.get("gid")
+    ]
+
+
+def _lane_of(url: str, image_id: Any, own: List[str]) -> Optional[str]:
+    """THE LANE OF A MEDIA, BY URL: the design row's ``image_id`` it was
+    pressed for -- None (the product's lane) when the url is one of the
+    product's own photographs ``own``, whichever door put it up. Pure."""
+    return None if url in own or not image_id else str(image_id)
+
+
+def _in_lane(r: Dict[str, Any], design_row: Optional[Dict[str, Any]]) -> bool:
+    """Does a pass GOVERN this doc: the design press (``design_row``, the
+    queue row being pressed) governs the docs stamped with ITS image_id; the
+    product press (None) governs the docs without one. Pure."""
+    if not design_row:
+        return not r.get("image_id")
+    return r.get("image_id") == str(design_row.get("image_id") or "")
+
+
+def _normalise_lanes(db, product_id: str, own: List[str]) -> None:
+    """STORE the lane the read already decides: every doc (pending or live)
+    whose url is one of the product's own photographs loses its image_id
+    stamp -- so once a design asset is promoted to a product photograph,
+    removing it from the product takes it down (the product press governs
+    it), even after that photograph leaves ``own``. One op; raises."""
+    if own:
+        db[MEDIA_COLLECTION].update_many(
+            {"product_id": str(product_id), "url": {"$in": list(own)}}, {"$set": {"image_id": None}}
+        )
+
+
+# ---------------------------------------------------------------------------
+# The design-queue press predicate (read off the parent twin and its ledger)
+# ---------------------------------------------------------------------------
+
+
+def _listing_map(parent: Optional[Dict[str, Any]], rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The live docs a design-queue press may consult: the parent twin's --
+    or NOTHING for a size-variant twin, which owns no listing (its twin may
+    carry the parent's gid after a repair; a copied gid must not make the
+    child's press a no-op that claims the parent's media). Pure."""
     if not parent or is_variant_of(parent):
         return []
-    return owned_media(parent)
+    return owned_media(rows, product_photo_urls(parent))
 
 
 def image_press_plan(
     parent: Optional[Dict[str, Any]],
     image: Dict[str, Any],
+    rows: Optional[List[Dict[str, Any]]],
     *,
     lock: Optional[str] = None,
     blocked: Optional[bool] = False,
 ) -> Dict[str, Any]:
     """PURE: what a press of this design-queue row does, read off the parent
-    twin and its ``ecom.media_map`` alone -- THE one predicate the press, the
-    sweep's skip and the pushed/pending counts all ask (read_image_press
-    supplies the db facts), so they can never disagree about a row:
+    twin and its ledger docs ``rows`` (media_rows; None = unreadable) alone --
+    THE one predicate the press, the sweep's skip and the pushed/pending
+    counts all ask (read_image_press supplies the db facts), so they can
+    never disagree about a row:
       gid     the MediaImage the row's source url maps to; None when the
               image is not on the listing (or the parent is a size-variant
               twin, which owns no listing);
@@ -162,15 +264,16 @@ def image_press_plan(
               'skip' -- the press REFUSES before it sends anything, with
               ``reason`` (push_locked | online_sync_blocked |
               block_status_unverifiable | no_url | no_photo | not_on_shopify |
-              hands_off) and ``error`` (the line the press reports). ``lock``
-              is the parent's push_lock_reason and ``blocked`` its online-block
-              status (True / False / None = unreadable, fail closed) -- db
-              facts the caller supplies.
+              map_unreadable | hands_off) and ``error`` (the line the press
+              reports). ``lock`` is the parent's push_lock_reason and
+              ``blocked`` its online-block status (True / False / None =
+              unreadable, fail closed) -- db facts the caller supplies.
     A refusal is part of the answer so a row the press will never send is
     not 'pending' forever and the sweep does not press it every run."""
     src = image_source_url(image)
-    gid = {r["url"]: r["id"] for r in _listing_map(parent)}.get(src) if src else None
-    drop = [r["url"] for r in image_lane_media(parent, image) if r["url"] != src]
+    known = rows or []
+    gid = {r["url"]: r["id"] for r in _listing_map(parent, known)}.get(src) if src else None
+    drop = [r["url"] for r in image_lane_media(parent, image, known) if r["url"] != src]
     plan = {"gid": gid, "drop": drop, "action": "create" if not gid else ("update" if drop else "noop")}
     on_shopify = (
         parent is not None
@@ -205,13 +308,20 @@ def image_press_plan(
         )
     elif not on_shopify:
         skip = ("not_on_shopify", "parent product not on Shopify yet (push the product first)")
-    elif not _listing_map(parent):
-        # HANDS OFF, read off the twin: IMS owns no media on this listing (it
-        # went live before the map existed, or its photographs never landed),
-        # and the pass never attaches onto a listing it owns nothing on -- a
-        # re-press would duplicate every photograph a human put there. The
-        # product press (it attaches the product's photographs and maps them)
-        # or the adoption runbook gives IMS the listing first.
+    elif rows is None:
+        # FAIL CLOSED: a ledger that cannot be read is never 'IMS owns
+        # nothing' (that would be hands-off at best, a blind attach at worst).
+        skip = (
+            "map_unreadable",
+            "refused: the product's media record could not be read -- press again",
+        )
+    elif not _listing_map(parent, rows):
+        # HANDS OFF, read off the ledger: IMS owns no media on this listing
+        # (it went live before the ledger existed, or its photographs never
+        # landed), and the pass never attaches onto a listing it owns nothing
+        # on -- a re-press would duplicate every photograph a human put there.
+        # The product press (it attaches the product's photographs) or the
+        # adoption runbook gives IMS the listing first.
         skip = (
             "hands_off",
             "hands off: IMS owns no media on this listing yet -- push the product "
@@ -225,176 +335,133 @@ def image_press_plan(
 
 def read_image_press(db, image: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[str], Dict[str, Any]]:
     """(parent twin, its push-lock, image_press_plan): the db facts the one
-    predicate needs -- the parent, its push_lock_reason and its online-block
-    status -- read HERE, the one way, for the press and for the sweep's skip
-    and the counts alike. Never raises."""
+    predicate needs -- the parent, its ledger docs, its push_lock_reason and
+    its online-block status -- read HERE, the one way, for the press and for
+    the sweep's skip and the counts alike. Never raises (an unreadable
+    ledger is rows=None: the plan refuses)."""
     parent = _resolve_product_doc(db, image.get("product_id"))
     if parent is None:
-        return None, None, image_press_plan(None, image)
+        return None, None, image_press_plan(None, image, [])
+    try:
+        rows: Optional[List[Dict[str, Any]]] = media_rows(db, image.get("product_id"))
+    except Exception:  # noqa: BLE001 -- fail closed in the plan
+        rows = None
     lock = push_lock_reason(db, "product", parent)
     blocked = online_block_status(db, parent)
-    return parent, lock, image_press_plan(parent, image, lock=lock, blocked=blocked)
+    return parent, lock, image_press_plan(parent, image, rows, lock=lock, blocked=blocked)
 
 
-def image_lane_media(parent: Optional[Dict[str, Any]], image: Dict[str, Any]) -> List[Dict[str, str]]:
-    """What a press of this design-queue row GOVERNS -- its lane: the media on
-    the parent's listing stamped with its ``image_id`` (whatever url the row
-    carries now), AND the attaches made for it whose answer never came back
-    (pending_media: ``{url, image_id}`` with no id -- the media may be on the
-    listing with no map row). Only a press of this row can take them down
-    (or settle them), so the row must not be deleted while this is
-    non-empty. Pure."""
+def image_lane_media(
+    parent: Optional[Dict[str, Any]], image: Dict[str, Any], rows: Optional[List[Dict[str, Any]]]
+) -> List[Dict[str, Any]]:
+    """What a press of this design-queue row GOVERNS -- its lane: the live
+    docs stamped with its ``image_id`` (whatever url the row carries now),
+    AND the pending ones (an attach made for it whose answer never came back:
+    ``{url, image_id}`` with no id -- the media may be on the listing).
+    Only a press of this row can take them down (or settle them), so the row
+    must not be deleted while this is non-empty. Pure."""
     if not image.get("image_id") or not parent or is_variant_of(parent):
         return []
-    return [r for r in owned_media(parent) + pending_media(parent) if _in_lane(r, image)]
+    own = product_photo_urls(parent)
+    return [r for r in owned_media(rows, own) + pending_media(rows, own) if _in_lane(r, image)]
 
 
-def image_media_gid(parent: Optional[Dict[str, Any]], image: Dict[str, Any]) -> Optional[str]:
-    """The MediaImage gid the parent twin's map holds for this design-queue
-    row's source url, None when it is not on the listing (``image_press_plan``,
-    the gid alone -- what a screen shows next to the row). Pure."""
-    return image_press_plan(parent, image)["gid"]
+def image_media_gid(
+    parent: Optional[Dict[str, Any]], image: Dict[str, Any], rows: Optional[List[Dict[str, Any]]]
+) -> Optional[str]:
+    """The MediaImage gid the ledger holds for this design-queue row's source
+    url, None when it is not on the listing (``image_press_plan``, the gid
+    alone -- what a screen shows next to the row). Pure."""
+    return image_press_plan(parent, image, rows)["gid"]
 
 
-async def _attach_product_photos(
-    db, product_gid: str, urls: List[str], alts: Optional[Dict[str, Any]] = None
-) -> Dict[str, Any]:
-    """LIVE-only: attach the product's photographs to the Shopify product in the
-    SAME press that wrote the product (productCreateMedia). Fail-SOFT side
-    channel -- reported on the result, never flips the push's ok -- but the
-    caller WITHHOLDS the publish when nothing attached, so a media failure
-    leaves an invisible product rather than a visible grey box.
-
-    Returns ``media_map`` too -- the ``[{url, id}]`` pairs Shopify minted for
-    the urls it was given, IN INPUT ORDER (productCreateMedia answers one node
-    per input, in order) -- so the photo pass can record which Shopify media
-    IMS owns and never attach the same photograph twice. ``alts`` (``{url:
-    alt text}``) is the design queue's alt for its row; a product's own
-    photograph carries alt '' (see match_media_to_photos on why).
-
-    ``lost: True`` when the call RAISED: no answer came back, so whether the
-    media landed on Shopify is unknown (a timeout after Shopify accepted it)
-    -- the pass keeps its pending rows for the next read to settle."""
-    media = build_media_inputs([{"url": u, "alt_text": (alts or {}).get(u)} for u in urls])
+async def _attach_one(
+    db, product_gid: str, url: str, alt: Optional[str] = None
+) -> Tuple[Optional[str], bool, Optional[str]]:
+    """LIVE-only: ONE productCreateMedia for ONE url -> (gid, ok, error).
+    One input per call, so the answer's node 0 IS this url's media -- no
+    positional mapping across inputs.
+      * the call raised (transport: sent once, answer lost)  -> (None, False, err)
+      * no node in the answer (mediaUserErrors / no media)    -> (None, False, err)
+      * a node Shopify already marked FAILED                  -> (gid, False, err)
+        -- the gid IS IMS's own media: the caller records it.
+      * otherwise                                             -> (gid, True, None)
+    AN ID IS NOT A PHOTOGRAPH: Shopify mints the id before it fetches the
+    bytes, so a node still UPLOADED/PROCESSING here can go FAILED later; the
+    next pass reads the listing's status (a FAILED media is not counted, and
+    in the pass's lane it is attached again and deleted). ``alt`` is the
+    design queue row's alt text; a product's own photograph carries ''."""
+    media = build_media_inputs([{"url": url, "alt_text": alt}])
     if not media:
-        return {"attached": 0, "error": "no usable photograph"}
+        return None, False, "no usable photograph"
     try:
-        body = await _graphql(
-            db, _PRODUCT_CREATE_MEDIA, {"productId": product_gid, "media": media}
-        )
+        body = await _graphql(db, _PRODUCT_CREATE_MEDIA, {"productId": product_gid, "media": media})
     except Exception as e:  # noqa: BLE001 -- fail-soft side channel
-        return {"attached": 0, "error": str(e), "lost": True}
-    err = _user_errors_media(body)
-    if err:
-        return {"attached": 0, "error": err}
-    nodes = ((body.get("data") or {}).get("productCreateMedia") or {}).get("media") or []
-    # AN ID IS NOT A PHOTOGRAPH. Shopify mints the MediaImage id BEFORE it
-    # fetches the bytes off the url, so counting ids would call a 404 image a
-    # photograph and publish the empty grey box the rule exists to prevent.
-    # A node Shopify has already marked FAILED is not a photo.
-    #
-    # ponytail: this only catches the failure Shopify reports in THIS response.
-    # The fetch is asynchronous, so a node that is still PROCESSING here can go
-    # FAILED minutes later and nothing re-reads it -- the residue the
-    # online_sync_health parity/uploads audit is for. Upgrade path if it bites:
-    # re-read `media(first:n){status}` on the next press and take the product
-    # down rather than leave a grey box up.
-    ok_nodes: List[Dict[str, Any]] = []
-    failed: List[Dict[str, Any]] = []
-    media_map: List[Dict[str, str]] = []
-    for i, n in enumerate(nodes):
-        n = n or {}
-        if not n.get("id"):
-            continue
-        if str(n.get("status") or "").upper() == "FAILED":
-            failed.append(n)
-            continue
-        ok_nodes.append(n)
-        # One node per input, in input order -- the ONLY way to learn which
-        # gid belongs to which IMS url (the CDN url is not the source url).
-        if len(nodes) == len(urls):
-            media_map.append({"url": urls[i], "id": str(n["id"])})
-    if failed and not ok_nodes:
+        return None, False, str(e)
+    nodes = []
+    if isinstance(body, dict):
+        nodes = ((body.get("data") or {}).get("productCreateMedia") or {}).get("media") or []
+    node = nodes[0] if nodes and isinstance(nodes[0], dict) else {}
+    if not node.get("id"):
+        return None, False, _user_errors_media(body) or "Shopify returned no media for the photograph"
+    gid = str(node["id"])
+    if str(node.get("status") or "").upper() == "FAILED":
         detail = "; ".join(
             str(e.get("details") or e.get("message") or e.get("code") or "")
-            for n in failed
-            for e in (n.get("mediaErrors") or [])
+            for e in (node.get("mediaErrors") or [])
             if isinstance(e, dict)
         )
-        return {
-            "attached": 0,
-            "error": "Shopify could not fetch the photograph"
-            + (": %s" % detail if detail else ""),
-        }
-    return {"attached": len(ok_nodes), "media_map": media_map}
+        return gid, False, "Shopify could not fetch the photograph" + (": %s" % detail if detail else "")
+    return gid, True, None
 
 
 # ---------------------------------------------------------------------------
 # THE PHOTO PASS (sync audit gap #3, owner 2026-09-06): "replacing or removing
 # a photo, and reordering, update Shopify instead of silently doing nothing."
 #
-# OWNERSHIP. IMS manages ONLY the media it attached itself, recorded on the
-# twin as ``ecom.media_map = [{url: <IMS source url>, id: <MediaImage gid>}]``.
-# BOTH doors write it through the one writer (_writeback_media_map): the
-# product press and the design-queue press (push_image) run this same pass,
-# and the pass writes the map on EVERY run -- the rows still on the listing,
-# what it minted, the rows whose delete has not happened yet -- so a media
-# that left Shopify behind IMS's back (deleted in the admin, a lost delete
-# response) is pruned on the next press of either door and the map converges.
+# OWNERSHIP. IMS manages ONLY the media it attached itself (or the runbook
+# adopted): the LIVE docs of the ledger above. A media is IMS-owned only when
+# (a) Shopify's own answer to IMS's productCreateMedia named its gid, or
+# (b) it SETTLES a pending doc of IMS's under _settle's rules. Anything else
+# on the listing -- the hand-uploaded photographs on the connector-created
+# Ray-Ban Meta products, anything a human added in the Shopify admin -- is
+# UNMANAGED: never deleted, reordered or claimed, counted as ``unmanaged``
+# and left exactly where it is. When IMS owns nothing on a product that
+# already carries media, the pass keeps its hands off entirely (no attach
+# either): that stops a re-press from minting a duplicate of every
+# photograph on a listing that went live before the ledger existed.
 #
-# TWO LANES, ONE MAP. A map row is either the product's own photograph (no
-# ``image_id``) or a design-queue media (it carries the queue row's
-# ``image_id``, stamped when the design press attached it). Each press GOVERNS
-# exactly one lane -- attaches into it, deletes from it, reorders it -- and
-# KEEPS the other lane exactly where it is:
-#   * the product press (and so the 01:00/09:00 sync) governs the own-photo
-#     rows against product_photo_urls; it never attaches, deletes or reorders
-#     a design row and never reads the design queue at all;
-#   * the design press governs the rows of the ONE image_id it is pressing:
-#     it attaches that row's url and drops the asset the row mapped before it
-#     was replaced. It never attaches an own photograph the product press has
-#     not put up yet, never drops one IMS removed, never reorders -- those are
-#     the product press's calls, made under its own publish gate.
-# A url that is one of the product's own photographs is the product's lane
-# whichever door attached it -- decided BY URL on every read of the map
-# (owned_media drops the image_id stamp of such a row, and the next write
-# stores it that way), so a design asset later promoted to a product photo
-# is never deleted by its old row's press, and removing that photo from the
-# product still takes it down on Shopify.
+# TWO LANES. A doc is either the product's own photograph (no ``image_id``)
+# or a design-queue media (the queue row's ``image_id``, stamped when the
+# design press attached it). Each press GOVERNS exactly one lane -- attaches
+# into it, deletes from it, reorders it -- and KEEPS the other lane exactly
+# where it is: the product press (and so the 01:00/09:00 sync) governs the
+# own-photo docs against product_photo_urls and never reads the design queue;
+# the design press governs the docs of the ONE image_id it is pressing. A url
+# that is one of the product's own photographs is the product's lane
+# whichever door attached it -- decided BY URL on every read (owned_media)
+# and stored that way by _normalise_lanes.
+#
+# NO ATTACH WITHOUT A RECORD, NO RECORD LOST. Before each productCreateMedia
+# the pass inserts the url's PENDING doc; Shopify's answer turns it LIVE
+# (how="minted"). The transport sends productCreateMedia ONCE (a lost answer
+# is never replayed), so a timeout leaves a pending doc and at most one media
+# on the listing. The NEXT pass settles it off its read of the listing: the
+# pending doc CLAIMS the one READY node whose CDN file name is the url's
+# IMS-unique file name; it is DROPPED ('never landed', the url may be
+# attached again) only when nothing matches, nothing on the listing is still
+# processing and 15 minutes have passed; otherwise it is HELD (reported, the
+# url not attached again). Identity is the CDN file name (_same_file):
+# originalSource is Shopify's own storage copy in production (measured
+# 2026-09-06, 42 twins, 180 media), never the url IMS sent.
+#
 # ONE PASS PER PRODUCT AT A TIME (media_lease): every press of either door --
 # and a design-queue row's delete -- holds the product's lease from BEFORE it
-# reads the listing until AFTER it has written the map, across every worker.
-# Two passes planning on one listing read each other's half-done work
-# (attached on Shopify, not yet mapped) as foreign media, so every interleave
-# ended in a duplicate or an orphan; under the lease the second pass reads a
-# listing and a map that agree. Inside it the pass plans on the map (and, in
-# the product lane, the photo list) AS THE TWIN HOLDS IT NOW -- the
-# 01:00/09:00 sweep hands the product press a doc it loaded minutes ago; the
-# design press re-reads its queue row -- and WRITES BY ID: every row the twin holds stays unless
-# this pass saw its media gone or deleted it, and what it minted or adopted
-# is added -- a lane is never re-derived at write time, so a row whose url
-# became (or stopped being) an own photograph since is never dropped.
-# A crash between a Shopify call and the map write is repaired, not
-# duplicated, and never orphaned: BEFORE productCreateMedia the pass writes
-# each url it is about to attach to ``ecom.media_pending`` ({url[, image_id]}
-# -- the lane it attaches for, no id yet: pending_media) and clears it once
-# the answer is back. A pending row a lost answer (or a dead worker) left
-# behind is settled by the NEXT pass of either door, off its read of the
-# listing: the unmapped media whose originalSource IS that url is IMS's own
-# attach and is mapped in the lane it was made for (then governed like any
-# other row: a design row re-pointed since drops it); none means it never
-# landed. Until then the design row it was made for may not be deleted (its
-# lane holds it: image_lane_media). A media whose originalSource is a url
-# the pass would attach is likewise mapped instead of attached again (R1 of
-# match_media_to_photos -- on a listing IMS already manages only).
-# Media that is on Shopify but not in the map -- the hand-uploaded photographs
-# on the connector-created Ray-Ban Meta products, anything a human added in
-# the Shopify admin -- is NEVER deleted or re-attached: it is counted as
-# ``unmanaged`` and left exactly where it is. When IMS owns nothing on a
-# product that already carries media, the pass keeps its hands off entirely
-# (no attach either): that is today's behaviour for the products that went
-# live before the map existed, and it is what stops a re-press from minting
-# a duplicate of every photograph on them.
+# reads the listing until the pass is done, across every worker, and renews
+# it before every attach; a pass that lost its lease sends nothing more.
+# Inside it the pass plans on the twin AS IT IS NOW (the 01:00/09:00 sweep
+# hands the product press a doc it loaded minutes ago); an unreadable twin or
+# ledger means zero Shopify writes.
 #
 # ORDER OF OPERATIONS is attach -> delete -> reorder, and a failed step stops
 # the pass: a replacement is on Shopify BEFORE the photo it replaces comes
@@ -405,66 +472,11 @@ async def _attach_product_photos(
 
 TOMBSTONES_COLLECTION = "online_media_tombstones"
 MEDIA_LIMIT_CODE = "MEDIA_LIMIT_250"
-
-
-def _map_row(r: Dict[str, Any]) -> Dict[str, str]:
-    """ONE map row as stored: ``{url, id}`` plus ``image_id`` when the media is
-    a design-queue press's (the lane marker -- see the ownership note). Pure."""
-    row = {"url": str(r["url"]), "id": str(r["id"])}
-    if r.get("image_id"):
-        row["image_id"] = str(r["image_id"])
-    return row
-
-
-def owned_media(product: Dict[str, Any]) -> List[Dict[str, str]]:
-    """The ``ecom.media_map`` rows IMS wrote on attach: ``[{url, id[, image_id]}]``
-    in IMS order. THE LANE IS DECIDED HERE, BY URL: a row whose url is one of
-    the product's own photographs (product_photo_urls) is the product's lane
-    whichever door attached it, so its ``image_id`` stamp is dropped on read
-    -- every plan, predicate and the map writer see one rule, and the next
-    write stores the row that way. Pure; malformed rows dropped; never raises."""
-    rows = (product.get("ecom") or {}).get("media_map")
-    own = product_photo_urls(product)
-    out: List[Dict[str, str]] = []
-    if isinstance(rows, list):
-        for r in rows:
-            if isinstance(r, dict) and r.get("url") and r.get("id"):
-                out.append(_map_row({**r, "image_id": _lane_of(str(r["url"]), r.get("image_id"), own)}))
-    return out
-
-
-def pending_media(product: Dict[str, Any]) -> List[Dict[str, str]]:
-    """The attaches whose answer never came back: ``ecom.media_pending`` rows
-    ``[{url[, image_id]}]`` (the ownership note) -- lane by url, as
-    owned_media reads the map. Pure; malformed rows dropped; never raises."""
-    rows = (product.get("ecom") or {}).get("media_pending")
-    own = product_photo_urls(product)
-    return [
-        _pending_row(str(r["url"]), _lane_of(str(r["url"]), r.get("image_id"), own))
-        for r in (rows if isinstance(rows, list) else [])
-        if isinstance(r, dict) and r.get("url")
-    ]
-
-
-def _lane_of(url: str, image_id: Any, own: List[str]) -> Optional[str]:
-    """THE LANE OF A MEDIA, BY URL: the design row's ``image_id`` it was
-    pressed for -- None (the product's lane) when the url is one of the
-    product's own photographs ``own``, whichever door put it up. Pure."""
-    return None if url in own or not image_id else str(image_id)
-
-
-def _pending_row(url: str, image_id: Optional[str]) -> Dict[str, str]:
-    """ONE media_pending row as stored: ``{url}`` plus the lane's ``image_id``."""
-    return {"url": url, **({"image_id": image_id} if image_id else {})}
-
-
-def _in_lane(r: Dict[str, str], design_row: Optional[Dict[str, Any]]) -> bool:
-    """Does a pass GOVERN this map row: the design press (``design_row``, the
-    queue row being pressed) governs the rows stamped with ITS image_id; the
-    product press (None) governs the rows without one. Pure."""
-    if not design_row:
-        return not r.get("image_id")
-    return r.get("image_id") == str(design_row.get("image_id") or "")
+MEDIA_SETTLING = "MEDIA_SETTLING"
+MEDIA_NAMING_DRIFT = "MEDIA_NAMING_DRIFT"
+NO_PHOTO = "NO_PHOTO"
+TWIN_UNREADABLE = "TWIN_UNREADABLE"
+MAP_UNREADABLE = "MAP_UNREADABLE"
 
 
 # Shopify keeps the SOURCE file name on the CDN copy (adding an extension
@@ -540,6 +552,89 @@ def _connector_file(ims_url: str, cdn_url: str, own_id: str) -> bool:
     return bool(stem) and stem == cstem
 
 
+
+# THE SETTLE (see the ownership note). A pending doc is claimed only by a
+# file name IMS minted itself -- an ObjectId (the in-app uploader), a uuid4
+# hex (the design queue's upload and edit keys) or a dashed uuid -- never by
+# a generic name a human's upload can carry too (front.jpg), and never by a
+# name that is itself Shopify's collision copy (<name>_<uuid>).
+_SETTLE_GRACE = timedelta(minutes=15)  # == _LEASE_TTL: no live pass can still be sending
+_IMS_UNIQUE = re.compile(
+    r"[0-9a-f]{24}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+)
+
+
+def _ims_unique(url: str) -> bool:
+    """Is this url's file name one only IMS mints (so a CDN file of that name
+    can only be IMS's own upload)? Pure."""
+    stem, _ext = _stem_ext(_file_name(url))
+    return bool(_IMS_UNIQUE.search(stem)) and not _COLLISION_SUFFIX.search(stem)
+
+
+def _cdn(node: Optional[Dict[str, Any]]) -> str:
+    """A listing node's CDN image url ('' while Shopify is still processing
+    it, or for a non-image media). Pure."""
+    return str(((node or {}).get("image") or {}).get("url") or "")
+
+
+def _utc(dt: datetime) -> datetime:
+    """pymongo hands datetimes back NAIVE (UTC); compare them aware."""
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+
+
+def _settle(
+    pending: List[Dict[str, Any]],
+    free: List[Dict[str, Any]],
+    minted: List[Dict[str, Any]],
+    nodes: Dict[str, Dict[str, Any]],
+    now: datetime,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], bool, List[str]]:
+    """PURE: settle the pending docs against the listing's FREE nodes (the
+    nodes no live doc names) -> (claims, drops, held, drift, nameless).
+      claim  exactly ONE READY free node carries the pending url's file name
+             (_same_file), no other pending doc hits that node, and the name
+             is IMS-unique -- at any age;
+      drop   ('never landed': the url may be attached again) zero hits, no
+             image-less node still UPLOADED/PROCESSING on the listing, and
+             older than _SETTLE_GRACE;
+      held   everything else: two hits, a generic name, a node still
+             processing, too young -- or DRIFT.
+    DRIFT (the canary): a READY node IMS minted whose CDN name no longer
+    carries its url's file name means Shopify's naming changed; every
+    pending doc of the product is then held -- no claim, no drop, no
+    re-attach -- until a person looks (MEDIA_NAMING_DRIFT)."""
+    drift = any(
+        _cdn(nodes.get(r["id"])) and not _same_file(r["url"], _cdn(nodes[r["id"]]))
+        for r in minted
+        if r["id"] in nodes
+    )
+    nameless = [
+        str(n["id"])
+        for n in free
+        if not _cdn(n) and str(n.get("status") or "").upper() not in ("READY", "FAILED")
+    ]
+    hits = {
+        p["_id"]: [str(n["id"]) for n in free if _cdn(n) and _same_file(p["url"], _cdn(n))]
+        for p in pending
+    }
+    load = Counter(i for ids in hits.values() for i in ids)
+    claims: List[Dict[str, Any]] = []
+    drops: List[Dict[str, Any]] = []
+    held: List[Dict[str, Any]] = []
+    for p in pending:
+        ids, sent = hits[p["_id"]], p.get("sent_at")
+        young = not isinstance(sent, datetime) or now - _utc(sent) < _SETTLE_GRACE
+        if drift:
+            held.append(p)
+        elif len(ids) == 1 and load[ids[0]] == 1 and _ims_unique(p["url"]):
+            claims.append({**p, "id": ids[0]})
+        elif not ids and not nameless and not young:
+            drops.append(p)
+        else:
+            held.append(p)
+    return claims, drops, held, drift, nameless
+
+
 def match_media_to_photos(
     photos: List[str],
     shopify_media: List[Dict[str, Any]],
@@ -549,12 +644,13 @@ def match_media_to_photos(
 ) -> Dict[str, Any]:
     """PURE: pair each IMS photo url with the ONE Shopify media that positively
     identifies as that photograph -- the adoption rule for products that went
-    live before ``ecom.media_map`` existed (scripts/adopt_shopify_media_map.py).
+    live before the ledger existed (scripts/adopt_shopify_media_map.py).
 
-    Under the default ``rules=('exact',)`` a media is the photo when (either
-    suffices, both are exact equality):
-      R1  its ``originalSource.url`` IS the IMS url (the source we handed over);
+    Under the default ``rules=('exact',)`` a media is the photo when
       R3  its CDN file name IS the IMS url's file name (``_same_file``).
+    (There is no originalSource rule: in production originalSource is always
+    Shopify's own storage copy, never the url IMS sent -- measured 09-06 on
+    the 42, it matched nothing.)
     ``'connector_prefix'`` in ``rules`` (OPT-IN; needs ``product_gid``, the
     product's own Shopify gid, else ValueError) adds
       R3b the CDN name is '<this product's own numeric id>__<nn>__<basename>'
@@ -582,24 +678,17 @@ def match_media_to_photos(
     own_id = _numeric_id(product_gid)
     if connector and not own_id:
         raise ValueError("the connector_prefix rule needs the product's own Shopify gid")
-    nodes = []
-    for n in shopify_media or []:
-        if not isinstance(n, dict) or not n.get("id"):
-            continue
-        nodes.append(
-            (
-                str(n["id"]),
-                str((n.get("originalSource") or {}).get("url") or "").strip(),
-                str((n.get("image") or {}).get("url") or "").strip(),
-            )
-        )
+    nodes = [
+        (str(n["id"]), _cdn(n).strip())
+        for n in shopify_media or []
+        if isinstance(n, dict) and n.get("id")
+    ]
     photos = list(dict.fromkeys(photos))
     hits: Dict[str, List[str]] = {
         url: [
             mid
-            for mid, src, cdn in nodes
-            if (exact and ((src and src == url) or _same_file(url, cdn)))
-            or (connector and _connector_file(url, cdn, own_id))
+            for mid, cdn in nodes
+            if (exact and _same_file(url, cdn)) or (connector and _connector_file(url, cdn, own_id))
         ]
         for url in photos
     }
@@ -616,116 +705,127 @@ def match_media_to_photos(
     return {
         "map": media_map,
         "unmatched_photos": unmatched,
-        "unmanaged": [mid for mid, _s, _c in nodes if mid not in owned_ids],
-        "names": {mid: _file_name(cdn) for mid, _s, cdn in nodes},
+        "unmanaged": [mid for mid, _c in nodes if mid not in owned_ids],
+        "names": {mid: _file_name(cdn) for mid, cdn in nodes},
     }
 
 
+def _is_failed(node: Optional[Dict[str, Any]]) -> bool:
+    return str((node or {}).get("status") or "").upper() == "FAILED"
+
+
 def plan_product_media(
-    product: Dict[str, Any],
+    rows: Optional[List[Dict[str, Any]]],
     photos: List[str],
-    shopify_media: Optional[List[Dict[str, Any]]] = None,
+    own: List[str],
+    listing: Optional[List[Dict[str, Any]]] = None,
     *,
     design_row: Optional[Dict[str, Any]] = None,
+    now: Optional[datetime] = None,
 ) -> Dict[str, Any]:
-    """PURE diff of IMS's ordered photo list against the media IMS owns on
-    Shopify. ``shopify_media`` is the product's current media node list (the
-    create/update response); None means UNKNOWN (the dark plan), in which
-    case the stored map is trusted as-is.
+    """PURE diff of IMS's ordered photo list ``photos`` against the media IMS
+    owns (the ledger docs ``rows``; ``own`` = the product's own photographs,
+    which decide the lanes). ``listing`` is the product's media node list on
+    Shopify RIGHT NOW (_product_media, in listing order); None = UNKNOWN (the
+    dark plan): the ledger is trusted as-is, nothing is settled or reordered.
 
     THE LANES (see the ownership note): without ``design_row`` this is the
-    product press's plan and it governs the own-photo rows only (no
-    ``image_id``); with ``design_row`` (the design-queue row being pressed)
-    it governs the rows stamped with THAT row's ``image_id`` only. A row of
-    the other lane is never attached (it is mapped), never deleted when
-    ``photos`` omits it and never reordered -- kept, exactly as unmanaged
-    media is, except that the map REMEMBERS it. A url ``photos`` names that
-    is mapped in EITHER lane is on the listing and is not attached again.
+    product press's plan and it governs the own-photo docs only; with
+    ``design_row`` it governs the docs stamped with THAT row's image_id only.
+    A doc of the other lane is never attached, deleted or reordered here. A
+    url ``photos`` names that is live in EITHER lane is on the listing and is
+    not attached again; one whose attach is HELD is not attached again either.
 
-    Returns {attach: [url], delete: [{url, id, shopify_url[, image_id]}],
-    reorder: [gid] (the desired order of the IMS-owned media, [] when already
-    in order), unmanaged: n, hands_off: bool, owned: [{url, id[, image_id]}]
-    (the rows that survive the delete; the attach's new gids are not known
-    until it runs), adopt: [{url, id[, image_id]}] (unmapped media that is
-    IMS's own attach whose map write was lost, stamped with its lane: the
-    media a pending row names (pending_media -- settled off this listing
-    read, whichever lane it is in) and the media whose originalSource IS a
-    url ``photos`` names; mapped instead of attached again, never counted
-    unmanaged -- and a pending one is then governed like any mapped row)}."""
-    def _governed(r: Dict[str, str]) -> bool:
+    Returns {attach: [url], delete: [{url, id, shopify_url, ...}], reorder:
+    [gid] (the desired order of the IMS-owned media, [] when in order),
+    unmanaged: n, hands_off: bool, owned: [live docs incl. the settled ones],
+    claims / drops: [pending doc] (_settle), held: [url], gone: [gid] (live
+    docs whose media left the listing), drift: bool, on_shopify: n (the
+    listing's media that is not FAILED; None dark)}."""
+    owned = owned_media(rows, own)
+    pending = pending_media(rows, own)
+
+    def _governed(r: Dict[str, Any]) -> bool:
         return _in_lane(r, design_row)
 
-    owned = owned_media(product)
-    own = product_photo_urls(product)
-    lane = str((design_row or {}).get("image_id") or "") or None
-    cdn: Dict[str, Optional[str]] = {}
-    source: Dict[str, str] = {}
-    adopt: List[Dict[str, str]] = []
-    if shopify_media is None:
-        current_ids: Optional[List[str]] = None
-        live_owned = owned
-        unmanaged: List[str] = []
-    else:
-        current_ids = []
-        for n in shopify_media:
-            if isinstance(n, dict) and n.get("id"):
-                current_ids.append(str(n["id"]))
-                cdn[str(n["id"])] = (n.get("image") or {}).get("url")
-                source[str(n["id"])] = str((n.get("originalSource") or {}).get("url") or "")
-        owned_ids = {r["id"] for r in owned}
-        live_owned = [r for r in owned if r["id"] in current_ids]
-        unmanaged = [i for i in current_ids if i not in owned_ids]
-        # A PENDING ATTACH, SETTLED (the ownership note), before hands_off is
-        # judged: a listing whose only media is IMS's own lost attach is not
-        # someone else's listing.
-        for p in pending_media(product):
-            hit = next((i for i in unmanaged if source.get(i) == p["url"]), None)
-            if hit:
-                unmanaged.remove(hit)
-                row = _map_row({**p, "id": hit})
-                live_owned.append(row)
-                adopt.append(row)
-    hands_off = not live_owned and bool(unmanaged)
-    by_url = {r["url"]: r["id"] for r in live_owned}
-    # R1 RE-ADOPTION (match_media_to_photos' R1: the source IMS handed over),
-    # on a listing IMS already manages only -- a pre-map listing stays hands
-    # off; the human-reviewed runbook adopts those.
-    for u in [] if hands_off else photos:
-        hit = None if u in by_url else next((i for i in unmanaged if source.get(i) == u), None)
-        if hit:
-            adopt.append(_map_row({"url": u, "id": hit, "image_id": _lane_of(u, lane, own)}))
-            unmanaged.remove(hit)
-            by_url[u] = hit
-    attach = [] if hands_off else [u for u in photos if u not in by_url]
+    out: Dict[str, Any] = {
+        "attach": [],
+        "delete": [],
+        "reorder": [],
+        "unmanaged": 0,
+        "hands_off": False,
+        "owned": owned,
+        "claims": [],
+        "drops": [],
+        "held": [],
+        "gone": [],
+        "drift": False,
+        "on_shopify": None,
+    }
+    if listing is None:
+        on_record = {r["url"] for r in owned} | {p["url"] for p in pending}
+        out["attach"] = [u for u in photos if u not in on_record]
+        out["delete"] = [
+            {**r, "shopify_url": None} for r in owned if _governed(r) and r["url"] not in photos
+        ]
+        out["held"] = [p["url"] for p in pending]
+        return out
+
+    nodes: Dict[str, Dict[str, Any]] = {}
+    for n in listing:
+        if isinstance(n, dict) and n.get("id"):
+            nodes[str(n["id"])] = n
+    gone = [r["id"] for r in owned if r["id"] not in nodes]
+    live = [r for r in owned if r["id"] in nodes]
+    named = {r["id"] for r in live}
+    free = [n for i, n in nodes.items() if i not in named]
+    minted = [r for r in live if r.get("how") == "minted"]
+    claims, drops, held, drift, _nameless = _settle(pending, free, minted, nodes, now or _now())
+    live += [
+        {"_id": c["_id"], "url": c["url"], "id": c["id"], "image_id": c["image_id"], "how": "settled"}
+        for c in claims
+    ]
+    claimed = {c["id"] for c in claims}
+    unmanaged = [str(n["id"]) for n in free if str(n["id"]) not in claimed]
+    hands_off = not live and bool(unmanaged)
+    failed = {i for i, n in nodes.items() if _is_failed(n)}
+    # A FAILED media of this lane is not a photograph: its url is attached
+    # again (before the FAILED one is deleted, below).
+    by_url = {r["url"]: r["id"] for r in live if not (r["id"] in failed and _governed(r))}
+    held_urls = {p["url"] for p in held}
+    attach = [] if hands_off else [u for u in photos if u not in by_url and u not in held_urls]
     delete = (
         []
         if hands_off
         else [
-            {**r, "shopify_url": cdn.get(r["id"])}
-            for r in live_owned
-            if _governed(r) and r["url"] not in photos
+            {**r, "shopify_url": _cdn(nodes.get(r["id"])) or None}
+            for r in live
+            if _governed(r) and (r["url"] not in photos or r["id"] in failed)
         ]
     )
-    delete_ids = {d["id"] for d in delete}
-    keep = [r for r in live_owned if r["id"] not in delete_ids]
     desired = [by_url[u] for u in photos if u in by_url]
     reorder: List[str] = []
-    if current_ids is not None and not hands_off:
-        # Only the media ``photos`` names has a desired slot; a row the list
+    if not hands_off:
+        # Only the media ``photos`` names has a desired slot; a doc the list
         # omits (the other lane) keeps its place, like unmanaged media.
         want = set(desired)
-        owned_now = [i for i in current_ids if i in want]
-        if owned_now != desired:
+        if [i for i in nodes if i in want] != desired:
             reorder = desired
-    return {
-        "attach": attach,
-        "delete": delete,
-        "reorder": reorder,
-        "unmanaged": len(unmanaged),
-        "hands_off": hands_off,
-        "owned": keep,
-        "adopt": adopt,
-    }
+    out.update(
+        attach=attach,
+        delete=delete,
+        reorder=reorder,
+        unmanaged=len(unmanaged),
+        hands_off=hands_off,
+        owned=live,
+        claims=claims,
+        drops=drops,
+        held=[p["url"] for p in held],
+        gone=gone,
+        drift=drift,
+        on_shopify=len(nodes) - len(failed),
+    )
+    return out
 
 
 def _tombstone_media(db, product_id: Optional[str], rows: List[Dict[str, Any]]) -> None:
@@ -747,46 +847,7 @@ def _tombstone_media(db, product_id: Optional[str], rows: List[Dict[str, Any]]) 
     )
 
 
-def _writeback_media_map(db, product_id: str, media_map, pending=None) -> bool:
-    """Persist ecom.media_map (read-merge-write of the ecom sub-doc, the
-    _writeback_product idiom). ``media_map`` is the list to store, or a
-    function of the rows the twin holds NOW (owned_media of the doc this
-    write reads) returning the list to store -- the pass's merge BY ID, so a
-    row this pass never planned on survives (the ownership note).
-    ``pending`` (a pass only) is the ``ecom.media_pending`` list to store in
-    the same write; None leaves it as the twin holds it. NEVER touches
-    locally_modified. Fail-soft; True when the twin now holds the map, False
-    when it could not be located or written (the adoption runbook reports
-    on it)."""
-    try:
-        coll = db["catalog_products"]
-        doc = coll.find_one({"id": product_id})
-        if doc is None:
-            return False
-        if callable(media_map):
-            media_map = media_map(owned_media(doc))
-        ecom = dict(doc.get("ecom") or {})
-        want = dict(ecom)
-        # An absent key and an empty list are the same fact (owned_media and
-        # pending_media read both as 'nothing'): a pass that owns nothing
-        # never mints an empty key on a twin the runbook has not visited.
-        for key, value in (("media_map", media_map), ("media_pending", pending)):
-            if value is None or not (value or ecom.get(key)):
-                continue
-            want[key] = value
-        if want == ecom:
-            return True
-        coll.update_one({"id": product_id}, {"$set": {"ecom": want}})
-        return True
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[SHOPIFY_PUSH] media_map write-back failed %s: %s", product_id, exc)
-        return False
-
-
 LEASES_COLLECTION = "online_media_leases"
-# ponytail: a fixed TTL, not renewed per call. A press outliving it (every
-# call of a product press at its full retry budget) could be overtaken by a
-# second pass; renew the lease on each _graphql call if that is ever seen.
 # A worker that dies holding a lease blocks that product's presses this long.
 _LEASE_TTL = timedelta(minutes=15)
 _LEASE_WAIT_SECONDS = 60.0
@@ -821,15 +882,17 @@ async def media_lease(db, product_id: Optional[str]):
     either door, or one design-queue row delete, per product at a time --
     across every worker, since the lease lives in Mongo. Waits up to
     _LEASE_WAIT_SECONDS for a running press, then raises MediaBusy (the
-    caller reports 'press again'). No db or no product id: nothing to hold
-    (there is no map to write either). Released on the way out; a lease a
-    dead worker left expires after _LEASE_TTL.
+    caller reports 'press again'). Yields ``renew()``: pushes the expiry out
+    by _LEASE_TTL and answers whether this holder STILL holds the lease --
+    the pass calls it before every attach and sends nothing once it is lost.
+    No db or no product id: nothing to hold (renew is always True). Released
+    on the way out; a lease a dead worker left expires after _LEASE_TTL.
 
     ponytail: the no-Mongo MockCollection overwrites a duplicate _id instead
     of refusing it, so in local no-Mongo mode the lease never blocks; prod is
     real Mongo."""
     if db is None or not product_id:
-        yield
+        yield lambda: True
         return
     coll = db[LEASES_COLLECTION]
     key, token = str(product_id), uuid.uuid4().hex
@@ -840,8 +903,20 @@ async def media_lease(db, product_id: Optional[str]):
                 "another press is running on product %s -- press again in a minute" % key
             )
         await asyncio.sleep(_LEASE_POLL_SECONDS)
+
+    def renew() -> bool:
+        try:
+            res = coll.update_one(
+                {"_id": key, "token": token},
+                {"$set": {"until": datetime.now(timezone.utc) + _LEASE_TTL}},
+            )
+            matched = getattr(res, "matched_count", None)
+            return (res.modified_count if matched is None else matched) == 1
+        except Exception:  # noqa: BLE001 -- unknown = lost: send nothing
+            return False
+
     try:
-        yield
+        yield renew
     finally:
         try:
             coll.delete_one({"_id": key, "token": token})
@@ -849,221 +924,228 @@ async def media_lease(db, product_id: Optional[str]):
             logger.warning("[SHOPIFY_PUSH] media lease release failed %s: %s", key, exc)
 
 
-def _in_ims_order(rows: List[Dict[str, str]], order: List[str]) -> List[Dict[str, str]]:
-    """The map as stored: the rows ``order`` names first, in that order (the
-    product press: its own photographs in IMS order), then every other row
-    in the order given -- the other lane, and a row whose delete is still
-    pending, are kept, never governed here. A MEDIA appears once (deduped by
-    id, never by url: two rows naming one url are two live media, and
-    dropping either would orphan it)."""
-    by_url = {r["url"]: r for r in rows}
-    out = [_map_row(by_url[u]) for u in order if u in by_url]
-    seen = {r["id"] for r in out}
-    for r in rows:
-        if r["id"] not in seen:
-            out.append(_map_row(r))
-            seen.add(r["id"])
-    return out
+def _refused(summary: Dict[str, Any], code: str, error: str) -> Dict[str, Any]:
+    summary.update(code=code, error=error)
+    return summary
 
 
 async def sync_product_media(
     db,
-    product: Dict[str, Any],
+    pid: str,
     product_gid: str,
-    photos: List[str],
-    shopify_media: List[Dict[str, Any]],
     *,
     design_row: Optional[Dict[str, Any]] = None,
     heirs: Optional[Dict[str, str]] = None,
+    renew: Callable[[], bool] = lambda: True,
 ) -> Dict[str, Any]:
     """LIVE-only (the caller has passed the gates AND holds the product's
-    media_lease from before it read ``shopify_media`` until this returns):
-    make the media IMS owns on the Shopify product, in the lane this pass
-    governs, match ``photos`` -- attach what is missing, delete what IMS
-    dropped, reorder to IMS order -- per the ownership rule above. It plans
-    on the twin as it is now -- its map and, in the product lane, its photo
-    list (a sweep's doc may be minutes old); ``product`` and ``photos`` are
-    the fallback when the twin cannot be read. ``design_row`` (the
-    design-queue row being pressed; ``photos`` is then that row's url alone)
-    selects the design lane: the row this pass attaches is stamped with the
-    queue row's ``image_id`` (unless its url is one of the product's own
-    photographs -- that media is the product's lane whichever door put it
-    up) and carries the row's alt text; the asset the row mapped before is
-    dropped -- unless ``heirs`` ({url: image_id}) names another APPROVED
-    queue row that sources that url too: the media is handed to that row's
-    lane instead, so pressing one row never takes a sibling's image down.
-    The map is written on EVERY pass, whatever happened (see the ownership
-    note: a media gone from the listing is pruned, a row whose delete failed
-    stays until it is off Shopify).
-    Fail-soft summary, never raises: {attached, deleted, reordered, unmanaged,
-    adopted, on_shopify (the media count after the pass -- the publish
-    precondition), hands_off, attached_map? ([{url, id}] this pass minted),
-    error?, code?}."""
-    pid = product.get("id") or product.get("product_id")
-    stored = _resolve_product_doc(db, pid)
-    if stored is not None:
-        # THE TWIN AS IT IS NOW (the caller holds the lease): its map and, for
-        # the product lane, its photo list -- the sweep's doc may be minutes old.
-        product = stored
-        if design_row is None:
-            photos = product_photo_urls(stored) or photos
-    if heirs and design_row:
-
-        def _hand(r: Dict[str, str]) -> Dict[str, str]:
-            return {**r, "image_id": heirs[r["url"]]} if _in_lane(r, design_row) and r["url"] in heirs else r
-
-        product = {
-            **product,
-            "ecom": {
-                **(product.get("ecom") or {}),
-                "media_map": [_hand(r) for r in owned_media(product)],
-                "media_pending": [_hand(r) for r in pending_media(product)],
-            },
-        }
-    plan = plan_product_media(product, photos, shopify_media, design_row=design_row)
-    current = [str(n["id"]) for n in shopify_media if isinstance(n, dict) and n.get("id")]
+    media_lease, whose ``renew`` it hands in): make the media IMS owns on
+    the Shopify product, in the lane this pass governs, match the photo list
+    -- attach what is missing, delete what IMS dropped, reorder to IMS order
+    -- per the ownership note. It plans ONLY on the twin as it is NOW (the
+    product lane's list is product_photo_urls of the twin re-read here) and
+    on the listing read here: an unreadable twin (TWIN_UNREADABLE), a twin
+    with no photograph (NO_PHOTO) or an unreadable ledger (MAP_UNREADABLE)
+    means zero Shopify writes. ``design_row`` (the design-queue row being
+    pressed) selects the design lane: the photo list is that row's url alone,
+    its attach is stamped with the row's image_id (unless the url is one of
+    the product's own photographs) and carries the row's alt text; the asset
+    the row held before is dropped -- unless ``heirs`` ({url: image_id})
+    names another APPROVED queue row that sources that url too: the doc is
+    handed to that row's lane instead.
+    Fail-soft summary, never raises: {attached, deleted, reordered,
+    unmanaged, adopted (pending docs settled by name), dropped, held
+    ([url] -- attaches that may still be landing: not attached again),
+    hands_off, on_shopify (the listing's non-FAILED media after the pass --
+    the publish precondition), attached_map ([{url, id, image_id}] minted),
+    error?, code? (MEDIA_SETTLING / MEDIA_NAMING_DRIFT alone are not an
+    error)}."""
     summary: Dict[str, Any] = {
         "attached": 0,
         "deleted": 0,
         "reordered": False,
-        "unmanaged": plan["unmanaged"],
-        "adopted": len(plan["adopt"]),
-        "hands_off": plan["hands_off"],
-        "on_shopify": len(current),
+        "unmanaged": 0,
+        "adopted": 0,
+        "dropped": 0,
+        "held": [],
+        "hands_off": False,
+        "on_shopify": 0,
+        "attached_map": [],
     }
-    if len(current) + len(plan["attach"]) > _MEDIA_LIMIT:
-        summary["code"] = MEDIA_LIMIT_CODE
-        summary["error"] = (
-            "refused: %d media on Shopify + %d to attach exceeds the %d-per-product "
-            "limit -- remove photographs before adding"
-            % (len(current), len(plan["attach"]), _MEDIA_LIMIT)
+    twin = _resolve_product_doc(db, pid)
+    if twin is None:
+        return _refused(
+            summary, TWIN_UNREADABLE, "refused: the product could not be read -- nothing was sent; press again"
         )
-        return summary
-    lane = str((design_row or {}).get("image_id") or "") or None
-    own = product_photo_urls(product)
-    alts = {image_source_url(design_row): design_row.get("alt_text")} if design_row else None
-
-    def _stamped(r: Dict[str, str]) -> Dict[str, str]:
-        # This pass's lane stamp, never on an own photograph (that media is
-        # the product's lane whichever door put it up).
-        return _map_row({**r, "image_id": _lane_of(r["url"], lane, own)})
-
-    # What the map must now also RECORD: what this pass adopted (a pending
-    # attach settled, or R1 -- each stamped with its lane by the plan) and,
-    # once step 1 has run, what it minted.
-    new_rows = [_map_row(r) for r in plan["adopt"]]
-    owned = list(plan["owned"]) + new_rows
-    # What media_pending must hold after this pass: every row it read is
-    # settled by the listing read above (adopted, or never landed), so only
-    # this pass's own attach can be left -- when its answer never came back.
-    pending_left: List[Dict[str, str]] = []
-    # What LEAVES the map: a row this pass planned on whose media the listing
-    # no longer carries (DEAD, whichever lane), and -- only once step 2 has
-    # succeeded -- the rows it deleted. Until then a row planned for delete
-    # stays mapped (still owned, still deletable next press): a map that
-    # forgets a live media makes an orphan no pass can ever see again.
-    gone = {r["id"] for r in owned_media(product) if r["id"] not in current}
-
-    def _merge(stored_rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
-        # THE MAP, BY ID (never by a lane re-derived at write time): every row
-        # the twin holds stays unless it is gone; a row this pass planned on
-        # is written as the pass sees it (its lane stamp, a hand-over); what
-        # it adopted or minted is added.
-        mine = {r["id"]: r for r in owned + [_map_row(d) for d in plan["delete"]]}
-        rows = [mine.get(r["id"], r) for r in stored_rows if r["id"] not in gone]
-        have = {r["id"] for r in rows}
-        rows += [r for r in new_rows if r["id"] not in have and r["id"] not in gone]
-        return _in_ims_order(rows, [] if design_row else photos)
-
+    own = product_photo_urls(twin)
+    photos = [u for u in ([image_source_url(design_row)] if design_row else own) if u]
+    if not photos or not own:
+        return _refused(
+            summary,
+            NO_PHOTO,
+            "refused: the product has no photograph now -- nothing was sent "
+            "(a product with no photograph is never published)",
+        )
+    coll = db[MEDIA_COLLECTION]
     try:
-        # 1. ATTACH what IMS has and Shopify lacks (the replacement lands first)
-        # -- each url written to media_pending FIRST, in its lane, so an
-        # answer that never comes back leaves a row the next pass settles
-        # (and the delete gate honours) instead of an orphan no door can
-        # see. No record, no attach.
-        if plan["attach"]:
-            wal = [_pending_row(u, _lane_of(u, lane, own)) for u in plan["attach"]]
-            if stored is not None and not _writeback_media_map(db, pid, _merge, pending=wal):
-                summary["error"] = (
-                    "refused: could not record the attach on the product -- "
-                    "nothing was sent; press again"
-                )
-                return summary
-            pending_left = wal
-            res = await _attach_product_photos(db, product_gid, plan["attach"], alts)
-            if not res.get("lost"):
-                pending_left = []
-            summary["attached"] = int(res.get("attached") or 0)
-            summary["on_shopify"] += summary["attached"]
-            # The gids this pass minted, url by url, stamped -- so a caller
-            # can still name a media that landed on Shopify when the map
-            # write-back fails.
-            minted = [_stamped(r) for r in res.get("media_map") or []]
-            summary["attached_map"] = minted
-            owned.extend(minted)
-            new_rows.extend(minted)
-            if res.get("error"):
-                summary["error"] = res["error"]
-                return summary
-        # 2. DELETE what IMS dropped -- tombstone first, then the call.
-        if plan["delete"]:
-            try:
-                _tombstone_media(db, pid, plan["delete"])
-                body = await _graphql(
-                    db,
-                    _PRODUCT_DELETE_MEDIA,
-                    {"productId": product_gid, "mediaIds": [d["id"] for d in plan["delete"]]},
-                )
-                err = _user_errors_media(body, "productDeleteMedia")
-            except Exception as exc:  # noqa: BLE001 -- fail-soft side channel
-                err = str(exc)
-            if err:
-                summary["error"] = err
-                return summary
-            summary["deleted"] = len(plan["delete"])
-            summary["on_shopify"] -= summary["deleted"]
-            gone.update(d["id"] for d in plan["delete"])
-        # 3. REORDER the IMS-owned media into IMS order, in the SLOTS they
-        # already occupy (the attach appended its new media at the end): media
-        # IMS does not own keeps its exact position, so a hero shot a human
-        # placed first in the Shopify admin stays first.
-        by_url = {r["url"]: r["id"] for r in owned}
-        desired = [by_url[u] for u in photos if u in by_url]
-        deleted_ids = {d["id"] for d in plan["delete"]}
-        survivors = [i for i in current if i not in deleted_ids]
-        survivors += [r["id"] for r in owned if r["id"] not in survivors]
-        slots = [i for i, gid in enumerate(survivors) if gid in set(desired)]
-        owned_now = [survivors[i] for i in slots]
-        if desired and owned_now != desired:
-            try:
-                body = await _graphql(
-                    db,
-                    _PRODUCT_REORDER_MEDIA,
-                    {
-                        "id": product_gid,
-                        "moves": [
-                            {"id": gid, "newPosition": str(slots[k])}
-                            for k, gid in enumerate(desired)
-                        ],
-                    },
-                )
-                err = _user_errors_media(body, "productReorderMedia")
-            except Exception as exc:  # noqa: BLE001
-                err = str(exc)
-            if err:
-                summary["error"] = err
-                return summary
-            summary["reordered"] = True
+        _normalise_lanes(db, pid, own)
+    except Exception as exc:  # noqa: BLE001 -- the read decides the lane anyway
+        logger.warning("[SHOPIFY_PUSH] media lane normalise failed %s: %s", pid, exc)
+    try:
+        rows = media_rows(db, pid)
+        if heirs and design_row:
+            # HAND-OVER: a doc of this lane whose url another APPROVED row
+            # sources is that row's image as well -- moved to its lane BEFORE
+            # the plan, so this press never deletes it.
+            for r in rows:
+                if r["url"] in heirs and _in_lane(
+                    {"image_id": _lane_of(r["url"], r.get("image_id"), own)}, design_row
+                ):
+                    coll.update_one({"_id": r["_id"]}, {"$set": {"image_id": heirs[r["url"]]}})
+                    r["image_id"] = heirs[r["url"]]
+    except Exception as exc:  # noqa: BLE001 -- fail closed
+        return _refused(
+            summary,
+            MAP_UNREADABLE,
+            "refused: the product's media record could not be read (%s) -- nothing was sent; press again" % exc,
+        )
+    try:
+        listing = await _product_media(db, product_gid)
+    except Exception as exc:  # noqa: BLE001 -- an unknown listing is never 'no media'
+        summary["error"] = "could not read the listing's media: %s" % exc
         return summary
-    finally:
-        # THE MAP, ON EVERY PASS, whichever step it ended on: merged by id
-        # over the twin as it is NOW (_merge) -- a media that left Shopify
-        # behind IMS's back is pruned, what this pass minted or adopted is
-        # recorded, a row whose delete has not happened yet stays -- and
-        # media_pending holds only this pass's unanswered attach. The writer
-        # no-ops when nothing changed.
-        if pid:
-            _writeback_media_map(db, pid, _merge, pending=pending_left)
+    now = _now()
+    plan = plan_product_media(rows, photos, own, listing, design_row=design_row, now=now)
+    summary.update(
+        unmanaged=plan["unmanaged"],
+        adopted=len(plan["claims"]),
+        dropped=len(plan["drops"]),
+        held=plan["held"],
+        hands_off=plan["hands_off"],
+        on_shopify=plan["on_shopify"],
+    )
+    if plan["drift"]:
+        summary["code"] = MEDIA_NAMING_DRIFT
+    elif plan["held"]:
+        summary["code"] = MEDIA_SETTLING
+    # THE SETTLE, written before anything is sent: a claim turns its pending
+    # doc live, a drop deletes it (the url may be attached again below), a
+    # live doc whose media left the listing is pruned. Each write is
+    # conditional on the doc still being pending. A failed write stops the
+    # pass: re-attaching over a drop that did not land would leave two
+    # pending docs for one url.
+    try:
+        for c in plan["claims"]:
+            coll.update_one({"_id": c["_id"], "gid": None}, {"$set": {"gid": c["id"], "how": "settled", "at": now}})
+        for d in plan["drops"]:
+            coll.delete_one({"_id": d["_id"], "gid": None})
+        if plan["gone"]:
+            coll.delete_many({"product_id": pid, "gid": {"$in": plan["gone"]}})
+    except Exception as exc:  # noqa: BLE001
+        summary["error"] = "refused: could not record the settle (%s) -- nothing was sent; press again" % exc
+        return summary
+    nodes = [str(n["id"]) for n in listing if isinstance(n, dict) and n.get("id")]
+    failed = {str(n["id"]) for n in listing if isinstance(n, dict) and n.get("id") and _is_failed(n)}
+    if len(nodes) + len(plan["attach"]) > _MEDIA_LIMIT:
+        return _refused(
+            summary,
+            MEDIA_LIMIT_CODE,
+            "refused: %d media on Shopify + %d to attach exceeds the %d-per-product "
+            "limit -- remove photographs before adding" % (len(nodes), len(plan["attach"]), _MEDIA_LIMIT),
+        )
+    lane = str((design_row or {}).get("image_id") or "") or None
+    alt = design_row.get("alt_text") if design_row else None
+    minted: List[Dict[str, Any]] = []
+    # 1. ATTACH what IMS has and Shopify lacks, ONE url per call (the
+    # replacement lands first) -- each on record BEFORE it is sent, and only
+    # while this pass still holds the lease. No lease, no record: no attach.
+    for url in plan["attach"]:
+        if not renew():
+            summary["error"] = "lost the media lease -- nothing sent for the rest; press again"
+            return summary
+        doc_id = uuid.uuid4().hex
+        sent = _now()
+        try:
+            coll.insert_one(
+                {
+                    "_id": doc_id,
+                    "product_id": pid,
+                    "url": url,
+                    "image_id": _lane_of(url, lane, own),
+                    "gid": None,
+                    "how": None,
+                    "sent_at": sent,
+                    "at": sent,
+                }
+            )
+        except Exception:  # noqa: BLE001
+            summary["error"] = (
+                "refused: could not record the attach on the product -- nothing was sent; press again"
+            )
+            return summary
+        gid, ok, err = await _attach_one(db, product_gid, url, alt)
+        if gid:
+            # Shopify's own answer named it: IMS's media, even a FAILED one.
+            row = {"url": url, "id": gid, "image_id": _lane_of(url, lane, own)}
+            summary["attached_map"].append(row)
+            try:
+                coll.update_one({"_id": doc_id}, {"$set": {"gid": gid, "how": "minted", "at": _now()}})
+                minted.append(row)
+            except Exception as exc:  # noqa: BLE001 -- the doc stays pending: the next pass settles it by name
+                logger.warning("[SHOPIFY_PUSH] media record of %s failed %s: %s", gid, pid, exc)
+        if not ok:
+            summary["error"] = err
+            return summary
+        summary["attached"] += 1
+        summary["on_shopify"] += 1
+    # 2. DELETE what IMS dropped (and a FAILED media of this lane) --
+    # tombstone first, then the call, then the ledger.
+    deleted = [d["id"] for d in plan["delete"]]
+    if deleted:
+        try:
+            _tombstone_media(db, pid, plan["delete"])
+            body = await _graphql(db, _PRODUCT_DELETE_MEDIA, {"productId": product_gid, "mediaIds": deleted})
+            err = _user_errors_media(body, "productDeleteMedia")
+        except Exception as exc:  # noqa: BLE001 -- fail-soft side channel
+            err = str(exc)
+        if err:
+            summary["error"] = err
+            return summary
+        summary["deleted"] = len(deleted)
+        summary["on_shopify"] -= len([i for i in deleted if i not in failed])
+        try:
+            coll.delete_many({"product_id": pid, "gid": {"$in": deleted}})
+        except Exception as exc:  # noqa: BLE001 -- the next pass prunes them as gone
+            logger.warning("[SHOPIFY_PUSH] media ledger prune failed %s: %s", pid, exc)
+    # 3. REORDER the IMS-owned media into IMS order, in the SLOTS they
+    # already occupy (the attach appended its new media at the end): media
+    # IMS does not own keeps its exact position, so a hero shot a human
+    # placed first in the Shopify admin stays first.
+    live = [r for r in plan["owned"] if r["id"] not in deleted] + minted
+    by_url = {r["url"]: r["id"] for r in live if r["id"] not in failed}
+    desired = [by_url[u] for u in photos if u in by_url]
+    survivors = [i for i in nodes if i not in deleted]
+    survivors += [r["id"] for r in minted if r["id"] not in survivors]
+    want = set(desired)
+    slots = [i for i, gid in enumerate(survivors) if gid in want]
+    if desired and [survivors[i] for i in slots] != desired:
+        try:
+            body = await _graphql(
+                db,
+                _PRODUCT_REORDER_MEDIA,
+                {
+                    "id": product_gid,
+                    "moves": [{"id": gid, "newPosition": str(slots[k])} for k, gid in enumerate(desired)],
+                },
+            )
+            err = _user_errors_media(body, "productReorderMedia")
+        except Exception as exc:  # noqa: BLE001
+            err = str(exc)
+        if err:
+            summary["error"] = err
+            return summary
+        summary["reordered"] = True
+    return summary
 
 
 def build_media_inputs(images: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1084,14 +1166,12 @@ def build_media_inputs(images: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
-
 async def _product_media(db, product_gid: str) -> List[Dict[str, Any]]:
-    """The media a live product carries RIGHT NOW (_PRODUCT_MEDIA_QUERY), in
-    the node shape the product press reads off its create/update response --
-    so the design-queue press can run the same pass. Raises on a GraphQL
-    error body or a product Shopify does not know: an unknown listing must
-    never read as 'no media' (the pass would then attach every photograph
-    again -- the duplicate this whole door exists to stop)."""
+    """The media a live product carries RIGHT NOW (_PRODUCT_MEDIA_QUERY: id,
+    status and the CDN url of an image, in listing order) -- the pass's ONE
+    read of the listing, for both doors. Raises on a GraphQL error body or a
+    product Shopify does not know: an unknown listing must never read as 'no
+    media' (the pass would then attach every photograph again)."""
     body = await _graphql(db, _PRODUCT_MEDIA_QUERY, {"id": product_gid})
     if not isinstance(body, dict):
         raise RuntimeError("malformed graphql response")
@@ -1108,14 +1188,14 @@ async def push_image(db, image: Dict[str, Any]) -> PushResult:
     DARK by default; LIVE behind the gates. Never raises.
 
     ONE identity, ONE writer, ONE predicate: a design-queue image is on
-    Shopify iff the parent twin's ``ecom.media_map`` maps its source url, and
-    what a press does is read off that map by ``image_press_plan`` (the same
-    call the sweep's skip and the pushed/pending counts make); the row itself
-    carries no Shopify id. The LIVE press never calls productCreateMedia on
-    its own -- it runs the SAME photo pass the product press runs
-    (``sync_product_media`` in the DESIGN lane: ``photos`` is this row's url
-    alone, ``design_row`` is the row, against the media the listing carries
-    right now), so:
+    Shopify iff the ledger holds a live doc for its source url in the
+    parent's listing, and what a press does is read off the ledger by
+    ``image_press_plan`` (the same call the sweep's skip and the
+    pushed/pending counts make); the row itself carries no Shopify id. The
+    LIVE press never calls productCreateMedia on its own -- it runs the SAME
+    photo pass the product press runs (``sync_product_media`` in the DESIGN
+    lane: the photo list is this row's url alone, ``design_row`` is the
+    row), so:
       * an image already on the listing is a no-op (zero network, its gid in
         the payload) -- a re-press can never mint a second MediaImage;
       * a row whose asset was replaced has the old media tombstoned and
@@ -1126,10 +1206,6 @@ async def push_image(db, image: Dict[str, Any]) -> PushResult:
         attached when the product press has not put them up, not dropped
         when IMS removed them, not reordered: those are the product press's
         calls, made under its own publish gate;
-      * the map row is written through ``_writeback_media_map`` with the
-        row's image_id (the design lane), so the product press keeps that
-        media -- a design image reaches or leaves Shopify only through a
-        press of its row;
       * media IMS does not own on the listing is never touched, and a
         listing IMS owns nothing on is refused (adopt it first), never
         attached to blind.
@@ -1149,7 +1225,7 @@ async def push_image(db, image: Dict[str, Any]) -> PushResult:
     deleted or re-pointed since must never be pressed from that copy."""
     iid = image.get("image_id")
     try:
-        async with media_lease(db, image.get("product_id")):
+        async with media_lease(db, image.get("product_id")) as renew:
             row = db["product_images"].find_one({"image_id": iid}) if iid else None
             if row is None:
                 return PushResult(
@@ -1161,18 +1237,19 @@ async def push_image(db, image: Dict[str, Any]) -> PushResult:
                     error="the design-queue row no longer exists -- nothing to press",
                     reason="row_gone",
                 )
-            return await _press_image(db, row)
+            return await _press_image(db, row, renew)
     except Exception as e:  # noqa: BLE001 -- MediaBusy, or the lease / row read failed: nothing sent
         return PushResult(
             mode=MODE_SIMULATED, entity="image", action="skip", target_id=iid, ok=False, error=str(e)
         )
 
 
-async def _press_image(db, image: Dict[str, Any]) -> PushResult:
+async def _press_image(db, image: Dict[str, Any], renew: Callable[[], bool] = lambda: True) -> PushResult:
     """push_image's press, under the lease, of the row as the db holds it."""
     iid = image.get("image_id")
+    pid = image.get("product_id")
 
-    # WHAT THIS PRESS DOES is read off the parent twin and its map by
+    # WHAT THIS PRESS DOES is read off the parent twin and its ledger by
     # image_press_plan -- the one predicate the sweep's skip and the counts
     # share -- INCLUDING every refusal made before anything is sent: the Hub
     # Phase 5 push-lock (defense-in-depth, FIRST gate: an image attaches to
@@ -1182,10 +1259,8 @@ async def _press_image(db, image: Dict[str, Any]) -> PushResult:
     # push_product (a product in an online_sync_blocked collection -- or
     # whose block status cannot be read -- is never written on Shopify, a
     # media attach included), an unfetchable url, the photo rule mirrored
-    # from push_product (a product with no photograph of its own is never
-    # published, so it takes no design image either -- without this a design
-    # press would run the pass over a listing the product press refuses to
-    # touch), and a parent that owns no listing.
+    # from push_product, a parent that owns no listing and an unreadable
+    # ledger.
     _parent, _img_lock, press = read_image_press(db, image)
     if press.get("reason") == "push_locked":
         return _blocked_result("image", iid, _img_lock)
@@ -1202,7 +1277,7 @@ async def _press_image(db, image: Dict[str, Any]) -> PushResult:
         )
 
     # Resolve the parent product's Shopify gid (media attaches to a product).
-    product_gid = _resolve_product_gid(db, image.get("product_id"))
+    product_gid = _resolve_product_gid(db, pid)
     media = build_media_inputs([image])
     payload: Dict[str, Any] = {"productId": product_gid, "media": media}
     if press["action"] == "skip":
@@ -1226,10 +1301,11 @@ async def _press_image(db, image: Dict[str, Any]) -> PushResult:
 
     # ALREADY ON THE LISTING -> nothing to send, dark or live: this is the
     # check the 09-06 sync audit found missing, the one that stops a re-press
-    # from attaching the same source url again. UNLESS this row still maps
-    # the asset it carried before it was replaced (a delete that failed):
-    # that press must run again to take the old media down -- a no-op over
-    # an orphan is exactly the silent success this door exists to end.
+    # from attaching the same source url again. UNLESS this row's lane still
+    # holds an asset it carried before it was replaced (a delete that
+    # failed, or a lost attach of an old url): that press must run again to
+    # take the old media down -- a no-op over an orphan is exactly the silent
+    # success this door exists to end.
     have = press["gid"]
     if press["action"] == "noop":
         return PushResult(
@@ -1257,17 +1333,17 @@ async def _press_image(db, image: Dict[str, Any]) -> PushResult:
             reason=reason,
         )
 
-    # THE DESIGN LANE: the pass governs the rows of THIS image_id only --
-    # it attaches this row's url and drops the asset the row mapped before
-    # it was replaced. The product's own photographs and every other design
-    # row are kept exactly where they are (see the ownership note). An asset
-    # to drop that another APPROVED row of this product sources too is that
-    # row's image as well (its gid is read by url): it is HANDED to that
-    # row's lane, never deleted from under it.
+    # THE DESIGN LANE: the pass governs the docs of THIS image_id only -- it
+    # attaches this row's url and drops the asset the row held before it was
+    # replaced. The product's own photographs and every other design row are
+    # kept exactly where they are (see the ownership note). An asset to drop
+    # that another APPROVED row of this product sources too is that row's
+    # image as well: it is HANDED to that row's lane, never deleted from
+    # under it.
     try:
         heirs: Dict[str, str] = {}
         if press["drop"]:
-            for r in db["product_images"].find({"product_id": image.get("product_id")}):
+            for r in db["product_images"].find({"product_id": pid}):
                 u = image_source_url(r)
                 if (
                     u in press["drop"]
@@ -1276,9 +1352,8 @@ async def _press_image(db, image: Dict[str, Any]) -> PushResult:
                     and str(r.get("status") or "").upper() == "APPROVED"
                 ):
                     heirs.setdefault(u, str(r["image_id"]))
-        current = await _product_media(db, product_gid)
         summary = await sync_product_media(
-            db, _parent, product_gid, [src], current, design_row=image, heirs=heirs
+            db, pid, product_gid, design_row=image, heirs=heirs, renew=renew
         )
     except Exception as e:  # noqa: BLE001
         return PushResult(
@@ -1290,19 +1365,26 @@ async def _press_image(db, image: Dict[str, Any]) -> PushResult:
             payload=payload,
             error=str(e),
         )
-    # THE FACT LIVES ON THE TWIN: read the map back rather than trust the
-    # pass. A media that landed on Shopify but is not in the stored map would
-    # be attached again by the next press, so that is a loud failure with the
+    # THE FACT LIVES IN THE LEDGER: read it back rather than trust the pass.
+    # A media that landed on Shopify but is not recorded live would be
+    # re-checked by the next press, so that is a loud failure with the
     # minted gid kept for reconcile (attached_map), never a silent ok=True.
-    new_gid = image_media_gid(_resolve_product_doc(db, image.get("product_id")), image)
+    try:
+        new_gid = image_media_gid(_resolve_product_doc(db, pid), image, media_rows(db, pid))
+    except Exception:  # noqa: BLE001 -- unreadable: not recorded, as far as this press knows
+        new_gid = None
     minted = {r["url"]: r["id"] for r in summary.get("attached_map") or []}.get(src)
     error = summary.get("error")
     if not new_gid and not error:
-        if minted:
+        if src in (summary.get("held") or []):
             error = (
-                "media attached on Shopify (%s) but the media_map write-back "
-                "failed -- manual reconcile required to avoid a duplicate on "
-                "re-push" % minted
+                "an earlier attach of this image may still be landing on Shopify "
+                "-- press again in 15 minutes"
+            )
+        elif minted:
+            error = (
+                "media attached on Shopify (%s) but the online_media write-back "
+                "failed -- the next press settles it by file name" % minted
             )
         elif summary.get("hands_off"):
             error = (

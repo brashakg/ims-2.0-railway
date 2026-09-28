@@ -144,6 +144,12 @@ def _force_live(monkeypatch, responses):
     # fixture therefore needs the media mutation answered; a test that wants
     # to prove a media FAILURE overrides this key explicitly.
     responses = dict(responses)
+    # The photo pass reads the listing first (one read path): a bare listing
+    # unless the test states one.
+    responses.setdefault(
+        "imsProductMedia",
+        {"data": {"product": {"id": "gid://shopify/Product/1", "media": {"nodes": []}}}},
+    )
     responses.setdefault(
         "productCreateMedia",
         {
@@ -872,7 +878,8 @@ def test_live_create_with_no_price_and_no_sku_makes_no_extra_call(monkeypatch):
     # no publish (the product is unpriced -- publish stays withheld).
     assert spy.count_for("productCreateMedia") == 1
     assert spy.count_for("publishablePublish") == 0
-    assert len(spy.calls) == 3  # + the stock step's tracking update (2026-09-07)
+    # + the photo pass's listing read + the stock step's tracking update
+    assert len(spy.calls) == 4
 
 
 # ===========================================================================
@@ -931,6 +938,9 @@ def test_live_update_of_a_seeded_product_does_not_reseed(monkeypatch):
         "shopify_variant_id": "gid://shopify/ProductVariant/5001",
         "shopify_inventory_item_id": "gid://shopify/InventoryItem/7001",
     }
+    # the twin is in the catalog: the photo pass plans on it, never on the
+    # caller's copy (an unreadable twin withholds the publish)
+    db["catalog_products"].insert_one(dict(product))
     res = _run(shopify_push.push_product(db, product, []))
     assert res.action == "update" and res.ok is True
     assert res.variants_seeded is None  # no re-seed: already seeded

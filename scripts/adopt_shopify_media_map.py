@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """
-IMS 2.0 - Adopt a live product's Shopify media into ecom.media_map
-==================================================================
+IMS 2.0 - Adopt a live product's Shopify media into the online_media ledger
+==========================================================================
 Runbook-only script. NOT in CI. ASCII only (Windows cp1252).
 
 WHY
 ---
 PR #1128 made photos follow IMS onto Shopify, but ONLY for the media IMS
-knows it owns: ``ecom.media_map = [{url: <IMS photo url>, id: <MediaImage
-gid>}]`` on the catalog twin, written at attach. The 42 products that were
-on Shopify before the map existed have none, so the photo pass keeps its
+knows it owns: the LIVE docs of the ``online_media`` ledger
+(shopify_push.media: {product_id, url: <IMS photo url>, gid: <MediaImage
+gid>, how, ...}, one per media), written at attach. The products that were
+on Shopify before the ledger existed have none, so the photo pass keeps its
 hands off them -- a replaced or removed photo in IMS never reaches the
-storefront for those products until the map is adopted.
+storefront for those products until their media is adopted.
 
 THE RULE (owner ticked "Adopt live products' photos")
 -----------------------------------------------------
 A claimed media can later be DELETED by the photo pass when IMS drops that
 photo, so adoption claims a media ONLY on a POSITIVE identity match
 (shopify_push.media.match_media_to_photos, the one rule the tests share):
-  R1  the media's originalSource url IS the IMS url, or
   R3  the media's CDN file name IS the IMS url's file name -- Shopify's own
       ``_<uuid>`` collision suffix is ignored on the CDN side only, the
       extension must agree exactly whenever the IMS name has one, nothing
@@ -47,8 +47,9 @@ the six adopt candidates carry 24-hex ObjectId names and no hand uploads).
 
 Measured on prod 2026-09-06 (API 2024-10, 42 twins, 180 media): R3 adopts
 the six 09-05 IMS-pushed products (15 media, ObjectId <-> ObjectId.png/jpg/
-webp, 1:1, no unmanaged left) -- ROUND 1, applied 09-06; R1 fires on
-nothing (originalSource is always Shopify's own storage copy). The 42 hold
+webp, 1:1, no unmanaged left) -- ROUND 1, applied 09-06. An originalSource
+rule fired on nothing (originalSource is always Shopify's own storage copy)
+and is gone. The 42 hold
 0 same-base-name/different-uuid pairs, 0 non-ASCII and 0 upper-case CDN
 names.
 
@@ -62,17 +63,17 @@ ROUND 2 (owner rulings 2026-09-06) -- two OPT-IN doors, each REQUIRES --ids
     be the product's own id (a foreign id, or no prefix, never matches);
     stems are exact (no case folding, no uuid strip). Still 1:1, still
     partial = report, and the other 3-5 connector media on each product
-    (different basenames) stay unmanaged. R1/R3 stay on underneath.
+    (different basenames) stay unmanaged. R3 stays on underneath.
 (2) ``--replace-photos-from-shopify``: for the 6 old-app twins
     (ecom.source=bvi_import) that hold 2-3 STALE cdn.shopify.com screenshot
     links as IMS photos while Shopify holds ONE connector image. Their IMS
     photo list is REPLACED with that one Shopify image (the media's CDN url)
-    and the map adopted as {url: that cdn url, id: media gid}. Refused,
+    and that media adopted under that cdn url. Refused,
     BEFORE the Shopify query and before any write, when the twin is not an
     old-app twin (ecom.source != bvi_import), when any of its photos is not
     a cdn.shopify.com link (a real in-app photo is never overwritten here --
     prod aa7d0ed2 has exactly the one-media shape a pasted-wrong id would
-    hand over), when a map already exists, when the twin carries a singular
+    hand over), when IMS already owns media on it, when the twin carries a singular
     image_url/image the door cannot clear, when its spine row lacks a
     product_id (the door cannot key it; falling through to a twin-only
     write is exactly what the next spine edit would undo), or when the spine's
@@ -90,34 +91,36 @@ ROUND 2 (owner rulings 2026-09-06) -- two OPT-IN doors, each REQUIRES --ids
     ``mark_dirty=False`` (the twin follows, nothing queues). A twin with NO
     spine row (memory: one of the six was archived rather than promoted)
     is written through the same mirror helper with an empty spine -- never
-    a second twin writer. After the write the twin is re-read and the map
+    a second twin writer. After the write the twin is re-read and the media
     is adopted ONLY when product_photo_urls(twin) is exactly [that cdn url].
 
     REVERSAL. Every PLANNED product's previous photo list (spine images,
-    twin photo list + raw twin images[], previous map) is saved to
+    twin photo list + raw twin images[], the media IMS owned before) is saved to
     ``adopt_replace_reversal_<UTC stamp>.json`` under --reversal-dir
     (default: the working directory; pass a directory OUTSIDE the git
     checkout under the prod recipe) BEFORE the first write, and printed per
     product; the file is rewritten after the loop with ``applied`` = the ids
     that moved. So an un-caught failure between two products, or a mirror
     that swallowed a twin error (fail-soft) after the spine moved -- printed
-    as 'TWIN DID NOT FOLLOW', the map NOT adopted -- still leaves the
+    as 'TWIN DID NOT FOLLOW', the media NOT adopted -- still leaves the
     before-state on disk. To reverse: put the saved ``spine_images`` back
     through the same door (PUT /products/{spine_id} images=[...]; a null
-    means the spine had no images key) and $unset ecom.media_map; a twin
-    without a spine takes its ``twin_images`` back on
-    catalog_products.images directly.
+    means the spine had no images key) and delete the product's adopted
+    ledger docs (REVERSAL below); a twin without a spine takes its
+    ``twin_images`` back on catalog_products.images directly.
 
 SCOPE
 -----
   - reads the twin (catalog_products) and, through the app's own transport,
     the product's media on Shopify -- a QUERY, never a mutation
-  - writes ONLY ecom.media_map, through the ONE writer the photo pass uses
-    (media._writeback_media_map); never locally_modified. The replace mode
-    ALSO writes the photo list, through the product edit door (above).
-  - a twin that already carries a map is skipped (the attach wrote it); a
-    map that is [] or holds only malformed rows counts as NO map (owned_media
-    drops such rows -- the pass pruned it or never wrote it) and is adopted
+  - writes ONLY the online_media ledger: one LIVE doc per claimed media,
+    ``how: "adopted"``, under the product's media_lease (the lease every
+    press holds, so no photo pass plans on half an adoption); never the twin,
+    never locally_modified. The replace mode ALSO writes the photo list,
+    through the product edit door (above).
+  - a product IMS already owns media on (a live ledger doc) is skipped, and
+    the write re-checks that under the lease: an adoption never overwrites
+    or duplicates a live doc, and a re-run is a no-op
   - one audit_logs row per adopted product (action MEDIA_MAP_ADOPT; the
     replace mode writes PHOTOS_REPLACED_FROM_SHOPIFY carrying the before list)
   - --ids is REQUIRED and explicit; 'all' is refused
@@ -131,11 +134,8 @@ ENVIRONMENT NOTES
     (PUBLIC_API_BASE_URL is unset on ims-2.0-railway today and the 42 store
     ABSOLUTE up.railway.app image urls, so the two cannot disagree; if that
     variable is ever set, both envs still see it through `railway run`).
-  - _writeback_media_map is a whole-``ecom`` read-merge-write, the same
-    idiom as the other ecom writers, so a write-back from the scheduled
-    sync (01:00 / 09:00 IST) running at the same instant can clobber the
-    map or be clobbered -- benign (a lost map = hands-off again; re-run),
-    but run --apply OUTSIDE those windows.
+  - the canary of the photo pass (MEDIA_NAMING_DRIFT) ignores adopted docs:
+    a connector or replace-mode name legitimately differs from the url.
 
 USAGE
 -----
@@ -148,9 +148,10 @@ Round 2:
     ... --ids <id>,<id> --rule connector-prefix [--apply]
     ... --ids <id>,<id> --replace-photos-from-shopify [--reversal-dir <dir>] [--apply]
 
-REVERSAL (map only): $unset ecom.media_map on the printed ids --
-    db.catalog_products.updateMany({id: {$in: [<ids>]}}, {$unset: {"ecom.media_map": ""}})
-(the photo pass then goes back to hands-off on them; nothing on Shopify moves.)
+REVERSAL (ledger only): delete the ADOPTED docs of the printed ids --
+    db.online_media.deleteMany({product_id: {$in: [<ids>]}, how: "adopted"})
+(the photo pass then goes back to hands-off on them; nothing on Shopify moves;
+a doc the pass minted or settled since is kept.)
 
 Connection: MONGO_PUBLIC_URL, else MONGO_URL (the vars `railway run` injects);
 Shopify creds resolve from the same injected env. Nothing secret is printed.
@@ -176,9 +177,11 @@ from agents.nexus_providers import _as_shopify_gid  # noqa: E402
 from api.services import product_master as pm  # noqa: E402
 from api.services import shopify_push  # noqa: E402
 from api.services.shopify_push.media import (  # noqa: E402
+    MEDIA_COLLECTION,
     _file_name,
-    _writeback_media_map,
     match_media_to_photos,
+    media_lease,
+    media_rows,
     owned_media,
     product_photo_urls,
 )
@@ -189,6 +192,11 @@ ACTOR = "system:adopt_shopify_media_map"
 DB_NAME = "ims_2_0"
 _URL = re.compile(r"https?://\S+|\S*myshopify\.com\S*")
 RULES = {"exact": ("exact",), "connector-prefix": ("exact", "connector_prefix")}
+
+
+def reversal_line(ids: List[str]) -> str:
+    """The one-line mongosh reversal: delete ONLY the adopted docs."""
+    return 'db.%s.deleteMany({product_id: {$in: %s}, how: "adopted"})' % (MEDIA_COLLECTION, list(ids))
 
 
 class _Conn:
@@ -231,7 +239,7 @@ def _row(product_id: str) -> Dict[str, Any]:
         "unmatched": [],
         "unmanaged": [],
         "names": {},
-        "before_map": None,
+        "before": [],
     }
 
 
@@ -260,19 +268,20 @@ async def inspect(db, product_id: str, rules: tuple = ("exact",)) -> Dict[str, A
     match. status: adopt | partial | unmatched | no_photos | already_mapped |
     missing | not_on_shopify | shopify_missing | graphql_error (a GraphQL
     error body OR the transport giving up -- reported, never fatal, so the
-    other ids in the run still get their report). already_mapped means
-    owned_media(twin) is non-empty; an empty or all-malformed map is not."""
+    other ids in the run still get their report). already_mapped means the
+    ledger holds a live doc for the product (pending docs are not owned
+    media)."""
     row = _row(product_id)
     twin = db["catalog_products"].find_one({"id": product_id})
     if twin is None:
         return row
     row["sku"] = twin.get("sku") or "-"
-    row["before_map"] = (twin.get("ecom") or {}).get("media_map")
+    row["before"] = _owned(db, product_id)
     gid = _as_shopify_gid((twin.get("ecom") or {}).get("shopify_product_id"), "Product")
     if not gid:
         row["status"] = "not_on_shopify"
         return row
-    if owned_media(twin):
+    if row["before"]:
         row["status"] = "already_mapped"
         return row
     row["photos"] = product_photo_urls(twin)
@@ -297,6 +306,42 @@ async def inspect(db, product_id: str, rules: tuple = ("exact",)) -> Dict[str, A
     return row
 
 
+def _owned(db, product_id: str) -> List[Dict[str, str]]:
+    """The media IMS already owns on the product: its LIVE ledger docs as
+    [{url, id}]. Raises on a ledger read error (no report beats a wrong one)."""
+    return [{"url": r["url"], "id": r["id"]} for r in owned_media(media_rows(db, product_id), [])]
+
+
+async def _adopt(db, product_id: str, pairs: List[Dict[str, str]]) -> bool:
+    """Write the claimed pairs as LIVE ledger docs (how="adopted") under the
+    product's media lease. False -- nothing written -- when the ledger
+    already holds a live doc for the product (checked under the lease: an
+    adoption never overwrites or duplicates one) or the write fails."""
+    try:
+        async with media_lease(db, product_id):
+            if owned_media(media_rows(db, product_id), []):
+                print(f"  SKIPPED {product_id}: IMS already owns media on it")
+                return False
+            now = datetime.now(tz=timezone.utc)
+            for pair in pairs:
+                db[MEDIA_COLLECTION].insert_one(
+                    {
+                        "_id": uuid.uuid4().hex,
+                        "product_id": product_id,
+                        "url": pair["url"],
+                        "image_id": None,
+                        "gid": pair["id"],
+                        "how": "adopted",
+                        "sent_at": now,
+                        "at": now,
+                    }
+                )
+        return True
+    except Exception as exc:  # noqa: BLE001 -- reported per product, the run goes on
+        print(f"  WRITE FAILED {product_id}: {_redact(exc)}")
+        return False
+
+
 def _spine_of(db, twin_id: str) -> Optional[Dict[str, Any]]:
     """The billing spine row behind a twin: keyed on its own id (the promote
     door: product_id == twin id) or on pim_product_id (the create door)."""
@@ -319,14 +364,14 @@ async def inspect_replace(db, product_id: str) -> Dict[str, Any]:
         return row
     ecom = twin.get("ecom") or {}
     row["sku"] = twin.get("sku") or "-"
-    row["before_map"] = ecom.get("media_map")
+    row["before"] = _owned(db, product_id)
     row["photos"] = product_photo_urls(twin)
     row["twin_images"] = twin.get("images")
     gid = _as_shopify_gid(ecom.get("shopify_product_id"), "Product")
     if not gid:
         row["status"] = "not_on_shopify"
         return row
-    if owned_media(twin):
+    if row["before"]:
         row["status"] = "already_mapped"
         return row
     # The door writes images[] only; a singular image_url/image would stay in
@@ -377,10 +422,10 @@ async def inspect_replace(db, product_id: str) -> Dict[str, Any]:
     return row
 
 
-def _replace(db, row: Dict[str, Any]) -> bool:
+async def _replace(db, row: Dict[str, Any]) -> bool:
     """Write the one Shopify image as the product's photo list through the
     product edit door (spine -> mirror -> twin, nothing queued), verify the
-    twin now shows exactly that photo, then adopt the map. Never raises:
+    twin now shows exactly that photo, then adopt the media. Never raises:
     every failure is reported per product, and this product's reversal
     entry is already on disk (run() saves the plan before the first write)."""
     pid = row["product_id"]
@@ -407,12 +452,12 @@ def _replace(db, row: Dict[str, Any]) -> bool:
             # spine_images back through the same door right here.
             print(
                 f"  TWIN DID NOT FOLLOW {pid}: twin holds {now}, spine "
-                f"{'written to [' + cdn + ']' if row['spine_id'] else 'none'} -- map not adopted; "
+                f"{'written to [' + cdn + ']' if row['spine_id'] else 'none'} -- media not adopted; "
                 "restore spine_images from the reversal file"
             )
             return False
-        if not _writeback_media_map(db, pid, row["map"]):
-            print(f"  WRITE FAILED {pid}: media_map -- photos moved; restore from the reversal file")
+        if not await _adopt(db, pid, row["map"]):
+            print(f"  NOT ADOPTED {pid}: photos moved; restore from the reversal file")
             return False
         return True
     except Exception as exc:  # noqa: BLE001 -- reported per product, the run goes on
@@ -429,7 +474,7 @@ def _save_reversal(path: str, plan: List[Dict[str, Any]], applied: List[str]) ->
             {
                 "created_at": datetime.now(tz=timezone.utc).isoformat(),
                 "how": "put spine_images back through PUT /products/{spine_id} (or twin_images on "
-                "catalog_products.images when spine_id is null) and $unset ecom.media_map",
+                "catalog_products.images when spine_id is null) and " + reversal_line([r["product_id"] for r in plan]),
                 "applied": list(applied),
                 "products": [
                     {
@@ -438,9 +483,9 @@ def _save_reversal(path: str, plan: List[Dict[str, Any]], applied: List[str]) ->
                         "spine_images": r["spine_images"],
                         "twin_photos": r["photos"],
                         "twin_images": r["twin_images"],
-                        "media_map_before": r["before_map"],
+                        "media_before": r["before"],
                         "photo_after": r["map"][0]["url"],
-                        "media_map_after": r["map"],
+                        "media_after": r["map"],
                     }
                     for r in plan
                 ],
@@ -452,7 +497,7 @@ def _save_reversal(path: str, plan: List[Dict[str, Any]], applied: List[str]) ->
 
 def _audit(db, row: Dict[str, Any], *, action: str, before: Dict[str, Any], after: Dict[str, Any], reversal: str) -> None:
     """One audit row per adopted product -- what was claimed, what was left
-    unmanaged, how to reverse. Best-effort; the map write stands."""
+    unmanaged, how to reverse. Best-effort; the ledger write stands."""
     try:
         db["audit_logs"].insert_one(
             {
@@ -530,14 +575,15 @@ async def run(
             )
             _save_reversal(reversal_path, plan, applied=[])  # BEFORE the first write
         for r in plan:
-            if _replace(db, r):
+            if await _replace(db, r):
                 _audit(
                     db,
                     r,
                     action="PHOTOS_REPLACED_FROM_SHOPIFY",
-                    before={"photos": r["photos"], "spine_images": r["spine_images"], "media_map": r["before_map"]},
-                    after={"photos": [r["map"][0]["url"]], "media_map": r["map"]},
-                    reversal="restore spine_images via PUT /products/{spine_id} images=[...]; $unset ecom.media_map",
+                    before={"photos": r["photos"], "spine_images": r["spine_images"], "media": r["before"]},
+                    after={"photos": [r["map"][0]["url"]], "media": r["map"]},
+                    reversal="restore spine_images via PUT /products/{spine_id} images=[...]; "
+                    + reversal_line([r["product_id"]]),
                 )
                 written.append(r["product_id"])
                 print(f"      previous photos {r['product_id']}: {r['photos']}")
@@ -547,32 +593,24 @@ async def run(
         if reversal_path:
             print(f"REVERSAL saved to {reversal_path} (the plan, written before the first write; 'applied' = what moved)")
         if written:
-            print(
-                "REVERSAL (map only): db.catalog_products.updateMany({id: {$in: %s}}, "
-                '{$unset: {"ecom.media_map": ""}})' % written
-            )
+            print("REVERSAL (ledger only): " + reversal_line(written))
     elif apply:
         for r in rows:
             if r["status"] != "adopt":
                 continue
-            if _writeback_media_map(db, r["product_id"], r["map"]):
+            if await _adopt(db, r["product_id"], r["map"]):
                 _audit(
                     db,
                     r,
                     action="MEDIA_MAP_ADOPT",
-                    before={"media_map": r["before_map"]},
-                    after={"media_map": r["map"], "unmanaged": r["unmanaged"]},
-                    reversal="update_one({'id': product_id}, {'$unset': {'ecom.media_map': ''}})",
+                    before={"media": r["before"]},
+                    after={"media": r["map"], "unmanaged": r["unmanaged"]},
+                    reversal=reversal_line([r["product_id"]]),
                 )
                 written.append(r["product_id"])
-            else:
-                print(f"  WRITE FAILED {r['product_id']}")
         print(f"\nproducts={len(rows)} {totals} written={len(written)}")
         if written:
-            print(
-                "REVERSAL: db.catalog_products.updateMany({id: {$in: %s}}, "
-                '{$unset: {"ecom.media_map": ""}})' % written
-            )
+            print("REVERSAL: " + reversal_line(written))
     else:
         print(f"\nproducts={len(rows)} {totals} written=0")
         want = "replace" if replace else "adopt"
@@ -582,15 +620,15 @@ async def run(
 
 def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Adopt a live product's Shopify media into ecom.media_map. Dry-run by default."
+        description="Adopt a live product's Shopify media into the online_media ledger. Dry-run by default."
     )
     parser.add_argument("--ids", required=True, help="Comma-separated catalog product ids ('all' refused).")
-    parser.add_argument("--apply", action="store_true", help="Write the maps (default: dry-run).")
+    parser.add_argument("--apply", action="store_true", help="Write the ledger docs (default: dry-run).")
     parser.add_argument(
         "--rule",
         choices=sorted(RULES),
         default="exact",
-        help="exact (R1/R3, default) or connector-prefix (adds R3b: '<own id>__<nn>__<basename>', extension ignored).",
+        help="exact (R3, default) or connector-prefix (adds R3b: '<own id>__<nn>__<basename>', extension ignored).",
     )
     parser.add_argument(
         "--replace-photos-from-shopify",
