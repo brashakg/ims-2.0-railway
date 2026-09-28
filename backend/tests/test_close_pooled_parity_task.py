@@ -77,3 +77,27 @@ def test_no_connection_is_a_clean_exit(monkeypatch):
     for k in ("MONGO_PUBLIC_URL", "MONGODB_URI", "MONGODB_URL", "MONGO_URL"):
         monkeypatch.delenv(k, raising=False)
     assert script.main([]) == 2
+
+
+def test_the_command_is_a_dry_run_unless_commit(monkeypatch):
+    """The runbook runs the COMMAND (`railway run ... close_pooled_parity_task.py`
+    with no flag), not the helper: main() must pass commit only on --commit.
+    Hard-wire `close_pooled(..., commit=True)` in main() -> the flagless run
+    closes T-JULY -> fails."""
+    import pymongo
+
+    coll = _tasks()
+
+    class _Client:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def __getitem__(self, _db):
+            return {"tasks": coll}
+
+    monkeypatch.setattr(pymongo, "MongoClient", _Client)
+    before = [dict(d) for d in coll.docs]
+    assert script.main(["--mongo-uri", "mongodb://fake"]) == 0
+    assert coll.docs == before
+    assert script.main(["--mongo-uri", "mongodb://fake", "--commit"]) == 0
+    assert _status(coll)["T-JULY"] == "COMPLETED"
