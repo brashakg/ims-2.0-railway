@@ -3,30 +3,47 @@
 // ============================================================================
 // "We maintain our own inventory through IMS barcodes and manufacturer UPC and
 // GTIN for reference and online stock keeping/Google." IMS barcodes are minted
-// per unit at receipt; the product's barcode is only the maker's UPC/EAN. So
-// the modal must not invent one: no random 'Generate', no CODE128/CODE39 picker.
-// Whether a value IS a GTIN is decided by the server (services/gtin.py, one
-// rule); the modal shows the server's refusal in words.
+// per unit at receipt; the product keeps only the maker's UPC/EAN, as its `gtin`
+// attribute -- the field the Add Product "GTIN (mfr)" box writes and the
+// Shopify push reads. So the modal must not invent one (no random 'Generate',
+// no CODE128/CODE39 picker), and it must show the server's refusal in words.
+// The refusal test rejects with a REAL ApiError from the api client (it has no
+// .response; its message is the server's detail), the shape the page gets.
 
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
-import { describe, it, expect, vi } from 'vitest';
+import type { AxiosError } from 'axios';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 
+const updateProduct = vi.fn();
+vi.mock('../../../services/api/products', () => ({
+  productApi: { updateProduct: (...a: unknown[]) => updateProduct(...a) },
+}));
+
+import { buildApiError } from '../../../services/api/client';
 import { BarcodeManagementModal } from '../BarcodeManagementModal';
 
-function renderModal(onSave = vi.fn().mockResolvedValue(undefined), currentBarcode = '') {
+function renderModal(currentGtin = '', onSaved = vi.fn()) {
   render(
     <BarcodeManagementModal
       isOpen
       onClose={() => {}}
+      productId="P-42"
       productName="Carrera CA 8895 Havana"
-      currentBarcode={currentBarcode}
-      onSave={onSave}
+      currentGtin={currentGtin}
+      onSaved={onSaved}
     />,
   );
-  return onSave;
+  return onSaved;
+}
+
+function typeAndSave(code: string) {
+  fireEvent.change(screen.getByLabelText(/manufacturer barcode/i), { target: { value: code } });
+  fireEvent.click(screen.getByRole('button', { name: /save barcode/i }));
 }
 
 describe('Manage Barcode (manufacturer UPC / EAN only)', () => {
+  beforeEach(() => updateProduct.mockReset());
+
   it('offers no Generate button and no symbology picker', () => {
     renderModal();
     expect(screen.queryByRole('button', { name: /generate/i })).toBeNull();
@@ -35,24 +52,32 @@ describe('Manage Barcode (manufacturer UPC / EAN only)', () => {
     }
   });
 
-  it('saves the typed manufacturer code as-is', async () => {
-    const onSave = renderModal();
-    fireEvent.change(screen.getByLabelText(/manufacturer barcode/i), {
-      target: { value: '4006381333931' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: /save barcode/i }));
-    await waitFor(() => expect(onSave).toHaveBeenCalledWith('4006381333931'));
+  it('opens with the saved GTIN', () => {
+    renderModal('4006381333931');
+    expect(screen.getByLabelText(/manufacturer barcode/i)).toHaveValue('4006381333931');
+  });
+
+  it("saves the code as the product's GTIN, the field that goes to Shopify", async () => {
+    updateProduct.mockResolvedValue({});
+    const onSaved = renderModal();
+    typeAndSave('4006381333931');
+    await waitFor(() =>
+      expect(updateProduct).toHaveBeenCalledWith('P-42', { attributes: { gtin: '4006381333931' } }),
+    );
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
   });
 
   it("shows the server's reason when the code is not a manufacturer barcode", async () => {
-    const onSave = vi
-      .fn()
-      .mockRejectedValue(new Error("'2000000000015' is not a manufacturer barcode (RESTRICTED)."));
-    renderModal(onSave);
-    fireEvent.change(screen.getByLabelText(/manufacturer barcode/i), {
-      target: { value: '2000000000015' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: /save barcode/i }));
-    expect(await screen.findByText(/not a manufacturer barcode/i)).toBeInTheDocument();
+    const detail = "'BV0000000042' is not a valid GTIN (NONNUMERIC).";
+    const refusal = buildApiError({
+      isAxiosError: true,
+      message: 'Request failed with status code 422',
+      response: { status: 422, data: { detail } },
+    } as unknown as AxiosError<{ detail?: string }>);
+    updateProduct.mockRejectedValueOnce(refusal);
+    const onSaved = renderModal();
+    typeAndSave('BV0000000042');
+    expect(await screen.findByText(detail)).toBeInTheDocument();
+    expect(onSaved).not.toHaveBeenCalled();
   });
 });

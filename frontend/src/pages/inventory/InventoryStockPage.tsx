@@ -282,24 +282,11 @@ export function InventoryStockPage() {
         await reloadInventory();
       }
     } catch (err: unknown) {
-      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail || 'Import failed. Check CSV format and try again.';
+      // An ApiError's message is the server's reason (it has no .response).
+      const msg = (err as Error)?.message || 'Import failed. Check CSV format and try again.';
       toast.error(msg);
     } finally {
       setIsImporting(false);
-    }
-  };
-
-  // Handle barcode save through the SINGLE validated product-update path. The
-  // server decides what is a manufacturer GTIN; its reason reaches the modal.
-  const handleSaveBarcode = async (barcode: string) => {
-    if (!selectedProduct) return;
-    try {
-      await productApi.updateProduct(selectedProduct.id, { barcode });
-      toast.success(`Barcode saved for ${selectedProduct.name}`);
-      await reloadInventory();
-    } catch (err) {
-      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
-      throw new Error(detail || 'Failed to save barcode. Please try again.');
     }
   };
 
@@ -678,9 +665,13 @@ export function InventoryStockPage() {
             setShowBarcodeModal(false);
             setSelectedProduct(null);
           }}
+          productId={selectedProduct.id}
           productName={selectedProduct.name}
-          currentBarcode={selectedProduct.barcode}
-          onSave={handleSaveBarcode}
+          currentGtin={selectedProduct.gtin}
+          onSaved={() => {
+            toast.success(`Manufacturer barcode saved for ${selectedProduct.name}`);
+            reloadInventory();
+          }}
         />
       )}
 
@@ -694,6 +685,7 @@ export function InventoryStockPage() {
         const rows: Array<[string, string]> = [
           ['SKU', detailItem.sku || '-'],
           ['Barcode', detailItem.barcode || 'Not set'],
+          ['Manufacturer barcode', detailItem.gtin || 'Not set'],
           ['Category', cat?.label || detailItem.category],
           ['MRP', formatCurrency(detailItem.mrp || 0)],
           ['Offer price', formatCurrency(detailItem.offerPrice || detailItem.mrp || 0)],

@@ -2,43 +2,50 @@
 // IMS 2.0 - Manufacturer Barcode Modal
 // ============================================================================
 // Owner ruling 2026-09-28: IMS keeps stock through its OWN per-unit barcodes
-// (minted at receipt, printed on unit labels). The product's barcode holds only
-// the manufacturer's UPC / EAN (GTIN) -- for reference and what goes to
-// Shopify / Google. So nothing here invents a code: no random Generate, no
-// symbology picker. The server (services/gtin.py) decides what is a GTIN and
-// its refusal is shown in words.
+// (minted at receipt, printed on unit labels). The manufacturer's UPC / EAN
+// (GTIN) is kept on the product for reference and for Shopify / Google. So
+// nothing here invents a code: no random Generate, no symbology picker.
+//
+// It is saved as the product's `gtin` attribute -- the SAME field the Add
+// Product form's "GTIN (mfr)" box writes and the Shopify push reads (the old
+// product `barcode` field never reached Shopify). The server
+// (services/gtin.py) decides what is a GTIN; its refusal is shown in words.
 
 import { useState, useEffect } from 'react';
 import { X, AlertCircle, CheckCircle } from 'lucide-react';
 import clsx from 'clsx';
+import { productApi } from '../../services/api/products';
 
 interface BarcodeManagementModalProps {
   isOpen: boolean;
   onClose: () => void;
+  productId: string;
   productName: string;
-  currentBarcode?: string;
-  onSave: (barcode: string) => Promise<void>;
+  /** The product's saved manufacturer GTIN (never a unit's IMS barcode). */
+  currentGtin?: string;
+  onSaved?: () => void;
 }
 
 export function BarcodeManagementModal({
   isOpen,
   onClose,
+  productId,
   productName,
-  currentBarcode,
-  onSave,
+  currentGtin,
+  onSaved,
 }: BarcodeManagementModalProps) {
-  const [barcode, setBarcode] = useState(currentBarcode || '');
+  const [barcode, setBarcode] = useState(currentGtin || '');
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
 
   useEffect(() => {
     if (isOpen) {
-      setBarcode(currentBarcode || '');
+      setBarcode(currentGtin || '');
       setError(null);
       setSuccess(false);
     }
-  }, [isOpen, currentBarcode]);
+  }, [isOpen, currentGtin]);
 
   const handleSave = async () => {
     if (!barcode.trim()) {
@@ -50,13 +57,16 @@ export function BarcodeManagementModal({
     setError(null);
 
     try {
-      await onSave(barcode.trim());
+      await productApi.updateProduct(productId, { attributes: { gtin: barcode.trim() } });
       setSuccess(true);
+      onSaved?.();
       setTimeout(() => {
         onClose();
       }, 1500);
-    } catch (err: any) {
-      setError(err?.message || 'Failed to save barcode');
+    } catch (err) {
+      // The api client rejects with an ApiError whose message IS the server's
+      // reason (services/api/client.ts buildApiError) -- there is no .response.
+      setError((err as Error)?.message || 'Failed to save barcode');
     } finally {
       setIsSaving(false);
     }
@@ -122,8 +132,8 @@ export function BarcodeManagementModal({
 
           <p className="text-sm text-gray-600">
             The 8, 12, 13 or 14-digit code printed on the maker&apos;s box. It is kept for
-            reference and sent to Shopify and Google. IMS scans and labels each unit with its
-            own IMS barcode, minted when the stock is received.
+            reference and goes to Shopify and Google with the next website push. IMS scans and
+            labels each unit with its own IMS barcode, minted when the stock is received.
           </p>
         </div>
 

@@ -73,6 +73,8 @@ export interface StockItem {
   minStock?: number;
   barcode?: string;
   storeBarcode?: string;
+  /** The product's manufacturer GTIN (attributes.gtin) -- what Manage Barcode edits. */
+  gtin?: string;
   /** Procurement Phase 1 (additive from /inventory/stock): the latest ACCEPTED
    *  GRN that stocked this product at this store, or null/absent. */
   last_grn?: { grn_number?: string; qty?: number; date?: string } | null;

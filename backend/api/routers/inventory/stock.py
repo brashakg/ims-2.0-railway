@@ -422,6 +422,8 @@ def _ledger_row(
         "reservedQuantity": reserved,
         "reserved_quantity": reserved,
         "barcode": sample_unit.get("barcode", "") or product.get("barcode", ""),
+        # The manufacturer's GTIN -- what Inventory > Manage Barcode edits.
+        "gtin": (product.get("attributes") or {}).get("gtin") or "",
         "location": sample_unit.get("location_code", "")
         or product.get("location_code", ""),
         "location_code": sample_unit.get("location_code", "")

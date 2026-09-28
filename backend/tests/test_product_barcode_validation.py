@@ -362,3 +362,19 @@ class TestGtinAttributeOnTheEditDoor:
         _update(pid, attributes={"gtin": ""})
         saved = mock_db["products"].find_one({"product_id": pid})
         assert not saved["attributes"].get("gtin")
+
+    def test_stock_row_offers_the_gtin_not_the_unit_code(self):
+        """Manage Barcode opens pre-filled from the row's `gtin`. It used to be
+        pre-filled with the row's `barcode` -- a unit's IMS code such as
+        BV0000000042 -- which the server then refused as not a GTIN."""
+        from api.routers.inventory.stock import _ledger_row
+
+        row = _ledger_row(
+            {"product_id": "P1", "attributes": {"gtin": _VALID_A}},
+            1,
+            0,
+            {"barcode": "BV0000000042"},
+            "BV-TEST-01",
+        )
+        assert row["gtin"] == _VALID_A
+        assert row["barcode"] == "BV0000000042"
