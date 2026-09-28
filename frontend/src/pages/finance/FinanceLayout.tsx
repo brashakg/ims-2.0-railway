@@ -14,19 +14,17 @@
 
 import { useState, useEffect, useMemo } from 'react';
 import { Loader2 } from 'lucide-react';
-import { Outlet, useLocation, useNavigate, useOutletContext, useSearchParams } from 'react-router-dom';
+import { Link, Outlet, useLocation, useNavigate, useOutletContext, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 
 import type { TabType } from './financeTypes';
-import { FINANCE_TAB_PATHS } from './financeTypes';
+import { CASH_FLOW_ROLES, FINANCE_TAB_PATHS } from './financeTypes';
 import type {
   RevenueData,
   ProfitLossStatement,
   GSTSummaryData,
   OutstandingReceivable,
-  CashFlowData,
-  BudgetData,
   VendorPaymentData,
 } from './financeTypes';
 import { financeApi } from '../../services/api/finance';
@@ -115,37 +113,6 @@ function mapOutstanding(d: any): OutstandingReceivable[] {
   }));
 }
 
-function mapCashFlow(d: any): CashFlowData[] {
-  if (!d) return [];
-  const inflow = Number(d.inflows || 0);
-  const outflow = Number(d.outflows || 0);
-  if (!inflow && !outflow) return [];
-  return [{
-    period: d.period || 'This month',
-    opening_balance: 0,
-    cash_inflows: inflow,
-    cash_outflows: outflow,
-    closing_balance: Number(d.net_cash_flow ?? inflow - outflow),
-    free_cash_flow: Number(d.net_cash_flow ?? inflow - outflow),
-  }];
-}
-
-function mapBudget(d: any): BudgetData[] {
-  const cats = d?.categories || {};
-  return Object.entries(cats).map(([category, v]: [string, any]) => {
-    const allocated = Number(v?.budget || 0);
-    const spent = Number(v?.actual || 0);
-    return {
-      category,
-      allocated,
-      spent,
-      remaining: allocated - spent,
-      variance: allocated - spent,
-      variance_percent: allocated ? ((allocated - spent) / allocated) * 100 : 0,
-    };
-  });
-}
-
 function mapVendorPayments(d: any): VendorPaymentData[] {
   const list = Array.isArray(d) ? d : [];
   return list.map((v: any) => {
@@ -194,6 +161,12 @@ function useFinanceDashboard() {
     (r) => r === 'ADMIN' || r === 'SUPERADMIN',
   );
 
+  // OWNER RULING 2026-09-27 (one door): cash flow and budgets are their
+  // standalone pages, linked from the header. The cash-flow link shows only
+  // to the roles that page's route gate admits -- a store manager would
+  // otherwise click through to "unauthorized".
+  const canOpenCashFlow = (user?.roles || []).some((r) => CASH_FLOW_ROLES.includes(r));
+
   // Tab management - the section is the URL now, not useState. Same two
   // names, so the loader's deps and the FinanceFilters wiring are unchanged.
   const activeTab: TabType =
@@ -233,8 +206,6 @@ function useFinanceDashboard() {
   const [plStatement, setPLStatement] = useState<ProfitLossStatement | null>(null);
   const [gstSummary, setGSTSummary] = useState<GSTSummaryData | null>(null);
   const [outstanding, setOutstanding] = useState<OutstandingReceivable[]>([]);
-  const [cashFlow, setCashFlow] = useState<CashFlowData[]>([]);
-  const [budgets, setBudgets] = useState<BudgetData[]>([]);
   const [vendorPayments, setVendorPayments] = useState<VendorPaymentData[]>([]);
   const [pnlByStore, setPnlByStore] = useState<Array<{ store_id?: string; store_name?: string; entity_id?: string; revenue?: number; cogs?: number; expenses?: number; payroll?: number; net_profit?: number; net_margin?: number }>>([]);
   // Sortable per-store P&L. Default highest-revenue-first (mirrors the backend's
@@ -242,21 +213,12 @@ function useFinanceDashboard() {
   const [pnlStoreSort, setPnlStoreSort] = useState<{ key: 'store_id' | 'revenue' | 'cogs' | 'gross_profit' | 'margin' | 'expenses' | 'payroll' | 'net_profit'; dir: 'asc' | 'desc' }>({ key: 'revenue', dir: 'desc' });
   const [pnlByCategory, setPnlByCategory] = useState<Array<{ category?: string; revenue?: number; cogs?: number; gross_profit?: number }>>([]);
   const [gstRecon, setGstRecon] = useState<Array<{ entity_name?: string; gst_collected?: number; input_credit?: number; net_payable?: number }>>([]);
-  // The backend tells us when it has withheld an expense head from this reader.
-  // THREE separate flags on three separate responses -- /pnl, /budget and
-  // /cash-flow -- and they are kept as three pieces of state on purpose: two of
-  // them share the key name `expenses_partially_restricted`, so a single shared
-  // flag would look correct in any test that varies only one at a time and would
-  // put a notice on a tab whose total is whole. Carrying them into state is what
+  // The backend tells us when it has withheld an expense head from this reader
+  // (/pnl sets `expenses_partially_restricted`). Carrying it into state is what
   // stops a shortened total rendering as the truth -- see RestrictedTotalsNotice.
+  // (The /budget and /cash-flow twins of this flag left with the Budgets and
+  // Cash Flow tabs; the standalone pages carry their own.)
   const [expensesRestricted, setExpensesRestricted] = useState(false);
-  const [budgetRestricted, setBudgetRestricted] = useState(false);
-  // THE THIRD ONE, and the easiest to miss. /finance/cash-flow strips the same
-  // pay heads below ADMIN and sets the SAME flag name as /pnl (finance.py:1500)
-  // -- but mapCashFlow() below keeps only the four numbers and drops the rest
-  // of the body, so the flag was arriving and being thrown away. "Total
-  // outflows" then rendered short, with nothing on screen saying so.
-  const [cashFlowRestricted, setCashFlowRestricted] = useState(false);
 
   // UI states
   const [isLoading, setIsLoading] = useState(true);
@@ -279,13 +241,11 @@ function useFinanceDashboard() {
       // Real finance.py endpoints, fetched in parallel. Each section
       // fail-soft independently so one slow/empty endpoint doesn't blank
       // the whole dashboard.
-      const [rev, pnl, gst, out, cf, bud, vend] = await Promise.allSettled([
+      const [rev, pnl, gst, out, vend] = await Promise.allSettled([
         financeApi.getRevenue({ period: 'month', store_id: storeId }),
         financeApi.getPnl({ store_id: storeId, from_date: dateFrom, to_date: dateTo }),
         financeApi.getGstSummary(),
         financeApi.getOutstanding({ store_id: storeId }),
-        financeApi.getCashFlow({ period: 'month', store_id: storeId }),
-        financeApi.getBudget(),
         financeApi.getVendorPayments(),
       ]);
 
@@ -293,20 +253,12 @@ function useFinanceDashboard() {
       setPLStatement(pnl.status === 'fulfilled' ? mapPnl(pnl.value, dateFrom, dateTo) : null);
       setGSTSummary(gst.status === 'fulfilled' ? mapGst(gst.value) : null);
       setOutstanding(out.status === 'fulfilled' ? mapOutstanding(out.value) : []);
-      setCashFlow(cf.status === 'fulfilled' ? mapCashFlow(cf.value) : []);
-      setBudgets(bud.status === 'fulfilled' ? mapBudget(bud.value) : []);
       setVendorPayments(vend.status === 'fulfilled' ? mapVendorPayments(vend.value) : []);
       // A failed/absent call must NOT leave a stale "incomplete" banner up, and
       // must not invent one either — default false on anything but an explicit
       // true from the backend.
       setExpensesRestricted(
         pnl.status === 'fulfilled' && !!(pnl.value as any)?.expenses_partially_restricted,
-      );
-      setBudgetRestricted(
-        bud.status === 'fulfilled' && !!(bud.value as any)?.categories_partially_restricted,
-      );
-      setCashFlowRestricted(
-        cf.status === 'fulfilled' && !!(cf.value as any)?.expenses_partially_restricted,
       );
 
       // Reflect the real period-lock state for the selected month.
@@ -443,6 +395,7 @@ function useFinanceDashboard() {
     // and the section nav.
     isLoading,
     handleTallyExport,
+    canOpenCashFlow,
     selectedYear,
     setSelectedYear,
     dateFrom,
@@ -457,8 +410,6 @@ function useFinanceDashboard() {
     plStatement,
     gstSummary,
     outstanding,
-    cashFlow,
-    budgets,
     vendorPayments,
     pnlByStore,
     pnlStoreSort,
@@ -467,8 +418,6 @@ function useFinanceDashboard() {
     pnlByCategory,
     gstRecon,
     expensesRestricted,
-    budgetRestricted,
-    cashFlowRestricted,
     periodLocked,
     handleLockPeriod,
     handleUnlockPeriod,
@@ -480,6 +429,7 @@ export default function FinanceLayout() {
   const {
     isLoading,
     handleTallyExport,
+    canOpenCashFlow,
     selectedYear,
     setSelectedYear,
     dateFrom,
@@ -511,7 +461,11 @@ export default function FinanceLayout() {
           <h1>The books, in real time.</h1>
           <div className="hint">Revenue, P&amp;L, GST collected / payable, outstanding aging, cash flow, period lock after month-end. Tally export on sync.</div>
         </div>
-        <div>
+        <div className="flex flex-wrap gap-2">
+          {canOpenCashFlow && (
+            <Link to="/finance/cash-flow" className="btn-secondary">Cash flow &amp; payables</Link>
+          )}
+          <Link to="/finance/budgeting" className="btn-secondary">Budgets</Link>
           <button className="btn-secondary" onClick={handleTallyExport}>Export to Tally</button>
         </div>
       </div>

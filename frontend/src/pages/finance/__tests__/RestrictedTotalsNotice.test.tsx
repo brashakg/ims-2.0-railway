@@ -20,10 +20,20 @@
 //
 // BOTH DIRECTIONS, always: a banner that always shows is exactly as useless as
 // one that never does, and only the "absent" half can catch that.
+//
+// OWNER RULING 2026-09-27 (one door): the dashboard's Budgets and Cash Flow
+// tabs were deleted, and with them the two tab describes that used to live at
+// the bottom of this file. Where that coverage went:
+//   - Budgets: /finance/budgeting (BudgetingPage) carries its own notice,
+//     pinned both directions in BudgetingPageRestrictedNotice.test.tsx.
+//   - Cash flow: /finance/cash-flow (CashFlowPage) is SUPERADMIN / ADMIN /
+//     ACCOUNTANT only, and its /finance/owner-dashboard figures are
+//     deliberately NOT stripped for that set (cash_flow.py, owner ruling
+//     2026-08-14) -- there is no short total there to declare. The roles the
+//     strip protected (store / area managers) cannot open that page at all.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 
 vi.mock('../../../services/api/finance', () => ({
@@ -32,8 +42,6 @@ vi.mock('../../../services/api/finance', () => ({
     getPnl: vi.fn(),
     getGstSummary: vi.fn(),
     getOutstanding: vi.fn(),
-    getCashFlow: vi.fn(),
-    getBudget: vi.fn(),
     getVendorPayments: vi.fn(),
     getPeriodStatus: vi.fn(),
     getPnlByStore: vi.fn(),
@@ -59,23 +67,19 @@ vi.mock('../../../context/ToastContext', () => ({
 
 import FinanceDashboard from '../FinanceDashboard';
 import { FinanceRevenuePlPage } from '../FinanceRevenuePlPage';
-import { FinanceBudgetsTabPage } from '../FinanceBudgetsTabPage';
-import { FinanceCashFlowTabPage } from '../FinanceCashFlowTabPage';
 import { financeApi } from '../../../services/api/finance';
 
 const api = financeApi as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
 // The dashboard is a layout with one page per section (Wave 6 split), so it is
-// mounted the way the app mounts it: the layout route, its sections as
-// children, and the section nav really navigating between them.
+// mounted the way the app mounts it: the layout route with the Revenue & P&L
+// section as its index.
 function renderDashboard() {
   return render(
     <MemoryRouter initialEntries={['/finance/dashboard']}>
       <Routes>
         <Route path="/finance/dashboard" element={<FinanceDashboard />}>
           <Route index element={<FinanceRevenuePlPage />} />
-          <Route path="budgets" element={<FinanceBudgetsTabPage />} />
-          <Route path="cash-flow" element={<FinanceCashFlowTabPage />} />
         </Route>
       </Routes>
     </MemoryRouter>,
@@ -98,40 +102,11 @@ const PNL_WHOLE = {
   expenses: { Rent: 21000, Electricity: 3450 },
 };
 
-const BUDGET_SHORT = {
-  categories: { Rent: { budget: 20000, actual: 21000 } },
-  categories_partially_restricted: true,
-};
-
-const BUDGET_WHOLE = {
-  categories: { Rent: { budget: 20000, actual: 21000 } },
-};
-
-// The cash-flow body, which strips the SAME heads under the SAME flag name as
-// /pnl (finance.py:1500). mapCashFlow() keeps only the numbers, so the flag has
-// to be read off the raw response or it is silently discarded.
-const CASHFLOW_SHORT = {
-  period: 'This month',
-  inflows: 300000,
-  outflows: 24450,
-  net_cash_flow: 275550,
-  expenses_partially_restricted: true,
-};
-
-const CASHFLOW_WHOLE = {
-  period: 'This month',
-  inflows: 300000,
-  outflows: 24450,
-  net_cash_flow: 275550,
-};
-
-function primeApi(pnl: unknown, budget: unknown, cashFlow: unknown = CASHFLOW_WHOLE) {
+function primeApi(pnl: unknown) {
   api.getRevenue.mockResolvedValue({ total_revenue: 300000 });
   api.getPnl.mockResolvedValue(pnl);
   api.getGstSummary.mockResolvedValue({});
   api.getOutstanding.mockResolvedValue([]);
-  api.getCashFlow.mockResolvedValue(cashFlow);
-  api.getBudget.mockResolvedValue(budget);
   api.getVendorPayments.mockResolvedValue([]);
   api.getPeriodStatus.mockResolvedValue({ locked: false });
   api.getPnlByStore.mockResolvedValue({ stores: [] });
@@ -145,7 +120,7 @@ describe('FinanceDashboard - incomplete expense totals are declared', () => {
   beforeEach(() => vi.clearAllMocks());
 
   it('shows the banner when the backend says the panel is short', async () => {
-    primeApi(PNL_SHORT, BUDGET_SHORT);
+    primeApi(PNL_SHORT);
     renderDashboard();
     await waitFor(() => expect(api.getPnl).toHaveBeenCalled());
     const notice = await screen.findByTestId(NOTICE);
@@ -157,7 +132,7 @@ describe('FinanceDashboard - incomplete expense totals are declared', () => {
   it('shows NOTHING when the backend does not set the flag', async () => {
     // THE OTHER DIRECTION. Without this, a banner hardcoded to always render
     // would pass the test above and be worthless on the shop floor.
-    primeApi(PNL_WHOLE, BUDGET_WHOLE);
+    primeApi(PNL_WHOLE);
     renderDashboard();
     await waitFor(() => expect(api.getPnl).toHaveBeenCalled());
     await waitFor(() =>
@@ -168,7 +143,7 @@ describe('FinanceDashboard - incomplete expense totals are declared', () => {
   it('never names the withheld head or its size', async () => {
     // On a 1-5 person store the head plus a number IS somebody's pay packet.
     // The reader is told THAT something is missing, never WHAT or HOW MUCH.
-    primeApi(PNL_SHORT, BUDGET_SHORT);
+    primeApi(PNL_SHORT);
     renderDashboard();
     const notice = await screen.findByTestId(NOTICE);
     const text = notice.textContent?.toLowerCase() || '';
@@ -182,119 +157,10 @@ describe('FinanceDashboard - incomplete expense totals are declared', () => {
     // A rejected call means "we do not know", not "something was withheld".
     // Inventing a restriction banner from a network error would train people
     // to ignore the real one.
-    primeApi(PNL_SHORT, BUDGET_SHORT);
+    primeApi(PNL_SHORT);
     api.getPnl.mockRejectedValue(new Error('boom'));
-    api.getBudget.mockRejectedValue(new Error('boom'));
     renderDashboard();
     await waitFor(() => expect(api.getPnl).toHaveBeenCalled());
-    await waitFor(() =>
-      expect(screen.queryByTestId(NOTICE)).not.toBeInTheDocument(),
-    );
-  });
-});
-
-// ===========================================================================
-// THE BUDGETS TAB - a SECOND flag, on a tab the tests above never open.
-// ===========================================================================
-// The four tests above mount the dashboard on its default tab ('revenue-pl')
-// and prime BUDGET_SHORT into the mock, which reads as coverage and is not:
-// the budgets branch renders only under `activeTab === 'budgets'`, so deleting
-// its banner outright left every one of them green. That is this repo's
-// documented hollow-test class - a fixture that supplies the answer to a
-// question nobody asks - so the tab is actually clicked here.
-
-describe('FinanceDashboard budgets tab - the short budget declares itself', () => {
-  beforeEach(() => vi.clearAllMocks());
-
-  async function openBudgetsTab() {
-    const user = userEvent.setup();
-    renderDashboard();
-    await waitFor(() => expect(api.getBudget).toHaveBeenCalled());
-    // findByRole, not getByRole: the waitFor above only proves the FETCH was
-    // CALLED, not that the resolved data has rendered. The tab button appears
-    // in a later paint, so a synchronous query raced it and failed roughly one
-    // CI run in two under parallel load -- while passing every time in
-    // isolation. A flaky gate teaches people to ignore red, and frontend tests
-    // gate merges here since #995.
-    await user.click(await screen.findByRole('button', { name: /budgets/i }));
-  }
-
-  it('shows the banner on the budgets tab when categories were withheld', async () => {
-    primeApi(PNL_WHOLE, BUDGET_SHORT);
-    await openBudgetsTab();
-    const notice = await screen.findByTestId(NOTICE);
-    expect(notice.textContent).toMatch(/not the full operating cost/i);
-    // Scoped to what the reader is looking at, not the P&L wording.
-    expect(notice.textContent).toMatch(/budget rows and totals/i);
-  });
-
-  it('shows NOTHING on the budgets tab when no category was withheld', async () => {
-    // The other direction. `expenses_partially_restricted` is deliberately
-    // absent too -- if the budgets banner were ever wired to the P&L flag this
-    // pair would not notice, so the flags are varied INDEPENDENTLY below.
-    primeApi(PNL_WHOLE, BUDGET_WHOLE);
-    await openBudgetsTab();
-    await waitFor(() =>
-      expect(screen.queryByTestId(NOTICE)).not.toBeInTheDocument(),
-    );
-  });
-
-  it('the budgets banner follows the BUDGET flag, not the P&L flag', async () => {
-    // Cross-wiring guard. With the P&L short and the budget whole, the budgets
-    // tab must stay clean -- otherwise a reader is told the budget leaves
-    // something out when it does not, and the notice stops meaning anything.
-    primeApi(PNL_SHORT, BUDGET_WHOLE);
-    await openBudgetsTab();
-    await waitFor(() =>
-      expect(screen.queryByTestId(NOTICE)).not.toBeInTheDocument(),
-    );
-  });
-});
-
-// ===========================================================================
-// THE CASH FLOW TAB - the third flag, and the one that was being thrown away.
-// ===========================================================================
-// GET /finance/cash-flow strips the same pay heads below ADMIN and sets the
-// SAME key name as /pnl (`expenses_partially_restricted`, finance.py:1500).
-// The dashboard's mapCashFlow() keeps four numbers and discards the rest of
-// the body, so the flag arrived and was dropped on the floor: "Total outflows"
-// rendered short by the wage bill with nothing on screen saying so.
-//
-// It is a separate flag on a separate response, so it gets its own pair plus a
-// cross-wiring guard -- wiring this tab to the P&L flag would look correct in
-// every single-flag test.
-
-describe('FinanceDashboard cash flow tab - the short outflow declares itself', () => {
-  beforeEach(() => vi.clearAllMocks());
-
-  async function openCashFlowTab() {
-    const user = userEvent.setup();
-    renderDashboard();
-    await waitFor(() => expect(api.getCashFlow).toHaveBeenCalled());
-    // Same race as the budgets tab above -- see the note there.
-    await user.click(await screen.findByRole('button', { name: /cash flow/i }));
-  }
-
-  it('shows the banner when outflows were stripped', async () => {
-    primeApi(PNL_WHOLE, BUDGET_WHOLE, CASHFLOW_SHORT);
-    await openCashFlowTab();
-    const notice = await screen.findByTestId(NOTICE);
-    expect(notice.textContent).toMatch(/not the full operating cost/i);
-    expect(notice.textContent).toMatch(/cash outflow figures/i);
-  });
-
-  it('shows NOTHING when the outflow total is whole', async () => {
-    primeApi(PNL_WHOLE, BUDGET_WHOLE, CASHFLOW_WHOLE);
-    await openCashFlowTab();
-    // POSITIVE CONTROL: the panel really rendered, so "no banner" is a verdict
-    // and not just an unrendered tab.
-    expect(await screen.findAllByText(/outflow/i)).not.toHaveLength(0);
-    expect(screen.queryByTestId(NOTICE)).not.toBeInTheDocument();
-  });
-
-  it('the cash flow banner follows the CASH FLOW flag, not the P&L flag', async () => {
-    primeApi(PNL_SHORT, BUDGET_WHOLE, CASHFLOW_WHOLE);
-    await openCashFlowTab();
     await waitFor(() =>
       expect(screen.queryByTestId(NOTICE)).not.toBeInTheDocument(),
     );

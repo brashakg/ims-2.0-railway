@@ -2,13 +2,16 @@
 // IMS 2.0 - Finance Dashboard Shared Types
 // ============================================================================
 
+import type { UserRole } from '../../types';
+
+// OWNER RULING 2026-09-27 (one door): the dashboard's own Cash Flow and
+// Budgets tabs are gone. Cash flow lives on /finance/cash-flow and budgets on
+// /finance/budgeting; the dashboard header links to both.
 export type TabType =
   | 'revenue-pl'
   | 'gst'
   | 'outstanding'
-  | 'cash-flow'
   | 'period'
-  | 'budgets'
   | 'vendor-payments'
   | 'journal-entries';
 
@@ -17,12 +20,14 @@ export const FINANCE_TAB_PATHS: Record<TabType, string> = {
   'revenue-pl': '/finance/dashboard',
   gst: '/finance/dashboard/gst',
   outstanding: '/finance/dashboard/outstanding',
-  'cash-flow': '/finance/dashboard/cash-flow',
   period: '/finance/dashboard/period',
-  budgets: '/finance/dashboard/budgets',
   'vendor-payments': '/finance/dashboard/vendor-payments',
   'journal-entries': '/finance/dashboard/journal-entries',
 };
+
+/** Who may open /finance/cash-flow: its route gate AND the dashboard's link to
+ *  it read this one list (the backend gate is _require_finance_admin). */
+export const CASH_FLOW_ROLES: UserRole[] = ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'];
 
 // F17/#25 Maker-checker journal entries
 export type JeStatus =
@@ -124,24 +129,6 @@ export interface OutstandingReceivable {
   due_date: string;
   days_overdue: number;
   status: 'active' | 'overdue' | 'disputed';
-}
-
-export interface CashFlowData {
-  period: string;
-  opening_balance: number;
-  cash_inflows: number;
-  cash_outflows: number;
-  closing_balance: number;
-  free_cash_flow: number;
-}
-
-export interface BudgetData {
-  category: string;
-  allocated: number;
-  spent: number;
-  remaining: number;
-  variance: number;
-  variance_percent: number;
 }
 
 export interface VendorPaymentData {

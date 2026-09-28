@@ -5,11 +5,9 @@
 import {
   BarChart3,
   TrendingUp,
-  TrendingDown,
   Calendar,
   Percent,
   CreditCard,
-  Target,
   Building2,
   BookOpen,
 } from 'lucide-react';
@@ -70,9 +68,7 @@ const TABS: { id: TabType; label: string; icon: typeof TrendingUp }[] = [
   { id: 'revenue-pl', label: 'Revenue & P&L', icon: TrendingUp },
   { id: 'gst', label: 'GST Management', icon: Percent },
   { id: 'outstanding', label: 'Outstanding & Collections', icon: CreditCard },
-  { id: 'cash-flow', label: 'Cash Flow', icon: TrendingDown },
   { id: 'period', label: 'Period Management', icon: Calendar },
-  { id: 'budgets', label: 'Budgets', icon: Target },
   { id: 'vendor-payments', label: 'Vendor Payments', icon: Building2 },
   { id: 'journal-entries', label: 'Journal Entries', icon: BookOpen },
 ];

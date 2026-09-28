@@ -33,16 +33,6 @@ export const financeApi = {
     return response.data;
   },
 
-  getCashFlow: async (params?: { period?: string; store_id?: string }) => {
-    const response = await api.get('/finance/cash-flow', { params });
-    return response.data;
-  },
-
-  getBudget: async (params?: { month?: number; year?: number; mode?: string }) => {
-    const response = await api.get('/finance/budget', { params });
-    return response.data;
-  },
-
   getReconciliation: async () => {
     const response = await api.get('/finance/reconciliation');
     return response.data;

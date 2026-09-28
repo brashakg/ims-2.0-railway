@@ -38,8 +38,6 @@ vi.mock('../../../services/api/finance', () => ({
     getPnl: vi.fn(async () => ({ revenue: 300000, total_expenses: 24450 })),
     getGstSummary: vi.fn(async () => ({ cgst: 100, sgst: 100, gst_collected: 200 })),
     getOutstanding: vi.fn(async () => ({ items: [] })),
-    getCashFlow: vi.fn(async () => ({ inflows: 1000, outflows: 500 })),
-    getBudget: vi.fn(async () => ({ categories: {} })),
     getVendorPayments: vi.fn(async () => []),
     getPeriodStatus: vi.fn(async () => ({ locked: false })),
     getPnlByStore: vi.fn(async () => ({ stores: [] })),
@@ -49,6 +47,11 @@ vi.mock('../../../services/api/finance', () => ({
     getChartOfAccounts: vi.fn(async () => ({ accounts: [] })),
   },
 }));
+
+// The two standalone pages the deleted tabs now point at -> sentinels. What is
+// under test is that the dashboard sends people there, not those pages.
+vi.mock('../CashFlowPage', () => ({ default: () => <div>CASH-FLOW-PAGE-SENTINEL</div> }));
+vi.mock('../BudgetingPage', () => ({ default: () => <div>BUDGETING-PAGE-SENTINEL</div> }));
 
 import { financeRoutes } from '../../../routes/financeRoutes';
 import { financeApi } from '../../../services/api/finance';
@@ -106,4 +109,48 @@ describe('the FY / date range survives section changes', () => {
       expect.objectContaining({ from_date: '2026-05-01' }),
     );
   }, SLOW * 2);
+});
+
+// ===========================================================================
+// OWNER RULING 2026-09-27, one door: the dashboard's own Cash Flow and Budgets
+// tabs are deleted. The standalone pages are the only doors, and every old way
+// in (the header, a bookmarked ?tab=) lands there.
+// ===========================================================================
+describe('cash flow and budgets have one door each', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('has no Cash Flow or Budgets tab in the section nav', async () => {
+    renderAt('/finance/dashboard');
+    await screen.findByText('Total Revenue', {}, { timeout: SLOW });
+    // Positive control: the nav really rendered.
+    expect(screen.getByRole('button', { name: /gst management/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^cash flow$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^budgets$/i })).not.toBeInTheDocument();
+  }, SLOW);
+
+  it('the header Cash flow link opens the standalone page for a finance admin', async () => {
+    renderAt('/finance/dashboard', ['ACCOUNTANT']);
+    const link = await screen.findByRole('link', { name: /cash flow/i }, { timeout: SLOW });
+    expect(link).toHaveAttribute('href', '/finance/cash-flow');
+    await userEvent.setup().click(link);
+    expect(await screen.findByText('CASH-FLOW-PAGE-SENTINEL', {}, { timeout: SLOW })).toBeInTheDocument();
+  }, SLOW * 2);
+
+  it('hides the Cash flow link from a store manager (the page would refuse them)', async () => {
+    renderAt('/finance/dashboard', ['STORE_MANAGER']);
+    await screen.findByText('Total Revenue', {}, { timeout: SLOW });
+    expect(screen.queryByRole('link', { name: /cash flow/i })).not.toBeInTheDocument();
+    // ...while Budgets, whose page admits every dashboard role, stays.
+    expect(screen.getByRole('link', { name: /^budgets$/i })).toHaveAttribute('href', '/finance/budgeting');
+  }, SLOW);
+
+  it('forwards a bookmarked ?tab=cash-flow to the standalone cash-flow page', async () => {
+    renderAt('/finance/dashboard?tab=cash-flow', ['ADMIN']);
+    expect(await screen.findByText('CASH-FLOW-PAGE-SENTINEL', {}, { timeout: SLOW })).toBeInTheDocument();
+  }, SLOW);
+
+  it('forwards a bookmarked ?tab=budgets to the standalone budgeting page', async () => {
+    renderAt('/finance/dashboard?tab=budgets', ['STORE_MANAGER']);
+    expect(await screen.findByText('BUDGETING-PAGE-SENTINEL', {}, { timeout: SLOW })).toBeInTheDocument();
+  }, SLOW);
 });
