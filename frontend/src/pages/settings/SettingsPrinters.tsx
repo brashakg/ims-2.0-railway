@@ -131,18 +131,6 @@ function PrinterSection({
                 ))}
               </select>
             </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-600 mb-1">Label Size</label>
-              <select
-                value={printerSettings?.label_size || '50x25'}
-                onChange={e => setPrinterSettings((prev: any) => prev ? { ...prev, label_size: e.target.value } : null)}
-                className="input-field"
-              >
-                <option value="50x25">50 x 25 mm</option>
-                <option value="50x30">50 x 30 mm</option>
-                <option value="100x50">100 x 50 mm</option>
-              </select>
-            </div>
           </div>
 
           <div className="space-y-2">

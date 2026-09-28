@@ -50,4 +50,10 @@ describe('label calibration', () => {
     expect(html).toContain('class="win outline" style="left:6.5mm"');
     expect(html).toMatch(/size:\s*100mm 15mm/);
   });
+
+  it('offers no label-size choice (it drove nothing; stock labels are 100 x 15 mm)', async () => {
+    render(<PrinterSettingsPage />);
+    await screen.findByLabelText(/printable area starts/i);
+    expect(screen.queryByRole('option', { name: /50 x 25 mm/i })).not.toBeInTheDocument();
+  });
 });
