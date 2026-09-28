@@ -154,3 +154,36 @@ describe('cash flow and budgets have one door each', () => {
     expect(await screen.findByText('BUDGETING-PAGE-SENTINEL', {}, { timeout: SLOW })).toBeInTheDocument();
   }, SLOW);
 });
+
+// ===========================================================================
+// One smoke test per section: its own URL renders its own panel, inside the
+// layout, with its own tab highlighted -- and not the index's panel.
+// ===========================================================================
+describe('every dashboard section has its own URL', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  const SECTIONS: Array<[path: string, tab: RegExp, text: string]> = [
+    ['/finance/dashboard', /revenue & p&l/i, 'Total Revenue'],
+    ['/finance/dashboard/gst', /gst management/i, 'GST Breakdown'],
+    ['/finance/dashboard/outstanding', /outstanding & collections/i, 'Outstanding Receivables'],
+    ['/finance/dashboard/period', /period management/i, 'Financial Period Management'],
+    ['/finance/dashboard/vendor-payments', /vendor payments/i, 'Total Payable'],
+    ['/finance/dashboard/journal-entries', /journal entries/i, 'No journal entries.'],
+  ];
+
+  it.each(SECTIONS)('%s renders its section inside the layout', async (path, tab, text) => {
+    renderAt(path);
+    expect(await screen.findByText(text, {}, { timeout: SLOW })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /the books, in real time/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: tab }).className).toContain('border-blue-400');
+    if (path !== '/finance/dashboard') {
+      expect(screen.queryByText('Total Revenue')).not.toBeInTheDocument();
+    }
+  }, SLOW);
+
+  it('forwards a legacy ?tab=gst to /finance/dashboard/gst, keeping the other params', async () => {
+    renderAt('/finance/dashboard?tab=gst&from=2026-05-01');
+    expect(await screen.findByText('GST Breakdown', {}, { timeout: SLOW })).toBeInTheDocument();
+    expect(dateInputs()[0].value).toBe('2026-05-01');
+  }, SLOW);
+});
