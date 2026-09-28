@@ -179,39 +179,6 @@ def product_ids_without_sku(items_data: List[dict]) -> List[str]:
     return seen
 
 
-def _online_store_ids(db) -> List[str]:
-    """Store ids that are ONLINE (pooled + stockless) and therefore must NEVER
-    contribute to the pooled on-hand we publish to Shopify.
-
-    An AVAILABLE unit parked on BV-ONLINE-01 / WO-ONLINE-01 is unpickable: the
-    online store has no shelf and POS is blocked on it (PR #941), so counting it
-    would publish availability that no shop can actually ship. The known-id
-    allow-list from services.stores_util is the floor (it can never be empty, so
-    this never degrades to "exclude nothing"); the `stores` collection is then
-    consulted for any further store_type == ONLINE rows. Fully fail-soft -- a
-    lookup failure falls back to the known ids rather than raising into the
-    STRICT on-hand contract below."""
-    from .stores_util import KNOWN_ONLINE_STORE_IDS, ONLINE_STORE_TYPE
-
-    ids = set(KNOWN_ONLINE_STORE_IDS)
-    if db is None:
-        return sorted(ids)
-    try:
-        coll = db.get_collection("stores")
-        if coll is not None:
-            for row in coll.find(
-                {"store_type": ONLINE_STORE_TYPE}, {"_id": 0, "store_id": 1}
-            ):
-                sid = str((row or {}).get("store_id") or "").strip()
-                if sid:
-                    ids.add(sid)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug(
-            "[STOCK_WRITEBACK] online-store lookup fell back to known ids: %s", exc
-        )
-    return sorted(ids)
-
-
 def _sku_to_pid(db, skus: List[str]):
     """``({sku: product_id}, {sku deactivated in IMS})`` from the spine, or
     ``None`` when the lookup itself failed (UNKNOWN, never an empty result).
@@ -306,15 +273,10 @@ def _on_hand_for_skus(db, skus: List[str], store_id: Optional[str]) -> Dict[str,
     per-shop half of THE ONE RULE (online_quantities_for_skus calls this once
     per physical shop).
 
-    ``store_id=None`` is the POOLED count across all PHYSICAL stores and now
-    has NO caller under backend/api or backend/agents at all: parity's
-    ``_pooled_availability`` was rewritten to go through
-    ``online_quantities_for_skus(..., safety_buffer=0)`` restricted to the
-    MAPPED shops, and only tests still exercise this branch. It is a LIVE TRAP,
-    not a feature: any future ``_on_hand_for_skus(db, skus, None)`` gets a
-    chain-pooled number that ignores the SUPERADMIN online block and the
-    per-shop buffer, with no guard naming it. Deleting it is PR 4's job (the
-    design defers it); until then, do not call it.
+    ONE shop, always. The POOLED ``store_id=None`` branch (a chain-wide
+    number that ignored the SUPERADMIN online block and the per-shop buffer)
+    was deleted in multi-location PR 4 with its last reader, the pooled
+    parity: a falsy ``store_id`` now reads UNKNOWN (``{}``), never a pool.
 
     STRICT failure contract (audit round-2 P1): this feeds an ABSOLUTE stock
     WRITER, so an aggregate failure must surface as {} (UNKNOWN -> the caller's
@@ -327,7 +289,7 @@ def _on_hand_for_skus(db, skus: List[str], store_id: Optional[str]) -> Dict[str,
     rows were yielded, discards the partial result and returns {}. A pid absent
     from a SUCCESSFULLY completed aggregate legitimately means zero on-hand and
     only then defaults to 0."""
-    if db is None or not skus:
+    if db is None or not skus or not store_id:
         return {}
     resolved = _sku_to_pid(db, skus)
     if resolved is None:
@@ -350,17 +312,9 @@ def _on_hand_for_skus(db, skus: List[str], store_id: Optional[str]) -> Dict[str,
             return {}
         match: Dict[str, Any] = {
             "product_id": {"$in": list(sku_to_pid.values())},
+            "store_id": store_id,
             **on_hand_match(),
         }
-        if store_id:
-            match["store_id"] = store_id
-        else:
-            # POOLED count -- NO production caller (see the docstring); every
-            # PHYSICAL shop's on-hand, never a unit stranded on a stockless
-            # ONLINE store. Deleted in PR 4.
-            online_ids = _online_store_ids(db)
-            if online_ids:
-                match["store_id"] = {"$nin": online_ids}
         on_hand_by_pid: Dict[str, int] = {}
         for row in stock_coll.aggregate(
             [
