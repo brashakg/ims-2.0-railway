@@ -840,6 +840,28 @@ def test_tick_a_refreshed_task_keeps_every_sku_still_owed():
     assert out["tasks"]["closed"] == [] and _tasks(db)[0]["status"] == "OPEN"
 
 
+def test_a_tasks_read_failure_files_no_second_task():
+    """task_triggers.active_tasks promises to RAISE on a read error, but the
+    real repository's find_many swallowed it into [] -- 'no active task' --
+    so a drifting night with a blipped tasks read filed a SECOND open task
+    beside the ESCALATED one. Read through find_many again -> 2 tasks ->
+    fails."""
+    from database.repositories.task_repository import TaskRepository
+
+    db = StrictDB()
+    coll = db.seed("tasks", [{"task_id": "T-1", "source_ref": "shopify-stock-parity-drift:BV-A",
+                              "status": "ESCALATED"}])
+
+    def dead(*_a, **_k):
+        raise RuntimeError("tasks read died")
+
+    coll.find = dead
+    summary = {"drift_count": 1, "drift": [{"sku": "SKU-1", "ims": 5, "shopify": 1, "delta": 4}],
+               "tolerance": 2, "max_delta": 4, "compared": 1, "clean_skus": []}
+    assert sp.sync_drift_task(TaskRepository(coll), {"store_id": "BV-A"}, summary) is None
+    assert len(coll.docs) == 1
+
+
 # ---------------------------------------------------------------------------
 # Snapshot pruning
 # ---------------------------------------------------------------------------

@@ -162,8 +162,13 @@ def active_tasks(repo: Any, source_ref: Any) -> List[Dict[str, Any]]:
     default page is 100 rows, so a ref with 100 closed episodes pushed its one
     open row off the page and every re-run filed a new task (and a closer
     found none to close). ``source_ref`` may be a Mongo condition (a prefix
-    ``$regex``). Raises on a read error; callers decide."""
-    rows = repo.find_many({"source_ref": source_ref, "status": {"$in": sorted(_ACTIVE)}}) or []
+    ``$regex``). Raises on a read error; callers decide: a real repository's
+    ``find_many`` swallows the error into [] -- "no active task", which let a
+    dedupe file a second task beside the open one -- so its collection is read
+    directly (a fake repo without one keeps ``find_many``)."""
+    query = {"source_ref": source_ref, "status": {"$in": sorted(_ACTIVE)}}
+    coll = getattr(repo, "collection", None)
+    rows = list(coll.find(query)) if coll is not None else (repo.find_many(query) or [])
     return [t for t in rows if str(t.get("status", "")).upper() in _ACTIVE]
 
 
