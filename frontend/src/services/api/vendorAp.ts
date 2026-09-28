@@ -390,6 +390,10 @@ function mapInvoiceFromApi(doc: Record<string, any>): PurchaseInvoice {
   const igst = doc.igst ?? doc.igst_total ?? 0;
   return {
     ...doc,
+    // The server keys a purchase invoice by bill_id (every /{id} route looks it
+    // up by bill_id) and never sends purchase_invoice_id, so without this every
+    // /{id} call from the Invoices tab went to /undefined/...
+    purchase_invoice_id: doc.purchase_invoice_id ?? doc.bill_id,
     vendor_invoice_no: doc.vendor_invoice_no ?? doc.invoice_number ?? doc.bill_number ?? '',
     vendor_invoice_date: doc.vendor_invoice_date ?? doc.invoice_date ?? doc.bill_date ?? '',
     cgst,

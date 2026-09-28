@@ -90,10 +90,6 @@ const DEFAULT_RECON: ReconBlock = {
   payment_settled: false,
 };
 
-export function invoiceRowId(inv: PurchaseInvoice): string {
-  return inv.purchase_invoice_id ?? inv.bill_id ?? '';
-}
-
 // ---- Queue classification (exported for tests) ------------------------------
 
 export type QueueChipId =
@@ -307,7 +303,7 @@ function ApproveExceptionModal({
     setSaving(true);
     try {
       const res = await purchaseInvoicesApi.approveException(
-        invoiceRowId(invoice),
+        invoice.purchase_invoice_id,
         { reason: reason.trim() },
       );
       onApproved({
@@ -445,7 +441,7 @@ function QueueRow({
               checked={selected}
               onChange={onToggleSelect}
               disabled={saving}
-              aria-label={`Select ${invoice.vendor_invoice_no || invoiceRowId(invoice)} for batch confirm`}
+              aria-label={`Select ${invoice.vendor_invoice_no || invoice.purchase_invoice_id} for batch confirm`}
               className="mt-1 accent-blue-600"
             />
           ) : recon.reconciled && invoice.match_status === 'MATCHED' ? (
@@ -1023,16 +1019,16 @@ export default function ReconConsole() {
       const map: Record<string, ReconBlock> = {};
       const missing: PurchaseInvoice[] = [];
       rows.forEach((inv) => {
-        const id = invoiceRowId(inv);
+        const id = inv.purchase_invoice_id;
         if (inv.recon) map[id] = { ...DEFAULT_RECON, ...inv.recon };
         else missing.push(inv);
       });
       if (missing.length > 0) {
         const blocks = await Promise.all(
-          missing.map((inv) => purchaseReconApi.getRecon(invoiceRowId(inv)))
+          missing.map((inv) => purchaseReconApi.getRecon(inv.purchase_invoice_id))
         );
         missing.forEach((inv, i) => {
-          map[invoiceRowId(inv)] = blocks[i]?.recon ?? { ...DEFAULT_RECON };
+          map[inv.purchase_invoice_id] = blocks[i]?.recon ?? { ...DEFAULT_RECON };
         });
       }
       setReconMap(map);
@@ -1180,7 +1176,7 @@ export default function ReconConsole() {
   // ---- Derived: filtered + attention-sorted queue -----------------------------
 
   const reconFor = useCallback(
-    (inv: PurchaseInvoice): ReconBlock => reconMap[invoiceRowId(inv)] ?? DEFAULT_RECON,
+    (inv: PurchaseInvoice): ReconBlock => reconMap[inv.purchase_invoice_id] ?? DEFAULT_RECON,
     [reconMap]
   );
 
@@ -1218,7 +1214,7 @@ export default function ReconConsole() {
 
   // Visible rows that can still be batch-selected (auto-matched, not reconciled)
   const visibleEligibleIds = useMemo(
-    () => filteredInvoices.filter((inv) => isBatchEligible(inv, reconFor(inv))).map(invoiceRowId),
+    () => filteredInvoices.filter((inv) => isBatchEligible(inv, reconFor(inv))).map((inv) => inv.purchase_invoice_id),
     [filteredInvoices, reconFor]
   );
   const allVisibleSelected =
@@ -1372,7 +1368,7 @@ export default function ReconConsole() {
               </thead>
               <tbody>
                 {filteredInvoices.map((inv) => {
-                  const id = invoiceRowId(inv);
+                  const id = inv.purchase_invoice_id;
                   const recon = reconFor(inv);
                   return (
                     <QueueRow
@@ -1468,9 +1464,9 @@ export default function ReconConsole() {
           invoice={approveTarget}
           onClose={() => setApproveTarget(null)}
           onApproved={(updated) => {
-            const targetId = invoiceRowId(approveTarget);
+            const targetId = approveTarget.purchase_invoice_id;
             setInvoices((prev) =>
-              prev.map((p) => (invoiceRowId(p) === targetId ? { ...p, ...updated } : p)),
+              prev.map((p) => (p.purchase_invoice_id === targetId ? { ...p, ...updated } : p)),
             );
             setApproveTarget(null);
           }}

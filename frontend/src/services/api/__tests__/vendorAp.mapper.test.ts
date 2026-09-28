@@ -87,6 +87,8 @@ describe('purchaseInvoicesApi.list -> mapInvoiceFromApi', () => {
 
     expect(mockGet).toHaveBeenCalledWith('/vendors/purchase-invoices', { params: { vendor_id: 'v_2' } });
     const row = result.purchase_invoices[0];
+    // The server's key is bill_id; every /{id} call reads purchase_invoice_id.
+    expect(row.purchase_invoice_id).toBe('b_2');
     expect(row.vendor_invoice_no).toBe('BILL-22');
     expect(row.vendor_invoice_date).toBe('2026-04-15');
     expect(row.cgst).toBe(0); // absent -> defaults to 0
