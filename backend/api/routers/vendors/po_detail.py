@@ -73,8 +73,9 @@ async def get_po_timeline(po_id: str, current_user: dict = Depends(get_current_u
     events: list = []
     events.append(
         {
+            # Every PO is born a DRAFT; it is on order only once SENT.
             "kind": "ordered",
-            "label": "Ordered",
+            "label": "Draft raised",
             "at": po.get("created_at"),
             "ref": po.get("po_number"),
             "actor": po.get("created_by"),
