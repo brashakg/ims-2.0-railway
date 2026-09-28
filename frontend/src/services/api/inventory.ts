@@ -425,7 +425,40 @@ export const inventoryApi = {
     const response = await api.post(`/labels/quarantine/${stockId}`);
     return response.data as QuarantineLabel;
   },
+
+  // F27: every serialised unit of one product -- or one goods receipt -- at a shop.
+  getUnits: async (params: { store_id?: string; product_id?: string; grn_id?: string }) => {
+    const response = await api.get('/inventory/units', { params });
+    return response.data as { units: StockUnit[]; total: number };
+  },
+
+  // F26: record that these units' labels went to the print dialog.
+  markBarcodePrinted: async (stockIds: string[]) => {
+    const response = await api.post('/inventory/units/barcode-printed', { stock_ids: stockIds });
+    return response.data as { updated: number; stock_ids: string[] };
+  },
 };
+
+/** One physical piece on the shelf (GET /inventory/units). cost_price only
+ *  reaches roles that see cost. */
+export interface StockUnit {
+  stock_id: string;
+  product_id: string;
+  barcode: string;
+  status: string;
+  grn_number: string;
+  source: string;
+  received_on: string;
+  barcode_printed: boolean;
+  location_code: string;
+  name: string;
+  brand: string;
+  model: string;
+  colour: string;
+  size: string;
+  mrp: number | null;
+  cost_price?: number | null;
+}
 
 // One merged stock-movement event. qty is SIGNED: positive = stock in
 // (RECEIVED / TRANSFER_IN / OPENING_STOCK), negative = stock out
