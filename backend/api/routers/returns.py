@@ -52,6 +52,7 @@ from ..dependencies import (
     get_stock_repository,
     validate_store_access,
 )
+from ..services import barcode as barcode_svc
 from ..services import cash_denominations as cash_denom
 from ..services import restock_engine
 from ..services import returns_engine as engine
@@ -2130,6 +2131,9 @@ def _restock_good_items(
                     # one returned early without minting anything.
                     "store_id": unit_store,
                     "product_id": pid,
+                    # The one unit-barcode minter: without a code the returned
+                    # frame could not be scanned back into a sale.
+                    "barcode": barcode_svc.mint_unit_barcode(_get_db(), unit_store),
                     "quantity": 1,
                     "status": "AVAILABLE",
                     "source_type": "RETURN",

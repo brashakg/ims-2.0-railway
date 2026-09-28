@@ -1,4 +1,4 @@
-"""Shared inventory helpers: barcode mint, db handle, on-hand rollup, FEFO/expiry."""
+"""Shared inventory helpers: db handle, on-hand rollup, FEFO/expiry."""
 
 from ._shared import (
     Dict,
@@ -9,18 +9,11 @@ from ._shared import (
     date,
     datetime,
     is_online_store,
-    uuid,
 )
 
 # ============================================================================
 # HELPERS
 # ============================================================================
-
-
-def generate_barcode(store_id: str, product_id: str) -> str:
-    """Generate unique barcode for stock item"""
-    short_uuid = str(uuid.uuid4())[:8].upper()
-    return f"{store_id[:3]}-{short_uuid}"
 
 
 def _get_db():

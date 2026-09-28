@@ -539,6 +539,12 @@ def test_return_mints_when_no_original_unit(ctx):
     assert minted[0]["source_type"] == "RETURN"
     assert minted[0]["source_id"] == data["return_id"]
     assert data["restocked"][0]["minted"] == 1
+    # Owner ruling 2026-09-28: every door that creates a unit mints its IMS
+    # barcode through the one minter -- letters and digits only, so the till
+    # accepts it typed (/^[A-Z0-9]{8,}$/). A barcode-less unit cannot be scanned.
+    import re
+
+    assert re.fullmatch(r"[A-Z0-9]{8,}", minted[0].get("barcode") or ""), minted[0]
 
 
 def test_damaged_return_does_not_restock(ctx):

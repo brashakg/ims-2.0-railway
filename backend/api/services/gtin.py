@@ -10,12 +10,12 @@ product. An EMPTY gtin is always safer than a wrong one.
 This is deliberately NOT the internal barcode. The two-barcode model:
 
     gtin / barcode   the manufacturer's public GTIN  -> pushed to Shopify
-    store_barcode    our internally minted EAN-13    -> NEVER pushed
+    store_barcode    our internally minted unit code -> NEVER pushed
 
-`services/barcode.py` mints the internal one under GS1 prefix 20-29
-("restricted distribution" / in-store only), which is exactly why a code in
-that range must never be accepted as a public GTIN: it is by definition not a
-manufacturer identifier.
+Until 2026-09-28 `services/barcode.py` minted unit codes as EAN-13s under GS1
+prefix 20-29 ("restricted distribution" / in-store only) and those units keep
+them. That is exactly why a code in that range must never be accepted as a
+public GTIN: it is by definition not a manufacturer identifier.
 
 Observed real damage this guards against (prod audit, 2026-07-29 -- 353 of
 2,815 gtin-bearing variants were invalid):
@@ -107,8 +107,8 @@ def classify_gtin(raw: Any) -> Optional[str]:
     if len(candidate) not in VALID_GTIN_LENGTHS:
         return REASON_BADLEN
     if _gs1_prefix2(candidate) in _RESTRICTED_PREFIXES:
-        # GS1 20-29 is restricted distribution / in-store only. That is the
-        # range services/barcode.py mints our own store_barcode in, so such a
+        # GS1 20-29 is restricted distribution / in-store only -- the range
+        # IMS minted its own unit barcodes in before 2026-09-28 -- so such a
         # code is either somebody's shelf label or our own internal barcode
         # leaking into the public field. Never publish it.
         return REASON_RESTRICTED

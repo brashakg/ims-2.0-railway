@@ -24,7 +24,6 @@ from .models import (
 from .helpers import (
     _get_db,
     _reject_stock_mint_on_online_store,
-    generate_barcode,
 )
 
 @router.get("/low-stock")
@@ -177,16 +176,11 @@ async def add_stock(
             raise HTTPException(status_code=404, detail="Product not found")
 
         # Create stock entries for each unit. Each physical unit gets a UNIQUE
-        # barcode (unique per unit per purchase): mint an EAN-13 from the atomic
-        # counter, falling back to the legacy store+uuid scheme if no DB counter
-        # is reachable so a GRN/intake is never blocked.
+        # barcode from the one minter (services/barcode.mint_unit_barcode).
         _db = _get_db()
-        _counter = _db.get_collection("counters") if _db is not None else None
         stock_items = []
         for _ in range(request.quantity):
-            barcode = barcode_svc.next_unit_ean13(_counter) or generate_barcode(
-                active_store, request.product_id
-            )
+            barcode = barcode_svc.mint_unit_barcode(_db, active_store)
             stock_data = {
                 "product_id": request.product_id,
                 "store_id": active_store,
@@ -217,4 +211,7 @@ async def add_stock(
             "quantity": len(stock_items),
         }
 
-    return {"stock_id": str(uuid.uuid4()), "barcode": generate_barcode("STR", "PRD")}
+    return {
+        "stock_id": str(uuid.uuid4()),
+        "barcode": barcode_svc.mint_unit_barcode(None, active_store),
+    }

@@ -128,12 +128,10 @@ def test_bad_checksum_rejected():
 
 
 def test_restricted_gs1_prefix_rejected():
-    """GS1 20-29 is in-store / restricted distribution -- and is exactly the
-    range services/barcode.py mints our own store_barcode in, so it must never
-    escape as a public GTIN."""
-    from api.services.barcode import format_ean13
-
-    internal = format_ean13(4242, prefix="20")
+    """GS1 20-29 is in-store / restricted distribution -- the range IMS minted
+    its own unit barcodes in before the 2026-09-28 ruling (those units still
+    carry them), so it must never escape as a public GTIN."""
+    internal = "2000000042428"  # a well-formed 20-prefix EAN-13 (old IMS mint)
     assert check_digit_ok(internal) is True  # well-formed, but not publishable
     assert classify_gtin(internal) == REASON_RESTRICTED
     assert sanitise_gtin(internal) is None
@@ -288,7 +286,6 @@ def test_push_falls_through_junk_to_the_parent_products_valid_gtin():
 def test_push_never_leaks_our_internal_store_barcode_as_a_gtin():
     """product['barcode'] is in the create-path fallback chain and often holds
     the internally minted GS1 20-29 code -- it must not be published."""
-    from api.services.barcode import format_ean13
     from api.services.shopify_push import build_variant_seed_rows
 
     rows = build_variant_seed_rows(
@@ -296,7 +293,7 @@ def test_push_never_leaks_our_internal_store_barcode_as_a_gtin():
             "sku": "P1",
             "mrp": 5000,
             "offer_price": 4000,
-            "barcode": format_ean13(99, prefix="20"),
+            "barcode": "2000000000992",  # an old IMS-minted 20-prefix EAN-13
         },
         [{"sku": "P1-A"}],
     )

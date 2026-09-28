@@ -1,89 +1,26 @@
 """
-IMS 2.0 - Per-unit barcode generator (EAN-13 + Code128)
+IMS 2.0 - Per-unit barcode minter (services/barcode.py)
 =======================================================
-Pure-function + fake-counter tests; no Mongo required.
+Pure-function + fake-counter tests; no Mongo required. The doors that call the
+minter are covered in tests/test_unit_barcode_one_mint.py.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pytest  # noqa: E402
-
 from api.services.barcode import (  # noqa: E402
-    ean13_check_digit,
-    format_ean13,
-    validate_ean13,
-    format_code128,
     allocate_sequence,
-    next_unit_ean13,
+    mint_unit_barcode,
 )
 
+# The till's own test for "this is a barcode" (BarcodeScanner.tsx).
+TILL = re.compile(r"^[A-Z0-9]{8,}$", re.I)
 
-# --- check digit (known references) -------------------------------------
-
-def test_check_digit_known_values():
-    # ISBN-13 9780143007234 -> payload 978014300723, check 4
-    assert ean13_check_digit("978014300723") == "4"
-    assert ean13_check_digit("012345678901") == "2"
-    assert ean13_check_digit("000000000000") == "0"
-
-
-def test_check_digit_rejects_bad_payload():
-    with pytest.raises(ValueError):
-        ean13_check_digit("123")          # too short
-    with pytest.raises(ValueError):
-        ean13_check_digit("12345678901A")  # non-digit
-
-
-# --- format / validate round-trip ---------------------------------------
-
-def test_format_ean13_is_valid_13_digits():
-    code = format_ean13(42, prefix="20")
-    assert len(code) == 13
-    assert code.isdigit()
-    assert code.startswith("20")
-    assert validate_ean13(code)
-
-
-def test_format_ean13_distinct_sequences_distinct_codes():
-    a = format_ean13(1)
-    b = format_ean13(2)
-    assert a != b
-    assert validate_ean13(a) and validate_ean13(b)
-
-
-def test_format_ean13_overflow_and_negative():
-    # prefix "20" leaves a 10-digit body; 10**10 overflows it
-    with pytest.raises(ValueError):
-        format_ean13(10 ** 10, prefix="20")
-    with pytest.raises(ValueError):
-        format_ean13(-1)
-    with pytest.raises(ValueError):
-        format_ean13(1, prefix="2A")  # bad prefix
-
-
-def test_validate_ean13_rejects_tampered():
-    code = format_ean13(123)
-    bad = code[:12] + str((int(code[12]) + 1) % 10)  # flip the check digit
-    assert validate_ean13(code)
-    assert not validate_ean13(bad)
-    assert not validate_ean13("123")                 # wrong length
-    assert not validate_ean13("20000000004A2")       # non-digit
-    assert not validate_ean13(None)  # type: ignore[arg-type]
-
-
-# --- Code128 value ------------------------------------------------------
-
-def test_format_code128_store_prefixed():
-    assert format_code128(42, store_code="BV-RNC") == "BVRNC00000042"
-    assert format_code128(7, store_code="", width=4) == "0007"
-
-
-# --- atomic allocation (fake counter) -----------------------------------
 
 class _FakeCounter:
     """Mimics find_one_and_update with $inc + upsert + ReturnDocument.AFTER."""
@@ -99,6 +36,15 @@ class _FakeCounter:
         return cur
 
 
+class _FakeDB:
+    def __init__(self):
+        self.counters = _FakeCounter()
+
+    def get_collection(self, name):
+        assert name == "counters"
+        return self.counters
+
+
 def test_allocate_sequence_is_monotonic():
     c = _FakeCounter()
     seqs = [allocate_sequence(c) for _ in range(5)]
@@ -109,9 +55,30 @@ def test_allocate_sequence_fail_soft_without_db():
     assert allocate_sequence(None) is None
 
 
-def test_next_unit_ean13_allocates_valid_unique():
-    c = _FakeCounter()
-    codes = [next_unit_ean13(c) for _ in range(3)]
-    assert all(validate_ean13(x) for x in codes)
-    assert len(set(codes)) == 3            # unique per unit
-    assert next_unit_ean13(None) is None   # fail-soft
+def test_mint_is_store_prefix_plus_counter():
+    db = _FakeDB()
+    assert mint_unit_barcode(db, "BV-DHN-02") == "BV0000000001"
+    assert mint_unit_barcode(db, "WO-DHN-01") == "WO0000000002"
+
+
+def test_two_shops_sharing_a_prefix_never_collide():
+    """Every BV shop shares 'BV'; the chain-wide counter keeps codes unique."""
+    db = _FakeDB()
+    codes = [mint_unit_barcode(db, s) for s in ("BV-DHN-02", "BV-BOK-01") * 50]
+    assert len(set(codes)) == 100
+    assert all(re.fullmatch(r"BV\d{10}", c) for c in codes)
+
+
+def test_no_counter_still_mints_a_scannable_code():
+    """Fail-soft: no DB counter must never block a receipt or mint a hyphen."""
+    codes = {mint_unit_barcode(None, "BV-DHN-02") for _ in range(200)}
+    assert len(codes) == 200
+    assert all(TILL.match(c) and c.startswith("BV") for c in codes)
+
+
+def test_a_broken_counter_falls_back_too():
+    class _Boom:
+        def get_collection(self, name):
+            raise RuntimeError("mongo down")
+
+    assert TILL.match(mint_unit_barcode(_Boom(), "BV-DHN-02"))

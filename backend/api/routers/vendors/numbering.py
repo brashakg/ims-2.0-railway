@@ -1,6 +1,6 @@
 """PO/GRN document numbers and the goods-receipt arithmetic helpers."""
 
-from ._shared import Optional, _get_db, datetime, uuid
+from ._shared import Optional, _get_db, datetime
 
 
 # ============================================================================
@@ -177,23 +177,6 @@ def grn_has_discrepancy(grn: dict, qty_tolerance: int = 0) -> bool:
             return True
 
     return False
-
-
-def _grn_barcode(store_id: Optional[str], product_id: Optional[str]) -> str:
-    """Generate a barcode for a GRN-minted serialized unit.
-
-    Reuses inventory.generate_barcode (the canonical stock-barcode format) so a
-    unit received via GRN is indistinguishable from one added via the inventory
-    /stock/add screen. Fail-soft: if that helper can't be imported for any
-    reason, fall back to a uuid-derived barcode so the stock write still
-    succeeds (a missing barcode must never block receiving goods).
-    """
-    try:
-        from ..inventory import generate_barcode
-
-        return generate_barcode(store_id, product_id)
-    except Exception:  # noqa: BLE001
-        return f"BC-{uuid.uuid4().hex[:12].upper()}"
 
 
 def _grn_stock_audit(
