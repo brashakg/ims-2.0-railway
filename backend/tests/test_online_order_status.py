@@ -438,6 +438,37 @@ def test_three_lost_races_write_nothing_and_say_so(swept, monkeypatch):
     assert "awb" not in _doc(swept, 60160)
 
 
+# A race: another move lands between the read a decision was made on and its
+# write. The claim's precondition is the status that was READ, so the stale
+# write loses; apply_fact reads again and decides again on the newer status.
+
+
+def test_a_courier_delivery_that_lands_first_wins_over_a_stale_shopify_cancel(swept):
+    """The mapper read SHIPPED and decided CANCEL; the courier's DELIVERED
+    landed before its write. Ruling 2: it stays DELIVERED, with one task."""
+    _book(swept, 60165)
+    _set(swept, 60165, status="SHIPPED", awb="AWB60165")
+    stale = _doc(swept, 60165)
+    _set(swept, 60165, status="DELIVERED")
+    res = oos.apply_fact(swept["db"], stale, oos.CANCEL, source="T")
+    assert (res["to"], res["why"], res["failed"]) == (None, "conflict", False)
+    assert _doc(swept, 60165)["status"] == "DELIVERED"
+    assert _tasks(swept, 60165, "online_status_conflict") == 1
+
+
+def test_a_staff_cancel_that_lands_first_wins_over_a_stale_shopify_fulfilment(swept):
+    """The mapper read CONFIRMED with a fulfilled body; staff cancelled before
+    its write. A finished order stays finished: never CANCELLED -> SHIPPED."""
+    _book(swept, 60166)
+    stale = _doc(swept, 60166)
+    assert stale["status"] == "CONFIRMED"
+    _set(swept, 60166, status="CANCELLED")
+    res = oos.apply_fact(swept["db"], stale, oos.SHIP, source="T")
+    assert (res["to"], res["why"], res["failed"]) == (None, "withheld", False)
+    assert _doc(swept, 60166)["status"] == "CANCELLED"
+
+
+
 @pytest.mark.parametrize("variant", ["cancel", "refund"])
 def test_a_delivered_order_shopify_cancels_stays_delivered_with_one_task_forever(swept, variant):
     """Ruling 2: DELIVERED stays DELIVERED; ONE task for a person, claimed by
