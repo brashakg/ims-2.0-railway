@@ -124,6 +124,22 @@ describe('the barcode', () => {
     expect(code128Modules('BV--00F1D2CC')).not.toBe(code128Modules('BV--91FA3858'));
   });
 
+  it("the bars on each label ARE that unit's barcode", () => {
+    const other = { ...CARRERA, barcode: 'BV--91FA3858' };
+    const svgs = parse(unitLabelsDocument([CARRERA, other])).querySelectorAll('.win svg');
+    const drawn = (svg: Element) => {
+      const n = Number(svg.getAttribute('viewBox')!.split(' ')[2]);
+      const m = Array(n).fill('0');
+      svg.querySelectorAll('rect').forEach((r) => {
+        const x = Number(r.getAttribute('x'));
+        for (let i = 0; i < Number(r.getAttribute('width')); i += 1) m[x + i] = '1';
+      });
+      return m.join('').replace(/^0+|0+$/g, '');
+    };
+    expect(drawn(svgs[0])).toBe(code128Modules('BV--E5145C6A'));
+    expect(drawn(svgs[1])).toBe(code128Modules('BV--91FA3858'));
+  });
+
   it('draws no bar narrower than 2 dots at 203 dpi and keeps a quiet zone', () => {
     const doc = parse(unitLabelsDocument([CARRERA]));
     const svg = doc.querySelector('.win svg') as SVGSVGElement;
