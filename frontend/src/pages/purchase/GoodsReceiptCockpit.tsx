@@ -242,6 +242,8 @@ export function GoodsReceiptCockpit() {
           (res.po_status ? ` · PO ${res.po_status}` : ''),
       );
       if (highlightGrn === grnNumber) setHighlightGrn(null);
+      // F26: these units are just received too - their labels, same dialog.
+      setPrintDialog({ grnId, grnNumber });
       await loadPendingGrns(vendorId);
       await loadCockpit(vendorId);
       void loadInbox();

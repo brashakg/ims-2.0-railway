@@ -231,4 +231,24 @@ describe('GoodsReceiptCockpit two-step receive - ruling 14 (the tally)', () => {
     expect(await screen.findByText(/nothing to print/i)).toBeInTheDocument();
     expect(toastMock.success).not.toHaveBeenCalledWith(expect.stringMatching(/label/i));
   });
+
+  it('F26: "Add to stock" on a waiting receipt also opens ITS labels', async () => {
+    getGRNsMock.mockImplementation(async (p: { status?: string }) =>
+      p.status === 'PENDING'
+        ? { grns: [{ grn_id: 'G7', grn_number: 'RCPT/S1/26-27/0007', vendor_id: 'V1', status: 'PENDING', items: [] }] }
+        : { grns: [] },
+    );
+    acceptGRNMock.mockResolvedValue({ units_added: 3, po_status: 'RECEIVED' });
+    // The vendor's worklists (no PO picked) carry the "Receipts still waiting" panel.
+    render(
+      <MemoryRouter initialEntries={['/purchase/receive?vendor_id=V1']}>
+        <GoodsReceiptCockpit />
+      </MemoryRouter>,
+    );
+    await screen.findByText(/receipts still waiting/i, undefined, { timeout: 5000 });
+    fireEvent.click(await screen.findByRole('button', { name: /add to stock/i }, { timeout: 5000 }));
+    await screen.findByRole('dialog', { name: /print stock labels/i });
+    expect(acceptGRNMock).toHaveBeenCalledWith('G7');
+    expect(getUnitsMock).toHaveBeenCalledWith({ grn_id: 'G7' });
+  });
 });
