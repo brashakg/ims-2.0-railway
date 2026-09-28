@@ -13,6 +13,7 @@ from typing import Any, Dict, Optional
 import asyncio
 import httpx
 import random
+import re
 
 from agents.nexus_providers import SHOPIFY_API_VERSION
 from api.services.shopify_auth import resolve_shopify_credentials
@@ -33,6 +34,73 @@ from ._shared import PROVIDER_TIMEOUT, logger
 _MAX_RETRIES = 4
 _RETRY_BASE_DELAY = 1.0  # seconds; doubles per attempt
 _RETRY_MAX_DELAY = 30.0  # cap, also applied to a vendor Retry-After
+
+# SEND-ONCE (2026-09-28). A read timeout or a 5xx comes back AFTER the request
+# left, so Shopify may already have applied it. Replaying a query, or a
+# mutation whose second run changes nothing (an update, a set, a delete, a
+# publish), is safe; replaying a CREATE mints a second object -- one
+# productCreateMedia timeout after Shopify committed plus a successful retry
+# was two photographs on the listing, one of them unmanaged forever. So only
+# the mutations named here are replayed after a send; every other mutation --
+# the creates, and any mutation added later without a name here (default
+# deny) -- is sent ONCE and a lost answer raises. A connect/pool timeout (the
+# request never left), a 429 and a THROTTLED body (Shopify refused it
+# unapplied) are retried for every operation, as before.
+# Send-once today: imsProductCreate, imsProductCreateMedia,
+# imsVariantsBulkCreate, imsCollectionCreate, imsMenuCreate,
+# imsFulfillmentCreate, imsWebhookSubscriptionCreate.
+_OP = re.compile(r"\s*mutation\s+(\w+)")
+_REPLAY_SAFE = frozenset(
+    {
+        "imsProductUpdate",
+        "imsTagsAdd",
+        "imsTagsRemove",
+        "imsCollectionUpdate",
+        "imsCollectionAddProducts",
+        "imsMenuUpdate",
+        "metafieldsSet",
+        "imsPublishablePublish",
+        "imsVariantPricesUpdate",
+        "imsVariantInventoryUpdate",
+        "imsInventorySetQuantities",
+        "imsInventoryActivate",
+        "imsProductDeleteMedia",
+        "imsProductReorderMedia",
+        "imsWebhookSubscriptionDelete",
+    }
+)
+
+
+def _replay_safe(query: str) -> bool:
+    """May this operation be sent again after Shopify may have applied it? A
+    query yes; a mutation only when _REPLAY_SAFE names it (default deny)."""
+    m = _OP.match(query or "")
+    return (m.group(1) in _REPLAY_SAFE) if m else not (query or "").lstrip().startswith("mutation")
+
+
+def _op_name(query: str) -> str:
+    m = _OP.match(query or "")
+    return m.group(1) if m else "operation"
+
+
+_version_logged = False
+
+
+def _log_served_version(resp: Any) -> None:
+    """Log, once per process, the Admin API version Shopify actually served
+    (it can differ from the pinned one when that version is unsupported)."""
+    global _version_logged
+    if _version_logged:
+        return
+    _version_logged = True
+    try:
+        logger.info(
+            "[SHOPIFY_PUSH] Shopify served API version %s (pinned %s)",
+            resp.headers.get("X-Shopify-API-Version"),
+            SHOPIFY_API_VERSION,
+        )
+    except Exception:  # noqa: BLE001 -- a log line must never fail a push
+        pass
 
 
 def _is_throttled_body(body: Any) -> bool:
@@ -82,7 +150,9 @@ async def _graphql(db, query: str, variables: Dict[str, Any]) -> Dict[str, Any]:
 
     RESILIENT: retries up to _MAX_RETRIES total attempts on 429 / GraphQL
     THROTTLED / 5xx / timeout with exponential backoff (+ Retry-After when
-    present). Non-retryable 4xx raises immediately.
+    present). Non-retryable 4xx raises immediately. SEND-ONCE: a read
+    timeout or a 5xx on a mutation _REPLAY_SAFE does not name raises at once
+    (Shopify may have applied it; see _REPLAY_SAFE).
 
     Returns the raw GraphQL response dict ({"data": ...} and/or {"errors": ...}).
     Raises httpx/ValueError on a transport-level failure; the caller catches and
@@ -102,12 +172,18 @@ async def _graphql(db, query: str, variables: Dict[str, Any]) -> Dict[str, Any]:
         "content-type": "application/json",
     }
     payload = {"query": query, "variables": variables}
+    safe = _replay_safe(query)
+    sent_once = (
+        "shopify %s %%s; not retried: Shopify may have applied it" % _op_name(query)
+    )
 
     last_error = "unknown"
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
             resp = await _post_once(url, headers, payload)
         except httpx.TimeoutException as e:
+            if not safe and not isinstance(e, (httpx.ConnectTimeout, httpx.PoolTimeout)):
+                raise ValueError(sent_once % ("timed out after sending (%s)" % e))
             last_error = f"timeout: {e}"
             if attempt >= _MAX_RETRIES:
                 raise ValueError(
@@ -122,6 +198,7 @@ async def _graphql(db, query: str, variables: Dict[str, Any]) -> Dict[str, Any]:
             continue
 
         status = resp.status_code
+        _log_served_version(resp)
         if status in (200, 201):
             body = resp.json() or {}
             if _is_throttled_body(body):
@@ -141,6 +218,8 @@ async def _graphql(db, query: str, variables: Dict[str, Any]) -> Dict[str, Any]:
                 continue
             return body
 
+        if status >= 500 and not safe:
+            raise ValueError(sent_once % ("answered status %d (%s)" % (status, resp.text[:200])))
         if status == 429 or status >= 500:
             last_error = f"status {status}: {resp.text[:200]}"
             if attempt >= _MAX_RETRIES:

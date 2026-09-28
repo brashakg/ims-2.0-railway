@@ -34,6 +34,7 @@ os.environ.setdefault("ENVIRONMENT", "test")
 
 import asyncio  # noqa: E402
 
+import httpx  # noqa: E402
 import pytest  # noqa: E402
 
 from database.connection import MockCollection  # noqa: E402
@@ -1203,6 +1204,73 @@ def test_graphql_retries_graphql_throttled_body(monkeypatch):
     ])
     body = _run(shopify_push._graphql(None, "query { x }", {}))
     assert body == ok_body and calls["n"] == 2
+
+
+# --- SEND-ONCE: a create is never replayed after Shopify may have run it ----
+# REVERT-PROOF: _replay_safe returning True for everything (the old
+# retry-everything policy) turns the ReadTimeout / 502 cases red (2+ POSTs).
+
+_CREATE_MEDIA = shopify_push.queries._PRODUCT_CREATE_MEDIA
+_UPDATE = shopify_push.queries._PRODUCT_UPDATE
+
+
+@pytest.mark.parametrize(
+    "first",
+    [httpx.ReadTimeout("read timed out"), _FakeResp(502, text="bad gateway")],
+    ids=["read-timeout", "502"],
+)
+def test_a_create_mutation_is_sent_once_when_shopify_may_have_applied_it(monkeypatch, first):
+    calls = _wire_graphql(monkeypatch, [first, _FakeResp(200, body={"data": {}})])
+    with pytest.raises(ValueError) as err:
+        _run(shopify_push._graphql(None, _CREATE_MEDIA, {}))
+    assert calls["n"] == 1, "one POST: a replay would mint a second media"
+    assert "imsProductCreateMedia" in str(err.value) and "not retried" in str(err.value)
+
+
+@pytest.mark.parametrize(
+    "first",
+    [httpx.ConnectTimeout("connect timed out"), _FakeResp(429, headers={"Retry-After": "0"})],
+    ids=["connect-timeout", "429"],
+)
+def test_a_create_mutation_is_retried_when_shopify_never_ran_it(monkeypatch, first):
+    ok = {"data": {"productCreateMedia": {"media": []}}}
+    calls = _wire_graphql(monkeypatch, [first, _FakeResp(200, body=ok)])
+    assert _run(shopify_push._graphql(None, _CREATE_MEDIA, {})) == ok
+    assert calls["n"] == 2
+
+
+@pytest.mark.parametrize("query", [_UPDATE, "query { shop { id } }"], ids=["replay-safe-mutation", "query"])
+def test_queries_and_replay_safe_mutations_still_retry_a_read_timeout(monkeypatch, query):
+    ok = {"data": {"ok": True}}
+    calls = _wire_graphql(monkeypatch, [httpx.ReadTimeout("read timed out"), _FakeResp(200, body=ok)])
+    assert _run(shopify_push._graphql(None, query, {})) == ok
+    assert calls["n"] == 2
+
+
+def test_the_replay_list_names_real_mutations_and_every_create_is_send_once():
+    """Every name on _REPLAY_SAFE is a `mutation <name>` IMS sends (a typo
+    would silently make that mutation send-once), and the send-once set is
+    exactly the creates (default deny)."""
+    import pathlib
+    import re as _re
+
+    from api.services.shopify_push import transport
+
+    api = pathlib.Path(__file__).resolve().parents[1] / "api"
+    sent = set()
+    for f in api.rglob("*.py"):
+        sent |= set(_re.findall(r"^\s*mutation\s+(\w+)\s*\(", f.read_text(encoding="utf-8"), _re.M))
+    assert transport._REPLAY_SAFE <= sent, transport._REPLAY_SAFE - sent
+    assert sent - transport._REPLAY_SAFE == {
+        "imsProductCreate",
+        "imsProductCreateMedia",
+        "imsVariantsBulkCreate",
+        "imsCollectionCreate",
+        "imsMenuCreate",
+        "imsFulfillmentCreate",
+        "imsWebhookSubscriptionCreate",
+    }
+    assert transport._replay_safe("mutation imsSomethingNew { x }") is False, "default deny"
 
 
 # --- register_webhooks ------------------------------------------------------
