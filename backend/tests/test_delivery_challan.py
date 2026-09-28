@@ -101,6 +101,7 @@ _TEST_STORE = {
     "address": "Test Road",
     "phone": "9000000000",
     "entity_id": "ent-zz-test",
+    "gstin": "20ABCDE1234F1Z5",  # stamped by the org module for its state
 }
 _TEST_ENTITY = {
     "entity_id": "ent-zz-test",

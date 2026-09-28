@@ -2,8 +2,8 @@
 Tests for store-specific print identity (PR: store-specific printouts).
 
 Proves:
-  * A document header reflects the PASSED store + entity (legal name, GSTIN-for-
-    state, address, brand) -- two different stores -> two different headers.
+  * A document header reflects the PASSED store + entity (legal name, the
+    store's own GSTIN, address, brand) -- two different stores -> two different headers.
   * The per-entity logo is read from the NESTED entity.invoice.logo_url (the
     Organization module's location), not only a top-level logo_url, and is
     rendered in the server-side HTML header.
@@ -54,6 +54,7 @@ BV_STORE_JH = {
     "state_code": "20",
     "pincode": "827004",
     "phone": "06542-000000",
+    "gstin": "20AABCB1234M1Z5",  # the store's OWN GSTIN (org module stamps it)
 }
 
 WIZ_ENTITY = {
@@ -79,6 +80,7 @@ WIZ_STORE_MH = {
     "state_code": "27",
     "pincode": "411004",
     "phone": "020-0000000",
+    "gstin": "27AABFW5678N1Z3",
 }
 
 
@@ -103,11 +105,16 @@ def test_header_reflects_passed_store_and_entity():
     assert h_wiz["brand_label"] == "WizOpt"
 
 
-def test_gstin_picks_store_state_not_primary():
-    """A BV store in Maharashtra resolves the MH GSTIN, not the JH primary."""
-    bv_store_mh = dict(BV_STORE_JH, state="Maharashtra", state_code="27", city="Mumbai")
+def test_gstin_is_the_stores_own_never_the_primary():
+    """A BV store in Maharashtra prints its own MH GSTIN; one with none prints
+    none -- never the entity's JH primary (the deleted second picker did)."""
+    bv_store_mh = dict(
+        BV_STORE_JH, state="Maharashtra", state_code="27", city="Mumbai",
+        gstin="27AABCB1234M1ZA",
+    )
     h = LegalHeader(BV_ENTITY, bv_store_mh, "tax_invoice")
     assert h["gstin"] == "27AABCB1234M1ZA"
+    assert LegalHeader(BV_ENTITY, dict(bv_store_mh, gstin=""), "tax_invoice")["gstin"] == ""
 
 
 def test_logo_read_from_nested_invoice_identity():

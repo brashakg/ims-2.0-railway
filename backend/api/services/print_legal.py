@@ -719,31 +719,6 @@ def _brand_of(store: Optional[Dict[str, Any]]) -> str:
     return str(store.get("brand") or "").strip().upper()
 
 
-def _gstin_for_state(
-    entity: Optional[Dict[str, Any]], state_code: str
-) -> Tuple[str, str]:
-    """Return (gstin, state_name) for the entity's registration that matches
-    `state_code`. Falls back to the primary registration; finally to ("", "")."""
-    if not isinstance(entity, dict):
-        return "", ""
-    gstins = entity.get("gstins") or []
-    if not isinstance(gstins, list) or not gstins:
-        return "", ""
-
-    target = str(state_code or "").strip()
-    primary: Optional[Dict[str, Any]] = None
-    for g in gstins:
-        if not isinstance(g, dict):
-            continue
-        if target and str(g.get("state_code", "")).strip() == target:
-            return str(g.get("gstin", "")), str(g.get("state_name") or "")
-        if primary is None or g.get("is_primary"):
-            primary = g
-    if primary is None:
-        return "", ""
-    return str(primary.get("gstin", "")), str(primary.get("state_name") or "")
-
-
 def _apply_overrides(
     fields: Dict[str, Any], overrides: Optional[Dict[str, Any]]
 ) -> Dict[str, Any]:
@@ -778,9 +753,10 @@ def LegalHeader(  # noqa: N802 - intentionally mirror the JSX export name
     """Build the data shape for the customer/vendor-facing statutory header.
 
     `entity` is the legal entity dict (from the `entities` collection or any
-    equivalent shape: name/legal_name/pan/cin/registered_address/website +
-    gstins list). `store` is the place-of-supply outlet (from the `stores`
-    collection: name/address/city/state/state_code/pincode/phone/email).
+    equivalent shape: name/legal_name/pan/cin/registered_address/website).
+    `store` is the place-of-supply outlet (from the `stores` collection:
+    name/address/city/state/state_code/pincode/phone/email + its own `gstin`,
+    the seller GSTIN printed).
     `overrides` is the per-entity-per-template content override dict from
     `print_template_overrides` (see routers/print_overrides.py).
 
@@ -822,9 +798,13 @@ def LegalHeader(  # noqa: N802 - intentionally mirror the JSX export name
         part for part in store_addr_lines + [city, state_name_store, pincode] if part
     )
 
-    # ---- pick the GSTIN for the store state ------------------------------
-    gstin, state_name_gst = _gstin_for_state(entity, store_state_code)
-    state_name = state_name_gst or state_name_store
+    # ---- the seller GSTIN: the store's OWN (store.gstin, stamped by the org
+    # module for the store's state) -- the one GSTIN its tax invoice, GSTR-1
+    # and the e-invoice issue from. The entity's registrations are never
+    # re-picked here: that second picker fell back to the PRIMARY one and
+    # printed another state's GSTIN on the goods-movement document.
+    gstin = _pick(store, "gstin")
+    state_name = state_name_store
 
     # ---- logo (entity invoice identity, then per-brand default) -----------
     logo_url = _entity_logo(entity) or _BRAND_DEFAULT_LOGO.get(store_brand, "")

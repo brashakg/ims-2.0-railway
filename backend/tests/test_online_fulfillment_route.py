@@ -1244,6 +1244,25 @@ def _gstr1(world, monkeypatch, order, store_id):
     return gstr1_mod._compute_gstr1(ist_date_str(order["created_at"])[:7], store_id)
 
 
+def _challan(world, monkeypatch, order_id):
+    """The order's delivery challan: its HTML, or the refusal text."""
+    from fastapi import HTTPException
+    from api.routers import print_documents as pd
+    from database.repositories.order_repository import OrderRepository
+
+    db = world["db"]
+    monkeypatch.setattr(pd, "get_order_repository", lambda: OrderRepository(db.orders))
+    monkeypatch.setattr(pd, "get_customer_repository", lambda: None)
+    monkeypatch.setattr(pd, "load_store", lambda sid: db.stores.find_one({"store_id": sid}, {"_id": 0}) or {})
+    monkeypatch.setattr(pd, "load_entity_for_store", lambda s: {"legal_name": "BV Retail", "gstins": [
+        {"gstin": "20AAAAA0000A1Z5", "state_code": "20", "is_primary": True}]})
+    monkeypatch.setattr(pd, "load_overrides", lambda *a: None)
+    try:
+        page = asyncio.run(pd.delivery_challan_for_order(order_id, current_user={"roles": ["SUPERADMIN"]}))
+    except HTTPException as exc:
+        assert exc.status_code == 400
+        return exc.detail
+    return page.body.decode()
 
 
 def test_a_duplicate_delivery_mid_claim_keeps_the_move_and_writes_stock_after_the_claim(world, monkeypatch):
@@ -1377,8 +1396,23 @@ def test_a_clean_routed_order_is_invoiced_filed_and_challaned(world, monkeypatch
     filed = _gstr1(world, monkeypatch, order, "BV-BOK-01")
     assert not [i for i in filed["validation"]["issues"] if i["level"] == "error"]
     assert len(filed["b2cs"]) == 1
+    assert "20AAAAA0000A1Z5" in _challan(world, monkeypatch, res["order_id"])
 
 
+def test_the_challan_refuses_what_the_booking_held(world, monkeypatch):
+    """P5: an online order at a Maharashtra shop whose only GSTIN is another
+    state's is held and refused an invoice -- and its delivery challan is
+    refused too, never printed under the Jharkhand GSTIN."""
+    db = world["db"]
+    db.stores.update_one({"store_id": PUNE}, {"$set": {
+        "shopify_location_id": LOC_PUN, "gstin": "20AAAAA0000A1Z5"}})
+    _stock(db, PUNE, "P-RB", 1)
+    world["shop"].fo(FO_1, LOC_PUN)
+
+    res, order = _book(world, _order(54006, buyer_state="27"))
+
+    assert order["store_id"] == PUNE and order["fulfillment_hold"] is True
+    assert "registered in state 20" in _challan(world, monkeypatch, res["order_id"])
 
 
 @pytest.mark.parametrize("bucket_env", [None, "BV-RAN-01"])

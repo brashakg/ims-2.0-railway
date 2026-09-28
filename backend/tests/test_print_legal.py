@@ -13,7 +13,7 @@ Pure-helper unit tests (no DB, no FastAPI client). Covers:
   - statutory_footer: per-doc text; retain override; junk -> default
   - declarations: per-doc text; unknown -> empty string
   - format_date: datetime / ISO / "YYYY-MM-DD" / None / junk
-  - LegalHeader: real entity + store data; overrides win; gstin-by-state
+  - LegalHeader: real entity + store data; overrides win; the store's own gstin
     routing; rx_card adds NCAHP/DMC; copy marker is wired
   - StaffHeader: minimal shape; no GSTIN/CIN; overrides win
 """
@@ -403,6 +403,8 @@ def _entity_fixture():
 
 def _store_fixture(state_code="20"):
     return {
+        # The store's OWN GSTIN, stamped by the org module for its state.
+        "gstin": f"{state_code}AAACA1234A1Z5",
         "name": "Acme Ranchi Main Road",
         "store_code": "AC-RAN-01",
         "address": "Shop 14, Main Road",
@@ -442,8 +444,8 @@ def test_legal_header_basic_shape():
         assert k in kv_keys
 
 
-def test_legal_header_picks_gstin_for_store_state():
-    # Maharashtra store gets the Maharashtra GSTIN.
+def test_legal_header_prints_the_stores_own_gstin():
+    # Maharashtra store prints its own (Maharashtra) GSTIN.
     out = LegalHeader(
         _entity_fixture(),
         _store_fixture(state_code="27"),
@@ -451,6 +453,10 @@ def test_legal_header_picks_gstin_for_store_state():
     )
     assert out["gstin"] == "27AAACA1234A1Z5"
     assert out["state_code"] == "27"
+    # A store with no GSTIN of its own prints none -- never the entity's
+    # PRIMARY (Jharkhand) registration on a Maharashtra document.
+    bare = dict(_store_fixture(state_code="27"), gstin="")
+    assert LegalHeader(_entity_fixture(), bare, doc_type="tax_invoice")["gstin"] == ""
 
 
 def test_legal_header_overrides_win():
@@ -635,6 +641,7 @@ def test_two_stores_two_headers_and_gstins():
         "state": "Jharkhand",
         "state_code": "20",
         "pincode": "827004",
+        "gstin": "20AAACB1111A1Z5",
     }
     wo_store = {
         "name": "WizOpt - Pune FC Road",
@@ -644,6 +651,7 @@ def test_two_stores_two_headers_and_gstins():
         "state": "Maharashtra",
         "state_code": "27",
         "pincode": "411004",
+        "gstin": "27AAACW2222B1Z9",
     }
 
     bv = LegalHeader(_entity_better_vision(), bv_store, doc_type="tax_invoice")

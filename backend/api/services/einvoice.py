@@ -20,7 +20,8 @@ Credential shape (integrations.config for type="einvoice"):
   }
 
 Multiple GSPs / multiple GSTINs are supported: store one `integrations` doc
-per GSTIN. The order's GSTIN (billing_gstin) determines which doc is loaded.
+per GSTIN. The seller GSTIN -- the order's OWN shop's (order.store_id ->
+store.gstin, ``_seller``) -- determines which doc is loaded.
 
 E-invoice JSON shape maps from gstn_export.py's b2b/itm_det model (1:1). The
 IRP API used is the standard NIC e-invoice sandbox/production endpoint; GSPs
@@ -128,16 +129,52 @@ def _load_creds(db, gstin: str) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# The seller
+# ---------------------------------------------------------------------------
+
+
+def _seller(db, order: Dict[str, Any]):
+    """THE seller of an order's e-invoice -> (shop doc, reason or None): the
+    order's OWN shop (order.store_id), whose ``gstin`` is the GSTIN its tax
+    invoice, GSTR-1 and the delivery challan issue from. ``reason`` refuses:
+    a routed online order its booking held (online_fulfillment_route
+    .seller_problem, the one seller check), or a shop with no GSTIN."""
+    from .online_fulfillment_route import seller_problem
+
+    def find(sid):
+        try:
+            return db.get_collection("stores").find_one({"store_id": sid}, {"_id": 0}) if sid else None
+        except Exception:  # noqa: BLE001 -- unreadable: no seller GSTIN, refused below
+            return None
+
+    store = find(order.get("store_id")) or {}
+    bad = seller_problem(order, store, find)
+    if bad:
+        return store, bad["message"]
+    if not str(store.get("gstin") or "").strip():
+        return store, (
+            f"The order's shop {order.get('store_id') or '(none)'} has no GSTIN, "
+            "so no e-invoice can be issued for it."
+        )
+    return store, None
+
+
+# ---------------------------------------------------------------------------
 # E-invoice JSON builder (maps gstn_export shape)
 # ---------------------------------------------------------------------------
 
 
-def _build_einvoice_json(order: Dict[str, Any]) -> Dict[str, Any]:
+def _build_einvoice_json(
+    order: Dict[str, Any], seller: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
     """Build the NIC e-invoice API request payload from an IMS order/invoice doc.
 
     The NIC IRP JSON schema (Schema v1.1) maps almost 1:1 from the b2b/itm_det
     shape already built in gstn_export.py. We derive the minimal mandatory
     fields here; optional fields default to empty strings (IRP ignores extras).
+
+    ``seller`` is the order's own shop doc (``_seller``): its ``gstin`` is the
+    seller GSTIN and its first two digits the seller's state code.
 
     Returns a dict. Never raises (malformed input -> best-effort partial doc).
     """
@@ -170,15 +207,11 @@ def _build_einvoice_json(order: Dict[str, Any]) -> Dict[str, Any]:
     inv_date_raw = order.get("invoice_date") or order.get("created_at") or ""
     inv_date = _fmt_date_ddmmyyyy(ist_date_str(inv_date_raw) or inv_date_raw)
 
-    # Seller GSTIN -- from the store/entity on the order
-    seller_gstin = _s(order.get("store_gstin") or order.get("billing_gstin"))
+    # Seller GSTIN -- the order's own shop's (``_seller``), never a guess.
+    seller_gstin = _s((seller or {}).get("gstin"))
 
     # Place of supply (2-digit state code)
-    pos = _s(
-        order.get("place_of_supply") or order.get("state_code") or seller_gstin[:2]
-        if len(seller_gstin) >= 2
-        else "20"
-    )
+    pos = _s(order.get("place_of_supply") or order.get("state_code") or seller_gstin[:2])
 
     # Tax classification: inter-state -> IGST, else CGST+SGST
     igst = _n(order.get("igst") or order.get("igst_amount"))
@@ -273,7 +306,7 @@ def _build_einvoice_json(order: Dict[str, Any]) -> Dict[str, Any]:
             "Addr2": "",
             "Loc": _s(order.get("store_city") or ""),
             "Pin": _s(order.get("store_pin") or "000000"),
-            "Stcd": _s(seller_gstin[:2] if len(seller_gstin) >= 2 else "20"),
+            "Stcd": seller_gstin[:2],
             "Ph": _s(order.get("store_phone") or ""),
             "Em": _s(order.get("store_email") or ""),
         },
@@ -596,8 +629,6 @@ async def generate_irn(db, order: Dict[str, Any]) -> Dict[str, Any]:
             "einvoice_json": None,
         }
 
-    gstin = str(order.get("store_gstin") or order.get("billing_gstin") or "")
-
     # ── Gate check ───────────────────────────────────────────────────────
     if not _env_enabled():
         return {
@@ -613,6 +644,20 @@ async def generate_irn(db, order: Dict[str, Any]) -> Dict[str, Any]:
             ),
             "einvoice_json": None,
         }
+
+    # ── The seller: the order's own shop, refused LOUDLY when it cannot issue
+    seller, refused = _seller(db, order)
+    if refused:
+        return {
+            "status": STATUS_FAILED,
+            "irn": None,
+            "ack_no": None,
+            "ack_date": None,
+            "signed_qr": None,
+            "reason": refused,
+            "einvoice_json": None,
+        }
+    gstin = str(seller["gstin"]).strip()
 
     cfg = _load_creds(db, gstin)
     if not (
@@ -635,7 +680,7 @@ async def generate_irn(db, order: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     # ── Build the IRP request payload ────────────────────────────────────
-    einvoice_json = _build_einvoice_json(order)
+    einvoice_json = _build_einvoice_json(order, seller)
 
     # ── Call the IRP / GSP ───────────────────────────────────────────────
     try:
@@ -705,13 +750,13 @@ async def cancel_irn(
             "reason": "No IRN on this order -- nothing to cancel",
         }
 
-    gstin = str(order.get("store_gstin") or order.get("billing_gstin") or "")
-
     if not _env_enabled():
         return {
             "status": STATUS_SIMULATED,
             "reason": "DARK: IMS_EINVOICE_ENABLED is not set",
         }
+    # The IRN was issued under the order's own shop's GSTIN: its creds cancel it.
+    gstin = str(_seller(db, order)[0].get("gstin") or "")
 
     cfg = _load_creds(db, gstin)
     if not cfg.get("gsp_url"):
