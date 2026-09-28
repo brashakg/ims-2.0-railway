@@ -35,7 +35,8 @@ from api.routers.inventory import alerts, quarantine, stock  # noqa: E402
 def test_route_count_and_no_duplicate_paths():
     """The count is the tripwire: a lost route is otherwise a silent 404."""
     routes = [(tuple(sorted(r.methods)), r.path) for r in inventory.router.routes]
-    assert len(routes) == 43, "inventory.router route count changed: %d" % len(routes)
+    # 45 = 43 + GET /units + POST /units/barcode-printed (F26/F27).
+    assert len(routes) == 45, "inventory.router route count changed: %d" % len(routes)
     assert len(set(routes)) == len(routes), "duplicate (method, path) on the router"
 
 
