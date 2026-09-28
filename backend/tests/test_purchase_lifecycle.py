@@ -579,7 +579,7 @@ class TestOrderAnUncataloguedItem:
             def find_by_id(self, _i):
                 return dict(self.d)
 
-            def update(self, _i, patch):
+            def update_if(self, _i, _expected, patch):  # send's guarded write
                 self.patched = patch
                 return True
 
