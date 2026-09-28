@@ -85,7 +85,6 @@ export function useQuickAddForm() {
   // Online (Shopify)
   const [syncToShopify, setSyncToShopify] = useState(false);
   const [shopifyTags, setShopifyTags] = useState<string[]>([]);
-  const [publishPOS, setPublishPOS] = useState(true);
 
   // Product images (Part 1): self-hosted URLs returned by the upload endpoint.
   const [images, setImages] = useState<string[]>([]);
@@ -284,7 +283,6 @@ export function useQuickAddForm() {
       discountCategory,
       syncToShopify,
       shopifyTags,
-      publishPOS,
       images,
       // Review-mode extras (ignored by buildProductPayload / create doors).
       name: displayName,
@@ -292,7 +290,7 @@ export function useQuickAddForm() {
     }),
     [
       selectedCategory, attributes, description, hsnCode, gstRate, weight, mrp,
-      offerPrice, costPrice, discountCategory, syncToShopify, shopifyTags, publishPOS,
+      offerPrice, costPrice, discountCategory, syncToShopify, shopifyTags,
       images, displayName, reviewTags,
     ]
   );
@@ -313,7 +311,6 @@ export function useQuickAddForm() {
       setReorderLevel('5');
       setSyncToShopify(false);
       setShopifyTags([]);
-      setPublishPOS(true);
       setImages([]);
       setErrors({});
       setDisplayName('');
@@ -343,7 +340,6 @@ export function useQuickAddForm() {
     setDiscountCategory(v.discountCategory || '');
     setSyncToShopify(Boolean(v.syncToShopify));
     setShopifyTags(Array.isArray(v.shopifyTags) ? v.shopifyTags : []);
-    setPublishPOS(v.publishPOS !== false);
     setImages(Array.isArray(v.images) ? v.images : []);
     // Review extras — blank for every non-review prefill (template/clone/
     // variant all leave them undefined).
@@ -1407,7 +1403,6 @@ export function useQuickAddForm() {
     discountCategory,
     reorderLevel, setReorderLevel,
     syncToShopify, setSyncToShopify, shopifyTags, setShopifyTags,
-    publishPOS, setPublishPOS,
     images, setImages,
     displayName, setDisplayName, reviewTags, setReviewTags,
     // options fed from the server

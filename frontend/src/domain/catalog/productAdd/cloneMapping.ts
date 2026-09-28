@@ -126,7 +126,6 @@ export function productToFormValues(product: ProductDoc): ProductFormValues {
     // Online flags are NOT cloned: a new SKU shouldn't inherit Shopify sync.
     syncToShopify: false,
     shopifyTags: [],
-    publishPOS: true,
     // Preserve the source product's images so the clone starts with them (the
     // operator can remove them before saving the new SKU).
     images: Array.isArray(product.images)

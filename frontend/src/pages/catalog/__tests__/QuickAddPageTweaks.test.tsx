@@ -99,7 +99,6 @@ const blankSunglass = (over: Partial<ProductFormValues> = {}): ProductFormValues
   discountCategory: '',
   syncToShopify: false,
   shopifyTags: [],
-  publishPOS: true,
   ...over,
 });
 
@@ -270,6 +269,8 @@ describe('5 - GST rate is text, and the value still posts', () => {
       'attributes', 'brand', 'category', 'cost_price', 'description', 'gst_rate',
       'hsn_code', 'images', 'model', 'mrp', 'offer_price', 'shopify', 'weight',
     ]);
+    // A new product never asks for Shopify's POS channel (owner 2026-09-28).
+    expect(payload.shopify).not.toHaveProperty('publish_to_pos');
   });
 });
 
@@ -302,14 +303,15 @@ describe('8 - the review card uses registry labels', () => {
 });
 
 describe('9 + 12 - the Online strip', () => {
-  it('says in words what the POS switch waits on, and the tag box has a visible label', async () => {
+  it('has no Shopify POS switch (IMS is the till, F74), and the tag box has a visible label', async () => {
     const user = userEvent.setup();
     renderPage();
-    expect(screen.getByText(/turn on Sync to Shopify first/)).toBeInTheDocument();
+    expect(screen.queryByLabelText('Publish to Shopify POS')).toBeNull();
+    expect(screen.queryByText(/Shopify POS/)).toBeNull();
     expect(screen.queryByLabelText('Shopify tags')).toBeNull();
 
     await user.click(screen.getByLabelText('Sync to Shopify'));
-    expect(screen.queryByText(/turn on Sync to Shopify first/)).toBeNull();
+    expect(screen.queryByLabelText('Publish to Shopify POS')).toBeNull();
     expect(screen.getByLabelText('Shopify tags')).toBeInTheDocument();
   });
 });

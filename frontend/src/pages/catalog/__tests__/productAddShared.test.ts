@@ -30,7 +30,6 @@ const fv = (
   discountCategory: '',
   syncToShopify: false,
   shopifyTags: [],
-  publishPOS: true,
   ...over,
 });
 

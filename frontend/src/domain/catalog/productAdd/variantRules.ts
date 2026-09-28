@@ -234,7 +234,6 @@ export function productToVariantFormValues(
     // A new variant never inherits online flags (same rule as clone).
     syncToShopify: false,
     shopifyTags: [],
-    publishPOS: true,
     // Images are NEVER auto-copied — sourceImages powers the one-click button.
     images: [],
   };

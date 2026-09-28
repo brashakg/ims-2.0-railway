@@ -1039,9 +1039,8 @@ class ShopifySyncInput(BaseModel):
     # The form's "Shopify tags" box -> the spine's governed `tags` + the twin's
     # ecom.seo.tags (product_master.set_twin_tags), the list the push sends.
     shopify_tags: List[str] = []
-    # publish_to_online_store removed in Phase 6.12 — we don't run our
-    # own storefront. Kept publish_to_pos for Shopify POS sync.
-    publish_to_pos: bool = True
+    # No POS channel flag: IMS is the till, a product never publishes to
+    # Shopify POS (owner ruling 2026-09-28).
 
 
 class SEOInput(BaseModel):
