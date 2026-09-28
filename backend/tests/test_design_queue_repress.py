@@ -40,6 +40,7 @@ were run red against it before they counted):
   T5  test_a_generic_name_is_never_claimed    _ims_unique -> True          -> hand upload deleted
   T6  test_two_hits_hold / ..._one_node       len(ids)==1 / load check off -> claimed
   T7  test_a_naming_drift_holds_every...      canary off                   -> re-attach
+  T7b test_the_canary_ignores_adopted_media   canary counts adopted docs   -> held
   T8  test_stale_whole_doc_writers...         (structural: T17)
   T9  test_a_stolen_lease_sends_nothing       renew() -> True              -> 1 send
   T10 test_a_stale_sweep_doc_never...         drop the NO_PHOTO refusal    -> deletes
@@ -1677,6 +1678,25 @@ def test_a_naming_drift_holds_every_pending_attach(gates, monkeypatch):
 
     assert prod.photos["code"] == "MEDIA_NAMING_DRIFT" and prod.photos["held"] == [U1]
     assert fake.attached() == [] and _pending(db) == {(U1, None)}
+
+
+def test_the_canary_ignores_adopted_media(gates, monkeypatch):
+    """T7b. An ADOPTED media legitimately carries another CDN name (the
+    connector's '<id>__<nn>__<name>', a replace-mode screenshot): it is no
+    evidence that Shopify's naming changed. An old pending doc with no hit
+    beside it is dropped and attached once, as usual -- no drift.
+    REVERT-PROOF: the canary counting adopted docs -> MEDIA_NAMING_DRIFT, held."""
+    fake = _live(monkeypatch, [_node(1, name="900__01__4_1.png")])
+    db = _DB()
+    _seed(db, _product([OWN, U1]))
+    _own(db, OWN, 1, how="adopted")
+    _pend(db, U1, minutes=60)
+
+    prod = _run(shopify_push.push_product(db, _parent(db), []))
+
+    assert prod.photos.get("code") is None and prod.photos["dropped"] == 1, prod.photos
+    assert fake.attached() == [U1] and _pending(db) == set()
+    assert _ledger(db) == {(OWN, _m(1), None), (U1, _m(100), None)}
 
 
 # ===========================================================================
