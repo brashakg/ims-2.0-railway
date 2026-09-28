@@ -194,7 +194,8 @@ export default function RefundReviewsPage() {
             const ref = result.return_id || review.review_id;
             toast.warning(
               `Credit note posted, but the returned items were NOT put back into stock (${ref}). ` +
-                'A task has been raised — add them at the receiving shop.',
+                'A task has been raised. When the goods are at the shop, press Goods back on this ' +
+                'refund - never add them by hand as well, or they are counted twice.',
             );
             setRestockGaps((prev) =>
               prev.some((g) => g.ref === ref)
@@ -284,7 +285,8 @@ export default function RefundReviewsPage() {
           <p className="text-sm text-red-900 mt-1">
             The credit note posted and the customer is refunded, but the returned items could
             not be booked into any shop&apos;s stock — so they are physically with whoever
-            received them and IMS has no record of them. Add them at the receiving shop.
+            received them and IMS has no record of them. When they are at the shop, press Goods
+            back on the refund - never add them by hand as well, or they are counted twice.
           </p>
           <ul className="mt-1.5 text-xs text-red-800 list-disc pl-5">
             {restockGaps.map((g) => (

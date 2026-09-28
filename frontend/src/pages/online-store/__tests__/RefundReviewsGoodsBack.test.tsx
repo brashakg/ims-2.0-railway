@@ -25,9 +25,8 @@ vi.mock('../../../services/api/onlineStore', () => ({
   },
 }));
 
-vi.mock('../../../context/ToastContext', () => ({
-  useToast: () => ({ success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() }),
-}));
+const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() }));
+vi.mock('../../../context/ToastContext', () => ({ useToast: () => toast }));
 
 vi.mock('react-router-dom', () => ({
   Link: ({ children }: { children: React.ReactNode }) => <span>{children}</span>,
@@ -74,5 +73,25 @@ describe('Goods back on a Shopify refund row', () => {
 
     await user.click(buttons[1]);
     await waitFor(() => expect(refundReviewsApi.goodsBack).toHaveBeenCalledWith('posted'));
+  });
+
+  it('sends staff to Goods back, never to a manual add, when the confirm put nothing back', async () => {
+    // A manual add plus a later Goods back on the same refund counts one frame twice.
+    vi.mocked(refundReviewsApi.confirm).mockResolvedValue({
+      review_id: 'open',
+      status: 'POSTED',
+      result: { status: 'credited', restock_applied: false, return_id: 'RET-9' },
+    } as never);
+    const user = userEvent.setup();
+    render(<RefundReviewsPage />);
+    await user.click(await screen.findByRole('button', { name: /Confirm/ }));
+
+    await waitFor(() => expect(toast.warning).toHaveBeenCalled());
+    const said = String(vi.mocked(toast.warning).mock.calls[0][0]);
+    expect(said).toMatch(/press Goods back/);
+    expect(said).not.toMatch(/receiving shop/);
+    const banner = await screen.findByText(/IMS has no record of them/);
+    expect(banner.textContent).toMatch(/press Goods\s+back/);
+    expect(banner.textContent).not.toMatch(/Add them at the receiving shop/);
   });
 });
