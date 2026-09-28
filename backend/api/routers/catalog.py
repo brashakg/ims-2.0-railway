@@ -131,7 +131,12 @@ async def online_stock_reconcile(
 
     Post-BVI: "which SKUs are online" comes from the IMS catalog (Mongo), and
     the LISTED quantity is read LIVE from Shopify for the online-mapped SKUs
-    (creds-gated, read-only, capped to the MAPPED set). Honesty contract
+    (creds-gated, read-only, capped to the MAPPED set), PER LOCATION. With
+    ``store_id`` the row is that shop's own Shopify location (an unmapped shop
+    lists 0); without it the row sums every location, and OVERSELL_RISK is
+    still decided location by location (shopify_stock_parity.unbacked_units
+    against the shelf rule) -- never one shop's (or unmapped Pune's) shelf
+    backing another shop's listing. Honesty contract
     (audit fix-round P1): an online SKU the live read did NOT cover carries
     online=null and classifies LISTED_UNKNOWN -- never a confident 0/OK.
     listed_qty_live is True only on FULL mapped coverage;
@@ -164,12 +169,25 @@ async def online_stock_reconcile(
     skus = [p.get("sku") for p in products if p.get("sku")]
     online = online_status_for_skus(db, skus)  # {sku: {online, status, ...}}
 
-    # Live Shopify listed quantities: mapped SKUs first, cap on the mapped set,
-    # coverage counts carried through (None when the read is unavailable).
-    from ..services.online_sync_health import live_listed_qty_for_skus
+    # Live Shopify listed quantities PER LOCATION: mapped SKUs first, cap on
+    # the mapped set, coverage counts carried through (None when unavailable).
+    from ..services.online_sync_health import live_listed_qty_for_skus, rule_by_location
+    from ..services.shopify_stock_parity import unbacked_units
 
     live = await live_listed_qty_for_skus(db, skus)
-    online_qty = (live or {}).get("qty") or {}
+    variants = (live or {}).get("variants") or []
+    levels = (live or {}).get("levels") or {}
+    # The shelf per shop (the rule at buffer 0, block-aware) + the writer's
+    # own shop -> location map. None = unknown -> ONHAND_UNKNOWN, never clean.
+    rule = rule_by_location(db, skus, safety_buffer=0)
+    quantities, mapped = rule or ({}, {})
+    if store_id:
+        # ONE shop = its OWN location only; a shop with no location lists 0.
+        gid = mapped.get(store_id)
+        levels = {inv: ({gid: per.get(gid, 0)} if gid else {}) for inv, per in levels.items()}
+        mapped = {store_id: gid} if gid else {}
+    unbacked = unbacked_units(variants, quantities, levels, mapped) if rule else {}
+    inv_of = {v["sku"]: v["inventory_item_id"] for v in variants}
 
     items = []
     for p in products:
@@ -178,7 +196,8 @@ async def online_stock_reconcile(
         is_online = bool(o.get("online"))
         # Uncovered online SKU -> None (LISTED_UNKNOWN downstream), never a
         # confident 0. Offline SKUs carry 0 (they are not assessed anyway).
-        listed = online_qty.get(sku)
+        per_location = levels.get(inv_of.get(sku))
+        listed = None if per_location is None else sum(int(q) for q in per_location.values())
         items.append(
             {
                 "sku": sku,
@@ -187,6 +206,8 @@ async def online_stock_reconcile(
                 "in_store": None if on_hand is None else on_hand.get(p.get("product_id"), 0),
                 "online": (listed if is_online else 0),
                 "is_online": is_online,
+                # Listed beyond the shelf, location by location (None: unknown).
+                "unbacked": unbacked.get(sku) if is_online else 0,
             }
         )
 

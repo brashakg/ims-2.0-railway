@@ -20,6 +20,10 @@ Pins, each with its revert named in the test:
     nothing; a shop that leaves the mapped set has its task closed; an open
     task is found past 100 closed ones.
   * fail-soft: no creds, a raising shop list -> a reason, never a raise.
+  * the Stock Tally page and the catalog reconciliation screen read the SAME
+    per-location pairs (unbacked_units): unmapped Pune never backs another
+    shop's listing, a swapped pair is a risk, one shop's filter reads its own
+    location only.
 
 StrictDB + injected Shopify boundary -- no network, no production.
 """
@@ -524,6 +528,98 @@ def test_tick_never_raises_into_sentinel(monkeypatch):
     monkeypatch.setattr(inv, "_stores", boom)
     out = _run(sp.run_parity_tick(_db({"SKU-1": {"BV-A": 1}}), graphql=_shopify({})))
     assert out["checked"] is False and "tick error" in out["reason"]
+
+
+# ---------------------------------------------------------------------------
+# The other IMS-vs-Shopify readers: tally + reconciliation, per location
+# ---------------------------------------------------------------------------
+
+
+def test_unbacked_units_per_location_never_pooled():
+    """Pure. Pune (unmapped) holds 5: it backs nothing. BV-A 0 vs LOC_A 3 ->
+    3 unbacked; a stray location's units are all unbacked; an item Shopify did
+    not return has no key; an unread shop behind a listing is None."""
+    mapped = {"BV-A": LOC_A, "BV-B": LOC_B}
+    out = sp.unbacked_units(
+        [{"sku": "SKU-1", "inventory_item_id": INV_1}, {"sku": "SKU-2", "inventory_item_id": INV_2},
+         {"sku": "SKU-3", "inventory_item_id": "gid://shopify/InventoryItem/93"}],
+        {"SKU-1": {"BV-A": 0, "BV-B": 0, "BV-PUN": 5}, "SKU-2": {"BV-B": 1}},
+        {INV_1: {LOC_A: 3, LOC_B: 0, LOC_STRAY: 2}, INV_2: {LOC_A: 4, LOC_B: 1}},
+        mapped,
+    )
+    assert out == {"SKU-1": 5, "SKU-2": None}
+
+
+def _tally_and_parity(monkeypatch, db, levels):
+    from api.services import online_catalog, online_sync_health as osh
+
+    monkeypatch.setattr(online_catalog, "online_status_for_skus", lambda db, skus: {s: {"online": True} for s in skus})
+    fake = _shopify(levels)
+    monkeypatch.setattr("api.services.shopify_push._graphql", fake)
+    tally = _run(osh.stock_tally_live(db))
+    parity = _run(sp.run_parity_tick(db, graphql=fake))
+    return {r["sku"]: r for r in tally["items"]}, parity
+
+
+def test_tally_pune_never_backs_another_shops_listing(monkeypatch):
+    """The panel's input. BV-A 0, BV-B 0, Pune (unmapped) 5; Shopify sells 3
+    at BV-A's location. Parity flags BV-A; the tally must say the same: listed
+    3, sellable 0 (Pune is sold online nowhere), OVERSELL RISK. Put the pooled
+    `listed > on_hand` back as the risk -> 3 > 5 is False -> this fails."""
+    db = _db({"SKU-1": {"BV-A": 0, "BV-B": 0}}, pune_units=5)
+    rows, parity = _tally_and_parity(monkeypatch, db, {INV_1: {LOC_A: 3, LOC_B: 0}, INV_2: {}})
+    assert [(d["store_id"], d["ims"], d["shopify"]) for d in parity["drift"]] == [("BV-A", 0, 3)]
+    row = rows["SKU-1"]
+    assert row["online_listed_qty"] == 3 and row["on_hand"] == 5 and row["sellable"] == 0
+    assert row["oversell_risk"] is True
+
+
+def test_tally_a_swapped_pair_is_a_risk_not_a_pooled_match(monkeypatch):
+    """BV-A 3, BV-B 0; Shopify holds them swapped (LOC_A 0, LOC_B 3). Pooled
+    that is 3 vs 3; LOC_B sells 3 units BV-B does not have. Put a pooled
+    `listed > sellable` back as the risk -> False -> this fails."""
+    db = _db({"SKU-1": {"BV-A": 3, "BV-B": 0}})
+    rows, parity = _tally_and_parity(monkeypatch, db, {INV_1: {LOC_A: 0, LOC_B: 3}, INV_2: {}})
+    assert parity["drift_count"] == 2
+    assert rows["SKU-1"]["sellable"] == 3 and rows["SKU-1"]["oversell_risk"] is True
+
+
+def _reconcile(monkeypatch, db, levels, store_id):
+    from api.routers import catalog
+
+    monkeypatch.setattr(catalog, "_get_db", lambda: db)
+    monkeypatch.setattr(catalog, "online_status_for_skus", lambda db, skus: {s: {"online": True} for s in skus})
+    monkeypatch.setattr(catalog, "online_mapping_available", lambda db: True)
+    monkeypatch.setattr("api.services.shopify_push._graphql", _shopify(levels))
+    out = _run(catalog.online_stock_reconcile(store_id=store_id, safety_buffer=0, limit=1000,
+                                              current_user={"user_id": "u1"}))
+    return {r["sku"]: r for r in out["items"]}
+
+
+def test_reconcile_one_shop_reads_its_own_location_only(monkeypatch):
+    """The panel's input: a CORRECT system (BV-A 2 = LOC_A 2, BV-B 3 = LOC_B
+    3), the page filtered to BV-A. Its row is BV-A's location: online 2, OK --
+    never 2 against all 5 (a false OVERSELL_RISK). Drop the store_id branch
+    (compare one shop against every location) -> this fails."""
+    db = _db({"SKU-1": {"BV-A": 2, "BV-B": 3}})
+    levels = {INV_1: {LOC_A: 2, LOC_B: 3}, INV_2: {}}
+    row = _reconcile(monkeypatch, db, levels, "BV-A")["SKU-1"]
+    assert (row["in_store"], row["online"], row["status"]) == (2, 2, "OK")
+    row = _reconcile(monkeypatch, db, levels, None)["SKU-1"]
+    assert (row["in_store"], row["online"], row["status"]) == (5, 5, "OK")
+    # An unmapped shop lists nothing from its own shelf: 0 online, never all 5.
+    row = _reconcile(monkeypatch, _db({"SKU-1": {"BV-A": 2, "BV-B": 3}}, pune_units=4), levels, "BV-PUN")["SKU-1"]
+    assert (row["in_store"], row["online"], row["status"]) == (4, 0, "OK")
+
+
+def test_reconcile_all_shops_is_decided_location_by_location(monkeypatch):
+    """"All stores": BV-A 0, BV-B 0, Pune 5; LOC_A lists 3. Pooled that is 5
+    in store vs 3 online -- OK. BV-A's location oversells 3. Drop the row's
+    `unbacked` (fall back to the pooled online > in_store) -> OK -> this
+    fails."""
+    db = _db({"SKU-1": {"BV-A": 0, "BV-B": 0}}, pune_units=5)
+    row = _reconcile(monkeypatch, db, {INV_1: {LOC_A: 3, LOC_B: 0}, INV_2: {}}, None)["SKU-1"]
+    assert (row["in_store"], row["online"], row["status"]) == (5, 3, "OVERSELL_RISK")
 
 
 # ---------------------------------------------------------------------------

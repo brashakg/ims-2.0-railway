@@ -243,6 +243,41 @@ def unclaimed_locations(
     return sorted(out.values(), key=lambda r: -r["units"])
 
 
+def unbacked_units(
+    variants: List[Dict[str, Any]],
+    quantities: Dict[str, Dict[str, int]],
+    levels: Dict[str, Dict[str, int]],
+    mapped: Dict[str, str],
+) -> Dict[str, Optional[int]]:
+    """PURE: per SKU, the units Shopify lists that IMS does not back, counted
+    LOCATION BY LOCATION -- ``max(0, Shopify - IMS)`` on every
+    ``parity_rows`` pair (a mapped shop and its own location) plus EVERY unit
+    at a location no mapped shop claims. Never a pooled sum: one shop's shelf
+    (or unmapped Pune's) never backs a listing at another shop's location.
+
+    Only SKUs whose item Shopify returned get a key. None = a location lists
+    units against a shop IMS could not read and nothing else is known to be
+    unbacked (unknown is never clean)."""
+    claimed = set(mapped.values())
+    out: Dict[str, int] = {}
+    unknown = set()
+    for r in parity_rows(variants, quantities, levels, mapped):
+        shop = r["shopify_available"]
+        if shop is None:
+            continue
+        if r["ims_available"] is None:
+            if shop > 0:
+                unknown.add(r["sku"])
+            continue
+        out[r["sku"]] = out.get(r["sku"], 0) + max(0, shop - int(r["ims_available"]))
+    for v in variants:
+        per_location = levels.get(v["inventory_item_id"])
+        if per_location is not None:
+            stray = sum(max(0, int(q)) for gid, q in per_location.items() if gid not in claimed)
+            out[v["sku"]] = out.get(v["sku"], 0) + stray
+    return {sku: (None if sku in unknown and not n else n) for sku, n in out.items()}
+
+
 # ---------------------------------------------------------------------------
 # Reads (IMS catalog sample, Shopify levels)
 # ---------------------------------------------------------------------------

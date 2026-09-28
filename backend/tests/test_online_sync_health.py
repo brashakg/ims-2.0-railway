@@ -60,6 +60,10 @@ class _FakeColl:
     def count_documents(self, query):
         return sum(1 for r in self._rows if _matches(r, query))
 
+    def find_one(self, query=None, *_a, **_k):
+        # The rule's safety-buffer read (integrations): nothing configured.
+        return next((r for r in self._rows if _matches(r, query or {})), None)
+
     def aggregate(self, _pipeline):
         # Not exercised in these fakes (reconcile tests use the None/empty path).
         return iter([])
@@ -98,15 +102,31 @@ class _FakeDb:
         return self[name]
 
 
+_LOC = "gid://shopify/Location/1"
+
+
 def _shops(*extra):
     """The `stores` collection the on-hand reader scopes to: one ACTIVE
-    physical shop, plus whatever rows a test adds (a deactivated shop, ...)."""
+    physical shop MAPPED to Shopify location _LOC, plus whatever rows a test
+    adds (a deactivated shop, ...)."""
     return _FakeColl(
         [
-            {"store_id": "BV-DHN-02", "store_code": "BV-DHN-02", "store_type": "RETAIL", "is_active": True},
+            {"store_id": "BV-DHN-02", "store_code": "BV-DHN-02", "store_type": "RETAIL", "is_active": True,
+             "shopify_location_id": _LOC},
             *extra,
         ]
     )
+
+
+def _live(listed, *, mapped=None):
+    """A live_listed_qty_for_skus answer: every listed unit at _LOC."""
+    return {
+        "qty": dict(listed),
+        "variants": [{"sku": s, "inventory_item_id": f"inv-{s}"} for s in listed],
+        "levels": {f"inv-{s}": {_LOC: n} for s, n in listed.items()},
+        "live": len(listed),
+        "mapped": len(listed) if mapped is None else mapped,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -346,7 +366,7 @@ def test_stock_tally_populated_with_oversell_risk(monkeypatch):
     )
     db = _tally_db()
     # listed 3 <= sellable 5 -> OK; listed 9 > sellable 2 -> OVERSELL RISK.
-    out = sh.stock_tally_summary(db, online_qty={"SKU-OK": 3, "SKU-RISK": 9})
+    out = sh.stock_tally_summary(db, live=_live({"SKU-OK": 3, "SKU-RISK": 9}))
 
     # Only the two ONLINE skus are assessed; the offline one is skipped.
     assert out["summary"]["skus_checked"] == 2
@@ -438,11 +458,7 @@ def test_stock_tally_partial_coverage_is_not_live(monkeypatch):
             "SKU-RISK": {"online": True, "online_stock": None},
         },
     )
-    out = sh.stock_tally_summary(
-        _tally_db(),
-        online_qty={"SKU-OK": 3},
-        listed_coverage={"live": 1, "mapped": 2},
-    )
+    out = sh.stock_tally_summary(_tally_db(), live=_live({"SKU-OK": 3}, mapped=2))
     s = out["summary"]
     assert s["listed_qty_live"] is False   # partial, not full coverage
     assert s["listed_live_rows"] == 1
@@ -488,6 +504,9 @@ def test_live_listed_qty_filters_mapped_first_then_caps(monkeypatch):
     assert not any(k.startswith("U") for k in out["qty"])
     # LISTED is what the storefront sells: every location summed (2 + 3).
     assert set(out["qty"].values()) == {5}
+    # ...and the per-location levels ride along for the oversell verdict.
+    assert out["variants"][0] == {"sku": mapped[0], "inventory_item_id": f"inv-{mapped[0]}"}
+    assert out["levels"][f"inv-{mapped[0]}"] == {"gid://shopify/Location/1": 2, "gid://shopify/Location/2": 3}
 
     # A failed Shopify read (the reader's None) is "live read unavailable".
     async def _dead(db, inv_ids):
@@ -581,7 +600,7 @@ def test_a_unit_parked_on_the_ONLINE_store_never_counts_as_on_hand(monkeypatch):
         }
     )
 
-    out = sh.stock_tally_summary(db, online_qty={"SKU-ONLINE-ONLY": 1})
+    out = sh.stock_tally_summary(db, live=_live({"SKU-ONLINE-ONLY": 1}))
 
     row = out["items"][0]
     assert row["on_hand"] == 0, "no shop can ship it, so no shop holds it"
@@ -622,6 +641,7 @@ def test_the_catalog_reconciliation_screen_reads_the_same_on_hand_as_the_tile(mo
             "stock_units": _StockUnitsColl(
                 [{"product_id": "P9", "status": "AVAILABLE", "quantity": 1, "store_id": "BV-ONLINE-01"}]
             ),
+            "stores": _shops(),
         }
     )
     monkeypatch.setattr(catalog, "_get_db", lambda: db)
@@ -631,7 +651,7 @@ def test_the_catalog_reconciliation_screen_reads_the_same_on_hand_as_the_tile(mo
     monkeypatch.setattr(catalog, "online_mapping_available", lambda db: True)
 
     async def _listed(db, skus, **kw):  # noqa: ARG001 -- the website shows 1
-        return {"qty": {"SKU-ONLINE-ONLY": 1}, "live": 1, "mapped": 1}
+        return _live({"SKU-ONLINE-ONLY": 1})
 
     monkeypatch.setattr(sh, "live_listed_qty_for_skus", _listed)
 
@@ -660,7 +680,7 @@ def test_a_unit_on_a_real_shop_still_counts(monkeypatch):
         }
     )
 
-    out = sh.stock_tally_summary(db, online_qty={"SKU-REAL": 1})
+    out = sh.stock_tally_summary(db, live=_live({"SKU-REAL": 1}))
     assert out["items"][0]["on_hand"] == 1 and out["items"][0]["oversell_risk"] is False
 
 
@@ -692,7 +712,7 @@ def test_R8_a_unit_at_a_deactivated_shop_never_counts_on_the_tile(monkeypatch):
         }
     )
 
-    out = sh.stock_tally_summary(db, online_qty={"SKU-OLD": 1})
+    out = sh.stock_tally_summary(db, live=_live({"SKU-OLD": 1}))
 
     row = out["items"][0]
     assert row["on_hand"] == 0, "the writer publishes it nowhere, so the tile holds it nowhere"
@@ -769,7 +789,7 @@ def test_R9_an_unknown_on_hand_is_never_a_confident_0_on_the_tile_or_the_tally(m
     tile = sh.pending_reconcile_summary(db)
     assert tile["scanned"] == 1 and tile["onhand_unknown"] == 1, tile
     assert tile["oversell_risk"] == 0 and tile["pending"] == 0 and tile["oversell_risk_units"] == 0, tile
-    tally = sh.stock_tally_summary(db, online_qty={"SKU-REAL": 3})
+    tally = sh.stock_tally_summary(db, live=_live({"SKU-REAL": 3}))
     assert tally["items"] == [] and tally["summary"]["on_hand_unknown"] is True, tally
     assert tally["summary"]["at_risk_count"] == 0 and tally["summary"]["total_on_hand"] == 0
 
@@ -789,7 +809,7 @@ def test_R9_the_reconciliation_screen_shows_an_unknown_on_hand_as_unknown(monkey
     monkeypatch.setattr(catalog, "online_mapping_available", lambda db: True)
 
     async def _listed(db, skus, **kw):  # noqa: ARG001 -- the website shows 3
-        return {"qty": {"SKU-REAL": 3}, "live": 1, "mapped": 1}
+        return _live({"SKU-REAL": 3})
 
     monkeypatch.setattr(sh, "live_listed_qty_for_skus", _listed)
     out = asyncio.run(
