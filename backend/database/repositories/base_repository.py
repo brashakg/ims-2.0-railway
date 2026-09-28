@@ -198,6 +198,22 @@ class BaseRepository(ABC, Generic[T]):
             print(f"Error updating {self.entity_name}: {e}")
             return False
 
+    def update_if(self, id: str, expected: Dict, data: Dict) -> bool:
+        """Compare-and-set update: lands only while the stored document still
+        matches ``expected`` (e.g. the status and updated_at the caller read).
+
+        False when another write got there first -- the caller refuses rather
+        than overwriting it. A database error RAISES: it is never reported as
+        a lost race."""
+        data["updated_at"] = datetime.now()
+        result = self.collection.update_one(
+            {**expected, self.id_field: id}, {"$set": data}
+        )
+        matched = getattr(result, "matched_count", None)
+        if matched is None:  # MockCollection reports modified_count only
+            matched = getattr(result, "modified_count", 0)
+        return bool(matched)
+
     def delete(self, id: str) -> bool:
         """
         Delete document by ID (hard delete)

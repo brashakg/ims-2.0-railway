@@ -77,6 +77,12 @@ class _PORepo:
             return True
         return False
 
+    def update_if(self, pid, expected, fields):
+        doc = self.pos.get(pid)
+        if doc is None or any(doc.get(k) != v for k, v in expected.items()):
+            return False
+        return self.update(pid, fields)
+
 
 class _VendorRepo:
     def find_by_id(self, vid):

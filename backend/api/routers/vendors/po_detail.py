@@ -1,5 +1,7 @@
 """Single purchase order: timeline, read, edit, send, cancel (whole or a line)."""
 
+from datetime import timezone
+
 from ._shared import (
     Depends,
     HTTPException,
@@ -22,7 +24,7 @@ from ._shared import (
 )
 from .gst import build_po_gst, po_gst_context
 from .models import POLineCancel, POUpdate, cancel_reason, expected_date_not_backdated
-from .numbering import compute_po_receipt_state
+from .numbering import _cumulative_received_by_product, compute_po_receipt_state
 from .purchase_orders import audit_cost_filled, price_po_lines
 
 
@@ -327,14 +329,18 @@ async def send_po(
                     },
                 )
 
-        po_repo.update(
+        # Sends exactly what was checked above: an edit landing in between
+        # refuses the send instead of going to the vendor unchecked.
+        if not po_repo.update_if(
             po_id,
+            _as_read(po),
             {
                 "status": "SENT",
                 "sent_at": datetime.now().isoformat(),
                 "sent_by": current_user.get("user_id"),
             },
-        )
+        ):
+            raise HTTPException(status_code=409, detail=_CHANGED_MEANWHILE)
 
     return {"message": "PO sent to vendor", "po_id": po_id}
 
@@ -349,16 +355,40 @@ async def send_po(
 # the audit log.
 # ============================================================================
 
-_PART_RECEIVED = ("PARTIALLY_RECEIVED", "PARTIAL")
 # Nothing left to cancel. Every other status (DRAFT, SENT, ACKNOWLEDGED, and
-# any legacy word) cancels whole; a part-received one cancels what is due.
+# any legacy word) cancels whole -- unless receipts put stock on the shelf, then
+# only what is still due is cancelled.
 _CLOSED = ("RECEIVED", "CANCELLED")
 _CLOSED_DETAIL = (
     "A received or cancelled order cannot be cancelled - nothing on it is "
     "still due."
 )
-# A delivery logged against the order but not accepted into stock yet.
-_WAITING_GRN = ("PENDING", "PARTIALLY_ACCEPTED")
+# A delivery logged against the order but not (fully) in stock yet, and what
+# clears each: void refuses anything not PENDING, and a PARTIALLY_ACCEPTED one
+# holds lines until their product is catalogued.
+_WAITING_GRN = {
+    "PENDING": "is logged but not accepted - accept it or void it",
+    "PARTIALLY_ACCEPTED": (
+        "has lines held until their product is catalogued - catalogue it, "
+        "then accept the delivery again"
+    ),
+}
+_CHANGED_MEANWHILE = "This order changed since you opened it - reload it and try again."
+
+
+def _now_iso() -> str:
+    """Now, WITH its zone (owner ruling: times are saved with their zone and
+    shown in IST). UTC, so it still sorts beside the older naive-UTC stamps."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _as_read(po: dict) -> dict:
+    """The compare-and-set guard for a write: the order must still hold the
+    status and the last-write stamp this request read. Every PO write goes
+    through the repository, which moves updated_at, so a send, a receipt or a
+    colleague's change in between refuses the write instead of being
+    overwritten by it."""
+    return {"status": po.get("status"), "updated_at": po.get("updated_at")}
 
 
 def _qty(v) -> int:
@@ -390,33 +420,47 @@ def _refuse_if_box_waiting(po_id: str) -> None:
     rows = grn_repo.find_many(
         {"po_id": po_id, "status": {"$in": list(_WAITING_GRN)}}, limit=50
     )
-    waiting = [g for g in rows or [] if g.get("status") in _WAITING_GRN]
+    waiting = [
+        f"{g.get('grn_number') or g.get('grn_id')} {_WAITING_GRN[g['status']]}"
+        for g in rows or []
+        if g.get("status") in _WAITING_GRN
+    ]
     if waiting:
-        numbers = ", ".join(str(g.get("grn_number") or g.get("grn_id")) for g in waiting)
         raise HTTPException(
             status_code=409,
             detail=(
-                f"A delivery against this order is logged but not accepted yet "
-                f"({numbers}). Accept it or void it first, then cancel what is "
-                "still due."
+                "A delivery against this order is not in stock yet: "
+                + "; ".join(waiting)
+                + ". Then cancel what is still due."
             ),
         )
 
 
-def _received_per_line(po: dict) -> list:
-    """Units received against each line. Receipts are counted per PRODUCT, so a
-    product's cumulative accepted quantity is shared out over its lines in
-    order -- two lines of one product never both claim the same units."""
+def _received_by_product(po: dict) -> dict:
+    """Units on the shelf per product: the ACCEPTED receipts' sum -- the count
+    grn_accept closes an order on -- never below the order's own copy. That
+    copy can lag (grn_accept's fallback writes only the status), and an
+    unreadable receipt table must not make arrived stock look cancellable."""
+    out = dict(_cumulative_received_by_product(get_grn_repository(), po.get("po_id")))
     header = po.get("received_qty_by_product") or {}
-    left: dict = {}
+    for it in po.get("items") or []:
+        pid = it.get("product_id")
+        own = header.get(pid)
+        own = _qty(it.get("received_qty") if own is None else own)
+        out[pid] = max(_qty(out.get(pid)), own)
+    return out
+
+
+def _received_per_line(po: dict, by_product: dict) -> list:
+    """Units received against each line. Receipts are counted per PRODUCT, so a
+    product's received quantity is shared out over its lines in order -- two
+    lines of one product never both claim the same units."""
+    left = dict(by_product)
     out = []
     for it in po.get("items") or []:
         pid = it.get("product_id")
-        if pid not in left:
-            recv = header.get(pid)
-            left[pid] = _qty(it.get("received_qty") if recv is None else recv)
-        take = min(left[pid], _qty(it.get("quantity")))
-        left[pid] -= take
+        take = min(_qty(left.get(pid)), _qty(it.get("quantity")))
+        left[pid] = _qty(left.get(pid)) - take
         out.append(take)
     return out
 
@@ -432,20 +476,17 @@ def _cancel_remainder(line: dict, received: int) -> int:
     if due <= 0:
         return 0
     line["cancelled_qty"] = _qty(line.get("cancelled_qty")) + due
+    line["received_qty"] = received
     line["quantity"] = received
     line["ordered_qty"] = received
     line["line_status"] = "RECEIVED" if received else "CANCELLED"
     return due
 
 
-def _status_after_cancel(po: dict, items: list, received: list) -> str:
+def _status_after_cancel(po: dict, items: list, by_product: dict) -> str:
     """Status once units were withdrawn: the receipt rule decides when anything
     arrived; nothing arrived and nothing left -> CANCELLED; else unchanged."""
-    if any(received):
-        by_product: dict = {}
-        for it, r in zip(po.get("items") or [], received):
-            pid = it.get("product_id")
-            by_product[pid] = by_product.get(pid, 0) + r
+    if any(by_product.values()):
         return compute_po_receipt_state(items, by_product)
     if not any(_qty(it.get("quantity")) for it in items):
         return "CANCELLED"
@@ -488,13 +529,15 @@ def _reprice(po: dict, items: list) -> dict:
 
 def _write_change(po_repo, po, patch, events, current_user, action, before, after):
     """Apply one change to an order: the patch, the timeline events (stamped
-    with the person and the time) and one audit row. Audit is fail-soft -- a
+    with the person and the time) and one audit row -- only while the order is
+    still as this request read it (409 otherwise). Audit is fail-soft -- a
     missing audit row never undoes the change the person made."""
-    now = datetime.now().isoformat()
+    now = _now_iso()
     who = current_user.get("user_id")
     stamped = [{**ev, "at": now, "actor": who} for ev in events]
     patch = {**patch, "history": [*(po.get("history") or []), *stamped]}
-    po_repo.update(po["po_id"], patch)
+    if not po_repo.update_if(po["po_id"], _as_read(po), patch):
+        raise HTTPException(status_code=409, detail=_CHANGED_MEANWHILE)
     try:
         audit = get_audit_repository()
         if audit is not None:
@@ -656,20 +699,27 @@ async def cancel_po(
     status = po.get("status")
     if status in _CLOSED:
         raise HTTPException(status_code=400, detail=_CLOSED_DETAIL)
+    by_product: dict = {}
     if status != "DRAFT":
         _refuse_if_box_waiting(po_id)
+        by_product = _received_by_product(po)
 
-    if status in _PART_RECEIVED:
+    if any(by_product.values()):
         items = [dict(i) for i in po.get("items") or []]
-        received = _received_per_line(po)
+        received = _received_per_line(po, by_product)
         units = sum(_cancel_remainder(it, r) for it, r in zip(items, received))
         if units == 0:
             raise HTTPException(
                 status_code=400,
                 detail="Nothing on this order is still due.",
             )
-        new_status = _status_after_cancel(po, items, received)
-        patch = {"items": items, **_reprice(po, items), "status": new_status}
+        new_status = _status_after_cancel(po, items, by_product)
+        patch = {
+            "items": items,
+            **_reprice(po, items),
+            "status": new_status,
+            "received_qty_by_product": by_product,
+        }
         event = {
             "kind": "cancelled",
             "label": "Rest cancelled",
@@ -682,7 +732,7 @@ async def cancel_po(
         new_status = "CANCELLED"
         patch = {
             "status": new_status,
-            "cancelled_at": datetime.now().isoformat(),
+            "cancelled_at": _now_iso(),
             "cancelled_by": current_user.get("user_id"),
             "cancellation_reason": reason,
         }
@@ -724,10 +774,7 @@ async def cancel_po_line(
         raise HTTPException(status_code=404, detail="No such line on this order")
     line = items[line_index]
     if body.product_id and body.product_id != line.get("product_id"):
-        raise HTTPException(
-            status_code=409,
-            detail="This order changed since you opened it - reload it and try again.",
-        )
+        raise HTTPException(status_code=409, detail=_CHANGED_MEANWHILE)
     name = line.get("product_name") or line.get("sku") or line.get("product_id")
 
     if status == "DRAFT":
@@ -742,9 +789,11 @@ async def cancel_po_line(
         items.pop(line_index)
         units = _qty(line.get("quantity"))
         new_status = status
+        by_product = None
     else:
         _refuse_if_box_waiting(po_id)
-        received = _received_per_line(po)
+        by_product = _received_by_product(po)
+        received = _received_per_line(po, by_product)
         units = _cancel_remainder(items[line_index], received[line_index])
         if units == 0:
             raise HTTPException(
@@ -754,9 +803,11 @@ async def cancel_po_line(
                     "has arrived."
                 ),
             )
-        new_status = _status_after_cancel(po, items, received)
+        new_status = _status_after_cancel(po, items, by_product)
 
     patch = {"items": items, **_reprice(po, items), "status": new_status}
+    if by_product is not None:
+        patch["received_qty_by_product"] = by_product
     events = [
         {
             "kind": "line_cancelled",
@@ -767,7 +818,7 @@ async def cancel_po_line(
     if new_status == "CANCELLED":
         patch.update(
             {
-                "cancelled_at": datetime.now().isoformat(),
+                "cancelled_at": _now_iso(),
                 "cancelled_by": current_user.get("user_id"),
                 "cancellation_reason": body.reason,
             }

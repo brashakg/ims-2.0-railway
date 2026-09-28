@@ -23,6 +23,7 @@ import asyncio
 import copy
 import os
 import sys
+from datetime import datetime
 
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
 os.environ.setdefault("MONGODB_URI", "")
@@ -33,6 +34,8 @@ from fastapi import HTTPException  # noqa: E402
 from pydantic import ValidationError  # noqa: E402
 
 from api.routers import vendors as v  # noqa: E402
+from database.repositories.vendor_repository import PurchaseOrderRepository  # noqa: E402
+from strict_fakes import StrictCollection, matches  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -54,6 +57,12 @@ class _PORepo:
         self.pos[pid].update(copy.deepcopy(patch))
         return True
 
+    def update_if(self, pid, expected, patch):
+        doc = self.pos.get(pid)
+        if doc is None or not matches(doc, expected):
+            return False
+        return self.update(pid, patch)
+
     def find_many(self, flt, skip=0, limit=50):
         out = []
         for doc in self.pos.values():
@@ -73,7 +82,8 @@ class _GRNRepo:
         self.grns = list(grns)
 
     def find_many(self, flt, limit=200):
-        return [g for g in self.grns if g.get("po_id") == flt.get("po_id")]
+        # Honours the status filter: the receipt sum reads ACCEPTED ones only.
+        return [copy.deepcopy(g) for g in self.grns if matches(g, flt)]
 
 
 class _AuditRepo:
@@ -301,6 +311,7 @@ def test_cancel_refused_while_a_box_waits_to_be_accepted(monkeypatch):
         _run(v.cancel_po("PO1", "changed mind", _user()))
     assert e.value.status_code == 409
     assert "RCPT/0007" in str(e.value.detail)
+    assert "void" in str(e.value.detail)  # a PENDING receipt CAN be voided
     assert repo.updates == []
 
 
@@ -496,3 +507,190 @@ def test_timeline_still_shows_a_legacy_cancel(monkeypatch):
     tl = _run(v.get_po_timeline("PO1", _user()))
     c = [e for e in tl["events"] if e["kind"] == "cancelled"]
     assert len(c) == 1 and c[0]["detail"] == "Rejected by approver"
+
+
+# =========================================================================== #
+# Verifier round 2 -- the guards hold for real, not only in the happy path
+# =========================================================================== #
+
+
+def test_line_cancel_refused_while_a_box_waits_to_be_accepted(monkeypatch):
+    """SENT order, P2 x3, a PENDING receipt holding 3 x P2. Had the line been
+    cancelled first, accepting that receipt would put 3 units of a cancelled
+    line into stock and mark the order received."""
+    repo, audit = _wire(
+        monkeypatch,
+        _po(status="SENT"),
+        grns=[{"po_id": "PO1", "grn_number": "RCPT/0009", "status": "PENDING",
+               "items": [{"product_id": "P2", "received_qty": 3}]}],
+    )
+    with pytest.raises(HTTPException) as e:
+        _run(v.cancel_po_line("PO1", 1, _line_body(product_id="P2"), _user()))
+    assert e.value.status_code == 409
+    assert "RCPT/0009" in str(e.value.detail)
+    assert repo.updates == [] and audit.rows == []
+
+
+def test_a_held_receipt_points_to_cataloguing_not_to_void(monkeypatch):
+    """PARTIALLY_ACCEPTED = some lines held until their product is catalogued.
+    Void refuses anything not PENDING, so the refusal must not send the person
+    to a void button that fails; it says what actually clears it."""
+    po = _po(
+        status="PARTIALLY_RECEIVED",
+        items=[
+            _line("P1", "Carrera CA8895", 2, 1000, received=2),
+            _line("P2", "Ray-Ban RB2140", 3, 2000),
+        ],
+        received_qty_by_product={"P1": 2},
+    )
+    repo, _ = _wire(
+        monkeypatch,
+        po,
+        grns=[{"po_id": "PO1", "grn_number": "RCPT/0010", "status": "PARTIALLY_ACCEPTED"}],
+    )
+    for call in (
+        lambda: v.cancel_po("PO1", "vendor out of stock", _user()),
+        lambda: v.cancel_po_line("PO1", 1, _line_body(), _user()),
+    ):
+        with pytest.raises(HTTPException) as e:
+            _run(call())
+        detail = str(e.value.detail).lower()
+        assert e.value.status_code == 409 and "rcpt/0010" in detail
+        assert "catalogue" in detail and "void" not in detail
+    assert repo.updates == []
+
+
+def _stale_part_received():
+    """PARTIALLY_RECEIVED, but the order's own copy of the received counts was
+    never written (grn_accept's fallback writes only the status): no header,
+    every line says 0. The receipts say 1 x P2 is on the shelf."""
+    po = _po(status="PARTIALLY_RECEIVED")
+    grns = [{"po_id": "PO1", "grn_number": "RCPT/0011", "status": "ACCEPTED",
+             "items": [{"product_id": "P2", "accepted_qty": 1}]},
+            # A receipt that never reached the shelf counts for nothing.
+            {"po_id": "PO1", "grn_number": "RCPT/0012", "status": "VOID",
+             "items": [{"product_id": "P1", "accepted_qty": 2}]}]
+    return po, grns
+
+
+def test_cancel_counts_what_the_receipts_accepted_not_a_stale_copy(monkeypatch):
+    po, grns = _stale_part_received()
+    repo, _ = _wire(monkeypatch, po, grns=grns)
+    _run(v.cancel_po("PO1", "vendor out of stock", _user()))
+    doc = repo.pos["PO1"]
+    p1, p2 = doc["items"]
+    # The Ray-Ban on the shelf stays ordered and received; 2 are withdrawn.
+    assert p2["quantity"] == 1 and p2["cancelled_qty"] == 2
+    assert p2["received_qty"] == 1 and p2["line_status"] == "RECEIVED"
+    assert p1["quantity"] == 0 and p1["line_status"] == "CANCELLED"
+    assert doc["received_qty_by_product"] == {"P1": 0, "P2": 1}
+    # Stock arrived, so it is a received order, never a cancelled one.
+    assert doc["status"] == "RECEIVED"
+    assert v.compute_po_receipt_state(doc["items"], doc["received_qty_by_product"]) == "RECEIVED"
+
+
+def test_line_cancel_counts_what_the_receipts_accepted(monkeypatch):
+    po, grns = _stale_part_received()
+    repo, _ = _wire(monkeypatch, po, grns=grns)
+    _run(v.cancel_po_line("PO1", 1, _line_body(), _user()))
+    p2 = repo.pos["PO1"]["items"][1]
+    assert p2["quantity"] == 1 and p2["cancelled_qty"] == 2 and p2["received_qty"] == 1
+    assert repo.pos["PO1"]["status"] == "PARTIALLY_RECEIVED"  # Carreras still due
+
+
+class _RacingRepo(PurchaseOrderRepository):
+    """The REAL repository over a strict fake collection. ``race`` runs once,
+    right after the handler's read: someone else's write landing between the
+    check and the write."""
+
+    def __init__(self, po, race):
+        super().__init__(StrictCollection("purchase_orders", [copy.deepcopy(po)]))
+        self.race = race
+
+    def find_by_id(self, pid):
+        doc = super().find_by_id(pid)
+        race, self.race = self.race, None
+        if race:
+            race(self)
+        return doc
+
+
+def _wire_racing(monkeypatch, po, race):
+    _wire(monkeypatch, None)
+    repo = _RacingRepo(po, race)
+    monkeypatch.setattr(v, "get_purchase_order_repository", lambda: repo)
+    return repo
+
+
+def test_edit_refused_when_the_order_was_sent_meanwhile(monkeypatch):
+    def send(repo):  # what send_po writes
+        repo.update("PO1", {"status": "SENT", "sent_by": "mgr_other"})
+
+    repo = _wire_racing(monkeypatch, _po(), send)
+    body = _edit_body(
+        [{"product_id": "P1", "product_name": "Carrera CA8895", "sku": "P1",
+          "quantity": 9, "unit_price": 1000, "gst_rate": 5}]
+    )
+    with pytest.raises(HTTPException) as e:
+        _run(v.update_po("PO1", body, _user()))
+    assert e.value.status_code == 409
+    doc = repo.collection.docs[0]
+    # The order the vendor already has is exactly what was sent.
+    assert doc["status"] == "SENT"
+    assert [(i["product_id"], i["quantity"]) for i in doc["items"]] == [("P1", 2), ("P2", 3)]
+    assert not doc.get("history")
+
+
+def test_two_line_cancels_at_once_never_lose_one(monkeypatch):
+    def colleague_cancels_p1(repo):  # a finished line cancel, by someone else
+        items = copy.deepcopy(repo.collection.docs[0]["items"])
+        items[0].update(quantity=0, ordered_qty=0, cancelled_qty=2, line_status="CANCELLED")
+        repo.update(
+            "PO1",
+            {"items": items,
+             "history": [{"kind": "line_cancelled", "actor": "mgr_other",
+                          "detail": "Carrera CA8895: 2 units cancelled"}]},
+        )
+
+    repo = _wire_racing(monkeypatch, _po(status="SENT"), colleague_cancels_p1)
+    with pytest.raises(HTTPException) as e:
+        _run(v.cancel_po_line("PO1", 1, _line_body(product_id="P2"), _user()))
+    assert e.value.status_code == 409
+    doc = repo.collection.docs[0]
+    assert doc["items"][0]["line_status"] == "CANCELLED"
+    assert doc["items"][1]["quantity"] == 3  # untouched by the refused write
+    assert [h["actor"] for h in doc["history"]] == ["mgr_other"]
+
+    # Reloaded and tried again: both changes and both timeline rows survive.
+    _run(v.cancel_po_line("PO1", 1, _line_body(product_id="P2"), _user()))
+    doc = repo.collection.docs[0]
+    assert [i["line_status"] for i in doc["items"]] == ["CANCELLED", "CANCELLED"]
+    assert doc["status"] == "CANCELLED"
+    assert [h["actor"] for h in doc["history"]] == ["mgr_other", "mgr_dhn2", "mgr_dhn2"]
+
+
+def test_change_times_are_saved_with_their_zone(monkeypatch):
+    """Owner ruling (Wave 6 A7): save every time WITH its zone. A naive stamp on
+    the UTC server showed a 14:03 IST cancel as 8:33 am in the drawer."""
+    repo, _ = _wire(monkeypatch, _po(status="SENT"))
+    _run(v.cancel_po_line("PO1", 1, _line_body(), _user()))
+    _run(v.cancel_po("PO1", "vendor closed", _user()))
+    doc = repo.pos["PO1"]
+    for stamp in [h["at"] for h in doc["history"]] + [doc["cancelled_at"]]:
+        assert datetime.fromisoformat(stamp).utcoffset() is not None, stamp
+
+
+def test_send_refused_when_the_draft_was_edited_meanwhile(monkeypatch):
+    """The send checks the lines, then writes: an edit landing in between must
+    not go to the vendor unchecked."""
+    def edit(repo):  # a finished draft edit, by someone else
+        items = copy.deepcopy(repo.collection.docs[0]["items"])
+        items[0]["quantity"] = 9
+        repo.update("PO1", {"items": items})
+
+    repo = _wire_racing(monkeypatch, _po(), edit)
+    with pytest.raises(HTTPException) as e:
+        _run(v.send_po("PO1", _user()))
+    assert e.value.status_code == 409
+    assert repo.collection.docs[0]["status"] == "DRAFT"
+    assert "sent_at" not in repo.collection.docs[0]
