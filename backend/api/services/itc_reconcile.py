@@ -109,11 +109,15 @@ def _is_interstate(bill_pos, entity_state) -> bool:
 def build_itc_register(bills: List[dict], entity_state: Optional[str] = None) -> dict:
     """Input credit available from booked vendor bills, grouped by period.
 
-    Splits tax into CGST + SGST (intra-state) vs IGST (inter-state, when the
-    bill's place_of_supply differs from `entity_state`). When place_of_supply
-    is missing or entity_state is None, falls back to intra-state (CGST/SGST
-    half-and-half) -- so existing data without place_of_supply behaves the
-    same as before.
+    A bill that STORES its tax heads (cgst_total / sgst_total / igst_total --
+    every purchase invoice and transfer mirror) is reported exactly as stored:
+    the register, GSTR-3B and the bill itself show one figure (F40). Only a
+    legacy header-only bill (no heads) is re-derived: IGST when its
+    place_of_supply differs from `entity_state`, else CGST + SGST half-and-half
+    (the intra-state fallback when either state is missing).
+
+    A bill with no taxable value and no tax carries no credit and is not
+    counted -- a cost-less stock transfer's Rs 0 mirror bill is not a bill.
     """
     periods: dict = {}
     total_taxable = 0.0
@@ -126,8 +130,9 @@ def build_itc_register(bills: List[dict], entity_state: Optional[str] = None) ->
             continue
         taxable = _f(b.get("taxable_amount"))
         tax = _f(b.get("tax_amount"))
+        if not taxable and not tax:
+            continue
         p = _period(b.get("bill_date")) or "unknown"
-        interstate = _is_interstate(b.get("place_of_supply"), entity_state)
         d = periods.setdefault(
             p,
             {
@@ -142,19 +147,25 @@ def build_itc_register(bills: List[dict], entity_state: Optional[str] = None) ->
         )
         d["taxable"] = round(d["taxable"] + taxable, 2)
         d["tax"] = round(d["tax"] + tax, 2)
-        if interstate:
-            d["igst"] = round(d["igst"] + tax, 2)
-            total_igst += tax
+        if any(k in b for k in ("cgst_total", "sgst_total", "igst_total")):
+            cgst_part = _f(b.get("cgst_total"))
+            sgst_part = _f(b.get("sgst_total"))
+            igst_part = _f(b.get("igst_total"))
+        elif _is_interstate(b.get("place_of_supply"), entity_state):
+            cgst_part, sgst_part, igst_part = 0.0, 0.0, tax
         else:
             # Residual trick: compute half then assign the remainder to sgst so
             # cgst + sgst == tax exactly (avoids +-1 paisa drift on odd-paise
             # tax amounts, e.g. tax=5.01 -> half=2.50 + sgst=2.51 = 5.01).
-            half = round(tax / 2, 2)
-            sgst_part = round(tax - half, 2)
-            d["cgst"] = round(d["cgst"] + half, 2)
-            d["sgst"] = round(d["sgst"] + sgst_part, 2)
-            total_cgst += half
-            total_sgst += sgst_part
+            cgst_part = round(tax / 2, 2)
+            sgst_part = round(tax - cgst_part, 2)
+            igst_part = 0.0
+        d["cgst"] = round(d["cgst"] + cgst_part, 2)
+        d["sgst"] = round(d["sgst"] + sgst_part, 2)
+        d["igst"] = round(d["igst"] + igst_part, 2)
+        total_cgst += cgst_part
+        total_sgst += sgst_part
+        total_igst += igst_part
         d["bills"] += 1
         total_taxable += taxable
         total_tax += tax

@@ -94,6 +94,11 @@ async def itc_register(
                     "taxable_amount": 1,
                     "tax_amount": 1,
                     "place_of_supply": 1,
+                    # The bill's own heads -- the register reports them as
+                    # stored instead of re-deriving (F40).
+                    "cgst_total": 1,
+                    "sgst_total": 1,
+                    "igst_total": 1,
                     "status": 1,
                     "itc_blocked": 1,
                     "itc_eligible": 1,

@@ -503,7 +503,7 @@ def test_the_bill_receives_on_the_primary_gstin_and_says_so_out_loud():
     real answer instead of a stubbed one, so it changes the day someone changes
     recipient resolution for real, and never before.
     """
-    recipient = pi._resolve_recipient(_entity_db(), "E1", None, None)
+    recipient = pi._resolve_recipient(_entity_db(), "E1")
     assert recipient["recipient_gstin"] == "20AABCU9603R1ZM"  # the JH primary
     assert _bill_verdict(_MH_VENDOR, recipient["recipient_gstin"]) is True
     assert _po_verdict(_MH_VENDOR, _MH_SHOP_WITH_JH_GSTIN) is False
