@@ -3939,3 +3939,35 @@ def test_F3_a_shop_the_writer_did_not_write_keeps_its_last_accepted_number_so_a_
     _live(monkeypatch, _Spy(_responses()))
     _run(wb.writeback_skus(db3, ["SP-1"], "BV-B"))
     assert _baseline(db3)["quantities"]["SP-1"] == {"BV-A": 2, "BV-B": 0, "BV-C": 0}
+
+
+def test_F6_a_dead_status_read_after_an_accepted_write_never_says_nothing_written(monkeypatch):
+    """A SCREEN SAYS SOMETHING UNTRUE (#1141 fix-six recheck, lens
+    r1:first-push). `_alert_unmapped_online` stamped a dead sellable-online read
+    in `_target_error`'s words -- 'the IMS -> Shopify inventory-item mapping
+    could not be read -- nothing written'. On the targets branch it runs AFTER
+    the writer, so the row said 'nothing written' over a write Shopify
+    ACCEPTED, and it named the wrong read (the mapping read answered; the
+    STATUS read died). Its own line now: the status read, no 'nothing
+    written'. Stamp `_target_error` again -> this fails."""
+    from api.services import online_catalog as oc
+
+    spy = _Spy(_responses())
+    _live(monkeypatch, spy)
+    db = _listed(_db(a=1, b=0, c=0))
+    db.get_collection("products").insert_one({"product_id": "spine-2", "sku": "SP-2"})  # no Shopify target
+    real = oc.online_status_for_skus
+
+    def _dies(d, skus, *, strict=False):
+        if strict:
+            raise RuntimeError("status read died")
+        return real(d, skus, strict=strict)
+
+    monkeypatch.setattr(oc, "online_status_for_skus", _dies)
+    s = _run(wb.writeback_skus(db, ["SP-1", "SP-2"], "BV-A"))
+    run = list(db.get_collection("sync_runs").find({}))[0]
+    assert s["pushed"] == 1 and (INV_GID, LOC_A, 1) in spy.rows(), "SP-1 WAS written"
+    assert s["code"] == shopify_push.STOCK_ONHAND_UNKNOWN and run["ok"] is False, s
+    for text in (s["error"], run["error"]):
+        assert "nothing written" not in text, text
+        assert "sellable on the website" in text and "status read died" in text and "SP-2" in text, text

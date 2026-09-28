@@ -686,13 +686,25 @@ def _alert_unmapped_online(db, skus: List[str], summary: Dict[str, Any]) -> None
     be ``logger.debug`` + return, with the catalog lookups inside
     ``online_status_for_skus`` fail-soft to {} besides, so a dead catalog read
     read as "not sellable online": no row, no P1 task, the storefront kept
-    the pre-sale number with every screen green."""
+    the pre-sale number with every screen green.
+
+    IN ITS OWN WORDS (#1141 fix-six recheck): it used to borrow
+    ``_target_error`` -- "the inventory-item mapping could not be read --
+    nothing written" -- which names the wrong read, and on the targets branch
+    runs AFTER the writer, so it said "nothing written" over a write Shopify
+    accepted."""
     try:
         from . import online_catalog
 
         statuses = online_catalog.online_status_for_skus(db, skus, strict=True)
     except Exception as exc:  # noqa: BLE001
-        _say_unknown(summary, exc)
+        _say_unknown(
+            summary,
+            f"whether {', '.join(skus[:5])} is sellable on the website could not be "
+            f"read (the online-status read died) -- a live SKU with no Shopify "
+            f"inventory item, whose sale the website never hears about, is not "
+            f"ruled out: {exc}",
+        )
         return
     online_unmapped = sorted(
         s for s in skus if (statuses.get(s) or {}).get("sellable_online")
@@ -851,22 +863,26 @@ def _unknown_run(db, summary: Dict[str, Any], exc: Exception) -> Dict[str, Any]:
     pre-move number until the next tick with every screen green; a second
     spelling of the row (recheck round 2) is how two doors come to answer the
     same failure differently. Never raises."""
-    _say_unknown(summary, exc)
+    from .shopify_push.inventory import _target_error
+
+    _say_unknown(summary, _target_error(exc))
     _record_run(db, summary)
     return summary
 
 
-def _say_unknown(summary: Dict[str, Any], exc: Exception) -> None:
-    """Stamp THE unknown verdict on a summary, in the writer's words. The dead
-    read leads (as a refusal Shopify answered leads on the writer); whatever
-    the summary already said rides under it as an ' -- ALSO:' line, never
-    lost. Split from ``_unknown_run`` for a guard that runs inside a door
-    which records its own row (``_alert_unmapped_online``): one row, not two."""
-    from .shopify_push.inventory import STOCK_ONHAND_UNKNOWN, _target_error
+def _say_unknown(summary: Dict[str, Any], line: str) -> None:
+    """Stamp THE unknown verdict (STOCK_ONHAND_UNKNOWN) on a summary; ``line``
+    names the read that died. The dead read leads (as a refusal Shopify
+    answered leads on the writer); whatever the summary already said rides
+    under it as an ' -- ALSO:' line, never lost. Split from ``_unknown_run``
+    for a guard that runs inside a door which records its own row
+    (``_alert_unmapped_online``, ``_name_baseline_strays``): one row, not
+    two."""
+    from .shopify_push.inventory import STOCK_ONHAND_UNKNOWN
 
     prior = summary.get("error")
     summary["code"] = STOCK_ONHAND_UNKNOWN
-    summary["error"] = _target_error(exc) + (f" -- ALSO: {prior}" if prior else "")
+    summary["error"] = line + (f" -- ALSO: {prior}" if prior else "")
     logger.warning("[STOCK_WRITEBACK] %s", summary["error"])
 
 
