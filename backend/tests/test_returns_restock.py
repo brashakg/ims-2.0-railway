@@ -547,6 +547,35 @@ def test_return_mints_when_no_original_unit(ctx):
     assert re.fullmatch(r"[A-Z0-9]{8,}", minted[0].get("barcode") or ""), minted[0]
 
 
+def test_return_mint_goes_through_the_one_minter(ctx, monkeypatch):
+    """The shape check above passes for ANY letters-and-digits code, including a
+    door-local uuid that would break chain-wide uniqueness. So swap the one
+    minter for a spy: the minted unit must carry the spy's code, and the door
+    must hand the minter its real database (the counter path, never the
+    no-database random fallback) and the shop the unit goes back to."""
+    from api.services import barcode as barcode_svc
+
+    calls = []
+
+    def spy(mint_db, store_id):
+        calls.append((mint_db, store_id))
+        return "SPY0000001"
+
+    monkeypatch.setattr(barcode_svc, "mint_unit_barcode", spy)
+    payload = _payload()
+    payload["items"][0]["product_id"] = "PRD-NOPRIOR"
+    r = ctx["client"].post(
+        "/api/v1/returns",
+        json=payload,
+        headers={"Authorization": f"Bearer {_staff_token(['CASHIER'])}"},
+    )
+    assert r.status_code == 201
+    minted = [u for u in ctx["stock_repo"].units if u["product_id"] == "PRD-NOPRIOR"]
+    assert [u.get("barcode") for u in minted] == ["SPY0000001"]
+    db = returns_router._get_db()
+    assert db is not None and calls == [(db, "BV-PUN-01")], calls
+
+
 def test_damaged_return_does_not_restock(ctx):
     tok = _staff_token(["ADMIN"])
     payload = _payload()

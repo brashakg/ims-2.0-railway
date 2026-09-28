@@ -20,6 +20,8 @@ import os
 import re
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
 os.environ.setdefault("MONGODB_URI", "")
@@ -58,12 +60,14 @@ class _GRNRepo:
         return [self._grn]
 
 
-def test_grn_receipt_mints_letters_and_digits_only(monkeypatch):
-    """The door behind F8: receiving a box must mint codes the till accepts typed."""
+# --------------------------------------------------------------------------- #
+# One driver per door that creates stock_units rows. Each runs the REAL route
+# function against `db` and returns the barcodes it minted, in order.
+# --------------------------------------------------------------------------- #
+def _grn_door(monkeypatch, db, qty=3):
     from api.routers import vendors as vd
     from database.repositories.product_repository import StockRepository
 
-    db = CasDB()
     stock_repo = StockRepository(db.get_collection("stock_units"))
     grn = {
         "grn_id": "GRN-1",
@@ -71,7 +75,7 @@ def test_grn_receipt_mints_letters_and_digits_only(monkeypatch):
         "store_id": STORE,
         "po_id": None,
         "status": "PENDING",
-        "items": [{"product_id": "FR-1", "accepted_qty": 3}],
+        "items": [{"product_id": "FR-1", "accepted_qty": qty}],
     }
     grn_repo = _GRNRepo(grn)
     monkeypatch.setattr(vd, "get_grn_repository", lambda: grn_repo)
@@ -82,26 +86,16 @@ def test_grn_receipt_mints_letters_and_digits_only(monkeypatch):
     monkeypatch.setattr(
         vd, "_cumulative_received_by_product", lambda repo, po_id: {}, raising=False
     )
-
     out = _run(vd.accept_grn("GRN-1", _MGR))
-
-    assert out["units_added"] == 3
-    codes = [u["barcode"] for u in stock_repo.find_many({"product_id": "FR-1"})]
-    assert len(set(codes)) == 3
-    assert all(TILL.match(c) for c in codes), codes
-    assert all(NEW.match(c) for c in codes), codes
+    assert out["units_added"] == qty
+    return [u["barcode"] for u in stock_repo.find_many({"product_id": "FR-1"})]
 
 
-def test_stock_add_mints_the_same_format_as_a_receipt(monkeypatch):
-    """One rule: /stock/add used to mint a 13-digit GS1 20-prefix EAN-13 instead."""
+def _stock_add_door(monkeypatch, db, qty=2, user=_MGR):
     from api.routers import inventory as inv
-
-    db = CasDB()
-    created = []
 
     class _Stock:
         def create(self, doc):
-            created.append(doc)
             return doc
 
     class _Prod:
@@ -111,46 +105,109 @@ def test_stock_add_mints_the_same_format_as_a_receipt(monkeypatch):
     monkeypatch.setattr(inv, "get_stock_repository", lambda: _Stock())
     monkeypatch.setattr(inv, "get_product_repository", lambda: _Prod())
     monkeypatch.setattr(inv, "_get_db", lambda: db)
-
-    out = _run(inv.add_stock(inv.StockAddRequest(product_id="P1", quantity=2), _MGR))
-
-    assert len(out["barcodes"]) == 2
-    assert all(NEW.match(c) for c in out["barcodes"]), out["barcodes"]
+    out = _run(inv.add_stock(inv.StockAddRequest(product_id="P1", quantity=qty), user))
+    return list(out["barcodes"])
 
 
-def test_opening_stock_mints_the_same_format_as_a_receipt(monkeypatch):
+def _opening_stock_door(monkeypatch, db, qty=2, user=_MGR):
     from api.routers import inventory as inv
     from tests.test_opening_stock_import import FakeProductRepo, FakeStockRepo
 
-    db = CasDB()
     prod = FakeProductRepo({"P1": {"product_id": "P1", "sku": "S1"}}, {})
     stock = FakeStockRepo({})
     monkeypatch.setattr(inv, "get_product_repository", lambda: prod)
     monkeypatch.setattr(inv, "get_stock_repository", lambda: stock)
     monkeypatch.setattr(inv, "_get_db", lambda: db)
     monkeypatch.setattr(inv, "get_audit_repository", lambda: None)
-
-    body = inv.OpeningStockImport(rows=[{"product_id": "P1", "quantity": 2}])
-    _run(inv.opening_stock_commit(body, _MGR))
-
-    codes = [d["barcode"] for d in stock.created]
-    assert len(codes) == 2
-    assert all(NEW.match(c) for c in codes), codes
+    body = inv.OpeningStockImport(rows=[{"product_id": "P1", "quantity": qty}])
+    _run(inv.opening_stock_commit(body, user))
+    return [d["barcode"] for d in stock.created]
 
 
-def test_serial_capture_without_a_label_gets_a_minted_barcode(monkeypatch):
+def _serial_capture_door(monkeypatch, db, **extra):
     from api.routers import serial_tracking as r
 
-    db = CasDB()
     monkeypatch.setattr(r, "_get_db", lambda: db)
     monkeypatch.setattr(r, "validate_store_access", lambda s, u: s)
     monkeypatch.setattr(r, "_audit", lambda *a, **k: None)
     monkeypatch.setattr(r, "_sync_online_stock", lambda *a, **k: None)
-
     unit = asyncio.run(
-        r.capture(r.CaptureBody(serial="SN-1", product_id="P1", store_id=STORE), _MGR)
+        r.capture(
+            r.CaptureBody(serial="SN-1", product_id="P1", store_id=STORE, **extra), _MGR
+        )
     )
-    assert NEW.match(unit["barcode"] or ""), unit.get("barcode")
+    return [unit["barcode"]]
+
+
+_DOORS = {
+    "grn_accept": _grn_door,
+    "stock_add": _stock_add_door,
+    "opening_stock": _opening_stock_door,
+    "serial_capture": _serial_capture_door,
+}
+# The fifth door, return restock, is proven the same way in
+# tests/test_returns_restock.py::test_return_mint_goes_through_the_one_minter.
+
+
+@pytest.mark.parametrize("door", sorted(_DOORS))
+def test_every_door_mints_letters_and_digits_only(monkeypatch, door):
+    """The door behind F8: a unit's code must be one the till accepts typed."""
+    codes = _DOORS[door](monkeypatch, CasDB())
+    assert codes and len(set(codes)) == len(codes), codes
+    assert all(TILL.match(c) for c in codes), codes
+    assert all(NEW.match(c) for c in codes), codes
+
+
+@pytest.mark.parametrize("door", sorted(_DOORS))
+def test_every_door_mints_through_the_one_minter(monkeypatch, door):
+    """ONE minter: a door that builds its own code (a uuid, a second counter)
+    passes a shape check but breaks chain-wide uniqueness. So swap the minter
+    for a spy: every unit the door creates must carry the spy's code, and the
+    door must hand the minter its real database (the counter path, not the
+    no-database random fallback) and the shop it is minting for."""
+    from api.services import barcode as barcode_svc
+
+    db = CasDB()
+    calls = []
+
+    def spy(mint_db, store_id):
+        calls.append((mint_db, store_id))
+        return f"SPY{len(calls):07d}"
+
+    monkeypatch.setattr(barcode_svc, "mint_unit_barcode", spy)
+    codes = _DOORS[door](monkeypatch, db)
+    assert codes == [f"SPY{i + 1:07d}" for i in range(len(codes))], codes
+    assert calls and all(c == (db, STORE) for c in calls), calls
+
+
+def test_codes_are_unique_across_doors_on_one_database(monkeypatch):
+    """Chain-wide uniqueness proven THROUGH the doors, not just the minter: a
+    receipt, a manual add, an opening-stock import and a serial capture on the
+    same database never mint the same code."""
+    db = CasDB()
+    codes = [c for door in sorted(_DOORS) for c in _DOORS[door](monkeypatch, db)]
+    assert len(codes) == 3 + 2 + 2 + 1
+    assert len(set(codes)) == len(codes), codes
+
+
+def test_serial_capture_ignores_a_label_the_caller_hands_in(monkeypatch):
+    """A caller-supplied barcode ('bv-001 x': hyphen, space, lower case) used to
+    be stored as the unit's code, bypassing the minter and its format."""
+    (code,) = _serial_capture_door(monkeypatch, CasDB(), barcode="bv-001 x")
+    assert NEW.match(code), code
+
+
+@pytest.mark.parametrize("door", ["stock_add", "opening_stock"])
+def test_no_stock_is_minted_without_a_shop(monkeypatch, door):
+    """With no shop picked the unit would belong to no shop and its code would
+    have no prefix ('0000000002'). Refuse instead."""
+    from fastapi import HTTPException
+
+    no_shop = {**_MGR, "active_store_id": None}
+    with pytest.raises(HTTPException) as ei:
+        _DOORS[door](monkeypatch, CasDB(), user=no_shop)
+    assert ei.value.status_code == 400
+    assert "shop" in ei.value.detail.lower()
 
 
 def test_till_lookup_still_finds_old_and_new_codes(monkeypatch):
