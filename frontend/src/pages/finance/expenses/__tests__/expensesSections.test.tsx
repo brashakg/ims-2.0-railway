@@ -4,10 +4,11 @@
 // ============================================================================
 // The old ExpenseTracker held nine role-gated tabs behind one URL and had no
 // test at all. Each tab is now its own URL under ExpensesLayout, fed by the
-// layout's one expenses load through <Outlet context>. These tests drive the
-// REAL layout + section at each URL (a section that lost its data wiring in
-// the move renders empty and fails here), then the REAL financeRoutes gates
-// (each section's allowedRoles must be exactly its old JSX gate).
+// layout's one expenses load through <Outlet context>. Every test drives the
+// REAL financeRoutes table, so the URL-to-section mapping under test is the one
+// the app ships (a section that lost its data wiring, or a URL wired to the
+// wrong section, renders the wrong text and fails here), then the same table's
+// gates (each section's allowedRoles must be exactly its old JSX gate).
 
 import { Suspense } from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -60,20 +61,16 @@ vi.mock('../../../../services/api/expenses', async (importOriginal) => {
 });
 
 import { expensesApi } from '../../../../services/api/expenses';
-import { ExpensesLayout } from '../ExpensesLayout';
-import { MyExpensesSection } from '../MyExpensesSection';
-import { ExpenseApprovalsSection } from '../ExpenseApprovalsSection';
-import { ExpenseEntrySection } from '../ExpenseEntrySection';
-import { ExpenseAgingSection } from '../ExpenseAgingSection';
-import { ExpenseDuplicatesSection } from '../ExpenseDuplicatesSection';
-import { ExpenseAdvancesSection } from '../ExpenseAdvancesSection';
-import { PettyCashFloatSection } from '../PettyCashFloatSection';
-import { DaySettlementSection } from '../DaySettlementSection';
-import { ExpenseSummarySection } from '../ExpenseSummarySection';
 import { legacyTabTarget } from '../legacyTabRedirect';
 import { financeRoutes } from '../../../../routes/financeRoutes';
 
 const api = expensesApi as unknown as Record<string, ReturnType<typeof vi.fn>>;
+
+// financeRoutes lazy-loads the layout and every section, and those chunks
+// compile on demand under vitest - slow on a loaded machine. Same allowance as
+// the other real-route tests (clinicalRoutesSplit, customersRecallsRoute).
+const FIND = { timeout: 20000 };
+vi.setConfig({ testTimeout: 30000 });
 
 const row = (id: string, description: string, status: string, extra = {}) => ({
   expense_id: id, category: 'supplies', amount: 300, description, status,
@@ -118,98 +115,8 @@ beforeEach(() => {
   api.listPettyCashSettlements.mockResolvedValue({ settlements: [] });
 });
 
-function renderSection(path: string, roles: string[] = ['ADMIN']) {
-  currentRoles = roles;
-  return render(
-    <MemoryRouter initialEntries={[path]}>
-      <Routes>
-        <Route path="/finance/expenses" element={<ExpensesLayout />}>
-          <Route index element={<MyExpensesSection />} />
-          <Route path="approvals" element={<ExpenseApprovalsSection />} />
-          <Route path="entry" element={<ExpenseEntrySection />} />
-          <Route path="aging" element={<ExpenseAgingSection />} />
-          <Route path="duplicates" element={<ExpenseDuplicatesSection />} />
-          <Route path="advances" element={<ExpenseAdvancesSection />} />
-          <Route path="float" element={<PettyCashFloatSection />} />
-          <Route path="settle" element={<DaySettlementSection />} />
-          <Route path="summary" element={<ExpenseSummarySection />} />
-        </Route>
-      </Routes>
-    </MemoryRouter>,
-  );
-}
-
-/** The section's own nav link is the active one - one URL per section. */
-async function expectActiveLink(name: RegExp) {
-  expect(await screen.findByRole('link', { name })).toHaveAttribute('aria-current', 'page');
-}
-
-describe('each expenses section renders at its own URL', () => {
-  it('my (index): the user\'s own expenses', async () => {
-    renderSection('/finance/expenses');
-    expect(await screen.findByText('ZZ bus fare to Ranchi')).toBeInTheDocument();
-    await expectActiveLink(/^My Expenses$/);
-  });
-
-  it('approvals: the approval queue with Approve / Reject', async () => {
-    renderSection('/finance/expenses/approvals');
-    expect(await screen.findByText('ZZ lens cloths')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Approve/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Reject/ })).toBeInTheDocument();
-    await expectActiveLink(/^Pending Approval/);
-  });
-
-  it('entry: the ledger-entry queue', async () => {
-    renderSection('/finance/expenses/entry');
-    expect(await screen.findByText('ZZ courier charges')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Mark entered/ })).toBeInTheDocument();
-    await expectActiveLink(/^For Entry/);
-  });
-
-  it('aging: the reimbursement aging table', async () => {
-    renderSection('/finance/expenses/aging');
-    expect(await screen.findByText('ZZ Aging Person')).toBeInTheDocument();
-    await expectActiveLink(/^Aging/);
-  });
-
-  it('duplicates: the duplicate-bill watch-list', async () => {
-    renderSection('/finance/expenses/duplicates');
-    expect(await screen.findByText('ZZ duplicated receipt')).toBeInTheDocument();
-    expect(screen.getByText('Possible duplicate bills')).toBeInTheDocument();
-    await expectActiveLink(/^Duplicates/);
-  });
-
-  it('advances: loads its own list on arrival', async () => {
-    renderSection('/finance/expenses/advances');
-    expect(await screen.findByText('ZZ camp bus fare')).toBeInTheDocument();
-    expect(api.getAdvances).toHaveBeenCalledWith({ store_id: 'ZZ-STORE' });
-    await expectActiveLink(/^Advances$/);
-  });
-
-  it('float: loads the store float on arrival', async () => {
-    renderSection('/finance/expenses/float');
-    expect(await screen.findByText('ZZ opening float')).toBeInTheDocument();
-    expect(screen.getByText('Float balance')).toBeInTheDocument();
-    expect(api.getPettyCashBalance).toHaveBeenCalledWith('ZZ-STORE');
-    await expectActiveLink(/^Petty Cash Float$/);
-  });
-
-  it('settle: loads the day position on arrival', async () => {
-    renderSection('/finance/expenses/settle');
-    expect(await screen.findByText('not yet settled')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Count & settle/ })).toBeInTheDocument();
-    expect(api.getPettyCashSettlementPosition).toHaveBeenCalledWith('ZZ-STORE', expect.any(String));
-    await expectActiveLink(/^Day Settlement$/);
-  });
-
-  it('summary: spending by category from the user\'s own expenses', async () => {
-    renderSection('/finance/expenses/summary');
-    expect(await screen.findByText('Spending by category')).toBeInTheDocument();
-    await expectActiveLink(/^Category Summary$/);
-  });
-});
-
-// The JSX gates are now route gates. Drive the REAL route table.
+// The REAL route table - the same URL-to-section mapping and gates the app
+// ships (financeRoutes.tsx), never a hand-copied one.
 function renderRoute(path: string, roles: string[]) {
   currentRoles = roles;
   return render(
@@ -224,12 +131,85 @@ function renderRoute(path: string, roles: string[]) {
   );
 }
 
+const renderSection = (path: string) => renderRoute(path, ['ADMIN']);
+
+/** The section's own nav link is the active one - one URL per section. */
+async function expectActiveLink(name: RegExp) {
+  expect(await screen.findByRole('link', { name }, FIND)).toHaveAttribute('aria-current', 'page');
+}
+
+describe('each expenses section renders at its own URL', () => {
+  it('my (index): the user\'s own expenses', async () => {
+    renderSection('/finance/expenses');
+    expect(await screen.findByText('ZZ bus fare to Ranchi', undefined, FIND)).toBeInTheDocument();
+    await expectActiveLink(/^My Expenses$/);
+  });
+
+  it('approvals: the approval queue with Approve / Reject', async () => {
+    renderSection('/finance/expenses/approvals');
+    expect(await screen.findByText('ZZ lens cloths', undefined, FIND)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Approve/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Reject/ })).toBeInTheDocument();
+    await expectActiveLink(/^Pending Approval/);
+  });
+
+  it('entry: the ledger-entry queue', async () => {
+    renderSection('/finance/expenses/entry');
+    expect(await screen.findByText('ZZ courier charges', undefined, FIND)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Mark entered/ })).toBeInTheDocument();
+    await expectActiveLink(/^For Entry/);
+  });
+
+  it('aging: the reimbursement aging table', async () => {
+    renderSection('/finance/expenses/aging');
+    expect(await screen.findByText('ZZ Aging Person', undefined, FIND)).toBeInTheDocument();
+    await expectActiveLink(/^Aging/);
+  });
+
+  it('duplicates: the duplicate-bill watch-list', async () => {
+    renderSection('/finance/expenses/duplicates');
+    expect(await screen.findByText('ZZ duplicated receipt', undefined, FIND)).toBeInTheDocument();
+    expect(screen.getByText('Possible duplicate bills')).toBeInTheDocument();
+    await expectActiveLink(/^Duplicates/);
+  });
+
+  it('advances: loads its own list on arrival', async () => {
+    renderSection('/finance/expenses/advances');
+    expect(await screen.findByText('ZZ camp bus fare', undefined, FIND)).toBeInTheDocument();
+    expect(api.getAdvances).toHaveBeenCalledWith({ store_id: 'ZZ-STORE' });
+    await expectActiveLink(/^Advances$/);
+  });
+
+  it('float: loads the store float on arrival', async () => {
+    renderSection('/finance/expenses/float');
+    expect(await screen.findByText('ZZ opening float', undefined, FIND)).toBeInTheDocument();
+    expect(screen.getByText('Float balance')).toBeInTheDocument();
+    expect(api.getPettyCashBalance).toHaveBeenCalledWith('ZZ-STORE');
+    await expectActiveLink(/^Petty Cash Float$/);
+  });
+
+  it('settle: loads the day position on arrival', async () => {
+    renderSection('/finance/expenses/settle');
+    expect(await screen.findByText('not yet settled', undefined, FIND)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Count & settle/ })).toBeInTheDocument();
+    expect(api.getPettyCashSettlementPosition).toHaveBeenCalledWith('ZZ-STORE', expect.any(String));
+    await expectActiveLink(/^Day Settlement$/);
+  });
+
+  it('summary: spending by category from the user\'s own expenses', async () => {
+    renderSection('/finance/expenses/summary');
+    expect(await screen.findByText('Spending by category', undefined, FIND)).toBeInTheDocument();
+    await expectActiveLink(/^Category Summary$/);
+  });
+});
+
+// The JSX gates are now route gates.
 describe('each section keeps its old role gate, now on the route', () => {
   it.each(['approvals', 'entry', 'aging', 'duplicates', 'float', 'settle'])(
     'SALES_STAFF is refused /finance/expenses/%s',
     async (section) => {
       renderRoute(`/finance/expenses/${section}`, ['SALES_STAFF']);
-      expect(await screen.findByText('ZZ-DENIED')).toBeInTheDocument();
+      expect(await screen.findByText('ZZ-DENIED', undefined, FIND)).toBeInTheDocument();
     },
   );
 
@@ -238,20 +218,20 @@ describe('each section keeps its old role gate, now on the route', () => {
     ['summary', 'Spending by category'],
   ])('SALES_STAFF can open the ungated /finance/expenses/%s', async (section, text) => {
     renderRoute(`/finance/expenses/${section}`, ['SALES_STAFF']);
-    expect(await screen.findByText(text)).toBeInTheDocument();
+    expect(await screen.findByText(text, undefined, FIND)).toBeInTheDocument();
   });
 
   it('STORE_MANAGER approves and holds the float but is not the accountant', async () => {
     const { unmount } = renderRoute('/finance/expenses/entry', ['STORE_MANAGER']);
-    expect(await screen.findByText('ZZ-DENIED')).toBeInTheDocument();
+    expect(await screen.findByText('ZZ-DENIED', undefined, FIND)).toBeInTheDocument();
     unmount();
     renderRoute('/finance/expenses/float', ['STORE_MANAGER']);
-    expect(await screen.findByText('ZZ opening float')).toBeInTheDocument();
+    expect(await screen.findByText('ZZ opening float', undefined, FIND)).toBeInTheDocument();
   });
 
   it('a legacy ?tab= link lands on that section', async () => {
     renderRoute('/finance/expenses?tab=approvals', ['ADMIN']);
-    expect(await screen.findByText('ZZ lens cloths')).toBeInTheDocument();
+    expect(await screen.findByText('ZZ lens cloths', undefined, FIND)).toBeInTheDocument();
   });
 });
 
@@ -262,6 +242,12 @@ describe('legacyTabTarget', () => {
     }
     expect(legacyTabTarget('?tab=my')).toBe('/finance/expenses');
     expect(legacyTabTarget('?tab=nonsense')).toBe('/finance/expenses');
+  });
+
+  it('an inherited Object key is unknown, not a URL built from Object.prototype', () => {
+    for (const k of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
+      expect(legacyTabTarget(`?tab=${k}`)).toBe('/finance/expenses');
+    }
   });
 
   it('carries every other query param through', () => {
