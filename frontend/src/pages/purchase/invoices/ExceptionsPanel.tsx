@@ -26,7 +26,8 @@ import { inr, APPROVE_ROLES } from './shared';
 // ============================================================================
 
 // Quick-approve modal: reason textarea (required, >=10 chars), confirm -> POST.
-function ApproveModal({
+// The Recon Console's Review action opens this same modal.
+export function ApproveModal({
   invoice,
   onClose,
   onApproved,

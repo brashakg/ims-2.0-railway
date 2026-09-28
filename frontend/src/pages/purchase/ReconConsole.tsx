@@ -33,15 +33,16 @@ import { Link } from 'react-router-dom';
 import {
   CheckSquare, Square, Loader2, RefreshCw, ChevronDown, ChevronRight,
   Package, RotateCcw, FileText, AlertTriangle, ClipboardCheck, StickyNote,
-  ShieldCheck, X, ListChecks,
+  ListChecks,
 } from 'lucide-react';
 import { purchaseReconApi, type ReconBlock, type ReconWorklists } from '../../services/api/purchaseRecon';
-import { purchaseInvoicesApi, type PurchaseInvoice, type MatchStatus, type ExceptionOverride } from '../../services/api/vendorAp';
+import { purchaseInvoicesApi, type PurchaseInvoice } from '../../services/api/vendorAp';
 import { PurchaseStatusChip } from '../../components/purchase/PurchaseStatusChip';
 import { byPerson } from './purchaseTypes';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { APPROVE_ROLES } from './invoices/shared';
+import { ApproveModal } from './invoices/ExceptionsPanel';
 
 // ---- helpers ---------------------------------------------------------------
 
@@ -271,129 +272,6 @@ function NoteControl({
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-// ---- Approve-exception modal ---------------------------------------------------
-// Same server contract as the Purchase Invoices tab: POST /{id}/approve-exception
-// with a mandatory reason (>= 10 chars, written to the immutable audit log).
-// Who may approve is the tab's own list: invoices/shared APPROVE_ROLES.
-
-function ApproveExceptionModal({
-  invoice,
-  onClose,
-  onApproved,
-}: {
-  invoice: PurchaseInvoice;
-  onClose: () => void;
-  onApproved: (updated: { match_status: MatchStatus; exception_override?: ExceptionOverride }) => void;
-}) {
-  const toast = useToast();
-  const [reason, setReason] = useState('');
-  const [saving, setSaving] = useState(false);
-
-  const tooShort = reason.trim().length < 10;
-  const reasons: string[] = Array.from(
-    new Set((invoice.match_detail?.exceptions ?? []) as string[]),
-  );
-
-  const confirm = async () => {
-    if (tooShort) { toast.error('A reason of at least 10 characters is required'); return; }
-    setSaving(true);
-    try {
-      const res = await purchaseInvoicesApi.approveException(
-        invoice.purchase_invoice_id,
-        { reason: reason.trim() },
-      );
-      onApproved({
-        match_status: res.match_status ?? 'MATCHED_OVERRIDE',
-        exception_override: res.exception_override,
-      });
-      toast.success('Exception approved — invoice released for payment');
-    } catch (e) {
-      const msg =
-        e && typeof e === 'object' && 'response' in e
-          ? ((e as { response?: { data?: { detail?: string } } }).response?.data?.detail ?? '')
-          : e instanceof Error ? e.message : '';
-      toast.error(msg || 'Failed to approve the exception');
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50 p-4" onClick={onClose}>
-      <div className="bg-white w-full max-w-lg rounded-lg shadow-xl" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between border-b border-gray-100 px-5 py-3">
-          <h3 className="font-semibold text-gray-900 flex items-center gap-2">
-            <ShieldCheck className="w-5 h-5 text-amber-600" />
-            Approve match exception
-          </h3>
-          <button type="button" onClick={onClose} title="Close" aria-label="Close" className="text-gray-400 hover:text-gray-700">
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        <div className="p-5 space-y-4">
-          <div className="text-sm text-gray-700">
-            <div className="font-medium text-gray-900">
-              {invoice.vendor_name || invoice.vendor_id}
-              <span className="text-gray-500 font-normal ml-2">· {invoice.vendor_invoice_no}</span>
-            </div>
-            <div className="text-xs text-gray-500 mt-0.5">
-              {(invoice.vendor_invoice_date || '').slice(0, 10)}
-              {invoice.po_number && <span className="ml-2">PO {invoice.po_number}</span>}
-              {invoice.grn_number && <span className="ml-2">GRN {invoice.grn_number}</span>}
-              <span className="ml-2 font-medium text-gray-700">{inr(invoice.total_amount)}</span>
-            </div>
-          </div>
-
-          {reasons.length > 0 && (
-            <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
-              <p className="text-xs font-semibold text-amber-800 mb-1.5">Why this invoice is on hold</p>
-              <ul className="space-y-1">
-                {reasons.map((r, i) => (
-                  <li key={i} className="text-xs text-amber-700 flex items-start gap-1.5">
-                    <AlertTriangle className="w-3 h-3 mt-0.5 flex-shrink-0" />
-                    <span>{r}</span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">
-              Reason for approval <span className="text-red-500">*</span>
-              <span className="font-normal text-gray-400 ml-1">(required, written to the immutable audit log)</span>
-            </label>
-            <textarea
-              className="border border-gray-300 rounded px-3 py-2 text-sm w-full h-24 resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"
-              value={reason}
-              onChange={(e) => setReason(e.target.value)}
-              placeholder="Why release this invoice for payment despite the variance? (min 10 chars)"
-            />
-            <p className={`text-[11px] mt-1 ${tooShort && reason.length > 0 ? 'text-amber-600' : 'text-gray-400'}`}>
-              {reason.trim().length}/10 characters minimum
-            </p>
-          </div>
-
-          <div className="flex justify-end gap-2 pt-1">
-            <button type="button" onClick={onClose} className="btn sm">Cancel</button>
-            <button
-              type="button"
-              onClick={confirm}
-              disabled={saving || tooShort}
-              className="btn sm primary disabled:opacity-60"
-            >
-              {saving && <Loader2 className="w-4 h-4 animate-spin" />}
-              <ShieldCheck className="w-4 h-4" />
-              Approve exception
-            </button>
-          </div>
-        </div>
-      </div>
     </div>
   );
 }
@@ -1460,7 +1338,7 @@ export default function ReconConsole() {
 
       {/* Exception review modal */}
       {approveTarget && (
-        <ApproveExceptionModal
+        <ApproveModal
           invoice={approveTarget}
           onClose={() => setApproveTarget(null)}
           onApproved={(updated) => {
