@@ -33,8 +33,10 @@ const QuickAddPage = lazy(() => import('../pages/catalog/QuickAddPage'));
 // is kept in the tree but no longer imported here.
 const BuyDeskPage = lazy(() => import('../pages/catalog/BuyDeskPage'));
 // /catalog/scorecard — per-user cataloguing performance (volume, approvals,
-// corrections, QC error rate) + the random-sample QC review workflow.
+// corrections, QC error rate). /catalog/qc — the random-sample QC review
+// workflow (its verdicts feed the scorecard's QC error rate).
 const CataloguingScorecardPage = lazy(() => import('../pages/catalog/CataloguingScorecardPage'));
+const CataloguingQcPage = lazy(() => import('../pages/catalog/cataloguing/CataloguingQcPage'));
 // /catalog/quick-share — pick products -> share as a branded PDF / save a
 // temporary (auto-expiring) set. Broad staff surface (anyone helping a customer).
 const QuickSharePage = lazy(() => import('../pages/catalog/QuickSharePage'));
@@ -86,9 +88,8 @@ export const catalogRoutes = (
       }
     />
 
-    {/* Cataloguing Scorecard + QC review — manager ladder; gate
-        mirrors the backend rbac rows for /products/cataloguing-
-        scorecard + /products/qc-samples*. */}
+    {/* Cataloguing Scorecard — manager ladder; gate mirrors the backend
+        rbac rows for /products/cataloguing-scorecard. */}
     <Route
       path="catalog/scorecard"
       element={
@@ -102,6 +103,25 @@ export const catalogRoutes = (
           ]}
         >
           <CataloguingScorecardPage />
+        </ProtectedRoute>
+      }
+    />
+
+    {/* Cataloguing QC review — same manager ladder; gate mirrors the
+        backend rbac rows for /products/qc-samples*. */}
+    <Route
+      path="catalog/qc"
+      element={
+        <ProtectedRoute
+          allowedRoles={[
+            'SUPERADMIN',
+            'ADMIN',
+            'AREA_MANAGER',
+            'STORE_MANAGER',
+            'CATALOG_MANAGER',
+          ]}
+        >
+          <CataloguingQcPage />
         </ProtectedRoute>
       }
     />

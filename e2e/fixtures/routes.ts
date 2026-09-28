@@ -49,6 +49,7 @@ export const ROUTES: ReadonlyArray<{ path: string; ready?: string }> = [
   { path: '/catalog/missing-photos' },
   { path: '/catalog/add' },
   { path: '/catalog/scorecard' },
+  { path: '/catalog/qc' },
   { path: '/catalog/quick-share' },
   { path: '/catalog/buy-desk' },
   { path: '/catalog/pricing' },

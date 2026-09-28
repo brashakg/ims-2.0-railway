@@ -132,9 +132,11 @@ export const NAV_GROUPS: NavGroup[] = [
       // live size. Same gate as /catalog; the counts come from the server.
       { id: 'catalog-review', label: 'Needs review', to: '/catalog/review', icon: 'clipboard', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'], badge: 'catalog-review' },
       { id: 'catalog-missing-photos', label: 'Missing photos', to: '/catalog/missing-photos', icon: 'eye', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'], badge: 'catalog-missing-photos' },
-      // Cataloguing Scorecard + QC review (attribution phase 2). requireRoles
-      // mirrors the /catalog/scorecard ProtectedRoute gate + backend rbac rows.
+      // Cataloguing Scorecard + QC review (attribution phase 2), two pages.
+      // requireRoles mirrors the /catalog/scorecard and /catalog/qc
+      // ProtectedRoute gates + backend rbac rows.
       { id: 'catalog-scorecard', label: 'Scorecard', to: '/catalog/scorecard', icon: 'chart', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER'] },
+      { id: 'catalog-qc', label: 'QC review', to: '/catalog/qc', icon: 'clipboard', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER'] },
       // Catalog Autopilot was REMOVED entirely (owner 2026-08-30: unused). The
       // "Auto-fill from web" panel), so its standalone nav item was removed. The
       // /catalog/autopilot route still resolves (redirects to /catalog/add)
