@@ -28,6 +28,7 @@ from .product_input import (
     build_variant_price_inputs,
 )
 from .writeback import _writeback_variant
+from .inventory import inventory_policy_for
 
 # ---------------------------------------------------------------------------
 # CREATE-side variant seeding (the price-0.00 / no-SKU fix)
@@ -413,6 +414,18 @@ async def _seed_variants_after_write(
     update_rows, create_rows, create_variants, pairs, skipped = _assign_seed_rows(
         seed_rows, nodes
     )
+    # BORN TRACKED (#1141 fix-six recheck, oversell): a variant created onto
+    # an already-PUBLISHED listing is visible the moment it exists. Sent as
+    # price/sku only it was born UNTRACKED, and the one door that tracked it
+    # was a SEPARATE bulk update -- refused, the size sold without limit.
+    # Shopify's ProductVariantsBulkInput takes tracked + inventoryPolicy on
+    # the create itself, so the variant is tracked atomically, and the create
+    # answer's own `inventoryItem { tracked }` + `inventoryPolicy` confirm it.
+    policy = inventory_policy_for(product)
+    create_rows = [
+        {**r, "inventoryPolicy": policy, "inventoryItem": {**(r.get("inventoryItem") or {}), "tracked": True}}
+        for r in create_rows
+    ]
     summary: Dict[str, Any] = {
         "updated": 0,
         "created": 0,
@@ -420,6 +433,9 @@ async def _seed_variants_after_write(
         "errors": [],
         "default_variant_gid": None,
         "variant_gids": [],
+        # The subset of variant_gids whose tracked + policy THIS call did not
+        # confirm (see born_tracked below).
+        "unconfirmed_variant_gids": [],
         # Oversell-guard capture: every InventoryItem gid persisted (aligned
         # 1:1 with variant_gids; None where the response carried none), plus
         # the PRODUCT-LEVEL one (set ONLY for a no-variant-row product, whose
@@ -492,8 +508,19 @@ async def _seed_variants_after_write(
                     )
                 )
 
+    born_tracked = {
+        _as_shopify_gid(n.get("id"), "ProductVariant")
+        for n in created_nodes
+        if (n.get("inventoryItem") or {}).get("tracked") is True and n.get("inventoryPolicy") == policy
+    }
     for variant_doc, gid, inventory_item_gid in pairs:
         summary["variant_gids"].append(gid)
+        if gid not in born_tracked:
+            # Tracking NOT confirmed by this call: a matched variant (the
+            # update rows carry no tracking) or a create Shopify's answer did
+            # not confirm. sync_product_stock must confirm it or take the
+            # listing down.
+            summary["unconfirmed_variant_gids"].append(gid)
         summary["inventory_item_gids"].append(inventory_item_gid)
         if variant_doc:
             _writeback_variant(db, variant_doc, gid, inventory_item_gid)

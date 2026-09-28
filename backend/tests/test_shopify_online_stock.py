@@ -3420,21 +3420,15 @@ def test_R9_a_refused_tracking_re_send_on_a_live_listing_is_a_warning_not_a_with
     assert "WITHOUT LIMIT" in res2.error and spy2.calls_for("publishablePublish") == []
 
 
-def test_R10_a_size_minted_onto_a_live_listing_under_a_refused_tracking_call_is_said_untracked_and_re_sent(monkeypatch):
-    """OVERSELL (fix-seven verification, 2026-09-19 -- the first-publish
-    finding's own class, reopened by the live-listing exemption above). The
-    exemption covered the whole LISTING, so a size this press MINTED onto an
-    already-published product (productVariantsBulkCreate -> visible the moment
-    it exists) under a refused tracking call went out UNTRACKED while the line
-    read 'the listing keeps the tracking its first publish set', the baseline
-    recorded tracked=True, and -- the new SKU's row written beside it -- the
-    sweep saw no diff: nothing ever re-sent tracking. Measured on a754644.
+_MINTED = "gid://shopify/ProductVariant/77"
 
-    For the minted variant this IS the first publish: the WITHOUT LIMIT line,
-    tracked=False on the baseline, and the next pass re-sends tracking to it.
-    Drop `and not [...]` from `live` in sync_product_stock -> 're-confirmed',
-    tracked True, the sweep a noop -> this fails."""
-    minted = "gid://shopify/ProductVariant/77"
+
+def _minted_onto_live(*, tracked_answer):
+    """cat-1 is LIVE (PUBLISHED, tracked baseline) with sizes M and S on
+    Shopify; this press MINTS size L onto it (productVariantsBulkCreate). The
+    create answer is shaped like production's to the mutation IMS sends:
+    ``inventoryPolicy`` + ``inventoryItem { id tracked }``; ``tracked_answer``
+    is what it says about the new item's tracking."""
     db = _db(a=2, b=1, c=0)
     db.seed("products", [{"product_id": "spine-S", "sku": "SP-1-S"}, {"product_id": "spine-L", "sku": "SP-1-L"}])
     db.get_collection("stock_units").insert_one(
@@ -3457,31 +3451,83 @@ def test_R10_a_size_minted_onto_a_live_listing_under_a_refused_tracking_call_is_
         {"id": "gid://shopify/ProductVariant/6", "selectedOptions": [{"name": "Size", "value": "S"}], "inventoryItem": {"id": INV_TWO}},
     ]
     created = _ok_body("productVariantsBulkCreate", productVariants=[
-        {"id": minted, "selectedOptions": [{"name": "Size", "value": "L"}], "inventoryItem": {"id": "gid://shopify/InventoryItem/777"}},
+        {"id": _MINTED, "title": "L", "selectedOptions": [{"name": "Size", "value": "L"}],
+         "inventoryPolicy": "DENY" if tracked_answer else "CONTINUE",
+         "inventoryItem": {"id": "gid://shopify/InventoryItem/777", "tracked": tracked_answer}},
     ])
-    responses = {"productUpdate(": upd, "productVariantsBulkCreate": created}
+    return db, variants, {"productUpdate(": upd, "productVariantsBulkCreate": created}
+
+
+def _drafted(spy):
+    """The take-downs: productUpdate calls that set the listing DRAFT."""
+    return [c for c in spy.calls_for("productUpdate(") if (c["variables"].get("input") or {}).get("status") == "DRAFT"]
+
+
+def test_R10_a_size_minted_onto_a_live_listing_is_born_tracked_and_denied_in_the_same_mutation(monkeypatch):
+    """OVERSELL, MEDIUM (#1141 fix-six recheck, lens r1:oversell). A size
+    minted onto an already-PUBLISHED listing is visible the moment it exists.
+    The seed row sent to productVariantsBulkCreate carried only
+    inventoryItem {sku}: no tracked, no inventoryPolicy -- so the size was
+    born UNTRACKED, and the ONLY door that ever tracked it was the separate
+    _set_variant_tracking bulk update. When Shopify refused that call the size
+    sold without limit on a live listing.
+
+    The create row now carries ``inventoryItem.tracked = true`` and the
+    listing's policy (Shopify's ProductVariantsBulkInput takes both on
+    productVariantsBulkCreate), and the create answer's own
+    ``inventoryItem { tracked }`` + ``inventoryPolicy`` CONFIRM it: the size is
+    tracked at birth, atomically, so a refused re-send leaves a listing whose
+    every variant is confirmed -- the live-listing warning, the idempotent
+    re-publish, baseline tracked=True, no take-down. Drop tracked / policy from
+    the create row -> the row pins fail; stop reading the confirmation off the
+    create answer -> the listing is taken down -> this fails."""
+    db, variants, responses = _minted_onto_live(tracked_answer=True)
     spy = _ThrottledTracking(_responses(**responses))
     _live(monkeypatch, spy)
     res = _run(shopify_push.push_product(db, db.get_collection("catalog_products").find_one({"id": "cat-1"}), variants))
-    assert len(spy.calls_for("productVariantsBulkCreate")) == 1, "the size was minted onto the live listing"
-    assert res.ok is True and res.code == shopify_push.STOCK_TRACKING_FAILED, res
-    assert "WITHOUT LIMIT" in res.error and "Throttled" in res.error, res.error
-    assert "keeps the tracking" not in res.error, "nothing ever confirmed tracking on the minted size"
-    assert _baseline(db)["tracked"] is False, "so the next pass re-sends tracking"
+    create = spy.calls_for("productVariantsBulkCreate")
+    assert len(create) == 1, "the size was minted onto the live listing"
+    row = create[0]["variables"]["variants"][0]
+    assert row["inventoryPolicy"] == "DENY", row
+    assert row["inventoryItem"] == {"sku": "SP-1-L", "tracked": True}, row
+    assert "inventoryItem { id tracked }" in create[0]["query"] and "inventoryPolicy" in create[0]["query"]
+    assert res.ok is True and res.reason is None and res.code == shopify_push.STOCK_TRACKING_FAILED, res
+    assert "re-confirmed" in res.error and "WITHOUT LIMIT" not in res.error, res.error
+    assert _drafted(spy) == [] and len(spy.calls_for("publishablePublish")) == 1
+    assert _baseline(db)["tracked"] is True, "every variant is confirmed tracked"
     assert _baseline(db)["quantities"]["SP-1-L"] == {"BV-A": 1, "BV-B": 0, "BV-C": 0}, "the true numbers still went out"
-    # The next tick, Shopify answering: tracking reaches the minted size with
-    # NO quantity change to carry it -- the baseline flag alone re-sends.
-    spy2 = _Spy(_responses())
-    _live(monkeypatch, spy2)
-    sw = _run(shopify_push.sync_stock_levels(db))
-    sent_tracking = [
-        r["id"]
-        for c in spy2.calls_for("productVariantsBulkUpdate")
-        for r in c["variables"]["variants"]
-        if (r.get("inventoryItem") or {}).get("tracked") is True and r.get("inventoryPolicy") == "DENY"
-    ]
-    assert minted in sent_tracking, (sw, [c["variables"] for c in spy2.calls_for("productVariantsBulkUpdate")])
-    assert _baseline(db)["tracked"] is True
+
+
+def test_R10b_a_minted_size_whose_tracking_cannot_be_confirmed_takes_the_live_listing_down(monkeypatch):
+    """The guard behind the fix above (lens r1:oversell): if Shopify's create
+    answer does NOT confirm tracking and the separate tracking call is refused
+    too, nothing says the new size is tracked -- and product.py used to publish
+    anyway (``tracking_ok`` was True for any visible listing), ok=True, while
+    the size sold WITHOUT LIMIT. Withholding an idempotent re-publish would
+    un-publish nothing, so the listing is TAKEN DOWN (Shopify status DRAFT)
+    until a press confirms tracking: no publish, ok=False / publish_withheld /
+    STOCK_TRACKING_FAILED, the twin DRAFT and queued. Remove the take-down ->
+    the publish goes out over the untracked size -> this fails. The next press
+    with Shopify answering puts it straight back (the control)."""
+    db, variants, responses = _minted_onto_live(tracked_answer=False)
+    spy = _ThrottledTracking(_responses(**responses))
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.push_product(db, db.get_collection("catalog_products").find_one({"id": "cat-1"}), variants))
+    assert spy.calls_for("publishablePublish") == [], "never re-published over an untracked size"
+    assert len(_drafted(spy)) == 1 and _drafted(spy)[0]["variables"]["input"]["id"] == PRODUCT_GID
+    assert spy.order("productVariantsBulkCreate", "inventorySetQuantities")[0] == "productVariantsBulkCreate"
+    assert res.ok is False and res.reason == "publish_withheld" and res.code == shopify_push.STOCK_TRACKING_FAILED, res
+    assert "WITHOUT LIMIT" in res.error and "TAKEN OFF the website" in res.error, res.error
+    twin = db.get_collection("catalog_products").find_one({"id": "cat-1"})["ecom"]
+    assert twin["status"] == "DRAFT" and twin["locally_modified"] is True, twin
+    assert _baseline(db)["tracked"] is False, "so the next pass re-sends tracking"
+    # CONTROL: Shopify answering, the next press confirms tracking and publishes.
+    ok_spy = _Spy(_responses(**{"productUpdate(": responses["productUpdate("]}))
+    _live(monkeypatch, ok_spy)
+    rows = list(db.get_collection("catalog_variants").find({"parent_product_id": "cat-1"}))
+    back = _run(shopify_push.push_product(db, db.get_collection("catalog_products").find_one({"id": "cat-1"}), rows))
+    assert back.ok is True and _drafted(ok_spy) == [] and len(ok_spy.calls_for("publishablePublish")) == 1, back
+    assert db.get_collection("catalog_products").find_one({"id": "cat-1"})["ecom"]["status"] == "PUBLISHED"
 
 
 def test_R9_a_size_delist_that_landed_under_the_day1_verdict_is_delisted_with_a_warning(monkeypatch):
@@ -3683,25 +3729,15 @@ def test_R11_a_size_delist_never_writes_the_listings_tracked_flag(monkeypatch):
     assert minted in _tracking_sent(spy3), "the next pass re-sends tracking to the minted size"
 
 
-def test_R11_press_again_after_a_size_minted_untracked_is_not_a_withheld_first_publish(monkeypatch):
-    """TRUTH OF SCREEN, OVERSELL direction (recheck round 3, the a97ec1d path
-    itself). After test_R10's press (a size minted onto a LIVE listing under a
-    refused tracking call: ok=True, WITHOUT LIMIT, baseline tracked=False) the
-    'press again' that line asks for, the throttle still on, was gated as a
-    FIRST publish because the gate read the baseline flag that press had just
-    set False: ok=False / publish_withheld / 'NOT made visible' -- about a
-    listing that IS visible with an untracked size, which the owner reads as
-    safely off the storefront. The gate asks whether the PUBLISH is the first
-    (`listing_visible`). Put `listing_already_live(product)` back in
-    `tracking_ok` -> withheld -> this fails. (The staged-PUBLISHED draft --
-    tracked False over an EMPTY baseline -- stays withheld: test_R9's db2.)"""
-    minted = "gid://shopify/ProductVariant/77"
+def _left_untracked():
+    """What an earlier unconfirmed mint left behind: a VISIBLE listing whose
+    baseline says tracking was never confirmed (tracked False) over real
+    numbers."""
     db = _db(a=2, b=1, c=0)
     db.seed("products", [{"product_id": "spine-L", "sku": "SP-1-L"}])
     db.get_collection("stock_units").insert_one(
         {"stock_id": "L1", "product_id": "spine-L", "store_id": "BV-A", "status": "AVAILABLE"}
     )
-    # What test_R10's press leaves behind.
     left = {"quantities": {"SP-1": {"BV-A": 2, "BV-B": 1, "BV-C": 0}, "SP-1-L": {"BV-A": 1, "BV-B": 0, "BV-C": 0}},
             "tracked": False, "policy": "DENY"}
     db.seed("catalog_products", [_catalog_row("cat-1", "SP-1", gid=True, status="PUBLISHED", locally_modified=True, online_stock=left)])
@@ -3709,21 +3745,45 @@ def test_R11_press_again_after_a_size_minted_untracked_is_not_a_withheld_first_p
         {"sku": "SP-1", "parent_product_id": "cat-1", "price": 1500, "option_size": "M",
          "shopify_variant_id": VARIANT_GID, "shopify_inventory_item_id": INV_GID},
         {"sku": "SP-1-L", "parent_product_id": "cat-1", "price": 1500, "option_size": "L",
-         "shopify_variant_id": minted, "shopify_inventory_item_id": "gid://shopify/InventoryItem/777"},
+         "shopify_variant_id": _MINTED, "shopify_inventory_item_id": "gid://shopify/InventoryItem/777"},
     ]
     db.seed("catalog_variants", [dict(v) for v in rows])
     upd = _product_body("productUpdate")
     upd["data"]["productUpdate"]["product"]["variants"]["nodes"] = [
         {"id": VARIANT_GID, "selectedOptions": [{"name": "Size", "value": "M"}], "inventoryItem": {"id": INV_GID}},
-        {"id": minted, "selectedOptions": [{"name": "Size", "value": "L"}], "inventoryItem": {"id": "gid://shopify/InventoryItem/777"}},
+        {"id": _MINTED, "selectedOptions": [{"name": "Size", "value": "L"}], "inventoryItem": {"id": "gid://shopify/InventoryItem/777"}},
     ]
+    return db, rows, upd
+
+
+def test_R11_press_again_over_an_unconfirmed_untracked_size_takes_the_listing_down(monkeypatch):
+    """OVERSELL (#1141 fix-six recheck, lens r1:oversell; supersedes round 3's
+    'ok + the WITHOUT LIMIT line'). A visible listing whose tracking was never
+    confirmed, pressed again under a refused tracking call: round 3 published
+    idempotently and answered ok=True -- the size kept selling without limit
+    and the only mitigation was a line of text. Withholding cannot help a
+    listing that is already visible, so the press TAKES IT DOWN (DRAFT) until
+    tracking is confirmed, and says so; queued, never ok. The sweep's own
+    tracking re-send is the same door (sync_product_stock), so it takes the
+    listing down too. Publish again (the round-3 answer) -> this fails."""
+    db, rows, upd = _left_untracked()
     spy = _ThrottledTracking(_responses(**{"productUpdate(": upd}))
     _live(monkeypatch, spy)
     res = _run(shopify_push.push_product(db, db.get_collection("catalog_products").find_one({"id": "cat-1"}), rows))
-    assert res.ok is True and res.reason is None and res.code == shopify_push.STOCK_TRACKING_FAILED, res
-    assert "WITHOUT LIMIT" in res.error and "publish withheld" not in res.error, res.error
-    assert len(spy.calls_for("publishablePublish")) == 1, "the idempotent re-publish still goes out"
+    assert spy.calls_for("publishablePublish") == [] and len(_drafted(spy)) == 1, [c["query"][:40] for c in spy.calls]
+    assert res.ok is False and res.reason == "publish_withheld" and res.code == shopify_push.STOCK_TRACKING_FAILED, res
+    assert "WITHOUT LIMIT" in res.error and "TAKEN OFF the website" in res.error, res.error
+    twin = db.get_collection("catalog_products").find_one({"id": "cat-1"})["ecom"]
+    assert twin["status"] == "DRAFT" and twin["locally_modified"] is True
     assert _baseline(db)["tracked"] is False, "still untracked, so the next pass re-sends tracking"
+    # The sweep over the same visible, unconfirmed listing, same throttle.
+    db2, _rows2, _upd2 = _left_untracked()
+    spy2 = _ThrottledTracking(_responses())
+    _live(monkeypatch, spy2)
+    sw = _run(shopify_push.sync_stock_levels(db2))
+    assert len(_drafted(spy2)) == 1 and spy2.calls_for("publishablePublish") == [], sw
+    assert sw.ok is False and sw.code == shopify_push.STOCK_TRACKING_FAILED and "TAKEN OFF the website" in sw.error, sw
+    assert db2.get_collection("catalog_products").find_one({"id": "cat-1"})["ecom"]["status"] == "DRAFT"
 
 
 # ---------------------------------------------------------------------------

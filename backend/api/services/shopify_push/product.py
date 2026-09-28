@@ -45,7 +45,6 @@ from .publish import _publish_to_online_store
 from .inventory import (
     STOCK_TRACKING_FAILED,
     _set_variant_tracking,
-    listing_visible,
     plan_product_stock,
     push_skus_stock,
     sync_product_stock,
@@ -368,7 +367,10 @@ async def push_product(
                 new_gid,
                 extra_variant_gids=[n.get("id") for n in variant_nodes if isinstance(n, dict)]
                 + list((seed_summary or {}).get("variant_gids") or []),
-                minted_variant_gids=(seed_summary or {}).get("variant_gids"),
+                # Only what seeding put on Shopify WITHOUT confirming its
+                # tracking: a size born tracked (the create carried tracked +
+                # policy and Shopify's answer said so) needs nothing more.
+                minted_variant_gids=(seed_summary or {}).get("unconfirmed_variant_gids"),
             )
         # SALES-CHANNEL PUBLISH -- the third shut door. An ACTIVE product
         # published to NO channel is invisible on bettervision.in. This used to
@@ -399,22 +401,18 @@ async def push_product(
         #     so the toast, the audit row, the tally and the sync page all say
         #     so, and the row stays queued for the retry.
         #   * ...and ONLY the first publish (recheck round 1). An already-live
-        #     listing keeps the tracking its first publish confirmed whatever a
+        #     listing whose every variant's tracking was CONFIRMED (its first
+        #     publish, or born tracked) keeps it whatever a
         #     refused re-send says (a refused bulk-update changes nothing on
         #     Shopify), so it is reported live with a stock warning -- never
         #     "NOT made visible" beside a catalog chip that reads "Live".
-        #     "First" is asked of the PUBLISH (`listing_visible`), not of the
-        #     baseline's tracked flag (recheck round 3): a size minted
-        #     untracked onto a live listing sets that flag False, and the
-        #     "press again" its own line asks for was then withheld as a first
-        #     publish -- "NOT made visible" about a listing that IS visible
-        #     with an untracked size, the opposite of the risk. Withholding an
-        #     idempotent re-publish un-publishes nothing; the truthful result
-        #     is ok + the code + the WITHOUT LIMIT line.
-        tracking_ok = (
-            (stock_summary or {}).get("code") != STOCK_TRACKING_FAILED
-            or listing_visible(product)
-        )
+        #   * ...and a variant whose tracking NOTHING confirmed on a listing
+        #     that is ALREADY visible (#1141 fix-six recheck, oversell):
+        #     withholding an idempotent re-publish un-publishes nothing, so the
+        #     stock pass TAKES THE LISTING DOWN (sync_product_stock ->
+        #     push_product_delist) and says so. Either way the verdict is the
+        #     stock pass's own `tracking_unconfirmed`, never re-derived here.
+        tracking_ok = not (stock_summary or {}).get("tracking_unconfirmed")
         pub_summary = None
         if new_gid and payload.get("status") == "ACTIVE":
             if seed_summary is not None:

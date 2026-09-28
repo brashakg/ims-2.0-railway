@@ -1924,6 +1924,27 @@ def listing_already_live(product: Dict[str, Any]) -> bool:
     return listing_visible(product) and (ecom.get("online_stock") or {}).get("tracked") is not False
 
 
+async def _take_down_untracked(db, product: Dict[str, Any]) -> str:
+    """Take a VISIBLE listing with an untracked variant off the website --
+    THE take-down door (``push_product_delist``: Shopify status DRAFT, the gid
+    kept, the twin DRAFT) -- and return the line that says what happened.
+    An untracked variant sells without limit whatever quantity is written, and
+    DRAFT is the one state that stops it short of deleting the variant."""
+    from .product import push_product_delist  # product imports this module
+
+    res = await push_product_delist(db, product)
+    if res.ok and res.mode == MODE_LIVE:
+        return (
+            " -- so the listing was TAKEN OFF the website (Shopify status Draft) "
+            "until a press confirms tracking; press it again"
+        )
+    return (
+        f" -- and taking the listing off the website FAILED "
+        f"({res.error or res.reason or 'not live'}), so it is STILL LIVE and "
+        f"selling without limit: set it to Draft in Shopify admin now"
+    )
+
+
 async def sync_product_stock(
     db,
     product: Dict[str, Any],
@@ -1946,8 +1967,10 @@ async def sync_product_stock(
     gids = product_variant_gids(product, variants, extra_variant_gids)
     tracked: Dict[str, Any] = {"updated": 0, "errors": []}
     # "Already live" covers the variants an earlier publish CONFIRMED, never
-    # one this press minted (``minted_variant_gids``: what seeding just put on
-    # Shopify, its gid on no IMS row yet). For that variant this IS the first
+    # one this press put on Shopify without confirming its tracking
+    # (``minted_variant_gids``: seeding's ``unconfirmed_variant_gids``, its gid
+    # on no IMS row yet -- a size BORN tracked, confirmed by Shopify's own
+    # create answer, is not in it). For that variant this IS the first
     # publish, and on a published product it is visible the moment it exists:
     # a size added to a live listing under a refused tracking call went out
     # UNTRACKED while the line said "the listing keeps the tracking its first
@@ -1984,6 +2007,10 @@ async def sync_product_stock(
     summary["tracked"] = tracked["updated"]
     summary["errors"] = list(tracked["errors"]) + list(summary["errors"])
     summary["ok"] = summary["ok"] and not tracked["errors"]
+    # THE verdict the press gates its publish on (product.py `tracking_ok`):
+    # some variant's tracking is confirmed by NOTHING -- not this call, not a
+    # first publish, not its own create.
+    summary["tracking_unconfirmed"] = bool(tracked["errors"]) and not live
     if tracked["errors"]:
         # The worse failure gets the code (recheck round 2, first-push): with
         # ok=False and NO code the press promoted nothing, the drawer toast and
@@ -1991,9 +2018,10 @@ async def sync_product_stock(
         # `pushed` -- over a variant that is LIVE and UNTRACKED (Shopify sells
         # it without limit) for up to 12 h until the next tick re-sends
         # tracking (the baseline records tracked=False). The product press
-        # reads this code and WITHHOLDS the publish (product.py `tracking_ok`);
-        # the sweep re-sends tracking on the next tick. The quantity verdict,
-        # if any, rides under it.
+        # reads `tracking_unconfirmed` and WITHHOLDS the publish (product.py
+        # `tracking_ok`); a listing already visible is taken down below; the
+        # sweep re-sends tracking on the next tick. The quantity verdict, if
+        # any, rides under it.
         why = "; ".join(str(e) for e in tracked["errors"][:3])
         summary["code"] = STOCK_TRACKING_FAILED
         if live:
@@ -2005,8 +2033,13 @@ async def sync_product_stock(
         else:
             line = (
                 f"tracking + {policy} could not be set on the variant(s) ({why}) -- "
-                f"an UNTRACKED listing sells WITHOUT LIMIT; press again"
+                f"an UNTRACKED listing sells WITHOUT LIMIT"
             )
+            # ALREADY VISIBLE (#1141 fix-six recheck, oversell): withholding
+            # the publish un-publishes nothing, so the listing comes DOWN
+            # until a press confirms tracking. Here, not in the press, so the
+            # sweep's re-send (the other caller) guards it the same way.
+            line += await _take_down_untracked(db, product) if listing_visible(product) else "; press again"
         summary["error"] = line + (
             f" -- ALSO: {summary['error']}" if summary.get("error") else ""
         )
