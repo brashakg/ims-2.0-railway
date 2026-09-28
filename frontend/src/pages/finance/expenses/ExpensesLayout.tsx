@@ -73,8 +73,10 @@ export function ExpensesLayout() {
   const [formBill, setFormBill] = useState<File | null>(null);
   const [saving, setSaving] = useState(false);
 
+  // isLoading is the FIRST load only. A reload (every toast re-runs this: the
+  // ToastProvider's value changes identity) must never swap the tree for the
+  // spinner, or <Outlet/> unmounts and the open section loses its state.
   const load = useCallback(async () => {
-    setIsLoading(true);
     try {
       const pick = (r: any): ExpenseRecord[] => (r?.expenses || r || []) as ExpenseRecord[];
       const [mineR, apprR, entR, agingR, dupR] = await Promise.all([
@@ -188,7 +190,7 @@ export function ExpensesLayout() {
   const pendingCount = mine.filter((e) => (e.status || '').toUpperCase() === 'PENDING').length;
   const approvedCount = mine.filter((e) => ['APPROVED', 'SENT_TO_ACCOUNTANT', 'ENTERED'].includes((e.status || '').toUpperCase())).length;
 
-  if (isLoading && mine.length === 0) {
+  if (isLoading) {
     return <div className="flex items-center justify-center h-96"><Loader2 className="w-8 h-8 text-bv-red-600 animate-spin" /></div>;
   }
 

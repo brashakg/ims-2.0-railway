@@ -12,7 +12,7 @@
 
 import { Suspense } from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 
 // jsdom has no requestIdleCallback, so the layout's chunk-warming would fall
@@ -35,13 +35,6 @@ vi.mock('../../../../context/AuthContext', () => ({
   }),
 }));
 
-// One stable object: the layout's loaders list `toast` as a dependency, so a
-// fresh object per render would re-run them forever.
-const toastMock = vi.hoisted(() => ({
-  success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn(),
-}));
-vi.mock('../../../../context/ToastContext', () => ({ useToast: () => toastMock }));
-
 vi.mock('../../../../services/api/expenses', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../../services/api/expenses')>();
   return {
@@ -56,11 +49,13 @@ vi.mock('../../../../services/api/expenses', async (importOriginal) => {
       getPettyCashBalance: vi.fn(),
       getPettyCashSettlementPosition: vi.fn(),
       listPettyCashSettlements: vi.fn(),
+      settlePettyCashDay: vi.fn(),
     },
   };
 });
 
 import { expensesApi } from '../../../../services/api/expenses';
+import { ToastProvider } from '../../../../context/ToastContext';
 import { legacyTabTarget } from '../legacyTabRedirect';
 import { financeRoutes } from '../../../../routes/financeRoutes';
 
@@ -116,18 +111,22 @@ beforeEach(() => {
 });
 
 // The REAL route table - the same URL-to-section mapping and gates the app
-// ships (financeRoutes.tsx), never a hand-copied one.
+// ships (financeRoutes.tsx), never a hand-copied one - under the REAL
+// ToastProvider, whose value changes identity on every toast (the layout's
+// load lists `toast`, so every toast re-runs it, as in the app).
 function renderRoute(path: string, roles: string[]) {
   currentRoles = roles;
   return render(
-    <MemoryRouter initialEntries={[path]}>
-      <Suspense fallback={null}>
-        <Routes>
-          {financeRoutes}
-          <Route path="/unauthorized" element={<div>ZZ-DENIED</div>} />
-        </Routes>
-      </Suspense>
-    </MemoryRouter>,
+    <ToastProvider>
+      <MemoryRouter initialEntries={[path]}>
+        <Suspense fallback={null}>
+          <Routes>
+            {financeRoutes}
+            <Route path="/unauthorized" element={<div>ZZ-DENIED</div>} />
+          </Routes>
+        </Suspense>
+      </MemoryRouter>
+    </ToastProvider>,
   );
 }
 
@@ -232,6 +231,40 @@ describe('each section keeps its old role gate, now on the route', () => {
   it('a legacy ?tab= link lands on that section', async () => {
     renderRoute('/finance/expenses?tab=approvals', ['ADMIN']);
     expect(await screen.findByText('ZZ lens cloths', undefined, FIND)).toBeInTheDocument();
+  });
+});
+
+// A toast re-runs the layout's load. For a user with no expenses of their own
+// that reload used to swap the page for the spinner, which unmounted <Outlet/>
+// and wiped the open section: Day Settlement snapped back to today, an open
+// float modal vanished. The section must survive the reload.
+describe('the open section survives a layout reload', () => {
+  // A real network round-trip: the reload is in flight long enough to render.
+  beforeEach(() => {
+    api.getExpenses.mockImplementation(() => new Promise((r) => { setTimeout(() => r({ expenses: [] }), 150); }));
+  });
+
+  it('Day Settlement keeps the picked day after a settle', async () => {
+    api.settlePettyCashDay.mockResolvedValue({ variance: 0, variance_status: 'BALANCED' });
+    renderRoute('/finance/expenses/settle', ['STORE_MANAGER']);
+    fireEvent.change(await screen.findByLabelText(/Settlement day/, undefined, FIND), { target: { value: '2025-01-15' } });
+    fireEvent.click(await screen.findByRole('button', { name: /Count & settle/ }, FIND));
+    fireEvent.change(screen.getByPlaceholderText('Count the box'), { target: { value: '3200' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Settle day' }));
+    await waitFor(() => expect(api.getExpenses).toHaveBeenCalledTimes(2)); // the toast's reload
+    await waitFor(() => expect(screen.getByLabelText(/Settlement day/)).toHaveValue('2025-01-15'));
+    expect(api.getPettyCashSettlementPosition).toHaveBeenLastCalledWith('ZZ-STORE', '2025-01-15');
+  });
+
+  it('an open Top-up modal keeps its amount when another toast fires', async () => {
+    renderRoute('/finance/expenses/float', ['STORE_MANAGER']);
+    fireEvent.click(await screen.findByRole('button', { name: /Top up/ }, FIND));
+    fireEvent.change(screen.getByPlaceholderText('e.g. 5000'), { target: { value: '900' } });
+    // A toast from elsewhere on the page: submit the empty Add-expense form.
+    fireEvent.click(screen.getByRole('button', { name: /Add expense/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Submit' }));
+    await waitFor(() => expect(api.getExpenses).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByPlaceholderText('e.g. 5000')).toHaveValue(900));
   });
 });
 
