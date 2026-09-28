@@ -575,6 +575,46 @@ def test_a_routing_stamp_on_a_stored_payload_is_never_trusted(world):
 # ---------------------------------------------------------------------------
 
 
+def test_no_shop_named_bills_the_bucket_loudly(world):
+    """[PR-5 design] live, Shopify routed to Pune's unmapped location, no
+    fallback set, no mapped shop holds it: billed from the bucket -- and the
+    order SAYS so (SELLER_UNKNOWN, tasked), never silently."""
+    db = world["db"]
+    _stock(db, PUNE, "P-RB", 1)
+    world["shop"].fo(FO_1, LOC_PUNE_SHOPIFY, name="Pune warehouse")
+
+    res, order = _book(world, _order(52009))
+
+    route = order["fulfillment_route"]
+    assert order["store_id"] == "BV-ONLINE-01" and route["reason"] == "NONE"
+    assert [p["code"] for p in route["problems"]] == ["LOCATION_UNMAPPED", "SELLER_UNKNOWN"]
+    assert "BV-ONLINE-01" in route["problems"][1]["message"]
+    assert f"online_route:SELLER_UNKNOWN:{res['order_id']}" in world["tasks"].refs("online_route:")
+
+
+def test_no_shop_named_in_dark_mode_is_loud_too(world, monkeypatch):
+    """[PR-5 design] dark gate, no fallback, no physical shop holds it."""
+    monkeypatch.setattr(shopify_push, "_live_or_reason", lambda _db: (False, "writes_disabled"))
+
+    res, order = _book(world, _order(52010))
+
+    assert order["store_id"] == "BV-ONLINE-01"
+    assert [p["code"] for p in order["fulfillment_route"]["problems"]] == ["SELLER_UNKNOWN"]
+    assert f"online_route:SELLER_UNKNOWN:{res['order_id']}" in world["tasks"].refs("online_route:")
+
+
+def test_routing_that_raises_bills_the_bucket_loudly(world, monkeypatch):
+    def boom(*_a, **_k):
+        raise RuntimeError("routing exploded")
+
+    monkeypatch.setattr(route_mod, "route_order", boom)
+    _res, order = _book(world, _order(52011))
+
+    assert order["store_id"] == "BV-ONLINE-01"
+    codes = [p["code"] for p in order["fulfillment_route"]["problems"]]
+    assert codes == ["ROUTING_UNREAD", "SELLER_UNKNOWN"]
+
+
 def test_every_door_result_names_the_orders_own_shop(world):
     """[Stale second answer] the mapper result (NEXUS log, missed-webhook pull,
     Re-map audit) names the shop the order is billed at, not the bucket --

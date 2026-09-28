@@ -312,6 +312,20 @@ def gstin_problem(store_doc: Optional[Dict[str, Any]]) -> Optional[Dict[str, str
     return None
 
 
+def seller_unknown_problem(bucket_id: Optional[str]) -> Dict[str, str]:
+    """No shipping shop could be named (route NONE, or routing itself failed),
+    so the order is billed from the stockless online bucket -- whose GSTIN is
+    not a shipping shop's (Q1). Always loud; the re-issue is the accountant's."""
+    return _problem(
+        "SELLER_UNKNOWN",
+        "IMS could not name the shop that ships this order, so its tax invoice "
+        f"was issued from the online billing store {bucket_id}'s GSTIN, not the "
+        "shipping shop's (owner ruling Q1). Find the shop that ships it; the "
+        "accountant must then cancel this invoice and re-issue it from that "
+        "shop's GSTIN.",
+    )
+
+
 def raise_problem_tasks(db, order: Dict[str, Any]) -> None:
     """One deduped P1 task per (order, problem code). Fail-soft."""
     route = order.get("fulfillment_route") or {}

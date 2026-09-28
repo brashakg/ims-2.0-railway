@@ -1592,12 +1592,18 @@ def ingest_shopify_order(
             store_doc = store_repo.find_by_id(store_id)
     except Exception:  # noqa: BLE001
         store_doc = None
-    if route is not None and route.get("store_id"):
-        from .online_fulfillment_route import gstin_problem
+    if route is not None:
+        # Q1 on the seller actually billed: the shipping shop's own GSTIN, or
+        # -- no shop named -- the bucket, which is never right and always loud.
+        from .online_fulfillment_route import gstin_problem, seller_unknown_problem
 
-        bad_gstin = gstin_problem(store_doc)
-        if bad_gstin:
-            route["problems"].append(bad_gstin)
+        bad_seller = (
+            gstin_problem(store_doc)
+            if route.get("store_id")
+            else seller_unknown_problem(store_id)
+        )
+        if bad_seller:
+            route["problems"].append(bad_seller)
 
     # Synthesize a customer-shaped dict carrying the buyer's delivery state so
     # the shared splitter resolves the place of supply.
