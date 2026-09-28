@@ -136,6 +136,7 @@ _LIST_PROJECTION: Dict[str, int] = {
     "rx_hold_reason": 1,
     "stock_hold_reason": 1,
     "fulfillment_hold": 1,
+    "fulfillment_route": 1,
     "rx_hold_cleared": 1,
     "rx_hold_cleared_at": 1,
     "invoice_number": 1,
@@ -610,11 +611,12 @@ async def remap_online_order(
         )
 
     try:
-        from ..services.online_order_mapper import map_shopify_order
+        from ..services.online_fulfillment_route import map_routed_order
 
         # A legacy topicless row was admitted by the loader ONLY because it is
-        # order-shaped (line_items, no parent order_id) -> replay as a create.
-        result = map_shopify_order(
+        # order-shaped (line_items, no parent order_id) -> replay as a create,
+        # through the routing door like the webhook (multi-location PR 5).
+        result = await map_routed_order(
             payload, db, webhook_id=webhook_id, topic=topic or "orders/create"
         )
     except Exception as exc:  # noqa: BLE001 - the mapper is fail-soft; belt-and-braces

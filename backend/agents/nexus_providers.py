@@ -228,7 +228,7 @@ async def _shopify_fetch_orders(
     return orders, False
 
 
-def _catch_up_one(db, order: Dict[str, Any], sid: str, live: bool) -> tuple:
+async def _catch_up_one(db, order: Dict[str, Any], sid: str, live: bool) -> tuple:
     """One pulled order -> (bucket, reason). Bucket is one of already_in_ims /
     skipped_dark / mapped / failed. Never raises."""
     if not sid:
@@ -239,14 +239,16 @@ def _catch_up_one(db, order: Dict[str, Any], sid: str, live: bool) -> tuple:
             return "already_in_ims", None
         if not live:
             return "skipped_dark", None
+        from api.services.online_fulfillment_route import map_routed_order
         from api.services.online_order_mapper import map_shopify_order
 
         # webhook_id stays None on purpose: ingest's layer-2 guard registers any
         # id on first sight and answers "replayed" forever after, so a pull-side
         # id would turn one transient booking failure into a permanent stall.
         # The hard layer-1 order-id guard (pre-checked above, re-checked inside)
-        # is what makes this idempotent against a later real webhook.
-        result = map_shopify_order(order, db, webhook_id=None, topic="orders/create")
+        # is what makes this idempotent against a later real webhook. The create
+        # goes through the routing door like the webhook (multi-location PR 5).
+        result = await map_routed_order(order, db, webhook_id=None, topic="orders/create")
         status = result.get("status")
         if status == "created":
             # The orders/updated delivery that already followed on Shopify's
@@ -322,7 +324,7 @@ async def shopify_pull_orders(db, since_hours: int = SHOPIFY_PULL_FLOOR_HOURS) -
     for order in orders:
         sid = str(order.get("id") or "").strip()
         raw = copy.deepcopy(order)  # the mapper stamps _ims_* keys; the inbox keeps Shopify's body
-        bucket, reason = _catch_up_one(db, order, sid, live)
+        bucket, reason = await _catch_up_one(db, order, sid, live)
         if bucket == "already_in_ims":
             tally[bucket] += 1
             continue

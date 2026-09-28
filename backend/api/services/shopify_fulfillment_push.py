@@ -366,6 +366,16 @@ async def push_fulfillment(
         )
 
     order_node, open_fos, existing_fuls = _parse_fulfillment_orders(body)
+    # Multi-location PR 5: IMS fulfils ONLY the shipping shop's fulfillment
+    # orders -- the ones online_fulfillment_route recorded at that shop's
+    # location (or moved there). Another shop's open fulfillment order is not
+    # IMS's to close from here. A route with no recorded list (None: routing
+    # was never read, e.g. a pre-PR-5 order) keeps the legacy all-open push.
+    ours = (order.get("fulfillment_route") or {}).get("fulfillment_order_ids")
+    others_open = 0
+    if isinstance(ours, list):
+        others_open = len([f for f in open_fos if f not in ours])
+        open_fos = [f for f in open_fos if f in ours]
     if order_node is None:
         return FulfillmentPushResult(
             mode=MODE_LIVE,
@@ -381,6 +391,18 @@ async def push_fulfillment(
     #     existing gid so future calls fast-skip. If neither, it is a clean noop
     #     (e.g. a cancelled / unfulfillable order).
     if not open_fos:
+        if others_open:
+            return FulfillmentPushResult(
+                mode=MODE_LIVE,
+                action="noop",
+                target_id=shopify_order_id,
+                ok=False,
+                error=(
+                    f"{others_open} open fulfillment order(s) sit at another "
+                    "shop's Shopify location, none at the shipping shop's -- "
+                    "move it in Shopify admin (Orders > order > Change location)"
+                ),
+            )
         if existing_fuls:
             existing_fid = existing_fuls[0]
             _writeback_fulfillment(db, order, existing_fid)
