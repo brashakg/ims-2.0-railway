@@ -226,7 +226,8 @@ describe('GoodsReceiptCockpit two-step receive - ruling 14 (the tally)', () => {
     fireEvent.click(screen.getByRole('button', { name: /create goods receipt/i }));
 
     await screen.findByRole('dialog', { name: /print stock labels/i });
-    expect(getUnitsMock).toHaveBeenCalledWith({ grn_id: 'G1' });
+    // The dialog can land before its load effect runs: wait for the read.
+    await waitFor(() => expect(getUnitsMock).toHaveBeenCalledWith({ grn_id: 'G1' }));
     // Nothing was printed, so nothing may claim it was.
     expect(await screen.findByText(/nothing to print/i)).toBeInTheDocument();
     expect(toastMock.success).not.toHaveBeenCalledWith(expect.stringMatching(/label/i));
@@ -249,6 +250,7 @@ describe('GoodsReceiptCockpit two-step receive - ruling 14 (the tally)', () => {
     fireEvent.click(await screen.findByRole('button', { name: /add to stock/i }, { timeout: 5000 }));
     await screen.findByRole('dialog', { name: /print stock labels/i });
     expect(acceptGRNMock).toHaveBeenCalledWith('G7');
-    expect(getUnitsMock).toHaveBeenCalledWith({ grn_id: 'G7' });
+    // The dialog can land before its load effect runs: wait for the read.
+    await waitFor(() => expect(getUnitsMock).toHaveBeenCalledWith({ grn_id: 'G7' }));
   });
 });
