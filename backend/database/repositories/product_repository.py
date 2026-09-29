@@ -69,12 +69,15 @@ class ProductRepository(BaseRepository):
         return self.find_one({"identity_key": identity_key})
 
     def find_by_barcode(self, barcode: str) -> Optional[Dict]:
-        """Find a product by scan-to-sell barcode (Hub Phase 1 duplicate guard).
-        Makes the create-path barcode arm functional whenever a barcode rides
-        along (e.g. a bulk/import row); returns None for a blank value."""
+        """Find the product holding this manufacturer barcode (Hub Phase 1
+        duplicate guard + the edit door's uniqueness check). It can live in
+        `barcode` or in the `gtin` attribute (what Manage Barcode and the Add
+        Product form write), so both are read. None for a blank value."""
         if not barcode:
             return None
-        return self.find_one({"barcode": barcode})
+        return self.find_one(
+            {"$or": [{"barcode": barcode}, {"attributes.gtin": barcode}]}
+        )
 
     def _category_filter(
         self,

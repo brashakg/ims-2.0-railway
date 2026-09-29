@@ -30,6 +30,8 @@ import pytest
 
 from fastapi import HTTPException
 
+from database.repositories.product_repository import ProductRepository
+
 # Real manufacturer GTINs (valid GS1 check digits).
 _VALID_A = "4006381333931"  # EAN-13
 _VALID_B = "5901234123457"  # EAN-13
@@ -50,16 +52,28 @@ _RANDOM_GENERATED = "930713281508"
 
 
 class _FakeRepo:
-    """Minimal repo exposing find_one over an in-memory product list."""
+    """An in-memory product list behind the REAL find_by_barcode rule: its
+    find_one understands equality on dotted paths and a top-level $or."""
+
+    find_by_barcode = ProductRepository.find_by_barcode
 
     def __init__(self, products: List[Dict[str, Any]]):
         self._products = products
 
+    @staticmethod
+    def _get(doc, path):
+        for part in path.split("."):
+            doc = doc.get(part) if isinstance(doc, dict) else None
+        return doc
+
+    def _hit(self, doc, flt):
+        return all(
+            any(self._hit(doc, sub) for sub in v) if k == "$or" else self._get(doc, k) == v
+            for k, v in flt.items()
+        )
+
     def find_one(self, flt: Dict[str, Any]):
-        for p in self._products:
-            if all(p.get(k) == v for k, v in flt.items()):
-                return p
-        return None
+        return next((p for p in self._products if self._hit(p, flt)), None)
 
 
 class TestBarcodeValidatorPure:
@@ -139,6 +153,16 @@ class TestBarcodeValidatorPure:
         # Re-saving the SAME product's existing barcode must NOT clash (idempotent).
         repo = _FakeRepo([{"product_id": "p1", "sku": "SKU-1", "barcode": _VALID_A}])
         _validate_product_barcode_or_400(_VALID_A, repo, "p1")
+
+    def test_a_code_held_as_another_products_gtin_is_rejected_409(self):
+        from api.routers.products import _validate_product_barcode_or_400
+
+        repo = _FakeRepo(
+            [{"product_id": "OTHER", "sku": "SKU-X", "attributes": {"gtin": _VALID_A}}]
+        )
+        with pytest.raises(HTTPException) as ei:
+            _validate_product_barcode_or_400(_VALID_A, repo, "p1")
+        assert ei.value.status_code == 409
 
 
 # ============================================================================
@@ -379,3 +403,49 @@ class TestGtinAttributeOnTheEditDoor:
         )
         assert row["gtin"] == _VALID_A
         assert row["barcode"] == "BV0000000042"
+
+    def test_a_gtin_already_on_another_product_is_refused_409(self, mock_db):
+        """Manage Barcode moved from products.barcode (409 on a duplicate) to
+        attributes.gtin, which only checked the format: two products could both
+        hold 4006381333931 and both went to Shopify/Google with it. A GTIN names
+        ONE manufacturer item, however it is typed."""
+        p1 = _create("GT-DUP-1")["product_id"]
+        p2 = _create("GT-DUP-2")["product_id"]
+        _update(p1, attributes={"gtin": _VALID_A})
+        for typed in (_VALID_A, "4006381 333931"):
+            with pytest.raises(HTTPException) as ei:
+                _update(p2, attributes={"gtin": typed})
+            assert ei.value.status_code == 409, typed
+            assert "GT-DUP-1" in str(ei.value.detail)
+        spine2 = mock_db["products"].find_one({"product_id": p2})
+        assert not (spine2.get("attributes") or {}).get("gtin")
+        # Re-saving a product's own GTIN (editing another field) is no clash.
+        _update(p1, attributes={"gtin": _VALID_A, "frame_material": "Acetate"})
+
+    def test_both_manufacturer_barcode_fields_share_one_uniqueness_rule(self, mock_db):
+        """products.barcode and attributes.gtin hold the same kind of code: a
+        code held in either field on one product is refused in either field on
+        another."""
+        p1 = _create("GT-X-1")["product_id"]
+        p2 = _create("GT-X-2")["product_id"]
+        _update(p1, barcode=_VALID_B)
+        with pytest.raises(HTTPException) as ei:
+            _update(p2, attributes={"gtin": _VALID_B})
+        assert ei.value.status_code == 409
+        _update(p2, attributes={"gtin": _VALID_A})
+        with pytest.raises(HTTPException) as ei:
+            _update(p1, barcode=_VALID_A)
+        assert ei.value.status_code == 409
+
+    def test_a_spaced_gtin_is_stored_bare_on_spine_and_twin(self, mock_db):
+        """'4006381 333931' from the box is one GTIN: stored bare on the product
+        AND its catalog twin, so the Inventory row, exact-match lookups and the
+        uniqueness check all see 4006381333931."""
+        pid = _create("GT-SP")["product_id"]
+        _update(pid, attributes={"gtin": "4006381 333931"})
+        spine = mock_db["products"].find_one({"product_id": pid})
+        assert spine["attributes"]["gtin"] == _VALID_A
+        twin = mock_db["catalog_products"].find_one(
+            {"id": spine.get("pim_product_id") or pid}
+        )
+        assert twin["gtin"] == _VALID_A

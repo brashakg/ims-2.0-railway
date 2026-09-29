@@ -1321,14 +1321,17 @@ def _guard_gtin_attribute(
     value and fixes or clears it -- silently discarding what someone just typed
     would be worse. DRAFT/IMPORT (bulk + clone doors): drop the value and log
     it, so one bad cell never blocks a 2,000-row import while still never
-    persisting garbage. Empty stays empty in both modes.
+    persisting garbage. Empty stays empty in both modes. A valid GTIN is kept
+    bare ('4006381 333931' -> '4006381333931'), so one GTIN is one value.
     """
     attrs = attributes or {}
     if "gtin" not in attrs:
         return attrs
     raw = attrs["gtin"]
-    if not normalise_candidate(raw) or is_valid_gtin(raw):
+    if not normalise_candidate(raw):
         return attrs
+    if is_valid_gtin(raw):
+        return {**attrs, "gtin": normalise_candidate(raw)}
     reason = classify_gtin(raw)
     if strict:
         raise ProductMasterError(
