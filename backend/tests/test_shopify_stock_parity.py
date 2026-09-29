@@ -975,6 +975,23 @@ def test_tally_a_mapped_shop_ims_could_not_read_is_unknown_never_a_row(monkeypat
     assert out["items"] == [] and out["summary"]["on_hand_unknown"] is True
 
 
+def test_tally_an_unreadable_online_block_is_unknown_never_sellable_zero(monkeypatch):
+    """Round 7 P2, the panel's input: the online-block read fails while every
+    shelf reads fine. The rule is unknown (the writer aborts its batch on
+    it), so the tally says on_hand_unknown and lists nothing -- never every
+    online SKU as a confident sellable 0. Delete rule_by_location's
+    `if skus and not quantities: return None` -> rows come back -> fails."""
+    from api.services import online_block
+
+    def dead(*_a, **_k):
+        raise RuntimeError("ecom_collections read died")
+
+    monkeypatch.setattr(online_block, "blocked_skus", dead)
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 0}})
+    out = _tally(monkeypatch, db, {INV_1: {LOC_A: 1, LOC_B: 0}, INV_2: {}})
+    assert out["items"] == [] and out["summary"]["on_hand_unknown"] is True
+
+
 def test_tally_a_listing_ims_has_no_rule_for_is_a_risk(monkeypatch):
     """Panel input: a products row SKU-9 with no product_id (so the rule has
     no answer for it) and Shopify LOC_A listing 4 of it. unbacked_units says
