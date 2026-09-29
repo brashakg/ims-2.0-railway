@@ -8,7 +8,7 @@
 // searchable product picker per line (ProductSearchSelect) and the ability to
 // add/remove lines -- both fed to the composer via props.
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { FileText, X as XIcon, Loader2, Search } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
@@ -221,6 +221,7 @@ function NewProductFields({
         min="0"
         step="0.01"
         value={value.mrp || ''}
+        onFocus={(e) => e.target.select()}
         onChange={(e) => set({ mrp: parseFloat(e.target.value) || 0 })}
         placeholder="MRP *"
         aria-label="New item MRP"
@@ -451,6 +452,9 @@ function ProductSearchSelect({
 
 interface PurchaseOrderFormProps {
   suppliers: Supplier[];
+  /** The supplier list is still on its way (audit F85: an empty dropdown
+   *  reading 'Select a vendor' sent a manager off to add a supplier). */
+  suppliersLoading?: boolean;
   existingPOCount: number;
   onClose: () => void;
   onCreated: (po: PurchaseOrder) => void;
@@ -461,9 +465,25 @@ function supplierToVendor(s: Supplier): ComposerVendorOption {
   return { id: s.id, name: s.name, code: s.code };
 }
 
-export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreated }: PurchaseOrderFormProps) {
+export function PurchaseOrderForm({
+  suppliers,
+  suppliersLoading = false,
+  existingPOCount,
+  onClose,
+  onCreated,
+}: PurchaseOrderFormProps) {
   const toast = useToast();
   const { user } = useAuth();
+
+  // Audit F87: X / Cancel on a half-typed order asks before throwing it away.
+  const dirtyRef = useRef(false);
+  const trackDirty = useCallback((dirty: boolean) => {
+    dirtyRef.current = dirty;
+  }, []);
+  const close = () => {
+    if (dirtyRef.current && !window.confirm('Discard this order? What you have entered will be lost.')) return;
+    onClose();
+  };
 
   const vendorOptions = suppliers.map(supplierToVendor);
 
@@ -514,7 +534,8 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
             Create Purchase Order
           </h2>
           <button
-            onClick={onClose}
+            onClick={close}
+            aria-label="Close"
             className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
           >
             <XIcon className="w-5 h-5 text-gray-500" />
@@ -526,6 +547,7 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
           <PurchaseOrderComposer
             mode="page"
             vendors={vendorOptions}
+            vendorsLoading={suppliersLoading}
             interstate={interstate}
             onVendorChange={setVendorId}
             allowAddLine
@@ -556,7 +578,8 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
             )}
             submitLabel="Create as Draft"
             submittingLabel="Creating..."
-            onCancel={onClose}
+            onCancel={close}
+            onDirtyChange={trackDirty}
             onSubmit={async (payload) => {
               const storeId = user?.activeStoreId ?? 'default';
               const resp = await vendorsApi.createPurchaseOrder({

@@ -158,6 +158,9 @@ export interface PurchaseOrderComposerProps {
   onVendorChange?: (vendorId: string) => void;
   /** Whether a line may be removed. Manual form: yes (min 1). Buy Desk: no. */
   allowRemoveLine?: boolean;
+  /** Told whether the operator has entered anything since the form opened,
+   *  so the caller can ask before throwing it away (audit F87). */
+  onDirtyChange?: (dirty: boolean) => void;
   onSubmit: (payload: ComposerSubmitPayload) => Promise<void>;
   submitLabel?: string;
   submittingLabel?: string;
@@ -250,6 +253,15 @@ function formatPaidDate(raw?: string | null): string {
   return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
 }
 
+// What the operator has put on the form, as one comparable string.
+function enteredSig(lines: ComposerLine[], expectedDate: string, notes: string): string {
+  return JSON.stringify([
+    expectedDate,
+    notes.trim(),
+    lines.map((l) => [l.productId, l.newProduct ?? null, l.quantity, l.costTouched ? l.unitCost : null]),
+  ]);
+}
+
 const blankLine = (): ComposerLine => ({
   productId: '',
   productName: '',
@@ -284,6 +296,7 @@ export function PurchaseOrderComposer({
   onAddLine,
   onVendorChange,
   allowRemoveLine = false,
+  onDirtyChange,
   onSubmit,
   submitLabel = 'Create as Draft',
   submittingLabel = 'Creating...',
@@ -301,6 +314,15 @@ export function PurchaseOrderComposer({
   // Synchronous re-entry guard: `disabled={saving}` only bites next render, so a
   // same-tick double-click could otherwise fire two POSTs.
   const submittingRef = useRef(false);
+
+  // Audit F87: has the operator entered anything since the form opened? Only
+  // what THEY put there counts -- a cost the form filled itself (catalogue /
+  // last paid) does not, and a preselected vendor is where the form started.
+  const [pristine] = useState(() => enteredSig(lines, expectedDate, notes));
+  const dirty = vendorId !== initialVendorId || enteredSig(lines, expectedDate, notes) !== pristine;
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
 
   // A caller can preselect a vendor asynchronously (Buy Desk resolves the single
   // preferred vendor only after the active vendor list loads). Adopt it -- but
@@ -596,6 +618,8 @@ export function PurchaseOrderComposer({
                       type="number"
                       min="1"
                       value={line.quantity}
+                      // Audit F67: a tap selects the 1, so typing 4 gives 4, not 14.
+                      onFocus={(e) => e.target.select()}
                       onChange={(e) => updateLine(index, { quantity: parseInt(e.target.value) || 0 })}
                       className="input-field text-sm"
                       aria-label={`Quantity for line ${index + 1}`}
@@ -608,6 +632,7 @@ export function PurchaseOrderComposer({
                       min="0"
                       step="0.01"
                       value={line.unitCost}
+                      onFocus={(e) => e.target.select()}
                       onChange={(e) =>
                         updateLine(index, {
                           unitCost: parseFloat(e.target.value) || 0,
