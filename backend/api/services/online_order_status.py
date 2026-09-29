@@ -54,6 +54,11 @@ TERMINAL = frozenset({"DELIVERED", "CANCELLED", "REFUNDED", "VOID", "VOIDED"})
 # never a local copy: a done sale (the nightly Tally export, the commission
 # ledgers) and a booked sale (the revenue widgets: all but DRAFT / CANCELLED).
 SALE_DONE_STATUSES = ("COMPLETED", "DELIVERED", "PAID", "SHIPPED")
+# The same done sale for the reports that also read imported history (stock
+# movements, sell-through, RFM): TechCherry wrote any case, and FULFILLED.
+SALE_DONE_ANY_CASE = tuple(
+    v for s in (*SALE_DONE_STATUSES, "FULFILLED") for v in (s, s.lower(), s.title())
+)
 BOOKED_STATUSES = frozenset({"CONFIRMED", "PROCESSING", "READY", "SHIPPED", "DELIVERED"})
 # Targets an active Rx / stock hold withholds (the deliver-guard's own rule).
 _HOLDABLE = frozenset({"SHIPPED", "DELIVERED"})

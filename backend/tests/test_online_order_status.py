@@ -997,15 +997,47 @@ def test_a_shipped_online_sale_counts_in_the_revenue_widgets(monkeypatch):
 
 def test_no_report_keeps_its_own_copy_of_the_sale_status_sets():
     """A local copy is how SHIPPED went missing from the Tally export, the
-    commission ledgers and the revenue widgets in the first place."""
+    commission ledgers, the revenue widgets, the stock reports and the RFM
+    segments. Read as Python, not as text: a copy written over several lines,
+    in any case, is still a copy."""
+    import ast
     import pathlib
 
     root = pathlib.Path(__file__).resolve().parents[1]
-    copies = ('"COMPLETED", "DELIVERED", "PAID"', '"CONFIRMED", "PROCESSING", "READY", "DELIVERED"')
-    hits = [f"{p.relative_to(root)}: {c}" for d in ("api", "agents") for p in (root / d).rglob("*.py")
-            for c in copies if p.name != "online_order_status.py" and c in p.read_text(encoding="utf-8")]
+    done, booked = {"DELIVERED", "PAID"}, {"CONFIRMED", "PROCESSING", "READY", "DELIVERED"}
+    hits = []
+    for p in (q for d in ("api", "agents") for q in (root / d).rglob("*.py")):
+        if p.name == "online_order_status.py":
+            continue
+        for node in ast.walk(ast.parse(p.read_text(encoding="utf-8"))):
+            if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+                vals = {e.value.upper() for e in node.elts
+                        if isinstance(e, ast.Constant) and isinstance(e.value, str)}
+                if done <= vals or booked <= vals:
+                    hits.append(f"{p.relative_to(root)}:{node.lineno}")
     assert hits == []
     assert "SHIPPED" in oos.SALE_DONE_STATUSES and "SHIPPED" in oos.BOOKED_STATUSES
+    assert {"SHIPPED", "Delivered", "fulfilled"} <= set(oos.SALE_DONE_ANY_CASE)
+
+
+def test_a_shipped_online_sale_keeps_its_customer_in_the_rfm_segments(monkeypatch):
+    from datetime import timedelta, timezone
+
+    from strict_fakes import StrictDB
+
+    from api.routers import crm
+
+    db = StrictDB()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    db.seed("orders", [
+        {"order_id": "O1", "customer_id": "c1", "status": "SHIPPED", "grand_total": 30000.0,
+         "created_at": now - timedelta(days=3)},
+        {"order_id": "O2", "customer_id": "c2", "status": "CANCELLED", "grand_total": 30000.0,
+         "created_at": now - timedelta(days=3)},
+    ])
+    monkeypatch.setattr(crm, "_crm_get_db", lambda: db)
+    segments = crm._perform_rfm_segmentation([{"customer_id": "c1"}, {"customer_id": "c2"}])
+    assert sum(s["customer_count"] for s in segments) == 1
 
 
 # ---------------------------------------------------------------------------

@@ -39,9 +39,7 @@ from .helpers import (
 # and /sell-through-analysis (previously lowercase-only, so they silently
 # missed every imported sale).
 #
-# _SOLD_STATUSES is defined near the top of the ADVANCED INVENTORY FEATURES
-# section (before its first use in get_non_moving_stock) so it is always
-# initialised before any caller runs.
+# _SOLD_STATUSES is online_order_status.SALE_DONE_ANY_CASE (via _shared).
 
 
 def _empty_alert_stats() -> dict:
