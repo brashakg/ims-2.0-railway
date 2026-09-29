@@ -56,6 +56,25 @@ class _DuplicateKeyError(Exception):
     pass
 
 
+_MISSING = object()
+
+
+def _path(doc, key):
+    """The value at a dotted path, as Mongo reads it: through an array of
+    subdocuments, the list of each element's value. _MISSING when absent."""
+    node = doc
+    for part in key.split("."):
+        if isinstance(node, list):
+            node = [e[part] for e in node if isinstance(e, dict) and part in e] or _MISSING
+        elif isinstance(node, dict):
+            node = node.get(part, _MISSING)
+        else:
+            node = _MISSING
+        if node is _MISSING:
+            return _MISSING
+    return node
+
+
 def _match(doc, filter_) -> bool:
     if not filter_:
         return True
@@ -64,7 +83,9 @@ def _match(doc, filter_) -> bool:
             if not any(_match(doc, sub) for sub in expected):
                 return False
             continue
-        actual = doc.get(k)
+        actual = _path(doc, k)
+        present = actual is not _MISSING
+        actual = actual if present else None
         if isinstance(expected, dict):
             for op, op_val in expected.items():
                 if op == "$type":
@@ -84,7 +105,7 @@ def _match(doc, filter_) -> bool:
                     if op_val in actual if isinstance(actual, list) else actual == op_val:
                         return False
                 elif op == "$exists":
-                    if (k in doc) != bool(op_val):
+                    if present != bool(op_val):
                         return False
                 elif op == "$elemMatch":
                     # An array element matching the whole sub-filter (the
@@ -93,6 +114,10 @@ def _match(doc, filter_) -> bool:
                         return False
                 else:
                     return False
+        elif isinstance(actual, list) and not isinstance(expected, list):
+            # Mongo: a scalar matches an array holding it.
+            if expected not in actual:
+                return False
         else:
             if actual != expected:
                 return False
@@ -191,23 +216,23 @@ class FakeCollection:
 
         def _slot(k):
             """(container, leaf) for a key: positional as above; a dotted "a.b"
-            is nested, as Mongo."""
-            arr, _, leaf = k.partition(".$.")
-            if leaf:
-                return pos[arr], leaf
-            *parents, leaf = k.split(".")
-            node = target
+            is nested, as Mongo -- after the positional element too."""
+            arr, _, rest = k.partition(".$.")
+            node = pos[arr] if rest else target
+            *parents, leaf = (rest or k).split(".")
             for part in parents:
                 node = node.setdefault(part, {})
             return node, leaf
 
         for op, fields in (update or {}).items():
-            for k, v in fields.items() if op in ("$inc", "$set", "$addToSet", "$pull") else ():
+            for k, v in fields.items() if op in ("$inc", "$set", "$addToSet", "$pull", "$unset") else ():
                 node, leaf = _slot(k)
                 if op == "$inc":
                     node[leaf] = (node.get(leaf) or 0) + v
                 elif op == "$set":
                     node[leaf] = v
+                elif op == "$unset":
+                    node.pop(leaf, None)
                 elif op == "$addToSet":
                     if v not in node.setdefault(leaf, []):
                         node[leaf].append(v)

@@ -709,6 +709,7 @@ def test_the_signed_shiprocket_webhook_delivers_on_a_known_awb(swept):
     assert _doc(swept, 60121)["status"] == "SHIPPED"
 
 
+
 # ---------------------------------------------------------------------------
 # The refund leg. Finding (d): a Shopify cancel refund restocks no unit the
 # order does not hold SOLD (an oversold / under-claimed line would MINT a
@@ -1214,3 +1215,61 @@ def test_a_goods_back_that_did_not_land_books_nothing_returned(swept, monkeypatc
         _goods_back(row)
     assert first.value.status_code == 503 and _units(swept) == [("stk-1", "SOLD")]
     assert not _doc(swept, 60176)["items"][0].get("returned_qty")
+
+
+@pytest.mark.parametrize("first", ["return_confirmed_before_the_marks", "money_only_refund"])
+def test_the_counter_counts_goods_back_beside_a_refund_that_has_only_its_doc(swept, first):
+    """Two frames sold. One refund already has its return doc and no booking
+    on the line: a return confirmed before the marks (the state of every
+    refund confirmed on main), or a money-only refund (the customer keeps
+    that frame). Refund R1's frame then comes back through Goods back, before
+    its confirm: booked on the line, no doc yet. Both frames are accounted
+    for, so the counter takes nothing back -- it used to read the larger of
+    the two books (1), not both (2), and mint or reactivate a third unit."""
+    oid, earlier, r1 = 60188, 700388, 700389
+    doc = _book(swept, oid, line_items=[{**_frame_order(oid)["line_items"][0], "quantity": 2}])
+    _claim_unit(swept, doc)
+    swept["stock_repo"].units.append({**swept["stock_repo"].units[0], "stock_id": "stk-2"})
+    _set(swept, oid, status="DELIVERED", payment_status="PARTIAL_REFUND")
+    restock_type = "return" if first == "return_confirmed_before_the_marks" else "no_restock"
+    shopify_refund.handle_shopify_refund(swept["db"], _refund(earlier, oid, restock_type=restock_type),
+                                         webhook_id=None, topic="refunds/create")
+    _confirm(swept["review"].find_one({"shopify_refund_id": str(earlier)}))
+    if first == "return_confirmed_before_the_marks":
+        items = _doc(swept, oid)["items"]
+        for item in items:
+            item.pop("returned_qty", None)
+            item.pop("restocked_refunds", None)
+        _set(swept, oid, items=items)
+    shopify_refund.handle_shopify_refund(swept["db"], _refund(r1, oid, restock_type="return"),
+                                         webhook_id=None, topic="refunds/create")
+    assert _goods_back(swept["review"].find_one({"shopify_refund_id": str(r1)}))["result"]["status"] == "restocked"
+    back = ["AVAILABLE", "AVAILABLE"] if first == "return_confirmed_before_the_marks" else ["AVAILABLE", "SOLD"]
+    assert sorted(s for _, s in _units(swept)) == back
+
+    _refused(swept, oid)
+    _confirm(swept["review"].find_one({"shopify_refund_id": str(r1)}))
+    assert len(swept["stock_repo"].units) == 2, "no phantom minted"
+    assert swept["ledger"].count_documents({}) == 2, "one credit note per refund, none at the counter"
+
+
+def test_a_partly_landed_goods_back_keeps_its_mark_at_the_units_that_landed(swept, monkeypatch):
+    """A two-unit refund line whose restock put back one unit: the line stays
+    booked for that one (restocked_refunds and returned_qty), so the counter
+    still takes back the other."""
+    oid, rid = 60189, 700387
+    doc = _book(swept, oid, line_items=[{**_frame_order(oid)["line_items"][0], "quantity": 2}])
+    _claim_unit(swept, doc)
+    swept["stock_repo"].units.append({**swept["stock_repo"].units[0], "stock_id": "stk-2"})
+    _set(swept, oid, status="DELIVERED", payment_status="PARTIAL_REFUND")
+    shopify_refund.handle_shopify_refund(swept["db"], _refund_both(rid, oid), webhook_id=None,
+                                         topic="refunds/create")
+    real = returns_router._restock_good_items
+
+    def one_lands(lines, *a, **kw):
+        return real([lines[0].model_copy(update={"return_qty": 1})], *a, **kw)
+
+    monkeypatch.setattr(returns_router, "_restock_good_items", one_lands)
+    _goods_back(swept["review"].find_one({"shopify_refund_id": str(rid)}))
+    line = _doc(swept, oid)["items"][0]
+    assert (line.get("returned_qty"), line.get("restocked_refunds")) == (1, {str(rid): 1})

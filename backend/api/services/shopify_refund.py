@@ -499,7 +499,7 @@ def _cap_restock_to_unreturned(
                 )
             keep = max(0.0, min(line.return_qty, left[key]))
             left[key] -= keep
-            if refund_id and refund_id in (orig.get("restocked_refunds") or []):
+            if refund_id and refund_id in (orig.get("restocked_refunds") or {}):
                 out.extend(_split_restock(line, 0.0) if line.restock else [line])
                 continue
             if keep >= line.return_qty:
@@ -1521,9 +1521,9 @@ def _release_unlanded(order: Dict[str, Any], held: _Held, result: Dict[str, Any]
     """Un-book what did not land, by the restock's own per-product count of
     units it reactivated or minted. A line with nothing landed drops the
     refund's mark too (another press may restock it); a partly landed one
-    keeps it, so its landed unit is never restocked twice and the missing one
-    shows as a restock not applied (ponytail: per-unit marks if a qty>1
-    refund line ever needs a partial retry)."""
+    keeps it at the units that landed, so its landed unit is never restocked
+    twice and the missing one shows as a restock not applied (ponytail: a
+    qty>1 refund line gets no partial retry)."""
     from ..routers.returns import _release_returnable_qty
 
     landed: Dict[str, float] = {}
@@ -1535,8 +1535,8 @@ def _release_unlanded(order: Dict[str, Any], held: _Held, result: Dict[str, Any]
         keep = min(qty, landed.get(pid, 0.0))
         landed[pid] = landed.get(pid, 0.0) - keep
         if keep < qty:
-            _release_returnable_qty(order.get("order_id"), orig, qty - keep,
-                                    refund_id if keep == 0 else None)
+            _release_returnable_qty(order.get("order_id"), orig, qty - keep, refund_id,
+                                    keep_mark=keep > 0)
 
 
 def goods_back(db, review: Dict[str, Any], *, user_id: Optional[str]) -> Dict[str, Any]:
