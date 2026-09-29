@@ -86,6 +86,27 @@ async def push_product(
     _lock = push_lock_reason(db, "product", product)
     if _lock:
         return _blocked_result("product", pid, _lock)
+    # THE BRAND DEFAULT ALWAYS DECIDES (owner ruling 2026-09-29, D6): a brand
+    # Settings -> Brand Master keeps off the website is never pushed. The same
+    # function stamped the product's sync_to_shopify at create, so the flag and
+    # the push can never disagree. Unknown brand / read trouble -> refused
+    # (fail-closed, never list by accident).
+    from ..catalog_dictionary import load_brand_sync_default
+
+    _brand = product.get("brand") or product.get("vendor") or (
+        product.get("attributes") or {}
+    ).get("brand_name")
+    if not load_brand_sync_default(db, _brand):
+        return PushResult(
+            mode=MODE_BLOCKED,
+            entity="product",
+            action="skip",
+            target_id=pid,
+            ok=False,
+            error=f"brand '{_brand or '-'}' is not for the website "
+            "(Settings > Brand Master)",
+            reason="brand_not_for_website",
+        )
     # VARIANT-OF (owner ruling 2026-09-06): a size variant owns NO listing. Its
     # price, barcode and stock ride the PARENT's push (push_variant_prices /
     # sync_product_stock over the parent's catalog_variants rows); every

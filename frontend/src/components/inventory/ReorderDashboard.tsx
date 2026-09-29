@@ -80,8 +80,9 @@ export function ReorderDashboard() {
         inventoryApi.getStock(storeId).catch(() => ({ items: [] })),
       ]);
 
-      // getLowStock returns { items: [{ _id: productId, quantity, auto_reorder_disabled }] }
-      const lowStockItems: Array<{ _id: string; quantity: number; auto_reorder_disabled?: boolean }> =
+      // getLowStock returns { items: [{ _id: productId, quantity, reorder_point, auto_reorder_disabled }] }
+      // -- only products with a SET level at or under it (reorder_policy).
+      const lowStockItems: Array<{ _id: string; quantity: number; reorder_point: number; auto_reorder_disabled?: boolean }> =
         Array.isArray(lowStockData) ? lowStockData : lowStockData?.items ?? [];
 
       // getStock returns { items: [...stock unit docs] }
@@ -135,7 +136,7 @@ export function ReorderDashboard() {
           category: raw.category ?? '',
           currentStock,
           reservedStock,
-          reorderPoint: Number(raw.reorder_point ?? raw.reorder_level ?? 10),
+          reorderPoint: Number(item.reorder_point),
           reorderQuantity,
           autoReorderDisabled,
           maxStock: Number(raw.max_stock ?? raw.maximum_stock ?? 50),

@@ -110,7 +110,7 @@ export function SimilarProductsHint({
               title={`${s.name || 'Product'}${s.sku ? ` — SKU ${s.sku}` : ''}${
                 s.is_active === false ? ' (inactive)' : ''
               } — click to add another variant of this model`}
-              className="inline-flex items-center mr-1 mb-0.5 px-1.5 py-px rounded border border-gray-200 bg-gray-50 text-[11px] text-gray-700 hover:border-bv hover:bg-bv-50 disabled:cursor-default disabled:hover:border-gray-200 disabled:hover:bg-gray-50 align-middle"
+              className="inline-flex items-center min-h-9 mr-1 mb-1 px-2.5 rounded border border-gray-200 bg-gray-50 text-xs text-gray-700 hover:border-bv hover:bg-bv-50 disabled:cursor-default disabled:hover:border-gray-200 disabled:hover:bg-gray-50 align-middle"
             >
               {chipLabel(s)}
             </button>

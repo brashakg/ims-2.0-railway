@@ -8,6 +8,8 @@ from ._shared import (
     Query,
     _SOLD_STATUSES,
     _reorder_disabled,
+    _is_low_stock,
+    _reorder_level,
     datetime,
     get_current_user,
     logger,
@@ -88,7 +90,7 @@ def _build_stock_alert(
     """
     stock = int(product.get("stock_quantity", 0) or 0)
     cost = float(product.get("cost_price", 0) or 0)
-    reorder_point = int(product.get("reorder_point", 0) or 0)
+    reorder_point = _reorder_level(product)  # None = not set (F73)
     # Owner decision (2026-07-04): reorder_quantity <= 0 (the new -1 default)
     # means auto-reorder is DISABLED for this product -- never emit a
     # REORDER_ALERT / restock suggestion for it. Informational alerts
@@ -124,7 +126,7 @@ def _build_stock_alert(
     #    (or is already at/below an explicit reorder point, or out of stock
     #     while still selling).
     out_of_stock_but_selling = stock <= 0 and velocity > 0
-    below_reorder_point = reorder_point > 0 and stock <= reorder_point and velocity > 0
+    below_reorder_point = _is_low_stock(product, stock) and velocity > 0
     runs_out_soon = projected is not None and projected <= lead_time_days
     if not reorder_suggestions_off and (
         out_of_stock_but_selling or below_reorder_point or runs_out_soon

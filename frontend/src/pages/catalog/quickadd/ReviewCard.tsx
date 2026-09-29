@@ -12,7 +12,7 @@ export function ReviewCard({ form }: { form: QuickAddForm }) {
   const {
     selectedCategory, attributes, mrp, offerPrice, canSeeCost, costPrice,
     weight, hsnCode, gstRate, hsnMatchesCategory, discountCategory, brandTiers,
-    isReviewMode, reorderLevel, images, syncToShopify,
+    isReviewMode, reorderLevel, images, brandSyncs, editMode, skuPreview,
   } = form;
 
   return (
@@ -25,6 +25,8 @@ export function ReviewCard({ form }: { form: QuickAddForm }) {
 
         <dl className="grid grid-cols-1 tablet:grid-cols-2 laptop:grid-cols-3 gap-x-8 gap-y-1.5 text-sm">
           <ReviewRow label="Category" value={categoryName(selectedCategory) || '—'} />
+          {/* The server-minted SKU this new product will get (F13/D5). */}
+          {!editMode && <ReviewRow label="SKU" value={skuPreview || '—'} />}
           <ReviewRow label="Brand" value={attributes.brand_name || '—'} />
           <ReviewRow
             label="Model"
@@ -63,11 +65,13 @@ export function ReviewCard({ form }: { form: QuickAddForm }) {
                 : 'Auto (Brand Master tier)')
             }
           />
-          {!isReviewMode && <ReviewRow label="Reorder level" value={reorderLevel || '—'} />}
+          {!isReviewMode && <ReviewRow label="Reorder level" value={reorderLevel || 'not set'} />}
           {images.length > 0 && (
             <ReviewRow label="Images" value={`${images.length} uploaded`} />
           )}
-          {syncToShopify && !isReviewMode && <ReviewRow label="Shopify" value="Will sync" />}
+          {brandSyncs[attributes.brand_name] && !isReviewMode && (
+            <ReviewRow label="Shopify" value="Will sync" />
+          )}
         </dl>
       </div>
     </aside>

@@ -23,6 +23,7 @@ import logging
 
 from .auth import get_current_user
 from ..services.reorder_policy import auto_reorder_disabled as _reorder_disabled
+from ..services.reorder_policy import is_low_stock, reorder_level
 
 # IST (TZ-P3): the server clock is UTC; every business "today" key below must be
 # the IST calendar day or the 00:00-05:30 IST window reads the PREVIOUS day.
@@ -189,12 +190,11 @@ class JarvisAnalyticsEngine:
                 for p in products_col.find({}):
                     total_products += 1
                     qty = int(p.get("stock_quantity") or p.get("quantity") or 0)
-                    reorder = int(p.get("reorder_point") or 0)
                     price = float(p.get("offer_price") or p.get("mrp") or 0)
                     inv_value += qty * price
                     if qty <= 0:
                         out_of_stock += 1
-                    elif reorder and qty <= reorder:
+                    elif is_low_stock(p, qty):
                         low_stock += 1
 
             # Customers
@@ -430,7 +430,7 @@ class JarvisAnalyticsEngine:
                     continue
                 total += 1
                 qty = int(p.get("stock_quantity") or p.get("quantity") or 0)
-                reorder = int(p.get("reorder_point") or 0)
+                reorder = reorder_level(p)  # None = not set (F73)
                 price = float(
                     p.get("offer_price") or p.get("mrp") or p.get("cost_price") or 0
                 )
@@ -448,7 +448,7 @@ class JarvisAnalyticsEngine:
                             "demand": "unknown",
                         }
                     )
-                elif reorder and qty <= reorder:
+                elif is_low_stock(p, qty):
                     low += 1
                     critical_alerts.append(
                         {

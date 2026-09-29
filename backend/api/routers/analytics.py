@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 from .auth import get_current_user, require_roles
 from ..utils.dates import to_date_str
 from ..utils.ist import ist_date_str
+from ..services.reorder_policy import is_low_stock, reorder_level
 from ..dependencies import (
     get_order_repository,
     get_stock_repository,
@@ -531,7 +532,7 @@ async def get_dashboard_summary(
             [
                 i
                 for i in inventory
-                if _safe_int(i.get("quantity")) <= _safe_int(i.get("reorder_point"))
+                if is_low_stock(i, _safe_int(i.get("quantity")))
             ]
         )
         out_of_stock = len([i for i in inventory if _safe_int(i.get("quantity")) == 0])
@@ -964,7 +965,7 @@ async def get_inventory_intelligence(
         low_stock = [
             i
             for i in inventory
-            if _safe_int(i.get("quantity")) <= _safe_int(i.get("reorder_point"))
+            if is_low_stock(i, _safe_int(i.get("quantity")))
             and _safe_int(i.get("quantity")) > 0
         ]
 
@@ -1002,7 +1003,8 @@ async def get_inventory_intelligence(
             i
             for i in inventory
             if _safe_float(i.get("sales_velocity", 0)) > 0
-            and _safe_int(i.get("quantity")) <= _safe_int(i.get("reorder_point")) * 1.5
+            and (lvl := reorder_level(i)) is not None
+            and _safe_int(i.get("quantity")) <= lvl * 1.5
         ]
 
         return {
@@ -1013,7 +1015,7 @@ async def get_inventory_intelligence(
                         "sku": _sku(i),
                         "name": _name(i),
                         "quantity": i.get("quantity", 0),
-                        "reorder_point": i.get("reorder_point", 0),
+                        "reorder_point": reorder_level(i),
                     }
                     for i in low_stock[:10]
                 ],
@@ -1330,7 +1332,7 @@ async def get_enterprise_kpis(
             [
                 i
                 for i in inventory
-                if _safe_int(i.get("quantity")) <= _safe_int(i.get("reorder_point"))
+                if is_low_stock(i, _safe_int(i.get("quantity")))
             ]
         )
 

@@ -7,6 +7,7 @@ from ._shared import (
     Optional,
     Query,
     _INVENTORY_ROLES,
+    _low_stock_rows,
     _reorder_disabled,
     barcode_svc,
     get_current_user,
@@ -47,7 +48,7 @@ async def get_low_stock_alerts(
     if repo is None:
         return {"items": []}
 
-    items = repo.find_low_stock(active_store)
+    items = _low_stock_rows(repo, get_product_repository(), active_store)
 
     # Join the product masters in ONE $in query (fail-soft: a join failure
     # only means the flag stays False, i.e. legacy-enabled behaviour).

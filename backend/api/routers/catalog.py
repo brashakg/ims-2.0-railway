@@ -28,6 +28,7 @@ from ..services import stock_allocation
 from ..services.pricing_caps import evaluate_offer_price, CATEGORY_DISCOUNT_CAPS
 from ..services.gst_rates import gst_rate_for_category, hsn_for_category
 from ..services import product_master as _pm
+from ..services.reorder_policy import is_low_stock, reorder_level
 from ..services import online_delist as _delist
 from ..services.shopify_push import is_variant_of as _is_variant_of
 # THE ONLINE on-hand reader, the one the oversell-risk tile reads (panel round
@@ -1026,7 +1027,7 @@ class InventoryInput(BaseModel):
     initial_quantity: int = 0
     location_id: Optional[str] = None
     barcode: Optional[str] = None
-    reorder_level: int = 5
+    reorder_level: int = -1  # -1 = not set, no low-stock alert (F73)
     # Owner decision (2026-07-04): -1 means "no auto-reorder" -- every reorder
     # engine skips the product until a positive qty is explicitly configured
     # (see api/services/reorder_policy.py).
@@ -1371,29 +1372,6 @@ def _next_sku_counter(prefix: str, db=None) -> int:
     return counter
 
 
-def generate_sku(category: ProductCategory, attributes: Dict[str, Any], db=None) -> str:
-    """Generate a unique SKU from category + attributes.
-
-    Pass `db` so the numeric counter is allocated ATOMICALLY + PERSISTENTLY
-    (see _next_sku_counter). The SKU still ends in a `find_by_sku` dedupe check
-    at the call site, so even if two products share brand/model/colour the
-    counter keeps them distinct.
-    """
-    prefix = category.value
-    counter = _next_sku_counter(prefix, db=db)
-
-    # Add brand code
-    brand = attributes.get("brand_name", "XX")[:2].upper()
-
-    # Add model/colour for uniqueness
-    model = attributes.get("model_no", attributes.get("model_name", ""))[:4].upper()
-    colour = attributes.get("colour_code", attributes.get("colour_name", ""))[
-        :3
-    ].upper()
-
-    return f"{prefix}-{brand}-{model}{colour}-{counter}"
-
-
 def generate_product_title(
     category: ProductCategory, attributes: Dict[str, Any]
 ) -> str:
@@ -1709,10 +1687,15 @@ async def create_catalog_product(
     # HSN/category) -- same rules the canonical /products path enforces.
     gst_rate, hsn_code = _guard_catalog_pricing(product)
 
-    # Generate SKU and title. Pass the DB so the SKU counter is allocated
-    # atomically + persistently (not the per-worker in-memory dict).
+    # SKU: the ONE readable rule (product_master.build_sku, owner D5), made
+    # unique by the same collision suffix every door uses.
+    from ..dependencies import get_product_repository
+
     product_id = f"prod_{uuid.uuid4().hex[:12]}"
-    sku = generate_sku(product.category, product.attributes, db=_get_db())
+    sku = _pm.mint_unique_sku(
+        product.category.value, product.attributes,
+        product_repo=get_product_repository(), db=_get_db(),
+    )
     title = generate_product_title(product.category, product.attributes)
 
     # PRODUCTS-CONVERGENCE step-10: validate through the canonical registry AND
@@ -1726,8 +1709,6 @@ async def create_catalog_product(
     # the catalog/PIM door (which legitimately holds same-identity variants) and
     # to keep the native catalog_products doc (storefront/Shopify shape) below
     # unchanged.
-    from ..dependencies import get_product_repository
-
     try:
         _spine = _pm.build_canonical_product(
             {
@@ -1853,7 +1834,7 @@ async def create_catalog_product(
             "locations": {},
             "barcode": product.inventory.barcode if product.inventory else None,
             "reorder_level": (
-                product.inventory.reorder_level if product.inventory else 5
+                product.inventory.reorder_level if product.inventory else -1
             ),
             # -1 = auto-reorder disabled (owner default; reorder_policy.py).
             "reorder_quantity": (
@@ -2793,9 +2774,8 @@ async def get_product_inventory(
         "title": product["title"],
         "total_quantity": product["inventory"]["total_quantity"],
         "locations": product["inventory"]["locations"],
-        "reorder_level": product["inventory"]["reorder_level"],
-        "needs_reorder": product["inventory"]["total_quantity"]
-        <= product["inventory"]["reorder_level"],
+        "reorder_level": reorder_level(product),
+        "needs_reorder": is_low_stock(product, product["inventory"]["total_quantity"]),
     }
 
 
@@ -2917,6 +2897,9 @@ async def import_products(
     # Resolve the DB once so each row's SKU counter is allocated atomically +
     # persistently (the per-worker in-memory dict would collide under concurrency).
     _bulk_db = _get_db()
+    from ..dependencies import get_product_repository
+
+    _bulk_repo = get_product_repository()
 
     for i, product in enumerate(products):
         try:
@@ -2965,7 +2948,10 @@ async def import_products(
                 continue
 
             product_id = f"prod_{uuid.uuid4().hex[:12]}"
-            sku = generate_sku(product.category, product.attributes, db=_bulk_db)
+            sku = _pm.mint_unique_sku(
+                product.category.value, product.attributes,
+                product_repo=_bulk_repo, db=_bulk_db,
+            )
             title = generate_product_title(product.category, product.attributes)
 
             product_data = {
@@ -2993,7 +2979,7 @@ async def import_products(
                 "inventory": {
                     "total_quantity": 0,
                     "locations": {},
-                    "reorder_level": 5,
+                    "reorder_level": -1,
                     "reorder_quantity": -1,
                 },
                 "shopify": {"synced": False},

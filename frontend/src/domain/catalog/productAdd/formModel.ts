@@ -27,7 +27,6 @@ export interface ProductFormValues {
   offerPrice?: string;
   costPrice?: string;
   discountCategory: string;
-  syncToShopify: boolean;
   shopifyTags: string[];
   publishPOS: boolean;
   // Uploaded product-image URLs (self-hosted, from productApi.uploadProductImage).
@@ -234,9 +233,8 @@ export function buildProductPayload(values: ProductFormValues): CreateProductPay
     // the operator didn't add any.
     images: Array.isArray(values.images) ? values.images : [],
     shopify: {
-      // Kept for future vendor sync (NEXUS pushes POS stock -> Shopify). We
-      // don't render our own storefront.
-      sync_to_shopify: values.syncToShopify,
+      // No sync choice: the brand's Brand Master default decides whether a
+      // product goes to the website (owner 2026-09-29, D6).
       shopify_tags: values.shopifyTags,
       publish_to_pos: values.publishPOS,
     },

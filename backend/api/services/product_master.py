@@ -577,60 +577,39 @@ def is_known_category(category: Any) -> bool:
 
 
 # ===========================================================================
-# SKU rule (REWRITE -- NOT a wrapper of catalog.generate_sku)
+# SKU rule -- THE one minter (owner ruling 2026-09-28, D5)
 # ===========================================================================
 
 
-def _sku_segment(value: Any, *, keep_separators: bool = False) -> str:
-    """Uppercase a value, stripping spaces. Keeps `/` and `-` when asked
-    (colour codes like `1109/71` must survive verbatim per the Excel rule)."""
-    s = str(value or "").strip().upper().replace(" ", "")
-    if keep_separators:
-        return s
-    return re.sub(r"[^A-Z0-9]", "", s)
+def _sku_segment(value: Any) -> str:
+    """One SKU part: uppercase letters and digits; a `/` becomes `-`, every
+    other character (spaces, dots, the brand's own hyphen) is dropped."""
+    s = re.sub(r"[^A-Z0-9/]", "", str(value or "").upper())
+    return "-".join(p for p in s.split("/") if p)
 
 
 def build_sku(category: Any, attributes: Dict[str, Any], db=None) -> str:
-    """Mint a canonical SKU: PREFIX + BRAND + MODEL + COLORCODE + SIZE.
-
-    REWRITE of the SKU rule (the legacy catalog.generate_sku is left untouched
-    for the /catalog path). Key differences from generate_sku:
-      * verbatim concatenation per the Excel spec (no truncation to 2/4/3 chars),
-      * the colour code keeps `/` and `-` (e.g. `1109/71` stays `1109/71`),
-      * the atomic counter suffix is appended ONLY on a uniqueness collision,
-        not unconditionally.
-
-    `db` (optional) is used to allocate the collision-suffix counter atomically
-    + persistently (reuses catalog._next_sku_counter, falling back to an
-    in-memory dict when no DB). A `find_by_sku`-style dedupe is the caller's
-    responsibility; this function also resolves a collision itself when given
-    the product repo via `_resolve_collision`.
-    """
+    """Mint a NEW product's readable SKU: CATEGORY-BRAND-MODEL-COLOUR-SIZE,
+    e.g. FR-CARRERA-CA8895-807-54 (owner ruling 2026-09-28, D5). Empty parts
+    are skipped. Deterministic, so POST /products/sku-preview shows the form
+    exactly what the create door will mint; a clash gets mint_unique_sku's
+    counter suffix. Existing SKUs are never re-minted (only a create without a
+    SKU calls this). `db` is unused (kept for the callers' signature)."""
     spec = category_spec(category)
     if spec is None:
         raise ProductMasterError(
             f"Unknown product category '{category}'.", status=422, field="category"
         )
-
-    brand = _sku_segment(attributes.get("brand_name") or attributes.get("brand"))
-    model = _sku_segment(
-        attributes.get("model_no")
-        or attributes.get("model_name")
-        or attributes.get("model")
+    a = attributes or {}
+    parts = (
+        spec.prefix,
+        a.get("brand_name") or a.get("brand"),
+        a.get("model_no") or a.get("model_name") or a.get("model"),
+        a.get("colour_code") or a.get("color_code") or a.get("colour_name") or a.get("color"),
+        # A frame's eye size is `lens_size` in the registry; `size` elsewhere.
+        a.get("size") or a.get("lens_size"),
     )
-    # Colour code keeps separators (1109/71 -> 1109/71). Fall back to colour name.
-    colour = _sku_segment(
-        attributes.get("colour_code") or attributes.get("color_code"),
-        keep_separators=True,
-    )
-    if not colour:
-        colour = _sku_segment(
-            attributes.get("colour_name") or attributes.get("color"),
-            keep_separators=False,
-        )
-    size = _sku_segment(attributes.get("size"), keep_separators=True)
-
-    return f"{spec.prefix}{brand}{model}{colour}{size}"
+    return "-".join(seg for seg in map(_sku_segment, parts) if seg)
 
 
 def _next_collision_suffix(prefix: str, db=None) -> int:
@@ -1361,7 +1340,7 @@ def normalise_payload(
     gst_rate: Optional[float] = None,
     country_of_origin: Optional[str] = None,
     warranty_months: Optional[int] = None,
-    weight_grams: Optional[float] = None,
+    weight: Optional[float] = None,
     tags: Any = None,
     created_by: Optional[str] = None,
     created_by_name: Optional[str] = None,
@@ -1564,8 +1543,8 @@ def normalise_payload(
         doc["country_of_origin"] = country_of_origin
     if warranty_months is not None:
         doc["warranty_months"] = int(warranty_months)
-    if weight_grams is not None:
-        doc["weight_grams"] = float(weight_grams)
+    if weight is not None:
+        doc["weight"] = float(weight)
     # Normalised, governed tags (step-12). Always present as a list (possibly
     # empty) so collection rules + the tag filter have a consistent shape.
     doc["tags"] = normalise_tags(tags)
@@ -1581,6 +1560,10 @@ def normalise_payload(
     # Reorder dashboard). setdefault so a door that DID supply a value
     # (via extra_fields) keeps it.
     doc.setdefault("reorder_quantity", -1)
+    # Owner ruling 2026-09-28 ("keep -1 for default"): the reorder LEVEL is
+    # born -1 = NOT SET = no low-stock alert until someone types one
+    # (reorder_policy.reorder_level is the rule every reader calls).
+    doc.setdefault("reorder_point", -1)
     # --- SEO auto-naming: mint a display name when the payload leaves it blank ---
     # The spine has historically had NO `name` column (brand+model was the
     # implicit display identity), so products created via the Add-Product flow
@@ -2214,7 +2197,7 @@ def build_canonical_product(
         gst_rate=p.get("gst_rate"),
         country_of_origin=p.get("country_of_origin"),
         warranty_months=p.get("warranty_months"),
-        weight_grams=p.get("weight_grams"),
+        weight=p.get("weight"),
         tags=p.get("tags"),
         created_by=p.get("created_by") or p.get("actor"),
         created_by_name=p.get("created_by_name") or p.get("actor_name"),
@@ -2298,7 +2281,7 @@ def create_via_door(
         gst_rate=p.get("gst_rate"),
         country_of_origin=p.get("country_of_origin"),
         warranty_months=p.get("warranty_months"),
-        weight_grams=p.get("weight_grams"),
+        weight=p.get("weight"),
         tags=p.get("tags"),
         as_draft=bool(p.get("as_draft", False)),
         force_draft=force_draft,
@@ -2333,7 +2316,7 @@ _CLONE_CATALOG_FIELDS = (
     "gst_rate",
     "country_of_origin",
     "warranty_months",
-    "weight_grams",
+    "weight",
 )
 
 
@@ -2443,7 +2426,7 @@ def create_product(
     gst_rate: Optional[float] = None,
     country_of_origin: Optional[str] = None,
     warranty_months: Optional[int] = None,
-    weight_grams: Optional[float] = None,
+    weight: Optional[float] = None,
     tags: Any = None,
     as_draft: bool = False,
     force_draft: bool = False,
@@ -2493,7 +2476,7 @@ def create_product(
         gst_rate=gst_rate,
         country_of_origin=country_of_origin,
         warranty_months=warranty_months,
-        weight_grams=weight_grams,
+        weight=weight,
         tags=tags,
         created_by=actor,
         # Attribution: a router-supplied username wins (no DB hit); doors that

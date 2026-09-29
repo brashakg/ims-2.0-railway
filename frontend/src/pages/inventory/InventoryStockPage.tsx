@@ -158,9 +158,9 @@ export function InventoryStockPage() {
   );
 
   const getStockStatus = (item: StockItem) => {
-    const threshold = item.lowStockThreshold || item.minStock || 5;
     if (item.stock === 0) return { label: 'Out of Stock', class: 'badge-error' };
-    if (item.stock <= threshold) return { label: 'Low Stock', class: 'badge-warning' };
+    // The server decides against the product's own level; not set = no badge.
+    if (item.low_stock) return { label: 'Low Stock', class: 'badge-warning' };
     return { label: 'In Stock', class: 'badge-success' };
   };
 

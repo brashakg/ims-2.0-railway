@@ -85,6 +85,10 @@ from datetime import datetime, timezone
 
 import pytest
 
+# The push's other mechanics, for a brand that IS for the website (owner D6;
+# the brand rule has its own test in test_add_product_owner_rulings.py).
+pytestmark = pytest.mark.usefixtures("brand_is_for_the_website")
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.environ.setdefault("JWT_SECRET_KEY", "test")
@@ -785,8 +789,8 @@ def test_the_one_create_door_mints_a_size_variant():
 
 
 def test_without_an_explicit_sku_the_mint_ends_large():
-    """Documents WHY the runbook passes the -L sku: build_sku appends the size
-    with no joiner, but Shopify holds '...601/71-L' and a reseed writes
+    """Documents WHY the runbook passes the -L sku: build_sku mints its own
+    readable shape ending '-LARGE', but Shopify holds '...601/71-L' and a reseed writes
     inventoryItem.sku = row.sku, so IMS must equal Shopify."""
     db = _world(seed_child=False)
     created = _create_via_door(db, _child_payload(sku=None))

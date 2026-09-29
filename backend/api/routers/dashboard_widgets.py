@@ -16,6 +16,7 @@ from datetime import datetime
 
 from ..utils.ist import ist_day_start_utc, ist_today, now_ist
 from .auth import get_current_user, require_roles
+from ..services.reorder_policy import is_low_stock, reorder_level
 
 # /admin/* widgets surface cross-store escalations + system status and were
 # AUTHENTICATED-only (any user) -- they bypass the admin router's gate because
@@ -274,10 +275,9 @@ async def inventory_stock_count_status(
                 continue
             total += 1
             qty = int(p.get("stock_quantity") or p.get("quantity") or 0)
-            rp = int(p.get("reorder_point") or 0)
             if qty <= 0:
                 oos += 1
-            elif rp and qty <= rp:
+            elif is_low_stock(p, qty):
                 low += 1
     return {"total_products": total, "low_stock": low, "out_of_stock": oos}
 
@@ -406,11 +406,11 @@ async def owner_digest(
             if p.get("is_active") is False:
                 continue
             qty = int(p.get("stock_quantity") or p.get("quantity") or 0)
-            rp = int(p.get("reorder_point") or 0)
-            is_low = qty <= 0 or (rp and qty <= rp)
+            rp = reorder_level(p)  # None = not set (F73)
+            is_low = qty <= 0 or is_low_stock(p, qty)
             if qty <= 0:
                 oos += 1
-            elif rp and qty <= rp:
+            elif is_low:
                 low += 1
             if is_low and len(low_items) < 10:
                 low_items.append(

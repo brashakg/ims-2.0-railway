@@ -397,6 +397,7 @@ def _canonical_door_payload(
         "hsn_code": product.hsn_code,
         "gst_rate": product.gst_rate,
         "tags": product.tags,
+        "weight": product.weight,
         # Flat identity columns -- normalise_door_payload folds these into the
         # registry's attribute keys (brand->brand_name, model->model_no,
         # color->colour_code) so the required-field gate sees them.
@@ -420,19 +421,13 @@ def _form_extra_fields(product: "ProductCreate") -> dict:
 
 
 def _resolve_sync_to_shopify(product: "ProductCreate", db) -> bool:
-    """The `sync_to_shopify` INTENT to stamp on a new spine product.
+    """The `sync_to_shopify` flag stamped on a new spine product.
 
-    NOTE: nothing pushes to Shopify from IMS anymore (IMS->Shopify is
-    retired; the BVI app owns Shopify) -- the stamp records the owner's
-    intent so the FUTURE BVI-side push knows which products to list.
-
-    An explicit payload value wins; when omitted (None) the brand's
-    Brand Master `sync_to_shopify_default` decides (case-insensitive name
-    match). FAIL-SOFT: unknown brand / no db / read trouble -> False
-    (never sync by accident)."""
-    explicit = getattr(product, "sync_to_shopify", None)
-    if explicit is not None:
-        return bool(explicit)
+    Owner ruling 2026-09-29 (D6): the BRAND DEFAULT ALWAYS DECIDES. There is
+    no per-product choice -- the stamp is catalog_dictionary.
+    load_brand_sync_default, the same function the Shopify push reads
+    (shopify_push.product.push_product). FAIL-SOFT: unknown brand / no db /
+    read trouble -> False (never sync by accident)."""
     try:
         from ..dependencies import get_db as _get_db_dep
         from ..services import catalog_dictionary as _cd
@@ -474,8 +469,8 @@ def _create_via_canonical_door(
     except Exception:  # noqa: BLE001 - mirror is fail-soft; never block a create
         variant_repo = None
 
-    # Additive door columns + the resolved Shopify-sync INTENT (explicit
-    # payload value, else the brand's Brand Master default, fail-soft False).
+    # Additive door columns + the Shopify-sync flag (the brand's Brand Master
+    # default, fail-soft False).
     extra = _form_extra_fields(product)
     extra["sync_to_shopify"] = _resolve_sync_to_shopify(product, db)
 
@@ -576,6 +571,10 @@ class ProductCreate(BaseModel):
     # silently dropped it on every create and no IMS-born product ever carried a
     # description to Shopify. Optional + additive.
     description: Optional[str] = None
+    # Grams -- the same `weight` key PUT /products/{id} writes and the form
+    # reads back. Was never modelled here, so pydantic dropped it on every
+    # create and the same-model chip had no weight to copy (audit F69).
+    weight: Optional[float] = Field(default=None, ge=0)
     # Governed product tags (step-12). Accepts a list or a comma-separated
     # string; normalised (lowercase/trim/dedupe) server-side via the canonical
     # door so FORM/BULK/CATALOG all yield an identical `tags` array. Tags back
@@ -623,13 +622,8 @@ class ProductCreate(BaseModel):
     @classmethod
     def _validate_images(cls, v):
         return _clean_image_urls(v)
-
-    # Shopify-sync INTENT for the new product. NOTE: nothing pushes to
-    # Shopify from IMS anymore (IMS->Shopify is retired; the BVI app owns
-    # Shopify) -- this stamps the owner's intent for the FUTURE BVI-side
-    # push. None (default) = resolve from the brand's Brand Master
-    # `sync_to_shopify_default`; an explicit true/false is honoured as-is.
-    sync_to_shopify: Optional[bool] = None
+    # No `sync_to_shopify` here: the brand default always decides (owner
+    # 2026-09-29, D6); a stale client that still sends one is ignored.
 
 
 class ProductUpdate(BaseModel):
@@ -698,7 +692,9 @@ class ProductUpdate(BaseModel):
     # ---- Per-product reorder configuration. Moved here from the retired
     # /admin/products PUT (the Reorder dashboard's only writer) so reorder
     # settings persist through the validated path. All optional + additive. ----
-    reorder_point: Optional[int] = Field(None, ge=0)
+    # ge=-1: -1 = NOT SET = no low-stock alert (owner 2026-09-28), so an edit
+    # can clear a typed level back to not set.
+    reorder_point: Optional[int] = Field(None, ge=-1)
     # ge=-1: -1 is the owner's "no auto-reorder" sentinel (reorder_policy.py),
     # so the Reorder dashboard can explicitly disable a product again.
     reorder_quantity: Optional[int] = Field(None, ge=-1)

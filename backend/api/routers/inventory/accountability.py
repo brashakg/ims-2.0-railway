@@ -8,6 +8,7 @@ from ._shared import (
     Optional,
     Query,
     _INVENTORY_ROLES,
+    _low_stock_rows,
     datetime,
     get_product_repository,
     get_stock_repository,
@@ -51,7 +52,7 @@ async def transfer_recommendations(
         return {"recommendations": [], "store_id": active_store}
 
     try:
-        low = stock_repo.find_low_stock(active_store, threshold) or []
+        low = _low_stock_rows(stock_repo, get_product_repository(), active_store)
         low_ids = [r["_id"] for r in low if r.get("_id")]
         if not low_ids:
             return {"recommendations": [], "store_id": active_store}

@@ -1,23 +1,22 @@
 """Add product - owner rulings of 2026-09-28 (second set) and 2026-09-29.
 
-Audit rows F12, F13, F69 (the backend half) and F73. Each strict xfail below
-reproduces a finding against today's code and names it; the fix removes the
-marker. The plain tests are guards the fix must keep green.
+Audit rows F12, F13, F69 (the backend half) and F73. Each test pins one rule
+the owner set; the `guard` tests pin what the fix must not break.
 
 F12 / D6  The brand default ALWAYS decides whether a product goes to the
-          website. Today the create door lets an explicit payload value beat
-          the Brand Master (products._resolve_sync_to_shopify), and the Shopify
-          push never asks the brand at all (shopify_push/product.push_product).
+          website: the create door stamps it (products._resolve_sync_to_shopify)
+          and the Shopify push refuses a brand that is not for the website
+          (shopify_push/product.push_product), both through
+          catalog_dictionary.load_brand_sync_default.
 F13 / D5  New products get a readable SKU, category-brand-model-colour-size,
-          e.g. FR-CARRERA-CA8895-807-54. Today product_master.build_sku runs the
-          parts together and keeps the slash (SGRAYBANRB3016001/58), ignores
-          the frame's eye size, and the legacy /catalog door mints its own shape
-          with catalog.generate_sku. Existing SKUs never change.
-F69       The "same model" chip copies weight. It cannot: the FORM create door
-          drops `weight` (ProductCreate never modelled it), so no sibling has one.
-F73       Reorder level: -1 = NOT SET = no low-stock alert. Today a new product
-          is born with no reorder_point at all, PUT refuses -1 (ge=0), and
-          GET /inventory/low-stock lists every product at or under a fixed 5.
+          e.g. FR-CARRERA-CA8895-807-54, from product_master.build_sku -- the
+          one minter every door and POST /products/sku-preview use. Existing
+          SKUs never change.
+F69       The FORM create door keeps the weight the form sends (`weight`, the
+          key PUT writes and the form reads), so the "same model" chip can copy it.
+F73       Reorder level: -1 = NOT SET = no low-stock alert. A new product is
+          born -1, PUT accepts -1, and GET /inventory/low-stock lists a product
+          only at or under its own level (reorder_policy.low_stock_rows).
 
 Run: JWT_SECRET_KEY=test ENVIRONMENT=test python -m pytest backend/tests/test_add_product_owner_rulings.py -q
 """
@@ -114,17 +113,11 @@ def test_f12_guard_brand_default_stamped_when_nothing_is_sent(door):
     assert carrera["sync_to_shopify"] is False
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="F12/D6: an explicit sync_to_shopify beats the brand default "
-                          "(products._resolve_sync_to_shopify)")
 def test_f12_brand_default_beats_an_explicit_false(door):
     created = door(_form(sync_to_shopify=False))
     assert created["sync_to_shopify"] is True  # Ray-Ban: website yes
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="F12/D6: an explicit sync_to_shopify beats the brand default "
-                          "(products._resolve_sync_to_shopify)")
 def test_f12_brand_default_beats_an_explicit_true(door):
     created = door(_form(brand="Carrera", model="CA8895", color="807", sync_to_shopify=True))
     assert created["sync_to_shopify"] is False  # Carrera: website no
@@ -151,9 +144,6 @@ def test_f12_guard_push_lists_a_brand_that_is_for_the_website():
     assert res.action == "create"
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="F12/D6: push_product never reads the brand default, so a "
-                          "Carrera product (brand: not for the website) is pushed")
 def test_f12_push_refuses_a_brand_that_is_not_for_the_website():
     res = _push(_db(), "Carrera")
     assert res.mode == sp.MODE_BLOCKED
@@ -166,24 +156,18 @@ def test_f12_push_refuses_a_brand_that_is_not_for_the_website():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="F13/D5: build_sku runs the parts together and drops the eye size")
 def test_f13_new_frame_gets_a_readable_sku(door):
     created = door(_form(brand="Carrera", model="CA8895", color="807",
                          attributes={"lens_size": "54"}))
     assert created["sku"] == "FR-CARRERA-CA8895-807-54"
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="F13/D5: build_sku keeps the slash and the brand's hyphen")
 def test_f13_slash_becomes_hyphen_and_punctuation_is_cleaned(door):
     created = door(_form(category="SUNGLASS", brand="Ray-Ban", model="RB 3016",
                          color="001/58"))
     assert created["sku"] == "SG-RAYBAN-RB3016-001-58"
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="F13/D5: the preview endpoint shows the run-together shape")
 def test_f13_preview_endpoint_shows_the_readable_sku():
     out = asyncio.run(pm_router.sku_preview(
         pm_router.SkuPreviewRequest(category="FR", attributes=dict(_CARRERA)),
@@ -215,12 +199,19 @@ def test_f13_guard_a_clash_still_gets_a_unique_sku(door):
         "FRAME", {"brand_name": "Carrera", "model_no": "CA8895", "colour_code": "808"}))
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="F13/D5: the /catalog door mints SKUs with its own copy "
-                          "(catalog.generate_sku), not product_master's")
-def test_f13_catalog_door_mints_the_same_sku():
-    sku = cat.generate_sku(cat.ProductCategory.FRAME, dict(_CARRERA), db=None)
-    assert sku == pm.build_sku("FRAME", dict(_CARRERA))
+def test_f13_catalog_door_mints_the_same_sku(client, auth_headers):
+    """POST /catalog/products (and its /import twin) mint through
+    product_master.mint_unique_sku -- the old catalog.generate_sku copy is gone."""
+    cat.CATALOG_PRODUCTS.clear()
+    resp = client.post(
+        "/api/v1/catalog/products",
+        json={"category": "FR", "attributes": dict(_CARRERA),
+              "pricing": {"mrp": 9000, "discount_category": "PREMIUM"}},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["product"]["sku"] == "FR-CARRERA-CA8895-807-54"
+    assert not hasattr(cat, "generate_sku")
 
 
 def test_f13_guard_existing_sku_never_changes_on_edit():
@@ -248,9 +239,6 @@ def test_f13_guard_existing_sku_never_changes_on_edit():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="F69: ProductCreate has no `weight`, so pydantic drops it and "
-                          "the same-model chip has nothing to copy")
 def test_f69_create_door_keeps_the_weight(door):
     created = door(prod_router.ProductCreate(
         category="FRAME", brand="Ray-Ban", model="RB2140", color="901",
@@ -264,17 +252,11 @@ def test_f69_create_door_keeps_the_weight(door):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="F73: normalise_payload stamps reorder_quantity -1 but no "
-                          "reorder_point, so the form's 5 becomes the level")
 def test_f73_new_product_is_born_with_reorder_level_not_set(door):
     created = door(_form())
     assert created.get("reorder_point") == -1
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="F73: ProductUpdate.reorder_point is ge=0, so a level can "
-                          "never be cleared back to 'not set'")
 def test_f73_edit_can_clear_the_level_back_to_not_set():
     try:
         upd = prod_router.ProductUpdate(reorder_point=-1)
@@ -305,9 +287,6 @@ def test_f73_guard_a_typed_level_still_alerts(monkeypatch):
     assert listed == {"P-SET"}
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="F73: find_low_stock uses a fixed threshold of 5 and never "
-                          "reads the product's level, so -1 still alerts")
 def test_f73_low_stock_skips_a_product_whose_level_is_not_set(monkeypatch):
     listed = _low_stock(
         monkeypatch,

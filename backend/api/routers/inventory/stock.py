@@ -8,6 +8,9 @@ from ._shared import (
     Optional,
     Query,
     StockState,
+    _is_low_stock,
+    _low_stock_rows,
+    _reorder_level,
     canonical_state,
     datetime,
     get_current_user,
@@ -114,7 +117,7 @@ async def get_stock(
 
     # Mode 1: per-product low-stock aggregation. Untouched.
     if low_stock:
-        stock = stock_repo.find_low_stock(active_store)
+        stock = _low_stock_rows(stock_repo, product_repo, active_store)
         return {"items": stock, "total": len(stock)}
 
     # Mode 2: per-unit detail for one product. Consumers (e.g. transfer
@@ -440,7 +443,9 @@ def _ledger_row(
         # api/services/reorder_policy.py. The Reorder dashboard renders that
         # state honestly instead of fabricating a quantity.
         "reorder_quantity": product.get("reorder_quantity"),
-        "reorder_point": product.get("reorder_point"),
+        "reorder_point": _reorder_level(product),  # None = not set (F73)
+        # The ledger badge reads this, never a threshold of its own.
+        "low_stock": _is_low_stock(product, on_hand),
         # Procurement Phase 1 (additive, optional): the latest ACCEPTED GRN
         # that put stock of this product on this store's shelf, or None.
         # Shape: {"grn_number": str, "qty": int, "date": "YYYY-MM-DD"}.

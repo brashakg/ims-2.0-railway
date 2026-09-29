@@ -8,9 +8,9 @@ Covers the 2026-07-04 Brand Master upgrades:
   2. catalog_dictionary.load_brand_sync_default: True only for an ACTIVE
      brand doc with the flag True; fail-soft False otherwise.
   3. GET /products/brand-options exposes sync_to_shopify_default per brand.
-  4. The FORM create door stamps `sync_to_shopify` on the spine: explicit
-     payload value wins; omitted -> brand default; unknown brand -> False.
-     (INTENT only -- nothing pushes to Shopify from IMS; BVI owns Shopify.)
+  4. The FORM create door stamps `sync_to_shopify` on the spine from the
+     brand default ALWAYS (owner 2026-09-29, D6: an explicit payload value is
+     ignored); unknown brand -> False.
   5. GET /products/brands (catalog.py) reads brand_masters, falling back to
      the legacy hardcoded BRANDS dict when the master is empty/unreadable.
   6. admin_catalog._attach_product_counts: one aggregation, case-insensitive
@@ -243,11 +243,12 @@ class TestCreateDoorSyncStamp:
         )
         assert created["sync_to_shopify"] is False
 
-    def test_explicit_value_wins_over_brand_default(self, monkeypatch):
+    def test_explicit_value_never_beats_the_brand_default(self, monkeypatch):
+        # Owner 2026-09-29 (D6): the brand default always decides.
         created = self._create(
             monkeypatch, _form_product(sync_to_shopify=False)
         )
-        assert created["sync_to_shopify"] is False  # despite brand True
+        assert created["sync_to_shopify"] is True  # Ray-Ban: website yes
 
     def test_unknown_brand_fails_soft_false(self, monkeypatch):
         # An EMPTY Brand Master fails open at the dictionary gate (any brand
@@ -269,7 +270,7 @@ class TestCreateDoorSyncStamp:
         assert prod_router._resolve_sync_to_shopify(_form_product(), None) is False
         assert prod_router._resolve_sync_to_shopify(
             _form_product(sync_to_shopify=True), None
-        ) is True
+        ) is False  # no brand to ask -> never sync by accident
 
 
 # ---------------------------------------------------------------------------
