@@ -846,14 +846,6 @@ export const vendorsApi = {
     return response.data;
   },
 
-  // F9 — draft a consolidated invoice from a set of DCs (does not persist).
-  draftInvoiceFromDCs: async (dcIds: string[], vendorId?: string) => {
-    const response = await api.get('/vendors/purchase-invoices/from-dcs', {
-      params: { dc_ids: dcIds.join(','), vendor_id: vendorId },
-    });
-    return response.data;
-  },
-
   acceptGRN: async (grnId: string) => {
     const response = await api.post(`/vendors/grn/${grnId}/accept`);
     return response.data;
