@@ -357,12 +357,20 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/vendors/purchase-orders",
         "allowed": "AUTHENTICATED",
     },
-    # Last-paid price lookup for the PO / Buy-Desk form (vendor roles; the
-    # endpoint additionally store-scopes each PO it reads).
+    # Last-paid price lookup for the PO / Buy-Desk form (vendor roles, plus the
+    # catalogue manager whose Buy Desk draft pre-fills from it; the endpoint
+    # additionally store-scopes each PO it reads). A read: vendors:read is
+    # already open to every role, so this broadens no union.
     {
         "method": "GET",
         "path": "/api/v1/vendors/last-cost",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": [
+            "ACCOUNTANT",
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "CATALOG_MANAGER",
+        ],
     },
     # Owner ruling 2026-09-28: the catalogue manager raises a DRAFT from the Buy
     # Desk (this door only ever writes a DRAFT); the store manager checks and
