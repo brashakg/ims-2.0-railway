@@ -48,80 +48,53 @@ _PRODUCTS = [
 ]
 
 
-def _units(pid, n, days_old=0, store="S1"):
-    return [
-        {
-            "product_id": pid,
-            "store_id": store,
-            "status": "AVAILABLE",
-            "created_at": _NOW - timedelta(days=days_old),
-        }
-        for _ in range(n)
-    ]
+def _units(pid, n, days_old=0, store="S1", **over):
+    unit = {
+        "product_id": pid,
+        "store_id": store,
+        "status": "AVAILABLE",
+        "created_at": _NOW - timedelta(days=days_old),
+    }
+    unit.update(over)
+    return [dict(unit) for _ in range(n)]
 
 
 # Received today: 4 Aviators (low), 17 Wayfarers (healthy).
 _UNITS = _units("P-AV", 4) + _units("P-WAY", 17)
 
 
-class _StockRepo:
-    """find_low_stock exactly as StockRepository computes it (AVAILABLE units
-    per product at the store, qty <= 5)."""
+def _wire(mp, units=_UNITS, products=_PRODUCTS):
+    """A mongomock database behind the REAL StockRepository / ProductRepository,
+    so both screens run the repository's own count, not a copy of it."""
+    import mongomock
 
-    def find_low_stock(self, store_id, threshold=5):
-        counts = {}
-        for u in _UNITS:
-            if u["store_id"] == store_id and u["status"] == "AVAILABLE":
-                counts[u["product_id"]] = counts.get(u["product_id"], 0) + 1
-        return [{"_id": p, "quantity": q} for p, q in counts.items() if q <= threshold]
+    from database.repositories.product_repository import ProductRepository, StockRepository
 
-
-class _ProductRepo:
-    def find_many(self, flt, limit=None, **_):
-        ids = set(flt["product_id"]["$in"])
-        return [dict(p) for p in _PRODUCTS if p["product_id"] in ids]
-
-
-class _Coll:
-    def __init__(self, docs):
-        self.docs = docs
-
-    def find(self, flt=None, projection=None):
-        return [dict(d) for d in self.docs]
-
-    def aggregate(self, pipeline):
-        match = pipeline[0].get("$match", {})
-        group = next((s["$group"] for s in pipeline if "$group" in s), None)
-        rows = [d for d in self.docs if all(d.get(k) == v for k, v in match.items() if not isinstance(v, dict) and not k.startswith("$"))]
-        if group is None or group.get("_id") != "$product_id":
-            return []  # orders: no sales in this scenario
-        out = {}
-        for d in rows:
-            r = out.setdefault(d["product_id"], {"_id": d["product_id"], "n": 0, "oldest": None})
-            r["n"] += 1
-            if r["oldest"] is None or d["created_at"] < r["oldest"]:
-                r["oldest"] = d["created_at"]
-        return list(out.values())
+    db = mongomock.MongoClient().db
+    db.products.insert_many([dict(p) for p in products])
+    if units:
+        db.stock_units.insert_many([dict(u) for u in units])
+    mp.setattr(inv, "get_stock_repository", lambda: StockRepository(db.stock_units))
+    mp.setattr(inv, "get_product_repository", lambda: ProductRepository(db.products))
+    mp.setattr(inv, "_get_db", lambda: db)
+    return db
 
 
-class _Db:
-    def get_collection(self, name):
-        return {
-            "products": _Coll(_PRODUCTS),
-            "stock_units": _Coll(_UNITS),
-            "orders": _Coll([]),
-        }[name]
+def _alerts():
+    return asyncio.run(
+        get_stock_alerts(
+            store_id=None, dead_days=90, lead_time_days=14, limit=200, current_user=_MGR
+        )
+    )
 
 
-def _wire(mp):
-    mp.setattr(inv, "get_stock_repository", lambda: _StockRepo())
-    mp.setattr(inv, "get_product_repository", lambda: _ProductRepo())
-    mp.setattr(inv, "_get_db", lambda: _Db())
+def _low():
+    return asyncio.run(get_low_stock_alerts(store_id=None, current_user=_MGR))
 
 
 def test_low_stock_row_names_the_product(monkeypatch):
     _wire(monkeypatch)
-    res = asyncio.run(get_low_stock_alerts(store_id=None, current_user=_MGR))
+    res = _low()
     (row,) = res["items"]
     assert row["name"] == "Ray-Ban RB3025 Aviator - Gold"
     assert row["sku"] == "RB3025-GLD"
@@ -132,12 +105,8 @@ def test_low_stock_row_names_the_product(monkeypatch):
 
 def test_alerts_agree_with_low_stock(monkeypatch):
     _wire(monkeypatch)
-    low = asyncio.run(get_low_stock_alerts(store_id=None, current_user=_MGR))
-    res = asyncio.run(
-        get_stock_alerts(
-            store_id=None, dead_days=90, lead_time_days=14, limit=200, current_user=_MGR
-        )
-    )
+    low = _low()
+    res = _alerts()
     low_names = {r["name"] for r in low["items"]}
     alert_low = {a["productName"] for a in res["alerts"] if a["alertType"] == "LOW_STOCK"}
     assert alert_low == low_names == {"Ray-Ban RB3025 Aviator - Gold"}
@@ -148,9 +117,43 @@ def test_alerts_agree_with_low_stock(monkeypatch):
 def test_stock_received_today_is_never_dead(monkeypatch):
     """17 Wayfarers that arrived this morning have not had 90 days to sell."""
     _wire(monkeypatch)
-    res = asyncio.run(
-        get_stock_alerts(
-            store_id=None, dead_days=90, lead_time_days=14, limit=200, current_user=_MGR
-        )
-    )
+    res = _alerts()
     assert not [a for a in res["alerts"] if a["alertType"] == "DEAD_STOCK"]
+
+
+# ---------------------------------------------------------------------------
+# Verifier round 2
+# ---------------------------------------------------------------------------
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    "legacy", [{"status": "available"}, {"status": None}], ids=["lowercase", "no-status"]
+)
+def test_a_legacy_unit_does_not_split_the_count(monkeypatch, legacy):
+    """5 units marked AVAILABLE plus 1 legacy unit: both screens count the
+    same units, so Alerts can never say 'Only 6 left - at or below' beside
+    Low stock's '5 left, Min 5'."""
+    units = _units("P-AV", 5) + _units("P-AV", 1, **legacy)
+    if legacy["status"] is None:
+        units[-1].pop("status")
+    _wire(monkeypatch, units=units)
+    (row,) = _low()["items"]
+    (alert,) = [a for a in _alerts()["alerts"] if a["productName"].startswith("Ray-Ban RB3025")]
+    assert alert["currentStock"] == row["quantity"] == 5
+    assert alert["alertType"] == "LOW_STOCK"
+    assert alert["actionRequired"] == "Only 5 left - at or below the low-stock level"
+
+
+def test_dead_stock_outranks_the_low_list(monkeypatch):
+    """2 frames on the shelf 200 days, never sold: that is dead stock, not
+    'running low'. Being on the low list (5 or fewer units) must not hide it."""
+    products = [{**_PRODUCTS[0], "cost_price": 3000}]
+    _wire(monkeypatch, units=_units("P-AV", 2, days_old=200), products=products)
+    assert [r["_id"] for r in _low()["items"]] == ["P-AV"]  # it IS on the low list
+    res = _alerts()
+    (alert,) = res["alerts"]
+    assert alert["alertType"] == "DEAD_STOCK"
+    assert alert["costImpact"] == 6000
+    assert res["stats"]["deadStockValue"] == 6000

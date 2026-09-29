@@ -7,7 +7,6 @@ from ._shared import (
     Optional,
     Query,
     _SOLD_STATUSES,
-    _on_hand_status_clause,
     _reorder_disabled,
     datetime,
     get_current_user,
@@ -28,11 +27,13 @@ from .helpers import (
 #
 # Replaces the old hardcoded mock list (Vogue Cat Eye / Prada Baroque / etc.)
 # the component used to render. Computes real, actionable alerts from the
-# `products` collection (where TechCherry-imported stock-on-hand lives as
-# `stock_quantity`) joined to `orders.items` by barcode for sales velocity.
+# catalogue and each product's AVAILABLE units at the store (the low-stock
+# list's own count, StockRepository.available_by_product) joined to
+# `orders.items` by barcode for sales velocity.
 #
 # Each product yields AT MOST ONE alert, chosen by priority:
-#   REORDER_ALERT > LOW_STOCK > DEAD_STOCK > OVERSTOCK > FAST_MOVING
+#   REORDER_ALERT > LOW_STOCK (selling low) > DEAD_STOCK
+#     > LOW_STOCK (on the low-stock list) > OVERSTOCK > FAST_MOVING
 # so a fast seller about to run out is a REORDER, not also a FAST_MOVING.
 #
 # NOTE on order status: TechCherry historic orders are stamped status
@@ -77,6 +78,26 @@ def _summarise_alert_stats(alerts: List[dict]) -> dict:
     return stats
 
 
+def _low_stock(base, stock, cost, velocity, lead_time_days, suggestions_off, action):
+    """Fill `base` as a LOW_STOCK alert. No suggested restock qty when
+    auto-reorder is off or nothing has sold (nothing to size an order by)."""
+    recommended = (
+        0
+        if suggestions_off or velocity <= 0
+        else max(int(round(velocity * lead_time_days * 2 - stock)), 1)
+    )
+    base.update(
+        {
+            "alertType": "LOW_STOCK",
+            "severity": "MEDIUM",
+            "recommendedOrder": recommended,
+            "costImpact": round(recommended * cost, 2),
+            "actionRequired": action,
+        }
+    )
+    return base
+
+
 def _build_stock_alert(
     product: dict,
     sold_30: float,
@@ -92,8 +113,9 @@ def _build_stock_alert(
     warrants no alert. No DB access, so it is fully unit-testable.
 
     ``low_stock``: the product is on GET /inventory/low-stock (the ONE low-stock
-    rule, StockRepository.find_low_stock) -- Alerts says LOW_STOCK for it too,
-    so the two screens cannot disagree (audit F48). ``stocked_since``: when the
+    rule, StockRepository.find_low_stock) -- Alerts says LOW_STOCK for it too
+    unless a stronger verdict (REORDER, selling low, DEAD_STOCK) applies
+    (audit F48). ``stocked_since``: when the
     oldest unit on the shelf arrived; stock younger than the dead-stock window
     has not had the chance to sell and is never called dead. None = unknown
     (legacy rows) = eligible, as before.
@@ -162,32 +184,14 @@ def _build_stock_alert(
         )
         return base
 
-    # 2. LOW_STOCK — sells and getting low but not yet reorder-critical, or
-    # on the low-stock list at all. When auto-reorder is disabled (or nothing
-    # has sold) the alert stays informational with NO suggested restock qty.
-    selling_low = (
-        velocity > 0 and projected is not None and projected <= lead_time_days * 2
-    )
-    if selling_low or low_stock:
-        recommended = (
-            0
-            if reorder_suggestions_off or velocity <= 0
-            else max(int(round(velocity * lead_time_days * 2 - stock)), 1)
+    # 2. LOW_STOCK — sells, getting low, but not yet reorder-critical.
+    # When auto-reorder is disabled the alert stays (it is informational)
+    # but with NO suggested restock qty (recommendedOrder 0, costImpact 0).
+    if velocity > 0 and projected is not None and projected <= lead_time_days * 2:
+        return _low_stock(
+            base, stock, cost, velocity, lead_time_days, reorder_suggestions_off,
+            f"Stock running low (~{int(projected)} days left)",
         )
-        base.update(
-            {
-                "alertType": "LOW_STOCK",
-                "severity": "MEDIUM",
-                "recommendedOrder": recommended,
-                "costImpact": round(recommended * cost, 2),
-                "actionRequired": (
-                    f"Stock running low (~{int(projected)} days left)"
-                    if selling_low
-                    else f"Only {stock} left - at or below the low-stock level"
-                ),
-            }
-        )
-        return base
 
     # 3. DEAD_STOCK — has stock but no movement in the dead-stock window, and
     # the stock has been on the shelf for that whole window.
@@ -219,6 +223,15 @@ def _build_stock_alert(
             }
         )
         return base
+
+    # 3b. LOW_STOCK — on the low-stock list, so Alerts says so too. After
+    # DEAD_STOCK: 5 or fewer units covers most frame SKUs, and an unsold frame
+    # that has sat out the window is dead stock, not something to reorder.
+    if low_stock:
+        return _low_stock(
+            base, stock, cost, velocity, lead_time_days, reorder_suggestions_off,
+            f"Only {stock} left - at or below the low-stock level",
+        )
 
     # 4/5. OVERSTOCK vs FAST_MOVING (both require active selling)
     if stock > 0 and velocity > 0:
@@ -350,31 +363,19 @@ async def get_stock_alerts(
             orders_coll, active_store, thirty_cutoff
         )
 
-        # Sellable units per product at this store (the shared on-hand clause)
-        # and when the oldest of them arrived.
-        unit_match: Dict = dict(_on_hand_status_clause())
-        if active_store:
-            unit_match["store_id"] = active_store
-        on_hand: Dict[str, dict] = {
-            str(r["_id"]): r
-            for r in db.get_collection("stock_units").aggregate(
-                [
-                    {"$match": unit_match},
-                    {
-                        "$group": {
-                            "_id": "$product_id",
-                            "n": {"$sum": {"$ifNull": ["$quantity", 1]}},
-                            "oldest": {"$min": "$created_at"},
-                        }
-                    },
-                ]
-            )
-            if r.get("_id")
-        }
-        # The ONE low-stock rule, so Alerts and Low stock always agree.
+        # Units per product at this store and when the oldest arrived, from
+        # the SAME rows the low-stock list cuts at its threshold
+        # (StockRepository.available_by_product / find_low_stock), so Alerts
+        # and Low stock count the same units and cannot disagree (audit F48).
+        on_hand: Dict[str, dict] = {}
         low_ids: set = set()
         stock_repo = get_stock_repository()
         if active_store and stock_repo is not None:
+            on_hand = {
+                str(r["_id"]): r
+                for r in stock_repo.available_by_product(active_store)
+                if r.get("_id")
+            }
             low_ids = {
                 str(r.get("_id")) for r in stock_repo.find_low_stock(active_store)
             }
@@ -385,7 +386,7 @@ async def get_stock_alerts(
             pid = str(p.get("product_id") or "")
             units = on_hand.get(pid) or {}
             alert = _build_stock_alert(
-                {**p, "stock_quantity": int(units.get("n") or 0)},
+                {**p, "stock_quantity": int(units.get("quantity") or 0)},
                 sold_30=sales_30.get(barcode, 0),
                 last_sale=last_sales.get(barcode),
                 now=now,
