@@ -462,6 +462,9 @@ def _fe_field_names(code):
     start = src.index(f"\n  {code}: [")
     end = src.index("\n  ],", start)
     block = src[start:end]
+    # A spread (`...EXTRA_FIELDS,`) adds fields with no `name:` key in this
+    # block, so the count guard below cannot see them: fail instead.
+    assert "..." not in block, (code, "spread in the field list; write it out")
     names = re.findall(r"\bname:\s*['\"]([^'\"]+)['\"]", block)
     # Every `name:` key must parse, whatever its shape (multi-line, double
     # quotes, template literal); one the regex cannot read FAILS the pin
@@ -475,10 +478,42 @@ def _fe_picker_tiles():
     src = _FE_SHARED.read_text(encoding="utf-8")
     start = src.index("export const CATEGORIES = [")
     picker = src[start : src.index("] as const", start)]
+    assert "..." not in picker, "spread in the CATEGORIES picker; write it out"
     tiles = re.findall(r"\{\s*code:\s*['\"]([A-Z]+)['\"],\s*name:\s*['\"]([^'\"]+)['\"]", picker)
     # Same guard as _fe_field_names: an unreadable tile fails, never skips.
     assert len(tiles) == len(re.findall(r"\bcode\s*:", picker)), tiles
     return tiles
+
+
+# A write to CATEGORY_FIELDS: `X.FR.push(`, `X.FR = `, `X[code] = `,
+# `X.FR[0].name = `, `Object.assign(X`.
+_CF_WRITE = re.compile(
+    r"\bCATEGORY_FIELDS\b(?:\.\w+|\[[^\]]*\])*\s*"
+    r"(?:\.(?:push|unshift|splice)\(|=(?!=))"
+    r"|Object\.assign\(\s*CATEGORY_FIELDS\b"
+)
+
+
+@pytest.mark.skipif(not _FRONTEND.exists(), reason="frontend not checked out")
+def test_no_field_reaches_the_form_outside_the_literal_the_pins_read():
+    """The pins read only the CATEGORY_FIELDS literal. A field pushed or
+    assigned in afterwards (in categoryFields.ts or any other module) would
+    reach the form unpinned, so the one write allowed is the SMTSG alias,
+    which points at a list the pins do read. Ceiling: a write through a local
+    alias (`const l = CATEGORY_FIELDS.FR; l.push(...)`) is not seen."""
+    src_dir = _FRONTEND / "src"
+    writes = [
+        (path.relative_to(src_dir).as_posix(), line.strip())
+        for path in sorted(src_dir.rglob("*.ts*"))
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if _CF_WRITE.search(line)
+    ]
+    assert writes == [
+        (
+            "domain/catalog/productAdd/categoryFields.ts",
+            "CATEGORY_FIELDS.SMTSG = CATEGORY_FIELDS.SMTFR;",
+        )
+    ], writes
 
 
 @pytest.mark.skipif(not _FRONTEND.exists(), reason="frontend not checked out")
