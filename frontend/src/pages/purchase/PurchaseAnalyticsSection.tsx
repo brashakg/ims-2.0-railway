@@ -5,14 +5,14 @@
 // section switches) rendering the existing PurchaseAnalytics panel.
 
 import { Loader2 } from 'lucide-react';
-import { useAuth } from '../../context/AuthContext';
+import { usePurchaseShop } from './purchaseShop';
 import { PurchaseAnalytics } from './PurchaseAnalytics';
 import { useSuppliers, usePurchaseOrdersQuery } from './purchaseQueries';
 
 export function PurchaseAnalyticsSection() {
-  const { user } = useAuth();
+  const { storeId } = usePurchaseShop(); // audit F63: one Purchase scope
   const suppliersQ = useSuppliers();
-  const posQ = usePurchaseOrdersQuery(user?.activeStoreId);
+  const posQ = usePurchaseOrdersQuery(storeId);
 
   if (suppliersQ.isPending || posQ.isPending) {
     return (

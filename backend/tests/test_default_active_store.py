@@ -18,15 +18,26 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from api.routers import auth  # noqa: E402
 
 
+def _matches(doc, query):
+    return all(
+        doc.get(k) != v["$ne"] if isinstance(v, dict) else doc.get(k) == v
+        for k, v in query.items()
+    )
+
+
 class _FakeColl:
     def __init__(self, stores):
         self.stores = stores
 
     def find_one(self, query, projection=None):
         for s in self.stores:
-            if all(s.get(k) == v for k, v in query.items()):
+            if _matches(s, query):
                 return {"store_id": s["store_id"]}
         return None
+
+    def find(self, query, projection=None):
+        # stores_util.physical_stores (the one physical-shop reader) lists here.
+        return [dict(s) for s in self.stores if _matches(s, query)]
 
 
 class _FakeDB:

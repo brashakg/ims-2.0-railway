@@ -24,7 +24,7 @@ import {
   type PurchaseInvoiceConfig,
 } from '../../../services/api/vendorAp';
 import { useToast } from '../../../context/ToastContext';
-import { useAuth } from '../../../context/AuthContext';
+import { usePurchaseShop } from '../purchaseShop';
 import type { Supplier } from '../purchaseTypes';
 import { inr, errMsg } from './shared';
 import { ExceptionsPanel } from './ExceptionsPanel';
@@ -36,7 +36,7 @@ import { InvoiceDetailDrawer, MatchBadge, ConfigNote } from './InvoiceDetailDraw
 // Tab root: list + GRN picker + invoice form
 // ============================================================================
 export function PurchaseInvoicesTab({ suppliers }: { suppliers: Supplier[] }) {
-  const { user } = useAuth();
+  const { storeId } = usePurchaseShop(); // audit F63: one Purchase scope
   const [invoices, setInvoices] = useState<PurchaseInvoice[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -55,7 +55,6 @@ export function PurchaseInvoicesTab({ suppliers }: { suppliers: Supplier[] }) {
     setLoading(true);
     setError(null);
     try {
-      const storeId = user?.activeStoreId;
       const res = await purchaseInvoicesApi.list(storeId ? { store_id: storeId } : {});
       setInvoices(res.purchase_invoices);
     } catch (e) {
@@ -63,7 +62,7 @@ export function PurchaseInvoicesTab({ suppliers }: { suppliers: Supplier[] }) {
     } finally {
       setLoading(false);
     }
-  }, [user?.activeStoreId]);
+  }, [storeId]);
 
   useEffect(() => { load(); }, [load]);
 

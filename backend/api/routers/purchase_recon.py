@@ -39,6 +39,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from .auth import get_current_user, require_roles
+from ..dependencies import resolve_store_scope
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -420,6 +421,8 @@ async def get_recon_worklists(
       pending_credit_notes_return -- open vendor-return CNs not yet issued
     """
     db = _get_db()  # May be None when DB is down; each helper handles that.
+    # The one Purchase shop scope (F63): a Pune accountant never reads Dhanbad.
+    store_id = resolve_store_scope(store_id, current_user)
 
     stock_yet_to_receive = _stock_yet_to_receive(db, store_id)
     vendor_returns = _pending_vendor_returns_open(db, store_id)

@@ -786,9 +786,11 @@ def _default_active_store(user: dict) -> Optional[str]:
     AREA_MANAGER) whose account has NO explicit store assignment, so the topbar
     never shows a 'No store' pill and POS isn't dead-ended on first login.
 
-    Prefers an active HQ store, else any active store, else any store. Returns
-    None (the prior behaviour) when the user is not an all-stores role, there is
-    no DB, or no stores exist. Fail-soft -- never blocks token issue."""
+    Prefers an active HQ store, else the first physical shop (never the
+    stockless ONLINE store -- every shop-scoped screen reads 0 there, F63), else
+    any active store, else any store. Returns None (the prior behaviour) when
+    the user is not an all-stores role, there is no DB, or no stores exist.
+    Fail-soft -- never blocks token issue."""
     roles = user.get("roles", []) or []
     if not any(r in ("SUPERADMIN", "ADMIN", "AREA_MANAGER") for r in roles):
         return None
@@ -801,9 +803,12 @@ def _default_active_store(user: dict) -> Optional[str]:
     if db is None:
         return None
     try:
+        from ..services.stores_util import physical_stores
+
         coll = db.get_collection("stores")
         s = (
             coll.find_one({"is_active": True, "store_type": "HQ"}, {"_id": 0, "store_id": 1})
+            or next(iter(physical_stores(db)), None)
             or coll.find_one({"is_active": True}, {"_id": 0, "store_id": 1})
             or coll.find_one({}, {"_id": 0, "store_id": 1})
         )

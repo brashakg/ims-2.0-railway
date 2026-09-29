@@ -14,6 +14,7 @@ import clsx from 'clsx';
 import { vendorsApi } from '../../services/api';
 import { productApi } from '../../services/api/products';
 import { useAuth } from '../../context/AuthContext';
+import { PurchaseShopPicker, usePurchaseShop } from './purchaseShop';
 import { useToast } from '../../context/ToastContext';
 import { GRNPrint } from '../../components/print/GRNPrint';
 import { resolveStoreIdentity, type StoreIdentity } from '../../components/print/storeIdentity';
@@ -171,7 +172,8 @@ export function GoodsReceiptNote() {
   // GRN's own store_id (falls back to the active store) + its legal entity.
   const [grnIdentity, setGrnIdentity] = useState<StoreIdentity | null>(null);
 
-  const storeId = user?.activeStoreId || '';
+  const storeId = user?.activeStoreId || ''; // goods are received here
+  const { storeId: grnScope } = usePurchaseShop(); // audit F63: the list reads the one Purchase scope
 
   // Resolve the GRN's issuing-store identity when the print modal opens.
   useEffect(() => {
@@ -215,7 +217,7 @@ export function GoodsReceiptNote() {
       try {
         setIsLoading(true);
         const [grnResp, poList] = await Promise.all([
-          vendorsApi.getGRNs({ store_id: storeId }),
+          vendorsApi.getGRNs({ store_id: grnScope }),
           fetchPurchaseOrders(),
         ]);
         const grnList = Array.isArray(grnResp) ? grnResp : grnResp.grns || grnResp.data || [];
@@ -228,10 +230,10 @@ export function GoodsReceiptNote() {
       }
     };
     load();
-  }, [storeId]);
+  }, [storeId, grnScope]);
 
   const reloadGrns = async () => {
-    const response = await vendorsApi.getGRNs({ store_id: storeId });
+    const response = await vendorsApi.getGRNs({ store_id: grnScope });
     const grnList = Array.isArray(response) ? response : response.grns || response.data || [];
     setGrns(grnList.map(transformGRN));
   };
@@ -602,6 +604,7 @@ export function GoodsReceiptNote() {
             Record item receipt against a PO with quality inspection and placement.
           </p>
         </div>
+        <PurchaseShopPicker />
       </div>
 
       {/* Summary stat strip */}

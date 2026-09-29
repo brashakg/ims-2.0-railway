@@ -40,6 +40,7 @@ import { purchaseInvoicesApi, type PurchaseInvoice, type MatchStatus, type Excep
 import { PurchaseStatusChip } from '../../components/purchase/PurchaseStatusChip';
 import { byPerson } from './purchaseTypes';
 import { useAuth } from '../../context/AuthContext';
+import { PurchaseShopPicker, usePurchaseShop } from './purchaseShop';
 import { useToast } from '../../context/ToastContext';
 import type { UserRole } from '../../types';
 
@@ -972,9 +973,9 @@ function ReturnCnTable({ rows }: { rows: ReconWorklists['pending_credit_notes_re
 // ---- Main page ---------------------------------------------------------------
 
 export default function ReconConsole() {
-  const { user, hasRole } = useAuth();
+  const { hasRole } = useAuth();
   const toast = useToast();
-  const storeId = user?.activeStoreId;
+  const { storeId } = usePurchaseShop(); // audit F63: one Purchase scope
   const canApprove = hasRole(EXCEPTION_APPROVE_ROLES);
 
   // Queue: invoices + their recon blocks
@@ -1247,6 +1248,7 @@ export default function ReconConsole() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <PurchaseShopPicker />
           {invoices.length > 0 && (
             <span className="text-xs text-gray-500 bg-gray-100 px-2.5 py-1 rounded-full">
               {allDoneCount}/{invoices.length} fully reconciled

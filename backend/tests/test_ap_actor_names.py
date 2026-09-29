@@ -94,7 +94,7 @@ def _ap_user(uid="user-superadmin"):
 
 
 def _list():
-    return asyncio.run(pi.list_purchase_invoices(None, None, None, _ap_user()))
+    return asyncio.run(pi.list_purchase_invoices(None, None, None, _ap_user(), store_id=None))
 
 
 # ---------------------------------------------------------------------------

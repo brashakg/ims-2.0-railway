@@ -17,6 +17,7 @@ import clsx from 'clsx';
 import { useSearchParams } from 'react-router-dom';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
+import { usePurchaseShop } from './purchaseShop';
 import api from '../../services/api/client';
 import { rtvDebitNotesApi, type DebitNote } from '../../services/api/rtvDebitNotes';
 
@@ -87,7 +88,8 @@ const STATUS_LABELS: Record<string, string> = {
 export function VendorReturns() {
   const toast = useToast();
   const { user } = useAuth();
-  const activeStoreId = user?.activeStoreId || '';
+  const activeStoreId = user?.activeStoreId || ''; // a new return is raised here
+  const { storeId: listScope } = usePurchaseShop(); // audit F63: lists read the one Purchase scope
   // F21: the Quarantine Queue "Create RTV" CTA deep-links here with ?stock_id=...
   // so the new return physically links that quarantined unit (backend backfills
   // rtv_vendor_id). Without reading it, the advertised one-click linkage was dead.
@@ -122,7 +124,7 @@ export function VendorReturns() {
         // Fetch vendor returns and vendors in parallel
         const [returnsResp, vendorsResp] = await Promise.all([
           api.get('/vendor-returns/', {
-            params: { store_id: activeStoreId || undefined, limit: 100 },
+            params: { store_id: listScope, limit: 100 },
           }),
           api.get('/vendors/', { params: { limit: 100 } }),
         ]);
@@ -134,7 +136,7 @@ export function VendorReturns() {
         // row shows "Issued" + serial (fail-soft: a load error just hides them).
         try {
           const dnResp = await rtvDebitNotesApi.list({
-            store_id: activeStoreId || undefined,
+            store_id: listScope,
             limit: 100,
           });
           const map: Record<string, DebitNote> = {};
@@ -153,7 +155,7 @@ export function VendorReturns() {
     };
 
     loadData();
-  }, [activeStoreId]);
+  }, [listScope]);
 
   const handleAddItem = () => {
     setItems([
@@ -203,7 +205,7 @@ export function VendorReturns() {
 
       // Refresh the list
       const refreshResp = await api.get('/vendor-returns/', {
-        params: { store_id: activeStoreId || undefined, limit: 100 },
+        params: { store_id: listScope, limit: 100 },
       });
       setReturns(refreshResp.data.returns || []);
     } catch {

@@ -23,6 +23,7 @@ import {
   PackageX,
 } from 'lucide-react';
 import { useIsOnlineStore } from '../../hooks/useIsOnlineStore';
+import { PurchaseShopPicker } from './purchaseShop';
 
 const SECTIONS = [
   { path: '/purchase/orders', label: 'Purchase Orders', icon: FileText },
@@ -76,17 +77,21 @@ export function PurchaseLayout() {
           <h1>Stock, from upstream.</h1>
           <div className="hint">Vendor ledger, purchase orders, GRN verification with quantity + price variance, payment aging, credit notes.</div>
         </div>
-        {/* Invoices page carries its own Create-from-GRN / Manual buttons; the
-            variance page is read-mostly (its own Dismiss action lives inline). */}
-        {headerAction && (
-          <button
-            onClick={() => navigate(`${pathname}?new=1`)}
-            className="btn sm primary"
-          >
-            <Plus className="w-4 h-4" />
-            {headerAction}
-          </button>
-        )}
+        <div className="flex flex-wrap items-center gap-3">
+          {/* Audit F63: admins read every tab across all stores or one shop. */}
+          <PurchaseShopPicker />
+          {/* Invoices page carries its own Create-from-GRN / Manual buttons; the
+              variance page is read-mostly (its own Dismiss action lives inline). */}
+          {headerAction && (
+            <button
+              onClick={() => navigate(`${pathname}?new=1`)}
+              className="btn sm primary"
+            >
+              <Plus className="w-4 h-4" />
+              {headerAction}
+            </button>
+          )}
+        </div>
       </div>
 
       {/* W1.4 / OS-006: online-store warning — POs deliver to the active store. */}

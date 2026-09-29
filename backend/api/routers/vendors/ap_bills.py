@@ -358,6 +358,9 @@ async def create_vendor_bill(
     doc = {
         "bill_id": bill_id,
         "vendor_id": vendor_id,
+        # The receipt's shop, else the booker's (the recipient's fallback too):
+        # every Purchase tab scopes on it (F63).
+        "store_id": _receipt_store or current_user.get("active_store_id"),
         "vendor_name": (vendor or {}).get("trade_name")
         or (vendor or {}).get("legal_name"),
         "bill_number": bill.bill_number,

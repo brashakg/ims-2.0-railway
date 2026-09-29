@@ -14,7 +14,8 @@
 // sitting on the online store asks for the online store's orders -- none.
 //
 // The HTTP client is mocked, not vendorsApi, so the fix may route the scope
-// however it likes. `it.fails` = xfail(strict=True): flip to `it` when fixed.
+// however it likes. This was an `it.fails` pin while the finding was open;
+// every tab now reads the one scope in purchaseShop.tsx.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, waitFor } from '@testing-library/react';
@@ -89,7 +90,7 @@ describe('F63: Purchase opens on all stores for an admin', () => {
     await orderListParams();
   });
 
-  it.fails('F63: the admin\'s order list is not pinned to his active (online) store', async () => {
+  it('F63: the admin\'s order list is not pinned to his active (online) store', async () => {
     openOrders();
     const params = await orderListParams();
     // No shop chosen = no store_id; the server's one scope rule reads that as

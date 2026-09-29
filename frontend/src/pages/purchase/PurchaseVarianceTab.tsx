@@ -16,6 +16,7 @@ import {
 import { vendorsApi, type VarianceLine } from '../../services/api';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
+import { usePurchaseShop } from './purchaseShop';
 
 function errMsg(e: unknown, fb: string): string {
   if (e && typeof e === 'object' && 'response' in e) {
@@ -44,7 +45,8 @@ const VARIANCE: Record<VarianceLine['variance_status'], string> = {
 
 export function PurchaseVarianceTab() {
   const toast = useToast();
-  const { user, hasRole } = useAuth();
+  const { hasRole } = useAuth();
+  const { storeId } = usePurchaseShop(); // audit F63: one Purchase scope
   const [rows, setRows] = useState<VarianceLine[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -56,7 +58,6 @@ export function PurchaseVarianceTab() {
     setLoading(true);
     setError(null);
     try {
-      const storeId = user?.activeStoreId;
       const res = await vendorsApi.getVarianceReport(storeId ? { store_id: storeId } : {});
       setRows(res?.lines ?? []);
     } catch (e) {
@@ -65,7 +66,7 @@ export function PurchaseVarianceTab() {
     } finally {
       setLoading(false);
     }
-  }, [user?.activeStoreId]);
+  }, [storeId]);
 
   useEffect(() => { load(); }, [load]);
 

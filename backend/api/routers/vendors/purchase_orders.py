@@ -21,6 +21,7 @@ from ._shared import (
     is_online_store,
     logger,
     require_roles,
+    resolve_store_scope,
     router,
     timedelta,
     uuid,
@@ -52,9 +53,9 @@ async def list_pos(
 ):
     """List purchase orders with filters"""
     po_repo = get_purchase_order_repository()
-    active_store = validate_store_access(store_id, current_user) or current_user.get(
-        "active_store_id"
-    )
+    # One shop scope for every Purchase tab (F63): no shop chosen = all shops
+    # for an admin, the caller's own shop for everyone else.
+    active_store = resolve_store_scope(store_id, current_user)
 
     if po_repo is None:
         return {"purchase_orders": [], "total": 0}

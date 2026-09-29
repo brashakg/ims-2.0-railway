@@ -9,7 +9,7 @@ import { useSearchParams } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { Search, Loader2, AlertTriangle } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
-import { useAuth } from '../../context/AuthContext';
+import { usePurchaseShop } from './purchaseShop';
 import { vendorsApi } from '../../services/api';
 import { PurchaseTable } from './PurchaseTable';
 import { PurchaseOrderForm } from './PurchaseOrderForm';
@@ -19,7 +19,6 @@ import type { POStatus, PurchaseOrder } from './purchaseTypes';
 
 export function PurchaseOrdersSection() {
   const toast = useToast();
-  const { user } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
 
@@ -30,7 +29,7 @@ export function PurchaseOrdersSection() {
 
   // Cached across section switches (owner: switching felt like a reload).
   // First visit fetches; later visits render instantly + refresh in background.
-  const storeId = user?.activeStoreId;
+  const { storeId } = usePurchaseShop(); // audit F63: one Purchase scope
   const suppliersQ = useSuppliers();
   const posQ = usePurchaseOrdersQuery(storeId);
   const suppliers = suppliersQ.data ?? [];

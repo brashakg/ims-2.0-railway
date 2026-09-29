@@ -21,8 +21,8 @@ from ._shared import (
     hashlib,
     io,
     require_roles,
+    resolve_store_scope,
     router,
-    validate_store_access,
 )
 from .models import GRN_SUBTYPE_DC, _GRN_SUBTYPES
 
@@ -51,9 +51,9 @@ async def list_grns(
 ):
     """List GRNs with filters (incl. F9 Delivery-Challan filters)."""
     grn_repo = get_grn_repository()
-    active_store = validate_store_access(store_id, current_user) or current_user.get(
-        "active_store_id"
-    )
+    # One shop scope for every Purchase tab (F63): no shop chosen = all shops
+    # for an admin, the caller's own shop for everyone else.
+    active_store = resolve_store_scope(store_id, current_user)
 
     if grn_repo is None:
         return {"grns": [], "total": 0}
