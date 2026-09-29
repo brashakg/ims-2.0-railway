@@ -272,7 +272,7 @@ function ProductSearchSelect({
     setLoading(true);
     const t = setTimeout(async () => {
       try {
-        const data = await productApi.getProducts({ search: q });
+        const data = await productApi.getProducts({ search: q, match: 'anywhere' });
         if (cancelled) return;
         const rows: ProductHit[] = (data?.products || []).slice(0, 20);
         setResults(rows);
