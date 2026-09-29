@@ -228,9 +228,14 @@ function PrinterSection({
 /** Owner ruling 2026-09-28: stock labels on the TSC TE244, 100 x 15 mm stock
  *  with a 70 mm printable area, through the normal Windows driver. Where the
  *  printable side of the stock sits is calibrated on the real printer, so the
- *  offset is saved on THIS computer (the printer attached here). */
+ *  offset is saved on THIS computer (the printer attached here) -- in browser
+ *  storage, which is per web address: IMS opened at its other address starts
+ *  flush left, so the card names the address it saved for.
+ *  ponytail: per-browser + per-address; a server-side per-PC setting only if
+ *  shops keep switching addresses. */
 function UnitLabelCard() {
   const toast = useToast();
+  const host = window.location.host;
   const [offset, setOffset] = useState(() => String(getLabelOffsetMm()));
   const save = () => {
     setLabelOffsetMm(Number(offset));
@@ -259,7 +264,8 @@ function UnitLabelCard() {
       />
       <p className="text-xs text-gray-500 mt-1 mb-4">
         0 = flush left. Print a test label: its box shows where the {PRINTABLE_MM} mm area lands.
-        Shift it until the box sits on the printable part of the stock. Saved on this computer.
+        Shift it until the box sits on the printable part of the stock. Saved on this computer for{' '}
+        <strong>{host}</strong> only: if this shop also opens IMS at another web address, set it there too.
       </p>
       <div className="flex flex-wrap gap-2">
         <button
@@ -267,7 +273,7 @@ function UnitLabelCard() {
           className="btn-primary"
           onClick={() => {
             save();
-            toast.success('Label offset saved on this computer');
+            toast.success(`Label offset saved on this computer for ${host}`);
           }}
         >
           <Save className="w-4 h-4 mr-2" />

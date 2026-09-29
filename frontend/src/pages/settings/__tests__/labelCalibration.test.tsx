@@ -51,6 +51,21 @@ describe('label calibration', () => {
     expect(html).toMatch(/size:\s*100mm 15mm/);
   });
 
+  it('"Save offset" keeps the offset, and names the web address it is kept for', async () => {
+    // The offset lives in browser storage, which is per web address: IMS at
+    // its other address starts flush left. The card must not say "this
+    // computer" as if that covered both.
+    render(<PrinterSettingsPage />);
+    const input = await screen.findByLabelText(/printable area starts/i);
+    fireEvent.change(input, { target: { value: '7' } });
+    printMock.mockClear();
+    fireEvent.click(screen.getByRole('button', { name: /save offset/i }));
+    expect(getLabelOffsetMm()).toBe(7);
+    expect(printMock).not.toHaveBeenCalled();
+    expect(screen.getByText(window.location.host)).toBeInTheDocument();
+    expect(screen.getByText(/at another web address, set it there too/i)).toBeInTheDocument();
+  });
+
   it('offers no label-size choice (it drove nothing; stock labels are 100 x 15 mm)', async () => {
     render(<PrinterSettingsPage />);
     await screen.findByLabelText(/printable area starts/i);
