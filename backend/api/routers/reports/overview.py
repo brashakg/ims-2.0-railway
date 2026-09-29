@@ -13,11 +13,14 @@ from ..auth import get_current_user, require_roles
 from ...dependencies import (
     get_order_repository,
     get_stock_repository,
+    get_product_repository,
     get_customer_repository,
     get_task_repository,
     get_db,
     validate_store_access,
 )
+from ...services import stock_value
+from ...services.cost_mask import can_see_cost
 from ...services.name_resolver import order_actor_id, order_actor_name_map
 from ._shared import (
     _REPORT_FINANCE_ROLES,
@@ -163,13 +166,16 @@ async def inventory_report(
     stock_repo = get_stock_repository()
 
     if stock_repo is not None:
-        all_stock = stock_repo.find_many({"store_id": active_store}, limit=0)
+    # F47: the one stock-value rule -- units physically on the shelf at what
+    # they cost (services/stock_value); the counter reads no cost figure.
+        all_stock = stock_value.shelf_units(
+            stock_repo, get_product_repository(), active_store
+        )
+        show_cost = can_see_cost(current_user, "stock")
         low_stock = stock_repo.find_low_stock(active_store, threshold=5)
 
         total_items = len(all_stock)
-        total_value = sum(
-            (s.get("quantity", 0) * s.get("cost_price", 0)) for s in all_stock
-        )
+        total_value = stock_value.total(all_stock) if show_cost else None
         low_stock_count = len(low_stock) if low_stock else 0
         out_of_stock = len([s for s in all_stock if s.get("quantity", 0) <= 0])
 
@@ -180,13 +186,13 @@ async def inventory_report(
             if cat not in categories:
                 categories[cat] = {"name": cat, "count": 0, "value": 0}
             categories[cat]["count"] += 1
-            categories[cat]["value"] += item.get("quantity", 0) * item.get(
-                "cost_price", 0
-            )
+            categories[cat]["value"] += item["cost_value"]
+        for c in categories.values():
+            c["value"] = round(c["value"], 2) if show_cost else None
 
         return {
             "totalItems": total_items,
-            "totalValue": round(total_value, 2),
+            "totalValue": total_value,
             "lowStock": low_stock_count,
             "outOfStock": out_of_stock,
             "categories": list(categories.values()),

@@ -194,8 +194,8 @@ export const reportsApi = {
       params: { from_date: fromDate, to_date: toDate, ...(storeId ? { store_id: storeId } : {}) },
     });
     return r.data as {
-      data: Array<{ category: string; item_count: number; total_quantity: number; total_value: number }>;
-      summary: { total_items: number; total_quantity: number; total_value: number };
+      data: Array<{ category: string; item_count: number; total_quantity: number; total_value: number | null }>;
+      summary: { total_items: number; total_quantity: number; total_value: number | null };
     };
   },
 

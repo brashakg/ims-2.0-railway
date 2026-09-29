@@ -14,8 +14,8 @@ from ._shared import (
     get_grn_repository,
     get_purchase_order_repository,
     require_roles,
+    resolve_store_scope,
     router,
-    validate_store_access,
 )
 
 
@@ -135,7 +135,7 @@ async def po_grn_variance_report(
     if po_repo is None:
         return {"lines": [], "total": 0}
 
-    active_store = validate_store_access(store_id, current_user)
+    active_store = resolve_store_scope(store_id, current_user)  # one Purchase scope (F63)
 
     try:
         # limit=0 -> ALL open POs; the variance total + backorders must not be

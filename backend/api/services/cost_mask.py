@@ -9,6 +9,9 @@ Role policy (DECISIONS sec 9):
   * SUPERADMIN / ADMIN / ACCOUNTANT -- always see cost + margin.
   * CATALOG_MANAGER -- sees cost ONLY in the product create/edit form context
     (context="catalog_edit"), never on operational views (inventory ledger, reports).
+  * STORE_MANAGER / AREA_MANAGER -- see what the STOCK cost (context="stock":
+    the stock ledger's per-unit cost + stock value at cost, Stock aging, the
+    stock-value reports), owner ruling 2026-09-28 (audit F47). Never margins.
   * AREA_MANAGER and below (STORE_MANAGER, OPTOMETRIST, SALES_*, WORKSHOP_STAFF)
     -- cost + margin are stripped from the payload; the FE renders "-".
 
@@ -19,6 +22,7 @@ from typing import Dict, List
 
 COST_VISIBLE_ROLES = {"SUPERADMIN", "ADMIN", "ACCOUNTANT"}
 CATALOG_FORM_ROLES = {"CATALOG_MANAGER"}
+STOCK_COST_ROLES = {"STORE_MANAGER", "AREA_MANAGER"}
 
 # Raw cost fields that may appear on product / stock / order-line payloads.
 _COST_FIELDS = {"cost_price", "cost_value", "cost_at_sale", "unit_cost"}
@@ -46,6 +50,8 @@ def can_see_cost(user: dict, context: str = "default") -> bool:
     if roles & COST_VISIBLE_ROLES:
         return True
     if context == "catalog_edit" and (roles & CATALOG_FORM_ROLES):
+        return True
+    if context == "stock" and (roles & STOCK_COST_ROLES):
         return True
     return False
 

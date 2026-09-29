@@ -158,17 +158,9 @@ async def ap_aging(
     db = _get_db()
     if db is None:
         return {"as_of": as_of, "totals": {}, "vendors": []}
-    try:
-        bills = list(
-            db.get_collection("vendor_bills").find(
-                {"status": {"$ne": "PAID"}}, {"_id": 0}
-            )
-        )
-        payments = list(db.get_collection("vendor_payments").find({}, {"_id": 0}))
-        debit_notes = list(db.get_collection("vendor_debit_notes").find({}, {"_id": 0}))
-    except Exception:
-        bills, payments, debit_notes = [], [], []
-    return ap_engine.build_aging_by_vendor(bills, payments, debit_notes, as_of)
+    from ..finance import _ap_rows  # the one AP row loader (call time: no cycle)
+
+    return ap_engine.build_aging_by_vendor(*_ap_rows(db), as_of)
 
 
 @router.post("/{vendor_id}/bills", status_code=201)
@@ -358,6 +350,9 @@ async def create_vendor_bill(
     doc = {
         "bill_id": bill_id,
         "vendor_id": vendor_id,
+        # The receipt's shop, else the booker's (the recipient's fallback too):
+        # every Purchase tab scopes on it (F63).
+        "store_id": _receipt_store or current_user.get("active_store_id"),
         "vendor_name": (vendor or {}).get("trade_name")
         or (vendor or {}).get("legal_name"),
         "bill_number": bill.bill_number,

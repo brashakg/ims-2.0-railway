@@ -41,8 +41,9 @@ Contract pinned (the build follows it): the stock ledger rows carry
 (managers, accounts, admins) and never for the counter; every stock-value
 report equals the same on-hand cost; aging values stock at cost.
 
-Every open finding raises FindingStillOpen under
-xfail(strict=True, raises=FindingStillOpen); a broken fixture fails loudly.
+These were strict xfails while the finding was open; the fix (one rule,
+api/services/stock_value.py, seen through cost_mask.can_see_cost(user, "stock"))
+turned them into plain tests. A regression raises FindingStillOpen.
 
 Run: JWT_SECRET_KEY=test ENVIRONMENT=test python -m pytest
      backend/tests/test_stock_value_at_cost.py -q
@@ -85,10 +86,6 @@ class FindingStillOpen(AssertionError):
 def _open(ok: bool, message: str) -> None:
     if not ok:
         raise FindingStillOpen(message)
-
-
-def _xfail(why: str):
-    return pytest.mark.xfail(strict=True, raises=FindingStillOpen, reason=f"F47: {why}")
 
 
 def _user(role: str) -> dict:
@@ -256,11 +253,6 @@ def test_the_shelf_holds_two_units_worth_6300_at_cost(world):
 # ============================================================================
 
 
-@_xfail(
-    "the stock ledger rows (inventory/stock.py _ledger_row) carry no cost at all, "
-    "so the Inventory headline can only sum selling price (InventoryLayout.tsx:123) "
-    "and managers see no per-unit cost anywhere"
-)
 @pytest.mark.parametrize("role", ["STORE_MANAGER", "AREA_MANAGER", "ACCOUNTANT", "ADMIN"])
 def test_f47_managers_get_the_shelf_at_cost_and_the_unit_cost(world, role):
     row = _ledger_row(world, role)
@@ -294,10 +286,6 @@ def _aging(world, role):
     return resp
 
 
-@_xfail(
-    "Stock aging values stock at MRP (inventory/aging.py:176 value = qty * mrp), so "
-    "'Tied Capital' (summary.slowMovingValue) reads 11600 for 6300 of stock"
-)
 def test_f47_stock_aging_tied_capital_is_at_cost(world):
     body = _aging(world, "STORE_MANAGER").json()
     products = {p["id"]: p for p in body["products"]}
@@ -313,11 +301,6 @@ def test_f47_stock_aging_tied_capital_is_at_cost(world):
     )
 
 
-@_xfail(
-    "Stock aging is open to every login (get_current_user) and hands the counter a "
-    "rupee value per product and the Tied Capital total; once that value is cost "
-    "the counter must not get it"
-)
 @pytest.mark.parametrize("role", COUNTER)
 def test_f47_the_counter_never_gets_aging_values(world, role):
     resp = _aging(world, role)
@@ -353,12 +336,6 @@ _REPORTS = {
 }
 
 
-@_xfail(
-    "each stock-value report sums quantity * cost_price over EVERY unit ever at the "
-    "store, sold ones included (9300 for 6300 on the shelf) -- four copies of one "
-    "rule (reports/overview.py:156, reports/inventory.py:25 and :66, "
-    "reports/workshop.py:479)"
-)
 @pytest.mark.parametrize("path", list(_REPORTS))
 def test_f47_every_stock_value_report_is_the_shelf_at_cost(world, path):
     params, _values = _REPORTS[path]
@@ -371,20 +348,14 @@ def test_f47_every_stock_value_report_is_the_shelf_at_cost(world, path):
     )
 
 
-_COUNTER_READS_COST = _xfail(
-    "the report is open to every login (get_current_user) and returns the stock "
-    "at cost to the counter"
-)
-
-
 @pytest.mark.parametrize(
     "path",
     [
-        pytest.param("/reports/inventory", marks=_COUNTER_READS_COST),
-        pytest.param("/reports/inventory/summary", marks=_COUNTER_READS_COST),
-        pytest.param("/reports/stock/count", marks=_COUNTER_READS_COST),
-        # Already gated to the finance-report roles -- the guard keeps it so.
-        pytest.param("/reports/inventory/valuation"),
+        "/reports/inventory",
+        "/reports/inventory/summary",
+        "/reports/stock/count",
+        # Gated to the finance-report roles.
+        "/reports/inventory/valuation",
     ],
 )
 def test_f47_the_counter_never_reads_stock_at_cost(world, path):

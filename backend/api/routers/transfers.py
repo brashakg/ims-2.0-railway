@@ -2371,6 +2371,8 @@ def _book_mirror_purchase(transfer: Dict) -> None:
             # the ITC lands ONLY in the RECEIVING store's GSTR-3B (to_store_id).
             "from_store_id": from_store_id,
             "to_store_id": to_store_id,
+            # The shop the goods landed in -- what every Purchase tab scopes on.
+            "store_id": to_store_id,
             # The "vendor" is the sending entity.
             "vendor_id": from_entity,
             "vendor_name": transfer.get("from_location_name") or from_entity,

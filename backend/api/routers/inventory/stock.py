@@ -136,6 +136,21 @@ async def get_stock(
         created_by=created_by,
         include_attribution=can_see_attribution,
     )
+    # F47: what the shelf COST, per product -- for the cost readers only
+    # (managers + accounts; the counter never sees cost).
+    from ...services import stock_value
+    from ...services.cost_mask import can_see_cost
+
+    if active_store and can_see_cost(current_user, "stock"):
+        shelf = stock_value.by_product(
+            stock_value.shelf_units(stock_repo, product_repo, active_store)
+        )
+        for row in items:
+            held = shelf.get(row["product_id"]) or {"units": 0, "cost": 0.0}
+            row["cost_value"] = held["cost"]
+            row["unit_cost"] = (
+                round(held["cost"] / held["units"], 2) if held["units"] else None
+            )
     return {"items": items, "total": len(items)}
 
 

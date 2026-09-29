@@ -120,8 +120,13 @@ export function InventoryLayout() {
   const onlineSummary = isOnlineStoreView ? onlineSummaryQ.data ?? null : null;
 
   const totalSKUs = inventory.length;
-  const totalValue = inventory.reduce(
+  // Audit F47: the headline is what the stock COST (the server's cost_value,
+  // sent to cost readers only); what it would SELL for is its own cell.
+  const costKnown = inventory.length === 0 || inventory.some((i) => i.cost_value != null);
+  const costValue = inventory.reduce((sum, item) => sum + (item.cost_value || 0), 0);
+  const sellingValue = inventory.reduce(
     (sum, item) => sum + ((item.offerPrice || item.mrp || 0) * (item.stock || 0)), 0);
+  const lakh = (rupees: number) => `₹ ${(rupees / 100000).toFixed(1)}L`;
   const onlineCount = inventory.reduce(
     (n, i) => (getOnlineFor(i, onlineStatusQ.data)?.online ? n + 1 : n), 0);
 
@@ -355,8 +360,8 @@ export function InventoryLayout() {
           </div>
           <div>
             <div className="l">Stock value</div>
-            <div className="v">₹ {(totalValue / 100000).toFixed(1)}L</div>
-            <div className="d">total landed inventory</div>
+            <div className="v">{costKnown ? lakh(costValue) : '—'}</div>
+            <div className="d">{costKnown ? 'at cost - matches the bills' : 'at cost'}</div>
           </div>
           <div>
             <div className="l">Low stock</div>
@@ -371,9 +376,9 @@ export function InventoryLayout() {
             <div className="d">{onlineCount > 0 ? 'listed in Shopify' : 'none synced online'}</div>
           </div>
           <div>
-            <div className="l">Categories</div>
-            <div className="v">{CATEGORIES.length}</div>
-            <div className="d">incl. lenses, frames, CL</div>
+            <div className="l">Selling value</div>
+            <div className="v">{lakh(sellingValue)}</div>
+            <div className="d">at offer price (MRP if none)</div>
           </div>
           <div>
             <div className="l">View</div>

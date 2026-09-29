@@ -196,13 +196,11 @@ async def get_cash_flow(
 
 
 def _ap_rows(db):
-    """(outstanding bills, all payments, all debit notes) for AP math."""
+    """(all bills, all payments, all debit notes) -- the supplier ledger's rows,
+    for every AP figure. ALL bills: dropping the PAID ones left their payments
+    behind to net off the vendor as if they were on-account money (F56)."""
     try:
-        bills = list(
-            db.get_collection("vendor_bills").find(
-                {"status": {"$ne": "PAID"}}, {"_id": 0}
-            )
-        )
+        bills = list(db.get_collection("vendor_bills").find({}, {"_id": 0}))
         payments = list(db.get_collection("vendor_payments").find({}, {"_id": 0}))
         dn = list(db.get_collection("vendor_debit_notes").find({}, {"_id": 0}))
     except Exception:
@@ -409,14 +407,17 @@ async def owner_dashboard(current_user: dict = Depends(get_current_user)):
         "as_of": now.date().isoformat(),
         "receivables": ar,
         "payables": {
-            "total": ap["total_outstanding"],
+            # What we owe = the supplier ledgers' balance (bills - payments -
+            # debit notes, on-account money included), not the gross of the
+            # open bills (F56).
+            "total": ap["net_payable"],
             "buckets": ap["buckets"],
             "overdue": ap_overdue,
             "due_7d": due_7d,
             "due_30d": due_30d,
             "unallocated_credits": ap["unallocated_credits"],
         },
-        "net_position": round(ar["total"] - ap["total_outstanding"], 2),
+        "net_position": round(ar["total"] - ap["net_payable"], 2),
         "this_month": {
             "revenue": revenue,
             "expenses": expenses,
