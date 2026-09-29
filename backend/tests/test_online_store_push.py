@@ -378,8 +378,11 @@ def test_push_menu_live_writes_back_gid(monkeypatch):
     res = _run(shopify_push.push_menu(db, menu))
     assert res.ok is True and res.shopify_id == "gid://shopify/Menu/7"
     assert db["ecom_menus"].find_one({"menu_id": "M1"})["shopify_menu_id"] == "gid://shopify/Menu/7"
-    # menuCreate carried the title/handle/items variables.
-    assert spy.calls[0]["variables"]["handle"] == "main-menu"
+    # menuCreate carried the title/handle/items variables (after the create
+    # journal's read of the menus already on the shop: creates.record_create).
+    (create,) = [c for c in spy.calls if "mutation imsMenuCreate" in c["query"]]
+    assert create["variables"]["handle"] == "main-menu"
+    assert "query imsMenus" in spy.calls[0]["query"]
 
 
 def test_push_image_live_attaches_media_and_writes_the_map(monkeypatch):
