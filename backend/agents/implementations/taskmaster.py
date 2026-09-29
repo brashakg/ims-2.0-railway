@@ -60,7 +60,7 @@ class TaskmasterAgent(JarvisAgent):
 
     # Anything in this list requires explicit human confirmation, NOT auto-act.
     requires_confirmation = [
-        "po_send",  # Drafting is fine; sending to vendor needs approval
+        "po_send",  # Drafting is fine; a manager sends it to the vendor
         "staff_transfer",
         "refund_issue",
         "price_ceiling_change",
@@ -588,7 +588,8 @@ class TaskmasterAgent(JarvisAgent):
 
     async def _draft_reorders(self) -> List[Dict[str, Any]]:
         """For SKUs below reorder_point, draft a PO. Tier 2 — DRAFT only,
-        not auto-sent. Sending the PO requires Superadmin approval."""
+        not auto-sent: a manager checks it and presses Send (no approval step,
+        owner ruling 2026-09-28)."""
         stock_coll = self.get_collection("stock_units")
         po_coll = self.get_collection("purchase_orders")
         if stock_coll is None or po_coll is None:
@@ -638,7 +639,7 @@ class TaskmasterAgent(JarvisAgent):
                 # inside one IST day CAN straddle a UTC midnight (e.g. 04:00
                 # IST then 10:00 IST) and double-draft one PO, but every
                 # auto-draft is Tier-2 requires_approval=True, so a human
-                # sees both and approves one; the cost is a duplicate DRAFT
+                # sees both and sends one; the cost is a duplicate DRAFT
                 # row, never a duplicate order or money. Aligning to IST
                 # would (a) leave this dedupe-key class inconsistent with
                 # follow_ups/kicker, which round 1 tabled for the same
@@ -671,7 +672,7 @@ class TaskmasterAgent(JarvisAgent):
                     "status": "DRAFT",
                     "auto_drafted_by": self.agent_id,
                     "created_at": datetime.now(timezone.utc).isoformat(),
-                    "requires_approval": True,  # Tier 2 — Superadmin must approve before send
+                    "requires_approval": True,  # Tier 2 — never auto-sent; a manager sends it
                 }
                 try:
                     po_coll.insert_one(draft_po)
