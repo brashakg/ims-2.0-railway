@@ -756,3 +756,73 @@ def test_grn_detail_is_store_scoped(monkeypatch):
     own = dict(mgr, store_ids=["BV-OTHER-02"], active_store_id="BV-OTHER-02")
     got = asyncio.run(grn_create_mod.get_grn("GRN2", current_user=own))
     assert got["vendor_invoice_no"] == "OTHER/INV/77"
+
+
+# ---------------------------------------------------------------------------
+# 12. Every rbac row this change touches equals its code gate
+# ---------------------------------------------------------------------------
+# A row wider than the code told every role it could write a vendor return
+# (capability 'vendor-returns:write' was AUTHENTICATED while the POST 403d); a
+# row narrower than the code (bank statements) was held only by the middleware.
+@pytest.mark.parametrize(
+    "method,path",
+    [
+        ("POST", "/api/v1/vendor-returns"),
+        ("POST", "/api/v1/vendor-returns/"),
+        ("PATCH", "/api/v1/vendor-returns/VR1/status"),
+    ],
+)
+def test_vendor_return_write_rows_equal_the_code_gate(method, path):
+    row = rbac.policy_for(method, path)
+    assert set(row["allowed"]) - {"SUPERADMIN"} == set(vr_router._VENDOR_RETURN_ROLES)
+
+
+def test_vendor_return_write_capability_is_the_writers():
+    from api.services.capabilities import capability_roles
+
+    assert set(capability_roles("vendor-returns:write")) == set(
+        vr_router._VENDOR_RETURN_ROLES
+    )
+
+
+def _bank_calls(role):
+    from api.routers.finance import bank_statement as bs
+
+    user = {
+        "roles": [role],
+        "store_ids": ["BV-TEST-01"],
+        "active_store_id": "BV-TEST-01",
+    }
+    return [
+        lambda: bs.import_bank_statement(
+            file=None, store_id=None, account_name=None, current_user=user
+        ),
+        lambda: bs.list_bank_statements(store_id=None, limit=20, current_user=user),
+        lambda: bs.get_bank_statement("S1", current_user=user),
+    ]
+
+
+@pytest.mark.parametrize("role", ("STORE_MANAGER", "AREA_MANAGER"))
+def test_bank_statement_handlers_refuse_managers(role):
+    # The finance router admits managers; the row (and now the handler) do not.
+    for call in _bank_calls(role):
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(call())
+        assert exc.value.status_code == 403
+
+
+@pytest.mark.parametrize(
+    "method,path",
+    [
+        ("POST", "/api/v1/finance/bank-statement/import"),
+        ("GET", "/api/v1/finance/bank-statement"),
+        ("GET", "/api/v1/finance/bank-statement/S1"),
+    ],
+)
+def test_bank_statement_rows_are_the_handler_gate(method, path):
+    from api.routers.finance import _require_finance_admin
+
+    row = set(rbac.policy_for(method, path)["allowed"]) - {"SUPERADMIN"}
+    assert row == {"ADMIN", "ACCOUNTANT"}
+    for role in row:
+        _require_finance_admin({"roles": [role]})  # no raise
