@@ -375,7 +375,11 @@ def render_debit_note_html(note: Dict[str, Any]) -> str:
     inter = bool(note.get("is_inter_state"))
 
     def _r(p: Any) -> str:
-        return f"{paise_to_rupees(p):,.2f}"
+        # None = a figure the reader may not see (cost_mask.mask_debit_note).
+        return "-" if p is None else f"{paise_to_rupees(p):,.2f}"
+
+    def _pct(r: Any) -> str:
+        return "-" if r is None else f"{float(r or 0):g}%"
 
     rows = []
     for i, ln in enumerate(note.get("lines") or [], start=1):
@@ -393,7 +397,7 @@ def render_debit_note_html(note: Dict[str, Any]) -> str:
             f"<td class='num'>{int(ln.get('qty') or 0)}</td>"
             f"<td class='num'>{_r(ln.get('rate_paise'))}</td>"
             f"<td class='num'>{_r(ln.get('taxable_paise'))}</td>"
-            f"<td class='num'>{float(ln.get('gst_rate') or 0):g}%</td>"
+            f"<td class='num'>{_pct(ln.get('gst_rate'))}</td>"
             f"{tax_cells}"
             f"<td class='num'>{_r(ln.get('line_total_paise'))}</td>"
             "</tr>"

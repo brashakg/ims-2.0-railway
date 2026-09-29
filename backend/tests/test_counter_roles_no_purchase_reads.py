@@ -16,7 +16,9 @@ exactly as the screens do:
     role outside ``_VENDOR_ROLES`` now gets names only (no GSTIN, contacts,
     bank or terms), and it searches only those keys (no GSTIN oracle).
   * Vendor returns / RTV debit notes -> writers + WORKSHOP_STAFF (the Vendor
-    Returns screen); vendor RMAs -> writers only (no screen).
+    Returns screen), who reads them without prices, totals or the supplier's
+    GSTIN / address (services/cost_mask, owner ruling 2026-09-29); vendor
+    RMAs -> writers only (no screen).
   * /finance/vendor-payments -> the same accounts set as the vendor ledger:
     one payables rule, and the Finance dashboard hides it from managers.
 
@@ -456,3 +458,153 @@ def test_rbac_matrix_doc_matches_the_rows_f60_moved():
         if got != want:
             drift.append((path, got, want))
     assert not drift, drift
+
+
+# ---------------------------------------------------------------------------
+# 9. Vendor returns / RTV debit notes: WORKSHOP_STAFF sees item, qty, reason
+# ---------------------------------------------------------------------------
+# Owner ruling 2026-09-29. WORKSHOP_STAFF keeps the Vendor Returns screen, but
+# the prices paid, totals and the supplier's GSTIN / address are hidden -- else
+# the debit note (vendor GSTIN + address) and the return (unit cost) read
+# around the names-only vendor list. One rule: services/cost_mask.
+import copy  # noqa: E402
+
+from api.routers import rtv_debit_notes as dn_router  # noqa: E402
+from api.routers import vendor_returns as vr_router  # noqa: E402
+from api.services.rtv_debit_note import build_debit_note  # noqa: E402
+
+_GSTIN = "27AAPFU0939F1ZV"
+_ADDRESS = "1 Marker Street"
+_BILL_NO = "ACME/INV/77"
+_RETURN = {
+    "return_id": "VR1",
+    "vendor_id": "V1",
+    "vendor_name": "Acme",
+    "store_id": "BV-TEST-01",
+    "items": [
+        {
+            "product_id": "P1",
+            "product_name": "RB Frame",
+            "quantity": 2,
+            "reason": "defective",
+            "unit_price": 3173.37,
+        }
+    ],
+    "return_type": "credit_note",
+    "status": "credit_issued",
+    "total_value": 6346.74,
+    "credit_note_number": "CN-1",
+    "credit_note_amount": 6346.74,
+    "purchase_invoice_number": _BILL_NO,
+}
+_NOTE = dict(
+    build_debit_note(
+        _RETURN,
+        {"vendor_id": "V1", "name": "Acme", "gstin": _GSTIN, "address": _ADDRESS},
+        [dict(_RETURN["items"][0], hsn="9003", gst_rate=5.0)],
+        "DN/26-27/0001",
+        seller={"name": "Better Vision", "gstin": "20AAACB1234C1Z5"},
+    ),
+    debit_note_id="DN-1",
+    rtv_ref_id="VR1",
+)
+# Every price / total / supplier identity figure the fixtures carry, in every
+# spelling a JSON body or the printed HTML would use.
+_SECRETS = (
+    _GSTIN,
+    _ADDRESS,
+    _BILL_NO,
+    "CN-1",
+    "3173.37",
+    "3,173.37",
+    "6346.74",
+    "6,346.74",
+    "317337",
+    "634674",
+    "unit_price",
+    "total_value",
+    "credit_note_amount",
+    "rate_paise",
+    "totals",
+)
+_PURCHASE_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT", "SUPERADMIN")
+
+
+class _Coll:
+    def __init__(self, doc):
+        self.doc = doc
+
+    def count_documents(self, _flt):
+        return 1
+
+    def find(self, _flt=None):
+        return self
+
+    def sort(self, *_a):
+        return self
+
+    def skip(self, _n):
+        return self
+
+    def limit(self, _n):
+        return [copy.deepcopy(self.doc)]
+
+    def find_one(self, _q):
+        return copy.deepcopy(self.doc)
+
+    def get_collection(self, _name):
+        return self
+
+
+class _Engine:
+    def list(self, **_kw):
+        return [copy.deepcopy(_NOTE)]
+
+    def get(self, _id):
+        return copy.deepcopy(_NOTE)
+
+
+@pytest.fixture
+def return_docs(monkeypatch):
+    monkeypatch.setattr(vr_router, "_get_db", lambda: _Coll(_RETURN))
+    monkeypatch.setattr(dn_router, "_engine", lambda: _Engine())
+
+
+RETURN_DOC_READS = (
+    "/api/v1/vendor-returns",
+    "/api/v1/vendor-returns/VR1",
+    "/api/v1/rtv-debit-notes",
+    "/api/v1/rtv-debit-notes/DN-1",
+    "/api/v1/rtv-debit-notes/DN-1/print",
+)
+
+
+@pytest.mark.parametrize("path", RETURN_DOC_READS)
+def test_workshop_reads_returns_without_prices_or_supplier(client, return_docs, path):
+    resp = client.get(path, headers=_headers("WORKSHOP_STAFF"))
+    assert resp.status_code == 200
+    leaked = [s for s in _SECRETS if s in resp.text]
+    assert not leaked, leaked
+    # ...but still the item and its quantity (and the reason on a return).
+    assert "RB Frame" in resp.text
+    # A hidden figure prints as "-", never as a fake zero.
+    assert ">0.00<" not in resp.text and ">0%<" not in resp.text
+    if "vendor-returns" in path:
+        body = resp.json()
+        item = (body["returns"][0] if "returns" in body else body)["items"][0]
+        assert item == {
+            "product_id": "P1",
+            "product_name": "RB Frame",
+            "quantity": 2,
+            "reason": "defective",
+        }
+
+
+@pytest.mark.parametrize("role", _PURCHASE_ROLES)
+@pytest.mark.parametrize("path", RETURN_DOC_READS)
+def test_purchase_roles_still_read_prices_and_supplier(client, return_docs, role, path):
+    resp = client.get(path, headers=_headers(role))
+    assert resp.status_code == 200
+    want = ("3173.37",) if "vendor-returns" in path else (_GSTIN, _ADDRESS, _BILL_NO)
+    for s in want:
+        assert s in resp.text, (role, s)
