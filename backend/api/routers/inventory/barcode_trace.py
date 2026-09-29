@@ -65,11 +65,20 @@ async def barcode_lifecycle_trace(
     def _scrub_list(docs) -> list:
         return [_scrub(dict(d)) for d in (docs or []) if d]
 
+    # The code as typed finds the unit in any letter case; everything after
+    # that is looked up by the unit's OWN code, the one other records carry.
+    code = barcode
+    stock_id = ""
+    sold_on = None
     try:
         # 1. Stock unit
         su = db.get_collection("stock_units").find_one(barcode_svc.unit_barcode_match(barcode))
         if su:
             result["stock_unit"] = _scrub(dict(su))
+            code = su.get("barcode") or barcode
+            # The till stamps the sale on the UNIT (mark_sold), not the code
+            # on the order line.
+            sold_on = su.get("order_id")
             stock_id = str(su.get("stock_id") or su.get("stock_unit_id") or su.get("_id") or "")
 
             # 2. Purchase / GRN origin
@@ -92,20 +101,22 @@ async def barcode_lifecycle_trace(
                     ).sort("at", 1).limit(200)
                 )
                 result["audit_trail"] = _scrub_list(audit_rows)
-        else:
-            stock_id = ""
 
     except Exception as exc:  # noqa: BLE001
         logger.warning("[INV-12] stock_unit lookup failed for barcode %s: %s", barcode, exc)
 
     try:
-        # 4. Sales: orders where an item carries this barcode
+        # 4. Sales: orders where an item carries this barcode, or the order
+        #    the unit was sold on.
+        sales_filter: list = [
+            {"items.barcode": code},
+            {"order_items.barcode": code},
+        ]
+        if sold_on:
+            sales_filter.append({"order_id": sold_on})
         orders = list(
             db.get_collection("orders").find(
-                {"$or": [
-                    {"items.barcode": barcode},
-                    {"order_items.barcode": barcode},
-                ]},
+                {"$or": sales_filter},
                 {"_id": 0, "order_number": 1, "created_at": 1, "store_id": 1,
                  "status": 1, "items": 1, "order_items": 1},
             ).sort("created_at", 1).limit(50)
@@ -113,7 +124,8 @@ async def barcode_lifecycle_trace(
         for order in orders:
             matching = [
                 i for i in (order.get("items") or order.get("order_items") or [])
-                if i.get("barcode") == barcode
+                if i.get("barcode") == code
+                or (stock_id and i.get("stock_id") == stock_id)
             ]
             result["sales"].append({
                 "order_number": order.get("order_number"),
@@ -126,12 +138,14 @@ async def barcode_lifecycle_trace(
         logger.warning("[INV-12] orders lookup failed for barcode %s: %s", barcode, exc)
 
     try:
-        # 5. Transfers: look for the barcode in shipped_stock_ids /
-        #    received_stock_ids on each transfer line.  Also check transfer_id
+        # 5. Transfers: shipped_stock_ids / received_stock_ids on each transfer
+        #    line hold the moved units' stock_ids.  Also check transfer_id
         #    stamped on the stock_unit itself.
         transfer_filter: list = [
-            {"items.shipped_stock_ids": barcode},
-            {"items.received_stock_ids": barcode},
+            {f"items.{field}": v}
+            for field in ("shipped_stock_ids", "received_stock_ids")
+            for v in (code, stock_id)
+            if v
         ]
         # If the stock unit carries a transfer_id, add that as an exact lookup.
         transfer_id_on_unit = None
@@ -155,7 +169,7 @@ async def barcode_lifecycle_trace(
 
     try:
         # 6. Returns: return lines that reference this barcode or its stock_id
-        return_filter: list = [{"items.barcode": barcode}]
+        return_filter: list = [{"items.barcode": code}]
         if stock_id:
             return_filter.append({"items.stock_id": stock_id})
         returns = list(

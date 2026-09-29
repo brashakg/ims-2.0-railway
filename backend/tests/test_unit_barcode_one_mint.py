@@ -218,7 +218,9 @@ def test_till_lookup_still_finds_old_and_new_codes(monkeypatch):
 
     db = CasDB()
     coll = db.get_collection("stock_units")
-    codes = ("BV--91FA3858", "2000000000015", "BV0000000042")
+    # 'Ab12cd34ef': serial capture stored any caller-supplied label verbatim
+    # before the one minter, so a legacy code can be mixed case.
+    codes = ("BV--91FA3858", "2000000000015", "BV0000000042", "Ab12cd34ef")
     for code in codes:
         coll.insert_one(
             {
@@ -235,7 +237,7 @@ def test_till_lookup_still_finds_old_and_new_codes(monkeypatch):
     for code in codes:
         # As printed, all lower case (typed), and first letter only capitalised
         # (a tablet keyboard): the till finds the same unit every time.
-        for typed in (code, code.lower(), code[:1] + code[1:].lower()):
+        for typed in (code, code.lower(), code.upper(), code[:1] + code[1:].lower()):
             hit = _run(inv.get_stock_by_barcode_short(typed, None, _MGR))
             assert hit["barcode"] == code, typed
 
@@ -260,3 +262,109 @@ def test_stock_count_scan_finds_a_unit_typed_in_lower_case(monkeypatch):
     )
     assert out["product_id"] == "P1"
     assert out["system_count"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# INV-12 trace: the code as typed finds the unit; its history is found by the
+# unit's own code and its sale by the order the till stamped on it.
+# --------------------------------------------------------------------------- #
+def _trace(monkeypatch, db, typed):
+    from api.routers.inventory import barcode_trace as bt
+
+    monkeypatch.setattr(bt, "_get_db", lambda: db)
+    return _run(bt.barcode_lifecycle_trace(typed, _MGR))
+
+
+def test_trace_finds_a_unit_and_its_history_typed_in_lower_case(monkeypatch):
+    """The lookup found the unit in any case, but the sale and return queries
+    still matched the raw typed string, so 'bv0000000042' read as never sold."""
+    import mongomock
+
+    db = mongomock.MongoClient().db
+    db.stock_units.insert_one(
+        {"stock_id": "SU-42", "barcode": "BV0000000042", "product_id": "P1",
+         "store_id": STORE, "status": "AVAILABLE"}
+    )
+    db.orders.insert_one(
+        {"order_number": "ORD-1", "created_at": "2026-09-20",
+         "items": [{"product_id": "P1", "barcode": "BV0000000042"}]}
+    )
+    db.returns.insert_one(
+        {"return_number": "RET-1", "created_at": "2026-09-21",
+         "items": [{"barcode": "BV0000000042"}]}
+    )
+    for typed in ("bv0000000042", "Bv0000000042"):
+        out = _trace(monkeypatch, db, typed)
+        assert (out["stock_unit"] or {}).get("barcode") == "BV0000000042", typed
+        assert [s["order_number"] for s in out["sales"]] == ["ORD-1"], typed
+        assert [r["return_number"] for r in out["returns"]] == ["RET-1"], typed
+
+
+def test_trace_shows_the_till_sale_of_a_scanned_unit(monkeypatch):
+    """The till never copies the unit code onto the order line: it stamps the
+    order on the UNIT (mark_sold -> stock_units.order_id). The trace must follow
+    that link, or every counter sale reads as never sold."""
+    import mongomock
+
+    db = mongomock.MongoClient().db
+    db.stock_units.insert_one(
+        {"stock_id": "SU-7", "barcode": "BV0000000007", "product_id": "P1",
+         "store_id": STORE, "status": "SOLD", "order_id": "ORD-ID-7"}
+    )
+    db.orders.insert_one(
+        {"order_id": "ORD-ID-7", "order_number": "BV/26-27/0007",
+         "created_at": "2026-09-22", "items": [{"product_id": "P1", "stock_id": "SU-7"}]}
+    )
+    out = _trace(monkeypatch, db, "BV0000000007")
+    assert [s["order_number"] for s in out["sales"]] == ["BV/26-27/0007"]
+    assert out["sales"][0]["matched_lines"] == [{"product_id": "P1", "stock_id": "SU-7"}]
+
+
+def test_trace_shows_a_transfer_that_moved_the_unit(monkeypatch):
+    """A transfer line records the moved units by stock_id, not by code."""
+    import mongomock
+
+    db = mongomock.MongoClient().db
+    db.stock_units.insert_one(
+        {"stock_id": "SU-9", "barcode": "BV0000000009", "product_id": "P1",
+         "store_id": STORE, "status": "AVAILABLE"}
+    )
+    db.stock_transfers.insert_one(
+        {"id": "TR-1", "transfer_number": "TR-001", "created_at": "2026-09-23",
+         "items": [{"product_id": "P1", "shipped_stock_ids": ["SU-9"],
+                    "received_stock_ids": ["SU-9"]}]}
+    )
+    out = _trace(monkeypatch, db, "bv0000000009")
+    assert [t["transfer_number"] for t in out["transfers"]] == ["TR-001"]
+
+
+def test_stock_ledger_rows_carry_their_on_hand_unit_codes():
+    """Inventory > Stock and New transfer search the ledger rows, which carried
+    only one sample unit's code: typing any other unit's code (old or new
+    format) found nothing. A row carries the code of every unit on hand at
+    THIS shop -- not a sold unit, not another shop's."""
+    import mongomock
+    from api.routers.inventory.stock import _build_store_ledger
+    from database.repositories.product_repository import StockRepository
+
+    db = mongomock.MongoClient().db
+    for code, status, store in (
+        ("BV0000000042", "AVAILABLE", STORE),
+        ("BV--91FA3858", "available", STORE),
+        ("BV0000000043", "SOLD", STORE),
+        ("BV0000000044", "AVAILABLE", "BV-BOK-01"),
+    ):
+        db.stock_units.insert_one(
+            {"barcode": code, "status": status, "store_id": store, "product_id": "P1"}
+        )
+
+    class _Products:
+        def find_many(self, flt, limit=0):
+            return [{"product_id": "P1", "sku": "S1", "name": "Frame", "is_active": True}]
+
+        def find_by_id(self, pid):
+            return None
+
+    (row,) = _build_store_ledger(StockRepository(db.stock_units), _Products(), STORE)
+    assert row["stock"] == 2
+    assert sorted(row["unit_barcodes"]) == ["BV--91FA3858", "BV0000000042"]

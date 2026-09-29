@@ -263,6 +263,7 @@ def _build_store_ledger(
                         },
                         "qty": {"$sum": {"$ifNull": ["$quantity", 1]}},
                         "barcode": {"$first": "$barcode"},
+                        "barcodes": {"$push": "$barcode"},
                         "location_code": {"$first": "$location_code"},
                     }
                 },
@@ -282,12 +283,19 @@ def _build_store_ledger(
                 if is_on_hand(status):
                     on_hand_by_product[pid] = on_hand_by_product.get(pid, 0) + qty
                     # Capture a sample barcode/location from any available unit
-                    # for the Barcode + Location columns on the ledger row.
-                    if pid not in sample_unit_by_product:
-                        sample_unit_by_product[pid] = {
+                    # for the Barcode + Location columns on the ledger row, and
+                    # every on-hand unit's code so the search box finds a unit.
+                    sample = sample_unit_by_product.setdefault(
+                        pid,
+                        {
                             "barcode": row.get("barcode") or "",
                             "location_code": row.get("location_code") or "",
-                        }
+                            "unit_barcodes": [],
+                        },
+                    )
+                    sample["unit_barcodes"].extend(
+                        b for b in row.get("barcodes") or [] if b
+                    )
                 elif canonical_state(status) is StockState.RESERVED:
                     reserved_by_product[pid] = reserved_by_product.get(pid, 0) + qty
         except (AttributeError, TypeError, ValueError) as exc:
@@ -422,6 +430,8 @@ def _ledger_row(
         "reservedQuantity": reserved,
         "reserved_quantity": reserved,
         "barcode": sample_unit.get("barcode", "") or product.get("barcode", ""),
+        # Every on-hand unit's IMS code at this shop (the search boxes match it).
+        "unit_barcodes": sample_unit.get("unit_barcodes", []),
         # The manufacturer's GTIN -- what Inventory > Manage Barcode edits.
         "gtin": (product.get("attributes") or {}).get("gtin") or "",
         "location": sample_unit.get("location_code", "")

@@ -84,8 +84,11 @@ def unit_barcode_match(code: Optional[str]) -> dict:
 
     Every minted unit code is upper case, but a hand-typed one may not be
     ('bv0000000001', or 'Bv0000000001' from a tablet that capitalises the first
-    letter). Match the code as typed OR upper-cased, so any case finds the unit
-    and a legacy row stored in lower case still matches itself.
+    letter), and a legacy code may be mixed case (serial capture used to store
+    any caller-supplied label verbatim, e.g. 'Ab12cd34ef'). So the whole code
+    matches exactly, ignoring letter case.
     """
     raw = str(code or "").strip()
-    return {"barcode": {"$in": list(dict.fromkeys([raw, raw.upper()]))}}
+    # ponytail: a case-insensitive regex cannot seek an index; fine while
+    # stock_units is small, add a collation index if lookups slow down.
+    return {"barcode": {"$regex": "^" + re.escape(raw) + "$", "$options": "i"}}
