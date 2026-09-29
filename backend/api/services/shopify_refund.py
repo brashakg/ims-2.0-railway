@@ -1507,8 +1507,9 @@ def _hold_returned_qty(order: Dict[str, Any], lines: List[Any], refund_id: str) 
     may list a line twice (a partly fulfilled line refunded in full: its
     "cancel" and its "return"), and the mark books a line for a refund once.
     All or nothing: None when a line has no returnable unit left or this
-    refund already restocked it (another door just did); the claims already
-    taken are released."""
+    refund already restocked it (another door just did); a claim that
+    cannot be written raises. Either way the claims already taken are
+    released."""
     from ..routers.returns import _claim_returnable_qty, _order_line_index, _resolve_original_line
 
     idx = _order_line_index(order)
@@ -1519,11 +1520,15 @@ def _hold_returned_qty(order: Dict[str, Any], lines: List[Any], refund_id: str) 
             qty = want.get(id(orig), (orig, 0.0, ""))[1] + float(line.return_qty)
             want[id(orig)] = (orig, qty, str(line.product_id or ""))
     held: _Held = []
-    for orig, qty, pid in want.values():
-        if not _claim_returnable_qty(order.get("order_id"), orig, qty, refund_id):
-            _release_unlanded(order, held, {}, refund_id)
-            return None
-        held.append((orig, qty, pid))
+    try:
+        for orig, qty, pid in want.values():
+            if not _claim_returnable_qty(order.get("order_id"), orig, qty, refund_id):
+                _release_unlanded(order, held, {}, refund_id)
+                return None
+            held.append((orig, qty, pid))
+    except Exception:
+        _release_unlanded(order, held, {}, refund_id)
+        raise
     return held
 
 

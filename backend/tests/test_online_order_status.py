@@ -1236,6 +1236,55 @@ def test_a_refund_that_lists_one_line_twice_restocks_each_unit_once(swept, monke
     assert (line.get("returned_qty"), line.get("restocked_refunds")) == (2, {str(rid): 2})
 
 
+class _WriteDown:
+    def find_one_and_update(self, *a, **kw):
+        raise RuntimeError("orders write down")
+
+
+@pytest.mark.parametrize("orders", [_WriteDown(), None], ids=["write_errors", "no_collection"])
+def test_a_restock_the_order_line_could_not_book_restocks_nothing(swept, monkeypatch, orders):
+    """The booking cannot be written: the restock goes ahead unbooked no
+    longer (the mark is all that stops the confirm minting the same
+    historical frame again). Nothing is put back, the press is released, and
+    a press once the write works puts the frame back once."""
+    from fastapi import HTTPException
+
+    row = _historical_refund(swept, monkeypatch, 60191, 700391, ims_product_id="IMS-P-1",
+                             status="DELIVERED")
+    real = returns_router._orders_coll
+    monkeypatch.setattr(returns_router, "_orders_coll", lambda: orders)
+    with pytest.raises(HTTPException) as first:
+        _goods_back(row)
+    assert first.value.status_code == 503 and _minted(swept) == []
+    monkeypatch.setattr(returns_router, "_orders_coll", real)
+    assert _goods_back(row)["result"]["status"] == "restocked"
+    _confirm(swept["review"].find_one({"review_id": row["review_id"]}))
+    assert _minted(swept) == ["AVAILABLE"], "one frame, one unit"
+
+
+def test_a_booking_that_errors_part_way_releases_the_line_it_booked(monkeypatch):
+    """Line a booked, line b's write errors: a stays booked no longer (it would
+    read as restocked with its unit still SOLD)."""
+    from api.routers.returns import ReturnLine
+
+    order = {"order_id": "O1", "items": [{"item_id": i, "product_id": i, "quantity": 1} for i in "ab"]}
+    lines = [ReturnLine(order_item_id=i, product_id=i, return_qty=1, unit_price=0.0) for i in "ab"]
+    calls = []
+
+    def claim(oid, orig, qty, rid):
+        if orig["item_id"] == "b":
+            raise RuntimeError("orders write down")
+        calls.append(("claim", orig["item_id"]))
+        return True
+
+    monkeypatch.setattr(returns_router, "_claim_returnable_qty", claim)
+    monkeypatch.setattr(returns_router, "_release_returnable_qty",
+                        lambda oid, orig, qty, rid, keep_mark=False: calls.append(("release", orig["item_id"])))
+    with pytest.raises(RuntimeError):
+        shopify_refund._hold_returned_qty(order, lines, "R1")
+    assert calls == [("claim", "a"), ("release", "a")]
+
+
 # ---------------------------------------------------------------------------
 # Ruling 1 leaves a fulfilled online order SHIPPED (it used to be DELIVERED).
 # Every report that picks orders by status reads the ONE pair of sets in

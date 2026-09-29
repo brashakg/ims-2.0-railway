@@ -544,13 +544,16 @@ def _claim_returnable_qty(
     over-cap / concurrent loser / this refund already restocked the line). Fail-soft: returns True when no orders
     collection is available, or the driver lacks find_one_and_update, so the
     pre-validation scan stays the guard rather than blocking a valid return.
+    Never for a refund's restock: its mark is all that stops another door
+    restocking the line again (a phantom unit), so a claim it cannot write
+    raises and nothing is restocked.
     """
-    if not order_id or return_qty <= 0:
+    if return_qty <= 0:
         return True
-    coll = _orders_coll()
-    if coll is None:
-        return True
-    if not hasattr(coll, "find_one_and_update"):
+    coll = _orders_coll() if order_id else None
+    if coll is None or not hasattr(coll, "find_one_and_update"):
+        if refund_id:
+            raise RuntimeError("the order line cannot be booked for this refund's restock")
         return True
 
     item_id = orig_line.get("item_id") or orig_line.get("id")
@@ -589,6 +592,8 @@ def _claim_returnable_qty(
         # Driver lacks positional update / find_one_and_update filter support ->
         # fall back to the pre-validation scan rather than block the return.
         logger.warning("[RETURNS] returnable-qty claim errored: %s", exc)
+        if refund_id:
+            raise
         return True
     return updated is not None
 
