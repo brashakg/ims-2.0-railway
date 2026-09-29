@@ -69,7 +69,9 @@ export function InvoiceFormDrawer({
 
   const [vendorId, setVendorId] = useState(prefill.vendor_id ?? '');
   const [vendorInvoiceNo, setVendorInvoiceNo] = useState(prefill.vendor_invoice_no ?? '');
-  const [vendorInvoiceDate, setVendorInvoiceDate] = useState((prefill.vendor_invoice_date ?? today).slice(0, 10));
+  // `||`, not `??`: a receipt with no supplier invoice date drafts '' -- the
+  // box must still open on a date (the due date is counted from it).
+  const [vendorInvoiceDate, setVendorInvoiceDate] = useState((prefill.vendor_invoice_date || today).slice(0, 10));
   const [recipientGstin, setRecipientGstin] = useState(prefill.recipient_gstin ?? '');
   const [notes, setNotes] = useState('');
   const [lines, setLines] = useState<EditLine[]>(initialLines);
@@ -149,6 +151,7 @@ export function InvoiceFormDrawer({
   const book = async () => {
     if (!vendorId) { toast.error('Select a supplier'); return; }
     if (!vendorInvoiceNo.trim()) { toast.error('Supplier invoice number is required'); return; }
+    if (!vendorInvoiceDate) { toast.error('Supplier invoice date is required'); return; }
     if (validLines.length === 0) { toast.error('Add at least one line item with a name and quantity'); return; }
     if (!receiptLinked && !billKind) {
       toast.error('Say what this bill is for: goods, or services/expenses');

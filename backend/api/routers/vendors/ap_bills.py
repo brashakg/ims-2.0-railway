@@ -342,7 +342,11 @@ async def create_vendor_bill(
 
     supplier_gstin = _vendor_gstin(db_early, vendor, vendor_id)
     recipient = _bill_recipient(
-        db_early, _receipt_store, None, current_user.get("active_store_id")
+        db_early,
+        _receipt_store,
+        None,
+        current_user.get("active_store_id"),
+        gstin_box=False,
     )
     heads = split_header_tax(
         bill.tax_amount, supplier_gstin, recipient.get("recipient_gstin")

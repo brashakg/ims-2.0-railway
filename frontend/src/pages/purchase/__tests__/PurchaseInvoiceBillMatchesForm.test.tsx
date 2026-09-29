@@ -198,6 +198,20 @@ describe('F37 + F6 - invoice from a goods receipt', () => {
     ]);
   });
 
+  it('a receipt with no supplier invoice date opens on today and books a date', async () => {
+    // The draft carries invoice_date null; the box opened blank (`'' ?? today`
+    // is ''), the bill booked with invoice_date '' and no due date.
+    routeGets({ '/vendors/purchase-invoices/from-grn/G1': { ...GRN_DRAFT, invoice_date: null } });
+    renderTab('/purchase/invoices?grn_id=G1');
+    const today = new Date().toISOString().slice(0, 10);
+    await screen.findByText(/Inter-state supply:/);
+    expect((document.querySelector('input[type="date"]') as HTMLInputElement).value).toBe(today);
+
+    fireEvent.click(screen.getByRole('button', { name: /Book invoice/i }));
+    await waitFor(() => expect(createCalls()).toHaveLength(1));
+    expect(createCalls()[0][1].invoice_date).toBe(today);
+  });
+
   it("shows the server's IGST and sends no place of supply", async () => {
     routeGets({ '/vendors/purchase-invoices/from-grn/G1': GRN_DRAFT });
     renderTab('/purchase/invoices?grn_id=G1');

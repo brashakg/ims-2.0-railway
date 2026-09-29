@@ -163,6 +163,15 @@ class PurchaseInvoiceCreate(BaseModel):
         invoice numbers can be case-significant."""
         return v.strip() if isinstance(v, str) else v
 
+    @field_validator("invoice_date", mode="before")
+    @classmethod
+    def _require_invoice_date(cls, v):
+        """A blank date booked with invoice_date '' and due_date None: the
+        credit-days due date silently never happened."""
+        if isinstance(v, str) and not v.strip():
+            raise ValueError("Invoice date is required (as printed on the bill)")
+        return v.strip() if isinstance(v, str) else v
+
 
 class PurchaseInvoicePreview(BaseModel):
     """The form as it stands: what POST / would book, minus the paperwork."""
@@ -1004,19 +1013,51 @@ def _entity_gstin_for_state(entity: dict, state_code: Optional[str]) -> Optional
 
 
 def _receipt_store_id(db, grn_doc, linked_dc_ids) -> Optional[str]:
-    """The shop the goods were DELIVERED to: the linked GRN's store, else the
-    first linked DC's (a cross-store consolidation is rejected by
-    _assert_dcs_single_vendor_store anyway). Fail-soft: None on any miss."""
+    """The shop the goods were DELIVERED to -- for the booking, its preview
+    and the DC draft alike: the linked GRN's store, else the first linked DC
+    that names one (a legacy DC with no store is skipped; two different shops
+    are refused by _assert_dcs_single_vendor_store). Fail-soft: None on a miss."""
     store_id = (grn_doc or {}).get("store_id")
-    if not store_id and linked_dc_ids and db is not None:
+    for dc_id in linked_dc_ids or []:
+        if store_id or db is None:
+            break
         try:
             dc = db.get_collection("grns").find_one(
-                {"grn_id": linked_dc_ids[0]}, {"_id": 0, "store_id": 1}
+                {"grn_id": dc_id}, {"_id": 0, "store_id": 1}
             )
-            store_id = (dc or {}).get("store_id")
         except Exception:
-            store_id = None
+            dc = None
+        store_id = (dc or {}).get("store_id")
     return store_id or None
+
+
+def _draft_lines(db, receipt: dict, po: Optional[dict]) -> list:
+    """A receipt's billable lines for BOTH drafts (from-GRN, from-DCs), with
+    the name and HSN the receipt and its PO lack taken from the catalogue: a
+    receipt line stores only product_id + quantities and a DC has no PO, so the
+    DC door opened every line blank and the form would not book until each
+    name was retyped. Fail-soft: a catalogue miss leaves the line as it was."""
+    lines = pinv.lines_from_grn(receipt, po)
+    missing = {
+        ln["product_id"]
+        for ln in lines
+        if ln.get("product_id") and not (ln.get("description") and ln.get("hsn"))
+    }
+    if not missing or db is None:
+        return lines
+    products: dict = {}
+    for pid in missing:
+        try:
+            products[pid] = db.get_collection("products").find_one(
+                {"product_id": pid}, {"_id": 0, "name": 1, "hsn_code": 1}
+            ) or {}
+        except Exception:
+            products[pid] = {}
+    for ln in lines:
+        p = products.get(ln.get("product_id")) or {}
+        ln["description"] = ln.get("description") or p.get("name")
+        ln["hsn"] = ln.get("hsn") or p.get("hsn_code")
+    return lines
 
 
 def _registrations(entity: Optional[dict]) -> set:
@@ -1032,7 +1073,9 @@ def _refuse_recipient(code: str, message: str):
     raise HTTPException(status_code=422, detail={"code": code, "message": message})
 
 
-def _bill_recipient(db, receipt_store_id, body_gstin, fallback_store_id=None) -> dict:
+def _bill_recipient(
+    db, receipt_store_id, body_gstin, fallback_store_id=None, gstin_box=True
+) -> dict:
     """THE recipient of a purchase bill -- one resolution for every bill door
     (the booking, its preview, both drafts, the Cash Flow '+ bill'), decided on
     the server (F40: a bill with no company is invisible to GSTR-3B).
@@ -1055,6 +1098,11 @@ def _bill_recipient(db, receipt_store_id, body_gstin, fallback_store_id=None) ->
     registration from another state is the owner's open bill-follows-store
     question -- this follows the shop's own record and does not answer it
     (test_gst_one_engine pins it).
+
+    `gstin_box`: whether the caller's form has a Recipient GSTIN box, so a
+    refusal never tells the accountant to type into a box that is not there
+    (the Cash Flow '+ bill' form has none). A company master that cannot be
+    read is a 503, never 'no companies'.
     """
     gstin = (body_gstin or "").strip().upper() or None
     if db is None:
@@ -1076,8 +1124,14 @@ def _bill_recipient(db, receipt_store_id, body_gstin, fallback_store_id=None) ->
             for e in db.get_collection("entities").find({}, {"_id": 0})
             if isinstance(e, dict)
         ]
-    except Exception:
-        entities = []
+    except Exception as exc:
+        # Never read as "no company master": that branch books a typed GSTIN
+        # unchecked and a bill with no company.
+        raise HTTPException(
+            status_code=503,
+            detail="Could not read our companies to decide who this bill is "
+            "for. Nothing was recorded -- try again shortly.",
+        ) from exc
 
     if receipt_store_id:
         shop = _store(receipt_store_id)
@@ -1104,8 +1158,12 @@ def _bill_recipient(db, receipt_store_id, body_gstin, fallback_store_id=None) ->
             + (
                 f"the receiving shop {receipt_store_id} has no company set."
                 if receipt_store_id
-                else "pick the shop it is for (top bar), or type our GSTIN "
-                "as printed on the supplier's bill."
+                else "pick the shop it is for (top bar)"
+                + (
+                    ", or type our GSTIN as printed on the supplier's bill."
+                    if gstin_box
+                    else ", then record the bill again."
+                )
             ),
         )
     held = _registrations(entity)
@@ -2075,7 +2133,7 @@ async def draft_invoice_from_grn(
         db, grn.get("store_id"), None, current_user.get("active_store_id")
     )
 
-    raw_lines = pinv.lines_from_grn(grn, po)
+    raw_lines = _draft_lines(db, grn, po)
     computed = pinv.compute_invoice(
         raw_lines, supplier_gstin, recipient.get("recipient_gstin")
     )
@@ -2149,11 +2207,9 @@ async def draft_invoice_from_dcs(
     agg: dict = {}
     order: list = []
     resolved_vendor_id = vendor_id
-    store_id = None
     for dc in dc_docs:
         resolved_vendor_id = resolved_vendor_id or dc.get("vendor_id")
-        store_id = store_id or dc.get("store_id")
-        for ln in pinv.lines_from_grn(dc, None):
+        for ln in _draft_lines(db, dc, None):
             pid = ln.get("product_id")
             key = pid if pid is not None else f"_noid_{len(order)}"
             if key not in agg:
@@ -2174,7 +2230,7 @@ async def draft_invoice_from_dcs(
         _vendor_gstin(db, vendor, resolved_vendor_id) if resolved_vendor_id else None
     )
     recipient = _bill_recipient(
-        db, store_id, None, current_user.get("active_store_id")
+        db, _receipt_store_id(db, None, ids), None, current_user.get("active_store_id")
     )
 
     computed = pinv.compute_invoice(

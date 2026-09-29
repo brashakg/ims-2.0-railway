@@ -442,7 +442,7 @@ class TestOneBillOneReturn:
 
 
 class TestEveryDoorEveryReader:
-    def _world(self):
+    def _world(self, active="S1"):
         db = _mongo(
             [
                 (
@@ -464,7 +464,7 @@ class TestEveryDoorEveryReader:
             {"po_id": f"PO-{g['grn_id']}", "items": [{"product_id": "P1", "unit_price": 1000.0, "tax_rate": 5.0}]}
             for g in grns
         ]
-        cli = _app(db)  # the accountant sits at S1
+        cli = _app_as(db, active)  # the accountant's shop (S1 unless told)
         vendors = _Repo(list(db["vendors"].find({}, {"_id": 0})), "vendor_id")
         pi_router.get_grn_repository = lambda: _Repo(grns, "grn_id")
         pi_router.get_purchase_order_repository = lambda: _Repo(pos, "po_id")
@@ -548,3 +548,265 @@ class TestCreditLeftOffEveryReturnIsFlagged:
         )
         row = _row(_crosscheck(db, "E1"), "Input credit left off GSTR-3B")
         assert row["status"] == "MISMATCH" and row["variance"] == 50.0
+
+
+# ===========================================================================
+# Panel round 3 -- the receipt's shop on every door, every reader in any
+# store order, and no check that fails open
+# ===========================================================================
+
+
+def _door(cli, vendor_id, **bill):
+    """POST the Cash Flow '+ bill' door (vendors router) as `cli`'s user."""
+    app = FastAPI()
+    app.include_router(vend.router, prefix="/api/v1/vendors")
+    app.dependency_overrides[get_current_user] = cli.app.dependency_overrides[get_current_user]
+    return TestClient(app).post(f"/api/v1/vendors/{vendor_id}/bills", json=bill)
+
+
+class TestTheReceiptsShopOnEveryDoor:
+    """The receipt's shop names the company; the accountant's own shop never
+    does. GRN GA was received at S1 (Better Vision, JH) from V1 (Maharashtra);
+    the accountant sits at S2 (WizOpt, MH). A mutant that drops the receipt's
+    shop books WizOpt's 27... number with CGST + SGST -- the credit lands on
+    the other company's GSTR-3B."""
+
+    def test_cash_flow_goods_bill_is_the_receipts_company(self):
+        """Mutant M1 (ap_bills `_receipt_store = None`) survived every suite."""
+        _, cli = TestEveryDoorEveryReader()._world("S2")
+        r = _door(cli, "V1", bill_number="G-1", bill_date="2026-05-09", taxable_amount=1000,
+                  tax_amount=50, total_amount=1050, bill_kind="GOODS", grn_id="GA")
+        assert r.status_code == 201, r.text
+        doc = r.json()
+        assert doc["recipient_entity_id"] == "E1" and doc["recipient_gstin"] == BUY_JH
+        assert (doc["igst_total"], doc["cgst_total"], doc["sgst_total"]) == (50.0, 0.0, 0.0)
+
+    def test_the_preview_of_a_receipt_bill_is_the_booking(self):
+        """Mutant M7 (preview `grn_doc = None`) survived: the preview named
+        WizOpt's number while the booking stored Better Vision's."""
+        _, cli = TestEveryDoorEveryReader()._world("S2")
+        body = {"vendor_id": "V1", "grn_id": "GA", "lines": [
+            {"product_id": "P1", "description": "Frame", "qty": 1, "unit_price": 1000, "gst_rate": 5}]}
+        pv = cli.post(f"{_URL}/preview", json=body)
+        assert pv.status_code == 200, pv.text
+        pv = pv.json()
+        assert pv["recipient_entity_id"] == "E1" and pv["recipient_gstin"] == BUY_JH
+        doc = cli.post(_URL, json={**body, "invoice_number": "A-9", "invoice_date": "2026-05-09", "po_id": "PO-GA"})
+        assert doc.status_code == 201, doc.text
+        _same_split(pv, doc.json())
+
+    def test_dcs_name_one_shop_for_draft_preview_and_booking(self):
+        """DX1 (legacy, no shop) + DX2 at PUNE (BVOPL's 27 number), a
+        Maharashtra vendor, the accountant at S1, Recipient GSTIN cleared. The
+        draft read the first DC WITH a shop (27..., CGST + SGST); the preview
+        and booking read only the first DC (none) and fell back to S1's 20...
+        (IGST). One helper now names the shop for all three."""
+        db = _mongo(
+            [
+                (
+                    {"entity_id": "E1", "name": "BVOPL", "gstins": [
+                        {"gstin": BUY_JH, "state_code": "20", "is_primary": True},
+                        {"gstin": BUY_MH, "state_code": "27"}]},
+                    [{"store_id": "S1", "entity_id": "E1", "state_code": "20", "gstin": BUY_JH},
+                     {"store_id": "PUNE", "entity_id": "E1", "state_code": "27", "gstin": BUY_MH}],
+                )
+            ]
+        )
+        db["grns"].insert_many(
+            [
+                {"grn_id": gid, "grn_subtype": "DELIVERY_CHALLAN", "status": "ACCEPTED", "vendor_id": "V1",
+                 "items": [{"product_id": "P1", "accepted_qty": 1}], **extra}
+                for gid, extra in (("DX1", {}), ("DX2", {"store_id": "PUNE"}))
+            ]
+        )
+        cli = _app(db)
+        draft = cli.get(f"{_URL}/from-dcs", params={"dc_ids": "DX1,DX2", "vendor_id": "V1"})
+        assert draft.status_code == 200, draft.text
+        assert draft.json()["recipient_gstin"] == BUY_MH and draft.json()["interstate"] is False
+        body = {"vendor_id": "V1", "linked_dc_ids": ["DX1", "DX2"], "lines": [
+            {"product_id": "P1", "description": "Frame", "qty": 2, "unit_price": 1000, "gst_rate": 5}]}
+        pv = cli.post(f"{_URL}/preview", json=body).json()
+        assert pv["recipient_gstin"] == BUY_MH and pv["interstate"] is False
+        doc = cli.post(_URL, json={**body, "invoice_number": "DX-1", "invoice_date": "2026-05-09"})
+        assert doc.status_code == 201, doc.text
+        _same_split(pv, doc.json())
+
+
+class TestTheDraftCarriesTheReceiptsProducts:
+    def test_a_dc_draft_names_the_catalogue_product_and_hsn(self):
+        """A DC line stores only product_id + qty, and a DC has no PO, so the
+        draft opened with a blank name and HSN on every line -- the form would
+        not book until each was retyped. The catalogue names them."""
+        db = _FakeDB()
+        db.collections["products"] = [{"product_id": "P1", "name": "Carrera CA 8895 807", "hsn_code": "9003"}]
+        db.collections["grns"] = [
+            {"grn_id": "D1", "grn_subtype": "DELIVERY_CHALLAN", "status": "ACCEPTED", "vendor_id": "V1",
+             "store_id": "S1", "items": [{"product_id": "P1", "accepted_qty": 2}]}
+        ]
+        r = _app(db).get(f"{_URL}/from-dcs", params={"dc_ids": "D1", "vendor_id": "V1"})
+        assert r.status_code == 200, r.text
+        (ln,) = r.json()["lines"]
+        assert (ln["description"], ln["hsn"], ln["qty"]) == ("Carrera CA 8895 807", "9003", 2)
+
+
+class TestNoCheckFailsOpen:
+    def test_a_bill_needs_its_invoice_date(self):
+        """A blank date booked with invoice_date '' and due_date None, so the
+        credit-days due date silently never happened."""
+        r = _app(_FakeDB()).post(_URL, json=_invoice_body(invoice_date="  "))
+        assert r.status_code == 422, r.text
+
+    def test_an_unreadable_company_master_refuses_the_booking(self):
+        """The entities read failing took the 'no company master' branch: the
+        typed GSTIN went unchecked and the bill booked anyway."""
+
+        class _Down(_FakeDB):
+            def get_collection(self, name):
+                if name == "entities":
+                    raise RuntimeError("mongo blip")
+                return super().get_collection(name)
+
+        db = _Down()
+        r = _app(db).post(_URL, json=_services(recipient_gstin=BUY_MH))
+        assert r.status_code == 503, r.text
+        assert db.collections["vendor_bills"] == []
+
+    def test_the_cash_flow_door_does_not_ask_for_a_gstin_it_has_no_box_for(self):
+        """No shop picked, two companies: the refusal told the accountant to
+        'type our GSTIN', and the Cash Flow form has no such box."""
+        _, cli = TestEveryDoorEveryReader()._world(None)
+        r = _door(cli, "V1", bill_number="FR-1", bill_date="2026-05-09",
+                  taxable_amount=1000, tax_amount=180, total_amount=1180, bill_kind="SERVICES")
+        assert r.status_code == 422, r.text
+        detail = r.json()["detail"]
+        assert detail["code"] == "RECIPIENT_UNRESOLVED"
+        assert "GSTIN" not in detail["message"] and "top bar" in detail["message"]
+
+    def test_an_unreadable_bill_list_never_reads_green(self, monkeypatch):
+        """_itc_unplaced swallowed any read error and reported 0 bills, so the
+        'Input credit left off GSTR-3B' row read MATCH on a DB failure."""
+        from api.routers.reports import gst_itc
+
+        db = TestCreditLeftOffEveryReturnIsFlagged()._world()
+
+        def _boom(*a, **k):
+            raise RuntimeError("mongo blip")
+
+        monkeypatch.setattr(gst_itc, "_itc_match", _boom)
+        xc = _crosscheck(db, "E1")
+        assert _row(xc, "Input credit left off GSTR-3B")["status"] == "MISMATCH"
+        assert xc["itc_leg_failed"] is True
+
+
+class TestOneGstinOneFigureInAnyStoreOrder:
+    """E1 holds only the Jharkhand number; its shops S1 (state 20) and PUNE
+    (state 27) both carry it (stores._derive_store_gstin's fallback). WizOpt
+    (E2) transfers Rs 10,000 to PUNE: the mirror books Rs 500 CGST + SGST with
+    NO recipient GSTIN (E1 has no 27 registration). Plus A-1 at S1, IGST 50.
+    The GSTIN slice was counted once per GSTIN, and S1's slice (50) and PUNE's
+    (550) differed -- whichever shop Mongo listed first won."""
+
+    def _world(self, order):
+        shops = {
+            "S1": {"store_id": "S1", "entity_id": "E1", "state_code": "20", "gstin": BUY_JH},
+            "PUNE": {"store_id": "PUNE", "entity_id": "E1", "state_code": "27", "gstin": BUY_JH},
+        }
+        db = _mongo(
+            [
+                ({"entity_id": "E1", "name": "BVOPL", "gstins": [{"gstin": BUY_JH, "state_code": "20", "is_primary": True}]},
+                 [shops[s] for s in order]),
+                ({"entity_id": "E2", "name": "WizOpt", "gstins": [{"gstin": BUY_MH, "state_code": "27", "is_primary": True}]},
+                 [{"store_id": "S2", "entity_id": "E2", "state_code": "27", "gstin": BUY_MH}]),
+            ]
+        )
+        common = {"status": "OUTSTANDING", "itc_eligible": True, "bill_date": "2026-05-12",
+                  "invoice_date": "2026-05-12", "recipient_entity_id": "E1"}
+        db["vendor_bills"].insert_many(
+            [
+                {**common, "bill_id": "m1", "bill_number": "TRF/T1", "source_transfer_id": "T1",
+                 "from_store_id": "S2", "to_store_id": "PUNE", "vendor_gstin": BUY_MH, "recipient_gstin": "",
+                 "taxable_amount": 10000, "tax_amount": 500, "cgst_total": 250.0, "sgst_total": 250.0,
+                 "igst_total": 0.0},
+                {**common, "bill_id": "a1", "bill_number": "A-1", "doc_type": "PURCHASE_INVOICE",
+                 "vendor_gstin": SUP_MH, "recipient_gstin": BUY_JH, "taxable_amount": 1000,
+                 "tax_amount": 50, "cgst_total": 0.0, "sgst_total": 0.0, "igst_total": 50.0},
+            ]
+        )
+        return db
+
+    @pytest.mark.parametrize("order", [("S1", "PUNE"), ("PUNE", "S1")])
+    def test_the_crosscheck_counts_the_mirror_whichever_shop_comes_first(self, order):
+        from api.routers.reports import _itc_from_vendor_bills
+
+        db = self._world(order)
+        assert _register(db)["total_itc"] == 550.0
+        xc = _crosscheck(db, "E1")
+        assert xc["gstr3b"]["itc"]["total"] == 550.0
+        assert _row(xc, "Input credit left off GSTR-3B")["status"] == "MATCH"
+        # One GSTIN, one filing: both shops print the same Table 4.
+        s1 = _itc_from_vendor_bills(db, "S1", 2026, 5, 31)
+        assert s1 == _itc_from_vendor_bills(db, "PUNE", 2026, 5, 31) == (50.0, 250.0, 250.0)
+
+
+class TestCreditFromAnUnregisteredSupplierIsFlagged:
+    def test_gst_typed_on_a_bill_from_a_supplier_with_no_gstin_is_flagged(self):
+        """An unregistered supplier's tax never reaches GSTR-2B, so that
+        credit is not claimable -- it was counted on 20...'s return with no
+        word. Rs 1000.11 @ 5% at S1 from VN (no GSTIN)."""
+        db = TestCreditLeftOffEveryReturnIsFlagged()._world()
+        db["vendors"].insert_one({"vendor_id": "VN", "trade_name": "Local Fitter", "credit_days": 0})
+        r = _app(db).post(_URL, json=_services(vendor_id="VN", invoice_number="VN-1", lines=[
+            {"description": "Fitting", "qty": 1, "unit_price": 1000.11, "gst_rate": 5}]))
+        assert r.status_code == 201, r.text
+        xc = _crosscheck(db, "E1")
+        assert xc["gstr3b"]["itc"]["total"] == 50.01
+        row = _row(xc, "Input credit from suppliers with no GSTIN")
+        assert row["status"] == "MISMATCH" and row["variance"] == 50.01
+        assert "VN-1" in row["note"]
+
+
+class TestTransferMirrorHeadsAreTheOneRule:
+    def test_whenever_both_gstins_resolve_the_mirror_head_is_classify_supply(self):
+        """Panel LOW on transfers.py: the mirror takes its head from the two
+        shops' states. With both registrations on file the GSTIN prefixes ARE
+        those states, so the verdicts agree for every pair of shops; they part
+        only when the receiving company holds no registration in the
+        receiving shop's state (recipient GSTIN left blank on purpose, so the
+        miss is loud -- transfers._entity_gstin_for_state)."""
+        import itertools
+
+        from api.routers import transfers as trf
+        from api.services.purchase_invoice_engine import classify_supply
+
+        regs = (("E1", "ZZZZZ9999Z1Z9"), ("E2", "YYYYY8888Y1Z8"))
+        shops = [
+            {"store_id": f"{e}-{s}", "entity_id": e, "state_code": s, "gstin": f"{s}{g}"}
+            for e, g in regs
+            for s in ("20", "27")
+        ]
+        entities = [
+            {"entity_id": e, "gstins": [{"gstin": f"{s}{g}", "state_code": s} for s in ("20", "27")]}
+            for e, g in regs
+        ]
+        saved = trf._get_db
+        try:
+            booked = 0
+            for a, b in itertools.permutations(shops, 2):
+                db = mongomock.MongoClient().db
+                db["stores"].insert_many([dict(s) for s in shops])
+                db["entities"].insert_many([dict(e) for e in entities])
+                trf._get_db = lambda db=db: db
+                trf._book_mirror_purchase({
+                    "id": "t", "transfer_number": "T", "total_value": 1000, "items": [],
+                    "from_location_id": a["store_id"], "to_location_id": b["store_id"],
+                    "completed_at": "2026-05-10T05:00:00",
+                })
+                bill = db["vendor_bills"].find_one({})
+                assert bill, (a["store_id"], b["store_id"])
+                booked += 1
+                assert bill["vendor_gstin"] and bill["recipient_gstin"]
+                verdict = classify_supply(bill["vendor_gstin"], bill["recipient_gstin"])["interstate"]
+                assert bill["interstate"] is verdict, (a["store_id"], b["store_id"])
+            assert booked == 12
+        finally:
+            trf._get_db = saved
