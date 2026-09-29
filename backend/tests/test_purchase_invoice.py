@@ -579,27 +579,22 @@ class TestRoleGating:
 
 
 class TestListAndGet:
-    def test_list_returns_only_purchase_invoices(self):
+    def test_list_returns_every_supplier_bill_but_no_transfer_mirror(self):
+        """A header-only bill (the Cash Flow '+ bill' door, no doc_type) is a
+        supplier bill the ITC register and GSTR-3B count, so the list shows
+        it too; a stock-transfer mirror is not a supplier bill."""
         db = _FakeDB()
-        # A legacy header-only bill (no doc_type) must NOT appear in the list.
-        db.collections["vendor_bills"].append(
-            {
-                "bill_id": "legacy1",
-                "vendor_id": "V1",
-                "bill_number": "OLD-1",
-                "total_amount": 500,
-            }
-        )
+        db.collections["vendor_bills"] += [
+            {"bill_id": "legacy1", "vendor_id": "V1", "bill_number": "OLD-1", "total_amount": 500},
+            {"bill_id": "m1", "bill_number": "TRF/T1", "source_transfer_id": "T1", "total_amount": 900},
+        ]
         cli = _app(db)
         cli.post("/api/v1/vendors/purchase-invoices", json=_invoice_body())
         r = cli.get("/api/v1/vendors/purchase-invoices")
         assert r.status_code == 200
         data = r.json()
-        assert data["total"] == 1
-        assert all(
-            row.get("doc_type") == "PURCHASE_INVOICE"
-            for row in data["purchase_invoices"]
-        )
+        assert data["total"] == 2
+        assert sorted(row["bill_number"] for row in data["purchase_invoices"]) == ["INV-001", "OLD-1"]
 
     def test_get_by_id(self):
         db = _FakeDB()

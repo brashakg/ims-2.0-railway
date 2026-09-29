@@ -395,6 +395,21 @@ export const vendorApApi = {
   },
 };
 
+// A server line -- a DRAFT's or a STORED bill's alike -- uses the create()
+// wire keys description / hsn / qty / taxable. Alias them onto the FE keys, the
+// exact reverse of toInvoiceWire: the draft's lines arrived blank with qty 1
+// (F37), and a booked bill's detail drawer read 'Line 1 | - | -' on every row.
+function mapLinesFromApi(lines: unknown): PurchaseInvoiceLine[] {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return ((Array.isArray(lines) ? lines : []) as Record<string, any>[]).map((l) => ({
+    ...l,
+    product_name: l.product_name ?? l.description ?? '',
+    hsn_code: l.hsn_code ?? l.hsn ?? '',
+    quantity: l.quantity ?? l.qty ?? 0,
+    taxable_amount: l.taxable_amount ?? l.taxable,
+  })) as PurchaseInvoiceLine[];
+}
+
 // The stored vendor_bills doc uses invoice_number / bill_number for the
 // supplier invoice no, invoice_date / bill_date for the date, cgst_total /
 // sgst_total / igst_total for the GST split, and `interstate` for the tax-type
@@ -418,26 +433,19 @@ function mapInvoiceFromApi(doc: Record<string, any>): PurchaseInvoice {
     sgst,
     igst,
     is_interstate: doc.is_interstate ?? doc.interstate ?? igst > 0,
+    lines: mapLinesFromApi(doc.lines),
   } as PurchaseInvoice;
 }
 
 // A server DRAFT (from-grn / from-dcs) uses the create() wire keys -- header
-// invoice_number / invoice_date, lines description / hsn / qty. Alias them onto
-// the FE keys, the exact reverse of create(), so the form shows the receipt's
-// products, HSNs and accepted quantities (F37: they arrived blank, qty 1).
+// invoice_number / invoice_date, lines as above.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function mapDraftFromApi(d: Record<string, any>): PurchaseInvoiceDraft {
   return {
     ...d,
     vendor_invoice_no: d.vendor_invoice_no ?? d.invoice_number ?? '',
     vendor_invoice_date: d.vendor_invoice_date ?? d.invoice_date ?? '',
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    lines: ((d.lines ?? []) as Record<string, any>[]).map((l) => ({
-      ...l,
-      product_name: l.product_name ?? l.description ?? '',
-      hsn_code: l.hsn_code ?? l.hsn ?? '',
-      quantity: l.quantity ?? l.qty ?? 0,
-    })),
+    lines: mapLinesFromApi(d.lines),
   } as PurchaseInvoiceDraft;
 }
 
@@ -482,10 +490,6 @@ export const purchaseInvoicesApi = {
     } catch {
       return { purchase_invoices: [] as PurchaseInvoice[], total: 0 };
     }
-  },
-  get: async (id: string) => {
-    const res = await api.get(`/vendors/purchase-invoices/${id}`);
-    return res.data as PurchaseInvoice;
   },
   // Writes THROW so booking failures (validation, missing GRN, period lock) are
   // surfaced loudly to the user rather than silently swallowed.

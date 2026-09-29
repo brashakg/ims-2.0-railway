@@ -1,5 +1,6 @@
 """Vendor-bill ITC, stock-transfer and credit-note helpers for the GST returns."""
 
+import re
 
 # ============================================================================
 # GST RETURNS - GSTR-3B (Summary Return)
@@ -37,6 +38,14 @@ def _itc_month(year, mon, last_day) -> list:
         {"invoice_date": {"$gte": month_lo, "$lte": month_hi}},
         {"bill_date": {"$gte": month_lo, "$lte": month_hi}},
     ]
+
+
+# A bill that no _itc_month window can place: neither date starts YYYY-MM-DD
+# ('' / '09/05/2026' / missing -- booked before every door validated it with
+# ap_engine.iso_bill_date). It is on no month's return, so the check below
+# reports it in every month until the bill is corrected.
+_ISO_DAY = re.compile(r"^\d{4}-\d{2}-\d{2}")
+_UNDATED = {"invoice_date": {"$not": _ISO_DAY}, "bill_date": {"$not": _ISO_DAY}}
 
 
 def _itc_match(shops, entity_id, store_gstin, year, mon, last_day) -> dict:
@@ -169,9 +178,10 @@ def _itc_gstin_from_vendor_bills(db, active_store, year, mon, last_day):
 def _itc_unplaced(db, year, mon, last_day, entity_id=None) -> dict:
     """Booked input credit that NO GSTIN's GSTR-3B counts this month: a bill
     with no company (recipient_entity_id null -- every screen bill before F40),
-    a bill whose GSTIN is no shop's, or a bill with tax but no stored heads
-    (Table 4 sums the heads). Placement is _itc_match run for every shop that
-    has a company (the Cross-Check never counts a company-less shop's credit),
+    a bill whose GSTIN is no shop's, a bill with tax but no stored heads
+    (Table 4 sums the heads), or a bill no month can place (_UNDATED: listed
+    in every month, since it is on none). Placement is _itc_match run for
+    every shop that has a company (the Cross-Check never counts a company-less shop's credit),
     so this cannot disagree with the returns. Scoped to `entity_id` plus the
     company-less bills (they belong to nobody, so every view shows them).
 
@@ -222,7 +232,7 @@ def _itc_unplaced(db, year, mon, last_day, entity_id=None) -> dict:
         q: dict = {
             "status": {"$nin": _DEAD_BILL},
             "itc_eligible": {"$ne": False},
-            "$or": _itc_month(year, mon, last_day),
+            "$or": _itc_month(year, mon, last_day) + [_UNDATED],
         }
         if entity_id:
             q["recipient_entity_id"] = {"$in": [entity_id, None]}
