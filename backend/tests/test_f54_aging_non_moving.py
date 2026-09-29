@@ -119,3 +119,26 @@ def test_non_moving_counts_only_shelf_stock_older_than_the_window(monkeypatch):
     ids = [p["product_id"] for p in res["products"]]
     assert ids == ["P-OLD"]  # not today's Aviators, not the 0-stock Havana
     assert res["products"][0]["current_stock"] == 2
+
+
+def test_non_moving_stock_column_is_what_is_on_the_shelf(monkeypatch):
+    """Verifier round 2: the young units drop out of the VERDICT, not out of
+    the displayed on-hand figure. 2 units received 120 days ago + 3 today, no
+    sale in 90 days: listed (the old two have sat out the window) with
+    Stock 5 -- what is on the shelf -- not 2."""
+    units = _UNITS + [
+        {"product_id": "P-OLD", "store_id": "S1", "status": "AVAILABLE", "created_at": _NOW}
+        for _ in range(3)
+    ]
+
+    class _MixedDb(_Db):
+        def get_collection(self, name):
+            if name == "stock_units":
+                return _Coll(units)
+            return super().get_collection(name)
+
+    monkeypatch.setattr(inv, "_get_db", lambda: _MixedDb())
+    res = asyncio.run(get_non_moving_stock(days=90, category=None, store_id=None, current_user=_MGR))
+    (row,) = res["products"]
+    assert row["product_id"] == "P-OLD"
+    assert row["current_stock"] == 5

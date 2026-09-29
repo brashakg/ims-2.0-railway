@@ -95,17 +95,21 @@ async def get_non_moving_stock(
                     stock_filter["store_id"] = active_store
                 stock = stock_coll.find(stock_filter)
                 # One serialized stock row == one physical unit; rows with no
-                # `quantity` field still count as one unit on hand. Only units
-                # that have sat on the shelf for the whole window count: a unit
-                # received this morning has not had N days to sell (audit
-                # F54). A unit with no readable created_at is legacy -> old.
+                # `quantity` field still count as one unit on hand. The VERDICT
+                # needs a unit that has sat on the shelf for the whole window: a
+                # unit received this morning has not had N days to sell (audit
+                # F54; no readable created_at = legacy = old). The Stock column
+                # still shows everything on the shelf.
                 total_qty = 0
+                aged_qty = 0
                 for s in stock:
+                    qty = s.get("quantity", 1)
+                    total_qty += qty
                     arrived = _parse_expiry(s.get("created_at"))
                     if arrived is None or arrived <= cutoff_date:
-                        total_qty += s.get("quantity", 1)
-                if total_qty <= 0:
-                    continue  # nothing on the shelf is not non-moving stock
+                        aged_qty += qty
+                if aged_qty <= 0:
+                    continue  # nothing has had the window: not non-moving
 
                 # Get last sold date (at the active store)
                 last_order_filter = {"items.product_id": product_id}
