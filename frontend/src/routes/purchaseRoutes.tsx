@@ -13,9 +13,10 @@ import { PURCHASE_MANAGER_ROLES } from '../pages/purchase/purchaseTypes';
 import type { UserRole } from '../types';
 
 // What the blocked page tells anyone else who opens a receiving screen
-// (audit F5). The page lists who can right under it (PURCHASE_MANAGER_ROLES,
-// the accountant included), so the hint points at that list, never a title.
-const RECEIVE_DENIED_HINT = 'Goods are received into stock by the people listed below. Hand the delivery to one of them.';
+// (audit F5). The page lists the roles that can right under it
+// (PURCHASE_MANAGER_ROLES, the accountant included), so the hint points at
+// that list rather than naming one title.
+const RECEIVE_DENIED_HINT = 'Goods are received into stock by staff in the roles listed below. Hand the delivery to one of them.';
 
 const PurchaseLayout = lazy(() => import('../pages/purchase/PurchaseLayout').then(m => ({ default: m.PurchaseLayout })));
 const PurchaseOrdersSection = lazy(() => import('../pages/purchase/PurchaseOrdersSection').then(m => ({ default: m.PurchaseOrdersSection })));
@@ -29,8 +30,9 @@ const VendorReturns = lazy(() => import('../pages/purchase/VendorReturns').then(
 // Purchase S6: Accountant Reconciliation Console
 const ReconConsole = lazy(() => import('../pages/purchase/ReconConsole'));
 
-// The module gate for the section pages — identical to the old /purchase gate.
-const PURCHASE_ROLES: UserRole[] = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'];
+// The module gate for the section pages: the same managers who send orders
+// and receive goods (one list, mirrors the backend _VENDOR_ROLES gate).
+const PURCHASE_ROLES: UserRole[] = [...PURCHASE_MANAGER_ROLES];
 
 // Legacy ?tab= mapper: /purchase and /purchase?tab=<x> land on the section
 // page, carrying every other query param (grn_id!) along.
@@ -149,9 +151,9 @@ export const purchaseRoutes = (
     />
 
     {/* Procurement Phase 2: Deliveries inbox + guided express
-        receive (mandatory attachment gate). ALL receiving roles —
-        mirrors the backend /vendors/grn* gate (owner decision:
-        express receive for all receiving staff). */}
+        receive (mandatory attachment gate). Managers only (owner
+        ruling 2026-09-28: receiving stays with them) — mirrors the
+        backend /vendors/grn* gate. */}
     <Route
       path="purchase/receive"
       element={

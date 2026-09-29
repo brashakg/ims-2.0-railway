@@ -106,9 +106,12 @@ export function byPerson(name?: string | null, id?: string | null): string {
 /** The managers who send orders to vendors and receive goods into stock
  *  (owner ruling 2026-09-28: receiving stays with them; workshop staff hand the
  *  box to one of them, the catalogue manager only raises drafts). ONE list for
- *  the receive routes, every Receive button, the blocked page that names them
- *  and the Buy Desk's "who sends it" hint; mirrors the backend _VENDOR_ROLES
- *  gate (+ SUPERADMIN). */
+ *  the purchase section pages, the receive routes, every Receive button, the
+ *  blocked page that names them and the Buy Desk's "who sends it" hint;
+ *  mirrors the backend _VENDOR_ROLES gate (+ SUPERADMIN), which guards ordering
+ *  and receiving alike. Narrowing only who RECEIVES needs its own list on both
+ *  sides -- shrinking this one would also lock those roles out of orders and
+ *  invoices. */
 export const PURCHASE_MANAGER_ROLES: readonly UserRole[] = [
   'SUPERADMIN',
   'ADMIN',
