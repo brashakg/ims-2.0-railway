@@ -364,6 +364,28 @@ def test_an_open_order_deleted_on_shopify_is_voided_through_the_claim(swept):
     assert doc["status_history"][-1]["changed_by"] == "system:SHOPIFY_ORDER_DELETE"
 
 
+def test_a_void_that_lost_a_race_snapshots_the_status_it_voided(swept, monkeypatch):
+    """The delete read CONFIRMED; staff marked the order READY before its
+    claim. The claim loses, apply_fact reads READY and voids that: the
+    snapshot kept to make the void auditable and reversible is READY."""
+    from api.routers.orders import release
+
+    _book(swept, 60062)
+    real = release._claim_order_status
+
+    def staff_first(*a, **kw):
+        monkeypatch.setattr(release, "_claim_order_status", real)
+        _set(swept, 60062, status="READY")
+        return real(*a, **kw)
+
+    monkeypatch.setattr(release, "_claim_order_status", staff_first)
+    res = shopify_order_delete.handle_shopify_order_delete(swept["db"], {"id": 60062}, topic="orders/delete")
+
+    assert res["status"] == "voided" and res["status_before_void"] == "READY"
+    doc = _doc(swept, 60062)
+    assert (doc["status"], doc["status_before_void"]) == ("VOID", "READY")
+
+
 # ---------------------------------------------------------------------------
 # An event's markers ride its status claim: a write that fails (a Mongo
 # failover inside the claim) leaves no marker, so the event is retried -- by

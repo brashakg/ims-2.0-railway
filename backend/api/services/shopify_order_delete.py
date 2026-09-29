@@ -155,11 +155,16 @@ def handle_shopify_order_delete(
 
         from .online_order_status import DELETE, apply_fact
 
-        extra: Dict[str, Any] = {"void_reason": "Shopify orders/delete webhook"}
-        # Preserve the lifecycle status the order held before the delete so the
-        # void is auditable / reversible (we never overwrite an existing snapshot).
-        if prior_status and not order.get("status_before_void"):
-            extra["status_before_void"] = prior_status
+        def extra(current: Dict[str, Any]) -> Dict[str, Any]:
+            # Preserve the lifecycle status the void moves (the one its claim
+            # was decided on, read again after a lost race) so the void is
+            # auditable / reversible; never overwrite an existing snapshot.
+            fields: Dict[str, Any] = {"void_reason": "Shopify orders/delete webhook"}
+            before = _norm(current.get("status")).upper()
+            if before and not current.get("status_before_void"):
+                fields["status_before_void"] = before
+            return fields
+
         # The marker rides the status claim (or lands alone when the table
         # keeps the status): a failed write leaves no marker, so a re-delivered
         # orders/delete retries instead of returning "duplicate".
@@ -183,7 +188,7 @@ def handle_shopify_order_delete(
                 "status": "voided",
                 "shopify_order_id": shopify_order_id,
                 "order_id": order.get("order_id"),
-                "status_before_void": prior_status,
+                "status_before_void": _norm(res["from"]).upper() or None,
             }
         return {
             "status": "kept",

@@ -30,7 +30,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
@@ -128,16 +128,20 @@ def decide(order: Dict[str, Any], fact: Optional[str]) -> Tuple[Optional[str], O
 
 def apply_fact(
     db, order: Dict[str, Any], fact: Optional[str], *, source: str,
-    extra: Optional[Dict[str, Any]] = None, marks: Optional[Dict[str, Any]] = None,
+    extra: Union[None, Dict[str, Any], Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+    marks: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Decide and write. Returns {"to", "why", "terminal_withheld", "failed"}.
-    `extra` rides the claim only. `marks` are the event's own markers (what a
+    """Decide and write. Returns {"to", "from", "why", "terminal_withheld",
+    "failed"}; "from" is the status the claim moved. `extra` rides the claim
+    only; a callable is asked of the order each claim is decided on (read
+    again after a lost race). `marks` are the event's own markers (what a
     replay or the hourly sweep reads to know the event landed): they ride the
     same atomic claim when the table moves the status, and land alone when it
     keeps it -- never before the claim, so a write that fails leaves the event
     unmarked and it is retried. failed=True: nothing was written (an error, or
     three lost races). Never raises."""
-    out: Dict[str, Any] = {"to": None, "why": None, "terminal_withheld": False, "failed": False}
+    out: Dict[str, Any] = {"to": None, "from": None, "why": None, "terminal_withheld": False,
+                           "failed": False}
     try:
         from database.repositories.order_repository import OrderRepository
 
@@ -160,9 +164,9 @@ def apply_fact(
                 return out
             if _claim_order_status(
                 repo, oid, to, [order.get("status")], f"system:{source}",
-                extra={**(marks or {}), **(extra or {})} or None,
+                extra={**(marks or {}), **((extra(order) if callable(extra) else extra) or {})} or None,
             ):
-                out["to"] = to
+                out["to"], out["from"] = to, order.get("status")
                 return out
             # Lost a race (staff moved it): read again and decide again.
             order = repo.collection.find_one({"order_id": oid}) or {}
