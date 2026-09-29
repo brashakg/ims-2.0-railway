@@ -76,7 +76,19 @@ def test_po_draft_carveout_keeps_catalog_manager_out_of_vendors_write():
     )
     assert "CATALOG_MANAGER" in C.capability_roles("vendors:po-draft")
     assert "CATALOG_MANAGER" not in C.capability_roles("vendors:write")
-    assert "vendors:po-draft" in C.module_deny_to_capability_denies({"vendors": False})
+
+
+def test_a_vendors_module_deny_blocks_a_draft_through_the_parent_key_alone():
+    """ONE mechanism carries a vendors deny onto the carved key: the module
+    deny adds vendors:write and CAPABILITY_PARENT points the draft key at it.
+    A second copy (a vendors entry in MODULE_EXTRA_DENY_CAPABILITIES) was
+    redundant -- the deny held with it removed -- so it is gone."""
+    from api.services.permission_resolver import apply_user_permissions
+
+    cap = C.capability_for("POST", "/api/v1/vendors/purchase-orders")
+    assert C.CAPABILITY_PARENT[cap] == "vendors:write"
+    assert cap not in C.module_deny_to_capability_denies({"vendors": False})
+    assert apply_user_permissions(True, cap, None, {"vendors": False}) is False
 
 
 @pytest.mark.parametrize("role", ["STORE_MANAGER", "ACCOUNTANT"])

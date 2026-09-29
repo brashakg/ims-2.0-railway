@@ -137,8 +137,8 @@ def capability_for(method: str, path: str) -> Optional[str]:
     # the CATALOG_MANAGER raise one (2026-09-28); collapsing this route into
     # vendors:write would add that role to the union the grant guard reasons
     # from, and a catalogue manager could then grant vendor / send / receive
-    # writes to anyone. A 'vendors' module deny still covers it (see
-    # MODULE_EXTRA_DENY_CAPABILITIES).
+    # writes to anyone. A 'vendors' module deny (or a vendors:write deny)
+    # still covers it through CAPABILITY_PARENT.
     if tmpl == "/api/v1/vendors/purchase-orders" and method.upper() == "POST":
         return "vendors:po-draft"
     verb = "read" if method.upper() in _READ_METHODS else "write"
@@ -267,7 +267,6 @@ MODULE_TO_CAPABILITY_MODULES: Dict[str, List[str]] = {
 # (the rbac capability-union gotcha concerns POLICY rows, not this map).
 MODULE_EXTRA_DENY_CAPABILITIES: Dict[str, List[str]] = {
     "online-store": ["online-store:rx-clear"],
-    "vendors": ["vendors:po-draft"],
 }
 
 # A carved key that still answers to the generic key it was carved out of, for
