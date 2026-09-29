@@ -89,7 +89,15 @@ def world(mongo_db, monkeypatch):  # noqa: F811
         }
     )
 
-    def unit(barcode, status="AVAILABLE", store=STORE, grn=GRN, printed=False):
+    def unit(
+        barcode,
+        status="AVAILABLE",
+        store=STORE,
+        grn=GRN,
+        printed=False,
+        created=datetime(2026, 9, 27, 10, 0, 0),
+        **extra,
+    ):
         sid = f"STK-{uuid.uuid4().hex[:8]}"
         mongo_db["stock_units"].insert_one(
             {
@@ -105,7 +113,8 @@ def world(mongo_db, monkeypatch):  # noqa: F811
                 "grn_number": f"RCPT/{store}/26-27/{grn[-1]}",
                 "cost_price": 4200.0,
                 "barcode_printed": printed,
-                "created_at": datetime(2026, 9, 27, 10, 0, 0),
+                "created_at": created,
+                **extra,
             }
         )
         return sid
@@ -211,13 +220,37 @@ def test_units_view_by_receipt_never_leaks_another_shops_units(world):
     assert r.json()["units"] == []
 
 
-def test_units_view_shows_cost_only_to_roles_that_see_cost(world):
+# Every role that reaches these reads, split by the cost rule (cost_mask.py:
+# SUPERADMIN / ADMIN / ACCOUNTANT see cost; everyone else never gets it). A
+# test that only sent STORE_MANAGER vs ADMIN let a leak to the counter roles
+# (SALES_STAFF, CASHIER) pass.
+_NO_COST_ROLES = ["SALES_STAFF", "CASHIER", "STORE_MANAGER", "CATALOG_MANAGER"]
+_COST_ROLES = ["ADMIN", "ACCOUNTANT"]
+
+
+def _as_role(role):
+    return {
+        "user_id": f"u_{role.lower()}",
+        "roles": [role],
+        "store_ids": [STORE],
+        "active_store_id": STORE,
+    }
+
+
+@pytest.mark.parametrize(
+    "role,sees_cost",
+    [(r, False) for r in _NO_COST_ROLES] + [(r, True) for r in _COST_ROLES],
+)
+def test_units_view_shows_cost_only_to_roles_that_see_cost(world, role, sees_cost):
     world["unit"]("BV--COST0001")
+    world["as_user"](_as_role(role))
     r = world["http"].get("/inventory/units", params={"product_id": world["pid"]})
-    assert "cost_price" not in r.json()["units"][0]
-    world["as_user"](ADMIN)
-    r = world["http"].get("/inventory/units", params={"product_id": world["pid"]})
-    assert r.json()["units"][0]["cost_price"] == 4200.0
+    assert r.status_code == 200, r.text
+    first = r.json()["units"][0]
+    if sees_cost:
+        assert first["cost_price"] == 4200.0
+    else:
+        assert "cost_price" not in first
 
 
 def test_units_view_refuses_another_shop(world):
@@ -231,13 +264,82 @@ def test_units_view_needs_a_product_or_a_receipt(world):
     assert world["http"].get("/inventory/units").status_code == 400
 
 
-def test_per_unit_stock_read_no_longer_leaks_cost(world):
-    world["unit"]("BV--LEAK0001")
+@pytest.mark.parametrize(
+    "role,sees_cost",
+    [(r, False) for r in _NO_COST_ROLES] + [(r, True) for r in _COST_ROLES],
+)
+def test_per_unit_stock_read_no_longer_leaks_cost(world, role, sees_cost):
+    world["unit"]("BV--LEAK0001", unit_cost=4200.0)
+    world["as_user"](_as_role(role))
     r = world["http"].get(
         "/inventory/stock", params={"store_id": STORE, "product_id": world["pid"]}
     )
     assert r.status_code == 200, r.text
-    assert r.json()["items"] and "cost_price" not in r.json()["items"][0]
+    item = r.json()["items"][0]
+    if sees_cost:
+        assert item["cost_price"] == 4200.0 and item["unit_cost"] == 4200.0
+    else:
+        assert "cost_price" not in item and "unit_cost" not in item
+
+
+# ---------------------------------------------------------------------------
+# a transferred-in unit reads as received HERE, by the transfer, on its day
+# ---------------------------------------------------------------------------
+
+
+def test_units_view_shows_a_transferred_in_unit_by_its_transfer(world):
+    # Minted at BV-DHN-02 on 17 Sep by RCPT/1, shipped, then re-homed at
+    # BV-BOK-01 by transfers._rehome (these are the fields it writes; its
+    # received_at is datetime.now().isoformat(), naive UTC).
+    world["unit"](
+        "BV--TRANSFER",
+        store=OTHER,
+        created=datetime(2026, 9, 17, 10, 0, 0),
+        grn_number="RCPT/1",
+        source_type="TRANSFER",
+        source_id="TR-1",
+        transfer_number="TRF/BV-DHN-02/0001",
+        from_store_id=STORE,
+        received_at="2026-09-28T20:00:00",  # 01:30 IST on 29 Sep
+    )
+    world["as_user"](
+        dict(MANAGER, user_id="mgr_bok", store_ids=[OTHER], active_store_id=OTHER)
+    )
+    r = world["http"].get("/inventory/units", params={"product_id": world["pid"]})
+    assert r.status_code == 200, r.text
+    (u,) = r.json()["units"]
+    assert u["source"] == "TRANSFER"
+    assert u["received_on"] == "2026-09-29"  # the day it arrived here, IST
+    assert u["transfer_number"] == "TRF/BV-DHN-02/0001"
+    assert u["from_store_id"] == STORE
+
+
+def test_units_view_received_on_is_the_ist_day_of_minting(world):
+    world["unit"]("BV--NIGHT001", created=datetime(2026, 9, 26, 20, 0, 0))
+    (u,) = world["http"].get(
+        "/inventory/units", params={"product_id": world["pid"]}
+    ).json()["units"]
+    assert u["received_on"] == "2026-09-27"  # 20:00 UTC = 01:30 IST next day
+
+
+# ---------------------------------------------------------------------------
+# the read cap never drops a unit still on the shelf
+# ---------------------------------------------------------------------------
+
+
+def test_units_on_the_shelf_survive_the_read_cap(world, monkeypatch):
+    from api.routers.inventory import stock as stock_mod
+
+    monkeypatch.setattr(stock_mod, "_UNITS_LIMIT", 3)
+    for i in range(3):  # three boxes sold long ago...
+        world["unit"](f"BV--SOLD000{i}", status="SOLD", created=datetime(2026, 9, 1, 10, i))
+    world["unit"]("BV--SHELF001", created=datetime(2026, 9, 20, 10, 0))  # ...one still here
+    units = world["http"].get(
+        "/inventory/units", params={"product_id": world["pid"]}
+    ).json()["units"]
+    assert len(units) == 3
+    assert units[0]["barcode"] == "BV--SHELF001"
+    assert units[0]["status"] == "AVAILABLE"
 
 
 # ---------------------------------------------------------------------------
@@ -271,3 +373,20 @@ def test_barcode_printed_is_a_stock_role_write(world):
     r = world["http"].post("/inventory/units/barcode-printed", json={"stock_ids": [sid]})
     assert r.status_code == 403
     assert _printed(world, sid)[0] is False
+
+
+def test_barcode_printed_policy_row_matches_the_route_gate(world):
+    # The RBAC policy row is what the middleware and the access matrix read;
+    # the route's own require_roles is what actually answers. Adding a role to
+    # one and not the other passed every rbac suite, so pin them to each other.
+    from api.services.rbac_policy import ALL_ROLES, check_access
+
+    sid = world["unit"]("BV--GATE0001")
+    for role in ALL_ROLES:
+        world["as_user"](_as_role(role))
+        r = world["http"].post("/inventory/units/barcode-printed", json={"stock_ids": [sid]})
+        route_allows = r.status_code != 403
+        policy_allows = check_access(
+            "POST", "/api/v1/inventory/units/barcode-printed", [role]
+        )
+        assert route_allows == policy_allows, (role, r.status_code)

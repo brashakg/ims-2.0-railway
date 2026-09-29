@@ -26,6 +26,8 @@ from ._shared import (
     validate_store_access,
 )
 from ...services.cost_mask import can_see_cost, mask_cost_list
+from ...services.item_events import on_hand_match
+from ...utils.ist import ist_date_str_from_stored
 from .helpers import (
     _get_db,
 )
@@ -485,8 +487,9 @@ def _ledger_row(
 # UNITS VIEW + LABEL PRINT RECORD (F26 / F27)
 # ============================================================================
 
-# ponytail: one read capped at 500 units per product/receipt at one shop; page
-# it if a single SKU ever holds more history than that at one store.
+# ponytail: one read capped at 500 units per product/receipt at one shop. The
+# units still in the shop are read FIRST, so the cap only ever trims history
+# (sold / transferred out); page it if 500 on one shelf ever happens.
 _UNITS_LIMIT = 500
 
 
@@ -526,11 +529,17 @@ async def list_units(
     if grn_id:
         flt["source_type"] = "GRN"
         flt["source_id"] = grn_id
-    docs = [
-        d
-        for d in stock_repo.find_many(flt, limit=_UNITS_LIMIT)
-        if can_access_store_scoped(d.get("store_id"), current_user)
-    ]
+    in_shop = on_hand_match(include_reserved=True)
+    found = stock_repo.find_many(
+        {"$and": [flt, in_shop]}, sort=[("created_at", 1)], limit=_UNITS_LIMIT
+    )
+    if len(found) < _UNITS_LIMIT:  # then the newest history, up to the cap
+        found += stock_repo.find_many(
+            {"$and": [flt, {"$nor": [in_shop]}]},
+            sort=[("created_at", -1)],
+            limit=_UNITS_LIMIT - len(found),
+        )
+    docs = [d for d in found if can_access_store_scoped(d.get("store_id"), current_user)]
     # Units still in the shop first (the ones that need a label), oldest first.
     docs.sort(
         key=lambda d: (not is_on_hand(d.get("status")), str(d.get("created_at") or ""))
@@ -557,7 +566,13 @@ async def list_units(
             "status": state.value if state else (str(raw or "").strip().upper() or "UNKNOWN"),
             "grn_number": d.get("grn_number") or "",
             "source": d.get("source_type") or d.get("source") or "",
-            "received_on": ist_date_str(d.get("created_at")) if d.get("created_at") else "",
+            # A transfer re-homes the unit and stamps received_at; created_at
+            # is when (and where) it was first minted.
+            "transfer_number": d.get("transfer_number") or "",
+            "from_store_id": d.get("from_store_id") or "",
+            "received_on": ist_date_str_from_stored(
+                d.get("received_at") or d.get("created_at")
+            ),
             "barcode_printed": bool(d.get("barcode_printed")),
             "location_code": d.get("location_code") or "",
             "name": p.get("name") or "",
