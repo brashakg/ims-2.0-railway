@@ -197,7 +197,11 @@ def test_vendor_list_names_only_outside_purchase_roles(
     resp = client.get("/api/v1/vendors", params=params, headers=_headers(role))
     assert resp.status_code == 200
     rows = resp.json()["vendors"]
-    assert rows and all(set(r) <= _NAME_KEYS for r in rows), rows
+    # Equality, not a subset: no hidden key leaks AND no key the pickers need
+    # goes missing (WorkshopJobDetail's VendorCaptureBlock, VendorReturns,
+    # BuyDeskDraftPOModal and StockReplenishment all key the picker on
+    # vendor_id; dropping it would empty them behind a green suite).
+    assert rows and all(set(r) == _NAME_KEYS for r in rows), rows
     assert rows[0]["legal_name"] == "Acme Optics Pvt Ltd"
 
 
