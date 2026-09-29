@@ -54,9 +54,11 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
     grn_id = str(uuid.uuid4())
     store_id = current_user.get("active_store_id")
     is_dc = grn.grn_subtype == GRN_SUBTYPE_DC
-    # grn_number is generated AFTER the receiving store is finalised (a standard
-    # PO-backed GRN is re-pointed to the PO's delivery store below), so the
-    # per-store serial reflects the store the goods are actually booked to.
+    # grn_number is minted LAST, after the receiving store is final (a standard
+    # PO-backed GRN is re-pointed to the PO's delivery store below) AND after
+    # every refusal (duplicate invoice / DC, untallied lines). The receipt
+    # number is a GST document series with no gaps: a refused receipt must not
+    # consume one (audit F28: a refused duplicate burned RCPT/.../0002).
 
     # F-S3: mandatory goods-receipt document. The ops user physically receiving a
     # STANDARD shipment MUST attach the vendor invoice/challan (image or PDF)
@@ -204,10 +206,6 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
     # F9: the vendor a DC is for -- from the PO when linked, else the body field.
     vendor_id = (po.get("vendor_id") if po else None) or grn.vendor_id
 
-    # Now that the receiving store is final (re-pointed to the PO's delivery
-    # store for a standard PO-backed GRN), mint the per-store GRN serial.
-    grn_number = generate_grn_number(store_id)
-
     # F9: DC-specific guards (uniqueness + period lock). Both are best-effort on
     # a DB error (fail-soft) but a found duplicate is a hard 409.
     if is_dc:
@@ -298,6 +296,12 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
                     "lines": untallied,
                 },
             )
+
+    # Every guard has passed: mint the per-store receipt serial now.
+    # ponytail: a concurrent duplicate that loses at the unique index below
+    # still burns its number; a gapless series under that race needs the
+    # counter and the insert in one Mongo transaction.
+    grn_number = generate_grn_number(store_id)
 
     # Calculate totals
     total_received = sum(item.received_qty for item in grn.items)
