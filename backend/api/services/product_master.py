@@ -1569,6 +1569,13 @@ def normalise_payload(
     # Normalised, governed tags (step-12). Always present as a list (possibly
     # empty) so collection rules + the tag filter have a consistent shape.
     doc["tags"] = normalise_tags(tags)
+    # Owner ruling 2026-09-29 (D6): the BRAND DEFAULT ALWAYS DECIDES whether a
+    # product goes to the website -- stamped here for every door (no payload
+    # or door can override it), from the one function the Shopify push reads.
+    # No db / unknown brand -> False (never sync by accident).
+    from api.services.catalog_dictionary import load_brand_sync_default
+
+    doc["sync_to_shopify"] = load_brand_sync_default(db, (attributes or {}).get("brand_name"))
     # Door-specific additive columns -- never override a canonical key, never a
     # None value (keeps the spine lean + behaviour-preserving per door).
     for _k, _v in (extra_fields or {}).items():

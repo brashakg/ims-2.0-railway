@@ -85,6 +85,10 @@ from datetime import datetime, timezone
 
 import pytest
 
+# The push's other mechanics, for a brand that IS for the website (owner D6;
+# the brand rule has its own test in test_add_product_owner_rulings.py).
+pytestmark = pytest.mark.usefixtures("brand_is_for_the_website")
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.environ.setdefault("JWT_SECRET_KEY", "test")
