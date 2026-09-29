@@ -46,6 +46,7 @@ import { ExpressReceivePanel } from './ExpressReceivePanel';
 import type { TwoStepPrefill } from './ExpressReceivePanel';
 import { PurchaseStatusChip } from '../../components/purchase/PurchaseStatusChip';
 import { RECEIVABLE_PO_STATUSES } from './purchaseTypes';
+import { reportGrnAccept } from './grnAcceptToast';
 
 // ---- Local types -----------------------------------------------------------
 
@@ -325,10 +326,7 @@ export function GoodsReceiptCockpit() {
     setGrnActionBusy(grnId);
     try {
       const res = await vendorsApi.acceptGRN(grnId);
-      toast.success(
-        `GRN ${grnNumber} accepted — ${res.units_added ?? 0} units added to stock` +
-          (res.po_status ? ` · PO ${res.po_status}` : ''),
-      );
+      reportGrnAccept(toast, grnNumber, res);
       if (highlightGrn === grnNumber) setHighlightGrn(null);
       await loadPendingGrns(vendorId);
       await loadCockpit(vendorId);
@@ -714,15 +712,7 @@ export function GoodsReceiptCockpit() {
       // QC accept/reject was already captured per line above.
       try {
         const acc = await vendorsApi.acceptGRN(result.grn_id);
-        toast.success(
-          `GRN ${result.grn_number} complete — ${acc.units_added ?? result.total_received} units added to stock` +
-            (acc.po_status ? ` · PO ${acc.po_status}` : ''),
-        );
-        if (acc.grn_status === 'PARTIALLY_ACCEPTED') {
-          toast.warning(
-            'Some lines were held because their product is not catalogued yet — finish those products, then press "Add to stock" again on this receipt in the "Receipts still waiting" panel below.',
-          );
-        }
+        reportGrnAccept(toast, result.grn_number, acc, result.total_received);
       } catch (acceptErr) {
         toast.warning(
           `GRN ${result.grn_number} was saved but could NOT be added to stock: ` +
@@ -1400,8 +1390,9 @@ export function GoodsReceiptCockpit() {
                       units are NOT in stock and its PO still shows as receivable — accept the
                       correct one, and void duplicates (safe: a pending GRN has added nothing).
                       A <strong>partly accepted</strong> one put most of its goods into stock but
-                      held the lines whose product is not catalogued yet; finish those products,
-                      then press "Add to stock" again to release them.
+                      held the lines whose product is not catalogued yet. The catalogue manager
+                      has a task for them, and finishing the product puts them on the shelf by
+                      itself; "Add to stock" tries again now.
                     </p>
                     <div className="space-y-2">
                       {pendingGrns.map((g) => (

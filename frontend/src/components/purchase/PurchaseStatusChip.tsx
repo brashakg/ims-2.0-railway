@@ -44,10 +44,13 @@ const PO_MAP: Record<string, keyof typeof VOCAB> = {
   RECEIVED: 'on_shelf',
 };
 
+// PARTIALLY_ACCEPTED = accept HELD lines whose product is not catalogued yet
+// (backend grn_accept), often with 0 units minted. "On shelf" for that was a
+// green lie (audit C1): the box is received, the shelf is not reached yet.
 const GRN_MAP: Record<string, keyof typeof VOCAB> = {
   PENDING: 'box_received',
   ACCEPTED: 'on_shelf',
-  PARTIALLY_ACCEPTED: 'on_shelf',
+  PARTIALLY_ACCEPTED: 'box_received',
 };
 
 const INVOICE_MAP: Record<string, keyof typeof VOCAB> = {

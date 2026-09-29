@@ -4,16 +4,16 @@
 // Owner procurement audit 2026-09-28, blocker C1. Items the manager typed onto a
 // PO through "Not in the catalogue?" arrive, and accept holds their lines
 // (backend grn_accept: status PARTIALLY_ACCEPTED, 0 units minted, the lines in
-// unresolved_lines). The "Receipts still waiting" row for that receipt then:
+// unresolved_lines). The "Receipts still waiting" row for that receipt used to:
 //   - wears a green "On shelf" chip while 0 units are on the shelf
 //     (PurchaseStatusChip GRN_MAP: PARTIALLY_ACCEPTED -> on_shelf), and
 //   - on "Add to stock" toasts a green success for 0 units, although the
 //     server answered that the lines are still held.
 //
-// The `it.fails` cases are the finding, pinned the way pytest pins an
-// xfail(strict=True): they pass while the bug is there and turn red when it is
-// fixed, so the fixer flips them to plain `it`. The plain `it` above them proves
-// the row really rendered, so a broken harness cannot make them pass hollow.
+// Both are fixed: the chip at its source (PurchaseStatusChip GRN_MAP) and the
+// toast through the one accept reading (grnAcceptToast). The C1 cases below
+// guard them; the first case proves the row really rendered, so a broken
+// harness cannot make them pass hollow.
 // Backend half of C1/C2/C3: backend/tests/test_off_catalogue_items_release.py.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -143,13 +143,13 @@ describe('Receive Goods - a receipt held for cataloguing (audit C1)', () => {
   });
 
   // C1: a receipt with 0 units on the shelf must not say "On shelf".
-  it.fails('C1: the held receipt does not wear an "On shelf" chip for 0 units', async () => {
+  it('C1: the held receipt does not wear an "On shelf" chip for 0 units', async () => {
     const row = await heldRow();
     expect(within(row).queryByText(/on shelf/i)).toBeNull();
   });
 
   // C1: "Add to stock" on a still-held receipt must not claim success.
-  it.fails('C1: "Add to stock" on a still-held receipt does not toast a success', async () => {
+  it('C1: "Add to stock" on a still-held receipt does not toast a success', async () => {
     const row = await heldRow();
     fireEvent.click(within(row).getByRole('button', { name: /add to stock/i }));
     await waitFor(() => expect(acceptGRNMock).toHaveBeenCalledWith('g-held'));
