@@ -24,14 +24,13 @@ import type { Supplier } from '../purchaseTypes';
 import { inr, GST_RATES, errMsg } from './shared';
 
 // The product ids a PRODUCT_NOT_CATALOGUED refusal names, so the accountant can
-// ask the cataloguer without retyping them.
+// ask the cataloguer without retyping them. Read off the client's ApiError
+// (code + detail): axios's `.response` never leaves services/api/client, so
+// reading it here meant the cataloguer was never asked.
 function blockedProductIds(e: unknown): string[] {
-  if (!e || typeof e !== 'object' || !('response' in e)) return [];
-  const d = (e as { response?: { data?: { detail?: unknown } } }).response?.data?.detail;
-  if (!d || typeof d !== 'object') return [];
-  const det = d as { code?: string; lines?: Array<{ product_id?: string }> };
-  if (det.code !== 'PRODUCT_NOT_CATALOGUED') return [];
-  return (det.lines || []).map((l) => l.product_id).filter((x): x is string => !!x);
+  const err = e as { code?: string; detail?: { lines?: Array<{ product_id?: string }> } } | null;
+  if (err?.code !== 'PRODUCT_NOT_CATALOGUED') return [];
+  return (err.detail?.lines || []).map((l) => l.product_id).filter((x): x is string => !!x);
 }
 
 // ---------------------------------------------------------------------------
@@ -120,8 +119,9 @@ export function InvoiceFormDrawer({
     bill_kind: receiptLinked ? 'GOODS' : (billKind || undefined),
   };
   // What the tax depends on (not the invoice no. or notes): a change here asks
-  // the server again, and Book waits until the answer is for THIS form.
-  const taxKey = JSON.stringify([payload.vendor_id, payload.recipient_gstin, payload.grn_id, payload.linked_dc_ids, payload.lines]);
+  // the server again, and Book waits until the answer is for THIS form. The
+  // shop is in it: a bill with no receipt is booked for store_id's company.
+  const taxKey = JSON.stringify([payload.vendor_id, payload.recipient_gstin, payload.grn_id, payload.linked_dc_ids, payload.store_id, payload.lines]);
   const [preview, setPreview] = useState<{ key: string; data?: PurchaseInvoicePreview; error?: string } | null>(null);
   const wantsPreview = Boolean(vendorId) && validLines.length > 0;
   useEffect(() => {
