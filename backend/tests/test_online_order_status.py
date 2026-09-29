@@ -1106,8 +1106,10 @@ def test_a_restock_retry_that_cannot_read_the_stock_restocks_nothing(swept, monk
 # frame is one AVAILABLE row whichever doors run, in either order.
 
 
-def _historical_refund(swept, monkeypatch, oid, rid, **order_set):
-    _book(swept, oid)
+def _historical_refund(swept, monkeypatch, oid, rid, ims_product_id=None, **order_set):
+    doc = _book(swept, oid)
+    if ims_product_id:  # the SKU resolved: the line keeps Shopify's product_id beside it
+        order_set["items"] = [{**doc["items"][0], "ims_product_id": ims_product_id}]
     _set(swept, oid, historical=True, import_source="shopify_order_history",
          fulfillment_stores=["BV-GANGA-01"], **order_set)
     shopify_refund.handle_shopify_refund(swept["db"], _refund(rid, oid, restock_type="return"),
@@ -1175,15 +1177,22 @@ def test_one_frame_of_a_historical_order_is_one_unit_auto_then_goods_back(swept,
     assert _minted(swept) == ["AVAILABLE"], "one frame, one unit"
 
 
-def test_goods_back_on_a_row_confirmed_before_the_line_marks_restocks_nothing(swept, monkeypatch):
+@pytest.mark.parametrize("ims_product_id", [None, "IMS-P-1"])
+def test_goods_back_on_a_row_confirmed_before_the_line_marks_restocks_nothing(swept, monkeypatch,
+                                                                             ims_product_id):
     """A row the accountant confirmed before the restock marked the order line
     (the deploy of this rule) carries no mark and no returned_qty, but its own
     returns doc says what its restock put back. Goods back, new on that row,
-    reads it: a historical order has no SOLD unit to stop a second mint."""
+    reads it: a historical order has no SOLD unit to stop a second mint. The
+    doc's rows carry the IMS product id; the order line keeps Shopify's
+    product_id beside its ims_product_id, and the count reads the IMS one."""
     oid = 60187
-    row = _historical_refund(swept, monkeypatch, oid, 700387, status="DELIVERED")
+    row = _historical_refund(swept, monkeypatch, oid, 700387, ims_product_id=ims_product_id,
+                             status="DELIVERED")
     _confirm(row)
     assert _minted(swept) == ["AVAILABLE"]
+    ret = swept["returns"].find_one({"shopify_refund_id": "700387"})
+    assert [r["product_id"] for r in ret["restocked"]] == [ims_product_id or "7001"]
     items = _doc(swept, oid)["items"]
     for item in items:
         item.pop("returned_qty", None)

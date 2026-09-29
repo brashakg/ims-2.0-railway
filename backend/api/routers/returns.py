@@ -477,11 +477,13 @@ def _units_already_back(
     return books both, a legacy one only the doc); each refund's the larger of
     its doc and its booking (a refund confirmed before the marks, or a money-
     only one, has only the doc). The counter return door and every Shopify
-    restock cap read it."""
+    restock cap read it. A line is matched to the docs' rows by its IMS
+    product id: an online order line keeps Shopify's product_id beside its
+    ims_product_id, and every return row carries the IMS one."""
     counter, refunds = _already_returned_qty(
         order_id,
         orig_line.get("item_id") or orig_line.get("id"),
-        orig_line.get("product_id"),
+        orig_line.get("ims_product_id") or orig_line.get("product_id"),
         own_shopify_refund_id=own_shopify_refund_id,
     )
     booked = {str(r): float(q or 0) for r, q in (orig_line.get("restocked_refunds") or {}).items()}
