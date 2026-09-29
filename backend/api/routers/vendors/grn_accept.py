@@ -1,5 +1,7 @@
 """POST /grn/{grn_id}/accept - the three-way match and the stock mint."""
 
+from urllib.parse import quote
+
 from ._shared import (
     Depends,
     HTTPException,
@@ -207,6 +209,9 @@ def _hand_to_store_manager(grn_id: str, grn: dict, over: List[dict]) -> None:
         f": {o['held']} held, PO ordered {o['ordered']}, {o['shelved']} already on the shelf"
         for o in over
     )
+    # Opens that vendor's "Receipts still waiting", where the receipt is voided.
+    vendor_id = grn.get("vendor_id")
+    link = "/purchase/receive" + (f"?vendor_id={quote(str(vendor_id))}" if vendor_id else "")
     people, _managers = _people_for(db, store_id, "STORE_MANAGER", entity_wide=False)
     for uid, task_store in people or [(None, store_id)]:
         _raise_once(
@@ -222,7 +227,7 @@ def _hand_to_store_manager(grn_id: str, grn: dict, over: List[dict]) -> None:
             category="Purchase",
             store_id=task_store,
             assigned_to=uid,
-            extra={"grn_id": grn_id, "link": "/purchase/receive"},
+            extra={"grn_id": grn_id, "link": link},
         )
     still_uncatalogued = [
         ln
