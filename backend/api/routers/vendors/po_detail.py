@@ -130,7 +130,17 @@ async def get_po_timeline(po_id: str, current_user: dict = Depends(get_current_u
                         "detail": f"Goods receipt logged ({g.get('total_received') or 0} units)",
                     }
                 )
-                if g.get("accepted_at"):
+                # "On shelf" counts only what reached the shelf: a receipt that
+                # is still HOLDING lines for the catalogue (PARTIALLY_ACCEPTED,
+                # the chip's "Box received") has accepted_at too, and often
+                # 0 units minted (audit C1 -- one rule with PurchaseStatusChip).
+                held = sum(
+                    int(ln.get("accepted_qty") or 0)
+                    for ln in (g.get("unresolved_lines") or [])
+                    if isinstance(ln, dict)
+                )
+                shelved = max(int(g.get("total_accepted") or 0) - held, 0)
+                if g.get("accepted_at") and shelved:
                     events.append(
                         {
                             "kind": "on_shelf",
@@ -138,7 +148,8 @@ async def get_po_timeline(po_id: str, current_user: dict = Depends(get_current_u
                             "at": g.get("accepted_at"),
                             "ref": g.get("grn_number"),
                             "actor": g.get("accepted_by"),
-                            "detail": f"{g.get('total_accepted') or 0} units accepted into stock",
+                            "detail": f"{shelved} units accepted into stock"
+                            + (f"; {held} still held" if held else ""),
                         }
                     )
     except Exception as e:  # noqa: BLE001
