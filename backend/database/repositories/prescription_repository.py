@@ -143,25 +143,3 @@ class PrescriptionRepository(BaseRepository):
         return self.find_many({
             "expiry_date": {"$gte": now, "$lte": cutoff}
         })
-    
-    def get_optometrist_stats(self, optometrist_id: str, from_date: date, to_date: date) -> Dict:
-        """Get optometrist prescription statistics"""
-        pipeline = [
-            {"$match": {
-                "optometrist_id": optometrist_id,
-                # THIRD copy of the same bound, same defect: raw datetimes at
-                # a STRING field match nothing in Mongo, so these stats have
-                # been aggregating an empty set. Shared builder, like the other
-                # two call sites.
-                "prescription_date": PrescriptionRepository._clinical_date_filter(
-                    from_date, to_date
-                )
-            }},
-            {"$group": {
-                "_id": None,
-                "total": {"$sum": 1},
-                "tested_at_store": {"$sum": {"$cond": [{"$eq": ["$source", "TESTED_AT_STORE"]}, 1, 0]}}
-            }}
-        ]
-        results = self.aggregate(pipeline)
-        return results[0] if results else {"total": 0, "tested_at_store": 0}
