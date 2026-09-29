@@ -18,6 +18,10 @@ from ._shared import (
 # STOCK AGING / NON-MOVING REPORT
 # ============================================================================
 
+# ponytail: one fixed grace (the first age bucket); a per-category grace is a
+# setting when a slow-selling category needs longer.
+_AGING_GRACE_DAYS = 30
+
 
 @router.get("/aging")
 async def get_stock_aging_report(
@@ -145,7 +149,10 @@ async def get_stock_aging_report(
                 oldest = datetime.fromisoformat(oldest)
             except Exception:
                 oldest = now
-        days_in_stock = (now - oldest).days if oldest else 0
+        # created_at is naive datetime.now() while `now` is utcnow(): on a box
+        # east of UTC this morning's receipt reads as -1 days (audit F54).
+        # Age is never negative.
+        days_in_stock = max(0, (now - oldest).days) if oldest else 0
 
         s30 = sales_30d.get(pid, 0)
         s90 = sales_90d.get(pid, 0)
@@ -154,8 +161,13 @@ async def get_stock_aging_report(
         # Turnover rate (annualized from 90-day sales)
         turnover = (s90 / max(qty, 1)) * (365 / 90) if qty > 0 else 0
 
-        # ABC classification based on turnover
-        if turnover >= 4:
+        # ABC classification based on turnover. Stock younger than the grace
+        # window that has not sold yet has not had its chance: no verdict
+        # (NEW), never "Slow Mover - consider discount/return" on the morning
+        # it arrived (audit F54).
+        if days_in_stock < _AGING_GRACE_DAYS and s90 == 0:
+            cls = "NEW"
+        elif turnover >= 4:
             cls = "A"
         elif turnover >= 1.5:
             cls = "B"
@@ -205,8 +217,8 @@ async def get_stock_aging_report(
             }
         )
 
-    # Sort: Slow movers first (C, then B, then A), then by days in stock desc
-    cls_order = {"C": 0, "B": 1, "A": 2}
+    # Sort: Slow movers first (C, then B, then A, then NEW), then by days in stock desc
+    cls_order = {"C": 0, "B": 1, "A": 2, "NEW": 3}
     products.sort(
         key=lambda p: (cls_order.get(p["classification"], 1), -p["daysInStock"])
     )

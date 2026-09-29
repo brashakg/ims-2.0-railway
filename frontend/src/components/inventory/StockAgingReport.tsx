@@ -35,7 +35,9 @@ interface AgingProduct {
   salesLast30Days: number;
   salesLast90Days: number;
   turnoverRate: number;
-  classification: 'A' | 'B' | 'C'; // A=Fast, B=Medium, C=Slow
+  // A=Fast, B=Medium, C=Slow. NEW = younger than the grace window with no
+  // sales yet - no verdict until it has had its chance to sell (audit F54).
+  classification: 'A' | 'B' | 'C' | 'NEW';
   ageCategory: '0-30' | '31-60' | '61-90' | '91-180' | '180+';
 }
 
@@ -125,6 +127,7 @@ export function StockAgingReport() {
       A: { label: 'Fast Mover', color: 'bg-green-50 text-green-700 border-green-200' },
       B: { label: 'Medium Mover', color: 'bg-amber-50 text-amber-700 border-amber-200' },
       C: { label: 'Slow Mover', color: 'bg-red-50 text-red-700 border-red-200' },
+      NEW: { label: 'New stock', color: 'bg-gray-50 text-gray-700 border-gray-200' },
     };
 
     return (
