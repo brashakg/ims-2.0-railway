@@ -36,6 +36,75 @@ from .models import POCreate
 from .numbering import generate_po_number
 
 
+def _typed_product_payload(it) -> dict:
+    """The product-door payload for a line typed in through "Not in the
+    catalogue?" (ruling 13): born a provisional draft."""
+    np = it.new_product
+    return {
+        "category": np.category,
+        "brand": np.brand,
+        "model": np.model,
+        "colour": np.colour,
+        "size": np.size,
+        "mrp": np.mrp,
+        # The PO rate is the PROVISIONAL cost (ruling 10); the purchase invoice
+        # corrects it to the actual one (ruling 12).
+        "cost_price": it.unit_price or None,
+        "as_draft": True,
+        "provisional": True,
+    }
+
+
+def _refuse_items_we_already_have(items, product_repo) -> None:
+    """Audit C2: a typed-in line that describes a product we ALREADY have
+    (active, or a draft somebody ordered earlier) never mints a hidden twin.
+
+    Every typed line is checked BEFORE any line is created, so the 409 leaves
+    nothing behind; the composer asks "already in the catalogue - use it?" and
+    resends the line with that product_id. The key is the door's OWN: the
+    canonical build with a placeholder SKU (zero writes, as the catalogue
+    promote dry-run does) stamps exactly the identity_key a create would, and
+    the lookup is the door's duplicate guard (find_by_identity_key)."""
+    if product_repo is None or not hasattr(product_repo, "find_by_identity_key"):
+        return
+    already = []
+    for idx, it in enumerate(items):
+        if it.new_product is None:
+            continue
+        try:
+            key = _pm.build_canonical_product(
+                {**_typed_product_payload(it), "sku": "DRYRUN-PLACEHOLDER"},
+                source="FORM",
+                product_repo=product_repo,
+                db=_get_db(),
+            ).get("identity_key")
+        except _pm.ProductMasterError:
+            continue  # the create below refuses an invalid line, with its reason
+        found = product_repo.find_by_identity_key(key) if key else None
+        if found:
+            summary = _pm.existing_product_summary(found)
+            already.append({"line": idx, "existing": summary})
+    if not already:
+        return
+
+    def _named(e: dict) -> str:
+        size = f", size {e['size']}" if e.get("size") else ""
+        return f"{e.get('name') or e.get('sku')}{size} (SKU {e.get('sku')})"
+
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": "ALREADY_IN_CATALOGUE",
+            "message": (
+                "Already in the catalogue: "
+                + ", ".join(_named(m["existing"]) for m in already)
+                + ". Use the existing product instead of typing it in."
+            ),
+            "matches": already,
+        },
+    )
+
+
 # ============================================================================
 # PURCHASE ORDER ENDPOINTS
 # ============================================================================
@@ -373,25 +442,14 @@ async def create_po(
     # receiving, the stock mint, the invoice and the 3-way match, instead of
     # forking identity into a second placeholder system.
     product_repo = get_product_repository()
+    _refuse_items_we_already_have(po.items, product_repo)  # audit C2
     for it in po.items:
         if it.new_product is None:
             continue
         np = it.new_product
         try:
             created = _pm.create_via_door(
-                {
-                    "category": np.category,
-                    "brand": np.brand,
-                    "model": np.model,
-                    "colour": np.colour,
-                    "size": np.size,
-                    "mrp": np.mrp,
-                    # The PO rate is the PROVISIONAL cost (ruling 10); the
-                    # purchase invoice corrects it to the actual one (ruling 12).
-                    "cost_price": it.unit_price or None,
-                    "as_draft": True,
-                    "provisional": True,
-                },
+                _typed_product_payload(it),
                 source="FORM",
                 actor=current_user.get("user_id"),
                 actor_name=current_user.get("username"),
@@ -400,9 +458,9 @@ async def create_po(
                 db=_get_db(),
             )
         except _pm.ProductMasterError as err:
-            # An identical brand+model+colour+size already exists: reuse it
-            # rather than refusing the order or minting a twin. The buyer has
-            # just typed a description of a product we already know.
+            # Past the check above this is two lines of THIS order typing the
+            # same item, or a product created a moment ago by someone else:
+            # reuse it rather than refusing the order or minting a twin.
             if err.status == 409 and (err.conflict or {}).get("product_id"):
                 it.product_id = err.conflict["product_id"]
                 it.product_name = it.product_name or err.conflict.get("name")

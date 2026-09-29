@@ -13,6 +13,7 @@ import { FileText, X as XIcon, Loader2, Search } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import { vendorsApi, productApi } from '../../services/api';
+import { ApiError } from '../../services/api/client';
 import { storeApi } from '../../services/api/stores';
 import { isInterStateSupply } from '../../constants/gst';
 import { useGstStateCodes } from '../../hooks/useGstStateCodes';
@@ -449,6 +450,12 @@ function ProductSearchSelect({
   );
 }
 
+/** One line of the server's ALREADY_IN_CATALOGUE answer (create_po). */
+interface AlreadyInCatalogueMatch {
+  line: number;
+  existing: { product_id: string; sku: string; name?: string | null; size?: string | null };
+}
+
 interface PurchaseOrderFormProps {
   suppliers: Supplier[];
   existingPOCount: number;
@@ -559,27 +566,56 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
             onCancel={onClose}
             onSubmit={async (payload) => {
               const storeId = user?.activeStoreId ?? 'default';
-              const resp = await vendorsApi.createPurchaseOrder({
-                vendor_id: payload.vendorId,
-                delivery_store_id: storeId,
-                expected_date: payload.expectedDate || undefined,
-                notes: payload.notes || undefined,
-                items: payload.items.map((it) => ({
-                  product_id: it.product_id,
-                  product_name: it.product_name,
-                  sku: it.sku,
-                  new_product: it.new_product,
-                  quantity: it.quantity,
-                  unit_price: it.unit_price,
-                })),
-              });
+              let items = payload.items.map((it) => ({
+                product_id: it.product_id,
+                product_name: it.product_name,
+                sku: it.sku,
+                new_product: it.new_product,
+                quantity: it.quantity,
+                unit_price: it.unit_price,
+              }));
+              const send = () =>
+                vendorsApi.createPurchaseOrder({
+                  vendor_id: payload.vendorId,
+                  delivery_store_id: storeId,
+                  expected_date: payload.expectedDate || undefined,
+                  notes: payload.notes || undefined,
+                  items,
+                });
+              let resp: Awaited<ReturnType<typeof send>>;
+              try {
+                resp = await send();
+              } catch (err) {
+                // Audit C2: a typed-in line describes a product we already
+                // have. The server created nothing and names it; ask, then
+                // order THAT product instead of a hidden twin.
+                if (!(err instanceof ApiError) || err.code !== 'ALREADY_IN_CATALOGUE') throw err;
+                const matches =
+                  (err.detail as { matches?: AlreadyInCatalogueMatch[] } | undefined)?.matches ?? [];
+                const names = matches
+                  .map(
+                    ({ existing: e }) =>
+                      `${e.name || e.sku}${e.size ? `, size ${e.size}` : ''} (SKU ${e.sku})`,
+                  )
+                  .join(', ');
+                if (!window.confirm(`Already in the catalogue: ${names}. Use it?`)) {
+                  throw new Error('Not created. Pick the item from the catalogue, or correct what you typed.');
+                }
+                items = items.map((it, i) => {
+                  const e = matches.find((m) => m.line === i)?.existing;
+                  return e
+                    ? { ...it, new_product: undefined, product_id: e.product_id, product_name: e.name || e.sku, sku: e.sku }
+                    : it;
+                });
+                resp = await send();
+              }
 
-              const poItems: POItem[] = payload.items.map((it) => ({
-                productId: it.product_id ?? '',
+              const poItems: POItem[] = payload.items.map((it, i) => ({
+                productId: items[i].product_id ?? '',
                 productName:
-                  it.product_name ??
+                  items[i].product_name ??
                   `${it.new_product?.brand ?? ''} ${it.new_product?.model ?? ''}`.trim(),
-                sku: it.sku ?? '',
+                sku: items[i].sku ?? '',
                 quantity: it.quantity,
                 unitCost: it.unit_price,
                 taxRate: it.taxRate,
