@@ -30,9 +30,7 @@ export interface Supplier {
   gstNumber: string;
   paymentTerms: number; // days
   creditLimit: number;
-  currentOutstanding: number;
   rating: number; // 1-5
-  totalPurchases: number;
   lastPurchaseDate: string;
   performance: {
     onTimeDelivery: number; // percentage

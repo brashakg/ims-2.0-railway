@@ -29,9 +29,7 @@ export function mapVendorToSupplier(v: any): Supplier {
     gstNumber: v.gstin ?? '',
     paymentTerms: v.credit_days ?? 30,
     creditLimit: v.credit_limit ?? 0,
-    currentOutstanding: v.current_outstanding ?? 0,
     rating: v.rating ?? 0,
-    totalPurchases: v.total_purchases ?? 0,
     lastPurchaseDate: v.last_purchase_date ?? '',
     performance: {
       onTimeDelivery: v.on_time_delivery ?? 0,

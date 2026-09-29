@@ -15,7 +15,8 @@
 // figure at all rather than Rs 0.0L.
 //
 // The HTTP client itself is mocked (not vendorsApi), so the fix is free to pick
-// its ledger reader. `it.fails` = xfail(strict=True): flip to `it` when fixed.
+// its ledger reader. These were `it.fails` pins while the finding was open;
+// the card now reads GET /finance/vendor-payments (the ledger).
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
@@ -128,12 +129,12 @@ describe('F56: the supplier card reads what we owe from the supplier ledger', ()
     expect(screen.getByText('Jharkhand Optical')).toBeInTheDocument();
   });
 
-  it.fails('F56: an admin sees Outstanding Rs 1.4L -- the ledger -- not Rs 0.0L', async () => {
+  it('F56: an admin sees Outstanding Rs 1.4L -- the ledger -- not Rs 0.0L', async () => {
     await openAs('ADMIN');
     await vi.waitFor(() => expect(figure('Outstanding')).toBe('₹1.4L'));
   });
 
-  it.fails('F56/F57: a store manager, who cannot read supplier balances, is never shown a confident Rs 0.0L', async () => {
+  it('F56/F57: a store manager, who cannot read supplier balances, is never shown a confident Rs 0.0L', async () => {
     await openAs('STORE_MANAGER');
     expect(screen.queryAllByText('₹0.0L')).toHaveLength(0);
   });

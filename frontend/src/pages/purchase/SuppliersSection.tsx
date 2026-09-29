@@ -8,9 +8,10 @@
 
 import { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Search, Loader2, AlertTriangle } from 'lucide-react';
-import { SupplierPanel } from './SupplierPanel';
+import { SupplierPanel, type SupplierBalance } from './SupplierPanel';
+import { financeApi } from '../../services/api/finance';
 import { SupplierFormModal } from './SupplierFormModal';
 import { useSuppliers, vendorsQueryKey } from './purchaseQueries';
 import type { Supplier } from './purchaseTypes';
@@ -28,6 +29,18 @@ export function SuppliersSection() {
   const suppliers = suppliersQ.data ?? [];
   const isLoading = suppliersQ.isPending;
   const loadError = suppliersQ.isError ? 'Failed to load purchase data' : null;
+
+  // Audit F56: what we owe each supplier is the supplier LEDGER (the server's
+  // one payable rule, ap_engine.build_ledger). A login the server refuses
+  // supplier balances gets no figure -- never a made-up Rs 0.
+  const balancesQ = useQuery({
+    queryKey: ['purchase', 'supplier-balances'],
+    queryFn: async () => {
+      const rows = (await financeApi.getVendorPayments()) as Array<SupplierBalance & { vendor_id: string }>;
+      return Object.fromEntries((Array.isArray(rows) ? rows : []).map((r) => [r.vendor_id, r]));
+    },
+    retry: false, // a 403 (no supplier balances for this login) is an answer
+  });
 
   // Cache writer for add/edit: the ledger updates in place, no refetch flash.
   const patchSuppliers = (fn: (old: Supplier[]) => Supplier[]) =>
@@ -91,7 +104,7 @@ export function SuppliersSection() {
           <Loader2 className="w-8 h-8 animate-spin text-blue-600" />
         </div>
       ) : (
-        <SupplierPanel suppliers={filteredSuppliers} onEdit={setEditingSupplier} />
+        <SupplierPanel suppliers={filteredSuppliers} onEdit={setEditingSupplier} balances={balancesQ.data} />
       )}
 
       {/* Add Supplier Modal */}

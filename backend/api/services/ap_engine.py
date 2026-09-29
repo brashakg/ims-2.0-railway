@@ -445,6 +445,12 @@ def bill_outstanding(
 ) -> float:
     """Outstanding on a single bill = total - allocated payments - allocated
     debit-notes. Only rows whose bill_id matches this bill count. Never < 0."""
+    return round(max(_bill_balance(bill, payments, debit_notes), 0.0), 2)
+
+
+def _bill_balance(bill: dict, payments: List[dict], debit_notes: List[dict]) -> float:
+    """bill_outstanding before the floor: negative = money allocated to the
+    bill beyond its total (an over-payment the ledger still counts)."""
     if not isinstance(bill, dict):
         return 0.0
     bid = bill.get("bill_id")
@@ -459,7 +465,7 @@ def bill_outstanding(
         for d in (debit_notes or [])
         if isinstance(d, dict) and d.get("bill_id") == bid
     )
-    return round(max(total - paid - dn, 0.0), 2)
+    return round(total - paid - dn, 2)
 
 
 # --- aging -----------------------------------------------------------------
@@ -484,12 +490,17 @@ def build_aging(
     total_out = 0.0
 
     bill_ids = {b.get("bill_id") for b in (bills or []) if isinstance(b, dict)}
+    # Money allocated to a bill beyond its total is still money paid: it nets
+    # like an on-account credit, so net_payable == the ledger's closing balance
+    # (floored at 0) whenever `bills` is the vendor's whole bill set.
+    overpaid = 0.0
 
     for b in bills or []:
         if not isinstance(b, dict):
             continue
-        out = bill_outstanding(b, payments, debit_notes)
+        out = _bill_balance(b, payments, debit_notes)
         if out <= 0:
+            overpaid -= out
             continue
         due_iso = b.get("due_date") or compute_due_date(
             b.get("bill_date"), b.get("credit_days", 0)
@@ -528,8 +539,8 @@ def build_aging(
         )
 
     # Credits that are not tied to any bill present in this set (advances /
-    # on-account payments / unallocated debit notes).
-    unallocated = 0.0
+    # on-account payments / unallocated debit notes), plus over-payments.
+    unallocated = overpaid
     for p in payments or []:
         if isinstance(p, dict) and p.get("bill_id") not in bill_ids:
             unallocated += _payment_gross(p)

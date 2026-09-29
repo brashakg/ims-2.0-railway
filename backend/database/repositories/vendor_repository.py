@@ -34,21 +34,8 @@ class VendorRepository(BaseRepository):
     def search_vendors(self, query: str) -> List[Dict]:
         return self.search(query, ["legal_name", "trade_name", "gstin", "vendor_code"])
     
-    def get_outstanding_balance(self, vendor_id: str) -> float:
-        vendor = self.find_by_id(vendor_id)
-        return float(vendor.get("current_balance", 0)) if vendor else 0
-    
-    def update_balance(self, vendor_id: str, amount: float, is_credit: bool = False) -> bool:
-        """Update vendor balance (credit reduces, debit increases)"""
-        try:
-            change = -amount if is_credit else amount
-            self.collection.update_one(
-                {"vendor_id": vendor_id},
-                {"$inc": {"current_balance": change}}
-            )
-            return True
-        except Exception:
-            return False
+    # What we owe a vendor is the supplier ledger (services/ap_engine.build_ledger);
+    # the old current_balance counter here had no writer and no reader (F56).
 
 
 class PurchaseOrderRepository(BaseRepository):

@@ -98,8 +98,8 @@ def _survival_ap_items(db):
     """Open AP bills as aging items (rupee `outstanding`, resolved `due_date`)
     + the raw bill's vendor_critical flag carried through.
 
-    Vendor bills carry no store_id (they are entity-level liabilities), so the
-    AP side of the survival view is always org-wide.
+    Vendor bills are entity-level liabilities (their store_id only says where
+    the goods landed), so the AP side of the survival view is always org-wide.
     """
     bills, payments, dn = _ap_rows(db)
     ap = ap_engine.build_aging(bills, payments, dn)
