@@ -487,9 +487,15 @@ function StoreModal({
     if (fieldErr) { toast.error(fieldErr); return; }
     setSaving(true);
     try {
-      if (store) await orgStoreApi.update(store.store_id, form);
-      else await orgStoreApi.create(form);
-      toast.success(store ? 'Store updated' : 'Store created');
+      if (store) {
+        const saved = await orgStoreApi.update(store.store_id, form);
+        toast.success('Store updated');
+        // The release's note (#1141 recheck 3) -- dropped, the save read clean.
+        if (saved?.warning) toast.warning(saved.warning);
+      } else {
+        await orgStoreApi.create(form);
+        toast.success('Store created');
+      }
       onSaved();
     } catch (e) {
       toast.error(errMsg(e, 'Failed to save store'));

@@ -105,7 +105,9 @@ export const orgStoreApi = {
   },
   update: async (storeId: string, payload: StorePayload) => {
     const response = await api.put(`/stores/${storeId}`, payload);
-    return response.data;
+    // `warning`: the save went through, but the Shopify release behind it has
+    // something to say (a zeroing refused at a location that holds nothing).
+    return response.data as { store_id: string; message: string; warning?: string };
   },
   remove: async (storeId: string) => {
     const response = await api.delete(`/stores/${storeId}`);

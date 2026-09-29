@@ -1202,3 +1202,26 @@ def test_R6_a_baseline_reset_that_dies_refuses_the_save(monkeypatch):
     assert _saved(db, "BV-BOK-02")["shopify_location_id"] == BOKARO
     # the retraction itself DID go out -- that half is idempotent and safe
     assert len([x for x in calls if "inventorySetQuantities" in x["query"]]) == 1
+
+
+def test_H13_a_release_that_went_through_with_a_note_says_so(monkeypatch, caplog):
+    """SILENT NOTE (low, #1141 recheck 3). `release_store_location` answers
+    ok=True with a note in `error` when the zeroing was refused at a location
+    that holds no stock (deactivated / gone). The router returned on `ok`
+    and dropped it: no message, no log line. It is logged and put on the
+    PUT and DELETE answers as `warning` now. Drop it again -> this fails."""
+    import logging
+
+    note = "the zeroing was refused at a location that holds no stock (deactivated in Shopify)"
+
+    async def _released(db, store_id, location_gid):  # noqa: ARG001
+        return {"ok": True, "mode": "LIVE", "set": 0, "skus": ["SP-1"], "forgot": 1, "code": None, "error": note}
+
+    c, db = _world(monkeypatch, [_store("BV-BOK-02", shopify_location_id=BOKARO), _store("BV-DHN-01", shopify_location_id=PUNE)])
+    monkeypatch.setattr(shopify_push, "release_store_location", _released)
+    with caplog.at_level(logging.WARNING, logger=stores.logger.name):
+        r = c.put("/api/v1/stores/BV-BOK-02", json={"shopify_location_id": ""})
+    assert r.status_code == 200 and r.json().get("warning") == note, r.text
+    assert any(note in rec.getMessage() for rec in caplog.records), caplog.text
+    d = c.delete("/api/v1/stores/BV-DHN-01")
+    assert d.status_code == 200 and d.json().get("warning") == note, d.text

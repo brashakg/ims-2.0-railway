@@ -4488,3 +4488,57 @@ def test_G10_one_dead_shop_never_marks_every_listing_changed_on_every_pass(monke
     assert moved.payload["changed"] == 1 and (INV_GID, LOC_A, 1) in spy.rows(), moved
     assert not any(r[1] == LOC_B for r in spy.rows()), "unknown is never written"
     assert _baseline(db)["quantities"]["SP-1"] == {"BV-A": 1, "BV-B": 1, "BV-C": 0}
+
+
+# ---------------------------------------------------------------------------
+# #1141 recheck 3 (2026-09-29): the panel's findings on the recheck-2 fixes.
+# Every Shopify answer below is shaped like production's: a userError body for
+# a refusal, an httpx.ReadTimeout (no body at all) for a call whose answer
+# never came back.
+# ---------------------------------------------------------------------------
+
+
+class _SetAnswers(_Spy):
+    """inventorySetQuantities answered PER LOCATION: a call carrying a row at a
+    location in ``refuse`` gets Shopify's userError (nothing applied); else
+    one carrying a row at a location in ``timeout`` raises httpx.ReadTimeout
+    -- no answer, and in these stories Shopify HAD applied it."""
+
+    def __init__(self, responses, *, refuse=(), timeout=()):
+        super().__init__(responses)
+        self.refuse, self.timeout = set(refuse), set(timeout)
+
+    async def __call__(self, db, query, variables):  # noqa: ARG002
+        if "inventorySetQuantities" in query:
+            locs = {r["locationId"] for r in variables["input"]["quantities"]}
+            if locs & self.refuse:
+                self.calls.append({"query": query, "variables": variables})
+                return _set_error("INVALID_LOCATION", "location refused")
+            if locs & self.timeout:
+                import httpx
+
+                self.calls.append({"query": query, "variables": variables})
+                raise httpx.ReadTimeout("The read operation timed out")
+        return await super().__call__(db, query, variables)
+
+
+def test_H1_a_refused_zeroing_at_an_UNTICKED_location_refuses_the_save(monkeypatch):
+    """LATENT OVERSELL, MEDIUM (panel on G7). The G7 release accepted a
+    refused zeroing whenever Shopify's list put the old location in `dead` --
+    and `dead` includes 'not ticked to fulfil online orders', an ACTIVE
+    location that still HOLDS its stock (prod's three Jharkhand shops today).
+    Released, BV-B's baseline was forgotten with 1 unit still at LOC_B that
+    no baseline or mapping would ever zero again; it sold the day someone
+    ticked the box. Only a DEACTIVATED or vanished location (which holds
+    nothing) releases; an unticked one refuses, for a userError and for a
+    timeout alike. Release on any `dead` again -> this fails."""
+    unticked = _locations(_loc(LOC_A, "Bokaro"), _loc(LOC_B, "Dhanbad", fulfils=False), _loc(LOC_C, "Sector 4"))
+    for answers in ({"refuse": (LOC_B,)}, {"timeout": (LOC_B,)}):
+        db = _sold_at_b()
+        _live(monkeypatch, _SetAnswers(_responses(imsLocationList=unticked), refuse=(LOC_B,)))
+        _run(wb.writeback_skus(db, ["SP-1"], "BV-B"))
+        assert _baseline(db)["quantities"]["SP-1"]["BV-B"] == 1, "the refusal changed nothing on Shopify"
+        _live(monkeypatch, _SetAnswers(_responses(imsLocationList=unticked), **answers))
+        out = _run(shopify_push.release_store_location(db, "BV-B", LOC_B))
+        assert out["ok"] is False and out["code"] == shopify_push.STOCK_WRITE_FAILED and out["forgot"] == 0, (answers, out)
+        assert _baseline(db)["quantities"]["SP-1"]["BV-B"] == 1, "still owed a zero at LOC_B"

@@ -2002,21 +2002,28 @@ async def release_store_location(db, store_id: str, location_gid: str) -> Dict[s
             if written["errors"]:
                 refused = "; ".join(str(e) for e in written["errors"][:3])
                 # A location Shopify DEACTIVATED or no longer lists refuses
-                # every write -- and sells nothing, so there is nothing to
-                # retract (#1141 fix-six recheck 2). Refused here, the baseline
-                # (which keeps a refused shop's last number) held that shop on
-                # the dead location for ever: no remap, no clear. Asked of
-                # Shopify's own list, fresh; unread is never "dead".
+                # every write -- and HOLDS nothing (Shopify moves a location's
+                # inventory out before it deactivates it), so there is nothing
+                # to retract (#1141 fix-six recheck 2). Refused here, the
+                # baseline (which keeps a refused shop's last number) held that
+                # shop on the dead location for ever: no remap, no clear.
+                # Asked of Shopify's own list, fresh; unread is never "gone".
+                #
+                # ONLY those two (recheck 3, oversell): a location merely not
+                # ticked to fulfil online orders is ACTIVE and still holds its
+                # stock -- released on a refused zeroing, its unit sat there
+                # with no baseline and no mapping left to zero it, and sold the
+                # day someone ticked the box. That refusal refuses the save.
                 verdict = await location_verdict(db, {store_id: gid})
-                dead = next((d for d in verdict.get("dead") or [] if d.get("location_id") == gid), None)
-                if not dead:
+                row = next((r for r in verdict.get("rows") or [] if r.get("id") == gid), None)
+                if not verdict.get("read") or (row is not None and row.get("isActive")):
                     out["ok"] = False
                     out["code"] = written.get("code") or STOCK_WRITE_FAILED
                     out["error"] = refused
                     return out
                 out["error"] = (
-                    f"the zeroing was refused at a location that cannot sell online "
-                    f"({dead['reason']}), so nothing shows there -- released: {refused}"
+                    f"the zeroing was refused at a location that holds no stock "
+                    f"({dead_mapped_reason(row)}), so nothing shows there -- released: {refused}"
                 )
     _rearm_or_refuse(db, store_id, out)
     return out

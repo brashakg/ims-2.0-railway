@@ -84,7 +84,7 @@ beforeEach(() => {
   vi.mocked(entitiesApi.list).mockResolvedValue({ entities: [ENTITY] } as never);
   vi.mocked(entitiesApi.meta).mockResolvedValue({ state_codes: [], entity_types: [] } as never);
   vi.mocked(orgStoreApi.list).mockResolvedValue({ stores: STORES as never, total: STORES.length });
-  vi.mocked(orgStoreApi.update).mockResolvedValue({});
+  vi.mocked(orgStoreApi.update).mockResolvedValue({} as never);
   vi.mocked(pushApi.getLocations).mockResolvedValue(LOCATIONS);
 });
 
@@ -153,6 +153,19 @@ describe('StoreModal Shopify location', () => {
     await screen.findByText(/location list unavailable/);
     expect(select.value).toBe(BOKARO);
     expect(screen.getByRole('option', { name: 'Better Vision Sector 4' })).toBeTruthy();
+  });
+
+  // #1141 recheck 3: a save whose Shopify release went through WITH A NOTE
+  // (the zeroing refused at a location that holds nothing) answered `warning`,
+  // and the page said only 'Store updated'. Drop the toast.warning -> this fails.
+  it('says the note a save came back with, never a clean save', async () => {
+    const note = 'the zeroing was refused at a location that holds no stock (deactivated in Shopify) -- released';
+    vi.mocked(orgStoreApi.update).mockResolvedValue({ store_id: 'BV-BOK-02', message: 'Store updated', warning: note });
+    render(<OrganizationPage />);
+    const { user } = await openStore('Sec 4 Bokaro');
+    await user.click(screen.getByRole('button', { name: /^save$/i }));
+    await waitFor(() => expect(toast.warning).toHaveBeenCalledWith(note));
+    expect(toast.success).toHaveBeenCalledWith('Store updated');
   });
 
   it('shows "not mapped" on an unmapped shop and nothing on an ONLINE store', async () => {
