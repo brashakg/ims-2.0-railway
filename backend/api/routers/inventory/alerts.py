@@ -7,9 +7,11 @@ from ._shared import (
     Optional,
     Query,
     _SOLD_STATUSES,
+    _on_hand_status_clause,
     _reorder_disabled,
     datetime,
     get_current_user,
+    get_stock_repository,
     logger,
     router,
     timedelta,
@@ -17,6 +19,7 @@ from ._shared import (
 )
 from .helpers import (
     _get_db,
+    _parse_expiry,  # generic stored-timestamp parser (ISO / date / datetime)
 )
 
 # ============================================================================
@@ -81,10 +84,19 @@ def _build_stock_alert(
     now: datetime,
     dead_days: int,
     lead_time_days: int,
+    low_stock: bool = False,
+    stocked_since: Optional[datetime] = None,
 ) -> Optional[dict]:
     """Pure classifier — given a product doc plus its sales signals, return a
     single frontend-shaped (camelCase) StockAlert dict, or None if the product
     warrants no alert. No DB access, so it is fully unit-testable.
+
+    ``low_stock``: the product is on GET /inventory/low-stock (the ONE low-stock
+    rule, StockRepository.find_low_stock) -- Alerts says LOW_STOCK for it too,
+    so the two screens cannot disagree (audit F48). ``stocked_since``: when the
+    oldest unit on the shelf arrived; stock younger than the dead-stock window
+    has not had the chance to sell and is never called dead. None = unknown
+    (legacy rows) = eligible, as before.
     """
     stock = int(product.get("stock_quantity", 0) or 0)
     cost = float(product.get("cost_price", 0) or 0)
@@ -150,13 +162,16 @@ def _build_stock_alert(
         )
         return base
 
-    # 2. LOW_STOCK — sells, getting low, but not yet reorder-critical.
-    # When auto-reorder is disabled the alert stays (it is informational)
-    # but with NO suggested restock qty (recommendedOrder 0, costImpact 0).
-    if velocity > 0 and projected is not None and projected <= lead_time_days * 2:
+    # 2. LOW_STOCK — sells and getting low but not yet reorder-critical, or
+    # on the low-stock list at all. When auto-reorder is disabled (or nothing
+    # has sold) the alert stays informational with NO suggested restock qty.
+    selling_low = (
+        velocity > 0 and projected is not None and projected <= lead_time_days * 2
+    )
+    if selling_low or low_stock:
         recommended = (
             0
-            if reorder_suggestions_off
+            if reorder_suggestions_off or velocity <= 0
             else max(int(round(velocity * lead_time_days * 2 - stock)), 1)
         )
         base.update(
@@ -165,13 +180,19 @@ def _build_stock_alert(
                 "severity": "MEDIUM",
                 "recommendedOrder": recommended,
                 "costImpact": round(recommended * cost, 2),
-                "actionRequired": f"Stock running low (~{int(projected)} days left)",
+                "actionRequired": (
+                    f"Stock running low (~{int(projected)} days left)"
+                    if selling_low
+                    else f"Only {stock} left - at or below the low-stock level"
+                ),
             }
         )
         return base
 
-    # 3. DEAD_STOCK — has stock but no movement in the dead-stock window
-    is_dead = stock > 0 and (
+    # 3. DEAD_STOCK — has stock but no movement in the dead-stock window, and
+    # the stock has been on the shelf for that whole window.
+    had_the_window = stocked_since is None or (now - stocked_since).days >= dead_days
+    is_dead = stock > 0 and had_the_window and (
         last_sale is None
         or (days_without_movement is not None and days_without_movement >= dead_days)
     )
@@ -298,15 +319,18 @@ async def get_stock_alerts(
         now = datetime.utcnow()
         thirty_cutoff = now - timedelta(days=30)
 
+        # The catalogue is shared; stock is per store and lives in
+        # stock_units. Filtering products by products.store_id and reading the
+        # legacy products.stock_quantity field made every alert vanish once
+        # stock moved to the ledger (audit F48: "No Alerts" beside LOW STOCK 1).
         prod_filter: Dict = {"is_active": {"$ne": False}}
-        if active_store:
-            prod_filter["store_id"] = active_store
 
         products = list(
             products_coll.find(
                 prod_filter,
                 {
                     "_id": 0,
+                    "product_id": 1,
                     "name": 1,
                     "brand": 1,
                     "category": 1,
@@ -326,16 +350,49 @@ async def get_stock_alerts(
             orders_coll, active_store, thirty_cutoff
         )
 
+        # Sellable units per product at this store (the shared on-hand clause)
+        # and when the oldest of them arrived.
+        unit_match: Dict = dict(_on_hand_status_clause())
+        if active_store:
+            unit_match["store_id"] = active_store
+        on_hand: Dict[str, dict] = {
+            str(r["_id"]): r
+            for r in db.get_collection("stock_units").aggregate(
+                [
+                    {"$match": unit_match},
+                    {
+                        "$group": {
+                            "_id": "$product_id",
+                            "n": {"$sum": {"$ifNull": ["$quantity", 1]}},
+                            "oldest": {"$min": "$created_at"},
+                        }
+                    },
+                ]
+            )
+            if r.get("_id")
+        }
+        # The ONE low-stock rule, so Alerts and Low stock always agree.
+        low_ids: set = set()
+        stock_repo = get_stock_repository()
+        if active_store and stock_repo is not None:
+            low_ids = {
+                str(r.get("_id")) for r in stock_repo.find_low_stock(active_store)
+            }
+
         alerts: List[dict] = []
         for p in products:
             barcode = p.get("barcode") or p.get("sku") or ""
+            pid = str(p.get("product_id") or "")
+            units = on_hand.get(pid) or {}
             alert = _build_stock_alert(
-                p,
+                {**p, "stock_quantity": int(units.get("n") or 0)},
                 sold_30=sales_30.get(barcode, 0),
                 last_sale=last_sales.get(barcode),
                 now=now,
                 dead_days=dead_days,
                 lead_time_days=lead_time_days,
+                low_stock=pid in low_ids,
+                stocked_since=_parse_expiry(units.get("oldest")),
             )
             if alert:
                 alerts.append(alert)

@@ -65,9 +65,23 @@ async def get_low_stock_alerts(
         except (AttributeError, TypeError, ValueError) as exc:
             logger.warning("[INVENTORY] low-stock reorder-policy join failed: %s", exc)
 
+    # The aggregate yields only {_id, quantity}; without the product master's
+    # identity every row printed "Unknown Product" (audit F48). Same join,
+    # named through the catalogue's one display-name formula.
+    from ...services.product_master import pim_display_name
+
     for item in items:
         pid = str(item.get("_id") or "")
-        item["auto_reorder_disabled"] = _reorder_disabled(products_by_id.get(pid, {}))
+        prod = products_by_id.get(pid, {})
+        item["auto_reorder_disabled"] = _reorder_disabled(prod)
+        item.update(
+            id=pid,
+            product_id=pid,
+            name=pim_display_name(prod) or "",
+            sku=prod.get("sku") or "",
+            brand=prod.get("brand") or "",
+            category=prod.get("category") or "",
+        )
 
     return {"items": items}
 
