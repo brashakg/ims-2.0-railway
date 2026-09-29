@@ -57,6 +57,20 @@ were run red against it before they counted):
       (502, read-timeout)                       unpriced                      photo up for good
   T21 test_a_hand_copy_of_a_lost_attach_...   claim without `not nameless` -> hand upload
                                                                               claimed, deleted
+  T22 test_two_lost_attaches_in_one_window..  every window node a        -> both held, OWN
+      (both landed / one removed)               candidate whatever its name   never taken down
+  T23 test_a_person_photo_under_another_name  the same                     -> U1 held for good
+      test_a_photo_under_another_name_holds_  another-name nodes never     -> dropped (a second
+      while_the_naming_is_unconfirmed           candidates                    copy) unconfirmed
+  T23b test_a_person_photo_on_a_listing_ims_ another-name node a candidate -> MEDIA_HELD for
+      owns_nothing_on_never_holds_...          while unconfirmed, no live     good (the first
+                                                doc or not                     attach)
+  T24test_a_lost_design_attach_queues_its_.. no re-queue after the        -> product drained,
+      / test_a_held_design_attach_is_not_...    design press / no settling    copy unmanaged
+  T22b test_two_lost_attaches_are_told_...   no other-name rule           -> both held
+  T26 test_the_send_window_counts_the_...     _REACH = PROVIDER_TIMEOUT    -> dropped, attached
+                                                + 90 s                        a second time
+  T26b test_the_send_window_counts_each_try_  a try = one PROVIDER_TIMEOUT -> dropped
   old test_the_old_originalsource_identity... (documents the production shape)
   and the ported round 1-6 tests, each with the revert it names.
 
@@ -118,20 +132,51 @@ def _ago(minutes, naive=False):
     return at.replace(tzinfo=None) if naive else at
 
 
+def _dig(doc, path):
+    for part in path.split("."):
+        doc = doc.get(part) if isinstance(doc, dict) else None
+    return doc
+
+
+def _fits(doc, dotted):
+    """Mongo's dotted-path match for the {path: value} / {path: {$in: [...]}}
+    forms (MockCollection reads a dotted key as a top-level field)."""
+    for path, want in dotted.items():
+        got = _dig(doc, path)
+        if isinstance(want, dict):
+            if set(want) != {"$in"}:
+                raise NotImplementedError(want)
+            if got not in want["$in"]:
+                return False
+        elif got != want:
+            return False
+    return True
+
+
 class _Coll:
     """A MockCollection read with real Mongo's semantics: find_one / find hand
     back COPIES, so a doc a press read is a snapshot a later write does not
-    mutate. insert_one refuses a duplicate _id (the media lease is exactly
-    that claim; MockCollection would overwrite). Everything else delegates."""
+    mutate; a dotted key matches the nested field. insert_one refuses a
+    duplicate _id (the media lease is exactly that claim; MockCollection
+    would overwrite). Everything else delegates."""
 
     def __init__(self, name):
         self._m = MockCollection(name)
 
-    def find_one(self, *args, **kwargs):
-        return copy.deepcopy(self._m.find_one(*args, **kwargs))
+    def _split(self, flt):
+        flt = dict(flt or {})
+        dotted = {k: flt.pop(k) for k in list(flt) if "." in k and not k.startswith("$")}
+        return flt, dotted
 
-    def find(self, *args, **kwargs):
-        return [copy.deepcopy(d) for d in self._m.find(*args, **kwargs)]
+    def find_one(self, flt=None, *args, **kwargs):
+        plain, dotted = self._split(flt)
+        if not dotted:
+            return copy.deepcopy(self._m.find_one(flt, *args, **kwargs))
+        return next((copy.deepcopy(d) for d in self._m.find(plain) if _fits(d, dotted)), None)
+
+    def find(self, flt=None, *args, **kwargs):
+        plain, dotted = self._split(flt)
+        return [copy.deepcopy(d) for d in self._m.find(plain, *args, **kwargs) if _fits(d, dotted)]
 
     def insert_one(self, doc):
         if doc.get("_id") is not None and self._m.find_one({"_id": doc["_id"]}) is not None:
@@ -737,7 +782,8 @@ def test_the_product_press_neither_attaches_nor_drops_design_media(gates, monkey
     assert _ledger(db) == {(OWN, _m(1), None), (NEW, _m(100), "I1")}
     assert res.photos == {
         "attached": 0, "deleted": 1, "reordered": False, "unmanaged": 0, "adopted": 0,
-        "dropped": 0, "held": [], "review": [], "hands_off": False, "on_shopify": 2, "attached_map": [],
+        "dropped": 0, "held": [], "review": [], "hands_off": False, "settling": False, "on_shopify": 2,
+        "attached_map": [],
     }
 
 
@@ -854,7 +900,7 @@ def test_a_ledger_write_failure_after_the_attach_is_loud_and_keeps_the_gid(gates
         _run(_delete_route(monkeypatch, db)("I1"))
     assert refused.value.status_code == 409 and _row(db, "I1") is not None
     fake.ready()
-    _age(db, U1, 5, fake=fake)  # the send window has closed
+    _age(db, U1, 9, fake=fake)  # the send window (_REACH, 8 min) has closed
     settled = _run(shopify_push.push_image(db, _row(db, "I1")))
     assert settled.ok and settled.shopify_id == _m(100) and settled.photos["adopted"] == 1
     assert len(fake.calls_of("imsProductCreateMedia")) == 1
@@ -1577,7 +1623,7 @@ def test_a_lost_attach_of_the_product_lane_settles_on_the_product_press(gates, m
     assert first.photos["error"] and _pending(db) == {(OID, None)}
 
     fake.ready()
-    _age(db, OID, 5, fake=fake)
+    _age(db, OID, 9, fake=fake)
     prod = _run(shopify_push.push_product(db, _parent(db), []))
 
     assert prod.ok is True and prod.photos["adopted"] == 1 and prod.photos["attached"] == 0, prod.photos
@@ -1599,7 +1645,7 @@ def test_a_lost_attach_of_a_row_re_pointed_since_is_taken_down_by_its_press(gate
     fake.commit_then(RuntimeError("lost"))
     assert _run(shopify_push.push_image(db, _row(db, "I1"))).ok is False
     fake.ready()
-    _age(db, U1, 5, fake=fake)
+    _age(db, U1, 9, fake=fake)
     db["product_images"].update_one({"image_id": "I1"}, {"$set": {"url": U2}})
     plan = _plan(db, _row(db, "I1"))
     assert (plan["action"], plan["drop"]) == ("create", [U1])
@@ -2269,12 +2315,15 @@ def test_a_hold_only_a_person_can_clear_is_said_on_the_door_and_not_re_pressed(g
     assert fake.listing() == [_m(100)] and _ledger(db) == {(U1, _m(100), None)}
 
 
-def test_a_held_design_attach_never_keeps_the_product_queued(gates, monkeypatch):
-    """B (round 4). A pending attach of design row I1 (its lane, inside the
-    grace) is not the product press's to report: the product press says
-    nothing about it and does not re-queue the product.
+def test_a_held_design_attach_is_not_reported_by_the_product_press_but_keeps_it_queued(gates, monkeypatch):
+    """B (round 4, revised round 5). A pending attach of design row I1 (its
+    lane, inside the grace) is not the product press's to REPORT: no code,
+    no held url. But only a later pass of this product settles it (no
+    schedule presses a design row), so the product STAYS queued while the
+    attach is young -- and drains once it is settled.
     REVERT-PROOF: the held list across ALL lanes -> MEDIA_SETTLING on the
-    product press, the product queued."""
+    product press; no ``settling`` re-queue -> the product drained with the
+    attach never settled."""
     fake = _live(monkeypatch, [_node(1, OWN)])
     db = _DB()
     _seed(db, _product([OWN]), (OWN, 1))
@@ -2283,7 +2332,42 @@ def test_a_held_design_attach_never_keeps_the_product_queued(gates, monkeypatch)
     prod = _run(shopify_push.push_product(db, _parent(db), []))
 
     assert prod.ok is True and prod.code is None and prod.photos["held"] == [], prod.photos
-    assert not _queued(db) and fake.attached() == []
+    assert _queued(db) and fake.attached() == []
+    _age(db, NEW, 20)
+    late = _run(shopify_push.push_product(db, _parent(db), []))
+    assert late.photos["dropped"] == 1 and late.code is None and not _queued(db), late.photos
+
+
+def test_a_lost_design_attach_queues_its_product_and_the_scheduled_press_settles_it(gates, monkeypatch):
+    """The panel's LOW (a failed attach should leave something queued),
+    through the REAL transport. The design press of I1 (NEW) lands on
+    Shopify and its answer is lost: the row's lane holds a PENDING doc and
+    nothing would ever press it again -- the copy on the listing unmanaged.
+    The press puts the PRODUCT back in the queue; the 01:00/09:00 product
+    press (the settle spans every lane) claims the copy into I1's lane, and
+    the queue drains. The row's next press is a no-op.
+    REVERT-PROOF: no re-queue on an unsettled design attach -> the product
+    is not queued, the copy stays unmanaged."""
+    fake = _wire(monkeypatch, [_node(1, OWN)])
+    db = _DB()
+    _seed(db, _product([OWN], locally_modified=False), (OWN, 1))
+    _image(db, "I1", NEW)
+    assert not _queued(db)
+    fake.commit_then(httpx.ReadTimeout("read timed out"))
+
+    first = _run(shopify_push.push_image(db, _row(db, "I1")))
+
+    assert first.ok is False and _pending(db) == {(NEW, "I1")}
+    assert _queued(db), "the lost attach leaves its product queued"
+    fake.ready()
+    _age(db, NEW, 60, fake=fake)
+    (doc,) = shopify_live_sync.select_dirty_products(db)[0]
+    prod = _run(shopify_push.push_product(db, doc, []))
+
+    assert prod.ok is True and prod.photos["adopted"] == 1 and prod.code is None, prod.photos
+    assert _ledger(db) == {(OWN, _m(1), None), (NEW, _m(100), "I1")} and not _queued(db)
+    assert _run(shopify_push.push_image(db, _row(db, "I1"))).action == "noop"
+    assert len(fake.calls_of("imsProductCreateMedia")) == 1
 
 
 def test_no_media_state_lives_on_the_twin():
@@ -2329,5 +2413,239 @@ def test_a_claim_waits_for_the_send_window_to_close():
 
     assert claims == [] and drops == [] and drift is False
     assert [(h["url"], h["young"]) for h in held] == [(U1, True)]
-    claims, _drops, held, _drift = _media._settle([p], [node], [], {_m(7): node}, now + timedelta(minutes=3))
+    claims, _drops, held, _drift = _media._settle([p], [node], [], {_m(7): node}, now + _media._REACH)
     assert [c["id"] for c in claims] == [_m(7)] and held == []
+
+
+# ===========================================================================
+# Round 5: a lost attach is told apart by its file name inside a shared send
+# window; a person's photograph under another name never holds an attach
+# once the naming is confirmed on the product
+# ===========================================================================
+
+
+@pytest.mark.parametrize("removed", [False, True], ids=["both-landed", "person-removed-u1-copy"])
+def test_two_lost_attaches_in_one_window_are_told_apart_by_name(gates, monkeypatch, removed):
+    """The panel's MEDIUM (probe test_p1), through the REAL transport. The
+    product's photos change from [OWN] to [U1, U2]. Press 1 sends U1: it
+    lands (100) and the answer is lost. A minute later press 2 holds U1 and
+    sends U2: it lands too (101), answer lost. Both copies sit in BOTH send
+    windows, but each carries its own file name: after the grace U1 claims
+    100 and U2 claims 101, OWN comes down and the product drains.
+    ``removed``: a person deletes U1's copy (100) first -- then nothing in
+    U1's window could be its copy (101 is U2's by name): U1 is dropped and
+    attached again (102), U2 claims 101 -- never both held for good.
+    REVERT-PROOF: every window node a candidate whatever its name -> both
+    docs held (MEDIA_HELD), OWN never taken down, the product drained."""
+    fake = _wire(monkeypatch, [_node(1, OWN)])
+    db = _DB()
+    _seed(db, _product([U1, U2]), (OWN, 1))
+    fake.commit_then(httpx.ReadTimeout("read timed out"))
+    _run(shopify_push.push_product(db, _parent(db), []))
+    assert fake.listing() == [_m(1), _m(100)] and _pending(db) == {(U1, None)}
+    _age(db, U1, 1, fake=fake)
+    fake.commit_then(httpx.ReadTimeout("read timed out"))
+    second = _run(shopify_push.push_product(db, _parent(db), []))
+    assert second.photos["held"] == [U1] and fake.attached() == [U1, U2], second.photos
+    assert _pending(db) == {(U1, None), (U2, None)}
+    fake.ready()
+    if removed:
+        fake.media_nodes = [n for n in fake.media_nodes if n["id"] != _m(100)]
+    _age(db, U1, 21, fake=fake)
+    _age(db, U2, 20, fake=fake)
+
+    done = _run(shopify_push.push_product(db, _parent(db), []))
+
+    assert done.ok is True and done.code is None, (done.code, done.photos)
+    u1 = _m(102) if removed else _m(100)
+    assert _ledger(db) == {(U1, u1, None), (U2, _m(101), None)} and _pending(db) == set()
+    assert done.photos["adopted"] == (1 if removed else 2) and done.photos["dropped"] == (1 if removed else 0)
+    assert sorted(fake.listing()) == sorted([u1, _m(101)]), "OWN taken down, one copy of each"
+    assert [t["media_gid"] for t in db[TOMB].find({})] == [_m(1)] and not _queued(db)
+
+
+def test_a_person_photo_under_another_name_never_holds_an_attach(gates, monkeypatch):
+    """The panel's LOW (c) (probe test_p9), through the REAL transport. U1's
+    attach answers 502 (nothing applied). Forty seconds later -- inside the
+    send window -- a person uploads a DIFFERENT photograph,
+    'lifestyle-shot.jpg' (media 7). The naming is confirmed on this product
+    (OWN's READY copy carries OWN's file name), so IMS's copy of U1 would
+    carry U1's name: 7 is a person's photograph, never U1's. After the grace
+    U1 is dropped and attached once; 7 is never claimed, never deleted --
+    not now, not when U1 is replaced -- and the product drains.
+    REVERT-PROOF: every window node a candidate -> U1 held for good
+    (MEDIA_HELD, 'remove the extra copy'), never attached."""
+    fake = _wire(monkeypatch, [_node(1, OWN)])
+    db = _DB()
+    _seed(db, _product([OWN, U1]), (OWN, 1))
+    fake.status_once["imsProductCreateMedia"] = 502
+    _run(shopify_push.push_product(db, _parent(db), []))
+    assert fake.listing() == [_m(1)] and _pending(db) == {(U1, None)}
+    sent = next(d for d in _docs(db) if not d.get("gid"))["sent_at"]
+    fake.media_nodes.append(_node(7, name="lifestyle-shot.jpg", at=sent + timedelta(seconds=40)))
+    _age(db, U1, 20, fake=fake)
+    fake.node(_m(7))["created"] = next(d for d in _docs(db) if not d.get("gid"))["sent_at"] + timedelta(seconds=40)
+
+    late = _run(shopify_push.push_product(db, _parent(db), []))
+
+    assert late.photos["dropped"] == 1 and late.photos["attached"] == 1, late.photos
+    assert late.code is None and not _queued(db)
+    assert _ledger(db) == {(OWN, _m(1), None), (U1, _m(100), None)}
+    fake.ready()
+    db["catalog_products"].update_one({"id": "P1"}, {"$set": {"images": [OWN, U2]}})
+    _run(shopify_push.push_product(db, _parent(db), []))
+    assert _m(7) in fake.listing() and _m(100) not in fake.listing()
+    assert [t["media_gid"] for t in db[TOMB].find({})] == [_m(100)]
+
+
+def test_a_photo_under_another_name_holds_while_the_naming_is_unconfirmed():
+    """The ceiling of the rule above, the settle alone. The product's only
+    live doc is ADOPTED under the connector's name (no live doc's READY node
+    carries its url's name): IMS's own copy of U1 could carry any name, so a
+    READY node under another name inside the window may be it -- held
+    (past the grace: a person), never dropped and attached a second time.
+    REVERT-PROOF: another-name nodes never candidates -> dropped."""
+    now = datetime.now(timezone.utc)
+    p = {"_id": "d1", "url": U1, "image_id": None, "sent_at": now - timedelta(minutes=30)}
+    own = {"id": _m(1), "status": "READY", "image": {"url": CDN + "900__01__4_1.png"}, "createdAt": "2026-01-01T00:00:00Z"}
+    other = {
+        "id": _m(7),
+        "status": "READY",
+        "image": {"url": CDN + "lifestyle-shot.jpg"},
+        "createdAt": (now - timedelta(minutes=29)).isoformat().replace("+00:00", "Z"),
+    }
+    adopted = ({"url": OWN, "id": _m(1), "how": "adopted"},)
+
+    claims, drops, held, drift = _media._settle([p], [other], [], {_m(1): own, _m(7): other}, now, adopted)
+
+    assert claims == [] and drops == [] and drift is False
+    assert [(h["url"], h["young"]) for h in held] == [(U1, False)]
+
+
+@pytest.mark.parametrize("landed", [True, False], ids=["ims-copy-landed", "nothing-landed"])
+def test_a_person_photo_on_a_listing_ims_owns_nothing_on_never_holds_the_first_attach(gates, monkeypatch, landed):
+    """T23b, the panel's LOW (c) where it bites most: a product's FIRST
+    attach (U1; IMS owns nothing on the listing yet, so nothing confirms the
+    naming) loses its answer, and forty seconds later -- inside the send
+    window -- a person uploads a DIFFERENT photograph, 'lifestyle-shot.jpg'
+    (media 7). ``landed``: IMS's copy (100) is on the listing under U1's
+    file name -- it is claimed, 7 is left alone, nothing is held. Nothing
+    landed: U1 is dropped, and the listing -- a person's photograph and
+    nothing IMS owns -- is hands-off, as the ownership rule has it: U1 is
+    not attached beside it, nothing is held, and no line tells the person to
+    remove a photograph.
+    REVERT-PROOF: an another-name node a candidate whenever the naming is
+    unconfirmed -> landed: two candidates, held; not landed: 7 taken for
+    U1's copy -- either way MEDIA_HELD for good ('remove the extra copy')."""
+    fake = _wire(monkeypatch, [])
+    db = _DB()
+    _seed(db, _product([U1]))
+    if landed:
+        fake.commit_then(httpx.ReadTimeout("read timed out"))
+    else:
+        fake.status_once["imsProductCreateMedia"] = 502
+    first = _run(shopify_push.push_product(db, _parent(db), []))
+    assert first.photos["error"] and _pending(db) == {(U1, None)}, first.photos
+    fake.ready()
+    _age(db, U1, 20, fake=fake)
+    sent = next(d for d in _docs(db) if not d.get("gid"))["sent_at"]
+    fake.media_nodes.append(
+        _node(7, name="lifestyle-shot.jpg", at=(sent if sent.tzinfo else sent.replace(tzinfo=timezone.utc)) + timedelta(seconds=40))
+    )
+
+    late = _run(shopify_push.push_product(db, _parent(db), []))
+
+    assert late.code is None and late.photos["held"] == [] and late.photos["review"] == [], (late.code, late.photos)
+    assert _pending(db) == set() and _m(7) in fake.listing()
+    if landed:
+        assert late.photos["adopted"] == 1 and late.photos["hands_off"] is False, late.photos
+        assert _ledger(db) == {(U1, _m(100), None)}
+    else:
+        assert late.photos["dropped"] == 1 and late.photos["hands_off"] is True, late.photos
+        assert _ledger(db) == set()
+    # (the 502 answered before anything reached Shopify: no attach at all)
+    assert fake.attached() == ([U1] if landed else []), "U1 never attached beside a copy"
+
+
+def test_the_send_window_counts_the_transports_own_tries_before_the_attach(gates, monkeypatch):
+    """T26, the panel's LOW (probe test_p2), through the REAL transport. The
+    pending doc's sent_at is stamped BEFORE _graphql; the transport tries a
+    connect timeout three times (30 s each, then its backoff) before the
+    attach leaves, and Shopify makes the media 25 s into that last try --
+    createdAt = sent_at + 122 s -- and the answer is lost. The window
+    reaches over every try the transport can make: after the grace the
+    media is CLAIMED, never dropped and attached a second time.
+    REVERT-PROOF: _REACH = PROVIDER_TIMEOUT + 90 s -> no node in the window,
+    the doc dropped after 15 minutes and U1 attached again: two copies, the
+    first unmanaged for good."""
+    fake = _wire(monkeypatch, [_node(1, OWN)])
+    wired, left = shopify_push._post_once, [3]
+
+    async def _connect_timeouts_first(url, headers, payload):
+        if "imsProductCreateMedia" in payload["query"] and left[0]:
+            left[0] -= 1
+            raise httpx.ConnectTimeout("connect timed out")
+        return await wired(url, headers, payload)
+
+    monkeypatch.setattr(shopify_push, "_post_once", _connect_timeouts_first)
+    monkeypatch.setattr(shopify_push.transport, "_retry_delay", lambda attempt, retry_after: 0)
+    db = _DB()
+    _seed(db, _product([OWN, U1]), (OWN, 1))
+    fake.commit_then(httpx.ReadTimeout("read timed out"))
+    _run(shopify_push.push_product(db, _parent(db), []))
+    assert left == [0] and fake.listing() == [_m(1), _m(100)] and _pending(db) == {(U1, None)}
+    sent = next(d for d in _docs(db) if not d.get("gid"))["sent_at"]
+    fake.node(_m(100))["created"] = (sent if sent.tzinfo else sent.replace(tzinfo=timezone.utc)) + timedelta(seconds=122)
+    fake.ready()
+    _age(db, U1, 30, fake=fake)
+
+    again = _run(shopify_push.push_product(db, _parent(db), []))
+
+    assert again.photos["adopted"] == 1 and again.photos["attached"] == 0, again.photos
+    assert fake.attached() == [U1] and _ledger(db) == {(OWN, _m(1), None), (U1, _m(100), None)}
+
+
+def test_two_lost_attaches_are_told_apart_by_name_while_the_naming_is_unconfirmed():
+    """T22b, the settle alone. No live doc confirms the naming on this
+    product, and two lost attaches (U1, U2) share one window, each copy
+    READY under its own url's file name: a node under U2's name is U2's
+    attach, never U1's copy -- each claims its own.
+    REVERT-PROOF: no 'another pending doc's name' rule -> each window holds
+    both nodes: both held."""
+    now = datetime.now(timezone.utc)
+    p1 = {"_id": "d1", "url": U1, "image_id": None, "sent_at": now - timedelta(minutes=31)}
+    p2 = {"_id": "d2", "url": U2, "image_id": None, "sent_at": now - timedelta(minutes=30)}
+    at = (now - timedelta(minutes=30, seconds=30)).isoformat().replace("+00:00", "Z")
+    n1 = {"id": _m(100), "status": "READY", "image": {"url": CDN + _cdn_name(U1)}, "createdAt": at}
+    n2 = {"id": _m(101), "status": "READY", "image": {"url": CDN + _cdn_name(U2)}, "createdAt": at}
+
+    claims, drops, held, drift = _media._settle([p1, p2], [n1, n2], [], {_m(100): n1, _m(101): n2}, now)
+
+    assert sorted((c["url"], c["id"]) for c in claims) == sorted([(U1, _m(100)), (U2, _m(101))])
+    assert drops == [] and held == [] and drift is False
+
+
+def test_the_send_window_counts_each_try_as_its_connect_and_its_answer_wait():
+    """T26b, the settle alone. httpx's PROVIDER_TIMEOUT (30 s) bounds each
+    PHASE of a try, not the try: three 429s, each answered 59 s after the
+    request (connect 29 s + a 30 s wait) with Retry-After 30, then the
+    create's own try connects in 29 s, Shopify takes the request and makes
+    the media while IMS waits (30 s) and finishes it 89 s after IMS gave up
+    -- createdAt = sent_at + 3 x 89 + 29 + 30 + 89 = 415 s. The window
+    reaches it: after the grace the media is CLAIMED, never dropped (and the
+    url attached a second time).
+    REVERT-PROOF: a try counted as one PROVIDER_TIMEOUT (_REACH 6 min) ->
+    no candidate, the doc DROPPED."""
+    now = datetime.now(timezone.utc)
+    sent = now - timedelta(minutes=30)
+    p = {"_id": "d1", "url": U1, "image_id": None, "sent_at": sent}
+    node = {
+        "id": _m(100),
+        "status": "READY",
+        "image": {"url": CDN + _cdn_name(U1)},
+        "createdAt": (sent + timedelta(seconds=415)).isoformat().replace("+00:00", "Z"),
+    }
+
+    claims, drops, held, drift = _media._settle([p], [node], [], {_m(100): node}, now)
+
+    assert [c["id"] for c in claims] == [_m(100)] and drops == [] and held == [] and drift is False

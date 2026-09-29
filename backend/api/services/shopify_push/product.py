@@ -569,8 +569,12 @@ async def push_product(
         # and only a NEXT pass settles it: the row stays queued for it. A hold
         # only a PERSON can clear (MEDIA_HELD, MEDIA_NAMING_DRIFT) is not
         # re-queued -- every 01:00/09:00 sync would re-press it for nothing --
-        # it is SAID: its code and line ride the result like the price's.
+        # it is SAID: its code and line ride the result like the price's. A
+        # design-queue attach still inside its grace keeps the row queued too
+        # (``settling``: only a later pass of this product settles it), though
+        # this press says nothing about a lane it does not govern.
         media_code, media_line, media_retry = photo_outcome(photo_summary)
+        media_retry = media_retry or bool((photo_summary or {}).get("settling"))
         # THE ONE RE-QUEUE RULE. The press reached Shopify but did not do all
         # it was pressed for -- the product is not visible, it is visible at
         # the wrong price, or its photographs have not settled. The row goes

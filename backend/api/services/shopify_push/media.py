@@ -36,7 +36,8 @@ from ._shared import (
     online_block_status,
     push_lock_reason,
 )
-from .transport import _graphql, _now
+from .transport import _MAX_RETRIES, _RETRY_MAX_DELAY, _graphql, _now
+from .writeback import _requeue_unpublished
 from .queries import (
     _MEDIA_LIMIT,
     _PRODUCT_CREATE_MEDIA,
@@ -466,11 +467,14 @@ async def _attach_one(
 # is never replayed), so a timeout leaves a pending doc and at most one media
 # on the listing. The NEXT pass settles it off its read of the listing, by
 # WHEN each media was made (createdAt) and its CDN file name: the pending doc
-# CLAIMS the ONE media made while its send was in flight -- READY under the
-# url's file name (_same_file), or FAILED (then attached again and taken
-# down); it is DROPPED ('never landed', the url may be attached again) only
-# when no media was made in that window and 15 minutes have passed;
-# otherwise it is HELD (the url not attached again). A hold past the grace
+# CLAIMS the ONE media made while its send was in flight that could be its
+# copy -- READY under the url's file name (_same_file), or FAILED (then
+# attached again and taken down); a media under another pending attach's
+# name is that attach's, and a READY one under a name no attach carries is
+# a person's once the naming is confirmed on the product. It is DROPPED
+# ('never landed', the url may be attached again) only when nothing made in
+# that window could be its copy and 15 minutes have passed; otherwise it is
+# HELD (the url not attached again). A hold past the grace
 # waits for a person (MEDIA_HELD), and so does a naming drift. A media made
 # outside the window -- a human's upload, even of IMS's own file under IMS's
 # own name -- is never claimed (_settle). originalSource is no identity: it
@@ -582,14 +586,20 @@ def _connector_file(ims_url: str, cdn_url: str, own_id: str) -> bool:
 # THE SETTLE (see the ownership note). IMS's attach is made on Shopify DURING
 # its productCreateMedia, so a pending doc's media -- if it landed -- is a
 # free node whose createdAt (Shopify's clock) lies inside the SEND WINDOW
-# [sent_at - _SKEW, sent_at + _REACH]: _SKEW covers the two clocks, _REACH
-# the send (PROVIDER_TIMEOUT) and Shopify finishing a request whose answer
-# IMS gave up on. A human's upload -- even of IMS's own file, under IMS's own
-# file name -- is made after someone saw the press fail: outside the window,
-# never a candidate, whatever its name. The window is the identity; the file
-# name only confirms it.
+# [sent_at - _SKEW, sent_at + _REACH]. sent_at is stamped BEFORE _graphql,
+# and the transport may try again before the request leaves (a connect or
+# pool timeout, a 429, a THROTTLED body, then a backoff of up to
+# _RETRY_MAX_DELAY). httpx's PROVIDER_TIMEOUT bounds each PHASE of a try, so
+# a try is counted as its connect plus its wait for the answer (2 x
+# PROVIDER_TIMEOUT): _REACH is every earlier try at its longest, the last try
+# at its longest, Shopify finishing a request whose answer IMS gave up on
+# (90 s) and _SKEW for the two clocks. A human's
+# upload -- even of IMS's own file, under IMS's own file name -- is made
+# after someone saw the press fail: outside the window, never a candidate.
+# Inside it, the FILE NAME tells IMS's attaches apart (_settle).
 _SKEW = timedelta(minutes=1)
-_REACH = timedelta(seconds=PROVIDER_TIMEOUT + 90)
+_TRY = 2 * PROVIDER_TIMEOUT  # connect + the wait for the answer
+_REACH = timedelta(seconds=(_MAX_RETRIES - 1) * (_TRY + _RETRY_MAX_DELAY) + _TRY + 90) + _SKEW
 _SETTLE_GRACE = timedelta(minutes=15)  # == _LEASE_TTL: no live pass can still be sending
 
 
@@ -620,39 +630,72 @@ def _settle(
     minted: List[Dict[str, Any]],
     nodes: Dict[str, Dict[str, Any]],
     now: datetime,
+    live: Tuple[Dict[str, Any], ...] = (),
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], bool]:
     """PURE: settle the pending docs against the listing's FREE nodes (the
-    nodes no live doc names) -> (claims, drops, held, drift). A pending doc's
-    CANDIDATES are the free nodes made inside its send window.
+    nodes no live doc names) -> (claims, drops, held, drift). ``live`` is
+    every live doc of the product (it CONFIRMS the naming, below). A pending
+    doc's CANDIDATES are the free nodes made inside its send window that
+    COULD be its copy -- each pending doc was sent once, so it made at most
+    one media:
+      * a node with no CDN name yet (still processing) or FAILED (no name
+        at all) could be anyone's -- a candidate;
+      * a READY node under the url's file name (_same_file) -- a candidate;
+      * a READY node under ANOTHER pending doc's file name is that attach's
+        -- never this one's (two lost attaches of one product inside one
+        window are told apart by name);
+      * a READY node under a name no pending doc carries is a candidate only
+        while Shopify's naming is UNCONFIRMED on a product IMS already has
+        media on: once a live doc's READY node carries its url's name, IMS's
+        copy carries its url's name too, so that node is a person's
+        photograph; and with NO live doc at all it is never a candidate
+        either -- the doc is dropped and the listing is hands-off (a READY
+        media and nothing IMS owns), so nothing is attached a second time,
+        unless another pending doc claims its own copy (which confirms the
+        naming: the node is a person's).
       claim  the window has closed and holds exactly ONE candidate, no other
-             pending doc's window holds that node, and the node is READY
-             carrying the url's file name (_same_file) -- or FAILED (IMS's
-             own attach Shopify could not fetch: claimed, so the pass
-             attaches the url again and takes the FAILED copy down);
+             pending doc's window holds it, and it is READY under the url's
+             file name -- or FAILED (IMS's own attach Shopify could not
+             fetch: claimed, so the pass attaches the url again and takes
+             the FAILED copy down);
       drop   ('never landed': the url may be attached again) no candidate at
              all, older than _SETTLE_GRACE;
       held   everything else, each with ``young`` (inside the grace: a later
-             pass settles it). An OLD hold -- two candidates, a candidate
-             still processing or under another name -- waits for a person
-             to look at the listing (MEDIA_HELD).
+             pass settles it). An OLD hold -- two candidates (a person's copy
+             of the same file inside the window), one still processing, or
+             one under another name while the naming is unconfirmed -- waits
+             for a person to look at the listing (MEDIA_HELD).
+    ponytail: a FAILED media carries no CDN name (and IMS sends alt ''), so
+    a person's upload that went FAILED inside the window is taken for IMS's
+    copy and taken down with it -- it shows nothing, its tombstone keeps the
+    record, and the url IMS wanted is attached again. Tell them apart only
+    if Shopify ever answers a FAILED media's source file name.
     DRIFT (the canary): a READY node IMS minted whose CDN name no longer
     carries its url's file name means Shopify's naming changed; every
     pending doc of the product is then held -- no claim, no drop, no
-    re-attach -- until a person looks (MEDIA_NAMING_DRIFT).
-    ponytail: two lost attaches of one product inside one window share their
-    candidates and wait for a person; tell them apart by name if that ever
-    happens."""
-    drift = any(
-        _cdn(nodes.get(r["id"])) and not _same_file(r["url"], _cdn(nodes[r["id"]]))
-        for r in minted
-        if r["id"] in nodes
-    )
+    re-attach -- until a person looks (MEDIA_NAMING_DRIFT)."""
+
+    def _named(r: Dict[str, Any]) -> Optional[bool]:
+        cdn = _cdn(nodes.get(r["id"]))
+        return _same_file(r["url"], cdn) if cdn else None
+
+    drift = any(_named(r) is False for r in minted)
+    confirmed = any(_named(r) for r in (*live, *minted))
+
+    def _could_be(p: Dict[str, Any], n: Dict[str, Any]) -> bool:
+        cdn = _cdn(n)
+        if not cdn or _same_file(p["url"], cdn):
+            return True
+        if any(_same_file(q["url"], cdn) for q in pending if q["_id"] != p["_id"]):
+            return False
+        return bool(live) and not confirmed
+
     cands: Dict[Any, Optional[List[Dict[str, Any]]]] = {}
     for p in pending:
         sent = p.get("sent_at")
         if isinstance(sent, datetime):
             lo, hi = _utc(sent) - _SKEW, _utc(sent) + _REACH
-            cands[p["_id"]] = [n for n in free if lo <= (_created(n) or lo - _SKEW) <= hi]
+            cands[p["_id"]] = [n for n in free if lo <= (_created(n) or lo - _SKEW) <= hi and _could_be(p, n)]
         else:
             cands[p["_id"]] = None  # no send time: never settled
     load = Counter(str(n["id"]) for ns in cands.values() for n in ns or [])
@@ -783,8 +826,9 @@ def plan_product_media(
     claims / drops: [pending doc] (_settle), held: [url] (the HELD attaches
     of the lane this plan governs), review: [url] (those of them past the
     grace, or held by drift: a person must look), gone: [gid] (live docs
-    whose media left the listing), drift: bool, on_shopify: n (the listing's
-    media that is not FAILED; None dark)}."""
+    whose media left the listing), drift: bool, settling: bool (an attach
+    of ANY lane is held inside its grace: only a later pass settles it),
+    on_shopify: n (the listing's media that is not FAILED; None dark)}."""
     owned = owned_media(rows, own)
     pending = pending_media(rows, own)
 
@@ -804,6 +848,7 @@ def plan_product_media(
         "review": [],
         "gone": [],
         "drift": False,
+        "settling": False,
         "on_shopify": None,
     }
     if listing is None:
@@ -827,7 +872,7 @@ def plan_product_media(
     named = {r["id"] for r in live}
     free = [n for i, n in nodes.items() if i not in named]
     minted = [r for r in live if r.get("how") == "minted"]
-    claims, drops, held, drift = _settle(pending, free, minted, nodes, now or _now())
+    claims, drops, held, drift = _settle(pending, free, minted, nodes, now or _now(), tuple(live))
     live += [
         {"_id": c["_id"], "url": c["url"], "id": c["id"], "image_id": c["image_id"], "how": "settled"}
         for c in claims
@@ -877,6 +922,7 @@ def plan_product_media(
         review=[p["url"] for p in held if _governed(p) and (drift or not p["young"])],
         gone=gone,
         drift=drift,
+        settling=not drift and any(p["young"] for p in held),
         on_shopify=len(nodes) - len(failed),
     )
     return out
@@ -1005,8 +1051,9 @@ def photo_outcome(summary: Optional[Dict[str, Any]]) -> Tuple[Optional[str], Opt
     if code == MEDIA_HELD:
         return code, (
             "photographs held: the attach of %s cannot be told apart on the Shopify listing "
-            "(more than one media, or one still processing, was made while it was sent) -- "
-            "check the listing in the Shopify admin, remove the extra copy, then press again" % held
+            "(two media that could be its copy, or one still processing, were made while it "
+            "was sent) -- check the listing in the Shopify admin: if that photograph is on it "
+            "twice, remove the extra copy (never a different photograph), then press again" % held
         ), False
     if code == MEDIA_SETTLING:
         return code, (
@@ -1044,8 +1091,10 @@ async def sync_product_media(
     unmanaged, adopted (pending docs settled onto a media of their send
     window), dropped, held ([url] -- attaches of this lane that may have
     landed: not attached again), review ([url] -- the held ones a person must
-    look at), hands_off, on_shopify (the listing's non-FAILED media after the
-    pass -- the publish precondition), attached_map ([{url, id, image_id}]
+    look at), hands_off, settling (an attach of ANY lane still inside its
+    grace: the product stays queued so a later pass settles it), on_shopify
+    (the listing's non-FAILED media after the pass -- the publish
+    precondition), attached_map ([{url, id, image_id}]
     minted), error?, code? (MEDIA_SETTLING / MEDIA_HELD / MEDIA_NAMING_DRIFT
     alone are not an error; photo_outcome says what each means for a door)}."""
     summary: Dict[str, Any] = {
@@ -1058,6 +1107,7 @@ async def sync_product_media(
         "held": [],
         "review": [],
         "hands_off": False,
+        "settling": False,
         "on_shopify": 0,
         "attached_map": [],
     }
@@ -1112,6 +1162,7 @@ async def sync_product_media(
         held=plan["held"],
         review=plan["review"],
         hands_off=plan["hands_off"],
+        settling=plan["settling"],
         on_shopify=plan["on_shopify"],
     )
     if plan["drift"]:
@@ -1461,10 +1512,18 @@ async def _press_image(db, image: Dict[str, Any], renew: Callable[[], bool] = la
     # A media that landed on Shopify but is not recorded live would be
     # re-checked by the next press, so that is a loud failure with the
     # minted gid kept for reconcile (attached_map), never a silent ok=True.
+    # An attach of this lane left PENDING (its answer lost, or still inside
+    # its grace) needs a next pass to settle it, and no schedule presses a
+    # design row: the product goes back in the queue, so the 01:00/09:00
+    # product press settles it (the settle spans every lane).
     try:
-        new_gid = image_media_gid(_resolve_product_doc(db, pid), image, media_rows(db, pid))
+        parent_now, rows_now = _resolve_product_doc(db, pid), media_rows(db, pid)
+        new_gid = image_media_gid(parent_now, image, rows_now)
+        unsettled = any(not r.get("id") for r in image_lane_media(parent_now, image, rows_now))
     except Exception:  # noqa: BLE001 -- unreadable: not recorded, as far as this press knows
-        new_gid = None
+        new_gid, unsettled = None, False
+    if unsettled:
+        _requeue_unpublished(db, pid)
     minted = {r["url"]: r["id"] for r in summary.get("attached_map") or []}.get(src)
     error = summary.get("error")
     if not new_gid and not error:
