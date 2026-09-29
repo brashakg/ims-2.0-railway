@@ -527,10 +527,15 @@ def _build_return_lines(
     order_items = [i for i in (order.get("items") or []) if isinstance(i, dict)]
     refund_level_restock = bool(payload.get("restock", True))
     door_released = _ims_cancel_door_ran(order)
-    # A Shopify cancel on an order IMS holds DELIVERED (owner ruling
-    # 2026-09-28): the customer has the goods, so a "cancel" line restocks
-    # nothing. If they come back, Goods back on the review row restocks them.
-    delivered = str(order.get("status") or "").strip().upper() == "DELIVERED"
+    # A Shopify "cancel" line is a quantity Shopify never fulfilled. On an
+    # order a person delivered at the counter (the counter door stamps its
+    # user; the courier legs stamp "system:"), the customer has it anyway
+    # (owner ruling 2026-09-28): the line restocks nothing, and Goods back on
+    # the review row restocks it if it comes back. After a courier delivery
+    # of other units, it never left the shelf and restocks as Shopify says.
+    by = str(order.get("status_updated_by") or "")
+    handed_over = (str(order.get("status") or "").strip().upper() == "DELIVERED"
+                   and bool(by) and not by.startswith("system:"))
     lines: List[Any] = []
     for rl in payload.get("refund_line_items") or []:
         if not isinstance(rl, dict):
@@ -567,7 +572,7 @@ def _build_return_lines(
                 restock=(
                     _line_restock_flag(rl, refund_level_restock)
                     and not door_released
-                    and not (delivered and _norm(rl.get("restock_type")).lower() == "cancel")
+                    and not (handed_over and _norm(rl.get("restock_type")).lower() == "cancel")
                 ),
                 reason="Shopify refund",
             )
@@ -863,8 +868,7 @@ def handle_shopify_refund(
             note = (
                 "Goods are with the courier or the customer: when they physically "
                 "come back, press Goods back here (never a counter return -- "
-                "Shopify already refunded this money). For a DELIVERED order see "
-                "its status-conflict task."
+                "Shopify already refunded this money)."
             )
         if door_cancelled or counter_returned or goods_out or not _refund_auto_enabled(db):
             # DEFAULT: accountant review queue. NO ledger, NO stock movement.
@@ -1543,7 +1547,8 @@ def goods_back(db, review: Dict[str, Any], *, user_id: Optional[str]) -> Dict[st
     """A person says the goods of this Shopify refund physically came back:
     put its units back in stock. This is the goods leg of a refund whose goods
     were out -- a DELIVERED order Shopify cancels or refunds stays DELIVERED
-    (owner ruling 2026-09-28) and its lines are held at the confirm. The money
+    (owner ruling 2026-09-28), and a line whose goods the customer holds
+    restocks nothing at the confirm. The money
     is the confirm's, never this door's; the counter return door would refund
     it a second time.
 

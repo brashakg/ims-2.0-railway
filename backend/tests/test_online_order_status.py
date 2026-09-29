@@ -790,8 +790,8 @@ def test_a_split_shipment_is_delivered_by_its_live_parcel(swept, monkeypatch, sp
 # The refund leg. Finding (d): a Shopify cancel refund restocks no unit the
 # order does not hold SOLD (an oversold / under-claimed line would MINT a
 # phantom), in both postures. Goods out with the courier or the customer: a
-# person decides, even under AUTO; a DELIVERED order's "cancel" line never
-# restocks (the customer has the goods).
+# person decides, even under AUTO; the "cancel" line of an order the counter
+# handed over never restocks (the customer has the goods).
 # ---------------------------------------------------------------------------
 
 from test_online_order_mapper import _frame_order  # noqa: E402
@@ -871,17 +871,42 @@ def test_a_refund_on_goods_out_waits_for_a_person_even_under_auto(swept, monkeyp
     assert swept["returns"].count_documents({}) == 0 and swept["ledger"].count_documents({}) == 0
 
 
+_HANDED_OVER = {"status": "DELIVERED", "status_updated_by": "u1"}
+
+
 @pytest.mark.parametrize("restock_type, restock", [("cancel", False), ("return", True)])
-def test_a_delivered_orders_cancel_line_is_proposed_without_a_restock(swept, restock_type, restock):
+def test_a_handed_over_orders_cancel_line_is_proposed_without_a_restock(swept, restock_type, restock):
     doc = _book(swept, 60150)
     _claim_unit(swept, doc)
-    _set(swept, 60150, status="DELIVERED")
+    _set(swept, 60150, **_HANDED_OVER)
     shopify_refund.handle_shopify_refund(swept["db"], _refund(700350, 60150, restock_type=restock_type),
                                          webhook_id=None, topic="refunds/create")
 
     row = swept["review"].find_one({"shopify_refund_id": "700350"})
     assert row["status"] == "PENDING"
     assert [line["restock"] for line in row["proposed_restock"]] == [restock]
+
+
+def test_a_unit_shopify_never_fulfilled_goes_back_on_the_shelf_after_a_courier_delivery(swept):
+    """Two frames on one line; the courier delivered one parcel (the order is
+    DELIVERED by the courier leg), then Shopify cancels and refunds the other,
+    unfulfilled unit ("cancel"). That frame never left the shelf: the confirm
+    restocks it. The hold is for an order the counter handed over, where the
+    customer has every unit whatever Shopify thinks was fulfilled."""
+    oid = 60151
+    doc = _book(swept, oid, line_items=[{**_frame_order(oid)["line_items"][0], "quantity": 2}])
+    _claim_unit(swept, doc)
+    swept["stock_repo"].units.append({**swept["stock_repo"].units[0], "stock_id": "stk-2"})
+    shopify_fulfillment.reconcile_fulfillment(swept["db"], _fulfilment(oid, 1, shipment_status="delivered"))
+    assert _doc(swept, oid)["status"] == "DELIVERED"
+    shopify_refund.handle_shopify_refund(swept["db"], _refund(700351, oid), webhook_id=None,
+                                         topic="refunds/create")
+    row = swept["review"].find_one({"shopify_refund_id": "700351"})
+    assert [(line["return_qty"], line["restock"]) for line in row["proposed_restock"]] == [(1, True)]
+    assert "status-conflict task" not in row["note"], "a partial refund raises none"
+
+    _confirm(row)
+    assert sorted(s for _, s in _units(swept)) == ["AVAILABLE", "SOLD"]
 
 
 # ---------------------------------------------------------------------------
@@ -971,7 +996,7 @@ def _goods_back(row):
 def test_the_goods_of_a_delivered_orders_refund_come_back_once(swept, order):
     from fastapi import HTTPException
 
-    row = _one_unit_refund(swept, 60170, 700370, status="DELIVERED", payment_status="REFUNDED")
+    row = _one_unit_refund(swept, 60170, 700370, **_HANDED_OVER, payment_status="REFUNDED")
     assert [line["restock"] for line in row["proposed_restock"]] == [False], "held: goods are out"
     if order == "confirm_first":
         res = _confirm(row)["result"]
