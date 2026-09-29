@@ -81,13 +81,18 @@ def _match(doc, filter_) -> bool:
                     if actual is None or actual > op_val:
                         return False
                 elif op == "$ne":
-                    if actual == op_val:
+                    # Mongo: $ne on an array field means "no element equals".
+                    if op_val in actual if isinstance(actual, list) else actual == op_val:
                         return False
                 elif op == "$in":
                     if actual not in (op_val or []):
                         return False
                 elif op == "$exists":
                     if (k in doc) != bool(op_val):
+                        return False
+                elif op == "$elemMatch":
+                    # The returnable-qty claim on an order line.
+                    if not any(isinstance(e, dict) and _match(e, op_val) for e in (actual or [])):
                         return False
                 else:
                     return False
@@ -167,6 +172,18 @@ class FakeCollection:
                     d[k] = v
                 for k, v in (update.get("$push") or {}).items():
                     d.setdefault(k, []).append(v)
+                # Positional "arr.$.leaf": the first element the $elemMatch matched.
+                for op in ("$inc", "$addToSet", "$pull"):
+                    for k, v in (update.get(op) or {}).items():
+                        arr, _, leaf = k.partition(".$.")
+                        cond = filter_[arr]["$elemMatch"]
+                        el = next(e for e in d[arr] if isinstance(e, dict) and _match(e, cond))
+                        if op == "$inc":
+                            el[leaf] = (el.get(leaf) or 0) + v
+                        elif op == "$addToSet":
+                            el[leaf] = (el.get(leaf) or []) + ([] if v in (el.get(leaf) or []) else [v])
+                        else:
+                            el[leaf] = [e for e in el.get(leaf) or [] if e != v]
                 return dict(d)
         return None
 

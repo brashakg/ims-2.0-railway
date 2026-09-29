@@ -928,22 +928,19 @@ def test_goods_back_that_cannot_read_the_stock_can_be_pressed_again(swept, monke
 # One frame, one unit, whichever doors run. The confirm of a goods-out refund
 # (a SHIPPED order) that cannot read the stock leaves the restock OPEN and a
 # task sends a person to the /returns/{id}/restock retry door; Goods back may
-# already have put the unit back, before or after that confirm. The retry door
-# holds the same cap as every Shopify restock, so it never mints a second one.
+# put the unit back before that confirm, or before or after the retry. Every
+# door restocks the one way (shopify_refund._restock_booked), so the refund
+# restocks its line once.
 
 
-def _open_restock(swept, monkeypatch, oid, rid, goods_first):
+def _open_restock(swept, monkeypatch, oid, rid):
     row = _one_unit_refund(swept, oid, rid, status="SHIPPED", awb=f"AWB{oid}")
     assert row["status"] == "PENDING" and [line["restock"] for line in row["proposed_restock"]] == [True]
-    if goods_first:
-        assert _goods_back(row)["result"]["status"] == "restocked"
     _read_fails_once(monkeypatch, swept["stock_repo"])
     res = shopify_refund.post_from_review(swept["db"], row)
     assert res["status"] == "credited" and res["restock_applied"] is False
-    if not goods_first:
-        assert _goods_back(row)["result"]["status"] == "restocked"
-    assert _units(swept) == [("stk-1", "AVAILABLE")]
-    return swept["returns"].find_one({"shopify_refund_id": str(rid)})
+    assert _units(swept) == [("stk-1", "SOLD")]
+    return row, swept["returns"].find_one({"shopify_refund_id": str(rid)})
 
 
 def _retry(ret):
@@ -952,18 +949,106 @@ def _retry(ret):
 
 @pytest.mark.parametrize("goods_first", [False, True])
 def test_goods_back_and_the_restock_retry_put_one_unit_back(swept, monkeypatch, goods_first):
-    ret = _open_restock(swept, monkeypatch, 60172, 700372, goods_first)
-    assert _retry(ret)["restock_applied"] is True
+    row, ret = _open_restock(swept, monkeypatch, 60172, 700372)
+    doors = [lambda: _goods_back(row)["result"]["status"], lambda: _retry(ret)["restock_applied"]]
+    assert [door() for door in (doors if goods_first else doors[::-1])] in (
+        ["restocked", True], [True, "restocked"])
+    assert _units(swept) == [("stk-1", "AVAILABLE")], "no phantom minted"
+
+
+def test_goods_back_before_the_confirm_leaves_it_nothing_to_restock(swept):
+    row = _one_unit_refund(swept, 60177, 700377, status="SHIPPED", awb="AWB60177")
+    assert _goods_back(row)["result"]["status"] == "restocked"
+    res = shopify_refund.post_from_review(swept["db"], row)
+    assert res["restock_applied"] is True and res["restock_stock_ids"] == []
     assert _units(swept) == [("stk-1", "AVAILABLE")], "no phantom minted"
 
 
 def test_a_restock_retry_that_cannot_read_the_stock_restocks_nothing(swept, monkeypatch):
-    ret = _open_restock(swept, monkeypatch, 60173, 700373, goods_first=True)
+    row, ret = _open_restock(swept, monkeypatch, 60173, 700373)
     _read_fails_once(monkeypatch, swept["stock_repo"])
     assert _retry(ret)["restock_applied"] is False
-    assert _units(swept) == [("stk-1", "AVAILABLE")]
+    assert _units(swept) == [("stk-1", "SOLD")]
     assert _retry(ret)["restock_applied"] is True, "left open, not stuck in progress"
+    assert _goods_back(row)["result"]["status"] == "restocked"
     assert _units(swept) == [("stk-1", "AVAILABLE")]
+
+
+# P1 phantom unit. Our own Shopify order-history import (historical, DELIVERED)
+# never claimed a stock row, so no SOLD unit guards its restock: every restock
+# MINTS a unit. Goods back, the accountant's confirm, the AUTO post and the
+# /returns/{id}/restock retry each restock the same refunded frame; every one
+# books the refund's mark on the order line first (_restock_booked), so one
+# frame is one AVAILABLE row whichever doors run, in either order.
+
+
+def _historical_refund(swept, monkeypatch, oid, rid, **order_set):
+    _book(swept, oid)
+    _set(swept, oid, historical=True, import_source="shopify_order_history",
+         fulfillment_stores=["BV-GANGA-01"], **order_set)
+    shopify_refund.handle_shopify_refund(swept["db"], _refund(rid, oid, restock_type="return"),
+                                         webhook_id=None, topic="refunds/create")
+    return swept["review"].find_one({"shopify_refund_id": str(rid)})
+
+
+def _minted(swept):
+    return sorted(u["status"] for u in swept["stock_repo"].units)
+
+
+@pytest.mark.parametrize("goods_first", [True, False])
+def test_one_frame_of_a_historical_order_is_one_unit_goods_back_and_confirm(swept, monkeypatch, goods_first):
+    row = _historical_refund(swept, monkeypatch, 60180 + goods_first, 700380 + goods_first,
+                             status="DELIVERED")
+    assert row["status"] == "PENDING" and [line["restock"] for line in row["proposed_restock"]] == [True]
+    doors = [lambda: _goods_back(row), lambda: _confirm(row)]
+    for door in (doors if goods_first else doors[::-1]):
+        door()
+    assert _minted(swept) == ["AVAILABLE"], "one frame, one unit"
+    assert swept["ledger"].count_documents({}) == 1
+
+
+@pytest.mark.parametrize("goods_first", [True, False])
+def test_one_frame_of_a_historical_order_is_one_unit_goods_back_and_retry(swept, monkeypatch, goods_first):
+    row = _historical_refund(swept, monkeypatch, 60182 + goods_first, 700382 + goods_first,
+                             status="DELIVERED")
+    real = returns_router._restock_good_items
+    monkeypatch.setattr(returns_router, "_restock_good_items", lambda *a, **kw: {"applied": False})
+    assert _confirm(row)["result"]["restock_applied"] is False, "the confirm's restock did not land"
+    monkeypatch.setattr(returns_router, "_restock_good_items", real)
+    ret = swept["returns"].find_one({"shopify_refund_id": str(700382 + goods_first)})
+    doors = [lambda: _goods_back(row), lambda: _retry(ret)]
+    for door in (doors if goods_first else doors[::-1]):
+        door()
+    assert _minted(swept) == ["AVAILABLE"], "one frame, one unit"
+
+
+def test_a_refund_restocks_its_line_once_even_when_another_refund_left_a_unit_out(swept, monkeypatch):
+    """Two frames on one line: refund R2 is money only (the customer keeps a
+    frame), refund R1's frame comes back through Goods back. The line still
+    has a unit out with the buyer, so only R1's own mark on the line stops
+    R1's confirm restocking its frame a second time."""
+    oid = 60185
+    _book(swept, oid, line_items=[{**_frame_order(oid)["line_items"][0], "quantity": 2}])
+    _set(swept, oid, historical=True, import_source="shopify_order_history",
+         fulfillment_stores=["BV-GANGA-01"], status="DELIVERED")
+    for rid, restock_type in ((700386, "no_restock"), (700385, "return")):
+        shopify_refund.handle_shopify_refund(swept["db"], _refund(rid, oid, restock_type=restock_type),
+                                             webhook_id=None, topic="refunds/create")
+    _confirm(swept["review"].find_one({"shopify_refund_id": "700386"}))
+    row = swept["review"].find_one({"shopify_refund_id": "700385"})
+    _goods_back(row)
+    _confirm(swept["review"].find_one({"shopify_refund_id": "700385"}))
+    assert _minted(swept) == ["AVAILABLE"], "one frame back, one unit"
+
+
+def test_one_frame_of_a_historical_order_is_one_unit_auto_then_goods_back(swept, monkeypatch):
+    """AUTO restocked it but could not issue the credit (no customer): the
+    NO_CUSTOMER row still offers Goods back."""
+    monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "1")
+    row = _historical_refund(swept, monkeypatch, 60184, 700384, status="COMPLETED", customer_id=None)
+    assert row["status"] == "NO_CUSTOMER" and _minted(swept) == ["AVAILABLE"]
+    _goods_back(row)
+    assert _minted(swept) == ["AVAILABLE"], "one frame, one unit"
 
 
 # ---------------------------------------------------------------------------

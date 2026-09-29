@@ -80,7 +80,8 @@ def _match(doc, filter_) -> bool:
                     if actual not in (op_val or []):
                         return False
                 elif op == "$ne":
-                    if actual == op_val:
+                    # Mongo: $ne on an array field means "no element equals".
+                    if op_val in actual if isinstance(actual, list) else actual == op_val:
                         return False
                 elif op == "$exists":
                     if (k in doc) != bool(op_val):
@@ -182,20 +183,31 @@ class FakeCollection:
             self.docs.append(target)
         if target is None:
             return None
+        def _slot(k):
+            """(container, leaf) for a key: positional "arr.$.leaf" is the first
+            element the $elemMatch matched; a dotted "a.b" is nested, as Mongo."""
+            arr, _, leaf = k.partition(".$.")
+            if leaf:
+                cond = filter_[arr]["$elemMatch"]
+                return next(e for e in target[arr] if isinstance(e, dict) and _match(e, cond)), leaf
+            *parents, leaf = k.split(".")
+            node = target
+            for part in parents:
+                node = node.setdefault(part, {})
+            return node, leaf
+
         for op, fields in (update or {}).items():
-            if op == "$inc":
-                for k, v in fields.items():
-                    arr, _, leaf = k.partition(".$.")
-                    if leaf:
-                        # Positional: the first element the $elemMatch matched.
-                        cond = filter_[arr]["$elemMatch"]
-                        el = next(e for e in target[arr] if isinstance(e, dict) and _match(e, cond))
-                        el[leaf] = (el.get(leaf) or 0) + v
-                    else:
-                        target[k] = (target.get(k) or 0) + v
-            elif op == "$set":
-                for k, v in fields.items():
-                    target[k] = v
+            for k, v in fields.items() if op in ("$inc", "$set", "$addToSet", "$pull") else ():
+                node, leaf = _slot(k)
+                if op == "$inc":
+                    node[leaf] = (node.get(leaf) or 0) + v
+                elif op == "$set":
+                    node[leaf] = v
+                elif op == "$addToSet":
+                    if v not in node.setdefault(leaf, []):
+                        node[leaf].append(v)
+                else:
+                    node[leaf] = [e for e in node.get(leaf) or [] if e != v]
         _push_unset(target, update)
         return dict(target)
 
@@ -203,7 +215,11 @@ class FakeCollection:
         for d in self.docs:
             if _match(d, filter_):
                 for k, v in (update.get("$set") or {}).items():
-                    d[k] = v
+                    *parents, leaf = k.split(".")
+                    node = d
+                    for part in parents:
+                        node = node.setdefault(part, {})
+                    node[leaf] = v
                 _push_unset(d, update)
                 return type("R", (), {"modified_count": 1, "matched_count": 1})()
         if upsert:

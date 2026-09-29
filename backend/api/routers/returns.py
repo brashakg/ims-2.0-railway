@@ -449,6 +449,28 @@ def _already_returned_qty(
     return round(total, 4)
 
 
+def _units_already_back(
+    order_id: Optional[str],
+    orig_line: Dict[str, Any],
+    exclude_shopify_refund_id: Optional[str] = None,
+) -> float:
+    """ONE count of an order line's units no longer out with the buyer: every
+    return doc's qty for the line (_already_returned_qty), or the line's own
+    returned_qty (the atomic claim's count: the counter door's claims plus
+    every Shopify refund restock, Goods back included, which write no counter
+    return doc), whichever is larger -- a counter return books both. The
+    counter return door and every Shopify restock cap read it."""
+    return max(
+        _already_returned_qty(
+            order_id,
+            orig_line.get("item_id") or orig_line.get("id"),
+            orig_line.get("product_id"),
+            exclude_shopify_refund_id=exclude_shopify_refund_id,
+        ),
+        float(orig_line.get("returned_qty") or 0),
+    )
+
+
 def _orders_coll():
     """Raw `orders` collection for the atomic per-line returnable-qty claim.
 
@@ -473,6 +495,7 @@ def _claim_returnable_qty(
     order_id: Optional[str],
     orig_line: Dict[str, Any],
     return_qty: float,
+    refund_id: Optional[str] = None,
 ) -> bool:
     """Atomically reserve `return_qty` units against an order line's remaining
     returnable quantity -- the same guard-in-the-filter pattern as the voucher
@@ -489,8 +512,13 @@ def _claim_returnable_qty(
     `product_id` (first line for that product). `$elemMatch` keeps the filter
     predicate and the positional `$inc` on the SAME element.
 
+    `refund_id`: a Shopify refund's restock (shopify_refund._restock_booked)
+    also marks the element restocked by that refund, in the SAME write, and
+    matches only while the mark is absent -- so one refund restocks one line
+    once, whichever door (Goods back, the confirm, the retry) runs first.
+
     Returns True when the claim succeeded, False on no-match (already returned /
-    over-cap / concurrent loser). Fail-soft: returns True when no orders
+    over-cap / concurrent loser / this refund already restocked the line). Fail-soft: returns True when no orders
     collection is available, or the driver lacks find_one_and_update, so the
     pre-validation scan stays the guard rather than blocking a valid return.
     """
@@ -525,8 +553,11 @@ def _claim_returnable_qty(
         # cap < 0 means even a single unit over-returns -> never claimable.
         elem["returned_qty"] = {"$lt": -1}  # impossible: forces no-match
 
+    update: Dict[str, Any] = {"$inc": {"items.$.returned_qty": return_qty}}
+    if refund_id:
+        elem["restocked_refunds"] = {"$ne": refund_id}
+        update["$addToSet"] = {"items.$.restocked_refunds": refund_id}
     match = {"order_id": order_id, "items": {"$elemMatch": elem}}
-    update = {"$inc": {"items.$.returned_qty": return_qty}}
     try:
         updated = coll.find_one_and_update(
             match, update, return_document=ReturnDocument.AFTER
@@ -543,10 +574,12 @@ def _release_returnable_qty(
     order_id: Optional[str],
     orig_line: Dict[str, Any],
     return_qty: float,
+    refund_id: Optional[str] = None,
 ) -> None:
     """Undo a successful _claim_returnable_qty (decrement the element's
-    returned_qty) when a later step of the SAME request fails and we must not
-    leave a phantom reservation. Best-effort + fail-soft -> never raises."""
+    returned_qty, and drop `refund_id`'s restock mark when given) when a later
+    step of the SAME request fails and we must not leave a phantom
+    reservation. Best-effort + fail-soft -> never raises."""
     if not order_id or return_qty <= 0:
         return
     coll = _orders_coll()
@@ -557,10 +590,13 @@ def _release_returnable_qty(
     elem: Dict[str, Any] = (
         {"item_id": item_id} if item_id else {"product_id": product_id}
     )
+    update: Dict[str, Any] = {"$inc": {"items.$.returned_qty": -return_qty}}
+    if refund_id:
+        update["$pull"] = {"items.$.restocked_refunds": refund_id}
     try:
         coll.find_one_and_update(
             {"order_id": order_id, "items": {"$elemMatch": elem}},
-            {"$inc": {"items.$.returned_qty": -return_qty}},
+            update,
             return_document=ReturnDocument.AFTER,
         )
     except Exception as exc:  # noqa: BLE001
@@ -2869,15 +2905,8 @@ async def create_return(
                 ),
             )
         purchased = _line_purchased_qty(orig_line)
-        item_id = orig_line.get("item_id") or orig_line.get("id")
         product_id = orig_line.get("product_id")
-        # The line's returned_qty is the atomic claim's own count (step 2b); it
-        # also holds the units Goods back put back on a Shopify refund, which
-        # write no return doc -- read it here too, for the clear 400.
-        already = max(
-            _already_returned_qty(resolved_order_id, item_id, product_id),
-            float(orig_line.get("returned_qty") or 0),
-        )
+        already = _units_already_back(resolved_order_id, orig_line)
         remaining = round(purchased - already, 4)
         if ret_line.return_qty > remaining + 1e-9:
             name = ret_line.product_name or orig_line.get("product_name") or product_id
@@ -3692,13 +3721,14 @@ async def retry_restock(
         }
 
     # A Shopify refund's restock holds the SAME cap as every Shopify restock
-    # (shopify_refund._cap_restock_to_returnable): only units the order still
-    # holds SOLD. Goods back may have put them back since the confirm left
-    # this restock open; restocking them again here MINTS a phantom on a live
-    # shelf. An unreadable stock answer restocks nothing and stays open.
+    # (shopify_refund._cap_restock_to_returnable) and restocks the one way
+    # every door does (shopify_refund._restock_booked): Goods back may have
+    # put the units back since the confirm left this restock open; restocking
+    # them again here MINTS a phantom on a live shelf. An unreadable stock
+    # answer restocks nothing and stays open.
     refund_id = claim.get("shopify_refund_id")
     if refund_id and retry_order is not None:
-        from ..services.shopify_refund import _cap_restock_to_returnable
+        from ..services.shopify_refund import _cap_restock_to_returnable, _restock_booked
 
         lines, _, unknown = _cap_restock_to_returnable(lines, retry_order, str(refund_id))
         if unknown:
@@ -3713,9 +3743,9 @@ async def retry_restock(
                 "message": "Could not read the stock just now - nothing was restocked. Retry shortly.",
             }
 
-    try:
-        restock_result = _restock_good_items(
-            lines,
+    def _restock(retry_lines):
+        return _restock_good_items(
+            retry_lines,
             claim_store,
             return_id,
             order_id=claim_order_id,
@@ -3727,6 +3757,15 @@ async def retry_restock(
             # VERIFIED evidence (non-None was checked above).
             order=retry_order,
         )
+
+    try:
+        if refund_id and retry_order is not None:
+            # None: another door just put the units back -- nothing left to do.
+            restock_result = _restock_booked(retry_order, lines, str(refund_id), _restock) or {
+                "applied": True
+            }
+        else:
+            restock_result = _restock(lines)
     except Exception as exc:  # noqa: BLE001
         # Even on failure we MUST release the in-progress flag so a future
         # retry isn't deadlocked.
