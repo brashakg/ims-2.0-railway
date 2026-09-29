@@ -63,11 +63,11 @@ from pydantic import BaseModel, Field, field_validator
 
 from .auth import get_current_user, require_roles
 from ..dependencies import (
+    resolve_store_scope,
     get_vendor_repository,
     get_purchase_order_repository,
     get_grn_repository,
     get_audit_repository,
-    resolve_store_scope,
 )
 from ..services import ap_engine
 from ..services import landed_cost as lc
@@ -1615,12 +1615,11 @@ async def create_purchase_invoice(
     # SUPPLIER's state under that name, the form sent it back, and reading it
     # as the buyer's state stored a Maharashtra supplier's IGST bill as
     # CGST+SGST.
-    receipt_store_id = _receipt_store_id(db, grn_doc, body.linked_dc_ids)
     supplier_gstin, recipient, computed = _bill_math(
         db,
         vendor,
         body.vendor_id,
-        receipt_store_id,
+        _receipt_store_id(db, grn_doc, body.linked_dc_ids),
         body.recipient_gstin,
         current_user.get("active_store_id"),
         [ln.model_dump() for ln in body.lines],
@@ -1713,7 +1712,8 @@ async def create_purchase_invoice(
         "vendor_id": body.vendor_id,
         # The shop the goods landed in (else the booker's shop, the same
         # fallback the recipient takes): every Purchase tab scopes on it (F63).
-        "store_id": receipt_store_id or current_user.get("active_store_id"),
+        "store_id": _receipt_store_id(db, grn_doc, body.linked_dc_ids)
+        or current_user.get("active_store_id"),
         "vendor_name": (vendor or {}).get("trade_name")
         or (vendor or {}).get("legal_name"),
         "vendor_gstin": supplier_gstin,
@@ -2077,10 +2077,6 @@ async def list_purchase_invoices(
     if db is None:
         return {"purchase_invoices": [], "total": 0}
     flt: dict = {"doc_type": "PURCHASE_INVOICE"}
-    # The one Purchase shop scope (F63): a Pune login never lists Dhanbad bills.
-    scope = resolve_store_scope(store_id, current_user)
-    if scope:
-        flt["store_id"] = scope
     if vendor_id:
         flt["vendor_id"] = vendor_id
     if status:
@@ -2088,6 +2084,10 @@ async def list_purchase_invoices(
     if unmatched is True:
         flt["po_id"] = None
         flt["grn_id"] = None
+    # The one Purchase shop scope (F63): a Pune login never lists Dhanbad bills.
+    scope = resolve_store_scope(store_id, current_user)
+    if scope:
+        flt["store_id"] = scope
     try:
         rows = list(db.get_collection("vendor_bills").find(flt, {"_id": 0}))
     except Exception:
