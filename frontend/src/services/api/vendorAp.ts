@@ -258,6 +258,24 @@ export interface PurchaseInvoiceCreate {
   bill_kind?: 'GOODS' | 'SERVICES';
 }
 
+// POST /preview: what the booking WILL store for the form as it stands (the
+// server's own _bill_math -- nothing written). lines[i] is payload.lines[i].
+export interface PurchaseInvoicePreview {
+  vendor_gstin?: string | null;
+  recipient_entity_id?: string | null;
+  recipient_gstin?: string | null;   // ours, as the server will book it
+  supplier_state?: string | null;
+  supply_place_recipient?: string | null;
+  interstate: boolean;
+  lines: Array<{ taxable: number; gst_rate: number; cgst: number; sgst: number; igst: number; line_total: number }>;
+  taxable_total: number;
+  cgst_total: number;
+  sgst_total: number;
+  igst_total: number;
+  tax_total: number;
+  total: number;
+}
+
 // Server-prepared draft returned by create-from-GRN: a NOT-yet-booked invoice
 // prefilled from the GRN's accepted lines + the PO's unit prices. The user
 // reviews / edits it, then books it via create().
@@ -423,6 +441,35 @@ function mapDraftFromApi(d: Record<string, any>): PurchaseInvoiceDraft {
   } as PurchaseInvoiceDraft;
 }
 
+// The FE form uses display-friendly keys (vendor_invoice_no / quantity /
+// product_name / hsn_code); the backend PurchaseInvoiceCreate schema wants
+// invoice_number / invoice_date and per-line description / qty / hsn. Mapped
+// at this ONE seam for create() and preview(), so the preview is computed on
+// exactly the body the booking sends.
+function toInvoiceWire(payload: PurchaseInvoiceCreate) {
+  return {
+    vendor_id: payload.vendor_id,
+    invoice_number: payload.vendor_invoice_no,
+    invoice_date: payload.vendor_invoice_date,
+    recipient_gstin: payload.recipient_gstin,
+    po_id: payload.po_id,
+    grn_id: payload.grn_id,
+    store_id: payload.store_id,
+    notes: payload.notes,
+    linked_dc_ids: payload.linked_dc_ids,
+    bill_kind: payload.bill_kind,
+    lines: payload.lines.map((l) => ({
+      product_id: l.product_id,
+      description: l.product_name,
+      hsn: l.hsn_code,
+      qty: l.quantity,
+      unit_price: l.unit_price,
+      gst_rate: l.gst_rate,
+      taxable: l.taxable_amount,
+    })),
+  };
+}
+
 export const purchaseInvoicesApi = {
   // Reads are fail-soft: a backend that hasn't shipped the route yet (404/500)
   // returns an empty list so the Purchase page renders instead of erroring.
@@ -447,29 +494,15 @@ export const purchaseInvoicesApi = {
   // invoice_number / invoice_date and per-line description / qty / hsn. Map at
   // this seam so the form code + TS types stay stable and the POST never 422s.
   create: async (payload: PurchaseInvoiceCreate) => {
-    const wire = {
-      vendor_id: payload.vendor_id,
-      invoice_number: payload.vendor_invoice_no,
-      invoice_date: payload.vendor_invoice_date,
-      recipient_gstin: payload.recipient_gstin,
-      po_id: payload.po_id,
-      grn_id: payload.grn_id,
-      store_id: payload.store_id,
-      notes: payload.notes,
-      linked_dc_ids: payload.linked_dc_ids,
-      bill_kind: payload.bill_kind,
-      lines: payload.lines.map((l) => ({
-        product_id: l.product_id,
-        description: l.product_name,
-        hsn: l.hsn_code,
-        qty: l.quantity,
-        unit_price: l.unit_price,
-        gst_rate: l.gst_rate,
-        taxable: l.taxable_amount,
-      })),
-    };
-    const res = await api.post('/vendors/purchase-invoices', wire);
+    const res = await api.post('/vendors/purchase-invoices', toInvoiceWire(payload));
     return mapInvoiceFromApi(res.data as Record<string, unknown>);
+  },
+  // What create() WOULD store for this payload -- recipient, tax head, every
+  // line's split -- from the server's own booking math (POST /preview writes
+  // nothing). The form shows this; it holds no GST rule of its own.
+  preview: async (payload: PurchaseInvoiceCreate) => {
+    const res = await api.post('/vendors/purchase-invoices/preview', toInvoiceWire(payload));
+    return res.data as PurchaseInvoicePreview;
   },
   // Returns a server-prepared DRAFT prefilled from the ACCEPTED GRN (+ its PO).
   // Nothing is booked until create() is called with the reviewed draft.

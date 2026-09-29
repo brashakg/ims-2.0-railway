@@ -1,20 +1,27 @@
 // ============================================================================
-// Purchase Invoices - the booking form drawer + its editable-line shape and
-// GST line math. MOVED verbatim out of ../PurchaseInvoicesTab.tsx (Wave 6 diet).
+// Purchase Invoices - the booking form drawer + its editable-line shape.
+// MOVED out of ../PurchaseInvoicesTab.tsx (Wave 6 diet).
+//
+// It holds NO GST math. Every tax figure on it -- which GSTIN of ours, the tax
+// head, each line's tax, the totals -- is the server's POST /preview, computed
+// by the very code the booking stores with. Its own copy previewed CGST + SGST
+// on a manual bill the server booked as IGST, called a junk-prefix GSTIN
+// inter-state, and rounded a paisa differently (panel on F6/F40).
 // ============================================================================
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Plus, X, Loader2, FileText, Trash2 } from 'lucide-react';
 import {
   purchaseInvoicesApi,
   type PurchaseInvoice,
   type PurchaseInvoiceLine,
   type PurchaseInvoiceCreate,
+  type PurchaseInvoicePreview,
 } from '../../../services/api/vendorAp';
 import { useToast } from '../../../context/ToastContext';
 import { useAuth } from '../../../context/AuthContext';
 import type { Supplier } from '../purchaseTypes';
-import { inr, GST_RATES, errMsg, stateCode, isInterstate } from './shared';
+import { inr, GST_RATES, errMsg } from './shared';
 
 // The product ids a PRODUCT_NOT_CATALOGUED refusal names, so the accountant can
 // ask the cataloguer without retyping them.
@@ -42,12 +49,7 @@ export interface EditLine {
 
 export const blankLine = (): EditLine => ({ product_name: '', sku: '', hsn_code: '', quantity: '1', unit_price: '0', gst_rate: '5' });
 
-function lineTaxable(l: EditLine): number {
-  return (parseFloat(l.quantity) || 0) * (parseFloat(l.unit_price) || 0);
-}
-function lineTax(l: EditLine): number {
-  return lineTaxable(l) * ((parseFloat(l.gst_rate) || 0) / 100);
-}
+const isBookable = (l: EditLine) => Boolean(l.product_name.trim()) && (parseFloat(l.quantity) || 0) > 0;
 
 // ============================================================================
 // Invoice form drawer: header + editable lines + live GST split + Book
@@ -82,28 +84,67 @@ export function InvoiceFormDrawer({
   const receiptLinked = locked || Boolean(prefillDcIds && prefillDcIds.length);
   const [billKind, setBillKind] = useState<'' | 'GOODS' | 'SERVICES'>('');
 
-  // The tax head is decided by the two GST numbers on the bill -- the
-  // supplier's and ours -- exactly as the server books it (F6). The supplier's
-  // comes from the draft (server) or the chosen supplier; there is no
-  // place-of-supply box to contradict it.
   const selectedVendor = useMemo(() => suppliers.find((s) => s.id === vendorId), [suppliers, vendorId]);
-  const supplierGstin = (prefill.vendor_gstin || selectedVendor?.gstNumber || '').trim();
-  const inter = isInterstate(supplierGstin, recipientGstin);
-  const posKnown = Boolean(stateCode(supplierGstin)) && Boolean(stateCode(recipientGstin));
-
-  const taxable = lines.reduce((s, l) => s + lineTaxable(l), 0);
-  const tax = lines.reduce((s, l) => s + lineTax(l), 0);
-  const cgst = inter ? 0 : tax / 2;
-  const sgst = inter ? 0 : tax / 2;
-  const igst = inter ? tax : 0;
-  const total = taxable + tax;
 
   const setLine = (i: number, patch: Partial<EditLine>) =>
     setLines((prev) => prev.map((l, idx) => (idx === i ? { ...l, ...patch } : l)));
   const addLine = () => setLines((prev) => [...prev, blankLine()]);
   const removeLine = (i: number) => setLines((prev) => (prev.length > 1 ? prev.filter((_, idx) => idx !== i) : prev));
 
-  const validLines = lines.filter((l) => l.product_name.trim() && (parseFloat(l.quantity) || 0) > 0);
+  const validLines = lines.filter(isBookable);
+  // THE body the Book button sends -- the preview is computed on exactly this.
+  const linkedDcIds = (prefill as { linked_dc_ids?: string[] }).linked_dc_ids;
+  const payload: PurchaseInvoiceCreate = {
+    vendor_id: vendorId,
+    vendor_invoice_no: vendorInvoiceNo.trim(),
+    vendor_invoice_date: vendorInvoiceDate,
+    recipient_gstin: recipientGstin.trim() || undefined,
+    po_id: prefill.po_id,
+    grn_id: prefill.grn_id,
+    store_id: prefill.store_id ?? user?.activeStoreId,
+    lines: validLines.map((l): PurchaseInvoiceLine => ({
+      product_id: l.product_id,
+      product_name: l.product_name.trim(),
+      sku: l.sku?.trim() || undefined,
+      hsn_code: l.hsn_code?.trim() || undefined,
+      quantity: parseFloat(l.quantity) || 0,
+      unit_price: parseFloat(l.unit_price) || 0,
+      gst_rate: parseFloat(l.gst_rate) || 0,
+    })),
+    notes: notes.trim() || undefined,
+    // F9 -- a draft consolidating Delivery Challans passes linked_dc_ids so
+    // the backend runs the DC tally + flips dc_matched on each DC.
+    linked_dc_ids: linkedDcIds && linkedDcIds.length ? linkedDcIds : undefined,
+    bill_kind: receiptLinked ? 'GOODS' : (billKind || undefined),
+  };
+  // What the tax depends on (not the invoice no. or notes): a change here asks
+  // the server again, and Book waits until the answer is for THIS form.
+  const taxKey = JSON.stringify([payload.vendor_id, payload.recipient_gstin, payload.grn_id, payload.linked_dc_ids, payload.lines]);
+  const [preview, setPreview] = useState<{ key: string; data?: PurchaseInvoicePreview; error?: string } | null>(null);
+  const wantsPreview = Boolean(vendorId) && validLines.length > 0;
+  useEffect(() => {
+    if (!wantsPreview) return;
+    let live = true;
+    const t = setTimeout(() => {
+      purchaseInvoicesApi
+        .preview(payload)
+        .then((data) => { if (live) setPreview({ key: taxKey, data }); })
+        .catch((e) => { if (live) setPreview({ key: taxKey, error: errMsg(e, 'Could not work out the tax for this bill') }); });
+    }, 250);
+    return () => { live = false; clearTimeout(t); };
+    // taxKey carries every input the preview depends on.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [taxKey, wantsPreview]);
+  const shown = wantsPreview && preview?.key === taxKey ? preview : null;
+  const pending = wantsPreview && !shown;
+  const pv = shown?.data;
+  const inter = Boolean(pv?.interstate);
+  const supplierGstin = (pv?.vendor_gstin || prefill.vendor_gstin || selectedVendor?.gstNumber || '').trim();
+  // The preview line for form row i (only bookable rows are sent, in order).
+  const previewLine = (i: number) => {
+    if (!pv || !isBookable(lines[i])) return undefined;
+    return pv.lines[lines.slice(0, i).filter(isBookable).length];
+  };
 
   const book = async () => {
     if (!vendorId) { toast.error('Select a supplier'); return; }
@@ -122,41 +163,6 @@ export function InvoiceFormDrawer({
 
     setSaving(true);
     try {
-      const payloadLines: PurchaseInvoiceLine[] = validLines.map((l) => {
-        const lt = lineTaxable(l);
-        const rate = parseFloat(l.gst_rate) || 0;
-        const t = lt * (rate / 100);
-        return {
-          product_id: l.product_id,
-          product_name: l.product_name.trim(),
-          sku: l.sku?.trim() || undefined,
-          hsn_code: l.hsn_code?.trim() || undefined,
-          quantity: parseFloat(l.quantity) || 0,
-          unit_price: parseFloat(l.unit_price) || 0,
-          gst_rate: rate,
-          taxable_amount: Math.round(lt * 100) / 100,
-          cgst: inter ? 0 : Math.round((t / 2) * 100) / 100,
-          sgst: inter ? 0 : Math.round((t / 2) * 100) / 100,
-          igst: inter ? Math.round(t * 100) / 100 : 0,
-          line_total: Math.round((lt + t) * 100) / 100,
-        };
-      });
-      // F9 — when this draft consolidates Delivery Challans, pass linked_dc_ids
-      // so the backend runs the DC tally + flips dc_matched on each DC.
-      const linkedDcIds = (prefill as { linked_dc_ids?: string[] }).linked_dc_ids;
-      const payload: PurchaseInvoiceCreate = {
-        vendor_id: vendorId,
-        vendor_invoice_no: vendorInvoiceNo.trim(),
-        vendor_invoice_date: vendorInvoiceDate,
-        recipient_gstin: recipientGstin.trim() || undefined,
-        po_id: prefill.po_id,
-        grn_id: prefill.grn_id,
-        store_id: prefill.store_id ?? user?.activeStoreId,
-        lines: payloadLines,
-        notes: notes.trim() || undefined,
-        linked_dc_ids: linkedDcIds && linkedDcIds.length ? linkedDcIds : undefined,
-        bill_kind: receiptLinked ? 'GOODS' : (billKind as 'GOODS' | 'SERVICES'),
-      };
       await purchaseInvoicesApi.create(payload);
       toast.success('Purchase invoice booked');
       onBooked();
@@ -241,15 +247,24 @@ export function InvoiceFormDrawer({
             <div>
               <label className="block text-xs font-medium text-gray-600 mb-1">Recipient GSTIN (our entity)</label>
               <input className={cls} value={recipientGstin} onChange={(e) => setRecipientGstin(e.target.value)} placeholder="GSTIN receiving the supply" />
+              {!recipientGstin.trim() && pv?.recipient_gstin && (
+                <p className="mt-1 text-xs text-gray-500">Left blank: booked on ours, {pv.recipient_gstin}</p>
+              )}
             </div>
             <div className="flex items-end">
-              {/* Inter/intra-state indicator: the visible proof of the IGST fix */}
-              <div className={`w-full rounded-lg px-3 py-2 text-sm border ${posKnown ? (inter ? 'bg-purple-50 border-purple-200 text-purple-800' : 'bg-blue-50 border-blue-200 text-blue-800') : 'bg-amber-50 border-amber-200 text-amber-800'}`}>
-                {posKnown
+              {/* The tax head the server WILL book (POST /preview) */}
+              <div className={`w-full rounded-lg px-3 py-2 text-sm border ${pv ? (inter ? 'bg-purple-50 border-purple-200 text-purple-800' : 'bg-blue-50 border-blue-200 text-blue-800') : 'bg-amber-50 border-amber-200 text-amber-800'}`}>
+                {pv
                   ? (inter
-                      ? <>Inter-state supply: <span className="font-semibold">IGST</span> (supplier state {stateCode(supplierGstin)}, ours {stateCode(recipientGstin)})</>
-                      : <>Intra-state supply: <span className="font-semibold">CGST + SGST</span> (both state {stateCode(supplierGstin)})</>)
-                  : <>Needs the supplier&apos;s GSTIN and ours to classify; booked as CGST + SGST until then.</>}
+                      ? <>Inter-state supply: <span className="font-semibold">IGST</span> (supplier state {pv.supplier_state}, ours {pv.supply_place_recipient})</>
+                      : pv.supplier_state && pv.supply_place_recipient
+                        ? <>Intra-state supply: <span className="font-semibold">CGST + SGST</span> (both state {pv.supplier_state})</>
+                        : <>Booked as <span className="font-semibold">CGST + SGST</span>: {pv.supplier_state ? 'no GSTIN of ours to compare with' : 'the supplier\'s GSTIN names no state'}.</>)
+                  : shown?.error
+                    ? <>{shown.error}</>
+                    : pending
+                      ? <>Working out the tax...</>
+                      : <>Pick the supplier and add a line to see the tax.</>}
               </div>
             </div>
           </div>
@@ -276,8 +291,7 @@ export function InvoiceFormDrawer({
                 </thead>
                 <tbody className="divide-y divide-gray-100">
                   {lines.map((l, i) => {
-                    const lt = lineTaxable(l);
-                    const t = lineTax(l);
+                    const pl = previewLine(i);
                     return (
                       <tr key={i}>
                         <td className="px-2 py-1">
@@ -292,8 +306,8 @@ export function InvoiceFormDrawer({
                             {GST_RATES.map((r) => <option key={r} value={r}>{r}%</option>)}
                           </select>
                         </td>
-                        <td className="px-2 py-1 text-right text-gray-700">{inr(lt)}</td>
-                        <td className="px-2 py-1 text-right text-gray-500">{inr(t)}</td>
+                        <td className="px-2 py-1 text-right text-gray-700">{pl ? inr(pl.taxable) : '-'}</td>
+                        <td className="px-2 py-1 text-right text-gray-500">{pl ? inr(pl.cgst + pl.sgst + pl.igst) : '-'}</td>
                         <td className="px-1 py-1 text-center">
                           <button type="button" onClick={() => removeLine(i)} className="text-gray-300 hover:text-red-600" title="Remove line"><Trash2 className="w-4 h-4" /></button>
                         </td>
@@ -308,17 +322,17 @@ export function InvoiceFormDrawer({
           {/* Totals */}
           <div className="flex justify-end">
             <div className="w-full tablet:w-72 space-y-1 text-sm">
-              <Row label="Taxable" value={inr(taxable)} />
+              <Row label="Taxable" value={inr(pv?.taxable_total)} />
               {inter ? (
-                <Row label="IGST" value={inr(igst)} />
+                <Row label="IGST" value={inr(pv?.igst_total)} />
               ) : (
                 <>
-                  <Row label="CGST" value={inr(cgst)} />
-                  <Row label="SGST" value={inr(sgst)} />
+                  <Row label="CGST" value={inr(pv?.cgst_total)} />
+                  <Row label="SGST" value={inr(pv?.sgst_total)} />
                 </>
               )}
               <div className="border-t border-gray-200 pt-1">
-                <Row label="Total" value={inr(total)} strong />
+                <Row label="Total" value={inr(pv?.total)} strong />
               </div>
             </div>
           </div>
@@ -338,7 +352,7 @@ export function InvoiceFormDrawer({
             <button
               type="button"
               onClick={book}
-              disabled={saving || (!receiptLinked && billKind === 'GOODS')}
+              disabled={saving || pending || (!receiptLinked && billKind === 'GOODS')}
               className="btn sm primary disabled:opacity-60"
             >
               {saving && <Loader2 className="w-4 h-4 animate-spin" />} Book invoice

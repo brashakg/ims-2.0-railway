@@ -1,6 +1,7 @@
 // ============================================================================
-// Purchase Invoices - shared helpers (INR formatting, GST state-code / IGST
-// rule, GST rate list, approval role list). MOVED verbatim out of
+// Purchase Invoices - shared helpers (INR formatting, GST rate list, approval
+// role list). The tax head is NOT decided here: the form shows the server's
+// POST /preview (the booking's own math). MOVED verbatim out of
 // ../PurchaseInvoicesTab.tsx by the Wave 6 file diet; nothing rewritten.
 // ============================================================================
 
@@ -27,24 +28,6 @@ export function errMsg(e: unknown, fb: string) {
     }
   }
   return e instanceof Error ? e.message : fb;
-}
-
-// The 2-digit state code of a GSTIN (its first two characters).
-export function stateCode(value?: string): string {
-  if (!value) return '';
-  const m = String(value).trim().match(/\d{2}/);
-  return m ? m[0] : '';
-}
-
-// THE bill's tax-head rule, as the server applies it
-// (purchase_invoice_engine.compute_invoice): the supplier's GSTIN state vs our
-// GSTIN's state. Different -> inter-state -> IGST. Missing either GSTIN ->
-// intra-state (CGST/SGST), the server's fallback.
-export function isInterstate(supplierGstin?: string, recipientGstin?: string): boolean {
-  const sup = stateCode(supplierGstin);
-  const rec = stateCode(recipientGstin);
-  if (!sup || !rec) return false;
-  return sup !== rec;
 }
 
 // Roles allowed to approve a 3-way-match exception (release an ON_HOLD invoice
