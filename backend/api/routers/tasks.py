@@ -133,6 +133,14 @@ def _authorise_attachment(file_id: str, current_user: dict) -> None:
 # (the same rungs the escalation ladder climbs). A non-manager who is neither
 # the assignee nor the assigner/creator must not act on someone else's task.
 _TASK_MANAGER_ROLES = {"STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"}
+# The people a task belongs to: who may act on it (_ensure_task_actor) and, for
+# anyone below manager, the only tasks they see (list_tasks).
+_TASK_OWNER_FIELDS = ("assigned_to", "assigned_by", "created_by")
+
+
+def _is_task_manager(current_user: dict) -> bool:
+    roles = {str(r).strip().upper() for r in (current_user.get("roles") or [])}
+    return bool(roles & _TASK_MANAGER_ROLES)
 
 
 def _ensure_task_actor(task: dict, current_user: dict) -> None:
@@ -152,15 +160,10 @@ def _ensure_task_actor(task: dict, current_user: dict) -> None:
     403. This is the INNER gate; ``_ensure_task_store_access`` stays the outer
     one and must be called first.
     """
-    roles = {str(r).strip().upper() for r in (current_user.get("roles") or [])}
-    if roles & _TASK_MANAGER_ROLES:
+    if _is_task_manager(current_user):
         return
     uid = current_user.get("user_id")
-    owners = {
-        task.get("assigned_to"),
-        task.get("assigned_by"),
-        task.get("created_by"),
-    }
+    owners = {task.get(f) for f in _TASK_OWNER_FIELDS}
     if uid and uid in owners:
         return
     raise HTTPException(
@@ -485,6 +488,18 @@ async def list_tasks(
             allowed = sorted(stores) + [None]
             filters["store_id"] = {"$in": allowed}
         # cross-store roles (SUPERADMIN/ADMIN): no store_id filter -> all stores.
+
+    # Owner ruling 2026-09-03 (pages/tasks/taskRoles.ts): a store's whole task
+    # list is for managers and above; everyone else sees ONLY their own -- the
+    # tasks _ensure_task_actor lets them act on. Enforced HERE, not in React:
+    # the Hub's "Priority tasks" asks for the whole store and used to show a
+    # cashier every task in the shop, a catalogue manager's included.
+    if not _is_task_manager(current_user):
+        uid = current_user.get("user_id")
+        if uid:
+            filters["$or"] = [{f: uid} for f in _TASK_OWNER_FIELDS]
+        else:
+            filters["task_id"] = {"$in": []}
 
     tasks = [
         _canon_task_out(t) for t in repo.find_many(filters, skip=skip, limit=limit)

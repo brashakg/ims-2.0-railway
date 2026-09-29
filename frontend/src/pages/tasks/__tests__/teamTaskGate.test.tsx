@@ -74,6 +74,11 @@ describe('the one team-task role list', () => {
     }
   });
 
+  it('lets the catalogue manager open the tasks assigned to them (held receipts)', () => {
+    expect(TASK_MODULE_ROLES).toContain('CATALOG_MANAGER');
+    expect(canSeeTeamTasks(['CATALOG_MANAGER'])).toBe(false);
+  });
+
   it.each(TASK_MODULE_ROLES)('shows %s exactly the sections its role allows', (role) => {
     const expected = (TEAM_TASK_ROLES as readonly string[]).includes(role);
     renderAs(role);
