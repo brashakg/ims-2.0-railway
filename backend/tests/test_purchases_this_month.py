@@ -61,10 +61,8 @@ Contract pinned for the report (the build follows it):
   a manager, never the counter. Scope: the ONE server-side shop rule every
   Purchase tab uses (api.dependencies.resolve_store_scope).
 
-Every open finding raises FindingStillOpen and is marked
-xfail(strict=True, raises=FindingStillOpen): a broken fixture or a crash fails
-loudly instead of hiding as an expected failure, and the day a finding is fixed
-its test XPASSes, which strict mode turns red until the marker is removed.
+These were strict xfails while the findings were open; the fix turned them into
+plain tests. A regression raises FindingStillOpen, naming the finding.
 
 Run: JWT_SECRET_KEY=test ENVIRONMENT=test python -m pytest
      backend/tests/test_purchases_this_month.py -q
@@ -110,12 +108,6 @@ class FindingStillOpen(AssertionError):
 def _open(ok: bool, message: str) -> None:
     if not ok:
         raise FindingStillOpen(message)
-
-
-def _xfail(finding: str, why: str):
-    return pytest.mark.xfail(
-        strict=True, raises=FindingStillOpen, reason=f"{finding}: {why}"
-    )
 
 
 def _user(role: str, store: str | None, stores=()) -> dict:
@@ -398,12 +390,6 @@ def test_the_supplier_ledger_owes_5540_and_2240(world):
 # ============================================================================
 
 
-@_xfail(
-    "F56",
-    "AP aging (vendors/ap_bills.py ap_aging) drops PAID bills but keeps their "
-    "payments, so a bill paid in full reads as an on-account credit and nets "
-    "the vendor down (5540 owed shows 4040; the audit saw Rs 0)",
-)
 def test_f56_ap_aging_owes_what_the_ledger_owes(world):
     resp = world.get("/vendors/ap-aging", ADMIN)
     assert resp.status_code == 200, resp.text
@@ -420,13 +406,6 @@ def test_f56_ap_aging_owes_what_the_ledger_owes(world):
     )
 
 
-@_xfail(
-    "F56",
-    "the Cash Flow 'Payables (AP)' headline (finance/cash_flow.py owner_dashboard) "
-    "is build_aging's gross total_outstanding: it ignores on-account payments "
-    "and PAID bills' rows, so it does not drop when a payment is saved "
-    "(audit: Rs 1,77,896 against a ledger of Rs 1,44,456)",
-)
 def test_f56_cash_flow_payables_headline_owes_what_the_ledger_owes(world):
     resp = world.get("/finance/owner-dashboard", ADMIN)
     assert resp.status_code == 200, resp.text
@@ -457,14 +436,6 @@ def _rows(body):
     return {r["vendor_id"]: r for r in body["vendors"]}
 
 
-_REPORT_MISSING = _xfail(
-    "F56",
-    "no 'Purchases this month' report exists: nothing answers what we bought "
-    "this month, from whom, and what is unpaid",
-)
-
-
-@_REPORT_MISSING
 def test_f56_report_september_per_vendor_matches_the_ledger(world):
     body = _report(world, ADMIN, month="2026-09")
     rows = _rows(body)
@@ -477,7 +448,7 @@ def test_f56_report_september_per_vendor_matches_the_ledger(world):
         row = rows[vid]
         for key in ("ordered", "received", "billed", "paid", "owed"):
             assert row[key] == pytest.approx(exp[key]), (vid, key, row)
-        assert str(row["next_due_date"])[:10] == exp["next_due_date"], (vid, row)
+        assert row["next_due_date"] == exp["next_due_date"], (vid, row)
     assert rows[VA]["vendor_name"] == "Jharkhand Optical"
     totals = body["totals"]
     for key, value in dict(ordered=5600.0, received=4480.0, billed=4480.0, paid=1500.0, owed=7780.0).items():
@@ -489,7 +460,6 @@ def test_f56_report_september_per_vendor_matches_the_ledger(world):
         assert rows[vid]["owed"] == pytest.approx(ledger["closing_balance"])
 
 
-@_REPORT_MISSING
 def test_f56_report_month_picker_reads_august(world):
     """The month picker: August holds B-PAID + B0 and the payment P0, nothing
     ordered or received; owed is the ledger balance at 31 August."""
@@ -501,7 +471,6 @@ def test_f56_report_month_picker_reads_august(world):
         assert body["totals"][key] == pytest.approx(value), (key, body["totals"])
 
 
-@_REPORT_MISSING
 @pytest.mark.parametrize("role", ["SALES_STAFF", "SALES_CASHIER", "CASHIER", "STORE_MANAGER"])
 def test_f56_report_is_for_the_supplier_balance_readers_only(world, role):
     """Counter roles never see what we owe (F60); managers do not read
@@ -531,29 +500,10 @@ _CASES = {
     "Pune accountant asks for Dhanbad": (ACCT_PUNE, DHN, 403),
 }
 
-_ALL_STORES_PINNED = _xfail(
-    "F63",
-    "an admin with no shop chosen is pinned to his ACTIVE store (validate_store_access "
-    "or active_store_id) -- the online store on first login -- so the tab reads 0; "
-    "resolve_store_scope gives admins all stores",
-)
-_INVOICES_UNSCOPED = _xfail(
-    "F63",
-    "purchase_invoices.list_purchase_invoices has no store filter and no store_id "
-    "parameter: every caller sees every shop's bills and the chosen shop is ignored",
-)
 
-_MATRIX = []
-for _tab in _TABS:
-    for _case in _CASES:
-        marks = []
-        if _tab == "report":
-            marks = [_REPORT_MISSING]
-        elif _tab in ("orders", "receiving") and _case == "admin opens Purchase (all stores)":
-            marks = [_ALL_STORES_PINNED]
-        elif _tab == "invoices" and _case != "admin opens Purchase (all stores)":
-            marks = [_INVOICES_UNSCOPED]
-        _MATRIX.append(pytest.param(_tab, _case, marks=marks, id=f"{_tab}: {_case}"))
+_MATRIX = [
+    pytest.param(_tab, _case, id=f"{_tab}: {_case}") for _tab in _TABS for _case in _CASES
+]
 
 
 @pytest.mark.parametrize("tab,case", _MATRIX)
@@ -578,12 +528,6 @@ def test_f63_every_purchase_tab_obeys_one_shop_scope(world, tab, case):
 # ============================================================================
 
 
-@_xfail(
-    "F63",
-    "auth._default_active_store picks the first active store in insertion order "
-    "(auth.py:806-808), which is the stockless online store on this database, so "
-    "a first-time admin lands on it and every shop-scoped screen reads 0",
-)
 def test_f63_a_first_time_admin_is_not_parked_on_the_online_store(monkeypatch):
     import database.connection as conn
     from api.routers import auth as auth_mod

@@ -21,8 +21,10 @@ import {
   TrendingUp,
   AlertTriangle,
   PackageX,
+  CalendarDays,
 } from 'lucide-react';
 import { useIsOnlineStore } from '../../hooks/useIsOnlineStore';
+import { useAuth } from '../../context/AuthContext';
 import { PurchaseShopPicker } from './purchaseShop';
 
 const SECTIONS = [
@@ -32,6 +34,9 @@ const SECTIONS = [
   { path: '/purchase/suppliers', label: 'Suppliers', icon: Truck },
   { path: '/purchase/vendor-returns', label: 'Vendor Returns', icon: AlertTriangle },
   { path: '/purchase/analytics', label: 'Analytics', icon: TrendingUp },
+  // Audit F56: what we ordered, received, were billed, paid and owe -- the
+  // supplier-balance readers only (the route and the API gate the same set).
+  { path: '/purchase/this-month', label: 'This month', icon: CalendarDays, roles: ['ACCOUNTANT'] as const },
 ];
 
 export function PurchaseLayout() {
@@ -40,6 +45,7 @@ export function PurchaseLayout() {
   const onlineStore = useIsOnlineStore();
   const { pathname } = useLocation();
   const navigate = useNavigate();
+  const { hasRole } = useAuth();
 
   // Warm the sibling section chunks once the browser is idle, so the FIRST
   // click on any tab renders without the lazy-chunk download spinner (owner
@@ -57,6 +63,7 @@ export function PurchaseLayout() {
       void import('./SuppliersSection');
       void import('./VendorReturns');
       void import('./PurchaseAnalyticsSection');
+      void import('./PurchasesThisMonthSection');
     });
   }, []);
 
@@ -114,7 +121,7 @@ export function PurchaseLayout() {
           (the row is wider than 768px; it scrolls instead of clipping). */}
       <div className="border-b border-gray-200 overflow-x-auto">
         <nav className="flex gap-4 tablet:gap-8 w-max min-w-full">
-          {SECTIONS.map(({ path, label, icon: Icon }) => (
+          {SECTIONS.filter((s) => !s.roles || hasRole([...s.roles])).map(({ path, label, icon: Icon }) => (
             <NavLink
               key={path}
               to={path}

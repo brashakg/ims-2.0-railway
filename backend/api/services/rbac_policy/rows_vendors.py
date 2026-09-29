@@ -230,6 +230,14 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/vendors/grn/{grn_id}/document",
         "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
+    # Purchases this month (F56): per-vendor ordered / received / billed / paid /
+    # owed from the supplier ledger -- the supplier-balance readers only, the
+    # same set as /vendors/ap-aging; never a manager, never the counter.
+    {
+        "method": "GET",
+        "path": "/api/v1/vendors/purchases-this-month",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
+    },
     # Purchase Invoices (first-class AP+ITC; books the payable + ITC ledger).
     # Create/from-grn/book AND reads are accounting actions -> ACCOUNTANT/ADMIN.
     # (SUPERADMIN auto-passes via require_roles.) F1: reads expose supplier bill /

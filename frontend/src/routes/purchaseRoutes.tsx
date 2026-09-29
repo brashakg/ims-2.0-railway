@@ -3,7 +3,8 @@
 // Wave 1 split: the old /purchase tab container (PurchaseManagementPage) is
 // now a layout with one REAL page per section:
 //   /purchase/orders · /purchase/invoices · /purchase/variance ·
-//   /purchase/suppliers · /purchase/vendor-returns · /purchase/analytics
+//   /purchase/suppliers · /purchase/vendor-returns · /purchase/analytics ·
+//   /purchase/this-month
 // Legacy /purchase?tab=<x> deep-links (bookmarks, WhatsApp'd links, old
 // builds) forward via PurchaseTabRedirect below — no dead links.
 import { lazy } from 'react';
@@ -17,6 +18,7 @@ const PurchaseInvoicesSection = lazy(() => import('../pages/purchase/PurchaseInv
 const PurchaseVarianceTab = lazy(() => import('../pages/purchase/PurchaseVarianceTab').then(m => ({ default: m.PurchaseVarianceTab })));
 const SuppliersSection = lazy(() => import('../pages/purchase/SuppliersSection').then(m => ({ default: m.SuppliersSection })));
 const PurchaseAnalyticsSection = lazy(() => import('../pages/purchase/PurchaseAnalyticsSection').then(m => ({ default: m.PurchaseAnalyticsSection })));
+const PurchasesThisMonthSection = lazy(() => import('../pages/purchase/PurchasesThisMonthSection').then(m => ({ default: m.PurchasesThisMonthSection })));
 const GoodsReceiptNote = lazy(() => import('../pages/purchase/GoodsReceiptNote').then(m => ({ default: m.GoodsReceiptNote })));
 const GoodsReceiptCockpit = lazy(() => import('../pages/purchase/GoodsReceiptCockpit').then(m => ({ default: m.GoodsReceiptCockpit })));
 const VendorReturns = lazy(() => import('../pages/purchase/VendorReturns').then(m => ({ default: m.VendorReturns })));
@@ -117,6 +119,16 @@ export const purchaseRoutes = (
         element={
           <ProtectedRoute allowedRoles={PURCHASE_ROLES}>
             <PurchaseAnalyticsSection />
+          </ProtectedRoute>
+        }
+      />
+      {/* Audit F56: Purchases this month -- the supplier-balance readers only,
+          the same set as GET /vendors/purchases-this-month. */}
+      <Route
+        path="this-month"
+        element={
+          <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'ACCOUNTANT']}>
+            <PurchasesThisMonthSection />
           </ProtectedRoute>
         }
       />

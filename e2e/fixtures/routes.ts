@@ -165,6 +165,7 @@ export const ROUTES: ReadonlyArray<{ path: string; ready?: string }> = [
   { path: '/purchase/suppliers' },
   { path: '/purchase/vendor-returns' },
   { path: '/purchase/analytics' },
+  { path: '/purchase/this-month' },
   { path: '/purchase/grn' },
   { path: '/purchase/receive' },
   { path: '/purchase/recon-console' },
