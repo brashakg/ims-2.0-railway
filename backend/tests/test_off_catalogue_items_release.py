@@ -51,6 +51,7 @@ import database.connection as _dbconn  # noqa: E402
 from api import dependencies as _deps  # noqa: E402
 from api.routers import catalog as _catalog  # noqa: E402
 from api.routers import products as _products  # noqa: E402
+from api.routers import tasks as _tasks  # noqa: E402
 from api.routers import vendors as vd  # noqa: E402
 from api.services import online_catalog as _online  # noqa: E402
 from strict_fakes import StrictDB  # noqa: E402
@@ -356,9 +357,10 @@ def test_the_world_reproduces_the_hold(world):
     assert draft["done_gaps"] == ["offer_price"]
     # A frame's typed size is its eye size -- the registry's lens_size, the
     # key the Add-Product form writes -- so the PO draft carries the SAME
-    # identity_key a catalogued Boss 1700 C2 does (C2/C3 root cause).
+    # identity_key a catalogued Boss 1700 C2 52 does (C2/C3 root cause), and
+    # the eye size is part of it (owner 09-28: each eye size is its own item).
     assert draft["attributes"]["lens_size"] == "52"
-    assert draft["identity_key"] == "boss|boss1700|c2"
+    assert draft["identity_key"] == "boss|boss1700|c2|52"
     # grn_accept: the line is held with reason incomplete_catalog, 0 minted.
     stored = world.grn(grn["grn_id"])
     assert stored["status"] == "PARTIALLY_ACCEPTED"
@@ -672,4 +674,413 @@ def test_c3_cataloguing_an_ordered_item_warns_against_the_draft(world):
     finding(
         (existing or {}).get("provisional") is True,
         "C3: the warning does not say the existing product is an ordered draft",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Panel round 2 (2026-09-29)
+# ---------------------------------------------------------------------------
+
+SALES = {
+    "user_id": "u-sales-dhn2",
+    "username": "sales.dhn2",
+    "roles": ["SALES_STAFF"],
+    "store_ids": [STORE],
+    "active_store_id": STORE,
+}
+
+
+def _receive_again(world, po, invoice_no):
+    """A second receipt against the SAME order (the PO still reads receivable
+    after a held receipt)."""
+    fresh = world.db.purchase_orders.find_one({"po_id": po["po_id"]})
+    return world.receive_everything(fresh, invoice_no=invoice_no)
+
+
+def _tasks_of(world, **flt):
+    return [
+        (t.get("status"), t.get("assigned_to"), t.get("category"), t.get("title"))
+        for t in world.db.tasks.find(flt)
+    ]
+
+
+def test_c1_a_second_receipt_of_the_same_box_waits_for_the_store_manager(world):
+    po, grn1, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    grn2, again = _receive_again(world, po, "JOT/26-27/0701-DUP")
+    assert again["grn_status"] == "PARTIALLY_ACCEPTED"
+
+    world.finish_draft(draft_id, offer=2790)
+
+    units = world.units(draft_id)
+    finding(
+        len(units) == 2,
+        f"C1: finishing the draft put {len(units)} units on the shelf for a "
+        "2-unit order -- the duplicate receipt was released with no human check",
+    )
+    assert world.grn(grn1["grn_id"])["status"] == "ACCEPTED"
+    finding(
+        world.grn(grn2["grn_id"])["status"] == "PARTIALLY_ACCEPTED",
+        "C1: the receipt beyond the order did not stay held",
+    )
+    # Owner 2026-09-29: a receipt problem is the shop's store manager's task.
+    mgr = [
+        t
+        for t in _open_tasks(world)
+        if t.get("assigned_to") == MANAGER["user_id"]
+        and t.get("grn_id") == grn2["grn_id"]
+    ]
+    finding(
+        len(mgr) == 1 and grn2["grn_number"] in mgr[0]["title"],
+        f"C1: the store manager was not told about {grn2['grn_number']} "
+        f"({_tasks_of(world)})",
+    )
+    finding(
+        not [t for t in _open_tasks(world) if t.get("category") == "Catalogue"],
+        "C1: the cataloguer still holds a task for an item already finished",
+    )
+
+    # The manager voids the duplicate: it put nothing on the shelf.
+    voided = _run(vd.void_grn(grn2["grn_id"], MANAGER))
+    assert voided["grn_status"] == "VOID"
+    assert len(world.units(draft_id)) == 2
+    finding(not _open_tasks(world), "C1: the task outlived the voided receipt")
+
+
+def test_c1_two_orders_of_one_draft_both_go_on_the_shelf(world):
+    po1, grn1, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    # A second order for the same item names the draft (the C2 answer).
+    draft = world.product(draft_id)
+    po2 = world.raise_po(
+        [
+            {
+                "product_id": draft_id,
+                "product_name": draft.get("name") or draft["sku"],
+                "sku": draft["sku"],
+                "quantity": 1,
+                "unit_price": 1200,
+            }
+        ]
+    )
+    grn2, held = world.receive_everything(po2, invoice_no="JOT/26-27/0702")
+    assert held["grn_status"] == "PARTIALLY_ACCEPTED"
+
+    world.finish_draft(draft_id, offer=2790)
+
+    finding(
+        len(world.units(draft_id)) == 3,
+        f"C1: {len(world.units(draft_id))} of 3 ordered units reached the shelf",
+    )
+    for g in (grn1, grn2):
+        finding(
+            world.grn(g["grn_id"])["status"] == "ACCEPTED",
+            f"C1: receipt {g['grn_number']} is still holding its units",
+        )
+
+
+def test_c1_the_release_is_the_manager_who_accepted_the_receipt(world):
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    world.finish_draft(draft_id, offer=2790)
+
+    units = world.units(draft_id)
+    assert len(units) == 2
+    who = MANAGER["user_id"]
+    finding(
+        {u.get("created_by") for u in units} == {who},
+        "C1: the released units are not stamped with the receiving manager "
+        f"({[u.get('created_by') for u in units]})",
+    )
+    ids = {str(u.get("stock_id")) for u in units}
+    audit = [a for a in world.db.stock_audit.find({}) if a.get("stock_id") in ids]
+    finding(
+        len(audit) == 2 and {a.get("by_user") for a in audit} == {who},
+        f"C1: the stock audit does not name the receiving manager ({audit})",
+    )
+    mints = [e for e in world.db.item_events.find({}) if e.get("stock_id") in ids]
+    finding(
+        len(mints) == 2 and {e.get("actor_id") for e in mints} == {who},
+        f"C1: the MINT ledger does not name the receiving manager ({mints})",
+    )
+
+
+def test_c1_a_closed_task_is_never_raised_again(world):
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    (task,) = _open_tasks(world)
+    _run(
+        _tasks.complete_task(
+            task["task_id"], _tasks.TaskComplete(completion_notes="Seen it"), CATALOGUER
+        )
+    )
+    # "Add to stock" pressed again while the line is still held.
+    _run(vd.accept_grn(grn["grn_id"], MANAGER))
+    finding(
+        not _open_tasks(world),
+        f"C1: a task a person closed was raised again ({_tasks_of(world)})",
+    )
+
+
+def test_c1_finishing_one_of_two_held_items_never_reopens_a_closed_task(world):
+    other = dict(BOSS_TYPED, model="BOSS 1701", colour="C3")
+    po = world.raise_po(
+        [
+            {"new_product": dict(BOSS_TYPED), "quantity": 1, "unit_price": 1200},
+            {"new_product": other, "quantity": 1, "unit_price": 1300},
+        ]
+    )
+    grn, accepted = world.receive_everything(po)
+    assert len(accepted["unresolved_lines"]) == 2
+    (task,) = _open_tasks(world)
+    _run(
+        _tasks.complete_task(
+            task["task_id"], _tasks.TaskComplete(completion_notes="On it"), CATALOGUER
+        )
+    )
+    world.finish_draft(po["items"][0]["product_id"], offer=2790)
+    finding(
+        not _open_tasks(world),
+        f"C1: finishing item 1 re-raised a closed task ({_tasks_of(world)})",
+    )
+
+
+def test_c1_po_timeline_never_says_on_shelf_for_held_units(world):
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+
+    def shelf_events():
+        tl = _run(vd.get_po_timeline(po["po_id"], MANAGER))
+        return [e for e in tl["events"] if e.get("kind") == "on_shelf"]
+
+    finding(
+        shelf_events() == [],
+        f"C1: the PO timeline says 'On shelf' for 0 units ({shelf_events()})",
+    )
+    world.finish_draft(draft_id, offer=2790)
+    ev = shelf_events()
+    finding(
+        len(ev) == 1 and ev[0]["detail"].startswith("2 units"),
+        f"C1: the PO timeline does not show the released units ({ev})",
+    )
+
+
+def test_counter_staff_never_see_the_cataloguers_task(world):
+    world.db.seed(
+        "users",
+        [
+            {
+                **{k: v for k, v in SALES.items() if k != "active_store_id"},
+                "is_active": True,
+            }
+        ],
+    )
+    world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+
+    def listed(user, store_id):
+        out = _run(
+            _tasks.list_tasks(
+                status="OPEN",
+                priority=None,
+                assigned_to=None,
+                task_type=None,
+                store_id=store_id,
+                skip=0,
+                limit=50,
+                current_user=user,
+            )
+        )
+        return [t.get("assigned_to") for t in out["tasks"]]
+
+    # The Hub's "Priority tasks": the whole shop's open tasks.
+    finding(
+        listed(SALES, STORE) == [],
+        "Owner 09-03: a salesperson sees a task assigned to someone else",
+    )
+    finding(
+        listed(CATALOGUER, None) == [CATALOGUER["user_id"]],
+        "C1: the catalogue manager cannot list the task assigned to them",
+    )
+    finding(
+        listed(MANAGER, STORE) == [CATALOGUER["user_id"]],
+        "Owner 09-03: the store manager no longer sees the shop's tasks",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Eye size is part of a frame's identity (owner 09-28: each eye size is its
+# own item); a category with no size records none.
+# ---------------------------------------------------------------------------
+
+
+def test_c2_another_eye_size_of_a_catalogued_frame_is_its_own_item(world):
+    fifty_two = world.catalogue_frame(
+        "Boss", "BOSS 1700", "C2", "52", mrp=2990, offer=2790, cost=1200
+    )
+    fifty_four = dict(BOSS_TYPED, size="54")
+    po = world.raise_po(
+        [{"new_product": fifty_four, "quantity": 2, "unit_price": 1200}]
+    )
+    draft = world.product(po["items"][0]["product_id"])
+    finding(
+        draft["product_id"] != fifty_two["product_id"]
+        and draft["attributes"].get("lens_size") == "54",
+        "C2: a 54 typed on the PO was ordered as the catalogued 52",
+    )
+    # And the catalogue form takes a 54 beside the 52.
+    world.catalogue_frame("Boss", "BOSS 1701", "C2", "52", mrp=2990, offer=2790, cost=1200)
+    world.catalogue_frame("Boss", "BOSS 1701", "C2", "54", mrp=2990, offer=2790, cost=1200)
+    assert len(world.products_named("Boss", "BOSS 1701")) == 2
+
+    # The SAME eye size is still the catalogued product.
+    refused = _refused_po(
+        world, [{"new_product": dict(BOSS_TYPED), "quantity": 1, "unit_price": 1200}]
+    )
+    detail = (refused.detail if refused else None) or {}
+    finding(
+        [m["existing"]["product_id"] for m in detail.get("matches", [])]
+        == [fifty_two["product_id"]],
+        "C2: the typed 52 is not answered with the catalogued 52",
+    )
+
+
+def test_c2_a_frame_typed_without_its_eye_size_is_asked_for_it(world):
+    world.catalogue_frame("Boss", "BOSS 1700", "C2", "52", mrp=2990, offer=2790, cost=1200)
+    sizeless = {k: v for k, v in BOSS_TYPED.items() if k != "size"}
+    refused = _refused_po(
+        world, [{"new_product": sizeless, "quantity": 1, "unit_price": 1200}]
+    )
+    detail = (refused.detail if refused else None) or {}
+    finding(
+        refused is not None
+        and refused.status_code == 422
+        and detail.get("code") == "EYE_SIZE_NEEDED"
+        and "52" in detail.get("message", ""),
+        f"C2: a sizeless Boss 1700 C2 was not sent back for its eye size ({refused})",
+    )
+    assert len(world.products_named("Boss", "BOSS 1700")) == 1
+    assert world.db.purchase_orders.count_documents({}) == 0
+
+
+def test_c2_a_size_typed_for_a_watch_is_not_a_second_watch(world):
+    body = _products.ProductCreate(
+        category="WT",
+        brand="Titan",
+        model="NR1805",
+        attributes={"brand_name": "Titan", "model_no": "NR1805", "colour_code": "SL01"},
+        mrp=4995,
+        offer_price=4495,
+        cost_price=2600,
+    )
+    watch = _run(_products.create_product(body, CATALOGUER, as_draft=False))
+    typed = {
+        "category": "WT",
+        "brand": "Titan",
+        "model": "NR1805",
+        "colour": "SL01",
+        "size": "42",
+        "mrp": 4995,
+    }
+    refused = _refused_po(
+        world, [{"new_product": typed, "quantity": 1, "unit_price": 2600}]
+    )
+    detail = (refused.detail if refused else None) or {}
+    finding(
+        [m["existing"]["product_id"] for m in detail.get("matches", [])]
+        == [watch["product_id"]],
+        "C2: a size typed for a watch made a second, hidden watch",
+    )
+    assert len(world.products_named("Titan", "NR1805")) == 1
+
+
+# ---------------------------------------------------------------------------
+# An ordered draft is finished in the product editor, never the import review
+# ---------------------------------------------------------------------------
+
+
+def _twin_of(world, draft_id):
+    return world.db.catalog_products.find_one({"spine_product_id": draft_id})
+
+
+def test_c1_the_import_review_never_saves_or_approves_an_ordered_draft(world):
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    twin = _twin_of(world, draft_id)
+    assert twin is not None
+
+    calls = (
+        lambda: _catalog.update_catalog_product(
+            twin["id"], _catalog.ProductUpdateInput(offer_price=2790), CATALOGUER
+        ),
+        lambda: _catalog.promote_catalog_product(
+            twin["id"], dry_run=True, current_user=CATALOGUER
+        ),
+    )
+    for call in calls:
+        try:
+            _run(call())
+            refused = None
+        except HTTPException as exc:
+            refused = exc
+        finding(
+            refused is not None
+            and refused.status_code == 409
+            and "product editor" in str(refused.detail),
+            f"C1: the import review wrote around the product door ({refused})",
+        )
+    assert not world.product(draft_id).get("offer_price")
+
+
+def _listed(world, **kw):
+    args = dict(
+        category=None,
+        brand=None,
+        search=None,
+        is_active="all",
+        needs_review=None,
+        source=None,
+        ordered_draft=None,
+        photo=None,
+        limit=250,
+        page=1,
+        current_user=CATALOGUER,
+    )
+    args.update(kw)
+    listed = _run(_catalog.list_catalog_products(**args))
+    return [p.get("sku") for p in listed["products"]]
+
+
+def test_c1_the_import_review_queue_leaves_ordered_drafts_out(world):
+    world.db.seed(
+        "catalog_products",
+        [
+            {
+                "id": "bvi-old",
+                "sku": "BVI-OLD",
+                "category": "FRAME",
+                "needs_review": True,
+                "is_active": False,
+                "created_at": "2001-01-01T00:00:00",
+            }
+        ],
+    )
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    sku = world.product(draft_id)["sku"]
+    assert _listed(world, needs_review=True)[0] == sku
+    finding(
+        _listed(world, needs_review=True, ordered_draft=False) == ["BVI-OLD"],
+        "C1: the import-review 'Next' fallback still lands on the ordered draft",
+    )
+
+
+def test_c1_ordered_first_is_only_the_needs_review_order(world):
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    boss_sku = world.product(draft_id)["sku"]
+    world.finish_draft(draft_id, offer=2790)
+    newer = world.catalogue_frame(
+        "Ray-Ban", "RB4350", "710", "58", mrp=9990, offer=8990, cost=5000
+    )
+    # Dated as on production: the Boss was catalogued first.
+    for sku, day in ((boss_sku, "2026-09-01"), (newer["sku"], "2026-09-02")):
+        world.db.catalog_products.update_one(
+            {"sku": sku}, {"$set": {"created_at": f"{day}T10:00:00"}}
+        )
+    everything = _listed(world)
+    finding(
+        everything.index(newer["sku"]) < everything.index(boss_sku),
+        f"C1: a once-ordered product permanently leads the product list ({everything})",
     )
