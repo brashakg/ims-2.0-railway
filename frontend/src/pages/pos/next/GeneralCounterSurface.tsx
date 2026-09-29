@@ -34,7 +34,7 @@ import { AlertTriangle, X, Glasses, ShoppingBag, Home } from 'lucide-react';
 import { useAuth } from '../../../context/AuthContext';
 import { usePOSStore, type CartLineItem } from '../../../stores/posStore';
 import { useIsOnlineStore } from '../../../hooks/useIsOnlineStore';
-import { useProducts } from '../../../hooks/usePOSQueries';
+import { useProducts, useSellableStock } from '../../../hooks/usePOSQueries';
 import WalkoutComplianceBanner from '../../../components/pos/WalkoutComplianceBanner';
 import { WalkinWalkoutControls } from '../../../components/pos/WalkinWalkoutControls';
 import { HeldBillsControls } from '../../../components/pos/HeldBillsControls';
@@ -133,6 +133,12 @@ export function GeneralCounterSurface() {
     category: category || undefined,
     store_id: store.store_id || activeStoreId || undefined,
   });
+  // F46: this shop's sellable counts (the oversell guard's own number) for
+  // the tiles on show and for the cart lines. Hooks, so above the guards.
+  const gridRows = (products as any[]).slice(0, MAX_PRODUCT_RESULTS);
+  const stockStoreId = store.store_id || activeStoreId || undefined;
+  const { data: gridSellable } = useSellableStock(stockStoreId, gridRows);
+  const { data: cartSellable } = useSellableStock(stockStoreId, store.cart || []);
 
   // ---- Guards (identical to the billing surface; backend enforces both) ---
   if (!activeStoreId) {
@@ -468,16 +474,15 @@ export function GeneralCounterSurface() {
                         implementation for both tills. Only the surrounding
                         grid layout belongs to this surface. */}
                     <div className="grid grid-cols-2 tablet:grid-cols-3 laptop:grid-cols-4 gap-2">
-                      {(products as any[])
-                        .slice(0, MAX_PRODUCT_RESULTS)
-                        .map((product: any) => (
-                          <ProductCard
-                            key={productIdOf(product) || product.sku}
-                            product={product}
-                            layout="grid"
-                            onPick={() => addProduct(product)}
-                          />
-                        ))}
+                      {gridRows.map((product: any) => (
+                        <ProductCard
+                          key={productIdOf(product) || product.sku}
+                          product={product}
+                          layout="grid"
+                          stock={gridSellable?.[productIdOf(product) || '']}
+                          onPick={() => addProduct(product)}
+                        />
+                      ))}
                     </div>
                     {(products as any[]).length > MAX_PRODUCT_RESULTS && (
                       <p className="mt-2 text-center text-[11px] text-gray-500">
@@ -500,7 +505,7 @@ export function GeneralCounterSurface() {
                   counter is optical — CartSidebar renders them for optical
                   lines only, so the same component IS the plain cart. */}
               <div className="min-h-0 overflow-y-auto rounded-xl border border-gray-200 bg-white">
-                <CartSidebar onOpenDiscount={setDiscountLine} />
+                <CartSidebar onOpenDiscount={setDiscountLine} sellable={cartSellable} />
               </div>
 
               <div className="min-h-0 overflow-y-auto flex flex-col gap-3">

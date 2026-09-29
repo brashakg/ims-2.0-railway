@@ -24,6 +24,24 @@ export const inventoryApi = {
     return response.data;
   },
 
+  // F46: this shop's sellable count per product -- the oversell guard's own
+  // number (GET /inventory/sellable). `itemTypes` is the order item_type per
+  // id (mapCategory), so lens/service lines come back null like the guard.
+  getSellable: async (
+    storeId: string,
+    productIds: string[],
+    itemTypes: string[],
+  ): Promise<{ store_id: string; sellable: Record<string, number | null> }> => {
+    const response = await api.get('/inventory/sellable', {
+      params: {
+        store_id: storeId,
+        product_ids: productIds.join(','),
+        item_types: itemTypes.join(','),
+      },
+    });
+    return response.data;
+  },
+
   searchByBarcode: async (barcode: string, storeId: string) => {
     // Search for product by barcode in specific store
     const response = await api.get(`/inventory/barcode/${barcode}`, { params: { store_id: storeId } });

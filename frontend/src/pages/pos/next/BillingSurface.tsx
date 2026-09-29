@@ -14,6 +14,7 @@
 // styling, widgets and the delivery surface land in the next phases.
 
 import { useRef, useState } from 'react';
+import { useSellableStock } from '../../../hooks/usePOSQueries';
 import { AlertTriangle, X } from 'lucide-react';
 import { useAuth } from '../../../context/AuthContext';
 import { usePOSStore, type CartLineItem } from '../../../stores/posStore';
@@ -73,6 +74,10 @@ export function BillingSurface() {
     fittingCoating?: string;
   } | null>(null);
   const idempotencyKeyRef = useRef<string | null>(null);
+  // F46: this shop's sellable count for each cart line -- the oversell
+  // guard's own number -- so a line warns the moment it is added, not at
+  // Complete sale. A hook, so above the guards.
+  const { data: cartSellable } = useSellableStock(activeStoreId, store.cart || []);
 
   // ---- Guards (same rules as the classic surface; backend enforces both) --
   if (!activeStoreId) {
@@ -423,7 +428,7 @@ export function BillingSurface() {
           {/* ── RIGHT: cart + payment, always visible (430px per mockup) ── */}
           <div className="w-full lg:w-[430px] shrink-0 lg:min-h-0 flex flex-col lg:grid gap-3 lg:grid-rows-[minmax(0,1fr)_minmax(0,auto)_auto]">
             <div className="lg:min-h-0 lg:overflow-y-auto rounded-xl border border-gray-200 bg-white">
-              <CartSidebar onOpenDiscount={setDiscountLine} />
+              <CartSidebar onOpenDiscount={setDiscountLine} sellable={cartSellable} />
             </div>
             {/* Bill discount sits in the payment row rather than as a fourth
                 grid child - the row template is fixed at three, and a stray

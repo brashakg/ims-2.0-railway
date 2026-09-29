@@ -7,10 +7,15 @@
 // badge, and no result cap. These pin the reads that were wrong on the counter
 // copy, on the shared card both tills now render. The result cap is pinned
 // where it is applied (generalCounterCompleteSale.test.tsx).
+//
+// The re-typed stock spelling chain (stock ?? quantity ?? stock_available) is
+// gone: no product row ever carried those, so no tile ever showed stock (F46).
+// The card's figure now comes only from the sale guard's own count, handed in
+// as `stock` (tillStockBadge.test.tsx).
 
 import { render, screen } from '@testing-library/react';
 import { describe, it, expect, beforeEach } from 'vitest';
-import { ProductCard, productIdOf, stockOf } from '../ProductResultsStrip';
+import { ProductCard, productIdOf } from '../ProductResultsStrip';
 import { usePOSStore } from '../../../../stores/posStore';
 
 beforeEach(() => usePOSStore.getState().resetTransaction());
@@ -20,19 +25,12 @@ describe('the shared product reads', () => {
     expect(productIdOf({ id: 'x' })).toBe('x');
     expect(productIdOf({ product_id: 'p', id: 'x' })).toBe('p');
   });
-
-  it('tells "no stock figure" apart from zero', () => {
-    expect(stockOf({})).toBeNull();
-    expect(stockOf({ stock: 0 })).toBe(0);
-    expect(stockOf({ quantity: 2 })).toBe(2);
-    expect(stockOf({ stock_available: 3 })).toBe(3);
-  });
 });
 
 describe('the shared card', () => {
   const base = { name: 'Titan Neo', sku: 'T1', mrp: 5000, offer_price: 4500 };
-  const card = (product: Record<string, unknown>) =>
-    render(<ProductCard product={product} layout="grid" onPick={() => undefined} />);
+  const card = (product: Record<string, unknown>, stock?: number | null) =>
+    render(<ProductCard product={product} layout="grid" stock={stock} onPick={() => undefined} />);
   const button = () => screen.getByRole('button') as HTMLButtonElement;
 
   it('marks a row already in the cart even when the row only carries `id`', () => {
@@ -52,18 +50,18 @@ describe('the shared card', () => {
   });
 
   it('badges low stock, blocks zero stock, and does not block a row with no figure', () => {
-    const low = card({ ...base, stock: 2 });
-    expect(screen.getByText('2 left')).toBeTruthy();
+    const low = card(base, 2);
+    expect(screen.getByText('2 in stock').className).toMatch(/amber/);
     expect(button().disabled).toBe(false);
     low.unmount();
 
-    const out = card({ ...base, stock: 0 });
+    const out = card(base, 0);
     expect(screen.getByText('Out of stock')).toBeTruthy();
     expect(button().disabled).toBe(true);
     out.unmount();
 
-    card(base);
-    expect(screen.queryByText(/left|Out/)).toBeNull();
+    card(base, null);
+    expect(screen.queryByText(/in stock|Out/)).toBeNull();
     expect(button().disabled).toBe(false);
   });
 

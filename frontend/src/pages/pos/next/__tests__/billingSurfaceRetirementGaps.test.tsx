@@ -36,8 +36,11 @@ vi.mock('../../../../components/pos/submitOrder', async (importOriginal) => ({
   submitPosOrder: (...a: unknown[]) => submitPosOrder(...a),
 }));
 
+// F46: the cart's sellable counts. Returns nothing unless a test hands it a map.
+const useSellableStock = vi.fn();
 vi.mock('../../../../hooks/usePOSQueries', () => ({
   useProducts: () => ({ data: [], isLoading: false }),
+  useSellableStock: (...a: unknown[]) => useSellableStock(...a),
 }));
 vi.mock('../../../../hooks/useIsOnlineStore', () => ({ useIsOnlineStore: () => false }));
 
@@ -58,7 +61,12 @@ vi.mock('../../../../components/pos/CustomerCardWithLoyalty', () => ({
     <button type="button" onClick={onChange}>change-customer</button>
   ),
 }));
-vi.mock('../../../../components/pos/POSCart', () => ({ CartSidebar: () => <div>cart</div> }));
+// The cart echoes the stock counts it was handed (F46).
+vi.mock('../../../../components/pos/POSCart', () => ({
+  CartSidebar: ({ sellable }: { sellable?: Record<string, number | null> }) => (
+    <div>cart{sellable ? `:${JSON.stringify(sellable)}` : ''}</div>
+  ),
+}));
 vi.mock('../../../../components/pos/DiscountModal', () => ({
   DiscountModal: () => null,
   toDiscountItem: (x: unknown) => x,
@@ -118,6 +126,20 @@ const completeSale = async () => {
 beforeEach(() => {
   usePOSStore.getState().resetTransaction();
   submitPosOrder.mockReset().mockResolvedValue({ ok: true, orderId: 'o-1' });
+  useSellableStock.mockReset().mockReturnValue({ data: undefined });
+});
+
+describe("F46: the cart hears what this shop can sell", () => {
+  it("asks for the cart lines' counts at the till's store and hands them to the cart", () => {
+    seed({ lines: ['FRAME'] });
+    useSellableStock.mockReturnValue({ data: { 'p-0': 0 } });
+    render(<BillingSurface />);
+    expect(useSellableStock).toHaveBeenCalledWith(
+      'BV-BOK-01',
+      [expect.objectContaining({ product_id: 'p-0' })],
+    );
+    expect(screen.getByText('cart:{"p-0":0}')).toBeTruthy();
+  });
 });
 
 describe('G1: the sale type the lab depends on is derived from the bill', () => {

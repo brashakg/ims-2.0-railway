@@ -72,6 +72,7 @@ vi.mock('../../context/AuthContext', () => ({
 // react-query POS hooks -> inert (also feeds useIsOnlineStore's store list).
 vi.mock('../../hooks/usePOSQueries', () => ({
   useProducts: () => ({ data: [], isLoading: false }),
+  useSellableStock: () => ({ data: undefined }),
   useCustomerSearch: () => ({ data: [], isLoading: false }),
   useCustomer: () => ({ data: null }),
   useStores: () => ({ data: [], isLoading: false }),

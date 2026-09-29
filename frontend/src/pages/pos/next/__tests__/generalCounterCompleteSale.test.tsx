@@ -64,8 +64,12 @@ vi.mock('../../../../services/api/sales', () => ({
 // MUTABLE: the browse-grid test hands the counter a product list; every
 // checkout test leaves it empty. Reset in beforeEach.
 let productRows: unknown[] = [];
+// F46: this shop's sellable counts, keyed by product id. Reset in beforeEach.
+let sellableCounts: Record<string, number | null> | undefined;
+const useSellableStock = vi.fn((_store: string, _rows: unknown[]) => ({ data: sellableCounts }));
 vi.mock('../../../../hooks/usePOSQueries', () => ({
   useProducts: () => ({ data: productRows, isLoading: false }),
+  useSellableStock: (store: string, rows: unknown[]) => useSellableStock(store, rows),
 }));
 vi.mock('../../../../hooks/useIsOnlineStore', () => ({ useIsOnlineStore: () => false }));
 
@@ -80,7 +84,12 @@ vi.mock('../../../../components/pos/CustomerCardWithLoyalty', () => ({
     <button type="button" onClick={onChange}>change-customer</button>
   ),
 }));
-vi.mock('../../../../components/pos/POSCart', () => ({ CartSidebar: () => <div>cart</div> }));
+// The cart echoes the stock counts it was handed (F46).
+vi.mock('../../../../components/pos/POSCart', () => ({
+  CartSidebar: ({ sellable }: { sellable?: Record<string, number | null> }) => (
+    <div>cart{sellable ? `:${JSON.stringify(sellable)}` : ''}</div>
+  ),
+}));
 vi.mock('../../../../components/pos/DiscountModal', () => ({
   DiscountModal: () => null,
   toDiscountItem: (x: unknown) => x,
@@ -145,6 +154,8 @@ beforeEach(() => {
   usePOSStore.getState().resetTransaction();
   submitPosOrder.mockReset();
   productRows = [];
+  sellableCounts = undefined;
+  useSellableStock.mockClear();
   localStorage.setItem('ims-held-bills', '[]');
 });
 
@@ -300,8 +311,8 @@ describe('the general counter browse grid', () => {
       sku: `W${i}`,
       mrp: 1000,
       offer_price: 1000,
-      stock: 5,
     }));
+    sellableCounts = Object.fromEntries(productRows.map((_, i) => [`p-${i}`, 5]));
     renderCounter();
 
     // (No ^ anchor: the card's accessible name starts with its stock badge.)
@@ -309,5 +320,35 @@ describe('the general counter browse grid', () => {
       MAX_PRODUCT_RESULTS,
     );
     expect(screen.getByText(new RegExp(`first ${MAX_PRODUCT_RESULTS}`))).toBeTruthy();
+  });
+});
+
+describe("F46: the counter's tiles and cart use this shop's sellable count", () => {
+  it('badges every grid tile and blocks the one this shop cannot sell', () => {
+    productRows = [
+      { product_id: 'SG-1', name: 'Ray-Ban Aviator - Gold', category: 'SUNGLASS', mrp: 9000, offer_price: 9000 },
+      { product_id: 'SG-2', name: 'Ray-Ban Aviator - Black', category: 'SUNGLASS', mrp: 9000, offer_price: 9000 },
+    ];
+    sellableCounts = { 'SG-1': 3, 'SG-2': 0 };
+    renderCounter();
+
+    expect(useSellableStock).toHaveBeenCalledWith('BV-BOK-01', productRows);
+    const gold = screen.getByText('Gold').closest('button') as HTMLButtonElement;
+    const black = screen.getByText('Black').closest('button') as HTMLButtonElement;
+    expect(gold.textContent).toMatch(/3 in stock/);
+    expect(gold.disabled).toBe(false);
+    expect(black.textContent).toMatch(/Out of stock/);
+    expect(black.disabled).toBe(true);
+  });
+
+  it("hands the cart lines' counts to the cart", () => {
+    putSomethingInTheCart();
+    sellableCounts = { 'p-1': 0 };
+    renderCounter();
+    expect(useSellableStock).toHaveBeenCalledWith(
+      'BV-BOK-01',
+      [expect.objectContaining({ product_id: 'p-1' })],
+    );
+    expect(screen.getByText('cart:{"p-1":0}')).toBeTruthy();
   });
 });
