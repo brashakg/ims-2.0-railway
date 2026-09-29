@@ -608,3 +608,114 @@ def test_purchase_roles_still_read_prices_and_supplier(client, return_docs, role
     want = ("3173.37",) if "vendor-returns" in path else (_GSTIN, _ADDRESS, _BILL_NO)
     for s in want:
         assert s in resp.text, (role, s)
+
+
+# ---------------------------------------------------------------------------
+# 10. Product reads: no cost_price / landed_cost for counter roles
+# ---------------------------------------------------------------------------
+# cost_price is the PO price written at receipt, landed_cost the purchase-bill
+# landed unit cost: a cashier read every product's purchase cost through
+# GET /products without touching /vendors (owner ruling 2026-09-29).
+import json  # noqa: E402
+
+from api.routers import products as products_mod  # noqa: E402
+from api.services import cache as cache_mod  # noqa: E402
+
+_PRODUCT = {
+    "product_id": "P1",
+    "sku": "BV-FR-1",
+    "name": "RB Frame",
+    "mrp": 5000,
+    "offer_price": 4500,
+    "cost_price": 3173.37,
+    "landed_cost": 3301.5,
+    "landed_cost_paise": 330150,
+    "moving_avg_cost": 3173.37,
+}
+_PRODUCT_COST_KEYS = {"cost_price", "landed_cost", "landed_cost_paise", "moving_avg_cost"}
+# The product master feeds the PO form (buyers) and the product edit form.
+_PRODUCT_COST_ROLES = (
+    "ADMIN",
+    "ACCOUNTANT",
+    "AREA_MANAGER",
+    "STORE_MANAGER",
+    "CATALOG_MANAGER",
+    "SUPERADMIN",
+)
+
+
+class _ProductRepo:
+    def find_by_sku(self, _sku):
+        return dict(_PRODUCT)
+
+    def find_by_id(self, _pid):
+        return dict(_PRODUCT)
+
+    def find_many(self, _flt, skip=0, limit=50):
+        return [dict(_PRODUCT)]
+
+    def count(self, _flt):
+        return 1
+
+
+class _JsonCache:
+    """The real cache stores JSON; so does this one, fresh per test."""
+
+    TTL_MEDIUM = 300
+
+    def __init__(self):
+        self.d = {}
+
+    def get(self, key):
+        return json.loads(self.d[key]) if key in self.d else None
+
+    def set(self, key, value, ttl=300):
+        self.d[key] = json.dumps(value, default=str)
+
+
+@pytest.fixture
+def product_repo(monkeypatch):
+    monkeypatch.setattr(products_mod, "get_product_repository", lambda: _ProductRepo())
+    monkeypatch.setattr(cache_mod, "cache", _JsonCache())
+
+
+def _product_rows(client, role, path):
+    resp = client.get(path, headers=_headers(role))
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    return body["products"] if "products" in body else [body]
+
+
+PRODUCT_READS = (
+    "/api/v1/products",
+    "/api/v1/products/sku/BV-FR-1",
+    "/api/v1/products/P1",
+)
+
+
+@pytest.mark.parametrize("path", PRODUCT_READS)
+@pytest.mark.parametrize("role", COUNTER_ROLES)
+def test_counter_roles_read_products_without_cost(client, product_repo, role, path):
+    rows = _product_rows(client, role, path)
+    assert rows and rows[0]["mrp"] == 5000
+    assert not [k for r in rows for k in _PRODUCT_COST_KEYS if k in r], rows
+
+
+@pytest.mark.parametrize("path", PRODUCT_READS)
+@pytest.mark.parametrize("role", _PRODUCT_COST_ROLES)
+def test_buyers_and_catalog_still_read_product_cost(client, product_repo, role, path):
+    row = _product_rows(client, role, path)[0]
+    assert row["cost_price"] == 3173.37 and row["landed_cost"] == 3301.5
+
+
+# ACCOUNTANT and CASHIER share the attribution tier ("staff") the key already
+# carried, so only the cost tier keeps their cached pages apart.
+@pytest.mark.parametrize(
+    "first,second", [("ACCOUNTANT", "CASHIER"), ("CASHIER", "ACCOUNTANT")]
+)
+def test_product_list_cache_never_crosses_the_cost_tier(
+    client, product_repo, first, second
+):
+    _product_rows(client, first, "/api/v1/products")
+    rows = _product_rows(client, second, "/api/v1/products")
+    assert ("cost_price" in rows[0]) is (second == "ACCOUNTANT"), rows

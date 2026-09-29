@@ -13,7 +13,8 @@ Role policy (DECISIONS sec 9):
     -- cost + margin are stripped from the payload; the FE renders "-".
   * The buyers (AREA_MANAGER / STORE_MANAGER, with ADMIN / ACCOUNTANT the
     purchase roles) see what was paid where they buy: purchase documents
-    (context="purchase").
+    (context="purchase") and the product master that prefills a PO
+    (context="product", which also admits the CATALOG_MANAGER product form).
     Counter roles (SALES_*, CASHIER, OPTOMETRIST, WORKSHOP_STAFF) never do
     (audit F46/F60, owner ruling D7 + 2026-09-29): a vendor return / RTV debit
     note shows them the item, quantity and reason only, and the vendor list
@@ -32,10 +33,16 @@ _BUYER_ROLES = {"AREA_MANAGER", "STORE_MANAGER"}
 _CONTEXT_ROLES = {
     "catalog_edit": CATALOG_FORM_ROLES,
     "purchase": _BUYER_ROLES,
+    "product": _BUYER_ROLES | CATALOG_FORM_ROLES,
 }
 
 # Raw cost fields that may appear on product / stock / order-line payloads.
-_COST_FIELDS = {"cost_price", "cost_value", "cost_at_sale", "unit_cost"}
+# landed_cost* / moving_avg_cost are what a purchase bill writes onto the
+# product master (purchase_invoices.py); purchase_price is the legacy name.
+_COST_FIELDS = {
+    "cost_price", "cost_value", "cost_at_sale", "unit_cost",
+    "landed_cost", "landed_cost_paise", "moving_avg_cost", "purchase_price",
+}
 # Derived margin / COGS figures emitted by analytics + finance payloads.
 _MARGIN_FIELDS = {
     "margin_pct", "gross_margin", "net_margin", "cogs",
