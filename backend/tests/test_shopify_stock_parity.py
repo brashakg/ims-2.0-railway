@@ -37,6 +37,13 @@ Pins, each with its revert named in the test:
     SKU listed within its shelf is OVER_ALLOCATED); both screens' second
     (units no shelf backs) and third (units past the writer, per location)
     sort keys are pinned.
+  * round 7: every Shopify query stays under the 1,000-point cap (the fake
+    prices each query as Shopify does and refuses one over it) and shrinks
+    from the cost Shopify quotes; a failed batch leaves only its own SKUs
+    unknown; an item Shopify answers null, or a product IMS stopped selling,
+    has left the catalogue; the task text names every SKU that keeps it
+    open, never calls a SKU compared tonight 'not compared', and asks a
+    SUPERADMIN-blocked SKU for 0 in Shopify admin, never the button.
 
 StrictDB + injected Shopify boundary -- no network, no production.
 """
@@ -1137,7 +1144,7 @@ def test_drift_task_names_the_press_that_re_sends_the_numbers():
     # Put back 'open each product named here and press Send to website' as
     # the whole instruction -> fails.
     assert task["store_id"] == "BV-A"
-    assert "Store manager: check each product named here on the shelf" in task["description"]
+    assert "Store manager: check each of these products on the shelf" in task["description"]
     assert "ask an ADMIN or SUPERADMIN" in task["description"]
 
 
@@ -1179,6 +1186,84 @@ def test_tick_the_task_text_names_every_sku_that_keeps_it_open(one_id_per_batch)
     assert "not compared tonight" in task["description"] and ": SKU-2." in task["description"]
     assert "SKU-1" not in task["description"]
     assert "check it is still on the website" in task["description"]
+
+
+def test_tick_a_sku_that_drifts_again_is_never_called_not_compared():
+    """Round 7 P3, the panel's input: SKU-1 drifts at BV-A on night 1 (IMS 5
+    vs Shopify 1) and again on night 2 (IMS 5 vs Shopify 0). Night 2 WAS
+    compared: the text names SKU-1 on the drift line only, never under 'not
+    compared tonight'. Drop `- drifted` from `owed` -> the owed sentence
+    names SKU-1 right after its own numbers -> fails."""
+    db = _db({"SKU-1": {"BV-A": 5, "BV-B": 1}})
+    _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {}})))
+    _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 0, LOC_B: 1}, INV_2: {}})))
+    text = _tasks(db)[0]["description"]
+    assert "SKU-1 (IMS 5 vs Shopify 0)" in text and "not compared tonight" not in text
+
+
+def test_tick_the_task_text_names_every_drifted_sku_past_the_top_five():
+    """Round 7 P5, the panel's probe: 7 SKUs drift at BV-A (IMS 5 vs Shopify
+    0 each). payload.skus holds all 7 and all 7 keep the task open, so the
+    text names all 7 -- the top five with their numbers, the rest by SKU.
+    Name only drift[:5] -> SKU-6 and SKU-7 appear nowhere -> fails."""
+    skus = [f"SKU-{n}" for n in range(1, 8)]
+    inv = {s: f"gid://shopify/InventoryItem/{90 + n}" for n, s in enumerate(skus, 1)}
+    db = StrictDB()
+    db.seed("stores", [_store("BV-A", LOC_A), _store("BV-B", LOC_B)])
+    db.seed("products", [{"product_id": "p" + s, "sku": s} for s in skus])
+    db.seed("catalog_variants", [{"sku": s, "shopify_inventory_item_id": inv[s]} for s in skus])
+    db.seed("stock_units", [{"stock_id": f"{s}-{i}", "product_id": "p" + s, "store_id": "BV-A",
+                             "status": "AVAILABLE"} for s in skus for i in range(5)])
+    _run(sp.run_parity_tick(db, graphql=_shopify({inv[s]: {LOC_A: 0, LOC_B: 0} for s in skus})))
+    (task,) = _tasks(db)
+    assert task["payload"]["skus"] == skus
+    assert [s for s in skus if s not in task["description"]] == []
+    assert "; also SKU-6, SKU-7." in task["description"]
+
+
+@pytest.mark.parametrize("how", ["deleted_in_shopify_admin", "soft_deleted_in_ims"])
+def test_tick_a_sku_that_left_the_online_catalogue_stops_keeping_its_task_open(how):
+    """Round 7 P6, the panel's probe. Night 1: SKU-2 drifts at BV-A (IMS 5 vs
+    Shopify 0), the task names it. Then EITHER Shopify answers INV_2 null in
+    a full answer (the product was deleted in Shopify admin: nothing can
+    compare it or re-send it) OR IMS's Delete button soft-deletes SKU-2
+    (is_active False; the row and its gid are kept, and Shopify still shows 5
+    at LOC_A). Night 2 compares SKU-1 clean and CLOSES the task; the deleted
+    item is reported under missing_on_shopify. Drop `- set(gone)` -> the
+    null SKU is owed, OPEN for ever; drop the is_active filter from
+    _sample_variants -> IMS 0 vs Shopify 5, refreshed for ever -> fails."""
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 5, "BV-B": 0}})
+    _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 0, LOC_B: 0}})))
+    assert _tasks(db)[0]["payload"]["skus"] == ["SKU-2"]
+    if how == "deleted_in_shopify_admin":
+        shop = _shopify({INV_1: {LOC_A: 1, LOC_B: 1}})
+    else:
+        db.get_collection("products").update_one({"sku": "SKU-2"}, {"$set": {"is_active": False}})
+        shop = _shopify({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 5, LOC_B: 0}})
+    out = _run(sp.run_parity_tick(db, graphql=shop))
+    assert out["checked"] is True
+    assert out["tasks"]["closed"] == ["BV-A"] and _tasks(db)[0]["status"] == "COMPLETED"
+    assert out["missing_on_shopify"] == (["SKU-2"] if how == "deleted_in_shopify_admin" else [])
+
+
+def test_tick_a_blocked_sku_that_drifts_asks_for_shopify_admin_never_the_button():
+    """Round 7 P7, the panel's input: SKU-1 is SUPERADMIN-blocked, shelves
+    BV-A 5 / BV-B 4, Shopify LOC_A 5 (a hand edit, or the block's 0 never
+    landed). IMS sends 0 -> drift at BV-A. push_product refuses a blocked
+    product and the stock pass re-sends only numbers IMS changed, so the
+    text sends nobody to the shelf or to Send to website for it: SKU-1 is on
+    the blocked line, which asks a SUPERADMIN for 0 in Shopify admin (or
+    lifting the block). Drop the blocked split -> 'press Send to website to
+    re-send' and 'on the shelf' -> fails."""
+    db = _db({"SKU-1": {"BV-A": 5, "BV-B": 4}})
+    db.seed("ecom_collections", [{"collection_id": "C-BAN", "collection_type": "CUSTOM",
+                                  "online_sync_blocked": True, "products": [{"sku": "SKU-1"}]}])
+    _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 5, LOC_B: 0}, INV_2: {LOC_A: 0, LOC_B: 0}})))
+    (task,) = _tasks(db)
+    text = task["description"]
+    assert "Blocked from online sale by a SUPERADMIN: SKU-1 (IMS 0 vs Shopify 5)" in text
+    assert "to 0 at BV-A's location in Shopify admin" in text and "lift the block" in text
+    assert "Send to website to re-send" not in text and "on the shelf" not in text
 
 
 def test_a_tasks_read_failure_files_no_second_task():
