@@ -102,6 +102,10 @@ class TaskmasterAgent(JarvisAgent):
         # -- task creation is fully reversible. Fail-soft.
         actions.extend(await self._remind_overdue_pos())
 
+        # 2d. F33: the accountant's 'Book purchase invoice for GRN ...' task
+        # closes once that receipt's bill is booked. Fail-soft.
+        actions.extend(await self._close_booked_invoice_tasks())
+
         # 3. E4: expire stale approval requests past their 60-min TTL. This is a
         # status flip (REQUESTED -> EXPIRED), not a delete -- rows stay
         # auditable. Fail-soft: a missing DB / engine error never breaks the tick.
@@ -1031,32 +1035,111 @@ class TaskmasterAgent(JarvisAgent):
             await self._create_advisory_task(payload)
 
     async def _create_advisory_task(self, anomaly: Dict[str, Any]):
-        """For Tier 3 anomalies — create a task for human review, no auto-action."""
+        """For Tier 3 anomalies — create a task for human review, no auto-action.
+        Through create_system_task (the one door for SYSTEM tasks): the store
+        manager of the anomaly's shop by name, a task_number, one task per
+        anomaly however often it is re-reported."""
         coll = self.get_collection("tasks")
         if coll is None:
             return
         try:
-            now = datetime.now()
-            coll.insert_one(
-                {
-                    "task_id": f"TSK-AUTO-{now.strftime('%y%m%d-%H%M%S')}",
-                    "title": f"Review: {anomaly.get('summary', 'anomaly')}",
-                    "description": "Auto-created from a detected anomaly (advisory, Tier 3).",
-                    "category": "Review",
-                    "priority": "P1",
-                    "status": "OPEN",
-                    "source": "SYSTEM",
-                    "assigned_to": "store_manager",
-                    "auto_created_by": self.agent_id,
-                    "linked_anomaly": anomaly,
-                    "due_at": now + timedelta(hours=24),
-                    "created_at": now,
-                    "updated_at": now,
-                    "escalation_level": 0,
-                }
+            from api.services.task_triggers import create_system_task
+            from database.repositories.task_repository import TaskRepository
+
+            ref = ":".join(
+                str(anomaly.get(k) or "") for k in ("kind", "prescription_id", "eye")
+            )
+            create_system_task(
+                TaskRepository(coll),
+                title=f"Review: {anomaly.get('summary', 'anomaly')}",
+                description="Auto-created from a detected anomaly (advisory, Tier 3).",
+                priority="P1",
+                category="Review",
+                store_id=anomaly.get("store_id"),
+                dedupe_ref=f"anomaly:{ref}",
+                assigned_to="STORE_MANAGER",
+                due_at=datetime.now() + timedelta(hours=24),
+                extra={"auto_created_by": self.agent_id, "linked_anomaly": anomaly},
             )
         except Exception as e:
             logger.warning(f"[TASKMASTER] Failed to create advisory task: {e}")
+
+    async def _close_booked_invoice_tasks(self) -> List[Dict[str, Any]]:
+        """F33: 'Book purchase invoice for GRN ...' (grn_express.py, source_ref
+        express_invoice:<grn_id>) closes once a bill carrying that grn_id is
+        booked -- from any booking door, so no door has to remember to.
+
+        ponytail: closes on the 5-minute tick, not the instant the bill is
+        booked; a direct close from the booking door makes it instant."""
+        tasks_coll = self.get_collection("tasks")
+        bills = self.get_collection("vendor_bills")
+        if tasks_coll is None or bills is None:
+            return []
+        active = ["OPEN", "IN_PROGRESS", "ESCALATED"]
+        try:
+            open_tasks = list(
+                tasks_coll.find(
+                    {
+                        "source_ref": {"$regex": "^express_invoice:"},
+                        "status": {"$in": active},
+                    },
+                    {"_id": 0, "task_id": 1, "source_ref": 1, "status": 1},
+                ).limit(500)
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[TASKMASTER] book-invoice task scan error: {e}")
+            return []
+        actions: List[Dict[str, Any]] = []
+        for t in open_tasks:
+            grn_id = str(t.get("source_ref") or "").split(":", 1)[1]
+            try:
+                bill = bills.find_one(
+                    {"grn_id": grn_id},
+                    {"_id": 0, "bill_id": 1, "invoice_number": 1, "bill_number": 1},
+                )
+                if not bill:
+                    continue
+                now = datetime.now()
+                number = (
+                    bill.get("invoice_number")
+                    or bill.get("bill_number")
+                    or bill.get("bill_id")
+                )
+                notes = f"Purchase invoice {number} booked."
+                res = tasks_coll.update_one(
+                    {"task_id": t.get("task_id"), "status": {"$in": active}},
+                    {
+                        "$set": {
+                            "status": "COMPLETED",
+                            "completed_at": now,
+                            "updated_at": now,
+                            "completion_notes": notes,
+                            "completed_by": self.agent_id,
+                        },
+                        "$push": {
+                            "history": {
+                                "action": "completed",
+                                "from": t.get("status"),
+                                "by": self.agent_id,
+                                "notes": notes,
+                                "at": now,
+                            }
+                        },
+                    },
+                )
+                if getattr(res, "modified_count", 0):
+                    actions.append(
+                        {
+                            "action": "book_invoice_task_closed",
+                            "task_id": t.get("task_id"),
+                            "grn_id": grn_id,
+                        }
+                    )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    f"[TASKMASTER] book-invoice task close failed for {grn_id}: {e}"
+                )
+        return actions
 
     async def run(self, query: str, context: AgentContext) -> AgentResponse:
         """On-demand: report recent actions taken."""

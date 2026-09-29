@@ -768,6 +768,7 @@ class OracleAgent(JarvisAgent):
                             "severity": "HIGH",
                             "summary": f"Rx {rx.get('prescription_id')} {eye_key} SPH={sph} exceeds ±20.00 limit",
                             "prescription_id": rx.get("prescription_id"),
+                            "store_id": rx.get("store_id"),
                             "eye": eye_key,
                             "sph": sph,
                         })

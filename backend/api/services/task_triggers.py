@@ -205,8 +205,8 @@ def create_system_task(
     store's managers see on the Team list."""
     if repo is None:
         return None
-    if assigned_to in VALID_ROLES:
-        assigned_to = _person_holding(assigned_to, store_id)
+    if str(assigned_to or "").upper() in VALID_ROLES:
+        assigned_to = _person_holding(str(assigned_to).upper(), store_id)
     try:
         existing = repo.find_many({"source_ref": dedupe_ref}) or []
         if any(

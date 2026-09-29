@@ -124,3 +124,72 @@ def test_grn_discrepancy_goes_to_that_shops_store_manager_by_name(monkeypatch):
     assert task["store_id"] == "BV-TEST-01"
     assert task["title"] == "GRN discrepancy on PO/BV-TEST-01/26-27/0007"
     assert "PO PO/" not in task["description"]
+
+
+# ---------------------------------------------------------------------------
+# Verifier round 2
+# ---------------------------------------------------------------------------
+
+import mongomock  # noqa: E402
+
+from agents.implementations.taskmaster import TaskmasterAgent  # noqa: E402
+
+
+def _open_task(task_id, ref):
+    return {
+        "task_id": task_id, "task_number": task_id, "title": task_id, "status": "OPEN",
+        "source": "SYSTEM", "source_ref": ref, "assigned_to": "acc-bv", "store_id": "BV-TEST-01",
+        "history": [],
+    }
+
+
+def test_book_invoice_task_closes_once_the_bill_is_booked(monkeypatch):
+    """'Book purchase invoice for GRN RCPT/...' stayed OPEN in the accountant's
+    Mine list after the bill was booked. TASKMASTER's tick closes it once a
+    bill carrying that grn_id exists, whichever door booked it; a receipt with
+    no bill yet, and the receipt's other tasks, stay open."""
+    db = mongomock.MongoClient().db
+    db.tasks.insert_many([
+        _open_task("T-BOOK-1", "express_invoice:G1"),
+        _open_task("T-BOOK-2", "express_invoice:G2"),  # not booked yet
+        _open_task("T-DISC-1", "grn:G1"),  # the discrepancy task is not the bill
+    ])
+    db.vendor_bills.insert_one(
+        {"bill_id": "B1", "grn_id": "G1", "invoice_number": "JOT/26-27/0451", "status": "OUTSTANDING"}
+    )
+    agent = TaskmasterAgent(db=db)
+    asyncio.run(agent._do_background_work())  # the real 5-minute tick
+
+    status = {t["task_id"]: t for t in db.tasks.find()}
+    assert status["T-BOOK-1"]["status"] == "COMPLETED"
+    assert status["T-BOOK-1"]["completed_at"] is not None
+    assert "JOT/26-27/0451" in status["T-BOOK-1"]["completion_notes"]
+    assert status["T-BOOK-1"]["history"][-1]["action"] == "completed"
+    assert status["T-BOOK-2"]["status"] == "OPEN"
+    assert status["T-DISC-1"]["status"] == "OPEN"
+
+
+def test_advisory_task_goes_through_the_one_door_to_a_person(monkeypatch):
+    """TASKMASTER's Rx-anomaly advisory task inserted itself with assigned_to
+    'store_manager' (a lowercase title, matching nobody). It now goes through
+    create_system_task: the named store manager of the Rx's shop, a
+    task_number, deduped per anomaly."""
+    _people(monkeypatch)
+    db = mongomock.MongoClient().db
+    agent = TaskmasterAgent(db=db)
+    anomaly = {
+        "kind": "rx_out_of_range", "severity": "HIGH", "summary": "Rx RX1 right_eye SPH=25.0 exceeds limit",
+        "prescription_id": "RX1", "eye": "right_eye", "sph": 25.0, "store_id": "BV-TEST-01",
+    }
+    asyncio.run(agent.on_event("anomaly.detected", anomaly))
+    asyncio.run(agent.on_event("anomaly.detected", anomaly))  # same anomaly again
+    (task,) = list(db.tasks.find())
+    assert task["assigned_to"] == "mgr-dhn2"
+    assert task["task_number"] and task["source"] == "SYSTEM"
+    assert task["source_ref"] == "anomaly:rx_out_of_range:RX1:right_eye"
+    assert task["priority"] == "P1"
+
+
+def test_a_lowercase_role_is_still_a_role(monkeypatch):
+    _people(monkeypatch)
+    assert _task("store_manager", "BV-TEST-01")["assigned_to"] == "mgr-dhn2"
