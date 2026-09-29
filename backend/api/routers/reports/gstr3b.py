@@ -26,7 +26,7 @@ from .gst_base import (
 from .gst_itc import (
     _cn_foreign_store,
     _itc_from_vendor_bills,
-    _itc_transfer_from_vendor_bills,
+    _itc_gstin_from_vendor_bills,
     _ledger_row_return_doc,
     _return_interstate_flag,
     _transfer_outward_bills,
@@ -288,7 +288,8 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
 
     Table 3.1 - Outward taxable supplies: derived from completed sales invoices.
     Table 4   - ITC available: derived from recorded purchase invoices
-                (vendor_bills cgst/sgst/igst_total), scoped to the store's entity.
+                (vendor_bills cgst/sgst/igst_total), placed on the store's GSTIN
+                (gst_itc._itc_match).
                 Returns zeros when no purchase data is present.
     Table 6.1 - Payment of tax: net cash liability = output tax - ITC.
     Returns all-zero figures when no data exists for the period.
@@ -319,7 +320,7 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
     itc_cgst = 0.0
     itc_sgst = 0.0
 
-    # R1: transfer-borne (GSTIN-scoped) ITC slice, split out of the total above.
+    # R1: the GSTIN-bound ITC slice, split out of the total above.
     t_itc_igst = 0.0
     t_itc_cgst = 0.0
     t_itc_sgst = 0.0
@@ -459,12 +460,13 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
         itc_igst, itc_cgst, itc_sgst = _itc_from_vendor_bills(
             db, active_store, year, mon, last_day
         )
-        # R1: split the transfer-borne (GSTIN-scoped) slice out of the total so
+        # R1: split the GSTIN-bound slice (every bill received on this GSTIN,
+        # plus GSTIN-less transfer mirrors at this store) out of the total so
         # the cross-check aggregator can dedupe it once per GSTIN while the
-        # regular (entity-scoped) remainder is deduped once per entity. The
-        # transfer slice uses the SAME filters restricted to source_transfer_id
-        # bills, so regular = total - transfer exactly.
-        t_itc_igst, t_itc_cgst, t_itc_sgst = _itc_transfer_from_vendor_bills(
+        # company-wide remainder (legacy bills naming no GSTIN) is deduped once
+        # per company. The slice is the SAME _itc_match AND-ed with the GSTIN
+        # binding, so remainder = total - slice exactly.
+        t_itc_igst, t_itc_cgst, t_itc_sgst = _itc_gstin_from_vendor_bills(
             db, active_store, year, mon, last_day
         )
 
@@ -529,17 +531,18 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
             "stateTax": _r(itc_sgst),
             "cess": 0.0,
         },
-        # R1: itcAvailable split into the entity-scoped regular remainder and the
-        # GSTIN-scoped transfer slice (regular + transfer == itcAvailable). The
-        # cross-check aggregator dedupes each at its true scope so a multi-GSTIN
-        # entity's ITC is independent of store enumeration order.
+        # R1: itcAvailable split into the company-wide remainder (bills naming
+        # no GSTIN) and the GSTIN-bound slice (remainder + slice ==
+        # itcAvailable). The cross-check aggregator dedupes each at its true
+        # scope, so a multi-GSTIN company's ITC is independent of store
+        # enumeration order and no bill counts on two registrations.
         "itcAvailableRegular": {
             "integratedTax": _r(itc_igst - t_itc_igst),
             "centralTax": _r(itc_cgst - t_itc_cgst),
             "stateTax": _r(itc_sgst - t_itc_sgst),
             "cess": 0.0,
         },
-        "itcAvailableTransfer": {
+        "itcAvailableGstin": {
             "integratedTax": _r(t_itc_igst),
             "centralTax": _r(t_itc_cgst),
             "stateTax": _r(t_itc_sgst),

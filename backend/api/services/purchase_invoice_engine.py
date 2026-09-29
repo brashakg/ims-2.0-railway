@@ -21,10 +21,10 @@ This engine determines place_of_supply from the supplier GSTIN vs the recipient
   * supplier state != recipient state  -> INTER-STATE -> IGST = gst, CGST=SGST=0
   * supplier state == recipient state  -> INTRA-STATE -> CGST+SGST split, IGST=0
 
-GST place-of-supply for a goods purchase is the buyer's (recipient's) state, so
-`place_of_supply` is the recipient state code -- which is exactly what
-itc_reconcile compares against the entity's primary state. We WRITE it onto the
-invoice doc so the register classifies correctly from then on.
+GST place-of-supply for a goods purchase is the buyer's (recipient's) state.
+The verdict and the split are STORED on the bill (interstate, cgst/sgst/
+igst_total), and every ITC reader -- the register, GSTR-3B -- reads those heads
+as stored. classify_supply is the one rule every bill door calls.
 
 Paisa-exactness mirrors itc_reconcile / the sales-invoice split: CGST is
 round(tax/2) and SGST is tax - cgst, so CGST + SGST == tax to the paisa on
@@ -158,6 +158,52 @@ def split_line_gst(taxable, gst_rate, interstate: bool) -> dict:
     }
 
 
+def classify_supply(
+    supplier_gstin: Optional[str],
+    recipient_gstin: Optional[str],
+    explicit_place_of_supply: Optional[str] = None,
+) -> dict:
+    """THE tax-head verdict of a purchase bill, shared by the line-detail
+    invoice (compute_invoice), the header-only bill (split_header_tax) and the
+    ITC register's read of a bill that stored no heads -- one rule, so no door
+    and no reader can classify the same pair of GST numbers two ways.
+
+    Returns {place_of_supply, itc_place_of_supply, supplier_state,
+    recipient_state, interstate}; see compute_invoice for why there are two
+    place-of-supply fields.
+    """
+    pos, interstate = determine_place_of_supply(
+        supplier_gstin, recipient_gstin, explicit_place_of_supply
+    )
+    supplier_state = state_code_of(supplier_gstin)
+    recipient_state = state_code_of(explicit_place_of_supply) or state_code_of(
+        recipient_gstin
+    )
+    return {
+        # Legal place of supply (recipient state) -- for display.
+        "place_of_supply": pos,
+        # What the router STORES on the doc: the supplier (counterparty) state,
+        # falling back to the recipient state when the supplier is unknown.
+        "itc_place_of_supply": supplier_state or recipient_state or None,
+        "supplier_state": supplier_state or None,
+        "recipient_state": recipient_state or None,
+        "interstate": interstate,
+    }
+
+
+def split_header_tax(
+    tax, supplier_gstin: Optional[str], recipient_gstin: Optional[str]
+) -> dict:
+    """A header-only bill (a total tax amount, no lines) split into its heads
+    by THE classification: classify_supply + gst_rates.split_gst. Returns the
+    classification plus cgst_total / sgst_total / igst_total."""
+    from .gst_rates import split_gst
+
+    head = classify_supply(supplier_gstin, recipient_gstin)
+    cgst, sgst, igst = split_gst(tax, head["interstate"])
+    return {**head, "cgst_total": cgst, "sgst_total": sgst, "igst_total": igst}
+
+
 def _line_taxable(line: dict) -> float:
     """Taxable value of a line: explicit `taxable` if present, else qty*unit_price."""
     if line.get("taxable") is not None:
@@ -190,30 +236,15 @@ def compute_invoice(
     place of supply), then applied per line. Totals are summed from the rounded
     per-line numbers so header == sum(lines) to the paisa.
 
-    `itc_place_of_supply` vs `place_of_supply` -- WHY TWO FIELDS:
-    services/itc_reconcile.build_itc_register decides inter-state by comparing
-    the STORED place_of_supply against the recipient ENTITY's primary state
-    (pos != entity_state => IGST). For that pre-existing test to fire on an
-    inter-state purchase, the stored value must be the COUNTERPARTY (supplier)
-    state -- which differs from the buyer-entity state exactly when the purchase
-    is inter-state. So `itc_place_of_supply` is the supplier state (what the
-    router writes onto the doc's `place_of_supply` field, keeping the register
-    working unchanged), while `place_of_supply` is the legal recipient state for
-    display. When supplier state is unknown we fall back to the recipient state
-    (intra-state by default -- the register's own missing-value behaviour).
+    `itc_place_of_supply` vs `place_of_supply` -- WHY TWO FIELDS: a stored
+    bill's `place_of_supply` field has always held the COUNTERPARTY (supplier)
+    state (`itc_place_of_supply`; the recipient state when the supplier is
+    unknown), while `place_of_supply` here is the legal recipient state, stored
+    as `supply_place_recipient` for display. Every ITC reader reads the bill's
+    stored heads (cgst/sgst/igst_total), never a re-derivation from either.
     """
-    pos, interstate = determine_place_of_supply(
-        supplier_gstin, recipient_gstin, explicit_place_of_supply
-    )
-    supplier_state = state_code_of(supplier_gstin)
-    recipient_state = state_code_of(explicit_place_of_supply) or state_code_of(
-        recipient_gstin
-    )
-    # The value the ITC register keys on: the supplier (counterparty) state, so
-    # `stored_pos != recipient_entity_state` is True iff the buy is inter-state.
-    # Fall back to the recipient state when the supplier is unknown (keeps the
-    # register's "missing -> intra" default).
-    itc_pos = supplier_state or recipient_state or None
+    head = classify_supply(supplier_gstin, recipient_gstin, explicit_place_of_supply)
+    interstate = head["interstate"]
 
     out_lines: List[dict] = []
     taxable_total = 0.0
@@ -249,13 +280,7 @@ def compute_invoice(
     total = round(taxable_total + tax_total, 2)
 
     return {
-        # Legal place of supply (recipient state) -- for display.
-        "place_of_supply": pos,
-        # What the router STORES on the doc so itc_reconcile classifies right.
-        "itc_place_of_supply": itc_pos,
-        "supplier_state": supplier_state or None,
-        "recipient_state": recipient_state or None,
-        "interstate": interstate,
+        **head,
         "lines": out_lines,
         "taxable_total": taxable_total,
         "cgst_total": cgst_total,

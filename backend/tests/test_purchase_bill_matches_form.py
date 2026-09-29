@@ -227,11 +227,11 @@ class TestF40RecipientIsServerSide:
         assert r.json()["detail"]["message"]
 
     def test_draft_and_booking_resolve_the_same_recipient(self):
-        """The draft is resolved by the same helper as the booking: the shop's
-        entity, on its PRIMARY registration (which registration a shop outside
-        the primary state should use is the owner's open bill-follows-store
-        question -- test_gst_one_engine pins the primary). The form shows that
-        GSTIN; typing our other registration (as printed on the paper bill) is
+        """The draft is resolved by the same helper, with the same arguments,
+        as the booking: the shop's company, on the SHOP's own registration
+        when its company holds it (panel finding 2: a Pune shop carrying the
+        company's Maharashtra number receives on it, as its purchase order
+        does). Typing our other registration (as printed on the paper bill) is
         the accountant's lever, and books on it."""
         db = _FakeDB()
         db.collections["entities"][0]["gstins"].append(
@@ -250,10 +250,10 @@ class TestF40RecipientIsServerSide:
         pi_router.get_vendor_repository = lambda: _StubRepo(db.collections["vendors"][0])
         draft = cli.get(f"{_URL}/from-grn/G1").json()
         assert draft["recipient_entity_id"] == "E1"
-        assert draft["recipient_gstin"] == BUY_JH and draft["interstate"] is True
-        typed = cli.post(_URL, json=_fe_body(recipient_gstin=BUY_MH)).json()
+        assert draft["recipient_gstin"] == BUY_MH and draft["interstate"] is False
+        typed = cli.post(_URL, json=_fe_body(recipient_gstin=BUY_JH)).json()
         assert typed["recipient_entity_id"] == "E1"
-        assert typed["recipient_gstin"] == BUY_MH and typed["interstate"] is False
+        assert typed["recipient_gstin"] == BUY_JH and typed["interstate"] is True
 
 
 # ===========================================================================
@@ -334,19 +334,19 @@ class TestF40ReadersAgree:
 
 
 def test_register_reads_each_bills_own_tax_heads():
-    """A bill stored as IGST stays IGST in the register even when the entity
-    state the register would re-derive from is unknown; a stored CGST+SGST
-    bill stays CGST+SGST even when its place_of_supply differs from the
-    entity's state. Only a legacy header-only bill (no heads) is re-derived."""
+    """A bill stored as IGST stays IGST in the register; a stored CGST+SGST
+    bill stays CGST+SGST whatever its place_of_supply says. A legacy bill with
+    no heads is split by THE engine rule (its two GSTINs), never by the
+    register's old place_of_supply-vs-company-state comparison."""
     bills = [
         {"bill_date": "2026-05-01", "taxable_amount": 1000, "tax_amount": 50,
          "place_of_supply": "27", "cgst_total": 0.0, "sgst_total": 0.0, "igst_total": 50.0},
         {"bill_date": "2026-05-02", "taxable_amount": 1000, "tax_amount": 50,
          "place_of_supply": "27", "cgst_total": 25.0, "sgst_total": 25.0, "igst_total": 0.0},
     ]
-    reg = build_itc_register(bills, entity_state=None)
+    reg = build_itc_register(bills)
     assert reg["total_igst"] == 50.0
     assert reg["total_cgst"] == 25.0 and reg["total_sgst"] == 25.0
     legacy = [{"bill_date": "2026-05-03", "taxable_amount": 100, "tax_amount": 10,
-               "place_of_supply": "27"}]
-    assert build_itc_register(legacy, entity_state="20")["total_igst"] == 10.0
+               "place_of_supply": "20", "vendor_gstin": SUP_MH, "recipient_gstin": BUY_JH}]
+    assert build_itc_register(legacy)["total_igst"] == 10.0

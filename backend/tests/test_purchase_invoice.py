@@ -698,40 +698,35 @@ class TestFromGrnDraft:
 
 def test_booked_interstate_invoice_lands_in_itc_igst():
     """The whole point: a created inter-state purchase invoice, read by the
-    EXISTING build_itc_register (which keys off taxable_amount / tax_amount /
-    place_of_supply that we now write), classifies as IGST against the
-    recipient entity's primary state -- NOT CGST/SGST."""
+    ITC register (which reports each bill's stored heads), lands in IGST --
+    NOT CGST/SGST."""
     db = _FakeDB()
     cli = _app(db)
     r = cli.post("/api/v1/vendors/purchase-invoices", json=_invoice_body())
     assert r.status_code == 201, r.text
 
-    # The vendor_bills rows exactly as the ITC register reads them.
-    bills = [
-        {
-            "bill_date": d.get("bill_date"),
-            "taxable_amount": d.get("taxable_amount"),
-            "tax_amount": d.get("tax_amount"),
-            "place_of_supply": d.get("place_of_supply"),
-        }
-        for d in db.collections["vendor_bills"]
-    ]
-    # Entity primary state is Jharkhand (20); supplier was Maharashtra (27),
-    # so place_of_supply written = "20" and the register routes it to IGST.
-    reg = build_itc_register(bills, entity_state="20")
+    # The vendor_bills rows exactly as the ITC register reads them (its
+    # projection in finance/itc.py): the bill's own stored heads.
+    keys = (
+        "bill_date", "taxable_amount", "tax_amount", "cgst_total", "sgst_total",
+        "igst_total", "vendor_gstin", "recipient_gstin",
+    )
+    bills = [{k: d.get(k) for k in keys} for d in db.collections["vendor_bills"]]
+    # Supplier Maharashtra (27), our GSTIN Jharkhand (20): stored IGST.
+    reg = build_itc_register(bills)
     assert reg["total_igst"] == 50.0
     assert reg["total_cgst"] == 0.0 and reg["total_sgst"] == 0.0
     assert reg["total_itc"] == 50.0
 
 
-def test_regression_without_pos_would_be_intrastate():
-    """Documents the OLD behaviour: a bill with NO place_of_supply (the
-    header-only path) is treated intra-state by the register -- which is exactly
-    the mis-booking the written place_of_supply fixes."""
+def test_regression_without_gstins_would_be_intrastate():
+    """Documents the OLD behaviour: a header-only bill with no heads and no
+    GSTINs on file is treated intra-state by the register -- which is exactly
+    the mis-booking every door now avoids by storing its heads."""
     bills = [
         {"bill_date": "2026-05-01", "taxable_amount": 1000, "tax_amount": 50}
-    ]  # no place_of_supply
-    reg = build_itc_register(bills, entity_state="20")
+    ]  # no heads, no GSTINs
+    reg = build_itc_register(bills)
     assert reg["total_igst"] == 0.0
     assert reg["total_cgst"] == 25.0 and reg["total_sgst"] == 25.0
 

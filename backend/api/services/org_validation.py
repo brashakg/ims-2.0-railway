@@ -289,19 +289,20 @@ def resolve_state_code(*candidates) -> str:
 
     IT IS NOT "the single place a state code is parsed" IN THIS CODEBASE, and
     that sentence must not be written here until the list below is empty and
-    re-measured. Six modules outside that chain still parse one themselves and
-    DO answer differently (measured, same inputs; see
-    tests/test_state_parser_divergence.py, which pins this table):
+    re-measured. Five modules outside that chain still parse one themselves
+    and DO answer differently (measured, same inputs; see
+    tests/test_state_parser_divergence.py, which pins this table). (The ITC
+    register's own parser is gone: it reads each bill's stored heads, and a
+    legacy bill without them is split by purchase_invoice_engine.)
 
-        input               here  print_legal  itc_reconcile  gstn_export
-        '27-Maharashtra'    27    27           27             ''
-        'Maharashtra (27)'  ''    27           27             ''
-        'MH'                27    ''           ''             ''
-        'Maharashtra'       27    ''           ''             27
-        '27AAAAA0000A1Z5'   27    27           27             ''
+        input               here  print_legal  gstn_export
+        '27-Maharashtra'    27    27           ''
+        'Maharashtra (27)'  ''    27           ''
+        'MH'                27    ''           ''
+        'Maharashtra'       27    ''           27
+        '27AAAAA0000A1Z5'   27    27           ''
 
       services/print_legal._state_code_of  - printed-invoice HSN tax summary
-      services/itc_reconcile._state_code   - ITC register IGST routing
       services/gstn_export._state_code     - GSTR export; own 38-name table
       routers/transfers._store_state_code  - inter-store transfer mirror bill
       routers/stores._state_code_for       - stamps state_code onto a store

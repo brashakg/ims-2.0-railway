@@ -259,6 +259,13 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/vendors/purchase-invoices/from-grn/{grn_id}",
         "allowed": ["ACCOUNTANT", "ADMIN"],
     },
+    # The form's live tax preview: what POST would book (same _bill_math),
+    # nothing written -- same accounting gate as the booking it previews.
+    {
+        "method": "POST",
+        "path": "/api/v1/vendors/purchase-invoices/preview",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
+    },
     # F9: consolidate N Delivery Challans into a draft bulk invoice (accounting
     # action -> ACCOUNTANT/ADMIN, same gate as from-grn).
     {
