@@ -4974,3 +4974,78 @@ def test_H15_after_the_guard_took_a_listing_down_no_screen_says_it_sells_without
         assert said.ok is False and said.code == shopify_push.STOCK_TRACKING_FAILED, said
         assert "sells WITHOUT LIMIT" not in said.error, said.error
         assert "stays OFF the website until a press confirms tracking" in said.error, said.error
+
+
+# ---------------------------------------------------------------------------
+# #1141 recheck 4 (2026-09-29): what the recheck-3 fixes left open.
+# ---------------------------------------------------------------------------
+
+
+class _StockAndTrackingThrottled(_ThrottledTracking):
+    """One throttle, both calls: the tracking re-send AND every
+    inventorySetQuantities come back THROTTLED (Shopify's userError body)."""
+
+    async def __call__(self, db, query, variables):  # noqa: ARG002
+        if "inventorySetQuantities" in query:
+            self.calls.append({"query": query, "variables": variables})
+            return _set_error("THROTTLED", "Throttled")
+        return await super().__call__(db, query, variables)
+
+
+class _LosesDraftRecord(StrictCollection):
+    """catalog_products whose write of ecom.status DRAFT dies (a Mongo blip on
+    the delist's fail-soft write-back); every other write lands."""
+
+    def update_one(self, filter, update, *a, **k):
+        if (((update or {}).get("$set") or {}).get("ecom") or {}).get("status") == "DRAFT":
+            raise RuntimeError("mongo blip")
+        return super().update_one(filter, update, *a, **k)
+
+
+def test_H2b_one_lost_draft_record_never_re_lists_the_untracked_size(monkeypatch):
+    """OVERSELL, LOW (the part of G1 the panel left unprobed; probe P2b). A
+    live listing mints size L, Shopify throttles its tracking AND every stock
+    row, the guard takes the listing down -- and the DRAFT write-back is lost.
+    No stock row landed, so nothing recorded tracked=False: IMS said
+    PUBLISHED over a baseline saying tracked, and the next press sent ACTIVE,
+    published, and answered ok=True with 'the listing keeps the tracking its
+    first publish set' -- L live and UNTRACKED. The take-down records
+    tracked=False itself now, so ONE lost write can never re-list it. Drop
+    that record -> this fails."""
+    db, variants, responses = _minted_onto_live(tracked_answer=False)
+    base = db.get_collection("catalog_products")
+    db._collections["catalog_products"] = _LosesDraftRecord(base.name, base.docs)
+    first = _StockAndTrackingThrottled(_responses(**responses))
+    _live(monkeypatch, first)
+    _run(shopify_push.push_product(db, _cat(db), variants))
+    assert len(_drafted(first)) == 1 and _cat(db)["ecom"]["status"] == "PUBLISHED", "the DRAFT record was lost"
+    assert _baseline(db)["tracked"] is False
+    rows = list(db.get_collection("catalog_variants").find({}))
+    again = _StockAndTrackingThrottled(_responses(**{"productUpdate(": _left_untracked_body()}))
+    _live(monkeypatch, again)
+    res = _run(shopify_push.push_product(db, _cat(db), rows))
+    assert "ACTIVE" not in _statuses(again) and again.calls_for("publishablePublish") == [], _statuses(again)
+    assert res.ok is False and res.code == shopify_push.STOCK_TRACKING_FAILED, res
+    assert "keeps the tracking its first publish set" not in res.error, res.error
+
+
+def test_H5c_every_read_the_sku_to_listing_resolver_makes_is_strict():
+    """HOLLOW (H5 pins the parents read only). `listings_for_skus` makes
+    three reads -- the size rows, their parents, and a product-level SKU's
+    own catalog_products row; any one fail-soft is 'this SKU rides no
+    listing', and the sale asks the stray question of nothing. Each RAISES.
+    Drop `strict` from the size-row or the product-row read -> this fails."""
+    from api.services import online_catalog
+
+    child = {
+        "id": "cat-1-L", "sku": "SP-1-L", "name": "Frame L",
+        "ecom": {"status": "DRAFT", "variant_of": {"product_id": "spine-1", "twin_id": "cat-1", "sku": "SP-1"}},
+    }
+    for dead in ("catalog_variants", "catalog_products"):
+        db = StrictDB()
+        db.seed("catalog_products", [child])
+        db.seed("catalog_variants", [])
+        assert online_catalog.listings_for_skus(db, ["SP-1-L"]) == {"cat-1": ["SP-1-L"]}
+        db._collections[dead] = _DeadFind(db.get_collection(dead), lambda f: True)
+        with pytest.raises(RuntimeError, match="cursor died"):
+            online_catalog.listings_for_skus(db, ["SP-1-L"])

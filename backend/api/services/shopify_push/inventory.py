@@ -2122,6 +2122,16 @@ async def _take_down_untracked(db, product: Dict[str, Any]) -> Tuple[bool, str]:
 
     res = await push_product_delist(db, product, requeue=True)
     if res.ok and res.mode == MODE_LIVE:
+        # The hold rests on TWO records, never one (#1141 recheck 4): the
+        # delist's DRAFT write-back is fail-soft, and a throttle that refuses
+        # tracking refuses the stock rows too, so no stock write recorded
+        # tracked=False. One lost write left IMS PUBLISHED over a baseline
+        # saying tracked, and the next press sent ACTIVE and published the
+        # untracked size under "keeps the tracking its first publish set".
+        # Either record now holds it at Draft (``listing_already_live``).
+        pid = product.get("id") or product.get("product_id")
+        if pid:
+            _writeback_stock(db, str(pid), {}, tracked=False)
         return True, (
             " -- so the listing was TAKEN OFF the website (Shopify status Draft) and "
             "stays off until a press confirms tracking; it is queued, so the next "
