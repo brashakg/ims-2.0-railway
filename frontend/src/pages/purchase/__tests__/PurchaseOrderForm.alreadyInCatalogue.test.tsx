@@ -98,10 +98,25 @@ describe('Create PO - a typed-in item that is already in the catalogue (audit C2
     await waitFor(() => expect(createPO).toHaveBeenCalledTimes(2));
     expect(createPO.mock.calls[0][0].items[0].new_product).toMatchObject({ brand: 'Carrera', size: '54' });
     expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/already in the catalogue.*size 54/i));
+    // ...and what the manager TYPED, so a wrong match is visible before "OK".
+    expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/you typed carrera ca 8895 807 size 54/i));
     const resent = createPO.mock.calls[1][0].items[0];
     expect(resent.product_id).toBe('p-carrera');
     expect(resent.new_product).toBeUndefined();
     await waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1));
+  });
+
+  it('offers a size box only where the catalogue records one', async () => {
+    render(<PurchaseOrderForm suppliers={[vendor]} existingPOCount={0} onClose={() => {}} onCreated={() => {}} />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    fireEvent.click(screen.getByRole('button', { name: /not in the catalogue\?/i }));
+    fireEvent.change(screen.getByLabelText('New item category'), { target: { value: 'FR' } });
+    expect(screen.getByLabelText('New item size')).toHaveAttribute('placeholder', 'Eye size');
+    // A watch records no size: a typed one would key a second, hidden watch.
+    fireEvent.change(screen.getByLabelText('New item category'), { target: { value: 'WT' } });
+    expect(screen.queryByLabelText('New item size')).toBeNull();
   });
 
   it('on "no" it creates nothing', async () => {

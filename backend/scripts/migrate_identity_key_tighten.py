@@ -14,6 +14,10 @@ between the deploy and this migration the guard compares a new-format key
 against old-format rows, matches nothing, and lets duplicates straight through
 -- the exact failure the change exists to prevent. Run it with the deploy.
 
+2026-09-29: a frame's / sunglass's EYE SIZE (attributes.lens_size) is now part
+of its key, as `size` is for every other category (owner 09-28: each eye size
+is its own item). Stored frame keys lack it until this runs again.
+
 SAFETY
 ------
   * Dry run by default. Nothing is written without --apply.
@@ -60,7 +64,7 @@ def _identity_of(doc: Dict[str, Any]):
         or attrs.get("colour_code")
         or attrs.get("color")
     )
-    size = doc.get("size") or attrs.get("size")
+    size = doc.get("size") or attrs.get("size") or attrs.get("lens_size")
     return compute_identity_key(brand, model, colour, size)
 
 

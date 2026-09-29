@@ -1,5 +1,7 @@
 """Purchase-order list and creation (manual + from forecast)."""
 
+import re
+
 from ._shared import (
     BaseModel,
     Depends,
@@ -64,10 +66,15 @@ def _refuse_items_we_already_have(items, product_repo) -> None:
     resends the line with that product_id. The key is the door's OWN: the
     canonical build with a placeholder SKU (zero writes, as the catalogue
     promote dry-run does) stamps exactly the identity_key a create would, and
-    the lookup is the door's duplicate guard (find_by_identity_key)."""
+    the lookup is the door's duplicate guard (find_by_identity_key).
+
+    Each eye size is its own item (owner 09-28), so a frame typed WITHOUT one
+    cannot be told apart from the eye sizes already catalogued: it is sent back
+    to have its eye size typed (422) instead of becoming a sizeless twin."""
     if product_repo is None or not hasattr(product_repo, "find_by_identity_key"):
         return
     already = []
+    need_size = []
     for idx, it in enumerate(items):
         if it.new_product is None:
             continue
@@ -84,6 +91,38 @@ def _refuse_items_we_already_have(items, product_repo) -> None:
         if found:
             summary = _pm.existing_product_summary(found)
             already.append({"line": idx, "existing": summary})
+        elif (
+            key
+            and not str(it.new_product.size or "").strip()
+            and _pm._size_attribute_key(it.new_product.category) == "lens_size"
+        ):
+            sized = product_repo.find_many(
+                {"identity_key": {"$regex": "^" + re.escape(key + "|")}}
+            ) or []
+            if sized:
+                need_size.append(
+                    {
+                        "line": idx,
+                        "sizes": sorted(
+                            {str(_pm.existing_product_summary(p).get("size")) for p in sized}
+                        ),
+                    }
+                )
+    if not already and need_size:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "EYE_SIZE_NEEDED",
+                "message": "; ".join(
+                    f"{items[n['line']].new_product.brand} {items[n['line']].new_product.model} "
+                    f"{items[n['line']].new_product.colour or ''}".strip()
+                    + f" is in the catalogue by eye size ({', '.join(n['sizes'])})"
+                    for n in need_size
+                )
+                + ". Type the eye size on the line, or pick the item from the catalogue.",
+                "lines": need_size,
+            },
+        )
     if not already:
         return
 

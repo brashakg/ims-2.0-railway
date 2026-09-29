@@ -22,7 +22,7 @@ import type {
   ComposerVendorOption,
   ComposerNewProduct,
 } from '../../components/purchase/PurchaseOrderComposer';
-import { CATEGORIES } from '../../domain/catalog/productAdd';
+import { CATEGORIES, getCategoryFields } from '../../domain/catalog/productAdd';
 import type { Supplier, PurchaseOrder, POItem } from './purchaseTypes';
 
 interface PickedProduct {
@@ -158,6 +158,11 @@ function NewProductFields({
   onCancel: () => void;
 }) {
   const set = (patch: Partial<ComposerNewProduct>) => onChange({ ...value, ...patch });
+  // A size box only where the catalogue records one (a frame's eye size, an
+  // accessory's size): anywhere else the server drops it (audit C2/C3).
+  const sizeField = getCategoryFields(value.category).find(
+    (f) => f.name === 'lens_size' || f.name === 'size',
+  );
   return (
     <div className="p-2 bg-amber-50 border border-amber-200 rounded-lg space-y-2">
       <div className="flex items-center justify-between">
@@ -208,14 +213,16 @@ function NewProductFields({
           aria-label="New item colour code"
           className="input-field text-sm"
         />
-        <input
-          type="text"
-          value={value.size}
-          onChange={(e) => set({ size: e.target.value })}
-          placeholder="Size"
-          aria-label="New item size"
-          className="input-field text-sm"
-        />
+        {sizeField && (
+          <input
+            type="text"
+            value={value.size}
+            onChange={(e) => set({ size: e.target.value })}
+            placeholder={sizeField.name === 'lens_size' ? 'Eye size' : 'Size'}
+            aria-label="New item size"
+            className="input-field text-sm"
+          />
+        )}
       </div>
       <input
         type="number"
@@ -598,7 +605,16 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
                       `${e.name || e.sku}${e.size ? `, size ${e.size}` : ''} (SKU ${e.sku})`,
                   )
                   .join(', ');
-                if (!window.confirm(`Already in the catalogue: ${names}. Use it?`)) {
+                const typed = matches
+                  .map(({ line }) => {
+                    const np = items[line]?.new_product;
+                    return np
+                      ? [np.brand, np.model, np.colour, np.size && `size ${np.size}`].filter(Boolean).join(' ')
+                      : '';
+                  })
+                  .filter(Boolean)
+                  .join(', ');
+                if (!window.confirm(`You typed ${typed}. Already in the catalogue: ${names}. Use it?`)) {
                   throw new Error('Not created. Pick the item from the catalogue, or correct what you typed.');
                 }
                 items = items.map((it, i) => {

@@ -1023,7 +1023,10 @@ def _derive_brand_model_color_size(
         "color": attrs.get("colour_code")
         or attrs.get("colour_name")
         or attrs.get("color"),
-        "size": attrs.get("size"),
+        # A frame's / sunglass's eye size is its registry's lens_size (`size`
+        # left their registry); each eye size is its own item (owner 09-28),
+        # so it is part of the identity like any other category's size.
+        "size": attrs.get("size") or attrs.get("lens_size"),
     }
 
 
@@ -2169,8 +2172,12 @@ _DOOR_IDENTITY_ALIASES = {
 }
 
 
-def _size_attribute_key(category: Any) -> str:
-    """Where a flat top-level `size` lands: the category's OWN registry key.
+def _size_attribute_key(category: Any) -> Optional[str]:
+    """Where a flat top-level `size` lands: the category's OWN registry key --
+    or nowhere (None) for a category that records no size at all (WATCH,
+    CONTACT_LENS, ...): its catalogue form has no size field, so a size typed
+    on a PO line would key the draft apart from the catalogued item and mint
+    a hidden twin (audit C2/C3).
 
     A frame's (and sunglass's) eye size lives in `lens_size` -- `size` was
     REMOVED from their registry, and the Add-Product form saves lens_size. The
@@ -2182,8 +2189,9 @@ def _size_attribute_key(category: Any) -> str:
     spec = category_spec(category)
     if spec is not None:
         fields = spec.required + spec.optional
-        if "size" not in fields and "lens_size" in fields:
-            return "lens_size"
+        if "size" in fields:
+            return "size"
+        return "lens_size" if "lens_size" in fields else None
     return "size"
 
 
@@ -2203,6 +2211,8 @@ def normalise_door_payload(payload: Dict[str, Any], *, source: str) -> Dict[str,
         if val is not None and not (isinstance(val, str) and not val.strip()):
             if top_key == "size":
                 attr_key = _size_attribute_key(p.get("category"))
+                if attr_key is None:
+                    continue
             attrs.setdefault(attr_key, val)
     # A flat top-level `model` fills BOTH model_no AND model_name (mirrors the
     # read-side _overlay_attributes). Several categories key identity on
