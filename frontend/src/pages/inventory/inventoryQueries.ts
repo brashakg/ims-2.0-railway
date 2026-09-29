@@ -83,6 +83,10 @@ export interface StockItem {
   /** Cataloguer attribution: who created the product master row. */
   created_by?: string | null;
   created_by_name?: string | null;
+  /** Audit F47: what the units on the shelf COST (and per unit). Sent only to
+   *  the cost readers (managers + accounts); absent for the counter. */
+  cost_value?: number;
+  unit_cost?: number | null;
 }
 
 /** Verbatim the old loadInventory() normalisation: one vocabulary at ingest. */

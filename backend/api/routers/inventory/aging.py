@@ -119,6 +119,20 @@ async def get_stock_aging_report(
         r["_id"]: r["last_sale"] for r in stock_repo.aggregate(last_sale_pipeline)
     }
 
+    # F47: stock is valued at what it COST (the one stock-value rule), and only
+    # for the cost readers -- the counter gets no rupee figure here.
+    from ...services import stock_value
+    from ...services.cost_mask import can_see_cost
+
+    show_cost = can_see_cost(current_user, "purchase")
+    shelf = (
+        stock_value.by_product(
+            stock_value.shelf_units(stock_repo, product_repo, active_store)
+        )
+        if show_cost
+        else {}
+    )
+
     # 3. Enrich with product details and calculate metrics
     products = []
     for sg in stock_groups:
@@ -174,8 +188,7 @@ async def get_stock_aging_report(
         else:
             age_cat = "180+"
 
-        mrp = product.get("mrp", 0) or 0
-        value = qty * mrp
+        value = (shelf.get(pid) or {}).get("cost", 0.0) if show_cost else None
 
         if classification and cls != classification:
             continue
@@ -190,7 +203,7 @@ async def get_stock_aging_report(
                 "brand": product.get("brand", ""),
                 "category": product.get("category", ""),
                 "quantity": qty,
-                "value": round(value, 2),
+                "value": value,
                 "daysInStock": days_in_stock,
                 "lastSaleDate": (
                     last_sale.isoformat()
@@ -216,7 +229,11 @@ async def get_stock_aging_report(
     class_a = sum(1 for p in products if p["classification"] == "A")
     class_b = sum(1 for p in products if p["classification"] == "B")
     class_c = sum(1 for p in products if p["classification"] == "C")
-    slow_value = sum(p["value"] for p in products if p["classification"] == "C")
+    slow_value = (
+        round(sum(p["value"] for p in products if p["classification"] == "C"), 2)
+        if show_cost
+        else None
+    )
     avg_age = sum(p["daysInStock"] for p in products) / max(total, 1)
 
     return {
@@ -226,7 +243,7 @@ async def get_stock_aging_report(
             "classA": class_a,
             "classB": class_b,
             "classC": class_c,
-            "slowMovingValue": round(slow_value, 2),
+            "slowMovingValue": slow_value,
             "averageAge": round(avg_age, 1),
             "oldStockCount": sum(1 for p in products if p["daysInStock"] > 90),
         },

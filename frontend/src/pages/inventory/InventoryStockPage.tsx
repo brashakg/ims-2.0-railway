@@ -95,6 +95,9 @@ export function InventoryStockPage() {
   // Data (shared cache with the layout's stat strip).
   const stockQ = useStock(storeId || undefined, cataloguerFilter || undefined);
   const inventory = stockQ.data ?? [];
+  // Audit F47: managers + accounts see what each unit cost; the server sends
+  // cost only to them, so the column follows the data, never a role list here.
+  const showUnitCost = inventory.some((i) => i.cost_value != null);
   const isLoading = stockQ.isPending;
   const onlineStatusQ = useOnlineStatus(onlineStatusIds(inventory));
   const onlineStatus = onlineStatusQ.data;
@@ -453,6 +456,9 @@ export function InventoryStockPage() {
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Category</th>
                   <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase whitespace-nowrap">MRP</th>
                   <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Offer</th>
+                  {showUnitCost && (
+                    <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Cost / unit</th>
+                  )}
                   {/* Physical-only columns: an ONLINE store owns no stock and
                       has no on-floor zone, so these are hidden there. */}
                   {!isOnlineStoreView && (
@@ -555,6 +561,11 @@ export function InventoryStockPage() {
                       <td className="px-4 py-3 text-right text-sm font-medium text-gray-900">
                         {formatCurrency(item.offerPrice || item.mrp || 0)}
                       </td>
+                      {showUnitCost && (
+                        <td className="px-4 py-3 text-right text-sm text-gray-700">
+                          {item.unit_cost != null ? formatCurrency(item.unit_cost) : '—'}
+                        </td>
+                      )}
                       {/* Physical-only cells (In-Store on-hand + on-floor Zone). */}
                       {!isOnlineStoreView && (
                         <>

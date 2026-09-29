@@ -19,6 +19,13 @@ from typing import Dict, List
 
 COST_VISIBLE_ROLES = {"SUPERADMIN", "ADMIN", "ACCOUNTANT"}
 CATALOG_FORM_ROLES = {"CATALOG_MANAGER"}
+_BUYER_ROLES = {"AREA_MANAGER", "STORE_MANAGER"}
+# context -> the roles it admits on top of COST_VISIBLE_ROLES.
+_CONTEXT_ROLES = {
+    "catalog_edit": CATALOG_FORM_ROLES,
+    "purchase": _BUYER_ROLES,
+    "product": _BUYER_ROLES | CATALOG_FORM_ROLES,
+}
 
 # Raw cost fields that may appear on product / stock / order-line payloads.
 _COST_FIELDS = {"cost_price", "cost_value", "cost_at_sale", "unit_cost"}
@@ -43,11 +50,7 @@ def _roles_of(user: dict) -> set:
 
 def can_see_cost(user: dict, context: str = "default") -> bool:
     roles = _roles_of(user)
-    if roles & COST_VISIBLE_ROLES:
-        return True
-    if context == "catalog_edit" and (roles & CATALOG_FORM_ROLES):
-        return True
-    return False
+    return bool(roles & (COST_VISIBLE_ROLES | _CONTEXT_ROLES.get(context, set())))
 
 
 def mask_cost(doc: dict, user: dict, context: str = "default") -> dict:

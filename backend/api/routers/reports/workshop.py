@@ -12,9 +12,12 @@ from ..auth import get_current_user, require_roles
 from ...dependencies import (
     get_order_repository,
     get_stock_repository,
+    get_product_repository,
     get_db,
     validate_store_access,
 )
+from ...services import stock_value
+from ...services.cost_mask import can_see_cost
 from ...services.name_resolver import order_actor_id, order_actor_name_map
 from ._shared import (
     _REPORT_FINANCE_ROLES,
@@ -490,7 +493,10 @@ async def daily_stock_count(
     if stock_repo is None:
         return {"data": [], "summary": {}}
 
-    all_stock = stock_repo.find_many({"store_id": active_store}, limit=0)
+    # F47: the one stock-value rule (services/stock_value); the counter reads
+    # the counts but no cost figure.
+    all_stock = stock_value.shelf_units(stock_repo, get_product_repository(), active_store)
+    show_cost = can_see_cost(current_user, "purchase")
 
     # category is on the product master, not the stock doc -> join it so the
     # per-category rows are real (FRAME etc.) instead of all under "Other".
@@ -511,17 +517,20 @@ async def daily_stock_count(
             }
         by_category[category]["item_count"] += 1
         by_category[category]["total_quantity"] += item.get("quantity", 0)
-        by_category[category]["total_value"] += item.get("quantity", 0) * item.get(
-            "cost_price", 0
+        by_category[category]["total_value"] = round(
+            by_category[category]["total_value"] + item["cost_value"], 2
         )
         total_items += 1
-        total_value += item.get("quantity", 0) * item.get("cost_price", 0)
+        total_value += item["cost_value"]
+    if not show_cost:
+        for row in by_category.values():
+            row["total_value"] = None
 
     return {
         "data": list(by_category.values()),
         "summary": {
             "total_items": total_items,
-            "total_value": round(total_value, 2),
+            "total_value": round(total_value, 2) if show_cost else None,
             "total_quantity": sum(item.get("quantity", 0) for item in all_stock),
         },
     }

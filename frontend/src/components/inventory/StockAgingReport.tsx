@@ -29,7 +29,8 @@ interface AgingProduct {
   brand: string;
   category: string;
   quantity: number;
-  value: number;
+  /** At COST (audit F47); null for a login that is not shown cost. */
+  value: number | null;
   daysInStock: number;
   lastSaleDate?: string;
   salesLast30Days: number;
@@ -72,7 +73,7 @@ export function StockAgingReport() {
         brand: p.brand || '',
         category: p.category || '',
         quantity: p.quantity || 0,
-        value: p.value || 0,
+        value: p.value ?? null,
         daysInStock: p.daysInStock || 0,
         lastSaleDate: p.lastSaleDate || undefined,
         salesLast30Days: p.salesLast30Days || 0,
@@ -113,9 +114,11 @@ export function StockAgingReport() {
   const classACount = products.filter((p) => p.classification === 'A').length;
   const classBCount = products.filter((p) => p.classification === 'B').length;
   const classCCount = products.filter((p) => p.classification === 'C').length;
-  const slowMovingValue = products
-    .filter((p) => p.classification === 'C')
-    .reduce((sum, p) => sum + p.value, 0);
+  const slowMovingValue = products.some((p) => p.value == null)
+    ? null
+    : products
+        .filter((p) => p.classification === 'C')
+        .reduce((sum, p) => sum + (p.value ?? 0), 0);
   const averageAge =
     products.reduce((sum, p) => sum + p.daysInStock, 0) / products.length || 0;
   const oldStockCount = products.filter((p) => p.daysInStock > 90).length;
@@ -160,7 +163,7 @@ export function StockAgingReport() {
       'Age Category': p.ageCategory,
       'Days In Stock': p.daysInStock,
       Quantity: p.quantity,
-      'Value (Rs)': p.value,
+      'Value at cost (Rs)': p.value ?? '',
       'Sales Last 30 Days': p.salesLast30Days,
       'Sales Last 90 Days': p.salesLast90Days,
       'Turnover Rate (x/yr)': p.turnoverRate.toFixed(2),
@@ -327,7 +330,8 @@ export function StockAgingReport() {
           </div>
           <div className="mt-2 pt-2 border-t border-red-200">
             <p className="text-xs text-red-700">
-              Tied Capital: ₹{(slowMovingValue / 100000).toFixed(1)}L
+              Tied capital (at cost):{' '}
+              {slowMovingValue == null ? '—' : `₹${(slowMovingValue / 100000).toFixed(1)}L`}
             </p>
           </div>
         </div>
@@ -411,7 +415,7 @@ export function StockAgingReport() {
                     Quantity
                   </th>
                   <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">
-                    Value
+                    Value (cost)
                   </th>
                   <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">
                     Days in Stock
@@ -448,7 +452,7 @@ export function StockAgingReport() {
                         {product.quantity}
                       </td>
                       <td className="px-4 py-3 text-right text-sm text-gray-900">
-                        ₹{product.value.toLocaleString('en-IN')}
+                        {product.value == null ? '—' : `₹${product.value.toLocaleString('en-IN')}`}
                       </td>
                       <td className="px-4 py-3 text-center">
                         <div className="flex flex-col items-center gap-1">

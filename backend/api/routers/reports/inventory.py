@@ -6,10 +6,13 @@ from datetime import date
 from ..auth import get_current_user, require_roles
 from ...dependencies import (
     get_stock_repository,
+    get_product_repository,
     get_eye_test_repository,
     get_db,
     validate_store_access,
 )
+from ...services import stock_value
+from ...services.cost_mask import can_see_cost
 from ._shared import (
     _REPORT_FINANCE_ROLES,
     _row_category,
@@ -43,11 +46,13 @@ async def inventory_summary(
         }
 
     # Get all stock
-    all_stock = stock_repo.find_many({"store_id": active_store}, limit=0)
+    # F47: the one stock-value rule -- units physically on the shelf at what
+    # they cost (services/stock_value); the counter reads no cost figure.
+    all_stock = stock_value.shelf_units(stock_repo, get_product_repository(), active_store)
     low_stock = stock_repo.find_low_stock(active_store, threshold=5)
 
-    total_value = sum(
-        (s.get("quantity", 0) * s.get("cost_price", 0)) for s in all_stock
+    total_value = (
+        stock_value.total(all_stock) if can_see_cost(current_user, "purchase") else None
     )
 
     out_of_stock = [s for s in all_stock if s.get("quantity", 0) <= 0]
@@ -56,7 +61,7 @@ async def inventory_summary(
         "summary": {
             "total_items": len(all_stock),
             "total_quantity": sum(s.get("quantity", 0) for s in all_stock),
-            "total_value": round(total_value, 2),
+            "total_value": total_value,
             "low_stock_count": len(low_stock) if low_stock else 0,
             "out_of_stock_count": len(out_of_stock),
         }
@@ -75,7 +80,8 @@ async def inventory_valuation(
     if stock_repo is None:
         return {"valuation": {"by_category": [], "total": 0}}
 
-    all_stock = stock_repo.find_many({"store_id": active_store}, limit=0)
+    # F47: the one stock-value rule (services/stock_value).
+    all_stock = stock_value.shelf_units(stock_repo, get_product_repository(), active_store)
 
     # category lives on the product master, not the stock doc -> join it so the
     # by-category split is real (FRAME etc.) instead of everything in "Other".
@@ -88,11 +94,11 @@ async def inventory_valuation(
         if category not in by_category:
             by_category[category] = {"category": category, "quantity": 0, "value": 0}
         by_category[category]["quantity"] += item.get("quantity", 0)
-        by_category[category]["value"] += item.get("quantity", 0) * item.get(
-            "cost_price", 0
+        by_category[category]["value"] = round(
+            by_category[category]["value"] + item["cost_value"], 2
         )
 
-    total = sum(c["value"] for c in by_category.values())
+    total = stock_value.total(all_stock)
 
     return {
         "valuation": {

@@ -69,8 +69,12 @@ export function ReportsInventoryPage() {
                     <span className="font-medium text-gray-900">{stockCount.summary?.total_quantity || 0} units</span>
                   </div>
                   <div className="flex items-center justify-between">
-                    <span className="text-gray-500">Total Value:</span>
-                    <span className="font-medium text-gray-900">₹{((stockCount.summary?.total_value || 0) / 100000).toFixed(2)}L</span>
+                    <span className="text-gray-500">Total Value (at cost):</span>
+                    <span className="font-medium text-gray-900">
+                      {stockCount.summary?.total_value == null
+                        ? '—'
+                        : `₹${(stockCount.summary.total_value / 100000).toFixed(2)}L`}
+                    </span>
                   </div>
                 </>
               ) : (
