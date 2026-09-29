@@ -50,16 +50,31 @@ def _norm(value: Any) -> str:
     return str(value or "").strip()
 
 
-# The fulfilment's own out-of-order watermark (the payload's updated_at, naive
-# UTC) -- the order-level one (shopify_updated_at) is the mapper's, and an order
-# body's updated_at is a different clock from a fulfilment's.
+# Fulfilment clocks (a payload's updated_at, naive UTC) -- the order-level one
+# (shopify_updated_at) is the mapper's, and an order body's updated_at is a
+# different clock from a fulfilment's. FULFILLMENT_CLOCKS holds EACH
+# fulfilment's own last applied clock, keyed by _clock_key: a split shipment's
+# parcels move on their own clocks, so a fulfilment is only ever compared with
+# its own earlier state. FULFILLMENT_WATERMARK is the clock of the fulfilment
+# the order's tracking fields show -- the newest one IMS applied.
+FULFILLMENT_CLOCKS = "shopify_fulfillment_clocks"
 FULFILLMENT_WATERMARK = "shopify_fulfillment_updated_at"
+
+
+def _clock_key(f: Dict[str, Any]) -> str:
+    """A fulfilment's key in FULFILLMENT_CLOCKS: its bare id (the push stamps
+    the GraphQL gid), prefixed so the dotted write is never an array index."""
+    return "f" + _norm(f.get("id")).rsplit("/", 1)[-1]
+
+
+def fulfilment_clock(existing: Dict[str, Any], f: Dict[str, Any]) -> Any:
+    """The clock IMS last applied for THIS fulfilment (None: never applied)."""
+    return (existing.get(FULFILLMENT_CLOCKS) or {}).get(_clock_key(f))
 
 
 def newest_fulfilment(order: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """The newest fulfilment on a Shopify order body (None when it carries
-    none). reconcile_fulfillment stores exactly ONE fulfilment id per order,
-    so only the newest one is compared."""
+    none): what a whole body is compared with (fulfilment_body_stale)."""
     from .shopify_ingest import _to_naive_utc
 
     rows = [f for f in (order.get("fulfillments") or []) if isinstance(f, dict) and f.get("id")]
@@ -152,12 +167,14 @@ def reconcile_fulfillment(
         from .online_order_status import apply_fact, fulfilment_fact
         from .shopify_ingest import _to_naive_utc
 
-        # OUT-OF-ORDER guard: the mapper's stale rule on the fulfilment's own
-        # clock. A fulfilment payload STRICTLY older than the one last applied
-        # (a retried create landing after a newer update, or the hourly pull's
-        # body losing the race with a fulfillments/update) never rewinds the
-        # tracking / shipment status. Fail-open without a stamp on either side.
-        if _shopify_payload_stale(order, payload, field=FULFILLMENT_WATERMARK):
+        # OUT-OF-ORDER guard: the mapper's stale rule on THIS fulfilment's own
+        # clock. A payload STRICTLY older than the state of the same
+        # fulfilment IMS last applied (a retried create landing after its own
+        # update, or the hourly pull's body losing the race with a
+        # fulfillments/update) is skipped whole. Another parcel's clock is
+        # never compared: its late "delivered" is a real fact. Fail-open
+        # without a stamp on either side.
+        if _shopify_payload_stale({"at": fulfilment_clock(order, payload)}, payload, field="at"):
             return {"status": "skipped", "reason": "stale_fulfillment"}
 
         ful_status = _FULFILLMENT_STATUS_MAP.get(
@@ -168,15 +185,21 @@ def reconcile_fulfillment(
         tracking_number = tracking.get("tracking_number", "")
 
         now = datetime.now(timezone.utc).isoformat()
-        update: Dict[str, Any] = {
-            "fulfillment_status": ful_status,
-            "updated_at": now,
-            "shopify_fulfillment_id": fulfillment_id,
-            **tracking,
-        }
+        update: Dict[str, Any] = {"updated_at": now}
         watermark = _to_naive_utc(payload.get("updated_at"))
-        if watermark is not None:
-            update[FULFILLMENT_WATERMARK] = watermark
+        if watermark is not None and fulfillment_id:
+            update[f"{FULFILLMENT_CLOCKS}.{_clock_key(payload)}"] = watermark
+        # The order's tracking fields show the NEWEST fulfilment IMS applied:
+        # an older parcel's late event states its own fact below but never
+        # takes them over from a newer one.
+        if not _shopify_payload_stale(order, payload, field=FULFILLMENT_WATERMARK):
+            update.update({
+                "fulfillment_status": ful_status,
+                "shopify_fulfillment_id": fulfillment_id,
+                **tracking,
+            })
+            if watermark is not None:
+                update[FULFILLMENT_WATERMARK] = watermark
 
         # The lifecycle status: this fulfilment's ONE fact through the ONE
         # transition table (the mapper's and the courier's too). The tracking,

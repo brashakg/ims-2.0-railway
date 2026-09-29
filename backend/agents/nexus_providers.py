@@ -323,21 +323,25 @@ _SWEEP_SETTLED = {
 }
 
 
-def _newest_fulfilment(order: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """The sweep's hook onto shopify_fulfillment.newest_fulfilment."""
-    from api.services.shopify_fulfillment import newest_fulfilment
-
-    return newest_fulfilment(order)
+def _fulfilments(order: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Every fulfilment on a Shopify order body (the ones with an id)."""
+    return [f for f in (order.get("fulfillments") or []) if isinstance(f, dict) and f.get("id")]
 
 
 def _fulfilment_moved(f: Dict[str, Any], existing: Dict[str, Any]) -> bool:
-    """True when the newest Shopify fulfilment is not the one the IMS order
-    carries: its id, or a tracking number / shipment status the reconcile
-    WOULD write -- its own _tracking_fields, which leaves out an empty one (an
-    empty field never clears the older fulfilment's, so comparing it would
-    re-fire the reconcile every hour)."""
-    from api.services.shopify_fulfillment import _tracking_fields
+    """True when IMS has not applied this fulfilment's state: newer than its
+    own clock (the reconcile's FULFILLMENT_CLOCKS). Without a clock (the
+    push's own fulfilment, or one applied before the clocks): it is not the
+    one the IMS order carries, or it carries a tracking number / shipment
+    status the reconcile WOULD write -- its own _tracking_fields, which leaves
+    out an empty one (an empty field never clears the older fulfilment's, so
+    comparing it would re-fire the reconcile every hour)."""
+    from api.services.shopify_fulfillment import _tracking_fields, fulfilment_clock
+    from api.services.shopify_ingest import _to_naive_utc
 
+    clock, at = _to_naive_utc(fulfilment_clock(existing, f)), _to_naive_utc(f.get("updated_at"))
+    if clock is not None and at is not None:
+        return at > clock
     fields = _tracking_fields(f)
     # The IMS->Shopify push stamps the GraphQL gid (gid://shopify/Fulfillment/N);
     # the REST body and the webhook reconcile carry the bare N. Same fulfilment.
@@ -466,13 +470,17 @@ def _sweep_booked_order(db, order, raw, existing, sid: str, live: bool) -> tuple
             # Shopify makes (fulfillments/create, then orders/fulfilled|updated),
             # so the end state is the drain's (both legs decide through the ONE
             # transition table, online_order_status).
-            f = _newest_fulfilment(raw)
             # The mapper's own fulfilment-clock check (no fulfilment on the
             # body at all: the body itself predates the one IMS holds when it
             # is older than that fulfilment's stamp).
             ful_stale = fulfilment_body_stale(existing, raw)
-            if f is not None and not ful_stale and _fulfilment_moved(f, existing):
-                res = feed("fulfillments/update", f, lambda: reconcile_fulfillment(db, f, topic="fulfillments/update"))
+            # EVERY fulfilment that moved, each on its own clock: a split
+            # shipment's older parcel can be the one the courier delivered.
+            for f in [] if ful_stale else _fulfilments(raw):
+                if not _fulfilment_moved(f, existing):
+                    continue
+                res = feed("fulfillments/update", f,
+                           lambda f=f: reconcile_fulfillment(db, f, topic="fulfillments/update"))
                 # The same transition table held the SHIPPED / DELIVERED flip back.
                 if res.get("terminal_withheld"):
                     buckets.add("status_skipped_terminal")

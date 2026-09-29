@@ -1145,16 +1145,16 @@ def test_a_handler_exception_on_one_order_never_stops_the_others(swept):
             raise RuntimeError("mapper exploded")
         return real_map(payload, db, **kw)
 
-    real_newest = np._newest_fulfilment
+    real_fulfilments = np._fulfilments
 
-    def exploding_newest(order):
+    def exploding_fulfilments(order):
         if str(order.get("id")) == "30019":
             raise RuntimeError("comparison exploded")  # the sweep's own code, not a handler
-        return real_newest(order)
+        return real_fulfilments(order)
 
     swept["mp"].setattr(shopify_fulfillment, "reconcile_fulfillment", exploding_reconcile)
     swept["mp"].setattr(online_order_mapper, "map_shopify_order", exploding_map)
-    swept["mp"].setattr(np, "_newest_fulfilment", exploding_newest)
+    swept["mp"].setattr(np, "_fulfilments", exploding_fulfilments)
     swept["state"]["orders"] = [
         _pulled(30009, cancelled_at=CANCELLED_AT, fulfillments=[_fulfilment(30009, 1)]),
         _pulled(30010, cancelled_at=CANCELLED_AT),
@@ -1337,10 +1337,71 @@ def test_a_body_older_than_the_last_fulfilment_webhook_never_rewinds_it(swept, v
     assert p["status_synced"] == [] and p["status_failed"] == [] and p["failed_reasons"] == {}
     assert swept["seen"] == [] and calls == []
     assert _snap(_doc(swept, oid)) == before
-    # The drain asks the same rule: the older fulfilment as a late webhook is skipped whole.
+    # The drain asks each fulfilment's OWN clock: the same fulfilment's older
+    # state (B) is skipped whole; another parcel's (A, A2) states its own fact
+    # but never takes the newer one's tracking over.
     for f in body.get("fulfillments") or []:
-        assert shopify_fulfillment.reconcile_fulfillment(swept["db"], f)["reason"] == "stale_fulfillment"
-    assert _snap(_doc(swept, oid)) == before
+        res = shopify_fulfillment.reconcile_fulfillment(swept["db"], f)
+        assert res.get("reason") == ("stale_fulfillment" if variant == "B" else None)
+    after = _snap(_doc(swept, oid))
+    clocks = after.pop(shopify_fulfillment.FULFILLMENT_CLOCKS)
+    assert after == {k: v for k, v in before.items() if k != shopify_fulfillment.FULFILLMENT_CLOCKS}
+    assert clocks["f1"], "each parcel keeps its own clock"
+
+
+# ---------------------------------------------------------------------------
+# A split shipment's parcels move on their own clocks. Parcel 1 is delivered
+# at 02:00, parcel 2 was cancelled at 03:00: parcel 1's "delivered" is a real
+# fact however late it lands (a Shopify retry, or another worker processed
+# parcel 2 first) -- never "stale" against parcel 2's clock -- and the hourly
+# sweep feeds every parcel that moved, not only the newest. Ruling 1: the
+# courier's delivered makes the order DELIVERED.
+# ---------------------------------------------------------------------------
+
+
+def _parcel(oid, fid, at, **over):
+    return _fulfilment(oid, fid, tracking_number=f"AWB-F{fid}", updated_at=f"2026-09-06T{at}:00Z", **over)
+
+
+def _split_shipment(swept, oid):
+    _book(swept, oid)
+    for f in (_parcel(oid, 1, "01:10", shipment_status="in_transit"),
+              _parcel(oid, 2, "01:20", shipment_status="in_transit"),
+              _parcel(oid, 2, "03:00", status="cancelled")):
+        assert shopify_fulfillment.reconcile_fulfillment(swept["db"], f)["status"] == "reconciled"
+    assert _doc(swept, oid)["status"] == "SHIPPED"
+
+
+def test_a_late_delivered_parcel_is_never_stale_against_another_parcel(swept):
+    oid = 30120
+    _split_shipment(swept, oid)
+    delivered = _parcel(oid, 1, "02:00", shipment_status="delivered")
+
+    res = shopify_fulfillment.reconcile_fulfillment(swept["db"], delivered)
+    assert (res["status"], res["order_status"]) == ("reconciled", "DELIVERED")
+    doc = _doc(swept, oid)
+    assert doc["status"] == "DELIVERED"
+    assert doc["shopify_fulfillment_id"] == "2", "the newest parcel keeps the tracking fields"
+    # Parcel 1's OWN older state is still stale.
+    older = _parcel(oid, 1, "01:30", shipment_status="in_transit")
+    assert shopify_fulfillment.reconcile_fulfillment(swept["db"], older)["reason"] == "stale_fulfillment"
+
+
+def test_the_sweep_feeds_every_parcel_that_moved(swept):
+    oid = 30121
+    _split_shipment(swept, oid)
+    calls = _spy_reconcile(swept)
+    swept["state"]["orders"] = [_pulled(oid, fulfillment_status="fulfilled", updated_at="2026-09-06T03:00:00Z",
+                                        fulfillments=[_parcel(oid, 1, "02:00", shipment_status="delivered"),
+                                                      _parcel(oid, 2, "03:00", status="cancelled")])]
+
+    assert swept["run"]().payload["status_synced"] == [str(oid)]
+    assert calls == [1], "parcel 1 moved; parcel 2 did not"
+    assert _doc(swept, oid)["status"] == "DELIVERED"
+    for _ in range(2):
+        p = swept["run"]().payload
+        assert p["status_synced"] == [] and p["status_failed"] == []
+    assert calls == [1]
 
 
 # ---------------------------------------------------------------------------
