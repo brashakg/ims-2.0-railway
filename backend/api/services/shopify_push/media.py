@@ -36,7 +36,7 @@ from ._shared import (
     online_block_status,
     push_lock_reason,
 )
-from .transport import _graphql, _now
+from .transport import _MAX_RETRIES, _RETRY_MAX_DELAY, _graphql, _now
 from .queries import (
     _MEDIA_LIMIT,
     _PRODUCT_CREATE_MEDIA,
@@ -582,14 +582,20 @@ def _connector_file(ims_url: str, cdn_url: str, own_id: str) -> bool:
 # THE SETTLE (see the ownership note). IMS's attach is made on Shopify DURING
 # its productCreateMedia, so a pending doc's media -- if it landed -- is a
 # free node whose createdAt (Shopify's clock) lies inside the SEND WINDOW
-# [sent_at - _SKEW, sent_at + _REACH]: _SKEW covers the two clocks, _REACH
-# the send (PROVIDER_TIMEOUT) and Shopify finishing a request whose answer
-# IMS gave up on. A human's upload -- even of IMS's own file, under IMS's own
-# file name -- is made after someone saw the press fail: outside the window,
-# never a candidate, whatever its name. The window is the identity; the file
-# name only confirms it.
+# [sent_at - _SKEW, sent_at + _REACH]. sent_at is stamped BEFORE _graphql,
+# and the transport may try again before the request leaves (a connect or
+# pool timeout, a 429, a THROTTLED body: each try up to PROVIDER_TIMEOUT, then
+# a backoff of up to _RETRY_MAX_DELAY) -- so _REACH is every earlier try at
+# its longest, the last send (PROVIDER_TIMEOUT), Shopify finishing a request
+# whose answer IMS gave up on (90 s) and _SKEW for the two clocks. A human's
+# upload -- even of IMS's own file, under IMS's own file name -- is made
+# after someone saw the press fail: outside the window, never a candidate.
+# Inside it, the FILE NAME tells IMS's attaches apart (_settle).
 _SKEW = timedelta(minutes=1)
-_REACH = timedelta(seconds=PROVIDER_TIMEOUT + 90)
+_REACH = (
+    timedelta(seconds=(_MAX_RETRIES - 1) * (PROVIDER_TIMEOUT + _RETRY_MAX_DELAY) + PROVIDER_TIMEOUT + 90)
+    + _SKEW
+)
 _SETTLE_GRACE = timedelta(minutes=15)  # == _LEASE_TTL: no live pass can still be sending
 
 
@@ -623,52 +629,61 @@ def _settle(
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], bool]:
     """PURE: settle the pending docs against the listing's FREE nodes (the
     nodes no live doc names) -> (claims, drops, held, drift). A pending doc's
-    CANDIDATES are the free nodes made inside its send window.
-      claim  the window has closed and holds exactly ONE candidate, no other
-             pending doc's window holds that node, and the node is READY
-             carrying the url's file name (_same_file) -- or FAILED (IMS's
-             own attach Shopify could not fetch: claimed, so the pass
-             attaches the url again and takes the FAILED copy down);
-      drop   ('never landed': the url may be attached again) no candidate at
-             all, older than _SETTLE_GRACE;
+    WINDOW holds the free nodes made inside its send window that are not
+    FAILED (a FAILED media is no photograph and carries no file name to tell
+    whose it is: never claimed, never deleted -- left unmanaged). Its NAMED
+    candidates are those READY under the url's file name (_same_file).
+      claim  the window has closed and holds exactly ONE named candidate
+             that is no other pending doc's named candidate (two lost
+             attaches of one product inside one window are told apart by
+             their names);
+      drop   ('never landed': the url may be attached again) older than
+             _SETTLE_GRACE and nothing in the window could be its copy --
+             none named, none still processing, and none under another
+             name unless Shopify's naming is CONFIRMED on this product (a
+             READY node IMS minted carries its url's name): then a READY
+             node under another name is a person's photograph, never IMS's;
       held   everything else, each with ``young`` (inside the grace: a later
-             pass settles it). An OLD hold -- two candidates, a candidate
-             still processing or under another name -- waits for a person
-             to look at the listing (MEDIA_HELD).
+             pass settles it). An OLD hold -- two named candidates (a
+             person's upload of the same file inside the window), one still
+             processing, or one under another name with naming unconfirmed
+             -- waits for a person to look at the listing (MEDIA_HELD).
     DRIFT (the canary): a READY node IMS minted whose CDN name no longer
     carries its url's file name means Shopify's naming changed; every
     pending doc of the product is then held -- no claim, no drop, no
-    re-attach -- until a person looks (MEDIA_NAMING_DRIFT).
-    ponytail: two lost attaches of one product inside one window share their
-    candidates and wait for a person; tell them apart by name if that ever
-    happens."""
-    drift = any(
-        _cdn(nodes.get(r["id"])) and not _same_file(r["url"], _cdn(nodes[r["id"]]))
-        for r in minted
-        if r["id"] in nodes
-    )
-    cands: Dict[Any, Optional[List[Dict[str, Any]]]] = {}
+    re-attach -- until a person looks (MEDIA_NAMING_DRIFT)."""
+    ready = [
+        _same_file(r["url"], _cdn(nodes[r["id"]])) for r in minted if r["id"] in nodes and _cdn(nodes[r["id"]])
+    ]
+    drift, confirmed = not all(ready), any(ready)
+    window: Dict[Any, Optional[List[Dict[str, Any]]]] = {}
     for p in pending:
         sent = p.get("sent_at")
         if isinstance(sent, datetime):
             lo, hi = _utc(sent) - _SKEW, _utc(sent) + _REACH
-            cands[p["_id"]] = [n for n in free if lo <= (_created(n) or lo - _SKEW) <= hi]
+            window[p["_id"]] = [
+                n for n in free if not _is_failed(n) and lo <= (_created(n) or lo - _SKEW) <= hi
+            ]
         else:
-            cands[p["_id"]] = None  # no send time: never settled
-    load = Counter(str(n["id"]) for ns in cands.values() for n in ns or [])
+            window[p["_id"]] = None  # no send time: never settled
+    named = {
+        p["_id"]: [n for n in window[p["_id"]] or [] if _same_file(p["url"], _cdn(n))] for p in pending
+    }
+    load = Counter(str(n["id"]) for ns in named.values() for n in ns)
     claims: List[Dict[str, Any]] = []
     drops: List[Dict[str, Any]] = []
     held: List[Dict[str, Any]] = []
     for p in pending:
-        ns = cands[p["_id"]]
+        ns, mine = window[p["_id"]], named[p["_id"]]
         sent = _utc(p["sent_at"]) if ns is not None else None
         young = sent is None or now - sent < _SETTLE_GRACE
-        one = ns[0] if ns and len(ns) == 1 and load[str(ns[0]["id"])] == 1 else None
+        one = mine[0] if len(mine) == 1 and load[str(mine[0]["id"])] == 1 else None
+        maybe = [n for n in ns or [] if n in mine or not _cdn(n) or not confirmed]
         if drift:
             held.append({**p, "young": young})
-        elif one and now >= sent + _REACH and (_is_failed(one) or _same_file(p["url"], _cdn(one))):
+        elif one and now >= sent + _REACH:
             claims.append({**p, "id": str(one["id"])})
-        elif ns == [] and not young:
+        elif ns is not None and not maybe and not young:
             drops.append(p)
         else:
             held.append({**p, "young": young})

@@ -118,20 +118,51 @@ def _ago(minutes, naive=False):
     return at.replace(tzinfo=None) if naive else at
 
 
+def _dig(doc, path):
+    for part in path.split("."):
+        doc = doc.get(part) if isinstance(doc, dict) else None
+    return doc
+
+
+def _fits(doc, dotted):
+    """Mongo's dotted-path match for the {path: value} / {path: {$in: [...]}}
+    forms (MockCollection reads a dotted key as a top-level field)."""
+    for path, want in dotted.items():
+        got = _dig(doc, path)
+        if isinstance(want, dict):
+            if set(want) != {"$in"}:
+                raise NotImplementedError(want)
+            if got not in want["$in"]:
+                return False
+        elif got != want:
+            return False
+    return True
+
+
 class _Coll:
     """A MockCollection read with real Mongo's semantics: find_one / find hand
     back COPIES, so a doc a press read is a snapshot a later write does not
-    mutate. insert_one refuses a duplicate _id (the media lease is exactly
-    that claim; MockCollection would overwrite). Everything else delegates."""
+    mutate; a dotted key matches the nested field. insert_one refuses a
+    duplicate _id (the media lease is exactly that claim; MockCollection
+    would overwrite). Everything else delegates."""
 
     def __init__(self, name):
         self._m = MockCollection(name)
 
-    def find_one(self, *args, **kwargs):
-        return copy.deepcopy(self._m.find_one(*args, **kwargs))
+    def _split(self, flt):
+        flt = dict(flt or {})
+        dotted = {k: flt.pop(k) for k in list(flt) if "." in k and not k.startswith("$")}
+        return flt, dotted
 
-    def find(self, *args, **kwargs):
-        return [copy.deepcopy(d) for d in self._m.find(*args, **kwargs)]
+    def find_one(self, flt=None, *args, **kwargs):
+        plain, dotted = self._split(flt)
+        if not dotted:
+            return copy.deepcopy(self._m.find_one(flt, *args, **kwargs))
+        return next((copy.deepcopy(d) for d in self._m.find(plain) if _fits(d, dotted)), None)
+
+    def find(self, flt=None, *args, **kwargs):
+        plain, dotted = self._split(flt)
+        return [copy.deepcopy(d) for d in self._m.find(plain, *args, **kwargs) if _fits(d, dotted)]
 
     def insert_one(self, doc):
         if doc.get("_id") is not None and self._m.find_one({"_id": doc["_id"]}) is not None:
@@ -854,7 +885,7 @@ def test_a_ledger_write_failure_after_the_attach_is_loud_and_keeps_the_gid(gates
         _run(_delete_route(monkeypatch, db)("I1"))
     assert refused.value.status_code == 409 and _row(db, "I1") is not None
     fake.ready()
-    _age(db, U1, 5, fake=fake)  # the send window has closed
+    _age(db, U1, 7, fake=fake)  # the send window (_REACH, 6 min) has closed
     settled = _run(shopify_push.push_image(db, _row(db, "I1")))
     assert settled.ok and settled.shopify_id == _m(100) and settled.photos["adopted"] == 1
     assert len(fake.calls_of("imsProductCreateMedia")) == 1
@@ -1577,7 +1608,7 @@ def test_a_lost_attach_of_the_product_lane_settles_on_the_product_press(gates, m
     assert first.photos["error"] and _pending(db) == {(OID, None)}
 
     fake.ready()
-    _age(db, OID, 5, fake=fake)
+    _age(db, OID, 7, fake=fake)
     prod = _run(shopify_push.push_product(db, _parent(db), []))
 
     assert prod.ok is True and prod.photos["adopted"] == 1 and prod.photos["attached"] == 0, prod.photos
@@ -1599,7 +1630,7 @@ def test_a_lost_attach_of_a_row_re_pointed_since_is_taken_down_by_its_press(gate
     fake.commit_then(RuntimeError("lost"))
     assert _run(shopify_push.push_image(db, _row(db, "I1"))).ok is False
     fake.ready()
-    _age(db, U1, 5, fake=fake)
+    _age(db, U1, 7, fake=fake)
     db["product_images"].update_one({"image_id": "I1"}, {"$set": {"url": U2}})
     plan = _plan(db, _row(db, "I1"))
     assert (plan["action"], plan["drop"]) == ("create", [U1])
@@ -2329,5 +2360,5 @@ def test_a_claim_waits_for_the_send_window_to_close():
 
     assert claims == [] and drops == [] and drift is False
     assert [(h["url"], h["young"]) for h in held] == [(U1, True)]
-    claims, _drops, held, _drift = _media._settle([p], [node], [], {_m(7): node}, now + timedelta(minutes=3))
+    claims, _drops, held, _drift = _media._settle([p], [node], [], {_m(7): node}, now + _media._REACH)
     assert [c["id"] for c in claims] == [_m(7)] and held == []

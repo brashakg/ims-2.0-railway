@@ -79,7 +79,8 @@ async def push_menu(db, menu: Dict[str, Any]) -> PushResult:
         variables = {"title": title, "handle": handle, "items": items}
     try:
         # NEVER A BLIND RE-CREATE (creates.py): a menuCreate whose answer was
-        # lost is looked for first (a menu handle is unique on the shop).
+        # lost is looked for first (by its title and handle, never one already
+        # on the shop before the send); the record stays until its gid is saved.
         creating = not existing_gid
         if creating:
             verdict, found, why = await settle_lost_create(db, "menu", mid)
@@ -100,19 +101,19 @@ async def push_menu(db, menu: Dict[str, Any]) -> PushResult:
                 query, field_name = _MENU_UPDATE, "menuUpdate"
                 variables = {"id": found, "title": title, "handle": handle, "items": items}
             else:
-                record_create(db, "menu", mid, title, handle)
+                await record_create(db, "menu", mid, title, handle)
         try:
             body = await _graphql(db, query, variables)
         except SentOnce:
             raise  # the intent stays: the next press looks for it first
         except Exception:
             if creating:
-                clear_create(db, "menu", mid)
+                clear_create(db, "menu", mid)  # refused unapplied: nothing to find
             raise
-        if creating:
-            clear_create(db, "menu", mid)
         err = _user_errors(body, field_name)
         if err:
+            if creating:
+                clear_create(db, "menu", mid)  # refused: nothing was made
             return PushResult(
                 mode=MODE_LIVE,
                 entity="menu",
@@ -124,10 +125,10 @@ async def push_menu(db, menu: Dict[str, Any]) -> PushResult:
             )
         menu_obj = ((body.get("data") or {}).get(field_name) or {}).get("menu") or {}
         new_gid = menu_obj.get("id") or existing_gid
-        if new_gid and mid:
-            _writeback_simple(
-                db, "ecom_menus", "menu_id", mid, "shopify_menu_id", new_gid
-            )
+        if new_gid and mid and _writeback_simple(
+            db, "ecom_menus", "menu_id", mid, "shopify_menu_id", new_gid
+        ) and action == "create":
+            clear_create(db, "menu", mid)  # the gid is saved: nothing to find
         return PushResult(
             mode=MODE_LIVE,
             entity="menu",

@@ -25,9 +25,10 @@ def _writeback_product(
     inventory_item_gid: Optional[str] = None,
     status: Optional[str] = None,
     tags_sent: Optional[List[str]] = None,
-) -> None:
+) -> bool:
     """Persist ecom.shopify_product_id (+ stamps) on the catalog_products doc and
-    clear the dirty flag, for idempotent re-push.
+    clear the dirty flag, for idempotent re-push. True iff the twin was
+    written (the create journal is cleared only then: creates.py).
 
     `tags_sent` (optional) records ecom.shopify_tags_sent -- the exact tag list
     IMS last put on the Shopify product (sync audit gap #4). It is the
@@ -75,7 +76,7 @@ def _writeback_product(
         coll = db["catalog_products"]
         doc = coll.find_one({"id": product_id})
         if doc is None:
-            return
+            return False
         ecom = dict(doc.get("ecom") or {})
         ecom["shopify_product_id"] = shopify_id
         if variant_gid:
@@ -104,8 +105,10 @@ def _writeback_product(
         ecom["last_pushed_at"] = _now()
         ecom["locally_modified"] = False
         coll.update_one({"id": product_id}, {"$set": {"ecom": ecom}})
+        return True
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[SHOPIFY_PUSH] product write-back failed {product_id}: {e}")
+        return False
 
 
 def _requeue_unpublished(db, product_id: str) -> None:
@@ -186,9 +189,9 @@ def _writeback_simple(
     doc_id: str,
     shopify_field: str,
     shopify_id: str,
-) -> None:
+) -> bool:
     """Generic gid write-back for collection/menu docs: set the shopify id field,
-    clear locally_modified, stamp last_synced_at. Fail-soft."""
+    clear locally_modified, stamp last_synced_at. Fail-soft; True iff written."""
     try:
         coll = db[collection_name]
         coll.update_one(
@@ -201,8 +204,10 @@ def _writeback_simple(
                 }
             },
         )
+        return True
     except Exception as e:  # noqa: BLE001
         logger.warning(
             f"[SHOPIFY_PUSH] {collection_name} write-back failed {doc_id}: {e}"
         )
+        return False
 

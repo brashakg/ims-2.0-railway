@@ -378,8 +378,11 @@ def test_push_menu_live_writes_back_gid(monkeypatch):
     res = _run(shopify_push.push_menu(db, menu))
     assert res.ok is True and res.shopify_id == "gid://shopify/Menu/7"
     assert db["ecom_menus"].find_one({"menu_id": "M1"})["shopify_menu_id"] == "gid://shopify/Menu/7"
-    # menuCreate carried the title/handle/items variables.
-    assert spy.calls[0]["variables"]["handle"] == "main-menu"
+    # menuCreate carried the title/handle/items variables (after the create
+    # journal's read of the menus already on the shop: creates.record_create).
+    (create,) = [c for c in spy.calls if "mutation imsMenuCreate" in c["query"]]
+    assert create["variables"]["handle"] == "main-menu"
+    assert "query imsMenus" in spy.calls[0]["query"]
 
 
 def test_push_image_live_attaches_media_and_writes_the_map(monkeypatch):
@@ -1222,16 +1225,36 @@ _CREATE_MEDIA = shopify_push.queries._PRODUCT_CREATE_MEDIA
 _UPDATE = shopify_push.queries._PRODUCT_UPDATE
 
 
+class _Garbled(_FakeResp):
+    def json(self):
+        raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+
 @pytest.mark.parametrize(
     "first",
-    [httpx.ReadTimeout("read timed out"), _FakeResp(502, text="bad gateway")],
-    ids=["read-timeout", "502"],
+    [
+        httpx.ReadTimeout("read timed out"),
+        _FakeResp(502, text="bad gateway"),
+        httpx.RemoteProtocolError("Server disconnected without sending a response."),
+        httpx.ReadError("connection reset by peer"),
+        httpx.WriteError("broken pipe"),
+        _Garbled(200, text="<html>upstream reset</html>"),
+        _FakeResp(200, body={"errors": [{"message": "Internal error. Looks like something went wrong on our end.",
+                                         "extensions": {"code": "INTERNAL_SERVER_ERROR"}}]}),
+    ],
+    ids=["read-timeout", "502", "disconnected", "read-error", "write-error", "garbled-200", "internal-error-200"],
 )
 def test_a_create_mutation_is_sent_once_when_shopify_may_have_applied_it(monkeypatch, first):
+    """Every failure after the request may have left is a lost answer
+    (SentOnce), never a plain error the caller reads as 'refused unapplied'.
+    REVERT-PROOF: SentOnce only for a timeout / 5xx -> the dropped-connection
+    and garbled cases raise a plain error (or, for the INTERNAL_SERVER_ERROR
+    body, return it) instead."""
     calls = _wire_graphql(monkeypatch, [first, _FakeResp(200, body={"data": {}})])
     with pytest.raises(ValueError) as err:
         _run(shopify_push._graphql(None, _CREATE_MEDIA, {}))
     assert calls["n"] == 1, "one POST: a replay would mint a second media"
+    assert isinstance(err.value, shopify_push.SentOnce), err.value
     assert "imsProductCreateMedia" in str(err.value) and "not retried" in str(err.value)
 
 
@@ -1247,10 +1270,15 @@ def test_a_create_mutation_is_retried_when_shopify_never_ran_it(monkeypatch, fir
     assert calls["n"] == 2
 
 
+@pytest.mark.parametrize(
+    "first", [httpx.ReadTimeout("read timed out"), _FakeResp(503, text="unavailable")], ids=["read-timeout", "503"]
+)
 @pytest.mark.parametrize("query", [_UPDATE, "query { shop { id } }"], ids=["replay-safe-mutation", "query"])
-def test_queries_and_replay_safe_mutations_still_retry_a_read_timeout(monkeypatch, query):
+def test_queries_and_replay_safe_mutations_still_retry_a_read_timeout(monkeypatch, query, first):
+    """REVERT-PROOF (the panel's M3): every 5xx send-once -> the 503 cases
+    raise instead of retrying."""
     ok = {"data": {"ok": True}}
-    calls = _wire_graphql(monkeypatch, [httpx.ReadTimeout("read timed out"), _FakeResp(200, body=ok)])
+    calls = _wire_graphql(monkeypatch, [first, _FakeResp(200, body=ok)])
     assert _run(shopify_push._graphql(None, query, {})) == ok
     assert calls["n"] == 2
 

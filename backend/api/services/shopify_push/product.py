@@ -250,6 +250,8 @@ async def push_product(
         # NEVER A BLIND RE-CREATE (creates.py): productCreate is sent once, so
         # a create whose answer was lost is looked for on Shopify first -- a
         # product it made is linked and UPDATED, never created a second time.
+        # The record stays until the gid is SAVED (below): an update of the
+        # found product that fails leaves it for the next press to find again.
         creating = not existing_gid
         if creating:
             verdict, found, why = await settle_lost_create(db, "product", pid)
@@ -266,10 +268,18 @@ async def push_product(
                 )
             if verdict == "found":
                 creating = False
-                existing_gid = payload["id"] = found
+                existing_gid = found
+                # The lost create LANDED -- options and tags included -- so
+                # what goes now is an UPDATE of it, built as one: a
+                # create-shaped input carries productOptions, which
+                # productUpdate refuses ("product_options cannot be specified
+                # during update").
+                payload = build_product_input(
+                    {**product, "ecom": {**ecom, "shopify_product_id": found}}, variants
+                )
                 query, field_name = _PRODUCT_UPDATE, "productUpdate"
             else:
-                record_create(db, "product", pid, payload.get("title"))
+                await record_create(db, "product", pid, payload.get("title"), payload.get("handle"))
         try:
             body = await _graphql(db, query, {"input": payload})
         except SentOnce:
@@ -278,10 +288,10 @@ async def push_product(
             if creating:
                 clear_create(db, "product", pid)  # refused unapplied: nothing to find
             raise
-        if creating:
-            clear_create(db, "product", pid)
         err = _user_errors(body, field_name)
         if err:
+            if creating:
+                clear_create(db, "product", pid)  # refused: nothing was made
             return PushResult(
                 mode=MODE_LIVE,
                 entity="product",
@@ -316,8 +326,8 @@ async def push_product(
                     "created. The product is still queued; press again."
                 ),
             )
-        if new_gid and pid:
-            _writeback_product(db, pid, new_gid)
+        if new_gid and pid and _writeback_product(db, pid, new_gid) and action == "create":
+            clear_create(db, "product", pid)  # the gid is saved: nothing to find
         # TAGS, RIGHT AFTER THE WRITE. The update sent no `tags`, so the
         # response's tag list is what Shopify holds now; the pass adds /
         # removes only the tags IMS itself sent and records the ledger.

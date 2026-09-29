@@ -407,7 +407,9 @@ class _OrderShopify:
     creates while Shopify is STILL COMMITTING them -- each lands right after
     the next read has answered (the read saw the FulfillmentOrder open).
     ``cancelled``: Fulfillments already on the order, cancelled in the
-    admin. ``log`` interleaves the reads, creates and the backoff sleeps."""
+    admin. ``others``: (gid, tracking number) of live Fulfillments someone
+    else made (a partial fulfilment in the admin: the FulfillmentOrder of the
+    rest stays OPEN). ``log`` interleaves the reads, creates and the backoff sleeps."""
 
     def __init__(self):
         self.posts = []
@@ -417,6 +419,7 @@ class _OrderShopify:
         self.fulfillments = []
         self.tracking = {}
         self.cancelled = []
+        self.others = []
         self.refuse = []
         self.lose = []
         self.late = []
@@ -439,6 +442,7 @@ class _OrderShopify:
             answer = httpx.Response(200, json={"data": {"order": {
                 "id": variables["id"],
                 "fulfillments": [{"id": f, "status": "CANCELLED", "trackingInfo": []} for f in self.cancelled]
+                + [{"id": f, "status": "SUCCESS", "trackingInfo": [{"number": n}]} for f, n in self.others]
                 + [
                     {"id": f, "status": "SUCCESS", "trackingInfo": [{"number": self.tracking.get(f)}]}
                     for f in self.fulfillments
@@ -507,11 +511,21 @@ def test_an_edge_refusal_of_the_create_is_sent_again_after_a_fresh_read(monkeypa
     assert shop.fulfillments == ["gid://shopify/Fulfillment/900"] and _stamp(db) == res.shopify_id
 
 
-def test_a_lost_answer_of_an_applied_create_is_never_sent_again(monkeypatch):
+@pytest.mark.parametrize("lost", ["read-timeout", "disconnected", "read-error"])
+def test_a_lost_answer_of_an_applied_create_is_never_sent_again(monkeypatch, lost):
+    """A dropped connection after the create left is a lost answer like a
+    read timeout: the next pass reads, finds it applied and stamps it.
+    REVERT-PROOF (the panel's fulfilment probe): SentOnce only for a timeout
+    -> the RemoteProtocolError / ReadError cases end ok=False after
+    ['read', 'create'], the FulfillmentOrder closed but nothing stamped."""
     import httpx
 
     shop, db = _through_transport(monkeypatch)
-    shop.lose = [httpx.ReadTimeout("read timed out")]
+    shop.lose = [{
+        "read-timeout": httpx.ReadTimeout("read timed out"),
+        "disconnected": httpx.RemoteProtocolError("Server disconnected without sending a response."),
+        "read-error": httpx.ReadError("connection reset by peer"),
+    }[lost]]
 
     res = _run(sfp.push_fulfillment(db, _online_order(), tracking={"number": "AWB1"}))
 
@@ -587,3 +601,52 @@ def test_a_cancelled_fulfilment_is_never_stamped_as_ims_own(monkeypatch):
 
     assert res.ok is True and res.shopify_id == "gid://shopify/Fulfillment/900", res
     assert res.reason == "ims_create_landed" and _stamp(db) == "gid://shopify/Fulfillment/900"
+
+
+def test_a_create_refused_unapplied_is_not_given_a_next_pass(monkeypatch):
+    """A create Shopify refused before applying it (a 4xx: a plain error, not
+    SentOnce) is reported as it is -- no re-read, no second create.
+    REVERT-PROOF (the panel's M8): the next pass taken on any exception ->
+    posts read, create, read, create and ok=True on a refusal."""
+    shop, db = _through_transport(monkeypatch)
+    shop.refuse = [422]
+
+    res = _run(sfp.push_fulfillment(db, _online_order(), tracking={"number": "AWB1"}))
+
+    assert res.ok is False and "status 422" in (res.error or ""), res
+    assert shop.posts == ["read", "create"] and shop.fulfillments == [] and _stamp(db) is None
+
+
+def test_ims_own_landed_create_is_stamped_over_an_earlier_fulfilment_of_someone_else(monkeypatch):
+    """A person fulfilled part of the order in the admin (Fulfillment/1,
+    their own tracking number); the rest stays OPEN. IMS's create of the
+    rest commits and its answer is lost: the next pass stamps IMS's own
+    (900, IMS's tracking number) -- not the person's, which comes first.
+    REVERT-PROOF (the panel's M6): stamp the first live fulfilment ->
+    Fulfillment/1 stamped, reason already_fulfilled_on_shopify."""
+    import httpx
+
+    shop, db = _through_transport(monkeypatch)
+    shop.others = [("gid://shopify/Fulfillment/1", "HANDAWB")]
+    shop.lose = [httpx.ReadTimeout("read timed out")]
+
+    res = _run(sfp.push_fulfillment(db, _online_order(), tracking={"number": "AWB1"}))
+
+    assert res.ok is True and res.reason == "ims_create_landed", res
+    assert res.shopify_id == "gid://shopify/Fulfillment/900" == _stamp(db)
+
+
+def test_an_order_with_nothing_open_and_only_a_cancelled_fulfilment_is_never_stamped(monkeypatch):
+    """The order's FulfillmentOrder is closed and its only Fulfillment was
+    cancelled in the admin: nothing to fulfil and nothing live to stamp -- a
+    clean noop, the order left unstamped.
+    REVERT-PROOF (the panel's M7): drop the cancelled-status filter -> the
+    cancelled Fulfillment/1 stamped as 'already_fulfilled_on_shopify'."""
+    shop, db = _through_transport(monkeypatch)
+    shop.fo_status = "CLOSED"
+    shop.cancelled = ["gid://shopify/Fulfillment/1"]
+
+    res = _run(sfp.push_fulfillment(db, _online_order(), tracking={"number": "AWB1"}))
+
+    assert res.ok is True and res.action == "noop", res
+    assert _stamp(db) is None and shop.posts == ["read"]
