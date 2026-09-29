@@ -16,6 +16,7 @@ import HandoffInboxCard from '../../components/handoffs/HandoffInboxCard';
 import { HandoffUploadModal } from '../../components/handoffs/HandoffUploadModal';
 import ClinicalHandoverCard from '../../components/handoffs/ClinicalHandoverCard';
 import { NewTaskModal } from '../../components/tasks/NewTaskModal';
+import { canSeeTeamTasks } from '../tasks/taskRoles';
 import DashboardNotifications from '../../components/notifications/DashboardNotifications';
 import OwnerDigestCard from '../../components/dashboard/OwnerDigestCard';
 import TickerCard from '../../components/hub/TickerCard';
@@ -104,6 +105,7 @@ export default function HubPage() {
   // and the POS/Clinical cards are swapped for online-store surfaces below.
   // Display-only: no POS or billing logic changes.
   const isOnlineStoreActive = useIsOnlineStore();
+  const teamTasks = canSeeTeamTasks(user?.roles);
   const [meta, setMeta] = useState<HeroMeta>({
     salesToday: '—',
     salesDelta: '',
@@ -210,8 +212,11 @@ export default function HubPage() {
     // Priority work: top open tasks (most-urgent first) + SOP checklists.
     setLoadingWork(true);
     Promise.allSettled([
+      // Below manager the server lists only your OWN tasks (owner 09-03), so
+      // ask for them at every shop you reach: a catalogue manager's receipt
+      // task sits at the receipt's shop, not the one active here.
       tasksApi.getTasks(
-        user?.activeStoreId
+        user?.activeStoreId && teamTasks
           ? { store_id: user.activeStoreId, status: 'OPEN' }
           : { status: 'OPEN' }
       ),
@@ -259,7 +264,7 @@ export default function HubPage() {
     return () => {
       cancelled = true;
     };
-  }, [user?.activeStoreId, isOnlineStoreActive]);
+  }, [user?.activeStoreId, isOnlineStoreActive, teamTasks]);
 
   const today = useMemo(() => humanDate(), []);
   const firstName = (user?.name ?? '').split(/\s+/)[0] ?? '';
