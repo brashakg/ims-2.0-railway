@@ -714,6 +714,7 @@ class TaskmasterAgent(JarvisAgent):
 
         try:
             from api.services import po_variance_engine
+            from api.services.purchase_numbering import po_label
             from api.services.task_triggers import create_system_task
             from database.repositories.task_repository import TaskRepository
         except Exception as e:  # noqa: BLE001
@@ -770,7 +771,7 @@ class TaskmasterAgent(JarvisAgent):
                 in {"OPEN", "IN_PROGRESS", "ESCALATED"}
             ]
 
-            po_label = spec.get("po_number") or spec.get("po_id")
+            po_ref = po_label(spec.get("po_number"), spec.get("po_id"))
             product = spec.get("product_name") or spec.get("product_id")
             if not active:
                 # No live task yet -> create one through the CANONICAL system-
@@ -778,12 +779,12 @@ class TaskmasterAgent(JarvisAgent):
                 # ESCALATED lives inside create_system_task too, so a re-run
                 # between the scan above and this call still cannot duplicate).
                 title = (
-                    f"Critically overdue backorder: {product} on PO {po_label}"
+                    f"Critically overdue backorder: {product} on {po_ref}"
                     if spec.get("escalate")
-                    else f"Overdue backorder: {product} on PO {po_label}"
+                    else f"Overdue backorder: {product} on {po_ref}"
                 )
                 description = (
-                    f"PO {po_label} is {spec.get('days_overdue')} day(s) past its "
+                    f"{po_ref} is {spec.get('days_overdue')} day(s) past its "
                     f"expected date with {spec.get('open_qty')} unit(s) of {product} "
                     f"still un-received. Chase the vendor or short-close the line."
                 )
@@ -878,6 +879,7 @@ class TaskmasterAgent(JarvisAgent):
 
         try:
             from api.services import po_variance_engine
+            from api.services.purchase_numbering import po_label
             from api.services.task_triggers import create_system_task
             from database.repositories.task_repository import TaskRepository
         except Exception as e:  # noqa: BLE001
@@ -925,7 +927,7 @@ class TaskmasterAgent(JarvisAgent):
                 except Exception:  # noqa: BLE001
                     pass  # dedupe is best-effort; create_system_task re-checks
 
-                po_label = spec.get("po_number") or spec.get("po_id")
+                po_ref = po_label(spec.get("po_number"), spec.get("po_id"))
                 vendor = (
                     spec.get("vendor_name") or spec.get("vendor_id") or "vendor"
                 )
@@ -933,9 +935,9 @@ class TaskmasterAgent(JarvisAgent):
                     when = f"expected {spec.get('expected_date')}"
                 else:
                     when = f"sent {spec.get('sent_date')}, no expected date"
-                title = f"Overdue delivery: PO {po_label} ({vendor}) - {when}"
+                title = f"Overdue delivery: {po_ref} ({vendor}) - {when}"
                 description = (
-                    f"PO {po_label} to {vendor} was sent but no delivery has "
+                    f"{po_ref} to {vendor} was sent but no delivery has "
                     f"been logged; it is {spec.get('days_overdue')} day(s) "
                     f"overdue ({when}). Chase the vendor, or record the GRN "
                     f"if the goods have arrived."

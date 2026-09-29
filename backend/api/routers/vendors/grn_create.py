@@ -28,6 +28,7 @@ from .numbering import (
     grn_has_discrepancy,
 )
 from .grn import _duplicate_grn_detail, _enrich_grn_names, _find_duplicate_standard_grn
+from ...services.purchase_numbering import po_label
 
 
 @router.post("/grn", status_code=201)
@@ -484,12 +485,12 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
             from ...services.task_triggers import create_system_task
             from ...dependencies import get_task_repository
 
-            po_label = grn_doc.get("po_number") or grn.po_id
+            po_ref = po_label(grn_doc.get("po_number"), grn.po_id)
             create_system_task(
                 get_task_repository(),
-                title=f"GRN discrepancy on PO {po_label}",
+                title=f"GRN discrepancy on {po_ref}",
                 description=(
-                    f"Goods receipt {grn_number} against PO {po_label} shows a "
+                    f"Goods receipt {grn_number} against {po_ref} shows a "
                     f"discrepancy: received {total_received}, accepted "
                     f"{total_accepted}, rejected {total_rejected}"
                     + (
@@ -504,6 +505,11 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
                 category="Purchase",
                 store_id=grn_doc.get("store_id"),
                 dedupe_ref=f"grn:{grn_id}",
+                # Owner ruling 2026-09-29 (D17): a goods-received-with-a-problem
+                # task goes to THAT shop's store manager, by name. A quantity
+                # discrepancy is not a price/bill problem, so accounts are not
+                # copied.
+                assigned_to="STORE_MANAGER",
             )
         except Exception:
             pass
