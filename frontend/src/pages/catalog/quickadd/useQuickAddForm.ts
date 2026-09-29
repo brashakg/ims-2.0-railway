@@ -57,6 +57,17 @@ import {
 import { productListPath, sectionOfError, type EditMode, type SectionId } from './shared';
 import { useProductImages } from './useProductImages';
 
+// Reorder level, form text <-> server number (owner 2026-09-28, F73). The
+// server's -1 (or no level at all) is NOT SET and shows as a blank field; a
+// blank or invalid field is never saved as a number.
+const typedLevel = (value: unknown): number | null => {
+  const n = value === null || value === undefined || String(value).trim() === ''
+    ? NaN
+    : Number(value);
+  return Number.isInteger(n) && n >= 0 ? n : null;
+};
+const levelText = (rp: unknown): string => String(typedLevel(rp) ?? '');
+
 export function useQuickAddForm() {
   const { hasRole, user } = useAuth();
   const toast = useToast();
@@ -80,10 +91,12 @@ export function useQuickAddForm() {
   // Inventory. Stock is added via Goods Receipt (GRN), and both the SKU and our
   // internal barcode are auto-assigned (SKU at create, barcode at GRN) — there
   // is no manual quantity or barcode entry here. Only the reorder level is set.
-  const [reorderLevel, setReorderLevel] = useState('5');
+  // '' = NOT SET (the server's -1): no low-stock alert until one is typed
+  // (owner 2026-09-28, F73).
+  const [reorderLevel, setReorderLevel] = useState('');
 
-  // Online (Shopify)
-  const [syncToShopify, setSyncToShopify] = useState(false);
+  // Online (Shopify). Whether the product goes to the website is the brand's
+  // Brand Master default (brandSyncs below), never a per-product switch (D6).
   const [shopifyTags, setShopifyTags] = useState<string[]>([]);
   const [publishPOS, setPublishPOS] = useState(true);
 
@@ -182,6 +195,8 @@ export function useQuickAddForm() {
   // is no longer picked per product — the backend derives it from this tier
   // (category force wins); shown read-only in the Review.
   const [brandTiers, setBrandTiers] = useState<Record<string, string>>({});
+  // Brand name -> its Brand Master website default (D6), shown read-only.
+  const [brandSyncs, setBrandSyncs] = useState<Record<string, boolean>>({});
 
   // Load the canonical category field registry once (shared module cache). The
   // required/optional flags the form renders + validates derive from it so they
@@ -243,6 +258,7 @@ export function useQuickAddForm() {
     if (!selectedCategory) {
       setSubbrandsByBrand({});
       setBrandTiers({});
+      setBrandSyncs({});
       return;
     }
     let alive = true;
@@ -252,18 +268,41 @@ export function useQuickAddForm() {
         if (!alive) return;
         const map: Record<string, string[]> = {};
         const tiers: Record<string, string> = {};
+        const syncs: Record<string, boolean> = {};
         (r.brands || []).forEach((b) => {
           if (b?.name) {
             map[b.name] = Array.isArray(b.subbrands) ? b.subbrands : [];
             if (b.tier) tiers[b.name] = b.tier;
+            syncs[b.name] = b.sync_to_shopify_default === true;
           }
         });
         setSubbrandsByBrand(map);
         setBrandTiers(tiers);
+        setBrandSyncs(syncs);
       })
       .catch(() => { /* free-form fallback */ });
     return () => { alive = false; };
   }, [selectedCategory]);
+
+  // F13/D5: the readable SKU a NEW product will get, previewed from the
+  // server's one minter (POST /products/sku-preview) once brand + model are in.
+  // Never built here. Edit/review keep their existing SKU.
+  const [skuPreview, setSkuPreview] = useState('');
+  useEffect(() => {
+    if (editMode || !selectedCategory || !attributes.brand_name ||
+        !(attributes.model_no || attributes.model_name)) {
+      setSkuPreview('');
+      return;
+    }
+    let alive = true;
+    const t = window.setTimeout(() => {
+      productApi
+        .previewSku(selectedCategory, attributes)
+        .then((r) => { if (alive) setSkuPreview(r?.sku || ''); })
+        .catch(() => { if (alive) setSkuPreview(''); });
+    }, 300);
+    return () => { alive = false; window.clearTimeout(t); };
+  }, [editMode, selectedCategory, attributes]);
 
   const canAddProduct = hasRole(['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']);
   // F35: cost price + margin are visible only to cost-authorised roles (matches
@@ -282,7 +321,6 @@ export function useQuickAddForm() {
       offerPrice,
       costPrice,
       discountCategory,
-      syncToShopify,
       shopifyTags,
       publishPOS,
       images,
@@ -292,13 +330,14 @@ export function useQuickAddForm() {
     }),
     [
       selectedCategory, attributes, description, hsnCode, gstRate, weight, mrp,
-      offerPrice, costPrice, discountCategory, syncToShopify, shopifyTags, publishPOS,
+      offerPrice, costPrice, discountCategory, shopifyTags, publishPOS,
       images, displayName, reviewTags,
     ]
   );
 
-  // Reset the form. `keepIdentity` (used by Save + New) keeps category + brand
-  // so the next variant of the same product is fast to enter.
+  // Reset the form. `keepIdentity` (used by Save + New) keeps category, brand
+  // and the reorder level so the next variant of the same product is fast to
+  // enter (F68).
   const resetForm = useCallback(
     (keepIdentity: boolean) => {
       const keptBrand = attributes.brand_name;
@@ -310,8 +349,7 @@ export function useQuickAddForm() {
       setOfferPrice('');
       setCostPrice('');
       setDiscountCategory('');
-      setReorderLevel('5');
-      setSyncToShopify(false);
+      if (!keepIdentity) setReorderLevel('');
       setShopifyTags([]);
       setPublishPOS(true);
       setImages([]);
@@ -341,7 +379,6 @@ export function useQuickAddForm() {
     setOfferPrice(v.offerPrice || '');
     setCostPrice(v.costPrice || '');
     setDiscountCategory(v.discountCategory || '');
-    setSyncToShopify(Boolean(v.syncToShopify));
     setShopifyTags(Array.isArray(v.shopifyTags) ? v.shopifyTags : []);
     setPublishPOS(v.publishPOS !== false);
     setImages(Array.isArray(v.images) ? v.images : []);
@@ -397,14 +434,30 @@ export function useQuickAddForm() {
   // Flip the form into VARIANT MODE seeded from an existing product. Shared by
   // the duplicate-rescue popup's default action and the ?variant=<id> deep
   // link (the "+ Variant" button in the product list emits that URL).
+  // `keep` (the same-model chip, F69): what the operator already typed wins
+  // over the sibling's copy -- the typed colour is never wiped.
   const enterVariantMode = useCallback(
-    (product: ProductDoc) => {
+    (
+      product: ProductDoc,
+      keep?: { attributes: Record<string, string>; weight: string; reorderLevel: string },
+    ) => {
       const seed = productToVariantFormValues(product);
       if (!seed.category) {
         toast.error("Couldn't resolve this product's category to start a variant.");
         return;
       }
-      applyFormValues(seed.values);
+      const typed = Object.fromEntries(
+        Object.entries(keep?.attributes || {}).filter(([, v]) => String(v ?? '').trim()),
+      );
+      applyFormValues({
+        ...seed.values,
+        attributes: { ...seed.values.attributes, ...typed },
+        weight: keep?.weight || seed.values.weight,
+      });
+      // The level copies like the rest of the model (F69); typed wins.
+      setReorderLevel(
+        keep?.reorderLevel || levelText((product as { reorder_point?: unknown }).reorder_point),
+      );
       setVariantCtx({
         sourceProductId: seed.sourceProductId,
         sourceSku: seed.sourceSku,
@@ -421,8 +474,8 @@ export function useQuickAddForm() {
                 .join(', ')}).`
             : '',
       });
-      setFlaggedFields(new Set(seed.flagged));
-      focusAttrField(seed.cleared[0] || null);
+      setFlaggedFields(new Set(seed.flagged.filter((k) => !(k in typed))));
+      focusAttrField(seed.cleared.find((k) => !(k in typed)) || null);
       window.scrollTo({ top: 0, behavior: 'smooth' });
     },
     [applyFormValues, focusAttrField, toast]
@@ -500,12 +553,12 @@ export function useQuickAddForm() {
       if (!productId) return;
       try {
         const product = (await productApi.getProduct(productId)) as ProductDoc;
-        enterVariantMode(product);
+        enterVariantMode(product, { attributes, weight, reorderLevel });
       } catch {
         toast.error('Could not load that product to start a variant.');
       }
     },
-    [enterVariantMode, toast]
+    [enterVariantMode, toast, attributes, weight, reorderLevel]
   );
 
   const handleSimilarOpen = useCallback(
@@ -548,7 +601,6 @@ export function useQuickAddForm() {
           // dup-rescue branch can't fire (PUT never throws DuplicateProductError).
           // (Review mode never reaches handleSubmit — it has its own fork.)
           const payload = buildProductPayload(values);
-          const reorderNum = Number(reorderLevel);
           await productApi.updateProduct(editMode.id, {
             brand: payload.brand,
             model: payload.model,
@@ -564,9 +616,8 @@ export function useQuickAddForm() {
             ...(payload.discount_category
               ? { discount_category: payload.discount_category }
               : {}),
-            ...(Number.isFinite(reorderNum) && reorderNum >= 0
-              ? { reorder_point: reorderNum }
-              : {}),
+            // Blank = not set: -1 clears a level that was typed before (F73).
+            reorder_point: typedLevel(reorderLevel) ?? -1,
           });
           toast.success(
             editMode.sku ? `Updated ${editMode.sku} — same SKU, no new product.` : 'Product updated.'
@@ -575,16 +626,18 @@ export function useQuickAddForm() {
           return;
         }
         const created = await productApi.createProduct(buildProductPayload(values));
-        // Persist the reorder level via a follow-up update on the new product_id
-        // (ProductCreate doesn't model reorder_point; ProductUpdate does). The
+        // Persist a TYPED reorder level via a follow-up update on the new
+        // product_id (ProductCreate doesn't model reorder_point; ProductUpdate
+        // does). Left blank, the product keeps the -1 = not set it was born
+        // with -- no write at all (F73). The
         // SKU is auto-minted by the backend and our internal barcode is assigned
         // at Goods Receipt — neither is entered here. Fail-soft: a failed reorder
         // update must not fail the create the user just did.
         const newId = created?.product_id || created?.id;
-        const reorderNum = Number(reorderLevel);
-        if (newId && Number.isFinite(reorderNum) && reorderNum >= 0) {
+        const level = typedLevel(reorderLevel);
+        if (newId && level !== null) {
           try {
-            await productApi.updateProduct(newId, { reorder_point: reorderNum });
+            await productApi.updateProduct(newId, { reorder_point: level });
           } catch {
             toast.warning('Product created, but the reorder level could not be saved.');
           }
@@ -613,8 +666,9 @@ export function useQuickAddForm() {
           startNextVariant();
         } else if (saveAndNew) {
           resetForm(true);
-          // Keep focus flowing — jump back to the top of the form.
+          // Keep focus flowing: back to the top, cursor in Model No (F68).
           window.scrollTo({ top: 0, behavior: 'smooth' });
+          focusAttrField(document.getElementById('qa-field-model_no') ? 'model_no' : 'model_name');
         } else {
           navigate('/inventory');
         }
@@ -636,7 +690,7 @@ export function useQuickAddForm() {
     },
     [
       currentValues, toast, resetForm, navigate, variantCtx, startNextVariant,
-      editMode, reorderLevel,
+      editMode, reorderLevel, focusAttrField,
     ]
   );
 
@@ -1200,9 +1254,9 @@ export function useQuickAddForm() {
           setFlaggedFields(new Set());
           applyFormValues(productToFormValues(product));
           setEditMode({ kind: 'spine', id: editId, sku: String(product.sku || '') });
-          // Prefill the reorder level so the single PUT round-trips it.
-          const rp = Number((product as { reorder_point?: unknown }).reorder_point);
-          setReorderLevel(Number.isFinite(rp) && rp >= 0 ? String(rp) : '5');
+          // Prefill the reorder level so the single PUT round-trips it; not
+          // set (-1 / none) stays blank -- never an invented level (F73).
+          setReorderLevel(levelText((product as { reorder_point?: unknown }).reorder_point));
         }
       } catch {
         if (!cancelled) toast.error('Could not load the product to edit.');
@@ -1406,12 +1460,12 @@ export function useQuickAddForm() {
     mrp, setMrp, offerPrice, setOfferPrice, costPrice, setCostPrice,
     discountCategory,
     reorderLevel, setReorderLevel,
-    syncToShopify, setSyncToShopify, shopifyTags, setShopifyTags,
+    shopifyTags, setShopifyTags,
     publishPOS, setPublishPOS,
     images, setImages,
     displayName, setDisplayName, reviewTags, setReviewTags,
     // options fed from the server
-    subbrandsByBrand, brandTiers,
+    subbrandsByBrand, brandTiers, brandSyncs, skuPreview,
     // accordion + validation surface
     errors, showAdvanced, setShowAdvanced,
     openSections, toggleSection, liveErrors, sectionIssues, jumpToField,

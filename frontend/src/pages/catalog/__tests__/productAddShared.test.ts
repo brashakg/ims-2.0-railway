@@ -28,7 +28,6 @@ const fv = (
   mrp: '5000',
   offerPrice: '4500',
   discountCategory: '',
-  syncToShopify: false,
   shopifyTags: [],
   publishPOS: true,
   ...over,

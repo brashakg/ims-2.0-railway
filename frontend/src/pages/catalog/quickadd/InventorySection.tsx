@@ -52,7 +52,7 @@ export function InventorySection({ form }: { form: QuickAddForm }) {
               id="qa-field-reorder_level"
               type="number"
               title="Reorder Level"
-              placeholder="5"
+              placeholder="not set"
               value={reorderLevel}
               onChange={(e) => setReorderLevel(e.target.value)}
               className="input-field w-full"
@@ -61,9 +61,10 @@ export function InventorySection({ form }: { form: QuickAddForm }) {
           </div>
           <p className="text-xs text-gray-600 tablet:pt-5">
             <span className="font-semibold text-gray-800">
-              Set the reorder level and you&apos;ll be alerted when stock falls below it.
+              Set the reorder level and you&apos;ll be alerted when stock falls to it.
             </span>{' '}
-            Stock is added via Goods Receipt (GRN), not here. The SKU is assigned when the
+            Left blank it is not set: no low-stock alert for this product.{' '}
+            Stock is added via Goods Receipt (GRN), not here. The SKU (previewed in Review) is assigned when the
             product is created and the internal barcode at goods receipt — neither is typed.
           </p>
         </div>

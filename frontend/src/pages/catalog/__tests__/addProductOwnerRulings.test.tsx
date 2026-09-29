@@ -1,9 +1,8 @@
 // ============================================================================
 // Add product - owner rulings 2026-09-28 (second set) + 2026-09-29
 // ============================================================================
-// Audit rows F12, F13, F68, F69, F73, F92. Every `it.fails` reproduces a
-// finding against today's screen and names it; the fix turns it into `it`.
-// (it.fails passes only while the body throws - vitest's strict xfail.)
+// Audit rows F12, F13, F68, F69, F73, F92: each test pins one owner rule on
+// the rendered screen.
 //
 // F12/D6 the brand default ALWAYS decides the website: no Sync to Shopify
 //        switch on Add / Edit / Quick add, a read-only line names the brand
@@ -51,7 +50,8 @@ const SOURCE_PRODUCT = {
 };
 const BRANDS = [
   { name: 'Ray-Ban', subbrands: [], tier: 'PREMIUM', sync_to_shopify_default: true },
-  { name: 'Carrera', subbrands: [], tier: 'PREMIUM', sync_to_shopify_default: false },
+  // Oakley, not Carrera: the brand select's offline fallback list has no Carrera.
+  { name: 'Oakley', subbrands: [], tier: 'PREMIUM', sync_to_shopify_default: false },
 ];
 
 const createProduct = vi.fn(async () => ({ product_id: 'P-NEW', sku: 'SG-RAYBAN-RB4165-601' }));
@@ -137,32 +137,32 @@ beforeEach(() => {
 });
 
 describe('F12 / D6 - the brand default decides the website', () => {
-  it.fails('Add product has no Sync to Shopify switch', async () => {
+  it('Add product has no Sync to Shopify switch', async () => {
     renderPage();
     await screen.findByText('Sunglass');
     expect(screen.queryByLabelText('Sync to Shopify')).toBeNull();
   });
 
-  it.fails('Edit product has no Sync to Shopify switch either', async () => {
+  it('Edit product has no Sync to Shopify switch either', async () => {
     renderPage('/catalog/add?edit=P-SRC');
     await screen.findByRole('button', { name: /Save changes/ });
     expect(screen.queryByLabelText('Sync to Shopify')).toBeNull();
   });
 
-  it.fails('a read-only line names the brand default, and follows the brand', async () => {
+  it('a read-only line names the brand default, and follows the brand', async () => {
     const user = userEvent.setup();
     renderPage();
     await sunglass(user);
     const rayBan = (await screen.findByText(/brand default/i)).textContent || '';
     expect(rayBan).toMatch(/Ray-Ban/);
 
-    fill(screen.getByLabelText(/^Brand Name/), 'Carrera');
-    await waitFor(() => expect(screen.getByText(/brand default/i).textContent).toMatch(/Carrera/));
+    fill(screen.getByLabelText(/^Brand Name/), 'Oakley');
+    await waitFor(() => expect(screen.getByText(/brand default/i).textContent).toMatch(/Oakley/));
     // Same sentence with only the name swapped would mean the verdict never moved.
-    expect(screen.getByText(/brand default/i).textContent).not.toBe(rayBan.replace('Ray-Ban', 'Carrera'));
+    expect(screen.getByText(/brand default/i).textContent).not.toBe(rayBan.replace('Ray-Ban', 'Oakley'));
   });
 
-  it.fails('the create payload carries no sync choice for the server to honour', async () => {
+  it('the create payload carries no sync choice for the server to honour', async () => {
     const user = userEvent.setup();
     renderPage();
     await sunglass(user);
@@ -175,7 +175,7 @@ describe('F12 / D6 - the brand default decides the website', () => {
 });
 
 describe('F13 / D5 - the SKU is previewed before saving', () => {
-  it.fails('shows the server-minted readable SKU once brand, model and colour are in', async () => {
+  it('shows the server-minted readable SKU once brand, model and colour are in', async () => {
     const user = userEvent.setup();
     renderPage();
     await sunglass(user);
@@ -189,7 +189,7 @@ describe('F13 / D5 - the SKU is previewed before saving', () => {
 });
 
 describe('F68 - Save + New keeps you typing', () => {
-  it.fails('lands the cursor in Model No and keeps the reorder level', async () => {
+  it('lands the cursor in Model No and keeps the reorder level', async () => {
     const user = userEvent.setup();
     renderPage();
     await sunglass(user);
@@ -202,7 +202,7 @@ describe('F68 - Save + New keeps you typing', () => {
 });
 
 describe('F69 - the same-model chip', () => {
-  it.fails('keeps the typed colour and copies weight and reorder level', async () => {
+  it('keeps the typed colour and copies weight and reorder level', async () => {
     const user = userEvent.setup();
     renderPage();
     await sunglass(user);
@@ -213,7 +213,7 @@ describe('F69 - the same-model chip', () => {
     expect(reorderInput().value).toBe('2');
   });
 
-  it.fails('the chip is at least the 36px control height', async () => {
+  it('the chip is at least the 36px control height', async () => {
     const { SimilarProductsHint: RealHint } =
       await vi.importActual<typeof import('../SimilarProductsHint')>('../SimilarProductsHint');
     (useSimilarProducts as unknown as Mock).mockReturnValue({
@@ -234,7 +234,7 @@ describe('F69 - the same-model chip', () => {
 });
 
 describe('F73 - reorder level -1 = not set', () => {
-  it.fails('a new product starts with the level blank and says not set', async () => {
+  it('a new product starts with the level blank and says not set', async () => {
     const user = userEvent.setup();
     renderPage();
     await user.click(screen.getByText('Sunglass'));
@@ -245,7 +245,7 @@ describe('F73 - reorder level -1 = not set', () => {
     expect(row).toHaveTextContent(/not set/i);
   });
 
-  it.fails('a level left blank is never saved as a number', async () => {
+  it('a level left blank is never saved as a number', async () => {
     const user = userEvent.setup();
     renderPage();
     await sunglass(user);
@@ -256,7 +256,7 @@ describe('F73 - reorder level -1 = not set', () => {
     expect(savedLevels()).toEqual([]);
   });
 
-  it.fails('editing a product whose level is -1 shows not set, and saving keeps it unset', async () => {
+  it('editing a product whose level is -1 shows not set, and saving keeps it unset', async () => {
     getProduct.mockResolvedValueOnce({ ...SOURCE_PRODUCT, reorder_point: -1 });
     const user = userEvent.setup();
     renderPage('/catalog/add?edit=P-SRC');

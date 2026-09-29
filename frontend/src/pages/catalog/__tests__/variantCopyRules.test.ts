@@ -252,7 +252,6 @@ describe('productToVariantFormValues', () => {
 
   it('behaves like a fresh create for online flags + carries the source identity', () => {
     const seed = productToVariantFormValues(SG_PRODUCT);
-    expect(seed.values.syncToShopify).toBe(false);
     expect(seed.values.shopifyTags).toEqual([]);
     expect(seed.values.publishPOS).toBe(true);
     expect(seed.sourceProductId).toBe('P-1');
