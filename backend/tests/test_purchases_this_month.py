@@ -571,3 +571,34 @@ def test_f63_every_purchase_tab_obeys_one_shop_scope(world, tab, case):
     _open(resp.status_code == 200, f"F63: {tab} answered {resp.status_code}")
     shops = {shop_of(r) for r in resp.json()[key]}
     _open(shops == expected, f"F63: {tab} shows shops {sorted(map(str, shops))}, expected {sorted(expected)}")
+
+
+# ============================================================================
+# F63: a first-time admin is not parked on the online store
+# ============================================================================
+
+
+@_xfail(
+    "F63",
+    "auth._default_active_store picks the first active store in insertion order "
+    "(auth.py:806-808), which is the stockless online store on this database, so "
+    "a first-time admin lands on it and every shop-scoped screen reads 0",
+)
+def test_f63_a_first_time_admin_is_not_parked_on_the_online_store(monkeypatch):
+    import database.connection as conn
+    from api.routers import auth as auth_mod
+    from strict_fakes import StrictDB
+
+    db = StrictDB()
+    db.seed(
+        "stores",
+        [
+            {"store_id": ONLINE, "store_type": "ONLINE", "is_active": True},
+            {"store_id": DHN, "store_type": "RETAIL", "is_active": True},
+            {"store_id": PUN, "store_type": "RETAIL", "is_active": True},
+        ],
+    )
+    monkeypatch.setattr(conn, "get_db", lambda: type("H", (), {"db": db})())
+    picked = auth_mod._default_active_store({"roles": ["ADMIN"]})
+    assert picked in (ONLINE, DHN, PUN), picked
+    _open(picked != ONLINE, f"F63: a first-time admin defaults to {picked}, the online store")
