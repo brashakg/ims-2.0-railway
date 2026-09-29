@@ -132,6 +132,25 @@ def parse_date(s) -> Optional[datetime]:
         return None
 
 
+def iso_bill_date(value) -> str:
+    """THE bill-date rule of every bill door (the line-detail invoice and the
+    Cash Flow '+ bill'): a real calendar date written YYYY-MM-DD, returned in
+    that form. Every GST return places a bill in its month by comparing this
+    string (reports.gst_itc._itc_month) and the period lock parses it, so a
+    bill dated '' or '09/05/2026' was on no GSTR-3B and under no lock.
+    ValueError otherwise, for the schema validator to report."""
+    txt = str(value or "").strip()
+    if len(txt) == 10 and txt[4] == txt[7] == "-" and (txt[:4] + txt[5:7] + txt[8:]).isdigit():
+        try:
+            return date.fromisoformat(txt).isoformat()
+        except ValueError:
+            pass
+    raise ValueError(
+        "Bill date must be a real date written YYYY-MM-DD, as printed on the "
+        "supplier's bill"
+    )
+
+
 def compute_due_date(bill_date_iso: str, credit_days: int) -> Optional[str]:
     """Due date = bill date + credit_days. ISO date string, or None if the
     bill date is unparseable."""

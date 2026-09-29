@@ -166,11 +166,9 @@ class PurchaseInvoiceCreate(BaseModel):
     @field_validator("invoice_date", mode="before")
     @classmethod
     def _require_invoice_date(cls, v):
-        """A blank date booked with invoice_date '' and due_date None: the
-        credit-days due date silently never happened."""
-        if isinstance(v, str) and not v.strip():
-            raise ValueError("Invoice date is required (as printed on the bill)")
-        return v.strip() if isinstance(v, str) else v
+        """ap_engine.iso_bill_date: a blank or '05/05/2026' date booked with
+        no due date, on no GSTR-3B and under no period lock."""
+        return ap_engine.iso_bill_date(v)
 
 
 class PurchaseInvoicePreview(BaseModel):
@@ -1481,6 +1479,12 @@ async def create_purchase_invoice(
 
     db = _get_db()
 
+    # Accounting period lock on the bill's own month, as the Cash Flow '+ bill'
+    # door always had (this door checked only a DC's date, below).
+    from .finance import check_period_locked
+
+    check_period_locked(db, body.invoice_date)
+
     # F3: a STANDARD PO-backed GRN must be ACCEPTED before it can be billed -- a
     # GRN mints stock only at accept time, so booking against a PENDING /
     # PARTIALLY_ACCEPTED GRN records a payable + ITC for goods not yet received
@@ -2591,16 +2595,21 @@ def _check_bill_period_open(db, doc: dict) -> None:
     an unverifiable period must not proceed (the lock would otherwise be
     silently bypassed by a bill with no date). check_period_locked itself is
     fail-soft on DB errors -- infrastructure noise still never blocks."""
-    posting_date = doc.get("invoice_date") or doc.get("bill_date")
-    if not posting_date or not str(posting_date).strip():
+    try:
+        # '09/05/2026' too: check_period_locked skips a date it cannot parse.
+        posting_date = ap_engine.iso_bill_date(
+            doc.get("invoice_date") or doc.get("bill_date")
+        )
+    except ValueError:
         raise HTTPException(
             status_code=422,
             detail=(
-                "This bill has no posting date (invoice_date/bill_date), so the "
+                "This bill has no usable posting date (invoice_date/bill_date "
+                "as YYYY-MM-DD), so the "
                 "accounting-period lock cannot be checked. Set the bill's date "
                 "before capturing or allocating landed costs."
             ),
-        )
+        ) from None
     try:
         from .finance import check_period_locked
 

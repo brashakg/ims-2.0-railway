@@ -810,3 +810,79 @@ class TestTransferMirrorHeadsAreTheOneRule:
             assert booked == 12
         finally:
             trf._get_db = saved
+
+
+# ===========================================================================
+# Panel round 4 -- a bill's date, the form's shop, the debit note's head,
+# the list, and a company with no GST number
+# ===========================================================================
+
+
+def _cash_flow_bill(**over):
+    body = {"bill_number": "FR-9", "bill_date": "2026-05-09", "taxable_amount": 1000,
+            "tax_amount": 180, "total_amount": 1180, "bill_kind": "SERVICES"}
+    body.update(over)
+    return body
+
+
+class TestABillIsDatedOrRefused:
+    """HIGH: a bill dated '' or '09/05/2026' booked 201 on both doors, fell
+    outside every GSTR-3B month window and outside the check that is meant to
+    catch credit left off the returns (register 330, GSTR-3B 150, MATCH)."""
+
+    BAD = ("", "  ", "09/05/2026", "2026-5-9", "2026-02-30", "20260509", "2026-05-09T10:00:00")
+
+    @pytest.mark.parametrize("bad", BAD)
+    def test_the_screen_refuses_a_date_no_return_can_place(self, bad):
+        db = _FakeDB()
+        r = _app(db).post(_URL, json=_services(invoice_date=bad))
+        assert r.status_code == 422, r.text
+        assert db.collections["vendor_bills"] == []
+
+    @pytest.mark.parametrize("bad", BAD)
+    def test_the_cash_flow_door_refuses_it_too(self, bad):
+        db, cli = TestEveryDoorEveryReader()._world()
+        r = _door(cli, "V1", **_cash_flow_bill(bill_date=bad))
+        assert r.status_code == 422, r.text
+        assert db["vendor_bills"].count_documents({}) == 0
+
+    def test_a_real_date_books_with_its_due_date(self):
+        r = _app(_FakeDB()).post(_URL, json=_services(invoice_date=" 2026-05-03 "))
+        assert r.status_code == 201, r.text
+        assert (r.json()["invoice_date"], r.json()["due_date"]) == ("2026-05-03", "2026-06-02")
+
+    def test_the_screen_door_honours_the_period_lock(self):
+        """The line-detail door never checked the lock on the bill's own date
+        (only the DC door checked its earliest DC)."""
+        db, cli = TestEveryDoorEveryReader()._world()
+        db["period_locks"].insert_one({"month": 5, "year": 2026})
+        r = cli.post(_URL, json=_services(invoice_date="2026-05-03"))
+        assert r.status_code == 423, r.text
+        r = _door(cli, "V1", **_cash_flow_bill())
+        assert r.status_code == 423, r.text
+        assert db["vendor_bills"].count_documents({}) == 0
+
+    def test_an_undated_bill_already_booked_turns_the_check_red(self):
+        """Bills booked before this fix: '' (r3's own blank), a dd/mm/yyyy date,
+        and no date field at all. No month window places them, so they are on
+        no return -- the check now names them in every month until fixed. A
+        properly dated June bill stays out of May's check."""
+        db = TestCreditLeftOffEveryReturnIsFlagged()._world()
+        heads = {"vendor_id": "V1", "taxable_amount": 1000, "tax_amount": 180, "cgst_total": 0.0,
+                 "sgst_total": 0.0, "igst_total": 180.0, "recipient_entity_id": "E1",
+                 "recipient_gstin": BUY_JH, "status": "OUTSTANDING"}
+        db["vendor_bills"].insert_many(
+            [
+                {**heads, "bill_id": "u1", "bill_number": "FR-9", "bill_date": "", "invoice_date": ""},
+                {**heads, "bill_id": "u2", "bill_number": "FR-10", "bill_date": "09/05/2026"},
+                {**heads, "bill_id": "u3", "bill_number": "FR-11"},
+                {**heads, "bill_id": "j1", "bill_number": "JUN-1", "bill_date": "2026-06-02"},
+            ]
+        )
+        for entity in (None, "E1"):
+            xc = _crosscheck(db, entity)
+            row = _row(xc, "Input credit left off GSTR-3B")
+            assert row["status"] == "MISMATCH" and row["variance"] == 540.0, row
+            assert all(n in row["note"] for n in ("FR-9", "FR-10", "FR-11"))
+            assert "JUN-1" not in row["note"]
+            assert xc["gstr3b"]["itc"]["total"] == 0.0

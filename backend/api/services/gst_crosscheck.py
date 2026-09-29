@@ -648,7 +648,8 @@ def build_crosscheck(
                 note=(
                     "%d booked bill(s) carry this input credit but no GSTIN's "
                     "GSTR-3B counts it: the bill has no company, no tax heads, "
-                    "or our GST number on it is no shop's. Correct those bills "
+                    "no date written YYYY-MM-DD (listed every month until "
+                    "corrected), or our GST number on it is no shop's. Correct those bills "
                     "before filing: %s"
                     % (n, ", ".join(str(x) for x in (unplaced.get("bill_numbers") or [])[:20]))
                     if n

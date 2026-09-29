@@ -59,6 +59,11 @@ class VendorBillCreate(BaseModel):
     def _normalize_bill_kind(cls, v):
         return ap_engine.normalize_bill_kind(v)
 
+    @field_validator("bill_date", mode="before")
+    @classmethod
+    def _iso_bill_date(cls, v):
+        return ap_engine.iso_bill_date(v)
+
 
 class VendorPaymentCreate(BaseModel):
     amount: float = Field(..., gt=0)  # cash actually paid to the vendor
