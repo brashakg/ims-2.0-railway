@@ -28,8 +28,11 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
+  MAX_BARS_MM,
+  MIN_INFO_MM,
   code128Modules,
   getLabelOffsetMm,
+  labelProblem,
   printUnitLabels,
   setLabelOffsetMm,
   testLabelDocument,
@@ -159,6 +162,51 @@ describe('the barcode', () => {
     expect(modules - (Number(last.getAttribute('x')) + Number(last.getAttribute('width')))).toBe(10);
     // ...and the whole symbol fits the 70 mm window.
     expect(widthMm).toBeLessThan(70);
+  });
+});
+
+describe('a barcode a label cannot carry', () => {
+  // A returned piece re-shelved with no barcode, or a typed one with a
+  // character Code 128 lacks, used to print a label with NO bars and an empty
+  // text line -- and IMS recorded it as printed. A barcode too long for the
+  // window crushed the text away (20 chars) or cut the stop pattern (26).
+  it('names the problem for an empty, non-ASCII or over-long barcode', () => {
+    expect(labelProblem('')).toBe('No barcode');
+    expect(labelProblem('   ')).toBe('No barcode');
+    expect(labelProblem('RB₹5154')).toMatch(/characters/);
+    expect(labelProblem('ABCDEFGHIJKLMNOPQRST')).toMatch(/too long/); // 20 chars: 68.8 mm of bars
+    expect(labelProblem('ABCDEFGHIJKLMNOPQRSTUVWXYZ')).toMatch(/too long/);
+  });
+
+  it('accepts every barcode IMS mints (receipt, BC- fallback, EAN-13)', () => {
+    expect(labelProblem('BV--91FA3858')).toBe('');
+    expect(labelProblem('BC-ABCDEFABCDEF')).toBe(''); // the widest: 15 letters
+    expect(labelProblem('2000000012345')).toBe('');
+  });
+
+  it('opens no print dialog for a batch holding one, and says which', () => {
+    const open = vi.spyOn(window, 'open');
+    const r = printUnitLabels([CARRERA, { ...CARRERA, barcode: '' }]);
+    expect(r.method).toBe('failed');
+    expect(r.message).toMatch(/no barcode/i);
+    expect(open).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
+
+  it('never renders a label without bars', () => {
+    expect(() => unitLabelsDocument([{ ...CARRERA, barcode: '' }])).toThrow();
+  });
+
+  it('keeps the text its room beside the widest accepted barcode', () => {
+    const html = unitLabelsDocument([{ ...CARRERA, barcode: 'BC-ABCDEFABCDEF' }]);
+    const bars = parseFloat(parse(html).querySelector('.win svg')!.getAttribute('width')!);
+    expect(bars).toBeLessThanOrEqual(MAX_BARS_MM);
+    // The window's own CSS: 70 mm wide, 1 mm right padding, 1.5 mm gap.
+    const win = html.match(/\.win\s*{([^}]*)}/)![1];
+    expect(win).toMatch(/width:\s*70mm/);
+    expect(win).toMatch(/gap:\s*1\.5mm/);
+    expect(win).toMatch(/padding:\s*0\.8mm 1mm 0\.8mm 0/);
+    expect(70 - 1 - 1.5 - bars).toBeGreaterThanOrEqual(MIN_INFO_MM);
   });
 });
 

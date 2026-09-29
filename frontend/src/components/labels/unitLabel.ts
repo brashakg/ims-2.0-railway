@@ -21,6 +21,14 @@ export const PRINTABLE_MM = 70;
 /** Narrowest bar: 2 dots of a 203 dpi head. */
 const MODULE_MM = (2 * 25.4) / 203;
 const QUIET_MODULES = 10;
+/** Inside the window: its right padding, and the gap between bars and text. */
+const WIN_PAD_RIGHT_MM = 1;
+const GAP_MM = 1.5;
+/** Room the text beside the bars keeps (brand + model, colour / size, MRP). */
+export const MIN_INFO_MM = 12;
+/** Widest bar block (quiet zones included) that leaves the text its room. The
+ *  longest unit barcode IMS mints (the 15-character BC- fallback) is 55.05 mm. */
+export const MAX_BARS_MM = PRINTABLE_MM - WIN_PAD_RIGHT_MM - GAP_MM - MIN_INFO_MM;
 const OFFSET_KEY = 'ims.unitLabel.offsetMm';
 
 export interface UnitLabelData {
@@ -64,13 +72,22 @@ export function code128Modules(value: string): string {
   return (out.encodings ?? []).map((e) => e.data).join('');
 }
 
-function barcodeSvg(value: string, heightMm: number): string {
-  let bars: string;
+/** Why this barcode cannot go on a label ('' when it can). A label whose bars
+ *  do not carry the unit's barcode must never print, nor be recorded as sent. */
+export function labelProblem(barcode: string): string {
+  if (!String(barcode ?? '').trim()) return 'No barcode';
+  let modules: number;
   try {
-    bars = code128Modules(value);
+    modules = code128Modules(barcode).length;
   } catch {
-    return '';
+    return 'Barcode has characters a label cannot carry';
   }
+  return (modules + 2 * QUIET_MODULES) * MODULE_MM > MAX_BARS_MM ? 'Barcode too long for the label' : '';
+}
+
+/** Throws on a barcode Code 128 cannot carry: callers check labelProblem first. */
+function barcodeSvg(value: string, heightMm: number): string {
+  const bars = code128Modules(value);
   const quiet = '0'.repeat(QUIET_MODULES);
   const m = quiet + bars + quiet;
   const rects: string[] = [];
@@ -127,7 +144,7 @@ body { font-family: Arial, Helvetica, sans-serif; }
 .lbl { position: relative; width: ${LABEL_WIDTH_MM}mm; height: ${LABEL_HEIGHT_MM}mm; overflow: hidden; }
 .lbl + .lbl { break-before: page; page-break-before: always; }
 .win { position: absolute; top: 0; width: ${PRINTABLE_MM}mm; height: ${LABEL_HEIGHT_MM}mm; overflow: hidden;
-  display: flex; align-items: center; gap: 1.5mm; padding: 0.8mm 1mm 0.8mm 0; }
+  display: flex; align-items: center; gap: ${GAP_MM}mm; padding: 0.8mm ${WIN_PAD_RIGHT_MM}mm 0.8mm 0; }
 .win.outline { border: 0.25mm solid #000; }
 .code { flex: none; text-align: center; }
 .code svg { display: block; }
@@ -161,9 +178,15 @@ export function testLabelDocument(): string {
   );
 }
 
-/** Open the Windows print dialog for these units' labels. */
+/** Open the Windows print dialog for these units' labels -- or refuse the
+ *  whole batch, opening nothing, when any unit's barcode cannot be printed. */
 export function printUnitLabels(units: UnitLabelData[]): PrintResult {
-  return printHtmlFallback(unitLabelsDocument(units));
+  const bad = units.find((u) => labelProblem(u.barcode));
+  if (bad) {
+    return { method: 'failed', message: `${labelProblem(bad.barcode)} (${bad.barcode || 'a unit'}): no label printed.` };
+  }
+  const r = printHtmlFallback(unitLabelsDocument(units));
+  return r.method === 'html' ? r : { ...r, message: `${r.message} Allow pop-ups for IMS and try again.` };
 }
 
 export function printTestLabel(): PrintResult {

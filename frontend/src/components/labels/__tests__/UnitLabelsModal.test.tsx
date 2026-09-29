@@ -8,6 +8,20 @@
 // open ONE print dialog with exactly those units' labels, and barcode_printed
 // is recorded on exactly the units sent -- never when the dialog did not open.
 
+// This Node/jsdom runner ships a partial localStorage: the repo's Map stand-in.
+(() => {
+  const m = new Map<string, string>();
+  const ls = {
+    getItem: (k: string) => (m.has(k) ? m.get(k)! : null),
+    setItem: (k: string, v: string) => { m.set(k, String(v)); },
+    removeItem: (k: string) => { m.delete(k); },
+    clear: () => { m.clear(); },
+    key: (i: number) => Array.from(m.keys())[i] ?? null,
+    get length() { return m.size; },
+  };
+  Object.defineProperty(globalThis, 'localStorage', { value: ls, configurable: true, writable: true });
+})();
+
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render as rtlRender, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import type { ReactElement } from 'react';
@@ -122,6 +136,53 @@ describe('the units view (from the stock ledger)', () => {
     expect(apiMock.markBarcodePrinted).not.toHaveBeenCalled();
   });
 
+  it('offers no label for a shelved unit with no barcode, and never records one', async () => {
+    // A return re-shelves a piece as a fresh unit; a historical one has no
+    // barcode. Its "label" had no bars and IMS still recorded it as printed.
+    apiMock.getUnits.mockResolvedValue({ units: [unit(1, { barcode: '' }), unit(2)], total: 2 });
+    render(<UnitLabelsModal productId="P1" title="x" onClose={() => {}} />);
+    const bare = (await screen.findByText('No barcode')).closest('tr')!;
+    expect(within(bare).getByRole('checkbox')).toBeDisabled();
+    expect(within(bare).queryByRole('button', { name: /reprint/i })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('checkbox', { name: /select every unit/i }));
+    fireEvent.click(screen.getByRole('button', { name: /print 1 label$/i }));
+    expect(printedBarcodes()).toEqual(['BV--00000002']);
+    await waitFor(() => expect(apiMock.markBarcodePrinted).toHaveBeenCalledWith(['STK-2']));
+  });
+
+  it('says "Sent to print", never "Printed" (a cancelled print dialog cannot be seen)', async () => {
+    apiMock.getUnits.mockResolvedValue({ units: [unit(1), unit(2, { barcode_printed: true })], total: 2 });
+    render(<UnitLabelsModal productId="P1" title="x" onClose={() => {}} />);
+    const sent = (await screen.findByText('BV--00000002')).closest('tr')!;
+    expect(within(sent).getByText('Sent to print')).toBeInTheDocument();
+    fireEvent.click(
+      within(screen.getByText('BV--00000001').closest('tr')!).getByRole('button', { name: /reprint/i }),
+    );
+    const first = screen.getByText('BV--00000001').closest('tr')!;
+    expect(await within(first).findByText('Sent to print')).toBeInTheDocument();
+    expect(screen.queryByText(/^Printed$/)).not.toBeInTheDocument();
+  });
+
+  it('shows a transferred-in unit by its transfer, not the source shop receipt', async () => {
+    apiMock.getUnits.mockResolvedValue({
+      units: [
+        unit(1, {
+          source: 'TRANSFER',
+          grn_number: 'RCPT/1',
+          transfer_number: 'TRF/BV-DHN-02/0001',
+          from_store_id: 'BV-DHN-02',
+          received_on: '2026-09-29',
+        }),
+      ],
+      total: 1,
+    });
+    render(<UnitLabelsModal productId="P1" storeId="BV-BOK-01" title="x" onClose={() => {}} />);
+    const row = (await screen.findByText('BV--00000001')).closest('tr')!;
+    expect(within(row).getByText('Transfer TRF/BV-DHN-02/0001 from BV-DHN-02')).toBeInTheDocument();
+    expect(within(row).queryByText('RCPT/1')).not.toBeInTheDocument();
+    expect(within(row).getByText('2026-09-29')).toBeInTheDocument();
+  });
+
   it('offers no print door to a role that cannot record labels', async () => {
     roles.current = ['SALES_STAFF'];
     apiMock.getUnits.mockResolvedValue({ units: [unit(1)], total: 1 });
@@ -142,6 +203,26 @@ describe('the dialog after receiving (grn door)', () => {
     expect(printedBarcodes()).toEqual(['BV--00000001', 'BV--00000002', 'BV--00000003']);
     await waitFor(() => expect(apiMock.markBarcodePrinted).toHaveBeenCalledWith(['STK-1', 'STK-2', 'STK-3']));
     expect(toastMock.success).toHaveBeenCalled();
+  });
+
+  it('pre-selects only the units whose label was never sent (a re-accepted receipt)', async () => {
+    // First accept shelved 3 units and printed their labels; the held line was
+    // catalogued and "Add to stock" shelved 2 more. Re-labelling the first 3
+    // puts duplicate barcodes in the shop.
+    apiMock.getUnits.mockResolvedValue({
+      units: [
+        unit(1, { barcode_printed: true }),
+        unit(2, { barcode_printed: true }),
+        unit(3, { barcode_printed: true }),
+        unit(4),
+        unit(5),
+      ],
+      total: 5,
+    });
+    render(<UnitLabelsModal grnId="GRN-9" title="Print stock labels?" onClose={() => {}} />);
+    fireEvent.click(await screen.findByRole('button', { name: /print 2 labels/i }));
+    expect(printedBarcodes()).toEqual(['BV--00000004', 'BV--00000005']);
+    await waitFor(() => expect(apiMock.markBarcodePrinted).toHaveBeenCalledWith(['STK-4', 'STK-5']));
   });
 
   it('says there is nothing to print instead of a fake success', async () => {

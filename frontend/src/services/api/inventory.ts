@@ -448,6 +448,10 @@ export interface StockUnit {
   status: string;
   grn_number: string;
   source: string;
+  /** Set when a transfer re-homed the unit here (source TRANSFER). */
+  transfer_number?: string;
+  from_store_id?: string;
+  /** IST day it arrived at THIS shop (a transfer's receipt day, else minting). */
   received_on: string;
   barcode_printed: boolean;
   location_code: string;

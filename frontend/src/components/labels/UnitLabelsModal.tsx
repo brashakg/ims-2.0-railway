@@ -7,6 +7,8 @@
 // the label print doors: the selected units, every unit just received, or a
 // reprint of one. All of them go through the ONE label renderer (unitLabel.ts)
 // and record barcode_printed on exactly the units sent to the print dialog.
+// A browser cannot tell whether that dialog was then cancelled, so the record
+// reads "Sent to print", never "Printed".
 
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
@@ -15,7 +17,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { inventoryApi, type StockUnit } from '../../services/api/inventory';
 import type { UserRole } from '../../types';
-import { printUnitLabels } from './unitLabel';
+import { labelProblem, printUnitLabels } from './unitLabel';
 
 /** Mirrors the POST /inventory/units/barcode-printed gate (_INVENTORY_ROLES). */
 const LABEL_ROLES: UserRole[] = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER', 'WORKSHOP_STAFF'];
@@ -32,6 +34,8 @@ const STATUS_TEXT: Record<string, string> = {
 
 /** A unit still physically in the shop -- the only kind worth a label. */
 const inShop = (u: StockUnit) => u.status === 'AVAILABLE' || u.status === 'RESERVED';
+/** ...and only when its barcode can actually go on the label. */
+const labelable = (u: StockUnit) => inShop(u) && !labelProblem(u.barcode);
 
 const money = (n: number) => `₹${n.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
 
@@ -70,8 +74,13 @@ export function UnitLabelsModal({ productId, storeId: shopId, grnId, title, subt
         );
         if (!alive) return;
         setUnits(res.units || []);
-        // After receiving, every piece just shelved is what needs a label.
-        if (grnId) setSelected(new Set((res.units || []).filter(inShop).map((u) => u.stock_id)));
+        // After receiving, every piece just shelved whose label was never sent
+        // (a receipt accepted twice must not label its first units again).
+        if (grnId) {
+          setSelected(
+            new Set((res.units || []).filter((u) => labelable(u) && !u.barcode_printed).map((u) => u.stock_id)),
+          );
+        }
       } catch {
         if (alive) setFailed(true);
       }
@@ -85,7 +94,7 @@ export function UnitLabelsModal({ productId, storeId: shopId, grnId, title, subt
     if (batch.length === 0) return;
     const result = printUnitLabels(batch);
     if (result.method !== 'html') {
-      toast.error(`${result.message} Allow pop-ups for IMS and try again.`);
+      toast.error(result.message);
       return;
     }
     const ids = batch.map((u) => u.stock_id);
@@ -93,9 +102,9 @@ export function UnitLabelsModal({ productId, storeId: shopId, grnId, title, subt
     try {
       await inventoryApi.markBarcodePrinted(ids);
       setUnits((cur) => (cur || []).map((u) => (ids.includes(u.stock_id) ? { ...u, barcode_printed: true } : u)));
-      toast.success(`${ids.length} label${ids.length === 1 ? '' : 's'} opened in the print dialog.`);
+      toast.success(`${ids.length} label${ids.length === 1 ? '' : 's'} sent to the print dialog.`);
     } catch {
-      toast.warning('Labels opened in the print dialog, but IMS could not record them as printed.');
+      toast.warning('Labels sent to the print dialog, but IMS could not record them.');
     } finally {
       setBusy(false);
     }
@@ -109,17 +118,20 @@ export function UnitLabelsModal({ productId, storeId: shopId, grnId, title, subt
       return next;
     });
 
-  const printable = (units || []).filter(inShop);
+  const printable = (units || []).filter(labelable);
   const chosen = printable.filter((u) => selected.has(u.stock_id));
   const showCost = (units || []).some((u) => u.cost_price !== undefined);
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={onClose}>
+    <div
+      className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+      onClick={onClose}
+      role="dialog"
+      aria-label={title}
+    >
       <div
         className="bg-white rounded-xl shadow-2xl w-full max-w-3xl max-h-[92dvh] flex flex-col"
         onClick={(e) => e.stopPropagation()}
-        role="dialog"
-        aria-label={title}
       >
         <div className="px-5 py-4 border-b border-gray-200 flex items-start justify-between gap-3">
           <div className="min-w-0">
@@ -180,7 +192,7 @@ export function UnitLabelsModal({ productId, storeId: shopId, grnId, title, subt
                           <input
                             type="checkbox"
                             aria-label={`Select ${u.barcode}`}
-                            disabled={!inShop(u)}
+                            disabled={!labelable(u)}
                             checked={selected.has(u.stock_id)}
                             onChange={() => toggle(u.stock_id)}
                           />
@@ -188,17 +200,27 @@ export function UnitLabelsModal({ productId, storeId: shopId, grnId, title, subt
                       )}
                       <td className="py-2 pr-3 font-mono text-gray-900">{u.barcode}</td>
                       <td className="py-2 pr-3 text-gray-600">
-                        {u.grn_number || (u.source === 'OPENING_STOCK' ? 'Opening stock' : '-')}
+                        {u.source === 'TRANSFER'
+                          ? `Transfer ${u.transfer_number || ''}${u.from_store_id ? ` from ${u.from_store_id}` : ''}`
+                          : u.grn_number || (u.source === 'OPENING_STOCK' ? 'Opening stock' : '-')}
                       </td>
                       <td className="py-2 pr-3">{STATUS_TEXT[u.status] || u.status}</td>
                       <td className="py-2 pr-3 text-gray-600">{u.received_on || '-'}</td>
-                      <td className="py-2 pr-3 text-gray-600">{u.barcode_printed ? 'Printed' : 'Not printed'}</td>
+                      <td className="py-2 pr-3 text-gray-600">
+                        {inShop(u) && labelProblem(u.barcode) ? (
+                          <span className="text-amber-700">{labelProblem(u.barcode)}</span>
+                        ) : u.barcode_printed ? (
+                          'Sent to print'
+                        ) : (
+                          'Not printed'
+                        )}
+                      </td>
                       {showCost && (
                         <td className="py-2 pr-3 text-right">{u.cost_price != null ? money(u.cost_price) : '-'}</td>
                       )}
                       {canPrint && (
                         <td className="py-2 text-right">
-                          {inShop(u) && (
+                          {labelable(u) && (
                             <button
                               type="button"
                               onClick={() => print([u])}
