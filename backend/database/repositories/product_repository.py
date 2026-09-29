@@ -45,9 +45,22 @@ class StockReleaseResult(NamedTuple):
 class ProductRepository(BaseRepository):
     """Repository for Product operations"""
 
-    # Tokenized-search fields. `barcode` is ADDITIVE (Catalog Manager scanner
-    # passthrough): it can only ADD matches for existing callers, never remove.
-    SEARCH_FIELDS = ("brand", "model", "sku", "variant", "barcode")
+    # Tokenized search: EVERY whitespace token must hit at least one field.
+    # NAME fields match ANYWHERE and ignore spaces/hyphens (audit F21): the
+    # model number off a vendor's list is the END of 'CA 8895', Ray-Ban is
+    # typed 'ray ban' or 'rayban', and the colour word lives under attributes.
+    # CODE fields match from their START -- a scanned barcode or a typed SKU
+    # is its beginning. Both only ADD to the old all-prefix rule.
+    NAME_SEARCH_FIELDS = (
+        "brand",
+        "model",
+        "color",
+        "attributes.frame_color",
+        "attributes.lens_colour",
+        "attributes.colour_name",
+    )
+    CODE_SEARCH_FIELDS = ("sku", "variant", "barcode")
+    SEARCH_FIELDS = NAME_SEARCH_FIELDS + CODE_SEARCH_FIELDS
 
     @property
     def entity_name(self) -> str:
@@ -179,6 +192,28 @@ class ProductRepository(BaseRepository):
             filter["created_by"] = created_by
         return filter
 
+    def _product_search_query(self, text: str, extra: Dict) -> Dict:
+        """The one product search query -- shared by the list and its count so
+        the two can never drift. ponytail: unanchored regex scans the
+        collection; fine at catalogue size, a text index if it ever is not."""
+        clauses = []
+        for tok in (text or "").split():
+            code = {"$regex": "^" + re.escape(tok), "$options": "i"}
+            ors = [{f: code} for f in self.CODE_SEARCH_FIELDS]
+            letters = [c for c in tok if c != "-"]
+            if letters:
+                name = {
+                    "$regex": r"[\s\-]*".join(re.escape(c) for c in letters),
+                    "$options": "i",
+                }
+                ors += [{f: name} for f in self.NAME_SEARCH_FIELDS]
+            clauses.append({"$or": ors})
+        if not clauses:
+            return extra
+        if extra:
+            clauses.append(extra)
+        return {"$and": clauses}
+
     def search_products(
         self,
         query: str,
@@ -189,10 +224,10 @@ class ProductRepository(BaseRepository):
         skip: int = 0,
         limit: int = 100,
     ) -> List[Dict]:
-        return self.search(
-            query,
-            list(self.SEARCH_FIELDS),
-            self._search_extra_filter(category, is_active, created_by),
+        return self.find_many(
+            self._product_search_query(
+                query, self._search_extra_filter(category, is_active, created_by)
+            ),
             skip=skip,
             limit=limit,
         )
@@ -205,10 +240,10 @@ class ProductRepository(BaseRepository):
         is_active: Optional[bool] = True,
         created_by: Optional[str] = None,
     ) -> int:
-        return self.search_count(
-            query,
-            list(self.SEARCH_FIELDS),
-            self._search_extra_filter(category, is_active, created_by),
+        return self.count(
+            self._product_search_query(
+                query, self._search_extra_filter(category, is_active, created_by)
+            )
         )
 
     def cataloguer_stats(self) -> List[Dict]:
