@@ -57,7 +57,12 @@ def _match(doc, flt):
                     if value not in operand:
                         return False
                 elif op == "$gte":
-                    if value is None or not (value >= operand):
+                    # Mongo brackets comparisons by BSON type: a string bound
+                    # never matches a Date field (and vice versa). The old fake
+                    # compared across types and hid F45.
+                    if value is None or type(value) is not type(operand):
+                        return False
+                    if not (value >= operand):
                         return False
                 else:
                     raise AssertionError(f"unsupported operator {op}")
@@ -71,7 +76,13 @@ class _FakeCursor:
         self._docs = list(docs)
 
     def sort(self, key, direction=-1):
-        self._docs.sort(key=lambda d: d.get(key) or "", reverse=direction == -1)
+        # Mongo sorts mixed BSON types by type (strings before dates) rather
+        # than raising, so the fake orders by (is-date, value) too.
+        def _key(d):
+            v = d.get(key) or ""
+            return (isinstance(v, datetime), v)
+
+        self._docs.sort(key=_key, reverse=direction == -1)
         return self
 
     def limit(self, n):
@@ -124,8 +135,9 @@ def _grns():
             "po_number": "PO-9",
             "store_id": "S1",
             "status": "ACCEPTED",
-            "created_at": _iso(5),
-            "accepted_at": _iso(5),
+            # BaseRepository._add_timestamps writes a BSON datetime (F45).
+            "created_at": _NOW - timedelta(days=5),
+            "accepted_at": _NOW - timedelta(days=5),
             "items": [
                 {"product_id": "P1", "accepted_qty": 4, "received_qty": 4},
                 {"product_id": "P2", "accepted_qty": 0, "received_qty": 2},
@@ -389,8 +401,8 @@ def test_skip_limit_paging_and_has_more():
 
 def test_days_window_excludes_old_events(monkeypatch):
     old = _grns()
-    old[0]["created_at"] = _iso(200)
-    old[0]["accepted_at"] = _iso(200)
+    old[0]["created_at"] = _NOW - timedelta(days=200)
+    old[0]["accepted_at"] = _NOW - timedelta(days=200)
     db = _db(grns=_FakeColl(old))
     monkeypatch.setattr(inv, "_get_db", lambda: db)
     res = _run(days=90)
@@ -511,3 +523,36 @@ def test_rbac_row_mirrors_stock_row():
     assert row is not None
     assert row["allowed"] == "AUTHENTICATED"
     assert row.get("store_scoped") is True
+
+
+# ---------------------------------------------------------------------------
+# F45 (audit 2026-09-29): receipts vanished from Movements
+# ---------------------------------------------------------------------------
+
+
+def test_f45_receipt_with_bson_datetime_created_at_is_listed():
+    """grn_repo.create() stamps created_at as a BSON datetime; the collector
+    filtered with an ISO STRING, so no receipt ever matched and Movements said
+    '+0 Total Stock In'. Today's receipt must be a RECEIVED row."""
+    res = _run(user=_S1_MANAGER)
+    received = [e for e in res["items"] if e["type"] == "RECEIVED"]
+    assert [e["ref"] for e in received] == ["GRN-1"]
+    assert received[0]["qty"] == 4
+    assert res["sources"]["grns"] == "ok"
+
+
+def test_f45_legacy_iso_string_receipt_still_listed():
+    """A legacy row whose created_at is an ISO string keeps matching."""
+    res = _run(user=_ADMIN)
+    assert any(e["ref"] == "GRN-3" for e in res["items"])
+
+
+def test_f45_po_number_is_not_prefixed_twice(monkeypatch):
+    """po_number already carries its 'PO/' prefix -- never 'against PO PO/...'."""
+    grns = _grns()
+    grns[0]["po_number"] = "PO/S1/26-27/0001"
+    db = _db(grns=_FakeColl(grns))
+    monkeypatch.setattr(inv, "_get_db", lambda: db)
+    res = _run(user=_S1_MANAGER)
+    detail = next(e["detail"] for e in res["items"] if e["ref"] == "GRN-1")
+    assert detail == "GRN GRN-1 against PO/S1/26-27/0001"
