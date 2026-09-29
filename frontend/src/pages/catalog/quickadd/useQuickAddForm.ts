@@ -551,7 +551,7 @@ export function useQuickAddForm() {
           // (Review mode never reaches handleSubmit — it has its own fork.)
           const payload = buildProductPayload(values);
           const reorderNum = Number(reorderLevel);
-          await productApi.updateProduct(editMode.id, {
+          const updated = await productApi.updateProduct(editMode.id, {
             brand: payload.brand,
             model: payload.model,
             attributes: payload.attributes,
@@ -570,8 +570,11 @@ export function useQuickAddForm() {
               ? { reorder_point: reorderNum }
               : {}),
           });
+          // Finishing a product releases the units receipts held for it.
+          const released = Number((updated as { released_units?: number })?.released_units) || 0;
           toast.success(
-            editMode.sku ? `Updated ${editMode.sku} — same SKU, no new product.` : 'Product updated.'
+            (editMode.sku ? `Updated ${editMode.sku} — same SKU, no new product.` : 'Product updated.') +
+              (released ? ` ${released} held unit(s) are now on the shelf.` : '')
           );
           navigate(`/catalog?focus=${encodeURIComponent(editMode.id)}`);
           return;

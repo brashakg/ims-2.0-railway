@@ -1910,6 +1910,17 @@ def _build_pim_doc(
             "sku": parent.get("sku"),
         }
         doc["ecom"]["locally_modified"] = False
+    if spine.get("provisional"):
+        # Ordered before it was catalogued (ruling 13): the cataloguer's work.
+        # It sits in the Needs-review queue (count, badge and list all read
+        # needs_review; the catalog population excludes it) until it is
+        # finished, and names its spine so the queue opens the spine editor --
+        # it already HAS a billing row, so the import "approve" path does not
+        # apply. mirror_update_to_catalog_twin clears the flag when it is
+        # finished. No is_active here: a twin never carries a projected flag
+        # (the drawer's spine sync relies on that, test_variant_of_rule).
+        doc["needs_review"] = True
+        doc["spine_product_id"] = spine.get("product_id")
     return doc
 
 
@@ -2826,6 +2837,10 @@ def mirror_update_to_catalog_twin(
         ):
             if key in patch:
                 cat_patch[key] = patch[key]
+        if patch.get("provisional") is False:
+            # A finished provisional draft leaves the Needs-review queue it
+            # entered at the PO door (_build_pim_doc).
+            cat_patch["needs_review"] = False
         if "tags" in patch:
             # The dot-path form of set_twin_tags: same field, same normaliser.
             cat_patch["ecom.seo.tags"] = normalise_tags(patch["tags"])
@@ -3374,5 +3389,11 @@ def restamp_on_update(current: Dict[str, Any], patch: Dict[str, Any]) -> Dict[st
     merged = {**(current or {}), **(patch or {})}
     status, gaps = compute_catalog_status(merged)
     if status == CATALOG_STATUS_ACTIVE:
-        return {"catalog_status": CATALOG_STATUS_ACTIVE, "done_gaps": []}
+        fields = {"catalog_status": CATALOG_STATUS_ACTIVE, "done_gaps": []}
+        if (current or {}).get("provisional") and (patch or {}).get("is_active") is not False:
+            # Ordered before it was catalogued: born inactive ONLY because it
+            # was incomplete (normalise_payload), so finishing it is what makes
+            # it sellable. An is_active False sent in the same save wins.
+            fields.update({"is_active": True, "provisional": False})
+        return fields
     return {"catalog_status": CATALOG_STATUS_DRAFT, "done_gaps": gaps}

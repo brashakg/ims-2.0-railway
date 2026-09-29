@@ -271,7 +271,15 @@ export function CatalogManagerPage({
           limit: PAGE_SIZE,
         });
         const docs = (res?.products || []) as unknown as Array<Record<string, unknown>>;
-        setItems(docs.map((doc) => ({ kind: 'imported' as const, doc })));
+        setItems(
+          docs.map((doc) =>
+            // A manager's typed-in draft (audit C1) already HAS its billing
+            // row: it opens in the product editor, never the import approve.
+            doc.spine_product_id
+              ? { kind: 'spine' as const, doc: { ...doc, product_id: doc.spine_product_id } }
+              : { kind: 'imported' as const, doc }
+          )
+        );
         setTotal(Number(res?.total ?? docs.length));
       }
     } catch (e: unknown) {
@@ -782,7 +790,8 @@ export function CatalogManagerPage({
                   const mrp = docMrp(doc);
                   const offer = docOffer(doc);
                   const hasDiscount = mrp !== null && offer !== null && offer < mrp;
-                  const inactive = doc.is_active === false;
+                  const orderedDraft = Boolean(doc.spine_product_id);
+                  const inactive = doc.is_active === false && !orderedDraft;
                   const needsReview = it.kind === 'imported' && Boolean(doc.needs_review);
                   const hasPhoto = doc.has_photo as boolean | undefined;
                   const online = doc.online as OnlineState | undefined;
@@ -801,13 +810,15 @@ export function CatalogManagerPage({
                     >
                       {segment === 'review' && (
                         <td className="px-3 py-2 align-middle">
-                          <input
-                            type="checkbox"
-                            checked={selected.has(pid)}
-                            onChange={() => toggleSelect(pid)}
-                            className="h-3.5 w-3.5 accent-amber-500"
-                            aria-label={`Select ${name}`}
-                          />
+                          {orderedDraft ? null : (
+                            <input
+                              type="checkbox"
+                              checked={selected.has(pid)}
+                              onChange={() => toggleSelect(pid)}
+                              className="h-3.5 w-3.5 accent-amber-500"
+                              aria-label={`Select ${name}`}
+                            />
+                          )}
                         </td>
                       )}
                       <td className="px-3 py-2 align-middle">
@@ -832,6 +843,10 @@ export function CatalogManagerPage({
                             {needsReview ? (
                               <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700">
                                 <AlertTriangle className="h-3 w-3" /> Needs review
+                              </span>
+                            ) : orderedDraft ? (
+                              <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700">
+                                <AlertTriangle className="h-3 w-3" /> Ordered — finish it
                               </span>
                             ) : inactive ? (
                               <span className="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-500">

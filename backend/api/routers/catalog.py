@@ -1623,8 +1623,13 @@ async def list_catalog_products(
         active_bool = is_active in ("true", "True")
         products = [p for p in products if p.get("is_active") == active_bool]
 
-    # Sort by created date (imported docs coalesce to migrated_at)
-    products.sort(key=_catalog_sort_key, reverse=True)
+    # Sort by created date (imported docs coalesce to migrated_at). A review
+    # row with a spine is a manager's typed-in draft (audit C1): stock is, or
+    # soon will be, waiting on it, so it leads the Needs-review list.
+    products.sort(
+        key=lambda p: (bool(p.get("spine_product_id")), _catalog_sort_key(p)),
+        reverse=True,
+    )
 
     total = len(products)
     start = (page - 1) * limit
