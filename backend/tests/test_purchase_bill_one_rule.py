@@ -508,6 +508,16 @@ class TestEveryDoorEveryReader:
         assert _crosscheck(db, "E1")["gstr3b"]["itc"]["total"] == 280.0
         assert _crosscheck(db, "E2")["gstr3b"]["itc"]["total"] == 50.0
 
+        # The Purchase Invoices list is the fourth reader: it listed only the
+        # screen's bills (3 rows, tax 150). A transfer mirror is not a bill.
+        db["vendor_bills"].insert_one(
+            {"bill_id": "m1", "bill_number": "TRF/T1", "source_transfer_id": "T1", "bill_date": "2026-05-10",
+             "tax_amount": 500, "recipient_entity_id": "E1", "status": "OUTSTANDING"}
+        )
+        rows = cli.get(_URL).json()["purchase_invoices"]
+        assert sorted(r["bill_number"] for r in rows) == ["A-1", "B-1", "C-1", "FR-9"]
+        assert round(sum(r["tax_amount"] for r in rows), 2) == 330.0
+
 
 class TestCreditLeftOffEveryReturnIsFlagged:
     def _world(self):
@@ -886,3 +896,140 @@ class TestABillIsDatedOrRefused:
             assert all(n in row["note"] for n in ("FR-9", "FR-10", "FR-11"))
             assert "JUN-1" not in row["note"]
             assert xc["gstr3b"]["itc"]["total"] == 0.0
+
+
+class TestTheFormsShopDecidesPreviewAndBooking:
+    """LOW-MEDIUM: the form sends store_id, the schema dropped it, and both
+    calls read the shop from the token -- so a shop switched in another tab
+    between the preview and Book stored a different GSTIN and tax head."""
+
+    def _world(self):
+        db = _FakeDB()
+        db.collections["entities"][0]["gstins"].append({"gstin": BUY_MH, "state_code": "27"})
+        db.collections["stores"] = [
+            {"store_id": "S1", "entity_id": "E1", "state_code": "20", "gstin": BUY_JH},
+            {"store_id": "PUNE", "entity_id": "E1", "state_code": "27", "gstin": BUY_MH},
+        ]
+        return db
+
+    @staticmethod
+    def _as(cli, active):
+        async def _u():
+            return {"user_id": "u1", "roles": ["ACCOUNTANT"], "store_ids": ["S1", "PUNE"],
+                    "active_store_id": active}
+
+        cli.app.dependency_overrides[get_current_user] = _u
+
+    def test_a_shop_switched_between_preview_and_book_changes_nothing(self):
+        db = self._world()
+        cli = _app(db)
+        body = _services(store_id="S1", lines=[{"description": "Freight", "qty": 3, "unit_price": 333.37, "gst_rate": 12}])
+        self._as(cli, "S1")
+        pv = cli.post(f"{_URL}/preview", json=body)
+        assert pv.status_code == 200, pv.text
+        self._as(cli, "PUNE")  # the other tab switched shop
+        doc = cli.post(_URL, json=body)
+        assert doc.status_code == 201, doc.text
+        pv, doc = pv.json(), doc.json()
+        _same_split(pv, doc)
+        assert doc["recipient_gstin"] == BUY_JH and doc["interstate"] is True
+        assert doc["igst_total"] == 120.01
+
+    def test_a_shop_the_user_cannot_act_for_is_refused(self):
+        db = self._world()
+        cli = _app(db)  # store_ids ["S1"]
+        for url in (f"{_URL}/preview", _URL):
+            r = cli.post(url, json=_services(store_id="PUNE"))
+            assert r.status_code == 403, r.text
+        assert db.collections["vendor_bills"] == []
+
+
+class TestACompanyWithNoGstNumberFailsLoud:
+    """MEDIUM: E1's company master lists no GSTIN; its shops S1 (20...) and
+    PUNE (27...) do. The bill booked with recipient_gstin None as CGST 90 +
+    SGST 90, and GSTR-3B then placed it on BOTH shops' returns (360 claimed
+    for 180 of tax)."""
+
+    def test_every_door_refuses_and_names_the_fix(self):
+        db, cli = TestEveryDoorEveryReader()._world()
+        db["entities"].update_one({"entity_id": "E1"}, {"$set": {"gstins": []}})
+        db["stores"].insert_one({"store_id": "PUNE", "entity_id": "E1", "state_code": "27", "gstin": BUY_MH})
+        for r in (
+            cli.post(f"{_URL}/preview", json=_services()),
+            cli.post(_URL, json=_services()),
+            _door(cli, "V1", **_cash_flow_bill()),
+        ):
+            assert r.status_code == 422, r.text
+            detail = r.json()["detail"]
+            assert detail["code"] == "RECIPIENT_COMPANY_HAS_NO_GSTIN"
+            assert "Better Vision" in detail["message"]
+        assert db["vendor_bills"].count_documents({}) == 0
+
+
+class TestTheDebitNoteReversesTheBillsHead:
+    """LOW-MEDIUM: the RTV debit note decided the head from the vendor's
+    TYPED state; the bill from its GSTIN only (none = intra). An unregistered
+    vendor typed as Maharashtra returning goods from S1 reversed IGST 120 on
+    a bill booked CGST + SGST."""
+
+    SELLER = {"entity_id": "E1", "name": "Better Vision", "gstin": BUY_JH, "state_code": "20"}
+    LINE = [{"description": "Frame", "qty": 1, "unit_cost": 1000, "gst_rate": 12}]
+
+    @pytest.mark.parametrize(
+        "vendor",
+        [
+            {"vendor_id": "VN", "name": "Local Fitter", "state_code": "27", "address": {"state_code": "27"}},
+            {"vendor_id": "V1", "name": "Mumbai Lens House", "gstin": SUP_MH, "state_code": "27"},
+            {"vendor_id": "V2", "name": "Ranchi Optics", "gstin": SUP_JH, "state_code": "27"},
+        ],
+    )
+    def test_the_note_and_the_bill_take_one_head(self, vendor):
+        from api.services.purchase_invoice_engine import classify_supply
+        from api.services.rtv_debit_note import build_debit_note
+
+        note = build_debit_note({"store_id": "S1"}, vendor, self.LINE, "DN/1", seller=self.SELLER)
+        bill = classify_supply(vendor.get("gstin"), BUY_JH)
+        assert note["is_inter_state"] is bill["interstate"], vendor
+        t = note["totals"]
+        assert t["tax_paise"] == 12000
+        assert (t["igst_paise"] == 12000) is bill["interstate"]
+
+    @pytest.mark.parametrize("shop_gstin", [None, BUY_JH, BUY_MH])
+    def test_the_notes_gstin_is_the_one_the_bill_was_received_on(self, shop_gstin):
+        """A shop with no GSTIN on its record: the bill receives on the
+        company's primary (IGST from a Maharashtra supplier); the note read
+        the shop's blank and reversed CGST + SGST. A shop carrying the
+        company's Maharashtra number: both take that number (intra)."""
+        from api.routers.rtv_debit_notes import _load_seller
+        from api.services.purchase_invoice_engine import classify_supply
+        from api.services.rtv_debit_note import build_debit_note
+
+        db = _FakeDB()
+        db.collections["entities"][0]["gstins"] = [
+            {"gstin": BUY_JH, "state_code": "20", "is_primary": True},
+            {"gstin": BUY_MH, "state_code": "27"},
+        ]
+        db.collections["stores"] = [{"store_id": "S1", "entity_id": "E1", "state_code": "20", "gstin": shop_gstin}]
+        recipient = pi_router._bill_recipient(db, "S1", None)["recipient_gstin"]
+        vendor = {"vendor_id": "V1", "name": "Mumbai Lens House", "gstin": SUP_MH}
+        note = build_debit_note({"store_id": "S1"}, vendor, self.LINE, "DN/1", seller=_load_seller(db, "S1", None))
+        assert note["seller"]["gstin"] == recipient == (shop_gstin or BUY_JH)
+        assert note["is_inter_state"] is classify_supply(SUP_MH, recipient)["interstate"] is (shop_gstin != BUY_MH)
+
+
+class TestTheGrnDraftNamesTheCatalogueProduct:
+    def test_a_grn_draft_takes_the_name_and_hsn_its_po_lacks(self):
+        """The from-GRN draft calling the bare lines_from_grn (no catalogue
+        fallback) survived every suite; only the DC door pinned it."""
+        db = _FakeDB()
+        db.collections["products"] = [{"product_id": "P1", "name": "Carrera CA 8895 807", "hsn_code": "9003"}]
+        grn = {"grn_id": "G1", "po_id": "PO1", "vendor_id": "V1", "store_id": "S1", "status": "ACCEPTED",
+               "items": [{"product_id": "P1", "accepted_qty": 2}]}
+        po = {"po_id": "PO1", "items": [{"product_id": "P1", "unit_price": 1000.0, "tax_rate": 5.0}]}
+        cli = _app(db)
+        pi_router.get_grn_repository = lambda: _StubRepo(grn)
+        pi_router.get_purchase_order_repository = lambda: _StubRepo(po)
+        r = cli.get(f"{_URL}/from-grn/G1")
+        assert r.status_code == 200, r.text
+        (ln,) = r.json()["lines"]
+        assert (ln["description"], ln["hsn"], ln["qty"]) == ("Carrera CA 8895 807", "9003", 2)

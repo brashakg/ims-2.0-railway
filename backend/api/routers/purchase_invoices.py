@@ -67,6 +67,7 @@ from ..dependencies import (
     get_purchase_order_repository,
     get_grn_repository,
     get_audit_repository,
+    validate_store_access,
 )
 from ..services import ap_engine
 from ..services import landed_cost as lc
@@ -126,6 +127,11 @@ class PurchaseInvoiceCreate(BaseModel):
     # or place-of-supply field: the tax head is the supplier's GSTIN state vs
     # this GSTIN's state, nothing a client calls "place of supply" (F6).
     recipient_gstin: Optional[str] = None
+    # The shop the form was filled at (a bill with no receipt is that shop's
+    # company's). Sent by the preview AND the booking, so a shop switched in
+    # another tab between the two cannot move the bill; the token's active
+    # shop only when absent. Checked by validate_store_access (403).
+    store_id: Optional[str] = None
     tds: float = Field(0, ge=0)
     itc_eligible: bool = True
     # GST reverse charge (RCM): when True this is an inward supply on which the
@@ -179,6 +185,7 @@ class PurchaseInvoicePreview(BaseModel):
     grn_id: Optional[str] = None
     linked_dc_ids: Optional[List[str]] = None
     recipient_gstin: Optional[str] = None
+    store_id: Optional[str] = None  # see PurchaseInvoiceCreate.store_id
 
 
 def _clean(doc: dict) -> dict:
@@ -1092,7 +1099,8 @@ def _bill_recipient(
     another company's number, would move the credit and the tax head); else
     the SHOP's own registration when its company holds it (a Pune shop
     carrying the company's Maharashtra number receives on it, as its purchase
-    order already does); else the company's PRIMARY. A shop stamped with a
+    order already does); else the company's PRIMARY; refused (422) when the
+    company holds no GSTIN at all. A shop stamped with a
     registration from another state is the owner's open bill-follows-store
     question -- this follows the shop's own record and does not answer it
     (test_gst_one_engine pins it).
@@ -1175,13 +1183,25 @@ def _bill_recipient(
                 + ". Check our GSTIN as printed on the supplier's bill.",
             )
         return {"recipient_entity_id": entity_id, "recipient_gstin": gstin}
-    shop_gstin = str(shop.get("gstin") or "").strip().upper()
-    return {
-        "recipient_entity_id": entity_id,
-        "recipient_gstin": shop_gstin
-        if shop_gstin in held
-        else _entity_gstin_for_state(entity, None),
-    }
+    if not held:
+        # Booked with no GSTIN, the bill counted on EVERY return of the
+        # company (gst_itc._itc_match keeps a GSTIN-less bill company-wide):
+        # 180 of tax was claimed as 360 across two shops' filings.
+        _refuse_recipient(
+            "RECIPIENT_COMPANY_HAS_NO_GSTIN",
+            f"{name} has no GST number in the company master, so this bill "
+            "cannot be put on a GST return. Add the company's GSTIN "
+            "(Settings, companies), then record the bill again.",
+        )
+    return {"recipient_entity_id": entity_id, "recipient_gstin": _shop_gstin(entity, shop)}
+
+
+def _shop_gstin(entity: Optional[dict], shop: Optional[dict]) -> Optional[str]:
+    """The GSTIN a shop receives on: its own registration when its company
+    holds it, else the company's primary. The bill's recipient and the RTV
+    debit note's seller (which reverses that bill's credit) both read it."""
+    own = str((shop or {}).get("gstin") or "").strip().upper()
+    return own if own in _registrations(entity) else _entity_gstin_for_state(entity, None)
 
 
 def _vendor_gstin(db, vendor: Optional[dict], vendor_id: str) -> Optional[str]:
@@ -1199,15 +1219,26 @@ def _vendor_gstin(db, vendor: Optional[dict], vendor_id: str) -> Optional[str]:
         return None
 
 
-def _bill_math(db, vendor, vendor_id, receipt_store_id, recipient_gstin, active_store_id, lines):
+def _bill_math(db, vendor, body, grn_doc, current_user):
     """Everything a booking stores about tax: (supplier GSTIN, recipient,
     computed invoice). POST / books it and POST /preview shows it through this
-    one call, so the form cannot preview one tax head, split or paisa and the
-    ledger store another (F6 / F40)."""
-    supplier_gstin = _vendor_gstin(db, vendor, vendor_id)
-    recipient = _bill_recipient(db, receipt_store_id, recipient_gstin, active_store_id)
+    one call on the same body, so the form cannot preview one tax head, split
+    or paisa and the ledger store another (F6 / F40) -- nor another shop: the
+    shop is the form's own store_id, never whichever the token names by the
+    time Book is pressed. A receipt's shop decides a receipt's bill, so the
+    form's shop is only checked (403) when it is the one that counts."""
+    supplier_gstin = _vendor_gstin(db, vendor, body.vendor_id)
+    receipt_store = _receipt_store_id(db, grn_doc, body.linked_dc_ids)
+    recipient = _bill_recipient(
+        db,
+        receipt_store,
+        body.recipient_gstin,
+        None if receipt_store else validate_store_access(body.store_id, current_user),
+    )
     computed = pinv.compute_invoice(
-        lines, supplier_gstin, recipient.get("recipient_gstin")
+        [ln.model_dump() for ln in body.lines],
+        supplier_gstin,
+        recipient.get("recipient_gstin"),
     )
     return supplier_gstin, recipient, computed
 
@@ -1619,13 +1650,7 @@ async def create_purchase_invoice(
     # as the buyer's state stored a Maharashtra supplier's IGST bill as
     # CGST+SGST.
     supplier_gstin, recipient, computed = _bill_math(
-        db,
-        vendor,
-        body.vendor_id,
-        _receipt_store_id(db, grn_doc, body.linked_dc_ids),
-        body.recipient_gstin,
-        current_user.get("active_store_id"),
-        [ln.model_dump() for ln in body.lines],
+        db, vendor, body, grn_doc, current_user
     )
 
     # Reconcile a client-supplied grand total against the server math.
@@ -2009,13 +2034,7 @@ async def preview_purchase_invoice(
         grn_repo = get_grn_repository()
         grn_doc = grn_repo.find_by_id(body.grn_id) if grn_repo is not None else None
     supplier_gstin, recipient, computed = _bill_math(
-        db,
-        vendor,
-        body.vendor_id,
-        _receipt_store_id(db, grn_doc, body.linked_dc_ids),
-        body.recipient_gstin,
-        current_user.get("active_store_id"),
-        [ln.model_dump() for ln in body.lines],
+        db, vendor, body, grn_doc, current_user
     )
     return {
         "vendor_gstin": supplier_gstin,
@@ -2068,13 +2087,16 @@ async def list_purchase_invoices(
     # same gate as the create/approve writes, instead of any authenticated user.
     current_user: dict = Depends(require_roles(*_AP_ROLES)),
 ):
-    """List first-class purchase invoices (doc_type=PURCHASE_INVOICE), newest
-    first. Header-only legacy bills are excluded from this view. Filterable by
+    """List every supplier bill, newest first: the screen's line-detail
+    invoices AND the Cash Flow '+ bill' door's header-only bills -- the same
+    bills the ITC register and GSTR-3B count (listing only doc_type
+    PURCHASE_INVOICE showed 3 rows and Rs 150 where they read Rs 330). A
+    stock-transfer mirror is not a supplier bill and stays out. Filterable by
     vendor / status / unmatched (no PO or GRN link)."""
     db = _get_db()
     if db is None:
         return {"purchase_invoices": [], "total": 0}
-    flt: dict = {"doc_type": "PURCHASE_INVOICE"}
+    flt: dict = {"source_transfer_id": None}
     if vendor_id:
         flt["vendor_id"] = vendor_id
     if status:

@@ -108,10 +108,15 @@ def _load_seller(db, store_id: Optional[str], entity_id: Optional[str]) -> dict:
             ent = db.get_collection("entities").find_one({"entity_id": eid}) or {}
         except Exception:  # noqa: BLE001
             ent = {}
+    # The GSTIN the returned goods' bill was received on (the bill rule's own
+    # _shop_gstin): the note reverses that bill's credit, so its head is
+    # decided on the same two GSTINs. Legacy single-gstin masters fall back.
+    from .purchase_invoices import _shop_gstin
+
     return {
         "entity_id": eid,
         "name": ent.get("legal_name") or ent.get("name") or store.get("name") or "",
-        "gstin": (ent.get("gstin") or store.get("gstin") or ""),
+        "gstin": _shop_gstin(ent, store) or ent.get("gstin") or store.get("gstin") or "",
         "state_code": ent.get("state_code") or store.get("state_code") or "",
         "address": ent.get("address") or store.get("address") or "",
     }
