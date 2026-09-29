@@ -764,10 +764,11 @@ async def list_all_integrations(current_user: dict = Depends(get_current_user)):
 # ============================================================================
 # ONLINE-STORE SYNC HEALTH (SUPERADMIN tile -- council D10)
 # ============================================================================
-# Read-only diagnostic for the IMS <-> online-store (BVI/Shopify) bridge:
-# last successful Shopify sync, count of pending online-stock reconcile diffs
-# (reuses the /catalog/online-stock-reconcile logic), and failed/skipped
-# inbound webhook counts. Fully fail-soft -> zeros when data is absent.
+# Read-only diagnostic for the IMS <-> online-store (Shopify) bridge: last
+# successful Shopify sync, failed/skipped inbound webhook counts, drift and
+# catalog parity (online_sync_health.sync_health). No oversell count: that is
+# decided per Shopify location against a live level, on the reconciliation
+# screen and the Stock Tally. Fully fail-soft -> zeros when data is absent.
 
 
 def _sync_health_db():

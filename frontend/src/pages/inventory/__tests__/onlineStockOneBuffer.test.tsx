@@ -40,5 +40,8 @@ describe('the online vs in-store reconciliation screen', () => {
     expect((onlineStockApi.reconcile as any).mock.calls[0][0]).toEqual({ store_id: undefined });
     expect(screen.queryByLabelText(/safety buffer/i)).toBeNull();
     expect(await screen.findByText(/minus the safety buffer \(2\)/)).toBeInTheDocument();
+    // Round 7: the backend's number is 0 for a blocked or retired product
+    // whatever the shelf holds; the subtitle says so. Drop the clause -> fails.
+    expect(screen.getByText(/0 for a product a SUPERADMIN blocked from online sale or IMS no longer sells/)).toBeInTheDocument();
   });
 });

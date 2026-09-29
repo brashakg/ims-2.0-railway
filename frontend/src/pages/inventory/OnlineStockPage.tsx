@@ -5,7 +5,8 @@
 // Shopify read via the IMS catalog mapping) per SKU, location by location,
 // flags overselling risk, and shows what IMS sends to the website
 // ("Recommended": each mapped shop's shelf minus the Shopify integration's
-// safety buffer -- the writer's own number; this page has no second buffer).
+// safety buffer, and 0 for a product blocked from online sale or no longer
+// sold -- the writer's own number; this page has no second buffer).
 
 import { useCallback, useEffect, useState } from 'react';
 import { RefreshCcw, Loader2, AlertTriangle, CheckCircle2, ShoppingCart } from 'lucide-react';
@@ -70,7 +71,7 @@ export default function OnlineStockPage() {
           <RefreshCcw className="w-4 h-4" /> Refresh
         </button>
       </div>
-      <p className="text-sm text-gray-500 mb-4">Stops you selling the same item online and in-store. "Recommended" = what IMS sends to the website: each shop's shelf minus the safety buffer{typeof s.safety_buffer === 'number' ? ` (${s.safety_buffer})` : ''}, for the shops mapped to a Shopify location.</p>
+      <p className="text-sm text-gray-500 mb-4">Stops you selling the same item online and in-store. "Recommended" = what IMS sends to the website: each shop's shelf minus the safety buffer{typeof s.safety_buffer === 'number' ? ` (${s.safety_buffer})` : ''}, for the shops mapped to a Shopify location, and 0 for a product a SUPERADMIN blocked from online sale or IMS no longer sells.</p>
 
       {data && data.online_configured === false && (
         <div className="flex items-center gap-2 text-sm rounded-lg px-3 py-2 border bg-blue-50 border-blue-200 text-blue-800 mb-4">
