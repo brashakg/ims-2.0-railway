@@ -47,8 +47,13 @@ export function BarcodeManagementModal({
     }
   }, [isOpen, currentGtin]);
 
+  // An emptied box on a product that HAS a GTIN removes it (a wrong code,
+  // say the neighbouring frame's box, must not keep going to Shopify/Google).
+  const code = barcode.trim();
+  const removing = !code && !!currentGtin;
+
   const handleSave = async () => {
-    if (!barcode.trim()) {
+    if (!code && !removing) {
       setError("Type the barcode printed on the manufacturer's box");
       return;
     }
@@ -57,7 +62,7 @@ export function BarcodeManagementModal({
     setError(null);
 
     try {
-      await productApi.updateProduct(productId, { attributes: { gtin: barcode.trim() } });
+      await productApi.updateProduct(productId, { attributes: { gtin: code } });
       setSuccess(true);
       onSaved?.();
       setTimeout(() => {
@@ -125,14 +130,15 @@ export function BarcodeManagementModal({
             {success && (
               <p className="text-sm text-green-600 mt-1 flex items-center gap-1">
                 <CheckCircle className="w-4 h-4" />
-                Barcode saved successfully!
+                {removing ? 'Barcode removed.' : 'Barcode saved successfully!'}
               </p>
             )}
           </div>
 
           <p className="text-sm text-gray-600">
             The 8, 12, 13 or 14-digit code printed on the maker&apos;s box. It is kept for
-            reference and goes to Shopify and Google with the next website push. IMS scans and
+            reference and goes to Shopify and Google with the next website push; empty the box to
+            remove a wrong one. IMS scans and
             labels each unit with its own IMS barcode, minted when the stock is received.
           </p>
         </div>
@@ -148,10 +154,10 @@ export function BarcodeManagementModal({
           </button>
           <button
             onClick={handleSave}
-            disabled={isSaving || !barcode.trim()}
+            disabled={isSaving || (!code && !removing)}
             className="btn-primary disabled:opacity-50"
           >
-            {isSaving ? 'Saving...' : 'Save Barcode'}
+            {isSaving ? 'Saving...' : removing ? 'Remove Barcode' : 'Save Barcode'}
           </button>
         </div>
       </div>

@@ -80,4 +80,24 @@ describe('Manage Barcode (manufacturer UPC / EAN only)', () => {
     expect(await screen.findByText(detail)).toBeInTheDocument();
     expect(onSaved).not.toHaveBeenCalled();
   });
+
+  it('removes a wrong saved GTIN when the box is emptied', async () => {
+    // A valid-but-wrong GTIN (the neighbouring frame's box) could only be
+    // overwritten, never removed, so it kept going to Shopify and Google.
+    updateProduct.mockResolvedValue({});
+    const onSaved = renderModal('4006381333931');
+    fireEvent.change(screen.getByLabelText(/manufacturer barcode/i), { target: { value: '' } });
+    const remove = screen.getByRole('button', { name: /remove barcode/i });
+    expect(remove).toBeEnabled();
+    fireEvent.click(remove);
+    await waitFor(() =>
+      expect(updateProduct).toHaveBeenCalledWith('P-42', { attributes: { gtin: '' } }),
+    );
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
+  });
+
+  it('has nothing to save when no GTIN was saved and the box is empty', () => {
+    renderModal('');
+    expect(screen.getByRole('button', { name: /save barcode/i })).toBeDisabled();
+  });
 });
