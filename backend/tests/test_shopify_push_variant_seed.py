@@ -249,8 +249,9 @@ def test_seed_rows_carry_price_compare_at_sku_and_barcode():
     # restricted distribution). It must NOT be published as a public GTIN --
     # Shopify republishes that field into the Google/Meta Shopping feeds. This
     # assertion used to expect "2000000000017"; the 2,032 draft pushes of
-    # 2026-07-20 carried exactly that shape, which is the leak now closed.
-    assert "barcode" not in row
+    # 2026-07-20 carried exactly that shape, which is the leak now closed. It
+    # is sent EMPTY (not omitted), so a stale barcode on Shopify is cleared.
+    assert row["barcode"] == ""
     assert rows[0]["option_values"] == []  # nothing to create; update-only
     assert rows[0]["key"] == ("", "")  # matches Shopify's "Default Title"
 

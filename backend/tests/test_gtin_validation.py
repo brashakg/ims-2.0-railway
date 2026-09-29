@@ -277,7 +277,7 @@ def test_repo_still_allows_clearing_a_gtin():
 # ---------------------------------------------------------------------------
 
 
-def test_push_omits_the_barcode_when_the_stored_gtin_is_junk():
+def test_push_sends_an_empty_barcode_when_the_stored_gtin_is_junk():
     from api.services.shopify_push import build_variant_price_inputs
 
     rows, _ = build_variant_price_inputs(
@@ -285,7 +285,8 @@ def test_push_omits_the_barcode_when_the_stored_gtin_is_junk():
         [{"shopify_variant_id": "gid://shopify/ProductVariant/1", "gtin": TAG_STRING}],
     )
     assert len(rows) == 1
-    assert "barcode" not in rows[0]
+    # Sent EMPTY, never the junk: an omitted key left Shopify's old barcode.
+    assert rows[0]["barcode"] == ""
 
 
 def test_push_sends_a_valid_barcode():
@@ -329,4 +330,24 @@ def test_push_never_leaks_our_internal_store_barcode_as_a_gtin():
         },
         [{"sku": "P1-A"}],
     )
-    assert "barcode" not in rows[0]["row"]
+    assert rows[0]["row"]["barcode"] == ""
+
+
+def test_a_cleared_gtin_clears_the_barcode_on_shopify():
+    """Clearing the GTIN in IMS must reach Shopify. Both push builders used to
+    OMIT the barcode key when there was no publishable GTIN, and
+    productVariantsBulkUpdate leaves an omitted field as it was -- so the old
+    barcode (and Google's feed value) stayed after IMS cleared it."""
+    from api.services.shopify_push import (
+        build_variant_price_inputs,
+        build_variant_seed_rows,
+    )
+
+    cleared = {"sku": "P1", "mrp": 5000, "offer_price": 4000, "gtin": None}
+    rows, _ = build_variant_price_inputs(
+        cleared,
+        [{"shopify_variant_id": "gid://shopify/ProductVariant/1", "gtin": ""}],
+    )
+    assert rows[0]["barcode"] == ""
+    seed = build_variant_seed_rows(cleared, [])
+    assert seed[0]["row"]["barcode"] == ""
