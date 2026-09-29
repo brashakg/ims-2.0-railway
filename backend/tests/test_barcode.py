@@ -10,6 +10,8 @@ from __future__ import annotations
 import os
 import re
 import sys
+import threading
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -61,12 +63,67 @@ def test_mint_is_store_prefix_plus_counter():
     assert mint_unit_barcode(db, "WO-DHN-01") == "WO0000000002"
 
 
-def test_two_shops_sharing_a_prefix_never_collide():
-    """Every BV shop shares 'BV'; the chain-wide counter keeps codes unique."""
-    db = _FakeDB()
-    codes = [mint_unit_barcode(db, s) for s in ("BV-DHN-02", "BV-BOK-01") * 50]
-    assert len(set(codes)) == 100
+class _AtomicOnlyCounter:
+    """A counter store shaped like MongoDB: find_one_and_update is ONE atomic
+    step, but a separate read and write are not (the read yields, as a network
+    round trip does). A minter that reads the counter and then writes it back
+    races here, exactly as it would on the real database."""
+
+    def __init__(self):
+        self.docs = {}
+        self._lock = threading.Lock()
+
+    def find_one_and_update(self, flt, update, upsert=False, return_document=None):
+        with self._lock:
+            cur = dict(self.docs.get(flt["_id"], {"_id": flt["_id"], "seq": 0}))
+            cur["seq"] += update["$inc"]["seq"]
+            self.docs[flt["_id"]] = cur
+            return dict(cur)
+
+    def find_one(self, flt, *a, **k):
+        doc = self.docs.get(flt["_id"])
+        time.sleep(0.001)
+        return dict(doc) if doc else None
+
+    def update_one(self, flt, update, upsert=False, **k):
+        cur = self.docs.setdefault(flt["_id"], {"_id": flt["_id"], "seq": 0})
+        cur.update(update.get("$set") or {})
+        for key, n in (update.get("$inc") or {}).items():
+            cur[key] = cur.get(key, 0) + n
+
+
+def test_parallel_receipts_at_two_shops_never_collide():
+    """Every BV shop shares 'BV', so uniqueness is the body alone. Receipts at
+    two shops run AT THE SAME TIME (8 threads released together); every code
+    must still be distinct AND come from the chain-wide counter (1..200 with no
+    gap) -- a code from the random fallback would hide a broken counter."""
+    counter = _AtomicOnlyCounter()
+
+    class _DB:
+        def get_collection(self, name):
+            assert name == "counters"
+            return counter
+
+    db, per_thread, shops = _DB(), 25, ("BV-DHN-02", "BV-BOK-01") * 4
+    start = threading.Barrier(len(shops))
+    codes, codes_lock = [], threading.Lock()
+
+    def receive(shop):
+        start.wait()
+        minted = [mint_unit_barcode(db, shop) for _ in range(per_thread)]
+        with codes_lock:
+            codes.extend(minted)
+
+    threads = [threading.Thread(target=receive, args=(s,)) for s in shops]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(codes) == len(shops) * per_thread
+    assert len(set(codes)) == len(codes), "two parallel receipts minted one code"
     assert all(re.fullmatch(r"BV\d{10}", c) for c in codes)
+    assert sorted(int(c[2:]) for c in codes) == list(range(1, len(codes) + 1))
 
 
 def test_no_counter_still_mints_a_scannable_code():
