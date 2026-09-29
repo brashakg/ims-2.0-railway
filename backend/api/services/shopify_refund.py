@@ -1503,21 +1503,27 @@ def _restock_booked(
 def _hold_returned_qty(order: Dict[str, Any], lines: List[Any], refund_id: str) -> Optional[_Held]:
     """Book each restock line on its order line through the counter return
     door's own atomic claim (returns._claim_returnable_qty, with this
-    refund's mark). All or nothing: None when a line has no returnable unit
-    left or this refund already restocked it (another door just did); the
-    claims already taken are released."""
+    refund's mark). ONE claim per order line, for all its units: a refund
+    may list a line twice (a partly fulfilled line refunded in full: its
+    "cancel" and its "return"), and the mark books a line for a refund once.
+    All or nothing: None when a line has no returnable unit left or this
+    refund already restocked it (another door just did); the claims already
+    taken are released."""
     from ..routers.returns import _claim_returnable_qty, _order_line_index, _resolve_original_line
 
     idx = _order_line_index(order)
-    held: _Held = []
+    want: Dict[int, Tuple[Dict[str, Any], float, str]] = {}
     for line in lines:
         orig = _resolve_original_line(line, idx) if line.restock else None
-        if orig is None:
-            continue
-        if not _claim_returnable_qty(order.get("order_id"), orig, float(line.return_qty), refund_id):
+        if orig is not None:
+            qty = want.get(id(orig), (orig, 0.0, ""))[1] + float(line.return_qty)
+            want[id(orig)] = (orig, qty, str(line.product_id or ""))
+    held: _Held = []
+    for orig, qty, pid in want.values():
+        if not _claim_returnable_qty(order.get("order_id"), orig, qty, refund_id):
             _release_unlanded(order, held, {}, refund_id)
             return None
-        held.append((orig, float(line.return_qty), str(line.product_id or "")))
+        held.append((orig, qty, pid))
     return held
 
 

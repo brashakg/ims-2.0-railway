@@ -1193,6 +1193,40 @@ def test_goods_back_on_a_row_confirmed_before_the_line_marks_restocks_nothing(sw
     assert _minted(swept) == ["AVAILABLE"], "one frame, one unit"
 
 
+def _same_line_twice(rid, oid):
+    """Shopify's refund of a partly fulfilled line in full: the unit it never
+    shipped as a "cancel" line and the shipped one as a "return" line -- one
+    order line listed twice in one refund."""
+    r = _refund(rid, oid, amount="1998.00")
+    cancel = r["refund_line_items"][0]
+    r["refund_line_items"].append({**cancel, "id": cancel["id"] + 1, "restock_type": "return"})
+    return r
+
+
+@pytest.mark.parametrize("door", ["auto", "confirm", "goods_back"])
+def test_a_refund_that_lists_one_line_twice_restocks_each_unit_once(swept, monkeypatch, door):
+    """The refund books its line once, for both units: booked per refund line,
+    the second found the refund's own mark from the first, restocked nothing
+    and was reported as restocked by another door -- both frames stranded SOLD."""
+    oid, rid = 60190, 700390
+    doc = _book(swept, oid, line_items=[{**_frame_order(oid)["line_items"][0], "quantity": 2}])
+    _claim_unit(swept, doc)
+    swept["stock_repo"].units.append({**swept["stock_repo"].units[0], "stock_id": "stk-2"})
+    if door == "auto":
+        monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "1")
+    shopify_refund.handle_shopify_refund(swept["db"], _same_line_twice(rid, oid), webhook_id=None,
+                                         topic="refunds/create")
+    row = swept["review"].find_one({"shopify_refund_id": str(rid)})
+    if door == "confirm":
+        assert _confirm(row)["result"]["restock_applied"] is True
+    elif door == "goods_back":
+        assert _goods_back(row)["result"]["status"] == "restocked"
+
+    assert _units(swept) == [("stk-1", "AVAILABLE"), ("stk-2", "AVAILABLE")]
+    line = _doc(swept, oid)["items"][0]
+    assert (line.get("returned_qty"), line.get("restocked_refunds")) == (2, {str(rid): 2})
+
+
 # ---------------------------------------------------------------------------
 # Ruling 1 leaves a fulfilled online order SHIPPED (it used to be DELIVERED).
 # Every report that picks orders by status reads the ONE pair of sets in
