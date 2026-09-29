@@ -1072,6 +1072,29 @@ def test_tick_a_refreshed_task_keeps_every_sku_still_owed():
     assert out["tasks"]["closed"] == [] and _tasks(db)[0]["status"] == "OPEN"
 
 
+def test_tick_the_task_text_names_every_sku_that_keeps_it_open():
+    """Round 5, the panel's input: the test above carried on. Night 2's text
+    must name SKU-2 (owed, INV_2 null) beside SKU-1's drift. Nights 3-7:
+    SKU-1 compares clean, INV_2 stays null -- the task stays OPEN because of
+    SKU-2 alone, so the refreshed text names SKU-2, no longer claims SKU-1
+    drifted, and payload.skus is SKU-2 only. Drop the owed line (`if owed:`)
+    -> SKU-2 is nowhere in the text -> fails; stop refreshing on a night
+    with no drift (`if drift:`) -> night 3 closes the task -> fails."""
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 5, "BV-B": 0}})
+    _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 0, LOC_B: 0}})))
+    _run(sp.run_parity_tick(db, graphql=_partial({INV_1: {LOC_A: 5, LOC_B: 1}})))
+    text = _tasks(db)[0]["description"]
+    assert "SKU-1 (IMS 1 vs Shopify 5)" in text and "not compared tonight" in text and "SKU-2" in text
+    for _night in range(3, 8):
+        out = _run(sp.run_parity_tick(db, graphql=_partial({INV_1: {LOC_A: 1, LOC_B: 1}})))
+        assert out["tasks"] == {"filed": [], "refreshed": ["BV-A"], "closed": []}
+    (task,) = _tasks(db)
+    assert task["status"] == "OPEN" and task["payload"]["skus"] == ["SKU-2"]
+    assert "not compared tonight" in task["description"] and ": SKU-2." in task["description"]
+    assert "SKU-1" not in task["description"]
+    assert "check it is still on the website" in task["description"]
+
+
 def test_a_tasks_read_failure_files_no_second_task():
     """task_triggers.active_tasks promises to RAISE on a read error, but the
     real repository's find_many swallowed it into [] -- 'no active task' --

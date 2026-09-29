@@ -29,18 +29,19 @@ In-transit units count at neither location (owner accepted): the rule reads
 the shelf, so they are in no row here either.
 
 Tasks: ONE per shop (source_ref ``shopify-stock-parity-drift:<store_id>``) --
-filed on drift, refreshed (description + payload) while the drift persists,
-completed when a later tick finds EVERY SKU the task names either compared
-clean at that shop or GONE from the online catalogue (deleted, or its Shopify
-item unmapped: nothing is left to measure, so an empty catalogue closes every
-task too). payload.skus: a SKU leaves the task only that way -- one Shopify
-skipped, that fell out of the capped sample or whose IMS side was unknown is
-still owed. A shop that leaves the mapped set (location cleared, claimed by
-two shops, shop deactivated) has its task closed on EVERY tick that could read
-the shop map, whether or not anything was compared: parity no longer compares
-it, and the writer's own STORE_UNMAPPED / STORE_LOCATION_DUPLICATE task names
-what is left. A task counts as filed / refreshed / closed only when the
-write succeeded. The pre-PR-4 POOLED task (the bare
+filed on drift, refreshed (description + payload) every night while it
+drifts or still owes a SKU, completed when a later tick finds EVERY SKU the
+task names either compared clean at that shop or GONE from the online
+catalogue (deleted, or its Shopify item unmapped: nothing is left to measure,
+so an empty catalogue closes every task too). payload.skus: a SKU leaves the
+task only that way -- one Shopify skipped, that fell out of the capped sample
+or whose IMS side was unknown is still owed, and the description names it.
+A shop that leaves the mapped set (location cleared, claimed by two shops,
+shop deactivated) has its task closed on EVERY tick that could read the shop
+map, whether or not anything was compared: parity no longer compares it, and
+the writer's own STORE_UNMAPPED / STORE_LOCATION_DUPLICATE task names what is
+left. A task counts as filed / refreshed / closed only when the write
+succeeded. The pre-PR-4 POOLED task (the bare
 ``shopify-stock-parity-drift`` ref) is never filed again;
 scripts/close_pooled_parity_task.py closes the stuck one.
 
@@ -417,21 +418,24 @@ def sync_drift_task(
     GONE (deleted, or its Shopify item unmapped): parity can never compare it
     again, so it is no longer owed.
 
-      * drift             -> refresh every ACTIVE task's description + payload,
+      * drift, or an active task still owed a SKU
+                          -> refresh every ACTIVE task's description + payload,
                              or file one when none is active (never a second);
       * 0 drift, every SKU the task names compared CLEAN tonight or is GONE
                           -> complete every active task (the drift cleared,
                              or nothing is left to measure);
-      * otherwise         -> leave it alone (unknown is not clear: a drifted
-                             SKU Shopify skipped, that fell out of the capped
-                             sample or whose IMS side was unknown is still
-                             owed).
+      * otherwise         -> leave it alone.
 
-    payload.skus carries every SKU still owed: tonight's drift plus any
-    earlier one not yet compared clean and not gone. Returns "filed" |
-    "refreshed" | "closed" only when EVERY write it made succeeded (the
-    repository returns False on a rejected write, never raises), else None.
-    Fail-soft."""
+    A SKU is still OWED when the task names it, it is still in the online
+    catalogue and it did not compare clean tonight (Shopify skipped it, it
+    fell out of the capped sample, or its IMS side was unknown): unknown is
+    not clear. payload.skus carries tonight's drift plus every SKU still
+    owed, and the description NAMES every one of them -- the text is what
+    the store manager and the admin read (no task screen shows payload), so
+    a SKU that keeps the task open is never missing from it. Returns "filed"
+    | "refreshed" | "closed" only when EVERY write it made succeeded (the
+    repository returns False / None on a rejected write, never raises), else
+    None. Fail-soft."""
     from .task_triggers import active_tasks
 
     sid = str(store.get("store_id") or "")
@@ -440,25 +444,41 @@ def sync_drift_task(
     try:
         active = active_tasks(repo, ref)
         named = {s for t in active for s in _task_skus(t)}
-        owed = (named & set(mapped_skus)) - set(summary.get("clean_skus") or [])
-        if summary.get("drift_count"):
-            worst = (summary.get("drift") or [])[:5]
-            lines = ", ".join(
-                f"{d.get('sku')} (IMS {d.get('ims')} vs Shopify {d.get('shopify')})" for d in worst
+        drift = summary.get("drift") or []
+        drifted = {d.get("sku") for d in drift}
+        owed = (named & set(mapped_skus)) - set(summary.get("clean_skus") or []) - drifted
+        if drift or (active and owed):
+            parts = []
+            if drift:
+                lines = ", ".join(
+                    f"{d.get('sku')} (IMS {d.get('ims')} vs Shopify {d.get('shopify')})" for d in drift[:5]
+                )
+                parts.append(
+                    f"{summary.get('drift_count')} online SKU(s) at {label}'s Shopify location drifted beyond "
+                    f"tolerance {summary.get('tolerance')} unit(s); worst delta "
+                    f"{summary.get('max_delta')}. Top: {lines}. The 01:00 / 09:00 IST pass and "
+                    f"Push stock re-send only numbers IMS changed, so they never undo a change "
+                    f"made on Shopify. Store manager: check each product named here on the "
+                    f"shelf, then ask an ADMIN or SUPERADMIN (only they have the button) to "
+                    f"open it and press Send to website to re-send IMS's numbers."
+                )
+            if owed:
+                parts.append(
+                    f"Still open from an earlier night, not compared tonight (Shopify returned "
+                    f"nothing for the item, it was outside tonight's sample, or IMS could not "
+                    f"read it): {', '.join(sorted(owed))}. Store manager: ask an ADMIN or "
+                    f"SUPERADMIN to open each of these and check it is still on the website, "
+                    f"then press Send to website."
+                )
+            parts.append(
+                f"This task closes on the first night every product named here compares "
+                f"clean at {label} or has left the online catalogue."
             )
-            description = (
-                f"{summary.get('drift_count')} online SKU(s) at {label}'s Shopify location "
-                f"drifted beyond tolerance {summary.get('tolerance')} unit(s); worst delta "
-                f"{summary.get('max_delta')}. Top: {lines}. The 01:00 / 09:00 IST pass and "
-                f"Push stock re-send only numbers IMS changed, so they never undo a change "
-                f"made on Shopify. Store manager: check each product named here on the "
-                f"shelf, then ask an ADMIN or SUPERADMIN (only they have the button) to "
-                f"open it and press Send to website to re-send IMS's numbers."
-            )
+            description = " ".join(parts)
             payload = {
                 "store_id": sid,
-                "drift": worst,
-                "skus": sorted(owed | {d.get("sku") for d in summary.get("drift") or []}),
+                "drift": drift[:5],
+                "skus": sorted(owed | drifted),
                 "drift_count": summary.get("drift_count"),
                 "max_delta": summary.get("max_delta"),
             }
@@ -482,7 +502,7 @@ def sync_drift_task(
             return "filed" if created else None
         # A task that names no SKU (an old payload) closes only on a night
         # that compared something at this shop.
-        if active and not owed and (named or summary.get("compared")):
+        if active and (named or summary.get("compared")):
             notes = (
                 f"Auto-closed: every SKU this task named at {label} compared clean or left "
                 f"the online catalogue ({summary.get('compared') or 0} SKU(s) compared)."
