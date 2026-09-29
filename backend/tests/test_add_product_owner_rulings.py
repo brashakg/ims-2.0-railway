@@ -156,24 +156,18 @@ def test_f12_push_refuses_a_brand_that_is_not_for_the_website():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="F13/D5: build_sku runs the parts together and drops the eye size")
 def test_f13_new_frame_gets_a_readable_sku(door):
     created = door(_form(brand="Carrera", model="CA8895", color="807",
                          attributes={"lens_size": "54"}))
     assert created["sku"] == "FR-CARRERA-CA8895-807-54"
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="F13/D5: build_sku keeps the slash and the brand's hyphen")
 def test_f13_slash_becomes_hyphen_and_punctuation_is_cleaned(door):
     created = door(_form(category="SUNGLASS", brand="Ray-Ban", model="RB 3016",
                          color="001/58"))
     assert created["sku"] == "SG-RAYBAN-RB3016-001-58"
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="F13/D5: the preview endpoint shows the run-together shape")
 def test_f13_preview_endpoint_shows_the_readable_sku():
     out = asyncio.run(pm_router.sku_preview(
         pm_router.SkuPreviewRequest(category="FR", attributes=dict(_CARRERA)),
@@ -205,12 +199,19 @@ def test_f13_guard_a_clash_still_gets_a_unique_sku(door):
         "FRAME", {"brand_name": "Carrera", "model_no": "CA8895", "colour_code": "808"}))
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="F13/D5: the /catalog door mints SKUs with its own copy "
-                          "(catalog.generate_sku), not product_master's")
-def test_f13_catalog_door_mints_the_same_sku():
-    sku = cat.generate_sku(cat.ProductCategory.FRAME, dict(_CARRERA), db=None)
-    assert sku == pm.build_sku("FRAME", dict(_CARRERA))
+def test_f13_catalog_door_mints_the_same_sku(client, auth_headers):
+    """POST /catalog/products (and its /import twin) mint through
+    product_master.mint_unique_sku -- the old catalog.generate_sku copy is gone."""
+    cat.CATALOG_PRODUCTS.clear()
+    resp = client.post(
+        "/api/v1/catalog/products",
+        json={"category": "FR", "attributes": dict(_CARRERA),
+              "pricing": {"mrp": 9000, "discount_category": "PREMIUM"}},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["product"]["sku"] == "FR-CARRERA-CA8895-807-54"
+    assert not hasattr(cat, "generate_sku")
 
 
 def test_f13_guard_existing_sku_never_changes_on_edit():

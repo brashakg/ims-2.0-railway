@@ -123,19 +123,16 @@ def test_hearing_aid_type_accepted_with_serial():
 
 
 def test_build_sku_canonical_excel_rule():
-    # Burberry sunglass model B 3142 colour 1109/71 -> SG + BURBERRY + B3142 + 1109/71
+    # Burberry sunglass model B 3142 colour 1109/71
     sku = pm.build_sku("SUNGLASS", {"brand_name": "Burberry", "model_no": "B 3142", "colour_code": "1109/71"})
-    assert sku.startswith("SG")
-    assert "BURBERRY" in sku
-    # The '/' in the colour code is PRESERVED verbatim (the legacy generate_sku
-    # truncated + stripped it; a hollow re-call of generate_sku fails here).
-    assert "1109/71" in sku
+    # Readable, separated (owner D5): the '/' in the colour code becomes '-'.
+    assert sku == "SG-BURBERRY-B3142-1109-71"
 
 
 def test_build_sku_no_truncation():
-    # Verbatim concat, not 2/4/3-char truncation.
+    # Whole parts, never the old 2/4/3-char truncation.
     sku = pm.build_sku("FRAME", _frame_attrs())
-    assert sku == "FRBURBERRYB31421109/71"
+    assert sku == "FR-BURBERRY-B3142-1109-71"
 
 
 def test_mint_unique_sku_collision_appends_counter(product_repo):

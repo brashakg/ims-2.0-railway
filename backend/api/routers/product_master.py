@@ -151,8 +151,9 @@ async def sku_preview(
     body: SkuPreviewRequest,
     current_user: dict = Depends(require_roles(*_CATALOG_ROLES)),
 ):
-    """Deterministic SKU preview per the Excel rule (PREFIX+BRAND+MODEL+COLOR+
-    SIZE). Does NOT allocate a collision counter (preview is read-only)."""
+    """The SKU a new product will get (product_master.build_sku, the one minter:
+    CATEGORY-BRAND-MODEL-COLOUR-SIZE). The Add-product form shows this before
+    saving. Does NOT allocate a collision counter (preview is read-only)."""
     try:
         sku = pm.build_sku(body.category, body.attributes)
     except pm.ProductMasterError as err:

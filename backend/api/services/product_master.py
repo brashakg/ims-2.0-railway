@@ -12,9 +12,9 @@ ONE service that unifies the two divergent product surfaces:
 WHAT THIS DELIVERS (packet PM / foundation N5):
   * A canonical category registry (long-form `FRAME` ... + short SKU prefix `FR`)
     that reconciles the two pre-existing, divergent category enums.
-  * `build_sku` -- a REWRITE of the SKU rule (PREFIX + BRAND + MODEL + COLORCODE
-    + SIZE per the Excel spec), format-PERMISSIVE for legacy SKUs (`/` and `-`
-    preserved, no length cap), atomic-counter suffix only on collision.
+  * `build_sku` -- THE SKU rule for new products, readable and separated
+    (CATEGORY-BRAND-MODEL-COLOUR-SIZE, owner D5); legacy SKUs are never
+    re-minted; atomic-counter suffix only on collision.
   * `validate_attributes` -- server-side category-conditional required-field
     validation (a Contact Lens without expiry, a Hearing Aid without serial_no,
     a Frame without colour_code are rejected -- not just on the FE wizard).
@@ -577,60 +577,39 @@ def is_known_category(category: Any) -> bool:
 
 
 # ===========================================================================
-# SKU rule (REWRITE -- NOT a wrapper of catalog.generate_sku)
+# SKU rule -- THE one minter (owner ruling 2026-09-28, D5)
 # ===========================================================================
 
 
-def _sku_segment(value: Any, *, keep_separators: bool = False) -> str:
-    """Uppercase a value, stripping spaces. Keeps `/` and `-` when asked
-    (colour codes like `1109/71` must survive verbatim per the Excel rule)."""
-    s = str(value or "").strip().upper().replace(" ", "")
-    if keep_separators:
-        return s
-    return re.sub(r"[^A-Z0-9]", "", s)
+def _sku_segment(value: Any) -> str:
+    """One SKU part: uppercase letters and digits; a `/` becomes `-`, every
+    other character (spaces, dots, the brand's own hyphen) is dropped."""
+    s = re.sub(r"[^A-Z0-9/]", "", str(value or "").upper())
+    return "-".join(p for p in s.split("/") if p)
 
 
 def build_sku(category: Any, attributes: Dict[str, Any], db=None) -> str:
-    """Mint a canonical SKU: PREFIX + BRAND + MODEL + COLORCODE + SIZE.
-
-    REWRITE of the SKU rule (the legacy catalog.generate_sku is left untouched
-    for the /catalog path). Key differences from generate_sku:
-      * verbatim concatenation per the Excel spec (no truncation to 2/4/3 chars),
-      * the colour code keeps `/` and `-` (e.g. `1109/71` stays `1109/71`),
-      * the atomic counter suffix is appended ONLY on a uniqueness collision,
-        not unconditionally.
-
-    `db` (optional) is used to allocate the collision-suffix counter atomically
-    + persistently (reuses catalog._next_sku_counter, falling back to an
-    in-memory dict when no DB). A `find_by_sku`-style dedupe is the caller's
-    responsibility; this function also resolves a collision itself when given
-    the product repo via `_resolve_collision`.
-    """
+    """Mint a NEW product's readable SKU: CATEGORY-BRAND-MODEL-COLOUR-SIZE,
+    e.g. FR-CARRERA-CA8895-807-54 (owner ruling 2026-09-28, D5). Empty parts
+    are skipped. Deterministic, so POST /products/sku-preview shows the form
+    exactly what the create door will mint; a clash gets mint_unique_sku's
+    counter suffix. Existing SKUs are never re-minted (only a create without a
+    SKU calls this). `db` is unused (kept for the callers' signature)."""
     spec = category_spec(category)
     if spec is None:
         raise ProductMasterError(
             f"Unknown product category '{category}'.", status=422, field="category"
         )
-
-    brand = _sku_segment(attributes.get("brand_name") or attributes.get("brand"))
-    model = _sku_segment(
-        attributes.get("model_no")
-        or attributes.get("model_name")
-        or attributes.get("model")
+    a = attributes or {}
+    parts = (
+        spec.prefix,
+        a.get("brand_name") or a.get("brand"),
+        a.get("model_no") or a.get("model_name") or a.get("model"),
+        a.get("colour_code") or a.get("color_code") or a.get("colour_name") or a.get("color"),
+        # A frame's eye size is `lens_size` in the registry; `size` elsewhere.
+        a.get("size") or a.get("lens_size"),
     )
-    # Colour code keeps separators (1109/71 -> 1109/71). Fall back to colour name.
-    colour = _sku_segment(
-        attributes.get("colour_code") or attributes.get("color_code"),
-        keep_separators=True,
-    )
-    if not colour:
-        colour = _sku_segment(
-            attributes.get("colour_name") or attributes.get("color"),
-            keep_separators=False,
-        )
-    size = _sku_segment(attributes.get("size"), keep_separators=True)
-
-    return f"{spec.prefix}{brand}{model}{colour}{size}"
+    return "-".join(seg for seg in map(_sku_segment, parts) if seg)
 
 
 def _next_collision_suffix(prefix: str, db=None) -> int:
