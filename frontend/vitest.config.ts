@@ -17,6 +17,10 @@ export default defineConfig({
     // 5.1-6.5s and all 1,246 passed alone at 20s. A genuine hang still fails.
     testTimeout: 15000,
     hookTimeout: 15000,
+    // Local runs share a 16 GB PC with parallel agents; an uncapped run starts a
+    // worker per core and pushed the machine past 94% memory (2026-09-29). CI
+    // (CI=true on GitHub Actions) keeps the default.
+    maxWorkers: process.env.CI ? undefined : 2,
     globals: true,
     setupFiles: ['./src/test/setup.ts'],
     include: ['src/**/*.{test,spec}.{ts,tsx}'],
