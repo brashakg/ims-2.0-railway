@@ -43,6 +43,7 @@ StrictDB + injected Shopify boundary -- no network, no production.
 
 import asyncio
 import os
+import re
 import sys
 import types
 
@@ -110,34 +111,71 @@ def _db(shelves, *, pune_units=0):
     return db
 
 
-def _shopify(levels, *, fail=False):
-    """A fake _graphql answering the levels query from {item_gid: {loc: qty}}."""
+_FIRST = re.compile(r"inventoryLevels\(first:\s*(\d+)\)")
+
+
+def _shopify(levels, *, fail=False, id_cost=None):
+    """A fake _graphql answering the levels query from {item_gid: {loc: qty}}
+    the way Shopify does: nodes in the ORDER of the ids asked, null for an id
+    it has no item for, at most `first:` level rows per item (pageInfo.
+    hasNextPage past them). It PRICES the query first, as Shopify does -- per
+    id the item (1) + the inventoryLevels connection (2) + pageInfo (1) +
+    `first:` x (level, location, quantities) (3), or `id_cost` -- and above
+    1,000 points answers MAX_COST_EXCEEDED with no data at all."""
     calls = []
+    costs = []
 
     async def gql(db, query, variables):  # noqa: ARG001
         calls.append(variables)
         if fail:
             raise RuntimeError("throttled")
-        return {
-            "data": {
-                "nodes": [
-                    {
-                        "id": gid,
-                        "inventoryLevels": {
-                            "edges": [
-                                {"node": {"location": {"id": loc}, "quantities": [{"name": "available", "quantity": q}]}}
-                                for loc, q in per.items()
-                            ]
-                        },
-                    }
-                    for gid, per in levels.items()
-                    if gid in variables["ids"]
-                ]
-            }
-        }
+        first = int(_FIRST.search(query).group(1))
+        ids = variables["ids"]
+        cost = len(ids) * (id_cost or 4 + 3 * first)
+        costs.append(cost)
+        if cost > 1000:
+            return {"errors": [{
+                "message": f"Query cost is {cost}, which exceeds the single query max cost limit (1000).",
+                "extensions": {"code": "MAX_COST_EXCEEDED", "cost": cost, "maxCost": 1000},
+            }]}
+
+        def node(gid):
+            if gid not in levels:
+                return None
+            rows = list(levels[gid].items())
+            return {"id": gid, "inventoryLevels": {
+                "pageInfo": {"hasNextPage": len(rows) > first},
+                "edges": [
+                    {"node": {"location": {"id": loc}, "quantities": [{"name": "available", "quantity": q}]}}
+                    for loc, q in rows[:first]
+                ],
+            }}
+
+        return {"data": {"nodes": [node(g) for g in ids]},
+                "extensions": {"cost": {"requestedQueryCost": cost}}}
 
     gql.calls = calls
+    gql.costs = costs
     return gql
+
+
+def _skipping(levels, skip=INV_2):
+    """Shopify answers from `levels`, except that any batch asking for `skip`
+    FAILS (a raise). With one id per batch (the `one_id_per_batch` fixture)
+    that SKU alone is unread tonight: unknown, never 0, never deleted."""
+    clean = _shopify(levels)
+
+    async def gql(db_, query, variables):
+        if skip in variables["ids"]:
+            raise RuntimeError("throttled")
+        return await clean(db_, query, variables)
+
+    return gql
+
+
+@pytest.fixture
+def one_id_per_batch(monkeypatch):
+    monkeypatch.setattr(sp, "_INV_BATCH", 1)
 
 
 def _tasks(db):
@@ -238,21 +276,66 @@ def test_levels_reader_keys_by_location_and_normalises_bare_ids():
     assert _run(sp.shopify_levels_by_item(None, [INV_1], graphql=gql)) == {INV_1: {LOC_A: 2, LOC_B: 5}}
 
 
-def test_levels_reader_is_none_when_any_batch_fails(monkeypatch):
-    """Half an answer is no answer. Revert the failed-batch `return None` to
-    `continue` -> the reader returns the other batch -> this fails (and the
-    tick would close a drifted shop's task on the half it did read)."""
-    monkeypatch.setattr(sp, "_INV_BATCH", 1)
-    seen = []
+def test_levels_reader_a_failed_batch_is_only_its_own_items_unknown(one_id_per_batch):
+    """Round 7 P1: a failed batch fails only itself. INV_2's batch raises:
+    INV_1 is read, INV_2 is ABSENT (unknown -- never a level, never None).
+    Only a read with NO batch answered is None. Put back the whole-read
+    `return None` on a failed batch -> None -> fails (and every SKU on the
+    Stock Tally and the reconciliation screen goes listed-unknown)."""
+    gql = _skipping({INV_1: {LOC_A: 2}, INV_2: {LOC_A: 3}})
+    assert _run(sp.shopify_levels_by_item(None, [INV_1, INV_2], graphql=gql)) == {INV_1: {LOC_A: 2}}
+    assert _run(sp.shopify_levels_by_item(None, [INV_1, INV_2], graphql=_shopify({}, fail=True))) is None
+
+
+def test_levels_reader_stays_under_the_query_cost_cap():
+    """Round 7 P1, the panel's arithmetic: 100 ids x inventoryLevels(first:
+    50) is ~15,000 points; Shopify refuses anything over 1,000 with NO nodes,
+    so every night read 'shopify inventory read failed'. 130 items (the
+    rebuilt catalogue is 121 products) through the pricing fake: every item
+    read, every query priced at or under 1,000. Put back `_INV_BATCH = 100`
+    (the old size) -> the first query is priced over 1,000 -> fails; with
+    the cost read also gone it is refused outright and nothing is read.
+    (`first: 50` alone re-sizes the batch from the cost, as it should.)"""
+    items = [f"gid://shopify/InventoryItem/{n}" for n in range(1000, 1130)]
+    gql = _shopify({inv: {LOC_A: 1, LOC_B: 2} for inv in items})
+    out = _run(sp.shopify_levels_by_item(None, items, graphql=gql))
+    assert out is not None and len(out) == 130 and out[items[-1]] == {LOC_A: 1, LOC_B: 2}
+    assert max(gql.costs) <= 1000 and len(gql.calls) == -(-130 // sp._INV_BATCH)
+
+
+def test_levels_reader_shrinks_the_batch_from_the_cost_shopify_quotes():
+    """Round 7 P1: Shopify prices these items at 100 points an id (more than
+    the estimate). The first batch is refused with its cost; the reader asks
+    for the same ids again in pieces that fit and keeps that size for the
+    rest -- every item read. Stop reading the cost (`cost = None`) -> the
+    refused batches' items are unknown -> fails."""
+    items = [f"gid://shopify/InventoryItem/{n}" for n in range(2000, 2040)]
+    gql = _shopify({inv: {LOC_A: 1} for inv in items}, id_cost=100)
+    out = _run(sp.shopify_levels_by_item(None, items, graphql=gql))
+    assert out is not None and len(out) == 40
+    assert gql.costs[0] > 1000 and max(gql.costs[1:]) <= 1000
+
+
+def test_levels_reader_never_keys_a_short_answer_by_position():
+    """nodes(ids:) answers positionally. A list shorter than the ids asked
+    cannot be keyed: the batch is unread, never INV_2's levels filed under
+    INV_1. Drop the length check -> {INV_1: {LOC_A: 7}} -> fails."""
 
     async def gql(db, query, variables):  # noqa: ARG001
-        seen.append(variables["ids"])
-        if len(seen) == 2:
-            raise RuntimeError("throttled")
-        return {"data": {"nodes": []}}
+        return {"data": {"nodes": [{"id": INV_2, "inventoryLevels": {"edges": [
+            {"node": {"location": {"id": LOC_A}, "quantities": [{"name": "available", "quantity": 7}]}}]}}]}}
 
     assert _run(sp.shopify_levels_by_item(None, [INV_1, INV_2], graphql=gql)) is None
-    assert _run(sp.shopify_levels_by_item(None, [INV_1], graphql=_shopify({}))) == {}
+
+
+def test_levels_reader_an_item_past_one_page_of_locations_is_unknown():
+    """Round 7 P1: the level connection is small now (_LEVELS_FIRST). An item
+    Shopify stocks at more locations than one page is UNKNOWN (absent), never
+    read from its first page with a later mapped location as 0. Drop the
+    hasNextPage check -> INV_2 comes back with 10 of its 11 -> fails."""
+    many = {f"gid://shopify/Location/{n}": 1 for n in range(1, sp._LEVELS_FIRST + 2)}
+    out = _run(sp.shopify_levels_by_item(None, [INV_1, INV_2], graphql=_shopify({INV_1: {LOC_A: 1}, INV_2: many})))
+    assert out == {INV_1: {LOC_A: 1}}
 
 
 # ---------------------------------------------------------------------------
@@ -355,32 +438,27 @@ def test_tick_an_escalated_task_is_refreshed_not_duplicated():
     assert _tasks(db)[0]["status"] == "ESCALATED" and _tasks(db)[0]["description"] != "old"
 
 
-def test_tick_a_partial_shopify_read_closes_nothing(monkeypatch):
-    """BV-A's open task is about SKU-2. Tonight SKU-1's batch reads clean and
-    SKU-2's batch fails. Half an answer is no answer: nothing is compared and
-    the task stays OPEN. Revert the reader's failed-batch `return None` to
-    `continue` -> BV-A compares 1 clean row (SKU-2 unknown) -> its task is
-    closed on a read that skipped the drifted SKU -> this fails."""
-    monkeypatch.setattr(sp, "_INV_BATCH", 1)
+def test_tick_a_failed_batch_leaves_only_its_skus_unknown(one_id_per_batch):
+    """Round 7 P1. Night 1: SKU-2 drifts at BV-A, the task names it. Night 2:
+    SKU-2's batch fails, SKU-1's reads. The night is CHECKED: SKU-1 is
+    compared at both shops, SKU-2 is unknown and still owed, so BV-A's task
+    stays OPEN and names it. Put back the whole-read failure -> checked False
+    -> fails; drop `not owed` from the close -> closed on a read that
+    skipped the drifted SKU -> fails."""
     db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 5, "BV-B": 0}})
-    db.seed("tasks", [{"task_id": "T-1", "source_ref": "shopify-stock-parity-drift:BV-A", "status": "OPEN"}])
-    clean = _shopify({INV_1: {LOC_A: 1, LOC_B: 1}})
-
-    async def gql(db_, query, variables):
-        if INV_2 in variables["ids"]:
-            raise RuntimeError("throttled")
-        return await clean(db_, query, variables)
-
-    out = _run(sp.run_parity_tick(db, graphql=gql))
-    assert out["checked"] is False and "read failed" in out["reason"]
-    assert out["tasks"]["closed"] == []
-    assert _tasks(db)[0]["status"] == "OPEN"
+    _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 0, LOC_B: 0}})))
+    assert _tasks(db)[0]["payload"]["skus"] == ["SKU-2"]
+    out = _run(sp.run_parity_tick(db, graphql=_skipping({INV_1: {LOC_A: 1, LOC_B: 1}})))
+    assert out["checked"] is True and out["compared"] == 2 and out["unknown"] == 2
+    assert out["tasks"]["closed"] == [] and _tasks(db)[0]["status"] == "OPEN"
+    assert "not compared tonight" in _tasks(db)[0]["description"] and "SKU-2" in _tasks(db)[0]["description"]
 
 
 def test_levels_reader_top_level_errors_beside_nodes_is_a_failed_read():
     """Shopify can answer a list of nodes WITH top-level `errors` (a node it
-    failed to resolve comes back null). Half an answer is no answer. Drop the
-    `or body.get("errors")` -> the reader returns INV_1 alone -> this fails."""
+    failed to resolve comes back null). That batch is unread -- its null is
+    never read as 'deleted in Shopify'. Drop the `or body.get("errors")` ->
+    the reader returns INV_1 and a deleted INV_2 -> this fails."""
 
     async def gql(db, query, variables):  # noqa: ARG001
         return {
@@ -391,16 +469,14 @@ def test_levels_reader_top_level_errors_beside_nodes_is_a_failed_read():
     assert _run(sp.shopify_levels_by_item(None, [INV_1, INV_2], graphql=gql)) is None
 
 
-def _partial(levels, *, errors=False):
-    """INV_1 answered from `levels`, INV_2 answered null (a deleted item, or a
-    per-node failure when `errors`)."""
+def _partial(levels):
+    """INV_1 answered from `levels`, INV_2 answered null WITH a top-level
+    error: a per-node failure, never a deleted item."""
     clean = _shopify(levels)
 
     async def gql(db_, query, variables):
         body = await clean(db_, query, variables)
-        body["data"]["nodes"].append(None)
-        if errors:
-            body["errors"] = [{"message": "Internal error", "path": ["nodes", 1]}]
+        body["errors"] = [{"message": "Internal error", "path": ["nodes", 1]}]
         return body
 
     return gql
@@ -414,21 +490,20 @@ def test_tick_a_partial_answer_with_errors_closes_nothing():
     _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 0, LOC_B: 0}})))
     (task,) = _tasks(db)
     assert task["payload"]["skus"] == ["SKU-2"]
-    out = _run(sp.run_parity_tick(db, graphql=_partial({INV_1: {LOC_A: 1, LOC_B: 1}}, errors=True)))
+    out = _run(sp.run_parity_tick(db, graphql=_partial({INV_1: {LOC_A: 1, LOC_B: 1}})))
     assert out["checked"] is False and out["tasks"]["closed"] == []
     assert _tasks(db)[0]["status"] == "OPEN"
 
 
-def test_tick_a_drifted_sku_that_was_not_re_read_keeps_its_task_open():
-    """Night 1: SKU-2 drifts at BV-A. Night 2: a CLEAN answer (no errors) but
-    INV_2 comes back null (deleted item), SKU-1 compares clean. The task names
-    SKU-2, SKU-2 was never re-read -> the task stays OPEN; night 3 re-reads
-    SKU-2 clean -> closed. Revert the close gate to `if active and
-    summary.get("compared"):` (drop `not owed`) -> night 2 closes it on a read
-    that skipped the drifted SKU -> this fails."""
+def test_tick_a_drifted_sku_that_was_not_re_read_keeps_its_task_open(one_id_per_batch):
+    """Night 1: SKU-2 drifts at BV-A. Night 2: SKU-2's batch fails, SKU-1
+    compares clean. The task names SKU-2, SKU-2 was never re-read -> the
+    task stays OPEN; night 3 re-reads SKU-2 clean -> closed. Revert the close
+    gate to `if active and summary.get("compared"):` (drop `not owed`) ->
+    night 2 closes it on a read that skipped the drifted SKU -> this fails."""
     db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 5, "BV-B": 0}})
     _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 0, LOC_B: 0}})))
-    out = _run(sp.run_parity_tick(db, graphql=_partial({INV_1: {LOC_A: 1, LOC_B: 1}})))
+    out = _run(sp.run_parity_tick(db, graphql=_skipping({INV_1: {LOC_A: 1, LOC_B: 1}})))
     bva = next(s for s in out["stores"] if s["store_id"] == "BV-A")
     assert out["checked"] is True and bva["compared"] == 1 and bva["unknown"] == 1
     assert out["tasks"]["closed"] == [] and _tasks(db)[0]["status"] == "OPEN"
@@ -987,6 +1062,17 @@ def test_both_screens_order_over_allocated_rows_per_location_never_pooled(monkey
         ("SKU-1", 4, 4, False), ("SKU-2", 3, 2, False)]
 
 
+def test_screens_read_an_item_deleted_in_shopify_as_listed_unknown(monkeypatch):
+    """Round 7: Shopify answers INV_2 null (deleted in Shopify admin). The
+    reconciliation screen reads it as listed-unknown, as an unread batch --
+    on the one-shop view too, never a crash. Drop the None-strip in
+    live_listed_qty_for_skus -> `per.get` on None -> fails."""
+    db = _db({"SKU-1": {"BV-A": 2, "BV-B": 3}, "SKU-2": {"BV-A": 1}})
+    for sid in ("BV-A", None):
+        row = _reconcile(monkeypatch, db, {INV_1: {LOC_A: 2, LOC_B: 3}}, sid)["SKU-2"]
+        assert _cols(row, "online", "status") == (None, "LISTED_UNKNOWN"), sid
+
+
 def test_reconcile_an_empty_store_id_is_all_stores(monkeypatch):
     """Round 4 P4: `?store_id=` (an empty string). The route and the on-hand
     reader read it as 'all stores'; rule_by_location narrowed the map to {}
@@ -1055,38 +1141,38 @@ def test_drift_task_names_the_press_that_re_sends_the_numbers():
     assert "ask an ADMIN or SUPERADMIN" in task["description"]
 
 
-def test_tick_a_refreshed_task_keeps_every_sku_still_owed():
+def test_tick_a_refreshed_task_keeps_every_sku_still_owed(one_id_per_batch):
     """Night 1: SKU-2 drifts at BV-A (IMS 5, Shopify 0) -> the task names
-    SKU-2. Night 2: SKU-1 drifts at BV-A (IMS 1, Shopify 5) and Shopify
-    answers INV_2 as a null node (no errors) -> refreshed, and the task names
-    SKU-1 AND SKU-2. Night 3: SKU-1 clean, INV_2 still null -> SKU-2 is still
-    owed, the task stays OPEN. Drop `owed |` from payload.skus -> night 2
-    names SKU-1 only and night 3 closes it -> fails."""
+    SKU-2. Night 2: SKU-1 drifts at BV-A (IMS 1, Shopify 5) and SKU-2's
+    Shopify batch fails -> refreshed, and the task names SKU-1 AND SKU-2.
+    Night 3: SKU-1 clean, SKU-2 unread again -> SKU-2 is still owed, the task
+    stays OPEN. Drop `owed |` from payload.skus -> night 2 names SKU-1 only
+    and night 3 closes it -> fails."""
     db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 5, "BV-B": 0}})
     _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 0, LOC_B: 0}})))
     assert _tasks(db)[0]["payload"]["skus"] == ["SKU-2"]
-    out = _run(sp.run_parity_tick(db, graphql=_partial({INV_1: {LOC_A: 5, LOC_B: 1}})))
+    out = _run(sp.run_parity_tick(db, graphql=_skipping({INV_1: {LOC_A: 5, LOC_B: 1}})))
     assert out["tasks"]["refreshed"] == ["BV-A"]
     assert _tasks(db)[0]["payload"]["skus"] == ["SKU-1", "SKU-2"]
-    out = _run(sp.run_parity_tick(db, graphql=_partial({INV_1: {LOC_A: 1, LOC_B: 1}})))
+    out = _run(sp.run_parity_tick(db, graphql=_skipping({INV_1: {LOC_A: 1, LOC_B: 1}})))
     assert out["tasks"]["closed"] == [] and _tasks(db)[0]["status"] == "OPEN"
 
 
-def test_tick_the_task_text_names_every_sku_that_keeps_it_open():
+def test_tick_the_task_text_names_every_sku_that_keeps_it_open(one_id_per_batch):
     """Round 5, the panel's input: the test above carried on. Night 2's text
-    must name SKU-2 (owed, INV_2 null) beside SKU-1's drift. Nights 3-7:
-    SKU-1 compares clean, INV_2 stays null -- the task stays OPEN because of
+    must name SKU-2 (owed, its batch unread) beside SKU-1's drift. Nights
+    3-7: SKU-1 compares clean, SKU-2 stays unread -- the task stays OPEN because of
     SKU-2 alone, so the refreshed text names SKU-2, no longer claims SKU-1
     drifted, and payload.skus is SKU-2 only. Drop the owed line (`if owed:`)
     -> SKU-2 is nowhere in the text -> fails; stop refreshing on a night
     with no drift (`if drift:`) -> night 3 closes the task -> fails."""
     db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 5, "BV-B": 0}})
     _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 0, LOC_B: 0}})))
-    _run(sp.run_parity_tick(db, graphql=_partial({INV_1: {LOC_A: 5, LOC_B: 1}})))
+    _run(sp.run_parity_tick(db, graphql=_skipping({INV_1: {LOC_A: 5, LOC_B: 1}})))
     text = _tasks(db)[0]["description"]
     assert "SKU-1 (IMS 1 vs Shopify 5)" in text and "not compared tonight" in text and "SKU-2" in text
     for _night in range(3, 8):
-        out = _run(sp.run_parity_tick(db, graphql=_partial({INV_1: {LOC_A: 1, LOC_B: 1}})))
+        out = _run(sp.run_parity_tick(db, graphql=_skipping({INV_1: {LOC_A: 1, LOC_B: 1}})))
         assert out["tasks"] == {"filed": [], "refreshed": ["BV-A"], "closed": []}
     (task,) = _tasks(db)
     assert task["status"] == "OPEN" and task["payload"]["skus"] == ["SKU-2"]

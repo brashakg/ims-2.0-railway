@@ -49,9 +49,12 @@ Contract (mirrors the rest of the Shopify bridge):
   * 100% FAIL-SOFT, end to end. No creds / no DB / Shopify error -> a
     structured reason, never a raise. It must NEVER take down SENTINEL.
   * READ-ONLY vs Shopify (single boundary: shopify_push._graphql, injectable).
-    Half an answer is no answer: when any Shopify batch fails (a raise, no
-    nodes, or top-level `errors` beside a partial nodes list), nothing is
-    compared and no MAPPED shop's task is filed OR closed.
+    Every query stays under Shopify's 1,000-point cap (_INV_BATCH, sized from
+    the cost; extensions.cost shrinks it further). A failed batch (a raise,
+    no nodes, top-level `errors` beside a partial list, refused for its cost)
+    leaves only ITS items unknown -- never 0, never clean, so a task naming
+    one stays open; the other batches are compared. Only a night on which
+    NO batch was read compares nothing and moves no MAPPED shop's task.
   * The row builder and the comparator are PURE (parity_rows,
     compare_location_parity, unclaimed_locations): unit-tested without a DB
     or Shopify.
@@ -68,8 +71,18 @@ logger = logging.getLogger(__name__)
 
 # Sampling ceiling (keeps the nightly Shopify call cheap on a large catalog).
 _DEFAULT_SAMPLE = 500
-# Batch size for the Shopify nodes() inventory query.
-_INV_BATCH = 100
+# Shopify refuses ONE query priced above 1,000 points (MAX_COST_EXCEEDED, no
+# nodes at all). It prices nodes(ids:) per id and a connection per `first:`
+# row, so one id here is: the item (1) + inventoryLevels (2) + pageInfo (1)
+# + per level row its node, location and quantities (3).
+_MAX_QUERY_COST = 1000
+# One Shopify location per shop: six shops and the online store fit. An item
+# stocked at more is UNKNOWN (pageInfo.hasNextPage), never a truncated 0.
+_LEVELS_FIRST = 10
+_ID_COST = 4 + 3 * _LEVELS_FIRST
+# Ids per nodes() call, sized from the cost with 10% headroom (26 ids, ~884
+# points). A batch Shopify prices higher (extensions.cost) shrinks the next.
+_INV_BATCH = (_MAX_QUERY_COST * 9 // 10) // _ID_COST
 # Compact snapshot retention.
 _SNAPSHOT_RETENTION_DAYS = 30
 # Drift tolerance default (units). Env override: SHOPIFY_STOCK_PARITY_TOLERANCE.
@@ -84,7 +97,8 @@ query ImsInvLevels($ids: [ID!]!) {
   nodes(ids: $ids) {
     ... on InventoryItem {
       id
-      inventoryLevels(first: 50) {
+      inventoryLevels(first: %d) {
+        pageInfo { hasNextPage }
         edges {
           node {
             location { id }
@@ -95,7 +109,7 @@ query ImsInvLevels($ids: [ID!]!) {
     }
   }
 }
-"""
+""" % _LEVELS_FIRST
 
 
 def _coll(db, name: str):
@@ -317,16 +331,75 @@ def _sample_variants(db) -> Optional[List[Dict[str, Any]]]:
     return [{"sku": s, "inventory_item_id": items[s]} for s in skus if s in items]
 
 
+def _requested_cost(body: Any) -> Optional[int]:
+    """The points Shopify priced a query at: extensions.cost.requestedQueryCost,
+    else a MAX_COST_EXCEEDED error's extensions.cost. None when absent."""
+    try:
+        cost = ((body.get("extensions") or {}).get("cost") or {}).get("requestedQueryCost")
+        if cost is None:
+            cost = next((e["extensions"]["cost"] for e in body.get("errors") or []
+                         if "cost" in ((e or {}).get("extensions") or {})), None)
+        return int(cost) if cost else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _batch_levels(body: Any, chunk: List[str], as_gid: Callable) -> Optional[Dict[str, Any]]:
+    """One nodes() answer keyed by the chunk's gids IN ORDER (Shopify answers
+    nodes(ids:) positionally, null for an id it has no item for):
+    ``{gid: {location_gid: available}}``, ``{gid: None}`` for a null node (the
+    item no longer exists in Shopify -- deleted in Shopify admin). An item at
+    more locations than one page is left out (unknown, never a truncated 0).
+    None for the whole batch unless the answer is a FULL one: a nodes list of
+    the chunk's length and no top-level `errors` (a node Shopify failed to
+    resolve comes back null too -- never read that as deleted)."""
+    nodes = ((body.get("data") or {}).get("nodes")) if isinstance(body, dict) else None
+    if not isinstance(nodes, list) or len(nodes) != len(chunk) or body.get("errors"):
+        return None
+    out: Dict[str, Any] = {}
+    for gid, node in zip(chunk, nodes):
+        if node is None:
+            out[gid] = None
+            continue
+        conn = (node.get("inventoryLevels") if isinstance(node, dict) else None) or {}
+        if not isinstance(node, dict) or (conn.get("pageInfo") or {}).get("hasNextPage"):
+            continue
+        per_location: Dict[str, int] = {}
+        for edge in conn.get("edges") or []:
+            lnode = edge.get("node") if isinstance(edge, dict) else None
+            if not isinstance(lnode, dict):
+                continue
+            loc = as_gid(str((lnode.get("location") or {}).get("id") or ""), "Location")
+            if not loc:
+                continue
+            for q in lnode.get("quantities") or []:
+                if isinstance(q, dict) and q.get("name") == "available":
+                    try:
+                        per_location[loc] = per_location.get(loc, 0) + int(q.get("quantity") or 0)
+                    except (TypeError, ValueError):
+                        pass
+        out[gid] = per_location
+    return out
+
+
 async def shopify_levels_by_item(
     db, inventory_item_ids: List[str], *, graphql: Optional[Callable] = None
-) -> Optional[Dict[str, Dict[str, int]]]:
+) -> Optional[Dict[str, Optional[Dict[str, int]]]]:
     """Live Shopify 'available' per inventory item PER LOCATION:
-    ``{inventory_item_id (as supplied): {location_gid: available}}``. An item
-    Shopify did not return is absent (the caller reads it as UNKNOWN).
+    ``{inventory_item_id (as supplied): {location_gid: available}}``.
 
-    None when ANY batch failed: half an answer is no answer -- a drift task
-    must never be closed on a read that skipped the drifted item.
-    Read-only; never raises."""
+      * None as an item's VALUE: Shopify answered it null in a full answer --
+        the item no longer exists in Shopify (deleted in Shopify admin);
+      * an item ABSENT: Shopify did not answer it -- its batch failed (a
+        raise, no nodes, top-level `errors`, refused for its cost) or it sits
+        at more than _LEVELS_FIRST locations. The caller reads it as UNKNOWN,
+        never a 0. A failed batch costs only its own items; the others stand.
+
+    Batches are sized from Shopify's 1,000-point query cap (_INV_BATCH). A
+    batch Shopify prices higher than estimated (extensions.cost) shrinks the
+    next one, and a batch refused for its cost is asked again in smaller
+    pieces. None when NO batch could be read (a failed read). Read-only;
+    never raises."""
     if not inventory_item_ids:
         return {}
     try:
@@ -344,42 +417,35 @@ async def shopify_levels_by_item(
         if gid:
             gid_to_supplied.setdefault(gid, str(raw))
 
-    out: Dict[str, Dict[str, int]] = {}
+    out: Dict[str, Optional[Dict[str, int]]] = {}
     gids = list(gid_to_supplied.keys())
-    for i in range(0, len(gids), _INV_BATCH):
-        chunk = gids[i : i + _INV_BATCH]
+    size, i, unread = _INV_BATCH, 0, 0
+    while i < len(gids):
+        chunk = gids[i : i + size]
         try:
             body = await gql(db, _INV_LEVELS_QUERY, {"ids": chunk})
-            nodes = (body.get("data") or {}).get("nodes")
-            # Top-level `errors` beside a nodes list is a PARTIAL answer (a
-            # node Shopify failed to resolve comes back null): half an answer.
-            if not isinstance(nodes, list) or body.get("errors"):
-                raise ValueError(f"no full nodes answer: {body.get('errors')}")
         except Exception as exc:  # noqa: BLE001
             logger.warning("[STOCK_PARITY] shopify inventory query failed: %s", exc)
-            return None
-        for node in nodes:
-            if not isinstance(node, dict):
-                continue
-            supplied = gid_to_supplied.get(str(node.get("id") or ""))
-            if not supplied:
-                continue
-            per_location: Dict[str, int] = {}
-            for edge in ((node.get("inventoryLevels") or {}).get("edges")) or []:
-                lnode = edge.get("node") if isinstance(edge, dict) else None
-                if not isinstance(lnode, dict):
-                    continue
-                loc = _as_shopify_gid(str((lnode.get("location") or {}).get("id") or ""), "Location")
-                if not loc:
-                    continue
-                for q in lnode.get("quantities") or []:
-                    if isinstance(q, dict) and q.get("name") == "available":
-                        try:
-                            per_location[loc] = per_location.get(loc, 0) + int(q.get("quantity") or 0)
-                        except (TypeError, ValueError):
-                            pass
-            out[supplied] = per_location
-    return out
+            body = None
+        cost = _requested_cost(body)
+        if cost:
+            # The price Shopify quoted for these ids sizes every later call.
+            fit = max(1, len(chunk) * (_MAX_QUERY_COST * 9 // 10) // cost)
+            size = min(size, fit)
+            if cost > _MAX_QUERY_COST and fit < len(chunk):
+                continue  # refused for its cost: the same ids again, fewer per call
+        i += len(chunk)
+        levels = _batch_levels(body, chunk, _as_shopify_gid)
+        if levels is None:
+            unread += len(chunk)
+            logger.warning(
+                "[STOCK_PARITY] %d inventory item(s) unread tonight (unknown, not 0): %s",
+                len(chunk), body.get("errors") if isinstance(body, dict) else "no answer",
+            )
+            continue
+        for gid, per_location in levels.items():
+            out[gid_to_supplied[gid]] = per_location
+    return None if gids and unread == len(gids) else out
 
 
 # ---------------------------------------------------------------------------

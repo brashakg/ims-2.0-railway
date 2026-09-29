@@ -521,6 +521,9 @@ async def live_listed_qty_for_skus(
         levels = await shopify_levels_by_item(db, sorted(set(inv_map.values())))
         if levels is None:
             return None
+        # An item Shopify answered null (deleted there) is listed-UNKNOWN on
+        # these screens, as an unread batch is: absent, never a level.
+        levels = {inv: per for inv, per in levels.items() if per is not None}
         # LISTED is what the storefront can sell: every location summed.
         qty: Dict[str, int] = {}
         for sku, inv in inv_map.items():
