@@ -398,6 +398,46 @@ def _ledger_row_return_doc(db, row):
     return None
 
 
+def _db_store_finder(db):
+    """``find_store(store_id)`` over the raw db, for the seller check."""
+
+    def find(sid):
+        return db.get_collection("stores").find_one({"store_id": sid})
+
+    return find
+
+
+def _order_held_off_returns(db, order) -> dict:
+    """The seller-check problem that keeps an order OFF the GST returns (None
+    when it files). THE rule the booking held on and the invoice door, the
+    challan, the e-invoice and GSTR-1 refuse on
+    (online_fulfillment_route.seller_problem) -- GSTR-3B and Tally ask the
+    SAME question, so the returns of one GSTIN never disagree on a held
+    order. None for an order never routed (POS, a historical import)."""
+    from ...services.online_fulfillment_route import stored_seller_problem
+
+    return stored_seller_problem(order, _db_store_finder(db))
+
+
+def _cn_parent_held(db, ret_doc, cache) -> bool:
+    """True when a credit note's (return doc's) PARENT order is held off the
+    returns (_order_held_off_returns): its sale was never filed, so its
+    credit note must not be either -- reversing output tax on a supply never
+    declared (and, for a B2B buyer, uploading the CDNR row). ONE answer for
+    GSTR-1's ledger + in-store passes and GSTR-3B's two legs. ``cache`` is
+    keyed by order_id. Fail-soft -> False (the note files, as before)."""
+    oid = str((ret_doc or {}).get("order_id") or "")
+    if not oid:
+        return False
+    if oid not in cache:
+        try:
+            order = db.get_collection("orders").find_one({"order_id": oid})
+            cache[oid] = bool(_order_held_off_returns(db, order))
+        except Exception:  # noqa: BLE001
+            cache[oid] = False
+    return cache[oid]
+
+
 def _cn_foreign_store(ret_doc, active_store) -> bool:
     """True when a ledger row's return belongs to a DIFFERENT store's GSTIN.
 

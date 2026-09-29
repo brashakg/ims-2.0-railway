@@ -1206,8 +1206,11 @@ def tally_build_day_voucher_xml_checked(
 ) -> tuple:
     """Reshape -> GATE -> build. The ONLY entry point an unattended caller may use.
 
-    Three gates run per order BEFORE a single byte of that order's XML exists:
+    The gates run per order BEFORE a single byte of that order's XML exists:
 
+      S. SELLER HOLD -- a routed online order held off the GST returns on its
+         seller (GSTIN) check (reports.gst_itc._order_held_off_returns, the
+         rule GSTR-1/3B apply) is quarantined, never booked.
       0. SELF-CONSISTENCY -- `_order_tax_statements_disagree`: a header tax and
          a per-line tax sum that differ by more than 50 paise, in EITHER
          direction (over-stating fabricates liability; under-stating hides it).
@@ -1265,8 +1268,21 @@ def tally_build_day_voucher_xml_checked(
     priced: List[Dict[str, Any]] = []
     rejected: List[Dict[str, Any]] = []
 
+    from api.routers.reports.gst_itc import _order_held_off_returns
+
     for original in orders or []:
         oid = _order_identity(original)
+
+        # SELLER HOLD: a routed online order its seller (GSTIN) check holds
+        # off the GST returns (GSTR-1/3B skip it; the invoice door refuses it)
+        # is no sale of this GSTIN until Re-map re-routes it -- quarantined
+        # here, never booked into the books GSTR-1 disagrees with.
+        held = _order_held_off_returns(db, original)
+        if held:
+            rejected.append(
+                {"order_id": oid, "reason": f"held on its seller (GSTIN) check: {held['message']}"}
+            )
+            continue
 
         # TWO-SIDED tax-statement check, BEFORE pricing: max() below only sees
         # under-booking, so a header that OVER-states the lines fabricates

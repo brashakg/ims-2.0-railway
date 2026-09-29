@@ -19,13 +19,17 @@ orders sitting at that shop's location).
                      order's largest open fulfillment order to.
     covers(shop)   = the shop holds CLAIMABLE units (the claim's own rule,
                      StockRepository.sellable_filter) for every claimable line.
-    shopify split  = Shopify split the order over several mapped shops and each
-                     covers its OWN fulfillment orders' lines: every shop claims
-                     and ships its own part (``split``), nothing moves (Q2 allows
-                     Shopify's split, Q4 moves only a short shop); the largest
-                     fulfillment order's shop bills it, and a leg shop under
-                     another GSTIN or without its own state's GSTIN holds the
-                     order (``seller_problem``, the one seller check).
+    shopify split  = Shopify split the order over several mapped shops: every
+                     shop claims and ships its own part (``split``; Q2 allows
+                     Shopify's split). Only a leg shop SHORT for its own part
+                     is acted on (Q4): its leg moves to a mapped shop holding
+                     it (``_follow_split``), else its claim fails loud at that
+                     shop -- a leg that holds its units is never touched, and
+                     a line IMS does not stock never moves anything. The shop
+                     shipping the largest fulfillment order bills it; a leg
+                     shop under another GSTIN or without its own state's
+                     GSTIN holds the order (``seller_problem``, the one seller
+                     check), released by Re-map (``reroute_held_order``).
     shipping shop  = otherwise assigned if it covers, else the first MAPPED shop
                      that covers the whole order (most stock first), else the
                      assigned shop (the claim under-claims and
@@ -38,12 +42,15 @@ orders sitting at that shop's location).
     moves          = a fulfillment order that is not the shipping shop's
                      (fo_is_shops) is moved to the shipping shop's location ONLY
                      when that shop holds every unit of the order (Q4: never
-                     into a short shop) and relocation is on. One that cannot
-                     be moved is FO_AT_OTHER_SHOP: loud + the order is held.
-                     While a move is pending the order is held too; the move
-                     lifts that hold, a failed move keeps it (MOVE_FAILED); a
-                     move for a cancelled, human-released or short-claimed
-                     order is SKIPPED, never sent.
+                     into a short shop), it carries an item IMS stocks, and
+                     relocation is on. One that cannot be moved is
+                     FO_AT_OTHER_SHOP: loud + the order is held. While a move
+                     is pending the order is held too; the move lifts that
+                     hold, a failed move keeps it (MOVE_FAILED); a move for a
+                     cancelled or human-released order is SKIPPED, never sent.
+                     A target whose claim came up short (a race after the
+                     count) still gets its move: the claim and the invoice
+                     are there, so the fulfillment order follows them.
 
 ONLINE_FULFILLMENT_STORE_ID is the documented FALLBACK, used only while there is
 no usable assignment: the assigned location maps to no IMS shop (Pune stays
@@ -215,7 +222,8 @@ def route_order(
     (None or text) puts the booked order on hold: a move is pending, or a
     fulfillment order sits at another shop IMS could not move it from.
     ``split`` (None or ``[{store_id, line_item_id, qty}]``) is the per-shop
-    claim plan of an order Shopify split (see ``_shopify_split``).
+    plan of an order Shopify split: EVERY line, at the shop that ships it
+    (``_shopify_split`` + ``_follow_split``).
     Never raises."""
     from .shopify_push.inventory import _mapped
     from .stores_util import physical_stores
@@ -293,21 +301,28 @@ def route_order(
 
     need = _need(items)
     stock = {pid: _stock_by_store(db, pid) for pid in need}
+    pid_of = {
+        str(it.get("shopify_line_item_id")): it.get("ims_product_id")
+        for it in items or []
+        if it.get("ims_product_id")
+    }
 
     def covers(store_id: Optional[str]) -> bool:
         return bool(store_id) and all(
             stock[pid].get(store_id, 0) >= q for pid, q in need.items()
         )
 
-    # Q2 + Q4: when Shopify itself split the order over several mapped shops
-    # and each holds its own fulfillment orders' units, every shop ships its
-    # own part -- nobody is short, so nothing moves and nothing is held.
-    split = _shopify_split(fos, shop_of, items, need, stock) if need else None
+    # Q2 + Q4: Shopify itself split the order over several mapped shops. Every
+    # shop claims and ships its own part; only a shop SHORT for its own part
+    # hands it on (_follow_split) -- a leg that holds its units is never
+    # touched, and an order with no IMS line moves nothing.
+    legs = _shopify_split(fos, shop_of, pid_of, need)
+    split: Optional[List[Dict[str, Any]]] = None
     target = assigned
     # Without Shopify's fulfillment orders (dark / unread) there is no
     # routing to follow and nothing to move: IMS never guesses a seller from
     # stock counts -- the documented fallback ships it, or no shop does (loud).
-    if need and fos and not split and not covers(assigned) and _relocation_enabled():
+    if need and fos and not legs and not covers(assigned) and _relocation_enabled():
         # A move needs a destination location: only a MAPPED shop can take it.
         best = sorted(
             (s for s in mapped if s and s != assigned and covers(s)),
@@ -323,15 +338,39 @@ def route_order(
     moves: List[Dict[str, Any]] = []
     fo_ids: Optional[List[str]] = None
     hold_reason: Optional[str] = None
-    if split:
-        fo_ids = [f["id"] for f in fos]  # each at its own claiming shop
+    if legs:
+        ships = _follow_split(legs, pid_of, stock, mapped)
+        target = ships[assigned]  # the largest fulfillment order's shop bills
+        reason = "ASSIGNED" if target == assigned else "MOVED"
+        split = [
+            {"store_id": ships[shop], "line_item_id": lid, "qty": q}
+            for shop, leg in legs.items()
+            for lid, q in leg.items()
+        ]
+        fo_ids = [f["id"] for f in fos]  # each at the shop that claims its lines
+        moves = [
+            {
+                "fulfillment_order_id": f["id"],
+                "from_location_id": f.get("location_id"),
+                "to_location_id": mapped[ships[shop_of[f.get("location_id")]]],
+                "status": "PLANNED",
+            }
+            for f in fos
+            if ships[shop_of[f.get("location_id")]] != shop_of[f.get("location_id")]
+        ]
+        if moves:
+            hold_reason = _pending_move_text(
+                sorted({shop_of.get(m["to_location_id"]) or "" for m in moves})
+            )
     elif fos and target:
         fo_ids = [f["id"] for f in fos if fo_is_shops(f.get("location_id"), target_loc, shop_of)]
         rest = [f for f in fos if f["id"] not in fo_ids]
         # Q4: a fulfillment order leaves its location only for a shop that
         # holds EVERY unit of the order (the whole order ships from there, Q2)
-        # -- never INTO a short shop, and never with relocation off.
-        if rest and target_loc and covers(target) and _relocation_enabled():
+        # -- never INTO a short shop, never with relocation off, and never one
+        # that carries no item IMS stocks (no shop is short on it).
+        ours = need and all(_carries_ims(f, pid_of) for f in rest)
+        if rest and ours and target_loc and covers(target) and _relocation_enabled():
             moves = [
                 {
                     "fulfillment_order_id": f["id"],
@@ -341,16 +380,17 @@ def route_order(
                 }
                 for f in rest
             ]
-            hold_reason = (
-                f"IMS is moving this order's Shopify fulfillment order to {target}'s "
-                "location. If this hold does not clear within minutes, move it in "
-                "Shopify admin (Orders > order > Change location), then clear the hold."
-            )
+            hold_reason = _pending_move_text([target])
         elif rest:
             if not target_loc:
                 why = f"{target} has no Shopify location to move it to"
             elif not _relocation_enabled():
                 why = "relocation is off (ONLINE_FULFILLMENT_FALLBACK=off)"
+            elif not ours:
+                why = (
+                    "they carry no item IMS stocks, so no shop is short on them "
+                    "(IMS moves a fulfillment order only off a short shop)"
+                )
             else:
                 why = (
                     f"{target} does not hold every unit of the order and no single "
@@ -384,16 +424,35 @@ def route_order(
     }
 
 
-def _shopify_split(fos, shop_of, items, need, stock) -> Optional[List[Dict[str, Any]]]:
-    """Shopify split the order over SEVERAL mapped shops and every shop holds
-    the claimable units of its own fulfillment orders -> the claim plan
-    ``[{store_id, line_item_id, qty}]``; otherwise None (the whole-order rule
-    applies). Each fulfillment order's lines come from the routing read."""
-    pid_of = {
-        str(it.get("shopify_line_item_id")): it.get("ims_product_id")
-        for it in items or []
-        if it.get("ims_product_id")
-    }
+def _pending_move_text(shops: List[str]) -> str:
+    """The pending-move hold text (a successful move lifts exactly this)."""
+    return (
+        f"IMS is moving this order's Shopify fulfillment order to "
+        f"{', '.join(shops)}'s location. If this hold does not clear within "
+        "minutes, move it in Shopify admin (Orders > order > Change location), "
+        "then clear the hold."
+    )
+
+
+def _carries_ims(fo: Dict[str, Any], pid_of: Dict[str, Any]) -> bool:
+    """The fulfillment order carries an order line IMS stocks. Lines not read
+    (an anonymous line) count as IMS's -- IMS cannot tell otherwise."""
+    lines = fo.get("lines")
+    if not isinstance(lines, list):
+        return True
+    return any(
+        not (ln or {}).get("line_item_id") or str(ln["line_item_id"]) in pid_of
+        for ln in lines
+    )
+
+
+def _shopify_split(fos, shop_of, pid_of, need) -> Optional[Dict[str, Dict[str, int]]]:
+    """Shopify split the order over SEVERAL mapped shops -> its legs
+    ``{shop: {line_item_id: qty}}`` (EVERY line, IMS stock or not, so the
+    seller check and the dispatch see every shop that ships a part);
+    otherwise None (the whole-order rule applies): a fulfillment order at an
+    unmapped location, a line the routing read could not name, or a
+    claimable unit in no open fulfillment order."""
     legs: Dict[str, Dict[str, int]] = {}
     for f in fos:
         shop = shop_of.get(f.get("location_id"))
@@ -402,26 +461,56 @@ def _shopify_split(fos, shop_of, items, need, stock) -> Optional[List[Dict[str, 
         leg = legs.setdefault(shop, {})
         for ln in f["lines"]:
             lid, q = str((ln or {}).get("line_item_id") or ""), int((ln or {}).get("qty") or 0)
-            if lid in pid_of and q > 0:
+            if not lid:
+                return None
+            if q > 0:
                 leg[lid] = leg.get(lid, 0) + q
     if len(legs) < 2:
         return None
     got: Dict[str, int] = {}
-    for shop, leg in legs.items():
-        want: Dict[str, int] = {}
+    for leg in legs.values():
         for lid, q in leg.items():
-            want[pid_of[lid]] = want.get(pid_of[lid], 0) + q
-        if any(stock[pid].get(shop, 0) < q for pid, q in want.items()):
-            return None  # this shop is short for its own part: Q4's move rule
-        for pid, q in want.items():
-            got[pid] = got.get(pid, 0) + q
-    if got != need:
-        return None  # a claimable unit sits in no open fulfillment order
-    return [
-        {"store_id": shop, "line_item_id": lid, "qty": q}
-        for shop, leg in legs.items()
-        for lid, q in leg.items()
-    ]
+            if lid in pid_of:
+                got[pid_of[lid]] = got.get(pid_of[lid], 0) + q
+    return legs if got == need else None
+
+
+def _follow_split(legs, pid_of, stock, mapped) -> Dict[str, str]:
+    """Q4 on Shopify's split: ``{leg shop: the shop that claims and ships
+    that leg}``. A leg shop holding its own part ships it. A leg shop SHORT
+    for its own part hands the whole leg (its fulfillment orders move) to ONE
+    mapped shop that holds it on top of what that shop already ships -- a
+    shop already in the order first (Q2: fewest locations), then the most
+    stock -- never INTO a short shop. None does, or relocation is off: the
+    leg stays, and its claim fails loud AT that shop."""
+    want: Dict[str, Dict[str, int]] = {}
+    for shop, leg in legs.items():
+        w = want.setdefault(shop, {})
+        for lid, q in leg.items():
+            if lid in pid_of:
+                w[pid_of[lid]] = w.get(pid_of[lid], 0) + q
+    load = {s: dict(w) for s, w in want.items()}  # the IMS units each shop ships
+    ships = {s: s for s in legs}
+
+    def holds(shop: str, extra: Dict[str, int]) -> bool:
+        have = load.get(shop) or {}
+        return all(
+            stock[p].get(shop, 0) >= have.get(p, 0) + extra.get(p, 0)
+            for p in set(have) | set(extra)
+        )
+
+    for s in sorted(legs, key=lambda s: (-sum(legs[s].values()), s)):
+        if holds(s, {}) or not _relocation_enabled():
+            continue
+        cands = [t for t in mapped if t and t != s and holds(t, want[s])]
+        if not cands:
+            continue
+        t = min(cands, key=lambda t: (not load.get(t), -sum(stock[p].get(t, 0) for p in want[s]), t))
+        for p, q in want[s].items():
+            load.setdefault(t, {})[p] = load.get(t, {}).get(p, 0) + q
+        load[s] = {}
+        ships[s] = t
+    return ships
 
 
 def split_seller_problem(
@@ -440,8 +529,10 @@ def split_seller_problem(
         "SPLIT_SELLERS",
         f"Shopify split this order across shops with different GSTINs ({seller or '(none)'} "
         f"bills it; {', '.join(other)} ship part of it), so one tax invoice cannot "
-        "cover it. The order is on hold: the accountant must decide how it is "
-        "invoiced, or move its fulfillment orders to one shop in Shopify admin.",
+        "cover it. The order is on hold: move its fulfillment orders to shops "
+        "under one GSTIN in Shopify admin (Orders > order > Change location), "
+        "then press Re-map on the Online orders screen -- IMS re-reads the "
+        "routing, claims and bills it again, and lifts the hold.",
     )
 
 
@@ -482,10 +573,51 @@ def seller_unknown_problem(bucket_id: Optional[str]) -> Dict[str, str]:
         "IMS could not name the shop that ships this order, so no stock was "
         f"claimed and the order is on hold. Its invoice number was taken from "
         f"the online billing store {bucket_id}'s series, but no tax invoice can "
-        "be issued from that GSTIN (owner ruling Q1). Find the shop that ships "
-        "it; the accountant must then cancel this invoice number and re-issue "
-        "it from that shop's GSTIN.",
+        "be issued from that GSTIN (owner ruling Q1). Once Shopify can be read "
+        "and its fulfillment order sits at a shop's mapped location, press "
+        "Re-map on the Online orders screen: IMS claims the stock at that shop "
+        "and re-issues the invoice from its GSTIN (this number is kept as "
+        "superseded).",
     )
+
+
+SELLER_CODES = ("SELLER_UNKNOWN", "SHOP_GSTIN_MISSING", "SPLIT_SELLERS")
+
+
+def stored_seller_problem(order: Optional[Dict[str, Any]], find_store=None) -> Optional[Dict[str, str]]:
+    """``seller_problem`` for a STORED order, reading its shops through
+    ``find_store`` (default: the store repository) -- for the doors that
+    hold no store docs: the dispatch gate (orders.assert_no_active_rx_hold),
+    the hold release, the fulfilment push, the Re-map re-route, GSTR-3B,
+    Tally and the credit-note passes. None for an order never routed."""
+    if not isinstance((order or {}).get("fulfillment_route"), dict):
+        return None
+    if find_store is None:
+        try:
+            from ..dependencies import get_store_repository
+
+            find_store = getattr(get_store_repository(), "find_by_id", None)
+        except Exception:  # noqa: BLE001 -- unreadable = not provably fine
+            find_store = None
+    finder = find_store or (lambda _sid: None)
+    try:
+        store_doc = finder(order.get("store_id"))
+    except Exception:  # noqa: BLE001
+        store_doc = None
+    return seller_problem(order, store_doc, finder)
+
+
+def seller_held(order: Optional[Dict[str, Any]]) -> bool:
+    """The order's hold is the one its seller check put on it (the stock-hold
+    reason IS a seller problem's text) -- what Re-map re-routes."""
+    order = order or {}
+    route = order.get("fulfillment_route")
+    if not order.get("fulfillment_hold") or not isinstance(route, dict):
+        return False
+    return order.get("stock_hold_reason") in {
+        p.get("message") for p in route.get("problems") or []
+        if isinstance(p, dict) and p.get("code") in SELLER_CODES
+    }
 
 
 def seller_problem(
@@ -644,9 +776,8 @@ async def move_fulfillment_orders(db, order_id: str) -> Dict[str, Any]:
     # The booking's claim has not settled yet (shopify_ingest stamps
     # fulfillment_breakdown, possibly [], once it has): a duplicate delivery
     # racing the creator between its insert and its claim. Leave the moves
-    # PLANNED -- judged now they would be SKIPPED as short-claimed and the
-    # stock written back before the claim; the creator sends them (and writes
-    # stock back) right after its claim.
+    # PLANNED -- sent now, the stock would be written back before the claim;
+    # the creator sends them (and writes stock back) right after its claim.
     # ponytail: a creator that dies before settling leaves them PLANNED, the
     # order held under the pending-move text; add a lease if that happens.
     if "fulfillment_breakdown" not in order:
@@ -699,7 +830,8 @@ async def move_fulfillment_orders(db, order_id: str) -> Dict[str, Any]:
             "movedFulfillmentOrder"
         ) or {}
         m.update(status="MOVED", moved_fulfillment_order_id=moved.get("id") or m["fulfillment_order_id"])
-        fo_ids.append(m["moved_fulfillment_order_id"])
+        if m["moved_fulfillment_order_id"] not in fo_ids:  # a split lists every FO already
+            fo_ids.append(m["moved_fulfillment_order_id"])
     route["moves"] = moves
     route["fulfillment_order_ids"] = fo_ids
     pending = route.get("hold_reason")
@@ -745,27 +877,20 @@ async def move_fulfillment_orders(db, order_id: str) -> Dict[str, Any]:
 
 
 def _stale_move(order: Dict[str, Any]) -> Optional[str]:
-    """Why a PLANNED move must no longer be sent (None: send it). A move is
-    only ever retried for a live order that is still held and whose shipping
-    shop really claimed every unit: never for a cancelled order, never for
-    one a human already handled (the hold text tells them to move it by hand
-    and clear the hold), and never INTO a shop whose claim came up short (a
-    concurrent sale took the unit between the routing count and the claim --
-    the stock-miss hold is already loud)."""
+    """Why a PLANNED move must no longer be sent (None: send it): the order
+    is cancelled, or a human already handled it (the hold text tells them to
+    move it by hand and clear the hold). A claim that came up short at the
+    move's target (a walk-in took the unit between the routing count and the
+    claim) does NOT stop it: the claim and the invoice are already at that
+    shop, so the fulfillment order must follow them -- left behind, Shopify
+    keeps the old shop's unit committed while IMS shows it on sale (the
+    write-back would offer it twice). The short claim is loud on its own
+    (stock-miss hold + task at the short shop)."""
     status = str(order.get("status") or "").upper()
     if status in ("CANCELLED", "REFUNDED"):
         return f"the order is {status}"
     if not order.get("fulfillment_hold"):
         return "the order's hold was cleared, so a human handled it"
-    got: Dict[str, int] = {}
-    for r in order.get("fulfillment_breakdown") or []:
-        if isinstance(r, dict) and r.get("store_id") == order.get("store_id"):
-            got[r.get("product_id")] = got.get(r.get("product_id"), 0) + int(r.get("qty") or 0)
-    if any(got.get(pid, 0) < q for pid, q in _need(order.get("items") or []).items()):
-        return (
-            f"{order.get('store_id')} could not claim every unit (stock-miss hold), "
-            "and IMS never moves an order into a short shop"
-        )
     return None
 
 
@@ -780,12 +905,176 @@ def _stock_write_back(db, order: Dict[str, Any]) -> None:
         )
 
 
+_REROUTE_LEASE_SECONDS = 300
+
+
+def _close_tasks(refs: List[str], note: str) -> None:
+    """Complete the still-open system tasks with these source_refs. Fail-soft."""
+    if not refs:
+        return
+    try:
+        from ..dependencies import get_task_repository
+
+        repo = get_task_repository()
+        for ref in refs:
+            for t in repo.find_many({"source_ref": ref}) or []:
+                if str(t.get("status") or "").upper() in ("OPEN", "IN_PROGRESS", "ESCALATED"):
+                    repo.complete_task(t["task_id"], notes=note)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[ONLINE_ROUTE] task close skipped for %s: %s", refs, exc)
+
+
+async def reroute_held_order(db, order_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Re-route ONE booked online order its seller check HELD (SELLER_UNKNOWN,
+    SPLIT_SELLERS, SHOP_GSTIN_MISSING; ``seller_held``) -- the door those
+    holds' text points at (Re-map on the Online orders screen). Without it the
+    booking-time stamp was frozen: the hold could never be released, so a
+    paid sale could never be invoiced or filed.
+
+    Reads Shopify's routing FRESH (a human may have moved its fulfillment
+    orders in Shopify admin), gives back the units the booking claimed,
+    routes it again with THE rule (route_order), claims again with THE claim
+    (shopify_ingest._claim_online_units), and -- when the shipping shop
+    changed -- re-bills it there: a new invoice number from that shop's
+    series and its GST split (shopify_ingest._seller_gst_fields); the old
+    number is kept as ``superseded_invoice_number`` (no tax invoice was ever
+    issued or filed on it: the seller check refused every door). Still a
+    seller problem -> it stays held under the new reason. Refused, the order
+    untouched: not seller-held, dispatched/cancelled, a refund or return on
+    it, routing unreadable (dark included), another Re-map mid-flight."""
+    from datetime import datetime, timedelta, timezone
+
+    from .shopify_ingest import _claim_online_units, _seller_gst_fields
+
+    coll = _orders(db)
+    order = coll.find_one({"order_id": order_id}) or {}
+
+    def refused(why: str) -> Dict[str, Any]:
+        return {
+            "status": "refused",
+            "order_id": order_id,
+            "store_id": order.get("store_id"),
+            "error": why,
+            "message": f"Not re-routed: {why}",
+        }
+
+    if not seller_held(order):
+        return refused("the order is not held on its seller (GSTIN) check")
+    status = str(order.get("status") or "").upper()
+    if status not in ("CONFIRMED", "PROCESSING") or order.get("shopify_fulfillment_id"):
+        return refused(f"the order is {status or 'not open'} or already fulfilled")
+    try:
+        if db.get_collection("returns").count_documents({"order_id": order_id}):
+            return refused("a refund or return is booked against it -- resolve it by hand")
+    except Exception as exc:  # noqa: BLE001 -- unreadable = not provably safe
+        return refused(f"its returns could not be read ({exc})")
+    routing = await read_routing(db, str(order.get("shopify_order_id") or ""))
+    if "fulfillment_orders" not in routing:
+        return refused(
+            "Shopify's routing could not be read ("
+            + str(routing.get("dark") or routing.get("error") or "unknown")
+            + ")"
+        )
+    now = datetime.now(timezone.utc)
+    stale = (now - timedelta(seconds=_REROUTE_LEASE_SECONDS)).isoformat()
+    lease = coll.update_one(
+        {"order_id": order_id, "$or": [{"reroute_lease_at": None}, {"reroute_lease_at": {"$lt": stale}}]},
+        {"$set": {"reroute_lease_at": now.isoformat()}},
+    )
+    if not getattr(lease, "modified_count", 0):
+        return refused("another Re-map of this order is running")
+    try:
+        from ..dependencies import get_order_repository, get_store_repository
+        from ..routers.orders import get_stock_repository
+
+        items = order.get("items") or []
+        ref = order.get("order_number") or order_id
+        old_route = order.get("fulfillment_route") or {}
+        # The order's own claimed units are SOLD: route_order must count them.
+        freed = get_stock_repository().release_sold_units_for_order(order_id, reason="ONLINE_REROUTE")
+        if getattr(freed, "incomplete", False):  # a re-run releases the rest (idempotent)
+            return refused("not every claimed unit could be given back; press Re-map again")
+        try:
+            route = route_order(db, items, routing)
+            store_id = route.get("store_id") or order.get("store_id")
+            find = getattr(get_store_repository(), "find_by_id", None) or (lambda _sid: None)
+            store_doc = find(store_id)
+            update: Dict[str, Any] = {"store_id": store_id}
+            if store_id != order.get("store_id"):
+                update.update(
+                    _seller_gst_fields(items, store_doc, payload),
+                    invoice_number=get_order_repository().next_invoice_number(store_id),
+                    superseded_invoice_number=order.get("invoice_number"),
+                    invoice_date=now.replace(tzinfo=None),
+                )
+            bad = seller_problem({"store_id": store_id, "fulfillment_route": route}, store_doc, find)
+            if bad:
+                route["problems"].append(bad)
+            hold = bad["message"] if bad else route.get("hold_reason")
+            update.update(
+                fulfillment_route={**route, "rerouted_at": now.isoformat()},
+                fulfillment_hold=bool(order.get("rx_pending") or hold),
+            )
+            unset = {"fulfillment_breakdown": "", "fulfillment_stores": ""}  # claim unsettled
+            if hold:
+                update["stock_hold_reason"] = hold
+            else:
+                unset["stock_hold_reason"] = ""
+            coll.update_one({"order_id": order_id}, {"$set": update, "$unset": unset})
+        except Exception as exc:  # noqa: BLE001 -- nothing written: put the claim back
+            _claim_online_units(db, order_id, ref, items, old_route)
+            return refused(str(exc))
+        try:  # the booking's stock miss is answered by this re-claim
+            db.get_collection("online_stock_miss").update_many(
+                {"order_id": order_id, "resolved": False},
+                {"$set": {"resolved": True, "resolution": "REROUTED", "resolved_at": now.isoformat()}},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[ONLINE_ROUTE] stock-miss close skipped for %s: %s", order_id, exc)
+        _close_tasks([f"online_stock_miss:{order_id}"], "Re-mapped: the stock was claimed again.")
+        breakdown, stores = _claim_online_units(db, order_id, ref, items, route)
+        coll.update_one(
+            {"order_id": order_id},
+            {"$set": {"fulfillment_breakdown": breakdown, "fulfillment_stores": stores}},
+        )
+        # A shop that no longer ships a unit of it must not pack one.
+        _close_tasks(
+            [f"online_fallback_ship:{order_id}:{s}"
+             for s in set(order.get("fulfillment_stores") or []) - set(stores)],
+            "Re-mapped: this shop no longer ships this order.",
+        )
+        raise_problem_tasks(db, {**order, **update})
+        if any(m.get("status") == "PLANNED" for m in route.get("moves") or []):
+            await move_fulfillment_orders(db, order_id)  # writes stock back after the move
+        else:
+            _stock_write_back(db, {**order, **update})
+    finally:
+        coll.update_one({"order_id": order_id}, {"$unset": {"reroute_lease_at": ""}})
+    final = coll.find_one({"order_id": order_id}) or {}
+    held = final.get("stock_hold_reason")
+    return {
+        "status": "rerouted",
+        "order_id": order_id,
+        "shopify_order_id": final.get("shopify_order_id"),
+        "store_id": final.get("store_id"),
+        "invoice_number": final.get("invoice_number"),
+        "held": bool(final.get("fulfillment_hold")),
+        "message": (
+            f"Re-routed to {final.get('store_id')}; still on hold: {held}"
+            if held
+            else f"Re-routed to {final.get('store_id')} (invoice {final.get('invoice_number')}); "
+            "the seller hold is lifted."
+        ),
+    }
+
+
 async def map_routed_order(
     payload: Dict[str, Any],
     db,
     *,
     webhook_id: Optional[str] = None,
     topic: Optional[str] = None,
+    reroute: bool = False,
 ) -> Dict[str, Any]:
     """THE door every live online-order create goes through (webhook drain,
     missed-webhook pull, Re-map): read Shopify's routing FRESH for an order
@@ -793,7 +1082,9 @@ async def map_routed_order(
     payload carries), hand it to the (sync) mapper -> ingest, then send the
     planned moves -- for an order already booked too (a replayed or
     orders/updated delivery), so moves a crash left PLANNED are retried by
-    the next delivery. Returns the mapper's result. Never raises."""
+    the next delivery. ``reroute`` (the Re-map door only): an order already
+    booked and held on its seller check is re-routed (reroute_held_order).
+    Returns the mapper's result. Never raises."""
     from . import online_order_mapper
     from .shopify_ingest import order_payload_refusal
 
@@ -820,4 +1111,11 @@ async def map_routed_order(
             await move_fulfillment_orders(db, result["order_id"])
         except Exception as exc:  # noqa: BLE001
             logger.warning("[ONLINE_ROUTE] moves skipped for %s: %s", sid, exc)
+    if reroute and (result or {}).get("status") == "duplicate" and result.get("order_id"):
+        try:
+            if seller_held(_orders(db).find_one({"order_id": result["order_id"]})):
+                return await reroute_held_order(db, result["order_id"], payload)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[ONLINE_ROUTE] re-route failed for %s: %s", sid, exc)
+            return {**result, "status": "error", "error": f"Re-route failed: {exc}"}
     return result

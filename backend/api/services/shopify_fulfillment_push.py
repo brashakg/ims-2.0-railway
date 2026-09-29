@@ -317,6 +317,22 @@ async def push_fulfillment(
             reason="already_pushed (shopify_fulfillment_id stamped)",
         )
 
+    # 2b. The online seller check (multi-location PR 5, the rule the booking
+    #     held on and every invoice door refuses on): no Shopify fulfilment
+    #     for goods whose tax invoice cannot be issued -- whatever became of
+    #     the hold flags.
+    from .online_fulfillment_route import stored_seller_problem
+
+    bad_seller = stored_seller_problem(order)
+    if bad_seller:
+        return FulfillmentPushResult(
+            mode=MODE_SIMULATED,
+            action="noop",
+            target_id=shopify_order_id,
+            ok=False,
+            error=f"not fulfilled on Shopify: {bad_seller['message']}",
+        )
+
     tracking_info = _resolve_tracking(order, tracking)
     order_gid = _as_shopify_gid(shopify_order_id, "Order")
     plan: Dict[str, Any] = {
@@ -397,9 +413,10 @@ async def push_fulfillment(
             for e in ((order_node or {}).get("fulfillmentOrders") or {}).get("edges") or []
         }
         mapped_locs = set(locs.values())
-        # The billing shop, plus every shop of a Shopify split (each ships
-        # the fulfillment orders of the units it claimed).
-        shops = [order.get("store_id")] + [
+        # The shipping shop THE route named (never the bill store's stand-in:
+        # a route that named none was refused above), plus every shop of a
+        # Shopify split (each ships the fulfillment orders of its own leg).
+        shops = [route.get("store_id")] + [
             r.get("store_id") for r in route.get("split") or [] if isinstance(r, dict)
         ]
         ours = [

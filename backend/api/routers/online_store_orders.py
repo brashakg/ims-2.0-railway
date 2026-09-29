@@ -107,7 +107,7 @@ _INBOX_SCAN_LIMIT = 300
 # Mapper result statuses that mean "the order IS (still) in the books" -- the ONLY
 # statuses a remap may report as success. Anything else ('skipped', 'error', ...)
 # is a failure the operator must see (OS-011: 'skipped' used to toast success).
-_REMAP_OK_STATUSES = ("created", "duplicate", "replayed", "status_synced")
+_REMAP_OK_STATUSES = ("created", "duplicate", "replayed", "status_synced", "rerouted")
 
 # Server-side projection for the list (OS-063): ship ONLY what the screen renders.
 # `items` is fetched but immediately collapsed to items_count and stripped -- the
@@ -213,6 +213,11 @@ def _slim_list_row(doc: Dict[str, Any]) -> Dict[str, Any]:
     # A doc in the orders collection IS in the books -- say so explicitly rather
     # than making the frontend infer it from the presence of an id.
     doc.setdefault("map_status", "MAPPED")
+    # Held on its seller (GSTIN) check: the screen offers Re-map, which
+    # re-routes it (online_fulfillment_route.reroute_held_order).
+    from ..services.online_fulfillment_route import seller_held
+
+    doc["seller_hold"] = seller_held(doc)
     return doc
 
 
@@ -616,8 +621,11 @@ async def remap_online_order(
         # A legacy topicless row was admitted by the loader ONLY because it is
         # order-shaped (line_items, no parent order_id) -> replay as a create,
         # through the routing door like the webhook (multi-location PR 5).
+        # An order already booked and HELD on its seller check is re-routed
+        # (re-read Shopify, re-claim, re-bill at the shop that ships it) --
+        # the door that hold's text points at.
         result = await map_routed_order(
-            payload, db, webhook_id=webhook_id, topic=topic or "orders/create"
+            payload, db, webhook_id=webhook_id, topic=topic or "orders/create", reroute=True
         )
     except Exception as exc:  # noqa: BLE001 - the mapper is fail-soft; belt-and-braces
         result = {"status": "error", "error": str(exc)}
@@ -640,6 +648,8 @@ async def remap_online_order(
             if ok
             else (result or {}).get("error") or (result or {}).get("reason") or status or "unknown"
         ),
+        # A re-route (or its refusal) says in words what happened to the hold.
+        "message": (result or {}).get("message"),
         "result": result,
     }
 
@@ -715,17 +725,29 @@ async def clear_rx_hold(
     # wrote into rx_hold_reason before the stock hold owned its own field.
     # Late import: online_store_orders must not import orders at module level.
     from .orders import order_hold_kinds
+    from ..services.online_fulfillment_route import seller_held, stored_seller_problem
 
     released = order_hold_kinds(order)
     if not released:
         raise HTTPException(
             status_code=409, detail="This order has no active hold to clear."
         )
-    _HOLD_NAMES = {"RX": "Rx hold", "STOCK": "stock hold"}
-    released_message = (
-        " and ".join(_HOLD_NAMES[k] for k in released).capitalize()
-        + " released - the order can now be fulfilled."
-    )
+    # The seller check's hold (no shop named, a shop without its own state's
+    # GSTIN, a split across GSTINs) is not a stock hold and no human can clear
+    # it away: while the problem stands no tax invoice can be issued, so the
+    # goods must not leave. Fix the cause (the shop's GSTIN in Organization,
+    # or the fulfillment orders + Re-map), then clear.
+    bad = stored_seller_problem(order)
+    if bad:
+        raise HTTPException(
+            status_code=409,
+            detail=f"This hold cannot be cleared yet: {bad['message']}",
+        )
+    if seller_held(order):  # its cause is fixed: name it for what it was
+        released = ["SELLER" if k == "STOCK" else k for k in released]
+    _HOLD_NAMES = {"RX": "Rx hold", "STOCK": "stock hold", "SELLER": "seller (GSTIN) hold"}
+    names = " and ".join(_HOLD_NAMES[k] for k in released)
+    released_message = names[:1].upper() + names[1:] + " released - the order can now be fulfilled."
 
     note = (body.note or "").strip() if body and body.note else None
     prescription_id = (

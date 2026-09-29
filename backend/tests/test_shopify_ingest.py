@@ -480,6 +480,9 @@ def test_online_order_underclaim_records_loud_stock_miss(wired, monkeypatch):
     import api.dependencies as deps
     from api.routers import orders as orders_mod
 
+    # A shop IS named (the documented fallback): a route that names none
+    # claims nothing and is no oversell (SELLER_UNKNOWN owns it, below).
+    monkeypatch.setenv("ONLINE_FULFILLMENT_STORE_ID", "ST-BOKARO-2")
     monkeypatch.setattr(deps, "get_product_repository", lambda: _FakeProductRepo())
     monkeypatch.setattr(
         orders_mod, "get_stock_repository", lambda: _FakeStockRepoNoStock()
@@ -812,7 +815,11 @@ def test_no_routing_never_claims_at_a_shop_guessed_from_stock(wired, monkeypatch
     assert [p["code"] for p in order["fulfillment_route"]["problems"]] == ["SELLER_UNKNOWN"]
     assert order["fulfillment_hold"] is True
     assert not [t for t in task_repo.created if "online_fallback_ship" in t["source_ref"]]
-    assert len(wired["db"].get_collection("online_stock_miss").docs) == 1
+    # Panel round 5: no false oversell for an order no shop was named for --
+    # the SELLER_UNKNOWN hold keeps its own reason and task.
+    assert wired["db"].get_collection("online_stock_miss").docs == []
+    assert order["stock_hold_reason"] == order["fulfillment_route"]["problems"][0]["message"]
+    assert not [t for t in task_repo.created if "online_stock_miss" in t["source_ref"]]
 
 
 def test_fallback_prefers_configured_store_when_it_has_stock(wired, monkeypatch):
@@ -840,7 +847,8 @@ def test_fallback_disabled_by_env_records_miss(wired, monkeypatch):
     """ONLINE_FULFILLMENT_FALLBACK=off -> old behaviour: preferred store only,
     and an empty preferred store records the loud stock miss."""
     monkeypatch.setenv("ONLINE_FULFILLMENT_FALLBACK", "off")
-    stock = _FakeStockRepoPerStore({"BV-ONLINE-01": 0, "ST-BOKARO-2": 5})
+    monkeypatch.setenv("ONLINE_FULFILLMENT_STORE_ID", "ST-MAIN-1")
+    stock = _FakeStockRepoPerStore({"BV-ONLINE-01": 0, "ST-MAIN-1": 0, "ST-BOKARO-2": 5})
     _wire_fallback(monkeypatch, stock)
 
     res = shopify_ingest.ingest_shopify_order(
@@ -855,6 +863,7 @@ def test_fallback_disabled_by_env_records_miss(wired, monkeypatch):
 def test_fallback_exhausted_still_records_miss(wired, monkeypatch):
     """No store anywhere has the unit -> stock miss records with the tried
     stores, exactly like the old single-store under-claim."""
+    monkeypatch.setenv("ONLINE_FULFILLMENT_STORE_ID", "ST-BOKARO-2")
     stock = _FakeStockRepoPerStore({"BV-ONLINE-01": 0, "ST-BOKARO-2": 0})
     _wire_fallback(monkeypatch, stock)
 

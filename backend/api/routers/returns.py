@@ -1683,10 +1683,12 @@ def _resolve_restock_store(
     Any candidate that is itself an ONLINE store is skipped at every step.
     """
     db = _get_db()
-    # A physical shop restocks its own return -- unless Shopify split the
-    # order (multi-location PR 5): its units left from SEVERAL shops, so each
-    # goes back to the shop it left from, exactly like a legacy online order.
-    if not is_online_store(db, store_id) and len(_order_fulfilment_stores(order)) < 2:
+    # A physical shop restocks its own return -- unless its units left from
+    # ANOTHER shop (multi-location PR 5: Shopify split the order, and a leg
+    # shop -- possibly the only one that claimed anything -- is not the
+    # billing shop): each unit goes back to the shop it left from, exactly
+    # like a legacy online order.
+    if not is_online_store(db, store_id) and set(_order_fulfilment_stores(order)) <= {store_id}:
         return {
             "store_id": store_id,
             "redirected_from": None,

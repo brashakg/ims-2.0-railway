@@ -31,7 +31,9 @@ from .gst_base import (
 from .gst_itc import (
     _cn_bucket_rate,
     _cn_foreign_store,
+    _cn_parent_held,
     _ledger_row_return_doc,
+    _order_held_off_returns,
     _return_interstate_flag,
     _transfer_b2b_rows,
     _transfer_outward_bills,
@@ -143,17 +145,13 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                 "created_at": {"$gte": from_dt, "$lt": to_dt},
             }
 
-            from ...services.online_fulfillment_route import seller_problem
-
-            def _find_store(sid):
-                return db["stores"].find_one({"store_id": sid})
-
             for order in orders_col.find(query):
                 # A routed online order its booking HELD on the seller check
                 # (no shop named, a shop or split leg without its own state's
                 # GSTIN, a split across GSTINs) is never filed under this
-                # GSTIN: the accountant decides how it is invoiced first.
-                held = seller_problem(order, store_doc, _find_store)
+                # GSTIN until Re-map re-routes it -- nor are its credit notes
+                # (below), nor is it in GSTR-3B or Tally (the same question).
+                held = _order_held_off_returns(db, order)
                 if held:
                     validation_issues.append(
                         {
@@ -386,6 +384,16 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
     # Per-report order->interstate cache, shared by the ledger pass and the
     # in-store returns pass so one refund can never resolve two heads.
     _cdnr_inter_cache: dict = {}
+    _held_cache: dict = {}  # order_id -> parent held on the seller check
+
+    def _held_cn_issue(ref, ret_doc) -> dict:
+        return {
+            "level": "error",
+            "invoice": str(ref or (ret_doc or {}).get("return_id") or ""),
+            "issue": "Not filed: this credit note reverses order "
+            f"{(ret_doc or {}).get('order_number') or (ret_doc or {}).get('order_id')}, "
+            "whose sale is held off this return on its seller (GSTIN) check.",
+        }
 
     if db is not None:
         # Process credit notes from returns/refunds in credit_note_ledger
@@ -439,6 +447,11 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                         # two GSTINs.
                         _ret_doc = _ledger_row_return_doc(db, entry)
                         if _cn_foreign_store(_ret_doc, active_store):
+                            continue
+                        # The refund of a sale this report refused to file
+                        # (held on the seller check) is not filed either.
+                        if _cn_parent_held(db, _ret_doc, _held_cache):
+                            validation_issues.append(_held_cn_issue(entry.get("ref"), _ret_doc))
                             continue
 
                         # Split CGST/SGST vs IGST: prefer the head stamped from
@@ -587,6 +600,9 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                         else:
                             continue
                     except (TypeError, ValueError):
+                        continue
+                    if _cn_parent_held(db, ret, _held_cache):
+                        validation_issues.append(_held_cn_issue(rid, ret))
                         continue
 
                     cust_id = str(ret.get("customer_id", ""))

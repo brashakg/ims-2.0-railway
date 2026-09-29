@@ -191,6 +191,15 @@ def _b2b_invoice_row(o: dict, cust: dict, split: dict, now: datetime) -> dict:
     }
 
 
+def _filed_orders(db, orders) -> List[dict]:
+    """The orders that are sales of their GSTIN: a routed online order held
+    on its seller (GSTIN) check is dropped -- the ONE rule GSTR-1 and GSTR-3B
+    apply (reports.gst_itc._order_held_off_returns)."""
+    from ..reports.gst_itc import _order_held_off_returns
+
+    return [o for o in orders if not _order_held_off_returns(db, o)]
+
+
 def _b2b_invoices(
     db,
     *,
@@ -222,7 +231,7 @@ def _b2b_invoices(
     _apply_created_at_range(match, from_date, to_date)
 
     try:
-        orders = list(db.get_collection("orders").find(match, {"_id": 0}))
+        orders = _filed_orders(db, db.get_collection("orders").find(match, {"_id": 0}))
     except Exception:  # noqa: BLE001
         return []
 
@@ -312,14 +321,15 @@ def _b2b_fetch_orders(db, order_ids: List[str]) -> List[dict]:
         from ...routers.orders import _build_invoice_gst_split
         from ...utils.online_gst import order_place_of_supply
 
-        docs = list(
+        docs = _filed_orders(
+            db,
             db.get_collection("orders").find(
                 {
                     "order_id": {"$in": list(order_ids)},
                     "status": _REAL_ORDER_STATUS_FILTER,
                 },
                 {"_id": 0},
-            )
+            ),
         )
     except Exception:  # noqa: BLE001
         return []
@@ -611,7 +621,9 @@ async def get_tally_sales_jv(
         match["store_id"] = {"$in": store_ids}
     _apply_created_at_range(match, from_date, to_date)
 
-    orders = list(db.get_collection("orders").find(match, {"_id": 0}))
+    # A routed online order held on its seller (GSTIN) check is no sale of
+    # this GSTIN until Re-map re-routes it: the one question GSTR-1/3B ask.
+    orders = _filed_orders(db, db.get_collection("orders").find(match, {"_id": 0}))
     # Determine inter-state vs intra-state for each order so the Tally voucher
     # uses the correct output ledger (IGST for inter-state, CGST+SGST for intra).
     _store_states = _store_state_map(db)
