@@ -487,6 +487,7 @@ def test_cancel_never_releases_the_units_of_an_order_whose_goods_are_out(wired, 
     with pytest.raises(HTTPException) as refused:
         _cancel()
     assert refused.value.status_code == 400
+    assert status.upper() in refused.value.detail.upper(), "the pre-check names the status"
     assert om._claim_order_for_cancel(wired["orders"], "ORD-1", "r" * 10, _ADMIN) is None
     wired["orders"].collection = None  # the non-atomic fallback holds it too
     assert om._claim_order_for_cancel(wired["orders"], "ORD-1", "r" * 10, _ADMIN) is None
