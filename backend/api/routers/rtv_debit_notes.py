@@ -16,8 +16,9 @@ It REUSES (no fork):
 
 RBAC: ADMIN / AREA_MANAGER / STORE_MANAGER / ACCOUNTANT (+ SUPERADMIN via
 require_roles) may issue / export. A cashier / sales / workshop / optometrist can
-NEVER issue a debit note. GET list/detail/print are AUTHENTICATED but store-scoped
-per object in the handler.
+NEVER issue a debit note. GET list/detail/print add WORKSHOP_STAFF (the Vendor
+Returns screen), store-scoped per object, and show it the items and quantities
+only (services/cost_mask.mask_debit_note; owner ruling 2026-09-29).
 
 No comms. No emoji (Windows cp1252). Money is paise-exact integers; responses
 carry both paise and a rupee display field.
@@ -40,6 +41,7 @@ from ..dependencies import (
     validate_store_access,
     user_store_scope,
 )
+from ..services.cost_mask import mask_debit_note
 from ..services.rtv_debit_note import (
     DebitNoteEngine,
     paise_to_rupees,
@@ -197,7 +199,10 @@ async def list_debit_notes(
         rows = eng.list(vendor_id=vendor_id, skip=skip, limit=limit)
     else:
         rows = eng.list(store_ids=list(reach), vendor_id=vendor_id, skip=skip, limit=limit)
-    return {"debit_notes": [_with_rupees(r) for r in rows], "total": len(rows)}
+    return {
+        "debit_notes": [mask_debit_note(_with_rupees(r), current_user) for r in rows],
+        "total": len(rows),
+    }
 
 
 @router.post("/issue", status_code=201)
@@ -245,7 +250,7 @@ async def get_debit_note(
     if doc is None:
         raise HTTPException(status_code=404, detail="Debit note not found")
     validate_store_access(doc.get("store_id"), current_user)
-    return _with_rupees(doc)
+    return mask_debit_note(_with_rupees(doc), current_user)
 
 
 @router.get("/{debit_note_id}/print", response_class=HTMLResponse)
@@ -259,7 +264,7 @@ async def print_debit_note(
     if doc is None:
         raise HTTPException(status_code=404, detail="Debit note not found")
     validate_store_access(doc.get("store_id"), current_user)
-    return HTMLResponse(content=render_debit_note_html(doc))
+    return HTMLResponse(content=render_debit_note_html(mask_debit_note(doc, current_user)))
 
 
 @router.get("/{debit_note_id}/tally", response_class=PlainTextResponse)

@@ -11,6 +11,7 @@ from datetime import datetime
 import uuid
 from .auth import require_roles
 from ..dependencies import get_db, resolve_store_scope, validate_store_access
+from ..services.cost_mask import mask_vendor_return
 
 # A vendor return mints a debit/credit note -- a financial instrument against a
 # vendor. Restrict create + status changes to the same roles that manage vendors
@@ -22,6 +23,8 @@ _VENDOR_RETURN_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
 # writers plus the Vendor Returns screen (/purchase/vendor-returns also admits
 # WORKSHOP_STAFF, who logs the defective pair). SALES_STAFF / CASHIER /
 # OPTOMETRIST have no screen and no read. rtv_debit_notes reads use this too.
+# Owner ruling 2026-09-29: WORKSHOP_STAFF sees the item, quantity and reason
+# only -- services/cost_mask strips the prices on every read.
 _VENDOR_RETURN_READERS = (*_VENDOR_RETURN_ROLES, "WORKSHOP_STAFF")
 
 router = APIRouter()
@@ -183,6 +186,7 @@ async def list_vendor_returns(
             if "_id" in ret:
                 del ret["_id"]
 
+        returns = [mask_vendor_return(r, current_user) for r in returns]
         return {"returns": returns, "total": total}
 
     except Exception as e:
@@ -296,7 +300,7 @@ async def get_vendor_return(
         if "_id" in return_doc:
             del return_doc["_id"]
 
-        return return_doc
+        return mask_vendor_return(return_doc, current_user)
 
     except HTTPException:
         raise

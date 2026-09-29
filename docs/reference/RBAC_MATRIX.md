@@ -1108,11 +1108,11 @@ are the exact current gate (SUPERADMIN always implied).
 | Method | Path | Allowed | S |
 |---|---|---|---|
 | `GET` | `/api/v1/vendor-returns` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT, WORKSHOP_STAFF | S |
-| `POST` | `/api/v1/vendor-returns` | AUTH |  |
+| `POST` | `/api/v1/vendor-returns` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `GET` | `/api/v1/vendor-returns/` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT, WORKSHOP_STAFF | S |
-| `POST` | `/api/v1/vendor-returns/` | AUTH |  |
+| `POST` | `/api/v1/vendor-returns/` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `GET` | `/api/v1/vendor-returns/{return_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT, WORKSHOP_STAFF | S |
-| `PATCH` | `/api/v1/vendor-returns/{return_id}/status` | AUTH |  |
+| `PATCH` | `/api/v1/vendor-returns/{return_id}/status` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 
 ### `/api/v1/vendor-rma`
 
@@ -1138,9 +1138,9 @@ are the exact current gate (SUPERADMIN always implied).
 | `GET` | `/api/v1/vendors/` | AUTH |  |
 | `POST` | `/api/v1/vendors/` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `GET` | `/api/v1/vendors/ap-aging` | ADMIN, ACCOUNTANT |  |
-| `GET` | `/api/v1/vendors/grn` | AUTH |  |
+| `GET` | `/api/v1/vendors/grn` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
 | `POST` | `/api/v1/vendors/grn` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/vendors/grn/{grn_id}` | AUTH |  |
+| `GET` | `/api/v1/vendors/grn/{grn_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
 | `POST` | `/api/v1/vendors/grn/{grn_id}/accept` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `POST` | `/api/v1/vendors/grn/{grn_id}/escalate` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `GET` | `/api/v1/vendors/purchase-orders` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |

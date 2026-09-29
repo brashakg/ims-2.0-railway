@@ -28,17 +28,21 @@ interface ReturnItem {
   unit_price: number;
 }
 
+// WORKSHOP_STAFF reads a return without its prices (server-side cost mask,
+// owner ruling 2026-09-29): the money keys are simply absent -> shown as "-".
+type ReturnLine = Omit<ReturnItem, 'unit_price'> & { unit_price?: number };
+
 interface VendorReturn {
   return_id: string;
   vendor_id: string;
   vendor_name: string;
   store_id: string;
-  items: ReturnItem[];
+  items: ReturnLine[];
   return_type: 'credit_note' | 'replacement';
   status: string;
-  total_value: number;
+  total_value?: number;
   credit_note_number: string | null;
-  credit_note_amount: number | null;
+  credit_note_amount?: number | null;
   created_at: string;
   created_by: string;
   notes: string;
@@ -50,6 +54,8 @@ interface Vendor {
   trade_name: string;
   mobile: string;
 }
+
+const rupees = (v?: number | null) => (v == null ? '-' : `₹${v.toLocaleString('en-IN')}`);
 
 const RETURN_REASONS = [
   { value: 'defective', label: 'Defective' },
@@ -316,7 +322,11 @@ export function VendorReturns() {
             <IndianRupee className="w-5 h-5 text-green-500" />
           </div>
           <p className="text-2xl font-bold text-green-600">
-            ₹{returns.reduce((sum, r) => sum + (r.credit_note_amount || 0), 0).toLocaleString('en-IN')}
+            {rupees(
+              returns.every((r) => r.total_value != null)
+                ? returns.reduce((sum, r) => sum + (r.credit_note_amount || 0), 0)
+                : null
+            )}
           </p>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
@@ -387,7 +397,7 @@ export function VendorReturns() {
                     <p className="text-gray-500 text-sm">Return ID: {ret.return_id}</p>
                   </div>
                   <div className="text-right">
-                    <p className="text-lg font-bold text-gray-900">₹{ret.total_value.toLocaleString('en-IN')}</p>
+                    <p className="text-lg font-bold text-gray-900">{rupees(ret.total_value)}</p>
                     <p className="text-gray-500 text-sm">{ret.items.length} item(s)</p>
                   </div>
                 </div>
@@ -410,10 +420,15 @@ export function VendorReturns() {
                         <div key={idx} className="flex justify-between items-center text-sm">
                           <div>
                             <p className="text-gray-600">{item.product_name}</p>
-                            <p className="text-gray-500 text-xs">Qty: {item.quantity} @ ₹{item.unit_price.toLocaleString('en-IN')}</p>
+                            <p className="text-gray-500 text-xs">
+                              Qty: {item.quantity}
+                              {item.unit_price != null && ` @ ${rupees(item.unit_price)}`}
+                            </p>
                           </div>
                           <div className="text-right">
-                            <p className="text-gray-600 font-medium">₹{(item.quantity * item.unit_price).toLocaleString('en-IN')}</p>
+                            <p className="text-gray-600 font-medium">
+                              {rupees(item.unit_price == null ? null : item.quantity * item.unit_price)}
+                            </p>
                             <p className="text-gray-500 text-xs">{RETURN_REASONS.find(r => r.value === item.reason)?.label}</p>
                           </div>
                         </div>
@@ -445,13 +460,12 @@ export function VendorReturns() {
                         {debitNotes[ret.return_id] ? (
                           <p className="text-gray-900 font-semibold">
                             {debitNotes[ret.return_id].debit_note_number}
-                            <span className="ml-2 text-gray-500 font-normal text-sm">
-                              ₹
-                              {(
-                                debitNotes[ret.return_id].totals_rupees?.grand_total ?? 0
-                              ).toLocaleString('en-IN')}
-                              {debitNotes[ret.return_id].is_inter_state ? ' (IGST)' : ' (CGST+SGST)'}
-                            </span>
+                            {debitNotes[ret.return_id].totals_rupees && (
+                              <span className="ml-2 text-gray-500 font-normal text-sm">
+                                {rupees(debitNotes[ret.return_id].totals_rupees?.grand_total)}
+                                {debitNotes[ret.return_id].is_inter_state ? ' (IGST)' : ' (CGST+SGST)'}
+                              </span>
+                            )}
                           </p>
                         ) : (
                           <p className="text-gray-400 text-sm">Not yet issued</p>

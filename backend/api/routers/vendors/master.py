@@ -18,6 +18,7 @@ from ._shared import (
     router,
     uuid,
 )
+from ...services.cost_mask import can_see_cost
 from .models import VendorCreate, VendorUpdate
 
 
@@ -59,8 +60,9 @@ async def list_vendors(
     if is_active is not None:
         filter_dict["is_active"] = is_active
 
-    roles = set(current_user.get("roles") or [])
-    names_only = not roles & {"SUPERADMIN", *_VENDOR_ROLES}
+    # Who sees supplier identity is the one purchase-mask rule (services/
+    # cost_mask) -- the same one that hides it on vendor returns / debit notes.
+    names_only = not can_see_cost(current_user, "purchase")
 
     if search:
         # A names-only caller searches only the keys it is shown. Matching the

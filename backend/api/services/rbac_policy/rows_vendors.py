@@ -44,7 +44,12 @@ ROWS: List[Dict[str, object]] = [
         ],
         "store_scoped": True,
     },
-    {"method": "POST", "path": "/api/v1/vendor-returns", "allowed": "AUTHENTICATED"},
+    # Writes = the handler's require_roles(*_VENDOR_RETURN_ROLES).
+    {
+        "method": "POST",
+        "path": "/api/v1/vendor-returns",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+    },
     {
         "method": "GET",
         "path": "/api/v1/vendor-returns/",
@@ -57,7 +62,11 @@ ROWS: List[Dict[str, object]] = [
         ],
         "store_scoped": True,
     },
-    {"method": "POST", "path": "/api/v1/vendor-returns/", "allowed": "AUTHENTICATED"},
+    {
+        "method": "POST",
+        "path": "/api/v1/vendor-returns/",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+    },
     {
         "method": "GET",
         "path": "/api/v1/vendor-returns/{return_id}",
@@ -73,7 +82,7 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "PATCH",
         "path": "/api/v1/vendor-returns/{return_id}/status",
-        "allowed": "AUTHENTICATED",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
     # --- /api/v1/vendor-rma (N4 Vendor RMA + credit-note reconciliation) ---
     # An RMA + its vendor credit note are financial instruments against a
@@ -230,7 +239,14 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/vendors/ap-aging",
         "allowed": ["ACCOUNTANT", "ADMIN"],
     },
-    {"method": "GET", "path": "/api/v1/vendors/grn", "allowed": "AUTHENTICATED"},
+    # F60: a GRN carries the supplier bill number / date + bill-scan id ->
+    # the receiving roles, store-scoped in the handler.
+    {
+        "method": "GET",
+        "path": "/api/v1/vendors/grn",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
     {
         "method": "POST",
         "path": "/api/v1/vendors/grn",
@@ -249,7 +265,8 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/vendors/grn/{grn_id}",
-        "allowed": "AUTHENTICATED",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
     },
     {
         "method": "POST",
