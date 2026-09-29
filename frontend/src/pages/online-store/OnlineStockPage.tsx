@@ -3,9 +3,12 @@
 // ============================================================================
 // A READ-ONLY reconciliation dashboard: per online-listed SKU it shows what the
 // storefront lists vs the real physical on-hand vs what is already reserved,
-// derives the sellable count (on_hand - reserved), flags oversell-risk
-// (listed > sellable), and suggests a conservative buffer to keep off the
-// listing. It answers "am I about to sell the same unit twice online + in-store".
+// shows what IMS's stock writer sends (sellable: each mapped shop's shelf minus
+// the safety buffer), shows the backend's oversell-risk flag (some Shopify
+// location lists more than its own shop's shelf -- decided per location, never
+// from the summed columns on this page), and suggests a conservative buffer to
+// keep off the listing. It answers "am I about to sell the same unit twice
+// online + in-store".
 //
 // STRICTLY READ-ONLY. This screen NEVER reserves/allocates a unit and NEVER
 // changes on-hand math — it only reports. The write-path allocation (marking
@@ -165,8 +168,8 @@ export default function OnlineStockPage() {
             oversell risk
           </span>
           <span className="text-sm text-red-900">
-            These list more online than is free to sell — reduce the online quantity (or restock)
-            before they can oversell.
+            A Shopify location lists more of these than its own shop has on the shelf — reduce
+            the online quantity (or restock) before they can oversell.
           </span>
         </div>
       )}
