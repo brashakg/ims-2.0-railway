@@ -239,9 +239,6 @@ def test_f13_guard_existing_sku_never_changes_on_edit():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="F69: ProductCreate has no `weight`, so pydantic drops it and "
-                          "the same-model chip has nothing to copy")
 def test_f69_create_door_keeps_the_weight(door):
     created = door(prod_router.ProductCreate(
         category="FRAME", brand="Ray-Ban", model="RB2140", color="901",

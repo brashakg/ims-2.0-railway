@@ -1340,7 +1340,7 @@ def normalise_payload(
     gst_rate: Optional[float] = None,
     country_of_origin: Optional[str] = None,
     warranty_months: Optional[int] = None,
-    weight_grams: Optional[float] = None,
+    weight: Optional[float] = None,
     tags: Any = None,
     created_by: Optional[str] = None,
     created_by_name: Optional[str] = None,
@@ -1543,8 +1543,8 @@ def normalise_payload(
         doc["country_of_origin"] = country_of_origin
     if warranty_months is not None:
         doc["warranty_months"] = int(warranty_months)
-    if weight_grams is not None:
-        doc["weight_grams"] = float(weight_grams)
+    if weight is not None:
+        doc["weight"] = float(weight)
     # Normalised, governed tags (step-12). Always present as a list (possibly
     # empty) so collection rules + the tag filter have a consistent shape.
     doc["tags"] = normalise_tags(tags)
@@ -2200,7 +2200,7 @@ def build_canonical_product(
         gst_rate=p.get("gst_rate"),
         country_of_origin=p.get("country_of_origin"),
         warranty_months=p.get("warranty_months"),
-        weight_grams=p.get("weight_grams"),
+        weight=p.get("weight"),
         tags=p.get("tags"),
         created_by=p.get("created_by") or p.get("actor"),
         created_by_name=p.get("created_by_name") or p.get("actor_name"),
@@ -2284,7 +2284,7 @@ def create_via_door(
         gst_rate=p.get("gst_rate"),
         country_of_origin=p.get("country_of_origin"),
         warranty_months=p.get("warranty_months"),
-        weight_grams=p.get("weight_grams"),
+        weight=p.get("weight"),
         tags=p.get("tags"),
         as_draft=bool(p.get("as_draft", False)),
         force_draft=force_draft,
@@ -2319,7 +2319,7 @@ _CLONE_CATALOG_FIELDS = (
     "gst_rate",
     "country_of_origin",
     "warranty_months",
-    "weight_grams",
+    "weight",
 )
 
 
@@ -2429,7 +2429,7 @@ def create_product(
     gst_rate: Optional[float] = None,
     country_of_origin: Optional[str] = None,
     warranty_months: Optional[int] = None,
-    weight_grams: Optional[float] = None,
+    weight: Optional[float] = None,
     tags: Any = None,
     as_draft: bool = False,
     force_draft: bool = False,
@@ -2479,7 +2479,7 @@ def create_product(
         gst_rate=gst_rate,
         country_of_origin=country_of_origin,
         warranty_months=warranty_months,
-        weight_grams=weight_grams,
+        weight=weight,
         tags=tags,
         created_by=actor,
         # Attribution: a router-supplied username wins (no DB hit); doors that

@@ -397,6 +397,7 @@ def _canonical_door_payload(
         "hsn_code": product.hsn_code,
         "gst_rate": product.gst_rate,
         "tags": product.tags,
+        "weight": product.weight,
         # Flat identity columns -- normalise_door_payload folds these into the
         # registry's attribute keys (brand->brand_name, model->model_no,
         # color->colour_code) so the required-field gate sees them.
@@ -549,6 +550,10 @@ class ProductCreate(BaseModel):
     # silently dropped it on every create and no IMS-born product ever carried a
     # description to Shopify. Optional + additive.
     description: Optional[str] = None
+    # Grams -- the same `weight` key PUT /products/{id} writes and the form
+    # reads back. Was never modelled here, so pydantic dropped it on every
+    # create and the same-model chip had no weight to copy (audit F69).
+    weight: Optional[float] = Field(default=None, ge=0)
     # Governed product tags (step-12). Accepts a list or a comma-separated
     # string; normalised (lowercase/trim/dedupe) server-side via the canonical
     # door so FORM/BULK/CATALOG all yield an identical `tags` array. Tags back
