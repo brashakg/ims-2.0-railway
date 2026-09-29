@@ -43,6 +43,7 @@ import { BarcodeManagementModal } from '../../components/inventory/BarcodeManage
 import { Pagination } from '../../components/common/Pagination';
 import { ImageLightbox } from '../../components/common/ImageLightbox';
 import { useInventoryContext } from './InventoryLayout';
+import { stockRowMatches } from '../../utils/stockSearch';
 import {
   CATEGORIES,
   getOnlineFor,
@@ -131,10 +132,11 @@ export function InventoryStockPage() {
 
   // Filter inventory locally
   const filteredInventory = inventory.filter(item => {
-    const matchesSearch = !searchQuery ||
-      item.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      item.sku?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      item.brand?.toLowerCase().includes(searchQuery.toLowerCase());
+    const matchesSearch = stockRowMatches(
+      searchQuery,
+      [item.name, item.sku, item.brand],
+      item.unit_barcodes,
+    );
 
     const matchesCategory = !selectedCategory || sameCategory(item.category, selectedCategory);
 
