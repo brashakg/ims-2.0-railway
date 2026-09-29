@@ -13,7 +13,7 @@ import {
 } from '../../../services/api/vendorAp';
 import { useToast } from '../../../context/ToastContext';
 import { useAuth } from '../../../context/AuthContext';
-import { inr, APPROVE_ROLES, errMsg } from './shared';
+import { inr, APPROVE_ROLES } from './shared';
 
 // ============================================================================
 // P3: Variance-Approval panel
@@ -56,7 +56,11 @@ export function ApproveModal({
       });
       toast.success('Exception approved — invoice released for payment');
     } catch (e) {
-      toast.error(errMsg(e, 'Failed to approve the exception'));
+      const msg =
+        e && typeof e === 'object' && 'response' in e
+          ? ((e as { response?: { data?: { detail?: string } } }).response?.data?.detail ?? '')
+          : e instanceof Error ? e.message : '';
+      toast.error(msg || 'Failed to approve the exception');
     } finally {
       setSaving(false);
     }

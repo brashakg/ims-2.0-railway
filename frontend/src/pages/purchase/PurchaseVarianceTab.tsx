@@ -16,7 +16,14 @@ import {
 import { vendorsApi, type VarianceLine } from '../../services/api';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
-import { errMsg } from './invoices/shared';
+
+function errMsg(e: unknown, fb: string): string {
+  if (e && typeof e === 'object' && 'response' in e) {
+    const r = (e as { response?: { data?: { detail?: string } } }).response;
+    if (r?.data?.detail) return String(r.data.detail);
+  }
+  return e instanceof Error ? e.message : fb;
+}
 
 const inr = (n?: number | null) =>
   n == null ? '-' : `₹${(Math.round(n * 100) / 100).toLocaleString('en-IN')}`;
