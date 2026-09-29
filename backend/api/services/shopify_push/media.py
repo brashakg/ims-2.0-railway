@@ -150,6 +150,15 @@ def image_source_url(image: Dict[str, Any]) -> Optional[str]:
 MEDIA_COLLECTION = "online_media"
 
 
+def reversed_marker(product_id: str) -> Dict[str, Any]:
+    """The ledger's HANDS-OFF MARKER for a product whose adoption was
+    REVERSED (scripts/adopt_shopify_media_map.py --reverse): while it stands
+    and IMS owns nothing on the listing, ANY media there -- a FAILED one
+    included -- keeps the pass hands-off, exactly as before the adoption (an
+    adoption takes it away again). No url: media_rows never returns it."""
+    return {"_id": "reversed:%s" % product_id, "product_id": str(product_id), "url": "", "how": "reversed"}
+
+
 def media_rows(db, product_id: Optional[str]) -> List[Dict[str, Any]]:
     """Every ledger doc of one product (pending and live). RAISES on a db
     error -- a caller that cannot read the ledger must fail closed, never
@@ -448,7 +457,9 @@ async def _attach_one(
 # photograph on a listing that went live before the ledger existed. A FAILED
 # media is no photograph and does not count (IMS's own lost attach that went
 # FAILED is claimed by its send window and taken down; any other would lock
-# the listing for good).
+# the listing for good) -- except on a product whose adoption was REVERSED
+# (reversed_marker): there any media keeps the pass hands-off, as before
+# the adoption, until the product is adopted again.
 #
 # TWO LANES. A doc is either the product's own photograph (no ``image_id``)
 # or a design-queue media (the queue row's ``image_id``, stamped when the
@@ -805,6 +816,7 @@ def plan_product_media(
     *,
     design_row: Optional[Dict[str, Any]] = None,
     now: Optional[datetime] = None,
+    reversed_: bool = False,
 ) -> Dict[str, Any]:
     """PURE diff of IMS's ordered photo list ``photos`` against the media IMS
     owns (the ledger docs ``rows``; ``own`` = the product's own photographs,
@@ -882,8 +894,10 @@ def plan_product_media(
     failed = {i for i, n in nodes.items() if _is_failed(n)}
     # Hands off guards the photographs a human put up; a FAILED media is none
     # (a FAILED media no send window claims would otherwise lock the listing
-    # for good).
-    hands_off = not live and any(i not in failed for i in unmanaged)
+    # for good) -- unless the product's adoption was REVERSED
+    # (``reversed_``, reversed_marker): then any media keeps it hands-off, as
+    # before the adoption.
+    hands_off = not live and any(reversed_ or i not in failed for i in unmanaged)
     # A FAILED media of this lane is not a photograph: its url is attached
     # again (before the FAILED one is deleted, below).
     by_url = {r["url"]: r["id"] for r in live if not (r["id"] in failed and _governed(r))}
@@ -1132,6 +1146,7 @@ async def sync_product_media(
         logger.warning("[SHOPIFY_PUSH] media lane normalise failed %s: %s", pid, exc)
     try:
         rows = media_rows(db, pid)
+        reversed_ = coll.find_one({"_id": reversed_marker(pid)["_id"]}) is not None
         if heirs and design_row:
             # HAND-OVER: a doc of this lane whose url another APPROVED row
             # sources is that row's image as well -- moved to its lane BEFORE
@@ -1154,7 +1169,7 @@ async def sync_product_media(
         summary["error"] = "could not read the listing's media: %s" % exc
         return summary
     now = _now()
-    plan = plan_product_media(rows, photos, own, listing, design_row=design_row, now=now)
+    plan = plan_product_media(rows, photos, own, listing, design_row=design_row, now=now, reversed_=reversed_)
     summary.update(
         unmanaged=plan["unmanaged"],
         adopted=len(plan["claims"]),

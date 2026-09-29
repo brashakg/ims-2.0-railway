@@ -36,6 +36,15 @@ a partial match is reported and nothing is written. Media no photo claimed
 exactly where it is, and the dry-run prints its file name so a wrong pairing
 is visible BEFORE --apply.
 
+DESIGN-QUEUE MEDIA PRESSED UNDER MAIN. Main recorded a pressed queue row's
+media on the row itself (product_images.shopify_image_id, the gid Shopify
+answered). Nothing reads that field now, and once the product's own photos
+are adopted the listing is no longer hands-off -- so without this the row's
+next press (or the push-all images sweep) would attach its asset a SECOND
+time. The adoption therefore takes each such media still on the listing
+into the ROW'S LANE (_design_pairs, printed '[design row <id>, pressed under
+main]'), riding with the product's own adoption.
+
 KNOWN LIMIT (inherent to a file-name rule): a HUMAN'S upload that carries the
 SAME file name as an IMS photo IS claimed -- IMS 'x/1.jpg' claims a hand
 upload named '1.jpg', and IMS 'front.jpg' claims 'front_<uuid>.jpg' (a hand
@@ -126,7 +135,8 @@ SCOPE
     the write re-checks that under the lease: an adoption never overwrites
     or duplicates a live doc, and a re-run is a no-op
   - one audit_logs row per adopted product (action MEDIA_MAP_ADOPT; the
-    replace mode writes PHOTOS_REPLACED_FROM_SHOPIFY carrying the before list)
+    replace mode writes PHOTOS_REPLACED_FROM_SHOPIFY carrying the before list;
+    the reversal MEDIA_MAP_REVERSE carrying every doc it deleted)
   - --ids is REQUIRED and explicit; 'all' is refused
 
 ENVIRONMENT NOTES
@@ -156,19 +166,26 @@ Reverse (the ledger only, under the lease):
 
 REVERSAL (ledger only): run the printed line --
     ... scripts/adopt_shopify_media_map.py --reverse --ids <id>,<id> --apply
-It deletes EVERY ledger doc of each product (the filter reversal_filter
-prints) UNDER the product's media_lease, the lease every press holds -- so no
-press is between its read of the ledger and its own record of an attach when
-the docs go. Never a raw deleteMany in mongosh: a press running at that moment
-records its attach after the delete, the product is no longer hands-off, and
-the next press attaches every rolled-back photo a second time. Without
---apply it only lists what it would delete. (The photo pass then goes back to
-hands-off on them, as before the adoption; nothing on Shopify moves: a media
-the pass attached since stays up, unmanaged, like every other media on a
-hands-off listing.)
+It deletes EVERY ledger doc of each product (reversal_filter) UNDER the
+product's media_lease, the lease every press holds -- so no press is between
+its read of the ledger and its own record of an attach when the docs go --
+and leaves the product's HANDS-OFF MARKER (media.reversed_marker). Never a
+raw deleteMany in mongosh: a press running at that moment records its attach
+after the delete, the product is no longer hands-off, and the next press
+attaches every rolled-back photo a second time. Every doc it deletes is
+printed (gid, url, how, lane) and goes into one audit_logs row
+(MEDIA_MAP_REVERSE). An id that is no catalog product (a spine product_id,
+the wrong MONGO_DATABASE) or holds no record is reported and NOT counted as
+reversed. Without --apply it only READS (no lease, no write) and lists what
+it would delete. The photo pass then goes back to hands-off on them, as
+before the adoption -- the marker keeps it so whatever media is on the
+listing, a FAILED copy included; adopting the product again takes the marker
+away. Nothing on Shopify moves: a media the pass attached since stays up,
+unmanaged, like every other media on a hands-off listing.
 
-Connection: MONGO_PUBLIC_URL, else MONGO_URL (the vars `railway run` injects);
-Shopify creds resolve from the same injected env. Nothing secret is printed.
+Connection: MONGO_PUBLIC_URL, else MONGO_URL (the vars `railway run` injects),
+database MONGO_DATABASE (default ims_2_0, as the app); Shopify creds resolve
+from the same injected env. Nothing secret is printed.
 """
 
 import argparse
@@ -192,27 +209,38 @@ from api.services import product_master as pm  # noqa: E402
 from api.services import shopify_push  # noqa: E402
 from api.services.shopify_push.media import (  # noqa: E402
     MEDIA_COLLECTION,
+    _cdn,
     _file_name,
+    _same_file,
+    image_source_url,
     match_media_to_photos,
     media_lease,
     media_rows,
     owned_media,
     product_photo_urls,
+    reversed_marker,
 )
 from api.services.shopify_push.queries import _PRODUCT_MEDIA_QUERY  # noqa: E402
 from database.repositories.product_repository import ProductRepository  # noqa: E402
 
 ACTOR = "system:adopt_shopify_media_map"
-DB_NAME = "ims_2_0"
+
+
+def _db_name() -> str:
+    """The app's own database: MONGO_DATABASE, default ims_2_0 (database/connection.py)."""
+    return os.getenv("MONGO_DATABASE", "ims_2_0")
+
+
 _URL = re.compile(r"https?://\S+|\S*myshopify\.com\S*")
 RULES = {"exact": ("exact",), "connector-prefix": ("exact", "connector_prefix")}
 
 
 def reversal_filter(ids: List[str]) -> Dict[str, Any]:
-    """The ledger docs the reversal deletes: EVERY doc of the products. Only
-    a product with no live doc is hands-off (media.plan_product_media), so
-    keeping a doc the pass minted or settled since would leave the pass
-    managing the listing and attach every rolled-back photo a second time."""
+    """The ledger docs the reversal deletes: EVERY doc of the products (the
+    hands-off marker it leaves has no url and is kept). Only a product with
+    no live doc is hands-off (media.plan_product_media), so keeping a doc the
+    pass minted or settled since would leave the pass managing the listing
+    and attach every rolled-back photo a second time."""
     return {"product_id": {"$in": list(ids)}}
 
 
@@ -225,21 +253,62 @@ def reversal_line(ids: List[str]) -> str:
     )
 
 
+def _doc_line(d: Dict[str, Any]) -> str:
+    return "%s %s %s%s" % (
+        d.get("gid") or "PENDING (sent %s)" % d.get("sent_at"),
+        d.get("url"),
+        d.get("how") or "-",
+        " lane=%s" % d["image_id"] if d.get("image_id") else "",
+    )
+
+
 async def reverse(db, ids: List[str], apply: bool) -> List[str]:
     """THE REVERSAL: delete EVERY ledger doc of each product (reversal_filter)
     UNDER its media_lease -- the lease every press holds from before it reads
     the ledger until its pass is done, so the docs never go while a press is
-    between that read and its own record of an attach. Dry-run (apply False)
-    lists what would go. Returns the ids reversed; a product whose lease or
-    delete fails is reported and left for a re-run."""
+    between that read and its own record of an attach -- and leave the
+    product's HANDS-OFF MARKER (media.reversed_marker): the pass then keeps
+    its hands off the listing whatever media is on it, a FAILED one
+    included, exactly as before the adoption. Every doc deleted is printed
+    and goes into one audit_logs row (MEDIA_MAP_REVERSE). A dry run (apply
+    False) only READS -- no lease, no write. Returns the ids reversed; an id
+    that is no catalog product (a spine id, the wrong database), one with
+    nothing on record, and one whose lease or delete fails are each reported
+    and never counted as reversed."""
     done: List[str] = []
     for pid in ids:
         try:
-            async with media_lease(db, pid):
-                docs = list(db[MEDIA_COLLECTION].find(reversal_filter([pid])))
-                if apply:
-                    db[MEDIA_COLLECTION].delete_many(reversal_filter([pid]))
+            if db["catalog_products"].find_one({"id": pid}) is None:
+                print(
+                    f"  NOT REVERSED {pid}: no catalog product with this id in database {_db_name()} "
+                    "(the TWIN id, not the spine's product_id) -- nothing deleted"
+                )
+                continue
+            if not apply:
+                docs = [d for d in db[MEDIA_COLLECTION].find(reversal_filter([pid])) if d.get("url")]
+            else:
+                async with media_lease(db, pid):
+                    docs = [d for d in db[MEDIA_COLLECTION].find(reversal_filter([pid])) if d.get("url")]
+                    marker = reversed_marker(pid)
+                    if docs and db[MEDIA_COLLECTION].find_one({"_id": marker["_id"]}) is None:
+                        db[MEDIA_COLLECTION].insert_one(marker)  # first: a failure here deletes nothing
+                    if docs:
+                        db[MEDIA_COLLECTION].delete_many({"_id": {"$in": [d["_id"] for d in docs]}})
+            if not docs:
+                print(f"  NOTHING TO REVERSE {pid}: IMS holds no media record for it -- nothing deleted")
+                continue
             print(f"  {'REVERSED' if apply else 'would reverse'} {pid}: {len(docs)} ledger doc(s)")
+            for d in docs:
+                print(f"      {'-' if apply else '?'} {_doc_line(d)}")
+            if apply:
+                _audit(
+                    db,
+                    {"product_id": pid},
+                    action="MEDIA_MAP_REVERSE",
+                    before={"media": [{k: d.get(k) for k in ("gid", "url", "how", "image_id", "sent_at")} for d in docs]},
+                    after={"media": [], "hands_off": True},
+                    reversal="adopt the listing again: scripts/adopt_shopify_media_map.py --ids %s" % pid,
+                )
             done.append(pid)
         except Exception as exc:  # noqa: BLE001 -- reported per product, the run goes on
             print(f"  REVERSAL FAILED {pid}: {_redact(exc)} -- nothing deleted for it; run again")
@@ -341,10 +410,11 @@ async def inspect(db, product_id: str, rules: tuple = ("exact",)) -> Dict[str, A
     if nodes is None:
         return row
     match = match_media_to_photos(row["photos"], nodes, rules=rules, product_gid=gid)
+    design = _design_pairs(db, product_id, nodes, {m["id"] for m in match["map"]}, row["photos"])
     row["media"] = len(nodes)
-    row["map"] = match["map"]
+    row["map"] = match["map"] + design
     row["unmatched"] = match["unmatched_photos"]
-    row["unmanaged"] = match["unmanaged"]
+    row["unmanaged"] = [mid for mid in match["unmanaged"] if mid not in {d["id"] for d in design}]
     row["names"] = match["names"]
     if match["map"] and not match["unmatched_photos"]:
         row["status"] = "adopt"
@@ -353,6 +423,33 @@ async def inspect(db, product_id: str, rules: tuple = ("exact",)) -> Dict[str, A
     else:
         row["status"] = "unmatched"
     return row
+
+
+def _design_pairs(
+    db, product_id: str, nodes: List[Dict[str, Any]], taken: set, own: List[str]
+) -> List[Dict[str, str]]:
+    """The DESIGN-QUEUE media main pressed onto this listing: main's
+    push_image wrote the MediaImage gid Shopify answered back onto the queue
+    row (product_images.shopify_image_id) -- an exact identity, the only
+    record main kept, which nothing on this branch reads. Each such media
+    still on the listing is adopted into ITS ROW'S LANE (image_id), so the
+    design press sees it live and never attaches it a second time: under the
+    row's source url when the media's CDN name carries that url's file name
+    (or it has none yet), else under the media's own CDN url -- the row was
+    re-edited since, and its next press swaps the old asset for the new one.
+    A gid already claimed, a row without an image_id (no lane) and a row
+    sourcing one of the product's own photographs are left out (unmanaged)."""
+    listed = {str(n["id"]): n for n in nodes if isinstance(n, dict) and n.get("id")}
+    out: List[Dict[str, str]] = []
+    for img in db["product_images"].find({"product_id": product_id}):
+        mid = _as_shopify_gid(img.get("shopify_image_id"), "MediaImage")
+        src = image_source_url(img)
+        if mid not in listed or mid in taken or not src or src in own or not img.get("image_id"):
+            continue
+        cdn = _cdn(listed[mid]).strip()
+        out.append({"url": src if not cdn or _same_file(src, cdn) else cdn, "id": mid, "image_id": str(img["image_id"])})
+        taken.add(mid)
+    return out
 
 
 def _owned(db, product_id: str) -> List[Dict[str, str]]:
@@ -377,7 +474,7 @@ async def _adopt(db, product_id: str, pairs: List[Dict[str, str]]) -> bool:
             "_id": uuid.uuid4().hex,
             "product_id": product_id,
             "url": pair["url"],
-            "image_id": None,
+            "image_id": pair.get("image_id"),
             "gid": pair["id"],
             "how": "adopted",
             "sent_at": now,
@@ -403,6 +500,11 @@ async def _adopt(db, product_id: str, pairs: List[Dict[str, str]]) -> bool:
                     )
                     return False
                 raise
+            try:
+                # an earlier REVERSAL's hands-off marker: IMS owns the listing again
+                coll.delete_one({"_id": reversed_marker(product_id)["_id"]})
+            except Exception as exc:  # noqa: BLE001 -- it matters only once IMS owns nothing again
+                print(f"  NOTE {product_id}: its reversal marker stays ({_redact(exc)})")
         return True
     except Exception as exc:  # noqa: BLE001 -- reported per product, the run goes on
         print(f"  WRITE FAILED {product_id}: {_redact(exc)} -- nothing adopted")
@@ -604,7 +706,8 @@ def _print_row(r: Dict[str, Any]) -> None:
                 print(f"      - media {mid} ({name})")
         return
     for m in r["map"]:
-        print(f"      + {m['url']} -> {m['id']} ({names.get(m['id'], '?')})")
+        lane = f" [design row {m['image_id']}, pressed under main]" if m.get("image_id") else ""
+        print(f"      + {m['url']} -> {m['id']} ({names.get(m['id'], '?')}){lane}")
     for u in r["unmatched"]:
         print(f"      ? unmatched {u}")
     for mid in r["unmanaged"]:
@@ -734,7 +837,7 @@ def _connect():
         client = MongoClient(uri, serverSelectionTimeoutMS=20000)
         try:
             client.admin.command("ping")
-            return client[DB_NAME]
+            return client[_db_name()]
         except ServerSelectionTimeoutError:
             if attempt == 2:
                 raise

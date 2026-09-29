@@ -471,7 +471,7 @@ def test_the_printed_reversal_puts_the_pass_back_to_hands_off(db, monkeypatch, c
     assert args.reverse and args.apply and script.parse_ids(args.ids) == ["P1"]
 
     assert asyncio.run(script.reverse(db, ["P1"], apply=True)) == ["P1"]
-    assert list(db[LEDGER].find({"product_id": "P1"})) == []
+    assert [d["_id"] for d in db[LEDGER].find({"product_id": "P1"})] == ["reversed:P1"], "only the marker"
 
     listing = [_node(1, OID1 + ".png"), _node(2, OID2 + ".png"), _node(3, OID3 + ".png")]
     rows = shopify_push.media_rows(db, "P1")
@@ -1110,3 +1110,175 @@ def test_the_runbook_names_one_reversal_and_it_takes_every_doc():
     assert "adopted ledger docs" not in doc and "delete the product's adopted" not in doc
     assert "--reverse --ids" in doc and "EVERY ledger doc" in doc
     assert script.reversal_filter(["P1"]) == {"product_id": {"$in": ["P1"]}}
+
+
+# ---------------------------------------------------------------------------
+# Round 5: the reversal reads without the lease on a dry run, is loud on a
+# no-op, records what it deleted, keeps the pass hands-off; main's design-row
+# media is adopted into its lane
+# ---------------------------------------------------------------------------
+
+
+def _held_lease(db, monkeypatch):
+    """P1's media lease collection with real Mongo's unique _id (the lease IS
+    that claim), a claimant waiting 0.3 s at most."""
+    from pymongo.errors import DuplicateKeyError
+
+    from api.services.shopify_push import media as media_mod
+
+    monkeypatch.setattr(media_mod, "_LEASE_WAIT_SECONDS", 0.3)
+    leases = db[media_mod.LEASES_COLLECTION]
+    plain_insert = leases.insert_one
+
+    def _unique_id(doc):
+        if leases.find_one({"_id": doc["_id"]}) is not None:
+            raise DuplicateKeyError("E11000 duplicate key error")
+        return plain_insert(doc)
+
+    leases.insert_one = _unique_id
+    return leases
+
+
+def test_a_dry_run_reversal_reads_without_the_lease(db, monkeypatch, capsys):
+    """The panel's LOW. A dry run only LISTS: it never claims the product's
+    media lease -- so a press holding it neither makes the dry run wait and
+    fail, nor can a dry run killed mid-way leave a lease that refuses every
+    press for 15 minutes.
+    REVERT-PROOF: the dry run under media_lease -> it waits, prints
+    'REVERSAL FAILED P1' and returns []."""
+    from api.services.shopify_push import media as media_mod
+
+    _wire(monkeypatch, [_node(1, OID1 + ".png")])
+    _seed(db, [U1])
+    assert _run(db, apply=True)["written"] == ["P1"]
+    leases = _held_lease(db, monkeypatch)
+
+    async def _press_holds_the_lease():
+        async with media_mod.media_lease(db, "P1"):
+            before = list(leases.find({}))
+            done = await script.reverse(db, ["P1"], apply=False)
+            return done, before, list(leases.find({}))
+
+    done, before, after = asyncio.run(_press_holds_the_lease())
+    out = capsys.readouterr().out
+    assert done == ["P1"] and "REVERSAL FAILED" not in out and "would reverse P1: 1" in out
+    assert after == before, "no lease written"
+    assert _adopted(db) == [{"url": U1, "id": _m(1)}], "nothing deleted"
+
+
+def test_the_cli_reverse_without_apply_deletes_nothing(db, monkeypatch, capsys):
+    """The panel's LOW (hollow CLI). A bare '--reverse --ids P1', documented
+    as list-only, goes through main() and deletes NOTHING; with --apply it
+    deletes.
+    REVERT-PROOF: main() calling reverse(db, ids, apply=True) -> the bare
+    --reverse deletes every ledger doc of P1."""
+    _wire(monkeypatch, [_node(1, OID1 + ".png")])
+    _seed(db, [U1])
+    assert _run(db, apply=True)["written"] == ["P1"]
+    monkeypatch.setattr(script, "_connect", lambda: db)
+
+    script.main(["--reverse", "--ids", "P1"])
+
+    assert "DRY RUN - nothing deleted" in capsys.readouterr().out
+    assert _adopted(db) == [{"url": U1, "id": _m(1)}]
+    script.main(["--reverse", "--ids", "P1", "--apply"])
+    assert _adopted(db) == []
+
+
+def test_a_reversal_that_matches_nothing_is_never_reported_done(db, monkeypatch, capsys):
+    """The panel's LOW. A SPINE product_id typed instead of the twin id (or
+    the wrong database) and a twin with nothing on record are each said --
+    'NOT REVERSED' / 'NOTHING TO REVERSE' -- and never returned as reversed:
+    the operator is never told a rollback worked while the pass still
+    manages the listing.
+    REVERT-PROOF: the old 'REVERSED <id>: 0 ledger doc(s)' -> both ids
+    returned as done."""
+    _seed(db, [U1])
+
+    done = asyncio.run(script.reverse(db, ["SPINE-1", "P1"], apply=True))
+
+    out = capsys.readouterr().out
+    assert done == [] and "NOT REVERSED SPINE-1" in out and "NOTHING TO REVERSE P1" in out
+    assert list(db[LEDGER].find({})) == [], "no marker for a no-op"
+
+
+def test_a_reversal_prints_and_audits_every_doc_it_deletes(db, monkeypatch, capsys):
+    """The panel's LOW. After a reversal something must record which listing
+    media IMS attached: every deleted doc (gid, url, how, a pending send) is
+    printed and goes into one MEDIA_MAP_REVERSE audit row -- as the adoption
+    writes MEDIA_MAP_ADOPT.
+    REVERT-PROOF: no audit row / no per-doc lines -> red."""
+    _wire(monkeypatch, [_node(1, OID1 + ".png")])
+    _seed(db, [U1])
+    assert _run(db, apply=True)["written"] == ["P1"]
+    db[LEDGER].insert_one(media_doc("P1", U2))  # a pending attach
+    capsys.readouterr()
+
+    assert asyncio.run(script.reverse(db, ["P1"], apply=True)) == ["P1"]
+
+    out = capsys.readouterr().out
+    assert "REVERSED P1: 2 ledger doc(s)" in out and _m(1) in out and "PENDING" in out and U2 in out
+    (row,) = [r for r in db["audit_logs"].find({}) if r.get("action") == "MEDIA_MAP_REVERSE"]
+    assert row["entity_id"] == "P1"
+    assert sorted((m["gid"] or "-", m["url"], m["how"] or "-") for m in row["before_state"]["media"]) == [
+        ("-", U2, "-"),
+        (_m(1), U1, "adopted"),
+    ]
+
+
+def test_the_runbook_connects_to_the_apps_database(monkeypatch):
+    """The panel's LOW. The script used a hard-coded 'ims_2_0': on a deploy
+    whose MONGO_DATABASE differs it read and wrote another database and
+    reported success. It follows the app's variable now.
+    REVERT-PROOF: the hard-coded name -> 'ims_2_0' used."""
+    import pymongo
+
+    class _Client:
+        def __init__(self, *_a, **_k):
+            self.admin = type("A", (), {"command": staticmethod(lambda *_a: {"ok": 1})})()
+
+        def __getitem__(self, name):
+            return "db:" + name
+
+    monkeypatch.setattr(pymongo, "MongoClient", _Client)
+    monkeypatch.setenv("MONGO_URL", "mongodb://example.invalid")
+    monkeypatch.setenv("MONGO_DATABASE", "ims_other")
+    assert script._connect() == "db:ims_other"
+
+
+def test_design_row_media_pressed_under_main_is_adopted_into_its_lane(db, monkeypatch):
+    """The panel's MEDIUM (migration gap, probe V4). Listing [media 1 = the
+    product's own photo; media 5 = D, a design asset pressed under main;
+    media 6, the first asset of row I2, pressed under main and RE-EDITED
+    since; media 7, a hand upload]. Rows I1 (url D) and I2 carry main's
+    shopify_image_id. The adoption takes the own photo into the product's
+    lane AND each design media into its row's lane: I1's press is then a
+    no-op (never a second copy of D), and I2's press swaps its old asset for
+    the new one (drops the old, attaches the new). The hand upload stays
+    unmanaged.
+    REVERT-PROOF: no design adoption -> I1's plan is 'create' once the own
+    photo is adopted: its press attaches D a second time."""
+    d = "https://cdn.example.com/design/d-lifestyle.jpg"
+    e_new = "https://cdn.example.com/design/e-v2.jpg"
+    e_old_cdn = CDN + "e-v1.jpg?v=1788643984"
+    _wire(monkeypatch, [_node(1, OID1 + ".png"), _node(5, "d-lifestyle.jpg"), _node(6, "e-v1.jpg"), _node(7, "hand.jpg")])
+    _seed(db, [U1])
+    db["product_images"].insert_one(
+        {"image_id": "I1", "product_id": "P1", "url": d, "status": "APPROVED", "shopify_image_id": _m(5)}
+    )
+    db["product_images"].insert_one(
+        {"image_id": "I2", "product_id": "P1", "url": e_new, "status": "APPROVED", "shopify_image_id": _m(6)}
+    )
+
+    out = _run(db, apply=True)
+
+    assert out["rows"][0]["status"] == "adopt" and out["written"] == ["P1"]
+    assert out["rows"][0]["unmanaged"] == [_m(7)]
+    got = {(r["url"], r["gid"], r.get("image_id")) for r in db[LEDGER].find({"product_id": "P1"})}
+    assert got == {(U1, _m(1), None), (d, _m(5), "I1"), (e_old_cdn, _m(6), "I2")}
+    parent = db["catalog_products"].find_one({"id": "P1"})
+    rows = shopify_push.media_rows(db, "P1")
+    i1 = shopify_push.image_press_plan(parent, db["product_images"].find_one({"image_id": "I1"}), rows)
+    assert (i1["action"], i1["gid"]) == ("noop", _m(5)), i1
+    i2 = shopify_push.image_press_plan(parent, db["product_images"].find_one({"image_id": "I2"}), rows)
+    assert (i2["action"], i2["drop"]) == ("create", [e_old_cdn]), i2

@@ -68,6 +68,7 @@ were run red against it before they counted):
   T24test_a_lost_design_attach_queues_its_.. no re-queue after the        -> product drained,
       / test_a_held_design_attach_is_not_...    design press / no settling    copy unmanaged
   T22b test_two_lost_attaches_are_told_...   no other-name rule           -> both held
+  T25 test_a_reversed_adoption_stays_hands_.. no reversal marker           -> U1 attached again
   T26 test_the_send_window_counts_the_...     _REACH = PROVIDER_TIMEOUT    -> dropped, attached
                                                 + 90 s                        a second time
   T26b test_the_send_window_counts_each_try_  a try = one PROVIDER_TIMEOUT -> dropped
@@ -2565,6 +2566,42 @@ def test_a_person_photo_on_a_listing_ims_owns_nothing_on_never_holds_the_first_a
         assert _ledger(db) == set()
     # (the 502 answered before anything reached Shopify: no attach at all)
     assert fake.attached() == ([U1] if landed else []), "U1 never attached beside a copy"
+
+
+def test_a_reversed_adoption_stays_hands_off_on_a_failed_only_listing(gates, monkeypatch):
+    """The panel's LOW (probe V3). OWN was ADOPTED (media 1). The operator
+    replaces it with U1: U1 is attached (100, minted) and OWN taken down.
+    Shopify then marks 100 FAILED. The operator runs the printed reversal.
+    The runbook promises the pass goes back to hands-off, as before the
+    adoption: the reversal leaves the product's hands-off marker, so the
+    FAILED copy -- the only media left -- keeps it hands-off: zero media
+    mutations, nothing managed again. Adopting it again lifts the marker.
+    REVERT-PROOF: no marker (the reversal only deletes) -> the next press
+    attaches U1 again (a minted doc: the rollback undid itself) beside the
+    FAILED copy, unmanaged for good."""
+    import importlib
+    import pathlib
+
+    scripts = str(pathlib.Path(__file__).resolve().parents[2] / "scripts")
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    script = importlib.import_module("adopt_shopify_media_map")
+
+    fake = _live(monkeypatch, [_node(1, OWN)])
+    db = _DB()
+    _seed(db, _product([U1]))
+    _own(db, OWN, 1, how="adopted")
+    first = _run(shopify_push.push_product(db, _parent(db), []))
+    assert first.ok is True and fake.listing() == [_m(100)], first.photos
+    fake.fail(_m(100))
+
+    assert _run(script.reverse(db, ["P1"], apply=True)) == ["P1"]
+    n = len(fake.calls)
+    again = _run(shopify_push.push_product(db, _parent(db), []))
+
+    assert again.photos["hands_off"] is True, again.photos
+    assert [c["op"] for c in fake.calls[n:] if "Media" in c["op"] and c["op"] != "imsProductMedia"] == []
+    assert [d for d in _docs(db) if d.get("url")] == [] and fake.listing() == [_m(100)]
 
 
 def test_the_send_window_counts_the_transports_own_tries_before_the_attach(gates, monkeypatch):
