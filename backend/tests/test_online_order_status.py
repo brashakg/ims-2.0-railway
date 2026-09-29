@@ -709,6 +709,30 @@ def test_the_signed_shiprocket_webhook_delivers_on_a_known_awb(swept):
     assert _doc(swept, 60121)["status"] == "SHIPPED"
 
 
+_HELD = {"rx_pending": True, "fulfillment_hold": True, "rx_hold_reasons": ["RX_MISSING"]}
+
+
+@pytest.mark.parametrize("state", [
+    {"status": "CANCELLED"}, {"status": "REFUNDED"}, {"status": "VOID"},
+    {"status": "CONFIRMED", **_HELD}, {"status": "SHIPPED", **_HELD},
+], ids=["cancelled", "refunded", "void", "rx_held_confirmed", "rx_held_shipped"])
+def test_the_shiprocket_webhook_asks_the_table_on_any_order_its_awb_finds(swept, state):
+    """The webhook finds the order by its AWB alone, whatever its status: an
+    order cancelled after its parcel was (the AWB stays on it), a refunded or
+    voided one, one on an Rx hold. A courier DELIVERED moves none of them --
+    the table keeps a finished order and withholds a held one (raising its
+    Rx task) -- where a bypass of the table would deliver each."""
+    _book(swept, 60124)
+    _set(swept, 60124, awb="AWB-C", **state)
+    agent = nexus_module.NexusAgent(db=swept["db"])
+    asyncio.run(agent._handle_shiprocket_webhook({"awb": "AWB-C", "current_status": "DELIVERED"}))
+
+    doc = _doc(swept, 60124)
+    assert doc["status"] == state["status"]
+    assert "delivered_at" not in doc and "status_history" not in doc
+    assert _tasks(swept, 60124, "online_rx_hold") == (1 if state.get("rx_pending") else 0)
+
+
 
 # ---------------------------------------------------------------------------
 # The refund leg. Finding (d): a Shopify cancel refund restocks no unit the
