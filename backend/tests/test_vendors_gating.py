@@ -147,19 +147,44 @@ def _everyone_else():
     return [r for r in ALL_ROLES if r != "SUPERADMIN" and r not in _ORDER_MANAGERS]
 
 
+# Everything a manager does to an order once it exists, and receiving goods
+# into stock (owner ruling 2026-09-28: receiving MANAGERS ONLY).
+_MANAGER_WRITES = [
+    w for w in WRITES if "/purchase-orders/po1" in w[1] or "/vendors/grn" in w[1]
+]
+_ROLE_GATE_DETAIL = "Your role does not have access to this resource"
+
+
 class TestOnlyManagersChangeAnOrder:
-    """Send, edit, cancel and line-cancel stay with the managers: every other
-    role -- cashier and workshop staff included, the catalogue manager too --
-    is refused on every one of them."""
+    """Send, edit, cancel, line-cancel and receiving stay with the managers:
+    every other role -- cashier and workshop staff included, the catalogue
+    manager too -- is refused on every one of them."""
 
     @pytest.mark.parametrize("role", _everyone_else())
-    @pytest.mark.parametrize(
-        "method,path,body,params",
-        [w for w in WRITES if "/purchase-orders/po1" in w[1]],
-    )
+    @pytest.mark.parametrize("method,path,body,params", _MANAGER_WRITES)
     def test_refused(self, client, role, method, path, body, params):
         resp = _send(client, method, path, body, params, _headers([role]))
         assert resp.status_code == 403, (role, method, path)
+
+    @pytest.mark.parametrize("method,path,body,params", _MANAGER_WRITES)
+    def test_a_vendors_write_grant_does_not_open_them(
+        self, client, monkeypatch, method, path, body, params
+    ):
+        """The policy row alone answers 403 to a role test, so a route that
+        lost its require_roles still looked gated. It is not: the middleware
+        honours a per-user grant, require_roles does not. An ADMIN may grant
+        vendors:write to a salesperson; the route's own gate must still say no
+        -- and it is that gate (its message) that answers."""
+        from api import dependencies as deps
+
+        class _Users:
+            def find_by_id(self, uid):
+                return {"user_id": uid, "permissions": {"grant": {"vendors:write": True}}}
+
+        monkeypatch.setattr(deps, "get_user_repository", lambda: _Users())
+        resp = _send(client, method, path, body, params, _headers(["SALES_STAFF"]))
+        assert resp.status_code == 403, (method, path)
+        assert resp.json().get("detail") == _ROLE_GATE_DETAIL, (method, path)
 
     def test_the_refused_list_covers_the_counter_and_the_workshop(self):
         assert {"CASHIER", "WORKSHOP_STAFF", "SALES_STAFF", "CATALOG_MANAGER"} <= set(
@@ -183,6 +208,34 @@ def _code_gate(dependant):
 
     walk(dependant)
     return set.intersection(*gates) - {"SUPERADMIN"} if gates else None
+
+
+# Writes whose role check lives inside the handler rather than a
+# require_roles dependency (portal tokens: _require_admin).
+_GATED_IN_THE_HANDLER = {
+    ("POST", "/api/v1/vendors/{vendor_id}/portal-token"),
+    ("DELETE", "/api/v1/vendors/{vendor_id}/portal-token/{token_id}"),
+}
+
+
+def test_every_vendors_write_has_a_code_gate(app):
+    """A write with no require_roles is gated by its policy row alone -- which
+    a per-user grant opens. So every /vendors write carries its own gate (or is
+    named above with where its check lives); losing one fails here."""
+    from fastapi.routing import APIRoute
+
+    missing, writes = [], 0
+    for route in app.routes:
+        if not isinstance(route, APIRoute) or not route.path.startswith("/api/v1/vendors"):
+            continue
+        for method in route.methods - {"GET", "HEAD"}:
+            writes += 1
+            if (method, route.path) in _GATED_IN_THE_HANDLER:
+                continue
+            if _code_gate(route.dependant) is None:
+                missing.append((method, route.path))
+    assert writes >= 10
+    assert not missing, missing
 
 
 def test_every_vendors_policy_row_matches_its_code_gate(app):
