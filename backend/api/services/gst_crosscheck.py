@@ -221,7 +221,7 @@ def aggregate_gstr3b(
 
     ITC is split by scope (R1). The GSTIN-BOUND slice (``itcAvailableGstin``:
     every bill received on the store's GSTIN, and GSTIN-less transfer mirrors
-    received at the store -- reports gst_itc._itc_match) differs between
+    received at any shop carrying that GSTIN -- gst_itc._itc_match) differs between
     sibling stores of one entity with DIFFERENT GSTINs; it is counted ONCE per
     GSTIN, so a bill is never claimed on two registrations. The company-wide
     remainder (legacy bills naming no GSTIN) and RCM filter on
@@ -438,7 +438,10 @@ def build_crosscheck(
     ``unplaced``: reports gst_itc._itc_unplaced -- booked input credit NO
                  GSTIN's GSTR-3B counts ({count, tax, bill_numbers}). When
                  given, a row compares it to zero, so credit silently missing
-                 from every return can never read as a green screen.
+                 from every return can never read as a green screen; a
+                 read failure (``failed``) is a MISMATCH row, and
+                 ``unregistered`` (credit claimed from suppliers with no
+                 GSTIN) gets a row of its own.
 
     Returns the comparison rows, the GSTR-1 per-rate breakup, the CDNR and
     deemed-supply detail, and a summary (mismatch_count / all_matched). Pure.
@@ -620,7 +623,19 @@ def build_crosscheck(
         ),
     ]
 
-    if unplaced is not None:
+    if unplaced is not None and unplaced.get("failed"):
+        # The bills could not be read: never a green row.
+        comparisons.append(
+            {
+                "metric": "Input credit left off GSTR-3B",
+                "sources": {},
+                "variance": 0.0,
+                "status": "MISMATCH",
+                "note": "The booked bills could not be read, so credit left off "
+                "the return cannot be ruled out. Retry before filing.",
+            }
+        )
+    elif unplaced is not None:
         n = int(_f(unplaced.get("count")))
         comparisons.append(
             _cmp_row(
@@ -641,8 +656,27 @@ def build_crosscheck(
                 ),
             )
         )
+        unreg = unplaced.get("unregistered")
+        if unreg is not None:
+            k = int(_f(unreg.get("count")))
+            comparisons.append(
+                _cmp_row(
+                    "Input credit from suppliers with no GSTIN",
+                    {"Claimed on GSTR-3B": _f(unreg.get("tax")), "Expected": 0.0},
+                    tolerance,
+                    note=(
+                        "%d bill(s) claim this input credit although the supplier "
+                        "has no GSTIN on file, and an unregistered supplier's tax "
+                        "never reaches GSTR-2B. Add the supplier's GSTIN, or mark "
+                        "the bill as no input credit: %s"
+                        % (k, ", ".join(str(x) for x in (unreg.get("bill_numbers") or [])[:20]))
+                        if k
+                        else "Every claimed bill names a registered supplier."
+                    ),
+                )
+            )
 
-    mismatches = [c for c in comparisons if c["status"] == "MISMATCH"]
+    mismatches =[c for c in comparisons if c["status"] == "MISMATCH"]
 
     return {
         "tolerance": round(tolerance, 2),

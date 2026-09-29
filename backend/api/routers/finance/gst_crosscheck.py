@@ -355,7 +355,9 @@ def _run_gst_cross_check(db, m: int, y: int, entity_id: Optional[str]) -> dict:
     # or a GSTIN that is no shop's): a row of its own, so a month with credit
     # missing from GSTR-3B can never read green.
     unplaced = _itc_unplaced(db, y, m, monthrange(y, m)[1], entity_id)
-    result = _xc.build_crosscheck(gstr1, gstr3b, books, tally, unplaced=unplaced)
+    # A bill read that failed is a dead ITC leg too (HR-1): no sign-off.
+    itc_leg_failed = itc_leg_failed or bool(unplaced.get("failed"))
+    result =_xc.build_crosscheck(gstr1, gstr3b, books, tally, unplaced=unplaced)
     result.update(
         {
             "month": m,

@@ -461,7 +461,7 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
             db, active_store, year, mon, last_day
         )
         # R1: split the GSTIN-bound slice (every bill received on this GSTIN,
-        # plus GSTIN-less transfer mirrors at this store) out of the total so
+        # plus GSTIN-less transfer mirrors at any shop on that GSTIN) out of the total so
         # the cross-check aggregator can dedupe it once per GSTIN while the
         # company-wide remainder (legacy bills naming no GSTIN) is deduped once
         # per company. The slice is the SAME _itc_match AND-ed with the GSTIN
