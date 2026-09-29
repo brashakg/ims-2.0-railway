@@ -2048,7 +2048,8 @@ COLLECTIONS.update({
 # It is PUSH-DARK: image records + their RAW->EDITED->APPROVED design lifecycle
 # are tracked inside IMS Mongo only; nothing is written to Shopify from here
 # (the press is shopify_push.push_image, and an image's identity on Shopify is
-# the parent twin's ecom.media_map row for its url -- no field on this doc).
+# its doc in the ``online_media`` ledger, shopify_push.media -- no field on
+# this doc).
 #
 # One doc = one image of a product (or a specific variant). BVI's two tables
 # (ProductImage on the parent, VariantImage on the variant) are merged into this

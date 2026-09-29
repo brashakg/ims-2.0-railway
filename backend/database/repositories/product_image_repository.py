@@ -8,7 +8,10 @@ IMS Mongo (BVI_MERGE_PLAN.md A.1 / Phase 4).
 PUSH-DARK: this repo STORES + EDITS image records + drives their
 RAW->EDITED->APPROVED design lifecycle inside IMS only. No Shopify network write
 happens here (the press is shopify_push.push_image; an image's identity on
-Shopify is the parent twin's ecom.media_map row, never a field on this row).
+Shopify is its doc in the ``online_media`` ledger -- keyed by the parent
+product and the row's source url, in the row's image_id lane -- never a field
+on this row; a pre-ledger ``shopify_image_id`` on an old row is read only by
+the adoption runbook, scripts/adopt_shopify_media_map.py).
 
 One row = one image of a product (variant_id=null) or of a specific variant
 (variant_id set) -- BVI's two image tables merged + discriminated by variant_id.
@@ -156,8 +159,8 @@ class ProductImageRepository(BaseRepository):
         Defaults: a fresh image enters the queue as kind=RAW, status=QUEUED,
         source=UPLOAD, position=0, variant_id=None. The caller's values win
         where supplied. The image_id is server-minted. The row carries NO
-        Shopify id: once pushed, its identity on the listing is the parent
-        twin's ecom.media_map row for its url (shopify_push.media).
+        Shopify id: once pushed, its identity on the listing is its
+        ``online_media`` ledger doc (shopify_push.media).
         """
         if not data or not data.get("product_id") or not data.get("url"):
             return None
