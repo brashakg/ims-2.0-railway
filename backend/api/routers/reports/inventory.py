@@ -5,11 +5,13 @@ from typing import Any, Dict, Optional
 from datetime import date
 from ..auth import get_current_user, require_roles
 from ...dependencies import (
+    get_product_repository,
     get_stock_repository,
     get_eye_test_repository,
     get_db,
     validate_store_access,
 )
+from ...services.reorder_policy import low_stock_rows
 from ._shared import (
     _REPORT_FINANCE_ROLES,
     _row_category,
@@ -44,7 +46,7 @@ async def inventory_summary(
 
     # Get all stock
     all_stock = stock_repo.find_many({"store_id": active_store}, limit=0)
-    low_stock = stock_repo.find_low_stock(active_store, threshold=5)
+    low_stock = low_stock_rows(stock_repo, get_product_repository(), active_store)
 
     total_value = sum(
         (s.get("quantity", 0) * s.get("cost_price", 0)) for s in all_stock

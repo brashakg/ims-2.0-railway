@@ -24,12 +24,21 @@ Consumers (each guards with auto_reorder_disabled()):
   - agents/implementations/taskmaster.py  auto-draft PO
   - agents/implementations/oracle.py      predictive reorder proposals
 
-No emojis (Windows cp1252). Pure function, no DB access.
+REORDER LEVEL (owner ruling 2026-09-28, "keep -1 for default"): the
+product's `reorder_point` is its low-stock level. -1 (the create door's
+default), a missing value or garbage = NOT SET = no low-stock alert until
+someone types a level. `reorder_level` / `is_low_stock` are THE rule; every
+reader that decides "low stock" calls them, and `low_stock_rows` is the one
+low-stock list (StockRepository.find_low_stock filtered by each product's own
+level) the endpoints and reports read.
+
+No emojis (Windows cp1252). No direct DB access (low_stock_rows reads through
+the repositories it is handed).
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict, List, Optional
 
 
 def auto_reorder_disabled(product: Any) -> bool:
@@ -53,3 +62,58 @@ def auto_reorder_disabled(product: Any) -> bool:
         return int(rq) <= 0
     except (TypeError, ValueError):
         return False
+
+
+def reorder_level(product: Any) -> Optional[int]:
+    """The product's low-stock level, or None = NOT SET (-1, missing, garbage).
+
+    Accepts a `products` spine doc (top-level reorder_point) or a
+    `catalog_products` doc (inventory.reorder_level)."""
+    if not isinstance(product, dict):
+        return None
+    rp = product.get("reorder_point")
+    if rp is None:
+        inv = product.get("inventory")
+        if isinstance(inv, dict):
+            rp = inv.get("reorder_level")
+    try:
+        level = int(rp)
+    except (TypeError, ValueError):
+        return None
+    return level if level >= 0 else None
+
+
+def is_low_stock(product: Any, on_hand: Any) -> bool:
+    """True when the product has a level and on_hand is at or under it."""
+    level = reorder_level(product)
+    try:
+        return level is not None and int(on_hand or 0) <= level
+    except (TypeError, ValueError):
+        return False
+
+
+def low_stock_rows(stock_repo, product_repo, store_id) -> List[Dict[str, Any]]:
+    """THE low-stock list for a store: find_low_stock's {_id, quantity} rows,
+    kept only when the product's own level says low, each row carrying that
+    `reorder_point`. No product repo / a failed read -> [] (never alert on a
+    level we could not read)."""
+    # ponytail: counts every product on hand at the store, then joins them in
+    # one $in; move the level into the aggregation ($lookup) if a store ever
+    # holds tens of thousands of products.
+    rows = stock_repo.find_low_stock(store_id, threshold=10**9) or []
+    pids = [str(r.get("_id")) for r in rows if r.get("_id")]
+    if product_repo is None or not pids:
+        return []
+    try:
+        products = {
+            str(p.get("product_id")): p
+            for p in product_repo.find_many({"product_id": {"$in": pids}}, limit=len(pids)) or []
+        }
+    except Exception:  # noqa: BLE001 - a failed read alerts nothing, never everything
+        return []
+    out = []
+    for r in rows:
+        prod = products.get(str(r.get("_id")))
+        if is_low_stock(prod, r.get("quantity")):
+            out.append({**r, "reorder_point": reorder_level(prod)})
+    return out

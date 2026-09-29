@@ -277,7 +277,7 @@ def _map_product(
         "offer_price": sale_price,
         "cost_price": pur_price,
         "stock_quantity": stock_qty,
-        "reorder_point": 0,  # TechCherry has no reorder concept exported
+        "reorder_point": -1,  # not set (owner 2026-09-28): TechCherry exports none
         "hsn_code": hsn,
         "unit": unit,
         "is_active": True,

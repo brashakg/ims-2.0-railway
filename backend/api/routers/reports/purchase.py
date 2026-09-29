@@ -12,6 +12,7 @@ from ...dependencies import (
     validate_store_access,
 )
 from ...services.reorder_policy import auto_reorder_disabled as _auto_reorder_disabled
+from ...services.reorder_policy import reorder_level
 from ._shared import router
 
 # ----------------------------------------------------------------------------
@@ -252,7 +253,9 @@ async def purchase_recommendations(
             or prod.get("current_stock")
             or 0
         )
-        reorder_point = int(prod.get("reorder_point") or 0)
+        # Not set (-1) buys nothing on its own account (F73); 0 is the floor.
+        level = reorder_level(prod)
+        reorder_point = level or 0
         gap_units = max(0, desired_cover - current_stock)
         if gap_units <= 0 and current_stock > reorder_point:
             # No buying needed — skip.
@@ -290,7 +293,7 @@ async def purchase_recommendations(
                 "velocity_90d": velocity_90d,
                 "daily_velocity": round(daily_v, 2),
                 "current_stock": current_stock,
-                "reorder_point": reorder_point,
+                "reorder_point": level,  # None = not set
                 "desired_cover": desired_cover,
                 "gap_units": gap_units,
                 "suggested_order_qty": suggested_qty,
@@ -304,7 +307,8 @@ async def purchase_recommendations(
                 "reason": (
                     f"Sold {velocity_90d} in {lookback_days}d "
                     f"(~{round(daily_v, 1)}/day). Stock {current_stock}, "
-                    f"reorder at {reorder_point}. Buy {suggested_qty} to cover "
+                    f"{'reorder level not set' if level is None else f'reorder at {level}'}. "
+                    f"Buy {suggested_qty} to cover "
                     f"{cover_days} days."
                 ),
             }

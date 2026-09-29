@@ -252,17 +252,11 @@ def test_f69_create_door_keeps_the_weight(door):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="F73: normalise_payload stamps reorder_quantity -1 but no "
-                          "reorder_point, so the form's 5 becomes the level")
 def test_f73_new_product_is_born_with_reorder_level_not_set(door):
     created = door(_form())
     assert created.get("reorder_point") == -1
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="F73: ProductUpdate.reorder_point is ge=0, so a level can "
-                          "never be cleared back to 'not set'")
 def test_f73_edit_can_clear_the_level_back_to_not_set():
     try:
         upd = prod_router.ProductUpdate(reorder_point=-1)
@@ -293,9 +287,6 @@ def test_f73_guard_a_typed_level_still_alerts(monkeypatch):
     assert listed == {"P-SET"}
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="F73: find_low_stock uses a fixed threshold of 5 and never "
-                          "reads the product's level, so -1 still alerts")
 def test_f73_low_stock_skips_a_product_whose_level_is_not_set(monkeypatch):
     listed = _low_stock(
         monkeypatch,
@@ -307,3 +298,17 @@ def test_f73_low_stock_skips_a_product_whose_level_is_not_set(monkeypatch):
     )
     # P-SET proves the aggregation really ran (a swallowed fake error lists nothing).
     assert listed == {"P-SET"}
+
+
+def test_f73_the_one_rule_says_not_set_never_minus_one():
+    """reorder_policy.reorder_level is what every reader and screen gets: -1,
+    a missing level or garbage is None (the screens print 'not set'), never -1."""
+    from api.services.reorder_policy import is_low_stock, reorder_level
+
+    assert reorder_level({"reorder_point": -1}) is None
+    assert reorder_level({}) is None
+    assert reorder_level({"reorder_point": "x"}) is None
+    assert reorder_level({"reorder_point": 0}) == 0
+    assert reorder_level({"inventory": {"reorder_level": 3}}) == 3  # a catalog doc
+    assert not is_low_stock({"reorder_point": -1}, -5)  # oversold, still no alert
+    assert is_low_stock({"reorder_point": 2}, 2)
