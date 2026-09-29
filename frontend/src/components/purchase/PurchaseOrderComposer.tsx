@@ -82,6 +82,9 @@ export interface ComposerLine {
   // Set true once the operator (or a caller default) has typed a cost -- guards
   // the last-cost prefill from ever overwriting a value someone chose.
   costTouched?: boolean;
+  /** The picked product's own catalogue cost -- the seed the box falls back
+   *  to when the chosen vendor has no price history for it. */
+  catalogCost?: number;
   // Populated by the last-cost lookup so we can render the muted caption. Not
   // sent to the server.
   lastPaid?: { unitPrice: number; date?: string | null } | null;
@@ -215,17 +218,19 @@ export function applyPickedProduct(
     detail?: string;
   },
 ): ComposerLine {
-  const keepCost = line.costTouched || line.unitCost > 0;
+  const catalogCost = picked.costPrice && picked.costPrice > 0 ? picked.costPrice : 0;
   const { taxRate, hsn, gstResolved, gstMissing } = gstForProduct(picked);
   return {
     ...line,
     productId: picked.productId,
     productName: picked.productName,
     sku: picked.sku,
-    // Seed from the catalog cost only when the line still has none; the buyer
-    // can always override. This is NOT the last-paid prefill (that runs off the
-    // vendor lookup) -- it's the catalog's own cost_price fallback.
-    unitCost: keepCost ? line.unitCost : picked.costPrice && picked.costPrice > 0 ? picked.costPrice : 0,
+    // Seed from the catalogue cost unless the buyer typed one. The seed is the
+    // form's own guess, so the vendor's last-paid lookup still replaces it
+    // (audit F22) -- and a cost auto-filled for the PREVIOUS product is not
+    // carried over to this one.
+    unitCost: line.costTouched ? line.unitCost : catalogCost,
+    catalogCost,
     // The picked product carries its own GST rate + HSN. Nothing is guessed:
     // a product with neither leaves the line unresolved and visibly flagged.
     taxRate,
@@ -331,16 +336,18 @@ export function PurchaseOrderComposer({
   // ------------------------------------------------------------------------
   // COST PREFILL (Phase 2C). When a vendor is chosen AND lines carry products,
   // batch every product_id into ONE getLastCost call and, for each line whose
-  // cost is still untouched/blank, fill it from the last agreed price and stash
-  // the caption. Never overwrites a value the operator typed. Re-runs when the
-  // vendor changes or a new product appears. Fail-soft: empty -> no caption.
+  // cost the operator has not typed, fill it from the last price agreed with
+  // THIS vendor and stash the caption -- over the catalogue seed too (audit
+  // F22: the seed used to block the lookup, so it never ran). Never overwrites
+  // a value the operator typed. Re-runs when the vendor changes or a new
+  // product appears. Fail-soft: no history -> the seed stays, no caption.
   // ------------------------------------------------------------------------
   // Signature of "which products need a price under which vendor" -- lets us
   // debounce/guard so adding lines one at a time doesn't spam the endpoint and
   // we don't refetch when nothing relevant changed.
   const prefillKey = useMemo(() => {
     const pids = lines
-      .filter((l) => l.productId && !l.costTouched && !(l.unitCost > 0))
+      .filter((l) => l.productId && !l.costTouched)
       .map((l) => l.productId)
       .sort();
     return `${vendorId}::${pids.join(',')}`;
@@ -353,7 +360,7 @@ export function PurchaseOrderComposer({
     if (prefillKey === lastPrefillKey.current) return;
 
     const productIds = lines
-      .filter((l) => l.productId && !l.costTouched && !(l.unitCost > 0))
+      .filter((l) => l.productId && !l.costTouched)
       .map((l) => l.productId);
     if (productIds.length === 0) {
       lastPrefillKey.current = prefillKey;
@@ -369,7 +376,7 @@ export function PurchaseOrderComposer({
         prev.map((l) => {
           // Re-check the guard against CURRENT state: the operator may have
           // typed a cost while the request was in flight.
-          if (!l.productId || l.costTouched || l.unitCost > 0) return l;
+          if (!l.productId || l.costTouched) return l;
           const hit = costs[l.productId];
           if (!hit || !(hit.unit_price > 0)) return l;
           return { ...l, unitCost: hit.unit_price, lastPaid: { unitPrice: hit.unit_price, date: hit.date } };
@@ -384,9 +391,10 @@ export function PurchaseOrderComposer({
   }, [prefillKey, vendorId, lines]);
 
   // When the vendor changes, a cost we AUTO-prefilled from the previous vendor's
-  // history no longer applies -- reset it to blank (and drop its caption) so the
-  // new vendor's lookup repaints it. Operator-typed costs (costTouched) are left
-  // exactly as chosen; we never overwrite a value someone entered.
+  // history no longer applies -- put the catalogue seed back (and drop its
+  // caption) so the new vendor's lookup repaints it. Operator-typed costs
+  // (costTouched) are left exactly as chosen; we never overwrite a value
+  // someone entered.
   const prevVendorRef = useRef(vendorId);
   useEffect(() => {
     if (prevVendorRef.current === vendorId) return;
@@ -394,7 +402,7 @@ export function PurchaseOrderComposer({
     lastPrefillKey.current = '';
     setLines((prev) =>
       prev.map((l) =>
-        l.lastPaid && !l.costTouched ? { ...l, unitCost: 0, lastPaid: null } : l,
+        l.lastPaid && !l.costTouched ? { ...l, unitCost: l.catalogCost ?? 0, lastPaid: null } : l,
       ),
     );
   }, [vendorId]);
@@ -609,10 +617,11 @@ export function PurchaseOrderComposer({
                       className="input-field text-sm"
                       aria-label={`Unit cost for line ${index + 1}`}
                     />
-                    {line.lastPaid && paidDate ? (
+                    {line.lastPaid ? (
                       <p className="mt-1 text-xs text-gray-400">
                         last paid {'₹'}
-                        {line.lastPaid.unitPrice.toLocaleString('en-IN')} on {paidDate}
+                        {line.lastPaid.unitPrice.toLocaleString('en-IN')}
+                        {paidDate ? ` on ${paidDate}` : ''}
                       </p>
                     ) : null}
                   </div>

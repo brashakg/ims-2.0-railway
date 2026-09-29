@@ -28,7 +28,7 @@ vi.mock('../../../services/api/inventory', () => ({
   },
 }));
 
-import { PurchaseOrderComposer } from '../PurchaseOrderComposer';
+import { PurchaseOrderComposer, applyPickedProduct } from '../PurchaseOrderComposer';
 import type {
   ComposerLine,
   ComposerVendorOption,
@@ -238,6 +238,64 @@ describe('PurchaseOrderComposer — cost prefill', () => {
     expect(screen.queryByText(/last paid/i)).not.toBeInTheDocument();
     // No product needed a price -> the endpoint was never hit for it.
     expect(getLastCostMock).not.toHaveBeenCalledWith('v-1', ['prod-a']);
+  });
+});
+
+// Audit F22: picking a product seeds its catalogue cost; that seed is the
+// form's own guess, not the buyer's, so the vendor's last price replaces it.
+describe('PurchaseOrderComposer — last paid beats the catalogue seed (F22)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function renderWithPicker() {
+    return renderComposer({
+      initialLines: undefined,
+      renderProductCell: ({ pickProduct }) => (
+        <button
+          type="button"
+          onClick={() =>
+            pickProduct({ productId: 'prod-a', productName: 'Carrera CA 8895', sku: 'CA8895', costPrice: 3200, gstRate: 5, hsn: '900311' })
+          }
+        >
+          pick
+        </button>
+      ),
+    });
+  }
+
+  it('replaces the catalogue cost with the last price paid to this vendor', async () => {
+    getLastCostMock.mockResolvedValue({
+      costs: { 'prod-a': { unit_price: 3100, po_number: 'PO-2', po_id: 'po-2', date: '2026-09-17T10:00:00' } },
+    });
+    renderWithPicker();
+    fireEvent.click(screen.getByRole('button', { name: 'pick' }));
+
+    const costInput = screen.getByLabelText(/unit cost for line 1/i) as HTMLInputElement;
+    await waitFor(() => expect(costInput.value).toBe('3100'));
+    expect(getLastCostMock).toHaveBeenCalledWith('v-1', ['prod-a']);
+    expect(screen.getByText(/last paid ₹3,100 on 17 Sept? 2026/i)).toBeInTheDocument();
+  });
+
+  it('re-picking a product does not inherit the previous one\'s auto-filled cost', () => {
+    const autoFilled = LINE({ unitCost: 3100, costTouched: false, lastPaid: { unitPrice: 3100 } });
+    const next = applyPickedProduct(autoFilled, { productId: 'prod-b', productName: 'B', sku: 'B', costPrice: 5000 });
+    expect(next.unitCost).toBe(5000);
+    const typed = applyPickedProduct(LINE({ unitCost: 2950, costTouched: true }), {
+      productId: 'prod-b', productName: 'B', sku: 'B', costPrice: 5000,
+    });
+    expect(typed.unitCost).toBe(2950);
+  });
+
+  it('keeps the catalogue cost when this vendor was never paid for it', async () => {
+    getLastCostMock.mockResolvedValue({ costs: {} });
+    renderWithPicker();
+    fireEvent.click(screen.getByRole('button', { name: 'pick' }));
+
+    await waitFor(() => expect(getLastCostMock).toHaveBeenCalledWith('v-1', ['prod-a']));
+    const costInput = screen.getByLabelText(/unit cost for line 1/i) as HTMLInputElement;
+    expect(costInput.value).toBe('3200');
+    expect(screen.queryByText(/last paid/i)).not.toBeInTheDocument();
   });
 });
 
