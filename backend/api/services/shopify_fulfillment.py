@@ -59,6 +59,26 @@ def _norm(value: Any) -> str:
 # the order's tracking fields show -- the newest one IMS applied.
 FULFILLMENT_CLOCKS = "shopify_fulfillment_clocks"
 FULFILLMENT_WATERMARK = "shopify_fulfillment_updated_at"
+# The AWB of every LIVE parcel ([{"id": _clock_key, "awb"}]; a cancelled or
+# failed one leaves it). The tracking fields show one parcel; the courier legs
+# (the Shiprocket poll and webhook) ask about all of them (tracked_awbs), so a
+# split shipment is delivered by whichever parcel the courier delivers.
+PARCEL_AWBS = "shopify_parcel_awbs"
+
+
+def tracked_awbs(order: Dict[str, Any]) -> list:
+    """The AWBs the courier legs track for an order: every live parcel's, or,
+    on an order no fulfilment has reached since the parcel list, its awb."""
+    parcels = order.get(PARCEL_AWBS)
+    if isinstance(parcels, list):
+        return [p["awb"] for p in parcels if isinstance(p, dict) and p.get("awb")]
+    return [order["awb"]] if order.get("awb") else []
+
+
+def awb_filter(awb: str) -> Dict[str, Any]:
+    """The orders query for the order an AWB belongs to, by tracked_awbs'
+    own rule."""
+    return {"$or": [{f"{PARCEL_AWBS}.awb": awb}, {"awb": awb, PARCEL_AWBS: {"$exists": False}}]}
 
 
 def _clock_key(f: Dict[str, Any]) -> str:
@@ -189,10 +209,19 @@ def reconcile_fulfillment(
         watermark = _to_naive_utc(payload.get("updated_at"))
         if watermark is not None and fulfillment_id:
             update[f"{FULFILLMENT_CLOCKS}.{_clock_key(payload)}"] = watermark
+        live = ful_status not in ("CANCELLED", "ERROR")
+        parcels = [p for p in order.get(PARCEL_AWBS) or []
+                   if isinstance(p, dict) and p.get("id") != _clock_key(payload)]
+        if live and tracking_number:
+            parcels.append({"id": _clock_key(payload), "awb": tracking_number})
+        if fulfillment_id:
+            update[PARCEL_AWBS] = parcels
         # The order's tracking fields show the NEWEST fulfilment IMS applied:
         # an older parcel's late event states its own fact below but never
-        # takes them over from a newer one.
-        if not _shopify_payload_stale(order, payload, field=FULFILLMENT_WATERMARK):
+        # takes them over from a newer one, and a cancelled / failed parcel
+        # never takes them over while another parcel is still live.
+        if (live or not parcels) and not _shopify_payload_stale(
+                order, payload, field=FULFILLMENT_WATERMARK):
             update.update({
                 "fulfillment_status": ful_status,
                 "shopify_fulfillment_id": fulfillment_id,

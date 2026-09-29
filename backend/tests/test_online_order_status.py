@@ -733,6 +733,58 @@ def test_the_shiprocket_webhook_asks_the_table_on_any_order_its_awb_finds(swept,
     assert _tasks(swept, 60124, "online_rx_hold") == (1 if state.get("rx_pending") else 0)
 
 
+_T = "2026-09-06T{}:00Z".format
+_SPLITS = {
+    # A second parcel created by mistake and cancelled: the live one keeps the
+    # order's tracking fields.
+    "a_cancelled_parcel_after_the_live_one": (
+        "AWB-LIVE", [(1, "AWB-LIVE", "success", _T("01:00")), (2, "AWB-CXL", "cancelled", _T("02:00"))]),
+    # The parcel the tracking fields show is cancelled; the earlier one is
+    # still on its way.
+    "the_newest_parcel_cancelled": (
+        "AWB-F1", [(1, "AWB-F1", "open", _T("01:10")), (2, "AWB-F2", "open", _T("01:20")),
+                   (2, "AWB-F2", "cancelled", _T("03:00"))]),
+}
+
+
+@pytest.mark.parametrize("leg", ["poll", "webhook"])
+@pytest.mark.parametrize("split", sorted(_SPLITS))
+def test_a_split_shipment_is_delivered_by_its_live_parcel(swept, monkeypatch, split, leg):
+    """Ruling 1 on a split shipment: DELIVERED when the courier delivers the
+    parcel still on its way. A cancelled parcel keeps its tracking number on
+    Shopify; it never takes over the order's tracking fields from a live one,
+    and the Shiprocket poll and webhook track every live parcel -- they used
+    to know only the order's one awb, so the poll asked the cancelled AWB
+    forever and the webhook for the live one found no order."""
+    oid = 60126
+    live, events = _SPLITS[split]
+    _book(swept, oid)
+    for fid, awb, status, at in events:
+        shopify_fulfillment.reconcile_fulfillment(
+            swept["db"], _fulfilment(oid, fid, tracking_number=awb, status=status, updated_at=at,
+                                     created_at=at), topic="fulfillments/update")
+    doc = _doc(swept, oid)
+    assert doc["status"] == "SHIPPED"
+    if split == "a_cancelled_parcel_after_the_live_one":
+        assert (doc["awb"], doc["fulfillment_status"]) == ("AWB-LIVE", "FULFILLED")
+    agent = nexus_module.NexusAgent(db=swept["db"])
+    if leg == "poll":
+        asked = []
+
+        async def fake_track(db, awb):
+            asked.append(awb)
+            return SyncResult(ok=True, provider="shiprocket", kind="pull",
+                              payload={"latest_status": "DELIVERED" if awb == live else "CANCELED"})
+
+        monkeypatch.setattr(nexus_module, "shiprocket_track_awb", fake_track)
+        asyncio.run(agent._sync_shiprocket_outbound())
+        assert asked == [live]
+    else:
+        asyncio.run(agent._handle_shiprocket_webhook({"awb": live, "current_status": "DELIVERED"}))
+
+    doc = _doc(swept, oid)
+    assert doc["status"] == "DELIVERED" and doc["delivered_at"]
+
 
 # ---------------------------------------------------------------------------
 # The refund leg. Finding (d): a Shopify cancel refund restocks no unit the

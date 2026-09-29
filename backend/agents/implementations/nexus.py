@@ -195,6 +195,7 @@ class NexusAgent(JarvisAgent):
         a lost race retries next hour (the query only returns SHIPPED orders).
         """
         from api.services.online_order_status import DELIVER, apply_fact, courier_fact
+        from api.services.shopify_fulfillment import awb_filter, tracked_awbs
 
         orders_coll = self.get_collection("orders")
         if orders_coll is None:
@@ -214,18 +215,23 @@ class NexusAgent(JarvisAgent):
 
         updated = delivered = 0
         for order in shipped_with_awb:
-            awb = order.get("awb")
-            try:
-                r = await shiprocket_track_awb(self.db, awb)
-            except Exception as e:  # noqa: BLE001 -- one bad AWB / answer never stops the poll
-                # An unexpected tracking JSON shape, or an AWB httpx refuses
-                # (InvalidURL is no HTTPError), raises out of the call. Left
-                # unstamped it would sort first and abort every run.
-                logger.warning(f"[NEXUS] Shiprocket track failed for AWB {awb!r}: {e}")
-                r = None
+            answers = []
+            # Every live parcel of a split shipment (tracked_awbs): the one
+            # the courier delivers is the delivery.
+            for awb in tracked_awbs(order):
+                try:
+                    r = await shiprocket_track_awb(self.db, awb)
+                except Exception as e:  # noqa: BLE001 -- one bad AWB / answer never stops the poll
+                    # An unexpected tracking JSON shape, or an AWB httpx refuses
+                    # (InvalidURL is no HTTPError), raises out of the call. Left
+                    # unstamped it would sort first and abort every run.
+                    logger.warning(f"[NEXUS] Shiprocket track failed for AWB {awb!r}: {e}")
+                    r = None
+                answers.append((r.payload or {}).get("latest_status") if r and r.ok else None)
             now = datetime.now(timezone.utc).isoformat()
             stamp = {"tracking_polled_at": now}  # asked, answered or not: to the back
-            new_status = (r.payload or {}).get("latest_status") if r and r.ok else None
+            new_status = next((s for s in answers if courier_fact(s) == DELIVER),
+                              next((s for s in answers if s), None))
             if new_status and new_status != order.get("tracking_status"):
                 stamp.update(tracking_status=new_status, tracking_updated_at=now)
             try:
@@ -1130,6 +1136,7 @@ class NexusAgent(JarvisAgent):
         decides. Field names are Shiprocket's documented ones (awb,
         current_status); the hourly poll is the path that is known to work."""
         from api.services.online_order_status import DELIVER, apply_fact, courier_fact
+        from api.services.shopify_fulfillment import awb_filter
 
         evt = payload.get("current_status") or payload.get("event") or "unknown"
         logger.info(f"[NEXUS] shiprocket webhook status={evt}")
@@ -1137,7 +1144,7 @@ class NexusAgent(JarvisAgent):
         if not awb or courier_fact(payload.get("current_status")) != DELIVER:
             return
         orders = self.get_collection("orders")
-        order = orders.find_one({"awb": awb}) if orders is not None else None
+        order = orders.find_one(awb_filter(awb)) if orders is not None else None
         if order:
             apply_fact(self.db, order, DELIVER, source="SHIPROCKET_WEBHOOK")
 
