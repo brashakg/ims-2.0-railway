@@ -15,6 +15,10 @@ pytest-mock==3.15.1
 # because fixtures seeded a business date off the box's UTC clock; without this
 # the only way to verify such a fix was to wait until tomorrow.
 freezegun==1.5.1
+# In-memory Mongo for tests that build a small world without a server. CI also
+# runs a real Mongo service; a test may use either, but CI must be able to import
+# it (PRs #1166/#1167 failed collection with "No module named mongomock").
+mongomock==4.3.0
 
 # Code Quality
 # 24.3.0 fixes GHSA-fj7x-q9j7-g6q6 / CVE-2024-21503 (ReDoS) while staying on
