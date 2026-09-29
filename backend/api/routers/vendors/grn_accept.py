@@ -112,13 +112,20 @@ def release_held_receipts(product_id: str) -> List[dict]:
     product catalogue-complete. The receipt is completed as the manager who
     accepted it (receiving is managers-only; the cataloguer only finished the
     product). Fail-soft per receipt: the catalogue save stands, the receipt
-    stays held and says so, and "Add to stock" retries it."""
+    stays held and says so, and "Add to stock" retries it.
+
+    Oldest receipt first, and never past what its order asked for: a receipt
+    whose held units would put more of a product on the shelf than its PO
+    ordered (a second receipt of the same box, say) stays held and goes to the
+    shop's store manager to void or accept -- a person decides, not the
+    cataloguer's save."""
     grn_repo = get_grn_repository()
     if grn_repo is None or not product_id:
         return []
     try:
         held = grn_repo.find_many(
-            {"status": "PARTIALLY_ACCEPTED", "unresolved_lines.product_id": product_id}
+            {"status": "PARTIALLY_ACCEPTED", "unresolved_lines.product_id": product_id},
+            sort=[("created_at", 1)],
         )
     except Exception as exc:  # noqa: BLE001
         logger.error("[VENDOR] held-receipt lookup for %s failed: %s", product_id, exc)
@@ -128,6 +135,16 @@ def release_held_receipts(product_id: str) -> List[dict]:
         gid = grn.get("grn_id")
         actor = {"user_id": grn.get("accepted_by") or grn.get("created_by")}
         try:
+            over = _beyond_the_order(grn)
+            if over:
+                logger.warning(
+                    "[VENDOR] GRN %s holds more than its PO ordered (%s) -- left "
+                    "held for the store manager",
+                    gid,
+                    over,
+                )
+                _hand_to_store_manager(gid, grn, over)
+                continue
             out.append(_put_on_shelf(grn_repo, gid, grn, actor))
         except Exception as exc:  # noqa: BLE001
             logger.error(
@@ -138,6 +155,92 @@ def release_held_receipts(product_id: str) -> List[dict]:
                 exc,
             )
     return out
+
+
+def _beyond_the_order(grn: dict) -> List[dict]:
+    """The held lines of a PO receipt that would take their product past what
+    the PO ordered: units already on the shelf from this PO plus this receipt's
+    held units. [] for a receipt with no PO (nothing to compare against).
+    Raises on a read error -- the caller then leaves the receipt held."""
+    po_id = grn.get("po_id")
+    stock_repo = get_stock_repository()
+    po_repo = get_purchase_order_repository()
+    if not po_id or stock_repo is None or po_repo is None:
+        return []
+    ordered: dict = {}
+    for it in (po_repo.find_by_id(po_id) or {}).get("items") or []:
+        pid = it.get("product_id")
+        ordered[pid] = ordered.get(pid, 0) + int(
+            it.get("ordered_qty", it.get("quantity", 0)) or 0
+        )
+    held: dict = {}
+    for ln in grn.get("unresolved_lines") or []:
+        pid = ln.get("product_id")
+        held[pid] = held.get(pid, 0) + int(ln.get("accepted_qty") or 0)
+    over = []
+    for pid, qty in held.items():
+        shelved = _grn_already_minted(
+            stock_repo, {"source_type": "GRN", "po_id": po_id, "product_id": pid}
+        )
+        if shelved + qty > ordered.get(pid, 0):
+            over.append(
+                {"product_id": pid, "held": qty, "ordered": ordered.get(pid, 0), "shelved": shelved}
+            )
+    return over
+
+
+def _hand_to_store_manager(grn_id: str, grn: dict, over: List[dict]) -> None:
+    """A held receipt the catalogue cannot release on its own (owner
+    2026-09-29: a receipt problem is the shop's store manager's task, by
+    person). The cataloguer's task on it closes once nothing on it waits for
+    the catalogue any more."""
+    db = _get_db()
+    if db is None:
+        return
+    product_repo = get_product_repository()
+    store_id = grn.get("store_id")
+    shop = _shop_label(db, store_id)
+    receipt = grn.get("grn_number") or grn_id
+    po = grn.get("po_number") or grn.get("po_id")
+    items = "; ".join(
+        f"{_held_item_label(product_repo.find_by_id(o['product_id']) if product_repo else None, o['product_id'])}"
+        f": {o['held']} held, PO ordered {o['ordered']}, {o['shelved']} already on the shelf"
+        for o in over
+    )
+    people, _managers = _people_for(db, store_id, "STORE_MANAGER", entity_wide=False)
+    for uid, task_store in people or [(None, store_id)]:
+        _raise_once(
+            db,
+            dedupe_ref=f"grn_over_order:{grn_id}:{uid or 'nobody'}",
+            title=f"Check receipt {receipt} at {shop}: more than PO {po} ordered",
+            description=(
+                f"Receipt {receipt} at {shop} is holding more than its order needs "
+                f"({items}). If it is a second receipt of the same box, void it in "
+                "Receive Goods > Receipts still waiting. If the vendor really sent "
+                "the extra units, press 'Add to stock' on it."
+            ),
+            category="Purchase",
+            store_id=task_store,
+            assigned_to=uid,
+            extra={"grn_id": grn_id, "link": "/purchase/receive"},
+        )
+    still_uncatalogued = [
+        ln
+        for ln in grn.get("unresolved_lines") or []
+        if _needs_catalogue(product_repo, ln.get("product_id"))
+    ]
+    if not still_uncatalogued:
+        _complete_receipt_tasks(
+            db,
+            grn_id,
+            "The items are finished; the store manager decides on this receipt.",
+            category="Catalogue",
+        )
+
+
+def _needs_catalogue(product_repo, product_id) -> bool:
+    prod = product_repo.find_by_id(product_id) if product_repo else None
+    return prod is None or bool(_pm.compute_catalog_status(prod)[1])
 
 
 def _put_on_shelf(grn_repo, grn_id: str, grn: dict, current_user: dict) -> dict:
@@ -671,11 +774,12 @@ def _accept_grn_claimed(
 _TASK_OPEN = ["OPEN", "IN_PROGRESS", "ESCALATED"]
 
 
-def _catalogue_people(db, store_id) -> tuple:
-    """([(user id, task store)], True) for the active CATALOG_MANAGERs of the
-    receipt shop's legal entity (anyone whose store_ids reach a store of that
-    entity), else ([(ADMIN -- failing that SUPERADMIN -- id, shop)], False):
-    nobody can finish the product, and that must be somebody's problem, not a
+def _people_for(db, store_id, role: str, *, entity_wide: bool) -> tuple:
+    """([(user id, task store)], True) for the active holders of `role` who
+    reach the receipt's shop -- or, with `entity_wide`, any shop of its legal
+    entity (a catalogue manager works for the entity, a store manager for his
+    shop) -- else ([(ADMIN -- failing that SUPERADMIN -- id, shop)], False):
+    nobody holds the job there, and that must be somebody's problem, not a
     silent drawer.
 
     The task store is one the person can OPEN -- the receipt's shop when it is
@@ -684,13 +788,13 @@ def _catalogue_people(db, store_id) -> tuple:
     with a shop outside their reach would be invisible to its own assignee."""
     users = db.get_collection("users")
     stores = db.get_collection("stores")
-    store = stores.find_one({"store_id": store_id}) or {}
     scope = {store_id}
-    if store.get("entity_id"):
+    store = stores.find_one({"store_id": store_id}) or {}
+    if entity_wide and store.get("entity_id"):
         scope |= {
             s.get("store_id") for s in stores.find({"entity_id": store["entity_id"]})
         }
-    flt = {"roles": "CATALOG_MANAGER", "is_active": True, "store_ids": {"$in": list(scope)}}
+    flt = {"roles": role, "is_active": True, "store_ids": {"$in": list(scope)}}
     people = []
     for u in users.find(flt):
         mine = [s for s in (u.get("store_ids") or []) if s in scope]
@@ -698,15 +802,20 @@ def _catalogue_people(db, store_id) -> tuple:
             people.append((u["user_id"], store_id if store_id in mine else mine[0]))
     if people:
         return people, True
-    for role in ("ADMIN", "SUPERADMIN"):
+    for admin_role in ("ADMIN", "SUPERADMIN"):
         people = [
             (u["user_id"], store_id)
-            for u in users.find({"roles": role, "is_active": True})
+            for u in users.find({"roles": admin_role, "is_active": True})
             if u.get("user_id")
         ]
         if people:
             return people, False
     return [], False
+
+
+def _shop_label(db, store_id) -> str:
+    store = db.get_collection("stores").find_one({"store_id": store_id}) or {}
+    return f"{store['store_name']} ({store_id})" if store.get("store_name") else str(store_id)
 
 
 def _held_item_label(prod: Optional[dict], product_id: str) -> str:
@@ -724,48 +833,59 @@ def _held_item_label(prod: Optional[dict], product_id: str) -> str:
     return f"{label} (SKU {prod.get('sku')})" if prod.get("sku") else label
 
 
+def _raise_once(db, *, dedupe_ref: str, **task) -> None:
+    """ONE task per source_ref, EVER: once a person has closed it, a re-press
+    of "Add to stock" or the next catalogue save never raises it again
+    (create_system_task alone dedupes only against OPEN ones)."""
+    from ...dependencies import get_task_repository
+    from ...services.task_triggers import create_system_task
+
+    if db.get_collection("tasks").find_one({"source_ref": dedupe_ref}):
+        return
+    create_system_task(
+        get_task_repository(), priority="P2", dedupe_ref=dedupe_ref, **task
+    )
+
+
+def _complete_receipt_tasks(db, grn_id, note: str, category: Optional[str] = None) -> None:
+    """Close the open system tasks raised for this receipt (both kinds, or one
+    `category`) -- the receipt no longer needs that person."""
+    flt = {"grn_id": grn_id, "source": "SYSTEM", "status": {"$in": _TASK_OPEN}}
+    if category:
+        flt["category"] = category
+    now = datetime.now()
+    db.get_collection("tasks").update_many(
+        flt,
+        {
+            "$set": {
+                "status": "COMPLETED",
+                "completed_at": now,
+                "updated_at": now,
+                "completed_by": "system",
+                "completion_notes": note,
+            },
+            "$push": {
+                "history": {"action": "completed", "by": "system", "notes": note, "at": now}
+            },
+        },
+    )
+
+
 def _sync_catalogue_tasks(grn_id, grn, unresolved_lines, grn_status, product_repo):
-    """A held receipt raises ONE task per catalogue manager (deduped per
-    receipt + person, so a re-press never stacks them) naming the items, the
-    receipt and the shop; a receipt that is now fully on the shelf completes
-    them. Fail-soft: a task problem never undoes a receipt."""
+    """A held receipt raises ONE task per catalogue manager (once per receipt +
+    person, ever -- _raise_once) naming the items, the receipt and the shop; a
+    receipt that is now fully on the shelf completes every task raised for it.
+    Fail-soft: a task problem never undoes a receipt."""
     try:
         db = _get_db()
         if db is None:
             return
         if not unresolved_lines:
             if grn_status == "ACCEPTED":
-                now = datetime.now()
-                note = "The held units are on the shelf."
-                db.get_collection("tasks").update_many(
-                    {"category": "Catalogue", "grn_id": grn_id, "status": {"$in": _TASK_OPEN}},
-                    {
-                        "$set": {
-                            "status": "COMPLETED",
-                            "completed_at": now,
-                            "updated_at": now,
-                            "completed_by": "system",
-                            "completion_notes": note,
-                        },
-                        "$push": {
-                            "history": {
-                                "action": "completed",
-                                "by": "system",
-                                "notes": note,
-                                "at": now,
-                            }
-                        },
-                    },
-                )
+                _complete_receipt_tasks(db, grn_id, "The held units are on the shelf.")
             return
-        from ...dependencies import get_task_repository
-        from ...services.task_triggers import create_system_task
-
         store_id = grn.get("store_id")
-        store = db.get_collection("stores").find_one({"store_id": store_id}) or {}
-        shop = (
-            f"{store['store_name']} ({store_id})" if store.get("store_name") else str(store_id)
-        )
+        shop = _shop_label(db, store_id)
         receipt = grn.get("grn_number") or grn_id
 
         def _line(ln):
@@ -773,7 +893,9 @@ def _sync_catalogue_tasks(grn_id, grn, unresolved_lines, grn_status, product_rep
             return f"{_held_item_label(prod, ln['product_id'])} x{ln.get('accepted_qty')}"
 
         items = "; ".join(_line(ln) for ln in unresolved_lines)
-        people, are_cataloguers = _catalogue_people(db, store_id)
+        people, are_cataloguers = _people_for(
+            db, store_id, "CATALOG_MANAGER", entity_wide=True
+        )
         if are_cataloguers:
             title = f"Finish {len(unresolved_lines)} item(s) held on receipt {receipt} at {shop}"
         else:
@@ -793,16 +915,14 @@ def _sync_catalogue_tasks(grn_id, grn, unresolved_lines, grn_status, product_rep
             "Needs review (they are at the top); the units go on the shelf by "
             "themselves when you save."
         )
-        repo = get_task_repository()
         for uid, task_store in people or [(None, store_id)]:
-            create_system_task(
-                repo,
+            _raise_once(
+                db,
+                dedupe_ref=f"grn_catalogue:{grn_id}:{uid or 'nobody'}",
                 title=title,
                 description=description,
-                priority="P2",
                 category="Catalogue",
                 store_id=task_store,
-                dedupe_ref=f"grn_catalogue:{grn_id}:{uid or 'nobody'}",
                 assigned_to=uid,
                 extra={"grn_id": grn_id, "link": "/catalog/review"},
             )
