@@ -4,9 +4,7 @@ IMS 2.0 - GST input-tax-credit (ITC) reconciliation
 Pure, DB-free helpers for the purchase-side GST:
 
   * build_itc_register(bills): the input credit available from vendor bills,
-    grouped by tax period. Detects inter-state bills via place_of_supply vs
-    entity primary state and routes the tax to IGST (intra-state splits to
-    CGST/SGST as before).
+    grouped by tax period, in each bill's own stored heads (CGST/SGST/IGST).
   * reconcile_gstr2b(book_rows, gstr2b_rows): match what you booked (vendor
     bills) against GSTR-2B (what your suppliers actually reported to the GST
     portal). Buckets:
@@ -39,6 +37,8 @@ from typing import List, Optional
 # clock (00:00-05:30 IST would otherwise age invoices against YESTERDAY).
 from api.utils.ist import now_ist_naive
 
+from .purchase_invoice_engine import split_header_tax
+
 
 def _f(v) -> float:
     try:
@@ -69,51 +69,18 @@ def _period(date_iso) -> str:
         return ""
 
 
-def _state_code(value) -> str:
-    """Pull a two-digit state code from a place_of_supply or GSTIN-like value.
-
-    Accepts '27' / '27-Maharashtra' / 'Maharashtra (27)' / a full GSTIN
-    (first 2 chars). Returns '' if no two-digit prefix can be derived.
-    """
-    if value is None:
-        return ""
-    s = str(value).strip().upper()
-    if not s:
-        return ""
-    # Numeric prefix (e.g. "27", "20-JHARKHAND", "27 Maharashtra").
-    m = re.match(r"(\d{2})", s)
-    if m:
-        return m.group(1)
-    # GSTIN: first 2 chars are the state code, then a digit/letter pattern.
-    m = re.search(r"(\d{2})[A-Z]{5}\d{4}[A-Z]", s)
-    if m:
-        return m.group(1)
-    # Parenthetical numeric (e.g. "Maharashtra (27)").
-    m = re.search(r"\((\d{2})\)", s)
-    if m:
-        return m.group(1)
-    return ""
-
-
-def _is_interstate(bill_pos, entity_state) -> bool:
-    """True if the bill's place_of_supply state differs from the entity's
-    primary state. Missing place_of_supply -> default to intra-state (False)
-    so existing bills aren't misclassified."""
-    pos = _state_code(bill_pos)
-    ent = _state_code(entity_state)
-    if not pos or not ent:
-        return False
-    return pos != ent
-
-
-def build_itc_register(bills: List[dict], entity_state: Optional[str] = None) -> dict:
+def build_itc_register(bills: List[dict]) -> dict:
     """Input credit available from booked vendor bills, grouped by period.
 
-    Splits tax into CGST + SGST (intra-state) vs IGST (inter-state, when the
-    bill's place_of_supply differs from `entity_state`). When place_of_supply
-    is missing or entity_state is None, falls back to intra-state (CGST/SGST
-    half-and-half) -- so existing data without place_of_supply behaves the
-    same as before.
+    Every bill is reported in its STORED tax heads (cgst_total / sgst_total /
+    igst_total), which every bill door writes -- so the register, GSTR-3B and
+    the bill itself show one figure (F40). A legacy bill booked before its door
+    stored heads is split by THE purchase classification
+    (purchase_invoice_engine.split_header_tax on its own supplier and recipient
+    GSTINs), never by a rule of this reader's own.
+
+    A bill with no taxable value and no tax carries no credit and is not
+    counted -- a cost-less stock transfer's Rs 0 mirror bill is not a bill.
     """
     periods: dict = {}
     total_taxable = 0.0
@@ -126,8 +93,9 @@ def build_itc_register(bills: List[dict], entity_state: Optional[str] = None) ->
             continue
         taxable = _f(b.get("taxable_amount"))
         tax = _f(b.get("tax_amount"))
+        if not taxable and not tax:
+            continue
         p = _period(b.get("bill_date")) or "unknown"
-        interstate = _is_interstate(b.get("place_of_supply"), entity_state)
         d = periods.setdefault(
             p,
             {
@@ -142,19 +110,20 @@ def build_itc_register(bills: List[dict], entity_state: Optional[str] = None) ->
         )
         d["taxable"] = round(d["taxable"] + taxable, 2)
         d["tax"] = round(d["tax"] + tax, 2)
-        if interstate:
-            d["igst"] = round(d["igst"] + tax, 2)
-            total_igst += tax
-        else:
-            # Residual trick: compute half then assign the remainder to sgst so
-            # cgst + sgst == tax exactly (avoids +-1 paisa drift on odd-paise
-            # tax amounts, e.g. tax=5.01 -> half=2.50 + sgst=2.51 = 5.01).
-            half = round(tax / 2, 2)
-            sgst_part = round(tax - half, 2)
-            d["cgst"] = round(d["cgst"] + half, 2)
-            d["sgst"] = round(d["sgst"] + sgst_part, 2)
-            total_cgst += half
-            total_sgst += sgst_part
+        heads = (
+            b
+            if any(k in b for k in ("cgst_total", "sgst_total", "igst_total"))
+            else split_header_tax(tax, b.get("vendor_gstin"), b.get("recipient_gstin"))
+        )
+        cgst_part = _f(heads.get("cgst_total"))
+        sgst_part = _f(heads.get("sgst_total"))
+        igst_part = _f(heads.get("igst_total"))
+        d["cgst"] = round(d["cgst"] + cgst_part, 2)
+        d["sgst"] = round(d["sgst"] + sgst_part, 2)
+        d["igst"] = round(d["igst"] + igst_part, 2)
+        total_cgst += cgst_part
+        total_sgst += sgst_part
+        total_igst += igst_part
         d["bills"] += 1
         total_taxable += taxable
         total_tax += tax

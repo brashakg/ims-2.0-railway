@@ -72,7 +72,7 @@ export function GrnPickerModal({
           po_number: draft.po_number ?? grn.po_number,
           grn_id: draft.grn_id ?? grnId,
           grn_number: draft.grn_number ?? grn.grn_number,
-          place_of_supply: draft.place_of_supply,
+          vendor_gstin: draft.vendor_gstin,
           recipient_gstin: draft.recipient_gstin,
           store_id: draft.store_id ?? grn.store_id,
         },
@@ -229,7 +229,7 @@ export function DcPickerModal({
           vendor_name: draft.vendor_name,
           vendor_invoice_no: '',
           vendor_invoice_date: todayIso,
-          place_of_supply: draft.place_of_supply,
+          vendor_gstin: draft.vendor_gstin,
           recipient_gstin: draft.recipient_gstin,
           store_id: user?.activeStoreId,
           // eslint-disable-next-line @typescript-eslint/no-explicit-any

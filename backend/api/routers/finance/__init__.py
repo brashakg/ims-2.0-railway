@@ -168,7 +168,6 @@ from .survival import (  # noqa: F401
     get_survival_cashflow,
 )
 from .itc import (  # noqa: F401
-    _primary_entity_state,
     itc_register,
     Gstr2bRow,
     Gstr2bReconcileBody,

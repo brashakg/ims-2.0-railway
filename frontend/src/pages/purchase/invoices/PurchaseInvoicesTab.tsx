@@ -5,12 +5,9 @@
 // header-only "bill" (a 3-field amount form on Finance -> Cash-Flow that
 // dropped the PO/GRN link), this carries:
 //   - line items with HSN + per-rate GST
-//   - an explicit place_of_supply, so tax is split correctly:
-//       intra-state -> CGST + SGST     inter-state -> IGST
-//
-// Writing place_of_supply here is the fix for the long-standing bug where the
-// ITC code READ place_of_supply but nothing ever WROTE it, so every
-// inter-state purchase was mis-booked CGST+SGST instead of IGST.
+//   - the tax head from the two GST numbers on the bill (supplier's vs ours):
+//       same state -> CGST + SGST     different states -> IGST
+//     decided by the server exactly as the form previews it.
 //
 // Two entry paths, one form:
 //   1. Create from GRN  -> server prefills a draft from the ACCEPTED GRN + PO.
@@ -106,7 +103,7 @@ export function PurchaseInvoicesTab({ suppliers }: { suppliers: Supplier[] }) {
             po_number: draft.po_number,
             grn_id: draft.grn_id ?? grnId,
             grn_number: draft.grn_number,
-            place_of_supply: draft.place_of_supply,
+            vendor_gstin: draft.vendor_gstin,
             recipient_gstin: draft.recipient_gstin,
             store_id: draft.store_id,
           },

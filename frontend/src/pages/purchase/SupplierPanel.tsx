@@ -32,9 +32,9 @@ import type { Supplier } from './purchaseTypes';
 // when the meta endpoint failed) is DELETED, not synced: the grace clause was
 // fail-open, so a junk "88..." GSTIN printed "Other state - IGST" whenever
 // the state list had not arrived. NOT the only inter/intra decider in the
-// frontend: print/legalPrimitives.hsnTaxSummary (printed invoice) and
-// invoices/shared.isInterstate (bill preview, mirrors itc_reconcile's
-// intra fallback) still answer with their own parsers, outside this chain.
+// frontend: print/legalPrimitives.hsnTaxSummary (printed invoice) still
+// answers with its own parser, outside this chain. (The purchase-bill form
+// has none: it shows the server's own booking math, POST /preview.)
 //
 // Both states are read from GSTINs and NOTHING else -- the same source
 // purchase_invoice_engine.determine_place_of_supply reads when it stamps the

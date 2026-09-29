@@ -178,12 +178,13 @@ def aggregate_gstr1(store_reports: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def _itc_regular(rep: Dict[str, Any]) -> Dict[str, float]:
-    """The ENTITY-scoped regular ITC of a per-store GSTR-3B report. Prefers the
-    split field ``itcAvailableRegular``; falls back to the whole ``itcAvailable``
-    for legacy report dicts that predate the R1 split (transfer slice then 0)."""
+    """The COMPANY-wide ITC of a per-store GSTR-3B report (bills that name no
+    GSTIN). Prefers the split field ``itcAvailableRegular``; falls back to the
+    whole ``itcAvailable`` for legacy report dicts that predate the R1 split
+    (the GSTIN slice then 0)."""
     src = rep.get("itcAvailableRegular")
     if src is None and (
-        "itcAvailableTransfer" not in rep and "itcAvailableRegular" not in rep
+        "itcAvailableGstin" not in rep and "itcAvailableRegular" not in rep
     ):
         src = rep.get("itcAvailable")
     src = src or {}
@@ -194,10 +195,11 @@ def _itc_regular(rep: Dict[str, Any]) -> Dict[str, float]:
     }
 
 
-def _itc_transfer(rep: Dict[str, Any]) -> Dict[str, float]:
-    """The GSTIN-scoped transfer-borne ITC slice of a per-store GSTR-3B report
-    (``itcAvailableTransfer``); 0 for legacy dicts without the split."""
-    src = rep.get("itcAvailableTransfer") or {}
+def _itc_gstin(rep: Dict[str, Any]) -> Dict[str, float]:
+    """The GSTIN-bound ITC slice of a per-store GSTR-3B report
+    (``itcAvailableGstin``: every bill received on that GSTIN, plus GSTIN-less
+    transfer mirrors at that store); 0 for legacy dicts without the split."""
+    src = rep.get("itcAvailableGstin") or {}
     return {
         "c": _f(src.get("centralTax")),
         "s": _f(src.get("stateTax")),
@@ -217,24 +219,24 @@ def aggregate_gstr3b(
     OUTWARD supply is STORE-scoped (reports.py reads it from that store's own
     orders + sender-side transfer bills), so it is SUMMED across every store.
 
-    ITC is split by scope (R1). REGULAR purchase ITC and RCM are ENTITY-scoped:
-    reports.py::_itc_from_vendor_bills / _rcm_from_vendor_bills filter on
-    recipient_entity_id, so EVERY store of an entity returns the SAME regular
-    Table-4 figure ("one entity, one books ITC"); they are counted ONCE per
-    entity. TRANSFER-borne ITC (``itcAvailableTransfer``) is GSTIN-scoped -- on
-    a same-entity cross-state stock transfer only the RECEIVING GSTIN claims it,
-    so sibling stores of one entity with DIFFERENT GSTINs return DIFFERENT
-    transfer ITC; it is counted ONCE per GSTIN. Without this split the entity
+    ITC is split by scope (R1). The GSTIN-BOUND slice (``itcAvailableGstin``:
+    every bill received on the store's GSTIN, and GSTIN-less transfer mirrors
+    received at any shop carrying that GSTIN -- gst_itc._itc_match) differs between
+    sibling stores of one entity with DIFFERENT GSTINs; it is counted ONCE per
+    GSTIN, so a bill is never claimed on two registrations. The company-wide
+    remainder (legacy bills naming no GSTIN) and RCM filter on
+    recipient_entity_id alone, so EVERY store of an entity returns the SAME
+    figure; they are counted ONCE per entity. Without this split the entity
     figure depended on which store Mongo listed first (order-dependent ITC and
     net cash) -- the R1 defect this closes. A store whose entity_id is falsy
     contributes ZERO ITC/RCM (its per-store figure is org-wide, not
     entity-scoped, so it must not be trusted).
 
     Pass ``entity_ids`` (a parallel list, one entity_id per store report) and,
-    for the transfer split, ``store_gstins`` (one GSTIN per store report). A
-    report with no GSTIN falls back to per-store transfer inclusion (its
-    underlying keep-condition is to_store_id-scoped, so distinct stores never
-    overlap).
+    for the GSTIN split, ``store_gstins`` (one GSTIN per store report). A
+    report with no GSTIN falls back to per-store inclusion (its only
+    GSTIN-bound bills are to_store_id-scoped transfers, so distinct stores
+    never overlap).
 
     Net cash is derived ENTITY-LEVEL after aggregation as per-head
     max(0, out - itc) + rcm and summed across entities -- one entity's ITC
@@ -275,8 +277,8 @@ def aggregate_gstr3b(
     # Accumulate PER ENTITY so ITC/RCM (entity-scoped) is not multiplied and net
     # cash is clamped per entity, not on the cross-entity grand total.
     buckets: Dict[Any, Dict[str, float]] = {}
-    regular_taken: set = set()   # regular ITC + RCM: once per entity
-    transfer_taken: set = set()  # transfer-borne ITC: once per GSTIN
+    regular_taken: set = set()  # company-wide ITC + RCM: once per entity
+    gstin_taken: set = set()    # GSTIN-bound ITC: once per GSTIN
     for rep, key, gstin in zip(reports, keys, gstins):
         # Storeless stores (falsy entity_id) share one bucket: their outward is
         # real and counted, but they never contribute ITC/RCM.
@@ -305,14 +307,14 @@ def aggregate_gstr3b(
             b["rcm_i"] += _f(rcm.get("integratedTax"))
             b["rcm_taxable"] += _f(rep.get("inwardSuppliesReverseChargeValue"))
 
-        # Transfer-borne ITC is GSTIN-scoped -> count ONCE per GSTIN (legacy
-        # per-report path or a report with no GSTIN sums it in, since those keys
-        # are already distinct per filing / per store).
-        trf = _itc_transfer(rep)
+        # GSTIN-bound ITC -> count ONCE per GSTIN (legacy per-report path or a
+        # report with no GSTIN sums it in, since those keys are already
+        # distinct per filing / per store).
+        trf = _itc_gstin(rep)
         if trf["c"] or trf["s"] or trf["i"]:
             if entity_ids is not None and gstin:
-                take_trf = gstin not in transfer_taken
-                transfer_taken.add(gstin)
+                take_trf = gstin not in gstin_taken
+                gstin_taken.add(gstin)
             else:
                 take_trf = True
             if take_trf:
@@ -419,6 +421,7 @@ def build_crosscheck(
     books: Dict[str, Any],
     tally: Dict[str, Any],
     tolerance: float = DEFAULT_TOLERANCE,
+    unplaced: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Assemble the full cross-check payload from the aggregated sources.
 
@@ -432,6 +435,13 @@ def build_crosscheck(
                   vendor_bills ITC -- a real cross-check).
     ``tally``  : {taxable, tax, cgst, sgst, igst} the Tally sales-JV export
                  would carry for the same order set.
+    ``unplaced``: reports gst_itc._itc_unplaced -- booked input credit NO
+                 GSTIN's GSTR-3B counts ({count, tax, bill_numbers}). When
+                 given, a row compares it to zero, so credit silently missing
+                 from every return can never read as a green screen; a
+                 read failure (``failed``) is a MISMATCH row, and
+                 ``unregistered`` (credit claimed from suppliers with no
+                 GSTIN) gets a row of its own.
 
     Returns the comparison rows, the GSTR-1 per-rate breakup, the CDNR and
     deemed-supply detail, and a summary (mismatch_count / all_matched). Pure.
@@ -613,7 +623,60 @@ def build_crosscheck(
         ),
     ]
 
-    mismatches = [c for c in comparisons if c["status"] == "MISMATCH"]
+    if unplaced is not None and unplaced.get("failed"):
+        # The bills could not be read: never a green row.
+        comparisons.append(
+            {
+                "metric": "Input credit left off GSTR-3B",
+                "sources": {},
+                "variance": 0.0,
+                "status": "MISMATCH",
+                "note": "The booked bills could not be read, so credit left off "
+                "the return cannot be ruled out. Retry before filing.",
+            }
+        )
+    elif unplaced is not None:
+        n = int(_f(unplaced.get("count")))
+        comparisons.append(
+            _cmp_row(
+                "Input credit left off GSTR-3B",
+                {
+                    "Booked bills on no return": _f(unplaced.get("tax")),
+                    "Expected": 0.0,
+                },
+                tolerance,
+                note=(
+                    "%d booked bill(s) carry this input credit but no GSTIN's "
+                    "GSTR-3B counts it: the bill has no company, no tax heads, "
+                    "or our GST number on it is no shop's. Correct those bills "
+                    "before filing: %s"
+                    % (n, ", ".join(str(x) for x in (unplaced.get("bill_numbers") or [])[:20]))
+                    if n
+                    else "Every booked bill's input credit is on a GSTIN's GSTR-3B."
+                ),
+            )
+        )
+        unreg = unplaced.get("unregistered")
+        if unreg is not None:
+            k = int(_f(unreg.get("count")))
+            comparisons.append(
+                _cmp_row(
+                    "Input credit from suppliers with no GSTIN",
+                    {"Claimed on GSTR-3B": _f(unreg.get("tax")), "Expected": 0.0},
+                    tolerance,
+                    note=(
+                        "%d bill(s) claim this input credit although the supplier "
+                        "has no GSTIN on file, and an unregistered supplier's tax "
+                        "never reaches GSTR-2B. Add the supplier's GSTIN, or mark "
+                        "the bill as no input credit: %s"
+                        % (k, ", ".join(str(x) for x in (unreg.get("bill_numbers") or [])[:20]))
+                        if k
+                        else "Every claimed bill names a registered supplier."
+                    ),
+                )
+            )
+
+    mismatches =[c for c in comparisons if c["status"] == "MISMATCH"]
 
     return {
         "tolerance": round(tolerance, 2),

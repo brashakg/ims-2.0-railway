@@ -125,6 +125,16 @@ describe('purchaseInvoicesApi.list -> mapInvoiceFromApi', () => {
     expect(result).toEqual({ purchase_invoices: [], total: 0 });
   });
 
+  it('gives every row the id the screen acts on (F7: Approve hit /undefined/)', async () => {
+    // The list returns the stored vendor_bills doc: bill_id / invoice_id, no
+    // purchase_invoice_id. Every Approve / match / recon door reads the latter.
+    mockGet.mockResolvedValue({
+      data: { purchase_invoices: [{ bill_id: 'b_9', invoice_id: 'b_9', vendor_id: 'v' }] },
+    });
+    const row = (await purchaseInvoicesApi.list()).purchase_invoices[0];
+    expect(row.purchase_invoice_id).toBe('b_9');
+  });
+
   it('handles a missing purchase_invoices array without throwing', async () => {
     mockGet.mockResolvedValue({ data: {} });
     const result = await purchaseInvoicesApi.list();
@@ -138,7 +148,6 @@ describe('purchaseInvoicesApi.create -> wire schema mapping', () => {
     vendor_id: 'v_1',
     vendor_invoice_no: 'SUP-INV-9',
     vendor_invoice_date: '2026-05-20',
-    place_of_supply: '27-Maharashtra',
     recipient_gstin: '27ABCDE1234F1Z5',
     po_id: 'po_1',
     grn_id: 'grn_1',
@@ -181,7 +190,9 @@ describe('purchaseInvoicesApi.create -> wire schema mapping', () => {
     expect(wire.invoice_number).toBe('SUP-INV-9');
     expect(wire.invoice_date).toBe('2026-05-20');
     expect(wire.vendor_id).toBe('v_1');
-    expect(wire.place_of_supply).toBe('27-Maharashtra');
+    // F6: the server decides the tax head from the two GST numbers; no
+    // "place of supply" goes on the wire for it to read another way.
+    expect(wire).not.toHaveProperty('place_of_supply');
     expect(wire.recipient_gstin).toBe('27ABCDE1234F1Z5');
     expect(wire.po_id).toBe('po_1');
     expect(wire.grn_id).toBe('grn_1');
@@ -227,5 +238,29 @@ describe('purchaseInvoicesApi.create -> wire schema mapping', () => {
     expect(created.vendor_invoice_date).toBe('2026-05-20');
     expect(created.igst).toBe(180);
     expect(created.is_interstate).toBe(true);
+  });
+});
+
+describe('draft lines -> form lines (F37: from-GRN lines arrived blank, qty 1)', () => {
+  const serverLines = [
+    { product_id: 'p_1', description: 'Carrera CA 8895 807', hsn: '9003', qty: 3, unit_price: 3100, gst_rate: 5, taxable: 9300, igst: 465 },
+  ];
+
+  it('createFromGrn maps description/hsn/qty onto the form keys', async () => {
+    mockGet.mockResolvedValue({ data: { invoice_number: 'MLH-77', invoice_date: '2026-09-10', lines: serverLines } });
+    const draft = await purchaseInvoicesApi.createFromGrn('G1');
+    expect(mockGet).toHaveBeenCalledWith('/vendors/purchase-invoices/from-grn/G1');
+    expect(draft.vendor_invoice_no).toBe('MLH-77');
+    expect(draft.lines).toEqual([
+      expect.objectContaining({ product_id: 'p_1', product_name: 'Carrera CA 8895 807', hsn_code: '9003', quantity: 3, unit_price: 3100, gst_rate: 5 }),
+    ]);
+  });
+
+  it('createFromDcs maps the same way', async () => {
+    mockGet.mockResolvedValue({ data: { linked_dc_ids: ['dc1'], lines: serverLines } });
+    const draft = await purchaseInvoicesApi.createFromDcs(['dc1']);
+    expect(draft.lines[0]).toEqual(
+      expect.objectContaining({ product_name: 'Carrera CA 8895 807', hsn_code: '9003', quantity: 3 }),
+    );
   });
 });
