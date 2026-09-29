@@ -172,12 +172,14 @@ class FakeCollection:
                     d[k] = v
                 for k, v in (update.get("$push") or {}).items():
                     d.setdefault(k, []).append(v)
-                # Positional "arr.$.leaf": the first element the $elemMatch matched.
+                # Positional "arr.$.leaf": the first element the $elemMatch
+                # matched, resolved ONCE before any write, as Mongo does.
+                pos = {arr: next(e for e in d[arr] if isinstance(e, dict) and _match(e, c["$elemMatch"]))
+                       for arr, c in filter_.items() if isinstance(c, dict) and "$elemMatch" in c}
                 for op in ("$inc", "$addToSet", "$pull"):
                     for k, v in (update.get(op) or {}).items():
                         arr, _, leaf = k.partition(".$.")
-                        cond = filter_[arr]["$elemMatch"]
-                        el = next(e for e in d[arr] if isinstance(e, dict) and _match(e, cond))
+                        el = pos[arr]
                         if op == "$inc":
                             el[leaf] = (el.get(leaf) or 0) + v
                         elif op == "$addToSet":

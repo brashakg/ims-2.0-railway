@@ -183,13 +183,18 @@ class FakeCollection:
             self.docs.append(target)
         if target is None:
             return None
+        # Positional "arr.$.leaf" is the first element the $elemMatch matched,
+        # resolved ONCE before any write, as Mongo does (re-matching after an
+        # $inc can miss the element the filter matched).
+        pos = {arr: next(e for e in target[arr] if isinstance(e, dict) and _match(e, cond["$elemMatch"]))
+               for arr, cond in filter_.items() if isinstance(cond, dict) and "$elemMatch" in cond}
+
         def _slot(k):
-            """(container, leaf) for a key: positional "arr.$.leaf" is the first
-            element the $elemMatch matched; a dotted "a.b" is nested, as Mongo."""
+            """(container, leaf) for a key: positional as above; a dotted "a.b"
+            is nested, as Mongo."""
             arr, _, leaf = k.partition(".$.")
             if leaf:
-                cond = filter_[arr]["$elemMatch"]
-                return next(e for e in target[arr] if isinstance(e, dict) and _match(e, cond)), leaf
+                return pos[arr], leaf
             *parents, leaf = k.split(".")
             node = target
             for part in parents:
