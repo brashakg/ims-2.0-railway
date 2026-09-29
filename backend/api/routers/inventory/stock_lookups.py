@@ -72,6 +72,42 @@ async def get_low_stock_alerts(
     return {"items": items}
 
 
+@router.get("/sellable")
+async def get_sellable_counts(
+    product_ids: str = Query(..., description="Comma-separated product ids, at most 100."),
+    item_types: Optional[str] = Query(
+        None,
+        description="Comma-separated order item_type per id, same order (the till's mapCategory).",
+    ),
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """F46: the till's per-tile stock badge and cart-line warning. For each id,
+    the count order-create's oversell guard blocks on at this store -- the
+    guard's own predicate (_takes_serialized_stock), id resolution
+    (_canonical_pid) and count (sellable_units), never a second computation.
+    None = the guard would not gate that line at all. Read-only."""
+    from ..orders.stock import _canonical_pid, _takes_serialized_stock, sellable_units
+
+    store = validate_store_access(store_id, current_user)
+    ids = [p.strip() for p in product_ids.split(",") if p.strip()]
+    if len(ids) > 100:
+        raise HTTPException(status_code=400, detail="At most 100 product ids per call")
+    types = [t.strip() for t in (item_types or "").split(",")]
+    stock_repo = get_stock_repository()
+    product_repo = get_product_repository()
+
+    # ponytail: 1 product + 2 stock_units lookups per id (<= 24 tiles + the
+    # cart); batch into one aggregate if the till ever shows hundreds.
+    sellable: Dict[str, Optional[int]] = {}
+    for i, pid in enumerate(ids):
+        canon = _canonical_pid(product_repo, pid)
+        line = {"product_id": canon, "item_type": types[i] if i < len(types) else ""}
+        gated = bool(store) and stock_repo is not None and _takes_serialized_stock(line)
+        sellable[pid] = sellable_units(stock_repo, canon, store) if gated else None
+    return {"store_id": store, "sellable": sellable}
+
+
 @router.get("/barcode/{barcode}")
 async def get_stock_by_barcode_short(
     barcode: str,

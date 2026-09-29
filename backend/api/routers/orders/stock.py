@@ -226,6 +226,26 @@ def _takes_serialized_stock(line: dict) -> bool:
     return True
 
 
+def sellable_units(stock_repo, product_id: str, store_id: str) -> Optional[int]:
+    """THE per-shop count the oversell guard below blocks on (owner ruling
+    2026-08-25: oversell BLOCKS). None when the product is not serialized-
+    tracked at this store (no stock_units row in any status) or the lookup
+    fails -- the guard never blocks those, so nothing may call them out of
+    stock. Otherwise the AVAILABLE, in-date count (StockRepository.
+    find_available). The till's stock badge and cart warning (F46, GET
+    /inventory/sellable) read this same function; do not re-derive it."""
+    try:
+        tracked = stock_repo.count({"product_id": product_id, "store_id": store_id})
+    except Exception:  # noqa: BLE001
+        tracked = 0
+    if not tracked:
+        return None  # not serialized-tracked here -> never false-block a sale
+    try:
+        return stock_repo.find_available(product_id, store_id)
+    except Exception:  # noqa: BLE001
+        return None  # availability lookup failed -> fail-soft
+
+
 def _assert_serialized_stock_available(
     items_data: List[dict], store_id: Optional[str]
 ) -> None:
@@ -276,16 +296,9 @@ def _assert_serialized_stock_available(
         _assert_explicit_unit_sellable(stock_repo, sid, pid, label, store_id)
 
     for pid, qty in need.items():
-        try:
-            tracked = stock_repo.count({"product_id": pid, "store_id": store_id})
-        except Exception:  # noqa: BLE001
-            tracked = 0
-        if not tracked:
-            continue  # not serialized-tracked here -> never false-block a sale
-        try:
-            avail = stock_repo.find_available(pid, store_id)
-        except Exception:  # noqa: BLE001
-            continue  # availability lookup failed -> fail-soft
+        avail = sellable_units(stock_repo, pid, store_id)
+        if avail is None:
+            continue  # not tracked here, or the lookup failed -> fail-soft
         if avail < qty:
             # F2: when the shortfall is caused by the EXPIRY FLOOR, say so --
             # "0 available" on a shelf with 6 visible boxes is not an actionable

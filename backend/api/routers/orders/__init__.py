@@ -152,6 +152,7 @@ from .stock import (  # noqa: F401
     _NON_SERIALIZED_ITEM_TYPES,
     _LENS_RESERVED_ITEM_TYPES,
     _takes_serialized_stock,
+    sellable_units,
     _assert_serialized_stock_available,
     _assert_explicit_unit_sellable,
     _lens_reservation_key,
