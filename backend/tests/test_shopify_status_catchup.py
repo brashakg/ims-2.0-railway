@@ -1339,14 +1339,18 @@ def test_a_body_older_than_the_last_fulfilment_webhook_never_rewinds_it(swept, v
     assert _snap(_doc(swept, oid)) == before
     # The drain asks each fulfilment's OWN clock: the same fulfilment's older
     # state (B) is skipped whole; another parcel's (A, A2) states its own fact
-    # but never takes the newer one's tracking over.
+    # but never takes the newer one's tracking over -- it only joins the live
+    # parcels the courier legs track.
     for f in body.get("fulfillments") or []:
         res = shopify_fulfillment.reconcile_fulfillment(swept["db"], f)
         assert res.get("reason") == ("stale_fulfillment" if variant == "B" else None)
+    own = (shopify_fulfillment.FULFILLMENT_CLOCKS, shopify_fulfillment.PARCEL_AWBS)
     after = _snap(_doc(swept, oid))
-    clocks = after.pop(shopify_fulfillment.FULFILLMENT_CLOCKS)
-    assert after == {k: v for k, v in before.items() if k != shopify_fulfillment.FULFILLMENT_CLOCKS}
+    clocks, parcels = (after.pop(k) for k in own)
+    assert after == {k: v for k, v in before.items() if k not in own}
     assert clocks["f1"], "each parcel keeps its own clock"
+    if variant in ("A", "A2"):
+        assert sorted(p["awb"] for p in parcels) == ["AWB-NEW", "AWB-OLD"]
 
 
 # ---------------------------------------------------------------------------
@@ -1381,7 +1385,8 @@ def test_a_late_delivered_parcel_is_never_stale_against_another_parcel(swept):
     assert (res["status"], res["order_status"]) == ("reconciled", "DELIVERED")
     doc = _doc(swept, oid)
     assert doc["status"] == "DELIVERED"
-    assert doc["shopify_fulfillment_id"] == "2", "the newest parcel keeps the tracking fields"
+    assert (doc["shopify_fulfillment_id"], doc["awb"]) == ("1", "AWB-F1"), (
+        "the delivered parcel shows, never the cancelled one")
     # Parcel 1's OWN older state is still stale.
     older = _parcel(oid, 1, "01:30", shipment_status="in_transit")
     assert shopify_fulfillment.reconcile_fulfillment(swept["db"], older)["reason"] == "stale_fulfillment"
