@@ -56,10 +56,10 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
     store_id = current_user.get("active_store_id")
     is_dc = grn.grn_subtype == GRN_SUBTYPE_DC
     # grn_number is minted LAST, after the receiving store is final (a standard
-    # PO-backed GRN is re-pointed to the PO's delivery store below) AND after
-    # every refusal (duplicate invoice / DC, untallied lines). The receipt
-    # number is a GST document series with no gaps: a refused receipt must not
-    # consume one (audit F28: a refused duplicate burned RCPT/.../0002).
+    # PO-backed GRN is re-pointed to the PO's delivery store below), after
+    # every refusal (duplicate invoice / DC, untallied lines) AND after the
+    # insert itself. The receipt number is a GST document series with no gaps:
+    # a refused receipt must not consume one (audit F28).
 
     # F-S3: mandatory goods-receipt document. The ops user physically receiving a
     # STANDARD shipment MUST attach the vendor invoice/challan (image or PDF)
@@ -298,12 +298,6 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
                 },
             )
 
-    # Every guard has passed: mint the per-store receipt serial now.
-    # ponytail: a concurrent duplicate that loses at the unique index below
-    # still burns its number; a gapless series under that race needs the
-    # counter and the insert in one Mongo transaction.
-    grn_number = generate_grn_number(store_id)
-
     # Calculate totals
     total_received = sum(item.received_qty for item in grn.items)
     total_accepted = sum(item.accepted_qty for item in grn.items)
@@ -346,7 +340,10 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
 
     grn_doc = {
         "grn_id": grn_id,
-        "grn_number": grn_number,
+        # Placeholder until the insert wins (see the mint below the insert):
+        # unique per row and a string, so the grn_number index and validator
+        # accept it.
+        "grn_number": f"PENDING/{grn_id}",
         "po_id": grn.po_id,
         "po_number": po.get("po_number") if po else None,
         "vendor_id": vendor_id,
@@ -447,6 +444,19 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
                     detail=_duplicate_grn_detail(dup, grn.vendor_invoice_no),
                 )
             raise HTTPException(status_code=500, detail="Failed to save goods receipt")
+
+    # Mint the per-store receipt serial only now that the row is in: every
+    # guard has passed AND the unique indexes accepted the insert. Two
+    # identical receipts that both passed the duplicate check race to the
+    # index, and the loser is refused above before it takes a number (audit
+    # F28: the loser used to burn one, leaving a gap in a GST series).
+    grn_number = generate_grn_number(store_id)
+    if grn_repo is not None and not grn_repo.update(grn_id, {"grn_number": grn_number}):
+        # Never leave a receipt carrying the placeholder. ponytail: the number
+        # is spent if this write fails after the mint (a DB failure mid-request).
+        grn_repo.delete(grn_id)
+        raise HTTPException(status_code=500, detail="Failed to save goods receipt")
+    grn_doc["grn_number"] = grn_number
 
     # F9: audit the DC log (immutable; a DC is the accountable checkpoint between
     # physical lens arrival and workshop work). Fail-soft -- never blocks save.

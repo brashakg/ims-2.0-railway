@@ -122,3 +122,96 @@ def test_refused_duplicate_challan_takes_no_receipt_number(monkeypatch):
         _create(dc)
     assert exc.value.status_code == 409
     assert minted == []
+
+
+# ---------------------------------------------------------------------------
+# Verifier round 2: two identical receipts at the same instant. Both pass the
+# duplicate pre-check before either inserts (4 uvicorn workers); the unique
+# index (uniq_std_vendor_invoice_store) refuses the loser's INSERT -- and the
+# loser must not have taken a number by then.
+# ---------------------------------------------------------------------------
+
+import itertools  # noqa: E402
+import threading  # noqa: E402
+
+_LIVE = {"PENDING", "PARTIALLY_ACCEPTED", "ACCEPTED"}
+
+
+class _IndexedGRNRepo(_MemGRNRepo):
+    """_MemGRNRepo plus the uniq_std_vendor_invoice_store partial unique index
+    and grn_number's unique index, enforced atomically the way Mongo does. A
+    refused insert returns None, exactly as BaseRepository.create swallows a
+    DuplicateKeyError."""
+
+    def __init__(self):
+        super().__init__()
+        self._lock = threading.Lock()
+
+    def create(self, doc):
+        def key(d):
+            return (d.get("vendor_id"), d.get("vendor_invoice_no_norm"), d.get("store_id"))
+
+        with self._lock:
+            for d in self.docs:
+                if d.get("grn_number") == doc.get("grn_number"):
+                    return None
+                if (
+                    doc.get("vendor_invoice_no_norm")
+                    and d.get("status") in _LIVE
+                    and key(d) == key(doc)
+                ):
+                    return None
+            self.docs.append(dict(doc))
+            return doc
+
+
+def test_two_identical_receipts_at_once_leave_no_gap(monkeypatch):
+    repo = _IndexedGRNRepo()
+    store = _wire(monkeypatch, repo)
+    seq = itertools.count(1)
+    minted = []
+
+    def _mint(store_id):
+        n = f"RCPT/{store_id}/26-27/{next(seq):04d}"
+        minted.append(n)
+        return n
+
+    monkeypatch.setattr(v, "generate_grn_number", _mint)
+
+    # Hold both requests together just after the duplicate pre-check, so both
+    # pass it before either inserts (the re-probe after a refused insert runs
+    # with exclude_grn_id and is not held).
+    real_check = v._find_duplicate_standard_grn
+    barrier = threading.Barrier(2, timeout=10)
+
+    def _held(grn_repo, po_id, vendor_id, invoice_no, exclude_grn_id=None):
+        dup = real_check(grn_repo, po_id, vendor_id, invoice_no, exclude_grn_id=exclude_grn_id)
+        if exclude_grn_id is None:
+            barrier.wait()
+        return dup
+
+    monkeypatch.setattr(v, "_find_duplicate_standard_grn", _held)
+
+    results, errors = [], []
+
+    def _run():
+        try:
+            results.append(_create(_body(store)))
+        except HTTPException as exc:
+            errors.append(exc.status_code)
+
+    threads = [threading.Thread(target=_run) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert len(results) == 1 and errors == [409]
+    assert minted == [results[0]["grn_number"]]  # the loser took no number
+    assert results[0]["grn_number"].endswith("/0001")
+    (saved,) = repo.docs
+    assert saved["grn_number"] == results[0]["grn_number"]  # stored as issued
+
+    monkeypatch.setattr(v, "_find_duplicate_standard_grn", real_check)  # race over
+    nxt = _create(_body(store, invoice_no="JOT/26-27/0466"))
+    assert nxt["grn_number"].endswith("/0002")  # 0001, 0002: no gap
