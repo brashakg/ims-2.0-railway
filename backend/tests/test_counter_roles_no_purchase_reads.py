@@ -63,6 +63,10 @@ PURCHASE_READS = [
         "/api/v1/vendors/purchase-orders/{po_id}/timeline",
     ),
     ("/api/v1/vendors/v1/performance", "/api/v1/vendors/{vendor_id}/performance"),
+    # A GRN carries the supplier bill number / date and the bill-scan id; every
+    # screen that reads GRNs is a purchase / accounts screen.
+    ("/api/v1/vendors/grn", "/api/v1/vendors/grn"),
+    ("/api/v1/vendors/grn/G1", "/api/v1/vendors/grn/{grn_id}"),
     (
         "/api/v1/vendors/v1/purchase-history",
         "/api/v1/vendors/{vendor_id}/purchase-history",
@@ -719,3 +723,36 @@ def test_product_list_cache_never_crosses_the_cost_tier(
     _product_rows(client, first, "/api/v1/products")
     rows = _product_rows(client, second, "/api/v1/products")
     assert ("cost_price" in rows[0]) is (second == "ACCOUNTANT"), rows
+
+
+# ---------------------------------------------------------------------------
+# 11. GRN detail: the caller's stores only
+# ---------------------------------------------------------------------------
+# The list validated ?store_id; the detail read any store's GRN by id (supplier
+# bill number included). Another store's GRN reads as 404, like its /document.
+from api.routers.vendors import grn_create as grn_create_mod  # noqa: E402
+
+
+def test_grn_detail_is_store_scoped(monkeypatch):
+    grn = {
+        "grn_id": "GRN2",
+        "store_id": "BV-OTHER-02",
+        "vendor_invoice_no": "OTHER/INV/77",
+    }
+
+    class _Repo:
+        def find_by_id(self, _gid):
+            return dict(grn)
+
+    monkeypatch.setattr(grn_create_mod, "get_grn_repository", lambda: _Repo())
+    mgr = {
+        "roles": ["STORE_MANAGER"],
+        "store_ids": ["BV-TEST-01"],
+        "active_store_id": "BV-TEST-01",
+    }
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(grn_create_mod.get_grn("GRN2", current_user=mgr))
+    assert exc.value.status_code == 404
+    own = dict(mgr, store_ids=["BV-OTHER-02"], active_store_id="BV-OTHER-02")
+    got = asyncio.run(grn_create_mod.get_grn("GRN2", current_user=own))
+    assert got["vendor_invoice_no"] == "OTHER/INV/77"
