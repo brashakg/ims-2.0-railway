@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import List, Optional
 from ...dependencies import get_stock_repository
 from ._shared import (
+    VALID_TRANSITIONS,
     _get_db,
     logger,
 )
@@ -333,7 +334,7 @@ def _claim_order_status(
             # which is update_one({id}, ...) with NO status precondition, the
             # exact primitive this helper's docstring diagnoses as the bug. A
             # cancel committing in that gap was stamped straight back over, and
-            # since _claim_order_for_cancel filters $nin [CANCELLED, DELIVERED],
+            # since _claim_order_for_cancel claims any CANCELLABLE_STATUSES,
             # both CONFIRMED and READY stayed claimable. Losing that race used to
             # leave the unit SOLD; now that cancel releases it, it leaves a frame
             # in the customer's bag reading AVAILABLE.
@@ -367,12 +368,19 @@ def _claim_order_status(
     return bool(repo.update_status(order_id, new_status, user_id))
 
 
+# The statuses the counter cancel door may cancel: the staff transition table's
+# own answer, so a status that cannot move to CANCELLED is never released.
+CANCELLABLE_STATUSES = [s for s, to in VALID_TRANSITIONS.items() if "CANCELLED" in to]
+
+
 def _claim_order_for_cancel(
     repo, order_id: str, reason: str, current_user: dict
 ) -> Optional[dict]:
-    """Atomically flip ONE order to CANCELLED, only if it is not already
-    CANCELLED or DELIVERED. Returns the PRE-IMAGE doc when this caller won the
-    claim, else None.
+    """Atomically flip ONE order to CANCELLED, only from a status the staff
+    transition table (VALID_TRANSITIONS) lets cancel -- never a SHIPPED order
+    (the goods are with the courier or the customer: its units must not come
+    back to AVAILABLE) nor a finished one. Returns the PRE-IMAGE doc when this
+    caller won the claim, else None.
 
     This is what makes cancel single-shot: the stock reactivation and the
     loyalty clawback must run for exactly one caller, and a check-then-act
@@ -393,10 +401,7 @@ def _claim_order_for_cancel(
     if callable(updater):
         try:
             return updater(
-                {
-                    "order_id": order_id,
-                    "status": {"$nin": ["CANCELLED", "DELIVERED"]},
-                },
+                {"order_id": order_id, "status": {"$in": CANCELLABLE_STATUSES}},
                 {"$set": payload},
             )
         except Exception as exc:  # noqa: BLE001
@@ -407,7 +412,7 @@ def _claim_order_for_cancel(
                 exc,
             )
     existing = repo.find_by_id(order_id)
-    if not existing or existing.get("status") in ("CANCELLED", "DELIVERED"):
+    if not existing or existing.get("status") not in CANCELLABLE_STATUSES:
         return None
     # GATE ON THE WRITE. base_repository.update swallows exceptions and returns
     # False, so discarding this result meant a FAILED status write still ran the

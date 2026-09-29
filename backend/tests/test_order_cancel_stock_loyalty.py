@@ -474,6 +474,26 @@ def test_cancel_reactivates_the_units_this_order_consumed(wired):
     assert wired["stock"].find_available("P1", "S1") == 2
 
 
+@pytest.mark.parametrize("status", ["SHIPPED", "DELIVERED", "REFUNDED", "Delivered"])
+def test_cancel_never_releases_the_units_of_an_order_whose_goods_are_out(wired, status):
+    """The door asks the staff transition table (VALID_TRANSITIONS), where a
+    SHIPPED order moves only to DELIVERED: a fulfilled online order is SHIPPED
+    until the courier delivers it (owner ruling 2026-09-28), and cancelling it
+    put the frame in the parcel back to AVAILABLE. The atomic claim holds the
+    same rule for a status that changes between the read and the claim."""
+    wired["orders"].orders["ORD-1"]["status"] = status
+    wired["units"].append(_unit("U1"))
+
+    with pytest.raises(HTTPException) as refused:
+        _cancel()
+    assert refused.value.status_code == 400
+    assert om._claim_order_for_cancel(wired["orders"], "ORD-1", "r" * 10, _ADMIN) is None
+    wired["orders"].collection = None  # the non-atomic fallback holds it too
+    assert om._claim_order_for_cancel(wired["orders"], "ORD-1", "r" * 10, _ADMIN) is None
+    assert wired["orders"].orders["ORD-1"]["status"] == status
+    assert [u["status"] for u in wired["units"]] == ["SOLD"]
+
+
 def test_cancel_does_not_touch_another_orders_units_or_damaged_stock(wired):
     wired["units"].extend(
         [
