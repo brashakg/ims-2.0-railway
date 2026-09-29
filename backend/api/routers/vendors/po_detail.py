@@ -24,7 +24,11 @@ from ._shared import (
 )
 from .gst import build_po_gst, po_gst_context
 from .models import POLineCancel, POUpdate, cancel_reason, expected_date_not_backdated
-from .numbering import _cumulative_received_by_product, compute_po_receipt_state
+from .numbering import (
+    _cumulative_received_by_product,
+    compute_po_receipt_state,
+    po_line_status,
+)
 from .purchase_orders import audit_cost_filled, price_po_lines
 
 
@@ -465,6 +469,15 @@ def _received_per_line(po: dict, by_product: dict) -> list:
     return out
 
 
+def _refresh_received(items: list, received: list) -> None:
+    """Each line's own copy of what arrived, from the receipts. The receive
+    inbox and the cockpit read a line's received_qty before the header, so a
+    cancel that corrected only the header left a lagging line looking due."""
+    for it, r in zip(items, received):
+        it["received_qty"] = r
+        it["line_status"] = po_line_status(it, r)
+
+
 def _cancel_remainder(line: dict, received: int) -> int:
     """Withdraw what is still due on one line, in place; returns the units.
 
@@ -707,6 +720,7 @@ async def cancel_po(
     if any(by_product.values()):
         items = [dict(i) for i in po.get("items") or []]
         received = _received_per_line(po, by_product)
+        _refresh_received(items, received)
         units = sum(_cancel_remainder(it, r) for it, r in zip(items, received))
         if units == 0:
             raise HTTPException(
@@ -794,6 +808,7 @@ async def cancel_po_line(
         _refuse_if_box_waiting(po_id)
         by_product = _received_by_product(po)
         received = _received_per_line(po, by_product)
+        _refresh_received(items, received)
         units = _cancel_remainder(items[line_index], received[line_index])
         if units == 0:
             raise HTTPException(

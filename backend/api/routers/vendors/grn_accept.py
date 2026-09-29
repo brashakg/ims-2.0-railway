@@ -20,6 +20,7 @@ from ._shared import (
     router,
 )
 from .gst import _promote_cost_from_rate
+from .po_detail import _as_read
 from .numbering import (
     _cumulative_received_by_product,
     _grn_barcode,
@@ -548,42 +549,66 @@ def _accept_grn_claimed(
     # Advance the PO received state. Sum the accepted qty across EVERY accepted
     # GRN for this PO (this one is now ACCEPTED) and compare against the ordered
     # lines: full receipt -> RECEIVED, otherwise PARTIALLY_RECEIVED. Fail-soft.
+    #
+    # The write is guarded like every other PO change (_as_read): a manager's
+    # "cancel what is still due" landing between this read and this write must
+    # not be undone by writing back the lines read before it. On a lost race
+    # re-read and re-derive -- the receipts are already counted, so the answer
+    # only depends on the order as it now stands.
     po_status = None
     if po_repo is not None and po_id:
         try:
-            po = po_repo.find_by_id(po_id)
-            received_by_product = _cumulative_received_by_product(grn_repo, po_id)
-            po_items = (po.get("items") if po else []) or []
-            po_status = compute_po_receipt_state(po_items, received_by_product)
-            # Map the cumulative per-product received qty down onto each PO line
-            # + derive the line residual status (drives the receiving cockpit's
-            # "open POs" / "pending not-received" panels).
-            updated_items = []
-            for it in po_items:
-                recv = received_by_product.get(it.get("product_id"), 0)
-                updated_items.append(
+            for _attempt in range(3):
+                po = po_repo.find_by_id(po_id)
+                if not po or po.get("status") == "CANCELLED":
+                    break  # a withdrawn order stays withdrawn
+                received_by_product = _cumulative_received_by_product(grn_repo, po_id)
+                po_items = po.get("items") or []
+                state = compute_po_receipt_state(po_items, received_by_product)
+                # Map the cumulative per-product received qty down onto each PO
+                # line + derive the line residual status (drives the receiving
+                # cockpit's "open POs" / "pending not-received" panels).
+                updated_items = []
+                for it in po_items:
+                    recv = received_by_product.get(it.get("product_id"), 0)
+                    updated_items.append(
+                        {
+                            **it,
+                            "received_qty": recv,
+                            "line_status": po_line_status(it, recv),
+                        }
+                    )
+                if po_repo.update_if(
+                    po_id,
+                    _as_read(po),
                     {
-                        **it,
-                        "received_qty": recv,
-                        "line_status": po_line_status(it, recv),
-                    }
+                        "status": state,
+                        "items": updated_items,
+                        "received_qty_by_product": received_by_product,
+                        "total_received_qty": sum(received_by_product.values()),
+                        "last_received_at": datetime.now().isoformat(),
+                    },
+                ):
+                    po_status = state
+                    break
+            else:
+                logger.warning(
+                    "[VENDOR] GRN %s: PO %s kept changing; receipt state left "
+                    "for the next receipt or cancel to re-derive",
+                    grn_id,
+                    po_id,
                 )
-            po_repo.update(
-                po_id,
-                {
-                    "status": po_status,
-                    "items": updated_items,
-                    "received_qty_by_product": received_by_product,
-                    "total_received_qty": sum(received_by_product.values()),
-                    "last_received_at": datetime.now().isoformat(),
-                },
-            )
         except Exception:  # noqa: BLE001
             # Never lose the stock write on a PO-update failure. Best effort:
-            # at least flag the PO as partially received.
+            # at least flag the PO as partially received -- never over an order
+            # a cancel (or a full receipt) closed meanwhile.
             try:
-                po_repo.update(po_id, {"status": "PARTIALLY_RECEIVED"})
-                po_status = "PARTIALLY_RECEIVED"
+                if po_repo.update_if(
+                    po_id,
+                    {"status": {"$nin": ["RECEIVED", "CANCELLED"]}},
+                    {"status": "PARTIALLY_RECEIVED"},
+                ):
+                    po_status = "PARTIALLY_RECEIVED"
             except Exception:  # noqa: BLE001
                 pass
 

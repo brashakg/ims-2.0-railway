@@ -600,24 +600,25 @@ def test_line_cancel_counts_what_the_receipts_accepted(monkeypatch):
 
 class _RacingRepo(PurchaseOrderRepository):
     """The REAL repository over a strict fake collection. ``race`` runs once,
-    right after the handler's read: someone else's write landing between the
-    check and the write."""
+    right after the handler's ``at``-th read: someone else's write landing
+    between the check and the write."""
 
-    def __init__(self, po, race):
+    def __init__(self, po, race, at=1):
         super().__init__(StrictCollection("purchase_orders", [copy.deepcopy(po)]))
-        self.race = race
+        self.race, self.reads_left = race, at
 
     def find_by_id(self, pid):
         doc = super().find_by_id(pid)
-        race, self.race = self.race, None
-        if race:
+        self.reads_left -= 1
+        if self.reads_left == 0 and self.race:
+            race, self.race = self.race, None
             race(self)
         return doc
 
 
-def _wire_racing(monkeypatch, po, race):
+def _wire_racing(monkeypatch, po, race, at=1):
     _wire(monkeypatch, None)
-    repo = _RacingRepo(po, race)
+    repo = _RacingRepo(po, race, at)
     monkeypatch.setattr(v, "get_purchase_order_repository", lambda: repo)
     return repo
 
@@ -694,3 +695,155 @@ def test_send_refused_when_the_draft_was_edited_meanwhile(monkeypatch):
     assert e.value.status_code == 409
     assert repo.collection.docs[0]["status"] == "DRAFT"
     assert "sent_at" not in repo.collection.docs[0]
+
+
+class _AcceptedGrnRepo:
+    """One receipt, for accept_grn (its claim needs ``.collection``) and for
+    every receipt read (the filter is honoured, like Mongo)."""
+
+    def __init__(self, doc):
+        from test_grn_accept_atomic_claim import _FakeGrnColl
+
+        self.collection = _FakeGrnColl(doc)
+
+    def find_by_id(self, gid):
+        doc = self.collection.doc
+        return dict(doc) if gid == doc["grn_id"] else None
+
+    def update(self, gid, patch):
+        self.collection.doc.update(patch)
+        return True
+
+    def find_many(self, flt=None, *a, **k):
+        doc = self.collection.doc
+        return [dict(doc)] if matches(doc, flt or {}) else []
+
+
+def test_a_receipt_accepted_during_a_cancel_never_brings_the_cancelled_units_back(
+    monkeypatch,
+):
+    """Verifier probe (MEDIUM): the accept reads the order, the manager cancels
+    what is still due, then the accept wrote back the lines IT had read -- the
+    3 cancelled Ray-Bans were due again (PARTIALLY_RECEIVED, P2 x3 OPEN) under a
+    timeline that says 'Rest cancelled'. The receipt math now re-reads and
+    re-derives when the order changed under it."""
+    from test_grn_accept_atomic_claim import _StockRepo, _grn
+    from test_grn_accept_atomic_claim import _run as run_sync
+
+    def manager_cancels_the_rest(_repo):
+        _run(v.cancel_po("PO1", "vendor out of stock", _user(roles=("ADMIN",))))
+
+    # Read 1 prices the units; read 2 is the one the receipt math writes back.
+    repo = _wire_racing(monkeypatch, _po(status="SENT"), manager_cancels_the_rest, at=2)
+    grn = _grn(qty=2, po_id="PO1", store_id="S1")
+    grn_repo = _AcceptedGrnRepo(grn)
+    monkeypatch.setattr(v, "get_grn_repository", lambda: grn_repo)
+    monkeypatch.setattr(v, "get_stock_repository", lambda: _StockRepo())
+    monkeypatch.setattr(v, "_get_db", lambda: None)
+
+    out = run_sync(v.accept_grn("GRN-1", _user(roles=("ADMIN",), uid="u-admin")))
+
+    assert repo.race is None, "the cancel never landed in the window"
+    doc = repo.collection.docs[0]
+    p1, p2 = doc["items"]
+    assert (p2["quantity"], p2["line_status"]) == (0, "CANCELLED")
+    assert (p1["received_qty"], p1["line_status"]) == (2, "RECEIVED")
+    assert doc["status"] == out["po_status"] == "RECEIVED"
+    assert [h["label"] for h in doc["history"]] == ["Rest cancelled"]
+
+
+def test_a_rejected_delivery_accepted_during_a_cancel_leaves_it_cancelled(monkeypatch):
+    """Same window, nothing kept (every unit rejected): the cancel withdraws the
+    whole order, and the accept must not re-derive it back to part-received --
+    that would put all 5 units back on the due lists."""
+    from test_grn_accept_atomic_claim import _StockRepo, _grn
+    from test_grn_accept_atomic_claim import _run as run_sync
+
+    def manager_cancels(_repo):
+        _run(v.cancel_po("PO1", "vendor sent the wrong model", _user(roles=("ADMIN",))))
+
+    repo = _wire_racing(monkeypatch, _po(status="SENT"), manager_cancels, at=2)
+    grn = _grn(qty=0, po_id="PO1", store_id="S1")
+    grn_repo = _AcceptedGrnRepo(grn)
+    monkeypatch.setattr(v, "get_grn_repository", lambda: grn_repo)
+    monkeypatch.setattr(v, "get_stock_repository", lambda: _StockRepo())
+    monkeypatch.setattr(v, "_get_db", lambda: None)
+
+    run_sync(v.accept_grn("GRN-1", _user(roles=("ADMIN",), uid="u-admin")))
+
+    assert repo.race is None, "the cancel never landed in the window"
+    assert repo.collection.docs[0]["status"] == "CANCELLED"
+
+
+def test_the_accept_fallback_never_reopens_an_order_a_cancel_closed(monkeypatch):
+    """The accept's last resort (its receipt write failed: flag the order
+    part-received) was a plain status write too. With the manager's cancel
+    already in, it turned a RECEIVED order back to PARTIALLY_RECEIVED."""
+    from test_grn_accept_atomic_claim import _StockRepo, _grn
+    from test_grn_accept_atomic_claim import _run as run_sync
+
+    def manager_cancels_then_the_db_blips(repo):
+        _run(v.cancel_po("PO1", "vendor out of stock", _user(roles=("ADMIN",))))
+        real = repo.update_if
+
+        def blip_once(*a, **k):
+            repo.update_if = real
+            raise RuntimeError("not primary; election in progress")
+
+        repo.update_if = blip_once
+
+    repo = _wire_racing(
+        monkeypatch, _po(status="SENT"), manager_cancels_then_the_db_blips, at=2
+    )
+    grn_repo = _AcceptedGrnRepo(_grn(qty=2, po_id="PO1", store_id="S1"))
+    monkeypatch.setattr(v, "get_grn_repository", lambda: grn_repo)
+    monkeypatch.setattr(v, "get_stock_repository", lambda: _StockRepo())
+    monkeypatch.setattr(v, "_get_db", lambda: None)
+
+    run_sync(v.accept_grn("GRN-1", _user(roles=("ADMIN",), uid="u-admin")))
+
+    assert repo.race is None, "the cancel never landed in the window"
+    doc = repo.collection.docs[0]
+    assert doc["status"] == "RECEIVED"
+    assert doc["items"][1]["line_status"] == "CANCELLED"
+
+
+def _lagging_copy():
+    """PARTIALLY_RECEIVED; the receipts put P1 x2 on the shelf but the order's
+    own line copy still says 0 / OPEN (grn_accept's fallback writes only the
+    status). P3 is still due."""
+    items = [
+        _line("P1", "Carrera CA8895", 2, 1000),
+        _line("P2", "Ray-Ban RB2140", 3, 2000),
+        _line("P3", "Oakley OX8046", 1, 3000),
+    ]
+    po = _po(status="PARTIALLY_RECEIVED", items=items)
+    grns = [{"po_id": "PO1", "grn_number": "RCPT/0013", "status": "ACCEPTED",
+             "items": [{"product_id": "P1", "accepted_qty": 2}]}]
+    return po, grns
+
+
+def test_line_cancel_brings_a_lagging_line_copy_up_to_date(monkeypatch):
+    """Verifier LOW: the receive inbox reads a line's own received_qty before
+    the header. Cancelling P2 wrote the right header but left P1 at 0 / OPEN,
+    so P1 x2 showed as still pending on the order."""
+    po, grns = _lagging_copy()
+    repo, _ = _wire(monkeypatch, po, grns=grns)
+    _run(v.cancel_po_line("PO1", 1, _line_body(product_id="P2"), _user()))
+    p1, p2, p3 = repo.pos["PO1"]["items"]
+    assert (p1["received_qty"], p1["line_status"]) == (2, "RECEIVED")
+    assert p2["line_status"] == "CANCELLED"
+    assert (p3["quantity"], p3["line_status"]) == (1, "OPEN")
+    assert repo.pos["PO1"]["status"] == "PARTIALLY_RECEIVED"  # P3 still due
+
+
+def test_cancel_brings_a_line_with_nothing_due_up_to_date(monkeypatch):
+    """Same lag through 'cancel what is still due': P1 has nothing due, so the
+    old early return skipped it and it kept 0 / OPEN on a RECEIVED order."""
+    po, grns = _lagging_copy()
+    repo, _ = _wire(monkeypatch, po, grns=grns)
+    _run(v.cancel_po("PO1", "vendor out of stock", _user()))
+    doc = repo.pos["PO1"]
+    p1 = doc["items"][0]
+    assert (p1["received_qty"], p1["line_status"]) == (2, "RECEIVED")
+    assert doc["status"] == "RECEIVED"
