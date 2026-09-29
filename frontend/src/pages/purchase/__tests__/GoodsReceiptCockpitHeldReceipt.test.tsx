@@ -71,6 +71,7 @@ const getCockpitMock = grnCockpitApi.getCockpit as unknown as ReturnType<typeof 
 const getGRNsMock = vendorsApi.getGRNs as unknown as ReturnType<typeof vi.fn>;
 const getPOsMock = vendorsApi.getPurchaseOrders as unknown as ReturnType<typeof vi.fn>;
 const acceptGRNMock = vendorsApi.acceptGRN as unknown as ReturnType<typeof vi.fn>;
+const voidGRNMock = vendorsApi.voidGRN as unknown as ReturnType<typeof vi.fn>;
 
 const HELD_NO = 'RCPT/BV-DHN-02/26-27/0022';
 
@@ -157,5 +158,17 @@ describe('Receive Goods - a receipt held for cataloguing (audit C1)', () => {
       expect(toastMock.success.mock.calls.length + toastMock.warning.mock.calls.length).toBeGreaterThan(0),
     );
     expect(toastMock.success).not.toHaveBeenCalled();
+  });
+
+  // Panel round 2: a second receipt of the same box stays held for the store
+  // manager, whose task says to void it here. The server proves it put
+  // nothing on the shelf (and refuses otherwise).
+  it('the store manager can void a held receipt (a second receipt of the same box)', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    voidGRNMock.mockResolvedValue({ grn_status: 'VOID' });
+    const row = await heldRow();
+    fireEvent.click(within(row).getByRole('button', { name: /void/i }));
+    await waitFor(() => expect(voidGRNMock).toHaveBeenCalledWith('g-held'));
+    confirmSpy.mockRestore();
   });
 });

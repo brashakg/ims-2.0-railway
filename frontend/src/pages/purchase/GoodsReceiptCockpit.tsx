@@ -1392,7 +1392,8 @@ export function GoodsReceiptCockpit() {
                       A <strong>partly accepted</strong> one put most of its goods into stock but
                       held the lines whose product is not catalogued yet. The catalogue manager
                       has a task for them, and finishing the product puts them on the shelf by
-                      itself; "Add to stock" tries again now.
+                      itself; "Add to stock" tries again now. A second receipt of the same box
+                      stays held for the store manager: void it if the vendor sent nothing extra.
                     </p>
                     <div className="space-y-2">
                       {pendingGrns.map((g) => (
@@ -1435,17 +1436,18 @@ export function GoodsReceiptCockpit() {
                               )}
                               Add to stock
                             </button>
-                            {g.status === 'PARTIALLY_ACCEPTED' ? null : (
-                              <button
-                                type="button"
-                                onClick={() => voidPendingGrn(g.grn_id, g.grn_number)}
-                                disabled={grnActionBusy === g.grn_id}
-                                className="btn-secondary !py-1 !px-3 text-xs flex items-center gap-1.5 disabled:opacity-50"
-                              >
-                                <X className="w-3.5 h-3.5" />
-                                Void (duplicate)
-                              </button>
-                            )}
+                            {/* A held receipt can be a second receipt of the same box: the
+                                store manager voids it here. The server refuses the void if
+                                the receipt put anything on the shelf. */}
+                            <button
+                              type="button"
+                              onClick={() => voidPendingGrn(g.grn_id, g.grn_number)}
+                              disabled={grnActionBusy === g.grn_id}
+                              className="btn-secondary !py-1 !px-3 text-xs flex items-center gap-1.5 disabled:opacity-50"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                              Void (duplicate)
+                            </button>
                           </div>
                         </div>
                       ))}

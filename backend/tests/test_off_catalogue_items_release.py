@@ -734,6 +734,11 @@ def test_c1_a_second_receipt_of_the_same_box_waits_for_the_store_manager(world):
         f"C1: the store manager was not told about {grn2['grn_number']} "
         f"({_tasks_of(world)})",
     )
+    # The task opens that vendor's "Receipts still waiting", where it is voided.
+    finding(
+        mgr[0].get("link") == f"/purchase/receive?vendor_id={po['vendor_id']}",
+        f"C1: the store manager's task does not open the receipt ({mgr[0].get('link')})",
+    )
     finding(
         not [t for t in _open_tasks(world) if t.get("category") == "Catalogue"],
         "C1: the cataloguer still holds a task for an item already finished",
