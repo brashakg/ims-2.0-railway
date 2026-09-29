@@ -45,6 +45,12 @@ function rupees(v: number | null | undefined): string {
 
 /** Small active/draft/inactive status note for the existing row. */
 function statusNote(info: DuplicateProductInfo): { text: string; tone: 'ok' | 'warn' } {
+  if (info.provisional) {
+    return {
+      text: 'Ordered before it was catalogued — finish this one; its held stock goes on the shelf when you save',
+      tone: 'warn',
+    };
+  }
   if (info.is_active === false) return { text: 'Inactive (archived)', tone: 'warn' };
   if (String(info.catalog_status || '').toUpperCase() === 'DRAFT') {
     return { text: 'Draft — in your catalog, not sellable yet', tone: 'warn' };
@@ -60,6 +66,10 @@ export function DuplicateProductModal({
   busy = false,
 }: DuplicateProductModalProps) {
   const primaryRef = useRef<HTMLButtonElement | null>(null);
+  // Audit C3: a manager's typed-in draft is not "a product to add a variant
+  // to" -- it is THE product, waiting to be finished. Lead there.
+  const finishDraft = Boolean(info.provisional);
+  const onPrimary = finishDraft ? onOpenExisting : onAddVariant;
 
   // Keyboard contract: Enter = default action (add variant), Esc = go back.
   // Bound on window so it works no matter where focus sits; the parent form's
@@ -73,12 +83,12 @@ export function DuplicateProductModal({
       } else if (e.key === 'Enter' && !busy) {
         e.preventDefault();
         e.stopPropagation();
-        onAddVariant();
+        onPrimary();
       }
     };
     window.addEventListener('keydown', onKeyDown, true);
     return () => window.removeEventListener('keydown', onKeyDown, true);
-  }, [onAddVariant, onClose, busy]);
+  }, [onPrimary, onClose, busy]);
 
   // Land focus on the primary action so Enter/Tab flow starts there.
   useEffect(() => {
@@ -172,21 +182,25 @@ export function DuplicateProductModal({
               ref={primaryRef}
               type="button"
               disabled={busy}
-              onClick={onAddVariant}
+              onClick={onPrimary}
               className="btn-primary w-full flex items-center justify-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
             >
-              <CopyPlus className="w-4 h-4" />
-              {busy ? 'Loading…' : 'Add a new colour/size of this model'}
+              {finishDraft ? <ExternalLink className="w-4 h-4" /> : <CopyPlus className="w-4 h-4" />}
+              {busy
+                ? 'Loading…'
+                : finishDraft
+                  ? 'Finish the ordered item'
+                  : 'Add a new colour/size of this model'}
               {!busy && <kbd className="qa-kbd ml-1">Enter</kbd>}
             </button>
             <button
               type="button"
               disabled={busy}
-              onClick={onOpenExisting}
+              onClick={finishDraft ? onAddVariant : onOpenExisting}
               className="btn-secondary w-full flex items-center justify-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
             >
-              <ExternalLink className="w-4 h-4" />
-              Open the existing product
+              {finishDraft ? <CopyPlus className="w-4 h-4" /> : <ExternalLink className="w-4 h-4" />}
+              {finishDraft ? 'Add a new colour/size of this model' : 'Open the existing product'}
             </button>
             <button
               type="button"

@@ -1145,6 +1145,10 @@ def existing_product_summary(existing: Dict[str, Any]) -> Dict[str, Any]:
         "offer_price": existing.get("offer_price"),
         "is_active": existing.get("is_active"),
         "catalog_status": existing.get("catalog_status"),
+        # Ordered before it was catalogued: the popup leads the cataloguer to
+        # FINISH this draft (its held stock goes on the shelf when he does),
+        # not to add a second product or read it as archived.
+        "provisional": bool(existing.get("provisional")),
         "image_url": _first_image(),
     }
 
@@ -2154,6 +2158,24 @@ _DOOR_IDENTITY_ALIASES = {
 }
 
 
+def _size_attribute_key(category: Any) -> str:
+    """Where a flat top-level `size` lands: the category's OWN registry key.
+
+    A frame's (and sunglass's) eye size lives in `lens_size` -- `size` was
+    REMOVED from their registry, and the Add-Product form saves lens_size. The
+    alias used to write `size` regardless, so the same Boss 1700 C2 52 got a
+    4-part identity_key off the PO's "not in the catalogue?" line and a 3-part
+    one off the catalogue form, the duplicate guard never matched the two, and
+    every typed-in frame became a hidden twin (audit C2/C3). Categories that do
+    keep `size` in their registry (ACCESSORIES) keep it."""
+    spec = category_spec(category)
+    if spec is not None:
+        fields = spec.required + spec.optional
+        if "size" not in fields and "lens_size" in fields:
+            return "lens_size"
+    return "size"
+
+
 def normalise_door_payload(payload: Dict[str, Any], *, source: str) -> Dict[str, Any]:
     """Fold a door's create payload into the canonical create kwargs.
 
@@ -2168,6 +2190,8 @@ def normalise_door_payload(payload: Dict[str, Any], *, source: str) -> Dict[str,
     for top_key, attr_key in _DOOR_IDENTITY_ALIASES.items():
         val = p.get(top_key)
         if val is not None and not (isinstance(val, str) and not val.strip()):
+            if top_key == "size":
+                attr_key = _size_attribute_key(p.get("category"))
             attrs.setdefault(attr_key, val)
     # A flat top-level `model` fills BOTH model_no AND model_name (mirrors the
     # read-side _overlay_attributes). Several categories key identity on

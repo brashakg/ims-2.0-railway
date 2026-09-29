@@ -487,8 +487,10 @@ export function useQuickAddForm() {
   // productListPath) pre-scoped to its SKU.
   const handleDupOpenExisting = useCallback(() => {
     const sku = dupInfo?.sku;
+    const draftId = dupInfo?.provisional ? dupInfo.product_id : null;
     setDupInfo(null);
-    navigate(productListPath(sku));
+    // A manager's typed-in draft opens in THIS editor to be finished (audit C3).
+    navigate(draftId ? `/catalog/add?edit=${encodeURIComponent(draftId)}` : productListPath(sku));
   }, [dupInfo, navigate]);
 
   // ---- Similar-products strip (Phase 2) -------------------------------------
