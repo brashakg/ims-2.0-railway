@@ -378,6 +378,33 @@ describe('attestation note', () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Review variance / approve opens the Invoices tab's ApproveModal
+// ---------------------------------------------------------------------------
+
+describe('review variance / approve', () => {
+  it('opens the shared ApproveModal and posts to the row id', async () => {
+    const approveMock = purchaseInvoicesApi.approveException as unknown as ReturnType<typeof vi.fn>;
+    approveMock.mockResolvedValue({
+      match_status: 'MATCHED_OVERRIDE',
+      exception_override: { approved_by: 'acc-1', reason: 'Vendor agreed short-ship' },
+    });
+    renderConsole();
+    const row = (await screen.findByText('INV-OH-1')).closest('tr') as HTMLElement;
+
+    fireEvent.click(within(row).getByText('Review variance / approve'));
+    const modal = screen.getByText('Approve match exception').closest('div.bg-white') as HTMLElement;
+    fireEvent.change(within(modal).getByRole('textbox'), { target: { value: 'Vendor agreed short-ship' } });
+    fireEvent.click(within(modal).getByRole('button', { name: /Approve exception/ }));
+
+    await waitFor(() =>
+      expect(approveMock).toHaveBeenCalledWith('pi-oh-1', { reason: 'Vendor agreed short-ship' }),
+    );
+    await waitFor(() => expect(screen.queryByText('Approve match exception')).toBeNull());
+    expect(within(row).getByText('OVERRIDE APPROVED')).toBeInTheDocument();
+  });
+});
 // ---------------------------------------------------------------------------
 // Audit stamps name a PERSON, not a user id
 // ---------------------------------------------------------------------------
