@@ -1051,6 +1051,24 @@ def test_one_frame_of_a_historical_order_is_one_unit_auto_then_goods_back(swept,
     assert _minted(swept) == ["AVAILABLE"], "one frame, one unit"
 
 
+def test_goods_back_on_a_row_confirmed_before_the_line_marks_restocks_nothing(swept, monkeypatch):
+    """A row the accountant confirmed before the restock marked the order line
+    (the deploy of this rule) carries no mark and no returned_qty, but its own
+    returns doc says what its restock put back. Goods back, new on that row,
+    reads it: a historical order has no SOLD unit to stop a second mint."""
+    oid = 60187
+    row = _historical_refund(swept, monkeypatch, oid, 700387, status="DELIVERED")
+    _confirm(row)
+    assert _minted(swept) == ["AVAILABLE"]
+    items = _doc(swept, oid)["items"]
+    for item in items:
+        item.pop("returned_qty", None)
+        item.pop("restocked_refunds", None)
+    _set(swept, oid, items=items)
+    _goods_back(swept["review"].find_one({"review_id": row["review_id"]}))
+    assert _minted(swept) == ["AVAILABLE"], "one frame, one unit"
+
+
 # ---------------------------------------------------------------------------
 # Ruling 1 leaves a fulfilled online order SHIPPED (it used to be DELIVERED).
 # Every report that picks orders by status reads the ONE pair of sets in

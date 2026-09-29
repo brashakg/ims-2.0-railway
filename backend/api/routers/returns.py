@@ -399,11 +399,14 @@ def _already_returned_qty(
     order_id: Optional[str],
     item_id: Optional[str],
     product_id: Optional[str],
-    exclude_shopify_refund_id: Optional[str] = None,
+    own_shopify_refund_id: Optional[str] = None,
 ) -> float:
     """Sum the quantities ALREADY returned for one (order, line) across the
-    `returns` collection. `exclude_shopify_refund_id`: leave out that Shopify
-    refund's own doc (the refund handler asks while it holds its claim doc).
+    `returns` collection. `own_shopify_refund_id`: that Shopify refund's own
+    doc (the refund handler asks while it holds its claim doc) counts only the
+    units its restock already put back (its landed `restocked` rows), never
+    the lines it claims -- a row confirmed before the order-line marks
+    (shopify_refund._restock_booked) has nothing else to say it restocked.
 
     A line is identified by its original order `item_id` when known, otherwise
     by `product_id`. We scan completed return docs for the same order and add up
@@ -420,9 +423,15 @@ def _already_returned_qty(
     total = 0.0
     try:
         for doc in coll.find({"order_id": order_id}, {"_id": 0}):
-            if exclude_shopify_refund_id and (
-                doc.get("shopify_refund_id") == exclude_shopify_refund_id
+            if own_shopify_refund_id and (
+                doc.get("shopify_refund_id") == own_shopify_refund_id
             ):
+                total += sum(
+                    float(row.get("reactivated") or 0) + float(row.get("minted") or 0)
+                    for row in doc.get("restocked") or []
+                    if isinstance(row, dict) and product_id
+                    and str(row.get("product_id")) == str(product_id)
+                )
                 continue
             for prior in doc.get("items") or []:
                 if not isinstance(prior, dict):
@@ -452,7 +461,7 @@ def _already_returned_qty(
 def _units_already_back(
     order_id: Optional[str],
     orig_line: Dict[str, Any],
-    exclude_shopify_refund_id: Optional[str] = None,
+    own_shopify_refund_id: Optional[str] = None,
 ) -> float:
     """ONE count of an order line's units no longer out with the buyer: every
     return doc's qty for the line (_already_returned_qty), or the line's own
@@ -465,7 +474,7 @@ def _units_already_back(
             order_id,
             orig_line.get("item_id") or orig_line.get("id"),
             orig_line.get("product_id"),
-            exclude_shopify_refund_id=exclude_shopify_refund_id,
+            own_shopify_refund_id=own_shopify_refund_id,
         ),
         float(orig_line.get("returned_qty") or 0),
     )

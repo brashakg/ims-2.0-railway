@@ -462,9 +462,10 @@ def _cap_restock_to_unreturned(
 ) -> Tuple[List[Any], bool]:
     """Restock no more units of an order line than are still out with the
     buyer, by the counter return door's own answer: the line's purchased qty
-    less returns._units_already_back (every OTHER return doc of the order --
-    this refund's own claim doc excluded -- or the line's returned_qty, which
-    every restock of a Shopify refund books). A unit a counter return or
+    less returns._units_already_back (every OTHER return doc of the order and
+    what this refund's own doc says its restock already put back -- or the
+    line's returned_qty, which every restock of a Shopify refund books). A
+    unit a counter return or
     another door already took back is on the shelf again -- restocking it
     finds no SOLD unit and MINTS a phantom (always, on a historical order,
     which has no SOLD unit to find). A line THIS refund already restocked
@@ -494,7 +495,7 @@ def _cap_restock_to_unreturned(
             key = str(orig.get("item_id") or orig.get("id") or orig.get("product_id"))
             if key not in left:
                 left[key] = _line_purchased_qty(orig) - _units_already_back(
-                    order.get("order_id"), orig, exclude_shopify_refund_id=refund_id
+                    order.get("order_id"), orig, own_shopify_refund_id=refund_id
                 )
             keep = max(0.0, min(line.return_qty, left[key]))
             left[key] -= keep
