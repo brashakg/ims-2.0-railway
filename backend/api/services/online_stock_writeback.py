@@ -663,12 +663,7 @@ def _name_baseline_strays(
     if not strays:
         return
     summary["stray_skus"] = strays
-    line = _stray_sku_error(strays)
-    if summary.get("code"):
-        summary["error"] = f"{summary.get('error') or summary['code']} -- ALSO: {line}"
-    else:
-        summary["code"] = STOCK_BASELINE_STRAY
-        summary["error"] = line
+    _say(summary, STOCK_BASELINE_STRAY, _stray_sku_error(strays))
 
 
 def _alert_unmapped_online(db, skus: List[str], summary: Dict[str, Any]) -> None:
@@ -882,18 +877,29 @@ def _unknown_run(db, summary: Dict[str, Any], exc: Exception) -> Dict[str, Any]:
 
 def _say_unknown(summary: Dict[str, Any], line: str) -> None:
     """Stamp THE unknown verdict (STOCK_ONHAND_UNKNOWN) on a summary; ``line``
-    names the read that died. The dead read leads (as a refusal Shopify
-    answered leads on the writer); whatever the summary already said rides
-    under it as an ' -- ALSO:' line, never lost. Split from ``_unknown_run``
-    for a guard that runs inside a door which records its own row
-    (``_alert_unmapped_online``, ``_name_baseline_strays``): one row, not
-    two."""
+    names the read that died. Split from ``_unknown_run`` for a guard that
+    runs inside a door which records its own row (``_alert_unmapped_online``,
+    ``_name_baseline_strays``): one row, not two."""
     from .shopify_push.inventory import STOCK_ONHAND_UNKNOWN
 
-    prior = summary.get("error")
-    summary["code"] = STOCK_ONHAND_UNKNOWN
-    summary["error"] = line + (f" -- ALSO: {prior}" if prior else "")
+    _say(summary, STOCK_ONHAND_UNKNOWN, line)
     logger.warning("[STOCK_WRITEBACK] %s", summary["error"])
+
+
+def _say(summary: Dict[str, Any], code: str, line: str) -> None:
+    """Add one fact to a door's row, THE one way: a code already on the row
+    keeps the lead and the new line rides under it (' -- ALSO:'); else it
+    takes the code. One rule for every fact the door finds after the writer
+    (#1141 recheck 3): a stray that was FOUND kept the writer's code while a
+    stray check that DIED overwrote it, so a mixed basket's untargeted SKU
+    flipped the writer's SHOPIFY_LOCATION_UNMAPPED to STOCK_ONHAND_UNKNOWN --
+    two rankings of one question in one door."""
+    if summary.get("code"):
+        summary["error"] = f"{summary.get('error') or summary['code']} -- ALSO: {line}"
+    else:
+        prior = summary.get("error")
+        summary["code"] = code
+        summary["error"] = line + (f" -- ALSO: {prior}" if prior else "")
 
 
 def _dispatch(coro) -> None:

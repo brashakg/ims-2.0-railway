@@ -637,7 +637,13 @@ def listings_for_skus(db, skus: List[str]) -> Dict[str, List[str]]:
     (``ecom.variant_of.twin_id``), never to itself: a size variant owns no
     listing and must never carry a baseline the schedule never diffs. The
     same two lookups ``inventory_items_for_skus`` resolves targets with, so
-    the target and the listing can never disagree. Fail-soft ``{}``."""
+    the target and the listing can never disagree.
+
+    STRICT -- it RAISES on a dead read (#1141 recheck 3). Fail-soft ``{}``
+    was "these SKUs ride no listing", so the writer asked the stray
+    question of nothing and a sale over a phantom size read green, while the
+    sale's no-target branch named the same dead read UNKNOWN. Its one caller
+    (``inventory.push_skus_stock``) names the raise."""
     keys = _clean_keys(skus)
     if not keys or db is None:
         return {}
@@ -647,12 +653,12 @@ def listings_for_skus(db, skus: List[str]) -> Dict[str, List[str]]:
         if pid and key not in out.setdefault(str(pid), []):
             out[str(pid)].append(key)
 
-    variants = _variants_by_key(db, keys)
-    parents = _parents_for_variants(db, list(variants.values()))
+    variants = _variants_by_key(db, keys, strict=True)
+    parents = _parents_for_variants(db, list(variants.values()), strict=True)
     for key, var in variants.items():
         _add(_parent_from(parents, var).get("id"), key)
     remaining = [k for k in keys if k not in variants]
-    for key, doc in _products_by_key(db, remaining).items():
+    for key, doc in _products_by_key(db, remaining, strict=True).items():
         link = (doc.get("ecom") or {}).get("variant_of")
         pid = (link.get("twin_id") if isinstance(link, dict) else None) or doc.get("id")
         _add(pid, key)

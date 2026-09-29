@@ -45,7 +45,7 @@ from .publish import _publish_to_online_store
 from .inventory import (
     STOCK_TRACKING_FAILED,
     _set_variant_tracking,
-    listing_visible,
+    listing_already_live,
     plan_product_stock,
     push_skus_stock,
     sync_product_stock,
@@ -244,7 +244,14 @@ async def push_product(
     # does not record PUBLISHED is written HELD at Draft; the publish step sets
     # it Active only after every gate has passed. A CREATE stays ACTIVE: a new
     # product has no publication until that same gated publish step.
-    held = bool(existing_gid) and payload.get("status") == "ACTIVE" and not listing_visible(product)
+    #
+    # HELD UNTIL TRACKING IS CONFIRMED, not only until IMS records PUBLISHED
+    # (recheck 3): the guard's take-down reports success once Shopify took the
+    # Draft, but its IMS write-back is fail-soft -- lost on a Mongo blip, IMS
+    # still said PUBLISHED and the next press sent ACTIVE before the tracking
+    # gate ran. A listing whose baseline records tracking as unconfirmed
+    # (``listing_already_live`` False) is held too.
+    held = bool(existing_gid) and payload.get("status") == "ACTIVE" and not listing_already_live(product)
     try:
         body = await _graphql(db, query, {"input": {**payload, "status": "DRAFT"} if held else payload})
         err = _user_errors(body, field_name)
@@ -429,6 +436,17 @@ async def push_product(
         #     re-derived here.
         tracking_ok = not (stock_summary or {}).get("withhold_publish")
         pub_summary = None
+        # A HELD press that withholds its publish has put the listing at Draft
+        # on Shopify: OFF the website, whatever it was before. IMS's record can
+        # lag Shopify (a lost PUBLISHED write-back, an activation in Shopify
+        # admin), so a listing that WAS showing is taken off here -- and the
+        # withheld line said only "NOT made visible" (recheck 3). Said now.
+        held_line = (
+            " -- the listing is held at Draft on Shopify, so it is OFF the website "
+            "(taken off, if it was showing) until a press passes every gate"
+            if held
+            else ""
+        )
         if new_gid and payload.get("status") == "ACTIVE":
             if seed_summary is not None:
                 priced_ok = (
@@ -453,7 +471,7 @@ async def push_product(
                         pub_summary = {
                             **pub_summary,
                             "published": False,
-                            "error": f"publish withheld: the listing could not be set Active ({err})",
+                            "error": f"publish withheld: the listing could not be set Active ({err})" + held_line,
                         }
                 if pub_summary.get("published") and pid:
                     # IMS must agree with the storefront (see _writeback_product
@@ -466,12 +484,12 @@ async def push_product(
                 # grey box the rule exists to prevent.
                 pub_summary = {
                     "published": False,
-                    "error": "publish withheld: the photograph did not reach Shopify",
+                    "error": "publish withheld: the photograph did not reach Shopify" + held_line,
                 }
             elif not priced_ok:
                 pub_summary = {
                     "published": False,
-                    "error": "publish withheld: variant unpriced or seeding failed",
+                    "error": "publish withheld: variant unpriced or seeding failed" + held_line,
                 }
             else:
                 # Priced and photographed, but tracking + DENY did not stick:
