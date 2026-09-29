@@ -272,7 +272,7 @@ describe('F73 - reorder level -1 = not set', () => {
 describe('F92 - two buying doors, each says what it is for', () => {
   const item = (id: string) => NAV_GROUPS.flatMap((g) => g.items).find((i) => i.id === id)!;
 
-  it.fails('menu labels', () => {
+  it('menu labels', () => {
     expect(item('buy-desk').label).toMatch(/^Buy Desk\s*[-–—]\s*what to reorder$/);
     expect(item('purchase').label).toMatch(/^Purchase\s*[-–—]\s*orders, receiving, bills$/);
   });
@@ -282,7 +282,7 @@ describe('F92 - two buying doors, each says what it is for', () => {
     expect(item('purchase').to).toBe('/purchase');
   });
 
-  it.fails('Buy Desk does not say 0 products while it is still loading', async () => {
+  it('Buy Desk does not say 0 products while it is still loading', async () => {
     getRows.mockReturnValue(new Promise(() => {}));
     render(
       <MemoryRouter initialEntries={['/catalog/buy-desk']}>

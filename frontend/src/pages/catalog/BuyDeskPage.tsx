@@ -201,7 +201,11 @@ export default function BuyDeskPage() {
           />
         </div>
         <div className="text-sm text-gray-500">
-          {rows.length} products · <span className="font-medium text-green-700">{readyCount} ready to buy</span>
+          {!loading && (
+            <>
+              {rows.length} products · <span className="font-medium text-green-700">{readyCount} ready to buy</span>
+            </>
+          )}
         </div>
       </div>
 
