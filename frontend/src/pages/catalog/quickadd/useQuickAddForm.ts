@@ -730,6 +730,7 @@ export function useQuickAddForm() {
         const res = await catalogProductsApi.list({
           needs_review: true,
           is_active: 'all',
+          ordered_draft: false,
           limit: 2,
         });
         const ids = (res.products || [])
@@ -1244,12 +1245,19 @@ export function useQuickAddForm() {
       try {
         const doc = await catalogProductsApi.get(reviewId);
         if (cancelled) return;
-        if (doc.pos_ready) {
+        if (doc.pos_ready || doc.spine_product_id) {
+          // Approved already, or ordered on a PO before it was catalogued
+          // (audit C1): either way it HAS its billing row, so it is edited --
+          // and an ordered draft finished -- in the standard editor.
           removeFromReviewQueue(reviewId);
-          toast.info('This item is already approved — opening the standard editor.');
+          toast.info(
+            doc.spine_product_id
+              ? 'This item was ordered before it was catalogued — finish it here; its held stock goes on the shelf when you save.'
+              : 'This item is already approved — opening the standard editor.'
+          );
           const next = new URLSearchParams(searchParams);
           next.delete('review');
-          next.set('edit', reviewId);
+          next.set('edit', String(doc.spine_product_id || reviewId));
           setSearchParams(next, { replace: true });
           return;
         }
@@ -1313,6 +1321,7 @@ export function useQuickAddForm() {
           const res = await catalogProductsApi.list({
             needs_review: true,
             is_active: 'all',
+            ordered_draft: false,
             limit: 2,
           });
           const ids = (res.products || [])

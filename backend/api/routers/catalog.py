@@ -1337,6 +1337,23 @@ def _spine_product_id(repo, catalog_doc: Optional[Dict]) -> Optional[str]:
     return (spine or {}).get("product_id")
 
 
+def _refuse_ordered_draft(doc: Optional[Dict]) -> None:
+    """An item a manager ordered on a PO before it was catalogued (audit C1)
+    already HAS its billing row. It is finished in the product editor
+    (PUT /products/{id}) -- the save that restamps it and puts the units its
+    receipts hold on the shelf. The import review's save / approve would write
+    around that door, so they refuse it and say where to go."""
+    if (doc or {}).get("spine_product_id") and (doc or {}).get("needs_review"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This item was ordered on a purchase order before it was "
+                "catalogued. Finish it in the product editor (Catalogue > Needs "
+                "review > open it); its held stock goes on the shelf when you save."
+            ),
+        )
+
+
 def _next_sku_counter(prefix: str, db=None) -> int:
     """Next monotonic SKU counter for a category prefix.
 
@@ -1553,6 +1570,14 @@ async def list_catalog_products(
     source: Optional[str] = Query(
         default=None, description="Filter by import source, e.g. 'bvi_import'."
     ),
+    ordered_draft: Optional[bool] = Query(
+        default=None,
+        description=(
+            "true = only items a manager ordered on a PO before they were "
+            "catalogued (they carry spine_product_id and open in the product "
+            "editor); false = none of them -- the import-review queue."
+        ),
+    ),
     photo: Optional[str] = Query(
         default=None,
         pattern="^(has|missing)$",
@@ -1574,6 +1599,8 @@ async def list_catalog_products(
     # an unsupplied `photo` arrives as its Query default object, not None.
     if not isinstance(photo, str):
         photo = None
+    if not isinstance(ordered_draft, bool):
+        ordered_draft = None
 
     # Photo + online truth, ONE rule (online_catalog.product_online_state),
     # stamped before the filters so the photo filter reads the same value the
@@ -1618,18 +1645,27 @@ async def list_catalog_products(
         ]
     if source:
         products = [p for p in products if p.get("source") == source]
+    if ordered_draft is not None:
+        products = [
+            p for p in products if bool(p.get("spine_product_id")) == ordered_draft
+        ]
     # 'all' = no active filter; otherwise the legacy boolean equality match.
     if is_active != "all":
         active_bool = is_active in ("true", "True")
         products = [p for p in products if p.get("is_active") == active_bool]
 
-    # Sort by created date (imported docs coalesce to migrated_at). A review
-    # row with a spine is a manager's typed-in draft (audit C1): stock is, or
-    # soon will be, waiting on it, so it leads the Needs-review list.
-    products.sort(
-        key=lambda p: (bool(p.get("spine_product_id")), _catalog_sort_key(p)),
-        reverse=True,
-    )
+    # Sort by created date (imported docs coalesce to migrated_at). In the
+    # Needs-review list ONLY, a row with a spine is a manager's typed-in draft
+    # (audit C1): stock is, or soon will be, waiting on it, so it leads. A
+    # finished one keeps its spine_product_id, so everywhere else it sorts by
+    # date like any product.
+    if needs_review is True:
+        products.sort(
+            key=lambda p: (bool(p.get("spine_product_id")), _catalog_sort_key(p)),
+            reverse=True,
+        )
+    else:
+        products.sort(key=_catalog_sort_key, reverse=True)
 
     total = len(products)
     start = (page - 1) * limit
@@ -1941,6 +1977,7 @@ async def update_catalog_product(
     existing = _get_catalog_product(product_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="Product not found")
+    _refuse_ordered_draft(existing)
     # Work on a COPY: in no-DB mode _get_catalog_product returns the LIVE
     # in-memory dict, so mutating it mid-handler would leak partial edits into
     # the store on a later 4xx AND defeat the compare-and-swap write below
@@ -2485,6 +2522,7 @@ async def promote_catalog_product(
     doc = _get_catalog_product(product_id)
     if doc is None:
         raise HTTPException(status_code=404, detail="Product not found")
+    _refuse_ordered_draft(doc)
 
     repo = get_product_repository()
     if repo is None:
