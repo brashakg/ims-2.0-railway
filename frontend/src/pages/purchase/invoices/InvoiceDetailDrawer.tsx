@@ -16,10 +16,10 @@ import {
   type MatchStatus,
   type MatchLine,
 } from '../../../services/api/vendorAp';
-import { useToast } from '../../../context/ToastContext';
 import { useAuth } from '../../../context/AuthContext';
 import { byPerson } from '../purchaseTypes';
-import { inr, errMsg, APPROVE_ROLES } from './shared';
+import { inr, APPROVE_ROLES } from './shared';
+import { ApproveModal } from './ExceptionsPanel';
 
 // ============================================================================
 // Phase 2 - 3-way match: badge + valuation/tolerance note + detail drawer
@@ -202,7 +202,6 @@ export function InvoiceDetailDrawer({
   onClose: () => void;
   onChanged: (updated: Partial<PurchaseInvoice> & { purchase_invoice_id?: string }) => void;
 }) {
-  const toast = useToast();
   const { hasRole } = useAuth();
   const id = invoice.purchase_invoice_id;
   // Start from the match detail embedded on the list row, then refine with the
@@ -213,8 +212,7 @@ export function InvoiceDetailDrawer({
   const [override, setOverride] = useState(invoice.exception_override ?? null);
   const [rowStatus, setRowStatus] = useState<MatchStatus | null>(invoice.match_status ?? null);
   const [loadingMatch, setLoadingMatch] = useState(true);
-  const [approving, setApproving] = useState(false);
-  const [reason, setReason] = useState('');
+  const [approveOpen, setApproveOpen] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -242,23 +240,6 @@ export function InvoiceDetailDrawer({
   const summary = match?.summary;
   // Per-line valuation only if a (future) backend stamps unit_cost on the line.
   const valuationLines = (invoice.lines ?? []).filter((l) => l.unit_cost != null || l.valuation_amount != null);
-
-  const approve = async () => {
-    if (!reason.trim()) { toast.error('A reason is required to approve the exception'); return; }
-    setApproving(true);
-    try {
-      const res = await purchaseInvoicesApi.approveException(id, { reason: reason.trim() });
-      const newStatus = res.match_status ?? 'MATCHED_OVERRIDE';
-      setRowStatus(newStatus);
-      if (res.exception_override) setOverride(res.exception_override);
-      onChanged({ purchase_invoice_id: id, match_status: newStatus, exception_override: res.exception_override });
-      toast.success('Exception approved - invoice released for payment');
-    } catch (e) {
-      toast.error(errMsg(e, 'Failed to approve the exception'));
-    } finally {
-      setApproving(false);
-    }
-  };
 
   return (
     <div className="fixed inset-0 bg-black/30 flex justify-end z-50" onClick={onClose}>
@@ -400,18 +381,11 @@ export function InvoiceDetailDrawer({
         <div className="sticky bottom-0 bg-white border-t border-gray-100 px-5 py-3">
           {onHold ? (
             canApprove ? (
-              <div className="flex flex-col tablet:flex-row tablet:items-end gap-2">
-                <div className="flex-1">
-                  <label className="block text-xs font-medium text-gray-600 mb-1">Reason for approval (required, audited)</label>
-                  <input
-                    className="border border-gray-300 rounded px-2 py-1.5 text-sm w-full"
-                    value={reason}
-                    onChange={(e) => setReason(e.target.value)}
-                    placeholder="Why release this invoice for payment despite the variance?"
-                  />
-                </div>
-                <button type="button" onClick={approve} disabled={approving || !reason.trim()} className="btn sm primary disabled:opacity-60 whitespace-nowrap">
-                  {approving ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShieldCheck className="w-4 h-4" />} Approve exception
+              // The one approve implementation (reason >= 10 chars): the
+              // Exceptions panel and the Recon Console open this same modal.
+              <div className="flex justify-end">
+                <button type="button" onClick={() => setApproveOpen(true)} className="btn sm primary whitespace-nowrap">
+                  <ShieldCheck className="w-4 h-4" /> Approve exception
                 </button>
               </div>
             ) : (
@@ -426,6 +400,19 @@ export function InvoiceDetailDrawer({
             </div>
           )}
         </div>
+
+        {approveOpen && (
+          <ApproveModal
+            invoice={invoice}
+            onClose={() => setApproveOpen(false)}
+            onApproved={(updated) => {
+              setRowStatus(updated.match_status);
+              if (updated.exception_override) setOverride(updated.exception_override);
+              onChanged({ purchase_invoice_id: id, ...updated });
+              setApproveOpen(false);
+            }}
+          />
+        )}
       </div>
     </div>
   );
