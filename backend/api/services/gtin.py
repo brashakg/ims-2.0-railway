@@ -48,13 +48,16 @@ REASON_BADLEN = "BADLEN"
 REASON_RESTRICTED = "RESTRICTED"
 REASON_BADCHECK = "BADCHECK"
 
-_DIGITS = re.compile(r"^\d+$")
+# ASCII 0-9 only: `\d` also matches every other script's digits, so a
+# Devanagari or full-width EAN passed as "numeric" and was pushed as-is.
+_DIGITS = re.compile(r"^[0-9]+\Z")
 # Separators a human or a spec sheet may legitimately put inside one code.
 # Stripping them is what makes "805-6597-72037-3" valid and, deliberately,
 # what makes "8056597720373 8056597720380" collapse to 26 digits -> BADLEN.
 _SEPARATORS = re.compile(r"[\s\-]+")
 
 _RESTRICTED_PREFIXES = frozenset(str(n) for n in range(20, 30))
+_RESTRICTED_UPC_PREFIXES = frozenset("0" + p for p in _RESTRICTED_PREFIXES)
 
 
 def check_digit_ok(digits: str) -> bool:
@@ -74,13 +77,19 @@ def check_digit_ok(digits: str) -> bool:
     return (10 - (total % 10)) % 10 == int(check)
 
 
-def _gs1_prefix2(digits: str) -> str:
-    """The two leading digits of the GS1 company prefix.
+def _is_restricted(digits: str) -> bool:
+    """True when the GS1 prefix is restricted distribution (in-store only).
 
-    A GTIN-14 leads with a packaging INDICATOR digit, so its GS1 prefix starts
-    one position later; for 8/12/13 the prefix starts at the front.
+    GTIN-12/13/14 are read in their one GTIN-13 form -- a UPC-A is a GTIN-13
+    with a leading 0, a GTIN-14 is a packaging INDICATOR digit plus a GTIN-13 --
+    so one code gets one verdict however it is padded. Restricted there is
+    prefix 20-29, and 020-029 (UPC-A number system 2). A GTIN-8 is its own
+    numbering: 20-29 at the front.
     """
-    return digits[1:3] if len(digits) == 14 else digits[:2]
+    if len(digits) == 8:
+        return digits[:2] in _RESTRICTED_PREFIXES
+    g13 = digits[-13:].zfill(13)
+    return g13[:2] in _RESTRICTED_PREFIXES or g13[:3] in _RESTRICTED_UPC_PREFIXES
 
 
 def normalise_candidate(raw: Any) -> str:
@@ -106,7 +115,7 @@ def classify_gtin(raw: Any) -> Optional[str]:
         return REASON_ZEROS
     if len(candidate) not in VALID_GTIN_LENGTHS:
         return REASON_BADLEN
-    if _gs1_prefix2(candidate) in _RESTRICTED_PREFIXES:
+    if _is_restricted(candidate):
         # GS1 20-29 is restricted distribution / in-store only -- the range
         # IMS minted its own unit barcodes in before 2026-09-28 -- so such a
         # code is either somebody's shelf label or our own internal barcode

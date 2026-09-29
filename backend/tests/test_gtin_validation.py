@@ -137,6 +137,38 @@ def test_restricted_gs1_prefix_rejected():
     assert sanitise_gtin(internal) is None
 
 
+# A GTIN is ASCII 0-9. Python's \d also matches every other script's digits,
+# so the Devanagari form of a real EAN (a Hindi phone keyboard) passed every
+# door and was pushed to Shopify as a non-ASCII barcode -- and IMS's own old
+# in-store code, typed in Devanagari, slipped past the 20-29 guard.
+_DEVANAGARI = str.maketrans("0123456789", "\u0966\u0967\u0968\u0969\u096a\u096b\u096c\u096d\u096e\u096f")
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "4006381333931".translate(_DEVANAGARI),
+        "400638133393\uff11",  # a full-width final digit
+        "2000000000015".translate(_DEVANAGARI),  # our old in-store code
+    ],
+)
+def test_digits_from_other_scripts_are_not_a_gtin(raw):
+    assert classify_gtin(raw) == REASON_NONNUMERIC
+    assert check_digit_ok(raw) is False
+    assert sanitise_gtin(raw) is None
+
+
+# UPC-A number system 2 is GS1 restricted distribution. The same number written
+# as a GTIN-13 (a leading 0) or a GTIN-14 (a leading 00) is the SAME code and
+# must get the same verdict; reading the first two digits of the padded form
+# ('02') let it through and pushed it as the Shopify barcode.
+@pytest.mark.parametrize("code", ["212345678909", "0212345678909", "00212345678909"])
+def test_a_restricted_code_is_refused_at_every_length(code):
+    assert check_digit_ok(code) is True  # well-formed, but in-store only
+    assert classify_gtin(code) == REASON_RESTRICTED
+    assert sanitise_gtin(code) is None
+
+
 @pytest.mark.parametrize("raw", [None, "", "   ", "  -  "])
 def test_empty_is_not_an_error_but_is_not_valid_either(raw):
     assert classify_gtin(raw) is None
