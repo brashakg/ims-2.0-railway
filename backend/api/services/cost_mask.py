@@ -48,12 +48,13 @@ _CONTEXT_ROLES = {
 _COST_FIELDS = {
     "cost_price", "cost_value", "cost_at_sale", "unit_cost",
     "landed_cost", "landed_cost_paise", "moving_avg_cost", "purchase_price",
+    "estimated_purchase_cost",
 }
 # Derived margin / COGS figures emitted by analytics + finance payloads.
 _MARGIN_FIELDS = {
     "margin_pct", "gross_margin", "net_margin", "cogs",
     "gross_margin_pct", "net_margin_pct", "avg_margin_pct",
-    "total_cost", "cogs_estimated_lines",
+    "total_cost", "cogs_estimated_lines", "unit_margin", "estimated_margin",
 }
 _ALL_MASKED = _COST_FIELDS | _MARGIN_FIELDS
 

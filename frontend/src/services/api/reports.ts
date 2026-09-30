@@ -425,11 +425,13 @@ export const reportsApi = {
         gap_units: number;
         suggested_order_qty: number;
         avg_selling_price: number;
-        cost_price: number;
-        unit_margin: number;
+        // Cost figures: absent for roles outside the product-cost rule
+        // (backend services/cost_mask "product").
+        cost_price?: number;
+        unit_margin?: number;
         estimated_revenue_impact: number;
-        estimated_purchase_cost: number;
-        estimated_margin: number;
+        estimated_purchase_cost?: number;
+        estimated_margin?: number;
         confidence: 'HIGH' | 'MEDIUM' | 'LOW';
         reason: string;
       }>;
@@ -443,7 +445,7 @@ export const reportsApi = {
         total_recommendations: number;
         total_suggested_units: number;
         estimated_revenue_at_risk: number;
-        estimated_purchase_cost: number;
+        estimated_purchase_cost?: number;
         estimated_margin?: number;
       };
       params: {

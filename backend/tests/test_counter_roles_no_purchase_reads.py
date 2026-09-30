@@ -1012,3 +1012,60 @@ def test_frontend_cost_cell_is_the_product_context():
         m = re.search(r"PRODUCT_COST_ROLES[^=]*=\s*\[([^\]]*)\]", fh.read())
     assert m, "CostCell.tsx no longer declares PRODUCT_COST_ROLES"
     assert set(re.findall(r"'([A-Z_]+)'", m.group(1))) == _product_cost_roles()
+
+
+# ---------------------------------------------------------------------------
+# 15. Purchase recommendations: the same product-cost rule
+# ---------------------------------------------------------------------------
+# GET /reports/purchase/recommendations (open to every signed-in role) handed
+# each product's cost_price, the margin on it and the buy's estimated cost to
+# the counter (panel: 1111.11 / 4444.44 back to CASHIER, SALES_STAFF,
+# OPTOMETRIST, WORKSHOP_STAFF) -- the figure /products masks. It now asks the
+# same "product" context: velocity and quantities for everyone, cost for the
+# managers.
+from api.routers.reports import purchase as recs_mod  # noqa: E402
+
+_SALES = {"_id": "P1", "units_sold": 6, "revenue": 27000.0, "avg_price": 4500.0,
+          "sample_name": "RB Frame"}
+_RECS_PRODUCT = {"_id": "P1", "product_id": "P1", "name": "RB Frame",
+                 "offer_price": 4500, "cost_price": 1111.11, "stock_quantity": 0,
+                 "reorder_point": 2, "reorder_quantity": 5}
+_REC_COST_KEYS = {"cost_price", "unit_margin", "estimated_purchase_cost", "estimated_margin"}
+
+
+class _RecsColl:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def aggregate(self, _pipeline):
+        return copy.deepcopy(self.rows)
+
+    def find(self, _flt):
+        return copy.deepcopy(self.rows)
+
+
+class _RecsDb:
+    def get_collection(self, name):
+        return _RecsColl({"orders": [_SALES], "products": [_RECS_PRODUCT]}[name])
+
+
+@pytest.mark.parametrize("role", rbac.ALL_ROLES)
+def test_purchase_recommendations_follow_the_product_cost_rule(
+    client, monkeypatch, role
+):
+    monkeypatch.setattr(recs_mod, "get_db", lambda: _RecsDb())
+    resp = client.get(
+        "/api/v1/reports/purchase/recommendations",
+        params={"store_id": "BV-TEST-01"},
+        headers=_headers(role),
+    )
+    assert resp.status_code == 200, (role, resp.text)
+    body = resp.json()
+    rec = body["recommendations"][0]
+    assert rec["suggested_order_qty"] == 4  # the buying signal stays for all
+    if role in _product_cost_roles():
+        assert rec["cost_price"] == 1111.11
+        assert body["summary"]["estimated_purchase_cost"] == 4444.44
+    else:
+        assert not _REC_COST_KEYS & (set(rec) | set(body["summary"])), rec
+        assert "1111.11" not in resp.text and "4444.44" not in resp.text
