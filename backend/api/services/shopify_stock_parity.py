@@ -534,7 +534,7 @@ def sync_drift_task(
     None. Fail-soft."""
     from .task_triggers import active_tasks
 
-    sid = str(store.get("store_id") or "")
+    sid = str(store.get("store_id") or "").strip()
     label = store.get("store_code") or store.get("store_name") or sid
     ref = _DRIFT_TASK_REF.format(store_id=sid)
     try:
@@ -829,7 +829,8 @@ async def run_parity_tick(
             mapped_skus = {v["sku"] for v in catalogue} - set(gone)
             blocked = _blocked_of(db, sorted({d["sku"] for d in cmp["drift"]}))
             for store in stores:
-                sid = str(store.get("store_id") or "")
+                # inventory._mapped's spelling: a stored 'BV-A ' is mapped as 'BV-A'.
+                sid = str(store.get("store_id") or "").strip()
                 if sid in mapped:
                     outcome = sync_drift_task(
                         repo, store, per_store.get(sid) or {}, mapped_skus=mapped_skus, blocked=blocked

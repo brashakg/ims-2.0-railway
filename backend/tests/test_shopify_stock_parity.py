@@ -710,6 +710,20 @@ def test_tick_a_location_two_shops_claim_is_unclaimed():
     assert out["unclaimed_locations"] == [{"location_id": LOC_B, "units": 7, "skus": ["SKU-1"]}]
 
 
+def test_tick_a_store_id_stored_with_a_space_still_gets_its_drift_task():
+    """Round 8, the panel's probe: BV-A's store doc reads 'BV-A ' (mapped to
+    LOC_A; inventory._mapped strips it to 'BV-A'), shelf 5, Shopify 0. The
+    snapshot shows the drift at BV-A, so the task must be filed under BV-A's
+    ref. Drop either `.strip()` -> the tick loop never finds 'BV-A ' in the
+    map (tasks all empty), or the task is filed under 'BV-A ' -> fails."""
+    db = _db({"SKU-1": {"BV-A": 5, "BV-B": 1}})
+    db.get_collection("stores").update_one({"store_id": "BV-A"}, {"$set": {"store_id": "BV-A "}})
+    out = _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 0, LOC_B: 1}, INV_2: {}})))
+    assert out["drift_count"] == 1 and out["tasks"]["filed"] == ["BV-A"]
+    (task,) = _tasks(db)
+    assert task["source_ref"] == "shopify-stock-parity-drift:BV-A" and task["payload"]["store_id"] == "BV-A"
+
+
 def test_tick_a_shop_that_left_the_mapped_set_has_its_task_closed():
     """BV-A has an open drift task; its location is then cleared. Parity never
     compares BV-A again, so nothing would ever refresh or close the task. The
