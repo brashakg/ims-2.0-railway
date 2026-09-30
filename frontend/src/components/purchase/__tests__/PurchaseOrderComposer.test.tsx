@@ -8,7 +8,7 @@
 //   - fail-soft: getLastCost returns empty -> blank cost, no caption, form works
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { act, render, screen, waitFor, fireEvent } from '@testing-library/react';
 
 const toastMock = vi.hoisted(() => ({
   success: vi.fn(),
@@ -329,6 +329,63 @@ describe('PurchaseOrderComposer — last paid beats the catalogue seed (F22)', (
     const costInput = screen.getByLabelText(/unit cost for line 1/i) as HTMLInputElement;
     expect(costInput.value).toBe('3200');
     expect(screen.queryByText(/last paid/i)).not.toBeInTheDocument();
+  });
+});
+
+// Audit F67 x F22: the last-cost answer can land AFTER the manager has tapped
+// the cost box (its text selected, ready to be typed over). Writing the price
+// into it then drops the selection, so '2950' typed next read '31002950'.
+describe('PurchaseOrderComposer — a late last-cost answer never rewrites a tapped box', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  const paid = (price: number) => ({
+    costs: { 'prod-a': { unit_price: price, po_number: 'PO-3', po_id: 'po-3', date: '2026-09-17T10:00:00' } },
+  });
+
+  it('an answer that lands while the manager is in the box only adds the caption', async () => {
+    let answer!: (v: unknown) => void;
+    getLastCostMock.mockReturnValue(new Promise((r) => { answer = r; }));
+    renderComposer({ initialLines: [LINE({ unitCost: 2800, catalogCost: 2800 })] });
+    await waitFor(() => expect(getLastCostMock).toHaveBeenCalledWith('v-1', ['prod-a']));
+
+    const cost = screen.getByLabelText(/unit cost for line 1/i) as HTMLInputElement;
+    fireEvent.focus(cost);
+    await act(async () => answer(paid(3100)));
+
+    await waitFor(() => expect(screen.getByText(/last paid ₹3,100/i)).toBeInTheDocument());
+    expect(cost.value).toBe('2800');
+    // Leaving without typing does not hand the box back to the lookup.
+    fireEvent.blur(cost);
+    expect(cost.value).toBe('2800');
+  });
+
+  it('a Qty keystroke does not hold the lookup back until the cost box is tapped', async () => {
+    vi.useFakeTimers();
+    try {
+      getLastCostMock.mockResolvedValue({ costs: {} });
+      renderComposer({ initialLines: [LINE({ unitCost: 2800 })] });
+      act(() => { vi.advanceTimersByTime(200); });
+      fireEvent.change(screen.getByLabelText(/quantity for line 1/i), { target: { value: '4' } });
+      await act(async () => { vi.advanceTimersByTime(60); });
+      expect(getLastCostMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("after a vendor switch the new vendor's price fills a box tapped before it", async () => {
+    getLastCostMock.mockImplementation(async (vendorId: string) => paid(vendorId === 'v-1' ? 3100 : 2900));
+    renderComposer({ initialLines: [LINE({ unitCost: 2800, catalogCost: 2800 })] });
+    const cost = screen.getByLabelText(/unit cost for line 1/i) as HTMLInputElement;
+    await waitFor(() => expect(cost.value).toBe('3100'));
+
+    fireEvent.focus(cost);
+    fireEvent.blur(cost);
+    fireEvent.change(screen.getByLabelText('Vendor'), { target: { value: 'v-2' } });
+    await waitFor(() => expect(cost.value).toBe('2900'));
+    expect(screen.getByText(/last paid ₹2,900/i)).toBeInTheDocument();
   });
 });
 
