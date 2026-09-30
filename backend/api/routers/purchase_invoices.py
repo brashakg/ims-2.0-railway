@@ -2111,7 +2111,29 @@ async def list_purchase_invoices(
         key=lambda r: r.get("invoice_date") or r.get("bill_date") or "", reverse=True
     )
     _stamp_bill_actor_names(db, rows)
+    _stamp_receipt_numbers(db, rows)
     return {"purchase_invoices": rows, "total": len(rows)}
+
+
+def _stamp_receipt_numbers(db, rows) -> None:
+    """A Cash Flow '+ bill' stores its receipt as grn_id alone, so its row
+    read 'Manual' under Refs. Stamp the receipt's number (the id when the
+    receipt cannot be read) on every row that links one. Fail-soft."""
+    ids = {r["grn_id"] for r in rows if r.get("grn_id") and not r.get("grn_number")}
+    if not ids:
+        return
+    try:
+        numbers = {
+            g.get("grn_id"): g.get("grn_number")
+            for g in db.get_collection("grns").find(
+                {"grn_id": {"$in": sorted(ids)}}, {"_id": 0, "grn_id": 1, "grn_number": 1}
+            )
+        }
+    except Exception:
+        numbers = {}
+    for r in rows:
+        if r.get("grn_id") in ids:
+            r["grn_number"] = numbers.get(r["grn_id"]) or r["grn_id"]
 
 
 @router.get("/from-grn/{grn_id}")
@@ -2380,12 +2402,15 @@ async def get_invoice_match(
     # F1: 3-way match detail (PO vs GRN vs invoice) is AP data -- AP roles only.
     current_user: dict = Depends(require_roles(*_AP_ROLES)),
 ):
-    """Return the stored 3-way match detail for an invoice.
+    """Return the stored 3-way match verdict and detail for an invoice.
 
-    If the invoice was booked before a match was run, or had no PO/GRN link,
-    match_detail is None and match_status reflects that (None / the stored
-    verdict). Re-computes on the fly from the linked PO/GRN when the stored
-    detail is absent but a link exists (so an older invoice still answers)."""
+    The verdict is ONLY the stored match_status -- the one payment holds and
+    approve-exception read. A bill with none (a Cash Flow '+ bill', booked
+    header-only; a bill from before the match existed) answers None: a
+    verdict recomputed here said 'On hold' over an Approve button that
+    approve-exception then refused (400), on a bill nobody was holding.
+    The detail is re-computed from the linked PO/GRN only to explain a stored
+    verdict whose detail is missing, and only from the bill's own lines."""
     db = _get_db()
     if db is None:
         return {"invoice_id": invoice_id, "match_status": None, "match_detail": None}
@@ -2400,19 +2425,24 @@ async def get_invoice_match(
 
     detail = doc.get("match_detail")
     status = doc.get("match_status")
-    if detail is None and (doc.get("po_id") or doc.get("grn_id")):
-        # Lazily recompute for invoices booked before Phase 2 (or where the
-        # stored detail was dropped). Read-only -- does not persist.
+    if (
+        detail is None
+        and status is not None
+        and doc.get("lines")
+        and (doc.get("po_id") or doc.get("grn_id"))
+    ):
+        # The stored detail was dropped: explain the stored verdict.
+        # Read-only -- does not persist, never changes the verdict.
         cfg = _resolved_purchase_config(db)
         detail = _run_match_for_invoice(
             db,
             doc.get("po_id"),
             doc.get("grn_id"),
-            doc.get("lines") or [],
+            doc.get("lines"),
             cfg["match_tolerance_pct"],
         )
-        if detail and status is None:
-            status = detail.get("match_status")
+        if detail:
+            detail = {**detail, "match_status": status}
 
     return {
         "invoice_id": invoice_id,
