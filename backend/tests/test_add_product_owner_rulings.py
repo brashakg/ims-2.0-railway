@@ -4,10 +4,11 @@ Audit rows F12, F13, F69 (the backend half) and F73. Each test pins one rule
 the owner set; the `guard` tests pin what the fix must not break.
 
 F12 / D6  The brand default ALWAYS decides whether a product goes to the
-          website: the one create door stamps it (product_master.normalise_payload)
-          and the Shopify push refuses a brand that is not for the website
-          (shopify_push/product.push_product), both through
-          catalog_dictionary.load_brand_sync_default.
+          website, read LIVE: shopify_push.product_push_refusal (through
+          catalog_dictionary.load_brand_sync_default) gates the product push,
+          the price push, the image push and the push-all queue. No product
+          stores a copy (a stored flag went stale after a brand edit or a Brand
+          Master change).
 F13 / D5  New products get a readable SKU, category-brand-model-colour-size,
           e.g. FR-CARRERA-CA8895-807-54, from product_master.build_sku -- the
           one minter every door and POST /products/sku-preview use. Existing
@@ -107,23 +108,35 @@ def door(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_f12_guard_brand_default_stamped_when_nothing_is_sent(door):
-    assert door(_form())["sync_to_shopify"] is True
-    carrera = door(_form(brand="Carrera", model="CA8895", color="807"))
-    assert carrera["sync_to_shopify"] is False
+def test_f12_no_create_door_stores_a_website_flag(door):
+    """The brand default is read LIVE at push time; a stored copy could only go
+    stale (brand edit, Brand Master change), so no door writes one -- whatever
+    the payload or a door's extra columns send."""
+    assert "sync_to_shopify" not in door(_form(sync_to_shopify=True))
+    assert "sync_to_shopify" not in door(_form(brand="Carrera", model="CA8895", color="807"))
+    via_extra = pm.build_canonical_product(
+        {"category": "FR", "attributes": dict(_CARRERA), "mrp": 9000.0, "offer_price": 9000.0},
+        source="MASTER", extra_fields={"sync_to_shopify": True}, db=_db(),
+    )
+    assert "sync_to_shopify" not in via_extra
 
 
-def test_f12_brand_default_beats_an_explicit_false(door):
-    created = door(_form(sync_to_shopify=False))
-    assert created["sync_to_shopify"] is True  # Ray-Ban: website yes
+def test_f12_catalog_door_stores_no_website_flag():
+    """POST /catalog/products builds its spine with build_canonical_product and
+    no db (catalog.py): with a stored flag that door always stamped False."""
+    spine = pm.build_canonical_product(
+        {"category": "FR", "attributes": dict(_CARRERA, brand_name="Ray-Ban"),
+         "sku": "FR-X", "mrp": 9000.0, "offer_price": 9000.0},
+        source="CATALOG",
+    )
+    assert "sync_to_shopify" not in spine
 
 
-def test_f12_brand_default_beats_an_explicit_true(door):
-    created = door(_form(brand="Carrera", model="CA8895", color="807", sync_to_shopify=True))
-    assert created["sync_to_shopify"] is False  # Carrera: website no
+def _run(coro):
+    return asyncio.new_event_loop().run_until_complete(coro)
 
 
-def _push(db, brand):
+def _push(db, brand, **extra):
     product = {
         "id": f"P-{brand}",
         "product_id": f"P-{brand}",
@@ -132,10 +145,13 @@ def _push(db, brand):
         "sku": f"SKU-{brand}",
         "attributes": {"brand_name": brand},
         "images": ["https://cdn.example.com/p.jpg"],  # no photo, no publish
+        **extra,
     }
-    return asyncio.new_event_loop().run_until_complete(
-        sp.push_product(db, product, blocked=False)
-    )
+    return _run(sp.push_product(db, product, blocked=False))
+
+
+def _set_brand(db, name, on):
+    db["brand_masters"].update_one({"name": name}, {"$set": {"sync_to_shopify_default": on}})
 
 
 def test_f12_guard_push_lists_a_brand_that_is_for_the_website():
@@ -149,6 +165,90 @@ def test_f12_push_refuses_a_brand_that_is_not_for_the_website():
     assert res.mode == sp.MODE_BLOCKED
     assert res.action == "skip"
     assert res.ok is False
+
+
+def test_f12_a_stale_stored_flag_never_decides_the_push():
+    """Products created before this rule still carry a sync_to_shopify; the
+    brand decides, never that copy -- in either direction."""
+    assert _push(_db(), "Carrera", sync_to_shopify=True).mode == sp.MODE_BLOCKED
+    assert _push(_db(), "Ray-Ban", sync_to_shopify=False).action == "create"
+
+
+def test_f12_brand_master_change_moves_the_push_at_once():
+    db = _db()
+    _set_brand(db, "Ray-Ban", False)
+    assert _push(db, "Ray-Ban").mode == sp.MODE_BLOCKED
+    _set_brand(db, "Carrera", True)
+    assert _push(db, "Carrera").action == "create"
+
+
+def test_f12_a_brand_edit_moves_the_push(door):
+    """Created as Ray-Ban (website yes), edited to Carrera (website no)."""
+    photo = {"images": ["https://cdn.example.com/p.jpg"]}  # so only the brand can refuse
+    created = door(_form())
+    before = _run(sp.push_product(door.db, {**created, **photo, "id": created["product_id"]},
+                                  blocked=False))
+    assert before.action == "create"
+    pm.update_product(
+        product_id=created["product_id"],
+        patch={"brand": "Carrera", "attributes": {**created["attributes"], "brand_name": "Carrera"}},
+        actor="u-admin", product_repo=door.repo, db=door.db,
+    )
+    after = door.repo.find_by_id(created["product_id"])
+    assert (after.get("attributes") or {}).get("brand_name") == "Carrera"  # the edit landed
+    res = _run(sp.push_product(door.db, {**after, **photo, "id": after["product_id"]},
+                               blocked=False))
+    assert res.mode == sp.MODE_BLOCKED and "not for the website" in (res.error or "")
+
+
+def _live_doc(brand):
+    return {
+        "id": f"P-{brand}", "product_id": f"P-{brand}", "brand": brand, "sku": f"SKU-{brand}",
+        "mrp": 5000.0, "offer_price": 4500.0, "online_price": 4500.0,
+        "ecom": {"shopify_product_id": "gid://shopify/Product/1",
+                 "default_variant_gid": "gid://shopify/ProductVariant/1"},
+    }
+
+
+def test_f12_a_brand_switched_off_stops_its_price_pushes():
+    """The price writer asks the same gate as the product push."""
+    db = _db()
+    assert _run(sp.push_variant_prices(db, _live_doc("Ray-Ban"))).mode != sp.MODE_BLOCKED
+    _set_brand(db, "Ray-Ban", False)
+    res = _run(sp.push_variant_prices(db, _live_doc("Ray-Ban")))
+    assert res.mode == sp.MODE_BLOCKED and res.ok is False
+
+
+def test_f12_a_brand_switched_off_stops_its_image_pushes():
+    db = _db()
+    db.seed("catalog_products", [_live_doc("Carrera")])
+    res = _run(sp.push_image(db, {"image_id": "IMG1", "product_id": "P-Carrera",
+                                  "status": "APPROVED"}))
+    assert res.mode == sp.MODE_BLOCKED and res.target_id == "IMG1"
+
+
+def test_f12_off_brand_products_never_starve_push_all_pending(monkeypatch):
+    """25 dirty Carrera twins ahead of 1 Ray-Ban twin: one press must reach the
+    Ray-Ban product. The refused ones never take a slot and stay queued."""
+    from api.routers.online_store_push import PRODUCT_BATCH_CAP
+    from api.services import shopify_live_sync as live_sync
+
+    monkeypatch.setattr(deps, "get_audit_repository", lambda: None)
+    db = _db()
+    docs = [
+        {"id": f"C{i}", "sku": f"C{i}", "brand": "Carrera", "title": "Carrera frame",
+         "images": ["https://cdn.example.com/c.jpg"], "ecom": {"locally_modified": True}}
+        for i in range(25)
+    ] + [
+        {"id": "RB", "sku": "RB", "brand": "Ray-Ban", "title": "Ray-Ban frame",
+         "images": ["https://cdn.example.com/r.jpg"], "ecom": {"locally_modified": True}}
+    ]
+    out = _run(live_sync.push_product_docs(
+        db, docs, current_user=_ADMIN, max_results=100, max_sent=PRODUCT_BATCH_CAP,
+    ))
+    assert [r["target_id"] for r in out["results"]] == ["RB"]
+    assert out["blocked_skipped"] == 25
+    assert out["cap_reached"] is False
 
 
 # ---------------------------------------------------------------------------
