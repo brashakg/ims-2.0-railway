@@ -204,18 +204,25 @@ describe('F37 + F6 - invoice from a goods receipt', () => {
     ]);
   });
 
-  it('a receipt with no supplier invoice date opens on today and books a date', async () => {
+  it('a receipt with no supplier invoice date opens on the IST day and books it', async () => {
     // The draft carries invoice_date null; the box opened blank (`'' ?? today`
-    // is ''), the bill booked with invoice_date '' and no due date.
-    routeGets({ '/vendors/purchase-invoices/from-grn/G1': { ...GRN_DRAFT, invoice_date: null } });
-    renderTab('/purchase/invoices?grn_id=G1');
-    const today = new Date().toISOString().slice(0, 10);
-    await screen.findByText(/Inter-state supply:/);
-    expect((document.querySelector('input[type="date"]') as HTMLInputElement).value).toBe(today);
+    // is ''), the bill booked with invoice_date '' and no due date. Then it
+    // opened on the UTC day: at 01:00 IST on 1 October that is 30 September,
+    // so the bill fell into September's GSTR-3B (or its lock).
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-30T19:30:00Z')); // 2026-10-01 01:00 IST
+    try {
+      routeGets({ '/vendors/purchase-invoices/from-grn/G1': { ...GRN_DRAFT, invoice_date: null } });
+      renderTab('/purchase/invoices?grn_id=G1');
+      await screen.findByText(/Inter-state supply:/);
+      expect((document.querySelector('input[type="date"]') as HTMLInputElement).value).toBe('2026-10-01');
 
-    fireEvent.click(screen.getByRole('button', { name: /Book invoice/i }));
-    await waitFor(() => expect(createCalls()).toHaveLength(1));
-    expect(createCalls()[0][1].invoice_date).toBe(today);
+      fireEvent.click(screen.getByRole('button', { name: /Book invoice/i }));
+      await waitFor(() => expect(createCalls()).toHaveLength(1));
+      expect(createCalls()[0][1].invoice_date).toBe('2026-10-01');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("shows the server's IGST and sends no place of supply", async () => {
@@ -338,6 +345,45 @@ describe('panel round 4 - every door hands its lines on, and the list follows th
     expect(screen.getByDisplayValue('9003')).toBeTruthy();
     expect(screen.getByDisplayValue('3')).toBeTruthy();
   });
+
+  it.each(['the GRN picker', 'the ?grn_id= link'])(
+    'a refused receipt draft opens no form from %s, only the reason',
+    async (door) => {
+      // The draft door refuses on purpose (the receipt's shop has no company):
+      // the picker opened 'Invoice from GRN' with one blank line anyway, and
+      // the preview and Book then hit the same 422.
+      const refusal = buildApiError({
+        message: 'Request failed with status code 422',
+        response: {
+          status: 422,
+          data: { detail: { code: 'RECIPIENT_UNRESOLVED', message: 'Shop S9 has no company set. Set it in Settings, then bill this receipt.' } },
+        },
+      } as unknown as AxiosError<never>);
+      routeReceipts(
+        { grns: [{ grn_id: 'G1', grn_number: 'RCPT 0004', vendor_id: 'V1', vendor_name: 'Mumbai Lens House', status: 'ACCEPTED', total_accepted: 3, store_id: 'S9' }] },
+        { grns: [] },
+      );
+      const base = mockGet.getMockImplementation() as (url: string, cfg?: unknown) => Promise<unknown>;
+      mockGet.mockImplementation(async (url: string, cfg?: unknown) => {
+        if (url === '/vendors/purchase-invoices/from-grn/G1') throw refusal;
+        return base(url, cfg);
+      });
+      if (door === 'the GRN picker') {
+        renderTab();
+        fireEvent.click(await screen.findByRole('button', { name: /Create from GRN/ }));
+        const picker = within((await screen.findByText('Pick an accepted GRN to invoice')).closest('.fixed') as HTMLElement);
+        fireEvent.click(await picker.findByRole('button', { name: /Invoice/ }));
+      } else {
+        renderTab('/purchase/invoices?grn_id=G1');
+      }
+
+      await waitFor(() => expect(toastMock.error).toHaveBeenCalledWith(expect.stringMatching(/has no company set/)));
+      expect(toastMock.warning).not.toHaveBeenCalled();
+      expect(screen.queryByText(/Invoice from GRN/)).toBeNull();
+      expect(screen.queryByRole('button', { name: /Book invoice/i })).toBeNull();
+      expect(previewCalls()).toHaveLength(0);
+    },
+  );
 
   it('Match DCs to Invoice: the draft opens with the challans\' products, HSNs and quantities', async () => {
     routeReceipts(

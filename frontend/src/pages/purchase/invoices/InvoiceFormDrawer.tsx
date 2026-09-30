@@ -22,6 +22,7 @@ import { useToast } from '../../../context/ToastContext';
 import { useAuth } from '../../../context/AuthContext';
 import type { Supplier } from '../purchaseTypes';
 import { inr, GST_RATES, errMsg } from './shared';
+import { istDayString } from '../../../utils/datetime';
 
 // The product ids a PRODUCT_NOT_CATALOGUED refusal names, so the accountant can
 // ask the cataloguer without retyping them. Read off the client's ApiError
@@ -64,7 +65,10 @@ export function InvoiceFormDrawer({
 }) {
   const toast = useToast();
   const { user } = useAuth();
-  const today = new Date().toISOString().slice(0, 10);
+  // The IST day (owner ruling): toISOString() is the UTC day, yesterday from
+  // 00:00 to 05:30 IST -- a bill booked on it lands in the previous month's
+  // GSTR-3B on the 1st, or under that month's lock.
+  const today = istDayString(new Date()) ?? '';
 
   const [vendorId, setVendorId] = useState(prefill.vendor_id ?? '');
   const [vendorInvoiceNo, setVendorInvoiceNo] = useState(prefill.vendor_invoice_no ?? '');
