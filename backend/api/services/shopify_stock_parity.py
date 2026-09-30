@@ -41,7 +41,9 @@ payload.skus: a SKU
 leaves the task only that way -- one whose Shopify batch failed, that fell
 out of the capped sample or whose IMS side was unknown is still owed, and
 the description names it (every SKU that keeps the task open, drift or
-owed). A drifted SKU a SUPERADMIN blocked from online sale is named on its
+owed) with the numbers it last drifted with (payload.last_seen) and the
+same press as a drift tonight: unknown is not cleared, and nothing re-sends
+it by itself. A drifted SKU a SUPERADMIN blocked from online sale is named on its
 own line: no IMS button re-sends it, so the line asks for 0 in Shopify admin
 or lifting the block. A drifted retired SKU is on its own line too: Take off
 website (a size: Send to website on its product), or 0 in Shopify admin.
@@ -505,8 +507,16 @@ def _task_skus(task: Dict[str, Any]) -> List[str]:
 
 
 def _named(rows: List[Dict[str, Any]]) -> str:
-    """EVERY SKU in ``rows``: the first 5 with both numbers, the rest by SKU."""
-    head = ", ".join(f"{d.get('sku')} (IMS {d.get('ims')} vs Shopify {d.get('shopify')})" for d in rows[:5])
+    """EVERY SKU in ``rows``: the first 5 with both numbers (an owed SKU's
+    from the night it last drifted; none known -> by SKU), the rest by SKU."""
+
+    def one(d: Dict[str, Any]) -> str:
+        if d.get("ims") is None:
+            return str(d.get("sku"))
+        when = " when last compared" if d.get("earlier") else ""
+        return f"{d.get('sku')} (IMS {d.get('ims')} vs Shopify {d.get('shopify')}{when})"
+
+    head = ", ".join(one(d) for d in rows[:5])
     rest = ", ".join(str(d.get("sku")) for d in rows[5:])
     return head + (f"; also {rest}" if rest else "")
 
@@ -547,9 +557,13 @@ def sync_drift_task(
     A SKU is still OWED when the task names it, it is still in the online
     catalogue and it did not compare clean tonight (its Shopify batch failed,
     it fell out of the capped sample, or its IMS side was unknown): unknown
-    is not clear. payload.skus carries tonight's drift plus every SKU still
-    owed, and the description NAMES every one of them (_named: past the
-    first five, by SKU) -- the text is what
+    is not clear, and nothing clears it by itself -- it drifted on an earlier
+    night, and the stock pass never undoes a change made on Shopify. So an
+    owed SKU keeps the numbers it last drifted with (payload.last_seen, else
+    an older payload's drift rows) and sits on the same line, with the same
+    press, as a drift tonight. payload.skus carries tonight's drift plus
+    every SKU still owed, and the description NAMES every one of them
+    (_named: past the first five, by SKU) -- the text is what
     the store manager and the admin read (no task screen shows payload), so
     a SKU that keeps the task open is never missing from it. Returns "filed"
     | "refreshed" | "closed" only when EVERY write it made succeeded (the
@@ -567,14 +581,30 @@ def sync_drift_task(
         drifted = {d.get("sku") for d in drift}
         owed = (named & set(mapped_skus)) - set(summary.get("clean_skus") or []) - drifted
         if drift or (active and owed):
-            banned = [d for d in drift if d.get("sku") in set(blocked)]
-            off = [d for d in drift if d.get("sku") in set(retired) and d not in banned]
-            fixable = [d for d in drift if d not in banned and d not in off]
+            seen: Dict[Any, Dict[str, Any]] = {}
+            for t in active:
+                p = t.get("payload") or {}
+                seen.update({d.get("sku"): {"ims": d.get("ims"), "shopify": d.get("shopify")}
+                             for d in p.get("drift") or []})
+                seen.update(p.get("last_seen") or {})
+            rows = drift + [{"sku": s, **seen.get(s, {}), "earlier": True} for s in sorted(owed)]
+            blocked, retired = set(blocked), set(retired)
+            banned = [d for d in rows if d.get("sku") in blocked]
+            off = [d for d in rows if d.get("sku") in retired - blocked]
+            fixable = [d for d in rows if d.get("sku") not in blocked | retired]
             parts = []
             if drift:
                 parts.append(
                     f"{summary.get('drift_count')} online SKU(s) at {label}'s Shopify location drifted beyond "
                     f"tolerance {summary.get('tolerance')} unit(s); worst delta {summary.get('max_delta')}."
+                )
+            if owed:
+                parts.append(
+                    f"Still open from an earlier night and not compared tonight (Shopify's read "
+                    f"of it failed, it was outside tonight's sample, or IMS could not read its "
+                    f"shelf): {', '.join(sorted(owed))}. Not compared is not cleared: each drifted "
+                    f"on an earlier night and nothing re-sends it by itself, so it still needs "
+                    f"the step on its line below."
                 )
             if fixable:
                 parts.append(
@@ -600,14 +630,6 @@ def sync_drift_task(
                     f"on that product), or a SUPERADMIN to set it to 0 at {label}'s location in "
                     f"Shopify admin."
                 )
-            if owed:
-                parts.append(
-                    f"Still open from an earlier night, not compared tonight (Shopify's read of "
-                    f"it failed, it was outside tonight's sample, or IMS could not read its "
-                    f"shelf): {', '.join(sorted(owed))}. Nothing to press for these: each "
-                    f"clears on the first night it compares clean. If one stays here, ask an "
-                    f"ADMIN or SUPERADMIN to open it and check it is still on the website."
-                )
             parts.append(
                 f"This task closes on the first night every product named here compares "
                 f"clean at {label} or has left the online catalogue (taken off the website, "
@@ -620,6 +642,11 @@ def sync_drift_task(
                 "skus": sorted(owed | drifted),
                 "drift_count": summary.get("drift_count"),
                 "max_delta": summary.get("max_delta"),
+                # The numbers every named SKU last drifted with: tonight's, else carried.
+                "last_seen": {
+                    **{s: seen[s] for s in owed if s in seen},
+                    **{d.get("sku"): {"ims": d.get("ims"), "shopify": d.get("shopify")} for d in drift},
+                },
             }
             if active:
                 # A list, not a generator: every task is written even after one fails.
@@ -654,7 +681,7 @@ def sync_drift_task(
 
 
 def _blocked_of(db, skus: List[str]) -> set:
-    """The drifted SKUs a SUPERADMIN blocked from online sale (online_block,
+    """The SKUs a SUPERADMIN blocked from online sale (online_block,
     the rule's own source). Fail-soft -> set(): the rule read the block a
     moment ago (an unreadable block compares nothing), so a failure here only
     words a blocked SKU's line as an ordinary drift."""
@@ -861,7 +888,9 @@ async def run_parity_tick(
         if repo is not None:
             mapped_skus = {v["sku"] for v in catalogue} - set(gone)
             retired = {v["sku"] for v in catalogue if v["retired"]}
-            blocked = _blocked_of(db, sorted({d["sku"] for d in cmp["drift"]}))
+            # Every catalogue SKU, not only tonight's drift: an owed SKU named
+            # from an earlier night needs its own line's press too.
+            blocked = _blocked_of(db, sorted({v["sku"] for v in catalogue}))
             for store in stores:
                 # inventory._mapped's spelling: a stored 'BV-A ' is mapped as 'BV-A'.
                 sid = str(store.get("store_id") or "").strip()

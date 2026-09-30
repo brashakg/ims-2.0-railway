@@ -47,7 +47,10 @@ Pins, each with its revert named in the test:
   * round 8: a product IMS stopped selling has left the catalogue only once
     its take-down REACHED Shopify (online_catalog._delisted_live); a failed
     or dark take-down, a retired size or a twin-less SKU is still compared
-    against the writer's 0 and gets its own line.
+    against the writer's 0 and gets its own line; a node that is not the
+    item asked for is unknown; a store_id stored with a space still gets its
+    task; an owed SKU keeps the numbers it last drifted with and the press
+    that clears it (never 'nothing to press').
 
 StrictDB + injected Shopify boundary -- no network, no production.
 """
@@ -1234,7 +1237,64 @@ def test_tick_the_task_text_names_every_sku_that_keeps_it_open(one_id_per_batch)
     assert task["status"] == "OPEN" and task["payload"]["skus"] == ["SKU-2"]
     assert "not compared tonight" in task["description"] and ": SKU-2." in task["description"]
     assert "SKU-1" not in task["description"]
-    assert "check it is still on the website" in task["description"]
+    # Round 8: five nights on, SKU-2 still carries the numbers it drifted with
+    # on night 1 and the press that clears it.
+    assert "SKU-2 (IMS 5 vs Shopify 0 when last compared)" in task["description"]
+    assert "press Send to website" in task["description"]
+    assert task["payload"]["last_seen"] == {"SKU-2": {"ims": 5, "shopify": 0}}
+
+
+def _night_two_unread(how, monkeypatch):
+    """Night 2 of the panel's probes: SKU-2's Shopify batch is throttled, or
+    one online-block read blips (the rule then has no number for any SKU)."""
+    if how == "shopify_batch_throttled":
+        return _skipping({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 5, LOC_B: 0}})
+    from api.services import online_stock_writeback as wb
+
+    monkeypatch.setattr(wb, "_blocked_online", lambda db, skus: None)
+    return _shopify({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 5, LOC_B: 0}})
+
+
+@pytest.mark.parametrize("how", ["shopify_batch_throttled", "online_block_read_blip"])
+def test_tick_an_owed_sku_keeps_its_numbers_and_its_press(one_id_per_batch, monkeypatch, how):
+    """Round 8, the panel's probes. Night 1: SKU-2, BV-A shelf 0 vs LOC_A 5
+    (an oversell) -> 'SKU-2 (IMS 0 vs Shopify 5) ... press Send to website'.
+    Night 2: SKU-2 is not compared (its batch throttled, or the online block
+    unreadable) while Shopify still lists 5. The drift is still real and
+    nothing re-sends it by itself, so the refreshed task still names SKU-2
+    with its last numbers and the press, never 'Nothing to press', and
+    payload.last_seen keeps them. Put back the round-7 owed line (drift
+    rows only on the press lines, payload without last_seen) -> fails."""
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 0, "BV-B": 0}})
+    _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 5, LOC_B: 0}})))
+    assert "SKU-2 (IMS 0 vs Shopify 5)" in _tasks(db)[0]["description"]
+    out = _run(sp.run_parity_tick(db, graphql=_night_two_unread(how, monkeypatch)))
+    assert out["checked"] is True and out["tasks"]["refreshed"] == ["BV-A"]
+    (task,) = _tasks(db)
+    text = task["description"]
+    assert task["status"] == "OPEN" and task["payload"]["skus"] == ["SKU-2"]
+    assert "SKU-2 (IMS 0 vs Shopify 5 when last compared)" in text
+    assert "press Send to website" in text and "Nothing to press" not in text
+    assert task["payload"]["last_seen"] == {"SKU-2": {"ims": 0, "shopify": 5}}
+
+
+def test_tick_an_owed_blocked_sku_keeps_the_shopify_admin_line(one_id_per_batch):
+    """Round 8: an owed SKU sits on the line its drift would. SKU-1 is
+    SUPERADMIN-blocked and drifts at BV-A (IMS 0 vs Shopify 5) on night 1;
+    on night 2 its Shopify batch fails. It is still owed, and still asks a
+    SUPERADMIN for 0 in Shopify admin, never the button. Compute the block
+    over tonight's drift only -> SKU-1 lands on the Send to website line ->
+    fails."""
+    db = _db({"SKU-1": {"BV-A": 5, "BV-B": 4}})
+    db.seed("ecom_collections", [{"collection_id": "C-BAN", "collection_type": "CUSTOM",
+                                  "online_sync_blocked": True, "products": [{"sku": "SKU-1"}]}])
+    shop = _shopify({INV_1: {LOC_A: 5, LOC_B: 0}, INV_2: {LOC_A: 0, LOC_B: 0}})
+    _run(sp.run_parity_tick(db, graphql=shop))
+    out = _run(sp.run_parity_tick(db, graphql=_skipping({INV_2: {LOC_A: 0, LOC_B: 0}}, skip=INV_1)))
+    assert out["tasks"]["refreshed"] == ["BV-A"]
+    text = _tasks(db)[0]["description"]
+    assert "Blocked from online sale by a SUPERADMIN: SKU-1 (IMS 0 vs Shopify 5 when last compared)" in text
+    assert "Send to website to re-send" not in text
 
 
 def test_tick_a_sku_that_drifts_again_is_never_called_not_compared():
