@@ -135,9 +135,9 @@ export function GeneralCounterSurface() {
     store_id: store.store_id || activeStoreId || undefined,
   });
   // F46: this shop's sellable counts (the oversell guard's own number) for
-  // the tiles on show and for the cart lines. At the signed-in shop -- the one
-  // Complete sale checks -- never a till draft's leftover store_id. Hooks, so
-  // above the guards.
+  // the tiles on show and for the cart lines. The server reads the store in
+  // the sign-in token (the one Complete sale checks); keyed by the signed-in
+  // shop, never a till draft's leftover store_id. Hooks, so above the guards.
   const gridRows = (products as any[]).slice(0, MAX_PRODUCT_RESULTS);
   const { data: gridStock } = useSellableStock(activeStoreId, gridRows);
   const { data: cartStock } = useSellableStock(activeStoreId, store.cart || []);

@@ -49,8 +49,8 @@ const strip = (client: QueryClient, storeId = 'BV-BOK-01') => (
   </QueryClientProvider>
 );
 const tile = (colour: string) => screen.getByText(colour).closest('button') as HTMLButtonElement;
-const answer = (sellable: Record<string, number | null>) =>
-  getSellable.mockResolvedValue({ store_id: 'BV-BOK-01', sellable, canonical: {} });
+const answer = (sellable: Record<string, number | null>, store_id = 'BV-BOK-01') =>
+  getSellable.mockResolvedValue({ store_id, sellable, canonical: {} });
 
 beforeEach(() => {
   usePOSStore.getState().resetTransaction();
@@ -105,7 +105,7 @@ describe('the till strip', () => {
     );
 
     await waitFor(() => expect(screen.getByText('8 in stock')).toBeTruthy());
-    expect(getSellable).toHaveBeenCalledWith('BV-BOK-01', ['FR-BLACK', 'FR-HAVANA'], ['FRAME', 'FRAME']);
+    expect(getSellable).toHaveBeenCalledWith(['FR-BLACK', 'FR-HAVANA'], ['FRAME', 'FRAME']);
     const havana = screen.getByText('Havana').closest('button') as HTMLButtonElement;
     const black = screen.getByText('Black').closest('button') as HTMLButtonElement;
     expect(havana.textContent).toMatch(/Out of stock/);
@@ -121,7 +121,7 @@ describe('the till strip', () => {
     answer({ 'FR-BLACK': 8, 'LN-1': null });
     render(strip(appClient()));
     await waitFor(() => expect(screen.getByText('8 in stock')).toBeTruthy());
-    expect(getSellable).toHaveBeenCalledWith('BV-BOK-01', ['FR-BLACK', 'LN-1'], ['FRAME', 'LENS']);
+    expect(getSellable).toHaveBeenCalledWith(['FR-BLACK', 'LN-1'], ['FRAME', 'LENS']);
   });
 
   it('asks for a row by the same id the tile looks its figure up by (productIdOf), even a bare _id', async () => {
@@ -130,7 +130,7 @@ describe('the till strip', () => {
     answer({ '66f1c0ffee00000000000001': 2 });
     render(strip(appClient()));
     await waitFor(() => expect(screen.getByText('2 in stock')).toBeTruthy());
-    expect(getSellable).toHaveBeenCalledWith('BV-BOK-01', ['66f1c0ffee00000000000001'], ['FRAME']);
+    expect(getSellable).toHaveBeenCalledWith(['66f1c0ffee00000000000001'], ['FRAME']);
   });
 });
 
@@ -199,6 +199,30 @@ describe('the figure keeps up (it is never 5 minutes old)', () => {
     }
   });
 
+  it("shows the store Complete sale checks, and re-reads every 2 s until that is the screen's", async () => {
+    // The server answers for the store in the sign-in token (the guard's).
+    // switchStore changes the screen first and the token after, so the first
+    // answer after a switch can still name the old shop: it is what Complete
+    // sale would check, so it shows -- and is re-read at once, not in 30 s.
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      getProducts.mockResolvedValue({ products: [BLACK] });
+      answer({ 'FR-BLACK': 3 }, 'BV-BOK-01'); // the token has not moved yet
+      render(strip(appClient(), 'BV-DHN-01'));
+      await waitFor(() => expect(screen.getByText('3 in stock')).toBeTruthy());
+
+      answer({ 'FR-BLACK': 0 }, 'BV-DHN-01'); // now it has
+      act(() => vi.advanceTimersByTime(2_000));
+      await waitFor(() => expect(tile('Black').disabled).toBe(true));
+
+      getSellable.mockClear();
+      act(() => vi.advanceTimersByTime(29_000)); // settled: back to every 30 s
+      expect(getSellable).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("never shows another shop's counts while a store switch re-reads", async () => {
     const client = appClient();
     getProducts.mockResolvedValue({ products: [BLACK] });
@@ -208,7 +232,7 @@ describe('the figure keeps up (it is never 5 minutes old)', () => {
 
     getSellable.mockReturnValue(new Promise(() => undefined)); // the other shop's answer is on its way
     r.rerender(strip(client, 'BV-DHN-01'));
-    await waitFor(() => expect(getSellable).toHaveBeenCalledWith('BV-DHN-01', ['FR-BLACK'], ['FRAME']));
+    await waitFor(() => expect(getSellable).toHaveBeenCalledTimes(2));
     await screen.findByText('Black');
     expect(screen.queryByText('8 in stock')).toBeNull();
   });

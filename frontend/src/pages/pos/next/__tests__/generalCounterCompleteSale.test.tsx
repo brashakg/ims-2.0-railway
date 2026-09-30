@@ -65,9 +65,18 @@ vi.mock('../../../../services/api/sales', () => ({
 // checkout test leaves it empty. Reset in beforeEach.
 let productRows: unknown[] = [];
 // F46: this shop's sellable counts, keyed by product id. Reset in beforeEach.
+// Like the real hook, a call answers ONLY for the rows it was handed, so the
+// grid's figures and the cart's cannot be swapped without a test noticing.
 let sellableCounts: Record<string, number | null> | undefined;
-const useSellableStock = vi.fn((_store: string, _rows: unknown[]) => ({
-  data: sellableCounts && { store_id: 'BV-BOK-01', sellable: sellableCounts },
+const useSellableStock = vi.fn((_store: string, rows: unknown[]) => ({
+  data: sellableCounts && {
+    store_id: 'BV-BOK-01',
+    sellable: Object.fromEntries(
+      (rows as { product_id: string }[])
+        .filter((r) => r.product_id in sellableCounts!)
+        .map((r) => [r.product_id, sellableCounts![r.product_id]]),
+    ),
+  },
 }));
 vi.mock('../../../../hooks/usePOSQueries', () => ({
   useProducts: () => ({ data: productRows, isLoading: false }),
@@ -354,10 +363,12 @@ describe("F46: the counter's tiles and cart use this shop's sellable count", () 
     expect(screen.getByText('cart:{"p-1":0}')).toBeTruthy();
   });
 
-  it("reads the counts at the signed-in shop -- the one Complete sale checks -- not a till draft's", () => {
+  it("keys the counts by the signed-in shop, never a till draft's leftover store", () => {
     // posStore.store_id survives in the persisted 'ims-pos-draft' (the retired
-    // till set it; only logout clears it). The sale guard uses the signed-in
-    // shop, so the badges must too.
+    // till set it; only logout clears it). The server reads the store in the
+    // sign-in token -- the one Complete sale checks (backend
+    // test_the_store_is_the_one_in_the_sign_in_token); the screen must key its
+    // figures by that shop too, or it re-reads every 2 s for a store it never gets.
     usePOSStore.getState().setStoreId('BV-OTHER-02');
     try {
       putSomethingInTheCart();

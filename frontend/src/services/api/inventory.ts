@@ -24,18 +24,15 @@ export const inventoryApi = {
     return response.data;
   },
 
-  // F46: this shop's sellable count per product -- the oversell guard's own
-  // number (GET /inventory/sellable). `itemTypes` is the order item_type per
-  // id (mapCategory), so lens/service lines come back null like the guard.
+  // F46: the most the oversell guard would sell per product (GET
+  // /inventory/sellable asks the guard). No store parameter: the server reads
+  // the store in the sign-in token, the one Complete sale checks, and says
+  // which in `store_id`. `itemTypes` is the order item_type per id
+  // (mapCategory), so lens/service lines come back null like the guard.
   // `canonical` maps each id to the one the guard adds its lines up under.
-  getSellable: async (
-    storeId: string,
-    productIds: string[],
-    itemTypes: string[],
-  ): Promise<SellableStock> => {
+  getSellable: async (productIds: string[], itemTypes: string[]): Promise<SellableStock> => {
     const response = await api.get('/inventory/sellable', {
       params: {
-        store_id: storeId,
         product_ids: productIds.join(','),
         item_types: itemTypes.join(','),
       },

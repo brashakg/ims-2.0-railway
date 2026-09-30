@@ -89,7 +89,14 @@ vi.mock('../PosWidgets', () => ({ PosWidgets: () => null }));
 vi.mock('../SaleCompleteScreen', () => ({
   default: (p: { orderId: string }) => <div>sale-complete:{p.orderId}</div>,
 }));
-vi.mock('../ProductResultsStrip', () => ({ default: () => null }));
+// The strip reports the store it was handed (F46: its tiles' counts are keyed by it).
+const stripStores = vi.fn();
+vi.mock('../ProductResultsStrip', () => ({
+  default: ({ storeId }: { storeId: string }) => {
+    stripStores(storeId);
+    return null;
+  },
+}));
 vi.mock('../DeliveryOptionsRow', () => ({ default: () => null }));
 
 import { BillingSurface } from '../BillingSurface';
@@ -127,6 +134,7 @@ beforeEach(() => {
   usePOSStore.getState().resetTransaction();
   submitPosOrder.mockReset().mockResolvedValue({ ok: true, orderId: 'o-1' });
   useSellableStock.mockReset().mockReturnValue({ data: undefined });
+  stripStores.mockReset();
 });
 
 describe("F46: the cart hears what this shop can sell", () => {
@@ -139,6 +147,23 @@ describe("F46: the cart hears what this shop can sell", () => {
       [expect.objectContaining({ product_id: 'p-0' })],
     );
     expect(screen.getByText('cart:{"p-0":0}')).toBeTruthy();
+  });
+
+  it("keys the cart and the strip by the signed-in shop, never a till draft's leftover store", () => {
+    // posStore.store_id survives in the persisted 'ims-pos-draft' (the retired
+    // till set it). Complete sale checks the signed-in shop, so the stock
+    // figures must be that shop's.
+    usePOSStore.getState().setStoreId('BV-OTHER-02');
+    try {
+      seed({ lines: ['FRAME'] });
+      render(<BillingSurface />);
+      expect(useSellableStock).toHaveBeenCalled();
+      for (const [storeId] of useSellableStock.mock.calls) expect(storeId).toBe('BV-BOK-01');
+      expect(stripStores).toHaveBeenCalled();
+      for (const [storeId] of stripStores.mock.calls) expect(storeId).toBe('BV-BOK-01');
+    } finally {
+      usePOSStore.getState().setStoreId('');
+    }
   });
 });
 
