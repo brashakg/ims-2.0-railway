@@ -185,3 +185,85 @@ def test_pnl_endpoint_payroll_answers_to_the_salary_gate_not_the_cost_gate(monke
     for field in ("payroll_cost", "net_profit", "net_margin"):
         assert field not in body, f"ACCOUNTANT received {field}={body.get(field)}"
     assert _pnl_body("ADMIN", monkeypatch)["payroll_cost"] == 8000.0
+
+
+# --------------------------------------------------------------- one rule, one place
+
+
+# A router that decides who sees cost with its own role list is how this rule
+# drifted: /catalog/products said no to the managers while /products said yes,
+# and the purchase recommendations handed cost to the counter. Every router
+# asks can_see_cost / mask_cost here. This guard fails when a file under
+# api/routers (a) binds role names to a name that says COST or MARGIN, or
+# (b) strips a raw cost field by hand (x.pop("cost_price"), del x["cost_price"],
+# or a pop / del inside a loop over a literal list naming one).
+import ast  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+from api.services import cost_mask as _cost_mask  # noqa: E402
+from api.services.rbac_policy import ALL_ROLES  # noqa: E402
+
+_ROUTERS = Path(__file__).resolve().parents[1] / "api" / "routers"
+_ROLE_NAMES = set(ALL_ROLES) | {"INVESTOR"}
+_RAW_COST = _cost_mask._COST_FIELDS
+
+
+def _consts(node):
+    return {n.value for n in ast.walk(node) if isinstance(n, ast.Constant)}
+
+
+def _is_strip(node):
+    """A `del ...` or an `x.pop(...)` call."""
+    return isinstance(node, ast.Delete) or (
+        isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "pop"
+    )
+
+
+def _own_cost_rules(tree):
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            names = [t.id.upper() for t in targets if isinstance(t, ast.Name)]
+            if any("COST" in n or "MARGIN" in n for n in names) and (
+                _consts(node.value) & _ROLE_NAMES
+            ):
+                yield node.lineno, "role set named for cost"
+        if _is_strip(node):
+            args = node.targets if isinstance(node, ast.Delete) else node.args[:1]
+            for arg in args:
+                key = arg.slice if isinstance(arg, ast.Subscript) else arg
+                if isinstance(key, ast.Constant) and key.value in _RAW_COST:
+                    yield node.lineno, f"hand-stripped {key.value}"
+        if (
+            isinstance(node, ast.For)
+            and isinstance(node.iter, (ast.Tuple, ast.List, ast.Set))
+            and _consts(node.iter) & _RAW_COST
+            and any(_is_strip(n) for stmt in node.body for n in ast.walk(stmt))
+        ):
+            yield node.lineno, "hand-stripped cost fields in a loop"
+
+
+def test_no_router_keeps_its_own_cost_rule():
+    found = sorted(
+        {
+            (path.relative_to(_ROUTERS).as_posix(), line, why)
+            for path in _ROUTERS.rglob("*.py")
+            for line, why in _own_cost_rules(ast.parse(path.read_text(encoding="utf-8")))
+        }
+    )
+    assert not found, (
+        "cost visibility is decided in services/cost_mask.py only -- call "
+        f"can_see_cost / mask_cost there instead: {found}"
+    )
+
+
+def test_the_guard_sees_a_router_local_cost_rule():
+    """The guard is not vacuous: each shape it forbids trips it."""
+    for src in (
+        '_COST_ROLES = ("ADMIN", "ACCOUNTANT")',
+        'if x:\n    row.pop("cost_price", None)',
+        'del row["landed_cost"]',
+        'for f in ("cost_price", "mrp"):\n    row.pop(f, None)',
+    ):
+        assert list(_own_cost_rules(ast.parse(src))), src
+    assert not list(_own_cost_rules(ast.parse('row.pop("created_by", None)')))
