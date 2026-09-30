@@ -27,11 +27,13 @@ vi.mock('../../../services/api/inventory', async (importOriginal) => {
   return { ...actual, inventoryApi: { ...actual.inventoryApi, getUnits } };
 });
 
-// A row as an OLD server sent it: one unit's code in `barcode`.
+// A row as an OLD server sent it: one unit's code in `barcode`. The ledger's
+// `stock` counts the shelf only; 2 more are reserved for an order, and the
+// units dialog lists all 9 as in the shop (each can be labelled).
 const ITEMS: StockItem[] = [
   {
     id: 'P-CARRERA', sku: 'FR-CAR-8895', name: 'Carrera CA 8895', brand: 'Carrera',
-    category: 'FR', mrp: 8990, offerPrice: 8990, stock: 9, reserved: 0, barcode: 'BV--00F1D2CC',
+    category: 'FR', mrp: 8990, offerPrice: 8990, stock: 7, reserved: 2, barcode: 'BV--00F1D2CC',
   } as StockItem,
 ];
 
@@ -66,11 +68,11 @@ function renderPage(storeId = 'BV-DHN-02') {
 }
 
 describe('the stock ledger row (F27)', () => {
-  it('shows the unit count, never one unit barcode, and opens the units', async () => {
+  it('counts the units in the shop (shelf + reserved, as the dialog lists them), never one barcode', async () => {
     getUnits.mockResolvedValue({ units: [], total: 0 });
     renderPage();
     expect(screen.queryByText('BV--00F1D2CC')).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /9 units/ }));
+    fireEvent.click(screen.getByRole('button', { name: /^9 units$/ }));
     expect(getUnits).toHaveBeenCalledWith({ store_id: 'BV-DHN-02', product_id: 'P-CARRERA' });
     expect(await screen.findByRole('dialog', { name: 'Carrera CA 8895' })).toBeInTheDocument();
   });
@@ -89,7 +91,7 @@ describe('the stock ledger row (F27)', () => {
     renderPage();
     fireEvent.click(screen.getByRole('button', { name: 'View Details' }));
     expect(screen.queryByText('BV--00F1D2CC')).not.toBeInTheDocument();
-    expect(screen.getByText('Units on hand')).toBeInTheDocument();
+    expect(screen.getByText('Units in the shop').nextElementSibling?.textContent).toBe('9');
     fireEvent.click(screen.getByRole('button', { name: /units & labels/i }));
     expect(await screen.findByRole('dialog', { name: 'Carrera CA 8895' })).toBeInTheDocument();
   });

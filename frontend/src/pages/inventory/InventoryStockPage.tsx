@@ -56,6 +56,10 @@ import {
   type StockItem,
 } from './inventoryQueries';
 
+/** Pieces of a product standing in the shop: on the shelf + reserved for an
+ *  order. The units dialog lists exactly these as labelable (plus history). */
+const unitsInShop = (i: StockItem) => (i.stock || 0) + (i.reserved || 0);
+
 export function InventoryStockPage() {
   const { hasRole } = useAuth();
   const toast = useToast();
@@ -543,7 +547,7 @@ export function InventoryStockPage() {
                             title="Each unit's barcode, and its label"
                           >
                             <Barcode className="w-3.5 h-3.5" />
-                            {item.stock ?? 0} unit{(item.stock ?? 0) === 1 ? '' : 's'}
+                            {unitsInShop(item)} unit{unitsInShop(item) === 1 ? '' : 's'}
                           </button>
                         )}
                       </td>
@@ -714,7 +718,7 @@ export function InventoryStockPage() {
         const available = (detailItem.stock || 0) - (detailItem.reserved || 0);
         const rows: Array<[string, string]> = [
           ['SKU', detailItem.sku || '-'],
-          ['Units on hand', String(detailItem.stock ?? 0)],
+          ['Units in the shop', String(unitsInShop(detailItem))],
           ['Category', cat?.label || detailItem.category],
           ['MRP', formatCurrency(detailItem.mrp || 0)],
           ['Offer price', formatCurrency(detailItem.offerPrice || detailItem.mrp || 0)],
