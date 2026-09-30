@@ -1188,6 +1188,15 @@ def test_copy_only_drawer_edit_never_reactivates_a_spine_the_twin_has_no_flag_fo
     assert "is_active" not in _twin(db, twin_id), "door-created shape: the twin carries no flag"
     _wire_catalog(monkeypatch, db)
 
+    if shape == "provisional":
+        # Ordered on a PO before it was catalogued (audit C1): it is finished
+        # in the product editor, so the drawer refuses to save it at all.
+        with pytest.raises(cat.HTTPException) as refused:
+            _drawer(twin_id, description="just copy")
+        assert refused.value.status_code == 409
+        assert _spine(db, spine_id)["is_active"] is False
+        return
+
     _drawer(twin_id, description="just copy")
     assert _spine(db, spine_id)["is_active"] is False, "a copy edit reactivated a retired spine"
 
