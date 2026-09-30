@@ -1276,6 +1276,43 @@ def test_c1_units_sold_since_still_fill_the_order(world):
     assert world.grn(grn2["grn_id"])["status"] == "PARTIALLY_ACCEPTED"
 
 
+def test_c1_a_held_draft_is_never_discarded_behind_its_receipt(world):
+    # P2: an admin deleting the draft a receipt is holding units for.
+    _seed_user(world, ADMIN)
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    twin = _twin_of(world, draft_id)
+    try:
+        _run(_catalog.delete_catalog_product(twin["id"], ADMIN))
+        refused = None
+    except HTTPException as exc:
+        refused = exc
+    finding(
+        refused is not None
+        and refused.status_code == 409
+        and grn["grn_number"] in str(refused.detail),
+        f"P2: the draft was deleted while {grn['grn_number']} holds its units ({refused})",
+    )
+    assert world.product(draft_id)["provisional"] is True
+
+    # The units go back: the manager voids the receipt, then the admin deletes.
+    _run(vd.void_grn(grn["grn_id"], MANAGER))
+    _run(_catalog.delete_catalog_product(twin["id"], ADMIN))
+    sku = world.product(draft_id)["sku"]
+    finding(
+        sku not in _needs_review_list(world),
+        "P2: the deleted draft is still in Needs review",
+    )
+    assert not _open_tasks(world)
+
+    # Following a stale lead to "finish" it never brings it back.
+    world.finish_draft(draft_id, offer=2790)
+    finding(
+        world.product(draft_id).get("is_active") is False,
+        "P2: finishing a deleted draft switched it back on",
+    )
+    assert _any_status_units(world, draft_id) == []
+
+
 def test_c1_no_store_manager_fails_loud_to_the_admins(world, caplog):
     world.db.users.update_one(
         {"user_id": MANAGER["user_id"]}, {"$set": {"is_active": False}}

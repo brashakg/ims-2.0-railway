@@ -2730,6 +2730,40 @@ async def delete_catalog_product(
     if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
 
+    try:
+        from ..dependencies import get_product_repository
+
+        _pr = get_product_repository()
+        _spine_id = _spine_product_id(_pr, product)
+    except Exception:  # noqa: BLE001
+        _pr, _spine_id = None, None
+        logger.warning(
+            "[CATALOG] spine lookup on delete failed for %s", product_id, exc_info=True
+        )
+    # Audit C1: an item a receipt is holding units for is not discarded behind
+    # that receipt's back -- its tasks, the receipt and the draft would all be
+    # left pointing at a deleted product. The admin decides the units first.
+    if _spine_id:
+        from .vendors.grn_accept import held_receipts
+
+        holding = [g.get("grn_number") or g.get("grn_id") for g in held_receipts(_spine_id)]
+        if holding:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Receipt {', '.join(holding)} is holding units of this item. "
+                    "Finish the item in the product editor, or void the receipt in "
+                    "Receive Goods if the units are going back, then delete it."
+                ),
+            )
+    # A discarded ordered draft (_refuse_ordered_draft's mark) leaves the
+    # Needs-review queue, and is no longer provisional: finishing a
+    # provisional draft switches it on (restamp_on_update), a deleted one must
+    # stay off.
+    discarded_draft = bool(product.get("spine_product_id") and product.get("needs_review"))
+    if discarded_draft:
+        product["needs_review"] = False
+
     product["is_active"] = False
     product["deleted_at"] = datetime.now().isoformat()
     product["deleted_by"] = current_user.get("user_id")
@@ -2744,12 +2778,11 @@ async def delete_catalog_product(
     # Products-convergence: deactivate the SPINE twin too (shared id) so a
     # soft-deleted catalog product can't still be sold at POS. Fail-soft.
     try:
-        from ..dependencies import get_product_repository
-
-        _pr = get_product_repository()
-        _spine_id = _spine_product_id(_pr, product)
         if _pr is not None and _spine_id:
-            _pr.update(_spine_id, {"is_active": False})
+            _pr.update(
+                _spine_id,
+                {"is_active": False, **({"provisional": False} if discarded_draft else {})},
+            )
     except Exception:  # noqa: BLE001
         logger.warning(
             "[CATALOG] spine deactivate on delete skipped for %s",
