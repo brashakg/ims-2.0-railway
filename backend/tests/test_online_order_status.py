@@ -1398,6 +1398,40 @@ def test_the_retry_restocks_the_unit_a_partly_landed_confirm_left_sold(swept, mo
     assert (line.get("returned_qty"), line.get("restocked_refunds")) == (2, {str(rid): 2})
 
 
+class _CommitsThenRaises:
+    """The first find_one_and_update commits, then its reply is lost (a
+    socket timeout after the commit; a standalone mongod retries no write)."""
+
+    def __init__(self, real):
+        self.real, self.lost = real, False
+
+    def __getattr__(self, name):
+        return getattr(self.real, name)
+
+    def find_one_and_update(self, *a, **kw):
+        out = self.real.find_one_and_update(*a, **kw)
+        if not self.lost:
+            self.lost = True
+            raise RuntimeError("socket timeout after the commit")
+        return out
+
+
+def test_a_booking_whose_reply_was_lost_after_it_committed_restocks_the_unit(swept, monkeypatch):
+    """The claim committed but raised: the line read as restocked by this
+    refund with stk-1 still SOLD, and every later door agreed -- the unit
+    stranded SOLD behind a "Restock applied"."""
+    row = _one_unit_refund(swept, 60197, 700397)
+    lossy = _CommitsThenRaises(returns_router._orders_coll())
+    monkeypatch.setattr(returns_router, "_orders_coll", lambda: lossy)
+    assert _confirm(row)["result"]["restock_applied"] is True
+    assert _units(swept) == [("stk-1", "AVAILABLE")]
+    _retry(swept["returns"].find_one({"shopify_refund_id": "700397"}))
+    _goods_back(swept["review"].find_one({"review_id": row["review_id"]}))
+    assert _units(swept) == [("stk-1", "AVAILABLE")], "one unit, once"
+    line = _doc(swept, 60197)["items"][0]
+    assert (line.get("returned_qty"), line.get("restocked_refunds")) == (1, {"700397": 1})
+
+
 # ---------------------------------------------------------------------------
 # Ruling 1 leaves a fulfilled online order SHIPPED (it used to be DELIVERED).
 # Every report that picks orders by status reads the ONE pair of sets in
