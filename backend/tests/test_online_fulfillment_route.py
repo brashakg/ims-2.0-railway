@@ -2327,12 +2327,13 @@ def test_every_gst_view_leaves_out_what_the_returns_leave_out(world, monkeypatch
     from datetime import date as _date
 
     from api.routers.reports import finance_ops as fo
+    from tests.ist_business_day import business_day
     from database.repositories.order_repository import OrderRepository
 
     monkeypatch.setattr(fo, "get_order_repository", lambda: OrderRepository(db.orders))
     monkeypatch.setattr(fo, "_get_raw_db", lambda: db)
     for order, rows in ((held, 0), (clean, 1)):
-        day = _date.fromisoformat(ist_date_str(order["created_at"])[:10])
+        day = _date.fromisoformat(business_day(order["created_at"]))
         rep = asyncio.run(fo.gst_report(from_date=day, to_date=day, store_id=order["store_id"],
                                         current_user=user))
         assert len(rep["data"]) == rows, (order["store_id"], rep)
