@@ -2642,21 +2642,28 @@ def test_the_send_window_counts_the_transports_own_tries_before_the_attach(gates
     assert fake.attached() == [U1] and _ledger(db) == {(OWN, _m(1), None), (U1, _m(100), None)}
 
 
-def test_two_lost_attaches_are_told_apart_by_name_while_the_naming_is_unconfirmed():
+@pytest.mark.parametrize("live", ["adopted-under-the-connector-name", "nothing-owned"])
+def test_two_lost_attaches_are_told_apart_by_name_while_the_naming_is_unconfirmed(live):
     """T22b, the settle alone. No live doc confirms the naming on this
-    product, and two lost attaches (U1, U2) share one window, each copy
-    READY under its own url's file name: a node under U2's name is U2's
-    attach, never U1's copy -- each claims its own.
-    REVERT-PROOF: no 'another pending doc's name' rule -> each window holds
-    both nodes: both held."""
+    product -- its only live doc is ADOPTED under the Ray-Ban Meta
+    connector's name, or IMS owns nothing there yet -- and two lost attaches
+    (U1, U2) share one window, each copy READY under its own url's file
+    name: a node under U2's name is U2's attach, never U1's copy -- each
+    claims its own.
+    REVERT-PROOF (the adopted case): no 'another pending doc's name' rule ->
+    each window holds both nodes: both held."""
     now = datetime.now(timezone.utc)
     p1 = {"_id": "d1", "url": U1, "image_id": None, "sent_at": now - timedelta(minutes=31)}
     p2 = {"_id": "d2", "url": U2, "image_id": None, "sent_at": now - timedelta(minutes=30)}
     at = (now - timedelta(minutes=30, seconds=30)).isoformat().replace("+00:00", "Z")
     n1 = {"id": _m(100), "status": "READY", "image": {"url": CDN + _cdn_name(U1)}, "createdAt": at}
     n2 = {"id": _m(101), "status": "READY", "image": {"url": CDN + _cdn_name(U2)}, "createdAt": at}
+    own = {"id": _m(1), "status": "READY", "image": {"url": CDN + "900__01__4_1.png"}, "createdAt": "2026-01-01T00:00:00Z"}
+    adopted = ({"url": OWN, "id": _m(1), "how": "adopted"},) if live.startswith("adopted") else ()
 
-    claims, drops, held, drift = _media._settle([p1, p2], [n1, n2], [], {_m(100): n1, _m(101): n2}, now)
+    claims, drops, held, drift = _media._settle(
+        [p1, p2], [n1, n2], [], {_m(1): own, _m(100): n1, _m(101): n2}, now, adopted
+    )
 
     assert sorted((c["url"], c["id"]) for c in claims) == sorted([(U1, _m(100)), (U2, _m(101))])
     assert drops == [] and held == [] and drift is False
