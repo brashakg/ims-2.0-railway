@@ -55,20 +55,46 @@ def _typed_product_payload(it) -> dict:
     }
 
 
+class _WithThisOrder:
+    """The product store as the create loop in create_po meets it, line by
+    line: the database plus the drafts this order's EARLIER typed lines will
+    have created by then (`planned`). identity_conflict reads through it, so
+    each typed line is judged against its own order as well, before anything
+    is written. Everything else is the database's."""
+
+    def __init__(self, repo):
+        self.repo, self.planned = repo, []
+
+    def __getattr__(self, name):
+        return getattr(self.repo, name)
+
+    def find_by_identity_key(self, key):
+        mine = [p for p in self.planned if p.get("identity_key") == key]
+        return mine[0] if mine else self.repo.find_by_identity_key(key)
+
+    def find_many(self, flt, *a, **k):
+        return list(self.planned) + list(self.repo.find_many(flt, *a, **k) or [])
+
+
 def _refuse_items_we_already_have(items, product_repo) -> None:
     """Audit C2: a typed-in line that describes a product we ALREADY have
     (active, or a draft somebody ordered earlier) never mints a hidden twin.
 
-    Every typed line is checked BEFORE any line is created, so the refusal
-    leaves nothing behind; the composer asks "already in the catalogue - use
-    it?" and resends the line with that product_id. The key is the door's OWN:
-    the canonical build with a placeholder SKU (zero writes, as the catalogue
-    promote dry-run does) stamps exactly the identity_key a create would, and
-    the answer is the door's own rule (product_master.identity_conflict) -- a
-    409 naming the product, or a 422 asking a frame typed without its eye size
-    for it (each eye size is its own item, owner 09-28)."""
+    EVERY typed line is validated BEFORE any line is created -- against the
+    database and against the order's own earlier lines, exactly as the create
+    loop will meet them -- so a refused order leaves no draft behind (a
+    provisional draft left by a failed order sits in Needs review as
+    "ordered" when nothing was). The composer asks "already in the catalogue
+    - use it?" and resends the line with that product_id. The key is the
+    door's OWN: the canonical build with a placeholder SKU (zero writes, as
+    the catalogue promote dry-run does) stamps exactly the identity_key a
+    create would, and the answer is the door's own rule
+    (product_master.identity_conflict) -- a 409 naming the product, or a 422
+    asking a frame typed without its eye size for it (each eye size is its
+    own item, owner 09-28)."""
     if product_repo is None or not hasattr(product_repo, "find_by_identity_key"):
         return
+    order = _WithThisOrder(product_repo)
     already = []
     need_size = []
     for idx, it in enumerate(items):
@@ -81,13 +107,20 @@ def _refuse_items_we_already_have(items, product_repo) -> None:
                 product_repo=product_repo,
                 db=_get_db(),
             )
-        except _pm.ProductMasterError:
-            continue  # the create below refuses an invalid line, with its reason
-        err = _pm.identity_conflict(spine, product_repo)
+        except _pm.ProductMasterError as err:
+            raise HTTPException(
+                status_code=err.status,
+                detail={"code": "NEW_PRODUCT_INVALID", "message": err.message, "field": err.field},
+            ) from err
+        err = _pm.identity_conflict(spine, order)
+        order.planned.append(spine)
         if err is None:
             continue
         if err.status == 409 and err.conflict:
-            already.append({"line": idx, "existing": err.conflict})
+            # No product_id: an earlier line of THIS order types the same
+            # item -- the create loop gives both lines its one draft.
+            if err.conflict.get("product_id"):
+                already.append({"line": idx, "existing": err.conflict})
         elif err.code == "EYE_SIZE_NEEDED":
             need_size.append({"line": idx, "sizes": err.sizes, "message": err.message})
     if not already and need_size:

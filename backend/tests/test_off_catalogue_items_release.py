@@ -1032,6 +1032,33 @@ def test_c2_a_frame_typed_without_its_eye_size_is_asked_for_it(world):
     assert world.db.purchase_orders.count_documents({}) == 0
 
 
+@pytest.mark.parametrize(
+    "second, code",
+    [
+        # The same frame again without its eye size: the 52 is on this order.
+        (dict(BOSS_TYPED, size=None), "EYE_SIZE_NEEDED"),
+        # A line the product door refuses outright.
+        (dict(BOSS_TYPED, model="BOSS 1701", category="NOPE"), "NEW_PRODUCT_INVALID"),
+    ],
+)
+def test_c2_a_refused_order_leaves_no_draft_behind(world, second, code):
+    refused = _refused_po(
+        world,
+        [
+            {"new_product": dict(BOSS_TYPED), "quantity": 1, "unit_price": 1200},
+            {"new_product": second, "quantity": 1, "unit_price": 1200},
+        ],
+    )
+    assert refused is not None and refused.status_code == 422, refused
+    assert refused.detail.get("code") == code, refused.detail
+    assert world.db.purchase_orders.count_documents({}) == 0
+    finding(
+        world.products_named("Boss", "BOSS 1700") == [] and _needs_review_list(world) == [],
+        "C2: a refused order left its first line's draft behind, 'ordered' in "
+        f"Needs review ({_needs_review_list(world)})",
+    )
+
+
 def test_c2_a_size_typed_for_a_watch_is_not_a_second_watch(world):
     body = _products.ProductCreate(
         category="WT",
