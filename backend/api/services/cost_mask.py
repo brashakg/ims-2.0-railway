@@ -19,6 +19,10 @@ Role policy (DECISIONS sec 9, owner rulings 2026-09-28 / D7 / 2026-09-29):
     three ask can_see_cost(user, "purchase").
   * Operational aggregates (default context: analytics, P&L) -- cost + margin
     stay with SUPERADMIN / ADMIN / ACCOUNTANT.
+  * Supplier payments (context="payables": bills, payments, balances, per
+    vendor AND in total -- owner ruling 2026-09-29) -- the same accounts roles,
+    AP_ROLES. The vendor AP gates ARE that tuple and the finance reads of the
+    same money ask can_see_cost(user, "payables").
   * Counter roles (SALES_*, CASHIER, OPTOMETRIST, WORKSHOP_STAFF) see cost in
     no context (audit F46/F60, owner ruling D7). A router never keeps its own
     cost role set: it asks can_see_cost / mask_cost here (a guard test in
@@ -29,7 +33,15 @@ No emoji (Windows cp1252).
 """
 from typing import Dict, List
 
-COST_VISIBLE_ROLES = {"SUPERADMIN", "ADMIN", "ACCOUNTANT"}
+# The accounts roles. Defined ONCE, here: they see cost + margin, and they
+# alone see supplier payments -- the vendor ledger / bills / payments / debit
+# notes / ap-aging, the purchase-invoice and recon books, vendor rebates
+# (routers/vendors/_shared._AP_ROLES and the others ARE this tuple), plus
+# /finance/vendor-payments and the cash-flow supplier-payments total (both ask
+# can_see_cost(user, "payables")). SUPERADMIN passes every require_roles gate
+# on its own.
+AP_ROLES = ("ADMIN", "ACCOUNTANT")
+COST_VISIBLE_ROLES = {"SUPERADMIN", *AP_ROLES}
 # The purchase roles: who buys, receives and pays suppliers, so who sees what
 # was paid and to whom. Defined ONCE, here: the purchase screens' route gate
 # (routers/vendors/_shared._VENDOR_ROLES) and the vendor-return, RTV debit-note
@@ -40,6 +52,7 @@ PURCHASE_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
 _CONTEXT_ROLES = {
     "purchase": set(PURCHASE_ROLES),
     "product": {*PURCHASE_ROLES, "CATALOG_MANAGER"},
+    "payables": set(),  # supplier payments: the accounts roles alone
 }
 
 # Raw cost fields that may appear on product / stock / order-line payloads.

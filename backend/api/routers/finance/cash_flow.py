@@ -12,6 +12,7 @@ from fastapi import Depends, Query
 from ..auth import get_current_user
 from ...dependencies import validate_store_access
 from ...services import ap_engine, cashflow
+from ...services.cost_mask import can_see_cost
 from ...services.salary_visibility import is_payroll_shaped_expense, is_salary_admin
 from ._shared import (
     PAID_STATUSES,
@@ -19,7 +20,6 @@ from ._shared import (
     _REAL_ORDER_STATUS_FILTER,
     _REVENUE_EXPR,
     _get_db,
-    _is_finance_admin,
     _order_total,
     _require_finance_admin,
     router,
@@ -116,12 +116,13 @@ async def get_cash_flow(
     # avoid double-attributing HQ payments to one store.
     #
     # Supplier payments, per vendor or in total, are ADMIN + ACCOUNTANT only
-    # (owner ruling 2026-09-29) -- the same gate as /finance/vendor-payments.
+    # (owner ruling 2026-09-29): services/cost_mask "payables", the one rule
+    # /finance/vendor-payments and the vendor ledger (AP_ROLES) answer.
     # Anyone else never has the figure read, so it is in neither the key nor
     # `outflows` / `net_cash_flow`, which would hand it straight back as
     #     outflows - expense_outflow - purchase_outflow
     # (the trap the payroll strip below documents).
-    ap_reader = _is_finance_admin(current_user)
+    ap_reader = can_see_cost(current_user, "payables")
     vendor_payment_outflow = 0.0
     if ap_reader and not active_store:
         try:

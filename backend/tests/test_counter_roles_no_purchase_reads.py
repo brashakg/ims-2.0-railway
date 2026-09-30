@@ -1104,7 +1104,7 @@ def _vendor_payments_admits(monkeypatch, role):
 
 @pytest.mark.parametrize("role", rbac.ALL_ROLES)
 def test_cash_flow_supplier_payments_total_answers_to_the_vendor_payments_gate(
-    monkeypatch, role
+    app, monkeypatch, role
 ):
     monkeypatch.setattr(cash_flow_mod, "_get_db", lambda: _CashDb())
     # No store on the token or the query: the org view, where AP is folded in.
@@ -1113,8 +1113,10 @@ def test_cash_flow_supplier_payments_total_answers_to_the_vendor_payments_gate(
             period="month", store_id=None, current_user={"roles": [role]}
         )
     )
-    if _vendor_payments_admits(monkeypatch, role):
-        assert role in ("SUPERADMIN", "ADMIN", "ACCOUNTANT"), role
+    # One answer with the vendor ledger's own route gate, not a role literal.
+    ledger = _route_allows(app, "/api/v1/vendors/{vendor_id}/ledger", role)
+    assert _vendor_payments_admits(monkeypatch, role) is ledger, role
+    if ledger:
         assert body["vendor_payment_outflow"] == _PAID_TO_VENDORS
         assert body["outflows"] == _PAID_TO_VENDORS
     else:
@@ -1122,3 +1124,68 @@ def test_cash_flow_supplier_payments_total_answers_to_the_vendor_payments_gate(
         assert body["outflows"] == 0 and body["net_cash_flow"] == 0, body
         assert body["vendor_payments_restricted"] is True
         assert str(_PAID_TO_VENDORS) not in json.dumps(body)
+
+
+# ---------------------------------------------------------------------------
+# 17. ONE supplier-payments rule: every gate IS cost_mask.AP_ROLES
+# ---------------------------------------------------------------------------
+# Owner ruling 2026-09-29: supplier payments, per vendor AND in total, are
+# ADMIN + ACCOUNTANT only. The vendor AP gates kept ("ADMIN", "ACCOUNTANT")
+# while /finance/vendor-payments and the cash-flow total asked the finance
+# router's own ("SUPERADMIN", "ADMIN", "ACCOUNTANT"): narrowing the vendor copy
+# refused an accountant the ledger while cash-flow still handed over the total,
+# and no test noticed. Every require_roles AP gate is now that one tuple and
+# every in-handler check asks can_see_cost(user, "payables"), which reads the
+# same accounts set at request time -- so narrowing it moves them all.
+from api.routers import purchase_invoices as pinv_router  # noqa: E402
+from api.routers import purchase_recon as recon_router  # noqa: E402
+from api.routers import vendor_rebates as rebates_router  # noqa: E402
+from api.services import cost_mask as cost_mask_mod  # noqa: E402
+from api.services.cost_mask import AP_ROLES  # noqa: E402
+
+
+def test_supplier_payment_gates_are_the_one_ap_constant():
+    for name, gate in (
+        ("vendors", _AP_ROLES),
+        ("purchase invoices", pinv_router._AP_ROLES),
+        ("purchase recon", recon_router._AP_ROLES),
+    ):
+        assert gate is AP_ROLES, name
+    assert cost_mask_mod.COST_VISIBLE_ROLES == {"SUPERADMIN", *AP_ROLES}
+
+
+def _supplier_payment_answers(monkeypatch, role):
+    """{read: does `role` get supplier payments} for every request-time check."""
+    monkeypatch.setattr(cash_flow_mod, "_get_db", lambda: _CashDb())
+    body = asyncio.run(
+        cash_flow_mod.get_cash_flow(
+            period="month", store_id=None, current_user={"roles": [role]}
+        )
+    )
+    try:
+        rebates_router._require({"roles": [role]}, "read rebates")
+        rebates = True
+    except HTTPException as exc:
+        assert exc.status_code == 403
+        rebates = False
+    return {
+        "cash-flow total": "vendor_payment_outflow" in body,
+        "vendor-payments": _vendor_payments_admits(monkeypatch, role),
+        "vendor rebates": rebates,
+    }
+
+
+@pytest.mark.parametrize("role", rbac.ALL_ROLES)
+def test_supplier_payments_are_one_answer_with_the_ledger(app, monkeypatch, role):
+    want = _route_allows(app, "/api/v1/vendors/{vendor_id}/ledger", role)
+    answers = _supplier_payment_answers(monkeypatch, role)
+    assert answers == dict.fromkeys(answers, want), (role, answers)
+
+
+def test_narrowing_the_accounts_set_moves_every_supplier_payment_read(monkeypatch):
+    # The panel's breaking input: ACCOUNTANT taken out of the accounts set. A
+    # read that kept its own role list would still answer the accountant.
+    monkeypatch.setattr(cost_mask_mod, "COST_VISIBLE_ROLES", {"SUPERADMIN", "ADMIN"})
+    answers = _supplier_payment_answers(monkeypatch, "ACCOUNTANT")
+    assert not any(answers.values()), answers
+    assert all(_supplier_payment_answers(monkeypatch, "ADMIN").values())

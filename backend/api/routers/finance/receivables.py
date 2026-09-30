@@ -8,15 +8,15 @@ or default was changed.
 from datetime import datetime, timedelta
 from ...utils.ist import now_ist_naive
 from typing import Optional
-from fastapi import Depends
+from fastapi import Depends, HTTPException
 from ..auth import get_current_user
 from ...services import ap_engine
+from ...services.cost_mask import can_see_cost
 from ._shared import (
     UNPAID_STATUSES,
     _REAL_ORDER_STATUS_FILTER,
     _get_db,
     _order_total,
-    _require_finance_admin,
     _scope_store,
     router,
 )
@@ -193,9 +193,12 @@ async def get_vendor_payments(current_user: dict = Depends(get_current_user)):
 
     F60: the same per-vendor payables the vendor ledger / bills / payments /
     debit notes and /vendors/ap-aging carry, for every vendor -> the same
-    accounts-only answer (ADMIN / ACCOUNTANT), not the finance router's
-    manager set. One payables rule."""
-    _require_finance_admin(current_user)
+    accounts-only answer (services/cost_mask "payables" = AP_ROLES), not the
+    finance router's manager set. One payables rule."""
+    if not can_see_cost(current_user, "payables"):
+        raise HTTPException(
+            status_code=403, detail="Supplier payments are ADMIN / ACCOUNTANT only"
+        )
     db = _get_db()
     if db is None:
         return []
