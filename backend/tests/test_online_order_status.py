@@ -830,6 +830,86 @@ def test_reconciles_of_two_parcels_from_one_stale_read_keep_both(swept, monkeypa
     assert doc[shopify_fulfillment.FULFILLMENT_WATERMARK] == datetime(2026, 9, 6, 1, 5)
 
 
+@pytest.mark.parametrize("newer_awb", ["", "AWB-Y"], ids=["cancelled", "relabelled"])
+@pytest.mark.parametrize("stale_lands", ["between_the_newer_ones_writes", "after_the_newer_one"])
+def test_a_stale_reconcile_of_a_parcel_never_sticks_over_its_newer_state(
+        swept, monkeypatch, newer_awb, stale_lands):
+    """Parcel 1 went out at 01:00 with AWB-X. Its 03:00 update (cancelled, or
+    relabelled AWB-Y) and an hourly-sweep body fetched at 02:00 (still AWB-X)
+    both read the 01:00 order. The parcel's entry and its clock were written
+    apart, the clock unguarded: the list kept AWB-X beside the 03:00 clock,
+    so no redelivery or sweep ever re-fed it -- the courier legs asked about
+    the cancelled AWB for good."""
+    oid = 60128
+    _book(swept, oid)
+    shopify_fulfillment.reconcile_fulfillment(swept["db"], _fulfilment(
+        oid, 1, tracking_number="AWB-X", updated_at=_T("01:00"), created_at=_T("01:00")))
+    pre = copy.deepcopy(_doc(swept, oid))
+    monkeypatch.setattr(shopify_fulfillment, "_find_ims_order", lambda db, sid: copy.deepcopy(pre))
+    newer = _fulfilment(oid, 1, tracking_number=newer_awb or "AWB-X", updated_at=_T("03:00"),
+                        created_at=_T("01:00"), status="success" if newer_awb else "cancelled")
+    stale = _fulfilment(oid, 1, tracking_number="AWB-X", updated_at=_T("02:00"), created_at=_T("01:00"))
+    orders = swept["orders"]
+    write = orders.update_one
+
+    def stale_first(filter_, update, **kw):
+        if any(k.startswith(shopify_fulfillment.FULFILLMENT_CLOCKS) for k in update.get("$set") or {}):
+            monkeypatch.setattr(orders, "update_one", write)
+            shopify_fulfillment.reconcile_fulfillment(swept["db"], stale)
+        return write(filter_, update, **kw)
+
+    if stale_lands == "between_the_newer_ones_writes":
+        monkeypatch.setattr(orders, "update_one", stale_first)
+    shopify_fulfillment.reconcile_fulfillment(swept["db"], newer)
+    if stale_lands == "after_the_newer_one":
+        shopify_fulfillment.reconcile_fulfillment(swept["db"], stale)
+
+    doc = _doc(swept, oid)
+    assert shopify_fulfillment.tracked_awbs(doc) == ([newer_awb] if newer_awb else [])
+    assert orders.find_one(shopify_fulfillment.awb_filter("AWB-X")) is None
+    assert doc[shopify_fulfillment.FULFILLMENT_CLOCKS]["f1"] == datetime(2026, 9, 6, 3, 0)
+
+
+def test_a_parcels_first_reconciles_overlapping_keep_the_newer(swept, monkeypatch):
+    """The create (01:00, AWB-X) and an update (01:30, AWB-Y) of one parcel
+    both find no entry for it; the create appends first, so the update's
+    append finds one and replaces it instead."""
+    oid = 60129
+    _book(swept, oid)
+    pre = copy.deepcopy(_doc(swept, oid))
+    monkeypatch.setattr(shopify_fulfillment, "_find_ims_order", lambda db, sid: copy.deepcopy(pre))
+    orders = swept["orders"]
+    write = orders.update_one
+
+    def create_first(filter_, update, **kw):
+        if "$push" in update:
+            monkeypatch.setattr(orders, "update_one", write)
+            shopify_fulfillment.reconcile_fulfillment(swept["db"], _fulfilment(
+                oid, 1, tracking_number="AWB-X", updated_at=_T("01:00"), created_at=_T("01:00")))
+        return write(filter_, update, **kw)
+
+    monkeypatch.setattr(orders, "update_one", create_first)
+    shopify_fulfillment.reconcile_fulfillment(swept["db"], _fulfilment(
+        oid, 1, tracking_number="AWB-Y", updated_at=_T("01:30"), created_at=_T("01:00")))
+    doc = _doc(swept, oid)
+    assert doc[shopify_fulfillment.PARCEL_AWBS] == [{"id": "f1", "awb": "AWB-Y"}]
+    assert doc[shopify_fulfillment.FULFILLMENT_CLOCKS]["f1"] == datetime(2026, 9, 6, 1, 30)
+
+
+def test_the_last_live_parcel_cancelled_takes_the_tracking_fields_over(swept):
+    """A cancelled parcel keeps its entry (AWB ""): it is no live parcel that
+    keeps the tracking fields from the last one's cancel."""
+    oid = 60130
+    _book(swept, oid)
+    for fid, status, at in ((1, "success", "01:00"), (2, "success", "01:10"),
+                            (1, "cancelled", "02:00"), (2, "cancelled", "03:00")):
+        shopify_fulfillment.reconcile_fulfillment(swept["db"], _fulfilment(
+            oid, fid, tracking_number=f"AWB-{fid}", status=status, updated_at=_T(at), created_at=_T(at)))
+    doc = _doc(swept, oid)
+    assert shopify_fulfillment.tracked_awbs(doc) == []
+    assert doc["fulfillment_status"] == "CANCELLED"
+
+
 # ---------------------------------------------------------------------------
 # The refund leg. Finding (d): a Shopify cancel refund restocks no unit the
 # order does not hold SOLD (an oversold / under-claimed line would MINT a

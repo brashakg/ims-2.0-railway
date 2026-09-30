@@ -251,8 +251,14 @@ class FakeCollection:
         for d in self.docs:
             if _match(d, filter_):
                 for k, v in (update.get("$set") or {}).items():
-                    *parents, leaf = k.split(".")
+                    # Positional "arr.$.leaf": the first element the filter's
+                    # "arr.<field>" conditions match, as Mongo.
+                    arr, _, rest = k.partition(".$.")
                     node = d
+                    if rest:
+                        cond = {f[len(arr) + 1:]: c for f, c in filter_.items() if f.startswith(arr + ".")}
+                        node = next(e for e in d[arr] if isinstance(e, dict) and _match(e, cond))
+                    *parents, leaf = (rest or k).split(".")
                     for part in parents:
                         node = node.setdefault(part, {})
                     node[leaf] = v

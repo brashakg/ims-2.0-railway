@@ -59,8 +59,8 @@ def _norm(value: Any) -> str:
 # the order's tracking fields show -- the newest one IMS applied.
 FULFILLMENT_CLOCKS = "shopify_fulfillment_clocks"
 FULFILLMENT_WATERMARK = "shopify_fulfillment_updated_at"
-# The AWB of every LIVE parcel ([{"id": _clock_key, "awb"}]; a cancelled or
-# failed one leaves it). The tracking fields show one parcel; the courier legs
+# Each parcel's AWB ([{"id": _clock_key, "awb"}]; "" for a cancelled or
+# failed one). The tracking fields show one parcel; the courier legs
 # (the Shiprocket poll and webhook) ask about all of them (tracked_awbs), so a
 # split shipment is delivered by whichever parcel the courier delivers.
 PARCEL_AWBS = "shopify_parcel_awbs"
@@ -81,20 +81,27 @@ def awb_filter(awb: str) -> Dict[str, Any]:
     return {"$or": [{f"{PARCEL_AWBS}.awb": awb}, {"awb": awb, PARCEL_AWBS: {"$exists": False}}]}
 
 
-def _write_parcel(orders, order: Dict[str, Any], key: str, awb: str) -> None:
-    """ONE parcel's entry in PARCEL_AWBS, element by element: its live AWB
-    added (none for a cancelled / failed parcel, whose order still gets the
-    list, so tracked_awbs never falls back to the order's awb), then every
-    other AWB this read saw for it dropped. Another parcel's entry is never
-    written, so two parcels reconciled at once both stay."""
-    oid = {"order_id": order.get("order_id")}
-    if awb:
-        orders.update_one(oid, {"$addToSet": {PARCEL_AWBS: {"id": key, "awb": awb}}})
-    else:
-        orders.update_one({**oid, PARCEL_AWBS: {"$exists": False}}, {"$set": {PARCEL_AWBS: []}})
-    for p in order.get(PARCEL_AWBS) or []:
-        if isinstance(p, dict) and p.get("id") == key and p.get("awb") != awb:
-            orders.update_one(oid, {"$pull": {PARCEL_AWBS: p}})
+def _write_parcel(orders, oid: Dict[str, Any], key: str, awb: str, clock: Dict[str, Any],
+                  watermark: Any) -> None:
+    """ONE parcel's entry in PARCEL_AWBS ({"id": key, "awb"}: its live AWB,
+    "" once it is cancelled / failed, so the order still gets the list and
+    tracked_awbs never falls back to the order's awb) and its clock, in ONE
+    write that matches only while this fulfilment's stored clock is not newer:
+    a stale reconcile racing a newer one of the same parcel lands before it
+    or not at all. The entry is replaced in place, else appended; another
+    parcel's entry is never written, so two parcels reconciled at once both
+    stay."""
+    guard = {} if watermark is None else {f"{FULFILLMENT_CLOCKS}.{key}": {"$not": {"$gt": watermark}}}
+    # Two passes: an append that lost to the same parcel's own append finds
+    # its entry (entries are never removed) and replaces it on the second.
+    for _ in range(2):
+        if orders.update_one({**oid, **guard, f"{PARCEL_AWBS}.id": key},
+                             {"$set": {f"{PARCEL_AWBS}.$.awb": awb, **clock}}).matched_count:
+            return
+        if orders.update_one({**oid, **guard, f"{PARCEL_AWBS}.id": {"$ne": key}},
+                             {"$push": {PARCEL_AWBS: {"id": key, "awb": awb}},
+                              "$set": clock}).matched_count:
+            return
 
 
 def _clock_key(f: Dict[str, Any]) -> str:
@@ -235,24 +242,22 @@ def reconcile_fulfillment(
             return {"status": "error", "error": "status write failed",
                     "order_id": order.get("order_id"), "fulfillment_id": fulfillment_id}
 
-        # Then this parcel's own state, each piece written on its own and
-        # never as a whole list or field set from this read: another parcel's
-        # reconcile (a second worker, the sweep beside a webhook) may be
-        # writing its own at the same time. Its clock goes LAST, so a write
-        # that fails before it leaves the fulfilment unapplied and the sweep
-        # re-feeds it (every write here lands again unchanged).
+        # Then this parcel's own state, never as a whole list or field set
+        # from this read: another parcel's reconcile (a second worker, the
+        # sweep beside a webhook) may be writing its own at the same time.
+        # Its entry and clock go LAST, in one write, so a write that fails
+        # before it leaves the fulfilment unapplied and the sweep re-feeds it
+        # (every write here lands again unchanged).
         orders = db.get_collection("orders")
         oid = {"order_id": order.get("order_id")}
         live = ful_status not in ("CANCELLED", "ERROR")
-        if fulfillment_id:
-            _write_parcel(orders, order, _clock_key(payload), tracking_number if live else "")
         # The order's tracking fields show the NEWEST fulfilment IMS applied:
         # an older parcel's late event states its own fact above but never
         # takes them over from a newer one (the write matches only while the
         # stored watermark is not newer), and a cancelled / failed parcel
         # never takes them over while another parcel is still live.
         others = [p for p in order.get(PARCEL_AWBS) or []
-                  if isinstance(p, dict) and p.get("id") != _clock_key(payload)]
+                  if isinstance(p, dict) and p.get("awb") and p.get("id") != _clock_key(payload)]
         watermark = _to_naive_utc(payload.get("updated_at"))
         if live or not others:
             takeover = {"fulfillment_status": ful_status, "shopify_fulfillment_id": fulfillment_id,
@@ -265,9 +270,13 @@ def reconcile_fulfillment(
                                  {FULFILLMENT_WATERMARK: None}]}
             orders.update_one({**oid, **newer}, {"$set": takeover})
         clock: Dict[str, Any] = {"updated_at": datetime.now(timezone.utc).isoformat()}
-        if watermark is not None and fulfillment_id:
-            clock[f"{FULFILLMENT_CLOCKS}.{_clock_key(payload)}"] = watermark
-        orders.update_one(oid, {"$set": clock})
+        if not fulfillment_id:
+            orders.update_one(oid, {"$set": clock})
+        else:
+            if watermark is not None:
+                clock[f"{FULFILLMENT_CLOCKS}.{_clock_key(payload)}"] = watermark
+            _write_parcel(orders, oid, _clock_key(payload), tracking_number if live else "",
+                          clock, watermark)
         order_status = res["to"] or current_status
 
         logger.info(
