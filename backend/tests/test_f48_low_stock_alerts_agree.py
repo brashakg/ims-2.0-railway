@@ -157,3 +157,29 @@ def test_dead_stock_outranks_the_low_list(monkeypatch):
     assert alert["alertType"] == "DEAD_STOCK"
     assert alert["costImpact"] == 6000
     assert res["stats"]["deadStockValue"] == 6000
+
+
+# ---------------------------------------------------------------------------
+# Verifier round 3
+# ---------------------------------------------------------------------------
+
+
+def test_a_discontinued_frame_still_on_the_shelf_is_on_both_screens(monkeypatch):
+    """The Aviator is inactive (discontinued) but 3 units are still here. Low
+    stock counts units whatever the catalogue flag says, so Alerts must too --
+    it used to answer 'No Alerts' beside 'Aviator - Gold, 3 left'. An inactive
+    product with nothing on the shelf stays silent (no reorder for it)."""
+    products = [{**_PRODUCTS[0], "is_active": False}, {**_PRODUCTS[1], "is_active": False}]
+    db = _wire(monkeypatch, units=_units("P-AV", 3), products=products)
+    # The discontinued Wayfarer sold out last week: scored, it would be an
+    # 'Out of stock - reorder' alert for a product nobody stocks any more.
+    db.orders.insert_one({
+        "status": "DELIVERED", "store_id": "S1", "created_at": _NOW - timedelta(days=5),
+        "items": [{"barcode": "RB2140", "quantity": 2}],
+    })
+    (row,) = _low()["items"]
+    assert row["name"] == "Ray-Ban RB3025 Aviator - Gold"
+    (alert,) = _alerts()["alerts"]  # the Wayfarer (0 units) is not scored
+    assert alert["productName"] == row["name"]
+    assert alert["alertType"] == "LOW_STOCK"
+    assert alert["currentStock"] == row["quantity"] == 3

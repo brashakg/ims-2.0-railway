@@ -336,14 +336,15 @@ async def get_stock_alerts(
         # stock_units. Filtering products by products.store_id and reading the
         # legacy products.stock_quantity field made every alert vanish once
         # stock moved to the ledger (audit F48: "No Alerts" beside LOW STOCK 1).
-        prod_filter: Dict = {"is_active": {"$ne": False}}
-
+        # Inactive products are read too: one still on the shelf is on the
+        # low-stock list, so it is scored here (see the loop below).
         products = list(
             products_coll.find(
-                prod_filter,
+                {},
                 {
                     "_id": 0,
                     "product_id": 1,
+                    "is_active": 1,
                     "name": 1,
                     "brand": 1,
                     "category": 1,
@@ -384,6 +385,11 @@ async def get_stock_alerts(
         for p in products:
             barcode = p.get("barcode") or p.get("sku") or ""
             pid = str(p.get("product_id") or "")
+            # A discontinued (inactive) product is scored only while it still
+            # has units here -- the low-stock list counts units whatever the
+            # catalogue flag, and the two screens must agree (audit F48).
+            if p.get("is_active") is False and pid not in on_hand:
+                continue
             units = on_hand.get(pid) or {}
             alert = _build_stock_alert(
                 {**p, "stock_quantity": int(units.get("quantity") or 0)},
