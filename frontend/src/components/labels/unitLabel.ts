@@ -24,11 +24,13 @@ const QUIET_MODULES = 10;
 /** Inside the window: its right padding, and the gap between bars and text. */
 const WIN_PAD_RIGHT_MM = 1;
 const GAP_MM = 1.5;
-/** Room the text beside the bars keeps (brand + model, colour / size, MRP). */
-export const MIN_INFO_MM = 12;
+/** Room the text beside the bars keeps (brand + model, colour, size). The MRP
+ *  sits under the barcode text, so no barcode can squeeze the price. */
+const MIN_INFO_MM = 12;
 /** Widest bar block (quiet zones included) that leaves the text its room. The
- *  longest unit barcode IMS mints (the 15-character BC- fallback) is 55.05 mm. */
-export const MAX_BARS_MM = PRINTABLE_MM - WIN_PAD_RIGHT_MM - GAP_MM - MIN_INFO_MM;
+ *  longest unit barcode IMS mints (the 15-character BC- fallback) is 55.05 mm;
+ *  e2e/tests/layout-unit-label.spec.ts measures the printed label in Chromium. */
+const MAX_BARS_MM = PRINTABLE_MM - WIN_PAD_RIGHT_MM - GAP_MM - MIN_INFO_MM;
 const OFFSET_KEY = 'ims.unitLabel.offsetMm';
 
 export interface UnitLabelData {
@@ -118,20 +120,21 @@ function esc(v: unknown): string {
     .replace(/"/g, '&quot;');
 }
 
+/** No price is printed for a unit with no MRP: an imported product with no
+ *  price is stored as 0, and a label reading "MRP ₹0" is a wrong price. */
 function mrpText(mrp?: number | null): string {
-  return mrp == null || Number.isNaN(Number(mrp))
-    ? ''
-    : `MRP ₹${Number(mrp).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
+  const n = Number(mrp);
+  return mrp != null && n > 0 ? `MRP ₹${n.toLocaleString('en-IN', { maximumFractionDigits: 0 })}` : '';
 }
 
 function labelHtml(u: UnitLabelData, offsetMm: number, extraClass = ''): string {
   const title = [u.brand, u.model].filter(Boolean).join(' ');
-  const variant = [u.colour, u.size].filter(Boolean).join(' / ');
   return (
     `<div class="lbl"><div class="win${extraClass}" style="left:${offsetMm}mm">` +
-    `<div class="code">${barcodeSvg(u.barcode, 8)}<div class="txt">${esc(u.barcode)}</div></div>` +
-    `<div class="info"><div class="b two">${esc(title)}</div><div class="two">${esc(variant)}</div>` +
-    `<div class="b">${esc(mrpText(u.mrp))}</div></div></div></div>`
+    `<div class="code">${barcodeSvg(u.barcode, 8)}<div class="txt">${esc(u.barcode)}</div>` +
+    `<div class="mrp">${esc(mrpText(u.mrp))}</div></div>` +
+    `<div class="info"><div class="b two">${esc(title)}</div><div class="two">${esc(u.colour)}</div>` +
+    `<div class="size">${esc(u.size)}</div></div></div></div>`
   );
 }
 
@@ -146,13 +149,16 @@ body { font-family: Arial, Helvetica, sans-serif; }
 .win { position: absolute; top: 0; width: ${PRINTABLE_MM}mm; height: ${LABEL_HEIGHT_MM}mm; overflow: hidden;
   display: flex; align-items: center; gap: ${GAP_MM}mm; padding: 0.8mm ${WIN_PAD_RIGHT_MM}mm 0.8mm 0; }
 .win.outline { border: 0.25mm solid #000; }
-.code { flex: none; text-align: center; }
+.code { flex: none; text-align: center; white-space: nowrap; }
 .code svg { display: block; }
 .txt { font-family: 'Courier New', monospace; font-size: 7pt; line-height: 1.1; letter-spacing: 0.3px; }
+/* Under the barcode text, whole: the column is as wide as the bars, or as the
+   price when a short barcode's bars are narrower. */
+.mrp { font-size: 6.5pt; line-height: 1.1; font-weight: 700; }
 .info { flex: 1; min-width: 0; font-size: 6.5pt; line-height: 1.15; }
 .info div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-/* ~20 mm beside the bars: a long model or colour/size wraps once instead of
-   losing its tail (the size); 2 + 2 + 1 lines at 6.5 pt fit the 15 mm. */
+/* Brand + model and colour wrap once, then cut; the size keeps a line of its
+   own so a long colour never pushes it off. 2 + 2 + 1 lines fit the 15 mm. */
 .info .two { white-space: normal; overflow-wrap: anywhere; display: -webkit-box;
   -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .b { font-weight: 700; }

@@ -10,6 +10,9 @@
 //   - Code 128 of the UNIT barcode with no bar narrower than 2 dots at 203 dpi
 //     (0.2502 mm) and a quiet zone;
 //   - barcode text, brand + model, colour + size, MRP.
+// What FITS on the 15 mm (the MRP beside the widest barcode, long names cut
+// rather than overprinted) needs a layout engine, so it is measured in
+// Chromium by e2e/tests/layout-unit-label.spec.ts, not guessed here.
 
 // This Node/jsdom runner ships a partial localStorage (no clear/setItem): the
 // repo's Map-backed stand-in (see HeldBillsScoping.test.ts).
@@ -28,8 +31,6 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
-  MAX_BARS_MM,
-  MIN_INFO_MM,
   code128Modules,
   getLabelOffsetMm,
   labelProblem,
@@ -95,18 +96,20 @@ describe('the unit label page', () => {
     expect(text).toMatch(/MRP\s*₹\s*8,990/);
   });
 
-  it('lets a long brand + model or colour + size take two lines, and never clips the MRP', () => {
-    // ~20 mm is left beside the bars: "Ray-Ban RB5154 Clubmaster Optics" or
-    // "2000 Black/Gold / 51-21-145" on one ellipsised line lost the SIZE.
-    // Measured in Chromium at 203 dpi: 2 + 2 + 1 lines at 6.5 pt fit 15 mm.
-    const html = unitLabelsDocument([CARRERA]);
-    const info = parse(html).querySelector('.info')!;
-    const [title, variant, mrp] = Array.from(info.children);
-    expect(title.className).toContain('two');
-    expect(variant.className).toContain('two');
-    expect(mrp.className).not.toContain('two');
-    expect(html).toMatch(/\.two\s*{[^}]*-webkit-line-clamp:\s*2/);
-    expect(html).toMatch(/\.info\s*{[^}]*font-size:\s*6\.5pt/);
+  it('puts the MRP under the barcode text and the size on a line of its own', () => {
+    // Beside a 15-character barcode only 12.45 mm is left: "MRP ₹8,9…" there.
+    // Under the bars the price always has the bars' width; a long colour can
+    // no longer push the size off its line.
+    const doc = parse(unitLabelsDocument([CARRERA]));
+    expect(doc.querySelector('.code .mrp')?.textContent).toBe('MRP ₹8,990');
+    expect(doc.querySelector('.info .size')?.textContent).toBe('54');
+  });
+
+  it('prints no price for a unit with no MRP (an import with no price stores 0)', () => {
+    for (const mrp of [0, null, undefined]) {
+      const text = parse(unitLabelsDocument([{ ...CARRERA, mrp }])).body.textContent || '';
+      expect(text, String(mrp)).not.toMatch(/MRP|₹/);
+    }
   });
 
   it('escapes product text (it lands in innerHTML of the print window)', () => {
@@ -197,16 +200,14 @@ describe('a barcode a label cannot carry', () => {
     expect(() => unitLabelsDocument([{ ...CARRERA, barcode: '' }])).toThrow();
   });
 
-  it('keeps the text its room beside the widest accepted barcode', () => {
-    const html = unitLabelsDocument([{ ...CARRERA, barcode: 'BC-ABCDEFABCDEF' }]);
-    const bars = parseFloat(parse(html).querySelector('.win svg')!.getAttribute('width')!);
-    expect(bars).toBeLessThanOrEqual(MAX_BARS_MM);
-    // The window's own CSS: 70 mm wide, 1 mm right padding, 1.5 mm gap.
-    const win = html.match(/\.win\s*{([^}]*)}/)![1];
-    expect(win).toMatch(/width:\s*70mm/);
-    expect(win).toMatch(/gap:\s*1\.5mm/);
-    expect(win).toMatch(/padding:\s*0\.8mm 1mm 0\.8mm 0/);
-    expect(70 - 1 - 1.5 - bars).toBeGreaterThanOrEqual(MIN_INFO_MM);
+  it('refuses a barcode one letter wider than the widest IMS mints (the text keeps its room)', () => {
+    // 15 letters = 55.05 mm of bars, leaving 12.45 mm of the 70 mm window for
+    // brand, model, colour and size. 16 letters = 57.8 mm would leave 9.7 mm.
+    const bars = (b: string) =>
+      parseFloat(parse(unitLabelsDocument([{ ...CARRERA, barcode: b }])).querySelector('.win svg')!.getAttribute('width')!);
+    expect(bars('BC-ABCDEFABCDEF')).toBeCloseTo(55.05, 1);
+    expect(labelProblem('BC-ABCDEFABCDEF')).toBe('');
+    expect(labelProblem('ABCDEFGHIJKLMNOP')).toMatch(/too long/);
   });
 });
 
