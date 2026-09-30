@@ -419,6 +419,16 @@ class FakeStockRepo:
             out = out[:limit]
         return out
 
+    def find_low_stock(self, store_id, threshold=5):
+        # The real aggregation over these rows (reorder_policy.low_stock_rows,
+        # the one low-stock list the analytics counts read, calls it).
+        from database.repositories.product_repository import StockRepository
+        from strict_fakes import StrictCollection
+
+        return StockRepository(StrictCollection("stock_units", self._rows)).find_low_stock(
+            store_id, threshold
+        )
+
 
 class FakeProductRepo:
     """In-memory product master keyed by product_id (mirrors find_by_id)."""

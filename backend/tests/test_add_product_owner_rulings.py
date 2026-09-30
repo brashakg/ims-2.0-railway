@@ -477,3 +477,87 @@ def test_f73_guard_a_typed_or_legacy_level_still_gets_its_alerts():
         assert low["alertType"] == "LOW_STOCK"
         reorder = _alert({**product, "stock_quantity": 3, "reorder_quantity": 4})
         assert reorder["alertType"] == "REORDER_ALERT"
+
+
+# -- F73: every reader asks the PRODUCT's level, through the one rule --------
+
+
+class _NoRows:
+    """An order / customer repo with nothing in it."""
+
+    def find_many(self, *args, **kwargs):
+        return []
+
+
+def _analytics(monkeypatch, products, units):
+    from api.routers import analytics as an
+
+    stock = StockRepository(StrictCollection("stock_units", [dict(u) for u in units]))
+    prods = ProductRepository(StrictCollection("products", [dict(p) for p in products]))
+    monkeypatch.setattr(an, "get_stock_repository", lambda: stock)
+    monkeypatch.setattr(an, "get_product_repository", lambda: prods)
+    monkeypatch.setattr(an, "get_order_repository", lambda: _NoRows())
+    monkeypatch.setattr(an, "get_customer_repository", lambda: _NoRows())
+    user = {**_ADMIN, "active_store_id": "S1"}
+    return (
+        asyncio.run(an.get_dashboard_summary(current_user=user, period="month", store_id="S1")),
+        asyncio.run(an.get_inventory_intelligence(current_user=user, store_id="S1")),
+        asyncio.run(an.get_enterprise_kpis(current_user=user, period="month", store_id="S1")),
+    )
+
+
+def test_f73_analytics_counts_judge_the_product_never_a_stock_unit(monkeypatch):
+    """/analytics dashboard-summary, inventory-intelligence and enterprise-kpis
+    count THE low-stock list (low_stock_rows). A stock_units row is one unit
+    with no level: judged on its own it read the legacy 5, so the 3 units of a
+    -1 product counted as 3 low items."""
+    units = [
+        dict(_one_unit("P-UNSET"), stock_id=f"UU{i}", quantity=1, sales_velocity=1)
+        for i in range(3)
+    ] + [dict(_one_unit("P-SET"), quantity=1, sales_velocity=1)]
+    summary, intel, kpis = _analytics(
+        monkeypatch,
+        [
+            {"product_id": "P-UNSET", "sku": "U", "reorder_point": -1, "cost_price": 50},
+            {"product_id": "P-SET", "sku": "A", "reorder_point": 2, "cost_price": 100},
+        ],
+        units,
+    )
+    # P-SET proves each list really ran (a swallowed error counts nothing).
+    assert summary["low_stock_items"] == 1
+    assert kpis["inventory"]["low_stock_items"] == 1
+    assert intel["low_stock"]["count"] == 1
+    assert intel["low_stock"]["items"] == [
+        {"sku": "A", "name": "", "quantity": 1, "reorder_point": 2}
+    ]
+    assert intel["low_stock"]["total_value"] == 100
+    # Fast-moving reads the product's level too: the -1 product's units never.
+    assert intel["fast_moving"]["count"] == 1
+
+
+def _mongo():
+    import mongomock
+
+    return mongomock.MongoClient().db
+
+
+def test_f73_jarvis_counts_and_lists_low_stock_by_the_same_rule(monkeypatch):
+    """Jarvis's overview count and its 'value at risk' list read the same
+    products through the one rule: a product that never stored a level is low
+    at the legacy 5 in both, a -1 product in neither."""
+    from api.routers import jarvis
+
+    db = _mongo()
+    db.products.insert_many([
+        {"name": "LEGACY", "stock_quantity": 3, "mrp": 100},
+        {"name": "SET", "stock_quantity": 2, "reorder_point": 4, "mrp": 100},
+        {"name": "UNSET", "stock_quantity": 1, "reorder_point": -1, "mrp": 100},
+        {"name": "ABOVE", "stock_quantity": 9, "reorder_point": 4, "mrp": 100},
+    ])
+    monkeypatch.setattr(jarvis, "get_db_collection", lambda name: db[name])
+    overview = jarvis.JarvisAnalyticsEngine._compute_overview_live()
+    ctx = jarvis.JarvisAnalyticsEngine.get_extended_context()
+    listed = {r["name"]: r["reorder_point"] for r in ctx["low_stock_value_at_risk"]}
+    assert listed == {"LEGACY": 5, "SET": 4}
+    assert overview["inventory"]["low_stock_items"] == len(listed)
+

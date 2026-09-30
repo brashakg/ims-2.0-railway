@@ -461,6 +461,7 @@ class TestBuildProductMasterMapBatched:
             "category": "FRAME",
             "cost_price": 2500.0,
             "mrp": 5000.0,
+            "reorder_level": 5,  # no level stored: legacy (F73)
         },
         # master hit without category/name: category defaults, model fallback
         "P-NOCAT": {
@@ -469,6 +470,7 @@ class TestBuildProductMasterMapBatched:
             "category": "Other",
             "cost_price": 100.0,
             "mrp": 0.0,
+            "reorder_level": 5,  # no level stored: legacy (F73)
         },
         # catalog by id: title -> name, nested pricing flattened
         "P-CAT": {
@@ -477,6 +479,7 @@ class TestBuildProductMasterMapBatched:
             "category": "SUNGLASS",
             "cost_price": 9000.0,
             "mrp": 20000.0,
+            "reorder_level": 5,  # no level stored: legacy (F73)
         },
         # catalog by sku: no cost_price in pricing -> 0.0
         "P-BYSKU": {
@@ -485,6 +488,7 @@ class TestBuildProductMasterMapBatched:
             "category": "FRAME",
             "cost_price": 0.0,
             "mrp": 12000.0,
+            "reorder_level": 5,  # no level stored: legacy (F73)
         },
         # catalog hit WITHOUT category still resolves (category -> "Other")
         "P-CAT-NOCAT": {
@@ -493,6 +497,7 @@ class TestBuildProductMasterMapBatched:
             "category": "Other",
             "cost_price": 0.0,
             "mrp": 0.0,
+            "reorder_level": 5,  # no level stored: legacy (F73)
         },
         # P-UNKNOWN: absent
     }

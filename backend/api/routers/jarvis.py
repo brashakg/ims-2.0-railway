@@ -1257,56 +1257,43 @@ class JarvisAnalyticsEngine:
 
                 # Low-stock items, sorted by value at risk (price * gap).
                 # More actionable than just "X items low" since it tells
-                # the operator WHICH stockouts hurt the most.
-                low_stock = list(
-                    prod_col.aggregate(
-                        [
-                            {
-                                "$match": {
-                                    "is_active": {"$ne": False},
-                                    "$expr": {
-                                        "$lte": [
-                                            {"$ifNull": ["$stock_quantity", 0]},
-                                            {"$ifNull": ["$reorder_point", 0]},
-                                        ]
-                                    },
-                                    "reorder_point": {"$gt": 0},
-                                }
-                            },
-                            {
-                                "$addFields": {
-                                    "_price": {"$ifNull": ["$offer_price", "$mrp"]},
-                                    "_gap": {
-                                        "$subtract": [
-                                            {"$ifNull": ["$reorder_point", 0]},
-                                            {"$ifNull": ["$stock_quantity", 0]},
-                                        ]
-                                    },
-                                }
-                            },
-                            {
-                                "$addFields": {
-                                    "_at_risk": {"$multiply": ["$_price", "$_gap"]},
-                                }
-                            },
-                            {"$sort": {"_at_risk": -1}},
-                            {"$limit": 15},
-                            {
-                                "$project": {
-                                    "_id": 0,
-                                    "name": 1,
-                                    "brand": 1,
-                                    "category": 1,
-                                    "store_id": 1,
-                                    "stock_quantity": 1,
-                                    "reorder_point": 1,
-                                    "price": "$_price",
-                                    "value_at_risk": "$_at_risk",
-                                }
-                            },
-                        ]
+                # the operator WHICH stockouts hurt the most. The product's
+                # own level decides (reorder_policy, F73) -- the same rule as
+                # Jarvis's low-stock counts, so a missing level is 5 here too.
+                low_stock = []
+                for p in prod_col.aggregate(
+                    [
+                        {"$match": {"is_active": {"$ne": False}}},
+                        {
+                            "$project": {
+                                "_id": 0, "name": 1, "brand": 1, "category": 1,
+                                "store_id": 1, "stock_quantity": 1,
+                                "reorder_point": 1, "offer_price": 1, "mrp": 1,
+                            }
+                        },
+                    ]
+                ):
+                    qty = p.get("stock_quantity") or 0
+                    if not is_low_stock(p, qty):
+                        continue
+                    level = reorder_level(p)
+                    price = p.get("offer_price")
+                    if price is None:
+                        price = p.get("mrp")
+                    low_stock.append(
+                        {
+                            "name": p.get("name"),
+                            "brand": p.get("brand"),
+                            "category": p.get("category"),
+                            "store_id": p.get("store_id"),
+                            "stock_quantity": qty,
+                            "reorder_point": level,
+                            "price": price,
+                            "value_at_risk": float(price or 0) * (level - int(qty)),
+                        }
                     )
-                )
+                low_stock.sort(key=lambda r: r["value_at_risk"], reverse=True)
+                low_stock = low_stock[:15]
                 ctx["low_stock_value_at_risk"] = low_stock
         except Exception as e:
             logger.warning("[JARVIS] catalog analytics ctx failed: %s", e)
