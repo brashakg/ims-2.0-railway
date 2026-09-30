@@ -106,15 +106,20 @@ def test_header_reflects_passed_store_and_entity():
 
 
 def test_gstin_is_the_stores_own_never_the_primary():
-    """A BV store in Maharashtra prints its own MH GSTIN; one with none prints
-    none -- never the entity's JH primary (the deleted second picker did)."""
+    """A BV store in Maharashtra prints its own MH GSTIN; one never stamped
+    prints its entity's MH registration (its own state's); one in a state
+    the entity has no registration for prints none -- never the entity's JH
+    primary (the deleted second picker did)."""
     bv_store_mh = dict(
         BV_STORE_JH, state="Maharashtra", state_code="27", city="Mumbai",
         gstin="27AABCB1234M1ZA",
     )
     h = LegalHeader(BV_ENTITY, bv_store_mh, "tax_invoice")
     assert h["gstin"] == "27AABCB1234M1ZA"
-    assert LegalHeader(BV_ENTITY, dict(bv_store_mh, gstin=""), "tax_invoice")["gstin"] == ""
+    unstamped = dict(bv_store_mh, gstin="")
+    assert LegalHeader(BV_ENTITY, unstamped, "delivery_challan")["gstin"] == "27AABCB1234M1ZA"
+    karnataka = dict(unstamped, state="Karnataka", state_code="29", city="Bengaluru")
+    assert LegalHeader(BV_ENTITY, karnataka, "delivery_challan")["gstin"] == ""
 
 
 def test_logo_read_from_nested_invoice_identity():

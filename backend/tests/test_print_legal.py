@@ -453,10 +453,18 @@ def test_legal_header_prints_the_stores_own_gstin():
     )
     assert out["gstin"] == "27AAACA1234A1Z5"
     assert out["state_code"] == "27"
-    # A store with no GSTIN of its own prints none -- never the entity's
-    # PRIMARY (Jharkhand) registration on a Maharashtra document.
+    # A store the org module never stamped (linked to its entity later)
+    # prints its entity's registration for the store's OWN state -- a
+    # transfer challan must carry the consignor's GSTIN (money panel round
+    # 8: it printed a blank one) ...
     bare = dict(_store_fixture(state_code="27"), gstin="")
-    assert LegalHeader(_entity_fixture(), bare, doc_type="tax_invoice")["gstin"] == ""
+    assert LegalHeader(_entity_fixture(), bare, doc_type="delivery_challan")["gstin"] == (
+        "27AAACA1234A1Z5"
+    )
+    # ... and never the entity's PRIMARY (Jharkhand) one on a document of a
+    # state it has no registration for.
+    elsewhere = dict(_store_fixture(state_code="29"), gstin="", state="Karnataka")
+    assert LegalHeader(_entity_fixture(), elsewhere, doc_type="delivery_challan")["gstin"] == ""
 
 
 def test_legal_header_overrides_win():

@@ -800,10 +800,19 @@ def LegalHeader(  # noqa: N802 - intentionally mirror the JSX export name
 
     # ---- the seller GSTIN: the store's OWN (store.gstin, stamped by the org
     # module for the store's state) -- the one GSTIN its tax invoice, GSTR-1
-    # and the e-invoice issue from. The entity's registrations are never
-    # re-picked here: that second picker fell back to the PRIMARY one and
-    # printed another state's GSTIN on the goods-movement document.
+    # and the e-invoice issue from. A store the org module never stamped (a
+    # store linked to its entity afterwards) prints its entity's registration
+    # for the store's OWN state -- a transfer challan must carry the
+    # consignor's GSTIN (Rule 55). Never the entity's PRIMARY one: that
+    # printed another state's GSTIN on the goods-movement document. A GST
+    # tax document never gets here without store.gstin
+    # (assert_issuing_identity(require_gstin=True), the invoice door).
     gstin = _pick(store, "gstin")
+    if not gstin and isinstance(entity, dict):
+        from .org_validation import resolve_gstin_for_state, shop_state_code
+
+        reg = resolve_gstin_for_state(entity.get("gstins") or [], shop_state_code(store))
+        gstin = str((reg or {}).get("gstin") or "").strip()
     state_name = state_name_store
 
     # ---- logo (entity invoice identity, then per-brand default) -----------

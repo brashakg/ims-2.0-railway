@@ -286,6 +286,25 @@ def test_transfer_challan_endpoint_returns_html(transfer_env):
     assert "DC/TRF/" in body
 
 
+def test_transfer_challan_prints_the_consignors_gstin_for_a_store_never_stamped(
+    transfer_env, monkeypatch
+):
+    """Money panel round 8: a store linked to its entity after it was saved
+    (POST /entities/{id}/stores/{store_id} sets only entity_id) carries no
+    store.gstin; its transfer challan printed a blank 'GSTIN / UIN'. It
+    prints the entity's registration for the store's own state (Rule 55)."""
+    monkeypatch.setattr(
+        print_documents, "load_store",
+        lambda sid: {**_TEST_STORE, "gstin": ""} if sid else {},
+    )
+    resp = asyncio.run(
+        print_documents.delivery_challan_for_transfer(
+            transfer_env, "ORIGINAL", False, _user("STORE_MANAGER")
+        )
+    )
+    assert "20ABCDE1234F1Z5" in resp.body.decode("utf-8")
+
+
 # ===========================================================================
 # 3. RBAC
 # ===========================================================================
