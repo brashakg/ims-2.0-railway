@@ -4,7 +4,7 @@
 // Reusable hooks for all POS data operations:
 // customers, products, prescriptions, orders, inventory
 
-import { keepPreviousData, useQuery } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import {
   inventoryApi,
   productApi,
@@ -12,6 +12,7 @@ import {
 } from '../services/api';
 import { mapCategory } from '../components/pos/submitOrder';
 import { productIdOf } from '../components/pos/productIntake';
+import { usePOSStore } from '../stores/posStore';
 
 // ============================================================================
 // Query Key Factories (for cache invalidation)
@@ -71,8 +72,17 @@ export function useProducts(params?: { category?: string; brand?: string; search
  *  lines). `sellable[id]` is the oversell guard's OWN number (GET
  *  /inventory/sellable asks _assert_serialized_stock_available): a number, or
  *  null when the guard does not gate that row (not unit-tracked here, lens,
- *  service). `canonical[id]` is the id the guard adds that line up under. */
+ *  service). `canonical[id]` is the id the guard adds that line up under.
+ *
+ *  The guard at Complete sale stays the authority; this is kept as fresh as a
+ *  read can be. Never "fresh" (the App default is 5 minutes), so a remount or
+ *  a refocus re-reads; unobserved counts are dropped at once, so a tile coming
+ *  back never shows an old figure; the key carries this till's last order id
+ *  (submitPosOrder sets it on every sale), so a sale here re-reads at once.
+ *  ponytail: stock another till or a receipt moves shows within 30 s (or on
+ *  refocus); push it from the server if that ever proves too slow. */
 export function useSellableStock(storeId: string | undefined, rows: any[]) {
+  const lastSale = usePOSStore((s) => s.order_id);
   const typeOf = new Map<string, string>();
   for (const r of rows || []) {
     const id = productIdOf(r || {});
@@ -80,12 +90,15 @@ export function useSellableStock(storeId: string | undefined, rows: any[]) {
   }
   const ids = [...typeOf.keys()].sort();
   return useQuery({
-    queryKey: ['pos', 'sellable', storeId, ids],
+    queryKey: ['pos', 'sellable', storeId, lastSale, ids],
     queryFn: () => inventoryApi.getSellable(storeId!, ids, ids.map((id) => typeOf.get(id)!)),
     enabled: !!storeId && ids.length > 0,
-    // Keep the last counts on screen while a changed cart refetches, so a
-    // warning never blinks off and back on.
-    placeholderData: keepPreviousData,
+    staleTime: 0,
+    gcTime: 0,
+    refetchInterval: 30_000,
+    // While a changed cart re-reads, keep the last counts FROM THIS SHOP on
+    // screen so a warning never blinks off and back on; never another shop's.
+    placeholderData: (prev, prevQuery) => (prevQuery?.queryKey[2] === storeId ? prev : undefined),
   });
 }
 

@@ -9,10 +9,12 @@
 // The number on the tile is the oversell guard's own (GET /inventory/sellable
 // asks orders/stock._assert_serialized_stock_available itself, pinned by
 // backend tests/test_till_sellable_stock.py). null = the guard does not gate
-// that row, so the tile must not call it out of stock either.
+// that row, so the tile must not call it out of stock either. The guard at
+// Complete sale stays the authority; the figure is kept as fresh as a read
+// can be (see 'the figure keeps up' below).
 
-import { render, screen, waitFor } from '@testing-library/react';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { act, render, screen, waitFor } from '@testing-library/react';
+import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const getSellable = vi.fn();
@@ -46,6 +48,7 @@ const strip = (client: QueryClient, storeId = 'BV-BOK-01') => (
     <ProductResultsStrip storeId={storeId} query="" />
   </QueryClientProvider>
 );
+const tile = (colour: string) => screen.getByText(colour).closest('button') as HTMLButtonElement;
 const answer = (sellable: Record<string, number | null>) =>
   getSellable.mockResolvedValue({ store_id: 'BV-BOK-01', sellable, canonical: {} });
 
@@ -128,5 +131,85 @@ describe('the till strip', () => {
     render(strip(appClient()));
     await waitFor(() => expect(screen.getByText('2 in stock')).toBeTruthy());
     expect(getSellable).toHaveBeenCalledWith('BV-BOK-01', ['66f1c0ffee00000000000001'], ['FRAME']);
+  });
+});
+
+describe('the figure keeps up (it is never 5 minutes old)', () => {
+  it('re-reads the moment this till completes a sale', async () => {
+    getProducts.mockResolvedValue({ products: [BLACK] });
+    answer({ 'FR-BLACK': 1 });
+    render(strip(appClient()));
+    await waitFor(() => expect(screen.getByText('1 in stock')).toBeTruthy());
+
+    answer({ 'FR-BLACK': 0 }); // that last unit was just sold here
+    act(() => usePOSStore.getState().setOrderResult('o-1', 'BV/INV/0001')); // submitPosOrder, every sale
+    await waitFor(() => expect(tile('Black').disabled).toBe(true));
+    expect(getSellable).toHaveBeenCalledTimes(2);
+  });
+
+  it('a tile that comes back on screen never shows the old figure, and reads afresh', async () => {
+    const client = appClient();
+    getProducts.mockResolvedValue({ products: [BLACK] });
+    answer({ 'FR-BLACK': 0 });
+    const first = render(strip(client));
+    await waitFor(() => expect(tile('Black').disabled).toBe(true));
+    first.unmount();
+    await act(() => new Promise((r) => setTimeout(r, 20))); // the till shows something else
+
+    answer({ 'FR-BLACK': 1 }); // a receipt put one back meanwhile
+    render(strip(client));
+    await screen.findByText('Black');
+    expect(screen.queryByText('Out of stock')).toBeNull();
+    expect(tile('Black').disabled).toBe(false);
+    await waitFor(() => expect(screen.getByText('1 in stock')).toBeTruthy());
+    expect(getSellable).toHaveBeenCalledTimes(2);
+  });
+
+  it('a tile left on screen re-reads when the till is looked at again', async () => {
+    getProducts.mockResolvedValue({ products: [BLACK] });
+    answer({ 'FR-BLACK': 0 });
+    render(strip(appClient()));
+    await waitFor(() => expect(tile('Black').disabled).toBe(true));
+
+    answer({ 'FR-BLACK': 1 });
+    act(() => {
+      focusManager.setFocused(false);
+      focusManager.setFocused(true);
+    });
+    try {
+      await waitFor(() => expect(screen.getByText('1 in stock')).toBeTruthy());
+    } finally {
+      focusManager.setFocused(undefined);
+    }
+  });
+
+  it('a tile left on screen catches up with other tills every 30 seconds', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      getProducts.mockResolvedValue({ products: [BLACK] });
+      answer({ 'FR-BLACK': 1 });
+      render(strip(appClient()));
+      await waitFor(() => expect(screen.getByText('1 in stock')).toBeTruthy());
+
+      answer({ 'FR-BLACK': 0 }); // another till sold it
+      act(() => vi.advanceTimersByTime(30_000));
+      await waitFor(() => expect(tile('Black').disabled).toBe(true));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("never shows another shop's counts while a store switch re-reads", async () => {
+    const client = appClient();
+    getProducts.mockResolvedValue({ products: [BLACK] });
+    answer({ 'FR-BLACK': 8 });
+    const r = render(strip(client, 'BV-BOK-01'));
+    await waitFor(() => expect(screen.getByText('8 in stock')).toBeTruthy());
+
+    getSellable.mockReturnValue(new Promise(() => undefined)); // the other shop's answer is on its way
+    r.rerender(strip(client, 'BV-DHN-01'));
+    await waitFor(() => expect(getSellable).toHaveBeenCalledWith('BV-DHN-01', ['FR-BLACK'], ['FRAME']));
+    await screen.findByText('Black');
+    expect(screen.queryByText('8 in stock')).toBeNull();
   });
 });

@@ -30,9 +30,11 @@
 // card's data reads, badges and disabled states exist once.
 //
 // STOCK (F46, owner-approved 2026-09-28): the number on a card is this shop's
-// sellable count from useSellableStock -- the oversell guard's own number, so
-// the badge can never disagree with Complete sale. The surface fetches it for
-// the rows it shows and hands each card its figure.
+// sellable count from useSellableStock -- the oversell guard's own number,
+// re-read on every sale here, every remount and refocus, and every 30 s. The
+// guard at Complete sale stays the authority (another till can sell the last
+// unit between two reads). The surface fetches it for the rows it shows and
+// hands each card its figure.
 
 import { Package } from 'lucide-react';
 import { usePOSStore } from '../../../stores/posStore';
