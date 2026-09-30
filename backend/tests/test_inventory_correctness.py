@@ -276,9 +276,12 @@ class TestNonMovingStockFixes:
 
 class TestReorderMinus1Passthrough:
     def test_stock_ledger_passes_reorder_fields_through_raw(self, inv_client, mongo_db):
-        """Ledger rows carry reorder_quantity / reorder_point verbatim:
-        -1 stays -1 (disabled sentinel), a missing field stays None (legacy),
-        and a real value stays itself. Nothing is defaulted to 10/20."""
+        """Ledger rows carry reorder_quantity verbatim: -1 stays -1 (disabled
+        sentinel), a missing field stays None (legacy), and a real value stays
+        itself. Nothing is defaulted to 10/20. reorder_point is the product's
+        low-stock level through reorder_policy.reorder_level: a typed level
+        stays itself, and a legacy product that never stored one shows the 5
+        it is alerted at (LEGACY_LEVEL), never a blank beside a Low Stock badge."""
         pid_off = _add_product(mongo_db, reorder_quantity=-1, reorder_point=5)
         pid_legacy = _add_product(mongo_db)  # no reorder fields at all
         pid_on = _add_product(mongo_db, reorder_quantity=12, reorder_point=4)
@@ -296,7 +299,7 @@ class TestReorderMinus1Passthrough:
             "a legacy product without the field must yield None, not a "
             "fabricated default"
         )
-        assert rows[pid_legacy]["reorder_point"] is None
+        assert rows[pid_legacy]["reorder_point"] == 5
         assert rows[pid_on]["reorder_quantity"] == 12
         assert rows[pid_on]["reorder_point"] == 4
 

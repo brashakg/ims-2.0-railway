@@ -237,6 +237,11 @@ async def push_product_docs(
     precomputed blocked=False so push_product does not re-scan the block
     config per product. If the block CONFIG is unreadable (verifiable=False)
     we pass blocked=None so push_product FAILS CLOSED per row (finding #18).
+    A product push_product would refuse for its BRAND (push-locked, or kept off
+    the website in Brand Master -- shopify_push.product_push_refusal) is
+    excluded the same way: counted in blocked_skipped, never a slot, so a queue
+    of off-brand products can never starve the ones behind it. It stays queued
+    and goes out once its brand is ticked.
 
     ``max_results`` caps the rows attempted (every result counts);
     ``max_sent`` caps the rows that reached Shopify -- a photo-less REFUSAL
@@ -261,7 +266,9 @@ async def push_product_docs(
         if max_sent is not None and sent >= max_sent:
             cap_reached = True
             break
-        if block_verifiable and doc.get("sku") in blocked_set:
+        if (
+            block_verifiable and doc.get("sku") in blocked_set
+        ) or shopify_push.product_push_refusal(db, doc):
             blocked_skipped += 1
             continue
         variants = variants_for_product(db, doc)

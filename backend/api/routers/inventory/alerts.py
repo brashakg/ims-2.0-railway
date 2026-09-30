@@ -128,7 +128,10 @@ def _build_stock_alert(
     out_of_stock_but_selling = stock <= 0 and velocity > 0
     below_reorder_point = _is_low_stock(product, stock) and velocity > 0
     runs_out_soon = projected is not None and projected <= lead_time_days
-    if not reorder_suggestions_off and (
+    # Owner 2026-09-28 (F73): no low-stock or reorder alert until a level is
+    # typed -- a not-set product falls through to the informational ones.
+    level_set = reorder_point is not None
+    if level_set and not reorder_suggestions_off and (
         out_of_stock_but_selling or below_reorder_point or runs_out_soon
     ):
         target = velocity * lead_time_days * 2  # cover 2x lead time
@@ -155,7 +158,7 @@ def _build_stock_alert(
     # 2. LOW_STOCK — sells, getting low, but not yet reorder-critical.
     # When auto-reorder is disabled the alert stays (it is informational)
     # but with NO suggested restock qty (recommendedOrder 0, costImpact 0).
-    if velocity > 0 and projected is not None and projected <= lead_time_days * 2:
+    if level_set and velocity > 0 and projected is not None and projected <= lead_time_days * 2:
         recommended = (
             0
             if reorder_suggestions_off

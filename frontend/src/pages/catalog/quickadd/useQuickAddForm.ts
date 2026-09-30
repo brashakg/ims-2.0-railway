@@ -528,13 +528,14 @@ export function useQuickAddForm() {
     try {
       const product = (await productApi.getProduct(pid)) as ProductDoc;
       setDupInfo(null);
-      enterVariantMode(product);
+      // Only the typed level survives: the typed identity IS the clash.
+      enterVariantMode(product, { attributes: {}, weight: '', reorderLevel });
     } catch {
       toast.error('Could not load the existing product for a variant.');
     } finally {
       setDupBusy(false);
     }
-  }, [dupInfo, enterVariantMode, toast]);
+  }, [dupInfo, enterVariantMode, toast, reorderLevel]);
 
   // Rescue popup: open the existing product in the stock ledger (see
   // productListPath) pre-scoped to its SKU.
@@ -589,6 +590,13 @@ export function useQuickAddForm() {
         }));
         if (newErrors.hsn_code) setShowAdvanced(true);
         toast.error('Please fix the highlighted fields.');
+        return;
+      }
+      // A typed level that is not a whole number >= 0 (2.5, -3) is refused,
+      // never silently saved as 'not set' (F73).
+      if (reorderLevel.trim() && typedLevel(reorderLevel) === null) {
+        setOpenSections((s) => ({ ...s, inventory: true }));
+        toast.error('Reorder level must be a whole number, 0 or more. Leave it blank for not set.');
         return;
       }
 

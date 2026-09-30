@@ -409,7 +409,7 @@ def _create_via_door(db, payload, name=CHILD_NAME):
         source="MASTER",
         actor="u-admin",
         actor_name="admin",
-        extra_fields={"name": name, "images": [PARENT_PHOTO], "sync_to_shopify": True},
+        extra_fields={"name": name, "images": [PARENT_PHOTO]},
         product_repo=ProductRepository(db["products"]),
         variant_repo=CatalogVariantRepository(db["catalog_variants"]),
         audit_repo=AuditRepository(db["audit_logs"]),
@@ -763,7 +763,7 @@ def test_the_one_create_door_mints_a_size_variant():
     assert spine["size"] == "Large" and spine["identity_key"].endswith("|large")
     assert spine["name"] == CHILD_NAME and spine["name"] != _spine(db, "sp-parent")["name"]
     assert spine["category"] == "SMARTGLASSES" and spine["hsn_code"] == "852580" and spine["gst_rate"] == 18.0
-    assert spine["images"] == [PARENT_PHOTO] and spine["sync_to_shopify"] is True
+    assert spine["images"] == [PARENT_PHOTO]
 
     twin = _twin(db, spine["pim_product_id"])
     assert twin["ecom"]["variant_of"] == _child_link()
