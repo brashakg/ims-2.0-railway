@@ -13,6 +13,7 @@ from ._shared import (
     timedelta,
     validate_store_access,
 )
+from .helpers import _had_the_window, _parse_expiry
 
 # ============================================================================
 # STOCK AGING / NON-MOVING REPORT
@@ -143,12 +144,7 @@ async def get_stock_aging_report(
             continue
 
         qty = sg.get("quantity", 0)
-        oldest = sg.get("oldest_date")
-        if isinstance(oldest, str):
-            try:
-                oldest = datetime.fromisoformat(oldest)
-            except Exception:
-                oldest = now
+        oldest = _parse_expiry(sg.get("oldest_date"))  # None = unknown
         # created_at is naive datetime.now() while `now` is utcnow(): on a box
         # east of UTC this morning's receipt reads as -1 days (audit F54).
         # Age is never negative.
@@ -165,7 +161,7 @@ async def get_stock_aging_report(
         # window that has not sold yet has not had its chance: no verdict
         # (NEW), never "Slow Mover - consider discount/return" on the morning
         # it arrived (audit F54).
-        if days_in_stock < _AGING_GRACE_DAYS and s90 == 0:
+        if not _had_the_window(oldest, now, _AGING_GRACE_DAYS) and s90 == 0:
             cls = "NEW"
         elif turnover >= 4:
             cls = "A"

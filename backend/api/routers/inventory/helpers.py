@@ -163,6 +163,17 @@ def _parse_expiry(value) -> Optional[datetime]:
         return None
 
 
+def _had_the_window(arrived, now: datetime, days: int) -> bool:
+    """Has stock that arrived at ``arrived`` sat on the shelf for ``days`` days?
+
+    THE rule for a stock age verdict -- Aging's NEW grace, Alerts' DEAD_STOCK
+    and Non-moving all read it. A missing or unreadable arrival date is legacy
+    stock: old, it has had the window. (Every current stock_units writer stamps
+    a real created_at, so only legacy rows take that branch.)"""
+    arrived = _parse_expiry(arrived)
+    return arrived is None or (now - arrived).days >= days
+
+
 def compute_days_until_expiry(expiry, now: Optional[datetime] = None) -> Optional[int]:
     """Whole days from `now` until `expiry` (negative = already expired).
 

@@ -16,7 +16,7 @@ from ._shared import (
 )
 from .helpers import (
     _get_db,
-    _parse_expiry,  # generic stored-timestamp parser (ISO / date / datetime)
+    _had_the_window,
 )
 
 # ============================================================================
@@ -61,7 +61,8 @@ async def get_non_moving_stock(
         products = list(products_coll.find(query, {"_id": 1, "name": 1, "sku": 1}))
 
         # Get products with sales in last N days (at the active store)
-        cutoff_date = datetime.utcnow() - timedelta(days=days)
+        now = datetime.utcnow()
+        cutoff_date = now - timedelta(days=days)
         sold_products = set()
 
         orders_filter = {
@@ -98,15 +99,14 @@ async def get_non_moving_stock(
                 # `quantity` field still count as one unit on hand. The VERDICT
                 # needs a unit that has sat on the shelf for the whole window: a
                 # unit received this morning has not had N days to sell (audit
-                # F54; no readable created_at = legacy = old). The Stock column
+                # F54; _had_the_window: unknown age = legacy = old). The Stock column
                 # still shows everything on the shelf.
                 total_qty = 0
                 aged_qty = 0
                 for s in stock:
                     qty = s.get("quantity", 1)
                     total_qty += qty
-                    arrived = _parse_expiry(s.get("created_at"))
-                    if arrived is None or arrived <= cutoff_date:
+                    if _had_the_window(s.get("created_at"), now, days):
                         aged_qty += qty
                 if aged_qty <= 0:
                     continue  # nothing has had the window: not non-moving

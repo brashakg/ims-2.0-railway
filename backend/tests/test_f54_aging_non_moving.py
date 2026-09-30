@@ -142,3 +142,47 @@ def test_non_moving_stock_column_is_what_is_on_the_shelf(monkeypatch):
     (row,) = res["products"]
     assert row["product_id"] == "P-OLD"
     assert row["current_stock"] == 5
+
+
+# ---------------------------------------------------------------------------
+# Verifier round 3: one rule for an unknown stock age
+# ---------------------------------------------------------------------------
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("stamp", [None, "30/09/2026"], ids=["missing", "unreadable"])
+def test_unknown_stock_age_is_old_on_every_screen(monkeypatch, stamp):
+    """A never-sold unit whose created_at is missing or unreadable. Aging
+    read it as 0 days old and said NEW while Non-moving (and Alerts) read it
+    as legacy stock and listed it. One rule now (helpers._had_the_window):
+    unknown age = legacy = old, so Aging gives it its mover verdict too."""
+    unit = {"product_id": "P-OLD", "store_id": "S1", "status": "AVAILABLE"}
+    if stamp:
+        unit["created_at"] = stamp
+
+    class _LegacyStockRepo:
+        def aggregate(self, pipeline):
+            if pipeline[0]["$match"].get("status") == "SOLD":
+                return []
+            # $min ignores a missing field and returns the lone string.
+            return [{"_id": "P-OLD", "quantity": 1, "oldest_date": stamp, "total_value": 0}]
+
+    class _LegacyDb(_Db):
+        def get_collection(self, name):
+            if name == "stock_units":
+                return _Coll([unit])
+            return super().get_collection(name)
+
+    monkeypatch.setattr(inv, "get_stock_repository", lambda: _LegacyStockRepo())
+    monkeypatch.setattr(inv, "get_product_repository", lambda: _ProductRepo())
+    monkeypatch.setattr(inv, "_get_db", lambda: _LegacyDb())
+    aging = asyncio.run(
+        get_stock_aging_report(
+            store_id=None, category=None, classification=None, min_days=None, current_user=_MGR
+        )
+    )
+    (row,) = aging["products"]
+    non_moving = asyncio.run(get_non_moving_stock(days=90, category=None, store_id=None, current_user=_MGR))
+    assert [p["product_id"] for p in non_moving["products"]] == ["P-OLD"]
+    assert row["classification"] == "C"  # not NEW

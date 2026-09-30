@@ -18,6 +18,7 @@ from ._shared import (
 )
 from .helpers import (
     _get_db,
+    _had_the_window,
     _parse_expiry,  # generic stored-timestamp parser (ISO / date / datetime)
 )
 
@@ -195,8 +196,7 @@ def _build_stock_alert(
 
     # 3. DEAD_STOCK — has stock but no movement in the dead-stock window, and
     # the stock has been on the shelf for that whole window.
-    had_the_window = stocked_since is None or (now - stocked_since).days >= dead_days
-    is_dead = stock > 0 and had_the_window and (
+    is_dead = stock > 0 and _had_the_window(stocked_since, now, dead_days) and (
         last_sale is None
         or (days_without_movement is not None and days_without_movement >= dead_days)
     )
