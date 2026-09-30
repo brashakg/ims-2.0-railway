@@ -1447,6 +1447,9 @@ def test_cash_flow_leaves_an_innocent_month_completely_alone(monkeypatch):
     monkeypatch.setattr(finance, "_get_db", lambda: _CleanDB())
     manager = _cash_flow("STORE_MANAGER")
     admin = _cash_flow("ADMIN")
+    # Supplier payments are ADMIN + ACCOUNTANT only (owner ruling 2026-09-29):
+    # the one key the manager's body lacks, and a store view folds in none.
+    assert admin.pop("vendor_payment_outflow") == 0
     assert manager == admin
     assert manager["expense_outflow"] == XCLEAN
 
