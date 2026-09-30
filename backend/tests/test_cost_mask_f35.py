@@ -192,24 +192,58 @@ def test_pnl_endpoint_payroll_answers_to_the_salary_gate_not_the_cost_gate(monke
 
 # A router that decides who sees cost with its own role list is how this rule
 # drifted: /catalog/products said no to the managers while /products said yes,
-# and the purchase recommendations handed cost to the counter. Every router
-# asks can_see_cost / mask_cost here. This guard fails when a file under
-# api/routers (a) binds role names to a name that says COST or MARGIN, or
-# (b) strips a raw cost field by hand (x.pop("cost_price"), del x["cost_price"],
-# or a pop / del inside a loop over a literal list naming one).
+# and the purchase recommendations handed cost to the counter. Every router and
+# service asks can_see_cost / mask_cost here. This guard reads every file under
+# api/routers AND api/services and fails on:
+#   (a) role names bound to a name that says COST or MARGIN;
+#   (b) a cost field stripped by hand -- x.pop("cost_price"), del x[...], a pop /
+#       del in a loop over a literal list naming one, a key filter against a
+#       collection naming one (`k not in _hide`, a dict comprehension's shape),
+#       or a Mongo projection / $project that sets one to 0;
+#   (c) a function that decides by role -- a role name, a role set of ANY name
+#       declared at module level under api/routers or api/services, or a call
+#       to a role predicate (a function answering True / False from roles) --
+#       and touches a cost / margin field without calling cost_mask. That is
+#       also the shape of an allow-list pick: the function holding the cost is
+#       the one that would pick it out.
+# Not a mask: `if <role test>: raise ...` and require_roles(...) -- those are
+# gates, held by rbac_policy and its tests.
+# Ceiling: a role test in one function whose hand-made projection lives in
+# another that names no cost field is not seen; the per-role differential tests
+# (test_counter_roles_no_purchase_reads) hold those routes.
 import ast  # noqa: E402
+import functools  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 from api.services import cost_mask as _cost_mask  # noqa: E402
 from api.services.rbac_policy import ALL_ROLES  # noqa: E402
 
-_ROUTERS = Path(__file__).resolve().parents[1] / "api" / "routers"
+_API = Path(__file__).resolve().parents[1] / "api"
 _ROLE_NAMES = set(ALL_ROLES) | {"INVESTOR"}
 _RAW_COST = _cost_mask._COST_FIELDS
+_ANY_COST = _cost_mask._ALL_MASKED
+_MASKERS = {
+    n for n, v in vars(_cost_mask).items()
+    if callable(v) and getattr(v, "__module__", "") == _cost_mask.__name__
+}
+# Writes that stamp cost onto a sale line under a role-decided discount cap:
+# the cost is stored, never shown. (path under api/, function)
+_COST_WRITES = {
+    ("routers/orders/create.py", "create_order"),
+    ("routers/orders/items.py", "add_order_item"),
+}
 
 
 def _consts(node):
     return {n.value for n in ast.walk(node) if isinstance(n, ast.Constant)}
+
+
+def _ref(node):
+    return node.id if isinstance(node, ast.Name) else getattr(node, "attr", None)
+
+
+def _called(node):
+    return _ref(node.func) if isinstance(node, ast.Call) else None
 
 
 def _is_strip(node):
@@ -219,8 +253,92 @@ def _is_strip(node):
     )
 
 
-def _own_cost_rules(tree):
-    for node in ast.walk(tree):
+def _bound(nodes, pool):
+    """Names assigned a value that names a member of `pool`."""
+    out = set()
+    for n in nodes:
+        if isinstance(n, (ast.Assign, ast.AnnAssign)) and n.value is not None:
+            if _consts(n.value) & pool:
+                targets = n.targets if isinstance(n, ast.Assign) else [n.target]
+                out |= {t.id for t in targets if isinstance(t, ast.Name)}
+    return out
+
+
+@functools.lru_cache(maxsize=None)
+def _nodes(tree):
+    """Every node of the tree, walked once."""
+    return tuple(ast.walk(tree))
+
+
+def _functions(tree):
+    return [n for n in _nodes(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+
+
+def _is_gate(node):
+    return _called(node) in ("require_roles", "Depends") or (
+        isinstance(node, ast.If)
+        and not node.orelse
+        and all(isinstance(b, ast.Raise) for b in node.body)
+    )
+
+
+@functools.lru_cache(maxsize=None)
+def _body(fn):
+    """The function body's nodes, minus gates (require_roles / Depends calls and
+    `if <test>: raise` blocks)."""
+    nodes = [n for stmt in fn.body for n in ast.walk(stmt)]
+    skip = {id(x) for g in nodes if _is_gate(g) for x in ast.walk(g)}
+    return tuple(n for n in nodes if id(n) not in skip)
+
+
+def _decides(nodes, role_sets, preds):
+    return any(
+        (isinstance(n, ast.Constant) and n.value in _ROLE_NAMES)
+        or _ref(n) in role_sets
+        or _called(n) in preds
+        for n in nodes
+    )
+
+
+def _answers_bool(fn):
+    rets = [n.value for n in ast.walk(fn) if isinstance(n, ast.Return)]
+    return bool(rets) and all(
+        isinstance(v, (ast.Compare, ast.BoolOp))
+        or (isinstance(v, ast.UnaryOp) and isinstance(v.op, ast.Not))
+        or _called(v) in ("any", "all", "bool")
+        or (isinstance(v, ast.Constant) and isinstance(v.value, bool))
+        for v in rets
+    )
+
+
+def _role_context(trees):
+    """(role sets of any name, role predicates) declared across `trees`."""
+    role_sets = set().union(set(), *(_bound(t.body, _ROLE_NAMES) for t in trees))
+    preds = {
+        fn.name
+        for t in trees
+        for fn in _functions(t)
+        if _answers_bool(fn) and _decides(_body(fn), role_sets, ())
+    }
+    return role_sets, preds
+
+
+def _own_cost_rules(tree, context=None):
+    role_sets, preds = context or _role_context([tree])
+    cost_sets = _bound(_nodes(tree), _ANY_COST)
+    for fn in _functions(tree):
+        nodes = _body(fn)
+        if (
+            _decides(nodes, role_sets, preds - {fn.name})
+            and any(
+                (isinstance(n, ast.Constant) and n.value in _ANY_COST)
+                or _ref(n) in cost_sets
+                for n in nodes
+            )
+            and not any(_called(n) in _MASKERS for n in nodes)
+        ):
+            yield fn.lineno, f"{fn.name} decides by role and touches cost"
+    for node in _nodes(tree):
         if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             names = [t.id.upper() for t in targets if isinstance(t, ast.Name)]
@@ -241,15 +359,61 @@ def _own_cost_rules(tree):
             and any(_is_strip(n) for stmt in node.body for n in ast.walk(stmt))
         ):
             yield node.lineno, "hand-stripped cost fields in a loop"
+        if isinstance(node, ast.Compare) and any(
+            isinstance(o, (ast.In, ast.NotIn)) for o in node.ops
+        ):
+            if any(
+                (isinstance(c, (ast.Tuple, ast.List, ast.Set)) and _consts(c) & _ANY_COST)
+                or _ref(c) in cost_sets
+                for c in node.comparators
+            ):
+                yield node.lineno, "keys filtered against cost fields"
+        projections = []
+        if _called(node) in ("find", "find_one", "find_many"):
+            projections = node.args[1:2] + [
+                k.value for k in node.keywords if k.arg == "projection"
+            ]
+        if isinstance(node, ast.Dict):
+            projections += [
+                v
+                for k, v in zip(node.keys, node.values)
+                if isinstance(k, ast.Constant) and k.value == "$project"
+            ]
+        for proj in projections:
+            if isinstance(proj, ast.Dict) and any(
+                isinstance(k, ast.Constant)
+                and k.value in _ANY_COST
+                and isinstance(v, ast.Constant)
+                and v.value in (0, False)
+                for k, v in zip(proj.keys, proj.values)
+            ):
+                yield node.lineno, "cost projected out"
 
 
-def test_no_router_keeps_its_own_cost_rule():
+@functools.lru_cache(maxsize=None)
+def _api_trees():
+    return {
+        path.relative_to(_API).as_posix(): ast.parse(path.read_text(encoding="utf-8"))
+        for folder in ("routers", "services")
+        for path in (_API / folder).rglob("*.py")
+        if path.name != "cost_mask.py"
+    }
+
+
+@functools.lru_cache(maxsize=None)
+def _api_context():
+    return _role_context(list(_api_trees().values()))
+
+
+def test_no_router_or_service_keeps_its_own_cost_rule():
+    trees = _api_trees()
+    assert "routers/reports/purchase.py" in trees
+    assert "services/rtv_debit_note.py" in trees
     found = sorted(
-        {
-            (path.relative_to(_ROUTERS).as_posix(), line, why)
-            for path in _ROUTERS.rglob("*.py")
-            for line, why in _own_cost_rules(ast.parse(path.read_text(encoding="utf-8")))
-        }
+        (path, line, why)
+        for path, tree in trees.items()
+        for line, why in _own_cost_rules(tree, _api_context())
+        if (path, why.split()[0]) not in _COST_WRITES
     )
     assert not found, (
         "cost visibility is decided in services/cost_mask.py only -- call "
@@ -257,13 +421,79 @@ def test_no_router_keeps_its_own_cost_rule():
     )
 
 
-def test_the_guard_sees_a_router_local_cost_rule():
-    """The guard is not vacuous: each shape it forbids trips it."""
-    for src in (
+def test_the_cost_write_exemptions_are_still_needed():
+    """The exemption list only shrinks: each entry still trips the guard."""
+    trees = _api_trees()
+    for path, fn in _COST_WRITES:
+        whys = {why.split()[0] for _l, why in _own_cost_rules(trees[path], _api_context())}
+        assert fn in whys, (path, fn)
+
+
+# The panel's mutation of routers/reports/purchase.py, verbatim in shape.
+_PANEL_MUTATION = """
+_BUYERS = {"SUPERADMIN", "ADMIN", "ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"}
+_hide = {"cost_price", "unit_margin", "estimated_purchase_cost"}
+
+def recommendations(current_user, recs):
+    if not set(current_user.get("roles") or []) & _BUYERS:
+        recs = [{k: v for k, v in r.items() if k not in _hide} for r in recs]
+    return recs
+"""
+
+_ALLOW_LIST_PICK = """
+_INSIGHT_ROLES = ("ADMIN", "AREA_MANAGER")
+
+def report(user, rows):
+    spend = sum(r["landed_cost"] for r in rows)
+    if set(user["roles"]) & _INSIGHT_ROLES:
+        return {"rows": rows, "spend": spend}
+    return {"rows": [{k: r[k] for k in ("sku", "mrp")} for r in rows]}
+"""
+
+
+@pytest.mark.parametrize(
+    "src",
+    [
         '_COST_ROLES = ("ADMIN", "ACCOUNTANT")',
         'if x:\n    row.pop("cost_price", None)',
         'del row["landed_cost"]',
         'for f in ("cost_price", "mrp"):\n    row.pop(f, None)',
-    ):
-        assert list(_own_cost_rules(ast.parse(src))), src
-    assert not list(_own_cost_rules(ast.parse('row.pop("created_by", None)')))
+        _PANEL_MUTATION,
+        _ALLOW_LIST_PICK,
+        'rows = [{k: v for k, v in r.items() if k not in ("cost_price", "mrp")} for r in rs]',
+        'docs = db.products.find({}, {"cost_price": 0, "_id": 0})',
+        'pipe = [{"$project": {"landed_cost": 0}}]',
+        'def h(user):\n    out = {}\n    if "ADMIN" in user["roles"]:\n        out["cogs"] = 5\n    return out',
+    ],
+)
+def test_the_guard_sees_a_router_local_cost_rule(src):
+    """The guard is not vacuous: each shape it forbids trips it."""
+    assert list(_own_cost_rules(ast.parse(src))), src
+
+
+def test_the_guard_sees_a_role_predicate_from_another_module():
+    """A predicate declared elsewhere under api/ (salary_visibility's
+    is_salary_admin) is a role decision too."""
+    src = (
+        "def h(user, out):\n"
+        "    if is_salary_admin(user):\n"
+        '        out["net_margin"] = 1\n'
+        "    return out"
+    )
+    assert list(_own_cost_rules(ast.parse(src), _api_context())), src
+
+
+@pytest.mark.parametrize(
+    "src",
+    [
+        'row.pop("created_by", None)',
+        # a gate, not a mask
+        'def h(user, p):\n    if "ADMIN" not in user["roles"]:\n        raise E()\n'
+        '    return p["cost_price"]',
+        # asks cost_mask
+        'def h(user, rows):\n    if "ADMIN" in user["roles"]:\n        rows = rows[:1]\n'
+        '    return mask_cost_list(rows, user)',
+    ],
+)
+def test_the_guard_passes_what_is_not_a_cost_rule(src):
+    assert not list(_own_cost_rules(ast.parse(src))), src
