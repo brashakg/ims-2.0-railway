@@ -366,28 +366,39 @@ def _online_store_id(payload: Dict[str, Any]) -> str:
     )
 
 
+def _gst_buyer(payload: Dict[str, Any]) -> Dict[str, str]:
+    """The BUYER side of an online order's GST split -- the delivery state
+    (the place of supply) and the buyer's GSTIN -- persisted on the order as
+    ``gst_buyer`` so a re-split when a seller hold lifts reads exactly what
+    the booking read."""
+    cust = payload.get("customer") if isinstance(payload.get("customer"), dict) else {}
+    return {
+        "state": _delivery_state(payload),
+        "gstin": str(payload.get("customer_gstin") or (cust.get("gstin") if cust else "") or ""),
+    }
+
+
 def _seller_gst_fields(
     items: List[Dict[str, Any]],
     store_doc: Optional[Dict[str, Any]],
-    payload: Dict[str, Any],
+    buyer: Dict[str, Any],
 ) -> Dict[str, Any]:
     """The seller-dependent GST fields of an online order -- place of supply
     (the buyer's delivery state) and, ONLY on a successful split, interstate /
     tax_summary / tax_totals -- from THE place-of-supply split the offline POS
-    uses. ONE rule for the booking and the Re-map re-route that re-bills an
-    order at its new shipping shop (online_fulfillment_route.reroute_held_order).
+    uses. ONE rule for the booking and the re-split when a seller hold lifts
+    (reseal_seller_gst). ``buyer`` is ``_gst_buyer``'s dict.
 
     OS-008 follow-up (P2): on a FAILED split the three keys are OMITTED, not
     defaulted to interstate=False / empty tax -- a real bool False would
     isinstance-win at all seven finance/GST read sites forever, freezing the
     order into a wrong intra-state (CGST/SGST) classification and locking out
     both the state-map fallback and the later customer-state healing."""
-    cust = payload.get("customer") if isinstance(payload.get("customer"), dict) else {}
-    buyer_state = _delivery_state(payload)
+    buyer_state = str((buyer or {}).get("state") or "")
     # A customer-shaped dict carrying the buyer's delivery state, so the shared
     # splitter resolves the place of supply.
     customer_shim = {
-        "gstin": (payload.get("customer_gstin") or (cust.get("gstin") if cust else "")),
+        "gstin": (buyer or {}).get("gstin") or "",
         "billing_address": {"state": buyer_state, "state_code": buyer_state},
         "state": buyer_state,
     }
@@ -409,6 +420,24 @@ def _seller_gst_fields(
             tax_totals=gst_split.get("totals", {}),
         )
     return out
+
+
+def reseal_seller_gst(
+    order: Dict[str, Any], store_doc: Optional[Dict[str, Any]]
+) -> Tuple[Dict[str, Any], Dict[str, str]]:
+    """THE re-split of a routed online order against its shop AS IT IS NOW --
+    run by every door that lifts (or re-routes) a seller hold: Re-map
+    (online_fulfillment_route.reroute_held_order) and clear-hold
+    (routers.online_store_orders). The booking froze interstate / tax_totals /
+    place_of_supply_assumed from the very shop doc the seller check refused;
+    GSTR-1/3B and Tally file the STORED flag while the invoice door splits
+    live, so a hold lifted without this files one tax head and prints the
+    other. Returns ($set, $unset) for the order."""
+    from ..utils.online_gst import order_place_of_supply
+
+    buyer = order.get("gst_buyer") or {"state": order_place_of_supply(order) or ""}
+    fields = _seller_gst_fields(order.get("items") or [], store_doc, buyer)
+    return fields, {k: "" for k in ("interstate", "tax_summary", "tax_totals") if k not in fields}
 
 
 def _claim_online_units(
@@ -1751,7 +1780,8 @@ def ingest_shopify_order(
             seller_hold = bad_seller["message"]
 
     cust = payload.get("customer") if isinstance(payload.get("customer"), dict) else {}
-    seller_gst = _seller_gst_fields(items, store_doc, payload)
+    gst_buyer = _gst_buyer(payload)
+    seller_gst = _seller_gst_fields(items, store_doc, gst_buyer)
 
     customer_name = ""
     if cust:
@@ -1906,6 +1936,9 @@ def ingest_shopify_order(
         # omits them so the heuristic fallback is not frozen out by a
         # definitive interstate=False.
         **seller_gst,
+        # What that split read of the buyer, for the re-split when a seller
+        # hold lifts (reseal_seller_gst).
+        **({"gst_buyer": gst_buyer} if route is not None else {}),
         # Multi-location PR 5: which shop ships (and so bills) this order, how
         # it was chosen, the Shopify fulfillment orders it may fulfil, planned
         # moves and every problem (each also tasked). Absent on a historical

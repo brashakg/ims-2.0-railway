@@ -98,7 +98,15 @@ def _build_invoice_gst_split(
         else ""
     )
 
-    supplier_state = _invoice_state_code(store.get("state_code"), store_gstin)
+    # THE shop-state read the online seller check uses too (state_code, then
+    # the state name, then the GSTIN), so an order the check passes splits on
+    # the state it checked.
+    try:
+        from ...services.org_validation import shop_state_code
+
+        supplier_state = shop_state_code(store)
+    except Exception:  # noqa: BLE001 -- never raises, as before
+        supplier_state = ""
     customer_state = _invoice_state_code(place_of_supply) or _customer_state_code(customer)
 
     # Inter-state only when BOTH states are known and differ. Missing customer

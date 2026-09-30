@@ -96,9 +96,10 @@ interface OrderRow {
    *  problem — the chip/confirm wording must not send staff after a
    *  prescription. */
   stock_hold: boolean;
-  /** Held on its seller (GSTIN) check — released by Re-map, which re-reads
-   *  Shopify's routing and re-claims / re-bills at the shop that ships it. */
-  seller_hold: boolean;
+  /** Held on its seller (GSTIN) check or a failed fulfillment-order move —
+   *  released by Re-map, which re-reads Shopify's routing and re-claims (and,
+   *  for a seller hold, re-bills) at the shop that ships it. */
+  remap_hold: boolean;
   rx_hold_cleared: boolean;
   rx_hold_reasons: string[];
 }
@@ -142,7 +143,7 @@ function toRow(o: Record<string, any>): OrderRow {
     rx_hold: isHeld,
     rx_pending: !!o.rx_pending,
     stock_hold: isHeld && (!!o.stock_hold_reason || legacyStockReason),
-    seller_hold: !!o.seller_hold,
+    remap_hold: !!o.remap_hold,
     rx_hold_cleared: !!o.rx_hold_cleared,
     rx_hold_reasons: reasons,
   };
@@ -823,15 +824,15 @@ export default function OnlineOrdersPage() {
                     })()}
                   </div>
                   <div className="flex items-center gap-2">
-                    {(order.map_status === 'FAILED' || order.seller_hold) && canAct && order.shopify_order_id && (
+                    {(order.map_status === 'FAILED' || order.remap_hold) && canAct && order.shopify_order_id && (
                       <button
                         type="button"
                         onClick={() => handleRemap(order)}
                         disabled={isRemapping}
                         className="btn-outline inline-flex items-center gap-1.5 text-xs disabled:opacity-60"
                         title={
-                          order.seller_hold
-                            ? "Re-read Shopify's routing and re-claim / re-bill at the shop that ships it"
+                          order.remap_hold
+                            ? "Re-read Shopify's routing and re-claim at the shop that ships it"
                             : 'Re-run ingestion for this Shopify order'
                         }
                       >

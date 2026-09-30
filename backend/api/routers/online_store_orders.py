@@ -213,11 +213,12 @@ def _slim_list_row(doc: Dict[str, Any]) -> Dict[str, Any]:
     # A doc in the orders collection IS in the books -- say so explicitly rather
     # than making the frontend infer it from the presence of an id.
     doc.setdefault("map_status", "MAPPED")
-    # Held on its seller (GSTIN) check: the screen offers Re-map, which
-    # re-routes it (online_fulfillment_route.reroute_held_order).
-    from ..services.online_fulfillment_route import seller_held
+    # Held on its seller (GSTIN) check or a failed fulfillment-order move: the
+    # screen offers Re-map, which re-routes it
+    # (online_fulfillment_route.reroute_held_order).
+    from ..services.online_fulfillment_route import reroutable
 
-    doc["seller_hold"] = seller_held(doc)
+    doc["remap_hold"] = reroutable(doc)
     return doc
 
 
@@ -621,9 +622,9 @@ async def remap_online_order(
         # A legacy topicless row was admitted by the loader ONLY because it is
         # order-shaped (line_items, no parent order_id) -> replay as a create,
         # through the routing door like the webhook (multi-location PR 5).
-        # An order already booked and HELD on its seller check is re-routed
-        # (re-read Shopify, re-claim, re-bill at the shop that ships it) --
-        # the door that hold's text points at.
+        # An order already booked and HELD on its seller check or a failed
+        # move is re-routed (re-read Shopify, re-claim at the shop that ships
+        # it, re-bill a seller hold) -- the door those holds' text points at.
         result = await map_routed_order(
             payload, db, webhook_id=webhook_id, topic=topic or "orders/create", reroute=True
         )
@@ -767,8 +768,28 @@ async def clear_rx_hold(
         update["rx_hold_cleared_note"] = note
     if prescription_id:
         update["rx_hold_cleared_prescription_id"] = prescription_id
+    unset: Dict[str, str] = {}
+    if "SELLER" in released:
+        # The booking split the GST from the shop doc the seller check refused:
+        # re-split it against the shop as fixed, the ONE re-split Re-map runs
+        # too, so the invoice, GSTR-1/3B and Tally file one tax head.
+        from ..dependencies import get_store_repository
+        from ..services.shopify_ingest import reseal_seller_gst
+
+        try:
+            store_doc = get_store_repository().find_by_id(order.get("store_id"))
+        except Exception:  # noqa: BLE001 -- unreadable: not provably fixed
+            store_doc = None
+        if not store_doc:
+            raise HTTPException(
+                status_code=503, detail="Could not read the order's shop to re-split its GST"
+            )
+        gst_set, unset = reseal_seller_gst(order, store_doc)
+        update.update(gst_set)
     try:
-        coll.update_one({"order_id": order_id}, {"$set": update})
+        coll.update_one(
+            {"order_id": order_id}, {"$set": update, **({"$unset": unset} if unset else {})}
+        )
     except Exception:  # noqa: BLE001 - surface the failure, don't fake success
         raise HTTPException(
             status_code=503, detail="Could not update the order (database error)"
