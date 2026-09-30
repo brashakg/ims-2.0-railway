@@ -381,7 +381,10 @@ def _sample_variants(db) -> Optional[List[Dict[str, Any]]]:
 
     A product IMS stopped selling (is_active False: the Delete button's soft
     delete, the retire hook) is still written -- the rule lists it at 0 at
-    every shop -- so it is still COMPARED, and flagged ``retired``. It has
+    every shop -- so it is still COMPARED, and flagged ``retired`` exactly
+    when the rule's own reader (online_stock_writeback._sku_to_pid) says it
+    is inactive: one answer, so a stale spine row can never put a SKU the
+    writer still sells on the take-down line. It has
     left the online catalogue only once its own listing's take-down REACHED
     Shopify (online_catalog._delisted_live: DELISTED by a LIVE delist, the
     writer's own "off Shopify" rule). A failed or DARK take-down leaves the
@@ -396,22 +399,26 @@ def _sample_variants(db) -> Optional[List[Dict[str, Any]]]:
         return None
     try:
         from .online_catalog import _delisted_live, _products_by_key, inventory_items_for_skus
+        from .online_stock_writeback import _sku_to_pid
         from .shopify_push import is_variant_of
 
-        retired: Dict[str, bool] = {}
-        for d in coll.find({"sku": {"$nin": [None, ""]}}, {"_id": 0, "sku": 1, "is_active": 1}):
-            sku = str(d.get("sku") or "").strip()
-            if sku:
-                # First row per SKU, as the rule's own lookup (_sku_to_pid).
-                retired.setdefault(sku, d.get("is_active") is False)
-        twins = _products_by_key(db, [s for s, off in retired.items() if off], strict=True)
+        spine = [str(d.get("sku") or "").strip()
+                 for d in coll.find({"sku": {"$nin": [None, ""]}}, {"_id": 0, "sku": 1})]
+        spine = [s for s in dict.fromkeys(spine) if s]
+        # "Retired" is the rule's own answer (the reader that makes it list
+        # 0), never a second loop over the spine that could disagree with it.
+        resolved = _sku_to_pid(db, spine)
+        if resolved is None:
+            return None
+        retired = resolved[1]
+        twins = _products_by_key(db, sorted(retired), strict=True)
         drafted = {s for s, t in twins.items() if not is_variant_of(t) and _delisted_live(t.get("ecom") or {})}
-        skus = [s for s in retired if s not in drafted]
+        skus = [s for s in spine if s not in drafted]
         items = inventory_items_for_skus(db, skus)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[STOCK_PARITY] variant sample failed: %s", exc)
         return None
-    return [{"sku": s, "inventory_item_id": items[s], "retired": retired[s]} for s in skus if s in items]
+    return [{"sku": s, "inventory_item_id": items[s], "retired": s in retired} for s in skus if s in items]
 
 
 def _requested_cost(body: Any) -> Optional[int]:

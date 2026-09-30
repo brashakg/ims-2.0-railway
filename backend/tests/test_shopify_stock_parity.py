@@ -1779,3 +1779,37 @@ def test_parity_and_the_rule_read_the_block_through_one_reader(monkeypatch):
     out = _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 5, LOC_B: 0}, INV_2: {}})))
     assert [(d["store_id"], d["ims"], d["shopify"]) for d in out["drift"]] == [("BV-A", 0, 5)]
     assert _tasks(db)[0]["payload"]["lines"] == {"SKU-1": "blocked"}
+
+
+# ---------------------------------------------------------------------------
+# Round 13
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("twin", [False, True])
+@pytest.mark.parametrize("stale", [
+    {"sku": "SKU-1 ", "product_id": "p0", "is_active": False},  # a padded old row
+    {"sku": "SKU-1", "is_active": False},  # a row with no product_id
+])
+def test_parity_takes_retired_from_the_rules_own_reader(stale, twin):
+    """Round 13, the panel's probe. A stale spine row for SKU-1 -- padded, or
+    with no product_id -- is stored AHEAD of the live one (p1, active). The
+    rule (_sku_to_pid: the first row WITH a product_id, looked up exactly)
+    reads SKU-1 as ACTIVE and sends BV-A its shelf 3; Shopify lists 9. So
+    this is drift on the Send to website line -- never 'Deleted or
+    deactivated in IMS' asking an ADMIN to take a selling product off the
+    website, and (`twin`: its listing carries the DELISTED/LIVE mark the
+    Take off website door writes) never dropped from the comparison while
+    the writer still writes it. Give parity its own first-row retired loop
+    back -> the retired line (or nothing compared) -> fails."""
+    db = _db({"SKU-1": {"BV-A": 3, "BV-B": 0}})
+    db.get_collection("products").docs.insert(0, dict(stale))
+    if twin:
+        db.seed("catalog_products", [{"id": "c1", "sku": "SKU-1", "ecom": {
+            "shopify_product_id": "gid://shopify/Product/1", "online_state": "DELISTED", "delist_mode": "LIVE"}}])
+    out = _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 9, LOC_B: 0}, INV_2: {}})))
+    assert [(d["store_id"], d["ims"], d["shopify"]) for d in out["drift"]] == [("BV-A", 3, 9)]
+    (task,) = _tasks(db)
+    assert task["payload"]["lines"] == {"SKU-1": "send"}
+    assert "Top: SKU-1 (IMS 3 vs Shopify 9)" in task["description"]
+    assert "Deleted or deactivated" not in task["description"]
