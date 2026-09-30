@@ -17,8 +17,10 @@ from ._shared import (
     get_grn_repository,
     get_purchase_order_repository,
     is_online_store,
+    logger,
     require_roles,
     router,
+    timedelta,
     uuid,
 )
 from .models import GRNCreate, GRN_SUBTYPE_DC
@@ -29,6 +31,64 @@ from .numbering import (
 )
 from .grn import _duplicate_grn_detail, _enrich_grn_names, _find_duplicate_standard_grn
 from ...services.purchase_numbering import po_label
+
+
+# The placeholder a receipt carries between its insert and its number.
+_PLACEHOLDER_RE = "^PENDING/"
+# A live request numbers its own row milliseconds after the insert; a row
+# still on the placeholder after this long lost its worker.
+_STRANDED_AFTER = timedelta(minutes=1)
+
+
+def _number_stranded_receipts(grn_repo) -> None:
+    """Number every receipt whose worker died between its insert and its
+    number (a killed worker, a deploy mid-request), so no row keeps
+    PENDING/<grn_id> for good (audit F28). Runs at the start of every receipt
+    create, so a retry of the stranded receipt heals it before the duplicate
+    guard names it. Fail-soft: what it cannot do now, the next create does.
+
+    ponytail: a request stalled longer than _STRANDED_AFTER between its insert
+    and its number gets numbered here AND then by itself, spending one serial;
+    a claim on the live path too would close that, if it is ever seen."""
+    coll = getattr(grn_repo, "collection", None)
+    if coll is None:
+        return
+    now = datetime.now()
+    stale = now - _STRANDED_AFTER
+    try:
+        rows = list(
+            coll.find(
+                {"grn_number": {"$regex": _PLACEHOLDER_RE}, "created_at": {"$lt": stale}},
+                {"_id": 0, "grn_id": 1, "store_id": 1},
+            ).limit(20)
+        )
+        for row in rows:
+            # Claim before minting: two creates at once must not both number
+            # it (the loser would spend a serial). A claim older than
+            # _STRANDED_AFTER belonged to a worker that died too; take it over.
+            claim = str(uuid.uuid4())
+            won = coll.update_one(
+                {
+                    "grn_id": row["grn_id"],
+                    "grn_number": {"$regex": _PLACEHOLDER_RE},
+                    "$or": [
+                        {"numbering_claimed_at": {"$exists": False}},
+                        {"numbering_claimed_at": {"$lt": stale}},
+                    ],
+                },
+                {"$set": {"numbering_claim": claim, "numbering_claimed_at": now}},
+            )
+            if not getattr(won, "modified_count", 0):
+                continue
+            coll.update_one(
+                {"grn_id": row["grn_id"], "numbering_claim": claim},
+                {
+                    "$set": {"grn_number": generate_grn_number(row.get("store_id"))},
+                    "$unset": {"numbering_claim": "", "numbering_claimed_at": ""},
+                },
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[VENDOR] stranded receipt numbering skipped: %s", exc)
 
 
 @router.post("/grn", status_code=201)
@@ -51,6 +111,8 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
     """
     grn_repo = get_grn_repository()
     po_repo = get_purchase_order_repository()
+    if grn_repo is not None:
+        _number_stranded_receipts(grn_repo)
 
     grn_id = str(uuid.uuid4())
     store_id = current_user.get("active_store_id")
@@ -449,7 +511,9 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
     # guard has passed AND the unique indexes accepted the insert. Two
     # identical receipts that both passed the duplicate check race to the
     # index, and the loser is refused above before it takes a number (audit
-    # F28: the loser used to burn one, leaving a gap in a GST series).
+    # F28: the loser used to burn one, leaving a gap in a GST series). A worker
+    # that dies between the insert and this write leaves the row on its
+    # placeholder; _number_stranded_receipts numbers it on the next create.
     grn_number = generate_grn_number(store_id)
     if grn_repo is not None and not grn_repo.update(grn_id, {"grn_number": grn_number}):
         # Never leave a receipt carrying the placeholder. ponytail: the number

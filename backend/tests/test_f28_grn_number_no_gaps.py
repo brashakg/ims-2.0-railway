@@ -215,3 +215,62 @@ def test_two_identical_receipts_at_once_leave_no_gap(monkeypatch):
     monkeypatch.setattr(v, "_find_duplicate_standard_grn", real_check)  # race over
     nxt = _create(_body(store, invoice_no="JOT/26-27/0466"))
     assert nxt["grn_number"].endswith("/0002")  # 0001, 0002: no gap
+
+
+# ---------------------------------------------------------------------------
+# Verifier round 3: a worker that dies between the insert and the number.
+# ---------------------------------------------------------------------------
+
+from datetime import datetime, timedelta  # noqa: E402
+
+import mongomock  # noqa: E402
+
+from api.routers.vendors.grn_create import _number_stranded_receipts  # noqa: E402
+from database.repositories.vendor_repository import GRNRepository  # noqa: E402
+
+
+def _stranded(db, grn_id, minutes_ago, **extra):
+    db.grns.insert_one({
+        "grn_id": grn_id, "grn_number": f"PENDING/{grn_id}", "store_id": "BV-TEST-01",
+        "status": "PENDING", "grn_subtype": "STANDARD",
+        "created_at": datetime.now() - timedelta(minutes=minutes_ago), **extra,
+    })
+
+
+def test_a_receipt_stranded_on_its_placeholder_is_numbered_by_the_next_create(monkeypatch):
+    """The worker was killed between the insert and the number: the row kept
+    PENDING/<grn_id> for good. The next receipt created numbers it first (it
+    came first), then takes its own. A row inserted a moment ago belongs to
+    a request still in flight and is left to it."""
+    db = mongomock.MongoClient().db
+    store = _wire(monkeypatch, GRNRepository(db.grns))
+    minted = _counting_minter(monkeypatch)
+    _stranded(db, "G-DEAD", minutes_ago=5)
+    _stranded(db, "G-LIVE", minutes_ago=0)
+
+    res = _create(_body(store))
+
+    dead = db.grns.find_one({"grn_id": "G-DEAD"})
+    assert dead["grn_number"] == "RCPT/BV-TEST-01/26-27/0001"
+    assert "numbering_claim" not in dead and "numbering_claimed_at" not in dead
+    assert res["grn_number"] == "RCPT/BV-TEST-01/26-27/0002"
+    assert db.grns.find_one({"grn_id": "G-LIVE"})["grn_number"] == "PENDING/G-LIVE"
+    assert len(minted) == 2  # no serial spent
+
+
+def test_a_stranded_receipt_is_numbered_once_even_by_two_creates(monkeypatch):
+    """Another create holds a fresh claim on the row: this one leaves it (two
+    numberings would spend a serial). A claim as old as the row is a dead
+    worker's, and is taken over."""
+    db = mongomock.MongoClient().db
+    minted = _counting_minter(monkeypatch)
+    now = datetime.now()
+    _stranded(db, "G-HELD", 5, numbering_claim="other", numbering_claimed_at=now)
+    _stranded(db, "G-ORPHAN", 5, numbering_claim="dead", numbering_claimed_at=now - timedelta(minutes=5))
+
+    _number_stranded_receipts(GRNRepository(db.grns))
+    _number_stranded_receipts(GRNRepository(db.grns))  # a second pass finds nothing left
+
+    assert db.grns.find_one({"grn_id": "G-HELD"})["grn_number"] == "PENDING/G-HELD"
+    assert db.grns.find_one({"grn_id": "G-ORPHAN"})["grn_number"] == "RCPT/BV-TEST-01/26-27/0001"
+    assert len(minted) == 1
