@@ -18,24 +18,13 @@ from ._shared import (
     router,
     uuid,
 )
-from ...services.cost_mask import can_see_cost
+from ...services.cost_mask import VENDOR_NAME_KEYS, can_see_cost, mask_vendor
 from .models import VendorCreate, VendorUpdate
 
 
 # ============================================================================
 # VENDOR ENDPOINTS
 # ============================================================================
-
-# F60: the vendor list stays open because the workshop job, vendor returns and
-# the buy desk pick a vendor BY NAME. Anyone outside the purchase roles gets only
-# these keys -- never GSTIN, contacts, bank details or terms.
-_VENDOR_NAME_FIELDS = (
-    "vendor_id",
-    "vendor_code",
-    "legal_name",
-    "trade_name",
-    "is_active",
-)
 
 
 # Both "" and "/" — the app uses redirect_slashes=False, so bare + slashed
@@ -60,24 +49,21 @@ async def list_vendors(
     if is_active is not None:
         filter_dict["is_active"] = is_active
 
-    # Who sees supplier identity is the one purchase-mask rule (services/
-    # cost_mask) -- the same one that hides it on vendor returns / debit notes.
-    names_only = not can_see_cost(current_user, "purchase")
-
+    # F60: the list stays open because the workshop job, vendor returns and the
+    # buy desk pick a vendor BY NAME. Who sees more of a supplier, and what a
+    # vendor by name is, is the one purchase-mask rule (services/cost_mask) --
+    # the same one that hides it on vendor returns / debit notes.
     if search:
         # A names-only caller searches only the keys it is shown. Matching the
         # hidden gstin made ?search an oracle: "does the GSTIN start with X?"
         # walked one character at a time recovered the whole number.
-        if names_only:
-            vendors = vendor_repo.search_vendors(search, fields=_VENDOR_NAME_FIELDS)
-        else:
+        if can_see_cost(current_user, "purchase"):
             vendors = vendor_repo.search_vendors(search)
+        else:
+            vendors = vendor_repo.search_vendors(search, fields=VENDOR_NAME_KEYS)
     else:
         vendors = vendor_repo.find_many(filter_dict, skip=skip, limit=limit)
-    vendors = vendors or []
-
-    if names_only:
-        vendors = [{k: v[k] for k in _VENDOR_NAME_FIELDS if k in v} for v in vendors]
+    vendors = [mask_vendor(v, current_user) for v in vendors or []]
 
     return {"vendors": vendors, "total": len(vendors)}
 

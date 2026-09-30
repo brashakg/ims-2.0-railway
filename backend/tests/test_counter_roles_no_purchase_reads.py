@@ -43,6 +43,7 @@ from fastapi import HTTPException  # noqa: E402
 
 from api.routers import vendors as vendors_mod  # noqa: E402
 from api.routers.vendors._shared import _AP_ROLES, _VENDOR_ROLES  # noqa: E402
+from api.services.cost_mask import VENDOR_NAME_KEYS, mask_vendor  # noqa: E402
 from api.services import rbac_policy as rbac  # noqa: E402
 
 COUNTER_ROLES = (
@@ -203,6 +204,36 @@ def test_vendor_list_names_only_outside_purchase_roles(
     # vendor_id; dropping it would empty them behind a green suite).
     assert rows and all(set(r) == _NAME_KEYS for r in rows), rows
     assert rows[0]["legal_name"] == "Acme Optics Pvt Ltd"
+    # ...and it is cost_mask's vendor by name, not a list the route keeps.
+    assert rows[0] == mask_vendor(dict(_FULL_VENDOR), {"roles": [role]})
+
+
+def test_one_vendor_name_projection():
+    """The vendor list and the debit note's vendor block are one projection
+    (cost_mask.VENDOR_NAME_KEYS): the vendors router keeps no vendor-name key
+    list of its own, and the list handler asks cost_mask for the vendor."""
+    import ast
+    import inspect
+
+    from api.routers.vendors import master
+
+    tree = ast.parse(inspect.getsource(master))
+    own = [
+        n.lineno
+        for n in ast.walk(tree)
+        if isinstance(n, (ast.Tuple, ast.List, ast.Set))
+        and {"legal_name", "trade_name"}
+        <= {c.value for c in n.elts if isinstance(c, ast.Constant)}
+    ]
+    assert not own, own
+    handler = ast.parse(inspect.getsource(master.list_vendors))
+    called = {
+        getattr(n.func, "id", getattr(n.func, "attr", None))
+        for n in ast.walk(handler)
+        if isinstance(n, ast.Call)
+    }
+    assert "mask_vendor" in called
+    assert _NAME_KEYS <= set(VENDOR_NAME_KEYS)
 
 
 @pytest.mark.parametrize("role", _VENDOR_ROLES + ("SUPERADMIN",))

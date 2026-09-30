@@ -15,8 +15,8 @@ Role policy (DECISIONS sec 9, owner rulings 2026-09-28 / D7 / 2026-09-29):
     this set.
   * What was paid and to whom (context="purchase"): PURCHASE_ROLES. A vendor
     return / RTV debit note shows anyone else the item, quantity and reason
-    only, and the vendor list (routers/vendors/master.py) names only -- all
-    three ask can_see_cost(user, "purchase").
+    only, and a vendor shows only VENDOR_NAME_KEYS (the vendor list, a debit
+    note's vendor block) -- all of it asks can_see_cost(user, "purchase").
   * Operational aggregates (default context: analytics, P&L) -- cost + margin
     stay with SUPERADMIN / ADMIN / ACCOUNTANT.
   * Supplier payments (context="payables": bills, payments, balances, per
@@ -117,6 +117,22 @@ def _pick(doc, keys) -> Dict:
     return {k: doc[k] for k in keys if k in doc} if isinstance(doc, dict) else {}
 
 
+# The vendor by name: all anyone outside the purchase roles sees of a supplier
+# -- on the vendor list (the workshop job, vendor returns and the buy desk pick
+# one by name, and search only these keys) and on a debit note's vendor block.
+# Never its GSTIN, contacts, address, bank details or terms (D7).
+VENDOR_NAME_KEYS = (
+    "vendor_id", "vendor_code", "legal_name", "trade_name", "name", "is_active",
+)
+
+
+def mask_vendor(doc: Dict, user: dict) -> Dict:
+    """A vendor by name only, unless the caller is a purchase role."""
+    if not isinstance(doc, dict) or can_see_cost(user, "purchase"):
+        return doc
+    return _pick(doc, VENDOR_NAME_KEYS)
+
+
 # What a vendor return / RTV debit note shows outside the purchase roles: the
 # item, quantity and reason (owner ruling 2026-09-29). Allow-lists, so a money
 # field added later stays hidden until someone lists it here.
@@ -153,6 +169,6 @@ def mask_debit_note(doc: Dict, user: dict) -> Dict:
     if not isinstance(doc, dict) or can_see_cost(user, "purchase"):
         return doc
     out = _pick(doc, _DEBIT_NOTE_KEYS)
-    out["vendor"] = _pick(doc.get("vendor"), ("vendor_id", "name"))
+    out["vendor"] = _pick(doc.get("vendor"), VENDOR_NAME_KEYS)
     out["lines"] = [_pick(ln, _DEBIT_NOTE_LINE_KEYS) for ln in doc.get("lines") or []]
     return out
