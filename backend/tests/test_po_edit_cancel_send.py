@@ -651,6 +651,90 @@ def test_edit_refused_when_the_order_was_sent_meanwhile(monkeypatch):
     assert not doc.get("history")
 
 
+class _ProductRepo:
+    def __init__(self, prods):
+        self.prods = copy.deepcopy(prods)
+
+    def find_by_id(self, pid):
+        doc = self.prods.get(pid)
+        return copy.deepcopy(doc) if doc else None
+
+    def update(self, pid, fields):
+        self.prods[pid].update(copy.deepcopy(fields))
+        return True
+
+
+def _rate_777_body():
+    return _edit_body(
+        [{"product_id": "P1", "product_name": "Carrera CA8895", "sku": "P1",
+          "quantity": 2, "unit_price": 777, "gst_rate": 5}]
+    )
+
+
+def _cost_rows(audit):
+    return [r for r in audit.rows if r["action"] == "purchase.cost_from_po_rate"]
+
+
+def test_a_refused_edit_changes_no_product_cost(monkeypatch):
+    """Verifier probe: a PUT set rate 777 on an uncosted product while a
+    colleague sent the draft. The edit got 409 and the order went out
+    unchanged -- yet P1 came out costed 777 (PO_RATE) with no audit row: a cost
+    that feeds margin and valuation, changed by an edit that never happened."""
+    def send(repo):  # what send_po writes
+        repo.update("PO1", {"status": "SENT", "sent_by": "mgr_other"})
+
+    repo = _wire_racing(monkeypatch, _po(), send)
+    products = _ProductRepo({"P1": {"product_id": "P1"}})
+    monkeypatch.setattr(v, "get_product_repository", lambda: products)
+    audit = v.get_audit_repository()
+
+    with pytest.raises(HTTPException) as e:
+        _run(v.update_po("PO1", _rate_777_body(), _user()))
+    assert e.value.status_code == 409
+    assert repo.race is None, "the send never landed in the window"
+    assert products.prods["P1"] == {"product_id": "P1"}
+    assert audit.rows == []
+
+
+def test_an_edit_that_fills_a_cost_audits_it(monkeypatch):
+    """The saved edit does fill the missing cost -- and says so, once."""
+    repo, audit = _wire(monkeypatch, _po())
+    products = _ProductRepo({"P1": {"product_id": "P1"}})
+    monkeypatch.setattr(v, "get_product_repository", lambda: products)
+
+    _run(v.update_po("PO1", _rate_777_body(), _user()))
+
+    assert products.prods["P1"]["cost_price"] == 777
+    assert products.prods["P1"]["cost_source"] == "PO_RATE"
+    rows = _cost_rows(audit)
+    assert len(rows) == 1
+    assert rows[0]["user_id"] == "mgr_dhn2"
+    assert rows[0]["detail"]["products"] == [{"product_id": "P1", "cost_price": 777.0}]
+
+
+def test_a_refused_order_creates_no_typed_in_product(monkeypatch):
+    """The catalogue gate refuses an unknown product id BEFORE a typed-in line
+    is turned into a product: a refused edit leaves no provisional product."""
+    _wire(monkeypatch, _po())
+    monkeypatch.setattr(v, "get_product_repository", lambda: _ProductRepo({}))
+    monkeypatch.setattr(v, "_po_catalog_gate_on", lambda: True)
+    made = []
+    monkeypatch.setattr(
+        v._pm, "create_via_door", lambda payload, **kw: made.append(payload) or {}
+    )
+    body = _edit_body(
+        [
+            {"new_product": {"brand": "Vogue", "model": "VO5286", "mrp": 5000},
+             "quantity": 1, "unit_price": 2000},
+            {"product_id": "GHOST", "product_name": "x", "quantity": 1, "unit_price": 1},
+        ]
+    )
+    with pytest.raises(HTTPException) as e:
+        _run(v.update_po("PO1", body, _user()))
+    assert e.value.status_code == 422
+    assert made == []
+
+
 def test_two_line_cancels_at_once_never_lose_one(monkeypatch):
     def colleague_cancels_p1(repo):  # a finished line cancel, by someone else
         items = copy.deepcopy(repo.collection.docs[0]["items"])

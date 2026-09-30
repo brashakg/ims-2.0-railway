@@ -334,19 +334,54 @@ def price_po_lines(items, vendor, delivery_store_id, current_user):
     """ONE path from the lines a person typed to the lines a PO stores.
 
     Both doors that take typed lines -- create (POST) and the draft edit (PUT)
-    -- call this, so an edited order is priced, gated and costed exactly as a
-    new one: typed-in new products are materialised through the product door,
-    the catalogue gate runs, GST is built per line (build_po_gst), and the rate
-    fills a missing product cost. Mutates `items` (a typed-in line gets its new
-    product_id). Returns (build_po_gst result, cost_filled list).
+    -- call this, so an edited order is priced and gated exactly as a new one:
+    the catalogue gate runs, typed-in new products are materialised through the
+    product door, and GST is built per line (build_po_gst). Mutates `items` (a
+    typed-in line gets its new product_id). Returns (build_po_gst result, the
+    product docs read) -- hand both to fill_cost_from_rate AFTER the order is
+    written; nothing here changes an existing product.
     """
+    product_repo = get_product_repository()
+
+    # Hub Phase 2: every PO line must reference a REAL catalogued product on the
+    # `products` spine. This rejects a fabricated / placeholder id (e.g. the UI's
+    # old `new-<timestamp>` id) at PO creation, so a PO can never carry a line
+    # that GRN would later mint as ghost stock. Gated behind pm.po_catalog_gate
+    # (DARK by default) so the existing free-text Create-PO form keeps working
+    # until the Buy Desk picker ships. Fail-soft when no product repo. Checked
+    # BEFORE any typed-in product is created, so a refused order never leaves
+    # one behind; a typed-in line gets a real id from the door below.
+    if product_repo is not None and _po_catalog_gate_on():
+        unknown = [
+            it.product_id
+            for it in items
+            if it.new_product is None and product_repo.find_by_id(it.product_id) is None
+        ]
+        if unknown:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": (
+                        "One or more PO lines reference an unknown product. "
+                        "Catalog the product first, then add it to the PO."
+                    ),
+                    "code": "UNKNOWN_PRODUCT",
+                    "product_ids": unknown,
+                },
+            )
+
     # Ruling 13 -- BUY FIRST, CATALOGUE LATER. Any line that carried typed-in
     # identity instead of a product_id becomes a REAL row on the products spine
     # here, through the ONE product door, born provisional: inactive, no selling
     # price, catalog_status DRAFT. That keeps product_id the single join key for
     # receiving, the stock mint, the invoice and the 3-way match, instead of
     # forking identity into a second placeholder system.
-    product_repo = get_product_repository()
+    # ponytail: a typed-in product is created before the order is written --
+    # the stored line must carry its id. A write refused after this (a
+    # colleague's send in the same instant) leaves that product as an inactive,
+    # stockless provisional draft, and retrying the edit reuses it (the 409
+    # branch below), never a twin. Pre-minting the id through the door would
+    # remove even that.
     for it in items:
         if it.new_product is None:
             continue
@@ -398,33 +433,6 @@ def price_po_lines(items, vendor, delivery_store_id, current_user):
         it.sku = created.get("sku")
         it.new_product = None
 
-    # Hub Phase 2: every PO line must reference a REAL catalogued product on the
-    # `products` spine. This rejects a fabricated / placeholder id (e.g. the UI's
-    # old `new-<timestamp>` id) at PO creation, so a PO can never carry a line
-    # that GRN would later mint as ghost stock. Gated behind pm.po_catalog_gate
-    # (DARK by default) so the existing free-text Create-PO form keeps working
-    # until the Buy Desk picker ships. Fail-soft when no product repo. A line
-    # that arrived as a typed-in new product has just been given a real id
-    # above, so it passes this gate like any other.
-    if product_repo is not None and _po_catalog_gate_on():
-        unknown = [
-            it.product_id
-            for it in items
-            if product_repo.find_by_id(it.product_id) is None
-        ]
-        if unknown:
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "message": (
-                        "One or more PO lines reference an unknown product. "
-                        "Catalog the product first, then add it to the PO."
-                    ),
-                    "code": "UNKNOWN_PRODUCT",
-                    "product_ids": unknown,
-                },
-            )
-
     # Who supplies whom decides CGST+SGST vs IGST (owner: "GST should be
     # calculated according to interstate or intrastate as per GST norms").
     # Read the delivery store -- with 3 entities over 4 GSTINs in 2 states,
@@ -433,7 +441,7 @@ def price_po_lines(items, vendor, delivery_store_id, current_user):
 
     # Per-line GST + place-of-supply split: ONE shared computation, the same
     # one both automatic PO doors call (see build_po_gst). Products are fetched
-    # ONCE here and reused for the cost promote below.
+    # ONCE here and handed back for the cost fill after the write.
     products = {}
     if product_repo is not None:
         for it in items:
@@ -449,11 +457,22 @@ def price_po_lines(items, vendor, delivery_store_id, current_user):
         store_doc,
     )
 
-    # Owner ruling 2026-08-26: the rate typed on the PO IS the cost, so raising
-    # the PO finishes the cataloguing. Done on CREATE, not on send: the buyer
-    # has agreed the price the moment the line is saved, a draft PO may never be
-    # sent, and the next of 40 lines should already see the product as costed.
-    # Never overwrites an existing cost.
+    return computed, products
+
+
+def fill_cost_from_rate(po_id, po_number, items, products, current_user) -> list:
+    """Owner ruling 2026-08-26: the rate typed on the PO IS the cost, so saving
+    the PO finishes the cataloguing. Done when the lines are SAVED, not on send:
+    the buyer has agreed the price the moment the line is saved, a draft PO may
+    never be sent, and the next of 40 lines should already see the product as
+    costed. Never overwrites an existing cost.
+
+    Call it only AFTER the order write succeeded: an order or edit that was
+    refused must leave every product's cost as it was. Every cost it writes is
+    audited here -- cost feeds margin and valuation, so "who set this cost and
+    from where" must be answerable. Fail-soft: an audit failure never undoes
+    the PO write. Returns [{product_id, cost_price}] for each cost written."""
+    product_repo = get_product_repository()
     cost_filled = []
     for item in items:
         prod = products.get(item.product_id)
@@ -476,15 +495,8 @@ def price_po_lines(items, vendor, delivery_store_id, current_user):
                 "cost_source": _PO_PROVISIONAL_COST_SOURCE,
             }
 
-    return computed, cost_filled
-
-
-def audit_cost_filled(po_id, po_number, cost_filled, current_user) -> None:
-    """Audit the cost figures a PO wrote onto the product spine -- cost feeds
-    margin and valuation, so "who set this cost and from where" must be
-    answerable. Fail-soft: an audit failure never undoes the PO write."""
     if not cost_filled:
-        return
+        return cost_filled
     try:
         audit = get_audit_repository()
         if audit is not None:
@@ -499,6 +511,7 @@ def audit_cost_filled(po_id, po_number, cost_filled, current_user) -> None:
             )
     except Exception:  # noqa: BLE001
         pass
+    return cost_filled
 
 
 # Owner ruling 2026-09-28: the CATALOGUE MANAGER raises a DRAFT from the Buy
@@ -545,7 +558,7 @@ async def create_po(
         if vendor is None:
             raise HTTPException(status_code=404, detail="Vendor not found")
 
-    computed, cost_filled = price_po_lines(
+    computed, products = price_po_lines(
         po.items,
         vendor if vendor_repo is not None else None,
         po.delivery_store_id,
@@ -586,7 +599,9 @@ async def create_po(
             }
         )
 
-    audit_cost_filled(po_id, po_number, cost_filled, current_user)
+    cost_filled = fill_cost_from_rate(
+        po_id, po_number, po.items, products, current_user
+    )
 
     return {
         "po_id": po_id,

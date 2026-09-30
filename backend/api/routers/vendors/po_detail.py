@@ -29,7 +29,7 @@ from .numbering import (
     compute_po_receipt_state,
     po_line_status,
 )
-from .purchase_orders import audit_cost_filled, price_po_lines
+from .purchase_orders import fill_cost_from_rate, price_po_lines
 
 
 def _stamp_event_actors(events: list) -> None:
@@ -645,7 +645,7 @@ async def update_po(
     notes = body.notes or None
 
     old_items = po.get("items") or []
-    computed, cost_filled = price_po_lines(
+    computed, products = price_po_lines(
         body.items, vendor, po.get("delivery_store_id"), current_user
     )
     new_items = computed["items"]
@@ -687,7 +687,8 @@ async def update_po(
         before={"items": old_items, "total_amount": po.get("total_amount")},
         after={"items": new_items, "total_amount": computed["total"]},
     )
-    audit_cost_filled(po_id, po.get("po_number"), cost_filled, current_user)
+    # Only now that the edit is saved: a refused edit changes no product cost.
+    fill_cost_from_rate(po_id, po.get("po_number"), body.items, products, current_user)
     return po_repo.find_by_id(po_id)
 
 
