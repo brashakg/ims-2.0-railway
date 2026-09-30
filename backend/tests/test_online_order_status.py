@@ -1396,6 +1396,35 @@ def test_goods_back_restocks_the_held_unit_of_a_line_the_confirm_partly_restocke
     assert (line.get("returned_qty"), line.get("restocked_refunds")) == (2, {str(rid): 2})
 
 
+def test_goods_back_restocks_the_held_unit_beside_a_unit_the_refund_never_covered(swept):
+    """A qty-3 line; the refund covers two units (one held, one restocked by
+    the confirm), the third was never refunded. Goods back may put back only
+    the refund's units less what its restock already did (its own share):
+    counted from the line's units still out, it asked for two, found no room
+    under the refund's mark and refused every press -- the held unit
+    stranded SOLD."""
+    oid, rid = 60199, 700399
+    doc = _book(swept, oid, line_items=[{**_frame_order(oid)["line_items"][0], "quantity": 3}])
+    _claim_unit(swept, doc)
+    swept["stock_repo"].units.extend({**swept["stock_repo"].units[0], "stock_id": sid}
+                                     for sid in ("stk-2", "stk-3"))
+    _set(swept, oid, status="DELIVERED")
+    r = _same_line_twice(rid, oid)
+    r["refund_line_items"][0]["restock_type"] = "no_restock"
+    shopify_refund.handle_shopify_refund(swept["db"], r, webhook_id=None, topic="refunds/create")
+    row = swept["review"].find_one({"shopify_refund_id": str(rid)})
+    assert [(line["return_qty"], line["restock"]) for line in row["proposed_restock"]] == [
+        (1, False), (1, True)]
+    _confirm(row)
+    assert sorted(s for _, s in _units(swept)) == ["AVAILABLE", "SOLD", "SOLD"]
+
+    got = _goods_back(swept["review"].find_one({"review_id": row["review_id"]}))["result"]
+    assert got["status"] == "restocked" and len(got["restock_stock_ids"]) == 1
+    assert sorted(s for _, s in _units(swept)) == ["AVAILABLE", "AVAILABLE", "SOLD"]
+    line = _doc(swept, oid)["items"][0]
+    assert (line.get("returned_qty"), line.get("restocked_refunds")) == (2, {str(rid): 2})
+
+
 def test_the_retry_restocks_the_unit_a_partly_landed_confirm_left_sold(swept, monkeypatch):
     """One qty-2 "return" line; the confirm put back one unit (restock not
     applied). The retry saw the line's mark, restocked nothing and answered
