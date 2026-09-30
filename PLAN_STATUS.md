@@ -1,5 +1,7 @@
 # IMS 2.0 — live plan status
 
+Updated **2026-09-29**. Eight more merged 2026-09-27/28 (section 4r): Wave 6 items A1, A3, A4, A6 and the clinical and workshop router packages (**#1150, #1151, #1155-#1158**), multi-location **PR 3 of 6 (#1154)**, and this file (#1149). The procurement audit (catalogue → purchase order → goods receipt → purchase invoice → stock, walked as each role on an isolated copy of the database) is **DELIVERED**: 118 confirmed findings, 3 of them blockers; the owner answered every question it raised (three multiple-choice rounds, 2026-09-28/29). Its fixes are **IN BUILD, none merged**: purchase-order edit/cancel/send, counter-role access to purchase data, stock-side bugs with real unit labels for the TSC TE244, unit barcodes without hyphens and the approved till stock badge. Also in build: multi-location PRs 4 and 5, the online order status rules, and the #1141 follow-ups.
+
 Updated **2026-09-27**. **#1141 MERGED** — the per-store website stock writer (multi-location PR 2 of 6): each shop's own quantity goes to its own Shopify location through one rule and one writer, after 13+ rounds of adversarial review and a clean final recheck (section 4p). **#1148 MERGED** — the backend's Railway sleep setting is now OFF (owner ruling 2026-09-27; the app never actually slept) and the keepalive service it needed is removed. Wave 6 of the modularization work is in build; nothing of it is merged yet (section 4q).
 
 Updated **2026-09-07**. **THE CATALOGUE WAS RESET TO EMPTY ON 2026-09-07 (section 4o).** On the owner's ruling every product was deleted: 43 listings removed outright from Shopify and every product, twin, variant, stock unit and product-image record removed from IMS. bettervision.in serves no products; IMS holds none. Orders (934), customers, stores, entities, users and the audit trail are untouched, and the historical GST invoices are intact because every order line carries its own snapshot of name, SKU, price and tax. The owner re-adds the catalogue fresh through IMS, which makes IMS the only source from the first product on. Every product count, product name and "live on the site" statement written below is history, not current state. All the sync code shipped on 2026-09-06 stands and applies to whatever is added next.
@@ -324,18 +326,33 @@ Also ruled 2026-09-07: the accountant **confirmed the GST rates as applied** (5%
 | **#1147** | Moved that config into `ops/keepalive/`; backend deploys healthy again. |
 | **#1148** | Removed the keepalive service: measured on 2026-09-27, the backend never slept (it always holds database connections, which Railway counts as activity), and the owner turned sleep off. |
 
-## 4q. Wave 6 of the modularization work — IN BUILD, nothing merged
+## 4q. Wave 6 of the modularization work — IN BUILD, part merged (section 4r)
 
 What the five page-split waves left, measured 2026-09-27 (owner page "Wave Six"). Owner rulings the same day: the finance dashboard's cash-flow and budgets become links to the existing standalone pages (one door); the customers list KEEPS its in-place panel; the Payroll module's Run is the one payroll door and the older HR generator is deleted; the classic goods-receipt screen retires once Receive Goods covers a delivery challan without an invoice.
 
 | Item | Status |
 |---|---|
-| A3 purchase-invoices screen split into files · A4 add-product rules moved to one package | **WIP** |
-| A6 delete dead endpoints (HR payroll generator, fake-success transfer stubs, duplicate routes) | **WIP** |
-| A1 expenses page → nine addressed sections · A2 finance dashboard → addressed sections · A10 QC queue gets its own address | **WIP** (queued) |
+| A3 purchase-invoices screen split into files · A4 add-product rules moved to one package | **MERGED #1150 · #1151** |
+| A6 delete dead endpoints (HR payroll generator, fake-success transfer stubs, duplicate routes) | **MERGED #1155** |
+| A1 expenses page → nine addressed sections | **MERGED #1156** |
+| Clinical and workshop routers become packages | **MERGED #1157 · #1158** |
+| A2 finance dashboard → addressed sections · A10 QC queue gets its own address | **WIP** |
 | A9 products router + product service become packages | **WIP** (queued) |
-| A8 GST/money rule convergence · A11 retire the classic goods-receipt screen | **TODO** — waits for the procurement audit report |
-| A7 one timestamp rule for the backend | **BLOCKED** — owner picks IST wall-clock or UTC |
+| A8 GST/money rule convergence · A11 retire the classic goods-receipt screen | **TODO** — the audit report is in; queued behind its fixes |
+| A7 one timestamp rule for the backend | **TODO** — DECIDED 2026-09-28: save every time with its time zone, show it in IST |
+
+## 4r. Merged 2026-09-27 .. 2026-09-28 (all squash-merged to main)
+
+| PR | What it does |
+|---|---|
+| **#1149** | This file: #1141 and #1148 recorded. |
+| **#1150** | Wave 6 A3: the 1,765-line purchase-invoices screen becomes a folder of files. Pure move; the screen is unchanged. |
+| **#1151** | Wave 6 A4: the add-product rules (1,580 lines) move into one package. Pure move. |
+| **#1154** | Multi-location PR 3 of 6: deletes the leftover second copies of the website stock rule and writer, so #1141's writer is the only one. |
+| **#1155** | Wave 6 A6 (owner ruling 2026-09-27): deletes the old HR payroll generator (Payroll's Run is the one door), the inventory transfer stubs that reported success without doing anything, a duplicate optometrist-stats route, a shadowed audit-log summary and an unused product API. |
+| **#1156** | Wave 6 A1: the expenses page becomes nine sections, each with its own address and its own role list. |
+| **#1157** | Wave 6: the 3,158-line clinical router becomes a package. Byte-identical API. |
+| **#1158** | Wave 6: the 3,528-line workshop router becomes a package. Byte-identical API. |
 
 ## 4r. Website photos pressed twice — PR #1152 DRAFT, not merged
 
