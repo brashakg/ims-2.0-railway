@@ -216,7 +216,10 @@ def test_edit_draft_changes_qty_cost_and_lines(monkeypatch):
     assert out["po_id"] == "PO1" and out["subtotal"] == 6850
 
 
-@pytest.mark.parametrize("status", ["SENT", "PARTIALLY_RECEIVED", "RECEIVED", "CANCELLED"])
+@pytest.mark.parametrize(
+    # ACKNOWLEDGED: the server counts it as gone to the vendor (on order).
+    "status", ["SENT", "ACKNOWLEDGED", "PARTIALLY_RECEIVED", "RECEIVED", "CANCELLED"]
+)
 def test_edit_refused_once_not_a_draft(monkeypatch, status):
     repo, audit = _wire(monkeypatch, _po(status=status))
     body = _edit_body(
@@ -259,9 +262,11 @@ def test_cancel_draft_or_sent_records_reason_person_and_time(monkeypatch, status
     assert audit.rows[-1]["after"]["reason"] == "qty typo"
 
 
+@pytest.mark.parametrize("status", ["DRAFT", "SENT"])
 @pytest.mark.parametrize("reason", ["", "   ", "x"])
-def test_cancel_needs_a_real_reason(monkeypatch, reason):
-    repo, audit = _wire(monkeypatch, _po(status="SENT"))
+def test_cancel_needs_a_real_reason(monkeypatch, status, reason):
+    """Owner ruling: a Draft OR a Sent order is cancelled WITH A REASON."""
+    repo, audit = _wire(monkeypatch, _po(status=status))
     with pytest.raises(HTTPException) as e:
         _run(v.cancel_po("PO1", reason, _user()))
     assert e.value.status_code == 400
@@ -350,7 +355,11 @@ def test_line_cancel_on_sent_order(monkeypatch):
     ev = doc["history"][-1]
     assert ev["kind"] == "line_cancelled" and ev["actor"] == "mgr_dhn2"
     assert "Ray-Ban RB2140" in ev["detail"] and "vendor discontinued" in ev["detail"]
-    assert audit.rows[-1]["action"] == "purchase_order.cancel_line"
+    # The audit row says who and why, like the whole-order cancel's.
+    row = audit.rows[-1]
+    assert row["action"] == "purchase_order.cancel_line"
+    assert row["user_id"] == "mgr_dhn2"
+    assert row["after"]["reason"] == "vendor discontinued"
 
 
 def test_cancelled_line_is_no_longer_due_at_receiving(monkeypatch):
