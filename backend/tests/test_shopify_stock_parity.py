@@ -1535,8 +1535,9 @@ def _press_take_down(monkeypatch, db, twin_id):
     return _run(osp.take_down_product(twin_id, current_user={"user_id": "u1", "roles": ["ADMIN"]}))["result"]
 
 
+@pytest.mark.parametrize("blocked", [False, True])
 @pytest.mark.parametrize("how", ["take_down_failed", "take_down_dark"])
-def test_the_take_off_website_press_closes_the_retired_line_it_asks_for(monkeypatch, how):
+def test_the_take_off_website_press_closes_the_retired_line_it_asks_for(monkeypatch, how, blocked):
     """Round 10, the panel's probe. SKU-2 is retired; its automatic take-down
     FAILED (or ran DARK), so Shopify still lists 3 at LOC_A and night 1 files
     BV-A's task on the retired line: 'press Take off website'. The ADMIN
@@ -1544,16 +1545,25 @@ def test_the_take_off_website_press_closes_the_retired_line_it_asks_for(monkeypa
     -- off the website -- so SKU-2 has left the online catalogue and the
     task CLOSES. Drop the door's stamp_take_down (the press writes only
     status DRAFT / taken_down_at, which parity never reads) -> refreshed,
-    OPEN for ever -> fails."""
+    OPEN for ever -> fails. Round 13: SKU-2 ALSO SUPERADMIN-blocked
+    (`blocked`) -- retired wins: it is on the retired line, whose press
+    closes it, never 'no IMS button clears this' / 'lift the block' (lifting
+    it leaves a retired SKU at 0, still drifting). Let blocked win over
+    retired -> the blocked line -> fails."""
     db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 0, "BV-B": 0}})
     db.get_collection("products").update_one({"sku": "SKU-2"}, {"$set": {"is_active": False}})
     db.seed("catalog_products", [_twin(
         {"online_state": "DELIST_FAILED", "delist_mode": "LIVE"} if how == "take_down_failed"
         else {"online_state": "DELISTED", "delist_mode": "SIMULATED"}
     )])
+    if blocked:
+        db.seed("ecom_collections", [{"collection_id": "C-BAN", "collection_type": "CUSTOM",
+                                      "online_sync_blocked": True, "products": [{"sku": "SKU-2"}]}])
     shop = {INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 3, LOC_B: 0}}
     _run(sp.run_parity_tick(db, graphql=_shopify(shop)))
-    assert "press Take off website" in _tasks(db)[0]["description"]
+    (task,) = _tasks(db)
+    assert "press Take off website" in task["description"] and "no IMS button" not in task["description"]
+    assert task["payload"]["lines"] == {"SKU-2": "retired"}
     res = _press_take_down(monkeypatch, db, "c2")
     assert (res["ok"], res["mode"], res["action"]) == (True, "LIVE", "delist")
     out = _run(sp.run_parity_tick(db, graphql=_shopify(shop)))

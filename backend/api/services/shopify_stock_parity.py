@@ -613,6 +613,9 @@ def sync_drift_task(
     their listing is not proven off Shopify -- the rule lists 0, and their
     line asks for the take-down (a size: its product's Send to website, which
     re-sends every size's number) or 0 in Shopify admin, never the shelf.
+    A SKU both retired and blocked is on the retired line: the take-down
+    press stamps the mark that closes it, while lifting the block leaves a
+    retired SKU at 0, still drifting.
 
       * drift, or an active task still owed a SKU
                           -> refresh every ACTIVE task's description + payload,
@@ -669,8 +672,10 @@ def sync_drift_task(
                 unsure = {d.get("sku") for d in rows} - set(lines) - retired
             else:
                 blocked, unsure = set(blocked), set()
-            banned = [d for d in rows if d.get("sku") in blocked]
-            off = [d for d in rows if d.get("sku") in retired - blocked]
+            # Retired wins: Take off website (or 0 in Shopify admin) closes a
+            # retired SKU whatever the block says; lifting the block does not.
+            banned = [d for d in rows if d.get("sku") in blocked - retired]
+            off = [d for d in rows if d.get("sku") in retired]
             unread = [d for d in rows if d.get("sku") in unsure]
             fixable = [d for d in rows if d.get("sku") not in blocked | retired | unsure]
             parts = []
