@@ -1971,3 +1971,21 @@ def test_a_parcels_create_after_its_update_at_one_clock_keeps_its_awb(swept):
     agent = nexus_module.NexusAgent(db=swept["db"])
     asyncio.run(agent._handle_shiprocket_webhook({"awb": "AWB-X", "current_status": "DELIVERED"}))
     assert _doc(swept, oid)["status"] == "DELIVERED"
+
+
+def test_a_fulfilled_body_older_than_the_parcels_cancel_ships_nothing(swept):
+    """The only parcel went out at 01:03 (its webhook was missed) and was
+    cancelled at 01:05. A delayed orders/fulfilled body stamped 01:03:30 (the
+    parcel still out) states no SHIP fact: it would move the order to SHIPPED
+    with no parcel out, and the counter cancel door then refuses it."""
+    oid = 60206
+    _book(swept, oid)
+    before = _doc(swept, oid)["status"]
+    shopify_fulfillment.reconcile_fulfillment(swept["db"], _fulfilment(
+        oid, 1, status="cancelled", created_at=_T("01:03"), updated_at=_T("01:05")),
+        topic="fulfillments/update")
+    assert _doc(swept, oid)["status"] == before
+    body = _pulled(oid, fulfillment_status="fulfilled", updated_at="2026-09-06T01:03:30Z",
+                   fulfillments=[_fulfilment(oid, 1, created_at=_T("01:03"), updated_at=_T("01:03"))])
+    swept["real_map"](body, swept["db"], webhook_id="ful-late", topic="orders/fulfilled")
+    assert _doc(swept, oid)["status"] == before
