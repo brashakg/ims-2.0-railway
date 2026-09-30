@@ -8,13 +8,18 @@ answered 'No catalogued products match.' The search matched only the START of
 brand / model / SKU per token (anchored ^), so only 'carrera' and a full SKU
 ever worked.
 
-The box calls GET /products?search=, which is ProductRepository.search_products
--- the ONE product search (POS uses the same one). These pins run that real
-query against a real Mongo engine (CI's service container; mongomock on a dev
-box with no Mongo). Expected sets are written out BY HAND.
+The box calls GET /products?search=...&match=anywhere, which is
+ProductRepository.search_products(anywhere=True). The SAME endpoint without
+`match` is what the till, goods receipt, the command palette, Returns and
+QuickShare call, and for them NOTHING changes (owner rule: ask before touching
+POS): every word still has to START brand / model / SKU / variant / barcode.
+The wide rule would crowd the till -- 'ray' is inside 'Gunmetal Gray' -- so it
+is opt-in, and even there what the till's rule finds comes FIRST, so a result
+limit can never push it off the list.
 
-Kept on purpose: a SKU and a barcode still match from their START, and every
-search the old rule answered still answers (the new rule only adds matches).
+These pins run that real query against a real Mongo engine (CI's service
+container; mongomock on a dev box with no Mongo). Expected sets are written out
+BY HAND.
 
 Run: JWT_SECRET_KEY=test python -m pytest backend/tests/test_product_search_finds_what_is_typed.py -q
 No emoji (Windows cp1252).
@@ -22,6 +27,7 @@ No emoji (Windows cp1252).
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import uuid
@@ -37,8 +43,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from database.repositories.product_repository import ProductRepository  # noqa: E402
 
 
-@pytest.fixture(scope="module")
-def repo():
+def _open_client():
     from pymongo import MongoClient
 
     uri = (
@@ -55,12 +60,28 @@ def repo():
             import mongomock
         except ImportError:
             pytest.skip("no Mongo and no mongomock available")
-            return
         client = mongomock.MongoClient()
+    return client, db_name
+
+
+def _repo_over(docs):
+    client, db_name = _open_client()
     db = client[db_name]
+    db["products"].insert_many(docs)
+    try:
+        yield ProductRepository(db["products"])
+    finally:
+        try:
+            client.drop_database(db_name)
+        except Exception:
+            pass
+
+
+@pytest.fixture(scope="module")
+def repo():
     # Spine-shaped docs: flat brand / model / color (the colour CODE), the
     # colour WORDS under attributes, exactly as product_master writes them.
-    db["products"].insert_many(
+    yield from _repo_over(
         [
             {
                 "_id": "P-CAR",
@@ -101,21 +122,49 @@ def repo():
                 "color": "BLACK",
                 "is_active": True,
             },
+            {
+                # The only colour WORD is on the temples (FRAME optional).
+                "_id": "P-TMP",
+                "product_id": "P-TMP",
+                "sku": "FR-VOG-VO5051-W44",
+                "brand": "Vogue",
+                "model": "VO5051",
+                "color": "W44",
+                "attributes": {"temple_color": "Tortoise"},
+                "is_active": True,
+            },
+            {
+                # A watch: the colour is its dial (WATCH optional), and the
+                # manufacturer's barcode printed on the box is its GTIN.
+                "_id": "P-WAT",
+                "product_id": "P-WAT",
+                "sku": "WT-FAS-3217SL-C2",
+                "brand": "Fastrack",
+                "model": "3217SL",
+                "color": "C2",
+                "attributes": {"dial_color": "Navy Blue", "gtin": "8901234567893"},
+                "is_active": True,
+            },
+            {
+                # A sunglass whose lens tint is the colour word people say.
+                "_id": "P-TNT",
+                "product_id": "P-TNT",
+                "sku": "SG-IDE-IDS2890-C3",
+                "brand": "IDEE",
+                "model": "IDS2890",
+                "color": "C3",
+                "attributes": {"tint": "Brown Gradient"},
+                "is_active": True,
+            },
         ]
     )
-    try:
-        yield ProductRepository(db["products"])
-    finally:
-        try:
-            client.drop_database(db_name)
-        except Exception:
-            pass
 
 
 def _ids(repo, q):
-    docs = repo.search_products(q)
+    """The purchase-order product box: the wide search."""
+    docs = repo.search_products(q, anywhere=True)
     # The list and its total are the SAME query -- they may never drift.
-    assert repo.count_search_products(q) == len(docs), q
+    assert repo.count_search_products(q, anywhere=True) == len(docs), q
     return {d["product_id"] for d in docs}
 
 
@@ -135,6 +184,13 @@ def _ids(repo, q):
         ("black", {"P-CAR", "P-OAK"}),
         ("g-15", {"P-RB"}),
         ("carrera black", {"P-CAR"}),
+        # Every colour word the catalogue stores, not only frame/lens.
+        ("tortoise", {"P-TMP"}),
+        ("blue", {"P-WAT"}),
+        ("gradient", {"P-TNT"}),
+        # The manufacturer's barcode on the box (the GTIN), whole or its start.
+        ("8901234567893", {"P-WAT"}),
+        ("890123", {"P-WAT"}),
     ],
 )
 def test_what_a_buyer_types_finds_the_frame(repo, typed, expected):
@@ -149,10 +205,11 @@ def test_what_a_buyer_types_finds_the_frame(repo, typed, expected):
         ("FR-CAR-CA8895-C1", {"P-CAR"}),
         ("2000000000031", {"P-CAR"}),
         ("oakley OO92", {"P-OAK"}),
-        # Codes stay anchored at their start: the middle of a SKU or a
-        # barcode is not a scan.
+        # Codes stay anchored at their start: the middle of a SKU, a barcode
+        # or a GTIN is not a scan.
         ("0000000031", set()),
         ("8896", set()),
+        ("4567893", set()),
     ],
 )
 def test_codes_still_match_from_their_start(repo, typed, expected):
@@ -167,3 +224,122 @@ def test_new_rule_only_adds_matches(repo):
             d["product_id"] for d in repo.search(q, legacy_fields, {"is_active": True})
         }
         assert _ids(repo, q) >= legacy, q
+
+
+# ---------------------------------------------------------------------------
+# The till is untouched (owner rule: ask before touching POS)
+# ---------------------------------------------------------------------------
+
+LEGACY_FIELDS = ["brand", "model", "sku", "variant", "barcode"]
+
+
+@pytest.mark.parametrize(
+    "q",
+    ["ray", "Ray-Ban", "RB", "carrera CA", "SG-", "oak", "2000", "8895", "black", "blue"],
+)
+def test_the_till_search_is_untouched(repo, q):
+    """No `match`: POS, goods receipt, command palette, Returns, QuickShare.
+    The old rule exactly -- same rows, same order, same total."""
+    legacy = repo.search(q, LEGACY_FIELDS, {"is_active": True})
+    assert repo.search_products(q) == legacy, q
+    assert repo.count_search_products(q) == len(legacy), q
+
+
+def test_the_till_does_not_get_the_wide_matches(repo):
+    assert repo.search_products("8895") == []
+    assert repo.search_products("black") == []
+    assert repo.search_products("8901234567893") == []
+
+
+@pytest.fixture
+def crowded():
+    """30 Vogue frames in 'Gunmetal Gray' stored BEFORE one Ray-Ban: 'ray' is
+    inside 'Gray', so an unranked wide search fills any limit with Vogues."""
+    yield from _repo_over(
+        [
+            {
+                "_id": f"P-VOG-{i:02d}",
+                "product_id": f"P-VOG-{i:02d}",
+                "sku": f"FR-VOG-VO{4000 + i}-GM",
+                "brand": "Vogue",
+                "model": f"VO{4000 + i}",
+                "attributes": {"frame_color": "Gunmetal Gray"},
+                "is_active": True,
+            }
+            for i in range(30)
+        ]
+        + [
+            {
+                "_id": "P-RB",
+                "product_id": "P-RB",
+                "sku": "SG-RAY-RB3025-001",
+                "brand": "Ray-Ban",
+                "model": "RB3025",
+                "is_active": True,
+            }
+        ]
+    )
+
+
+def test_the_till_strip_still_shows_the_ray_ban(crowded):
+    # The POS results strip puts 24 on screen.
+    hits = crowded.search_products("ray", limit=24)
+    assert [d["product_id"] for d in hits] == ["P-RB"]
+
+
+def test_wide_search_puts_what_the_till_finds_first(crowded):
+    page = crowded.search_products("ray", anywhere=True, limit=20)
+    assert page[0]["product_id"] == "P-RB"
+    assert len(page) == 20
+    assert crowded.count_search_products("ray", anywhere=True) == 31
+    # Paging through it returns every match exactly once, the Ray-Ban first.
+    seen = []
+    for skip in range(0, 31, 7):
+        seen += [
+            d["product_id"]
+            for d in crowded.search_products("ray", anywhere=True, skip=skip, limit=7)
+        ]
+    assert seen[0] == "P-RB"
+    assert len(seen) == len(set(seen)) == 31
+
+
+def test_the_endpoint_opts_in_only_with_match_anywhere(repo, monkeypatch):
+    import api.services.cache as cache_mod
+    from api.routers import products as products_mod
+
+    class _NoCache:
+        TTL_MEDIUM = 0
+
+        def get(self, k):
+            return None
+
+        def set(self, *a, **k):
+            pass
+
+    monkeypatch.setattr(cache_mod, "cache", _NoCache())
+    monkeypatch.setattr(products_mod, "get_product_repository", lambda: repo)
+
+    def _list(**kw):
+        params = dict(
+            category=None,
+            brand=None,
+            search=None,
+            tag=None,
+            created_by=None,
+            store_id=None,
+            skip=0,
+            limit=50,
+            is_active=None,
+            photo=None,
+            current_user={
+                "user_id": "u1",
+                "roles": ["STORE_MANAGER"],
+                "active_store_id": "S1",
+            },
+        )
+        params.update(kw)
+        out = asyncio.run(products_mod.list_products(**params))
+        return {p["product_id"] for p in out["products"]}, out["total_count"]
+
+    assert _list(search="8895") == (set(), 0)
+    assert _list(search="8895", match="anywhere") == ({"P-CAR"}, 1)

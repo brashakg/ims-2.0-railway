@@ -219,7 +219,7 @@ describe('PurchaseOrderComposer — cost prefill', () => {
     );
   });
 
-  it('does NOT overwrite a cost the operator already typed', async () => {
+  it('does NOT overwrite a cost the operator already typed (but still says what this vendor was paid)', async () => {
     getLastCostMock.mockResolvedValue({
       costs: { 'prod-a': { unit_price: 3200, po_number: 'PO-1', po_id: 'po-1', date: '2026-06-30T10:00:00' } },
     });
@@ -230,14 +230,11 @@ describe('PurchaseOrderComposer — cost prefill', () => {
     const costInput = screen.getByLabelText(/unit cost for line 1/i) as HTMLInputElement;
     expect(costInput.value).toBe('999');
 
-    // getLastCost should not even be asked about a line that already has a cost;
-    // give any pending effect a tick, then assert the value is untouched and no
-    // caption appeared.
-    await new Promise((r) => setTimeout(r, 50));
+    // The lookup runs for the caption; the typed 999 stays.
+    await waitFor(() =>
+      expect(screen.getByText(/last paid ₹3,200 on 30 Jun 2026/i)).toBeInTheDocument(),
+    );
     expect(costInput.value).toBe('999');
-    expect(screen.queryByText(/last paid/i)).not.toBeInTheDocument();
-    // No product needed a price -> the endpoint was never hit for it.
-    expect(getLastCostMock).not.toHaveBeenCalledWith('v-1', ['prod-a']);
   });
 });
 
@@ -285,6 +282,42 @@ describe('PurchaseOrderComposer — last paid beats the catalogue seed (F22)', (
       productId: 'prod-b', productName: 'B', sku: 'B', costPrice: 5000,
     });
     expect(typed.unitCost).toBe(2950);
+  });
+
+  it('typing in an uncatalogued item drops the cost the form filled for the picked one', async () => {
+    getLastCostMock.mockResolvedValue({
+      costs: { 'prod-a': { unit_price: 3100, po_number: 'PO-2', po_id: 'po-2', date: '2026-09-17T10:00:00' } },
+    });
+    renderComposer({
+      initialLines: undefined,
+      renderProductCell: ({ pickProduct, setNewProduct }) => (
+        <>
+          <button
+            type="button"
+            onClick={() =>
+              pickProduct({ productId: 'prod-a', productName: 'Carrera CA 8895', sku: 'CA8895', costPrice: 3200, gstRate: 5, hsn: '900311' })
+            }
+          >
+            pick
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              setNewProduct({ category: 'FR', brand: 'Vogue', model: 'VO5051', colour: 'W44', size: '52', mrp: 5990 })
+            }
+          >
+            new
+          </button>
+        </>
+      ),
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'pick' }));
+    const costInput = screen.getByLabelText(/unit cost for line 1/i) as HTMLInputElement;
+    await waitFor(() => expect(costInput.value).toBe('3100'));
+
+    fireEvent.click(screen.getByRole('button', { name: 'new' }));
+    expect(costInput.value).toBe('0');
+    expect(screen.queryByText(/last paid/i)).not.toBeInTheDocument();
   });
 
   it('keeps the catalogue cost when this vendor was never paid for it', async () => {

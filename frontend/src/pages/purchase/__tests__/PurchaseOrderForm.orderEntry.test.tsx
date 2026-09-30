@@ -8,6 +8,8 @@
 //   F67  Tapping a prefilled number box left the caret after the value:
 //        Qty 1 + typing 4 = 14 frames. Every number box selects on focus.
 //   F87  Cancel / X threw a half-typed order away without asking.
+//   F21  The product box asks for the WIDE search (model number anywhere,
+//        brand spelt any way, colour words); the till keeps its own rule.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
@@ -69,6 +71,7 @@ const supplier = (id: string, name: string): Supplier => ({
 
 const MUMBAI = supplier('v-mum', 'Mumbai Lens House');
 const RANCHI = supplier('v-rnc', 'Ranchi Optics');
+const KOLKATA = supplier('v-kol', 'Kolkata Frames');
 
 const CARRERA = {
   product_id: 'P-CAR',
@@ -91,7 +94,7 @@ async function settle() {
 async function renderForm(onClose = vi.fn()) {
   render(
     <PurchaseOrderForm
-      suppliers={[MUMBAI, RANCHI]}
+      suppliers={[MUMBAI, RANCHI, KOLKATA]}
       existingPOCount={0}
       onClose={onClose}
       onCreated={() => {}}
@@ -114,8 +117,18 @@ beforeEach(() => {
   getLastCost.mockImplementation(async (vendorId: string) =>
     vendorId === 'v-mum'
       ? { costs: { 'P-CAR': { unit_price: 3100, date: '2026-09-17T10:00:00', po_number: 'PO/BV-DHN-02/26-27/0002' } } }
-      : { costs: {} },
+      : vendorId === 'v-kol'
+        ? { costs: { 'P-CAR': { unit_price: 3000, date: '2026-08-02T10:00:00', po_number: 'PO/BV-DHN-02/26-27/0001' } } }
+        : { costs: {} },
   );
+});
+
+describe('F21 - the product box asks for the wide search', () => {
+  it('sends match=anywhere, so "8895" finds Carrera CA 8895', async () => {
+    await renderForm();
+    await pickCarrera();
+    expect(getProducts).toHaveBeenCalledWith({ search: '8895', match: 'anywhere' });
+  });
 });
 
 describe('F22 - the price last paid to THIS vendor wins over the catalogue cost', () => {
@@ -144,15 +157,70 @@ describe('F22 - the price last paid to THIS vendor wins over the catalogue cost'
     expect(screen.queryByText(/last paid/)).not.toBeInTheDocument();
   });
 
-  it('a cost the manager typed is never replaced', async () => {
+  it('a cost the manager typed is never replaced (the caption still tells what this vendor was paid)', async () => {
     await renderForm();
     await pickCarrera();
     const cost = screen.getByLabelText('Unit cost for line 1') as HTMLInputElement;
     fireEvent.change(cost, { target: { value: '2950' } });
     fireEvent.change(screen.getByLabelText('Vendor'), { target: { value: 'v-mum' } });
-    await new Promise((r) => setTimeout(r, 400));
+    await screen.findByText(/last paid ₹3,100 on 17 Sept? 2026/, undefined, { timeout: 3000 });
     expect(cost.value).toBe('2950');
+  });
+
+  it("switching vendor after typing a cost shows THAT vendor's last price, never the previous one's", async () => {
+    await renderForm();
+    fireEvent.change(screen.getByLabelText('Vendor'), { target: { value: 'v-mum' } });
+    await pickCarrera();
+    const cost = screen.getByLabelText('Unit cost for line 1') as HTMLInputElement;
+    await waitFor(() => expect(cost.value).toBe('3100'));
+    fireEvent.change(cost, { target: { value: '2950' } });
+
+    fireEvent.change(screen.getByLabelText('Vendor'), { target: { value: 'v-kol' } });
+    await screen.findByText(/last paid ₹3,000 on 2 Aug 2026/, undefined, { timeout: 3000 });
+    expect(screen.queryByText(/3,100/)).not.toBeInTheDocument();
+    expect(cost.value).toBe('2950');
+
+    // A vendor never paid for it: no caption at all, not a stale one.
+    fireEvent.change(screen.getByLabelText('Vendor'), { target: { value: 'v-rnc' } });
+    await waitFor(() => expect(getLastCost).toHaveBeenCalledWith('v-rnc', ['P-CAR']));
+    await settle();
     expect(screen.queryByText(/last paid/)).not.toBeInTheDocument();
+    expect(cost.value).toBe('2950');
+  });
+
+  it('the caption still shows when the last order has no date', async () => {
+    getLastCost.mockResolvedValue({ costs: { 'P-CAR': { unit_price: 3100, date: null, po_number: 'PO-2' } } });
+    await renderForm();
+    fireEvent.change(screen.getByLabelText('Vendor'), { target: { value: 'v-mum' } });
+    await pickCarrera();
+    const caption = await screen.findByText(/last paid ₹3,100/, undefined, { timeout: 3000 });
+    expect(caption.textContent).not.toMatch(/ on /);
+  });
+});
+
+describe('F22 - changing the product drops the cost the form filled for the old one', () => {
+  it('"Change product" then "Not in the catalogue?" does not carry 3,100 onto an unpriced item', async () => {
+    await renderForm();
+    fireEvent.change(screen.getByLabelText('Vendor'), { target: { value: 'v-mum' } });
+    await pickCarrera();
+    const cost = screen.getByLabelText('Unit cost for line 1') as HTMLInputElement;
+    await waitFor(() => expect(cost.value).toBe('3100'));
+
+    fireEvent.click(screen.getByTitle('Change product'));
+    expect(cost.value).toBe('0');
+    expect(screen.queryByText(/last paid/)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /Not in the catalogue\?/ }));
+    expect((screen.getByLabelText('Unit cost for line 1') as HTMLInputElement).value).toBe('0');
+  });
+
+  it('a cost the manager typed survives changing the product', async () => {
+    await renderForm();
+    await pickCarrera();
+    const cost = screen.getByLabelText('Unit cost for line 1') as HTMLInputElement;
+    fireEvent.change(cost, { target: { value: '2950' } });
+    fireEvent.click(screen.getByTitle('Change product'));
+    expect(cost.value).toBe('2950');
   });
 });
 
