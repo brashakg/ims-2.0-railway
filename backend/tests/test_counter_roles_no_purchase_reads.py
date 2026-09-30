@@ -675,8 +675,17 @@ _PRODUCT = {
     "landed_cost": 3301.5,
     "landed_cost_paise": 330150,
     "moving_avg_cost": 3173.37,
+    # The legacy name the PO form still falls back to
+    # (routers/vendors/purchase_orders.py), so a legacy product carries it.
+    "purchase_price": 3088.88,
 }
-_PRODUCT_COST_KEYS = {"cost_price", "landed_cost", "landed_cost_paise", "moving_avg_cost"}
+_PRODUCT_COST_KEYS = {
+    "cost_price",
+    "landed_cost",
+    "landed_cost_paise",
+    "moving_avg_cost",
+    "purchase_price",
+}
 # The product master feeds the PO form (buyers) and the product edit form.
 _PRODUCT_COST_ROLES = (
     "ADMIN",
@@ -750,6 +759,7 @@ def test_counter_roles_read_products_without_cost(client, product_repo, role, pa
 def test_buyers_and_catalog_still_read_product_cost(client, product_repo, role, path):
     row = _product_rows(client, role, path)[0]
     assert row["cost_price"] == 3173.37 and row["landed_cost"] == 3301.5
+    assert row["purchase_price"] == 3088.88
 
 
 # ACCOUNTANT and CASHIER share the attribution tier ("staff") the key already
