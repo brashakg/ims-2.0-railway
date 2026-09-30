@@ -449,8 +449,8 @@ def _create_via_canonical_door(
     except Exception:  # noqa: BLE001 - mirror is fail-soft; never block a create
         variant_repo = None
 
-    # Additive door columns. (`sync_to_shopify` is stamped inside the door from
-    # the brand default -- owner D6 -- never from the payload.)
+    # Additive door columns. (No website flag: the brand default decides it
+    # live at push time -- owner D6.)
     extra = _form_extra_fields(product)
 
     try:
@@ -2059,9 +2059,8 @@ async def get_brand_options(
                     "name": name,
                     "subbrands": subs,
                     "tier": tier,
-                    # Default Shopify-sync INTENT for the brand (Settings ->
-                    # Brand Master); the create door stamps sync_to_shopify
-                    # from it when the payload doesn't say explicitly.
+                    # Whether the brand goes to the website (Settings ->
+                    # Brand Master, owner D6); the form's read-only line.
                     "sync_to_shopify_default": _cd.load_brand_sync_default(db, name),
                 }
             )

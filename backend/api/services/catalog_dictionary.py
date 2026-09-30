@@ -193,11 +193,11 @@ def load_brand_sync_default(db, brand_name: str) -> bool:
     """The brand's `sync_to_shopify_default` flag (Settings -> Brand Master).
 
     THE website rule (owner ruling 2026-09-29, D6): the brand default always
-    decides whether a product goes to the website. The create door stamps a
-    new product's `sync_to_shopify` with it, the Shopify push refuses a
-    product whose brand says no, and the Add-product form's read-only line
-    shows it (GET /products/brand-options). FAIL-SOFT: unknown brand / no db /
-    read failure -> False (never sync by accident)."""
+    decides whether a product goes to the website, read LIVE: the Shopify
+    push refuses a product whose brand says no (shopify_push.
+    product_push_refusal) and the Add-product form's read-only line shows it
+    (GET /products/brand-options). Products store no copy of it. FAIL-SOFT:
+    unknown brand / no db / read failure -> False (never sync by accident)."""
     doc = _find_active_brand(db, brand_name)
     if doc is None:
         return False

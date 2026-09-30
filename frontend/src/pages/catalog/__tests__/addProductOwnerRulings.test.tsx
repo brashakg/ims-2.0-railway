@@ -96,6 +96,7 @@ vi.mock('../../../services/api/buyDesk', () => ({
 }));
 
 import { QuickAddPage } from '../QuickAddPage';
+import { DuplicateProductError } from '../../../services/api/products';
 import BuyDeskPage from '../BuyDeskPage';
 import { useSimilarProducts } from '../useSimilarProducts';
 import { NAV_GROUPS } from '../../../components/shell/navConfig';
@@ -266,6 +267,48 @@ describe('F73 - reorder level -1 = not set', () => {
     await user.click(screen.getByRole('button', { name: /Save changes/ }));
     await waitFor(() => expect(updateProduct).toHaveBeenCalledTimes(1));
     expect(savedLevels()).toEqual([]);
+  });
+});
+
+describe('F73 - a typed level is never silently lost', () => {
+  it.each(['2.5', '-3'])('editing: %s is refused, not saved as not set', async (typed) => {
+    const user = userEvent.setup();
+    renderPage('/catalog/add?edit=P-SRC');
+    await screen.findByRole('button', { name: /Save changes/ });
+    await waitFor(() => expect(reorderInput().value).toBe('2'));
+    fill(reorderInput(), typed);
+    await user.click(screen.getByRole('button', { name: /Save changes/ }));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(updateProduct).not.toHaveBeenCalled();
+    expect(reorderInput().value).toBe(typed); // still there to correct
+  });
+
+  it('creating: 2.5 is refused, not saved without a level', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await sunglass(user);
+    fill(reorderInput(), '2.5');
+    await user.click(screen.getByRole('button', { name: /Save product/ }));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(createProduct).not.toHaveBeenCalled();
+  });
+
+  it('the duplicate rescue keeps the typed level', async () => {
+    createProduct.mockRejectedValueOnce(
+      Object.assign(new DuplicateProductError('duplicate'), {
+        existing: { product_id: 'P-SRC', sku: SOURCE_PRODUCT.sku },
+      }),
+    );
+    const user = userEvent.setup();
+    renderPage();
+    await sunglass(user);
+    fill(reorderInput(), '4');
+    await user.click(screen.getByRole('button', { name: /Save product/ }));
+    await user.click(await screen.findByRole('button', { name: /Add a new colour\/size of this model/ }));
+    await waitFor(() => expect(getProduct).toHaveBeenCalledWith('P-SRC'));
+    // The rescued product's own level is 2; the operator typed 4.
+    await waitFor(() => expect(screen.getByLabelText(/^Model No/)).toHaveValue('RB4165'));
+    expect(reorderInput().value).toBe('4');
   });
 });
 
