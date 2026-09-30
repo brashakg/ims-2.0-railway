@@ -117,10 +117,12 @@ export function PurchaseLayout() {
       )}
 
       {/* Section nav — real links, one URL per section. overflow-x-auto +
-          shrink-0 keep all six reachable on iPad portrait / phone widths
-          (the row is wider than 768px; it scrolls instead of clipping). */}
+          shrink-0 keep every tab reachable on iPad portrait / phone widths
+          (the row is wider than 768px; it scrolls instead of clipping).
+          gap-6: all seven tabs fit a 1024x768 landscape tablet (measured:
+          923px of 958 at gap-6; gap-8 clipped "This month" by 13px). */}
       <div className="border-b border-gray-200 overflow-x-auto">
-        <nav className="flex gap-4 tablet:gap-8 w-max min-w-full">
+        <nav className="flex gap-4 tablet:gap-6 w-max min-w-full">
           {SECTIONS.filter((s) => !s.roles || hasRole([...s.roles])).map(({ path, label, icon: Icon }) => (
             <NavLink
               key={path}
