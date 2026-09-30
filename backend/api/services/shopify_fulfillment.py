@@ -81,25 +81,28 @@ def awb_filter(awb: str) -> Dict[str, Any]:
     return {"$or": [{f"{PARCEL_AWBS}.awb": awb}, {"awb": awb, PARCEL_AWBS: {"$exists": False}}]}
 
 
-def _write_parcel(orders, oid: Dict[str, Any], key: str, awb: str, clock: Dict[str, Any],
-                  watermark: Any) -> None:
+def _write_parcel(orders, oid: Dict[str, Any], key: str, awb: Optional[str],
+                  clock: Dict[str, Any], watermark: Any) -> None:
     """ONE parcel's entry in PARCEL_AWBS ({"id": key, "awb"}: its live AWB,
     "" once it is cancelled / failed, so the order still gets the list and
-    tracked_awbs never falls back to the order's awb) and its clock, in ONE
-    write that matches only while this fulfilment's stored clock is not newer:
-    a stale reconcile racing a newer one of the same parcel lands before it
-    or not at all. The entry is replaced in place, else appended; another
+    tracked_awbs never falls back to the order's awb; None: a live parcel with
+    no tracking number yet, whose stored AWB stays -- an empty one never
+    clears what an older event wrote, _tracking_fields' rule) and its clock,
+    in ONE write that matches only while this fulfilment's stored clock is
+    not newer: a stale reconcile racing a newer one of the same parcel lands
+    before it or not at all. The entry is replaced in place, else appended; another
     parcel's entry is never written, so two parcels reconciled at once both
     stay."""
     guard = {} if watermark is None else {f"{FULFILLMENT_CLOCKS}.{key}": {"$not": {"$gt": watermark}}}
+    entry = {} if awb is None else {f"{PARCEL_AWBS}.$.awb": awb}
     # Two passes: an append that lost to the same parcel's own append finds
     # its entry (entries are never removed) and replaces it on the second.
     for _ in range(2):
         if orders.update_one({**oid, **guard, f"{PARCEL_AWBS}.id": key},
-                             {"$set": {f"{PARCEL_AWBS}.$.awb": awb, **clock}}).matched_count:
+                             {"$set": {**entry, **clock}}).matched_count:
             return
         if orders.update_one({**oid, **guard, f"{PARCEL_AWBS}.id": {"$ne": key}},
-                             {"$push": {PARCEL_AWBS: {"id": key, "awb": awb}},
+                             {"$push": {PARCEL_AWBS: {"id": key, "awb": awb or ""}},
                               "$set": clock}).matched_count:
             return
 
@@ -275,8 +278,8 @@ def reconcile_fulfillment(
         else:
             if watermark is not None:
                 clock[f"{FULFILLMENT_CLOCKS}.{_clock_key(payload)}"] = watermark
-            _write_parcel(orders, oid, _clock_key(payload), tracking_number if live else "",
-                          clock, watermark)
+            _write_parcel(orders, oid, _clock_key(payload),
+                          (tracking_number or None) if live else "", clock, watermark)
         order_status = res["to"] or current_status
 
         logger.info(

@@ -1950,3 +1950,24 @@ def test_the_counter_refuses_while_the_returns_scan_blips(swept, monkeypatch):
         _counter_return(swept, oid)
     assert refused.value.status_code == 503 and swept["returns"].count_documents({}) == 0
     assert _counter_return(swept, oid)["return_id"]
+
+
+def test_a_parcels_create_after_its_update_at_one_clock_keeps_its_awb(swept):
+    """A parcel's create (no tracking yet) and its update (AWB-X) carry one
+    updated_at second; the update is processed first. The create wrote "" over
+    AWB-X in the parcel list while the order's awb kept AWB-X: the courier
+    legs asked about no AWB and the delivered webhook matched no order, so it
+    stayed SHIPPED. A live parcel's empty tracking number never clears it."""
+    oid = 60205
+    _book(swept, oid)
+    at = _T("01:00")
+    shopify_fulfillment.reconcile_fulfillment(swept["db"], _fulfilment(
+        oid, 1, tracking_number="AWB-X", updated_at=at, created_at=at), topic="fulfillments/update")
+    shopify_fulfillment.reconcile_fulfillment(swept["db"], _fulfilment(
+        oid, 1, tracking_number=None, updated_at=at, created_at=at), topic="fulfillments/create")
+    doc = _doc(swept, oid)
+    assert doc["status"] == "SHIPPED" and shopify_fulfillment.tracked_awbs(doc) == ["AWB-X"]
+
+    agent = nexus_module.NexusAgent(db=swept["db"])
+    asyncio.run(agent._handle_shiprocket_webhook({"awb": "AWB-X", "current_status": "DELIVERED"}))
+    assert _doc(swept, oid)["status"] == "DELIVERED"
