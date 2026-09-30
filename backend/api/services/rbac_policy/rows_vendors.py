@@ -31,7 +31,8 @@ ROWS: List[Dict[str, object]] = [
     },
     # --- /api/v1/vendor-returns ---
     # F60: reads carry unit costs -> the writers plus the Vendor Returns screen
-    # (WORKSHOP_STAFF logs defective pairs). Store-scoped in the handler.
+    # (WORKSHOP_STAFF logs defective pairs and reads them without prices or
+    # supplier identity: services/cost_mask). Store-scoped in the handler.
     {
         "method": "GET",
         "path": "/api/v1/vendor-returns",
