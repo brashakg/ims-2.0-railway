@@ -357,7 +357,10 @@ def _batch_levels(body: Any, chunk: List[str], as_gid: Callable) -> Optional[Dic
     nodes(ids:) positionally, null for an id it has no item for):
     ``{gid: {location_gid: available}}``, ``{gid: None}`` for a null node (the
     item no longer exists in Shopify -- deleted in Shopify admin). An item at
-    more locations than one page is left out (unknown, never a truncated 0).
+    more locations than one page is left out (unknown, never a truncated 0),
+    and so is a node that is not the item asked for (its id is another gid,
+    or none: a stored id of another type answers ``{}``, which would read as
+    "stocked nowhere").
     None for the whole batch unless the answer is a FULL one: a nodes list of
     the chunk's length and no top-level `errors` (a node Shopify failed to
     resolve comes back null too -- never read that as deleted)."""
@@ -369,8 +372,10 @@ def _batch_levels(body: Any, chunk: List[str], as_gid: Callable) -> Optional[Dic
         if node is None:
             out[gid] = None
             continue
-        conn = (node.get("inventoryLevels") if isinstance(node, dict) else None) or {}
-        if not isinstance(node, dict) or (conn.get("pageInfo") or {}).get("hasNextPage"):
+        if not isinstance(node, dict) or as_gid(str(node.get("id") or ""), "InventoryItem") != gid:
+            continue
+        conn = node.get("inventoryLevels") or {}
+        if (conn.get("pageInfo") or {}).get("hasNextPage"):
             continue
         per_location: Dict[str, int] = {}
         for edge in conn.get("edges") or []:

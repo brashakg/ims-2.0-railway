@@ -345,6 +345,20 @@ def test_levels_reader_an_item_past_one_page_of_locations_is_unknown():
     assert out == {INV_1: {LOC_A: 1}}
 
 
+def test_levels_reader_a_node_that_is_not_the_item_asked_for_is_unknown():
+    """Round 8, the panel's probe: a stored shopify_inventory_item_id of
+    another type makes the `... on InventoryItem` fragment match nothing, so
+    Shopify answers `{}` in its place -- no id, no levels. That is not 'stocked
+    nowhere' (0 at every mapped shop, a drift task and 0 on both screens):
+    the item stays ABSENT (unknown), and so does a node carrying another id.
+    Drop the node-id check -> {INV_1: {}, INV_2: {}} -> fails."""
+
+    async def gql(db, query, variables):  # noqa: ARG001
+        return {"data": {"nodes": [{}, {"id": INV_1, "inventoryLevels": {"edges": []}}]}}
+
+    assert _run(sp.shopify_levels_by_item(None, [INV_1, INV_2], graphql=gql)) == {}
+
+
 # ---------------------------------------------------------------------------
 # The tick, end to end on the real rule (StrictDB)
 # ---------------------------------------------------------------------------
