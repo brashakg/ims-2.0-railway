@@ -1145,6 +1145,7 @@ def _post_credit_and_restock(
 _FULFILMENT_CONTEXT_KEYS = (
     "fulfillment_stores",
     "fulfillment_breakdown",
+    "fulfillment_route",
     "channel",
     "interstate",
 )

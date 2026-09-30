@@ -1683,6 +1683,18 @@ def _resolve_restock_store(
     Any candidate that is itself an ONLINE store is skipped at every step.
     """
     db = _get_db()
+    # A routed online order whose route named NO shop (multi-location PR 5:
+    # dark, unread or unmapped with no fallback) claimed nothing: no unit left
+    # any shop, so a restock anywhere -- its billing bucket included, which
+    # may be a physical shop -- mints a phantom that is written back to
+    # Shopify and sold at the till. Loud instead: a human says where the goods are.
+    route = (order or {}).get("fulfillment_route")
+    if isinstance(route, dict) and not route.get("store_id"):
+        return {
+            "store_id": None,
+            "redirected_from": store_id,
+            "reason": _RESTOCK_ROUTE_UNRESOLVED,
+        }
     # A physical shop restocks its own return -- unless its units left from
     # ANOTHER shop (multi-location PR 5: Shopify split the order, and a leg
     # shop -- possibly the only one that claimed anything -- is not the
