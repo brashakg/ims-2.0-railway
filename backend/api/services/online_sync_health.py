@@ -510,7 +510,10 @@ async def live_listed_qty_for_skus(
     Decided 2026-10-01: parity measures whether Shopify holds the writer's
     number at each mapped location, so ``levels`` (parity's full level) is
     what the Online column and the OVER_ALLOCATED verdict read -- a shop's
-    reconcile view and its drift task always agree -- and ``selling`` is
+    reconcile view shows the two numbers its drift task names (the verdicts
+    are different questions: OVER_ALLOCATED is any unit listed past the
+    writer's number; parity drift is either way, past its tolerance where
+    the writer sends more than 0) -- and ``selling`` is
     what the oversell verdict reads (units at a location that cannot sell
     online oversell nothing). Both per location, via
     shopify_stock_parity.unbacked_units; ``qty`` is for display only.

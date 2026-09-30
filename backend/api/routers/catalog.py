@@ -140,7 +140,14 @@ async def online_stock_reconcile(
         the shelf behind it;
       * OVER_ALLOCATED -- a location lists beyond what the writer sends there
         (its safety buffer, the SUPERADMIN online block), sells online or
-        not: exactly what the nightly parity files as drift;
+        not, by even one unit. Same level, same writer's number as the
+        nightly parity, but not its verdict: parity also files a location
+        listing FEWER than the writer sends, and lets a gap within its
+        tolerance pass where the writer sends more than 0 -- so a shop's
+        drift task can sit beside OK (under-listed) and OVER_ALLOCATED beside
+        no task (within tolerance). For a SKU IMS still sells (a retired one
+        is not on this page), one shop's Online and ``recommended`` are the
+        two numbers its drift task names;
       * ``recommended`` -- what the writer sends, summed over the mapped shops
         in view. The buffer is the writer's own (the Shopify integration's
         safety_buffer); this page has no second one;

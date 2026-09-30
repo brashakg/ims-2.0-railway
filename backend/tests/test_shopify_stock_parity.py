@@ -1514,7 +1514,10 @@ def test_a_mapped_location_that_cannot_sell_online_oversells_nothing_and_still_d
     location, sells online or not, so it files BV-B's drift (0 vs 3) -- and
     the screens read that same full level for the Online column and the
     OVER_ALLOCATED verdict: BV-B's own view is 3 listed vs 0 sent,
-    OVER_ALLOCATED, never 0 / OK beside an open task. Drop the non-selling
+    OVER_ALLOCATED, never 0 / OK beside the task that files this same
+    over-listing (the two verdicts still ask different questions: round
+    14's test_a_shops_view_shows_its_tasks_numbers_and_asks_its_own_question).
+    Drop the non-selling
     filter everywhere -> OVERSELL_RISK -> fails; drop the mapped location's
     full level too (the round-10 filter) -> BV-B reads 0 / OK -> fails."""
     db = _db({"SKU-1": {"BV-A": 1, "BV-B": 0}})
@@ -1979,3 +1982,33 @@ def test_a_retired_size_of_a_blocked_product_is_told_its_press_is_refused(monkey
     res = _run(osp.push_product("c1", current_user={"user_id": "u1", "roles": ["ADMIN"]}))["result"]
     assert (res["ok"], res["reason"]) == (False, "online_sync_blocked")
 
+
+@pytest.mark.parametrize("case", ["own_location_unticked", "under_listed", "within_tolerance"])
+def test_a_shops_view_shows_its_tasks_numbers_and_asks_its_own_question(monkeypatch, case):
+    """Round 14, the panel's counter-inputs to 'the view and the task always
+    agree'. One shop's view reads parity's full level and the writer's
+    number -- the two numbers its task names -- but its verdict is its own:
+    OVER_ALLOCATED is any unit listed past the writer's number, while parity
+    drift is either way, past its tolerance where the writer sends more
+    than 0. (a) BV-B's own location unticked, writer 4, LOC_B 0: task 4 vs
+    0, view 0 / 4 / OK. (b) writer 5, LOC_A 1: task 5 vs 1, view 1 / 5 /
+    OK. (c) buffer 2, shelf 7 (writer 5), LOC_A 6: no task, view 6 / 5 /
+    OVER_ALLOCATED. Pins the narrowed claims (catalog.online_stock_reconcile,
+    online_sync_health.live_listed_qty_for_skus): change either comparator
+    without them -> fails."""
+    if case == "own_location_unticked":
+        db = _db({"SKU-1": {"BV-A": 0, "BV-B": 4}})
+        _locations(db, unticked=(LOC_B,))
+        sid, per_loc, row_want, task_want = "BV-B", {LOC_A: 0, LOC_B: 0}, (0, 4, 0, "OK"), [("BV-B", 4, 0)]
+    elif case == "under_listed":
+        db = _db({"SKU-1": {"BV-A": 5, "BV-B": 0}})
+        sid, per_loc, row_want, task_want = "BV-A", {LOC_A: 1, LOC_B: 0}, (1, 5, 0, "OK"), [("BV-A", 5, 1)]
+    else:
+        monkeypatch.setenv("ONLINE_STOCK_SAFETY_BUFFER", "2")
+        db = _db({"SKU-1": {"BV-A": 7, "BV-B": 0}})
+        sid, per_loc, row_want, task_want = "BV-A", {LOC_A: 6, LOC_B: 0}, (6, 5, 1, "OVER_ALLOCATED"), []
+    levels = {INV_1: per_loc, INV_2: {}}
+    row = _reconcile(monkeypatch, db, levels, sid)["SKU-1"]
+    assert _cols(row, "online", "recommended", "delta", "status") == row_want
+    parity = _run(sp.run_parity_tick(db, graphql=_shopify(levels)))
+    assert [(d["store_id"], d["ims"], d["shopify"]) for d in parity["drift"]] == task_want
