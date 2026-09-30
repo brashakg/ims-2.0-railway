@@ -34,7 +34,7 @@ const printMock = vi.hoisted(() => vi.fn());
 const roles = vi.hoisted(() => ({ current: ['STORE_MANAGER'] as string[] }));
 
 vi.mock('../../../services/api/inventory', () => ({ inventoryApi: apiMock }));
-vi.mock('../../../services/qz', () => ({ printHtmlFallback: printMock }));
+vi.mock('../../../services/printWindow', () => ({ printHtmlFallback: printMock }));
 vi.mock('../../../context/ToastContext', () => ({ useToast: () => toastMock }));
 vi.mock('../../../context/AuthContext', () => ({
   useAuth: () => ({

@@ -13,7 +13,7 @@
 // whole number of dots and a scanner reads it.
 
 import JsBarcode from 'jsbarcode';
-import { printHtmlFallback, type PrintResult } from '../../services/qz';
+import { printHtmlFallback, type PrintResult } from '../../services/printWindow';
 
 export const LABEL_WIDTH_MM = 100;
 export const LABEL_HEIGHT_MM = 15;

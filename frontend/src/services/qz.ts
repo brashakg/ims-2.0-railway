@@ -15,6 +15,9 @@
 // for consumers (TS2614) in this codebase.
 
 import apiClient, { getSecureApiUrl } from './api/client';
+import { printHtmlFallback, type PrintResult } from './printWindow';
+
+export type { PrintResult };
 
 // qz-tray has no bundled types; treat the default export as `any`. The dep is
 // declared in package.json and installed by the parent (no node_modules here).
@@ -22,13 +25,6 @@ import apiClient, { getSecureApiUrl } from './api/client';
 let qzModule: any = null;
 let connectPromise: Promise<boolean> | null = null;
 let securityConfigured = false;
-
-/** Result of an attempted print: did it go via QZ, or fall back to HTML? */
-export type PrintMethod = 'qz' | 'html' | 'failed';
-export interface PrintResult {
-  method: PrintMethod;
-  message: string;
-}
 
 /** Lazy-load the qz-tray module (only when first needed). */
 async function loadQz(): Promise<any | null> {
@@ -136,41 +132,6 @@ export async function connectQz(): Promise<boolean> {
   const result = await connectPromise;
   if (!result) connectPromise = null;
   return result;
-}
-
-export function printHtmlFallback(htmlDocument: string): PrintResult {
-  try {
-    const win = window.open('', '_blank', 'width=420,height=620');
-    if (!win) {
-      return {
-        method: 'failed',
-        message: 'Could not open a print window (popup blocked?).',
-      };
-    }
-    win.document.open();
-    win.document.write(htmlDocument);
-    win.document.close();
-    // Give the barcode SVG a tick to render before invoking print. onload OR
-    // the timer (some browsers never fire onload for document.write) -- but
-    // only ONE of them: both firing opened the dialog twice, and a second
-    // dialog on a label printer is a second set of labels.
-    let asked = false;
-    const printOnce = () => {
-      if (asked) return;
-      asked = true;
-      try {
-        win.focus();
-        win.print();
-      } catch {
-        /* ignore */
-      }
-    };
-    win.onload = printOnce;
-    setTimeout(printOnce, 400);
-    return { method: 'html', message: 'Opened label in a print window.' };
-  } catch {
-    return { method: 'failed', message: 'HTML print failed.' };
-  }
 }
 
 /**

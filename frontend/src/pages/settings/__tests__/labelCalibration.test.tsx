@@ -22,7 +22,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 
 const printMock = vi.hoisted(() => vi.fn(() => ({ method: 'html', message: '' })));
-vi.mock('../../../services/qz', () => ({ printHtmlFallback: printMock }));
+vi.mock('../../../services/printWindow', () => ({ printHtmlFallback: printMock }));
 vi.mock('../../../context/ToastContext', () => ({
   useToast: () => ({ success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() }),
 }));
