@@ -651,10 +651,15 @@ def _scope_store(store_id, current_user):
 # there without an import cycle. Bodies are unchanged.
 
 
-def _require_finance_admin(current_user: dict) -> None:
-    """Org-wide financials are owner/accountant material."""
+def _is_finance_admin(current_user: dict) -> bool:
+    """Org-wide financials (and supplier payments, per vendor or in total --
+    owner ruling 2026-09-29) are owner/accountant material."""
     roles = current_user.get("roles", []) or []
-    if not any(r in roles for r in ("SUPERADMIN", "ADMIN", "ACCOUNTANT")):
+    return any(r in roles for r in ("SUPERADMIN", "ADMIN", "ACCOUNTANT"))
+
+
+def _require_finance_admin(current_user: dict) -> None:
+    if not _is_finance_admin(current_user):
         raise HTTPException(
             status_code=403, detail="Owner financials require ADMIN / ACCOUNTANT"
         )

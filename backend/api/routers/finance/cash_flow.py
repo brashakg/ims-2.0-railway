@@ -19,6 +19,7 @@ from ._shared import (
     _REAL_ORDER_STATUS_FILTER,
     _REVENUE_EXPR,
     _get_db,
+    _is_finance_admin,
     _order_total,
     _require_finance_admin,
     router,
@@ -113,8 +114,16 @@ async def get_cash_flow(
     # Real cash paid to vendors this period (vendor_payments). AP is org-level,
     # so only fold it in for the org/owner view (no specific store selected) to
     # avoid double-attributing HQ payments to one store.
+    #
+    # Supplier payments, per vendor or in total, are ADMIN + ACCOUNTANT only
+    # (owner ruling 2026-09-29) -- the same gate as /finance/vendor-payments.
+    # Anyone else never has the figure read, so it is in neither the key nor
+    # `outflows` / `net_cash_flow`, which would hand it straight back as
+    #     outflows - expense_outflow - purchase_outflow
+    # (the trap the payroll strip below documents).
+    ap_reader = _is_finance_admin(current_user)
     vendor_payment_outflow = 0.0
-    if not active_store:
+    if ap_reader and not active_store:
         try:
             vp = list(
                 db.get_collection("vendor_payments").aggregate(
@@ -183,8 +192,13 @@ async def get_cash_flow(
         "net_cash_flow": round(total_inflow - total_outflow, 2),
         "expense_outflow": expense_outflow,
         "purchase_outflow": purchase_outflow,
-        "vendor_payment_outflow": vendor_payment_outflow,
     }
+    if ap_reader:
+        body["vendor_payment_outflow"] = vendor_payment_outflow
+    elif not active_store:
+        # The org view's outflows leave supplier payments out for this reader:
+        # a flag, never a figure (as expenses_partially_restricted below).
+        body["vendor_payments_restricted"] = True
     if expenses_partially_restricted:
         # Same flag /pnl sets, and for the same reason: a short total must not
         # read as the truth. A flag, never a figure.

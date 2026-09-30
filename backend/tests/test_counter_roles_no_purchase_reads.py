@@ -1069,3 +1069,56 @@ def test_purchase_recommendations_follow_the_product_cost_rule(
     else:
         assert not _REC_COST_KEYS & (set(rec) | set(body["summary"])), rec
         assert "1111.11" not in resp.text and "4444.44" not in resp.text
+
+
+# ---------------------------------------------------------------------------
+# 16. Cash flow: the supplier-payments TOTAL goes with the per-vendor payments
+# ---------------------------------------------------------------------------
+# Owner ruling 2026-09-29: supplier payments, per vendor and in total, are
+# ADMIN + ACCOUNTANT only. /finance/vendor-payments went to accounts, but
+# /finance/cash-flow still gave store and area managers vendor_payment_outflow
+# (the total paid to vendors this period). The total now answers to the same
+# gate as the per-vendor read, and is left out of `outflows` too -- else
+# outflows - expense_outflow - purchase_outflow hands it straight back.
+from api.routers.finance import cash_flow as cash_flow_mod  # noqa: E402
+from api.routers.finance import receivables as receivables_mod  # noqa: E402
+
+_PAID_TO_VENDORS = 7777.77
+
+
+class _CashDb:
+    def get_collection(self, name):
+        rows = [{"_id": None, "total": _PAID_TO_VENDORS}]
+        return _RecsColl(rows if name == "vendor_payments" else [])
+
+
+def _vendor_payments_admits(monkeypatch, role):
+    monkeypatch.setattr(receivables_mod, "_get_db", lambda: None)
+    try:
+        asyncio.run(receivables_mod.get_vendor_payments(current_user={"roles": [role]}))
+    except HTTPException as exc:
+        assert exc.status_code == 403
+        return False
+    return True
+
+
+@pytest.mark.parametrize("role", rbac.ALL_ROLES)
+def test_cash_flow_supplier_payments_total_answers_to_the_vendor_payments_gate(
+    monkeypatch, role
+):
+    monkeypatch.setattr(cash_flow_mod, "_get_db", lambda: _CashDb())
+    # No store on the token or the query: the org view, where AP is folded in.
+    body = asyncio.run(
+        cash_flow_mod.get_cash_flow(
+            period="month", store_id=None, current_user={"roles": [role]}
+        )
+    )
+    if _vendor_payments_admits(monkeypatch, role):
+        assert role in ("SUPERADMIN", "ADMIN", "ACCOUNTANT"), role
+        assert body["vendor_payment_outflow"] == _PAID_TO_VENDORS
+        assert body["outflows"] == _PAID_TO_VENDORS
+    else:
+        assert "vendor_payment_outflow" not in body, body
+        assert body["outflows"] == 0 and body["net_cash_flow"] == 0, body
+        assert body["vendor_payments_restricted"] is True
+        assert str(_PAID_TO_VENDORS) not in json.dumps(body)

@@ -1415,7 +1415,8 @@ def test_cash_flow_moves_all_three_figures_together(cross_route_db, role):
         body["outflows"]
         - body["expense_outflow"]
         - body["purchase_outflow"]
-        - body["vendor_payment_outflow"]
+        # Absent below ADMIN / ACCOUNTANT (supplier payments, 2026-09-29).
+        - body.get("vendor_payment_outflow", 0)
     )
     assert abs(residue) < 0.005, f"{residue} of payroll left inside `outflows`"
     assert abs(body["net_cash_flow"] - (body["inflows"] - body["outflows"])) < 0.005
