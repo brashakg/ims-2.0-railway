@@ -1841,3 +1841,32 @@ def test_the_shop_filter_is_spelled_as_the_writers_map(monkeypatch):
     for sid in ("BV-A ", "BV-A"):
         row = _reconcile(monkeypatch, db, levels, sid)["SKU-1"]
         assert _cols(row, "in_store", "online", "recommended", "delta", "status") == want, sid
+
+
+@pytest.mark.parametrize("shopify_says", ["userErrors", "raises"])
+def test_a_failed_take_off_website_press_stamps_nothing(monkeypatch, shopify_says):
+    """Round 13, the ok half of the door's guard. An ADMIN presses Take off
+    website, LIVE, on an ACTIVE product and Shopify rejects it (userErrors)
+    or the call raises: nothing is off the website, and nothing was retired
+    -- so the twin carries no take-down mark (the Catalog column would say
+    'IMS retired it but the automatic take-down failed') and the result
+    carries no retire-hook code. Stamp every LIVE press, ok or not ->
+    DELIST_FAILED on the twin -> fails."""
+    from api.routers import online_store_push as osp
+    from api.services.shopify_push import product as push_product_mod
+
+    async def gql(db_, query, variables):  # noqa: ARG001
+        if shopify_says == "raises":
+            raise RuntimeError("shopify down")
+        return {"data": {"productUpdate": {"product": None,
+                                           "userErrors": [{"field": ["id"], "message": "nope"}]}}}
+
+    db = _db({"SKU-2": {"BV-A": 0, "BV-B": 0}})
+    db.seed("catalog_products", [_twin({})])
+    monkeypatch.setattr(push_product_mod, "_live_or_reason", lambda db_: (True, None))
+    monkeypatch.setattr(push_product_mod, "_graphql", gql)
+    monkeypatch.setattr(osp, "_get_db", lambda: db)
+    res = _run(osp.take_down_product("c2", current_user={"user_id": "u1", "roles": ["ADMIN"]}))["result"]
+    assert (res["ok"], res["mode"], res["action"]) == (False, "LIVE", "delist")
+    assert res.get("code") != "DELIST_FAILED"
+    assert "online_state" not in db.get_collection("catalog_products").find_one({"id": "c2"})["ecom"]
