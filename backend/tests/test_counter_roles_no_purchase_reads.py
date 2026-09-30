@@ -305,10 +305,10 @@ def _refused(allowed):
     return [r for r in COUNTER_ROLES + ("CATALOG_MANAGER",) if r not in allowed]
 
 
-def _route_allows(app, template, role):
-    """Every require_roles gate on the GET route lets `role` through."""
+def _route_allows(app, template, role, method="GET"):
+    """Every require_roles gate on the `method` route lets `role` through."""
     for route in app.routes:
-        if getattr(route, "path", None) == template and "GET" in getattr(
+        if getattr(route, "path", None) == template and method in getattr(
             route, "methods", ()
         ):
             try:
@@ -319,7 +319,7 @@ def _route_allows(app, template, role):
                 assert exc.status_code == 403
                 return False
             return True
-    raise AssertionError(f"no GET route {template}")
+    raise AssertionError(f"no {method} route {template}")
 
 
 @pytest.mark.parametrize("concrete,template,allowed", SIBLING_READS)
@@ -768,17 +768,35 @@ def test_grn_detail_is_store_scoped(monkeypatch):
 # A row wider than the code told every role it could write a vendor return
 # (capability 'vendor-returns:write' was AUTHENTICATED while the POST 403d); a
 # row narrower than the code (bank statements) was held only by the middleware.
+# The route's own `_dep` is called for every role: comparing the row with a
+# module constant stayed green when a route was switched onto the READERS
+# tuple, and that gate is the last line once a per-user capability grant lets
+# a request past the middleware.
 @pytest.mark.parametrize(
-    "method,path",
+    "method,path,template",
     [
-        ("POST", "/api/v1/vendor-returns"),
-        ("POST", "/api/v1/vendor-returns/"),
-        ("PATCH", "/api/v1/vendor-returns/VR1/status"),
+        ("POST", "/api/v1/vendor-returns", "/api/v1/vendor-returns"),
+        ("POST", "/api/v1/vendor-returns/", "/api/v1/vendor-returns/"),
+        (
+            "PATCH",
+            "/api/v1/vendor-returns/VR1/status",
+            "/api/v1/vendor-returns/{return_id}/status",
+        ),
+        ("POST", "/api/v1/rtv-debit-notes/issue", "/api/v1/rtv-debit-notes/issue"),
+        (
+            "GET",
+            "/api/v1/rtv-debit-notes/DN-1/tally",
+            "/api/v1/rtv-debit-notes/{debit_note_id}/tally",
+        ),
     ],
 )
-def test_vendor_return_write_rows_equal_the_code_gate(method, path):
+def test_vendor_return_write_rows_equal_the_code_gate(app, method, path, template):
     row = rbac.policy_for(method, path)
-    assert set(row["allowed"]) - {"SUPERADMIN"} == set(vr_router._VENDOR_RETURN_ROLES)
+    assert row["path"] == template
+    assert set(row["allowed"]) - {"SUPERADMIN"} == set(_RETURN_WRITERS)
+    for role in rbac.ALL_ROLES:
+        want = role == "SUPERADMIN" or role in row["allowed"]
+        assert _route_allows(app, template, role, method) is want, role
 
 
 def test_vendor_return_write_capability_is_the_writers():
