@@ -556,3 +556,32 @@ def test_f45_po_number_is_not_prefixed_twice(monkeypatch):
     res = _run(user=_S1_MANAGER)
     detail = next(e["detail"] for e in res["items"] if e["ref"] == "GRN-1")
     assert detail == "GRN GRN-1 against PO/S1/26-27/0001"
+
+
+def test_partly_accepted_receipt_lists_the_units_it_put_on_the_shelf(monkeypatch):
+    """One line held for cataloguing leaves the receipt PARTIALLY_ACCEPTED,
+    but its 17 Carrera units are already on the shelf (grn_accept mints the
+    resolved lines first). Movements listed nothing for them. The held line
+    itself is not stock yet and stays out."""
+    grns = _grns() + [
+        {
+            "grn_id": "G4",
+            "grn_number": "GRN-4",
+            "store_id": "S1",
+            "status": "PARTIALLY_ACCEPTED",
+            "created_at": _NOW - timedelta(days=1),
+            "accepted_at": _NOW - timedelta(days=1),
+            "items": [
+                {"product_id": "P1", "accepted_qty": 17},
+                {"product_id": "P-NEW", "accepted_qty": 1},
+            ],
+            "unresolved_lines": [
+                {"product_id": "P-NEW", "accepted_qty": 1, "reason": "not_catalogued"}
+            ],
+        }
+    ]
+    db = _db(grns=_FakeColl(grns))
+    monkeypatch.setattr(inv, "_get_db", lambda: db)
+    res = _run(user=_S1_MANAGER)
+    g4 = [(e["product_id"], e["qty"]) for e in res["items"] if e["ref"] == "GRN-4"]
+    assert g4 == [("P1", 17)]

@@ -26,7 +26,7 @@ from ...services.purchase_numbering import po_label
 # ============================================================================
 # One reverse-chronological ledger merged from the real event sources that
 # move stock today:
-#   RECEIVED      <- `grns` (status ACCEPTED)          qty positive
+#   RECEIVED      <- `grns` (ACCEPTED / PARTIALLY_ACCEPTED) qty positive
 #   SOLD          <- `orders` (status in _SOLD_STATUSES) qty negative
 #   TRANSFER_OUT  <- `stock_transfers` shipped leg     qty negative (from store)
 #   TRANSFER_IN   <- `stock_transfers` received leg    qty positive (to store)
@@ -62,7 +62,11 @@ def _movement_iso(value) -> str:
 def _collect_received_events(
     db, store_id: Optional[str], cutoff_iso: str, product_id: Optional[str]
 ) -> List[Dict]:
-    """RECEIVED events from ACCEPTED GRNs (qty = accepted units, positive).
+    """RECEIVED events from accepted GRNs (qty = accepted units, positive).
+
+    A PARTIALLY_ACCEPTED receipt has minted its resolved lines already; only
+    the lines held for cataloguing (its `unresolved_lines`) are not on the
+    shelf yet, so only those are left out.
 
     grns.created_at is a BSON datetime: grn_repo.create() overwrites the
     router's ISO string in BaseRepository._add_timestamps. Mongo never compares
@@ -70,7 +74,7 @@ def _collect_received_events(
     receipt at all (audit F45). Both shapes are matched so legacy string rows
     keep showing."""
     flt: Dict = {
-        "status": "ACCEPTED",
+        "status": {"$in": ["ACCEPTED", "PARTIALLY_ACCEPTED"]},
         "$or": [
             {"created_at": {"$gte": cutoff_iso}},
             {"created_at": {"$gte": datetime.fromisoformat(cutoff_iso)}},
@@ -94,6 +98,7 @@ def _collect_received_events(
                 "items": 1,
                 "accepted_at": 1,
                 "created_at": 1,
+                "unresolved_lines": 1,
             },
         )
         .sort("created_at", -1)
@@ -104,9 +109,14 @@ def _collect_received_events(
         ref = grn.get("grn_number") or grn.get("grn_id") or ""
         po_number = grn.get("po_number")
         detail = f"GRN {ref}" + (f" against {po_label(po_number)}" if po_number else "")
+        held = {
+            u.get("product_id")
+            for u in grn.get("unresolved_lines") or []
+            if isinstance(u, dict)
+        }
         for idx, item in enumerate(grn.get("items") or []):
             pid = item.get("product_id")
-            if not pid or (product_id and pid != product_id):
+            if not pid or (product_id and pid != product_id) or pid in held:
                 continue
             # accepted_qty drives the ledger; received_qty is ONLY a fallback
             # for legacy lines missing the field. An explicit accepted_qty=0
