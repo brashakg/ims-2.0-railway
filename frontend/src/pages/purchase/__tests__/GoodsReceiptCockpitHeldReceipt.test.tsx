@@ -171,4 +171,28 @@ describe('Receive Goods - a receipt held for cataloguing (audit C1)', () => {
     await waitFor(() => expect(voidGRNMock).toHaveBeenCalledWith('g-held'));
     confirmSpy.mockRestore();
   });
+
+  // Panel round 3: once its product is finished, a second receipt of the same
+  // box is held beyond its order for the store manager -- nothing on it waits
+  // for the catalogue, and it has put nothing into stock.
+  it('a receipt held beyond its order says it waits for the store manager', async () => {
+    getGRNsMock.mockImplementation(async (params: { status?: string }) =>
+      params?.status === 'PARTIALLY_ACCEPTED'
+        ? {
+            grns: [
+              {
+                ...HELD_GRN,
+                unresolved_lines: [
+                  { product_id: 'p-boss', accepted_qty: 2, reason: 'over_order', ordered: 2, on_shelf: 2 },
+                ],
+              },
+            ],
+          }
+        : { grns: [] },
+    );
+    const row = await heldRow();
+    expect(within(row).getByText(/1 line\(s\) beyond the order, for the store manager/i)).toBeTruthy();
+    expect(within(row).queryByText(/waiting to be catalogued/i)).toBeNull();
+    expect(screen.queryByText(/put most of its goods into stock/i)).toBeNull();
+  });
 });

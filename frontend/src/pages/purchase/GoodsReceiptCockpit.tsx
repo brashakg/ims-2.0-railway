@@ -46,7 +46,7 @@ import { ExpressReceivePanel } from './ExpressReceivePanel';
 import type { TwoStepPrefill } from './ExpressReceivePanel';
 import { PurchaseStatusChip } from '../../components/purchase/PurchaseStatusChip';
 import { RECEIVABLE_PO_STATUSES } from './purchaseTypes';
-import { reportGrnAccept } from './grnAcceptToast';
+import { heldLinesSummary, reportGrnAccept } from './grnAcceptToast';
 
 // ---- Local types -----------------------------------------------------------
 
@@ -280,13 +280,13 @@ export function GoodsReceiptCockpit() {
       vendor_invoice_no?: string;
       created_at?: string;
       items?: unknown[];
-      // A PARTIALLY_ACCEPTED receipt is one whose uncatalogued lines were HELD:
-      // real stock was minted for the rest, and the held lines are waiting for
-      // someone to finish the product. It belongs in this panel too -- it was
-      // the one state the panel did not query, while the accept-time toast
-      // sent people here to find it.
+      // A PARTIALLY_ACCEPTED receipt is one holding some lines back -- for the
+      // catalogue, or beyond its order for the store manager -- with none,
+      // some or most of its goods in stock. It belongs in this panel too -- it
+      // was the one state the panel did not query, while the accept-time
+      // toast sent people here to find it.
       status?: string;
-      heldLines?: number;
+      held?: string;
     }>
   >([]);
   const [grnActionBusy, setGrnActionBusy] = useState<string | null>(null);
@@ -312,7 +312,7 @@ export function GoodsReceiptCockpit() {
               created_at: g.created_at ? String(g.created_at) : undefined,
               items: Array.isArray(g.items) ? g.items : [],
               status: String(g.status || 'PENDING'),
-              heldLines: Array.isArray(g.unresolved_lines) ? g.unresolved_lines.length : 0,
+              held: heldLinesSummary(g.unresolved_lines).text,
             }))
         );
       } catch {
@@ -1389,11 +1389,13 @@ export function GoodsReceiptCockpit() {
                       A <strong>pending</strong> receipt was created but never accepted, so its
                       units are NOT in stock and its PO still shows as receivable — accept the
                       correct one, and void duplicates (safe: a pending GRN has added nothing).
-                      A <strong>partly accepted</strong> one put most of its goods into stock but
-                      held the lines whose product is not catalogued yet. The catalogue manager
-                      has a task for them, and finishing the product puts them on the shelf by
-                      itself; "Add to stock" tries again now. A second receipt of the same box
-                      stays held for the store manager: void it if the vendor sent nothing extra.
+                      A <strong>partly accepted</strong> one is holding some lines back, and may
+                      have none of its goods in stock yet. A line waiting to be catalogued goes on
+                      the shelf by itself once the catalogue manager finishes the product ("Add to
+                      stock" tries again now). A line beyond what the PO ordered (a second receipt
+                      of the same box, say) waits for the store manager: void the receipt if the
+                      vendor sent nothing extra and none of it is in stock, or press "Add to
+                      stock" if they did.
                     </p>
                     <div className="space-y-2">
                       {pendingGrns.map((g) => (
@@ -1411,7 +1413,7 @@ export function GoodsReceiptCockpit() {
                             <PurchaseStatusChip status={g.status || 'PENDING'} kind="grn" />
                             {g.status === 'PARTIALLY_ACCEPTED' && (
                               <span className="text-amber-700">
-                                {' '}· {g.heldLines || 'some'} line(s) waiting to be catalogued
+                                {' '}· {g.held}
                               </span>
                             )}
                             {g.vendor_invoice_no && (

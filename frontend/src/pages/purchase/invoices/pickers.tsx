@@ -15,6 +15,7 @@ import { useToast } from '../../../context/ToastContext';
 import { useAuth } from '../../../context/AuthContext';
 import type { Supplier } from '../purchaseTypes';
 import { errMsg } from './shared';
+import { heldLinesSummary } from '../grnAcceptToast';
 
 // ============================================================================
 // GRN picker: choose an ACCEPTED GRN to bill, calls createFromGrn for a draft
@@ -119,8 +120,9 @@ export function GrnPickerModal({
           ) : (
             <div className="space-y-2">
               {grns.map((g) => {
-                const heldLines: Array<{ product_id?: string }> = g.unresolved_lines || [];
+                const heldLines: unknown[] = g.unresolved_lines || [];
                 const held = g.status === 'PARTIALLY_ACCEPTED' || heldLines.length > 0;
+                const { text: heldText, catalogueProductIds } = heldLinesSummary(heldLines);
                 return (
                 <div key={g.grn_id} className="flex items-center justify-between border border-gray-200 rounded-lg px-3 py-2 hover:bg-gray-50">
                   <div>
@@ -130,17 +132,16 @@ export function GrnPickerModal({
                     </div>
                     {held ? (
                       <div className="text-xs text-amber-700 mt-0.5">
-                        {heldLines.length || 'Some'} line(s) are waiting to be catalogued — this receipt
-                        cannot be invoiced until they are finished.
+                        Held: {heldText} — this receipt cannot be invoiced until they are resolved.
                       </div>
                     ) : null}
                   </div>
                   {held ? (
+                    catalogueProductIds.length > 0 && (
                     <button
                       type="button"
                       onClick={async () => {
-                        const ids = heldLines.map((l) => l.product_id).filter(Boolean) as string[];
-                        if (ids.length === 0) { toast.error('Nothing to request on this receipt'); return; }
+                        const ids = catalogueProductIds;
                         setBusyId(g.grn_id);
                         try {
                           await purchaseInvoicesApi.requestCataloguing(ids);
@@ -156,6 +157,7 @@ export function GrnPickerModal({
                     >
                       {busyId === g.grn_id ? <Loader2 className="w-4 h-4 animate-spin" /> : null} Ask for cataloguing
                     </button>
+                    )
                   ) : (
                     <button type="button" onClick={() => pick(g)} disabled={busyId === g.grn_id} className="btn sm primary disabled:opacity-60">
                       {busyId === g.grn_id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />} Invoice

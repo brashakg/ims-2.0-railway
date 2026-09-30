@@ -41,3 +41,24 @@ export function reportGrnAccept(
       (res?.po_status ? ` · PO ${res.po_status}` : ''),
   );
 }
+
+/** What a held receipt is waiting for, read off the server's
+ *  unresolved_lines[].reason: "over_order" lines are beyond what the PO
+ *  ordered (a second receipt of the same box, say) and wait for the store
+ *  manager; every other held line waits to be catalogued. */
+export function heldLinesSummary(lines: unknown): {
+  text: string;
+  catalogueProductIds: string[];
+} {
+  const held = (Array.isArray(lines) ? lines : []) as Array<{ product_id?: string; reason?: string }>;
+  const over = held.filter((l) => l?.reason === 'over_order');
+  const catalogue = held.filter((l) => l?.reason !== 'over_order');
+  const parts = [
+    catalogue.length ? `${catalogue.length} line(s) waiting to be catalogued` : '',
+    over.length ? `${over.length} line(s) beyond the order, for the store manager` : '',
+  ].filter(Boolean);
+  return {
+    text: parts.join(' · ') || 'some line(s) held',
+    catalogueProductIds: catalogue.map((l) => l?.product_id).filter(Boolean) as string[],
+  };
+}
