@@ -47,8 +47,10 @@ owed) with the numbers it last drifted with (payload.last_seen) and the
 same press as a drift tonight: unknown is not cleared, and nothing re-sends
 it by itself. A drifted SKU a SUPERADMIN blocked from online sale is named on its
 own line: no IMS button re-sends it, so the line asks for 0 in Shopify admin
-or lifting the block. A drifted retired SKU is on its own line too: Take off
-website (a size: Send to website on its product), or 0 in Shopify admin.
+or lifting the block (on a night the block is unreadable, a SKU keeps the
+line it was last filed on: payload.lines). A drifted retired SKU is on its
+own line too: Take off website (a size: Send to website on its product), or
+0 in Shopify admin.
 A shop that leaves the mapped set (location cleared, claimed by two shops,
 shop deactivated) has its task closed on EVERY tick that could read the shop
 map, whether or not anything was compared: parity no longer compares it, and
@@ -567,7 +569,7 @@ def sync_drift_task(
     summary: Dict[str, Any],
     *,
     mapped_skus: Iterable[str],
-    blocked: Iterable[str] = (),
+    blocked: Optional[Iterable[str]] = (),
     retired: Iterable[str] = (),
 ) -> Optional[str]:
     """ONE shop's drift task, from that shop's own ``compare_location_parity``
@@ -580,7 +582,11 @@ def sync_drift_task(
     again, so it is no longer owed. ``blocked``: the drifted SKUs a SUPERADMIN
     blocked from online sale -- IMS sends them 0 and Send to website refuses
     them, so their line asks for the one thing that clears it (0 in Shopify
-    admin, or lifting the block), never the button. ``retired``: the SKUs IMS
+    admin, or lifting the block), never the button; None = the block could
+    not be read tonight (_blocked_of): each SKU keeps the line it was last
+    filed on (payload.lines), never moved onto the Send to website line, and
+    one never filed on a line gets a line that says the block is unknown.
+    ``retired``: the SKUs IMS
     stopped selling (deleted / deactivated) that are still compared because
     their listing is not proven off Shopify -- the rule lists 0, and their
     line asks for the take-down (a size: its product's Send to website, which
@@ -628,10 +634,23 @@ def sync_drift_task(
                              for d in p.get("drift") or []})
                 seen.update(p.get("last_seen") or {})
             rows = drift + [{"sku": s, **seen.get(s, {}), "earlier": True} for s in sorted(owed)]
-            blocked, retired = set(blocked), set(retired)
+            retired = set(retired)
+            if blocked is None:
+                # The block unread tonight: the line each SKU was last filed
+                # on says whether it was blocked (a blocked SKU is only ever
+                # on the blocked line). A SKU never filed on one is unsure --
+                # the retired line's press works whatever the block says.
+                lines: Dict[Any, str] = {}
+                for t in active:
+                    lines.update((t.get("payload") or {}).get("lines") or {})
+                blocked = {s for s, line in lines.items() if line == "blocked"}
+                unsure = {d.get("sku") for d in rows} - set(lines) - retired
+            else:
+                blocked, unsure = set(blocked), set()
             banned = [d for d in rows if d.get("sku") in blocked]
             off = [d for d in rows if d.get("sku") in retired - blocked]
-            fixable = [d for d in rows if d.get("sku") not in blocked | retired]
+            unread = [d for d in rows if d.get("sku") in unsure]
+            fixable = [d for d in rows if d.get("sku") not in blocked | retired | unsure]
             parts = []
             if drift:
                 parts.append(
@@ -661,6 +680,13 @@ def sync_drift_task(
                     f"this. Store manager: ask a SUPERADMIN to set each to 0 at {label}'s location "
                     f"in Shopify admin, or to lift the block if it should sell online."
                 )
+            if unread:
+                parts.append(
+                    f"The SUPERADMIN online block could not be read tonight for: {_named(unread)}. "
+                    f"If one is blocked, ask a SUPERADMIN to set it to 0 at {label}'s location in "
+                    f"Shopify admin (or to lift the block); if not, check it on the shelf and ask "
+                    f"an ADMIN or SUPERADMIN to open it and press Send to website."
+                )
             if off:
                 parts.append(
                     f"Deleted or deactivated in IMS but still listed at {label}'s Shopify location: "
@@ -682,6 +708,12 @@ def sync_drift_task(
                 "skus": sorted(owed | drifted),
                 "drift_count": summary.get("drift_count"),
                 "max_delta": summary.get("max_delta"),
+                # The line each SKU is filed on, for a night the block is unread.
+                "lines": {
+                    **{d.get("sku"): "send" for d in fixable},
+                    **{d.get("sku"): "retired" for d in off},
+                    **{d.get("sku"): "blocked" for d in banned},
+                },
                 # The numbers every named SKU last drifted with: tonight's, else carried.
                 "last_seen": {
                     **{s: seen[s] for s in owed if s in seen},
@@ -720,11 +752,12 @@ def sync_drift_task(
     return None
 
 
-def _blocked_of(db, skus: List[str]) -> set:
-    """The SKUs a SUPERADMIN blocked from online sale (online_block,
-    the rule's own source). Fail-soft -> set(): the rule read the block a
-    moment ago (an unreadable block compares nothing), so a failure here only
-    words a blocked SKU's line as an ordinary drift."""
+def _blocked_of(db, skus: List[str]) -> Optional[set]:
+    """The SKUs a SUPERADMIN blocked from online sale (online_block, the
+    rule's own source). None when the read failed -- unknown, never "none
+    blocked": sync_drift_task then keeps each SKU on the line it was filed on
+    (an owed SKU is named on its line, so "not blocked" would move a blocked
+    one onto the Send to website press that refuses it)."""
     if not skus:
         return set()
     try:
@@ -733,7 +766,7 @@ def _blocked_of(db, skus: List[str]) -> set:
         return set(blocked_skus(db, skus, strict=True))
     except Exception as exc:  # noqa: BLE001
         logger.warning("[STOCK_PARITY] online-block read failed: %s", exc)
-        return set()
+        return None
 
 
 def retire_unmapped_drift_tasks(repo, mapped: Dict[str, str]) -> List[str]:

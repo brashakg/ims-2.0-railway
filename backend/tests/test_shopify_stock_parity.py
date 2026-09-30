@@ -1575,3 +1575,49 @@ def test_a_dark_take_off_website_press_stamps_nothing(monkeypatch):
     ecom = db.get_collection("catalog_products").find_one({"id": "c2"})["ecom"]
     assert ecom["online_state"] == "DELIST_FAILED"
 
+
+def test_a_blocked_sku_keeps_its_line_on_a_night_the_block_is_unreadable(one_id_per_batch, monkeypatch):
+    """Round 10, the panel's probe. Night 1: SKU-1 is SUPERADMIN-blocked and
+    drifts at BV-A (IMS 0 vs Shopify 5) -> the blocked line. Night 2: the
+    online-block read raises (a Mongo blip) with the same Shopify levels:
+    nothing is compared, SKU-1 is owed -- and stays on the blocked line,
+    never moved onto 'press Send to website' (which refuses it) nor sent to
+    the shelf. Put back `_blocked_of -> set()` on a failed read -> SKU-1
+    lands on the Send to website line -> fails."""
+    from api.services import online_block
+
+    db = _db({"SKU-1": {"BV-A": 5, "BV-B": 4}})
+    db.seed("ecom_collections", [{"collection_id": "C-BAN", "collection_type": "CUSTOM",
+                                  "online_sync_blocked": True, "products": [{"sku": "SKU-1"}]}])
+    shop = _shopify({INV_1: {LOC_A: 5, LOC_B: 0}, INV_2: {LOC_A: 0, LOC_B: 0}})
+    _run(sp.run_parity_tick(db, graphql=shop))
+    assert _tasks(db)[0]["payload"]["lines"] == {"SKU-1": "blocked"}
+
+    def blip(*_a, **_k):
+        raise RuntimeError("block read blipped")
+
+    monkeypatch.setattr(online_block, "blocked_skus", blip)
+    out = _run(sp.run_parity_tick(db, graphql=shop))
+    assert out["compared"] == 0 and out["tasks"]["refreshed"] == ["BV-A"]
+    (task,) = _tasks(db)
+    text = task["description"]
+    assert "Blocked from online sale by a SUPERADMIN: SKU-1 (IMS 0 vs Shopify 5 when last compared)" in text
+    assert "Send to website to re-send" not in text and "on the shelf" not in text
+    assert task["payload"]["lines"] == {"SKU-1": "blocked"}
+
+
+def test_a_sku_never_filed_on_a_line_says_the_block_is_unknown(monkeypatch):
+    """Round 10: the rule read the block, parity's own read of it a moment
+    later failed, and SKU-2 drifts for the first time (IMS 5 vs Shopify 0).
+    No line it was filed on says whether it is blocked, so its line says the
+    block is unknown and names both steps -- never a bare Send to website.
+    Treat the unread block as 'none blocked' -> the plain Send to website
+    line -> fails."""
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 5, "BV-B": 0}})
+    monkeypatch.setattr(sp, "_blocked_of", lambda db_, skus: None)
+    _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 0, LOC_B: 0}})))
+    (task,) = _tasks(db)
+    text = task["description"]
+    assert "online block could not be read tonight for: SKU-2 (IMS 5 vs Shopify 0)" in text
+    assert "Top: " not in text and task["payload"]["lines"] == {}
+
