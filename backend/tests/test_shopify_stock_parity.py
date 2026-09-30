@@ -1576,14 +1576,32 @@ def test_a_dark_take_off_website_press_stamps_nothing(monkeypatch):
     assert ecom["online_state"] == "DELIST_FAILED"
 
 
+def _block_blips_after(monkeypatch, answered):
+    """online_block.blocked_skus answers its first `answered` calls and raises
+    after: 1 = the rule read the block and parity's own read of it (the same
+    reader, online_stock_writeback._blocked_online) a moment later failed;
+    0 = a night neither could read it (the rule is unknown, nothing compared)."""
+    from api.services import online_block
+
+    real, calls = online_block.blocked_skus, []
+
+    def maybe(*a, **k):
+        calls.append(1)
+        if len(calls) > answered:
+            raise RuntimeError("block read blipped")
+        return real(*a, **k)
+
+    monkeypatch.setattr(online_block, "blocked_skus", maybe)
+
+
 def test_a_blocked_sku_keeps_its_line_on_a_night_the_block_is_unreadable(one_id_per_batch, monkeypatch):
     """Round 10, the panel's probe. Night 1: SKU-1 is SUPERADMIN-blocked and
     drifts at BV-A (IMS 0 vs Shopify 5) -> the blocked line. Night 2: the
     online-block read raises (a Mongo blip) with the same Shopify levels:
     nothing is compared, SKU-1 is owed -- and stays on the blocked line,
     never moved onto 'press Send to website' (which refuses it) nor sent to
-    the shelf. Put back `_blocked_of -> set()` on a failed read -> SKU-1
-    lands on the Send to website line -> fails."""
+    the shelf. Read the unread block as set() -> SKU-1 lands on the Send to
+    website line -> fails."""
     from api.services import online_block
 
     db = _db({"SKU-1": {"BV-A": 5, "BV-B": 4}})
@@ -1614,7 +1632,7 @@ def test_a_sku_never_filed_on_a_line_says_the_block_is_unknown(monkeypatch):
     Treat the unread block as 'none blocked' -> the plain Send to website
     line -> fails."""
     db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 5, "BV-B": 0}})
-    monkeypatch.setattr(sp, "_blocked_of", lambda db_, skus: None)
+    _block_blips_after(monkeypatch, 1)
     _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 0, LOC_B: 0}})))
     (task,) = _tasks(db)
     text = task["description"]
@@ -1672,3 +1690,20 @@ def test_the_tick_compares_through_sentinels_connection():
     out = _run(sp.run_parity_tick(_sentinel_db(db), graphql=_shopify({INV_1: {LOC_A: 3, LOC_B: 0}, INV_2: {}})))
     assert (out["checked"], out["compared"], out["unknown"], out["drift_count"]) == (True, 4, 0, 1)
     assert out["tasks"]["filed"] == ["BV-A"] and len(_tasks(db)) == 1
+
+
+def test_parity_and_the_rule_read_the_block_through_one_reader(monkeypatch):
+    """Round 11, one rule, one implementation: the task's blocked line and the
+    rule's 0 come from ONE reader, online_stock_writeback._blocked_online.
+    Make that reader say SKU-1 is blocked (nothing in ecom_collections): the
+    rule lists 0 against Shopify's 5 at LOC_A, and parity files SKU-1 on the
+    blocked line. Give parity a block reader of its own (the deleted
+    _blocked_of, reading online_block directly) -> SKU-1 on the Send to
+    website line -> fails."""
+    from api.services import online_stock_writeback as wb
+
+    monkeypatch.setattr(wb, "_blocked_online", lambda db_, skus: {"SKU-1"} & set(skus))
+    db = _db({"SKU-1": {"BV-A": 5, "BV-B": 0}})
+    out = _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 5, LOC_B: 0}, INV_2: {}})))
+    assert [(d["store_id"], d["ims"], d["shopify"]) for d in out["drift"]] == [("BV-A", 0, 5)]
+    assert _tasks(db)[0]["payload"]["lines"] == {"SKU-1": "blocked"}

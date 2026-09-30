@@ -593,7 +593,8 @@ def sync_drift_task(
     blocked from online sale -- IMS sends them 0 and Send to website refuses
     them, so their line asks for the one thing that clears it (0 in Shopify
     admin, or lifting the block), never the button; None = the block could
-    not be read tonight (_blocked_of): each SKU keeps the line it was last
+    not be read tonight (online_stock_writeback._blocked_online, the
+    rule's own reader): each SKU keeps the line it was last
     filed on (payload.lines), never moved onto the Send to website line, and
     one never filed on a line gets a line that says the block is unknown.
     ``retired``: the SKUs IMS
@@ -763,23 +764,6 @@ def sync_drift_task(
     return None
 
 
-def _blocked_of(db, skus: List[str]) -> Optional[set]:
-    """The SKUs a SUPERADMIN blocked from online sale (online_block, the
-    rule's own source). None when the read failed -- unknown, never "none
-    blocked": sync_drift_task then keeps each SKU on the line it was filed on
-    (an owed SKU is named on its line, so "not blocked" would move a blocked
-    one onto the Send to website press that refuses it)."""
-    if not skus:
-        return set()
-    try:
-        from .online_block import blocked_skus
-
-        return set(blocked_skus(db, skus, strict=True))
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[STOCK_PARITY] online-block read failed: %s", exc)
-        return None
-
-
 def retire_unmapped_drift_tasks(repo, mapped: Dict[str, str]) -> List[str]:
     """Close the ACTIVE per-shop drift tasks of shops that are no longer in
     ``mapped`` (location cleared, one location claimed by two shops, shop
@@ -887,9 +871,15 @@ async def run_parity_tick(
 
     try:
         from .online_delist import _raw_db
-        from .online_stock_writeback import online_quantities_for_skus
+        from .online_delist import _raw_db
+        from .online_stock_writeback import _blocked_online, online_quantities_for_skus
         from .shopify_push.inventory import _mapped, _stores, unmapped_holders
 
+        # SENTINEL hands over the SeededDatabaseConnection wrapper, which has no
+        # item access: the rule's block read (db["ecom_collections"]) raised on
+        # it, the rule returned {} and every night compared nothing. The raw db,
+        # as the screens read it.
+        db = _raw_db(db)
         # SENTINEL hands over the SeededDatabaseConnection wrapper, which has no
         # item access: the rule's block read (db["ecom_collections"]) raised on
         # it, the rule returned {} and every night compared nothing. The raw db,
@@ -982,7 +972,8 @@ async def run_parity_tick(
             retired = {v["sku"] for v in catalogue if v["retired"]}
             # Every catalogue SKU, not only tonight's drift: an owed SKU named
             # from an earlier night needs its own line's press too.
-            blocked = _blocked_of(db, sorted({v["sku"] for v in catalogue}))
+            # The rule's own block reader (None = unread), never a second copy.
+            blocked = _blocked_online(db, sorted({v["sku"] for v in catalogue}))
             for store in stores:
                 # inventory._mapped's spelling: a stored 'BV-A ' is mapped as 'BV-A'.
                 sid = str(store.get("store_id") or "").strip()
