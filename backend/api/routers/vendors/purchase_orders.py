@@ -1,7 +1,5 @@
 """Purchase-order list and creation (manual + from forecast)."""
 
-import re
-
 from ._shared import (
     BaseModel,
     Depends,
@@ -61,16 +59,14 @@ def _refuse_items_we_already_have(items, product_repo) -> None:
     """Audit C2: a typed-in line that describes a product we ALREADY have
     (active, or a draft somebody ordered earlier) never mints a hidden twin.
 
-    Every typed line is checked BEFORE any line is created, so the 409 leaves
-    nothing behind; the composer asks "already in the catalogue - use it?" and
-    resends the line with that product_id. The key is the door's OWN: the
-    canonical build with a placeholder SKU (zero writes, as the catalogue
+    Every typed line is checked BEFORE any line is created, so the refusal
+    leaves nothing behind; the composer asks "already in the catalogue - use
+    it?" and resends the line with that product_id. The key is the door's OWN:
+    the canonical build with a placeholder SKU (zero writes, as the catalogue
     promote dry-run does) stamps exactly the identity_key a create would, and
-    the lookup is the door's duplicate guard (find_by_identity_key).
-
-    Each eye size is its own item (owner 09-28), so a frame typed WITHOUT one
-    cannot be told apart from the eye sizes already catalogued: it is sent back
-    to have its eye size typed (422) instead of becoming a sizeless twin."""
+    the answer is the door's own rule (product_master.identity_conflict) -- a
+    409 naming the product, or a 422 asking a frame typed without its eye size
+    for it (each eye size is its own item, owner 09-28)."""
     if product_repo is None or not hasattr(product_repo, "find_by_identity_key"):
         return
     already = []
@@ -79,47 +75,27 @@ def _refuse_items_we_already_have(items, product_repo) -> None:
         if it.new_product is None:
             continue
         try:
-            key = _pm.build_canonical_product(
+            spine = _pm.build_canonical_product(
                 {**_typed_product_payload(it), "sku": "DRYRUN-PLACEHOLDER"},
                 source="FORM",
                 product_repo=product_repo,
                 db=_get_db(),
-            ).get("identity_key")
+            )
         except _pm.ProductMasterError:
             continue  # the create below refuses an invalid line, with its reason
-        found = product_repo.find_by_identity_key(key) if key else None
-        if found:
-            summary = _pm.existing_product_summary(found)
-            already.append({"line": idx, "existing": summary})
-        elif (
-            key
-            and not str(it.new_product.size or "").strip()
-            and _pm._size_attribute_key(it.new_product.category) == "lens_size"
-        ):
-            sized = product_repo.find_many(
-                {"identity_key": {"$regex": "^" + re.escape(key + "|")}}
-            ) or []
-            if sized:
-                need_size.append(
-                    {
-                        "line": idx,
-                        "sizes": sorted(
-                            {str(_pm.existing_product_summary(p).get("size")) for p in sized}
-                        ),
-                    }
-                )
+        err = _pm.identity_conflict(spine, product_repo)
+        if err is None:
+            continue
+        if err.status == 409 and err.conflict:
+            already.append({"line": idx, "existing": err.conflict})
+        elif err.code == "EYE_SIZE_NEEDED":
+            need_size.append({"line": idx, "sizes": err.sizes, "message": err.message})
     if not already and need_size:
         raise HTTPException(
             status_code=422,
             detail={
                 "code": "EYE_SIZE_NEEDED",
-                "message": "; ".join(
-                    f"{items[n['line']].new_product.brand} {items[n['line']].new_product.model} "
-                    f"{items[n['line']].new_product.colour or ''}".strip()
-                    + f" is in the catalogue by eye size ({', '.join(n['sizes'])})"
-                    for n in need_size
-                )
-                + ". Type the eye size on the line, or pick the item from the catalogue.",
+                "message": " ".join(n.pop("message") for n in need_size),
                 "lines": need_size,
             },
         )

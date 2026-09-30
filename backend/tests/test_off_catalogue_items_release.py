@@ -1407,3 +1407,83 @@ def test_c1_no_store_manager_fails_loud_to_the_admins(world, caplog):
         ),
         "No ERROR is logged when no store manager covers the shop",
     )
+
+
+# -- Reading glasses record an eye size, as their Add-Product form does ---------
+
+RG_TYPED = {"category": "RG", "brand": "Titan", "model": "RG77", "colour": "BLK", "mrp": 1490}
+
+
+def _catalogue_rg(world, lens_size):
+    attrs = {"brand_name": "Titan", "model_no": "RG77", "colour_code": "BLK"}
+    if lens_size:
+        attrs["lens_size"] = lens_size
+    body = _products.ProductCreate(
+        category="RG",
+        brand="Titan",
+        model="RG77",
+        attributes=attrs,
+        mrp=1490,
+        offer_price=1290,
+        cost_price=600,
+    )
+    return _run(_products.create_product(body, CATALOGUER, as_draft=False))
+
+
+def test_c2_reading_glasses_typed_with_their_eye_size_use_the_catalogued_one(world):
+    rg = _catalogue_rg(world, "50")
+    refused = _refused_po(
+        world, [{"new_product": dict(RG_TYPED, size="50"), "quantity": 1, "unit_price": 600}]
+    )
+    detail = (refused.detail if refused else None) or {}
+    finding(
+        [m["existing"]["product_id"] for m in detail.get("matches", [])]
+        == [rg["product_id"]],
+        f"C2: an RG typed with its eye size made a twin ({refused})",
+    )
+    assert len(world.products_named("Titan", "RG77")) == 1
+
+
+def test_c2_reading_glasses_typed_without_an_eye_size_are_asked_for_it(world):
+    _catalogue_rg(world, "50")
+    refused = _refused_po(
+        world, [{"new_product": dict(RG_TYPED), "quantity": 1, "unit_price": 600}]
+    )
+    finding(
+        refused is not None and (refused.detail or {}).get("code") == "EYE_SIZE_NEEDED",
+        f"C2: a sizeless RG against a catalogued RG 50 was not asked its size ({refused})",
+    )
+    assert len(world.products_named("Titan", "RG77")) == 1
+
+
+def test_c3_cataloguing_reading_glasses_already_ordered_warns(world):
+    po = world.raise_po(
+        [{"new_product": dict(RG_TYPED, size="50"), "quantity": 1, "unit_price": 600}]
+    )
+    try:
+        _catalogue_rg(world, "50")
+        refused = None
+    except HTTPException as exc:
+        refused = exc
+    finding(
+        refused is not None
+        and refused.status_code == 409
+        and refused.detail["existing"]["product_id"] == po["items"][0]["product_id"],
+        f"C3: an RG catalogued after it was ordered made a twin ({refused})",
+    )
+
+
+def test_c3_a_frame_catalogued_without_its_eye_size_is_asked_for_it(world):
+    # One "already exists" rule for both doors: Add product asks for the eye
+    # size exactly as the PO line does.
+    world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    try:
+        world.catalogue_frame("Boss", "BOSS 1700", "C2", "", mrp=2990, offer=2790, cost=1200)
+        refused = None
+    except HTTPException as exc:
+        refused = exc
+    finding(
+        refused is not None and refused.status_code == 422 and "52" in str(refused.detail),
+        f"C3: a sizeless Boss 1700 C2 was catalogued beside the ordered 52 ({refused})",
+    )
+    assert len(world.products_named("Boss", "BOSS 1700")) == 1

@@ -98,6 +98,8 @@ class ProductMasterError(Exception):
         # existing row so the caller/FE can link to it ("add stock / a variant").
         self.code: Optional[str] = None
         self.conflict: Optional[Dict[str, Any]] = None
+        # EYE_SIZE_NEEDED (identity_conflict): the eye sizes already catalogued.
+        self.sizes: Optional[List[str]] = None
 
 
 # ===========================================================================
@@ -247,7 +249,10 @@ _CATEGORY_SPECS: Dict[str, CategorySpec] = {
         "RG",
         "Reading Glasses",
         required=("brand_name", "model_no", "colour_code"),
-        optional=("subbrand", "power"),
+        # lens_size / bridge_width / temple_length: the Add-Product form's RG
+        # fields (categoryFields.ts). The eye size is part of the identity like
+        # a frame's, so the PO line and the catalogue form key it alike.
+        optional=("subbrand", "power", "lens_size", "bridge_width", "temple_length"),
     ),
     "CONTACT_LENS": CategorySpec(
         "CONTACT_LENS",
@@ -2569,28 +2574,12 @@ def create_product(
         return spine
 
     # --- Hub Phase 1: duplicate HARD-BLOCK (409 + show-existing) ---
-    # Refuse a product that already exists by SKU, by brand+model+colour identity,
-    # or by barcode (when one rides along). The DB unique indexes are the
-    # race-safe backstop (handled at the create below). Pre-check first so the
-    # common case returns the existing row for the FE to link to.
-    existing = product_repo.find_by_sku(spine["sku"])
-    if (
-        existing is None
-        and spine.get("identity_key")
-        and hasattr(product_repo, "find_by_identity_key")
-    ):
-        existing = product_repo.find_by_identity_key(spine["identity_key"])
-    if (
-        existing is None
-        and spine.get("barcode")
-        and hasattr(product_repo, "find_by_barcode")
-    ):
-        try:
-            existing = product_repo.find_by_barcode(spine["barcode"])
-        except Exception:  # noqa: BLE001
-            existing = None
-    if existing is not None:
-        raise _duplicate_error(existing)
+    # The DB unique indexes are the race-safe backstop (handled at the create
+    # below). Pre-check first so the common case returns the existing row for
+    # the FE to link to.
+    conflict = identity_conflict(spine, product_repo)
+    if conflict is not None:
+        raise conflict
 
     # --- STEP 1: spine FIRST + alone (single-document atomic create) ---
     # raise_on_duplicate=True so a race lost to the unique index surfaces as a
@@ -2664,6 +2653,64 @@ def create_product(
             logger.warning("[PM] audit write failed for %s: %s", product_id, exc)
 
     return created
+
+
+def identity_conflict(spine: Dict[str, Any], product_repo) -> Optional[ProductMasterError]:
+    """THE one "we already have this" rule. The create door's guard (above)
+    and the PO's typed-line check (purchase_orders) both run it, so the two
+    doors can never answer the same item differently.
+
+    A product that exists by SKU, brand+model+colour(+size) identity or barcode
+    -> the 409 naming it. An eye-size category item WITHOUT its eye size whose
+    brand/model/colour is catalogued BY eye size (each eye size is its own item,
+    owner 09-28) -> 422 EYE_SIZE_NEEDED naming the sizes: it cannot be told
+    apart from them, so it is never created as a sizeless twin."""
+    existing = product_repo.find_by_sku(spine.get("sku"))
+    key = spine.get("identity_key")
+    if existing is None and key and hasattr(product_repo, "find_by_identity_key"):
+        existing = product_repo.find_by_identity_key(key)
+    if (
+        existing is None
+        and spine.get("barcode")
+        and hasattr(product_repo, "find_by_barcode")
+    ):
+        try:
+            existing = product_repo.find_by_barcode(spine["barcode"])
+        except Exception:  # noqa: BLE001
+            existing = None
+    if existing is not None:
+        return _duplicate_error(existing)
+    if (
+        not key
+        or normalise_identity_component(spine.get("size"))
+        or _size_attribute_key(spine.get("category")) != "lens_size"
+        or not hasattr(product_repo, "find_many")
+    ):
+        return None
+    prefix = key + "|"
+    sized = [
+        p
+        for p in product_repo.find_many(
+            {"identity_key": {"$regex": "^" + re.escape(prefix)}}
+        )
+        or []
+        if str(p.get("identity_key") or "").startswith(prefix)
+    ]
+    if not sized:
+        return None
+    sizes = sorted({str(existing_product_summary(p).get("size")) for p in sized})
+    name = " ".join(
+        str(v) for v in (spine.get("brand"), spine.get("model"), spine.get("color")) if v
+    )
+    err = ProductMasterError(
+        f"{name} is in the catalogue by eye size ({', '.join(sizes)}). Type the "
+        "eye size, or pick the item from the catalogue.",
+        status=422,
+        field="lens_size",
+    )
+    err.code = "EYE_SIZE_NEEDED"
+    err.sizes = sizes
+    return err
 
 
 def _resolve_variant_parent(
