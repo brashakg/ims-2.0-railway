@@ -886,9 +886,15 @@ async def run_parity_tick(
     }
 
     try:
+        from .online_delist import _raw_db
         from .online_stock_writeback import online_quantities_for_skus
         from .shopify_push.inventory import _mapped, _stores, unmapped_holders
 
+        # SENTINEL hands over the SeededDatabaseConnection wrapper, which has no
+        # item access: the rule's block read (db["ecom_collections"]) raised on
+        # it, the rule returned {} and every night compared nothing. The raw db,
+        # as the screens read it.
+        db = _raw_db(db)
         # The shop map first: a shop that left it has its task retired on
         # every return below, compared or not -- retiring needs the map and
         # nothing else (a raising shop list is a tick error: an unknown map

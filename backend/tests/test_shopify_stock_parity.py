@@ -1648,3 +1648,27 @@ def test_the_tolerance_still_holds_where_the_writer_sends_more_than_zero():
         tolerance=2,
     )
     assert [d["sku"] for d in out["drift"]] == ["C"] and out["clean_skus"] == ["A", "B"]
+
+
+def _sentinel_db(db):
+    """What SENTINEL hands the tick: the REAL SeededDatabaseConnection (no
+    item access) over `db` as its connected real database."""
+    from database.connection import SeededDatabaseConnection
+
+    conn = object.__new__(SeededDatabaseConnection)  # past the singleton
+    conn._real_db = types.SimpleNamespace(is_connected=True, db=db, get_collection=db.get_collection)
+    return conn
+
+
+def test_the_tick_compares_through_sentinels_connection():
+    """Round 11 BLOCKER. The only caller is SENTINEL's run_parity_tick(self.db),
+    and self.db is database.connection.SeededDatabaseConnection, which has no
+    item access: the rule's block read (db["ecom_collections"]) raised, the
+    rule answered {} and every night compared nothing -- no task ever filed
+    or closed. Shelves BV-A 0 / BV-B 0, Shopify LOC_A 3: through the wrapper
+    the tick compares all 4 pairs and files BV-A's task, as on the raw db.
+    Drop the tick's _raw_db unwrap -> compared 0, nothing filed -> fails."""
+    db = _db({"SKU-1": {"BV-A": 0, "BV-B": 0}})
+    out = _run(sp.run_parity_tick(_sentinel_db(db), graphql=_shopify({INV_1: {LOC_A: 3, LOC_B: 0}, INV_2: {}})))
+    assert (out["checked"], out["compared"], out["unknown"], out["drift_count"]) == (True, 4, 0, 1)
+    assert out["tasks"]["filed"] == ["BV-A"] and len(_tasks(db)) == 1
