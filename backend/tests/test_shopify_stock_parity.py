@@ -40,10 +40,14 @@ Pins, each with its revert named in the test:
   * round 7: every Shopify query stays under the 1,000-point cap (the fake
     prices each query as Shopify does and refuses one over it) and shrinks
     from the cost Shopify quotes; a failed batch leaves only its own SKUs
-    unknown; an item Shopify answers null, or a product IMS stopped selling,
-    has left the catalogue; the task text names every SKU that keeps it
-    open, never calls a SKU compared tonight 'not compared', and asks a
-    SUPERADMIN-blocked SKU for 0 in Shopify admin, never the button.
+    unknown; an item Shopify answers null has left the catalogue; the task
+    text names every SKU that keeps it open, never calls a SKU compared
+    tonight 'not compared', and asks a SUPERADMIN-blocked SKU for 0 in
+    Shopify admin, never the button.
+  * round 8: a product IMS stopped selling has left the catalogue only once
+    its take-down REACHED Shopify (online_catalog._delisted_live); a failed
+    or dark take-down, a retired size or a twin-less SKU is still compared
+    against the writer's 0 and gets its own line.
 
 StrictDB + injected Shopify boundary -- no network, no production.
 """
@@ -1266,17 +1270,23 @@ def test_tick_the_task_text_names_every_drifted_sku_past_the_top_five():
     assert "; also SKU-6, SKU-7." in task["description"]
 
 
-@pytest.mark.parametrize("how", ["deleted_in_shopify_admin", "soft_deleted_in_ims"])
+def _twin(ecom):
+    """SKU-2's catalog_products twin with this ecom (a live listing's gid)."""
+    return {"id": "c2", "sku": "SKU-2", "ecom": {"shopify_product_id": "gid://shopify/Product/2", **ecom}}
+
+
+@pytest.mark.parametrize("how", ["deleted_in_shopify_admin", "taken_off_the_website"])
 def test_tick_a_sku_that_left_the_online_catalogue_stops_keeping_its_task_open(how):
-    """Round 7 P6, the panel's probe. Night 1: SKU-2 drifts at BV-A (IMS 5 vs
-    Shopify 0), the task names it. Then EITHER Shopify answers INV_2 null in
-    a full answer (the product was deleted in Shopify admin: nothing can
-    compare it or re-send it) OR IMS's Delete button soft-deletes SKU-2
-    (is_active False; the row and its gid are kept, and Shopify still shows 5
-    at LOC_A). Night 2 compares SKU-1 clean and CLOSES the task; the deleted
-    item is reported under missing_on_shopify. Drop `- set(gone)` -> the
-    null SKU is owed, OPEN for ever; drop the is_active filter from
-    _sample_variants -> IMS 0 vs Shopify 5, refreshed for ever -> fails."""
+    """Round 7 P6, narrowed in round 8. Night 1: SKU-2 drifts at BV-A (IMS 5
+    vs Shopify 0), the task names it. Then EITHER Shopify answers INV_2 null
+    in a full answer (deleted in Shopify admin: nothing can compare it or
+    re-send it) OR IMS's Delete button soft-deletes SKU-2 AND its take-down
+    REACHED Shopify (twin DELISTED by a LIVE delist: the listing is a draft,
+    nothing sells it). Night 2 compares SKU-1 clean and CLOSES the task; the
+    deleted item is reported under missing_on_shopify. Drop `- set(gone)` ->
+    the null SKU is owed, OPEN for ever; drop the `drafted` exclusion from
+    _sample_variants -> IMS 0 vs Shopify 5 on a draft, refreshed for ever ->
+    fails."""
     db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 5, "BV-B": 0}})
     _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 0, LOC_B: 0}})))
     assert _tasks(db)[0]["payload"]["skus"] == ["SKU-2"]
@@ -1284,11 +1294,48 @@ def test_tick_a_sku_that_left_the_online_catalogue_stops_keeping_its_task_open(h
         shop = _shopify({INV_1: {LOC_A: 1, LOC_B: 1}})
     else:
         db.get_collection("products").update_one({"sku": "SKU-2"}, {"$set": {"is_active": False}})
+        db.seed("catalog_products", [_twin({"online_state": "DELISTED", "delist_mode": "LIVE"})])
         shop = _shopify({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 5, LOC_B: 0}})
     out = _run(sp.run_parity_tick(db, graphql=shop))
     assert out["checked"] is True
     assert out["tasks"]["closed"] == ["BV-A"] and _tasks(db)[0]["status"] == "COMPLETED"
     assert out["missing_on_shopify"] == (["SKU-2"] if how == "deleted_in_shopify_admin" else [])
+
+
+@pytest.mark.parametrize("how", ["take_down_failed", "take_down_dark", "retired_size", "no_twin"])
+def test_tick_a_retired_sku_still_on_sale_on_shopify_stays_compared(how):
+    """Round 8, the panel's probes. SKU-2 is retired in IMS (is_active
+    False), so the writer lists it at 0 at every shop -- but its listing is
+    NOT proven off Shopify: the take-down FAILED (DELIST_FAILED, the product
+    still ACTIVE), ran DARK (a SIMULATED no-op), SKU-2 is a SIZE of SKU-1
+    (its take-down is DENY + 0 on the parent's ACTIVE listing, stamped
+    DELISTED/LIVE all the same) or it has no twin at all. Shopify still
+    sells 3 at LOC_A (a hand edit, a dropped 0). Night 1 files BV-A's task
+    (IMS 0 vs Shopify 3) on the retired line; night 2 is the same drift, so
+    the task is REFRESHED, never auto-closed as 'left the online catalogue'.
+    Put back the plain `is_active: {$ne: False}` sample filter -> sampled 1,
+    drift 0, the task closed on night 2 -> fails; drop `not is_variant_of`
+    -> the retired size is dropped -> fails."""
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 0, "BV-B": 0}})
+    db.get_collection("products").update_one({"sku": "SKU-2"}, {"$set": {"is_active": False}})
+    ecom = {
+        "take_down_failed": {"online_state": "DELIST_FAILED", "delist_mode": "LIVE"},
+        "take_down_dark": {"online_state": "DELISTED", "delist_mode": "SIMULATED"},
+        "retired_size": {"online_state": "DELISTED", "delist_mode": "LIVE",
+                         "variant_of": {"product_id": "p1", "twin_id": "c1", "sku": "SKU-1"}},
+    }.get(how)
+    if ecom is not None:
+        db.seed("catalog_products", [_twin(ecom)])
+    shop = {INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 3, LOC_B: 0}}
+    out = _run(sp.run_parity_tick(db, graphql=_shopify(shop)))
+    assert out["sampled"] == 2 and out["drift_count"] == 1 and out["tasks"]["filed"] == ["BV-A"]
+    out = _run(sp.run_parity_tick(db, graphql=_shopify(shop)))
+    assert out["tasks"] == {"filed": [], "refreshed": ["BV-A"], "closed": []}
+    (task,) = _tasks(db)
+    text = task["description"]
+    assert task["status"] == "OPEN" and task["payload"]["skus"] == ["SKU-2"]
+    assert "Deleted or deactivated in IMS but still listed at BV-A's Shopify location: SKU-2 (IMS 0 vs Shopify 3)" in text
+    assert "press Take off website" in text and "on the shelf" not in text
 
 
 def test_tick_a_blocked_sku_that_drifts_asks_for_shopify_admin_never_the_button():
