@@ -58,8 +58,9 @@ import { productListPath, sectionOfError, type EditMode, type SectionId } from '
 import { useProductImages } from './useProductImages';
 
 // Reorder level, form text <-> server number (owner 2026-09-28, F73). The
-// server's -1 (or no level at all) is NOT SET and shows as a blank field; a
-// blank or invalid field is never saved as a number.
+// server decides what a product's level is (GET /products/{id} sends the level
+// reorder_policy gives, a legacy product's 5 included); its -1 = NOT SET shows
+// as a blank field, and a blank or invalid field is never saved as a number.
 const typedLevel = (value: unknown): number | null => {
   const n = value === null || value === undefined || String(value).trim() === ''
     ? NaN
@@ -1262,8 +1263,8 @@ export function useQuickAddForm() {
           setFlaggedFields(new Set());
           applyFormValues(productToFormValues(product));
           setEditMode({ kind: 'spine', id: editId, sku: String(product.sku || '') });
-          // Prefill the reorder level so the single PUT round-trips it; not
-          // set (-1 / none) stays blank -- never an invented level (F73).
+          // Prefill the server's level so the single PUT round-trips it; not
+          // set (-1) stays blank -- never an invented level (F73).
           setReorderLevel(levelText((product as { reorder_point?: unknown }).reorder_point));
         }
       } catch {

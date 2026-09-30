@@ -114,6 +114,7 @@ CL_MODALITIES = ("DAILY", "FORTNIGHTLY", "MONTHLY", "QUARTERLY", "YEARLY", "COLO
 # place -- the product_master registry. This guard reads its canonical list from
 # there instead of hand-maintaining a duplicate.
 from ..services.product_master import canonical_categories as _pm_canonical_categories
+from ..services.reorder_policy import reorder_level
 
 # Accepted-category superset for the create/update guard. Behaviour-preserving:
 # kept as the GST/HSN table keys (the canonical 13 registry categories PLUS the
@@ -3295,6 +3296,11 @@ async def get_product(product_id: str, current_user: dict = Depends(get_current_
                 imgs = product.get("images")
                 if isinstance(imgs, list) and imgs and isinstance(imgs[0], str):
                     product["image_url"] = imgs[0]
+            # The level the rule gives (F73): a product that never stored one
+            # reads its legacy level, not set reads -1. The edit form shows and
+            # saves this number, so it never has a rule of its own.
+            level = reorder_level(product)
+            product["reorder_point"] = -1 if level is None else level
             return product
         raise HTTPException(status_code=404, detail="Product not found")
 

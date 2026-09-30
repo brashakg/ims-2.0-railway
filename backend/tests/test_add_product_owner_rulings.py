@@ -601,3 +601,21 @@ def test_f73_guard_a_product_that_never_stored_a_level_buys_to_five(monkeypatch)
     recs = _recommendations(monkeypatch, [{"product_id": "P-LEGACY", "sku": "L"}], {"P-LEGACY": 2})
     assert recs == {"P-LEGACY": (5, 5)}
 
+
+def test_f73_get_product_sends_the_level_the_rule_gives(monkeypatch):
+    """GET /products/{id} (the Add/Edit form's read) carries the level the rule
+    gives, so an edit that never touches the level round-trips it: a product
+    that never stored one reads 5 (never blank -> -1, which switched its
+    alerts off), not set reads -1."""
+    repo = ProductRepository(StrictCollection("products", [
+        {"product_id": "P-LEGACY", "sku": "L"},
+        {"product_id": "P-UNSET", "sku": "U", "reorder_point": -1},
+        {"product_id": "P-SET", "sku": "S", "reorder_point": 3},
+        {"product_id": "P-GARBAGE", "sku": "G", "reorder_point": "x"},
+    ]))
+    monkeypatch.setattr(prod_router, "get_product_repository", lambda: repo)
+    got = {
+        pid: asyncio.run(prod_router.get_product(pid, current_user=_ADMIN))["reorder_point"]
+        for pid in ("P-LEGACY", "P-UNSET", "P-SET", "P-GARBAGE")
+    }
+    assert got == {"P-LEGACY": 5, "P-UNSET": -1, "P-SET": 3, "P-GARBAGE": -1}
