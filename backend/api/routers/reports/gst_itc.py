@@ -1,9 +1,7 @@
 """Vendor-bill ITC, stock-transfer and credit-note helpers for the GST returns."""
 
-import re
-
-from ...services.ap_engine import GST_START
-from ...utils.ist import ist_today
+from ...services.ap_engine import iso_bill_date
+from ...services.org_validation import shop_gstins
 
 # ============================================================================
 # GST RETURNS - GSTR-3B (Summary Return)
@@ -14,23 +12,23 @@ _DEAD_BILL = ["CANCELLED", "cancelled", "VOID", "voided"]
 
 
 def _itc_store_scope(db, active_store):
-    """(entity_id, gstin, shops) of the store whose return is being filed:
-    `shops` is every store that carries the same GSTIN (just this one when it
-    has none) -- the shops whose receipts that one filing covers. Fail-soft."""
+    """(entity_id, gstin, shops) of the store whose return is being filed.
+    `gstin` is THE shop's GSTIN (org_validation.shop_gstin -- the one the
+    bill door books its purchases on), '' when it has none; `shops` is every
+    store whose GSTIN is the same (just this one when it has none) -- the
+    shops whose receipts that one filing covers. Reading the raw stores.gstin
+    here put a bill booked on a GSTIN-less shop's company number on no return
+    at all. Fail-soft."""
     try:
-        row = db["stores"].find_one(
-            {"store_id": active_store}, {"entity_id": 1, "gstin": 1}
-        )
-        gstin = str((row or {}).get("gstin", "") or "").strip()
-        shops = {active_store}
-        if gstin:
-            shops.update(
-                s.get("store_id")
-                for s in db["stores"].find({"gstin": gstin}, {"store_id": 1})
-            )
+        gstins = shop_gstins(db)
+        row = db["stores"].find_one({"store_id": active_store}, {"entity_id": 1})
     except Exception:
         return None, "", [active_store]
-    return (row or {}).get("entity_id"), gstin, sorted(x for x in shops if x)
+    gstin = gstins.get(active_store, "")
+    shops = {active_store}
+    if gstin:
+        shops.update(sid for sid, g in gstins.items() if g == gstin)
+    return (row or {}).get("entity_id"), gstin, sorted(shops)
 
 
 def _itc_month(year, mon, last_day) -> list:
@@ -43,27 +41,21 @@ def _itc_month(year, mon, last_day) -> list:
     ]
 
 
-_ISO_DAY = re.compile(r"^\d{4}-\d{2}-\d{2}")
-
-
-def _undated() -> dict:
-    """A bill no return anyone files can place -- neither date is a YYYY-MM-DD
-    day from the start of GST to today in IST, the range ap_engine.iso_bill_date
-    now enforces on every door: '' / '09/05/2026' / missing, or '0202-05-09' /
-    '2062-05-09' (a half-typed or swapped year, booked before that rule). The
-    check below reports it in every month until the bill is corrected."""
-    hi = ist_today().isoformat() + "T23:59:59"
-
-    def off(field):
-        return {
-            "$or": [
-                {field: {"$not": _ISO_DAY}},
-                {field: {"$lt": GST_START.isoformat()}},
-                {field: {"$gt": hi}},
-            ]
-        }
-
-    return {"$and": [off("invoice_date"), off("bill_date")]}
+def _dated(value) -> bool:
+    """Can a GST return place a bill dated `value`? Decided by THE bill-date
+    rule every door books through (ap_engine.iso_bill_date: a real calendar
+    day from the start of GST to today in IST), read on the day part -- a
+    transfer mirror stores a full IST timestamp and its month's window
+    places it. '' / '09/05/2026' / '2026-04-31' (no such day) / '2062-05-09'
+    / a non-string are not dated: a shape check let '2026-04-31' through,
+    and it lies between two months' windows."""
+    if not isinstance(value, str):
+        return False
+    try:
+        iso_bill_date(value[:10])
+    except ValueError:
+        return False
+    return True
 
 
 def _placement(shops, entity_id, store_gstin, year, mon, last_day) -> dict:
@@ -215,11 +207,15 @@ def _itc_unplaced(db, year, mon, last_day, entity_id=None) -> dict:
     """Booked input credit that NO GSTIN's GSTR-3B counts this month: a bill
     with no company (recipient_entity_id null -- every screen bill before F40),
     a bill whose GSTIN is no shop's, a bill with tax but no stored heads
-    (Table 4 sums the heads), or a bill no month can place (_undated: listed
+    (Table 4 sums the heads), or a bill no month can place (not _dated: listed
     in every month, since it is on none). Placement is _itc_match run for
-    every shop that has a company (the Cross-Check never counts a company-less shop's credit),
-    so this cannot disagree with the returns. Scoped to `entity_id` plus the
-    company-less bills (they belong to nobody, so every view shows them).
+    every shop that has a company, on THE shop's GSTIN (org_validation.
+    shop_gstins, the same answer GSTR-3B's scope reads), so this cannot
+    disagree with the returns. A shop with no company places nothing: its
+    GSTR-3B has no company filter, so it would mark every company's
+    GSTIN-less bill as placed while the Cross-Check counts none of its credit.
+    Scoped to `entity_id` plus the company-less bills (they belong to nobody,
+    so every view shows them).
 
     Also `unregistered`: credit that IS on a return although the supplier has
     no GSTIN (neither on the bill nor on the vendor) and the bill is not
@@ -239,41 +235,44 @@ def _itc_unplaced(db, year, mon, last_day, entity_id=None) -> dict:
         acc["tax"] = round(acc["tax"] + tax, 2)
         acc["bill_numbers"].append(bill.get("bill_number") or bill.get("bill_id"))
 
+    month_lo = f"{year:04d}-{mon:02d}-01"
+    month_hi = f"{year:04d}-{mon:02d}-{last_day:02d}T23:59:59"
     try:
-        stores = list(
-            db["stores"].find({}, {"_id": 0, "store_id": 1, "entity_id": 1, "gstin": 1})
-        )
+        gstins = shop_gstins(db)
         by_gstin: dict = {}
-        for st in stores:
-            g = str(st.get("gstin") or "").strip()
+        for sid, g in gstins.items():
             if g:
-                by_gstin.setdefault(g, []).append(st.get("store_id"))
+                by_gstin.setdefault(g, []).append(sid)
         placed = set()
-        for st in stores:
-            if not st.get("entity_id"):
+        filings = set()
+        for st in db["stores"].find({}, {"_id": 0, "store_id": 1, "entity_id": 1}):
+            eid = st.get("entity_id")
+            if not eid:
                 continue
-            g = str(st.get("gstin") or "").strip()
+            g = gstins.get(st.get("store_id"), "")
+            filing = (eid, g or st.get("store_id"))
+            if filing in filings:
+                continue  # one GSTIN, one filing: same placement
+            filings.add(filing)
             match = _itc_match(
-                by_gstin.get(g) or [st.get("store_id")],
-                st.get("entity_id"),
-                g,
-                year,
-                mon,
-                last_day,
+                by_gstin.get(g) or [st.get("store_id")], eid, g, year, mon, last_day
             )
             placed.update(
                 b.get("bill_id")
                 for b in db["vendor_bills"].find(match, {"_id": 0, "bill_id": 1})
             )
-        q: dict = {
-            "status": {"$nin": _DEAD_BILL},
-            "itc_eligible": {"$ne": False},
-            "$or": _itc_month(year, mon, last_day) + [_undated()],
-        }
+        q: dict = {"status": {"$nin": _DEAD_BILL}, "itc_eligible": {"$ne": False}}
         if entity_id:
             q["recipient_entity_id"] = {"$in": [entity_id, None]}
         vendor_gstin: dict = {}
+        # ponytail: reads every live bill of the scope, so 'undated' is the
+        # doors' own date parse (a Mongo range cannot tell 2026-04-31 is no
+        # day); push a month prefilter into the query if this grows slow.
         for b in db["vendor_bills"].find(q, {"_id": 0}):
+            dates = (b.get("invoice_date"), b.get("bill_date"))
+            in_month = any(isinstance(d, str) and month_lo <= d <= month_hi for d in dates)
+            if not in_month and any(_dated(d) for d in dates):
+                continue  # another month's return places it
             tax = round(float(b.get("tax_amount") or 0), 2)
             if tax <= 0:
                 continue

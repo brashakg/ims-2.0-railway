@@ -195,7 +195,7 @@ class TestF40RecipientIsServerSide:
         db.collections["entities"].append(
             {"entity_id": "E2", "name": "WizOpt", "gstins": [{"gstin": BUY_MH, "is_primary": True}]}
         )
-        db.collections["stores"].append({"store_id": "S2", "entity_id": "E2"})
+        db.collections["stores"].append({"store_id": "S2", "entity_id": "E2", "state_code": "27"})
         grn = {
             "grn_id": "G2",
             "vendor_id": "V1",

@@ -70,6 +70,7 @@ from ..dependencies import (
     validate_store_access,
 )
 from ..services import ap_engine
+from ..services import org_validation as ov
 from ..services import landed_cost as lc
 from ..services import purchase_invoice_engine as pinv
 from ..services import purchase_match as pmatch
@@ -995,28 +996,6 @@ def _apply_valuation_trueup(db, invoice_doc, computed, config) -> Optional[list]
 # ---------------------------------------------------------------------------
 
 
-def _entity_gstin_for_state(entity: dict, state_code: Optional[str]) -> Optional[str]:
-    """Pick the entity GSTIN to use as the recipient.
-
-    Prefer the GSTIN whose state matches `state_code` (a multi-GSTIN entity has
-    one per state); else the primary GSTIN; else the first. Returns None when
-    the entity has no GSTINs.
-    """
-    gstins = (entity or {}).get("gstins") or []
-    if not isinstance(gstins, list) or not gstins:
-        return None
-    sc = (state_code or "").strip()
-    if sc:
-        for g in gstins:
-            if isinstance(g, dict) and str(g.get("state_code") or "").strip() == sc:
-                return g.get("gstin")
-    for g in gstins:
-        if isinstance(g, dict) and g.get("is_primary"):
-            return g.get("gstin")
-    first = gstins[0]
-    return first.get("gstin") if isinstance(first, dict) else None
-
-
 def _receipt_store_id(db, grn_doc, linked_dc_ids) -> Optional[str]:
     """The shop the goods were DELIVERED to -- for the booking, its preview
     and the DC draft alike: the linked GRN's store, else the first linked DC
@@ -1097,13 +1076,12 @@ def _bill_recipient(
 
     The GSTIN: the typed one, refused unless that company holds it (a typo, or
     another company's number, would move the credit and the tax head); else
-    the SHOP's own registration when its company holds it (a Pune shop
-    carrying the company's Maharashtra number receives on it, as its purchase
-    order already does); else the company's PRIMARY; refused (422) when the
-    company holds no GSTIN at all. A shop stamped with a
-    registration from another state is the owner's open bill-follows-store
-    question -- this follows the shop's own record and does not answer it
-    (test_gst_one_engine pins it).
+    THE shop's GSTIN (org_validation.shop_gstin, the one answer every door
+    reads: its own when its company holds it, else the company's
+    registration for the shop's state); refused (422) when the company holds
+    no GSTIN at all, or none that is the shop's -- never the company's
+    primary, which put a Pune shop's Maharashtra purchase on the Jharkhand
+    return as IGST while its purchase order said CGST + SGST.
 
     `gstin_box`: whether the caller's form has a Recipient GSTIN box, so a
     refusal never tells the accountant to type into a box that is not there
@@ -1119,7 +1097,8 @@ def _bill_recipient(
             return {}
         try:
             return db.get_collection("stores").find_one(
-                {"store_id": store_id}, {"_id": 0, "entity_id": 1, "gstin": 1}
+                {"store_id": store_id},
+                {"_id": 0, "store_id": 1, "entity_id": 1, "gstin": 1, "state_code": 1, "state": 1},
             ) or {}
         except Exception:
             return {}
@@ -1193,15 +1172,35 @@ def _bill_recipient(
             "cannot be put on a GST return. Add the company's GSTIN "
             "(Settings, companies), then record the bill again.",
         )
-    return {"recipient_entity_id": entity_id, "recipient_gstin": _shop_gstin(entity, shop)}
-
-
-def _shop_gstin(entity: Optional[dict], shop: Optional[dict]) -> Optional[str]:
-    """The GSTIN a shop receives on: its own registration when its company
-    holds it, else the company's primary. The bill's recipient and the RTV
-    debit note's seller (which reverses that bill's credit) both read it."""
-    own = str((shop or {}).get("gstin") or "").strip().upper()
-    return own if own in _registrations(entity) else _entity_gstin_for_state(entity, None)
+    shop_gstin = ov.shop_gstin(entity, shop)
+    if not shop_gstin:
+        sid = shop.get("store_id")
+        if sid:
+            state = ov.resolve_state_code(shop.get("state_code"), shop.get("state"))
+            own = shop.get("gstin")
+            why = (
+                f"Shop {sid} has no GST number of {name}: "
+                + (f"its own ({own}) is not one of {name}'s, and " if own else "")
+                + f"{name} holds none for the shop's state "
+                f"({ov.state_name(state) or 'not set'}). Correct the shop's "
+                "state or GSTIN (Settings, stores), or add the company's "
+                "registration for that state (Settings, companies)"
+            )
+        else:
+            why = (
+                f"Cannot tell which of {name}'s GST numbers this bill is for: "
+                "pick the shop it is for (top bar)"
+            )
+        _refuse_recipient(
+            "RECIPIENT_SHOP_HAS_NO_GSTIN",
+            why
+            + (
+                ", or type our GSTIN as printed on the supplier's bill."
+                if gstin_box
+                else ", then record the bill again."
+            ),
+        )
+    return {"recipient_entity_id": entity_id, "recipient_gstin": shop_gstin}
 
 
 def _vendor_gstin(db, vendor: Optional[dict], vendor_id: str) -> Optional[str]:

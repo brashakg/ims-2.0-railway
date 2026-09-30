@@ -268,6 +268,49 @@ def resolve_gstin_for_state(gstins, state_code: Optional[str]) -> Optional[dict]
     return None
 
 
+def shop_gstin(entity: Optional[dict], shop: Optional[dict]) -> Optional[str]:
+    """THE answer to 'which GSTIN is this shop's' (owner, 2026-09-30: the
+    registration decides the state). Its own GSTIN when its company holds it;
+    else the company's registration for the shop's declared state (matched on
+    the GSTIN's first two digits, the registration's own state); else None.
+
+    None is a refusal, never a guess: a bill door refuses the booking, a
+    return places nothing on the shop, the go-live checklist names the shop.
+    The company's primary is NOT a fallback -- a Pune shop given the
+    Jharkhand number booked Maharashtra purchases as IGST while its purchase
+    order said CGST + SGST. Every door reads this one function: the bill's
+    recipient, the RTV debit note, GSTR-3B's scope, the Cross-Check, the
+    transfer mirror bill and the purchase order's tax head. The shop's GST
+    state is the answer's first two digits."""
+    held = [
+        _norm(g.get("gstin"))
+        for g in (entity or {}).get("gstins") or []
+        if isinstance(g, dict) and g.get("gstin")
+    ]
+    own = _norm((shop or {}).get("gstin"))
+    if own and own in held:
+        return own
+    state = resolve_state_code((shop or {}).get("state_code"), (shop or {}).get("state"))
+    return next((g for g in held if state and g[:2] == state), None)
+
+
+def shop_gstins(db) -> dict:
+    """store_id -> shop_gstin ('' when it has none) for every shop, reading
+    the stores and the companies once. Raises when either cannot be read:
+    the caller decides between a refusal and a flagged figure."""
+    entities = {
+        e.get("entity_id"): e
+        for e in db.get_collection("entities").find({}, {"_id": 0, "entity_id": 1, "gstins": 1})
+    }
+    return {
+        s["store_id"]: shop_gstin(entities.get(s.get("entity_id")), s) or ""
+        for s in db.get_collection("stores").find(
+            {}, {"_id": 0, "store_id": 1, "entity_id": 1, "gstin": 1, "state_code": 1, "state": 1}
+        )
+        if s.get("store_id")
+    }
+
+
 # Two digits that ARE the value or are followed by a non-digit (see the
 # fallback in resolve_state_code below). "27-Maharashtra" yes, "190001" no.
 _LEADING_STATE_CODE_RE = re.compile(r"(\d{2})(?:\D|$)")
@@ -289,11 +332,12 @@ def resolve_state_code(*candidates) -> str:
 
     IT IS NOT "the single place a state code is parsed" IN THIS CODEBASE, and
     that sentence must not be written here until the list below is empty and
-    re-measured. Five modules outside that chain still parse one themselves
+    re-measured. Four modules outside that chain still parse one themselves
     and DO answer differently (measured, same inputs; see
     tests/test_state_parser_divergence.py, which pins this table). (The ITC
     register's own parser is gone: it reads each bill's stored heads, and a
-    legacy bill without them is split by purchase_invoice_engine.)
+    legacy bill without them is split by purchase_invoice_engine. The
+    transfer mirror bill's is gone too: it reads shop_gstin below.)
 
         input               here  print_legal  gstn_export
         '27-Maharashtra'    27    27           ''
@@ -304,7 +348,6 @@ def resolve_state_code(*candidates) -> str:
 
       services/print_legal._state_code_of  - printed-invoice HSN tax summary
       services/gstn_export._state_code     - GSTR export; own 38-name table
-      routers/transfers._store_state_code  - inter-store transfer mirror bill
       routers/stores._state_code_for       - stamps state_code onto a store
                                              row at birth; reads names and
                                              bare codes but drops the portal

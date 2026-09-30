@@ -244,7 +244,7 @@ def aggregate_gstr3b(
     every bill received on the store's GSTIN, and GSTIN-less transfer mirrors
     received at any shop carrying that GSTIN -- gst_itc._itc_match) differs between
     sibling stores of one entity with DIFFERENT GSTINs; it is counted ONCE per
-    GSTIN, so a bill is never claimed on two registrations. The company-wide
+    (company, GSTIN), so a bill is never claimed on two registrations. The company-wide
     remainder (legacy bills naming no GSTIN) filters on recipient_entity_id
     alone, so EVERY store of an entity returns the SAME figure; it is counted
     ONCE per entity. RCM (Table 3.1(d)) is placed by the same rule as the
@@ -300,7 +300,7 @@ def aggregate_gstr3b(
     # cash is clamped per entity, not on the cross-entity grand total.
     buckets: Dict[Any, Dict[str, float]] = {}
     regular_taken: set = set()  # company-wide ITC + RCM: once per entity
-    gstin_taken: set = set()    # GSTIN-bound ITC: once per GSTIN
+    gstin_taken: set = set()    # GSTIN-bound ITC: once per (entity, GSTIN)
     for rep, key, gstin in zip(reports, keys, gstins):
         # Storeless stores (falsy entity_id) share one bucket: their outward is
         # real and counted, but they never contribute ITC/RCM.
@@ -330,14 +330,18 @@ def aggregate_gstr3b(
             b["rcm_i"] += rcm_reg["i"]
             b["rcm_taxable"] += rcm_reg["t"]
 
-        # GSTIN-bound ITC + RCM -> count ONCE per GSTIN (legacy per-report path
+        # GSTIN-bound ITC + RCM -> count ONCE per company + GSTIN (legacy per-report path
         # or a report with no GSTIN sums it in, since those keys are already
         # distinct per filing / per store). Every store of one GSTIN reports
         # the same slice, so which store comes first cannot matter.
+        # Keyed by (entity, GSTIN): each report's slice is scoped to its own
+        # company (gst_itc._placement), so a shop of E2 carrying E1's number
+        # holds a different slice -- keyed by GSTIN alone, whichever store
+        # came first silently dropped the other company's credit.
         if entity_ids is not None and gstin:
-            if gstin in gstin_taken:
+            if (key, gstin) in gstin_taken:
                 continue
-            gstin_taken.add(gstin)
+            gstin_taken.add((key, gstin))
         trf = _itc_gstin(rep)
         b["itc_c"] += trf["c"]
         b["itc_s"] += trf["s"]
