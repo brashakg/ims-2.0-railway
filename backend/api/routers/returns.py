@@ -568,13 +568,15 @@ def _claim_returnable_qty(
     land).
 
     Returns True when the claim succeeded, False on no-match (already returned /
-    over-cap / concurrent loser / this refund already restocked these units). Fail-soft: returns True when no orders
-    collection is available, or the driver lacks find_one_and_update, so the
-    pre-validation scan stays the guard rather than blocking a valid return.
-    Never for a refund's restock: its mark is all that stops another door
-    restocking the line again (a phantom unit), so a claim it cannot write
-    raises and nothing is restocked -- unless the write landed and only its
-    reply was lost (the mark, read again, carries it).
+    over-cap / concurrent loser / this refund already restocked these units)
+    or on a write that errored and did not land. Fail-soft: returns True when
+    no orders collection is available, or the driver lacks
+    find_one_and_update, so the pre-validation scan stays the guard rather
+    than blocking a valid return. Never for a refund's restock: its mark is
+    all that stops another door restocking the line again (a phantom unit),
+    so a claim it cannot write raises and nothing is restocked. A write that
+    errored is decided by the line read again: it landed when this attempt's
+    own token is on it (a lost reply), else it did not.
     """
     if return_qty <= 0:
         return True
@@ -605,11 +607,13 @@ def _claim_returnable_qty(
         # cap < 0 means even a single unit over-returns -> never claimable.
         elem["returned_qty"] = {"$lt": -1}  # impossible: forces no-match
 
-    def _mark(line: Dict[str, Any]) -> float:
-        return float((line.get("restocked_refunds") or {}).get(str(refund_id)) or 0)
-
-    before = _mark(orig_line)
-    update: Dict[str, Any] = {"$inc": {"items.$.returned_qty": return_qty}}
+    # This attempt's own token, written in the SAME write as its units: the
+    # one proof, read back after an ambiguous error, that THIS write landed
+    # (a count cannot tell it from another door's booking in the meantime).
+    # ponytail: tokens are never pulled; a line gets one per claim.
+    token = uuid.uuid4().hex
+    update: Dict[str, Any] = {"$inc": {"items.$.returned_qty": return_qty},
+                              "$addToSet": {"items.$.claim_tokens": token}}
     if refund_id:
         mark = f"restocked_refunds.{refund_id}"
         room = round((return_qty if refund_qty is None else refund_qty) - return_qty, 4)
@@ -621,25 +625,23 @@ def _claim_returnable_qty(
             match, update, return_document=ReturnDocument.AFTER
         )
     except Exception as exc:  # noqa: BLE001
-        # Driver lacks positional update / find_one_and_update filter support ->
-        # fall back to the pre-validation scan rather than block the return.
+        # An error does not say whether the write landed (a socket timeout
+        # after the commit; a standalone mongod retries no write): the line,
+        # read again, does. Landed: booked. Not landed: a counter return is
+        # refused for a retry (it would go ahead unreserved, and its release
+        # would take back another door's units); a refund's restock raises
+        # (its mark is all that stops another door restocking the line again).
         logger.warning("[RETURNS] returnable-qty claim errored: %s", exc)
-        if not refund_id:
-            return True
-        # A write whose reply was lost (a socket timeout after the commit; a
-        # standalone mongod retries no write) may have landed: it did when the
-        # mark, read again, carries these units. Raising then would strand the
-        # booking with nothing restocked. ponytail: a concurrent door of the
-        # same refund booking the same units in that instant reads as ours.
         try:
-            doc = coll.find_one({"order_id": order_id}) or {}
-        except Exception:  # noqa: BLE001 -- no answer: the claim did not land
-            raise exc from None
-        now = next((i for i in doc.get("items") or [] if isinstance(i, dict)
-                    and all(i.get(k) == v for k, v in ident.items())), {})
-        if _mark(now) >= before + return_qty:
+            landed = coll.find_one({"order_id": order_id,
+                                    "items": {"$elemMatch": {"claim_tokens": token}}})
+        except Exception:  # noqa: BLE001 -- no answer either: read as not landed
+            landed = None
+        if landed is not None:
             return True
-        raise
+        if refund_id:
+            raise
+        return False
     return updated is not None
 
 

@@ -1454,6 +1454,37 @@ def test_a_booking_whose_reply_was_lost_after_it_committed_restocks_the_unit(swe
     assert (line.get("returned_qty"), line.get("restocked_refunds")) == (1, {"700397": 1})
 
 
+class _RaisesBeforeTheWrite(_CommitsThenRaises):
+    """Every find_one_and_update fails before the server sees it."""
+
+    def find_one_and_update(self, *a, **kw):
+        raise RuntimeError("connection reset before the write")
+
+
+def test_a_booking_that_did_not_land_never_reads_another_doors_booking_as_its_own(swept, monkeypatch):
+    """A door read the order, then Goods back booked and put the frame back,
+    then the door's own booking failed without landing. The read-back
+    compared the line's mark with the door's stale read: Goods back's unit
+    read as its own, and the door minted the historical frame a second
+    time. Each attempt now looks for its own token on the line."""
+    oid, rid = 60198, 700398
+    row = _historical_refund(swept, monkeypatch, oid, rid, ims_product_id="IMS-P-1", status="DELIVERED")
+    stale = copy.deepcopy(_doc(swept, oid))
+    lines = shopify_refund._return_lines_from_proposed(row["proposed_restock"])
+    assert _goods_back(row)["result"]["status"] == "restocked" and _minted(swept) == ["AVAILABLE"]
+
+    down = _RaisesBeforeTheWrite(returns_router._orders_coll())
+    monkeypatch.setattr(returns_router, "_orders_coll", lambda: down)
+    stale.update(fulfillment_stores=["BV-GANGA-01"])
+    with pytest.raises(RuntimeError):
+        shopify_refund._restock_booked(stale, lines, str(rid), lambda ls: returns_router._restock_good_items(
+            ls, stale["store_id"], "RET-X", order_id=stale["order_id"], user_id="u",
+            processing_store_id=None, order=stale))
+    assert _minted(swept) == ["AVAILABLE"], "one frame, one unit"
+    line = _doc(swept, oid)["items"][0]
+    assert (line.get("returned_qty"), line.get("restocked_refunds")) == (1, {str(rid): 1})
+
+
 # ---------------------------------------------------------------------------
 # Ruling 1 leaves a fulfilled online order SHIPPED (it used to be DELIVERED).
 # Every report that picks orders by status reads the ONE pair of sets in
@@ -1559,6 +1590,34 @@ def _refused(swept, oid):
         _counter_return(swept, oid)
     assert refused.value.status_code == 400, refused.value.detail
     assert "exceeds the returnable quantity 0" in refused.value.detail
+
+
+@pytest.mark.parametrize("lands", [False, True])
+def test_a_counter_claim_that_errored_is_decided_by_the_line_read_again(swept, monkeypatch, lands):
+    """The claim's write raised. It went ahead as reserved whether or not it
+    landed: unreserved, a second return of the unit could pass beside it, and
+    its release on a later failure took back another door's units. Not
+    landed: refused for a retry, nothing recorded. Landed (a lost reply): the
+    return is booked, once."""
+    from fastapi import HTTPException
+
+    oid = 60177 + lands
+    _claim_unit(swept, _book(swept, oid))
+    _set(swept, oid, status="DELIVERED")
+    real = returns_router._orders_coll()
+    flaky = (_CommitsThenRaises if lands else _RaisesBeforeTheWrite)(real)
+    monkeypatch.setattr(returns_router, "_orders_coll", lambda: flaky)
+    if lands:
+        assert _counter_return(swept, oid)["return_id"]
+    else:
+        with pytest.raises(HTTPException) as refused:
+            _counter_return(swept, oid)
+        assert refused.value.status_code == 409 and swept["returns"].count_documents({}) == 0
+        assert "returned_qty" not in _doc(swept, oid)["items"][0]
+        monkeypatch.setattr(returns_router, "_orders_coll", lambda: real)
+        assert _counter_return(swept, oid)["return_id"]
+    assert _doc(swept, oid)["items"][0]["returned_qty"] == 1
+    _refused(swept, oid)
 
 
 def test_the_counter_cannot_take_back_the_unit_goods_back_put_back(swept):
