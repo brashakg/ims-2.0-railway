@@ -202,6 +202,11 @@ class FakeCollection:
                     d[k] = v
                 for k, v in (update.get("$push") or {}).items():
                     d.setdefault(k, []).append(v)
+                for k, v in (update.get("$addToSet") or {}).items():
+                    if v not in d.setdefault(k, []):
+                        d[k].append(v)
+                for k, v in (update.get("$pull") or {}).items():
+                    d[k] = [e for e in d.get(k) or [] if e != v]
                 return type("R", (), {"modified_count": 1, "matched_count": 1})()
         if upsert:
             doc = dict(filter_)

@@ -256,6 +256,11 @@ class FakeCollection:
                     for part in parents:
                         node = node.setdefault(part, {})
                     node[leaf] = v
+                for k, v in (update.get("$addToSet") or {}).items():
+                    if v not in d.setdefault(k, []):
+                        d[k].append(v)
+                for k, v in (update.get("$pull") or {}).items():
+                    d[k] = [e for e in d.get(k) or [] if e != v]
                 _push_unset(d, update)
                 return type("R", (), {"modified_count": 1, "matched_count": 1})()
         if upsert:

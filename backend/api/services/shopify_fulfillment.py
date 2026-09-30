@@ -81,6 +81,22 @@ def awb_filter(awb: str) -> Dict[str, Any]:
     return {"$or": [{f"{PARCEL_AWBS}.awb": awb}, {"awb": awb, PARCEL_AWBS: {"$exists": False}}]}
 
 
+def _write_parcel(orders, order: Dict[str, Any], key: str, awb: str) -> None:
+    """ONE parcel's entry in PARCEL_AWBS, element by element: its live AWB
+    added (none for a cancelled / failed parcel, whose order still gets the
+    list, so tracked_awbs never falls back to the order's awb), then every
+    other AWB this read saw for it dropped. Another parcel's entry is never
+    written, so two parcels reconciled at once both stay."""
+    oid = {"order_id": order.get("order_id")}
+    if awb:
+        orders.update_one(oid, {"$addToSet": {PARCEL_AWBS: {"id": key, "awb": awb}}})
+    else:
+        orders.update_one({**oid, PARCEL_AWBS: {"$exists": False}}, {"$set": {PARCEL_AWBS: []}})
+    for p in order.get(PARCEL_AWBS) or []:
+        if isinstance(p, dict) and p.get("id") == key and p.get("awb") != awb:
+            orders.update_one(oid, {"$pull": {PARCEL_AWBS: p}})
+
+
 def _clock_key(f: Dict[str, Any]) -> str:
     """A fulfilment's key in FULFILLMENT_CLOCKS: its bare id (the push stamps
     the GraphQL gid), prefixed so the dotted write is never an array index."""
@@ -204,48 +220,54 @@ def reconcile_fulfillment(
         shipment_status = tracking.get("shipment_status", "")
         tracking_number = tracking.get("tracking_number", "")
 
-        now = datetime.now(timezone.utc).isoformat()
-        update: Dict[str, Any] = {"updated_at": now}
-        watermark = _to_naive_utc(payload.get("updated_at"))
-        if watermark is not None and fulfillment_id:
-            update[f"{FULFILLMENT_CLOCKS}.{_clock_key(payload)}"] = watermark
-        live = ful_status not in ("CANCELLED", "ERROR")
-        parcels = [p for p in order.get(PARCEL_AWBS) or []
-                   if isinstance(p, dict) and p.get("id") != _clock_key(payload)]
-        if live and tracking_number:
-            parcels.append({"id": _clock_key(payload), "awb": tracking_number})
-        if fulfillment_id:
-            update[PARCEL_AWBS] = parcels
-        # The order's tracking fields show the NEWEST fulfilment IMS applied:
-        # an older parcel's late event states its own fact below but never
-        # takes them over from a newer one, and a cancelled / failed parcel
-        # never takes them over while another parcel is still live.
-        if (live or not parcels) and not _shopify_payload_stale(
-                order, payload, field=FULFILLMENT_WATERMARK):
-            update.update({
-                "fulfillment_status": ful_status,
-                "shopify_fulfillment_id": fulfillment_id,
-                **tracking,
-            })
-            if watermark is not None:
-                update[FULFILLMENT_WATERMARK] = watermark
-
         # The lifecycle status: this fulfilment's ONE fact through the ONE
-        # transition table (the mapper's and the courier's too). The tracking,
-        # fulfillment_status and watermark ride the same claim (or land alone
-        # when the table keeps the status): a failed write leaves the
-        # fulfilment unapplied, so the hourly sweep sees it moved and re-feeds it.
+        # transition table (the mapper's and the courier's too). A failed
+        # write leaves the fulfilment unapplied and writes nothing else, so
+        # the hourly sweep sees it moved and re-feeds it.
         current_status = _norm(order.get("status")).upper()
         res = apply_fact(
             db,
             order,
             fulfilment_fact(ful_status, shipment_status, tracking_number),
             source="SHOPIFY_FULFILL",
-            marks=update,
         )
         if res["failed"]:
             return {"status": "error", "error": "status write failed",
                     "order_id": order.get("order_id"), "fulfillment_id": fulfillment_id}
+
+        # Then this parcel's own state, each piece written on its own and
+        # never as a whole list or field set from this read: another parcel's
+        # reconcile (a second worker, the sweep beside a webhook) may be
+        # writing its own at the same time. Its clock goes LAST, so a write
+        # that fails before it leaves the fulfilment unapplied and the sweep
+        # re-feeds it (every write here lands again unchanged).
+        orders = db.get_collection("orders")
+        oid = {"order_id": order.get("order_id")}
+        live = ful_status not in ("CANCELLED", "ERROR")
+        if fulfillment_id:
+            _write_parcel(orders, order, _clock_key(payload), tracking_number if live else "")
+        # The order's tracking fields show the NEWEST fulfilment IMS applied:
+        # an older parcel's late event states its own fact above but never
+        # takes them over from a newer one (the write matches only while the
+        # stored watermark is not newer), and a cancelled / failed parcel
+        # never takes them over while another parcel is still live.
+        others = [p for p in order.get(PARCEL_AWBS) or []
+                  if isinstance(p, dict) and p.get("id") != _clock_key(payload)]
+        watermark = _to_naive_utc(payload.get("updated_at"))
+        if live or not others:
+            takeover = {"fulfillment_status": ful_status, "shopify_fulfillment_id": fulfillment_id,
+                        **tracking}
+            newer: Dict[str, Any] = {}
+            if watermark is not None:
+                takeover[FULFILLMENT_WATERMARK] = watermark
+                newer = {"$or": [{FULFILLMENT_WATERMARK: {"$lte": watermark}},
+                                 {FULFILLMENT_WATERMARK: {"$exists": False}},
+                                 {FULFILLMENT_WATERMARK: None}]}
+            orders.update_one({**oid, **newer}, {"$set": takeover})
+        clock: Dict[str, Any] = {"updated_at": datetime.now(timezone.utc).isoformat()}
+        if watermark is not None and fulfillment_id:
+            clock[f"{FULFILLMENT_CLOCKS}.{_clock_key(payload)}"] = watermark
+        orders.update_one(oid, {"$set": clock})
         order_status = res["to"] or current_status
 
         logger.info(

@@ -808,6 +808,28 @@ def test_a_split_shipment_is_delivered_by_its_live_parcel(swept, monkeypatch, sp
     assert doc["status"] == "DELIVERED" and doc["delivered_at"]
 
 
+def test_reconciles_of_two_parcels_from_one_stale_read_keep_both(swept, monkeypatch):
+    """Two reconciles of different parcels overlap (two workers, or the sweep
+    beside a webhook): each read the order before the other wrote. The
+    live-parcel list was one whole list from the read, so the later write
+    dropped the other parcel -- the courier legs never asked its AWB -- and
+    an older parcel took the tracking fields and the watermark back."""
+    oid = 60127
+    _book(swept, oid)
+    pre = _doc(swept, oid)
+    monkeypatch.setattr(shopify_fulfillment, "_find_ims_order", lambda db, sid: copy.deepcopy(pre))
+    for fid, at in ((1, "01:00"), (2, "01:05"), (1, "01:00")):
+        shopify_fulfillment.reconcile_fulfillment(
+            swept["db"], _fulfilment(oid, fid, tracking_number=f"AWB-{fid}", updated_at=_T(at),
+                                     created_at=_T(at)), topic="fulfillments/create")
+
+    doc = _doc(swept, oid)
+    assert sorted(shopify_fulfillment.tracked_awbs(doc)) == ["AWB-1", "AWB-2"]
+    assert swept["orders"].find_one(shopify_fulfillment.awb_filter("AWB-1"))["order_id"] == doc["order_id"]
+    assert doc["awb"] == "AWB-2"
+    assert doc[shopify_fulfillment.FULFILLMENT_WATERMARK] == datetime(2026, 9, 6, 1, 5)
+
+
 # ---------------------------------------------------------------------------
 # The refund leg. Finding (d): a Shopify cancel refund restocks no unit the
 # order does not hold SOLD (an oversold / under-claimed line would MINT a
