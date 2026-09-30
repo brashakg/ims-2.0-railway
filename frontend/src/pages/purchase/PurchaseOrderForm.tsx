@@ -22,8 +22,9 @@ import type {
   ComposerVendorOption,
   ComposerNewProduct,
 } from '../../components/purchase/PurchaseOrderComposer';
-import { CATEGORIES, getCategoryFields } from '../../domain/catalog/productAdd';
+import { CATEGORIES } from '../../domain/catalog/productAdd';
 import type { Supplier, PurchaseOrder, POItem } from './purchaseTypes';
+import { getCategoryFields } from '../../domain/catalog/productAdd/categoryFields';
 
 interface PickedProduct {
   productId: string;
