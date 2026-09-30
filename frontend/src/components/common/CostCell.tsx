@@ -23,6 +23,12 @@ export const PRODUCT_COST_ROLES: UserRole[] = [
   'CATALOG_MANAGER',
 ];
 
+/** Who sees and books supplier payments -- bills, payments, balances, per
+ *  vendor AND in total (owner ruling 2026-09-29): the accounts roles. It IS the
+ *  backend's cost_mask "payables" context (AP_ROLES + SUPERADMIN); a backend
+ *  test (test_counter_roles_no_purchase_reads) holds the two sets equal. */
+export const PAYABLES_ROLES: UserRole[] = ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'];
+
 function Dash() {
   return <span className="text-gray-400 select-none" aria-label="not authorised">-</span>;
 }
