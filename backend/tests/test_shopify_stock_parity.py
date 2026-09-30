@@ -1668,6 +1668,58 @@ def test_the_tolerance_still_holds_where_the_writer_sends_more_than_zero():
     assert [d["sku"] for d in out["drift"]] == ["C"] and out["clean_skus"] == ["A", "B"]
 
 
+@pytest.mark.parametrize("line", ["send", "retired"])
+def test_every_sku_keeps_its_line_on_a_night_the_block_is_unreadable(monkeypatch, line):
+    """Round 11, the panel's mutants M2 / M5. Night 1 files SKU-1 on the Send
+    to website line (IMS 5 vs Shopify 0) -- or retired SKU-2, whose take-down
+    failed, on the retired line (IMS 0 vs Shopify 3). Night 2 the block read
+    blips: nothing is compared, the SKU is owed and keeps its own line and
+    press. Drop the 'send' entries from payload.lines -> SKU-1 moves to 'the
+    block could not be read' -> fails; count a 'retired' line as blocked ->
+    SKU-2 gets 'no IMS button clears this' -> fails."""
+    if line == "send":
+        db = _db({"SKU-1": {"BV-A": 5, "BV-B": 0}})
+        shop = _shopify({INV_1: {LOC_A: 0, LOC_B: 0}, INV_2: {LOC_A: 0, LOC_B: 0}})
+        want = "Top: SKU-1 (IMS 5 vs Shopify 0 when last compared)."
+        sku = "SKU-1"
+    else:
+        db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 0, "BV-B": 0}})
+        db.get_collection("products").update_one({"sku": "SKU-2"}, {"$set": {"is_active": False}})
+        db.seed("catalog_products", [_twin({"online_state": "DELIST_FAILED", "delist_mode": "LIVE"})])
+        shop = _shopify({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 3, LOC_B: 0}})
+        want = "still listed at BV-A's Shopify location: SKU-2 (IMS 0 vs Shopify 3 when last compared)."
+        sku = "SKU-2"
+    _run(sp.run_parity_tick(db, graphql=shop))
+    assert _tasks(db)[0]["payload"]["lines"] == {sku: line}
+    _block_blips_after(monkeypatch, 0)
+    out = _run(sp.run_parity_tick(db, graphql=shop))
+    assert out["compared"] == 0 and out["tasks"]["refreshed"] == ["BV-A"]
+    (task,) = _tasks(db)
+    text = task["description"]
+    assert want in text
+    assert "could not be read" not in text and "no IMS button clears this" not in text
+    assert task["payload"]["lines"] == {sku: line}
+
+
+def test_a_retired_sku_never_filed_on_a_line_gets_the_retired_line(monkeypatch):
+    """Round 11, the panel's mutant M1. The rule read the block, parity's own
+    read of it failed, and retired SKU-2 (take-down failed, Shopify 3 at
+    LOC_A) drifts for the first time: the retired line's press (Take off
+    website) works whatever the block says, so it is never also told the
+    block is unknown and to check the shelf. Drop `- retired` from the unsure
+    set -> SKU-2 is on 'the block could not be read' line too -> fails."""
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 0, "BV-B": 0}})
+    db.get_collection("products").update_one({"sku": "SKU-2"}, {"$set": {"is_active": False}})
+    db.seed("catalog_products", [_twin({"online_state": "DELIST_FAILED", "delist_mode": "LIVE"})])
+    _block_blips_after(monkeypatch, 1)
+    _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 3, LOC_B: 0}})))
+    (task,) = _tasks(db)
+    text = task["description"]
+    assert "still listed at BV-A's Shopify location: SKU-2 (IMS 0 vs Shopify 3)." in text
+    assert "could not be read" not in text and "on the shelf" not in text
+    assert task["payload"]["lines"] == {"SKU-2": "retired"}
+
+
 LOC_LEGACY = "gid://shopify/Location/5555"
 
 
