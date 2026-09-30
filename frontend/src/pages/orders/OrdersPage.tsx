@@ -760,7 +760,7 @@ export function OrdersPage() {
                   orderNumber={selectedOrder.orderNumber}
                   customerName={selectedOrder.customerName}
                   customerPhone={selectedOrder.customerPhone}
-                  status={selectedOrder.orderStatus as 'DRAFT' | 'CONFIRMED' | 'PROCESSING' | 'READY' | 'DELIVERED' | 'CANCELLED'}
+                  status={selectedOrder.orderStatus}
                   createdAt={selectedOrder.createdAt}
                   onSendNotification={async (status, channel) => {
                     // Was a fake toast with NO API call — a silent lie to

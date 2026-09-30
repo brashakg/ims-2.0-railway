@@ -20,18 +20,11 @@ import {
   NOTIFICATION_TEMPLATES,
   populateTemplate,
 } from '../../constants/notifications';
+import type { OrderStatus } from '../../types';
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
-
-type OrderStatus =
-  | 'DRAFT'
-  | 'CONFIRMED'
-  | 'PROCESSING'
-  | 'READY'
-  | 'DELIVERED'
-  | 'CANCELLED';
 
 interface StatusHistoryEntry {
   status: string;
@@ -55,11 +48,14 @@ interface OrderNotificationTrackerProps {
 // Constants
 // ---------------------------------------------------------------------------
 
-/** The ordered progression of non-cancelled statuses. */
+/** The ordered progression of non-cancelled statuses. SHIPPED (an online
+ *  order Shopify fulfilled, on its way) is a step only while the order is
+ *  there: a counter order never ships, and an earlier step reads as done. */
 const STATUS_STEPS: OrderStatus[] = [
   'CONFIRMED',
   'PROCESSING',
   'READY',
+  'SHIPPED',
   'DELIVERED',
 ];
 
@@ -69,6 +65,7 @@ const STATUS_LABELS: Record<OrderStatus, string> = {
   CONFIRMED: 'Order Confirmed',
   PROCESSING: 'Processing',
   READY: 'Ready for Pickup',
+  SHIPPED: 'Shipped',
   DELIVERED: 'Delivered',
   CANCELLED: 'Cancelled',
 };
@@ -92,6 +89,7 @@ function getStatusIcon(status: OrderStatus, size = 'w-4 h-4') {
       return <Clock className={size} />;
     case 'READY':
       return <Package className={size} />;
+    case 'SHIPPED':
     case 'DELIVERED':
       return <Truck className={size} />;
     case 'CANCELLED':
@@ -211,6 +209,7 @@ export function OrderNotificationTracker({
   onSendNotification,
 }: OrderNotificationTrackerProps) {
   const [expandedStep, setExpandedStep] = useState<string | null>(null);
+  const steps = STATUS_STEPS.filter((s) => s !== 'SHIPPED' || status === 'SHIPPED');
 
   /** Find the history entry that matches a given status. */
   function findHistoryEntry(stepStatus: string): StatusHistoryEntry | undefined {
@@ -237,10 +236,10 @@ export function OrderNotificationTracker({
 
       {/* Timeline */}
       <div className="relative">
-        {STATUS_STEPS.map((stepStatus, idx) => {
+        {steps.map((stepStatus, idx) => {
           const state = getStepState(stepStatus, status);
           const history = findHistoryEntry(stepStatus);
-          const isLast = idx === STATUS_STEPS.length - 1;
+          const isLast = idx === steps.length - 1;
           const isExpanded = expandedStep === stepStatus;
           const hasTemplate = !!STATUS_TEMPLATE_MAP[stepStatus];
           const showNotifyButtons =
