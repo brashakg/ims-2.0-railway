@@ -1879,3 +1879,103 @@ def test_a_failed_take_off_website_press_stamps_nothing(monkeypatch, shopify_say
     assert (res["ok"], res["mode"], res["action"]) == (False, "LIVE", "delist")
     assert res.get("code") != "DELIST_FAILED"
     assert "online_state" not in db.get_collection("catalog_products").find_one({"id": "c2"})["ecom"]
+
+
+# ---------------------------------------------------------------------------
+# Round 14
+# ---------------------------------------------------------------------------
+
+
+def _retired_failed_take_down(db):
+    """SKU-2 retired in IMS; its automatic take-down FAILED (still selling)."""
+    db.get_collection("products").update_one({"sku": "SKU-2"}, {"$set": {"is_active": False}})
+    db.seed("catalog_products", [_twin({"online_state": "DELIST_FAILED", "delist_mode": "LIVE"})])
+
+
+def _ban(db, *skus):
+    db.seed("ecom_collections", [{"collection_id": "C-BAN", "collection_type": "CUSTOM",
+                                  "online_sync_blocked": True, "products": [{"sku": s} for s in skus]}])
+
+
+def test_a_retired_line_says_nothing_about_the_block_on_an_unread_night(monkeypatch):
+    """Round 14, the panel's probe (a regression from round 13's 'retired
+    wins'). Night 1: SKU-2 is retired AND SUPERADMIN-blocked, its take-down
+    failed and LOC_A lists 3 -> the retired line, payload.lines 'retired'.
+    By day SKU-2 is reactivated and stays blocked. Night 2 the block read
+    blips: SKU-2 is owed, no longer retired, and its 'retired' line never
+    said whether it is blocked -- so it is on 'the block could not be read'
+    line, never 'press Send to website' (which refuses a blocked product).
+    Read every line but 'blocked' as 'not blocked' again (round 13's
+    `- set(lines)`) -> the Send to website line, lines 'send' -> fails."""
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 4, "BV-B": 0}})
+    _retired_failed_take_down(db)
+    _ban(db, "SKU-2")
+    shop = _shopify({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 3, LOC_B: 0}})
+    _run(sp.run_parity_tick(db, graphql=shop))
+    assert _tasks(db)[0]["payload"]["lines"] == {"SKU-2": "retired"}
+    db.get_collection("products").update_one({"sku": "SKU-2"}, {"$set": {"is_active": True}})
+    _block_blips_after(monkeypatch, 0)
+    out = _run(sp.run_parity_tick(db, graphql=shop))
+    assert out["compared"] == 0 and out["tasks"]["refreshed"] == ["BV-A"]
+    (task,) = _tasks(db)
+    text = task["description"]
+    assert "online block could not be read tonight for: SKU-2 (IMS 0 vs Shopify 3 when last compared)" in text
+    assert "Top: " not in text and task["payload"]["lines"] == {}
+
+
+def test_an_unreadable_retired_answer_touches_no_task(monkeypatch):
+    """Round 14, the panel's test gap. Night 1 files retired SKU-2 (take-down
+    failed, LOC_A 3) on the retired line. Night 2 the rule's own reader of
+    'retired' (online_stock_writeback._sku_to_pid) fails: which SKU is
+    retired is unknown, so the tick compares nothing and leaves BV-A's task
+    exactly as it was. Read the failed answer as 'none retired'
+    (`retired = set()`) -> the tick refreshes BV-A and moves SKU-2 onto the
+    Send to website line -> fails."""
+    import copy
+
+    from api.services import online_stock_writeback as wb
+
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 0, "BV-B": 0}})
+    _retired_failed_take_down(db)
+    shop = _shopify({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 3, LOC_B: 0}})
+    _run(sp.run_parity_tick(db, graphql=shop))
+    before = copy.deepcopy(_tasks(db)[0])
+    assert before["payload"]["lines"] == {"SKU-2": "retired"}
+    monkeypatch.setattr(wb, "_sku_to_pid", lambda db_, skus: None)
+    out = _run(sp.run_parity_tick(db, graphql=shop))
+    assert out["checked"] is False and "catalog read failed" in out["reason"]
+    (task,) = _tasks(db)
+    assert (task["status"], task["description"], task["payload"]) == (
+        "OPEN", before["description"], before["payload"])
+
+
+@pytest.mark.parametrize("size_blocked", [True, False])
+def test_a_retired_size_of_a_blocked_product_is_told_its_press_is_refused(monkeypatch, size_blocked):
+    """Round 14, the panel's probe. SKU-2 is a SIZE of SKU-1 (it rides SKU-1's
+    listing) and is retired; SKU-1 is SUPERADMIN-blocked (a brand ban, the
+    size with it or not) and Shopify still lists SKU-2 at LOC_A 3. A size's
+    press is Send to website on its product, and that press is refused for a
+    blocked product (online_sync_blocked) -- so the retired line says so and
+    names the Shopify admin 0 that clears it in every case. Put back round
+    13's text (the size's press with no word that it is refused) -> fails."""
+    from api.routers import online_store_push as osp
+
+    db = _db({"SKU-1": {"BV-A": 0, "BV-B": 0}, "SKU-2": {"BV-A": 0, "BV-B": 0}})
+    db.get_collection("products").update_one({"sku": "SKU-2"}, {"$set": {"is_active": False}})
+    db.seed("catalog_products", [
+        {"id": "c1", "sku": "SKU-1", "ecom": {"shopify_product_id": "gid://shopify/Product/1"}},
+        _twin({"online_state": "DELISTED", "delist_mode": "LIVE",
+               "variant_of": {"product_id": "p1", "twin_id": "c1", "sku": "SKU-1"}}),
+    ])
+    _ban(db, "SKU-1", *(["SKU-2"] if size_blocked else []))
+    _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 0, LOC_B: 0}, INV_2: {LOC_A: 3, LOC_B: 0}})))
+    (task,) = _tasks(db)
+    text = task["description"]
+    assert task["payload"]["lines"] == {"SKU-2": "retired"}
+    assert "Send to website on that product, which is refused while that product is blocked" in text
+    assert "to 0 at BV-A's location in Shopify admin, which clears it in every case" in text
+    # The premise: Send to website on SKU-1 is refused.
+    monkeypatch.setattr(osp, "_get_db", lambda: db)
+    res = _run(osp.push_product("c1", current_user={"user_id": "u1", "roles": ["ADMIN"]}))["result"]
+    assert (res["ok"], res["reason"]) == (False, "online_sync_blocked")
+

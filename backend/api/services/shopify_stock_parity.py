@@ -52,9 +52,11 @@ same press as a drift tonight: unknown is not cleared, and nothing re-sends
 it by itself. A drifted SKU a SUPERADMIN blocked from online sale is named on its
 own line: no IMS button re-sends it, so the line asks for 0 in Shopify admin
 or lifting the block (on a night the block is unreadable, a SKU keeps the
-line it was last filed on: payload.lines). A drifted retired SKU is on its
-own line too: Take off website (a size: Send to website on its product), or
-0 in Shopify admin.
+line it was last filed on: payload.lines -- except a 'retired' line, which
+says nothing about the block: a SKU filed there that is no longer retired
+is unsure). A drifted retired SKU is on its own line too: Take off website
+(a size: Send to website on its product, which refuses a blocked product),
+or 0 in Shopify admin, which clears every case.
 A shop that leaves the mapped set (location cleared, claimed by two shops,
 shop deactivated) has its task closed on EVERY tick that could read the shop
 map, whether or not anything was compared: parity no longer compares it, and
@@ -614,9 +616,14 @@ def sync_drift_task(
     their listing is not proven off Shopify -- the rule lists 0, and their
     line asks for the take-down (a size: its product's Send to website, which
     re-sends every size's number) or 0 in Shopify admin, never the shelf.
-    A SKU both retired and blocked is on the retired line: the take-down
-    press stamps the mark that closes it, while lifting the block leaves a
-    retired SKU at 0, still drifting.
+    A SKU both retired and blocked is on the retired line: Take off website
+    stamps the mark that closes it, while lifting the block leaves a retired
+    SKU at 0, still drifting. A size's press is its product's Send to
+    website, which refuses a blocked product (whether or not the size itself
+    is blocked), so the line says so and names the Shopify admin 0 that
+    clears every case. A 'retired' line therefore says nothing about the
+    block: on a night the block is unread, a SKU filed there that is no
+    longer retired is unsure, never moved onto the Send to website line.
 
       * drift, or an active task still owed a SKU
                           -> refresh every ACTIVE task's description + payload,
@@ -662,19 +669,22 @@ def sync_drift_task(
             rows = drift + [{"sku": s, **seen.get(s, {}), "earlier": True} for s in sorted(owed)]
             retired = set(retired)
             if blocked is None:
-                # The block unread tonight: the line each SKU was last filed
-                # on says whether it was blocked (a blocked SKU is only ever
-                # on the blocked line). A SKU never filed on one is unsure --
-                # the retired line's press works whatever the block says.
+                # The block unread tonight: the 'send' / 'blocked' line a SKU
+                # was last filed on says whether it was blocked. A 'retired'
+                # line does not (retired wins over the block), so a SKU filed
+                # there that is no longer retired is unsure, as is one never
+                # filed -- a SKU still retired keeps the retired line.
                 lines: Dict[Any, str] = {}
                 for t in active:
                     lines.update((t.get("payload") or {}).get("lines") or {})
                 blocked = {s for s, line in lines.items() if line == "blocked"}
-                unsure = {d.get("sku") for d in rows} - set(lines) - retired
+                known = {s for s, line in lines.items() if line != "retired"}
+                unsure = {d.get("sku") for d in rows} - known - retired
             else:
                 blocked, unsure = set(blocked), set()
-            # Retired wins: Take off website (or 0 in Shopify admin) closes a
-            # retired SKU whatever the block says; lifting the block does not.
+            # Retired wins: 0 in Shopify admin closes a retired SKU whatever
+            # the block says, and so does Take off website on one that is not
+            # a size; lifting the block does not.
             banned = [d for d in rows if d.get("sku") in blocked - retired]
             off = [d for d in rows if d.get("sku") in retired]
             unread = [d for d in rows if d.get("sku") in unsure]
@@ -722,8 +732,9 @@ def sync_drift_task(
                     f"{_named(off)}. IMS lists 0 for a retired product, and the stock pass never "
                     f"re-sends an unchanged number. Store manager: ask an ADMIN or SUPERADMIN to "
                     f"press Take off website on it (for a size of another product: Send to website "
-                    f"on that product), or a SUPERADMIN to set it to 0 at {label}'s location in "
-                    f"Shopify admin."
+                    f"on that product, which is refused while that product is blocked from online "
+                    f"sale), or a SUPERADMIN to set it to 0 at {label}'s location in Shopify admin, "
+                    f"which clears it in every case."
                 )
             parts.append(
                 f"This task closes on the first night every product named here compares "
