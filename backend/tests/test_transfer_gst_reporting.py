@@ -39,7 +39,7 @@ Adversarial-review hardening (PR #899 follow-up), all tested here:
 
 All tests are pure (no live DB) via a small in-memory Mongo-subset evaluator
 (handles the exact operators the collectors use: $exists/$ne/$nin/$in/$gte/
-$lte/$or/$nor and aggregate $match+$group/$sum).
+$lte/$lt/$or/$nor and aggregate $match+$group/$sum).
 """
 
 from __future__ import annotations
@@ -101,6 +101,9 @@ def _match(doc, query):
                         return False
                 elif op == "$lte":
                     if val is None or not (val <= arg):
+                        return False
+                elif op == "$lt":
+                    if val is None or not (val < arg):
                         return False
                 else:
                     raise NotImplementedError(f"operator {op} not supported")
@@ -687,8 +690,10 @@ def test_missing_destination_gstin_stays_empty_and_loud(static_rates, monkeypatc
     file. The old gstins[0] fallback stamped the SENDER's own GSTIN as the
     recipient (a supply-to-self B2B row the portal rejects) and the validation
     never fired. Now: recipient stays '', the GSTR-1 validation flags it, the
-    portal export drops the row, and the ITC falls back to the RECEIVING store
-    only."""
+    portal export drops the row. Its credit is on NO return: the receiving
+    shop holds no GSTIN of its company, so it files none (the shop-GSTIN rule,
+    org_validation.shop_gstin) -- the Cross-Check lists it as credit left
+    off GSTR-3B instead of counting it on a return nobody files."""
     from api.services.gstn_export import to_gstr1_json
 
     db = _mini_db()
@@ -716,11 +721,13 @@ def test_missing_destination_gstin_stays_empty_and_loud(static_rates, monkeypatc
     out = to_gstr1_json(rep, gstin=rep["gstin"], period="2026-06")
     assert out["b2b"] == []
 
-    # ITC fallback: recipient GSTIN empty -> only the RECEIVING store claims.
+    # No GSTIN to receive on -> no return claims it, and the check says so.
     recv_3b = reports._compute_gstr3b("2026-06", "mh_send_branch")
     send_3b = reports._compute_gstr3b("2026-06", "jh_store")
-    assert recv_3b["itcAvailable"]["integratedTax"] == 460.0
+    assert recv_3b["itcAvailable"]["integratedTax"] == 0.0
     assert send_3b["itcAvailable"]["integratedTax"] == 0.0
+    left_off = reports._itc_unplaced(db, 2026, 6, 30, "ent_send")
+    assert (left_off["count"], left_off["tax"]) == (1, 460.0), left_off
 
 
 # ============================================================================

@@ -256,9 +256,9 @@ def aggregate_gstr3b(
 
     Pass ``entity_ids`` (a parallel list, one entity_id per store report) and,
     for the GSTIN split, ``store_gstins`` (one GSTIN per store report). A
-    report with no GSTIN falls back to per-store inclusion (its only
-    GSTIN-bound bills are to_store_id-scoped transfers, so distinct stores
-    never overlap).
+    report with no GSTIN falls back to per-store inclusion (its slice is
+    empty: gst_itc._placement keeps no transfer mirror on a shop with no
+    GSTIN, which files no return).
 
     Net cash is derived ENTITY-LEVEL after aggregation as per-head
     max(0, out - itc) + rcm and summed across entities -- one entity's ITC
