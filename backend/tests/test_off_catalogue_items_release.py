@@ -1487,3 +1487,15 @@ def test_c3_a_frame_catalogued_without_its_eye_size_is_asked_for_it(world):
         f"C3: a sizeless Boss 1700 C2 was catalogued beside the ordered 52 ({refused})",
     )
     assert len(world.products_named("Boss", "BOSS 1700")) == 1
+
+
+def test_the_identity_migration_keys_rows_as_the_door_does(world):
+    from scripts.migrate_identity_key_tighten import _identity_of
+
+    frame = world.catalogue_frame(
+        "Boss", "BOSS 1700", "C2", "52", mrp=2990, offer=2790, cost=1200
+    )
+    stored = world.product(frame["product_id"])
+    assert _identity_of(stored) == stored["identity_key"] == "boss|boss1700|c2|52"
+    # A top-level size that differs from the eye size never wins over it.
+    assert _identity_of({**stored, "size": "M"}) == "boss|boss1700|c2|52"

@@ -44,28 +44,29 @@ from typing import Any, Dict
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from api.services.product_master import compute_identity_key  # noqa: E402
+from api.services.product_master import (  # noqa: E402
+    _derive_brand_model_color_size,
+    compute_identity_key,
+)
 
 
 def _identity_of(doc: Dict[str, Any]):
-    """Read the identity fields the way the spine writes them.
-
-    Mirrors backfill_dedupe_prep._identity_of: the spine stores brand/model/
-    color/size at the top level, with attributes as the fallback for rows that
-    came in through the catalogue door.
-    """
+    """The key the create door stamps: product_master's own derivation over the
+    attributes (_derive_brand_model_color_size -> compute_identity_key), never
+    a second reading of the fields. Only a field the attributes do not carry
+    at all (a legacy row that predates them) falls back to the spine's
+    top-level column -- the door wrote those FROM the attributes, so for a
+    door-made row the fallback never fires."""
     attrs = doc.get("attributes") if isinstance(doc.get("attributes"), dict) else {}
-    brand = doc.get("brand") or doc.get("brand_name") or attrs.get("brand_name") or attrs.get("brand")
-    model = doc.get("model") or doc.get("model_no") or attrs.get("model_no") or attrs.get("model")
-    colour = (
-        doc.get("color")
-        or doc.get("colour")
-        or doc.get("colour_code")
-        or attrs.get("colour_code")
-        or attrs.get("color")
-    )
-    size = doc.get("size") or attrs.get("size") or attrs.get("lens_size")
-    return compute_identity_key(brand, model, colour, size)
+    ids = _derive_brand_model_color_size(attrs)
+    top = {
+        "brand": doc.get("brand"),
+        "model": doc.get("model"),
+        "color": doc.get("color") or doc.get("colour"),
+        "size": doc.get("size"),
+    }
+    ids = {k: ids.get(k) or top.get(k) for k in top}
+    return compute_identity_key(ids["brand"], ids["model"], ids["color"], ids["size"])
 
 
 def run(products, *, apply: bool) -> Dict[str, Any]:
