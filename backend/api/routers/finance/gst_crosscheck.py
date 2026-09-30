@@ -81,6 +81,8 @@ async def get_gst_reconciliation(
                 # OS-008: the order-carried inter-state flag (online orders).
                 "interstate": 1,
                 "fulfillment_route": 1,
+                "fulfillment_hold": 1,
+                "stock_hold_reason": 1,
             },
         ),
     )
@@ -206,6 +208,8 @@ def _books_and_tally_for_stores(db, store_ids, start, end) -> tuple:
             # OS-008: the order-carried inter-state flag (online orders).
             "interstate": 1,
             "fulfillment_route": 1,
+            "fulfillment_hold": 1,
+            "stock_hold_reason": 1,
         },
     )
     for o in _filed_orders(db, cursor):

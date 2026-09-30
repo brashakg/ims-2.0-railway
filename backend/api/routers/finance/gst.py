@@ -111,6 +111,8 @@ async def get_gst_summary(
                 # OS-008: the order-carried inter-state flag (online orders).
                 "interstate": 1,
                 "fulfillment_route": 1,
+                "fulfillment_hold": 1,
+                "stock_hold_reason": 1,
             },
         ),
     )

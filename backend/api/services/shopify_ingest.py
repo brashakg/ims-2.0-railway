@@ -440,17 +440,47 @@ def reseal_seller_gst(
     return fields, {k: "" for k in ("interstate", "tax_summary", "tax_totals") if k not in fields}
 
 
+def claim_plan(items: List[Dict[str, Any]], route: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
+    """THE plan of a routed online order's claim: ``{shop: [line with
+    product_id = its IMS product and quantity = what that shop claims]}``.
+    One shop claims every line (route.store_id), unless Shopify split the
+    order: then each leg's lines at the shop that ships that leg. Lines with
+    no IMS match are left out (not our serialized stock); a route that named
+    no shop plans nothing."""
+    lines = [
+        {**it, "product_id": it.get("ims_product_id")}
+        for it in items or []
+        if it.get("ims_product_id")
+    ]
+    plan: Dict[str, List[Dict[str, Any]]] = {}
+    if route.get("split"):
+        by_line = {str(it.get("shopify_line_item_id")): it for it in lines}
+        for r in route["split"]:
+            line = by_line.get(str(r.get("line_item_id")))
+            if line:  # a line IMS does not stock ships without a claim
+                plan.setdefault(r["store_id"], []).append({**line, "quantity": r["qty"]})
+    elif lines and route.get("store_id"):
+        plan[route["store_id"]] = lines
+    return plan
+
+
 def _claim_online_units(
     db,
     order_id: str,
     order_ref: str,
     items: List[Dict[str, Any]],
     route: Dict[str, Any],
+    held: Optional[Dict[str, Dict[str, int]]] = None,
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
     """THE claim of a routed online order's serialized units -- the booking's
     and the Re-map re-route's (online_fulfillment_route.reroute_held_order).
     Returns (breakdown rows {product_id, store_id, qty}, the shops that
-    claimed). Never raises: Shopify already took payment.
+    claimed). Never raises: Shopify already took payment. ``held``
+    (``{shop: {product_id: n}}``, Re-map only) is the units the order still
+    holds SOLD where the plan wants them: they count as claimed and are never
+    swapped for another unit, and only a shop that claims a NEW unit is
+    tasked to ship (a shop already told, which may have packed it, is not
+    told again).
 
     ONE shop per order (Q2): route_order already moved the order to a shop
     that covers every line when the assigned one was short -- unless Shopify
@@ -468,39 +498,44 @@ def _claim_online_units(
     billing one) and named, so the sync-health tile + Sentry surface it."""
     breakdown: List[Dict[str, Any]] = []
     fulfillment_store = route.get("store_id")
-    # _mark_units_sold claims by IMS product_id; map each line's resolved
-    # ims_product_id onto product_id (the Shopify product_id is NOT the IMS one).
-    decrement_items = [
-        {**it, "product_id": it.get("ims_product_id")}
-        for it in items or []
-        if it.get("ims_product_id")
-    ]
-    if not decrement_items or not (fulfillment_store or route.get("split")):
+    # _mark_units_sold claims by IMS product_id: claim_plan maps each line's
+    # resolved ims_product_id onto product_id (the Shopify one is NOT IMS's).
+    plan = claim_plan(items, route)
+    if not plan:
         return breakdown, []
     try:
-        expected = sum(int(it.get("quantity") or 1) for it in decrement_items)
-        plan: Dict[str, List[Dict[str, Any]]] = {}
-        if route.get("split"):
-            by_line = {str(it.get("shopify_line_item_id")): it for it in decrement_items}
-            for r in route["split"]:
-                line = by_line.get(str(r.get("line_item_id")))
-                if line:  # a line IMS does not stock ships without a claim
-                    plan.setdefault(r["store_id"], []).append({**line, "quantity": r["qty"]})
-        else:
-            plan[fulfillment_store] = decrement_items
+        expected = sum(int(ln.get("quantity") or 1) for lines in plan.values() for ln in lines)
         claimed = 0
         short: List[str] = []  # the shops that could not claim their own part
+        new: List[str] = []  # the shops that claimed a unit now
         for shop, lines in plan.items():
-            n, rows = _claim_units_at(db, order_id, lines, shop)
+            have = dict((held or {}).get(shop) or {})
+            todo: List[Dict[str, Any]] = []
+            for ln in lines:
+                q = int(ln.get("quantity") or 1)
+                kept = min(have.get(ln["product_id"], 0), q)
+                have[ln["product_id"]] = have.get(ln["product_id"], 0) - kept
+                if kept:
+                    claimed += kept
+                    breakdown.append({"product_id": ln["product_id"], "store_id": shop, "qty": kept})
+                if q > kept:
+                    todo.append({**ln, "quantity": q - kept})
+            n, rows = _claim_units_at(db, order_id, todo, shop)
             claimed += n
             breakdown.extend(rows)
-            if n < sum(int(ln.get("quantity") or 1) for ln in lines):
+            if n:
+                new.append(shop)
+            if n < sum(int(ln.get("quantity") or 1) for ln in todo):
                 short.append(shop)
-        if breakdown:
+        if new:
             from .online_fulfillment_route import fallback_store_id
 
             _raise_fallback_ship_tasks(
-                db, order_id, order_ref, breakdown, fallback_store_id() or ""
+                db,
+                order_id,
+                order_ref,
+                [r for r in breakdown if r["store_id"] in new],
+                fallback_store_id() or "",
             )
         if claimed < expected:
             # ponytail: one task per order -- a split short at two shops

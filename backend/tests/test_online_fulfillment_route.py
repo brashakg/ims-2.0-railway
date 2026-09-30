@@ -66,6 +66,16 @@ Rules pinned (each was reverted in the source and seen red, see the PR notes):
      never-into-a-short-shop is pinned on the whole-order path; the GST
      summary, reconciliation and cross-check leave out what the returns do;
      a split leg's GSTIN hold is worded for the leg
+  R16 (money panel, round 8) an unmapped location's problem names the shop
+     that really ships; Re-map counts the order's own units without giving
+     them back, keeps every unit its new route still wants (never swapped),
+     and a refused Re-map leaves every unit the order's -- the same ones;
+     Re-map re-raises no task a human closed; a seller hold still standing
+     keeps the invoice, the challan and every return off even once its cause
+     is fixed; a released seller hold is dated and filed in its release
+     month (clear-hold and Re-map, same shop too); a failed split-leg move
+     names the leg's shop, and a human's later move of it rewrites stock at
+     dispatch
 """
 
 from __future__ import annotations
@@ -2021,10 +2031,9 @@ def _gstin_missing_at_bokaro(world, order_id):
     return payload, res, order
 
 
-def _untouched(world, res, order, counted=False):
-    """Nothing changed. ``counted``: the refusal came after the route count,
-    which needs the order's own units back on the shelf -- they are claimed
-    again at the same shop."""
+def _untouched(world, res, order):
+    """Nothing changed -- not even a unit given back and claimed again: the
+    route counts the order's own units without releasing them (round 8)."""
     db = world["db"]
     after = db.orders.find_one({"order_id": res["order_id"]}, {"_id": 0})
     assert after["store_id"] == order["store_id"]
@@ -2035,7 +2044,7 @@ def _untouched(world, res, order, counted=False):
     assert db.stock_units.find_one({"store_id": "BV-RAN-01"})["status"] == "AVAILABLE"
     # Refused BEFORE any unit moved: none was given back and claimed again (a
     # shop holding several would re-claim a shelf unit and free the shipped one).
-    assert db.stock_units.count_documents({"released_from_order_id": res["order_id"]}) == int(counted)
+    assert db.stock_units.count_documents({"released_from_order_id": res["order_id"]}) == 0
 
 
 @pytest.mark.parametrize("how", ["closed_in_shopify", "fulfilled_per_shopify", "unmapped_no_fallback"])
@@ -2068,7 +2077,7 @@ def test_remap_refuses_an_order_shopify_no_longer_routes_to_a_shop(world, monkey
     assert {"closed_in_shopify": "no open fulfillment order",
             "fulfilled_per_shopify": "Shopify shows it FULFILLED",
             "unmapped_no_fallback": "names no IMS shop"}[how] in out["message"]
-    _untouched(world, res, order, counted=how == "unmapped_no_fallback")
+    _untouched(world, res, order)
 
 
 @pytest.mark.parametrize("state", ["claiming", "move_on_the_wire", "crashed_remap"])
@@ -2363,3 +2372,348 @@ def test_a_leg_in_the_sellers_state_is_offered_the_sellers_gstin_too():
         {"store_name": "Dhanbad", "state_code": "20", "gstin": ""}, bokaro)["message"]
     assert "if Dhanbad is registered under 20AAAAA0000A1Z5, set that GSTIN on Dhanbad" in msg
     assert "otherwise move its fulfillment order" in msg
+
+
+# ---------------------------------------------------------------------------
+# R16 -- money panel, round 8
+# ---------------------------------------------------------------------------
+
+
+def test_an_unmapped_location_names_the_shop_that_really_ships_it(world, monkeypatch):
+    """[LOW] Shopify assigned the unmapped Pune location; the fallback BV-BOK-01
+    is mapped but holds nothing, Ranchi holds 1 -- the order moves to Ranchi.
+    The LOCATION_UNMAPPED text (and its P1 task, scoped to Ranchi) said 'IMS
+    used the fallback shop BV-BOK-01'; it names Ranchi now."""
+    db = world["db"]
+    monkeypatch.setenv("ONLINE_FULFILLMENT_STORE_ID", "BV-BOK-01")
+    _stock(db, "BV-RAN-01", "P-RB", 1)
+    world["shop"].fo(FO_1, LOC_PUNE_SHOPIFY, name="Pune warehouse")
+
+    res, order = _book(world, _order(58001))
+
+    route = order["fulfillment_route"]
+    assert order["store_id"] == "BV-RAN-01" and route["reason"] == "MOVED"
+    [p] = route["problems"]
+    assert p["code"] == "LOCATION_UNMAPPED" and "Pune warehouse" in p["message"]
+    assert "IMS used the fallback shop" not in p["message"]
+    assert ("The fallback shop BV-BOK-01 (ONLINE_FULFILLMENT_STORE_ID) does not hold every "
+            "unit, so IMS ships it from BV-RAN-01") in p["message"]
+    [task] = [t for t in world["tasks"].created
+              if t["source_ref"] == f"online_route:LOCATION_UNMAPPED:{res['order_id']}"]
+    assert task["description"] == p["message"] and task["store_id"] == "BV-RAN-01"
+
+
+def _move_failed_at_ranchi(world, order_id, ranchi_units=1, qty=1):
+    """Shopify has the order at Bokaro, which holds nothing; Ranchi holds it,
+    so the order is claimed and billed at Ranchi and the move is refused:
+    MOVE_FAILED, held. The human closes every task the booking raised."""
+    _stock(world["db"], "BV-RAN-01", "P-RB", ranchi_units)
+    world["shop"].fo(FO_1, LOC_BOK, units=qty)
+    world["shop"].move_error = "Location does not stock the item"
+    payload = _order(order_id, lines=(("RB-1234", qty),))
+    res, order = _book(world, payload)
+    assert [p["code"] for p in order["fulfillment_route"]["problems"]] == ["MOVE_FAILED"]
+    assert order["store_id"] == "BV-RAN-01"
+    for t in world["tasks"].created:
+        t["status"] = "COMPLETED"
+    world["shop"].move_error = None
+    return payload, res, order
+
+
+def _units(db, order_id):
+    return sorted(u["stock_id"] for u in db.stock_units.find({"order_id": order_id, "status": "SOLD"}))
+
+
+@pytest.mark.parametrize("hold", ["move_failed", "gstin_fixed"])
+def test_a_remap_at_the_same_shop_keeps_the_very_units_the_order_holds(world, monkeypatch, hold):
+    """[LOW] The order holds U1; an earlier unit U0 came back on the shelf (the
+    order holding it was cancelled). A Re-map that ships from the same shop
+    gave U1 back and claimed U0 -- the packed unit on the shelf, serial
+    lineage wrong. Nothing is given back now, and the shop that already
+    packed it is not told to ship it again."""
+    db = world["db"]
+    shop = "BV-RAN-01" if hold == "move_failed" else "BV-BOK-01"
+    for sid in ("U0", "U1"):
+        db.stock_units.insert_one({"stock_id": sid, "product_id": "P-RB", "store_id": shop,
+                                   "status": "AVAILABLE"})
+    db.stock_units.update_one({"stock_id": "U0"}, {"$set": {"status": "SOLD", "order_id": "OTHER"}})
+    if hold == "move_failed":
+        world["shop"].fo(FO_1, LOC_BOK)
+        world["shop"].move_error = "Location does not stock the item"
+    else:
+        db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": {"gstin": ""}})
+        world["shop"].fo(FO_1, LOC_BOK)
+    payload = _order(58010 + (hold == "gstin_fixed"))
+    res, order = _book(world, payload)
+    assert order["fulfillment_hold"] is True and _units(db, res["order_id"]) == ["U1"]
+    for t in world["tasks"].created:
+        t["status"] = "COMPLETED"  # the shop packed it; the human closed the rest
+    world["shop"].move_error = None
+    db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": {"gstin": "20AAAAA0000A1Z5"}})
+    db.stock_units.update_one({"stock_id": "U0"}, {"$set": {"status": "AVAILABLE", "order_id": None}})
+
+    out = _remap(world, monkeypatch, payload)
+
+    assert out["ok"] and out["result"]["status"] == "rerouted", out
+    assert _units(db, res["order_id"]) == ["U1"]
+    assert db.stock_units.find_one({"stock_id": "U0"})["status"] == "AVAILABLE"
+    assert db.stock_units.count_documents({"released_from_order_id": res["order_id"]}) == 0
+    after = db.orders.find_one({"order_id": res["order_id"]}, {"_id": 0})
+    assert after["fulfillment_breakdown"] == [{"product_id": "P-RB", "store_id": shop, "qty": 1}]
+    assert world["tasks"].open_refs("online_fallback_ship:") == []
+
+
+def test_a_failing_release_on_a_same_shop_remap_never_touches_the_units(world, monkeypatch):
+    """[LOW] The panel's input: a MOVE_FAILED order holding 2 units at Ranchi,
+    and a release that frees 1 then fails. Re-map refused and left the freed
+    unit on the shelf (sellable at the till, the breakdown still saying 2).
+    Now a same-shop Re-map gives nothing back: the release is never called."""
+    from database.repositories.product_repository import StockRepository
+
+    db = world["db"]
+    payload, res, _order_doc = _move_failed_at_ranchi(world, 58020, ranchi_units=2, qty=2)
+
+    def half_then_fail(self, order_id, **kw):
+        raise AssertionError("a same-shop Re-map must not give a unit back")
+
+    monkeypatch.setattr(StockRepository, "release_sold_units_for_order", half_then_fail)
+    out = _remap(world, monkeypatch, payload)
+
+    assert out["ok"], out
+    assert _sold_at(db, res["order_id"]) == ["BV-RAN-01", "BV-RAN-01"]
+    assert db.stock_units.count_documents({"status": "AVAILABLE"}) == 0
+
+
+@pytest.mark.parametrize("race", [False, True])
+def test_a_refused_remap_puts_back_every_unit_it_gave_back(world, monkeypatch, race):
+    """[LOW] Where a Re-map must give units back (the human moved Pune's leg
+    to Bokaro, so Pune's 2 OA units go back) and the release frees 1 then
+    fails: refused, and the freed unit is the order's again -- the very
+    same one; nothing sellable at the till, the breakdown still true.
+    ``race``: the till sold the freed unit in between -- a stock miss, loud."""
+    from database.repositories.product_repository import StockReleaseResult, StockRepository
+
+    db = world["db"]
+    db.stores.update_one({"store_id": PUNE}, {"$set": {"shopify_location_id": LOC_PUN}})
+    _stock(db, "BV-BOK-01", "P-RB", 1)
+    _stock(db, "BV-BOK-01", "P-OA", 2)
+    _stock(db, PUNE, "P-OA", 2)
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 1)])
+    world["shop"].fo(FO_2, LOC_PUN, lines=[(9001, 2)])
+    payload = _order(58021 + 100 * race, lines=(("RB-1234", 1), ("OA-5", 2)))
+    res, order = _book(world, payload)
+    assert [p["code"] for p in order["fulfillment_route"]["problems"]] == ["SPLIT_SELLERS"]
+    before = _units(db, res["order_id"])
+    world["shop"].fos[1]["assignedLocation"]["location"]["id"] = LOC_BOK  # the human's move
+    real = StockRepository.release_sold_units_for_order
+
+    def half_then_fail(self, order_id, **kw):
+        got = real(self, order_id, **{**kw, "limit": 1})
+        if race:
+            db.stock_units.update_one({"stock_id": got.released[0]},
+                                      {"$set": {"status": "SOLD", "order_id": "WALK-IN"}})
+        return StockReleaseResult(got.released, True)
+
+    monkeypatch.setattr(StockRepository, "release_sold_units_for_order", half_then_fail)
+    out = _remap(world, monkeypatch, payload)
+
+    assert not out["ok"] and "press Re-map again" in out["message"], out
+    if race:
+        [miss] = list(db.online_stock_miss.find({"order_id": res["order_id"]}))
+        assert miss["store_id"] == PUNE and len(miss["detail"]["lost_on_remap"]) == 1
+        assert len(_units(db, res["order_id"])) == len(before) - 1
+        return
+    assert _units(db, res["order_id"]) == before
+    assert db.stock_units.count_documents({"store_id": PUNE, "status": "AVAILABLE"}) == 0
+    after = db.orders.find_one({"order_id": res["order_id"]}, {"_id": 0})
+    assert after["fulfillment_breakdown"] == order["fulfillment_breakdown"]
+    assert after["stock_hold_reason"] == order["stock_hold_reason"]
+
+
+@pytest.mark.parametrize("fix", ["state_corrected", "gstin_only"])
+def test_a_standing_seller_hold_keeps_the_invoice_and_every_return_off(world, monkeypatch, fix):
+    """[MEDIUM] The buyer is in Maharashtra. Booked HELD on SHOP_GSTIN_MISSING
+    with the split taken then. Organization fixes Bokaro -- and until someone
+    lifts the hold, the invoice door split LIVE (IGST) while GSTR-1/3B filed
+    the booking's stored split (CGST+SGST): one order, two tax heads. While
+    the hold stands, no door issues or files it; once lifted (which
+    re-splits), the invoice and every return agree."""
+    db = world["db"]
+    if fix == "state_corrected":  # Jharkhand GSTIN, state typed as Maharashtra
+        db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": {"state_code": "27"}})
+    else:  # neither GSTIN nor state; the admin sets only the GSTIN
+        db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": {"gstin": "", "state_code": None}})
+    _stock(db, "BV-BOK-01", "P-RB", 1)
+    world["shop"].fo(FO_1, LOC_BOK)
+    res, order = _book(world, _order(58030 + (fix == "gstin_only"), buyer_state="27"))
+    assert order["fulfillment_hold"] is True and order["interstate"] is False
+    if fix == "state_corrected":
+        db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": {"state_code": "20"}})
+    else:
+        db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": {"gstin": "20AAAAA0000A1Z5"}})
+
+    assert "still on its seller (GSTIN) hold" in _invoice_refusal(world, monkeypatch, res["order_id"])
+    filed = _gstr1(world, monkeypatch, order, "BV-BOK-01")
+    assert filed["b2cs"] == [] and filed["b2b"] == []
+    assert _gstr3b(world, monkeypatch, order, "BV-BOK-01")["outwardTaxableSupplies"]["centralTax"] == 0
+    assert "still on its seller" in _challan(world, monkeypatch, res["order_id"])
+
+    assert _clear_hold(world, monkeypatch, res["order_id"])["released"] == ["SELLER"]
+
+    after = db.orders.find_one({"order_id": res["order_id"]}, {"_id": 0})
+    inv = _invoice(world, monkeypatch, res["order_id"])
+    assert inv["interstate"] is True and after["interstate"] is True
+    [row] = _gstr1(world, monkeypatch, after, "BV-BOK-01")["b2cs"]
+    assert row["igst"] == inv["taxTotals"]["igst"] > 0 and row["cgst"] == row["sgst"] == 0
+
+
+@pytest.mark.parametrize("door", ["clear_hold", "remap"])
+def test_a_seller_hold_released_at_the_same_shop_is_filed_in_its_release_month(world, monkeypatch, door):
+    """[MEDIUM] Booked held (SHOP_GSTIN_MISSING) 40 days ago and kept off the
+    booking month's GSTR-1 while held. Released at the SAME shop today, it
+    kept its booking date: the invoice said 2026-08-21, this month's return
+    left it out, and the booking month may already be filed -- the supply in
+    no return. Released now, it is dated and filed now."""
+    from datetime import datetime, timedelta, timezone
+
+    db = world["db"]
+    payload, res, order = _gstin_missing_at_bokaro(world, 58040 + (door == "remap"))
+    booked = datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0) - timedelta(days=40)
+    db.orders.update_one({"order_id": res["order_id"]},
+                         {"$set": {"created_at": booked, "invoice_date": booked}})
+    assert _gstr1(world, monkeypatch, {**order, "created_at": booked}, "BV-BOK-01")["b2cs"] == []
+    db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": {"gstin": "20AAAAA0000A1Z5"}})
+
+    if door == "remap":
+        out = _remap(world, monkeypatch, payload)
+        assert out["ok"] and "hold is lifted" in out["message"], out
+    else:
+        assert _clear_hold(world, monkeypatch, res["order_id"])["released"] == ["SELLER"]
+
+    after = db.orders.find_one({"order_id": res["order_id"]}, {"_id": 0})
+    assert after["store_id"] == "BV-BOK-01" and after["invoice_number"] == order["invoice_number"]
+    assert after["invoice_date"] == after["created_at"] > booked
+    assert after["booked_at"] == booked
+    assert len(_gstr1(world, monkeypatch, after, "BV-BOK-01")["b2cs"]) == 1
+    assert _gstr1(world, monkeypatch, {**after, "created_at": booked}, "BV-BOK-01")["b2cs"] == []
+
+
+def test_remap_never_reopens_a_task_a_human_closed(world, monkeypatch):
+    """[LOW] Input A: the fallback BV-BOK-01 is mapped, Shopify has the order
+    at unmapped Pune, only Ranchi holds it and Shopify refuses the move:
+    booked MOVED to Ranchi with LOCATION_UNMAPPED + MOVE_FAILED tasks. The
+    human closes both (and Ranchi its ship task); Shopify then takes the
+    move and Re-map succeeds. LOCATION_UNMAPPED was re-opened (P1) and the
+    ship task re-issued; neither is now, and MOVE_FAILED stays closed."""
+    db = world["db"]
+    monkeypatch.setenv("ONLINE_FULFILLMENT_STORE_ID", "BV-BOK-01")
+    _stock(db, "BV-RAN-01", "P-RB", 1)
+    world["shop"].fo(FO_1, LOC_PUNE_SHOPIFY, name="Pune warehouse")
+    world["shop"].move_error = "Fulfillment order cannot be moved"
+    payload = _order(58050)
+    res, order = _book(world, payload)
+    oid = res["order_id"]
+    assert sorted(p["code"] for p in order["fulfillment_route"]["problems"]) == [
+        "LOCATION_UNMAPPED", "MOVE_FAILED"]
+    for t in world["tasks"].created:
+        t["status"] = "COMPLETED"
+    world["shop"].move_error = None
+
+    out = _remap(world, monkeypatch, payload)
+
+    assert out["ok"] and "hold is lifted" in out["message"], out
+    assert world["tasks"].open_refs("online_route:") == []
+    assert world["tasks"].open_refs("online_fallback_ship:") == []
+    assert len(world["tasks"].refs(f"online_route:LOCATION_UNMAPPED:{oid}")) == 1
+
+
+def test_a_refused_remap_raises_no_task(world, monkeypatch):
+    """[LOW] Input B: MOVE_FAILED at Ranchi, Ranchi closed its ship task,
+    Bokaro restocks, Re-map is REFUSED ('may already be issued'). The
+    refusal re-issued 'Pack and hand them to dispatch' to Ranchi; it touches
+    nothing now."""
+    db = world["db"]
+    payload, res, _order_doc = _move_failed_at_ranchi(world, 58060)
+    _stock(db, "BV-BOK-01", "P-RB", 1)
+    n_tasks = len(world["tasks"].created)
+
+    out = _remap(world, monkeypatch, payload)
+
+    assert not out["ok"] and "may already be issued" in out["message"], out
+    assert len(world["tasks"].created) == n_tasks
+    assert _sold_at(db, res["order_id"]) == ["BV-RAN-01"]
+
+
+def _split_leg_move_refused(world, order_id):
+    """Shopify split RB x2 -> Bokaro, OA -> Ranchi (short); BV Dhanbad (Bokaro's
+    GSTIN) holds the OA, so FO_2 is planned to Dhanbad -- and Shopify refuses."""
+    db = world["db"]
+    _shop(db, "BV-DHN-01", "BV Dhanbad", "20AAAAA0000A1Z5", LOC_DHN)
+    _stock(db, "BV-BOK-01", "P-RB", 2)
+    _stock(db, "BV-DHN-01", "P-OA", 1)
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 2)])
+    world["shop"].fo(FO_2, LOC_RAN, lines=[(9001, 1)])
+    world["shop"].move_error = "Location does not stock the item"
+    res, order = _book(world, _order(order_id, lines=(("RB-1234", 2), ("OA-5", 1))))
+    assert world["shop"].moves() == [{"id": FO_2, "newLocationId": LOC_DHN}]
+    assert _sold_at(db, res["order_id"]) == ["BV-BOK-01", "BV-BOK-01", "BV-DHN-01"]
+    return res, order
+
+
+def test_a_failed_split_leg_move_names_the_legs_shop(world):
+    """[LOW] The MOVE_FAILED hold text and task said 'the shipping shop's
+    Shopify location' -- order.store_id is Bokaro, so a human moved FO_2 to
+    Bokaro. It names Dhanbad, the leg's shop, now."""
+    res, order = _split_leg_move_refused(world, 58070)
+
+    [p] = order["fulfillment_route"]["problems"]
+    assert p["code"] == "MOVE_FAILED" and order["store_id"] == "BV-BOK-01"
+    assert "to BV-DHN-01's Shopify location" in p["message"]
+    assert "stock it at BV-DHN-01's location" in p["message"]
+    assert "move it to BV-DHN-01's location in Shopify admin" in p["message"]
+    assert "shipping shop" not in p["message"]
+    assert order["stock_hold_reason"] == p["message"]
+
+
+def test_a_human_moved_split_leg_rewrites_the_shops_stock_at_dispatch(world, monkeypatch):
+    """[LOW] The split twin of the whole-order rule: the leg's move failed, a
+    human moved FO_2 from Ranchi to Dhanbad in Shopify admin and cleared the
+    hold. FO_2 was recorded as Dhanbad's at booking anyway, so the dispatch
+    never re-asserted stock and Ranchi's location stayed one phantom OA high.
+    FO_2 is not recorded until it really moves; the dispatch rewrites."""
+    import api.services.online_stock_writeback as wb
+
+    db = world["db"]
+    res, order = _split_leg_move_refused(world, 58071)
+    assert order["fulfillment_route"]["fulfillment_order_ids"] == [FO_1]
+    assert _clear_hold(world, monkeypatch, res["order_id"])["released"] == ["STOCK"]
+    wrote = []
+    monkeypatch.setattr(wb, "writeback_after_sale", lambda db, items, store: wrote.append(store))
+    after = db.orders.find_one({"order_id": res["order_id"]}, {"_id": 0})
+
+    pushed = _push(world, after, {FO_1: LOC_BOK, FO_2: LOC_DHN})  # the human's move
+
+    assert pushed.ok and _fulfilled(world) == [[FO_1, FO_2]]
+    assert wrote == ["BV-BOK-01"]
+
+
+def test_remap_tells_only_a_shop_that_claims_a_new_unit(world, monkeypatch):
+    """[LOW] Split RB -> Bokaro, OA -> Pune (another GSTIN): held. Bokaro packs
+    its RB and closes its ship task; the human moves FO_2 to Ranchi (Bokaro's
+    GSTIN) and presses Re-map. Ranchi claims the OA and is told to ship it;
+    Bokaro keeps the very RB it packed and is not told again."""
+    db = world["db"]
+    payload, res, _order_doc = _split_sellers(world, 58080)
+    oid = res["order_id"]
+    _stock(db, "BV-RAN-01", "P-OA", 1)
+    rb = _units(db, oid)
+    for t in world["tasks"].created:
+        t["status"] = "COMPLETED"
+    world["shop"].fos[1]["assignedLocation"]["location"]["id"] = LOC_RAN  # the human's move
+
+    out = _remap(world, monkeypatch, payload)
+
+    assert out["ok"] and "hold is lifted" in out["message"], out
+    assert _sold_at(db, oid) == ["BV-BOK-01", "BV-RAN-01"]
+    assert [u for u in _units(db, oid) if "BV-BOK-01" in u] == [u for u in rb if "BV-BOK-01" in u]
+    assert world["tasks"].open_refs("online_fallback_ship:") == [f"online_fallback_ship:{oid}:BV-RAN-01"]

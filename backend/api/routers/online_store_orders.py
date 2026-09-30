@@ -726,7 +726,11 @@ async def clear_rx_hold(
     # wrote into rx_hold_reason before the stock hold owned its own field.
     # Late import: online_store_orders must not import orders at module level.
     from .orders import order_hold_kinds
-    from ..services.online_fulfillment_route import seller_held, stored_seller_problem
+    from ..services.online_fulfillment_route import (
+        seller_held,
+        seller_release_dates,
+        stored_seller_problem,
+    )
 
     released = order_hold_kinds(order)
     if not released:
@@ -738,7 +742,7 @@ async def clear_rx_hold(
     # it away: while the problem stands no tax invoice can be issued, so the
     # goods must not leave. Fix the cause (the shop's GSTIN in Organization,
     # or the fulfillment orders + Re-map), then clear.
-    bad = stored_seller_problem(order)
+    bad = stored_seller_problem(order, cause_only=True)
     if bad:
         raise HTTPException(
             status_code=409,
@@ -786,6 +790,9 @@ async def clear_rx_hold(
             )
         gst_set, unset = reseal_seller_gst(order, store_doc)
         update.update(gst_set)
+        # No tax invoice was issued while it was held: the one issued now is
+        # dated now and filed in this month (THE filing-date rule, Re-map's too).
+        update.update(seller_release_dates(order, now_dt))
     try:
         coll.update_one(
             {"order_id": order_id}, {"$set": update, **({"$unset": unset} if unset else {})}
