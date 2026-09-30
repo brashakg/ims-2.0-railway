@@ -1825,3 +1825,69 @@ def test_a_partly_landed_goods_back_keeps_its_mark_at_the_units_that_landed(swep
     _goods_back(swept["review"].find_one({"shopify_refund_id": str(rid)}))
     line = _doc(swept, oid)["items"][0]
     assert (line.get("returned_qty"), line.get("restocked_refunds")) == (1, {str(rid): 1})
+
+
+# ---------------------------------------------------------------------------
+# An answer that could not be read is no answer (panel round 11): the returns
+# scan, and a claim whose reply AND read-back were both lost.
+# ---------------------------------------------------------------------------
+
+
+class _ScanFailsOnce:
+    """The returns collection; its first find raises (a blip)."""
+
+    def __init__(self, real):
+        self.real, self.failed = real, False
+
+    def __getattr__(self, name):
+        return getattr(self.real, name)
+
+    def find(self, *a, **kw):
+        if not self.failed:
+            self.failed = True
+            raise RuntimeError("returns scan timed out")
+        return self.real.find(*a, **kw)
+
+
+def test_goods_back_on_a_premark_row_restocks_nothing_while_the_returns_scan_blips(swept, monkeypatch):
+    """A row confirmed before the line marks (every refund confirmed on main)
+    has only its own returns doc to say its restock minted the frame. The
+    scan failing read as nothing back: Goods back minted it a second time
+    (a historical order has no SOLD unit to stop it)."""
+    from fastapi import HTTPException
+
+    oid = 60201
+    row = _historical_refund(swept, monkeypatch, oid, 700401, status="DELIVERED")
+    _confirm(row)
+    assert _minted(swept) == ["AVAILABLE"]
+    items = _doc(swept, oid)["items"]
+    for item in items:
+        item.pop("returned_qty", None)
+        item.pop("restocked_refunds", None)
+    _set(swept, oid, items=items)
+    blip = _ScanFailsOnce(returns_router._returns_coll())
+    monkeypatch.setattr(returns_router, "_returns_coll", lambda: blip)
+    posted = swept["review"].find_one({"review_id": row["review_id"]})
+    with pytest.raises(HTTPException) as first:
+        _goods_back(posted)
+    assert first.value.status_code == 503 and blip.failed
+    assert _minted(swept) == ["AVAILABLE"], "one frame, one unit"
+    _goods_back(posted)
+    assert _minted(swept) == ["AVAILABLE"], "one frame, one unit"
+
+
+def test_the_counter_refuses_while_the_returns_scan_blips(swept, monkeypatch):
+    """The same unreadable scan at the counter: a refund confirmed before the
+    marks has only its doc, so reading nothing back took the unit back (and
+    refunded it) a second time. Refused for a retry, nothing recorded."""
+    from fastapi import HTTPException
+
+    oid = 60204
+    _claim_unit(swept, _book(swept, oid))
+    _set(swept, oid, status="DELIVERED")
+    blip = _ScanFailsOnce(returns_router._returns_coll())
+    monkeypatch.setattr(returns_router, "_returns_coll", lambda: blip)
+    with pytest.raises(HTTPException) as refused:
+        _counter_return(swept, oid)
+    assert refused.value.status_code == 503 and swept["returns"].count_documents({}) == 0
+    assert _counter_return(swept, oid)["return_id"]

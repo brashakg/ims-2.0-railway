@@ -384,10 +384,11 @@ def _cap_restock_to_returnable(
     counter return door's own answer (_cap_restock_to_unreturned), then the
     order's own SOLD units (_cap_restock_to_sold_units). The webhook's
     proposal, the post (AUTO or the accountant's confirm) and Goods back all
-    ask it. Returns (lines, overlapped, unknown)."""
-    lines, overlapped = _cap_restock_to_unreturned(lines, order, refund_id)
+    ask it. Returns (lines, overlapped, unknown): unknown = either answer
+    could not be read."""
+    lines, overlapped, unread = _cap_restock_to_unreturned(lines, order, refund_id)
     lines, unknown = _cap_restock_to_sold_units(lines, order)
-    return lines, overlapped, unknown
+    return lines, overlapped, unknown or unread
 
 
 def _split_restock(line: Any, keep: float) -> List[Any]:
@@ -459,7 +460,7 @@ def _sold_units(order_id: Any, product_id: str) -> Optional[float]:
 
 def _cap_restock_to_unreturned(
     lines: List[Any], order: Dict[str, Any], refund_id: str
-) -> Tuple[List[Any], bool]:
+) -> Tuple[List[Any], bool, bool]:
     """Restock no more units of an order line than are still out with the
     buyer, by the counter return door's own answer: the line's purchased qty
     less returns._units_already_back (every OTHER return doc of the order and
@@ -474,10 +475,13 @@ def _cap_restock_to_unreturned(
     did not refund, never one twice, and the rest whenever a door asks (the
     held unit the customer brings back, one a partial restock missed). A
     restock line over the cap splits: the part still returnable restocks, the
-    rest does not. Returns (lines, overlapped): overlapped = IMS already
-    booked a return for some of these units, so the counter may already have
-    refunded their money. Never raises -- an unreadable answer leaves the
-    lines as they are."""
+    rest does not. Returns (lines, overlapped, unknown): overlapped = IMS
+    already booked a return for some of these units, so the counter may
+    already have refunded their money. Never raises -- an unreadable answer
+    (the return docs, or any error) is NO answer, never nothing back: the
+    lines come back as they are with unknown=True, as _cap_restock_to_sold_units
+    does -- a refund confirmed before the marks has only its doc to say it
+    restocked, and a historical order no SOLD unit to stop a second mint."""
     try:
         from ..routers.returns import (
             _line_purchased_qty,
@@ -498,8 +502,11 @@ def _cap_restock_to_unreturned(
                 continue
             key = id(orig)
             if key not in left:
-                back, own = _units_already_back(order.get("order_id"), orig,
-                                                own_shopify_refund_id=refund_id)
+                got = _units_already_back(order.get("order_id"), orig,
+                                          own_shopify_refund_id=refund_id)
+                if got is None:
+                    return lines, False, True
+                back, own = got
                 units = sum(ln.return_qty for ln, o in pairs if o is orig)
                 left[key] = _line_purchased_qty(orig) - back
                 mine[key] = units - own
@@ -512,10 +519,10 @@ def _cap_restock_to_unreturned(
             keep = max(0.0, min(keep, mine[key]))
             mine[key] -= keep
             out.extend(_split_restock(line, keep))
-        return out, overlapped
+        return out, overlapped, False
     except Exception:  # noqa: BLE001
-        logger.debug("[SHOPIFY_REFUND] returnable-qty cap failed", exc_info=True)
-        return lines, False
+        logger.warning("[SHOPIFY_REFUND] returnable-qty cap failed", exc_info=True)
+        return lines, False, True
 
 
 def _build_return_lines(

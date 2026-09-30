@@ -260,6 +260,11 @@ class _FakeColl:
                 return _FakeResult(1)
         return _FakeResult(0)
 
+    def find(self, query=None, projection=None):
+        # The counter door's earlier-returns scan: a collection it cannot
+        # read is no answer (503), so the fake answers like Mongo.
+        return [dict(d) for d in self.docs if _doc_matches(d, query)]
+
     def find_one_and_update(self, query, update, return_document=None):
         for d in self.docs:
             if _doc_matches(d, query):

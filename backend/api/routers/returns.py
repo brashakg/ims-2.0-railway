@@ -400,7 +400,7 @@ def _already_returned_qty(
     item_id: Optional[str],
     product_id: Optional[str],
     own_shopify_refund_id: Optional[str] = None,
-) -> Tuple[float, Dict[str, float]]:
+) -> Optional[Tuple[float, Dict[str, float]]]:
     """The quantities the `returns` docs say were ALREADY returned for one
     (order, line): (the counter's, {Shopify refund id: that refund's}).
     `own_shopify_refund_id`: that Shopify refund's own doc (the refund handler
@@ -412,8 +412,11 @@ def _already_returned_qty(
     A line is identified by its original order `item_id` when known, otherwise
     by `product_id`. We scan the return docs for the same order and add up
     the `return_qty` of every prior return line that targets the same line.
-    Fail-soft -> nothing when the returns collection is unavailable (the
-    atomic order-line claim is the second guard).
+    Nothing when no returns collection is configured (the atomic order-line
+    claim is the second guard). None when the docs cannot be read: an
+    unreadable answer is NO answer, never nothing back -- a refund confirmed
+    before the marks has only its doc to say it restocked, and reading it as
+    nothing restocks (on a historical order, mints) its unit a second time.
     """
     counter: float = 0.0
     refunds: Dict[str, float] = {}
@@ -441,7 +444,7 @@ def _already_returned_qty(
                     counter += qty
     except Exception as exc:  # noqa: BLE001
         logger.warning("[RETURNS] already-returned scan failed: %s", exc)
-        return 0.0, {}
+        return None
     return counter, refunds
 
 
@@ -488,7 +491,7 @@ def _units_already_back(
     order_id: Optional[str],
     orig_line: Dict[str, Any],
     own_shopify_refund_id: Optional[str] = None,
-) -> Tuple[float, float]:
+) -> Optional[Tuple[float, float]]:
     """ONE count of an order line's units no longer out with the buyer, read
     from its two books, each unit once. The return docs
     (_already_returned_qty): the counter's, and each Shopify refund's. The
@@ -502,13 +505,17 @@ def _units_already_back(
     restock cap read it. A line is matched to the docs' rows by its IMS
     product id: an online order line keeps Shopify's product_id beside its
     ims_product_id, and every return row carries the IMS one. Returns (every
-    unit back, the part of it that is `own_shopify_refund_id`'s restock)."""
-    counter, refunds = _already_returned_qty(
+    unit back, the part of it that is `own_shopify_refund_id`'s restock); None
+    when the docs cannot be read (_already_returned_qty)."""
+    docs = _already_returned_qty(
         order_id,
         orig_line.get("item_id") or orig_line.get("id"),
         orig_line.get("ims_product_id") or orig_line.get("product_id"),
         own_shopify_refund_id=own_shopify_refund_id,
     )
+    if docs is None:
+        return None
+    counter, refunds = docs
     booked = {str(r): float(q or 0) for r, q in (orig_line.get("restocked_refunds") or {}).items()}
     counter = max(counter, float(orig_line.get("returned_qty") or 0) - sum(booked.values()))
     each = {r: max(refunds.get(r, 0.0), booked.get(r, 0.0)) for r in {*refunds, *booked}}
@@ -2982,7 +2989,14 @@ async def create_return(
             )
         purchased = _line_purchased_qty(orig_line)
         product_id = orig_line.get("product_id")
-        already, _ = _units_already_back(resolved_order_id, orig_line)
+        back = _units_already_back(resolved_order_id, orig_line)
+        if back is None:
+            raise HTTPException(
+                status_code=503,
+                detail=("Could not read this order's earlier returns just now - "
+                        "nothing was recorded. Try again."),
+            )
+        already = back[0]
         remaining = round(purchased - already, 4)
         if ret_line.return_qty > remaining + 1e-9:
             name = ret_line.product_name or orig_line.get("product_name") or product_id
