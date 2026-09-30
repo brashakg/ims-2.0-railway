@@ -401,14 +401,79 @@ def test_f73_low_stock_skips_a_product_whose_level_is_not_set(monkeypatch):
 
 
 def test_f73_the_one_rule_says_not_set_never_minus_one():
-    """reorder_policy.reorder_level is what every reader and screen gets: -1,
-    a missing level or garbage is None (the screens print 'not set'), never -1."""
+    """reorder_policy.reorder_level is what every reader and screen gets: -1
+    or garbage is None (the screens print 'not set'), never -1. A product that
+    never stored a level is NOT -1: it keeps the old threshold of 5."""
     from api.services.reorder_policy import is_low_stock, reorder_level
 
     assert reorder_level({"reorder_point": -1}) is None
-    assert reorder_level({}) is None
+    assert reorder_level({}) == 5
+    assert is_low_stock({}, 5) and not is_low_stock({}, 6)
     assert reorder_level({"reorder_point": "x"}) is None
     assert reorder_level({"reorder_point": 0}) == 0
     assert reorder_level({"inventory": {"reorder_level": 3}}) == 3  # a catalog doc
     assert not is_low_stock({"reorder_point": -1}, -5)  # oversold, still no alert
     assert is_low_stock({"reorder_point": 2}, 2)
+
+
+def test_f73_a_product_that_never_stored_a_level_still_alerts(monkeypatch):
+    """Bulk create, PO walk-in, vendor import and catalog promote never stamped a
+    level. Those products must stay on the low-stock list at the old 5 (the
+    Mongo suites test_inventory_quantity / test_inventory_correctness assert the
+    same against a real database in CI)."""
+    listed = _low_stock(
+        monkeypatch,
+        [
+            {"product_id": "P-LEGACY", "sku": "L"},
+            {"product_id": "P-LEGACY-FULL", "sku": "F"},
+            {"product_id": "P-UNSET", "sku": "U", "reorder_point": -1},
+        ],
+        [_one_unit("P-LEGACY")]
+        + [dict(_one_unit("P-LEGACY-FULL"), stock_id=f"UF{i}") for i in range(6)]
+        + [_one_unit("P-UNSET"), _one_unit("P-NO-MASTER")],
+    )
+    # 1 unit at 5 -> low; 6 units -> not; -1 -> never; a unit whose product
+    # row is gone never stored a level either -> listed as before.
+    assert listed == {"P-LEGACY", "P-NO-MASTER"}
+
+
+def test_f73_the_stock_ledger_badge_is_the_products_own_level():
+    """GET /inventory/stock builds every row with _ledger_row: its low_stock
+    (the ledger's Low Stock badge, InventoryStockPage) and reorder_point come
+    from the one rule -- never a fixed 5, never always-off. The audit's
+    Bokaro badge."""
+    cases = {  # product, on hand -> (low_stock, reorder_point)
+        "P-UNSET": ({"reorder_point": -1}, 1, (False, None)),
+        "P-AT": ({"reorder_point": 2}, 2, (True, 2)),
+        "P-ABOVE": ({"reorder_point": 2}, 3, (False, 2)),
+        "P-LEGACY": ({}, 4, (True, 5)),
+    }
+    for pid, (product, on_hand, want) in cases.items():
+        row = inv._ledger_row({"product_id": pid, "sku": pid, **product}, on_hand, 0, {}, "S1")
+        assert (row["low_stock"], row["reorder_point"]) == want, pid
+
+
+def _alert(product):
+    from datetime import datetime
+
+    now = datetime(2026, 9, 30)
+    return inv._build_stock_alert(
+        product, sold_30=30, last_sale=now, now=now, dead_days=90, lead_time_days=7,
+    )
+
+
+def test_f73_no_low_stock_or_reorder_alert_until_a_level_is_typed():
+    """Stock Alerts: the velocity branches ask the level too (owner: no alert
+    until a level is typed)."""
+    for rq in (-1, 4):  # reorder suggestions off, and on
+        for stock in (3, 5, 0):
+            got = _alert({"stock_quantity": stock, "reorder_point": -1, "reorder_quantity": rq})
+            assert (got or {}).get("alertType") not in ("LOW_STOCK", "REORDER_ALERT"), (rq, stock, got)
+
+
+def test_f73_guard_a_typed_or_legacy_level_still_gets_its_alerts():
+    for product in ({"reorder_point": 2}, {}):  # typed; never stored (legacy 5)
+        low = _alert({**product, "stock_quantity": 5, "reorder_quantity": -1})
+        assert low["alertType"] == "LOW_STOCK"
+        reorder = _alert({**product, "stock_quantity": 3, "reorder_quantity": 4})
+        assert reorder["alertType"] == "REORDER_ALERT"
