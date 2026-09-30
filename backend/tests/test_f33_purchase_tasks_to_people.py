@@ -238,3 +238,30 @@ def test_receipt_fully_billed_is_the_caps_own_totals():
     assert receipt_fully_billed(grn, [a(12), b]) is False
     assert receipt_fully_billed(grn, [a(12), a(8), b]) is True  # 12 then 8
     assert receipt_fully_billed(grn, [{"lines": []}]) is True  # header-only bill: whole receipt
+
+
+def test_role_resolution_reads_the_real_staff_to_store_assignment(monkeypatch):
+    """create_system_task now resolves a role for EVERY caller, including the
+    till-variance task of the day-end cash close (eod_tally, POS-adjacent).
+    Against the real UserRepository: that store's ACTIVE manager by user id
+    -- not a manager elsewhere, not a deactivated one, not the cashier."""
+    from api.services.eod_tally import raise_variance_task
+    from database.repositories.task_repository import TaskRepository
+    from database.repositories.user_repository import UserRepository
+
+    db = mongomock.MongoClient().db
+    db.users.insert_many([
+        {"user_id": "mgr-jsr", "roles": ["STORE_MANAGER"], "store_ids": ["WO-JSR-01"], "is_active": True},
+        {"user_id": "mgr-left", "roles": ["STORE_MANAGER"], "store_ids": ["BV-TEST-01"], "is_active": False},
+        {"user_id": "cash-1", "roles": ["CASHIER"], "store_ids": ["BV-TEST-01"], "is_active": True},
+        {"user_id": "mgr-dhn", "roles": ["STORE_MANAGER"], "store_ids": ["BV-TEST-01"], "is_active": True},
+    ])
+    monkeypatch.setattr(deps, "get_user_repository", lambda: UserRepository(db.users))
+    monkeypatch.setattr(deps, "get_task_repository", lambda: TaskRepository(db.tasks))
+
+    raise_variance_task(
+        store_id="BV-TEST-01", session_date="2026-09-30", variance_paisa=-120000, tolerance_paisa=50000
+    )
+    (task,) = list(db.tasks.find())
+    assert task["assigned_to"] == "mgr-dhn"
+    assert task["source_ref"] == "till_variance:BV-TEST-01:2026-09-30"
