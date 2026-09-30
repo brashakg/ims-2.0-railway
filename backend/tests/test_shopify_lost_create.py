@@ -33,10 +33,15 @@ REVERT-PROOF (each run red against the named revert before it counted):
                                                                            product, updated it
   C12 test_a_create_refused_unapplied_...     keep the record on a      -> the next press
                                               non-SentOnce exception       refused for 15 min
+      (and test_a_collection_or_menu_create_refused_unapplied_clears_the_record)
   C13 test_a_rival_record_whose_send_...      any same-title record a   -> refused for good
                                               rival (no window check)      by a stale record
   C14 test_the_send_window_counts_the_...     _REACH = PROVIDER_TIMEOUT -> 'none', Product/901
                                               + 90 s
+  C15 test_a_create_whose_gid_is_not_saved... clear the record whatever -> a second create
+      (product, collection, menu)             the write-back did
+  C16 test_a_same_title_product_under_...     no handle check           -> P1 linked to a
+                                                                           person's product
 """
 
 import os
@@ -97,7 +102,7 @@ class _Shop(_Shopify):
             lo, hi = re.findall(r"'([^']+)'", variables["q"])
             hits = sorted((p for p in self.products if lo <= _iso(p["created"]) <= hi), key=lambda p: p["created"])
             start = int(variables.get("after") or 0)
-            nodes = [{"id": p["id"], "title": p["title"], "createdAt": _iso(p["created"])}
+            nodes = [{"id": p["id"], "title": p["title"], "handle": p.get("handle"), "createdAt": _iso(p["created"])}
                      for p in hits[start:start + self.page]]
             more = start + self.page < len(hits)
             return {"data": {"products": {"nodes": nodes, "pageInfo": {
@@ -109,7 +114,8 @@ class _Shop(_Shopify):
         if "mutation imsProductCreate(" in query:
             self.calls.append({"op": "imsProductCreate", "variables": copy.deepcopy(variables)})
             gid = "gid://shopify/Product/%d" % (900 + len(self.products))
-            self.products.append({"id": gid, "title": variables["input"]["title"], "created": datetime.now(timezone.utc)})
+            self.products.append({"id": gid, "title": variables["input"]["title"],
+                                  "handle": variables["input"].get("handle"), "created": datetime.now(timezone.utc)})
             return {"data": {"productCreate": {"product": {
                 "id": gid, "handle": "h", "tags": [],
                 "variants": {"nodes": [{"id": "gid://shopify/ProductVariant/901", "title": "Default Title",
@@ -657,6 +663,39 @@ def test_a_create_refused_unapplied_clears_the_record_so_the_next_press_creates_
     assert len(shop.products) == 1
 
 
+@pytest.mark.parametrize("fault", ["422", "connect-refused"])
+@pytest.mark.parametrize("kind", ["collection", "menu"])
+def test_a_collection_or_menu_create_refused_unapplied_clears_the_record(gates, monkeypatch, kind, fault):
+    """C12, the other two creates: a collectionCreate / menuCreate refused
+    before it was applied -- a 4xx, or no connection at all -- made nothing,
+    so the record is cleared and the next press creates straight away.
+    REVERT-PROOF: keep the record on a non-SentOnce exception -> the next
+    press is refused 'create_unsettled' for the settle time."""
+    shop = _NavShop()
+    left = [1]
+
+    async def post_once(url, headers, payload):
+        if re.search(r"mutation\s+ims(Collection|Menu)Create", payload["query"]) and left[0]:
+            left[0] -= 1
+            if fault == "422":
+                return httpx.Response(422, text="unprocessable")
+            raise httpx.ConnectError("connection refused")
+        return await shop.post_once(url, headers, payload)
+
+    monkeypatch.setattr(shopify_push, "_post_once", post_once)
+    db = _DB()
+    push, stored = _nav_doc(db, kind)
+
+    first = _run(push())
+    assert first.ok is False and shop.objects[kind] == [] and left == [0], first
+    assert db[JOURNAL].find_one({"_id": "%s:%s" % (kind, _NAV_KEY[kind])}) is None
+
+    again = _run(push())
+
+    assert again.ok is True and again.shopify_id == stored() == shop.objects[kind][0]["id"], again.error
+    assert len(shop.objects[kind]) == 1
+
+
 def test_a_rival_record_whose_send_window_misses_the_candidate_never_blocks(gates, monkeypatch):
     """C13. P2 -- same title -- holds a create record two days old that was
     never settled (its product deleted from IMS since, say). P1's create
@@ -715,3 +754,91 @@ def test_the_send_window_counts_the_transports_own_tries_before_the_send(gates, 
 
     assert again.ok is True and again.shopify_id == "gid://shopify/Product/900", again.error
     assert _creates(shop) == 1 and len(shop.products) == 1, "never created twice"
+
+
+@pytest.mark.parametrize("kind", ["product", "collection", "menu"])
+def test_a_create_whose_gid_is_not_saved_keeps_the_record(gates, monkeypatch, kind):
+    """C15. The create lands and answers -- and writing its gid onto the IMS
+    doc fails (a Mongo write timeout, so _writeback_* answers False): IMS
+    still does not know the object. The record STAYS, so the next press
+    finds the object and links it -- one object, never two.
+    REVERT-PROOF: clear the record whatever the write-back did -> the next
+    press has neither a gid nor a record and creates a second one."""
+    db = _DB()
+    if kind == "product":
+        shop = _wire(monkeypatch)
+        _new_product(db)
+
+        def push():
+            return shopify_push.push_product(db, _new_product_doc(db), [])
+
+        def stored():
+            return (_new_product_doc(db).get("ecom") or {}).get("shopify_product_id")
+
+        def made():
+            return [p["id"] for p in shop.products]
+
+        coll, key = db["catalog_products"], "product:P1"
+    else:
+        shop = _NavShop()
+        monkeypatch.setattr(shopify_push, "_post_once", shop.post_once)
+        push, stored = _nav_doc(db, kind)
+
+        def made():
+            return [o["id"] for o in shop.objects[kind]]
+
+        coll = db["ecom_collections" if kind == "collection" else "ecom_menus"]
+        key = "%s:%s" % (kind, _NAV_KEY[kind])
+    real, broken = coll.update_one, [True]
+
+    def update_one(flt, upd, *args, **kwargs):
+        s = (upd or {}).get("$set") or {}
+        if broken[0] and (
+            "shopify_collection_id" in s or "shopify_menu_id" in s or (s.get("ecom") or {}).get("shopify_product_id")
+        ):
+            raise RuntimeError("mongo write timed out")
+        return real(flt, upd, *args, **kwargs)
+
+    monkeypatch.setattr(coll, "update_one", update_one)
+
+    _run(push())
+    assert stored() is None and len(made()) == 1
+    assert db[JOURNAL].find_one({"_id": key}) is not None, "kept until the gid is saved"
+    broken[0] = False
+
+    again = _run(push())
+
+    assert again.ok is True and again.shopify_id == stored() == made()[0], again.error
+    assert len(made()) == 1, "never created twice"
+    assert db[JOURNAL].find_one({"_id": key}) is None
+
+
+
+def test_a_same_title_product_under_another_handle_is_never_ims_own(gates, monkeypatch):
+    """C16. IMS sends its own handle. Its productCreate answers 502 and
+    nothing is applied; inside the send window a person makes a product with
+    the same title under ANOTHER handle. IMS's send could not have made it
+    (Shopify keeps a sent handle, or makes it unique with '-<n>'): never
+    linked -- after the settle time IMS creates its own, once, and the
+    person's listing is never written.
+    REVERT-PROOF: ignore the handle -> P1 is linked to the person's product
+    and its productUpdate overwrites that listing."""
+    shop = _wire(monkeypatch)
+    db = _DB()
+    doc = _product([OWN])
+    doc["ecom"] = {"status": "DRAFT", "locally_modified": True, "handle": "p1-own-handle"}
+    db["catalog_products"].insert_one(copy.deepcopy(doc))
+    shop.refuse = 502
+    first = _run(shopify_push.push_product(db, _new_product_doc(db), []))
+    assert first.ok is False and shop.products == []
+    intent = db[JOURNAL].find_one({"_id": "product:P1"})
+    assert intent["handle"] == "p1-own-handle"
+    shop.products.append({"id": "gid://shopify/Product/555", "title": intent["title"], "handle": "their-handle",
+                          "created": intent["sent_at"] + timedelta(seconds=30)})
+    _age(db, shop, 30)
+
+    again = _run(shopify_push.push_product(db, _new_product_doc(db), []))
+
+    assert again.ok is True and again.shopify_id == "gid://shopify/Product/901", again.error
+    assert [c["variables"]["input"]["id"] for c in shop.calls_of("imsProductUpdate")] == []
+    assert shop.calls_of("imsProductCreate")[-1]["variables"]["input"]["handle"] == "p1-own-handle"
