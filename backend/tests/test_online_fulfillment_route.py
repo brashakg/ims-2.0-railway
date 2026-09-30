@@ -76,6 +76,16 @@ Rules pinned (each was reverted in the source and seen red, see the PR notes):
      month (clear-hold and Re-map, same shop too); a failed split-leg move
      names the leg's shop, and a human's later move of it rewrites stock at
      dispatch
+  R17 (money panel, round 10) Re-map takes its lease first, checks the order
+     again after the routing read and writes only on the order it checked
+     (two presses, a cancel mid-read); THE ROOT RULE -- an issued invoice
+     (printed, in a filed or fileable GSTR-1 month, or with an IRN) is never
+     re-billed, re-numbered, re-dated or put on a seller hold, at Re-map or
+     clear-hold; a same-shop release in a new financial year gets a fresh
+     serial; on Re-map nothing moves into a shop failing the seller check;
+     Re-map refuses while a refund waits for the accountant; a retried move
+     leaves its task as it was; a return on an order no shop shipped mints
+     nothing; the sync-health tile gives route_order's fallback answer
 """
 
 from __future__ import annotations
@@ -2112,35 +2122,48 @@ def test_remap_waits_for_the_bookings_claim_and_its_move(world, monkeypatch, sta
     _untouched(world, res, order)
 
 
-@pytest.mark.parametrize("then", ["shopify_takes_it", "bokaro_restocked"])
+@pytest.mark.parametrize("then", ["shopify_takes_it", "bokaro_restocked", "printed_then_restocked"])
 def test_remap_is_the_door_out_of_a_failed_move(world, monkeypatch, then):
     """[LOW] A failed move left the unit claimed at Ranchi and Shopify's
     fulfillment order at Bokaro, and Re-map answered 'duplicate' and did
     nothing. Now it re-reads the routing and sends the move again (the hold
-    lifts once Shopify takes it) -- but never re-bills an order whose
-    invoice may already be issued: a route to another shop is refused."""
+    lifts once Shopify takes it). Round 10, THE ROOT RULE: Bokaro restocked
+    and Shopify still has it there -> an invoice never issued is re-billed
+    at Bokaro (Q4 + Q1); one the invoice door printed is never re-billed:
+    refused, the order untouched."""
     from api.routers import online_store_orders as oso
 
     db = world["db"]
     _stock(db, "BV-RAN-01", "P-RB", 1)
     world["shop"].fo(FO_1, LOC_BOK)
     world["shop"].move_error = "Location does not stock the item"
-    payload = _order(57020 + (then == "bokaro_restocked"))
+    payload = _order(57020 + ["shopify_takes_it", "bokaro_restocked",
+                              "printed_then_restocked"].index(then))
     res, order = _book(world, payload)
     assert [p["code"] for p in order["fulfillment_route"]["problems"]] == ["MOVE_FAILED"]
     assert oso._slim_list_row(dict(order))["remap_hold"] is True
     world["shop"].move_error = None
-    if then == "bokaro_restocked":
+    if then == "printed_then_restocked":
+        assert _invoice(world, monkeypatch, res["order_id"])["invoiceNumber"] == order["invoice_number"]
+    if then != "shopify_takes_it":
         _stock(db, "BV-BOK-01", "P-RB", 1)
 
     out = _remap(world, monkeypatch, payload)
 
     after = db.orders.find_one({"order_id": res["order_id"]}, {"_id": 0})
+    if then == "bokaro_restocked":
+        assert out["ok"] and "hold is lifted" in out["message"], out
+        assert after["store_id"] == "BV-BOK-01" and "/BV-BOK-01/" in after["invoice_number"]
+        assert after["superseded_invoice_number"] == order["invoice_number"]
+        assert _sold_at(db, res["order_id"]) == ["BV-BOK-01"]
+        assert db.stock_units.find_one({"store_id": "BV-RAN-01"})["status"] == "AVAILABLE"
+        assert after["invoice_date"] == after["created_at"] >= order["created_at"]
+        return
     assert after["store_id"] == "BV-RAN-01" and after["invoice_number"] == order["invoice_number"]
     assert _sold_at(db, res["order_id"]) == ["BV-RAN-01"]
-    if then == "bokaro_restocked":
-        assert not out["ok"] and "may already be issued" in out["message"], out
-        assert after["fulfillment_hold"] is True
+    if then == "printed_then_restocked":
+        assert not out["ok"] and "already issued (the invoice door has printed it)" in out["message"], out
+        assert after["fulfillment_hold"] is True and after["created_at"] == order["created_at"]
         return
     assert out["ok"] and out["result"]["status"] == "rerouted", out
     assert world["shop"].moves()[-1] == {"id": FO_1, "newLocationId": LOC_RAN}
@@ -2592,7 +2615,11 @@ def test_a_seller_hold_released_at_the_same_shop_is_filed_in_its_release_month(w
         assert _clear_hold(world, monkeypatch, res["order_id"])["released"] == ["SELLER"]
 
     after = db.orders.find_one({"order_id": res["order_id"]}, {"_id": 0})
-    assert after["store_id"] == "BV-BOK-01" and after["invoice_number"] == order["invoice_number"]
+    # Same shop: the same number -- unless the 40 days crossed 1 April (the
+    # serial is per financial year: R17).
+    same_fy = route_mod._fy(booked) == route_mod._fy(after["created_at"])
+    assert after["store_id"] == "BV-BOK-01"
+    assert (after["invoice_number"] == order["invoice_number"]) is same_fy
     assert after["invoice_date"] == after["created_at"] > booked
     assert after["booked_at"] == booked
     assert len(_gstr1(world, monkeypatch, after, "BV-BOK-01")["b2cs"]) == 1
@@ -2629,18 +2656,19 @@ def test_remap_never_reopens_a_task_a_human_closed(world, monkeypatch):
 
 
 def test_a_refused_remap_raises_no_task(world, monkeypatch):
-    """[LOW] Input B: MOVE_FAILED at Ranchi, Ranchi closed its ship task,
-    Bokaro restocks, Re-map is REFUSED ('may already be issued'). The
-    refusal re-issued 'Pack and hand them to dispatch' to Ranchi; it touches
-    nothing now."""
+    """[LOW] Input B: MOVE_FAILED at Ranchi, its invoice printed, Ranchi
+    closed its ship task, Bokaro restocks, Re-map is REFUSED (an issued
+    invoice). The refusal re-issued 'Pack and hand them to dispatch' to
+    Ranchi; it touches nothing now."""
     db = world["db"]
     payload, res, _order_doc = _move_failed_at_ranchi(world, 58060)
+    _invoice(world, monkeypatch, res["order_id"])
     _stock(db, "BV-BOK-01", "P-RB", 1)
     n_tasks = len(world["tasks"].created)
 
     out = _remap(world, monkeypatch, payload)
 
-    assert not out["ok"] and "may already be issued" in out["message"], out
+    assert not out["ok"] and "already issued" in out["message"], out
     assert len(world["tasks"].created) == n_tasks
     assert _sold_at(db, res["order_id"]) == ["BV-RAN-01"]
 
@@ -2718,3 +2746,343 @@ def test_remap_tells_only_a_shop_that_claims_a_new_unit(world, monkeypatch):
     assert _sold_at(db, oid) == ["BV-BOK-01", "BV-RAN-01"]
     assert [u for u in _units(db, oid) if "BV-BOK-01" in u] == [u for u in rb if "BV-BOK-01" in u]
     assert world["tasks"].open_refs("online_fallback_ship:") == [f"online_fallback_ship:{oid}:BV-RAN-01"]
+
+
+# ---------------------------------------------------------------------------
+# R17 -- money panel, round 10
+# ---------------------------------------------------------------------------
+
+
+def _yielding_routing_read(world, monkeypatch, during=None):
+    """The routing read yields to the loop, as a real network hop does,
+    running ``during`` first -- what lands while Shopify answers."""
+    real = world["shop"].graphql
+
+    async def graphql(db, query, variables):
+        if "imsOrderRouting" in query:
+            if during:
+                during()
+            await asyncio.sleep(0)
+        return await real(db, query, variables)
+
+    monkeypatch.setattr(shopify_push, "_graphql", graphql)
+
+
+def _dark_seller_unknown(world, monkeypatch, order_id):
+    """Booked dark: SELLER_UNKNOWN at the bucket, nothing claimed. Then
+    Shopify can be read and has it at Bokaro, which holds the unit."""
+    db = world["db"]
+    monkeypatch.setattr(shopify_push, "_live_or_reason", lambda _db: (False, "writes_disabled"))
+    _stock(db, "BV-BOK-01", "P-RB", 1)
+    payload = _order(order_id)
+    res, order = _book(world, payload)
+    assert [p["code"] for p in order["fulfillment_route"]["problems"]] == ["SELLER_UNKNOWN"]
+    monkeypatch.setattr(shopify_push, "_live_or_reason", lambda _db: (True, None))
+    world["shop"].fo(FO_1, LOC_BOK)
+    return payload, res, order
+
+
+def test_two_remap_presses_never_both_rebill(world, monkeypatch):
+    """[LOW-MEDIUM] Two Re-maps at once, the routing read yielding: the second
+    carried on from the order as read BEFORE its lease -- it minted Bokaro's
+    0002 and pointed superseded back at the bucket, Bokaro's 0001 recorded
+    nowhere. The lease is taken first now: one re-bills, one is refused, and
+    Bokaro's series draws one serial."""
+    db = world["db"]
+    payload, res, order = _dark_seller_unknown(world, monkeypatch, 59001)
+    _yielding_routing_read(world, monkeypatch)
+    oid = res["order_id"]
+
+    async def both():
+        return await asyncio.gather(
+            route_mod.reroute_held_order(db, oid, payload),
+            route_mod.reroute_held_order(db, oid, payload),
+        )
+
+    outs = asyncio.run(both())
+
+    assert sorted(o["status"] for o in outs) == ["refused", "rerouted"], outs
+    after = db.orders.find_one({"order_id": oid}, {"_id": 0})
+    assert "/BV-BOK-01/" in after["invoice_number"] and after["invoice_number"].endswith("/0001")
+    assert after["superseded_invoice_number"] == order["invoice_number"]
+    assert db.counters.find_one({"_id": {"$regex": "BV-BOK-01"}})["seq"] == 1
+    assert _sold_at(db, oid) == ["BV-BOK-01"] and "reroute_lease_at" not in after
+
+
+@pytest.mark.parametrize("when", ["during_the_routing_read", "after_the_checks"])
+def test_a_cancel_landing_mid_remap_is_never_rebilled_or_claimed(world, monkeypatch, when):
+    """[LOW-MEDIUM] orders/cancelled lands while Re-map runs: it still claimed
+    Bokaro's unit for the CANCELLED order and re-billed it (the unit SOLD
+    against a cancelled order, Shopify's stock written one lower). The
+    checks run again after the routing read, and the write is conditioned
+    on the order as checked: refused, nothing claimed or re-billed."""
+    db = world["db"]
+    payload, res, order = _dark_seller_unknown(world, monkeypatch, 59002 + (when == "after_the_checks"))
+    oid = res["order_id"]
+
+    def cancel():
+        db.orders.update_one({"order_id": oid}, {"$set": {"status": "CANCELLED"}})
+
+    if when == "during_the_routing_read":
+        _yielding_routing_read(world, monkeypatch, during=cancel)
+    else:  # between the last check and the write (another worker's thread)
+        real = route_mod.route_order
+
+        def route_then_cancel(*a, **k):
+            cancel()
+            return real(*a, **k)
+
+        monkeypatch.setattr(route_mod, "route_order", route_then_cancel)
+
+    out = asyncio.run(route_mod.reroute_held_order(db, oid, payload))
+
+    assert out["status"] == "refused", out
+    assert {"during_the_routing_read": "the order is CANCELLED",
+            "after_the_checks": "the order changed while Re-map ran"}[when] in out["message"], out
+    after = db.orders.find_one({"order_id": oid}, {"_id": 0})
+    assert after["status"] == "CANCELLED" and after["store_id"] == order["store_id"]
+    assert after["invoice_number"] == order["invoice_number"] and "superseded_invoice_number" not in after
+    assert _sold_at(db, oid) == [] and "reroute_lease_at" not in after
+
+
+@pytest.mark.parametrize("issued_by", ["filed_period", "irn"])
+def test_remap_never_rebills_an_issued_invoice(world, monkeypatch, issued_by):
+    """[MEDIUM] THE ROOT RULE. MOVE_FAILED at Ranchi (the invoice door, GSTR-1
+    and the e-invoice all accept it while it waits); Bokaro restocks and
+    Shopify still has it there. Its invoice is ISSUED -- booked last month,
+    whose GSTR-1 is filed or fileable, or carrying an IRN: Re-map refuses to
+    re-bill it at Bokaro, the order untouched (shop, number, date, units)."""
+    from datetime import datetime, timedelta, timezone
+
+    db = world["db"]
+    payload, res, _o = _move_failed_at_ranchi(world, 59010 + (issued_by == "irn"))
+    oid = res["order_id"]
+    if issued_by == "filed_period":
+        booked = datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0) - timedelta(days=40)
+        db.orders.update_one({"order_id": oid}, {"$set": {"created_at": booked, "invoice_date": booked}})
+    else:
+        db.orders.update_one({"order_id": oid}, {"$set": {"irn": "IRN-0001"}})
+    _stock(db, "BV-BOK-01", "P-RB", 1)
+    before = db.orders.find_one({"order_id": oid}, {"_id": 0})
+
+    out = _remap(world, monkeypatch, payload)
+
+    assert not out["ok"] and "already issued" in out["message"], out
+    after = db.orders.find_one({"order_id": oid}, {"_id": 0})
+    for k in ("store_id", "invoice_number", "invoice_date", "created_at", "stock_hold_reason"):
+        assert after[k] == before[k], k
+    assert _sold_at(db, oid) == ["BV-RAN-01"]
+
+
+def test_an_issued_invoice_never_goes_onto_a_seller_hold(world, monkeypatch):
+    """[MEDIUM] The panel's input: RB+OA, Shopify at Bokaro (short), Ranchi
+    covers, the move fails -- MOVE_FAILED at Ranchi. The invoice door prints
+    Ranchi's invoice and its month's GSTR-1 files it. A human moves the OA
+    line to Pune (Maharashtra) by hand and presses Re-map: it put the order
+    on SPLIT_SELLERS -- off the filed GSTR-1, the reprint refused, then
+    re-billable from Pune or re-datable. Refused now: still as issued."""
+    db = world["db"]
+    db.stores.update_one({"store_id": PUNE}, {"$set": {"shopify_location_id": LOC_PUN}})
+    _stock(db, "BV-RAN-01", "P-RB", 1)
+    _stock(db, "BV-RAN-01", "P-OA", 1)
+    _stock(db, PUNE, "P-OA", 1)
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 1), (9001, 1)])
+    world["shop"].move_error = "Location does not stock the item"
+    payload = _order(59020, lines=(("RB-1234", 1), ("OA-5", 1)))
+    res, order = _book(world, payload)
+    oid = res["order_id"]
+    assert order["store_id"] == "BV-RAN-01"
+    assert [p["code"] for p in order["fulfillment_route"]["problems"]] == ["MOVE_FAILED"]
+    world["shop"].move_error = None
+    assert _invoice(world, monkeypatch, oid)["invoiceNumber"] == order["invoice_number"]
+    assert len(_gstr1(world, monkeypatch, order, "BV-RAN-01")["b2cs"]) == 1
+    world["shop"].fos[:] = []  # the human's move: the OA line now at Pune
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 1)])
+    world["shop"].fo(FO_2, LOC_PUN, lines=[(9001, 1)])
+
+    out = _remap(world, monkeypatch, payload)
+
+    assert not out["ok"] and "already issued" in out["message"], out
+    assert "different GSTINs" in out["message"]
+    after = db.orders.find_one({"order_id": oid}, {"_id": 0})
+    assert after["stock_hold_reason"] == order["stock_hold_reason"]
+    assert after["invoice_number"] == order["invoice_number"] and after["created_at"] == order["created_at"]
+    assert len(_gstr1(world, monkeypatch, after, "BV-RAN-01")["b2cs"]) == 1
+    assert _invoice_refusal(world, monkeypatch, oid) is None
+    assert _sold_at(db, oid) == ["BV-RAN-01", "BV-RAN-01"]
+    assert db.stock_units.find_one({"store_id": PUNE})["status"] == "AVAILABLE"
+
+
+@pytest.mark.parametrize("door", ["clear_hold", "remap"])
+def test_a_lifted_seller_hold_keeps_an_issued_invoice_as_issued(world, monkeypatch, door):
+    """[MEDIUM] THE ROOT RULE at both doors: a seller hold on an order whose
+    invoice is issued (the print stamp) lifts once its cause is fixed, but
+    the invoice keeps its number, date and GST split -- never re-dated into a
+    second month."""
+    db = world["db"]
+    payload, res, order = _gstin_missing_at_bokaro(world, 59025 + (door == "remap"))
+    oid = res["order_id"]
+    db.orders.update_one({"order_id": oid}, {"$set": {"invoice_issued_at": "2026-08-20T10:00:00+00:00"}})
+    db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": {"gstin": "20AAAAA0000A1Z5"}})
+
+    if door == "remap":
+        out = _remap(world, monkeypatch, payload)
+        assert out["ok"] and "hold is lifted" in out["message"], out
+    else:
+        out = _clear_hold(world, monkeypatch, oid)
+        assert out["released"] == ["SELLER"] and "already issued" in out["message"], out
+    after = db.orders.find_one({"order_id": oid}, {"_id": 0})
+    assert after["fulfillment_hold"] is False
+    for k in ("invoice_number", "invoice_date", "created_at", "interstate", "tax_totals"):
+        assert after[k] == order[k], k
+    assert "booked_at" not in after
+
+
+@pytest.mark.parametrize("door", ["clear_hold", "remap"])
+def test_a_same_shop_release_in_a_new_financial_year_gets_a_fresh_serial(world, monkeypatch, door):
+    """[LOW] Held at Bokaro (SHOP_GSTIN_MISSING) and released in a later
+    financial year at the same shop: it was dated in the new year but kept
+    the old year's serial -- a hole in that year's run (Rule 46(b)). It is
+    numbered from this year's series now; the old number kept as superseded."""
+    from datetime import datetime, timedelta, timezone
+
+    from api.utils.ist import fy_start_year_ist, now_ist
+
+    db = world["db"]
+    payload, res, order = _gstin_missing_at_bokaro(world, 59030 + (door == "remap"))
+    oid = res["order_id"]
+    booked = datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0) - timedelta(days=400)
+    db.orders.update_one({"order_id": oid}, {"$set": {"created_at": booked, "invoice_date": booked}})
+    db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": {"gstin": "20AAAAA0000A1Z5"}})
+
+    if door == "remap":
+        assert _remap(world, monkeypatch, payload)["ok"]
+    else:
+        assert _clear_hold(world, monkeypatch, oid)["released"] == ["SELLER"]
+
+    after = db.orders.find_one({"order_id": oid}, {"_id": 0})
+    start = fy_start_year_ist(now_ist())
+    assert after["store_id"] == "BV-BOK-01" and after["invoice_number"] != order["invoice_number"]
+    assert f"/BV-BOK-01/{start % 100:02d}-{(start + 1) % 100:02d}/" in after["invoice_number"]
+    assert after["superseded_invoice_number"] == order["invoice_number"]
+    assert after["invoice_date"] == after["created_at"] > booked
+
+
+def test_remap_never_moves_a_leg_back_into_a_shop_under_another_gstin(world, monkeypatch):
+    """[LOW] Split RB -> Bokaro, OA -> Pune (another GSTIN; the order holds
+    Pune's only OA): held. The human does what the hold says -- moves FO_2 to
+    Ranchi (Bokaro's GSTIN, no OA) -- and presses Re-map. The order's own
+    unit made Pune look like a holder: Re-map sent FO_2 back to Pune and
+    raised SPLIT_SELLERS again, a loop no documented action left. Now the leg
+    stays at Ranchi, short, a stock miss named there; Pune's OA goes back."""
+    db = world["db"]
+    payload, res, order = _split_sellers(world, 59040)
+    oid = res["order_id"]
+    world["shop"].fos[1]["assignedLocation"]["location"]["id"] = LOC_RAN  # the human's move
+    sent = len(world["shop"].moves())
+
+    out = _remap(world, monkeypatch, payload)
+
+    assert out["ok"] and out["result"]["status"] == "rerouted", out
+    assert world["shop"].moves()[sent:] == []
+    after = db.orders.find_one({"order_id": oid}, {"_id": 0})
+    assert after["store_id"] == "BV-BOK-01"
+    assert "SPLIT_SELLERS" not in [p["code"] for p in after["fulfillment_route"]["problems"]]
+    assert {r["store_id"] for r in after["fulfillment_route"]["split"]} == {"BV-BOK-01", "BV-RAN-01"}
+    [miss] = list(db.online_stock_miss.find({"order_id": oid, "resolved": False}))
+    assert miss["store_id"] == "BV-RAN-01" and after["fulfillment_hold"] is True
+    assert _sold_at(db, oid) == ["BV-BOK-01"]
+    assert db.stock_units.find_one({"store_id": PUNE, "product_id": "P-OA"})["status"] == "AVAILABLE"
+
+
+def test_remap_never_moves_a_whole_order_into_a_shop_failing_the_seller_check(world, monkeypatch):
+    """[LOW] Booked dark (SELLER_UNKNOWN). Shopify has it at Bokaro, which is
+    short; the only holder is BV Dhanbad, mapped but with no GSTIN. Re-map
+    moved it there -- re-billed from a shop that cannot issue its invoice,
+    held again. It stays at Bokaro now, a stock miss named there."""
+    db = world["db"]
+    monkeypatch.setattr(shopify_push, "_live_or_reason", lambda _db: (False, "writes_disabled"))
+    _shop(db, "BV-DHN-01", "BV Dhanbad", "", LOC_DHN)
+    _stock(db, "BV-DHN-01", "P-RB", 1)
+    payload = _order(59050)
+    res, _order_doc = _book(world, payload)
+    oid = res["order_id"]
+    monkeypatch.setattr(shopify_push, "_live_or_reason", lambda _db: (True, None))
+    world["shop"].fo(FO_1, LOC_BOK)
+
+    out = _remap(world, monkeypatch, payload)
+
+    assert out["ok"], out
+    after = db.orders.find_one({"order_id": oid}, {"_id": 0})
+    assert after["store_id"] == "BV-BOK-01" and world["shop"].moves() == []
+    assert _sold_at(db, oid) == []
+    [miss] = list(db.online_stock_miss.find({"order_id": oid}))
+    assert miss["store_id"] == "BV-BOK-01" and after["fulfillment_hold"] is True
+
+
+def test_remap_refuses_while_a_refund_waits_for_the_accountant(world, monkeypatch):
+    """[MEDIUM] A Shopify refund queued for review (SHOPIFY_REFUND_AUTO off)
+    is stamped with the order's shop and invoice. Re-map re-billed the order
+    at Bokaro anyway; confirmed, the credit note posted under the bucket's
+    GSTIN against the superseded number. Re-map refuses while it waits."""
+    db = world["db"]
+    payload, res, order = _dark_seller_unknown(world, monkeypatch, 59060)
+    db.shopify_refund_review.insert_one({
+        "review_id": "R-1", "shopify_refund_id": "RF-1", "shopify_order_id": str(payload["id"]),
+        "order_id": None, "store_id": order["store_id"], "invoice_number": order["invoice_number"],
+        "status": "PENDING_REVIEW", "resolved": False})
+
+    out = _remap(world, monkeypatch, payload)
+
+    assert not out["ok"] and "refund or return" in out["message"], out
+    after = db.orders.find_one({"order_id": res["order_id"]}, {"_id": 0})
+    assert after["store_id"] == order["store_id"] and after["invoice_number"] == order["invoice_number"]
+    assert _sold_at(db, res["order_id"]) == []
+
+
+@pytest.mark.parametrize("task", ["closed", "open"])
+def test_a_remap_whose_move_fails_again_leaves_its_task_as_it_was(world, monkeypatch, task):
+    """[LOW] MOVE_FAILED at Ranchi; Shopify still refuses the move when the
+    human presses Re-map. The retried move re-raised the MOVE_FAILED task a
+    human had closed; an open one was closed with 'the order was routed' and
+    an identical one opened. The one task stays as it was now."""
+    payload, res, _o = _move_failed_at_ranchi(world, 59070 + (task == "open"))
+    ref = f"online_route:MOVE_FAILED:{res['order_id']}"
+    if task == "open":
+        for t in world["tasks"].created:
+            if t["source_ref"] == ref:
+                t["status"] = "OPEN"
+    world["shop"].move_error = "Location does not stock the item"
+
+    out = _remap(world, monkeypatch, payload)
+
+    assert out["ok"] and "still on hold" in out["message"], out
+    [t] = [t for t in world["tasks"].created if t["source_ref"] == ref]
+    assert t["status"] == ("OPEN" if task == "open" else "COMPLETED")
+    assert "completion_notes" not in t
+
+
+def test_a_return_on_an_order_no_shop_shipped_mints_nothing(world, monkeypatch):
+    """[LOW] ONLINE_STORE_ID=BV-RAN-01 (a physical shop), dark: route NONE,
+    billed at BV-RAN-01, nothing claimed. The customer cancels with restock:
+    the direct branch minted a unit at Ranchi (1 -> 2 AVAILABLE), written back
+    to Shopify and sellable at the till. Unresolved now (loud, nothing
+    minted) -- the accountant's refund-review door included, whose rebuilt
+    order carries the route."""
+    from api.routers import returns
+    from api.services import shopify_refund
+    from database.repositories.order_repository import OrderRepository
+
+    db = world["db"]
+    monkeypatch.setattr(shopify_push, "_live_or_reason", lambda _db: (False, "writes_disabled"))
+    monkeypatch.setenv("ONLINE_STORE_ID", "BV-RAN-01")
+    _stock(db, "BV-RAN-01", "P-RB", 1)
+    res, order = _book(world, _order(59080))
+    assert order["fulfillment_route"]["reason"] == "NONE" and order["store_id"] == "BV-RAN-01"
+    monkeypatch.setattr(returns, "get_order_repository", lambda: OrderRepository(db.orders))
+    rebuilt = {"order_id": order["order_id"], "store_id": order["store_id"]}  # the review row's
+    assert shopify_refund._merge_fulfilment_context(rebuilt)
+
+    for o in (order, rebuilt):
+        hit = returns._resolve_restock_store(o["store_id"], o["order_id"], order=o, product_id="P-RB")
+        assert hit["store_id"] is None and hit["reason"] == returns._RESTOCK_ROUTE_UNRESOLVED, hit

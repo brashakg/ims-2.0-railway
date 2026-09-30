@@ -5,7 +5,7 @@ split): no path, method, dependency, status code, response_model, default,
 rounding or validation was changed.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import Depends, HTTPException
 from typing import Optional
 from ..auth import get_current_user
@@ -274,6 +274,21 @@ def _assemble_invoice(order_id: str, current_user: dict):
                 pass
             invoice_number = repo.next_invoice_number(store_id, store_doc=store_doc)
             repo.set_invoice(order_id, invoice_number)
+        # THE ROOT RULE's print stamp (online_fulfillment_route.invoice_issued):
+        # a routed online order's invoice handed out here is ISSUED -- Re-map
+        # and clear-hold never re-bill, re-number or re-date it. Unrecorded,
+        # it is not handed out.
+        if isinstance(order.get("fulfillment_route"), dict) and not order.get("invoice_issued_at"):
+            try:
+                repo.collection.update_one(
+                    {"order_id": order_id, "invoice_issued_at": None},
+                    {"$set": {"invoice_issued_at": datetime.now(timezone.utc).isoformat()}},
+                )
+            except Exception:  # noqa: BLE001
+                raise HTTPException(
+                    status_code=503,
+                    detail="Could not record this tax invoice as issued -- try again",
+                )
 
         # Convert items to camelCase
         items_formatted = [item_to_frontend(item) for item in order.get("items", [])]

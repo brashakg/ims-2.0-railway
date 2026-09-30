@@ -66,12 +66,23 @@ class _FakeColl:
         return
 
 
+# The shops route_order knows (stores_util.physical_stores): Bokaro is an
+# active physical shop, BV-ONLINE-01 the stockless online bucket.
+_SHOPS = [
+    {"store_id": "BV-BOK-01", "store_type": "RETAIL", "is_active": True},
+    {"store_id": "BV-RAN-01", "store_type": "RETAIL", "is_active": True},
+    {"store_id": "BV-ONLINE-01", "store_type": "ONLINE", "is_active": True},
+]
+
+
 class _FakeDb:
     def __init__(self, colls=None):
-        self._colls = dict(colls or {})
+        self._colls = {"stores": _FakeColl(_SHOPS), **dict(colls or {})}
 
     def __getitem__(self, name):
         return self._colls.get(name, _FakeColl([]))
+
+    get_collection = __getitem__
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +136,7 @@ def test_fulfillment_store_health_counts_by_the_claims_own_rule(monkeypatch):
     mongomock = pytest.importorskip("mongomock")  # the expiry rule needs $type
     monkeypatch.setenv("ONLINE_FULFILLMENT_STORE_ID", "BV-BOK-01")
     db = mongomock.MongoClient()["ims_tile"]
+    db.stores.insert_many([dict(s) for s in _SHOPS])
     db.stock_units.insert_many(
         [
             {"store_id": "BV-BOK-01"},  # no status (a legacy minted row)
@@ -139,15 +151,32 @@ def test_fulfillment_store_health_counts_by_the_claims_own_rule(monkeypatch):
 
 
 def test_fulfillment_store_health_flags_virtual_default(monkeypatch):
-    """Resolving to the virtual default bucket is flagged even when it has stock."""
+    """A fallback naming the virtual bucket is no fallback at all -- route_order
+    never ships or bills from it (online_fulfillment_route.usable_fallback) --
+    so the tile never reports its (phantom) stock as the fallback's."""
     monkeypatch.setenv("ONLINE_FULFILLMENT_STORE_ID", "BV-ONLINE-01")
     db = _FakeDb(
         {"stock_units": _FakeColl([{"store_id": "BV-ONLINE-01", "status": "AVAILABLE"}])}
     )
     out = sh.fulfillment_store_health(db)
     assert out["is_virtual_default"] is True
-    assert out["available_units"] == 1
-    assert out["warning"] is not None  # advisory, not a hard zero-stock warning
+    assert out["available_units"] == 0 and out["checked"] is False
+    assert "not an active physical shop" in out["warning"]
+
+
+def test_fulfillment_store_health_gives_route_orders_answer_when_unset(monkeypatch):
+    """Money panel round 10 (LOW): with no ONLINE_FULFILLMENT_STORE_ID the tile
+    reported the billing bucket's shop (ONLINE_STORE_ID=BV-RAN-01, 3 units) as
+    a healthy fallback, while route_order has NO fallback: every dark, unread
+    or unmapped order is held and claims nothing. One answer now: none, said so."""
+    monkeypatch.delenv("ONLINE_FULFILLMENT_STORE_ID", raising=False)
+    monkeypatch.setenv("ONLINE_STORE_ID", "BV-RAN-01")
+    db = _FakeDb(
+        {"stock_units": _FakeColl([{"store_id": "BV-RAN-01", "status": "AVAILABLE"}] * 3)}
+    )
+    out = sh.fulfillment_store_health(db)
+    assert out["store_id"] is None and out["available_units"] == 0
+    assert "No fallback online fulfillment store is set" in out["warning"]
 
 
 def test_fulfillment_store_health_none_db(monkeypatch):

@@ -727,8 +727,9 @@ async def clear_rx_hold(
     # Late import: online_store_orders must not import orders at module level.
     from .orders import order_hold_kinds
     from ..services.online_fulfillment_route import (
+        invoice_issued,
+        reissue_fields,
         seller_held,
-        seller_release_dates,
         stored_seller_problem,
     )
 
@@ -773,7 +774,16 @@ async def clear_rx_hold(
     if prescription_id:
         update["rx_hold_cleared_prescription_id"] = prescription_id
     unset: Dict[str, str] = {}
-    if "SELLER" in released:
+    issued = invoice_issued(order, now_dt) if "SELLER" in released else None
+    if issued:
+        # THE ROOT RULE: an issued tax invoice is never re-split, re-dated or
+        # re-numbered -- the hold lifts, the invoice stays as issued.
+        released_message += (
+            f" Its tax invoice {order.get('invoice_number')} was already issued "
+            f"({issued}), so it keeps its number, date and GST split; a change of "
+            "seller needs a credit note and a new invoice through the normal doors."
+        )
+    elif "SELLER" in released:
         # The booking split the GST from the shop doc the seller check refused:
         # re-split it against the shop as fixed, the ONE re-split Re-map runs
         # too, so the invoice, GSTR-1/3B and Tally file one tax head.
@@ -791,8 +801,9 @@ async def clear_rx_hold(
         gst_set, unset = reseal_seller_gst(order, store_doc)
         update.update(gst_set)
         # No tax invoice was issued while it was held: the one issued now is
-        # dated now and filed in this month (THE filing-date rule, Re-map's too).
-        update.update(seller_release_dates(order, now_dt))
+        # dated now and filed in this month, numbered in this financial year
+        # (THE re-issue rule, Re-map's too).
+        update.update(reissue_fields(order, order.get("store_id"), now_dt))
     try:
         coll.update_one(
             {"order_id": order_id}, {"$set": update, **({"$unset": unset} if unset else {})}
