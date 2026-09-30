@@ -1813,3 +1813,21 @@ def test_parity_takes_retired_from_the_rules_own_reader(stale, twin):
     assert task["payload"]["lines"] == {"SKU-1": "send"}
     assert "Top: SKU-1 (IMS 3 vs Shopify 9)" in task["description"]
     assert "Deleted or deactivated" not in task["description"]
+
+
+def test_the_shop_filter_is_spelled_as_the_writers_map(monkeypatch):
+    """Round 13, the panel's probe. The stores row is 'BV-A ' (padded); the
+    writer's map (inventory._mapped) strips it to 'BV-A' -> LOC_A, and the
+    rule reads BV-A's shelf (5) under that same spelling. The screen's
+    dropdown sends the stored id unchanged. Filtered to 'BV-A ' the row is
+    BV-A's own location -- 9 listed vs 5 sent, OVERSELL_RISK -- exactly the
+    row filtered to 'BV-A', never 0 / 0 / OK (a mapped shop read as
+    unmapped, a real oversell hidden). Compare the raw filter against the
+    map's keys -> 0 / OK -> fails."""
+    db = _db({"SKU-1": {"BV-A": 5, "BV-B": 0}})
+    db.get_collection("stores").update_one({"store_id": "BV-A"}, {"$set": {"store_id": "BV-A "}})
+    levels = {INV_1: {LOC_A: 9, LOC_B: 0}, INV_2: {}}
+    want = (5, 9, 5, 4, "OVERSELL_RISK")
+    for sid in ("BV-A ", "BV-A"):
+        row = _reconcile(monkeypatch, db, levels, sid)["SKU-1"]
+        assert _cols(row, "in_store", "online", "recommended", "delta", "status") == want, sid

@@ -149,6 +149,9 @@ async def online_stock_reconcile(
     listed_qty_live is True only on FULL mapped coverage;
     listed_live_rows / listed_mapped_rows expose partial coverage.
     Read-only + fail-soft."""
+    # The shop key as the writer's map (inventory._mapped) and the rule spell
+    # it: a stored 'BV-A ' is mapped, and its shelf read, as 'BV-A'.
+    store_id = (store_id or "").strip() or None
     db = _get_db()
     if db is None:
         return {

@@ -193,7 +193,9 @@ def rule_by_location(db, skus: List[str], *, store_id: Optional[str] = None):
     (inventory._mapped). Both reads are the writer's own functions.
     With ``store_id`` the map is that shop's own entry only ({} for a shop
     with no usable location), so another shop's failed read never blanks it.
-    An EMPTY store_id is no filter -- all stores -- exactly as the route and
+    ``store_id`` is spelled as the map's keys are (stripped: the route
+    strips it once, where it arrives). An EMPTY store_id is no filter --
+    all stores -- exactly as the route and
     _on_hand_by_product read it (a ``store_id=`` query string once narrowed
     the map to {} here while the shelf stayed pooled: every listing looked
     unclaimed and every online SKU read OVERSELL_RISK).
