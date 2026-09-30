@@ -83,11 +83,14 @@ async def get_sellable_counts(
     current_user: dict = Depends(get_current_user),
 ):
     """F46: the till's per-tile stock badge and cart-line warning. For each id,
-    the count order-create's oversell guard blocks on at this store -- the
-    guard's own predicate (_takes_serialized_stock), id resolution
-    (_canonical_pid) and count (sellable_units), never a second computation.
-    None = the guard would not gate that line at all. Read-only."""
-    from ..orders.stock import _canonical_pid, _takes_serialized_stock, sellable_units
+    the count order-create's oversell guard blocks on at this store, ASKED OF
+    THE GUARD (_assert_serialized_stock_available, untouched): n = the
+    available count it reads; if it refuses a line of n + 1 it gates this line
+    and sells exactly n, otherwise it never blocks it -> None. Never a second
+    copy of the rule. `canonical` is the id the guard sums a line under
+    (_canonical_pid), so the cart adds a SKU line and a product_id line of one
+    product together, as the guard does. Read-only."""
+    from ..orders.stock import _assert_serialized_stock_available, _canonical_pid
 
     store = validate_store_access(store_id, current_user)
     ids = [p.strip() for p in product_ids.split(",") if p.strip()]
@@ -97,15 +100,26 @@ async def get_sellable_counts(
     stock_repo = get_stock_repository()
     product_repo = get_product_repository()
 
-    # ponytail: 1 product + 2 stock_units lookups per id (<= 24 tiles + the
-    # cart); batch into one aggregate if the till ever shows hundreds.
+    # ponytail: ~5 indexed reads per id (<= 24 tiles + the cart), and the
+    # guard's expired-unit warning is logged on each refused probe; batch into
+    # one aggregate if the till ever shows hundreds.
     sellable: Dict[str, Optional[int]] = {}
+    canonical: Dict[str, str] = {}
     for i, pid in enumerate(ids):
-        canon = _canonical_pid(product_repo, pid)
+        canon = canonical[pid] = _canonical_pid(product_repo, pid)
         line = {"product_id": canon, "item_type": types[i] if i < len(types) else ""}
-        gated = bool(store) and stock_repo is not None and _takes_serialized_stock(line)
-        sellable[pid] = sellable_units(stock_repo, canon, store) if gated else None
-    return {"store_id": store, "sellable": sellable}
+        sellable[pid] = None
+        try:
+            n = int(stock_repo.find_available(canon, store))
+        except Exception:  # noqa: BLE001 -- the guard fails soft here too
+            continue
+        try:
+            _assert_serialized_stock_available([{**line, "quantity": n + 1}], store)
+        except HTTPException as exc:
+            if exc.status_code != 409:
+                raise
+            sellable[pid] = n
+    return {"store_id": store, "sellable": sellable, "canonical": canonical}
 
 
 @router.get("/barcode/{barcode}")
