@@ -583,7 +583,8 @@ def _claim_returnable_qty(
     all that stops another door restocking the line again (a phantom unit),
     so a claim it cannot write raises and nothing is restocked. A write that
     errored is decided by the line read again: it landed when this attempt's
-    own token is on it (a lost reply), else it did not.
+    own token is on it (a lost reply), else it did not; with no answer to the
+    read either, it is taken back by its token.
     """
     if return_qty <= 0:
         return True
@@ -633,19 +634,32 @@ def _claim_returnable_qty(
         )
     except Exception as exc:  # noqa: BLE001
         # An error does not say whether the write landed (a socket timeout
-        # after the commit; a standalone mongod retries no write): the line,
-        # read again, does. Landed: booked. Not landed: a counter return is
-        # refused for a retry (it would go ahead unreserved, and its release
-        # would take back another door's units); a refund's restock raises
-        # (its mark is all that stops another door restocking the line again).
+        # after the commit; a standalone mongod retries no write): its token
+        # on the line, read again, does. Landed: booked. No answer to that
+        # read either: the write is taken back by its token (it matches only
+        # if the write landed; the $pull makes it once) -- a booking no door
+        # owns strands the unit SOLD behind a line that reads returned. Not
+        # landed, or taken back: a counter return is refused for a retry (it
+        # would go ahead unreserved, and its release would take back another
+        # door's units); a refund's restock raises (its mark is all that stops
+        # another door restocking the line again).
         logger.warning("[RETURNS] returnable-qty claim errored: %s", exc)
+        mine = {"order_id": order_id, "items": {"$elemMatch": {"claim_tokens": token}}}
         try:
-            landed = coll.find_one({"order_id": order_id,
-                                    "items": {"$elemMatch": {"claim_tokens": token}}})
-        except Exception:  # noqa: BLE001 -- no answer either: read as not landed
-            landed = None
-        if landed is not None:
-            return True
+            if coll.find_one(mine) is not None:
+                return True
+        except Exception:  # noqa: BLE001
+            try:
+                coll.find_one_and_update(mine, {
+                    "$inc": {k: -v for k, v in update["$inc"].items()},
+                    "$pull": {"items.$.claim_tokens": token},
+                })
+            except Exception:  # noqa: BLE001
+                # ponytail: three misses in a row stay unknown (this ERROR); a
+                # durable pending-claim record if one ever shows in the logs.
+                logger.error("[RETURNS] claim %s on order %s: landed or not is unknown; "
+                             "a line carrying it holds %s units no door owns",
+                             token, order_id, return_qty)
         if refund_id:
             raise
         return False

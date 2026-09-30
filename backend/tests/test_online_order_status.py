@@ -1876,6 +1876,65 @@ def test_goods_back_on_a_premark_row_restocks_nothing_while_the_returns_scan_bli
     assert _minted(swept) == ["AVAILABLE"], "one frame, one unit"
 
 
+class _CommitsThenReadDown(_CommitsThenRaises):
+    """The lost reply, and the read-back right after it fails too: a partition
+    that eats the one usually eats the other."""
+
+    read_down = False
+
+    def find_one(self, *a, **kw):
+        if self.lost and not self.read_down:
+            self.read_down = True
+            raise RuntimeError("read timed out")
+        return self.real.find_one(*a, **kw)
+
+
+def test_a_booking_whose_reply_and_read_back_were_lost_is_taken_back_for_the_retry(swept, monkeypatch):
+    """The booking committed, its reply was lost and so was the read-back. It
+    stayed on the line with stk-1 SOLD; the retry the blocked-restock task
+    sends a person to, and Goods back, both read it as restocked and
+    answered success -- for good. It is taken back by its own token."""
+    oid, rid = 60202, "700402"
+    row = _one_unit_refund(swept, oid, int(rid))
+    lossy = _CommitsThenReadDown(returns_router._orders_coll())
+    monkeypatch.setattr(returns_router, "_orders_coll", lambda: lossy)
+    assert _confirm(row)["result"]["restock_applied"] is False and lossy.read_down
+    assert _units(swept) == [("stk-1", "SOLD")]
+    line = _doc(swept, oid)["items"][0]
+    assert not line.get("returned_qty") and not (line.get("restocked_refunds") or {}).get(rid)
+
+    assert _retry(swept["returns"].find_one({"shopify_refund_id": rid}))["restock_applied"] is True
+    assert _units(swept) == [("stk-1", "AVAILABLE")]
+    _goods_back(swept["review"].find_one({"review_id": row["review_id"]}))
+    assert _units(swept) == [("stk-1", "AVAILABLE")], "one unit, once"
+    line = _doc(swept, oid)["items"][0]
+    assert (line.get("returned_qty"), line.get("restocked_refunds")) == (1, {rid: 1})
+
+
+def test_a_counter_claim_whose_reply_and_read_back_were_lost_is_taken_back(swept, monkeypatch):
+    """The counter's claim committed, its reply was lost and so was the
+    read-back: refused (409) with returned_qty burned at 1, so the customer's
+    real return was refused for good and the frame stayed SOLD. Taken back by
+    its token, the retry books it once."""
+    from fastapi import HTTPException
+
+    oid = 60203
+    _claim_unit(swept, _book(swept, oid))
+    _set(swept, oid, status="DELIVERED")
+    lossy = _CommitsThenReadDown(returns_router._orders_coll())
+    monkeypatch.setattr(returns_router, "_orders_coll", lambda: lossy)
+    with pytest.raises(HTTPException) as refused:
+        _counter_return(swept, oid)
+    assert refused.value.status_code == 409 and lossy.read_down
+    assert swept["returns"].count_documents({}) == 0
+    assert not _doc(swept, oid)["items"][0].get("returned_qty")
+
+    assert _counter_return(swept, oid)["return_id"]
+    assert _doc(swept, oid)["items"][0]["returned_qty"] == 1
+    assert _units(swept) == [("stk-1", "AVAILABLE")]
+    _refused(swept, oid)
+
+
 def test_the_counter_refuses_while_the_returns_scan_blips(swept, monkeypatch):
     """The same unreadable scan at the counter: a refund confirmed before the
     marks has only its doc, so reading nothing back took the unit back (and
