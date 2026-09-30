@@ -1422,3 +1422,141 @@ class TestAHeaderOnlyBillHasNoInventedVerdict:
         m = cli.get(f"{_URL}/{a['bill_id']}/match").json()
         assert m["match_status"] == "MATCHED_OVERRIDE"
         assert m["match_detail"] and m["match_detail"]["match_status"] == "MATCHED_OVERRIDE"
+
+
+# ===========================================================================
+# Panel round 8 -- the debit note's GSTIN, the Cross-Check's shop GSTINs, a
+# mirror no return can file, the month's last second, the check's company
+# ===========================================================================
+
+
+class TestTheDebitNoteHasOurGstinOrIsRefused:
+    @pytest.mark.parametrize(
+        "entity, shop",
+        [
+            ({"gstins": []}, {"store_id": "DHN", "state_code": "20"}),
+            ({"gstins": [{"gstin": BUY_JH, "state_code": "20", "is_primary": True}]},
+             {"store_id": "NSK", "state_code": "27"}),
+            ({"gstin": BUY_JH}, {"store_id": "S1", "state_code": "20", "gstin": BUY_JH}),
+        ],
+        ids=["company-holds-none", "none-for-the-shops-state", "legacy-top-level-number"],
+    )
+    def test_no_gstin_no_note(self, entity, shop):
+        """r8 #1: every bill door refuses a shop with no GSTIN of its company
+        (RECIPIENT_*_HAS_NO_GSTIN), yet POST /rtv-debit-notes/issue answered
+        201 with seller.gstin '' and CGST 60 + SGST 60 -- a statutory note
+        naming no GSTIN. A company's top-level (primary) number was its
+        fallback too, which the bill door never reads."""
+        from fastapi import HTTPException
+
+        import api.routers.rtv_debit_notes as dn_router
+
+        sid = shop["store_id"]
+        db = _mongo([({"entity_id": "E1", "name": "Better Vision", **entity}, [{**shop, "entity_id": "E1"}])])
+        r = _app_as(db, sid).post(_URL, json=_services(store_id=sid))
+        assert r.status_code == 422, r.text
+        db["vendor_returns"].insert_one(
+            {"return_id": "VR-1", "store_id": sid, "vendor_id": "V1", "entity_id": "E1",
+             "lines": [{"product_id": "P1", "product_name": "Frame", "hsn": "9003", "quantity": 1,
+                        "rate_paise": 100000, "gst_rate": 12.0}]}
+        )
+        user = {"user_id": "u1", "roles": ["ADMIN"], "store_ids": [sid], "active_store_id": sid}
+        saved = dn_router._get_db
+        try:
+            dn_router._get_db = lambda: db
+            with pytest.raises(HTTPException) as ei:
+                asyncio.run(dn_router.issue_debit_note(
+                    dn_router.DebitNoteIssue(source_type="vendor_return", rtv_id="VR-1"), current_user=user
+                ))
+        finally:
+            dn_router._get_db = saved
+        assert ei.value.status_code == 422
+        assert ei.value.detail["error"] == "seller_has_no_gstin"
+        assert sid in ei.value.detail["message"]
+        assert db["debit_notes"].count_documents({}) == 0
+
+
+class TestRoundEightReaders:
+    def test_the_crosscheck_reads_a_gstin_less_shops_registration(self):
+        """r8 #2: the Cross-Check's switch to the shop-GSTIN answer was pinned
+        by no test. S3 (Jharkhand, no GSTIN on its record) files on E1's
+        20... like S1; keyed on its raw blank it was counted again as a
+        GSTIN-less shop and the Rs 180 bill read ITC 360."""
+        db = _one_company([
+            {"store_id": "S1", "entity_id": "E1", "state_code": "20", "gstin": BUY_JH},
+            {"store_id": "S3", "entity_id": "E1", "state_code": "20", "gstin": None},
+        ])
+        r = _app_as(db, "S1").post(_URL, json=_services())
+        assert r.status_code == 201, r.text
+        assert r.json()["igst_total"] == 180.0
+        assert _crosscheck(db, "E1")["gstr3b"]["itc"]["total"] == 180.0
+
+    def test_a_transfer_into_a_shop_with_no_gstin_is_credit_left_off(self):
+        """r8 #3: PUNE (Maharashtra) holds no GSTIN of E1 (Jharkhand only).
+        The mirror of S1 -> PUNE (IGST 50, no recipient GSTIN) was placed on
+        PUNE by to_store_id alone: the Cross-Check counted ITC 50 and 'left
+        off' read MATCH, while E1's only real return (S1) claims none of it
+        and pays that IGST in cash. No return files it, so it is flagged."""
+        from api.routers import transfers as trf
+        from api.routers.reports import _itc_from_vendor_bills
+
+        db = _one_company([
+            {"store_id": "S1", "entity_id": "E1", "state_code": "20", "gstin": BUY_JH},
+            {"store_id": "PUNE", "entity_id": "E1", "state_code": "27"},
+        ])
+        saved = trf._get_db
+        try:
+            trf._get_db = lambda: db
+            trf._book_mirror_purchase({
+                "id": "t", "transfer_number": "T7", "total_value": 1000, "items": [],
+                "from_location_id": "S1", "to_location_id": "PUNE",
+                "completed_at": "2026-05-10T05:00:00",
+            })
+        finally:
+            trf._get_db = saved
+        bill = db["vendor_bills"].find_one({}, {"_id": 0})
+        assert (bill["recipient_gstin"], bill["igst_total"]) == ("", 50.0)
+        assert _itc_from_vendor_bills(db, "PUNE", 2026, 5, 31) == (0.0, 0.0, 0.0)
+        xc = _crosscheck(db, "E1")
+        assert xc["gstr3b"]["itc"]["total"] == 0.0
+        row = _row(xc, "Input credit left off GSTR-3B")
+        assert row["status"] == "MISMATCH" and "TRF/T7" in row["note"], row
+
+    def test_a_mirror_in_the_months_last_second_is_on_its_return(self):
+        """r8 #4: the month ended at 'T23:59:59', and a mirror's IST timestamp
+        carries microseconds: '2026-05-31T23:59:59.412000' sorted after it,
+        so it was on no GSTR-3B (nor the sender's outward) and the check
+        skipped it as dated. June's first instant stays June's."""
+        from api.routers.reports import _transfer_outward_bills
+
+        db = TestCreditLeftOffEveryReturnIsFlagged()._world()
+        mirror = {"source_transfer_id": "T9", "from_store_id": "SX", "to_store_id": "S1", "vendor_id": "E2",
+                  "taxable_amount": 1000, "tax_amount": 50, "cgst_total": 0.0, "sgst_total": 0.0,
+                  "igst_total": 50.0, "recipient_entity_id": "E1", "recipient_gstin": BUY_JH,
+                  "status": "OUTSTANDING"}
+        db["vendor_bills"].insert_many([
+            {**mirror, "bill_id": "m9", "bill_number": "TRF/T9",
+             "bill_date": "2026-05-31T23:59:59.412000", "invoice_date": "2026-05-31T23:59:59.412000"},
+            {**mirror, "bill_id": "j1", "bill_number": "TRF/J1", "source_transfer_id": "J1",
+             "bill_date": "2026-06-01", "invoice_date": "2026-06-01"},
+        ])
+        xc = _crosscheck(db, "E1")
+        assert xc["gstr3b"]["itc"]["total"] == 50.0
+        assert _row(xc, "Input credit left off GSTR-3B")["status"] == "MATCH"
+        assert [b["bill_id"] for b in _transfer_outward_bills(db, "SX", 2026, 5, 31)] == ["m9"]
+        assert [b["bill_id"] for b in _transfer_outward_bills(db, "SX", 2026, 6, 30)] == ["j1"]
+        assert reports._compute_gstr3b("2026-06", "S1")["itcAvailable"]["integratedTax"] == 50.0
+
+    def test_the_check_lists_only_its_own_companys_bills(self):
+        """r8 #5: the check's company scope was pinned by no test. Without it
+        E1's Cross-Check listed E2's header-only bill as E1's credit left off
+        GSTR-3B, with E2's tax and bill number."""
+        db = TestOneShopGstinForEveryDoor._two_company_world()
+        db["vendor_bills"].insert_one(
+            {"bill_id": "w1", "bill_number": "WZ-1", "vendor_id": "V1", "bill_date": "2026-05-06",
+             "invoice_date": "2026-05-06", "taxable_amount": 1000, "tax_amount": 50,
+             "recipient_entity_id": "E2", "recipient_gstin": BUY_MH, "status": "OUTSTANDING"}
+        )
+        assert _row(_crosscheck(db, "E1"), "Input credit left off GSTR-3B")["status"] == "MATCH"
+        row = _row(_crosscheck(db, "E2"), "Input credit left off GSTR-3B")
+        assert row["status"] == "MISMATCH" and "WZ-1" in row["note"], row
