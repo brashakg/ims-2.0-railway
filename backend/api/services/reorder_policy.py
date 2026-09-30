@@ -30,9 +30,14 @@ default) or garbage = NOT SET = no low-stock alert until someone types a
 level. A product saved before that rule with NO level at all is not -1: it
 keeps the chain's old threshold, LEGACY_LEVEL (the 5 the low-stock list always
 used), so its alerts never vanish silently. `reorder_level` / `is_low_stock`
-are THE rule; every reader that decides "low stock" calls them, and
+are THE rule; every reader that decides "low stock" calls them with the
+PRODUCT (never a stock_units row, which is one unit and has no level), and
 `low_stock_rows` is the one low-stock list (StockRepository.find_low_stock
-filtered by each product's own level) the endpoints and reports read.
+filtered by each product's own level) the endpoints, reports and analytics
+counts read. A SKU with no product row at all (e.g. deleted in the 09-07 wipe)
+stays visible on the low-stock list at the legacy level, but the buying
+readers (purchase report, Oracle) pass None for it: no top-up is ever
+suggested for a product that is gone.
 
 No emojis (Windows cp1252). No direct DB access (low_stock_rows reads through
 the repositories it is handed).

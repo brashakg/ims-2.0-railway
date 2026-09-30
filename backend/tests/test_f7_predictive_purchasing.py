@@ -576,6 +576,16 @@ class TestT9HorizonNotReorderPoint:
         assert pl["days_remaining"] < 14
         assert pl["reorder_point"] == 20
 
+    def test_a_sku_with_no_product_row_gets_no_legacy_top_up(self):
+        # F73: a SKU whose product row is gone (the 09-07 wipe) has no level at
+        # all -> no reorder-point gap, never the legacy 5 a product row without
+        # a stored level keeps. One sale in 30 days, nothing on hand -> 1.
+        db = FakeDB()
+        db.get_collection("orders").insert_one(_order("S1", "P-GONE", days_ago=20))
+        assert _run_oracle(db) == 1
+        pl = _pending(db)[0]["payload"]
+        assert (pl["reorder_point"], pl["quantity"]) == (0, 1)
+
 
 # ============================================================================
 # T6 - Act On It creates a DRAFT (not SENT) PO + audit row

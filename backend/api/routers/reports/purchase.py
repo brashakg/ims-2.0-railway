@@ -238,7 +238,10 @@ async def purchase_recommendations(
     # 3. Build per-SKU recommendation rows.
     recs: list = []
     for pid, stats in sku_stats.items():
-        prod = products.get(pid, {})
+        # A SKU whose product row is gone (e.g. the 09-07 catalogue wipe) has
+        # no level at all: not set, never the legacy 5 (F73).
+        level = reorder_level(products.get(pid))
+        prod = products.get(pid) or {}
         # Owner decision (2026-07-04): reorder_quantity <= 0 (the new -1
         # default) disables auto-reorder for the product -- it never appears
         # in the purchase recommendations (api/services/reorder_policy.py).
@@ -254,7 +257,6 @@ async def purchase_recommendations(
             or 0
         )
         # Not set (-1) buys nothing on its own account (F73); 0 is the floor.
-        level = reorder_level(prod)
         reorder_point = level or 0
         gap_units = max(0, desired_cover - current_stock)
         if gap_units <= 0 and current_stock > reorder_point:

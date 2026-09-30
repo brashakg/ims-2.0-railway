@@ -561,3 +561,43 @@ def test_f73_jarvis_counts_and_lists_low_stock_by_the_same_rule(monkeypatch):
     assert listed == {"LEGACY": 5, "SET": 4}
     assert overview["inventory"]["low_stock_items"] == len(listed)
 
+
+def _recommendations(monkeypatch, products, sold):
+    from datetime import timedelta
+
+    from api.routers.reports import purchase
+    from api.utils.ist import now_ist_naive
+
+    db = _mongo()
+    if products:
+        db.products.insert_many([dict(p) for p in products])
+    db.orders.insert_many([
+        {"store_id": "S1", "status": "CONFIRMED",
+         "created_at": now_ist_naive() - timedelta(days=1),
+         "items": [{"product_id": pid, "quantity": qty, "unit_price": 100}]}
+        for pid, qty in sold.items()
+    ])
+    monkeypatch.setattr(purchase, "get_db", lambda: db)
+    res = asyncio.run(purchase.purchase_recommendations(
+        store_id="S1", lookback_days=90, lead_time_days=7, reorder_cycle_days=14,
+        safety_buffer_days=7, min_velocity=2, limit=100,
+        current_user={**_ADMIN, "active_store_id": "S1"},
+    ))
+    return {r["product_id"]: (r["suggested_order_qty"], r["reorder_point"])
+            for r in res["recommendations"]}
+
+
+def test_f73_a_sku_with_no_product_row_is_never_topped_up_to_five(monkeypatch):
+    """A SKU sold in the window whose product row is gone (the 09-07 wipe) has
+    no level at all: the purchase report suggests what its sales need (1), not
+    a legacy top-up to 5."""
+    recs = _recommendations(monkeypatch, [], {"P-GONE": 2})
+    assert recs == {"P-GONE": (1, None)}
+
+
+def test_f73_guard_a_product_that_never_stored_a_level_buys_to_five(monkeypatch):
+    """The one rule: a product row with no level is low at 5 on Low Stock, so
+    the purchase report reorders it at 5 too."""
+    recs = _recommendations(monkeypatch, [{"product_id": "P-LEGACY", "sku": "L"}], {"P-LEGACY": 2})
+    assert recs == {"P-LEGACY": (5, 5)}
+
