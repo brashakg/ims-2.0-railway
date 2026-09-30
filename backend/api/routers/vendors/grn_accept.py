@@ -40,6 +40,7 @@ from .grn_accept_lock import (
     _grn_already_minted,
     _grn_mint_unit,
     _grn_unit_index_present,
+    _received_on,
     _release_grn_accept_claim,
     _stock_create_raises_on_duplicate,
 )
@@ -189,11 +190,13 @@ def _over_the_order(
     claim (or its minted units), so at most one shelves -- both may hold, and
     the store manager accepts one.
 
-    Counts every unit this PO has put on the shelf in ANY status: a unit sold
-    or transferred since was still received, so it still fills the order. Both
-    counts fail closed (raise): the receipt then stays held."""
+    Counts every unit this PO has put on the shelf, by its ORIGIN (po_id is
+    stamped at mint and a transfer never rewrites it -- _received_on), in ANY
+    status and at ANY shop: a unit sold or transferred since was still
+    received, so it still fills the order. Both counts fail closed (raise):
+    the receipt then stays held."""
     on_shelf = _grn_already_minted(
-        stock_repo, {"source_type": "GRN", "po_id": po_id, "product_id": product_id}
+        stock_repo, {"po_id": po_id, "product_id": product_id}
     )
     live_since = (
         datetime.now() - timedelta(seconds=_GRN_ACCEPT_LOCK_STALE_SECONDS)
@@ -224,9 +227,7 @@ def _hand_to_store_manager(db, grn_id: str, grn: dict, over: List[dict], product
     po = grn.get("po_number") or grn.get("po_id")
     # A void is refused once a receipt has put anything on the shelf.
     try:
-        voidable = not _grn_already_minted(
-            get_stock_repository(), {"source_type": "GRN", "source_id": grn_id}
-        )
+        voidable = not _grn_already_minted(get_stock_repository(), _received_on(grn_id))
     except Exception:  # noqa: BLE001
         voidable = False
     # Opens that vendor's "Receipts still waiting", where the receipt is voided.
@@ -250,7 +251,7 @@ def _hand_to_store_manager(db, grn_id: str, grn: dict, over: List[dict], product
         prod = product_repo.find_by_id(o["product_id"]) if product_repo else None
         item = (
             f"{_held_item_label(prod, o['product_id'])}: {o['accepted_qty']} held, "
-            f"PO ordered {o['ordered']}, {o['on_shelf']} already on the shelf"
+            f"PO ordered {o['ordered']}, {o['on_shelf']} already received on it"
             + (
                 "; another receipt of this order was going into stock at that moment"
                 if o.get("busy")
@@ -475,12 +476,9 @@ def _accept_grn_claimed(
             try:
                 already = _grn_already_minted(
                     stock_repo,
-                    {
-                        "source_type": "GRN",
-                        "source_id": grn_id,
-                        "product_id": product_id,
-                        "grn_line_index": line_index,
-                    },
+                    _received_on(
+                        grn_id, product_id=product_id, grn_line_index=line_index
+                    ),
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.error(
@@ -615,6 +613,9 @@ def _accept_grn_claimed(
                         "barcode_printed": False,
                         "source_type": "GRN",
                         "source_id": grn_id,
+                        # The ORIGIN (_received_on): never rewritten by a
+                        # transfer, unlike source_type/source_id above.
+                        "grn_id": grn_id,
                         "grn_line_index": line_index,
                         "line_unit_seq": seq,
                         "grn_number": grn_number,

@@ -44,6 +44,9 @@ import pytest  # noqa: E402
 from fastapi import HTTPException  # noqa: E402
 
 from api.routers import vendors as vendors_mod  # noqa: E402
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from strict_fakes import matches  # noqa: E402
 from api.routers import purchase_invoices as pi_mod  # noqa: E402
 
 
@@ -106,7 +109,7 @@ class _FakeStockRepo:
     def count(self, flt):
         n = 0
         for u in self.units:
-            if all(u.get(k) == v for k, v in (flt or {}).items()):
+            if matches(u, flt):  # the real matcher: the guard reads $or
                 n += 1
         return n
 

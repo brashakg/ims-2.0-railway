@@ -1409,6 +1409,126 @@ def test_c1_no_store_manager_fails_loud_to_the_admins(world, caplog):
     )
 
 
+# -- A unit's ORIGIN is recorded once; a transfer never rewrites it -------------
+# (owner 2026-10-01). Every "already received from this receipt / line" count
+# reads the origin, so a unit moved to another shop is still received.
+
+OTHER = "BV-DHN-01"
+
+
+def _transfer_out(world, monkeypatch, pid, n):
+    """Send n units of pid to another shop, through the transfer module's own
+    stock moves (ship, then receive): the receive re-homes each unit and
+    rewrites its source_type / source_id to the transfer."""
+    from api.routers import transfers as _tr
+
+    monkeypatch.setattr(_tr, "_writeback_units_left", lambda *a, **k: None)  # no Shopify
+    t = {
+        "id": f"T-{pid}",
+        "transfer_number": "TRF/1",
+        "from_location_id": STORE,
+        "to_location_id": OTHER,
+        "items": [{"product_id": pid, "quantity_requested": n}],
+    }
+    _tr._apply_ship_stock_move(t)
+    t["items"][0]["quantity_received"] = n
+    _tr._apply_receive_stock_move(t)
+    moved = list(world.db.stock_units.find({"product_id": pid, "store_id": OTHER}))
+    assert len(moved) == n and {u["source_type"] for u in moved} == {"TRANSFER"}, moved
+
+
+def _carrera_and_boss(world, qtys, invoice_no="JOT/26-27/0901"):
+    """One order: a catalogued Carrera x1 and the typed Boss draft x2."""
+    car = world.catalogue_frame(
+        "Carrera", "CA 8895", "807", "54", mrp=6990, offer=6490, cost=3155.76
+    )
+    po = world.raise_po(
+        [
+            {
+                "product_id": car["product_id"],
+                "product_name": car.get("name") or car["sku"],
+                "sku": car["sku"],
+                "quantity": 1,
+                "unit_price": 3200,
+            },
+            {"new_product": dict(BOSS_TYPED), "quantity": 2, "unit_price": 1200},
+        ]
+    )
+    grn = _receive(world, po, qtys, invoice_no)
+    assert len(world.units(car["product_id"])) == 1
+    return po, grn, car["product_id"], po["items"][1]["product_id"]
+
+
+def test_c1_units_transferred_since_still_fill_the_order(world, monkeypatch):
+    po, grn1, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    grn2, _ = _receive_again(world, po, "JOT/26-27/0701-DUP")
+    world.finish_draft(draft_id, offer=2790)
+    assert len(world.units(draft_id)) == 2
+    _transfer_out(world, monkeypatch, draft_id, 2)
+
+    world.finish_draft(draft_id, offer=2690)  # any later catalogue edit
+
+    finding(
+        len(_any_status_units(world, draft_id)) == 2,
+        f"Origin: {len(_any_status_units(world, draft_id))} units exist for a 2-unit "
+        "order -- the duplicate receipt went on the shelf once the first units "
+        "were transferred",
+    )
+    assert world.grn(grn2["grn_id"])["status"] == "PARTIALLY_ACCEPTED"
+
+
+def test_c1_a_transferred_line_is_never_received_twice(world, monkeypatch):
+    po, grn, car_id, boss_id = _carrera_and_boss(world, [1, 2])
+    _transfer_out(world, monkeypatch, car_id, 1)
+
+    # The manager presses "Add to stock" again (no order cap: a person) ...
+    _run(vd.accept_grn(grn["grn_id"], MANAGER))
+    finding(
+        len(_any_status_units(world, car_id)) == 1,
+        f"Origin: {len(_any_status_units(world, car_id))} Carrera units for 1 "
+        "received -- 'Add to stock' re-received the transferred Carrera line",
+    )
+    # ... and the cataloguer finishes the Boss, which releases the receipt.
+    world.finish_draft(boss_id, offer=2790)
+
+    assert len(world.units(boss_id)) == 2
+    finding(
+        len(_any_status_units(world, car_id)) == 1,
+        f"Origin: {len(_any_status_units(world, car_id))} Carrera units for 1 "
+        "received -- finishing the Boss re-received the transferred Carrera line",
+    )
+    finding(
+        world.grn(grn["grn_id"])["status"] == "ACCEPTED" and not _mgr_tasks(world, grn["grn_id"]),
+        "Origin: the transferred Carrera line reads as not yet received, so the "
+        f"receipt is held for the store manager ({world.grn(grn['grn_id'])['unresolved_lines']})",
+    )
+
+
+def test_c1_a_receipt_whose_units_moved_shop_is_never_voided(world, monkeypatch):
+    # The Boss over-shipped (3 for 2), so finishing it leaves the receipt held
+    # for the store manager -- while its Carrera unit lives at another shop.
+    po, grn, car_id, boss_id = _carrera_and_boss(world, [1, 3])
+    _transfer_out(world, monkeypatch, car_id, 1)
+    world.finish_draft(boss_id, offer=2790)
+
+    (task,) = _mgr_tasks(world, grn["grn_id"])
+    finding(
+        "void" not in task["description"].lower(),
+        "Origin: the task sends the manager to void a receipt whose unit is stock "
+        f"at another shop ({task['description']!r})",
+    )
+    try:
+        _run(vd.void_grn(grn["grn_id"], MANAGER))
+        refused = None
+    except HTTPException as exc:
+        refused = exc
+    finding(
+        refused is not None and refused.status_code == 409,
+        f"Origin: a receipt with a live unit at another shop was voided ({refused})",
+    )
+    assert world.grn(grn["grn_id"])["status"] == "PARTIALLY_ACCEPTED"
+
+
 # -- Reading glasses record an eye size, as their Add-Product form does ---------
 
 RG_TYPED = {"category": "RG", "brand": "Titan", "model": "RG77", "colour": "BLK", "mrp": 1490}
