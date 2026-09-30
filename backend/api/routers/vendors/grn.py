@@ -11,6 +11,7 @@ from ._shared import (
     StreamingResponse,
     UploadFile,
     _GRN_DOCUMENT_KIND,
+    _RECEIVE_ROLES,
     _VENDOR_ROLES,
     _get_db,
     _normalize_invoice_no,
@@ -116,7 +117,7 @@ def _enrich_grn_names(grns: list) -> None:
 @router.post("/grn/upload-doc")
 async def upload_grn_doc(
     file: UploadFile = File(...),
-    current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
+    current_user: dict = Depends(require_roles(*_RECEIVE_ROLES)),
 ):
     """F-S3: upload the goods-receipt document (vendor invoice/challan image or
     PDF) and get back a file_id to attach to the GRN.

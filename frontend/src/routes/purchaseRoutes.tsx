@@ -9,13 +9,13 @@
 import { lazy } from 'react';
 import { Route, Navigate, useSearchParams } from 'react-router-dom';
 import { ProtectedRoute } from '../components/layout/ProtectedRoute';
-import { PURCHASE_MANAGER_ROLES } from '../pages/purchase/purchaseTypes';
+import { PURCHASE_MANAGER_ROLES, RECEIVING_MANAGER_ROLES } from '../pages/purchase/purchaseTypes';
 import type { UserRole } from '../types';
 
 // What the blocked page tells anyone else who opens a receiving screen
 // (audit F5). The page lists the roles that can right under it
-// (PURCHASE_MANAGER_ROLES, the accountant included), so the hint points at
-// that list rather than naming one title.
+// (RECEIVING_MANAGER_ROLES -- managers only, owner ruling 2026-09-28), so the
+// hint points at that list rather than naming one title.
 const RECEIVE_DENIED_HINT = 'Goods are received into stock by staff in the roles listed below. Hand the delivery to one of them.';
 
 const PurchaseLayout = lazy(() => import('../pages/purchase/PurchaseLayout').then(m => ({ default: m.PurchaseLayout })));
@@ -30,8 +30,9 @@ const VendorReturns = lazy(() => import('../pages/purchase/VendorReturns').then(
 // Purchase S6: Accountant Reconciliation Console
 const ReconConsole = lazy(() => import('../pages/purchase/ReconConsole'));
 
-// The module gate for the section pages: the same managers who send orders
-// and receive goods (one list, mirrors the backend _VENDOR_ROLES gate).
+// The module gate for the section pages: the roles that send orders (one
+// list, mirrors the backend _VENDOR_ROLES gate). Receiving has its own,
+// narrower list below.
 const PURCHASE_ROLES: UserRole[] = [...PURCHASE_MANAGER_ROLES];
 
 // Legacy ?tab= mapper: /purchase and /purchase?tab=<x> land on the section
@@ -144,7 +145,7 @@ export const purchaseRoutes = (
     <Route
       path="purchase/grn"
       element={
-        <ProtectedRoute allowedRoles={[...PURCHASE_MANAGER_ROLES]} deniedHint={RECEIVE_DENIED_HINT}>
+        <ProtectedRoute allowedRoles={[...RECEIVING_MANAGER_ROLES]} deniedHint={RECEIVE_DENIED_HINT}>
           <GoodsReceiptNote />
         </ProtectedRoute>
       }
@@ -157,7 +158,7 @@ export const purchaseRoutes = (
     <Route
       path="purchase/receive"
       element={
-        <ProtectedRoute allowedRoles={[...PURCHASE_MANAGER_ROLES]} deniedHint={RECEIVE_DENIED_HINT}>
+        <ProtectedRoute allowedRoles={[...RECEIVING_MANAGER_ROLES]} deniedHint={RECEIVE_DENIED_HINT}>
           <GoodsReceiptCockpit />
         </ProtectedRoute>
       }

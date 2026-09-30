@@ -103,21 +103,27 @@ export function byPerson(name?: string | null, id?: string | null): string {
   return who ? ` by ${who}` : '';
 }
 
-/** The managers who send orders to vendors and receive goods into stock
- *  (owner ruling 2026-09-28: receiving stays with them; workshop staff hand the
- *  box to one of them, the catalogue manager only raises drafts). ONE list for
- *  the purchase section pages, the receive routes, every Receive button, the
- *  blocked page that names them and the Buy Desk's "who sends it" hint;
- *  mirrors the backend _VENDOR_ROLES gate (+ SUPERADMIN), which guards ordering
- *  and receiving alike. Narrowing only who RECEIVES needs its own list on both
- *  sides -- shrinking this one would also lock those roles out of orders and
- *  invoices. */
+/** The roles that send orders to vendors (the catalogue manager only raises
+ *  drafts). ONE list for the purchase section pages and the Buy Desk's "who
+ *  sends it" hint; mirrors the backend _VENDOR_ROLES gate (+ SUPERADMIN). */
 export const PURCHASE_MANAGER_ROLES: readonly UserRole[] = [
   'SUPERADMIN',
   'ADMIN',
   'AREA_MANAGER',
   'STORE_MANAGER',
   'ACCOUNTANT',
+];
+
+/** Who receives goods into stock. Owner ruling 2026-09-28: RECEIVING IS
+ *  MANAGERS ONLY -- not the accountant (bills and payments stay theirs), and
+ *  workshop staff hand the box to one of these. ONE list for the receive
+ *  routes, the Receive Goods menu item, every Receive button and the blocked
+ *  page that names them; mirrors the backend _RECEIVE_ROLES (+ SUPERADMIN). */
+export const RECEIVING_MANAGER_ROLES: readonly UserRole[] = [
+  'SUPERADMIN',
+  'ADMIN',
+  'AREA_MANAGER',
+  'STORE_MANAGER',
 ];
 
 /** PO statuses the Goods-Receipt cockpit can receive against (mirrors the

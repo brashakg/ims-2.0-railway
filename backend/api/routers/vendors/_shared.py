@@ -58,9 +58,15 @@ router = APIRouter()
 logger = logging.getLogger(__package__)
 
 
-# Roles permitted to mutate vendors, purchase orders and goods-receipt notes.
-# Mirrors the frontend /purchase/* route guards. SUPERADMIN auto-passes.
+# Roles permitted to mutate vendors and purchase orders. Mirrors the frontend
+# PURCHASE_MANAGER_ROLES. SUPERADMIN auto-passes.
 _VENDOR_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
+
+# Receiving goods into stock -- log, accept, express-receive, void or escalate
+# a receipt, and the receiving screen itself. Owner ruling 2026-09-28:
+# RECEIVING IS MANAGERS ONLY, so the accountant is not here (they keep bills,
+# payments and the receipt document read). Mirrors the frontend RECEIVE_ROLES.
+_RECEIVE_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER")
 
 # The metadata.kind this router's own GRN upload stamps. Anything else in the
 # shared GridFS bucket belongs to another feature and must never be bound to,

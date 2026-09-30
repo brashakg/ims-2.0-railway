@@ -6,7 +6,8 @@ check — any authenticated user could create POs or accept GRNs (which adjust
 stock and vendor liability) by hitting the API directly, despite the frontend
 /purchase/* routes being restricted. The 8 write endpoints are now gated to
 the roles those routes allow (ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT;
-SUPERADMIN auto-passes). Reads intentionally stay open (they may feed
+SUPERADMIN auto-passes) -- receiving goods only the managers (owner ruling
+2026-09-28, not the accountant). Reads intentionally stay open (they may feed
 inventory views for catalog/workshop roles).
 
 End-to-end via the conftest TestClient fixtures.
@@ -83,7 +84,14 @@ WRITES = [
     ("post", "/api/v1/vendors/grn", _GRN_BODY, None),
     ("post", "/api/v1/vendors/grn/g1/accept", None, None),
     ("post", "/api/v1/vendors/grn/g1/escalate", None, {"note": "short"}),
+    ("post", "/api/v1/vendors/grn/g1/void", None, None),
+    ("post", "/api/v1/vendors/grn/express", _GRN_BODY, None),
+    ("post", "/api/v1/vendors/grn/upload-doc", None, None),
+    ("get", "/api/v1/vendors/goods-receipt/cockpit", None, {"vendor_id": "v1"}),
 ]
+
+# Receiving goods into stock (and the receiving screen): MANAGERS ONLY.
+_RECEIVING = [w for w in WRITES if "/vendors/grn" in w[1] or "goods-receipt" in w[1]]
 
 
 def _send(client, method, path, json_body, params, headers):
@@ -101,10 +109,18 @@ class TestVendorWriteGating:
         resp = _send(client, method, path, body, params, staff_headers)
         assert resp.status_code == 403
 
-    @pytest.mark.parametrize("method,path,body,params", WRITES)
+    @pytest.mark.parametrize(
+        "method,path,body,params", [w for w in WRITES if w not in _RECEIVING]
+    )
     def test_accountant_allowed(self, client, method, path, body, params):
         resp = _send(client, method, path, body, params, _headers(["ACCOUNTANT"]))
         assert resp.status_code != 403
+
+    @pytest.mark.parametrize("method,path,body,params", _RECEIVING)
+    def test_accountant_does_not_receive_goods(self, client, method, path, body, params):
+        """Owner ruling 2026-09-28: RECEIVING IS MANAGERS ONLY."""
+        resp = _send(client, method, path, body, params, _headers(["ACCOUNTANT"]))
+        assert resp.status_code == 403, (method, path)
 
     @pytest.mark.parametrize("method,path,body,params", WRITES)
     def test_superadmin_allowed(self, client, auth_headers, method, path, body, params):
@@ -139,18 +155,23 @@ class TestCatalogManagerRaisesDraftOnly:
 
 # The managers who send, edit and cancel an order (SUPERADMIN passes every gate).
 _ORDER_MANAGERS = {"ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT"}
+# Who receives goods into stock (owner ruling 2026-09-28: MANAGERS ONLY).
+_RECEIVING_MANAGERS = {"ADMIN", "AREA_MANAGER", "STORE_MANAGER"}
 
 
-def _everyone_else():
+def _everyone_else(managers=_ORDER_MANAGERS):
     from api.services.rbac_policy import ALL_ROLES
 
-    return [r for r in ALL_ROLES if r != "SUPERADMIN" and r not in _ORDER_MANAGERS]
+    return [r for r in ALL_ROLES if r != "SUPERADMIN" and r not in managers]
 
 
 # Everything a manager does to an order once it exists, and receiving goods
-# into stock (owner ruling 2026-09-28: receiving MANAGERS ONLY).
-_MANAGER_WRITES = [
-    w for w in WRITES if "/purchase-orders/po1" in w[1] or "/vendors/grn" in w[1]
+# into stock.
+_MANAGER_WRITES = [w for w in WRITES if "/purchase-orders/po1" in w[1]] + _RECEIVING
+_REFUSED = [
+    (role, *w)
+    for w in _MANAGER_WRITES
+    for role in _everyone_else(_RECEIVING_MANAGERS if w in _RECEIVING else _ORDER_MANAGERS)
 ]
 _ROLE_GATE_DETAIL = "Your role does not have access to this resource"
 
@@ -158,15 +179,16 @@ _ROLE_GATE_DETAIL = "Your role does not have access to this resource"
 class TestOnlyManagersChangeAnOrder:
     """Send, edit, cancel, line-cancel and receiving stay with the managers:
     every other role -- cashier and workshop staff included, the catalogue
-    manager too -- is refused on every one of them."""
+    manager too, and the accountant on receiving -- is refused on every one."""
 
-    @pytest.mark.parametrize("role", _everyone_else())
-    @pytest.mark.parametrize("method,path,body,params", _MANAGER_WRITES)
+    @pytest.mark.parametrize("role,method,path,body,params", _REFUSED)
     def test_refused(self, client, role, method, path, body, params):
         resp = _send(client, method, path, body, params, _headers([role]))
         assert resp.status_code == 403, (role, method, path)
 
-    @pytest.mark.parametrize("method,path,body,params", _MANAGER_WRITES)
+    @pytest.mark.parametrize(
+        "method,path,body,params", [w for w in _MANAGER_WRITES if w[0] != "get"]
+    )
     def test_a_vendors_write_grant_does_not_open_them(
         self, client, monkeypatch, method, path, body, params
     ):
@@ -190,6 +212,7 @@ class TestOnlyManagersChangeAnOrder:
         assert {"CASHIER", "WORKSHOP_STAFF", "SALES_STAFF", "CATALOG_MANAGER"} <= set(
             _everyone_else()
         )
+        assert "ACCOUNTANT" in _everyone_else(_RECEIVING_MANAGERS)
 
 
 def _code_gate(dependant):
@@ -236,6 +259,47 @@ def test_every_vendors_write_has_a_code_gate(app):
                 missing.append((method, route.path))
     assert writes >= 10
     assert not missing, missing
+
+
+def _gate_of(app, method, path):
+    from fastapi.routing import APIRoute
+
+    for route in app.routes:
+        if isinstance(route, APIRoute) and route.path == path and method in route.methods:
+            return _code_gate(route.dependant)
+    raise AssertionError(f"no route {method} {path}")
+
+
+# Every door that receives goods into stock, and the receiving screen.
+_RECEIVING_ROUTES = [
+    ("POST", "/api/v1/vendors/grn"),
+    ("POST", "/api/v1/vendors/grn/express"),
+    ("POST", "/api/v1/vendors/grn/{grn_id}/accept"),
+    ("POST", "/api/v1/vendors/grn/{grn_id}/void"),
+    ("POST", "/api/v1/vendors/grn/{grn_id}/escalate"),
+    ("POST", "/api/v1/vendors/grn/upload-doc"),
+    ("GET", "/api/v1/vendors/goods-receipt/cockpit"),
+]
+# What the accountant keeps: orders, the receipt document (to match the bill),
+# bills and payments.
+_ACCOUNTANT_KEEPS = [
+    ("POST", "/api/v1/vendors/purchase-orders/{po_id}/send"),
+    ("POST", "/api/v1/vendors/purchase-orders/{po_id}/cancel"),
+    ("GET", "/api/v1/vendors/grn/{grn_id}/document"),
+    ("POST", "/api/v1/vendors/{vendor_id}/bills"),
+    ("POST", "/api/v1/vendors/{vendor_id}/payments"),
+    ("POST", "/api/v1/vendors/purchase-invoices"),
+]
+
+
+def test_receiving_is_managers_only_and_the_accountant_keeps_the_rest(app):
+    """Owner ruling 2026-09-28: RECEIVING IS MANAGERS ONLY. The route's own gate
+    (not just its policy row) decides, and narrowing it must not take the
+    accountant's bills, payments or orders with it."""
+    for method, path in _RECEIVING_ROUTES:
+        assert _gate_of(app, method, path) == _RECEIVING_MANAGERS, (method, path)
+    for method, path in _ACCOUNTANT_KEEPS:
+        assert "ACCOUNTANT" in _gate_of(app, method, path), (method, path)
 
 
 def test_every_vendors_policy_row_matches_its_code_gate(app):

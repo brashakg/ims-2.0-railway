@@ -14,7 +14,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 
-const ROLES = ['WORKSHOP_STAFF'];
+const ROLES: string[] = ['WORKSHOP_STAFF'];
 vi.mock('../../../context/AuthContext', () => ({
   useAuth: () => ({
     isAuthenticated: true,
@@ -48,12 +48,24 @@ describe('403 page names who can receive goods (F5)', () => {
       renderAt(path);
       expect(await screen.findByText('403')).toBeInTheDocument();
       expect(screen.getByText(/hand the delivery to one of them/i)).toBeInTheDocument();
-      // The hint and the list agree: the list IS the rule. It names the
-      // accountant, so the hint must not say "only managers".
+      // The hint and the list agree: the list IS the rule -- managers only
+      // (owner ruling 2026-09-28), the accountant not among them.
       expect(screen.getByText(/^Who can:/)).toHaveTextContent(
-        'Who can: Admin, Area manager, Store manager, Accountant.',
+        'Who can: Admin, Area manager, Store manager.',
       );
-      expect(screen.queryByText(/only managers/i)).not.toBeInTheDocument();
+    },
+  );
+
+  it.each(['/purchase/receive', '/purchase/grn'])(
+    '%s: the accountant does not receive goods (managers only)',
+    async (path) => {
+      ROLES.splice(0, ROLES.length, 'ACCOUNTANT');
+      try {
+        renderAt(path);
+        expect(await screen.findByText('403')).toBeInTheDocument();
+      } finally {
+        ROLES.splice(0, ROLES.length, 'WORKSHOP_STAFF');
+      }
     },
   );
 

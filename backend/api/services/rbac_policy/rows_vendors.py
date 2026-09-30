@@ -172,20 +172,23 @@ ROWS: List[Dict[str, object]] = [
         "allowed": ["ACCOUNTANT", "ADMIN"],
     },
     {"method": "GET", "path": "/api/v1/vendors/grn", "allowed": "AUTHENTICATED"},
+    # Receiving goods into stock (log / accept / express / void / escalate a
+    # receipt, its document upload, the receiving screen): owner ruling
+    # 2026-09-28, RECEIVING IS MANAGERS ONLY -- the accountant is not here
+    # (_RECEIVE_ROLES in routers/vendors/_shared.py).
     {
         "method": "POST",
         "path": "/api/v1/vendors/grn",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
     # Procurement Phase 2: one-shot express receive for a CLEAN delivery
     # (create + accept + invoice-draft preview + accountant task, server-side).
-    # Same gate as creating/accepting a GRN -- ALL receiving roles (owner
-    # decision); every receiving control (attachment gate, store boundary,
+    # Same gate as creating/accepting a GRN -- the receiving managers; every receiving control (attachment gate, store boundary,
     # PO receivable) is enforced inside via the shared create/accept impls.
     {
         "method": "POST",
         "path": "/api/v1/vendors/grn/express",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
     {
         "method": "GET",
@@ -195,24 +198,24 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/vendors/grn/{grn_id}/accept",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
     {
         "method": "POST",
         "path": "/api/v1/vendors/grn/{grn_id}/void",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
     {
         "method": "POST",
         "path": "/api/v1/vendors/grn/{grn_id}/escalate",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
     # P1/S2: vendor-first goods-receipt cockpit (open POs + worklists for the
     # receiving screen). Same gate as receiving -- the receiving roles.
     {
         "method": "GET",
         "path": "/api/v1/vendors/goods-receipt/cockpit",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
     # P1/S3: the ops user uploads the mandatory goods-receipt document (vendor
     # invoice/challan) here BEFORE creating the GRN. Same gate as creating the
@@ -220,11 +223,11 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/vendors/grn/upload-doc",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
     # P1/S3: stream the attached goods-receipt document (accountant recon links
     # here). Store-scoped object access inside the handler; the role gate is the
-    # receiving + accounting roles.
+    # receiving managers + the accountant, who reads it to match the bill.
     {
         "method": "GET",
         "path": "/api/v1/vendors/grn/{grn_id}/document",

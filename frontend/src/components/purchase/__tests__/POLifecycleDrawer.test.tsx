@@ -178,8 +178,8 @@ describe('POLifecycleDrawer — next-step derivation', () => {
     expect(onClose).toHaveBeenCalled();
   });
 
-  it('receivable status shows NO button for a non-receiving role', async () => {
-    currentRoles = ['SALES_STAFF'];
+  it.each(['SALES_STAFF', 'ACCOUNTANT'])('receivable status shows NO Receive button for %s (receiving is managers only)', async (role) => {
+    currentRoles = [role];
     getPOTimeline.mockResolvedValue(makeTimeline({ status: 'SENT' }));
     renderDrawer();
 

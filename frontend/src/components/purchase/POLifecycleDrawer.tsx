@@ -38,7 +38,7 @@ import { vendorsApi } from '../../services/api/inventory';
 import { useAuth } from '../../context/AuthContext';
 import { PurchaseStatusChip } from './PurchaseStatusChip';
 import { formatDateTimeIST } from '../../utils/datetime';
-import { RECEIVABLE_PO_STATUSES, PURCHASE_MANAGER_ROLES } from '../../pages/purchase/purchaseTypes';
+import { RECEIVABLE_PO_STATUSES, RECEIVING_MANAGER_ROLES } from '../../pages/purchase/purchaseTypes';
 import type { POStatus } from '../../pages/purchase/purchaseTypes';
 
 // ---------------------------------------------------------------------------
@@ -239,7 +239,7 @@ export function POLifecycleDrawer({ poId, poNumber, onClose, onSendToVendor }: P
   const nextStep = timeline
     ? deriveNextStep(timeline, {
         canSend: Boolean(onSendToVendor),
-        canReceive: hasRole([...PURCHASE_MANAGER_ROLES]),
+        canReceive: hasRole([...RECEIVING_MANAGER_ROLES]),
         canBookInvoice: hasRole([...AP_ROLES]),
       })
     : null;
