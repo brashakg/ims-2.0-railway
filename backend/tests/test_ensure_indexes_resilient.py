@@ -113,3 +113,37 @@ def test_all_succeed_path_is_clean():
         assert db["audit_logs"].calls > 0
     finally:
         conn._db, conn._connected = saved_db, saved_connected
+
+
+def test_a_missing_receipt_backstop_index_is_a_critical_line_on_every_boot(caplog):
+    """F28's "two identical receipts at once" relies on the grns unique
+    indexes, and prod may lack them (existing duplicates block the build).
+    The build stays fail-soft, but its failure is a CRITICAL log line naming
+    the index -- how anyone reading the boot log sees the net is missing."""
+    import logging
+
+    class _GrnsFail(_FakeColl):
+        def create_index(self, keys, **kw):
+            if kw.get("name") in ("uniq_std_vendor_invoice_store", "uniq_dc_vendor_number_store"):
+                raise Exception("E11000 duplicate key error (simulated)")
+            return super().create_index(keys, **kw)
+
+    class _DB(_FakeDB):
+        def __getitem__(self, name):
+            if name not in self._colls:
+                self._colls[name] = _GrnsFail(name)
+            return self._colls[name]
+
+    conn = DatabaseConnection()
+    saved_db, saved_connected = conn._db, conn._connected
+    try:
+        conn._connected = True
+        conn._db = _DB(fail_colls=set())
+        with caplog.at_level(logging.ERROR, logger="database.connection"):
+            conn.ensure_indexes()
+    finally:
+        conn._db, conn._connected = saved_db, saved_connected
+    critical = [r.getMessage() for r in caplog.records if "CRITICAL" in r.getMessage()]
+    assert any("uniq_std_vendor_invoice_store" in m for m in critical), critical
+    assert any("uniq_dc_vendor_number_store" in m for m in critical), critical
+    assert len(critical) == 2  # the healthy backstop (stock_units) is silent
