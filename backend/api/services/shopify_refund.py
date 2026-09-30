@@ -465,16 +465,19 @@ def _cap_restock_to_unreturned(
     less returns._units_already_back (every OTHER return doc of the order and
     what this refund's own doc says its restock already put back -- or the
     line's returned_qty, which every restock of a Shopify refund books). A
-    unit a counter return or
-    another door already took back is on the shelf again -- restocking it
-    finds no SOLD unit and MINTS a phantom (always, on a historical order,
-    which has no SOLD unit to find). A line THIS refund already restocked
-    (its mark on the line, _restock_booked) restocks nothing again. A restock
-    line over the cap splits: the part still returnable restocks, the rest
-    does not. Returns (lines, overlapped): overlapped = IMS already booked a
-    return for some of these units, so the counter may already have refunded
-    their money. Never raises -- an unreadable answer leaves the lines as they
-    are."""
+    unit a counter return or another door already took back is on the shelf
+    again -- restocking it finds no SOLD unit and MINTS a phantom (always, on
+    a historical order, which has no SOLD unit to find). This refund
+    restocks no more of a line than its own units on it (every one of its
+    lines on that order line, held or not) less what its restock already put
+    back there (_restock_booked's mark, or its own doc) -- never a unit it
+    did not refund, never one twice, and the rest whenever a door asks (the
+    held unit the customer brings back, one a partial restock missed). A
+    restock line over the cap splits: the part still returnable restocks, the
+    rest does not. Returns (lines, overlapped): overlapped = IMS already
+    booked a return for some of these units, so the counter may already have
+    refunded their money. Never raises -- an unreadable answer leaves the
+    lines as they are."""
     try:
         from ..routers.returns import (
             _line_purchased_qty,
@@ -484,29 +487,31 @@ def _cap_restock_to_unreturned(
         )
 
         idx = _order_line_index(order)
-        left: Dict[str, float] = {}
+        pairs = [(line, _resolve_original_line(line, idx)) for line in lines]
+        left: Dict[int, float] = {}
+        mine: Dict[int, float] = {}
         out: List[Any] = []
         overlapped = False
-        for line in lines:
-            orig = _resolve_original_line(line, idx)
+        for line, orig in pairs:
             if orig is None:
                 out.append(line)
                 continue
-            key = str(orig.get("item_id") or orig.get("id") or orig.get("product_id"))
+            key = id(orig)
             if key not in left:
-                left[key] = _line_purchased_qty(orig) - _units_already_back(
-                    order.get("order_id"), orig, own_shopify_refund_id=refund_id
-                )
+                back, own = _units_already_back(order.get("order_id"), orig,
+                                                own_shopify_refund_id=refund_id)
+                units = sum(ln.return_qty for ln, o in pairs if o is orig)
+                left[key] = _line_purchased_qty(orig) - back
+                mine[key] = units - own
+                overlapped = overlapped or units - own > left[key]
             keep = max(0.0, min(line.return_qty, left[key]))
             left[key] -= keep
-            if refund_id and refund_id in (orig.get("restocked_refunds") or {}):
-                out.extend(_split_restock(line, 0.0) if line.restock else [line])
-                continue
-            if keep >= line.return_qty:
+            if not line.restock:
                 out.append(line)
                 continue
-            overlapped = True
-            out.extend(_split_restock(line, keep) if line.restock else [line])
+            keep = max(0.0, min(keep, mine[key]))
+            mine[key] -= keep
+            out.extend(_split_restock(line, keep))
         return out, overlapped
     except Exception:  # noqa: BLE001
         logger.debug("[SHOPIFY_REFUND] returnable-qty cap failed", exc_info=True)
@@ -1483,12 +1488,12 @@ def _restock_booked(
     lines already capped by _cap_restock_to_returnable, and `restock` (their
     returns._restock_good_items call). Every restock line is first booked on
     its order line (_hold_returned_qty): its returned_qty, which the counter
-    return door and every cap read, and this refund's mark, so the refund
-    never restocks that line a second time, whichever door runs first -- on a
-    historical order too, where no SOLD unit guards the restock and a second
-    one MINTS a phantom frame. A line whose unit did not land is un-booked; a
-    landed one never is. None: another door booked a line first (nothing
-    restocked)."""
+    return door and every cap read, and this refund's mark (its units put
+    back on that line), so the refund never restocks a unit of the line a
+    second time, whichever door runs first -- on a historical order too,
+    where no SOLD unit guards the restock and a second one MINTS a phantom
+    frame. A unit that did not land is un-booked; a landed one never is.
+    None: another door booked those units first (nothing restocked)."""
     held = _hold_returned_qty(order, lines, refund_id)
     if held is None:
         return None
@@ -1503,26 +1508,31 @@ def _restock_booked(
 def _hold_returned_qty(order: Dict[str, Any], lines: List[Any], refund_id: str) -> Optional[_Held]:
     """Book each restock line on its order line through the counter return
     door's own atomic claim (returns._claim_returnable_qty, with this
-    refund's mark). ONE claim per order line, for all its units: a refund
-    may list a line twice (a partly fulfilled line refunded in full: its
-    "cancel" and its "return"), and the mark books a line for a refund once.
-    All or nothing: None when a line has no returnable unit left or this
-    refund already restocked it (another door just did); a claim that
-    cannot be written raises. Either way the claims already taken are
-    released."""
+    refund's mark, within the refund's own units on the line: all its lines
+    there, restock or not). ONE claim per order line, for all its restock
+    units: a refund may list a line twice (a partly fulfilled line refunded
+    in full: its "cancel" and its "return"). All or nothing: None when a
+    line has no returnable unit left or this refund's mark has no room for
+    them (another door just restocked them); a claim that cannot be written
+    raises. Either way the claims already taken are released."""
     from ..routers.returns import _claim_returnable_qty, _order_line_index, _resolve_original_line
 
     idx = _order_line_index(order)
-    want: Dict[int, Tuple[Dict[str, Any], float, str]] = {}
+    want: Dict[int, List[Any]] = {}
     for line in lines:
-        orig = _resolve_original_line(line, idx) if line.restock else None
+        orig = _resolve_original_line(line, idx)
         if orig is not None:
-            qty = want.get(id(orig), (orig, 0.0, ""))[1] + float(line.return_qty)
-            want[id(orig)] = (orig, qty, str(line.product_id or ""))
+            row = want.setdefault(id(orig), [orig, 0.0, 0.0, ""])
+            row[2] += float(line.return_qty)
+            if line.restock:
+                row[1] += float(line.return_qty)
+                row[3] = str(line.product_id or "")
     held: _Held = []
     try:
-        for orig, qty, pid in want.values():
-            if not _claim_returnable_qty(order.get("order_id"), orig, qty, refund_id):
+        for orig, qty, units, pid in want.values():
+            if qty <= 0:
+                continue
+            if not _claim_returnable_qty(order.get("order_id"), orig, qty, refund_id, units):
                 _release_unlanded(order, held, {}, refund_id)
                 return None
             held.append((orig, qty, pid))
@@ -1534,11 +1544,10 @@ def _hold_returned_qty(order: Dict[str, Any], lines: List[Any], refund_id: str) 
 
 def _release_unlanded(order: Dict[str, Any], held: _Held, result: Dict[str, Any], refund_id: str) -> None:
     """Un-book what did not land, by the restock's own per-product count of
-    units it reactivated or minted. A line with nothing landed drops the
-    refund's mark too (another press may restock it); a partly landed one
-    keeps it at the units that landed, so its landed unit is never restocked
-    twice and the missing one shows as a restock not applied (ponytail: a
-    qty>1 refund line gets no partial retry)."""
+    units it reactivated or minted: the line's returned_qty and the refund's
+    mark drop by the units that did not land, so a landed unit is never
+    restocked twice and a missing one is a restock not applied that the next
+    door (the retry, Goods back) puts back."""
     from ..routers.returns import _release_returnable_qty
 
     landed: Dict[str, float] = {}
@@ -1550,8 +1559,7 @@ def _release_unlanded(order: Dict[str, Any], held: _Held, result: Dict[str, Any]
         keep = min(qty, landed.get(pid, 0.0))
         landed[pid] = landed.get(pid, 0.0) - keep
         if keep < qty:
-            _release_returnable_qty(order.get("order_id"), orig, qty - keep, refund_id,
-                                    keep_mark=keep > 0)
+            _release_returnable_qty(order.get("order_id"), orig, qty - keep, refund_id)
 
 
 def goods_back(db, review: Dict[str, Any], *, user_id: Optional[str]) -> Dict[str, Any]:

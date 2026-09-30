@@ -488,7 +488,7 @@ def _units_already_back(
     order_id: Optional[str],
     orig_line: Dict[str, Any],
     own_shopify_refund_id: Optional[str] = None,
-) -> float:
+) -> Tuple[float, float]:
     """ONE count of an order line's units no longer out with the buyer, read
     from its two books, each unit once. The return docs
     (_already_returned_qty): the counter's, and each Shopify refund's. The
@@ -501,7 +501,8 @@ def _units_already_back(
     only one, has only the doc). The counter return door and every Shopify
     restock cap read it. A line is matched to the docs' rows by its IMS
     product id: an online order line keeps Shopify's product_id beside its
-    ims_product_id, and every return row carries the IMS one."""
+    ims_product_id, and every return row carries the IMS one. Returns (every
+    unit back, the part of it that is `own_shopify_refund_id`'s restock)."""
     counter, refunds = _already_returned_qty(
         order_id,
         orig_line.get("item_id") or orig_line.get("id"),
@@ -510,9 +511,9 @@ def _units_already_back(
     )
     booked = {str(r): float(q or 0) for r, q in (orig_line.get("restocked_refunds") or {}).items()}
     counter = max(counter, float(orig_line.get("returned_qty") or 0) - sum(booked.values()))
-    return round(counter + sum(
-        max(refunds.get(r, 0.0), booked.get(r, 0.0)) for r in {*refunds, *booked}
-    ), 4)
+    each = {r: max(refunds.get(r, 0.0), booked.get(r, 0.0)) for r in {*refunds, *booked}}
+    return (round(counter + sum(each.values()), 4),
+            round(each.get(str(own_shopify_refund_id or ""), 0.0), 4))
 
 
 def _orders_coll():
@@ -540,6 +541,7 @@ def _claim_returnable_qty(
     orig_line: Dict[str, Any],
     return_qty: float,
     refund_id: Optional[str] = None,
+    refund_qty: Optional[float] = None,
 ) -> bool:
     """Atomically reserve `return_qty` units against an order line's remaining
     returnable quantity -- the same guard-in-the-filter pattern as the voucher
@@ -557,13 +559,16 @@ def _claim_returnable_qty(
     predicate and the positional `$inc` on the SAME element.
 
     `refund_id`: a Shopify refund's restock (shopify_refund._restock_booked)
-    also marks the element restocked by that refund with the units it booked
+    also counts the units it books on the element's mark for that refund
     (restocked_refunds {refund id: units}), in the SAME write, and matches
-    only while the mark is absent -- so one refund restocks one line once,
-    whichever door (Goods back, the confirm, the retry) runs first.
+    only while the mark leaves room for them within `refund_qty` (the
+    refund's units on this line) -- so a refund restocks each of its units
+    on a line once, whichever door (Goods back, the confirm, the retry) runs
+    first, and the rest later (a held unit that comes back, one that did not
+    land).
 
     Returns True when the claim succeeded, False on no-match (already returned /
-    over-cap / concurrent loser / this refund already restocked the line). Fail-soft: returns True when no orders
+    over-cap / concurrent loser / this refund already restocked these units). Fail-soft: returns True when no orders
     collection is available, or the driver lacks find_one_and_update, so the
     pre-validation scan stays the guard rather than blocking a valid return.
     Never for a refund's restock: its mark is all that stops another door
@@ -603,8 +608,10 @@ def _claim_returnable_qty(
 
     update: Dict[str, Any] = {"$inc": {"items.$.returned_qty": return_qty}}
     if refund_id:
-        elem[f"restocked_refunds.{refund_id}"] = {"$exists": False}
-        update["$inc"][f"items.$.restocked_refunds.{refund_id}"] = return_qty
+        mark = f"restocked_refunds.{refund_id}"
+        room = round((return_qty if refund_qty is None else refund_qty) - return_qty, 4)
+        elem[mark] = {"$not": {"$gt": room}}
+        update["$inc"][f"items.$.{mark}"] = return_qty
     match = {"order_id": order_id, "items": {"$elemMatch": elem}}
     try:
         updated = coll.find_one_and_update(
@@ -625,13 +632,12 @@ def _release_returnable_qty(
     orig_line: Dict[str, Any],
     return_qty: float,
     refund_id: Optional[str] = None,
-    keep_mark: bool = False,
 ) -> None:
     """Undo a successful _claim_returnable_qty (decrement the element's
-    returned_qty, and `refund_id`'s restock mark when given: by the same
-    units with `keep_mark`, else dropped) when a later step of the SAME
-    request fails and we must not leave a phantom reservation. Best-effort +
-    fail-soft -> never raises."""
+    returned_qty, and `refund_id`'s restock mark when given, by the same
+    units: an earlier restock of that refund keeps its booking) when a later
+    step of the SAME request fails and we must not leave a phantom
+    reservation. Best-effort + fail-soft -> never raises."""
     if not order_id or return_qty <= 0:
         return
     coll = _orders_coll()
@@ -643,10 +649,8 @@ def _release_returnable_qty(
         {"item_id": item_id} if item_id else {"product_id": product_id}
     )
     update: Dict[str, Any] = {"$inc": {"items.$.returned_qty": -return_qty}}
-    if refund_id and keep_mark:
+    if refund_id:
         update["$inc"][f"items.$.restocked_refunds.{refund_id}"] = -return_qty
-    elif refund_id:
-        update["$unset"] = {f"items.$.restocked_refunds.{refund_id}": ""}
     try:
         coll.find_one_and_update(
             {"order_id": order_id, "items": {"$elemMatch": elem}},
@@ -2960,7 +2964,7 @@ async def create_return(
             )
         purchased = _line_purchased_qty(orig_line)
         product_id = orig_line.get("product_id")
-        already = _units_already_back(resolved_order_id, orig_line)
+        already, _ = _units_already_back(resolved_order_id, orig_line)
         remaining = round(purchased - already, 4)
         if ret_line.return_qty > remaining + 1e-9:
             name = ret_line.product_name or orig_line.get("product_name") or product_id

@@ -1271,7 +1271,7 @@ def test_a_booking_that_errors_part_way_releases_the_line_it_booked(monkeypatch)
     lines = [ReturnLine(order_item_id=i, product_id=i, return_qty=1, unit_price=0.0) for i in "ab"]
     calls = []
 
-    def claim(oid, orig, qty, rid):
+    def claim(oid, orig, qty, rid, units):
         if orig["item_id"] == "b":
             raise RuntimeError("orders write down")
         calls.append(("claim", orig["item_id"]))
@@ -1279,7 +1279,7 @@ def test_a_booking_that_errors_part_way_releases_the_line_it_booked(monkeypatch)
 
     monkeypatch.setattr(returns_router, "_claim_returnable_qty", claim)
     monkeypatch.setattr(returns_router, "_release_returnable_qty",
-                        lambda oid, orig, qty, rid, keep_mark=False: calls.append(("release", orig["item_id"])))
+                        lambda oid, orig, qty, rid: calls.append(("release", orig["item_id"])))
     with pytest.raises(RuntimeError):
         shopify_refund._hold_returned_qty(order, lines, "R1")
     assert calls == [("claim", "a"), ("release", "a")]
@@ -1345,6 +1345,57 @@ def test_the_retry_restocks_the_line_whose_unit_did_not_land_beside_one_of_its_p
     assert sorted(s for _, s in _units(swept)) == ["AVAILABLE", "SOLD"]
     assert _retry(swept["returns"].find_one({"shopify_refund_id": "700393"}))["restock_applied"] is True
     assert _units(swept) == [("stk-1", "AVAILABLE"), ("stk-2", "AVAILABLE")]
+
+
+@pytest.mark.parametrize("held", ["cancel", "no_restock"])
+def test_goods_back_restocks_the_held_unit_of_a_line_the_confirm_partly_restocked(swept, held):
+    """A qty-2 line refunded in full on an order the counter handed over: one
+    unit held (a "cancel" line, ruling 2026-09-28, or a "no_restock" one), one
+    restocked by the confirm. The line's mark used to stop every later door
+    for this refund: Goods back answered "restocked" with stk-2 SOLD forever."""
+    oid, rid = 60194 + (held == "no_restock"), 700394 + (held == "no_restock")
+    doc = _book(swept, oid, line_items=[{**_frame_order(oid)["line_items"][0], "quantity": 2}])
+    _claim_unit(swept, doc)
+    swept["stock_repo"].units.append({**swept["stock_repo"].units[0], "stock_id": "stk-2"})
+    _set(swept, oid, **_HANDED_OVER)
+    r = _same_line_twice(rid, oid)
+    r["refund_line_items"][0]["restock_type"] = held
+    shopify_refund.handle_shopify_refund(swept["db"], r, webhook_id=None, topic="refunds/create")
+    row = swept["review"].find_one({"shopify_refund_id": str(rid)})
+    assert [(line["return_qty"], line["restock"]) for line in row["proposed_restock"]] == [
+        (1, False), (1, True)]
+    _confirm(row)
+    assert sorted(s for _, s in _units(swept)) == ["AVAILABLE", "SOLD"]
+
+    got = _goods_back(swept["review"].find_one({"review_id": row["review_id"]}))["result"]
+    assert got["status"] == "restocked" and len(got["restock_stock_ids"]) == 1
+    assert _units(swept) == [("stk-1", "AVAILABLE"), ("stk-2", "AVAILABLE")]
+    line = _doc(swept, oid)["items"][0]
+    assert (line.get("returned_qty"), line.get("restocked_refunds")) == (2, {str(rid): 2})
+
+
+def test_the_retry_restocks_the_unit_a_partly_landed_confirm_left_sold(swept, monkeypatch):
+    """One qty-2 "return" line; the confirm put back one unit (restock not
+    applied). The retry saw the line's mark, restocked nothing and answered
+    "Restock applied" with stk-2 still SOLD."""
+    oid, rid = 60196, 700396
+    doc = _book(swept, oid, line_items=[{**_frame_order(oid)["line_items"][0], "quantity": 2}])
+    _claim_unit(swept, doc)
+    swept["stock_repo"].units.append({**swept["stock_repo"].units[0], "stock_id": "stk-2"})
+    _set(swept, oid, status="DELIVERED")
+    r = _refund_both(rid, oid)
+    r["refund_line_items"][0]["restock_type"] = "return"
+    shopify_refund.handle_shopify_refund(swept["db"], r, webhook_id=None, topic="refunds/create")
+    row = swept["review"].find_one({"shopify_refund_id": str(rid)})
+    real = _lands_only_first(monkeypatch, qty=1)
+    assert _confirm(row)["result"]["restock_applied"] is False
+    monkeypatch.setattr(returns_router, "_restock_good_items", real)
+    assert sorted(s for _, s in _units(swept)) == ["AVAILABLE", "SOLD"]
+
+    assert _retry(swept["returns"].find_one({"shopify_refund_id": str(rid)}))["restock_applied"] is True
+    assert _units(swept) == [("stk-1", "AVAILABLE"), ("stk-2", "AVAILABLE")]
+    line = _doc(swept, oid)["items"][0]
+    assert (line.get("returned_qty"), line.get("restocked_refunds")) == (2, {str(rid): 2})
 
 
 # ---------------------------------------------------------------------------

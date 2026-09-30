@@ -80,6 +80,12 @@ def _match(doc, filter_) -> bool:
                 elif op == "$lte":
                     if actual is None or actual > op_val:
                         return False
+                elif op == "$gt":
+                    if actual is None or actual <= op_val:
+                        return False
+                elif op == "$not":
+                    if _match({k: actual} if k in doc else {}, {k: op_val}):
+                        return False
                 elif op == "$ne":
                     # Mongo: $ne on an array field means "no element equals".
                     if op_val in actual if isinstance(actual, list) else actual == op_val:
