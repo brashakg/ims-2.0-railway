@@ -1520,3 +1520,58 @@ def test_a_mapped_location_that_cannot_sell_online_oversells_nothing(monkeypatch
     assert _reconcile(monkeypatch, db, levels, "BV-B")["SKU-1"]["status"] == "OK"
     assert [(d["store_id"], d["ims"], d["shopify"]) for d in parity["drift"]] == [("BV-B", 0, 3)]
 
+
+def _press_take_down(monkeypatch, db, twin_id):
+    """An ADMIN presses Take off website, LIVE: Shopify accepts the DRAFT."""
+    from api.routers import online_store_push as osp
+    from api.services.shopify_push import product as push_product_mod
+
+    async def gql(db_, query, variables):  # noqa: ARG001
+        return {"data": {"productUpdate": {"product": {"id": variables["input"]["id"]}, "userErrors": []}}}
+
+    monkeypatch.setattr(push_product_mod, "_live_or_reason", lambda db_: (True, None))
+    monkeypatch.setattr(push_product_mod, "_graphql", gql)
+    monkeypatch.setattr(osp, "_get_db", lambda: db)
+    return _run(osp.take_down_product(twin_id, current_user={"user_id": "u1", "roles": ["ADMIN"]}))["result"]
+
+
+@pytest.mark.parametrize("how", ["take_down_failed", "take_down_dark"])
+def test_the_take_off_website_press_closes_the_retired_line_it_asks_for(monkeypatch, how):
+    """Round 10, the panel's probe. SKU-2 is retired; its automatic take-down
+    FAILED (or ran DARK), so Shopify still lists 3 at LOC_A and night 1 files
+    BV-A's task on the retired line: 'press Take off website'. The ADMIN
+    presses it, LIVE, and Shopify accepts. Night 2: the listing is a draft
+    -- off the website -- so SKU-2 has left the online catalogue and the
+    task CLOSES. Drop the door's stamp_take_down (the press writes only
+    status DRAFT / taken_down_at, which parity never reads) -> refreshed,
+    OPEN for ever -> fails."""
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 0, "BV-B": 0}})
+    db.get_collection("products").update_one({"sku": "SKU-2"}, {"$set": {"is_active": False}})
+    db.seed("catalog_products", [_twin(
+        {"online_state": "DELIST_FAILED", "delist_mode": "LIVE"} if how == "take_down_failed"
+        else {"online_state": "DELISTED", "delist_mode": "SIMULATED"}
+    )])
+    shop = {INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 3, LOC_B: 0}}
+    _run(sp.run_parity_tick(db, graphql=_shopify(shop)))
+    assert "press Take off website" in _tasks(db)[0]["description"]
+    res = _press_take_down(monkeypatch, db, "c2")
+    assert (res["ok"], res["mode"], res["action"]) == (True, "LIVE", "delist")
+    out = _run(sp.run_parity_tick(db, graphql=_shopify(shop)))
+    assert out["tasks"]["closed"] == ["BV-A"] and _tasks(db)[0]["status"] == "COMPLETED"
+
+
+def test_a_dark_take_off_website_press_stamps_nothing(monkeypatch):
+    """The control: a DARK press is a SIMULATED plan with zero network, so
+    it proves nothing is off Shopify -- the twin keeps its failed take-down
+    and the Catalog screen still says so. Stamp every press -> DELISTED ->
+    fails."""
+    from api.routers import online_store_push as osp
+
+    db = _db({"SKU-2": {"BV-A": 0, "BV-B": 0}})
+    db.seed("catalog_products", [_twin({"online_state": "DELIST_FAILED", "delist_mode": "LIVE"})])
+    monkeypatch.setattr(osp, "_get_db", lambda: db)
+    res = _run(osp.take_down_product("c2", current_user={"user_id": "u1", "roles": ["ADMIN"]}))["result"]
+    assert res["mode"] == "SIMULATED"
+    ecom = db.get_collection("catalog_products").find_one({"id": "c2"})["ecom"]
+    assert ecom["online_state"] == "DELIST_FAILED"
+

@@ -178,7 +178,9 @@ async def take_down_product(
     product back is an ordinary push and can never mint a duplicate listing.
     The engine also records the take-down in IMS (ecom.status DRAFT, dirty flag
     cleared) so the screen agrees with the storefront and the next sweep does
-    not resurrect it seconds later.
+    not resurrect it seconds later; a LIVE take-down also carries the retire
+    hook's own "off the website" marker (online_delist.stamp_take_down), the
+    one the nightly stock parity reads.
 
     DARK by default -> a SIMULATED plan. A product that was never on Shopify is
     a clean no-op, not an error. Unknown product -> 404; writes the same chained
@@ -189,6 +191,13 @@ async def take_down_product(
         raise HTTPException(status_code=404, detail="Product not found")
     result = await shopify_push.push_product_delist(db, product)
     data = result.to_dict()
+    if data.get("ok") and data.get("mode") == shopify_push.MODE_LIVE and data.get("action") == "delist":
+        # The retire hook's own "off the website" marker (online_delist):
+        # the nightly parity lets a retired product go only on it, so this
+        # press closes the drift task that asked for it.
+        from ..services.online_delist import stamp_take_down
+
+        stamp_take_down(db, product, data, reason="taken down")
     _write_audit(data, current_user)
     return {"result": data}
 
