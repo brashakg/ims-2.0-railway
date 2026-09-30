@@ -5,21 +5,24 @@ sensitive. This is a PURE read-path filter: it strips `cost_price` and every
 derived margin figure from an API response dict for any role not authorised to
 see cost. No DB access, no engine imports, no schema change, no state mutation.
 
-Role policy (DECISIONS sec 9):
+Role policy (DECISIONS sec 9, owner rulings 2026-09-28 / D7 / 2026-09-29):
   * SUPERADMIN / ADMIN / ACCOUNTANT -- always see cost + margin.
-  * CATALOG_MANAGER -- sees cost ONLY in the product create/edit form context
-    (context="catalog_edit"), never on operational views (inventory ledger, reports).
-  * AREA_MANAGER and below (STORE_MANAGER, OPTOMETRIST, SALES_*, WORKSHOP_STAFF)
-    -- cost + margin are stripped from the payload; the FE renders "-".
-  * The purchase roles (PURCHASE_ROLES: ADMIN / ACCOUNTANT / AREA_MANAGER /
-    STORE_MANAGER) see what was paid where they buy: purchase documents
-    (context="purchase") and the product master that prefills a PO
-    (context="product", which also admits the CATALOG_MANAGER product form).
-    Counter roles (SALES_*, CASHIER, OPTOMETRIST, WORKSHOP_STAFF) never do
-    (audit F46/F60, owner ruling D7 + 2026-09-29): a vendor return / RTV debit
-    note shows them the item, quantity and reason only, and the vendor list
-    (routers/vendors/master.py) names only -- all three ask can_see_cost(user,
-    "purchase"), so who sees what was paid and to whom is decided here once.
+  * Per-unit product cost (context="product"): every product read
+    (/products, /catalog/products, the product form) and the purchase
+    recommendations also admit the managers -- AREA_MANAGER / STORE_MANAGER
+    (the purchase roles) and CATALOG_MANAGER. ONE context, so every product
+    route answers alike, and the frontend CostCell's PRODUCT_COST_ROLES is
+    this set.
+  * What was paid and to whom (context="purchase"): PURCHASE_ROLES. A vendor
+    return / RTV debit note shows anyone else the item, quantity and reason
+    only, and the vendor list (routers/vendors/master.py) names only -- all
+    three ask can_see_cost(user, "purchase").
+  * Operational aggregates (default context: analytics, P&L) -- cost + margin
+    stay with SUPERADMIN / ADMIN / ACCOUNTANT.
+  * Counter roles (SALES_*, CASHIER, OPTOMETRIST, WORKSHOP_STAFF) see cost in
+    no context (audit F46/F60, owner ruling D7). A router never keeps its own
+    cost role set: it asks can_see_cost / mask_cost here (a guard test in
+    tests/test_cost_mask_f35.py fails otherwise).
 
 "Hidden" = the field is removed server-side so it never reaches the browser.
 No emoji (Windows cp1252).
@@ -27,7 +30,6 @@ No emoji (Windows cp1252).
 from typing import Dict, List
 
 COST_VISIBLE_ROLES = {"SUPERADMIN", "ADMIN", "ACCOUNTANT"}
-CATALOG_FORM_ROLES = {"CATALOG_MANAGER"}
 # The purchase roles: who buys, receives and pays suppliers, so who sees what
 # was paid and to whom. Defined ONCE, here: the purchase screens' route gate
 # (routers/vendors/_shared._VENDOR_ROLES) and the vendor-return, RTV debit-note
@@ -36,9 +38,8 @@ CATALOG_FORM_ROLES = {"CATALOG_MANAGER"}
 PURCHASE_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
 # context -> the roles it admits on top of COST_VISIBLE_ROLES.
 _CONTEXT_ROLES = {
-    "catalog_edit": CATALOG_FORM_ROLES,
     "purchase": set(PURCHASE_ROLES),
-    "product": set(PURCHASE_ROLES) | CATALOG_FORM_ROLES,
+    "product": {*PURCHASE_ROLES, "CATALOG_MANAGER"},
 }
 
 # Raw cost fields that may appear on product / stock / order-line payloads.

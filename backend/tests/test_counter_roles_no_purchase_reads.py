@@ -927,3 +927,88 @@ def test_purchase_mask_is_membership_of_the_purchase_gate(app, role):
     # ...and the route itself agrees, so a handler switched onto another tuple
     # cannot reopen the gap either.
     assert _route_allows(app, "/api/v1/vendors/{vendor_id}", role) is sees, role
+
+
+# ---------------------------------------------------------------------------
+# 14. Product cost: ONE answer on every product route and in the frontend
+# ---------------------------------------------------------------------------
+# Owner ruling 2026-09-28: the managers (store, area, catalogue) see per-unit
+# cost, counter staff never. /products said yes to store and area managers
+# while /catalog/products said no (and yes to the catalogue manager only on
+# the form) and the frontend CostCell said no to all three: one question,
+# three answers. Every product read now asks cost_mask's "product" context,
+# and CostCell's PRODUCT_COST_ROLES is that set.
+from api.routers import catalog as catalog_mod  # noqa: E402
+
+_CATALOG_DOC = {
+    "id": "C1",
+    "sku": "BV-FR-1",
+    "title": "RB Frame",
+    "is_active": True,
+    "pricing": {"mrp": 5000, "offer_price": 4500, "cost_price": 3173.37},
+}
+
+
+@pytest.fixture
+def catalog_docs(monkeypatch):
+    monkeypatch.setattr(
+        catalog_mod, "_all_catalog_products", lambda: [copy.deepcopy(_CATALOG_DOC)]
+    )
+    monkeypatch.setattr(
+        catalog_mod, "_get_catalog_product", lambda _pid: copy.deepcopy(_CATALOG_DOC)
+    )
+
+
+def _product_cost_answers(client, role):
+    """{product route: did the body carry the per-unit cost} for one role."""
+    out = {p: "cost_price" in _product_rows(client, role, p)[0] for p in PRODUCT_READS}
+    for path, key in (
+        ("/api/v1/catalog/products", "products"),
+        ("/api/v1/catalog/products/C1", "product"),
+    ):
+        resp = client.get(path, headers=_headers(role))
+        assert resp.status_code == 200, (role, path, resp.text)
+        doc = resp.json()[key]
+        doc = doc[0] if isinstance(doc, list) else doc
+        assert doc["pricing"]["mrp"] == 5000
+        out[path] = "cost_price" in doc["pricing"]
+    return out
+
+
+def _product_cost_roles():
+    return {r for r in rbac.ALL_ROLES if can_see_cost({"roles": [r]}, "product")}
+
+
+@pytest.mark.parametrize("role", rbac.ALL_ROLES)
+def test_product_cost_is_one_answer_on_every_product_route(
+    client, product_repo, catalog_docs, role
+):
+    want = role in _product_cost_roles()
+    answers = _product_cost_answers(client, role)
+    assert answers == dict.fromkeys(answers, want), (role, answers)
+
+
+def test_product_cost_follows_the_owner_ruling():
+    roles = _product_cost_roles()
+    assert {"STORE_MANAGER", "AREA_MANAGER", "CATALOG_MANAGER"} <= roles
+    assert not roles & set(COUNTER_ROLES), roles
+
+
+_COST_CELL = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "..",
+    "..",
+    "frontend",
+    "src",
+    "components",
+    "common",
+    "CostCell.tsx",
+)
+
+
+@pytest.mark.skipif(not os.path.exists(_COST_CELL), reason="frontend/ not shipped here")
+def test_frontend_cost_cell_is_the_product_context():
+    with open(_COST_CELL, encoding="utf-8") as fh:
+        m = re.search(r"PRODUCT_COST_ROLES[^=]*=\s*\[([^\]]*)\]", fh.read())
+    assert m, "CostCell.tsx no longer declares PRODUCT_COST_ROLES"
+    assert set(re.findall(r"'([A-Z_]+)'", m.group(1))) == _product_cost_roles()

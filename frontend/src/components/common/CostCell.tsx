@@ -1,35 +1,38 @@
 // ============================================================================
-// F35 - Cost & margin masking (#35), frontend presentational guards.
-// Cost / margin cells render their value ONLY for cost-visible roles
-// (SUPERADMIN / ADMIN / ACCOUNTANT). Every other role sees a restrained "-"
-// (no badge, no lock icon -- do not draw attention to the masking).
-// The backend already strips the field for unauthorised roles; these cells are
-// the matching client-side render of null/absent values + a defensive guard.
+// F35 - Cost masking (#35), frontend presentational guard.
+// A per-unit product cost renders ONLY for PRODUCT_COST_ROLES; every other role
+// sees a restrained "-" (no badge, no lock icon -- do not draw attention to the
+// masking). The backend already strips the field for unauthorised roles; this
+// cell is the matching client-side render of null/absent values + a defensive
+// guard.
 // ============================================================================
 
 import { useAuth } from '../../context/AuthContext';
 import type { UserRole } from '../../types';
 
-const COST_VISIBLE: UserRole[] = ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'];
+/** Who sees per-unit product cost (owner ruling 2026-09-28): the managers
+ *  (store, area, catalogue) and the owner / accounts roles; counter staff never.
+ *  It IS the backend's cost_mask "product" context -- a backend test
+ *  (test_counter_roles_no_purchase_reads) holds the two sets equal. */
+export const PRODUCT_COST_ROLES: UserRole[] = [
+  'SUPERADMIN',
+  'ADMIN',
+  'ACCOUNTANT',
+  'AREA_MANAGER',
+  'STORE_MANAGER',
+  'CATALOG_MANAGER',
+];
 
 function Dash() {
   return <span className="text-gray-400 select-none" aria-label="not authorised">-</span>;
 }
 
-/** Renders a rupee cost value, masked to "-" for non-cost-visible roles. */
+/** Renders a rupee cost value, masked to "-" outside PRODUCT_COST_ROLES. */
 export function CostCell({ value }: { value: number | null | undefined }) {
   const { hasRole } = useAuth();
-  if (!hasRole(COST_VISIBLE)) return <Dash />;
+  if (!hasRole(PRODUCT_COST_ROLES)) return <Dash />;
   if (value === null || value === undefined) return <Dash />;
   return <span className="font-mono">₹{value.toLocaleString('en-IN')}</span>;
-}
-
-/** Renders a margin percentage, masked to "-" for non-cost-visible roles. */
-export function MarginCell({ value }: { value: number | null | undefined }) {
-  const { hasRole } = useAuth();
-  if (!hasRole(COST_VISIBLE)) return <Dash />;
-  if (value === null || value === undefined) return <Dash />;
-  return <span className="font-mono">{value.toFixed(1)}%</span>;
 }
 
 export default CostCell;
