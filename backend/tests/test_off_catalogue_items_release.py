@@ -531,7 +531,7 @@ def test_c1_the_task_goes_to_the_catalogue_manager_of_that_entity(world):
     )
 
 
-def test_c1_no_catalogue_manager_fails_loud_to_the_admins(world):
+def test_c1_no_catalogue_manager_fails_loud_to_the_admins(world, caplog):
     world.db.users.update_one(
         {"user_id": CATALOGUER["user_id"]}, {"$set": {"is_active": False}}
     )
@@ -547,7 +547,8 @@ def test_c1_no_catalogue_manager_fails_loud_to_the_admins(world):
             }
         ],
     )
-    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    with caplog.at_level("ERROR"):
+        po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
     tasks = _open_tasks(world)
     finding(
         [t.get("assigned_to") for t in tasks] == ["u-admin"]
@@ -555,6 +556,75 @@ def test_c1_no_catalogue_manager_fails_loud_to_the_admins(world):
         and grn["grn_number"] in tasks[0]["title"],
         f"C1: a shop with no catalogue manager is not raised to the admins ({tasks})",
     )
+    finding(
+        any(
+            r.levelname == "ERROR" and "NO catalogue manager" in r.getMessage()
+            for r in caplog.records
+        ),
+        "No ERROR is logged when no catalogue manager covers the shop",
+    )
+
+
+def test_c1_each_catalogue_manager_gets_their_own_task(world):
+    # Two catalogue managers of the same entity: one task EACH, by name -- a
+    # task one of them closes never silences the other.
+    world.db.seed(
+        "users",
+        [
+            {
+                "user_id": "u-cat-2",
+                "username": "catalog.two",
+                "roles": ["CATALOG_MANAGER"],
+                "store_ids": [STORE],
+                "is_active": True,
+            }
+        ],
+    )
+    world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    tasks = _open_tasks(world)
+    finding(
+        sorted(t.get("assigned_to") for t in tasks)
+        == sorted([CATALOGUER["user_id"], "u-cat-2"]),
+        "C1: not one task per catalogue manager "
+        f"({[(t.get('assigned_to'), t.get('source_ref')) for t in tasks]})",
+    )
+
+
+def _task_list(user, store_id):
+    out = _run(
+        _tasks.list_tasks(
+            status="OPEN",
+            priority=None,
+            assigned_to=None,
+            task_type=None,
+            store_id=store_id,
+            skip=0,
+            limit=50,
+            current_user=user,
+        )
+    )
+    return [(t.get("assigned_to"), t.get("title")) for t in out["tasks"]]
+
+
+def test_c1_asking_for_cataloguing_for_a_bill_reaches_the_catalogue_manager(world):
+    # Purchase Invoices: the accountant is stopped by an unfinished product and
+    # asks for it (InvoiceFormDrawer does this when a booking is refused). The
+    # ask goes through the SAME named-person door as a held receipt's task.
+    from api.routers import purchase_invoices as _pi
+
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    _run(
+        _pi.request_cataloguing(
+            _pi.CataloguingRequest(product_ids=[draft_id]), ACCOUNTANT
+        )
+    )
+    want = "Finish cataloguing 1 item(s) - a vendor bill is waiting"
+    for store_id in (STORE, None):
+        finding(
+            (CATALOGUER["user_id"], want) in _task_list(CATALOGUER, store_id),
+            "The catalogue manager cannot see the ask for cataloguing "
+            f"(store_id={store_id}: {_task_list(CATALOGUER, store_id)})",
+        )
 
 
 # ---------------------------------------------------------------------------

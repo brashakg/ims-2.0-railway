@@ -1299,24 +1299,30 @@ async def request_cataloguing(
         + (", ".join(i["missing"]) if i["missing"] else "review")
         for i in items
     ]
+    # The catalogue managers BY NAME, through the one door a held receipt uses
+    # too -- a task with no assignee is one no catalogue manager's list shows.
+    store_id = current_user.get("active_store_id") or next(
+        iter(current_user.get("store_ids") or []), None
+    )
     try:
-        from ..services.task_triggers import create_system_task
-        from ..dependencies import get_task_repository
+        from .vendors.grn_accept import tell_catalogue_managers
 
-        create_system_task(
-            get_task_repository(),
+        tell_catalogue_managers(
+            db,
+            store_id,
+            dedupe="catalogue-for-bill:"
+            + ",".join(sorted(i["product_id"] for i in items)),
             title=f"Finish cataloguing {len(items)} item(s) - a vendor bill is waiting",
+            orphan_title=(
+                f"No catalogue manager for {store_id}: {len(items)} item(s) "
+                "block a vendor bill"
+            ),
             description=(
                 "A purchase invoice cannot be booked until these products are "
                 "catalogue-complete:\n"
                 + "\n".join(lines)
                 + (f"\n\nNote: {body.note}" if body.note else "")
             ),
-            priority="P2",
-            category="Catalog",
-            store_id=current_user.get("active_store_id"),
-            dedupe_ref="catalogue-for-bill:"
-            + ",".join(sorted(i["product_id"] for i in items)),
         )
     except Exception:  # noqa: BLE001 - asking must never 500 the screen
         logger.warning("[PI] could not raise the cataloguing task", exc_info=True)

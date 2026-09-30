@@ -122,7 +122,7 @@ export function GrnPickerModal({
               {grns.map((g) => {
                 const heldLines: unknown[] = g.unresolved_lines || [];
                 const held = g.status === 'PARTIALLY_ACCEPTED' || heldLines.length > 0;
-                const { text: heldText, catalogueProductIds } = heldLinesSummary(heldLines);
+                const { text: heldText } = heldLinesSummary(heldLines);
                 return (
                 <div key={g.grn_id} className="flex items-center justify-between border border-gray-200 rounded-lg px-3 py-2 hover:bg-gray-50">
                   <div>
@@ -136,29 +136,9 @@ export function GrnPickerModal({
                       </div>
                     ) : null}
                   </div>
-                  {held ? (
-                    catalogueProductIds.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        const ids = catalogueProductIds;
-                        setBusyId(g.grn_id);
-                        try {
-                          await purchaseInvoicesApi.requestCataloguing(ids);
-                          toast.success('Asked the cataloguer to finish these items');
-                        } catch (e) {
-                          toast.error(errMsg(e, 'Could not raise the cataloguing request'));
-                        } finally {
-                          setBusyId(null);
-                        }
-                      }}
-                      disabled={busyId === g.grn_id}
-                      className="btn sm disabled:opacity-60"
-                    >
-                      {busyId === g.grn_id ? <Loader2 className="w-4 h-4 animate-spin" /> : null} Ask for cataloguing
-                    </button>
-                    )
-                  ) : (
+                  {/* A held receipt already gave each catalogue manager a task
+                      by name (grn_accept.tell_catalogue_managers): no second ask. */}
+                  {held ? null : (
                     <button type="button" onClick={() => pick(g)} disabled={busyId === g.grn_id} className="btn sm primary disabled:opacity-60">
                       {busyId === g.grn_id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />} Invoice
                     </button>

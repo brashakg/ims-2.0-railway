@@ -979,38 +979,57 @@ def _sync_catalogue_tasks(grn_id, grn, unresolved_lines, grn_status, product_rep
             return f"{_held_item_label(prod, ln['product_id'])} x{ln.get('accepted_qty')}"
 
         items = "; ".join(_line(ln) for ln in unresolved_lines)
-        people, are_cataloguers = _people_for(
-            db, store_id, "CATALOG_MANAGER", entity_wide=True
+        n = len(unresolved_lines)
+        tell_catalogue_managers(
+            db,
+            store_id,
+            dedupe=f"grn_catalogue:{grn_id}",
+            title=f"Finish {n} item(s) held on receipt {receipt} at {shop}",
+            orphan_title=(
+                f"No catalogue manager for {shop}: receipt {receipt} is holding {n} item(s)"
+            ),
+            description=(
+                f"Receipt {receipt} at {shop} is holding these units until each "
+                f"product is finished in the catalogue: {items}. Finish them from "
+                "Catalogue > Needs review (they are at the top); the units go on "
+                "the shelf by themselves when you save."
+            ),
+            extra={"grn_id": grn_id, "link": "/catalog/review"},
         )
-        if are_cataloguers:
-            title = f"Finish {len(unresolved_lines)} item(s) held on receipt {receipt} at {shop}"
-        else:
-            logger.error(
-                "[VENDOR] GRN %s holds units at %s and NO catalogue manager covers "
-                "that shop -- raising the task for the admins",
-                receipt,
-                store_id,
-            )
-            title = (
-                f"No catalogue manager for {shop}: receipt {receipt} is holding "
-                f"{len(unresolved_lines)} item(s)"
-            )
-        description = (
-            f"Receipt {receipt} at {shop} is holding these units until each product "
-            f"is finished in the catalogue: {items}. Finish them from Catalogue > "
-            "Needs review (they are at the top); the units go on the shelf by "
-            "themselves when you save."
-        )
-        for uid, task_store in people or [(None, store_id)]:
-            _raise_once(
-                db,
-                dedupe_ref=f"grn_catalogue:{grn_id}:{uid or 'nobody'}",
-                title=title,
-                description=description,
-                category="Catalogue",
-                store_id=task_store,
-                assigned_to=uid,
-                extra={"grn_id": grn_id, "link": "/catalog/review"},
-            )
     except Exception as exc:  # noqa: BLE001
         logger.error("[VENDOR] GRN %s catalogue task sync failed: %s", grn_id, exc)
+
+
+def tell_catalogue_managers(
+    db, store_id, *, dedupe: str, title: str, orphan_title: str, description: str,
+    extra: Optional[dict] = None,
+) -> None:
+    """THE door that tells the catalogue managers an item waits on them -- a
+    receipt holding units (_sync_catalogue_tasks), a vendor bill that cannot be
+    booked (purchase_invoices.request_cataloguing). One task per active
+    CATALOG_MANAGER of the shop's legal entity, BY NAME (owner 2026-09-30),
+    once per `dedupe` + person, ever (_raise_once), in a store that person can
+    open. Nobody holding the job there fails loud: logged, and raised for the
+    admins under `orphan_title` -- never a task nobody can see."""
+    people, are_cataloguers = _people_for(
+        db, store_id, "CATALOG_MANAGER", entity_wide=True
+    )
+    if not are_cataloguers:
+        logger.error(
+            "[CATALOGUE] %s: NO catalogue manager covers %s -- raising the task "
+            "for the admins",
+            title,
+            store_id,
+        )
+        title = orphan_title
+    for uid, task_store in people or [(None, store_id)]:
+        _raise_once(
+            db,
+            dedupe_ref=f"{dedupe}:{uid or 'nobody'}",
+            title=title,
+            description=description,
+            category="Catalogue",
+            store_id=task_store,
+            assigned_to=uid,
+            extra=extra or {},
+        )
