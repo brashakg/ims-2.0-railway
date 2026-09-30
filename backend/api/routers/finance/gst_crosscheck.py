@@ -65,7 +65,11 @@ async def get_gst_reconciliation(
     }
     if store_ids is not None:
         o_match["store_id"] = {"$in": store_ids}
-    orders = list(
+    # A held online order is no GSTIN's output tax (tally._filed_orders).
+    from .tally import _filed_orders
+
+    orders = _filed_orders(
+        db,
         db.get_collection("orders").find(
             o_match,
             {
@@ -76,8 +80,9 @@ async def get_gst_reconciliation(
                 "tax_total": 1,
                 # OS-008: the order-carried inter-state flag (online orders).
                 "interstate": 1,
+                "fulfillment_route": 1,
             },
-        )
+        ),
     )
 
     # purchase_orders persist created_at as a BSON datetime (BaseRepository
@@ -181,6 +186,12 @@ def _books_and_tally_for_stores(db, store_ids, start, end) -> tuple:
     payments_collected = 0.0
     t_cgst = t_sgst = t_igst = 0.0
 
+    # A routed online order held on its seller (GSTIN) check is in neither
+    # leg: GSTR-1/3B do not file it and the Tally sales JV does not export it
+    # (tally._filed_orders -- the SAME filter), so the books compared against
+    # them must not count it either.
+    from .tally import _filed_orders
+
     cursor = db.get_collection("orders").find(
         o_match,
         {
@@ -194,9 +205,10 @@ def _books_and_tally_for_stores(db, store_ids, start, end) -> tuple:
             "payments": 1,
             # OS-008: the order-carried inter-state flag (online orders).
             "interstate": 1,
+            "fulfillment_route": 1,
         },
     )
-    for o in cursor:
+    for o in _filed_orders(db, cursor):
         grand = float(o.get("grand_total") or o.get("total") or 0)
         tax = float(o.get("tax_amount") or o.get("tax_total") or 0)
         sales_grand += grand

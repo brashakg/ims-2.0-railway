@@ -93,8 +93,13 @@ async def get_gst_summary(
     # Fetch the matched sales rows once with the fields the CGST/SGST/IGST
     # classifier needs (the split happens below). The prior aggregation summed
     # total_tax then split it 50/50, which mis-stated every inter-state sale and
-    # never reported IGST.
-    _sales_orders = list(
+    # never reported IGST. A routed online order held on its seller (GSTIN)
+    # check is not output tax of any return: GSTR-1/3B and Tally drop it
+    # (tally._filed_orders, the ONE rule), and so does this summary.
+    from .tally import _filed_orders
+
+    _sales_orders = _filed_orders(
+        db,
         db.get_collection("orders").find(
             sales_match,
             {
@@ -105,8 +110,9 @@ async def get_gst_summary(
                 "tax_total": 1,
                 # OS-008: the order-carried inter-state flag (online orders).
                 "interstate": 1,
+                "fulfillment_route": 1,
             },
-        )
+        ),
     )
 
     # GST paid (Input Tax Credit). ITC is claimable on PURCHASES recorded as
