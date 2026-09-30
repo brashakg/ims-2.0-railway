@@ -496,8 +496,8 @@ async def live_listed_qty_for_skus(
                                          # Shopify actually returned
           "variants": [{sku, inventory_item_id}],  # the SKUs read
           "levels":   {inventory_item_id: {location_gid: available}},
-                      # only locations the storefront sells from
-                      # (online_selling_locations), when Shopify's list is known
+                      # less the locations Shopify's list proves cannot
+                      # sell online (online_non_selling_locations)
           "mapped":   int,               # online-mapped SKUs in the input
           "live":     int,               # == len(qty) (may be < mapped)
           "capped":   bool,              # True when mapped > cap
@@ -511,7 +511,7 @@ async def live_listed_qty_for_skus(
         if not _has_shopify_creds(db):
             return None
         from .online_catalog import inventory_items_for_skus
-        from .shopify_stock_parity import online_selling_locations, shopify_levels_by_item
+        from .shopify_stock_parity import online_non_selling_locations, shopify_levels_by_item
 
         clean = [str(s).strip() for s in (skus or []) if str(s or "").strip()]
         # Mapped FIRST, then cap -- preserving the caller's SKU order.
@@ -527,11 +527,12 @@ async def live_listed_qty_for_skus(
             return None
         # An item Shopify answered null (deleted there) is listed-UNKNOWN on
         # these screens, as an unread batch is: absent, never a level. And a
-        # location the storefront does not sell from (inactive, or unticked
-        # for online orders -- the writer's own rule) lists nothing online.
-        selling = await online_selling_locations(db)
+        # location Shopify's list proves cannot sell online (inactive, or
+        # unticked for online orders -- the writer's own rule) lists nothing
+        # online; one missing from that list still counts (unknown).
+        dead = await online_non_selling_locations(db)
         levels = {
-            inv: (per if selling is None else {g: q for g, q in per.items() if g in selling})
+            inv: {g: q for g, q in per.items() if g not in dead}
             for inv, per in levels.items()
             if per is not None
         }

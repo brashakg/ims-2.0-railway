@@ -1668,6 +1668,26 @@ def test_the_tolerance_still_holds_where_the_writer_sends_more_than_zero():
     assert [d["sku"] for d in out["drift"]] == ["C"] and out["clean_skus"] == ["A", "B"]
 
 
+LOC_LEGACY = "gid://shopify/Location/5555"
+
+
+def test_a_location_missing_from_shopifys_list_still_sells(monkeypatch):
+    """Round 11, the panel's probe P1. Shopify's list (locations(first: 50),
+    no includeLegacy) never shows LOC_LEGACY -- a legacy fulfillment-service
+    location, mapped to no shop -- yet its levels hold 4 units. Missing from
+    the list is unknown, never proven non-selling: the Stock Tally lists 5
+    and flags the oversell, the reconciliation screen says OVERSELL_RISK and
+    parity reports LOC_LEGACY. Keep only the gids the list shows as selling
+    (the round-10 filter) -> 1 / OK / [] -> fails."""
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 0}})
+    _locations(db)
+    levels = {INV_1: {LOC_A: 1, LOC_B: 0, LOC_LEGACY: 4}, INV_2: {}}
+    rows, parity = _tally_and_parity(monkeypatch, db, levels)
+    assert _cols(rows["SKU-1"], "online_listed_qty", "oversell_risk") == (5, True)
+    assert _cols(_reconcile(monkeypatch, db, levels, None)["SKU-1"], "online", "status") == (5, "OVERSELL_RISK")
+    assert parity["unclaimed_locations"] == [{"location_id": LOC_LEGACY, "units": 4, "skus": ["SKU-1"]}]
+
+
 def _sentinel_db(db):
     """What SENTINEL hands the tick: the REAL SeededDatabaseConnection (no
     item access) over `db` as its connected real database."""
