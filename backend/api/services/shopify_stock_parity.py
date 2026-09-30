@@ -308,9 +308,10 @@ def unbacked_units(
     ``parity_rows`` pair (a mapped shop and its own location) plus EVERY unit
     at a location no mapped shop claims. Never a pooled sum: one shop's shelf
     (or unmapped Pune's) never backs a listing at another shop's location.
-    ``levels`` are what the storefront sells from: the screens' reader
-    (online_sync_health.live_listed_qty_for_skus) already dropped every
-    location online_non_selling_locations says cannot sell online.
+    ``levels`` is the caller's pick from the screens' reader
+    (online_sync_health.live_listed_qty_for_skus): ``selling`` for the
+    oversell verdict (every location online_non_selling_locations says
+    cannot sell online dropped), parity's full ``levels`` for OVER_ALLOCATED.
 
     Only SKUs whose item Shopify returned get a key. None = a location lists
     units against a shop IMS could not read and nothing else is known to be

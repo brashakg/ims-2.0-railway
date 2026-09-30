@@ -129,15 +129,18 @@ async def online_stock_reconcile(
     Post-BVI: "which SKUs are online" comes from the IMS catalog (Mongo), and
     the LISTED quantity is read LIVE from Shopify for the online-mapped SKUs
     (creds-gated, read-only, capped to the MAPPED set), per location. With
-    ``store_id`` the row is that shop's own Shopify location (an unmapped shop
-    lists 0 and is recommended 0); without it the row sums every location the
-    storefront sells from (live_listed_qty_for_skus drops the rest).
+    ``store_id`` the row is that shop's own Shopify location, in full, as
+    parity compares it (an unmapped shop lists 0 and is recommended 0);
+    without it the row sums every mapped location plus every other location
+    the storefront sells from (live_listed_qty_for_skus ``levels``).
     Either way the verdict is decided location by location
     (shopify_stock_parity.unbacked_units) -- never one shop's (or unmapped
     Pune's) shelf backing another shop's listing:
-      * OVERSELL_RISK  -- a location lists beyond the shelf behind it;
+      * OVERSELL_RISK  -- a location the storefront sells from lists beyond
+        the shelf behind it;
       * OVER_ALLOCATED -- a location lists beyond what the writer sends there
-        (its safety buffer, the SUPERADMIN online block);
+        (its safety buffer, the SUPERADMIN online block), sells online or
+        not: exactly what the nightly parity files as drift;
       * ``recommended`` -- what the writer sends, summed over the mapped shops
         in view. The buffer is the writer's own (the Shopify integration's
         safety_buffer); this page has no second one;
@@ -187,7 +190,10 @@ async def online_stock_reconcile(
 
     live = await live_listed_qty_for_skus(db, skus)
     variants = (live or {}).get("variants") or []
+    # Parity's full level (the Online column, OVER_ALLOCATED) and the level
+    # the storefront sells from (OVERSELL_RISK): live_listed_qty_for_skus.
     levels = (live or {}).get("levels") or {}
+    selling = (live or {}).get("selling") or {}
     # The shelf and the writer's number per shop + the writer's own shop ->
     # location map (one shop's entry with store_id). None = unknown ->
     # ONHAND_UNKNOWN, never clean.
@@ -196,10 +202,14 @@ async def online_stock_reconcile(
         # ONE shop = its OWN location only; a shop with no location lists 0.
         # An unreadable map = which location is unknown -> listed unknown.
         gid = (mapped or {}).get(store_id)
-        levels = {} if mapped is None else {
-            inv: ({gid: per.get(gid, 0)} if gid else {}) for inv, per in levels.items()
-        }
-    over = None if shelf is None else unbacked_units(variants, shelf, levels, mapped)
+
+        def own(lv):
+            return {} if mapped is None else {
+                inv: ({gid: per.get(gid, 0)} if gid else {}) for inv, per in lv.items()
+            }
+
+        levels, selling = own(levels), own(selling)
+    over = None if shelf is None else unbacked_units(variants, shelf, selling, mapped)
     excess = None if sent is None else unbacked_units(variants, sent, levels, mapped)
     inv_of = {v["sku"]: v["inventory_item_id"] for v in variants}
 

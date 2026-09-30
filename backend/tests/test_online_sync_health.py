@@ -124,6 +124,7 @@ def _live(listed, *, mapped=None):
         "qty": dict(listed),
         "variants": [{"sku": s, "inventory_item_id": f"inv-{s}"} for s in listed],
         "levels": {f"inv-{s}": {_LOC: n} for s, n in listed.items()},
+        "selling": {f"inv-{s}": {_LOC: n} for s, n in listed.items()},
         "live": len(listed),
         "mapped": len(listed) if mapped is None else mapped,
     }

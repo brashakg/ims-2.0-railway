@@ -308,9 +308,9 @@ def stock_tally_summary(
     (honest unknown -- never a fake 0) and oversell_risk stays False.
 
     For each online-eligible SKU it reports:
-      - online_listed_qty : live Shopify available, summed over every
-                            location the storefront sells from (active,
-                            ticked to fulfil online orders), else None
+      - online_listed_qty : live Shopify available, summed over parity's
+                            level (every mapped location in full, any other
+                            the storefront sells from), else None
       - on_hand           : AVAILABLE units on every physical shelf
                             (_on_hand_by_product; display only -- unmapped
                             Pune included, and it is sold online nowhere)
@@ -320,7 +320,8 @@ def stock_tally_summary(
                             the SUPERADMIN online block) summed over the MAPPED
                             shops -- what IMS lets the website sell
       - recommended_buffer: a conservative reserve suggestion (not enforced)
-      - oversell_risk     : some Shopify location lists more than the SHELF
+      - oversell_risk     : some Shopify location the storefront sells from
+                            lists more than the SHELF
                             behind it (the physical shelf -- no buffer, no
                             online block; the same line the
                             reconciliation screen draws), counted by
@@ -397,7 +398,7 @@ def stock_tally_summary(
     # beyond the shelf (the risk) and beyond the writer's number (the order).
     unbacked, excess = (
         (
-            unbacked_units(live.get("variants") or [], shelf, live.get("levels") or {}, mapped),
+            unbacked_units(live.get("variants") or [], shelf, live.get("selling") or {}, mapped),
             unbacked_units(live.get("variants") or [], sent, live.get("levels") or {}, mapped),
         )
         if live
@@ -493,19 +494,26 @@ async def live_listed_qty_for_skus(
     Returns None when the live read is unavailable (no creds / no mapping /
     read error), else:
         {
-          "qty":      {sku: available},  # every location the storefront
-                                         # sells from summed; only SKUs
+          "qty":      {sku: available},  # `levels` summed; only SKUs
                                          # Shopify actually returned
           "variants": [{sku, inventory_item_id}],  # the SKUs read
           "levels":   {inventory_item_id: {location_gid: available}},
-                      # less the locations Shopify's list proves cannot
-                      # sell online (online_non_selling_locations)
+                      # parity's view: every MAPPED location in full, any
+                      # other less the locations Shopify's list proves
+                      # cannot sell online (online_non_selling_locations)
+          "selling":  {inventory_item_id: {location_gid: available}},
+                      # less EVERY such location, mapped or not
           "mapped":   int,               # online-mapped SKUs in the input
           "live":     int,               # == len(qty) (may be < mapped)
           "capped":   bool,              # True when mapped > cap
         }
-    ``levels`` is what an oversell verdict reads (per location, via
-    shopify_stock_parity.unbacked_units); ``qty`` is for display only.
+    Decided 2026-10-01: parity measures whether Shopify holds the writer's
+    number at each mapped location, so ``levels`` (parity's full level) is
+    what the Online column and the OVER_ALLOCATED verdict read -- a shop's
+    reconcile view and its drift task always agree -- and ``selling`` is
+    what the oversell verdict reads (units at a location that cannot sell
+    online oversell nothing). Both per location, via
+    shopify_stock_parity.unbacked_units; ``qty`` is for display only.
     READ-ONLY + fail-soft, never raises."""
     try:
         from .shopify_push import _has_shopify_creds
@@ -528,17 +536,26 @@ async def live_listed_qty_for_skus(
         if levels is None:
             return None
         # An item Shopify answered null (deleted there) is listed-UNKNOWN on
-        # these screens, as an unread batch is: absent, never a level. And a
+        # these screens, as an unread batch is: absent, never a level. A
         # location Shopify's list proves cannot sell online (inactive, or
-        # unticked for online orders -- the writer's own rule) lists nothing
-        # online; one missing from that list still counts (unknown).
+        # unticked for online orders -- the writer's own rule) oversells
+        # nothing, so `selling` drops it; one missing from that list still
+        # counts (unknown). `levels` is parity's own view: a MAPPED location
+        # in full (the writer writes its number there, sells or not -- parity
+        # files drift on it), any other location only while it sells.
         dead = await online_non_selling_locations(db)
+        claimed: set = set()
+        if dead:
+            from .shopify_push.inventory import _mapped, _stores
+
+            claimed = set(_mapped(_stores(db)).values())
         levels = {
-            inv: {g: q for g, q in per.items() if g not in dead}
+            inv: {g: q for g, q in per.items() if g in claimed or g not in dead}
             for inv, per in levels.items()
             if per is not None
         }
-        # LISTED is what the storefront can sell: every selling location summed.
+        selling = {inv: {g: q for g, q in per.items() if g not in dead} for inv, per in levels.items()}
+        # LISTED is parity's level, summed.
         qty: Dict[str, int] = {}
         for sku, inv in inv_map.items():
             per_location = levels.get(inv)
@@ -550,6 +567,7 @@ async def live_listed_qty_for_skus(
             "qty": qty,
             "variants": [{"sku": s, "inventory_item_id": inv} for s, inv in inv_map.items()],
             "levels": levels,
+            "selling": selling,
             "mapped": len(mapped_ordered),
             "live": len(qty),
             "capped": capped,

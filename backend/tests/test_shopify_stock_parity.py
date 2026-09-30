@@ -1505,20 +1505,29 @@ def test_a_location_the_storefront_does_not_sell_from_oversells_nothing(monkeypa
     assert parity["drift_count"] == 0
 
 
-def test_a_mapped_location_that_cannot_sell_online_oversells_nothing(monkeypatch):
+def test_a_mapped_location_that_cannot_sell_online_oversells_nothing_and_still_drifts(monkeypatch):
     """Round 10, the same root on a MAPPED shop: LOC_B (BV-B's own) is not
-    ticked to fulfil online orders -- the writer's dead_mapped_reason, flagged
-    on every press. Its 3 units sell nothing online, so neither screen calls
-    them an oversell; parity still compares BV-B's number there (the writer
-    still writes it). Drop the filter -> LOC_B's 3 vs shelf 0 is
-    OVERSELL_RISK again -> fails."""
+    ticked to fulfil online orders -- the writer's dead_mapped_reason,
+    flagged on every press. Its 3 units sell nothing online, so neither
+    screen calls them an oversell. Round 13 (decided 2026-10-01): parity
+    measures whether Shopify holds the writer's number at each MAPPED
+    location, sells online or not, so it files BV-B's drift (0 vs 3) -- and
+    the screens read that same full level for the Online column and the
+    OVER_ALLOCATED verdict: BV-B's own view is 3 listed vs 0 sent,
+    OVER_ALLOCATED, never 0 / OK beside an open task. Drop the non-selling
+    filter everywhere -> OVERSELL_RISK -> fails; drop the mapped location's
+    full level too (the round-10 filter) -> BV-B reads 0 / OK -> fails."""
     db = _db({"SKU-1": {"BV-A": 1, "BV-B": 0}})
     _locations(db, unticked=(LOC_B,))
     levels = {INV_1: {LOC_A: 1, LOC_B: 3}, INV_2: {}}
     rows, parity = _tally_and_parity(monkeypatch, db, levels)
-    assert _cols(rows["SKU-1"], "online_listed_qty", "oversell_risk") == (1, False)
-    assert _reconcile(monkeypatch, db, levels, "BV-B")["SKU-1"]["status"] == "OK"
+    assert _cols(rows["SKU-1"], "online_listed_qty", "sellable", "oversell_risk") == (4, 1, False)
+    row = _reconcile(monkeypatch, db, levels, "BV-B")["SKU-1"]
+    assert _cols(row, "online", "recommended", "delta", "status") == (3, 0, 3, "OVER_ALLOCATED")
+    row = _reconcile(monkeypatch, db, levels, None)["SKU-1"]
+    assert _cols(row, "online", "recommended", "delta", "status") == (4, 1, 3, "OVER_ALLOCATED")
     assert [(d["store_id"], d["ims"], d["shopify"]) for d in parity["drift"]] == [("BV-B", 0, 3)]
+    assert parity["tasks"]["filed"] == ["BV-B"] and "Top: SKU-1 (IMS 0 vs Shopify 3)" in _tasks(db)[0]["description"]
 
 
 def _press_take_down(monkeypatch, db, twin_id):
