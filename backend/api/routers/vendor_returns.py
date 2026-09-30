@@ -11,13 +11,13 @@ from datetime import datetime
 import uuid
 from .auth import require_roles
 from ..dependencies import get_db, resolve_store_scope, validate_store_access
-from ..services.cost_mask import mask_vendor_return
+from ..services.cost_mask import PURCHASE_ROLES, mask_vendor_return
 
 # A vendor return mints a debit/credit note -- a financial instrument against a
 # vendor. Restrict create + status changes to the same roles that manage vendors
-# / AP (mirrors vendors.py _VENDOR_ROLES); it was previously open to ANY
+# / AP (the purchase roles, services/cost_mask); it was previously open to ANY
 # authenticated user (down to a cashier).
-_VENDOR_RETURN_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
+_VENDOR_RETURN_ROLES = PURCHASE_ROLES
 
 # F60: a return carries the unit cost of each returned piece, so READS go to the
 # writers plus the Vendor Returns screen (/purchase/vendor-returns also admits

@@ -36,6 +36,7 @@ from pydantic import BaseModel, Field
 
 from .auth import require_roles
 from ..dependencies import get_db, resolve_store_scope, validate_store_access, user_store_scope
+from ..services.cost_mask import PURCHASE_ROLES
 from ..services.vendor_rma import (
     VendorRMAEngine,
     RMA_REASONS,
@@ -46,10 +47,11 @@ from ..services.vendor_rma import (
 
 logger = logging.getLogger(__name__)
 
-# Same vendor/AP role set vendor_returns hardened to. A vendor RMA + its credit
-# note are financial instruments against a vendor; juniors (cashier/sales/
-# workshop/optometrist/catalog) are excluded. SUPERADMIN passes via require_roles.
-_VENDOR_RMA_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
+# The purchase roles (services/cost_mask), as on vendor_returns. A vendor RMA +
+# its credit note are financial instruments against a vendor; juniors (cashier/
+# sales/workshop/optometrist/catalog) are excluded. SUPERADMIN passes via
+# require_roles.
+_VENDOR_RMA_ROLES = PURCHASE_ROLES
 
 router = APIRouter()
 

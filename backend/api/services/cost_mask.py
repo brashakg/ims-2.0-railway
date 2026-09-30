@@ -11,8 +11,8 @@ Role policy (DECISIONS sec 9):
     (context="catalog_edit"), never on operational views (inventory ledger, reports).
   * AREA_MANAGER and below (STORE_MANAGER, OPTOMETRIST, SALES_*, WORKSHOP_STAFF)
     -- cost + margin are stripped from the payload; the FE renders "-".
-  * The buyers (AREA_MANAGER / STORE_MANAGER, with ADMIN / ACCOUNTANT the
-    purchase roles) see what was paid where they buy: purchase documents
+  * The purchase roles (PURCHASE_ROLES: ADMIN / ACCOUNTANT / AREA_MANAGER /
+    STORE_MANAGER) see what was paid where they buy: purchase documents
     (context="purchase") and the product master that prefills a PO
     (context="product", which also admits the CATALOG_MANAGER product form).
     Counter roles (SALES_*, CASHIER, OPTOMETRIST, WORKSHOP_STAFF) never do
@@ -28,12 +28,17 @@ from typing import Dict, List
 
 COST_VISIBLE_ROLES = {"SUPERADMIN", "ADMIN", "ACCOUNTANT"}
 CATALOG_FORM_ROLES = {"CATALOG_MANAGER"}
-_BUYER_ROLES = {"AREA_MANAGER", "STORE_MANAGER"}
+# The purchase roles: who buys, receives and pays suppliers, so who sees what
+# was paid and to whom. Defined ONCE, here: the purchase screens' route gate
+# (routers/vendors/_shared._VENDOR_ROLES) and the vendor-return, RTV debit-note
+# and RMA gates ARE this tuple, and the "purchase" context admits exactly it.
+# SUPERADMIN passes every require_roles gate on its own.
+PURCHASE_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
 # context -> the roles it admits on top of COST_VISIBLE_ROLES.
 _CONTEXT_ROLES = {
     "catalog_edit": CATALOG_FORM_ROLES,
-    "purchase": _BUYER_ROLES,
-    "product": _BUYER_ROLES | CATALOG_FORM_ROLES,
+    "purchase": set(PURCHASE_ROLES),
+    "product": set(PURCHASE_ROLES) | CATALOG_FORM_ROLES,
 }
 
 # Raw cost fields that may appear on product / stock / order-line payloads.

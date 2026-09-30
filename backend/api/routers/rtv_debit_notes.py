@@ -41,7 +41,7 @@ from ..dependencies import (
     validate_store_access,
     user_store_scope,
 )
-from ..services.cost_mask import mask_debit_note
+from ..services.cost_mask import PURCHASE_ROLES, mask_debit_note
 from ..services.rtv_debit_note import (
     DebitNoteEngine,
     paise_to_rupees,
@@ -51,10 +51,10 @@ from ..services.rtv_debit_note import (
 
 logger = logging.getLogger(__name__)
 
-# Same vendor/AP role set vendor_returns / vendor_rma hardened to. A debit note is
-# a financial instrument against a vendor; juniors are excluded. SUPERADMIN passes
-# via require_roles.
-_DEBIT_NOTE_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
+# The purchase roles (services/cost_mask), as on vendor_returns / vendor_rma. A
+# debit note is a financial instrument against a vendor; juniors are excluded.
+# SUPERADMIN passes via require_roles.
+_DEBIT_NOTE_ROLES = PURCHASE_ROLES
 
 router = APIRouter()
 

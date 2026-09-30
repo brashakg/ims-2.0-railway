@@ -26,6 +26,7 @@ from ...dependencies import (
     resolve_store_scope,
 )
 from ...services import ap_engine
+from ...services.cost_mask import PURCHASE_ROLES
 from ...services import org_validation as ov
 from ...utils.ist import fy_start_year_ist, ist_date_str, now_ist
 from ...services import product_master as _pm
@@ -58,9 +59,11 @@ router = APIRouter()
 logger = logging.getLogger(__package__)
 
 
-# Roles permitted to mutate vendors, purchase orders and goods-receipt notes.
+# Roles permitted to read and mutate vendors, purchase orders and goods-receipt
+# notes: the purchase roles, defined once in services/cost_mask (the same set
+# that sees supplier identity on the vendor list and prices on vendor returns).
 # Mirrors the frontend /purchase/* route guards. SUPERADMIN auto-passes.
-_VENDOR_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
+_VENDOR_ROLES = PURCHASE_ROLES
 
 # The metadata.kind this router's own GRN upload stamps. Anything else in the
 # shared GridFS bucket belongs to another feature and must never be bound to,

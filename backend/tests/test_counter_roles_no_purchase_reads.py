@@ -894,3 +894,36 @@ def test_bank_statement_rows_are_the_handler_gate(method, path):
     assert row == {"ADMIN", "ACCOUNTANT"}
     for role in row:
         _require_finance_admin({"roles": [role]})  # no raise
+
+
+# ---------------------------------------------------------------------------
+# 13. ONE purchase-role rule: the purchase gate and the purchase mask
+# ---------------------------------------------------------------------------
+# Who may open the purchase reads (vendor detail, POs, GRNs, and the return /
+# debit-note / RMA writes) and who is shown what was paid and to whom (the
+# full vendor list, prices on returns and debit notes) is one question. Two
+# constants let them drift: narrowing the gate alone left the vendor LIST
+# handing GSTIN and bank to a role the vendor DETAIL refused. So every gate IS
+# cost_mask.PURCHASE_ROLES (identity, not a synced copy), and the mask answers
+# exactly its members for every role.
+from api.routers import vendor_rma as rma_router  # noqa: E402
+from api.services.cost_mask import PURCHASE_ROLES, can_see_cost  # noqa: E402
+
+
+def test_purchase_gates_are_the_one_purchase_role_constant():
+    for name, gate in (
+        ("vendors", _VENDOR_ROLES),
+        ("vendor returns", vr_router._VENDOR_RETURN_ROLES),
+        ("rtv debit notes", dn_router._DEBIT_NOTE_ROLES),
+        ("vendor rma", rma_router._VENDOR_RMA_ROLES),
+    ):
+        assert gate is PURCHASE_ROLES, name
+
+
+@pytest.mark.parametrize("role", rbac.ALL_ROLES)
+def test_purchase_mask_is_membership_of_the_purchase_gate(app, role):
+    sees = can_see_cost({"roles": [role]}, "purchase")
+    assert sees is (role == "SUPERADMIN" or role in _VENDOR_ROLES), role
+    # ...and the route itself agrees, so a handler switched onto another tuple
+    # cannot reopen the gap either.
+    assert _route_allows(app, "/api/v1/vendors/{vendor_id}", role) is sees, role
