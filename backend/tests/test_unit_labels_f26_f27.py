@@ -191,6 +191,32 @@ def test_units_view_lists_every_unit_of_the_product_at_this_shop(world):
     assert first["mrp"] == 8990.0
 
 
+def test_units_view_reads_only_the_shop_asked_for(world):
+    # An admin, or an area manager over two shops, browsing one shop's ledger
+    # must get THAT shop's units. The per-unit access check lets both shops
+    # through for them, so only the shop filter keeps the other shop out.
+    world["unit"]("BV--DHN00001")
+    world["unit"]("BV--BOK00001", store=OTHER)
+    area = {
+        "user_id": "am_jh",
+        "roles": ["AREA_MANAGER"],
+        "store_ids": [STORE, OTHER],
+        "active_store_id": STORE,
+    }
+    for user in (ADMIN, area):
+        world["as_user"](user)
+        for shop, barcode in ((STORE, "BV--DHN00001"), (OTHER, "BV--BOK00001")):
+            r = world["http"].get(
+                "/inventory/units",
+                params={"product_id": world["pid"], "store_id": shop},
+            )
+            assert r.status_code == 200, (user["roles"], shop, r.text)
+            assert [u["barcode"] for u in r.json()["units"]] == [barcode], (
+                user["roles"],
+                shop,
+            )
+
+
 def test_units_view_by_receipt_lists_only_that_receipt(world):
     world["unit"]("BV--RCPT0009")
     world["unit"]("BV--RCPT0010", grn="GRN-7")
