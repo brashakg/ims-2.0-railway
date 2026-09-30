@@ -54,13 +54,14 @@ import {
 } from '../../../components/pos/CustomerSearchBar';
 import { PosWidgets } from './PosWidgets';
 import { CounterCompleteScreen } from './SaleCompleteScreen';
-import { ProductCard, productIdOf, MAX_PRODUCT_RESULTS } from './ProductResultsStrip';
+import { ProductCard, MAX_PRODUCT_RESULTS } from './ProductResultsStrip';
 import { submitPosOrder } from '../../../components/pos/submitOrder';
 import { orderApi } from '../../../services/api/sales';
 import {
   resolveBarcode,
   posPriceGuard,
   cartItemFromProduct,
+  productIdOf,
 } from '../../../components/pos/productIntake';
 import { CATEGORY_BROWSE_OPTIONS } from '../../../utils/categoryNormalize';
 import { istDayString } from '../../../utils/datetime';
@@ -134,11 +135,12 @@ export function GeneralCounterSurface() {
     store_id: store.store_id || activeStoreId || undefined,
   });
   // F46: this shop's sellable counts (the oversell guard's own number) for
-  // the tiles on show and for the cart lines. Hooks, so above the guards.
+  // the tiles on show and for the cart lines. At the signed-in shop -- the one
+  // Complete sale checks -- never a till draft's leftover store_id. Hooks, so
+  // above the guards.
   const gridRows = (products as any[]).slice(0, MAX_PRODUCT_RESULTS);
-  const stockStoreId = store.store_id || activeStoreId || undefined;
-  const { data: gridSellable } = useSellableStock(stockStoreId, gridRows);
-  const { data: cartSellable } = useSellableStock(stockStoreId, store.cart || []);
+  const { data: gridStock } = useSellableStock(activeStoreId, gridRows);
+  const { data: cartStock } = useSellableStock(activeStoreId, store.cart || []);
 
   // ---- Guards (identical to the billing surface; backend enforces both) ---
   if (!activeStoreId) {
@@ -479,7 +481,7 @@ export function GeneralCounterSurface() {
                           key={productIdOf(product) || product.sku}
                           product={product}
                           layout="grid"
-                          stock={gridSellable?.[productIdOf(product) || '']}
+                          stock={gridStock?.sellable[productIdOf(product) || '']}
                           onPick={() => addProduct(product)}
                         />
                       ))}
@@ -505,7 +507,7 @@ export function GeneralCounterSurface() {
                   counter is optical — CartSidebar renders them for optical
                   lines only, so the same component IS the plain cart. */}
               <div className="min-h-0 overflow-y-auto rounded-xl border border-gray-200 bg-white">
-                <CartSidebar onOpenDiscount={setDiscountLine} sellable={cartSellable} />
+                <CartSidebar onOpenDiscount={setDiscountLine} stock={cartStock} />
               </div>
 
               <div className="min-h-0 overflow-y-auto flex flex-col gap-3">

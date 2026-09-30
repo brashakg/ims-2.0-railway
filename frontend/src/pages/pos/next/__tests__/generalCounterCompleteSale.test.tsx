@@ -66,7 +66,9 @@ vi.mock('../../../../services/api/sales', () => ({
 let productRows: unknown[] = [];
 // F46: this shop's sellable counts, keyed by product id. Reset in beforeEach.
 let sellableCounts: Record<string, number | null> | undefined;
-const useSellableStock = vi.fn((_store: string, _rows: unknown[]) => ({ data: sellableCounts }));
+const useSellableStock = vi.fn((_store: string, _rows: unknown[]) => ({
+  data: sellableCounts && { store_id: 'BV-BOK-01', sellable: sellableCounts },
+}));
 vi.mock('../../../../hooks/usePOSQueries', () => ({
   useProducts: () => ({ data: productRows, isLoading: false }),
   useSellableStock: (store: string, rows: unknown[]) => useSellableStock(store, rows),
@@ -86,8 +88,8 @@ vi.mock('../../../../components/pos/CustomerCardWithLoyalty', () => ({
 }));
 // The cart echoes the stock counts it was handed (F46).
 vi.mock('../../../../components/pos/POSCart', () => ({
-  CartSidebar: ({ sellable }: { sellable?: Record<string, number | null> }) => (
-    <div>cart{sellable ? `:${JSON.stringify(sellable)}` : ''}</div>
+  CartSidebar: ({ stock }: { stock?: { sellable: Record<string, number | null> } }) => (
+    <div>cart{stock ? `:${JSON.stringify(stock.sellable)}` : ''}</div>
   ),
 }));
 vi.mock('../../../../components/pos/DiscountModal', () => ({
@@ -350,5 +352,21 @@ describe("F46: the counter's tiles and cart use this shop's sellable count", () 
       [expect.objectContaining({ product_id: 'p-1' })],
     );
     expect(screen.getByText('cart:{"p-1":0}')).toBeTruthy();
+  });
+
+  it("reads the counts at the signed-in shop -- the one Complete sale checks -- not a till draft's", () => {
+    // posStore.store_id survives in the persisted 'ims-pos-draft' (the retired
+    // till set it; only logout clears it). The sale guard uses the signed-in
+    // shop, so the badges must too.
+    usePOSStore.getState().setStoreId('BV-OTHER-02');
+    try {
+      putSomethingInTheCart();
+      productRows = [{ product_id: 'SG-1', name: 'Ray-Ban Aviator - Gold', category: 'SUNGLASS', mrp: 9000, offer_price: 9000 }];
+      renderCounter();
+      expect(useSellableStock).toHaveBeenCalled();
+      for (const [storeId] of useSellableStock.mock.calls) expect(storeId).toBe('BV-BOK-01');
+    } finally {
+      usePOSStore.getState().setStoreId('');
+    }
   });
 });

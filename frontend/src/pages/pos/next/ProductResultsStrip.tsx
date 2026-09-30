@@ -37,7 +37,7 @@
 import { Package } from 'lucide-react';
 import { usePOSStore } from '../../../stores/posStore';
 import { useProducts, useSellableStock } from '../../../hooks/usePOSQueries';
-import { posPriceGuard, cartItemFromProduct } from '../../../components/pos/productIntake';
+import { posPriceGuard, cartItemFromProduct, productIdOf } from '../../../components/pos/productIntake';
 
 interface ProductResultsStripProps {
   /** Terminal's active store - results are scoped to its stock. */
@@ -66,14 +66,6 @@ export const MAX_PRODUCT_RESULTS = 24;
 function nameParts(name: string): [string, string] {
   const i = name.lastIndexOf(' - ');
   return i > 0 ? [name.slice(0, i), name.slice(i + 3)] : [name, ''];
-}
-
-/** ONE spelling chain for the row's id. Includes plain `id` because the axios
-    aliaser camelises snake_case ADDITIVELY but a row that arrives with only
-    `id` (e.g. an order-shaped join) has no product_id/_id at all - reading
-    just those showed a false "not in cart" on such rows. */
-export function productIdOf(p: any): string | undefined {
-  return p.product_id || p._id || p.id;
 }
 
 export type ProductCardLayout = 'strip' | 'grid';
@@ -221,7 +213,7 @@ export function ProductResultsStrip({
     store_id: storeId || undefined,
   });
   const rows = (products as any[]).slice(0, MAX_PRODUCT_RESULTS);
-  const { data: sellable } = useSellableStock(storeId, rows);
+  const { data: stock } = useSellableStock(storeId, rows);
 
   const handlePick = (product: any) => {
     const guard = posPriceGuard(product);
@@ -269,7 +261,7 @@ export function ProductResultsStrip({
           key={productIdOf(product) || product.sku}
           product={product}
           layout="strip"
-          stock={sellable?.[productIdOf(product) || '']}
+          stock={stock?.sellable[productIdOf(product) || '']}
           onPick={() => handlePick(product)}
         />
       ))}

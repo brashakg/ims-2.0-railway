@@ -15,7 +15,8 @@
 
 import { render, screen } from '@testing-library/react';
 import { describe, it, expect, beforeEach } from 'vitest';
-import { ProductCard, productIdOf } from '../ProductResultsStrip';
+import { ProductCard } from '../ProductResultsStrip';
+import { productIdOf } from '../../../../components/pos/productIntake';
 import { usePOSStore } from '../../../../stores/posStore';
 
 beforeEach(() => usePOSStore.getState().resetTransaction());

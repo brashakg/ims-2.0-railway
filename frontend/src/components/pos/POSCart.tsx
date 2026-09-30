@@ -8,6 +8,7 @@
 
 import { ShoppingCart, X } from 'lucide-react';
 import { usePOSStore, type CartLineItem } from '../../stores/posStore';
+import type { SellableStock } from '../../services/api/inventory';
 
 /** Next free pair label for a cart ("Pair 1", "Pair 2", …). Gaps left by a
     removed pair are reused, so labels stay small and stable. */
@@ -37,16 +38,20 @@ export function stockWarning(sellable: number | null | undefined, wanted: number
  *  Discount control. */
 export function CartSidebar({
   onOpenDiscount,
-  sellable,
+  stock,
 }: {
   onOpenDiscount?: (line: CartLineItem) => void;
-  /** F46: this shop's sellable count per product id (useSellableStock). */
-  sellable?: Record<string, number | null>;
+  /** F46: this shop's sellable counts for the cart lines (useSellableStock). */
+  stock?: SellableStock;
 } = {}) {
   const store = usePOSStore();
+  // Lines add up under the id the guard sums them by, so a line picked by its
+  // _id and the same product scanned count as one product, as at Complete sale.
+  const canonOf = (pid: string) => stock?.canonical?.[pid] || pid;
   const wantedByProduct = new Map<string, number>();
   for (const i of store.cart || []) {
-    wantedByProduct.set(i.product_id, (wantedByProduct.get(i.product_id) || 0) + i.quantity);
+    const key = canonOf(i.product_id);
+    wantedByProduct.set(key, (wantedByProduct.get(key) || 0) + i.quantity);
   }
   const opticalCount = (store.cart || []).filter((i) => i.is_optical).length;
   const pairIds = Array.from(
@@ -118,8 +123,8 @@ export function CartSidebar({
         )}
         {(store.cart || []).map((item) => {
           const warning = stockWarning(
-            sellable?.[item.product_id],
-            wantedByProduct.get(item.product_id) || 0,
+            stock?.sellable[item.product_id],
+            wantedByProduct.get(canonOf(item.product_id)) || 0,
           );
           return (
             <div

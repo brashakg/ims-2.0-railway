@@ -11,6 +11,7 @@ import {
   storeApi,
 } from '../services/api';
 import { mapCategory } from '../components/pos/submitOrder';
+import { productIdOf } from '../components/pos/productIntake';
 
 // ============================================================================
 // Query Key Factories (for cache invalidation)
@@ -67,20 +68,20 @@ export function useProducts(params?: { category?: string; brand?: string; search
 }
 
 /** F46: this shop's sellable count for a set of till rows (tiles or cart
- *  lines), keyed by product id. It is the oversell guard's OWN number (GET
- *  /inventory/sellable -> orders/stock.sellable_units): a number, or null when
- *  the guard does not gate that row (not unit-tracked here, lens, service). */
+ *  lines). `sellable[id]` is the oversell guard's OWN number (GET
+ *  /inventory/sellable asks _assert_serialized_stock_available): a number, or
+ *  null when the guard does not gate that row (not unit-tracked here, lens,
+ *  service). `canonical[id]` is the id the guard adds that line up under. */
 export function useSellableStock(storeId: string | undefined, rows: any[]) {
   const typeOf = new Map<string, string>();
   for (const r of rows || []) {
-    const id = r?.product_id || r?._id || r?.id;
+    const id = productIdOf(r || {});
     if (id && !typeOf.has(id)) typeOf.set(id, mapCategory(r.category || ''));
   }
   const ids = [...typeOf.keys()].sort();
   return useQuery({
     queryKey: ['pos', 'sellable', storeId, ids],
-    queryFn: async () =>
-      (await inventoryApi.getSellable(storeId!, ids, ids.map((id) => typeOf.get(id)!))).sellable,
+    queryFn: () => inventoryApi.getSellable(storeId!, ids, ids.map((id) => typeOf.get(id)!)),
     enabled: !!storeId && ids.length > 0,
     // Keep the last counts on screen while a changed cart refetches, so a
     // warning never blinks off and back on.

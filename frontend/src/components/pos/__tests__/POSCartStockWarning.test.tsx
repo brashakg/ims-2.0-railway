@@ -10,7 +10,7 @@
 
 import { render, screen } from '@testing-library/react';
 import { it, expect, beforeEach } from 'vitest';
-import { CartSidebar } from '../POSCart';
+import { CartSidebar, stockWarning } from '../POSCart';
 import { usePOSStore } from '../../../stores/posStore';
 
 const line = (id: string, product_id: string, quantity = 1) =>
@@ -29,29 +29,55 @@ beforeEach(() => usePOSStore.getState().resetTransaction());
 
 it('warns on a line that is not in stock at this shop', () => {
   line('l-1', 'FR-HAVANA');
-  render(<CartSidebar sellable={{ 'FR-HAVANA': 0 }} />);
+  render(<CartSidebar stock={{ store_id: 'S', sellable: { 'FR-HAVANA': 0 } }} />);
   expect(screen.getByRole('alert').textContent).toMatch(/not in stock at this shop/i);
 });
 
 it('warns when the quantity passes what this shop has', () => {
   line('l-1', 'FR-BLACK', 2);
-  render(<CartSidebar sellable={{ 'FR-BLACK': 1 }} />);
+  render(<CartSidebar stock={{ store_id: 'S', sellable: { 'FR-BLACK': 1 } }} />);
   expect(screen.getByRole('alert').textContent).toMatch(/only 1 in stock at this shop/i);
 });
 
 it('adds up two lines of the same product, as the sale guard does', () => {
   line('l-1', 'FR-BLACK');
   line('l-2', 'FR-BLACK');
-  render(<CartSidebar sellable={{ 'FR-BLACK': 1 }} />);
+  render(<CartSidebar stock={{ store_id: 'S', sellable: { 'FR-BLACK': 1 } }} />);
   expect(screen.getAllByRole('alert')).toHaveLength(2);
 });
 
 it('stays quiet when there is enough, when the guard does not gate it, or before the count arrives', () => {
   line('l-1', 'FR-BLACK', 2);
   line('l-2', 'SVC-EYE-TEST');
-  const r = render(<CartSidebar sellable={{ 'FR-BLACK': 8, 'SVC-EYE-TEST': null }} />);
+  const r = render(<CartSidebar stock={{ store_id: 'S', sellable: { 'FR-BLACK': 8, 'SVC-EYE-TEST': null } }} />);
   expect(screen.queryByRole('alert')).toBeNull();
   r.unmount();
   render(<CartSidebar />);
   expect(screen.queryByRole('alert')).toBeNull();
+});
+
+it('stays quiet on the last unit: one in the cart, one on the shelf', () => {
+  expect(stockWarning(1, 1)).toBeNull();
+  expect(stockWarning(1, 2)).toMatch(/only 1 in stock/i);
+  line('l-1', 'FR-BLACK');
+  render(<CartSidebar stock={{ store_id: 'S', sellable: { 'FR-BLACK': 1 } }} />);
+  expect(screen.queryByRole('alert')).toBeNull();
+});
+
+it('adds up a picked line and a scanned line of one product under the id the guard uses', () => {
+  // A tile row that carried only its Mongo _id, then the same frame scanned
+  // (resolveBarcode gives the canonical product_id): the guard sums both under
+  // FR-BLACK and refuses 2 > 1, so the cart must warn on both lines.
+  line('l-1', '66f1c0ffee00000000000001');
+  line('l-2', 'FR-BLACK');
+  render(
+    <CartSidebar
+      stock={{
+        store_id: 'S',
+        sellable: { '66f1c0ffee00000000000001': 1, 'FR-BLACK': 1 },
+        canonical: { '66f1c0ffee00000000000001': 'FR-BLACK', 'FR-BLACK': 'FR-BLACK' },
+      }}
+    />,
+  );
+  expect(screen.getAllByRole('alert')).toHaveLength(2);
 });

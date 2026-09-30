@@ -27,11 +27,12 @@ export const inventoryApi = {
   // F46: this shop's sellable count per product -- the oversell guard's own
   // number (GET /inventory/sellable). `itemTypes` is the order item_type per
   // id (mapCategory), so lens/service lines come back null like the guard.
+  // `canonical` maps each id to the one the guard adds its lines up under.
   getSellable: async (
     storeId: string,
     productIds: string[],
     itemTypes: string[],
-  ): Promise<{ store_id: string; sellable: Record<string, number | null> }> => {
+  ): Promise<SellableStock> => {
     const response = await api.get('/inventory/sellable', {
       params: {
         store_id: storeId,
@@ -448,6 +449,13 @@ export const inventoryApi = {
 // One merged stock-movement event. qty is SIGNED: positive = stock in
 // (RECEIVED / TRANSFER_IN / OPENING_STOCK), negative = stock out
 // (SOLD / TRANSFER_OUT).
+/** GET /inventory/sellable (F46): the till's per-product sellable counts. */
+export interface SellableStock {
+  store_id: string;
+  sellable: Record<string, number | null>;
+  canonical?: Record<string, string>;
+}
+
 export interface StockMovementEntry {
   id: string;
   at: string;

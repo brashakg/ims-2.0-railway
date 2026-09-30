@@ -63,8 +63,8 @@ vi.mock('../../../../components/pos/CustomerCardWithLoyalty', () => ({
 }));
 // The cart echoes the stock counts it was handed (F46).
 vi.mock('../../../../components/pos/POSCart', () => ({
-  CartSidebar: ({ sellable }: { sellable?: Record<string, number | null> }) => (
-    <div>cart{sellable ? `:${JSON.stringify(sellable)}` : ''}</div>
+  CartSidebar: ({ stock }: { stock?: { sellable: Record<string, number | null> } }) => (
+    <div>cart{stock ? `:${JSON.stringify(stock.sellable)}` : ''}</div>
   ),
 }));
 vi.mock('../../../../components/pos/DiscountModal', () => ({
@@ -132,7 +132,7 @@ beforeEach(() => {
 describe("F46: the cart hears what this shop can sell", () => {
   it("asks for the cart lines' counts at the till's store and hands them to the cart", () => {
     seed({ lines: ['FRAME'] });
-    useSellableStock.mockReturnValue({ data: { 'p-0': 0 } });
+    useSellableStock.mockReturnValue({ data: { store_id: 'BV-BOK-01', sellable: { 'p-0': 0 } } });
     render(<BillingSurface />);
     expect(useSellableStock).toHaveBeenCalledWith(
       'BV-BOK-01',
