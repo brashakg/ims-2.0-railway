@@ -735,6 +735,53 @@ def test_a_refused_order_creates_no_typed_in_product(monkeypatch):
     assert made == []
 
 
+def test_a_door_refusal_on_a_later_typed_in_line_creates_no_product(monkeypatch):
+    """Panel MEDIUM: the typed-in lines went through the product door one at a
+    time, so the door refusing line 2 arrived after line 1's product was
+    already written -- a 422 edit, an unchanged order, and an orphan
+    provisional Vogue on the spine with its product.created audit row. Every
+    typed-in line is now validated before the first is written."""
+    from test_purchase_lifecycle import _ProductRepo as _SpineRepo
+
+    repo, audit = _wire(monkeypatch, _po())
+    spine = _SpineRepo()
+    monkeypatch.setattr(v, "get_product_repository", lambda: spine)
+    monkeypatch.setattr(v, "_get_db", lambda: None)
+    vogue = {"category": "FRAME", "brand": "Vogue", "model": "VO5286",
+             "colour": "W44", "size": "52", "mrp": 5000}
+    body = _edit_body(
+        [
+            {"new_product": vogue, "quantity": 1, "unit_price": 2000},
+            {"new_product": {**vogue, "category": "NOT_A_CATEGORY",
+                             "brand": "Oakley", "model": "OX8046"},
+             "quantity": 1, "unit_price": 2500},
+        ]
+    )
+    with pytest.raises(HTTPException) as e:
+        _run(v.update_po("PO1", body, _user()))
+    assert e.value.status_code == 422
+    assert e.value.detail["code"] == "NEW_PRODUCT_INVALID"
+    assert spine.rows == [], "a refused edit leaves no provisional product"
+    assert audit.rows == []
+    assert [(i["product_id"], i["quantity"]) for i in repo.pos["PO1"]["items"]] == [
+        ("P1", 2), ("P2", 3)
+    ]
+
+    # The same lines with a real category: both products made, order saved.
+    body = _edit_body(
+        [
+            {"new_product": vogue, "quantity": 1, "unit_price": 2000},
+            {"new_product": {**vogue, "brand": "Oakley", "model": "OX8046"},
+             "quantity": 1, "unit_price": 2500},
+        ]
+    )
+    _run(v.update_po("PO1", body, _user()))
+    assert len(spine.rows) == 2
+    assert [i["product_id"] for i in repo.pos["PO1"]["items"]] == [
+        r["product_id"] for r in spine.rows
+    ]
+
+
 def test_two_line_cancels_at_once_never_lose_one(monkeypatch):
     def colleague_cancels_p1(repo):  # a finished line cancel, by someone else
         items = copy.deepcopy(repo.collection.docs[0]["items"])

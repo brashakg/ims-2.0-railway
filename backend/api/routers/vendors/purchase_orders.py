@@ -330,6 +330,35 @@ async def create_pos_from_forecast(
         }
 
 
+def _typed_in_payload(it) -> dict:
+    """The product-door payload for a line typed in instead of picked."""
+    np = it.new_product
+    return {
+        "category": np.category,
+        "brand": np.brand,
+        "model": np.model,
+        "colour": np.colour,
+        "size": np.size,
+        "mrp": np.mrp,
+        # The PO rate is the PROVISIONAL cost (ruling 10); the purchase invoice
+        # corrects it to the actual one (ruling 12).
+        "cost_price": it.unit_price or None,
+        "as_draft": True,
+        "provisional": True,
+    }
+
+
+def _new_product_invalid(err) -> HTTPException:
+    return HTTPException(
+        status_code=err.status,
+        detail={
+            "code": "NEW_PRODUCT_INVALID",
+            "message": err.message,
+            "field": err.field,
+        },
+    )
+
+
 def price_po_lines(items, vendor, delivery_store_id, current_user):
     """ONE path from the lines a person typed to the lines a PO stores.
 
@@ -376,31 +405,32 @@ def price_po_lines(items, vendor, delivery_store_id, current_user):
     # price, catalog_status DRAFT. That keeps product_id the single join key for
     # receiving, the stock mint, the invoice and the 3-way match, instead of
     # forking identity into a second placeholder system.
+    #
+    # ALL typed-in lines pass the door's own validation (build_canonical_product
+    # -- the same core create_via_door runs, minus the write) BEFORE the first
+    # one is written: a refusal on line 2 used to arrive after line 1's product
+    # was already on the spine, so a refused edit left a provisional product.
     # ponytail: a typed-in product is created before the order is written --
     # the stored line must carry its id. A write refused after this (a
-    # colleague's send in the same instant) leaves that product as an inactive,
-    # stockless provisional draft, and retrying the edit reuses it (the 409
-    # branch below), never a twin. Pre-minting the id through the door would
-    # remove even that.
-    for it in items:
-        if it.new_product is None:
-            continue
+    # colleague's send in the same instant) or a database failure between two
+    # creates leaves an inactive, stockless provisional draft, and retrying the
+    # same lines reuses it (the 409 branch below), never a twin. Pre-minting
+    # the id through the door would remove even that.
+    payloads = [
+        (it, _typed_in_payload(it)) for it in items if it.new_product is not None
+    ]
+    for _, payload in payloads:
+        try:
+            _pm.build_canonical_product(
+                payload, source="FORM", product_repo=product_repo, db=_get_db()
+            )
+        except _pm.ProductMasterError as err:
+            raise _new_product_invalid(err) from err
+    for it, payload in payloads:
         np = it.new_product
         try:
             created = _pm.create_via_door(
-                {
-                    "category": np.category,
-                    "brand": np.brand,
-                    "model": np.model,
-                    "colour": np.colour,
-                    "size": np.size,
-                    "mrp": np.mrp,
-                    # The PO rate is the PROVISIONAL cost (ruling 10); the
-                    # purchase invoice corrects it to the actual one (ruling 12).
-                    "cost_price": it.unit_price or None,
-                    "as_draft": True,
-                    "provisional": True,
-                },
+                payload,
                 source="FORM",
                 actor=current_user.get("user_id"),
                 actor_name=current_user.get("username"),
@@ -418,14 +448,7 @@ def price_po_lines(items, vendor, delivery_store_id, current_user):
                 it.sku = it.sku or err.conflict.get("sku")
                 it.new_product = None
                 continue
-            raise HTTPException(
-                status_code=err.status,
-                detail={
-                    "code": "NEW_PRODUCT_INVALID",
-                    "message": err.message,
-                    "field": err.field,
-                },
-            ) from err
+            raise _new_product_invalid(err) from err
         it.product_id = created.get("product_id")
         it.product_name = (
             it.product_name or created.get("name") or f"{np.brand} {np.model}".strip()
