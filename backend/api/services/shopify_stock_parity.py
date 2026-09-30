@@ -17,6 +17,9 @@ and compares, per (SKU, MAPPED shop):
     Shopify side = the inventory level at THAT shop's location (0 when Shopify
                    returned the item but it is not stocked there)
 
+A pair drifts past the tolerance (default 2) only where the writer sends
+more than 0; where it sends 0, every listed unit is drift.
+
 Reported separately, NEVER as drift (the writer already files the "map me"
 task for both, so parity only reports):
   * unmapped_holders    -- shops with no usable Shopify location that hold
@@ -100,7 +103,8 @@ _ID_COST = 4 + 3 * _LEVELS_FIRST
 _INV_BATCH = (_MAX_QUERY_COST * 9 // 10) // _ID_COST
 # Compact snapshot retention.
 _SNAPSHOT_RETENTION_DAYS = 30
-# Drift tolerance default (units). Env override: SHOPIFY_STOCK_PARITY_TOLERANCE.
+# Drift tolerance default (units), only where the writer sends more than 0
+# (compare_variant_parity). Env override: SHOPIFY_STOCK_PARITY_TOLERANCE.
 _DEFAULT_TOLERANCE = 2
 # Stable dedupe key: at most ONE active parity-drift task PER SHOP.
 _DRIFT_TASK_REF = "shopify-stock-parity-drift:{store_id}"
@@ -198,6 +202,12 @@ def compare_variant_parity(
     shopify_available}, return the drift summary. A row whose either side is
     None (or junk) is counted as UNKNOWN and never a drift.
 
+    ``tolerance`` applies only where the writer sends MORE than 0 (owner
+    default 2026-09-30): where it sends 0, every unit Shopify lists is drift.
+    The tolerance is per (SKU, location), so without this rule 2 units at
+    each of three locations the writer zeroes -- 6 units no shelf backs --
+    compared clean at every one of them.
+
     Returns {compared, unknown, drift[], drift_count, max_delta, tolerance,
     clean_skus[]} where drift is [{sku, inventory_item_id, store_id, ims,
     shopify, delta}] sorted by the biggest delta first and clean_skus are the
@@ -222,7 +232,7 @@ def compare_variant_parity(
         delta = abs(ims - shop)
         if delta > max_delta:
             max_delta = delta
-        if delta <= tol:
+        if delta <= (tol if ims > 0 else 0):
             clean.append(r.get("sku"))
         else:
             drift.append(
@@ -655,7 +665,8 @@ def sync_drift_task(
             if drift:
                 parts.append(
                     f"{summary.get('drift_count')} online SKU(s) at {label}'s Shopify location drifted beyond "
-                    f"tolerance {summary.get('tolerance')} unit(s); worst delta {summary.get('max_delta')}."
+                    f"tolerance {summary.get('tolerance')} unit(s) (none where IMS lists 0); worst delta "
+                    f"{summary.get('max_delta')}."
                 )
             if owed:
                 parts.append(

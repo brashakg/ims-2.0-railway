@@ -1621,3 +1621,30 @@ def test_a_sku_never_filed_on_a_line_says_the_block_is_unknown(monkeypatch):
     assert "online block could not be read tonight for: SKU-2 (IMS 5 vs Shopify 0)" in text
     assert "Top: " not in text and task["payload"]["lines"] == {}
 
+
+@pytest.mark.parametrize("listed", [2, 1, -1])
+def test_no_tolerance_where_the_writer_sends_zero(listed):
+    """Round 10, the owner-safe default: the tolerance (2) holds only where
+    the writer sends MORE than 0. The panel's probe: shelves BV-A 0 / BV-B 0
+    (the writer sends 0), Shopify LOC_A 2 / LOC_B 2 -- four units no shelf
+    backs, which the per-location tolerance let through at both locations.
+    Every unit off the writer's 0 is drift. Put back `delta <= tol` for
+    every row -> drift_count 0, no task -> fails."""
+    db = _db({"SKU-1": {"BV-A": 0, "BV-B": 0}})
+    out = _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: listed, LOC_B: listed}, INV_2: {}})))
+    assert out["drift_count"] == 2
+    assert out["tasks"]["filed"] == ["BV-A", "BV-B"]
+    assert "(none where IMS lists 0)" in _tasks(db)[0]["description"]
+
+
+def test_the_tolerance_still_holds_where_the_writer_sends_more_than_zero():
+    """The control: BV-A 5 vs LOC_A 3 (delta 2) is within tolerance, and so is
+    IMS 1 vs Shopify 0 (the writer sends 1); IMS 0 vs Shopify 1 is not.
+    Drop the tolerance everywhere -> A and B drift -> fails."""
+    out = sp.compare_variant_parity(
+        [{"sku": "A", "store_id": "S", "ims_available": 5, "shopify_available": 3},
+         {"sku": "B", "store_id": "S", "ims_available": 1, "shopify_available": 0},
+         {"sku": "C", "store_id": "S", "ims_available": 0, "shopify_available": 1}],
+        tolerance=2,
+    )
+    assert [d["sku"] for d in out["drift"]] == ["C"] and out["clean_skus"] == ["A", "B"]
