@@ -245,6 +245,30 @@ export function applyPickedProduct(
   };
 }
 
+// The line's product is gone -- cleared ("Change product") or swapped for an
+// item typed in because it is not catalogued. Everything that came WITH that
+// product goes with it, including a cost the FORM filled for it (catalogue
+// seed or last paid): left behind, it would be sent as the price of an item
+// nobody priced. A cost the buyer typed stays -- it is theirs.
+export function releaseProduct(line: ComposerLine, patch: Partial<ComposerLine> = {}): ComposerLine {
+  return {
+    ...line,
+    productId: '',
+    productName: '',
+    sku: '',
+    newProduct: null,
+    taxRate: 0,
+    hsn: null,
+    productDetail: '',
+    gstResolved: false,
+    gstMissing: null,
+    lastPaid: null,
+    catalogCost: 0,
+    unitCost: line.costTouched ? line.unitCost : 0,
+    ...patch,
+  };
+}
+
 // ISO string -> "4 Jul 2026" (human-friendly, fail-soft to '' on garbage).
 function formatPaidDate(raw?: string | null): string {
   if (!raw) return '';
@@ -357,19 +381,20 @@ export function PurchaseOrderComposer({
 
   // ------------------------------------------------------------------------
   // COST PREFILL (Phase 2C). When a vendor is chosen AND lines carry products,
-  // batch every product_id into ONE getLastCost call and, for each line whose
-  // cost the operator has not typed, fill it from the last price agreed with
-  // THIS vendor and stash the caption -- over the catalogue seed too (audit
-  // F22: the seed used to block the lookup, so it never ran). Never overwrites
-  // a value the operator typed. Re-runs when the vendor changes or a new
-  // product appears. Fail-soft: no history -> the seed stays, no caption.
+  // batch every product_id into ONE getLastCost call. EVERY line gets the
+  // caption with the last price agreed with THIS vendor -- a typed cost too,
+  // so the buyer sees what they are bargaining against. Only a line whose
+  // cost the operator has not typed has its box filled, over the catalogue
+  // seed too (audit F22: the seed used to block the lookup, so it never ran).
+  // Re-runs when the vendor changes or a new product appears. Fail-soft: no
+  // history -> the seed stays, no caption.
   // ------------------------------------------------------------------------
   // Signature of "which products need a price under which vendor" -- lets us
   // debounce/guard so adding lines one at a time doesn't spam the endpoint and
   // we don't refetch when nothing relevant changed.
   const prefillKey = useMemo(() => {
     const pids = lines
-      .filter((l) => l.productId && !l.costTouched)
+      .filter((l) => l.productId)
       .map((l) => l.productId)
       .sort();
     return `${vendorId}::${pids.join(',')}`;
@@ -381,9 +406,7 @@ export function PurchaseOrderComposer({
     if (!vendorId) return;
     if (prefillKey === lastPrefillKey.current) return;
 
-    const productIds = lines
-      .filter((l) => l.productId && !l.costTouched)
-      .map((l) => l.productId);
+    const productIds = lines.filter((l) => l.productId).map((l) => l.productId);
     if (productIds.length === 0) {
       lastPrefillKey.current = prefillKey;
       return;
@@ -396,12 +419,12 @@ export function PurchaseOrderComposer({
       lastPrefillKey.current = prefillKey;
       setLines((prev) =>
         prev.map((l) => {
-          // Re-check the guard against CURRENT state: the operator may have
-          // typed a cost while the request was in flight.
-          if (!l.productId || l.costTouched) return l;
-          const hit = costs[l.productId];
+          const hit = l.productId ? costs[l.productId] : undefined;
           if (!hit || !(hit.unit_price > 0)) return l;
-          return { ...l, unitCost: hit.unit_price, lastPaid: { unitPrice: hit.unit_price, date: hit.date } };
+          const lastPaid = { unitPrice: hit.unit_price, date: hit.date };
+          // Re-checked against CURRENT state: the operator may have typed a
+          // cost while the request was in flight.
+          return l.costTouched ? { ...l, lastPaid } : { ...l, unitCost: hit.unit_price, lastPaid };
         }),
       );
     }, 250);
@@ -412,9 +435,10 @@ export function PurchaseOrderComposer({
     };
   }, [prefillKey, vendorId, lines]);
 
-  // When the vendor changes, a cost we AUTO-prefilled from the previous vendor's
-  // history no longer applies -- put the catalogue seed back (and drop its
-  // caption) so the new vendor's lookup repaints it. Operator-typed costs
+  // When the vendor changes, the previous vendor's price no longer applies:
+  // every caption goes (a typed cost must not sit under another vendor's
+  // price either), and a cost we AUTO-prefilled goes back to the catalogue
+  // seed, so the new vendor's lookup repaints both. Operator-typed costs
   // (costTouched) are left exactly as chosen; we never overwrite a value
   // someone entered.
   const prevVendorRef = useRef(vendorId);
@@ -424,7 +448,7 @@ export function PurchaseOrderComposer({
     lastPrefillKey.current = '';
     setLines((prev) =>
       prev.map((l) =>
-        l.lastPaid && !l.costTouched ? { ...l, unitCost: l.catalogCost ?? 0, lastPaid: null } : l,
+        !l.lastPaid ? l : l.costTouched ? { ...l, lastPaid: null } : { ...l, unitCost: l.catalogCost ?? 0, lastPaid: null },
       ),
     );
   }, [vendorId]);
@@ -584,31 +608,18 @@ export function PurchaseOrderComposer({
                     pickProduct: (p) =>
                       setLines((prev) => prev.map((l, i) => (i === index ? applyPickedProduct(l, p) : l))),
                     clearProduct: () =>
-                      updateLine(index, {
-                        productId: '',
-                        productName: '',
-                        sku: '',
-                        taxRate: 0,
-                        hsn: null,
-                        productDetail: '',
-                        gstResolved: false,
-                        gstMissing: null,
-                        newProduct: null,
-                        lastPaid: null,
-                      }),
+                      setLines((prev) => prev.map((l, i) => (i === index ? releaseProduct(l) : l))),
                     setNewProduct: (np) =>
-                      updateLine(index, {
-                        newProduct: np,
-                        productId: '',
-                        productName: np ? `${np.brand} ${np.model}`.trim() : '',
-                        sku: '',
-                        taxRate: 0,
-                        hsn: null,
-                        productDetail: '',
-                        gstResolved: false,
-                        gstMissing: null,
-                        lastPaid: null,
-                      }),
+                      setLines((prev) =>
+                        prev.map((l, i) =>
+                          i === index
+                            ? releaseProduct(l, {
+                                newProduct: np,
+                                productName: np ? `${np.brand} ${np.model}`.trim() : '',
+                              })
+                            : l,
+                        ),
+                      ),
                   })}
                 </div>
                 <div className="grid grid-cols-12 gap-2 items-start">
