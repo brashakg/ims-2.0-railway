@@ -1313,6 +1313,75 @@ def test_c1_a_held_draft_is_never_discarded_behind_its_receipt(world):
     assert _any_status_units(world, draft_id) == []
 
 
+def test_c1_the_catalogue_task_escalates_to_someone_who_can_do_it(world):
+    # An SLA breach climbs the ladder. Above a catalogue manager is the admin:
+    # the shop's store manager can neither open Needs review nor save a product.
+    _seed_user(world, ADMIN)
+    world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    (task,) = _open_tasks(world)
+    assert task["assigned_to"] == CATALOGUER["user_id"]
+    _tasks._escalate_and_reassign(
+        _deps.get_task_repository(),
+        task,
+        reason="ack SLA breached",
+        by="TASKMASTER",
+        now=vd.datetime.now(),
+    )
+    after = world.db.tasks.find_one({"task_id": task["task_id"]})
+    finding(
+        after["assigned_to"] == ADMIN["user_id"],
+        f"The catalogue task escalated to {after['assigned_to']}, who cannot do it",
+    )
+
+
+def test_an_accountant_sees_and_closes_the_task_addressed_to_accountants(world):
+    # Express receive's "Book purchase invoice" is addressed to the ACCOUNTANT
+    # title (grn_express). Below manager the list is your own -- and a task
+    # addressed to your title is yours.
+    _seed_user(world, ACCOUNTANT)
+    _seed_user(world, SALES)
+    from api.services.task_triggers import create_system_task
+
+    task = create_system_task(
+        _deps.get_task_repository(),
+        title="Book purchase invoice for GRN RCPT/1 (Jharkhand Optical Traders)",
+        description="Express receive completed.",
+        priority="P2",
+        category="Purchase",
+        store_id=STORE,
+        dedupe_ref="express_invoice:g-1",
+        assigned_to="ACCOUNTANT",
+    )
+
+    def listed(user, store_id):
+        out = _run(
+            _tasks.list_tasks(
+                status="OPEN",
+                priority=None,
+                assigned_to=None,
+                task_type=None,
+                store_id=store_id,
+                skip=0,
+                limit=50,
+                current_user=user,
+            )
+        )
+        return [t.get("task_id") for t in out["tasks"]]
+
+    for store_id in (STORE, None):
+        finding(
+            listed(ACCOUNTANT, store_id) == [task["task_id"]],
+            f"No accountant can see the express-receive task (store_id={store_id})",
+        )
+    assert listed(SALES, STORE) == []
+    _run(
+        _tasks.complete_task(
+            task["task_id"], _tasks.TaskComplete(completion_notes="Booked"), ACCOUNTANT
+        )
+    )
+    assert world.db.tasks.find_one({"task_id": task["task_id"]})["status"] == "COMPLETED"
+
+
 def test_c1_no_store_manager_fails_loud_to_the_admins(world, caplog):
     world.db.users.update_one(
         {"user_id": MANAGER["user_id"]}, {"$set": {"is_active": False}}

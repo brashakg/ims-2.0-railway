@@ -5,6 +5,7 @@ Resolve *who* an SLA-breached task escalates to, by climbing the org
 hierarchy:
 
     worker (any) -> STORE_MANAGER -> AREA_MANAGER -> ADMIN -> SUPERADMIN
+    CATALOG_MANAGER -> ADMIN -> SUPERADMIN
 
 The decision of *whether* to escalate lives in ``task_sla.should_escalate``;
 this module decides the *target*. Store-scoped rungs (STORE_MANAGER,
@@ -36,6 +37,12 @@ ESCALATION_RUNGS: List[str] = ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERA
 # Rungs that are scoped to a single store/area (resolved with the store id).
 _STORE_SCOPED = {"STORE_MANAGER", "AREA_MANAGER"}
 
+# Roles that work for the legal entity, not for one shop: a shop's manager can
+# neither open their work (a catalogue manager's is Catalogue > Needs review)
+# nor do it, so a breach of theirs goes to the admins -- handing it to the
+# shop's store manager would leave it with nobody who can act on it.
+_ENTITY_ROLES = {"CATALOG_MANAGER"}
+
 
 def _authority(roles: Any) -> int:
     """Highest authority rank among a user's roles (worker == 1)."""
@@ -51,6 +58,8 @@ def next_rung_role(current_roles: Any) -> Optional[str]:
     None means the owner is already at the top (SUPERADMIN) -- nowhere left
     to escalate."""
     auth = _authority(current_roles)
+    if auth == 1 and {str(r).strip().upper() for r in current_roles or []} & _ENTITY_ROLES:
+        return "ADMIN"
     if auth >= 5:  # SUPERADMIN
         return None
     if auth == 4:  # ADMIN -> SUPERADMIN

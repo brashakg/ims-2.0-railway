@@ -133,14 +133,30 @@ def _authorise_attachment(file_id: str, current_user: dict) -> None:
 # (the same rungs the escalation ladder climbs). A non-manager who is neither
 # the assignee nor the assigner/creator must not act on someone else's task.
 _TASK_MANAGER_ROLES = {"STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"}
-# The people a task belongs to: who may act on it (_ensure_task_actor) and, for
-# anyone below manager, the only tasks they see (list_tasks).
-_TASK_OWNER_FIELDS = ("assigned_to", "assigned_by", "created_by")
+
+
+def _user_roles(current_user: dict) -> set:
+    return {str(r).strip().upper() for r in (current_user.get("roles") or [])}
 
 
 def _is_task_manager(current_user: dict) -> bool:
-    roles = {str(r).strip().upper() for r in (current_user.get("roles") or [])}
-    return bool(roles & _TASK_MANAGER_ROLES)
+    return bool(_user_roles(current_user) & _TASK_MANAGER_ROLES)
+
+
+def _task_owner_values(current_user: dict) -> dict:
+    """THE rule for whose a task is: who may act on it (_ensure_task_actor) and,
+    for anyone below manager, the only tasks they see (list_tasks). Field ->
+    the values that make it yours: your id as assignee, assigner or creator,
+    and a task addressed to your TITLE (a system task such as express receive's
+    "Book purchase invoice", assigned_to "ACCOUNTANT") -- else nobody holding
+    that title would ever see it."""
+    uid = current_user.get("user_id")
+    ids = [uid] if uid else []
+    return {
+        "assigned_to": ids + sorted(_user_roles(current_user)),
+        "assigned_by": ids,
+        "created_by": ids,
+    }
 
 
 def _ensure_task_actor(task: dict, current_user: dict) -> None:
@@ -162,9 +178,9 @@ def _ensure_task_actor(task: dict, current_user: dict) -> None:
     """
     if _is_task_manager(current_user):
         return
-    uid = current_user.get("user_id")
-    owners = {task.get(f) for f in _TASK_OWNER_FIELDS}
-    if uid and uid in owners:
+    if any(
+        task.get(f) in vals for f, vals in _task_owner_values(current_user).items() if vals
+    ):
         return
     raise HTTPException(
         status_code=403,
@@ -495,9 +511,11 @@ async def list_tasks(
     # the Hub's "Priority tasks" asks for the whole store and used to show a
     # cashier every task in the shop, a catalogue manager's included.
     if not _is_task_manager(current_user):
-        uid = current_user.get("user_id")
-        if uid:
-            filters["$or"] = [{f: uid} for f in _TASK_OWNER_FIELDS]
+        mine = [
+            {f: {"$in": vals}} for f, vals in _task_owner_values(current_user).items() if vals
+        ]
+        if mine:
+            filters["$or"] = mine
         else:
             filters["task_id"] = {"$in": []}
 
