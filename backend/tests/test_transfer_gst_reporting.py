@@ -353,11 +353,18 @@ def test_intrastate_per_line_split_paisa_exact(static_rates):
     equals the rounded line sums even on odd-paise lines."""
     db = _mini_db()
     # ent_send JH -> a hypothetical ent_recv JH store: reuse mh_store but move
-    # it to state 20 for this test.
+    # it to state 20 on a Jharkhand registration of ent_recv -- the GSTIN
+    # decides the state (owner, 2026-09-30), so a declared state alone does
+    # not make the move intra-state.
+    recv_jh = "20BBGAA1234J1ZX"
     for s in db["stores"].docs:
         if s["store_id"] == "mh_store":
             s["state_code"] = "20"
             s["state"] = "Jharkhand"
+            s["gstin"] = recv_jh
+    for e in db["entities"].docs:
+        if e["entity_id"] == "ent_recv":
+            e["gstins"].append({"state_code": "20", "gstin": recv_jh})
     t = _mixed_transfer()
     # Odd-paise costs: 3 x 333.35 = 1000.05 @5%; 1 x 466.63 @18%.
     t["items"][0].update(

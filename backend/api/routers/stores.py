@@ -183,8 +183,11 @@ def _state_code_for(
 def _derive_store_gstin(
     db, entity_id: Optional[str], state_code: Optional[str]
 ) -> Optional[str]:
-    """Resolve the GSTIN a store bills under = its entity's GSTIN for the store's
-    state (single source of truth). Falls back to the entity's primary GSTIN."""
+    """The GSTIN stamped on a store at birth / on a company or state change:
+    org_validation.shop_gstin for a shop of that company in that state -- the
+    company's registration for the state, else None (the go-live checklist
+    names the shop). The company's primary was the fallback, and it stamped a
+    Maharashtra shop with the Jharkhand number."""
     if db is None or not entity_id:
         return None
     try:
@@ -193,15 +196,7 @@ def _derive_store_gstin(
         )
     except Exception:
         return None
-    if not entity:
-        return None
-    match = ov.resolve_gstin_for_state(entity.get("gstins") or [], state_code)
-    if match:
-        return match.get("gstin")
-    for g in entity.get("gstins") or []:
-        if isinstance(g, dict) and g.get("is_primary"):
-            return g.get("gstin")
-    return None
+    return ov.shop_gstin(entity, {"state_code": state_code})
 
 
 _LOCATION_GID_RE = re.compile(r"^gid://shopify/Location/\d+$")
@@ -604,6 +599,55 @@ async def go_live_checklist(current_user: dict = Depends(require_roles("ADMIN"))
             ),
             "/settings?tab=stores",
         )
+
+    # 2b. A shop whose record disagrees with its registration. The GSTIN
+    # decides the state (owner, 2026-09-30): every bill, return, transfer and
+    # purchase order reads org_validation.shop_gstin, so a shop whose declared
+    # state or stamped number says otherwise is named here to be fixed at the
+    # source -- never silently used either way.
+    if active_stores > 0:
+        try:
+            resolved = ov.shop_gstins(db)
+            off = []
+            for st in db.get_collection("stores").find(
+                {"is_active": {"$ne": False}},
+                {"_id": 0, "store_id": 1, "gstin": 1, "state_code": 1, "state": 1},
+            ):
+                sid = st.get("store_id")
+                g = resolved.get(sid, "")
+                own = str(st.get("gstin") or "").strip().upper()
+                declared = ov.resolve_state_code(st.get("state_code"), st.get("state"))
+                if not g:
+                    off.append(f"{sid}: no GST number of its company for its state")
+                elif own and own != g:
+                    off.append(f"{sid}: its GSTIN {own} is not its company's")
+                elif declared and declared != g[:2]:
+                    off.append(
+                        f"{sid}: declared {ov.state_name(declared)}, but its GSTIN "
+                        f"{g} is {ov.state_name(g[:2]) or g[:2]}"
+                    )
+            add(
+                "store_gst_state",
+                "Store GSTIN matches its state",
+                "PASS" if not off else "WARN",
+                len(off),
+                (
+                    "Every store's GSTIN is its company's registration for its state."
+                    if not off
+                    else "Bills, returns and orders follow each store's GSTIN, not its "
+                    "declared state -- fix these records: " + "; ".join(off[:5])
+                ),
+                "/settings?tab=stores",
+            )
+        except Exception:
+            add(
+                "store_gst_state",
+                "Store GSTIN matches its state",
+                "WARN",
+                0,
+                "Could not read the stores and companies to check this.",
+                "/settings?tab=stores",
+            )
 
     # 3. Staff logins (active, non-superadmin/admin — someone to run a till)
     staff = _count(

@@ -404,19 +404,16 @@ export function gstStateCode(...candidates: Array<string | null | undefined>): s
  *  "Same state - CGST + SGST" on every vendor whose GST number is missing,
  *  which is a wrong TAX LABEL stated with confidence, not a blank.
  *
- *  Only the two GST NUMBERS decide HERE. The server is close but NOT
- *  identical: purchase_invoice_engine.determine_place_of_supply takes a THIRD
- *  input -- the receiving shop's declared state (vendors._po_gst_parties
- *  passes it) -- which it weighs alongside the GSTINs. So a shop whose
- *  registration state and declared state DIFFER can make this preview and the
- *  stored split disagree. No live store is in that shape today (every store's
- *  declared state matches its GSTIN prefix), and which side should win --
- *  the registration or the shop the goods land in -- is an owner decision on
- *  file (bill-follows-store); until it lands, this preview reads
- *  registrations only. A party's declared `state` is accepted (callers hand
- *  over the whole vendor/shop) but does NOT decide on screen: an address is
- *  not a registration. With no GSTIN the answer is "cannot tell", and the
- *  totals box says which assumption it is showing.
+ *  Only the two GST NUMBERS decide -- here and on the server alike: the
+ *  registration decides the state (owner, 2026-09-30), and the order, the
+ *  bill and the transfer all read the shop's GSTIN through one server rule
+ *  (org_validation.shop_gstin). A party's declared `state` is accepted
+ *  (callers hand over the whole vendor/shop) but does NOT decide: an address
+ *  is not a registration, and a shop whose declared state disagrees with its
+ *  GSTIN is named on the go-live checklist. With no GSTIN on the shop's
+ *  record the answer here is "cannot tell" (the server may still find the
+ *  company's registration for the shop's state), and the totals box says
+ *  which assumption it is showing.
  *
  *  `knownStates` is the server-fed code list (useGstStateCodes). A two-digit
  *  prefix the server does not list is not a state: the engine's parser
