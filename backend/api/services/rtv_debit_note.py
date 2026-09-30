@@ -850,6 +850,22 @@ class DebitNoteEngine:
         if existing is not None:
             return {"ok": True, "idempotent": True, "debit_note": existing}
 
+        # The note reverses credit taken on OUR GSTIN. With none to issue
+        # under, every bill door refuses the bill (purchase_invoices.
+        # _bill_recipient); the note is refused too -- never a blank GSTIN.
+        if not str((seller or {}).get("gstin") or "").strip():
+            store_id = rtv_doc.get("store_id") or "?"
+            name = (seller or {}).get("name") or "Our company"
+            return {
+                "ok": False,
+                "http": 422,
+                "error": "seller_has_no_gstin",
+                "message": f"{name} has no GST number for shop {store_id}, so no "
+                "debit note was issued. Add the company's registration for the "
+                "shop's state (Settings, companies) or correct the shop's state "
+                "or GSTIN (Settings, stores).",
+            }
+
         # P1: resolve the source lines + enrich each with product-derived GST
         # rate + HSN (the source RTV docs don't persist them). Fail loud on a
         # taxable line whose GST is unresolvable rather than emit a 0% tax doc.
