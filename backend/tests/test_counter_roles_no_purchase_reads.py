@@ -504,6 +504,8 @@ _RETURN = {
     "credit_note_number": "CN-1",
     "credit_note_amount": 6346.74,
     "purchase_invoice_number": _BILL_NO,
+    "notes": "Left hinge loose",
+    "created_at": "2026-09-01T10:00:00",
 }
 _NOTE = dict(
     build_debit_note(
@@ -605,6 +607,40 @@ def test_workshop_reads_returns_without_prices_or_supplier(client, return_docs, 
             "product_name": "RB Frame",
             "quantity": 2,
             "reason": "defective",
+        }
+
+
+# Equality, not a subset (as for the names-only vendor list): no hidden key
+# leaks AND no key the Vendor Returns screen reads goes missing -- status (badge
+# + Active / History tabs), vendor_name (card heading), return_id (expand +
+# keys), rtv_ref_id (return -> note map, else "Issue Debit Note" 403s),
+# debit_note_id (Print), debit_note_number (the note label).
+_MASKED_RETURN_KEYS = {
+    "return_id", "vendor_id", "vendor_name", "store_id", "return_type",
+    "status", "notes", "created_at", "items",
+}
+_MASKED_NOTE_KEYS = {
+    "debit_note_id", "debit_note_number", "financial_year", "issue_date",
+    "entity_id", "store_id", "seller", "rtv_ref", "rtv_ref_id", "vendor", "lines",
+}
+
+
+@pytest.mark.parametrize("path", RETURN_DOC_READS[:4])
+def test_workshop_masked_returns_keep_the_keys_the_screen_reads(
+    client, return_docs, path
+):
+    body = client.get(path, headers=_headers("WORKSHOP_STAFF")).json()
+    rows = body.get("returns") or body.get("debit_notes") or [body]
+    doc = rows[0]
+    if "vendor-returns" in path:
+        assert set(doc) == _MASKED_RETURN_KEYS, sorted(doc)
+        assert doc["status"] == "credit_issued" and doc["vendor_name"] == "Acme"
+    else:
+        assert set(doc) == _MASKED_NOTE_KEYS, sorted(doc)
+        assert (doc["debit_note_id"], doc["rtv_ref_id"]) == ("DN-1", "VR1")
+        assert doc["vendor"] == {"vendor_id": "V1", "name": "Acme"}
+        assert {k for ln in doc["lines"] for k in ln} == {
+            "sku", "description", "hsn", "qty",
         }
 
 
