@@ -1065,7 +1065,10 @@ def test_frontend_payables_roles_are_the_payables_context():
     assert set(re.findall(r"'([A-Z_]+)'", m.group(1))) == want
     for rel in _PAYABLES_SCREENS:
         with open(os.path.join(_FRONTEND_SRC, rel), encoding="utf-8") as fh:
-            assert "PAYABLES_ROLES" in fh.read(), rel
+            # Code only: a comment naming the list is not a use of it.
+            code = re.sub(r"/\*.*?\*/|//[^\n]*", "", fh.read(), flags=re.S)
+        assert re.search(r"import\s*\{[^}]*\bPAYABLES_ROLES\b", code), rel
+        assert len(re.findall(r"\bPAYABLES_ROLES\b", code)) >= 2, rel
 
 
 # ---------------------------------------------------------------------------
