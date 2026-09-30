@@ -2,21 +2,26 @@
 and its cart-line warning read THE count the order-create oversell guard blocks
 on (owner ruling 2026-08-25: oversell BLOCKS).
 
-One rule, one implementation, and the sale guard is NOT touched: GET
-/inventory/sellable asks ``orders/stock._assert_serialized_stock_available``
-itself. It reads the available count ``n`` and has the guard judge a line of
-``n + 1``: a 409 means the guard gates the line and sells exactly ``n``; a pass
-means the guard never blocks it -> None. These pin
+One rule, one implementation: GET /inventory/sellable holds no copy of the
+rule. It ASKS ``orders/stock._assert_serialized_stock_available`` for the most
+one line may sell: find_available only picks the first question (n + 1, then
+n); any other answer is searched for, so the figure is always a quantity the
+guard let through with one more refused -- or None when it never gates the
+line. The guard is touched only by a ``quiet`` flag that skips its expired-unit
+count and WARNING for these asks. These pin
 
-  * the endpoint follows the guard, whatever the guard decides (a copy of the
-    rule inside the endpoint fails ``test_the_endpoint_asks_the_guard``);
+  * the figure is the guard's under ANY monotone rule, not just today's (a
+    re-read of find_available fails ``test_the_tile_follows_any_guard_rule``),
+    and stays the guard's when stock moves between the hint and the asks;
   * parity: for every shape, the guard lets ``qty == count`` through and 409s
-    ``qty == count + 1``, and never blocks a None;
-  * per-id counts for the caller's store, None for lines the guard does not gate
-    (lens / service item types, virtual ids, a failing stock lookup), SKU
-    references resolved the way order-create resolves them (and the canonical
-    id returned, so the cart adds lines up the way the guard does), store access
-    enforced, and a bounded id list.
+    ``qty == count + 1``, and never blocks a None -- on fakes and on a real
+    StockRepository (every non-sellable status and an expired unit left out);
+  * the store is the one in the sign-in token, where create_order binds the
+    guard; a named ``?store_id`` never moves it;
+  * per-id counts, None for lines the guard does not gate (lens / service item
+    types, virtual ids, a failing stock lookup), SKU references resolved the way
+    order-create resolves them (and the canonical id returned, so the cart adds
+    lines up the way the guard does), a quiet guard, and a bounded id list.
 """
 
 from __future__ import annotations
@@ -37,6 +42,7 @@ class _Stock:
 
     def __init__(self, rows):
         self.rows = rows
+        self.expired_asks = 0
 
     def count(self, query):
         key = (query.get("product_id"), query.get("store_id"))
@@ -46,7 +52,21 @@ class _Stock:
         return self.rows.get((pid, store_id), {}).get("available", 0)
 
     def count_expired(self, pid, store_id):
-        return 0
+        self.expired_asks += 1
+        return self.rows.get((pid, store_id), {}).get("expired", 0)
+
+
+class _Moving(_Stock):
+    """The first find_available (the endpoint's hint) sees `first`; every read
+    after it -- the guard's -- sees `then`: a receipt or a sale landed between."""
+
+    def __init__(self, first, then):
+        super().__init__({("FR-1", STORE): {"total": 5}})
+        self.reads = [first]
+        self.then = then
+
+    def find_available(self, pid, store_id):
+        return self.reads.pop() if self.reads else self.then
 
 
 class _Down(_Stock):
@@ -145,6 +165,17 @@ def test_a_failing_stock_lookup_is_never_out_of_stock(client, staff_headers, til
     assert r.json()["sellable"] == {"FR-BLACK": None}
 
 
+def _guard_selling(limit):
+    """A stand-in sale guard that lets a line of up to `limit` through (None:
+    never gates) -- any monotone rule the real guard might grow into."""
+
+    def guard(items, store_id, *, quiet=False):
+        if limit is not None and items[0]["quantity"] > limit:
+            raise HTTPException(status_code=409, detail="Insufficient stock")
+
+    return guard
+
+
 def test_the_endpoint_asks_the_guard(client, staff_headers, till, monkeypatch):
     """Structural pin: whatever the sale guard decides, the tile follows. A
     copy of the rule inside the endpoint ignores these fakes and fails here."""
@@ -152,18 +183,74 @@ def test_the_endpoint_asks_the_guard(client, staff_headers, till, monkeypatch):
 
     ids = dict(product_ids="FR-HAVANA,FR-BLACK,LENS-1,FR-NEW", item_types="FRAME,FRAME,LENS,FRAME")
 
-    def refuses_everything(items, store_id):
-        raise HTTPException(status_code=409, detail="Insufficient stock")
-
-    monkeypatch.setattr(guard_mod, "_assert_serialized_stock_available", refuses_everything)
+    monkeypatch.setattr(guard_mod, "_assert_serialized_stock_available", _guard_selling(0))
     assert _get(client, staff_headers, **ids).json()["sellable"] == {
-        "FR-HAVANA": 0, "FR-BLACK": 8, "LENS-1": 0, "FR-NEW": 0,
+        "FR-HAVANA": 0, "FR-BLACK": 0, "LENS-1": 0, "FR-NEW": 0,
     }
 
-    monkeypatch.setattr(guard_mod, "_assert_serialized_stock_available", lambda items, store_id: None)
+    monkeypatch.setattr(guard_mod, "_assert_serialized_stock_available", _guard_selling(None))
     assert _get(client, staff_headers, **ids).json()["sellable"] == {
         "FR-HAVANA": None, "FR-BLACK": None, "LENS-1": None, "FR-NEW": None,
     }
+
+
+@pytest.mark.parametrize(
+    "limit",
+    [
+        8,  # today's rule: find_available (8) is what it sells
+        7,  # a floor unit held back, or `avail <= qty`: one less than the read
+        3,  # a stricter rule
+        10,  # a looser rule (sells past find_available)
+        0,  # refuses every line
+        None,  # never gates
+    ],
+)
+def test_the_tile_follows_any_guard_rule(client, staff_headers, till, monkeypatch, limit):
+    """The NUMBER is the guard's, not a second read of its input: with
+    find_available saying 8, the tile says whatever the guard would sell."""
+    from api.routers.orders import stock as guard_mod
+
+    monkeypatch.setattr(guard_mod, "_assert_serialized_stock_available", _guard_selling(limit))
+    r = _get(client, staff_headers, product_ids="FR-BLACK", item_types="FRAME")
+    assert r.json()["sellable"] == {"FR-BLACK": limit}
+
+
+@pytest.mark.parametrize(
+    "first,then",
+    [
+        (2, 3),  # a unit was received between the hint and the guard's read
+        (2, 1),  # a unit was sold between them
+        (2, 0),  # the last two went
+        (0, 1),  # the first unit arrived
+    ],
+)
+def test_stock_moving_mid_call_still_gets_the_guards_number(client, staff_headers, till, first, then):
+    till["repo"] = _Moving(first, then)
+    r = _get(client, staff_headers, product_ids="FR-1", item_types="FRAME")
+    assert r.json()["sellable"] == {"FR-1": then}
+
+
+def test_asking_the_guard_logs_nothing_and_counts_no_expired_units(client, staff_headers, till, caplog):
+    """A refused ask is not a refused sale: a contact lens with expired boxes
+    and none sellable, polled all day by a till, logs no '[STOCK] expired'
+    WARNING and runs no count_expired. A real sale refusal still does both."""
+    import logging
+
+    from api.routers.orders.stock import _assert_serialized_stock_available
+
+    repo = till["repo"] = _Stock({("CL-1", STORE): {"total": 2, "available": 0, "expired": 2}})
+    with caplog.at_level(logging.WARNING):
+        r = _get(client, staff_headers, product_ids="CL-1", item_types="CONTACT_LENS")
+    assert r.json()["sellable"] == {"CL-1": 0}
+    assert repo.expired_asks == 0
+    assert not [rec for rec in caplog.records if "expired" in rec.getMessage()]
+
+    with caplog.at_level(logging.WARNING), pytest.raises(HTTPException) as exc:
+        _assert_serialized_stock_available(
+            [{"product_id": "CL-1", "item_type": "CONTACT_LENS", "quantity": 1}], STORE
+        )
+    assert "PAST THEIR EXPIRY" in exc.value.detail
+    assert [rec for rec in caplog.records if "expired unit(s) held back" in rec.getMessage()]
 
 
 @pytest.mark.parametrize(
@@ -195,14 +282,62 @@ def test_the_guard_blocks_exactly_past_the_tile_count(client, staff_headers, til
     assert exc.value.status_code == 409
 
 
-def test_endpoint_refuses_another_shops_stock_to_staff(client, staff_headers, till):
-    r = _get(client, staff_headers, product_ids="FR-BLACK", store_id="BV-OTHER-02")
-    assert r.status_code == 403
+@pytest.mark.parametrize("who", ["staff_headers", "auth_headers"])
+def test_the_store_is_the_one_in_the_sign_in_token(client, till, request, who):
+    """create_order binds the guard to the token's active store and nothing
+    else. A screen whose store switch never reached the server (AuthContext's
+    fire-and-forget switchStore) may name another shop; the figure must still
+    be the one Complete sale checks -- for staff and for a SUPERADMIN who could
+    read any shop."""
+    r = _get(client, request.getfixturevalue(who), product_ids="FR-BLACK", store_id="BV-OTHER-02")
+    assert r.status_code == 200, r.text
+    assert r.json()["store_id"] == STORE
+    assert r.json()["sellable"] == {"FR-BLACK": 8}  # BV-OTHER-02 holds 5
 
 
-def test_admin_reads_the_named_shop(client, auth_headers, till):
-    r = _get(client, auth_headers, product_ids="FR-BLACK", store_id="BV-OTHER-02")
-    assert r.json()["sellable"] == {"FR-BLACK": 5}
+def test_no_store_in_the_token_gates_nothing(client, till):
+    """With no active store the guard never blocks a sale, so no tile may."""
+    from api.routers.auth import create_access_token
+
+    token = create_access_token(
+        {"user_id": "hq-1", "username": "hq", "roles": ["SUPERADMIN"], "store_ids": []}
+    )
+    r = _get(client, {"Authorization": f"Bearer {token}"}, product_ids="FR-BLACK,FR-HAVANA")
+    assert r.status_code == 200, r.text
+    assert r.json()["sellable"] == {"FR-BLACK": None, "FR-HAVANA": None}
+
+
+def test_a_real_stock_repository_counts_only_sellable_units(client, staff_headers, till):
+    """End to end on a real StockRepository: reserved, transferred, quarantined,
+    damaged, sold, expired and another shop's units are not on the tile, and
+    the guard sells exactly the tile's figure."""
+    mongomock = pytest.importorskip("mongomock")
+    from api.routers.orders.stock import _assert_serialized_stock_available
+    from database.repositories.product_repository import StockRepository
+
+    coll = mongomock.MongoClient().db.stock_units
+    units = [("AVAILABLE", STORE, None)] * 2 + [
+        ("AVAILABLE", STORE, "2020-01-01"),  # expired
+        ("RESERVED", STORE, None),
+        ("TRANSFERRED", STORE, None),
+        ("QUARANTINED", STORE, None),
+        ("DAMAGED", STORE, None),
+        ("SOLD", STORE, None),
+        ("AVAILABLE", "BV-OTHER-02", None),
+    ]
+    for i, (status, store, expiry) in enumerate(units):
+        coll.insert_one(
+            {"stock_id": f"U{i}", "product_id": "FR-1", "store_id": store, "status": status,
+             "expiry_date": expiry, "barcode": f"BC{i}", "quantity": 1}
+        )
+    till["repo"] = StockRepository(coll)
+
+    r = _get(client, staff_headers, product_ids="FR-1", item_types="FRAME")
+    assert r.json()["sellable"] == {"FR-1": 2}
+    line = {"product_id": "FR-1", "item_type": "FRAME"}
+    _assert_serialized_stock_available([{**line, "quantity": 2}], STORE)
+    with pytest.raises(HTTPException):
+        _assert_serialized_stock_available([{**line, "quantity": 3}], STORE)
 
 
 def test_endpoint_bounds_the_id_list(client, staff_headers, till):

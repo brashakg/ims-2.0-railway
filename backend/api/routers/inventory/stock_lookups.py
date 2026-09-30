@@ -72,27 +72,52 @@ async def get_low_stock_alerts(
     return {"items": items}
 
 
+_NEVER_GATED_AT = 10**6  # a line the guard lets through at this size, it never gates
+
+
+def _most_it_sells(sells, hint: int) -> Optional[int]:
+    """The largest quantity `sells(q)` lets through, or None when it lets
+    _NEVER_GATED_AT through (the guard does not gate the line). Assumes only
+    that the rule is monotone (refusing q means refusing q + 1). `hint` is
+    where the search starts, never the answer."""
+    if sells(hint + 1):
+        if sells(_NEVER_GATED_AT):
+            return None
+        lo, hi = hint + 1, _NEVER_GATED_AT  # stock arrived since the hint
+    elif hint == 0 or sells(hint):
+        return hint  # the usual answer: two asks
+    else:
+        lo, hi = 0, hint  # stock left since the hint
+    while hi - lo > 1:  # sells(lo) (0 always does), never sells(hi)
+        mid = (lo + hi) // 2
+        lo, hi = (mid, hi) if sells(mid) else (lo, mid)
+    return lo
+
+
 @router.get("/sellable")
-async def get_sellable_counts(
+def get_sellable_counts(
     product_ids: str = Query(..., description="Comma-separated product ids, at most 100."),
     item_types: Optional[str] = Query(
         None,
         description="Comma-separated order item_type per id, same order (the till's mapCategory).",
     ),
-    store_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
     """F46: the till's per-tile stock badge and cart-line warning. For each id,
-    the count order-create's oversell guard blocks on at this store, ASKED OF
-    THE GUARD (_assert_serialized_stock_available, untouched): n = the
-    available count it reads; if it refuses a line of n + 1 it gates this line
-    and sells exactly n, otherwise it never blocks it -> None. Never a second
-    copy of the rule. `canonical` is the id the guard sums a line under
-    (_canonical_pid), so the cart adds a SKU line and a product_id line of one
-    product together, as the guard does. Read-only."""
+    the most order-create's oversell guard (_assert_serialized_stock_available)
+    would let one line sell, found by ASKING THE GUARD: every number returned
+    is a quantity it let through, one more is a quantity it refused; None when
+    it never gates the line. find_available only picks the first question.
+
+    The store is the one in the sign-in token, where create_order binds the
+    guard (create.py: store_id = current_user['active_store_id']); no caller-
+    named store, so the figure is always the store Complete sale checks.
+    `canonical` is the id the guard sums a line under (_canonical_pid), so the
+    cart adds a SKU line and a product_id line of one product together, as the
+    guard does. Read-only; a plain def, so its reads run off the event loop."""
     from ..orders.stock import _assert_serialized_stock_available, _canonical_pid
 
-    store = validate_store_access(store_id, current_user)
+    store = current_user.get("active_store_id")
     ids = [p.strip() for p in product_ids.split(",") if p.strip()]
     if len(ids) > 100:
         raise HTTPException(status_code=400, detail="At most 100 product ids per call")
@@ -100,25 +125,29 @@ async def get_sellable_counts(
     stock_repo = get_stock_repository()
     product_repo = get_product_repository()
 
-    # ponytail: ~5 indexed reads per id (<= 24 tiles + the cart), and the
-    # guard's expired-unit warning is logged on each refused probe; batch into
-    # one aggregate if the till ever shows hundreds.
+    def sells(line: dict, qty: int) -> bool:
+        try:
+            _assert_serialized_stock_available([{**line, "quantity": qty}], store, quiet=True)
+        except HTTPException as exc:
+            if exc.status_code != 409:
+                raise
+            return False
+        return True
+
+    # ponytail: per id, 1-4 reads to resolve it, 1 for the hint, then two asks
+    # of the guard (1 read each untracked, 2 tracked): 4-9 indexed reads. A
+    # receipt or sale landing mid-call bisects instead (~20 asks, rare). <= 24
+    # tiles + the cart per call; move to one aggregate if that ever hurts.
     sellable: Dict[str, Optional[int]] = {}
     canonical: Dict[str, str] = {}
     for i, pid in enumerate(ids):
         canon = canonical[pid] = _canonical_pid(product_repo, pid)
         line = {"product_id": canon, "item_type": types[i] if i < len(types) else ""}
-        sellable[pid] = None
         try:
-            n = int(stock_repo.find_available(canon, store))
-        except Exception:  # noqa: BLE001 -- the guard fails soft here too
-            continue
-        try:
-            _assert_serialized_stock_available([{**line, "quantity": n + 1}], store)
-        except HTTPException as exc:
-            if exc.status_code != 409:
-                raise
-            sellable[pid] = n
+            hint = max(0, int(stock_repo.find_available(canon, store)))
+        except Exception:  # noqa: BLE001 -- only a hint; the guard decides
+            hint = 0
+        sellable[pid] = _most_it_sells(lambda q, line=line: sells(line, q), hint)
     return {"store_id": store, "sellable": sellable, "canonical": canonical}
 
 

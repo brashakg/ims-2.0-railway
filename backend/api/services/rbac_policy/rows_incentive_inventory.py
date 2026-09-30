@@ -262,8 +262,9 @@ ROWS: List[Dict[str, object]] = [
         "allowed": "AUTHENTICATED",
     },
     # F46: the till's stock badge + cart warning -- per-product sellable
-    # count for the caller's store (the oversell guard's own rule). Any POS
-    # role reads it; store_scoped stops cross-store reads via ?store_id=.
+    # count, asked of the oversell guard, at the store in the caller's
+    # sign-in token (where create_order binds the guard; no ?store_id). Any
+    # POS role reads it; store_scoped: only ever the caller's own store.
     {
         "method": "GET",
         "path": "/api/v1/inventory/sellable",
