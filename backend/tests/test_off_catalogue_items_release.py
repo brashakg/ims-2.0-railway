@@ -1089,3 +1089,215 @@ def test_c1_ordered_first_is_only_the_needs_review_order(world):
         everything.index(newer["sku"]) < everything.index(boss_sku),
         f"C1: a once-ordered product permanently leads the product list ({everything})",
     )
+
+
+# ---------------------------------------------------------------------------
+# Panel round 3 (2026-09-30)
+# ---------------------------------------------------------------------------
+
+ADMIN = {
+    "user_id": "u-admin",
+    "username": "admin",
+    "roles": ["ADMIN"],
+    "store_ids": [],
+    "active_store_id": STORE,
+}
+ACCOUNTANT = {
+    "user_id": "u-acc-dhn2",
+    "username": "acc.dhn2",
+    "roles": ["ACCOUNTANT"],
+    "store_ids": [STORE],
+    "active_store_id": STORE,
+}
+BOSS_1701 = dict(BOSS_TYPED, model="BOSS 1701", colour="C3")
+
+
+def _seed_user(world, user):
+    world.db.seed(
+        "users",
+        [{**{k: v for k, v in user.items() if k != "active_store_id"}, "is_active": True}],
+    )
+    return user
+
+
+def _receive(world, po, qtys, invoice_no):
+    """Receive Goods with the counts the vendor really sent (one per PO line),
+    then "Add to stock"."""
+    items = [
+        vd.GRNItemCreate(
+            product_id=it["product_id"],
+            received_qty=q,
+            accepted_qty=q,
+            rejected_qty=0,
+            tallied=True,
+        )
+        for it, q in zip(po["items"], qtys)
+    ]
+    created = _run(
+        vd.create_grn(
+            vd.GRNCreate(
+                po_id=po["po_id"],
+                vendor_invoice_no=invoice_no,
+                vendor_invoice_date="2026-09-28",
+                items=items,
+                attachment_file_id="F-RECEIPT-PHOTO",
+                attachment_filename="bill.jpg",
+                attachment_mime="image/jpeg",
+            ),
+            MANAGER,
+        )
+    )
+    _run(vd.accept_grn(created["grn_id"], MANAGER))
+    return created
+
+
+def _mgr_tasks(world, grn_id):
+    return [
+        t
+        for t in _open_tasks(world)
+        if t.get("assigned_to") == MANAGER["user_id"] and t.get("grn_id") == grn_id
+    ]
+
+
+def _any_status_units(world, pid):
+    return list(world.db.stock_units.find({"product_id": pid}))
+
+
+def _two_drafts_po(world):
+    po = world.raise_po(
+        [
+            {"new_product": dict(BOSS_TYPED), "quantity": 1, "unit_price": 1200},
+            {"new_product": dict(BOSS_1701), "quantity": 1, "unit_price": 1300},
+        ]
+    )
+    return po, po["items"][0]["product_id"], po["items"][1]["product_id"]
+
+
+def test_c1_a_second_item_over_the_order_on_a_receipt_is_told_too(world):
+    # P1: the store manager's task is per item, so closing the first item's
+    # task never silences the second.
+    po, d_id, e_id = _two_drafts_po(world)
+    grn = _receive(world, po, [2, 2], "JOT/26-27/0801")
+
+    world.finish_draft(d_id, offer=2790)
+    (t1,) = _mgr_tasks(world, grn["grn_id"])
+    assert "BOSS 1700" in t1["description"]
+    # The manager does what T1 says: "Add to stock" (the vendor really sent
+    # 2). Nothing on the receipt is beyond its order now, so T1 closes.
+    _run(vd.accept_grn(grn["grn_id"], MANAGER))
+    assert len(world.units(d_id)) == 2
+    assert world.db.tasks.find_one({"task_id": t1["task_id"]})["status"] == "COMPLETED"
+
+    world.finish_draft(e_id, offer=2890)
+    held = world.grn(grn["grn_id"])
+    assert held["status"] == "PARTIALLY_ACCEPTED"
+    assert [ln["product_id"] for ln in held["unresolved_lines"]] == [e_id]
+    finding(
+        any("BOSS 1701" in t["description"] for t in _mgr_tasks(world, grn["grn_id"])),
+        f"P1: the second item held beyond the order told nobody ({_tasks_of(world)})",
+    )
+
+
+def test_c1_a_line_within_its_order_is_never_held_behind_one_over_it(world):
+    # P3: D arrived exactly as ordered, E over-shipped. Finishing D shelves D.
+    po, d_id, e_id = _two_drafts_po(world)
+    grn = _receive(world, po, [1, 2], "JOT/26-27/0802")
+
+    world.finish_draft(d_id, offer=2790)
+    finding(
+        len(world.units(d_id)) == 1,
+        f"P3: D is finished and within its order, yet {len(world.units(d_id))} "
+        "of 1 unit reached the shelf",
+    )
+    # E is still a draft: the cataloguer's job, not yet the store manager's.
+    assert not _mgr_tasks(world, grn["grn_id"])
+
+    world.finish_draft(e_id, offer=2890)
+    assert world.units(e_id) == []
+    (task,) = _mgr_tasks(world, grn["grn_id"])
+    # D's unit is on the shelf, so the receipt cannot be voided: the task must
+    # not send the manager to a void the server refuses.
+    finding(
+        "BOSS 1701" in task["description"] and "void" not in task["description"].lower(),
+        "P3: the task sends the manager to void a receipt with stock on the shelf "
+        f"({task['description']!r})",
+    )
+    assert len(world.units(d_id)) == 1
+
+
+def test_c1_a_receipt_of_the_same_order_going_into_stock_holds_the_other(world):
+    # P4: request A holds GRN1's accept claim and has not minted yet when
+    # request B's catalogue save reaches GRN2 (the same box again).
+    po, grn1, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    grn2, _ = _receive_again(world, po, "JOT/26-27/0701-DUP")
+    world.db.grns.update_one(
+        {"grn_id": grn1["grn_id"]},
+        {
+            "$set": {
+                "accept_lock_at": vd.datetime.now().isoformat(),
+                "accept_lock_token": "GACC-request-a",
+                "accept_lock_by": MANAGER["user_id"],
+            }
+        },
+    )
+
+    world.finish_draft(draft_id, offer=2790)
+
+    finding(
+        world.units(draft_id) == [],
+        "P4: GRN2 went on the shelf while GRN1 of the same 2-unit order was being "
+        f"added ({len(world.units(draft_id))} units, and request A still mints 2)",
+    )
+    held = world.grn(grn2["grn_id"])
+    assert held["status"] == "PARTIALLY_ACCEPTED"
+    assert held["unresolved_lines"][0]["reason"] == "over_order"
+    assert _mgr_tasks(world, grn2["grn_id"])
+
+
+def test_c1_units_sold_since_still_fill_the_order(world):
+    # P5: the order cap counts units in ANY status -- once the released units
+    # are sold, the next catalogue save must not release the second receipt.
+    po, grn1, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    grn2, _ = _receive_again(world, po, "JOT/26-27/0701-DUP")
+    world.finish_draft(draft_id, offer=2790)
+    assert len(world.units(draft_id)) == 2
+    world.db.stock_units.update_many(
+        {"product_id": draft_id}, {"$set": {"status": "SOLD"}}
+    )
+
+    world.finish_draft(draft_id, offer=2690)  # another catalogue edit
+
+    finding(
+        len(_any_status_units(world, draft_id)) == 2,
+        f"P5: {len(_any_status_units(world, draft_id))} units exist for a 2-unit "
+        "order -- the second receipt of the box was released once the first "
+        "units were sold",
+    )
+    assert world.grn(grn2["grn_id"])["status"] == "PARTIALLY_ACCEPTED"
+
+
+def test_c1_no_store_manager_fails_loud_to_the_admins(world, caplog):
+    world.db.users.update_one(
+        {"user_id": MANAGER["user_id"]}, {"$set": {"is_active": False}}
+    )
+    _seed_user(world, ADMIN)
+    po, grn1, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    grn2, _ = _receive_again(world, po, "JOT/26-27/0701-DUP")
+    with caplog.at_level("ERROR"):
+        world.finish_draft(draft_id, offer=2790)
+    admin = [
+        t
+        for t in _open_tasks(world)
+        if t.get("assigned_to") == ADMIN["user_id"] and t.get("grn_id") == grn2["grn_id"]
+    ]
+    finding(
+        len(admin) == 1 and "No store manager" in admin[0]["title"],
+        f"A shop with no store manager went to the admins silently ({admin})",
+    )
+    finding(
+        any(
+            r.levelname == "ERROR" and "NO store manager" in r.getMessage()
+            for r in caplog.records
+        ),
+        "No ERROR is logged when no store manager covers the shop",
+    )
