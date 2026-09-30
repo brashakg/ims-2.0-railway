@@ -1285,6 +1285,68 @@ def test_a_booking_that_errors_part_way_releases_the_line_it_booked(monkeypatch)
     assert calls == [("claim", "a"), ("release", "a")]
 
 
+# A refund restocks each of its units once and no unit it did not refund, per
+# ORDER LINE: its mark on a line counts the units its restock put back there,
+# and any door may put back the rest of the refund's units on that line later
+# (the held one the customer brings back, the one a partial restock missed).
+
+
+def _two_lines_one_product(swept, oid, rid, second):
+    """Two Shopify lines (9001, 9002) of ONE IMS product -- two identical
+    frames with different Rx -- each with its unit SOLD. One refund lists 9001
+    as a "return" and 9002 as `second`."""
+    line = _frame_order(oid)["line_items"][0]
+    doc = _book(swept, oid, line_items=[line, {**line, "id": 9002}])
+    _set(swept, oid, status="DELIVERED", fulfillment_stores=["BV-GANGA-01"],
+         items=[{**i, "ims_product_id": "IMS-P-1"} for i in doc["items"]])
+    swept["stock_repo"].units.extend(
+        {"stock_id": sid, "product_id": "IMS-P-1", "store_id": "BV-GANGA-01",
+         "order_id": doc["order_id"], "status": "SOLD"} for sid in ("stk-1", "stk-2"))
+    r = _refund(rid, oid, restock_type="return", amount="1998.00")
+    a = r["refund_line_items"][0]
+    r["refund_line_items"].append({**a, "id": a["id"] + 1, "line_item_id": 9002, "restock_type": second,
+                                   "line_item": {**a["line_item"], "id": 9002}})
+    shopify_refund.handle_shopify_refund(swept["db"], r, webhook_id=None, topic="refunds/create")
+    return swept["review"].find_one({"shopify_refund_id": str(rid)})
+
+
+def _lands_only_first(monkeypatch, qty=None):
+    """The restock puts back only its first line's units (or `qty` of them)
+    and says it did not land whole."""
+    real = returns_router._restock_good_items
+
+    def first(lines, *a, **kw):
+        head = lines[0].model_copy(update={"return_qty": qty}) if qty else lines[0]
+        return {**real([head], *a, **kw), "applied": False}
+
+    monkeypatch.setattr(returns_router, "_restock_good_items", first)
+    return real
+
+
+def test_goods_back_restocks_the_held_line_beside_a_restocked_line_of_one_product(swept):
+    """The own-doc count read the doc's per-PRODUCT restocked rows for every
+    line of that product: line 9002's frame, held at the confirm, counted as
+    already back, and Goods back answered "restocked" with stk-2 still SOLD."""
+    row = _two_lines_one_product(swept, 60192, 700392, "no_restock")
+    assert [line["restock"] for line in row["proposed_restock"]] == [True, False]
+    _confirm(row)
+    assert sorted(s for _, s in _units(swept)) == ["AVAILABLE", "SOLD"]
+    got = _goods_back(swept["review"].find_one({"review_id": row["review_id"]}))["result"]
+    assert got["status"] == "restocked" and len(got["restock_stock_ids"]) == 1
+    assert _units(swept) == [("stk-1", "AVAILABLE"), ("stk-2", "AVAILABLE")]
+
+
+def test_the_retry_restocks_the_line_whose_unit_did_not_land_beside_one_of_its_product(
+        swept, monkeypatch):
+    row = _two_lines_one_product(swept, 60193, 700393, "return")
+    real = _lands_only_first(monkeypatch)
+    assert _confirm(row)["result"]["restock_applied"] is False
+    monkeypatch.setattr(returns_router, "_restock_good_items", real)
+    assert sorted(s for _, s in _units(swept)) == ["AVAILABLE", "SOLD"]
+    assert _retry(swept["returns"].find_one({"shopify_refund_id": "700393"}))["restock_applied"] is True
+    assert _units(swept) == [("stk-1", "AVAILABLE"), ("stk-2", "AVAILABLE")]
+
+
 # ---------------------------------------------------------------------------
 # Ruling 1 leaves a fulfilled online order SHIPPED (it used to be DELIVERED).
 # Every report that picks orders by status reads the ONE pair of sets in

@@ -405,8 +405,8 @@ def _already_returned_qty(
     (order, line): (the counter's, {Shopify refund id: that refund's}).
     `own_shopify_refund_id`: that Shopify refund's own doc (the refund handler
     asks while it holds its claim doc) counts only the units its restock
-    already put back (its landed `restocked` rows), never the lines it claims
-    -- a row confirmed before the order-line marks
+    already put back on THIS line (_own_restock_share), never the lines it
+    claims -- a row confirmed before the order-line marks
     (shopify_refund._restock_booked) has nothing else to say it restocked.
 
     A line is identified by its original order `item_id` when known, otherwise
@@ -426,27 +426,10 @@ def _already_returned_qty(
         for doc in coll.find({"order_id": order_id}, {"_id": 0}):
             rid = str(doc.get("shopify_refund_id") or "")
             if own_shopify_refund_id and rid == own_shopify_refund_id:
-                refunds[rid] = refunds.get(rid, 0.0) + sum(
-                    float(row.get("reactivated") or 0) + float(row.get("minted") or 0)
-                    for row in doc.get("restocked") or []
-                    if isinstance(row, dict) and product_id
-                    and str(row.get("product_id")) == str(product_id)
-                )
+                refunds[rid] = refunds.get(rid, 0.0) + _own_restock_share(doc, item_id, product_id)
                 continue
             for prior in doc.get("items") or []:
-                if not isinstance(prior, dict):
-                    continue
-                # Prefer item-level identity; fall back to product identity so a
-                # legacy return recorded without order_item_id still counts.
-                p_item = prior.get("order_item_id")
-                p_prod = prior.get("product_id")
-                if item_id and p_item:
-                    same_line = str(p_item) == str(item_id)
-                elif product_id and p_prod:
-                    same_line = str(p_prod) == str(product_id)
-                else:
-                    same_line = False
-                if not same_line:
+                if not isinstance(prior, dict) or not _same_line(prior, item_id, product_id):
                     continue
                 try:
                     qty = float(prior.get("return_qty") or 0)
@@ -460,6 +443,45 @@ def _already_returned_qty(
         logger.warning("[RETURNS] already-returned scan failed: %s", exc)
         return 0.0, {}
     return counter, refunds
+
+
+def _same_line(prior: Dict[str, Any], item_id: Optional[str], product_id: Optional[str]) -> bool:
+    """Does a return doc's row target this order line? Item-level identity
+    first; product identity so a legacy return recorded without
+    order_item_id still counts."""
+    p_item = prior.get("order_item_id")
+    p_prod = prior.get("product_id")
+    if item_id and p_item:
+        return str(p_item) == str(item_id)
+    if product_id and p_prod:
+        return str(p_prod) == str(product_id)
+    return False
+
+
+def _own_restock_share(
+    doc: Dict[str, Any], item_id: Optional[str], product_id: Optional[str]
+) -> float:
+    """The units a Shopify refund's own doc says its restock put back on ONE
+    order line. Its `restocked` rows count landed units per PRODUCT; they are
+    shared out over the doc's own restock lines of that product, in order, so
+    a second line of the same product (a no_restock one, or one whose unit
+    did not land) is never counted for a unit another line took."""
+    pool: Dict[str, float] = {}
+    for row in doc.get("restocked") or []:
+        if isinstance(row, dict):
+            pid = str(row.get("product_id"))
+            pool[pid] = pool.get(pid, 0.0) + float(row.get("reactivated") or 0) + float(
+                row.get("minted") or 0)
+    share = 0.0
+    for prior in doc.get("items") or []:
+        if not isinstance(prior, dict) or not prior.get("restock"):
+            continue
+        pid = str(prior.get("product_id"))
+        got = min(float(prior.get("return_qty") or 0), pool.get(pid, 0.0))
+        pool[pid] = pool.get(pid, 0.0) - got
+        if _same_line(prior, item_id, product_id):
+            share += got
+    return share
 
 
 def _units_already_back(
