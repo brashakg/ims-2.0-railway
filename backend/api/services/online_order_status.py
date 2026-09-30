@@ -162,9 +162,11 @@ def apply_fact(
                 if marks:
                     repo.collection.update_one({"order_id": oid}, {"$set": marks})
                 return out
+            # Bandit B610 reads any call named extra() as Django QuerySet.extra.
+            fields = extra(order) if callable(extra) else extra  # nosec B610
             if _claim_order_status(
                 repo, oid, to, [order.get("status")], f"system:{source}",
-                extra={**(marks or {}), **((extra(order) if callable(extra) else extra) or {})} or None,
+                extra={**(marks or {}), **(fields or {})} or None,
             ):
                 out["to"], out["from"] = to, order.get("status")
                 return out
