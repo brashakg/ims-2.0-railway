@@ -102,6 +102,35 @@ def test_the_backfill_places_old_bills_the_way_booking_does():
     assert backfill(db, commit=True)["placed"] == 0  # idempotent
 
 
+def test_a_transfer_mirror_bill_carries_the_receiving_shop():
+    """The third door: an inter-company transfer books the receiving company a
+    purchase bill. Its goods landed at the receiving shop, so that is its shop."""
+    from unittest.mock import patch
+
+    from api.routers.transfers import _book_mirror_purchase
+    from test_transfer_mirror_purchase import _make_db
+
+    db, bills = _make_db(
+        stores={
+            "S1": {"store_id": "S1", "entity_id": "E1", "state_code": "20"},
+            "S2": {"store_id": "S2", "entity_id": "E2", "state_code": "20"},
+        },
+        entities={
+            "E1": {"entity_id": "E1", "gstins": [{"state_code": "20", "gstin": "20AAPFU0939F1ZV"}]},
+            "E2": {"entity_id": "E2", "gstins": [{"state_code": "20", "gstin": "20BBGAA1234J1ZV"}]},
+        },
+    )
+    with patch("api.routers.transfers._get_db", return_value=db):
+        _book_mirror_purchase(
+            {
+                "id": "T1", "transfer_number": "TRF-1", "from_location_id": "S1",
+                "to_location_id": "S2", "total_value": 1000.0, "items": [],
+                "completed_at": "2026-09-05T10:00:00",
+            }
+        )
+    assert [b["store_id"] for b in bills] == ["S2"]
+
+
 # ============================================================================
 # 2. AP aging owes what the ledger owes, whatever the payments look like
 # ============================================================================
