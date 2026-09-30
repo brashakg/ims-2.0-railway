@@ -868,6 +868,49 @@ def test_a_rejected_delivery_accepted_during_a_cancel_leaves_it_cancelled(monkey
     assert repo.collection.docs[0]["status"] == "CANCELLED"
 
 
+def test_a_receipt_logged_during_a_cancel_cannot_be_accepted(monkeypatch):
+    """Verifier LOW: the receipt passed its 'can receive' check on a SENT
+    order; the cancel found no waiting box and wrote CANCELLED; the receipt was
+    then logged PENDING. Accepting it minted the stock while the order stayed
+    Cancelled with nothing received. The accept now holds the order open with
+    a compare-and-set before minting -- and a cancelled order refuses it."""
+    from test_grn_accept_atomic_claim import _StockRepo, _grn
+    from test_grn_accept_atomic_claim import _run as run_sync
+
+    repo, _ = _wire(monkeypatch, _po(status="SENT"))
+    _run(v.cancel_po("PO1", "vendor out of stock", _user()))
+    assert repo.pos["PO1"]["status"] == "CANCELLED"
+
+    grn_repo = _AcceptedGrnRepo(_grn(qty=2, po_id="PO1", store_id="S1"))
+    stock = _StockRepo()
+    monkeypatch.setattr(v, "get_grn_repository", lambda: grn_repo)
+    monkeypatch.setattr(v, "get_stock_repository", lambda: stock)
+    monkeypatch.setattr(v, "_get_db", lambda: None)
+
+    with pytest.raises(HTTPException) as e:
+        run_sync(v.accept_grn("GRN-1", _user(roles=("ADMIN",), uid="u-admin")))
+    assert e.value.status_code == 409
+    assert "Void this receipt" in e.value.detail
+    assert stock.rows == [], "no stock on the shelf of a cancelled order"
+    assert grn_repo.collection.doc["status"] == "PENDING"  # still voidable
+    assert repo.pos["PO1"]["status"] == "CANCELLED"
+
+
+def test_a_cancel_that_read_the_order_before_an_accept_is_refused(monkeypatch):
+    """The other order of events: the accept holds the order first, so a
+    cancel working from the order it read before that is refused (reload, and
+    the receipt shows) instead of cancelling under the delivery."""
+    def accept_holds_the_order(repo):
+        v._hold_order_open_for_receipt(repo, "PO1")
+
+    repo = _wire_racing(monkeypatch, _po(status="SENT"), accept_holds_the_order)
+    with pytest.raises(HTTPException) as e:
+        _run(v.cancel_po("PO1", "vendor out of stock", _user()))
+    assert e.value.status_code == 409
+    assert repo.race is None, "the accept never landed in the window"
+    assert repo.collection.docs[0]["status"] == "SENT"
+
+
 def test_the_accept_fallback_never_reopens_an_order_a_cancel_closed(monkeypatch):
     """The accept's last resort (its receipt write failed: flag the order
     part-received) was a plain status write too. With the manager's cancel

@@ -142,6 +142,7 @@ async def _accept_grn_impl(grn_id: str, current_user: dict) -> dict:
         raise _grn_accept_conflict(grn_repo, grn_id)
 
     try:
+        _hold_order_open_for_receipt(po_repo, grn.get("po_id"))
         return _accept_grn_claimed(
             grn_id,
             grn,
@@ -159,6 +160,31 @@ async def _accept_grn_impl(grn_id: str, current_user: dict) -> dict:
         # per-(grn, line) mint guard makes that retry idempotent.
         _release_grn_accept_claim(grn_repo, grn_id, claim_token)
         raise
+
+
+def _hold_order_open_for_receipt(po_repo, po_id) -> None:
+    """Compare-and-set on the ORDER before a single unit is minted.
+
+    A cancel looks for a receipt waiting to be accepted, then writes. A receipt
+    logged in between slipped past that look and, once accepted, put stock on
+    the shelf of an order shown as Cancelled with nothing received. This
+    guarded write moves the order's write stamp only while it is not
+    CANCELLED: a cancel that read the order before it is refused by its own
+    compare-and-set (reload, and the receipt shows), and a cancel that landed
+    first refuses this accept -- no stock is minted against it."""
+    if po_repo is None or not po_id:
+        return
+    if po_repo.update_if(po_id, {"status": {"$ne": "CANCELLED"}}, {}):
+        return
+    po = po_repo.find_by_id(po_id)
+    if po and po.get("status") == "CANCELLED":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This order was cancelled - nothing can be received against it "
+                "any more. Void this receipt."
+            ),
+        )
 
 
 def _accept_grn_claimed(
