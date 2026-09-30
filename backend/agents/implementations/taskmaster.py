@@ -1066,14 +1066,22 @@ class TaskmasterAgent(JarvisAgent):
 
     async def _close_booked_invoice_tasks(self) -> List[Dict[str, Any]]:
         """F33: 'Book purchase invoice for GRN ...' (grn_express.py, source_ref
-        express_invoice:<grn_id>) closes once a bill carrying that grn_id is
-        booked -- from any booking door, so no door has to remember to.
+        express_invoice:<grn_id>) closes once the bills carrying that grn_id
+        cover every unit the receipt accepted (purchase_match.
+        receipt_fully_billed) -- from any booking door, so no door has to
+        remember to. A part bill leaves it open for the rest.
 
         ponytail: closes on the 5-minute tick, not the instant the bill is
         booked; a direct close from the booking door makes it instant."""
+        try:
+            from api.services.purchase_match import receipt_fully_billed
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[TASKMASTER] book-invoice close skipped: {e}")
+            return []
         tasks_coll = self.get_collection("tasks")
         bills = self.get_collection("vendor_bills")
-        if tasks_coll is None or bills is None:
+        grns = self.get_collection("grns")
+        if tasks_coll is None or bills is None or grns is None:
             return []
         active = ["OPEN", "IN_PROGRESS", "ESCALATED"]
         try:
@@ -1093,19 +1101,27 @@ class TaskmasterAgent(JarvisAgent):
         for t in open_tasks:
             grn_id = str(t.get("source_ref") or "").split(":", 1)[1]
             try:
-                bill = bills.find_one(
-                    {"grn_id": grn_id},
-                    {"_id": 0, "bill_id": 1, "invoice_number": 1, "bill_number": 1},
+                booked = list(
+                    bills.find(
+                        {"grn_id": grn_id},
+                        {
+                            "_id": 0,
+                            "bill_id": 1,
+                            "invoice_number": 1,
+                            "bill_number": 1,
+                            "lines": 1,
+                        },
+                    )
                 )
-                if not bill:
+                grn = grns.find_one({"grn_id": grn_id}, {"_id": 0, "items": 1})
+                if not receipt_fully_billed(grn, booked):
                     continue
                 now = datetime.now()
-                number = (
-                    bill.get("invoice_number")
-                    or bill.get("bill_number")
-                    or bill.get("bill_id")
+                numbers = ", ".join(
+                    str(b.get("invoice_number") or b.get("bill_number") or b.get("bill_id"))
+                    for b in booked
                 )
-                notes = f"Purchase invoice {number} booked."
+                notes = f"Purchase invoice {numbers} booked."
                 res = tasks_coll.update_one(
                     {"task_id": t.get("task_id"), "status": {"$in": active}},
                     {

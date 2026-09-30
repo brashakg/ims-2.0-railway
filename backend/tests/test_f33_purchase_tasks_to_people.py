@@ -193,3 +193,48 @@ def test_advisory_task_goes_through_the_one_door_to_a_person(monkeypatch):
 def test_a_lowercase_role_is_still_a_role(monkeypatch):
     _people(monkeypatch)
     assert _task("store_manager", "BV-TEST-01")["assigned_to"] == "mgr-dhn2"
+
+
+# ---------------------------------------------------------------------------
+# Verifier round 3
+# ---------------------------------------------------------------------------
+
+
+def _bill(bill_id, grn_id, number, qty):
+    return {
+        "bill_id": bill_id, "grn_id": grn_id, "invoice_number": number,
+        "lines": [{"product_id": "P-CAR", "qty": qty, "unit_price": 1500}],
+    }
+
+
+def test_a_part_bill_leaves_the_book_invoice_task_open(monkeypatch):
+    """20 Carrera units received, the first bill covers 10. The task stayed
+    closed on 'any bill exists', and nobody held the other 10 unbilled units.
+    It closes only once the bills cover every accepted unit."""
+    db = mongomock.MongoClient().db
+    db.tasks.insert_one(_open_task("T-BOOK-P", "express_invoice:G20"))
+    db.grns.insert_one({"grn_id": "G20", "items": [{"product_id": "P-CAR", "accepted_qty": 20}]})
+    db.vendor_bills.insert_one(_bill("B1", "G20", "SAF/0101", 10))
+    agent = TaskmasterAgent(db=db)
+
+    asyncio.run(agent._do_background_work())
+    assert db.tasks.find_one({"task_id": "T-BOOK-P"})["status"] == "OPEN"
+
+    db.vendor_bills.insert_one(_bill("B2", "G20", "SAF/0117", 10))  # the balance
+    asyncio.run(agent._do_background_work())
+    task = db.tasks.find_one({"task_id": "T-BOOK-P"})
+    assert task["status"] == "COMPLETED"
+    assert "SAF/0101" in task["completion_notes"] and "SAF/0117" in task["completion_notes"]
+
+
+def test_receipt_fully_billed_is_the_caps_own_totals():
+    from api.services.purchase_match import receipt_fully_billed
+
+    grn = {"items": [{"product_id": "A", "accepted_qty": 20}, {"product_id": "B", "accepted_qty": 2}]}
+    a = lambda q: {"lines": [{"product_id": "A", "qty": q}]}  # noqa: E731
+    b = {"lines": [{"product_id": "B", "qty": 2}]}
+    assert receipt_fully_billed(grn, []) is False
+    assert receipt_fully_billed(grn, [a(20)]) is False  # B not billed
+    assert receipt_fully_billed(grn, [a(12), b]) is False
+    assert receipt_fully_billed(grn, [a(12), a(8), b]) is True  # 12 then 8
+    assert receipt_fully_billed(grn, [{"lines": []}]) is True  # header-only bill: whole receipt

@@ -806,3 +806,28 @@ def billed_qty_by_product(bill_lines: Optional[List[dict]]) -> Dict[str, float]:
         pid: _f(line.get("invoiced_qty"))
         for pid, line in _invoice_by_product(bill_lines).items()
     }
+
+
+def receipt_fully_billed(grn: Optional[dict], bills: Optional[List[dict]]) -> bool:
+    """Have the bills linked to a goods receipt covered every unit it accepted?
+
+    The other side of :func:`over_billed_products`: the same per-product
+    accepted-vs-billed totals, asking "is anything left to bill?". A receipt
+    may be billed in parts, so one bill is not the end of it.
+
+    A bill with NO lines (the header-only door, vendors.create_vendor_bill)
+    covers the whole receipt: that door refuses a receipt already billed, and
+    the line-level cap refuses any bill after it, so nothing else can follow.
+    A receipt we cannot key (no product lines) counts as covered once any
+    bill exists -- the cap's own fail-open-on-unknowable rule.
+    """
+    bills = [b for b in bills or [] if isinstance(b, dict)]
+    if not bills:
+        return False
+    if any(not (b.get("lines") or []) for b in bills):
+        return True
+    billed = billed_qty_by_product([ln for b in bills for ln in b["lines"]])
+    return all(
+        billed.get(pid, 0.0) >= qty - _QTY_EPS
+        for pid, qty in _grn_accepted_by_product(grn).items()
+    )
