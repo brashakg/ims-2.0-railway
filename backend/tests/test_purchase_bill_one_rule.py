@@ -1165,3 +1165,260 @@ class TestABillsYearIsReal:
             assert row["status"] == "MISMATCH" and row["variance"] == 360.0, row
             assert "Y-0202" in row["note"] and "Y-2062" in row["note"] and "MAY-1" not in row["note"]
             assert xc["gstr3b"]["itc"]["total"] == 180.0
+
+
+
+# ===========================================================================
+# Panel round 7 -- ONE answer to "which GSTIN is this shop's" for every door
+# (owner, 2026-09-30: the registration decides the state), a day that is a
+# day, the credit nobody may claim, and a match verdict nobody invented
+# ===========================================================================
+
+
+def _one_company(stores, gstins=(BUY_JH,)):
+    """E1 Better Vision holding `gstins` (the first is primary), with `stores`."""
+    regs = [{"gstin": g, "state_code": g[:2], "is_primary": i == 0} for i, g in enumerate(gstins)]
+    return _mongo([({"entity_id": "E1", "name": "Better Vision", "gstins": regs}, stores)])
+
+
+def _po_store_doc(db, store_id):
+    """The shop as every purchase-order door sees it (vendors.po_gst_context)."""
+    import api.routers.vendors.gst as po_gst
+
+    saved = (po_gst.get_store_repository, po_gst._get_db)
+    try:
+        po_gst.get_store_repository = lambda: _Repo(list(db["stores"].find({}, {"_id": 0})), "store_id")
+        po_gst._get_db = lambda: db
+        return po_gst.po_gst_context(store_id, None)[1]
+    finally:
+        po_gst.get_store_repository, po_gst._get_db = saved
+
+
+class TestOneShopGstinForEveryDoor:
+    def test_a_gstin_less_shops_bill_is_on_its_gstr3b(self):
+        """r7 #1: S1 has NO GSTIN on its record (created before its company
+        had one). The bill booked IGST 180 on 20... (the recipient read the
+        company), GSTR-3B read the shop's blank stores.gstin and dropped the
+        bill, and the Cross-Check showed ITC 0 beside a Rs 180 MISMATCH."""
+        db = _one_company([{"store_id": "S1", "entity_id": "E1", "state_code": "20", "gstin": None}])
+        r = _app_as(db, "S1").post(_URL, json=_services())
+        assert r.status_code == 201, r.text
+        assert (r.json()["recipient_gstin"], r.json()["igst_total"]) == (BUY_JH, 180.0)
+        reports._get_raw_db = lambda: db
+        assert reports._compute_gstr3b("2026-05", "S1")["itcAvailable"]["integratedTax"] == 180.0
+        assert _register(db)["total_itc"] == 180.0
+        xc = _crosscheck(db, "E1")
+        assert xc["gstr3b"]["itc"]["total"] == 180.0
+        assert _row(xc, "Input credit left off GSTR-3B")["status"] == "MATCH"
+
+    def test_a_pune_shop_without_a_gstin_orders_and_bills_on_its_states_number(self):
+        """r7 #9: no GSTIN on the Pune shop's record, the company holds 20
+        (primary) and 27. The bill fell back to the primary -- IGST on the
+        Jharkhand number while its order said CGST + SGST."""
+        db = _one_company([{"store_id": "PUNE", "entity_id": "E1", "state_code": "27"}], (BUY_JH, BUY_MH))
+        r = _app_as(db, "PUNE").post(_URL, json=_services(store_id="PUNE"))
+        assert r.status_code == 201, r.text
+        assert (r.json()["recipient_gstin"], r.json()["interstate"]) == (BUY_MH, False)
+        store_doc = _po_store_doc(db, "PUNE")
+        assert store_doc["gstin"] == BUY_MH
+        vendor = db["vendors"].find_one({"vendor_id": "V1"}, {"_id": 0})
+        assert _po_gst_parties(vendor, store_doc)["interstate"] is False
+
+    def test_a_shop_whose_company_has_no_number_for_its_state_is_refused(self):
+        """Fail loud: a Maharashtra shop of a company registered only in
+        Jharkhand. The bill door refuses (never the Jharkhand primary), the
+        order names no GSTIN, and a new shop is not stamped with one."""
+        from api.routers import stores as stores_router
+
+        db = _one_company([{"store_id": "NSK", "entity_id": "E1", "state_code": "27", "gstin": None}])
+        r = _app_as(db, "NSK").post(_URL, json=_services(store_id="NSK"))
+        assert r.status_code == 422, r.text
+        assert r.json()["detail"]["code"] == "RECIPIENT_SHOP_HAS_NO_GSTIN"
+        assert "Maharashtra" in r.json()["detail"]["message"]
+        assert db["vendor_bills"].count_documents({}) == 0
+        assert _po_store_doc(db, "NSK")["gstin"] == ""
+        assert stores_router._derive_store_gstin(db, "E1", "27") is None
+        assert stores_router._derive_store_gstin(db, "E1", "20") == BUY_JH
+
+    @staticmethod
+    def _two_company_world():
+        """E1 holds only 20...: S1 (JH) and PUNE, which declares Maharashtra
+        but carries E1's 20... number. E2 WizOpt: S2 (MH) on 27..."""
+        return _mongo(
+            [
+                (
+                    {"entity_id": "E1", "name": "Better Vision",
+                     "gstins": [{"gstin": BUY_JH, "state_code": "20", "is_primary": True}]},
+                    [{"store_id": "S1", "entity_id": "E1", "state_code": "20", "gstin": BUY_JH},
+                     {"store_id": "PUNE", "entity_id": "E1", "state_code": "27", "gstin": BUY_JH}],
+                ),
+                (
+                    {"entity_id": "E2", "name": "WizOpt",
+                     "gstins": [{"gstin": BUY_MH, "state_code": "27", "is_primary": True}]},
+                    [{"store_id": "S2", "entity_id": "E2", "state_code": "27", "gstin": BUY_MH}],
+                ),
+            ]
+        )
+
+    def test_a_transfer_to_a_shop_follows_its_registration(self):
+        """r7 #8: the mirror bill took its head from the shops' DECLARED
+        states. WizOpt's Maharashtra shop sends PUNE (declared Maharashtra,
+        trading on E1's Jharkhand number) Rs 1000: IGST on 20..., the head
+        PUNE's bills and orders take -- it was CGST + SGST with no recipient
+        GSTIN. A move between two shops on ONE registration is no supply."""
+        from api.routers import transfers as trf
+
+        saved = trf._get_db
+        try:
+            for src, supply in (("S2", True), ("S1", False)):
+                db = self._two_company_world()
+                trf._get_db = lambda db=db: db
+                trf._book_mirror_purchase({
+                    "id": "t", "transfer_number": "T", "total_value": 1000, "items": [],
+                    "from_location_id": src, "to_location_id": "PUNE",
+                    "completed_at": "2026-05-10T05:00:00",
+                })
+                bill = db["vendor_bills"].find_one({}, {"_id": 0})
+                if not supply:
+                    assert bill is None, bill
+                    continue
+                assert bill["recipient_gstin"] == BUY_JH
+                assert bill["interstate"] is True and bill["supply_place_recipient"] == "20"
+                assert bill["igst_total"] > 0 and bill["cgst_total"] == 0.0
+        finally:
+            trf._get_db = saved
+
+    def test_pune_is_ordered_as_it_is_billed(self):
+        """r7 #8, the order: PUNE's purchase order read its declared state
+        (CGST + SGST from a Maharashtra vendor) while its bill booked IGST on
+        the Jharkhand number it trades on."""
+        db = self._two_company_world()
+        r = _app_as(db, "PUNE").post(_URL, json=_services(store_id="PUNE"))
+        assert r.status_code == 201, r.text
+        assert (r.json()["recipient_gstin"], r.json()["interstate"]) == (BUY_JH, True)
+        vendor = db["vendors"].find_one({"vendor_id": "V1"}, {"_id": 0})
+        assert _po_gst_parties(vendor, _po_store_doc(db, "PUNE"))["interstate"] is True
+
+    def test_the_go_live_checklist_names_a_shop_its_gstin_contradicts(self):
+        """Flagged, never silently used: PUNE declares Maharashtra on a
+        Jharkhand number; W carries a number its company does not hold."""
+        from api.routers import stores as stores_router
+
+        db = self._two_company_world()
+        db["stores"].insert_one({"store_id": "W", "entity_id": "E2", "state_code": "27", "gstin": BUY_JH})
+        saved = stores_router.get_db
+        try:
+            stores_router.get_db = lambda: db
+            out = asyncio.run(stores_router.go_live_checklist(current_user={"roles": ["ADMIN"]}))
+        finally:
+            stores_router.get_db = saved
+        check = next(c for c in out["checks"] if c["key"] == "store_gst_state")
+        assert (check["status"], check["count"]) == ("WARN", 2), check
+        assert "PUNE: declared Maharashtra" in check["hint"] and "W: its GSTIN" in check["hint"]
+        assert "S1:" not in check["hint"] and "S2:" not in check["hint"]
+
+
+class TestTheCrossCheckCountsEachCompanysSlice:
+    def test_a_shared_gstin_is_counted_once_per_company(self):
+        """r7 #2: the GSTIN-bound slice was deduped by GSTIN alone. A shop of
+        E2 on the same number listed first held E2's slice (0) and silently
+        dropped E1's (50) -- the figure depended on store order."""
+        from api.services.gst_crosscheck import aggregate_gstr3b
+
+        w = {"itcAvailableGstin": {"integratedTax": 0.0}}
+        s1 = {"itcAvailableGstin": {"integratedTax": 50.0}}
+        for reps, ents in (([w, s1], ["E2", "E1"]), ([s1, w], ["E1", "E2"])):
+            assert aggregate_gstr3b(reps, ents, [BUY_JH, BUY_JH])["itc"]["total"] == 50.0
+
+
+class TestOnlyARealDayIsDated:
+    def test_a_well_formed_date_that_is_no_day_turns_the_check_red(self):
+        """r7 #4: the undated check read the SHAPE, so '2026-04-31' (no such
+        day) sat between April's and May's windows, on no return and in no
+        check. A transfer mirror's full IST timestamp is a real day and
+        stays on May's return."""
+        db = TestCreditLeftOffEveryReturnIsFlagged()._world()
+        heads = {"vendor_id": "V1", "taxable_amount": 1000, "tax_amount": 50, "cgst_total": 0.0,
+                 "sgst_total": 0.0, "igst_total": 50.0, "recipient_entity_id": "E1",
+                 "recipient_gstin": BUY_JH, "status": "OUTSTANDING"}
+        bad = ("2026-04-31", "2026-02-29", "2026-05-00", "2025-13-05", "2025-06-31")
+        db["vendor_bills"].insert_many(
+            [{**heads, "bill_id": f"x{i}", "bill_number": f"X-{d}", "bill_date": d, "invoice_date": d}
+             for i, d in enumerate(bad)]
+            + [
+                {**heads, "bill_id": "apr", "bill_number": "APR-1", "bill_date": "2026-04-30",
+                 "invoice_date": "2026-04-30"},
+                {**heads, "bill_id": "m1", "bill_number": "TRF/T1", "source_transfer_id": "T1",
+                 "to_store_id": "S1", "bill_date": "2026-05-10T09:30:00.123456",
+                 "invoice_date": "2026-05-10T09:30:00.123456"},
+            ]
+        )
+        xc = _crosscheck(db, "E1")
+        row = _row(xc, "Input credit left off GSTR-3B")
+        assert row["status"] == "MISMATCH" and row["variance"] == 250.0, row
+        assert all(f"X-{d}" in row["note"] for d in bad)
+        assert "APR-1" not in row["note"] and "TRF/T1" not in row["note"]
+        assert xc["gstr3b"]["itc"]["total"] == 50.0
+
+
+class TestTheUnplacedCheckKeepsItsRules:
+    def test_credit_nobody_may_claim_is_not_missing_credit(self):
+        """r7 #5: a bill booked itc_eligible False would be listed as credit
+        left off GSTR-3B every month -- credit nobody may claim."""
+        db = TestCreditLeftOffEveryReturnIsFlagged()._world()
+        db["vendor_bills"].insert_one(
+            {"bill_id": "blk", "bill_number": "BLK-1", "vendor_id": "V1", "bill_date": "2026-05-05",
+             "invoice_date": "2026-05-05", "taxable_amount": 1000, "tax_amount": 50, "cgst_total": 0.0,
+             "sgst_total": 0.0, "igst_total": 50.0, "recipient_entity_id": "E1",
+             "recipient_gstin": BUY_JH, "itc_eligible": False, "status": "OUTSTANDING"}
+        )
+        xc = _crosscheck(db, "E1")
+        assert _row(xc, "Input credit left off GSTR-3B")["status"] == "MATCH"
+        assert xc["gstr3b"]["itc"]["total"] == 0.0
+
+    def test_a_shop_with_no_company_places_nothing(self):
+        """r7 #6: a company-less shop's placement has no company filter, so it
+        marked every GSTIN-less bill of every company as placed while the
+        Cross-Check counts none of its credit -- the F40 bill (no company,
+        tax 50) read MATCH beside GSTR-3B ITC 0."""
+        db = TestCreditLeftOffEveryReturnIsFlagged()._world()
+        db["stores"].insert_one({"store_id": "X"})
+        db["vendor_bills"].insert_one(
+            {"bill_id": "nc", "bill_number": "NC-1", "vendor_id": "V1", "bill_date": "2026-05-05",
+             "invoice_date": "2026-05-05", "taxable_amount": 1000, "tax_amount": 50, "cgst_total": 0.0,
+             "sgst_total": 0.0, "igst_total": 50.0, "recipient_entity_id": None, "status": "OUTSTANDING"}
+        )
+        xc = _crosscheck(db, None)
+        row = _row(xc, "Input credit left off GSTR-3B")
+        assert row["status"] == "MISMATCH" and "NC-1" in row["note"], row
+        assert xc["gstr3b"]["itc"]["total"] == 0.0
+
+
+class TestAHeaderOnlyBillHasNoInventedVerdict:
+    def test_a_cash_flow_bill_is_not_on_hold_and_shows_its_receipt(self):
+        """r7 #7: the list now shows Cash Flow '+ bill' bills. GET /match
+        recomputed a verdict from their EMPTY lines -- 'On hold' with an
+        Approve button approve-exception refused (400) -- and the row read
+        'Manual' because the door stores the receipt's grn_id alone."""
+        db, cli = TestEveryDoorEveryReader()._world()
+        db["grns"].insert_one({"grn_id": "GA", "grn_number": "RCPT/BV/26-27/0001"})
+        r = _door(cli, "V1", bill_number="G-1", bill_date="2026-05-09", taxable_amount=1000,
+                  tax_amount=50, total_amount=1050, bill_kind="GOODS", grn_id="GA")
+        assert r.status_code == 201, r.text
+        bill_id = r.json()["bill_id"]
+        m = cli.get(f"{_URL}/{bill_id}/match").json()
+        assert (m["match_status"], m["match_detail"]) == (None, None), m
+        row = next(x for x in cli.get(_URL).json()["purchase_invoices"] if x["bill_id"] == bill_id)
+        assert row["grn_number"] == "RCPT/BV/26-27/0001"
+
+    def test_a_stored_verdict_keeps_its_word(self):
+        """A bill whose stored detail was dropped: the recomputed detail
+        explains the STORED verdict and never replaces it."""
+        db, cli = TestEveryDoorEveryReader()._world()
+        a = _book_from_grn(cli, "GA", "A-1")
+        db["vendor_bills"].update_one(
+            {"bill_id": a["bill_id"]}, {"$set": {"match_status": "MATCHED_OVERRIDE", "match_detail": None}}
+        )
+        m = cli.get(f"{_URL}/{a['bill_id']}/match").json()
+        assert m["match_status"] == "MATCHED_OVERRIDE"
+        assert m["match_detail"] and m["match_detail"]["match_status"] == "MATCHED_OVERRIDE"
