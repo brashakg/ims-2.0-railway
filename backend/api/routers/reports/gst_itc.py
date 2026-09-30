@@ -2,6 +2,8 @@
 
 import re
 
+from ...services.ap_engine import GST_START
+from ...utils.ist import ist_today
 
 # ============================================================================
 # GST RETURNS - GSTR-3B (Summary Return)
@@ -41,12 +43,27 @@ def _itc_month(year, mon, last_day) -> list:
     ]
 
 
-# A bill that no _itc_month window can place: neither date starts YYYY-MM-DD
-# ('' / '09/05/2026' / missing -- booked before every door validated it with
-# ap_engine.iso_bill_date). It is on no month's return, so the check below
-# reports it in every month until the bill is corrected.
 _ISO_DAY = re.compile(r"^\d{4}-\d{2}-\d{2}")
-_UNDATED = {"invoice_date": {"$not": _ISO_DAY}, "bill_date": {"$not": _ISO_DAY}}
+
+
+def _undated() -> dict:
+    """A bill no return anyone files can place -- neither date is a YYYY-MM-DD
+    day from the start of GST to today in IST, the range ap_engine.iso_bill_date
+    now enforces on every door: '' / '09/05/2026' / missing, or '0202-05-09' /
+    '2062-05-09' (a half-typed or swapped year, booked before that rule). The
+    check below reports it in every month until the bill is corrected."""
+    hi = ist_today().isoformat() + "T23:59:59"
+
+    def off(field):
+        return {
+            "$or": [
+                {field: {"$not": _ISO_DAY}},
+                {field: {"$lt": GST_START.isoformat()}},
+                {field: {"$gt": hi}},
+            ]
+        }
+
+    return {"$and": [off("invoice_date"), off("bill_date")]}
 
 
 def _placement(shops, entity_id, store_gstin, year, mon, last_day) -> dict:
@@ -198,7 +215,7 @@ def _itc_unplaced(db, year, mon, last_day, entity_id=None) -> dict:
     """Booked input credit that NO GSTIN's GSTR-3B counts this month: a bill
     with no company (recipient_entity_id null -- every screen bill before F40),
     a bill whose GSTIN is no shop's, a bill with tax but no stored heads
-    (Table 4 sums the heads), or a bill no month can place (_UNDATED: listed
+    (Table 4 sums the heads), or a bill no month can place (_undated: listed
     in every month, since it is on none). Placement is _itc_match run for
     every shop that has a company (the Cross-Check never counts a company-less shop's credit),
     so this cannot disagree with the returns. Scoped to `entity_id` plus the
@@ -251,7 +268,7 @@ def _itc_unplaced(db, year, mon, last_day, entity_id=None) -> dict:
         q: dict = {
             "status": {"$nin": _DEAD_BILL},
             "itc_eligible": {"$ne": False},
-            "$or": _itc_month(year, mon, last_day) + [_UNDATED],
+            "$or": _itc_month(year, mon, last_day) + [_undated()],
         }
         if entity_id:
             q["recipient_entity_id"] = {"$in": [entity_id, None]}

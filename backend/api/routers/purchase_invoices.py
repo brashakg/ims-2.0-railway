@@ -2627,7 +2627,7 @@ def _check_bill_period_open(db, doc: dict) -> None:
             status_code=422,
             detail=(
                 "This bill has no usable posting date (invoice_date/bill_date "
-                "as YYYY-MM-DD), so the "
+                "as YYYY-MM-DD, from 1 July 2017 to today), so the "
                 "accounting-period lock cannot be checked. Set the bill's date "
                 "before capturing or allocating landed costs."
             ),

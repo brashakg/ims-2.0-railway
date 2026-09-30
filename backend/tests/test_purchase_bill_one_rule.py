@@ -1112,3 +1112,56 @@ class TestReverseChargeLandsWithItsCredit:
         assert xc["rcm"] == {"taxableValue": 1200.0, "cgst": 35.0, "sgst": 35.0, "igst": 0.0, "total": 70.0}
         assert xc["itc"]["total"] == 70.0
 
+
+class TestABillsYearIsReal:
+    """MEDIUM: the one date rule took any calendar date from 0001 to 9999, so
+    '0202-05-09' (a half-typed year) or '2062-05-09' (swapped digits) booked
+    201 on both doors; May's Cross-Check read GSTR-3B ITC 0 and 'credit left
+    off' MATCH while the register carried Rs 360 under period 0202-05."""
+
+    @staticmethod
+    def _tomorrow():
+        from datetime import timedelta
+
+        from api.utils.ist import ist_today
+
+        return (ist_today() + timedelta(days=1)).isoformat()
+
+    BAD = ("0202-05-09", "2062-05-09", "1999-05-09", "2101-05-09", "2017-06-30")
+
+    @pytest.mark.parametrize("bad", BAD + ("tomorrow",))
+    def test_both_doors_refuse_a_date_outside_gst_and_today(self, bad):
+        bad = self._tomorrow() if bad == "tomorrow" else bad
+        db, cli = TestEveryDoorEveryReader()._world()
+        for r in (cli.post(_URL, json=_services(invoice_date=bad)), _door(cli, "V1", **_cash_flow_bill(bill_date=bad))):
+            assert r.status_code == 422, r.text
+            assert "1 July 2017" in r.text
+        assert db["vendor_bills"].count_documents({}) == 0
+
+    def test_the_first_day_of_gst_and_today_book(self):
+        from api.utils.ist import ist_today
+
+        db, cli = TestEveryDoorEveryReader()._world()
+        for n, day in enumerate(("2017-07-01", ist_today().isoformat())):
+            r = cli.post(_URL, json=_services(invoice_number=f"FR-{n}", invoice_date=day))
+            assert r.status_code == 201, r.text
+            assert r.json()["invoice_date"] == day
+
+    def test_a_bill_already_booked_with_an_impossible_year_turns_the_check_red(self):
+        db = TestCreditLeftOffEveryReturnIsFlagged()._world()
+        heads = {"vendor_id": "V1", "taxable_amount": 1000, "tax_amount": 180, "cgst_total": 0.0,
+                 "sgst_total": 0.0, "igst_total": 180.0, "recipient_entity_id": "E1",
+                 "recipient_gstin": BUY_JH, "status": "OUTSTANDING"}
+        db["vendor_bills"].insert_many(
+            [
+                {**heads, "bill_id": "y1", "bill_number": "Y-0202", "bill_date": "0202-05-09", "invoice_date": "0202-05-09"},
+                {**heads, "bill_id": "y2", "bill_number": "Y-2062", "bill_date": "2062-05-09", "invoice_date": "2062-05-09"},
+                {**heads, "bill_id": "ok", "bill_number": "MAY-1", "bill_date": "2026-05-09", "invoice_date": "2026-05-09"},
+            ]
+        )
+        for entity in (None, "E1"):
+            xc = _crosscheck(db, entity)
+            row = _row(xc, "Input credit left off GSTR-3B")
+            assert row["status"] == "MISMATCH" and row["variance"] == 360.0, row
+            assert "Y-0202" in row["note"] and "Y-2062" in row["note"] and "MAY-1" not in row["note"]
+            assert xc["gstr3b"]["itc"]["total"] == 180.0

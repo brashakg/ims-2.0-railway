@@ -132,23 +132,37 @@ def parse_date(s) -> Optional[datetime]:
         return None
 
 
+# GST began on 1 July 2017: no GSTR-3B exists for an earlier month.
+GST_START = date(2017, 7, 1)
+
+
 def iso_bill_date(value) -> str:
     """THE bill-date rule of every bill door (the line-detail invoice and the
-    Cash Flow '+ bill'): a real calendar date written YYYY-MM-DD, returned in
-    that form. Every GST return places a bill in its month by comparing this
-    string (reports.gst_itc._itc_month) and the period lock parses it, so a
-    bill dated '' or '09/05/2026' was on no GSTR-3B and under no lock.
-    ValueError otherwise, for the schema validator to report."""
+    Cash Flow '+ bill'): a real calendar date written YYYY-MM-DD, from the
+    start of GST (GST_START) to today in IST, returned in that form. Every GST
+    return places a bill in its month by comparing this string
+    (reports.gst_itc._itc_month) and the period lock parses it, so a bill
+    dated '' or '09/05/2026' was on no GSTR-3B and under no lock -- and one
+    dated '0202-05-09' (a half-typed year) or '2062-05-09' only on a return
+    nobody files. ValueError otherwise, for the schema validator to report."""
     txt = str(value or "").strip()
+    d = None
     if len(txt) == 10 and txt[4] == txt[7] == "-" and (txt[:4] + txt[5:7] + txt[8:]).isdigit():
         try:
-            return date.fromisoformat(txt).isoformat()
+            d = date.fromisoformat(txt)
         except ValueError:
             pass
-    raise ValueError(
-        "Bill date must be a real date written YYYY-MM-DD, as printed on the "
-        "supplier's bill"
-    )
+    if d is None:
+        raise ValueError(
+            "Bill date must be a real date written YYYY-MM-DD, as printed on "
+            "the supplier's bill"
+        )
+    if not GST_START <= d <= now_ist_naive().date():
+        raise ValueError(
+            f"Bill date {txt} is not between 1 July 2017 (the start of GST) and "
+            "today -- check the year as printed on the supplier's bill"
+        )
+    return d.isoformat()
 
 
 def compute_due_date(bill_date_iso: str, credit_days: int) -> Optional[str]:
