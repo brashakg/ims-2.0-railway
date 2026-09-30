@@ -2,8 +2,9 @@
 
 The intent: cost_price + every derived margin/COGS figure is stripped from an API
 payload for any role not authorised to see cost. SUPERADMIN/ADMIN/ACCOUNTANT always
-see it; CATALOG_MANAGER only in the product-edit form (catalog_edit context);
-AREA_MANAGER and below never. No emoji.
+see it; the managers (area, store, catalogue) see per-unit product cost (the
+"product" context, owner ruling 2026-09-28) but not operational aggregates;
+counter roles never. No emoji.
 """
 import os
 import sys
@@ -28,14 +29,15 @@ def test_can_see_cost_role_matrix():
     assert can_see_cost(_u("SUPERADMIN")) is True
     assert can_see_cost(_u("ADMIN")) is True
     assert can_see_cost(_u("ACCOUNTANT")) is True
-    # CATALOG_MANAGER: only in the edit-form context
-    assert can_see_cost(_u("CATALOG_MANAGER")) is False
-    assert can_see_cost(_u("CATALOG_MANAGER"), context="catalog_edit") is True
-    # AREA_MANAGER and below: never (DECISIONS sec 9)
-    for r in ("AREA_MANAGER", "STORE_MANAGER", "OPTOMETRIST", "SALES_CASHIER",
-              "SALES_STAFF", "WORKSHOP_STAFF"):
+    # The managers: per-unit product cost yes, operational aggregates no.
+    for r in ("AREA_MANAGER", "STORE_MANAGER", "CATALOG_MANAGER"):
         assert can_see_cost(_u(r)) is False, r
-        assert can_see_cost(_u(r), context="catalog_edit") is False, r
+        assert can_see_cost(_u(r), context="product") is True, r
+    # Counter roles: never, in any context (owner ruling D7).
+    for r in ("OPTOMETRIST", "SALES_CASHIER", "SALES_STAFF", "CASHIER",
+              "WORKSHOP_STAFF"):
+        for ctx in ("default", "product", "purchase"):
+            assert can_see_cost(_u(r), context=ctx) is False, (r, ctx)
     # activeRole fallback (no roles[] list)
     assert can_see_cost({"activeRole": "ADMIN"}) is True
     assert can_see_cost({"activeRole": "SALES_CASHIER"}) is False
@@ -76,11 +78,11 @@ def test_accountant_sees_real_cost():
     assert doc["pricing"]["cost_price"] == 2200
 
 
-def test_catalog_manager_edit_form_vs_operational():
-    # edit form -> sees cost
-    edit = mask_cost(_product(), _u("CATALOG_MANAGER"), context="catalog_edit")
+def test_catalog_manager_product_cost_vs_operational():
+    # a product read -> sees the per-unit cost
+    edit = mask_cost(_product(), _u("CATALOG_MANAGER"), context="product")
     assert edit["cost_price"] == 2200
-    # operational list (default context) -> stripped
+    # an operational aggregate (default context) -> stripped
     op = mask_cost(_product(), _u("CATALOG_MANAGER"))
     assert "cost_price" not in op and "cost_price" not in op["pricing"]
 

@@ -1650,8 +1650,8 @@ async def get_catalog_product(
     if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
 
-    # F35: product create/edit form -> CATALOG_MANAGER keeps cost (catalog_edit context).
-    product = mask_cost(product, current_user, context="catalog_edit")
+    # F35: the one product-cost rule, as on the list and /products.
+    product = mask_cost(product, current_user, "product")
     return {"product": product}
 
 
@@ -1914,7 +1914,7 @@ async def create_catalog_product(
         product_data["shopify"] = shopify_result
 
     return {
-        "product": mask_cost(product_data, current_user, context="catalog_edit"),
+        "product": mask_cost(product_data, current_user, "product"),
         "message": "Product created successfully",
         "shopify_sync": shopify_result,
     }
@@ -2336,7 +2336,7 @@ async def update_catalog_product(
         )
 
     return {
-        "product": mask_cost(existing, current_user, context="catalog_edit"),
+        "product": mask_cost(existing, current_user, "product"),
         "message": "Product updated successfully",
     }
 
