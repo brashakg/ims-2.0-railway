@@ -2,6 +2,7 @@
 
 import re
 
+
 # ============================================================================
 # GST RETURNS - GSTR-3B (Summary Return)
 # ============================================================================
@@ -48,10 +49,11 @@ _ISO_DAY = re.compile(r"^\d{4}-\d{2}-\d{2}")
 _UNDATED = {"invoice_date": {"$not": _ISO_DAY}, "bill_date": {"$not": _ISO_DAY}}
 
 
-def _itc_match(shops, entity_id, store_gstin, year, mon, last_day) -> dict:
-    """THE placement of input credit on ONE GSTIN's GSTR-3B Table 4 -- the
-    single query every ITC read (the return, its GSTIN slice, the Cross-Check's
-    count of credit left off every return) is built from.
+def _placement(shops, entity_id, store_gstin, year, mon, last_day) -> dict:
+    """THE placement of a vendor bill on ONE GSTIN's GSTR-3B -- the single
+    query Table 4 (input credit, _itc_match) and Table 3.1(d) (reverse charge,
+    _rcm_from_vendor_bills) are both built from, so a reverse-charge bill's
+    liability and its credit always land on the same return.
 
     A bill counts on the return of the GSTIN it was RECEIVED on: one GSTIN, one
     filing, so every store of a multi-store GSTIN produces the SAME Table 4 and
@@ -69,7 +71,7 @@ def _itc_match(shops, entity_id, store_gstin, year, mon, last_day) -> dict:
         whichever shop it meets first;
       * a legacy purchase bill that names no GSTIN stays company-wide.
     Always scoped to the store's company (recipient_entity_id) when it has one,
-    and to live, ITC-eligible bills dated in the month.
+    and to live bills dated in the month.
     """
     transfer_keep: list = []
     if store_gstin:
@@ -80,7 +82,6 @@ def _itc_match(shops, entity_id, store_gstin, year, mon, last_day) -> dict:
     this_gstin = ["", None] + ([store_gstin] if store_gstin else [])
     vb_match: dict = {
         "status": {"$nin": _DEAD_BILL},
-        "itc_eligible": {"$ne": False},
         "$or": _itc_month(year, mon, last_day),
         "$nor": [
             # A transfer mirror meeting NEITHER keep-condition. source_transfer_id
@@ -99,8 +100,36 @@ def _itc_match(shops, entity_id, store_gstin, year, mon, last_day) -> dict:
     return vb_match
 
 
-def _sum_itc(db, match):
-    """(igst, cgst, sgst) summed from the bills' own stored heads."""
+def _itc_match(shops, entity_id, store_gstin, year, mon, last_day) -> dict:
+    """Table 4: the bills _placement puts on this GSTIN's return that carry
+    input credit -- every ITC read (the return, its GSTIN slice, the
+    Cross-Check's count of credit left off every return) is built from it."""
+    return {
+        **_placement(shops, entity_id, store_gstin, year, mon, last_day),
+        "itc_eligible": {"$ne": False},
+    }
+
+
+def _gstin_bound(shops, store_gstin) -> dict:
+    """The GSTIN-BOUND part of a return (R1): bills received on this GSTIN,
+    plus GSTIN-less transfer mirrors received at any shop carrying it. The
+    rest of a placed figure is company-wide (legacy bills naming no GSTIN),
+    so the Cross-Check counts this part once per GSTIN, the rest once per
+    company."""
+    bound: list = [
+        {
+            "source_transfer_id": {"$exists": True, "$ne": None},
+            "recipient_gstin": {"$in": ["", None]},
+            "to_store_id": {"$in": list(shops)},
+        }
+    ]
+    if store_gstin:
+        bound.insert(0, {"recipient_gstin": store_gstin})
+    return {"$or": bound}
+
+
+def _sum_heads(db, match):
+    """(igst, cgst, sgst, taxable) summed from the bills' own stored heads."""
     pipeline = [
         {"$match": match},
         {
@@ -109,18 +138,17 @@ def _sum_itc(db, match):
                 "igst": {"$sum": "$igst_total"},
                 "cgst": {"$sum": "$cgst_total"},
                 "sgst": {"$sum": "$sgst_total"},
+                "taxable": {"$sum": "$taxable_amount"},
             }
         },
     ]
     res = list(db["vendor_bills"].aggregate(pipeline))
     if res:
         a = res[0]
-        return (
-            float(a.get("igst", 0.0) or 0.0),
-            float(a.get("cgst", 0.0) or 0.0),
-            float(a.get("sgst", 0.0) or 0.0),
+        return tuple(
+            float(a.get(k, 0.0) or 0.0) for k in ("igst", "cgst", "sgst", "taxable")
         )
-    return 0.0, 0.0, 0.0
+    return 0.0, 0.0, 0.0, 0.0
 
 
 def _itc_from_vendor_bills(db, active_store, year, mon, last_day):
@@ -133,9 +161,9 @@ def _itc_from_vendor_bills(db, active_store, year, mon, last_day):
         return 0.0, 0.0, 0.0
     try:
         entity_id, store_gstin, shops = _itc_store_scope(db, active_store)
-        return _sum_itc(
+        return _sum_heads(
             db, _itc_match(shops, entity_id, store_gstin, year, mon, last_day)
-        )
+        )[:3]
     except Exception:
         pass
     return 0.0, 0.0, 0.0
@@ -159,17 +187,8 @@ def _itc_gstin_from_vendor_bills(db, active_store, year, mon, last_day):
         return 0.0, 0.0, 0.0
     try:
         entity_id, store_gstin, shops = _itc_store_scope(db, active_store)
-        bound: list = [
-            {
-                "source_transfer_id": {"$exists": True, "$ne": None},
-                "recipient_gstin": {"$in": ["", None]},
-                "to_store_id": {"$in": shops},
-            }
-        ]
-        if store_gstin:
-            bound.insert(0, {"recipient_gstin": store_gstin})
         match = _itc_match(shops, entity_id, store_gstin, year, mon, last_day)
-        return _sum_itc(db, {"$and": [match, {"$or": bound}]})
+        return _sum_heads(db, {"$and": [match, _gstin_bound(shops, store_gstin)]})[:3]
     except Exception:
         pass
     return 0.0, 0.0, 0.0

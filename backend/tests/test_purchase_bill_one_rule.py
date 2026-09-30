@@ -1033,3 +1033,82 @@ class TestTheGrnDraftNamesTheCatalogueProduct:
         assert r.status_code == 200, r.text
         (ln,) = r.json()["lines"]
         assert (ln["description"], ln["hsn"], ln["qty"]) == ("Carrera CA 8895 807", "9003", 2)
+
+
+# ===========================================================================
+# Panel round 5 -- reverse charge lands with its credit; a bill's year is real
+# ===========================================================================
+
+
+def _bvopl(pune_first=True):
+    """BVOPL (E1) holding 20... (S1, Jharkhand) and 27... (PUNE, Maharashtra)."""
+    shops = [
+        {"store_id": "PUNE", "entity_id": "E1", "state_code": "27", "gstin": BUY_MH},
+        {"store_id": "S1", "entity_id": "E1", "state_code": "20", "gstin": BUY_JH},
+    ]
+    return _mongo(
+        [
+            (
+                {
+                    "entity_id": "E1",
+                    "name": "BVOPL",
+                    "gstins": [
+                        {"gstin": BUY_JH, "state_code": "20", "is_primary": True},
+                        {"gstin": BUY_MH, "state_code": "27"},
+                    ],
+                },
+                shops if pune_first else shops[::-1],
+            )
+        ]
+    )
+
+
+class TestReverseChargeLandsWithItsCredit:
+    """MEDIUM: Table 3.1(d) was still placed by COMPANY while Table 4 moved to
+    the GSTIN. A reverse-charge bill received on PUNE's 27... (CGST 25 + SGST
+    25) charged Rs 50 of reverse charge on the Jharkhand return (S1, cash CGST
+    25 / SGST 25, ITC 0) -- a Maharashtra bill paid on the wrong registration
+    with nothing to offset it."""
+
+    ZERO = {"integratedTax": 0.0, "centralTax": 0.0, "stateTax": 0.0, "cess": 0.0}
+    HALVES = {"integratedTax": 0.0, "centralTax": 25.0, "stateTax": 25.0, "cess": 0.0}
+
+    @pytest.mark.parametrize("pune_first", (True, False))
+    def test_the_liability_and_the_credit_are_on_one_return(self, pune_first):
+        db = _bvopl(pune_first)
+        cli = _app(db)
+        TestTheFormsShopDecidesPreviewAndBooking._as(cli, "S1")
+        r = cli.post(
+            _URL,
+            json=_services(
+                store_id="PUNE",
+                reverse_charge=True,
+                lines=[{"description": "Freight", "qty": 1, "unit_price": 1000, "gst_rate": 5}],
+            ),
+        )
+        assert r.status_code == 201, r.text
+        doc = r.json()
+        assert doc["recipient_gstin"] == BUY_MH
+        assert (doc["cgst_total"], doc["sgst_total"], doc["igst_total"]) == (25.0, 25.0, 0.0)
+
+        reports._get_raw_db = lambda: db
+        jh = reports._compute_gstr3b("2026-05", "S1")
+        mh = reports._compute_gstr3b("2026-05", "PUNE")
+        for key in ("inwardSuppliesReverseCharge", "taxPaidCash", "itcAvailable"):
+            assert jh[key] == self.ZERO, (key, jh[key])
+            assert mh[key] == self.HALVES, (key, mh[key])
+        assert (jh["inwardSuppliesReverseChargeValue"], mh["inwardSuppliesReverseChargeValue"]) == (0.0, 1000.0)
+
+        # A legacy reverse-charge bill naming no GSTIN is company-wide, like
+        # its credit: on both returns, counted ONCE by the Cross-Check.
+        db["vendor_bills"].insert_one(
+            {"bill_id": "old", "bill_number": "OLD-1", "vendor_id": "V1", "bill_date": "2026-05-04",
+             "invoice_date": "2026-05-04", "reverse_charge": True, "recipient_entity_id": "E1",
+             "recipient_gstin": None, "taxable_amount": 200.0, "tax_amount": 20.0,
+             "cgst_total": 10.0, "sgst_total": 10.0, "igst_total": 0.0, "status": "OUTSTANDING"}
+        )
+        assert reports._compute_gstr3b("2026-05", "S1")["inwardSuppliesReverseCharge"]["centralTax"] == 10.0
+        xc = _crosscheck(db, "E1")["gstr3b"]
+        assert xc["rcm"] == {"taxableValue": 1200.0, "cgst": 35.0, "sgst": 35.0, "igst": 0.0, "total": 70.0}
+        assert xc["itc"]["total"] == 70.0
+

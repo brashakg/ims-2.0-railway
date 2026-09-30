@@ -207,6 +207,27 @@ def _itc_gstin(rep: Dict[str, Any]) -> Dict[str, float]:
     }
 
 
+def _rcm_parts(rep: Dict[str, Any]) -> tuple:
+    """(company-wide, GSTIN-bound) Table 3.1(d) of a per-store report, each as
+    {c, s, i, t}. Placed like the credit (gst_itc._placement), so it splits
+    the same way; a legacy dict without the split is all company-wide."""
+    tot = rep.get("inwardSuppliesReverseCharge") or {}
+    g = rep.get("inwardSuppliesReverseChargeGstin") or {}
+    whole = {
+        "c": _f(tot.get("centralTax")),
+        "s": _f(tot.get("stateTax")),
+        "i": _f(tot.get("integratedTax")),
+        "t": _f(rep.get("inwardSuppliesReverseChargeValue")),
+    }
+    bound = {
+        "c": _f(g.get("centralTax")),
+        "s": _f(g.get("stateTax")),
+        "i": _f(g.get("integratedTax")),
+        "t": _f(g.get("taxableValue")),
+    }
+    return {k: whole[k] - bound[k] for k in whole}, bound
+
+
 def aggregate_gstr3b(
     store_reports: List[Dict[str, Any]],
     entity_ids: Optional[List[Any]] = None,
@@ -224,9 +245,10 @@ def aggregate_gstr3b(
     received at any shop carrying that GSTIN -- gst_itc._itc_match) differs between
     sibling stores of one entity with DIFFERENT GSTINs; it is counted ONCE per
     GSTIN, so a bill is never claimed on two registrations. The company-wide
-    remainder (legacy bills naming no GSTIN) and RCM filter on
-    recipient_entity_id alone, so EVERY store of an entity returns the SAME
-    figure; they are counted ONCE per entity. Without this split the entity
+    remainder (legacy bills naming no GSTIN) filters on recipient_entity_id
+    alone, so EVERY store of an entity returns the SAME figure; it is counted
+    ONCE per entity. RCM (Table 3.1(d)) is placed by the same rule as the
+    credit and split the same way (_rcm_parts). Without this split the entity
     figure depended on which store Mongo listed first (order-dependent ITC and
     net cash) -- the R1 defect this closes. A store whose entity_id is falsy
     contributes ZERO ITC/RCM (its per-store figure is org-wide, not
@@ -294,33 +316,36 @@ def aggregate_gstr3b(
         if not (entity_ids is None or bool(key)):
             continue
 
-        # Regular ITC + RCM are entity-scoped -> count ONCE per entity.
+        rcm_reg, rcm_bound = _rcm_parts(rep)
+
+        # Company-wide ITC + RCM -> count ONCE per entity.
         if key not in regular_taken:
             regular_taken.add(key)
             reg = _itc_regular(rep)
             b["itc_c"] += reg["c"]
             b["itc_s"] += reg["s"]
             b["itc_i"] += reg["i"]
-            rcm = rep.get("inwardSuppliesReverseCharge") or {}
-            b["rcm_c"] += _f(rcm.get("centralTax"))
-            b["rcm_s"] += _f(rcm.get("stateTax"))
-            b["rcm_i"] += _f(rcm.get("integratedTax"))
-            b["rcm_taxable"] += _f(rep.get("inwardSuppliesReverseChargeValue"))
+            b["rcm_c"] += rcm_reg["c"]
+            b["rcm_s"] += rcm_reg["s"]
+            b["rcm_i"] += rcm_reg["i"]
+            b["rcm_taxable"] += rcm_reg["t"]
 
-        # GSTIN-bound ITC -> count ONCE per GSTIN (legacy per-report path or a
-        # report with no GSTIN sums it in, since those keys are already
-        # distinct per filing / per store).
+        # GSTIN-bound ITC + RCM -> count ONCE per GSTIN (legacy per-report path
+        # or a report with no GSTIN sums it in, since those keys are already
+        # distinct per filing / per store). Every store of one GSTIN reports
+        # the same slice, so which store comes first cannot matter.
+        if entity_ids is not None and gstin:
+            if gstin in gstin_taken:
+                continue
+            gstin_taken.add(gstin)
         trf = _itc_gstin(rep)
-        if trf["c"] or trf["s"] or trf["i"]:
-            if entity_ids is not None and gstin:
-                take_trf = gstin not in gstin_taken
-                gstin_taken.add(gstin)
-            else:
-                take_trf = True
-            if take_trf:
-                b["itc_c"] += trf["c"]
-                b["itc_s"] += trf["s"]
-                b["itc_i"] += trf["i"]
+        b["itc_c"] += trf["c"]
+        b["itc_s"] += trf["s"]
+        b["itc_i"] += trf["i"]
+        b["rcm_c"] += rcm_bound["c"]
+        b["rcm_s"] += rcm_bound["s"]
+        b["rcm_i"] += rcm_bound["i"]
+        b["rcm_taxable"] += rcm_bound["t"]
 
     vals = list(buckets.values())
     out_taxable = sum(b["out_taxable"] for b in vals)
