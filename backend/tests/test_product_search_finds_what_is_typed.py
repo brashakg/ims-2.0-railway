@@ -180,6 +180,9 @@ def _ids(repo, q):
         ("rayban", {"P-RB", "P-RB-OLD"}),
         ("RAY-BAN", {"P-RB", "P-RB-OLD"}),
         ("ray ban 3025", {"P-RB"}),
+        # A hyphen typed as its own word is spacing, not something to match.
+        ("ray - ban", {"P-RB", "P-RB-OLD"}),
+        ("CA - 8895", {"P-CAR"}),
         # Colours: the colour word under attributes and the flat colour.
         ("black", {"P-CAR", "P-OAK"}),
         ("g-15", {"P-RB"}),
@@ -241,6 +244,53 @@ def test_every_colour_field_the_catalogue_stores_is_searched():
     assert {f"attributes.{k}" for k in words - {"colour_code"}} <= set(
         ProductRepository.NAME_SEARCH_FIELDS
     )
+
+
+@pytest.fixture
+def lens():
+    """A contact lens whose name carries regex characters: brackets, a plus
+    and a dot."""
+    yield from _repo_over(
+        [
+            {
+                "_id": "P-CL",
+                "product_id": "P-CL",
+                "sku": "CL-ACU-OASYS-P250",
+                "brand": "Acuvue",
+                "model": "Oasys (Moist) +2.50",
+                "is_active": True,
+            },
+            {
+                "_id": "P-TIT",
+                "product_id": "P-TIT",
+                "sku": "WT-TIT-T1500-C1",
+                "brand": "Titan",
+                "model": "T1500",
+                "is_active": True,
+            },
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    "typed, expected",
+    [
+        # Typed characters are matched as themselves, never as a pattern:
+        # unescaped, '(' and '+2.50' are broken patterns (no results at all),
+        # '.' matches every product and 'a|b' matches any 'a' or 'b'.
+        ("(moist)", {"P-CL"}),
+        ("+2.50", {"P-CL"}),
+        ("(", {"P-CL"}),
+        (".", {"P-CL"}),
+        ("a|b", set()),
+        (".*", set()),
+        ("c++", set()),
+        ("[", set()),
+        ("\\", set()),
+    ],
+)
+def test_regex_characters_are_matched_as_typed(lens, typed, expected):
+    assert _ids(lens, typed) == expected
 
 
 # ---------------------------------------------------------------------------

@@ -213,15 +213,17 @@ class ProductRepository(BaseRepository):
         ever is not."""
         clauses = []
         for tok in (text or "").split():
-            code = {"$regex": "^" + re.escape(tok), "$options": "i"}
-            ors = [{f: code} for f in self.CODE_SEARCH_FIELDS]
             letters = [c for c in tok if c != "-"]
-            if letters:
-                name = {
-                    "$regex": r"[\s\-]*".join(re.escape(c) for c in letters),
-                    "$options": "i",
-                }
-                ors += [{f: name} for f in self.NAME_SEARCH_FIELDS]
+            if not letters:
+                # A lone hyphen ('ray - ban') is spacing, not a word to match.
+                continue
+            code = {"$regex": "^" + re.escape(tok), "$options": "i"}
+            name = {
+                "$regex": r"[\s\-]*".join(re.escape(c) for c in letters),
+                "$options": "i",
+            }
+            ors = [{f: code} for f in self.CODE_SEARCH_FIELDS]
+            ors += [{f: name} for f in self.NAME_SEARCH_FIELDS]
             clauses.append({"$or": ors})
         if not clauses:
             return extra
