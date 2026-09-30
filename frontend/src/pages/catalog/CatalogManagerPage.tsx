@@ -66,6 +66,7 @@ import {
   docImages,
   docMrp,
   docOffer,
+  isOrderedDraft,
   type CatalogDrawerItem,
 } from './CatalogProductDrawer';
 import { writeReviewQueue } from './reviewQueue';
@@ -275,7 +276,7 @@ export function CatalogManagerPage({
           docs.map((doc) =>
             // A manager's typed-in draft (audit C1) already HAS its billing
             // row: it opens in the product editor, never the import approve.
-            doc.spine_product_id
+            isOrderedDraft(doc)
               ? { kind: 'spine' as const, doc: { ...doc, product_id: doc.spine_product_id } }
               : { kind: 'imported' as const, doc }
           )
@@ -790,7 +791,7 @@ export function CatalogManagerPage({
                   const mrp = docMrp(doc);
                   const offer = docOffer(doc);
                   const hasDiscount = mrp !== null && offer !== null && offer < mrp;
-                  const orderedDraft = Boolean(doc.spine_product_id);
+                  const orderedDraft = isOrderedDraft(doc);
                   const inactive = doc.is_active === false && !orderedDraft;
                   const needsReview = it.kind === 'imported' && Boolean(doc.needs_review);
                   const hasPhoto = doc.has_photo as boolean | undefined;
