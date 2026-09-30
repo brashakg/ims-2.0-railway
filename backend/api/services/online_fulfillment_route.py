@@ -31,7 +31,8 @@ orders sitting at that shop's location).
                      GSTIN holds the order (``seller_problem``, the one seller
                      check), released by Re-map (``reroute_held_order``).
     shipping shop  = otherwise assigned if it covers, else the first MAPPED shop
-                     that covers the whole order (most stock first), else the
+                     that covers the whole order (one that passes the seller
+                     check first, then the most stock), else the
                      assigned shop (the claim under-claims and
                      shopify_ingest._record_stock_miss holds the order + tasks
                      the shop: fail loud, IMS never splits an order itself).
@@ -46,7 +47,9 @@ orders sitting at that shop's location).
                      relocation is on. One that cannot be moved is
                      FO_AT_OTHER_SHOP: loud + the order is held. While a move
                      is pending the order is held too; the move lifts that
-                     hold, a failed move keeps it (MOVE_FAILED); a move for a
+                     hold, a failed move keeps it (MOVE_FAILED, released by
+                     Re-map, which re-reads the routing and sends the move
+                     again -- never re-billing the order); a move for a
                      cancelled or human-released order is SKIPPED, never sent.
                      A target whose claim came up short (a race after the
                      count) still gets its move: the claim and the invoice
@@ -204,6 +207,26 @@ def _problem(code: str, message: str) -> Dict[str, str]:
     return {"code": code, "message": message}
 
 
+def _open_fos(routing: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The fulfillment orders of a routing read that still need shipping --
+    what route_order routes on, and what Re-map requires before it touches
+    an order (none: fulfilled or closed in Shopify, or not read)."""
+    return [
+        f
+        for f in (routing or {}).get("fulfillment_orders") or []
+        if isinstance(f, dict) and f.get("id") and f.get("status") in _ACTIVE_FO
+    ]
+
+
+def _gstin(doc: Optional[Dict[str, Any]]) -> str:
+    return str((doc or {}).get("gstin") or "").strip()
+
+
+def _name(doc: Optional[Dict[str, Any]]) -> str:
+    doc = doc or {}
+    return doc.get("store_name") or doc.get("store_code") or doc.get("store_id") or "the shop"
+
+
 def route_order(
     db, items: List[Dict[str, Any]], routing: Optional[Dict[str, Any]]
 ) -> Dict[str, Any]:
@@ -239,12 +262,17 @@ def route_order(
             problems.append(_problem("ROUTING_UNREAD", f"The shop list could not be read: {exc}"))
     mapped = _mapped(shops)
     shop_of = {gid: sid for sid, gid in mapped.items()}
+    doc_of = {s.get("store_id"): s for s in shops}
 
-    fos = [
-        f
-        for f in routing.get("fulfillment_orders") or []
-        if isinstance(f, dict) and f.get("id") and f.get("status") in _ACTIVE_FO
-    ]
+    def fits(store_id: Optional[str], gstin: Optional[str] = None) -> bool:
+        """The shop passes the seller check's GSTIN rule (its own state's
+        GSTIN; a split leg also shares the billing shop's GSTIN). A move
+        prefers such a shop: IMS never holds an order for a shop it chose
+        while a clean shop could take it."""
+        doc = doc_of.get(store_id)
+        return gstin_problem(doc) is None and (gstin is None or _gstin(doc) == gstin)
+
+    fos = _open_fos(routing)
     if routing.get("error"):
         problems.append(_problem("ROUTING_UNREAD", str(routing["error"])))
     elif "fulfillment_orders" in routing and not fos:
@@ -323,10 +351,11 @@ def route_order(
     # routing to follow and nothing to move: IMS never guesses a seller from
     # stock counts -- the documented fallback ships it, or no shop does (loud).
     if need and fos and not legs and not covers(assigned) and _relocation_enabled():
-        # A move needs a destination location: only a MAPPED shop can take it.
+        # A move needs a destination location: only a MAPPED shop can take it;
+        # one that passes the seller check first, then the most stock.
         best = sorted(
             (s for s in mapped if s and s != assigned and covers(s)),
-            key=lambda s: -sum(stock[pid].get(s, 0) for pid in need),
+            key=lambda s: (not fits(s), -sum(stock[pid].get(s, 0) for pid in need)),
         )
         if best:
             target = best[0]
@@ -339,7 +368,8 @@ def route_order(
     fo_ids: Optional[List[str]] = None
     hold_reason: Optional[str] = None
     if legs:
-        ships = _follow_split(legs, pid_of, stock, mapped)
+        home = _gstin(doc_of.get(assigned))  # the largest leg's shop bills
+        ships = _follow_split(legs, pid_of, stock, mapped, lambda t: fits(t, home))
         target = ships[assigned]  # the largest fulfillment order's shop bills
         reason = "ASSIGNED" if target == assigned else "MOVED"
         split = [
@@ -475,14 +505,15 @@ def _shopify_split(fos, shop_of, pid_of, need) -> Optional[Dict[str, Dict[str, i
     return legs if got == need else None
 
 
-def _follow_split(legs, pid_of, stock, mapped) -> Dict[str, str]:
+def _follow_split(legs, pid_of, stock, mapped, fits) -> Dict[str, str]:
     """Q4 on Shopify's split: ``{leg shop: the shop that claims and ships
     that leg}``. A leg shop holding its own part ships it. A leg shop SHORT
     for its own part hands the whole leg (its fulfillment orders move) to ONE
-    mapped shop that holds it on top of what that shop already ships -- a
-    shop already in the order first (Q2: fewest locations), then the most
-    stock -- never INTO a short shop. None does, or relocation is off: the
-    leg stays, and its claim fails loud AT that shop."""
+    mapped shop that holds it on top of what that shop already ships -- one
+    that ``fits`` the seller check (its own state's GSTIN, the billing shop's
+    GSTIN) first, then a shop already in the order (Q2: fewest locations),
+    then the most stock -- never INTO a short shop. None does, or relocation
+    is off: the leg stays, and its claim fails loud AT that shop."""
     want: Dict[str, Dict[str, int]] = {}
     for shop, leg in legs.items():
         w = want.setdefault(shop, {})
@@ -505,7 +536,10 @@ def _follow_split(legs, pid_of, stock, mapped) -> Dict[str, str]:
         cands = [t for t in mapped if t and t != s and holds(t, want[s])]
         if not cands:
             continue
-        t = min(cands, key=lambda t: (not load.get(t), -sum(stock[p].get(t, 0) for p in want[s]), t))
+        t = min(
+            cands,
+            key=lambda t: (not fits(t), not load.get(t), -sum(stock[p].get(t, 0) for p in want[s]), t),
+        )
         for p, q in want[s].items():
             load.setdefault(t, {})[p] = load.get(t, {}).get(p, 0) + q
         load[s] = {}
@@ -519,10 +553,8 @@ def split_seller_problem(
     """One order, one tax invoice, one GSTIN (Q1): a Shopify split across shops
     registered under DIFFERENT GSTINs cannot be invoiced from the billing
     shop's GSTIN alone. None when every shop shares the seller's GSTIN."""
-    seller = str((seller_doc or {}).get("gstin") or "").strip()
-    other = sorted(
-        {str((d or {}).get("gstin") or "").strip() or "(none)" for d in leg_docs} - {seller}
-    )
+    seller = _gstin(seller_doc)
+    other = sorted({_gstin(d) or "(none)" for d in leg_docs} - {seller})
     if not other:
         return None
     return _problem(
@@ -536,30 +568,72 @@ def split_seller_problem(
     )
 
 
+def _gstin_fault(doc: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Why a shop has no GSTIN of its OWN state (None: it has). The shop's
+    state is org_validation.shop_state_code -- the read the GST split uses."""
+    from .org_validation import gstin_state_code, shop_state_code
+
+    gstin = _gstin(doc)
+    if not gstin:
+        return "has no GSTIN"
+    state = shop_state_code(doc)
+    if state and gstin_state_code(gstin) != state:
+        return (
+            f"is in state {state} but its GSTIN {gstin} is registered in "
+            f"state {gstin_state_code(gstin)}"
+        )
+    return None
+
+
 def gstin_problem(store_doc: Optional[Dict[str, Any]]) -> Optional[Dict[str, str]]:
     """The shipping shop must invoice from its OWN GSTIN for its state (Q1).
-    Checks the GSTIN the invoice door reads (store.gstin): present, and when
-    the shop carries a state, registered in that state. None when fine."""
-    from .org_validation import gstin_state_code, resolve_state_code
-
-    doc = store_doc if isinstance(store_doc, dict) else {}
-    name = doc.get("store_name") or doc.get("store_code") or doc.get("store_id") or "the shop"
-    gstin = str(doc.get("gstin") or "").strip()
-    if not gstin:
+    Checks the GSTIN the invoice door reads (store.gstin): present, and
+    registered in the shop's own state. None when fine."""
+    fault = _gstin_fault(store_doc)
+    if not fault:
+        return None
+    name = _name(store_doc)
+    if fault == "has no GSTIN":
         return _problem(
             "SHOP_GSTIN_MISSING",
             f"{name} has no GSTIN, so the tax invoice for this online order cannot "
             "be issued from it. Set the shop's GSTIN in Organization.",
         )
-    state = resolve_state_code(doc.get("state_code"), doc.get("state"))
-    if state and gstin_state_code(gstin) != state:
-        return _problem(
-            "SHOP_GSTIN_MISSING",
-            f"{name} is in state {state} but its GSTIN {gstin} is registered in "
-            f"state {gstin_state_code(gstin)}. Set the shop's GSTIN for its own "
-            "state in Organization.",
-        )
-    return None
+    return _problem(
+        "SHOP_GSTIN_MISSING",
+        f"{name} {fault}. Set the shop's GSTIN for its own state in Organization.",
+    )
+
+
+def _leg_gstin_problem(
+    leg_doc: Optional[Dict[str, Any]], seller_doc: Optional[Dict[str, Any]]
+) -> Optional[Dict[str, str]]:
+    """gstin_problem for a shop shipping a LEG of Shopify's split, worded for
+    what it is: the tax invoice is the BILLING shop's; the leg lacks a
+    registration of its own state for the goods leaving it."""
+    from .org_validation import gstin_state_code, shop_state_code
+
+    fault = _gstin_fault(leg_doc)
+    if not fault:
+        return None
+    leg, seller, sg = _name(leg_doc), _name(seller_doc), _gstin(seller_doc) or "(none)"
+    # A GSTIN is one state's: a leg in another state can never be under the
+    # seller's, so only the move can fix it.
+    state = shop_state_code(leg_doc)
+    fix = (
+        f"if {leg} is registered under {sg}, set that GSTIN on {leg} in "
+        "Organization and clear the hold; otherwise "
+        if not state or state == gstin_state_code(sg)
+        else ""
+    )
+    return _problem(
+        "SHOP_GSTIN_MISSING",
+        f"{leg} ships part of this order and {fault}. The tax invoice is "
+        f"{seller}'s ({sg}), so the goods leaving {leg} must be covered by that "
+        f"registration. The order is on hold: {fix}move its fulfillment order to "
+        f"a shop under {sg} in Shopify admin (Orders > order > Change location) "
+        "and press Re-map on the Online orders screen.",
+    )
 
 
 def seller_unknown_problem(bucket_id: Optional[str]) -> Dict[str, str]:
@@ -607,17 +681,30 @@ def stored_seller_problem(order: Optional[Dict[str, Any]], find_store=None) -> O
     return seller_problem(order, store_doc, finder)
 
 
-def seller_held(order: Optional[Dict[str, Any]]) -> bool:
-    """The order's hold is the one its seller check put on it (the stock-hold
-    reason IS a seller problem's text) -- what Re-map re-routes."""
+def _held_on(order: Optional[Dict[str, Any]], codes) -> bool:
+    """The order's hold is the one a route problem with one of ``codes`` put
+    on it (the stock-hold reason IS that problem's text)."""
     order = order or {}
     route = order.get("fulfillment_route")
     if not order.get("fulfillment_hold") or not isinstance(route, dict):
         return False
     return order.get("stock_hold_reason") in {
         p.get("message") for p in route.get("problems") or []
-        if isinstance(p, dict) and p.get("code") in SELLER_CODES
+        if isinstance(p, dict) and p.get("code") in codes
     }
+
+
+def seller_held(order: Optional[Dict[str, Any]]) -> bool:
+    """The order's hold is the one its seller check put on it: no tax invoice
+    was ever issued from it (every door refused), so Re-map may re-bill it."""
+    return _held_on(order, SELLER_CODES)
+
+
+def reroutable(order: Optional[Dict[str, Any]]) -> bool:
+    """The holds Re-map releases (reroute_held_order): a seller hold, and a
+    failed fulfillment-order move -- the move's only other door is a human
+    move in Shopify admin, which Shopify may refuse for good."""
+    return _held_on(order, SELLER_CODES + ("MOVE_FAILED",))
 
 
 def seller_problem(
@@ -656,7 +743,7 @@ def seller_problem(
         leg_docs.append(doc or {"store_id": sid})
     return (
         gstin_problem(store_doc)
-        or next((p for p in map(gstin_problem, leg_docs) if p), None)
+        or next((p for p in (_leg_gstin_problem(d, store_doc) for d in leg_docs) if p), None)
         or split_seller_problem(store_doc, leg_docs)
     )
 
@@ -840,9 +927,12 @@ async def move_fulfillment_orders(db, order_id: str) -> Dict[str, Any]:
             "MOVE_FAILED",
             f"IMS could not move {len(failed)} fulfillment order(s) to the "
             f"shipping shop's Shopify location ({failed[0].get('error')}). The "
-            "order is on hold: move it in Shopify admin (Orders > order > Change "
-            "location), then clear the hold -- until then Shopify has it (and "
-            "the unit it committed) at the other shop.",
+            "order is on hold: once Shopify can take the move (if it says the "
+            "location does not stock the item, stock it there in Shopify admin), "
+            "press Re-map on the Online orders screen -- IMS re-reads the routing "
+            "and sends the move again; or move it in Shopify admin yourself "
+            "(Orders > order > Change location), then clear the hold. Until then "
+            "Shopify has it (and the unit it committed) at the other shop.",
         )
         route["problems"] = list(route.get("problems") or []) + [problem]
         route["hold_reason"] = problem["message"]
@@ -925,26 +1015,44 @@ def _close_tasks(refs: List[str], note: str) -> None:
 
 
 async def reroute_held_order(db, order_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Re-route ONE booked online order its seller check HELD (SELLER_UNKNOWN,
-    SPLIT_SELLERS, SHOP_GSTIN_MISSING; ``seller_held``) -- the door those
-    holds' text points at (Re-map on the Online orders screen). Without it the
-    booking-time stamp was frozen: the hold could never be released, so a
-    paid sale could never be invoiced or filed.
+    """Re-route ONE booked online order held on its seller check
+    (SELLER_UNKNOWN, SPLIT_SELLERS, SHOP_GSTIN_MISSING) or on a failed
+    fulfillment-order move (MOVE_FAILED) -- ``reroutable``, the door those
+    holds' text points at (Re-map on the Online orders screen).
 
     Reads Shopify's routing FRESH (a human may have moved its fulfillment
     orders in Shopify admin), gives back the units the booking claimed,
     routes it again with THE rule (route_order), claims again with THE claim
-    (shopify_ingest._claim_online_units), and -- when the shipping shop
-    changed -- re-bills it there: a new invoice number from that shop's
-    series and its GST split (shopify_ingest._seller_gst_fields); the old
-    number is kept as ``superseded_invoice_number`` (no tax invoice was ever
-    issued or filed on it: the seller check refused every door). Still a
-    seller problem -> it stays held under the new reason. Refused, the order
-    untouched: not seller-held, dispatched/cancelled, a refund or return on
-    it, routing unreadable (dark included), another Re-map mid-flight."""
+    (shopify_ingest._claim_online_units), re-splits its GST against the shop
+    as it is NOW (shopify_ingest.reseal_seller_gst -- the booking froze the
+    split from the shop doc the seller check refused) and, when the shipping
+    shop changed, re-bills it there: a new invoice number from that shop's
+    series. Only a SELLER hold is ever re-billed (the seller check refused
+    every door, so no tax invoice was issued from the old number, kept as
+    ``superseded_invoice_number``); a MOVE_FAILED order may have been
+    invoiced, so a route to another shop is refused for it.
+
+    THE filing-date rule (every return reads ``created_at``: GSTR-1, GSTR-3B,
+    Tally, the GST summary and cross-check): an order is filed in the month
+    its tax invoice is dated -- ``invoice_date`` and ``created_at`` are one
+    moment. A re-issue (new number) is dated NOW and moves ``created_at`` with
+    it (the booking moment kept as ``booked_at``): the held goods have not
+    left, so the invoice issued now fixes the time of supply (CGST s.12(2)(a)
+    with s.31(1)(a)); backdating it to the booking would date a document
+    before it existed and could land it in a return already filed, while
+    today's month is never filed yet. An order released at the same shop
+    keeps its number and its date -- both.
+
+    Still a problem -> it stays held under the new reason. Refused, the order
+    untouched: not reroutable; dispatched, cancelled or fulfilled (in IMS, or
+    Shopify shows it fulfilled / no open fulfillment order in the fresh read);
+    a refund or return on it; routing unreadable (dark included); the
+    booking's claim not settled yet or a move on the wire; another Re-map
+    mid-flight; the fresh route names no shop (or, for a MOVE_FAILED hold,
+    another shop)."""
     from datetime import datetime, timedelta, timezone
 
-    from .shopify_ingest import _claim_online_units, _seller_gst_fields
+    from .shopify_ingest import _claim_online_units, reseal_seller_gst
 
     coll = _orders(db)
     order = coll.find_one({"order_id": order_id}) or {}
@@ -958,11 +1066,26 @@ async def reroute_held_order(db, order_id: str, payload: Dict[str, Any]) -> Dict
             "message": f"Not re-routed: {why}",
         }
 
-    if not seller_held(order):
-        return refused("the order is not held on its seller (GSTIN) check")
+    if not reroutable(order):
+        return refused(
+            "the order is not held on its seller (GSTIN) check or a failed "
+            "fulfillment-order move"
+        )
+    seller = seller_held(order)
     status = str(order.get("status") or "").upper()
     if status not in ("CONFIRMED", "PROCESSING") or order.get("shopify_fulfillment_id"):
         return refused(f"the order is {status or 'not open'} or already fulfilled")
+    shipped = str(order.get("fulfillment_status") or "UNFULFILLED").upper()
+    if shipped != "UNFULFILLED":
+        return refused(f"Shopify shows it {shipped}: goods may have left -- resolve it by hand")
+    # The creator's claim has not settled (it stamps fulfillment_breakdown
+    # once it has): re-claiming now would claim the order twice. A crashed
+    # Re-map leaves its own lease behind and is taken over below.
+    if "fulfillment_breakdown" not in order and not order.get("reroute_lease_at"):
+        return refused("its booking is still claiming stock -- press Re-map again in a moment")
+    old_route = order.get("fulfillment_route") or {}
+    if any(m.get("status") == "SENDING" for m in old_route.get("moves") or []):
+        return refused("a fulfillment-order move for it is on the wire -- press Re-map again in a moment")
     try:
         if db.get_collection("returns").count_documents({"order_id": order_id}):
             return refused("a refund or return is booked against it -- resolve it by hand")
@@ -974,6 +1097,11 @@ async def reroute_held_order(db, order_id: str, payload: Dict[str, Any]) -> Dict
             "Shopify's routing could not be read ("
             + str(routing.get("dark") or routing.get("error") or "unknown")
             + ")"
+        )
+    if not _open_fos(routing):
+        return refused(
+            "Shopify shows no open fulfillment order for it (fulfilled or closed "
+            "in Shopify) -- resolve it by hand"
         )
     now = datetime.now(timezone.utc)
     stale = (now - timedelta(seconds=_REROUTE_LEASE_SECONDS)).isoformat()
@@ -989,23 +1117,41 @@ async def reroute_held_order(db, order_id: str, payload: Dict[str, Any]) -> Dict
 
         items = order.get("items") or []
         ref = order.get("order_number") or order_id
-        old_route = order.get("fulfillment_route") or {}
         # The order's own claimed units are SOLD: route_order must count them.
         freed = get_stock_repository().release_sold_units_for_order(order_id, reason="ONLINE_REROUTE")
         if getattr(freed, "incomplete", False):  # a re-run releases the rest (idempotent)
             return refused("not every claimed unit could be given back; press Re-map again")
         try:
             route = route_order(db, items, routing)
-            store_id = route.get("store_id") or order.get("store_id")
+            store_id = route.get("store_id")
+            # Never the old shop by default (nothing would be claimed), never
+            # a shop picked while the routing itself was unread.
+            if not store_id or any(p["code"] == "ROUTING_UNREAD" for p in route["problems"]):
+                raise ValueError(
+                    "Shopify's routing names no IMS shop to ship it: "
+                    + (" ".join(p["message"] for p in route["problems"]) or "no shop")
+                )
+            if not seller and store_id != order.get("store_id"):
+                old = order.get("store_id")
+                raise ValueError(
+                    f"Shopify's routing would now ship it from {store_id}, but it is "
+                    f"billed at {old} and its invoice may already be issued from that "
+                    f"GSTIN. Move its fulfillment order to {old}'s location in Shopify "
+                    "admin (Orders > order > Change location; if Shopify refuses, stock "
+                    f"the item at {old}'s location there first), then press Re-map again"
+                )
             find = getattr(get_store_repository(), "find_by_id", None) or (lambda _sid: None)
             store_doc = find(store_id)
-            update: Dict[str, Any] = {"store_id": store_id}
-            if store_id != order.get("store_id"):
+            gst_set, gst_unset = reseal_seller_gst(order, store_doc)
+            update: Dict[str, Any] = {"store_id": store_id, **gst_set}
+            if store_id != order.get("store_id"):  # a re-issue: see the filing-date rule
+                issued = now.replace(tzinfo=None)
                 update.update(
-                    _seller_gst_fields(items, store_doc, payload),
                     invoice_number=get_order_repository().next_invoice_number(store_id),
                     superseded_invoice_number=order.get("invoice_number"),
-                    invoice_date=now.replace(tzinfo=None),
+                    invoice_date=issued,
+                    created_at=issued,
+                    booked_at=order.get("booked_at") or order.get("created_at"),
                 )
             bad = seller_problem({"store_id": store_id, "fulfillment_route": route}, store_doc, find)
             if bad:
@@ -1015,7 +1161,7 @@ async def reroute_held_order(db, order_id: str, payload: Dict[str, Any]) -> Dict
                 fulfillment_route={**route, "rerouted_at": now.isoformat()},
                 fulfillment_hold=bool(order.get("rx_pending") or hold),
             )
-            unset = {"fulfillment_breakdown": "", "fulfillment_stores": ""}  # claim unsettled
+            unset = {"fulfillment_breakdown": "", "fulfillment_stores": "", **gst_unset}  # claim unsettled
             if hold:
                 update["stock_hold_reason"] = hold
             else:
@@ -1031,7 +1177,14 @@ async def reroute_held_order(db, order_id: str, payload: Dict[str, Any]) -> Dict
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[ONLINE_ROUTE] stock-miss close skipped for %s: %s", order_id, exc)
-        _close_tasks([f"online_stock_miss:{order_id}"], "Re-mapped: the stock was claimed again.")
+        # The booking's stock miss and every problem this route no longer has.
+        gone = {p.get("code") for p in old_route.get("problems") or []} - {
+            p.get("code") for p in route["problems"]
+        }
+        _close_tasks(
+            [f"online_stock_miss:{order_id}"] + [f"online_route:{c}:{order_id}" for c in sorted(gone)],
+            "Re-mapped: the order was routed and its stock claimed again.",
+        )
         breakdown, stores = _claim_online_units(db, order_id, ref, items, route)
         coll.update_one(
             {"order_id": order_id},
@@ -1063,7 +1216,7 @@ async def reroute_held_order(db, order_id: str, payload: Dict[str, Any]) -> Dict
             f"Re-routed to {final.get('store_id')}; still on hold: {held}"
             if held
             else f"Re-routed to {final.get('store_id')} (invoice {final.get('invoice_number')}); "
-            "the seller hold is lifted."
+            "the hold is lifted."
         ),
     }
 
@@ -1088,6 +1241,12 @@ async def map_routed_order(
     from . import online_order_mapper
     from .shopify_ingest import order_payload_refusal
 
+    if reroute:
+        # A human replay is not a Shopify delivery: the stored delivery's
+        # webhook id is already in the dedupe log (30 days), so passing it
+        # made ingest answer 'replayed' and the re-route never ran. The
+        # order-id guard still books a replay exactly once.
+        webhook_id = None
     payload = payload if isinstance(payload, dict) else {}
     sid = str(payload.get("id") or "").strip()
     try:
@@ -1113,7 +1272,7 @@ async def map_routed_order(
             logger.warning("[ONLINE_ROUTE] moves skipped for %s: %s", sid, exc)
     if reroute and (result or {}).get("status") == "duplicate" and result.get("order_id"):
         try:
-            if seller_held(_orders(db).find_one({"order_id": result["order_id"]})):
+            if reroutable(_orders(db).find_one({"order_id": result["order_id"]})):
                 return await reroute_held_order(db, result["order_id"], payload)
         except Exception as exc:  # noqa: BLE001
             logger.error("[ONLINE_ROUTE] re-route failed for %s: %s", sid, exc)
