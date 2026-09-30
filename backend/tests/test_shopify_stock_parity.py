@@ -1457,3 +1457,66 @@ def test_prune_snapshots_uses_iso_cutoff():
     assert sp.prune_snapshots(coll, retention_days=30) == 3
     assert "$lt" in coll.deleted_query["generated_at"]
     assert sp.prune_snapshots(None) == 0
+
+
+# ---------------------------------------------------------------------------
+# Round 10
+# ---------------------------------------------------------------------------
+
+LOC_OLD = "gid://shopify/Location/4444"
+
+
+def _locations(db, unticked=(), unknown=False):
+    """Record Shopify's own location list as the writer does (fresh): LOC_A,
+    LOC_B and LOC_OLD (mapped to no shop), all ACTIVE, ticked to fulfil online
+    orders unless named in `unticked`. `unknown` records nothing."""
+    from api.services.shopify_push.inventory import record_location_verdict
+
+    if not unknown:
+        record_location_verdict(db, {"rows": [
+            {"id": gid, "name": gid, "isActive": True, "fulfillsOnlineOrders": gid not in unticked}
+            for gid in (LOC_A, LOC_B, LOC_OLD)
+        ]})
+
+
+@pytest.mark.parametrize("old_ticked", [False, True, None])
+def test_a_location_the_storefront_does_not_sell_from_oversells_nothing(monkeypatch, old_ticked):
+    """Round 10, the panel's probe. BV-A shelf 1 = LOC_A 1, BV-B 0 = LOC_B 0,
+    and LOC_OLD -- mapped to no shop, ACTIVE, NOT ticked to fulfil online
+    orders (the owner took the writer's own "untick it" advice) -- still
+    holds 4 units. The storefront sells 1: the writer's verdict is green, so
+    the Stock Tally, the reconciliation screen and parity's unclaimed report
+    are too. Ticked (old_ticked True), the 4 units sell online with no shelf
+    behind them: all three say so. Location list unknown (None): every
+    location counts, as before. Drop online_selling_locations' filter from
+    live_listed_qty_for_skus -> the tally's oversell / the page's
+    OVERSELL_RISK come back -> fails; drop it from unclaimed_locations ->
+    LOC_OLD is reported -> fails."""
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 0}})
+    _locations(db, unticked=() if old_ticked else (LOC_OLD,), unknown=old_ticked is None)
+    levels = {INV_1: {LOC_A: 1, LOC_B: 0, LOC_OLD: 4}, INV_2: {}}
+    sells = old_ticked is not False
+    rows, parity = _tally_and_parity(monkeypatch, db, levels)
+    assert _cols(rows["SKU-1"], "online_listed_qty", "oversell_risk") == ((5, True) if sells else (1, False))
+    row = _reconcile(monkeypatch, db, levels, None)["SKU-1"]
+    assert _cols(row, "online", "status") == ((5, "OVERSELL_RISK") if sells else (1, "OK"))
+    assert parity["unclaimed_locations"] == (
+        [{"location_id": LOC_OLD, "units": 4, "skus": ["SKU-1"]}] if sells else [])
+    assert parity["drift_count"] == 0
+
+
+def test_a_mapped_location_that_cannot_sell_online_oversells_nothing(monkeypatch):
+    """Round 10, the same root on a MAPPED shop: LOC_B (BV-B's own) is not
+    ticked to fulfil online orders -- the writer's dead_mapped_reason, flagged
+    on every press. Its 3 units sell nothing online, so neither screen calls
+    them an oversell; parity still compares BV-B's number there (the writer
+    still writes it). Drop the filter -> LOC_B's 3 vs shelf 0 is
+    OVERSELL_RISK again -> fails."""
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 0}})
+    _locations(db, unticked=(LOC_B,))
+    levels = {INV_1: {LOC_A: 1, LOC_B: 3}, INV_2: {}}
+    rows, parity = _tally_and_parity(monkeypatch, db, levels)
+    assert _cols(rows["SKU-1"], "online_listed_qty", "oversell_risk") == (1, False)
+    assert _reconcile(monkeypatch, db, levels, "BV-B")["SKU-1"]["status"] == "OK"
+    assert [(d["store_id"], d["ims"], d["shopify"]) for d in parity["drift"]] == [("BV-B", 0, 3)]
+

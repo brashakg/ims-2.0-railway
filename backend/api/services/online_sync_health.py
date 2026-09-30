@@ -306,8 +306,9 @@ def stock_tally_summary(
     (honest unknown -- never a fake 0) and oversell_risk stays False.
 
     For each online-eligible SKU it reports:
-      - online_listed_qty : live Shopify available, every location summed
-                            (what the storefront can sell), else None
+      - online_listed_qty : live Shopify available, summed over every
+                            location the storefront sells from (active,
+                            ticked to fulfil online orders), else None
       - on_hand           : AVAILABLE units on every physical shelf
                             (_on_hand_by_product; display only -- unmapped
                             Pune included, and it is sold online nowhere)
@@ -490,10 +491,13 @@ async def live_listed_qty_for_skus(
     Returns None when the live read is unavailable (no creds / no mapping /
     read error), else:
         {
-          "qty":      {sku: available},  # every location summed; only SKUs
+          "qty":      {sku: available},  # every location the storefront
+                                         # sells from summed; only SKUs
                                          # Shopify actually returned
           "variants": [{sku, inventory_item_id}],  # the SKUs read
           "levels":   {inventory_item_id: {location_gid: available}},
+                      # only locations the storefront sells from
+                      # (online_selling_locations), when Shopify's list is known
           "mapped":   int,               # online-mapped SKUs in the input
           "live":     int,               # == len(qty) (may be < mapped)
           "capped":   bool,              # True when mapped > cap
@@ -507,7 +511,7 @@ async def live_listed_qty_for_skus(
         if not _has_shopify_creds(db):
             return None
         from .online_catalog import inventory_items_for_skus
-        from .shopify_stock_parity import shopify_levels_by_item
+        from .shopify_stock_parity import online_selling_locations, shopify_levels_by_item
 
         clean = [str(s).strip() for s in (skus or []) if str(s or "").strip()]
         # Mapped FIRST, then cap -- preserving the caller's SKU order.
@@ -522,9 +526,16 @@ async def live_listed_qty_for_skus(
         if levels is None:
             return None
         # An item Shopify answered null (deleted there) is listed-UNKNOWN on
-        # these screens, as an unread batch is: absent, never a level.
-        levels = {inv: per for inv, per in levels.items() if per is not None}
-        # LISTED is what the storefront can sell: every location summed.
+        # these screens, as an unread batch is: absent, never a level. And a
+        # location the storefront does not sell from (inactive, or unticked
+        # for online orders -- the writer's own rule) lists nothing online.
+        selling = await online_selling_locations(db)
+        levels = {
+            inv: (per if selling is None else {g: q for g, q in per.items() if g in selling})
+            for inv, per in levels.items()
+            if per is not None
+        }
+        # LISTED is what the storefront can sell: every selling location summed.
         qty: Dict[str, int] = {}
         for sku, inv in inv_map.items():
             per_location = levels.get(inv)

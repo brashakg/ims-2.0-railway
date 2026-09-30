@@ -24,7 +24,9 @@ task for both, so parity only reports):
     writer's own inventory.unmapped_holders answers it.
   * unclaimed_locations -- Shopify locations holding stock of a sampled item
     that no MAPPED shop carries (a location two shops claim is mapped by
-    neither -- the writer's own definition, inventory._mapped).
+    neither -- the writer's own definition, inventory._mapped) and that the
+    storefront sells from (online_selling_locations: the writer's own
+    is_stray_fulfilling -- an unticked location sells nothing online).
 In-transit units count at neither location (owner accepted): the rule reads
 the shelf, so they are in no row here either.
 
@@ -257,16 +259,24 @@ def compare_location_parity(rows: List[Dict[str, Any]], tolerance: int) -> Dict[
 
 
 def unclaimed_locations(
-    variants: List[Dict[str, Any]], levels: Dict[str, Dict[str, int]], claimed: Iterable[str]
+    variants: List[Dict[str, Any]],
+    levels: Dict[str, Dict[str, int]],
+    claimed: Iterable[str],
+    selling: Optional[Iterable[str]] = None,
 ) -> List[Dict[str, Any]]:
     """PURE: Shopify locations holding stock (available > 0) of a sampled item
     that NO IMS shop carries: ``[{location_id, units, skus}]``, most units
-    first. Reported, never drift -- IMS has no number for such a location."""
+    first. Reported, never drift -- IMS has no number for such a location.
+    ``selling`` (online_selling_locations): only a location the storefront
+    sells from counts -- the writer's own stray rule, so a location the owner
+    unticked (the writer's own advice) is no longer reported. None = unknown:
+    every location counts."""
     claimed = set(claimed)
+    selling = None if selling is None else set(selling)
     out: Dict[str, Dict[str, Any]] = {}
     for v in variants:
         for gid, q in (levels.get(v["inventory_item_id"]) or {}).items():
-            if gid in claimed or int(q) <= 0:
+            if gid in claimed or int(q) <= 0 or (selling is not None and gid not in selling):
                 continue
             row = out.setdefault(gid, {"location_id": gid, "units": 0, "skus": []})
             row["units"] += int(q)
@@ -285,6 +295,9 @@ def unbacked_units(
     ``parity_rows`` pair (a mapped shop and its own location) plus EVERY unit
     at a location no mapped shop claims. Never a pooled sum: one shop's shelf
     (or unmapped Pune's) never backs a listing at another shop's location.
+    ``levels`` are what the storefront sells from: the screens' reader
+    (online_sync_health.live_listed_qty_for_skus) already dropped every
+    location online_selling_locations says cannot sell online.
 
     Only SKUs whose item Shopify returned get a key. None = a location lists
     units against a shop IMS could not read and nothing else is known to be
@@ -310,8 +323,35 @@ def unbacked_units(
 
 
 # ---------------------------------------------------------------------------
-# Reads (IMS catalog sample, Shopify levels)
+# Reads (IMS catalog sample, Shopify levels, Shopify locations)
 # ---------------------------------------------------------------------------
+
+
+async def online_selling_locations(db) -> Optional[set]:
+    """The Shopify locations the storefront SELLS FROM: ACTIVE and ticked to
+    fulfil online orders -- the writer's own predicate
+    (inventory.is_stray_fulfilling, asked with no mapping; dead_mapped_reason
+    is its mirror), over the writer's own location rows
+    (writer_location_verdict: the last pass's, else one read-only locations
+    query of its own, recorded for the next caller). Shopify counts online
+    availability only at those, so units anywhere else oversell nothing --
+    and the writer's own STORE / LOCATION tasks tell the owner to untick a
+    stray location as a valid fix.
+
+    ONE answer for parity's unclaimed report, the Stock Tally and the
+    reconciliation screen. None when the rows are unknown (DARK, a failed
+    read): the caller then counts every location (unknown is never clean).
+    Fail-soft, never raises."""
+    try:
+        from .shopify_push.inventory import is_stray_fulfilling, writer_location_verdict
+
+        verdict = await writer_location_verdict(db, {})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[STOCK_PARITY] Shopify location list unknown: %s", exc)
+        return None
+    if not verdict.get("read"):
+        return None
+    return {r["id"] for r in verdict.get("rows") or [] if is_stray_fulfilling(r, ())}
 
 
 def _sample_variants(db) -> Optional[List[Dict[str, Any]]]:
@@ -880,7 +920,9 @@ async def run_parity_tick(
                 for sid, gid in mapped.items()
             ],
             "unmapped_holders": unmapped_holders(db, quantities, stores, skus, mapped),
-            "unclaimed_locations": unclaimed_locations(variants, levels, claimed),
+            "unclaimed_locations": unclaimed_locations(
+                variants, levels, claimed, await online_selling_locations(db)
+            ),
             "missing_on_shopify": gone,
             "tasks": {"filed": [], "refreshed": [], "closed": []},
         }

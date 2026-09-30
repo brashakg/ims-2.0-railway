@@ -130,7 +130,8 @@ async def online_stock_reconcile(
     the LISTED quantity is read LIVE from Shopify for the online-mapped SKUs
     (creds-gated, read-only, capped to the MAPPED set), per location. With
     ``store_id`` the row is that shop's own Shopify location (an unmapped shop
-    lists 0 and is recommended 0); without it the row sums every location.
+    lists 0 and is recommended 0); without it the row sums every location the
+    storefront sells from (live_listed_qty_for_skus drops the rest).
     Either way the verdict is decided location by location
     (shopify_stock_parity.unbacked_units) -- never one shop's (or unmapped
     Pune's) shelf backing another shop's listing:
