@@ -22,18 +22,24 @@ import { labelProblem, printUnitLabels } from './unitLabel';
 /** Mirrors the POST /inventory/units/barcode-printed gate (_INVENTORY_ROLES). */
 const LABEL_ROLES: UserRole[] = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER', 'WORKSHOP_STAFF'];
 
+/** Every StockState (backend services/item_events.py) in shop words. */
 const STATUS_TEXT: Record<string, string> = {
   AVAILABLE: 'On shelf',
   RESERVED: 'Reserved',
+  UNDER_AUDIT: 'Under audit',
+  BLIND_COUNT: 'In a stock count',
   SOLD: 'Sold',
   TRANSFERRED: 'Transferred out',
   QUARANTINED: 'Quarantined',
   DAMAGED: 'Damaged',
   RTV: 'Returned to vendor',
+  VOID: 'Written off',
 };
 
-/** A unit still physically in the shop -- the only kind worth a label. */
-const inShop = (u: StockUnit) => u.status === 'AVAILABLE' || u.status === 'RESERVED';
+/** A unit still physically in the shop -- the only kind worth a label. One
+ *  being counted is still on the shelf: a count is when a lost label shows. */
+const IN_SHOP = new Set(['AVAILABLE', 'RESERVED', 'UNDER_AUDIT', 'BLIND_COUNT']);
+const inShop = (u: StockUnit) => IN_SHOP.has(u.status);
 /** ...and only when its barcode can actually go on the label. */
 const labelable = (u: StockUnit) => inShop(u) && !labelProblem(u.barcode);
 

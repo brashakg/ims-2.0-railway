@@ -96,6 +96,29 @@ describe('the units view (from the stock ledger)', () => {
     expect(screen.queryByText(/^Cost$/)).not.toBeInTheDocument();
   });
 
+  it('words every status, and a unit being counted can still get its label', async () => {
+    // A count is exactly when a missing label turns up; the counted unit is on
+    // the shelf. A written-off unit is not, and no status shows as a raw token.
+    apiMock.getUnits.mockResolvedValue({
+      units: [unit(1, { status: 'BLIND_COUNT' }), unit(2, { status: 'UNDER_AUDIT' }), unit(3, { status: 'VOID' })],
+      total: 3,
+    });
+    render(<UnitLabelsModal productId="P1" title="x" onClose={() => {}} />);
+    const row = async (n: number) => (await screen.findByText(`BV--0000000${n}`)).closest('tr')!;
+    for (const [n, text] of [[1, 'In a stock count'], [2, 'Under audit']] as const) {
+      const r = await row(n);
+      expect(within(r).getByText(text)).toBeInTheDocument();
+      expect(within(r).getByRole('checkbox')).toBeEnabled();
+      expect(within(r).getByRole('button', { name: /reprint label/i })).toBeInTheDocument();
+    }
+    const voided = await row(3);
+    expect(within(voided).getByText('Written off')).toBeInTheDocument();
+    expect(within(voided).getByRole('checkbox')).toBeDisabled();
+    expect(within(voided).queryByRole('button', { name: /reprint label/i })).not.toBeInTheDocument();
+    fireEvent.click(within(await row(1)).getByRole('button', { name: /reprint label/i }));
+    expect(printedBarcodes()).toEqual(['BV--00000001']);
+  });
+
   it('shows cost only when the server sent it', async () => {
     apiMock.getUnits.mockResolvedValue({ units: [unit(1, { cost_price: 4200 })], total: 1 });
     render(<UnitLabelsModal productId="P1" title="x" onClose={() => {}} />);
