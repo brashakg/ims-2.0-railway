@@ -81,7 +81,13 @@ vi.mock('../../../services/api/catalog', () => ({
     promoteDryRun: vi.fn(async () => ({ ok: true, gaps: [], duplicate_warnings: [] })),
   },
 }));
-vi.mock('../SimilarProductsHint', () => ({ SimilarProductsHint: () => null }));
+const hintSizes: string[] = [];
+vi.mock('../SimilarProductsHint', () => ({
+  SimilarProductsHint: (p: { size?: string }) => {
+    hintSizes.push(p.size ?? '');
+    return null;
+  },
+}));
 
 import { QuickAddPage } from '../QuickAddPage';
 
@@ -103,6 +109,7 @@ const renderAt = (url: string) =>
 beforeEach(() => {
   where = '';
   getProduct.mockClear();
+  hintSizes.length = 0;
   list.mockClear();
   window.sessionStorage.clear();
   window.scrollTo = vi.fn() as unknown as typeof window.scrollTo;
@@ -115,6 +122,22 @@ describe('an ordered draft in Needs review', () => {
     await waitFor(() => expect(where).toContain('edit=P-SPINE'));
     expect(where).not.toContain('review=');
     await waitFor(() => expect(getProduct).toHaveBeenCalledWith('P-SPINE'));
+  });
+
+  it('the similar-products hint reads a frame by its eye size, never an old stored size', async () => {
+    // `size` left the frame registry; a legacy "52-18-140" can still sit
+    // beside the eye size, and the server keys the frame by lens_size.
+    getProduct.mockImplementation(async () => ({
+      ...SPINE,
+      attributes: { ...SPINE.attributes, size: '52-18-140' },
+    }));
+    try {
+      renderAt('/catalog/add?edit=P-SPINE');
+      await waitFor(() => expect(hintSizes).toContain('52'));
+      expect(hintSizes).not.toContain('52-18-140');
+    } finally {
+      getProduct.mockImplementation(async () => SPINE);
+    }
   });
 
   it("the review queue's next-item fallback asks for imports only", async () => {

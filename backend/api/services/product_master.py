@@ -1018,20 +1018,26 @@ def set_twin_tags(doc: Dict[str, Any], tags: Any) -> List[str]:
 
 
 def _derive_brand_model_color_size(
-    attributes: Dict[str, Any],
+    attributes: Dict[str, Any], category: Any = None
 ) -> Dict[str, Optional[str]]:
-    """Map category attribute keys onto the spine identity columns."""
+    """Map category attribute keys onto the spine identity columns -- THE one
+    reading of an item's brand, model, colour and size (the identity key, the
+    "already exists" summary, the variant option and the identity migration
+    all read it)."""
     attrs = attributes or {}
+    size_key = _size_attribute_key(category) or "size"
     return {
         "brand": attrs.get("brand_name") or attrs.get("brand"),
         "model": attrs.get("model_no") or attrs.get("model_name") or attrs.get("model"),
         "color": attrs.get("colour_code")
         or attrs.get("colour_name")
         or attrs.get("color"),
-        # A frame's / sunglass's eye size is its registry's lens_size (`size`
-        # left their registry); each eye size is its own item (owner 09-28),
-        # so it is part of the identity like any other category's size.
-        "size": attrs.get("size") or attrs.get("lens_size"),
+        # The category's OWN size key first: a frame's / sunglass's eye size
+        # is its registry's lens_size, and `size` (which left their registry)
+        # can still hold a legacy "52-18-140" beside it -- read first, it keyed
+        # the frame apart from the same frame typed with eye size 52 (C2).
+        # Each eye size is its own item (owner 09-28).
+        "size": attrs.get(size_key) or attrs.get("size") or attrs.get("lens_size"),
     }
 
 
@@ -1128,7 +1134,10 @@ def existing_product_summary(existing: Dict[str, Any]) -> Dict[str, Any]:
     colour = (
         attrs.get("colour_code") or attrs.get("colour_name") or existing.get("color")
     )
-    size = existing.get("size") or attrs.get("lens_size") or attrs.get("size")
+    size = (
+        _derive_brand_model_color_size(attrs, existing.get("category"))["size"]
+        or existing.get("size")
+    )
     # Display name: the doc's auto-minted `name` wins (product_naming stamps it
     # at create time); legacy rows created before that fall back to "Brand
     # Model".
@@ -1534,7 +1543,7 @@ def normalise_payload(
             canonical, attributes, product_repo=product_repo, db=db
         )
 
-    ids = _derive_brand_model_color_size(attributes)
+    ids = _derive_brand_model_color_size(attributes, canonical)
 
     doc: Dict[str, Any] = {
         "sku": resolved_sku,
@@ -2062,7 +2071,8 @@ def _variant_row_for(
         "sku": spine.get("sku"),
         "parent_product_id": parent.get("pim_product_id") or parent.get("product_id"),
         "parent_sku": parent.get("sku"),
-        "option_size": attrs.get("size") or spine.get("size"),
+        "option_size": _derive_brand_model_color_size(attrs, spine.get("category"))["size"]
+        or spine.get("size"),
         "mrp": spine.get("mrp"),
     }
     if attrs.get("gtin"):

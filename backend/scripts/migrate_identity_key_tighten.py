@@ -58,7 +58,7 @@ def _identity_of(doc: Dict[str, Any]):
     top-level column -- the door wrote those FROM the attributes, so for a
     door-made row the fallback never fires."""
     attrs = doc.get("attributes") if isinstance(doc.get("attributes"), dict) else {}
-    ids = _derive_brand_model_color_size(attrs)
+    ids = _derive_brand_model_color_size(attrs, doc.get("category"))
     top = {
         "brand": doc.get("brand"),
         "model": doc.get("model"),

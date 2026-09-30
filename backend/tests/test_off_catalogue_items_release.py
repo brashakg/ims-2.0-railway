@@ -1716,3 +1716,58 @@ def test_the_identity_migration_keys_rows_as_the_door_does(world):
     assert _identity_of(stored) == stored["identity_key"] == "boss|boss1700|c2|52"
     # A top-level size that differs from the eye size never wins over it.
     assert _identity_of({**stored, "size": "M"}) == "boss|boss1700|c2|52"
+
+
+def test_c2_a_frame_still_carrying_an_old_size_is_found_by_its_eye_size(world):
+    # `size` left the frame registry, but an API or clone caller can still
+    # store a legacy "52-18-140" beside the eye size. The eye size (the
+    # registry's lens_size) is the identity, so the frame typed with eye size
+    # 52 on a PO is that frame -- never a hidden second one.
+    from scripts.migrate_identity_key_tighten import _identity_of
+
+    body = _products.ProductCreate(
+        category="FR",
+        brand="Boss",
+        model="BOSS 1700",
+        attributes={
+            "brand_name": "Boss",
+            "model_no": "BOSS 1700",
+            "colour_code": "C2",
+            "lens_size": "52",
+            "size": "52-18-140",
+        },
+        mrp=2990,
+        offer_price=2790,
+        cost_price=1200,
+    )
+    made = _run(_products.create_product(body, CATALOGUER, as_draft=False))
+    stored = world.product(made["product_id"])
+    finding(
+        stored["identity_key"] == "boss|boss1700|c2|52",
+        f"C2: the frame is keyed by its old size ({stored['identity_key']})",
+    )
+    assert _identity_of(stored) == "boss|boss1700|c2|52"
+    # A row stored before this fix carries the old size top-level too.
+    world.db.products.update_one(
+        {"product_id": made["product_id"]}, {"$set": {"size": "52-18-140"}}
+    )
+    # As a size variant, its Size option is the eye size too.
+    from api.services.product_master import _variant_row_for
+
+    row = _variant_row_for(world.product(made["product_id"]), {"product_id": "P-PARENT"})
+    assert row["option_size"] == "52", row
+
+    refused = _refused_po(
+        world, [{"new_product": dict(BOSS_TYPED), "quantity": 1, "unit_price": 1200}]
+    )
+    finding(
+        refused is not None
+        and refused.status_code == 409
+        and len(world.products_named("Boss", "BOSS 1700")) == 1,
+        "C2: the Boss 1700 C2 typed with eye size 52 made a second, hidden one "
+        f"({[p.get('identity_key') for p in world.products_named('Boss', 'BOSS 1700')]})",
+    )
+    finding(
+        "size 52 (SKU" in refused.detail["message"],
+        f"C2: the answer names the old size, not the eye size ({refused.detail['message']!r})",
+    )
