@@ -40,6 +40,7 @@ import { productApi, type CreateProductPayload } from '../../services/api/produc
 import type { DisplayFixture, } from '../../services/api/displayFixtures';
 import type { DisplayPlacement } from '../../services/api/displayPlacements';
 import { BarcodeManagementModal } from '../../components/inventory/BarcodeManagementModal';
+import { UnitLabelsModal } from '../../components/labels/UnitLabelsModal';
 import { Pagination } from '../../components/common/Pagination';
 import { ImageLightbox } from '../../components/common/ImageLightbox';
 import { useInventoryContext } from './InventoryLayout';
@@ -54,6 +55,11 @@ import {
   useStock,
   type StockItem,
 } from './inventoryQueries';
+
+/** Pieces of a product standing in the shop: on the shelf + reserved for an
+ *  order. The units dialog labels the units the server marks `in_shop`, the
+ *  same rule (backend tests/test_on_hand_is_one_rule.py pins the two). */
+const unitsInShop = (i: StockItem) => (i.stock || 0) + (i.reserved || 0);
 
 export function InventoryStockPage() {
   const { hasRole } = useAuth();
@@ -76,6 +82,8 @@ export function InventoryStockPage() {
   const [showBarcodeModal, setShowBarcodeModal] = useState(false);
   const [selectedProduct, setSelectedProduct] = useState<StockItem | null>(null);
   const [detailItem, setDetailItem] = useState<StockItem | null>(null);
+  // F27: the product whose units (each with its own barcode + label) are open.
+  const [unitsFor, setUnitsFor] = useState<StockItem | null>(null);
 
   // CSV Import state. csvRows = ALL parsed rows (sent to the validated
   // bulk-create endpoint); csvPreview = first 10, for the preview table only.
@@ -184,7 +192,7 @@ export function InventoryStockPage() {
       return;
     }
     const headers = [
-      'Product', 'Brand', 'SKU', 'Barcode', 'Category',
+      'Product', 'Brand', 'SKU', 'Product Barcode', 'Category',
       'MRP', 'Offer Price', 'In Stock', 'Reserved', 'Available',
       'Online', 'Online Stock', 'Location', 'Status',
     ];
@@ -449,7 +457,7 @@ export function InventoryStockPage() {
                 <tr>
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap min-w-[240px]">Product</th>
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap">SKU</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Barcode</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Units</th>
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Category</th>
                   <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase whitespace-nowrap">MRP</th>
                   <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Offer</th>
@@ -527,13 +535,21 @@ export function InventoryStockPage() {
                         </div>
                       </td>
                       <td className="px-4 py-3 text-sm text-gray-600">{item.sku}</td>
+                      {/* F27: every unit has its OWN barcode - the row links to
+                          them (and their labels) instead of showing one. */}
                       <td className="px-4 py-3">
-                        {item.barcode ? (
-                          <span className="text-xs font-mono text-gray-700 bg-gray-100 px-2 py-1 rounded">
-                            {item.barcode}
-                          </span>
+                        {isOnlineStoreView ? (
+                          <span className="text-xs text-gray-400">-</span>
                         ) : (
-                          <span className="text-xs text-gray-500">Not set</span>
+                          <button
+                            type="button"
+                            onClick={() => setUnitsFor(item)}
+                            className="inline-flex items-center gap-1 text-xs font-medium text-blue-700 hover:underline whitespace-nowrap"
+                            title="Each unit's barcode, and its label"
+                          >
+                            <Barcode className="w-3.5 h-3.5" />
+                            {unitsInShop(item)} unit{unitsInShop(item) === 1 ? '' : 's'}
+                          </button>
                         )}
                       </td>
                       <td className="px-4 py-3">
@@ -685,6 +701,15 @@ export function InventoryStockPage() {
         />
       )}
 
+      {unitsFor && (
+        <UnitLabelsModal
+          productId={unitsFor.id}
+          storeId={storeId}
+          title={unitsFor.name}
+          onClose={() => setUnitsFor(null)}
+        />
+      )}
+
       {/* Product Detail Drawer - read-only snapshot of the row's real fields.
           No backend call: every value shown is already loaded in the row. */}
       {detailItem && (() => {
@@ -694,7 +719,7 @@ export function InventoryStockPage() {
         const available = (detailItem.stock || 0) - (detailItem.reserved || 0);
         const rows: Array<[string, string]> = [
           ['SKU', detailItem.sku || '-'],
-          ['Barcode', detailItem.barcode || 'Not set'],
+          ['Units in the shop', String(unitsInShop(detailItem))],
           ['Category', cat?.label || detailItem.category],
           ['MRP', formatCurrency(detailItem.mrp || 0)],
           ['Offer price', formatCurrency(detailItem.offerPrice || detailItem.mrp || 0)],
@@ -740,7 +765,15 @@ export function InventoryStockPage() {
                   ))}
                 </dl>
               </div>
-              <div className="px-5 py-3 border-t border-gray-200 flex justify-end gap-2">
+              <div className="px-5 py-3 border-t border-gray-200 flex flex-wrap justify-end gap-2">
+                {!isOnlineStoreView && (
+                  <button
+                    onClick={() => { setUnitsFor(detailItem); setDetailItem(null); }}
+                    className="px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 rounded-lg flex items-center gap-1.5"
+                  >
+                    <Barcode className="w-4 h-4" /> Units &amp; labels
+                  </button>
+                )}
                 {canManageBarcode && (
                   <button
                     onClick={() => { openBarcodeModal(detailItem); setDetailItem(null); }}
