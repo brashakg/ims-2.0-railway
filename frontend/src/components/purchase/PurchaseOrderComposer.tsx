@@ -86,7 +86,7 @@ export interface ComposerLine {
    *  blur). A last-cost answer that lands meanwhile only captions the line:
    *  rewriting the box under the caret dropped the selection, so '2950'
    *  typed into a box that had just become 3100 read 31002950 (audit F67).
-   *  Once they leave it, the box is the form's again. */
+   *  Leaving it without typing puts that last-paid price in (takeLastPaid). */
   costFocused?: boolean;
   /** The picked product's own catalogue cost -- the seed the box falls back
    *  to when the chosen vendor has no price history for it. */
@@ -275,6 +275,17 @@ export function releaseProduct(line: ComposerLine, patch: Partial<ComposerLine> 
   };
 }
 
+// The ONE rule for when the form puts the last price paid to this vendor in
+// the cost box (owner: it wins over the catalogue cost): there is one, the
+// manager has not typed a cost, and they are not in the box right now. Run
+// when the answer lands AND when they leave the box, so the box ends up the
+// same whichever comes first -- and whatever the other lines do.
+function takeLastPaid(l: ComposerLine): ComposerLine {
+  return l.lastPaid && !l.costTouched && !l.costFocused
+    ? { ...l, unitCost: l.lastPaid.unitPrice }
+    : l;
+}
+
 // ISO string -> "4 Jul 2026" (human-friendly, fail-soft to '' on garbage).
 function formatPaidDate(raw?: string | null): string {
   if (!raw) return '';
@@ -432,12 +443,9 @@ export function PurchaseOrderComposer({
         prev.map((l) => {
           const hit = l.productId ? costs[l.productId] : undefined;
           if (!hit || !(hit.unit_price > 0)) return l;
-          const lastPaid = { unitPrice: hit.unit_price, date: hit.date };
           // Re-checked against CURRENT state: the operator may have typed a
           // cost -- or be in the box -- while the request was in flight.
-          return l.costTouched || l.costFocused
-            ? { ...l, lastPaid }
-            : { ...l, unitCost: hit.unit_price, lastPaid };
+          return takeLastPaid({ ...l, lastPaid: { unitPrice: hit.unit_price, date: hit.date } });
         }),
       );
     }, 250);
@@ -664,7 +672,11 @@ export function PurchaseOrderComposer({
                         e.target.select();
                         if (!line.costFocused) updateLine(index, { costFocused: true });
                       }}
-                      onBlur={() => updateLine(index, { costFocused: false })}
+                      onBlur={() =>
+                        setLines((prev) =>
+                          prev.map((l, i) => (i === index ? takeLastPaid({ ...l, costFocused: false }) : l)),
+                        )
+                      }
                       onChange={(e) =>
                         updateLine(index, {
                           unitCost: parseFloat(e.target.value) || 0,

@@ -344,7 +344,10 @@ describe('PurchaseOrderComposer — a late last-cost answer never rewrites a tap
     costs: { 'prod-a': { unit_price: price, po_number: 'PO-3', po_id: 'po-3', date: '2026-09-17T10:00:00' } },
   });
 
-  it('an answer that lands while the manager is in the box only adds the caption', async () => {
+  // Owner direction: the last price paid to this vendor wins over the
+  // catalogue cost. While the manager is in the box the answer only captions
+  // the line; leaving it WITHOUT typing puts that price in.
+  it('an answer that lands while the manager is in the box captions it, and leaving untyped takes the price', async () => {
     let answer!: (v: unknown) => void;
     getLastCostMock.mockReturnValue(new Promise((r) => { answer = r; }));
     renderComposer({ initialLines: [LINE({ unitCost: 2800, catalogCost: 2800 })] });
@@ -356,9 +359,88 @@ describe('PurchaseOrderComposer — a late last-cost answer never rewrites a tap
 
     await waitFor(() => expect(screen.getByText(/last paid ₹3,100/i)).toBeInTheDocument());
     expect(cost.value).toBe('2800');
-    // Leaving without typing does not hand the box back to the lookup.
     fireEvent.blur(cost);
-    expect(cost.value).toBe('2800');
+    expect(cost.value).toBe('3100');
+  });
+
+  it('Buy Desk (seed 0): leaving the tapped box untyped takes the price, and Create goes through', async () => {
+    let answer!: (v: unknown) => void;
+    getLastCostMock.mockReturnValue(new Promise((r) => { answer = r; }));
+    const { onSubmit } = renderComposer({ initialLines: [LINE({ unitCost: 0 })] });
+    await waitFor(() => expect(getLastCostMock).toHaveBeenCalledWith('v-1', ['prod-a']));
+
+    const cost = screen.getByLabelText(/unit cost for line 1/i) as HTMLInputElement;
+    fireEvent.focus(cost);
+    await act(async () => answer(paid(3100)));
+    await waitFor(() => expect(screen.getByText(/last paid ₹3,100/i)).toBeInTheDocument());
+    expect(cost.value).toBe('0');
+    fireEvent.blur(cost);
+    expect(cost.value).toBe('3100');
+
+    fireEvent.click(screen.getByRole('button', { name: /create as draft/i }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0].items[0].unit_price).toBe(3100);
+    expect(toastMock.error).not.toHaveBeenCalled();
+  });
+
+  it('a cost typed in the box always wins, whenever the answer lands', async () => {
+    let answer!: (v: unknown) => void;
+    getLastCostMock.mockReturnValue(new Promise((r) => { answer = r; }));
+    renderComposer({ initialLines: [LINE({ unitCost: 2800, catalogCost: 2800 })] });
+    await waitFor(() => expect(getLastCostMock).toHaveBeenCalled());
+
+    const cost = screen.getByLabelText(/unit cost for line 1/i) as HTMLInputElement;
+    fireEvent.focus(cost);
+    fireEvent.change(cost, { target: { value: '2950' } });
+    await act(async () => answer(paid(3100)));
+    await waitFor(() => expect(screen.getByText(/last paid ₹3,100/i)).toBeInTheDocument());
+    fireEvent.blur(cost);
+    expect(cost.value).toBe('2950');
+  });
+
+  // The same taps give the same price whatever another line does later: a
+  // lookup started by line 2 must not flip line 1 from one price to another.
+  it('line 1 ends on the same price whether or not line 2 starts a lookup afterwards', async () => {
+    let answer!: (v: unknown) => void;
+    getLastCostMock
+      .mockReturnValueOnce(new Promise((r) => { answer = r; }))
+      .mockResolvedValue({
+        costs: {
+          'prod-a': { unit_price: 3100, po_number: 'PO-3', po_id: 'po-3', date: '2026-09-17T10:00:00' },
+          'prod-b': { unit_price: 1500, po_number: 'PO-4', po_id: 'po-4', date: '2026-09-18T10:00:00' },
+        },
+      });
+    renderComposer({
+      initialLines: [
+        LINE({ unitCost: 2800, catalogCost: 2800 }),
+        LINE({ productId: '', productName: '', sku: '' }),
+      ],
+      renderProductCell: ({ index, pickProduct }) =>
+        index === 1 ? (
+          <button
+            type="button"
+            onClick={() => pickProduct({ productId: 'prod-b', productName: 'B', sku: 'B', costPrice: 1000 })}
+          >
+            pick line 2
+          </button>
+        ) : (
+          <div />
+        ),
+    });
+    await waitFor(() => expect(getLastCostMock).toHaveBeenCalledWith('v-1', ['prod-a']));
+
+    const cost1 = screen.getByLabelText(/unit cost for line 1/i) as HTMLInputElement;
+    fireEvent.focus(cost1);
+    await act(async () => answer(paid(3100)));
+    await waitFor(() => expect(screen.getByText(/last paid ₹3,100/i)).toBeInTheDocument());
+    fireEvent.blur(cost1);
+    expect(cost1.value).toBe('3100');
+
+    fireEvent.click(screen.getByRole('button', { name: 'pick line 2' }));
+    const cost2 = screen.getByLabelText(/unit cost for line 2/i) as HTMLInputElement;
+    await waitFor(() => expect(cost2.value).toBe('1500'));
+    expect(getLastCostMock).toHaveBeenLastCalledWith('v-1', ['prod-a', 'prod-b']);
+    expect(cost1.value).toBe('3100');
   });
 
   it('a Qty keystroke does not hold the lookup back until the cost box is tapped', async () => {
