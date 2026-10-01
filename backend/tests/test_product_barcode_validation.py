@@ -459,7 +459,8 @@ class TestGtinAttributeOnTheEditDoor:
     def test_stock_row_offers_the_gtin_not_the_unit_code(self):
         """Manage Barcode opens pre-filled from the row's `gtin`. It used to be
         pre-filled with the row's `barcode` -- a unit's IMS code such as
-        BV0000000042 -- which the server then refused as not a GTIN."""
+        BV0000000042 -- which the server then refused as not a GTIN. Since
+        #1164 (F27) the row's `barcode` is the product's own, never a unit's."""
         from api.routers.inventory.stock import _ledger_row
 
         row = _ledger_row(
@@ -470,7 +471,7 @@ class TestGtinAttributeOnTheEditDoor:
             "BV-TEST-01",
         )
         assert row["gtin"] == _VALID_A
-        assert row["barcode"] == "BV0000000042"
+        assert row["barcode"] == ""
 
     @pytest.mark.parametrize("new_gtin", ["", _VALID_B])
     def test_a_legacy_product_barcode_shows_and_moves_off_with_the_gtin(
