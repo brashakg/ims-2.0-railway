@@ -131,9 +131,8 @@ export function ReorderDashboard() {
         const stockEntry = stockByProduct.get(pid);
         const raw = stockEntry?.raw ?? {};
 
-        const currentStock = stockEntry
-          ? stockEntry.available + stockEntry.reserved
-          : Number(item.quantity ?? 0);
+        // The server's on-hand count (reorder_policy), never a client re-sum.
+        const currentStock = Number(item.quantity ?? 0);
         const reservedStock = stockEntry?.reserved ?? 0;
 
         // REAL reorder_quantity only (ledger rows now pass it through from
@@ -185,7 +184,11 @@ export function ReorderDashboard() {
     const failures: string[] = [];
     let levelSaved = false;
     let productSaved = false;
-    if (canSetShopLevel) {
+    // The level is sent only when it changed (a product-wide save with the level
+    // untouched never needs a shop) and only for a shop.
+    const levelChanged =
+      data.reorderPoint !== (products.find(p => p.id === data.productId)?.reorderPoint ?? null);
+    if (canSetShopLevel && levelChanged) {
       if (!user?.activeStoreId) {
         // Never send an empty shop (the server answers 422).
         failures.push(PICK_A_SHOP);
@@ -679,6 +682,7 @@ export function ReorderDashboard() {
             brand: selectedProduct.brand,
             currentStock: selectedProduct.currentStock,
             reorderPoint: selectedProduct.reorderPoint,
+            stockStatus: selectedProduct.status,
             reorderQuantity: selectedProduct.reorderQuantity,
             maxStock: selectedProduct.maxStock,
             averageSalesPerDay: selectedProduct.averageSalesPerDay,

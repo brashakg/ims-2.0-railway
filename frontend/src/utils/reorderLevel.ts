@@ -31,3 +31,8 @@ export const isLevelInputValid = (value: unknown): boolean =>
 
 export const LEVEL_INPUT_ERROR =
   'Reorder level must be a whole number from 0 to 100000. Leave it blank for not set.';
+
+/** A browser reports value "" for malformed number text ("1e", "--") and sets
+ *  validity.badInput: that is invalid, never "blank clears the level". */
+export const isBadInput = (el: { validity?: { badInput?: boolean } } | null | undefined): boolean =>
+  !!el?.validity?.badInput;

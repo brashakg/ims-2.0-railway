@@ -14,7 +14,7 @@ import {
   Calculator,
 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
-import { typedLevel, levelText, isLevelInputValid, LEVEL_INPUT_ERROR } from '../../utils/reorderLevel';
+import { typedLevel, levelText, isLevelInputValid, isBadInput, LEVEL_INPUT_ERROR } from '../../utils/reorderLevel';
 
 interface ReorderPointModalProps {
   isOpen: boolean;
@@ -27,6 +27,8 @@ interface ReorderPointModalProps {
     currentStock: number;
     /** This shop's level; null/undefined = not set. */
     reorderPoint?: number | null;
+    /** The server's band for the saved level (reorder_policy.stock_status). */
+    stockStatus?: string;
     // Real value from the product master: null/undefined = never configured;
     // <= 0 (the -1 sentinel) = auto-reorder explicitly DISABLED.
     reorderQuantity?: number | null;
@@ -76,6 +78,8 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave, productWid
   const [maxStock, setMaxStock] = useState(product.maxStock || 100);
   const [leadTimeDays, setLeadTimeDays] = useState(product.leadTimeDays || 7);
   const [autoCalculate, setAutoCalculate] = useState(false);
+  // The browser's own verdict on malformed number text (value reads as '').
+  const [levelBadInput, setLevelBadInput] = useState(false);
 
   // Sales velocity calculation
   const avgSalesPerDay = product.averageSalesPerDay || 2;
@@ -87,6 +91,7 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave, productWid
       // Reorder Point = (Average Daily Sales × Lead Time) + Safety Stock
       const calculatedReorderPoint = leadTimeStock + safetyStock;
       setReorderPoint(String(calculatedReorderPoint));
+      setLevelBadInput(false);
 
       // Reorder Quantity = Average Daily Sales × (Lead Time + Review Period)
       // Using 30-day review period. Never overrides an explicit
@@ -105,7 +110,7 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave, productWid
 
   const handleSubmit = async () => {
     // Validation (blank = not set; 0 is a real level: alert once this shop runs out)
-    if (!isLevelInputValid(reorderPoint)) {
+    if (levelBadInput || !isLevelInputValid(reorderPoint)) {
       toast.error(LEVEL_INPUT_ERROR);
       return;
     }
@@ -154,14 +159,18 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave, productWid
   if (!isOpen) return null;
 
   const shownLevel = typedLevel(reorderPoint);
+  // The band is the SERVER's, for the saved level only: a level being typed has
+  // no verdict until it is saved (the client never decides low stock).
+  const serverStatus =
+    shownLevel === (product.reorderPoint ?? null) ? product.stockStatus : undefined;
   const stockStatus =
-    shownLevel === null
-      ? 'healthy' // no level at this shop: nothing to alert on
-      : product.currentStock <= shownLevel
-        ? 'critical'
-        : product.currentStock <= shownLevel * 1.5
-          ? 'warning'
-          : 'healthy';
+    serverStatus === 'critical' || serverStatus === 'out-of-stock'
+      ? 'critical'
+      : serverStatus === 'low'
+        ? 'warning'
+        : serverStatus === 'healthy'
+          ? 'healthy'
+          : 'unknown';
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
@@ -280,7 +289,10 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave, productWid
                 min="0"
                 value={reorderPoint}
                 placeholder="not set"
-                onChange={(e) => setReorderPoint(e.target.value)}
+                onChange={(e) => {
+                  setReorderPoint(e.target.value);
+                  setLevelBadInput(isBadInput(e.target));
+                }}
                 disabled={autoCalculate || isSaving || shopLevelLocked}
                 className="input-field w-full"
               />
@@ -373,7 +385,9 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave, productWid
                       ? 'bg-red-500'
                       : stockStatus === 'warning'
                       ? 'bg-amber-500'
-                      : 'bg-green-500'
+                      : stockStatus === 'healthy'
+                      ? 'bg-green-500'
+                      : 'bg-gray-400'
                   }`}
                   style={{ width: `${Math.min((product.currentStock / maxStock) * 100, 100)}%` }}
                 />

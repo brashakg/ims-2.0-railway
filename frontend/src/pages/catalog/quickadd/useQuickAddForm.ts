@@ -86,6 +86,8 @@ export function useQuickAddForm() {
   // the level at the user's active shop ('' = not set), written only by the
   // roles that may set a shop's level (a catalogue manager has none to set).
   const [reorderLevel, setReorderLevel] = useState('');
+  // The browser's verdict on malformed number text (its value reads as '').
+  const [reorderBadInput, setReorderBadInput] = useState(false);
   const reorderShop = user?.activeStoreId || '';
   const canSetReorderLevel = !!reorderShop && hasRole(REORDER_LEVEL_ROLES);
   // Edit mode: the product's per-shop levels as loaded. The field shows the
@@ -325,6 +327,7 @@ export function useQuickAddForm() {
       setCostPrice('');
       setDiscountCategory('');
       setReorderLevel('');
+      setReorderBadInput(false);
       setEditLevels(null);
       setSyncToShopify(false);
       setShopifyTags([]);
@@ -554,7 +557,7 @@ export function useQuickAddForm() {
         return;
       }
 
-      if (canSetReorderLevel && !isLevelInputValid(reorderLevel)) {
+      if (canSetReorderLevel && (reorderBadInput || !isLevelInputValid(reorderLevel))) {
         toast.error(LEVEL_INPUT_ERROR);
         return;
       }
@@ -655,7 +658,7 @@ export function useQuickAddForm() {
     },
     [
       currentValues, toast, resetForm, navigate, variantCtx, startNextVariant,
-      editMode, reorderLevel, canSetReorderLevel, reorderShop,
+      editMode, reorderLevel, reorderBadInput, canSetReorderLevel, reorderShop,
     ]
   );
 
@@ -1425,7 +1428,7 @@ export function useQuickAddForm() {
     weight, setWeight,
     mrp, setMrp, offerPrice, setOfferPrice, costPrice, setCostPrice,
     discountCategory,
-    reorderLevel, setReorderLevel, canSetReorderLevel, reorderShop,
+    reorderLevel, setReorderLevel, setReorderBadInput, canSetReorderLevel, reorderShop,
     syncToShopify, setSyncToShopify, shopifyTags, setShopifyTags,
     publishPOS, setPublishPOS,
     images, setImages,

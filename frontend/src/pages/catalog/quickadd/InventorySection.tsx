@@ -8,10 +8,11 @@ import { Boxes, ImageIcon, Loader2, Upload, Wand2, X } from 'lucide-react';
 import clsx from 'clsx';
 import { Section } from './parts';
 import type { QuickAddForm } from './useQuickAddForm';
+import { isBadInput } from '../../../utils/reorderLevel';
 
 export function InventorySection({ form }: { form: QuickAddForm }) {
   const {
-    isReviewMode, reorderLevel, setReorderLevel, canSetReorderLevel, reorderShop,
+    isReviewMode, reorderLevel, setReorderLevel, setReorderBadInput, canSetReorderLevel, reorderShop,
     images, setImages, variantCtx,
     imageInputRef, onImageInputChange, onImageDrop, dragActive, setDragActive,
     uploadingImages, editingImages, removeImage, editImage,
@@ -55,7 +56,10 @@ export function InventorySection({ form }: { form: QuickAddForm }) {
               title={`Reorder level at ${reorderShop}`}
               placeholder="not set"
               value={reorderLevel}
-              onChange={(e) => setReorderLevel(e.target.value)}
+              onChange={(e) => {
+                setReorderLevel(e.target.value);
+                setReorderBadInput(isBadInput(e.target));
+              }}
               className="input-field w-full"
               min="0"
             />

@@ -9,7 +9,7 @@
 import { useState } from 'react';
 import { useToast } from '../../context/ToastContext';
 import { reorderApi } from '../../services/api/inventory';
-import { typedLevel, isLevelInputValid, LEVEL_INPUT_ERROR } from '../../utils/reorderLevel';
+import { typedLevel, isLevelInputValid, isBadInput, LEVEL_INPUT_ERROR } from '../../utils/reorderLevel';
 
 export function ShopReorderLevel({
   productId,
@@ -27,6 +27,7 @@ export function ShopReorderLevel({
   const toast = useToast();
   const [draft, setDraft] = useState<string | null>(null); // null = not editing
   const [saving, setSaving] = useState(false);
+  const [badInput, setBadInput] = useState(false); // malformed text reads as ''
   const shown = level == null ? 'not set' : String(level);
 
   if (!canEdit) {
@@ -36,7 +37,10 @@ export function ShopReorderLevel({
     return (
       <button
         type="button"
-        onClick={() => setDraft(level == null ? '' : String(level))}
+        onClick={() => {
+          setBadInput(false);
+          setDraft(level == null ? '' : String(level));
+        }}
         // min-h: the app's standard control height (36px, the .input-field height).
         className="inline-flex items-center min-h-[36px] text-xs text-gray-500 hover:text-bv-red-600 underline decoration-dotted"
         aria-label={`Reorder level at this shop: ${shown}. Change it`}
@@ -48,7 +52,7 @@ export function ShopReorderLevel({
   }
 
   const save = async () => {
-    if (!isLevelInputValid(draft)) {
+    if (badInput || !isLevelInputValid(draft)) {
       toast.error(LEVEL_INPUT_ERROR);
       return;
     }
@@ -75,7 +79,10 @@ export function ShopReorderLevel({
         placeholder="not set"
         aria-label="Reorder level"
         disabled={saving}
-        onChange={(e) => setDraft(e.target.value)}
+        onChange={(e) => {
+          setDraft(e.target.value);
+          setBadInput(isBadInput(e.target));
+        }}
         onKeyDown={(e) => {
           if (e.key === 'Enter') void save();
           if (e.key === 'Escape') setDraft(null);
