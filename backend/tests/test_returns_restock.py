@@ -545,6 +545,8 @@ def test_return_mints_when_no_original_unit(ctx):
     import re
 
     assert re.fullmatch(r"[A-Z0-9]{8,}", minted[0].get("barcode") or ""), minted[0]
+    # ...and its label is still to print (the units view offers it).
+    assert minted[0]["barcode_printed"] is False
 
 
 def test_return_mint_goes_through_the_one_minter(ctx, monkeypatch):

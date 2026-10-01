@@ -142,7 +142,8 @@ export function BarcodeManagementModal({
             reference and goes to Shopify and Google with the next website push; empty the box to
             remove a wrong one from IMS (a product already on the website keeps its Shopify
             barcode until it is cleared in Shopify admin). IMS scans and
-            labels each unit with its own IMS barcode, minted when the stock is received.
+            labels each unit with its own IMS barcode, minted when the stock is received; print
+            those labels from the product's units on the stock ledger.
           </p>
         </div>
 

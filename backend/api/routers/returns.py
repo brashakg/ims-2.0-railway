@@ -2134,6 +2134,7 @@ def _restock_good_items(
                     # The one unit-barcode minter: without a code the returned
                     # frame could not be scanned back into a sale.
                     "barcode": barcode_svc.mint_unit_barcode(_get_db(), unit_store),
+                    "barcode_printed": False,
                     "quantity": 1,
                     "status": "AVAILABLE",
                     "source_type": "RETURN",
