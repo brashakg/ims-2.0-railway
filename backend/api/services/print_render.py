@@ -411,11 +411,16 @@ def render_delivery_challan(
     transport_reason: str = "",
     overrides: Optional[Dict[str, Any]] = None,
     auto_print: bool = False,
+    consignor_gstin: str = "",
+    consignee_gstin: str = "",
+    valued: bool = False,
 ) -> str:
     """Render a Rule 55 Delivery Challan as a self-contained HTML page.
 
     `items` rows accept: product_name/name/description, qty/quantity,
-    hsn_code/hsn, serial/serial_numbers/remarks. The challan is NOT a tax
+    hsn_code/hsn, serial/serial_numbers/remarks, and -- when `valued` (a move
+    between two GST registrations, owner ruling D13) -- rate and value, which
+    add Rate / Value columns and a total value. The challan is NOT a tax
     invoice (Rule 55: goods moved without an invoice -- e.g. an inter-store
     transfer, or goods sent for the customer to take delivery of). It carries
     Rule 55 copy markers (CONSIGNEE / TRANSPORTER / CONSIGNOR).
@@ -452,17 +457,21 @@ def render_delivery_challan(
         '<div class="party-grid">'
         + "<div><h3>Consignor (From)</h3><div><strong>"
         + _e(consignor)
-        + "</strong></div></div>"
+        + "</strong></div>"
+        + ("<div>GSTIN: " + _e(consignor_gstin) + "</div>" if consignor_gstin else "")
+        + "</div>"
         + "<div><h3>Consignee (To)</h3><div><strong>"
         + _e(to_label or consignee_name)
         + "</strong></div>"
         + ("<div>" + _e(consignee_address) + "</div>" if consignee_address else "")
+        + ("<div>GSTIN: " + _e(consignee_gstin) + "</div>" if consignee_gstin else "")
         + "</div>"
         + "</div>"
     )
 
     rows = ""
     total_qty = 0.0
+    total_value = 0.0
     for idx, it in enumerate(items, start=1):
         if not isinstance(it, dict):
             continue
@@ -491,23 +500,40 @@ def render_delivery_challan(
             + "<td>" + _e(name) + "</td>"
             + "<td>" + _e(hsn) + "</td>"
             + '<td class="num">' + _qty(q) + "</td>"
+            + (
+                '<td class="num">' + _money(it.get("rate")) + "</td>"
+                + '<td class="num">' + _money(it.get("value")) + "</td>"
+                if valued
+                else ""
+            )
             + "<td>" + _e(remarks) + "</td>"
             + "</tr>"
         )
+        total_value += float(it.get("value") or 0) if valued else 0.0
     if not rows:
-        rows = '<tr><td colspan="5" class="ctr muted">No items</td></tr>'
+        rows = '<tr><td colspan="{0}" class="ctr muted">No items</td></tr>'.format(
+            7 if valued else 5
+        )
 
     table = (
         '<table class="lines">'
         + "<thead><tr>"
         + '<th class="ctr">Sr.</th><th>Description of Goods</th><th>HSN/SAC</th>'
-        + '<th class="num">Qty</th><th>Serial / Remarks</th>'
+        + '<th class="num">Qty</th>'
+        + ('<th class="num">Rate (at cost)</th><th class="num">Value</th>' if valued else "")
+        + "<th>Serial / Remarks</th>"
         + "</tr></thead><tbody>"
         + rows
         + "</tbody>"
         + "<tfoot><tr>"
         + '<td colspan="3" class="right"><strong>Total Quantity</strong></td>'
-        + '<td class="num"><strong>' + _qty(total_qty) + "</strong></td><td></td>"
+        + '<td class="num"><strong>' + _qty(total_qty) + "</strong></td>"
+        + (
+            '<td></td><td class="num"><strong>' + _money(round(total_value, 2)) + "</strong></td>"
+            if valued
+            else ""
+        )
+        + "<td></td>"
         + "</tr></tfoot>"
         + "</table>"
     )

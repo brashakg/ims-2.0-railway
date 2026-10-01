@@ -20,6 +20,7 @@ from ..dependencies import (
     user_store_scope,
     validate_store_access,
 )
+from ..services.cost_mask import can_see_cost, mask_cost
 
 # W1.4 / OS-032: shared ONLINE store-type detector -- a transfer must never
 # land stock on a pooled, stockless ONLINE store.
@@ -292,6 +293,21 @@ def _assert_transfer_access(
         raise HTTPException(
             status_code=403, detail="No access to this transfer's store"
         )
+
+
+def _mask_transfer_cost(transfer: Dict, current_user: dict) -> Dict:
+    """D7: counter roles never see what the units cost. A transfer carries its
+    units' own cost (each line's unit_cost, the total_value -- F51), so a
+    caller outside the per-unit cost roles gets a copy without them. Never
+    mutates the stored doc (the in-memory fallback hands out the original)."""
+    if not isinstance(transfer, dict) or can_see_cost(current_user, "product"):
+        return transfer
+    out = {k: v for k, v in transfer.items() if k != "total_value"}
+    out["items"] = [
+        mask_cost(dict(it), current_user, "product") if isinstance(it, dict) else it
+        for it in transfer.get("items") or []
+    ]
+    return out
 
 
 def generate_transfer_number() -> str:
@@ -599,6 +615,7 @@ def _apply_ship_stock_move(transfer: Dict) -> Dict:
             candidates = []
 
         moved_ids: List[str] = []
+        moved_units: List[Dict] = []
         for unit in candidates[:want]:
             sid = unit.get("stock_id") or unit.get("stock_unit_id") or unit.get("_id")
             if not sid:
@@ -613,6 +630,7 @@ def _apply_ship_stock_move(transfer: Dict) -> Dict:
             )
             if ok:
                 moved_ids.append(str(sid))
+                moved_units.append(unit)
                 _audit_stock_move(
                     STOCK_STATUS_AVAILABLE,
                     STOCK_STATUS_TRANSFERRED,
@@ -635,6 +653,7 @@ def _apply_ship_stock_move(transfer: Dict) -> Dict:
         # Reflect what actually left the floor (may be < requested if the source
         # didn't hold enough AVAILABLE units - we never move phantom stock).
         line["quantity_shipped"] = len(moved_ids)
+        _stamp_shipped_value(line, moved_units)
         moved_total += len(moved_ids)
         if moved_ids and product_id not in moved_pids:
             moved_pids.append(product_id)
@@ -649,7 +668,71 @@ def _apply_ship_stock_move(transfer: Dict) -> Dict:
 
     transfer["stock_shipped"] = True
     transfer["stock_units_moved_out"] = moved_total
+    # F51: the transfer is worth what left the shop, at the units' own cost --
+    # never the request x whatever cost the client sent (the modal sends 0).
+    transfer["total_value"] = round(
+        sum(_shipped_line_value(ln) for ln in transfer.get("items", [])), 2
+    )
     return transfer
+
+
+def _first_cost(*candidates) -> float:
+    """The first positive money value among `candidates`; 0.0 when none. Pure."""
+    for raw in candidates:
+        try:
+            value = float(raw or 0)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return 0.0
+
+
+def _stamp_shipped_value(line: Dict, units: List[Dict]) -> None:
+    """F51 / D13: stamp on a line what LEFT the shop -- the units' barcodes,
+    the product's HSN, and the units' OWN cost (unit_cost / cost_price, stamped
+    on each unit at its goods receipt or opening stock) averaged into the
+    line's unit_cost. The product master's cost_price stands in only for a
+    unit that carries no cost of its own (owner 2026-09-28: shelf units carry
+    the product's cost); a unit with neither leaves the line at 0, so a valued
+    challan refuses instead of printing a short value (a move between two
+    registrations never gets here: _assert_valued_paper stops it). The challan, the
+    transfer's total_value and the FIN-3 mirror bill all read these stamps:
+    one value per transfer. Fail-soft: a product lookup error only loses the
+    fallbacks -- the units have already moved, so this never raises."""
+    from ..services.gst_rates import hsn_for_category
+
+    product: Dict = {}
+    db = _get_db()
+    if db is not None and line.get("product_id"):
+        try:
+            product = db.get_collection("products").find_one(
+                {"product_id": line["product_id"]},
+                {"_id": 0, "hsn_code": 1, "category": 1, "cost_price": 1},
+            ) or {}
+        except Exception as exc:  # noqa: BLE001 - fail-soft
+            logger.warning("[TRANSFER] product lookup for the ship value failed: %s", exc)
+    line["hsn_code"] = (
+        line.get("hsn_code")
+        or product.get("hsn_code")
+        or hsn_for_category(product.get("category"))
+        or ""
+    )
+    line["shipped_barcodes"] = [str(u["barcode"]) for u in units if u.get("barcode")]
+    if units:
+        costs = [
+            _first_cost(u.get("unit_cost"), u.get("cost_price"), product.get("cost_price"))
+            for u in units
+        ]
+        # ponytail: one average rate per line (exact for a line of one cost);
+        # per-unit rows if lines of mixed-cost units ever need their own rates.
+        line["unit_cost"] = sum(costs) / len(costs) if all(costs) else 0.0
+
+
+def _shipped_line_value(line: Dict) -> float:
+    """What a shipped line is worth: units shipped x their own cost, rounded to
+    the paisa -- the same per-line rounding the FIN-3 mirror bill uses. Pure."""
+    return round(_qty(line.get("quantity_shipped")) * _first_cost(line.get("unit_cost")), 2)
 
 
 def _transferred_pool(stock_repo, transfer, product_id, prefer):
@@ -969,7 +1052,7 @@ async def list_transfers(
     end = start + limit
 
     return {
-        "transfers": transfers[start:end],
+        "transfers": [_mask_transfer_cost(t, current_user) for t in transfers[start:end]],
         "total": total,
         "page": page,
         "limit": limit,
@@ -1014,6 +1097,7 @@ async def get_pending_transfers(
             or t.get("to_location_id") == location_id
         ]
 
+    transfers = [_mask_transfer_cost(t, current_user) for t in transfers]
     return {
         "pending_approval": [
             t for t in transfers if t.get("status") == TransferStatus.PENDING_APPROVAL
@@ -1042,7 +1126,7 @@ async def get_transfer(
     # IDOR guard: both parties (source + destination stores) may read.
     _assert_transfer_access(transfer, current_user, side="either")
 
-    return {"transfer": transfer}
+    return {"transfer": _mask_transfer_cost(transfer, current_user)}
 
 
 @router.post("")
@@ -1317,7 +1401,7 @@ async def start_picking(
     )
 
     _save_transfer(transfer)
-    return {"transfer": transfer, "message": "Picking started"}
+    return {"transfer": _mask_transfer_cost(transfer, current_user), "message": "Picking started"}
 
 
 @router.post("/{transfer_id}/complete-picking")
@@ -1370,7 +1454,10 @@ async def complete_picking(
     )
 
     _save_transfer(transfer)
-    return {"transfer": transfer, "message": "Picking completed, ready for shipment"}
+    return {
+        "transfer": _mask_transfer_cost(transfer, current_user),
+        "message": "Picking completed, ready for shipment",
+    }
 
 
 @router.post("/{transfer_id}/ship")
@@ -1402,6 +1489,7 @@ async def ship_transfer(
             status_code=400,
             detail="Transfer must be approved or packed before shipping",
         )
+    _assert_valued_paper(transfer)
 
     # Create Shiprocket shipment if requested
     if create_shiprocket:
@@ -1437,13 +1525,15 @@ async def ship_transfer(
             "timestamp": datetime.now().isoformat(),
             "user_id": current_user.get("user_id"),
             "user_name": current_user.get("username"),
-            "notes": f"Shipped via {transfer.get('courier_name', 'carrier')}",
+            # F51: no carrier named -> "Shipped", never "Shipped via None".
+            "notes": "Shipped"
+            + (f" via {transfer['courier_name']}" if transfer.get("courier_name") else ""),
         },
     )
 
     _save_transfer(transfer)
     return {
-        "transfer": transfer,
+        "transfer": _mask_transfer_cost(transfer, current_user),
         "message": "Transfer shipped",
         "tracking": {
             "number": transfer.get("tracking_number"),
@@ -1647,7 +1737,7 @@ async def receive_transfer(
 
     _save_transfer(transfer)
     return {
-        "transfer": transfer,
+        "transfer": _mask_transfer_cost(transfer, current_user),
         "message": "Items received",
         "summary": {
             "expected": total_expected,
@@ -1909,7 +1999,9 @@ async def get_transfer_analytics(
     )
     cancelled = len([t for t in transfers if t["status"] == TransferStatus.CANCELLED])
 
-    total_value = sum(t.get("total_value", 0) for t in transfers)
+    # D7: the value is the units' own cost (F51) -- a per-unit cost figure.
+    show_value = can_see_cost(current_user, "product")
+    total_value = sum(t.get("total_value", 0) for t in transfers) if show_value else None
     total_items = sum(t.get("total_items", 0) for t in transfers)
 
     return {
@@ -1944,6 +2036,8 @@ async def get_location_transfer_analytics(
 
     outgoing = [t for t in transfers if t.get("from_location_id") == location_id]
     incoming = [t for t in transfers if t.get("to_location_id") == location_id]
+    # D7: the value is the units' own cost (F51) -- a per-unit cost figure.
+    show_value = can_see_cost(current_user, "product")
 
     return {
         "location_id": location_id,
@@ -1960,7 +2054,7 @@ async def get_location_transfer_analytics(
                     in [TransferStatus.PENDING_APPROVAL, TransferStatus.APPROVED]
                 ]
             ),
-            "value": sum(t.get("total_value", 0) for t in outgoing),
+            "value": sum(t.get("total_value", 0) for t in outgoing) if show_value else None,
         },
         "incoming": {
             "total": len(incoming),
@@ -1970,7 +2064,7 @@ async def get_location_transfer_analytics(
             "pending_receipt": len(
                 [t for t in incoming if t["status"] == TransferStatus.IN_TRANSIT]
             ),
-            "value": sum(t.get("total_value", 0) for t in incoming),
+            "value": sum(t.get("total_value", 0) for t in incoming) if show_value else None,
         },
     }
 
@@ -2066,6 +2160,88 @@ def _entity_gstin_for_state(db, entity_id: str, state_code: str) -> str:
             exc,
         )
     return ""
+
+
+def _shop_gst(db, store_id: str) -> tuple:
+    """(entity_id, gstin, state) of one side of a transfer -- the registration
+    the FIN-3 mirror bill books on. ('', '', '') on a miss / DB absent."""
+    entity_id = _store_entity(db, store_id)
+    state = _store_state_code(db, store_id)
+    return entity_id, _entity_gstin_for_state(db, entity_id, state), state
+
+
+def _transfer_registrations(db, transfer: Dict) -> tuple:
+    """(source, destination, crosses): each side's (entity_id, gstin, state)
+    and whether the move crosses a GST registration -- a different company OR
+    a different GSTIN of one company (Sch I deemed supply). ONE rule for the
+    FIN-3 mirror bill and the D13 valued delivery challan, so the paper and the
+    books can never disagree about whether a move is between two
+    registrations. A side with no company never crosses (nothing to book)."""
+    src = _shop_gst(db, transfer.get("from_location_id") or "")
+    dst = _shop_gst(db, transfer.get("to_location_id") or "")
+    return src, dst, bool(src[0] and dst[0]) and src != dst
+
+
+def _gstin_gap(transfer: Dict, src: tuple, dst: tuple) -> str:
+    """'' when both sides of a registration-crossing move have a GSTIN, else
+    the sentence naming the store(s) without one (ship and the challan)."""
+    missing = [
+        name or "A store"
+        for name, side in (
+            (transfer.get("from_location_name"), src),
+            (transfer.get("to_location_name"), dst),
+        )
+        if not side[1]
+    ]
+    if not missing:
+        return ""
+    return (
+        " and ".join(missing)
+        + " has no GSTIN on file. A transfer between two GST registrations "
+        "travels on a valued delivery challan, which needs both."
+    )
+
+
+def _assert_valued_paper(transfer: Dict) -> None:
+    """D13: a move between two GST registrations travels on a VALUED delivery
+    challan, so it ships only when that paper can be printed -- both GSTINs on
+    file, and a cost for every unit that may leave (its own, else the
+    product's). Refused BEFORE any unit moves: once shipped, the value is fixed
+    (_stamp_shipped_value), so a cost entered afterwards could not reach it."""
+    db = _get_db()
+    src, dst, crosses = _transfer_registrations(db, transfer)
+    if not crosses:
+        return
+    gap = _gstin_gap(transfer, src, dst)
+    if gap:
+        raise HTTPException(status_code=400, detail=gap)
+    for line in transfer.get("items") or []:
+        pid = line.get("product_id")
+        if not pid:
+            continue
+        product = db.get_collection("products").find_one(
+            {"product_id": pid}, {"_id": 0, "cost_price": 1}
+        ) or {}
+        if _first_cost(product.get("cost_price")):
+            continue
+        # ponytail: any cost-less unit on the shelf refuses, not only the ones
+        # ship would pick; the fix (a product cost price) is the same.
+        if db.get_collection("stock_units").count_documents(
+            {
+                "product_id": pid,
+                "store_id": transfer.get("from_location_id"),
+                "status": STOCK_STATUS_AVAILABLE,
+                "unit_cost": {"$not": {"$gt": 0}},
+                "cost_price": {"$not": {"$gt": 0}},
+            }
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=f"{line.get('product_name') or pid} has no cost price and "
+                "some of its units here carry no cost. Enter the product's cost "
+                "price before shipping: a transfer between two GST registrations "
+                "is valued at cost.",
+            )
 
 
 def _tax_split(tax: float, interstate: bool):
@@ -2231,20 +2407,15 @@ def _book_mirror_purchase(transfer: Dict) -> None:
     if not from_store_id or not to_store_id:
         return
 
-    from_entity = _store_entity(db, from_store_id)
-    to_entity = _store_entity(db, to_store_id)
-
     # NEW-GST-TRANSFER-IGST: a stock move books a mirror purchase (and GST) when it
     # crosses a GSTIN boundary -- that is EITHER a different legal entity OR a
     # different STATE. A same-PAN inter-STATE transfer is a deemed supply between
-    # distinct GSTINs (Sch I) and attracts IGST. Compute states here so the gate
-    # isn't fooled by a same-entity cross-state move (previously it returned early
-    # and booked NO IGST -> GST understated).
-    from_state = _store_state_code(db, from_store_id)
-    to_state = _store_state_code(db, to_store_id)
-    if not from_entity or not to_entity:
-        return
-    if from_entity == to_entity and (from_state or "") == (to_state or ""):
+    # distinct GSTINs (Sch I) and attracts IGST. The ONE rule shared with the D13
+    # valued delivery challan (_transfer_registrations).
+    (from_entity, from_gstin, from_state), (to_entity, to_gstin, to_state), crosses = (
+        _transfer_registrations(db, transfer)
+    )
+    if not crosses:
         return
 
     # Idempotent: skip if we already wrote the bill for this transfer.
@@ -2341,12 +2512,6 @@ def _book_mirror_purchase(transfer: Dict) -> None:
                         "line_total": round(taxable + tax, 2),
                     }
                 ]
-
-        # Sending entity's GSTIN (acts as the "vendor" for the receiving entity).
-        from_gstin = _entity_gstin_for_state(db, from_entity, from_state) or ""
-
-        # Receiving entity's GSTIN (determines place_of_supply for ITC).
-        to_gstin = _entity_gstin_for_state(db, to_entity, to_state) or ""
 
         bill_id = f"mbill_{uuid.uuid4().hex[:12]}"
         # Bill number mirrors the transfer number so it is traceable.

@@ -282,7 +282,8 @@ def test_transfer_challan_endpoint_returns_html(transfer_env):
     assert "DELIVERY CHALLAN" in body.upper()
     assert "Frame Classic" in body
     assert "BV Bokaro" in body and "BV Ranchi" in body
-    assert "DC/TRF/" in body
+    # F51: the challan carries the transfer's own number, not an internal code.
+    assert "TRF-202606-1" in body and "DC/TRF/" not in body
 
 
 # ===========================================================================
