@@ -111,7 +111,7 @@ def _fake_gstr3b(period, sid):
         },
         "itcAvailable": {"integratedTax": 0.0, "centralTax": 0.0, "stateTax": 0.0, "cess": 0.0},
         "itcAvailableRegular": {"integratedTax": 0.0, "centralTax": 0.0, "stateTax": 0.0, "cess": 0.0},
-        "itcAvailableTransfer": {"integratedTax": 0.0, "centralTax": 0.0, "stateTax": 0.0, "cess": 0.0},
+        "itcAvailableGstin": {"integratedTax": 0.0, "centralTax": 0.0, "stateTax": 0.0, "cess": 0.0},
         "inwardSuppliesReverseChargeValue": 0.0,
         "inwardSuppliesReverseCharge": {
             "integratedTax": 0.0, "centralTax": 0.0, "stateTax": 0.0, "cess": 0.0,

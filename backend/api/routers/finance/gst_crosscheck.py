@@ -5,12 +5,14 @@ package split): no path, method, dependency, status code, response_model
 or default was changed.
 """
 
+from calendar import monthrange
 from datetime import date
 from ...utils.ist import now_ist, ist_day_start_utc
 from typing import Optional
 from fastapi import Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from ..auth import get_current_user
+from ...services.org_validation import shop_gstins
 from ._shared import (
     _REAL_ORDER_STATUS_FILTER,
     _customer_state_map,
@@ -18,7 +20,6 @@ from ._shared import (
     _iso_now,
     _order_is_interstate,
     _require_finance_admin,
-    _store_gstin_map,
     _store_maps,
     _store_state_map,
     gst_reconciliation,
@@ -244,12 +245,20 @@ def _run_gst_cross_check(db, m: int, y: int, entity_id: Optional[str]) -> dict:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     from ...services import gst_crosscheck as _xc
-    from ..reports import _compute_gstr1, _compute_gstr3b
+    from ..reports import _compute_gstr1, _compute_gstr3b, _itc_unplaced
 
     period = f"{y:04d}-{m:02d}"
 
     s2e, enames = _store_maps(db)
-    s2g = _store_gstin_map(db)
+    # THE shop's GSTIN (the one GSTR-3B's scope files on), so a report's
+    # GSTIN-bound slice is counted once per filing. Unreadable -> the ITC
+    # leg is dead (no sign-off), never a silent per-store sum.
+    try:
+        s2g = shop_gstins(db)
+        gstins_failed = False
+    except Exception:  # noqa: BLE001
+        logger.exception("cross-check: shop GSTINs unreadable")
+        s2g, gstins_failed = {}, True
     if entity_id:
         store_ids = [sid for sid, eid in s2e.items() if eid == entity_id]
         if not store_ids:
@@ -289,11 +298,11 @@ def _run_gst_cross_check(db, m: int, y: int, entity_id: Optional[str]) -> dict:
             failed.add(sid)
 
     gstr1 = _xc.aggregate_gstr1(g1_reports)
-    # Regular ITC / RCM are entity-scoped (identical for every sibling store), so
-    # pass the entity per store report -- aggregate_gstr3b counts them ONCE per
-    # entity. Transfer-borne ITC is GSTIN-scoped (R1), so pass the GSTIN per
-    # store report -- it is counted ONCE per GSTIN, making a multi-GSTIN entity's
-    # ITC independent of store enumeration order.
+    # Company-wide ITC / RCM are identical for every sibling store, so pass the
+    # entity per store report -- aggregate_gstr3b counts them ONCE per entity.
+    # GSTIN-bound ITC (every bill received on a GSTIN, R1) is counted ONCE per
+    # GSTIN, making a multi-GSTIN entity's ITC independent of store enumeration
+    # order and never counting one bill on two registrations.
     gstr3b = _xc.aggregate_gstr3b(g3_reports, g3_entities, g3_gstins)
 
     start, end = _gst_month_window(y, m)
@@ -350,7 +359,13 @@ def _run_gst_cross_check(db, m: int, y: int, entity_id: Optional[str]) -> dict:
         books["input_credit"] = None
         itc_leg_failed = True
 
-    result = _xc.build_crosscheck(gstr1, gstr3b, books, tally)
+    # Booked credit that no GSTIN's return counts (no company, no tax heads,
+    # or a GSTIN that is no shop's): a row of its own, so a month with credit
+    # missing from GSTR-3B can never read green.
+    unplaced = _itc_unplaced(db, y, m, monthrange(y, m)[1], entity_id)
+    # A bill read that failed is a dead ITC leg too (HR-1): no sign-off.
+    itc_leg_failed = itc_leg_failed or gstins_failed or bool(unplaced.get("failed"))
+    result =_xc.build_crosscheck(gstr1, gstr3b, books, tally, unplaced=unplaced)
     result.update(
         {
             "month": m,
@@ -363,6 +378,7 @@ def _run_gst_cross_check(db, m: int, y: int, entity_id: Optional[str]) -> dict:
             "failed_store_ids": sorted(failed),
             "partial": bool(failed),
             "itc_leg_failed": itc_leg_failed,
+            "itc_unplaced": unplaced,
             "gstr1": {
                 "totalTaxableValue": gstr1["totalTaxableValue"],
                 "totalTax": gstr1["totalTax"],

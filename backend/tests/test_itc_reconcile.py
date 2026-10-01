@@ -13,36 +13,13 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from api.services.itc_reconcile import (  # noqa: E402
-    build_itc_register, reconcile_gstr2b, _norm_inv, _is_interstate, _state_code,
+    build_itc_register, reconcile_gstr2b, _norm_inv,
 )
 
 
 def test_norm_inv():
     # Punctuation/case/leading-zeros differences shouldn't break matching.
     assert _norm_inv("INV/001") == _norm_inv("inv-001") == _norm_inv("INV 001")
-
-
-def test_state_code_parsing():
-    assert _state_code("27") == "27"
-    assert _state_code("27-Maharashtra") == "27"
-    assert _state_code("Maharashtra (27)") == "27"
-    # GSTIN: first 2 chars are the state code.
-    assert _state_code("27AAPFU0939F1ZV") == "27"
-    assert _state_code(None) == ""
-    assert _state_code("") == ""
-
-
-def test_is_interstate_missing_pos_defaults_intrastate():
-    # No place_of_supply -> assume intra so existing rows aren't reclassified.
-    assert _is_interstate(None, "20") is False
-    assert _is_interstate("", "20") is False
-    assert _is_interstate("20", None) is False
-
-
-def test_is_interstate_real_states():
-    assert _is_interstate("27", "20") is True       # MH vs JH
-    assert _is_interstate("20", "20") is False      # JH vs JH
-    assert _is_interstate("27-MH", "20-JH") is True
 
 
 def test_build_itc_register_intrastate_default():
@@ -64,36 +41,44 @@ def test_build_itc_register_intrastate_default():
     assert reg["periods"][0]["period"] == "2026-05"
 
 
-def test_build_itc_register_interstate_routes_to_igst():
-    # Entity in Jharkhand (20). One MH bill (place_of_supply 27) -> IGST.
+def test_build_itc_register_legacy_bill_uses_the_engine_rule():
+    """A legacy bill stored WITHOUT heads is split by THE purchase
+    classification (supplier GSTIN state vs our GSTIN state), not by a rule of
+    the register's own: an MH supplier to our JH GSTIN is IGST, a JH supplier
+    to it is CGST + SGST, and a place_of_supply field on the bill is NOT read
+    (the old register compared it to the company's state -- a second rule)."""
     bills = [
         {
             "bill_date": "2026-04-10",
             "taxable_amount": 1000,
             "tax_amount": 50,
-            "place_of_supply": "20",  # same state -> intra
+            "vendor_gstin": "20ABCDE1234F1Z5",
+            "recipient_gstin": "20ZZZZZ9999Z1Z9",
+            "place_of_supply": "27",  # ignored
         },
         {
             "bill_date": "2026-04-15",
             "taxable_amount": 2000,
             "tax_amount": 100,
-            "place_of_supply": "27",  # different state -> IGST
+            "vendor_gstin": "27ABCDE1234F1Z5",
+            "recipient_gstin": "20ZZZZZ9999Z1Z9",
         },
     ]
-    reg = build_itc_register(bills, entity_state="20")
+    reg = build_itc_register(bills)
     assert reg["total_itc"] == 150.0
-    assert reg["total_cgst"] == 25.0     # 50/2 from the intra bill
-    assert reg["total_sgst"] == 25.0
-    assert reg["total_igst"] == 100.0    # full tax from the inter bill
+    assert reg["total_cgst"] == 25.0 and reg["total_sgst"] == 25.0
+    assert reg["total_igst"] == 100.0
     period = reg["periods"][0]
-    assert period["cgst"] == 25.0
-    assert period["sgst"] == 25.0
-    assert period["igst"] == 100.0
-    assert period["tax"] == 150.0  # total tax across both
+    assert (period["cgst"], period["sgst"], period["igst"], period["tax"]) == (
+        25.0,
+        25.0,
+        100.0,
+        150.0,
+    )
 
 
-def test_build_itc_register_no_entity_state_intrastate_fallback():
-    # When entity_state is unknown, behave as before: no IGST routing.
+def test_build_itc_register_legacy_bill_without_gstins_is_intrastate():
+    """No GSTINs on file -> the engine's conservative intra-state default."""
     bills = [
         {
             "bill_date": "2026-04-10",
@@ -102,7 +87,7 @@ def test_build_itc_register_no_entity_state_intrastate_fallback():
             "place_of_supply": "27",
         },
     ]
-    reg = build_itc_register(bills, entity_state=None)
+    reg = build_itc_register(bills)
     assert reg["total_igst"] == 0.0
     assert reg["total_cgst"] == 50.0
     assert reg["total_sgst"] == 50.0
