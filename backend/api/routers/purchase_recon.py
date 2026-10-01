@@ -38,8 +38,8 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
-from .auth import get_current_user, require_roles
 from ..dependencies import resolve_store_scope
+from .auth import get_current_user, require_roles
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
