@@ -90,7 +90,8 @@ async def get_low_stock_alerts(
         prod = products_by_id.get(pid, {})
         item["auto_reorder_disabled"] = _reorder_disabled(prod)
         # Why it is off, by the same rule (the Reorder dashboard labels it,
-        # never re-decides it): inactive, but a provisional buy is not.
+        # never re-decides it): inactive, unless a provisional buy not yet
+        # switched on (reorder_policy.discontinued).
         item["discontinued"] = _discontinued(prod)
         item.update(
             id=pid,

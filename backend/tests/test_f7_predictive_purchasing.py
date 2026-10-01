@@ -357,6 +357,19 @@ class TestT1ProposalGeneration:
         assert _run_oracle(db) == 0
         assert _pending(db) == []
 
+    def test_deleted_provisional_product_gets_no_proposal(self):
+        """OPEN 1: a PO-door (provisional) product still a catalogue DRAFT,
+        switched on, sold, then deleted. 'provisional' is never cleared, so
+        the read must carry deleted_at too, or it reads as never switched on."""
+        db = self._seed()
+        db.get_collection("products").update_one(
+            {"product_id": "P1"},
+            {"$set": {"is_active": False, "provisional": True,
+                      "catalog_status": "DRAFT", "deleted_at": NOW}},
+        )
+        assert _run_oracle(db) == 0
+        assert _pending(db) == []
+
 
 # ============================================================================
 # T2 - zero-7d / non-zero-30d fallback

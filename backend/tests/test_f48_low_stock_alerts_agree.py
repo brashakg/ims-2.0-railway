@@ -223,35 +223,116 @@ def test_a_discontinued_product_still_selling_is_never_a_reorder(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Verifier round 7: a provisional product is inactive, not discontinued
+# A provisional product (ruling 13) is new until it is catalogued or deleted
 # ---------------------------------------------------------------------------
 
 
-def test_a_provisional_product_is_not_discontinued(monkeypatch):
-    """The same two frames, selling the same, but PROVISIONAL (ruling 13:
-    ordered on a PO before anyone catalogued them -- born inactive and never
-    flipped active). Reading is_active alone called them discontinued: no
-    reorder for the Aviator, no FAST_MOVING for the Wayfarer, 'Discontinued -
-    not reordered' on the Reorder dashboard. They reorder like any product."""
-    products = [
-        {**_PRODUCTS[0], "is_active": False, "provisional": True, "reorder_quantity": 5},
-        {**_PRODUCTS[1], "is_active": False, "provisional": True, "reorder_quantity": 5},
-    ]
-    db = _wire(monkeypatch, units=_units("P-AV", 3) + _units("P-WAY", 30), products=products)
+def _po_door_frame(db, model, colour):
+    """A frame bought on a PO before anyone catalogued it, made by the REAL PO
+    door: provisional, inactive, catalog_status DRAFT. This shop's level 5."""
+    from api.services import product_master as pm
+    from database.repositories.product_repository import ProductRepository
+
+    repo = ProductRepository(db.products)
+    doc = pm.create_via_door(
+        {
+            "category": "FR", "brand": "Ray-Ban", "model": model, "colour": colour,
+            "size": "58", "mrp": 9000, "cost_price": 5000,
+            "as_draft": True, "provisional": True,
+        },
+        source="FORM", actor="buyer", actor_name="buyer",
+        product_repo=repo, audit_repo=None, db=db,
+    )
+    pid = doc["product_id"]
+    repo.update(pid, {"reorder_levels": {"S1": 5}})
+    return repo, pid
+
+
+def _switched_on_and_sold(db, repo, pid, catalogued):
+    """Switched on (optionally after cataloguing finished: the real restamp
+    moves DRAFT -> ACTIVE) and sold 20 units this month."""
+    from api.services import product_master as pm
+
+    if catalogued:
+        pm.apply_restamp_atomic(pid, repo.find_by_id(pid), {"offer_price": 8000}, product_repo=repo)
+    repo.update(pid, {"offer_price": 8000, "is_active": True})
+    sku = repo.find_by_id(pid)["sku"]
     db.orders.insert_many([
         {
             "status": "DELIVERED", "store_id": "S1", "created_at": _NOW - timedelta(days=d % 25 + 1),
-            "items": [{"barcode": "RB3025-GLD", "quantity": 1}, {"barcode": "RB2140", "quantity": 1}],
+            "items": [{"barcode": sku, "quantity": 1}],
         }
         for d in range(20)
     ])
-    by_name = {a["productName"]: a for a in _alerts()["alerts"]}
-    av = by_name["Ray-Ban RB3025 Aviator - Gold"]
-    assert av["alertType"] == "REORDER_ALERT" and av["recommendedOrder"] > 0
-    assert by_name["Ray-Ban Wayfarer"]["alertType"] == "FAST_MOVING"
+
+
+def _wire_units(mp, db, units):
+    from database.repositories.product_repository import ProductRepository, StockRepository
+
+    db.stock_units.insert_many([dict(u) for u in units])
+    mp.setattr(inv, "get_stock_repository", lambda: StockRepository(db.stock_units))
+    mp.setattr(inv, "get_product_repository", lambda: ProductRepository(db.products))
+    mp.setattr(inv, "_get_db", lambda: db)
+
+
+def test_a_po_door_product_never_switched_on_is_new_not_discontinued(monkeypatch):
+    """Bought last week on the PO door, 3 received, not catalogued or switched
+    on yet: inactive, but the Reorder dashboard must not call it
+    'Discontinued - not reordered' -- it can be ordered like any product."""
+    import mongomock
+
+    db = mongomock.MongoClient().db
+    repo, pid = _po_door_frame(db, "RB3025", "Gold")
+    repo.update(pid, {"reorder_quantity": 5})
+    _wire_units(monkeypatch, db, _units(pid, 3))
     (row,) = _low()["items"]
-    assert row["auto_reorder_disabled"] is False
     assert row["discontinued"] is False
+    assert row["auto_reorder_disabled"] is False
+
+
+@pytest.mark.parametrize("catalogued", [False, True], ids=["deleted-as-draft", "deleted-after-cataloguing"])
+def test_a_deleted_provisional_product_is_never_a_reorder(monkeypatch, catalogued):
+    """OPEN 1, probe 1: a PO-door Aviator was switched on, sold 20 this month,
+    then deleted (the real soft-delete) with 3 left. 'provisional' is never
+    cleared, so it read 'not discontinued': REORDER_ALERT '~4 days of stock
+    left - reorder 16 units', and Generate PO raised a PO for it."""
+    import mongomock
+
+    db = mongomock.MongoClient().db
+    repo, pid = _po_door_frame(db, "RB3025", "Gold")
+    repo.update(pid, {"reorder_quantity": 5})
+    _switched_on_and_sold(db, repo, pid, catalogued)
+    repo.soft_delete(pid)
+    _wire_units(monkeypatch, db, _units(pid, 3))
+    (alert,) = _alerts()["alerts"]
+    assert alert["alertType"] == "LOW_STOCK"
+    assert alert["recommendedOrder"] == 0 and alert["costImpact"] == 0
+    (row,) = _low()["items"]
+    assert row["discontinued"] is True  # 'Discontinued - not reordered'
+    assert row["auto_reorder_disabled"] is True  # Generate PO skips it
+
+
+def test_a_provisional_product_switched_off_after_cataloguing_is_discontinued(monkeypatch):
+    """OPEN 1, probe 2: the same lifecycle with the default reorder_quantity
+    -1, ending in a switch-off (no delete). The 30-left Wayfarer was
+    'FAST_MOVING - keep well stocked', and the 3-left Aviator showed
+    'Auto-reorder off - Enable it via the settings icon', not 'Discontinued'."""
+    import mongomock
+
+    db = mongomock.MongoClient().db
+    units = []
+    for model, colour, left in (("RB3025", "Gold", 3), ("RB2140", "Black", 30)):
+        repo, pid = _po_door_frame(db, model, colour)
+        assert repo.find_by_id(pid)["reorder_quantity"] == -1  # the door's default
+        _switched_on_and_sold(db, repo, pid, catalogued=True)
+        repo.update(pid, {"is_active": False})
+        units += _units(pid, left)
+    _wire_units(monkeypatch, db, units)
+    alerts = _alerts()["alerts"]
+    assert not [a for a in alerts if a["alertType"] in ("FAST_MOVING", "REORDER_ALERT")]
+    (row,) = _low()["items"]
+    assert row["quantity"] == 3
+    assert row["discontinued"] is True
 
 
 # ---------------------------------------------------------------------------

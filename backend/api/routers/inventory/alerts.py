@@ -22,6 +22,7 @@ from .helpers import (
     _shelf_by_product,
 )
 from ...services.reorder_policy import (
+    DISCONTINUED_FIELDS,
     is_low_stock,
     low_stock_rows,
     on_hand,
@@ -142,7 +143,7 @@ def _build_stock_alert(
     # REORDER_ALERT / restock suggestion for it. Informational alerts
     # (LOW_STOCK without a suggested qty, DEAD_STOCK, OVERSTOCK, FAST_MOVING)
     # still apply. See api/services/reorder_policy.py, which also turns
-    # reorder off for a discontinued product (inactive, not provisional).
+    # reorder off for a discontinued product (reorder_policy.discontinued).
     reorder_suggestions_off = _reorder_disabled(product)
     # A discontinued product still on the shelf is scored only as LOW_STOCK
     # (no qty) or DEAD_STOCK: 'keep well stocked' or 'excess units' is advice
@@ -371,8 +372,7 @@ async def get_stock_alerts(
                 {
                     "_id": 0,
                     "product_id": 1,
-                    "is_active": 1,
-                    "provisional": 1,
+                    **{f: 1 for f in DISCONTINUED_FIELDS},
                     "name": 1,
                     "brand": 1,
                     "category": 1,
