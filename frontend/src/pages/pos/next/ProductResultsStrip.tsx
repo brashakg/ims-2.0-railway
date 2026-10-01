@@ -28,11 +28,20 @@
 // it layout="strip", the counter layout="grid". Each surface keeps its own
 // SURROUNDING layout (one scrolling row here, a category grid there); the
 // card's data reads, badges and disabled states exist once.
+//
+// STOCK (F46, owner-approved 2026-09-28): the number on a card is this shop's
+// sellable count from useSellableStock -- the oversell guard's own number,
+// re-read on every sale here, every remount and refocus, and every 30 s. The
+// guard at Complete sale stays the authority (another till can sell the last
+// unit between two reads). The surface fetches it ONCE for the rows it shows
+// and hands every card that one answer; the card looks its own figure up by
+// productIdOf, the id the hook asked with, so no surface re-types the lookup.
 
 import { Package } from 'lucide-react';
 import { usePOSStore } from '../../../stores/posStore';
-import { useProducts } from '../../../hooks/usePOSQueries';
-import { posPriceGuard, cartItemFromProduct } from '../../../components/pos/productIntake';
+import { useProducts, useSellableStock } from '../../../hooks/usePOSQueries';
+import { posPriceGuard, cartItemFromProduct, productIdOf } from '../../../components/pos/productIntake';
+import type { SellableStock } from '../../../services/api/inventory';
 
 interface ProductResultsStripProps {
   /** Terminal's active store - results are scoped to its stock. */
@@ -53,19 +62,14 @@ const money = (v: number) => `₹${Math.round(v || 0).toLocaleString('en-IN')}`;
     stock is never silently hidden. */
 export const MAX_PRODUCT_RESULTS = 24;
 
-/** The product list spells on-hand quantity three ways depending on which
-    join served the row. null means "this row carries no stock figure at all"
-    - never read that as zero, or every unjoined product looks out of stock. */
-export function stockOf(p: any): number | null {
-  return p.stock ?? p.quantity ?? p.stock_available ?? null;
-}
-
-/** ONE spelling chain for the row's id. Includes plain `id` because the axios
-    aliaser camelises snake_case ADDITIVELY but a row that arrives with only
-    `id` (e.g. an order-shaped join) has no product_id/_id at all - reading
-    just those showed a false "not in cart" on such rows. */
-export function productIdOf(p: any): string | undefined {
-  return p.product_id || p._id || p.id;
+/** A minted product name ends " - {Colour}" (product_naming.build_product_name
+    on the server). Split it off so a card truncates the MODEL, never the
+    colour: two colours of one frame otherwise read identically. A name with
+    no separator has no colour line. ponytail: reads the name, not the colour
+    attributes - an explicit name without " - " can still be cut. */
+function nameParts(name: string): [string, string] {
+  const i = name.lastIndexOf(' - ');
+  return i > 0 ? [name.slice(0, i), name.slice(i + 3)] : [name, ''];
 }
 
 export type ProductCardLayout = 'strip' | 'grid';
@@ -80,24 +84,31 @@ export function ProductCard({
   product,
   layout,
   onPick,
+  stock,
 }: {
   product: any;
   layout: ProductCardLayout;
   onPick: () => void;
+  /** The screen's ONE useSellableStock answer. The card reads its own
+      figure by productIdOf -- the id the hook asked with. A null figure = the
+      sale guard does not gate this row; no figure = not known yet. Neither
+      shows a badge or blocks. */
+  stock?: SellableStock;
 }) {
   const store = usePOSStore();
   const id = productIdOf(product);
+  const figure = id ? stock?.sellable[id] : undefined;
   const mrp = product.mrp || 0;
   const offer = product.offer_price || product.offerPrice || mrp;
-  const stock = stockOf(product);
-  // Owner ruling 2026-08-25: oversell = BLOCK. A row that reports zero on
-  // hand cannot be billed here; a row with no figure is not blocked.
-  const outOfStock = stock !== null && stock <= 0;
-  const lowStock = stock !== null && stock > 0 && stock <= 3;
+  const counted = typeof figure === 'number';
+  // Owner ruling 2026-08-25: oversell = BLOCK. A row this shop cannot sell
+  // cannot be billed here; a row with no figure is not blocked.
+  const outOfStock = counted && figure <= 0;
+  const lowStock = counted && figure > 0 && figure <= 3;
   const inCart = (store.cart || []).some((i) => i.product_id === id);
 
   const stockBadge =
-    stock !== null ? (
+    counted ? (
       <span
         className={`text-[9px] px-1 py-0.5 rounded font-medium shrink-0 ${
           outOfStock
@@ -107,12 +118,15 @@ export function ProductCard({
               : 'bg-gray-100 text-gray-600'
         }`}
       >
-        {outOfStock ? 'Out' : lowStock ? `${stock} left` : stock}
+        {outOfStock ? 'Out of stock' : `${figure} in stock`}
       </span>
     ) : null;
 
   const title = `${product.name || ''} ${product.sku ? `· ${product.sku}` : ''}`;
-  const name = product.name || product.model || 'Item';
+  const [model, colour] = nameParts(product.name || product.model || 'Item');
+  const colourLine = colour ? (
+    <span className="text-[11px] font-medium text-gray-700 break-words">{colour}</span>
+  ) : null;
   const secondLine = [product.brand, product.sku].filter(Boolean).join(' · ');
 
   if (layout === 'grid') {
@@ -139,7 +153,8 @@ export function ProductCard({
           )}
           {stockBadge && <span className="absolute top-1 right-1">{stockBadge}</span>}
         </div>
-        <span className="text-xs font-medium text-gray-900 line-clamp-2">{name}</span>
+        <span className="text-xs font-medium text-gray-900 line-clamp-2">{model}</span>
+        {colourLine}
         <span className="text-[11px] text-gray-500 truncate">{secondLine}</span>
         <span className="text-sm font-semibold text-gray-900">
           {money(offer)}
@@ -149,7 +164,6 @@ export function ProductCard({
             </span>
           )}
         </span>
-        {outOfStock && <span className="text-[11px] text-red-600">Out of stock</span>}
         {inCart && !outOfStock && <span className="text-[11px] text-green-700">In cart</span>}
       </button>
     );
@@ -179,7 +193,8 @@ export function ProductCard({
         </div>
         {stockBadge && <span className="ml-auto">{stockBadge}</span>}
       </div>
-      <span className="text-xs font-semibold text-gray-900 truncate">{name}</span>
+      <span className="text-xs font-semibold text-gray-900 truncate">{model}</span>
+      {colourLine}
       <span className="text-[10px] text-gray-500 truncate">{secondLine}</span>
       <span className="mt-auto flex items-baseline gap-1.5">
         <span className="text-sm font-bold text-gray-900">{money(offer)}</span>
@@ -203,6 +218,8 @@ export function ProductResultsStrip({
     search: query.trim() || undefined,
     store_id: storeId || undefined,
   });
+  const rows = (products as any[]).slice(0, MAX_PRODUCT_RESULTS);
+  const { data: stock } = useSellableStock(storeId, rows);
 
   const handlePick = (product: any) => {
     const guard = posPriceGuard(product);
@@ -232,8 +249,6 @@ export function ProductResultsStrip({
     );
   }
 
-  const rows = (products as any[]).slice(0, MAX_PRODUCT_RESULTS);
-
   if (rows.length === 0) {
     return (
       <div className="min-h-[44px] flex items-center gap-2 rounded-xl border border-gray-200 bg-white px-3 text-sm text-gray-500">
@@ -252,6 +267,7 @@ export function ProductResultsStrip({
           key={productIdOf(product) || product.sku}
           product={product}
           layout="strip"
+          stock={stock}
           onPick={() => handlePick(product)}
         />
       ))}
