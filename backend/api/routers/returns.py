@@ -3302,7 +3302,6 @@ async def create_return(
             # physical store when the online order carries no fulfilment stamp.
             processing_store_id=current_user.get("active_store_id"),
             # Already resolved above; saves the online branch a second fetch.
-            order=order,
         )
     except Exception as exc:  # noqa: BLE001
         # A stock-write failure must never break the return record - leave

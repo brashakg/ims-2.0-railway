@@ -142,7 +142,7 @@ def till(monkeypatch):
                 "cost_source": "GRN_PO",
             }
         )
-    return {"db": db, "stock": stock_repo}
+    return {"db": db, "stock": stock_repo, "orders": order_repo}
 
 
 def _line(**over):
@@ -459,6 +459,44 @@ def test_return_serial_check_reads_the_scanned_lines_own_unit(client, till):
         )
         is None
     )
+
+
+def test_post_returns_for_the_second_scanned_line_restocks_that_unit(
+    client, till, monkeypatch
+):
+    """TSU-7 through the route: POST /returns must hand the order to both the
+    serial check and the restock, or the SU-B line puts SU-A back (and its
+    correct serial is 409'd as a mismatch against SU-A's)."""
+    from api.routers import returns as ret_mod
+
+    db = till["db"]
+    monkeypatch.setattr(ret_mod, "_get_db", lambda: db)
+    monkeypatch.setattr(ret_mod, "get_order_repository", lambda: till["orders"])
+    db.stock_units.update_one({"stock_id": "SU-A"}, {"$set": {"serial": "SER-A"}})
+    db.stock_units.update_one({"stock_id": "SU-B"}, {"$set": {"serial": "SER-B"}})
+    r = _sell(client, [_line(stock_id="SU-A"), _line(stock_id="SU-B")])
+    assert r.status_code in (200, 201), r.text
+    order_id = _order_id(r)
+    total = _order(till, order_id)["grand_total"]
+    db.orders.update_one(
+        {"order_id": order_id},
+        {"$set": {"status": "DELIVERED", "amount_paid": total, "balance_due": 0}},
+    )
+    b_line = _item_of(_order(till, order_id), "SU-B")
+
+    ret = client.post(
+        "/api/v1/returns",
+        json={
+            "order_id": order_id,
+            "return_type": "RETURN",
+            "items": [_return_line(b_line, serial="SER-B").model_dump()],
+        },
+        headers=_token(["SUPERADMIN"]),
+    )
+    assert ret.status_code in (200, 201), ret.text
+    assert ret.json()["restock_stock_ids"] == ["SU-B"], ret.json()
+    assert _unit(till, "SU-B")["status"] == "AVAILABLE"
+    assert _unit(till, "SU-A")["status"] == "SOLD"  # still with the customer
 
 
 # ---------------------------------------------------------------------------
