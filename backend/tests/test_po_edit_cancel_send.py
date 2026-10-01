@@ -156,6 +156,7 @@ def _wire(monkeypatch, po, grns=()):
     monkeypatch.setattr(v, "get_vendor_repository", lambda: _VendorRepo())
     monkeypatch.setattr(v, "get_product_repository", lambda: None)
     monkeypatch.setattr(v, "get_store_repository", lambda: None)
+    monkeypatch.setattr(v, "get_stock_repository", lambda: None)
     return repo, audit
 
 
@@ -1220,3 +1221,75 @@ def test_cancel_brings_a_line_with_nothing_due_up_to_date(monkeypatch):
     p1 = doc["items"][0]
     assert (p1["received_qty"], p1["line_status"]) == (2, "RECEIVED")
     assert doc["status"] == "RECEIVED"
+
+
+# --------------------------------------------------------------------------- #
+# Review round 7: a part-accepted receipt that was then ESCALATED is in no
+# receipt sum, yet its units are on the shelf. The cancel read "nothing
+# arrived" and cancelled the whole order (or the line) over 5 shelved frames.
+# --------------------------------------------------------------------------- #
+
+
+def _escalated_world(monkeypatch):
+    from database.repositories.product_repository import StockRepository
+    from database.repositories.vendor_repository import GRNRepository
+    from test_hub_phase2_grn_hero import _ProductRepo as _HeroProducts, _complete_frame
+
+    monkeypatch.setenv("PM_MIRROR_ENABLED", "")
+    po_repo = PurchaseOrderRepository(StrictCollection("purchase_orders", []))
+    grn_repo = GRNRepository(StrictCollection("grns", []))
+    stock_repo = StockRepository(StrictCollection("stock_units", []))
+    po_repo.create(_po(status="SENT", items=[
+        _line("P1", "Frame A", 5, 1000),
+        _line("GHOST", "Frame B (typed in)", 3, 800),  # not catalogued: held
+    ], store="S1"))
+    grn_repo.create({
+        "grn_id": "G1", "grn_number": "RCPT/S1/26-27/0001", "po_id": "PO1",
+        "store_id": "S1", "vendor_id": "V1", "status": "PENDING",
+        "items": [
+            {"product_id": "P1", "received_qty": 5, "accepted_qty": 5,
+             "rejected_qty": 0, "ordered_qty": 5, "unit_price": 1000.0},
+            {"product_id": "GHOST", "received_qty": 3, "accepted_qty": 3,
+             "rejected_qty": 0, "ordered_qty": 3, "unit_price": 800.0},
+        ],
+    })
+    audit = _AuditRepo()
+    for name, repo in {
+        "get_purchase_order_repository": po_repo,
+        "get_grn_repository": grn_repo,
+        "get_stock_repository": stock_repo,
+        "get_product_repository": _HeroProducts([_complete_frame("P1", cost=1000.0)]),
+        "get_audit_repository": audit,
+        "get_store_repository": None,
+        "get_vendor_repository": None,
+    }.items():
+        monkeypatch.setattr(v, name, lambda r=repo: r)
+    monkeypatch.setattr(v, "_get_db", lambda: None)
+    monkeypatch.setattr(v, "is_online_store", lambda *a, **k: False)
+    admin = _user(roles=("ADMIN",), uid="u-mgr")
+    out = _run(v.accept_grn("G1", admin))
+    assert out["grn_status"] == "PARTIALLY_ACCEPTED" and out["units_added"] == 5
+    _run(v.escalate_grn("G1", note="held line, vendor dispute", current_user=admin))
+    assert grn_repo.find_by_id("G1")["status"] == "ESCALATED"
+    return po_repo, stock_repo, admin
+
+
+def test_a_cancel_counts_units_an_escalated_receipt_put_on_the_shelf(monkeypatch):
+    po_repo, stock_repo, admin = _escalated_world(monkeypatch)
+    _run(v.cancel_po("PO1", reason="vendor closed down", current_user=admin))
+    po = po_repo.find_by_id("PO1")
+    assert po["status"] != "CANCELLED", "cancelled whole over 5 frames on the shelf"
+    p1, ghost = po["items"]
+    assert (p1["quantity"], p1.get("cancelled_qty", 0)) == (5, 0)
+    assert (ghost["quantity"], ghost["cancelled_qty"]) == (0, 3)
+    assert len(stock_repo.collection.find({"po_id": "PO1", "product_id": "P1"})) == 5
+
+
+def test_a_line_cancel_cannot_withdraw_units_an_escalated_receipt_shelved(monkeypatch):
+    po_repo, _, admin = _escalated_world(monkeypatch)
+    with pytest.raises(HTTPException) as e:
+        _run(v.cancel_po_line(
+            "PO1", 0, v.POLineCancel(reason="vendor short", product_id="P1"), admin
+        ))
+    assert e.value.status_code == 400
+    assert po_repo.find_by_id("PO1")["items"][0].get("cancelled_qty", 0) == 0

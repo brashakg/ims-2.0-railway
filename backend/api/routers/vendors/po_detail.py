@@ -17,12 +17,14 @@ from ._shared import (
     get_grn_repository,
     get_product_repository,
     get_purchase_order_repository,
+    get_stock_repository,
     get_vendor_repository,
     logger,
     require_roles,
     router,
 )
 from .gst import build_po_gst, po_gst_context
+from .grn_accept_lock import _grn_already_minted
 from .models import POLineCancel, POUpdate, cancel_reason, expected_date_not_backdated
 from .numbering import (
     _cumulative_received_by_product,
@@ -444,18 +446,48 @@ def _refuse_if_box_waiting(po_id: str) -> None:
         )
 
 
+def _units_minted_for(po_id: str, product_id: str) -> int:
+    """Units a goods receipt actually put in stock for this order and product,
+    whatever that receipt's status is now. A part-accepted receipt that was
+    then ESCALATED counts in no receipt sum, yet its units are on the shelf.
+    Fails CLOSED (503): an unreadable stock table must not make arrived stock
+    look cancellable."""
+    stock_repo = get_stock_repository()
+    if stock_repo is None:
+        return 0
+    try:
+        return _grn_already_minted(
+            stock_repo,
+            {"source_type": "GRN", "po_id": po_id, "product_id": product_id},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[VENDOR] PO %s: could not count received units: %s", po_id, exc)
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Could not check what has already arrived on this order, so "
+                "nothing was cancelled. Try again in a moment."
+            ),
+        ) from exc
+
+
 def _received_by_product(po: dict) -> dict:
-    """Units on the shelf per product: the ACCEPTED receipts' sum -- the count
-    grn_accept closes an order on -- never below the order's own copy. That
-    copy can lag (grn_accept's fallback writes only the status), and an
-    unreadable receipt table must not make arrived stock look cancellable."""
-    out = dict(_cumulative_received_by_product(get_grn_repository(), po.get("po_id")))
+    """Units on the shelf per product: the most of the ACCEPTED receipts' sum
+    (the count grn_accept closes an order on), the units receipts actually
+    minted for this order (a part-accepted receipt that was escalated is in no
+    receipt sum), and the order's own copy (grn_accept's fallback writes only
+    the status, so it can lag)."""
+    po_id = po.get("po_id")
+    out = dict(_cumulative_received_by_product(get_grn_repository(), po_id))
     header = po.get("received_qty_by_product") or {}
+    minted: dict = {}
     for it in po.get("items") or []:
         pid = it.get("product_id")
+        if pid not in minted:
+            minted[pid] = _units_minted_for(po_id, pid)
         own = header.get(pid)
         own = _qty(it.get("received_qty") if own is None else own)
-        out[pid] = max(_qty(out.get(pid)), own)
+        out[pid] = max(_qty(out.get(pid)), own, minted[pid])
     return out
 
 
