@@ -43,7 +43,9 @@ def _raise(exc):
 def _pulled(order_id, **over):
     """A Shopify REST order as orders.json returns it (== the webhook body)."""
     o = _frame_order(order_id)
-    o["created_at"] = "2026-09-06T00:30:00Z"
+    # Inside the create window (the pull re-applies it client-side now that the
+    # fetch is by updated_at); UPDATED stays fixed because it keys the inbox row.
+    o["created_at"] = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
     o["updated_at"] = UPDATED
     o.update(over)
     return o
@@ -52,7 +54,7 @@ def _pulled(order_id, **over):
 @pytest.fixture
 def pull(monkeypatch, wired):
     """The pull, wired: creds resolve, the Shopify fetch is a fake that records
-    the window it was asked for, dispatch mode defaults to live."""
+    the (updated_at) window it was asked for, dispatch mode defaults to live."""
     import api.services.shopify_auth as auth
 
     monkeypatch.setattr(
@@ -62,8 +64,8 @@ def pull(monkeypatch, wired):
     )
     state = {"orders": [], "complete": True, "calls": [], "error": None}
 
-    async def fake_fetch(shop_url, token, *, created_at_min):
-        state["calls"].append(created_at_min)
+    async def fake_fetch(shop_url, token, *, updated_at_min):
+        state["calls"].append(updated_at_min)
         if state["error"] is not None:
             _raise(state["error"])
         return [copy.deepcopy(o) for o in state["orders"]], state["complete"]
@@ -326,7 +328,7 @@ def test_fetch_follows_link_next_and_flags_truncation(monkeypatch):
             calls.append((url, params))
             n = len(calls)
             if n == 1:
-                assert params["created_at_min"] == "2026-09-04T00:00:00+00:00"
+                assert params["updated_at_min"] == "2026-09-04T00:00:00+00:00"
                 assert params["status"] == "any" and params["limit"] == np.SHOPIFY_PULL_PAGE_LIMIT
                 return _page([{"id": 1}], next_url="https://bv.myshopify.com/p?page_info=abc")
             assert params is None and "page_info=abc" in url
@@ -334,14 +336,14 @@ def test_fetch_follows_link_next_and_flags_truncation(monkeypatch):
 
     monkeypatch.setattr(np.httpx, "AsyncClient", _Client)
     orders, complete = asyncio.run(
-        np._shopify_fetch_orders("bv.myshopify.com", "t", created_at_min="2026-09-04T00:00:00+00:00")
+        np._shopify_fetch_orders("bv.myshopify.com", "t", updated_at_min="2026-09-04T00:00:00+00:00")
     )
     assert [o["id"] for o in orders] == [1, 2] and complete is True
 
     monkeypatch.setattr(np, "SHOPIFY_PULL_MAX_PAGES", 1)
     calls.clear()
     orders, complete = asyncio.run(
-        np._shopify_fetch_orders("bv.myshopify.com", "t", created_at_min="2026-09-04T00:00:00+00:00")
+        np._shopify_fetch_orders("bv.myshopify.com", "t", updated_at_min="2026-09-04T00:00:00+00:00")
     )
     assert [o["id"] for o in orders] == [1] and complete is False
 

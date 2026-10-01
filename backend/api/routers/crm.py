@@ -25,6 +25,7 @@ from ..dependencies import (
     get_task_repository,
     get_audit_repository,
 )
+from ..services.online_order_status import SALE_DONE_ANY_CASE
 from ..services.task_triggers import create_system_task
 
 # Customer store-ownership + the credit-role set are single-sourced in the
@@ -1989,24 +1990,6 @@ _SEGMENT_DEFS = [
     ("lost", "Lost Customers", "No activity in 12+ months."),
 ]
 
-# Order statuses that count as a real sale (both cases — TechCherry uses
-# uppercase "DELIVERED"). Mirrors inventory._SOLD_STATUSES.
-_SOLD_STATUSES = [
-    "DELIVERED",
-    "delivered",
-    "Delivered",
-    "COMPLETED",
-    "completed",
-    "Completed",
-    "PAID",
-    "paid",
-    "Paid",
-    "FULFILLED",
-    "fulfilled",
-    "Fulfilled",
-]
-
-
 def _crm_get_db():
     try:
         from ..dependencies import get_db
@@ -2059,7 +2042,7 @@ def _perform_rfm_segmentation(customers: list) -> list:
     try:
         orders_coll = db_conn.get_collection("orders")
         cursor = orders_coll.find(
-            {"status": {"$in": _SOLD_STATUSES}},
+            {"status": {"$in": SALE_DONE_ANY_CASE}},
             {
                 "_id": 0,
                 "customer_id": 1,

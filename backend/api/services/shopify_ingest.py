@@ -1857,6 +1857,10 @@ def ingest_shopify_order(
         ),
         "created_at": now,
         "updated_at": now,
+        # The mapper's order watermark (_shopify_payload_stale): this doc was
+        # built from this body, so an OLDER one (a late-retried orders/create,
+        # partially_paid) is stale and never rewinds the money it booked.
+        "shopify_updated_at": _to_naive_utc(payload.get("updated_at")),
     }
 
     # HISTORICAL import: overlay the terminal status + settled payment + traceability

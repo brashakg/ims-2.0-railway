@@ -433,6 +433,10 @@ class OrderStatus(str, Enum):
     CONFIRMED = "CONFIRMED"
     PROCESSING = "PROCESSING"
     READY = "READY"
+    # Every online order Shopify fulfilled, until the courier delivers it
+    # (owner ruling 2026-09-28). GET /orders validates ?status= against this
+    # enum, so the Orders screen's Shipped filter needs it.
+    SHIPPED = "SHIPPED"
     DELIVERED = "DELIVERED"
     CANCELLED = "CANCELLED"
 
@@ -447,6 +451,10 @@ VALID_TRANSITIONS = {
     },  # READY for quick-sale (no workshop)
     "PROCESSING": {"READY", "CANCELLED"},
     "READY": {"DELIVERED", "CANCELLED"},
+    # An online order Shopify fulfilled is SHIPPED (owner ruling 2026-09-28);
+    # the counter delivers it when a person hands it over (click-and-collect)
+    # or confirms a parcel no courier feed reports delivered.
+    "SHIPPED": {"DELIVERED"},
     "DELIVERED": set(),  # Terminal
     "CANCELLED": set(),  # Terminal
 }

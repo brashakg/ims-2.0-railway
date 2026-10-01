@@ -80,8 +80,25 @@ def _match(doc, filter_) -> bool:
                 elif op == "$lte":
                     if actual is None or actual > op_val:
                         return False
+                elif op == "$gt":
+                    if actual is None or actual <= op_val:
+                        return False
+                elif op == "$not":
+                    if _match({k: actual} if k in doc else {}, {k: op_val}):
+                        return False
                 elif op == "$ne":
-                    if actual == op_val:
+                    # Mongo: $ne on an array field means "no element equals".
+                    if op_val in actual if isinstance(actual, list) else actual == op_val:
+                        return False
+                elif op == "$in":
+                    if actual not in (op_val or []):
+                        return False
+                elif op == "$exists":
+                    if (k in doc) != bool(op_val):
+                        return False
+                elif op == "$elemMatch":
+                    # The returnable-qty claim on an order line.
+                    if not any(isinstance(e, dict) and _match(e, op_val) for e in (actual or [])):
                         return False
                 else:
                     return False
@@ -159,6 +176,22 @@ class FakeCollection:
             if _match(d, filter_):
                 for k, v in (update.get("$set") or {}).items():
                     d[k] = v
+                for k, v in (update.get("$push") or {}).items():
+                    d.setdefault(k, []).append(v)
+                # Positional "arr.$.leaf": the first element the $elemMatch
+                # matched, resolved ONCE before any write, as Mongo does.
+                pos = {arr: next(e for e in d[arr] if isinstance(e, dict) and _match(e, c["$elemMatch"]))
+                       for arr, c in filter_.items() if isinstance(c, dict) and "$elemMatch" in c}
+                for op in ("$inc", "$addToSet", "$pull"):
+                    for k, v in (update.get(op) or {}).items():
+                        arr, _, leaf = k.partition(".$.")
+                        el = pos[arr]
+                        if op == "$inc":
+                            el[leaf] = (el.get(leaf) or 0) + v
+                        elif op == "$addToSet":
+                            el[leaf] = (el.get(leaf) or []) + ([] if v in (el.get(leaf) or []) else [v])
+                        else:
+                            el[leaf] = [e for e in el.get(leaf) or [] if e != v]
                 return dict(d)
         return None
 
@@ -167,6 +200,13 @@ class FakeCollection:
             if _match(d, filter_):
                 for k, v in (update.get("$set") or {}).items():
                     d[k] = v
+                for k, v in (update.get("$push") or {}).items():
+                    d.setdefault(k, []).append(v)
+                for k, v in (update.get("$addToSet") or {}).items():
+                    if v not in d.setdefault(k, []):
+                        d[k].append(v)
+                for k, v in (update.get("$pull") or {}).items():
+                    d[k] = [e for e in d.get(k) or [] if e != v]
                 return type("R", (), {"modified_count": 1, "matched_count": 1})()
         if upsert:
             doc = dict(filter_)
