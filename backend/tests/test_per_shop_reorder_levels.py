@@ -423,6 +423,13 @@ def test_admin_sets_any_shop_and_clears_back_to_not_set(world):
     assert _get("/api/v1/inventory/low-stock", store_id=DHN)["items"] == []
 
 
+def test_a_minus_one_write_clears_the_level_and_is_never_stored_or_echoed(world):
+    res = _set_level(_DHN_MGR, "P-FRAME", DHN, -1)
+    assert res.status_code == 200, res.text
+    assert -1 not in _leaves(res.json())
+    assert _levels_of(world, "P-FRAME") == {}  # cleared, not stored as -1
+
+
 # ---------------------------------------------------------------------------
 # 4. The migration: owner-set chain values become each stocking shop's level
 # ---------------------------------------------------------------------------
