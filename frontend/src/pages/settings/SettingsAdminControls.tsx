@@ -130,7 +130,56 @@ const DEFAULT_RULES: OperationalRule[] = [
 
 type AdminControlsPayload = Parameters<typeof settingsApi.updateAdminControls>[0];
 
-function SaveBar({ label, payload }: { label: string; payload: () => AdminControlsPayload }) {
+const LOAD_ERROR = 'Could not load the saved settings - the values below are defaults, not what is stored. Do not save until this is resolved; reload the page to retry.';
+
+/** Visible failure for the stored-settings load (never silently show defaults). */
+function LoadError({ message }: { message: string | null }) {
+  if (!message) return null;
+  return (
+    <div role="alert" className="p-3 rounded-lg border border-red-200 bg-red-50 text-sm text-red-700">
+      {message}
+    </div>
+  );
+}
+
+/**
+ * Unsaved-edit guard. The app runs on <BrowserRouter> (not a data router), so
+ * react-router's useBlocker is unavailable; this follows the codebase's own
+ * window.confirm pattern. While `dirty`: closing/reloading the tab prompts via
+ * beforeunload, and a click on any in-app link (the settings rail included)
+ * asks before leaving.
+ */
+function useUnsavedGuard(dirty: boolean) {
+  useEffect(() => {
+    if (!dirty) return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ''; };
+    const onClick = (e: MouseEvent) => {
+      const a = (e.target as Element | null)?.closest?.('a[href]') as HTMLAnchorElement | null;
+      if (!a || a.target === '_blank' || a.getAttribute('href')?.startsWith('#')) return;
+      if (!window.confirm('You have unsaved changes on this page - leave without saving?')) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    document.addEventListener('click', onClick, true);
+    return () => {
+      window.removeEventListener('beforeunload', onBeforeUnload);
+      document.removeEventListener('click', onClick, true);
+    };
+  }, [dirty]);
+}
+
+/** dirty flag + guard: markDirty() on a user edit, clean() after a save. */
+function useDirty() {
+  const [dirty, setDirty] = useState(false);
+  useUnsavedGuard(dirty);
+  return { dirty, markDirty: () => setDirty(true), clean: () => setDirty(false) };
+}
+
+function SaveBar({ label, payload, dirty, onSaved }: {
+  label: string; payload: () => AdminControlsPayload; dirty: boolean; onSaved: () => void;
+}) {
   const toast = useToast();
   const [isSaving, setIsSaving] = useState(false);
 
@@ -138,6 +187,7 @@ function SaveBar({ label, payload }: { label: string; payload: () => AdminContro
     setIsSaving(true);
     try {
       await settingsApi.updateAdminControls(payload());
+      onSaved();
       toast.success('Admin settings saved successfully');
     } catch {
       toast.error('Failed to save settings');
@@ -147,7 +197,8 @@ function SaveBar({ label, payload }: { label: string; payload: () => AdminContro
   };
 
   return (
-    <div className="flex justify-end pt-4 border-t border-gray-200">
+    <div className="flex items-center justify-end gap-3 pt-4 border-t border-gray-200">
+      {dirty && <span className="text-xs text-amber-700">Unsaved changes</span>}
       <button
         onClick={handleSave}
         disabled={isSaving}
@@ -167,6 +218,8 @@ function SaveBar({ label, payload }: { label: string; payload: () => AdminContro
 export function StoreModulesSection() {
   // Store module access — fetch dynamically
   const [storeModules, setStoreModules] = useState<StoreModuleConfig[]>(DEFAULT_STORES);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const { dirty, markDirty, clean } = useDirty();
 
   useEffect(() => {
     // Fetch stores
@@ -179,7 +232,7 @@ export function StoreModulesSection() {
           modules: s.modules || { pos: true, clinical: true, workshop: true, inventory: true, reports: true, hr: true, finance: true, crm: true, tasks: true, settings: true },
         })));
       }
-    }).catch(() => {});
+    }).catch(() => setLoadError(LOAD_ERROR));
 
     // Load saved admin controls
     settingsApi.getAdminControls().then((data: any) => {
@@ -189,10 +242,11 @@ export function StoreModulesSection() {
           modules: data.store_modules[s.storeId] || s.modules,
         })));
       }
-    }).catch(() => {});
+    }).catch(() => setLoadError(LOAD_ERROR));
   }, []);
 
   const toggleStoreModule = (storeId: string, moduleId: string) => {
+    markDirty();
     setStoreModules(prev => prev.map(s =>
       s.storeId === storeId ? { ...s, modules: { ...s.modules, [moduleId]: !s.modules[moduleId] } } : s
     ));
@@ -200,6 +254,7 @@ export function StoreModulesSection() {
 
   return (
     <div className="space-y-6">
+      <LoadError message={loadError} />
       <div className="space-y-4">
         <p className="text-sm text-gray-500">Control which modules are available at each store location.</p>
         <div className="overflow-x-auto">
@@ -239,6 +294,8 @@ export function StoreModulesSection() {
       </div>
       <SaveBar
         label="Store Modules"
+        dirty={dirty}
+        onSaved={clean}
         payload={() => ({ store_modules: Object.fromEntries(storeModules.map(s => [s.storeId, s.modules])) })}
       />
     </div>
@@ -260,6 +317,8 @@ export function RolePermissionsSection() {
       ),
     }))
   );
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const { dirty, markDirty, clean } = useDirty();
 
   useEffect(() => {
     // Load saved admin controls
@@ -270,11 +329,12 @@ export function RolePermissionsSection() {
           permissions: data.role_permissions[rp.roleId] || rp.permissions,
         })));
       }
-    }).catch(() => {});
+    }).catch(() => setLoadError(LOAD_ERROR));
   }, []);
 
   return (
     <div className="space-y-6">
+      <LoadError message={loadError} />
       <div className="space-y-4">
         <p className="text-sm text-gray-500">Fine-grained permission control for each role across all modules.</p>
         <div className="overflow-x-auto">
@@ -298,6 +358,7 @@ export function RolePermissionsSection() {
                       <button
                         onClick={() => {
                           if (role.roleId === 'SUPERADMIN') return; // Can't modify superadmin
+                          markDirty();
                           setRolePermissions(prev => prev.map(rp =>
                             rp.roleId === role.roleId
                               ? { ...rp, permissions: { ...rp.permissions, [perm]: !rp.permissions[perm] } }
@@ -322,6 +383,8 @@ export function RolePermissionsSection() {
       </div>
       <SaveBar
         label="Role Permissions"
+        dirty={dirty}
+        onSaved={clean}
         payload={() => ({ role_permissions: Object.fromEntries(rolePermissions.map(rp => [rp.roleId, rp.permissions])) })}
       />
     </div>
@@ -334,19 +397,24 @@ export function RolePermissionsSection() {
 
 export function DiscountCapsSection() {
   // Discount limits
-  const [discountLimits, setDiscountLimits] = useState<DiscountLimit[]>(DEFAULT_DISCOUNT_LIMITS);
+  const [discountLimits, setDiscountLimitsState] = useState<DiscountLimit[]>(DEFAULT_DISCOUNT_LIMITS);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const { dirty, markDirty, clean } = useDirty();
+  // User edits go through this so they mark the page dirty; the load below does not.
+  const setDiscountLimits = (u: (prev: DiscountLimit[]) => DiscountLimit[]) => { markDirty(); setDiscountLimitsState(u); };
 
   useEffect(() => {
     // Load saved admin controls
     settingsApi.getAdminControls().then((data: any) => {
       if (data?.discount_limits?.length > 0) {
-        setDiscountLimits(data.discount_limits);
+        setDiscountLimitsState(data.discount_limits);
       }
-    }).catch(() => {});
+    }).catch(() => setLoadError(LOAD_ERROR));
   }, []);
 
   return (
     <div className="space-y-6">
+      <LoadError message={loadError} />
       <div className="space-y-4">
         <p className="text-sm text-gray-500">Set maximum discount percentages and approval requirements per role.</p>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -401,7 +469,7 @@ export function DiscountCapsSection() {
           ))}
         </div>
       </div>
-      <SaveBar label="Discount Limits" payload={() => ({ discount_limits: discountLimits })} />
+      <SaveBar label="Discount Limits" payload={() => ({ discount_limits: discountLimits })} dirty={dirty} onSaved={clean} />
     </div>
   );
 }
@@ -412,22 +480,27 @@ export function DiscountCapsSection() {
 
 export function OperationalRulesSection() {
   // Operational rules
-  const [rules, setRules] = useState<OperationalRule[]>(DEFAULT_RULES);
+  const [rules, setRulesState] = useState<OperationalRule[]>(DEFAULT_RULES);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const { dirty, markDirty, clean } = useDirty();
+  // User edits go through this so they mark the page dirty; the load below does not.
+  const setRules = (u: (prev: OperationalRule[]) => OperationalRule[]) => { markDirty(); setRulesState(u); };
 
   useEffect(() => {
     // Load saved admin controls
     settingsApi.getAdminControls().then((data: any) => {
       if (data?.operational_rules && Object.keys(data.operational_rules).length > 0) {
-        setRules(prev => prev.map(r => ({
+        setRulesState(prev => prev.map(r => ({
           ...r,
           value: data.operational_rules[r.id] !== undefined ? data.operational_rules[r.id] : r.value,
         })));
       }
-    }).catch(() => {});
+    }).catch(() => setLoadError(LOAD_ERROR));
   }, []);
 
   return (
     <div className="space-y-6">
+      <LoadError message={loadError} />
       <div className="space-y-6">
         {['billing', 'inventory', 'hr', 'clinical', 'security'].map(category => {
           // COUNCIL RULING §3: HIDE inert security controls. session_timeout +
@@ -500,6 +573,8 @@ export function OperationalRulesSection() {
       </div>
       <SaveBar
         label="Operational Rules"
+        dirty={dirty}
+        onSaved={clean}
         payload={() => ({ operational_rules: Object.fromEntries(rules.map(r => [r.id, r.value])) })}
       />
     </div>
