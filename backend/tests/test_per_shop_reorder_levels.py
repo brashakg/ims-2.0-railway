@@ -118,6 +118,7 @@ def _orders(pid, store, units, days_ago=1):
 
 def _world():
     db = mongomock.MongoClient().db
+    db.stores.insert_many([{"store_id": x} for x in (DHN, BOK, PUN)])
     db.products.insert_many([
         _product("P-FRAME", reorder_point=5, **_levels({DHN: 2})),
         _product("P-OWNER", reorder_point=3, **_levels({BOK: -1})),
@@ -428,6 +429,91 @@ def test_a_minus_one_write_clears_the_level_and_is_never_stored_or_echoed(world)
     assert res.status_code == 200, res.text
     assert -1 not in _leaves(res.json())
     assert _levels_of(world, "P-FRAME") == {}  # cleared, not stored as -1
+
+
+def test_a_level_for_a_shop_that_does_not_exist_is_refused(world):
+    res = _set_level(_ADMIN, "P-FRAME", "BV-GHOST-99", 3)
+    assert res.status_code == 404, res.text
+    assert "BV-GHOST-99" not in _levels_of(world, "P-FRAME")
+    # nothing phantom reaches the all-shops views
+    assert "BV-GHOST-99" not in {
+        r["store_id"] for r in _get("/api/v1/inventory/low-stock")["items"]
+    }
+
+
+def test_the_shop_level_write_roles_are_one_list_for_server_and_screen():
+    """The server gate (_STOCK_MANAGER_ROLES + SUPERADMIN, who always passes)
+    and the screen's REORDER_LEVEL_ROLES must be the same set, and the
+    CATALOG_MANAGER stays out of both."""
+    import re as _re
+    from api.routers.inventory._shared import _STOCK_MANAGER_ROLES
+
+    src = open(os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "frontend", "src", "pages", "inventory", "inventoryRoles.ts",
+    )).read()
+    m = _re.search(r"REORDER_LEVEL_ROLES[^=]*=\s*\[([^\]]*)\]", src)
+    assert m, "REORDER_LEVEL_ROLES is not in inventoryRoles.ts"
+    screen = set(_re.findall(r"'([A-Z_]+)'", m.group(1)))
+    assert screen == set(_STOCK_MANAGER_ROLES) | {"SUPERADMIN"}
+    assert "CATALOG_MANAGER" not in screen
+    # and the route's rbac row says the same
+    from api.services.rbac_policy import POLICY
+    row = next(r for r in POLICY if r["method"] == "PUT"
+               and r["path"] == "/api/v1/inventory/reorder-levels/{product_id}")
+    assert set(row["allowed"]) == screen
+
+
+# ---------------------------------------------------------------------------
+# 3b. One verdict: the low-stock list and the purchase recommendations
+# ---------------------------------------------------------------------------
+
+
+def test_low_stock_list_and_purchase_recommendations_give_the_same_verdict(world):
+    # Dhanbad P-SLOW: level 2, exactly 2 on hand, slow sales (velocity alone
+    # recommends nothing) -- the reviewer's repro: the list had it, the report
+    # did not.
+    world.products.insert_one(_product("P-SLOW", **_levels({DHN: 2})))
+    world.stock_units.insert_many(
+        [{**u, "stock_id": f"{u['stock_id']}-s"} for u in _units("P-SLOW", DHN, 2)]
+    )
+    world.orders.insert_many(_orders("P-SLOW", DHN, 2))
+
+    low = _ids(_get("/api/v1/inventory/low-stock", store_id=DHN)["items"])
+    recs = {r["product_id"] for r in _get(
+        "/api/v1/reports/purchase/recommendations", store_id=DHN, min_velocity=2
+    )["recommendations"]}
+    assert "P-SLOW" in low
+    # velocity may add products with no level; a breached level must never be missing
+    assert low <= recs, (low, recs)
+    # ...and one unit more is above the level: neither lists it
+    world.stock_units.insert_one(
+        {**_units("P-SLOW", DHN, 1)[0], "stock_id": "U-SLOW-extra", "barcode": "BCSLOWX"}
+    )
+    low = _ids(_get("/api/v1/inventory/low-stock", store_id=DHN)["items"])
+    recs = {r["product_id"] for r in _get(
+        "/api/v1/reports/purchase/recommendations", store_id=DHN, min_velocity=2
+    )["recommendations"]}
+    assert "P-SLOW" not in low and "P-SLOW" not in recs
+
+
+# ---------------------------------------------------------------------------
+# 2b. Only sellable units count toward on-hand for the verdict
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("status", ["SOLD", "QUARANTINED", "IN_TRANSIT", "RESERVED"])
+def test_units_that_are_not_sellable_never_count_toward_the_low_stock_verdict(world, status):
+    world.products.insert_one(_product("P-STAT", **_levels({DHN: 2})))
+    world.stock_units.insert_many(
+        _units("P-STAT", DHN, 1) + [
+            {**u, "stock_id": f"{u['stock_id']}-x", "barcode": u["barcode"] + "x"}
+            for u in _units("P-STAT", DHN, 5, status=status)
+        ]
+    )
+    rows = [r for r in _get("/api/v1/inventory/low-stock", store_id=DHN)["items"]
+            if r["product_id"] == "P-STAT"]
+    assert len(rows) == 1 and rows[0]["quantity"] == 1, (status, rows)
 
 
 # ---------------------------------------------------------------------------
