@@ -3082,6 +3082,16 @@ async def create_return(
             )
         claimed.append(rl)
 
+    # The order's refund/return mark before any credit or restock (multi-
+    # location PR 5): a Re-map running on another worker never moves its
+    # claims under this return. Fail-soft.
+    try:
+        from ..services.online_fulfillment_route import mark_refund_or_return
+
+        mark_refund_or_return(_get_db(), resolved_order_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[RETURNS] order refund mark skipped: %s", exc)
+
     def _issue_credit_or_fail(
         amount: float,
         *,

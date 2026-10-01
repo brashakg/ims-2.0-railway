@@ -1182,10 +1182,14 @@ def _close_tasks(refs: List[str], note: str, keep_store: Optional[str] = None) -
         logger.warning("[ONLINE_ROUTE] task close skipped for %s: %s", refs, exc)
 
 
+# The mark every refund and return door stamps on its order BEFORE it books
+# anything (mark_refund_or_return): a counter, so each stamp changes it.
+REFUND_MARK = "refund_or_return_marks"
+
 # The order fields Re-map's and clear-hold's writes are conditioned on: what
 # each read. A cancel, a fulfilment, a hold release (clear-hold: rx_pending +
-# fulfillment_hold) or a Re-map landing in between changes one of them, and
-# the other's write matches nothing.
+# fulfillment_hold), a refund or return (REFUND_MARK) or a Re-map landing in
+# between changes one of them, and the other's write matches nothing.
 HOLD_CAS = (
     "status",
     "stock_hold_reason",
@@ -1193,15 +1197,32 @@ HOLD_CAS = (
     "rx_pending",
     "fulfillment_status",
     "shopify_fulfillment_id",
+    REFUND_MARK,
 )
+
+
+def mark_refund_or_return(db, order_id: Optional[str]) -> None:
+    """THE mark of a refund or return on an order, stamped by every door
+    that queues or books one (the Shopify refund review and AUTO paths, the
+    counter return) BEFORE it writes its row: a Re-map that read the order
+    before the mark never writes (HOLD_CAS), one that reads it after refuses
+    (refund_or_return) -- no check-then-act window between them. Fail-soft."""
+    if not order_id or db is None:
+        return
+    try:
+        _orders(db).update_one({"order_id": order_id}, {"$inc": {REFUND_MARK: 1}})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[ONLINE_ROUTE] refund/return mark skipped for %s: %s", order_id, exc)
 
 
 def refund_or_return(db, order: Dict[str, Any]) -> Optional[str]:
     """Why Re-map must not move the order's stock claims: a refund or return
-    is booked or queued against it (shopify_refund_review), so money or goods
-    already went back and what the order still ships is a human's call
-    (None: none is)."""
+    is booked or queued against it (its mark, a returns row or a
+    shopify_refund_review row), so money or goods already went back and what
+    the order still ships is a human's call (None: none is)."""
     sid = str(order.get("shopify_order_id") or "")
+    if order.get(REFUND_MARK):
+        return "a refund or return is booked or queued against it -- resolve it by hand"
     try:
         if db.get_collection("returns").count_documents({"order_id": order.get("order_id")}) or (
             db.get_collection("shopify_refund_review").count_documents(

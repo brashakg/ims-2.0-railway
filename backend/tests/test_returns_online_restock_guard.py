@@ -2211,3 +2211,100 @@ def test_explicit_store_scope_is_unchanged():
     db, stock_coll = _wb_db(units, [])
     assert wb._on_hand_for_skus(db, ["RB-1"], PHYSICAL_COUNTER_STORE) == {"RB-1": 1}
     assert stock_coll.last_match["store_id"] == PHYSICAL_COUNTER_STORE
+
+
+def test_a_counter_return_marks_its_order_before_it_books_anything(monkeypatch):
+    """Multi-location PR 5, round 13 item 8: a Re-map running on another
+    worker must see a return landing inside its window. The counter return
+    stamps the order's refund/return mark (online_fulfillment_route
+    .mark_refund_or_return, in Re-map's write condition) BEFORE its returns
+    row, its credit note or its restock exist."""
+    from api.services import online_fulfillment_route as route_mod
+
+    order = dict(
+        _ONLINE_ORDER,
+        fulfillment_stores=[PHYSICAL_FULFILMENT_STORE],
+        fulfillment_breakdown=[
+            {"product_id": "PRD-1", "store_id": PHYSICAL_FULFILMENT_STORE, "qty": 1}
+        ],
+    )
+    ctx = _build_ctx(
+        monkeypatch,
+        order=order,
+        stock_units=[
+            {
+                "stock_id": "STK-ONL-1",
+                "product_id": "PRD-1",
+                "store_id": PHYSICAL_FULFILMENT_STORE,
+                "status": "SOLD",
+                "order_id": "ORD-ONL-1",
+            }
+        ],
+        active_store=PHYSICAL_FULFILMENT_STORE,
+    )
+    seen: list = []
+
+    def mark(_db, order_id):
+        seen.append({
+            "order_id": order_id,
+            "returns_rows": len(ctx["returns_coll"].docs),
+            "unit": ctx["stock_repo"].units[0]["status"],
+            "ledger_rows": len(getattr(ctx["extra"].get("credit_note_ledger"), "docs", []) or []),
+        })
+
+    monkeypatch.setattr(route_mod, "mark_refund_or_return", mark)
+    r = ctx["client"].post(
+        "/api/v1/returns",
+        json=_payload("ORD-ONL-1", ONLINE_STORE),
+        headers={"Authorization": f"Bearer {ctx['token']}"},
+    )
+    assert r.status_code == 201, r.text
+    assert seen == [{"order_id": "ORD-ONL-1", "returns_rows": 0, "unit": "SOLD", "ledger_rows": 0}]
+    assert ctx["stock_repo"].units[0]["status"] == "AVAILABLE"
+
+
+def test_the_shopify_refund_door_marks_its_order_before_it_books_anything(monkeypatch):
+    """Round 13 item 8, the AUTO / accountant-confirm door
+    (shopify_refund._post_credit_and_restock): the order's refund/return
+    mark lands BEFORE its claim row, its credit note or its restock."""
+    from api.services import online_fulfillment_route as route_mod
+    from api.services import shopify_refund as sr
+
+    order = dict(
+        _ONLINE_ORDER,
+        order_id="ORD-ONL-8",
+        items=[{"item_id": "li1", "product_id": "PRD-1", "quantity": 1, "sku": "RB-1",
+                "unit_price": 1500, "returned_qty": 0}],
+        fulfillment_stores=[PHYSICAL_FULFILMENT_STORE],
+        fulfillment_breakdown=[
+            {"product_id": "PRD-1", "store_id": PHYSICAL_FULFILMENT_STORE, "qty": 1}],
+    )
+    ctx = _build_ctx(
+        monkeypatch,
+        order=order,
+        stock_units=[{"stock_id": "STK-A", "product_id": "PRD-1",
+                      "store_id": PHYSICAL_FULFILMENT_STORE, "status": "SOLD",
+                      "order_id": "ORD-ONL-8"}],
+        active_store=PHYSICAL_FULFILMENT_STORE,
+    )
+    returns_coll = ctx["returns_coll"]
+
+    class _WebhookDB:
+        def get_collection(self, name):
+            return returns_coll if name == "returns" else _FakeColl()
+
+    seen: list = []
+    monkeypatch.setattr(route_mod, "mark_refund_or_return", lambda _db, oid: seen.append(
+        (oid, len(returns_coll.docs), ctx["stock_repo"].units[0]["status"])))
+    sr._post_credit_and_restock(
+        _WebhookDB(),
+        refund_id="RF-9002",
+        order=order,
+        return_lines=[returns_router.ReturnLine(
+            order_item_id="li1", product_id="PRD-1", sku="RB-1",
+            product_name="Ray-Ban", return_qty=1, unit_price=1500, condition="GOOD")],
+        credit_note={"gross_refund": 0.0, "net_refund": 0.0, "gst_breakup": {}, "lines": []},
+        restock_store=PHYSICAL_FULFILMENT_STORE,
+    )
+    assert seen == [("ORD-ONL-8", 0, "SOLD")]
+    assert ctx["stock_repo"].units[0]["status"] == "AVAILABLE"

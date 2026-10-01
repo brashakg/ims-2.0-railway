@@ -729,6 +729,17 @@ def handle_shopify_refund(
         return {"status": "skipped", "reason": f"exception:{type(exc).__name__}"}
 
 
+def _mark_order(db, order_id: Optional[str]) -> None:
+    """THE refund/return mark on the order (online_fulfillment_route
+    .mark_refund_or_return). Fail-soft."""
+    try:
+        from .online_fulfillment_route import mark_refund_or_return
+
+        mark_refund_or_return(db, order_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[SHOPIFY_REFUND] order refund mark skipped: %s", exc)
+
+
 def _queue_review(
     db,
     *,
@@ -770,6 +781,9 @@ def _queue_review(
         "created_at": now,
         "updated_at": now,
     }
+    # The order's refund mark FIRST (multi-location PR 5): a Re-map running
+    # on another worker never moves its claims under a queued credit note.
+    _mark_order(db, (order or {}).get("order_id"))
     try:
         coll = db.get_collection(_REVIEW_COLLECTION)
         if coll is not None:
@@ -847,6 +861,8 @@ def _post_credit_and_restock(
 
     # (0) CLAIM-FIRST: insert the PENDING returns doc stamped with the refund id
     #     BEFORE any side effect, so a concurrent / replayed delivery is blocked.
+    #     The order's refund mark before that (multi-location PR 5: Re-map).
+    _mark_order(db, order_id)
     _ensure_unique_refund_index(db, _RETURNS_COLLECTION)
     now = datetime.now(timezone.utc).isoformat()
     claim_doc = {

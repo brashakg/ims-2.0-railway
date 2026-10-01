@@ -2969,6 +2969,52 @@ def test_remap_refuses_while_a_refund_waits_for_the_accountant(world, monkeypatc
     assert _sold_at(db, res["order_id"]) == []
 
 
+@pytest.mark.parametrize("when", ["queued_after_the_checks", "marked_before_the_row"])
+def test_a_refund_queued_while_remap_runs_stops_its_write(world, monkeypatch, when):
+    """[LOW] Round 13, item 8: Re-map's last refund check runs before
+    route_order, the unit release and the claim; nothing a refund door wrote
+    was in the write's condition, so a review queued on another worker in
+    that window was never seen -- Re-map moved the order's claims under a
+    queued credit note. Every refund and return door stamps the order's mark
+    FIRST now (mark_refund_or_return), and the mark is in HOLD_CAS: refused,
+    nothing claimed. A mark stamped before its row lands is refused on too."""
+    from api.services import shopify_refund
+
+    db = world["db"]
+    payload, res, order = _short_held_at_bokaro(world, 59061 + (when == "marked_before_the_row"))
+    oid = res["order_id"]
+    live = db.orders.find_one({"order_id": oid}, {"_id": 0})
+
+    def queue():
+        shopify_refund._queue_review(
+            db, refund_id="RF-9", shopify_order_id=str(payload["id"]), order=live,
+            credit_note={"gross_refund": 100.0}, restock_lines=[], restock_store=None,
+            status="PENDING_REVIEW", note="queued mid Re-map")
+
+    if when == "queued_after_the_checks":  # another worker's refund drain
+        real = route_mod.route_order
+
+        def route_then_queue(*a, **k):
+            queue()
+            return real(*a, **k)
+
+        monkeypatch.setattr(route_mod, "route_order", route_then_queue)
+    else:  # the door stamped its mark; its row is not written yet
+        route_mod.mark_refund_or_return(db, oid)
+
+    out = asyncio.run(route_mod.reroute_held_order(db, oid))
+
+    assert out["status"] == "refused", out
+    assert {"queued_after_the_checks": "the order changed while Re-map ran",
+            "marked_before_the_row": "refund or return"}[when] in out["message"], out
+    after = db.orders.find_one({"order_id": oid}, {"_id": 0})
+    assert after["fulfillment_hold"] is True and after["stock_hold_reason"] == order["stock_hold_reason"]
+    assert after[route_mod.REFUND_MARK] == 1
+    assert _sold_at(db, oid) == [] and "reroute_lease_at" not in after
+    if when == "queued_after_the_checks":
+        assert db.shopify_refund_review.count_documents({"order_id": oid}) == 1
+
+
 @pytest.mark.parametrize("task", ["closed", "open"])
 def test_a_remap_whose_move_fails_again_leaves_its_task_as_it_was(world, monkeypatch, task):
     """[LOW] MOVE_FAILED at Ranchi; Shopify still refuses the move when the
