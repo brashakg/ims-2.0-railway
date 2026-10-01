@@ -73,7 +73,7 @@ export interface StockItem {
   minStock?: number;
   barcode?: string;
   storeBarcode?: string;
-  /** The product's manufacturer GTIN (attributes.gtin) -- what Manage Barcode edits. */
+  /** The manufacturer GTIN (attributes.gtin, else a legacy product barcode) -- what Manage Barcode edits. */
   gtin?: string;
   /** The IMS code of every unit on hand at this shop (the search box matches it). */
   unit_barcodes?: string[];
