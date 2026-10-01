@@ -245,6 +245,7 @@ from .product_input import (  # noqa: F401
     _MAX_METAFIELDS,
     _METAFIELDS_SET,
     build_product_metafields,
+    build_removed_metafields,
     _set_product_metafields,
     _derive_options,
     _dedupe,

@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from agents.nexus_providers import _as_shopify_gid
 from ..ecom_category_map import ims_to_shopify_type
-from ..gtin import sanitise_gtin
+from ..gtin import MANUFACTURER_BARCODE_ATTRIBUTES, sanitise_gtin
 from ..shopify_tag_gen import generate_attribute_tags, merge_tag_lists
 
 from ._shared import logger
@@ -147,6 +147,33 @@ mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
 """
 
 
+_METAFIELDS_DELETE = """
+mutation metafieldsDelete($metafields: [MetafieldIdentifierInput!]!) {
+  metafieldsDelete(metafields: $metafields) {
+    deletedMetafields { key }
+    userErrors { field message }
+  }
+}
+"""
+
+
+def build_removed_metafields(product: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The ims.* metafields to DELETE (without ownerId): each manufacturer
+    barcode attribute (gtin / upc) the product holds EMPTY -- what Manage
+    Barcode > Remove writes. build_product_metafields skips a blank value and
+    metafieldsSet only upserts, so a removed code stayed on the live product
+    as its ims.gtin metafield. Pure. (The variant barcode itself is left as
+    Shopify has it: IMS sends one only when it holds a valid GTIN.)"""
+    attrs = product.get("attributes") or {}
+    if not isinstance(attrs, dict):
+        return []
+    return [
+        {"namespace": _METAFIELD_NAMESPACE, "key": key}
+        for key in MANUFACTURER_BARCODE_ATTRIBUTES
+        if key in attrs and not str(attrs[key] or "").strip()
+    ]
+
+
 def build_product_metafields(product: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Map the product's `attributes` dict (the canonical home of the
     category-specific fields) onto Shopify MetafieldsSetInput rows (without
@@ -182,14 +209,35 @@ def build_product_metafields(product: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 async def _set_product_metafields(
-    db, product_gid: str, metafields: List[Dict[str, Any]]
+    db,
+    product_gid: str,
+    metafields: List[Dict[str, Any]],
+    removed: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """LIVE-only: upsert the product's attribute metafields via metafieldsSet
-    (idempotent on owner+namespace+key), chunked at the Shopify per-call cap.
-    Fail-SOFT: a metafield error must never undo/fail the product push itself --
-    returns {"set": n, "errors": [...]} for the result/audit row."""
+    (idempotent on owner+namespace+key), chunked at the Shopify per-call cap,
+    after deleting the `removed` ones (build_removed_metafields; deleting one
+    that does not exist is a no-op). Fail-SOFT: a metafield error must never
+    undo/fail the product push itself -- returns {"set": n, "errors": [...]}
+    (plus "deleted": n when anything was removed) for the result/audit row."""
     set_count = 0
     errors: List[str] = []
+    out: Dict[str, Any] = {}
+    if removed:
+        try:
+            body = await _graphql(
+                db,
+                _METAFIELDS_DELETE,
+                {"metafields": [{**m, "ownerId": product_gid} for m in removed]},
+            )
+            field_obj = (body.get("data") or {}).get("metafieldsDelete") or {}
+            errors.extend(
+                f"{(e.get('field') or '?')}: {e.get('message')}"
+                for e in field_obj.get("userErrors") or []
+            )
+            out["deleted"] = len([d for d in field_obj.get("deletedMetafields") or [] if d])
+        except Exception as e:  # noqa: BLE001 -- fail-soft side channel
+            errors.append(str(e))
     for i in range(0, len(metafields), _METAFIELDS_PER_CALL):
         chunk = [
             {**m, "ownerId": product_gid}
@@ -206,7 +254,7 @@ async def _set_product_metafields(
             set_count += len(field_obj.get("metafields") or [])
         except Exception as e:  # noqa: BLE001 -- fail-soft side channel
             errors.append(str(e))
-    return {"set": set_count, "errors": errors}
+    return {"set": set_count, "errors": errors, **out}
 
 
 def _derive_options(variants: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
