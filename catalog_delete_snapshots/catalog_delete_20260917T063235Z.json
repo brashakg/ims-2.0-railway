@@ -1,0 +1,232 @@
+{
+  "taken_at": "2026-09-17T06:32:35.954626+00:00",
+  "products": [
+    {
+      "label": "Ram 1234 (SKU FRRAM1234)",
+      "ids": [
+        "44ac60ec-2280-4840-b5d6-5101c8093388",
+        "8f3dbc37-4c47-48db-9292-57e3c9531f60"
+      ],
+      "sku": "FRRAM1234"
+    },
+    {
+      "label": "Ram 1234 (SKU FRRAM1234C1254)",
+      "ids": [
+        "230fe901-01cc-4f55-9646-559aa433adc0",
+        "5311304f-ed5d-4f0e-9e4a-e8d33cffc3a8"
+      ],
+      "sku": "FRRAM1234C1254"
+    }
+  ],
+  "documents": {
+    "catalog_products": [
+      {
+        "_id": "6aa0253b430bb4d29b6e40f7",
+        "id": "8f3dbc37-4c47-48db-9292-57e3c9531f60",
+        "attributes": {
+          "brand_name": "Ram",
+          "model_no": "1234",
+          "model_name": "1234"
+        },
+        "brand": "Ram",
+        "category": "FRAME",
+        "description": null,
+        "ecom": {
+          "status": "DRAFT",
+          "locally_modified": true,
+          "handle": "ram-1234-eyeglasses",
+          "seo": {
+            "title": "Ram 1234 Eyeglasses",
+            "description": "Buy Ram 1234 Eyeglasses online -- genuine Ram eyeglasses with authenticity assured.",
+            "tags": []
+          },
+          "category_specific": {
+            "brand_name": "Ram",
+            "model_no": "1234",
+            "model_name": "1234"
+          }
+        },
+        "gst_rate": 5.0,
+        "gtin": null,
+        "hsn_code": "900311",
+        "images": [],
+        "model": "1234",
+        "mrp": 4500.0,
+        "name": "Ram 1234 Eyeglasses",
+        "offer_price": null,
+        "parent_sku": "FRRAM1234",
+        "sku": "FRRAM1234",
+        "sku_prefix": "FR",
+        "status": "DRAFT",
+        "title": "Ram 1234 Eyeglasses"
+      },
+      {
+        "_id": "6aa026cb430bb4d29b6e40f8",
+        "id": "230fe901-01cc-4f55-9646-559aa433adc0",
+        "attributes": {
+          "brand_name": "Ram",
+          "model_no": "1234",
+          "colour_code": "C12",
+          "size": "54",
+          "model_name": "1234"
+        },
+        "brand": "Ram",
+        "category": "FRAME",
+        "description": null,
+        "ecom": {
+          "status": "DRAFT",
+          "locally_modified": true,
+          "handle": "ram-1234-eyeglasses-c12",
+          "seo": {
+            "title": "Ram 1234 Eyeglasses - C12",
+            "description": "Buy Ram 1234 Eyeglasses - C12 online -- genuine Ram eyeglasses with authenticity assured.",
+            "tags": []
+          },
+          "category_specific": {
+            "brand_name": "Ram",
+            "model_no": "1234",
+            "colour_code": "C12",
+            "size": "54",
+            "model_name": "1234"
+          }
+        },
+        "gst_rate": 5.0,
+        "gtin": null,
+        "hsn_code": "900311",
+        "images": [],
+        "model": "1234",
+        "mrp": 4500.0,
+        "name": "Ram 1234 Eyeglasses - C12",
+        "offer_price": null,
+        "parent_sku": "FRRAM1234C1254",
+        "sku": "FRRAM1234C1254",
+        "sku_prefix": "FR",
+        "status": "DRAFT",
+        "title": "Ram 1234 Eyeglasses - C12"
+      }
+    ],
+    "products": [
+      {
+        "_id": "44ac60ec-2280-4840-b5d6-5101c8093388",
+        "sku": "FRRAM1234",
+        "category": "FRAME",
+        "sku_prefix": "FR",
+        "brand": "Ram",
+        "model": "1234",
+        "mrp": 4500.0,
+        "offer_price": null,
+        "hsn_code": "900311",
+        "gst_rate": 5.0,
+        "attributes": {
+          "brand_name": "Ram",
+          "model_no": "1234",
+          "model_name": "1234"
+        },
+        "is_active": false,
+        "created_by": "user-superadmin",
+        "created_by_name": "admin",
+        "identity_key": "ram|1234|",
+        "discount_category": "LUXURY",
+        "cost_price": 2000.0,
+        "tags": [],
+        "reorder_quantity": -1,
+        "name": "Ram 1234 Eyeglasses",
+        "catalog_status": "DRAFT",
+        "done_gaps": [
+          "colour_code",
+          "offer_price"
+        ],
+        "provisional": true,
+        "pim_product_id": "8f3dbc37-4c47-48db-9292-57e3c9531f60",
+        "product_id": "44ac60ec-2280-4840-b5d6-5101c8093388",
+        "created_at": "2026-09-08 15:09:47.233000",
+        "updated_at": "2026-09-08 15:09:47.260000",
+        "sync_status": {
+          "mirrored_at": "2026-09-08T15:09:47.260836",
+          "targets": {
+            "catalog_products": {
+              "status": "OK",
+              "detail": null
+            },
+            "catalog_variants": {
+              "status": "SKIPPED",
+              "detail": "no variant repo"
+            },
+            "external": {
+              "status": "SKIPPED",
+              "detail": "DISPATCH_MODE not live / flag off"
+            },
+            "catalog_draft": {
+              "status": "OK",
+              "detail": null
+            }
+          }
+        }
+      },
+      {
+        "_id": "5311304f-ed5d-4f0e-9e4a-e8d33cffc3a8",
+        "sku": "FRRAM1234C1254",
+        "category": "FRAME",
+        "sku_prefix": "FR",
+        "brand": "Ram",
+        "model": "1234",
+        "mrp": 4500.0,
+        "offer_price": null,
+        "hsn_code": "900311",
+        "gst_rate": 5.0,
+        "attributes": {
+          "brand_name": "Ram",
+          "model_no": "1234",
+          "colour_code": "C12",
+          "size": "54",
+          "model_name": "1234"
+        },
+        "is_active": false,
+        "created_by": "user-superadmin",
+        "created_by_name": "admin",
+        "color": "C12",
+        "size": "54",
+        "identity_key": "ram|1234|c12|54",
+        "discount_category": "LUXURY",
+        "cost_price": 2000.0,
+        "tags": [],
+        "reorder_quantity": -1,
+        "name": "Ram 1234 Eyeglasses - C12",
+        "catalog_status": "DRAFT",
+        "done_gaps": [
+          "offer_price"
+        ],
+        "provisional": true,
+        "pim_product_id": "230fe901-01cc-4f55-9646-559aa433adc0",
+        "product_id": "5311304f-ed5d-4f0e-9e4a-e8d33cffc3a8",
+        "created_at": "2026-09-08 15:16:27.298000",
+        "updated_at": "2026-09-08 15:16:27.323000",
+        "sync_status": {
+          "mirrored_at": "2026-09-08T15:16:27.323962",
+          "targets": {
+            "catalog_products": {
+              "status": "OK",
+              "detail": null
+            },
+            "catalog_variants": {
+              "status": "SKIPPED",
+              "detail": "no variant repo"
+            },
+            "external": {
+              "status": "SKIPPED",
+              "detail": "DISPATCH_MODE not live / flag off"
+            },
+            "catalog_draft": {
+              "status": "OK",
+              "detail": null
+            }
+          }
+        }
+      }
+    ],
+    "catalog_variants": [],
+    "product_images": [],
+    "collection_products": [],
+    "stock_units": []
+  }
+}
