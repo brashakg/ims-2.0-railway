@@ -117,7 +117,14 @@ function Overview({ dash }: { dash: OwnerDashboard }) {
     <div className="space-y-5">
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <Card label="Receivables (AR)" value={inr(dash.receivables.total)} sub={`${inr(dash.receivables.overdue)} overdue 30+d`} tone="good" />
-        <Card label="Payables (AP)" value={inr(dash.payables.total)} sub={`${inr(dash.payables.overdue)} overdue`} tone="bad" />
+        {/* F56: the bars and 'overdue' are what is still owed on bills; money
+            paid ahead of any bill (an advance) comes off the headline. */}
+        <Card
+          label="Payables (AP)"
+          value={inr(dash.payables.total)}
+          sub={`${inr(dash.payables.overdue)} overdue${dash.payables.unallocated_credits > 0 ? ` · less ${inr(dash.payables.unallocated_credits)} advances` : ''}`}
+          tone="bad"
+        />
         <Card label="Net position" value={inr(dash.net_position)} sub="AR minus AP" tone={dash.net_position >= 0 ? 'good' : 'bad'} />
         <Card label="Due in 7 days (AP)" value={inr(dash.payables.due_7d)} sub={`${inr(dash.payables.due_30d)} in 30d`} tone="warn" />
       </div>
@@ -141,13 +148,19 @@ function Overview({ dash }: { dash: OwnerDashboard }) {
 
       <div className="grid grid-cols-2 gap-4">
         <BucketBars title="Receivables aging" buckets={dash.receivables.buckets} order={['0_30', '31_60', '61_90', '90_plus']} labels={{ '0_30': '0-30d', '31_60': '31-60d', '61_90': '61-90d', '90_plus': '90+ d' }} />
-        <BucketBars title="Payables aging" buckets={dash.payables.buckets} order={AP_BUCKETS} labels={AP_LABELS} />
+        <BucketBars
+          title="Payables aging"
+          buckets={dash.payables.buckets}
+          order={AP_BUCKETS}
+          labels={AP_LABELS}
+          note={dash.payables.unallocated_credits > 0 ? `Less ${inr(dash.payables.unallocated_credits)} paid to suppliers ahead of their bills = ${inr(dash.payables.total)} owed` : undefined}
+        />
       </div>
     </div>
   );
 }
 
-function BucketBars({ title, buckets, order, labels }: { title: string; buckets: Record<string, number>; order: string[]; labels: Record<string, string> }) {
+function BucketBars({ title, buckets, order, labels, note }: { title: string; buckets: Record<string, number>; order: string[]; labels: Record<string, string>; note?: string }) {
   const max = Math.max(1, ...order.map((k) => buckets[k] || 0));
   return (
     <div className="bg-white border border-gray-200 rounded-lg p-4">
@@ -163,6 +176,7 @@ function BucketBars({ title, buckets, order, labels }: { title: string; buckets:
           </div>
         ))}
       </div>
+      {note && <p className="text-xs text-gray-500 mt-3">{note}</p>}
     </div>
   );
 }
@@ -248,6 +262,12 @@ function Aging({ aging, onVendor }: { aging: ApAgingByVendor; onVendor: (id: str
         </tbody>
         {aging.vendors.length > 0 && (
           <tfoot className="bg-gray-50 font-medium">
+            {aging.totals.unallocated_credits > 0 && (
+              <tr className="text-gray-600">
+                <td className="px-3 py-2" colSpan={AP_BUCKETS.length + 1}>Less: paid to suppliers ahead of their bills</td>
+                <td className="px-3 py-2 text-right">-{inr(aging.totals.unallocated_credits)}</td>
+              </tr>
+            )}
             <tr>
               <td className="px-3 py-2">Total</td>
               {AP_BUCKETS.map((b) => <td key={b} className="px-3 py-2 text-right">{inr(aging.totals.buckets[b])}</td>)}

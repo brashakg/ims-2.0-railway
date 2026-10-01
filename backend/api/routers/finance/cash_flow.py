@@ -195,17 +195,19 @@ async def get_cash_flow(
 # === Owner cash-flow dashboard + forecast (ADMIN / ACCOUNTANT) ===
 
 
-def _ap_rows(db):
-    """(all bills, all payments, all debit notes) -- the supplier ledger's rows,
-    for every AP figure. ALL bills: dropping the PAID ones left their payments
-    behind to net off the vendor as if they were on-account money (F56)."""
+def _ap_rows(db, store_id=None):
+    """(bills, payments, debit notes) -- the supplier ledger's rows, for every
+    AP figure: ap_engine.supplier_ledger_rows (no transfer mirror bills; one
+    shop's rows when `store_id` is given). ALL bills: dropping the PAID ones
+    left their payments behind to net off the vendor as if they were
+    on-account money (F56)."""
     try:
         bills = list(db.get_collection("vendor_bills").find({}, {"_id": 0}))
         payments = list(db.get_collection("vendor_payments").find({}, {"_id": 0}))
         dn = list(db.get_collection("vendor_debit_notes").find({}, {"_id": 0}))
     except Exception:
         bills, payments, dn = [], [], []
-    return bills, payments, dn
+    return ap_engine.supplier_ledger_rows(bills, payments, dn, store_id)
 
 
 def _ar_aging(db, now: datetime) -> dict:
@@ -409,7 +411,10 @@ async def owner_dashboard(current_user: dict = Depends(get_current_user)):
         "payables": {
             # What we owe = the supplier ledgers' balance (bills - payments -
             # debit notes, on-account money included), not the gross of the
-            # open bills (F56).
+            # open bills (F56). buckets / overdue / due_*d are what is still
+            # owed on the bills once on-account money has settled the oldest
+            # (ap_engine.build_aging), so sum(buckets) - unallocated_credits
+            # (advances beyond a supplier's bills) == total.
             "total": ap["net_payable"],
             "buckets": ap["buckets"],
             "overdue": ap_overdue,

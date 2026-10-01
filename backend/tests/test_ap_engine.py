@@ -155,9 +155,99 @@ def test_build_aging_unallocated_credit_nets_off():
     # An on-account payment (no bill_id) is an unallocated credit.
     pays = [{"vendor_id": "v1", "amount": 300, "tds_amount": 0}]
     ag = build_aging(bills, pays, [], as_of_iso="2026-02-01")
-    assert ag["total_outstanding"] == 1000.0
-    assert ag["unallocated_credits"] == 300.0
+    # F56: on-account money settles the vendor's oldest bill, so the buckets,
+    # the items and total_outstanding owe what the headline owes.
+    assert ag["total_outstanding"] == 700.0
+    assert sum(ag["buckets"].values()) == 700.0
+    assert [it["outstanding"] for it in ag["items"]] == [700.0]
+    assert ag["unallocated_credits"] == 0.0
     assert ag["net_payable"] == 700.0
+
+
+def test_build_aging_on_account_money_settles_oldest_due_first_and_never_another_vendor():
+    """F56 (Cash Flow card): a Rs 1,77,896 bill due 2026-08-15 and a Rs 33,440
+    on-account payment once read 'Payables Rs 1,44,456' over 'Rs 1,77,896
+    overdue' with aging bars summing Rs 1,77,896. Now every figure is 1,44,456.
+    The credit settles the OLDEST due bill first and only its own vendor's."""
+    bills = [
+        _bill(bid="new", total=1000, due="2026-09-30"),
+        _bill(bid="old", total=177896, due="2026-08-15"),
+        _bill(bid="other", total=500, vendor="v2", due="2026-08-01"),
+    ]
+    pays = [{"vendor_id": "v1", "amount": 33440, "tds_amount": 0}]
+    ag = build_aging(bills, pays, [], as_of_iso="2026-09-29")
+    out = {it["bill_id"]: it["outstanding"] for it in ag["items"]}
+    assert out == {"old": 144456.0, "new": 1000.0, "other": 500.0}
+    assert ag["total_outstanding"] == ag["net_payable"] == 145956.0
+    assert sum(ag["buckets"].values()) == 145956.0
+    overdue = ag["total_outstanding"] - ag["buckets"]["current"]
+    assert overdue == 144956.0 and overdue <= ag["net_payable"]
+
+
+def test_build_aging_credit_beyond_the_bills_is_an_advance():
+    bills = [_bill(bid="b1", total=1000, due="2026-01-01")]
+    pays = [
+        {"bill_id": "b1", "vendor_id": "v1", "amount": 1200, "tds_amount": 0},  # over-paid 200
+        {"vendor_id": "v1", "amount": 300, "tds_amount": 0},  # on account
+    ]
+    ag = build_aging(bills, pays, [], as_of_iso="2026-02-01")
+    assert ag["items"] == [] and ag["total_outstanding"] == 0.0
+    assert ag["unallocated_credits"] == 500.0
+    assert ag["net_payable"] == 0.0
+
+
+def test_build_aging_by_vendor_counts_a_vendor_holding_only_an_advance():
+    """F56: a Rs 1000 advance to a vendor with no bills dropped out of AP aging
+    (grouped by the bills' vendors), so its total owed 1000 more than the
+    ledgers, Cash Flow, the report and Vendor Payments."""
+    bills = [_bill(bid="b1", total=7780, due="2026-01-01")]
+    pays = [{"vendor_id": "v-new", "vendor_name": "New Co", "amount": 1000, "tds_amount": 0}]
+    rep = build_aging_by_vendor(bills, pays, [], as_of_iso="2026-02-01")
+    flat = build_aging(bills, pays, [], as_of_iso="2026-02-01")
+    assert rep["totals"]["net_payable"] == flat["net_payable"] == 6780.0
+    assert rep["totals"]["unallocated_credits"] == 1000.0
+    assert {v["vendor_id"] for v in rep["vendors"]} == {"v1", "v-new"}
+    assert next(v for v in rep["vendors"] if v["vendor_id"] == "v-new")["vendor_name"] == "New Co"
+
+
+def test_supplier_ledger_rows_drop_transfer_mirror_bills_and_their_money():
+    """F56: an inter-company transfer's mirror bill (vendor = our own sending
+    company) is not a supplier purchase: the external bill already counts the
+    frames. Every payable figure reads these rows, so none counts it."""
+    from api.services.ap_engine import supplier_ledger_rows
+
+    bills = [
+        {"bill_id": "ext", "vendor_id": "v1", "store_id": "DHN", "total_amount": 3150},
+        {"bill_id": "mbill_1", "vendor_id": "ENT-A", "store_id": "BOK", "total_amount": 3150, "source_transfer_id": "T1"},
+    ]
+    pays = [{"bill_id": "mbill_1", "vendor_id": "ENT-A", "amount": 100}]
+    b, p, d = supplier_ledger_rows(bills, pays, [])
+    assert [x["bill_id"] for x in b] == ["ext"] and p == [] and d == []
+
+
+def test_supplier_ledger_rows_give_every_row_one_shop_and_the_shops_add_up():
+    """F56/F63: a shop's view is its share of the supplier ledger. Money that
+    names no bill is the shop of the supplier's latest bill on or before it
+    (else its earliest bill); a supplier that never billed has no shop."""
+    from api.services.ap_engine import build_ledger, supplier_ledger_rows
+
+    bills = [
+        {"bill_id": "d1", "vendor_id": "v1", "store_id": "DHN", "bill_date": "2026-08-01", "total_amount": 5000},
+        {"bill_id": "p1", "vendor_id": "v1", "store_id": "PUN", "bill_date": "2026-09-01", "total_amount": 2000},
+    ]
+    pays = [
+        {"payment_id": "x", "vendor_id": "v1", "bill_id": "p1", "amount": 300, "payment_date": "2026-08-20"},
+        {"payment_id": "a", "vendor_id": "v1", "amount": 400, "payment_date": "2026-08-20"},  # -> DHN
+        {"payment_id": "b", "vendor_id": "v1", "amount": 600, "payment_date": "2026-09-05"},  # -> PUN
+        {"payment_id": "c", "vendor_id": "v1", "amount": 50, "payment_date": "2026-07-01"},  # before any bill -> earliest, DHN
+        {"payment_id": "z", "vendor_id": "v-never", "amount": 900, "payment_date": "2026-09-05"},  # no shop
+    ]
+    shop_pays = {s: [x["payment_id"] for x in supplier_ledger_rows(bills, pays, [], s)[1]] for s in ("DHN", "PUN")}
+    assert shop_pays == {"DHN": ["a", "c"], "PUN": ["x", "b"]}
+
+    whole = build_ledger(*supplier_ledger_rows(bills, pays, []))["closing_balance"]
+    parts = sum(build_ledger(*supplier_ledger_rows(bills, pays, [], s))["closing_balance"] for s in ("DHN", "PUN"))
+    assert parts == 5650.0 and whole == parts - 900.0  # only the never-billed advance is all-stores-only
 
 
 def test_build_aging_excludes_settled_bills():

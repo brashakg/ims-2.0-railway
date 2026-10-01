@@ -87,6 +87,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from api.routers import finance as finance_pkg  # noqa: E402
 from api.routers import purchase_invoices as pinv_mod  # noqa: E402
+from api.routers import purchase_recon as recon_mod  # noqa: E402
 from api.routers import vendor_returns as vret_mod  # noqa: E402
 from api.routers import vendors as vendors_pkg  # noqa: E402
 from api.routers.auth import get_current_user  # noqa: E402
@@ -97,6 +98,7 @@ ONLINE = "BV-ONLINE-01"
 VA = "V-JHK"
 VB = "V-PUN"
 SHOP_OF_VENDOR = {VA: DHN, VB: PUN}
+SHOP_OF_PO = {"PO-A1": DHN, "PO-B0": PUN}
 
 REPORT = "/vendors/purchases-this-month"
 
@@ -131,8 +133,7 @@ ACCT_PUNE = _user("ACCOUNTANT", PUN, [PUN])
 # ============================================================================
 
 
-@pytest.fixture(scope="module")
-def mongo_db():
+def _fresh_db(seed):
     from pymongo import MongoClient
 
     uri = (
@@ -152,7 +153,7 @@ def mongo_db():
             return
         client = mongomock.MongoClient()
     db = client[db_name]
-    _seed(db)
+    seed(db)
     try:
         yield db
     finally:
@@ -161,6 +162,16 @@ def mongo_db():
         except Exception:
             pass
         client.close()
+
+
+@pytest.fixture(scope="module")
+def mongo_db():
+    yield from _fresh_db(_seed)
+
+
+@pytest.fixture(scope="module")
+def probe_db():
+    yield from _fresh_db(_seed_probe)
 
 
 class _DBProxy:
@@ -214,6 +225,9 @@ def _seed(db) -> None:
             po("PO-A2", VA, DHN, "DRAFT", 9999.0, None, [dict(frame_a, quantity=9)]),
             po("PO-A3", VA, DHN, "CANCELLED", 4480.0, "2026-09-10T10:00:00", [dict(frame_a, quantity=4)]),
             po("PO-B1", VB, PUN, "RECEIVED", 2240.0, "2026-09-04T10:00:00", [frame_b]),
+            # Still open, sent in July (outside every report month): Pune's row
+            # on the variance and recon tabs.
+            po("PO-B0", VB, PUN, "PARTIALLY_RECEIVED", 4480.0, "2026-07-10T10:00:00", [dict(frame_b, quantity=2)]),
         ],
     )
 
@@ -315,6 +329,81 @@ def _seed(db) -> None:
     )
 
 
+BOK = "BV-BOK-01"
+V_NEW = "V-NEW"  # paid an advance, never billed
+V_BX = "V-BX"  # a bill paid AFTER the month it fell due in, and one the next month
+V_IST = "V-IST"  # ordered + received in the first IST hour of 1 September
+
+
+def _seed_probe(db) -> None:
+    """The base world plus the panel's probes (2026-10-01).
+
+      * a valued Dhanbad -> Bokaro inter-company transfer of 3150: its MIRROR
+        bill (vendor = our own sending company ENT-A) at Bokaro;
+      * a Rs 1000 advance to V-NEW, a supplier with no bills;
+      * Pune Lens Co pays its 2240 ON ACCOUNT (no bill named) on 20 Sep;
+      * V-BX: bill BX 20 Aug due 5 Sep, paid in full 2 Sep; bill BY 1 Sep, due
+        1 Sep, 700 still owed;
+      * V-IST: an order sent and a receipt accepted at 01:30 / 00:30 IST on
+        1 September (naive-UTC 31 August 20:00 / 19:00).
+
+    The ledgers: VA 5540, VB 0, V-NEW -1000, V-BX 700 -> all stores owe 5240.
+    """
+    _seed(db)
+
+    def ins(coll, *docs):
+        for d in docs:
+            db[coll].insert_one(dict(d))
+
+    ins(
+        "vendors",
+        {"vendor_id": V_NEW, "legal_name": "New Frames Co", "trade_name": "New Frames Co"},
+        {"vendor_id": V_BX, "legal_name": "Bihar Optics", "trade_name": "Bihar Optics"},
+        {"vendor_id": V_IST, "legal_name": "Midnight Optics", "trade_name": "Midnight Optics"},
+    )
+
+    def bill(bill_id, vendor, store, on, due, total, **extra):
+        return {
+            "bill_id": bill_id, "vendor_id": vendor, "store_id": store, "bill_number": bill_id,
+            "bill_date": on, "due_date": due, "total_amount": total, "total": total,
+            "status": "OUTSTANDING", **extra,
+        }
+
+    ins(
+        "vendor_bills",
+        # transfers._book_mirror_purchase's shape: vendor = the sending company.
+        bill("mbill_T1", "ENT-A", BOK, "2026-09-14", "2026-10-14", 3150.0,
+             source_transfer_id="T1", from_store_id=DHN, to_store_id=BOK,
+             vendor_name="Better Vision Dhanbad", auto_generated=True),
+        bill("BX", V_BX, DHN, "2026-08-20", "2026-09-05", 1000.0),
+        bill("BY", V_BX, DHN, "2026-09-01", "2026-09-01", 700.0),
+    )
+
+    def pay(pid, vendor, bill_id, amount, on):
+        return {"payment_id": pid, "vendor_id": vendor, "bill_id": bill_id, "amount": amount,
+                "tds_amount": 0.0, "mode": "BANK", "payment_date": on}
+
+    ins(
+        "vendor_payments",
+        pay("P-ADV", V_NEW, None, 1000.0, "2026-09-16"),
+        pay("P-VB", VB, None, 2240.0, "2026-09-20"),
+        pay("P-BX", V_BX, "BX", 1000.0, "2026-09-02"),
+    )
+    frame_c = {"product_id": "P-FRAME-C", "quantity": 1, "unit_price": 1000.0, "tax_rate": 12.0}
+    ins(
+        "purchase_orders",
+        {"po_id": "PO-IST", "po_number": "PO-IST", "vendor_id": V_IST, "delivery_store_id": DHN,
+         "status": "SENT", "total_amount": 1120.0, "sent_at": "2026-08-31T20:00:00",
+         "created_at": "2026-08-31T19:55:00", "items": [frame_c]},
+    )
+    ins(
+        "grns",
+        {"grn_id": "GRN-IST", "grn_number": "GRN-IST", "vendor_id": V_IST, "store_id": DHN,
+         "po_id": "PO-IST", "status": "ACCEPTED", "accepted_at": "2026-08-31T19:00:00",
+         "items": [{"product_id": "P-FRAME-C", "received_qty": 1, "accepted_qty": 1, "rejected_qty": 0}]},
+    )
+
+
 # ============================================================================
 # The app: the REAL vendors / purchase-invoice / vendor-return / finance routers
 # ============================================================================
@@ -336,6 +425,15 @@ class _World:
 
 @pytest.fixture
 def world(mongo_db, monkeypatch):
+    return _make_world(mongo_db, monkeypatch)
+
+
+@pytest.fixture
+def probe(probe_db, monkeypatch):
+    return _make_world(probe_db, monkeypatch)
+
+
+def _make_world(mongo_db, monkeypatch):
     from database.repositories.vendor_repository import (
         GRNRepository,
         PurchaseOrderRepository,
@@ -343,7 +441,7 @@ def world(mongo_db, monkeypatch):
     )
 
     proxy = _DBProxy(mongo_db)
-    for mod in (vendors_pkg, finance_pkg, pinv_mod, vret_mod):
+    for mod in (vendors_pkg, finance_pkg, pinv_mod, vret_mod, recon_mod):
         monkeypatch.setattr(mod, "_get_db", lambda: proxy)
     monkeypatch.setattr(vendors_pkg, "get_vendor_repository", lambda: VendorRepository(mongo_db["vendors"]))
     monkeypatch.setattr(
@@ -357,6 +455,7 @@ def world(mongo_db, monkeypatch):
     # Same order as main.py: the concrete /purchase-invoices paths before the
     # vendors router, whose catch-all GET /{vendor_id} would swallow them.
     app.include_router(pinv_mod.router, prefix="/vendors/purchase-invoices")
+    app.include_router(recon_mod.router, prefix="/vendors")
     app.include_router(vendors_pkg.router, prefix="/vendors")
     app.include_router(vret_mod.router, prefix="/vendor-returns")
     app.include_router(finance_pkg.router, prefix="/finance")
@@ -489,6 +588,8 @@ _TABS = {
     "receiving": ("/vendors/grn", {}, "grns", lambda r: r.get("store_id")),
     "invoices": ("/vendors/purchase-invoices", {}, "purchase_invoices", lambda r: r.get("store_id")),
     "returns": ("/vendor-returns", {}, "returns", lambda r: r.get("store_id")),
+    "variance": ("/vendors/variance-report", {}, "lines", lambda r: SHOP_OF_PO.get(r.get("po_id"))),
+    "recon": ("/vendors/recon/worklists", {}, "stock_yet_to_receive", lambda r: r.get("delivery_store_id")),
     "report": (REPORT, {"month": "2026-09"}, "vendors", lambda r: SHOP_OF_VENDOR.get(r.get("vendor_id"))),
 }
 
@@ -546,3 +647,113 @@ def test_f63_a_first_time_admin_is_not_parked_on_the_online_store(monkeypatch):
     picked = auth_mod._default_active_store({"roles": ["ADMIN"]})
     assert picked in (ONLINE, DHN, PUN), picked
     _open(picked != ONLINE, f"F63: a first-time admin defaults to {picked}, the online store")
+
+
+# ============================================================================
+# F56 round 2 (panel 2026-10-01): one 'we owe' on every screen, every shop
+# ============================================================================
+
+
+def _payables_everywhere(w) -> dict:
+    """What we owe, as each screen reads it (all stores)."""
+    dash = w.get("/finance/owner-dashboard", ADMIN).json()["payables"]
+    aging = w.get("/vendors/ap-aging", ADMIN).json()["totals"]
+    vp = w.get("/finance/vendor-payments", ADMIN).json()
+    report = _report(w, ADMIN, month="2026-09")["totals"]
+    return {
+        "cash_flow": dash["total"],
+        "ap_aging": aging["net_payable"],
+        "vendor_payments": round(sum(r["balance"] for r in vp), 2),
+        "report": report["owed"],
+    }
+
+
+def test_f56_every_screen_owes_one_figure_with_a_transfer_and_an_advance(probe):
+    """A transfer mirror bill read 10,930 on three screens and 7,780 on Vendor
+    Payments; an advance to a vendor with no bills read 7,780 on AP aging and
+    6,780 elsewhere. The ledgers owe 5240 and so does every screen."""
+    figures = _payables_everywhere(probe)
+    _open(set(figures.values()) == {5240.0}, f"F56: 'we owe' differs by screen: {figures}")
+
+
+def test_f56_a_transfer_mirror_bill_is_not_a_supplier_purchase(probe):
+    """The frames are on the external supplier's bill already; the mirror bill
+    (vendor = our own company) must not count them again or show as a supplier."""
+    body = _report(probe, ADMIN, month="2026-09")
+    rows = _rows(body)
+    assert "ENT-A" not in rows, rows["ENT-A"]
+    assert body["totals"]["billed"] == pytest.approx(4480.0 + 700.0)  # B1 + B2 + BY
+    bok = _report(probe, ADMIN, month="2026-09", store_id=BOK)
+    assert bok["vendors"] == [], bok
+
+
+def test_f56_cash_flow_card_reconciles_to_its_headline(probe):
+    """Headline, overdue and the aging bars are one figure: what is still owed
+    on bills after on-account money, less advances beyond a supplier's bills."""
+    p = probe.get("/finance/owner-dashboard", ADMIN).json()["payables"]
+    bars = round(sum(p["buckets"].values()), 2)
+    assert bars - p["unallocated_credits"] == pytest.approx(p["total"])
+    assert p["overdue"] <= bars
+    assert p["unallocated_credits"] == pytest.approx(1000.0)  # V-NEW's advance
+
+
+def test_f56_shop_view_is_the_supplier_ledger_and_shops_add_up(world):
+    """Jharkhand Optical supplies only Dhanbad, so Dhanbad's view of it IS its
+    ledger: owed 5540, paid 1500 in September (P1 1000 + P2 500 on account) --
+    not 6040 / 1000 with the on-account money dropped. Dhanbad + Pune = all."""
+    dhn = _rows(_report(world, ADMIN, month="2026-09", store_id=DHN))
+    _open(
+        (dhn[VA]["owed"], dhn[VA]["paid"]) == (5540.0, 1500.0),
+        f"F56: Dhanbad says Jharkhand Optical owed {dhn[VA]['owed']} paid {dhn[VA]['paid']}, ledger 5540 / 1500",
+    )
+    total = _report(world, ADMIN, month="2026-09")["totals"]["owed"]
+    parts = sum(_report(world, ADMIN, month="2026-09", store_id=s)["totals"]["owed"] for s in (DHN, PUN))
+    _open(parts == pytest.approx(total), f"F56: Dhanbad + Pune owe {parts}, all stores {total}")
+
+
+def test_f56_an_advance_to_a_never_billed_supplier_is_all_stores_only(probe):
+    total = _report(probe, ADMIN, month="2026-09")["totals"]["owed"]
+    parts = sum(_report(probe, ADMIN, month="2026-09", store_id=s)["totals"]["owed"] for s in (DHN, PUN, BOK))
+    assert parts == pytest.approx(total + 1000.0)
+    assert _rows(_report(probe, ADMIN, month="2026-09"))[V_NEW]["owed"] == pytest.approx(-1000.0)
+
+
+def test_f56_next_due_is_as_at_the_month_end(probe):
+    """(a) BX was the bill still owed on 31 August (paid 2 Sep): August's next
+    due is its 5 Sep, not yet overdue. (b) BY, dated 1 Sep, did not exist in
+    August. (c) Pune Lens Co's bill is settled by money paid on account: no
+    next due. September: BY (1 Sep) is the one left, and overdue."""
+    aug = _rows(_report(probe, ADMIN, month="2026-08"))
+    _open(aug[V_BX]["next_due_date"] == "2026-09-05", f"F56: August next due {aug[V_BX]['next_due_date']}, 2026-09-05")
+    assert aug[V_BX]["next_due_overdue"] is False
+    assert aug[V_BX]["owed"] == pytest.approx(1000.0)
+    sep = _rows(_report(probe, ADMIN, month="2026-09"))
+    assert (sep[V_BX]["next_due_date"], sep[V_BX]["next_due_overdue"]) == ("2026-09-01", True)
+    _open(
+        (sep[VB]["owed"], sep[VB]["next_due_date"]) == (0.0, None),
+        f"F56: Pune Lens Co owed {sep[VB]['owed']}, next due {sep[VB]['next_due_date']} (paid on account)",
+    )
+    assert (sep[VA]["next_due_date"], sep[VA]["next_due_overdue"]) == ("2026-09-09", True)
+
+
+def test_f56_report_months_are_ist_months(probe):
+    """An order sent and goods accepted between 00:00 and 05:30 IST on the 1st
+    (naive-UTC on the last day of the previous month) belong to the new month."""
+    sep = _rows(_report(probe, ADMIN, month="2026-09"))
+    _open(
+        (sep.get(V_IST) or {}).get("ordered") == 1120.0 and sep[V_IST]["received"] == pytest.approx(1120.0),
+        f"F56: the 1 Sep 01:30 IST order is not September's: {sep.get(V_IST)}",
+    )
+    assert V_IST not in _rows(_report(probe, ADMIN, month="2026-08"))
+
+
+def test_f63_supplier_balances_obey_the_shop_asked_for(world):
+    """The Suppliers tab sends the Purchase shop: one shop's balances are its
+    share of each supplier ledger, and a Pune login cannot ask for Dhanbad."""
+    def balances(user, store):
+        resp = world.get("/finance/vendor-payments", user, store_id=store)
+        return resp.status_code, {r["vendor_id"]: r["balance"] for r in resp.json()} if resp.status_code == 200 else None
+
+    assert balances(ADMIN, DHN) == (200, {VA: 5540.0, VB: 0.0})
+    assert balances(ACCT_PUNE, PUN) == (200, {VA: 0.0, VB: 2240.0})
+    assert balances(ACCT_PUNE, DHN)[0] == 403

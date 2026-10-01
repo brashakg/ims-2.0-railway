@@ -2,13 +2,18 @@
 
 One row per vendor: what we ORDERED (orders sent in the month), RECEIVED
 (accepted goods at the order's price incl. GST), were BILLED, PAID, still OWE
-at the month's end, and the next due date. Billed / paid / owed are the
-supplier ledger's own rows (ap_engine.build_ledger) -- the one payable rule the
-vendor ledger and /finance/vendor-payments read -- so this report can never
-disagree with them. Shop scope is the one Purchase rule (resolve_store_scope).
+at the month's end, and the NEXT DUE date as at the month's end. Billed / paid /
+owed are the supplier ledger's own rows (ap_engine.build_ledger) over the one
+row rule every payable screen reads (finance._ap_rows ->
+ap_engine.supplier_ledger_rows: no transfer mirror bills; a shop's share when
+one shop is asked for), so this report can never disagree with the vendor
+ledger, /finance/vendor-payments, AP aging or the Cash Flow payables. Shop
+scope is the one Purchase rule (resolve_store_scope).
 """
 
 import re
+from calendar import monthrange
+from datetime import date
 
 from ._shared import (
     Depends,
@@ -36,6 +41,11 @@ def _month_of(value) -> str:
     return ist_date_str_from_stored(value)[:7]
 
 
+def _dated(doc: dict):
+    """The date a ledger row is entered on -- the field build_ledger reads."""
+    return doc.get("bill_date") or doc.get("payment_date") or doc.get("date") or doc.get("created_at")
+
+
 def _find(db, coll: str, flt: dict) -> list:
     return list(db.get_collection(coll).find(flt, {"_id": 0}))
 
@@ -55,17 +65,13 @@ async def purchases_this_month(
     if db is None:
         return body
 
+    from ..finance import _ap_rows  # the one AP row loader (call time: no cycle)
+
     shop = {"store_id": scope} if scope else {}
-    bills = _find(db, "vendor_bills", shop)
-    payments = _find(db, "vendor_payments", {})
-    notes = _find(db, "vendor_debit_notes", {})
-    if scope:
-        # ponytail: payments and debit notes carry no shop, so a shop's ledger is
-        # its bills plus the money that names them; on-account money (no bill)
-        # shows under All stores only. Stamp a shop on payments if that matters.
-        ids = {b.get("bill_id") for b in bills}
-        payments = [p for p in payments if p.get("bill_id") in ids]
-        notes = [d for d in notes if d.get("bill_id") in ids]
+    bills, payments, notes = _ap_rows(db, scope)
+    month_end = date(int(month[:4]), int(month[5:]), monthrange(int(month[:4]), int(month[5:]))[1])
+    # 'Next due' as at the month's end -- or today, for the month we are in.
+    as_of = min(month_end, now_ist_naive().date()).isoformat()
 
     rows: dict = {}
 
@@ -102,26 +108,29 @@ async def purchases_this_month(
             for ln in pinv.lines_from_grn(g, pos_by_id.get(g.get("po_id")))
         )
 
-    # BILLED / PAID / OWED: the supplier ledger, row for row.
-    def of_vendor(docs, vid):
-        return [d for d in docs if d.get("vendor_id") == vid]
+    # BILLED / PAID / OWED: the supplier ledger, row for row, as it stood at the
+    # month's end (rows dated later did not exist yet; undated rows count, as
+    # in the closing balance).
+    def upto_month(docs, vid):
+        return [d for d in docs if d.get("vendor_id") == vid and _month_of(_dated(d)) <= month]
 
     vendor_ids = {d.get("vendor_id") for d in bills + payments + notes} | set(rows)
     next_due: dict = {}
     for vid in vendor_ids:
-        v_bills, v_pays, v_notes = of_vendor(bills, vid), of_vendor(payments, vid), of_vendor(notes, vid)
+        v_bills, v_pays, v_notes = (upto_month(docs, vid) for docs in (bills, payments, notes))
         r = row(vid)
         for entry in ap_engine.build_ledger(v_bills, v_pays, v_notes)["entries"]:
-            when = _month_of(entry.get("date"))
-            if when <= month:  # undated rows ('') count, as in the closing balance
-                r["owed"] += entry["credit"] - entry["debit"]
-            if when == month and entry["type"] == "BILL":
-                r["billed"] += entry["credit"]
-            elif when == month and entry["type"] == "PAYMENT":
-                r["paid"] += entry["debit"]
+            r["owed"] += entry["credit"] - entry["debit"]
+            if _month_of(entry.get("date")) == month:
+                if entry["type"] == "BILL":
+                    r["billed"] += entry["credit"]
+                elif entry["type"] == "PAYMENT":
+                    r["paid"] += entry["debit"]
+        # The earliest due date of a bill still owed at the month's end, after
+        # on-account money has settled the oldest (ap_engine.build_aging).
         dues = [
             str(it["due_date"])[:10]  # a stored datetime and a string both compare
-            for it in ap_engine.build_aging(v_bills, v_pays, v_notes)["items"]
+            for it in ap_engine.build_aging(v_bills, v_pays, v_notes, as_of)["items"]
             if it.get("due_date")
         ]
         next_due[vid] = min(dues) if dues else None
@@ -135,7 +144,14 @@ async def purchases_this_month(
         if not any(figures.values()):
             continue
         body["vendors"].append(
-            {"vendor_id": vid, "vendor_name": names.get(vid) or vid, **figures, "next_due_date": next_due.get(vid)}
+            {
+                "vendor_id": vid,
+                "vendor_name": names.get(vid) or vid,
+                **figures,
+                "next_due_date": next_due.get(vid),
+                # Past due on the day the report is as at (month end / today).
+                "next_due_overdue": bool(next_due.get(vid) and next_due[vid] < as_of),
+            }
         )
         for k in _FIGURES:
             body["totals"][k] = round(body["totals"][k] + figures[k], 2)
