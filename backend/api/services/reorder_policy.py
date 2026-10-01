@@ -13,10 +13,12 @@ Semantics (single source of truth for every consumer):
                               once the backfill script (scripts/
                               backfill_reorder_quantity_minus1.py) or the
                               create door has stamped the field.
-  - is_active False        -> DISABLED whatever the quantity: a
+  - discontinued()         -> DISABLED whatever the quantity: a
                               discontinued (soft-deleted) product is never
                               suggested for reorder, even while units of it
-                              are still on a shelf (audit F48).
+                              are still on a shelf (audit F48). A PROVISIONAL
+                              product (ruling 13: bought before it was
+                              catalogued) is inactive too but NOT discontinued.
 
 Consumers (each guards with auto_reorder_disabled()):
   - api/routers/inventory.py      /inventory/alerts restock suggestions
@@ -36,10 +38,25 @@ from __future__ import annotations
 from typing import Any
 
 
+def discontinued(product: Any) -> bool:
+    """THE discontinued rule: inactive (is_active False) and not provisional.
+
+    product_master stamps a buy-first-catalogue-later product `provisional`
+    and inactive precisely so it is never confused with one someone
+    deliberately deactivated; nothing flips it active when cataloguing
+    finishes, so is_active alone would call a frame bought last week
+    'Discontinued - not reordered'."""
+    return (
+        isinstance(product, dict)
+        and product.get("is_active") is False
+        and not product.get("provisional")
+    )
+
+
 def auto_reorder_disabled(product: Any) -> bool:
     """True when the product has EXPLICITLY disabled auto-reorder
     (reorder_quantity present and <= 0, e.g. the -1 default the create door
-    stamps) or is discontinued (is_active False). A missing/None/garbage
+    stamps) or is discontinued (discontinued()). A missing/None/garbage
     quantity returns False (legacy behaviour) so pre-backfill docs keep
     working until they are stamped.
 
@@ -47,7 +64,7 @@ def auto_reorder_disabled(product: Any) -> bool:
     `catalog_products` doc (inventory.reorder_quantity)."""
     if not isinstance(product, dict):
         return False
-    if product.get("is_active") is False:
+    if discontinued(product):
         return True
     rq = product.get("reorder_quantity")
     if rq is None:

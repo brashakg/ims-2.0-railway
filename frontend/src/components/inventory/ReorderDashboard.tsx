@@ -37,7 +37,8 @@ interface Product {
   // The server's verdict (reorder_policy.py, via /inventory/low-stock): the
   // one reorder rule. Never re-decided here.
   autoReorderDisabled: boolean;
-  // Discontinued (is_active false): says WHY it is off, decides nothing.
+  // The server's discontinued verdict (reorder_policy.py: inactive, but a
+  // provisional buy is not): says WHY it is off, decides nothing.
   discontinued: boolean;
   maxStock: number;
   leadTimeDays: number;
@@ -55,7 +56,12 @@ const isAutoReorderOff = (p: Product) => p.autoReorderDisabled;
 const hasOrderableQty = (p: Product): p is Product & { reorderQuantity: number } =>
   !isAutoReorderOff(p) && p.reorderQuantity != null && p.reorderQuantity >= 1;
 
-type LowStockRow = { _id: string; quantity: number; auto_reorder_disabled?: boolean };
+type LowStockRow = {
+  _id: string;
+  quantity: number;
+  auto_reorder_disabled?: boolean;
+  discontinued?: boolean;
+};
 const lowStockRows = (data: unknown): LowStockRow[] =>
   Array.isArray(data) ? data : (data as { items?: LowStockRow[] } | null)?.items ?? [];
 
@@ -87,7 +93,7 @@ export function ReorderDashboard() {
         inventoryApi.getStock(storeId).catch(() => ({ items: [] })),
       ]);
 
-      // getLowStock returns { items: [{ _id: productId, quantity, auto_reorder_disabled }] }
+      // getLowStock returns { items: [{ _id: productId, quantity, auto_reorder_disabled, discontinued }] }
       const lowStockItems = lowStockRows(lowStockData);
 
       // getStock returns { items: [...stock unit docs] }
@@ -141,7 +147,7 @@ export function ReorderDashboard() {
           reorderPoint: Number(raw.reorder_point ?? raw.reorder_level ?? 10),
           reorderQuantity,
           autoReorderDisabled: item.auto_reorder_disabled === true,
-          discontinued: raw.is_active === false,
+          discontinued: item.discontinued === true,
           maxStock: Number(raw.max_stock ?? raw.maximum_stock ?? 50),
           leadTimeDays: Number(raw.lead_time_days ?? raw.lead_time ?? 7),
           averageSalesPerDay: Number(raw.average_sales_per_day ?? raw.avg_daily_sales ?? 0),

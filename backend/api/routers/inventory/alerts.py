@@ -7,6 +7,7 @@ from ._shared import (
     Optional,
     Query,
     _SOLD_STATUSES,
+    _discontinued,
     _reorder_disabled,
     datetime,
     get_current_user,
@@ -129,12 +130,12 @@ def _build_stock_alert(
     # REORDER_ALERT / restock suggestion for it. Informational alerts
     # (LOW_STOCK without a suggested qty, DEAD_STOCK, OVERSTOCK, FAST_MOVING)
     # still apply. See api/services/reorder_policy.py, which also turns
-    # reorder off for a discontinued product (is_active False).
+    # reorder off for a discontinued product (inactive, not provisional).
     reorder_suggestions_off = _reorder_disabled(product)
     # A discontinued product still on the shelf is scored only as LOW_STOCK
     # (no qty) or DEAD_STOCK: 'keep well stocked' or 'excess units' is advice
     # for a product the counter can still sell (audit F48).
-    discontinued = product.get("is_active") is False
+    discontinued = _discontinued(product)
 
     velocity = (sold_30 or 0) / 30.0  # units/day from the last 30 days
     days_without_movement = (now - last_sale).days if last_sale else None
@@ -350,6 +351,7 @@ async def get_stock_alerts(
                     "_id": 0,
                     "product_id": 1,
                     "is_active": 1,
+                    "provisional": 1,
                     "name": 1,
                     "brand": 1,
                     "category": 1,

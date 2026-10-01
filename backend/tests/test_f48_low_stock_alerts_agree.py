@@ -216,3 +216,36 @@ def test_a_discontinued_product_still_selling_is_never_a_reorder(monkeypatch):
     assert alert["recommendedOrder"] == 0 and alert["costImpact"] == 0
     (row,) = _low()["items"]
     assert row["auto_reorder_disabled"] is True
+    assert row["discontinued"] is True
+
+
+# ---------------------------------------------------------------------------
+# Verifier round 7: a provisional product is inactive, not discontinued
+# ---------------------------------------------------------------------------
+
+
+def test_a_provisional_product_is_not_discontinued(monkeypatch):
+    """The same two frames, selling the same, but PROVISIONAL (ruling 13:
+    ordered on a PO before anyone catalogued them -- born inactive and never
+    flipped active). Reading is_active alone called them discontinued: no
+    reorder for the Aviator, no FAST_MOVING for the Wayfarer, 'Discontinued -
+    not reordered' on the Reorder dashboard. They reorder like any product."""
+    products = [
+        {**_PRODUCTS[0], "is_active": False, "provisional": True, "reorder_quantity": 5},
+        {**_PRODUCTS[1], "is_active": False, "provisional": True, "reorder_quantity": 5},
+    ]
+    db = _wire(monkeypatch, units=_units("P-AV", 3) + _units("P-WAY", 30), products=products)
+    db.orders.insert_many([
+        {
+            "status": "DELIVERED", "store_id": "S1", "created_at": _NOW - timedelta(days=d % 25 + 1),
+            "items": [{"barcode": "RB3025-GLD", "quantity": 1}, {"barcode": "RB2140", "quantity": 1}],
+        }
+        for d in range(20)
+    ])
+    by_name = {a["productName"]: a for a in _alerts()["alerts"]}
+    av = by_name["Ray-Ban RB3025 Aviator - Gold"]
+    assert av["alertType"] == "REORDER_ALERT" and av["recommendedOrder"] > 0
+    assert by_name["Ray-Ban Wayfarer"]["alertType"] == "FAST_MOVING"
+    (row,) = _low()["items"]
+    assert row["auto_reorder_disabled"] is False
+    assert row["discontinued"] is False

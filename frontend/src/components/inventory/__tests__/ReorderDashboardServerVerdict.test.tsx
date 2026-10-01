@@ -49,7 +49,9 @@ const ledger = (extra: Record<string, unknown>) => ({
     { product_id: 'P1', name: 'Frame P1', quantity: 3, status: 'AVAILABLE', reorder_point: 10, vendor_id: 'V1', ...extra },
   ],
 });
-const verdict = (off: boolean) => ({ items: [{ _id: 'P1', quantity: 3, auto_reorder_disabled: off }] });
+const verdict = (off: boolean, discontinued = false) => ({
+  items: [{ _id: 'P1', quantity: 3, auto_reorder_disabled: off, discontinued }],
+});
 
 async function saveQty5ThenGeneratePO() {
   fireEvent.click(await screen.findByTitle('Configure reorder point'));
@@ -68,7 +70,7 @@ describe('ReorderDashboard - the server decides auto-reorder', () => {
 
   it('never orders a discontinued product, even after a quantity is saved', async () => {
     getStock.mockResolvedValue(ledger({ is_active: false, reorder_quantity: 5 }));
-    getLowStock.mockResolvedValue(verdict(true));
+    getLowStock.mockResolvedValue(verdict(true, true));
     render(<MemoryRouter><ReorderDashboard /></MemoryRouter>);
 
     expect(await screen.findByText('Discontinued - not reordered')).toBeInTheDocument();
@@ -88,6 +90,23 @@ describe('ReorderDashboard - the server decides auto-reorder', () => {
     render(<MemoryRouter><ReorderDashboard /></MemoryRouter>);
 
     expect(await screen.findByText('Auto-reorder off')).toBeInTheDocument();
+    await saveQty5ThenGeneratePO();
+
+    await waitFor(() => expect(createPurchaseOrder).toHaveBeenCalledTimes(1));
+    expect(createPurchaseOrder.mock.calls[0][0].items[0]).toMatchObject({ product_id: 'P1', quantity: 5 });
+  });
+
+  // Verifier round 7: a provisional product (ruling 13, bought before it was
+  // catalogued) is inactive in the ledger but NOT discontinued. The screen
+  // read is_active itself and said 'Discontinued - not reordered' for a frame
+  // bought last week; the server's discontinued flag is the only judge.
+  it('a provisional (inactive, not discontinued) product orders once its quantity is saved', async () => {
+    getStock.mockResolvedValue(ledger({ is_active: false, reorder_quantity: -1 }));
+    getLowStock.mockResolvedValueOnce(verdict(true)).mockResolvedValue(verdict(false));
+    render(<MemoryRouter><ReorderDashboard /></MemoryRouter>);
+
+    expect(await screen.findByText('Auto-reorder off')).toBeInTheDocument();
+    expect(screen.queryByText('Discontinued - not reordered')).not.toBeInTheDocument();
     await saveQty5ThenGeneratePO();
 
     await waitFor(() => expect(createPurchaseOrder).toHaveBeenCalledTimes(1));

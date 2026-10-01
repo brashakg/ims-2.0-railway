@@ -9,6 +9,7 @@ from ._shared import (
     Optional,
     Query,
     _INVENTORY_ROLES,
+    _discontinued,
     _reorder_disabled,
     barcode_svc,
     get_current_user,
@@ -38,7 +39,8 @@ async def get_low_stock_alerts(
 
     Each item carries `auto_reorder_disabled` (per-product policy, see
     api/services/reorder_policy.py): True when the product master has
-    reorder_quantity <= 0 (the -1 "no auto-reorder" sentinel). The alert
+    reorder_quantity <= 0 (the -1 "no auto-reorder" sentinel) or the product
+    is discontinued, which `discontinued` says (reorder_policy). The alert
     list itself is UNCHANGED -- every low-stock product is still returned
     so managers see the state; the flag lets consumers (Reorder dashboard,
     Stock Replenishment suggestions) decide whether to propose a PO.
@@ -76,6 +78,9 @@ async def get_low_stock_alerts(
         pid = str(item.get("_id") or "")
         prod = products_by_id.get(pid, {})
         item["auto_reorder_disabled"] = _reorder_disabled(prod)
+        # Why it is off, by the same rule (the Reorder dashboard labels it,
+        # never re-decides it): inactive, but a provisional buy is not.
+        item["discontinued"] = _discontinued(prod)
         item.update(
             id=pid,
             product_id=pid,
