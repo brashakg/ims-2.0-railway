@@ -149,7 +149,12 @@ export function useOnlineStatus(ids: string[]) {
       try {
         return await catalogApi.getOnlineStatus(ids);
       } catch {
-        return {}; // fail-soft: bridge off -> no badges (as before)
+        // A failed call is UNKNOWN for every id (the screens say Unverified),
+        // never {} -- a missing key read as "In-store only", a confident
+        // false negative.
+        return Object.fromEntries(
+          ids.map((id): [string, OnlineStatus] => [id, { online: null, online_stock: null, status: null }]),
+        );
       }
     },
   });
