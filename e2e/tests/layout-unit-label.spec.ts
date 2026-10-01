@@ -272,6 +272,9 @@ test('a saved offset moves the printed window, and N labels print as N pages of 
           ['window from the paper edge', win.l, offset],
           ['window top', win.t, i * 15],
           ['window width', win.w, 70],
+          // The lines are checked against the window, so a window taller than
+          // the label would let .lbl's overflow cut the MRP unseen.
+          ['window height', win.h, 15],
         ];
         for (const [name, got, exp] of want) {
           if (Math.abs(got - exp) > TOL_MM) {
