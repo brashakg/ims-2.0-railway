@@ -281,7 +281,7 @@ def _unit(pid, store, status: Any = "AVAILABLE", **extra):
         "stock_id": f"STK-{uuid.uuid4().hex[:12]}",
         "product_id": pid,
         "store_id": store,
-        "barcode": f"BV{uuid.uuid4().hex[:10].upper()}",
+        "barcode": f"BV{uuid.uuid4().hex[-10:].upper()}",
         "quantity": 1,
         "location_code": "DEFAULT",
         **_MONEY_ON_UNIT,
