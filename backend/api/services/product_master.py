@@ -2723,6 +2723,55 @@ def identity_conflict(spine: Dict[str, Any], product_repo) -> Optional[ProductMa
     return err
 
 
+def revive_discarded_draft(
+    product_id: str, product_repo, db=None, actor: Optional[str] = None
+) -> bool:
+    """A draft an admin discarded (catalog DELETE's `discarded_draft` mark)
+    that a manager orders AGAIN by typing it in comes back as the ordered
+    draft it was: provisional on the spine, in Needs review on its catalogue
+    copy, never switched on. Its identity key is unique, so a second row for
+    the item can never be made -- without this the discarded row would block
+    every new order of it behind a product nobody can see.
+
+    True when the row was a discarded draft and is now a draft again; False
+    (nothing written) for any other product."""
+    if product_repo is None or not product_id:
+        return False
+    spine = product_repo.find_by_id(product_id)
+    if not spine or not spine.get("discarded_draft"):
+        return False
+    now = datetime.now().isoformat()
+    product_repo.update(
+        product_id,
+        {
+            "provisional": True,
+            "is_active": False,
+            "discarded_draft": False,
+            "revived_at": now,
+            "revived_by": actor,
+        },
+    )
+    if db is not None and getattr(db, "is_connected", True):
+        cat = db.get_collection("catalog_products")
+        if cat is not None:
+            twin_id = spine.get("pim_product_id") or product_id
+            # Back as _build_pim_doc made it: in Needs review, naming its
+            # spine, with no projected is_active and no delete stamp.
+            cat.update_one(
+                {"id": twin_id},
+                {
+                    "$set": {"needs_review": True, "spine_product_id": product_id},
+                    "$unset": {"is_active": "", "deleted_at": "", "deleted_by": ""},
+                },
+            )
+    logger.info(
+        "[PRODUCT_MASTER] discarded draft %s ordered again by %s: back in Needs review",
+        product_id,
+        actor,
+    )
+    return True
+
+
 def _resolve_variant_parent(
     variant_of: str, spine: Dict[str, Any], product_repo
 ) -> Dict[str, Any]:

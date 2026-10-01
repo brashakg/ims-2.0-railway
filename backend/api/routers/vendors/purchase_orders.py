@@ -76,6 +76,12 @@ class _WithThisOrder:
         return list(self.planned) + list(self.repo.find_many(flt, *a, **k) or [])
 
 
+def _discarded(product_repo, product_id) -> bool:
+    """A draft an admin discarded: a typed line naming it is given that draft
+    back (revive_discarded_draft), never refused behind it."""
+    return bool((product_repo.find_by_id(product_id) or {}).get("discarded_draft"))
+
+
 def _refuse_items_we_already_have(items, product_repo) -> None:
     """Audit C2: a typed-in line that describes a product we ALREADY have
     (active, or a draft somebody ordered earlier) never mints a hidden twin.
@@ -119,7 +125,9 @@ def _refuse_items_we_already_have(items, product_repo) -> None:
         if err.status == 409 and err.conflict:
             # No product_id: an earlier line of THIS order types the same
             # item -- the create loop gives both lines its one draft.
-            if err.conflict.get("product_id"):
+            if err.conflict.get("product_id") and not _discarded(
+                product_repo, err.conflict["product_id"]
+            ):
                 already.append({"line": idx, "existing": err.conflict})
         elif err.code == "EYE_SIZE_NEEDED":
             need_size.append({"line": idx, "sizes": err.sizes, "message": err.message})
@@ -534,9 +542,17 @@ async def create_po(
         except _pm.ProductMasterError as err:
             # Past the check above this is two lines of THIS order typing the
             # same item, or a product created a moment ago by someone else:
-            # reuse it rather than refusing the order or minting a twin.
+            # reuse it rather than refusing the order or minting a twin. A
+            # draft an admin discarded is ordered again here: it comes back
+            # as the ordered draft it was, to Needs review (round 5).
             if err.status == 409 and (err.conflict or {}).get("product_id"):
                 it.product_id = err.conflict["product_id"]
+                _pm.revive_discarded_draft(
+                    it.product_id,
+                    product_repo,
+                    db=_get_db(),
+                    actor=current_user.get("user_id"),
+                )
                 it.product_name = it.product_name or err.conflict.get("name")
                 it.sku = it.sku or err.conflict.get("sku")
                 it.new_product = None
