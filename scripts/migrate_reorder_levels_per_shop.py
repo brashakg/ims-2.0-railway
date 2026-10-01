@@ -40,9 +40,14 @@ import re
 import sys
 from typing import Dict, List
 
-LEVELS_FIELD = "reorder_levels"  # = api/services/reorder_policy.LEVELS_FIELD
+sys.path.insert(
+    0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "backend")
+)
+# The field and the shop-key pattern are the write model's own, not copies.
+from api.services.reorder_policy import LEVELS_FIELD, STORE_KEY_PATTERN  # noqa: E402
+
 FORM_DEFAULT = 5
-_SHOP_KEY = re.compile(r"[A-Za-z0-9_-]+")  # a safe Mongo key, like the write route
+_SHOP_KEY = re.compile(STORE_KEY_PATTERN)
 
 
 def _typed(value) -> int:

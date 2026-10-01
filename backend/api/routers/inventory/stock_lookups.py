@@ -24,7 +24,7 @@ from .models import (
     StockAddRequest,
 )
 from ._shared import BaseModel, Field, _STOCK_MANAGER_ROLES
-from ...services.reorder_policy import low_stock_rows
+from ...services.reorder_policy import LEVELS_FIELD, STORE_KEY_PATTERN, low_stock_rows
 from .helpers import (
     _get_db,
     _reject_stock_mint_on_online_store,
@@ -334,8 +334,7 @@ async def add_stock(
 class ReorderLevelWrite(BaseModel):
     """One shop's reorder level. level None or -1 = clear it (not set)."""
 
-    # A Mongo key (reorder_levels.<store_id>): no dots, no "$".
-    store_id: str = Field(..., min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    store_id: str = Field(..., min_length=1, max_length=64, pattern=STORE_KEY_PATTERN)
     level: Optional[int] = Field(None, ge=-1, le=100000)
 
 
@@ -354,8 +353,16 @@ async def set_reorder_level(
     repo = get_product_repository()
     if repo is None:
         raise HTTPException(status_code=503, detail="Products are unavailable")
+    # A level for a shop that does not exist would show up as a phantom shop in
+    # every all-shops list (owner digest, Jarvis).
+    db = _get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Shops are unavailable")
+    stores = db.get_collection("stores")
+    if stores.find_one({"store_id": store}, {"_id": 1}) is None:
+        raise HTTPException(status_code=404, detail="Shop not found")
     level = body.level if body.level is not None and body.level >= 0 else None
-    key = f"reorder_levels.{store}"
+    key = f"{LEVELS_FIELD}.{store}"
     res = repo.collection.update_one(
         {"product_id": product_id},
         {"$set": {key: level}} if level is not None else {"$unset": {key: ""}},
