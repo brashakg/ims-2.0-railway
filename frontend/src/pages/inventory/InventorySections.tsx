@@ -16,7 +16,7 @@
 //   power-grid   -> /inventory/power-grid (PowerGridPage - the tab rendered
 //                   the OLD products-based widget instead)
 
-import { useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { AlertTriangle, Package } from 'lucide-react';
 import { StockAlertsOverview } from '../../components/inventory/StockAlertsOverview';
 import { StockTransferManagement } from '../../components/inventory/StockTransferManagement';
@@ -98,9 +98,13 @@ export function InventoryLowStockPage() {
                   <p className="text-sm text-gray-500">{item.sku} • {item.brand}</p>
                 </div>
               </div>
-              <div className="text-right">
-                <p className="text-lg font-bold text-amber-600">{item.stock} left</p>
-                <p className="text-xs text-gray-500">Min: {item.lowStockThreshold ?? 'not set'}</p>
+              <div className="flex items-center gap-4">
+                <div className="text-right">
+                  <p className="text-lg font-bold text-amber-600">{item.stock} left</p>
+                  <p className="text-xs text-gray-500">Min: {item.lowStockThreshold ?? 'not set'}</p>
+                </div>
+                {/* Raise the PO where POs are raised from stock: the reorder desk. */}
+                <Link to="/inventory/reorders" className="btn-outline text-sm">Raise PO</Link>
               </div>
             </div>
           ))}

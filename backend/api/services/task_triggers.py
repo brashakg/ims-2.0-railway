@@ -21,6 +21,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from .task_sla import sla_for
+from .user_roles import VALID_ROLES
 
 _ACTIVE = {"OPEN", "IN_PROGRESS", "ESCALATED", "open", "in_progress", "escalated"}
 
@@ -156,6 +157,26 @@ def _as_dt(v: Any) -> Optional[datetime]:
 # ---------------------------------------------------------------------------
 
 
+def _person_holding(role: str, store_id: Optional[str]) -> Optional[str]:
+    """The user id of the person holding ``role`` at ``store_id``, through the
+    staff-to-store assignment (users.store_ids, active users only). None when
+    nobody holds it there, or for a store-less task (no store = no person)."""
+    if not store_id:
+        return None
+    try:
+        from ..dependencies import get_user_repository
+
+        repo = get_user_repository()
+        people = repo.find_by_role(role, store_id) if repo is not None else []
+    except Exception:  # noqa: BLE001 - a lookup failure leaves it unassigned
+        return None
+    for person in people or []:
+        uid = person.get("user_id") or person.get("id")
+        if uid:
+            return uid
+    return None
+
+
 def create_system_task(
     repo: Any,
     *,
@@ -175,9 +196,17 @@ def create_system_task(
 
     ``extra``: optional ADDITIVE fields merged onto the task doc (e.g. a deep
     ``link`` path or a structured ``payload`` the frontend keys on). Extra keys
-    can never override the core task fields (setdefault semantics)."""
+    can never override the core task fields (setdefault semantics).
+
+    ``assigned_to`` is a user id. A ROLE name ("STORE_MANAGER", "ACCOUNTANT")
+    is resolved here to the person holding it at ``store_id`` -- owner rule
+    2026-09-03: tasks go to PEOPLE, not titles. A title stored verbatim matched
+    nobody's "Mine" (audit F33). Nobody holds it -> None: unassigned, which the
+    store's managers see on the Team list."""
     if repo is None:
         return None
+    if str(assigned_to or "").upper() in VALID_ROLES:
+        assigned_to = _person_holding(str(assigned_to).upper(), store_id)
     try:
         existing = repo.find_many({"source_ref": dedupe_ref}) or []
         if any(

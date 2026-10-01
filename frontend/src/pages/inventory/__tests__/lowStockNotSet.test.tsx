@@ -1,6 +1,7 @@
 // Review round 4, item 16: a low-stock row with no threshold says 'not set',
 // never a blank 'Min: '.
 import { render, screen } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 import { describe, it, expect, vi } from 'vitest';
 
 vi.mock('../InventoryLayout', () => ({ useInventoryContext: () => ({ storeId: 'BV-DHN-02' }) }));
@@ -16,7 +17,8 @@ import { InventoryLowStockPage } from '../InventorySections';
 
 describe('InventoryLowStockPage', () => {
   it("shows 'Min: not set' when the threshold is missing", () => {
-    render(<InventoryLowStockPage />);
+    // MemoryRouter: each row links to the reorder desk (Raise PO).
+    render(<MemoryRouter><InventoryLowStockPage /></MemoryRouter>);
     expect(screen.getByText('Min: not set')).toBeTruthy();
   });
 });
