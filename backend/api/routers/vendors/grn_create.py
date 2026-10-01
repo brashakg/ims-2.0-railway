@@ -346,6 +346,8 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
         "po_number": po.get("po_number") if po else None,
         "vendor_id": vendor_id,
         "vendor_name": po.get("vendor_name") if po else None,
+        # D14: the walk-in dealer of a "Bought without PO" receipt, by name.
+        "dealer_name": grn.dealer_name,
         "store_id": store_id,
         "vendor_invoice_no": grn.vendor_invoice_no,
         # Folded identity for the uniq_std_vendor_invoice_store partial unique

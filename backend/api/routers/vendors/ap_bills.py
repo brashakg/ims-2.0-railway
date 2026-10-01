@@ -257,6 +257,7 @@ async def create_vendor_bill(
                 },
             )
 
+    linked = None  # the goods receipt this bill names, read below
     # This door accepts a grn_id but validated NOTHING about it -- so the same
     # two money leaks the first-class purchase-invoice door had were reachable
     # here too: bill another vendor's receipt, or bill one receipt again and
@@ -351,6 +352,8 @@ async def create_vendor_bill(
         # A receipt-linked bill IS a goods bill whatever the caller declared;
         # otherwise the declared kind (the gate above proved it is SERVICES).
         "bill_kind": ap_engine.BILL_KIND_GOODS if bill.grn_id else bill.bill_kind,
+        # D14: never on a bill for goods bought without a PO.
+        "itc_eligible": ap_engine.itc_eligible(linked),
         "notes": bill.notes,
         "status": "OUTSTANDING",
         "created_by": current_user.get("user_id"),

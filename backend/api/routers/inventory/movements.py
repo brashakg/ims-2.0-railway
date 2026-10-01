@@ -16,6 +16,7 @@ from ._shared import (
     timedelta,
     validate_store_access,
 )
+from ...services.ap_engine import GRN_SUBTYPE_NO_PO
 from .helpers import (
     _get_db,
 )
@@ -78,6 +79,7 @@ def _collect_received_events(
                 "grn_id": 1,
                 "grn_number": 1,
                 "po_number": 1,
+                "grn_subtype": 1,
                 "store_id": 1,
                 "items": 1,
                 "accepted_at": 1,
@@ -120,7 +122,12 @@ def _collect_received_events(
                     "ref": ref,
                     "ref_id": grn.get("grn_id") or "",
                     "store_id": grn.get("store_id") or "",
-                    "detail": detail,
+                    # D14: a walk-in purchase reads as one, not as a PO delivery.
+                    "detail": (
+                        f"Bought without PO - {detail}"
+                        if grn.get("grn_subtype") == GRN_SUBTYPE_NO_PO
+                        else detail
+                    ),
                 }
             )
     return events

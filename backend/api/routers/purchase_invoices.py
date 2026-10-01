@@ -1644,7 +1644,8 @@ async def create_purchase_invoice(
             else body.bill_kind
         ),
         "tds": round(body.tds, 2),
-        "itc_eligible": bool(body.itc_eligible),
+        # D14: never on a bill for goods bought without a PO.
+        "itc_eligible": ap_engine.itc_eligible(grn_doc, body.itc_eligible),
         "reverse_charge": bool(body.reverse_charge),
         "outstanding": total,
         "status": "OUTSTANDING",

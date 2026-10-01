@@ -109,6 +109,10 @@ def _enrich_grn_names(grns: list) -> None:
             vid = g.get("vendor_id")
             if vid and not g.get("vendor_name") and str(vid) in vmap:
                 g["vendor_name"] = vmap[str(vid)]
+            # D14: a walk-in dealer bought from without a PO has no supplier
+            # record -- the name typed at receipt is the name.
+            if not g.get("vendor_name") and g.get("dealer_name"):
+                g["vendor_name"] = g["dealer_name"]
     except Exception:  # noqa: BLE001
         pass
 

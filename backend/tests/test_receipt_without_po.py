@@ -11,12 +11,14 @@ and books NO input tax credit: GSTR-3B and the ITC register never count it.
 Receiving is MANAGERS ONLY (ruling 2026-09-28). The receipt shows in the
 receipts list and on Movements labelled "Bought without PO".
 
-THE CONTRACT THESE TESTS PIN (nothing below exists on main yet):
+THE CONTRACT THESE TESTS PIN:
   * POST /vendors/grn with grn_subtype "NO_PO": no po_id; vendor_id (a supplier
     on file) OR dealer_name (typed walk-in dealer); vendor_invoice_no /
     vendor_invoice_date optional; every line carries unit_price > 0 (the cost);
-    expiry_date per line as on any receipt; attachment_file_id (bill photo) is
-    kept when sent. Stored as grn_subtype "NO_PO" (+ dealer_name).
+    expiry_date per line as on any receipt; the bill photo
+    (attachment_file_id) is required, by the same document gate as a PO
+    receipt. Stored as grn_subtype "NO_PO" (+ dealer_name). A cost typed on a
+    PO receipt's line is dropped: that receipt is costed at the order's price.
   * POST /vendors/grn/{id}/accept is the ONE minting door: units are
     source_type GRN, carry the line's unit_price as unit_cost/cost_price and
     the line's expiry; accounts get a "book the bill" task.
@@ -26,9 +28,6 @@ THE CONTRACT THESE TESTS PIN (nothing below exists on main yet):
     sent, so the ITC register, /gst/summary and GSTR-3B Table 4 never count it.
   * GET /vendors/grn?grn_subtype=NO_PO lists only these receipts, naming the
     dealer; the Movements ledger labels them "Bought without PO".
-
-Every test is xfail(strict=True) until the build lands: an unexpected pass
-fails the run, so each mark must come off in the commit that makes it pass.
 
 Engine: mongomock behind the real repositories (CI installs it, #1168).
 No emoji (Windows cp1252).
@@ -95,10 +94,6 @@ ADMIN = {
     "store_ids": [STORE],
     "active_store_id": STORE,
 }
-
-
-def _xfail(finding: str, why: str):
-    return pytest.mark.xfail(strict=True, reason=f"{finding}: {why}")
 
 
 def _run(coro):
@@ -315,8 +310,6 @@ def _seed_receipt(db, *, grn_id, subtype, status="ACCEPTED", vendor_id=DEALER, *
 # ===========================================================================
 
 
-@_xfail("C7", "there is no 'Bought without PO' receipt; the only door is a "
-        "Delivery Challan, which keeps no line cost and drops the bill photo")
 def test_c7_bought_without_po_receipt_keeps_dealer_bill_photo_and_cost(world):
     res = world["as_"](MANAGER).post("/vendors/grn", json=_no_po_body(world))
     assert res.status_code == 201, res.text
@@ -337,8 +330,6 @@ def test_c7_bought_without_po_receipt_keeps_dealer_bill_photo_and_cost(world):
     assert by_pid[LENS]["expiry_date"] == "2027-08-31"
 
 
-@_xfail("C7", "GRNItemCreate has no unit_price field, so the cost a receiver "
-        "types is dropped at the model while accept reads item['unit_price']")
 def test_c7_a_receipt_line_keeps_its_cost():
     line = vd.GRNItemCreate(
         product_id=FRAME, received_qty=1, accepted_qty=1, unit_price=3100.0
@@ -346,8 +337,26 @@ def test_c7_a_receipt_line_keeps_its_cost():
     assert line.model_dump().get("unit_price") == 3100.0
 
 
-@_xfail("C7", "a walk-in dealer with no supplier record cannot be named on a "
-        "receipt (vendor_id only, and optional, so a DC can name nobody)")
+def test_c7_only_a_no_po_receipt_takes_a_typed_cost():
+    """A PO receipt is costed at the order's agreed price (accept reads the PO);
+    a cost on its lines would override it, so it is dropped."""
+    po_receipt = vd.GRNCreate(
+        po_id="PO-1",
+        vendor_invoice_no="INV-1",
+        items=[{"product_id": FRAME, "received_qty": 1, "accepted_qty": 1, "unit_price": 1.0}],
+    )
+    assert po_receipt.items[0].unit_price is None
+
+
+def test_c7_no_po_receipt_needs_the_bill_photo(world):
+    body = _no_po_body(world)
+    del body["attachment_file_id"]
+    res = world["as_"](MANAGER).post("/vendors/grn", json=body)
+    assert res.status_code == 400, res.text
+    assert res.json()["detail"]["code"] == "ATTACHMENT_REQUIRED"
+    assert world["db"].grns.count_documents({}) == 0
+
+
 def test_c7_walk_in_dealer_by_name_and_someone_must_be_named(world):
     http = world["as_"](MANAGER)
     by_name = _no_po_body(world, vendor_id=None, dealer_name="Sharma Optical, Bank More")
@@ -362,8 +371,6 @@ def test_c7_walk_in_dealer_by_name_and_someone_must_be_named(world):
     assert res.status_code == 422, res.text
 
 
-@_xfail("C7", "nothing requires a cost on a no-PO line, so units land with "
-        "no cost at all")
 def test_c7_every_line_must_carry_its_cost(world):
     http = world["as_"](MANAGER)
     body = _no_po_body(world)
@@ -382,8 +389,6 @@ def test_c7_every_line_must_carry_its_cost(world):
 # ===========================================================================
 
 
-@_xfail("C7", "a no-PO receipt mints units with no cost (no PO price to read, "
-        "the line cost was never stored)")
 def test_c7_accept_puts_units_on_the_shelf_at_what_was_paid(world):
     http = world["as_"](MANAGER)
     created = http.post("/vendors/grn", json=_no_po_body(world))
@@ -410,8 +415,6 @@ def test_c7_accept_puts_units_on_the_shelf_at_what_was_paid(world):
     assert {u.get("expiry_date") for u in lenses} == {"2027-08-31"}
 
 
-@_xfail("C7", "accounts get no task for a no-PO receipt (only express "
-        "receive raises 'Book purchase invoice', and it refuses a DC)")
 def test_c7_accept_sends_the_bill_to_accounts(world):
     http = world["as_"](MANAGER)
     created = http.post("/vendors/grn", json=_no_po_body(world))
@@ -437,8 +440,6 @@ def test_c7_accept_sends_the_bill_to_accounts(world):
 # ===========================================================================
 
 
-@_xfail("D14", "ACCOUNTANT is in _VENDOR_ROLES, so the accountant can log and "
-        "accept a receipt; receiving is managers only")
 def test_d14_receiving_without_po_is_managers_only(world):
     db = world["db"]
     refused = world["as_"](ACCOUNTANT).post("/vendors/grn", json=_no_po_body(world))
@@ -496,8 +497,6 @@ def _itc_everywhere():
     )
 
 
-@_xfail("D14", "a bill booked against a no-PO receipt keeps itc_eligible "
-        "True (the body default), so GSTR-3B and the ITC register claim it")
 def test_d14_line_bill_for_a_no_po_receipt_claims_no_itc(world):
     db = world["db"]
     _seed_receipt(db, grn_id="GRN-STD-0001", subtype="STANDARD", po_id="PO-1")
@@ -515,8 +514,6 @@ def test_d14_line_bill_for_a_no_po_receipt_claims_no_itc(world):
     assert _itc_everywhere() == (310.0, 310.0, 310.0)
 
 
-@_xfail("D14", "an explicit itc_eligible=True from the client still claims "
-        "credit on a no-PO receipt's bill")
 def test_d14_client_cannot_switch_itc_back_on(world):
     db = world["db"]
     _seed_receipt(db, grn_id="GRN-NOPO-0003", subtype="NO_PO")
@@ -528,8 +525,6 @@ def test_d14_client_cannot_switch_itc_back_on(world):
     assert _itc_everywhere() == (0.0, 0.0, 0.0)
 
 
-@_xfail("D14", "the header-only AP bill door stores no itc_eligible at all, "
-        "and every ITC reader counts a missing flag as eligible")
 def test_d14_header_only_bill_door_claims_no_itc_either(world):
     db = world["db"]
     _seed_receipt(db, grn_id="GRN-NOPO-0004", subtype="NO_PO")
@@ -556,8 +551,6 @@ def test_d14_header_only_bill_door_claims_no_itc_either(world):
 # ===========================================================================
 
 
-@_xfail("C7", "the receipts list silently ignores an unknown grn_subtype "
-        "filter (returns every receipt) and names no walk-in dealer")
 def test_c7_receipts_list_finds_and_names_bought_without_po(world):
     db = world["db"]
     _seed_receipt(db, grn_id="GRN-STD-0005", subtype="STANDARD", po_id="PO-5")
@@ -575,8 +568,6 @@ def test_c7_receipts_list_finds_and_names_bought_without_po(world):
     assert rows[0]["vendor_name"] == "Sharma Optical, Bank More"
 
 
-@_xfail("C7", "the Movements ledger labels every receipt 'GRN <no>', so a "
-        "walk-in purchase is not told apart from a PO delivery")
 def test_c7_movements_label_bought_without_po(world):
     db = world["db"]
     _seed_receipt(db, grn_id="GRN-STD-0007", subtype="STANDARD", po_id="PO-7", po_number="PO/7")

@@ -39,6 +39,8 @@ from .grn_accept_lock import (
     _release_grn_accept_claim,
     _stock_create_raises_on_duplicate,
 )
+from .grn import _enrich_grn_names
+from .models import GRN_SUBTYPE_NO_PO
 
 
 @router.post("/grn/{grn_id}/accept")
@@ -70,7 +72,49 @@ async def accept_grn(
     wrapped so that a logging/secondary failure can never lose the stock that
     was already received.
     """
-    return await _accept_grn_impl(grn_id, current_user)
+    result = await _accept_grn_impl(grn_id, current_user)
+    _send_no_po_bill_to_accounts(grn_id, result)
+    return result
+
+
+def _send_no_po_bill_to_accounts(grn_id: str, result: dict) -> None:
+    """D14: goods bought without a PO have no order behind them, so nothing
+    else tells accounts a bill is waiting. Once the receipt is fully on the
+    shelf, raise one task to book it (the bill doors stamp it no-ITC).
+    Fail-soft: a task failure never undoes the receipt."""
+    if result.get("grn_status") != "ACCEPTED":
+        return
+    try:
+        grn = get_grn_repository().find_by_id(grn_id) or {}
+        if grn.get("grn_subtype") != GRN_SUBTYPE_NO_PO:
+            return
+        from ...services.task_triggers import create_system_task
+        from ...dependencies import get_task_repository
+
+        _enrich_grn_names([grn])
+        number = grn.get("grn_number") or grn_id
+        seller = grn.get("vendor_name") or grn.get("vendor_id") or "the dealer"
+        bill_no = grn.get("vendor_invoice_no")
+        link = f"/purchase/invoices/book?grn_id={grn_id}"
+        create_system_task(
+            get_task_repository(),
+            title=f"Book the bill for {number} - bought without PO ({seller})",
+            description=(
+                f"Goods bought from {seller} without a purchase order are on "
+                f"the shelf (receipt {number}"
+                + (f", bill {bill_no}" if bill_no else "")
+                + f"). Book the bill against this receipt: {link}. It claims "
+                "no input tax credit."
+            ),
+            priority="P2",
+            category="Purchase",
+            store_id=grn.get("store_id"),
+            dedupe_ref=f"no_po_bill:{grn_id}",
+            assigned_to="ACCOUNTANT",
+            extra={"link": link, "payload": {"grn_id": grn_id, "grn_number": number}},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[VENDOR] no-PO bill task failed for %s: %s", grn_id, exc)
 
 
 async def _accept_grn_impl(grn_id: str, current_user: dict) -> dict:

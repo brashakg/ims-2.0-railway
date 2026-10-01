@@ -104,6 +104,22 @@ def normalize_bill_kind(value):
     raise ValueError("bill_kind must be GOODS or SERVICES")
 
 
+# Owner ruling D14 (2026-09-29): goods bought from a local / walk-in dealer
+# without a purchase order arrive on a "Bought without PO" receipt, and a bill
+# booked against one claims NO input tax credit -- whatever the client sent.
+# BOTH bill doors (purchase_invoices.create_purchase_invoice and
+# vendors.create_vendor_bill) stamp itc_eligible through here, so every ITC
+# reader (the register, /gst/summary, GSTR-3B Table 4 -- all skip
+# itc_eligible False) leaves it out.
+GRN_SUBTYPE_NO_PO = "NO_PO"
+
+
+def itc_eligible(receipt: Optional[dict], requested=True) -> bool:
+    """The itc_eligible a bill against ``receipt`` (its GRN doc, or None) is
+    stored with."""
+    return bool(requested) and (receipt or {}).get("grn_subtype") != GRN_SUBTYPE_NO_PO
+
+
 def _f(v) -> float:
     """Coerce anything to a float, defaulting to 0.0."""
     try:
