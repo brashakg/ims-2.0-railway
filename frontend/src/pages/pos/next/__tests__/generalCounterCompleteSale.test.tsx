@@ -344,6 +344,8 @@ describe("F46: the counter's tiles and cart use this shop's sellable count", () 
     renderCounter();
 
     expect(useSellableStock).toHaveBeenCalledWith('BV-BOK-01', productRows);
+    // ONE read for the grid and one for the cart, never one per tile.
+    for (const [, rows] of useSellableStock.mock.calls) expect([productRows, []]).toContainEqual(rows);
     const gold = screen.getByText('Gold').closest('button') as HTMLButtonElement;
     const black = screen.getByText('Black').closest('button') as HTMLButtonElement;
     expect(gold.textContent).toMatch(/3 in stock/);

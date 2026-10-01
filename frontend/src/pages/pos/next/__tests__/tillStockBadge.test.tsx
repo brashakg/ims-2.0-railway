@@ -123,6 +123,9 @@ describe('the till strip', () => {
 
     await waitFor(() => expect(screen.getByText('8 in stock')).toBeTruthy());
     expect(getSellable).toHaveBeenCalledWith(['FR-BLACK', 'FR-HAVANA'], ['FRAME', 'FRAME']);
+    // ONE read for the whole strip, never one per tile: each read is a guard
+    // run per row on the server, repeated every 30 s and after every sale.
+    expect(getSellable).toHaveBeenCalledTimes(1);
     const havana = screen.getByText('Havana').closest('button') as HTMLButtonElement;
     const black = screen.getByText('Black').closest('button') as HTMLButtonElement;
     expect(havana.textContent).toMatch(/Out of stock/);
