@@ -782,6 +782,53 @@ def test_a_door_refusal_on_a_later_typed_in_line_creates_no_product(monkeypatch)
     ]
 
 
+_VOGUE = {"category": "FRAME", "brand": "Vogue", "model": "VO5286",
+          "colour": "W44", "size": "52", "mrp": 5000}
+
+
+def _real_spine(monkeypatch):
+    """The REAL product repository over a strict fake collection: the spine
+    the product door writes a provisional product into."""
+    from database.repositories.product_repository import ProductRepository
+
+    spine = ProductRepository(StrictCollection("products"))
+    monkeypatch.setattr(v, "get_product_repository", lambda: spine)
+    monkeypatch.setattr(v, "_get_db", lambda: None)
+    return spine
+
+
+@pytest.mark.parametrize(
+    "status", ["SENT", "ACKNOWLEDGED", "PARTIALLY_RECEIVED", "RECEIVED", "CANCELLED"]
+)
+def test_a_refused_edit_of_a_sent_order_creates_no_typed_in_product(monkeypatch, status):
+    """Rules lens r6: moving the not-a-draft refusal after the line pricing
+    left a provisional Vogue (and its product.created row) behind a 400, and no
+    test saw it -- the status test above runs with no product repository and
+    no typed-in line."""
+    repo, audit = _wire(monkeypatch, _po(status=status))
+    spine = _real_spine(monkeypatch)
+    body = _edit_body([{"new_product": dict(_VOGUE), "quantity": 1, "unit_price": 2000}])
+    with pytest.raises(HTTPException) as e:
+        _run(v.update_po("PO1", body, _user()))
+    assert e.value.status_code == 400
+    assert spine.collection.docs == [], "a refused edit leaves no provisional product"
+    assert audit.rows == [] and repo.updates == []
+
+
+def test_the_same_typed_in_edit_on_a_draft_makes_the_product(monkeypatch):
+    """The control for the test above: the same body on a DRAFT does reach the
+    real spine, once, under the id the saved line carries."""
+    repo, audit = _wire(monkeypatch, _po())
+    spine = _real_spine(monkeypatch)
+    body = _edit_body([{"new_product": dict(_VOGUE), "quantity": 1, "unit_price": 2000}])
+    _run(v.update_po("PO1", body, _user()))
+    [made] = spine.collection.docs
+    assert made["provisional"] is True and made["is_active"] is False
+    [line] = repo.pos["PO1"]["items"]
+    assert line["product_id"] == made["product_id"] and line["sku"] == made["sku"]
+    assert [r["action"] for r in audit.rows].count("product.created") == 1
+
+
 def test_two_line_cancels_at_once_never_lose_one(monkeypatch):
     def colleague_cancels_p1(repo):  # a finished line cancel, by someone else
         items = copy.deepcopy(repo.collection.docs[0]["items"])
