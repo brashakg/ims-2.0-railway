@@ -1354,6 +1354,20 @@ async def create_purchase_invoice(
     # single-GRN mirror of the DC path's mixed_vendors 409. DC-consolidated
     # invoices validate each linked DC separately below (via _load_linked_dcs),
     # so the single-GRN guard skips them.
+    #
+    # A bill is EITHER one goods receipt OR a set of Delivery Challans, never
+    # both: with both named, the receipt was never read -- not checked
+    # (ACCEPTED, vendor, over-billing) and not seen by the no-credit rule
+    # below, so a "Bought without PO" receipt booked full ITC (D14). No screen
+    # sends both (the DC draft carries no grn_id).
+    if body.grn_id and body.linked_dc_ids:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "A bill links one goods receipt or a set of Delivery "
+                "Challans, not both - book them as separate bills."
+            ),
+        )
     grn_doc = None
     if body.grn_id and not body.linked_dc_ids:
         grn_doc = _load_standard_grn(body.grn_id, expected_vendor_id=body.vendor_id)

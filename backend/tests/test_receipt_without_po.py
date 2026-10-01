@@ -534,6 +534,32 @@ def test_d14_header_only_bill_door_claims_no_itc_either(world):
     assert float(summary.get("gst_input_credit") or 0) == 0.0
 
 
+def test_d14_naming_a_challan_too_cannot_smuggle_the_credit_back(world):
+    """Panel probe: grn_id = a no-PO receipt PLUS linked_dc_ids = an unrelated
+    open challan of the same dealer and shop. The receipt was never read on
+    that path, so the bill stored itc_eligible True and every ITC reader
+    counted 310. A bill is one receipt or a set of challans, never both."""
+    from fastapi import HTTPException
+
+    db = world["db"]
+    _seed_receipt(db, grn_id="GRN-NOPO-0101", subtype="NO_PO")
+    _seed_receipt(
+        db,
+        grn_id="GRN-DC-0102",
+        subtype="DELIVERY_CHALLAN",
+        dc_number="DC-0102",
+        dc_matched=False,
+    )
+    body = _invoice_body("GRN-NOPO-0101", "CASH-101")
+    body.linked_dc_ids = ["GRN-DC-0102"]
+    with pytest.raises(HTTPException) as refused:
+        _run(pi.create_purchase_invoice(body, current_user=ACCOUNTANT))
+    assert refused.value.status_code == 422
+    assert db.vendor_bills.count_documents({}) == 0
+    assert db.grns.find_one({"grn_id": "GRN-DC-0102"})["dc_matched"] is False
+    assert _itc_everywhere() == (0.0, 0.0, 0.0)
+
+
 # ===========================================================================
 # 4. Seen for what it is: receipts list + Movements
 # ===========================================================================
