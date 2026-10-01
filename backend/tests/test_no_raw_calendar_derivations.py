@@ -76,7 +76,7 @@ _PATTERN = re.compile(
 )
 
 # A line that already goes through ist.py has made its choice of frame.
-_ALREADY_IST = ("ist_date_str(", "ist_day_start_utc(", "ist_month_window_utc(", "now_ist")
+_ALREADY_IST = ("ist_date_str(", "ist_date_str_from_stored(", "ist_day_start_utc(", "ist_month_window_utc(", "now_ist")
 
 _SKIP_FILES = {"seed_data_OLD.py"}
 _SKIP_DIRS = {"tests", "__pycache__", ".git", "node_modules", ".venv"}
