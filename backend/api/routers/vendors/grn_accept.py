@@ -77,6 +77,29 @@ async def accept_grn(
     return result
 
 
+def _raise_book_bill_task(grn_id, store_id, title, description, payload):
+    """THE "book the bill for this receipt" task: one per receipt, to
+    accounts, P2 Purchase, opening the booking screen on it. Express receive
+    and a "Bought without PO" accept both raise it here, so who books and
+    where the link points is said once. (The dedupe key keeps the name the
+    express receive gave it first.) Returns the task, or None."""
+    from ...services.task_triggers import create_system_task
+    from ...dependencies import get_task_repository
+
+    link = f"/purchase/invoices/book?grn_id={grn_id}"
+    return create_system_task(
+        get_task_repository(),
+        title=title,
+        description=f"{description} Book it here: {link}",
+        priority="P2",
+        category="Purchase",
+        store_id=store_id,
+        dedupe_ref=f"express_invoice:{grn_id}",
+        assigned_to="ACCOUNTANT",
+        extra={"link": link, "payload": {"grn_id": grn_id, **payload}},
+    )
+
+
 def _send_no_po_bill_to_accounts(grn_id: str, result: dict) -> None:
     """D14: goods bought without a PO have no order behind them, so nothing
     else tells accounts a bill is waiting. Once the receipt is fully on the
@@ -88,30 +111,19 @@ def _send_no_po_bill_to_accounts(grn_id: str, result: dict) -> None:
         grn = get_grn_repository().find_by_id(grn_id) or {}
         if grn.get("grn_subtype") != GRN_SUBTYPE_NO_PO:
             return
-        from ...services.task_triggers import create_system_task
-        from ...dependencies import get_task_repository
-
         _enrich_grn_names([grn])
         number = grn.get("grn_number") or grn_id
         seller = grn.get("vendor_name") or grn.get("vendor_id") or "the dealer"
         bill_no = grn.get("vendor_invoice_no")
-        link = f"/purchase/invoices/book?grn_id={grn_id}"
-        create_system_task(
-            get_task_repository(),
-            title=f"Book the bill for {number} - bought without PO ({seller})",
-            description=(
-                f"Goods bought from {seller} without a purchase order are on "
-                f"the shelf (receipt {number}"
-                + (f", bill {bill_no}" if bill_no else "")
-                + f"). Book the bill against this receipt: {link}. It claims "
-                "no input tax credit."
-            ),
-            priority="P2",
-            category="Purchase",
-            store_id=grn.get("store_id"),
-            dedupe_ref=f"no_po_bill:{grn_id}",
-            assigned_to="ACCOUNTANT",
-            extra={"link": link, "payload": {"grn_id": grn_id, "grn_number": number}},
+        _raise_book_bill_task(
+            grn_id,
+            grn.get("store_id"),
+            f"Book the bill for {number} - bought without PO ({seller})",
+            f"Goods bought from {seller} without a purchase order are on the "
+            f"shelf (receipt {number}" + (f", bill {bill_no}" if bill_no else "")
+            + "). Book the bill against this receipt - it claims no input tax "
+            "credit.",
+            {"grn_number": number},
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[VENDOR] no-PO bill task failed for %s: %s", grn_id, exc)

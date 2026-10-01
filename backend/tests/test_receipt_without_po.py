@@ -444,6 +444,22 @@ def test_c7_accept_sends_the_bill_to_accounts(world):
     assert any(
         t.get("assigned_to") in ("ACCOUNTANT", ACCOUNTANT["user_id"]) for t in tasks
     ), tasks
+    assert {t.get("link") for t in tasks} == {f"/purchase/invoices/book?grn_id={grn_id}"}
+
+
+def test_c7_one_book_the_bill_task_for_every_receipt():
+    """Express receive and a no-PO accept raise the same accounts task; it is
+    built in ONE place (grn_accept._raise_book_bill_task), so who books and
+    where the link points cannot drift between the two."""
+    from pathlib import Path
+
+    pkg = Path(vd.__file__).parent
+    hits = [
+        f.name
+        for f in pkg.glob("*.py")
+        for _ in range(f.read_text(encoding="utf-8").count("/purchase/invoices/book?grn_id="))
+    ]
+    assert hits == ["grn_accept.py"], hits
 
 
 # ===========================================================================
