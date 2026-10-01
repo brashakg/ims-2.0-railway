@@ -95,7 +95,10 @@ def apply(db, rows) -> Dict[str, int]:
         # list) cannot take a dotted $set: set the whole dict instead, guarded
         # so a real dict is never replaced.
         whole = db["products"].update_one(
-            {"product_id": row["product_id"], LEVELS_FIELD: {"$not": {"$type": "object"}}},
+            {"product_id": row["product_id"], "$or": [
+                {LEVELS_FIELD: {"$not": {"$type": "object"}}},
+                {LEVELS_FIELD: {"$type": "array"}},  # $type matches any element
+            ]},
             {"$set": {LEVELS_FIELD: dict(row["levels"])}},
         )
         if whole.modified_count:

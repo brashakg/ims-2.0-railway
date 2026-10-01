@@ -193,7 +193,7 @@ def test_put_null_clears_and_integers_set(world):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("junk", ["oops", ["a"], 5, None])
+@pytest.mark.parametrize("junk", ["oops", ["a"], 5, None, [{"a": 1}], [], "x"])
 def test_put_sets_a_level_on_a_doc_whose_levels_are_not_an_object(world, junk):
     world.products.update_one({"product_id": "P-FRAME"}, {"$set": {"reorder_levels": junk}})
     res = _set_level(_ADMIN, "P-FRAME", DHN, 4)
@@ -204,7 +204,7 @@ def test_put_sets_a_level_on_a_doc_whose_levels_are_not_an_object(world, junk):
     assert _levels_of(world, "P-FRAME") == {DHN: 4, BOK: 6}
 
 
-@pytest.mark.parametrize("junk", ["oops", ["a"]])
+@pytest.mark.parametrize("junk", ["oops", ["a"], [{"a": 1}]])
 def test_put_clear_on_a_non_object_levels_doc_is_a_quiet_no_op(world, junk):
     world.products.update_one({"product_id": "P-FRAME"}, {"$set": {"reorder_levels": junk}})
     assert _set_level(_ADMIN, "P-FRAME", DHN, None).status_code == 200
@@ -253,7 +253,7 @@ def test_migration_plan_and_apply_survive_every_junk_value():
     assert _levels_of(db, "GOOD") == {DHN: 3}
 
 
-@pytest.mark.parametrize("junk", ["oops", ["a"], 5])
+@pytest.mark.parametrize("junk", ["oops", ["a"], 5, [{"a": 1}], [], "x"])
 def test_migration_apply_survives_a_levels_field_that_is_not_an_object(junk):
     mod = _script()
     import mongomock

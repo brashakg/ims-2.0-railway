@@ -596,7 +596,12 @@ export function useQuickAddForm() {
               ? { discount_category: payload.discount_category }
               : {}),
           });
-          if (canSetReorderLevel) await saveShopLevel(editMode.id);
+          // Only a level the user changed: an untouched one sends nothing (it
+          // could clear an unset level or overwrite a newer save by someone else).
+          const loadedLevel = typedLevel(levelText(editLevels?.[reorderShop]));
+          if (canSetReorderLevel && typedLevel(reorderLevel) !== loadedLevel) {
+            await saveShopLevel(editMode.id);
+          }
           toast.success(
             editMode.sku ? `Updated ${editMode.sku} — same SKU, no new product.` : 'Product updated.'
           );
@@ -658,7 +663,7 @@ export function useQuickAddForm() {
     },
     [
       currentValues, toast, resetForm, navigate, variantCtx, startNextVariant,
-      editMode, reorderLevel, reorderBadInput, canSetReorderLevel, reorderShop,
+      editMode, editLevels, reorderLevel, reorderBadInput, canSetReorderLevel, reorderShop,
     ]
   );
 

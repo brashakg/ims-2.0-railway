@@ -6,7 +6,7 @@
 // level or clear it; the write is for this shop only
 // (PUT /inventory/reorder-levels/{product_id}).
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useToast } from '../../context/ToastContext';
 import { reorderApi } from '../../services/api/inventory';
 import { typedLevel, isLevelInputValid, isBadInput, LEVEL_INPUT_ERROR } from '../../utils/reorderLevel';
@@ -28,6 +28,11 @@ export function ShopReorderLevel({
   const [draft, setDraft] = useState<string | null>(null); // null = not editing
   const [saving, setSaving] = useState(false);
   const [badInput, setBadInput] = useState(false); // malformed text reads as ''
+  // A typed value belongs to the shop it was typed for: never carry it over.
+  useEffect(() => {
+    setDraft(null);
+    setBadInput(false);
+  }, [storeId]);
   const shown = level == null ? 'not set' : String(level);
 
   if (!canEdit) {
@@ -57,6 +62,10 @@ export function ShopReorderLevel({
       return;
     }
     const next = typedLevel(draft);
+    if (next === null && level == null) {
+      setDraft(null); // blank on a shop with no level: nothing to change
+      return;
+    }
     setSaving(true);
     try {
       await reorderApi.setShopLevel(productId, storeId, next);

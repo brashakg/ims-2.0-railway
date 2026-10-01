@@ -377,7 +377,14 @@ async def set_reorder_level(
         # cannot take a dotted $set: set the whole dict first, guarded so a real
         # dict is never replaced; otherwise the dotted path.
         res = coll.update_one(
-            {"product_id": product_id, LEVELS_FIELD: {"$not": {"$type": "object"}}},
+            {
+                "product_id": product_id,
+                "$or": [
+                    {LEVELS_FIELD: {"$not": {"$type": "object"}}},
+                    # $type matches an array that merely contains an object
+                    {LEVELS_FIELD: {"$type": "array"}},
+                ],
+            },
             {"$set": {LEVELS_FIELD: {store: level}}},
         )
         if not res.matched_count:

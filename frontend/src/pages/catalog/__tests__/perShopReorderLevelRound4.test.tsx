@@ -151,4 +151,22 @@ describe('review round 4 - quick add reorder level', () => {
     expect(putsToLevels()).toEqual([]);
     expect(toast.warning).not.toHaveBeenCalled();
   });
+
+  it('R5-2. an edit that leaves the level untouched sends no level PUT', async () => {
+    const user = userEvent.setup();
+    renderPage('/catalog/add?edit=P-SRC');
+    await waitFor(() => expect(shopReorderInput().value).toBe('2'));
+    await user.click(await screen.findByRole('button', { name: /Save changes/ }));
+    await waitFor(() => expect(productSpies.updateProduct).toHaveBeenCalled());
+    expect(putsToLevels()).toEqual([]);
+  });
+
+  it('R5-2. a changed level in edit mode is sent', async () => {
+    const user = userEvent.setup();
+    renderPage('/catalog/add?edit=P-SRC');
+    await waitFor(() => expect(shopReorderInput().value).toBe('2'));
+    fill(shopReorderInput(), '6');
+    await user.click(await screen.findByRole('button', { name: /Save changes/ }));
+    await waitFor(() => expect(putsToLevels().length).toBe(1));
+  });
 });
