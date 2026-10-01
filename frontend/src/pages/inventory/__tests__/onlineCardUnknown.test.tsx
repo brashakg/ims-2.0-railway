@@ -15,7 +15,7 @@ vi.stubGlobal('requestIdleCallback', () => 0);
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
-let onlineStatus: Record<string, { online: boolean | null; online_stock: null }> = {};
+let onlineStatus: Record<string, { online: boolean | null; online_stock: null; shares_item?: boolean }> = {};
 
 vi.mock('../../../context/AuthContext', () => ({
   useAuth: () => ({
@@ -67,5 +67,20 @@ describe('the Inventory Online card', () => {
     onlineStatus = { 'SKU-1': { online: false, online_stock: null } };
     renderLayout();
     expect(screen.getByText(/none synced online/i)).toBeInTheDocument();
+  });
+
+  // Round 21: a shared-item SKU is live. Count only `online` -> 0 / unknown
+  // tile -> fails; drop the shares_item guard in isOnlineUnknown -> fails.
+  it('counts a shared-item SKU as online and does not say it could not read', () => {
+    onlineStatus = { 'SKU-1': { online: null, online_stock: null, shares_item: true } };
+    renderLayout();
+    expect(screen.queryByText(/could not read the website/i)).toBeNull();
+    expect(screen.getByText(/listed in Shopify/i).previousElementSibling).toHaveTextContent('1');
+  });
+
+  it('still says could not read for a genuine null without shares_item', () => {
+    onlineStatus = { 'SKU-1': { online: null, online_stock: null, shares_item: false } };
+    renderLayout();
+    expect(screen.getByText(/could not read the website/i)).toBeInTheDocument();
   });
 });

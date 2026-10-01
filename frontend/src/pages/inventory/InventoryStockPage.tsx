@@ -41,7 +41,7 @@ import type { DisplayFixture, } from '../../services/api/displayFixtures';
 import type { DisplayPlacement } from '../../services/api/displayPlacements';
 import { BarcodeManagementModal } from '../../components/inventory/BarcodeManagementModal';
 import { REORDER_LEVEL_ROLES } from './inventoryRoles';
-import { SHARES_ITEM_LABEL } from './sharedItem';
+import { SHARES_ITEM_LABEL, isOnlineRow, isOnlineUnknown } from './sharedItem';
 import { ShopReorderLevel } from './ShopReorderLevel';
 import { UnitLabelsModal } from '../../components/labels/UnitLabelsModal';
 import { Pagination } from '../../components/common/Pagination';
@@ -156,9 +156,8 @@ export function InventoryStockPage() {
     const o = getOnline(item);
     // A live SKU that shares its Shopify item is online (the listing is
     // live), so it stays in the Online filter; it has no Offline leg.
-    const shared = !!o?.shares_item;
-    const unknown = !!o && o.online === null && !shared;
-    const isOnline = !!o?.online || shared;
+    const unknown = isOnlineUnknown(o);
+    const isOnline = isOnlineRow(o);
     const matchesAvailability =
       availabilityFilter === 'all' ? true : unknown ? false : availabilityFilter === 'online' ? isOnline : !isOnline;
 
