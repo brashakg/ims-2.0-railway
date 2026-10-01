@@ -27,7 +27,7 @@ from .numbering import (
     compute_po_receipt_state,
     grn_number_pending,
 )
-from .grn_create import _number_stranded_receipts
+from .grn import _number_stranded_receipts
 from .grn_accept_lock import (
     _GRN_MINT_DUPLICATE,
     _advance_grn_terminal_status,

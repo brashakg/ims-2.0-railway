@@ -225,7 +225,7 @@ from datetime import datetime, timedelta  # noqa: E402
 
 import mongomock  # noqa: E402
 
-from api.routers.vendors.grn_create import _number_stranded_receipts  # noqa: E402
+from api.routers.vendors.grn import _number_stranded_receipts, list_grns  # noqa: E402
 from database.repositories.vendor_repository import GRNRepository  # noqa: E402
 
 
@@ -342,3 +342,39 @@ def test_the_healer_never_overwrites_the_number_its_own_request_wrote(monkeypatc
     monkeypatch.setattr(v, "generate_grn_number", _mint)
     _number_stranded_receipts(GRNRepository(db.grns))
     assert db.grns.find_one({"grn_id": "G-SLOW"})["grn_number"] == "RCPT/LIVE/0007"
+
+
+# ---------------------------------------------------------------------------
+# Verifier round 6: the pending receipts panel reads only the list
+# ---------------------------------------------------------------------------
+
+
+def _list(status="PENDING"):
+    return asyncio.run(
+        list_grns(
+            store_id=None, status=status, po_id=None, grn_subtype=None,
+            dc_matched=None, vendor_id=None, date_from=None, date_to=None,
+            skip=0, limit=50, current_user=_user(),
+        )
+    )
+
+
+def test_the_pending_panel_never_names_a_placeholder(monkeypatch):
+    """A worker died between the insert and the number and nothing else was
+    created or accepted since (one quiet shop). The panel's only source is
+    the list: it printed 'PENDING/G-DEAD' as the receipt number, the void
+    confirm read 'Void PENDING/G-DEAD?' and the accept toast 'GRN
+    PENDING/G-DEAD accepted'. The list numbers a stranded row itself; a row
+    its own request is still numbering is left out until it has a number."""
+    db = mongomock.MongoClient().db
+    _wire(monkeypatch, GRNRepository(db.grns))
+    _counting_minter(monkeypatch)
+    _stranded(db, "G-DEAD", 30)
+    _stranded(db, "G-FRESH", 0)
+
+    rows = _list()["grns"]
+
+    assert [(r["grn_id"], r["grn_number"]) for r in rows] == [
+        ("G-DEAD", "RCPT/BV-TEST-01/26-27/0001")
+    ]
+    assert db.grns.find_one({"grn_id": "G-DEAD"})["grn_number"] == "RCPT/BV-TEST-01/26-27/0001"
