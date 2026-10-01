@@ -22,10 +22,18 @@ const routeSrc = readFileSync(
 
 /** Every <Route> in customerRoutes.tsx as { path, roles }, read out of the
  *  source rather than a hand-kept list — a route added without a nav row must
- *  show up here on its own. */
+ *  show up here on its own.
+ *
+ *  A path is paired only with an allowedRoles that comes BEFORE the next
+ *  path= (the tempered `(?:(?!path=")[\s\S])*?`). A section nested under a
+ *  layout route (/customers/loyalty/tiers) carries no gate of its own — the
+ *  layout route's ProtectedRoute wraps the Outlet — and is reached from the
+ *  layout's section nav, never the menu; without the tempering, its bare
+ *  segment ("tiers") would be paired with the NEXT route's roles and demanded
+ *  a nav row of its own. */
 function declaredRoutes(): { path: string; roles: string[] }[] {
   const out: { path: string; roles: string[] }[] = [];
-  const re = /path="([^"]+)"[\s\S]*?allowedRoles=\{\[([\s\S]*?)\]\}/g;
+  const re = /path="([^"]+)"(?:(?!path=")[\s\S])*?allowedRoles=\{\[([\s\S]*?)\]\}/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(routeSrc)) !== null) {
     const roles = m[2]
