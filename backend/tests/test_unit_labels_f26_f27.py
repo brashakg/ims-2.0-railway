@@ -381,14 +381,16 @@ def test_units_on_the_shelf_survive_the_read_cap(world, monkeypatch):
     for i in range(3):  # three boxes sold long ago...
         world["unit"](f"BV--SOLD000{i}", status="SOLD", created=datetime(2026, 9, 1, 10, i))
     world["unit"]("BV--SHELF001", created=datetime(2026, 9, 20, 10, 0))  # ...one still here
-    world["unit"]("BV--RESV0001", status="RESERVED", created=datetime(2026, 9, 21, 10, 0))
+    # ...and one reserved for an order, older than every sale: read as history
+    # (newest first) the cap would drop it.
+    world["unit"]("BV--RESV0001", status="RESERVED", created=datetime(2026, 8, 31, 10, 0))
     units = world["http"].get(
         "/inventory/units", params={"product_id": world["pid"]}
     ).json()["units"]
     # The cap trims history only: both pieces in the shop, then the newest sale.
     assert [(u["barcode"], u["in_shop"]) for u in units] == [
-        ("BV--SHELF001", True),
         ("BV--RESV0001", True),
+        ("BV--SHELF001", True),
         ("BV--SOLD0002", False),
     ]
 
