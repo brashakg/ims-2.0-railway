@@ -259,22 +259,29 @@ def _coerce_dt(value: Any) -> Optional[datetime]:
     return None
 
 
-def _on_hand_by_product_store(db, product_ids: List[str]) -> Dict[Tuple[str, str], int]:
+def _on_hand_by_product_store(
+    db, product_ids: Optional[List[str]], store_id: Optional[str] = None
+) -> Dict[Tuple[str, str], int]:
     """Per-(product, store) on-hand from the serialized `stock_units` collection,
     using the SAME available-status definition as inventory._on_hand_by_product
     (the canonical on-hand allowlist + the explicit non-sellable exclusion list).
-    Fail-soft -> {}."""
+    `product_ids` None = every product (an empty list = nothing);
+    `store_id` None = every shop. Fail-soft -> {}."""
     out: Dict[Tuple[str, str], int] = {}
-    if db is None or not product_ids:
+    if db is None or (product_ids is not None and not product_ids):
         return out
     try:
         from .item_events import is_on_hand
     except Exception:  # noqa: BLE001
         return {}
     try:
+        flt: Dict[str, Any] = {}
+        if product_ids is not None:
+            flt["product_id"] = {"$in": list(product_ids)}
+        if store_id:
+            flt["store_id"] = store_id
         cur = db.get_collection("stock_units").find(
-            {"product_id": {"$in": list(product_ids)}},
-            {"product_id": 1, "store_id": 1, "status": 1, "quantity": 1})
+            flt, {"product_id": 1, "store_id": 1, "status": 1, "quantity": 1})
         rows = list(cur)
     except Exception:  # noqa: BLE001
         return {}

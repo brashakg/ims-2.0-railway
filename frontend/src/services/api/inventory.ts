@@ -442,7 +442,47 @@ export const inventoryApi = {
     const response = await api.post(`/labels/quarantine/${stockId}`);
     return response.data as QuarantineLabel;
   },
+
+  // F27: every serialised unit of one product -- or one goods receipt -- at a shop.
+  getUnits: async (params: { store_id?: string; product_id?: string; grn_id?: string }) => {
+    const response = await api.get('/inventory/units', { params });
+    return response.data as { units: StockUnit[]; total: number };
+  },
+
+  // F26: record that these units' labels went to the print dialog.
+  markBarcodePrinted: async (stockIds: string[]) => {
+    const response = await api.post('/inventory/units/barcode-printed', { stock_ids: stockIds });
+    return response.data as { updated: number; stock_ids: string[] };
+  },
 };
+
+/** One physical piece on the shelf (GET /inventory/units). cost_price only
+ *  reaches roles that see cost. */
+export interface StockUnit {
+  stock_id: string;
+  product_id: string;
+  barcode: string;
+  status: string;
+  /** Standing in the shop (on the shelf or reserved): the server's one rule,
+   *  the same the ledger's "N units" counts. Only these get a label. */
+  in_shop: boolean;
+  grn_number: string;
+  source: string;
+  /** Set when a transfer re-homed the unit here (source TRANSFER). */
+  transfer_number?: string;
+  from_store_id?: string;
+  /** IST day it arrived at THIS shop (a transfer's receipt day, else minting). */
+  received_on: string;
+  barcode_printed: boolean;
+  location_code: string;
+  name: string;
+  brand: string;
+  model: string;
+  colour: string;
+  size: string;
+  mrp: number | null;
+  cost_price?: number | null;
+}
 
 /** GET /inventory/sellable (F46): the till's per-product sellable counts.
     `store_id` is the sign-in token's store, null when the token has none. */
@@ -1005,21 +1045,27 @@ export interface VarianceLine {
 // ============================================================================
 
 export const reorderApi = {
+  /** ONE shop's reorder level (owner ruling D12: levels are per shop).
+   *  null clears it = not set = no low-stock alert. */
+  setShopLevel: async (productId: string, storeId: string, level: number | null) => {
+    const response = await api.put(
+      `/inventory/reorder-levels/${encodeURIComponent(productId)}`,
+      { store_id: storeId, level },
+    );
+    return response.data as { product_id: string; store_id: string; level: number | null };
+  },
+
   updateReorderSettings: async (
     productId: string,
     settings: {
-      reorder_point: number;
       reorder_quantity: number;
       max_stock: number;
       lead_time_days: number;
     }
   ) => {
-    // Persist reorder settings via the SINGLE validated product-update path
-    // (`PUT /products/{id}` in routers/products.py). Previously this hit the
-    // now-retired, unvalidated `PUT /admin/products/{id}` -- consolidated so
-    // there is exactly one validated writer to the `products` collection.
-    // reorder_point / reorder_quantity / max_stock / lead_time_days are
-    // explicit optional fields on the backend ProductUpdate schema.
+    // Persist the product's chain-wide reorder settings via the SINGLE
+    // validated product-update path (`PUT /products/{id}` in
+    // routers/products.py). The reorder LEVEL is per shop: setShopLevel.
     const response = await api.put(`/products/${productId}`, settings);
     return response.data;
   },

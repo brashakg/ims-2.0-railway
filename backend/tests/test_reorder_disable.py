@@ -15,13 +15,13 @@ Covers the 2026-07-04 owner decision:
        - buy_desk.build_row: buy_signal is None (FE shows "-").
        - jarvis _compute_inventory_live: low-stock alert kept, reorder
          recommendation dropped.
-       - TASKMASTER _draft_reorders: no auto-draft PO for a disabled SKU.
+     (TASKMASTER's own draft-PO scan is deleted -- ORACLE is the one reorder
+     engine; see test_per_shop_reorder_levels.py.)
   4. catalog.py InventoryInput default + products.py ProductUpdate accepts -1.
 
 Run: JWT_SECRET_KEY=test python -m pytest backend/tests/test_reorder_disable.py -q
 """
 
-import asyncio
 import os
 import sys
 from datetime import datetime
@@ -132,6 +132,9 @@ class TestCreateDoorStamp:
 # ---------------------------------------------------------------------------
 
 
+SHOP = "BV-TEST-01"
+
+
 def _alert_product(reorder_quantity):
     return {
         "sku": "FR-X-1",
@@ -140,7 +143,7 @@ def _alert_product(reorder_quantity):
         "category": "FRAME",
         "stock_quantity": 2,
         "cost_price": 1000.0,
-        "reorder_point": 5,
+        "reorder_levels": {SHOP: 5},  # this shop's own level (owner D12)
         "reorder_quantity": reorder_quantity,
     }
 
@@ -154,6 +157,7 @@ class TestStockAlertGuard:
             now=datetime(2026, 7, 4),
             dead_days=90,
             lead_time_days=14,
+            store_id=SHOP,
         )
 
     def test_enabled_product_gets_reorder_alert(self):
@@ -213,59 +217,30 @@ class TestBuyDeskGuard:
 # ---------------------------------------------------------------------------
 
 
-class _FakeColl:
-    def __init__(self, docs):
-        self._docs = [dict(d) for d in docs]
-        self.inserted = []
-
-    def find(self, query=None, projection=None):
-        query = query or {}
-        out = []
-        for d in self._docs:
-            ok = True
-            for k, v in query.items():
-                if isinstance(v, dict) and "$in" in v:
-                    if d.get(k) not in v["$in"]:
-                        ok = False
-                elif d.get(k) != v:
-                    ok = False
-            if ok:
-                out.append(dict(d))
-        return _FakeCursor(out)
-
-    def find_one(self, query=None, projection=None):
-        res = list(self.find(query))
-        return res[0] if res else None
-
-    def insert_one(self, doc):
-        self.inserted.append(dict(doc))
-
-
-class _FakeCursor(list):
-    def limit(self, n):
-        return _FakeCursor(self[:n])
-
-
 class TestJarvisGuard:
     def test_disabled_product_alerted_but_not_recommended(self, monkeypatch):
+        import mongomock
+
         from api.routers import jarvis as jv
 
-        products = _FakeColl([
+        db = mongomock.MongoClient().db
+        db.products.insert_many([
             {  # low stock + auto-reorder DISABLED -> alert only
-                "sku": "S-OFF", "name": "Disabled", "is_active": True,
-                "stock_quantity": 2, "reorder_point": 5,
+                "product_id": "P-OFF", "sku": "S-OFF", "name": "Disabled",
+                "is_active": True, "reorder_levels": {SHOP: 5},
                 "reorder_quantity": -1, "offer_price": 100,
             },
             {  # low stock + ENABLED -> alert + recommendation
-                "sku": "S-ON", "name": "Enabled", "is_active": True,
-                "stock_quantity": 2, "reorder_point": 5,
+                "product_id": "P-ON", "sku": "S-ON", "name": "Enabled",
+                "is_active": True, "reorder_levels": {SHOP: 5},
                 "reorder_quantity": 30, "offer_price": 100,
             },
         ])
-        monkeypatch.setattr(
-            jv, "get_db_collection",
-            lambda name: products if name == "products" else None,
-        )
+        db.stock_units.insert_many([
+            {"product_id": pid, "store_id": SHOP, "status": "AVAILABLE", "quantity": 1}
+            for pid in ("P-OFF", "P-OFF", "P-ON", "P-ON")
+        ])
+        monkeypatch.setattr(jv, "get_db_collection", lambda name: db[name])
         out = jv.JarvisAnalyticsEngine._compute_inventory_live()
         assert out is not None
         rec_skus = [r["sku"] for r in out["reorder_recommendations"]]
@@ -273,63 +248,3 @@ class TestJarvisGuard:
         assert "S-ON" in rec_skus
         assert "S-OFF" not in rec_skus
         assert "S-OFF" in alert_skus  # the low-stock ALERT is kept
-
-
-# ---------------------------------------------------------------------------
-# 3d. TASKMASTER auto-draft PO
-# ---------------------------------------------------------------------------
-
-
-class _FakeDb:
-    def __init__(self, colls):
-        self._colls = colls
-
-    def get_collection(self, name):
-        return self._colls.get(name)
-
-
-class TestTaskmasterGuard:
-    def _run(self, stock_docs, product_docs):
-        from agents.implementations.taskmaster import TaskmasterAgent
-
-        stock = _FakeColl(stock_docs)
-        pos = _FakeColl([])
-        products = _FakeColl(product_docs)
-        audit = _FakeColl([])
-        # The reorder scan matches $expr {quantity < reorder_point} -- the
-        # fake can't evaluate $expr, so pre-filter and serve everything.
-        stock.find = lambda q=None, p=None: _FakeCursor(
-            [dict(d) for d in stock_docs]
-        )
-        agent = TaskmasterAgent(db=_FakeDb({
-            "stock_units": stock,
-            "purchase_orders": pos,
-            "products": products,
-            "agent_audit_log": audit,
-        }))
-        actions = asyncio.run(agent._draft_reorders())
-        return actions, pos
-
-    def test_disabled_sku_never_drafted(self):
-        actions, pos = self._run(
-            stock_docs=[
-                {"sku": "SKU-OFF", "quantity": 1, "reorder_point": 10},
-                {"sku": "SKU-ON", "quantity": 1, "reorder_point": 10},
-            ],
-            product_docs=[
-                {"sku": "SKU-OFF", "reorder_quantity": -1},
-                {"sku": "SKU-ON", "reorder_quantity": 15},
-            ],
-        )
-        drafted = [a["sku"] for a in actions]
-        assert "SKU-ON" in drafted
-        assert "SKU-OFF" not in drafted
-        assert all(po["sku"] != "SKU-OFF" for po in pos.inserted)
-
-    def test_legacy_sku_without_master_row_still_drafts(self):
-        actions, _pos = self._run(
-            stock_docs=[{"sku": "SKU-LEGACY", "quantity": 1,
-                         "reorder_point": 10}],
-            product_docs=[],
-        )
-        assert [a["sku"] for a in actions] == ["SKU-LEGACY"]

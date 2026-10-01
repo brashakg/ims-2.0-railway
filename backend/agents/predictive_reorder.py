@@ -66,20 +66,23 @@ def recommended_qty(
     effective_rate: float,
     horizon_days: int,
     lead_time_days: int,
-    reorder_point: float = 0,
+    reorder_point: Optional[int] = None,
 ) -> int:
     """Units to order so stock covers (lead_time + horizon) days of burn.
 
     The target cover is generous on purpose: by the time the order lands
     (lead_time) the SKU should still hold a full horizon of cover. Never less
     than 1 (a flagged SKU always gets a non-zero suggestion) and never below
-    the reorder-point gap.
+    reorder_policy.top_up for the shop's level.
     """
     rate = max(0.0, float(effective_rate or 0))
     cover_days = max(1, int(lead_time_days) + int(horizon_days))
     target_cover = math.ceil(rate * cover_days)
     gap = target_cover - max(0.0, float(on_hand or 0))
-    rp_gap = float(reorder_point or 0) - max(0.0, float(on_hand or 0))
+    # The shop's level floors the order at the ONE top-up rule (None = not set).
+    from api.services.reorder_policy import top_up
+
+    rp_gap = float(top_up(reorder_point, on_hand))
     qty = max(gap, rp_gap, 1.0)
     return int(math.ceil(qty))
 

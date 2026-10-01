@@ -52,8 +52,9 @@ const POPUP = '[role="dialog"], div.fixed.inset-0';
 type Popup = {
   /** Route the trigger lives on. */
   path: string;
-  /** Accessible name of the button that opens it (never destructive). */
-  trigger: string;
+  /** Accessible name of the button that opens it (never destructive). A
+   *  RegExp only where the name carries a live count. */
+  trigger: string | RegExp;
   /** Test name, and the key KNOWN_BROKEN refers to. */
   name: string;
   /**
@@ -104,6 +105,11 @@ const POPUPS: ReadonlyArray<Popup> = [
   { path: '/inventory', trigger: 'Manage Barcode', name: 'inventory barcode' },
   { path: '/inventory', trigger: 'View Details', name: 'inventory stock-detail' },
   { path: '/inventory/audit', trigger: 'New stock count', name: 'inventory new-count' },
+  // F27: a ledger row's "N units" opens the units & labels dialog (a
+  // min-w-[560px] table in its own sideways scroller on a phone). A RegExp:
+  // the count moves as the suite sells seeded frames, and a "0 units" row
+  // would open an empty list with no table to measure.
+  { path: '/inventory/stock', trigger: /^[1-9]\d* units?$/, name: 'inventory units-labels' },
   // ── Purchase ─────────────────────────────────────────────────────────────
   { path: '/purchase', trigger: 'New PO', name: 'purchase new-po' },
   { path: '/purchase/suppliers', trigger: 'New supplier', name: 'purchase new-supplier' },
