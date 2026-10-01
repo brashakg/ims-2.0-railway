@@ -34,7 +34,11 @@ interface Product {
   // (legacy-enabled, nothing to show). <= 0 (the -1 sentinel) = the owner
   // explicitly DISABLED auto-reorder for this product.
   reorderQuantity: number | null;
+  // The server's verdict (reorder_policy.py, via /inventory/low-stock): the
+  // one reorder rule. Never re-decided here.
   autoReorderDisabled: boolean;
+  // Discontinued (is_active false): says WHY it is off, decides nothing.
+  discontinued: boolean;
   maxStock: number;
   leadTimeDays: number;
   averageSalesPerDay: number;
@@ -44,13 +48,16 @@ interface Product {
   unitCost?: number;
 }
 
-// Auto-reorder is OFF when the product master says so explicitly (value
-// present and <= 0, i.e. the -1 sentinel) or the low-stock feed flagged it.
+// Auto-reorder is OFF when the server's low-stock feed says so.
 const isAutoReorderOff = (p: Product) => p.autoReorderDisabled;
 
 // A row that auto-reorder can actually order: enabled AND a real qty >= 1.
-const hasOrderableQty = (p: Product) =>
+const hasOrderableQty = (p: Product): p is Product & { reorderQuantity: number } =>
   !isAutoReorderOff(p) && p.reorderQuantity != null && p.reorderQuantity >= 1;
+
+type LowStockRow = { _id: string; quantity: number; auto_reorder_disabled?: boolean };
+const lowStockRows = (data: unknown): LowStockRow[] =>
+  Array.isArray(data) ? data : (data as { items?: LowStockRow[] } | null)?.items ?? [];
 
 export function ReorderDashboard() {
   const { user } = useAuth();
@@ -81,8 +88,7 @@ export function ReorderDashboard() {
       ]);
 
       // getLowStock returns { items: [{ _id: productId, quantity, auto_reorder_disabled }] }
-      const lowStockItems: Array<{ _id: string; quantity: number; auto_reorder_disabled?: boolean }> =
-        Array.isArray(lowStockData) ? lowStockData : lowStockData?.items ?? [];
+      const lowStockItems = lowStockRows(lowStockData);
 
       // getStock returns { items: [...stock unit docs] }
       const stockUnits: Array<Record<string, any>> =
@@ -123,9 +129,6 @@ export function ReorderDashboard() {
           rawReorderQty == null || Number.isNaN(Number(rawReorderQty))
             ? null
             : Number(rawReorderQty);
-        const autoReorderDisabled =
-          (reorderQuantity != null && reorderQuantity <= 0) ||
-          item.auto_reorder_disabled === true;
 
         return {
           id: pid,
@@ -137,7 +140,8 @@ export function ReorderDashboard() {
           reservedStock,
           reorderPoint: Number(raw.reorder_point ?? raw.reorder_level ?? 10),
           reorderQuantity,
-          autoReorderDisabled,
+          autoReorderDisabled: item.auto_reorder_disabled === true,
+          discontinued: raw.is_active === false,
           maxStock: Number(raw.max_stock ?? raw.maximum_stock ?? 50),
           leadTimeDays: Number(raw.lead_time_days ?? raw.lead_time ?? 7),
           averageSalesPerDay: Number(raw.average_sales_per_day ?? raw.avg_daily_sales ?? 0),
@@ -165,14 +169,22 @@ export function ReorderDashboard() {
         lead_time_days: data.leadTimeDays,
       });
 
+      // Read the server's verdict back rather than re-deciding it here: a
+      // discontinued product stays off whatever quantity was saved. No answer
+      // keeps the last verdict.
+      const fresh = await inventoryApi.getLowStock(user?.activeStoreId ?? '').catch(() => null);
+      const verdict = lowStockRows(fresh).find(i => i._id === data.productId);
+
       // Update local state to reflect saved values
-      setProducts(products.map(p =>
+      setProducts(prev => prev.map(p =>
         p.id === data.productId
           ? {
               ...p,
               reorderPoint: data.reorderPoint,
               reorderQuantity: data.reorderQuantity,
-              autoReorderDisabled: data.reorderQuantity <= 0,
+              autoReorderDisabled: verdict
+                ? verdict.auto_reorder_disabled === true
+                : p.autoReorderDisabled,
               maxStock: data.maxStock,
               leadTimeDays: data.leadTimeDays,
             }
@@ -193,11 +205,16 @@ export function ReorderDashboard() {
 
     const selectedItems = products.filter(p => selectedProducts.has(p.id));
 
-    // NEVER order a product the owner explicitly opted out of (-1 sentinel).
+    // NEVER order a product the server says is off. A discontinued one stays
+    // off whatever its settings, so it is never told to enable it there.
     const disabledItems = selectedItems.filter(isAutoReorderOff);
-    if (disabledItems.length > 0) {
+    const discontinuedCount = disabledItems.filter(p => p.discontinued).length;
+    if (discontinuedCount > 0) {
+      toast.error(`${discontinuedCount} product(s) skipped - discontinued, not reordered.`);
+    }
+    if (disabledItems.length > discontinuedCount) {
       toast.error(
-        `${disabledItems.length} product(s) skipped - auto-reorder is turned off for them. ` +
+        `${disabledItems.length - discontinuedCount} product(s) skipped - auto-reorder is turned off for them. ` +
         `Enable it via the settings icon to order.`
       );
     }
@@ -541,12 +558,11 @@ export function ReorderDashboard() {
                       </td>
                       <td className="px-4 py-3 text-center">
                         {isAutoReorderOff(product) ? (
-                          // Owner explicitly disabled auto-reorder (-1 sentinel).
                           <span className="px-2 py-1 bg-gray-100 text-gray-500 text-xs font-medium rounded-full whitespace-nowrap">
-                            Auto-reorder off
+                            {product.discontinued ? 'Discontinued - not reordered' : 'Auto-reorder off'}
                           </span>
-                        ) : product.reorderQuantity == null ? (
-                          // Never configured - show an honest dash, not a fake 20.
+                        ) : !hasOrderableQty(product) ? (
+                          // Nothing to order - show an honest dash, not a fake 20.
                           <span className="text-gray-400">&mdash;</span>
                         ) : (
                           <>
