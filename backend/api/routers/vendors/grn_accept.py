@@ -20,7 +20,7 @@ from ._shared import (
     router,
 )
 from .gst import _promote_cost_from_rate
-from .po_detail import _as_read
+from .po_detail import _as_read, _qty
 from .numbering import (
     _cumulative_received_by_product,
     _grn_barcode,
@@ -142,7 +142,7 @@ async def _accept_grn_impl(grn_id: str, current_user: dict) -> dict:
         raise _grn_accept_conflict(grn_repo, grn_id)
 
     try:
-        _hold_order_open_for_receipt(po_repo, grn.get("po_id"))
+        _hold_order_open_for_receipt(po_repo, grn)
         return _accept_grn_claimed(
             grn_id,
             grn,
@@ -162,29 +162,55 @@ async def _accept_grn_impl(grn_id: str, current_user: dict) -> dict:
         raise
 
 
-def _hold_order_open_for_receipt(po_repo, po_id) -> None:
+def _hold_order_open_for_receipt(po_repo, grn) -> None:
     """Compare-and-set on the ORDER before a single unit is minted.
 
     A cancel looks for a receipt waiting to be accepted, then writes. A receipt
     logged in between slipped past that look and, once accepted, put stock on
-    the shelf of an order shown as Cancelled with nothing received. This
-    guarded write moves the order's write stamp only while it is not
-    CANCELLED: a cancel that read the order before it is refused by its own
-    compare-and-set (reload, and the receipt shows), and a cancel that landed
-    first refuses this accept -- no stock is minted against it."""
+    the shelf against units the order says were withdrawn. So the accept reads
+    the order, refuses when it was cancelled -- or when a product on this
+    receipt is now ordered in fewer units than the receipt was logged against
+    (a line cancel, or the rest of a part-received order cancelled) -- and then
+    moves the order's write stamp only while the order is still as it read it.
+    A cancel that read the order before is refused by its own compare-and-set
+    (reload, and the receipt shows); a cancel that landed first refuses this
+    accept -- no stock is minted against it."""
+    po_id = grn.get("po_id")
     if po_repo is None or not po_id:
         return
-    if po_repo.update_if(po_id, {"status": {"$ne": "CANCELLED"}}, {}):
-        return
-    po = po_repo.find_by_id(po_id)
-    if po and po.get("status") == "CANCELLED":
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "This order was cancelled - nothing can be received against it "
-                "any more. Void this receipt."
-            ),
-        )
+    for _attempt in range(3):
+        po = po_repo.find_by_id(po_id)
+        if not po:
+            return
+        if po.get("status") == "CANCELLED":
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This order was cancelled - nothing can be received against "
+                    "it any more. Void this receipt."
+                ),
+            )
+        ordered_now: dict = {}
+        for it in po.get("items") or []:
+            pid = it.get("product_id")
+            ordered_now[pid] = ordered_now.get(pid, 0) + _qty(it.get("quantity"))
+        for line in grn.get("items") or []:
+            was = line.get("ordered_qty")
+            if was is not None and ordered_now.get(line.get("product_id"), 0) < _qty(was):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Part of this order was cancelled after this delivery "
+                        "was logged, so the receipt no longer matches it. Void "
+                        "this receipt and log what arrived again."
+                    ),
+                )
+        if po_repo.update_if(po_id, _as_read(po), {}):
+            return
+    raise HTTPException(
+        status_code=409,
+        detail="This order kept changing while the delivery was being accepted - accept it again.",
+    )
 
 
 def _accept_grn_claimed(

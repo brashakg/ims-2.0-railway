@@ -873,8 +873,9 @@ def test_a_receipt_accepted_during_a_cancel_never_brings_the_cancelled_units_bac
     def manager_cancels_the_rest(_repo):
         _run(v.cancel_po("PO1", "vendor out of stock", _user(roles=("ADMIN",))))
 
-    # Read 1 prices the units; read 2 is the one the receipt math writes back.
-    repo = _wire_racing(monkeypatch, _po(status="SENT"), manager_cancels_the_rest, at=2)
+    # Read 1 is the accept's hold on the order, read 2 prices the units,
+    # read 3 is the one the receipt math writes back.
+    repo = _wire_racing(monkeypatch, _po(status="SENT"), manager_cancels_the_rest, at=3)
     grn = _grn(qty=2, po_id="PO1", store_id="S1")
     grn_repo = _AcceptedGrnRepo(grn)
     monkeypatch.setattr(v, "get_grn_repository", lambda: grn_repo)
@@ -902,7 +903,7 @@ def test_a_rejected_delivery_accepted_during_a_cancel_leaves_it_cancelled(monkey
     def manager_cancels(_repo):
         _run(v.cancel_po("PO1", "vendor sent the wrong model", _user(roles=("ADMIN",))))
 
-    repo = _wire_racing(monkeypatch, _po(status="SENT"), manager_cancels, at=2)
+    repo = _wire_racing(monkeypatch, _po(status="SENT"), manager_cancels, at=3)
     grn = _grn(qty=0, po_id="PO1", store_id="S1")
     grn_repo = _AcceptedGrnRepo(grn)
     monkeypatch.setattr(v, "get_grn_repository", lambda: grn_repo)
@@ -948,7 +949,7 @@ def test_a_cancel_that_read_the_order_before_an_accept_is_refused(monkeypatch):
     cancel working from the order it read before that is refused (reload, and
     the receipt shows) instead of cancelling under the delivery."""
     def accept_holds_the_order(repo):
-        v._hold_order_open_for_receipt(repo, "PO1")
+        v._hold_order_open_for_receipt(repo, {"po_id": "PO1"})
 
     repo = _wire_racing(monkeypatch, _po(status="SENT"), accept_holds_the_order)
     with pytest.raises(HTTPException) as e:
@@ -956,6 +957,89 @@ def test_a_cancel_that_read_the_order_before_an_accept_is_refused(monkeypatch):
     assert e.value.status_code == 409
     assert repo.race is None, "the accept never landed in the window"
     assert repo.collection.docs[0]["status"] == "SENT"
+
+
+def _receipt(pid, qty, ordered):
+    """A PENDING receipt as grn_create logs it: the order's quantity for the
+    product, read at logging time, stamped on the line."""
+    from test_grn_accept_atomic_claim import _grn
+
+    doc = _grn(po_id="PO1", store_id="S1")
+    doc["items"] = [{"product_id": pid, "accepted_qty": qty, "location_code": "A1",
+                     "ordered_qty": ordered}]
+    return doc
+
+
+def test_a_receipt_logged_during_a_line_cancel_cannot_be_accepted(monkeypatch):
+    """Panel LOW-MEDIUM: the hold covered only a whole CANCELLED order. A
+    receipt for the Ray-Bans logged (ordered 3 stamped) between the line
+    cancel's box check and its write was accepted after it: 3 units on the
+    shelf against a line the timeline says was withdrawn, the receipt saying
+    3 of 3 exactly. The accept now refuses a receipt whose product the order
+    has since cut; the uncut Carreras still receive."""
+    from test_grn_accept_atomic_claim import _StockRepo
+    from test_grn_accept_atomic_claim import _run as run_sync
+
+    repo, _ = _wire(monkeypatch, _po(status="SENT"))
+    _run(v.cancel_po_line("PO1", 1, _line_body(product_id="P2"), _user()))
+    stock = _StockRepo()
+    monkeypatch.setattr(v, "get_stock_repository", lambda: stock)
+    monkeypatch.setattr(v, "_get_db", lambda: None)
+    admin = _user(roles=("ADMIN",), uid="u-admin")
+
+    grn_repo = _AcceptedGrnRepo(_receipt("P2", 3, ordered=3))
+    monkeypatch.setattr(v, "get_grn_repository", lambda: grn_repo)
+    with pytest.raises(HTTPException) as e:
+        run_sync(v.accept_grn("GRN-1", admin))
+    assert e.value.status_code == 409
+    assert "Void this receipt" in e.value.detail
+    assert stock.rows == [], "no stock against a withdrawn line"
+    assert grn_repo.collection.doc["status"] == "PENDING"  # still voidable
+    p2 = repo.pos["PO1"]["items"][1]
+    assert (p2["quantity"], p2["received_qty"], p2["line_status"]) == (0, 0, "CANCELLED")
+
+    grn_repo = _AcceptedGrnRepo(_receipt("P1", 2, ordered=2))
+    monkeypatch.setattr(v, "get_grn_repository", lambda: grn_repo)
+    run_sync(v.accept_grn("GRN-1", admin))
+    assert {r["product_id"] for r in stock.rows} == {"P1"} and len(stock.rows) == 2
+
+
+def test_a_line_cancel_landing_inside_the_accepts_hold_still_refuses_it(monkeypatch):
+    """The hold's own window: the line cancel's write lands after the accept
+    read the order (still 3 Ray-Bans) and before its compare-and-set. The
+    stale read must not pass -- the hold re-reads, sees the cut, refuses."""
+    from test_grn_accept_atomic_claim import _StockRepo
+    from test_grn_accept_atomic_claim import _run as run_sync
+
+    def line_cancel_write_lands(repo):
+        items = copy.deepcopy(repo.collection.docs[0]["items"])
+        items[1].update(quantity=0, ordered_qty=0, cancelled_qty=3, line_status="CANCELLED")
+        repo.update("PO1", {"items": items})
+
+    repo = _wire_racing(monkeypatch, _po(status="SENT"), line_cancel_write_lands)
+    stock = _StockRepo()
+    monkeypatch.setattr(v, "get_grn_repository", lambda: _AcceptedGrnRepo(_receipt("P2", 3, 3)))
+    monkeypatch.setattr(v, "get_stock_repository", lambda: stock)
+    monkeypatch.setattr(v, "_get_db", lambda: None)
+    with pytest.raises(HTTPException) as e:
+        run_sync(v.accept_grn("GRN-1", _user(roles=("ADMIN",), uid="u-admin")))
+    assert e.value.status_code == 409
+    assert repo.race is None, "the cancel never landed in the window"
+    assert stock.rows == []
+
+
+def test_a_line_cancel_that_read_the_order_before_an_accept_is_refused(monkeypatch):
+    """The other order of events for a line: the accept holds the order first,
+    so the line cancel working from the order it read before is refused."""
+    def accept_holds_the_order(repo):
+        v._hold_order_open_for_receipt(repo, _receipt("P2", 3, ordered=3))
+
+    repo = _wire_racing(monkeypatch, _po(status="SENT"), accept_holds_the_order)
+    with pytest.raises(HTTPException) as e:
+        _run(v.cancel_po_line("PO1", 1, _line_body(product_id="P2"), _user()))
+    assert e.value.status_code == 409
+    assert repo.race is None, "the accept never landed in the window"
+    assert repo.collection.docs[0]["items"][1]["quantity"] == 3
 
 
 def test_the_accept_fallback_never_reopens_an_order_a_cancel_closed(monkeypatch):
@@ -976,7 +1060,7 @@ def test_the_accept_fallback_never_reopens_an_order_a_cancel_closed(monkeypatch)
         repo.update_if = blip_once
 
     repo = _wire_racing(
-        monkeypatch, _po(status="SENT"), manager_cancels_then_the_db_blips, at=2
+        monkeypatch, _po(status="SENT"), manager_cancels_then_the_db_blips, at=3
     )
     grn_repo = _AcceptedGrnRepo(_grn(qty=2, po_id="PO1", store_id="S1"))
     monkeypatch.setattr(v, "get_grn_repository", lambda: grn_repo)
