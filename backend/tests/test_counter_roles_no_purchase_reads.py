@@ -979,9 +979,42 @@ def catalog_docs(monkeypatch):
     )
 
 
+# The stock ledger (Reorder dashboard: cost x reorder qty) and the per-unit
+# read (each unit carries the cost it was received at) are product reads too.
+from api.routers.inventory import stock as stock_mod  # noqa: E402
+
+
+class _StockRepo:
+    collection = types.SimpleNamespace(aggregate=lambda _pipeline: [])
+
+    def find_by_product_store(self, _pid, _store):
+        return [{"stock_id": "S1", "product_id": "P1", "unit_cost": 3173.37,
+                 "cost_price": 3173.37, "cost_source": "GRN"}]
+
+
+@pytest.fixture
+def stock_docs(monkeypatch):
+    monkeypatch.setattr(stock_mod, "get_stock_repository", lambda: _StockRepo())
+    monkeypatch.setattr(stock_mod, "get_product_repository", lambda: _ProductRepo())
+    monkeypatch.setattr(stock_mod, "_get_db", lambda: None)
+
+
+STOCK_READS = ({}, {"product_id": "P1"})
+
+
 def _product_cost_answers(client, role):
     """{product route: did the body carry the per-unit cost} for one role."""
     out = {p: "cost_price" in _product_rows(client, role, p)[0] for p in PRODUCT_READS}
+    for params in STOCK_READS:
+        resp = client.get(
+            "/api/v1/inventory/stock",
+            params={"store_id": "BV-TEST-01", **params},
+            headers=_headers(role),
+        )
+        assert resp.status_code == 200, (role, params, resp.text)
+        row = resp.json()["items"][0]
+        assert row["product_id"] == "P1"
+        out[f"inventory/stock {params}"] = bool({"cost_price", "unit_cost"} & set(row))
     for path, key in (
         ("/api/v1/catalog/products", "products"),
         ("/api/v1/catalog/products/C1", "product"),
@@ -1001,7 +1034,7 @@ def _product_cost_roles():
 
 @pytest.mark.parametrize("role", rbac.ALL_ROLES)
 def test_product_cost_is_one_answer_on_every_product_route(
-    client, product_repo, catalog_docs, role
+    client, product_repo, catalog_docs, stock_docs, role
 ):
     want = role in _product_cost_roles()
     answers = _product_cost_answers(client, role)

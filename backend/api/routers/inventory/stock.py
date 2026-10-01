@@ -23,6 +23,7 @@ from ._shared import (
 from .helpers import (
     _get_db,
 )
+from ...services.cost_mask import mask_cost_list
 
 # ============================================================================
 # STOCK ENDPOINTS
@@ -119,9 +120,11 @@ async def get_stock(
 
     # Mode 2: per-unit detail for one product. Consumers (e.g. transfer
     # picker that selects specific stock_ids) want the raw stock_units rows.
+    # A unit carries the cost it was received at (GRN / opening stock): the
+    # one product-cost rule decides who sees it, here and on the ledger rows.
     if product_id:
         stock = stock_repo.find_by_product_store(product_id, active_store)
-        return {"items": stock, "total": len(stock)}
+        return {"items": mask_cost_list(stock, current_user, "product"), "total": len(stock)}
 
     # Mode 3 (default): per-product ledger view. Aggregate stock_units by
     # product_id, join with the catalog so every row carries the fields the
@@ -136,7 +139,7 @@ async def get_stock(
         created_by=created_by,
         include_attribution=can_see_attribution,
     )
-    return {"items": items, "total": len(items)}
+    return {"items": mask_cost_list(items, current_user, "product"), "total": len(items)}
 
 
 def _last_grn_by_product(store_id: Optional[str]) -> Dict[str, Dict]:
@@ -414,6 +417,9 @@ def _ledger_row(
         "model": model,
         "category": product.get("category", ""),
         "mrp": mrp,
+        # Per-unit cost (the Reorder dashboard's PO estimate and PO rate);
+        # get_stock strips it outside cost_mask's "product" context.
+        "cost_price": product.get("cost_price"),
         "offerPrice": offer_price,
         "offer_price": offer_price,
         "stock": on_hand,
