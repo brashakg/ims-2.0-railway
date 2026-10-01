@@ -829,6 +829,46 @@ def test_the_same_typed_in_edit_on_a_draft_makes_the_product(monkeypatch):
     assert [r["action"] for r in audit.rows].count("product.created") == 1
 
 
+def test_an_edit_that_loses_to_a_send_makes_no_typed_in_product(monkeypatch):
+    """Panel LOW: the typed-in product used to be created before the guarded
+    write, so a colleague sending the draft in that instant left the loser a
+    409, an unchanged order -- and a provisional Vogue with its
+    product.created row on the spine. The product is now written only after
+    the order write succeeded."""
+    def send(repo):  # what send_po writes
+        repo.update("PO1", {"status": "SENT", "sent_by": "mgr_other"})
+
+    repo = _wire_racing(monkeypatch, _po(), send)
+    spine = _real_spine(monkeypatch)
+    audit = v.get_audit_repository()
+    body = _edit_body([{"new_product": dict(_VOGUE), "quantity": 1, "unit_price": 2000}])
+    with pytest.raises(HTTPException) as e:
+        _run(v.update_po("PO1", body, _user()))
+    assert e.value.status_code == 409
+    assert repo.race is None, "the send never landed in the window"
+    assert spine.collection.docs == [], "a refused edit leaves no provisional product"
+    assert audit.rows == []
+    assert [i["product_id"] for i in repo.collection.docs[0]["items"]] == ["P1", "P2"]
+
+
+def test_a_product_that_fails_after_the_edit_is_saved_never_fails_the_edit(monkeypatch):
+    """The ceiling make_typed_in_products names: the order is already saved,
+    so a product write failing afterwards is logged, never a 500 that sends
+    the manager back to save the same edit again."""
+    repo, _ = _wire(monkeypatch, _po())
+    spine = _real_spine(monkeypatch)
+
+    def down(*_a, **_k):
+        raise RuntimeError("database unreachable")
+
+    monkeypatch.setattr(spine.collection, "insert_one", down)
+    body = _edit_body([{"new_product": dict(_VOGUE), "quantity": 1, "unit_price": 2000}])
+    out = _run(v.update_po("PO1", body, _user()))
+    [line] = out["items"]
+    assert line["sku"] and spine.collection.docs == []
+    assert repo.pos["PO1"]["history"][-1]["kind"] == "edited"
+
+
 def test_two_line_cancels_at_once_never_lose_one(monkeypatch):
     def colleague_cancels_p1(repo):  # a finished line cancel, by someone else
         items = copy.deepcopy(repo.collection.docs[0]["items"])

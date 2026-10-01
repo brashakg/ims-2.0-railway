@@ -541,6 +541,60 @@ class TestOrderAnUncataloguedItem:
         assert len(repo.rows) == 1, "a second spine row was minted for the same frame"
         assert po_repo.created[1]["items"][0]["product_id"] == first_id
 
+    def test_two_lines_typing_the_same_new_item_share_one_product(self):
+        repo = _ProductRepo()
+        po_repo = _POCreateRepo()
+        _raise_po(
+            [
+                {"new_product": dict(_NEW_FRAME), "quantity": 20, "unit_price": 3200},
+                {"new_product": dict(_NEW_FRAME), "quantity": 5, "unit_price": 3200},
+            ],
+            repo,
+            po_repo,
+        )
+        assert len(repo.rows) == 1, "one new frame typed twice became two products"
+        a, b = po_repo.created[0]["items"]
+        assert a["product_id"] == b["product_id"] == repo.rows[0]["product_id"]
+        assert a["sku"] == b["sku"] == repo.rows[0]["sku"]
+
+    def test_a_refused_later_line_leaves_no_product_from_an_earlier_one(self):
+        """The door refusing line 2 must not leave line 1's product behind:
+        every typed-in line is checked before anything is written."""
+        repo = _ProductRepo()
+        po_repo = _POCreateRepo()
+        with pytest.raises(HTTPException) as e:
+            _raise_po(
+                [
+                    {"new_product": dict(_NEW_FRAME), "quantity": 20, "unit_price": 3200},
+                    {"new_product": {**_NEW_FRAME, "category": "NOT_A_CATEGORY",
+                                     "model": "RB2140"},
+                     "quantity": 5, "unit_price": 3000},
+                ],
+                repo,
+                po_repo,
+            )
+        assert e.value.status_code == 422
+        assert repo.rows == [] and po_repo.created == []
+
+    def test_an_order_that_was_not_saved_makes_no_product(self):
+        """The products are written only after the order is: the repository
+        swallows an insert error into None, which used to answer 201 with the
+        typed-in product on the spine and no order holding it."""
+        repo = _ProductRepo()
+
+        class _Down(_POCreateRepo):
+            def create(self, doc):
+                return None
+
+        with pytest.raises(HTTPException) as e:
+            _raise_po(
+                [{"new_product": dict(_NEW_FRAME), "quantity": 20, "unit_price": 3200}],
+                repo,
+                _Down(),
+            )
+        assert e.value.status_code == 503
+        assert repo.rows == []
+
     def test_a_line_must_name_a_product_or_describe_one(self):
         with pytest.raises(Exception) as exc:
             vendors_mod.POItemCreate(quantity=1, unit_price=100)

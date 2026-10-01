@@ -2263,9 +2263,15 @@ def create_via_door(
     variant_repo=None,
     audit_repo=None,
     force_draft: bool = False,
+    prebuilt: Optional[Dict[str, Any]] = None,
     db=None,
 ) -> Dict[str, Any]:
     """THE single create path every product-entry door delegates to (step-9).
+
+    `prebuilt` is the doc build_canonical_product returned for this SAME
+    payload, for a door that must validate before it may write (a purchase
+    order creates its typed-in products only once the order is saved). It is
+    written as built -- product_id and SKU included -- not normalised again.
 
     `force_draft` (IMPORT / CLONE doors) stamps the spine catalog_status=DRAFT AT
     WRITE TIME even for a complete payload, so an imported/cloned product is born
@@ -2305,6 +2311,7 @@ def create_via_door(
         provisional=bool(p.get("provisional", False)),
         variant_of=p.get("variant_of"),
         extra_fields=extra_fields,
+        prebuilt=prebuilt,
         product_repo=product_repo,
         catalog_repo=catalog_repo,
         variant_repo=variant_repo,
@@ -2450,6 +2457,7 @@ def create_product(
     provisional: bool = False,
     variant_of: Optional[str] = None,
     extra_fields: Optional[Dict[str, Any]] = None,
+    prebuilt: Optional[Dict[str, Any]] = None,
     product_repo=None,
     catalog_repo=None,
     variant_repo=None,
@@ -2481,7 +2489,9 @@ def create_product(
     Returns the created spine doc (with `sync_status`). Raises
     ProductMasterError on a validation failure (before any write).
     """
-    spine = normalise_payload(
+    # A prebuilt doc (see create_via_door) was validated by normalise_payload
+    # already; its product_id and SKU are the ones its caller has stored.
+    spine = dict(prebuilt) if prebuilt is not None else normalise_payload(
         category=category,
         attributes=attributes,
         mrp=mrp,
@@ -2524,26 +2534,10 @@ def create_product(
         return spine
 
     # --- Hub Phase 1: duplicate HARD-BLOCK (409 + show-existing) ---
-    # Refuse a product that already exists by SKU, by brand+model+colour identity,
-    # or by barcode (when one rides along). The DB unique indexes are the
-    # race-safe backstop (handled at the create below). Pre-check first so the
-    # common case returns the existing row for the FE to link to.
-    existing = product_repo.find_by_sku(spine["sku"])
-    if (
-        existing is None
-        and spine.get("identity_key")
-        and hasattr(product_repo, "find_by_identity_key")
-    ):
-        existing = product_repo.find_by_identity_key(spine["identity_key"])
-    if (
-        existing is None
-        and spine.get("barcode")
-        and hasattr(product_repo, "find_by_barcode")
-    ):
-        try:
-            existing = product_repo.find_by_barcode(spine["barcode"])
-        except Exception:  # noqa: BLE001
-            existing = None
+    # The DB unique indexes are the race-safe backstop (handled at the create
+    # below). Pre-check first so the common case returns the existing row for
+    # the FE to link to.
+    existing = find_existing_product(spine, product_repo)
     if existing is not None:
         raise _duplicate_error(existing)
 
@@ -2619,6 +2613,33 @@ def create_product(
             logger.warning("[PM] audit write failed for %s: %s", product_id, exc)
 
     return created
+
+
+def find_existing_product(
+    spine: Dict[str, Any], product_repo
+) -> Optional[Dict[str, Any]]:
+    """The row a create of `spine` (a normalise_payload doc) would refuse as a
+    duplicate: the same SKU, the same brand+model+colour(+size) identity, or the
+    same barcode when one rides along. THE duplicate rule -- create_product
+    enforces it, and a door that must decide "reuse or new" before it may
+    write asks here instead of keeping a copy."""
+    existing = product_repo.find_by_sku(spine["sku"])
+    if (
+        existing is None
+        and spine.get("identity_key")
+        and hasattr(product_repo, "find_by_identity_key")
+    ):
+        existing = product_repo.find_by_identity_key(spine["identity_key"])
+    if (
+        existing is None
+        and spine.get("barcode")
+        and hasattr(product_repo, "find_by_barcode")
+    ):
+        try:
+            existing = product_repo.find_by_barcode(spine["barcode"])
+        except Exception:  # noqa: BLE001
+            existing = None
+    return existing
 
 
 def _resolve_variant_parent(

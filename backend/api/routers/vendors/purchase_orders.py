@@ -364,11 +364,12 @@ def price_po_lines(items, vendor, delivery_store_id, current_user):
 
     Both doors that take typed lines -- create (POST) and the draft edit (PUT)
     -- call this, so an edited order is priced and gated exactly as a new one:
-    the catalogue gate runs, typed-in new products are materialised through the
-    product door, and GST is built per line (build_po_gst). Mutates `items` (a
-    typed-in line gets its new product_id). Returns (build_po_gst result, the
-    product docs read) -- hand both to fill_cost_from_rate AFTER the order is
-    written; nothing here changes an existing product.
+    the catalogue gate runs, typed-in lines are validated and matched through
+    the product door, and GST is built per line (build_po_gst). Mutates `items`
+    (a typed-in line gets its product_id). WRITES NOTHING. Returns (build_po_gst
+    result, the product docs read, the typed-in products still to create) --
+    once the order is written, hand the third to make_typed_in_products and the
+    first two to fill_cost_from_rate.
     """
     product_repo = get_product_repository()
 
@@ -400,60 +401,58 @@ def price_po_lines(items, vendor, delivery_store_id, current_user):
             )
 
     # Ruling 13 -- BUY FIRST, CATALOGUE LATER. Any line that carried typed-in
-    # identity instead of a product_id becomes a REAL row on the products spine
-    # here, through the ONE product door, born provisional: inactive, no selling
+    # identity instead of a product_id becomes a REAL row on the products spine,
+    # through the ONE product door, born provisional: inactive, no selling
     # price, catalog_status DRAFT. That keeps product_id the single join key for
     # receiving, the stock mint, the invoice and the 3-way match, instead of
     # forking identity into a second placeholder system.
     #
-    # ALL typed-in lines pass the door's own validation (build_canonical_product
-    # -- the same core create_via_door runs, minus the write) BEFORE the first
-    # one is written: a refusal on line 2 used to arrive after line 1's product
-    # was already on the spine, so a refused edit left a provisional product.
-    # ponytail: a typed-in product is created before the order is written --
-    # the stored line must carry its id. A write refused after this (a
-    # colleague's send in the same instant) or a database failure between two
-    # creates leaves an inactive, stockless provisional draft, and retrying the
-    # same lines reuses it (the 409 branch below), never a twin. Pre-minting
-    # the id through the door would remove even that.
-    payloads = [
-        (it, _typed_in_payload(it)) for it in items if it.new_product is not None
-    ]
-    for _, payload in payloads:
-        try:
-            _pm.build_canonical_product(
-                payload, source="FORM", product_repo=product_repo, db=_get_db()
-            )
-        except _pm.ProductMasterError as err:
-            raise _new_product_invalid(err) from err
-    for it, payload in payloads:
+    # Nothing is written HERE. Every typed-in line passes the door's own
+    # validation (build_canonical_product -- the core create_via_door runs,
+    # minus the write) and the door's own duplicate rule: an item we already
+    # know is reused (the buyer typed a description of it) rather than refusing
+    # the order or minting a twin; a new one is fixed now -- its product_id and
+    # SKU go on the stored line -- and make_typed_in_products writes it only
+    # after the order write succeeded. So no refusal (a later line, the status
+    # check, a colleague's send in the same instant) leaves a product behind.
+    db = _get_db()
+    products = {}
+    to_create = []
+    new_by_identity = {}  # two lines typing the same new item share one product
+    for it in items:
         np = it.new_product
+        if np is None:
+            continue
+        payload = _typed_in_payload(it)
         try:
-            created = _pm.create_via_door(
-                payload,
+            spine = _pm.build_canonical_product(
+                {
+                    **payload,
+                    "created_by": current_user.get("user_id"),
+                    "created_by_name": current_user.get("username"),
+                },
                 source="FORM",
-                actor=current_user.get("user_id"),
-                actor_name=current_user.get("username"),
                 product_repo=product_repo,
-                audit_repo=get_audit_repository(),
-                db=_get_db(),
+                db=db,
             )
         except _pm.ProductMasterError as err:
-            # An identical brand+model+colour+size already exists: reuse it
-            # rather than refusing the order or minting a twin. The buyer has
-            # just typed a description of a product we already know.
-            if err.status == 409 and (err.conflict or {}).get("product_id"):
-                it.product_id = err.conflict["product_id"]
-                it.product_name = it.product_name or err.conflict.get("name")
-                it.sku = it.sku or err.conflict.get("sku")
-                it.new_product = None
-                continue
             raise _new_product_invalid(err) from err
-        it.product_id = created.get("product_id")
+        known = new_by_identity.get(spine.get("identity_key"))
+        if known is None and product_repo is not None:
+            known = _pm.find_existing_product(spine, product_repo)
+        if known is None:
+            known = {**spine, "product_id": str(uuid.uuid4())}
+            to_create.append((payload, known))
+            products[known["product_id"]] = known
+            if spine.get("identity_key"):
+                new_by_identity[spine["identity_key"]] = known
+            it.sku = known["sku"]
+        else:
+            it.sku = it.sku or known.get("sku")
+        it.product_id = known["product_id"]
         it.product_name = (
-            it.product_name or created.get("name") or f"{np.brand} {np.model}".strip()
+            it.product_name or known.get("name") or f"{np.brand} {np.model}".strip()
         )
-        it.sku = created.get("sku")
         it.new_product = None
 
     # Who supplies whom decides CGST+SGST vs IGST (owner: "GST should be
@@ -464,23 +463,61 @@ def price_po_lines(items, vendor, delivery_store_id, current_user):
 
     # Per-line GST + place-of-supply split: ONE shared computation, the same
     # one both automatic PO doors call (see build_po_gst). Products are fetched
-    # ONCE here and handed back for the cost fill after the write.
-    products = {}
+    # ONCE here and handed back for the cost fill after the write; a typed-in
+    # product still to be created is priced from the doc the door built.
     if product_repo is not None:
         for it in items:
             if it.product_id not in products:
                 products[it.product_id] = product_repo.find_by_id(it.product_id)
     computed = build_po_gst(
-        # A typed-in new product was minted onto the spine above and its line
-        # given a real product_id; the spent `new_product: None` payload must
-        # not ride through **line onto the stored item.
+        # A typed-in line was given a real product_id above; the spent
+        # `new_product: None` payload must not ride through **line onto the
+        # stored item.
         [it.model_dump(exclude={"new_product"}) for it in items],
         products.get,
         vendor,
         store_doc,
     )
 
-    return computed, products
+    return computed, products, to_create
+
+
+def make_typed_in_products(to_create, current_user) -> None:
+    """Write the typed-in products price_po_lines fixed, through the ONE
+    product door, each under the product_id and SKU its stored line carries.
+    Call it only AFTER the order write succeeded: a refused order or edit must
+    leave no provisional product behind.
+
+    ponytail: a create failing here -- a database error, or the same new item
+    typed into another order in the same instant -- cannot undo the saved order,
+    so it is logged and the line names a product that does not exist yet. That
+    is contained, not silent: the catalogue gate (on by default) refuses to send
+    the draft (product_not_found) until the line is typed again, which then
+    finds the item, and receiving holds an uncatalogued line regardless. A
+    multi-document transaction would close it.
+    """
+    if not to_create:
+        return
+    product_repo = get_product_repository()
+    audit_repo = get_audit_repository()
+    for payload, built in to_create:
+        try:
+            _pm.create_via_door(
+                payload,
+                source="FORM",
+                actor=current_user.get("user_id"),
+                actor_name=current_user.get("username"),
+                prebuilt=built,
+                product_repo=product_repo,
+                audit_repo=audit_repo,
+                db=_get_db(),
+            )
+        except Exception as exc:  # noqa: BLE001 - the order is already saved
+            logger.error(
+                "[VENDOR] typed-in product %s on a saved PO line was not created: %s",
+                built.get("product_id"),
+                exc,
+            )
 
 
 def fill_cost_from_rate(po_id, po_number, items, products, current_user) -> list:
@@ -581,7 +618,7 @@ async def create_po(
         if vendor is None:
             raise HTTPException(status_code=404, detail="Vendor not found")
 
-    computed, products = price_po_lines(
+    computed, products, to_create = price_po_lines(
         po.items,
         vendor if vendor_repo is not None else None,
         po.delivery_store_id,
@@ -597,7 +634,7 @@ async def create_po(
     gst_warnings = computed["warnings"]
 
     if po_repo is not None:
-        po_repo.create(
+        saved = po_repo.create(
             {
                 "po_id": po_id,
                 "po_number": po_number,
@@ -621,7 +658,14 @@ async def create_po(
                 "created_at": datetime.now().isoformat(),
             }
         )
+        if not saved:  # the repository swallows a write error into None
+            raise HTTPException(
+                status_code=503,
+                detail="The purchase order could not be saved - try again.",
+            )
 
+    # Only now that the order is saved: a refused order makes no product.
+    make_typed_in_products(to_create, current_user)
     cost_filled = fill_cost_from_rate(
         po_id, po_number, po.items, products, current_user
     )
