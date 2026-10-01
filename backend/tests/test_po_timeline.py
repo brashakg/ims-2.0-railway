@@ -355,4 +355,10 @@ def test_rbac_row_catalogued():
         and r.get("method") == "GET"
     ]
     assert len(rows) == 1
-    assert rows[0]["allowed"] == "AUTHENTICATED"
+    # F60: the timeline carries bill amounts -> the purchase roles, like get_po.
+    assert rows[0]["allowed"] == [
+        "ACCOUNTANT",
+        "ADMIN",
+        "AREA_MANAGER",
+        "STORE_MANAGER",
+    ]

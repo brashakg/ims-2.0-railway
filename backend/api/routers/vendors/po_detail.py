@@ -10,7 +10,6 @@ from ._shared import (
     _po_catalog_gate_on,
     can_access_store_scoped,
     datetime,
-    get_current_user,
     get_grn_repository,
     get_product_repository,
     get_purchase_order_repository,
@@ -40,7 +39,9 @@ def _stamp_event_actors(events: list) -> None:
 
 
 @router.get("/purchase-orders/{po_id}/timeline")
-async def get_po_timeline(po_id: str, current_user: dict = Depends(get_current_user)):
+async def get_po_timeline(
+    po_id: str, current_user: dict = Depends(require_roles(*_VENDOR_ROLES))
+):
     """The full life of a PO on one read (procurement Phase 3): ordered ->
     sent -> box received (GRNs) -> on shelf (accepted) -> bill (purchase
     invoices). One click from any PO number opens the drawer that renders this.
@@ -223,7 +224,9 @@ async def get_po_timeline(po_id: str, current_user: dict = Depends(get_current_u
 
 
 @router.get("/purchase-orders/{po_id}")
-async def get_po(po_id: str, current_user: dict = Depends(get_current_user)):
+async def get_po(
+    po_id: str, current_user: dict = Depends(require_roles(*_VENDOR_ROLES))
+):
     """Get purchase order details"""
     po_repo = get_purchase_order_repository()
 

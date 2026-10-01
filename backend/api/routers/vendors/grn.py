@@ -15,7 +15,6 @@ from ._shared import (
     _get_db,
     _normalize_invoice_no,
     can_access_store_scoped,
-    get_current_user,
     get_file_store,
     get_grn_repository,
     hashlib,
@@ -47,9 +46,11 @@ async def list_grns(
     date_to: Optional[str] = Query(None, description="DC date <= (ISO)"),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
 ):
-    """List GRNs with filters (incl. F9 Delivery-Challan filters)."""
+    """List GRNs with filters (incl. F9 Delivery-Challan filters). F60: a GRN
+    carries the supplier's bill number / date and the bill-scan id, so only the
+    receiving roles read it (every screen that lists GRNs is a purchase screen)."""
     grn_repo = get_grn_repository()
     active_store = validate_store_access(store_id, current_user) or current_user.get(
         "active_store_id"

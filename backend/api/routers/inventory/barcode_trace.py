@@ -11,6 +11,7 @@ from ._shared import (
 from .helpers import (
     _get_db,
 )
+from ...services.cost_mask import mask_cost
 
 # ============================================================================
 # INV-12: BARCODE LIFECYCLE TRACE
@@ -98,21 +99,29 @@ async def barcode_lifecycle_trace(
         logger.warning("[INV-12] stock_unit lookup failed for barcode %s: %s", barcode, exc)
 
     try:
-        # 4. Sales: orders where an item carries this barcode
+        # 4. Sales: orders where an item carries this barcode, or the line
+        #    that names this unit (the till records the scanned unit).
+        sales_filter: list = [
+            {"items.barcode": barcode},
+            {"order_items.barcode": barcode},
+        ]
+        if stock_id:
+            sales_filter.append({"items.stock_id": stock_id})
         orders = list(
             db.get_collection("orders").find(
-                {"$or": [
-                    {"items.barcode": barcode},
-                    {"order_items.barcode": barcode},
-                ]},
+                {"$or": sales_filter},
                 {"_id": 0, "order_number": 1, "created_at": 1, "store_id": 1,
                  "status": 1, "items": 1, "order_items": 1},
             ).sort("created_at", 1).limit(50)
         )
         for order in orders:
+            # Every signed-in role reads this route: a sale line's
+            # cost_at_sale goes through the one cost rule.
             matching = [
-                i for i in (order.get("items") or order.get("order_items") or [])
+                mask_cost(dict(i), current_user, "product")
+                for i in (order.get("items") or order.get("order_items") or [])
                 if i.get("barcode") == barcode
+                or (stock_id and i.get("stock_id") == stock_id)
             ]
             result["sales"].append({
                 "order_number": order.get("order_number"),

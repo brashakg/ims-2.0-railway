@@ -26,8 +26,10 @@ from .pricing import (
 from .rx import _validate_order_line_rx
 from .stock import (
     _assert_serialized_stock_available,
+    _claim_scanned_units,
     _lens_reservation_key,
     _mark_units_sold,
+    _release_claimed_units,
     _resolve_billable_product,
 )
 from .release import (
@@ -284,6 +286,9 @@ async def add_order_item(
                 exc,
             )
 
+        # A scanned unit is claimed before the save, as at create (a 409 here
+        # leaves the order untouched; a scanned line reserves no lens cell).
+        claimed = _claim_scanned_units(order_id, [item_data], _store_id)
         try:
             persisted = repo.update(
                 order_id,
@@ -306,6 +311,7 @@ async def add_order_item(
         if not persisted:
             # The line never landed on the order -> give the lens cell back so
             # the reservation cannot leak against a line that does not exist.
+            _release_claimed_units(order_id, claimed)
             try:
                 await release_for_cancel(
                     order_item=item_data,
@@ -321,7 +327,7 @@ async def add_order_item(
         # Serialized units -> SOLD with this order_id stamped (fail-soft: a
         # stock-side failure must never lose the line the user just added).
         try:
-            _mark_units_sold(order_id, [item_data], _store_id)
+            _mark_units_sold(order_id, [item_data], _store_id, claimed)
         except Exception as exc:  # noqa: BLE001
             logger.warning("[STOCK] add-item mark_units_sold failed: %s", exc)
 
