@@ -651,6 +651,9 @@ _LEGACY_BILL = {
     # bill_kind key at all, header-only, no receipt. Values chosen distinct.
     "bill_id": "LEG-1",
     "vendor_id": "V-G1",
+    # Placed in S1 (the shop backfill_bill_store_id stamps): a bill with no shop
+    # at all is an admin's only on every Purchase list (F63).
+    "store_id": "S1",
     "vendor_name": "Frames Wala",
     "bill_number": "OLD-77",
     "bill_date": "2026-07-11",

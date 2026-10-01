@@ -17,6 +17,7 @@ from ._shared import (
     get_vendor_repository,
     logger,
     require_roles,
+    resolve_store_scope,
     router,
     uuid,
 )
@@ -437,14 +438,21 @@ async def list_vendor_bills(
     vendor_id: str,
     status: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
+    store_id: Optional[str] = Query(None),
 ):
-    """List a vendor's bills (newest first)."""
+    """List a vendor's bills (newest first), in the caller's shop scope."""
     db = _get_db()
     if db is None:
         return {"bills": [], "total": 0}
     flt: dict = {"vendor_id": vendor_id}
     if status:
         flt["status"] = status
+    # The one Purchase shop scope (F63), as the purchase-invoice list applies
+    # it: a supplier who serves two shops must not hand a Pune login Dhanbad's
+    # bill ids to open. Admins see every shop (or the one asked for).
+    scope = resolve_store_scope(store_id, current_user)
+    if scope:
+        flt["store_id"] = scope
     try:
         bills = list(db.get_collection("vendor_bills").find(flt, {"_id": 0}))
     except Exception:

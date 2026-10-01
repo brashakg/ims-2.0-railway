@@ -173,7 +173,15 @@ def db() -> FakeDB:
 
 
 def _acct(uid="AC1"):
-    return {"user_id": uid, "full_name": "Accountant", "roles": ["ACCOUNTANT"]}
+    # An accountant works in a shop, and every route on one bill holds him to it
+    # (F63, purchase_invoices._bill_in_scope_or_404); the seeded bill is S1's.
+    return {
+        "user_id": uid,
+        "full_name": "Accountant",
+        "roles": ["ACCOUNTANT"],
+        "store_ids": ["S1"],
+        "active_store_id": "S1",
+    }
 
 
 def _sales(uid="S1"):
@@ -188,6 +196,7 @@ def _seed_bill(db, **over):
         "invoice_id": "PI-1",
         "doc_type": "PURCHASE_INVOICE",
         "vendor_id": "V-1",
+        "store_id": "S1",  # the shop the goods landed in (F63)
         "bill_number": "INV-001",
         "invoice_number": "INV-001",
         "bill_date": "2026-05-15",

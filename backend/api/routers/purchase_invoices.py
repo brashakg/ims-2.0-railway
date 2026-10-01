@@ -50,7 +50,9 @@ bill lines and rolled into the product master as ``landed_cost`` /
 re-invoked (see allocate_invoice_landed_costs for why).
 
 Roles: create / book is an accounting action -> ADMIN / ACCOUNTANT (+SUPERADMIN
-via require_roles). Reads are AUTHENTICATED.
+via require_roles); so are the reads (F1). Shop scope (F63): the list filters
+on the one Purchase shop rule, and every route that acts on ONE bill by id
+answers 404 for a bill outside the caller's shop (_bill_in_scope_or_404).
 """
 
 import logging
@@ -63,6 +65,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from .auth import get_current_user, require_roles
 from ..dependencies import (
+    can_access_store_scoped,
     resolve_store_scope,
     get_vendor_repository,
     get_purchase_order_repository,
@@ -186,6 +189,17 @@ class PurchaseInvoicePreview(BaseModel):
 
 def _clean(doc: dict) -> dict:
     return {k: v for k, v in doc.items() if k != "_id"}
+
+
+def _bill_in_scope_or_404(doc: dict, current_user: dict) -> None:
+    """The one Purchase shop scope (F63) on ONE bill, as the list applies it to
+    many: a Pune accountant may not read, approve or cost a Dhanbad bill by
+    typing its id. ADMIN / SUPERADMIN reach every shop; everyone else only the
+    bill's own shop, and a bill with no shop only an admin (the list hides it
+    from them too). 404, not 403 -- the same answer as a missing bill, so
+    another shop's bill is never confirmed to exist (the GRN / PO convention)."""
+    if not can_access_store_scoped(doc.get("store_id"), current_user):
+        raise HTTPException(status_code=404, detail="Purchase invoice not found")
 
 
 # ---------------------------------------------------------------------------
@@ -2382,6 +2396,7 @@ async def get_invoice_match(
         doc = None
     if not doc:
         raise HTTPException(status_code=404, detail="Purchase invoice not found")
+    _bill_in_scope_or_404(doc, current_user)
 
     detail = doc.get("match_detail")
     status = doc.get("match_status")
@@ -2433,6 +2448,7 @@ async def get_invoice_dc_match(
         doc = None
     if not doc:
         raise HTTPException(status_code=404, detail="Purchase invoice not found")
+    _bill_in_scope_or_404(doc, current_user)
     return {
         "invoice_id": invoice_id,
         "dc_match_status": doc.get("dc_match_status") or "N_A",
@@ -2468,6 +2484,9 @@ async def approve_invoice_exception(
         doc = None
     if not doc:
         raise HTTPException(status_code=404, detail="Purchase invoice not found")
+    # Before the status check: another shop's held bill must read as missing,
+    # not as "not on hold".
+    _bill_in_scope_or_404(doc, current_user)
 
     if doc.get("match_status") != pmatch.MATCH_ON_HOLD:
         raise HTTPException(
@@ -2636,6 +2655,7 @@ async def set_invoice_landed_costs(
     exactly what the accountant last reviewed."""
     db = _get_db()
     doc = _load_purchase_invoice_or_404(db, invoice_id)
+    _bill_in_scope_or_404(doc, current_user)
     if doc.get("landed_cost_allocated"):
         raise HTTPException(
             status_code=409,
@@ -2727,6 +2747,7 @@ async def preview_invoice_landed_costs(
     missing line weight)."""
     db = _get_db()
     doc = _load_purchase_invoice_or_404(db, invoice_id)
+    _bill_in_scope_or_404(doc, current_user)
     components = doc.get("landed_cost_components") or []
     if not components:
         raise HTTPException(
@@ -2782,6 +2803,7 @@ async def allocate_invoice_landed_costs(
     no second AVCO writer is introduced."""
     db = _get_db()
     doc = _load_purchase_invoice_or_404(db, invoice_id)
+    _bill_in_scope_or_404(doc, current_user)
     if doc.get("landed_cost_allocated"):
         raise HTTPException(
             status_code=409,
@@ -2977,5 +2999,6 @@ async def get_purchase_invoice(
         doc = None
     if not doc:
         raise HTTPException(status_code=404, detail="Purchase invoice not found")
+    _bill_in_scope_or_404(doc, current_user)
     _stamp_bill_actor_names(db, [doc])
     return doc
