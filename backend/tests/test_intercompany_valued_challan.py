@@ -281,14 +281,14 @@ def test_f51_ship_without_a_carrier_never_reads_none(db):
     assert notes and not any("None" in n for n in notes), notes
 
 
-def test_f51_challan_before_ship_is_refused_or_valued(db):
+def test_f51_challan_before_ship_is_refused(db):
+    """The value is what leaves the shop, chosen at ship: before that the
+    crossing challan is refused with "ship first", not printed unvalued."""
     t = _create("ST-BOK-1")  # APPROVED, not shipped
-    try:
-        html = _challan(t["id"])
-    except HTTPException as exc:
-        assert 400 <= exc.status_code < 500
-        return
-    assert _shows_amount(html, UNIT_COST)
+    with pytest.raises(HTTPException) as exc:
+        _challan(t["id"])
+    assert exc.value.status_code == 409
+    assert "Ship the transfer first" in str(exc.value.detail)
 
 
 @pytest.mark.parametrize("side", ["consignor", "consignee"])
