@@ -17,9 +17,9 @@ frontend/src/components/pos/__tests__/tillRecordsScannedUnit.test.ts):
   TSU-5  the same unit scanned onto two lines of one bill: the second line
          silently sells the FIRST AVAILABLE unit instead (a scanned line must
          never be served first-available).
-  TSC-1  GET /inventory/barcode/{code} hands counter roles the unit's cost and
-         the joined product's cost / landed cost.
-  TSC-2  GET /inventory/stock/barcode/{code} does the same.
+  TSC-1  GET /inventory/barcode/{code} handed counter roles the unit's cost and
+         the joined product's cost / landed cost; now through cost_mask.
+  TSC-2  GET /inventory/stock/barcode/{code} did the same.
 
 The server half of (1) that ALREADY works (an explicit stock_id is honoured,
 refused when not AVAILABLE, and the unit label then finds its order) is pinned
@@ -298,16 +298,8 @@ def test_admin_scan_reply_still_carries_cost(client, till, url, finding):
 @pytest.mark.parametrize("role", COUNTER_ROLES)
 @pytest.mark.parametrize("url,finding", _SCAN_DOORS)
 def test_counter_scan_reply_carries_no_cost_and_is_otherwise_unchanged(
-    client, till, request, url, finding, role
+    client, till, url, finding, role
 ):
-    request.applymarker(
-        pytest.mark.xfail(
-            strict=True,
-            reason=f"{finding}: {url.split('?')[0]} returns the unit's unit_cost/cost_price "
-            "and the joined product's cost_price/landed_cost to counter roles "
-            "(stock_lookups.py, no cost_mask); landed_cost needs #1161's field list",
-        )
-    )
     admin = client.get(url, headers=_token(["ADMIN"]))
     counter = client.get(url, headers=_token([role]))
     assert counter.status_code == 200, counter.text

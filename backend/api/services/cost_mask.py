@@ -21,7 +21,13 @@ COST_VISIBLE_ROLES = {"SUPERADMIN", "ADMIN", "ACCOUNTANT"}
 CATALOG_FORM_ROLES = {"CATALOG_MANAGER"}
 
 # Raw cost fields that may appear on product / stock / order-line payloads.
-_COST_FIELDS = {"cost_price", "cost_value", "cost_at_sale", "unit_cost"}
+# landed_cost* / moving_avg_cost are what a purchase bill writes onto the
+# product master (purchase_invoices.py); purchase_price is the legacy name.
+_COST_FIELDS = {
+    "cost_price", "cost_value", "cost_at_sale", "unit_cost",
+    "landed_cost", "landed_cost_paise", "moving_avg_cost", "purchase_price",
+    "estimated_purchase_cost",
+}
 # Derived margin / COGS figures emitted by analytics + finance payloads.
 _MARGIN_FIELDS = {
     "margin_pct", "gross_margin", "net_margin", "cogs",

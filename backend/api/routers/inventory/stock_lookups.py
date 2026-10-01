@@ -26,6 +26,7 @@ from .helpers import (
     _reject_stock_mint_on_online_store,
     generate_barcode,
 )
+from ...services.cost_mask import mask_cost
 
 @router.get("/low-stock")
 async def get_low_stock_alerts(
@@ -119,9 +120,11 @@ async def get_stock_by_barcode_short(
         product = product_repo.find_by_id(stock["product_id"])
         if product:
             product.pop("_id", None)
-            stock["product"] = product
+            stock["product"] = mask_cost(product, current_user, "product")
 
-    return stock
+    # The till scans through here: counter roles never receive what a unit or
+    # its product cost (owner ruling 2026-09-30). The one cost_mask rule.
+    return mask_cost(stock, current_user, "product")
 
 
 @router.get("/expiring")
@@ -149,7 +152,7 @@ async def get_stock_by_barcode(
     if repo is not None:
         stock = repo.find_by_barcode(barcode)
         if stock:
-            return stock
+            return mask_cost(stock, current_user, "product")
         raise HTTPException(status_code=404, detail="Stock item not found")
 
     return {"barcode": barcode}
