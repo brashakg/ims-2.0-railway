@@ -27,8 +27,9 @@ export const inventoryApi = {
   // F46: the most the oversell guard would sell per product (GET
   // /inventory/sellable asks the guard). No store parameter: the server reads
   // the store in the sign-in token, the one Complete sale checks, and says
-  // which in `store_id`. `itemTypes` is the order item_type per id
-  // (mapCategory), so lens/service lines come back null like the guard.
+  // which in `store_id` (useSellableStock shows only the screen's own shop).
+  // `itemTypes` is the order item_type per id (mapCategory), so lens/service
+  // lines come back null like the guard.
   // `canonical` maps each id to the one the guard adds its lines up under.
   getSellable: async (productIds: string[], itemTypes: string[]): Promise<SellableStock> => {
     const response = await api.get('/inventory/sellable', {
@@ -443,16 +444,17 @@ export const inventoryApi = {
   },
 };
 
-// One merged stock-movement event. qty is SIGNED: positive = stock in
-// (RECEIVED / TRANSFER_IN / OPENING_STOCK), negative = stock out
-// (SOLD / TRANSFER_OUT).
-/** GET /inventory/sellable (F46): the till's per-product sellable counts. */
+/** GET /inventory/sellable (F46): the till's per-product sellable counts.
+    `store_id` is the sign-in token's store, null when the token has none. */
 export interface SellableStock {
-  store_id: string;
+  store_id: string | null;
   sellable: Record<string, number | null>;
   canonical?: Record<string, string>;
 }
 
+// One merged stock-movement event. qty is SIGNED: positive = stock in
+// (RECEIVED / TRANSFER_IN / OPENING_STOCK), negative = stock out
+// (SOLD / TRANSFER_OUT).
 export interface StockMovementEntry {
   id: string;
   at: string;

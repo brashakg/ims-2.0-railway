@@ -199,29 +199,44 @@ describe('the figure keeps up (it is never 5 minutes old)', () => {
     }
   });
 
-  it("shows the store Complete sale checks, and re-reads every 2 s until that is the screen's", async () => {
-    // The server answers for the store in the sign-in token (the guard's).
-    // switchStore changes the screen first and the token after, so the first
-    // answer after a switch can still name the old shop: it is what Complete
-    // sale would check, so it shows -- and is re-read at once, not in 30 s.
-    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
-    try {
-      getProducts.mockResolvedValue({ products: [BLACK] });
-      answer({ 'FR-BLACK': 3 }, 'BV-BOK-01'); // the token has not moved yet
-      render(strip(appClient(), 'BV-DHN-01'));
-      await waitFor(() => expect(screen.getByText('3 in stock')).toBeTruthy());
+  it("never shows another shop's answer: a switch shows the screen's shop a moment later", async () => {
+    // The server answers for the store in the sign-in token. A store switch
+    // moves the screen first and the token after, so the first answer on the
+    // new screen can still be the old shop's: it must never reach a tile.
+    getProducts.mockResolvedValue({ products: [BLACK] });
+    answer({ 'FR-BLACK': 3 }, 'BV-BOK-01'); // the token has not moved yet
+    render(strip(appClient(), 'BV-DHN-01'));
+    await screen.findByText('Black');
+    await waitFor(() => expect(getSellable).toHaveBeenCalledTimes(1));
+    answer({ 'FR-BLACK': 0 }, 'BV-DHN-01'); // now it has
+    await act(() => new Promise((r) => setTimeout(r, 100))); // BOK's answer has landed
+    expect(screen.queryByText(/in stock/)).toBeNull();
+    expect(tile('Black').disabled).toBe(false);
 
-      answer({ 'FR-BLACK': 0 }, 'BV-DHN-01'); // now it has
-      act(() => vi.advanceTimersByTime(2_000));
-      await waitFor(() => expect(tile('Black').disabled).toBe(true));
-
-      getSellable.mockClear();
-      act(() => vi.advanceTimersByTime(29_000)); // settled: back to every 30 s
-      expect(getSellable).not.toHaveBeenCalled();
-    } finally {
-      vi.useRealTimers();
-    }
+    await waitFor(() => expect(tile('Black').disabled).toBe(true), { timeout: 3_000 });
+    expect(getSellable).toHaveBeenCalledTimes(2);
   });
+
+  it.each(['BV-BOK-01', null])(
+    'a screen whose token never names its shop (%s) shows nothing and asks a few times, not every 2 s',
+    async (tokenStore) => {
+      // An AREA_MANAGER at a shop outside their list (switch_store 403s), or
+      // a token with no store: the answer never names the screen's shop.
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+      try {
+        getProducts.mockResolvedValue({ products: [BLACK] });
+        answer({ 'FR-BLACK': 3 }, tokenStore as string);
+        render(strip(appClient(), 'BV-DHN-01'));
+        await act(() => vi.advanceTimersByTimeAsync(29_000));
+        expect(screen.getByText('Black')).toBeTruthy();
+        expect(screen.queryByText(/in stock/)).toBeNull();
+        expect(getSellable.mock.calls.length).toBeGreaterThan(1); // it did ask again
+        expect(getSellable.mock.calls.length).toBeLessThanOrEqual(4); // 1 + 3 retries
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it("never shows another shop's counts while a store switch re-reads", async () => {
     const client = appClient();

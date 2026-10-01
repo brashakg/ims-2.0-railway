@@ -74,13 +74,14 @@ export function useProducts(params?: { category?: string; brand?: string; search
  *  null when the guard does not gate that row (not unit-tracked here, lens,
  *  service). `canonical[id]` is the id the guard adds that line up under.
  *
- *  The server reads the store in the sign-in token -- the one Complete sale
- *  checks -- whatever the screen says; `storeId` (the screen's store) only
- *  keys the cache. A store switch swaps the token after the screen changes
- *  (AuthContext.switchStore), so while the answer names another store than
- *  the screen's this re-reads every 2 s; the figure shown is still the
- *  guard's. ponytail: a switch that never reaches the server keeps that 2 s
- *  re-read until the next sign-in.
+ *  Only THIS screen's shop (`storeId`) is ever shown. The server answers for
+ *  the store in the sign-in token -- the one Complete sale checks -- and names
+ *  it; an answer naming any other shop (or none) is thrown away, never shown,
+ *  and asked again: 1 s, 2 s, 4 s later, then every 30 s. That covers a store
+ *  switch, which moves the screen before the token (AuthContext
+ *  setActiveStore). A screen whose token never moves (a switch the server
+ *  refused, e.g. an AREA_MANAGER at a shop outside their list) shows no
+ *  figures and no warnings rather than another shop's.
  *
  *  The guard at Complete sale stays the authority; this is kept as fresh as a
  *  read can be. Never "fresh" (the App default is 5 minutes), so a remount or
@@ -99,11 +100,18 @@ export function useSellableStock(storeId: string | undefined, rows: any[]) {
   const ids = [...typeOf.keys()].sort();
   return useQuery({
     queryKey: ['pos', 'sellable', storeId, lastSale, ids],
-    queryFn: () => inventoryApi.getSellable(ids, ids.map((id) => typeOf.get(id)!)),
+    queryFn: async () => {
+      const answer = await inventoryApi.getSellable(ids, ids.map((id) => typeOf.get(id)!));
+      if (answer.store_id !== storeId) {
+        throw new Error(`Stock figures came back for ${answer.store_id}, not ${storeId}`);
+      }
+      return answer;
+    },
     enabled: !!storeId && ids.length > 0,
     staleTime: 0,
     gcTime: 0,
-    refetchInterval: (q) => (q.state.data && q.state.data.store_id !== storeId ? 2_000 : 30_000),
+    retry: 3,
+    refetchInterval: 30_000,
     // While a changed cart re-reads, keep the last counts FROM THIS SHOP on
     // screen so a warning never blinks off and back on; never another shop's.
     placeholderData: (prev, prevQuery) => (prevQuery?.queryKey[2] === storeId ? prev : undefined),
