@@ -1196,8 +1196,9 @@ def test_tick_an_unreadable_catalog_touches_no_task(monkeypatch):
     assert _tasks(db)[0]["status"] == "OPEN"
 
 
-_ONE_STEP = ("open Inventory > Online Stock, pick BV-A, and ask an ADMIN or SUPERADMIN to set each "
-             "product's quantity at BV-A's location in Shopify admin to its Recommended number there "
+_ONE_STEP = ("open Online Stock (sidebar, Stock & supply; the page is titled Online vs In-store Stock), "
+             "pick Shop BV-A (BV-A), and ask an ADMIN or SUPERADMIN to set each "
+             "product's quantity at Shop BV-A (BV-A)'s location in Shopify admin to its Recommended number there "
              "(what IMS sends now)")
 
 
@@ -1229,7 +1230,8 @@ def test_drift_task_gives_the_one_safe_instruction():
     _one_safe_step(task["description"])
     assert "IMS re-sends a product's number only when it changes in IMS" in task["description"]
     assert task["store_id"] == "BV-A"
-    assert "Store manager: open Inventory > Online Stock" in task["description"]
+    assert "Store manager: open Online Stock (sidebar" in task["description"]
+    assert "Inventory > Online Stock" not in task["description"]
     assert "lines" not in task["payload"]
 
 
@@ -2388,3 +2390,196 @@ def test_the_close_note_never_says_a_retired_listing_left_the_website():
     note = task["completion_notes"]
     assert "Auto-closed" in note and "no longer live on the website" not in note
     assert "IMS no longer sells it" in note
+
+
+# ---------------------------------------------------------------------------
+# Round 18: the review's nine items
+# ---------------------------------------------------------------------------
+
+
+def _levels_gql(edges_by_item):
+    """A fake _graphql answering each asked id with the given raw `edges`
+    (or None for a null node), whatever shape they are."""
+
+    async def gql(db, query, variables):  # noqa: ARG001
+        nodes = []
+        for g in variables["ids"]:
+            e = edges_by_item.get(g)
+            nodes.append(None if e is None else {"id": g, "inventoryLevels": {"pageInfo": {"hasNextPage": False}, "edges": e}})
+        return {"data": {"nodes": nodes}}
+
+    return gql
+
+
+def _edge(loc, quantities):
+    return {"node": {"location": {"id": loc}, "quantities": quantities}}
+
+
+_MALFORMED = [
+    pytest.param([{"name": "available", "quantity": "abc"}], id="abc"),
+    pytest.param([], id="empty-list"),
+    pytest.param("available", id="non-list"),
+    pytest.param(None, id="none-quantities"),
+    pytest.param([{"name": "available", "quantity": None}], id="none-quantity"),
+    pytest.param([{"name": "on_hand", "quantity": 3}], id="no-available-name"),
+]
+
+
+@pytest.mark.parametrize("quantities", _MALFORMED)
+def test_r18_malformed_location_quantity_makes_the_item_unknown_never_zero(quantities):
+    """Review item 2. A location edge with no parseable `available` leaves the
+    WHOLE item absent (unknown). Only a location Shopify does not return is a
+    valid 0. Restore the skip-and-continue parse (`pass` on ValueError, no
+    edge check) -> the location is never recorded, the item reads {LOC_B: 1}
+    and the SKU is 0 at the malformed shop -> fails."""
+    gql = _levels_gql({INV_1: [_edge(LOC_A, quantities), _edge(LOC_B, [{"name": "available", "quantity": 1}])],
+                       INV_2: [_edge(LOC_A, [{"name": "available", "quantity": 4}])]})
+    out = _run(sp.shopify_levels_by_item(None, [INV_1, INV_2], graphql=gql))
+    assert out == {INV_2: {LOC_A: 4}}
+
+
+@pytest.mark.parametrize("quantities", _MALFORMED)
+@pytest.mark.parametrize("ims", [3, 0])
+def test_r18_malformed_quantity_files_no_drift_and_claims_no_clean(quantities, ims):
+    """Review item 2 end to end, at IMS 3 (was a false drift 3 vs 0) and IMS 0
+    (was a false clean). BV-A's SKU-1 row is UNKNOWN: no drift, not compared,
+    not in clean_skus."""
+    db = _db({"SKU-1": {"BV-A": ims}})
+    gql = _levels_gql({INV_1: [_edge(LOC_A, quantities)], INV_2: [_edge(LOC_A, [{"name": "available", "quantity": 0}])]})
+    out = _run(sp.run_parity_tick(db, graphql=gql))
+    bva = next(s for s in out["stores"] if s["store_id"] == "BV-A")
+    assert out["drift_count"] == 0 and _tasks(db) == []
+    assert bva["compared"] == 1 and bva["unknown"] == 1  # SKU-2 compared, SKU-1 unknown
+
+
+def test_r18_a_malformed_node_costs_only_itself():
+    """Review item 6. A location that is a string raises inside the parse; the
+    other items of the batch stand (no 'tick error' for the whole night).
+    Drop the per-node try/except -> the call returns None -> fails."""
+    bad = {"node": {"location": "gid://shopify/Location/1001", "quantities": [{"name": "available", "quantity": 1}]}}
+    gql = _levels_gql({INV_1: [bad], INV_2: [_edge(LOC_A, [{"name": "available", "quantity": 4}])]})
+    assert _run(sp.shopify_levels_by_item(None, [INV_1, INV_2], graphql=gql)) == {INV_2: {LOC_A: 4}}
+    db = _db({"SKU-1": {"BV-A": 1}})
+    out = _run(sp.run_parity_tick(db, graphql=gql))
+    assert out["checked"] is True and out["compared"] > 0
+
+
+def test_r18_the_same_location_twice_is_unknown_not_summed():
+    """Review item 9. Two edges for LOC_A with 3 each used to sum to 6 (a false
+    drift). Restore `per_location.get(loc, 0) + ...` -> {LOC_A: 6} -> fails."""
+    q = [{"name": "available", "quantity": 3}]
+    gql = _levels_gql({INV_1: [_edge(LOC_A, q), _edge(LOC_A, q)], INV_2: [_edge(LOC_A, q)]})
+    assert _run(sp.shopify_levels_by_item(None, [INV_1, INV_2], graphql=gql)) == {INV_2: {LOC_A: 3}}
+
+
+def test_r18_an_item_shopify_answers_null_is_missing_and_closes_its_task():
+    """Review item 7. Night 1 names SKU-2 (IMS 5 vs Shopify 0 at BV-A); night 2
+    Shopify answers INV_2 null (deleted in admin): it lands in
+    missing_on_shopify and the task closes. Delete `out[gid] = None` for a
+    null node -> the item reads unknown, SKU-2 stays owed, the task stays
+    OPEN -> fails."""
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 5, "BV-B": 0}})
+    _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 0, LOC_B: 0}})))
+    assert _tasks(db)[0]["payload"]["skus"] == ["SKU-2"]
+    out = _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 1, LOC_B: 1}})))
+    assert out["missing_on_shopify"] == ["SKU-2"]
+    assert out["tasks"]["closed"] == ["BV-A"] and _tasks(db)[0]["status"] == "COMPLETED"
+
+
+def test_r18_the_task_names_each_shop_as_the_picker_does():
+    """Review items 4 and 8. The picker shows store_name; the task says "Better
+    Vision Bokaro (BV-BKR)" (name AND code) in the title and every mention,
+    and points at the sidebar entry. Back to `store_code or store_name` ->
+    "BV-BKR" matches no picker option -> fails."""
+    db = _db({"SKU-1": {"BV-A": 5, "BV-B": 1}})
+    for st in db.get_collection("stores").docs:
+        if st["store_id"] == "BV-A":
+            st["store_code"], st["store_name"] = "BV-BKR", "Better Vision Bokaro"
+    _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {}})))
+    (task,) = _tasks(db)
+    assert task["title"] == "Shopify stock drift at Better Vision Bokaro (BV-BKR)"
+    assert "pick Better Vision Bokaro (BV-BKR)," in task["description"]
+    assert "Online Stock (sidebar, Stock & supply" in task["description"]
+    assert task["store_id"] == "BV-A"
+
+
+@pytest.mark.parametrize(
+    "store,label",
+    [
+        ({"store_id": "S1", "store_name": "Bokaro", "store_code": "BV-BKR"}, "Bokaro (BV-BKR)"),
+        ({"store_id": "S1", "store_name": "BV-BKR", "store_code": "BV-BKR"}, "BV-BKR"),
+        ({"store_id": "S1", "store_code": "BV-BKR"}, "BV-BKR"),
+        ({"store_id": "S1", "store_name": "Bokaro"}, "Bokaro"),
+        ({"store_id": "S1"}, "S1"),
+    ],
+)
+def test_r18_shop_label_matches_the_picker(store, label):
+    assert sp.shop_label(store) == label
+
+
+def _shared_db():
+    """SKU-1 and SKU-2 both carry INV_1 (two IMS products on one Shopify
+    item), SKU-3 has its own INV_3 and drifts at BV-A."""
+    db = _db({"SKU-1": {"BV-A": 3}, "SKU-2": {"BV-A": 0}})
+    db.get_collection("catalog_variants").docs[1]["shopify_inventory_item_id"] = INV_1
+    db.get_collection("products").insert_one({"product_id": "p3", "sku": "SKU-3"})
+    db.get_collection("catalog_products").insert_one(_listing(3, "SKU-3"))
+    db.get_collection("catalog_variants").insert_one(
+        {"sku": "SKU-3", "parent_product_id": "c3", "shopify_inventory_item_id": INV_3})
+    db.get_collection("stock_units").insert_many(
+        [{"stock_id": f"S3-{i}", "product_id": "p3", "store_id": "BV-A", "status": "AVAILABLE"} for i in range(6)])
+    return db
+
+
+INV_3 = "gid://shopify/InventoryItem/93"
+
+
+def test_r18_skus_sharing_one_shopify_item_are_in_no_view_and_named_apart(monkeypatch):
+    """Review item 1. The writer sends NEITHER of two SKUs on one Shopify item
+    (_duplicates_or_error), so parity, the reconcile view and the Stock Tally
+    skip both through the one live reader, and the shop's task names them
+    separately ("fix in IMS"), never as drift to set in Shopify. Drop the
+    duplicate guard from live_listing_split -> SKU-1 and SKU-2 are compared
+    (SKU-2: IMS 0 vs Shopify 3) -> fails."""
+    from api.services import online_sync_health as osh
+    from api.services.shopify_push.inventory import live_listing_split, skus_on_live_listings
+
+    db = _shared_db()
+    live, shared = live_listing_split(db, ["SKU-1", "SKU-2", "SKU-3"], strict=True)
+    assert live == {"SKU-3"} and shared == {"SKU-1", "SKU-2"}
+    assert skus_on_live_listings(db, ["SKU-1", "SKU-2", "SKU-3"], strict=True) == {"SKU-3"}
+    levels = {INV_1: {LOC_A: 3, LOC_B: 0}, INV_3: {LOC_A: 1, LOC_B: 0}, INV_2: {}}
+    out = _run(sp.run_parity_tick(db, graphql=_shopify(levels)))
+    assert [d["sku"] for d in out["drift"]] == ["SKU-3"]
+    assert out["shared_item_skus"] == ["SKU-1", "SKU-2"]
+    (task,) = _tasks(db)
+    assert "Two IMS products share one Shopify item - fix in IMS" in task["description"]
+    assert "SKU-1, SKU-2" in task["description"]
+    assert task["payload"]["skus"] == ["SKU-3"]
+    # The other two readers skip them as well.
+    monkeypatch.setattr("api.services.shopify_push._graphql", _shopify(levels))
+    tally = _run(osh.stock_tally_live(db))
+    assert {r["sku"] for r in tally["items"]} == {"SKU-3"}
+    page = _reconcile_page(monkeypatch, db, levels, "BV-A")
+    assert {r["sku"] for r in page["items"] if r["status"] != "NOT_ONLINE"} == {"SKU-3"}
+
+
+def test_r18_an_unreadable_claim_guard_is_unknown_never_nothing_shared(monkeypatch):
+    """Review item 1: the claim read raising is UNKNOWN. The strict reader
+    raises (parity: nothing compared, no task touched); fail-soft gives
+    nothing live. Swallow the claim error as {} -> SKU-1 and SKU-2 read live
+    -> fails."""
+    from api.services import online_catalog
+    from api.services.shopify_push.inventory import skus_on_live_listings
+
+    db = _shared_db()
+
+    def boom(db_, gids):
+        raise RuntimeError("claim read died")
+
+    monkeypatch.setattr(online_catalog, "skus_claiming_inventory_items", boom)
+    with pytest.raises(Exception):
+        skus_on_live_listings(db, ["SKU-3"], strict=True)
+    assert skus_on_live_listings(db, ["SKU-3"]) == set()
+    out = _run(sp.run_parity_tick(db, graphql=_shopify({})))
+    assert out["checked"] is False and "catalog read failed" in out["reason"]

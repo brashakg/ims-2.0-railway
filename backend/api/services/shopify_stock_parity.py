@@ -374,7 +374,7 @@ async def online_non_selling_locations(db) -> set:
     return {r["id"] for r in verdict.get("rows") or [] if r.get("id") and dead_mapped_reason(r)}
 
 
-def _sample_variants(db) -> Optional[List[Dict[str, Any]]]:
+def _sample_variants(db, shared_out: Optional[List[str]] = None) -> Optional[List[Dict[str, Any]]]:
     """EVERY IMS SKU (the spine ``products``, the rule's own SKU list) on a
     LIVE listing that maps to a Shopify inventory item through THE WRITER's
     resolver, online_catalog.inventory_items_for_skus (catalog_variants
@@ -406,7 +406,7 @@ def _sample_variants(db) -> Optional[List[Dict[str, Any]]]:
     try:
         from .online_catalog import inventory_items_for_skus
         from .online_stock_writeback import _sku_to_pid
-        from .shopify_push.inventory import skus_on_live_listings
+        from .shopify_push.inventory import live_listing_split
 
         spine = [str(d.get("sku") or "").strip()
                  for d in coll.find({"sku": {"$nin": [None, ""]}}, {"_id": 0, "sku": 1})]
@@ -415,7 +415,9 @@ def _sample_variants(db) -> Optional[List[Dict[str, Any]]]:
         if resolved is None:
             return None
         retired = resolved[1]
-        on_live = skus_on_live_listings(db, spine, strict=True)
+        on_live, shared = live_listing_split(db, spine, strict=True)
+        if shared_out is not None:
+            shared_out[:] = sorted(s for s in shared if s not in retired)
         skus = [s for s in spine if s in on_live and s not in retired]
         items = inventory_items_for_skus(db, skus)
     except Exception as exc:  # noqa: BLE001
@@ -435,6 +437,36 @@ def _requested_cost(body: Any) -> Optional[int]:
         return int(cost) if cost else None
     except Exception:  # noqa: BLE001
         return None
+
+
+def _node_levels(node: Dict[str, Any], as_gid: Callable) -> Optional[Dict[str, int]]:
+    """``{location_gid: available}`` for one inventory-item node, or None when
+    ANY of its location edges cannot be read as a number (no location id, no
+    ``available`` quantity, a non-numeric or null value, the same location
+    twice): the whole item is then UNKNOWN. A location Shopify does not return
+    is a valid 0 (the item is not stocked there); one it returns unreadably is
+    not -- reading it as 0 filed a false drift at IMS 3 and hid a real one at
+    IMS 0. Raises on a structurally odd node (the caller reads it unknown)."""
+    conn = node.get("inventoryLevels") or {}
+    if (conn.get("pageInfo") or {}).get("hasNextPage"):
+        return None
+    per_location: Dict[str, int] = {}
+    for edge in conn.get("edges") or []:
+        lnode = edge.get("node") if isinstance(edge, dict) else None
+        if not isinstance(lnode, dict):
+            return None
+        loc = as_gid(str((lnode.get("location") or {}).get("id") or ""), "Location")
+        quantities = lnode.get("quantities")
+        if not loc or loc in per_location or not isinstance(quantities, list):
+            return None
+        availables = [q for q in quantities if isinstance(q, dict) and q.get("name") == "available"]
+        if len(availables) != 1:
+            return None
+        try:
+            per_location[loc] = int(availables[0].get("quantity"))
+        except (TypeError, ValueError, OverflowError):
+            return None
+    return per_location
 
 
 def _batch_levels(body: Any, chunk: List[str], as_gid: Callable) -> Optional[Dict[str, Any]]:
@@ -459,24 +491,12 @@ def _batch_levels(body: Any, chunk: List[str], as_gid: Callable) -> Optional[Dic
             continue
         if not isinstance(node, dict) or as_gid(str(node.get("id") or ""), "InventoryItem") != gid:
             continue
-        conn = node.get("inventoryLevels") or {}
-        if (conn.get("pageInfo") or {}).get("hasNextPage"):
-            continue
-        per_location: Dict[str, int] = {}
-        for edge in conn.get("edges") or []:
-            lnode = edge.get("node") if isinstance(edge, dict) else None
-            if not isinstance(lnode, dict):
-                continue
-            loc = as_gid(str((lnode.get("location") or {}).get("id") or ""), "Location")
-            if not loc:
-                continue
-            for q in lnode.get("quantities") or []:
-                if isinstance(q, dict) and q.get("name") == "available":
-                    try:
-                        per_location[loc] = per_location.get(loc, 0) + int(q.get("quantity") or 0)
-                    except (TypeError, ValueError):
-                        pass
-        out[gid] = per_location
+        try:
+            per_location = _node_levels(node, as_gid)
+        except Exception:  # noqa: BLE001 -- one malformed node costs only itself
+            per_location = None
+        if per_location is not None:
+            out[gid] = per_location
     return out
 
 
@@ -586,12 +606,25 @@ def _named(rows: List[Dict[str, Any]]) -> str:
     return ", ".join(one(d) for d in rows)
 
 
+def shop_label(store: Dict[str, Any]) -> str:
+    """A shop as the Online Stock picker spells it (store_name, else the code,
+    else the id), with its code beside it when they differ: "Better Vision
+    Bokaro (BV-BKR)". The task tells a manager to pick this shop, so the text
+    must match an option on the page."""
+    sid = str(store.get("store_id") or "").strip()
+    name = str(store.get("store_name") or "").strip()
+    code = str(store.get("store_code") or "").strip()
+    first = name or code or sid
+    return f"{first} ({code})" if code and code != first else first
+
+
 def sync_drift_task(
     repo,
     store: Dict[str, Any],
     summary: Dict[str, Any],
     *,
     mapped_skus: Iterable[str],
+    shared_skus: Iterable[str] = (),
 ) -> Optional[str]:
     """ONE shop's drift task, from that shop's own ``compare_location_parity``
     summary (source_ref ``shopify-stock-parity-drift:<store_id>``).
@@ -635,7 +668,7 @@ def sync_drift_task(
     from .task_triggers import active_tasks
 
     sid = str(store.get("store_id") or "").strip()
-    label = store.get("store_code") or store.get("store_name") or sid
+    label = shop_label(store)
     ref = _DRIFT_TASK_REF.format(store_id=sid)
     try:
         active = active_tasks(repo, ref)
@@ -669,10 +702,18 @@ def sync_drift_task(
                 f"Products: {_named(rows)}. IMS re-sends a product's number only when it changes "
                 f"in IMS (a sale, a return, a transfer, a receipt), so the numbers here are from "
                 f"the night each was compared and may be out of date. Store manager: open "
-                f"Inventory > Online Stock, pick {label}, and ask an ADMIN or SUPERADMIN to set "
+                f"Online Stock (sidebar, Stock & supply; the page is titled Online vs In-store "
+                f"Stock), pick {label}, and ask an ADMIN or SUPERADMIN to set "
                 f"each product's quantity at {label}'s location in Shopify admin to its "
                 f"Recommended number there (what IMS sends now)."
             )
+            shared = sorted(set(shared_skus or ()))
+            if shared:
+                parts.append(
+                    f"Two IMS products share one Shopify item - fix in IMS (IMS sends neither "
+                    f"number, so they are not compared): {', '.join(shared)}. Give each its own "
+                    f"Shopify variant, or clear the duplicated Shopify inventory item id."
+                )
             parts.append(
                 f"This task closes by itself on the first night every product named here "
                 f"compares clean at {label} or is no longer compared (its listing is off the "
@@ -864,7 +905,8 @@ async def run_parity_tick(
         if not creds:
             return not_compared("shopify creds not configured")
 
-        catalogue = _sample_variants(db)
+        shared_skus: List[str] = []
+        catalogue = _sample_variants(db, shared_skus)
         if catalogue is None:
             return not_compared("catalog read failed -- nothing compared, no mapped shop's task touched")
         variants = catalogue[: int(sample_limit)]
@@ -919,6 +961,7 @@ async def run_parity_tick(
                 variants, levels, claimed, await online_non_selling_locations(db)
             ),
             "missing_on_shopify": gone,
+            "shared_item_skus": shared_skus,
             "tasks": {"filed": [], "refreshed": [], "closed": []},
         }
 
@@ -928,7 +971,9 @@ async def run_parity_tick(
                 # inventory._mapped's spelling: a stored 'BV-A ' is mapped as 'BV-A'.
                 sid = str(store.get("store_id") or "").strip()
                 if sid in mapped:
-                    outcome = sync_drift_task(repo, store, per_store.get(sid) or {}, mapped_skus=mapped_skus)
+                    outcome = sync_drift_task(
+                        repo, store, per_store.get(sid) or {}, mapped_skus=mapped_skus, shared_skus=shared_skus
+                    )
                     if outcome:
                         snapshot["tasks"][outcome].append(sid)
             snapshot["tasks"]["closed"] += retire_unmapped_drift_tasks(repo, mapped)
