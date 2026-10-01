@@ -267,10 +267,22 @@ def _assert_serialized_stock_available(
             continue
         pid = line.get("product_id") or ""
         sid = line.get("stock_id")
+        qty = int(line.get("quantity") or 1)
         if sid:
-            explicit_units.append((str(sid), pid, line.get("product_name") or pid))
-            continue  # explicit unit -> validated by _assert_explicit_unit_sellable
-        need[pid] = need.get(pid, 0) + int(line.get("quantity") or 1)
+            sid, label = str(sid), line.get("product_name") or pid
+            if any(sid == u[0] for u in explicit_units):
+                # Else _mark_units_sold serves the repeat line first-available.
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"'{label}' (unit {sid}) is on this bill twice. One unit "
+                        f"can be sold once -- remove the extra line."
+                    ),
+                )
+            explicit_units.append((sid, pid, label))
+            qty -= 1  # the scanned unit; any extra quantity sells first-available
+        if qty > 0:
+            need[pid] = need.get(pid, 0) + qty
 
     for sid, pid, label in explicit_units:
         _assert_explicit_unit_sellable(stock_repo, sid, pid, label, store_id)
@@ -286,6 +298,15 @@ def _assert_serialized_stock_available(
             avail = stock_repo.find_available(pid, store_id)
         except Exception:  # noqa: BLE001
             continue  # availability lookup failed -> fail-soft
+        if explicit_units:
+            # A unit scanned onto this bill is its own line's: a first-available
+            # line of the same product needs ANOTHER unit.
+            try:
+                flt = stock_repo.sellable_filter(pid, store_id)
+                flt["stock_id"] = {"$in": [u[0] for u in explicit_units]}
+                avail -= stock_repo.count(flt)
+            except Exception:  # noqa: BLE001 -- old repo: count as before
+                pass
         if avail < qty:
             # F2: when the shortfall is caused by the EXPIRY FLOOR, say so --
             # "0 available" on a shelf with 6 visible boxes is not an actionable

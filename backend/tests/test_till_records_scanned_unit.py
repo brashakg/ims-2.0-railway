@@ -11,19 +11,24 @@ Owner ruling 2026-09-30 00:10 (POS asks, both answered YES):
       roles; what the till shows stays exactly the same.
 
 Finding ids (the frontend half, TSU-1..3, is pinned in
-frontend/src/components/pos/__tests__/tillRecordsScannedUnit.test.ts):
-  TSU-4  the order line records no unit barcode, so the barcode trace of the
-         frame that was handed over shows no sale.
-  TSU-5  the same unit scanned onto two lines of one bill: the second line
-         silently sells the FIRST AVAILABLE unit instead (a scanned line must
-         never be served first-available).
+frontend/src/components/pos/__tests__/tillRecordsScannedUnit.test.ts), each
+fixed and pinned by a plain test below:
+  TSU-4  the barcode trace of the frame handed over showed no sale (it matched
+         only items.barcode, which no order line stores); it now also matches
+         the line that names the unit's stock_id.
+  TSU-5  the same unit scanned onto two lines of one bill sold the FIRST
+         AVAILABLE unit on the second line; it is now refused (409).
+  TSU-6  once scanned lines name their unit, a typed line of the same product
+         could oversell past it (the gate counted the scanned unit as free for
+         the typed line, and the extra quantity on a scanned line went
+         unchecked); the gate now holds the scanned unit for its own line.
   TSC-1  GET /inventory/barcode/{code} handed counter roles the unit's cost and
          the joined product's cost / landed cost; now through cost_mask.
   TSC-2  GET /inventory/stock/barcode/{code} did the same.
 
-The server half of (1) that ALREADY works (an explicit stock_id is honoured,
+The server half of (1) that already worked (an explicit stock_id is honoured,
 refused when not AVAILABLE, and the unit label then finds its order) is pinned
-by plain passing tests here -- the till simply never sends the stock_id yet.
+by plain tests too.
 
 Engine: mongomock with the REAL StockRepository / OrderRepository, so the
 atomic claim, the guarded mark_sold and the trace's orders query are the real
@@ -215,12 +220,6 @@ def test_scanned_unit_no_longer_available_is_refused_not_swapped(client, till):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="TSU-4: the order line records no unit barcode (OrderItemCreate has no "
-    "barcode; create.py never stamps one), so the barcode trace of the frame "
-    "handed over lists no sale",
-)
 def test_barcode_trace_of_the_scanned_frame_shows_its_sale(client, till):
     r = _sell(client, [_line(stock_id=UNIT_B["stock_id"], barcode=UNIT_B["barcode"])])
     assert r.status_code in (200, 201), r.text
@@ -236,12 +235,6 @@ def test_barcode_trace_of_the_scanned_frame_shows_its_sale(client, till):
     assert shelf.json()["sales"] == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="TSU-5: the same unit scanned onto two lines passes the pre-persist gate "
-    "twice, then _mark_units_sold serves the second line FIRST-AVAILABLE "
-    "(orders/stock.py explicit_sid-in-used branch) instead of refusing it",
-)
 def test_same_unit_scanned_twice_on_one_bill_is_refused(client, till):
     scanned = _line(stock_id=UNIT_B["stock_id"])
     r = _sell(client, [scanned, dict(scanned)])
@@ -250,6 +243,39 @@ def test_same_unit_scanned_twice_on_one_bill_is_refused(client, till):
     # Nothing left the shelf.
     assert _unit(till, "SU-A")["status"] == "AVAILABLE"
     assert _unit(till, "SU-B")["status"] == "AVAILABLE"
+
+
+def test_typed_line_before_a_scanned_line_sells_both_units(client, till):
+    """FIFO would pick SU-A for the typed line and SU-A is scanned onto the
+    NEXT line: both units still leave, to this order."""
+    r = _sell(client, [_line(), _line(stock_id=UNIT_A["stock_id"])])
+    assert r.status_code in (200, 201), r.text
+    order_id = _order_id(r)
+    assert _unit(till, "SU-A")["order_id"] == order_id
+    assert _unit(till, "SU-B")["status"] == "SOLD" and _unit(till, "SU-B")["order_id"] == order_id
+
+
+def test_typed_line_cannot_oversell_past_the_scanned_unit(client, till):
+    """TSU-6: only SU-A is left and it is scanned; a typed line of the same
+    product has nothing to take -- refused (oversell blocks), nothing leaves."""
+    till["db"].get_collection("stock_units").update_one(
+        {"stock_id": "SU-B"}, {"$set": {"status": "SOLD", "order_id": "ORD-EARLIER"}}
+    )
+    r = _sell(client, [_line(), _line(stock_id=UNIT_A["stock_id"])])
+    assert r.status_code == 409, r.text
+    assert "insufficient stock" in r.text.lower(), r.text
+    assert _unit(till, "SU-A")["status"] == "AVAILABLE"
+
+
+def test_extra_quantity_on_a_scanned_line_is_oversell_checked(client, till):
+    """The scanned unit plus one more first-available: with SU-B gone there is
+    no second unit, so the bill is refused rather than selling one."""
+    till["db"].get_collection("stock_units").update_one(
+        {"stock_id": "SU-B"}, {"$set": {"status": "SOLD", "order_id": "ORD-EARLIER"}}
+    )
+    r = _sell(client, [_line(stock_id=UNIT_A["stock_id"], quantity=2)])
+    assert r.status_code == 409, r.text
+    assert _unit(till, "SU-A")["status"] == "AVAILABLE"
 
 
 # ---------------------------------------------------------------------------
