@@ -286,6 +286,7 @@ async def export_debit_note_tally(
 ):
     """Tally import XML carrying the Debit Note voucher (balanced; debits ==
     credits). Accounts roles only. Store-IDOR guarded."""
+    require_payables(current_user, "The debit note Tally export")
     eng = _engine()
     doc = eng.get(debit_note_id)
     if doc is None:

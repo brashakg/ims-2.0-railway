@@ -212,7 +212,8 @@ def _seed(db) -> None:
             "status": status,
             "total_amount": total,
             "sent_at": sent_at,
-            "created_at": (sent_at or "2026-09-20T09:00:00")[:10] + "T08:00:00",
+            # Raised two hours before it is sent (every fixture order is sent at 10:00).
+            "created_at": (sent_at or "2026-09-20T10:00:00").replace("T10:00", "T08:00"),
             "items": items,
         }
 
