@@ -277,7 +277,7 @@ def test_repo_still_allows_clearing_a_gtin():
 # ---------------------------------------------------------------------------
 
 
-def test_push_sends_an_empty_barcode_when_the_stored_gtin_is_junk():
+def test_push_omits_the_barcode_when_the_stored_gtin_is_junk():
     from api.services.shopify_push import build_variant_price_inputs
 
     rows, _ = build_variant_price_inputs(
@@ -285,8 +285,7 @@ def test_push_sends_an_empty_barcode_when_the_stored_gtin_is_junk():
         [{"shopify_variant_id": "gid://shopify/ProductVariant/1", "gtin": TAG_STRING}],
     )
     assert len(rows) == 1
-    # Sent EMPTY, never the junk: an omitted key left Shopify's old barcode.
-    assert rows[0]["barcode"] == ""
+    assert "barcode" not in rows[0]
 
 
 def test_push_sends_a_valid_barcode():
@@ -330,24 +329,24 @@ def test_push_never_leaks_our_internal_store_barcode_as_a_gtin():
         },
         [{"sku": "P1-A"}],
     )
-    assert rows[0]["row"]["barcode"] == ""
+    assert "barcode" not in rows[0]["row"]
 
 
-def test_a_cleared_gtin_clears_the_barcode_on_shopify():
-    """Clearing the GTIN in IMS must reach Shopify. Both push builders used to
-    OMIT the barcode key when there was no publishable GTIN, and
-    productVariantsBulkUpdate leaves an omitted field as it was -- so the old
-    barcode (and Google's feed value) stayed after IMS cleared it."""
+def test_a_live_product_without_a_gtin_keeps_its_shopify_barcode():
+    """Decided 2026-10-01: IMS sends a barcode only when it holds a valid GTIN.
+    productVariantsBulkUpdate leaves an omitted field as Shopify has it, so a
+    price or copy edit on a live product with no GTIN in IMS (cleared, never
+    set, or junk) must OMIT the key -- sending "" would blank the barcode on
+    Shopify, including one typed in Shopify admin, and Google's GTIN match."""
     from api.services.shopify_push import (
         build_variant_price_inputs,
         build_variant_seed_rows,
     )
 
-    cleared = {"sku": "P1", "mrp": 5000, "offer_price": 4000, "gtin": None}
-    rows, _ = build_variant_price_inputs(
-        cleared,
-        [{"shopify_variant_id": "gid://shopify/ProductVariant/1", "gtin": ""}],
-    )
-    assert rows[0]["barcode"] == ""
-    seed = build_variant_seed_rows(cleared, [])
-    assert seed[0]["row"]["barcode"] == ""
+    for gtin in (None, "", TAG_STRING):
+        product = {"sku": "P1", "mrp": 5000, "offer_price": 4000, "gtin": gtin}
+        rows, _ = build_variant_price_inputs(
+            product, [{"shopify_variant_id": "gid://shopify/ProductVariant/1", "gtin": gtin}]
+        )
+        assert "barcode" not in rows[0], gtin
+        assert "barcode" not in build_variant_seed_rows(product, [])[0]["row"], gtin

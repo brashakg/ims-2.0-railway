@@ -381,8 +381,7 @@ def build_variant_price_inputs(
     compareAtPrice (mrp when > price, else EXPLICIT null so a stale
     strikethrough on Shopify is cleared), barcode (the variant's `gtin` --
     the two-barcode model: gtin/barcode IS the GTIN pushed to Shopify;
-    `store_barcode` is the physical join key and is NEVER pushed; "" when
-    there is no publishable GTIN, so a cleared one is cleared on Shopify).
+    `store_barcode` is the physical join key and is NEVER pushed).
 
     SKIPS (counted, returned as the second tuple member):
       - variants with no stored shopify_variant_id -- they get their gid when
@@ -405,10 +404,13 @@ def build_variant_price_inputs(
             "price": f"{price:.2f}",
             "compareAtPrice": f"{mrp:.2f}" if mrp > price else None,
         }
-        # ALWAYS sent: productVariantsBulkUpdate leaves an omitted field as it
-        # was, so no publishable GTIN (cleared, or junk) goes out as "" -- what
-        # Shopify itself holds for "no barcode" -- or the old one stays live.
-        row["barcode"] = _publishable_gtin(v.get("gtin"), v.get("barcode")) or ""
+        # Sent ONLY when IMS holds a publishable GTIN (decided 2026-10-01): an
+        # omitted barcode is left as Shopify has it, so a live product whose
+        # IMS twin has none -- most of the catalogue -- keeps the one typed in
+        # Shopify admin, and Google keeps its GTIN match. IMS never blanks it.
+        barcode = _publishable_gtin(v.get("gtin"), v.get("barcode"))
+        if barcode:
+            row["barcode"] = barcode
         rows.append(row)
     return rows, skipped
 

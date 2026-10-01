@@ -109,9 +109,8 @@ def build_variant_seed_rows(
                          EXPLICIT None (GraphQL null) so a stale strikethrough
                          on Shopify is CLEARED -- the same contract as
                          build_variant_price_inputs
-        barcode          the GTIN (variant gtin/barcode, else the product's), ""
-                         when none is publishable -- `store_barcode` is the
-                         physical join key and is never pushed
+        barcode          the GTIN (variant gtin/barcode, else the product's) --
+                         `store_barcode` is the physical join key and is never pushed
         inventoryItem.sku the IMS SKU (variant sku, else the product sku) -- in
                          the 2024-04+ product model the SKU lives on the
                          inventory item, NOT on the variant
@@ -147,10 +146,8 @@ def build_variant_seed_rows(
                 row["compareAtPrice"] = None
         if sku:
             row["inventoryItem"] = {"sku": sku}
-        # "" when there is no publishable GTIN: an omitted barcode is left as
-        # it was on Shopify, so a cleared GTIN would stay live (same rule as
-        # build_variant_price_inputs).
-        row["barcode"] = str(barcode or "")
+        if barcode:
+            row["barcode"] = str(barcode)
         if not row.get("price") and not row.get("inventoryItem"):
             # No price and no SKU -> nothing worth a mutation for this variant.
             continue
