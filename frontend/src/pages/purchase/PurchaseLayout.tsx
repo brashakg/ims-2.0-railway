@@ -25,7 +25,8 @@ import {
 } from 'lucide-react';
 import { useIsOnlineStore } from '../../hooks/useIsOnlineStore';
 import { useAuth } from '../../context/AuthContext';
-import { PurchaseShopPicker } from './purchaseShop';
+import { PurchaseShopPicker, usePurchaseShop, useShopLabel } from './purchaseShop';
+import { APPROVE_ROLES } from './invoices/shared';
 
 const SECTIONS = [
   { path: '/purchase/orders', label: 'Purchase Orders', icon: FileText },
@@ -35,8 +36,9 @@ const SECTIONS = [
   { path: '/purchase/vendor-returns', label: 'Vendor Returns', icon: AlertTriangle },
   { path: '/purchase/analytics', label: 'Analytics', icon: TrendingUp },
   // Audit F56: what we ordered, received, were billed, paid and owe -- the
-  // supplier-balance readers only (the route and the API gate the same set).
-  { path: '/purchase/this-month', label: 'This month', icon: CalendarDays, roles: ['ACCOUNTANT'] as const },
+  // supplier-balance readers only (APPROVE_ROLES = the API's _AP_ROLES; the
+  // route and the Suppliers card read the same list).
+  { path: '/purchase/this-month', label: 'This month', icon: CalendarDays, roles: APPROVE_ROLES },
 ];
 
 export function PurchaseLayout() {
@@ -46,6 +48,8 @@ export function PurchaseLayout() {
   const { pathname } = useLocation();
   const navigate = useNavigate();
   const { hasRole } = useAuth();
+  const { canPick, ownStoreId } = usePurchaseShop();
+  const ownShop = useShopLabel(ownStoreId);
 
   // Warm the sibling section chunks once the browser is idle, so the FIRST
   // click on any tab renders without the lazy-chunk download spinner (owner
@@ -98,6 +102,11 @@ export function PurchaseLayout() {
               {headerAction}
             </button>
           )}
+          {/* F63: whatever shop the filter shows, a new PO delivers to the
+              admin's own shop (W1.4) -- say which before he creates it. */}
+          {canPick && pathname === '/purchase/orders' && (
+            <span className="text-xs text-gray-500">New orders deliver to {ownShop}</span>
+          )}
         </div>
       </div>
 
@@ -119,11 +128,13 @@ export function PurchaseLayout() {
       {/* Section nav — real links, one URL per section. overflow-x-auto +
           shrink-0 keep every tab reachable on iPad portrait / phone widths
           (the row is wider than 768px; it scrolls instead of clipping).
-          gap-6: all seven tabs fit a 1024x768 landscape tablet (measured:
-          923px of 958 at gap-6; gap-8 clipped "This month" by 13px). */}
+          gap-5: all seven tabs fit a 1024x768 landscape tablet. Measured in
+          headless Chromium with Inter 500 actually loaded: the row is 941px
+          at gap-5 in a 958px box (classic scrollbar); gap-6 was 965px and
+          clipped "This month". */}
       <div className="border-b border-gray-200 overflow-x-auto">
-        <nav className="flex gap-4 tablet:gap-6 w-max min-w-full">
-          {SECTIONS.filter((s) => !s.roles || hasRole([...s.roles])).map(({ path, label, icon: Icon }) => (
+        <nav className="flex gap-4 tablet:gap-5 w-max min-w-full">
+          {SECTIONS.filter((s) => !s.roles || hasRole(s.roles)).map(({ path, label, icon: Icon }) => (
             <NavLink
               key={path}
               to={path}
