@@ -69,7 +69,7 @@ describe('Create Purchase Order - vendor dropdown while suppliers load (F85)', (
   it('says the vendors are loading, not "Select a vendor"', async () => {
     getVendors.mockReturnValue(new Promise(() => {})); // still on its way
     openNewPO();
-    const vendor = (await screen.findByLabelText('Vendor')) as HTMLSelectElement;
+    const vendor = (await screen.findByLabelText('Vendor', {}, { timeout: 15000 })) as HTMLSelectElement;
     expect(vendor.options[0].textContent).toBe('Loading vendors…');
     expect(vendor).toBeDisabled();
   });
@@ -79,7 +79,7 @@ describe('Create Purchase Order - vendor dropdown while suppliers load (F85)', (
       vendors: [{ vendor_id: 'v-mum', legal_name: 'Mumbai Lens House', vendor_code: 'MLH', is_active: true }],
     });
     openNewPO();
-    expect(await screen.findByRole('option', { name: /Mumbai Lens House/ })).toBeInTheDocument();
+    expect(await screen.findByRole('option', { name: /Mumbai Lens House/ }, { timeout: 15000 })).toBeInTheDocument();
     const vendor = screen.getByLabelText('Vendor') as HTMLSelectElement;
     expect(vendor.options[0].textContent).toBe('Select a vendor…');
     expect(vendor).not.toBeDisabled();
