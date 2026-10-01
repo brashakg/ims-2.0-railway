@@ -557,7 +557,10 @@ class TestT9HorizonNotReorderPoint:
         for da in (0, 1, 1, 2, 3, 3):
             orders.insert_one(_order("S1", "P1", days_ago=da))
         db.get_collection("stock_units").insert_one(_stock("S1", "P1", on_hand))
-        db.get_collection("products").insert_one(_product("P1", vendor="V", reorder_point=20))
+        # S1's own level (owner ruling D12: levels are per shop).
+        db.get_collection("products").insert_one(
+            {**_product("P1", vendor="V"), "reorder_levels": {"S1": 20}}
+        )
         return db
 
     def test_above_reorder_point_but_above_horizon_no_proposal(self):

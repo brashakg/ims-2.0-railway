@@ -31,6 +31,7 @@ from ...utils.ist import ist_date_str_from_stored
 from .helpers import (
     _get_db,
 )
+from ...services.reorder_policy import is_low_stock, low_stock_rows, reorder_level
 
 # ============================================================================
 # STOCK ENDPOINTS
@@ -120,9 +121,9 @@ async def get_stock(
     if stock_repo is None or product_repo is None:
         return {"items": [], "total": 0}
 
-    # Mode 1: per-product low-stock aggregation. Untouched.
+    # Mode 1: THIS shop's low-stock list (the shop's own levels, D12).
     if low_stock:
-        stock = stock_repo.find_low_stock(active_store)
+        stock = low_stock_rows(product_repo, stock_repo, store_id=active_store)
         return {"items": stock, "total": len(stock)}
 
     # Mode 2: per-unit detail for one product. Consumers (e.g. transfer
@@ -450,7 +451,10 @@ def _ledger_row(
         # api/services/reorder_policy.py. The Reorder dashboard renders that
         # state honestly instead of fabricating a quantity.
         "reorder_quantity": product.get("reorder_quantity"),
-        "reorder_point": product.get("reorder_point"),
+        # THIS shop's level (None = not set, never -1) and the one rule's
+        # low-stock verdict for it (owner ruling D12: levels are per shop).
+        "reorder_point": reorder_level(product, store_id=store_id),
+        "low_stock": is_low_stock(product, on_hand, store_id=store_id),
         # Procurement Phase 1 (additive, optional): the latest ACCEPTED GRN
         # that put stock of this product on this store's shelf, or None.
         # Shape: {"grn_number": str, "qty": int, "date": "YYYY-MM-DD"}.
