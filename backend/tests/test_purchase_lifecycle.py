@@ -1194,6 +1194,6 @@ class TestAskingForCataloguing:
         assert len(tasks.rows) == 1
         task = tasks.rows[0]
         assert task["category"] == "Catalogue"  # the catalogue managers' door
-        assert task["priority"] == "P2"
+        assert task["priority"] == "P3"  # the door's SLA: escalates after a day
         assert "Ray-Ban RB3025: needs Selling Price" in task["description"]
         assert task["status"] == "OPEN"
