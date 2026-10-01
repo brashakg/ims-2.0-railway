@@ -315,11 +315,11 @@ export function ReportsInventoryPage() {
                       <td className="text-gray-600">{p.category || '-'}</td>
                       <td className="right text-gray-700">{p.velocity_90d}</td>
                       <td className="right">
-                        <span className={p.current_stock <= p.reorder_point ? 'text-red-600 font-medium' : 'text-gray-700'}>
+                        <span className={p.low_stock ? 'text-red-600 font-medium' : 'text-gray-700'}>
                           {p.current_stock}
                         </span>
                       </td>
-                      <td className="right text-gray-600">{p.reorder_point || '-'}</td>
+                      <td className="right text-gray-600">{p.reorder_point ?? 'not set'}</td>
                       <td className="right font-medium text-bv-red-600">{p.suggested_order_qty}</td>
                       <td className="right text-gray-900">
                         ₹{(p.estimated_revenue_impact / 1000).toFixed(1)}K

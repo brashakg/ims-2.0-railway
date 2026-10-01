@@ -236,7 +236,7 @@ export default function OwnerDigestCard({ storeId }: { storeId?: string }) {
                           <span
                             className={`tabular-nums ${p.qty <= 0 ? 'text-red-600' : 'text-amber-600'}`}
                           >
-                            {p.qty} left{p.reorder_point ? ` / RP ${p.reorder_point}` : ''}
+                            {p.qty} left{p.reorder_point != null ? ` / RP ${p.reorder_point}` : ''}
                           </span>
                         </li>
                       ))}

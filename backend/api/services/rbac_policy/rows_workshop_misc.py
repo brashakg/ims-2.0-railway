@@ -410,11 +410,6 @@ ROWS: List[Dict[str, object]] = [
     },
     {"method": "GET", "path": "/api/v1/workshop/overdue", "allowed": "AUTHENTICATED"},
     {"method": "GET", "path": "/api/v1/workshop/pending", "allowed": "AUTHENTICATED"},
-    {
-        "method": "GET",
-        "path": "/api/v1/workshop/product-label",
-        "allowed": "AUTHENTICATED",
-    },
     {"method": "GET", "path": "/api/v1/workshop/ready", "allowed": "AUTHENTICATED"},
     # F13 -- remake justification taxonomy: read anywhere (the bench needs it
     # for the rework dialog), replace is owner/admin-only.

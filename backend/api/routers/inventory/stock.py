@@ -1,13 +1,17 @@
 """GET /stock - the store stock ledger, plus its GRN-cost and ledger-row builders."""
 
 from ._shared import (
+    _INVENTORY_ROLES,
+    BaseModel,
     Depends,
     Dict,
+    Field,
     HTTPException,
     List,
     Optional,
     Query,
     StockState,
+    can_access_store_scoped,
     canonical_state,
     datetime,
     get_current_user,
@@ -16,13 +20,18 @@ from ._shared import (
     is_on_hand,
     ist_date_str,
     logger,
+    require_roles,
     router,
     timedelta,
     validate_store_access,
 )
+from ...services.cost_mask import can_see_cost, mask_cost_list
+from ...services.item_events import on_hand_match
+from ...utils.ist import ist_date_str_from_stored
 from .helpers import (
     _get_db,
 )
+from ...services.reorder_policy import is_low_stock, low_stock_rows, reorder_level
 
 # ============================================================================
 # STOCK ENDPOINTS
@@ -112,15 +121,17 @@ async def get_stock(
     if stock_repo is None or product_repo is None:
         return {"items": [], "total": 0}
 
-    # Mode 1: per-product low-stock aggregation. Untouched.
+    # Mode 1: THIS shop's low-stock list (the shop's own levels, D12).
     if low_stock:
-        stock = stock_repo.find_low_stock(active_store)
+        stock = low_stock_rows(product_repo, stock_repo, store_id=active_store)
         return {"items": stock, "total": len(stock)}
 
     # Mode 2: per-unit detail for one product. Consumers (e.g. transfer
     # picker that selects specific stock_ids) want the raw stock_units rows.
     if product_id:
-        stock = stock_repo.find_by_product_store(product_id, active_store)
+        stock = mask_cost_list(
+            stock_repo.find_by_product_store(product_id, active_store), current_user
+        )
         return {"items": stock, "total": len(stock)}
 
     # Mode 3 (default): per-product ledger view. Aggregate stock_units by
@@ -229,8 +240,10 @@ def _build_store_ledger(
         because units are typically qty=1)
       - reserved count (anything canonicalising to RESERVED)
       - product master fields (sku, name, brand, category, mrp, offer_price)
-      - a representative barcode + location_code from any AVAILABLE unit
-        (so the row's Barcode + Location columns are populated)
+      - a representative location_code from any AVAILABLE unit. NOT a
+        barcode: every unit carries its own, so one unit's code on the row
+        read as the product's and changed when that unit shipped (F27). The
+        units live behind GET /inventory/units.
 
     Joins to `products` so every row carries the catalog fields the
     frontend filters/renders. Products in the catalog with no stock_units
@@ -253,7 +266,6 @@ def _build_store_ledger(
                         "product_id": 1,
                         "status": 1,
                         "quantity": 1,
-                        "barcode": 1,
                         "location_code": 1,
                     }
                 },
@@ -264,7 +276,6 @@ def _build_store_ledger(
                             "status": "$status",
                         },
                         "qty": {"$sum": {"$ifNull": ["$quantity", 1]}},
-                        "barcode": {"$first": "$barcode"},
                         "location_code": {"$first": "$location_code"},
                     }
                 },
@@ -283,11 +294,10 @@ def _build_store_ledger(
                 # ledger entirely.
                 if is_on_hand(status):
                     on_hand_by_product[pid] = on_hand_by_product.get(pid, 0) + qty
-                    # Capture a sample barcode/location from any available unit
-                    # for the Barcode + Location columns on the ledger row.
+                    # A sample location from any available unit for the
+                    # Location column on the ledger row.
                     if pid not in sample_unit_by_product:
                         sample_unit_by_product[pid] = {
-                            "barcode": row.get("barcode") or "",
                             "location_code": row.get("location_code") or "",
                         }
                 elif canonical_state(status) is StockState.RESERVED:
@@ -460,7 +470,8 @@ def _ledger_row(
         "reserved": reserved,
         "reservedQuantity": reserved,
         "reserved_quantity": reserved,
-        "barcode": sample_unit.get("barcode", "") or product.get("barcode", ""),
+        # The PRODUCT's own barcode only (F27) -- never a unit's.
+        "barcode": product.get("barcode", "") or "",
         "location": sample_unit.get("location_code", "")
         or product.get("location_code", ""),
         "location_code": sample_unit.get("location_code", "")
@@ -479,7 +490,10 @@ def _ledger_row(
         # api/services/reorder_policy.py. The Reorder dashboard renders that
         # state honestly instead of fabricating a quantity.
         "reorder_quantity": product.get("reorder_quantity"),
-        "reorder_point": product.get("reorder_point"),
+        # THIS shop's level (None = not set, never -1) and the one rule's
+        # low-stock verdict for it (owner ruling D12: levels are per shop).
+        "reorder_point": reorder_level(product, store_id=store_id),
+        "low_stock": is_low_stock(product, on_hand, store_id=store_id),
         # Procurement Phase 1 (additive, optional): the latest ACCEPTED GRN
         # that put stock of this product on this store's shelf, or None.
         # Shape: {"grn_number": str, "qty": int, "date": "YYYY-MM-DD"}.
@@ -510,3 +524,144 @@ def _ledger_row(
             product.get("images") if isinstance(product.get("images"), list) else []
         ),
     }
+
+
+# ============================================================================
+# UNITS VIEW + LABEL PRINT RECORD (F26 / F27)
+# ============================================================================
+
+# ponytail: one read capped at 500 units per product/receipt at one shop. The
+# units still in the shop are read FIRST, so the cap only ever trims history
+# (sold / transferred out); page it if 500 on one shelf ever happens.
+_UNITS_LIMIT = 500
+
+
+@router.get("/units")
+async def list_units(
+    store_id: Optional[str] = Query(None),
+    product_id: Optional[str] = Query(None),
+    grn_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Every serialised unit of one product -- or of one goods receipt -- at a shop.
+
+    The ledger is one row per product; receiving mints one stock_unit, with its
+    own barcode, per physical piece. This is where those pieces are listed and
+    their labels printed from. Each unit carries the label fields (brand, model,
+    colour, size, MRP) so the label renderer needs no second fetch. cost_price
+    only for roles that already see cost (cost_mask.can_see_cost).
+    """
+    if not product_id and not grn_id:
+        raise HTTPException(status_code=400, detail="Provide product_id or grn_id")
+    flt: Dict = {}
+    # A receipt's units sit at the shop it was received into, which need not be
+    # the caller's active store (an admin receiving for another shop). Without
+    # an explicit store, a receipt read is scoped per unit below instead.
+    if store_id or not grn_id:
+        active_store = validate_store_access(store_id, current_user)
+        if not active_store:
+            raise HTTPException(status_code=400, detail="Pick a store first")
+        flt["store_id"] = active_store
+    stock_repo = get_stock_repository()
+    product_repo = get_product_repository()
+    if stock_repo is None or product_repo is None:
+        return {"units": [], "total": 0}
+
+    if product_id:
+        flt["product_id"] = product_id
+    if grn_id:
+        flt["source_type"] = "GRN"
+        flt["source_id"] = grn_id
+    # "In the shop" (the only units a label is for) is the ONE physical rule,
+    # item_events.on_hand_match / is_on_hand with include_reserved=True: on the
+    # shelf or reserved for an order. The ledger's "N units" (stock + reserved)
+    # buckets the same rule; tests/test_on_hand_is_one_rule.py pins the two.
+    in_shop = on_hand_match(include_reserved=True)
+    found = stock_repo.find_many(
+        {"$and": [flt, in_shop]}, sort=[("created_at", 1)], limit=_UNITS_LIMIT
+    )
+    if len(found) < _UNITS_LIMIT:  # then the newest history, up to the cap
+        found += stock_repo.find_many(
+            {"$and": [flt, {"$nor": [in_shop]}]},
+            sort=[("created_at", -1)],
+            limit=_UNITS_LIMIT - len(found),
+        )
+    docs = [d for d in found if can_access_store_scoped(d.get("store_id"), current_user)]
+
+    def _in_shop(d: Dict) -> bool:
+        return is_on_hand(d.get("status"), include_reserved=True)
+
+    # Units still in the shop first (the ones that need a label), oldest first.
+    docs.sort(key=lambda d: (not _in_shop(d), str(d.get("created_at") or "")))
+
+    from ...services.product_master import existing_product_summary
+
+    products: Dict[str, Dict] = {}
+    show_cost = can_see_cost(current_user)
+    units = []
+    for d in docs:
+        pid = d.get("product_id") or ""
+        if pid not in products:
+            products[pid] = existing_product_summary(product_repo.find_by_id(pid) or {})
+        p = products[pid]
+        # The one on-hand rule decides AVAILABLE (a legacy 'in_stock' or a unit
+        # with no status is on the shelf); anything else by its canonical name.
+        raw = d.get("status")
+        state = StockState.AVAILABLE if is_on_hand(raw) else canonical_state(raw)
+        unit = {
+            "stock_id": d.get("stock_id"),
+            "product_id": pid,
+            "barcode": d.get("barcode") or "",
+            "status": state.value if state else (str(raw or "").strip().upper() or "UNKNOWN"),
+            # The dialog labels exactly these; it keeps no status list of its own.
+            "in_shop": _in_shop(d),
+            "grn_number": d.get("grn_number") or "",
+            "source": d.get("source_type") or d.get("source") or "",
+            # A transfer re-homes the unit and stamps received_at; created_at
+            # is when (and where) it was first minted.
+            "transfer_number": d.get("transfer_number") or "",
+            "from_store_id": d.get("from_store_id") or "",
+            "received_on": ist_date_str_from_stored(
+                d.get("received_at") or d.get("created_at")
+            ),
+            "barcode_printed": bool(d.get("barcode_printed")),
+            "location_code": d.get("location_code") or "",
+            "name": p.get("name") or "",
+            "brand": p.get("brand") or "",
+            "model": p.get("model") or "",
+            "colour": p.get("colour_code") or "",
+            "size": p.get("size") or "",
+            "mrp": p.get("mrp"),
+        }
+        if show_cost:
+            unit["cost_price"] = d.get("cost_price")
+        units.append(unit)
+    return {"units": units, "total": len(units)}
+
+
+class BarcodePrintedRequest(BaseModel):
+    stock_ids: List[str] = Field(..., min_length=1, max_length=_UNITS_LIMIT)
+
+
+@router.post("/units/barcode-printed")
+async def mark_units_barcode_printed(
+    body: BarcodePrintedRequest,
+    current_user: dict = Depends(require_roles(*_INVENTORY_ROLES)),
+):
+    """Record that these units' labels were sent to the print dialog (F26).
+
+    Called by the label renderer only after the print window opened. A unit in
+    a shop the caller cannot reach is skipped, never 403'd, so one stray id
+    cannot sink a whole receipt's record.
+    """
+    stock_repo = get_stock_repository()
+    if stock_repo is None:
+        raise HTTPException(status_code=503, detail="Stock store unavailable")
+    updated: List[str] = []
+    for sid in dict.fromkeys(body.stock_ids):
+        unit = stock_repo.find_by_id(sid)
+        if not unit or not can_access_store_scoped(unit.get("store_id"), current_user):
+            continue
+        if stock_repo.mark_barcode_printed(sid):
+            updated.append(sid)
+    return {"updated": len(updated), "stock_ids": updated}

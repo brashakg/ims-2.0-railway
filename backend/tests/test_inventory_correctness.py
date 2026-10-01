@@ -268,20 +268,26 @@ class TestNonMovingStockFixes:
 # Owner decision 2026-07-04: reorder_quantity <= 0 (the -1 default) means
 # auto-reorder is DISABLED (api/services/reorder_policy.py). The inventory-
 # side UI reads two feeds that previously dropped this signal:
-#   * /inventory/stock ledger rows must pass reorder_quantity/reorder_point
-#     through RAW (None when absent) -- no fabricated defaults.
+#   * /inventory/stock ledger rows must pass reorder_quantity through RAW
+#     (None when absent) and carry THIS shop's reorder level (owner ruling
+#     D12: None = not set, never -1, never the old chain-wide reorder_point).
 #   * /inventory/low-stock items must carry auto_reorder_disabled so
 #     consumers can skip opted-out products without hiding the alert.
 
 
 class TestReorderMinus1Passthrough:
     def test_stock_ledger_passes_reorder_fields_through_raw(self, inv_client, mongo_db):
-        """Ledger rows carry reorder_quantity / reorder_point verbatim:
-        -1 stays -1 (disabled sentinel), a missing field stays None (legacy),
-        and a real value stays itself. Nothing is defaulted to 10/20."""
-        pid_off = _add_product(mongo_db, reorder_quantity=-1, reorder_point=5)
-        pid_legacy = _add_product(mongo_db)  # no reorder fields at all
-        pid_on = _add_product(mongo_db, reorder_quantity=12, reorder_point=4)
+        """Ledger rows carry reorder_quantity verbatim: -1 stays -1 (disabled
+        sentinel), a missing field stays None (legacy), a real value stays
+        itself. reorder_point is THIS shop's level: None when not set here,
+        whatever the old chain value. Nothing is defaulted to 10/20."""
+        pid_off = _add_product(
+            mongo_db, reorder_quantity=-1, reorder_levels={"ST-CORR": 5}
+        )
+        pid_legacy = _add_product(mongo_db, reorder_point=7)  # chain value only
+        pid_on = _add_product(
+            mongo_db, reorder_quantity=12, reorder_levels={"ST-CORR": 4, "ST-X": 9}
+        )
 
         resp = inv_client.get("/inventory/stock")
         assert resp.status_code == 200, resp.text
@@ -305,9 +311,10 @@ class TestReorderMinus1Passthrough:
         product with reorder_quantity=-1, False for reorder_quantity=5, and
         False (legacy-enabled) when the field is missing. The alert list
         still contains ALL low-stock products -- the flag only informs."""
-        pid_off = _add_product(mongo_db, reorder_quantity=-1)
-        pid_on = _add_product(mongo_db, reorder_quantity=5)
-        pid_legacy = _add_product(mongo_db)
+        level = {"reorder_levels": {"ST-CORR": 5}}  # this shop's own level
+        pid_off = _add_product(mongo_db, reorder_quantity=-1, **level)
+        pid_on = _add_product(mongo_db, reorder_quantity=5, **level)
+        pid_legacy = _add_product(mongo_db, **level)
         for pid in (pid_off, pid_on, pid_legacy):
             _add_unit(mongo_db, pid)  # 1 AVAILABLE unit -> low stock
 

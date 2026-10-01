@@ -22,6 +22,7 @@ from ...dependencies import (
 from ...services import stock_value
 from ...services.cost_mask import can_see_cost
 from ...services.name_resolver import order_actor_id, order_actor_name_map
+from ...services.reorder_policy import low_stock_rows
 from ._shared import (
     _REPORT_FINANCE_ROLES,
     _category_breakdown,
@@ -108,7 +109,7 @@ async def dashboard_stats(
 
     # Fetch inventory data
     if stock_repo is not None:
-        low_stock = stock_repo.find_low_stock(active_store, threshold=5)
+        low_stock = low_stock_rows(get_product_repository(), stock_repo, store_id=active_store)
         low_stock_items = len(low_stock) if low_stock else 0
 
     # Fetch customer data
@@ -172,7 +173,7 @@ async def inventory_report(
             stock_repo, get_product_repository(), active_store
         )
         show_cost = can_see_cost(current_user, "purchase")
-        low_stock = stock_repo.find_low_stock(active_store, threshold=5)
+        low_stock = low_stock_rows(get_product_repository(), stock_repo, store_id=active_store)
 
         total_items = len(all_stock)
         total_value = stock_value.total(all_stock) if show_cost else None

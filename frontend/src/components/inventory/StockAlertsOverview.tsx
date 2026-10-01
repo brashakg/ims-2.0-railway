@@ -27,7 +27,8 @@ interface StockAlert {
   brand: string;
   category: string;
   currentStock: number;
-  reorderPoint: number;
+  /** null = not set (the product's -1): no reorder level to show. */
+  reorderPoint: number | null;
   safetyStock: number;
   projectedDaysToStockout: number;
   alertType: 'DEAD_STOCK' | 'LOW_STOCK' | 'REORDER_ALERT' | 'FAST_MOVING' | 'OVERSTOCK';
@@ -277,7 +278,9 @@ export function StockAlertsOverview() {
                     </div>
                     <div>
                       <p className="opacity-75 text-xs">Reorder Point</p>
-                      <p className="font-semibold">{alert.reorderPoint} units</p>
+                      <p className="font-semibold">
+                        {alert.reorderPoint === null ? 'not set' : `${alert.reorderPoint} units`}
+                      </p>
                     </div>
                     {alert.daysWithoutMovement !== undefined && (
                       <div>

@@ -12,6 +12,7 @@
 //   (lines to write a follow-up date / note by hand). These are empty boxes
 //   / lines, not pre-filled text.
 //
+// Workshop JOB labels only. Stock (unit) labels are components/labels/unitLabel.ts.
 // Sizing: small thermal labels default to ~50x25mm; the traveler/work-order
 // label is larger at ~75x50mm. ZPL assumes 203dpi (8 dots/mm), the common
 // resolution for Zebra / TSC desktop label printers.
@@ -22,7 +23,7 @@ import JsBarcode from 'jsbarcode';
 // Types
 // ---------------------------------------------------------------------------
 
-export type LabelType = 'traveler' | 'stage' | 'frame' | 'cl' | 'ready';
+export type LabelType = 'traveler' | 'stage' | 'ready';
 
 export interface JobLabelData {
   job_id: string;
@@ -50,34 +51,6 @@ export interface JobLabelData {
   stage_label?: string;
   next_stage?: string | null;
   include_followup?: boolean;
-}
-
-export interface ProductLabelData {
-  barcode_value: string;
-  name?: string;
-  brand?: string;
-  sku?: string;
-  category?: string;
-  mrp?: number | string;
-  price_label?: string;
-  is_contact_lens?: boolean;
-  batch_code?: string;
-  expiry?: string;
-  // Issuing-store identity so a frame tag / CL box is traceable to its store.
-  store_name?: string;
-  store_code?: string;
-  store_brand?: string;
-  cl?: {
-    modality?: string;
-    base_curve?: string;
-    diameter?: string;
-    power?: string;
-    cyl?: string;
-    axis?: string;
-    add?: string;
-    color?: string;
-    pack_size?: number | string;
-  };
 }
 
 // ---------------------------------------------------------------------------
@@ -304,97 +277,6 @@ export function stageHtml(d: JobLabelData): string {
 }
 
 // ===========================================================================
-// FRAME TAG  (dumbbell ~ small) - we use a compact 50x25mm tag
-// ===========================================================================
-
-export function frameZpl(d: ProductLabelData): string {
-  const bc = zplSafe(d.barcode_value);
-  const w = 50 * A_DOT;
-  const h = 25 * A_DOT;
-  return [
-    '^XA',
-    `^PW${w}`,
-    `^LL${h}`,
-    '^CI28',
-    '^CF0,22',
-    `^FO12,10^FD${zplSafe(d.brand || '')}^FS`,
-    '^CF0,18',
-    `^FO12,36^FD${zplSafe(d.name || d.sku || '')}^FS`,
-    `^FO12,60^BY2^BCN,48,Y,N,N^FD${bc}^FS`,
-    '^CF0,24',
-    `^FO12,150^FD${zplSafe(d.price_label || '')}^FS`,
-    '^XZ',
-  ].join('\n');
-}
-
-export function frameHtml(d: ProductLabelData): string {
-  const storeTag = storeDisplayName(d);
-  return `
-  <div class="label" style="width:50mm;min-height:25mm">
-    ${d.brand ? `<div class="lbl-title">${esc(d.brand)}</div>` : ''}
-    ${d.name ? `<div class="lbl-row">${esc(d.name)}</div>` : ''}
-    ${d.sku ? `<div class="lbl-row lbl-mono lbl-muted">${esc(d.sku)}</div>` : ''}
-    <div class="lbl-barcode">${barcodeSvg(d.barcode_value, 32)}</div>
-    ${d.price_label ? `<div class="lbl-row lbl-strong" style="font-size:11pt">${esc(d.price_label)}</div>` : ''}
-    ${storeTag ? `<div class="lbl-muted">${esc(storeTag)}</div>` : ''}
-    ${notesHtml('Note', 1)}
-  </div>`;
-}
-
-// ===========================================================================
-// CONTACT-LENS BOX  (~50x25mm) - CL identity + batch/expiry + barcode
-// ===========================================================================
-
-export function clZpl(d: ProductLabelData): string {
-  const bc = zplSafe(d.barcode_value);
-  const cl = d.cl || {};
-  const spec = [
-    cl.power ? `PWR ${cl.power}` : '',
-    cl.base_curve ? `BC ${cl.base_curve}` : '',
-    cl.diameter ? `DIA ${cl.diameter}` : '',
-  ]
-    .filter(Boolean)
-    .join('  ');
-  const w = 50 * A_DOT;
-  const h = 25 * A_DOT;
-  return [
-    '^XA',
-    `^PW${w}`,
-    `^LL${h}`,
-    '^CI28',
-    '^CF0,20',
-    `^FO12,8^FD${zplSafe((d.brand || '') + ' ' + (d.name || ''))}^FS`,
-    '^CF0,18',
-    `^FO12,32^FD${zplSafe(spec)}^FS`,
-    `^FO12,54^FDExp: ${zplSafe(d.expiry || '')}  Lot: ${zplSafe(d.batch_code || '')}^FS`,
-    `^FO12,76^BY2^BCN,46,Y,N,N^FD${bc}^FS`,
-    '^XZ',
-  ].join('\n');
-}
-
-export function clHtml(d: ProductLabelData): string {
-  const cl = d.cl || {};
-  const spec = [
-    cl.power ? `PWR ${cl.power}` : '',
-    cl.base_curve ? `BC ${cl.base_curve}` : '',
-    cl.diameter ? `DIA ${cl.diameter}` : '',
-    cl.modality ? cl.modality : '',
-  ]
-    .filter(Boolean)
-    .join(' &middot; ');
-  const storeTag = storeDisplayName(d);
-  return `
-  <div class="label" style="width:50mm;min-height:25mm">
-    <div class="lbl-title">${esc((d.brand || '') + ' ' + (d.name || ''))}</div>
-    ${spec ? `<div class="lbl-row">${spec}</div>` : ''}
-    <div class="lbl-row lbl-muted">Exp: ${esc(d.expiry || '__________')} &nbsp; Lot: ${esc(d.batch_code || '________')}</div>
-    <div class="lbl-barcode">${barcodeSvg(d.barcode_value, 30)}</div>
-    ${storeTag ? `<div class="lbl-muted">${esc(storeTag)}</div>` : ''}
-    ${notesHtml('Note', 1)}
-  </div>`;
-}
-
-// ===========================================================================
 // READY / PICKUP  (~50x30mm) - includes a blank FOLLOW-UP section by hand
 // ===========================================================================
 
@@ -460,14 +342,6 @@ export function buildJobLabel(type: 'traveler' | 'stage' | 'ready', d: JobLabelD
     return { zpl: readyZpl(d), html: readyHtml(d), widthMm: 50, heightMm: 30, title: 'Ready for Pickup' };
   }
   return { zpl: stageZpl(d), html: stageHtml(d), widthMm: 50, heightMm: 25, title: 'Stage Sticker' };
-}
-
-/** Build a product label (frame tag or CL box) -> ZPL + HTML. */
-export function buildProductLabel(d: ProductLabelData): BuiltLabel {
-  if (d.is_contact_lens) {
-    return { zpl: clZpl(d), html: clHtml(d), widthMm: 50, heightMm: 25, title: 'Contact Lens Box' };
-  }
-  return { zpl: frameZpl(d), html: frameHtml(d), widthMm: 50, heightMm: 25, title: 'Frame Tag' };
 }
 
 /** Wrap a label's HTML body into a full printable document string. */

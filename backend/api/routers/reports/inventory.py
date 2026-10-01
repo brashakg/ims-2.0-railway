@@ -13,6 +13,7 @@ from ...dependencies import (
 )
 from ...services import stock_value
 from ...services.cost_mask import can_see_cost
+from ...services.reorder_policy import low_stock_rows
 from ._shared import (
     _REPORT_FINANCE_ROLES,
     _row_category,
@@ -49,7 +50,7 @@ async def inventory_summary(
     # F47: the one stock-value rule -- units physically on the shelf at what
     # they cost (services/stock_value); the counter reads no cost figure.
     all_stock = stock_value.shelf_units(stock_repo, get_product_repository(), active_store)
-    low_stock = stock_repo.find_low_stock(active_store, threshold=5)
+    low_stock = low_stock_rows(get_product_repository(), stock_repo, store_id=active_store)
 
     total_value = (
         stock_value.total(all_stock) if can_see_cost(current_user, "purchase") else None
