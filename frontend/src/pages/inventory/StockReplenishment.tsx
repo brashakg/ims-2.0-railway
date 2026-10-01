@@ -18,9 +18,9 @@ interface ReplenishmentItem {
   product_name: string;
   sku: string;
   current_stock: number;
-  reorder_level: number;
-  // Real reorder gap (reorder_level - current_stock, floored at 1) — used as
-  // the default PO quantity. NOT a fabricated EOQ.
+  reorder_level: number | null;
+  // The server's top-up quantity (reorder_policy.top_up) — the default PO
+  // quantity. NOT a fabricated EOQ.
   reorder_qty: number;
   preferred_vendor_id: string;
   preferred_vendor_name: string | null;
@@ -96,9 +96,11 @@ export function StockReplenishment() {
           .filter((item) => item.auto_reorder_disabled !== true)
           .map((item: any) => {
           const currentStock = item.current_stock ?? item.stock ?? item.quantity ?? 0;
-          const reorderLevel = item.reorder_point ?? item.reorder_level ?? item.lowStockThreshold ?? item.minStock ?? item.min_stock ?? 0;
-          // Real gap to refill back up to the reorder point; at least 1.
-          const reorderQty = Math.max(1, reorderLevel - currentStock);
+          // This shop's level, as the server sends it (null = not set).
+          const reorderLevel: number | null = item.reorder_point ?? null;
+          // The SERVER's top-up (reorder_policy.top_up, the same rule the
+          // purchase report uses): never computed here.
+          const reorderQty: number = item.top_up_qty ?? 0;
           return {
             product_id: item.product_id || item.id || '',
             product_name: item.product_name || item.name || 'Unknown Product',
@@ -111,7 +113,7 @@ export function StockReplenishment() {
             preferred_vendor_name: item.preferred_vendor_name || null,
             estimated_cost: item.estimated_cost || (item.last_purchase_price || 0) * reorderQty,
             last_purchase_price: item.last_purchase_price || 0,
-            stock_status: item.stock_status || (currentStock === 0 ? 'critical' : 'low'),
+            stock_status: item.stock_status === 'out-of-stock' ? 'critical' : item.stock_status === 'critical' || item.stock_status === 'low' ? item.stock_status : 'low',
           };
         });
         setSuggestions(transformedSuggestions);
@@ -299,7 +301,7 @@ export function StockReplenishment() {
                       </div>
                       <div>
                         <p className="text-gray-500 text-xs mb-1">Reorder Level</p>
-                        <p className="text-gray-900 font-semibold">{item.reorder_level}</p>
+                        <p className="text-gray-900 font-semibold">{item.reorder_level ?? 'not set'}</p>
                       </div>
                       <div>
                         <p className="text-gray-500 text-xs mb-1">Suggested Qty</p>

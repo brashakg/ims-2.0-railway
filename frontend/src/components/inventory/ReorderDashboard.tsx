@@ -23,6 +23,14 @@ import { typedLevel } from '../../utils/reorderLevel';
 import { REORDER_LEVEL_ROLES } from '../../pages/inventory/inventoryRoles';
 import { ReorderPointModal, type ReorderPointData } from './ReorderPointModal';
 
+const PICK_A_SHOP = 'Pick a shop first - a reorder level belongs to one shop.';
+
+type StockStatus = 'out-of-stock' | 'critical' | 'low' | 'healthy';
+
+// Every row of the low-stock feed IS low (the server's list); the band says how.
+const toStatus = (v: unknown): StockStatus =>
+  v === 'out-of-stock' || v === 'critical' || v === 'healthy' ? v : 'low';
+
 interface Product {
   id: string;
   sku: string;
@@ -33,6 +41,9 @@ interface Product {
   reservedStock: number;
   // This shop's level; null = not set (no low-stock alert, shown as 'not set').
   reorderPoint: number | null;
+  // The SERVER's verdict for this shop (reorder_policy.stock_status) - this
+  // screen never decides low / critical itself.
+  status: StockStatus;
   // Real reorder_quantity from the product master. null = never configured
   // (legacy-enabled, nothing to show). <= 0 (the -1 sentinel) = the owner
   // explicitly DISABLED auto-reorder for this product.
@@ -91,7 +102,7 @@ export function ReorderDashboard() {
 
       // getLowStock returns { items: [{ _id: productId, quantity, reorder_point, auto_reorder_disabled }] }
       // -- only products with a SET level at or under it (reorder_policy).
-      const lowStockItems: Array<{ _id: string; quantity: number; reorder_point: number; auto_reorder_disabled?: boolean }> =
+      const lowStockItems: Array<{ _id: string; quantity: number; reorder_point: number; stock_status?: string; auto_reorder_disabled?: boolean }> =
         Array.isArray(lowStockData) ? lowStockData : lowStockData?.items ?? [];
 
       // getStock returns { items: [...stock unit docs] }
@@ -146,6 +157,7 @@ export function ReorderDashboard() {
           currentStock,
           reservedStock,
           reorderPoint: typedLevel(item.reorder_point),
+          status: toStatus(item.stock_status),
           reorderQuantity,
           autoReorderDisabled,
           maxStock: Number(raw.max_stock ?? raw.maximum_stock ?? 50),
@@ -174,11 +186,16 @@ export function ReorderDashboard() {
     let levelSaved = false;
     let productSaved = false;
     if (canSetShopLevel) {
-      try {
-        await reorderApi.setShopLevel(data.productId, user?.activeStoreId ?? '', data.reorderPoint);
-        levelSaved = true;
-      } catch (error: any) {
-        failures.push(error?.message || 'Could not save the reorder level');
+      if (!user?.activeStoreId) {
+        // Never send an empty shop (the server answers 422).
+        failures.push(PICK_A_SHOP);
+      } else {
+        try {
+          await reorderApi.setShopLevel(data.productId, user.activeStoreId, data.reorderPoint);
+          levelSaved = true;
+        } catch (error: any) {
+          failures.push(error?.message || 'Could not save the reorder level');
+        }
       }
     }
     if (canEditProduct) {
@@ -200,8 +217,7 @@ export function ReorderDashboard() {
         p.id === data.productId
           ? {
               ...p,
-              ...(levelSaved ? { reorderPoint: data.reorderPoint } : {}),
-              ...(productSaved
+                            ...(productSaved
                 ? {
                     reorderQuantity: data.reorderQuantity,
                     autoReorderDisabled: data.reorderQuantity <= 0,
@@ -213,6 +229,9 @@ export function ReorderDashboard() {
           : p
       ));
     }
+
+    // The verdict (low / critical) is the server's: re-read it after a level change.
+    if (levelSaved) void loadProducts();
 
     if (failures.length > 0) {
       throw new Error(failures.join('; '));
@@ -332,15 +351,7 @@ export function ReorderDashboard() {
     setSelectedProducts(new Set());
   };
 
-  const getStockStatus = (product: Product) => {
-    const availableStock = product.currentStock - product.reservedStock;
-    if (availableStock <= 0) return 'out-of-stock';
-    // No level at this shop = nothing to alert on (owner ruling D12).
-    if (product.reorderPoint === null) return 'healthy';
-    if (availableStock <= product.reorderPoint * 0.5) return 'critical';
-    if (availableStock <= product.reorderPoint) return 'low';
-    return 'healthy';
-  };
+  const getStockStatus = (product: Product): StockStatus => product.status;
 
   const getDaysUntilStockout = (product: Product) => {
     const availableStock = product.currentStock - product.reservedStock;
@@ -675,7 +686,8 @@ export function ReorderDashboard() {
           }}
           onSave={handleSaveReorderPoint}
           productWideLocked={!canEditProduct}
-          shopLevelLocked={!canSetShopLevel}
+          shopLevelLocked={!canSetShopLevel || !user?.activeStoreId}
+          shopLevelNotice={canSetShopLevel && !user?.activeStoreId ? PICK_A_SHOP : undefined}
         />
       )}
     </div>

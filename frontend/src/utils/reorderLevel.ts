@@ -6,13 +6,17 @@
 // low-stock alert, saved as null; 0 is a real level; anything that is not a
 // whole number >= 0 is invalid and is never saved as a number.
 
-/** The level a field holds: a whole number >= 0, else null (= not set). */
+/** The server's cap on a level (the write model's le=100000). */
+export const MAX_LEVEL = 100000;
+
+/** The level a field holds: digits only (no '0x10', '1e2', '2.5', signs) and at
+ *  most MAX_LEVEL, else null (= not set). */
 export const typedLevel = (value: unknown): number | null => {
-  const n =
-    value === null || value === undefined || String(value).trim() === ''
-      ? NaN
-      : Number(value);
-  return Number.isInteger(n) && n >= 0 ? n : null;
+  if (value === null || value === undefined) return null;
+  const text = typeof value === 'number' ? String(value) : String(value).trim();
+  if (!/^\d+$/.test(text)) return null;
+  const n = Number(text);
+  return n <= MAX_LEVEL ? n : null;
 };
 
 /** What a field shows for a level: '' for not set, never -1 or NaN. */
@@ -26,4 +30,4 @@ export const isLevelInputValid = (value: unknown): boolean =>
   typedLevel(value) !== null;
 
 export const LEVEL_INPUT_ERROR =
-  'Reorder level must be a whole number, 0 or more. Leave it blank for not set.';
+  'Reorder level must be a whole number from 0 to 100000. Leave it blank for not set.';

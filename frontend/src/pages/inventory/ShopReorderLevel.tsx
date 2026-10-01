@@ -37,8 +37,8 @@ export function ShopReorderLevel({
       <button
         type="button"
         onClick={() => setDraft(level == null ? '' : String(level))}
-        // min-h: a tablet-sized tap target (owner: tablets are the counter device).
-        className="inline-flex items-center min-h-[32px] text-xs text-gray-500 hover:text-bv-red-600 underline decoration-dotted"
+        // min-h: the app's standard control height (36px, the .input-field height).
+        className="inline-flex items-center min-h-[36px] text-xs text-gray-500 hover:text-bv-red-600 underline decoration-dotted"
         aria-label={`Reorder level at this shop: ${shown}. Change it`}
         title="Change this shop's reorder level"
       >
@@ -80,12 +80,12 @@ export function ShopReorderLevel({
           if (e.key === 'Enter') void save();
           if (e.key === 'Escape') setDraft(null);
         }}
-        className="input-field w-20 text-xs"
+        className="input-field w-20 text-xs min-h-[36px]"
       />
-      <button type="button" onClick={() => void save()} disabled={saving} className="btn sm primary">
+      <button type="button" onClick={() => void save()} disabled={saving} className="btn primary">
         Save
       </button>
-      <button type="button" onClick={() => setDraft(null)} disabled={saving} className="btn sm">
+      <button type="button" onClick={() => setDraft(null)} disabled={saving} className="btn">
         Cancel
       </button>
     </span>

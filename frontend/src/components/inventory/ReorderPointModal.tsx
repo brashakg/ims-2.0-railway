@@ -42,6 +42,8 @@ interface ReorderPointModalProps {
   /** True for a role that may not set a shop's level (a catalogue manager):
    *  the level field is read-only and no level is sent for it. */
   shopLevelLocked?: boolean;
+  /** Why the level is locked, when it is (e.g. no active shop). */
+  shopLevelNotice?: string;
 }
 
 export interface ReorderPointData {
@@ -54,7 +56,7 @@ export interface ReorderPointData {
   leadTimeDays: number;
 }
 
-export function ReorderPointModal({ isOpen, onClose, product, onSave, productWideLocked = false, shopLevelLocked = false }: ReorderPointModalProps) {
+export function ReorderPointModal({ isOpen, onClose, product, onSave, productWideLocked = false, shopLevelLocked = false, shopLevelNotice }: ReorderPointModalProps) {
   const toast = useToast();
 
   // Seed from the REAL master value only. <= 0 (the -1 sentinel) means the
@@ -283,7 +285,9 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave, productWid
                 className="input-field w-full"
               />
               <p className="text-xs text-gray-500 mt-1">
-                {autoCalculate ? (
+                {shopLevelNotice ? (
+                  <span role="alert" className="text-red-600">{shopLevelNotice}</span>
+                ) : autoCalculate ? (
                   <>Calculated: {leadTimeStock} (lead time stock) + {safetyStock} (safety stock)</>
                 ) : (
                   'Alert will trigger when stock falls to this level'
