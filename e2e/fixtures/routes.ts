@@ -18,6 +18,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { SEED } from './constants';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SRC = join(HERE, '..', '..', 'frontend', 'src');
@@ -29,6 +30,9 @@ const SETTINGS_SECTIONS_FILE = join(SRC, 'pages', 'settings', 'settingsSections.
  * enough overrides `ready` in ROUTES below — that is the only reason to.
  */
 export const READY_DEFAULT = '#main-content :is(h1, h2, table, button, input)';
+
+/** A till product tile (a button) showing the seeded frame's colour line. */
+const TILL_TILE_WITH_COLOUR = `button:has-text("${SEED.colourFrame.colour}")`;
 
 /**
  * Screens probed by tests/layout.spec.ts, in router-file order.
@@ -105,6 +109,8 @@ export const ROUTES: ReadonlyArray<{ path: string; ready?: string }> = [
   { path: '/hr/shifts' },
   { path: '/hr/leaderboard' },
   { path: '/hr/payroll' },
+  { path: '/hr/payroll/advances' },
+  { path: '/hr/payroll/payslips' },
   { path: '/hr/salary-setup' },
   { path: '/hr/payroll-run' },
   { path: '/incentive' },
@@ -155,8 +161,10 @@ export const ROUTES: ReadonlyArray<{ path: string; ready?: string }> = [
   { path: '/walkouts' },
   { path: '/walkouts/dashboard' },
   { path: '/returns' },
-  { path: '/pos/counter' },
-  { path: '/pos/new', ready: 'input[placeholder*="Scan"]' },
+  // The till tiles are measured with the seeded colour frame's colour line
+  // drawn (F46: a minted name's " - {Colour}" gets its own line).
+  { path: '/pos/counter', ready: TILL_TILE_WITH_COLOUR },
+  { path: '/pos/new', ready: TILL_TILE_WITH_COLOUR },
   { path: '/pos/delivery', ready: 'input[placeholder*="Scan"]' },
   { path: '/pos/footfall' },
   { path: '/purchase/orders' },
@@ -173,6 +181,8 @@ export const ROUTES: ReadonlyArray<{ path: string; ready?: string }> = [
   { path: '/reports/customers' },
   { path: '/reports/gst' },
   { path: '/reports/forecast' },
+  { path: '/reports/forecast/seasonal' },
+  { path: '/reports/forecast/reorder' },
   { path: '/reports/gstr1' },
   { path: '/reports/gstr3b' },
   { path: '/reports/blueprint' },
@@ -230,6 +240,12 @@ export const EXCLUSIONS: ReadonlyArray<{ path: string; reason: string }> = [
   {
     path: '/hr',
     reason: 'redirect-only: index maps the legacy ?tab= onto /hr/<section>, all probed above.',
+  },
+  {
+    path: '/reports/forecast/*',
+    reason:
+      'redirect-only: catch-all; any unknown forecast sub-address Navigates to '
+      + '/reports/forecast, which is probed above.',
   },
   {
     path: '/hr/monthly-summary',
