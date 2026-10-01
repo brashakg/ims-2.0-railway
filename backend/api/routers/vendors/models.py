@@ -419,9 +419,18 @@ class POLineCancel(BaseModel):
 
 
 def cancel_reason(v) -> str:
-    """ONE rule for a cancel reason (whole order or one line): trimmed, and at
-    least 3 characters -- 'qty typo' passes, a blank or a stray key does not."""
-    reason = str(v or "").strip()
-    if len(reason) < 3:
-        raise ValueError("Say why this is being cancelled (at least 3 characters).")
-    return reason
+    """ONE rule for a cancel reason (whole order or one line): invisible
+    characters (zero-width, BOM and other format characters) and surrounding
+    whitespace removed, then at least 3 letters or digits -- 'qty typo' passes;
+    a blank, '...', '???' or a zero-width string does not."""
+    import unicodedata
+
+    text = "".join(
+        c for c in str(v or "") if unicodedata.category(c) not in ("Cf", "Cc", "Zl", "Zp")
+        or c in "\t\n"
+    ).strip()
+    if sum(1 for c in text if c.isalnum()) < 3:
+        raise ValueError(
+            "Say why this is being cancelled (at least 3 letters or digits)."
+        )
+    return text

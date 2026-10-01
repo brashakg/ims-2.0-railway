@@ -305,7 +305,9 @@ def test_cancel_draft_or_sent_records_reason_person_and_time(monkeypatch, status
 
 
 @pytest.mark.parametrize("status", ["DRAFT", "SENT"])
-@pytest.mark.parametrize("reason", ["", "   ", "x"])
+@pytest.mark.parametrize(
+    "reason", ["", "   ", "x", "...", "???", "\u200b\u200b\u200b\u200b", "\ufeff \u200b ??"]
+)
 def test_cancel_needs_a_real_reason(monkeypatch, status, reason):
     """Owner ruling: a Draft OR a Sent order is cancelled WITH A REASON."""
     repo, audit = _wire(monkeypatch, _po(status=status))
@@ -492,9 +494,16 @@ def test_line_cancel_bad_index_404(monkeypatch):
     assert e.value.status_code == 404
 
 
-def test_line_cancel_needs_a_reason():
+@pytest.mark.parametrize(
+    "reason", ["  ", "...", "???", "\u200b\u200b\u200b\u200b", "a\u200bb\ufeff"]
+)
+def test_line_cancel_needs_a_reason(reason):
     with pytest.raises(ValidationError):
-        v.POLineCancel(reason="  ")
+        v.POLineCancel(reason=reason)
+
+
+def test_a_reason_with_invisible_characters_is_stored_without_them():
+    assert v.POLineCancel(reason="\u200bqty\u200b typo ").reason == "qty typo"
 
 
 def test_line_cancel_cross_store_404(monkeypatch):
