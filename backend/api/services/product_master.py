@@ -584,11 +584,17 @@ def is_known_category(category: Any) -> bool:
 # ===========================================================================
 
 
-def _sku_segment(value: Any) -> str:
-    """One SKU part: uppercase letters and digits; a `/` becomes `-`, every
-    other character (spaces, dots, the brand's own hyphen) is dropped."""
-    s = re.sub(r"[^A-Z0-9/]", "", str(value or "").upper())
-    return "-".join(p for p in s.split("/") if p)
+def _sku_segment(value: Any, keep_separators: bool = False) -> str:
+    """One SKU part, uppercase letters and digits. `-` separates the parts, so
+    it never appears inside one: a brand or model drops every other character
+    (RAY-BAN -> RAYBAN); a colour code or size (`keep_separators`) keeps its
+    own `/` or `-` as `/` (901/58, 1109-71 -> 1109/71), so colour 901/58 is
+    never the SKU of colour 901 in size 58, nor 1109-71 that of 110971."""
+    s = str(value or "").upper()
+    if not keep_separators:
+        return re.sub(r"[^A-Z0-9]", "", s)
+    s = re.sub(r"[^A-Z0-9/]", "", s.replace("-", "/"))
+    return "/".join(p for p in s.split("/") if p)
 
 
 def _size_segment(value: Any) -> str:
@@ -598,9 +604,9 @@ def _size_segment(value: Any) -> str:
     try:
         num = float(value)
     except (TypeError, ValueError):
-        return _sku_segment(value)
+        return _sku_segment(value, keep_separators=True)
     if not (math.isfinite(num) and num >= 0):
-        return _sku_segment(value)
+        return _sku_segment(value, keep_separators=True)
     return ("%f" % num).rstrip("0").rstrip(".")
 
 
@@ -623,11 +629,15 @@ def build_sku(category: Any, attributes: Dict[str, Any], db=None) -> str:
         spec.prefix,
         a.get("brand_name") or a.get("brand"),
         a.get("model_no") or a.get("model_name") or a.get("model") or a.get("subbrand"),
-        a.get("colour_code") or a.get("color_code") or a.get("colour_name") or a.get("color"),
     )
+    colour = a.get("colour_code") or a.get("color_code") or a.get("colour_name") or a.get("color")
     # A frame's eye size is `lens_size` in the registry; `size` elsewhere.
     size = a.get("size") or a.get("lens_size")
-    segs = [*map(_sku_segment, parts), _size_segment(size) if size else ""]
+    segs = [
+        *map(_sku_segment, parts),
+        _sku_segment(colour, keep_separators=True),
+        _size_segment(size) if size else "",
+    ]
     return "-".join(seg for seg in segs if seg)
 
 

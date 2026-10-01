@@ -125,14 +125,15 @@ def test_hearing_aid_type_accepted_with_serial():
 def test_build_sku_canonical_excel_rule():
     # Burberry sunglass model B 3142 colour 1109/71
     sku = pm.build_sku("SUNGLASS", {"brand_name": "Burberry", "model_no": "B 3142", "colour_code": "1109/71"})
-    # Readable, separated (owner D5): the '/' in the colour code becomes '-'.
-    assert sku == "SG-BURBERRY-B3142-1109-71"
+    # Readable, separated (owner D5): '-' separates the parts, so the colour
+    # code keeps its own '/' (1109/71 is one part, never colour 1109 size 71).
+    assert sku == "SG-BURBERRY-B3142-1109/71"
 
 
 def test_build_sku_no_truncation():
     # Whole parts, never the old 2/4/3-char truncation.
     sku = pm.build_sku("FRAME", _frame_attrs())
-    assert sku == "FR-BURBERRY-B3142-1109-71"
+    assert sku == "FR-BURBERRY-B3142-1109/71"
 
 
 def test_mint_unique_sku_collision_appends_counter(product_repo):

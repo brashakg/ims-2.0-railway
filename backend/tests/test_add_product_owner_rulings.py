@@ -297,10 +297,32 @@ def test_f13_new_frame_gets_a_readable_sku(door):
     assert created["sku"] == "FR-CARRERA-CA8895-807-54"
 
 
-def test_f13_slash_becomes_hyphen_and_punctuation_is_cleaned(door):
+def test_f13_punctuation_is_cleaned_and_a_colour_keeps_its_slash(door):
     created = door(_form(category="SUNGLASS", brand="Ray-Ban", model="RB 3016",
                          color="001/58"))
-    assert created["sku"] == "SG-RAYBAN-RB3016-001-58"
+    assert created["sku"] == "SG-RAYBAN-RB3016-001/58"
+
+
+def test_f13_different_products_never_share_a_readable_sku():
+    """`-` separates the parts, so it never appears inside one: colour 901/58
+    with no size is not colour 901 in size 58, and colour 1109-71 is not
+    110971. The bulk door used to reject the second, genuine product as a
+    'Duplicate SKU within this batch'."""
+    def sku(**attrs):
+        return pm.build_sku("SG", {"brand_name": "Ray-Ban", "model_no": "RB2140", **attrs})
+
+    assert sku(colour_code="901/58") == "SG-RAYBAN-RB2140-901/58"
+    assert sku(colour_code="901", size="58") == "SG-RAYBAN-RB2140-901-58"
+    assert sku(colour_code="1109-71") == "SG-RAYBAN-RB2140-1109/71"
+    assert sku(colour_code="110971") == "SG-RAYBAN-RB2140-110971"
+    seen: set = set()
+    for colour, size in (("901/58", None), ("901", "58"), ("1109-71", None), ("110971", None)):
+        row = prod_router.ProductCreate(category="SUNGLASS", brand="Ray-Ban", model="RB2140",
+                                        color=colour, size=size, mrp=5000.0, offer_price=4500.0)
+        errors, resolved = prod_router._validate_bulk_row(row, seen)
+        assert errors == [], (colour, size, errors)
+        seen.add(resolved)
+    assert len(seen) == 4
 
 
 def test_f13_preview_endpoint_shows_the_readable_sku():
@@ -380,7 +402,7 @@ def test_f13_the_size_keeps_its_decimal_point(door):
     assert sku("52.5") == "FR-CARRERA-CA8895-807-52.5"
     assert sku("525") == "FR-CARRERA-CA8895-807-525"
     assert sku(54.0) == sku("54") == sku("54.0") == "FR-CARRERA-CA8895-807-54"
-    assert sku("52/18") == "FR-CARRERA-CA8895-807-52-18"
+    assert sku("52/18") == "FR-CARRERA-CA8895-807-52/18"
     created = door(_form(brand="Carrera", model="CA8895", color="807",
                          attributes={"lens_size": "52.5"}))
     assert created["sku"] == "FR-CARRERA-CA8895-807-52.5"
