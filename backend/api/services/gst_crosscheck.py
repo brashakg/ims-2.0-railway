@@ -673,7 +673,9 @@ def build_crosscheck(
                     "Booked bills on no return": _f(unplaced.get("tax")),
                     "Expected": 0.0,
                 },
-                tolerance,
+                # Exact: one computation against zero, no rounding spread to
+                # forgive -- Rs 0.90 of credit on no return is a break.
+                0.0,
                 note=(
                     "%d booked bill(s) carry this input credit but no GSTIN's "
                     "GSTR-3B counts it: the bill has no company, no tax heads, "
@@ -693,7 +695,7 @@ def build_crosscheck(
                 _cmp_row(
                     "Input credit from suppliers with no GSTIN",
                     {"Claimed on GSTR-3B": _f(unreg.get("tax")), "Expected": 0.0},
-                    tolerance,
+                    0.0,
                     note=(
                         "%d bill(s) claim this input credit although the supplier "
                         "has no GSTIN on file, and an unregistered supplier's tax "

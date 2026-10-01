@@ -1424,6 +1424,36 @@ class TestTheUnplacedCheckKeepsItsRules:
         assert row["status"] == "MISMATCH" and "NC-1" in row["note"], row
         assert xc["gstr3b"]["itc"]["total"] == 0.0
 
+    def test_any_credit_off_every_return_is_a_mismatch(self):
+        """r10 #2: the row compared to zero within the Rs 1 rounding
+        tolerance, so up to Rs 1.00 of credit on no return read MATCH and did
+        not block sign-off. Nothing is rounded here: any amount is a break."""
+        db = TestCreditLeftOffEveryReturnIsFlagged()._world()
+        db["vendor_bills"].insert_one(
+            {"bill_id": "t1", "bill_number": "TINY-1", "vendor_id": "V1", "bill_date": "",
+             "taxable_amount": 18, "tax_amount": 0.90, "cgst_total": 0.0, "sgst_total": 0.0,
+             "igst_total": 0.90, "recipient_entity_id": "E1", "recipient_gstin": BUY_JH,
+             "status": "OUTSTANDING"}
+        )
+        xc = _crosscheck(db, "E1")
+        row = _row(xc, "Input credit left off GSTR-3B")
+        assert (row["status"], row["variance"]) == ("MISMATCH", 0.9), row
+        assert "Input credit left off GSTR-3B" in xc["summary"]["mismatch_metrics"]
+
+    def test_any_credit_claimed_from_an_unregistered_supplier_is_a_mismatch(self):
+        """r10 #2, the sibling row: the same Rs 1 tolerance let Rs 0.90 of
+        credit from a supplier with no GSTIN read MATCH."""
+        db = TestCreditLeftOffEveryReturnIsFlagged()._world()
+        db["vendors"].insert_one({"vendor_id": "VN", "trade_name": "Local Fitter", "credit_days": 0})
+        db["vendor_bills"].insert_one(
+            {"bill_id": "t2", "bill_number": "TINY-2", "vendor_id": "VN", "bill_date": "2026-05-05",
+             "invoice_date": "2026-05-05", "taxable_amount": 18, "tax_amount": 0.90, "cgst_total": 0.0,
+             "sgst_total": 0.0, "igst_total": 0.90, "recipient_entity_id": "E1",
+             "recipient_gstin": BUY_JH, "status": "OUTSTANDING"}
+        )
+        row = _row(_crosscheck(db, "E1"), "Input credit from suppliers with no GSTIN")
+        assert (row["status"], row["variance"]) == ("MISMATCH", 0.9), row
+
 
 class TestAHeaderOnlyBillHasNoInventedVerdict:
     def test_a_cash_flow_bill_is_not_on_hold_and_shows_its_receipt(self):
