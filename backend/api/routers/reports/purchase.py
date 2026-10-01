@@ -12,7 +12,7 @@ from ...dependencies import (
     validate_store_access,
 )
 from ...services.reorder_policy import auto_reorder_disabled as _auto_reorder_disabled
-from ...services.reorder_policy import on_hand, reorder_level
+from ...services.reorder_policy import is_low_stock, on_hand, reorder_level
 from ._shared import router
 
 # ----------------------------------------------------------------------------
@@ -262,9 +262,15 @@ async def purchase_recommendations(
         # None = no level at this shop: velocity alone decides.
         reorder_point = reorder_level(prod, store_id=active_store)
         gap_units = max(0, desired_cover - current_stock)
-        # If the shop's level is breached even when desired_cover would
-        # tolerate current stock, still recommend a top-up to the level.
-        top_up = max(0, (reorder_point or 0) - current_stock)
+        # If the shop's level is breached (reorder_policy.is_low_stock: at or
+        # under it, the same verdict as the low-stock list) even when
+        # desired_cover would tolerate current stock, still recommend a top-up
+        # back above the level.
+        top_up = (
+            max(0, (reorder_point or 0) + 1 - current_stock)
+            if is_low_stock(prod, current_stock, store_id=active_store)
+            else 0
+        )
         suggested_qty = max(gap_units, top_up)
         if suggested_qty <= 0:
             continue
