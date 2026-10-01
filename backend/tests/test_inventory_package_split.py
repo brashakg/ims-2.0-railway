@@ -35,9 +35,9 @@ from api.routers.inventory import alerts, quarantine, stock  # noqa: E402
 def test_route_count_and_no_duplicate_paths():
     """The count is the tripwire: a lost route is otherwise a silent 404."""
     routes = [(tuple(sorted(r.methods)), r.path) for r in inventory.router.routes]
-    # 43 = 41 + GET /sellable (#1173, the till tiles) + GET /lookup (D7b, the
-    # counter's read-only stock lookup).
-    assert len(routes) == 43, "inventory.router route count changed: %d" % len(routes)
+    # 45 = 41 + GET /units + POST /units/barcode-printed (F26/F27) + GET /sellable (F46)
+    # + GET /lookup (D7b, the counter's read-only stock lookup).
+    assert len(routes) == 45, "inventory.router route count changed: %d" % len(routes)
     assert len(set(routes)) == len(routes), "duplicate (method, path) on the router"
 
 
