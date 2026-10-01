@@ -1057,10 +1057,11 @@ def test_the_correction_never_overwrites_a_colleagues_change(monkeypatch):
     assert repo.race is None, "the colleague never landed in the window"
     doc = repo.collection.docs[0]
     # The colleague took P1 off; the correction took the Vogue off. Neither
-    # undoes the other.
+    # undoes the other -- and with nothing left the order is cancelled, never
+    # kept as an empty draft that could be sent.
     assert doc["notes"] == "call before delivery"
-    assert doc["items"] == []
-    assert "add it again" in out["products_not_created"][0]["reason"]
+    assert doc["items"] == [] and doc["status"] == "CANCELLED"
+    assert "order was cancelled" in out["products_not_created"][0]["reason"]
 
 
 def test_an_order_sent_before_its_lines_were_corrected_is_not_rewritten(monkeypatch):
@@ -1524,3 +1525,170 @@ def test_a_cancel_fails_closed_when_the_stock_table_cannot_be_read(monkeypatch):
         _run(v.cancel_po("PO1", reason="vendor closed down", current_user=_user()))
     assert e.value.status_code == 503
     assert repo.updates == [] and audit.rows == []
+
+
+# --------------------------------------------------------------------------- #
+# Review round 7, second pass.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "typed",
+    [
+        {"colour": "C.01"},
+        {"colour": "Black&Gold"},
+        {"category": "CONTACT_LENS", "brand": "Acuvue", "model": "Oasys", "colour": None,
+         "size": "14.0", "mrp": 3200},
+    ],
+)
+def test_a_typed_in_item_whose_sku_keeps_a_dot_or_ampersand_is_still_added(monkeypatch, typed):
+    """The preview SKU keeps the colour and size as typed ('C.01', '14.0').
+    Pinned into the door it was refused as a supplied SKU (422), so the line
+    was taken off the order -- every time it was added again."""
+    repo, _ = _wire(monkeypatch, _po())
+    spine = _real_spine(monkeypatch)
+    item = {k: val for k, val in {**_VOGUE, **typed}.items() if val is not None}
+    out = _run(v.update_po("PO1", _edit_body(
+        [{"new_product": item, "quantity": 1, "unit_price": 1500}]
+    ), _user()))
+    assert out["products_not_created"] == []
+    assert len(spine.collection.docs) == 1
+    line = repo.pos["PO1"]["items"][0]
+    prod = spine.collection.docs[0]
+    assert (line["product_id"], line["sku"]) == (prod["product_id"], prod["sku"])
+
+
+def _create_world(monkeypatch):
+    po_repo = PurchaseOrderRepository(StrictCollection("purchase_orders", []))
+    _wire(monkeypatch, None)
+    monkeypatch.setattr(v, "get_purchase_order_repository", lambda: po_repo)
+    monkeypatch.setattr(v, "validate_store_access", lambda *a, **k: None)
+    monkeypatch.setattr(v, "is_online_store", lambda *a, **k: False)
+    monkeypatch.setattr(v, "generate_po_number", lambda _s: "PO-TEST-1")
+    return po_repo, _real_spine(monkeypatch)
+
+
+def test_an_order_left_with_no_line_is_cancelled_not_kept_empty(monkeypatch):
+    """Settling took every line off and kept an empty DRAFT, answered 201
+    'created' -- and Send to vendor then sent a PO with no lines."""
+    po_repo, spine = _create_world(monkeypatch)
+    _door_cannot_write(monkeypatch, spine)
+    body = v.POCreate(vendor_id="V1", delivery_store_id="S1", items=[
+        v.POItemCreate(new_product=dict(_VOGUE), quantity=3, unit_price=2000),
+    ])
+    with pytest.raises(HTTPException) as e:
+        _run(v.create_po(body, _user()))
+    assert e.value.status_code == 503
+    assert e.value.detail["code"] == "TYPED_IN_NOT_ADDED"
+    doc = po_repo.collection.docs[0]
+    assert doc["status"] == "CANCELLED" and doc["items"] == []
+    assert doc["cancellation_reason"]
+
+
+def test_send_refuses_an_order_with_no_line(monkeypatch):
+    empty = _po()
+    empty["items"] = []  # _po() fills in default lines for a falsy list
+    repo, _ = _wire(monkeypatch, empty)
+    with pytest.raises(HTTPException) as e:
+        _run(v.send_po("PO1", _user()))
+    assert e.value.status_code == 400
+    assert repo.updates == []
+
+
+def test_create_answers_with_the_order_as_stored_after_settling(monkeypatch):
+    """The response carried the total priced before settling: the form showed
+    Rs 2100 for an order stored at Rs 2360 (re-taxed as the 18% sunglass)."""
+    po_repo, _ = _create_world(monkeypatch)
+    _rival_appears(monkeypatch, category="SUNGLASS", hsn_code="90041000", gst_rate=18)
+    body = v.POCreate(vendor_id="V1", delivery_store_id="S1", items=[
+        v.POItemCreate(new_product=dict(_VOGUE), quantity=1, unit_price=2000),
+    ])
+    out = _run(v.create_po(body, _user()))
+    doc = po_repo.collection.docs[0]
+    assert doc["total_amount"] == 2360
+    assert out["total_amount"] == 2360
+    assert out["gst_summary"] == doc["gst_summary"]
+
+
+def test_a_line_moved_to_another_product_takes_its_name_and_hsn(monkeypatch):
+    """A typed rate is kept, but the line names the product it now points at:
+    not the frame that was never created, with that frame's HSN."""
+    repo, _ = _wire(monkeypatch, _po())
+    _real_spine(monkeypatch)
+    _rival_appears(monkeypatch, category="SUNGLASS", hsn_code="90041000", gst_rate=18,
+                   name="Vogue VO5286 Sunglasses - W44")
+    _run(v.update_po("PO1", _edit_body(
+        [{"new_product": dict(_VOGUE), "quantity": 1, "unit_price": 2000, "gst_rate": 12}]
+    ), _user()))
+    line = repo.pos["PO1"]["items"][0]
+    assert line["product_id"] == "RIVAL"
+    assert line["product_name"] == "Vogue VO5286 Sunglasses - W44"
+    assert line["hsn"] == "90041000"
+    assert line["tax_rate"] == 12  # typed by the person: kept
+
+
+def _cl_po():
+    return _po(status="SENT", items=[
+        _line("CL1", "Acuvue Oasys -1.00", 2, 900),
+        _line("CL1", "Acuvue Oasys -2.00", 3, 900),
+    ])
+
+
+def test_a_line_cancel_is_refused_when_arrivals_cannot_be_placed_on_a_line(monkeypatch):
+    """A contact-lens order has one line per power, all one product. 2 boxes
+    arrived; the receipt does not say which power. Cancelling the -2.00 line
+    gave the 2 to the -1.00 line and withdrew all 3 -2.00 boxes."""
+    grn = {"grn_id": "G1", "po_id": "PO1", "status": "ACCEPTED",
+           "items": [{"product_id": "CL1", "accepted_qty": 2}]}
+    repo, audit = _wire(monkeypatch, _cl_po(), grns=[grn])
+    with pytest.raises(HTTPException) as e:
+        _run(v.cancel_po_line("PO1", 1, _line_body(product_id="CL1"), _user()))
+    assert e.value.status_code == 409
+    assert "which of its lines" in e.value.detail
+    assert repo.updates == [] and audit.rows == []
+
+
+def test_a_line_cancel_of_one_of_two_lines_of_a_product_with_nothing_arrived(monkeypatch):
+    repo, _ = _wire(monkeypatch, _cl_po())
+    _run(v.cancel_po_line("PO1", 1, _line_body(product_id="CL1"), _user()))
+    assert [i["quantity"] for i in repo.pos["PO1"]["items"]] == [2, 0]
+
+
+def test_a_stale_screen_cannot_cancel_the_other_line_of_a_product(monkeypatch):
+    """Two managers remove the 'P1 x2' line of [P1 x2, P1 x3, P2 x1] from the
+    same screen. The product alone matched both times, so both P1 lines went."""
+    repo, _ = _wire(monkeypatch, _po(items=[
+        _line("P1", "Carrera CA8895", 2, 1000),
+        _line("P1", "Carrera CA8895", 3, 1000),
+        _line("P2", "Ray-Ban RB2140", 1, 2000),
+    ]))
+    body = v.POLineCancel(reason="duplicate line", product_id="P1", quantity=2)
+    _run(v.cancel_po_line("PO1", 0, body, _user()))
+    with pytest.raises(HTTPException) as e:
+        _run(v.cancel_po_line("PO1", 0, body, _user()))
+    assert e.value.status_code == 409
+    assert [(i["product_id"], i["quantity"]) for i in repo.pos["PO1"]["items"]] == [
+        ("P1", 3), ("P2", 1)
+    ]
+
+
+def test_a_gst_only_edit_is_saved_and_described(monkeypatch):
+    """A rate change alone was answered 200 'saved' with nothing written."""
+    repo, audit = _wire(monkeypatch, _po())
+    _run(v.update_po("PO1", _edit_body([
+        {**_p1(2, 1000), "gst_rate": 18},
+        {"product_id": "P2", "product_name": "Ray-Ban RB2140", "sku": "P2",
+         "quantity": 3, "unit_price": 2000, "gst_rate": 5},
+    ]), _user()))
+    doc = repo.pos["PO1"]
+    assert doc["items"][0]["tax_rate"] == 18
+    assert "GST 5% -> 18%" in doc["history"][-1]["detail"]
+    assert [r["action"] for r in audit.rows] == ["purchase_order.edit"]
+
+
+def test_a_paise_cost_change_reads_as_it_is():
+    out = v._describe_edit(
+        [{"product_id": "P1", "product_name": "Frame", "quantity": 1, "unit_price": 12345.67}],
+        [{"product_id": "P1", "product_name": "Frame", "quantity": 1, "unit_price": 12345.68}],
+    )
+    assert out == ["Frame: cost Rs 12345.67 -> Rs 12345.68"]

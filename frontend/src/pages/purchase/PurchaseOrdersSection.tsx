@@ -109,7 +109,9 @@ export function PurchaseOrdersSection() {
         toast.success(`${po.poNumber} cancelled`);
       } else if (action === 'cancel-line' && opts.lineIndex !== undefined) {
         const line = po.items[opts.lineIndex];
-        const saved = await vendorsApi.cancelPurchaseOrderLine(po.id, opts.lineIndex, opts.reason ?? '', line?.productId);
+        const saved = await vendorsApi.cancelPurchaseOrderLine(
+          po.id, opts.lineIndex, opts.reason ?? '', line?.productId, line?.quantity,
+        );
         showSaved(mapPOtoPurchaseOrder(saved));
         toast.success(`${line?.productName ?? 'Line'} cancelled on ${po.poNumber}`);
       }

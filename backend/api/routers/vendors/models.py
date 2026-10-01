@@ -95,8 +95,9 @@ class POItemNewProduct(BaseModel):
 class POItemCreate(BaseModel):
     # Ruling 13: a line references EITHER an existing catalogued product OR
     # carries the identity of one that does not exist yet, which the server
-    # materialises into a real (provisional, unsellable) spine row before the PO
-    # is written. product_id stays the join key for everything downstream --
+    # gives a product_id and writes as a real (provisional, unsellable) spine
+    # row right after the PO is written (po_detail.settle_typed_in_lines).
+    # product_id stays the join key for everything downstream --
     # receiving, the stock mint, the invoice and the 3-way match all key on it.
     product_id: Optional[str] = None
     product_name: Optional[str] = None
@@ -405,6 +406,8 @@ class POLineCancel(BaseModel):
     # The product the person saw on that line. A stale screen (the draft was
     # edited meanwhile) must not cancel whatever line now sits at that index.
     product_id: Optional[str] = None
+    # ...and its quantity: two lines may carry one product.
+    quantity: Optional[int] = None
 
     @field_validator("reason")
     @classmethod

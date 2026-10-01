@@ -364,11 +364,12 @@ def price_po_lines(items, vendor, delivery_store_id, current_user):
 
     Both doors that take typed lines -- create (POST) and the draft edit (PUT)
     -- call this, so an edited order is priced and gated exactly as a new one:
-    the catalogue gate runs, typed-in new products are materialised through the
-    product door, and GST is built per line (build_po_gst). Mutates `items` (a
-    typed-in line gets its new product_id). Returns (build_po_gst result, the
-    product docs read) -- hand both to fill_cost_from_rate AFTER the order is
-    written; nothing here changes an existing product.
+    the catalogue gate runs, typed-in new products are validated by the product
+    door and given their product_id, and GST is built per line (build_po_gst).
+    Mutates `items` (a typed-in line gets its product_id). Writes NOTHING.
+    Returns (build_po_gst result, the product docs read, the typed-in products
+    still to write) -- after the order write, hand the last to
+    po_detail.settle_typed_in_lines, then the docs to fill_cost_from_rate.
     """
     product_repo = get_product_repository()
 
@@ -379,7 +380,7 @@ def price_po_lines(items, vendor, delivery_store_id, current_user):
     # (DARK by default) so the existing free-text Create-PO form keeps working
     # until the Buy Desk picker ships. Fail-soft when no product repo. Checked
     # BEFORE any typed-in product is created, so a refused order never leaves
-    # one behind; a typed-in line gets a real id from the door below.
+    # one behind; a typed-in line is given its product_id below.
     if product_repo is not None and _po_catalog_gate_on():
         unknown = [
             it.product_id
@@ -447,8 +448,12 @@ def price_po_lines(items, vendor, delivery_store_id, current_user):
             claimed[key] = (pid, name, sku)
             previews[pid] = preview
             # The door writes exactly the SKU the stored line will carry; left
-            # to itself it would mint a second collision suffix.
-            payload["sku"] = sku
+            # to itself it would mint a second collision suffix. A minted SKU
+            # keeps the colour and size as typed ('C.01', '14.0'), which the
+            # door refuses as a SUPPLIED SKU -- that one it mints itself, and
+            # the stored line is corrected after the write.
+            if _pm.is_acceptable_sku(sku):
+                payload["sku"] = sku
             typed_in.append(
                 {"line": it, "payload": payload, "product_id": pid,
                  "identity_key": preview.get("identity_key")}
@@ -508,7 +513,9 @@ def create_typed_in_products(typed_in, products, current_user):
     for entry in typed_in:
         it, pid = entry["line"], entry["product_id"]
         pinned = entry["payload"]
-        attempts = [pinned, {k: v for k, v in pinned.items() if k != "sku"}]
+        attempts = [pinned]
+        if "sku" in pinned:
+            attempts.append({k: v for k, v in pinned.items() if k != "sku"})
         created = winner = None
         for payload in attempts:
             try:
@@ -531,7 +538,7 @@ def create_typed_in_products(typed_in, products, current_user):
                 if conflict.get("product_id") and same:
                     winner = conflict
                     break
-                if err.status == 409 and payload is pinned:
+                if err.status == 409 and payload is not attempts[-1]:
                     continue  # another product holds the SKU: let the door mint
                 logger.error(
                     "[VENDOR] typed-in product %s (%s) was not created: %s",
@@ -540,8 +547,12 @@ def create_typed_in_products(typed_in, products, current_user):
                 break
         products.pop(pid, None)
         if winner is not None:
-            moved[pid] = {"product_id": winner["product_id"], "sku": winner.get("sku")}
-            it.product_id, it.sku = winner["product_id"], winner.get("sku")
+            name = winner.get("name") or it.product_name
+            moved[pid] = {
+                "product_id": winner["product_id"], "sku": winner.get("sku"),
+                "product_name": name,
+            }
+            it.product_id, it.sku, it.product_name = winner["product_id"], winner.get("sku"), name
             if product_repo is not None:
                 products[it.product_id] = product_repo.find_by_id(it.product_id)
         elif created is not None:
@@ -707,6 +718,36 @@ async def create_po(
     not_created = settle_typed_in_lines(
         po_repo, po_id, typed_in, products, current_user
     )
+    if typed_in and po_repo is not None:
+        # Settling may have corrected or removed lines: answer with the order
+        # as stored, never the totals priced before it.
+        stored = po_repo.find_by_id(po_id) or {}
+        if stored.get("status") == "CANCELLED":
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "TYPED_IN_NOT_ADDED",
+                    "message": (
+                        "The typed-in items could not be added to the catalogue, "
+                        "so nothing was left to order and the order was cancelled. "
+                        "Try again in a moment."
+                    ),
+                    "po_id": po_id,
+                    "products_not_created": not_created,
+                },
+            )
+        total = stored.get("total_amount", total)
+        gst_summary = stored.get("gst_summary", gst_summary)
+        gst_warnings = [
+            {
+                "product_id": it.get("product_id"),
+                "product_name": it.get("product_name"),
+                "missing": it.get("gst_missing"),
+                "taxed": not it.get("gst_unresolved"),
+            }
+            for it in stored.get("items") or []
+            if it.get("gst_missing")
+        ]
     cost_filled = fill_cost_from_rate(
         po_id, po_number, po.items, products, current_user
     )

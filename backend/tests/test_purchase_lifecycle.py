@@ -413,6 +413,9 @@ class _POCreateRepo:
         self.created.append(doc)
         return doc
 
+    def find_by_id(self, po_id):
+        return next((d for d in self.created if d.get("po_id") == po_id), None)
+
 
 def _raise_po(items, product_repo, po_repo):
     saved = (

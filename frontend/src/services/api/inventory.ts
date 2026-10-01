@@ -823,10 +823,18 @@ export const vendorsApi = {
   // Cancel what is still due on ONE line. `productId` is the product the person
   // saw on that line: a stale screen is refused (409), never mis-applied.
   // Returns the updated order.
-  cancelPurchaseOrderLine: async (poId: string, lineIndex: number, reason: string, productId?: string) => {
+  cancelPurchaseOrderLine: async (
+    poId: string,
+    lineIndex: number,
+    reason: string,
+    productId?: string,
+    quantity?: number,
+  ) => {
+    // The product AND quantity the screen showed: two lines may carry one
+    // product, so the product alone does not prove the screen is current.
     const response = await api.post(
       `/vendors/purchase-orders/${poId}/items/${lineIndex}/cancel`,
-      { reason, product_id: productId },
+      { reason, product_id: productId, quantity },
     );
     return response.data;
   },

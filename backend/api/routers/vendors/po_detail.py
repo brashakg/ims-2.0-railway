@@ -287,6 +287,11 @@ async def send_po(
 
         if po.get("status") != "DRAFT":
             raise HTTPException(status_code=400, detail="Only draft POs can be sent")
+        if not any(_qty(it.get("quantity")) for it in po.get("items") or []):
+            raise HTTPException(
+                status_code=400,
+                detail="This order has no lines - add what to order before sending it.",
+            )
 
         # Hub Phase 2 SENT gate: a PO may be DRAFTED against an incomplete product,
         # but cannot be SENT to the vendor until every line is catalog-complete.
@@ -505,6 +510,28 @@ def _received_per_line(po: dict, by_product: dict) -> list:
     return out
 
 
+def _refuse_if_arrivals_unattributed(line: dict, items: list, by_product: dict) -> None:
+    """A receipt counts units per PRODUCT, never per line. When some -- not
+    all -- of a product's units arrived and the order carries that product on
+    more than one open line (a contact-lens order has one line per power),
+    nothing says which line they were for, so one of those lines cannot be
+    cancelled on its own: it might withdraw boxes that arrived and leave the
+    ones that never came looking received."""
+    pid = line.get("product_id")
+    open_lines = [i for i in items if i.get("product_id") == pid and _qty(i.get("quantity"))]
+    arrived = _qty(by_product.get(pid))
+    if len(open_lines) > 1 and 0 < arrived < sum(_qty(i.get("quantity")) for i in open_lines):
+        name = line.get("product_name") or line.get("sku") or pid
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{arrived} of {name} arrived, but the receipt does not say which "
+                "of its lines they were for, so one line cannot be cancelled on "
+                "its own. Cancel what is still due on the whole order instead."
+            ),
+        )
+
+
 def _refresh_received(items: list, received: list) -> None:
     """Each line's own copy of what arrived, from the receipts. The receive
     inbox and the cockpit read a line's received_qty before the header, so a
@@ -612,6 +639,12 @@ def _units(n: int) -> str:
     return f"{n} unit" + ("" if n == 1 else "s")
 
 
+def _money(v: float) -> str:
+    """1000 -> '1000', 12345.68 -> '12345.68': never the rounded ':g' form
+    that showed a 12345.67 -> 12345.68 change as 12345.7 -> 12345.7."""
+    return f"{v:.2f}".rstrip("0").rstrip(".")
+
+
 def _describe_edit(old_items: list, new_items: list) -> list:
     """What changed on the lines, in the words the timeline shows. Empty means
     the lines are as stored, which is how update_po knows an edit changed
@@ -621,7 +654,13 @@ def _describe_edit(old_items: list, new_items: list) -> list:
     An unchanged line (same product, quantity and cost) is matched first; the
     rest are paired with the next line of the same product, in order."""
     def key(i):
-        return (i.get("product_id"), _qty(i.get("quantity")), float(i.get("unit_price") or 0))
+        return (
+            i.get("product_id"),
+            _qty(i.get("quantity")),
+            float(i.get("unit_price") or 0),
+            float(i.get("tax_rate") or 0),
+            i.get("hsn") or None,
+        )
 
     def name(i):
         return i.get("product_name") or i.get("sku") or i.get("product_id")
@@ -647,7 +686,13 @@ def _describe_edit(old_items: list, new_items: list) -> list:
         old_price = float(o.get("unit_price") or 0)
         new_price = float(n.get("unit_price") or 0)
         if old_price != new_price:
-            out.append(f"{name(n)}: cost Rs {old_price:g} -> Rs {new_price:g}")
+            out.append(f"{name(n)}: cost Rs {_money(old_price)} -> Rs {_money(new_price)}")
+        old_rate = float(o.get("tax_rate") or 0)
+        new_rate = float(n.get("tax_rate") or 0)
+        if old_rate != new_rate:
+            out.append(f"{name(n)}: GST {_money(old_rate)}% -> {_money(new_rate)}%")
+        if (o.get("hsn") or None) != (n.get("hsn") or None):
+            out.append(f"{name(n)}: HSN {o.get('hsn') or 'none'} -> {n.get('hsn') or 'none'}")
     for o in old_left:
         out.append(f"removed {name(o)} x{_qty(o.get('quantity'))}")
     return out
@@ -680,6 +725,9 @@ def _settled_lines(po: dict, moved: dict, failed_ids: set, products: dict):
             touched = True
             was = line.get("sku")
             line.update(fix)
+            real = products.get(fix["product_id"]) or {}
+            if other_product and real.get("hsn_code"):
+                line["hsn"] = real["hsn_code"]
             changes.append(
                 f"{name} is already catalogued as {line.get('sku')}"
                 if other_product
@@ -735,16 +783,36 @@ def settle_typed_in_lines(po_repo, po_id, typed_in, products, current_user) -> l
         if settled is None:
             return dropped
         items, money, changes = settled
+        patch = {"items": items, **money}
+        events = [{"kind": "edited", "label": "Lines corrected", "detail": "; ".join(changes)}]
+        if not items:
+            # Nothing left to order: the same rule as a cancel that leaves
+            # nothing -- the order is cancelled, never kept as an empty draft
+            # that could be sent.
+            why = "None of its lines could be added to the catalogue."
+            patch.update(
+                status="CANCELLED",
+                cancelled_at=_now_iso(),
+                cancelled_by=current_user.get("user_id"),
+                cancellation_reason=why,
+            )
+            events.append({"kind": "cancelled", "label": "Cancelled", "detail": f"Reason: {why}"})
+            dropped = [
+                {**d, "reason": "could not be added to the catalogue, and with nothing "
+                                "left on it the order was cancelled - raise it again"}
+                for d in dropped
+            ]
         try:
             _write_change(
                 po_repo,
                 po,
-                {"items": items, **money},
-                [{"kind": "edited", "label": "Lines corrected", "detail": "; ".join(changes)}],
+                patch,
+                events,
                 current_user,
                 "purchase_order.lines_settled",
-                before={"items": po.get("items")},
-                after={"items": items, "total_amount": money["total_amount"]},
+                before={"items": po.get("items"), "status": po.get("status")},
+                after={"items": items, "total_amount": money["total_amount"],
+                       "status": patch.get("status", po.get("status"))},
             )
             return dropped
         except HTTPException as exc:
@@ -958,7 +1026,12 @@ async def cancel_po_line(
     if not 0 <= line_index < len(items):
         raise HTTPException(status_code=404, detail="No such line on this order")
     line = items[line_index]
-    if body.product_id and body.product_id != line.get("product_id"):
+    # What the person saw on that line. Two lines may carry one product, so the
+    # product alone does not prove the screen is current.
+    seen = (body.product_id, body.quantity)
+    shown = line.get("ordered_qty")  # what the screen shows as the line's qty
+    now = (line.get("product_id"), _qty(line.get("quantity") if shown is None else shown))
+    if any(want is not None and want != got for want, got in zip(seen, now)):
         raise HTTPException(status_code=409, detail=_CHANGED_MEANWHILE)
     name = line.get("product_name") or line.get("sku") or line.get("product_id")
 
@@ -978,6 +1051,7 @@ async def cancel_po_line(
     else:
         _refuse_if_box_waiting(po_id)
         by_product = _received_by_product(po)
+        _refuse_if_arrivals_unattributed(line, items, by_product)
         received = _received_per_line(po, by_product)
         _refresh_received(items, received)
         units = _cancel_remainder(items[line_index], received[line_index])

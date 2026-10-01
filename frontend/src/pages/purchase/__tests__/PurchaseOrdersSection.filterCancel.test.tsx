@@ -153,7 +153,7 @@ describe('Cancel an order with a reason (F4)', () => {
     expect(toastMock.success).not.toHaveBeenCalled();
   });
 
-  it('cancelling one line sends the line position, product and reason', async () => {
+  it('cancelling one line sends the line position, product, quantity and reason', async () => {
     cancelPurchaseOrderLine.mockResolvedValue(
       raw('S1', 'CANCELLED', {
         items: [{ product_id: 'p1', product_name: 'Carrera CA8895', quantity: 0, ordered_qty: 0, cancelled_qty: 2, line_status: 'CANCELLED', unit_price: 1000, tax_rate: 5 }],
@@ -167,7 +167,7 @@ describe('Cancel an order with a reason (F4)', () => {
     fireEvent.change(screen.getByLabelText(/why/i), { target: { value: 'vendor discontinued' } });
     fireEvent.click(screen.getByRole('button', { name: /confirm cancel/i }));
     await waitFor(() =>
-      expect(cancelPurchaseOrderLine).toHaveBeenCalledWith('po-S1', 0, 'vendor discontinued', 'p1'),
+      expect(cancelPurchaseOrderLine).toHaveBeenCalledWith('po-S1', 0, 'vendor discontinued', 'p1', 2),
     );
   });
 });
