@@ -36,7 +36,8 @@ export function ShopReorderLevel({
       <button
         type="button"
         onClick={() => setDraft(level == null ? '' : String(level))}
-        className="text-xs text-gray-500 hover:text-bv-red-600 underline decoration-dotted"
+        // min-h: a tablet-sized tap target (owner: tablets are the counter device).
+        className="inline-flex items-center min-h-[32px] text-xs text-gray-500 hover:text-bv-red-600 underline decoration-dotted"
         aria-label={`Reorder level at this shop: ${shown}. Change it`}
         title="Change this shop's reorder level"
       >

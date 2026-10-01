@@ -97,6 +97,13 @@ export function useQuickAddForm() {
   const [reorderLevel, setReorderLevel] = useState('');
   const reorderShop = user?.activeStoreId || '';
   const canSetReorderLevel = !!reorderShop && hasRole(REORDER_LEVEL_ROLES);
+  // Edit mode: the product's per-shop levels as loaded. The field shows the
+  // ACTIVE shop's (an effect, not the loader: the signed-in user -- and so
+  // the shop -- can arrive after the product does on a fresh page load).
+  const [editLevels, setEditLevels] = useState<Record<string, unknown> | null>(null);
+  useEffect(() => {
+    if (editLevels) setReorderLevel(levelText(editLevels[reorderShop]));
+  }, [editLevels, reorderShop]);
 
   // Online (Shopify)
   const [syncToShopify, setSyncToShopify] = useState(false);
@@ -327,6 +334,7 @@ export function useQuickAddForm() {
       setCostPrice('');
       setDiscountCategory('');
       setReorderLevel('');
+      setEditLevels(null);
       setSyncToShopify(false);
       setShopifyTags([]);
       setPublishPOS(true);
@@ -1221,9 +1229,9 @@ export function useQuickAddForm() {
           applyFormValues(productToFormValues(product));
           setEditMode({ kind: 'spine', id: editId, sku: String(product.sku || '') });
           // THIS shop's level; not set here = blank (never another shop's,
-          // never the old chain-wide reorder_point).
+          // never the old chain-wide reorder_point). See editLevels above.
           const levels = (product as { reorder_levels?: Record<string, unknown> }).reorder_levels;
-          setReorderLevel(levelText(levels?.[reorderShop]));
+          setEditLevels(levels && typeof levels === 'object' ? levels : {});
         }
       } catch {
         if (!cancelled) toast.error('Could not load the product to edit.');
