@@ -9,6 +9,7 @@
 import { useState } from 'react';
 import { useToast } from '../../context/ToastContext';
 import { reorderApi } from '../../services/api/inventory';
+import { typedLevel, isLevelInputValid, LEVEL_INPUT_ERROR } from '../../utils/reorderLevel';
 
 export function ShopReorderLevel({
   productId,
@@ -47,12 +48,11 @@ export function ShopReorderLevel({
   }
 
   const save = async () => {
-    const text = draft.trim();
-    const next = text === '' ? null : Number(text);
-    if (next !== null && !(Number.isInteger(next) && next >= 0)) {
-      toast.error('Reorder level must be a whole number, 0 or more. Leave it blank for not set.');
+    if (!isLevelInputValid(draft)) {
+      toast.error(LEVEL_INPUT_ERROR);
       return;
     }
+    const next = typedLevel(draft);
     setSaving(true);
     try {
       await reorderApi.setShopLevel(productId, storeId, next);

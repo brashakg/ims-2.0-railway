@@ -56,18 +56,9 @@ import {
 } from '../reviewQueue';
 import { productListPath, sectionOfError, type EditMode, type SectionId } from './shared';
 import { useProductImages } from './useProductImages';
-import { reorderApi, REORDER_LEVEL_ROLES } from '../../../services/api/inventory';
-
-// Reorder level, form text <-> server number. The level is THIS shop's (owner
-// ruling D12, 2026-09-29: per shop): '' = not set = no low-stock alert, and a
-// blank or invalid field is never saved as a number.
-const typedLevel = (value: unknown): number | null => {
-  const n = value === null || value === undefined || String(value).trim() === ''
-    ? NaN
-    : Number(value);
-  return Number.isInteger(n) && n >= 0 ? n : null;
-};
-const levelText = (rp: unknown): string => String(typedLevel(rp) ?? '');
+import { reorderApi } from '../../../services/api/inventory';
+import { REORDER_LEVEL_ROLES } from '../../inventory/inventoryRoles';
+import { typedLevel, levelText, isLevelInputValid, LEVEL_INPUT_ERROR } from '../../../utils/reorderLevel';
 
 export function useQuickAddForm() {
   const { hasRole, user } = useAuth();
@@ -563,8 +554,8 @@ export function useQuickAddForm() {
         return;
       }
 
-      if (canSetReorderLevel && reorderLevel.trim() && typedLevel(reorderLevel) === null) {
-        toast.error('Reorder level must be a whole number, 0 or more. Leave it blank for not set.');
+      if (canSetReorderLevel && !isLevelInputValid(reorderLevel)) {
+        toast.error(LEVEL_INPUT_ERROR);
         return;
       }
       // THIS shop's level, written on its own (never inside the product).

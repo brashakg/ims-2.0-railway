@@ -14,6 +14,7 @@ import {
   Calculator,
 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
+import { typedLevel, levelText, isLevelInputValid, LEVEL_INPUT_ERROR } from '../../utils/reorderLevel';
 
 interface ReorderPointModalProps {
   isOpen: boolean;
@@ -24,7 +25,8 @@ interface ReorderPointModalProps {
     name: string;
     brand: string;
     currentStock: number;
-    reorderPoint?: number;
+    /** This shop's level; null/undefined = not set. */
+    reorderPoint?: number | null;
     // Real value from the product master: null/undefined = never configured;
     // <= 0 (the -1 sentinel) = auto-reorder explicitly DISABLED.
     reorderQuantity?: number | null;
@@ -37,18 +39,22 @@ interface ReorderPointModalProps {
    *  stock / lead time are product-wide: read-only for a role that cannot
    *  edit the product (they are not saved for it). */
   productWideLocked?: boolean;
+  /** True for a role that may not set a shop's level (a catalogue manager):
+   *  the level field is read-only and no level is sent for it. */
+  shopLevelLocked?: boolean;
 }
 
 export interface ReorderPointData {
   productId: string;
-  reorderPoint: number;
+  /** null = not set (clears this shop's level). */
+  reorderPoint: number | null;
   // -1 = auto-reorder disabled (backend sentinel); otherwise >= 1.
   reorderQuantity: number;
   maxStock: number;
   leadTimeDays: number;
 }
 
-export function ReorderPointModal({ isOpen, onClose, product, onSave, productWideLocked = false }: ReorderPointModalProps) {
+export function ReorderPointModal({ isOpen, onClose, product, onSave, productWideLocked = false, shopLevelLocked = false }: ReorderPointModalProps) {
   const toast = useToast();
 
   // Seed from the REAL master value only. <= 0 (the -1 sentinel) means the
@@ -58,7 +64,7 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave, productWid
   const startDisabled = product.reorderQuantity != null && product.reorderQuantity <= 0;
 
   const [isSaving, setIsSaving] = useState(false);
-  const [reorderPoint, setReorderPoint] = useState(product.reorderPoint ?? 0);
+  const [reorderPoint, setReorderPoint] = useState(levelText(product.reorderPoint));
   const [autoReorderOff, setAutoReorderOff] = useState(startDisabled);
   const [reorderQuantity, setReorderQuantity] = useState<number | ''>(
     product.reorderQuantity != null && product.reorderQuantity >= 1
@@ -78,7 +84,7 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave, productWid
     if (autoCalculate && avgSalesPerDay > 0) {
       // Reorder Point = (Average Daily Sales × Lead Time) + Safety Stock
       const calculatedReorderPoint = leadTimeStock + safetyStock;
-      setReorderPoint(calculatedReorderPoint);
+      setReorderPoint(String(calculatedReorderPoint));
 
       // Reorder Quantity = Average Daily Sales × (Lead Time + Review Period)
       // Using 30-day review period. Never overrides an explicit
@@ -96,11 +102,12 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave, productWid
   }, [autoCalculate, autoReorderOff, avgSalesPerDay, leadTimeDays, leadTimeStock, safetyStock]);
 
   const handleSubmit = async () => {
-    // Validation (0 is a real level: alert once this shop runs out)
-    if (reorderPoint < 0) {
-      toast.error('Reorder level must be 0 or more');
+    // Validation (blank = not set; 0 is a real level: alert once this shop runs out)
+    if (!isLevelInputValid(reorderPoint)) {
+      toast.error(LEVEL_INPUT_ERROR);
       return;
     }
+    const level = typedLevel(reorderPoint);
     // Resolve the quantity to persist: -1 (the backend's "auto-reorder off"
     // sentinel) when disabled, otherwise a real qty >= 1. An untouched save
     // on a disabled product therefore KEEPS it disabled. (Not saved at all
@@ -115,7 +122,7 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave, productWid
       }
       reorderQuantityToSave = reorderQuantity;
     }
-    if (!productWideLocked && maxStock < reorderPoint) {
+    if (!productWideLocked && level !== null && maxStock < level) {
       toast.error('Max stock must be greater than or equal to reorder point');
       return;
     }
@@ -128,7 +135,7 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave, productWid
     try {
       await onSave({
         productId: product.id,
-        reorderPoint,
+        reorderPoint: level,
         reorderQuantity: reorderQuantityToSave,
         maxStock,
         leadTimeDays,
@@ -144,7 +151,15 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave, productWid
 
   if (!isOpen) return null;
 
-  const stockStatus = product.currentStock <= reorderPoint ? 'critical' : product.currentStock <= reorderPoint * 1.5 ? 'warning' : 'healthy';
+  const shownLevel = typedLevel(reorderPoint);
+  const stockStatus =
+    shownLevel === null
+      ? 'healthy' // no level at this shop: nothing to alert on
+      : product.currentStock <= shownLevel
+        ? 'critical'
+        : product.currentStock <= shownLevel * 1.5
+          ? 'warning'
+          : 'healthy';
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
@@ -256,14 +271,15 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave, productWid
             {/* Reorder Point */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
-                Reorder level at this shop (units) *
+                Reorder level at this shop (units)
               </label>
               <input
                 type="number"
                 min="0"
                 value={reorderPoint}
-                onChange={(e) => setReorderPoint(Math.max(0, parseInt(e.target.value) || 0))}
-                disabled={autoCalculate || isSaving}
+                placeholder="not set"
+                onChange={(e) => setReorderPoint(e.target.value)}
+                disabled={autoCalculate || isSaving || shopLevelLocked}
                 className="input-field w-full"
               />
               <p className="text-xs text-gray-500 mt-1">
@@ -319,7 +335,7 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave, productWid
               </label>
               <input
                 type="number"
-                min={reorderPoint}
+                min={shownLevel ?? 0}
                 value={maxStock}
                 onChange={(e) => setMaxStock(parseInt(e.target.value) || maxStock)}
                 disabled={autoCalculate || isSaving || productWideLocked}
@@ -349,9 +365,9 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave, productWid
               <div className="w-full bg-gray-200 rounded-full h-3">
                 <div
                   className={`h-3 rounded-full transition-all ${
-                    product.currentStock <= reorderPoint
+                    stockStatus === 'critical'
                       ? 'bg-red-500'
-                      : product.currentStock <= reorderPoint * 1.5
+                      : stockStatus === 'warning'
                       ? 'bg-amber-500'
                       : 'bg-green-500'
                   }`}
@@ -361,7 +377,7 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave, productWid
               <div className="flex items-center justify-between text-xs text-gray-500">
                 <span>0</span>
                 <span className="text-amber-600 font-medium">
-                  Reorder: {reorderPoint}
+                  Reorder: {shownLevel ?? 'not set'}
                 </span>
                 <span>Max: {maxStock}</span>
               </div>
