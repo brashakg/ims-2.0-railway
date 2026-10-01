@@ -12,6 +12,7 @@ from ._shared import (
 from .helpers import (
     _get_db,
 )
+from ..vendors._shared import _VENDOR_ROLES
 
 # ============================================================================
 # INV-12: BARCODE LIFECYCLE TRACE
@@ -25,15 +26,14 @@ from .helpers import (
 #
 # The purchase section is the raw receipt (supplier or walk-in dealer, bill
 # number, price paid per line, bill photo id) and the unit carries its cost,
-# so the trace is the receipt readers' -- the same roles and store scope as
-# GET /vendors/grn/{grn_id} -- never the counter's.
-_TRACE_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
+# so the trace is the receipt readers' -- the same roles (one constant) and
+# store scope as GET /vendors/grn/{grn_id} -- never the counter's.
 
 
 @router.get("/barcode/{barcode}/trace")
 async def barcode_lifecycle_trace(
     barcode: str,
-    current_user: dict = Depends(require_roles(*_TRACE_ROLES)),
+    current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
 ):
     """Return the full movement history for a physical barcode (INV-12).
 
