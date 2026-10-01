@@ -560,6 +560,49 @@ def test_d14_naming_a_challan_too_cannot_smuggle_the_credit_back(world):
     assert _itc_everywhere() == (0.0, 0.0, 0.0)
 
 
+def _walk_in_lines():
+    return [
+        {"product_id": FRAME, "received_qty": 2, "accepted_qty": 2, "rejected_qty": 0, "unit_price": 3100.0},
+        {"product_id": LENS, "received_qty": 3, "accepted_qty": 3, "rejected_qty": 0, "unit_price": 420.0},
+    ]
+
+
+def test_c7_the_bill_draft_carries_the_price_paid(world):
+    """Panel probe: the book-the-bill task opens /from-grn, whose lines took a
+    price only from the PO -- a receipt of 2 x 3100 + 3 x 420 drafted every
+    line at 0 (total 0.0), so the price paid had to be typed again from
+    nothing."""
+    db = world["db"]
+    _seed_receipt(db, grn_id="GRN-NOPO-0201", subtype="NO_PO", items=_walk_in_lines())
+    draft = _run(pi.draft_invoice_from_grn("GRN-NOPO-0201", current_user=ACCOUNTANT))
+    assert {ln["product_id"]: ln["unit_price"] for ln in draft["lines"]} == {
+        FRAME: 3100.0,
+        LENS: 420.0,
+    }
+    assert draft["taxable_total"] == 2 * 3100.0 + 3 * 420.0
+
+
+def test_c7_the_bill_is_held_to_the_price_paid(world):
+    """The receipt's cost is what the units went on the shelf at; the bill's
+    price drives the product's moving-average cost. With no PO the match read
+    every line as "not on purchase order", so a fair bill and an inflated one
+    looked the same. Now the receipt is the order it is matched against."""
+    db = world["db"]
+    _seed_receipt(db, grn_id="GRN-NOPO-0202", subtype="NO_PO")
+    _seed_receipt(db, grn_id="GRN-NOPO-0203", subtype="NO_PO")
+    _run(pi.create_purchase_invoice(_invoice_body("GRN-NOPO-0202", "CASH-202"), current_user=ACCOUNTANT))
+    dear = _invoice_body("GRN-NOPO-0203", "CASH-203")
+    dear.lines[0].unit_price = 4000.0
+    _run(pi.create_purchase_invoice(dear, current_user=ACCOUNTANT))
+
+    fair = db.vendor_bills.find_one({"grn_id": "GRN-NOPO-0202"}, {"_id": 0})
+    inflated = db.vendor_bills.find_one({"grn_id": "GRN-NOPO-0203"}, {"_id": 0})
+    assert fair["match_status"] == "MATCHED", fair["match_detail"]
+    assert inflated["match_status"] == "ON_HOLD_EXCEPTION"
+    reasons = " ".join(inflated["match_detail"]["exceptions"])
+    assert "4000" in reasons and "3100" in reasons, reasons
+
+
 # ===========================================================================
 # 4. Seen for what it is: receipts list + Movements
 # ===========================================================================

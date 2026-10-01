@@ -318,7 +318,9 @@ def lines_from_grn(grn: dict, po: Optional[dict]) -> List[dict]:
                 or po_line.get("sku"),
                 "hsn": gi.get("hsn") or po_line.get("hsn"),
                 "qty": accepted,
-                "unit_price": _f(po_line.get("unit_price")),
+                # No PO line (a "Bought without PO" receipt, D14): the cost the
+                # receiver recorded is the price paid -- never a 0 to retype.
+                "unit_price": _f(po_line.get("unit_price", gi.get("unit_price"))),
                 "gst_rate": _f(po_line.get("tax_rate")),
             }
         )

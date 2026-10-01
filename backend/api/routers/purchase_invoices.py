@@ -815,6 +815,22 @@ def _run_match_for_invoice(db, po_id, grn_id, computed_lines, tolerance_pct):
             po = po_repo.find_by_id(po_id)
         if grn_id and grn_repo is not None:
             grn = grn_repo.find_by_id(grn_id)
+        # D14: a "Bought without PO" receipt is its own order. The bill is
+        # held to what was accepted and the cost the receiver recorded (the
+        # cost its units went on the shelf at); with no PO every line read
+        # "not on purchase order", whatever the bill said.
+        if po is None and (grn or {}).get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO:
+            po = {
+                "items": [
+                    {
+                        "product_id": gi.get("product_id"),
+                        "quantity": gi.get("accepted_qty"),
+                        "unit_price": gi.get("unit_price"),
+                    }
+                    for gi in grn.get("items") or []
+                    if isinstance(gi, dict)
+                ]
+            }
         # Need at least one comparison doc to make a meaningful verdict.
         if po is None and grn is None:
             return None
