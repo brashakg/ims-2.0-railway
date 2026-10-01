@@ -274,7 +274,7 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/vendors/purchase-invoices/preview",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     # F9: consolidate N Delivery Challans into a draft bulk invoice (accounting
     # action -> ACCOUNTANT/ADMIN, same gate as from-grn).

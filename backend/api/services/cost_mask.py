@@ -19,11 +19,11 @@ from typing import Dict, List
 
 # The accounts roles. Defined ONCE, here: they see cost + margin, and they
 # alone see supplier payments -- the vendor ledger / bills / payments / debit
-# notes / ap-aging, the purchase-invoice and recon books, vendor rebates
-# (routers/vendors/_shared._AP_ROLES and the others ARE this tuple), plus
-# /finance/vendor-payments and the cash-flow supplier-payments total (both ask
-# can_see_cost(user, "payables")). SUPERADMIN passes every require_roles gate
-# on its own.
+# notes / ap-aging / TDS, the purchase-invoice and recon books (their
+# require_roles gates ARE this tuple), plus every finance read of the same
+# money and vendor rebates (they ask can_see_cost(user, "payables")); the
+# rbac_policy rows for all of them are rbac_policy._core.ACCOUNTS, built from
+# this tuple. SUPERADMIN passes every gate on its own.
 AP_ROLES = ("ADMIN", "ACCOUNTANT")
 COST_VISIBLE_ROLES = {"SUPERADMIN", *AP_ROLES}
 # The purchase roles: who buys, receives and pays suppliers, so who sees what
