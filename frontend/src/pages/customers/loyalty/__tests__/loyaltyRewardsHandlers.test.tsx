@@ -100,6 +100,23 @@ describe('add reward', () => {
     expect(names).toEqual(['ZZ new voucher', 'ZZ free lens cloth']);
   });
 
+  it('clears the draft after a successful add: reopening starts blank', async () => {
+    api.createReward.mockResolvedValue({
+      reward: { reward_id: 'RW-2', name: 'ZZ new voucher', type: 'DISCOUNT', point_cost: 100, active: true, redemption_count: 0 },
+    });
+    await openRewards();
+    fireEvent.click(screen.getByRole('button', { name: /Add Reward/ }));
+    fireEvent.change(screen.getByPlaceholderText('e.g. Free glasses-cloth'), { target: { value: 'ZZ new voucher' } });
+    fireEvent.change(screen.getAllByRole('spinbutton')[0], { target: { value: '640' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save Reward' }));
+    await screen.findByText('ZZ new voucher');
+    await waitFor(() => expect(screen.queryByText('New reward')).not.toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole('button', { name: /Add Reward/ }));
+    expect(screen.getByPlaceholderText('e.g. Free glasses-cloth')).toHaveValue('');
+    expect(screen.getAllByRole('spinbutton')[0]).toHaveValue(100);
+  });
+
   it('a failing create toasts the error, keeps the list and keeps the form', async () => {
     api.createReward.mockRejectedValue(new Error('boom'));
     await openRewards();
