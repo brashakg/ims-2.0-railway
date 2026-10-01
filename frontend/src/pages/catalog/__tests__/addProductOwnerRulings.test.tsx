@@ -121,12 +121,18 @@ async function sunglass(user: ReturnType<typeof userEvent.setup>) {
   fill(screen.getByLabelText(/^MRP/), '7890');
 }
 
-// A number saved as the level. -1 (not set) or nothing at all are both fine.
-const savedLevels = () =>
+// Every level a save sent, -1 (not set) included; a save that sent none adds nothing.
+const sentLevels = () =>
   [
     ...createProduct.mock.calls.map((c) => (c[0] as Record<string, unknown>)?.reorder_point),
     ...updateProduct.mock.calls.map((c) => (c[1] as Record<string, unknown>)?.reorder_point),
-  ].filter((v) => typeof v === 'number' && v >= 0);
+  ].filter((v) => v !== undefined);
+// A number saved as a LEVEL. Only above 0 is a level (owner 2026-10-01).
+const savedLevels = () => sentLevels().filter((v) => typeof v === 'number' && v > 0);
+const reviewRow = (label: string) => {
+  const card = screen.getByRole('heading', { name: 'Review' }).closest('.card') as HTMLElement;
+  return within(card).getByText(label).closest('dl') as HTMLElement;
+};
 
 beforeEach(() => {
   Element.prototype.scrollIntoView = vi.fn() as unknown as typeof Element.prototype.scrollIntoView;
@@ -134,7 +140,8 @@ beforeEach(() => {
   createProduct.mockClear();
   updateProduct.mockClear();
   getProduct.mockClear();
-  previewSku.mockClear();
+  previewSku.mockReset();
+  previewSku.mockImplementation(async () => ({ category: 'SUNGLASS', sku: 'SG-RAYBAN-RB4165-601' }));
 });
 
 describe('F12 / D6 - the brand default decides the website', () => {
@@ -186,6 +193,41 @@ describe('F13 / D5 - the SKU is previewed before saving', () => {
     expect(category).toBe('SG');
     expect(attrs).toMatchObject({ brand_name: 'Ray-Ban', model_no: 'RB4165', colour_code: '601' });
     expect(createProduct).not.toHaveBeenCalled();
+  });
+
+  it('previews an Optical Lens (no model) too, and its save invents no model', async () => {
+    previewSku.mockResolvedValue({ category: 'OPTICAL_LENS', sku: 'LS-ESSILOR' });
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(screen.getByText('Optical Lens'));
+    fill(screen.getByLabelText(/^Brand Name/), 'Essilor');
+    fill(screen.getByLabelText(/^Index/), '1.56');
+    fill(screen.getByLabelText(/^Coating/), 'HC');
+    fill(screen.getByLabelText(/^MRP/), '2500');
+    expect(await screen.findByText('LS-ESSILOR')).toBeInTheDocument();
+    const [category, attrs] = previewSku.mock.calls.at(-1) as [string, Record<string, string>];
+    expect(category).toBe('LS');
+    expect(attrs).toMatchObject({ brand_name: 'Essilor', index: '1.56', coating: 'HC' });
+    await user.click(screen.getByRole('button', { name: /Save product/ }));
+    await waitFor(() => expect(createProduct).toHaveBeenCalledTimes(1));
+    // The server's minter (the one the preview called) decides the SKU from
+    // these attributes; the form adds no 'STD' or sub-brand model of its own.
+    const payload = createProduct.mock.calls[0][0] as Record<string, unknown>;
+    expect(payload.model).toBe('');
+    expect(payload.attributes).toEqual(attrs);
+  });
+
+  it('a long SKU is shown whole: its row spans the Review grid and wraps', async () => {
+    const LONG = 'CCL-BAUSCHLOMB-LACELLECOLORS-HAZELBROWN-52.5';
+    previewSku.mockResolvedValue({ category: 'SUNGLASS', sku: LONG });
+    const user = userEvent.setup();
+    renderPage();
+    await sunglass(user);
+    const value = await screen.findByText(LONG);
+    expect(value).toHaveTextContent(LONG); // the full string, no ellipsis
+    expect(value.className).not.toMatch(/(^|\s)truncate(\s|$)/);
+    expect(value.className).toMatch(/(^|\s)break-all(\s|$)/);
+    expect(reviewRow('SKU').className).toMatch(/(^|\s)col-span-full(\s|$)/);
   });
 });
 
@@ -246,6 +288,31 @@ describe('F73 - reorder level -1 = not set', () => {
     expect(row).toHaveTextContent(/not set/i);
   });
 
+  it('a typed 0 is not set: the Review says so and no level is saved', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await sunglass(user);
+    fill(reorderInput(), '0');
+    expect(reviewRow('Reorder level')).toHaveTextContent(/not set/i);
+    await user.click(screen.getByRole('button', { name: /Save product/ }));
+    await waitFor(() => expect(createProduct).toHaveBeenCalledTimes(1));
+    await new Promise((r) => setTimeout(r, 50)); // the follow-up write, if any
+    expect(sentLevels()).toEqual([]);
+  });
+
+  it('editing: a stored 0 shows not set, and 0 typed saves -1 (not set)', async () => {
+    getProduct.mockResolvedValueOnce({ ...SOURCE_PRODUCT, reorder_point: 0 });
+    const user = userEvent.setup();
+    renderPage('/catalog/add?edit=P-SRC');
+    await screen.findByRole('button', { name: /Save changes/ });
+    await waitFor(() => expect(screen.getByLabelText(/^Model No/)).toHaveValue('RB4165'));
+    expect(reorderInput().value).toBe('');
+    fill(reorderInput(), '0');
+    await user.click(screen.getByRole('button', { name: /Save changes/ }));
+    await waitFor(() => expect(updateProduct).toHaveBeenCalledTimes(1));
+    expect(sentLevels()).toEqual([-1]);
+  });
+
   it('a level left blank is never saved as a number', async () => {
     const user = userEvent.setup();
     renderPage();
@@ -266,7 +333,7 @@ describe('F73 - reorder level -1 = not set', () => {
     expect(reorderInput().value).toBe('');
     await user.click(screen.getByRole('button', { name: /Save changes/ }));
     await waitFor(() => expect(updateProduct).toHaveBeenCalledTimes(1));
-    expect(savedLevels()).toEqual([]);
+    expect(sentLevels()).toEqual([-1]);
   });
 });
 

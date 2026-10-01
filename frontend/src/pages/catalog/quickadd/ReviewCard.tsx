@@ -6,7 +6,7 @@
 import { Sparkles } from 'lucide-react';
 import { categoryName, fieldLabelFor } from '../productAddShared';
 import { ReviewRow } from './parts';
-import type { QuickAddForm } from './useQuickAddForm';
+import { levelLabel, type QuickAddForm } from './useQuickAddForm';
 
 export function ReviewCard({ form }: { form: QuickAddForm }) {
   const {
@@ -24,9 +24,12 @@ export function ReviewCard({ form }: { form: QuickAddForm }) {
         </div>
 
         <dl className="grid grid-cols-1 tablet:grid-cols-2 laptop:grid-cols-3 gap-x-8 gap-y-1.5 text-sm">
+          {/* The server-minted SKU this new product will get (F13/D5): a
+              full-width row that wraps, so a long SKU is read whole on a
+              1024px tablet (no hover there to reveal a cut-off value). First,
+              so the grid leaves no empty cell beside it. */}
+          {!editMode && <ReviewRow label="SKU" value={skuPreview || '—'} wide />}
           <ReviewRow label="Category" value={categoryName(selectedCategory) || '—'} />
-          {/* The server-minted SKU this new product will get (F13/D5). */}
-          {!editMode && <ReviewRow label="SKU" value={skuPreview || '—'} />}
           <ReviewRow label="Brand" value={attributes.brand_name || '—'} />
           <ReviewRow
             label="Model"
@@ -65,7 +68,7 @@ export function ReviewCard({ form }: { form: QuickAddForm }) {
                 : 'Auto (Brand Master tier)')
             }
           />
-          {!isReviewMode && <ReviewRow label="Reorder level" value={reorderLevel || 'not set'} />}
+          {!isReviewMode && <ReviewRow label="Reorder level" value={levelLabel(reorderLevel)} />}
           {images.length > 0 && (
             <ReviewRow label="Images" value={`${images.length} uploaded`} />
           )}

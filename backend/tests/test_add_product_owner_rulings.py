@@ -301,7 +301,10 @@ _FORM_VALUES = {
 
 def _form_post(category, attrs):
     """The create payload the form posts (formModel.buildProductPayload):
-    brand and model straight from the same attributes, nothing invented."""
+    brand and model straight from the same attributes, nothing invented. The
+    frontend test 'previews an Optical Lens (no model) too, and its save
+    invents no model' (addProductOwnerRulings.test.tsx) pins the form to this
+    shape -- the form used to send model_no || model_name || subbrand || 'STD'."""
     return prod_router.ProductCreate(
         category=category, brand=attrs.get("brand_name", ""),
         model=attrs.get("model_no") or attrs.get("model_name") or "",
