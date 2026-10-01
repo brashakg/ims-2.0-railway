@@ -41,18 +41,21 @@ Tasks: ONE per shop (source_ref ``shopify-stock-parity-drift:<store_id>``) --
 filed on drift, refreshed (description + payload) every night while it
 drifts or still owes a SKU, completed when a later tick finds EVERY SKU the
 task names either compared clean at that shop or GONE: off the live set
-(its listing drafted or taken down by any door, or retired in IMS), its
-Shopify item unmapped, or answered null by Shopify (deleted in Shopify
-admin) -- nothing is left to measure, so an empty catalogue closes every
-task too. payload.skus: a SKU leaves the task only that way -- one whose
-Shopify batch failed, that fell out of the capped sample or whose IMS side
-was unknown is still owed, and the description names it (every SKU that
-keeps the task open, drift or owed) with the numbers it last drifted with
-(payload.last_seen): unknown is not cleared, and nothing re-sends it by
-itself. Every SKU gets the SAME one instruction (decided 2026-10-01): set
-the quantity at the shop's location in Shopify admin to the IMS number.
-It never names a press that changes a listing's status, and no IMS press
-re-sends an unchanged number (the stock pass sends only changes).
+(its listing drafted or taken down by any door, or the SKU or its listing's
+product retired in IMS), its Shopify item unmapped, or answered null by
+Shopify (deleted in Shopify admin) -- nothing is left to measure, so an
+empty catalogue closes every task too. payload.skus: a SKU leaves the task
+only that way -- one whose Shopify batch failed, that fell out of the
+capped sample or whose IMS side was unknown is still owed, and the
+description names it (every SKU that keeps the task open, drift or owed)
+with the numbers it last drifted with (payload.last_seen): unknown is not
+cleared, and IMS re-sends a number only when it changes in IMS. Every SKU
+gets the SAME one instruction (decided 2026-10-01): set the quantity at the
+shop's location in Shopify admin to the number IMS sends there NOW -- the
+Recommended column of that shop's Online Stock view, never a number the
+task carries (a sale since then re-sent a new one). It never names a press
+that changes a listing's status, and no IMS press re-sends an unchanged
+number (the stock pass sends only changes).
 A shop that leaves the mapped set (location cleared, claimed by two shops,
 shop deactivated) has its task closed on EVERY tick that could read the shop
 map, whether or not anything was compared: parity no longer compares it, and
@@ -383,12 +386,18 @@ def _sample_variants(db) -> Optional[List[Dict[str, Any]]]:
     (inventory.listing_visible: a gid and PUBLISHED, which only a confirmed
     publish writes and every LIVE take-down -- Take off website, the retire
     hook, the SUPERADMIN block cutover, all push_product_delist -- turns to
-    DRAFT), and that listing's product is not retired in IMS (the rule's own
-    reader, online_stock_writeback._sku_to_pid: a DARK or failed take-down
-    leaves a retired listing PUBLISHED; the Catalog screen's DELIST_FAILED
-    reports that one). Any other listing is never compared. Returns
-    [{sku, inventory_item_id}]; None when a read failed (unknown, never
-    "nothing is live"). ponytail: resolves every spine SKU; cap the scan if
+    DRAFT). RETIRED is skipped, by the rule's own reader
+    (online_stock_writeback._sku_to_pid), twice: the SKU itself (a size too
+    -- the retire hook takes a size off sale on its parent's listing, and
+    the Stock Tally and the reconciliation screen list no retired SKU, so a
+    shop's view always holds every SKU its task names), and every SKU on the
+    listing the retire hook takes down for a retired product, found by the
+    hook's own link (online_delist._resolve_twin: pim_product_id, product_id,
+    id, then sku -- never a second spelling). A DARK or failed take-down
+    leaves that listing PUBLISHED; the Catalog screen's DELIST_FAILED reports
+    it. Returns [{sku, inventory_item_id}]; None when a read failed
+    (unknown, never "nothing is live"). ponytail: resolves every spine SKU
+    and one twin per retired product (up to 4 reads each); batch them if
     the catalogue grows past a few thousand."""
     coll = _coll(db, "products")
     listings = _coll(db, "catalog_products")
@@ -396,7 +405,9 @@ def _sample_variants(db) -> Optional[List[Dict[str, Any]]]:
         return None
     try:
         from .online_catalog import inventory_items_for_skus, listings_for_skus
+        from .online_delist import _resolve_twin
         from .online_stock_writeback import _sku_to_pid
+        from .shopify_push import is_variant_of
         from .shopify_push.inventory import listing_visible
 
         spine = [str(d.get("sku") or "").strip()
@@ -405,15 +416,25 @@ def _sample_variants(db) -> Optional[List[Dict[str, Any]]]:
         resolved = _sku_to_pid(db, spine)
         if resolved is None:
             return None
-        retired = resolved[1]
+        pid_of, retired = resolved
+        # The rows the rule read as retired, and the listing the retire hook
+        # takes down for each (a size's twin owns none: only the size is off).
+        rows = coll.find({"product_id": {"$in": list({pid_of[s] for s in retired})}}, {"_id": 0})
+        taken = set()
+        for row in rows:
+            sku = str(row.get("sku") or "").strip()
+            if sku in retired and row.get("product_id") == pid_of[sku]:
+                twin = _resolve_twin(db, row, strict=True)
+                if twin is not None and not is_variant_of(twin):
+                    taken.add(str(twin.get("id")))
         by_listing = listings_for_skus(db, spine, strict=True)
         live = {
             str(d.get("id"))
-            for d in listings.find({"id": {"$in": sorted(by_listing)}}, {"_id": 0, "id": 1, "sku": 1, "ecom": 1})
-            if listing_visible(d) and str(d.get("sku") or "").strip() not in retired
+            for d in listings.find({"id": {"$in": sorted(by_listing)}}, {"_id": 0, "id": 1, "ecom": 1})
+            if listing_visible(d) and str(d.get("id")) not in taken
         }
         on_live = {s for pid, keys in by_listing.items() if pid in live for s in keys}
-        skus = [s for s in spine if s in on_live]
+        skus = [s for s in spine if s in on_live and s not in retired]
         items = inventory_items_for_skus(db, skus)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[STOCK_PARITY] variant sample failed: %s", exc)
@@ -570,8 +591,9 @@ def _task_skus(task: Dict[str, Any]) -> List[str]:
 
 
 def _named(rows: List[Dict[str, Any]]) -> str:
-    """EVERY SKU in ``rows``: the first 5 with both numbers (an owed SKU's
-    from the night it last drifted; none known -> by SKU), the rest by SKU."""
+    """EVERY SKU in ``rows`` with both numbers (decided 2026-10-01: the task
+    names each one so): an owed SKU's from the night it last drifted, marked
+    so; none known -> by SKU."""
 
     def one(d: Dict[str, Any]) -> str:
         if d.get("ims") is None:
@@ -579,9 +601,7 @@ def _named(rows: List[Dict[str, Any]]) -> str:
         when = " when last compared" if d.get("earlier") else ""
         return f"{d.get('sku')} (IMS {d.get('ims')} vs Shopify {d.get('shopify')}{when})"
 
-    head = ", ".join(one(d) for d in rows[:5])
-    rest = ", ".join(str(d.get("sku")) for d in rows[5:])
-    return head + (f"; also {rest}" if rest else "")
+    return ", ".join(one(d) for d in rows)
 
 
 def sync_drift_task(
@@ -595,8 +615,9 @@ def sync_drift_task(
     summary (source_ref ``shopify-stock-parity-drift:<store_id>``).
     ``mapped_skus``: EVERY SKU parity compares tonight (_sample_variants: on a
     live listing, uncapped, less the items Shopify answered null) -- a SKU
-    the task names that is not in it is GONE (its listing drafted, taken
-    down or retired, deleted in Shopify admin, or its Shopify item unmapped):
+    the task names that is not in it is GONE (its listing drafted or taken
+    down, the SKU or its listing's product retired, deleted in Shopify admin,
+    or its Shopify item unmapped):
     parity will not compare it again while it stays so, so it is no longer
     owed.
 
@@ -610,19 +631,23 @@ def sync_drift_task(
 
     A SKU is still OWED when the task names it, it is still compared and it
     did not compare clean tonight (its Shopify batch failed, it fell out of
-    the capped sample, or its IMS side was unknown): unknown is not clear,
-    and nothing clears it by itself -- it drifted on an earlier night, and
-    the stock pass never undoes a change made on Shopify. So an owed SKU
-    keeps the numbers it last drifted with (payload.last_seen, else an older
-    payload's drift rows). payload.skus carries tonight's drift plus every
-    SKU still owed, and the description NAMES every one of them (_named:
-    past the first five, by SKU) -- the text is what the store manager and
-    the admin read (no task screen shows payload).
+    the capped sample, or its IMS side was unknown): unknown is not clear --
+    it drifted on an earlier night, and IMS re-sends a number only when it
+    changes in IMS. So an owed SKU keeps the numbers it last drifted with
+    (payload.last_seen, else an older payload's drift rows). payload.skus
+    carries tonight's drift plus every SKU still owed, and the description
+    NAMES every one of them with its numbers (_named) -- the text is what
+    the store manager and the admin read (no task screen shows payload).
 
     ONE instruction for every SKU (decided 2026-10-01): set the quantity at
-    this shop's location in Shopify admin to the IMS number. No IMS press
-    re-sends an unchanged number, and the text never names a press that
-    changes a listing's status. Returns "filed" | "refreshed" | "closed"
+    this shop's location in Shopify admin to the number IMS sends there NOW
+    -- the Recommended column of the shop's Online Stock view
+    (catalog.online_stock_reconcile filtered to it: the writer's number for
+    that shop), never a number this text carries: those are from the night
+    each SKU was compared, and every sale since re-sent a new absolute one
+    (writeback_after_sale -> push_skus_stock). No IMS press re-sends an
+    unchanged number, and the text never names a press that changes a
+    listing's status. Returns "filed" | "refreshed" | "closed"
     only when EVERY write it made succeeded (the repository returns False /
     None on a rejected write, never raises), else None. Fail-soft."""
     from .task_triggers import active_tasks
@@ -656,18 +681,20 @@ def sync_drift_task(
                     f"Still open from an earlier night and not compared tonight (Shopify's read "
                     f"of it failed, it was outside tonight's sample, or IMS could not read its "
                     f"shelf): {', '.join(sorted(owed))}. Not compared is not cleared: each drifted "
-                    f"on an earlier night and nothing re-sends it by itself."
+                    f"on an earlier night and stays so until its number is set again."
                 )
             parts.append(
-                f"Top: {_named(rows)}. The 01:00 / 09:00 IST pass and Push stock re-send only "
-                f"numbers IMS changed, so they never undo a change made on Shopify. Store manager: "
-                f"ask an ADMIN or SUPERADMIN to set each product's quantity at {label}'s location "
-                f"in Shopify admin to the IMS number above."
+                f"Products: {_named(rows)}. IMS re-sends a product's number only when it changes "
+                f"in IMS (a sale, a return, a transfer, a receipt), so the numbers here are from "
+                f"the night each was compared and may be out of date. Store manager: open "
+                f"Inventory > Online Stock, pick {label}, and ask an ADMIN or SUPERADMIN to set "
+                f"each product's quantity at {label}'s location in Shopify admin to its "
+                f"Recommended number there (what IMS sends now)."
             )
             parts.append(
-                f"This task closes on the first night every product named here compares "
-                f"clean at {label} or is no longer live on the website (taken off it, "
-                f"deactivated or deleted in IMS, or deleted in Shopify admin)."
+                f"This task closes by itself on the first night every product named here "
+                f"compares clean at {label} or is no longer compared (its listing is off the "
+                f"website, IMS no longer sells it, or it was deleted in Shopify admin)."
             )
             description = " ".join(parts)
             payload = {

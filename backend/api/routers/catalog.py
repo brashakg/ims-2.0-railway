@@ -145,9 +145,13 @@ async def online_stock_reconcile(
         listing FEWER than the writer sends, and lets a gap within its
         tolerance pass where the writer sends more than 0 -- so a shop's
         drift task can sit beside OK (under-listed) and OVER_ALLOCATED beside
-        no task (within tolerance). For a SKU on a live listing (parity
-        compares no other), one shop's Online and ``recommended`` are the
-        two numbers its drift task names;
+        no task (within tolerance). Parity compares only a SKU IMS still
+        sells (a retired one is on neither this page nor a task) on a live
+        listing, so every SKU a shop's drift task names is a row here
+        (within ``limit``), and that shop's Online and ``recommended`` are
+        the two numbers the task names, read now (the task's are from the
+        night it compared them); ``recommended`` is the number its
+        instruction asks for (shopify_stock_parity.sync_drift_task);
       * ``recommended`` -- what the writer sends, summed over the mapped shops
         in view. The buffer is the writer's own (the Shopify integration's
         safety_buffer); this page has no second one;

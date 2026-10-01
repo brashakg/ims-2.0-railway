@@ -51,6 +51,14 @@ Pins, each with its revert named in the test:
     door closes the task; every drift gets ONE safe instruction (the
     Shopify admin quantity, never a press that changes a listing's
     status); the worst delta is over drifted rows only.
+  * round 17: a retired SKU (a size too) is never compared, so every SKU a
+    task names is a row in its shop's view; a retired product's listing is
+    found by the retire hook's own link (_resolve_twin, strict); live is
+    listing_visible (a staged-PUBLISHED draft and a gid-less PUBLISHED twin
+    are not live, an untracked live listing is); a dead status or twin read
+    touches no task; a deactivated location sells nothing; the task names
+    EVERY SKU with both numbers and sends the admin to the shop's
+    Recommended (IMS's number now), never to a number it carries.
 
 StrictDB + injected Shopify boundary -- no network, no production.
 """
@@ -1187,23 +1195,30 @@ def test_tick_an_unreadable_catalog_touches_no_task(monkeypatch):
     assert _tasks(db)[0]["status"] == "OPEN"
 
 
-_ONE_STEP = "set each product's quantity at BV-A's location in Shopify admin to the IMS number above"
+_ONE_STEP = ("open Inventory > Online Stock, pick BV-A, and ask an ADMIN or SUPERADMIN to set each "
+             "product's quantity at BV-A's location in Shopify admin to its Recommended number there "
+             "(what IMS sends now)")
 
 
 def _one_safe_step(text):
     """The ONE instruction (decided 2026-10-01) and nothing that presses a
     listing's status: never Send to website (push_product re-lists a
-    draft), never Take off website, never 'lift the block'."""
+    draft), never Take off website, never 'lift the block'. Round 17: it
+    points at the number IMS sends NOW (the shop's Recommended), never a
+    number the task carries, and makes neither false claim of round 16 (a
+    sale re-sends an absolute number, so a Shopify edit IS undone)."""
     assert _ONE_STEP in text, text
     assert "Send to website" not in text and "Take off website" not in text and "lift the block" not in text
+    assert "number above" not in text and "never undo" not in text and "nothing re-sends" not in text
 
 
 def test_drift_task_gives_the_one_safe_instruction():
     """The 01:00 / 09:00 pass and Push stock (sync_stock_levels) send only
     products whose IMS number CHANGED since the recorded baseline
-    (test_shopify_online_stock.py::test_T6), so neither undoes a hand edit on
-    Shopify, and no stock-only press re-sends an unchanged number: the one
-    safe instruction is the Shopify admin quantity. The task carries the
+    (test_shopify_online_stock.py::test_T6), and no stock-only press
+    re-sends an unchanged number: the one safe instruction is the Shopify
+    admin quantity -- IMS's number now, read off the shop's Online Stock
+    view. The task carries the
     shop's store_id, so its first owner is that shop's STORE_MANAGER, who
     asks an admin. Put back the round-15 'press Send to website' line ->
     fails."""
@@ -1211,9 +1226,9 @@ def test_drift_task_gives_the_one_safe_instruction():
     _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {}})))
     (task,) = _tasks(db)
     _one_safe_step(task["description"])
-    assert "re-send only numbers IMS changed" in task["description"]
+    assert "IMS re-sends a product's number only when it changes in IMS" in task["description"]
     assert task["store_id"] == "BV-A"
-    assert "Store manager: ask an ADMIN or SUPERADMIN" in task["description"]
+    assert "Store manager: open Inventory > Online Stock" in task["description"]
     assert "lines" not in task["payload"]
 
 
@@ -1310,10 +1325,13 @@ def test_tick_a_sku_that_drifts_again_is_never_called_not_compared():
 
 
 def test_tick_the_task_text_names_every_drifted_sku_past_the_top_five():
-    """Round 7 P5, the panel's probe: 7 SKUs drift at BV-A (IMS 5 vs Shopify
-    0 each). payload.skus holds all 7 and all 7 keep the task open, so the
-    text names all 7 -- the top five with their numbers, the rest by SKU.
-    Name only drift[:5] -> SKU-6 and SKU-7 appear nowhere -> fails."""
+    """Round 7 P5 and round 17, the panel's probe: 7 SKUs drift at BV-A
+    (SKU-n: IMS n+2 vs Shopify 0). payload.skus holds all 7 and all 7 keep
+    the task open, so the text names all 7 WITH both numbers (decided
+    2026-10-01: the task names each drifted SKU with IMS vs Shopify). Name
+    only drift[:5] -> SKU-6 and SKU-7 appear nowhere -> fails; give numbers
+    to the first five only (round 16's `_named`) -> 'SKU-1 (IMS 3 vs
+    Shopify 0)' is missing -> fails."""
     skus = [f"SKU-{n}" for n in range(1, 8)]
     inv = {s: f"gid://shopify/InventoryItem/{90 + n}" for n, s in enumerate(skus, 1)}
     db = StrictDB()
@@ -1323,12 +1341,13 @@ def test_tick_the_task_text_names_every_drifted_sku_past_the_top_five():
     db.seed("catalog_variants", [{"sku": s, "parent_product_id": f"c{n}", "shopify_inventory_item_id": inv[s]}
                                  for n, s in enumerate(skus, 1)])
     db.seed("stock_units", [{"stock_id": f"{s}-{i}", "product_id": "p" + s, "store_id": "BV-A",
-                             "status": "AVAILABLE"} for s in skus for i in range(5)])
+                             "status": "AVAILABLE"} for n, s in enumerate(skus, 1) for i in range(n + 2)])
     _run(sp.run_parity_tick(db, graphql=_shopify({inv[s]: {LOC_A: 0, LOC_B: 0} for s in skus})))
     (task,) = _tasks(db)
     assert task["payload"]["skus"] == skus
-    assert [s for s in skus if s not in task["description"]] == []
-    assert "; also SKU-6, SKU-7." in task["description"]
+    text = task["description"]
+    assert [s for n, s in enumerate(skus, 1) if f"{s} (IMS {n + 2} vs Shopify 0)" not in text] == []
+    _one_safe_step(text)
 
 
 def test_a_tasks_read_failure_files_no_second_task():
@@ -1379,36 +1398,41 @@ def test_prune_snapshots_uses_iso_cutoff():
 LOC_OLD = "gid://shopify/Location/4444"
 
 
-def _locations(db, unticked=(), unknown=False):
+def _locations(db, unticked=(), unknown=False, inactive=()):
     """Record Shopify's own location list as the writer does (fresh): LOC_A,
-    LOC_B and LOC_OLD (mapped to no shop), all ACTIVE, ticked to fulfil online
-    orders unless named in `unticked`. `unknown` records nothing."""
+    LOC_B and LOC_OLD (mapped to no shop), ACTIVE unless named in `inactive`,
+    ticked to fulfil online orders unless named in `unticked`. `unknown`
+    records nothing."""
     from api.services.shopify_push.inventory import record_location_verdict
 
     if not unknown:
         record_location_verdict(db, {"rows": [
-            {"id": gid, "name": gid, "isActive": True, "fulfillsOnlineOrders": gid not in unticked}
+            {"id": gid, "name": gid, "isActive": gid not in inactive, "fulfillsOnlineOrders": gid not in unticked}
             for gid in (LOC_A, LOC_B, LOC_OLD)
         ]})
 
 
-@pytest.mark.parametrize("old_ticked", [False, True, None])
-def test_a_location_the_storefront_does_not_sell_from_oversells_nothing(monkeypatch, old_ticked):
+@pytest.mark.parametrize("old", ["unticked", "deactivated", "ticked", "unknown"])
+def test_a_location_the_storefront_does_not_sell_from_oversells_nothing(monkeypatch, old):
     """Round 10, the panel's probe. BV-A shelf 1 = LOC_A 1, BV-B 0 = LOC_B 0,
     and LOC_OLD -- mapped to no shop, ACTIVE, NOT ticked to fulfil online
     orders (the owner took the writer's own "untick it" advice) -- still
     holds 4 units. The storefront sells 1: the writer's verdict is green, so
     the Stock Tally, the reconciliation screen and parity's unclaimed report
-    are too. Ticked (old_ticked True), the 4 units sell online with no shelf
-    behind them: all three say so. Location list unknown (None): every
-    location counts, as before. Drop online_selling_locations' filter from
-    live_listed_qty_for_skus -> the tally's oversell / the page's
-    OVERSELL_RISK come back -> fails; drop it from unclaimed_locations ->
-    LOC_OLD is reported -> fails."""
+    are too. Round 17: so is a DEACTIVATED LOC_OLD still ticked to fulfil
+    online orders (the other leg of inventory.dead_mapped_reason). Ticked
+    and active, the 4 units sell online with no shelf behind them: all three
+    say so. Location list unknown: every location counts, as before. Drop
+    online_selling_locations' filter from live_listed_qty_for_skus -> the
+    tally's oversell / the page's OVERSELL_RISK come back -> fails; drop it
+    from unclaimed_locations -> LOC_OLD is reported -> fails; re-spell the
+    dead test as `not fulfillsOnlineOrders` -> the deactivated LOC_OLD sells
+    on all three -> fails."""
     db = _db({"SKU-1": {"BV-A": 1, "BV-B": 0}})
-    _locations(db, unticked=() if old_ticked else (LOC_OLD,), unknown=old_ticked is None)
+    _locations(db, unticked=(LOC_OLD,) if old == "unticked" else (), unknown=old == "unknown",
+               inactive=(LOC_OLD,) if old == "deactivated" else ())
     levels = {INV_1: {LOC_A: 1, LOC_B: 0, LOC_OLD: 4}, INV_2: {}}
-    sells = old_ticked is not False
+    sells = old in ("ticked", "unknown")
     rows, parity = _tally_and_parity(monkeypatch, db, levels)
     assert _cols(rows["SKU-1"], "online_listed_qty", "oversell_risk") == ((5, True) if sells else (1, False))
     row = _reconcile(monkeypatch, db, levels, None)["SKU-1"]
@@ -1443,7 +1467,7 @@ def test_a_mapped_location_that_cannot_sell_online_oversells_nothing_and_still_d
     row = _reconcile(monkeypatch, db, levels, None)["SKU-1"]
     assert _cols(row, "online", "recommended", "delta", "status") == (4, 1, 3, "OVER_ALLOCATED")
     assert [(d["store_id"], d["ims"], d["shopify"]) for d in parity["drift"]] == [("BV-B", 0, 3)]
-    assert parity["tasks"]["filed"] == ["BV-B"] and "Top: SKU-1 (IMS 0 vs Shopify 3)" in _tasks(db)[0]["description"]
+    assert parity["tasks"]["filed"] == ["BV-B"] and "Products: SKU-1 (IMS 0 vs Shopify 3)" in _tasks(db)[0]["description"]
 
 
 def _press_take_down(monkeypatch, db, twin_id):
@@ -1560,7 +1584,7 @@ def test_parity_takes_retired_from_the_rules_own_reader(stale, twin):
     out = _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 9, LOC_B: 0}, INV_2: {}})))
     assert [(d["store_id"], d["ims"], d["shopify"]) for d in out["drift"]] == [("BV-A", 3, 9)]
     (task,) = _tasks(db)
-    assert "Top: SKU-1 (IMS 3 vs Shopify 9)" in task["description"]
+    assert "Products: SKU-1 (IMS 3 vs Shopify 9)" in task["description"]
 
 
 def test_the_shop_filter_is_spelled_as_the_writers_map(monkeypatch):
@@ -1591,18 +1615,22 @@ def _ban(db, *skus):
                                   "online_sync_blocked": True, "products": [{"sku": s} for s in skus]}])
 
 
-@pytest.mark.parametrize("dead", ["retired_reader", "parent_listing_read"])
+@pytest.mark.parametrize("dead", ["retired_reader", "parent_listing_read", "live_listing_read", "retired_twin_read"])
 def test_an_unreadable_live_answer_touches_no_task(monkeypatch, dead):
     """Round 14's test gap, round 16's reader. Night 1 files SKU-2 (IMS 0 vs
     LOC_A 3). Night 2 one read behind 'is this listing live' fails: the
     rule's own reader of 'retired' (online_stock_writeback._sku_to_pid), or
     the read of the listing that carries each SKU (the parents of the
-    catalog_variants rows, inside online_catalog.listings_for_skus). Which
-    SKU is live is unknown, so the tick compares nothing and leaves BV-A's
-    task exactly as it was. Read the failed answer as 'none retired'
-    (`retired = set()`) or call listings_for_skus fail-soft (strict=False:
-    no listing found, nothing live) -> SKU-2 leaves the live set and the
-    task is closed -> fails."""
+    catalog_variants rows, inside online_catalog.listings_for_skus), or
+    (round 17) the read of those listings' status (listing_visible's
+    input), or the retire hook's twin read for a retired product
+    (online_delist._resolve_twin). Which SKU is live is unknown, so the
+    tick compares nothing and leaves BV-A's task exactly as it was. Read
+    the failed answer as 'none retired' (`retired = set()`), call
+    listings_for_skus fail-soft (strict=False: no listing found, nothing
+    live), read a dead status read as 'nothing live' (`live = set()`) or
+    call _resolve_twin fail-soft (no twin: the retired product's listing
+    stays live) -> the night is 'checked' -> fails."""
     import copy
 
     from api.services import online_stock_writeback as wb
@@ -1612,15 +1640,25 @@ def test_an_unreadable_live_answer_touches_no_task(monkeypatch, dead):
     _run(sp.run_parity_tick(db, graphql=shop))
     before = copy.deepcopy(_tasks(db)[0])
     assert before["payload"]["skus"] == ["SKU-2"]
+    coll = db.get_collection("catalog_products")
+    real = coll.find
     if dead == "retired_reader":
         monkeypatch.setattr(wb, "_sku_to_pid", lambda db_, skus: None)
-    else:
-        coll = db.get_collection("catalog_products")
-        real = coll.find
+    elif dead == "retired_twin_read":
+        # A product retired since night 1 (no listing of its own carries a
+        # SKU parity compares): its twin read dies.
+        db.seed("products", [{"product_id": "p3", "sku": "SKU-3", "is_active": False}])
 
+        def find_one(*a, **k):
+            raise RuntimeError("twin read died")
+
+        coll.find_one = find_one
+    else:
         def find(flt=None, *a, **k):
-            if any("id" in c for c in (flt or {}).get("$or") or []):
+            if dead == "parent_listing_read" and any("id" in c for c in (flt or {}).get("$or") or []):
                 raise RuntimeError("parent read died")
+            if dead == "live_listing_read" and "$in" in ((flt or {}).get("id") or {}):
+                raise RuntimeError("live read died")
             return real(flt, *a, **k)
 
         coll.find = find
@@ -1691,16 +1729,43 @@ def _retire(sku, **stamp):
     return change
 
 
+def _retire_by_pim(sku, twin_id):
+    """The panel's round-17 probe: the spine row is linked to its twin by
+    pim_product_id (the create door's own link) and the twin's own sku is a
+    legacy one, so no sku-only link reaches it. Retired, its take-down
+    failed: the twin still says PUBLISHED and the Catalog screen says
+    DELIST_FAILED."""
+    def change(db):
+        _set(db, "products", {"sku": sku}, is_active=False, pim_product_id=twin_id)
+        _set(db, "catalog_products", {"id": twin_id}, sku=f"{sku}-LEGACY",
+             **{"ecom.online_state": "DELIST_FAILED", "ecom.delist_mode": "LIVE"})
+    return change
+
+
 # state -> (SKU-2 is a size of SKU-1, the change, SKU-2 still compared on night 2)
 _LIVE_STATES = {
     "taken_down": (False, lambda db: _set(db, "catalog_products", {"id": "c2"}, **_TAKEN_DOWN), False),
     "never_published": (False, lambda db: _set(db, "catalog_products", {"id": "c2"}, **{"ecom.status": "DRAFT"}), False),
+    # Round 17: PUBLISHED is not live by itself (inventory.listing_visible).
+    "staged_published_draft": (False, lambda db: _set(
+        db, "catalog_products", {"id": "c2"}, **{"ecom.online_stock": {"tracked": False, "quantities": {}}}), False),
+    "published_without_gid": (False, lambda db: _set(
+        db, "catalog_products", {"id": "c2"}, **{"ecom.shopify_product_id": None}), False),
     "retired_take_down_failed": (False, _retire("SKU-2", online_state="DELIST_FAILED", delist_mode="LIVE"), False),
     "retired_take_down_dark": (False, _retire("SKU-2", online_state="DELISTED", delist_mode="SIMULATED"), False),
+    "retired_twin_by_pim_link": (False, _retire_by_pim("SKU-2", "c2"), False),
     "size_parent_taken_down": (True, lambda db: _set(db, "catalog_products", {"id": "c1"}, **_TAKEN_DOWN), False),
     "size_parent_retired": (True, _retire("SKU-1", online_state="DELIST_FAILED", delist_mode="LIVE"), False),
-    "size_retired_on_a_live_parent": (True, _retire("SKU-2"), True),
+    "size_parent_retired_by_pim_link": (True, _retire_by_pim("SKU-1", "c1"), False),
+    # Round 17: a retired SKU is never compared, a size too -- no shop's view lists it.
+    "size_retired_on_a_live_parent": (True, _retire("SKU-2"), False),
     "still_live": (False, lambda db: None, True),
+    # Round 17: a live listing a stock pass recorded untracked (a size minted
+    # untracked: Shopify sells it without limit) is live -- listing_visible,
+    # never listing_already_live.
+    "live_but_untracked": (False, lambda db: _set(
+        db, "catalog_products", {"id": "c2"}, **{"ecom.online_stock": {"tracked": False, "quantities": {"BV-A": 0}}}),
+        True),
 }
 
 
@@ -1713,12 +1778,18 @@ def test_parity_compares_only_skus_on_a_live_listing(state):
     taken down (DRAFT + taken_down_at, what every LIVE take-down writes),
     never published, or retired in IMS whatever its take-down did (failed
     or DARK: the listing still says PUBLISHED). Night 2 CLOSES the task:
-    SKU-2 left the live set. The controls stay compared and the task is
-    refreshed: a retired SIZE on its parent's live listing (the writer sends
-    it 0 there) and an untouched listing. Drop listing_visible -> a draft
-    stays compared; drop the retired check -> a retired listing stays
-    compared; judge a size by its own twin -> the size rides a drafted
-    parent, or a retired size is dropped -> fails."""
+    SKU-2 left the live set. Round 17: so does a retired SIZE on its
+    parent's live listing (no shop's view lists a retired SKU), a
+    staged-PUBLISHED draft and a PUBLISHED twin with no gid (live is
+    listing_visible, never the status alone), and a retired product whose
+    twin only the retire hook's pim_product_id link reaches (its own sku is
+    a legacy one). The controls stay compared and the task is refreshed: an
+    untouched listing, and a live one recorded untracked. Drop
+    listing_visible, or re-spell it as status == PUBLISHED -> a draft stays
+    compared; drop the retired SKU check -> a retired size stays compared;
+    link a listing to its retired product by sku only -> a size rides a
+    retired parent; judge live by listing_already_live -> the untracked
+    listing is dropped -> fails."""
     size, change, compared = _LIVE_STATES[state]
     db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 0, "BV-B": 0}})
     if size:
@@ -1794,9 +1865,7 @@ def test_a_live_take_down_by_any_door_closes_the_task(monkeypatch, door):
 _CLASSES = {
     "plain": ("SKU-1", 5, 0),
     "blocked": ("SKU-1", 0, 5),
-    "retired_size": ("SKU-2", 0, 4),
     "size_of_a_blocked_parent": ("SKU-2", 1, 5),
-    "retired_size_of_a_blocked_parent": ("SKU-2", 0, 4),
 }
 
 
@@ -1807,16 +1876,15 @@ def test_every_drift_gets_the_one_safe_instruction(case):
     or that are refused (Send to website on a blocked parent, on a size).
     Every drift now gets ONE instruction -- set the quantity at the shop's
     location in Shopify admin to the IMS number -- whatever the class, and
-    the text names the IMS number to set. A blocked listing the cutover has
-    not drafted (DARK) is still live and still compared. Put back any
-    per-class line -> 'Send to website' / 'Take off website' / 'lift the
-    block' -> fails."""
+    the text names both numbers; round 17: the number to set is the shop's
+    Recommended now. A blocked listing the cutover has not drafted (DARK)
+    is still live and still compared (a retired size no longer is: round
+    17's size_retired_on_a_live_parent). Put back any per-class line ->
+    'Send to website' / 'Take off website' / 'lift the block' -> fails."""
     sku, ims, listed = _CLASSES[case]
     db = _db({"SKU-1": {"BV-A": 5, "BV-B": 0}, "SKU-2": {"BV-A": 1, "BV-B": 0}})
     if "size" in case:
         _size_of_c1(db)
-    if "retired" in case:
-        _set(db, "products", {"sku": "SKU-2"}, is_active=False)
     if "blocked" in case:
         _ban(db, "SKU-1")
     one = {LOC_A: listed, LOC_B: 0}
@@ -1826,7 +1894,7 @@ def test_every_drift_gets_the_one_safe_instruction(case):
     out = _run(sp.run_parity_tick(db, graphql=_shopify(levels)))
     assert [(d["sku"], d["store_id"], d["ims"], d["shopify"]) for d in out["drift"]] == [(sku, "BV-A", ims, listed)]
     (task,) = _tasks(db)
-    assert f"Top: {sku} (IMS {ims} vs Shopify {listed})." in task["description"]
+    assert f"Products: {sku} (IMS {ims} vs Shopify {listed})." in task["description"]
     _one_safe_step(task["description"])
     assert "lines" not in task["payload"]
 
@@ -1836,7 +1904,7 @@ def test_the_worst_delta_is_the_worst_drifted_row():
     drift at a SMALLER delta than a clean one (IMS 0 vs Shopify 1 drifts at
     1; IMS 5 vs Shopify 3 is within tolerance at 2). 'Worst delta' is over
     the drifted rows, so it is a number the task names. Take max_delta over
-    every compared row again -> 'worst delta 2' beside 'Top: SKU-1 (IMS 0 vs
+    every compared row again -> 'worst delta 2' beside 'Products: SKU-1 (IMS 0 vs
     Shopify 1)' -> fails."""
     db = _db({"SKU-1": {"BV-A": 0, "BV-B": 0}, "SKU-2": {"BV-A": 5, "BV-B": 0}})
     out = _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 1, LOC_B: 0}, INV_2: {LOC_A: 3, LOC_B: 0}})))
@@ -1844,3 +1912,51 @@ def test_the_worst_delta_is_the_worst_drifted_row():
     assert out["max_delta"] == 1 and next(s for s in out["stores"] if s["store_id"] == "BV-A")["max_delta"] == 1
     (task,) = _tasks(db)
     assert "worst delta 1." in task["description"] and task["payload"]["max_delta"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Round 17: a task names only SKUs its shop's view lists; the step reads now
+# ---------------------------------------------------------------------------
+
+
+def test_every_sku_a_task_names_is_a_row_in_its_shops_view(monkeypatch):
+    """Round 17, the panel's probe: SKU-2 is a size of c1 (PUBLISHED) and
+    retired in IMS; BV-A holds 2 of it and LOC_A lists 3. The Stock Tally and
+    the reconciliation screen list no retired SKU, so parity compares none
+    either (decided: retired is skipped): BV-A's task names SKU-1 alone, and
+    BV-A's view holds SKU-1 with the task's two numbers (Online = Shopify,
+    Recommended = IMS). Drop parity's retired-SKU check -> the task names
+    'SKU-2 (IMS 0 vs Shopify 3)', a SKU neither screen shows -> fails."""
+    db = _db({"SKU-1": {"BV-A": 5, "BV-B": 0}, "SKU-2": {"BV-A": 2, "BV-B": 0}})
+    _size_of_c1(db)
+    _set(db, "products", {"sku": "SKU-2"}, is_active=False)
+    levels = {INV_1: {LOC_A: 1, LOC_B: 0}, INV_2: {LOC_A: 3, LOC_B: 0}}
+    rows, parity = _tally_and_parity(monkeypatch, db, levels)
+    assert [(d["sku"], d["store_id"], d["ims"], d["shopify"]) for d in parity["drift"]] == [("SKU-1", "BV-A", 5, 1)]
+    view = _reconcile(monkeypatch, db, levels, "BV-A")
+    assert sorted(view) == sorted(rows) == ["SKU-1"]
+    for d in parity["drift"]:
+        assert _cols(_reconcile(monkeypatch, db, levels, d["store_id"])[d["sku"]], "online", "recommended") == (
+            d["shopify"], d["ims"])
+    (task,) = _tasks(db)
+    assert "SKU-2" not in task["description"] and task["payload"]["skus"] == ["SKU-1"]
+
+
+def test_the_step_points_at_the_number_ims_sends_now(monkeypatch):
+    """Round 17, the panel's probe p7: night 1 SKU-1 at BV-A is IMS 5 vs
+    Shopify 0, so the task names 'SKU-1 (IMS 5 vs Shopify 0)'. During the
+    day a sale drops the shelf to 4 and the writer re-sends 4 (a sale
+    re-sends an absolute number, so 'never undo' was false). An admin who
+    set the task's 5 would list one unit with no shelf behind it, within
+    tolerance, and night 2 would close the task. The step sends the admin
+    to BV-A's Recommended -- 4 now -- and says the task's numbers may be out
+    of date. Put back 'to the IMS number above' -> fails."""
+    db = _db({"SKU-1": {"BV-A": 5, "BV-B": 0}})
+    levels = {INV_1: {LOC_A: 0, LOC_B: 0}, INV_2: {}}
+    _run(sp.run_parity_tick(db, graphql=_shopify(levels)))
+    (task,) = _tasks(db)
+    text = task["description"]
+    assert "SKU-1 (IMS 5 vs Shopify 0)" in text and "may be out of date" in text
+    _one_safe_step(text)
+    db.get_collection("stock_units").update_one({"stock_id": "SKU-1-BV-A-0"}, {"$set": {"status": "SOLD"}})
+    assert _reconcile(monkeypatch, db, levels, "BV-A")["SKU-1"]["recommended"] == 4
