@@ -6,7 +6,7 @@
 // Suppliers and Analytics sections.
 
 import { gstinStateCode } from '../../constants/gst';
-import type { POStatus, Supplier, PurchaseOrder } from './purchaseTypes';
+import type { POItem, POStatus, Supplier, PurchaseOrder } from './purchaseTypes';
 
 // ============================================================================
 // Field mapping: backend vendor doc -> frontend Supplier shape
@@ -72,6 +72,7 @@ export function mapPOtoPurchaseOrder(po: any): PurchaseOrder {
   const items = rawItems.map((item: any) => ({
     productId: item.product_id ?? '',
     productName: item.product_name ?? '',
+    description: item.description || undefined,
     sku: item.sku ?? '',
     quantity: item.ordered_qty ?? item.quantity ?? 0,
     unitCost: item.unit_price ?? item.unit_cost ?? 0,
@@ -107,5 +108,12 @@ export function mapPOtoPurchaseOrder(po: any): PurchaseOrder {
     notes: po.notes,
     cancellationReason: po.cancellation_reason ?? undefined,
     source: po.source ?? undefined,
+    updatedAt: po.updated_at ?? undefined,
   };
+}
+
+/** How a line is named on screen: its description first (a lens order has
+ *  one line per power, all one product name), else the product name. */
+export function lineLabel(item: Pick<POItem, 'description' | 'productName'>): string {
+  return item.description || item.productName;
 }

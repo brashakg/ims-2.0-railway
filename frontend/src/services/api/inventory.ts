@@ -829,12 +829,14 @@ export const vendorsApi = {
     reason: string,
     productId?: string,
     quantity?: number,
+    updatedAt?: string,
   ) => {
-    // The product AND quantity the screen showed: two lines may carry one
-    // product, so the product alone does not prove the screen is current.
+    // What the screen showed: the order's version (exact) and the line's
+    // product and quantity. A stale screen is refused (409), never applied to
+    // whatever line now sits at that position.
     const response = await api.post(
       `/vendors/purchase-orders/${poId}/items/${lineIndex}/cancel`,
-      { reason, product_id: productId, quantity },
+      { reason, product_id: productId, quantity, updated_at: updatedAt },
     );
     return response.data;
   },

@@ -19,3 +19,22 @@ export function typedInNotAddedMessage(lines?: TypedInNotAdded[] | null): string
     .map((l) => `${l.product_name || 'A typed-in item'} ${l.reason}.`)
     .join(' ');
 }
+
+/** What the form says after an edit is saved. An edit whose typed-in items
+ *  could not be added -- leaving nothing, so the server cancelled the order --
+ *  is never "saved". */
+export function editOutcomeToasts(
+  poNumber: string,
+  status: string,
+  lines?: TypedInNotAdded[] | null,
+): Array<{ kind: 'success' | 'warning' | 'error'; text: string }> {
+  const notAdded = typedInNotAddedMessage(lines);
+  if (status === 'CANCELLED') {
+    return [{ kind: 'error', text: `${poNumber} was cancelled. ${notAdded ?? ''}`.trim() }];
+  }
+  const out: Array<{ kind: 'success' | 'warning' | 'error'; text: string }> = [
+    { kind: 'success', text: `${poNumber} saved` },
+  ];
+  if (notAdded) out.push({ kind: 'warning', text: notAdded });
+  return out;
+}

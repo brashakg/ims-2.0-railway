@@ -189,3 +189,19 @@ describe('PO detail modal - no approval wording anywhere (owner 2026-09-28)', ()
     expect(screen.queryByText('u-approver')).not.toBeInTheDocument();
   });
 });
+
+describe('PO detail modal - a lens order names each power (review round 7)', () => {
+  it('shows each line by its own description, and its Cancel line button says which', () => {
+    const lens = mapPOtoPurchaseOrder({
+      po_id: 'PO7', po_number: 'PO-LENS-1', status: 'SENT', source: 'cl_po_generator',
+      items: ['-1.00', '-2.00'].map((sph) => ({
+        product_id: 'CL1', product_name: 'Acuvue Oasys', description: `Acuvue Oasys SPH ${sph}`,
+        quantity: 2, unit_price: 900, tax_rate: 5,
+      })),
+    });
+    show(lens);
+    expect(screen.getByText('Acuvue Oasys SPH -1.00')).toBeInTheDocument();
+    expect(screen.getByText('Acuvue Oasys SPH -2.00')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Cancel line Acuvue Oasys SPH -2.00' })).toBeInTheDocument();
+  });
+});

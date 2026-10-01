@@ -25,7 +25,7 @@ import type {
 import { mapPOtoPurchaseOrder } from './purchaseMappers';
 import { CATEGORIES } from '../../domain/catalog/productAdd';
 import type { Supplier, PurchaseOrder, POItem } from './purchaseTypes';
-import { typedInNotAddedMessage } from './typedInNotAdded';
+import { editOutcomeToasts, typedInNotAddedMessage } from './typedInNotAdded';
 
 interface PickedProduct {
   productId: string;
@@ -603,10 +603,11 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, editing, onClose
                     unit_price: it.unit_price,
                   })),
                 });
-                onCreated(mapPOtoPurchaseOrder(saved));
-                toast.success(`${editing.poNumber} saved`);
-                const notAdded = typedInNotAddedMessage(saved?.products_not_created);
-                if (notAdded) toast.warning(notAdded);
+                const savedPO = mapPOtoPurchaseOrder(saved);
+                onCreated(savedPO);
+                for (const t of editOutcomeToasts(editing.poNumber, savedPO.status, saved?.products_not_created)) {
+                  toast[t.kind](t.text);
+                }
                 return;
               }
               const storeId = user?.activeStoreId ?? 'default';

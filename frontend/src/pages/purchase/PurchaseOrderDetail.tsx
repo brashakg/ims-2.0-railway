@@ -17,6 +17,7 @@ import { POPrint } from '../../components/print/POPrint';
 import { POLifecycleDrawer } from '../../components/purchase/POLifecycleDrawer';
 import { useAuth } from '../../context/AuthContext';
 import { resolveStoreIdentity, type StoreIdentity } from '../../components/print/storeIdentity';
+import { lineLabel } from './purchaseMappers';
 
 /** What a person can do to an order from this modal (owner rulings
  *  2026-09-28): send a draft to the vendor, edit a draft, cancel the order or
@@ -252,7 +253,7 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
                 <tbody>
                   {po.items.map((item, idx) => (
                     <tr key={idx} className="border-b border-gray-100">
-                      <td className={`py-2 px-3 ${item.lineStatus === 'CANCELLED' ? 'text-gray-400 line-through' : 'text-gray-900'}`}>{item.productName}</td>
+                      <td className={`py-2 px-3 ${item.lineStatus === 'CANCELLED' ? 'text-gray-400 line-through' : 'text-gray-900'}`}>{lineLabel(item)}</td>
                       <td className="py-2 px-3 text-gray-600">{item.sku}</td>
                       <td className="py-2 px-3 text-right text-gray-900">
                         {item.quantity}
@@ -269,7 +270,7 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
                             <button
                               type="button"
                               onClick={() => { setReason(''); setCancelTarget({ lineIndex: idx }); }}
-                              aria-label={`Cancel line ${item.productName}`}
+                              aria-label={`Cancel line ${lineLabel(item)}`}
                               className="px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-50 rounded-lg whitespace-nowrap"
                             >
                               Cancel line
@@ -331,7 +332,7 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
           <div className="px-6 py-4 border-t border-red-200 bg-red-50 space-y-2">
             <label htmlFor="po-cancel-reason" className="block text-sm font-medium text-red-900">
               {cancelLine
-                ? `Why is this line (${cancelLine.productName}) being cancelled?`
+                ? `Why is this line (${lineLabel(cancelLine)}) being cancelled?`
                 : partReceived
                   ? 'Why is what is still due being cancelled?'
                   : 'Why is this order being cancelled?'}

@@ -70,6 +70,9 @@ export interface PurchaseOrder {
   notes?: string;
   /** Why the order was cancelled (the timeline shows who and when). */
   cancellationReason?: string;
+  /** The server's last-write stamp as read: sent back with a line cancel so a
+   *  stale screen is refused instead of cancelling another line. */
+  updatedAt?: string;
   /** Set on drafts generated automatically (lens top-up / forecast): their
    *  lines carry data the edit form cannot hold, so they are not editable. */
   source?: string;
@@ -78,6 +81,9 @@ export interface PurchaseOrder {
 export interface POItem {
   productId: string;
   productName: string;
+  /** The line's own description when it has one: a lens order has one line
+   *  per power, all under one product name ("Acuvue Oasys SPH -2.00"). */
+  description?: string;
   sku: string;
   quantity: number;
   unitCost: number;

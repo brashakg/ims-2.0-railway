@@ -15,7 +15,7 @@ import { PurchaseTable } from './PurchaseTable';
 import { PurchaseOrderForm } from './PurchaseOrderForm';
 import { PurchaseOrderDetail, type POAction, type POActionOptions } from './PurchaseOrderDetail';
 import { useSuppliers, usePurchaseOrdersQuery, purchaseOrdersQueryKey } from './purchaseQueries';
-import { mapPOtoPurchaseOrder } from './purchaseMappers';
+import { lineLabel, mapPOtoPurchaseOrder } from './purchaseMappers';
 import type { POStatus, PurchaseOrder } from './purchaseTypes';
 
 // The filter words ARE the badge words (audit F23): the old list offered
@@ -110,10 +110,10 @@ export function PurchaseOrdersSection() {
       } else if (action === 'cancel-line' && opts.lineIndex !== undefined) {
         const line = po.items[opts.lineIndex];
         const saved = await vendorsApi.cancelPurchaseOrderLine(
-          po.id, opts.lineIndex, opts.reason ?? '', line?.productId, line?.quantity,
+          po.id, opts.lineIndex, opts.reason ?? '', line?.productId, line?.quantity, po.updatedAt,
         );
         showSaved(mapPOtoPurchaseOrder(saved));
-        toast.success(`${line?.productName ?? 'Line'} cancelled on ${po.poNumber}`);
+        toast.success(`${line ? lineLabel(line) : 'Line'} cancelled on ${po.poNumber}`);
       }
     } catch (err) {
       toast.error(
