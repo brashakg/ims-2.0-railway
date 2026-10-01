@@ -81,3 +81,20 @@ it('adds up a picked line and a scanned line of one product under the id the gua
   );
   expect(screen.getAllByRole('alert')).toHaveLength(2);
 });
+
+it("reads a line's figure under the id the cart asked by, not the canonical one", () => {
+  // The count comes back keyed by the id the cart sent (a bare Mongo _id);
+  // `canonical` is only for adding lines up. Looking the figure up under
+  // FR-BLACK finds nothing and hides the warning the guard will act on.
+  line('l-1', '66f1c0ffee00000000000001');
+  render(
+    <CartSidebar
+      stock={{
+        store_id: 'S',
+        sellable: { '66f1c0ffee00000000000001': 0 },
+        canonical: { '66f1c0ffee00000000000001': 'FR-BLACK' },
+      }}
+    />,
+  );
+  expect(screen.getByRole('alert').textContent).toMatch(/not in stock at this shop/i);
+});
