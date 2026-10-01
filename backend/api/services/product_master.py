@@ -1360,7 +1360,6 @@ def _guard_gtin_attribute(
     return attrs
 
 
-
 def twin_barcode_fields(gtin: Any) -> Dict[str, Any]:
     """The catalog-twin (or catalog_variants row) fields the Shopify push reads
     a barcode from, for the product's gtin attribute: the top-level `gtin`
