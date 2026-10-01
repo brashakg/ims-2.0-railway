@@ -385,8 +385,8 @@ export default {
 /** The 2-digit DIGIT PREFIX out of the first usable candidate (a 15-char
  *  GSTIN, or an already-bare 2-digit code). '' when none resolves. This is a
  *  raw read, NOT a verdict that the prefix names a real Indian state -- "88"
- *  comes back "88". Only the server's state list can settle that, which is
- *  why isInterStateSupply demands one. */
+ *  comes back "88". Only the server can settle that: the tax head of a
+ *  purchase is GET /vendors/po-gst-heads (usePoGstHeads), never decided here. */
 export function gstStateCode(...candidates: Array<string | null | undefined>): string {
   for (const candidate of candidates) {
     const s = (candidate ?? '').toString().trim();
@@ -395,43 +395,4 @@ export function gstStateCode(...candidates: Array<string | null | undefined>): s
     if (/^\d{2}$/.test(s)) return s;
   }
   return '';
-}
-
-/** true = inter-state (IGST), false = intra-state (CGST + SGST),
- *  null = cannot be told from what we hold (caller must say so, not guess).
- *
- *  `null` is deliberately NOT `false`. A falsy unknown renders as
- *  "Same state - CGST + SGST" on every vendor whose GST number is missing,
- *  which is a wrong TAX LABEL stated with confidence, not a blank.
- *
- *  Only the two GST NUMBERS decide -- here and on the server alike: the
- *  registration decides the state (owner, 2026-09-30), and the order, the
- *  bill and the transfer all read the shop's GSTIN through one server rule
- *  (org_validation.shop_gstin). A party's declared `state` is accepted
- *  (callers hand over the whole vendor/shop) but does NOT decide: an address
- *  is not a registration, and a shop whose declared state disagrees with its
- *  GSTIN is named on the go-live checklist. With no GSTIN on the shop's
- *  record the answer here is "cannot tell" (the server may still find the
- *  company's registration for the shop's state), and the totals box says
- *  which assumption it is showing.
- *
- *  `knownStates` is the server-fed code list (useGstStateCodes). A two-digit
- *  prefix the server does not list is not a state: the engine's parser
- *  (org_validation, behind determine_place_of_supply) reads NO state off such
- *  a GSTIN, so a screen that kept the raw digits would answer "IGST" (88 !=
- *  20) on a purchase the engine books intra-state. FAIL-CLOSED on purpose:
- *  until the list arrives -- and for the whole session if the meta endpoint is
- *  down -- the answer is null ("cannot tell"), never a tax verdict off an
- *  unverified prefix. */
-export function isInterStateSupply(
-  a: { gstin?: string | null; state?: string | null },
-  b: { gstin?: string | null; state?: string | null },
-  knownStates: Record<string, string>,
-): boolean | null {
-  const codeA = gstStateCode(a.gstin);
-  const codeB = gstStateCode(b.gstin);
-  if (codeA && codeB && knownStates[codeA] && knownStates[codeB]) {
-    return codeA !== codeB;
-  }
-  return null;
 }

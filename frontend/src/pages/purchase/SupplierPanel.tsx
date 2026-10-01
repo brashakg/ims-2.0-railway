@@ -19,34 +19,20 @@ import {
 } from 'lucide-react';
 import { vendorsApi } from '../../services/api';
 import { useToast } from '../../context/ToastContext';
-import { useStorePrintInfo } from '../../hooks/useStorePrintInfo';
+import { usePoGstHeads } from '../../hooks/usePoGstHeads';
 import { useGstStateCodes } from '../../hooks/useGstStateCodes';
-import { gstinStateCode, isInterStateSupply } from '../../constants/gst';
+import { gstinStateCode } from '../../constants/gst';
 import type { Supplier } from './purchaseTypes';
 
-// How a purchase from this vendor is taxed. The decision this card and the PO
-// composer share lives in constants/gst.ts isInterStateSupply -- this card
-// only maps its three answers onto a chip. The local copy this file used to
-// hold (its own taxSplit + a "stateListLoaded &&" grace clause that kept a
-// raw, unverified GSTIN prefix for the first paint, and for the whole session
-// when the meta endpoint failed) is DELETED, not synced: the grace clause was
-// fail-open, so a junk "88..." GSTIN printed "Other state - IGST" whenever
-// the state list had not arrived. NOT the only inter/intra decider in the
-// frontend: print/legalPrimitives.hsnTaxSummary (printed invoice) still
-// answers with its own parser, outside this chain. (The purchase-bill form
-// has none: it shows the server's own booking math, POST /preview.)
-//
-// Both states are read from GSTINs and NOTHING else -- the same source
-// purchase_invoice_engine.determine_place_of_supply reads when it stamps the
-// bill. An address is not a registration: stores.py sets a store's state_code
-// from its ADDRESS while its gstin is the entity's registration for that state
-// (WizOpt's online store bills under BV Opticals Pvt Ltd). Reading the address
-// first made this card print the OPPOSITE verdict to the bill for those stores.
-//
-// Where it departs from the engine, on purpose: the engine must return a
-// boolean for a bill, so an unknown pair falls back to intra-state. A card is
-// a statement to a human, and "Same state - CGST + SGST" over a pair nobody
-// has established is a wrong-tax claim -- so unknown reads as unknown.
+// How a purchase from this vendor is taxed: the SERVER's verdict
+// (GET /vendors/po-gst-heads -> usePoGstHeads: org_validation.shop_gstin +
+// purchase_invoice_engine.classify_supply, the rule the order and the bill
+// book with). The browser compares nothing: a raw store.gstin can be blank or
+// stale, and a GSTIN prefix that is not a state ("88...") has no head. This
+// card only maps the answer onto a chip: true = IGST, false = CGST + SGST,
+// null / missing (loading, endpoint down, no GSTIN) = "tax split unknown" --
+// a card is a statement to a human, and a confident split over a pair nobody
+// has established is a wrong-tax claim.
 type TaxSplit = 'igst' | 'cgst_sgst' | 'unknown';
 
 const TAX_SPLIT_LABEL: Record<TaxSplit, string> = {
@@ -74,7 +60,7 @@ export function SupplierPanel({ suppliers, onEdit }: SupplierPanelProps) {
   const [portalForVendor, setPortalForVendor] = useState<{ id: string; name: string } | null>(null);
   // The buying store's own GST REGISTRATION decides how a purchase from each
   // vendor is taxed. Same state -> CGST + SGST; another state -> IGST.
-  const storeInfo = useStorePrintInfo();
+  const heads = usePoGstHeads();
   const stateNames = useGstStateCodes();
 
   return (
@@ -85,15 +71,7 @@ export function SupplierPanel({ suppliers, onEdit }: SupplierPanelProps) {
           supplier.state ||
           stateNames[supplier.stateCode || gstinStateCode(supplier.gstNumber)] ||
           '';
-        // FAIL-CLOSED: isInterStateSupply answers null (-> the grey "unknown"
-        // chip) until the server's state list is in hand AND lists both
-        // prefixes. No verdict off a raw prefix, ever -- not on first paint,
-        // not when the meta endpoint is down.
-        const inter = isInterStateSupply(
-          { gstin: supplier.gstNumber },
-          { gstin: storeInfo?.gstin },
-          stateNames,
-        );
+        const inter: boolean | null = heads[supplier.id] ?? null;
         const split: TaxSplit =
           inter === null ? 'unknown' : inter ? 'igst' : 'cgst_sgst';
         return (

@@ -782,6 +782,23 @@ export const vendorsApi = {
   // <date>" instead of the buyer guessing. Store-scoped + fail-soft on the
   // server: no history / DB trouble yields an empty `costs` map. Batch every
   // line's product_id into ONE call.
+  // The tax head each vendor's purchase carries at a shop, decided on the
+  // server (shop_gstin + classify_supply). true = IGST, false = CGST + SGST,
+  // null = cannot tell. Fail-soft: {} -> every card says "cannot tell".
+  getPoGstHeads: async (
+    storeId?: string,
+  ): Promise<{ shop_gstin: string; heads: Record<string, boolean | null> }> => {
+    try {
+      const response = await api.get('/vendors/po-gst-heads', {
+        params: storeId ? { store_id: storeId } : undefined,
+      });
+      const d = response.data ?? {};
+      return { shop_gstin: d.shop_gstin ?? '', heads: d.heads ?? {} };
+    } catch {
+      return { shop_gstin: '', heads: {} };
+    }
+  },
+
   getLastCost: async (
     vendorId: string,
     productIds: string[],
