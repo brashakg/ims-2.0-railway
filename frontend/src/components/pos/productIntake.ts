@@ -106,13 +106,22 @@ export function posPriceGuard(product: any): PriceGuardResult {
   return { ok: true, finalPrice, mrp, offerPrice };
 }
 
+/** ONE spelling chain for a product row's id -- the tile, the cart line built
+    from it and the till's stock lookup all read it. Includes plain `id`
+    because the axios aliaser camelises snake_case ADDITIVELY but a row that
+    arrives with only `id` (e.g. an order-shaped join) has no product_id/_id at
+    all - reading just those showed a false "not in cart" on such rows. */
+export function productIdOf(p: any): string | undefined {
+  return p.product_id || p._id || p.id;
+}
+
 /** Cart-line shape from a guarded product — the exact mapping the classic
     surface uses (hsn_code carried so the tax invoice prints the registered
     code; is_optical drives the Rx surfaces). */
 export function cartItemFromProduct(product: any, guard: PriceGuardResult) {
   const { finalPrice, mrp, offerPrice } = guard;
   return {
-    product_id: product.product_id || product._id || product.id,
+    product_id: productIdOf(product) as string,
     name: product.name,
     sku: product.sku,
     barcode: product.barcode,
