@@ -33,13 +33,15 @@
 // sellable count from useSellableStock -- the oversell guard's own number,
 // re-read on every sale here, every remount and refocus, and every 30 s. The
 // guard at Complete sale stays the authority (another till can sell the last
-// unit between two reads). The surface fetches it for the rows it shows and
-// hands each card its figure.
+// unit between two reads). The surface fetches it ONCE for the rows it shows
+// and hands every card that one answer; the card looks its own figure up by
+// productIdOf, the id the hook asked with, so no surface re-types the lookup.
 
 import { Package } from 'lucide-react';
 import { usePOSStore } from '../../../stores/posStore';
 import { useProducts, useSellableStock } from '../../../hooks/usePOSQueries';
 import { posPriceGuard, cartItemFromProduct, productIdOf } from '../../../components/pos/productIntake';
+import type { SellableStock } from '../../../services/api/inventory';
 
 interface ProductResultsStripProps {
   /** Terminal's active store - results are scoped to its stock. */
@@ -87,20 +89,22 @@ export function ProductCard({
   product: any;
   layout: ProductCardLayout;
   onPick: () => void;
-  /** This shop's sellable count (useSellableStock). null = the sale guard
-      does not gate this row; undefined = not known yet. Neither shows a
-      badge or blocks. */
-  stock?: number | null;
+  /** The screen's ONE useSellableStock answer. The card reads its own
+      figure by productIdOf -- the id the hook asked with. A null figure = the
+      sale guard does not gate this row; no figure = not known yet. Neither
+      shows a badge or blocks. */
+  stock?: SellableStock;
 }) {
   const store = usePOSStore();
   const id = productIdOf(product);
+  const figure = id ? stock?.sellable[id] : undefined;
   const mrp = product.mrp || 0;
   const offer = product.offer_price || product.offerPrice || mrp;
-  const counted = typeof stock === 'number';
+  const counted = typeof figure === 'number';
   // Owner ruling 2026-08-25: oversell = BLOCK. A row this shop cannot sell
   // cannot be billed here; a row with no figure is not blocked.
-  const outOfStock = counted && stock <= 0;
-  const lowStock = counted && stock > 0 && stock <= 3;
+  const outOfStock = counted && figure <= 0;
+  const lowStock = counted && figure > 0 && figure <= 3;
   const inCart = (store.cart || []).some((i) => i.product_id === id);
 
   const stockBadge =
@@ -114,7 +118,7 @@ export function ProductCard({
               : 'bg-gray-100 text-gray-600'
         }`}
       >
-        {outOfStock ? 'Out of stock' : `${stock} in stock`}
+        {outOfStock ? 'Out of stock' : `${figure} in stock`}
       </span>
     ) : null;
 
@@ -263,7 +267,7 @@ export function ProductResultsStrip({
           key={productIdOf(product) || product.sku}
           product={product}
           layout="strip"
-          stock={stock?.sellable[productIdOf(product) || '']}
+          stock={stock}
           onPick={() => handlePick(product)}
         />
       ))}

@@ -30,8 +30,16 @@ describe('the shared product reads', () => {
 
 describe('the shared card', () => {
   const base = { name: 'Titan Neo', sku: 'T1', mrp: 5000, offer_price: 4500 };
-  const card = (product: Record<string, unknown>, stock?: number | null) =>
-    render(<ProductCard product={product} layout="grid" stock={stock} onPick={() => undefined} />);
+  // `sellable` is the screen's one stock answer; the card reads its own row.
+  const card = (product: Record<string, unknown>, sellable?: Record<string, number | null>) =>
+    render(
+      <ProductCard
+        product={product}
+        layout="grid"
+        stock={sellable && { store_id: 'BV-BOK-01', sellable }}
+        onPick={() => undefined}
+      />,
+    );
   const button = () => screen.getByRole('button') as HTMLButtonElement;
 
   it('marks a row already in the cart even when the row only carries `id`', () => {
@@ -51,17 +59,18 @@ describe('the shared card', () => {
   });
 
   it('badges low stock, blocks zero stock, and does not block a row with no figure', () => {
-    const low = card(base, 2);
+    const row = { ...base, product_id: 'T-1' };
+    const low = card(row, { 'T-1': 2 });
     expect(screen.getByText('2 in stock').className).toMatch(/amber/);
     expect(button().disabled).toBe(false);
     low.unmount();
 
-    const out = card(base, 0);
+    const out = card(row, { 'T-1': 0 });
     expect(screen.getByText('Out of stock')).toBeTruthy();
     expect(button().disabled).toBe(true);
     out.unmount();
 
-    card(base, null);
+    card(row, { 'T-1': null });
     expect(screen.queryByText(/in stock|Out/)).toBeNull();
     expect(button().disabled).toBe(false);
   });

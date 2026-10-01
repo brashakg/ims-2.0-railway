@@ -59,9 +59,26 @@ beforeEach(() => {
 });
 
 describe.each(['strip', 'grid'] as const)('the %s tile', (layout) => {
-  const card = (stock?: number | null) =>
-    render(<ProductCard product={HAVANA} layout={layout} stock={stock} onPick={() => undefined} />);
+  // A card is handed the screen's ONE answer and reads its own row from it.
+  const card = (stock?: number | null, product: Record<string, unknown> = HAVANA, id = HAVANA.product_id) =>
+    render(
+      <ProductCard
+        product={product}
+        layout={layout}
+        stock={stock === undefined ? undefined : { store_id: 'BV-BOK-01', sellable: { [id]: stock } }}
+        onPick={() => undefined}
+      />,
+    );
   const button = () => screen.getByRole('button') as HTMLButtonElement;
+
+  it("finds its figure by the id the stock hook asks with (productIdOf), even a bare _id", () => {
+    // The lookup lives in the card, so both tills read a row the same way the
+    // hook asked for it. A row the counter knows only by _id must still block.
+    const { product_id: _drop, ...bare } = HAVANA;
+    card(0, { ...bare, _id: '66f1c0ffee00000000000001' }, '66f1c0ffee00000000000001');
+    expect(screen.getByText('Out of stock')).toBeTruthy();
+    expect(button().disabled).toBe(true);
+  });
 
   it('says how many this shop has and stays pickable', () => {
     card(8);

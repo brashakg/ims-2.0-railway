@@ -481,7 +481,7 @@ export function GeneralCounterSurface() {
                           key={productIdOf(product) || product.sku}
                           product={product}
                           layout="grid"
-                          stock={gridStock?.sellable[productIdOf(product) || '']}
+                          stock={gridStock}
                           onPick={() => addProduct(product)}
                         />
                       ))}
