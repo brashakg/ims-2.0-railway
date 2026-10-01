@@ -1,6 +1,7 @@
 """Vendor-bill ITC, stock-transfer and credit-note helpers for the GST returns."""
 
-from datetime import date, timedelta
+import re
+from datetime import date
 
 from ...services.ap_engine import iso_bill_date
 from ...services.org_validation import shop_gstins
@@ -33,31 +34,34 @@ def _itc_store_scope(db, active_store):
     return (row or {}).get("entity_id"), gstin, sorted(shops)
 
 
-def _month_bounds(year, mon, last_day):
-    """THE month of a bill's ISO date string: lo <= date < hi, hi being the
-    next month's first day. A 'T23:59:59' upper bound dropped a transfer
-    mirror stamped '...-31T23:59:59.412000' (microseconds sort after it)
-    from every return."""
-    return f"{year:04d}-{mon:02d}-01", (date(year, mon, last_day) + timedelta(days=1)).isoformat()
+def _month_days(year, mon, last_day) -> list:
+    """THE days of a GST return's month: each day of the month that THE
+    bill-date rule every door books through (ap_engine.iso_bill_date: a real
+    calendar day from the start of GST to today in IST) accepts. A bill is in
+    the month when the first ten characters of its date are one of them (a
+    transfer mirror stores a full IST timestamp). Placement (_itc_month) and
+    the Cross-Check's unplaced count read this one list, so a stored non-day
+    like '2026-04-31' is on no month's return and flagged in every month --
+    a string range placed it on April's."""
+    days = []
+    for n in range(1, last_day + 1):
+        try:
+            days.append(iso_bill_date(date(year, mon, n).isoformat()))
+        except ValueError:
+            pass
+    return days
 
 
 def _itc_month(year, mon, last_day) -> list:
-    """The string-date month window (invoice_date / bill_date are ISO strings)."""
-    month_lo, month_hi = _month_bounds(year, mon, last_day)
-    return [
-        {"invoice_date": {"$gte": month_lo, "$lt": month_hi}},
-        {"bill_date": {"$gte": month_lo, "$lt": month_hi}},
-    ]
+    """The bills dated in the month (_month_days) on invoice_date or bill_date."""
+    day = {"$in": [re.compile("^" + d) for d in _month_days(year, mon, last_day)]}
+    return [{"invoice_date": day}, {"bill_date": day}]
 
 
 def _dated(value) -> bool:
-    """Can a GST return place a bill dated `value`? Decided by THE bill-date
-    rule every door books through (ap_engine.iso_bill_date: a real calendar
-    day from the start of GST to today in IST), read on the day part -- a
-    transfer mirror stores a full IST timestamp and its month's window
-    places it. '' / '09/05/2026' / '2026-04-31' (no such day) / '2062-05-09'
-    / a non-string are not dated: a shape check let '2026-04-31' through,
-    and it lies between two months' windows."""
+    """Is a bill dated `value` on SOME month's return? The same rule as
+    _month_days, read on the day part: '' / '09/05/2026' / '2026-04-31' (no
+    such day) / '2062-05-09' / a non-string are on none."""
     if not isinstance(value, str):
         return False
     try:
@@ -246,7 +250,7 @@ def _itc_unplaced(db, year, mon, last_day, entity_id=None) -> dict:
         acc["tax"] = round(acc["tax"] + tax, 2)
         acc["bill_numbers"].append(bill.get("bill_number") or bill.get("bill_id"))
 
-    month_lo, month_hi = _month_bounds(year, mon, last_day)
+    days = set(_month_days(year, mon, last_day))
     try:
         gstins = shop_gstins(db)
         by_gstin: dict = {}
@@ -275,12 +279,12 @@ def _itc_unplaced(db, year, mon, last_day, entity_id=None) -> dict:
         if entity_id:
             q["recipient_entity_id"] = {"$in": [entity_id, None]}
         vendor_gstin: dict = {}
-        # ponytail: reads every live bill of the scope, so 'undated' is the
-        # doors' own date parse (a Mongo range cannot tell 2026-04-31 is no
-        # day); push a month prefilter into the query if this grows slow.
+        # ponytail: reads every live bill of the scope -- an undated bill is
+        # in no month's window, yet is listed in every month; add a
+        # "this month or undated" prefilter if this grows slow.
         for b in db["vendor_bills"].find(q, {"_id": 0}):
             dates = (b.get("invoice_date"), b.get("bill_date"))
-            in_month = any(isinstance(d, str) and month_lo <= d < month_hi for d in dates)
+            in_month = any(isinstance(d, str) and d[:10] in days for d in dates)
             if not in_month and any(_dated(d) for d in dates):
                 continue  # another month's return places it
             tax = round(float(b.get("tax_amount") or 0), 2)

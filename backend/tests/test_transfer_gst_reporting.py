@@ -38,8 +38,8 @@ Adversarial-review hardening (PR #899 follow-up), all tested here:
     as the orders in the return.
 
 All tests are pure (no live DB) via a small in-memory Mongo-subset evaluator
-(handles the exact operators the collectors use: $exists/$ne/$nin/$in/$gte/
-$lte/$lt/$or/$nor and aggregate $match+$group/$sum).
+(handles the exact operators the collectors use: $exists/$ne/$nin/$in (with
+patterns)/$gte/$lte/$lt/$or/$nor and aggregate $match+$group/$sum).
 """
 
 from __future__ import annotations
@@ -93,8 +93,15 @@ def _match(doc, query):
                         return False
                 elif op == "$in":
                     # Mongo: {$in: [null]} also matches a MISSING field --
-                    # doc.get() returning None reproduces that.
-                    if val not in arg:
+                    # doc.get() returning None reproduces that. A compiled
+                    # pattern in the list matches a string field (the GST
+                    # month's days, reports.gst_itc._itc_month).
+                    if not any(
+                        (isinstance(val, str) and bool(a.search(val)))
+                        if hasattr(a, "search")
+                        else val == a
+                        for a in arg
+                    ):
                         return False
                 elif op == "$gte":
                     if val is None or not (val >= arg):

@@ -391,9 +391,9 @@ def _book_from_grn(cli, grn_id, invoice_number):
     return r.json()
 
 
-def _crosscheck(db, entity_id):
+def _crosscheck(db, entity_id, month=5, year=2026):
     reports._get_raw_db = lambda: db
-    return _run_gst_cross_check(db, 5, 2026, entity_id)
+    return _run_gst_cross_check(db, month, year, entity_id)
 
 
 def _row(result, metric):
@@ -1359,6 +1359,37 @@ class TestOnlyARealDayIsDated:
         assert all(f"X-{d}" in row["note"] for d in bad)
         assert "APR-1" not in row["note"] and "TRF/T1" not in row["note"]
         assert xc["gstr3b"]["itc"]["total"] == 50.0
+
+    def test_a_non_day_is_on_no_months_return_and_flagged_in_every_month(self):
+        """r10 #1: placement compared the raw string, so '2026-04-31' sat
+        inside April's window -- April's GSTR-3B claimed it and April's check
+        read green, while every other month flagged it as on no return. One
+        real-calendar parse now decides both: on no month's return, flagged
+        in every month, the month it sorts into included. '2017-06-30' is a
+        real day before GST: the same rule, the same answer."""
+        db = TestCreditLeftOffEveryReturnIsFlagged()._world()
+        heads = {"vendor_id": "V1", "taxable_amount": 1000, "tax_amount": 50, "cgst_total": 0.0,
+                 "sgst_total": 0.0, "igst_total": 50.0, "recipient_entity_id": "E1",
+                 "recipient_gstin": BUY_JH, "status": "OUTSTANDING"}
+        bad = ("2026-04-31", "2026-02-29", "2026-05-00", "2025-13-05", "2025-06-31", "2017-06-30")
+        db["vendor_bills"].insert_many(
+            [{**heads, "bill_id": f"x{i}", "bill_number": f"X-{d}", "bill_date": d, "invoice_date": d}
+             for i, d in enumerate(bad)]
+            + [{**heads, "bill_id": "apr", "bill_number": "APR-1", "bill_date": "2026-04-30",
+                "invoice_date": "2026-04-30"},
+               # Its invoice date is a real May day: on May's return, flagged nowhere.
+               {**heads, "bill_id": "mix", "bill_number": "MIX-1", "bill_date": "2026-04-31",
+                "invoice_date": "2026-05-12"}]
+        )
+        # Each month a string range put one of them on.
+        months = ((2017, 6, 0.0), (2025, 6, 0.0), (2025, 12, 0.0), (2026, 2, 0.0), (2026, 4, 50.0), (2026, 5, 50.0))
+        for year, month, real in months:
+            xc = _crosscheck(db, "E1", month, year)
+            row = _row(xc, "Input credit left off GSTR-3B")
+            assert (row["status"], row["variance"]) == ("MISMATCH", 300.0), (year, month, row)
+            assert all(f"X-{d}" in row["note"] for d in bad), (year, month)
+            assert "APR-1" not in row["note"] and "MIX-1" not in row["note"], (year, month)
+            assert xc["gstr3b"]["itc"]["total"] == real, (year, month, xc["gstr3b"]["itc"])
 
 
 class TestTheUnplacedCheckKeepsItsRules:
