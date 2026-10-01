@@ -16,6 +16,7 @@ import { productApi } from '../../services/api/products';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { GRNPrint } from '../../components/print/GRNPrint';
+import { UnitLabelsModal } from '../../components/labels/UnitLabelsModal';
 import { resolveStoreIdentity, type StoreIdentity } from '../../components/print/storeIdentity';
 
 interface GRNLineItem {
@@ -137,6 +138,8 @@ export function GoodsReceiptNote() {
   const { user } = useAuth();
   const toast = useToast();
   const [activeTab, setActiveTab] = useState<'create' | 'history' | 'discrepancies'>('create');
+  // F26: after a receipt is posted, its units' labels (one per piece).
+  const [labelsFor, setLabelsFor] = useState<string | null>(null);
   const [poNumber, setPoNumber] = useState('');
   const [receivedItems, setReceivedItems] = useState<GRNLineItem[]>([]);
   const [inspectionChecks, setInspectionChecks] = useState<Record<string, boolean>>({});
@@ -504,6 +507,7 @@ export function GoodsReceiptNote() {
       toast.success(
         `GRN posted${units ? ` · ${units} unit${units === 1 ? '' : 's'} added to stock` : ''}${poState ? ` · ${poState}` : ''}`,
       );
+      if (grnId) setLabelsFor(grnId);
 
       setActiveTab('history');
       setPoNumber('');
@@ -590,6 +594,14 @@ export function GoodsReceiptNote() {
           store={storeInfo}
           entity={grnIdentity?.entity ?? null}
           onClose={() => setPrintGrn(null)}
+        />
+      )}
+      {labelsFor && (
+        <UnitLabelsModal
+          grnId={labelsFor}
+          title="Print stock labels?"
+          subtitle="One label per piece this receipt put on the shelf."
+          onClose={() => setLabelsFor(null)}
         />
       )}
     <div className="inv-body">

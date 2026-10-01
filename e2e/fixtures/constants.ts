@@ -50,6 +50,15 @@ export const SEED = {
     price: 1180,
     gstRate: 18,
   },
+  // A frame named the way every minted product is ("... - {Colour}"): the
+  // till tiles draw the colour on its own line, and the layout gate waits
+  // for it on /pos/new and /pos/counter so that line is always measured.
+  colourFrame: {
+    productId: 'e2e-frame-havana',
+    sku: 'E2E-FR-HAV',
+    name: 'E2E Test Frame Colour - Havana',
+    colour: 'Havana',
+  },
 } as const;
 
 /** GST pricing modes the backend may run in. */

@@ -9,21 +9,12 @@ import { useEffect, useMemo, useState } from 'react';
 import { Printer, X } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { labelsApi } from '../../services/api/labels';
-import {
-  buildJobLabel,
-  buildProductLabel,
-  labelBaseCss,
-} from './labelTemplates';
-import type { JobLabelData, ProductLabelData } from './labelTemplates';
-import { printJobLabel, printProductLabel } from './printLabel';
+import { buildJobLabel, labelBaseCss } from './labelTemplates';
+import type { JobLabelData } from './labelTemplates';
+import { printJobLabel } from './printLabel';
 
-type JobMode = { kind: 'job'; jobId: string; type: 'traveler' | 'stage' | 'ready' };
-type ProductMode = {
-  kind: 'product';
-  productId?: string;
-  stockId?: string;
-};
-export type LabelModalSpec = JobMode | ProductMode;
+// Workshop JOB labels only. Stock (unit) labels: UnitLabelsModal + unitLabel.ts.
+export type LabelModalSpec = { kind: 'job'; jobId: string; type: 'traveler' | 'stage' | 'ready' };
 
 interface LabelPreviewModalProps {
   spec: LabelModalSpec;
@@ -35,7 +26,6 @@ interface LabelPreviewModalProps {
 export function LabelPreviewModal({ spec, onClose, fallbackJob }: LabelPreviewModalProps) {
   const toast = useToast();
   const [jobData, setJobData] = useState<JobLabelData | null>(null);
-  const [productData, setProductData] = useState<ProductLabelData | null>(null);
   const [loading, setLoading] = useState(true);
   const [printing, setPrinting] = useState(false);
 
@@ -44,41 +34,21 @@ export function LabelPreviewModal({ spec, onClose, fallbackJob }: LabelPreviewMo
     (async () => {
       setLoading(true);
       try {
-        if (spec.kind === 'job') {
-          const d = await labelsApi.getJobLabel(spec.jobId, spec.type);
-          if (active) {
-            // Merge the active-store fallback UNDER the backend payload so the
-            // issuing-store identity is always present even when the label
-            // lookup returns a thin payload (no hardcoded brand fallback).
-            const base = (fallbackJob || {}) as Partial<JobLabelData>;
-            setJobData(
-              d?.job_id
-                ? ({ ...base, ...d } as JobLabelData)
-                : ({ job_id: spec.jobId, ...base } as JobLabelData),
-            );
-          }
-        } else {
-          const d = await labelsApi.getProductLabel({
-            product_id: spec.productId,
-            stock_id: spec.stockId,
-          });
-          if (active) {
-            setProductData(
-              d?.barcode_value
-                ? d
-                : ({ barcode_value: spec.stockId || spec.productId || '' } as ProductLabelData),
-            );
-          }
+        const d = await labelsApi.getJobLabel(spec.jobId, spec.type);
+        if (active) {
+          // Merge the active-store fallback UNDER the backend payload so the
+          // issuing-store identity is always present even when the label
+          // lookup returns a thin payload (no hardcoded brand fallback).
+          const base = (fallbackJob || {}) as Partial<JobLabelData>;
+          setJobData(
+            d?.job_id
+              ? ({ ...base, ...d } as JobLabelData)
+              : ({ job_id: spec.jobId, ...base } as JobLabelData),
+          );
         }
       } catch {
         if (active) {
-          if (spec.kind === 'job') {
-            setJobData({ job_id: spec.jobId, ...(fallbackJob || {}) } as JobLabelData);
-          } else {
-            setProductData({
-              barcode_value: spec.stockId || spec.productId || '',
-            } as ProductLabelData);
-          }
+          setJobData({ job_id: spec.jobId, ...(fallbackJob || {}) } as JobLabelData);
         }
       } finally {
         if (active) setLoading(false);
@@ -90,11 +60,10 @@ export function LabelPreviewModal({ spec, onClose, fallbackJob }: LabelPreviewMo
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [spec]);
 
-  const built = useMemo(() => {
-    if (spec.kind === 'job' && jobData) return buildJobLabel(spec.type, jobData);
-    if (spec.kind === 'product' && productData) return buildProductLabel(productData);
-    return null;
-  }, [spec, jobData, productData]);
+  const built = useMemo(
+    () => (jobData ? buildJobLabel(spec.type, jobData) : null),
+    [spec, jobData],
+  );
 
   const previewSrcDoc = useMemo(() => {
     if (!built) return '';
@@ -107,15 +76,7 @@ export function LabelPreviewModal({ spec, onClose, fallbackJob }: LabelPreviewMo
   const handlePrint = async () => {
     setPrinting(true);
     try {
-      let result;
-      if (spec.kind === 'job') {
-        result = await printJobLabel(spec.jobId, spec.type, fallbackJob);
-      } else {
-        result = await printProductLabel({
-          product_id: spec.productId,
-          stock_id: spec.stockId,
-        });
-      }
+      const result = await printJobLabel(spec.jobId, spec.type, fallbackJob);
       if (result.method === 'qz') toast.success(result.message);
       else if (result.method === 'html') toast.info(result.message);
       else toast.error(result.message);
@@ -127,13 +88,11 @@ export function LabelPreviewModal({ spec, onClose, fallbackJob }: LabelPreviewMo
   };
 
   const title =
-    spec.kind === 'job'
-      ? spec.type === 'traveler'
-        ? 'Work Order Label'
-        : spec.type === 'ready'
-          ? 'Ready / Pickup Label'
-          : 'Stage Sticker'
-      : 'Product Label';
+    spec.type === 'traveler'
+      ? 'Work Order Label'
+      : spec.type === 'ready'
+        ? 'Ready / Pickup Label'
+        : 'Stage Sticker';
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[70] p-4">

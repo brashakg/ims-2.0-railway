@@ -24,6 +24,23 @@ export const inventoryApi = {
     return response.data;
   },
 
+  // F46: the most the oversell guard would sell per product (GET
+  // /inventory/sellable asks the guard). No store parameter: the server reads
+  // the store in the sign-in token, the one Complete sale checks, and says
+  // which in `store_id` (useSellableStock shows only the screen's own shop).
+  // `itemTypes` is the order item_type per id (mapCategory), so lens/service
+  // lines come back null like the guard.
+  // `canonical` maps each id to the one the guard adds its lines up under.
+  getSellable: async (productIds: string[], itemTypes: string[]): Promise<SellableStock> => {
+    const response = await api.get('/inventory/sellable', {
+      params: {
+        product_ids: productIds.join(','),
+        item_types: itemTypes.join(','),
+      },
+    });
+    return response.data;
+  },
+
   searchByBarcode: async (barcode: string, storeId: string) => {
     // Search for product by barcode in specific store
     const response = await api.get(`/inventory/barcode/${barcode}`, { params: { store_id: storeId } });
@@ -425,7 +442,55 @@ export const inventoryApi = {
     const response = await api.post(`/labels/quarantine/${stockId}`);
     return response.data as QuarantineLabel;
   },
+
+  // F27: every serialised unit of one product -- or one goods receipt -- at a shop.
+  getUnits: async (params: { store_id?: string; product_id?: string; grn_id?: string }) => {
+    const response = await api.get('/inventory/units', { params });
+    return response.data as { units: StockUnit[]; total: number };
+  },
+
+  // F26: record that these units' labels went to the print dialog.
+  markBarcodePrinted: async (stockIds: string[]) => {
+    const response = await api.post('/inventory/units/barcode-printed', { stock_ids: stockIds });
+    return response.data as { updated: number; stock_ids: string[] };
+  },
 };
+
+/** One physical piece on the shelf (GET /inventory/units). cost_price only
+ *  reaches roles that see cost. */
+export interface StockUnit {
+  stock_id: string;
+  product_id: string;
+  barcode: string;
+  status: string;
+  /** Standing in the shop (on the shelf or reserved): the server's one rule,
+   *  the same the ledger's "N units" counts. Only these get a label. */
+  in_shop: boolean;
+  grn_number: string;
+  source: string;
+  /** Set when a transfer re-homed the unit here (source TRANSFER). */
+  transfer_number?: string;
+  from_store_id?: string;
+  /** IST day it arrived at THIS shop (a transfer's receipt day, else minting). */
+  received_on: string;
+  barcode_printed: boolean;
+  location_code: string;
+  name: string;
+  brand: string;
+  model: string;
+  colour: string;
+  size: string;
+  mrp: number | null;
+  cost_price?: number | null;
+}
+
+/** GET /inventory/sellable (F46): the till's per-product sellable counts.
+    `store_id` is the sign-in token's store, null when the token has none. */
+export interface SellableStock {
+  store_id: string | null;
+  sellable: Record<string, number | null>;
+  canonical?: Record<string, string>;
+}
 
 // One merged stock-movement event. qty is SIGNED: positive = stock in
 // (RECEIVED / TRANSFER_IN / OPENING_STOCK), negative = stock out

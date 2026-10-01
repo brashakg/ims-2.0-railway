@@ -990,16 +990,23 @@ def catalog_docs(monkeypatch):
 
 
 # The stock ledger (Reorder dashboard: cost x reorder qty) and the per-unit
-# read (each unit carries the cost it was received at) are product reads too.
+# reads (each unit carries the cost it was received at: ?product_id= and the
+# units / labels view) are product reads too.
 from api.routers.inventory import stock as stock_mod  # noqa: E402
 
 
 class _StockRepo:
     collection = types.SimpleNamespace(aggregate=lambda _pipeline: [])
 
+    _UNIT = {"stock_id": "S1", "product_id": "P1", "store_id": "BV-TEST-01",
+             "status": "AVAILABLE", "unit_cost": 3173.37, "cost_price": 3173.37,
+             "cost_source": "GRN"}
+
     def find_by_product_store(self, _pid, _store):
-        return [{"stock_id": "S1", "product_id": "P1", "unit_cost": 3173.37,
-                 "cost_price": 3173.37, "cost_source": "GRN"}]
+        return [dict(self._UNIT)]
+
+    def find_many(self, _flt, sort=None, limit=0):
+        return [dict(self._UNIT)]
 
 
 @pytest.fixture
@@ -1025,6 +1032,13 @@ def _product_cost_answers(client, role):
         row = resp.json()["items"][0]
         assert row["product_id"] == "P1"
         out[f"inventory/stock {params}"] = bool({"cost_price", "unit_cost"} & set(row))
+    resp = client.get(
+        "/api/v1/inventory/units",
+        params={"store_id": "BV-TEST-01", "product_id": "P1"},
+        headers=_headers(role),
+    )
+    assert resp.status_code == 200, (role, resp.text)
+    out["inventory/units"] = "cost_price" in resp.json()["units"][0]
     for path, key in (
         ("/api/v1/catalog/products", "products"),
         ("/api/v1/catalog/products/C1", "product"),
