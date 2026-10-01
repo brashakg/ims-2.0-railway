@@ -833,15 +833,13 @@ export const vendorsApi = {
   }> => {
     const ids = productIds.filter(Boolean);
     if (!vendorId || ids.length === 0) return { costs: {} };
-    try {
-      const response = await api.get('/vendors/last-cost', {
-        params: { vendor_id: vendorId, product_ids: ids.join(',') },
-      });
-      return response.data ?? { costs: {} };
-    } catch {
-      // Read-only convenience lookup -- never block PO creation on it.
-      return { costs: {} };
-    }
+    // A failure rejects: the PO composer (the only caller) keeps the
+    // catalogue cost and asks again later -- swallowing it here made a
+    // network error look like "never paid" and the form never asked again.
+    const response = await api.get('/vendors/last-cost', {
+      params: { vendor_id: vendorId, product_ids: ids.join(',') },
+    });
+    return response.data ?? { costs: {} };
   },
 
   sendPurchaseOrder: async (poId: string) => {

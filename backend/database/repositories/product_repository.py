@@ -45,9 +45,35 @@ class StockReleaseResult(NamedTuple):
 class ProductRepository(BaseRepository):
     """Repository for Product operations"""
 
-    # Tokenized-search fields. `barcode` is ADDITIVE (Catalog Manager scanner
-    # passthrough): it can only ADD matches for existing callers, never remove.
+    # THE TILL'S RULE (the default, and what POS, goods receipt, the command
+    # palette, Returns and QuickShare get): every whitespace token must START
+    # one of these fields. `barcode` is ADDITIVE (Catalog Manager scanner
+    # passthrough). Unchanged by audit F21 -- owner rule: ask before touching
+    # POS, and a wider rule crowds a 24-result strip ('ray' is inside 'Gray').
     SEARCH_FIELDS = ("brand", "model", "sku", "variant", "barcode")
+
+    # THE WIDE RULE, opt-in (`anywhere=True`; the purchase-order product box,
+    # audit F21). NAME fields match ANYWHERE and ignore spaces/hyphens: the
+    # model number off a vendor's list is the END of 'CA 8895', Ray-Ban is
+    # typed 'ray ban' or 'rayban', and the colour words live under attributes
+    # (every colour key product_master stores; the watch dial is spelt both
+    # ways there). CODE fields match from their START -- a scanned barcode,
+    # a typed SKU or the manufacturer's GTIN off the box is its beginning.
+    NAME_SEARCH_FIELDS = (
+        "brand",
+        "model",
+        "color",
+        "attributes.frame_color",
+        "attributes.temple_color",
+        "attributes.lens_colour",
+        "attributes.tint",
+        "attributes.colour_name",
+        "attributes.dial_color",
+        "attributes.dial_colour",
+        "attributes.body_colour",
+        "attributes.belt_colour",
+    )
+    CODE_SEARCH_FIELDS = ("sku", "variant", "barcode", "attributes.gtin", "gtin")
 
     @property
     def entity_name(self) -> str:
@@ -179,6 +205,34 @@ class ProductRepository(BaseRepository):
             filter["created_by"] = created_by
         return filter
 
+    def _product_search_query(self, text: str, extra: Dict) -> Dict:
+        """The WIDE product search query -- shared by the list and its count
+        so the two can never drift. It is a superset of the till's rule (an
+        unanchored name match includes the anchored one). ponytail: unanchored
+        regex scans the collection; fine at catalogue size, a text index if it
+        ever is not."""
+        clauses = []
+        for tok in (text or "").split():
+            letters = [c for c in tok if c != "-"]
+            if not letters:
+                # A lone hyphen ('ray - ban') is spacing, not a word to match.
+                continue
+            code = {"$regex": "^" + re.escape(tok), "$options": "i"}
+            name = {
+                "$regex": r"[\s\-]*".join(re.escape(c) for c in letters),
+                "$options": "i",
+            }
+            ors = [{f: code} for f in self.CODE_SEARCH_FIELDS]
+            ors += [{f: name} for f in self.NAME_SEARCH_FIELDS]
+            clauses.append({"$or": ors})
+        if not clauses:
+            # Nothing but hyphens and spaces ('--'): nothing to look for, so
+            # no product -- not the whole catalogue.
+            return {"_id": {"$in": []}}
+        if extra:
+            clauses.append(extra)
+        return {"$and": clauses}
+
     def search_products(
         self,
         query: str,
@@ -188,13 +242,25 @@ class ProductRepository(BaseRepository):
         created_by: Optional[str] = None,
         skip: int = 0,
         limit: int = 100,
+        anywhere: bool = False,
     ) -> List[Dict]:
-        return self.search(
-            query,
-            list(self.SEARCH_FIELDS),
-            self._search_extra_filter(category, is_active, created_by),
-            skip=skip,
-            limit=limit,
+        extra = self._search_extra_filter(category, is_active, created_by)
+        if not anywhere:
+            return self.search(
+                query, list(self.SEARCH_FIELDS), extra, skip=skip, limit=limit
+            )
+        # What the till's rule finds comes FIRST, then what only the wide rule
+        # adds -- so no result limit can push a brand/model/SKU match off the
+        # list behind, say, thirty 'Gunmetal Gray' frames for 'ray'.
+        head_q = self._search_query(query, list(self.SEARCH_FIELDS), extra)
+        head = self.find_many(head_q, skip=skip, limit=limit)
+        if len(head) >= limit:
+            return head
+        tail_q = {"$and": [self._product_search_query(query, extra), {"$nor": [head_q]}]}
+        return head + self.find_many(
+            tail_q,
+            skip=max(0, skip - self.count(head_q)),
+            limit=limit - len(head),
         )
 
     def count_search_products(
@@ -204,12 +270,12 @@ class ProductRepository(BaseRepository):
         *,
         is_active: Optional[bool] = True,
         created_by: Optional[str] = None,
+        anywhere: bool = False,
     ) -> int:
-        return self.search_count(
-            query,
-            list(self.SEARCH_FIELDS),
-            self._search_extra_filter(category, is_active, created_by),
-        )
+        extra = self._search_extra_filter(category, is_active, created_by)
+        if not anywhere:
+            return self.search_count(query, list(self.SEARCH_FIELDS), extra)
+        return self.count(self._product_search_query(query, extra))
 
     def cataloguer_stats(self) -> List[Dict]:
         """Per-creator cataloguing rollup (attribution feature).

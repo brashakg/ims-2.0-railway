@@ -334,6 +334,11 @@ export const productApi = {
     category?: string;
     brand?: string;
     search?: string;
+    /** 'anywhere' = the purchase-order product box's wide search (model
+     *  number anywhere, brand spelt any way, colour words, GTIN -- audit F21).
+     *  Omit for the till's rule: every word from the START of brand / model /
+     *  SKU / variant / barcode. POS and every other search box omit it. */
+    match?: 'anywhere';
     store_id?: string;
     skip?: number;
     limit?: number;
