@@ -9,6 +9,13 @@
 // Everything else still falls back to Sales, exactly as the old page did
 // (the module launcher links ?tab=dead-stock, ?tab=churn and friends, which
 // were never tabs and always landed on Sales).
+//
+// Wave 6 B13: the forecast panels (category / seasonal / reorder) are child
+// routes of /reports/forecast. They never had a ?tab= id of their own - they
+// lived in useState behind the one URL - so there is nothing legacy to map:
+// ?tab=forecast still lands on /reports/forecast, whose index IS the category
+// panel the old page opened on. 'seasonal' and 'reorder' were never tabs and
+// keep falling back to Sales like every other unknown value.
 
 const TAB_TO_PATH: Record<string, string> = {
   sales: 'sales',

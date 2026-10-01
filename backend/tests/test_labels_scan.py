@@ -12,7 +12,6 @@ Covers (TestClient + fakes, no live DB / network):
       - WRONG_STATION when station's step != the job's ready move
       - NOT_FOUND / REPO_UNAVAILABLE fail-soft
   - GET /workshop/jobs/{id}/label payload shape (traveler / ready)
-  - GET /workshop/product-label payload (frame tag + CL box)
   - QZ sign + cert fail-soft (204) when env unset
 """
 
@@ -426,57 +425,16 @@ class TestLabelPayload:
         assert body["ok"] is False
 
 
-class TestProductLabel:
-    def test_requires_id(self, client, auth_headers):
-        resp = client.get("/api/v1/workshop/product-label", headers=auth_headers)
-        assert resp.status_code == 200
-        assert resp.json()["reason"] == "MISSING_ID"
+class TestProductLabelRetired:
+    """The frame-tag / CL-box payload fed a 50 x 25 mm QZ/ZPL stock label no
+    screen opened. Stock labels are the 100 x 15 mm unit label, built in the
+    browser from GET /inventory/units (owner ruling 2026-09-28)."""
 
-    def test_frame_tag(self, client, auth_headers, monkeypatch):
-        from api.routers import labels as labels_module
-
-        prod = {
-            "name": "RB1234 Aviator",
-            "brand": "Ray-Ban",
-            "sku": "RB-1234",
-            "category": "SUNGLASSES",
-            "mrp": 5990,
-        }
-        monkeypatch.setattr(
-            labels_module, "get_product_repository", lambda: FakeProductRepo(prod)
-        )
+    def test_route_is_gone(self, client, auth_headers):
         resp = client.get(
             "/api/v1/workshop/product-label?product_id=P1", headers=auth_headers
         )
-        body = resp.json()
-        assert body["ok"] is True
-        assert body["brand"] == "Ray-Ban"
-        assert body["is_contact_lens"] is False
-        assert body["price_label"] == "Rs 5990"  # ASCII, never the rupee glyph
-
-    def test_cl_box(self, client, auth_headers, monkeypatch):
-        from api.routers import labels as labels_module
-
-        prod = {
-            "name": "Acuvue Oasys",
-            "brand": "Acuvue",
-            "category": "CONTACT_LENS",
-            "modality": "FORTNIGHTLY",
-            "base_curve": "8.4",
-            "diameter": "14.0",
-            "cl_power": "-2.00",
-            "pack_size": 6,
-        }
-        monkeypatch.setattr(
-            labels_module, "get_product_repository", lambda: FakeProductRepo(prod)
-        )
-        resp = client.get(
-            "/api/v1/workshop/product-label?product_id=P9", headers=auth_headers
-        )
-        body = resp.json()
-        assert body["is_contact_lens"] is True
-        assert body["cl"]["modality"] == "FORTNIGHTLY"
-        assert body["cl"]["base_curve"] == "8.4"
+        assert resp.status_code == 404
 
 
 # ============================================================================

@@ -1,5 +1,7 @@
 # IMS 2.0 — live plan status
 
+Updated **2026-10-01**. Seven more merged 2026-09-29 .. 10-01 (section 4s): the owner-approved till stock badge (**#1173**), unit labels for the TSC TE244 (**#1164**), four Wave 6 page splits built and reviewed in the cloud (settings admin editors **#1175**, payroll **#1176**, demand forecast **#1177**, loyalty **#1178**), and two CI/tooling fixes (**#1162**, **#1168**). Still in build, none merged: the procurement-audit fixes (purchase bills #1167, purchase-order edit/cancel #1165, purchase-order form #1170, off-catalogue items #1171, per-shop reorder levels #1179, counter stock lookup #1180, unit barcodes #1166, stock screens #1169, counter-role purchase access #1161, the purchases report, bought-without-PO and the valued inter-company challan), multi-location PRs 4 and 5 (#1160, #1163) and the online order status rules (#1153). Note: Vercel's free plan hit its daily deploy limit on 2026-10-01, so #1178 is merged but reaches the live site with the next deploy.
+
 Updated **2026-09-29**. Eight more merged 2026-09-27/28 (section 4r): Wave 6 items A1, A3, A4, A6 and the clinical and workshop router packages (**#1150, #1151, #1155-#1158**), multi-location **PR 3 of 6 (#1154)**, and this file (#1149). The procurement audit (catalogue → purchase order → goods receipt → purchase invoice → stock, walked as each role on an isolated copy of the database) is **DELIVERED**: 118 confirmed findings, 3 of them blockers; the owner answered every question it raised (three multiple-choice rounds, 2026-09-28/29). Its fixes are **IN BUILD, none merged**: purchase-order edit/cancel/send, counter-role access to purchase data, stock-side bugs with real unit labels for the TSC TE244, unit barcodes without hyphens and the approved till stock badge. Also in build: multi-location PRs 4 and 5, the online order status rules, and the #1141 follow-ups.
 
 Updated **2026-09-27**. **#1141 MERGED** — the per-store website stock writer (multi-location PR 2 of 6): each shop's own quantity goes to its own Shopify location through one rule and one writer, after 13+ rounds of adversarial review and a clean final recheck (section 4p). **#1148 MERGED** — the backend's Railway sleep setting is now OFF (owner ruling 2026-09-27; the app never actually slept) and the keepalive service it needed is removed. Wave 6 of the modularization work is in build; nothing of it is merged yet (section 4q).
@@ -353,6 +355,19 @@ What the five page-split waves left, measured 2026-09-27 (owner page "Wave Six")
 | **#1156** | Wave 6 A1: the expenses page becomes nine sections, each with its own address and its own role list. |
 | **#1157** | Wave 6: the 3,158-line clinical router becomes a package. Byte-identical API. |
 | **#1158** | Wave 6: the 3,528-line workshop router becomes a package. Byte-identical API. |
+
+## 4s. Merged 2026-09-29 .. 2026-10-01 (all squash-merged to main)
+
+| PR | What it does |
+|---|---|
+| **#1162** | Local test runs use 2 workers, so a test run no longer exhausts the office PC's memory; CI keeps its default. |
+| **#1168** | CI installs mongomock, which the newer backend tests need. |
+| **#1173** | Owner-approved till change: product tiles show this shop's stock ("8 in stock" / "Out of stock") and the colour, and adding an unavailable frame warns at once. The Complete-sale guard is unchanged. |
+| **#1164** | Unit labels: one 100 x 15 mm label per unit on the TSC TE244, MRP printed exactly (never rounded), a per-computer print offset, and one "in the shop" rule for the ledger count and the labels dialog. |
+| **#1175** | Wave 6 B21: the four admin editors (modules, permissions, discount caps, rules) get their own SUPERADMIN-only addresses with an unsaved-changes warning; every SUPERADMIN-only settings page is now refused to ADMIN by address too. Owner question: nothing reads what these editors save - connect them or remove them? |
+| **#1176** | Wave 6 B14: payroll's salary sheet, advances and payslips get their own addresses inside HR; salary stays ADMIN/SUPERADMIN only. |
+| **#1177** | Wave 6 B13: the demand forecast's three panels get their own addresses; the reorder panel is kept (different data and rule from Inventory > Reorders). |
+| **#1178** | Wave 6 B12: loyalty's overview, tiers and rewards get their own addresses; four tabs that showed no real data are removed (checked one by one first). |
 
 ## 5. Waiting on the owner
 

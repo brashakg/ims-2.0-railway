@@ -1,6 +1,7 @@
 // ============================================================================
 // IMS 2.0 - High-level label printing orchestration
 // ============================================================================
+// Workshop JOB labels. Stock (unit) labels print through unitLabel.ts.
 // Ties together: fetch label payload -> build ZPL + HTML -> print via QZ Tray
 // (silent raw) OR fall back to an HTML print window. Always fail-soft.
 //
@@ -11,10 +12,9 @@ import { printZpl } from '../../services/qz';
 import type { PrintResult } from '../../services/qz';
 import {
   buildJobLabel,
-  buildProductLabel,
   wrapLabelDocument,
 } from './labelTemplates';
-import type { JobLabelData, ProductLabelData } from './labelTemplates';
+import type { JobLabelData } from './labelTemplates';
 
 /** Fill any EMPTY store-identity field on `data` from `fallback` (active store).
  *  Backend-populated values win; only blanks are filled. So the issuing-store
@@ -78,38 +78,6 @@ export async function printJobLabel(
   data = mergeStoreFallback(data, fallbackData);
 
   const built = buildJobLabel(type, data);
-  const doc = wrapLabelDocument(built, copies);
-  return printZpl(await getLabelPrinterName(), built.zpl, doc);
-}
-
-/** Print a frame-tag / CL-box label for a product or stock unit. */
-export async function printProductLabel(
-  params: { product_id?: string; stock_id?: string },
-  fallbackData?: Partial<ProductLabelData>,
-  copies = 1,
-): Promise<PrintResult> {
-  let data: ProductLabelData;
-  try {
-    const resp = await labelsApi.getProductLabel(params);
-    if (!resp || !resp.barcode_value) {
-      data = {
-        barcode_value: params.stock_id || params.product_id || '',
-        ...(fallbackData || {}),
-      } as ProductLabelData;
-    } else {
-      data = resp;
-    }
-  } catch {
-    data = {
-      barcode_value: params.stock_id || params.product_id || '',
-      ...(fallbackData || {}),
-    } as ProductLabelData;
-  }
-
-  // Fill the issuing-store identity from the active-store fallback when absent.
-  data = mergeStoreFallback(data, fallbackData);
-
-  const built = buildProductLabel(data);
   const doc = wrapLabelDocument(built, copies);
   return printZpl(await getLabelPrinterName(), built.zpl, doc);
 }

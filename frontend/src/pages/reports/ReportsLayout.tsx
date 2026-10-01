@@ -228,7 +228,8 @@ export function ReportsLayout() {
           <button
             key={path}
             onClick={() => navigate(path)}
-            className={pathname === path ? 'on' : ''}
+            // A section's own sub-pages (/reports/forecast/seasonal) keep its tab lit.
+            className={pathname === path || pathname.startsWith(`${path}/`) ? 'on' : ''}
           >
             <TabIcon className="w-4 h-4" />
             {label}
