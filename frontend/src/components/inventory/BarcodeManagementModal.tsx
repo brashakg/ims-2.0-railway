@@ -239,7 +239,7 @@ export function BarcodeManagementModal({
           {/* Barcode Preview */}
           {barcode && validateBarcode(barcode) && (
             <div className="border border-gray-200 rounded-lg p-4">
-              <h3 className="text-sm font-medium text-gray-700 mb-3">Preview & Print</h3>
+              <h3 className="text-sm font-medium text-gray-700 mb-3">Preview</h3>
               <BarcodeGenerator
                 value={barcode}
                 format={format}
@@ -256,7 +256,7 @@ export function BarcodeManagementModal({
               <li>Use unique barcodes for each product variant (frame color, size, etc.)</li>
               <li>CODE128 is recommended for optical products (frames, lenses)</li>
               <li>EAN13/UPC are required for products to be sold online or in major retailers</li>
-              <li>Print labels at high resolution (300 DPI) for reliable scanning</li>
+              <li>Stock labels carry each piece's own barcode: print them from the product's Units on the stock ledger</li>
               <li>Test scanned barcodes with your POS scanner before printing in bulk</li>
             </ul>
           </div>

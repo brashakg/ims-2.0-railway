@@ -10,6 +10,13 @@ import { RefreshCw, Printer, Save, AlertCircle } from 'lucide-react';
 import clsx from 'clsx';
 import { useToast } from '../../context/ToastContext';
 import { settingsApi } from '../../services/api';
+import {
+  LABEL_WIDTH_MM,
+  PRINTABLE_MM,
+  getLabelOffsetMm,
+  printTestLabel,
+  setLabelOffsetMm,
+} from '../../components/labels/unitLabel';
 
 export function PrinterSettingsPage() {
   const [isLoading, setIsLoading] = useState(true);
@@ -124,18 +131,6 @@ function PrinterSection({
                 ))}
               </select>
             </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-600 mb-1">Label Size</label>
-              <select
-                value={printerSettings?.label_size || '50x25'}
-                onChange={e => setPrinterSettings((prev: any) => prev ? { ...prev, label_size: e.target.value } : null)}
-                className="input-field"
-              >
-                <option value="50x25">50 x 25 mm</option>
-                <option value="50x30">50 x 30 mm</option>
-                <option value="100x50">100 x 50 mm</option>
-              </select>
-            </div>
           </div>
 
           <div className="space-y-2">
@@ -197,6 +192,8 @@ function PrinterSection({
         </div>
       </div>
 
+      <UnitLabelCard />
+
       <div className="card">
         <h2 className="text-lg font-semibold text-gray-900 mb-4">Available Printers</h2>
         <div className="space-y-2">
@@ -227,3 +224,81 @@ function PrinterSection({
   );
 }
 
+
+/** Owner ruling 2026-09-28: stock labels on the TSC TE244, 100 x 15 mm stock
+ *  with a 70 mm printable area, through the normal Windows driver. Where the
+ *  printable side of the stock sits is calibrated on the real printer, so the
+ *  offset is saved on THIS computer (the printer attached here) -- in browser
+ *  storage, which is per web address: IMS opened at its other address starts
+ *  flush left, so the card names the address it saved for.
+ *  ponytail: per-browser + per-address; a server-side per-PC setting only if
+ *  shops keep switching addresses. */
+function UnitLabelCard() {
+  const toast = useToast();
+  const host = window.location.host;
+  const [offset, setOffset] = useState(() => String(getLabelOffsetMm()));
+  /** True when the offset was kept; when this browser blocks site data it is
+   *  not, the labels print flush left, and the card says exactly that. */
+  const save = () => {
+    const kept = setLabelOffsetMm(Number(offset));
+    setOffset(String(getLabelOffsetMm()));
+    if (!kept) {
+      toast.error(
+        `This browser did not keep the offset (site data is blocked for ${host}), so labels print flush left. Allow site data for IMS and save again.`,
+      );
+    }
+    return kept;
+  };
+  return (
+    <div className="card">
+      <h2 className="text-lg font-semibold text-gray-900 mb-1">Barcode labels (TSC TE244)</h2>
+      <p className="text-sm text-gray-600 mb-4">
+        Stock labels are {LABEL_WIDTH_MM} x 15 mm with a {PRINTABLE_MM} mm printable area and print
+        through the normal Windows driver. In the TSC printer preferences set the paper to{' '}
+        {LABEL_WIDTH_MM} x 15 mm; in the print dialog pick that printer with Margins: None.
+      </p>
+      <label htmlFor="label-offset" className="block text-sm font-medium text-gray-600 mb-1">
+        Printable area starts this far from the left edge (mm)
+      </label>
+      <input
+        id="label-offset"
+        type="number"
+        min={0}
+        max={LABEL_WIDTH_MM - PRINTABLE_MM}
+        step={0.5}
+        value={offset}
+        onChange={(e) => setOffset(e.target.value)}
+        className="input-field max-w-[10rem]"
+      />
+      <p className="text-xs text-gray-500 mt-1 mb-4">
+        0 = flush left. Print a test label: its box shows where the {PRINTABLE_MM} mm area lands.
+        Shift it until the box sits on the printable part of the stock. Saved on this computer for{' '}
+        <strong>{host}</strong> only: if this shop also opens IMS at another web address, set it there too.
+      </p>
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          className="btn-primary"
+          onClick={() => {
+            if (save()) toast.success(`Label offset saved on this computer for ${host}`);
+          }}
+        >
+          <Save className="w-4 h-4 mr-2" />
+          Save offset
+        </button>
+        <button
+          type="button"
+          className="btn-outline"
+          onClick={() => {
+            save();
+            const r = printTestLabel();
+            if (r.method !== 'html') toast.error(`${r.message} Allow pop-ups for IMS and try again.`);
+          }}
+        >
+          <Printer className="w-4 h-4 mr-2" />
+          Print a test label
+        </button>
+      </div>
+    </div>
+  );
+}

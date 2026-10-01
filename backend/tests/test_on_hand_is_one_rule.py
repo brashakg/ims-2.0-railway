@@ -127,6 +127,12 @@ _SHAPES: List[Tuple[str, Dict[str, Any], bool, bool]] = [
     ("QUARANTINED", {"status": "QUARANTINED"}, False, False),
     ("quarantined (lowercase)", {"status": "quarantined"}, False, False),
     ("TRANSFERRED", {"status": "TRANSFERRED"}, False, False),
+    # Excluded from every rollup (item_events.EXCLUDED_STATUSES). Nothing
+    # writes them today -- a blind count keeps its units AVAILABLE and records
+    # the count in its session -- so they are not "on the shelf" to any reader,
+    # the units-and-labels view included.
+    ("UNDER_AUDIT", {"status": "UNDER_AUDIT"}, False, False),
+    ("blind_count (lowercase)", {"status": "blind_count"}, False, False),
     ("empty string status", {"status": ""}, False, False),
     ("unknown junk status", {"status": "FOO"}, False, False),
 ]
@@ -294,6 +300,14 @@ def _physical_readers(mongo_db, http, pid, barcode) -> Dict[str, int]:
     row = _ledger_row_for(mongo_db, pid)
     out["stock ledger (quantity + reserved)"] = int(row.get("quantity", 0)) + int(
         row.get("reserved_quantity", 0)
+    )
+
+    # 9. the units-and-labels view the ledger's "N units" opens: the units it
+    #    calls in the shop are the ones its dialog lets you label
+    resp = http.get("/inventory/units", params={"store_id": STORE, "product_id": pid})
+    assert resp.status_code == 200, resp.text
+    out["GET /units in_shop (labelable)"] = sum(
+        1 for u in resp.json()["units"] if u["in_shop"] is True
     )
     return out
 
