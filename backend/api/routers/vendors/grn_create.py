@@ -21,6 +21,7 @@ from ._shared import (
     router,
     uuid,
 )
+from .grn import _find_duplicate_no_po_grn
 from .models import GRNCreate, GRN_SUBTYPE_DC
 from .numbering import (
     classify_grn_line_variance,
@@ -263,15 +264,19 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
     # admitted this hole ("_create_grn_impl has no duplicate guard for
     # STANDARD receipts"); this closes it for BOTH doors, since express
     # creates through this shared impl. A legitimately split delivery arrives
-    # with DIFFERENT invoice numbers per shipment and passes untouched.
+    # with DIFFERENT invoice numbers per shipment and passes untouched. A
+    # "Bought without PO" receipt from a walk-in dealer (no vendor_id) is
+    # matched by its bill photo or the dealer's bill number instead (D14).
     if not is_dc:
         dup = _find_duplicate_standard_grn(
             grn_repo, grn.po_id, vendor_id, grn.vendor_invoice_no
-        )
+        ) or _find_duplicate_no_po_grn(grn_repo, grn, store_id)
         if dup is not None:
             raise HTTPException(
                 status_code=409,
-                detail=_duplicate_grn_detail(dup, grn.vendor_invoice_no),
+                detail=_duplicate_grn_detail(
+                    dup, grn.vendor_invoice_no or "(no number) with this bill photo"
+                ),
             )
 
     # Ruling 14 -- THE TALLY. Every line of a PO-backed receipt must be ticked
@@ -435,13 +440,17 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
                     vendor_id,
                     grn.vendor_invoice_no,
                     exclude_grn_id=grn_id,
+                ) or _find_duplicate_no_po_grn(
+                    grn_repo, grn, store_id, exclude_grn_id=grn_id
                 )
             except Exception:  # noqa: BLE001
                 dup = None
             if dup is not None:
                 raise HTTPException(
                     status_code=409,
-                    detail=_duplicate_grn_detail(dup, grn.vendor_invoice_no),
+                    detail=_duplicate_grn_detail(
+                        dup, grn.vendor_invoice_no or "(no number) with this bill photo"
+                    ),
                 )
             raise HTTPException(status_code=500, detail="Failed to save goods receipt")
 

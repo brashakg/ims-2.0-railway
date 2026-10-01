@@ -395,6 +395,69 @@ def test_c7_every_line_must_carry_its_cost(world):
     assert ok.status_code == 201, ok.text
 
 
+def _walk_in_body(world, **over):
+    """The panel's probe body: a walk-in dealer by name only, no vendor_id."""
+    return _no_po_body(world, vendor_id=None, dealer_name="Sharma Optical", **over)
+
+
+def test_c7_the_same_walk_in_bill_cannot_go_on_the_shelf_twice(world):
+    """Panel probe: the identical dealer-only body posted twice (a retried
+    post after a lost response) gave 201 + 201, and accepting both minted 10
+    units for a 5-unit bill -- the vendor-keyed guard has no vendor to key on."""
+    http = world["as_"](MANAGER)
+    body = _walk_in_body(world)
+    first = http.post("/vendors/grn", json=body)
+    assert first.status_code == 201, first.text
+    again = http.post("/vendors/grn", json=body)
+    assert again.status_code == 409, again.text
+    assert again.json()["detail"]["grn_id"] == first.json()["grn_id"]
+    assert world["db"].grns.count_documents({}) == 1
+    assert http.post(f"/vendors/grn/{first.json()['grn_id']}/accept").status_code == 200
+    assert world["db"].stock_units.count_documents({}) == 5
+
+
+def test_c7_a_new_photo_of_the_same_dealer_bill_is_still_the_same_bill(world):
+    http = world["as_"](MANAGER)
+    assert http.post("/vendors/grn", json=_walk_in_body(world)).status_code == 201
+    # Same dealer typed differently, same bill number, a fresh upload.
+    twin = _no_po_body(world, vendor_id=None, dealer_name="sharma  optical.")
+    assert http.post("/vendors/grn", json=twin).status_code == 409
+    # A different bill from the same dealer is a different purchase.
+    other = _walk_in_body(world, vendor_invoice_no="CASH-78")
+    assert http.post("/vendors/grn", json=other).status_code == 201
+
+
+def test_c7_two_posts_at_once_meet_the_bill_photo_index(world, monkeypatch):
+    """Two identical posts at the same moment both pass the look-up; the
+    partial unique index on the bill photo makes the second insert fail, and
+    that must read as the same 409 -- never a second receipt."""
+    from api.routers.vendors import grn_create as gc
+    from database.schemas import get_all_indexes
+
+    spec = next(i for i in get_all_indexes()["grns"] if i.get("name") == "uniq_nopo_bill_photo")
+    (lambda *a, **k: None)(
+        spec["keys"],
+        unique=True,
+        name=spec["name"],
+        partialFilterExpression=spec["partialFilterExpression"],
+    )
+    http = world["as_"](MANAGER)
+    body = _walk_in_body(world, vendor_invoice_no=None)
+    assert http.post("/vendors/grn", json=body).status_code == 201
+
+    real = gc._find_duplicate_no_po_grn
+    calls = {"n": 0}
+
+    def racing(*a, **kw):  # the pre-insert look-up misses the rival
+        calls["n"] += 1
+        return None if calls["n"] == 1 else real(*a, **kw)
+
+    monkeypatch.setattr(gc, "_find_duplicate_no_po_grn", racing)
+    raced = http.post("/vendors/grn", json=body)
+    assert raced.status_code == 409, raced.text
+    assert world["db"].grns.count_documents({}) == 1
+
+
 # ===========================================================================
 # 2. On the shelf through the one minting door, at the real cost
 # ===========================================================================

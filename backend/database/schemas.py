@@ -903,7 +903,21 @@ INDEXES = {
                 "status": {"$in": ["PENDING", "PARTIALLY_ACCEPTED", "ACCEPTED"]},
             },
             "name": "uniq_std_vendor_invoice_store",
-        }
+        },
+        # D14: one live "Bought without PO" receipt per bill photo. A retried
+        # or double-pressed post re-sends the same uploaded file, and a walk-in
+        # dealer has no vendor_id for the index above to key on -- the atomic
+        # twin of vendors.grn._find_duplicate_no_po_grn. A VOID frees it.
+        {
+            "keys": [("attachment_file_id", 1)],
+            "unique": True,
+            "partialFilterExpression": {
+                "grn_subtype": "NO_PO",
+                "attachment_file_id": {"$type": "string"},
+                "status": {"$in": ["PENDING", "PARTIALLY_ACCEPTED", "ACCEPTED"]},
+            },
+            "name": "uniq_nopo_bill_photo",
+        },
     ],
     "tasks": [
         {"keys": [("task_number", 1)], "unique": True},
