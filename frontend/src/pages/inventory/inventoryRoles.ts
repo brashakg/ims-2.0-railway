@@ -52,6 +52,22 @@ export const POWER_GRID_ROLES: UserRole[] = [
   'OPTOMETRIST',
 ];
 
+/**
+ * The read-only Stock lookup (owner ruling D7b, 2026-09-29): the counter
+ * roles plus the manager ladder. Mirrors STOCK_LOOKUP_ROLES on the backend
+ * (routers/inventory/lookup.py) minus SALES_CASHIER, which sign-in folds
+ * into SALES_STAFF.
+ */
+export const STOCK_LOOKUP_ROLES: UserRole[] = [
+  'SUPERADMIN',
+  'ADMIN',
+  'AREA_MANAGER',
+  'STORE_MANAGER',
+  'SALES_STAFF',
+  'CASHIER',
+  'OPTOMETRIST',
+];
+
 /** Nav visibility for the two sections that live behind tighter gates. */
 export function canManageInventory(roles: readonly string[] | undefined | null): boolean {
   if (!roles) return false;

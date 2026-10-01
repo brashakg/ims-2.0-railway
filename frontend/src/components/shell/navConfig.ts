@@ -10,6 +10,7 @@
 import { moduleForPath } from '../../context/ModuleContext';
 import { TASK_MODULE_ROLES } from '../../pages/tasks/taskRoles';
 import {
+  STOCK_LOOKUP_ROLES,
   INVENTORY_MODULE_ROLES,
   INVENTORY_MANAGE_ROLES,
   POWER_GRID_ROLES,
@@ -103,6 +104,8 @@ export const NAV_GROUPS: NavGroup[] = [
       // address. The module's seventeen sections live behind the Inventory
       // entry, which now lands on the stock ledger.
       { id: 'inventory', label: 'Inventory', to: '/inventory/stock', icon: 'box', requireRoles: INVENTORY_MODULE_ROLES },
+      // D7b: the counter's read-only stock lookup (this shop, other shops, in transit).
+      { id: 'stock-lookup', label: 'Stock Lookup', to: '/inventory/lookup', icon: 'box', requireRoles: STOCK_LOOKUP_ROLES },
       { id: 'stock-count', label: 'Stock Count', to: '/inventory/audit', icon: 'box', requireRoles: INVENTORY_MANAGE_ROLES },
       { id: 'replenishment', label: 'Replenishment', to: '/inventory/replenishment', icon: 'box', requireRoles: INVENTORY_MANAGE_ROLES },
       { id: 'opening-stock', label: 'Opening Stock', to: '/inventory/opening-stock', icon: 'box', requireRoles: INVENTORY_MANAGE_ROLES },
