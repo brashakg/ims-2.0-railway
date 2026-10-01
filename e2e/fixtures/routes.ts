@@ -179,6 +179,8 @@ export const ROUTES: ReadonlyArray<{ path: string; ready?: string }> = [
   { path: '/reports/customers' },
   { path: '/reports/gst' },
   { path: '/reports/forecast' },
+  { path: '/reports/forecast/seasonal' },
+  { path: '/reports/forecast/reorder' },
   { path: '/reports/gstr1' },
   { path: '/reports/gstr3b' },
   { path: '/reports/blueprint' },
