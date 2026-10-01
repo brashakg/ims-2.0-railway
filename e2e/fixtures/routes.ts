@@ -242,6 +242,12 @@ export const EXCLUSIONS: ReadonlyArray<{ path: string; reason: string }> = [
     reason: 'redirect-only: index maps the legacy ?tab= onto /hr/<section>, all probed above.',
   },
   {
+    path: '/reports/forecast/*',
+    reason:
+      'redirect-only: catch-all; any unknown forecast sub-address Navigates to '
+      + '/reports/forecast, which is probed above.',
+  },
+  {
     path: '/hr/monthly-summary',
     reason: 'redirect-only: retired tab, Navigate to /attendance which shows a superset.',
   },
