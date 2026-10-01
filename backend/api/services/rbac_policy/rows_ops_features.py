@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Dict, List
 
+from ._core import ACCOUNTS
+
 ROWS: List[Dict[str, object]] = [
     # --- Feature #29 skills-based rostering (shares /api/v1/hr; mounted without
     # the HR finance gate). All stores clinical -> every shift needs optometrist
@@ -339,7 +341,9 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/finance/vendor-payments",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        # F60: per-vendor payables = the vendor ledger's answer (handler enforces
+        # _require_finance_admin), not the finance router's manager set.
+        "allowed": ACCOUNTS,
     },
     # FIN-1: GST e-invoice (IRN generation). Narrower than the router-level finance
     # gate (no AREA_MANAGER / STORE_MANAGER; matching the inline role check in
@@ -353,16 +357,16 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/finance/bank-statement/import",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",
         "path": "/api/v1/finance/bank-statement",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",
         "path": "/api/v1/finance/bank-statement/{statement_id}",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
 ]
