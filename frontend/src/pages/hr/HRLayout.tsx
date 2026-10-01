@@ -18,6 +18,11 @@
 // reads had their own .catch(() => empty), so the outer try/catch was dead
 // code. A failed load shows an empty table, exactly as it did before. The
 // LIVE error path - a failed approve/reject - keeps its banner, on /hr/leave.
+//
+// Wave 6 B14: the payroll page (three tabs in useState behind /hr/payroll,
+// outside this layout) is three more sections here - /hr/payroll (Salary
+// Sheet), /hr/payroll/advances, /hr/payroll/payslips - offered to SALARY_ROLES
+// only, the same list routes/hrRoutes.tsx gates the subtree with.
 
 import { useEffect } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
@@ -33,12 +38,15 @@ import {
   Settings,
   CalendarSync,
   Trophy,
+  DollarSign,
+  TrendingDown,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { hrApi, storeApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { useAttendance, useLeaveRequests } from './hrQueries';
+import { SALARY_ROLES } from './payroll/payrollShared';
 
 const SECTIONS = [
   { path: '/hr/today', label: "Today's Attendance", icon: Clock, managerOnly: false, badge: false },
@@ -46,6 +54,10 @@ const SECTIONS = [
   { path: '/hr/week-off-swaps', label: 'Week-off Swaps', icon: CalendarSync, managerOnly: false, badge: false },
   { path: '/hr/shifts', label: 'Shifts', icon: Settings, managerOnly: true, badge: false },
   { path: '/hr/leaderboard', label: 'Leaderboard', icon: Trophy, managerOnly: false, badge: false },
+  // Payroll: the old PayrollDashboard's three tabs, same labels and icons.
+  { path: '/hr/payroll', label: 'Salary Sheet', icon: DollarSign, managerOnly: false, salaryOnly: true, badge: false },
+  { path: '/hr/payroll/advances', label: 'Advances', icon: TrendingDown, managerOnly: false, salaryOnly: true, badge: false },
+  { path: '/hr/payroll/payslips', label: 'Payslips', icon: FileText, managerOnly: false, salaryOnly: true, badge: false },
 ];
 
 export function HRLayout() {
@@ -64,6 +76,10 @@ export function HRLayout() {
 
   // Shift config is manager-tier (matches the backend require_roles gate).
   const canConfigureShifts = hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']);
+  // Salary data is SUPERADMIN + ADMIN only (owner ruling 2026-08-10): the ONE
+  // list the /hr/payroll route gate reads, so the nav can never offer a
+  // payroll section the router would refuse.
+  const canSeeSalary = hasRole(SALARY_ROLES);
 
   // Stats (unchanged)
   const presentCount = attendance.filter(a => ['PRESENT', 'LATE'].includes(a.status)).length;
@@ -89,6 +105,10 @@ export function HRLayout() {
       void import('../../components/hr/WeekOffSwap');
       void import('../../components/hr/ShiftSetup');
       void import('./HRLeaderboardPage');
+      void import('./payroll/PayrollLayout');
+      void import('./payroll/SalarySheetSection');
+      void import('./payroll/SalaryAdvancesSection');
+      void import('./payroll/PayslipsSection');
     });
   }, []);
 
@@ -243,7 +263,7 @@ export function HRLayout() {
       {/* Section nav - same underline tabs, but each now navigates to a real
           URL instead of flipping a useState, so every section is linkable. */}
       <div className="flex border-b border-gray-200 overflow-x-auto">
-        {SECTIONS.filter(s => !s.managerOnly || canConfigureShifts).map(({ path, label, icon: TabIcon, badge }) => (
+        {SECTIONS.filter(s => (!s.managerOnly || canConfigureShifts) && (!s.salaryOnly || canSeeSalary)).map(({ path, label, icon: TabIcon, badge }) => (
           <button
             key={path}
             onClick={() => navigate(path)}
