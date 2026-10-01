@@ -16,7 +16,7 @@
 
 import { Suspense } from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
 
 // jsdom has no requestIdleCallback, so the layout's chunk-warming would fall
@@ -164,6 +164,26 @@ describe('every section keeps the /customers/loyalty gate', () => {
   });
 });
 
+// The 'New reward' draft lives in the layout, so it survives the section
+// switches the old tabs let it survive.
+describe('the New reward draft survives a visit to another section', () => {
+  it('typed values are still there after Tiers and back', async () => {
+    renderSection('/customers/loyalty/rewards');
+    fireEvent.click(await screen.findByRole('button', { name: /Add Reward/ }, FIND));
+    fireEvent.change(screen.getByPlaceholderText('e.g. Free glasses-cloth'), { target: { value: 'ZZ half typed' } });
+    fireEvent.change(screen.getByPlaceholderText('What does the customer get?'), { target: { value: 'ZZ note' } });
+
+    fireEvent.click(screen.getByRole('link', { name: /^Tiers$/ }));
+    expect(await screen.findByText('5,000+ lifetime points', undefined, FIND)).toBeInTheDocument();
+    expect(screen.queryByText('New reward')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('link', { name: /^Rewards$/ }));
+    expect(await screen.findByText('New reward', undefined, FIND)).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('e.g. Free glasses-cloth')).toHaveValue('ZZ half typed');
+    expect(screen.getByPlaceholderText('What does the customer get?')).toHaveValue('ZZ note');
+  });
+});
+
 describe('legacy /customers/loyalty?tab= links still land', () => {
   it('?tab=rewards forwards to /customers/loyalty/rewards and paints it', async () => {
     renderSection('/customers/loyalty?tab=rewards');
@@ -186,5 +206,13 @@ describe('/customers/feedback is the NPS dashboard only', () => {
     for (const gone of [/Sentiment/, /Complaints/, /Comparison/, /^NPS$/]) {
       expect(screen.queryByRole('button', { name: gone })).not.toBeInTheDocument();
     }
+  });
+
+  it('says where detractor follow-ups land', async () => {
+    renderSection('/customers/feedback');
+    expect(await screen.findByText(
+      'NPS detractors automatically create manager follow-up tasks, which appear on the Follow-ups dashboard.',
+      undefined, FIND,
+    )).toBeInTheDocument();
   });
 });
