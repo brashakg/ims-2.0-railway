@@ -344,6 +344,7 @@ async def create_vendor_bill(
     # GSTR-3B. Refused (422) before anything is claimed or written.
     from ..purchase_invoices import _bill_recipient, _vendor_gstin
     from ...services.purchase_invoice_engine import split_header_tax
+    from ...services.org_validation import has_valid_gstin
 
     supplier_gstin = _vendor_gstin(db_early, vendor, vendor_id)
     recipient = _bill_recipient(
@@ -383,6 +384,9 @@ async def create_vendor_bill(
         "igst_total": heads["igst_total"],
         "total_amount": round(bill.total_amount, 2),
         "outstanding": round(bill.total_amount, 2),
+        # No valid supplier GSTIN, no input credit (purchase_invoices does the
+        # same on its doors): one rule, org_validation.has_valid_gstin.
+        "itc_eligible": has_valid_gstin(supplier_gstin),
         "po_id": bill.po_id,
         "grn_id": bill.grn_id,
         # A receipt-linked bill IS a goods bill whatever the caller declared;

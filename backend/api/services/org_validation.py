@@ -193,6 +193,20 @@ def validate_gstin(gstin: Optional[str], verify_checksum: bool = True) -> bool:
     return True
 
 
+def has_valid_gstin(value) -> bool:
+    """THE answer to 'does this string name a registered person' -- 15
+    characters in the GSTIN pattern with a real state code. Checksum is not
+    verified (the vendor master and the company master accept format only; a
+    mistyped check digit is still a registered supplier on the paper bill).
+    'NA', 'URP', 'N/A', '-', '0', '27' and a 15-character string with a bad
+    state prefix are all False. Input credit (GST law s.16 / Rule 36) needs a
+    registered supplier's GSTIN on the invoice, so every bill door and every
+    ITC reader asks this one function."""
+    if not isinstance(value, str):
+        return False
+    return validate_gstin(value, verify_checksum=False)
+
+
 def validate_ifsc(ifsc: Optional[str]) -> bool:
     return bool(_IFSC_RE.match(_norm(ifsc)))
 

@@ -2028,18 +2028,11 @@ def _shop_gst(db, store_id: str) -> tuple:
 
 
 def _tax_split(tax: float, interstate: bool):
-    """Return (cgst, sgst, igst) for a tax amount.
+    """Return (cgst, sgst, igst) for a tax amount -- gst_rates.split_gst, the
+    one splitter every bill door and the GSTR readers use (no second copy)."""
+    from ..services.gst_rates import split_gst
 
-    Intra-state: CGST = SGST = half each (residual trick avoids +/-1 paisa drift).
-    Inter-state: IGST = full tax, CGST = SGST = 0.
-    Pure, no I/O.
-    """
-    tax = round(float(tax or 0), 2)
-    if interstate:
-        return 0.0, 0.0, tax
-    half = round(tax / 2, 2)
-    sgst = round(tax - half, 2)
-    return half, sgst, 0.0
+    return split_gst(tax, interstate)
 
 
 def _bill_date_ist(completed_at_raw) -> str:

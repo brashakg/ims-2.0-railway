@@ -535,25 +535,43 @@ class TestCreateBooksApAndItc:
         )
         assert r.status_code == 201, r.text
 
-    def test_explicit_recipient_gstin_overrides_entity(self):
+    def test_typed_recipient_gstin_cannot_override_the_receiving_shop(self):
+        """Round 12 item 1: goods received at S1 (Jharkhand registration) are
+        S1's, whatever number is typed. A company's OTHER registration typed
+        against them is refused, not booked onto the other return."""
         db = _FakeDB()
-        # E1 is a two-state entity: the typed MH GSTIN is one of its own
-        # registrations (a GSTIN the entity does not hold is refused -- see
-        # test_purchase_bill_matches_form).
         db.collections["entities"][0]["gstins"].append(
             {"gstin": BUY_MH, "state_code": "27", "is_primary": False}
         )
         cli = _app(db)
-        # Pass an explicit MH recipient GSTIN -> intra-state with the MH supplier.
         r = cli.post(
             "/api/v1/vendors/purchase-invoices",
             json=_invoice_body(recipient_gstin=BUY_MH, recipient_entity_id=None),
         )
-        assert r.status_code == 201, r.text
-        doc = r.json()
-        # Explicit MH recipient GSTIN -> intra-state with the MH supplier.
-        assert doc["place_of_supply"] == "27" and doc["interstate"] is False
-        assert doc["cgst_total"] == 25.0 and doc["igst_total"] == 0.0
+        assert r.status_code == 422, r.text
+        assert r.json()["detail"]["code"] == "RECIPIENT_GSTIN_NOT_RECEIPT_SHOP"
+        assert BUY_MH in r.json()["detail"]["message"]
+        assert not [x for x in db.collections.get("purchase_invoices", [])]
+
+    def test_receiving_shop_registration_is_the_recipient(self):
+        """The same GRN at a Maharashtra shop books intra-state on the MH
+        registration with the MH supplier (typed number absent or equal)."""
+        for typed in (None, BUY_MH):
+            db = _FakeDB()
+            db.collections["entities"][0]["gstins"].append(
+                {"gstin": BUY_MH, "state_code": "27", "is_primary": False}
+            )
+            db.collections["stores"][0].update({"state_code": "27", "gstin": BUY_MH})
+            cli = _app(db)
+            body = _invoice_body(recipient_entity_id=None)
+            body.pop("recipient_gstin", None)
+            if typed:
+                body["recipient_gstin"] = typed
+            r = cli.post("/api/v1/vendors/purchase-invoices", json=body)
+            assert r.status_code == 201, r.text
+            doc = r.json()
+            assert doc["recipient_gstin"] == BUY_MH and doc["interstate"] is False
+            assert doc["cgst_total"] == 25.0 and doc["igst_total"] == 0.0
 
 
 class TestRoleGating:

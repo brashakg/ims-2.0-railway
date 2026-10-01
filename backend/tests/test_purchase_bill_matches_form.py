@@ -231,8 +231,8 @@ class TestF40RecipientIsServerSide:
         as the booking: the shop's company, on the SHOP's own registration
         when its company holds it (panel finding 2: a Pune shop carrying the
         company's Maharashtra number receives on it, as its purchase order
-        does). Typing our other registration (as printed on the paper bill) is
-        the accountant's lever, and books on it."""
+        does). Round 12: typing our OTHER registration against a receipt is
+        refused (422) -- the receiving shop decides, a typed number only agrees."""
         db = _FakeDB()
         db.collections["entities"][0]["gstins"].append(
             {"gstin": BUY_MH, "state_code": "27", "is_primary": False}
@@ -251,9 +251,9 @@ class TestF40RecipientIsServerSide:
         draft = cli.get(f"{_URL}/from-grn/G1").json()
         assert draft["recipient_entity_id"] == "E1"
         assert draft["recipient_gstin"] == BUY_MH and draft["interstate"] is False
-        typed = cli.post(_URL, json=_fe_body(recipient_gstin=BUY_JH)).json()
-        assert typed["recipient_entity_id"] == "E1"
-        assert typed["recipient_gstin"] == BUY_JH and typed["interstate"] is True
+        typed = cli.post(_URL, json=_fe_body(recipient_gstin=BUY_JH))
+        assert typed.status_code == 422, typed.text
+        assert typed.json()["detail"]["code"] == "RECIPIENT_GSTIN_NOT_RECEIPT_SHOP"
 
 
 # ===========================================================================

@@ -324,8 +324,23 @@ class TestTheRecipientIsNeverGuessed:
 
     def test_a_typed_gstin_names_its_company_on_a_manual_bill(self):
         """P11 (a surviving mutant): no receipt, active shop S1 (E1), WizOpt's
-        number typed as printed on the bill -> the bill is WizOpt's."""
-        r = _app(_two_companies()).post(_URL, json=_services(recipient_gstin=BUY_MH))
+        number typed as printed on the bill -> the bill is WizOpt's, for a
+        caller who can reach a WizOpt shop (round 12 item 8: else 403)."""
+        db = _two_companies()
+        r = _app(db).post(_URL, json=_services(recipient_gstin=BUY_MH))
+        assert r.status_code == 403, r.text  # S1-only accountant
+        cli = _app_as(db, "S1")
+
+        async def _u():
+            return {
+                "user_id": "u1",
+                "roles": ["ACCOUNTANT"],
+                "store_ids": ["S1", "S2"],
+                "active_store_id": "S1",
+            }
+
+        cli.app.dependency_overrides[get_current_user] = _u
+        r = cli.post(_URL, json=_services(recipient_gstin=BUY_MH))
         assert r.status_code == 201, r.text
         doc = r.json()
         assert doc["recipient_entity_id"] == "E2" and doc["recipient_gstin"] == BUY_MH
@@ -768,6 +783,9 @@ class TestCreditFromAnUnregisteredSupplierIsFlagged:
         r = _app(db).post(_URL, json=_services(vendor_id="VN", invoice_number="VN-1", lines=[
             {"description": "Fitting", "qty": 1, "unit_price": 1000.11, "gst_rate": 5}]))
         assert r.status_code == 201, r.text
+        # Booked before round 12 (when a bill with no valid supplier GSTIN
+        # began to be booked no-credit): the credit is still claimed.
+        db["vendor_bills"].update_many({}, {"$set": {"itc_eligible": True}})
         xc = _crosscheck(db, "E1")
         assert xc["gstr3b"]["itc"]["total"] == 50.01
         row = _row(xc, "Input credit from suppliers with no GSTIN")
@@ -790,6 +808,9 @@ class TestCreditFromAnUnregisteredSupplierIsFlagged:
         bill = db["vendor_bills"].find_one({"bill_number": "FR-1"})
         assert bill["vendor_gstin"] is None
         assert (bill["cgst_total"], bill["sgst_total"], bill["igst_total"]) == (60.0, 60.0, 0.0)
+        # Booked before round 12 (when a bill with no valid supplier GSTIN
+        # began to be booked no-credit): the credit is still claimed.
+        db["vendor_bills"].update_many({}, {"$set": {"itc_eligible": True}})
 
         db["vendors"].update_one({"vendor_id": "VNO"}, {"$set": {"gstin": SUP_MH}})
         row = _row(_crosscheck(db, "E1"), "Input credit from suppliers with no GSTIN")
@@ -1698,11 +1719,16 @@ class TestTheNoGstinNoteNamesOnlyWhatTheAppCanDo:
         db["vendors"].insert_one({"vendor_id": "VN", "trade_name": "Local Fitter", "credit_days": 0})
         r = _app(db).post(_URL, json=_services(vendor_id="VN", invoice_number="VN-1"))
         assert r.status_code == 201, r.text
+        # Booked before round 12 (when a bill with no valid supplier GSTIN
+        # began to be booked no-credit): the credit is still claimed.
+        db["vendor_bills"].update_many({}, {"$set": {"itc_eligible": True}})
         note = _row(_crosscheck(db, "E1"), self.NOTE)["note"]
         low = note.lower()
         assert "VN-1" in note and "stock-transfer" not in low
         assert "do not book it again" in low and "twice" in low
         assert "book the bill again" not in low and "mark it as no" not in low
+        assert "developer" not in low and "corrected" not in low
+        assert "on the gst portal, leave this credit out of table 4" in low
 
     def test_a_transfer_mirror_gets_its_own_truthful_text(self):
         """r11 #1: a mirror (made by SYSTEM, source_transfer_id set) from a
@@ -1776,3 +1802,291 @@ class TestNoSoleCompanyGuess:
         from api.services import org_validation as ov
 
         assert ov.shop_gstins(db)["S9"] == ""
+
+
+# ===========================================================================
+# Round 12 -- recipient authority, fail-loud, no credit without a valid
+# supplier GSTIN, honest notes, one splitter, the mirror's junk-prefix head
+# ===========================================================================
+
+from fastapi import HTTPException  # noqa: E402
+
+
+def _pune_world():
+    """E1 holds 20... (S1) and 27... (PUNE); BLR is a third shop, user-less."""
+    return _one_company(
+        [
+            {"store_id": "S1", "entity_id": "E1", "state_code": "20", "gstin": BUY_JH},
+            {"store_id": "PUNE", "entity_id": "E1", "state_code": "27", "gstin": BUY_MH},
+        ],
+        gstins=(BUY_JH, BUY_MH),
+    )
+
+
+def _refused(fn, *a, **kw):
+    with pytest.raises(HTTPException) as e:
+        fn(*a, **kw)
+    return e.value
+
+
+class TestRound12RecipientAuthority:
+    def test_item1_a_receipt_shop_is_never_moved_by_a_typed_gstin(self):
+        """#1: goods received at PUNE (27...), the company's OTHER number (20...)
+        typed -> 422, never IGST on the Jharkhand return."""
+        db = _pune_world()
+        err = _refused(pi_router._bill_recipient, db, "PUNE", BUY_JH)
+        assert err.status_code == 422
+        assert err.detail["code"] == "RECIPIENT_GSTIN_NOT_RECEIPT_SHOP"
+        assert BUY_MH in err.detail["message"] and "PUNE" in err.detail["message"]
+        for typed in (None, "", BUY_MH, BUY_MH.lower()):
+            r = pi_router._bill_recipient(db, "PUNE", typed)
+            assert r["recipient_gstin"] == BUY_MH
+
+    def test_item1_on_the_booking_and_the_preview(self):
+        """#1 through the doors: the same 422 on POST / and POST /preview."""
+        db = _pune_world()
+        db["vendors"].insert_one({"vendor_id": "V1", "trade_name": "M", "gstin": SUP_MH})
+        db["grns"].insert_one(
+            {"grn_id": "GP", "vendor_id": "V1", "store_id": "PUNE", "status": "ACCEPTED",
+             "items": [{"product_id": "P1", "accepted_qty": 1}]}
+        )
+        cli = _app_as(db, "S1")
+        pi_router.get_grn_repository = lambda: _Repo(list(db["grns"].find({}, {"_id": 0})), "grn_id")
+
+        async def _u():
+            return {"user_id": "u1", "roles": ["ACCOUNTANT"], "store_ids": ["S1", "PUNE"],
+                    "active_store_id": "S1"}
+
+        cli.app.dependency_overrides[get_current_user] = _u
+        body = {"vendor_id": "V1", "grn_id": "GP", "recipient_gstin": BUY_JH,
+                "lines": [{"description": "x", "qty": 1, "unit_price": 1000, "gst_rate": 5, "product_id": "P1"}]}
+        for url in (f"{_URL}/preview", _URL):
+            r = cli.post(url, json={**body, "invoice_number": "X-1", "invoice_date": "2026-05-03"})
+            assert r.status_code == 422, (url, r.text)
+            assert r.json()["detail"]["code"] == "RECIPIENT_GSTIN_NOT_RECEIPT_SHOP"
+
+    def test_item8_a_typed_gstin_needs_a_shop_of_its_company(self):
+        """#8: S1-only caller types WizOpt's number -> 403; a caller with a
+        WizOpt shop, and an admin, are let through."""
+        db = _two_companies()
+        s1 = {"roles": ["ACCOUNTANT"], "store_ids": ["S1"], "active_store_id": "S1"}
+        err = _refused(pi_router._bill_recipient, db, None, BUY_MH, "S1", current_user=s1)
+        assert err.status_code == 403
+        both = {"roles": ["ACCOUNTANT"], "store_ids": ["S1", "S2"], "active_store_id": "S1"}
+        r = pi_router._bill_recipient(db, None, BUY_MH, "S1", current_user=both)
+        assert (r["recipient_entity_id"], r["recipient_gstin"]) == ("E2", BUY_MH)
+        adm = {"roles": ["ADMIN"], "store_ids": [], "active_store_id": None}
+        assert pi_router._bill_recipient(db, None, BUY_MH, "S1", current_user=adm)["recipient_entity_id"] == "E2"
+        own = pi_router._bill_recipient(db, None, BUY_JH, "S1", current_user=s1)
+        assert own["recipient_entity_id"] == "E1"
+
+    def test_item2_no_company_master_and_no_typed_gstin_is_a_422(self):
+        """#2: the recipient GSTIN may never resolve to None, in the helper, the
+        preview and the booking alike."""
+        db = _FakeDB()
+        db.collections["entities"].clear()
+        err = _refused(pi_router._bill_recipient, db, None, None, "S1")
+        assert err.status_code == 422 and err.detail["code"] == "RECIPIENT_NO_COMPANY_MASTER"
+        cli = _app(db)
+        for url in (_URL, f"{_URL}/preview"):
+            r = cli.post(url, json=_services(invoice_number="NM-1"))
+            assert r.status_code == 422, (url, r.text)
+            assert r.json()["detail"]["code"] == "RECIPIENT_NO_COMPANY_MASTER"
+        assert not db.collections.get("purchase_invoices")
+        # A typed GSTIN with no master to check it against is still taken.
+        assert pi_router._bill_recipient(db, None, BUY_JH, "S1")["recipient_gstin"] == BUY_JH
+
+
+class TestRound12NoCreditWithoutAValidSupplierGstin:
+    BAD = ("NA", "URP", "N/A", "-", "0", "27", "88AAAAA1111A1Z1", "", "  ")
+
+    def test_the_one_helper(self):
+        from api.services.org_validation import has_valid_gstin
+
+        for bad in (*self.BAD, None, 27, "27AAAAA1111A1Z", "27AAAAA1111A1Z12"):
+            assert has_valid_gstin(bad) is False, bad
+        assert has_valid_gstin(SUP_MH) and has_valid_gstin(" " + SUP_JH.lower() + " ")
+
+    @pytest.mark.parametrize("gstin", BAD)
+    def test_every_bad_string_books_no_credit_on_the_screen_door(self, gstin):
+        db = TestCreditLeftOffEveryReturnIsFlagged()._world()
+        db["vendors"].insert_one({"vendor_id": "VN", "trade_name": "Local", "gstin": gstin, "credit_days": 0})
+        r = _app(db).post(_URL, json=_services(vendor_id="VN", invoice_number="VN-1"))
+        assert r.status_code == 201, r.text
+        assert r.json()["itc_eligible"] is False
+        xc = _crosscheck(db, "E1")
+        assert xc["gstr3b"]["itc"]["total"] == 0.0
+        assert _register(db)["total_itc"] == 0.0
+        assert _row(xc, "Input credit from suppliers with no GSTIN")["status"] == "MATCH"
+        assert _row(xc, "Input credit left off GSTR-3B")["status"] == "MATCH"
+        pre = _app(db).post(f"{_URL}/preview", json={"vendor_id": "VN", "lines": _services()["lines"]})
+        assert pre.json()["itc_eligible"] is False
+
+    @pytest.mark.parametrize("gstin", ("NA", "88AAAAA1111A1Z1", ""))
+    def test_the_cash_flow_door_too(self, gstin):
+        db, cli = TestEveryDoorEveryReader()._world()
+        vno = {"vendor_id": "VNO", "trade_name": "Local", "credit_days": 0, "gstin": gstin}
+        db["vendors"].insert_one(dict(vno))
+        vend.get_vendor_repository = lambda: _Repo([vno], "vendor_id")
+        r = _door(cli, "VNO", **_cash_flow_bill(bill_number="FR-1", tax_amount=120, total_amount=1120))
+        assert r.status_code == 201, r.text
+        assert db["vendor_bills"].find_one({"bill_number": "FR-1"})["itc_eligible"] is False
+        xc = _crosscheck(db, "E1")
+        assert xc["gstr3b"]["itc"]["total"] == 0.0
+        assert _row(xc, "Input credit from suppliers with no GSTIN")["status"] == "MATCH"
+
+    def test_a_valid_gstin_still_claims_credit(self):
+        db = TestCreditLeftOffEveryReturnIsFlagged()._world()
+        r = _app(db).post(_URL, json=_services())
+        assert r.status_code == 201, r.text
+        assert r.json()["itc_eligible"] is True
+        assert _crosscheck(db, "E1")["gstr3b"]["itc"]["total"] == 180.0
+
+    def test_the_reader_judges_a_stored_junk_gstin_with_the_same_helper(self):
+        """A bill booked before the rule, vendor_gstin 'NA' with the credit
+        claimed, is flagged by the row (it was non-blank, so it read clean)."""
+        db = TestCreditLeftOffEveryReturnIsFlagged()._world()
+        db["vendors"].insert_one({"vendor_id": "VN", "trade_name": "Local", "gstin": "NA"})
+        assert _app(db).post(_URL, json=_services(vendor_id="VN", invoice_number="J-1")).status_code == 201
+        db["vendor_bills"].update_many({}, {"$set": {"itc_eligible": True}})
+        row = _row(_crosscheck(db, "E1"), "Input credit from suppliers with no GSTIN")
+        assert row["status"] == "MISMATCH" and row["variance"] == 180.0 and "J-1" in row["note"]
+
+
+class TestRound12NotesNameOnlyRealActions:
+    def test_the_left_off_note(self):
+        db = TestCreditLeftOffEveryReturnIsFlagged()._world()
+        db["vendor_bills"].insert_one(
+            {"bill_id": "b-old", "bill_number": "OLD-1", "vendor_id": "V1", "bill_date": "2026-05-02",
+             "taxable_amount": 1000, "tax_amount": 50, "igst_total": 50.0, "cgst_total": 0.0,
+             "sgst_total": 0.0, "recipient_entity_id": None, "status": "OUTSTANDING"}
+        )
+        note = _row(_crosscheck(db, "E1"), "Input credit left off GSTR-3B")["note"]
+        assert note.startswith("1 booked bill(s) carry input credit that IMS left off every GSTIN's GSTR-3B")
+        assert "IMS cannot edit a booked bill" in note
+        assert "on the GST portal, claim it in Table 4 only if your accountant confirms" in note
+        assert note.endswith("OLD-1")
+        low = note.lower()
+        for gone in ("correct those", "corrected", "developer"):
+            assert gone not in low
+
+    def test_the_no_gstin_notes(self):
+        from api.services.gst_crosscheck import _unregistered_note
+
+        note = _unregistered_note({"bill_numbers": ["A-1", "TRF/T-1"], "transfer_bill_numbers": ["TRF/T-1"]})
+        assert "IMS counted this credit in the GSTR-3B figure on this screen" in note
+        assert "On the GST portal, leave this credit out of Table 4 of the GSTR-3B you file" in note
+        assert "marked no-credit by IMS automatically: A-1" in note
+        assert "so IMS set the head from the two shops' GST numbers" in note
+        assert "of the GSTR-3B you file: TRF/T-1" in note
+        low = note.lower()
+        for gone in ("developer", "corrected", "correct those", "have the stored bill"):
+            assert gone not in low
+
+
+class TestRound12OneSplitterAndTheMirrorHead:
+    def test_item4_the_aggregate_mirror_uses_gst_rates_split_gst(self, monkeypatch):
+        from api.routers import transfers as trf
+        from api.services import gst_rates
+
+        monkeypatch.setattr(gst_rates, "split_gst", lambda tax, inter: ("SENTINEL", tax, inter))
+        assert trf._tax_split(10.01, False) == ("SENTINEL", 10.01, False)
+
+    @pytest.mark.parametrize("tax", (0.01, 180.01, 0.05, 33.33, 5.01))
+    def test_item4_the_values_still_agree(self, tax):
+        from api.routers import transfers as trf
+        from api.services.gst_rates import split_gst
+
+        for inter in (True, False):
+            assert trf._tax_split(tax, inter) == split_gst(tax, inter)
+
+    def test_item9_a_junk_prefix_registration_takes_its_head_from_classify_supply(self):
+        """#9: E1 holds 20... and a junk-prefix '88AAAAA1111A1Z1'. classify_supply
+        (no state for 88) says CGST + SGST; the old `from_state != to_state`
+        said IGST. The mirror reads the one rule."""
+        from api.services.purchase_invoice_engine import classify_supply
+
+        junk = "88AAAAA1111A1Z1"
+        db = _one_company(
+            [
+                {"store_id": "S1", "entity_id": "E1", "state_code": "20", "gstin": BUY_JH},
+                {"store_id": "JUNK", "entity_id": "E1", "state_code": "27", "gstin": junk},
+            ],
+            gstins=(BUY_JH, junk),
+        )
+        assert classify_supply(BUY_JH, junk)["interstate"] is False
+        bill = _mirror(db, "S1", "JUNK")
+        assert (bill["vendor_gstin"], bill["recipient_gstin"]) == (BUY_JH, junk)
+        assert bill["interstate"] is False
+        assert (bill["cgst_total"], bill["sgst_total"], bill["igst_total"]) == (25.0, 25.0, 0.0)
+
+
+class TestRound12ThePoComposerShowsTheServersHead:
+    def _client(self, db, roles=("ACCOUNTANT",), stores=("S1", "PUNE")):
+        import api.routers.vendors.cockpit as cockpit
+        import api.routers.vendors.gst as po_gst
+
+        saved = (po_gst.get_store_repository, po_gst._get_db, cockpit._get_db)
+        po_gst.get_store_repository = lambda: _Repo(list(db["stores"].find({}, {"_id": 0})), "store_id")
+        po_gst._get_db = lambda: db
+        cockpit._get_db = lambda: db
+        self._restore = lambda: (
+            setattr(po_gst, "get_store_repository", saved[0]),
+            setattr(po_gst, "_get_db", saved[1]),
+            setattr(cockpit, "_get_db", saved[2]),
+        )
+        app = FastAPI()
+        app.include_router(vend.router, prefix="/api/v1/vendors")
+
+        async def _u():
+            return {"user_id": "u1", "roles": list(roles), "store_ids": list(stores),
+                    "active_store_id": stores[0] if stores else None}
+
+        app.dependency_overrides[get_current_user] = _u
+        return TestClient(app)
+
+    def test_heads_come_from_shop_gstin_and_classify_supply(self):
+        db = _pune_world()
+        db["vendors"].insert_many([
+            {"vendor_id": "VJ", "trade_name": "Ranchi", "gstin": SUP_JH},
+            {"vendor_id": "VN", "trade_name": "Local"},
+            {"vendor_id": "VX", "trade_name": "Junk", "gstin": "88AAAAA1111A1Z1"},
+        ])
+        try:
+            cli = self._client(db)
+            pune = cli.get("/api/v1/vendors/po-gst-heads", params={"store_id": "PUNE"}).json()
+            s1 = cli.get("/api/v1/vendors/po-gst-heads", params={"store_id": "S1"}).json()
+        finally:
+            self._restore()
+        assert pune["shop_gstin"] == BUY_MH and s1["shop_gstin"] == BUY_JH
+        # Maharashtra shop: the MH vendor is CGST+SGST, the JH vendor IGST.
+        assert pune["heads"] == {"V1": False, "V2": True, "VJ": True, "VN": None, "VX": None}
+        assert s1["heads"]["VJ"] is False and s1["heads"]["VN"] is None and s1["heads"]["VX"] is None
+
+    def test_a_shop_the_company_holds_no_number_for_says_cannot_tell(self):
+        """The old composer read raw store.gstin: a stale/blank own GSTIN gave a
+        stale head or 'cannot tell'. The server resolves through shop_gstin."""
+        db = _one_company(
+            [{"store_id": "S1", "entity_id": "E1", "state_code": "20", "gstin": "27STALE0000Z1Z0"},
+             {"store_id": "BLR", "entity_id": "E1", "state_code": "29", "gstin": None}],
+            gstins=(BUY_JH,),
+        )
+        db["vendors"].insert_one({"vendor_id": "VJ", "trade_name": "R", "gstin": SUP_JH})
+        try:
+            cli = self._client(db, stores=("S1", "BLR"))
+            s1 = cli.get("/api/v1/vendors/po-gst-heads", params={"store_id": "S1"}).json()
+            blr = cli.get("/api/v1/vendors/po-gst-heads", params={"store_id": "BLR"}).json()
+        finally:
+            self._restore()
+        assert s1["shop_gstin"] == BUY_JH and s1["heads"]["VJ"] is False  # stale own number ignored
+        assert blr["shop_gstin"] == "" and blr["heads"]["VJ"] is None
+
+    def test_role_and_store_gate(self):
+        db = _pune_world()
+        try:
+            assert self._client(db, roles=("SALES_STAFF",)).get("/api/v1/vendors/po-gst-heads").status_code == 403
+            assert self._client(db, stores=("S1",)).get(
+                "/api/v1/vendors/po-gst-heads", params={"store_id": "PUNE"}
+            ).status_code == 403
+        finally:
+            self._restore()

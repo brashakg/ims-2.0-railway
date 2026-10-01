@@ -677,11 +677,13 @@ def build_crosscheck(
                 # forgive -- Rs 0.90 of credit on no return is a break.
                 0.0,
                 note=(
-                    "%d booked bill(s) carry this input credit but no GSTIN's "
-                    "GSTR-3B counts it: the bill has no company, no tax heads, "
-                    "no date written YYYY-MM-DD (listed every month until "
-                    "corrected), or our GST number on it is no shop's. Correct those bills "
-                    "before filing: %s"
+                    "%d booked bill(s) carry input credit that IMS left off every "
+                    "GSTIN's GSTR-3B: the bill has no company, no tax heads, no "
+                    "date written YYYY-MM-DD (listed every month), or our GST "
+                    "number on it is no shop's. IMS cannot edit a booked bill. "
+                    "The GSTR-3B figures on this screen already exclude this "
+                    "credit; on the GST portal, claim it in Table 4 only if "
+                    "your accountant confirms it belongs on that month's return: %s"
                     % (n, ", ".join(str(x) for x in (unplaced.get("bill_numbers") or [])[:20]))
                     if n
                     else "Every booked bill's input credit is on a GSTIN's GSTR-3B."
@@ -737,26 +739,26 @@ def _unregistered_note(unreg: dict) -> str:
     parts = []
     if own:
         parts.append(
-            "%d bill(s) claim this input credit although the bill names no "
-            "supplier GSTIN, and an unregistered supplier's tax never reaches "
-            "GSTR-2B. Adding a GSTIN to the supplier now does not fix the "
-            "bill: its CGST/SGST/IGST was set without the supplier's state. "
-            "The app cannot edit or cancel a booked bill, and booking the same "
+            "%d bill(s) were booked before IMS refused input credit without a "
+            "valid supplier GSTIN: they name none, and an unregistered "
+            "supplier's tax never reaches GSTR-2B, so it cannot be claimed. "
+            "IMS counted this credit in the GSTR-3B figure on this screen. "
+            "IMS cannot edit or cancel a booked bill, and booking the same "
             "supplier invoice again would claim its credit twice, so do not "
-            "book it again. Leave this credit out of the GSTR-3B you file "
-            "(Table 4) and have the stored bill corrected by the developer: %s"
-            % (len(own), ", ".join(own[:20]))
+            "book it again. On the GST portal, leave this credit out of "
+            "Table 4 of the GSTR-3B you file. Bills booked from now on with "
+            "no valid supplier GSTIN are marked no-credit by IMS "
+            "automatically: %s" % (len(own), ", ".join(own[:20]))
         )
     if mirrors:
         parts.append(
             "%d stock-transfer bill(s) were made by the system when a transfer "
             "was received, and the sending shop has no GST number of its "
-            "company, so the head was set from the two shops' GST numbers "
+            "company, so IMS set the head from the two shops' GST numbers "
             "with no sender registration. They do not appear in Purchase "
             "Invoices and cannot be booked again. Add the sending shop's "
-            "company registration (Settings, companies) for later transfers; "
-            "leave this credit out of the GSTR-3B you file (Table 4) and have "
-            "the stored bill corrected by the developer: %s"
-            % (len(mirrors), ", ".join(mirrors[:20]))
+            "company registration (Settings, companies) so later transfers "
+            "carry one; on the GST portal, leave this credit out of Table 4 "
+            "of the GSTR-3B you file: %s" % (len(mirrors), ", ".join(mirrors[:20]))
         )
     return " ".join(parts)

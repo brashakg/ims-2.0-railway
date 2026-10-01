@@ -1058,7 +1058,12 @@ def _refuse_recipient(code: str, message: str):
 
 
 def _bill_recipient(
-    db, receipt_store_id, body_gstin, fallback_store_id=None, gstin_box=True
+    db,
+    receipt_store_id,
+    body_gstin,
+    fallback_store_id=None,
+    gstin_box=True,
+    current_user=None,
 ) -> dict:
     """THE recipient of a purchase bill -- one resolution for every bill door
     (the booking, its preview, both drafts, the Cash Flow '+ bill'), decided on
@@ -1074,8 +1079,12 @@ def _bill_recipient(
     Refused (422) when companies exist and none can be named -- a bill with
     recipient_entity_id null drops out of every GSTR-3B.
 
-    The GSTIN: the typed one, refused unless that company holds it (a typo, or
-    another company's number, would move the credit and the tax head); else
+    The GSTIN: when the goods were received at a shop it is ALWAYS that shop's
+    (org_validation.shop_gstin) -- a typed GSTIN that differs is refused 422,
+    never allowed to move the credit to another registration. With no receipt
+    shop, the typed one: refused unless that company holds it (a typo, or
+    another company's number, would move the credit and the tax head) and
+    unless the caller can reach a shop of that company (403); else
     THE shop's GSTIN (org_validation.shop_gstin, the one answer every door
     reads: its own when its company holds it, else the company's
     registration for the shop's state); refused (422) when the company holds
@@ -1090,6 +1099,12 @@ def _bill_recipient(
     """
     gstin = (body_gstin or "").strip().upper() or None
     if db is None:
+        if not gstin:
+            _refuse_recipient(
+                "RECIPIENT_UNRESOLVED",
+                "Cannot tell which of our GST numbers this bill is for. "
+                "Nothing was recorded -- try again shortly.",
+            )
         return {"recipient_entity_id": None, "recipient_gstin": gstin}
 
     def _store(store_id) -> dict:
@@ -1127,6 +1142,30 @@ def _bill_recipient(
         )
         shop = {} if holder else _store(fallback_store_id)
         entity_id = (holder or {}).get("entity_id") or shop.get("entity_id")
+        if holder and current_user is not None:
+            # A typed number must not move credit onto a company the caller
+            # has no shop in (store_id=S2 is 403; so is S2's GSTIN typed).
+            from ..dependencies import user_store_scope
+
+            cross, allowed = user_store_scope(current_user)
+            if not cross:
+                reach = False
+                try:
+                    reach = any(
+                        d.get("store_id") in allowed
+                        for d in db.get_collection("stores").find(
+                            {"entity_id": entity_id}, {"_id": 0, "store_id": 1}
+                        )
+                        if isinstance(d, dict)
+                    )
+                except Exception:
+                    reach = False
+                if not reach:
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"No access to any shop of {holder.get('name') or entity_id}, "
+                        f"the company that holds {gstin}.",
+                    )
     # No "the only company is this shop's" guess: a shop with no entity_id has
     # no GSTIN by org_validation.shop_gstin, the answer every other reader
     # (GSTR-3B scope, Cross-Check, RTV note, transfer) gives, so it is refused.
@@ -1135,7 +1174,16 @@ def _bill_recipient(
     )
     if not entities:
         # No company master at all (a fresh install): nothing to scope by and
-        # nothing to check a typed number against.
+        # nothing to check a typed number against -- but a bill must still
+        # name a GSTIN: with none typed the head would be a guess.
+        if not gstin:
+            _refuse_recipient(
+                "RECIPIENT_NO_COMPANY_MASTER",
+                "There is no company master, so IMS cannot tell which of our "
+                "GST numbers this bill is for. Add the company and its GSTIN "
+                "(Settings, companies)"
+                + (", or type our GSTIN as printed on the supplier's bill." if gstin_box else "."),
+            )
         return {"recipient_entity_id": entity_id, "recipient_gstin": gstin}
     if entity is None:
         _refuse_recipient(
@@ -1169,6 +1217,20 @@ def _bill_recipient(
                 + (f" ({', '.join(sorted(held))})" if held else "")
                 + ". Check our GSTIN as printed on the supplier's bill.",
             )
+        if receipt_store_id:
+            # The receiving shop decides the registration; a typed number can only
+            # agree with it.
+            shop_reg = ov.shop_gstin(entity, shop)
+            if gstin != shop_reg:
+                _refuse_recipient(
+                    "RECIPIENT_GSTIN_NOT_RECEIPT_SHOP",
+                    f"{gstin} is not the GST number of the shop that received the "
+                    f"goods ({receipt_store_id}"
+                    + (f", {shop_reg}" if shop_reg else ", which has none")
+                    + "). The credit goes to the receiving shop's registration; "
+                    "clear the Recipient GSTIN box, or pick the shop the goods "
+                    "were received at.",
+                )
         return {"recipient_entity_id": entity_id, "recipient_gstin": gstin}
     if not held:
         # Booked with no GSTIN, the bill counted on EVERY return of the
@@ -1204,7 +1266,7 @@ def _bill_recipient(
             why
             + (
                 ", or type our GSTIN as printed on the supplier's bill."
-                if gstin_box
+                if gstin_box and not receipt_store_id
                 else ", then record the bill again."
             ),
         )
@@ -1241,6 +1303,7 @@ def _bill_math(db, vendor, body, grn_doc, current_user):
         receipt_store,
         body.recipient_gstin,
         None if receipt_store else validate_store_access(body.store_id, current_user),
+        current_user=current_user,
     )
     computed = pinv.compute_invoice(
         [ln.model_dump() for ln in body.lines],
@@ -1803,7 +1866,10 @@ async def create_purchase_invoice(
             else body.bill_kind
         ),
         "tds": round(body.tds, 2),
-        "itc_eligible": bool(body.itc_eligible),
+        # Round 12 item 6: no valid supplier GSTIN on the invoice, no input
+        # credit -- decided here, once, so the register, GSTR-3B and the
+        # Cross-Check all read it from the stored flag.
+        "itc_eligible": bool(body.itc_eligible) and ov.has_valid_gstin(supplier_gstin),
         "reverse_charge": bool(body.reverse_charge),
         "outstanding": total,
         "status": "OUTSTANDING",
@@ -2045,6 +2111,7 @@ async def preview_purchase_invoice(
     )
     return {
         "vendor_gstin": supplier_gstin,
+        "itc_eligible": ov.has_valid_gstin(supplier_gstin),
         "recipient_entity_id": recipient.get("recipient_entity_id"),
         "recipient_gstin": recipient.get("recipient_gstin"),
         "supplier_state": computed["supplier_state"],
