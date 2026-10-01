@@ -17,6 +17,17 @@ describe('legacyTabTarget', () => {
     expect(legacyTabTarget('?tab=forecast')).toBe('/reports/forecast');
   });
 
+  // Wave 6 B13 split the forecast page into /reports/forecast (category, the
+  // index) + /seasonal + /reorder. The panels never had a ?tab= id of their
+  // own, so an old link still lands where it did: ?tab=forecast on the
+  // category panel (the index route). The panel names are not tab ids and
+  // fall back to Sales like any other unknown value - nothing invented.
+  it('after the panel split, ?tab=forecast is still the category (index) panel; panel names are not tab ids', () => {
+    expect(legacyTabTarget('?tab=forecast')).toBe('/reports/forecast');
+    expect(legacyTabTarget('?tab=seasonal')).toBe('/reports/sales');
+    expect(legacyTabTarget('?tab=reorder')).toBe('/reports/sales');
+  });
+
   it('falls back to sales for a bare /reports and for tabs that never existed', () => {
     expect(legacyTabTarget('')).toBe('/reports/sales');
     // ModuleContext still links these; they landed on Sales before, and do now.
