@@ -757,3 +757,135 @@ def test_f63_supplier_balances_obey_the_shop_asked_for(world):
     assert balances(ADMIN, DHN) == (200, {VA: 5540.0, VB: 0.0})
     assert balances(ACCT_PUNE, PUN) == (200, {VA: 0.0, VB: 2240.0})
     assert balances(ACCT_PUNE, DHN)[0] == 403
+
+
+# ============================================================================
+# Round 3 (review 2026-10-01): a rebate credit note and a post-dated cheque
+# ============================================================================
+
+V_REB = "V-REB"  # bill R1 + the rebate engine's own credit-note shape
+V_PDC = "V-PDC"  # bill PD1 paid by a cheque dated 15 November
+
+
+def _seed_round3(db) -> None:
+    """The base world plus two suppliers.
+
+      * V-REB (Dhanbad): bill R1 1 Sep 1000; the credit note rebate_engine.post
+        writes -- no 'date', no bill_id, an offset-aware UTC created_at.
+        Ledger: 1000 - 100 = 900.
+      * V-PDC (Pune): bill PD1 20 Sep 5000; a payment of 5000 against it dated
+        15 Nov (keyed on 1 Oct). Until 15 Nov we still owe 5000.
+    """
+    _seed(db)
+    db["vendors"].insert_many([
+        {"vendor_id": V_REB, "legal_name": "Rebate Frames", "trade_name": "Rebate Frames"},
+        {"vendor_id": V_PDC, "legal_name": "Cheque Lens Co", "trade_name": "Cheque Lens Co"},
+    ])
+    db["vendor_bills"].insert_many([
+        {"bill_id": "R1", "vendor_id": V_REB, "store_id": DHN, "bill_number": "R1",
+         "bill_date": "2026-09-01", "due_date": "2026-10-01", "total_amount": 1000.0,
+         "total": 1000.0, "status": "OUTSTANDING"},
+        {"bill_id": "PD1", "vendor_id": V_PDC, "store_id": PUN, "bill_number": "PD1",
+         "bill_date": "2026-09-20", "due_date": "2026-10-20", "total_amount": 5000.0,
+         "total": 5000.0, "status": "OUTSTANDING"},
+    ])
+    # rebate_engine.post's credit-note mirror, field for field.
+    db["vendor_debit_notes"].insert_one({
+        "_id": "VCN-REB-1", "credit_note_number": "VCN-REB-1", "vendor_id": V_REB,
+        "amount": 100.0, "amount_paise": 10000, "bill_id": None, "source": "VOLUME_REBATE",
+        "rebate_id": "RB-1", "created_by": "u-admin", "created_at": "2026-09-20T10:00:00.123456+00:00",
+    })
+    db["vendor_payments"].insert_one({
+        "payment_id": "P-PDC", "vendor_id": V_PDC, "bill_id": "PD1", "amount": 5000.0,
+        "tds_amount": 0.0, "mode": "CHEQUE", "payment_date": "2026-11-15",
+        "created_at": "2026-10-01T05:00:00",
+    })
+
+
+@pytest.fixture(scope="module")
+def round3_db():
+    yield from _fresh_db(_seed_round3)
+
+
+def _today(monkeypatch, day: str):
+    """Pin the IST 'today' every payable figure is struck on."""
+    from datetime import datetime as _dt
+
+    from api.services import ap_engine as _ape
+
+    monkeypatch.setattr(_ape, "now_ist_naive", lambda: _dt.fromisoformat(day + "T12:00:00"))
+
+
+@pytest.fixture
+def round3(round3_db, monkeypatch):
+    _today(monkeypatch, "2026-10-01")
+    return _make_world(round3_db, monkeypatch)
+
+
+def test_r3_a_rebate_credit_note_does_not_crash_the_report(round3):
+    """The rebate engine's aware created_at sorted beside naive bill dates
+    raised TypeError: the whole report (and the ledger) answered 500."""
+    resp = round3.get(REPORT, ADMIN, month="2026-09")
+    assert resp.status_code == 200, resp.text
+    row = _rows(resp.json())[V_REB]
+    assert (row["billed"], row["owed"]) == (1000.0, 900.0), row
+    led = round3.get(f"/vendors/{V_REB}/ledger", ADMIN)
+    assert led.status_code == 200, led.text
+    assert led.json()["ledger"]["closing_balance"] == pytest.approx(900.0)
+    vp = round3.get("/finance/vendor-payments", ADMIN)
+    assert vp.status_code == 200, vp.text
+    assert {r["vendor_id"]: r["balance"] for r in vp.json()}[V_REB] == pytest.approx(900.0)
+
+
+def test_r3_a_post_dated_cheque_is_unpaid_on_every_screen_until_its_day(round3, monkeypatch):
+    """One as-of day (month end, clamped to today): on 1 Oct the 15 Nov cheque
+    has not been paid -- the October report, Cash Flow, AP aging, the Suppliers
+    card and the ledger all owe Cheque Lens Co 5000."""
+    def everywhere(w, month):
+        aging = {v["vendor_id"]: v["net_payable"] for v in w.get("/vendors/ap-aging", ADMIN).json()["vendors"]}
+        vp = {r["vendor_id"]: r["balance"] for r in w.get("/finance/vendor-payments", ADMIN).json()}
+        return {
+            "report": _rows(_report(w, ADMIN, month=month))[V_PDC]["owed"],
+            "ap_aging": aging.get(V_PDC, 0.0),
+            "vendor_payments": vp[V_PDC],
+            "ledger": w.get(f"/vendors/{V_PDC}/ledger", ADMIN).json()["ledger"]["closing_balance"],
+        }
+
+    figures = everywhere(round3, "2026-10")
+    _open(set(figures.values()) == {5000.0}, f"F56: a post-dated cheque splits 'we owe': {figures}")
+    totals = _payables_everywhere_r3(round3, "2026-10")
+    _open(len(set(totals.values())) == 1, f"F56: all-store 'we owe' differs by screen: {totals}")
+
+    # On 20 Nov the cheque has been paid: every screen says 0, and September's
+    # report (as at 30 Sep) still says 5000 was owed then.
+    _today(monkeypatch, "2026-11-20")
+    figures = everywhere(round3, "2026-11")
+    _open(set(figures.values()) == {0.0}, f"F56: after the cheque's day: {figures}")
+    assert _rows(_report(round3, ADMIN, month="2026-09"))[V_PDC]["owed"] == pytest.approx(5000.0)
+
+
+def _payables_everywhere_r3(w, month) -> dict:
+    dash = w.get("/finance/owner-dashboard", ADMIN).json()["payables"]
+    aging = w.get("/vendors/ap-aging", ADMIN).json()["totals"]
+    vp = w.get("/finance/vendor-payments", ADMIN).json()
+    return {
+        "cash_flow": dash["total"],
+        "ap_aging": aging["net_payable"],
+        "vendor_payments": round(sum(r["balance"] for r in vp), 2),
+        "report": _report(w, ADMIN, month=month)["totals"]["owed"],
+    }
+
+
+def test_r3_parse_date_is_always_naive_ist():
+    from datetime import datetime as _dt
+
+    from api.services import ap_engine as _ape
+
+    assert _ape.parse_date("2026-09-20T20:00:00+00:00") == _dt(2026, 9, 21, 1, 30)
+    assert _ape.parse_date("2026-09-20") == _dt(2026, 9, 20)
+    rows = _ape.build_ledger(
+        [{"bill_id": "B", "bill_date": "2026-09-01", "total_amount": 10}],
+        [],
+        [{"amount": 1, "created_at": "2026-09-02T00:00:00Z"}],
+    )
+    assert [r["type"] for r in rows["entries"]] == ["BILL", "DEBIT_NOTE"]

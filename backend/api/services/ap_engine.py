@@ -29,12 +29,14 @@ All amounts are floats rounded to 2 dp. Functions are defensive: missing or
 garbage fields coerce to 0 / are skipped so a malformed row never raises.
 """
 
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, timezone, date
 from typing import List, Optional, Dict
 
 # IST (TZ-P3): the as_of default must be the IST business day, not the UTC box
 # clock (00:00-05:30 IST would otherwise age bills against YESTERDAY).
 from api.utils.ist import now_ist_naive
+
+_IST = timezone(timedelta(hours=5, minutes=30))
 
 # --- TDS sections (rate %) -------------------------------------------------
 # Common sections an optical retailer hits when paying vendors / contractors.
@@ -112,10 +114,26 @@ def _f(v) -> float:
         return 0.0
 
 
+def _naive_ist(dt: datetime) -> datetime:
+    """An offset-aware instant as the naive IST wall clock; naive passes through.
+
+    Bill and payment dates are naive 'YYYY-MM-DD' (IST calendar), but some
+    writers stamp aware UTC strings (rebate_engine's credit note created_at).
+    Mixing the two in one sort or comparison raises TypeError, so every
+    parsed value leaves here naive, on the IST calendar the business uses.
+    """
+    if dt.tzinfo is None:
+        return dt
+    return dt.astimezone(_IST).replace(tzinfo=None)
+
+
 def parse_date(s) -> Optional[datetime]:
-    """Tolerant ISO parse for 'YYYY-MM-DD' or full ISO datetimes. None on junk."""
+    """Tolerant ISO parse for 'YYYY-MM-DD' or full ISO datetimes. None on junk.
+
+    Always naive (an aware value is converted to IST wall clock) so rows from
+    different writers can be sorted and compared together."""
     if isinstance(s, datetime):
-        return s
+        return _naive_ist(s)
     if not s or not isinstance(s, str):
         return None
     txt = s.strip()
@@ -123,7 +141,7 @@ def parse_date(s) -> Optional[datetime]:
         return None
     # Try full ISO first, then date-only.
     try:
-        return datetime.fromisoformat(txt.replace("Z", "+00:00"))
+        return _naive_ist(datetime.fromisoformat(txt.replace("Z", "+00:00")))
     except ValueError:
         pass
     try:
@@ -654,11 +672,30 @@ def _day(value) -> str:
     return dt.date().isoformat() if dt else ""
 
 
+def ledger_day(doc: dict) -> str:
+    """'YYYY-MM-DD' a ledger row is entered on -- the date build_ledger sorts
+    by: a bill's bill_date, a payment's payment_date, a note's date, else the
+    row's created_at ('' when undatable)."""
+    return _day(
+        doc.get("bill_date") or doc.get("payment_date") or doc.get("date") or doc.get("created_at")
+    )
+
+
+def as_of_day(as_of_iso: Optional[str] = None) -> str:
+    """THE as-of day every payable figure is struck on: the day asked for,
+    never later than today (IST); today when none is asked. A row dated after
+    it (a post-dated cheque, a bill keyed ahead) has not happened yet."""
+    today = now_ist_naive().date().isoformat()
+    asked = _day(as_of_iso) if as_of_iso else ""
+    return min(asked, today) if asked else today
+
+
 def supplier_ledger_rows(
     bills: List[dict],
     payments: List[dict],
     debit_notes: List[dict],
     store_id: Optional[str] = None,
+    as_of: Optional[str] = None,
 ) -> tuple:
     """THE (bills, payments, debit notes) every 'what we owe our suppliers'
     figure is built from (F56/F63).
@@ -675,10 +712,20 @@ def supplier_ledger_rows(
        So the shops add up to the supplier ledger. A supplier that has never
        billed has no shop: its money counts under all stores only.
 
+    3. Only rows dated on or before the as-of day (as_of_day: the day asked
+       for, clamped to today) count; undated rows always count. So the
+       Purchases report for this month, Cash Flow, AP aging, the Suppliers
+       card and the vendor ledger strike 'we owe' on the same day.
+
     ponytail: money with no bill follows the supplier's latest bill, not a shop
     stamped on the payment; stamp store_id on payments if a supplier serving two
     shops is ever paid on account for one of them.
     """
+    cutoff = as_of_day(as_of)
+    bills, payments, debit_notes = (
+        [d for d in docs or [] if isinstance(d, dict) and ledger_day(d) <= cutoff]
+        for docs in (bills, payments, debit_notes)
+    )
     mirror = {
         b.get("bill_id")
         for b in bills or []
