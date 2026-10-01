@@ -612,26 +612,43 @@ def _units(n: int) -> str:
 
 
 def _describe_edit(old_items: list, new_items: list) -> list:
-    """What changed on the lines, in the words the timeline shows."""
-    old = {i.get("product_id"): i for i in old_items}
-    new = {i.get("product_id"): i for i in new_items}
+    """What changed on the lines, in the words the timeline shows. Empty means
+    the lines are as stored, which is how update_po knows an edit changed
+    nothing -- so every line is compared, not one per product: an order may
+    carry two lines of one product, and a change to either must count.
+
+    An unchanged line (same product, quantity and cost) is matched first; the
+    rest are paired with the next line of the same product, in order."""
+    def key(i):
+        return (i.get("product_id"), _qty(i.get("quantity")), float(i.get("unit_price") or 0))
+
+    def name(i):
+        return i.get("product_name") or i.get("sku") or i.get("product_id")
+
+    old_left = list(old_items)
+    new_left = []
+    for n in new_items:
+        same = next((o for o in old_left if key(o) == key(n)), None)
+        if same is None:
+            new_left.append(n)
+        else:
+            old_left.remove(same)
     out = []
-    for pid, n in new.items():
-        name = n.get("product_name") or n.get("sku") or pid
-        o = old.get(pid)
+    for n in new_left:
+        o = next((x for x in old_left if x.get("product_id") == n.get("product_id")), None)
         if o is None:
-            out.append(f"added {name} x{_qty(n.get('quantity'))}")
+            out.append(f"added {name(n)} x{_qty(n.get('quantity'))}")
             continue
+        old_left.remove(o)
         old_qty, new_qty = _qty(o.get("quantity")), _qty(n.get("quantity"))
         if old_qty != new_qty:
-            out.append(f"{name}: qty {old_qty} -> {new_qty}")
+            out.append(f"{name(n)}: qty {old_qty} -> {new_qty}")
         old_price = float(o.get("unit_price") or 0)
         new_price = float(n.get("unit_price") or 0)
         if old_price != new_price:
-            out.append(f"{name}: cost Rs {old_price:g} -> Rs {new_price:g}")
-    for pid, o in old.items():
-        if pid not in new:
-            out.append(f"removed {o.get('product_name') or o.get('sku') or pid}")
+            out.append(f"{name(n)}: cost Rs {old_price:g} -> Rs {new_price:g}")
+    for o in old_left:
+        out.append(f"removed {name(o)} x{_qty(o.get('quantity'))}")
     return out
 
 

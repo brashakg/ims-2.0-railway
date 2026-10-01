@@ -232,6 +232,47 @@ def test_edit_refused_once_not_a_draft(monkeypatch, status):
     assert repo.updates == [] and audit.rows == []
 
 
+def _two_p1_lines():
+    return _po(items=[_line("P1", "Carrera CA8895", 2, 1000), _line("P1", "Carrera CA8895", 3, 1000)])
+
+
+def _p1(qty, price):
+    return {"product_id": "P1", "product_name": "Carrera CA8895", "sku": "P1",
+            "quantity": qty, "unit_price": price, "gst_rate": 5}
+
+
+@pytest.mark.parametrize(
+    "new_lines, stored, words",
+    [
+        # Change the FIRST of two lines of one product.
+        ([_p1(5, 900), _p1(3, 1000)], [(5, 900), (3, 1000)], ["qty 2 -> 5", "Rs 1000 -> Rs 900"]),
+        # Remove one of them: the order must not keep ordering 5.
+        ([_p1(3, 1000)], [(3, 1000)], ["removed Carrera CA8895 x2"]),
+        # Add a second line of a product already on the draft.
+        ([_p1(2, 1000), _p1(3, 1000), _p1(2, 1000)], [(2, 1000), (3, 1000), (2, 1000)],
+         ["added Carrera CA8895 x2"]),
+    ],
+)
+def test_an_edit_to_one_of_two_lines_of_a_product_is_saved(monkeypatch, new_lines, stored, words):
+    """Review round 7: the change test compared one line per product, so an
+    edit to any but the last line of a product was answered 200 'saved' with
+    no write, no timeline entry and no audit row."""
+    repo, audit = _wire(monkeypatch, _two_p1_lines())
+    _run(v.update_po("PO1", _edit_body(new_lines), _user()))
+    doc = repo.pos["PO1"]
+    assert [(i["quantity"], i["unit_price"]) for i in doc["items"]] == stored
+    detail = doc["history"][-1]["detail"]
+    for w in words:
+        assert w in detail
+    assert [r["action"] for r in audit.rows] == ["purchase_order.edit"]
+
+
+def test_an_edit_that_only_reorders_the_lines_changes_nothing(monkeypatch):
+    repo, audit = _wire(monkeypatch, _two_p1_lines())
+    _run(v.update_po("PO1", _edit_body([_p1(3, 1000), _p1(2, 1000)]), _user()))
+    assert repo.updates == [] and audit.rows == []
+
+
 def test_edit_cross_store_404_no_mutation(monkeypatch):
     repo, _ = _wire(monkeypatch, _po(store="S2"))
     body = _edit_body(
