@@ -227,7 +227,7 @@ def _takes_serialized_stock(line: dict) -> bool:
 
 
 def _assert_serialized_stock_available(
-    items_data: List[dict], store_id: Optional[str], *, quiet: bool = False
+    items_data: List[dict], store_id: Optional[str]
 ) -> None:
     """BUG-097: reject order creation (409) when a SERIALIZED non-lens line does
     not have enough AVAILABLE units in stock_units -- closes the non-lens oversell
@@ -249,10 +249,6 @@ def _assert_serialized_stock_available(
     the silent oversell, but check-then-act, so two highly-concurrent orders for
     the last unit can still both pass. The atomic guards (claim_one_available /
     the now-guarded mark_sold) are what actually make the WRITE safe.
-
-    ``quiet``: GET /inventory/sellable asks this guard what it would sell (F46).
-    The decision is the same; only the expired-units count and its WARNING,
-    which belong to a real refusal, are skipped.
     """
     if not store_id or not items_data:
         return
@@ -296,7 +292,7 @@ def _assert_serialized_stock_available(
             # message. Fail-soft: an unsupported/old repo just omits the hint.
             expired = 0
             try:
-                counter = None if quiet else getattr(stock_repo, "count_expired", None)
+                counter = getattr(stock_repo, "count_expired", None)
                 if callable(counter):
                     expired = int(counter(pid, store_id) or 0)
             except Exception:  # noqa: BLE001

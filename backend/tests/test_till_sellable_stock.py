@@ -7,8 +7,8 @@ rule. It ASKS ``orders/stock._assert_serialized_stock_available`` for the most
 one line may sell: find_available only picks the first question (n + 1, then
 n); any other answer is searched for, so the figure is always a quantity the
 guard let through with one more refused -- or None when it never gates the
-line. The guard is touched only by a ``quiet`` flag that skips its expired-unit
-count and WARNING for these asks. These pin
+line. The guard is not touched (orders/ is byte-identical to main); only its
+log is muted, for the ask alone. These pin
 
   * the figure is the guard's under ANY monotone rule, not just today's (a
     re-read of find_available fails ``test_the_tile_follows_any_guard_rule``),
@@ -21,7 +21,8 @@ count and WARNING for these asks. These pin
   * per-id counts, None for lines the guard does not gate (lens / service item
     types, virtual ids, a failing stock lookup), SKU references resolved the way
     order-create resolves them (and the canonical id returned, so the cart adds
-    lines up the way the guard does), a quiet guard, and a bounded id list.
+    lines up the way the guard does), a quiet ask, and a bounded id list;
+  * the grid stays fast: the hint makes a tile two asks, never a search.
 """
 
 from __future__ import annotations
@@ -169,7 +170,7 @@ def _guard_selling(limit):
     """A stand-in sale guard that lets a line of up to `limit` through (None:
     never gates) -- any monotone rule the real guard might grow into."""
 
-    def guard(items, store_id, *, quiet=False):
+    def guard(items, store_id):
         if limit is not None and items[0]["quantity"] > limit:
             raise HTTPException(status_code=409, detail="Insufficient stock")
 
@@ -230,10 +231,10 @@ def test_stock_moving_mid_call_still_gets_the_guards_number(client, staff_header
     assert r.json()["sellable"] == {"FR-1": then}
 
 
-def test_asking_the_guard_logs_nothing_and_counts_no_expired_units(client, staff_headers, till, caplog):
+def test_asking_the_guard_logs_nothing(client, staff_headers, till, caplog):
     """A refused ask is not a refused sale: a contact lens with expired boxes
     and none sellable, polled all day by a till, logs no '[STOCK] expired'
-    WARNING and runs no count_expired. A real sale refusal still does both."""
+    WARNING. A real sale refusal still logs it and still names the expiry."""
     import logging
 
     from api.routers.orders.stock import _assert_serialized_stock_available
@@ -242,7 +243,7 @@ def test_asking_the_guard_logs_nothing_and_counts_no_expired_units(client, staff
     with caplog.at_level(logging.WARNING):
         r = _get(client, staff_headers, product_ids="CL-1", item_types="CONTACT_LENS")
     assert r.json()["sellable"] == {"CL-1": 0}
-    assert repo.expired_asks == 0
+    assert repo.expired_asks  # the guard ran as it is; only its log was muted
     assert not [rec for rec in caplog.records if "expired" in rec.getMessage()]
 
     with caplog.at_level(logging.WARNING), pytest.raises(HTTPException) as exc:
@@ -251,6 +252,28 @@ def test_asking_the_guard_logs_nothing_and_counts_no_expired_units(client, staff
         )
     assert "PAST THEIR EXPIRY" in exc.value.detail
     assert [rec for rec in caplog.records if "expired unit(s) held back" in rec.getMessage()]
+
+
+@pytest.mark.parametrize("available", [8, 1, 0])
+def test_a_tile_is_two_asks_of_the_guard_not_a_search(client, staff_headers, till, monkeypatch, available):
+    """The grid stays fast: find_available's hint makes the usual answer n + 1
+    refused and n let through -- two asks, ~4 reads. Ignore the hint and a tile
+    with 8 on the shelf costs ~22 asks (~44 reads): ~1,000 reads per 24-tile
+    call, every 30 s, per till."""
+    from api.routers.orders import stock as guard_mod
+
+    real = guard_mod._assert_serialized_stock_available
+    asks = []
+
+    def counting(items, store_id):
+        asks.append(items[0]["quantity"])
+        return real(items, store_id)
+
+    monkeypatch.setattr(guard_mod, "_assert_serialized_stock_available", counting)
+    till["repo"] = _Stock({("FR-1", STORE): {"total": 9, "available": available}})
+    r = _get(client, staff_headers, product_ids="FR-1", item_types="FRAME")
+    assert r.json()["sellable"] == {"FR-1": available}
+    assert len(asks) <= 2, asks
 
 
 @pytest.mark.parametrize(
