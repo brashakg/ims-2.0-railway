@@ -5,6 +5,7 @@ from ._shared import (
     HTTPException,
     Optional,
     Query,
+    _AP_ROLES,
     _get_db,
     ap_engine,
     datetime,
@@ -30,7 +31,7 @@ async def get_tds_threshold_status(
         None,
         description="Financial year start date (YYYY-MM-DD); defaults to current FY 1-Apr",
     ),
-    current_user: dict = Depends(require_roles("ADMIN", "ACCOUNTANT")),
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
 ):
     """FIN-11: Check whether TDS applies on a vendor payment given cumulative
     spend to that vendor in the current financial year.
@@ -114,7 +115,7 @@ async def export_26q(
         le=4,
         description="Quarter (1-4). If omitted, returns all quarters of the FY.",
     ),
-    current_user: dict = Depends(require_roles("ADMIN", "ACCOUNTANT")),
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
 ):
     """FIN-11: Export TDS deduction data for quarterly 26Q (TDS on payments)
     and 27EQ (TCS under 206C) returns.

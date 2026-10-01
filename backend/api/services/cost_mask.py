@@ -21,8 +21,11 @@ Role policy (DECISIONS sec 9, owner rulings 2026-09-28 / D7 / 2026-09-29):
     stay with SUPERADMIN / ADMIN / ACCOUNTANT.
   * Supplier payments (context="payables": bills, payments, balances, per
     vendor AND in total -- owner ruling 2026-09-29) -- the same accounts roles,
-    AP_ROLES. The vendor AP gates ARE that tuple and the finance reads of the
-    same money ask can_see_cost(user, "payables").
+    AP_ROLES. The vendor AP and TDS gates ARE that tuple, the finance reads of
+    the same money (owner dashboard, forecast, survival, bank statements,
+    ITC / GST / Tally via finance _require_finance_admin, vendor-payments,
+    the cash-flow total, vendor rebates) ask can_see_cost(user, "payables"),
+    and their rbac_policy rows ARE rbac_policy._core.ACCOUNTS, built from it.
   * Counter roles (SALES_*, CASHIER, OPTOMETRIST, WORKSHOP_STAFF) see cost in
     no context (audit F46/F60, owner ruling D7). A router never keeps its own
     cost role set: it asks can_see_cost / mask_cost here (a guard test in
@@ -35,11 +38,11 @@ from typing import Dict, List
 
 # The accounts roles. Defined ONCE, here: they see cost + margin, and they
 # alone see supplier payments -- the vendor ledger / bills / payments / debit
-# notes / ap-aging, the purchase-invoice and recon books, vendor rebates
-# (routers/vendors/_shared._AP_ROLES and the others ARE this tuple), plus
-# /finance/vendor-payments and the cash-flow supplier-payments total (both ask
-# can_see_cost(user, "payables")). SUPERADMIN passes every require_roles gate
-# on its own.
+# notes / ap-aging / TDS, the purchase-invoice and recon books (their
+# require_roles gates ARE this tuple), plus every finance read of the same
+# money and vendor rebates (they ask can_see_cost(user, "payables")); the
+# rbac_policy rows for all of them are rbac_policy._core.ACCOUNTS, built from
+# this tuple. SUPERADMIN passes every gate on its own.
 AP_ROLES = ("ADMIN", "ACCOUNTANT")
 COST_VISIBLE_ROLES = {"SUPERADMIN", *AP_ROLES}
 # The purchase roles: who buys, receives and pays suppliers, so who sees what
