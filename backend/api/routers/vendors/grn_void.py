@@ -9,6 +9,7 @@ from ._shared import (
     datetime,
     get_audit_repository,
     get_grn_repository,
+    get_purchase_order_repository,
     get_stock_repository,
     logger,
     require_roles,
@@ -23,6 +24,46 @@ from .grn_accept_lock import (
     _received_on,
     _release_grn_accept_claim,
 )
+
+
+def _reopen_po_if_nothing_received(grn_repo, grn) -> None:
+    """A held receipt's accept moved its PO to PARTIALLY_RECEIVED with nothing
+    on the shelf. Voided, and with no other live receipt on the order, nothing
+    was received: the order goes back to SENT, so it reads true and can be
+    cancelled again (cancel refuses a part-received order) -- the way out for
+    a draft whose box went back to the vendor (a draft on an open order is
+    never discarded, catalog DELETE). Fail-soft: the void stands."""
+    po_id = (grn or {}).get("po_id")
+    if not po_id:
+        return
+    try:
+        po_repo = get_purchase_order_repository()
+        if po_repo is None:
+            return
+        po = po_repo.find_by_id(po_id)
+        if not po or po.get("status") not in ("PARTIALLY_RECEIVED", "PARTIAL"):
+            return
+        live = grn_repo.find_many({"po_id": po_id, "status": {"$ne": "VOID"}}) or []
+        if live:
+            return
+        po_repo.update(
+            po_id,
+            {
+                "status": "SENT",
+                "items": [
+                    {**it, "received_qty": 0, "line_status": "OPEN"}
+                    for it in (po.get("items") or [])
+                ],
+                "received_qty_by_product": {},
+                "total_received_qty": 0,
+            },
+        )
+    except Exception:  # noqa: BLE001 - the void stands; the PO status is advisory
+        logger.warning(
+            "[VENDOR] PO %s: could not reopen after its receipt was voided",
+            po_id,
+            exc_info=True,
+        )
 
 
 @router.post("/grn/{grn_id}/void")
@@ -276,6 +317,8 @@ async def void_grn(
                 _complete_receipt_tasks(_db, grn_id, "The receipt was voided.")
         except Exception:  # noqa: BLE001 - a task problem never undoes the void
             pass
+
+        _reopen_po_if_nothing_received(grn_repo, grn)
 
         return {
             "message": "GRN voided",
