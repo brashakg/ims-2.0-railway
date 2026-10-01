@@ -23,6 +23,15 @@ from ._shared import (
 from .models import (
     StockAddRequest,
 )
+from pydantic import StrictInt
+
+from ._shared import BaseModel, Field, _STOCK_MANAGER_ROLES
+from ...services.reorder_policy import (
+    LEVELS_FIELD,
+    MAX_LEVEL,
+    STORE_KEY_PATTERN,
+    low_stock_rows,
+)
 from .helpers import (
     _get_db,
     _reject_stock_mint_on_online_store,
@@ -50,7 +59,9 @@ async def get_low_stock_alerts(
     if repo is None:
         return {"items": []}
 
-    items = repo.find_low_stock(active_store)
+    # THIS shop's low-stock list: each product judged by the shop's own level
+    # (reorder_policy.low_stock_rows, owner ruling D12).
+    items = low_stock_rows(get_product_repository(), repo, store_id=active_store)
 
     # Join the product masters in ONE $in query (fail-soft: a join failure
     # only means the flag stays False, i.e. legacy-enabled behaviour).
@@ -328,3 +339,70 @@ async def add_stock(
         }
 
     return {"stock_id": str(uuid.uuid4()), "barcode": generate_barcode("STR", "PRD")}
+
+
+class ReorderLevelWrite(BaseModel):
+    """One shop's reorder level. `level` is REQUIRED: null (or -1) clears it
+    (not set); only a real JSON integer is a level (true/false/'7' are 422)."""
+
+    store_id: str = Field(..., min_length=1, max_length=64, pattern=STORE_KEY_PATTERN)
+    level: Optional[StrictInt] = Field(..., ge=-1, le=MAX_LEVEL)
+
+
+@router.put("/reorder-levels/{product_id}")
+async def set_reorder_level(
+    product_id: str,
+    body: ReorderLevelWrite,
+    current_user: dict = Depends(require_roles(*_STOCK_MANAGER_ROLES)),
+):
+    """Set or clear ONE shop's reorder level for a product (owner ruling D12:
+    reorder points are per shop). A store / area manager sets their own shops
+    only (validate_store_access 403s any other); ADMIN / SUPERADMIN any shop.
+    The level is never pushed to Shopify, so the product is not marked dirty.
+    The response says `level: null` for not set, never -1."""
+    store = validate_store_access(body.store_id, current_user)
+    repo = get_product_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Products are unavailable")
+    # A level for a shop that does not exist would show up as a phantom shop in
+    # every all-shops list (owner digest, Jarvis).
+    db = _get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Shops are unavailable")
+    stores = db.get_collection("stores")
+    if stores.find_one({"store_id": store}, {"_id": 1}) is None:
+        raise HTTPException(status_code=404, detail="Shop not found")
+    level = body.level if body.level is not None and body.level >= 0 else None
+    key = f"{LEVELS_FIELD}.{store}"
+    coll = repo.collection
+    if level is not None:
+        # reorder_levels that is not an object (null, absent, a string, a list)
+        # cannot take a dotted $set: set the whole dict first, guarded so a real
+        # dict is never replaced; otherwise the dotted path.
+        res = coll.update_one(
+            {
+                "product_id": product_id,
+                "$or": [
+                    {LEVELS_FIELD: {"$not": {"$type": "object"}}},
+                    # $type matches an array that merely contains an object
+                    {LEVELS_FIELD: {"$type": "array"}},
+                ],
+            },
+            {"$set": {LEVELS_FIELD: {store: level}}},
+        )
+        if not res.matched_count:
+            res = coll.update_one({"product_id": product_id}, {"$set": {key: level}})
+        found = bool(res.matched_count)
+    else:
+        # Only a real dict can hold a level to clear; anything else is already
+        # not set (and cannot take a dotted $unset).
+        res = coll.update_one(
+            {"product_id": product_id, LEVELS_FIELD: {"$type": "object"}},
+            {"$unset": {key: ""}},
+        )
+        found = bool(res.matched_count) or (
+            coll.find_one({"product_id": product_id}, {"_id": 1}) is not None
+        )
+    if not found:
+        raise HTTPException(status_code=404, detail="Product not found")
+    return {"product_id": product_id, "store_id": store, "level": level}

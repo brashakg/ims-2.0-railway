@@ -34,7 +34,7 @@ export interface OwnerDigestExpanded {
     name?: string | null;
     sku?: string | null;
     qty: number;
-    reorder_point: number;
+    reorder_point: number | null; // null = not set
     store_id?: string | null;
   }>;
   pending_task_list: Array<{
