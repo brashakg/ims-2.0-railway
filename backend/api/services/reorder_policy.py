@@ -13,6 +13,10 @@ Semantics (single source of truth for every consumer):
                               once the backfill script (scripts/
                               backfill_reorder_quantity_minus1.py) or the
                               create door has stamped the field.
+  - is_active False        -> DISABLED whatever the quantity: a
+                              discontinued (soft-deleted) product is never
+                              suggested for reorder, even while units of it
+                              are still on a shelf (audit F48).
 
 Consumers (each guards with auto_reorder_disabled()):
   - api/routers/inventory.py      /inventory/alerts restock suggestions
@@ -35,13 +39,16 @@ from typing import Any
 def auto_reorder_disabled(product: Any) -> bool:
     """True when the product has EXPLICITLY disabled auto-reorder
     (reorder_quantity present and <= 0, e.g. the -1 default the create door
-    stamps). A missing/None/garbage value returns False (legacy behaviour)
-    so pre-backfill docs keep working until they are stamped.
+    stamps) or is discontinued (is_active False). A missing/None/garbage
+    quantity returns False (legacy behaviour) so pre-backfill docs keep
+    working until they are stamped.
 
     Accepts a `products` spine doc (top-level reorder_quantity) or a
     `catalog_products` doc (inventory.reorder_quantity)."""
     if not isinstance(product, dict):
         return False
+    if product.get("is_active") is False:
+        return True
     rq = product.get("reorder_quantity")
     if rq is None:
         inv = product.get("inventory")

@@ -128,8 +128,13 @@ def _build_stock_alert(
     # means auto-reorder is DISABLED for this product -- never emit a
     # REORDER_ALERT / restock suggestion for it. Informational alerts
     # (LOW_STOCK without a suggested qty, DEAD_STOCK, OVERSTOCK, FAST_MOVING)
-    # still apply. See api/services/reorder_policy.py.
+    # still apply. See api/services/reorder_policy.py, which also turns
+    # reorder off for a discontinued product (is_active False).
     reorder_suggestions_off = _reorder_disabled(product)
+    # A discontinued product still on the shelf is scored only as LOW_STOCK
+    # (no qty) or DEAD_STOCK: 'keep well stocked' or 'excess units' is advice
+    # for a product the counter can still sell (audit F48).
+    discontinued = product.get("is_active") is False
 
     velocity = (sold_30 or 0) / 30.0  # units/day from the last 30 days
     days_without_movement = (now - last_sale).days if last_sale else None
@@ -234,7 +239,7 @@ def _build_stock_alert(
         )
 
     # 4/5. OVERSTOCK vs FAST_MOVING (both require active selling)
-    if stock > 0 and velocity > 0:
+    if stock > 0 and velocity > 0 and not discontinued:
         months_of_stock = stock / (velocity * 30.0)
         if months_of_stock >= 6:
             excess = max(int(round(stock - velocity * 30 * 3)), 0)  # beyond 3mo cover
@@ -387,7 +392,8 @@ async def get_stock_alerts(
             pid = str(p.get("product_id") or "")
             # A discontinued (inactive) product is scored only while it still
             # has units here -- the low-stock list counts units whatever the
-            # catalogue flag, and the two screens must agree (audit F48).
+            # catalogue flag, and the two screens must agree (audit F48). It
+            # never gets a reorder: the policy treats it as reorder-off.
             if p.get("is_active") is False and pid not in on_hand:
                 continue
             units = on_hand.get(pid) or {}

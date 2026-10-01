@@ -183,3 +183,36 @@ def test_a_discontinued_frame_still_on_the_shelf_is_on_both_screens(monkeypatch)
     assert alert["productName"] == row["name"]
     assert alert["alertType"] == "LOW_STOCK"
     assert alert["currentStock"] == row["quantity"] == 3
+
+
+# ---------------------------------------------------------------------------
+# Verifier round 4: a discontinued product that is still selling
+# ---------------------------------------------------------------------------
+
+
+def test_a_discontinued_product_still_selling_is_never_a_reorder(monkeypatch):
+    """Both frames are discontinued (catalog soft-delete: the counter can no
+    longer sell them) but sold well this month. The Aviator (3 left, reorder
+    qty 5) was 'REORDER_ALERT ~4 days of stock left - reorder 16 units'; the
+    Wayfarer (30 left) was 'FAST_MOVING - keep well stocked'. Reorder is off
+    for a discontinued product, so the Aviator is informational LOW_STOCK with
+    no order qty, the Wayfarer says nothing, and the low-stock list flags the
+    Aviator as reorder-off too."""
+    products = [
+        {**_PRODUCTS[0], "is_active": False, "reorder_quantity": 5},
+        {**_PRODUCTS[1], "is_active": False, "reorder_quantity": 5},
+    ]
+    db = _wire(monkeypatch, units=_units("P-AV", 3) + _units("P-WAY", 30), products=products)
+    db.orders.insert_many([
+        {
+            "status": "DELIVERED", "store_id": "S1", "created_at": _NOW - timedelta(days=d % 25 + 1),
+            "items": [{"barcode": "RB3025-GLD", "quantity": 1}, {"barcode": "RB2140", "quantity": 1}],
+        }
+        for d in range(20)
+    ])
+    (alert,) = _alerts()["alerts"]
+    assert alert["productName"] == "Ray-Ban RB3025 Aviator - Gold"
+    assert alert["alertType"] == "LOW_STOCK"
+    assert alert["recommendedOrder"] == 0 and alert["costImpact"] == 0
+    (row,) = _low()["items"]
+    assert row["auto_reorder_disabled"] is True
