@@ -319,8 +319,6 @@ class BaseRepository(ABC, Generic[T]):
         filter: Dict = None,
         skip: int = 0,
         limit: int = 100,
-        *,
-        word_fields: tuple = (),
     ) -> List[Dict]:
         """
         Tokenized text search across fields.
@@ -344,17 +342,12 @@ class BaseRepository(ABC, Generic[T]):
             filter: Additional filter
             skip / limit: pagination passthrough to find_many. Defaults match
                 find_many's own defaults so existing callers are unchanged.
-            word_fields: fields a token may match at the start of ANY word,
-                not only the start of the field -- for a composed text such
-                as the minted product name, where "aviator" or "gold" is
-                never the first word. Empty by default: existing callers
-                are unchanged.
 
         Returns:
             Matching documents
         """
         try:
-            query = self._search_query(text, fields, filter, word_fields)
+            query = self._search_query(text, fields, filter)
             return self.find_many(query, skip=skip, limit=limit)
         except Exception as e:
             print(f"Error searching {self.entity_name}s: {e}")
@@ -369,9 +362,7 @@ class BaseRepository(ABC, Generic[T]):
             print(f"Error counting {self.entity_name} search: {e}")
             return 0
 
-    def _search_query(
-        self, text: str, fields: List[str], filter: Dict = None, word_fields: tuple = ()
-    ) -> Dict:
+    def _search_query(self, text: str, fields: List[str], filter: Dict = None) -> Dict:
         """Build the tokenized-prefix search query search() executes. Shared
         with search_count so the list and its total can never drift."""
         import re
@@ -389,11 +380,7 @@ class BaseRepository(ABC, Generic[T]):
             # ^ prevents full scans and keeps the result semantics
             # (e.g., searching "ray" no longer matches "spray" or "primary").
             regex = {"$regex": "^" + re.escape(tok), "$options": "i"}
-            word = {"$regex": r"\b" + re.escape(tok), "$options": "i"}
-            and_clauses.append(
-                {"$or": [{field: regex} for field in fields]
-                 + [{field: word} for field in word_fields]}
-            )
+            and_clauses.append({"$or": [{field: regex} for field in fields]})
 
         query = {"$and": and_clauses}
         if filter:

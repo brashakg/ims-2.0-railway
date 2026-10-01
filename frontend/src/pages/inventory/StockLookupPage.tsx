@@ -1,17 +1,19 @@
 // ============================================================================
 // IMS 2.0 - Stock lookup (owner ruling D7b, 2026-09-29)
 // ============================================================================
-// READ-ONLY. Counter staff search a frame by model, name, brand, SKU or scan
-// its barcode and see how many are sellable at this shop, at every other shop
-// and on their way to each - every colour and eye size of the model. The
+// READ-ONLY. Counter staff search a frame by brand, model or SKU, or scan its
+// barcode, and see how many the till can sell at this shop, at every other
+// shop and on their way to each - every colour and eye size of the model. The
 // server sends MRP and selling price only (GET /inventory/lookup builds its
-// answer from an allow-list), so there is no cost to hide here.
+// answer from an allow-list), so there is no cost to hide here. The price
+// shown is the till's own (posPriceGuard), never a re-typed chain.
 
-import { useState, type FormEvent } from 'react';
+import { useRef, useState, type FormEvent } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Search, Loader2 } from 'lucide-react';
 import api from '../../services/api/client';
 import { apiDetailMessage } from '../../utils/errorHandler';
+import { posPriceGuard } from '../../components/pos/productIntake';
 
 interface ShopCount { store_id: string; store_name: string; available: number; in_transit: number }
 interface LookupItem {
@@ -22,10 +24,16 @@ interface LookupItem {
 interface LookupResult { store_id?: string; items: LookupItem[] }
 
 const rupees = (n?: number) => (n == null ? '-' : `₹${n.toLocaleString('en-IN')}`);
+/** What the till puts on the line; '-' where the till refuses the price. */
+const tillPrice = (it: LookupItem) => {
+  const g = posPriceGuard(it);
+  return g.ok ? rupees(g.finalPrice) : '-';
+};
 
 export default function StockLookupPage() {
   const [text, setText] = useState('');
   const [q, setQ] = useState('');
+  const input = useRef<HTMLInputElement>(null);
   const { data, isFetching, error } = useQuery({
     queryKey: ['inventory', 'lookup', q],
     queryFn: async () => (await api.get<LookupResult>('/inventory/lookup', { params: { q } })).data,
@@ -36,6 +44,9 @@ export default function StockLookupPage() {
   const submit = (e: FormEvent) => {
     e.preventDefault();
     setQ(text.trim());
+    // A scanner types into the focused box and presses Enter: select what is
+    // there so the next scan replaces it instead of being glued onto it.
+    input.current?.select();
   };
 
   const items = data?.items ?? [];
@@ -49,15 +60,16 @@ export default function StockLookupPage() {
     <div className="p-4 md:p-6 max-w-6xl mx-auto">
       <h1 className="text-xl font-semibold text-gray-900">Stock lookup</h1>
       <p className="text-sm text-gray-500 mb-4">
-        Search by model, name, brand or SKU, or scan the barcode. Shows what can be sold now at every shop.
+        Search by brand, model or SKU, or scan the barcode. Shows what the till can sell now at every shop.
       </p>
 
       <form onSubmit={submit} className="flex gap-2 mb-4" role="search">
         <input
+          ref={input}
           type="search"
           value={text}
           onChange={(e) => setText(e.target.value)}
-          placeholder="e.g. CA8895, Carrera aviator, or scan"
+          placeholder="e.g. CA8895, Carrera, or scan"
           aria-label="Search stock"
           className="input-field flex-1 min-w-0"
           autoFocus
@@ -102,7 +114,7 @@ export default function StockLookupPage() {
                     <td className="px-3 py-2">{it.color || '-'}</td>
                     <td className="px-3 py-2">{it.size || '-'}</td>
                     <td className="px-3 py-2 text-right whitespace-nowrap">{rupees(it.mrp)}</td>
-                    <td className="px-3 py-2 text-right whitespace-nowrap">{rupees(it.offer_price)}</td>
+                    <td className="px-3 py-2 text-right whitespace-nowrap">{tillPrice(it)}</td>
                     {shops.map((s) => {
                       const c = counts.get(s.store_id);
                       const n = c?.available ?? 0;
