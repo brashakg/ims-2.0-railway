@@ -171,7 +171,14 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/vendors/ap-aging",
         "allowed": ["ACCOUNTANT", "ADMIN"],
     },
-    {"method": "GET", "path": "/api/v1/vendors/grn", "allowed": "AUTHENTICATED"},
+    # F60: a GRN carries the supplier bill number / date + bill-scan id ->
+    # the receiving roles, store-scoped in the handler.
+    {
+        "method": "GET",
+        "path": "/api/v1/vendors/grn",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
     {
         "method": "POST",
         "path": "/api/v1/vendors/grn",
@@ -190,7 +197,8 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/vendors/grn/{grn_id}",
-        "allowed": "AUTHENTICATED",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
     },
     {
         "method": "POST",

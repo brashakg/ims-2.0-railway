@@ -124,7 +124,11 @@ class Gstr2bReconcileBody(BaseModel):
 
 
 def _book_rows_from_db(db) -> List[dict]:
-    """Pull all vendor bills + their vendor GSTIN, formatted for the reconciler."""
+    """Every vendor bill whose GST counts as input credit (the ONE rule the ITC
+    register uses, gst._itc_eligible_bill) + its vendor GSTIN, formatted for
+    the reconciler. A bill that claims no credit -- a walk-in "Bought without
+    PO" receipt's bill (D14), a 17(5)-blocked or draft bill -- is neither
+    "matched (claim)" nor "ITC at risk" on the GSTR-2B screen or its CSV."""
     gstin_by_vendor: Dict[str, str] = {}
     try:
         for v in db.get_collection("vendors").find(
@@ -136,6 +140,8 @@ def _book_rows_from_db(db) -> List[dict]:
     rows = []
     try:
         for b in db.get_collection("vendor_bills").find({}, {"_id": 0}):
+            if not _itc_eligible_bill(b):
+                continue
             rows.append(
                 {
                     "gstin": gstin_by_vendor.get(b.get("vendor_id")),

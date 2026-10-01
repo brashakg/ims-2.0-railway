@@ -1,5 +1,6 @@
 """Goods receipt list, document upload/download and duplicate detection."""
 
+from ...services.ap_engine import GRN_SUBTYPE_NO_PO
 from ._shared import (
     ALLOWED_MIME_TYPES,
     Depends,
@@ -18,6 +19,7 @@ from ._shared import (
     get_current_user,
     get_file_store,
     get_grn_repository,
+    get_vendor_repository,
     hashlib,
     io,
     require_roles,
@@ -47,9 +49,11 @@ async def list_grns(
     date_to: Optional[str] = Query(None, description="DC date <= (ISO)"),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
 ):
-    """List GRNs with filters (incl. F9 Delivery-Challan filters)."""
+    """List GRNs with filters (incl. F9 Delivery-Challan filters). F60: a GRN
+    carries the supplier's bill number / date and the bill-scan id, so only the
+    receiving roles read it (every screen that lists GRNs is a purchase screen)."""
     grn_repo = get_grn_repository()
     active_store = validate_store_access(store_id, current_user) or current_user.get(
         "active_store_id"
@@ -109,6 +113,10 @@ def _enrich_grn_names(grns: list) -> None:
             vid = g.get("vendor_id")
             if vid and not g.get("vendor_name") and str(vid) in vmap:
                 g["vendor_name"] = vmap[str(vid)]
+            # D14: a walk-in dealer bought from without a PO has no supplier
+            # record -- the name typed at receipt is the name.
+            if not g.get("vendor_name") and g.get("dealer_name"):
+                g["vendor_name"] = g["dealer_name"]
     except Exception:  # noqa: BLE001
         pass
 
@@ -290,6 +298,76 @@ def _find_duplicate_standard_grn(
         if r.get("grn_subtype") == GRN_SUBTYPE_DC:
             continue
         if _normalize_invoice_no(r.get("vendor_invoice_no")) == norm:
+            return r
+    return None
+
+
+def _find_duplicate_no_po_grn(
+    grn_repo, grn, store_id, photo_sha=None, exclude_grn_id=None
+):
+    """D14: a live "Bought without PO" receipt already holding this bill at
+    this store. It is the same bill when it has
+      * the same bill photo -- the same upload (a double-pressed post) or the
+        same bytes uploaded again (a retry after a page reload mints a new file
+        id; upload-doc stamps the sha256, which the receipt keeps), or
+      * the same seller's same bill number, however the seller was named: a
+        supplier picked from the list meets the same dealer typed by name
+        through its trade or legal name (names and numbers case/punctuation-
+        folded).
+    Indexed look-ups, never a capped scan, so a shop's long history cannot
+    hide a recent receipt. The atomic twin for the photo is the
+    uniq_nopo_bill_hash partial unique index. A VOIDed receipt frees its bill.
+    """
+    if grn_repo is None or grn.grn_subtype != GRN_SUBTYPE_NO_PO:
+        return None
+    live = {
+        "grn_subtype": GRN_SUBTYPE_NO_PO,
+        "store_id": store_id,
+        "status": {"$ne": "VOID"},
+    }
+    if exclude_grn_id:
+        live["grn_id"] = {"$ne": exclude_grn_id}
+    photo = str(grn.attachment_file_id or "").strip()
+    probes = []
+    if photo:
+        probes.append({"attachment_file_id": photo})
+    if photo_sha:
+        probes.append({"attachment_sha256": photo_sha})
+    for probe in probes:
+        hit = grn_repo.find_one({**live, **probe})
+        if hit:
+            return hit
+
+    norm = _normalize_invoice_no(grn.vendor_invoice_no)
+    if not norm:
+        return None
+    vendor_keys: dict = {}
+
+    def seller(vendor_id, dealer_name) -> set:
+        if vendor_id and vendor_id not in vendor_keys:
+            repo = get_vendor_repository()
+            v = (repo.find_by_id(vendor_id) if repo is not None else None) or {}
+            vendor_keys[vendor_id] = {
+                f"id:{vendor_id}",
+                _normalize_invoice_no(v.get("trade_name")),
+                _normalize_invoice_no(v.get("legal_name")),
+            }
+        keys = set(vendor_keys.get(vendor_id) or ()) | {
+            _normalize_invoice_no(dealer_name)
+        }
+        keys.discard("")
+        return keys
+
+    mine = seller(grn.vendor_id, grn.dealer_name)
+    # ponytail: the newest 200 walk-in receipts at this shop carrying this
+    # same bill number -- no shop holds more than that.
+    same_number = grn_repo.find_many(
+        {**live, "vendor_invoice_no_norm": norm},
+        sort=[("created_at", -1)],
+        limit=200,
+    )
+    for r in same_number or []:
+        if mine & seller(r.get("vendor_id"), r.get("dealer_name")):
             return r
     return None
 

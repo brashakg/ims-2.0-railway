@@ -5,6 +5,7 @@ from ._shared import (
     Field,
     List,
     Optional,
+    ap_engine,
     field_validator,
     model_validator,
     validate_vendor_gstin,
@@ -213,6 +214,15 @@ class GRNItemCreate(BaseModel):
     batch_code: Optional[str] = None
     lot_number: Optional[str] = None
     expiry_date: Optional[str] = None
+    # D14: what the shop paid per unit on a "Bought without PO" receipt -- the
+    # only place that cost exists (no PO to read it from). accept stamps it on
+    # every minted unit. Required there, and only kept there: a PO receipt is
+    # costed at the order's agreed price (GRNCreate drops it on other types).
+    # Finite (an Infinity minted units at cost inf and every receipt read then
+    # 500'd) and at most Rs 5 lakh a unit, so a slipped zero is refused rather
+    # than becoming the stock cost. ponytail: raise the cap if a single item
+    # bought over the counter ever really costs more.
+    unit_price: Optional[float] = Field(None, gt=0, le=500_000, allow_inf_nan=False)
 
     @field_validator("batch_code", "lot_number", "expiry_date", mode="before")
     @classmethod
@@ -257,7 +267,12 @@ class GRNItemCreate(BaseModel):
 # docs reads as STANDARD (backward-compatible).
 GRN_SUBTYPE_STANDARD = "STANDARD"
 GRN_SUBTYPE_DC = "DELIVERY_CHALLAN"
-_GRN_SUBTYPES = (GRN_SUBTYPE_STANDARD, GRN_SUBTYPE_DC)
+# D14 (owner 2026-09-29): goods bought from a local / walk-in dealer with no
+# PO. Supplier on file OR the dealer's name, a cost on every line, the bill
+# photo (same mandatory-document gate as STANDARD), bill number/date if any.
+# Its bill books no input tax credit (ap_engine.itc_eligible).
+GRN_SUBTYPE_NO_PO = ap_engine.GRN_SUBTYPE_NO_PO
+_GRN_SUBTYPES = (GRN_SUBTYPE_STANDARD, GRN_SUBTYPE_DC, GRN_SUBTYPE_NO_PO)
 
 
 class GRNCreate(BaseModel):
@@ -280,6 +295,8 @@ class GRNCreate(BaseModel):
     dc_date: Optional[str] = None
     # F9: the vendor a no-PO DC is for (a STANDARD GRN derives this from the PO).
     vendor_id: Optional[str] = None
+    # D14: a walk-in dealer with no supplier record, by name (NO_PO only).
+    dealer_name: Optional[str] = Field(None, max_length=120)
     # F-S3: mandatory goods-receipt document. The ops user (Superadmin/Admin/
     # Store Manager) physically receiving the stock MUST attach the vendor
     # invoice/challan image or PDF BEFORE the GRN can be created -- so the
@@ -306,12 +323,38 @@ class GRNCreate(BaseModel):
                   contract -- a standard GRN is always against a PO + invoice).
         DELIVERY_CHALLAN: dc_number + dc_date are required; po_id +
                   vendor_invoice_no are optional (they come later).
+        NO_PO (D14): no po_id; a supplier (vendor_id) or a dealer_name; a
+                  cost on every line. The bill number/date stay optional.
         """
+        if self.grn_subtype != GRN_SUBTYPE_NO_PO:
+            # A PO receipt is costed at the order's agreed price; a cost typed
+            # on its lines is not the receiver's to set (accept would prefer it).
+            self.dealer_name = None
+            for it in self.items:
+                it.unit_price = None
         if self.grn_subtype == GRN_SUBTYPE_DC:
             if not (self.dc_number and str(self.dc_number).strip()):
                 raise ValueError("dc_number is required for a Delivery Challan")
             if not (self.dc_date and str(self.dc_date).strip()):
                 raise ValueError("dc_date is required for a Delivery Challan")
+        elif self.grn_subtype == GRN_SUBTYPE_NO_PO:
+            if self.po_id and str(self.po_id).strip():
+                raise ValueError(
+                    "Goods bought without a PO name no purchase order - "
+                    "receive goods that have an order against that order"
+                )
+            self.dealer_name = (self.dealer_name or "").strip() or None
+            if not ((self.vendor_id or "").strip() or self.dealer_name):
+                raise ValueError(
+                    "Pick the supplier, or type the dealer's name, the goods "
+                    "were bought from"
+                )
+            no_cost = [n for n, it in enumerate(self.items, 1) if not it.unit_price]
+            if no_cost:
+                raise ValueError(
+                    "Enter the cost paid per unit on every line (missing on "
+                    f"line {', '.join(map(str, no_cost))})"
+                )
         else:
             if not (self.po_id and str(self.po_id).strip()):
                 raise ValueError("po_id is required for a standard GRN")

@@ -88,6 +88,20 @@ AGING_BUCKETS = ["current", "1_30", "31_60", "61_90", "90_plus"]
 BILL_KIND_GOODS = "GOODS"
 BILL_KIND_SERVICES = "SERVICES"
 
+# The way out for a goods bill that has no receipt to link, for BOTH doors.
+# A walk-in / local-dealer buy goes on a "Bought without PO" receipt, which
+# claims no input credit (D14) -- telling staff to log it as a Delivery
+# Challan, as these doors used to, booked full credit on it. Receiving is the
+# store manager's (owner 2026-09-28), so it says who logs the receipt.
+NO_RECEIPT_WAY_OUT = (
+    "If the goods were bought without a purchase order (a local or walk-in "
+    "dealer, a cash bill), ask the shop's store manager to receive them on the "
+    "Goods Receipt screen with 'Bought without PO' ticked (the dealer, each "
+    "item's cost and a photo of the bill), then bill against that receipt - "
+    "it claims no GST input credit. Goods a supplier delivered on a delivery "
+    "challan are logged there as a Delivery Challan instead."
+)
+
 
 def normalize_bill_kind(value):
     """None when absent/blank (a legacy client or stored row); the canonical
@@ -102,6 +116,22 @@ def normalize_bill_kind(value):
     if s in ("SERVICES", "SERVICE", "EXPENSE", "EXPENSES", "SERVICES_EXPENSES"):
         return BILL_KIND_SERVICES
     raise ValueError("bill_kind must be GOODS or SERVICES")
+
+
+# Owner ruling D14 (2026-09-29): goods bought from a local / walk-in dealer
+# without a purchase order arrive on a "Bought without PO" receipt, and a bill
+# booked against one claims NO input tax credit -- whatever the client sent.
+# BOTH bill doors (purchase_invoices.create_purchase_invoice and
+# vendors.create_vendor_bill) stamp itc_eligible through here, so every ITC
+# reader (the register, /gst/summary, GSTR-3B Table 4 -- all skip
+# itc_eligible False) leaves it out.
+GRN_SUBTYPE_NO_PO = "NO_PO"
+
+
+def itc_eligible(receipt: Optional[dict], requested=True) -> bool:
+    """The itc_eligible a bill against ``receipt`` (its GRN doc, or None) is
+    stored with."""
+    return bool(requested) and (receipt or {}).get("grn_subtype") != GRN_SUBTYPE_NO_PO
 
 
 def _f(v) -> float:

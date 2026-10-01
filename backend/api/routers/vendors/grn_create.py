@@ -12,7 +12,6 @@ from ._shared import (
     can_access_store_scoped,
     datetime,
     get_audit_repository,
-    get_current_user,
     get_file_store,
     get_grn_repository,
     get_purchase_order_repository,
@@ -21,6 +20,7 @@ from ._shared import (
     router,
     uuid,
 )
+from .grn import _find_duplicate_no_po_grn
 from .models import GRNCreate, GRN_SUBTYPE_DC
 from .numbering import (
     classify_grn_line_variance,
@@ -263,15 +263,22 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
     # admitted this hole ("_create_grn_impl has no duplicate guard for
     # STANDARD receipts"); this closes it for BOTH doors, since express
     # creates through this shared impl. A legitimately split delivery arrives
-    # with DIFFERENT invoice numbers per shipment and passes untouched.
+    # with DIFFERENT invoice numbers per shipment and passes untouched. A
+    # "Bought without PO" receipt from a walk-in dealer (no vendor_id) is
+    # matched by its bill photo or the dealer's bill number instead (D14).
+    # The photo's content hash (upload-doc stamps it) makes the same bill
+    # uploaded again -- a new file id, the same bytes -- the same bill.
+    photo_sha = None if is_dc else (_attachment_meta or {}).get("sha256")
     if not is_dc:
         dup = _find_duplicate_standard_grn(
             grn_repo, grn.po_id, vendor_id, grn.vendor_invoice_no
-        )
+        ) or _find_duplicate_no_po_grn(grn_repo, grn, store_id, photo_sha=photo_sha)
         if dup is not None:
             raise HTTPException(
                 status_code=409,
-                detail=_duplicate_grn_detail(dup, grn.vendor_invoice_no),
+                detail=_duplicate_grn_detail(
+                    dup, grn.vendor_invoice_no or "(no number) with this bill photo"
+                ),
             )
 
     # Ruling 14 -- THE TALLY. Every line of a PO-backed receipt must be ticked
@@ -346,6 +353,8 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
         "po_number": po.get("po_number") if po else None,
         "vendor_id": vendor_id,
         "vendor_name": po.get("vendor_name") if po else None,
+        # D14: the walk-in dealer of a "Bought without PO" receipt, by name.
+        "dealer_name": grn.dealer_name,
         "store_id": store_id,
         "vendor_invoice_no": grn.vendor_invoice_no,
         # Folded identity for the uniq_std_vendor_invoice_store partial unique
@@ -366,6 +375,8 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
         "attachment_file_id": None if is_dc else grn.attachment_file_id,
         "attachment_filename": None if is_dc else grn.attachment_filename,
         "attachment_mime": None if is_dc else grn.attachment_mime,
+        # D14: the bill photo's sha256 -- the uniq_nopo_bill_hash key.
+        "attachment_sha256": photo_sha,
         "items": item_docs,
         "total_received": total_received,
         "total_accepted": total_accepted,
@@ -433,13 +444,17 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
                     vendor_id,
                     grn.vendor_invoice_no,
                     exclude_grn_id=grn_id,
+                ) or _find_duplicate_no_po_grn(
+                    grn_repo, grn, store_id, photo_sha=photo_sha, exclude_grn_id=grn_id
                 )
             except Exception:  # noqa: BLE001
                 dup = None
             if dup is not None:
                 raise HTTPException(
                     status_code=409,
-                    detail=_duplicate_grn_detail(dup, grn.vendor_invoice_no),
+                    detail=_duplicate_grn_detail(
+                        dup, grn.vendor_invoice_no or "(no number) with this bill photo"
+                    ),
                 )
             raise HTTPException(status_code=500, detail="Failed to save goods receipt")
 
@@ -516,15 +531,19 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
 
 
 @router.get("/grn/{grn_id}")
-async def get_grn(grn_id: str, current_user: dict = Depends(get_current_user)):
-    """Get GRN details"""
+async def get_grn(
+    grn_id: str, current_user: dict = Depends(require_roles(*_VENDOR_ROLES))
+):
+    """Get GRN details. F60: receiving roles only (supplier bill number / date,
+    bill-scan id), and only for the caller's stores -- another store's GRN reads
+    as 404, exactly as its /document does."""
     grn_repo = get_grn_repository()
 
     if grn_repo is None:
         return {"grn_id": grn_id}
 
     grn = grn_repo.find_by_id(grn_id)
-    if not grn:
+    if not grn or not can_access_store_scoped(grn.get("store_id"), current_user):
         raise HTTPException(status_code=404, detail="GRN not found")
 
     _enrich_grn_names([grn])

@@ -815,6 +815,22 @@ def _run_match_for_invoice(db, po_id, grn_id, computed_lines, tolerance_pct):
             po = po_repo.find_by_id(po_id)
         if grn_id and grn_repo is not None:
             grn = grn_repo.find_by_id(grn_id)
+        # D14: a "Bought without PO" receipt is its own order. The bill is
+        # held to what was accepted and the cost the receiver recorded (the
+        # cost its units went on the shelf at); with no PO every line read
+        # "not on purchase order", whatever the bill said.
+        if po is None and (grn or {}).get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO:
+            po = {
+                "items": [
+                    {
+                        "product_id": gi.get("product_id"),
+                        "quantity": gi.get("accepted_qty"),
+                        "unit_price": gi.get("unit_price"),
+                    }
+                    for gi in grn.get("items") or []
+                    if isinstance(gi, dict)
+                ]
+            }
         # Need at least one comparison doc to make a meaningful verdict.
         if po is None and grn is None:
             return None
@@ -1354,6 +1370,20 @@ async def create_purchase_invoice(
     # single-GRN mirror of the DC path's mixed_vendors 409. DC-consolidated
     # invoices validate each linked DC separately below (via _load_linked_dcs),
     # so the single-GRN guard skips them.
+    #
+    # A bill is EITHER one goods receipt OR a set of Delivery Challans, never
+    # both: with both named, the receipt was never read -- not checked
+    # (ACCEPTED, vendor, over-billing) and not seen by the no-credit rule
+    # below, so a "Bought without PO" receipt booked full ITC (D14). No screen
+    # sends both (the DC draft carries no grn_id).
+    if body.grn_id and body.linked_dc_ids:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "A bill links one goods receipt or a set of Delivery "
+                "Challans, not both - book them as separate bills."
+            ),
+        )
     grn_doc = None
     if body.grn_id and not body.linked_dc_ids:
         grn_doc = _load_standard_grn(body.grn_id, expected_vendor_id=body.vendor_id)
@@ -1386,9 +1416,10 @@ async def create_purchase_invoice(
     # book -- software cannot read the carton.)
     #
     # A genuine no-order purchase (goods bought over the counter, no PO) has a
-    # way out the UI can actually WALK: the Goods Receipt screen's
-    # Delivery-Challan mode receives without a PO (vendor picker + product
-    # lines), and the receipt it posts is linkable from every billing door.
+    # way out the UI can actually WALK: the Goods Receipt screen's "Bought
+    # without PO" mode (dealer, cost per line, bill photo), whose receipt is
+    # linkable from every billing door and claims no input credit (D14). A
+    # supplier's delivery on a challan keeps the Delivery-Challan mode.
     if not body.grn_id and not body.linked_dc_ids:
         if (
             body.po_id
@@ -1402,11 +1433,7 @@ async def create_purchase_invoice(
                     "message": (
                         "Link the goods receipt for this bill before booking "
                         "it - the quantities have to be tallied before the "
-                        "purchase is final. If the goods arrived without a "
-                        "purchase order, log them as a Delivery Challan on "
-                        "the Goods Receipt screen (tick 'This is a Delivery "
-                        "Challan', pick the vendor, add what arrived), then "
-                        "bill against that receipt."
+                        "purchase is final. " + ap_engine.NO_RECEIPT_WAY_OUT
                     ),
                 },
             )
@@ -1644,7 +1671,8 @@ async def create_purchase_invoice(
             else body.bill_kind
         ),
         "tds": round(body.tds, 2),
-        "itc_eligible": bool(body.itc_eligible),
+        # D14: never on a bill for goods bought without a PO.
+        "itc_eligible": ap_engine.itc_eligible(grn_doc, body.itc_eligible),
         "reverse_charge": bool(body.reverse_charge),
         "outstanding": total,
         "status": "OUTSTANDING",

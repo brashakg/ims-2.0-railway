@@ -1112,9 +1112,9 @@ are the exact current gate (SUPERADMIN always implied).
 | `GET` | `/api/v1/vendors/` | AUTH |  |
 | `POST` | `/api/v1/vendors/` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `GET` | `/api/v1/vendors/ap-aging` | ADMIN, ACCOUNTANT |  |
-| `GET` | `/api/v1/vendors/grn` | AUTH |  |
+| `GET` | `/api/v1/vendors/grn` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
 | `POST` | `/api/v1/vendors/grn` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/vendors/grn/{grn_id}` | AUTH |  |
+| `GET` | `/api/v1/vendors/grn/{grn_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
 | `POST` | `/api/v1/vendors/grn/{grn_id}/accept` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `POST` | `/api/v1/vendors/grn/{grn_id}/escalate` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `GET` | `/api/v1/vendors/purchase-orders` | AUTH |  |

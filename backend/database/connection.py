@@ -803,6 +803,23 @@ class DatabaseConnection:
             name="uniq_std_vendor_invoice_store",
             background=True,
         )
+        # D14: one live "Bought without PO" receipt per bill photo per shop,
+        # keyed on the photo's sha256 (the same bytes uploaded again are the
+        # same bill) -- the atomic backstop for a walk-in dealer, who has no
+        # vendor_id for the index above (schemas.py uniq_nopo_bill_hash). New
+        # subtype, so no existing rows can block the build.
+        _idx(
+            "grns",
+            [("store_id", 1), ("attachment_sha256", 1)],
+            unique=True,
+            partialFilterExpression={
+                "grn_subtype": "NO_PO",
+                "attachment_sha256": {"$type": "string"},
+                "status": {"$in": ["PENDING", "PARTIALLY_ACCEPTED", "ACCEPTED"]},
+            },
+            name="uniq_nopo_bill_hash",
+            background=True,
+        )
 
         # Vendor bills / purchase invoices (AP + ITC). bill_id UNIQUE sparse;
         # (vendor_id, bill_number) is NON-unique on purpose -- the duplicate-

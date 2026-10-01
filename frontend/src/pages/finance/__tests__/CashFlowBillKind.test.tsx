@@ -176,4 +176,15 @@ describe('the goods/services declaration on the Record-Bill form', () => {
     });
     await screen.findByText(/Could not load this vendor/);
   });
+
+  it('no unbilled receipt: a walk-in buy is sent to "Bought without PO", not to a challan (D14)', async () => {
+    apis.vendorApApi.listReceipts.mockResolvedValue([]);
+    await openBillForm();
+    fireEvent.change(screen.getByDisplayValue('This bill is for…'), {
+      target: { value: 'GOODS' },
+    });
+    const hint = await screen.findByText(/No unbilled goods receipts/);
+    expect(hint).toHaveTextContent(/Bought without PO/);
+    expect(hint).not.toHaveTextContent(/Log them as a Delivery Challan/);
+  });
 });
