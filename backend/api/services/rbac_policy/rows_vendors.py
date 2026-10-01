@@ -146,13 +146,13 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/rtv-debit-notes/{debit_note_id}/print",
-        "allowed": "AUTHENTICATED",
+        "allowed": ACCOUNTS,
         "store_scoped": True,
     },
     {
         "method": "GET",
         "path": "/api/v1/rtv-debit-notes/{debit_note_id}/tally",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": ACCOUNTS,
         "store_scoped": True,
     },
     # --- /api/v1/vendors ---
@@ -444,10 +444,12 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/vendors/{vendor_id}",
         "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
+    # F60: bills / debit notes / ledger / payments are what the owner owes a
+    # vendor -> ACCOUNTANT/ADMIN, the same gate as /ap-aging (their aggregate).
     {
         "method": "GET",
         "path": "/api/v1/vendors/{vendor_id}/bills",
-        "allowed": "AUTHENTICATED",
+        "allowed": ACCOUNTS,
     },
     {
         "method": "POST",
@@ -457,27 +459,27 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/vendors/{vendor_id}/debit-notes",
-        "allowed": "AUTHENTICATED",
+        "allowed": ACCOUNTS,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendors/{vendor_id}/debit-notes",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendors/{vendor_id}/ledger",
-        "allowed": "AUTHENTICATED",
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendors/{vendor_id}/payments",
-        "allowed": "AUTHENTICATED",
+        "allowed": ACCOUNTS,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendors/{vendor_id}/payments",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "POST",

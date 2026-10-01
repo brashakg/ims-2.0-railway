@@ -157,7 +157,7 @@ class _DB:
 def _pay_db(debit_notes=None, rejected=2):
     return _DB(
         vendor_bills=[
-            {"bill_id": "B1", "bill_number": "INV-9", "grn_id": "G1", "vendor_id": "V1"}
+            {"bill_id": "B1", "bill_number": "INV-9", "grn_id": "G1", "vendor_id": "V1", "store_id": "S1"}
         ],
         grns=[
             {
@@ -189,6 +189,7 @@ def _dc_pay_db(debit_notes=None, rejected=2):
                 "grn_id": None,
                 "linked_dc_ids": ["DC1"],
                 "vendor_id": "V1",
+                "store_id": "S1",
             }
         ],
         grns=[
@@ -221,6 +222,7 @@ def _two_dc_pay_db(debit_notes=None):
                 "grn_id": None,
                 "linked_dc_ids": ["DC1", "DC2"],
                 "vendor_id": "V1",
+                "store_id": "S1",
             }
         ],
         grns=[
@@ -272,7 +274,10 @@ def _record_payment(db):
         )
         return asyncio.run(
             vendors_mod.create_vendor_payment(
-                "V1", body, {"user_id": "u1", "roles": ["ACCOUNTANT"]}
+                "V1",
+                body,
+                # The bill's own shop (F63: a bill elsewhere is a 404).
+                {"user_id": "u1", "roles": ["ACCOUNTANT"], "store_ids": ["S1"], "active_store_id": "S1"},
             )
         )
     finally:

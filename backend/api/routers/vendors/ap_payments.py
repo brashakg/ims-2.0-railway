@@ -3,13 +3,15 @@
 from ._shared import (
     Depends,
     HTTPException,
+    Optional,
+    Query,
     _AP_ROLES,
     _get_db,
     ap_engine,
     datetime,
-    get_current_user,
     get_vendor_repository,
     require_roles,
+    resolve_store_scope,
     router,
     uuid,
 )
@@ -20,6 +22,65 @@ from .ap_bills import (
     _recompute_bill_status,
     _rejected_goods_hold,
 )
+
+# The answer for a named bill that is not there for the caller -- the words
+# purchase_invoices._bill_in_scope_or_404 uses, so another shop's bill and a
+# bill that does not exist answer alike.
+_NO_BILL = "Purchase invoice not found"
+
+
+def _named_bill_in_scope_or_404(
+    db, vendor_id: str, bill_id: Optional[str], current_user: dict
+) -> None:
+    """The one Purchase shop scope (F63) on the bill a payment or debit note
+    names: ADMIN / SUPERADMIN reach every shop, everyone else only the bill's
+    own shop (purchase_invoices._bill_in_scope_or_404, the rule every bill
+    read by id applies). Another shop's bill, another supplier's, or none at
+    all answers the SAME 404 -- so the door never confirms another shop's bill
+    exists -- before anything is written. No bill named (on account): nothing
+    to check."""
+    if not bill_id or db is None:
+        return
+    from ..purchase_invoices import _bill_in_scope_or_404
+
+    try:
+        bill = db.get_collection("vendor_bills").find_one(
+            {"bill_id": bill_id, "vendor_id": vendor_id}, {"_id": 0}
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Database unavailable") from exc
+    if bill is None:
+        raise HTTPException(status_code=404, detail=_NO_BILL)
+    _bill_in_scope_or_404(bill, current_user)
+
+
+def _ledger_rows(db, vendor_id: str, scope: Optional[str]) -> tuple:
+    """(bills, payments, debit notes) of one supplier by THE row rule every
+    'what we owe' figure reads (ap_engine.supplier_ledger_rows): no transfer
+    mirror bills, nothing dated after today, and with `scope` (resolve_store_
+    scope) one shop's share -- a bill's own shop; money naming a bill, that
+    bill's shop; money naming none, the shop of the supplier's latest bill on
+    or before it. So a Pune accountant's ledger, payments and debit notes are
+    Pune's share, the same figures /finance/vendor-payments?store_id= and the
+    Purchases report give that shop. ALL the supplier's bills are read, so
+    money naming a bill finds the bill's shop."""
+    try:
+        bills = list(
+            db.get_collection("vendor_bills").find({"vendor_id": vendor_id}, {"_id": 0})
+        )
+        payments = list(
+            db.get_collection("vendor_payments").find(
+                {"vendor_id": vendor_id}, {"_id": 0}
+            )
+        )
+        debit_notes = list(
+            db.get_collection("vendor_debit_notes").find(
+                {"vendor_id": vendor_id}, {"_id": 0}
+            )
+        )
+    except Exception:
+        bills, payments, debit_notes = [], [], []
+    return ap_engine.supplier_ledger_rows(bills, payments, debit_notes, scope)
 
 
 @router.post("/{vendor_id}/payments", status_code=201)
@@ -51,6 +112,10 @@ async def create_vendor_payment(
         from ..finance import check_period_locked
 
         check_period_locked(db, payment.payment_date)
+
+    # F63: the bill it settles is in the caller's shop -- checked before the
+    # hold below, whose message would describe that bill.
+    _named_bill_in_scope_or_404(db, vendor_id, payment.bill_id, current_user)
 
     # Owner ruling 7: HOLD the bill while goods were rejected and no debit note
     # exists. Until now a rejection inside the 5% match tolerance was paid in
@@ -94,21 +159,19 @@ async def create_vendor_payment(
 
 @router.get("/{vendor_id}/payments")
 async def list_vendor_payments(
+    *,
+    store_id: Optional[str] = Query(None),
     vendor_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
 ):
     """List a vendor's payments (newest first)."""
+    # The ledger's payment rows in the caller's shop scope (F63): ADMIN /
+    # SUPERADMIN every shop or the one asked for; everyone else their own.
+    scope = resolve_store_scope(store_id, current_user)
     db = _get_db()
     if db is None:
         return {"payments": [], "total": 0}
-    try:
-        rows = list(
-            db.get_collection("vendor_payments").find(
-                {"vendor_id": vendor_id}, {"_id": 0}
-            )
-        )
-    except Exception:
-        rows = []
+    rows = _ledger_rows(db, vendor_id, scope)[1]
     rows.sort(key=lambda p: p.get("payment_date") or "", reverse=True)
     return {"payments": rows, "total": len(rows)}
 
@@ -125,6 +188,8 @@ async def create_debit_note(
     vendor = vendor_repo.find_by_id(vendor_id) if vendor_repo is not None else None
     if vendor_repo is not None and vendor is None:
         raise HTTPException(status_code=404, detail="Vendor not found")
+    # F63: the bill it reduces is in the caller's shop.
+    _named_bill_in_scope_or_404(_get_db(), vendor_id, note.bill_id, current_user)
 
     dn_id = str(uuid.uuid4())
     prefix = vendor_id[:3].upper() if vendor_id else "DN"
@@ -162,32 +227,35 @@ async def create_debit_note(
 
 @router.get("/{vendor_id}/debit-notes")
 async def list_debit_notes(
+    *,
+    store_id: Optional[str] = Query(None),
     vendor_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
 ):
     """List a vendor's debit notes (newest first)."""
+    # The ledger's debit-note rows in the caller's shop scope (F63).
+    scope = resolve_store_scope(store_id, current_user)
     db = _get_db()
     if db is None:
         return {"debit_notes": [], "total": 0}
-    try:
-        rows = list(
-            db.get_collection("vendor_debit_notes").find(
-                {"vendor_id": vendor_id}, {"_id": 0}
-            )
-        )
-    except Exception:
-        rows = []
+    rows = _ledger_rows(db, vendor_id, scope)[2]
     rows.sort(key=lambda d: d.get("date") or "", reverse=True)
     return {"debit_notes": rows, "total": len(rows)}
 
 
 @router.get("/{vendor_id}/ledger")
 async def vendor_ledger(
+    *,
+    store_id: Optional[str] = Query(None),
     vendor_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
 ):
     """Full vendor ledger: bills (credit) + payments + debit notes (debit) with
     a running payable balance, plus an aging snapshot for the same vendor."""
+    # The caller's shop scope (F63): ADMIN / SUPERADMIN every shop or the one
+    # asked for; everyone else their own shop's share, even with store_id
+    # dropped, and another shop asked for is a 403.
+    scope = resolve_store_scope(store_id, current_user)
     db = _get_db()
     vendor_repo = get_vendor_repository()
     vendor = vendor_repo.find_by_id(vendor_id) if vendor_repo is not None else None
@@ -198,26 +266,10 @@ async def vendor_ledger(
             "ledger": ap_engine.build_ledger([], [], []),
             "aging": ap_engine.build_aging([], [], []),
         }
-    try:
-        bills = list(
-            db.get_collection("vendor_bills").find({"vendor_id": vendor_id}, {"_id": 0})
-        )
-        payments = list(
-            db.get_collection("vendor_payments").find(
-                {"vendor_id": vendor_id}, {"_id": 0}
-            )
-        )
-        debit_notes = list(
-            db.get_collection("vendor_debit_notes").find(
-                {"vendor_id": vendor_id}, {"_id": 0}
-            )
-        )
-    except Exception:
-        bills, payments, debit_notes = [], [], []
     # The one row rule every payable screen reads (no transfer mirror bills;
     # rows dated after today -- a post-dated cheque -- not yet counted), so
     # the closing balance is the Suppliers card's and the report's figure.
-    bills, payments, debit_notes = ap_engine.supplier_ledger_rows(bills, payments, debit_notes)
+    bills, payments, debit_notes = _ledger_rows(db, vendor_id, scope)
     return {
         "vendor_id": vendor_id,
         "vendor": vendor,

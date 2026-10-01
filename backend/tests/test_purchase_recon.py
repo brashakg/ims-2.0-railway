@@ -211,7 +211,7 @@ def test_build_recon_block_note():
 
 def test_upsert_recon_persists_and_returns(monkeypatch):
     """POST /recon should write flags to vendor_bills and return recon block."""
-    bill = {"bill_id": "INV-001", "vendor_id": "V1"}
+    bill = {"bill_id": "INV-001", "vendor_id": "V1", "store_id": "BV-01"}
     coll = _FakeCollection([bill])
     db = _FakeDB({"vendor_bills": coll})
 
@@ -233,6 +233,7 @@ def test_upsert_recon_is_idempotent(monkeypatch):
     """A second POST with the same flags should not corrupt the recon block."""
     bill = {
         "bill_id": "INV-002",
+        "store_id": "BV-01",
         "recon": {
             "reconciled": True,
             "reconciled_by": "acc-1",
@@ -265,7 +266,7 @@ def test_upsert_recon_404_on_missing_bill(monkeypatch):
 
 def test_get_recon_returns_defaults_when_no_recon(monkeypatch):
     """GET /recon should return all 4 flags as False when no recon yet."""
-    bill = {"bill_id": "INV-003", "vendor_id": "V1"}
+    bill = {"bill_id": "INV-003", "vendor_id": "V1", "store_id": "BV-01"}
     db = _FakeDB({"vendor_bills": _FakeCollection([bill])})
     monkeypatch.setattr(recon_mod, "_get_db", lambda: db)
 
@@ -280,6 +281,7 @@ def test_get_recon_returns_existing_flags(monkeypatch):
     """GET /recon should return persisted flags."""
     bill = {
         "bill_id": "INV-004",
+        "store_id": "BV-01",
         "recon": {
             "reconciled": True,
             "reconciled_by": "u1",
@@ -465,7 +467,7 @@ def test_worklists_503_on_db_upsert_error(monkeypatch):
     class _BrokenColl:
         def find_one(self, q, proj=None):
             # Return a doc so we get past the 404 check
-            return {"bill_id": "INV-X"}
+            return {"bill_id": "INV-X", "store_id": "BV-01"}
 
         def update_one(self, q, upd, upsert=False):
             raise RuntimeError("DB unavailable")

@@ -12,7 +12,6 @@ from ._shared import (
     ap_engine,
     datetime,
     field_validator,
-    get_current_user,
     get_grn_repository,
     get_vendor_repository,
     logger,
@@ -149,19 +148,24 @@ def _recompute_bill_status(db, bill_id: Optional[str]) -> None:
 @router.get("/ap-aging")
 async def ap_aging(
     as_of: Optional[str] = Query(None, description="ISO date; defaults to today"),
+    store_id: Optional[str] = Query(None),
     current_user: dict = Depends(require_roles(*_AP_ROLES)),
 ):
-    """Org-wide accounts-payable aging, grouped by vendor + grand totals.
+    """Accounts-payable aging, grouped by vendor + grand totals.
 
     Buckets each outstanding bill by days past its due date (current / 1-30 /
-    31-60 / 61-90 / 90+). ADMIN / ACCOUNTANT only.
+    31-60 / 61-90 / 90+). ADMIN / ACCOUNTANT only, in the caller's shop scope.
     """
+    # The one Purchase shop scope (F63), as the vendor ledger and the Suppliers
+    # card apply it: ADMIN / SUPERADMIN every shop or the one asked for; a Pune
+    # accountant ages Pune's share, so each row here is the ledger it opens.
+    scope = resolve_store_scope(store_id, current_user)
     db = _get_db()
     if db is None:
         return {"as_of": as_of, "totals": {}, "vendors": []}
     from ..finance import _ap_rows  # the one AP row loader (call time: no cycle)
 
-    return ap_engine.build_aging_by_vendor(*_ap_rows(db, as_of=as_of), as_of)
+    return ap_engine.build_aging_by_vendor(*_ap_rows(db, scope, as_of=as_of), as_of)
 
 
 @router.post("/{vendor_id}/bills", status_code=201)
@@ -436,9 +440,9 @@ async def create_vendor_bill(
 @router.get("/{vendor_id}/bills")
 async def list_vendor_bills(
     vendor_id: str,
-    status: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user),
     store_id: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
 ):
     """List a vendor's bills (newest first), in the caller's shop scope."""
     db = _get_db()
