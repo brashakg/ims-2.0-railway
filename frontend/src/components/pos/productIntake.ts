@@ -31,6 +31,15 @@ export async function resolveBarcode(
         message: `Barcode ${code} belongs to another store's stock -- it cannot be sold here.`,
       };
     }
+    // The scanned unit is the one handed over: one already sold, quarantined or
+    // transferred out is refused here, never swapped for another on the shelf.
+    const status = String(hit?.status || '').toUpperCase();
+    if (status && status !== 'AVAILABLE') {
+      return {
+        ok: false,
+        message: `Barcode ${code} is not available to sell (it is ${status}). Scan a different unit.`,
+      };
+    }
     // Build a cart-ready product from the joined product master (the scan
     // endpoint joins `products` onto the `stock_units` row); fall back to the
     // unit's own fields if the join is absent.
@@ -40,6 +49,8 @@ export async function resolveBarcode(
       name: p.name || p.model || hit?.product_name,
       sku: p.sku || hit?.sku,
       barcode: hit?.barcode || code,
+      // The exact unit scanned: the order marks THIS unit sold.
+      stock_id: hit?.stock_id,
       brand: p.brand,
       subbrand: p.subbrand || p.sub_brand,
       category: p.category || hit?.category,
@@ -105,6 +116,8 @@ export function cartItemFromProduct(product: any, guard: PriceGuardResult) {
     name: product.name,
     sku: product.sku,
     barcode: product.barcode,
+    // Set only by a unit scan; a typed product has none (first-available).
+    stock_id: product.stock_id,
     brand: product.brand,
     subbrand: product.subbrand || product.sub_brand,
     category: product.category,

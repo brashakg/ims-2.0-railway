@@ -8,19 +8,17 @@
 // behaviour. A scanned unit that is no longer AVAILABLE is refused clearly.
 // Billing, prices, GST and the till layout do not change.
 //
-// Today the unit's stock_id is dropped at every hop: resolveBarcode builds the
-// cart-ready product without it, cartItemFromProduct has no field for it, and
-// submitPosOrder's explicit payload list never sends it -- so the server's
-// explicit-unit path (orders/stock.py _mark_units_sold path 1, already built)
-// is never reached and every scanned frame is sold first-available.
+// The unit's stock_id used to be dropped at every hop (resolveBarcode, the cart
+// line, submitPosOrder's payload list), so the server's explicit-unit path
+// (orders/stock.py _mark_units_sold path 1) was never reached and every scanned
+// frame was sold first-available.
 //
-// Finding ids (the server half, TSU-4/TSU-5/TSC-*, is pinned in
-// backend/tests/test_till_records_scanned_unit.py):
-//   TSU-1  productIntake: the scanned unit's stock_id never reaches the cart line.
-//   TSU-2  submitOrder: the order payload never sends a line's stock_id.
+// Finding ids, each fixed and pinned below (the server half, TSU-4..6 / TSC-*,
+// is in backend/tests/test_till_records_scanned_unit.py):
+//   TSU-1  productIntake: the scanned unit's stock_id never reached the cart line.
+//   TSU-2  submitOrder: the order payload never sent a line's stock_id.
 //   TSU-3  productIntake: a scanned unit that is SOLD / quarantined / transferred
-//          is added to the cart like any other.
-// `it.fails` is vitest's strict xfail: it turns red the moment the bug is fixed.
+//          was added to the cart like any other.
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
@@ -112,7 +110,7 @@ describe('the till records the exact scanned unit', () => {
     } as any);
   });
 
-  it.fails('TSU-1: a unit scan puts THAT unit on the cart line', async () => {
+  it('TSU-1: a unit scan puts THAT unit on the cart line', async () => {
     const res = await scanIntoCart(scanReply());
     expect(res.ok).toBe(true);
     const [line] = usePOSStore.getState().cart as any[];
@@ -120,7 +118,7 @@ describe('the till records the exact scanned unit', () => {
     expect(line.barcode).toBe('BVB00000002');
   });
 
-  it.fails('TSU-2: the order submit sends each line its stock_id', async () => {
+  it('TSU-2: the order submit sends each line its stock_id', async () => {
     typeIntoCart(PRODUCT);
     const [typed] = usePOSStore.getState().cart;
     usePOSStore.setState({ cart: [{ ...typed, id: 'scanned', stock_id: 'SU-B' } as any] });
@@ -128,7 +126,7 @@ describe('the till records the exact scanned unit', () => {
     expect(sent.stock_id).toBe('SU-B');
   });
 
-  it.fails('TSU-1+2: scan -> Complete sale sends the scanned unit; billing is the typed line', async () => {
+  it('TSU-1+2: scan -> Complete sale sends the scanned unit; billing is the typed line', async () => {
     await scanIntoCart(scanReply());
     typeIntoCart(PRODUCT);
     const [scanned, typed] = await completeSale();
@@ -152,7 +150,7 @@ describe('the till records the exact scanned unit', () => {
     expect(sent).toMatchObject({ product_id: 'FR-1', unit_price: 9000, quantity: 1, item_type: 'FRAME' });
   });
 
-  it.fails('TSU-3: a scanned unit that is no longer AVAILABLE is refused at the scan', async () => {
+  it('TSU-3: a scanned unit that is no longer AVAILABLE is refused at the scan', async () => {
     for (const status of ['SOLD', 'QUARANTINED', 'TRANSFERRED']) {
       usePOSStore.setState({ cart: [] });
       const res = await scanIntoCart(scanReply({ status }));

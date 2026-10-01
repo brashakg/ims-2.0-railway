@@ -54,6 +54,9 @@ export interface CartLineItem {
   name: string;
   sku: string;
   barcode?: string;
+  // The exact unit a scan put on this line; absent on a typed line, which the
+  // server then fills first-available.
+  stock_id?: string;
   brand?: string;
   subbrand?: string;
   category: string;
