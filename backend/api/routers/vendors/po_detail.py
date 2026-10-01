@@ -542,6 +542,18 @@ def _status_after_cancel(po: dict, items: list, by_product: dict) -> str:
     return po.get("status")
 
 
+def _gst_parties_of(po: dict) -> tuple:
+    """(vendor_doc, store_doc) for re-pricing a stored order: the order's own
+    GST numbers, or -- for orders from before they were stored -- the vendor
+    and shop read afresh."""
+    if "vendor_gstin" in po:
+        return (
+            {"gstin": po.get("vendor_gstin")},
+            {"gstin": po.get("store_gstin"), "state_code": po.get("supply_place_recipient")},
+        )
+    return po_gst_context(po.get("delivery_store_id"), po.get("vendor_id"))
+
+
 def _reprice(po: dict, items: list) -> dict:
     """Money fields after quantities changed on an already-priced order.
 
@@ -549,21 +561,10 @@ def _reprice(po: dict, items: list) -> dict:
     rate pinned and the order's stored GST numbers, so a cancel withdraws units
     and never re-taxes what is left. Orders from before the GST numbers were
     stored read the vendor and shop afresh."""
-    if "vendor_gstin" in po:
-        vendor_doc = {"gstin": po.get("vendor_gstin")}
-        store_doc = {
-            "gstin": po.get("store_gstin"),
-            "state_code": po.get("supply_place_recipient"),
-        }
-    else:
-        vendor_doc, store_doc = po_gst_context(
-            po.get("delivery_store_id"), po.get("vendor_id")
-        )
     computed = build_po_gst(
         [{**it, "gst_rate": it.get("tax_rate")} for it in items],
         None,
-        vendor_doc,
-        store_doc,
+        *_gst_parties_of(po),
     )
     for it, priced in zip(items, computed["items"]):
         for key in ("line_tax", "cgst", "sgst", "igst"):
@@ -650,6 +651,118 @@ def _describe_edit(old_items: list, new_items: list) -> list:
     for o in old_left:
         out.append(f"removed {name(o)} x{_qty(o.get('quantity'))}")
     return out
+
+
+_GST_KEYS = ("tax_rate", "gst_source", "gst_unresolved", "gst_missing", "hsn")
+
+
+def _settled_lines(po: dict, moved: dict, failed_ids: set, products: dict):
+    """The stored lines with each moved line pointed at its real product (and,
+    when that is a different product, re-taxed from it) and each line whose
+    product could not be written taken off. (items, money fields, what
+    changed), or None when no stored line names a product being settled."""
+    items, retax, changes = [], [], []
+    touched = False
+    for line in po.get("items") or []:
+        pid = line.get("product_id")
+        name = line.get("product_name") or line.get("sku") or pid
+        if pid in failed_ids:
+            touched = True
+            changes.append(
+                f"{name} x{_qty(line.get('quantity'))} could not be added to "
+                "the catalogue and was taken off this order - add it again"
+            )
+            continue
+        line = dict(line)
+        fix = moved.get(pid)
+        other_product = bool(fix) and fix["product_id"] != pid
+        if fix:
+            touched = True
+            was = line.get("sku")
+            line.update(fix)
+            changes.append(
+                f"{name} is already catalogued as {line.get('sku')}"
+                if other_product
+                else f"{name}: catalogue number {was} -> {line.get('sku')}"
+            )
+        items.append(line)
+        # A typed rate stays; otherwise the product the line now names sets it.
+        retax.append(other_product and line.get("gst_source") != "line")
+    if not touched:
+        return None
+    raw = [
+        {**line, "gst_rate": None, "hsn": None}
+        if again
+        else {**line, "gst_rate": line.get("tax_rate")}
+        for line, again in zip(items, retax)
+    ]
+    computed = build_po_gst(raw, products.get, *_gst_parties_of(po))
+    for line, priced, again in zip(items, computed["items"], retax):
+        for key in ("line_tax", "cgst", "sgst", "igst") + (_GST_KEYS if again else ()):
+            line[key] = priced[key]
+    money = {
+        "subtotal": computed["subtotal"],
+        "tax_amount": computed["tax"],
+        "total_amount": computed["total"],
+        "gst_summary": computed["gst_summary"],
+    }
+    return items, money, changes
+
+
+def settle_typed_in_lines(po_repo, po_id, typed_in, products, current_user) -> list:
+    """Write the typed-in products of an order that was just saved, then make
+    the stored lines name what the spine really holds (see
+    create_typed_in_products). The correction is a compare-and-set write of
+    its own, audited and on the timeline, and only while the order is still a
+    DRAFT: a colleague's edit or send in between is never overwritten.
+
+    Returns what the person must be told: [{product_id, product_name, reason}]
+    for every typed-in line that is not on the order as typed."""
+    moved, failed = create_typed_in_products(typed_in, products, current_user)
+    dropped = [
+        {**f, "reason": "could not be added to the catalogue and was taken off "
+                        "this order - add it again"}
+        for f in failed
+    ]
+    if not (moved or failed) or po_repo is None:
+        return dropped
+    failed_ids = {f["product_id"] for f in failed}
+    for _attempt in range(3):
+        po = po_repo.find_by_id(po_id)
+        if not po or po.get("status") != "DRAFT":
+            break
+        settled = _settled_lines(po, moved, failed_ids, products)
+        if settled is None:
+            return dropped
+        items, money, changes = settled
+        try:
+            _write_change(
+                po_repo,
+                po,
+                {"items": items, **money},
+                [{"kind": "edited", "label": "Lines corrected", "detail": "; ".join(changes)}],
+                current_user,
+                "purchase_order.lines_settled",
+                before={"items": po.get("items")},
+                after={"items": items, "total_amount": money["total_amount"]},
+            )
+            return dropped
+        except HTTPException as exc:
+            if exc.status_code != 409:
+                raise
+    # The order moved on (sent, cancelled, gone) before its lines could be
+    # corrected: say so loudly rather than leave it silent.
+    logger.error(
+        "[VENDOR] PO %s: typed-in lines not settled (moved=%s failed=%s)",
+        po_id, moved, sorted(failed_ids),
+    )
+    names = {e["product_id"]: e["line"].product_name for e in typed_in}
+    return [
+        {"product_id": pid, "product_name": names.get(pid),
+         "reason": "the order changed before this line could be corrected - "
+                   "check it before it goes to the vendor"}
+        for pid in [*failed_ids, *moved]
+    ]
 
 
 @router.put("/purchase-orders/{po_id}")
@@ -742,9 +855,11 @@ async def update_po(
     )
     # Only now that the edit is saved: a refused edit creates no typed-in
     # product and changes no product cost.
-    create_typed_in_products(po_repo, po_id, typed_in, products, current_user)
+    not_created = settle_typed_in_lines(
+        po_repo, po_id, typed_in, products, current_user
+    )
     fill_cost_from_rate(po_id, po.get("po_number"), body.items, products, current_user)
-    return po_repo.find_by_id(po_id)
+    return {**(po_repo.find_by_id(po_id) or {}), "products_not_created": not_created}
 
 
 @router.post("/purchase-orders/{po_id}/cancel")

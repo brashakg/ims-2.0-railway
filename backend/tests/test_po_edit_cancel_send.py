@@ -903,31 +903,201 @@ def test_a_saved_edit_writes_the_typed_in_product_under_the_lines_id(monkeypatch
     assert actions.index("purchase_order.edit") < actions.index("product.created")
 
 
-def test_a_product_made_meanwhile_is_reused_not_left_dangling(monkeypatch):
+def _rival_appears(monkeypatch, **rival):
     """Someone creates the identical frame between the check and the write:
-    the door answers 409 and the stored line is pointed at that product, so
-    the order never names a product the spine does not hold."""
+    it lands on the spine during the door's own duplicate pre-check, after the
+    order was written."""
     from database.repositories.product_repository import ProductRepository
 
-    repo, _ = _wire(monkeypatch, _po())
-    spine = _real_spine(monkeypatch)
     real_find = ProductRepository.find_by_identity_key
     calls = {"n": 0}
 
     def find(self, key):
         calls["n"] += 1
-        if calls["n"] == 2:  # the door's own pre-check, after the order write
+        if calls["n"] == 2:
             self.collection.insert_one(
                 {"_id": "RIVAL", "product_id": "RIVAL", "sku": "RIVAL-SKU",
-                 "identity_key": key}
+                 "identity_key": key, **rival}
             )
         return real_find(self, key)
 
     monkeypatch.setattr(ProductRepository, "find_by_identity_key", find)
+
+
+def _door_cannot_write(monkeypatch, spine):
+    """BaseRepository.create swallows a failed insert into None: the product
+    door then refuses with 500, after the order was already written. P1 is a
+    catalogued frame already on the spine."""
+    from database.repositories.product_repository import ProductRepository
+
+    spine.collection.insert_one(
+        {"_id": "P1", "product_id": "P1", "sku": "P1", "cost_price": 1000}
+    )
+    monkeypatch.setattr(ProductRepository, "create", lambda self, doc, **kw: None)
+
+
+def _only_p1(spine):
+    return [d["product_id"] for d in spine.collection.docs] == ["P1"]
+
+
+def test_a_product_made_meanwhile_is_reused_retaxed_and_audited(monkeypatch):
+    """The stored line is pointed at the rival, so the order never names a
+    product the spine does not hold -- and it is taxed as THAT product (an 18%
+    sunglass, not the 5% frame the preview priced), with the correction on the
+    timeline and in the audit log. Review round 7: the repair only swapped the
+    id and SKU, in an unaudited write that kept the preview's tax."""
+    repo, audit = _wire(monkeypatch, _po())
+    spine = _real_spine(monkeypatch)
+    _rival_appears(monkeypatch, category="SUNGLASS", hsn_code="90041000", gst_rate=18)
     _run(v.update_po("PO1", _typed_in_vogue_body(), _user()))
     assert [d["product_id"] for d in spine.collection.docs] == ["RIVAL"]
-    line = repo.pos["PO1"]["items"][0]
+    doc = repo.pos["PO1"]
+    line = doc["items"][0]
     assert (line["product_id"], line["sku"]) == ("RIVAL", "RIVAL-SKU")
+    assert line["tax_rate"] == 18 and line["hsn"] == "90041000"
+    assert (doc["subtotal"], doc["tax_amount"], doc["total_amount"]) == (2000, 360, 2360)
+    assert doc["history"][-1]["label"] == "Lines corrected"
+    assert "already catalogued as RIVAL-SKU" in doc["history"][-1]["detail"]
+    settled = [r for r in audit.rows if r["action"] == "purchase_order.lines_settled"]
+    assert len(settled) == 1 and settled[0]["after"]["items"][0]["product_id"] == "RIVAL"
+
+
+def test_a_typed_in_line_keeps_the_sku_its_product_is_written_with(monkeypatch):
+    """Review round 7: a base SKU already held by a row the duplicate check
+    cannot match (a legacy row with no identity key) made the preview and the
+    door mint two different suffixes. The order and its audit row named a SKU
+    no product held, repaired by a second, unaudited write."""
+    repo, audit = _wire(monkeypatch, _po())
+    spine = _real_spine(monkeypatch)
+    spine.collection.insert_one(
+        {"_id": "LEG1", "product_id": "LEG1", "sku": "FRVOGUEVO5286W4452"}
+    )
+    _run(v.update_po("PO1", _typed_in_vogue_body(), _user()))
+    made = [d for d in spine.collection.docs if d["product_id"] != "LEG1"]
+    assert len(made) == 1
+    line = repo.pos["PO1"]["items"][0]
+    assert (line["product_id"], line["sku"]) == (made[0]["product_id"], made[0]["sku"])
+    edit = [r for r in audit.rows if r["action"] == "purchase_order.edit"][0]
+    assert edit["after"]["items"][0]["sku"] == made[0]["sku"]
+    assert len(repo.updates) == 1, "one write: the edit, nothing to repair after"
+
+
+def test_a_sku_taken_meanwhile_by_another_product_is_not_reused(monkeypatch):
+    """Only the IDENTICAL product is reused. Another product that took the
+    line's SKU in the meantime gets the door to mint a fresh SKU, and the line
+    keeps its own product."""
+    from database.repositories.product_repository import ProductRepository
+
+    repo, _ = _wire(monkeypatch, _po())
+    spine = _real_spine(monkeypatch)
+    real_find = ProductRepository.find_by_sku
+    calls = {"n": 0}
+
+    def find(self, sku):
+        calls["n"] += 1
+        # 1-2: the preview's mint and duplicate check; 3: the door's own
+        # pre-check, after the order write.
+        if calls["n"] == 3:
+            self.collection.insert_one(
+                {"_id": "OTHER", "product_id": "OTHER", "sku": sku,
+                 "identity_key": "someone|else|entirely"}
+            )
+        return real_find(self, sku)
+
+    monkeypatch.setattr(ProductRepository, "find_by_sku", find)
+    _run(v.update_po("PO1", _typed_in_vogue_body(), _user()))
+    mine = [d for d in spine.collection.docs if d["product_id"] != "OTHER"]
+    assert len(mine) == 1
+    line = repo.pos["PO1"]["items"][0]
+    assert (line["product_id"], line["sku"]) == (mine[0]["product_id"], mine[0]["sku"])
+    assert line["sku"] != "FRVOGUEVO5286W4452"
+
+
+def test_a_product_the_door_could_not_write_comes_off_the_order(monkeypatch):
+    """Review round 7: the PUT answered 200 with the line naming a product
+    that does not exist -- the draft could then neither be sent nor re-saved,
+    and nobody was told. The line now comes off the order, on the timeline,
+    and the response names it."""
+    repo, audit = _wire(monkeypatch, _po())
+    spine = _real_spine(monkeypatch)
+    _door_cannot_write(monkeypatch, spine)
+    body = _edit_body([
+        {"new_product": dict(_VOGUE), "quantity": 1, "unit_price": 2000},
+        _p1(4, 1000),
+    ])
+    out = _run(v.update_po("PO1", body, _user()))
+    assert _only_p1(spine)
+    doc = repo.pos["PO1"]
+    assert [(i["product_id"], i["quantity"]) for i in doc["items"]] == [("P1", 4)]
+    assert (doc["subtotal"], doc["tax_amount"], doc["total_amount"]) == (4000, 200, 4200)
+    assert "taken off this order" in doc["history"][-1]["detail"]
+    assert [r["action"] for r in audit.rows] == [
+        "purchase_order.edit", "purchase_order.lines_settled"
+    ]
+    assert len(out["products_not_created"]) == 1
+    assert out["products_not_created"][0]["product_name"].startswith("Vogue VO5286")
+    assert "add it again" in out["products_not_created"][0]["reason"]
+
+
+def test_the_correction_never_overwrites_a_colleagues_change(monkeypatch):
+    """Review round 7: the repair rewrote the whole items array with no
+    compare-and-set, so a colleague's change in between was lost. It is now a
+    guarded write that re-reads and retries."""
+    def colleague_edits(repo):  # lands between the repair's read and its write
+        vogue_only = [i for i in repo.collection.docs[0]["items"] if i["product_id"] != "P1"]
+        repo.update("PO1", {"items": vogue_only, "notes": "call before delivery"})
+
+    repo = _wire_racing(monkeypatch, _po(), colleague_edits, at=2)
+    _door_cannot_write(monkeypatch, _real_spine(monkeypatch))
+    body = _edit_body([
+        {"new_product": dict(_VOGUE), "quantity": 1, "unit_price": 2000},
+        _p1(4, 1000),
+    ])
+    out = _run(v.update_po("PO1", body, _user()))
+    assert repo.race is None, "the colleague never landed in the window"
+    doc = repo.collection.docs[0]
+    # The colleague took P1 off; the correction took the Vogue off. Neither
+    # undoes the other.
+    assert doc["notes"] == "call before delivery"
+    assert doc["items"] == []
+    assert "add it again" in out["products_not_created"][0]["reason"]
+
+
+def test_an_order_sent_before_its_lines_were_corrected_is_not_rewritten(monkeypatch):
+    """The correction only ever touches a DRAFT. An order a colleague sent in
+    between keeps what was sent, and the person is told to check that line."""
+    def colleague_sends(repo):
+        repo.update("PO1", {"status": "SENT", "sent_by": "mgr_other"})
+
+    repo = _wire_racing(monkeypatch, _po(), colleague_sends, at=2)
+    _door_cannot_write(monkeypatch, _real_spine(monkeypatch))
+    out = _run(v.update_po("PO1", _typed_in_vogue_body(), _user()))
+    doc = repo.collection.docs[0]
+    assert doc["status"] == "SENT" and len(doc["items"]) == 1
+    assert [h["kind"] for h in doc["history"]] == ["edited"]
+    assert "check it before it goes to the vendor" in out["products_not_created"][0]["reason"]
+
+
+def test_a_new_order_whose_typed_in_product_could_not_be_written(monkeypatch):
+    """create_po: the same correction, and the response names the line."""
+    po_repo = PurchaseOrderRepository(StrictCollection("purchase_orders", []))
+    _wire(monkeypatch, None)
+    monkeypatch.setattr(v, "get_purchase_order_repository", lambda: po_repo)
+    monkeypatch.setattr(v, "validate_store_access", lambda *a, **k: None)
+    monkeypatch.setattr(v, "is_online_store", lambda *a, **k: False)
+    monkeypatch.setattr(v, "generate_po_number", lambda _s: "PO-TEST-1")
+    spine = _real_spine(monkeypatch)
+    _door_cannot_write(monkeypatch, spine)
+    body = v.POCreate(vendor_id="V1", delivery_store_id="S1", items=[
+        v.POItemCreate(new_product=dict(_VOGUE), quantity=1, unit_price=2000),
+        v.POItemCreate(**_p1(4, 1000)),
+    ])
+    out = _run(v.create_po(body, _user()))
+    assert _only_p1(spine)
+    doc = po_repo.collection.docs[0]
+    assert [i["product_id"] for i in doc["items"]] == ["P1"]
+    assert doc["total_amount"] == 4200
+    assert len(out["products_not_created"]) == 1
 
 
 def test_two_line_cancels_at_once_never_lose_one(monkeypatch):
@@ -1334,3 +1504,23 @@ def test_a_line_cancel_cannot_withdraw_units_an_escalated_receipt_shelved(monkey
         ))
     assert e.value.status_code == 400
     assert po_repo.find_by_id("PO1")["items"][0].get("cancelled_qty", 0) == 0
+
+
+def test_a_cancel_fails_closed_when_the_stock_table_cannot_be_read(monkeypatch):
+    """What arrived cannot be checked -> nothing is cancelled (503), rather
+    than reading 'nothing arrived' and cancelling over stock on the shelf."""
+    class _Unreadable:
+        def find(self, *a, **k):
+            raise RuntimeError("stock_units unreachable")
+
+        count_documents = find
+
+    class _StockDown:
+        collection = _Unreadable()
+
+    repo, audit = _wire(monkeypatch, _po(status="SENT"))
+    monkeypatch.setattr(v, "get_stock_repository", lambda: _StockDown())
+    with pytest.raises(HTTPException) as e:
+        _run(v.cancel_po("PO1", reason="vendor closed down", current_user=_user()))
+    assert e.value.status_code == 503
+    assert repo.updates == [] and audit.rows == []

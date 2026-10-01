@@ -411,12 +411,12 @@ def price_po_lines(items, vendor, delivery_store_id, current_user):
     # core create_via_door runs, minus the write) and the door's duplicate rule
     # (find_existing_product) first, and a new one is given its product_id now
     # so the stored line can carry it. The product itself is written by
-    # create_typed_in_products, called only AFTER the order write succeeded: a
+    # po_detail.settle_typed_in_lines, called only AFTER the order write: a
     # refused order or edit -- a later line the door refuses, a colleague who
     # sent the draft meanwhile, a lost compare-and-set -- leaves no provisional
     # product behind, however many lines it typed in.
     db = _get_db()
-    typed_in = []  # (line, door payload, pre-minted product_id), still to write
+    typed_in = []  # typed-in products still to write, each with its line
     previews = {}  # product_id -> the doc the door built (GST reads it below)
     claimed = {}  # identity -> (product_id, name, sku) minted in this request
     for it in items:
@@ -446,7 +446,13 @@ def price_po_lines(items, vendor, delivery_store_id, current_user):
             pid, name, sku = str(uuid.uuid4()), preview.get("name"), preview.get("sku")
             claimed[key] = (pid, name, sku)
             previews[pid] = preview
-            typed_in.append((it, payload, pid))
+            # The door writes exactly the SKU the stored line will carry; left
+            # to itself it would mint a second collision suffix.
+            payload["sku"] = sku
+            typed_in.append(
+                {"line": it, "payload": payload, "product_id": pid,
+                 "identity_key": preview.get("identity_key")}
+            )
         it.product_id = pid
         it.product_name = it.product_name or name or f"{np.brand} {np.model}".strip()
         it.sku = sku if pid in previews else (it.sku or sku)
@@ -479,63 +485,73 @@ def price_po_lines(items, vendor, delivery_store_id, current_user):
     return computed, products, typed_in
 
 
-def create_typed_in_products(po_repo, po_id, typed_in, products, current_user) -> list:
-    """Write the typed-in products price_po_lines held back, now that the order
-    that names them is saved. Call it only AFTER the order write succeeded.
+def create_typed_in_products(typed_in, products, current_user):
+    """Write the typed-in products price_po_lines held back. Call it only
+    AFTER the order that names them is saved (po_detail.settle_typed_in_lines
+    does, and repairs the stored lines from what this returns).
 
-    Each product is created under the product_id its line already carries. If
-    someone created the identical product in the meantime (the door answers
-    409), or the door had to mint a different SKU, the stored line is pointed
-    at what the spine actually holds, so the order never names a product that
-    does not exist; the line and `products` are moved too, so the cost fill
-    that follows reads the right row. Returns the lines whose product could not be written at all
-    (a database failure), each logged -- the order stays saved."""
+    Each product is written under the product_id and SKU its line already
+    carries. Returns (moved, failed):
+      moved  -- {pre-minted product_id: {product_id, sku}} for a line the
+                stored order must be pointed at: the identical product (same
+                identity key) was created by someone else meanwhile, so the
+                line names that one; or another product took the SKU, so the
+                door minted a fresh one.
+      failed -- [{product_id, product_name}] for a product the door could not
+                write at all; its line must come off the order.
+    `products` and each line are kept in step, so the cost fill that follows
+    reads the row the line really names, and never one that does not exist."""
     if not typed_in:
-        return []
+        return {}, []
     product_repo = get_product_repository()
-    moved = {}  # pre-minted product_id -> {product_id, sku[, product_name]}
-    failed = []
-    for it, payload, pid in typed_in:
-        try:
-            created = _pm.create_via_door(
-                payload,
-                source="FORM",
-                actor=current_user.get("user_id"),
-                actor_name=current_user.get("username"),
-                extra_fields={"product_id": pid},
-                product_repo=product_repo,
-                audit_repo=get_audit_repository(),
-                db=_get_db(),
-            )
-        except _pm.ProductMasterError as err:
-            winner = (err.conflict or {}) if err.status == 409 else {}
-            if winner.get("product_id"):
-                moved[pid] = {"product_id": winner["product_id"], "sku": winner.get("sku")}
-                it.product_id, it.sku = winner["product_id"], winner.get("sku")
-                products.pop(pid, None)
-                if product_repo is not None:
-                    products[it.product_id] = product_repo.find_by_id(it.product_id)
-                continue
-            logger.error(
-                "[VENDOR] PO %s: typed-in product %s was not created: %s",
-                po_id, pid, err.message,
-            )
+    moved, failed = {}, []
+    for entry in typed_in:
+        it, pid = entry["line"], entry["product_id"]
+        pinned = entry["payload"]
+        attempts = [pinned, {k: v for k, v in pinned.items() if k != "sku"}]
+        created = winner = None
+        for payload in attempts:
+            try:
+                created = _pm.create_via_door(
+                    payload,
+                    source="FORM",
+                    actor=current_user.get("user_id"),
+                    actor_name=current_user.get("username"),
+                    extra_fields={"product_id": pid},
+                    product_repo=product_repo,
+                    audit_repo=get_audit_repository(),
+                    db=_get_db(),
+                )
+                break
+            except _pm.ProductMasterError as err:
+                conflict = (err.conflict or {}) if err.status == 409 else {}
+                same = entry.get("identity_key") and conflict.get(
+                    "identity_key"
+                ) == entry.get("identity_key")
+                if conflict.get("product_id") and same:
+                    winner = conflict
+                    break
+                if err.status == 409 and payload is pinned:
+                    continue  # another product holds the SKU: let the door mint
+                logger.error(
+                    "[VENDOR] typed-in product %s (%s) was not created: %s",
+                    pid, it.product_name, err.message,
+                )
+                break
+        products.pop(pid, None)
+        if winner is not None:
+            moved[pid] = {"product_id": winner["product_id"], "sku": winner.get("sku")}
+            it.product_id, it.sku = winner["product_id"], winner.get("sku")
+            if product_repo is not None:
+                products[it.product_id] = product_repo.find_by_id(it.product_id)
+        elif created is not None:
+            products[pid] = created
+            if created.get("sku") and created.get("sku") != it.sku:
+                moved[pid] = {"product_id": pid, "sku": created.get("sku")}
+                it.sku = created.get("sku")
+        else:
             failed.append({"product_id": pid, "product_name": it.product_name})
-            continue
-        products[pid] = created
-        if created.get("sku") and created.get("sku") != it.sku:
-            moved[pid] = {"product_id": pid, "sku": created.get("sku")}
-            it.sku = created.get("sku")
-    if moved and po_repo is not None:
-        po = po_repo.find_by_id(po_id) or {}
-        items = [
-            {**line, **moved[line.get("product_id")]}
-            if line.get("product_id") in moved
-            else line
-            for line in po.get("items") or []
-        ]
-        po_repo.update(po_id, {"items": items})
-    return failed
+    return moved, failed
 
 
 def fill_cost_from_rate(po_id, po_number, items, products, current_user) -> list:
@@ -686,7 +702,9 @@ async def create_po(
             )
 
     # Only now that the order is saved: a refused order leaves no product.
-    not_created = create_typed_in_products(
+    from .po_detail import settle_typed_in_lines  # po_detail imports this module
+
+    not_created = settle_typed_in_lines(
         po_repo, po_id, typed_in, products, current_user
     )
     cost_filled = fill_cost_from_rate(
