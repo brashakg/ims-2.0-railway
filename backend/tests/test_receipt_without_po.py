@@ -659,6 +659,30 @@ def test_d14_naming_a_challan_too_cannot_smuggle_the_credit_back(world):
     assert _itc_everywhere() == (0.0, 0.0, 0.0)
 
 
+def test_d14_the_gstr2b_screen_counts_what_the_register_counts(world):
+    """Panel probe: the GSTR-2B reconcile fed EVERY vendor bill to the matcher,
+    so a walk-in bill (stored itc_eligible False, tax 310) whose dealer filed it
+    read "Matched (claim) Rs 310" -- and with no 2B row, "ITC at risk Rs 310"
+    -- while the register, /gst/summary and GSTR-3B all said 0."""
+    db = world["db"]
+    _seed_receipt(db, grn_id="GRN-STD-0301", subtype="STANDARD", po_id="PO-3")
+    _seed_receipt(db, grn_id="GRN-NOPO-0302", subtype="NO_PO")
+    _run(pi.create_purchase_invoice(_invoice_body("GRN-STD-0301", "TAX-301"), current_user=ACCOUNTANT))
+    _run(pi.create_purchase_invoice(_invoice_body("GRN-NOPO-0302", "CASH-302"), current_user=ACCOUNTANT))
+    portal = [
+        fin_itc.Gstr2bRow(gstin=DEALER_GSTIN, invoice_no=n, taxable=6200.0, tax=310.0)
+        for n in ("TAX-301", "CASH-302")
+    ]
+    filed = _run(fin_itc.gstr2b_reconcile(fin_itc.Gstr2bReconcileBody(rows=portal), current_user=ADMIN))
+    # Control: the PO receipt's bill matches, so the walk-in's absence is the rule.
+    assert [r["invoice_no"] for r in filed["matched"]] == ["TAX-301"]
+    assert filed["summary"]["itc_safe_to_claim"] == 310.0
+    assert filed["summary"]["total_book_itc"] == _itc_everywhere()[0] == 310.0
+    unfiled = _run(fin_itc.gstr2b_reconcile(fin_itc.Gstr2bReconcileBody(rows=[]), current_user=ADMIN))
+    assert [r["invoice_no"] for r in unfiled["only_in_books"]] == ["TAX-301"]
+    assert unfiled["summary"]["itc_at_risk"] == 310.0
+
+
 def _walk_in_lines():
     return [
         {"product_id": FRAME, "received_qty": 2, "accepted_qty": 2, "rejected_qty": 0, "unit_price": 3100.0},
