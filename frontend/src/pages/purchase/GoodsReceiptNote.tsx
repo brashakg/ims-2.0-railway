@@ -13,8 +13,8 @@ import { Check, AlertCircle, Package, FileText, Printer, Loader2, Trash2 } from 
 import clsx from 'clsx';
 import { vendorsApi } from '../../services/api';
 import { productApi } from '../../services/api/products';
-import { useAuth } from '../../context/AuthContext';
 import { PurchaseShopPicker, usePurchaseShop } from './purchaseShop';
+import { useStores } from '../../hooks/usePOSQueries';
 import { useToast } from '../../context/ToastContext';
 import { GRNPrint } from '../../components/print/GRNPrint';
 import { resolveStoreIdentity, type StoreIdentity } from '../../components/print/storeIdentity';
@@ -59,6 +59,7 @@ interface GRN {
   quality_status: 'passed' | 'failed' | 'conditional';
   created_by: string;
   created_by_name?: string;
+  store_id?: string;
 }
 
 interface POOption {
@@ -66,6 +67,8 @@ interface POOption {
   po_number: string;
   vendor_name?: string;
   status?: string;
+  // The shop the order delivers to: a standard receipt against it is booked there.
+  delivery_store_id?: string;
   items?: Array<{
     po_item_id?: string;
     id?: string;
@@ -107,7 +110,45 @@ function transformGRN(grn: any): GRN {
       totalRejected === 0 ? 'passed' : totalAccepted === 0 ? 'failed' : 'conditional',
     created_by: grn.created_by || 'Unknown',
     created_by_name: grn.created_by_name,
+    store_id: grn.store_id,
   };
+}
+
+// Only POs that still have goods to receive belong in the receive picker
+// (the server's _RECEIVABLE_PO_STATUSES). A DRAFT PO hasn't been sent; a
+// RECEIVED/CANCELLED one is closed. "PARTIAL" is the legacy alias of the
+// canonical "PARTIALLY_RECEIVED".
+const RECEIVABLE_PO_STATUSES = ['SENT', 'ACKNOWLEDGED', 'PARTIAL', 'PARTIALLY_RECEIVED'];
+
+const poLabel = (p: POOption) =>
+  `${p.po_number}${p.vendor_name ? ` · ${p.vendor_name}` : ''}${
+    p.status === 'PARTIALLY_RECEIVED' || p.status === 'PARTIAL' ? ' · partially received' : ''
+  }`;
+
+/** On all stores the filter no longer says whose order it is, so each option
+ *  names the shop the order delivers to (where its receipt is booked). Only
+ *  mounted for an admin on all stores: nobody else reads the store list. */
+function PoOptionsNamingShop({ pos }: { pos: POOption[] }) {
+  const { data } = useStores();
+  const stores = (Array.isArray(data) ? data : []) as Array<{
+    store_id?: string;
+    store_name?: string;
+    store_code?: string;
+  }>;
+  const shopName = (id: string) => {
+    const row = stores.find((s) => s.store_id === id);
+    return row?.store_name || row?.store_code || id;
+  };
+  return (
+    <>
+      {pos.map((p) => (
+        <option key={p.po_id} value={p.po_id}>
+          {poLabel(p)}
+          {p.delivery_store_id ? ` · delivers to ${shopName(p.delivery_store_id)}` : ''}
+        </option>
+      ))}
+    </>
+  );
 }
 
 const INSPECTION_CHECKLIST = [
@@ -135,7 +176,6 @@ const qualityChip = (status: string): string => {
 };
 
 export function GoodsReceiptNote() {
-  const { user } = useAuth();
   const toast = useToast();
   const [activeTab, setActiveTab] = useState<'create' | 'history' | 'discrepancies'>('create');
   const [poNumber, setPoNumber] = useState('');
@@ -172,47 +212,57 @@ export function GoodsReceiptNote() {
   // GRN's own store_id (falls back to the active store) + its legal entity.
   const [grnIdentity, setGrnIdentity] = useState<StoreIdentity | null>(null);
 
-  const { storeId: grnScope, canPick } = usePurchaseShop(); // audit F63: the list reads the one Purchase scope
-  // Goods are received at the shop the list shows (an admin's pick, else his
-  // own): its open orders fill the picker and the receipt lands in the order's shop.
-  const storeId = grnScope || user?.activeStoreId || '';
+  // Audit F63: ONE scope for the whole tab -- the receipts list and the
+  // open-order picker both read it (an admin's pick, all stores when he picks
+  // none, else the caller's own shop; the server enforces the same rule). A
+  // standard receipt is booked at its order's shop (the server re-points it).
+  const { storeId: grnScope, canPick, ownStoreId } = usePurchaseShop();
   // What the counts cover, said plainly (F63): never "all stores" for one shop.
   const scopeLabel = !grnScope ? 'all stores' : canPick ? 'the shop picked above' : 'your shop';
+  const openPoWhere = !grnScope ? 'in any store' : canPick ? 'at the shop picked above' : 'at your shop';
+  const onAllStores = canPick && !grnScope;
 
-  // Resolve the GRN's issuing-store identity when the print modal opens.
+  // Resolve the GRN's issuing-store identity when the print modal opens: the
+  // GRN's own shop (on all stores the list mixes shops), else the shop shown.
   useEffect(() => {
-    const sid = (printGrn as any)?.store_id || storeId;
+    const sid = printGrn?.store_id || grnScope || ownStoreId;
     if (!printGrn || !sid) { setGrnIdentity(null); return; }
     let cancelled = false;
     resolveStoreIdentity(sid)
       .then((id) => { if (!cancelled) setGrnIdentity(id); })
       .catch(() => { if (!cancelled) setGrnIdentity(null); });
     return () => { cancelled = true; };
-  }, [printGrn, storeId]);
+  }, [printGrn, grnScope, ownStoreId]);
 
-  // Only POs that still have goods to receive belong in the receive picker.
-  // A DRAFT PO hasn't been sent; a RECEIVED/CANCELLED one is closed. Keep the
-  // legacy "PARTIAL" alias alongside the canonical "PARTIALLY_RECEIVED".
-  const isReceivablePO = (status?: string) =>
-    !status ||
-    ['SENT', 'ACKNOWLEDGED', 'PARTIAL', 'PARTIALLY_RECEIVED'].includes(status);
+  const isReceivablePO = (status?: string) => !status || RECEIVABLE_PO_STATUSES.includes(status);
 
+  // One read per open status, not one unfiltered page: the list route answers
+  // its first 50 orders in the order they were raised, so on all stores the
+  // open ones (the newest) fell off the end behind the closed ones.
   const fetchPurchaseOrders = async (): Promise<POOption[]> => {
-    const poResp = await vendorsApi
-      .getPurchaseOrders({ store_id: storeId })
-      .catch(() => null);
-    const poList: any[] = Array.isArray(poResp)
-      ? poResp
-      : poResp?.purchase_orders || poResp?.pos || poResp?.data || [];
-    return poList
+    const pages = await Promise.all(
+      RECEIVABLE_PO_STATUSES.map((status) =>
+        vendorsApi.getPurchaseOrders({ store_id: grnScope, status }).catch(() => null),
+      ),
+    );
+    const seen = new Set<string>();
+    return pages
+      .flatMap((poResp: any) =>
+        Array.isArray(poResp) ? poResp : poResp?.purchase_orders || poResp?.pos || poResp?.data || [],
+      )
       .map((p: any) => ({
         po_id: p.po_id || p.id || p._id || '',
         po_number: p.po_number || p.po_id || 'PO',
         vendor_name: p.vendor_name || p.vendor?.trade_name || p.vendor?.legal_name,
         status: p.status,
+        delivery_store_id: p.delivery_store_id,
         items: p.items || p.line_items || [],
       }))
-      .filter((p: POOption) => isReceivablePO(p.status));
+      .filter((p: POOption) => {
+        if (!isReceivablePO(p.status) || seen.has(p.po_id)) return false;
+        seen.add(p.po_id);
+        return true;
+      });
   };
 
   // Load GRNs + open purchase orders on mount / store change.
@@ -234,7 +284,7 @@ export function GoodsReceiptNote() {
       }
     };
     load();
-  }, [storeId, grnScope]);
+  }, [grnScope]);
 
   const reloadGrns = async () => {
     const response = await vendorsApi.getGRNs({ store_id: grnScope });
@@ -245,6 +295,16 @@ export function GoodsReceiptNote() {
   const reloadPurchaseOrders = async () => {
     setPos(await fetchPurchaseOrders());
   };
+
+  // A new shop scope reloads the order picker, and an order picked under the
+  // old one may not be in it: drop the pick and its lines rather than post
+  // against an order the screen no longer shows. Typed no-PO lines stay.
+  useEffect(() => {
+    if (!poNumber) return;
+    setPoNumber('');
+    setReceivedItems([]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [grnScope]);
 
   // Receiving without a PO = DC mode with no PO picked. Lines are then typed
   // in from the product picker instead of hydrated from a PO.
@@ -419,8 +479,18 @@ export function GoodsReceiptNote() {
     }
     // A receipt with no order is recorded at the receiver's own shop (the
     // server's rule) -- never let it vanish from a list showing another shop.
-    if (noPoDc && storeId !== user?.activeStoreId) {
+    if (noPoDc && (!ownStoreId || (!!grnScope && grnScope !== ownStoreId))) {
       toast.error('A receipt without a PO is recorded at your own shop: pick it in Shop to receive it');
+      return;
+    }
+    // A Delivery Challan stays at the receiver's own shop even when it names
+    // an order (the server re-points only a standard receipt to the order's
+    // shop): never book another shop's order -- its stock -- into this one.
+    const pickedPo = pos.find((p) => p.po_id === poNumber || p.po_number === poNumber);
+    if (isDcMode && pickedPo?.delivery_store_id && pickedPo.delivery_store_id !== ownStoreId) {
+      toast.error(
+        "This order delivers to another shop, but a Delivery Challan is booked at the shop you are signed in to: switch to the order's shop in the top bar to receive it",
+      );
       return;
     }
     if (receivedItems.length === 0) {
@@ -762,7 +832,7 @@ export function GoodsReceiptNote() {
               {pos.length === 0 ? (
                 <div className="text-center py-6" style={{ color: 'var(--ink-4)', fontSize: 13 }}>
                   <Package className="w-8 h-8 mx-auto mb-2" style={{ color: 'var(--ink-5)' }} />
-                  No open purchase orders to receive against.
+                  No open purchase orders to receive against {openPoWhere}.
                   <div className="text-xs mt-1" style={{ color: 'var(--ink-5)' }}>
                     {isDcMode
                       ? 'A Delivery Challan needs no PO — pick the vendor above and add the items below.'
@@ -777,15 +847,15 @@ export function GoodsReceiptNote() {
                     </label>
                     <select value={poNumber} onChange={(e) => onSelectPO(e.target.value)} className="input w-full">
                       <option value="">{isDcMode ? 'No PO — receiving over the counter' : 'Select a PO…'}</option>
-                      {pos.map((p) => (
-                        <option key={p.po_id} value={p.po_id}>
-                          {p.po_number}
-                          {p.vendor_name ? ` · ${p.vendor_name}` : ''}
-                          {p.status === 'PARTIALLY_RECEIVED' || p.status === 'PARTIAL'
-                            ? ' · partially received'
-                            : ''}
-                        </option>
-                      ))}
+                      {onAllStores ? (
+                        <PoOptionsNamingShop pos={pos} />
+                      ) : (
+                        pos.map((p) => (
+                          <option key={p.po_id} value={p.po_id}>
+                            {poLabel(p)}
+                          </option>
+                        ))
+                      )}
                     </select>
                   </div>
                   <div>
@@ -1148,8 +1218,8 @@ export function GoodsReceiptNote() {
           <div className="flex items-center gap-3 flex-wrap">
             <span className="text-xs" style={{ color: 'var(--ink-4)' }}>
               {noPoDc
-                ? `Posting this Delivery Challan adds ${totals.rec} unit${totals.rec === 1 ? '' : 's'} to this store's stock · the receipt is what the vendor's bill will link to.`
-                : `Posting against ${poNumber || 'the selected PO'} adds ${totals.rec} unit${totals.rec === 1 ? '' : 's'} to this store's stock · the PO is marked partially / fully received · variance raises a debit note.`}
+                ? `Posting this Delivery Challan adds ${totals.rec} unit${totals.rec === 1 ? '' : 's'} to your own shop's stock · the receipt is what the vendor's bill will link to.`
+                : `Posting against ${poNumber || 'the selected PO'} adds ${totals.rec} unit${totals.rec === 1 ? '' : 's'} to the stock of the shop it delivers to · the PO is marked partially / fully received · variance raises a debit note.`}
             </span>
             <span className="flex-1" />
             <button

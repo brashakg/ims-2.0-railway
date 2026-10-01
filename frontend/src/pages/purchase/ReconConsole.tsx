@@ -975,8 +975,11 @@ function ReturnCnTable({ rows }: { rows: ReconWorklists['pending_credit_notes_re
 export default function ReconConsole() {
   const { hasRole } = useAuth();
   const toast = useToast();
-  const { storeId } = usePurchaseShop(); // audit F63: one Purchase scope
+  const { storeId, canPick } = usePurchaseShop(); // audit F63: one Purchase scope
   const canApprove = hasRole(EXCEPTION_APPROVE_ROLES);
+  // Which shops an empty queue covers, said plainly (F63): never "this store"
+  // while the admin's picker is on all stores.
+  const queueWhere = !storeId ? 'in any store' : canPick ? 'for the shop picked above' : 'for your shop';
 
   // Queue: invoices + their recon blocks
   const [invoices, setInvoices] = useState<PurchaseInvoice[]>([]);
@@ -1342,7 +1345,7 @@ export default function ReconConsole() {
             <FileText size={28} className="mx-auto mb-2" />
             <p className="text-sm">
               {invoices.length === 0
-                ? 'No purchase invoices found for this store.'
+                ? `No purchase invoices found ${queueWhere}.`
                 : 'No invoices match this filter.'}
             </p>
           </div>
