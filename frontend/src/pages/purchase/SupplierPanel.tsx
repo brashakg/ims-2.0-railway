@@ -209,10 +209,12 @@ export function SupplierPanel({ suppliers, onEdit, balances }: SupplierPanelProp
 
           {/* The supplier ledger's figures in the Purchases report's own words
               and rupees (whole rupees; below 0 owed is an advance): lakh to
-              one decimal read Rs 4,999 owed as "Rs 0.0L" -- the F56 Rs 0. */}
+              one decimal read Rs 4,999 owed as "Rs 0.0L" -- the F56 Rs 0.
+              Billed is every bill to date, so it says so: the report's
+              "Billed" is one month (review r2 #4/#23). */}
           <div className="grid grid-cols-2 gap-3 text-sm">
             <div>
-              <p className="text-xs text-gray-600">Billed</p>
+              <p className="text-xs text-gray-600">Billed to date</p>
               <p className="font-semibold text-gray-900">{ledger ? rupees(ledger.total_billed) : '—'}</p>
             </div>
             <div>

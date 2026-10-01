@@ -1,6 +1,11 @@
 // ============================================================================
 // Purchase Invoices - the two source pickers (accepted GRN, open Delivery
 // Challans). MOVED verbatim out of ../PurchaseInvoicesTab.tsx (Wave 6 diet).
+//
+// Both read the ONE Purchase shop scope (audit F63), like the invoice list
+// beside them: an admin's pick (none = all stores), else the caller's own
+// shop. They read his topbar shop instead, so an admin viewing Pune was
+// offered only Dhanbad's receipts to bill (review r2 #17).
 // ============================================================================
 
 import { useCallback, useEffect, useState } from 'react';
@@ -12,9 +17,23 @@ import {
 } from '../../../services/api/vendorAp';
 import { vendorsApi } from '../../../services/api';
 import { useToast } from '../../../context/ToastContext';
-import { useAuth } from '../../../context/AuthContext';
+import { PurchaseShopName, usePurchaseShop } from '../purchaseShop';
 import type { Supplier } from '../purchaseTypes';
 import { errMsg } from './shared';
+
+/** On All stores, each receipt row names the shop it was received at. */
+function RowShop({ storeId }: { storeId?: string }) {
+  return (
+    <div className="text-xs text-gray-500">
+      {storeId ? <>For <PurchaseShopName storeId={storeId} /></> : 'No shop on record'}
+    </div>
+  );
+}
+
+/** Which shops an empty picker looked in: the one in scope, or every store. */
+function ScopeWords({ storeId }: { storeId?: string }) {
+  return storeId ? <>at <PurchaseShopName storeId={storeId} /></> : <>in any store</>;
+}
 
 // ============================================================================
 // GRN picker: choose an ACCEPTED GRN to bill, calls createFromGrn for a draft
@@ -26,7 +45,7 @@ export function GrnPickerModal({
   onPicked: (prefill: Partial<PurchaseInvoice>, lines: PurchaseInvoiceLine[]) => void;
 }) {
   const toast = useToast();
-  const { user } = useAuth();
+  const { storeId } = usePurchaseShop(); // audit F63: the invoice list's scope
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [grns, setGrns] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -36,7 +55,6 @@ export function GrnPickerModal({
     (async () => {
       setLoading(true);
       try {
-        const storeId = user?.activeStoreId;
         const scope = storeId ? { store_id: storeId } : {};
         // Only ACCEPTED GRNs are billable (goods physically verified into
         // stock). PARTIALLY_ACCEPTED ones are listed too, but not billable:
@@ -54,7 +72,7 @@ export function GrnPickerModal({
         setLoading(false);
       }
     })();
-  }, [user?.activeStoreId]);
+  }, [storeId]);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const pick = async (grn: any) => {
@@ -114,7 +132,7 @@ export function GrnPickerModal({
           ) : grns.length === 0 ? (
             <div className="text-center py-8 text-gray-500">
               <PackageCheck className="w-10 h-10 text-gray-300 mx-auto mb-2" />
-              No accepted GRNs to invoice. Receive and accept goods in the GRN flow first.
+              No accepted GRNs to invoice <ScopeWords storeId={storeId} />. Receive and accept goods in the GRN flow first.
             </div>
           ) : (
             <div className="space-y-2">
@@ -125,6 +143,7 @@ export function GrnPickerModal({
                 <div key={g.grn_id} className="flex items-center justify-between border border-gray-200 rounded-lg px-3 py-2 hover:bg-gray-50">
                   <div>
                     <div className="font-medium text-gray-900">{g.grn_number} <span className="text-xs font-normal text-gray-500">· {g.vendor_name || g.vendor_id}</span></div>
+                    {!storeId && <RowShop storeId={g.store_id} />}
                     <div className="text-xs text-gray-500">
                       PO {g.po_number || '-'} · Supplier inv {g.vendor_invoice_no || '-'} · {g.total_accepted ?? 0} units accepted
                     </div>
@@ -186,7 +205,7 @@ export function DcPickerModal({
   onPicked: (prefill: Partial<PurchaseInvoice>, lines: PurchaseInvoiceLine[]) => void;
 }) {
   const toast = useToast();
-  const { user } = useAuth();
+  const { storeId } = usePurchaseShop(); // audit F63: the invoice list's scope
   const todayIso = new Date().toISOString().slice(0, 10);
   const thirtyAgoIso = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
   const [vendorId, setVendorId] = useState('');
@@ -201,7 +220,6 @@ export function DcPickerModal({
   const reload = useCallback(async () => {
     setLoading(true);
     try {
-      const storeId = user?.activeStoreId;
       const rows = await purchaseInvoicesApi.getOpenDcs({
         vendor_id: vendorId || undefined,
         store_id: storeId || undefined,
@@ -212,7 +230,7 @@ export function DcPickerModal({
     } finally {
       setLoading(false);
     }
-  }, [user?.activeStoreId, vendorId, dateFrom, dateTo]);
+  }, [storeId, vendorId, dateFrom, dateTo]);
 
   useEffect(() => { reload(); }, [reload]);
 
@@ -231,7 +249,9 @@ export function DcPickerModal({
           vendor_invoice_date: todayIso,
           vendor_gstin: draft.vendor_gstin,
           recipient_gstin: draft.recipient_gstin,
-          store_id: user?.activeStoreId,
+          // The server books a DC bill to the DCs' shop (one shop per bill),
+          // not the booker's: carry it so the form names the right shop.
+          store_id: dcs.find((d) => selected[d.grn_id] && d.store_id)?.store_id,
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           linked_dc_ids: (draft as any).linked_dc_ids ?? chosenIds,
         } as Partial<PurchaseInvoice>,
@@ -277,7 +297,7 @@ export function DcPickerModal({
           ) : dcs.length === 0 ? (
             <div className="text-center py-8 text-gray-500">
               <PackageCheck className="w-10 h-10 text-gray-300 mx-auto mb-2" />
-              No open Delivery Challans for this filter. Log + accept a DC in the GRN flow first.
+              No open Delivery Challans for this filter <ScopeWords storeId={storeId} />. Log + accept a DC in the GRN flow first.
             </div>
           ) : (
             <div className="space-y-2">
@@ -296,8 +316,9 @@ export function DcPickerModal({
                         <span className="text-xs font-normal text-gray-500"> · {g.vendor_name || g.vendor_id}</span>
                       </div>
                       <div className="text-xs text-gray-500">
-                        {(g.dc_date || '').slice(0, 10)} · {g.total_accepted ?? 0} units accepted · store {g.store_id || '-'}
+                        {(g.dc_date || '').slice(0, 10)} · {g.total_accepted ?? 0} units accepted
                       </div>
+                      {!storeId && <RowShop storeId={g.store_id} />}
                     </div>
                   </label>
                 );

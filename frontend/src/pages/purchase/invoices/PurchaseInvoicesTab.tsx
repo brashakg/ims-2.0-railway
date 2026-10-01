@@ -36,7 +36,7 @@ import { InvoiceDetailDrawer, MatchBadge, ConfigNote } from './InvoiceDetailDraw
 // Tab root: list + GRN picker + invoice form
 // ============================================================================
 export function PurchaseInvoicesTab({ suppliers }: { suppliers: Supplier[] }) {
-  const { storeId } = usePurchaseShop(); // audit F63: one Purchase scope
+  const { storeId, showShopOf } = usePurchaseShop(); // audit F63: one Purchase scope
   const [invoices, setInvoices] = useState<PurchaseInvoice[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -64,7 +64,11 @@ export function PurchaseInvoicesTab({ suppliers }: { suppliers: Supplier[] }) {
     }
   }, [storeId]);
 
-  useEffect(() => { load(); }, [load]);
+  // A booking reloads through this effect, once, AFTER showShopOf has moved an
+  // admin's filter to the bill's shop -- calling load() from onBooked would
+  // fetch the shop being left and race the reload of the new one.
+  const [bookings, setBookings] = useState(0);
+  useEffect(() => { load(); }, [load, bookings]);
 
   // Best-effort: fetch the active valuation method + tolerance once for the
   // read-only note. Never blocks the tab (getConfig is fail-soft -> null).
@@ -219,7 +223,13 @@ export function PurchaseInvoicesTab({ suppliers }: { suppliers: Supplier[] }) {
           prefill={form.prefill}
           initialLines={form.lines}
           onClose={() => setForm(null)}
-          onBooked={() => { setForm(null); load(); }}
+          onBooked={(bookedAt) => {
+            // A bill booked to another shop than the one an admin's list shows
+            // moves the list there, so it never vanishes (review r2 #19).
+            setForm(null);
+            showShopOf(bookedAt);
+            setBookings((n) => n + 1);
+          }}
         />
       )}
 

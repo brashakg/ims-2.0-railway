@@ -6,7 +6,12 @@
 // advance read "Rs -0.0L", while the Purchases report said "Rs 4,999" and
 // "Rs 1,501 advance" for the same suppliers. The all-time billed figure sat
 // under "Total Purchases", the ledger's "Billed" under another name. The card
-// now uses the report's own formatter and label.
+// now uses the report's own formatter.
+//
+// Review r2 #4/#23: it then took the report's bare "Billed" too -- but the
+// report's Billed is ONE month and the card's is every bill to date, so two
+// neighbouring Purchase tabs used one word for two figures. The card's label
+// says its period: "Billed to date".
 
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
@@ -61,29 +66,30 @@ function show(balances: Record<string, SupplierBalance>) {
 }
 
 describe('the Suppliers card says what the Purchases report says', () => {
-  it('Rs 4,999 owed reads Rs 4,999 under Outstanding and Billed -- never Rs 0.0L', () => {
+  it('Rs 4,999 owed reads Rs 4,999 under Outstanding and Billed to date -- never Rs 0.0L', () => {
     show({ v1: { balance: 4999, total_billed: 4999 } });
     expect(figure('Essilor', 'Outstanding')).toBe('₹4,999');
-    expect(figure('Essilor', 'Billed')).toBe('₹4,999');
+    expect(figure('Essilor', 'Billed to date')).toBe('₹4,999');
     expect(screen.queryByText(/0\.0L/)).toBeNull();
   });
 
   it('an advance reads as the report reads it: Rs 1,501 advance, never Rs -0.0L', () => {
     show({ v2: { balance: -1500.5, total_billed: 0 } });
     expect(figure('Pune Frames', 'Outstanding')).toBe('₹1,501 advance');
-    expect(figure('Pune Frames', 'Billed')).toBe('₹0');
+    expect(figure('Pune Frames', 'Billed to date')).toBe('₹0');
   });
 
-  it('the all-time billed figure is labelled Billed, not Total Purchases', () => {
+  it("the all-time billed figure is labelled Billed to date -- not Total Purchases, not the report's one-month Billed", () => {
     show({ v3: { balance: 0.4, total_billed: 1234567.8 } });
     expect(screen.queryByText('Total Purchases')).toBeNull();
-    expect(figure('Small Co', 'Billed')).toBe('₹12,34,568');
+    expect(screen.queryAllByText('Billed')).toHaveLength(0);
+    expect(figure('Small Co', 'Billed to date')).toBe('₹12,34,568');
     expect(figure('Small Co', 'Outstanding')).toBe('₹0');
   });
 
   it('a supplier the ledger has no figure for shows a dash, not a made-up Rs 0', () => {
     show({});
     expect(figure('Essilor', 'Outstanding')).toBe('—');
-    expect(figure('Essilor', 'Billed')).toBe('—');
+    expect(figure('Essilor', 'Billed to date')).toBe('—');
   });
 });
