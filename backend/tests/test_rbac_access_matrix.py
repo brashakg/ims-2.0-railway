@@ -64,6 +64,7 @@ COVERAGE LIST (method, path, roles_tested)
   POST /api/v1/transfers                   -> mgmt+super roles; CASHIER -> 403
   GET  /api/v1/inventory/accountability/shrinkage -> mgmt roles; SALES_STAFF -> 403
   GET  /api/v1/vendors/ap-aging            -> ACCOUNTANT/ADMIN; STORE_MANAGER -> 403
+  GET  /api/v1/vendors/purchases-this-month -> ACCOUNTANT/ADMIN; managers + counter -> 403
   POST /api/v1/vendors/{vid}/bills         -> ACCOUNTANT/ADMIN; AREA_MANAGER -> 403
   GET  /api/v1/expenses/aging              -> ACCOUNTANT/ADMIN; SALES_CASHIER -> 403
 
@@ -1278,6 +1279,25 @@ class TestVendorFinanceRoutes:
             headers=ALL_ROLE_HEADERS["ADMIN"],
         )
         assert_route_allowed(r, "ADMIN", "GET", "/api/v1/vendors/ap-aging")
+
+    # Purchases this month (audit F56): what we owe each supplier, so the same
+    # supplier-balance readers as ap-aging -- the policy row, not only the
+    # handler's require_roles, refuses a manager and the counter.
+    @pytest.mark.parametrize("role", ["STORE_MANAGER", "AREA_MANAGER", "SALES_STAFF", "CASHIER"])
+    def test_purchases_this_month_denied_below_accounts(self, client, role):
+        r = client.get(
+            "/api/v1/vendors/purchases-this-month",
+            headers=ALL_ROLE_HEADERS[role],
+        )
+        assert_middleware_403(r, "GET", "/api/v1/vendors/purchases-this-month")
+
+    @pytest.mark.parametrize("role", ["ACCOUNTANT", "ADMIN"])
+    def test_purchases_this_month_allowed_for_accounts(self, matrix_client, role):
+        r = matrix_client.get(
+            "/api/v1/vendors/purchases-this-month",
+            headers=ALL_ROLE_HEADERS[role],
+        )
+        assert_route_allowed(r, role, "GET", "/api/v1/vendors/purchases-this-month")
 
 
 # ===========================================================================
