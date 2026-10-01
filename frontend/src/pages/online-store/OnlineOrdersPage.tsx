@@ -97,8 +97,8 @@ interface OrderRow {
    *  prescription. */
   stock_hold: boolean;
   /** Held on its seller (GSTIN) check or a failed fulfillment-order move —
-   *  released by Re-map, which re-reads Shopify's routing and re-claims (and,
-   *  for a seller hold, re-bills) at the shop that ships it. */
+   *  released by Re-map, which re-reads Shopify's routing and re-claims the
+   *  stock (never changing the order's seller, invoice or tax). */
   remap_hold: boolean;
   rx_hold_cleared: boolean;
   rx_hold_reasons: string[];
