@@ -53,6 +53,7 @@ vi.mock('../../../../services/api/sales', () => ({
 
 vi.mock('../../../../hooks/usePOSQueries', () => ({
   useProducts: () => ({ data: [], isLoading: false }),
+  useSellableStock: () => ({ data: undefined }),
 }));
 vi.mock('../../../../hooks/useIsOnlineStore', () => ({ useIsOnlineStore: () => false }));
 vi.mock('../../../../components/pos/WalkoutComplianceBanner', () => ({ default: () => null }));
