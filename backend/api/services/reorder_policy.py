@@ -75,6 +75,9 @@ LEVELS_FIELD = "reorder_levels"
 # the migration script both read this one pattern.
 STORE_KEY_PATTERN = r"^[A-Za-z0-9_-]+$"
 
+# The largest level there is; anything above reads as not set (the PUT refuses it too).
+MAX_LEVEL = 100000
+
 
 def _whole(value: Any) -> Optional[int]:
     """A real integer or None. bool, non-integral floats, inf/NaN, strings and
@@ -92,6 +95,10 @@ def _whole(value: Any) -> Optional[int]:
     return None
 
 
+# Public name for the one whole-number reader (the migration script reads old values with it).
+whole_number = _whole
+
+
 def reorder_level(product: Any, *, store_id: Optional[str]) -> Optional[int]:
     """THIS shop's reorder level for the product, or None = not set.
     Only a real whole number >= 0 is a level; garbage is not set."""
@@ -101,7 +108,7 @@ def reorder_level(product: Any, *, store_id: Optional[str]) -> Optional[int]:
     if not isinstance(levels, dict):
         return None
     level = _whole(levels.get(store_id))
-    return level if level is not None and level >= 0 else None
+    return level if level is not None and 0 <= level <= MAX_LEVEL else None
 
 
 def is_low_stock(product: Any, on_hand: Any, *, store_id: Optional[str]) -> bool:
@@ -119,7 +126,7 @@ def top_up(level: Any, on_hand: Any) -> int:
     report and the replenishment screen both read this."""
     lvl = _whole(level)
     count = 0 if on_hand is None else _whole(on_hand)
-    if lvl is None or lvl < 0 or count is None:
+    if lvl is None or not 0 <= lvl <= MAX_LEVEL or count is None:
         return 0
     return max(0, lvl + 1 - count)
 
@@ -130,11 +137,11 @@ def stock_status(level: Any, on_hand: Any) -> str:
     under the level) or 'healthy'. The only place the bands are decided."""
     lvl = _whole(level)
     count = 0 if on_hand is None else _whole(on_hand)
-    if lvl is None or lvl < 0 or count is None:
+    if lvl is None or not 0 <= lvl <= MAX_LEVEL or count is None:
         return "not-set"
     if count <= 0:
         return "out-of-stock" if count <= lvl else "healthy"
-    if count <= lvl * 0.5:
+    if count * 2 <= lvl:  # integers only: no float, no OverflowError
         return "critical"
     return "low" if count <= lvl else "healthy"
 
@@ -171,6 +178,29 @@ def on_hand(
         return {}
     ids = None if product_ids is None else [str(p) for p in product_ids]
     return _on_hand_by_product_store(_StockOnly(coll), ids, store_id)
+
+
+def out_of_stock_count(
+    products, stock_units, *, store_id: Optional[str]
+) -> Tuple[int, int]:
+    """(active products, of which sold out): sold out = no sellable unit in this
+    shop (store_id None = none in any shop), by the SAME on-hand rule as the
+    low-stock list -- never products.stock_quantity. (0, 0) if unreadable."""
+    products = _coll(products)
+    if products is None or _coll(stock_units) is None:
+        return 0, 0
+    try:
+        ids = [
+            str(d["product_id"])
+            for d in products.find({}, {"_id": 0, "product_id": 1, "is_active": 1})
+            if d.get("product_id") and d.get("is_active") is not False
+        ]
+    except Exception:  # noqa: BLE001
+        return 0, 0
+    have = {pid for (pid, _shop), n in on_hand(
+        stock_units, store_id=store_id, product_ids=ids
+    ).items() if n > 0}
+    return len(ids), sum(1 for pid in ids if pid not in have)
 
 
 def low_stock_rows(
