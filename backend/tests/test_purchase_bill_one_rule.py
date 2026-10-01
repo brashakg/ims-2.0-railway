@@ -915,6 +915,27 @@ class TestTheMirrorsCreditIsTheOneHelpers:
         assert bill["vendor_gstin"] == BUY_MH and bill["itc_eligible"] is True, bill
         assert _crosscheck(db, "E1")["gstr3b"]["itc"]["total"] == bill["tax_amount"] > 0
 
+    def test_a_credit_denied_transfer_is_named_on_the_cross_check(self):
+        """Round 15 #3: the verdict (no credit) is right, but the screen must
+        say it: one INFO row naming the transfer, the sender and the CA check."""
+        db = self._world()
+        bill = self._mirror(db, "PUNE", "S1")
+        xc = _crosscheck(db, "E1")
+        row = _row(xc, "Transfers with no input credit")
+        assert row["status"] == "INFO", row  # not a mismatch: the verdict is correct
+        assert row["sources"] == {"Credit denied": bill["tax_amount"]} and bill["tax_amount"] > 0
+        assert bill["bill_number"] in row["note"]
+        assert "sender has no GSTIN: no input credit" in row["note"]
+        assert "check whether outward tax applies with your CA" in row["note"]
+        assert row["note"].startswith("Transfer from ")
+        assert xc["summary"]["all_matched"] is True or xc["summary"]["mismatch_count"] == 0
+
+    def test_a_registered_sender_gets_no_such_note(self):
+        db = self._world()
+        self._mirror(db, "S2", "S1")
+        xc = _crosscheck(db, "E1")
+        assert not [c for c in xc["comparisons"] if c["metric"] == "Transfers with no input credit"]
+
 
 # ===========================================================================
 # Panel round 4 -- a bill's date, the form's shop, the debit note's head,
@@ -2231,6 +2252,23 @@ class TestRound13NotesNameTheRealScreen:
         err = _refused(pi_router._bill_recipient, db, None, None, "S1")
         assert "Add the company and its GSTIN in Organization (left menu)" in err.detail["message"]
         assert "Settings, companies" not in err.detail["message"]
+
+    def test_round15_no_dead_settings_stores_screen_is_named(self):
+        """Round 15 #4: '(Settings, stores)' and '/settings?tab=stores' name a
+        screen that does not exist; the screen is Organization (/organization)."""
+        import inspect
+        from api.routers import stores as stores_router
+        from api.services import rtv_debit_note
+
+        for mod in (pi_router, rtv_debit_note, stores_router):
+            src = inspect.getsource(mod)
+            assert "Settings, stores" not in src, mod.__name__
+            assert "/settings?tab=stores" not in src, mod.__name__
+        assert "/organization" in inspect.getsource(stores_router)
+        db = _FakeDB()
+        db.collections["entities"].clear()
+        err = _refused(pi_router._bill_recipient, db, None, None, "S1")
+        assert "Organization (left menu)" in err.detail["message"]
 
 
 class TestRound13NoRegistrationReceiptShop:
