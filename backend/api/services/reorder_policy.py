@@ -24,20 +24,20 @@ Consumers (each guards with auto_reorder_disabled()):
   - agents/implementations/taskmaster.py  auto-draft PO
   - agents/implementations/oracle.py      predictive reorder proposals
 
-REORDER LEVEL (owner ruling 2026-09-28, "keep -1 for default"): the
-product's `reorder_point` is its low-stock level. -1 (the create door's
-default) or garbage = NOT SET = no low-stock alert until someone types a
-level. A product saved before that rule with NO level at all is not -1: it
-keeps the chain's old threshold, LEGACY_LEVEL (the 5 the low-stock list always
-used), so its alerts never vanish silently. `reorder_level` / `is_low_stock`
-are THE rule; every reader that decides "low stock" calls them with the
-PRODUCT (never a stock_units row, which is one unit and has no level), and
-`low_stock_rows` is the one low-stock list (StockRepository.find_low_stock
-filtered by each product's own level) the endpoints, reports and analytics
-counts read. A SKU with no product row at all (e.g. deleted in the 09-07 wipe)
-stays visible on the low-stock list at the legacy level, but the buying
-readers (purchase report, Oracle) pass None for it: no top-up is ever
-suggested for a product that is gone.
+REORDER LEVEL (owner rulings 2026-09-28 and 2026-10-01): the product's
+`reorder_point` is its low-stock level. Only a whole number ABOVE 0 is a level.
+-1 (the create door's default), 0, anything below 0, a missing field or garbage
+all mean NOT SET: no low-stock alert, no top-up, and the screens print 'not
+set'. A 0 is not set too because it can never fire while a unit is on the
+shelf (the low-stock list only sees products with stock), and the old form
+saved 0 for a blank box. A SKU with no product row at all (e.g. deleted in the
+09-07 wipe) has no level either: never on a low-stock list, never topped up.
+
+`reorder_level` / `is_low_stock` are THE rule, called with the PRODUCT (never a
+stock_units row, which is one unit and has no level). `low_stock_rows` is THE
+low-stock list for a store and the ONLY caller of StockRepository.find_low_stock
+(tests/test_add_product_owner_rulings.py guards that): every endpoint, report,
+dashboard count, transfer recommendation and Taskmaster's auto-reorder reads it.
 
 No emojis (Windows cp1252). No direct DB access (low_stock_rows reads through
 the repositories it is handed).
@@ -71,15 +71,10 @@ def auto_reorder_disabled(product: Any) -> bool:
         return False
 
 
-# The old chain-wide threshold (StockRepository.find_low_stock's default) for a
-# product that never stored a level -- bulk create, PO walk-in, vendor import
-# and catalog promote rows from before the -1 rule.
-LEGACY_LEVEL = 5
-
-
 def reorder_level(product: Any) -> Optional[int]:
-    """The product's low-stock level, or None = NOT SET (-1, garbage).
-    No level stored at all = LEGACY_LEVEL (see module docstring).
+    """The product's low-stock level (a whole number above 0), or None = NOT
+    SET: missing, 0, -1, below 0, garbage, or no product doc at all (see the
+    module docstring).
 
     Accepts a `products` spine doc (top-level reorder_point) or a
     `catalog_products` doc (inventory.reorder_level)."""
@@ -90,13 +85,11 @@ def reorder_level(product: Any) -> Optional[int]:
         inv = product.get("inventory")
         if isinstance(inv, dict):
             rp = inv.get("reorder_level")
-    if rp is None:
-        return LEGACY_LEVEL
     try:
         level = int(rp)
     except (TypeError, ValueError):
         return None
-    return level if level >= 0 else None
+    return level if level > 0 else None
 
 
 def is_low_stock(product: Any, on_hand: Any) -> bool:
@@ -129,8 +122,8 @@ def low_stock_rows(stock_repo, product_repo, store_id) -> List[Dict[str, Any]]:
         return []
     out = []
     for r in rows:
-        # A unit whose product row is gone never stored a level: legacy.
-        prod = products.get(str(r.get("_id"))) or {}
+        # A unit whose product row is gone has no level: never low (F73).
+        prod = products.get(str(r.get("_id")))
         if is_low_stock(prod, r.get("quantity")):
             out.append({**r, "reorder_point": reorder_level(prod)})
     return out

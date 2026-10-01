@@ -578,13 +578,29 @@ class TestT9HorizonNotReorderPoint:
 
     def test_a_sku_with_no_product_row_gets_no_legacy_top_up(self):
         # F73: a SKU whose product row is gone (the 09-07 wipe) has no level at
-        # all -> no reorder-point gap, never the legacy 5 a product row without
-        # a stored level keeps. One sale in 30 days, nothing on hand -> 1.
+        # all -> no reorder-point gap. One sale in 30 days, nothing on hand -> 1.
         db = FakeDB()
         db.get_collection("orders").insert_one(_order("S1", "P-GONE", days_ago=20))
         assert _run_oracle(db) == 1
         pl = _pending(db)[0]["payload"]
         assert (pl["reorder_point"], pl["quantity"]) == (0, 1)
+
+    def test_no_level_adds_no_reorder_point_gap(self):
+        # F73 (owner 2026-10-01): a level of 0, -1, missing or garbage is NOT
+        # SET -> no reorder-point gap, the burn alone sizes the order (1); a
+        # typed level of 5 still lifts it to 5.
+        for level, want in ((0, (0, 1)), (-1, (0, 1)), ("x", (0, 1)), (None, (0, 1)), (5, (5, 5))):
+            db = FakeDB()
+            db.get_collection("orders").insert_one(_order("S1", "P1", days_ago=20))
+            prod = _product("P1", vendor="V")
+            if level is None:
+                prod.pop("reorder_point")
+            else:
+                prod["reorder_point"] = level
+            db.get_collection("products").insert_one(prod)
+            assert _run_oracle(db) == 1, level
+            pl = _pending(db)[0]["payload"]
+            assert (pl["reorder_point"], pl["quantity"]) == want, level
 
 
 # ============================================================================

@@ -280,8 +280,8 @@ class TestReorderMinus1Passthrough:
         sentinel), a missing field stays None (legacy), and a real value stays
         itself. Nothing is defaulted to 10/20. reorder_point is the product's
         low-stock level through reorder_policy.reorder_level: a typed level
-        stays itself, and a legacy product that never stored one shows the 5
-        it is alerted at (LEGACY_LEVEL), never a blank beside a Low Stock badge."""
+        stays itself, and a product that never stored one is None = not set
+        (owner 2026-10-01), never an invented number."""
         pid_off = _add_product(mongo_db, reorder_quantity=-1, reorder_point=5)
         pid_legacy = _add_product(mongo_db)  # no reorder fields at all
         pid_on = _add_product(mongo_db, reorder_quantity=12, reorder_point=4)
@@ -299,7 +299,7 @@ class TestReorderMinus1Passthrough:
             "a legacy product without the field must yield None, not a "
             "fabricated default"
         )
-        assert rows[pid_legacy]["reorder_point"] == 5
+        assert rows[pid_legacy]["reorder_point"] is None
         assert rows[pid_on]["reorder_quantity"] == 12
         assert rows[pid_on]["reorder_point"] == 4
 
@@ -308,11 +308,11 @@ class TestReorderMinus1Passthrough:
         product with reorder_quantity=-1, False for reorder_quantity=5, and
         False (legacy-enabled) when the field is missing. The alert list
         still contains ALL low-stock products -- the flag only informs."""
-        pid_off = _add_product(mongo_db, reorder_quantity=-1)
-        pid_on = _add_product(mongo_db, reorder_quantity=5)
-        pid_legacy = _add_product(mongo_db)
+        pid_off = _add_product(mongo_db, reorder_quantity=-1, reorder_point=5)
+        pid_on = _add_product(mongo_db, reorder_quantity=5, reorder_point=5)
+        pid_legacy = _add_product(mongo_db, reorder_point=5)
         for pid in (pid_off, pid_on, pid_legacy):
-            _add_unit(mongo_db, pid)  # 1 AVAILABLE unit -> low stock
+            _add_unit(mongo_db, pid)  # 1 AVAILABLE unit at level 5 -> low stock
 
         resp = inv_client.get("/inventory/low-stock")
         assert resp.status_code == 200, resp.text

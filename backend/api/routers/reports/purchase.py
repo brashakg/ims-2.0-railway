@@ -239,7 +239,7 @@ async def purchase_recommendations(
     recs: list = []
     for pid, stats in sku_stats.items():
         # A SKU whose product row is gone (e.g. the 09-07 catalogue wipe) has
-        # no level at all: not set, never the legacy 5 (F73).
+        # no level at all: not set, like 0, -1 or a missing level (F73).
         level = reorder_level(products.get(pid))
         prod = products.get(pid) or {}
         # Owner decision (2026-07-04): reorder_quantity <= 0 (the new -1
@@ -256,7 +256,7 @@ async def purchase_recommendations(
             or prod.get("current_stock")
             or 0
         )
-        # Not set (-1) buys nothing on its own account (F73); 0 is the floor.
+        # Not set buys nothing on its own account (F73); 0 is the floor.
         reorder_point = level or 0
         gap_units = max(0, desired_cover - current_stock)
         if gap_units <= 0 and current_stock > reorder_point:

@@ -219,8 +219,9 @@ def _seed_sold_order(mongo_db, product_id: str, qty: int, store_id: str = STORE)
 class TestLowStockOnHand:
     def test_legacy_units_count_toward_on_hand(self, client, mongo_db):
         """3 legacy units (no quantity field) must report on-hand 3, not 0,
-        and only surface as low-stock under the default threshold (5)."""
-        pid = _seed_product(mongo_db)
+        and surface as low-stock at the product's own level (5). A product
+        with no level is never on the list (owner 2026-10-01, F73)."""
+        pid = _seed_product(mongo_db, reorder_point=5)
         _seed_legacy_units(mongo_db, pid, 3)
 
         resp = client.get("/inventory/low-stock")
@@ -233,9 +234,9 @@ class TestLowStockOnHand:
         )
 
     def test_well_stocked_product_not_flagged_low(self, client, mongo_db):
-        """10 legacy units is above the threshold -> not low-stock (proves the
-        count is real, not a constant)."""
-        pid = _seed_product(mongo_db)
+        """10 legacy units is above the product's level (5) -> not low-stock
+        (proves the count is real, not a constant)."""
+        pid = _seed_product(mongo_db, reorder_point=5)
         _seed_legacy_units(mongo_db, pid, 10)
 
         resp = client.get("/inventory/low-stock")
@@ -383,7 +384,7 @@ class TestAddStockStampsQuantity:
 
     def test_added_units_visible_to_low_stock(self, client, mongo_db):
         """End-to-end: add_stock then low-stock reflects the new on-hand."""
-        pid = _seed_product(mongo_db)
+        pid = _seed_product(mongo_db, reorder_point=5)
         client.post("/inventory/stock/add", json={"product_id": pid, "quantity": 2})
 
         resp = client.get("/inventory/low-stock")

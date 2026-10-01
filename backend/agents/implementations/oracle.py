@@ -601,7 +601,7 @@ class OracleAgent(JarvisAgent):
                 or prod.get("vendor_id")
             )
             from api.services.reorder_policy import reorder_level
-            # Not set (-1), or no product row at all, = 0 (F73).
+            # Not set (0, -1, missing), or no product row at all, = 0 (F73).
             reorder_point = reorder_level(prod_by_id.get(pid)) or 0
             qty = recommended_qty(
                 on_hand=on_hand, effective_rate=eff, horizon_days=horizon,

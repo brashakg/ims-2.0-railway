@@ -44,7 +44,9 @@ def _product(**overrides) -> dict:
         "offer_price": 8000.0,
         "cost_price": 4000.0,
         "stock_quantity": 10,
-        "reorder_point": 0,
+        # A typed level: no low-stock or reorder alert fires without one, and
+        # 0 is NOT a level (owner 2026-09-28 / 2026-10-01, F73).
+        "reorder_point": 1,
     }
     base.update(overrides)
     return base

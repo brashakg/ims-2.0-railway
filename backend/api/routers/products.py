@@ -3296,9 +3296,9 @@ async def get_product(product_id: str, current_user: dict = Depends(get_current_
                 imgs = product.get("images")
                 if isinstance(imgs, list) and imgs and isinstance(imgs[0], str):
                     product["image_url"] = imgs[0]
-            # The level the rule gives (F73): a product that never stored one
-            # reads its legacy level, not set reads -1. The edit form shows and
-            # saves this number, so it never has a rule of its own.
+            # The level the rule gives (F73): only a level above 0 is one;
+            # not set (0, -1, missing, garbage) reads -1. The edit form shows
+            # and saves this number, so it never has a rule of its own.
             level = reorder_level(product)
             product["reorder_point"] = -1 if level is None else level
             return product

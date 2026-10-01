@@ -1259,7 +1259,7 @@ class JarvisAnalyticsEngine:
                 # More actionable than just "X items low" since it tells
                 # the operator WHICH stockouts hurt the most. The product's
                 # own level decides (reorder_policy, F73) -- the same rule as
-                # Jarvis's low-stock counts, so a missing level is 5 here too.
+                # Jarvis's low-stock counts: no level (0, -1, missing) = never.
                 low_stock = []
                 for p in prod_col.aggregate(
                     [

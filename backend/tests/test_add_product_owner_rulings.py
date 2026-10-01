@@ -15,9 +15,12 @@ F13 / D5  New products get a readable SKU, category-brand-model-colour-size,
           SKUs never change.
 F69       The FORM create door keeps the weight the form sends (`weight`, the
           key PUT writes and the form reads), so the "same model" chip can copy it.
-F73       Reorder level: -1 = NOT SET = no low-stock alert. A new product is
-          born -1, PUT accepts -1, and GET /inventory/low-stock lists a product
-          only at or under its own level (reorder_policy.low_stock_rows).
+F73       Reorder level (owner 2026-09-28 and 2026-10-01): only a level above 0
+          is a level. -1, 0, below 0, missing, garbage or no product row = NOT
+          SET = no low-stock alert, no top-up, 'not set' on screen. A new
+          product is born -1, PUT accepts -1, and ONE helper decides for every
+          reader (reorder_policy.reorder_level / is_low_stock / low_stock_rows,
+          the only caller of find_low_stock -- guarded structurally below).
 
 Run: JWT_SECRET_KEY=test ENVIRONMENT=test python -m pytest backend/tests/test_add_product_owner_rulings.py -q
 """
@@ -401,40 +404,52 @@ def test_f73_low_stock_skips_a_product_whose_level_is_not_set(monkeypatch):
 
 
 def test_f73_the_one_rule_says_not_set_never_minus_one():
-    """reorder_policy.reorder_level is what every reader and screen gets: -1
-    or garbage is None (the screens print 'not set'), never -1. A product that
-    never stored a level is NOT -1: it keeps the old threshold of 5."""
+    """reorder_policy.reorder_level is what every reader and screen gets: only
+    a level above 0 is a level; -1, 0, below 0, missing, garbage or no product
+    doc at all is None (the screens print 'not set'). Owner 2026-10-01: a 0
+    can never fire with stock on the shelf, so it is not set too."""
     from api.services.reorder_policy import is_low_stock, reorder_level
 
-    assert reorder_level({"reorder_point": -1}) is None
-    assert reorder_level({}) == 5
-    assert is_low_stock({}, 5) and not is_low_stock({}, 6)
-    assert reorder_level({"reorder_point": "x"}) is None
-    assert reorder_level({"reorder_point": 0}) == 0
+    for not_set in ({"reorder_point": -1}, {"reorder_point": 0}, {"reorder_point": "0"},
+                    {"reorder_point": -3}, {}, {"reorder_point": None},
+                    {"reorder_point": "x"}, {"reorder_point": ""}, None,
+                    {"inventory": {"reorder_level": 0}}, {"inventory": {"reorder_level": -1}}):
+        assert reorder_level(not_set) is None, not_set
+        assert not is_low_stock(not_set, 0) and not is_low_stock(not_set, -5), not_set
+    assert reorder_level({"reorder_point": 3}) == 3
+    assert reorder_level({"reorder_point": "3"}) == 3
     assert reorder_level({"inventory": {"reorder_level": 3}}) == 3  # a catalog doc
-    assert not is_low_stock({"reorder_point": -1}, -5)  # oversold, still no alert
     assert is_low_stock({"reorder_point": 2}, 2)
+    assert not is_low_stock({"reorder_point": 2}, 3)
 
 
-def test_f73_a_product_that_never_stored_a_level_still_alerts(monkeypatch):
-    """Bulk create, PO walk-in, vendor import and catalog promote never stamped a
-    level. Those products must stay on the low-stock list at the old 5 (the
-    Mongo suites test_inventory_quantity / test_inventory_correctness assert the
-    same against a real database in CI)."""
-    listed = _low_stock(
-        monkeypatch,
-        [
-            {"product_id": "P-LEGACY", "sku": "L"},
-            {"product_id": "P-LEGACY-FULL", "sku": "F"},
-            {"product_id": "P-UNSET", "sku": "U", "reorder_point": -1},
-        ],
-        [_one_unit("P-LEGACY")]
-        + [dict(_one_unit("P-LEGACY-FULL"), stock_id=f"UF{i}") for i in range(6)]
-        + [_one_unit("P-UNSET"), _one_unit("P-NO-MASTER")],
-    )
-    # 1 unit at 5 -> low; 6 units -> not; -1 -> never; a unit whose product
-    # row is gone never stored a level either -> listed as before.
-    assert listed == {"P-LEGACY", "P-NO-MASTER"}
+# Every low-stock reader below is fed the SAME shelf: one unit each of a
+# product with a typed level (P-SET, 2) and of every NOT-SET shape, plus a unit
+# whose product row is gone (the 09-07 wipe). Only P-SET is ever low; P-SET
+# also proves each reader really ran (a swallowed error lists nothing).
+_NOT_SET_LEVELS = {"P-UNSET": -1, "P-ZERO": 0, "P-NEG": -3, "P-GARBAGE": "x", "P-BLANK": ""}
+
+
+def _shelf_products(**extra):
+    rows = [
+        {"product_id": "P-SET", "sku": "S-SET", "name": "Set", "reorder_point": 2, **extra},
+        {"product_id": "P-MISSING", "sku": "S-MISSING", "name": "Missing", **extra},
+    ]
+    return rows + [
+        {"product_id": pid, "sku": "S" + pid[1:], "name": pid, "reorder_point": rp, **extra}
+        for pid, rp in _NOT_SET_LEVELS.items()
+    ]
+
+
+def _shelf_units():
+    return [_one_unit(p["product_id"]) for p in _shelf_products()] + [_one_unit("P-NO-ROW")]
+
+
+def test_f73_only_a_level_above_0_puts_a_product_on_the_low_stock_list(monkeypatch):
+    """GET /inventory/low-stock: a level of 0 or below, a missing or garbage
+    level, or a unit whose product row is gone is never listed (it used to be
+    listed at the legacy 5, and a 0 level silently never fired)."""
+    assert _low_stock(monkeypatch, _shelf_products(), _shelf_units()) == {"P-SET"}
 
 
 def test_f73_the_stock_ledger_badge_is_the_products_own_level():
@@ -446,7 +461,9 @@ def test_f73_the_stock_ledger_badge_is_the_products_own_level():
         "P-UNSET": ({"reorder_point": -1}, 1, (False, None)),
         "P-AT": ({"reorder_point": 2}, 2, (True, 2)),
         "P-ABOVE": ({"reorder_point": 2}, 3, (False, 2)),
-        "P-LEGACY": ({}, 4, (True, 5)),
+        "P-MISSING": ({}, 0, (False, None)),
+        "P-ZERO": ({"reorder_point": 0}, 0, (False, None)),
+        "P-GARBAGE": ({"reorder_point": "x"}, 0, (False, None)),
     }
     for pid, (product, on_hand, want) in cases.items():
         row = inv._ledger_row({"product_id": pid, "sku": pid, **product}, on_hand, 0, {}, "S1")
@@ -464,19 +481,23 @@ def _alert(product):
 
 def test_f73_no_low_stock_or_reorder_alert_until_a_level_is_typed():
     """Stock Alerts: the velocity branches ask the level too (owner: no alert
-    until a level is typed)."""
-    for rq in (-1, 4):  # reorder suggestions off, and on
-        for stock in (3, 5, 0):
-            got = _alert({"stock_quantity": stock, "reorder_point": -1, "reorder_quantity": rq})
-            assert (got or {}).get("alertType") not in ("LOW_STOCK", "REORDER_ALERT"), (rq, stock, got)
+    until a level is typed; 0 or missing is not typed)."""
+    for level in (-1, 0, "x", None):
+        for rq in (-1, 4):  # reorder suggestions off, and on
+            for stock in (3, 5, 0):
+                product = {"stock_quantity": stock, "reorder_quantity": rq}
+                if level is not None:
+                    product["reorder_point"] = level
+                got = _alert(product)
+                assert (got or {}).get("alertType") not in ("LOW_STOCK", "REORDER_ALERT"), (
+                    level, rq, stock, got)
 
 
-def test_f73_guard_a_typed_or_legacy_level_still_gets_its_alerts():
-    for product in ({"reorder_point": 2}, {}):  # typed; never stored (legacy 5)
-        low = _alert({**product, "stock_quantity": 5, "reorder_quantity": -1})
-        assert low["alertType"] == "LOW_STOCK"
-        reorder = _alert({**product, "stock_quantity": 3, "reorder_quantity": 4})
-        assert reorder["alertType"] == "REORDER_ALERT"
+def test_f73_guard_a_typed_level_still_gets_its_alerts():
+    low = _alert({"reorder_point": 2, "stock_quantity": 5, "reorder_quantity": -1})
+    assert low["alertType"] == "LOW_STOCK"
+    reorder = _alert({"reorder_point": 2, "stock_quantity": 3, "reorder_quantity": 4})
+    assert reorder["alertType"] == "REORDER_ALERT"
 
 
 # -- F73: every reader asks the PRODUCT's level, through the one rule --------
@@ -509,30 +530,147 @@ def _analytics(monkeypatch, products, units):
 def test_f73_analytics_counts_judge_the_product_never_a_stock_unit(monkeypatch):
     """/analytics dashboard-summary, inventory-intelligence and enterprise-kpis
     count THE low-stock list (low_stock_rows). A stock_units row is one unit
-    with no level: judged on its own it read the legacy 5, so the 3 units of a
-    -1 product counted as 3 low items."""
-    units = [
+    with no level: judged on its own it read a level off nothing, so the 3
+    units of a -1 product counted as 3 low items."""
+    units = [dict(u, quantity=1, sales_velocity=1) for u in _shelf_units()] + [
         dict(_one_unit("P-UNSET"), stock_id=f"UU{i}", quantity=1, sales_velocity=1)
-        for i in range(3)
-    ] + [dict(_one_unit("P-SET"), quantity=1, sales_velocity=1)]
-    summary, intel, kpis = _analytics(
-        monkeypatch,
-        [
-            {"product_id": "P-UNSET", "sku": "U", "reorder_point": -1, "cost_price": 50},
-            {"product_id": "P-SET", "sku": "A", "reorder_point": 2, "cost_price": 100},
-        ],
-        units,
-    )
-    # P-SET proves each list really ran (a swallowed error counts nothing).
+        for i in range(2)
+    ]
+    products = [
+        dict(p, cost_price=100 if p["product_id"] == "P-SET" else 50) for p in _shelf_products()
+    ]
+    summary, intel, kpis = _analytics(monkeypatch, products, units)
     assert summary["low_stock_items"] == 1
     assert kpis["inventory"]["low_stock_items"] == 1
     assert intel["low_stock"]["count"] == 1
     assert intel["low_stock"]["items"] == [
-        {"sku": "A", "name": "", "quantity": 1, "reorder_point": 2}
+        {"sku": "S-SET", "name": "Set", "quantity": 1, "reorder_point": 2}
     ]
     assert intel["low_stock"]["total_value"] == 100
-    # Fast-moving reads the product's level too: the -1 product's units never.
+    # Fast-moving reads the product's level too: no level, no fast-mover.
     assert intel["fast_moving"]["count"] == 1
+
+
+def _repos(monkeypatch, modules, products, units):
+    """Point each module's stock + product repositories at one in-memory shelf
+    (mongomock: the transfer pass groups on a composite _id)."""
+    db = _mongo()
+    db.stock_units.insert_many([dict(u) for u in units])
+    db.products.insert_many([dict(p) for p in products])
+    stock, prods = StockRepository(db.stock_units), ProductRepository(db.products)
+    for mod in modules:
+        monkeypatch.setattr(mod, "get_stock_repository", lambda: stock)
+        monkeypatch.setattr(mod, "get_product_repository", lambda: prods)
+
+
+def test_f73_stock_low_stock_mode_and_transfer_recommendations_read_the_one_list(monkeypatch):
+    """GET /inventory/stock?low_stock=true and GET /inventory/transfer-
+    recommendations list only P-SET (they used find_low_stock's fixed 5)."""
+    donors = [  # another shop holding plenty of everything, so any low product can be refilled
+        dict(_one_unit(p["product_id"]), stock_id=f"D-{p['product_id']}-{i}", store_id="S2")
+        for p in _shelf_products()
+        for i in range(20)
+    ]
+    _repos(monkeypatch, [inv], _shelf_products(), _shelf_units() + donors)
+    mode = asyncio.run(inv.get_stock(
+        store_id=None, product_id=None, category=None, created_by=None,
+        low_stock=True, current_user=_MGR,
+    ))
+    assert {r["_id"] for r in mode["items"]} == {"P-SET"}
+    recs = asyncio.run(inv.transfer_recommendations(store_id=None, threshold=5, current_user=_MGR))
+    assert {r["product_id"] for r in recs["recommendations"]} == {"P-SET"}, recs
+
+
+def test_f73_report_low_stock_counts_read_the_one_list(monkeypatch):
+    """GET /reports/dashboard, /reports/inventory and /reports/inventory/summary
+    count the one list: 1, never the 7 products on hand under a fixed 5."""
+    from api.routers.reports import inventory as rep_inv
+    from api.routers.reports import overview
+
+    _repos(monkeypatch, [overview, rep_inv], _shelf_products(), _shelf_units())
+    for name in ("get_order_repository", "get_customer_repository", "get_task_repository"):
+        monkeypatch.setattr(overview, name, lambda: None)
+    dash = asyncio.run(overview.dashboard_stats(store_id=None, current_user=_MGR))
+    report = asyncio.run(overview.inventory_report(store_id=None, current_user=_MGR))
+    summary = asyncio.run(rep_inv.inventory_summary(store_id=None, current_user=_MGR))
+    assert dash["lowStockItems"] == 1
+    assert report["lowStock"] == 1
+    assert summary["summary"]["low_stock_count"] == 1
+
+
+def _walk(obj):
+    """Every dict/list inside a response, depth first."""
+    yield obj
+    if isinstance(obj, dict):
+        for v in obj.values():
+            yield from _walk(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _walk(v)
+
+
+def test_f73_hub_widgets_count_low_stock_by_the_one_rule(monkeypatch):
+    """Hub stock-count-status and the owner digest judge each product's own
+    level: only P-SET (1 on hand, level 2) is low; a garbage level is not set
+    (the old int() copy 500'd the widget on it)."""
+    from api.routers import dashboard_widgets as dw
+
+    db = _mongo()
+    db.products.insert_many(_shelf_products(stock_quantity=1, is_active=True))
+    monkeypatch.setattr(dw, "_coll", lambda name: db[name])
+    status = asyncio.run(dw.inventory_stock_count_status(store_id=None, current_user=_ADMIN))
+    assert (status["low_stock"], status["out_of_stock"]) == (1, 0)
+    digest = asyncio.run(dw.owner_digest(store_id=None, current_user=_ADMIN))
+    rows = [r for r in _walk(digest) if isinstance(r, dict) and "reorder_point" in r]
+    assert [(r["sku"], r["reorder_point"]) for r in rows] == [("S-SET", 2)], digest
+
+
+def test_f73_catalog_inventory_needs_reorder_only_at_a_level(monkeypatch):
+    """GET /catalog/products/{id}/inventory: needs_reorder is the one rule on
+    the catalog doc's inventory.reorder_level; 0 and -1 are not set."""
+    docs = {
+        pid: {"sku": pid, "title": pid,
+              "inventory": {"total_quantity": 0, "locations": {}, "reorder_level": lvl}}
+        for pid, lvl in (("C-SET", 2), ("C-ZERO", 0), ("C-UNSET", -1))
+    }
+    monkeypatch.setattr(cat, "_get_catalog_product", docs.get)
+    got = {}
+    for pid in docs:
+        r = asyncio.run(cat.get_product_inventory(pid, current_user=_ADMIN))
+        got[pid] = (r["reorder_level"], r["needs_reorder"])
+    assert got == {"C-SET": (2, True), "C-ZERO": (None, False), "C-UNSET": (None, False)}
+
+
+def _find_low_stock_callers():
+    """(file, line) of every `.find_low_stock(` call in the backend, tests excluded."""
+    import ast
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    hits = []
+    for path in root.rglob("*.py"):
+        rel = path.relative_to(root).as_posix()
+        if rel.startswith("tests/") or "site-packages" in rel:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+        hits += [
+            (rel, node.lineno)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "find_low_stock"
+        ]
+    return hits
+
+
+def test_f73_guard_only_the_one_helper_calls_find_low_stock():
+    """Structural guard (owner 2026-10-01: ONE helper decides set/low for every
+    reader). find_low_stock counts units under a FIXED threshold and never asks
+    the product's level, so a reader calling it directly brings the old 5 back
+    -- and that reader's own tests can stay green on legacy-shaped data. Only
+    reorder_policy.low_stock_rows may call it; every other reader calls that."""
+    callers = _find_low_stock_callers()
+    assert [rel for rel, _ in callers] == ["api/services/reorder_policy.py"], callers
 
 
 def _mongo():
@@ -542,24 +680,24 @@ def _mongo():
 
 
 def test_f73_jarvis_counts_and_lists_low_stock_by_the_same_rule(monkeypatch):
-    """Jarvis's overview count and its 'value at risk' list read the same
-    products through the one rule: a product that never stored a level is low
-    at the legacy 5 in both, a -1 product in neither."""
+    """Jarvis's overview count, its inventory alerts and its 'value at risk'
+    list read the same products through the one rule: only a level above 0
+    is low; 0, -1, missing or garbage never."""
     from api.routers import jarvis
 
     db = _mongo()
-    db.products.insert_many([
-        {"name": "LEGACY", "stock_quantity": 3, "mrp": 100},
-        {"name": "SET", "stock_quantity": 2, "reorder_point": 4, "mrp": 100},
-        {"name": "UNSET", "stock_quantity": 1, "reorder_point": -1, "mrp": 100},
-        {"name": "ABOVE", "stock_quantity": 9, "reorder_point": 4, "mrp": 100},
-    ])
+    db.products.insert_many(_shelf_products(stock_quantity=1, mrp=100, is_active=True))
+    db.products.insert_one({"name": "ABOVE", "sku": "S-ABOVE", "stock_quantity": 9,
+                            "reorder_point": 4, "mrp": 100})
     monkeypatch.setattr(jarvis, "get_db_collection", lambda name: db[name])
     overview = jarvis.JarvisAnalyticsEngine._compute_overview_live()
     ctx = jarvis.JarvisAnalyticsEngine.get_extended_context()
+    live = jarvis.JarvisAnalyticsEngine._compute_inventory_live()
     listed = {r["name"]: r["reorder_point"] for r in ctx["low_stock_value_at_risk"]}
-    assert listed == {"LEGACY": 5, "SET": 4}
-    assert overview["inventory"]["low_stock_items"] == len(listed)
+    assert listed == {"Set": 2}
+    assert overview["inventory"]["low_stock_items"] == 1
+    alerts = [r for r in _walk(live) if isinstance(r, dict) and r.get("type") == "low_stock"]
+    assert [(r["sku"], r["reorder_point"]) for r in alerts] == [("S-SET", 2)], live
 
 
 def _recommendations(monkeypatch, products, sold):
@@ -589,33 +727,40 @@ def _recommendations(monkeypatch, products, sold):
 
 def test_f73_a_sku_with_no_product_row_is_never_topped_up_to_five(monkeypatch):
     """A SKU sold in the window whose product row is gone (the 09-07 wipe) has
-    no level at all: the purchase report suggests what its sales need (1), not
-    a legacy top-up to 5."""
+    no level at all: the purchase report suggests what its sales need (1),
+    never a top-up to a level it does not have."""
     recs = _recommendations(monkeypatch, [], {"P-GONE": 2})
     assert recs == {"P-GONE": (1, None)}
 
 
-def test_f73_guard_a_product_that_never_stored_a_level_buys_to_five(monkeypatch):
-    """The one rule: a product row with no level is low at 5 on Low Stock, so
-    the purchase report reorders it at 5 too."""
-    recs = _recommendations(monkeypatch, [{"product_id": "P-LEGACY", "sku": "L"}], {"P-LEGACY": 2})
-    assert recs == {"P-LEGACY": (5, 5)}
+def test_f73_no_level_buys_only_what_sales_need(monkeypatch):
+    """Purchase recommendations: a product with no level (missing, 0, -1,
+    garbage) gets no top-up to a level -- just what its sales need (1) -- and
+    reports reorder_point None ('not set'). A typed 5 still tops up to 5."""
+    products = [
+        dict(p, reorder_point=5) if p["product_id"] == "P-SET" else p for p in _shelf_products()
+    ]
+    sold = {p["product_id"]: 2 for p in products}
+    want = {pid: (1, None) for pid in sold}
+    want["P-SET"] = (5, 5)
+    assert _recommendations(monkeypatch, products, sold) == want
 
 
 def test_f73_get_product_sends_the_level_the_rule_gives(monkeypatch):
     """GET /products/{id} (the Add/Edit form's read) carries the level the rule
     gives, so an edit that never touches the level round-trips it: a product
-    that never stored one reads 5 (never blank -> -1, which switched its
-    alerts off), not set reads -1."""
+    with no level (missing, 0, -1, garbage) reads -1 = not set (the form's
+    blank box), a typed level reads itself."""
     repo = ProductRepository(StrictCollection("products", [
         {"product_id": "P-LEGACY", "sku": "L"},
         {"product_id": "P-UNSET", "sku": "U", "reorder_point": -1},
+        {"product_id": "P-ZERO", "sku": "Z", "reorder_point": 0},
         {"product_id": "P-SET", "sku": "S", "reorder_point": 3},
         {"product_id": "P-GARBAGE", "sku": "G", "reorder_point": "x"},
     ]))
     monkeypatch.setattr(prod_router, "get_product_repository", lambda: repo)
     got = {
         pid: asyncio.run(prod_router.get_product(pid, current_user=_ADMIN))["reorder_point"]
-        for pid in ("P-LEGACY", "P-UNSET", "P-SET", "P-GARBAGE")
+        for pid in ("P-LEGACY", "P-UNSET", "P-ZERO", "P-SET", "P-GARBAGE")
     }
-    assert got == {"P-LEGACY": 5, "P-UNSET": -1, "P-SET": 3, "P-GARBAGE": -1}
+    assert got == {"P-LEGACY": -1, "P-UNSET": -1, "P-ZERO": -1, "P-SET": 3, "P-GARBAGE": -1}

@@ -69,16 +69,17 @@ async def transfer_recommendations(
                             "qty": {"$sum": {"$ifNull": ["$quantity", 1]}},
                         }
                     },
+                    # Flatten the pair: the repository's aggregate() turns any
+                    # non-string _id into a string (its ObjectId fix), which
+                    # left key.get() failing and this endpoint always empty.
+                    {"$project": {"_id": 0, "p": "$_id.p", "s": "$_id.s", "qty": 1}},
                 ]
             )
             or []
         )
         store_levels: Dict[str, Dict[str, int]] = {}
         for r in rows:
-            key = r.get("_id", {})
-            store_levels.setdefault(key.get("p"), {})[key.get("s")] = int(
-                r.get("qty", 0) or 0
-            )
+            store_levels.setdefault(r.get("p"), {})[r.get("s")] = int(r.get("qty", 0) or 0)
 
         # Enrich with product names.
         names: Dict[str, str] = {}
