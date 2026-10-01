@@ -606,7 +606,7 @@ class OracleAgent(JarvisAgent):
             qty = recommended_qty(
                 on_hand=on_hand, effective_rate=eff, horizon_days=horizon,
                 lead_time_days=self._DEFAULT_LEAD_TIME_DAYS,
-                reorder_point=reorder_point or 0,
+                reorder_point=reorder_point,
             )
             name = d.get("name") or pid
             brand = d.get("brand") or ""

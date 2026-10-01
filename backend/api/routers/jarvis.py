@@ -23,7 +23,7 @@ import logging
 
 from .auth import get_current_user
 from ..services.reorder_policy import auto_reorder_disabled as _reorder_disabled
-from ..services.reorder_policy import low_stock_rows
+from ..services.reorder_policy import low_stock_rows, top_up
 
 # IST (TZ-P3): the server clock is UTC; every business "today" key below must be
 # the IST calendar day or the 00:00-05:30 IST window reads the PREVIOUS day.
@@ -480,10 +480,8 @@ class JarvisAnalyticsEngine:
                             "product": name,
                             "store_id": r["store_id"],
                             "current": r["quantity"],
-                            "recommended_order": max(
-                                int(p.get("reorder_quantity") or 0),
-                                r["reorder_point"] * 2,
-                                20,
+                            "recommended_order": top_up(
+                                r["reorder_point"], r["quantity"]
                             ),
                             "supplier": p.get("vendor") or p.get("brand") or "—",
                         }
@@ -1289,7 +1287,7 @@ class JarvisAnalyticsEngine:
                 for r in lows:
                     p = prices.get(r["product_id"]) or {}
                     price = float(p.get("offer_price") or p.get("mrp") or 0)
-                    gap = r["reorder_point"] - r["quantity"]
+                    gap = top_up(r["reorder_point"], r["quantity"])
                     low_stock.append({
                         "name": r["name"], "brand": p.get("brand"),
                         "category": p.get("category"), "store_id": r["store_id"],
