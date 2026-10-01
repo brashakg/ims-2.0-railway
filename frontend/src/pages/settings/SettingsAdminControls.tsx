@@ -1,13 +1,22 @@
 // ============================================================================
-// IMS 2.0 — Admin Control Panel (Exhaustive Store-wise & Role-wise Config)
+// IMS 2.0 - Settings · Admin controls (Wave 6 B21)
 // ============================================================================
-// Superadmin controls for the entire software: module access per store,
-// role permissions, discount limits, feature flags, operational rules
+// The old AdminControlPanel kept four editors behind a second tab layer on
+// /settings/system with no address. Each is now its own settings section:
+//   /settings/modules        StoreModulesSection      admin_controls.store_modules
+//   /settings/permissions    RolePermissionsSection   admin_controls.role_permissions
+//   /settings/discount-caps  DiscountCapsSection      admin_controls.discount_limits
+//   /settings/rules          OperationalRulesSection  admin_controls.operational_rules
+// Editor bodies moved verbatim. Each section loads and saves ONLY its own key:
+// the backend PUT is a `$set` of the keys sent, so a section never rewrites a
+// sibling's rows with the copy it happened to load (the one-button panel used
+// to send all four on every save).
 
 import { useState, useEffect } from 'react';
-import { adminStoreApi, settingsApi } from '../../services/api';
+import { settingsApi } from '../../services/api/settings';
+import { adminStoreApi } from '../../services/api/stores';
 import {
-  Store, Shield, Eye, EyeOff, Save, Loader2,
+  Shield, Eye, EyeOff, Save, Loader2,
   ShoppingCart, Stethoscope, Wrench, Package, BarChart3,
   Users, FileText, CreditCard, Settings,
 } from 'lucide-react';
@@ -116,16 +125,46 @@ const DEFAULT_RULES: OperationalRule[] = [
 ];
 
 // -----------------------------------------------------------------------
-// Component
+// Save bar - the one save door for all four sections
 // -----------------------------------------------------------------------
 
-type PanelTab = 'modules' | 'permissions' | 'discounts' | 'rules';
+type AdminControlsPayload = Parameters<typeof settingsApi.updateAdminControls>[0];
 
-export function AdminControlPanel() {
+function SaveBar({ label, payload }: { label: string; payload: () => AdminControlsPayload }) {
   const toast = useToast();
-  const [activeTab, setActiveTab] = useState<PanelTab>('modules');
   const [isSaving, setIsSaving] = useState(false);
 
+  const handleSave = async () => {
+    setIsSaving(true);
+    try {
+      await settingsApi.updateAdminControls(payload());
+      toast.success('Admin settings saved successfully');
+    } catch {
+      toast.error('Failed to save settings');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  return (
+    <div className="flex justify-end pt-4 border-t border-gray-200">
+      <button
+        onClick={handleSave}
+        disabled={isSaving}
+        className="flex items-center gap-2 px-6 py-2.5 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50"
+      >
+        {isSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+        {isSaving ? 'Saving...' : `Save ${label}`}
+      </button>
+    </div>
+  );
+}
+
+// -----------------------------------------------------------------------
+// /settings/modules - which modules each store can use
+// -----------------------------------------------------------------------
+
+export function StoreModulesSection() {
   // Store module access — fetch dynamically
   const [storeModules, setStoreModules] = useState<StoreModuleConfig[]>(DEFAULT_STORES);
 
@@ -144,30 +183,73 @@ export function AdminControlPanel() {
 
     // Load saved admin controls
     settingsApi.getAdminControls().then((data: any) => {
-      if (data?.discount_limits?.length > 0) {
-        setDiscountLimits(data.discount_limits);
-      }
-      if (data?.operational_rules && Object.keys(data.operational_rules).length > 0) {
-        setRules(prev => prev.map(r => ({
-          ...r,
-          value: data.operational_rules[r.id] !== undefined ? data.operational_rules[r.id] : r.value,
-        })));
-      }
       if (data?.store_modules && Object.keys(data.store_modules).length > 0) {
         setStoreModules(prev => prev.map(s => ({
           ...s,
           modules: data.store_modules[s.storeId] || s.modules,
         })));
       }
-      if (data?.role_permissions) {
-        setRolePermissions(prev => prev.map(rp => ({
-          ...rp,
-          permissions: data.role_permissions[rp.roleId] || rp.permissions,
-        })));
-      }
     }).catch(() => {});
   }, []);
 
+  const toggleStoreModule = (storeId: string, moduleId: string) => {
+    setStoreModules(prev => prev.map(s =>
+      s.storeId === storeId ? { ...s, modules: { ...s.modules, [moduleId]: !s.modules[moduleId] } } : s
+    ));
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="space-y-4">
+        <p className="text-sm text-gray-500">Control which modules are available at each store location.</p>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-white text-gray-500 text-left">
+              <tr>
+                <th className="px-4 py-3 sticky left-0 bg-white z-10">Store</th>
+                {MODULES.map(m => (
+                  <th key={m.id} className="px-3 py-3 text-center whitespace-nowrap">
+                    <div className="flex flex-col items-center gap-1">
+                      <m.icon className="w-4 h-4" />
+                      <span className="text-xs">{m.label}</span>
+                    </div>
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-700">
+              {storeModules.map(store => (
+                <tr key={store.storeId} className="text-gray-900">
+                  <td className="px-4 py-3 font-medium sticky left-0 bg-white z-10 whitespace-nowrap">{store.storeName}</td>
+                  {MODULES.map(m => (
+                    <td key={m.id} className="px-3 py-3 text-center">
+                      <button
+                        onClick={() => toggleStoreModule(store.storeId, m.id)}
+                        className={clsx('p-1 rounded', store.modules[m.id] ? 'text-green-600' : 'text-gray-600')}
+                      >
+                        {store.modules[m.id] ? <Eye className="w-5 h-5" /> : <EyeOff className="w-5 h-5" />}
+                      </button>
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <SaveBar
+        label="Store Modules"
+        payload={() => ({ store_modules: Object.fromEntries(storeModules.map(s => [s.storeId, s.modules])) })}
+      />
+    </div>
+  );
+}
+
+// -----------------------------------------------------------------------
+// /settings/permissions - the role x permission matrix
+// -----------------------------------------------------------------------
+
+export function RolePermissionsSection() {
   // Role permissions
   const [rolePermissions, setRolePermissions] = useState<RolePermission[]>(
     ROLES.map(role => ({
@@ -179,303 +261,247 @@ export function AdminControlPanel() {
     }))
   );
 
-  // Discount limits
-  const [discountLimits, setDiscountLimits] = useState<DiscountLimit[]>(DEFAULT_DISCOUNT_LIMITS);
-
-  // Operational rules
-  const [rules, setRules] = useState<OperationalRule[]>(DEFAULT_RULES);
-
-  const handleSave = async () => {
-    setIsSaving(true);
-    try {
-      const payload = {
-        store_modules: Object.fromEntries(storeModules.map(s => [s.storeId, s.modules])),
-        discount_limits: discountLimits,
-        operational_rules: Object.fromEntries(rules.map(r => [r.id, r.value])),
-        role_permissions: Object.fromEntries(rolePermissions.map(rp => [rp.roleId, rp.permissions])),
-      };
-      await settingsApi.updateAdminControls(payload);
-      toast.success('Admin settings saved successfully');
-    } catch {
-      toast.error('Failed to save settings');
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  const toggleStoreModule = (storeId: string, moduleId: string) => {
-    setStoreModules(prev => prev.map(s =>
-      s.storeId === storeId ? { ...s, modules: { ...s.modules, [moduleId]: !s.modules[moduleId] } } : s
-    ));
-  };
-
-  const TABS: { id: PanelTab; label: string; icon: typeof Store }[] = [
-    { id: 'modules', label: 'Store Modules', icon: Store },
-    { id: 'permissions', label: 'Role Permissions', icon: Shield },
-    { id: 'discounts', label: 'Discount Limits', icon: CreditCard },
-    { id: 'rules', label: 'Operational Rules', icon: Settings },
-  ];
+  useEffect(() => {
+    // Load saved admin controls
+    settingsApi.getAdminControls().then((data: any) => {
+      if (data?.role_permissions) {
+        setRolePermissions(prev => prev.map(rp => ({
+          ...rp,
+          permissions: data.role_permissions[rp.roleId] || rp.permissions,
+        })));
+      }
+    }).catch(() => {});
+  }, []);
 
   return (
     <div className="space-y-6">
-      {/* Tab Bar */}
-      <div className="flex flex-wrap gap-2 border-b border-gray-200 pb-1">
-        {TABS.map(tab => (
-          <button
-            key={tab.id}
-            onClick={() => setActiveTab(tab.id)}
-            className={clsx(
-              'flex items-center gap-2 px-4 py-2.5 text-sm font-medium rounded-t-lg transition-colors',
-              activeTab === tab.id ? 'bg-gray-100 text-gray-900' : 'text-gray-500 hover:text-gray-700'
-            )}
-          >
-            <tab.icon className="w-4 h-4" />
-            {tab.label}
-          </button>
-        ))}
-      </div>
-
-      {/* ============================================================= */}
-      {/* STORE MODULE ACCESS                                            */}
-      {/* ============================================================= */}
-      {activeTab === 'modules' && (
-        <div className="space-y-4">
-          <p className="text-sm text-gray-500">Control which modules are available at each store location.</p>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="bg-white text-gray-500 text-left">
-                <tr>
-                  <th className="px-4 py-3 sticky left-0 bg-white z-10">Store</th>
-                  {MODULES.map(m => (
-                    <th key={m.id} className="px-3 py-3 text-center whitespace-nowrap">
-                      <div className="flex flex-col items-center gap-1">
-                        <m.icon className="w-4 h-4" />
-                        <span className="text-xs">{m.label}</span>
-                      </div>
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-700">
-                {storeModules.map(store => (
-                  <tr key={store.storeId} className="text-gray-900">
-                    <td className="px-4 py-3 font-medium sticky left-0 bg-white z-10 whitespace-nowrap">{store.storeName}</td>
-                    {MODULES.map(m => (
-                      <td key={m.id} className="px-3 py-3 text-center">
-                        <button
-                          onClick={() => toggleStoreModule(store.storeId, m.id)}
-                          className={clsx('p-1 rounded', store.modules[m.id] ? 'text-green-600' : 'text-gray-600')}
-                        >
-                          {store.modules[m.id] ? <Eye className="w-5 h-5" /> : <EyeOff className="w-5 h-5" />}
-                        </button>
-                      </td>
-                    ))}
-                  </tr>
+      <div className="space-y-4">
+        <p className="text-sm text-gray-500">Fine-grained permission control for each role across all modules.</p>
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead className="bg-white text-gray-500 text-left">
+              <tr>
+                <th className="px-3 py-2 sticky left-0 bg-white z-10">Permission</th>
+                {ROLES.map(role => (
+                  <th key={role.id} className="px-2 py-2 text-center whitespace-nowrap">{role.name}</th>
                 ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {/* ============================================================= */}
-      {/* ROLE PERMISSIONS MATRIX                                        */}
-      {/* ============================================================= */}
-      {activeTab === 'permissions' && (
-        <div className="space-y-4">
-          <p className="text-sm text-gray-500">Fine-grained permission control for each role across all modules.</p>
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs">
-              <thead className="bg-white text-gray-500 text-left">
-                <tr>
-                  <th className="px-3 py-2 sticky left-0 bg-white z-10">Permission</th>
-                  {ROLES.map(role => (
-                    <th key={role.id} className="px-2 py-2 text-center whitespace-nowrap">{role.name}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-700">
-                {PERMISSIONS.map(perm => (
-                  <tr key={perm} className="text-gray-900">
-                    <td className="px-3 py-2 font-medium sticky left-0 bg-white z-10 whitespace-nowrap capitalize">
-                      {perm.replace(/_/g, ' ')}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-700">
+              {PERMISSIONS.map(perm => (
+                <tr key={perm} className="text-gray-900">
+                  <td className="px-3 py-2 font-medium sticky left-0 bg-white z-10 whitespace-nowrap capitalize">
+                    {perm.replace(/_/g, ' ')}
+                  </td>
+                  {rolePermissions.map(role => (
+                    <td key={role.roleId} className="px-2 py-2 text-center">
+                      <button
+                        onClick={() => {
+                          if (role.roleId === 'SUPERADMIN') return; // Can't modify superadmin
+                          setRolePermissions(prev => prev.map(rp =>
+                            rp.roleId === role.roleId
+                              ? { ...rp, permissions: { ...rp.permissions, [perm]: !rp.permissions[perm] } }
+                              : rp
+                          ));
+                        }}
+                        className={clsx(
+                          'inline-block w-3 h-3 rounded-full transition-colors',
+                          role.permissions[perm] ? 'bg-green-500' : 'bg-red-500/30',
+                          role.roleId !== 'SUPERADMIN' && 'cursor-pointer hover:ring-2 hover:ring-white/30'
+                        )}
+                        disabled={role.roleId === 'SUPERADMIN'}
+                        title={role.permissions[perm] ? 'Enabled - click to disable' : 'Disabled - click to enable'}
+                      />
                     </td>
-                    {rolePermissions.map(role => (
-                      <td key={role.roleId} className="px-2 py-2 text-center">
-                        <button
-                          onClick={() => {
-                            if (role.roleId === 'SUPERADMIN') return; // Can't modify superadmin
-                            setRolePermissions(prev => prev.map(rp =>
-                              rp.roleId === role.roleId
-                                ? { ...rp, permissions: { ...rp.permissions, [perm]: !rp.permissions[perm] } }
-                                : rp
-                            ));
-                          }}
-                          className={clsx(
-                            'inline-block w-3 h-3 rounded-full transition-colors',
-                            role.permissions[perm] ? 'bg-green-500' : 'bg-red-500/30',
-                            role.roleId !== 'SUPERADMIN' && 'cursor-pointer hover:ring-2 hover:ring-white/30'
-                          )}
-                          disabled={role.roleId === 'SUPERADMIN'}
-                          title={role.permissions[perm] ? 'Enabled - click to disable' : 'Disabled - click to enable'}
-                        />
-                      </td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
-      )}
+      </div>
+      <SaveBar
+        label="Role Permissions"
+        payload={() => ({ role_permissions: Object.fromEntries(rolePermissions.map(rp => [rp.roleId, rp.permissions])) })}
+      />
+    </div>
+  );
+}
 
-      {/* ============================================================= */}
-      {/* DISCOUNT LIMITS                                                */}
-      {/* ============================================================= */}
-      {activeTab === 'discounts' && (
-        <div className="space-y-4">
-          <p className="text-sm text-gray-500">Set maximum discount percentages and approval requirements per role.</p>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {discountLimits.map(dl => (
-              <div key={dl.roleId} className="bg-white border border-gray-200 rounded-lg p-4">
-                <div className="flex items-center gap-2 mb-3">
-                  <Shield className="w-4 h-4 text-gray-500" />
-                  <h4 className="font-medium text-gray-900">{dl.roleName}</h4>
+// -----------------------------------------------------------------------
+// /settings/discount-caps - max discount + approval threshold per role
+// -----------------------------------------------------------------------
+
+export function DiscountCapsSection() {
+  // Discount limits
+  const [discountLimits, setDiscountLimits] = useState<DiscountLimit[]>(DEFAULT_DISCOUNT_LIMITS);
+
+  useEffect(() => {
+    // Load saved admin controls
+    settingsApi.getAdminControls().then((data: any) => {
+      if (data?.discount_limits?.length > 0) {
+        setDiscountLimits(data.discount_limits);
+      }
+    }).catch(() => {});
+  }, []);
+
+  return (
+    <div className="space-y-6">
+      <div className="space-y-4">
+        <p className="text-sm text-gray-500">Set maximum discount percentages and approval requirements per role.</p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {discountLimits.map(dl => (
+            <div key={dl.roleId} className="bg-white border border-gray-200 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-3">
+                <Shield className="w-4 h-4 text-gray-500" />
+                <h4 className="font-medium text-gray-900">{dl.roleName}</h4>
+              </div>
+              <div className="space-y-3">
+                <div>
+                  <label className="text-xs text-gray-500">Max Discount %</label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={100}
+                    value={dl.maxDiscountPercent}
+                    onChange={(e) => setDiscountLimits(prev => prev.map(d =>
+                      d.roleId === dl.roleId ? { ...d, maxDiscountPercent: Number(e.target.value) } : d
+                    ))}
+                    className="w-full mt-1 bg-white border border-gray-300 text-gray-900 rounded px-3 py-1.5 text-sm"
+                  />
                 </div>
-                <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={dl.requiresApproval}
+                    onChange={() => setDiscountLimits(prev => prev.map(d =>
+                      d.roleId === dl.roleId ? { ...d, requiresApproval: !d.requiresApproval } : d
+                    ))}
+                    className="rounded border-gray-300"
+                  />
+                  <label className="text-xs text-gray-700">Requires approval above threshold</label>
+                </div>
+                {dl.requiresApproval && (
                   <div>
-                    <label className="text-xs text-gray-500">Max Discount %</label>
+                    <label className="text-xs text-gray-500">Approval Threshold %</label>
                     <input
                       type="number"
                       min={0}
-                      max={100}
-                      value={dl.maxDiscountPercent}
+                      max={dl.maxDiscountPercent}
+                      value={dl.approvalThreshold}
                       onChange={(e) => setDiscountLimits(prev => prev.map(d =>
-                        d.roleId === dl.roleId ? { ...d, maxDiscountPercent: Number(e.target.value) } : d
+                        d.roleId === dl.roleId ? { ...d, approvalThreshold: Number(e.target.value) } : d
                       ))}
                       className="w-full mt-1 bg-white border border-gray-300 text-gray-900 rounded px-3 py-1.5 text-sm"
                     />
                   </div>
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="checkbox"
-                      checked={dl.requiresApproval}
-                      onChange={() => setDiscountLimits(prev => prev.map(d =>
-                        d.roleId === dl.roleId ? { ...d, requiresApproval: !d.requiresApproval } : d
-                      ))}
-                      className="rounded border-gray-300"
-                    />
-                    <label className="text-xs text-gray-700">Requires approval above threshold</label>
-                  </div>
-                  {dl.requiresApproval && (
-                    <div>
-                      <label className="text-xs text-gray-500">Approval Threshold %</label>
-                      <input
-                        type="number"
-                        min={0}
-                        max={dl.maxDiscountPercent}
-                        value={dl.approvalThreshold}
-                        onChange={(e) => setDiscountLimits(prev => prev.map(d =>
-                          d.roleId === dl.roleId ? { ...d, approvalThreshold: Number(e.target.value) } : d
-                        ))}
-                        className="w-full mt-1 bg-white border border-gray-300 text-gray-900 rounded px-3 py-1.5 text-sm"
-                      />
-                    </div>
-                  )}
-                </div>
+                )}
               </div>
-            ))}
-          </div>
+            </div>
+          ))}
         </div>
-      )}
-
-      {/* ============================================================= */}
-      {/* OPERATIONAL RULES                                              */}
-      {/* ============================================================= */}
-      {activeTab === 'rules' && (
-        <div className="space-y-6">
-          {['billing', 'inventory', 'hr', 'clinical', 'security'].map(category => {
-            // COUNCIL RULING §3: HIDE inert security controls. session_timeout +
-            // two_factor (2FA) are written to admin_controls.operational_rules but
-            // NOTHING in the backend reads/enforces them -- a visible-but-inert
-            // auth control is a false-security lie, so it's hidden until wired.
-            // (password_expiry stays: force-change-on-first-login IS enforced.)
-            const INERT_RULE_IDS = new Set(['session_timeout', 'two_factor']);
-            const categoryRules = rules.filter(r => r.category === category && !INERT_RULE_IDS.has(r.id));
-            if (categoryRules.length === 0) return null;
-            return (
-              <div key={category}>
-                <h3 className="text-sm font-semibold text-gray-700 uppercase tracking-wider mb-3 border-b border-gray-200 pb-2">
-                  {category.charAt(0).toUpperCase() + category.slice(1)} Rules
-                </h3>
-                <div className="space-y-3">
-                  {categoryRules.map(rule => (
-                    <div key={rule.id} className="flex items-center justify-between p-3 bg-white border border-gray-200 rounded-lg">
-                      <div className="flex-1 min-w-0 mr-4">
-                        <p className="text-sm font-medium text-gray-900">{rule.label}</p>
-                        <p className="text-xs text-gray-500 mt-0.5">{rule.description}</p>
-                      </div>
-                      <div className="flex-shrink-0">
-                        {rule.type === 'toggle' && (
-                          <button
-                            onClick={() => setRules(prev => prev.map(r =>
-                              r.id === rule.id ? { ...r, value: !r.value } : r
-                            ))}
-                            className={clsx(
-                              'relative inline-flex h-7 w-12 items-center rounded-full transition-colors',
-                              rule.value ? 'bg-green-600' : 'bg-gray-600'
-                            )}
-                          >
-                            <span className={clsx(
-                              'inline-block h-5 w-5 rounded-full bg-white transition-transform',
-                              rule.value ? 'translate-x-6' : 'translate-x-1'
-                            )} />
-                          </button>
-                        )}
-                        {rule.type === 'number' && (
-                          <input
-                            type="number"
-                            value={rule.value as number}
-                            onChange={(e) => setRules(prev => prev.map(r =>
-                              r.id === rule.id ? { ...r, value: Number(e.target.value) } : r
-                            ))}
-                            className="w-24 bg-white border border-gray-300 text-gray-900 rounded px-2 py-1 text-sm text-right"
-                          />
-                        )}
-                        {rule.type === 'select' && rule.options && (
-                          <select
-                            value={rule.value as string}
-                            onChange={(e) => setRules(prev => prev.map(r =>
-                              r.id === rule.id ? { ...r, value: e.target.value } : r
-                            ))}
-                            className="bg-white border border-gray-300 text-gray-900 rounded px-2 py-1 text-sm"
-                          >
-                            {rule.options.map(opt => (
-                              <option key={opt} value={opt}>{opt}</option>
-                            ))}
-                          </select>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      {/* Save Button */}
-      <div className="flex justify-end pt-4 border-t border-gray-200">
-        <button
-          onClick={handleSave}
-          disabled={isSaving}
-          className="flex items-center gap-2 px-6 py-2.5 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50"
-        >
-          {isSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-          {isSaving ? 'Saving...' : 'Save All Settings'}
-        </button>
       </div>
+      <SaveBar label="Discount Limits" payload={() => ({ discount_limits: discountLimits })} />
+    </div>
+  );
+}
+
+// -----------------------------------------------------------------------
+// /settings/rules - operational rules by category
+// -----------------------------------------------------------------------
+
+export function OperationalRulesSection() {
+  // Operational rules
+  const [rules, setRules] = useState<OperationalRule[]>(DEFAULT_RULES);
+
+  useEffect(() => {
+    // Load saved admin controls
+    settingsApi.getAdminControls().then((data: any) => {
+      if (data?.operational_rules && Object.keys(data.operational_rules).length > 0) {
+        setRules(prev => prev.map(r => ({
+          ...r,
+          value: data.operational_rules[r.id] !== undefined ? data.operational_rules[r.id] : r.value,
+        })));
+      }
+    }).catch(() => {});
+  }, []);
+
+  return (
+    <div className="space-y-6">
+      <div className="space-y-6">
+        {['billing', 'inventory', 'hr', 'clinical', 'security'].map(category => {
+          // COUNCIL RULING §3: HIDE inert security controls. session_timeout +
+          // two_factor (2FA) are written to admin_controls.operational_rules but
+          // NOTHING in the backend reads/enforces them -- a visible-but-inert
+          // auth control is a false-security lie, so it's hidden until wired.
+          // (password_expiry stays: force-change-on-first-login IS enforced.)
+          const INERT_RULE_IDS = new Set(['session_timeout', 'two_factor']);
+          const categoryRules = rules.filter(r => r.category === category && !INERT_RULE_IDS.has(r.id));
+          if (categoryRules.length === 0) return null;
+          return (
+            <div key={category}>
+              <h3 className="text-sm font-semibold text-gray-700 uppercase tracking-wider mb-3 border-b border-gray-200 pb-2">
+                {category.charAt(0).toUpperCase() + category.slice(1)} Rules
+              </h3>
+              <div className="space-y-3">
+                {categoryRules.map(rule => (
+                  <div key={rule.id} className="flex items-center justify-between p-3 bg-white border border-gray-200 rounded-lg">
+                    <div className="flex-1 min-w-0 mr-4">
+                      <p className="text-sm font-medium text-gray-900">{rule.label}</p>
+                      <p className="text-xs text-gray-500 mt-0.5">{rule.description}</p>
+                    </div>
+                    <div className="flex-shrink-0">
+                      {rule.type === 'toggle' && (
+                        <button
+                          onClick={() => setRules(prev => prev.map(r =>
+                            r.id === rule.id ? { ...r, value: !r.value } : r
+                          ))}
+                          className={clsx(
+                            'relative inline-flex h-7 w-12 items-center rounded-full transition-colors',
+                            rule.value ? 'bg-green-600' : 'bg-gray-600'
+                          )}
+                        >
+                          <span className={clsx(
+                            'inline-block h-5 w-5 rounded-full bg-white transition-transform',
+                            rule.value ? 'translate-x-6' : 'translate-x-1'
+                          )} />
+                        </button>
+                      )}
+                      {rule.type === 'number' && (
+                        <input
+                          type="number"
+                          value={rule.value as number}
+                          onChange={(e) => setRules(prev => prev.map(r =>
+                            r.id === rule.id ? { ...r, value: Number(e.target.value) } : r
+                          ))}
+                          className="w-24 bg-white border border-gray-300 text-gray-900 rounded px-2 py-1 text-sm text-right"
+                        />
+                      )}
+                      {rule.type === 'select' && rule.options && (
+                        <select
+                          value={rule.value as string}
+                          onChange={(e) => setRules(prev => prev.map(r =>
+                            r.id === rule.id ? { ...r, value: e.target.value } : r
+                          ))}
+                          className="bg-white border border-gray-300 text-gray-900 rounded px-2 py-1 text-sm"
+                        >
+                          {rule.options.map(opt => (
+                            <option key={opt} value={opt}>{opt}</option>
+                          ))}
+                        </select>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <SaveBar
+        label="Operational Rules"
+        payload={() => ({ operational_rules: Object.fromEntries(rules.map(r => [r.id, r.value])) })}
+      />
     </div>
   );
 }

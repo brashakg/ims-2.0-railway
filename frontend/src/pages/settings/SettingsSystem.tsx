@@ -12,7 +12,6 @@ import clsx from 'clsx';
 import { useToast } from '../../context/ToastContext';
 import { adminSystemApi, policiesApi } from '../../services/api';
 import { financeApi } from '../../services/api/finance';
-import { AdminControlPanel } from './SettingsAdminControls';
 import { AutoLogoutSettings } from '../../components/settings/AutoLogoutSettings';
 
 export function SystemSettingsPage() {
@@ -104,10 +103,9 @@ function SystemSection({ systemStatus }: { systemStatus: { database: string; api
         </div>
       </div>
 
-      <div className="card mt-6">
-        <h2 className="text-lg font-semibold text-gray-900 mb-4">Admin Controls -- Store & Role Configuration</h2>
-        <AdminControlPanel />
-      </div>
+      {/* The Admin Controls panel (store modules / role permissions / discount
+          limits / operational rules) is four settings pages of its own since
+          Wave 6 B21: /settings/modules, /permissions, /discount-caps, /rules. */}
 
       {/* F34 target-ticker config (SUPERADMIN/ADMIN; the System tab is already
           role-gated to them). Persisted to the two E2 policy keys. */}

@@ -16,6 +16,7 @@ import {
   Link, Boxes, CircleDot, Layers,
   User, Building2, Receipt, Bell, History, Printer,
   Shield, Bot, Award, Sliders, RotateCcw, ToggleLeft, RefreshCw,
+  Store, CreditCard, Settings,
 } from 'lucide-react';
 import type { SettingsTab } from './settingsTypes';
 
@@ -49,6 +50,15 @@ export const SETTINGS_SECTIONS = [
   // Backend keys are SUPERADMIN write-only (policy registry), so the tab matches.
   { id: 'shopify-live-sync' as SettingsTab, label: 'Shopify live sync', icon: RefreshCw, description: 'When edited products already on Shopify are re-pushed (IST times, on/off, per-run cap)', role: ['SUPERADMIN'] },
   { id: 'audit-logs' as SettingsTab, label: 'Audit Logs', icon: History, description: 'Activity history and logs', role: ['SUPERADMIN', 'ADMIN'] },
+  // Wave 6 B21: the four editors that used to sit behind a second tab layer
+  // on /settings/system. Same roles as that page, so nobody gains or loses a
+  // screen. (The backend /settings/admin-controls is SUPERADMIN-only and
+  // answers ADMIN with a 403, exactly as it did on the System tab - a gap
+  // for a later ruling, not widened or narrowed here.)
+  { id: 'modules' as SettingsTab, label: 'Store Modules', icon: Store, description: 'Which modules each store can use', role: ['SUPERADMIN', 'ADMIN'] },
+  { id: 'permissions' as SettingsTab, label: 'Role Permissions', icon: Shield, description: 'Permission matrix per role', role: ['SUPERADMIN', 'ADMIN'] },
+  { id: 'discount-caps' as SettingsTab, label: 'Discount Limits', icon: CreditCard, description: 'Max discount and approval threshold per role', role: ['SUPERADMIN', 'ADMIN'] },
+  { id: 'rules' as SettingsTab, label: 'Operational Rules', icon: Settings, description: 'Billing, inventory, HR, clinical and security rules', role: ['SUPERADMIN', 'ADMIN'] },
   { id: 'system' as SettingsTab, label: 'System', icon: Database, description: 'Backup, sync, maintenance', role: ['SUPERADMIN', 'ADMIN'] },
 ];
 
@@ -85,6 +95,10 @@ export const SETTINGS_GROUP_OF: Record<SettingsTab, GroupId> = {
   'feature-toggles': 'system',
   'shopify-live-sync': 'system',
   'audit-logs': 'system',
+  modules: 'system',
+  permissions: 'system',
+  'discount-caps': 'system',
+  rules: 'system',
   system: 'system',
 };
 
