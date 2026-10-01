@@ -51,10 +51,10 @@ class _StockRepo:
             return []  # nothing sold yet
         out = {}
         for u in _UNITS:
-            r = out.setdefault(u["product_id"], {"_id": u["product_id"], "quantity": 0, "oldest_date": None, "total_value": 0})
+            r = out.setdefault(u["product_id"], {"_id": u["product_id"], "quantity": 0, "oldest": None, "total_value": 0})
             r["quantity"] += 1
-            if r["oldest_date"] is None or u["created_at"] < r["oldest_date"]:
-                r["oldest_date"] = u["created_at"]
+            if r["oldest"] is None or u["created_at"] < r["oldest"]:
+                r["oldest"] = u["created_at"]
         return list(out.values())
 
 
@@ -165,8 +165,8 @@ def test_unknown_stock_age_is_old_on_every_screen(monkeypatch, stamp):
         def aggregate(self, pipeline):
             if pipeline[0]["$match"].get("status") == "SOLD":
                 return []
-            # $min ignores a missing field and returns the lone string.
-            return [{"_id": "P-OLD", "quantity": 1, "oldest_date": stamp, "total_value": 0}]
+            # group_with_oldest_arrival: None when undated, else the lone string.
+            return [{"_id": "P-OLD", "quantity": 1, "oldest": stamp, "total_value": 0}]
 
     class _LegacyDb(_Db):
         def get_collection(self, name):
@@ -186,3 +186,56 @@ def test_unknown_stock_age_is_old_on_every_screen(monkeypatch, stamp):
     non_moving = asyncio.run(get_non_moving_stock(days=90, category=None, store_id=None, current_user=_MGR))
     assert [p["product_id"] for p in non_moving["products"]] == ["P-OLD"]
     assert row["classification"] == "C"  # not NEW
+    # ...and the age in the same row says old too: no made-up 0 days, the
+    # oldest bucket, counted as old stock (verifier round 4).
+    assert row["daysInStock"] is None
+    assert row["ageCategory"] == "180+"
+    assert aging["summary"]["oldStockCount"] == 1
+    assert aging["summary"]["averageAge"] == 0  # no known age to average
+
+
+# ---------------------------------------------------------------------------
+# Verifier round 4: legacy units beside a unit received today
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_units_beside_todays_receipt_are_old_on_every_screen(monkeypatch):
+    """5 never-sold legacy units with no created_at and 1 unit received today,
+    run through the REAL repositories on mongomock. Mongo's $min skips the
+    missing dates, so Aging said NEW / 0 days and Alerts saw stock 'since
+    today' (no DEAD_STOCK) while Non-moving, judging unit by unit, listed the
+    same 5 as old. One rule: an undated unit makes the product's age unknown,
+    and unknown is old -- on all three screens, and min_days keeps it."""
+    import mongomock
+
+    from database.repositories.product_repository import ProductRepository, StockRepository
+
+    db = mongomock.MongoClient().db
+    db.products.insert_one(
+        {"_id": "P-OLD", **_PRODUCTS["P-OLD"], "barcode": "CM", "cost_price": 3000}
+    )
+    db.stock_units.insert_many(
+        [{"product_id": "P-OLD", "store_id": "S1", "status": "AVAILABLE"} for _ in range(5)]
+        + [{"product_id": "P-OLD", "store_id": "S1", "status": "AVAILABLE", "created_at": _NOW}]
+    )
+    monkeypatch.setattr(inv, "get_stock_repository", lambda: StockRepository(db.stock_units))
+    monkeypatch.setattr(inv, "get_product_repository", lambda: ProductRepository(db.products))
+    monkeypatch.setattr(inv, "_get_db", lambda: db)
+
+    aging = asyncio.run(
+        get_stock_aging_report(
+            store_id=None, category=None, classification=None, min_days=90, current_user=_MGR
+        )
+    )
+    (row,) = aging["products"]
+    assert row["classification"] == "C" and row["daysInStock"] is None
+
+    alerts = asyncio.run(
+        inv.get_stock_alerts(
+            store_id=None, dead_days=90, lead_time_days=14, limit=200, current_user=_MGR
+        )
+    )
+    assert [a["alertType"] for a in alerts["alerts"]] == ["DEAD_STOCK"]
+
+    non_moving = asyncio.run(get_non_moving_stock(days=90, category=None, store_id=None, current_user=_MGR))
+    assert [(p["product_id"], p["current_stock"]) for p in non_moving["products"]] == [("P-OLD", 6)]

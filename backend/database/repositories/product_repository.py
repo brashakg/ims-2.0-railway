@@ -29,6 +29,29 @@ _LEGACY = object()
 AVAILABLE_STATUS_VALUES = ["AVAILABLE", "available", "Available"]
 
 
+def group_with_oldest_arrival(group: Dict) -> List[Dict]:
+    """``group`` as a $group stage plus ``oldest``: when the oldest unit in the
+    group arrived on the shelf, or None when that is unknown.
+
+    $min skips a unit with no created_at, so 5 legacy units beside 1 received
+    today read as arrived today on Aging and Alerts while Non-moving, judging
+    unit by unit, called the same 5 old (audit F54). Unknown age is legacy
+    stock, so old (inventory.helpers._had_the_window): one undated unit makes
+    the whole group's ``oldest`` None."""
+    return [
+        {
+            "$group": {
+                **group,
+                "oldest": {"$min": "$created_at"},
+                "undated": {
+                    "$sum": {"$cond": [{"$ifNull": ["$created_at", False]}, 0, 1]}
+                },
+            }
+        },
+        {"$addFields": {"oldest": {"$cond": [{"$gt": ["$undated", 0]}, None, "$oldest"]}}},
+    ]
+
+
 class StockReleaseResult(NamedTuple):
     """Outcome of a stock release (order cancel / DRAFT line removal).
 
@@ -475,13 +498,12 @@ class StockRepository(BaseRepository):
         # product looks out-of-stock. $ifNull treats a missing quantity as 1.
         return [
             {"$match": {"store_id": store_id, "status": "AVAILABLE"}},
-            {
-                "$group": {
+            *group_with_oldest_arrival(
+                {
                     "_id": "$product_id",
                     "quantity": {"$sum": {"$ifNull": ["$quantity", 1]}},
-                    "oldest": {"$min": "$created_at"},
                 }
-            },
+            ),
         ]
 
     def available_by_product(self, store_id: str) -> List[Dict]:
