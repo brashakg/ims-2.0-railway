@@ -113,6 +113,26 @@ describe('Goods back on a Shopify refund row', () => {
     expect(said).not.toMatch(/put back in stock/);
   });
 
+  it('a historical frame the confirm could not book: Goods back books it, a task adds it', async () => {
+    // Never "never add them by hand" beside the stock-in task that adds it.
+    vi.mocked(refundReviewsApi.confirm).mockResolvedValueOnce({
+      review_id: 'open',
+      status: 'POSTED',
+      result: { status: 'credited', restock_applied: false, return_id: 'RET-H', historical: true },
+    } as never);
+    const user = userEvent.setup();
+    render(<RefundReviewsPage />);
+    await user.click(await screen.findByRole('button', { name: /Confirm/ }));
+
+    await waitFor(() => expect(toast.warning).toHaveBeenCalled());
+    const said = String(vi.mocked(toast.warning).mock.calls.at(-1)?.[0]);
+    expect(said).toMatch(/not booked yet \(RET-H\)/);
+    expect(said).toMatch(/press Goods back/);
+    expect(said).toMatch(/add the frames through stock-in/);
+    expect(said).not.toMatch(/by hand|task has been raised|put back into stock/);
+    expect(screen.queryByText(/IMS has no record of them/)).toBeNull();
+  });
+
   it('says the same after a confirm that booked a historical frame', async () => {
     vi.mocked(refundReviewsApi.confirm).mockResolvedValueOnce({
       review_id: 'open',

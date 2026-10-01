@@ -468,6 +468,41 @@ def test_a_blip_in_the_fulfilment_claim_is_refed_by_the_sweep(swept, blip):
     assert (doc["status"], doc["awb"], doc["fulfillment_status"]) == ("SHIPPED", "AWB60150", "FULFILLED")
 
 
+@pytest.mark.parametrize("leg", ["drain_then_sweep", "delete_redelivered"])
+def test_a_lost_conflict_task_is_raised_by_the_next_event(swept, monkeypatch, leg):
+    """Ruling 2: a delivered order Shopify cancels or deletes gets ONE task.
+    Its insert fails once: the event wrote its marks anyway and reported
+    success, so the sweep never fed it again and a redelivered delete was a
+    duplicate -- no task, ever. A lost task is a failed event: no marks."""
+    oid = 60165 + (leg == "delete_redelivered")
+    _book(swept, oid)
+    _set(swept, oid, status="DELIVERED", fulfillment_status="FULFILLED")
+    tasks, lost = swept["db"]["tasks"], []
+    real = tasks.insert_one
+
+    def insert_fails_once(doc, *a, **kw):
+        if not lost:
+            lost.append(doc)
+            raise RuntimeError("tasks write down")
+        return real(doc, *a, **kw)
+
+    monkeypatch.setattr(tasks, "insert_one", insert_fails_once)
+    if leg == "drain_then_sweep":
+        body = _pulled(oid, cancelled_at=CANCELLED_AT, fulfillment_status="fulfilled")
+        res = swept["real_map"](copy.deepcopy(body), swept["db"], webhook_id=f"c-{oid}",
+                                topic="orders/cancelled")
+        assert res["status_synced"] is False and "shopify_cancelled_at" not in _doc(swept, oid)
+        swept["state"]["orders"] = [body]
+        swept["run"]()
+    else:
+        first = shopify_order_delete.handle_shopify_order_delete(swept["db"], {"id": oid}, topic="orders/delete")
+        assert first["status"] == "error" and "shopify_deleted_at" not in _doc(swept, oid)
+        again = shopify_order_delete.handle_shopify_order_delete(swept["db"], {"id": oid}, topic="orders/delete")
+        assert (again["status"], again["conflict_task"]) == ("kept", True)
+    assert lost and _doc(swept, oid)["status"] == "DELIVERED"
+    assert _tasks(swept, oid, "online_status_conflict") == 1
+
+
 def test_three_lost_races_write_nothing_and_say_so(swept, monkeypatch):
     from api.routers.orders import release
 
@@ -732,6 +767,39 @@ def test_one_awb_whose_track_call_raises_never_stops_the_poll(swept, monkeypatch
     assert asked == ["AWB-TRANSIT", "AWB-POISON", "AWB-LATE", "AWB-TRANSIT", "AWB-POISON"]
     assert _doc(swept, 60127)["status"] == "DELIVERED"
     assert swept["orders"].find_one({"order_id": "P"})["tracking_polled_at"]
+
+
+def test_the_shiprocket_poll_asks_the_table_again_after_a_lost_delivery(swept, monkeypatch):
+    """The poll asks the table on every answer, not only on a tracking
+    change: the courier's DELIVERED stamp landed but the status claim hit a
+    Mongo blip, so the order stayed SHIPPED with tracking_status DELIVERED.
+    Asked only on a change, every later answer equals the stored one and the
+    order is SHIPPED forever."""
+    from api.routers.orders import release
+
+    _book(swept, 60113)
+    _set(swept, 60113, status="SHIPPED", awb="AWB-B")
+
+    async def fake_track(db, awb):
+        return SyncResult(ok=True, provider="shiprocket", kind="pull", payload={"latest_status": "DELIVERED"})
+
+    real, left = release._claim_order_status, [1]
+
+    def claim(*a, **kw):
+        if left and left.pop():
+            raise RuntimeError("mongo failover")
+        return real(*a, **kw)
+
+    monkeypatch.setattr(nexus_module, "shiprocket_track_awb", fake_track)
+    monkeypatch.setattr(release, "_claim_order_status", claim)
+    agent = nexus_module.NexusAgent(db=swept["db"])
+    asyncio.run(agent._sync_shiprocket_outbound())
+    doc = _doc(swept, 60113)
+    assert (doc["status"], doc["tracking_status"]) == ("SHIPPED", "DELIVERED")
+
+    asyncio.run(agent._sync_shiprocket_outbound())
+    doc = _doc(swept, 60113)
+    assert doc["status"] == "DELIVERED" and doc["delivered_at"]
 
 
 def test_the_signed_shiprocket_webhook_delivers_on_a_known_awb(swept):
@@ -1016,6 +1084,23 @@ def test_a_refund_on_goods_out_waits_for_a_person_even_under_auto(swept, monkeyp
 _HANDED_OVER = {"status": "DELIVERED", "status_updated_by": "u1"}
 
 
+def test_an_order_handed_over_at_the_counter_is_goods_out_by_its_status_alone(swept, monkeypatch):
+    """No parcel (no awb, no Shopify fulfilment id): the DELIVERED status is
+    all that says the customer holds the frame, so AUTO still waits for a
+    person -- posted, it put stk-1 back on the shelf while the customer
+    still had it."""
+    monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "1")
+    doc = _book(swept, 60141)
+    _claim_unit(swept, doc)
+    _set(swept, 60141, **_HANDED_OVER)
+    assert not {"awb", "shopify_fulfillment_id"} & set(_doc(swept, 60141))
+    res = shopify_refund.handle_shopify_refund(swept["db"], _refund(700341, 60141, restock_type="return"),
+                                               webhook_id=None, topic="refunds/create")
+
+    assert res["status"] == "queued"
+    assert [(u["stock_id"], u["status"]) for u in swept["stock_repo"].units] == [("stk-1", "SOLD")]
+
+
 @pytest.mark.parametrize("restock_type, restock", [("cancel", False), ("return", True)])
 def test_a_handed_over_orders_cancel_line_is_proposed_without_a_restock(swept, restock_type, restock):
     doc = _book(swept, 60150)
@@ -1277,9 +1362,13 @@ def test_one_frame_of_a_historical_order_is_one_stock_in_task_goods_back_and_con
     oid = 60180 + goods_first
     row = _historical_refund(swept, monkeypatch, oid, 700380 + goods_first, status="DELIVERED")
     assert row["status"] == "PENDING" and [line["restock"] for line in row["proposed_restock"]] == [True]
-    doors = [lambda: _goods_back(row), lambda: _confirm(row)]
+    said = {}
+    doors = [lambda: said.update(goods=_goods_back(row)["result"]["status"]), lambda: _confirm(row)]
     for door in (doors if goods_first else doors[::-1]):
         door()
+    # Pressed after the confirm booked the frame, Goods back has nothing left to
+    # book: it still says stock-in (it said "Goods put back in stock").
+    assert said == {"goods": "stock_in"}
     assert _minted(swept) == [], "IMS adds no stock row for a historical frame"
     [task] = _stock_in(swept, oid)
     assert (task["assigned_to"], task["store_id"], task["status"]) == (_MANAGER, "BV-GANGA-01", "OPEN")
@@ -1298,12 +1387,54 @@ def test_one_frame_of_a_historical_order_is_one_stock_in_task_goods_back_and_ret
     real = returns_router._returns_coll
     blip = _ScanFailsOnce(real())
     monkeypatch.setattr(returns_router, "_returns_coll", lambda: blip)
-    assert _confirm(row)["result"]["restock_applied"] is False, "its returns could not be read"
+    res = _confirm(row)["result"]
+    assert (res["restock_applied"], res["historical"]) == (False, True), "its returns could not be read"
     monkeypatch.setattr(returns_router, "_returns_coll", real)
     ret = swept["returns"].find_one({"shopify_refund_id": str(rid)})
-    doors = [lambda: _goods_back(row), lambda: _retry(ret)]
+    # The blocked task says what happened on THIS order: the re-run books the
+    # frame and a stock-in task adds it -- never "IMS puts each unit back" and
+    # "never add by hand", which the stock-in task then contradicts.
+    [blocked] = swept["db"]["tasks"].find({"source_ref": f"return_restock_blocked:{ret['return_id']}"})
+    text = blocked["description"]
+    assert "booked nothing" in text and "Shopify's order history" in text and "stock-in" in text
+    assert "puts each unit back" not in text and "by hand as well" not in text
+    said = []
+    doors = [lambda: said.append(_goods_back(row)["result"]["status"]),
+             lambda: said.append(_retry(ret)["message"])]
     for door in (doors if goods_first else doors[::-1]):
         door()
+    assert said[goods_first is False] == "stock_in"
+    assert said[goods_first is True].startswith("Booked. This order predates IMS stock")
+    assert _minted(swept) == [] and len(_stock_in(swept, oid)) == 1, "one frame, one task"
+    # One open task for one frame: the re-run closed the blocked one.
+    assert swept["db"]["tasks"].find_one({"task_id": blocked["task_id"]})["status"] == "COMPLETED"
+
+
+def test_a_stock_in_task_that_did_not_land_leaves_the_frame_to_the_next_door(swept, monkeypatch):
+    """The task insert fails (BaseRepository.create swallows it and answers
+    None). Goods back answered stock_in with the id of a task that does not
+    exist and kept the booking, so the confirm restocked nothing, the retry
+    said "Already restocked": no task, no stock row, no door left. A task
+    that did not land is no booking: released, and the next door raises it."""
+    from fastapi import HTTPException
+
+    oid, rid = 60188, 700388
+    row = _historical_refund(swept, monkeypatch, oid, rid, status="DELIVERED")
+    tasks = swept["db"]["tasks"]
+    real = tasks.insert_one
+
+    def insert_down(doc, *a, **kw):
+        raise RuntimeError("tasks write down")
+
+    monkeypatch.setattr(tasks, "insert_one", insert_down)
+    with pytest.raises(HTTPException) as no:
+        _goods_back(row)
+    assert no.value.status_code == 503 and "stock_in_task_not_saved" in no.value.detail
+    line = _doc(swept, oid)["items"][0]
+    assert not line.get("returned_qty") and not (line.get("restocked_refunds") or {}).get(str(rid))
+    monkeypatch.setattr(tasks, "insert_one", real)
+    res = _confirm(swept["review"].find_one({"review_id": row["review_id"]}))["result"]
+    assert res["stock_in_task"] and res["restock_applied"] is True
     assert _minted(swept) == [] and len(_stock_in(swept, oid)) == 1, "one frame, one task"
 
 
@@ -1984,6 +2115,34 @@ def test_a_premark_unit_and_a_booked_one_are_two_units_on_a_historical_order(swe
     assert _minted(swept) == ["AVAILABLE"]
     [task] = _stock_in(swept, oid)
     assert task["title"].endswith("add 1 returned frame(s) through stock-in")
+
+
+def test_a_blocked_retry_keeps_the_frame_a_premark_confirm_put_back(swept, monkeypatch):
+    """Two frames, one refund for both; the confirm before the marks minted
+    one and left the restock open. The /returns/{id}/restock retry runs
+    while the order cannot be read (blocked). Its doc rows MERGE: written
+    over, the minted frame left the doc that counts it and Goods back asked
+    for 2 frames through stock-in beside the 1 stock row -- 3 rows for 2."""
+    oid, rid = 60211, 700411
+    row = _two_frame_refund(swept, oid, rid, historical=True, import_source="shopify_order_history",
+                            fulfillment_stores=["BV-GANGA-01"], status="DELIVERED")
+    _premark_one_of_two(swept, monkeypatch, row)
+    assert _minted(swept) == ["AVAILABLE"]
+    real = returns_router._load_order_for_restock
+    monkeypatch.setattr(returns_router, "_load_order_for_restock", lambda order_id: None)
+    blocked = _retry(swept["returns"].find_one({"shopify_refund_id": str(rid)}))
+    monkeypatch.setattr(returns_router, "_load_order_for_restock", real)
+    assert blocked["restock_applied"] is False and "could not be read" in blocked["message"]
+    ret = swept["returns"].find_one({"shopify_refund_id": str(rid)})
+    [task] = swept["db"]["tasks"].find({"source_ref": f"return_restock_blocked:{ret['return_id']}"})
+    assert "Shopify's order history" in task["description"], "unread order: both kinds' re-run said"
+    assert [r.get("minted") for r in swept["returns"].find_one(
+        {"shopify_refund_id": str(rid)})["restocked"]][:1] == [1]
+    _goods_back(swept["review"].find_one({"review_id": row["review_id"]}))
+    assert _minted(swept) == ["AVAILABLE"]
+    [stock_in] = _stock_in(swept, oid)
+    assert stock_in["title"].endswith("add 1 returned frame(s) through stock-in")
+    assert swept["db"]["tasks"].find_one({"task_id": task["task_id"]})["status"] == "COMPLETED"
 
 
 def test_a_premark_unit_and_a_booked_one_are_two_units(swept, monkeypatch):
