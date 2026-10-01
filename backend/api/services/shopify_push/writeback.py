@@ -25,9 +25,10 @@ def _writeback_product(
     inventory_item_gid: Optional[str] = None,
     status: Optional[str] = None,
     tags_sent: Optional[List[str]] = None,
-) -> None:
+) -> bool:
     """Persist ecom.shopify_product_id (+ stamps) on the catalog_products doc and
-    clear the dirty flag, for idempotent re-push.
+    clear the dirty flag, for idempotent re-push. True iff the twin was
+    written (the create journal is cleared only then: creates.py).
 
     `tags_sent` (optional) records ecom.shopify_tags_sent -- the exact tag list
     IMS last put on the Shopify product (sync audit gap #4). It is the
@@ -75,7 +76,7 @@ def _writeback_product(
         coll = db["catalog_products"]
         doc = coll.find_one({"id": product_id})
         if doc is None:
-            return
+            return False
         ecom = dict(doc.get("ecom") or {})
         ecom["shopify_product_id"] = shopify_id
         if variant_gid:
@@ -104,14 +105,17 @@ def _writeback_product(
         ecom["last_pushed_at"] = _now()
         ecom["locally_modified"] = False
         coll.update_one({"id": product_id}, {"$set": {"ecom": ecom}})
+        return True
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[SHOPIFY_PUSH] product write-back failed {product_id}: {e}")
+        return False
 
 
 def _requeue_unpublished(db, product_id: str) -> None:
     """Put a row BACK in the push queue after a press that reached Shopify but
-    did NOT make the product visible (publish withheld: unpriced, the photograph
-    did not attach, the Online Store publication could not be resolved).
+    did NOT do all it was pressed for (publish withheld: unpriced, the photograph
+    did not attach, the Online Store publication could not be resolved; live at
+    the old price; the photo pass did not settle).
 
     THIS IS NOT THE PING-PONG HAZARD. _writeback_product must never set the flag,
     because that write is the push's own book-keeping and would re-queue a press
@@ -119,7 +123,7 @@ def _requeue_unpublished(db, product_id: str) -> None:
     do what it was pressed for. Clearing the flag anyway would leave the product
     ON Shopify, INVISIBLE, and OUT of the queue -- `pending: 0` next to an empty
     brand page, which is the exact lie this whole change exists to end. It
-    re-queues ONLY on the not-published branch, so a successful publish still
+    re-queues ONLY a press that fell short, so a clean one still
     drains the queue (the control test), and the batch cap bounds how often a
     stubbornly-unpublishable row can be retried per press.
 
@@ -185,9 +189,9 @@ def _writeback_simple(
     doc_id: str,
     shopify_field: str,
     shopify_id: str,
-) -> None:
+) -> bool:
     """Generic gid write-back for collection/menu docs: set the shopify id field,
-    clear locally_modified, stamp last_synced_at. Fail-soft."""
+    clear locally_modified, stamp last_synced_at. Fail-soft; True iff written."""
     try:
         coll = db[collection_name]
         coll.update_one(
@@ -200,8 +204,10 @@ def _writeback_simple(
                 }
             },
         )
+        return True
     except Exception as e:  # noqa: BLE001
         logger.warning(
             f"[SHOPIFY_PUSH] {collection_name} write-back failed {doc_id}: {e}"
         )
+        return False
 

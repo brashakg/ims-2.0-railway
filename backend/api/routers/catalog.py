@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, field_validator
 from typing import Optional, Dict, Any, List, Union
 from datetime import datetime
 from enum import Enum
+import copy
 import logging
 import uuid
 
@@ -1223,11 +1224,64 @@ def _mark_online_dirty(product: Dict) -> None:
     ecom["locally_modified"] = True
 
 
-def _save_catalog_product(product: Dict, *, mark_dirty: bool = True) -> None:
+def _ecom_to_write(
+    stored_ecom: Any, product: Dict, *, mark_dirty: bool, ecom_paths: tuple
+) -> Dict:
+    """The ``ecom`` sub-doc a whole-product save writes: the STORED one as the
+    db holds it now, plus ONLY what this save changes -- the dirty stamp
+    (``mark_dirty``) and the ``ecom_paths`` (dotted, under ecom) the caller set
+    on ``product``. Every other ecom key on the caller's copy
+    (shopify_product_id, status, the stock and online-price write-backs, ...)
+    may be stale: a push, a write-back or a delist that landed after the
+    caller loaded the doc must survive the save (a reverted
+    shopify_product_id means the next press creates a DUPLICATE product)."""
+    ecom = copy.deepcopy(stored_ecom) if isinstance(stored_ecom, dict) else {}
+    mine = product.get("ecom") if isinstance(product.get("ecom"), dict) else {}
+    for path in ecom_paths:
+        *head, last = path.split(".")
+        src: Any = mine
+        dst = ecom
+        for key in head:
+            src = src.get(key) if isinstance(src, dict) else None
+            if not isinstance(dst.get(key), dict):
+                dst[key] = {}
+            dst = dst[key]
+        if isinstance(src, dict) and last in src:
+            dst[last] = copy.deepcopy(src[last])
+    if mark_dirty:
+        ecom.setdefault("status", "DRAFT")
+        ecom["locally_modified"] = True
+    return ecom
+
+
+def _whole_save_set(
+    product: Dict, stored: Dict, *, mark_dirty: bool, ecom_paths: tuple
+) -> Dict:
+    """The $set of a whole-product save over a STORED doc: every top-level
+    field of ``product`` EXCEPT ecom, which is written only when this save
+    changes it (_ecom_to_write) -- a save that changes nothing there (a stock
+    movement, a soft delete, a sync stamp) writes no ecom at all.
+    ponytail: the stored ecom is read one round trip before the write, so a
+    writer landing inside that round trip is still lost; the ecom dot-path
+    writers (follow-up PR) close it."""
+    body = {k: v for k, v in product.items() if k != "ecom"}
+    if mark_dirty or ecom_paths:
+        body["ecom"] = _ecom_to_write(
+            stored.get("ecom"), product, mark_dirty=mark_dirty, ecom_paths=ecom_paths
+        )
+    return body
+
+
+def _save_catalog_product(
+    product: Dict, *, mark_dirty: bool = True, ecom_paths: tuple = ()
+) -> None:
     # Dirty by DEFAULT: every save through this door is a human catalogue edit
     # unless it says otherwise. Writes that are NOT a catalogue edit -- a stock
     # movement, the retired Shopify-sync bookkeeping stamp, the soft-delete
     # stamp -- pass mark_dirty=False and say why at the call site.
+    # ``ecom_paths``: the ecom fields (dotted, under ecom) this save changed on
+    # ``product`` -- the ONLY ecom fields it writes besides the dirty stamp
+    # (_whole_save_set); the caller's copy of the rest may be stale.
     if mark_dirty:
         _mark_online_dirty(product)
     coll = _catalog_coll()
@@ -1239,8 +1293,16 @@ def _save_catalog_product(product: Dict, *, mark_dirty: bool = True) -> None:
         # whenever Mongo wasn't connected. Checking existence first keeps the
         # 2-arg update_one / insert_one signatures that BOTH backends support,
         # and is functionally identical to an upsert on real Mongo.
-        if coll.find_one({"id": product["id"]}) is not None:
-            coll.update_one({"id": product["id"]}, {"$set": product})
+        stored = coll.find_one({"id": product["id"]})
+        if stored is not None:
+            coll.update_one(
+                {"id": product["id"]},
+                {
+                    "$set": _whole_save_set(
+                        product, stored, mark_dirty=mark_dirty, ecom_paths=ecom_paths
+                    )
+                },
+            )
         else:
             coll.insert_one(dict(product))
     else:
@@ -1249,13 +1311,15 @@ def _save_catalog_product(product: Dict, *, mark_dirty: bool = True) -> None:
         # flags from its write; a full replace here would drop them).
         stored = CATALOG_PRODUCTS.get(product["id"])
         if stored is not None:
-            stored.update(product)
+            stored.update(
+                _whole_save_set(product, stored, mark_dirty=mark_dirty, ecom_paths=ecom_paths)
+            )
         else:
             CATALOG_PRODUCTS[product["id"]] = product
 
 
 def _save_catalog_product_cas(
-    product: Dict, expected_raw_updated_at, *, mark_dirty: bool = True
+    product: Dict, expected_raw_updated_at, *, mark_dirty: bool = True, ecom_paths: tuple = ()
 ) -> bool:
     """Compare-and-swap save for the optimistic-concurrency PUT path: the
     write only lands when the stored updated_at STILL equals the raw value
@@ -1268,14 +1332,24 @@ def _save_catalog_product_cas(
     Marks the row dirty for the Online Store push by default, exactly like
     _save_catalog_product (this is the same catalogue-edit door, just with an
     optimistic-concurrency filter). The stamp happens before the write attempt;
-    when the CAS loses the write does not land, so nothing is queued."""
+    when the CAS loses the write does not land, so nothing is queued. Like
+    _save_catalog_product it writes only the ecom fields it changed
+    (_whole_save_set): a push does not move updated_at, so the CAS alone
+    never caught a push that landed after the load."""
     if mark_dirty:
         _mark_online_dirty(product)
     coll = _catalog_coll()
     if coll is not None:
+        stored = coll.find_one({"id": product["id"]})
+        if stored is None:
+            return False
         res = coll.update_one(
             {"id": product["id"], "updated_at": expected_raw_updated_at},
-            {"$set": product},
+            {
+                "$set": _whole_save_set(
+                    product, stored, mark_dirty=mark_dirty, ecom_paths=ecom_paths
+                )
+            },
         )
         matched = getattr(res, "matched_count", None)
         if matched is None:
@@ -1285,7 +1359,9 @@ def _save_catalog_product_cas(
     stored = CATALOG_PRODUCTS.get(product["id"])
     if stored is None or stored.get("updated_at") != expected_raw_updated_at:
         return False
-    stored.update(product)
+    stored.update(
+        _whole_save_set(product, stored, mark_dirty=mark_dirty, ecom_paths=ecom_paths)
+    )
     return True
 
 
@@ -2145,12 +2221,14 @@ async def update_catalog_product(
     for _flag in ("needs_review", "pos_ready", "promoted_at", "promoted_by"):
         to_write.pop(_flag, None)
 
+    # The ONE ecom field this PUT edits (besides the dirty stamp): the tags.
+    _ecom_paths = ("seo.tags",) if product.tags is not None else ()
     if product.expected_updated_at is not None:
         # Compare-and-swap: filter the write on the RAW stored updated_at
         # (datetime or string) captured at load. matched_count == 0 means
         # another writer landed inside the check-to-write window (which
         # includes live DB round-trips) -- 409 instead of clobbering.
-        if not _save_catalog_product_cas(to_write, raw_expected_ts):
+        if not _save_catalog_product_cas(to_write, raw_expected_ts, ecom_paths=_ecom_paths):
             raise HTTPException(
                 status_code=409,
                 detail=(
@@ -2159,7 +2237,7 @@ async def update_catalog_product(
                 ),
             )
     else:
-        _save_catalog_product(to_write)
+        _save_catalog_product(to_write, ecom_paths=_ecom_paths)
 
     # Compact field-classified audit row (cataloguing scorecard corrections):
     # local mirror of the spine PUT's twin in products.update_product -- keep

@@ -10,7 +10,8 @@ from typing import Any, Dict, List
 from agents.nexus_providers import _as_shopify_gid
 
 from ._shared import MODE_LIVE, MODE_SIMULATED, PushResult, _live_or_reason
-from .transport import _graphql, _user_errors
+from .transport import SentOnce, _graphql, _user_errors
+from .creates import clear_create, record_create, settle_lost_create
 from .queries import _MENU_CREATE, _MENU_UPDATE
 from .writeback import _writeback_simple
 
@@ -77,9 +78,42 @@ async def push_menu(db, menu: Dict[str, Any]) -> PushResult:
         query, field_name = _MENU_CREATE, "menuCreate"
         variables = {"title": title, "handle": handle, "items": items}
     try:
-        body = await _graphql(db, query, variables)
+        # NEVER A BLIND RE-CREATE (creates.py): a menuCreate whose answer was
+        # lost is looked for first (by its title and handle, never one already
+        # on the shop before the send); the record stays until its gid is saved.
+        creating = not existing_gid
+        if creating:
+            verdict, found, why = await settle_lost_create(db, "menu", mid)
+            if verdict == "refuse":
+                return PushResult(
+                    mode=MODE_LIVE,
+                    entity="menu",
+                    action=action,
+                    target_id=mid,
+                    ok=False,
+                    payload=payload,
+                    error=why,
+                    reason="create_unsettled",
+                )
+            if verdict == "found":
+                creating = False
+                existing_gid = found
+                query, field_name = _MENU_UPDATE, "menuUpdate"
+                variables = {"id": found, "title": title, "handle": handle, "items": items}
+            else:
+                await record_create(db, "menu", mid, title, handle)
+        try:
+            body = await _graphql(db, query, variables)
+        except SentOnce:
+            raise  # the intent stays: the next press looks for it first
+        except Exception:
+            if creating:
+                clear_create(db, "menu", mid)  # refused unapplied: nothing to find
+            raise
         err = _user_errors(body, field_name)
         if err:
+            if creating:
+                clear_create(db, "menu", mid)  # refused: nothing was made
             return PushResult(
                 mode=MODE_LIVE,
                 entity="menu",
@@ -91,10 +125,10 @@ async def push_menu(db, menu: Dict[str, Any]) -> PushResult:
             )
         menu_obj = ((body.get("data") or {}).get(field_name) or {}).get("menu") or {}
         new_gid = menu_obj.get("id") or existing_gid
-        if new_gid and mid:
-            _writeback_simple(
-                db, "ecom_menus", "menu_id", mid, "shopify_menu_id", new_gid
-            )
+        if new_gid and mid and _writeback_simple(
+            db, "ecom_menus", "menu_id", mid, "shopify_menu_id", new_gid
+        ) and action == "create":
+            clear_create(db, "menu", mid)  # the gid is saved: nothing to find
         return PushResult(
             mode=MODE_LIVE,
             entity="menu",

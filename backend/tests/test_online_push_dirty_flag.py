@@ -346,6 +346,96 @@ def test_a_product_with_no_ecom_subdoc_still_lands_in_the_queue(db, monkeypatch)
 
 
 # ===========================================================================
+# 2b. A whole-product save writes ONLY the ecom fields it changed
+# ===========================================================================
+
+_PUSHED_ECOM = {
+    "status": "PUBLISHED",
+    "shopify_product_id": "gid://shopify/Product/999",
+    "locally_modified": False,
+    "seo": {"title": "SEO title", "tags": ["old"]},
+}
+
+
+def _push_lands(db, product_id):
+    """A press lands AFTER the caller loaded its copy: the push's own ecom
+    write-back (gid, PUBLISHED, flag cleared). It does not move updated_at,
+    so the compare-and-swap save never sees it."""
+    db["catalog_products"].update_one(
+        {"id": product_id}, {"$set": {"ecom": copy.deepcopy(_PUSHED_ECOM)}}
+    )
+
+
+def _seed_unpushed(db, product_id):
+    db["catalog_products"].insert_one(
+        {
+            "id": product_id,
+            "title": "Old",
+            "updated_at": "t0",
+            "inventory": {"locations": {"BV-01": 3}},
+            "ecom": {"status": "DRAFT", "locally_modified": True},
+        }
+    )
+    return _load(db, product_id)
+
+
+def test_a_stale_catalog_save_never_reverts_what_a_push_wrote_since(db, monkeypatch):
+    """MANY WRITERS (design-queue repress, root cause 3). A catalogue edit of
+    a copy loaded BEFORE a press landed -- through the plain save AND the
+    compare-and-swap save -- keeps every ecom field the push wrote (a
+    reverted shopify_product_id is a DUPLICATE product on the next press)
+    and still re-queues the row.
+    REVERT-PROOF: $set the caller's whole doc (the old save) -> gid None."""
+    monkeypatch.setattr(catalog, "_catalog_coll", lambda: db["catalog_products"])
+    for pid, cas in (("P1", False), ("P2", True)):
+        stale = _seed_unpushed(db, pid)
+        _push_lands(db, pid)
+        stale["title"] = "New"
+        if cas:
+            assert catalog._save_catalog_product_cas(stale, "t0") is True
+        else:
+            catalog._save_catalog_product(stale)
+
+        saved = db["catalog_products"].find_one({"id": pid})
+        assert saved["title"] == "New"
+        assert saved["ecom"] == {**_PUSHED_ECOM, "locally_modified": True}, pid
+
+
+def test_a_save_that_changes_no_ecom_field_writes_no_ecom(db, monkeypatch):
+    """A stock movement (not a catalogue edit: mark_dirty=False) saved from a
+    stale copy leaves the stored ecom exactly as the push left it.
+    REVERT-PROOF: $set the caller's whole doc -> the stale DRAFT comes back."""
+    monkeypatch.setattr(catalog, "_catalog_coll", lambda: db["catalog_products"])
+    stale = _seed_unpushed(db, "P1")
+    _push_lands(db, "P1")
+    stale["inventory"]["locations"]["BV-01"] = 2
+    catalog._save_catalog_product(stale, mark_dirty=False)
+
+    saved = db["catalog_products"].find_one({"id": "P1"})
+    assert saved["inventory"]["locations"]["BV-01"] == 2
+    assert saved["ecom"] == _PUSHED_ECOM
+
+
+def test_a_tag_edit_writes_the_tags_and_nothing_else_of_ecom(db, monkeypatch):
+    """The catalog PUT's one ecom field is the tag list (ecom.seo.tags): a
+    stale copy's new tags land, while the seo title and the gid a push wrote
+    since survive.
+    REVERT-PROOF: base the write on the caller's ecom -> gid None."""
+    monkeypatch.setattr(catalog, "_catalog_coll", lambda: db["catalog_products"])
+    stale = _seed_unpushed(db, "P1")
+    _push_lands(db, "P1")
+    pm.set_twin_tags(stale, ["Aviator"])
+    catalog._save_catalog_product(stale, ecom_paths=("seo.tags",))
+
+    saved = db["catalog_products"].find_one({"id": "P1"})
+    assert saved["ecom"] == {
+        **_PUSHED_ECOM,
+        "locally_modified": True,
+        "seo": {"title": "SEO title", "tags": ["aviator"]},
+    }
+
+
+# ===========================================================================
 # 3. THE PING-PONG GUARD -- a Shopify sync write-back must NOT queue
 # ===========================================================================
 
@@ -367,9 +457,11 @@ def test_successful_push_clears_the_flag_and_pending_returns_to_zero(db, monkeyp
                 # fixture has to answer the media call too or the flag
                 # lifecycle under test never happens.
                 "productCreateMedia": {
-                    "media": [{"id": "gid://shopify/MediaImage/1"}],
+                    "media": [{"id": "gid://shopify/MediaImage/1", "status": "UPLOADED"}],
                     "mediaUserErrors": [],
                 },
+                # ... and the photo pass's read of the listing (bare today).
+                "product": {"id": "gid://shopify/Product/111", "media": {"nodes": []}},
             }
         },
     )
@@ -408,9 +500,11 @@ def test_shopify_writeback_never_requeues_the_row(db, monkeypatch):
                 # fixture has to answer the media call too or the flag
                 # lifecycle under test never happens.
                 "productCreateMedia": {
-                    "media": [{"id": "gid://shopify/MediaImage/1"}],
+                    "media": [{"id": "gid://shopify/MediaImage/1", "status": "UPLOADED"}],
                     "mediaUserErrors": [],
                 },
+                # ... and the photo pass's read of the listing (bare today).
+                "product": {"id": "gid://shopify/Product/111", "media": {"nodes": []}},
             }
         },
     )

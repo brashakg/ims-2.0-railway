@@ -763,6 +763,23 @@ class DatabaseConnection:
         _idx("product_images", "status", background=True)
         _idx("product_images", "assigned_to", sparse=True, background=True)
 
+        # The photo pass's media ledger (shopify_push.media MEDIA_COLLECTION).
+        # Every read keys on product_id -- the pass, the Online Store status
+        # counts, the design-row delete gate, the runbook reversal -- so
+        # product_id is indexed on its own (a PARTIAL index serves no query
+        # that does not name its filter). UNIQUE (product_id, gid) over the
+        # LIVE docs only (a PENDING doc has gid None): one media is IMS's at
+        # most once per product, whatever writer races the lease.
+        _idx("online_media", "product_id", background=True)
+        _idx(
+            "online_media",
+            [("product_id", 1), ("gid", 1)],
+            unique=True,
+            partialFilterExpression={"gid": {"$type": "string"}},
+            name="uniq_online_media_product_gid",
+            background=True,
+        )
+
         # GRNs / Delivery Challans (F9 P3). Partial UNIQUE backstop on
         # (vendor_id, dc_number, store_id) for DELIVERY_CHALLAN rows only --
         # the app-level duplicate check in vendors.create_grn is check-then-

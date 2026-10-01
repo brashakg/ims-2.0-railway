@@ -28,10 +28,8 @@ from typing import Dict
 # precondition): the InventoryItem gid is what the stock write-back resolver
 # needs (catalog_variants.shopify_inventory_item_id) to sync the listed
 # quantity down after an in-store sale. Read-only; no extra network call.
-# media(first: 250) -- EVERY media id (+ the CDN url of an image) rides on
-# the create/update response so the photo pass (media.sync_product_media)
-# can diff IMS's photo list against what is on Shopify with NO extra query.
-# 250 is Shopify's per-product media ceiling, so the page is always complete.
+# No media selection here: the photo pass (media.sync_product_media) reads the
+# listing through _PRODUCT_MEDIA_QUERY below -- ONE read path, for both doors.
 _PRODUCT_CREATE = """
 mutation imsProductCreate($input: ProductInput!) {
   productCreate(input: $input) {
@@ -42,7 +40,6 @@ mutation imsProductCreate($input: ProductInput!) {
       variants(first: 100) {
         nodes { id title selectedOptions { name value } inventoryItem { id } }
       }
-      media(first: 250) { nodes { id ... on MediaImage { image { url } } } }
     }
     userErrors { field message }
   }
@@ -63,7 +60,6 @@ mutation imsProductUpdate($input: ProductInput!) {
       variants(first: 100) {
         nodes { id title selectedOptions { name value } inventoryItem { id } }
       }
-      media(first: 250) { nodes { id ... on MediaImage { image { url } } } }
     }
     userErrors { field message }
   }
@@ -177,18 +173,24 @@ mutation imsProductReorderMedia($id: ID!, $moves: [MoveInput!]!) {
   }
 }
 """
-# READ-ONLY: the media a live product carries today, for the adoption
-# runbook (scripts/adopt_shopify_media_map.py) that claims pre-media_map media
-# as IMS-owned by a positive identity match (media.match_media_to_photos).
-# originalSource is the url Shopify was handed at attach; image.url the CDN
-# copy (its file name is the only trace of the source name). alt is NOT read:
-# IMS attaches every photo with alt '', so an alt can never identify one.
+# READ-ONLY: the media a live product carries today, in listing order -- the
+# photo pass's one read of the listing (both doors) and the adoption
+# runbook's (scripts/adopt_shopify_media_map.py). `status` says whether
+# Shopify has fetched the bytes (UPLOADED / PROCESSING / READY / FAILED);
+# image.url is the CDN copy, and its FILE NAME is how IMS recognises its own
+# attach (media._same_file): Shopify keeps the source file's name. createdAt
+# (Shopify's clock) says WHEN the media was made: a lost attach is settled
+# only onto a media made while IMS's send was in flight (media._settle). NOT read:
+# originalSource (in production it is Shopify's own storage copy, never the
+# url IMS sent -- measured 2026-09-06) and alt (IMS attaches every photo
+# with alt '', so an alt can never identify one). 250 is Shopify's
+# per-product media ceiling, so the page is always complete.
 _PRODUCT_MEDIA_QUERY = """
 query imsProductMedia($id: ID!) {
   product(id: $id) {
     id
     media(first: 250) {
-      nodes { id ... on MediaImage { image { url } originalSource { url } } }
+      nodes { id status ... on MediaImage { createdAt image { url } } }
     }
   }
 }

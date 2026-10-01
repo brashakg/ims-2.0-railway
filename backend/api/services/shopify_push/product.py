@@ -6,6 +6,7 @@ variant seeding, photos, publish) and `push_product_delist`.
 
 from __future__ import annotations
 
+from contextlib import AsyncExitStack
 from typing import Any, Dict, List, Optional
 
 from agents.nexus_providers import _as_shopify_gid
@@ -20,11 +21,14 @@ from ._shared import (
     _blocked_result,
     _live_or_reason,
     is_variant_of,
+    online_block_refusal,
+    online_block_status,
     price_on_update_enabled,
     push_lock_reason,
 )
-from .transport import _graphql, _user_errors
+from .transport import SentOnce, _graphql, _user_errors
 from .queries import _PRODUCT_CREATE, _PRODUCT_UPDATE
+from .creates import clear_create, record_create, settle_lost_create
 from .product_input import (
     _has_publishable_price,
     _set_product_metafields,
@@ -50,7 +54,14 @@ from .inventory import (
     push_skus_stock,
     sync_product_stock,
 )
-from .media import plan_product_media, product_photo_urls, sync_product_media
+from .media import (
+    media_lease,
+    media_rows,
+    photo_outcome,
+    plan_product_media,
+    product_photo_urls,
+    sync_product_media,
+)
 from .writeback import _requeue_unpublished, _writeback_product
 
 # ===========================================================================
@@ -121,32 +132,17 @@ async def push_product(
     # already-synced blocked product is done separately by push_product_delist,
     # which is NOT gated here (it IS the block action).
     if blocked is None:
-        try:
-            from ..online_block import is_blocked_from_online_strict
-
-            blocked = is_blocked_from_online_strict(product, db)
-        except Exception:  # noqa: BLE001 -- classifier must never break a push
-            blocked = None
-    if blocked is None:
+        blocked = online_block_status(db, product)
+    refusal = online_block_refusal(blocked)
+    if refusal:
         return PushResult(
             mode=MODE_BLOCKED,
             entity="product",
             action="skip",
             target_id=pid,
             ok=False,
-            error="block status unverifiable (block-config read error) -- "
-            "push skipped (fail-closed)",
-            reason="block_status_unverifiable",
-        )
-    if blocked:
-        return PushResult(
-            mode=MODE_BLOCKED,
-            entity="product",
-            action="skip",
-            target_id=pid,
-            ok=False,
-            error="blocked from online (member of an online_sync_blocked collection)",
-            reason="online_sync_blocked",
+            error=refusal[1],
+            reason=refusal[0],
         )
     variants = variants or []
     ecom = product.get("ecom") or {}
@@ -172,6 +168,12 @@ async def push_product(
             "never published to the storefront",
             reason="no_photo",
         )
+    # ``photos`` is the product's OWN photographs only. A design-queue media
+    # the design press attached is an online_media doc carrying its row's
+    # ``image_id``, and the photo pass below keeps it without ever attaching,
+    # deleting or reordering it (media.plan_product_media): this press -- and
+    # the 01:00/09:00 sync that runs it -- never reads the design queue, so a
+    # design image reaches or leaves Shopify only through a human press.
 
     existing_gid = ecom.get("shopify_product_id")
     payload = build_product_input(product, variants)
@@ -215,6 +217,10 @@ async def push_product(
             seed_plan = plan_variant_seed(product, variants)
         elif repair_only:
             seed_plan = plan_variant_seed(product, variants, repair_only=True)
+        try:
+            photo_plan: Dict[str, Any] = plan_product_media(media_rows(db, pid), photos, photos)
+        except Exception as exc:  # noqa: BLE001 -- a dry run never fails on its plan
+            photo_plan = {"error": "the media record could not be read: %s" % exc}
         return PushResult(
             mode=MODE_SIMULATED,
             entity="product",
@@ -228,16 +234,64 @@ async def push_product(
             variant_prices=vp_plan,
             variants_seeded=seed_plan,
             stock=await plan_product_stock(db, product, variants),
-            photos=plan_product_media(product, photos),
+            photos=photo_plan,
             tags=plan_product_tags(product, ims_tags),
         )
 
     query = _PRODUCT_UPDATE if existing_gid else _PRODUCT_CREATE
     field_name = "productUpdate" if existing_gid else "productCreate"
+    # ONE MEDIA PASS PER PRODUCT (media.media_lease): the lease is held from
+    # BEFORE the product write until the photo pass is done -- a design press
+    # (or another sweep) on this product waits, and never plans on half of
+    # this one; the pass renews it before every attach.
+    lease = AsyncExitStack()
     try:
-        body = await _graphql(db, query, {"input": payload})
+        renew = await lease.enter_async_context(media_lease(db, pid))
+        # NEVER A BLIND RE-CREATE (creates.py): productCreate is sent once, so
+        # a create whose answer was lost is looked for on Shopify first -- a
+        # product it made is linked and UPDATED, never created a second time.
+        # The record stays until the gid is SAVED (below): an update of the
+        # found product that fails leaves it for the next press to find again.
+        creating = not existing_gid
+        if creating:
+            verdict, found, why = await settle_lost_create(db, "product", pid)
+            if verdict == "refuse":
+                return PushResult(
+                    mode=MODE_LIVE,
+                    entity="product",
+                    action=action,
+                    target_id=pid,
+                    ok=False,
+                    payload=payload,
+                    error=why,
+                    reason="create_unsettled",
+                )
+            if verdict == "found":
+                creating = False
+                existing_gid = found
+                # The lost create LANDED -- options and tags included -- so
+                # what goes now is an UPDATE of it, built as one: a
+                # create-shaped input carries productOptions, which
+                # productUpdate refuses ("product_options cannot be specified
+                # during update").
+                payload = build_product_input(
+                    {**product, "ecom": {**ecom, "shopify_product_id": found}}, variants
+                )
+                query, field_name = _PRODUCT_UPDATE, "productUpdate"
+            else:
+                await record_create(db, "product", pid, payload.get("title"), payload.get("handle"))
+        try:
+            body = await _graphql(db, query, {"input": payload})
+        except SentOnce:
+            raise  # the intent stays: the next press looks for it first
+        except Exception:
+            if creating:
+                clear_create(db, "product", pid)  # refused unapplied: nothing to find
+            raise
         err = _user_errors(body, field_name)
         if err:
+            if creating:
+                clear_create(db, "product", pid)  # refused: nothing was made
             return PushResult(
                 mode=MODE_LIVE,
                 entity="product",
@@ -272,8 +326,8 @@ async def push_product(
                     "created. The product is still queued; press again."
                 ),
             )
-        if new_gid and pid:
-            _writeback_product(db, pid, new_gid)
+        if new_gid and pid and _writeback_product(db, pid, new_gid) and action == "create":
+            clear_create(db, "product", pid)  # the gid is saved: nothing to find
         # TAGS, RIGHT AFTER THE WRITE. The update sent no `tags`, so the
         # response's tag list is what Shopify holds now; the pass adds /
         # removes only the tags IMS itself sent and records the ledger.
@@ -336,18 +390,16 @@ async def push_product(
         # visible before its photo arrived. The refusal above proved IMS has a
         # photograph; this puts it on Shopify before anything is published.
         #
-        # Sync audit gap #3 (owner 2026-09-06): the pass now DIFFS IMS's photo
-        # list against the media IMS owns on Shopify (read straight off the
-        # create/update response's media selection -- no extra query) --
-        # attaching what is missing, deleting what IMS dropped, reordering to
-        # IMS order -- instead of attaching only onto a bare product. The
-        # ownership rule (media.py) keeps hand-uploaded media untouched.
-        existing_media = ((prod.get("media") or {}).get("nodes")) or []
+        # Sync audit gap #3 (owner 2026-09-06): the pass DIFFS the twin's
+        # photo list (re-read under the lease: a sweep's doc may be minutes
+        # old) against the media IMS owns on the listing it reads -- attaching
+        # what is missing, deleting what IMS dropped, reordering to IMS order.
+        # The ownership rule (media.py) keeps hand-uploaded media untouched. A
+        # refusal (no photograph now, twin or ledger unreadable) reports
+        # on_shopify 0, so the publish below is withheld.
         photo_summary = None
         if new_gid:
-            photo_summary = await sync_product_media(
-                db, product, new_gid, photos, existing_media
-            )
+            photo_summary = await sync_product_media(db, pid, new_gid, renew=renew)
         photo_on_shopify = bool((photo_summary or {}).get("on_shopify"))
         # STOCK, IN THIS SAME PRESS, BEFORE THE PUBLISH (owner ruling
         # 2026-09-07 -- the website sells only what the shops can ship). Every
@@ -521,12 +573,24 @@ async def push_product(
         # them. No re-queue: the stock diff still sees this product as changed
         # (nothing reached its baseline), so the next pass retries it.
         stock_not_written = bool(stock_summary) and not stock_summary.get("ok")
+        # ...AND SO ARE THE PHOTOGRAPHS. The attach is sent ONCE (transport):
+        # a 502 or a lost answer, or an attach still settling, leaves the
+        # listing short of what IMS says -- the old photo still up, or both --
+        # and only a NEXT pass settles it: the row stays queued for it. A hold
+        # only a PERSON can clear (MEDIA_HELD, MEDIA_NAMING_DRIFT) is not
+        # re-queued -- every 01:00/09:00 sync would re-press it for nothing --
+        # it is SAID: its code and line ride the result like the price's. A
+        # design-queue attach still inside its grace keeps the row queued too
+        # (``settling``: only a later pass of this product settles it), though
+        # this press says nothing about a lane it does not govern.
+        media_code, media_line, media_retry = photo_outcome(photo_summary)
+        media_retry = media_retry or bool((photo_summary or {}).get("settling"))
         # THE ONE RE-QUEUE RULE. The press reached Shopify but did not do all
-        # it was pressed for -- the product is not visible, or it is visible at
-        # the wrong price. Either way the row goes BACK in the queue so the next
-        # press / scheduled sync retries it. See _requeue_unpublished for why
-        # this is not the ping-pong hazard.
-        if pid and (not published_ok or price_not_synced):
+        # it was pressed for -- the product is not visible, it is visible at
+        # the wrong price, or its photographs have not settled. The row goes
+        # BACK in the queue so the next press / scheduled sync retries it. See
+        # _requeue_unpublished for why this is not the ping-pong hazard.
+        if pid and (not published_ok or price_not_synced or media_retry):
             _requeue_unpublished(db, pid)
         return PushResult(
             mode=MODE_LIVE,
@@ -547,6 +611,7 @@ async def push_product(
                         for line in (
                             _PRICE_NOT_SYNCED_MSG if price_not_synced else None,
                             (stock_summary or {}).get("error") if stock_not_written else None,
+                            media_line,
                         )
                         if line
                     )
@@ -563,7 +628,7 @@ async def push_product(
                 (
                     PRICE_NOT_SYNCED
                     if price_not_synced
-                    else ((stock_summary or {}).get("code") if stock_not_written else None)
+                    else (((stock_summary or {}).get("code") if stock_not_written else None) or media_code)
                 )
                 if published_ok
                 else (pub_summary or {}).get("code")
@@ -591,6 +656,8 @@ async def push_product(
             payload=payload,
             error=str(e),
         )
+    finally:
+        await lease.aclose()
 
 
 async def push_product_delist(db, product: Dict[str, Any]) -> PushResult:

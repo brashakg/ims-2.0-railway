@@ -153,23 +153,34 @@ class _FakeColl:
     def find_one(self, _flt):
         return self._doc
 
+    # The press's media lease (an insert/delete on its own collection): free.
+    def insert_one(self, _doc):
+        return None
+
+    def delete_one(self, _flt):
+        return None
+
+    # The online-block config read (no collection is blocked here) -- an
+    # unreadable config refuses the press (fail closed).
+    def find(self, *_args, **_kwargs):
+        return []
+
 
 class _FakeDB:
-    def __init__(self, product_doc):
-        self._p = product_doc
+    """The parent product and the one queue row the press re-reads."""
+
+    def __init__(self, product_doc, image_doc=None):
+        self._docs = {"catalog_products": product_doc, "product_images": image_doc}
 
     def __getitem__(self, name):
-        return _FakeColl(self._p if name == "catalog_products" else None)
+        return _FakeColl(self._docs.get(name))
 
 
 def test_push_image_blocked_when_parent_brand_locked(monkeypatch):
     _locks(monkeypatch, {"brands": ["cartier"]})
-    db = _FakeDB({"id": "P1", "brand": "Cartier", "ecom": {"shopify_product_id": "g"}})
-    res = _run(
-        sp.push_image(
-            db, {"image_id": "IMG1", "product_id": "P1", "status": "APPROVED"}
-        )
-    )
+    img = {"image_id": "IMG1", "product_id": "P1", "status": "APPROVED"}
+    db = _FakeDB({"id": "P1", "brand": "Cartier", "ecom": {"shopify_product_id": "g"}}, img)
+    res = _run(sp.push_image(db, img))
     assert res.mode == sp.MODE_BLOCKED
     assert res.ok is False
     assert res.target_id == "IMG1"
@@ -177,10 +188,7 @@ def test_push_image_blocked_when_parent_brand_locked(monkeypatch):
 
 def test_push_image_unlocked_parent_proceeds(monkeypatch):
     _locks(monkeypatch, {"brands": ["cartier"]})
-    db = _FakeDB({"id": "P2", "brand": "Ray-Ban", "ecom": {}})
-    res = _run(
-        sp.push_image(
-            db, {"image_id": "IMG2", "product_id": "P2", "status": "APPROVED"}
-        )
-    )
+    img = {"image_id": "IMG2", "product_id": "P2", "status": "APPROVED"}
+    db = _FakeDB({"id": "P2", "brand": "Ray-Ban", "ecom": {}}, img)
+    res = _run(sp.push_image(db, img))
     assert res.mode != sp.MODE_BLOCKED

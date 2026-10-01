@@ -354,6 +354,10 @@ What the five page-split waves left, measured 2026-09-27 (owner page "Wave Six")
 | **#1157** | Wave 6: the 3,158-line clinical router becomes a package. Byte-identical API. |
 | **#1158** | Wave 6: the 3,528-line workshop router becomes a package. Byte-identical API. |
 
+## 4s. Website photos pressed twice — PR #1152 DRAFT, not merged
+
+The design-queue photo press could put the same photograph on a Shopify listing twice. Rebuilt on the branch (2026-09-28), not merged, not on the website: IMS now keeps its record of which Shopify photos it owns in a place of its own (other product saves can no longer erase it); it recognises its own photo on Shopify by the file name, the one thing production Shopify keeps; a photo upload that times out is never sent a second time; and a catalogue edit no longer writes back stale website fields it did not change. The PR stays a draft until an adversarial review panel clears it. Round 2 (2026-09-29 .. 10-01) fixed its four open problems and ran three more review rounds; the last one was **NOT CLEAR**, with 20 problems still open (the worst: a photo a person uploads by hand within 8 minutes of a failed IMS upload can be taken for IMS's own and later deleted). The PR description lists every one.
+
 ## 5. Waiting on the owner
 
 | Question | Why it matters |

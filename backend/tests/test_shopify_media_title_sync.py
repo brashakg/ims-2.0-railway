@@ -10,11 +10,12 @@ nothing on the storefront while IMS reported "synced"; and the spine->twin
 mirror never recomputed the twin's title, so a rename never reached Shopify.
 
 THE DESIGN under test
-  * ecom.media_map = [{url, id}] -- the Shopify media IMS attached, in IMS
-    order. IMS manages ONLY those: attach what is missing, delete what IMS
-    dropped (tombstone first), reorder to IMS order. Media not in the map
-    (hand-uploaded, design-queue, admin) is never touched; a product IMS owns
-    nothing on is left entirely alone (no duplicate attach).
+  * the online_media ledger (shopify_push.media) -- one LIVE doc per Shopify
+    media IMS attached. IMS manages ONLY those: attach what is missing (one
+    url per call), delete what IMS dropped (tombstone first), reorder to IMS
+    order. Media not in the ledger (hand-uploaded, admin) is never touched;
+    a product IMS owns nothing on is left entirely alone (no duplicate
+    attach).
   * ONE title formula (product_master.pim_display_name) at create AND on a
     rename; the rename queues the twin so the next press / sync sends it.
   * The scheduled live sync runs the stock pass after the product pass.
@@ -57,6 +58,9 @@ from test_online_push_dirty_flag import (  # noqa: E402
     _seed_pushed,
 )
 from test_shopify_live_sync import _seed_products, world  # noqa: E402,F401
+from strict_fakes import media_doc  # noqa: E402
+
+LEDGER = shopify_push.MEDIA_COLLECTION
 
 TOMB = shopify_push.TOMBSTONES_COLLECTION
 GID = "gid://shopify/Product/900"
@@ -92,6 +96,7 @@ class _Shopify:
             "imsProductCreateMedia",
             "imsProductDeleteMedia",
             "imsProductReorderMedia",
+            "imsProductMedia",
             "imsProductCreate",
             "imsProductUpdate",
             "imsPublishablePublish",
@@ -112,6 +117,13 @@ class _Shopify:
     def ops(self):
         return [c["op"] for c in self.calls]
 
+    def media_ops(self):
+        """The media MUTATIONS sent (the listing read is not one)."""
+        return [o for o in self.ops() if o.endswith("Media") and o != "imsProductMedia"]
+
+    def attached(self):
+        return [m["originalSource"] for c in self.calls_of("imsProductCreateMedia") for m in c["variables"]["media"]]
+
     async def __call__(self, db, query, variables):
         op = self._op(query)
         self.calls.append({"op": op, "variables": copy.deepcopy(variables)})
@@ -123,20 +135,18 @@ class _Shopify:
         }
         if op in ("imsProductCreate", "imsProductUpdate"):
             field = "productCreate" if op == "imsProductCreate" else "productUpdate"
-            nodes = [] if op == "imsProductCreate" else self.media_nodes
+            if op == "imsProductCreate":
+                self.media_nodes = []  # a new product carries no media
             return {
                 "data": {
                     field: {
-                        "product": {
-                            "id": GID,
-                            "handle": "h",
-                            "variants": {"nodes": [variant]},
-                            "media": {"nodes": nodes},
-                        },
+                        "product": {"id": GID, "handle": "h", "variants": {"nodes": [variant]}},
                         "userErrors": [],
                     }
                 }
             }
+        if op == "imsProductMedia":
+            return {"data": {"product": {"id": variables["id"], "media": {"nodes": copy.deepcopy(self.media_nodes)}}}}
         if op == "imsProductCreateMedia":
             if self.fail_attach:
                 return {
@@ -149,7 +159,8 @@ class _Shopify:
                 }
             out = []
             for _ in variables.get("media") or []:
-                out.append({"id": _m(self.next_media), "status": "PROCESSING"})
+                out.append({"id": _m(self.next_media), "status": "UPLOADED"})
+                self.media_nodes.append({"id": _m(self.next_media), "status": "UPLOADED", "image": None})
                 self.next_media += 1
             return {"data": {"productCreateMedia": {"media": out, "mediaUserErrors": []}}}
         if op == "imsProductDeleteMedia":
@@ -223,9 +234,9 @@ def _live(monkeypatch, media_nodes=None):
     return fake
 
 
-def _product(photos, media_map=None, shopify_id=GID, pid="P1"):
+def _product(photos, shopify_id=GID, pid="P1"):
     """A product already on Shopify (or not, shopify_id=None) with the given
-    IMS photo list and the media IMS recorded as its own."""
+    IMS photo list (the media IMS owns is _seed's ``media``)."""
     doc = {
         "id": pid,
         "sku": "SKU-1",
@@ -240,22 +251,32 @@ def _product(photos, media_map=None, shopify_id=GID, pid="P1"):
     if shopify_id:
         doc["ecom"]["shopify_product_id"] = shopify_id
         doc["ecom"]["shopify_variant_id"] = "gid://shopify/ProductVariant/901"
-    if media_map is not None:
-        doc["ecom"]["media_map"] = [{"url": u, "id": i} for u, i in media_map]
     return doc
 
 
-def _seed(db, doc):
+def _own(db, media, pid="P1"):
+    """Record [(url, gid)] as media IMS owns (LIVE ledger docs). how=adopted:
+    the CDN names _nodes gives are not the urls' (the canary ignores
+    adopted docs; it has its own tests in test_design_queue_repress)."""
+    for u, i in media:
+        db[LEDGER].insert_one(media_doc(pid, u, i, how="adopted"))
+
+
+def _seed(db, doc, media=()):
     db["catalog_products"].insert_one(copy.deepcopy(doc))
+    _own(db, media, doc["id"])
     return copy.deepcopy(doc)
 
 
 def _map_of(db, pid="P1"):
-    return (db["catalog_products"].find_one({"id": pid}) or {})["ecom"].get("media_map")
+    """The media IMS owns: [{url, id}] in write order."""
+    return [{"url": d["url"], "id": d["gid"]} for d in db[LEDGER].find({"product_id": pid}) if d.get("gid")]
 
 
 def _nodes(*ids):
-    return [{"id": _m(i), "image": {"url": "https://cdn.shopify.com/%d.jpg" % i}} for i in ids]
+    return [
+        {"id": _m(i), "status": "READY", "image": {"url": "https://cdn.shopify.com/%d.jpg" % i}} for i in ids
+    ]
 
 
 # ===========================================================================
@@ -270,8 +291,7 @@ def test_create_attaches_every_photo_in_order_and_records_the_map(db, gates, mon
     res = _run(shopify_push.push_product(db, doc, []))
 
     assert res.ok is True and res.mode == "LIVE"
-    (att,) = fake.calls_of("imsProductCreateMedia")
-    assert [m["originalSource"] for m in att["variables"]["media"]] == [U1, U2]
+    assert fake.attached() == [U1, U2] and len(fake.calls_of("imsProductCreateMedia")) == 2, "one url per call"
     assert _map_of(db) == [{"url": U1, "id": _m(100)}, {"url": U2, "id": _m(101)}]
     assert res.photos["attached"] == 2 and res.photos["on_shopify"] == 2
 
@@ -280,15 +300,16 @@ def test_a_repress_with_nothing_changed_touches_no_media(db, gates, monkeypatch)
     """The map is what stops a re-press from piling a duplicate copy of every
     photograph onto a live listing (the July '250 media' wall)."""
     fake = _live(monkeypatch, _nodes(1, 2))
-    doc = _seed(db, _product([U1, U2], media_map=[(U1, _m(1)), (U2, _m(2))]))
+    doc = _seed(db, _product([U1, U2]), media=[(U1, _m(1)), (U2, _m(2))])
 
     res = _run(shopify_push.push_product(db, doc, []))
 
     assert res.ok is True
-    assert not [o for o in fake.ops() if o.endswith("Media")], fake.ops()
+    assert fake.media_ops() == [], fake.ops()
     assert res.photos == {
-        "attached": 0, "deleted": 0, "reordered": False,
-        "unmanaged": 0, "hands_off": False, "on_shopify": 2,
+        "attached": 0, "deleted": 0, "reordered": False, "unmanaged": 0, "adopted": 0,
+        "dropped": 0, "held": [], "review": [], "hands_off": False, "settling": False, "on_shopify": 2,
+        "attached_map": [],
     }
 
 
@@ -296,14 +317,13 @@ def test_replacing_a_photo_attaches_the_new_then_deletes_the_old(db, gates, monk
     """IMS swapped the side shot (U2) for a top shot (U3). Shopify gets the new
     one FIRST, then the old one comes down -- and only the old one."""
     fake = _live(monkeypatch, _nodes(1, 2))
-    doc = _seed(db, _product([U1, U3], media_map=[(U1, _m(1)), (U2, _m(2))]))
+    doc = _seed(db, _product([U1, U3]), media=[(U1, _m(1)), (U2, _m(2))])
 
     res = _run(shopify_push.push_product(db, doc, []))
 
-    media_ops = [o for o in fake.ops() if o.endswith("Media")]
+    media_ops = fake.media_ops()
     assert media_ops == ["imsProductCreateMedia", "imsProductDeleteMedia"], media_ops
-    (att,) = fake.calls_of("imsProductCreateMedia")
-    assert [m["originalSource"] for m in att["variables"]["media"]] == [U3]
+    assert fake.attached() == [U3]
     (dele,) = fake.calls_of("imsProductDeleteMedia")
     assert dele["variables"] == {"productId": GID, "mediaIds": [_m(2)]}
     assert res.photos["attached"] == 1 and res.photos["deleted"] == 1
@@ -314,7 +334,7 @@ def test_replacing_a_photo_attaches_the_new_then_deletes_the_old(db, gates, monk
 
 def test_removing_a_photo_deletes_exactly_that_media(db, gates, monkeypatch):
     fake = _live(monkeypatch, _nodes(1, 2))
-    doc = _seed(db, _product([U2], media_map=[(U1, _m(1)), (U2, _m(2))]))
+    doc = _seed(db, _product([U2]), media=[(U1, _m(1)), (U2, _m(2))])
 
     res = _run(shopify_push.push_product(db, doc, []))
 
@@ -330,7 +350,7 @@ def test_the_tombstone_is_written_before_the_delete(db, gates, monkeypatch):
     """The never-lose-bytes lesson: the record of what came down exists
     BEFORE the call that takes it down."""
     fake = _live(monkeypatch, _nodes(1, 2))
-    doc = _seed(db, _product([U1], media_map=[(U1, _m(1)), (U2, _m(2))]))
+    doc = _seed(db, _product([U1]), media=[(U1, _m(1)), (U2, _m(2))])
 
     _run(shopify_push.push_product(db, doc, []))
 
@@ -343,7 +363,7 @@ def test_the_tombstone_is_written_before_the_delete(db, gates, monkeypatch):
 
 def test_a_failed_tombstone_skips_the_delete(db, gates, monkeypatch):
     fake = _live(monkeypatch, _nodes(1, 2))
-    doc = _seed(db, _product([U1], media_map=[(U1, _m(1)), (U2, _m(2))]))
+    doc = _seed(db, _product([U1]), media=[(U1, _m(1)), (U2, _m(2))])
 
     def _no_record(*_a, **_k):
         raise RuntimeError("tombstones unavailable")
@@ -360,7 +380,7 @@ def test_a_failed_tombstone_skips_the_delete(db, gates, monkeypatch):
 
 def test_reordering_photos_reorders_the_shopify_media(db, gates, monkeypatch):
     fake = _live(monkeypatch, _nodes(1, 2))
-    doc = _seed(db, _product([U2, U1], media_map=[(U1, _m(1)), (U2, _m(2))]))
+    doc = _seed(db, _product([U2, U1]), media=[(U1, _m(1)), (U2, _m(2))])
 
     res = _run(shopify_push.push_product(db, doc, []))
 
@@ -379,7 +399,7 @@ def test_unmapped_media_is_never_deleted_and_keeps_its_place(db, gates, monkeypa
     drops U2: only M/2 comes down; M/9 is counted, never touched, and NOT
     displaced -- the owned media was already in IMS order among itself."""
     fake = _live(monkeypatch, _nodes(9, 1, 2))
-    doc = _seed(db, _product([U1], media_map=[(U1, _m(1)), (U2, _m(2))]))
+    doc = _seed(db, _product([U1]), media=[(U1, _m(1)), (U2, _m(2))])
 
     res = _run(shopify_push.push_product(db, doc, []))
 
@@ -403,7 +423,7 @@ def test_a_reorder_uses_the_slots_ims_owns_and_leaves_unmanaged_media_put(db, ga
     The moves sort the IMS-owned media inside slots 1 and 2; the hero stays
     at 0 whichever way Shopify applies the moves."""
     fake = _live(monkeypatch, _nodes(9, 2, 1))
-    doc = _seed(db, _product([U1, U2], media_map=[(U1, _m(1)), (U2, _m(2))]))
+    doc = _seed(db, _product([U1, U2]), media=[(U1, _m(1)), (U2, _m(2))])
 
     res = _run(shopify_push.push_product(db, doc, []))
 
@@ -420,20 +440,20 @@ def test_a_product_ims_owns_nothing_on_is_left_alone(db, gates, monkeypatch):
     attached (no duplicates), nothing deleted; the product still publishes
     because it HAS photographs."""
     fake = _live(monkeypatch, _nodes(7, 8))
-    doc = _seed(db, _product([U1, U2]))  # no media_map at all
+    doc = _seed(db, _product([U1, U2]))  # IMS owns nothing
 
     res = _run(shopify_push.push_product(db, doc, []))
 
-    assert not [o for o in fake.ops() if o.endswith("Media")], fake.ops()
+    assert fake.media_ops() == [], fake.ops()
     assert res.photos["hands_off"] is True and res.photos["unmanaged"] == 2
     assert res.photos["on_shopify"] == 2 and res.publication["published"] is True
-    assert _map_of(db) is None
+    assert _map_of(db) == []
 
 
 def test_a_failed_attach_never_deletes_the_photo_it_was_replacing(db, gates, monkeypatch):
     fake = _live(monkeypatch, _nodes(1, 2))
     fake.fail_attach = True
-    doc = _seed(db, _product([U1, U3], media_map=[(U1, _m(1)), (U2, _m(2))]))
+    doc = _seed(db, _product([U1, U3]), media=[(U1, _m(1)), (U2, _m(2))])
 
     res = _run(shopify_push.push_product(db, doc, []))
 
@@ -446,11 +466,11 @@ def test_a_failed_attach_never_deletes_the_photo_it_was_replacing(db, gates, mon
 def test_the_250_media_limit_is_refused_with_a_code_before_any_call(db, gates, monkeypatch):
     urls = ["https://cdn.example.com/%d.jpg" % i for i in range(250)]
     fake = _live(monkeypatch, _nodes(*range(250)))
-    doc = _seed(db, _product(urls + [U3], media_map=list(zip(urls, (_m(i) for i in range(250))))))
+    doc = _seed(db, _product(urls + [U3]), media=list(zip(urls, (_m(i) for i in range(250)))))
 
     res = _run(shopify_push.push_product(db, doc, []))
 
-    assert not [o for o in fake.ops() if o.endswith("Media")], fake.ops()
+    assert fake.media_ops() == [], fake.ops()
     assert res.photos["code"] == shopify_push.MEDIA_LIMIT_CODE
     assert "250" in res.photos["error"] and res.photos["attached"] == 0
 
@@ -476,28 +496,25 @@ def test_dark_press_returns_the_media_plan_and_makes_no_call(db, monkeypatch):
         raise AssertionError("DARK press must never hit the Shopify network")
 
     monkeypatch.setattr(shopify_push, "_graphql", _boom)
-    doc = _product([U3, U1], media_map=[(U1, _m(1)), (U2, _m(2))])
+    doc = _seed(db, _product([U3, U1]), media=[(U1, _m(1)), (U2, _m(2))])
 
     res = _run(shopify_push.push_product(db, doc, []))
 
     assert res.mode == "SIMULATED" and res.ok is True
-    assert res.photos == {
-        "attach": [U3],
-        "delete": [{"url": U2, "id": _m(2), "shopify_url": None}],
-        "reorder": [],
-        "unmanaged": 0,
-        "hands_off": False,
-        "owned": [{"url": U1, "id": _m(1)}],
-    }
+    photos = res.photos
+    assert photos["attach"] == [U3] and photos["reorder"] == [] and photos["hands_off"] is False
+    assert [(d["url"], d["id"], d["shopify_url"]) for d in photos["delete"]] == [(U2, _m(2), None)]
+    assert [(r["url"], r["id"]) for r in photos["owned"]] == [(U1, _m(1)), (U2, _m(2))]
+    assert photos["on_shopify"] is None and photos["claims"] == [] and photos["held"] == []
 
 
 def test_plan_reports_a_reorder_when_shopify_order_differs():
     """The pure diff (what the live pass acts on) sees a reorder when the
     IMS order and the Shopify order of the owned media disagree."""
-    doc = _product([U2, U1], media_map=[(U1, _m(1)), (U2, _m(2))])
-    plan = shopify_push.plan_product_media(doc, [U2, U1], _nodes(1, 2))
+    rows = [media_doc("P1", U1, _m(1)), media_doc("P1", U2, _m(2))]
+    plan = shopify_push.plan_product_media(rows, [U2, U1], [U2, U1], _nodes(1, 2))
     assert plan["reorder"] == [_m(2), _m(1)] and plan["attach"] == [] and plan["delete"] == []
-    same = shopify_push.plan_product_media(doc, [U2, U1], _nodes(2, 1))
+    same = shopify_push.plan_product_media(rows, [U2, U1], [U2, U1], _nodes(2, 1))
     assert same["reorder"] == []
 
 

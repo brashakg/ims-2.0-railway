@@ -18,7 +18,8 @@ from ._shared import (
     _live_or_reason,
     push_lock_reason,
 )
-from .transport import _graphql, _user_errors
+from .transport import SentOnce, _graphql, _user_errors
+from .creates import clear_create, record_create, settle_lost_create
 from .queries import (
     _COLLECTION_ADD_PRODUCTS,
     _COLLECTION_CREATE,
@@ -206,9 +207,42 @@ async def push_collection(db, collection: Dict[str, Any]) -> PushResult:
     query = _COLLECTION_UPDATE if existing_gid else _COLLECTION_CREATE
     field_name = "collectionUpdate" if existing_gid else "collectionCreate"
     try:
-        body = await _graphql(db, query, {"input": payload})
+        # NEVER A BLIND RE-CREATE (creates.py): a collectionCreate whose answer
+        # was lost is looked for first; one it made is linked and updated, and
+        # the record stays until its gid is saved.
+        creating = not existing_gid
+        if creating:
+            verdict, found, why = await settle_lost_create(db, "collection", cid)
+            if verdict == "refuse":
+                return PushResult(
+                    mode=MODE_LIVE,
+                    entity="collection",
+                    action=action,
+                    target_id=cid,
+                    ok=False,
+                    payload=payload,
+                    error=why,
+                    reason="create_unsettled",
+                )
+            if verdict == "found":
+                creating = False
+                existing_gid = found
+                payload = build_collection_input({**collection, "shopify_collection_id": found})
+                query, field_name = _COLLECTION_UPDATE, "collectionUpdate"
+            else:
+                await record_create(db, "collection", cid, payload.get("title"), payload.get("handle"))
+        try:
+            body = await _graphql(db, query, {"input": payload})
+        except SentOnce:
+            raise  # the intent stays: the next press looks for it first
+        except Exception:
+            if creating:
+                clear_create(db, "collection", cid)  # refused unapplied: nothing to find
+            raise
         err = _user_errors(body, field_name)
         if err:
+            if creating:
+                clear_create(db, "collection", cid)  # refused: nothing was made
             return PushResult(
                 mode=MODE_LIVE,
                 entity="collection",
@@ -222,15 +256,10 @@ async def push_collection(db, collection: Dict[str, Any]) -> PushResult:
             "collection"
         ) or {}
         new_gid = coll_obj.get("id") or existing_gid
-        if new_gid and cid:
-            _writeback_simple(
-                db,
-                "ecom_collections",
-                "collection_id",
-                cid,
-                "shopify_collection_id",
-                new_gid,
-            )
+        if new_gid and cid and _writeback_simple(
+            db, "ecom_collections", "collection_id", cid, "shopify_collection_id", new_gid
+        ) and action == "create":
+            clear_create(db, "collection", cid)  # the gid is saved: nothing to find
         # CUSTOM manual membership rides AFTER the collection upsert (the gid must
         # exist to attach products to). Fail-soft side channel: reported in
         # `membership`, never flips the collection push's ok. push never raises.

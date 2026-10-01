@@ -46,6 +46,7 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
+import asyncio
 import logging
 
 # Reuse the code-verified Shopify writer primitives -- NEVER a second gate/boundary.
@@ -61,6 +62,10 @@ MODE_LIVE = shopify_push.MODE_LIVE
 # be created against them). Anything else (CLOSED / INCOMPLETE / CANCELLED) is
 # NOT fulfillable and is skipped.
 _FULFILLABLE_FO_STATUS = {"OPEN", "IN_PROGRESS", "SCHEDULED"}
+
+# A Fulfillment in one of these statuses fulfils nothing (cancelled in the
+# admin, or failed): it is never stamped as the order's fulfilment.
+_DEAD_FULFILLMENT_STATUS = {"CANCELLED", "ERROR", "FAILURE"}
 
 # How many FulfillmentOrders / existing Fulfillments to inspect per order. An
 # online optical order is a single parcel; a handful is ample headroom.
@@ -113,7 +118,7 @@ _ORDER_FULFILLMENT_ORDERS = """
 query imsOrderFulfillmentOrders($id: ID!, $foPage: Int!, $fulPage: Int!) {
   order(id: $id) {
     id
-    fulfillments(first: $fulPage) { id status }
+    fulfillments(first: $fulPage) { id status trackingInfo { number } }
     fulfillmentOrders(first: $foPage) {
       edges { node { id status } }
     }
@@ -233,14 +238,16 @@ def _writeback_fulfillment(db, order: Dict[str, Any], fulfillment_id: str) -> No
 
 def _parse_fulfillment_orders(
     body: Dict[str, Any],
-) -> Tuple[Optional[Dict[str, Any]], List[str], List[str]]:
+) -> Tuple[Optional[Dict[str, Any]], List[str], List[Dict[str, Any]]]:
     """From the fulfillmentOrders query body return
-    (order_node, open_fo_gids, existing_fulfillment_gids).
+    (order_node, open_fo_gids, live_fulfillments).
 
     order_node is None when Shopify has no such order (a hard error upstream).
-    open_fo_gids are the FulfillmentOrders still fulfillable. existing gids are
-    any Fulfillments already on the order (used to echo/stamp when there is
-    nothing left to fulfil). Pure; tolerant of a malformed body."""
+    open_fo_gids are the FulfillmentOrders still fulfillable.
+    live_fulfillments are the Fulfillments on the order that still fulfil it
+    -- a CANCELLED / ERROR / FAILURE one is none -- as {id, numbers} (their
+    tracking numbers), used to echo/stamp when there is nothing left to
+    fulfil. Pure; tolerant of a malformed body."""
     data = (body or {}).get("data") or {}
     order = data.get("order")
     if not isinstance(order, dict):
@@ -252,10 +259,19 @@ def _parse_fulfillment_orders(
         status = _norm(node.get("status")).upper()
         if gid and status in _FULFILLABLE_FO_STATUS:
             open_fos.append(gid)
-    existing_fuls: List[str] = [
-        f.get("id")
+    existing_fuls: List[Dict[str, Any]] = [
+        {
+            "id": f["id"],
+            "numbers": {
+                _norm(t.get("number"))
+                for t in (f.get("trackingInfo") or [])
+                if isinstance(t, dict) and _norm(t.get("number"))
+            },
+        }
         for f in (order.get("fulfillments") or [])
-        if isinstance(f, dict) and f.get("id")
+        if isinstance(f, dict)
+        and f.get("id")
+        and _norm(f.get("status")).upper() not in _DEAD_FULFILLMENT_STATUS
     ]
     return order, open_fos, existing_fuls
 
@@ -271,6 +287,7 @@ async def push_fulfillment(
     *,
     tracking: Optional[Dict[str, Any]] = None,
     notify_customer: bool = True,
+    _pass: int = 1,
 ) -> FulfillmentPushResult:
     """Push an ONLINE order's fulfilment + tracking to Shopify. Never raises.
 
@@ -287,6 +304,18 @@ async def push_fulfillment(
       4. LIVE: resolve the order's OPEN FulfillmentOrder(s); if none remain the
          order is already fulfilled -> skip (echo/stamp the existing gid); else
          fulfillmentCreateV2 with trackingInfo, write the new gid back.
+      5. THE NEXT PASS. The create is sent ONCE (a lost answer may have been
+         applied -- shopify_push.SentOnce), and the booking hook runs once, so
+         a lost answer starts step 4 again here: the order is READ first, and
+         a create that landed has closed its FulfillmentOrder (4b stamps it
+         -- IMS's own, told by its tracking number, never a cancelled one),
+         one that did not is still open (4c sends it again). A create of a
+         LATER pass that Shopify refuses may have met the first one landing
+         late (it closed the FulfillmentOrder after this pass read it open):
+         it is read again too, never reported as a plain failure. Never a
+         blind re-send; at most _MAX_RETRIES passes, each after the
+         transport's own backoff (a read right after a lost answer is the
+         read most likely to miss a create still being committed).
     """
     order = order or {}
     shopify_order_id = _norm(order.get("shopify_order_id"))
@@ -376,13 +405,17 @@ async def push_fulfillment(
             error="order not found on Shopify (no order node in response)",
         )
 
-    # 4b. No OPEN FulfillmentOrder left -> nothing to fulfil. If a Fulfillment
-    #     already exists the order was fulfilled out-of-band: SKIP + stamp the
-    #     existing gid so future calls fast-skip. If neither, it is a clean noop
-    #     (e.g. a cancelled / unfulfillable order).
+    # 4b. No OPEN FulfillmentOrder left -> nothing to fulfil. A live
+    #     Fulfillment carrying IMS's tracking number is IMS's own create (one
+    #     whose answer was lost): stamp THAT one. Any other live one means the
+    #     order was fulfilled out-of-band: SKIP + stamp it so future calls
+    #     fast-skip. A cancelled one is never stamped. If none, it is a clean
+    #     noop (e.g. a cancelled / unfulfillable order).
     if not open_fos:
         if existing_fuls:
-            existing_fid = existing_fuls[0]
+            number = _norm(tracking_info.get("number"))
+            own = [f for f in existing_fuls if number and number in f["numbers"]]
+            existing_fid = (own or existing_fuls)[0]["id"]
             _writeback_fulfillment(db, order, existing_fid)
             return FulfillmentPushResult(
                 mode=MODE_LIVE,
@@ -390,7 +423,7 @@ async def push_fulfillment(
                 target_id=shopify_order_id,
                 ok=True,
                 shopify_id=existing_fid,
-                reason="already_fulfilled_on_shopify",
+                reason="ims_create_landed" if own else "already_fulfilled_on_shopify",
             )
         return FulfillmentPushResult(
             mode=MODE_LIVE,
@@ -414,6 +447,12 @@ async def push_fulfillment(
     try:
         body = await shopify_push._graphql(db, _FULFILLMENT_CREATE, mutation_vars)
     except Exception as exc:  # noqa: BLE001 -- fail-soft, never propagate
+        if isinstance(exc, shopify_push.SentOnce) and _pass < shopify_push._MAX_RETRIES:
+            # 5. THE NEXT PASS: read the order again, then create only if open.
+            await asyncio.sleep(shopify_push._retry_delay(_pass, None))
+            return await push_fulfillment(
+                db, order, tracking=tracking, notify_customer=notify_customer, _pass=_pass + 1
+            )
         return FulfillmentPushResult(
             mode=MODE_LIVE,
             action="create",
@@ -423,6 +462,13 @@ async def push_fulfillment(
             error=f"fulfillmentCreateV2 failed: {exc}",
         )
     err = shopify_push._user_errors(body, "fulfillmentCreateV2")
+    if err and 1 < _pass < shopify_push._MAX_RETRIES:
+        # A LATE COMMIT: pass 1's lost create may have closed the
+        # FulfillmentOrder after this pass read it open -- read again.
+        await asyncio.sleep(shopify_push._retry_delay(_pass, None))
+        return await push_fulfillment(
+            db, order, tracking=tracking, notify_customer=notify_customer, _pass=_pass + 1
+        )
     if err:
         return FulfillmentPushResult(
             mode=MODE_LIVE,

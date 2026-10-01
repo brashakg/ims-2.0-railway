@@ -190,7 +190,6 @@ def _product_body(field):
                             }
                         ]
                     },
-                    "media": {"nodes": [{"id": "gid://shopify/MediaImage/1"}]},
                 },
                 "userErrors": [],
             }
@@ -211,6 +210,25 @@ def _responses(**override):
         "publications(": {"data": {"publications": {"nodes": [{"id": "gid://shopify/Publication/1", "name": "Online Store"}]}}},
         "publishablePublish": _ok_body("publishablePublish"),
         "metafieldsSet": _ok_body("metafieldsSet", metafields=[]),
+        # The photo pass's read of the listing (production shape: a READY
+        # image carries its CDN url). The listing already has a photograph, so
+        # the publish precondition holds and these stock pins see a publish.
+        "imsProductMedia": {
+            "data": {
+                "product": {
+                    "id": PRODUCT_GID,
+                    "media": {
+                        "nodes": [
+                            {
+                                "id": "gid://shopify/MediaImage/1",
+                                "status": "READY",
+                                "image": {"url": "https://cdn.shopify.com/s/files/1/0000/0001/files/p.jpg?v=1"},
+                            }
+                        ]
+                    },
+                }
+            }
+        },
         # Shopify's location list, READ and answering the three mapped shops,
         # ticked. It used to be unanswered ({'data': {}} -> nodes [] -> read
         # False), so EVERY green pin in this file exercised the unread branch

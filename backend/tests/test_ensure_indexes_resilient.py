@@ -113,3 +113,41 @@ def test_all_succeed_path_is_clean():
         assert db["audit_logs"].calls > 0
     finally:
         conn._db, conn._connected = saved_db, saved_connected
+
+
+def test_the_media_ledger_is_indexed_and_one_media_is_owned_once():
+    """Round 4. Every read of the photo pass's ledger (online_media) keys on
+    product_id -- the pass, the Online Store status counts, the design-row
+    delete gate, the runbook reversal -- so it gets a plain product_id index
+    (a partial index serves no query that does not name its filter), and a
+    UNIQUE (product_id, gid) index over the LIVE docs (gid a string; a
+    pending doc has none): one media is IMS's at most once per product.
+    REVERT-PROOF: drop either _idx line -> red."""
+
+    class _Keys(_FakeColl):
+        def __init__(self, name):
+            super().__init__(name)
+            self.keys = []
+
+        def create_index(self, keys, **kw):
+            self.keys.append((keys, kw.get("unique", False), kw.get("partialFilterExpression")))
+            return super().create_index(keys, **kw)
+
+    class _DB(_FakeDB):
+        def __getitem__(self, name):
+            if name not in self._colls:
+                self._colls[name] = _Keys(name)
+            return self._colls[name]
+
+    conn = DatabaseConnection()
+    saved_db, saved_connected = conn._db, conn._connected
+    try:
+        conn._connected = True
+        db = _DB(fail_colls=set())
+        conn._db = db
+        conn.ensure_indexes()
+        keys = db["online_media"].keys
+        assert ("product_id", False, None) in keys, keys
+        assert ([("product_id", 1), ("gid", 1)], True, {"gid": {"$type": "string"}}) in keys, keys
+    finally:
+        conn._db, conn._connected = saved_db, saved_connected

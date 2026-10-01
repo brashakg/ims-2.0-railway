@@ -34,11 +34,16 @@ os.environ.setdefault("ENVIRONMENT", "test")
 
 import asyncio  # noqa: E402
 
+import httpx  # noqa: E402
 import pytest  # noqa: E402
 
 from database.connection import MockCollection  # noqa: E402
 from api.services import shopify_push  # noqa: E402
 from api.services import rbac_policy as rbac  # noqa: E402
+from tests.strict_fakes import media_doc  # noqa: E402
+
+LEDGER = shopify_push.MEDIA_COLLECTION
+_BARE_LISTING = {"id": "gid://shopify/Product/111", "media": {"nodes": []}}
 
 
 # ===========================================================================
@@ -215,6 +220,14 @@ def test_push_collection_menu_image_simulated_no_network(monkeypatch):
                        "resource_id": "gid://shopify/Collection/9", "children": []}]}
     img = {"image_id": "I1", "product_id": "P1", "url": "http://x/raw.jpg",
            "status": "APPROVED"}
+    # The parent is on Shopify with a photograph IMS owns on its listing: a
+    # press of a row whose parent is not is a SKIP, dark or live
+    # (image_press_plan's refusals). The press re-reads its queue row.
+    db["catalog_products"].insert_one(
+        {"id": "P1", "images": ["https://cdn.example.com/p.jpg"],
+         "ecom": {"shopify_product_id": "gid://shopify/Product/111"}})
+    db[LEDGER].insert_one(media_doc("P1", "https://cdn.example.com/p.jpg", "gid://shopify/MediaImage/1"))
+    db["product_images"].insert_one(dict(img))
 
     rc = _run(shopify_push.push_collection(db, coll))
     rm = _run(shopify_push.push_menu(db, menu))
@@ -234,7 +247,9 @@ def test_push_image_non_approved_is_skipped_even_dark(monkeypatch):
     the gate (the design-queue go-live gate). No network either."""
     _force_dark(monkeypatch, "writes_off")
     img = {"image_id": "I2", "product_id": "P1", "url": "u", "status": "REVIEW"}
-    res = _run(shopify_push.push_image(_EngineDB(), img))
+    db = _EngineDB()
+    db["product_images"].insert_one(dict(img))
+    res = _run(shopify_push.push_image(db, img))
     assert res.action == "skip" and res.ok is False
     assert "APPROVED" in (res.error or "")
 
@@ -250,7 +265,7 @@ def test_push_product_live_creates_and_writes_back_gid(monkeypatch):
         "data": {"productCreate": {
             "product": {"id": "gid://shopify/Product/111", "handle": "rb"},
             "userErrors": [],
-        }}
+        }, "product": _BARE_LISTING}
     })
     db = _EngineDB()
     db["catalog_products"].insert_one(
@@ -266,13 +281,14 @@ def test_push_product_live_creates_and_writes_back_gid(monkeypatch):
     assert res.ok is False and res.reason == "publish_withheld"
     assert res.action == "create"
     assert res.shopify_id == "gid://shopify/Product/111"
-    # The network boundary WAS hit: the product, then its photograph (the photo
-    # rides the SAME press since 2026-08-25). Nothing else: this fixture's
-    # productCreate returns no variant, so there is no tracking call, and the
-    # per-store writer reads its locations from Mongo, never from Shopify.
-    assert len(spy.calls) == 2
+    # The network boundary WAS hit: the product, the listing read, then its
+    # photograph (the photo rides the SAME press since 2026-08-25). Nothing
+    # else: this fixture's productCreate returns no variant, so there is no
+    # tracking call, and the per-store writer reads its locations from Mongo.
+    assert len(spy.calls) == 3
     assert "imsProductCreate(" in spy.calls[0]["query"]
-    assert "productCreateMedia" in spy.calls[1]["query"]
+    assert "imsProductMedia(" in spy.calls[1]["query"]
+    assert "productCreateMedia" in spy.calls[2]["query"]
 
     # Idempotency write-back: the gid is now on the doc.
     saved = db["catalog_products"].find_one({"id": "P1"})
@@ -362,34 +378,56 @@ def test_push_menu_live_writes_back_gid(monkeypatch):
     res = _run(shopify_push.push_menu(db, menu))
     assert res.ok is True and res.shopify_id == "gid://shopify/Menu/7"
     assert db["ecom_menus"].find_one({"menu_id": "M1"})["shopify_menu_id"] == "gid://shopify/Menu/7"
-    # menuCreate carried the title/handle/items variables.
-    assert spy.calls[0]["variables"]["handle"] == "main-menu"
+    # menuCreate carried the title/handle/items variables (after the create
+    # journal's read of the menus already on the shop: creates.record_create).
+    (create,) = [c for c in spy.calls if "mutation imsMenuCreate" in c["query"]]
+    assert create["variables"]["handle"] == "main-menu"
+    assert "query imsMenus" in spy.calls[0]["query"]
 
 
-def test_push_image_live_attaches_media_and_writes_back(monkeypatch):
-    """An APPROVED image whose parent product is already on Shopify pushes via
-    productCreateMedia and writes back the MediaImage gid."""
+def test_push_image_live_attaches_media_and_writes_the_map(monkeypatch):
+    """An APPROVED image whose parent product is already on Shopify goes through
+    the listing's photo pass: one media read, one productCreateMedia for the
+    edited asset, and the MediaImage gid lands in the online_media ledger
+    (the ONE writer) -- never on the image row or the twin."""
     spy = _force_live(monkeypatch, {
-        "data": {"productCreateMedia": {
-            "media": [{"id": "gid://shopify/MediaImage/900"}],
-            "mediaUserErrors": [],
-        }}
+        "data": {
+            "product": {"id": "gid://shopify/Product/111",
+                        "media": {"nodes": [{"id": "gid://shopify/MediaImage/1"}]}},
+            "productCreateMedia": {
+                "media": [{"id": "gid://shopify/MediaImage/900"}],
+                "mediaUserErrors": [],
+            },
+        }
     })
     db = _EngineDB()
-    # Parent product must already carry a Shopify gid (media attaches to a product).
+    # Parent product must already carry a Shopify gid (media attaches to a product);
+    # its own photograph is already on the listing and mapped.
     db["catalog_products"].insert_one(
-        {"id": "P1", "images": ["https://cdn.example.com/p.jpg"], "ecom": {"shopify_product_id": "gid://shopify/Product/111"}}
+        {"id": "P1", "images": ["https://cdn.example.com/p.jpg"],
+         "ecom": {"shopify_product_id": "gid://shopify/Product/111"}}
     )
+    db[LEDGER].insert_one(media_doc("P1", "https://cdn.example.com/p.jpg", "gid://shopify/MediaImage/1"))
     db["product_images"].insert_one(
         {"image_id": "I1", "product_id": "P1", "url": "http://x/raw.jpg",
-         "edited_url": "http://x/edited.jpg", "status": "APPROVED", "shopify_image_id": None}
+         "edited_url": "http://x/edited.jpg", "status": "APPROVED"}
     )
     img = db["product_images"].find_one({"image_id": "I1"})
     res = _run(shopify_push.push_image(db, img))
     assert res.ok is True and res.shopify_id == "gid://shopify/MediaImage/900"
-    assert db["product_images"].find_one({"image_id": "I1"})["shopify_image_id"] == "gid://shopify/MediaImage/900"
-    # Prefer the EDITED asset as the source.
-    assert spy.calls[0]["variables"]["media"][0]["originalSource"] == "http://x/edited.jpg"
+    # The design row's ledger doc carries the queue row's image_id: the lane
+    # marker the product press keeps its hands off.
+    assert sorted((d["url"], d["gid"], d["image_id"]) for d in db[LEDGER].find({})) == [
+        ("http://x/edited.jpg", "gid://shopify/MediaImage/900", "I1"),
+        ("https://cdn.example.com/p.jpg", "gid://shopify/MediaImage/1", None),
+    ]
+    assert set(db["catalog_products"].find_one({"id": "P1"})["ecom"]) == {"shopify_product_id"}
+    assert db["product_images"].find_one({"image_id": "I1"}).get("shopify_image_id") is None
+    # The read came first; the create carries ONLY the new asset, and prefers
+    # the EDITED asset as the source.
+    assert [c["variables"].get("media") for c in spy.calls] == [
+        None, [{"originalSource": "http://x/edited.jpg", "alt": "", "mediaContentType": "IMAGE"}]
+    ]
 
 
 def test_push_image_live_skips_when_parent_not_on_shopify(monkeypatch):
@@ -683,7 +721,13 @@ def _seed_pending(conn):
     """Seed a mix of pending + already-pushed/clean docs across all four entities."""
     conn.db["catalog_products"].insert_one(
         {"id": "P1", "title": "RB", "brand": "RB",
-         "images": ["https://cdn.example.com/p.jpg"], "ecom": {"status": "PUBLISHED", "handle": "rb", "locally_modified": True}})
+         "images": ["https://cdn.example.com/p.jpg"],
+         "ecom": {"status": "PUBLISHED", "handle": "rb", "locally_modified": True,
+                  # On Shopify, so I1 below is a press the sweep makes (a row
+                  # whose parent is not on Shopify is a refusal, never swept).
+                  "shopify_product_id": "gid://shopify/Product/1"}})
+    # I2 below is already on the listing: its url is on record in the ledger.
+    conn.db[LEDGER].insert_one(media_doc("P1", "http://x/b.jpg", "gid://shopify/MediaImage/9"))
     conn.db["catalog_products"].insert_one(  # clean -> NOT swept
         {"id": "P2", "images": ["https://cdn.example.com/p.jpg"], "ecom": {"shopify_product_id": "gid://shopify/Product/2"}})
     conn.db["ecom_collections"].insert_one(
@@ -695,9 +739,9 @@ def _seed_pending(conn):
     conn.db["product_images"].insert_one(  # APPROVED + unpushed -> swept
         {"image_id": "I1", "product_id": "P1", "url": "http://x/a.jpg",
          "status": "APPROVED"})
-    conn.db["product_images"].insert_one(  # already pushed -> NOT swept
+    conn.db["product_images"].insert_one(  # already on the listing (mapped) -> NOT swept
         {"image_id": "I2", "product_id": "P1", "url": "http://x/b.jpg",
-         "status": "APPROVED", "shopify_image_id": "gid://shopify/MediaImage/9"})
+         "status": "APPROVED"})
 
 
 def test_push_all_pending_dark_sweeps_every_dirty_doc(client, auth_headers, patched_db, monkeypatch):
@@ -941,6 +985,7 @@ def test_live_push_sets_metafields_after_create(monkeypatch):
                     "product": {"id": "gid://shopify/Product/222"},
                     "userErrors": [],
                 },
+                "product": _BARE_LISTING,
                 "metafieldsSet": {
                     "metafields": [{"id": "gid://shopify/Metafield/1", "key": "frame_material"},
                                     {"id": "gid://shopify/Metafield/2", "key": "uv_protection"}],
@@ -963,13 +1008,14 @@ def test_live_push_sets_metafields_after_create(monkeypatch):
     assert res.mode == "LIVE"
     # (Unpriced fixture -> the publish is withheld; the metafield side channel
     # below is what this test is about.)
-    # Three network calls: productCreate, ONE metafieldsSet chunk and the
-    # photograph (which rides the same press since 2026-08-25). The stock step
-    # adds none here: no variant came back to track, and the per-store writer
-    # reads its locations from Mongo.
-    assert len(spy.calls) == 3
+    # Four network calls: productCreate, ONE metafieldsSet chunk, the
+    # listing read and the photograph (which rides the same press since
+    # 2026-08-25). The stock step adds none here: no variant came back to
+    # track, and the per-store writer reads its locations from Mongo.
+    assert len(spy.calls) == 4
     assert "metafieldsSet" in spy.calls[1]["query"]
-    assert "productCreateMedia" in spy.calls[2]["query"]
+    assert "imsProductMedia(" in spy.calls[2]["query"]
+    assert "productCreateMedia" in spy.calls[3]["query"]
     mfs = spy.calls[1]["variables"]["metafields"]
     assert all(m["ownerId"] == "gid://shopify/Product/222" for m in mfs)
     assert sorted(m["key"] for m in mfs) == ["frame_material", "uv_protection"]
@@ -1169,6 +1215,136 @@ def test_graphql_retries_graphql_throttled_body(monkeypatch):
     ])
     body = _run(shopify_push._graphql(None, "query { x }", {}))
     assert body == ok_body and calls["n"] == 2
+
+
+# --- SEND-ONCE: a create is never replayed after Shopify may have run it ----
+# REVERT-PROOF: _replay_safe returning True for everything (the old
+# retry-everything policy) turns the ReadTimeout / 502 cases red (2+ POSTs).
+
+_CREATE_MEDIA = shopify_push.queries._PRODUCT_CREATE_MEDIA
+_UPDATE = shopify_push.queries._PRODUCT_UPDATE
+
+
+class _Garbled(_FakeResp):
+    def json(self):
+        raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+
+@pytest.mark.parametrize(
+    "first",
+    [
+        httpx.ReadTimeout("read timed out"),
+        _FakeResp(502, text="bad gateway"),
+        httpx.RemoteProtocolError("Server disconnected without sending a response."),
+        httpx.ReadError("connection reset by peer"),
+        httpx.WriteError("broken pipe"),
+        _Garbled(200, text="<html>upstream reset</html>"),
+        _FakeResp(200, body={"errors": [{"message": "Internal error. Looks like something went wrong on our end.",
+                                         "extensions": {"code": "INTERNAL_SERVER_ERROR"}}]}),
+        httpx.DecodingError("Error -3 while decompressing data: incorrect header check"),
+        RuntimeError("an exception the transport has no name for"),
+    ],
+    ids=[
+        "read-timeout", "502", "disconnected", "read-error", "write-error", "garbled-200", "internal-error-200",
+        "undecodable", "unnamed-exception",
+    ],
+)
+def test_a_create_mutation_is_sent_once_when_shopify_may_have_applied_it(monkeypatch, first):
+    """Every failure after the request may have left is a lost answer
+    (SentOnce), never a plain error the caller reads as 'refused unapplied'
+    -- default deny: only a failure that proves the request never left
+    (transport._NEVER_SENT) is not one.
+    REVERT-PROOF: SentOnce only for a timeout / 5xx -> the dropped-connection,
+    undecodable, unnamed and garbled cases raise a plain error (or, for the
+    INTERNAL_SERVER_ERROR body, return it) instead."""
+    calls = _wire_graphql(monkeypatch, [first, _FakeResp(200, body={"data": {}})])
+    with pytest.raises(ValueError) as err:
+        _run(shopify_push._graphql(None, _CREATE_MEDIA, {}))
+    assert calls["n"] == 1, "one POST: a replay would mint a second media"
+    assert isinstance(err.value, shopify_push.SentOnce), err.value
+    assert "imsProductCreateMedia" in str(err.value) and "not retried" in str(err.value)
+
+
+@pytest.mark.parametrize(
+    "first",
+    [httpx.ConnectTimeout("connect timed out"), _FakeResp(429, headers={"Retry-After": "0"})],
+    ids=["connect-timeout", "429"],
+)
+def test_a_create_mutation_is_retried_when_shopify_never_ran_it(monkeypatch, first):
+    ok = {"data": {"productCreateMedia": {"media": []}}}
+    calls = _wire_graphql(monkeypatch, [first, _FakeResp(200, body=ok)])
+    assert _run(shopify_push._graphql(None, _CREATE_MEDIA, {})) == ok
+    assert calls["n"] == 2
+
+
+@pytest.mark.parametrize(
+    "first", [httpx.ReadTimeout("read timed out"), _FakeResp(503, text="unavailable")], ids=["read-timeout", "503"]
+)
+@pytest.mark.parametrize("query", [_UPDATE, "query { shop { id } }"], ids=["replay-safe-mutation", "query"])
+def test_queries_and_replay_safe_mutations_still_retry_a_read_timeout(monkeypatch, query, first):
+    """REVERT-PROOF (the panel's M3): every 5xx send-once -> the 503 cases
+    raise instead of retrying."""
+    ok = {"data": {"ok": True}}
+    calls = _wire_graphql(monkeypatch, [first, _FakeResp(200, body=ok)])
+    assert _run(shopify_push._graphql(None, query, {})) == ok
+    assert calls["n"] == 2
+
+
+def test_the_replay_list_names_real_mutations_and_every_create_is_send_once():
+    """Every name on _REPLAY_SAFE is a `mutation <name>` IMS sends (a typo
+    would silently make that mutation send-once), and the send-once set is
+    exactly the creates (default deny)."""
+    import pathlib
+    import re as _re
+
+    from api.services.shopify_push import transport
+
+    api = pathlib.Path(__file__).resolve().parents[1] / "api"
+    sent = set()
+    for f in api.rglob("*.py"):
+        sent |= set(_re.findall(r"^\s*mutation\s+(\w+)\s*\(", f.read_text(encoding="utf-8"), _re.M))
+    assert transport._REPLAY_SAFE <= sent, transport._REPLAY_SAFE - sent
+    assert sent - transport._REPLAY_SAFE == {
+        "imsProductCreate",
+        "imsProductCreateMedia",
+        "imsVariantsBulkCreate",
+        "imsCollectionCreate",
+        "imsMenuCreate",
+        "imsFulfillmentCreate",
+        "imsWebhookSubscriptionCreate",
+    }
+    assert transport._replay_safe("mutation imsSomethingNew { x }") is False, "default deny"
+
+
+def test_replay_safe_reads_every_real_document_whole():
+    """Round 4: _replay_safe is asked of the REAL documents IMS sends (every
+    `query ims...` / `mutation ...` string constant under backend/api), and
+    answers the same with a leading comment or a fragment in front -- a
+    create must never read as a query and be replayed blind after a lost
+    answer (the duplicate-media bug the send-once rule exists for).
+    REVERT-PROOF: the round-3 `startswith('mutation')` reading -> the
+    comment-led and fragment-led creates answer True (replayed)."""
+    import ast
+    import pathlib
+    import re as _re
+
+    from api.services.shopify_push import transport
+
+    api = pathlib.Path(__file__).resolve().parents[1] / "api"
+    docs = []
+    for f in api.rglob("*.py"):
+        for node in ast.walk(ast.parse(f.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                if _re.match(r"\s*(query\s+ims\w*|mutation\s+\w+)\s*[({]", node.value):
+                    docs.append(node.value)
+    creates = [d for d in docs if _re.match(r"\s*mutation\s+\w*Create\w*", d)]
+    assert len(docs) > 20 and len(creates) >= 7, (len(docs), len(creates))
+    for d in docs:
+        m = _re.match(r"\s*mutation\s+(\w+)", d)
+        want = (m.group(1) in transport._REPLAY_SAFE) if m else True
+        for doc in (d, "# a note\n" + d, "fragment F on Media { id }\n" + d):
+            assert transport._replay_safe(doc) is want, doc[:80]
+    assert transport._replay_safe("mutation ($x: ID!) { productCreate { id } }") is False, "anonymous: deny"
 
 
 # --- register_webhooks ------------------------------------------------------
@@ -1511,6 +1687,84 @@ def test_push_history_query_failure_reports_unavailable_not_a_false_empty(
     assert body["entries"] == []
 
 
+def test_push_all_pending_presses_a_mapped_image_whose_old_asset_is_still_up(client, auth_headers, patched_db, monkeypatch):
+    """The sweep's skip IS the press's own predicate (image_press_plan): a row
+    already on the listing that still maps the asset it carried before it was
+    replaced is NOT skipped -- the press (dark here) plans the drop. Skipping
+    on 'has a gid' alone left that row pressable only by hand."""
+    conn, _ = patched_db
+    _force_dark(monkeypatch, "writes_off")
+    conn.db["catalog_products"].insert_one(
+        {"id": "P1", "images": ["https://cdn.example.com/p.jpg"],
+         "ecom": {"shopify_product_id": "gid://shopify/Product/1"}})
+    conn.db[LEDGER].insert_one(media_doc("P1", "http://x/new.jpg", "gid://shopify/MediaImage/9", image_id="I1"))
+    conn.db[LEDGER].insert_one(media_doc("P1", "http://x/old.jpg", "gid://shopify/MediaImage/8", image_id="I1"))
+    conn.db["product_images"].insert_one(
+        {"image_id": "I1", "product_id": "P1", "url": "http://x/new.jpg", "status": "APPROVED"})
+
+    r = client.post("/api/v1/online-store/push/all-pending?entities=images", headers=auth_headers)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["summary"]["images"]["pushed"] == 1, body
+    (res,) = body["results"]
+    assert res["action"] == "update" and res["payload"]["drop"] == ["http://x/old.jpg"]
+    assert res["shopify_id"] == "gid://shopify/MediaImage/9"
+
+
+def test_push_all_pending_never_presses_a_row_the_press_refuses(client, auth_headers, patched_db, monkeypatch):
+    """Round 4 P4: the press refuses four kinds of APPROVED row before it
+    sends anything -- a url Shopify cannot fetch, a parent not on Shopify, a
+    parent with no photograph, a push-locked brand. Those refusals are part
+    of the ONE predicate (image_press_plan -> 'skip' + reason), so the sweep
+    presses none of them (no result, no audit row, no 'failed' tally every
+    run) and the counts call none of them pending.
+    REVERT-PROOF: the sweep skipping on 'noop' alone -> red (4 presses);
+    the counts' pending on != 'noop' -> red (pending 4)."""
+    from api.routers import online_store_push as router
+    from api.services import policy_engine
+
+    conn, audit_repo = patched_db
+    _force_dark(monkeypatch, "writes_off")
+    monkeypatch.setattr(
+        policy_engine, "get_policy",
+        lambda key, default=None: {"brands": ["Cartier"]} if key == "ecom.shopify_push_locks" else default,
+    )
+    photo = "https://cdn.example.com/p.jpg"
+    on = {"shopify_product_id": "gid://shopify/Product/1"}
+    for doc in (
+        {"id": "P1", "images": [photo], "ecom": dict(on)},
+        {"id": "P2", "images": [photo], "ecom": {}},
+        {"id": "P3", "images": [], "ecom": dict(on)},
+        {"id": "P4", "images": [photo], "brand": "Cartier", "ecom": dict(on)},
+    ):
+        conn.db["catalog_products"].insert_one(doc)
+    rows = (("I1", "P1", "/uploads/x.jpg"), ("I2", "P2", "http://x/a.jpg"),
+            ("I3", "P3", "http://x/b.jpg"), ("I4", "P4", "http://x/c.jpg"))
+    for iid, pid, url in rows:
+        conn.db["product_images"].insert_one(
+            {"image_id": iid, "product_id": pid, "url": url, "status": "APPROVED"})
+
+    plans = {iid: router._press_plan(conn.db, conn.db["product_images"].find_one({"image_id": iid}))
+             for iid, _p, _u in rows}
+    assert {k: (p["action"], p["reason"]) for k, p in plans.items()} == {
+        "I1": ("skip", "no_url"), "I2": ("skip", "not_on_shopify"),
+        "I3": ("skip", "no_photo"), "I4": ("skip", "push_locked"),
+    }
+    # The press gives the SAME answer the predicate did, zero network.
+    for iid, _p, _u in rows:
+        res = _run(shopify_push.push_image(conn.db, conn.db["product_images"].find_one({"image_id": iid})))
+        assert (res.action, res.ok) == ("skip", False), (iid, res)
+        # the lock refusal keeps its Hub Phase 5 shape (BLOCKED, the lock line)
+        assert res.reason == plans[iid]["reason"] or (iid == "I4" and res.mode == "BLOCKED"), (iid, res)
+    assert router._image_counts(conn.db) == {"approved": 4, "pushed": 0, "pending": 0}
+
+    r = client.post("/api/v1/online-store/push/all-pending?entities=images", headers=auth_headers)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["results"] == [] and body["pushed_count"] == 0, body
+    assert audit_repo.find_many({"action": "ONLINE_STORE_PUSH"}) == []
+
+
 def test_a_press_that_wrote_no_stock_is_not_tallied_as_a_clean_success(
     client, auth_headers, patched_db, monkeypatch
 ):
@@ -1652,3 +1906,33 @@ def test_a_bulk_press_counts_the_listings_that_went_live_sold_out_from_the_write
     monkeypatch.setattr(shopify_push, "push_product", _clean_with_a_unit)
     s2 = client.post("/api/v1/online-store/push/all-pending?entities=products", headers=auth_headers).json()["summary"]["products"]
     assert s2["pushed"] == 1 and "sold_out" not in s2, s2
+
+
+def test_the_status_counts_read_each_products_media_once(monkeypatch):
+    """Round 4. The Online Store status counts plan EVERY design-queue row;
+    they write nothing between rows, so each product's facts (twin, ledger,
+    push-lock, block) are read ONCE, not once per row (at the old catalogue
+    size that was ~22k ledger reads per screen load).
+    REVERT-PROOF: _image_counts without the per-product facts -> 5 ledger
+    reads for 5 rows of one product."""
+    from api.routers import online_store_push as router
+    from api.services.shopify_push import media as media_mod
+
+    db = _EngineDB()
+    db["catalog_products"].insert_one(
+        {"id": "P1", "images": ["https://cdn.example.com/p.jpg"], "ecom": {"shopify_product_id": "gid://shopify/Product/1"}}
+    )
+    db["online_media"].insert_one(media_doc("P1", "https://cdn.example.com/p.jpg", "gid://shopify/MediaImage/1"))
+    db["online_media"].insert_one(media_doc("P1", "https://x/a1.jpg", "gid://shopify/MediaImage/2", image_id="I1"))
+    for i in range(1, 6):
+        db["product_images"].insert_one(
+            {"image_id": "I%d" % i, "product_id": "P1", "url": "https://x/a%d.jpg" % i, "status": "APPROVED"}
+        )
+    reads = []
+    real = media_mod.media_rows
+    monkeypatch.setattr(media_mod, "media_rows", lambda d, pid: reads.append(pid) or real(d, pid))
+
+    counts = router._image_counts(db)
+
+    assert reads == ["P1"], reads
+    assert counts == {"approved": 5, "pushed": 1, "pending": 4}

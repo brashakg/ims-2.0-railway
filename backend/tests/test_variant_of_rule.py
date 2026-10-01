@@ -90,7 +90,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.environ.setdefault("JWT_SECRET_KEY", "test")
 os.environ.setdefault("ENVIRONMENT", "test")
 
-from strict_fakes import StrictDB  # noqa: E402
+from strict_fakes import StrictDB, media_doc  # noqa: E402
 from api import dependencies as deps  # noqa: E402
 from api.routers import catalog as cat  # noqa: E402
 from api.routers import online_store_push as osp  # noqa: E402
@@ -198,6 +198,13 @@ def _responses():
     return {
         "productCreate(": _product_body("productCreate"),
         "productUpdate(": _product_body("productUpdate"),
+        # The photo pass reads the listing's media (media._product_media):
+        # one READY photograph on it -- IMS owns it only where a test records
+        # it in the ledger (the P3 test below), else the pass keeps its hands
+        # off and the product still publishes (it HAS a photograph).
+        "imsProductMedia": {"data": {"product": {"id": P_GID, "media": {"nodes": [
+            {"id": "gid://shopify/MediaImage/1", "status": "READY",
+             "image": {"url": "https://cdn.shopify.com/s/files/1/0/1/files/parent.jpg"}}]}}}},
         "productVariantsBulkUpdate": _ok("productVariantsBulkUpdate", productVariants=[]),
         "productVariantsBulkCreate": _ok("productVariantsBulkCreate", productVariants=[]),
         "inventorySetQuantities": _ok("inventorySetQuantities", inventoryAdjustmentGroup={"createdAt": "now"}),
@@ -1111,13 +1118,22 @@ def test_push_image_never_attaches_a_childs_photo_to_the_parents_listing(monkeyp
     assert _media._resolve_product_gid(db, "tw-child") is None
 
     image = {"image_id": "img-child", "product_id": "tw-child", "status": "APPROVED", "url": CHILD_PHOTO}
+    db["product_images"].insert_one(dict(image))
     res = _run(shopify_push.push_image(db, image))
     assert (res.action, res.ok) == ("skip", False) and spy.calls == [], "zero network"
     assert "not on Shopify" in (res.error or "")
     assert res.payload["productId"] is None
 
-    # the parent's image goes through as before
-    parent_image = {**image, "image_id": "img-parent", "product_id": "tw-parent", "url": PARENT_PHOTO}
+    # the parent's image goes through as before (a design asset of its own, on
+    # a listing IMS manages: one owned among no foreign media -- a listing IMS
+    # owns NOTHING on is refused, hands off)
+    db[shopify_push.MEDIA_COLLECTION].insert_one(
+        media_doc("tw-parent", PARENT_PHOTO, "gid://shopify/MediaImage/1", how="adopted")
+    )
+    parent_image = {
+        **image, "image_id": "img-parent", "product_id": "tw-parent",
+        "url": "https://cdn.example.com/parent-design.jpg",
+    }
     db["product_images"].insert_one(dict(parent_image))
     res = _run(shopify_push.push_image(db, parent_image))
     assert res.ok and res.action == "create"

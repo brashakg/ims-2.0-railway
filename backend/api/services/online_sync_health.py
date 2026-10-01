@@ -1046,7 +1046,6 @@ def parity_summary(db) -> Dict[str, Any]:
                 "catalog_products":  {"total": int, "pushed": int, "missing": int},
                 "catalog_variants":  {"total": int, "pushed": int, "missing": int},
                 "ecom_collections":  {"total": int, "pushed": int, "missing": int},
-                "product_images":    {"total": int, "pushed": int, "missing": int},
             },
             "ok": bool,    # True if all totals could be read
         }
@@ -1070,12 +1069,11 @@ def parity_summary(db) -> Dict[str, Any]:
                 "shopify_collection_id": {"$exists": True, "$nin": [None, ""]}
             },
         },
-        "product_images": {
-            "total_filter": {},
-            "pushed_filter": {
-                "shopify_image_id": {"$exists": True, "$nin": [None, ""]}
-            },
-        },
+        # product_images is NOT a row here: a design-queue image's Shopify
+        # identity is its live online_media ledger doc (shopify_push.media),
+        # keyed on the parent's listing lane, not a gid on the row a Mongo
+        # filter could count. The push status screen's
+        # images pushed/pending (online_store_push._image_counts) answers it.
     }
 
     if db is None:

@@ -35,6 +35,9 @@ from database.repositories.product_image_repository import (  # noqa: E402
     VALID_TRANSITIONS,
 )
 from api.services import rbac_policy as rbac  # noqa: E402
+from tests.strict_fakes import media_doc  # noqa: E402
+
+LEDGER = "online_media"
 
 
 # ===========================================================================
@@ -48,7 +51,7 @@ def repo():
 
 def test_create_then_get_roundtrip_with_defaults(repo):
     """A fresh image enters the queue as kind=RAW, status=QUEUED, source=UPLOAD,
-    position 0, with null lifecycle fields + a null shopify_image_id (PUSH-DARK)."""
+    position 0, with null lifecycle fields and no Shopify id of its own."""
     created = repo.create({"product_id": "P1", "url": "http://x/raw.jpg"})
     assert created is not None
     assert created["image_id"]
@@ -64,8 +67,9 @@ def test_create_then_get_roundtrip_with_defaults(repo):
     assert created["assigned_to"] is None
     assert created["reviewed_by"] is None
     assert created["approved_at"] is None
-    # PUSH-DARK: not pushed to Shopify yet.
-    assert created["shopify_image_id"] is None
+    # No Shopify id on the row: once pressed, its identity on Shopify is the
+    # live online_media doc (shopify_push.media), never a field here.
+    assert "shopify_image_id" not in created
     assert "created_at" in created and "updated_at" in created
 
     fetched = repo.get_by_id(created["image_id"])
@@ -488,6 +492,41 @@ def test_live_get_and_delete_unknown_is_404(client, auth_headers, patched_db):
     assert client.delete(f"{base}/no-such", headers=auth_headers).status_code == 404
 
 
+def test_live_delete_is_refused_while_the_rows_media_is_on_the_listing(client, auth_headers, patched_db):
+    """Round 4 P3: the design press takes a media down only through its row,
+    so deleting a row whose lane still holds media on the parent's listing
+    (here the asset it carried BEFORE it was edited -- its current url is on
+    record for nothing, so 'has a gid' alone would let it through) would
+    leave that media up and its ledger doc orphaned forever. 409, the row
+    kept. Once the media is off the listing (the product press prunes the
+    doc), it deletes. A row whose url is one of the product's own
+    photographs holds nothing in its lane (that media is the product's) and
+    deletes.
+    REVERT-PROOF: drop the lane refusal in delete_image -> red (200)."""
+    conn, _ = patched_db
+    base = "/api/v1/online-store/images"
+    own, v1 = "https://cdn.example.com/own.jpg", "https://cdn.example.com/design-v1.jpg"
+    iid = client.post(base, headers=auth_headers, json={
+        "product_id": "P1", "url": "https://cdn.example.com/design-v2.jpg"}).json()["image"]["image_id"]
+    own_iid = client.post(base, headers=auth_headers, json={
+        "product_id": "P1", "url": own}).json()["image"]["image_id"]
+    ecom = {"shopify_product_id": "gid://shopify/Product/1"}
+    conn.db["catalog_products"].insert_one({"id": "P1", "images": [own], "ecom": ecom})
+    conn.db[LEDGER].insert_one(media_doc("P1", own, "gid://shopify/MediaImage/1", image_id=own_iid))
+    conn.db[LEDGER].insert_one(media_doc("P1", v1, "gid://shopify/MediaImage/100", image_id=iid, _id="v1"))
+
+    r = client.delete(f"{base}/{iid}", headers=auth_headers)
+    assert r.status_code == 409, r.text
+    assert "MediaImage/100" in r.text
+    assert client.get(f"{base}/{iid}", headers=auth_headers).status_code == 200, "the row is kept"
+
+    assert client.delete(f"{base}/{own_iid}", headers=auth_headers).status_code == 200, "the product's lane"
+
+    conn.db[LEDGER].delete_one({"_id": "v1"})
+    assert client.delete(f"{base}/{iid}", headers=auth_headers).status_code == 200
+    assert client.get(f"{base}/{iid}", headers=auth_headers).status_code == 404
+
+
 # --- OS-024: sign-off (APPROVE/REJECT) is approver-only in the HANDLER --------
 
 
@@ -613,3 +652,26 @@ def test_admin_can_sign_off(client, auth_headers, patched_db):
                     json={"status": "APPROVED"})
     assert r.status_code == 200, r.text
     assert r.json()["image"]["status"] == "APPROVED"
+
+
+def test_live_list_reads_the_synced_chip_off_the_media_ledger(client, auth_headers, patched_db):
+    """`shopify_media_id` on a listed row -- the Synced chip on the Design
+    Queue card -- is the live online_media gid for the row's source url on
+    its parent (the one identity a pushed design image has), read at list
+    time and never stored on the row. A row not on the listing reads null."""
+    conn, _ = patched_db
+    conn.db["catalog_products"].insert_one({"id": "P1", "ecom": {}})
+    conn.db[LEDGER].insert_one(
+        media_doc("P1", "http://x/edited.jpg", "gid://shopify/MediaImage/900", image_id="I1"))
+    conn.db["product_images"].insert_one(
+        {"image_id": "I1", "product_id": "P1", "url": "http://x/raw.jpg",
+         "edited_url": "http://x/edited.jpg", "status": "APPROVED"})
+    conn.db["product_images"].insert_one(
+        {"image_id": "I2", "product_id": "P1", "url": "http://x/other.jpg", "status": "APPROVED"})
+
+    r = client.get("/api/v1/online-store/images", headers=auth_headers)
+    assert r.status_code == 200, r.text
+    by_id = {row["id"]: row for row in r.json()["images"]}
+    assert by_id["I1"]["shopify_media_id"] == "gid://shopify/MediaImage/900"
+    assert by_id["I2"]["shopify_media_id"] is None
+    assert "shopify_media_id" not in conn.db["product_images"].find_one({"image_id": "I1"}), "read, never stored"

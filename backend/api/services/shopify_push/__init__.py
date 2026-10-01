@@ -30,10 +30,13 @@ We REUSE the existing, code-verified safety primitives rather than reinvent them
 
 IDEMPOTENT: on a LIVE push the Shopify gid returned by the mutation is written
 BACK onto the IMS doc (ecom.shopify_product_id / shopify_variant_id /
-shopify_collection_id / shopify_menu_id / shopify_image_id), keyed on the IMS
-join key (never Mongo _id), so a re-push UPDATES the same Shopify object instead
-of creating a duplicate. The presence of a stored Shopify id is what selects
-create-vs-update in the mutation.
+shopify_collection_id / shopify_menu_id), keyed on the IMS join key (never
+Mongo _id), so a re-push UPDATES the same Shopify object instead of creating a
+duplicate. The presence of a stored Shopify id is what selects
+create-vs-update in the mutation. A design-queue IMAGE has no row id of its
+own: its identity is its live online_media doc (media.py, the media ledger)
+for its url, and a press whose url is already on record is a no-op
+(media.push_image).
 
 VARIANT SEEDING ON CREATE (2026-07 fix -- IMS is the sole Shopify writer):
 ProductInput carries NO price and NO sku (the 2024-04+ product model moved both
@@ -108,6 +111,7 @@ from . import (
     collections,
     menus,
     media,
+    creates,
     writeback,
     inventory,
     tags,
@@ -159,6 +163,7 @@ from ._shared import (  # noqa: F401
     _PRICE_NOT_SYNCED_MSG,
 )
 from .transport import (  # noqa: F401
+    SentOnce,
     _MAX_RETRIES,
     _RETRY_BASE_DELAY,
     _RETRY_MAX_DELAY,
@@ -301,18 +306,23 @@ from .media import (  # noqa: F401
     TOMBSTONES_COLLECTION,
     MEDIA_LIMIT_CODE,
     product_photo_urls,
-    _attach_product_photos,
+    MEDIA_COLLECTION,
+    media_rows,
     owned_media,
+    pending_media,
     match_media_to_photos,
     plan_product_media,
     sync_product_media,
     build_media_inputs,
+    image_source_url,
+    image_press_plan,
+    read_image_press,
+    image_lane_media,
+    image_media_gid,
     push_image,
     _user_errors_media,
     _resolve_product_doc,
     _resolve_product_gid,
-    _image_writeback_filter,
-    _writeback_image,
 )
 from .writeback import (  # noqa: F401
     _writeback_product,
@@ -348,6 +358,7 @@ _SUBMODULES = (
     collections,
     menus,
     media,
+    creates,
     writeback,
     inventory,
     tags,

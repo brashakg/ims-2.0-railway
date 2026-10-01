@@ -85,6 +85,7 @@ class _Shopify:
             "imsVariantInventoryUpdate",
             "imsInventorySetQuantities",
             "imsProductCreateMedia",
+            "imsProductMedia",
             "imsLocations",
             "metafieldsSet",
         ):
@@ -128,6 +129,10 @@ class _Shopify:
                     }
                 }
             }
+        if op == "imsProductMedia":
+            # a photograph a human put up: IMS owns nothing, hands off
+            nodes = [{"id": "gid://shopify/MediaImage/1", "status": "READY", "image": {"url": "https://cdn.shopify.com/1.jpg"}}]
+            return {"data": {"product": {"id": GID, "media": {"nodes": nodes}}}}
         if op == "imsTagsAdd":
             self.ledger_at_add = (
                 db["catalog_products"].find_one({"id": "P1"}) or {}

@@ -30,7 +30,10 @@ Mounted at /api/v1/online-store/push:
   POST /product/{product_id}      push a catalog product (+ ecom + variants)
   POST /collection/{collection_id} push an ecom_collections doc (+ smart ruleSet)
   POST /menu/{menu_id}            push an ecom_menus doc (the nav / mega-menu)
-  POST /image/{image_id}          push ONE APPROVED product image (productCreateMedia)
+  POST /image/{image_id}          press ONE APPROVED design-queue image onto its
+                                  parent's listing (the shared media pass: no-op
+                                  when already mapped, drops the asset the row
+                                  mapped before it was replaced)
   POST /stock                     write each shop's own quantity of every changed listing (?dry_run=true previews)
   GET  /status                    per-entity pushed-vs-pending + the current mode
   GET  /locations                 Shopify's locations, joined to the shop each maps to
@@ -246,10 +249,13 @@ async def push_image(
     image_id: str,
     current_user: dict = Depends(require_roles(*_PUSH_ROLES)),
 ) -> Dict[str, Any]:
-    """Push ONE APPROVED product image to Shopify (productCreateMedia onto its
-    parent product). DARK by default; LIVE behind the gates. Writes a chained
-    audit row. Unknown image -> 404. A non-APPROVED image is NOT a route error
-    (the engine returns ok=false action=skip) so the audit still records the
+    """Press ONE APPROVED design-queue image onto its parent product's listing
+    through the shared media pass (read -> attach -> delete -> reorder): a
+    no-op when the media ledger (online_media) already holds the url live
+    on the parent's listing, an attach otherwise, and the drop of the asset
+    this row held before it was replaced. DARK by default; LIVE behind the gates. Writes a chained audit
+    row. Unknown image -> 404. A non-APPROVED image is NOT a route error (the
+    engine returns ok=false action=skip) so the audit still records the
     refusal."""
     db = _require_db()
     repo = _image_repo(db)
@@ -843,7 +849,7 @@ async def push_all_pending(
             if len(results) >= limit:
                 break
             is_approved = str(doc.get("status") or "").upper() == "APPROVED"
-            if not is_approved or doc.get("shopify_image_id"):
+            if not is_approved or _press_plan(db, doc)["action"] in ("noop", "skip"):
                 continue
             data = (await shopify_push.push_image(db, doc)).to_dict()
             _write_audit(data, current_user)
@@ -924,18 +930,32 @@ def _doc_counts(db, name: str, shopify_field: str) -> Dict[str, int]:
     return {"total": total, "pushed": pushed, "pending": pending}
 
 
+def _press_plan(db, doc: Dict[str, Any], facts: Optional[Dict[Any, tuple]] = None) -> Dict[str, Any]:
+    """The ONE 'what does a press of this design-queue image do' rule
+    (media.image_press_plan) read off the parent twin and its media ledger
+    docs by the press's own reader (media.read_image_press: the parent's push-lock
+    and online block included): the sweep skips a row only when the press
+    itself would be a no-op or a refusal, and the counts call a row pending
+    on the same answer. The row itself carries no Shopify id. ``facts``:
+    see read_image_press (the counts read each product once)."""
+    return shopify_push.read_image_press(db, doc, facts)[2]
+
+
 def _image_counts(db) -> Dict[str, int]:
-    """approved (push-eligible) / pushed (has shopify_image_id) / pending (APPROVED
-    but not yet pushed)."""
+    """approved (push-eligible) / pushed (on the parent's listing per the
+    media ledger) / pending (APPROVED and a press would still SEND something:
+    not yet on the listing, or a replaced asset still to take down -- never
+    a row the press refuses, which no sweep will ever send)."""
     approved = pushed = pending = 0
+    facts: Dict[Any, tuple] = {}  # one read of each product, not one per row
     for doc in _all_docs(db, "product_images"):
         is_approved = str(doc.get("status") or "").upper() == "APPROVED"
-        has_gid = bool(doc.get("shopify_image_id"))
+        plan = _press_plan(db, doc, facts)
         if is_approved:
             approved += 1
-            if not has_gid:
+            if plan["action"] in ("create", "update"):
                 pending += 1
-        if has_gid:
+        if plan["gid"]:
             pushed += 1
     return {"approved": approved, "pushed": pushed, "pending": pending}
 

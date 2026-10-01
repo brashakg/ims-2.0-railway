@@ -69,11 +69,14 @@ class _Shopify:
         # The prod failure of 2026-09-05: the app token lacks
         # write_publications, so ONLY the publish step is refused.
         self.deny_publish = False
+        # A product this press just CREATED carries no media yet.
+        self.created = False
 
     @staticmethod
     def _op(query):
         for name in (
             "imsProductCreateMedia",
+            "imsProductMedia",
             "imsProductCreate",
             "imsProductUpdate",
             "imsPublishablePublish",
@@ -102,9 +105,15 @@ class _Shopify:
             "inventoryItem": {"id": "gid://shopify/InventoryItem/902"},
         }
         media_nodes = [
-            {"id": "gid://shopify/MediaImage/%d" % i}
+            {"id": "gid://shopify/MediaImage/%d" % i, "status": "READY",
+             "image": {"url": "https://cdn.shopify.com/%d.jpg" % i}}
             for i in range(self.media_on_existing)
         ]
+        if op in ("imsProductCreate", "imsProductUpdate"):
+            self.created = op == "imsProductCreate"
+        if op == "imsProductMedia":
+            nodes = [] if self.created else media_nodes
+            return {"data": {"product": {"id": self.product_id, "media": {"nodes": nodes}}}}
         if op == "imsProductCreate":
             return {
                 "data": {

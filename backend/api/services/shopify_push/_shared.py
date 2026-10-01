@@ -112,7 +112,8 @@ class PushResult:
     # media diff plan {attach, delete, reorder, unmanaged, hands_off}; LIVE ->
     # {attached, deleted, reordered, unmanaged, on_shopify, hands_off, error?,
     # code?} from media.sync_product_media. None when the push never got that
-    # far (refusal, transport error).
+    # far (refusal, transport error). A LIVE design-queue image press carries
+    # the same summary: it runs the same pass.
     photos: Optional[Any] = None
     # Product pushes only: the STOCK side channel (owner ruling 2026-09-07 --
     # make website quantities real). SIMULATED -> the plan {policy, quantities,
@@ -301,6 +302,37 @@ def _live_or_reason(db) -> Tuple[bool, Optional[str]]:
     if not _has_shopify_creds(db):
         return False, "shopify creds not configured (shop_url/access_token)"
     return True, None
+
+
+def online_block_status(db, product: Dict[str, Any]) -> Optional[bool]:
+    """online_block.is_blocked_from_online_strict, never raising: True / False,
+    or None when the block config cannot be read (UNKNOWN -- the caller fails
+    CLOSED, finding #18)."""
+    try:
+        from ..online_block import is_blocked_from_online_strict
+
+        return is_blocked_from_online_strict(product, db)
+    except Exception:  # noqa: BLE001 -- classifier must never break a push
+        return None
+
+
+def online_block_refusal(blocked: Optional[bool]) -> Optional[Tuple[str, str]]:
+    """THE ONLINE-BLOCK VERDICT both presses give (the product press and the
+    design-queue press): (reason, error) when the product must NEVER be
+    written on Shopify -- a member of an online_sync_blocked collection, or a
+    block status that could not be read (fail CLOSED) -- else None."""
+    if blocked is None:
+        return (
+            "block_status_unverifiable",
+            "block status unverifiable (block-config read error) -- "
+            "push skipped (fail-closed)",
+        )
+    if blocked:
+        return (
+            "online_sync_blocked",
+            "blocked from online (member of an online_sync_blocked collection)",
+        )
+    return None
 
 
 def push_lock_reason(db, entity: str, doc: Dict[str, Any]) -> Optional[str]:
