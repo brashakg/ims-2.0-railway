@@ -13,7 +13,7 @@
 import { lazy } from 'react';
 import { Route, Navigate, useSearchParams } from 'react-router-dom';
 import { ProtectedRoute } from '../components/layout/ProtectedRoute';
-import { legacyTabTarget } from '../pages/customers/legacyTabRedirect';
+import { legacyTabTarget, legacyLoyaltyTabTarget } from '../pages/customers/legacyTabRedirect';
 
 const CustomersPage = lazy(() => import('../pages/customers/CustomersPage').then(m => ({ default: m.CustomersPage })));
 const Customer360Dashboard = lazy(() => import('../pages/customers/Customer360Dashboard').then(m => ({ default: m.Customer360Dashboard })));
@@ -21,7 +21,12 @@ const CustomerSegmentation = lazy(() => import('../pages/customers/CustomerSegme
 const VipChurnWatchlistPage = lazy(() => import('../pages/customers/VipChurnWatchlistPage').then(m => ({ default: m.VipChurnWatchlistPage })));
 const NBADashboardPage = lazy(() => import('../pages/customers/NBADashboardPage').then(m => ({ default: m.NBADashboardPage })));
 const LapsedReactivationPage = lazy(() => import('../pages/customers/LapsedReactivationPage').then(m => ({ default: m.LapsedReactivationPage })));
-const LoyaltyProgram = lazy(() => import('../pages/customers/LoyaltyProgram').then(m => ({ default: m.LoyaltyProgram })));
+// Wave 6 B12: the Loyalty Program layout (header, cards, section nav) and its
+// three sections, one URL each.
+const LoyaltyLayout = lazy(() => import('../pages/customers/loyalty/LoyaltyLayout').then(m => ({ default: m.LoyaltyLayout })));
+const LoyaltyOverviewSection = lazy(() => import('../pages/customers/loyalty/LoyaltyOverviewSection').then(m => ({ default: m.LoyaltyOverviewSection })));
+const LoyaltyTiersSection = lazy(() => import('../pages/customers/loyalty/LoyaltyTiersSection').then(m => ({ default: m.LoyaltyTiersSection })));
+const LoyaltyRewardsSection = lazy(() => import('../pages/customers/loyalty/LoyaltyRewardsSection').then(m => ({ default: m.LoyaltyRewardsSection })));
 const LoyaltyLedger = lazy(() => import('../pages/customers/LoyaltyLedger'));
 const CampaignManager = lazy(() => import('../pages/customers/CampaignManager').then(m => ({ default: m.CampaignManager })));
 const RecallManager = lazy(() => import('../components/crm/RecallManager').then(m => ({ default: m.RecallManager })));
@@ -43,6 +48,14 @@ function CustomersIndex() {
   const [searchParams] = useSearchParams();
   const target = legacyTabTarget(searchParams);
   return target ? <Navigate to={target} replace /> : <CustomersPage />;
+}
+
+// Bare /customers/loyalty IS the Overview. A legacy ?tab=<x> link forwards to
+// that section's own URL (mapper in pages/customers/legacyTabRedirect.ts).
+function LoyaltyIndex() {
+  const [searchParams] = useSearchParams();
+  if (!searchParams.has('tab')) return <LoyaltyOverviewSection />;
+  return <Navigate to={legacyLoyaltyTabTarget(searchParams)} replace />;
 }
 
 export const customerRoutes = (
@@ -177,17 +190,24 @@ export const customerRoutes = (
       }
     />
 
-    {/* CRM: Loyalty Program */}
+    {/* CRM: Loyalty Program. Wave 6 B12: one URL per section under the
+        layout (Overview is the index). The old tabs all shared this one gate,
+        so it stays on the layout route and wraps every section through the
+        Outlet -- no section carries a gate of its own. */}
     <Route
       path="customers/loyalty"
       element={
         <ProtectedRoute
           allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']}
         >
-          <LoyaltyProgram />
+          <LoyaltyLayout />
         </ProtectedRoute>
       }
-    />
+    >
+      <Route index element={<LoyaltyIndex />} />
+      <Route path="tiers" element={<LoyaltyTiersSection />} />
+      <Route path="rewards" element={<LoyaltyRewardsSection />} />
+    </Route>
 
     {/* CRM: Per-customer Loyalty Ledger (audit trail) */}
     <Route
