@@ -209,14 +209,15 @@ def compare_variant_parity(
 
     Returns {compared, unknown, drift[], drift_count, max_delta, tolerance,
     clean_skus[]} where drift is [{sku, inventory_item_id, store_id, ims,
-    shopify, delta}] sorted by the biggest delta first and clean_skus are the
-    SKUs compared within tolerance (what may clear a drift task)."""
+    shopify, delta}] sorted by the biggest delta first, max_delta is the
+    worst DRIFTED delta (a wider gap within tolerance is no drift) and
+    clean_skus are the SKUs compared within tolerance (what may clear a
+    drift task)."""
     tol = max(0, int(tolerance or 0))
     drift: List[Dict[str, Any]] = []
     clean: List[Any] = []
     compared = 0
     unknown = 0
-    max_delta = 0
     for r in rows or []:
         ims, shop = r.get("ims_available"), r.get("shopify_available")
         if ims is None or shop is None:
@@ -229,8 +230,6 @@ def compare_variant_parity(
             continue
         compared += 1
         delta = abs(ims - shop)
-        if delta > max_delta:
-            max_delta = delta
         if delta <= (tol if ims > 0 else 0):
             clean.append(r.get("sku"))
         else:
@@ -250,7 +249,7 @@ def compare_variant_parity(
         "unknown": unknown,
         "drift": drift,
         "drift_count": len(drift),
-        "max_delta": max_delta,
+        "max_delta": drift[0]["delta"] if drift else 0,
         "tolerance": tol,
         "clean_skus": clean,
     }

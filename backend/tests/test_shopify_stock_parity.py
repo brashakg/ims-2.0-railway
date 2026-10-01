@@ -50,7 +50,7 @@ Pins, each with its revert named in the test:
     writer's listing_visible, not retired in IMS; a LIVE take-down by any
     door closes the task; every drift gets ONE safe instruction (the
     Shopify admin quantity, never a press that changes a listing's
-    status).
+    status); the worst delta is over drifted rows only.
 
 StrictDB + injected Shopify boundary -- no network, no production.
 """
@@ -1829,3 +1829,18 @@ def test_every_drift_gets_the_one_safe_instruction(case):
     assert f"Top: {sku} (IMS {ims} vs Shopify {listed})." in task["description"]
     _one_safe_step(task["description"])
     assert "lines" not in task["payload"]
+
+
+def test_the_worst_delta_is_the_worst_drifted_row():
+    """Round 16, open problem 4: since round 10's zero tolerance, a row can
+    drift at a SMALLER delta than a clean one (IMS 0 vs Shopify 1 drifts at
+    1; IMS 5 vs Shopify 3 is within tolerance at 2). 'Worst delta' is over
+    the drifted rows, so it is a number the task names. Take max_delta over
+    every compared row again -> 'worst delta 2' beside 'Top: SKU-1 (IMS 0 vs
+    Shopify 1)' -> fails."""
+    db = _db({"SKU-1": {"BV-A": 0, "BV-B": 0}, "SKU-2": {"BV-A": 5, "BV-B": 0}})
+    out = _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 1, LOC_B: 0}, INV_2: {LOC_A: 3, LOC_B: 0}})))
+    assert [(d["sku"], d["delta"]) for d in out["drift"]] == [("SKU-1", 1)]
+    assert out["max_delta"] == 1 and next(s for s in out["stores"] if s["store_id"] == "BV-A")["max_delta"] == 1
+    (task,) = _tasks(db)
+    assert "worst delta 1." in task["description"] and task["payload"]["max_delta"] == 1
