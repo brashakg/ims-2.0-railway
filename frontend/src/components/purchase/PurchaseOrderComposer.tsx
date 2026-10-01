@@ -82,11 +82,11 @@ export interface ComposerLine {
   // Set true once the operator (or a caller default) has typed a cost -- guards
   // the last-cost prefill from ever overwriting a value someone chose.
   costTouched?: boolean;
-  /** The manager has been in this cost box since the form last filled it.
-   *  A last-cost answer that lands after that only captions the line: it
-   *  never rewrites a box the manager has tapped (audit F67 -- rewriting it
-   *  under the caret dropped the selection, so '2950' typed into a box that
-   *  had just become 3100 read 31002950). */
+  /** The manager is in this cost box right now (set on focus, cleared on
+   *  blur). A last-cost answer that lands meanwhile only captions the line:
+   *  rewriting the box under the caret dropped the selection, so '2950'
+   *  typed into a box that had just become 3100 read 31002950 (audit F67).
+   *  Once they leave it, the box is the form's again. */
   costFocused?: boolean;
   /** The picked product's own catalogue cost -- the seed the box falls back
    *  to when the chosen vendor has no price history for it. */
@@ -240,7 +240,6 @@ export function applyPickedProduct(
     // carried over to this one.
     unitCost: line.costTouched ? line.unitCost : catalogCost,
     catalogCost,
-    costFocused: false,
     // The picked product carries its own GST rate + HSN. Nothing is guessed:
     // a product with neither leaves the line unresolved and visibly flagged.
     taxRate,
@@ -272,7 +271,6 @@ export function releaseProduct(line: ComposerLine, patch: Partial<ComposerLine> 
     lastPaid: null,
     catalogCost: 0,
     unitCost: line.costTouched ? line.unitCost : 0,
-    costFocused: false,
     ...patch,
   };
 }
@@ -436,7 +434,7 @@ export function PurchaseOrderComposer({
           if (!hit || !(hit.unit_price > 0)) return l;
           const lastPaid = { unitPrice: hit.unit_price, date: hit.date };
           // Re-checked against CURRENT state: the operator may have typed a
-          // cost -- or just tapped the box -- while the request was in flight.
+          // cost -- or be in the box -- while the request was in flight.
           return l.costTouched || l.costFocused
             ? { ...l, lastPaid }
             : { ...l, unitCost: hit.unit_price, lastPaid };
@@ -453,9 +451,7 @@ export function PurchaseOrderComposer({
   // When the vendor changes, the previous vendor's price no longer applies:
   // every caption goes (a typed cost must not sit under another vendor's
   // price either), and a cost we AUTO-prefilled goes back to the catalogue
-  // seed, so the new vendor's lookup repaints both (the box is the form's
-  // again, so it may fill it even if the manager had tapped it before the
-  // switch; the vendor picker has the focus now). Operator-typed costs
+  // seed, so the new vendor's lookup repaints both. Operator-typed costs
   // (costTouched) are left exactly as chosen; we never overwrite a value
   // someone entered.
   const prevVendorRef = useRef(vendorId);
@@ -469,7 +465,7 @@ export function PurchaseOrderComposer({
           ? l
           : l.costTouched
             ? { ...l, lastPaid: null }
-            : { ...l, unitCost: l.catalogCost ?? 0, lastPaid: null, costFocused: false },
+            : { ...l, unitCost: l.catalogCost ?? 0, lastPaid: null },
       ),
     );
   }, [vendorId]);
@@ -668,6 +664,7 @@ export function PurchaseOrderComposer({
                         e.target.select();
                         if (!line.costFocused) updateLine(index, { costFocused: true });
                       }}
+                      onBlur={() => updateLine(index, { costFocused: false })}
                       onChange={(e) =>
                         updateLine(index, {
                           unitCost: parseFloat(e.target.value) || 0,

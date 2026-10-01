@@ -387,6 +387,54 @@ describe('PurchaseOrderComposer — a late last-cost answer never rewrites a tap
     await waitFor(() => expect(cost.value).toBe('2900'));
     expect(screen.getByText(/last paid ₹2,900/i)).toBeInTheDocument();
   });
+
+  // The guard lasts only while the box has focus: a tap the manager has left
+  // behind, typing nothing, must not keep a vendor's last price out.
+  it('a box tapped and left before the answer lands still takes the price', async () => {
+    let answer!: (v: unknown) => void;
+    getLastCostMock.mockReturnValue(new Promise((r) => { answer = r; }));
+    renderComposer({ initialLines: [LINE({ unitCost: 2800, catalogCost: 2800 })] });
+    await waitFor(() => expect(getLastCostMock).toHaveBeenCalled());
+
+    const cost = screen.getByLabelText(/unit cost for line 1/i) as HTMLInputElement;
+    fireEvent.focus(cost);
+    fireEvent.blur(cost);
+    await act(async () => answer(paid(3100)));
+    await waitFor(() => expect(cost.value).toBe('3100'));
+  });
+
+  it('a tapped box takes the price of a vendor with history after one without', async () => {
+    getLastCostMock.mockImplementation(async (vendorId: string) =>
+      vendorId === 'v-2' ? paid(2900) : { costs: {} });
+    renderComposer({ initialLines: [LINE({ unitCost: 2800, catalogCost: 2800 })] });
+    await waitFor(() => expect(getLastCostMock).toHaveBeenCalledWith('v-1', ['prod-a']));
+
+    const cost = screen.getByLabelText(/unit cost for line 1/i) as HTMLInputElement;
+    fireEvent.focus(cost);
+    fireEvent.blur(cost);
+    fireEvent.change(screen.getByLabelText('Vendor'), { target: { value: 'v-2' } });
+    await waitFor(() => expect(cost.value).toBe('2900'));
+  });
+
+  it('a Buy Desk box tapped before the vendor is set takes that vendor’s price', async () => {
+    getLastCostMock.mockResolvedValue(paid(3100));
+    const { rerender, onSubmit } = renderComposer({ initialVendorId: '', initialLines: [LINE({ unitCost: 0 })] });
+    const cost = screen.getByLabelText(/unit cost for line 1/i) as HTMLInputElement;
+    fireEvent.focus(cost);
+    fireEvent.blur(cost);
+
+    rerender(
+      <PurchaseOrderComposer
+        mode="modal"
+        vendors={VENDORS}
+        initialVendorId="v-1"
+        initialLines={[LINE({ unitCost: 0 })]}
+        renderProductCell={({ line }) => <div data-testid="product-cell">{line.productName}</div>}
+        onSubmit={onSubmit}
+      />,
+    );
+    await waitFor(() => expect(cost.value).toBe('3100'));
+  });
 });
 
 describe('PurchaseOrderComposer — fail-soft when history is empty', () => {
