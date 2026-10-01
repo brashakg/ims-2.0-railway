@@ -20,6 +20,7 @@ from ._shared import (
 from .helpers import (
     _get_db,
 )
+from ...services.inventory_balancing import _on_hand_by_product_store
 
 # ============================================================================
 # INVENTORY INTELLIGENCE: transfer recommendations + staff accountability
@@ -127,31 +128,15 @@ async def cross_store_stock(
 
     Fail-soft: empty list on DB unavailable.
     """
-    stock_repo = get_stock_repository()
+    db = _get_db()
     product_repo = get_product_repository()
-    if stock_repo is None:
+    if db is None:
         return {"product_id": product_id, "stores": []}
 
     try:
-        rows = (
-            stock_repo.aggregate(
-                [
-                    {
-                        "$match": {
-                            "product_id": product_id,
-                            "status": "AVAILABLE",
-                        }
-                    },
-                    {
-                        "$group": {
-                            "_id": "$store_id",
-                            "quantity": {"$sum": {"$ifNull": ["$quantity", 1]}},
-                        }
-                    },
-                ]
-            )
-            or []
-        )
+        # The same per-shop sellable count the counter's /inventory/lookup
+        # reads (item_events' one on-hand rule), not a second status literal.
+        on_hand = _on_hand_by_product_store(db, [product_id])
 
         # Enrich with product name (once)
         product_name = ""
@@ -161,13 +146,9 @@ async def cross_store_stock(
                 product_name = p.get("name") or p.get("product_name") or ""
 
         stores = []
-        for r in rows:
-            sid = r.get("_id")
-            if not sid:
-                continue
+        for (_pid, sid), qty in on_hand.items():
             if exclude_store_id and sid == exclude_store_id:
                 continue
-            qty = int(r.get("quantity") or 0)
             if qty <= 0:
                 continue
             stores.append({"store_id": sid, "available_qty": qty})

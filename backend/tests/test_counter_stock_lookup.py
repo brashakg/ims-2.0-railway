@@ -6,8 +6,9 @@ every other shop, and in transit -- colour and size variants included -- and
 never a cost price, landed cost, supplier, bill or any money figure other than
 MRP / selling price. Audit row F46: "Sales staff have no stock screen at all."
 
-Each strict xfail below reproduces a finding against today's code and names it;
-the fix removes the marker. The plain tests are guards the fix must keep green.
+Each test below was a strict xfail reproducing one finding (the FINDINGS list
+is the state of origin/main 6068802); the fix in routers/inventory/lookup.py
+and accountability.py turned them all green. The rest were guards and stay so.
 
 THE CONTRACT these tests pin (the build follows it; extra keys are fine unless
 they carry money):
@@ -374,10 +375,6 @@ def _counts(item) -> Dict[str, tuple]:
 
 
 @pytest.mark.parametrize("role", COUNTER_ROLES)
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="D7b-1/F46: no stock read a counter role can reach "
-                          "(no /inventory/lookup; cross-store-stock 403s them, "
-                          "accountability.py:120)")
 def test_d7b1_every_counter_role_reaches_the_lookup_in_the_real_app(client, role):
     assert check_access("GET", LOOKUP_API, [role]), f"no rbac_policy row admits {role}"
     token = jwt.encode(
@@ -392,6 +389,12 @@ def test_d7b1_every_counter_role_reaches_the_lookup_in_the_real_app(client, role
     resp = client.get(LOOKUP_API, params={"q": "CA8895"},
                       headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 200, f"{role}: {resp.status_code} {resp.text[:200]}"
+
+
+def test_d7b1_no_database_is_an_empty_answer_not_a_500(call, mongo_db, monkeypatch):
+    _seed(mongo_db)  # the repositories still answer; the raw handle does not
+    monkeypatch.setattr(inv_mod, "_get_db", lambda: None)
+    assert _ok(call(_user("CASHIER"), q="CA8895")) == {"store_id": S1, "items": []}
 
 
 # ============================================================================
@@ -410,10 +413,6 @@ _SEARCHES = [
 
 
 @pytest.mark.parametrize("label,query,pid", _SEARCHES, ids=[s[0] for s in _SEARCHES])
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="D7b-2: no lookup; the reused search (SEARCH_FIELDS, "
-                          "product_repository.py:47) misses name, attributes.gtin "
-                          "and the unit barcode on stock_units")
 def test_d7b2_the_counter_finds_the_frame_by(call, mongo_db, label, query, pid):
     _seed(mongo_db)
     found = _items(_ok(call(_user("SALES_STAFF"), q=query)))
@@ -426,10 +425,6 @@ def test_d7b2_the_counter_finds_the_frame_by(call, mongo_db, label, query, pid):
 # ============================================================================
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="D7b-3: no per-shop availability for counter roles "
-                          "(physical_stores + the one on-hand rule + TRANSFERRED "
-                          "in transit, none read per shop today)")
 def test_d7b3_counts_at_this_shop_every_other_shop_and_in_transit(call, mongo_db):
     _seed(mongo_db)
     body = _ok(call(_user("SALES_STAFF", S1), q="CA8895"))
@@ -457,9 +452,6 @@ def test_d7b3_counts_at_this_shop_every_other_shop_and_in_transit(call, mongo_db
 
 
 @pytest.mark.parametrize("label,shape,sellable,physical", _SHAPES, ids=[s[0] for s in _SHAPES])
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="D7b-3: no lookup to ask; it must answer item_events."
-                          "on_hand_match's sellable question for every stored shape")
 def test_d7b3_a_unit_is_available_by_the_one_on_hand_rule(
     call, mongo_db, label, shape, sellable, physical
 ):
@@ -488,9 +480,6 @@ def test_d7b3_a_unit_is_available_by_the_one_on_hand_rule(
 # ============================================================================
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="D7b-4: no lookup; one model must list every colour and "
-                          "eye size, each with its colour and size")
 def test_d7b4_one_model_lists_every_colour_and_size(call, mongo_db):
     _seed(mongo_db)
     items = _items(_ok(call(_user("SALES_STAFF"), q="CA8895")))
@@ -502,14 +491,25 @@ def test_d7b4_one_model_lists_every_colour_and_size(call, mongo_db):
 
 @pytest.mark.parametrize("label,query", [("unit barcode", UNIT_BARCODE),
                                          ("sku", "SG-CARRERA-CA8895-807-54")])
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="D7b-4: a scanned frame must bring its other colours "
-                          "(same brand+model) and eye sizes (variant_of)")
 def test_d7b4_a_scanned_frame_brings_its_colours_and_sizes(call, mongo_db, label, query):
     _seed(mongo_db)
     items = _items(_ok(call(_user("SALES_STAFF"), q=query)))
     assert {P54, P56, P003} <= set(items), f"scan by {label}: {sorted(items)}"
     assert RB not in items
+
+
+def test_d7b4_a_size_variant_comes_with_its_parent_whatever_its_model_spelling(call, mongo_db):
+    # The variant_of door checks the category, not brand+model
+    # (product_master._resolve_variant_parent), so a size typed "CA-8895" is
+    # still a CA8895: the link, not the spelling, makes it family.
+    _seed(mongo_db)
+    mongo_db["products"].insert_one(
+        _product("P-807-58", "SG-CARRERA-CA-8895-807-58", "Carrera CA-8895 Aviator - Gold",
+                 "807", "58", model="CA-8895", variant_of=P54)
+    )
+    assert "P-807-58" in _items(_ok(call(_user("SALES_STAFF"), q="CA8895")))
+    items = _items(_ok(call(_user("SALES_STAFF"), q="SG-CARRERA-CA-8895-807-58")))
+    assert {P54, P56} <= set(items), sorted(items)
 
 
 # ============================================================================
@@ -527,10 +527,6 @@ def _keys(node, path=""):
             yield from _keys(v, f"{path}[{i}]")
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="D7b-5: no lookup; it must carry no cost, landed cost, "
-                          "supplier or bill (ledger last_grn stock.py:450, product "
-                          "cost fields, cost_mask misses landed_cost on main)")
 def test_d7b5_no_cost_supplier_or_bill_reaches_the_counter(call, mongo_db):
     _seed(mongo_db)
     body = _ok(call(_user("SALES_STAFF"), q="CA8895"))
@@ -550,8 +546,6 @@ def test_d7b5_no_cost_supplier_or_bill_reaches_the_counter(call, mongo_db):
 # ============================================================================
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="D7b-6: no lookup route; it must answer GET and nothing else")
 def test_d7b6_the_lookup_is_read_only(app):
     methods = set()
     for route in app.routes:
@@ -567,21 +561,9 @@ def test_d7b6_the_lookup_is_read_only(app):
 # ============================================================================
 
 
-def _cross_store_mark(shape, sellable):
-    # Today's literal: status == "AVAILABLE" exactly. Only the sellable shapes
-    # it cannot see reproduce the finding; every other shape is a guard.
-    if sellable and shape.get("status") != "AVAILABLE":
-        return [pytest.mark.xfail(
-            strict=True, raises=AssertionError,
-            reason="D7b-8: cross-store-stock matches the literal 'AVAILABLE' "
-                   "(accountability.py:131-137), a second on-hand rule")]
-    return []
-
-
 @pytest.mark.parametrize(
     "label,shape,sellable",
-    [pytest.param(lbl, shp, sell, marks=_cross_store_mark(shp, sell), id=lbl)
-     for lbl, shp, sell, _phys in _SHAPES],
+    [pytest.param(lbl, shp, sell, id=lbl) for lbl, shp, sell, _phys in _SHAPES],
 )
 def test_d7b8_cross_store_stock_counts_by_the_one_on_hand_rule(
     call, mongo_db, label, shape, sellable
@@ -604,21 +586,12 @@ def test_d7b8_cross_store_stock_counts_by_the_one_on_hand_rule(
 
 
 _ROW_VS_GATE = [
-    ("SALES_STAFF", True), ("SALES_CASHIER", True), ("WORKSHOP_STAFF", True),
-    ("CASHIER", False), ("OPTOMETRIST", False), ("ACCOUNTANT", False),
-    ("STORE_MANAGER", False),
+    "SALES_STAFF", "SALES_CASHIER", "WORKSHOP_STAFF", "CASHIER", "OPTOMETRIST",
+    "ACCOUNTANT", "STORE_MANAGER",
 ]
 
 
-@pytest.mark.parametrize(
-    "role",
-    [pytest.param(r, id=r, marks=[pytest.mark.xfail(
-        strict=True, raises=AssertionError,
-        reason="D7b-8: the cross-store-stock rbac row (rows_items_jarvis.py:249-261) "
-               "disagrees with its route gate _INVENTORY_ROLES (accountability.py:120)")]
-        if broken else [])
-     for r, broken in _ROW_VS_GATE],
-)
+@pytest.mark.parametrize("role", _ROW_VS_GATE)
 def test_d7b8_cross_store_stock_row_matches_its_gate(call, mongo_db, role):
     resp = call(_user(role), "/inventory/cross-store-stock", product_id="P-NONE")
     gate_admits = resp.status_code != 403
