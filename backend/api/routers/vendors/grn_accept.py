@@ -123,6 +123,36 @@ def held_receipts(product_id: str) -> List[dict]:
     )
 
 
+# A PO in one of these will never bring the item in again.
+_PO_DONE_STATUSES = ("CANCELLED", "RECEIVED", "CLOSED")
+
+
+def orders_and_receipts_naming(product_id: str) -> Optional[List[str]]:
+    """Every open purchase order (not cancelled, not fully received) and every
+    receipt that is not void naming `product_id` on a line, as the numbers a
+    person reads ("PO/... (purchase order)", "RCPT/... (receipt)").
+
+    A draft one of these names is still coming in, or already here: discarding
+    it would leave a box arriving for -- or held behind -- a deleted product,
+    whose catalogue task points at a queue it is no longer in. None if the
+    question cannot be answered (no database): the caller refuses then."""
+    if not product_id:
+        return []
+    po_repo = get_purchase_order_repository()
+    grn_repo = get_grn_repository()
+    if po_repo is None or grn_repo is None:
+        return None
+    orders = po_repo.find_many(
+        {"items.product_id": product_id, "status": {"$nin": list(_PO_DONE_STATUSES)}}
+    ) or []
+    receipts = grn_repo.find_many(
+        {"items.product_id": product_id, "status": {"$ne": "VOID"}}
+    ) or []
+    return [
+        f"{p.get('po_number') or p.get('po_id')} (purchase order)" for p in orders
+    ] + [f"{g.get('grn_number') or g.get('grn_id')} (receipt)" for g in receipts]
+
+
 def release_held_receipts(product_id: str) -> List[dict]:
     """Audit C1: finishing a product in the catalogue puts every unit a receipt
     was holding for it on the shelf -- through _put_on_shelf, the SAME path

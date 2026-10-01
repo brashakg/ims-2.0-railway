@@ -2756,11 +2756,43 @@ async def delete_catalog_product(
                     "Receive Goods if the units are going back, then delete it."
                 ),
             )
+    # Round 5: a DRAFT (ordered before it was catalogued) is not discarded
+    # while an open order or a receipt still names it. Discarded, the box
+    # would arrive held behind a deleted product, its task pointing at a
+    # Needs-review queue it has left; finishing it there would mint sellable-
+    # looking units of a product that stays deleted. Cancel the order (or void
+    # the receipt) first. If the orders cannot be read, refuse -- fail loudly.
+    spine_doc = _pr.find_by_id(_spine_id) if (_pr is not None and _spine_id) else None
+    is_draft = bool((spine_doc or {}).get("provisional")) or bool(
+        product.get("spine_product_id") and product.get("needs_review")
+    )
+    if is_draft:
+        from .vendors.grn_accept import orders_and_receipts_naming
+
+        naming = orders_and_receipts_naming(_spine_id) if _spine_id else None
+        if naming is None:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Could not check the purchase orders and receipts for this "
+                    "draft, so it was not deleted. Try again."
+                ),
+            )
+        if naming:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"This item is on {', '.join(naming)}. Cancel the purchase "
+                    "order in Purchase Orders (or void the receipt in Receive "
+                    "Goods if the units are going back), then delete it -- or "
+                    "finish it in the product editor."
+                ),
+            )
     # A discarded ordered draft (_refuse_ordered_draft's mark) leaves the
     # Needs-review queue, and is no longer provisional: finishing a
     # provisional draft switches it on (restamp_on_update), a deleted one must
     # stay off.
-    discarded_draft = bool(product.get("spine_product_id") and product.get("needs_review"))
+    discarded_draft = is_draft
     if discarded_draft:
         product["needs_review"] = False
 
@@ -2781,7 +2813,22 @@ async def delete_catalog_product(
         if _pr is not None and _spine_id:
             _pr.update(
                 _spine_id,
-                {"is_active": False, **({"provisional": False} if discarded_draft else {})},
+                {
+                    "is_active": False,
+                    # The discard mark: a manager typing the same item on a
+                    # new order gets THIS draft back (purchase_orders,
+                    # revive_discarded_draft) -- its identity key is unique,
+                    # so a second row for it can never be made.
+                    **(
+                        {
+                            "provisional": False,
+                            "discarded_draft": True,
+                            "discarded_at": product["deleted_at"],
+                        }
+                        if discarded_draft
+                        else {}
+                    ),
+                },
             )
     except Exception:  # noqa: BLE001
         logger.warning(
