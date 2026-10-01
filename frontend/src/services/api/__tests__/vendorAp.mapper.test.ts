@@ -366,3 +366,81 @@ describe('round 12 mapper hardening (#10, #11, #12)', () => {
     expect(purchase_invoices[0].lines[0]).toMatchObject({ hsn_code: '9003', product_name: 'X' });
   });
 });
+
+describe('round 13: ONE purchase-invoice id rule (#10)', () => {
+  it('the helper: trims, rejects blank / undefined / null, takes numbers', async () => {
+    const { cleanInvoiceId, firstInvoiceId, requireInvoiceId, invoiceIdSegment } = await import('../requireId');
+    expect(cleanInvoiceId('  pi_1  ')).toBe('pi_1');
+    expect(cleanInvoiceId(77)).toBe('77');
+    for (const bad of ['', '   ', 'undefined', 'null', ' null ', undefined, null, NaN, Infinity, {}, [], true]) {
+      expect(cleanInvoiceId(bad)).toBeNull();
+    }
+    expect(firstInvoiceId('  ', 'b1', 'c')).toBe('b1');
+    expect(firstInvoiceId(undefined, null)).toBeUndefined();
+    expect(requireInvoiceId(' x ')).toBe('x');
+    expect(() => requireInvoiceId('  ')).toThrow(/no id/);
+    expect(invoiceIdSegment('a/b?c=1')).toBe('a%2Fb%3Fc%3D1');
+  });
+
+  it('a blank purchase_invoice_id never wins over a valid bill_id; a number id is accepted', async () => {
+    mockGet.mockResolvedValue({
+      data: {
+        purchase_invoices: [
+          { purchase_invoice_id: '  ', bill_id: 'b-1' },
+          { bill_id: 77 },
+          { purchase_invoice_id: ' pi_2 ' },
+        ],
+        total: 3,
+      },
+    });
+    const { purchase_invoices } = await purchaseInvoicesApi.list();
+    expect(purchase_invoices.map((r) => r.purchase_invoice_id)).toEqual(['b-1', '77', 'pi_2']);
+  });
+
+  it('writes and reads encode the id into one path segment', async () => {
+    mockPost.mockResolvedValue({ data: { ok: true } });
+    mockGet.mockResolvedValue({ data: { match_status: 'MATCHED' } });
+    await purchaseInvoicesApi.approveException('a/b?x=1', { reason: 'ok' });
+    expect(mockPost).toHaveBeenCalledWith(
+      '/vendors/purchase-invoices/a%2Fb%3Fx%3D1/approve-exception',
+      { reason: 'ok' },
+    );
+    await purchaseInvoicesApi.getMatch('../x');
+    expect(mockGet).toHaveBeenCalledWith('/vendors/purchase-invoices/..%2Fx/match');
+  });
+
+  it('a blank / "undefined" / "null" id sends nothing on reads and on writes', async () => {
+    for (const bad of ['  ', 'undefined', 'null']) {
+      await expect(purchaseInvoicesApi.approveException(bad, { reason: 'ok' })).rejects.toThrow(/no id/);
+      expect(await purchaseInvoicesApi.getMatch(bad)).toBeNull();
+    }
+    expect(mockPost).not.toHaveBeenCalled();
+    expect(mockGet).not.toHaveBeenCalled();
+  });
+});
+
+describe('round 13: non-object rows (#11)', () => {
+  it('one null / string / array row never blanks the list', async () => {
+    mockGet.mockResolvedValue({ data: { purchase_invoices: [null, { id: 'a' }, 'junk', [1], 7, { id: 'b' }], total: 6 } });
+    const { purchase_invoices } = await purchaseInvoicesApi.list();
+    expect(purchase_invoices.map((r) => r.purchase_invoice_id)).toEqual(['a', 'b']);
+  });
+
+  it('purchase_invoices that is not an array gives an empty list', async () => {
+    mockGet.mockResolvedValue({ data: { purchase_invoices: { a: 1 } } });
+    expect((await purchaseInvoicesApi.list()).purchase_invoices).toEqual([]);
+    mockGet.mockResolvedValue({ data: null });
+    expect((await purchaseInvoicesApi.list()).purchase_invoices).toEqual([]);
+  });
+
+  it('a draft with data:null (or a string) is an empty draft, not a crash', async () => {
+    for (const data of [null, undefined, 'x', 5]) {
+      mockGet.mockResolvedValue({ data });
+      const g = await purchaseInvoicesApi.createFromGrn('G1');
+      expect(g.lines).toEqual([]);
+      expect(g.vendor_invoice_no).toBe('');
+      const d = await purchaseInvoicesApi.createFromDcs(['D1']);
+      expect(d.lines).toEqual([]);
+    }
+  });
+});

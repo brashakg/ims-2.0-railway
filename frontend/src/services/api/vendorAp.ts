@@ -4,7 +4,7 @@
 // Import this directly (not via the services/api barrel) -- newly-added
 // services don't resolve through the barrel re-export (TS2614).
 
-import { requireInvoiceId } from './requireId';
+import { cleanInvoiceId, firstInvoiceId, invoiceIdSegment, requireInvoiceId } from './requireId';
 import api from './client';
 import type { ReconBlock } from './purchaseRecon';
 
@@ -400,13 +400,15 @@ export const vendorApApi = {
 // wire keys description / hsn / qty / taxable. Alias them onto the FE keys, the
 // exact reverse of toInvoiceWire: the draft's lines arrived blank with qty 1
 // (F37), and a booked bill's detail drawer read 'Line 1 | - | -' on every row.
+// A null / string / number / array entry is not an object row: drop it, never
+// throw (a throw in list() renders as an empty list, in createFromGrn as a toast).
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function isRow(x: unknown): x is Record<string, any> {
+  return !!x && typeof x === 'object' && !Array.isArray(x);
+}
+
 function mapLinesFromApi(lines: unknown): PurchaseInvoiceLine[] {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  // A null / string / number entry is not a line: drop it, never throw (a
-  // throw in list() renders as an empty list, in createFromGrn as a toast).
-  const objects = (Array.isArray(lines) ? lines : []).filter(
-    (l): l is Record<string, any> => !!l && typeof l === 'object' && !Array.isArray(l),
-  );
+  const objects = (Array.isArray(lines) ? lines : []).filter(isRow);
   return objects.map((l) => ({
     ...l,
     // `||`, not `??`: an empty string is "not there", so the alias still wins.
@@ -433,8 +435,13 @@ function mapInvoiceFromApi(doc: Record<string, any>): PurchaseInvoice {
     ...doc,
     // The stored doc carries bill_id / invoice_id; every Approve / match /
     // recon door acts on purchase_invoice_id (F7: they POSTed /undefined/).
-    purchase_invoice_id:
-      doc.purchase_invoice_id || doc.bill_id || doc.invoice_id || doc.id || doc._id,
+    purchase_invoice_id: firstInvoiceId(
+      doc.purchase_invoice_id,
+      doc.bill_id,
+      doc.invoice_id,
+      doc.id,
+      doc._id,
+    ),
     vendor_invoice_no: doc.vendor_invoice_no ?? doc.invoice_number ?? doc.bill_number ?? '',
     vendor_invoice_date: doc.vendor_invoice_date ?? doc.invoice_date ?? doc.bill_date ?? '',
     cgst,
@@ -456,7 +463,10 @@ function mapInvoiceFromApi(doc: Record<string, any>): PurchaseInvoice {
 // A server DRAFT (from-grn / from-dcs) uses the create() wire keys -- header
 // invoice_number / invoice_date, lines as above.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function mapDraftFromApi(d: Record<string, any>): PurchaseInvoiceDraft {
+function mapDraftFromApi(raw: unknown): PurchaseInvoiceDraft {
+  // data: null (or anything that is not an object) is an empty draft, never a
+  // crash into the toast.
+  const d: Record<string, any> = isRow(raw) ? raw : {};
   return {
     ...d,
     vendor_invoice_no: d.vendor_invoice_no ?? d.invoice_number ?? '',
@@ -500,8 +510,11 @@ export const purchaseInvoicesApi = {
   list: async (params?: { vendor_id?: string; store_id?: string; status?: string }) => {
     try {
       const res = await api.get('/vendors/purchase-invoices', { params });
-      const d = res.data as { purchase_invoices?: Record<string, unknown>[]; total?: number };
-      const rows = (d.purchase_invoices ?? []).map(mapInvoiceFromApi);
+      const d = (res.data ?? {}) as { purchase_invoices?: unknown; total?: number };
+      // One null / junk row never blanks the list.
+      const rows = (Array.isArray(d.purchase_invoices) ? d.purchase_invoices : [])
+        .filter(isRow)
+        .map(mapInvoiceFromApi);
       return { purchase_invoices: rows, total: d.total ?? rows.length };
     } catch {
       return { purchase_invoices: [] as PurchaseInvoice[], total: 0 };
@@ -515,7 +528,7 @@ export const purchaseInvoicesApi = {
   // this seam so the form code + TS types stay stable and the POST never 422s.
   create: async (payload: PurchaseInvoiceCreate) => {
     const res = await api.post('/vendors/purchase-invoices', toInvoiceWire(payload));
-    return mapInvoiceFromApi(res.data as Record<string, unknown>);
+    return mapInvoiceFromApi(isRow(res.data) ? res.data : {});
   },
   // What create() WOULD store for this payload -- recipient, tax head, every
   // line's split -- from the server's own booking math (POST /preview writes
@@ -584,9 +597,10 @@ export const purchaseInvoicesApi = {
   // section instead of throwing/white-screening.
   getMatch: async (id: string): Promise<PurchaseInvoiceMatch | null> => {
     // A read: no id means no request (never GET /undefined/match), and null.
-    if (!id) return null;
+    const key = cleanInvoiceId(id);
+    if (!key) return null;
     try {
-      const res = await api.get(`/vendors/purchase-invoices/${id}/match`);
+      const res = await api.get(`/vendors/purchase-invoices/${invoiceIdSegment(key)}/match`);
       const env = res.data as MatchEnvelope;
       const detail = env?.match_detail;
       if (detail && Array.isArray(detail.lines)) return detail;
@@ -605,8 +619,11 @@ export const purchaseInvoicesApi = {
     id: string,
     payload: { reason: string },
   ): Promise<ApproveExceptionResult> => {
-    requireInvoiceId(id);
-    const res = await api.post(`/vendors/purchase-invoices/${id}/approve-exception`, payload);
+    const key = requireInvoiceId(id);
+    const res = await api.post(
+      `/vendors/purchase-invoices/${invoiceIdSegment(key)}/approve-exception`,
+      payload,
+    );
     return res.data as ApproveExceptionResult;
   },
   // Phase 2: the active match/valuation settings (read-only display). Fail-soft
