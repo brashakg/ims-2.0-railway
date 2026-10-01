@@ -375,11 +375,8 @@ def _variants_for_price_push(
     an option-less row. UPDATE-only stays true: no stored default gid -> []
     (a clean noop downstream, never a create).
 
-    The pseudo carries the product's gtin AND barcode as SEPARATE candidate
-    fields (never pre-collapsed), so build_variant_price_inputs' _publishable_gtin
-    gate (#948) evaluates them exactly as for a real variant -- an internally
-    minted GS1 20-29 code in product.barcode is rejected, never shipped as a
-    public GTIN."""
+    The pseudo carries the product's own sku, so variant_barcode reads the
+    PRODUCT's GTIN for it -- no copy of the GTIN rides on the row."""
     rows = list(variants or [])
     if rows:
         return rows
@@ -387,12 +384,7 @@ def _variants_for_price_push(
     default_gid = ecom.get("shopify_variant_id")
     if not default_gid:
         return []
-    pseudo: Dict[str, Any] = {
-        "shopify_variant_id": default_gid,
-        "gtin": product.get("gtin"),
-        "barcode": product.get("barcode"),
-    }
-    return [pseudo]
+    return [{"shopify_variant_id": default_gid, "sku": product.get("sku")}]
 
 
 def _publishable_gtin(*candidates: Any) -> Optional[str]:
@@ -420,6 +412,32 @@ def _publishable_gtin(*candidates: Any) -> Optional[str]:
     return None
 
 
+def variant_barcode(
+    product: Dict[str, Any], row: Optional[Dict[str, Any]]
+) -> Optional[str]:
+    """THE barcode one Shopify variant of `product` carries, or None -- then the
+    key is OMITTED and Shopify keeps what it has (decided 2026-10-01: IMS never
+    blanks or changes a barcode unless it holds a valid publishable GTIN).
+
+    The product's OWN variant -- the SELF row the create door writes (sku ==
+    the product's sku; the price push's pseudo-variant is one too) or no row
+    at all (the seed's single default variant) -- carries the PRODUCT's GTIN:
+    the gtin attribute, then its top-level projection, then the legacy
+    barcode. One home; the row keeps no copy to fall out of sync. Any other
+    row (a size variant of the listing, a colour option) carries ONLY its own:
+    a GTIN names one trade item, so the parent's never lands on a sibling."""
+    if row is not None:
+        sku = str(row.get("sku") or "").strip()
+        if not sku or sku != str(product.get("sku") or "").strip():
+            return _publishable_gtin(row.get("gtin"), row.get("barcode"))
+    attrs = product.get("attributes")
+    return _publishable_gtin(
+        attrs.get("gtin") if isinstance(attrs, dict) else None,
+        product.get("gtin"),
+        product.get("barcode"),
+    )
+
+
 def build_variant_price_inputs(
     product: Dict[str, Any], variants: List[Dict[str, Any]]
 ) -> Tuple[List[Dict[str, Any]], int]:
@@ -427,9 +445,9 @@ def build_variant_price_inputs(
 
     Per variant: id (the stored shopify_variant_id gid), price (selling),
     compareAtPrice (mrp when > price, else EXPLICIT null so a stale
-    strikethrough on Shopify is cleared), barcode (the variant's `gtin` --
-    the two-barcode model: gtin/barcode IS the GTIN pushed to Shopify;
-    `store_barcode` is the physical join key and is NEVER pushed).
+    strikethrough on Shopify is cleared), barcode (variant_barcode -- the
+    GTIN pushed to Shopify; `store_barcode` is the physical join key and is
+    NEVER pushed).
 
     SKIPS (counted, returned as the second tuple member):
       - variants with no stored shopify_variant_id -- they get their gid when
@@ -456,7 +474,7 @@ def build_variant_price_inputs(
         # omitted barcode is left as Shopify has it, so a live product whose
         # IMS twin has none -- most of the catalogue -- keeps the one typed in
         # Shopify admin, and Google keeps its GTIN match. IMS never blanks it.
-        barcode = _publishable_gtin(v.get("gtin"), v.get("barcode"))
+        barcode = variant_barcode(product, v)
         if barcode:
             row["barcode"] = barcode
         rows.append(row)

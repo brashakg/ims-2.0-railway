@@ -510,3 +510,23 @@ def test_import_with_a_free_gtin_still_creates(env, monkeypatch):
     _gtin_holder_repo(monkeypatch)
     res = _import("4006381333931")
     assert res["created_count"] == 1, res["errors"]
+
+
+def test_an_imported_then_approved_gtin_reaches_the_price_push(env, monkeypatch):
+    """Import and Approve write the GTIN as the gtin ATTRIBUTE only (no
+    top-level projection on the doc): the push reads the product's own GTIN
+    from that home, so it still ships as the variant barcode."""
+    from api.services.shopify_push.product_input import (
+        _variants_for_price_push,
+        build_variant_price_inputs,
+    )
+
+    _gtin_holder_repo(monkeypatch)
+    assert _import("4006381333931")["created_count"] == 1
+    (pid,) = catalog_mod.CATALOG_PRODUCTS
+    _promote(pid)
+    twin = dict(catalog_mod.CATALOG_PRODUCTS[pid])
+    assert not twin.get("gtin")
+    twin["ecom"] = {"shopify_variant_id": "gid://shopify/ProductVariant/1"}
+    rows, _ = build_variant_price_inputs(twin, _variants_for_price_push(twin, []))
+    assert rows[0]["barcode"] == "4006381333931"

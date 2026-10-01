@@ -362,6 +362,24 @@ class TestBarcodeUpdateEndpoint:
 # never sent anywhere.
 
 
+def _pushed_barcodes(db, twin):
+    """What the price push sends for `twin` over the catalog_variants rows the
+    create door REALLY wrote (variant_rows_for_product, as push_product loads
+    them), once each row is on Shopify: {sku: barcode or None (omitted)}."""
+    from api.services.online_catalog import variant_rows_for_product
+    from api.services.shopify_push.product_input import (
+        _variants_for_price_push,
+        build_variant_price_inputs,
+    )
+
+    rows = variant_rows_for_product(db, twin)
+    assert rows, "the create door writes a catalog_variants row"
+    for r in rows:  # the first-publish seed writes each variant gid back
+        r["shopify_variant_id"] = "gid://shopify/ProductVariant/" + r["sku"]
+    out, _ = build_variant_price_inputs(twin, _variants_for_price_push(twin, rows))
+    return {o["id"].rsplit("/", 1)[-1]: o.get("barcode") for o in out}
+
+
 class TestGtinAttributeOnTheEditDoor:
     @pytest.mark.parametrize(
         "junk", [_INTERNAL, "TW003HG14", _BAD_CHECK, _RANDOM_GENERATED]
@@ -386,10 +404,7 @@ class TestGtinAttributeOnTheEditDoor:
         _update(pid, attributes={"upc": _UPC_A})
 
     def test_a_saved_gtin_reaches_the_shopify_push(self, mock_db):
-        from api.services.shopify_push.product_input import (
-            _variants_for_price_push,
-            build_variant_price_inputs,
-        )
+        from api.services.online_catalog import variant_rows_for_product
 
         created = _create("GT-OK")
         pid = created["product_id"]
@@ -402,10 +417,52 @@ class TestGtinAttributeOnTheEditDoor:
         assert twin is not None, "the create door makes the catalog twin"
         assert twin["gtin"] == _VALID_A
         assert (twin.get("ecom") or {}).get("locally_modified") is True
-        # Once the product is on Shopify, the push sends it as the barcode.
-        twin.setdefault("ecom", {})["shopify_variant_id"] = "gid://shopify/ProductVariant/1"
-        rows, _ = build_variant_price_inputs(twin, _variants_for_price_push(twin, []))
-        assert rows and rows[0].get("barcode") == _VALID_A
+        # The door's SELF row holds no copy of the GTIN to keep in sync ...
+        rows = variant_rows_for_product(mock_db, twin)
+        assert [r["sku"] for r in rows] == ["GT-OK"] and not rows[0].get("gtin")
+        # ... and once the product is on Shopify the push sends the product's.
+        assert _pushed_barcodes(mock_db, twin) == {"GT-OK": _VALID_A}
+
+    def test_a_size_variant_keeps_its_own_gtin_on_the_parents_push(self, mock_db):
+        """The parent's push carries every row the create door wrote under
+        it: its self row ships the PARENT's GTIN, the size variant's row its
+        own -- never the parent's (a GTIN names one trade item)."""
+        from api.routers.products import create_product, ProductCreate
+        from api.services import product_master as pm
+        from database.repositories.catalog_variant_repository import (
+            CatalogVariantRepository,
+        )
+
+        body = ProductCreate(
+            sku="GT-PAR", category="FRAME", brand="B", model="M-GT-PAR",
+            color="Black", mrp=1000.0, offer_price=900.0,
+            attributes={"gtin": _VALID_A},
+        )
+        parent_id = asyncio.run(create_product(body, _ADMIN))["product_id"]
+        pm.create_via_door(
+            {
+                "category": "FRAME",
+                "sku": "GT-PAR-L",
+                "attributes": {
+                    "brand_name": "B", "model_no": "M-GT-PAR",
+                    "colour_code": "Black", "size": "Large", "gtin": _VALID_B,
+                },
+                "mrp": 1100.0,
+                "offer_price": 1100.0,
+                "variant_of": parent_id,
+            },
+            source="MASTER",
+            actor="u-admin",
+            product_repo=ProductRepository(mock_db["products"]),
+            variant_repo=CatalogVariantRepository(mock_db["catalog_variants"]),
+            db=mock_db,
+        )
+        spine = mock_db["products"].find_one({"product_id": parent_id})
+        twin = mock_db["catalog_products"].find_one({"id": spine["pim_product_id"]})
+        assert _pushed_barcodes(mock_db, twin) == {
+            "GT-PAR": _VALID_A,
+            "GT-PAR-L": _VALID_B,
+        }
 
     def test_clearing_the_gtin_is_allowed(self, mock_db):
         pid = _create("GT-CLR")["product_id"]
@@ -418,26 +475,20 @@ class TestGtinAttributeOnTheEditDoor:
         """Manage Barcode > Remove (attributes.gtin = '') cleared only the twin's
         gtin; the push falls back to the twin's legacy top-level `barcode`, so
         it went on sending that code."""
-        from api.services.shopify_push.product_input import (
-            _variants_for_price_push,
-            build_variant_price_inputs,
-            build_removed_metafields,
-        )
+        from api.services.shopify_push.product_input import build_removed_metafields
 
         pid = _create("GT-RM")["product_id"]
         spine = mock_db["products"].find_one({"product_id": pid})
         twin_id = spine.get("pim_product_id") or pid
         mock_db["catalog_products"].update_one(
             {"id": twin_id},
-            {"$set": {"barcode": _VALID_B,
-                      "ecom.shopify_variant_id": "gid://shopify/ProductVariant/1"}},
+            {"$set": {"barcode": _VALID_B}},
         )
         _update(pid, attributes={"gtin": _VALID_A})
         _update(pid, attributes={"gtin": ""})
         twin = mock_db["catalog_products"].find_one({"id": twin_id})
         assert not twin.get("gtin") and not twin.get("barcode")
-        rows, _ = build_variant_price_inputs(twin, _variants_for_price_push(twin, []))
-        assert "barcode" not in rows[0]
+        assert _pushed_barcodes(mock_db, twin) == {"GT-RM": None}
         # ...and the ims.gtin metafield is deleted on the next push.
         assert build_removed_metafields(twin) == [{"namespace": "ims", "key": "gtin"}]
 

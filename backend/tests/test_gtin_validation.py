@@ -327,16 +327,39 @@ def test_push_sends_a_valid_barcode():
     assert rows[0]["barcode"] == VALID_EAN13
 
 
-def test_push_falls_through_junk_to_the_parent_products_valid_gtin():
-    """The old `or` chain stopped at the first TRUTHY value, so a junk variant
-    gtin shadowed a good product one. It now picks the first VALID value."""
+def test_push_falls_through_junk_to_the_products_valid_gtin():
+    """The old `or` chain stopped at the first TRUTHY value, so a junk value
+    shadowed a good GTIN. It now picks the first VALID one. The product's own
+    variant (its self row) reads the PRODUCT's GTIN; a sibling row (P1-A) never
+    inherits it -- a GTIN names one trade item."""
     from api.services.shopify_push import build_variant_seed_rows
 
     rows = build_variant_seed_rows(
-        {"sku": "P1", "mrp": 5000, "offer_price": 4000, "gtin": VALID_EAN13},
-        [{"sku": "P1-A", "gtin": "2511661"}],
+        {
+            "sku": "P1",
+            "mrp": 5000,
+            "offer_price": 4000,
+            "attributes": {"gtin": "2511661"},
+            "gtin": VALID_EAN13,
+        },
+        [{"sku": "P1", "gtin": "2511661"}, {"sku": "P1-A", "gtin": "2511661"}],
     )
     assert rows[0]["row"]["barcode"] == VALID_EAN13
+    assert "barcode" not in rows[1]["row"]
+
+
+def test_the_self_row_never_shadows_the_products_gtin():
+    """The product's own variant reads ONLY the product's GTIN (one home): a
+    copy left on its self row -- one the product has since removed or
+    replaced -- is never what ships."""
+    from api.services.shopify_push import build_variant_price_inputs
+
+    row = {"sku": "P1", "shopify_variant_id": "gid://shopify/ProductVariant/1",
+           "gtin": VALID_EAN13}
+    for gtin, sent in (("", None), ("4006381333931", "4006381333931")):
+        product = {"sku": "P1", "mrp": 5000, "attributes": {"gtin": gtin}}
+        rows, _ = build_variant_price_inputs(product, [dict(row)])
+        assert rows[0].get("barcode") == sent, gtin
 
 
 def test_push_never_leaks_our_internal_store_barcode_as_a_gtin():
