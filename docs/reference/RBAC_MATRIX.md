@@ -1239,7 +1239,6 @@ are the exact current gate (SUPERADMIN always implied).
 | `POST` | `/api/v1/workshop/jobs/{job_id}/vendor-status` | AUTH |  |
 | `GET` | `/api/v1/workshop/overdue` | AUTH |  |
 | `GET` | `/api/v1/workshop/pending` | AUTH |  |
-| `GET` | `/api/v1/workshop/product-label` | AUTH |  |
 | `GET` | `/api/v1/workshop/ready` | AUTH |  |
 | `GET` | `/api/v1/workshop/technician-workload` | AUTH |  |
 

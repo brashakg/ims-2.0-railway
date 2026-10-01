@@ -9,7 +9,7 @@
 // consumers (TS2614) in this codebase.
 
 import api from './client';
-import type { JobLabelData, ProductLabelData } from '../../components/labels/labelTemplates';
+import type { JobLabelData } from '../../components/labels/labelTemplates';
 
 export type ScanReason =
   | 'WRONG_JOB'
@@ -118,15 +118,6 @@ export const labelsApi = {
   ): Promise<JobLabelData & { ok?: boolean }> => {
     const resp = await api.get(`/workshop/jobs/${jobId}/label`, { params: { type } });
     return resp.data as JobLabelData & { ok?: boolean };
-  },
-
-  /** Fetch a frame-tag / CL-box label payload from a product or stock id. */
-  getProductLabel: async (params: {
-    product_id?: string;
-    stock_id?: string;
-  }): Promise<ProductLabelData & { ok?: boolean; reason?: string }> => {
-    const resp = await api.get('/workshop/product-label', { params });
-    return resp.data as ProductLabelData & { ok?: boolean; reason?: string };
   },
 
   // --- F2 internal lab routing ---

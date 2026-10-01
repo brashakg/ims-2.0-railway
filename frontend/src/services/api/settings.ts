@@ -382,6 +382,7 @@ export const settingsApi = {
     store_modules?: Record<string, Record<string, boolean>>;
     discount_limits?: Array<{ roleId: string; maxDiscountPercent: number; requiresApproval: boolean; approvalThreshold: number }>;
     operational_rules?: Record<string, boolean | number | string>;
+    role_permissions?: Record<string, Record<string, boolean>>;
   }) => {
     const response = await api.put('/settings/admin-controls', controls);
     return response.data;

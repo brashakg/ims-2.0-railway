@@ -122,6 +122,27 @@ ROWS: List[Dict[str, object]] = [
         "allowed": "AUTHENTICATED",
         "store_scoped": True,
     },
+    # F26/F27 -- the per-unit list behind a ledger row / a receipt, and the
+    # "labels went to the printer" record. The POST uses _INVENTORY_ROLES, the
+    # exact inventory:write union already, so it broadens no capability.
+    {
+        "method": "GET",
+        "path": "/api/v1/inventory/units",
+        "allowed": "AUTHENTICATED",
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/inventory/units/barcode-printed",
+        "allowed": [
+            "ADMIN",
+            "AREA_MANAGER",
+            "CATALOG_MANAGER",
+            "STORE_MANAGER",
+            "WORKSHOP_STAFF",
+        ],
+        "store_scoped": True,
+    },
     # F21 -- defective quarantine lifecycle (manager-ladder only; queue read also
     # for ACCOUNTANT). store_scoped: a store role only sees / acts on its store.
     {
