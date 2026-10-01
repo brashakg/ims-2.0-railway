@@ -95,8 +95,9 @@ class POItemNewProduct(BaseModel):
 class POItemCreate(BaseModel):
     # Ruling 13: a line references EITHER an existing catalogued product OR
     # carries the identity of one that does not exist yet, which the server
-    # materialises into a real (provisional, unsellable) spine row before the PO
-    # is written. product_id stays the join key for everything downstream --
+    # gives a product_id and writes as a real (provisional, unsellable) spine
+    # row right after the PO is written (po_detail.settle_typed_in_lines).
+    # product_id stays the join key for everything downstream --
     # receiving, the stock mint, the invoice and the 3-way match all key on it.
     product_id: Optional[str] = None
     product_name: Optional[str] = None
@@ -136,6 +137,43 @@ class POItemCreate(BaseModel):
         return self
 
 
+def expected_date_not_backdated(v):
+    """Owner rule: a promised delivery is today or later, never the past.
+
+    Enforced HERE, on the server, not only by the date picker's `min` --
+    a picker minimum is a courtesy, not a rule, and any other caller
+    (Buy Desk, a script, a replayed request) bypasses it entirely.
+
+    "Today" is the IST calendar day: Railway runs in UTC, so between
+    00:00 and 05:30 IST a UTC "today" is still YESTERDAY in the shop and
+    would reject a perfectly valid same-day delivery date.
+
+    Applies to CREATE, and to an EDIT that changes the date -- POs already
+    carrying an older date keep it and still open, display and receive exactly
+    as before.
+    """
+    if v is None:
+        return v
+    raw = str(v).strip()
+    if not raw:
+        return v
+    from datetime import date as _date
+    from ...utils.ist import ist_today
+
+    try:
+        parsed = _date.fromisoformat(raw[:10])
+    except ValueError:
+        raise ValueError(
+            "Expected delivery date must be a real date, like 2026-08-26"
+        )
+    if parsed < ist_today():
+        raise ValueError(
+            "Expected delivery date cannot be in the past - "
+            "choose today or a later date"
+        )
+    return raw[:10]
+
+
 class POCreate(BaseModel):
     vendor_id: str
     delivery_store_id: str
@@ -149,39 +187,7 @@ class POCreate(BaseModel):
     @field_validator("expected_date")
     @classmethod
     def _expected_date_not_backdated(cls, v):
-        """Owner rule: a promised delivery is today or later, never the past.
-
-        Enforced HERE, on the server, not only by the date picker's `min` --
-        a picker minimum is a courtesy, not a rule, and any other caller
-        (Buy Desk, a script, a replayed request) bypasses it entirely.
-
-        "Today" is the IST calendar day: Railway runs in UTC, so between
-        00:00 and 05:30 IST a UTC "today" is still YESTERDAY in the shop and
-        would reject a perfectly valid same-day delivery date.
-
-        Applies to CREATE only -- POs already carrying an older date keep it
-        and still open, display and receive exactly as before.
-        """
-        if v is None:
-            return v
-        raw = str(v).strip()
-        if not raw:
-            return v
-        from datetime import date as _date
-        from ...utils.ist import ist_today
-
-        try:
-            parsed = _date.fromisoformat(raw[:10])
-        except ValueError:
-            raise ValueError(
-                "Expected delivery date must be a real date, like 2026-08-26"
-            )
-        if parsed < ist_today():
-            raise ValueError(
-                "Expected delivery date cannot be in the past - "
-                "choose today or a later date"
-            )
-        return raw[:10]
+        return expected_date_not_backdated(v)
 
 
 class GRNItemCreate(BaseModel):
@@ -377,3 +383,78 @@ class ExpressGRNCreate(BaseModel):
     def _normalize_subtype(cls, v):
         s = str(v or GRN_SUBTYPE_STANDARD).strip().upper().replace("-", "_")
         return s if s in _GRN_SUBTYPES else GRN_SUBTYPE_STANDARD
+
+
+class POUpdate(BaseModel):
+    """Edit a DRAFT purchase order (owner ruling 2026-09-28: quantity, unit
+    cost, add / remove lines). The lines are the SAME shape the create door
+    takes and go through the same pricing, so an edited order is priced by the
+    one rule a new order is. The receiving shop is fixed -- a different shop is
+    a different order."""
+
+    vendor_id: Optional[str] = None
+    items: List[POItemCreate] = Field(..., min_length=1)
+    expected_date: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class POLineCancel(BaseModel):
+    """Cancel what is still due on ONE line. The reason is shown on the order
+    timeline with the person and the time, so it has to say something."""
+
+    reason: str
+    # The product the person saw on that line. A stale screen (the draft was
+    # edited meanwhile) must not cancel whatever line now sits at that index.
+    product_id: Optional[str] = None
+    # ...and its quantity: two lines may carry one product.
+    quantity: Optional[int] = None
+    # The order's updated_at as the screen read it. Exact where the line's own
+    # fields are not: two lens powers of one product can match on every field.
+    updated_at: Optional[str] = None
+
+    @field_validator("reason")
+    @classmethod
+    def _real_reason(cls, v):
+        return cancel_reason(v)
+
+
+def cancel_reason(v) -> str:
+    """ONE rule for a cancel reason (whole order or one line): invisible
+    characters (zero-width space, BOM and other format characters) and
+    surrounding whitespace removed (also the blank Hangul fillers and
+    variation selectors), then at least 3 letters or digits -- 'qty
+    typo' passes; a blank, '...', '???' or a zero-width string does not. Vowel
+    signs count with their letter, so a short Hindi reason is a reason; the
+    joiners that Indic scripts need are kept."""
+    import unicodedata
+
+    blank_fillers = "\u115f\u1160\u3164\uffa0"
+    text = "".join(
+        c
+        for c in str(v or "")
+        if c not in blank_fillers
+        and not (0xFE00 <= ord(c) <= 0xFE0F or 0xE0100 <= ord(c) <= 0xE01EF)
+        and (
+            c in "\t\n\u200c\u200d"
+            or unicodedata.category(c) not in ("Cf", "Cc", "Zl", "Zp")
+        )
+    ).strip()
+    # Letters and digits count; a vowel sign or accent counts only when it
+    # follows a counted character, so a run of bare marks is not a reason.
+    counted = 0
+    after_base = False
+    for c in text:
+        cat = unicodedata.category(c)[0]
+        if cat in "LN":
+            counted += 1
+            after_base = True
+        elif cat == "M":
+            if after_base:
+                counted += 1
+        else:
+            after_base = False
+    if counted < 3:
+        raise ValueError(
+            "Say why this is being cancelled (at least 3 letters or digits)."
+        )
+    return text

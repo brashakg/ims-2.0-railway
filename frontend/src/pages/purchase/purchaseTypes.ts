@@ -2,14 +2,17 @@
 // IMS 2.0 - Purchase Management Types
 // ============================================================================
 
+import type { UserRole } from '../../types';
+
 export type TabType = 'purchase-orders' | 'purchase-invoices' | 'variance' | 'suppliers' | 'vendor-returns' | 'analytics';
+// The statuses the server actually writes. There is NO approval step (owner
+// ruling 2026-09-28): a DRAFT is sent straight to the vendor, so the old
+// PENDING / APPROVED / ORDERED words are gone -- they only ever existed on
+// screen. PARTIAL is the legacy spelling of PARTIALLY_RECEIVED.
 export type POStatus =
   | 'DRAFT'
-  | 'PENDING'
-  | 'APPROVED'
   | 'SENT'
   | 'ACKNOWLEDGED'
-  | 'ORDERED'
   | 'PARTIAL'
   | 'PARTIALLY_RECEIVED'
   | 'RECEIVED'
@@ -63,23 +66,42 @@ export interface PurchaseOrder {
   /** true = IGST, false = CGST + SGST, undefined = the order predates the
    *  split (or the server could not tell). */
   interstate?: boolean;
-  approvedBy?: string;
   receivedDate?: string;
   notes?: string;
+  /** Why the order was cancelled (the timeline shows who and when). */
+  cancellationReason?: string;
+  /** The server's last-write stamp as read: sent back with a line cancel so a
+   *  stale screen is refused instead of cancelling another line. */
+  updatedAt?: string;
+  /** Set on drafts generated automatically (lens top-up / forecast): their
+   *  lines carry data the edit form cannot hold, so they are not editable. */
+  source?: string;
 }
 
 export interface POItem {
   productId: string;
   productName: string;
+  /** The line's own description when it has one: a lens order has one line
+   *  per power, all under one product name ("Acuvue Oasys SPH -2.00"). */
+  description?: string;
   sku: string;
   quantity: number;
   unitCost: number;
   taxRate: number;
+  /** The HSN stored on the line, and whether its GST rate was left unsettled
+   *  (tax_rate 0 then means "unknown", not "0%"). An edit sends them back so
+   *  saving never re-prices a line. */
+  hsn?: string;
+  gstUnresolved?: boolean;
   total: number;
   /** Units received so far (per-line received_qty, falling back to the PO
    *  header received_qty_by_product for pre-S1 POs). Drives the "N of M
    *  lines received" progress chip on the PO list. */
   receivedQty?: number;
+  /** Units withdrawn from this line by a cancel (never received stock). */
+  cancelledQty?: number;
+  /** Server line status: OPEN / PARTIAL / RECEIVED / CANCELLED. */
+  lineStatus?: string;
 }
 
 // An audit stamp names a PERSON. The backend resolves the raw user id it
@@ -91,6 +113,29 @@ export function byPerson(name?: string | null, id?: string | null): string {
   const who = name || id;
   return who ? ` by ${who}` : '';
 }
+
+/** The roles that send orders to vendors (the catalogue manager only raises
+ *  drafts). ONE list for the purchase section pages and the Buy Desk's "who
+ *  sends it" hint; mirrors the backend _VENDOR_ROLES gate (+ SUPERADMIN). */
+export const PURCHASE_MANAGER_ROLES: readonly UserRole[] = [
+  'SUPERADMIN',
+  'ADMIN',
+  'AREA_MANAGER',
+  'STORE_MANAGER',
+  'ACCOUNTANT',
+];
+
+/** Who receives goods into stock. Owner ruling 2026-09-28: RECEIVING IS
+ *  MANAGERS ONLY -- not the accountant (bills and payments stay theirs), and
+ *  workshop staff hand the box to one of these. ONE list for the receive
+ *  routes, the Receive Goods menu item, every Receive button and the blocked
+ *  page that names them; mirrors the backend _RECEIVE_ROLES (+ SUPERADMIN). */
+export const RECEIVING_MANAGER_ROLES: readonly UserRole[] = [
+  'SUPERADMIN',
+  'ADMIN',
+  'AREA_MANAGER',
+  'STORE_MANAGER',
+];
 
 /** PO statuses the Goods-Receipt cockpit can receive against (mirrors the
  *  backend _RECEIVABLE_PO_STATUSES tuple in vendors.py). */

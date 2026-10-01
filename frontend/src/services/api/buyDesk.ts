@@ -27,7 +27,10 @@ export interface BuyDeskRow {
   readiness: BuyDeskReadiness;
   ecom_state: EcomState;
   on_hand: number;
+  /** Units on orders SENT to the vendor (owner D11, 2026-09-29) -- never drafts. */
   on_order: number;
+  /** Units on draft orders nobody has sent yet; shown apart, not netted. */
+  in_draft?: number;
   /** Suggested order qty, netted against on_hand + on_order. null = no sales signal yet. */
   buy_signal: number | null;
   purchasable: boolean;

@@ -84,7 +84,7 @@ export const hrRoutes = (
     <Route
       path="hr"
       element={
-        <ProtectedRoute allowedRoles={HR_ROLES}>
+        <ProtectedRoute allowedRoles={HR_ROLES} namesWhoCan={false}>
           <HRLayout />
         </ProtectedRoute>
       }

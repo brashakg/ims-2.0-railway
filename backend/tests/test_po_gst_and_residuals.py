@@ -674,9 +674,9 @@ def test_a_product_with_no_cost_can_be_ordered_and_the_po_still_sent(monkeypatch
         def find_by_id(self, pid):
             return self.doc
 
-        def update(self, pid, fields):
+        def update_if(self, pid, expected, fields):  # send's guarded write
             self.updated = fields
-            return fields
+            return True
 
     send_repo = _SendablePORepo({**created, "status": "DRAFT"})
     monkeypatch.setattr(v, "get_purchase_order_repository", lambda: send_repo)
@@ -707,7 +707,7 @@ def test_a_gap_other_than_cost_still_blocks_the_send(monkeypatch):
                 "items": [{"product_id": "P1"}],
             }
 
-        def update(self, pid, fields):
+        def update_if(self, pid, expected, fields):
             raise AssertionError("must not send an incomplete PO")
 
     monkeypatch.setattr(v, "get_purchase_order_repository", lambda: _SendablePORepo())

@@ -5,7 +5,7 @@ from ._shared import (
     HTTPException,
     List,
     Optional,
-    _VENDOR_ROLES,
+    _RECEIVE_ROLES,
     _get_db,
     _pm,
     can_access_store_scoped,
@@ -20,11 +20,13 @@ from ._shared import (
     router,
 )
 from .gst import _promote_cost_from_rate
+from .po_detail import _as_read, _qty, beyond_open_quantity
 from .numbering import (
     _cumulative_received_by_product,
     _grn_barcode,
     _grn_stock_audit,
     compute_po_receipt_state,
+    po_line_status,
 )
 from .grn_accept_lock import (
     _GRN_MINT_DUPLICATE,
@@ -43,7 +45,7 @@ from .grn_accept_lock import (
 
 @router.post("/grn/{grn_id}/accept")
 async def accept_grn(
-    grn_id: str, current_user: dict = Depends(require_roles(*_VENDOR_ROLES))
+    grn_id: str, current_user: dict = Depends(require_roles(*_RECEIVE_ROLES))
 ):
     """Post a goods-receipt note: mint serialized stock for the accepted units,
     advance the PO to PARTIALLY_RECEIVED / RECEIVED, and write an audit trail.
@@ -81,7 +83,7 @@ async def _accept_grn_impl(grn_id: str, current_user: dict) -> dict:
     store-scope guard, the PENDING/PARTIALLY_ACCEPTED status gate, idempotent
     per-(grn, line) stock minting, PO receipt math and the audit trail all run
     here unchanged for both callers. Callers pass the authenticated
-    ``current_user`` their own ``require_roles(*_VENDOR_ROLES)`` gate produced.
+    ``current_user`` their own ``require_roles(*_RECEIVE_ROLES)`` gate produced.
     """
     grn_repo = get_grn_repository()
     stock_repo = get_stock_repository()
@@ -140,6 +142,7 @@ async def _accept_grn_impl(grn_id: str, current_user: dict) -> dict:
         raise _grn_accept_conflict(grn_repo, grn_id)
 
     try:
+        _hold_order_open_for_receipt(po_repo, grn)
         return _accept_grn_claimed(
             grn_id,
             grn,
@@ -157,6 +160,95 @@ async def _accept_grn_impl(grn_id: str, current_user: dict) -> dict:
         # per-(grn, line) mint guard makes that retry idempotent.
         _release_grn_accept_claim(grn_repo, grn_id, claim_token)
         raise
+
+
+def _hold_order_open_for_receipt(po_repo, grn) -> None:
+    """Compare-and-set on the ORDER before a single unit is minted.
+
+    A cancel looks for a receipt waiting to be accepted, then writes. A receipt
+    logged in between slipped past that look and, once accepted, put stock on
+    the shelf against units the order says were withdrawn. So the accept reads
+    the order, refuses when it was cancelled -- or when a product on this
+    receipt is now ordered in fewer units than the receipt was logged against
+    (a line cancel, or the rest of a part-received order cancelled) -- and then
+    moves the order's write stamp only while the order is still as it read it.
+    A cancel that read the order before is refused by its own compare-and-set
+    (reload, and the receipt shows); a cancel that landed first refuses this
+    accept -- no stock is minted against it."""
+    po_id = grn.get("po_id")
+    if po_repo is None or not po_id:
+        return
+    for _attempt in range(3):
+        po = po_repo.find_by_id(po_id)
+        if not po:
+            return
+        if po.get("status") == "CANCELLED":
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This order was cancelled - nothing can be received against "
+                    "it any more. Void this receipt."
+                ),
+            )
+        def earlier_receipts() -> dict:
+            # Earlier ACCEPTED receipts only: this receipt is not accepted
+            # yet, and a retry of its own half-minted accept must not count
+            # twice.
+            got = dict(_cumulative_received_by_product(get_grn_repository(), po_id))
+            # Plus every OTHER receipt for this order that another accept has
+            # claimed and may be minting right now: it is not ACCEPTED yet, but
+            # its units are about to be on the shelf. Each accept sets its
+            # claim BEFORE it reads here, so of two racing accepts at least
+            # one sees the other (both may -- then both are told to accept
+            # again, never both mint).
+            for other in _claimed_receipts_for_order(get_grn_repository(), po_id, grn):
+                for line in other.get("items") or []:
+                    pid = line.get("product_id")
+                    got[pid] = _qty(got.get(pid)) + _qty(line.get("accepted_qty"))
+            for pid, own in (po.get("received_qty_by_product") or {}).items():
+                got[pid] = max(_qty(got.get(pid)), _qty(own))
+            return got
+
+        over = beyond_open_quantity(po, grn.get("items") or [], earlier_receipts, "accepted_qty")
+        if over:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Part of this order was cancelled, so the receipt no "
+                    "longer fits it (" + ", ".join(over) + "). Void this "
+                    "receipt and log what arrived again."
+                ),
+            )
+        if po_repo.update_if(po_id, _as_read(po), {}):
+            return
+    raise HTTPException(
+        status_code=409,
+        detail="This order kept changing while the delivery was being accepted - accept it again.",
+    )
+
+
+def _claimed_receipts_for_order(grn_repo, po_id, this_grn) -> list:
+    """Receipts of this order, other than `this_grn`, that hold an accept claim
+    but are not ACCEPTED yet (still minting, or held for a product that is not
+    catalogued). Fails CLOSED: an unreadable list must not let two accepts
+    both think the open quantity is theirs."""
+    if grn_repo is None:
+        return []
+    try:
+        rows = grn_repo.find_many({"po_id": po_id}, limit=1000) or []
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=503,
+            detail="Could not check the other deliveries on this order - try again.",
+        ) from exc
+    return [
+        r
+        for r in rows
+        if isinstance(r, dict)
+        and r.get("grn_id") != this_grn.get("grn_id")
+        and r.get("status") in ("PENDING", "PARTIALLY_ACCEPTED")
+        and r.get("accept_lock_at")
+    ]
 
 
 def _accept_grn_claimed(
@@ -547,47 +639,66 @@ def _accept_grn_claimed(
     # Advance the PO received state. Sum the accepted qty across EVERY accepted
     # GRN for this PO (this one is now ACCEPTED) and compare against the ordered
     # lines: full receipt -> RECEIVED, otherwise PARTIALLY_RECEIVED. Fail-soft.
+    #
+    # The write is guarded like every other PO change (_as_read): a manager's
+    # "cancel what is still due" landing between this read and this write must
+    # not be undone by writing back the lines read before it. On a lost race
+    # re-read and re-derive -- the receipts are already counted, so the answer
+    # only depends on the order as it now stands.
     po_status = None
     if po_repo is not None and po_id:
         try:
-            po = po_repo.find_by_id(po_id)
-            received_by_product = _cumulative_received_by_product(grn_repo, po_id)
-            po_items = (po.get("items") if po else []) or []
-            po_status = compute_po_receipt_state(po_items, received_by_product)
-            # Map the cumulative per-product received qty down onto each PO line
-            # + derive the line residual status (drives the receiving cockpit's
-            # "open POs" / "pending not-received" panels).
-            updated_items = []
-            for it in po_items:
-                ordered = it.get("ordered_qty", it.get("quantity", 0)) or 0
-                recv = received_by_product.get(it.get("product_id"), 0)
-                updated_items.append(
+            for _attempt in range(3):
+                po = po_repo.find_by_id(po_id)
+                if not po or po.get("status") == "CANCELLED":
+                    break  # a withdrawn order stays withdrawn
+                received_by_product = _cumulative_received_by_product(grn_repo, po_id)
+                po_items = po.get("items") or []
+                state = compute_po_receipt_state(po_items, received_by_product)
+                # Map the cumulative per-product received qty down onto each PO
+                # line + derive the line residual status (drives the receiving
+                # cockpit's "open POs" / "pending not-received" panels).
+                updated_items = []
+                for it in po_items:
+                    recv = received_by_product.get(it.get("product_id"), 0)
+                    updated_items.append(
+                        {
+                            **it,
+                            "received_qty": recv,
+                            "line_status": po_line_status(it, recv),
+                        }
+                    )
+                if po_repo.update_if(
+                    po_id,
+                    _as_read(po),
                     {
-                        **it,
-                        "received_qty": recv,
-                        "line_status": (
-                            "RECEIVED"
-                            if ordered and recv >= ordered
-                            else ("PARTIAL" if recv > 0 else "OPEN")
-                        ),
-                    }
+                        "status": state,
+                        "items": updated_items,
+                        "received_qty_by_product": received_by_product,
+                        "total_received_qty": sum(received_by_product.values()),
+                        "last_received_at": datetime.now().isoformat(),
+                    },
+                ):
+                    po_status = state
+                    break
+            else:
+                logger.warning(
+                    "[VENDOR] GRN %s: PO %s kept changing; receipt state left "
+                    "for the next receipt or cancel to re-derive",
+                    grn_id,
+                    po_id,
                 )
-            po_repo.update(
-                po_id,
-                {
-                    "status": po_status,
-                    "items": updated_items,
-                    "received_qty_by_product": received_by_product,
-                    "total_received_qty": sum(received_by_product.values()),
-                    "last_received_at": datetime.now().isoformat(),
-                },
-            )
         except Exception:  # noqa: BLE001
             # Never lose the stock write on a PO-update failure. Best effort:
-            # at least flag the PO as partially received.
+            # at least flag the PO as partially received -- never over an order
+            # a cancel (or a full receipt) closed meanwhile.
             try:
-                po_repo.update(po_id, {"status": "PARTIALLY_RECEIVED"})
-                po_status = "PARTIALLY_RECEIVED"
+                if po_repo.update_if(
+                    po_id,
+                    {"status": {"$nin": ["RECEIVED", "CANCELLED"]}},
+                    {"status": "PARTIALLY_RECEIVED"},
+                ):
+                    po_status = "PARTIALLY_RECEIVED"
             except Exception:  # noqa: BLE001
                 pass
 

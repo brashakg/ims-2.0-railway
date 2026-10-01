@@ -168,6 +168,15 @@ describe('the goods/services declaration on the Record-Bill form', () => {
     expect(apis.vendorApApi.listReceipts).not.toHaveBeenCalled();
   });
 
+  it('no unbilled receipt: names the store manager, who receives (the accountant cannot)', async () => {
+    apis.vendorApApi.listReceipts.mockResolvedValue([]);
+    await openBillForm();
+    fireEvent.change(screen.getByDisplayValue('This bill is for…'), {
+      target: { value: 'GOODS' },
+    });
+    expect(await screen.findByText(/No unbilled goods receipts/)).toHaveTextContent(/store manager/);
+  });
+
   it('a receipts endpoint that is down shows the error state, not an empty list', async () => {
     apis.vendorApApi.listReceipts.mockResolvedValue(null); // listReceipts maps failures to null
     await openBillForm();

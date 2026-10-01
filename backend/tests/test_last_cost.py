@@ -151,4 +151,16 @@ def test_rbac_row_catalogued():
         "ADMIN",
         "AREA_MANAGER",
         "STORE_MANAGER",
+        "CATALOG_MANAGER",
     }
+
+
+def test_the_catalogue_manager_gets_the_last_paid_price_for_a_buy_desk_draft():
+    """Owner ruling 2026-09-28 gives the catalogue manager the Buy Desk draft.
+    Its composer pre-fills each line's cost from this lookup; a 403 here was
+    swallowed, so every line stayed at 0 with no 'last paid' caption. Both
+    gates let them in (test_vendors_gating keeps the row and the code gate in
+    step)."""
+    from api.services import rbac_policy
+
+    assert rbac_policy.check_access("GET", "/api/v1/vendors/last-cost", ["CATALOG_MANAGER"])

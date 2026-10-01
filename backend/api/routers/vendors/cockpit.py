@@ -5,7 +5,7 @@ from ._shared import (
     Optional,
     Query,
     _RECEIVABLE_PO_STATUSES,
-    _VENDOR_ROLES,
+    _RECEIVE_ROLES,
     _pm,
     can_access_store_scoped,
     get_product_repository,
@@ -15,13 +15,14 @@ from ._shared import (
     resolve_store_scope,
     router,
 )
+from .purchase_orders import _PO_DRAFT_ROLES
 
 
 @router.get("/goods-receipt/cockpit")
 async def goods_receipt_cockpit(
     vendor_id: str = Query(..., description="Vendor to receive against"),
     store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
+    current_user: dict = Depends(require_roles(*_RECEIVE_ROLES)),
 ):
     """Vendor-first goods-receipt cockpit (Purchase P1 / S2).
 
@@ -145,7 +146,7 @@ async def goods_receipt_cockpit(
 async def get_last_purchase_cost(
     vendor_id: str = Query(..., description="Vendor to look up prior prices for"),
     product_ids: str = Query(..., description="Comma-separated product_ids to price"),
-    current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
+    current_user: dict = Depends(require_roles(*_PO_DRAFT_ROLES)),
 ):
     """Most-recent agreed purchase price per product for this vendor, from PO
     history -- so the PO / Buy-Desk form can pre-fill "last paid Rs X on <date>"

@@ -6,7 +6,7 @@
 // lifecycle from GET /vendors/purchase-orders/{po_id}/timeline (PR #869):
 //   header  : PO number + vendor + PurchaseStatusChip
 //   timeline: chronological events in the owner vocabulary
-//             (Ordered / Sent / Box received / On shelf / Bill settled)
+//             (Draft raised / Sent / Box received / On shelf / Bill settled)
 //   lists   : raw linked GRNs + purchase invoices with their statuses
 //   footer  : ONE derived next-step action --
 //             DRAFT                      -> "Send to vendor" (parent callback;
@@ -30,12 +30,15 @@ import {
   Circle,
   Truck,
   RefreshCw,
+  Pencil,
+  MinusCircle,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { vendorsApi } from '../../services/api/inventory';
 import { useAuth } from '../../context/AuthContext';
 import { PurchaseStatusChip } from './PurchaseStatusChip';
-import { RECEIVABLE_PO_STATUSES } from '../../pages/purchase/purchaseTypes';
+import { formatDateTimeIST } from '../../utils/datetime';
+import { RECEIVABLE_PO_STATUSES, RECEIVING_MANAGER_ROLES } from '../../pages/purchase/purchaseTypes';
 import type { POStatus } from '../../pages/purchase/purchaseTypes';
 
 // ---------------------------------------------------------------------------
@@ -45,6 +48,8 @@ import type { POStatus } from '../../pages/purchase/purchaseTypes';
 export type POTimelineEventKind =
   | 'ordered'
   | 'sent'
+  | 'edited'
+  | 'line_cancelled'
   | 'cancelled'
   | 'box_received'
   | 'on_shelf'
@@ -109,6 +114,8 @@ export interface POLifecycleDrawerProps {
 const EVENT_ICONS: Record<string, typeof FileText> = {
   ordered: FileText,
   sent: Send,
+  edited: Pencil,
+  line_cancelled: MinusCircle,
   cancelled: XCircle,
   box_received: Package,
   on_shelf: CheckCircle2,
@@ -118,29 +125,17 @@ const EVENT_ICONS: Record<string, typeof FileText> = {
 const EVENT_ICON_CLASSES: Record<string, string> = {
   ordered: 'bg-gray-100 text-gray-600',
   sent: 'bg-indigo-50 text-indigo-600',
+  edited: 'bg-gray-100 text-gray-600',
+  line_cancelled: 'bg-red-50 text-red-600',
   cancelled: 'bg-red-50 text-red-600',
   box_received: 'bg-amber-50 text-amber-600',
   on_shelf: 'bg-green-50 text-green-600',
   bill_settled: 'bg-teal-50 text-teal-600',
 };
 
-/** Humanised date+time, e.g. "16 Jun 2026, 2:45 pm". Fail-soft on bad input. */
-function fmtDateTime(at: string | null | undefined): string {
-  if (!at) return '';
-  const d = new Date(at);
-  if (Number.isNaN(d.getTime())) return String(at);
-  return d.toLocaleString('en-IN', {
-    day: 'numeric',
-    month: 'short',
-    year: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  });
-}
-
-/** Mirrors the /purchase/receive ProtectedRoute gate in App.tsx -- never hand
- *  a role a button that lands on /unauthorized. */
-const RECEIVE_ROLES = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] as const;
+/** Date+time in IST, e.g. "16 Jun 2026, 2:45 pm" (a zoneless stamp is the
+ *  server's UTC clock -- see utils/datetime). Blank when there is none. */
+const fmtDateTime = (at: string | null | undefined) => formatDateTimeIST(at, '');
 
 /** AP-capable roles (mirrors the /purchase/recon-console gate -- the invoice
  *  booking surface is an accountant function). */
@@ -244,7 +239,7 @@ export function POLifecycleDrawer({ poId, poNumber, onClose, onSendToVendor }: P
   const nextStep = timeline
     ? deriveNextStep(timeline, {
         canSend: Boolean(onSendToVendor),
-        canReceive: hasRole([...RECEIVE_ROLES]),
+        canReceive: hasRole([...RECEIVING_MANAGER_ROLES]),
         canBookInvoice: hasRole([...AP_ROLES]),
       })
     : null;

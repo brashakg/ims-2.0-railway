@@ -15,6 +15,16 @@ interface ProtectedRouteProps {
    *  derived from the current path via moduleForPath. Pass `null` to opt a
    *  route OUT of module gating entirely (rare). */
   requireModule?: ModuleKey | null;
+  /** One line the blocked page shows above the list of who CAN open this
+   *  route (e.g. "Only managers receive goods into stock."). */
+  deniedHint?: string;
+  /** false on a section LAYOUT's gate whose sections are narrower than it
+   *  (/purchase: the accountant may not open vendor returns, workshop staff
+   *  may not open orders). Its list is the union of every section's, so naming
+   *  it on the blocked page told people to hand the work to roles the section
+   *  itself refuses. Leave it on where every section shares the layout's list
+   *  (inventory, reports) -- that list is the right one to name. */
+  namesWhoCan?: boolean;
 }
 
 export function ProtectedRoute({
@@ -22,6 +32,8 @@ export function ProtectedRoute({
   allowedRoles,
   requirePermission,
   requireModule,
+  deniedHint,
+  namesWhoCan = true,
 }: ProtectedRouteProps) {
   const { isAuthenticated, isLoading, hasRole, hasPermission, hasModuleAccess } = useAuth();
   const location = useLocation();
@@ -46,7 +58,11 @@ export function ProtectedRoute({
   // Check role-based access
   if (allowedRoles && allowedRoles.length > 0) {
     if (!hasRole(allowedRoles)) {
-      return <Navigate to="/unauthorized" state={{ from: location }} replace />;
+      // Tell the blocked page who CAN open this, so it can name them.
+      const who = namesWhoCan ? allowedRoles : undefined;
+      return (
+        <Navigate to="/unauthorized" state={{ from: location, allowedRoles: who, deniedHint }} replace />
+      );
     }
   }
 

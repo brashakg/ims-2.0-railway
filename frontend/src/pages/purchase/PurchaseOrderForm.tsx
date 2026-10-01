@@ -20,9 +20,12 @@ import { PurchaseOrderComposer } from '../../components/purchase/PurchaseOrderCo
 import type {
   ComposerVendorOption,
   ComposerNewProduct,
+  ComposerLine,
 } from '../../components/purchase/PurchaseOrderComposer';
+import { mapPOtoPurchaseOrder } from './purchaseMappers';
 import { CATEGORIES } from '../../domain/catalog/productAdd';
 import type { Supplier, PurchaseOrder, POItem } from './purchaseTypes';
+import { editOutcomeToasts, typedInNotAddedMessage } from './typedInNotAdded';
 
 interface PickedProduct {
   productId: string;
@@ -452,8 +455,32 @@ function ProductSearchSelect({
 interface PurchaseOrderFormProps {
   suppliers: Supplier[];
   existingPOCount: number;
+  /** A saved DRAFT to edit (owner ruling 2026-09-28: quantity, unit cost,
+   *  add / remove lines). Same form, same pricing rule on the server; saving
+   *  hands back the server's copy through onCreated. */
+  editing?: PurchaseOrder;
   onClose: () => void;
   onCreated: (po: PurchaseOrder) => void;
+}
+
+// A saved line, back into the form. Its cost was agreed, so the last-paid
+// prefill must never overwrite it.
+function lineFromSaved(item: POItem): ComposerLine {
+  return {
+    productId: item.productId,
+    productName: item.productName,
+    sku: item.sku,
+    newProduct: null,
+    quantity: item.quantity,
+    unitCost: item.unitCost,
+    taxRate: item.taxRate,
+    hsn: item.hsn ?? null,
+    productDetail: '',
+    gstResolved: !item.gstUnresolved,
+    gstMissing: null,
+    costTouched: true,
+    lastPaid: null,
+  };
 }
 
 // Map the purchase module's Supplier down to the composer's vendor option.
@@ -461,7 +488,7 @@ function supplierToVendor(s: Supplier): ComposerVendorOption {
   return { id: s.id, name: s.name, code: s.code };
 }
 
-export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreated }: PurchaseOrderFormProps) {
+export function PurchaseOrderForm({ suppliers, existingPOCount, editing, onClose, onCreated }: PurchaseOrderFormProps) {
   const toast = useToast();
   const { user } = useAuth();
 
@@ -473,7 +500,7 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
   // says the split could not be told rather than showing a wrong one.
   const storeId = user?.activeStoreId ?? '';
   const [store, setStore] = useState<{ gstin?: string; state?: string } | null>(null);
-  const [vendorId, setVendorId] = useState('');
+  const [vendorId, setVendorId] = useState(editing?.supplierId ?? '');
   useEffect(() => {
     if (!storeId) return;
     let cancelled = false;
@@ -511,7 +538,7 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
         <div className="flex items-center justify-between p-6 border-b border-gray-200">
           <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
             <FileText className="w-5 h-5 text-blue-600" />
-            Create Purchase Order
+            {editing ? `Edit draft ${editing.poNumber}` : 'Create Purchase Order'}
           </h2>
           <button
             onClick={onClose}
@@ -528,6 +555,10 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
             vendors={vendorOptions}
             interstate={interstate}
             onVendorChange={setVendorId}
+            initialVendorId={editing?.supplierId}
+            initialLines={editing?.items.map(lineFromSaved)}
+            initialExpectedDate={editing?.expectedDelivery}
+            initialNotes={editing?.notes}
             allowAddLine
             allowRemoveLine
             renderProductCell={({ line, pickProduct, clearProduct, setNewProduct }) => (
@@ -554,10 +585,36 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
                 onSetNew={setNewProduct}
               />
             )}
-            submitLabel="Create as Draft"
-            submittingLabel="Creating..."
+            submitLabel={editing ? 'Save changes' : 'Create as Draft'}
+            submittingLabel={editing ? 'Saving...' : 'Creating...'}
             onCancel={onClose}
             onSubmit={async (payload) => {
+              if (editing) {
+                const saved = await vendorsApi.updatePurchaseOrder(editing.id, {
+                  vendor_id: payload.vendorId,
+                  // A PUT keeps a field it does not carry; null clears it.
+                  expected_date: payload.expectedDate || null,
+                  notes: payload.notes || null,
+                  items: payload.items.map((it) => ({
+                    product_id: it.product_id,
+                    product_name: it.product_name,
+                    sku: it.sku,
+                    new_product: it.new_product,
+                    quantity: it.quantity,
+                    unit_price: it.unit_price,
+                    // The line's stored rate and HSN go back with it, so an
+                    // edit never re-prices a line from the catalogue.
+                    gst_rate: it.gst_rate,
+                    hsn: it.hsn,
+                  })),
+                });
+                const savedPO = mapPOtoPurchaseOrder(saved);
+                onCreated(savedPO);
+                for (const t of editOutcomeToasts(editing.poNumber, savedPO.status, saved?.products_not_created)) {
+                  toast[t.kind](t.text);
+                }
+                return;
+              }
               const storeId = user?.activeStoreId ?? 'default';
               const resp = await vendorsApi.createPurchaseOrder({
                 vendor_id: payload.vendorId,
@@ -603,6 +660,8 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
 
               onCreated(newPO);
               toast.success(`Purchase Order ${newPO.poNumber} created as Draft`);
+              const notAdded = typedInNotAddedMessage(resp.products_not_created);
+              if (notAdded) toast.warning(notAdded);
               // Say what is missing rather than letting a short tax total pass
               // unnoticed -- the server is the authority on the rate, so this
               // reports what it actually stored, including the lines it taxed

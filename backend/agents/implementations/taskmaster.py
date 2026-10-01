@@ -60,7 +60,7 @@ class TaskmasterAgent(JarvisAgent):
 
     # Anything in this list requires explicit human confirmation, NOT auto-act.
     requires_confirmation = [
-        "po_send",  # Drafting is fine; sending to vendor needs approval
+        "po_send",  # Drafting is fine; a manager sends it to the vendor
         "staff_transfer",
         "refund_issue",
         "price_ceiling_change",
