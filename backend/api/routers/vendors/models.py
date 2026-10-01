@@ -421,19 +421,39 @@ class POLineCancel(BaseModel):
 def cancel_reason(v) -> str:
     """ONE rule for a cancel reason (whole order or one line): invisible
     characters (zero-width space, BOM and other format characters) and
-    surrounding whitespace removed, then at least 3 letters or digits -- 'qty
+    surrounding whitespace removed (also the blank Hangul fillers and
+    variation selectors), then at least 3 letters or digits -- 'qty
     typo' passes; a blank, '...', '???' or a zero-width string does not. Vowel
     signs count with their letter, so a short Hindi reason is a reason; the
     joiners that Indic scripts need are kept."""
     import unicodedata
 
+    blank_fillers = "\u115f\u1160\u3164\uffa0"
     text = "".join(
         c
         for c in str(v or "")
-        if c in "\t\n\u200c\u200d"
-        or unicodedata.category(c) not in ("Cf", "Cc", "Zl", "Zp")
+        if c not in blank_fillers
+        and not (0xFE00 <= ord(c) <= 0xFE0F or 0xE0100 <= ord(c) <= 0xE01EF)
+        and (
+            c in "\t\n\u200c\u200d"
+            or unicodedata.category(c) not in ("Cf", "Cc", "Zl", "Zp")
+        )
     ).strip()
-    if sum(1 for c in text if unicodedata.category(c)[0] in "LNM") < 3:
+    # Letters and digits count; a vowel sign or accent counts only when it
+    # follows a counted character, so a run of bare marks is not a reason.
+    counted = 0
+    after_base = False
+    for c in text:
+        cat = unicodedata.category(c)[0]
+        if cat in "LN":
+            counted += 1
+            after_base = True
+        elif cat == "M":
+            if after_base:
+                counted += 1
+        else:
+            after_base = False
+    if counted < 3:
         raise ValueError(
             "Say why this is being cancelled (at least 3 letters or digits)."
         )
