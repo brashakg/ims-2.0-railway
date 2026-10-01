@@ -782,6 +782,111 @@ def test_a_door_refusal_on_a_later_typed_in_line_creates_no_product(monkeypatch)
     ]
 
 
+_VOGUE = {"category": "FRAME", "brand": "Vogue", "model": "VO5286",
+          "colour": "W44", "size": "52", "mrp": 5000}
+
+
+def _real_spine(monkeypatch):
+    """The REAL ProductRepository over a strict fake collection: the product
+    door's own duplicate checks and writes run, nothing is stubbed."""
+    from database.repositories.product_repository import ProductRepository
+
+    spine = ProductRepository(StrictCollection("products", []))
+    monkeypatch.setattr(v, "get_product_repository", lambda: spine)
+    monkeypatch.setattr(v, "_get_db", lambda: None)
+    return spine
+
+
+def _typed_in_vogue_body():
+    return _edit_body([{"new_product": dict(_VOGUE), "quantity": 1, "unit_price": 2000}])
+
+
+@pytest.mark.parametrize("status", ["SENT", "ACKNOWLEDGED", "RECEIVED", "CANCELLED"])
+def test_an_edit_refused_for_status_creates_no_typed_in_product(monkeypatch, status):
+    """Verifier round 6: the DRAFT check must stop an edit before a typed-in
+    line reaches the product door. Moving it after the pricing left a
+    provisional Vogue (and its product.created row) behind a 400."""
+    repo, audit = _wire(monkeypatch, _po(status=status))
+    spine = _real_spine(monkeypatch)
+    with pytest.raises(HTTPException) as e:
+        _run(v.update_po("PO1", _typed_in_vogue_body(), _user()))
+    assert e.value.status_code == 400
+    assert spine.collection.docs == [], "a refused edit left a provisional product"
+    assert audit.rows == [] and repo.updates == []
+
+
+def test_an_edit_that_lost_the_race_creates_no_typed_in_product(monkeypatch):
+    """Round 6 open item 2: the typed-in product used to be written before the
+    compare-and-set. A colleague who sent the draft while the edit ran left a
+    409, an unchanged order and an orphan provisional Vogue with its audit row.
+    The product is now written only after the order write succeeds."""
+    def send(repo):  # what send_po writes
+        repo.update("PO1", {"status": "SENT", "sent_by": "mgr_other"})
+
+    repo = _wire_racing(monkeypatch, _po(), send)
+    spine = _real_spine(monkeypatch)
+    audit = v.get_audit_repository()
+    body = _edit_body([
+        {"new_product": dict(_VOGUE), "quantity": 1, "unit_price": 2000},
+        {"new_product": {**_VOGUE, "brand": "Oakley", "model": "OX8046"},
+         "quantity": 1, "unit_price": 2500},
+    ])
+    with pytest.raises(HTTPException) as e:
+        _run(v.update_po("PO1", body, _user()))
+    assert e.value.status_code == 409
+    assert repo.race is None, "the send never landed in the window"
+    assert spine.collection.docs == [], "a lost edit left a provisional product"
+    assert audit.rows == []
+    doc = repo.collection.docs[0]
+    assert [(i["product_id"], i["quantity"]) for i in doc["items"]] == [("P1", 2), ("P2", 3)]
+
+
+def test_a_saved_edit_writes_the_typed_in_product_under_the_lines_id(monkeypatch):
+    repo, audit = _wire(monkeypatch, _po())
+    spine = _real_spine(monkeypatch)
+    body = _edit_body([
+        {"new_product": dict(_VOGUE), "quantity": 1, "unit_price": 2000},
+        # The same frame typed twice in one edit: one product, not two.
+        {"new_product": dict(_VOGUE), "quantity": 2, "unit_price": 2000},
+    ])
+    _run(v.update_po("PO1", body, _user()))
+    assert len(spine.collection.docs) == 1
+    prod = spine.collection.docs[0]
+    assert prod["provisional"] is True and prod["is_active"] is False
+    lines = repo.pos["PO1"]["items"]
+    assert [i["product_id"] for i in lines] == [prod["product_id"]] * 2
+    assert [i["sku"] for i in lines] == [prod["sku"]] * 2
+    actions = [r["action"] for r in audit.rows]
+    assert actions.index("purchase_order.edit") < actions.index("product.created")
+
+
+def test_a_product_made_meanwhile_is_reused_not_left_dangling(monkeypatch):
+    """Someone creates the identical frame between the check and the write:
+    the door answers 409 and the stored line is pointed at that product, so
+    the order never names a product the spine does not hold."""
+    from database.repositories.product_repository import ProductRepository
+
+    repo, _ = _wire(monkeypatch, _po())
+    spine = _real_spine(monkeypatch)
+    real_find = ProductRepository.find_by_identity_key
+    calls = {"n": 0}
+
+    def find(self, key):
+        calls["n"] += 1
+        if calls["n"] == 2:  # the door's own pre-check, after the order write
+            self.collection.insert_one(
+                {"_id": "RIVAL", "product_id": "RIVAL", "sku": "RIVAL-SKU",
+                 "identity_key": key}
+            )
+        return real_find(self, key)
+
+    monkeypatch.setattr(ProductRepository, "find_by_identity_key", find)
+    _run(v.update_po("PO1", _typed_in_vogue_body(), _user()))
+    assert [d["product_id"] for d in spine.collection.docs] == ["RIVAL"]
+    line = repo.pos["PO1"]["items"][0]
+    assert (line["product_id"], line["sku"]) == ("RIVAL", "RIVAL-SKU")
+
+
 def test_two_line_cancels_at_once_never_lose_one(monkeypatch):
     def colleague_cancels_p1(repo):  # a finished line cancel, by someone else
         items = copy.deepcopy(repo.collection.docs[0]["items"])
