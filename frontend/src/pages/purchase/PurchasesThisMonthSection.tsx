@@ -231,7 +231,10 @@ function Caption({ report }: { report: Report }) {
 
 /** What the figures are and what they leave out -- only what is true of THIS
  *  body: its as-of day, its shop scope (no word of an All stores view to a
- *  login that cannot open one), and the totals' rounding. */
+ *  login that cannot open one), and the totals' rounding. Two rules always
+ *  hold: Received is units put into stock, each in its own month (never a
+ *  line held for cataloguing); and no return door writes the supplier ledger
+ *  yet, so a return's credit lowers owed only once booked as a debit note. */
 function Footnote({ report, shown, canPick }: { report: Report; shown: Figures; canPick: boolean }) {
   const asOf = report.as_of;
   const unpriced = report.unpriced_receipt_lines ?? 0;
@@ -244,9 +247,12 @@ function Footnote({ report, shown, canPick }: { report: Report; shown: Figures; 
       Billed, paid and owed are the supplier ledger's figures; owed is the balance as at{' '}
       {asOf ? formatDateIST(asOf) : 'the end of the month'}
       {asOf && (asOf === lastDay(report.month) ? ' (the end of the month)' : ' (today: the month is not over)')}, and
-      next due the earliest due date still owed then. Received is valued at the order's price incl. GST (an order
-      line with no GST rate counts without GST, as its bill draft does), or at the receipt's own price for goods on
-      no order; receipts with no price count 0
+      next due the earliest due date still owed then. A return's credit (a vendor-return credit note, an RMA credit,
+      an RTV debit note) lowers owed only once it is recorded as a debit note on the supplier (Cash Flow &amp;
+      Payables, Debit note). Received is the goods put into stock, each in the month it went in: a line held back at
+      receiving until its product is catalogued counts in the month it is added to stock. It is valued at the order's
+      price incl. GST (an order line with no GST rate counts without GST, as its bill draft does), or at the
+      receipt's own price for goods on no order; receipts with no price count 0
       {unpriced > 0 && ` (${unpriced} receipt line${unpriced === 1 ? '' : 's'} in this report)`}.{' '}
       {report.store_id ? (
         <>

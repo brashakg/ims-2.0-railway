@@ -1,8 +1,10 @@
 """Purchases this month (audit F56, owner ruling 2026-09-28).
 
 One row per vendor: what we ORDERED (orders sent in the month), RECEIVED
-(accepted goods incl. GST at the order's price, else the receipt line's own
-price -- see _received_line), were BILLED, PAID, still OWE on the as-of day
+(goods PUT INTO STOCK in the month -- each unit in the month receiving minted
+it, never a line held back for cataloguing, see _put_in_stock -- incl. GST at
+the order's price, else the receipt line's own price -- see _received_line),
+were BILLED, PAID, still OWE on the as-of day
 (the month's end, today for the month we are in), and the NEXT DUE date on
 that day. Billed / paid / owed are the supplier ledger's own rows
 (ap_engine.build_ledger) over the one row rule every payable screen reads
@@ -54,8 +56,8 @@ def _month_of(value) -> str:
     return ist_date_str_from_stored(value)[:7]
 
 
-def _find(db, coll: str, flt: dict) -> list:
-    return list(db.get_collection(coll).find(flt, {"_id": 0}))
+def _find(db, coll: str, flt: dict, fields: Optional[dict] = None) -> list:
+    return list(db.get_collection(coll).find(flt, {"_id": 0, **(fields or {})}))
 
 
 def _money(value) -> float:
@@ -89,6 +91,59 @@ def _received_line(gi: dict, po: Optional[dict]) -> Optional[tuple]:
         rate = gi.get("gst_rate")
     rate = line["gst_rate"] if rate is None else _money(rate)
     return line["qty"], _money(gi.get("unit_price")), rate
+
+
+def _accepted_qty(gi: dict) -> int:
+    try:
+        return max(int(gi.get("accepted_qty", 0) or 0), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _put_in_stock(grn: dict, units: list, month: str) -> dict:
+    """{receipt line index: units that line put INTO STOCK in `month`}.
+
+    The truth is the stock itself. grn_accept mints one stock_units row per
+    unit it puts on the shelf (source_type GRN, source_id = the receipt,
+    grn_line_index = its line), created_at = the moment it went in. A line
+    HELD at receiving (product not yet catalogued: unresolved_lines) mints
+    nothing, so it counts nothing until a re-accept adds it -- in the month
+    of that re-accept. The receipt's own accepted_at cannot say this: every
+    accept, the re-accept included, overwrites it, which used to move a
+    whole receipt (the lines received a month earlier too) into the
+    re-accept's month and change a closed month's Received.
+
+    A unit minted before units carried their line (no grn_line_index) goes
+    on that receipt's lines of the same product, in line order, up to each
+    line's accepted quantity. A line never counts more than it accepted.
+
+    A receipt with NO unit on record (one accepted before units named their
+    receipt) falls back on its own word: every line not held back, in the
+    month it was accepted."""
+    items = [gi if isinstance(gi, dict) else {} for gi in grn.get("items") or []]
+    if not units:
+        if _month_of(grn.get("accepted_at")) != month:
+            return {}
+        held = {h.get("product_id") for h in grn.get("unresolved_lines") or [] if isinstance(h, dict)}
+        return {i: _accepted_qty(gi) for i, gi in enumerate(items) if gi.get("product_id") not in held}
+    by_line: dict = {}
+    unplaced: dict = {}
+    for u in units:
+        idx = u.get("grn_line_index")
+        when = _month_of(u.get("created_at"))
+        if isinstance(idx, int) and not isinstance(idx, bool) and 0 <= idx < len(items):
+            by_line.setdefault(idx, []).append(when)
+        else:
+            unplaced.setdefault(u.get("product_id"), []).append(when)
+    for pid, months in unplaced.items():
+        months.sort()
+        for i, gi in enumerate(items):
+            room = _accepted_qty(gi) - len(by_line.get(i, ())) if gi.get("product_id") == pid else 0
+            if room > 0 and months:
+                by_line.setdefault(i, []).extend(months[:room])
+                del months[:room]
+    # Earliest first, so a line over its accepted quantity drops its latest.
+    return {i: sorted(m)[: _accepted_qty(items[i])].count(month) for i, m in by_line.items()}
 
 
 def _owed(rows: tuple) -> float:
@@ -167,24 +222,43 @@ async def purchases_this_month(
         if _month_of(po.get("sent_at") or po.get("created_at")) == month:
             row(po.get("vendor_id"))["ordered"] += float(po.get("total_amount") or po.get("total") or 0)
 
-    # RECEIVED: goods accepted this month, incl. GST, at the price _received_line
-    # gives each accepted line (the order's, else the receipt line's own). A
-    # line with no price anywhere counts 0 and is counted in
-    # unpriced_receipt_lines, so the screen can say so.
+    # RECEIVED: the units each receipt put INTO STOCK this month
+    # (_put_in_stock), incl. GST, at the price _received_line gives the line
+    # (the order's, else the receipt line's own). A line with no price anywhere
+    # counts 0 and is counted in unpriced_receipt_lines, so the screen can say
+    # so. A receipt can only have put units in stock up to its LAST accept
+    # (accepted_at, rewritten by every accept), so one last accepted before
+    # this month is out -- unless it still waits on cataloguing
+    # (PARTIALLY_ACCEPTED): a re-accept that stopped half-way can have added
+    # units without restamping it.
     grns = [
         g
         for g in _find(db, "grns", {**shop, "status": {"$in": list(_ACCEPTED)}})
-        if _month_of(g.get("accepted_at")) == month
+        if g.get("status") == "PARTIALLY_ACCEPTED" or _month_of(g.get("accepted_at")) >= month
     ]
+    units: dict = {}
+    grn_ids = [g.get("grn_id") for g in grns if g.get("grn_id")]
+    if grn_ids:
+        for u in _find(
+            db,
+            "stock_units",
+            {"source_type": "GRN", "source_id": {"$in": grn_ids}},
+            {"source_id": 1, "grn_line_index": 1, "product_id": 1, "created_at": 1, "serial_tracked": 1},
+        ):
+            # A serial captured against a receipt (serial_tracking) is a row of
+            # its own, not one the receipt's accept minted: never counted.
+            if not u.get("serial_tracked"):
+                units.setdefault(u.get("source_id"), []).append(u)
     po_ids = list({g.get("po_id") for g in grns if g.get("po_id")})
     pos_by_id = {p.get("po_id"): p for p in _find(db, "purchase_orders", {"po_id": {"$in": po_ids}})}
     for g in grns:
         po = pos_by_id.get(g.get("po_id"))
-        for gi in g.get("items") or []:
-            counted = _received_line(gi, po)
+        items = g.get("items") or []
+        for i, qty in _put_in_stock(g, units.get(g.get("grn_id")) or [], month).items():
+            counted = _received_line(items[i], po) if qty > 0 else None
             if counted is None:
                 continue
-            qty, price, rate = counted
+            _, price, rate = counted
             if price <= 0:
                 body["unpriced_receipt_lines"] += 1
                 continue

@@ -352,3 +352,27 @@ describe('Purchases this month says what its figures are', () => {
     expect(footnote()).toContain('count under All stores only.');
   });
 });
+
+describe('Purchases this month says what Received and owed leave out (review r2 #3, #5)', () => {
+  it('#3: Received is the goods put into stock, a held line in the month it is added', async () => {
+    roles = ['ADMIN'];
+    serve({ ...REPORT, store_id: null, as_of: '2026-09-30', unassigned_owed: 0 });
+    open();
+    await screen.findByText('Jharkhand Optical');
+    expect(footnote()).toContain('Received is the goods put into stock, each in the month it went in');
+    expect(footnote()).toContain(
+      'a line held back at receiving until its product is catalogued counts in the month it is added to stock',
+    );
+  });
+
+  it('#5: a return lowers owed only once it is recorded as a debit note on the supplier', async () => {
+    roles = ['ACCOUNTANT'];
+    serve({ ...REPORT, store_id: 'BV-PUN-01', as_of: '2026-09-30', unassigned_owed: null });
+    open();
+    await screen.findByText('Jharkhand Optical');
+    expect(footnote()).toContain(
+      "A return's credit (a vendor-return credit note, an RMA credit, an RTV debit note) lowers owed only once " +
+        'it is recorded as a debit note on the supplier (Cash Flow & Payables, Debit note).',
+    );
+  });
+});

@@ -1079,3 +1079,206 @@ def test_r4_the_money_in_no_shop_is_named_and_the_shops_add_up(round4):
 def test_r4_the_shops_add_up_in_the_base_world_with_nothing_unplaced(world):
     """Every bill and every rupee in the base world has a shop: 0 in no shop."""
     assert _report(world, ADMIN, month="2026-09")["unassigned_owed"] == pytest.approx(0.0)
+
+
+# ============================================================================
+# Round 5 (review r2 #3): Received is what went INTO STOCK, in the month it
+# went in -- never a line held back for cataloguing, and a re-accept never
+# moves a closed month's receipts
+# ============================================================================
+
+from datetime import datetime, timezone  # noqa: E402
+
+V_HOLD = "V-HOLD"  # PO-H: 1 x P-CAT (catalogued) + 2 x P-NEW (not yet), 1000 + 12%
+
+
+class _Clock(datetime):
+    """datetime.now() on the receiving box (naive UTC), set by the test."""
+
+    at = datetime(2026, 9, 25, 6, 0, 0)
+
+    @classmethod
+    def now(cls, tz=None):
+        return cls.at if tz is None else cls.at.replace(tzinfo=timezone.utc).astimezone(tz)
+
+
+def _catalogued(pid: str) -> dict:
+    """A catalogue-complete frame with its cost already known (nothing to promote)."""
+    return {
+        "product_id": pid, "category": "FRAME", "catalog_status": "ACTIVE",
+        "attributes": {"brand_name": "RB", "model_no": "M-" + pid, "colour_code": "BLK"},
+        "mrp": 5000.0, "offer_price": 4500.0, "hsn_code": "9003", "gst_rate": 5.0,
+        "cost_price": 1000.0, "cost_source": "TEST",
+    }
+
+
+class _Spine:
+    """The products spine receiving checks: P-NEW joins it on 'Catalog now'."""
+
+    def __init__(self, *pids):
+        self.products = {p: _catalogued(p) for p in pids}
+
+    def find_by_id(self, pid):
+        doc = self.products.get(pid)
+        return dict(doc) if doc else None
+
+    def update(self, pid, fields):
+        self.products.get(pid, {}).update(fields)
+        return pid in self.products
+
+
+def _seed_held(db) -> None:
+    db["vendors"].insert_one({"vendor_id": V_HOLD, "legal_name": "Held Frames", "trade_name": "Held Frames"})
+    db["purchase_orders"].insert_one({
+        "po_id": "PO-H", "po_number": "PO-H", "vendor_id": V_HOLD, "delivery_store_id": DHN,
+        "status": "SENT", "total_amount": 3360.0, "sent_at": "2026-09-02T10:00:00",
+        "created_at": "2026-09-02T08:00:00",
+        "items": [
+            {"product_id": "P-CAT", "quantity": 1, "unit_price": 1000.0, "tax_rate": 12.0},
+            {"product_id": "P-NEW", "quantity": 2, "unit_price": 1000.0, "tax_rate": 12.0},
+        ],
+    })
+    db["grns"].insert_one({
+        "_id": "GRN-H", "grn_id": "GRN-H", "grn_number": "GRN-H", "vendor_id": V_HOLD,
+        "store_id": DHN, "po_id": "PO-H", "status": "PENDING", "created_at": "2026-09-25T05:00:00",
+        "items": [
+            {"product_id": "P-CAT", "received_qty": 1, "accepted_qty": 1, "rejected_qty": 0},
+            {"product_id": "P-NEW", "received_qty": 2, "accepted_qty": 2, "rejected_qty": 0},
+        ],
+    })
+
+
+@pytest.fixture
+def held(monkeypatch):
+    """The real accept engine (grn_accept) over its own Mongo, clock in hand."""
+    from database.repositories import base_repository
+    from database.repositories.product_repository import StockRepository
+
+    from api.routers.vendors import grn_accept, grn_accept_lock
+
+    gen = _fresh_db(_seed_held)
+    db = next(gen)
+    world = _make_world(db, monkeypatch)
+    spine = _Spine("P-CAT")
+    monkeypatch.setenv("PM_MIRROR_ENABLED", "")
+    monkeypatch.setattr(vendors_pkg, "get_stock_repository", lambda: StockRepository(db["stock_units"]))
+    monkeypatch.setattr(vendors_pkg, "get_product_repository", lambda: spine)
+    for mod in (grn_accept, grn_accept_lock, base_repository):
+        monkeypatch.setattr(mod, "datetime", _Clock)
+    _today(monkeypatch, "2026-10-02")
+    yield world, db, spine
+    next(gen, None)
+
+
+def _accept(day_utc: datetime) -> dict:
+    import asyncio
+
+    _Clock.at = day_utc
+    return asyncio.new_event_loop().run_until_complete(vendors_pkg.accept_grn("GRN-H", ADMIN))
+
+
+def _received(world, month: str, **params) -> float:
+    return _rows(_report(world, ADMIN, month=month, **params)).get(V_HOLD, {}).get("received", 0.0)
+
+
+def test_r5_received_is_what_went_into_stock_in_the_month_it_went_in(held):
+    """#3: GRN-H is accepted on 25 Sep with P-NEW not yet catalogued, so only
+    P-CAT goes into stock (PARTIALLY_ACCEPTED, P-NEW held). September read
+    Received Rs 3,360 -- Rs 2,240 of it for 2 frames not in stock. On 2 Oct,
+    after 'Catalog now', the receipt is accepted again; that rewrote
+    accepted_at, so September fell to Rs 0 and October read Rs 3,360: a closed
+    month changed and the frame really received in September left it."""
+    world, db, spine = held
+    first = _accept(datetime(2026, 9, 25, 6, 0, 0))  # 11:30 IST, 25 Sep
+    assert (first["grn_status"], first["units_added"]) == ("PARTIALLY_ACCEPTED", 1), first
+    assert [h["product_id"] for h in first["unresolved_lines"]] == ["P-NEW"]
+    _open(
+        _received(world, "2026-09") == pytest.approx(1120.0),
+        f"F56: September Received {_received(world, '2026-09')} counts the 2 held frames (in stock: 1120)",
+    )
+    assert _received(world, "2026-09", store_id=DHN) == pytest.approx(1120.0)
+    assert _rows(_report(world, ADMIN, month="2026-09"))[V_HOLD]["ordered"] == pytest.approx(3360.0)
+
+    spine.products["P-NEW"] = _catalogued("P-NEW")  # 'Catalog now'
+    again = _accept(datetime(2026, 10, 2, 6, 0, 0))
+    assert (again["grn_status"], again["units_added"]) == ("ACCEPTED", 2), again
+    stored = db["grns"].find_one({"grn_id": "GRN-H"})
+    assert str(stored["accepted_at"]).startswith("2026-10-02") and stored["unresolved_lines"] == []
+    _open(
+        (_received(world, "2026-09"), _received(world, "2026-10")) == (1120.0, 2240.0),
+        "F56: after the re-accept September Received is "
+        f"{_received(world, '2026-09')} and October {_received(world, '2026-10')} (want 1120 and 2240)",
+    )
+    # Pune never received any of it.
+    assert _received(world, "2026-09", store_id=PUN) == 0.0
+
+
+@pytest.fixture
+def stocked(monkeypatch):
+    """Receipts written by hand, each with the stock_units its accepts minted."""
+
+    def seed(db):
+        db["vendors"].insert_one({"vendor_id": V_HOLD, "legal_name": "Held Frames", "trade_name": "Held Frames"})
+        db["purchase_orders"].insert_one({
+            "po_id": "PO-S", "po_number": "PO-S", "vendor_id": V_HOLD, "delivery_store_id": DHN,
+            "status": "PARTIALLY_RECEIVED", "total_amount": 0.0, "sent_at": "2026-07-01T10:00:00",
+            "items": [
+                {"product_id": "P-A", "quantity": 9, "unit_price": 100.0, "tax_rate": 0.0},
+                {"product_id": "P-B", "quantity": 9, "unit_price": 1000.0, "tax_rate": 0.0},
+            ],
+        })
+
+        def grn(grn_id, status, accepted_at, items, unresolved=()):
+            return {"grn_id": grn_id, "grn_number": grn_id, "vendor_id": V_HOLD, "store_id": DHN,
+                    "po_id": "PO-S", "status": status, "accepted_at": accepted_at,
+                    "unresolved_lines": [{"product_id": p, "accepted_qty": q, "reason": "not_catalogued"}
+                                         for p, q in unresolved],
+                    "items": [{"product_id": p, "accepted_qty": q} for p, q in items]}
+
+        def unit(grn_id, pid, at, line=None, **extra):
+            doc = {"source_type": "GRN", "source_id": grn_id, "product_id": pid, "created_at": at,
+                   "store_id": DHN, "status": "AVAILABLE", **extra}
+            if line is not None:
+                doc["grn_line_index"] = line
+            return doc
+
+        db["grns"].insert_many([
+            # Held on 10 Sep, nothing in stock_units at all (a receipt from
+            # before units named it): its own word, held line left out.
+            grn("G-OLD", "PARTIALLY_ACCEPTED", "2026-09-10T06:00:00", [("P-A", 1), ("P-B", 2)],
+                unresolved=[("P-B", 2)]),
+            # Accepted 12 Sep before units carried their line: two lines of
+            # P-A, product-keyed mint put 2 units in; a serial captured
+            # against it later is a row of its own.
+            grn("G-LEG", "ACCEPTED", "2026-09-12T06:00:00", [("P-A", 1), ("P-A", 2)]),
+            # Partly accepted 25 Sep; a re-accept on 3 Oct minted P-B's 2 units
+            # then stopped before restamping accepted_at.
+            grn("G-HALF", "PARTIALLY_ACCEPTED", "2026-09-25T06:00:00", [("P-A", 1), ("P-B", 2)],
+                unresolved=[("P-B", 2)]),
+        ])
+        db["stock_units"].insert_many([
+            unit("G-LEG", "P-A", datetime(2026, 9, 12, 6, 0)),
+            unit("G-LEG", "P-A", datetime(2026, 9, 12, 6, 0)),
+            unit("G-LEG", "P-A", "2026-09-20T06:00:00", serial_tracked=True, serial="SN-1"),
+            unit("G-HALF", "P-A", datetime(2026, 9, 25, 6, 0), line=0, line_unit_seq=0),
+            unit("G-HALF", "P-B", datetime(2026, 10, 3, 6, 0), line=1, line_unit_seq=0),
+            unit("G-HALF", "P-B", datetime(2026, 10, 3, 6, 0), line=1, line_unit_seq=1),
+        ])
+
+    gen = _fresh_db(seed)
+    db = next(gen)
+    _today(monkeypatch, "2026-10-05")
+    yield _make_world(db, monkeypatch)
+    next(gen, None)
+
+
+def test_r5_received_counts_units_in_stock_never_held_lines_or_serial_rows(stocked):
+    """September: G-OLD's P-A 100 (its held P-B 2000 is not stock), G-LEG's two
+    minted units 200 (the serial row is not a third), G-HALF's P-A 100 -> 400.
+    October: G-HALF's P-B 2000, put in on 3 Oct though its accepted_at still
+    says 25 Sep."""
+    _open(
+        (_received(stocked, "2026-09"), _received(stocked, "2026-10")) == (400.0, 2000.0),
+        f"F56: Received Sep {_received(stocked, '2026-09')} / Oct {_received(stocked, '2026-10')}, "
+        "want 400 / 2000 (only units put into stock, each in its month)",
+    )
