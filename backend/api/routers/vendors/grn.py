@@ -1,5 +1,6 @@
 """Goods receipt list, document upload/download and duplicate detection."""
 
+from ...services.ap_engine import GRN_SUBTYPE_NO_PO
 from ._shared import (
     ALLOWED_MIME_TYPES,
     Depends,
@@ -294,6 +295,47 @@ def _find_duplicate_standard_grn(
         if r.get("grn_subtype") == GRN_SUBTYPE_DC:
             continue
         if _normalize_invoice_no(r.get("vendor_invoice_no")) == norm:
+            return r
+    return None
+
+
+def _find_duplicate_no_po_grn(grn_repo, grn, store_id, exclude_grn_id=None):
+    """D14: a live "Bought without PO" receipt already holding this bill at
+    this store -- the same uploaded bill photo (a retried or double-pressed
+    post sends the same file), or the same walk-in dealer's same bill number
+    (dealer name and number both case/punctuation-folded). A dealer with no
+    supplier record has no vendor_id, so the guard above finds nothing for it;
+    a supplier on file is covered there. The atomic twin is the
+    uniq_nopo_bill_photo partial unique index. A VOIDed receipt frees its bill.
+
+    ponytail: linear scan over the first 500 of one store's no-PO receipts;
+    index dealer + number if a shop ever logs thousands.
+    """
+    if grn_repo is None or grn.grn_subtype != GRN_SUBTYPE_NO_PO:
+        return None
+    photo = str(grn.attachment_file_id or "").strip()
+    norm = _normalize_invoice_no(grn.vendor_invoice_no)
+    dealer = _normalize_invoice_no(grn.dealer_name)
+    try:
+        rows = (
+            grn_repo.find_many(
+                {"grn_subtype": GRN_SUBTYPE_NO_PO, "store_id": store_id}, limit=500
+            )
+            or []
+        )
+    except Exception:  # noqa: BLE001 - fail-soft, like the guard above
+        rows = []
+    for r in rows:
+        if r.get("grn_id") == exclude_grn_id or r.get("status") == "VOID":
+            continue
+        if photo and r.get("attachment_file_id") == photo:
+            return r
+        if (
+            norm
+            and dealer
+            and _normalize_invoice_no(r.get("dealer_name")) == dealer
+            and _normalize_invoice_no(r.get("vendor_invoice_no")) == norm
+        ):
             return r
     return None
 
