@@ -1255,7 +1255,8 @@ def _post_credit_and_restock(
             "restock_store_reason": _RESTOCK_ROUTE_UNRESOLVED,
         }
         _raise_restock_blocked_task(
-            return_id or refund_id, order_id, billing_store, units, None, unread=unread
+            return_id or refund_id, order_id, billing_store, units, None, unread=unread,
+            historical=None if unread == "the order" else bool(order.get("historical")),
         )
     else:
         try:
@@ -1383,6 +1384,8 @@ def _post_credit_and_restock(
         # A historical order: booked, and a task hands the frames to stock-in.
         "stock_in_task": restock_result.get("stock_in_task"),
         "stock_in_store_id": restock_result.get("stock_in_store_id"),
+        # Its restock left open is never "put back" by a re-run: the screen says so.
+        "historical": bool(order.get("historical")),
     }
 
 
@@ -1600,8 +1603,12 @@ def _stock_in_task(order: Dict[str, Any], lines: List[Any], held: _Held, refund_
     phantom frame came from there). ONE task per booking -- the booking is
     taken once, so a second door books and raises nothing -- for the store
     manager of the shop the frame goes back to (the restock router's own
-    answer) to add it through stock-in. Nothing restocked, applied: there is
-    nothing left for a door to retry."""
+    answer) to add it through stock-in, and closes the blocked-restock task
+    of a blip that sent a person to re-run it. Nothing restocked, applied:
+    there is nothing left for a door to retry. A task that did not land is
+    no booking: it is released and the restock stays open, so the next door
+    books it and raises the task again (kept, nothing recorded the frame and
+    every later door answered "already done")."""
     from ..routers import returns as _r
 
     out: Dict[str, Any] = {"applied": True, "restocked": [], "restock_stock_ids": [],
@@ -1613,17 +1620,16 @@ def _stock_in_task(order: Dict[str, Any], lines: List[Any], held: _Held, refund_
                                      processing_store_id, order=order)["store_id"]
     ref = order.get("order_number") or order.get("order_id")
     items = ", ".join(sorted({str(ln.sku or ln.product_id) for ln in lines if ln.restock}))
-    task = None
-    # ponytail: best-effort like every system task (BaseRepository.create
-    # swallows its own insert error); the booking stands either way.
+    task = tasks = None
     try:
         from ..dependencies import get_task_repository, get_user_repository
         from .task_triggers import create_system_task
 
+        tasks = get_task_repository()
         users = get_user_repository()
         managers = (users.find_managers(shop) or []) if users is not None and shop else []
         task = create_system_task(
-            get_task_repository(),
+            tasks,
             title=f"Order {ref}: add {units:g} returned frame(s) through stock-in",
             description=(
                 f"Shopify refund {refund_id} on order {ref} is booked: {units:g} unit(s) "
@@ -1645,7 +1651,30 @@ def _stock_in_task(order: Dict[str, Any], lines: List[Any], held: _Held, refund_
     except Exception:  # noqa: BLE001
         logger.warning("[SHOPIFY_REFUND] stock-in task failed for refund=%s", refund_id,
                        exc_info=True)
-    return {**out, "stock_in_task": (task or {}).get("task_id"), "stock_in_store_id": shop}
+    if not task:
+        _release_unlanded(order, held, {}, refund_id)
+        return {**out, "applied": False, "reason": "stock_in_task_not_saved"}
+    _close_blocked_task(tasks, refund_id)
+    return {**out, "stock_in_task": task.get("task_id"), "stock_in_store_id": shop}
+
+
+def _close_blocked_task(tasks: Any, refund_id: str) -> None:
+    """Close the blocked-restock task (returns._raise_restock_blocked_task) of
+    this refund's return: the re-run it asked for has booked the frames, and
+    the stock-in task now carries them. Never raises."""
+    try:
+        from ..routers import returns as _r
+
+        coll = _r._returns_coll()
+        doc = coll.find_one({"shopify_refund_id": refund_id}) if coll is not None else None
+        ref = f"return_restock_blocked:{(doc or {}).get('return_id') or refund_id}"
+        for t in tasks.find_many({"source_ref": ref}) or []:
+            if str(t.get("status") or "").upper() in ("OPEN", "IN_PROGRESS", "ESCALATED"):
+                tasks.complete_task(t["task_id"], "Re-run done: the return is booked and a "
+                                    "stock-in task asks the store manager to add the frame(s).")
+    except Exception:  # noqa: BLE001
+        logger.warning("[SHOPIFY_REFUND] blocked task not closed for refund=%s", refund_id,
+                       exc_info=True)
 
 
 def goods_back(db, review: Dict[str, Any], *, user_id: Optional[str]) -> Dict[str, Any]:
@@ -1735,8 +1764,10 @@ def goods_back(db, review: Dict[str, Any], *, user_id: Optional[str]) -> Dict[st
     except Exception:  # noqa: BLE001
         logger.warning("[SHOPIFY_REFUND] goods-back stamp failed for review=%s", review_id,
                        exc_info=True)
-    if out["stock_in_task"]:
+    # A historical order's frame is booked, never put back in stock: by this
+    # press (its task) or by the door that booked it first (that door's task).
+    if out["stock_in_task"] or (out["restock_applied"] and order.get("historical")):
         return {"status": "stock_in", **out}
     if out["restock_applied"]:
         return {"status": "restocked", **out}
-    return {"status": "not_restocked", "reason": reason, **out}
+    return {"status": "not_restocked", "reason": result.get("reason") or reason, **out}

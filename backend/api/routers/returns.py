@@ -1997,13 +1997,18 @@ def _raise_restock_blocked_task(
     units: List[Dict[str, Any]],
     processing_store_id: Optional[str] = None,
     unread: Optional[str] = None,
+    historical: Optional[bool] = False,
 ) -> None:
     """Put a BLOCKED restock in front of a human, with its real cause and ONE
     action. `unread`: what IMS could not read just now (the order, its SOLD
     units, its earlier returns) -- a blip, so the action is to re-run the
     restock, which reads again; None: no physical shop could be resolved.
     Never "add them by hand and re-run": the re-run puts back a unit already
-    added by hand (two stock rows for one frame).
+    added by hand (two stock rows for one frame). `historical`: the order is
+    our Shopify order-history import (True), a live order (False), or could
+    not be read (None) -- a historical order's re-run puts nothing back: it
+    books the frames and raises the stock-in task, which closes this one
+    (shopify_refund._stock_in_task).
 
     Without this the fail-loud branch is one Railway log line while real goods
     sit on the counter with no stock row -- developer-only recovery on a live
@@ -2023,12 +2028,28 @@ def _raise_restock_blocked_task(
                 }
             )
         )
-        if unread:
+        rerun = ("re-run the restock once IMS reads again - press Goods back on "
+                 "its refund in Online Store > Refund reviews, or ask the IMS admin "
+                 "to retry it")
+        stock_in = ("adds no stock row: it books the return and raises one task "
+                    "for the shop's store manager to add the frame(s) through "
+                    "stock-in, and closes this task")
+        never = "Never add these units by hand as well - IMS would count them twice."
+        if unread and historical:
+            cause = (f"IMS could not read {unread} just now, so it booked nothing "
+                     "rather than guess")
+            action = (f"{rerun}. This order was imported from Shopify's order "
+                      f"history, from before IMS kept its stock, so the re-run {stock_in}")
+            never = "Add nothing by hand before that stock-in task."
+        elif unread:
             cause = (f"IMS could not read {unread} just now, so it put nothing "
                      "back rather than guess")
-            action = ("re-run the restock once IMS reads again - press Goods back "
-                      "on its refund in Online Store > Refund reviews, or ask the "
-                      "IMS admin to retry it; IMS then puts each unit back once")
+            action = f"{rerun}; IMS then puts each unit back once"
+            if historical is None:
+                action += ("; on an order imported from Shopify's order history "
+                           f"(older than IMS stock) the re-run {stock_in}")
+                never = ("Never add these units by hand before the re-run - IMS "
+                         "would count them twice.")
         else:
             cause = (f"the order bills to the online store {store_id}, which holds "
                      "no stock, and no physical shop could be resolved to receive them")
@@ -2041,8 +2062,7 @@ def _raise_restock_blocked_task(
             description=(
                 f"The refund for return {return_id} (order {order_id}) is "
                 f"recorded, but its returned goods were NOT put back in stock: "
-                f"{cause}. Do this: {action}. Never add these units by hand "
-                f"as well - IMS would count them twice. "
+                f"{cause}. Do this: {action}. {never} "
                 f"Items: {lines or 'see the return'}."
             ),
             priority="P1",
@@ -3825,6 +3845,7 @@ async def retry_restock(
             blocked_units,
             current_user.get("active_store_id"),
             unread="the order",
+            historical=None,
         )
         blocked_update = {
             "restocked": _merge_restocked(claim.get("restocked"),
@@ -3972,12 +3993,16 @@ async def retry_restock(
         "restock_store_id": update["restock_store_id"],
         "restock_store_ids": update["restock_store_ids"],
         "stock_in_task": restock_result.get("stock_in_task"),
+        # A historical order's frame is booked, never put back in stock: by
+        # this retry (its task) or by the door that booked it first.
         "message": (
             "Booked. This order predates IMS stock: a task asks the shop's store "
             "manager to add the frame(s) through stock-in"
-            if restock_result.get("stock_in_task")
+            if update["restock_applied"] and (retry_order or {}).get("historical")
             else "Restock applied"
             if update["restock_applied"]
+            else "Nothing booked: the stock-in task could not be saved - retry shortly"
+            if restock_result.get("reason") == "stock_in_task_not_saved"
             else "Restock partial - retry again"
         ),
     }

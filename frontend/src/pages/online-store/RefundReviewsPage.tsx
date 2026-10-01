@@ -174,6 +174,7 @@ export default function RefundReviewsPage() {
             return_id?: string | null;
             stock_in_task?: string | null;
             stock_in_store_id?: string | null;
+            historical?: boolean;
           };
           // An idempotent re-confirm returns {status:'duplicate'} with NO
           // restock_applied key. Reading that as `false` would pin the red
@@ -200,6 +201,16 @@ export default function RefundReviewsPage() {
               landed
                 ? `Credit note posted. Stock put back at ${landed}.`
                 : 'Credit note posted and stock restocked.',
+            );
+          } else if (result.historical) {
+            // Owner 2026-10-01: Goods back books a historical frame and a
+            // stock-in task adds it -- never "put back", never "not by hand".
+            toast.warning(
+              `Credit note posted, but the returned frames are not booked yet (${
+                result.return_id || review.review_id
+              }). When they are at the shop, press Goods back on this refund: this order ` +
+                'predates IMS stock, so that adds no stock row - it raises a task for the store ' +
+                'manager to add the frames through stock-in.',
             );
           } else {
             const ref = result.return_id || review.review_id;
