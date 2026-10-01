@@ -889,3 +889,38 @@ def test_r3_parse_date_is_always_naive_ist():
         [{"amount": 1, "created_at": "2026-09-02T00:00:00Z"}],
     )
     assert [r["type"] for r in rows["entries"]] == ["BILL", "DEBIT_NOTE"]
+
+
+# ============================================================================
+# Round 3, problem 4: the Suppliers balances keep a login's own shop even when
+# the request is edited (F63) -- the shop rule is the server's, not the browser's
+# ============================================================================
+
+
+@pytest.mark.parametrize("role", ["ACCOUNTANT", "STORE_MANAGER", "AREA_MANAGER"])
+def test_f63_supplier_balances_keep_a_pune_login_on_pune_with_store_id_dropped(world, role):
+    """The Suppliers tab sends the Purchase shop, but a Pune login that drops
+    ?store_id got every shop: Jharkhand Optical owing 5540, billed 8740 and
+    ordered 17839 -- all of it Dhanbad's. With no store_id it is Pune's share
+    only (resolve_store_scope: the caller's active shop). After #1161 the
+    managers are refused outright, which keeps Dhanbad hidden as well."""
+    resp = world.get("/finance/vendor-payments", _user(role, PUN, [PUN]))
+    assert resp.status_code in (200, 403), resp.text
+    if resp.status_code == 403:  # the payables gate (#1161) refuses a manager
+        assert role != "ACCOUNTANT", resp.text
+        return
+    rows = {r["vendor_id"]: r for r in resp.json()}
+    seen = {vid: (r["balance"], r["total_billed"], r["po_total"]) for vid, r in rows.items()}
+    _open(
+        seen == {VA: (0.0, 0.0, 0.0), VB: (2240.0, 2240.0, 6720.0)},
+        f"F63: a Pune {role} with store_id dropped sees {seen}, not Pune's share only",
+    )
+
+
+def test_f63_supplier_balances_admin_with_no_store_id_sees_every_shop(world):
+    """The same request from an admin is every shop: both ledgers whole, and
+    every order to each supplier (draft and cancelled included) in po_total."""
+    resp = world.get("/finance/vendor-payments", ADMIN)
+    assert resp.status_code == 200, resp.text
+    seen = {r["vendor_id"]: (r["balance"], r["total_billed"], r["po_total"]) for r in resp.json()}
+    assert seen == {VA: (5540.0, 8740.0, 17839.0), VB: (2240.0, 2240.0, 6720.0)}, seen

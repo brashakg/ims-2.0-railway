@@ -196,13 +196,14 @@ async def get_vendor_payments(
     if db is None:
         return []
     # The one supplier-ledger row rule (no transfer mirror bills), narrowed
-    # to the Purchase shop scope when a shop is asked for: the Suppliers tab
-    # obeys its shop filter, and a store-level login can only ask for its own
-    # (resolve_store_scope 403s another). No store_id = every shop (Finance).
+    # by the ONE Purchase shop rule (F63), applied whether or not a shop is
+    # asked for: ADMIN / SUPERADMIN read every shop and may narrow with
+    # ?store_id; every other login keeps its OWN shop -- dropping store_id
+    # gives its active shop, never every shop, and naming another 403s.
     from ...dependencies import resolve_store_scope
     from .cash_flow import _ap_rows
 
-    scope = resolve_store_scope(store_id, current_user) if store_id else None
+    scope = resolve_store_scope(store_id, current_user)
     vendors = list(
         db.get_collection("vendors").find(
             {}, {"_id": 0, "vendor_id": 1, "legal_name": 1, "trade_name": 1, "name": 1}
