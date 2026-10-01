@@ -183,6 +183,9 @@ def _ids(repo, q):
         # A hyphen typed as its own word is spacing, not something to match.
         ("ray - ban", {"P-RB", "P-RB-OLD"}),
         ("CA - 8895", {"P-CAR"}),
+        # Only hyphens and spaces is nothing to look for -- not every product.
+        ("--", set()),
+        ("- -", set()),
         # Colours: the colour word under attributes and the flat colour.
         ("black", {"P-CAR", "P-OAK"}),
         ("g-15", {"P-RB"}),

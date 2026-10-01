@@ -226,7 +226,9 @@ class ProductRepository(BaseRepository):
             ors += [{f: name} for f in self.NAME_SEARCH_FIELDS]
             clauses.append({"$or": ors})
         if not clauses:
-            return extra
+            # Nothing but hyphens and spaces ('--'): nothing to look for, so
+            # no product -- not the whole catalogue.
+            return {"_id": {"$in": []}}
         if extra:
             clauses.append(extra)
         return {"$and": clauses}
