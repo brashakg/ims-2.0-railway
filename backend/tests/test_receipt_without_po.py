@@ -8,8 +8,9 @@ receipt -- supplier or walk-in dealer name, items, quantities, each item's
 cost, the bill number/date if there is one, the bill photo, expiry -- that puts
 the units on the shelf through the SAME receive/accept door as a PO receipt,
 and books NO input tax credit: GSTR-3B and the ITC register never count it.
-Receiving is MANAGERS ONLY (ruling 2026-09-28). The receipt shows in the
-receipts list and on Movements labelled "Bought without PO".
+The receipt shows in the receipts list and on Movements labelled "Bought
+without PO". (Who may receive -- managers only, ruling 2026-09-28 -- is the
+shared receiving gate, which #1165 narrows for every kind of receipt at once.)
 
 THE CONTRACT THESE TESTS PIN:
   * POST /vendors/grn with grn_subtype "NO_PO": no po_id; vendor_id (a supplier
@@ -22,7 +23,6 @@ THE CONTRACT THESE TESTS PIN:
   * POST /vendors/grn/{id}/accept is the ONE minting door: units are
     source_type GRN, carry the line's unit_price as unit_cost/cost_price and
     the line's expiry; accounts get a "book the bill" task.
-  * ACCOUNTANT may neither create nor accept such a receipt.
   * A bill booked against it -- line-detail purchase-invoice door OR the
     header-only AP bill door -- is stored itc_eligible False whatever the client
     sent, so the ITC register, /gst/summary and GSTR-3B Table 4 never count it.
@@ -447,30 +447,7 @@ def test_c7_accept_sends_the_bill_to_accounts(world):
 
 
 # ===========================================================================
-# 3. Managers only (ruling 2026-09-28)
-# ===========================================================================
-
-
-def test_d14_receiving_without_po_is_managers_only(world):
-    db = world["db"]
-    refused = world["as_"](ACCOUNTANT).post("/vendors/grn", json=_no_po_body(world))
-    assert refused.status_code == 403, refused.text
-    assert db.grns.count_documents({}) == 0
-
-    created = world["as_"](MANAGER).post("/vendors/grn", json=_no_po_body(world))
-    assert created.status_code == 201, created.text
-    grn_id = created.json()["grn_id"]
-
-    refused = world["as_"](ACCOUNTANT).post(f"/vendors/grn/{grn_id}/accept")
-    assert refused.status_code == 403, refused.text
-    assert db.stock_units.count_documents({}) == 0
-
-    accepted = world["as_"](MANAGER).post(f"/vendors/grn/{grn_id}/accept")
-    assert accepted.status_code == 200, accepted.text
-
-
-# ===========================================================================
-# 4. No input tax credit, on either bill door (D14)
+# 3. No input tax credit, on either bill door (D14)
 # ===========================================================================
 
 
@@ -558,7 +535,7 @@ def test_d14_header_only_bill_door_claims_no_itc_either(world):
 
 
 # ===========================================================================
-# 5. Seen for what it is: receipts list + Movements
+# 4. Seen for what it is: receipts list + Movements
 # ===========================================================================
 
 

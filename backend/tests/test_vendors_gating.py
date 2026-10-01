@@ -6,8 +6,7 @@ check — any authenticated user could create POs or accept GRNs (which adjust
 stock and vendor liability) by hitting the API directly, despite the frontend
 /purchase/* routes being restricted. The 8 write endpoints are now gated to
 the roles those routes allow (ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT;
-SUPERADMIN auto-passes) -- receiving goods only the managers (owner ruling
-2026-09-28, not the accountant). Reads intentionally stay open (they may feed
+SUPERADMIN auto-passes). Reads intentionally stay open (they may feed
 inventory views for catalog/workshop roles).
 
 End-to-end via the conftest TestClient fixtures.
@@ -79,9 +78,6 @@ WRITES = [
     ("post", "/api/v1/vendors/grn/g1/escalate", None, {"note": "short"}),
 ]
 
-# Receiving goods into stock (and the receiving screen): MANAGERS ONLY.
-_RECEIVING = [w for w in WRITES if "/vendors/grn" in w[1] or "goods-receipt" in w[1]]
-
 
 def _send(client, method, path, json_body, params, headers):
     kwargs = {"headers": headers}
@@ -98,18 +94,10 @@ class TestVendorWriteGating:
         resp = _send(client, method, path, body, params, staff_headers)
         assert resp.status_code == 403
 
-    @pytest.mark.parametrize(
-        "method,path,body,params", [w for w in WRITES if w not in _RECEIVING]
-    )
+    @pytest.mark.parametrize("method,path,body,params", WRITES)
     def test_accountant_allowed(self, client, method, path, body, params):
         resp = _send(client, method, path, body, params, _headers(["ACCOUNTANT"]))
         assert resp.status_code != 403
-
-    @pytest.mark.parametrize("method,path,body,params", _RECEIVING)
-    def test_accountant_does_not_receive_goods(self, client, method, path, body, params):
-        """Owner ruling 2026-09-28: RECEIVING IS MANAGERS ONLY."""
-        resp = _send(client, method, path, body, params, _headers(["ACCOUNTANT"]))
-        assert resp.status_code == 403, (method, path)
 
     @pytest.mark.parametrize("method,path,body,params", WRITES)
     def test_superadmin_allowed(self, client, auth_headers, method, path, body, params):

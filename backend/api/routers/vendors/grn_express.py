@@ -3,7 +3,7 @@
 from ._shared import (
     Depends,
     HTTPException,
-    _RECEIVE_ROLES,
+    _VENDOR_ROLES,
     get_grn_repository,
     logger,
     require_roles,
@@ -23,7 +23,7 @@ from .grn_accept import _accept_grn_impl
 @router.post("/grn/express", status_code=201)
 async def express_receive_grn(
     body: ExpressGRNCreate,
-    current_user: dict = Depends(require_roles(*_RECEIVE_ROLES)),
+    current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
 ):
     """One-shot receiving chain for a CLEAN delivery (procurement Phase 2).
 

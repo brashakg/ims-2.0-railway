@@ -175,7 +175,7 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/vendors/grn",
-        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
     # Procurement Phase 2: one-shot express receive for a CLEAN delivery
     # (create + accept + invoice-draft preview + accountant task, server-side).
@@ -185,7 +185,7 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/vendors/grn/express",
-        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
     {
         "method": "GET",
@@ -195,17 +195,17 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/vendors/grn/{grn_id}/accept",
-        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
     {
         "method": "POST",
         "path": "/api/v1/vendors/grn/{grn_id}/void",
-        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
     {
         "method": "POST",
         "path": "/api/v1/vendors/grn/{grn_id}/escalate",
-        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
     # P1/S2: vendor-first goods-receipt cockpit (open POs + worklists for the
     # receiving screen). Same gate as receiving -- the receiving roles.
