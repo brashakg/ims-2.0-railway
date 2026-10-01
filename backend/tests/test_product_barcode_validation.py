@@ -414,6 +414,48 @@ class TestGtinAttributeOnTheEditDoor:
         saved = mock_db["products"].find_one({"product_id": pid})
         assert not saved["attributes"].get("gtin")
 
+    def test_remove_barcode_clears_every_barcode_the_push_reads(self, mock_db):
+        """Manage Barcode > Remove (attributes.gtin = '') cleared only the twin's
+        gtin; the push falls back to the twin's legacy top-level `barcode`, so
+        it went on sending that code."""
+        from api.services.shopify_push.product_input import (
+            _variants_for_price_push,
+            build_variant_price_inputs,
+            build_removed_metafields,
+        )
+
+        pid = _create("GT-RM")["product_id"]
+        spine = mock_db["products"].find_one({"product_id": pid})
+        twin_id = spine.get("pim_product_id") or pid
+        mock_db["catalog_products"].update_one(
+            {"id": twin_id},
+            {"$set": {"barcode": _VALID_B,
+                      "ecom.shopify_variant_id": "gid://shopify/ProductVariant/1"}},
+        )
+        _update(pid, attributes={"gtin": _VALID_A})
+        _update(pid, attributes={"gtin": ""})
+        twin = mock_db["catalog_products"].find_one({"id": twin_id})
+        assert not twin.get("gtin") and not twin.get("barcode")
+        rows, _ = build_variant_price_inputs(twin, _variants_for_price_push(twin, []))
+        assert "barcode" not in rows[0]
+        # ...and the ims.gtin metafield is deleted on the next push.
+        assert build_removed_metafields(twin) == [{"namespace": "ims", "key": "gtin"}]
+
+    def test_remove_on_a_size_variant_clears_its_row_barcode(self, mock_db):
+        """A size variant's barcode reaches Shopify from its catalog_variants
+        row (gtin, then barcode): Remove clears both."""
+        from api.services.product_master import _mirror_variant_row_update
+
+        mock_db["catalog_variants"].insert_one(
+            {"sku": "CH-1", "gtin": _VALID_A, "barcode": _VALID_B}
+        )
+        _mirror_variant_row_update(
+            current={"sku": "CH-1"}, patch={"attributes": {"gtin": ""}},
+            db=mock_db, mark_dirty=False,
+        )
+        row = mock_db["catalog_variants"].find_one({"sku": "CH-1"})
+        assert row["gtin"] is None and row["barcode"] is None
+
     def test_stock_row_offers_the_gtin_not_the_unit_code(self):
         """Manage Barcode opens pre-filled from the row's `gtin`. It used to be
         pre-filled with the row's `barcode` -- a unit's IMS code such as

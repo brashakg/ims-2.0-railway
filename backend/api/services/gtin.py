@@ -56,6 +56,11 @@ _DIGITS = re.compile(r"^[0-9]+\Z")
 # what makes "8056597720373 8056597720380" collapse to 26 digits -> BADLEN.
 _SEPARATORS = re.compile(r"[\s\-]+")
 
+# The product attributes that hold a MANUFACTURER's barcode: the GTIN that
+# becomes the Shopify variant barcode, and the 'UPC (mfr)' box (a UPC is a
+# GTIN-12). Both are validated as GTINs and both publish as ims.* metafields.
+MANUFACTURER_BARCODE_ATTRIBUTES = ("gtin", "upc")
+
 _RESTRICTED_PREFIXES = frozenset(str(n) for n in range(20, 30))
 _RESTRICTED_UPC_PREFIXES = frozenset("0" + p for p in _RESTRICTED_PREFIXES)
 

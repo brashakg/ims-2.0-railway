@@ -2000,7 +2000,8 @@ async def update_catalog_product(
         # Catalog Dictionary parity with the spine PUT (products.py): when the
         # owner configured allowed values for a field, an attributes patch must
         # match them (case-canonicalising). Fail-soft when no db.
-        merged_attrs = {**(existing.get("attributes") or {}), **product.attributes}
+        from ..dependencies import get_product_repository
+
         try:
             # Case ONLY what this submit carries. The merged dict below
             # holds every stored attribute, so casing that would rewrite
@@ -2008,13 +2009,27 @@ async def update_catalog_product(
             _typed = _pm.apply_field_casing(
                 product.attributes or {}, only=set((product.attributes or {}).keys())
             )
+            # The review editor's 'GTIN (mfr)' / 'UPC (mfr)' boxes are the
+            # manufacturer barcodes that reach Shopify and Google: the same
+            # strict guard and one-holder rule as the spine doors.
+            _typed = _pm._guard_gtin_attribute(_typed, strict=True)
+            if "gtin" in _typed:
+                _gtin_repo = get_product_repository()
+                _pm.assert_gtin_free(
+                    _typed["gtin"], _gtin_repo, _spine_product_id(_gtin_repo, existing)
+                )
             product.attributes = _typed
+            merged_attrs = {**(existing.get("attributes") or {}), **_typed}
             merged_attrs = _pm.enforce_dictionary_values(
                 existing.get("category"), merged_attrs, db=_get_db()
             )
         except _pm.ProductMasterError as err:
             raise HTTPException(status_code=err.status, detail=err.message) from err
         existing["attributes"] = merged_attrs
+        if "gtin" in product.attributes:
+            # The twin's top-level gtin is what the push sends as the variant
+            # barcode (the same projection as the spine door's mirror).
+            existing.update(_pm.twin_barcode_fields(merged_attrs.get("gtin")))
         # Title regen is BEST-EFFORT: imported (BVI) docs store the canonical
         # long-form category ("FRAME"), which is not a ProductCategory short
         # code -- ProductCategory("FRAME") raises and previously 500'd any
@@ -2270,6 +2285,14 @@ async def update_catalog_product(
             _patch = {k: v for k, v in _patch.items() if v is not None}
             if _patch:
                 _pr.update(_spine_id, _patch)
+            if product.attributes and "gtin" in product.attributes:
+                # Spine and twin hold ONE GTIN (Manage Barcode and the stock
+                # page read the spine's). Its own write, so a legacy spine
+                # whose attributes are not a dict cannot sink the price sync.
+                _pr.update(
+                    _spine_id,
+                    {"attributes.gtin": (existing.get("attributes") or {}).get("gtin") or ""},
+                )
     except Exception:  # noqa: BLE001
         logger.warning(
             "[CATALOG] spine sync on update skipped for %s", product_id, exc_info=True

@@ -55,7 +55,12 @@ from .gst_rates import (
     hsn_for_category,
     resolve_gst_rate_strict,
 )
-from .gtin import classify_gtin, is_valid_gtin, normalise_candidate
+from .gtin import (
+    MANUFACTURER_BARCODE_ATTRIBUTES,
+    classify_gtin,
+    is_valid_gtin,
+    normalise_candidate,
+)
 from .pricing_caps import evaluate_offer_price
 from .product_naming import (
     build_handle,
@@ -1329,7 +1334,7 @@ def _guard_gtin_attribute(
     description's 'UPC Code' row, so it gets the same rule.
     """
     attrs = attributes or {}
-    for key in _MANUFACTURER_BARCODE_KEYS:
+    for key in MANUFACTURER_BARCODE_ATTRIBUTES:
         raw = attrs.get(key)
         if not normalise_candidate(raw):
             continue
@@ -1355,8 +1360,17 @@ def _guard_gtin_attribute(
     return attrs
 
 
-# The attributes that hold a MANUFACTURER's barcode (validated as GTINs).
-_MANUFACTURER_BARCODE_KEYS = ("gtin", "upc")
+
+def twin_barcode_fields(gtin: Any) -> Dict[str, Any]:
+    """The catalog-twin (or catalog_variants row) fields the Shopify push reads
+    a barcode from, for the product's gtin attribute: the top-level `gtin`
+    and, when the GTIN is REMOVED, the legacy `barcode` too -- the push falls
+    back to it (variants.build_variant_seed_rows, the price push's
+    pseudo-variant), so leaving it would send the removed code again. ONE rule
+    for every door that moves the gtin attribute."""
+    if gtin:
+        return {"gtin": gtin}
+    return {"gtin": None, "barcode": None}
 
 
 def assert_gtin_free(code: Any, product_repo, this_product_id: Optional[str]) -> None:
@@ -2717,7 +2731,7 @@ def _mirror_variant_row_update(
     if "mrp" in patch:
         row_patch["mrp"] = patch["mrp"]
     if "gtin" in (patch.get("attributes") or {}):
-        row_patch["gtin"] = patch["attributes"].get("gtin") or None
+        row_patch.update(twin_barcode_fields(patch["attributes"].get("gtin")))
     variants = db.get_collection("catalog_variants")
     variants.update_one({"sku": sku}, {"$set": row_patch})
     if not mark_dirty:
@@ -2844,7 +2858,7 @@ def mirror_update_to_catalog_twin(
         if "gtin" in (patch.get("attributes") or {}):
             # Same projection as _build_pim_doc: the public barcode rides
             # top-level on the twin for the pseudo-variant.
-            cat_patch["gtin"] = patch["attributes"].get("gtin") or None
+            cat_patch.update(twin_barcode_fields(patch["attributes"].get("gtin")))
         # The photograph moves with the spine and QUEUES: it is the one field
         # the storefront shows more prominently than the price, and the push
         # reads it off the twin (see _build_pim_doc).
