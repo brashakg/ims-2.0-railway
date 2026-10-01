@@ -406,11 +406,13 @@ export function PurchaseOrderComposer({
   // Re-runs when the vendor changes or a new product appears. Fail-soft: no
   // history -> the seed stays, no caption.
   // ------------------------------------------------------------------------
-  // Signature of "which products need a price under which vendor" -- lets us
-  // debounce/guard so adding lines one at a time doesn't spam the endpoint and
-  // we don't refetch when nothing relevant changed. A string, so a Qty or cost
-  // keystroke (same products) does not restart the debounce and hold the
-  // answer back until the manager is already in the cost box.
+  // Signature of "which products need a price under which vendor": the
+  // lookup runs whenever it changes, debounced so adding lines one at a time
+  // doesn't spam the endpoint. A string, so a Qty or cost keystroke (same
+  // products) does not restart the debounce and hold the answer back until
+  // the manager is already in the cost box. No memory of the last answered
+  // set: a product cleared and picked back lost its price with the pick, so
+  // coming back to an earlier set is asked again too.
   const prefillIds = useMemo(
     () =>
       lines
@@ -420,19 +422,10 @@ export function PurchaseOrderComposer({
         .join(','),
     [lines],
   );
-  const prefillKey = `${vendorId}::${prefillIds}`;
-
-  const lastPrefillKey = useRef<string>('');
 
   useEffect(() => {
-    if (!vendorId) return;
-    if (prefillKey === lastPrefillKey.current) return;
-
-    const productIds = prefillIds ? prefillIds.split(',') : [];
-    if (productIds.length === 0) {
-      lastPrefillKey.current = prefillKey;
-      return;
-    }
+    if (!vendorId || !prefillIds) return;
+    const productIds = prefillIds.split(',');
 
     let cancelled = false;
     const t = setTimeout(async () => {
@@ -441,12 +434,11 @@ export function PurchaseOrderComposer({
         ({ costs } = await vendorsApi.getLastCost(vendorId, productIds));
       } catch {
         // The lookup failed: every line keeps the cost it has (the catalogue
-        // seed) with no caption, and the key is NOT recorded, so the next
-        // product or vendor change asks again. Never blocks the order.
+        // seed) with no caption; the next product or vendor change asks
+        // again. Never blocks the order.
         return;
       }
       if (cancelled) return;
-      lastPrefillKey.current = prefillKey;
       setLines((prev) =>
         prev.map((l) => {
           const hit = l.productId ? costs[l.productId] : undefined;
@@ -462,7 +454,7 @@ export function PurchaseOrderComposer({
       cancelled = true;
       clearTimeout(t);
     };
-  }, [prefillKey, prefillIds, vendorId]);
+  }, [prefillIds, vendorId]);
 
   // When the vendor changes, the previous vendor's price no longer applies:
   // every caption goes (a typed cost must not sit under another vendor's
@@ -474,7 +466,6 @@ export function PurchaseOrderComposer({
   useEffect(() => {
     if (prevVendorRef.current === vendorId) return;
     prevVendorRef.current = vendorId;
-    lastPrefillKey.current = '';
     setLines((prev) =>
       prev.map((l) =>
         !l.lastPaid

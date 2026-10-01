@@ -572,6 +572,54 @@ describe('PurchaseOrderComposer — a failed last-paid lookup', () => {
     expect(getLastCostMock).toHaveBeenLastCalledWith('v-1', ['prod-a']);
     expect(screen.getByText(/last paid ₹3,100/i)).toBeInTheDocument();
   });
+
+  // Panel finding (round 6): a product changed and picked back while the
+  // lookup in between failed or was still out came back to the SAME product
+  // set as the last good answer -- and was never asked again, so line 1 sat
+  // on the catalogue cost with no caption.
+  it.each(['failed', 'in flight'])(
+    're-picking a product after a lookup that %s gets its last price back',
+    async (mode) => {
+      getLastCostMock.mockImplementation(async (_v: string, ids: string[]) => {
+        if (ids.length === 1 && ids[0] === 'prod-b') {
+          if (mode === 'failed') throw new Error('Network Error');
+          return new Promise(() => {});
+        }
+        return {
+          costs: { 'prod-a': { unit_price: 3100, po_number: 'PO-2', po_id: 'po-2', date: '2026-09-17T10:00:00' } },
+        };
+      });
+      const blank = LINE({ productId: '', productName: '', sku: '' });
+      renderComposer({
+        initialLines: [blank, blank],
+        renderProductCell: ({ index, pickProduct, clearProduct }) => (
+          <>
+            <button type="button" onClick={() => pickProduct({ productId: 'prod-a', productName: 'A', sku: 'A', costPrice: 3200 })}>
+              {`pick a ${index + 1}`}
+            </button>
+            <button type="button" onClick={() => pickProduct({ productId: 'prod-b', productName: 'B', sku: 'B', costPrice: 4800 })}>
+              {`pick b ${index + 1}`}
+            </button>
+            <button type="button" onClick={clearProduct}>{`clear ${index + 1}`}</button>
+          </>
+        ),
+      });
+      const cost1 = screen.getByLabelText(/unit cost for line 1/i) as HTMLInputElement;
+      fireEvent.click(screen.getByRole('button', { name: 'pick a 1' }));
+      await waitFor(() => expect(cost1.value).toBe('3100'));
+      fireEvent.click(screen.getByRole('button', { name: 'pick b 2' }));
+      await waitFor(() => expect(getLastCostMock).toHaveBeenCalledTimes(2));
+
+      fireEvent.click(screen.getByRole('button', { name: 'clear 1' }));
+      await waitFor(() => expect(getLastCostMock).toHaveBeenLastCalledWith('v-1', ['prod-b']));
+      await act(async () => {});
+      fireEvent.click(screen.getByRole('button', { name: 'pick a 1' }));
+
+      await waitFor(() => expect(cost1.value).toBe('3100'));
+      expect(screen.getByText(/last paid ₹3,100/i)).toBeInTheDocument();
+      expect(getLastCostMock).toHaveBeenLastCalledWith('v-1', ['prod-a', 'prod-b']);
+    },
+  );
 });
 
 describe('PurchaseOrderComposer — fail-soft when history is empty', () => {
