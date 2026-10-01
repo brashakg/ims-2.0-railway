@@ -10,7 +10,7 @@ from ...utils.ist import now_ist_naive, ist_today, ist_day_start_utc
 from typing import Optional
 from fastapi import Depends, Query
 from ..auth import get_current_user
-from ...dependencies import validate_store_access
+from ...dependencies import resolve_store_scope, validate_store_access
 from ...services import ap_engine, cashflow
 from ...services.cost_mask import can_see_cost
 from ...services.salary_visibility import is_payroll_shaped_expense, is_salary_admin
@@ -126,19 +126,16 @@ async def get_cash_flow(
     vendor_payment_outflow = 0.0
     if ap_reader and not active_store:
         try:
-            vp = list(
-                db.get_collection("vendor_payments").aggregate(
-                    [
-                        {
-                            "$match": {
-                                "payment_date": {"$gte": start.date().isoformat()}
-                            }
-                        },
-                        {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
-                    ]
-                )
-            )
-            vendor_payment_outflow = round(vp[0]["total"], 2) if vp else 0.0
+            # THE supplier ledger's payment rows in this view's own shop scope
+            # (none here: the org view) -- the same rows, month and shop the
+            # Purchases report's `paid` and the owner dashboard's 'Paid to
+            # vendors' read. A raw payment_date >= aggregate counted a
+            # post-dated cheque before its day, money naming a transfer mirror
+            # bill, and (start.date() of IST midnight in UTC is the day before
+            # the 1st) the previous month's last day. Cash, not gross of TDS:
+            # see _cash_paid_in_month.
+            _, paid, _ = _ap_rows(db, active_store)
+            vendor_payment_outflow = _cash_paid_in_month(paid, today.strftime("%Y-%m"))
         except Exception:
             vendor_payment_outflow = 0.0
 
@@ -226,7 +223,30 @@ def _ap_rows(db, store_id=None, as_of=None):
     return ap_engine.supplier_ledger_rows(bills, payments, dn, store_id, as_of)
 
 
-def _ar_aging(db, now: datetime) -> dict:
+def _cash_paid_in_month(payments, month: str) -> float:
+    """Cash paid to suppliers in `month` ('YYYY-MM'): the supplier ledger's
+    PAYMENT rows (from _ap_rows, so already cut at the as-of day, free of
+    transfer-mirror money and in the caller's shop) whose ledger day falls in
+    the month -- the very rows the Purchases report's `paid` adds up for the
+    same month and shop.
+
+    CASH, NOT GROSS. A payment's `amount` is the money that left the bank; its
+    `tds_amount` was withheld and goes to the government, not the supplier. The
+    report's `paid` (the ledger's PAYMENT debit) is GROSS = amount + TDS,
+    because TDS discharges the bill. So for one month and shop:
+        paid to vendors (here) == report paid - TDS withheld on those rows.
+    """
+    total = 0.0
+    for p in payments or []:
+        if isinstance(p, dict) and ap_engine.ledger_day(p)[:7] == month:
+            try:
+                total += float(p.get("amount") or 0)
+            except (TypeError, ValueError):
+                continue
+    return round(total, 2)
+
+
+def _ar_aging(db, now: datetime, store_id: Optional[str] = None) -> dict:
     """Customer receivables aged by DUE date.
 
     due_date = order.created_at + customer.credit_terms_days (fallback 30).
@@ -236,6 +256,8 @@ def _ar_aging(db, now: datetime) -> dict:
     Pre-fix this aged by (now - created_at), which mislabeled current-status
     receivables (NET-60 customer, sold 25 days ago) as already in the 0-30
     overdue bucket. The mirror /outstanding is also fixed to match.
+
+    `store_id` narrows to one shop's orders (None = every shop).
     """
     buckets = {
         "current": 0.0,
@@ -252,6 +274,7 @@ def _ar_aging(db, now: datetime) -> dict:
                     "payment_status": {"$in": UNPAID_STATUSES},
                     # A cancelled order is not a receivable.
                     "status": _REAL_ORDER_STATUS_FILTER,
+                    **({"store_id": store_id} if store_id else {}),
                 },
                 {
                     "_id": 0,
@@ -307,16 +330,25 @@ def _agg_sum(db, coll: str, match: dict, expr) -> float:
 @router.get("/owner-dashboard")
 async def owner_dashboard(current_user: dict = Depends(get_current_user)):
     """CEO/owner financial snapshot: receivables (AR) vs payables (AP), net
-    working-capital position, this-month cash movement, and alerts. Org-wide,
-    ADMIN / ACCOUNTANT only."""
+    working-capital position, this-month cash movement, and alerts. ADMIN /
+    ACCOUNTANT only.
+
+    Shop scope (F63), one rule for every figure on it: ADMIN / SUPERADMIN read
+    every shop; any other login (a shop's accountant) reads its OWN shop --
+    resolve_store_scope, the rule AP aging, /finance/vendor-payments and the
+    Purchases report apply -- so its payables equal theirs and AR, revenue,
+    expenses and 'Paid to vendors' are the same shop's (net_position and
+    net_cash_flow never mix two scopes)."""
     _require_finance_admin(current_user)
     db = _get_db()
     now = now_ist_naive()
     start = ist_day_start_utc(now.replace(day=1).date())
+    scope = resolve_store_scope(None, current_user)
+    shop = {"store_id": scope} if scope else {}
 
-    ar = _ar_aging(db, now)
+    ar = _ar_aging(db, now, scope)
 
-    bills, payments, dn = _ap_rows(db)
+    bills, payments, dn = _ap_rows(db, scope)
     ap = ap_engine.build_aging(bills, payments, dn)
     ap_overdue = round(ap["total_outstanding"] - ap["buckets"]["current"], 2)
     due_7d = 0.0
@@ -326,9 +358,11 @@ async def owner_dashboard(current_user: dict = Depends(get_current_user)):
         if due is None:
             continue
         delta = (due.date() - now.date()).days
-        if delta <= 7:
+        # Falls due within the window from today; an overdue bill (delta < 0)
+        # is already in `overdue`, not 'due in 7 days'.
+        if 0 <= delta <= 7:
             due_7d += it["outstanding"]
-        if delta <= 30:
+        if 0 <= delta <= 30:
             due_30d += it["outstanding"]
     due_7d = round(due_7d, 2)
     due_30d = round(due_30d, 2)
@@ -342,6 +376,7 @@ async def owner_dashboard(current_user: dict = Depends(get_current_user)):
             "created_at": {"$gte": start},
             "payment_status": {"$in": PAID_STATUSES},
             "status": _REAL_ORDER_STATUS_FILTER,
+            **shop,
         },
         _REVENUE_EXPR,
     )
@@ -377,15 +412,15 @@ async def owner_dashboard(current_user: dict = Depends(get_current_user)):
             # the entire expense total. Use a date-only bound to match.
             "expense_date": {"$gte": start.date().isoformat()},
             "status": {"$in": ["APPROVED", "PAID", "approved", "paid"]},
+            **shop,
         },
         "$amount",
     )
-    vpaid = _agg_sum(
-        db,
-        "vendor_payments",
-        {"payment_date": {"$gte": start.date().isoformat()}},
-        "$amount",
-    )
+    # 'Paid to vendors' this month: the supplier ledger's payment rows above
+    # (dated up to today, so a post-dated cheque counts on its day and not
+    # before; no transfer-mirror money; this shop's), cash only -- the
+    # Purchases report's `paid` for the same month and shop, less TDS.
+    vpaid = _cash_paid_in_month(payments, now.strftime("%Y-%m"))
 
     # Structured alerts: emit `amount` + `label_template` (with a '{}' slot for
     # the FE-rendered INR symbol). `message` keeps an ASCII-only fallback so
@@ -423,6 +458,8 @@ async def owner_dashboard(current_user: dict = Depends(get_current_user)):
 
     return {
         "as_of": now.date().isoformat(),
+        # The shop every figure below is for (None = every shop).
+        "store_id": scope,
         "receivables": ar,
         "payables": {
             # What we owe = the supplier ledgers' balance (bills - payments -
@@ -462,10 +499,17 @@ async def cash_flow_forecast(
     vendor bills on their due date + a recurring monthly estimate (avg of the
     last 3 months' expenses plus an owner-supplied recurring_monthly_outflow,
     e.g. payroll). Surfaces the lowest projected balance as a cash-crunch
-    warning. ADMIN / ACCOUNTANT only."""
+    warning. ADMIN / ACCOUNTANT only.
+
+    Shop scope (F63), as on /owner-dashboard: ADMIN / SUPERADMIN project every
+    shop; any other login its OWN shop (resolve_store_scope) -- its collections,
+    its supplier bills and its expenses, so the outflows are the payables its
+    AP aging tab shows."""
     _require_finance_admin(current_user)
     db = _get_db()
     now = now_ist_naive()
+    scope = resolve_store_scope(None, current_user)
+    shop = {"store_id": scope} if scope else {}
 
     # Inflows from AR.
     inflow_events = []
@@ -476,6 +520,7 @@ async def cash_flow_forecast(
                     "payment_status": {"$in": UNPAID_STATUSES},
                     # Don't project a cancelled order as an expected collection.
                     "status": _REAL_ORDER_STATUS_FILTER,
+                    **shop,
                 },
                 {
                     "_id": 0,
@@ -496,8 +541,8 @@ async def cash_flow_forecast(
         coll_date = created + timedelta(days=collection_lag_days)
         inflow_events.append({"date": coll_date.date().isoformat(), "amount": bal})
 
-    # Outflows from AP (real due dates).
-    bills, payments, dn = _ap_rows(db)
+    # Outflows from AP (real due dates), in the same shop scope.
+    bills, payments, dn = _ap_rows(db, scope)
     ap = ap_engine.build_aging(bills, payments, dn)
     outflow_events = [
         {"date": it.get("due_date"), "amount": it["outstanding"]} for it in ap["items"]
@@ -525,11 +570,15 @@ async def cash_flow_forecast(
     #
     # WHAT AN ATTACKER WOULD HAVE TO KNOW TO UNBLEND IT, stated properly rather
     # than hiding behind "it is blended": the figure is sum(all approved/paid
-    # expenses, ALL stores, trailing 90 days) / 3. To pull one month's wage bill
-    # out of it they would need the 90-day non-pay expense total across every
-    # store (this response does not carry it, and /pnl is per-store and
-    # caller-scoped) AND the other two months' pay. An accountant closing the
-    # books has both from the ledger anyway, which is the point above.
+    # expenses in the caller's shop scope -- every store for ADMIN /
+    # SUPERADMIN, a shop accountant's own shop (F63) -- trailing 90 days) / 3.
+    # To pull one month's wage bill out of it they would need the 90-day
+    # non-pay expense total for that scope (this response does not carry it;
+    # /pnl is per-store and caller-scoped) AND the other two months' pay. A
+    # shop accountant can get close for their own shop -- the same shop whose
+    # pay heads the owner's exception lets them read BY NAME on
+    # /finance/survival-cashflow -- and an accountant closing the books has
+    # both from the ledger anyway, which is the point above.
     #
     # IF THIS GATE EVER WIDENS BELOW ACCOUNTANT, this comment is void and the
     # strip must be added the same day -- see get_cash_flow for the shape.
@@ -548,6 +597,7 @@ async def cash_flow_forecast(
                         "$match": {
                             "expense_date": {"$gte": three_mo_ago},
                             "status": {"$in": ["APPROVED", "PAID", "approved", "paid"]},
+                            **shop,
                         }
                     },
                     {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
