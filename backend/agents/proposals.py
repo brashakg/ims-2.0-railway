@@ -670,6 +670,7 @@ def _exec_draft_po(db, proposal: Dict[str, Any]) -> Dict[str, Any]:
         **computed["parties"],
         "status": "DRAFT",                       # DRAFT only - not sent
         "auto_drafted_by": proposal.get("created_by_agent"),
+        "created_by": proposal.get("created_by_agent"),
         "from_proposal_id": proposal.get("proposal_id"),
         "requires_approval": True,               # sending still needs a human
         "created_at": datetime.now(timezone.utc).isoformat(),

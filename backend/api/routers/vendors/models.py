@@ -420,16 +420,20 @@ class POLineCancel(BaseModel):
 
 def cancel_reason(v) -> str:
     """ONE rule for a cancel reason (whole order or one line): invisible
-    characters (zero-width, BOM and other format characters) and surrounding
-    whitespace removed, then at least 3 letters or digits -- 'qty typo' passes;
-    a blank, '...', '???' or a zero-width string does not."""
+    characters (zero-width space, BOM and other format characters) and
+    surrounding whitespace removed, then at least 3 letters or digits -- 'qty
+    typo' passes; a blank, '...', '???' or a zero-width string does not. Vowel
+    signs count with their letter, so a short Hindi reason is a reason; the
+    joiners that Indic scripts need are kept."""
     import unicodedata
 
     text = "".join(
-        c for c in str(v or "") if unicodedata.category(c) not in ("Cf", "Cc", "Zl", "Zp")
-        or c in "\t\n"
+        c
+        for c in str(v or "")
+        if c in "\t\n\u200c\u200d"
+        or unicodedata.category(c) not in ("Cf", "Cc", "Zl", "Zp")
     ).strip()
-    if sum(1 for c in text if c.isalnum()) < 3:
+    if sum(1 for c in text if unicodedata.category(c)[0] in "LNM") < 3:
         raise ValueError(
             "Say why this is being cancelled (at least 3 letters or digits)."
         )

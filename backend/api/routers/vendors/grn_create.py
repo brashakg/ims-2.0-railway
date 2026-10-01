@@ -308,7 +308,7 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
         over = beyond_open_quantity(
             po,
             [it.model_dump() for it in grn.items],
-            _received_by_product(po),
+            lambda: _received_by_product(po),
             "received_qty",
         )
         if over:

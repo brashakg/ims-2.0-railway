@@ -502,6 +502,12 @@ def test_line_cancel_needs_a_reason(reason):
         v.POLineCancel(reason=reason)
 
 
+def test_a_short_hindi_reason_is_a_reason():
+    assert v.POLineCancel(reason="\u0926\u0947\u0930").reason == "\u0926\u0947\u0930"  # "der"
+    with pytest.raises(ValidationError):
+        v.POLineCancel(reason="\u200d\u200c\u200d")
+
+
 def test_a_reason_with_invisible_characters_is_stored_without_them():
     assert v.POLineCancel(reason="\u200bqty\u200b typo ").reason == "qty typo"
 

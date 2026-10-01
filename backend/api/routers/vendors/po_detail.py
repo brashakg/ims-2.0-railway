@@ -440,7 +440,7 @@ def _qty(v) -> int:
         return 0
 
 
-def beyond_open_quantity(po: dict, lines, already_received: dict, qty_key: str) -> list:
+def beyond_open_quantity(po: dict, lines, received_of, qty_key: str) -> list:
     """THE rule behind "no receipt against a cancelled quantity": the names of
     the products on `lines` that the LIVE order no longer has room for.
 
@@ -450,7 +450,10 @@ def beyond_open_quantity(po: dict, lines, already_received: dict, qty_key: str) 
     the order has cancelled units of is held to it; a delivery that merely
     runs over an untouched line is a variance for the receiver to record, as
     before. `qty_key` is the receipt's `received_qty` when logging it and its
-    `accepted_qty` when accepting it. Create and accept both call this."""
+    `accepted_qty` when accepting it. `received_of()` returns the units
+    already received per product; it is only called when the receipt touches a
+    product the order has cancelled units of, so an ordinary receipt never
+    depends on it. Create and accept both call this."""
     live: dict = {}
     cancelled: set = set()
     names: dict = {}
@@ -464,10 +467,14 @@ def beyond_open_quantity(po: dict, lines, already_received: dict, qty_key: str) 
     for line in lines or []:
         pid = line.get("product_id")
         coming[pid] = coming.get(pid, 0) + _qty(line.get(qty_key))
+    touched = {pid for pid, qty in coming.items() if qty and pid in cancelled}
+    if not touched:
+        return []
+    already_received = received_of()
     return [
         str(names[pid])
-        for pid, qty in coming.items()
-        if qty and pid in cancelled and _qty(already_received.get(pid)) + qty > live.get(pid, 0)
+        for pid in touched
+        if _qty(already_received.get(pid)) + coming[pid] > live.get(pid, 0)
     ]
 
 

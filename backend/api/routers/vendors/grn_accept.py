@@ -190,12 +190,16 @@ def _hold_order_open_for_receipt(po_repo, grn) -> None:
                     "it any more. Void this receipt."
                 ),
             )
-        # Earlier ACCEPTED receipts only: this receipt is not accepted yet,
-        # and a retry of its own half-minted accept must not count twice.
-        received = dict(_cumulative_received_by_product(get_grn_repository(), po_id))
-        for pid, own in (po.get("received_qty_by_product") or {}).items():
-            received[pid] = max(_qty(received.get(pid)), _qty(own))
-        over = beyond_open_quantity(po, grn.get("items") or [], received, "accepted_qty")
+        def earlier_receipts() -> dict:
+            # Earlier ACCEPTED receipts only: this receipt is not accepted
+            # yet, and a retry of its own half-minted accept must not count
+            # twice.
+            got = dict(_cumulative_received_by_product(get_grn_repository(), po_id))
+            for pid, own in (po.get("received_qty_by_product") or {}).items():
+                got[pid] = max(_qty(got.get(pid)), _qty(own))
+            return got
+
+        over = beyond_open_quantity(po, grn.get("items") or [], earlier_receipts, "accepted_qty")
         if over:
             raise HTTPException(
                 status_code=409,
