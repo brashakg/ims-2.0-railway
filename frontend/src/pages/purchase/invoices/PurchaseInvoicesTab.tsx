@@ -287,6 +287,10 @@ function InvoiceList({ invoices, onOpen }: { invoices: PurchaseInvoice[]; onOpen
         </thead>
         <tbody className="divide-y divide-gray-100">
           {invoices.map((pi) => {
+            // No stored verdict and no head amounts = no tax head was ever
+            // decided (old Cash Flow bill): say so, do not show CGST+SGST.
+            const headNotSet =
+              pi.is_interstate == null && !pi.cgst && !pi.sgst && !pi.igst;
             const inter = pi.is_interstate ?? (pi.igst || 0) > 0;
             return (
               <tr
@@ -306,8 +310,8 @@ function InvoiceList({ invoices, onOpen }: { invoices: PurchaseInvoice[]; onOpen
                   {!pi.po_number && !pi.grn_number && <span className="text-gray-400">Manual</span>}
                 </td>
                 <td className="px-3 py-2 text-center">
-                  <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${inter ? 'bg-purple-100 text-purple-800' : 'bg-blue-100 text-blue-800'}`}>
-                    {inter ? 'IGST' : 'CGST+SGST'}
+                  <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${headNotSet ? 'bg-gray-100 text-gray-600' : inter ? 'bg-purple-100 text-purple-800' : 'bg-blue-100 text-blue-800'}`}>
+                    {headNotSet ? 'Not set' : inter ? 'IGST' : 'CGST+SGST'}
                   </span>
                 </td>
                 <td className="px-3 py-2 text-right text-gray-700">{inr(pi.taxable_amount)}</td>

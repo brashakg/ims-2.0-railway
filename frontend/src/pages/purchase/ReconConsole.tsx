@@ -602,9 +602,11 @@ function QueueRow({
               <div><span className="text-gray-400">Taxable</span><br />{inr(invoice.taxable_amount)}</div>
               <div>
                 <span className="text-gray-400">Tax</span><br />
-                {invoice.is_interstate
-                  ? `IGST ${inr(invoice.igst)}`
-                  : `CGST ${inr(invoice.cgst)} + SGST ${inr(invoice.sgst)}`}
+                {invoice.is_interstate == null && !invoice.cgst && !invoice.sgst && !invoice.igst
+                  ? 'Tax head not set'
+                  : invoice.is_interstate
+                    ? `IGST ${inr(invoice.igst)}`
+                    : `CGST ${inr(invoice.cgst)} + SGST ${inr(invoice.sgst)}`}
               </div>
             </div>
             {exceptionReasons.length > 0 && (

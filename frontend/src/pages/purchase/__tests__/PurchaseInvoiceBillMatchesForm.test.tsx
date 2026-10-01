@@ -496,3 +496,24 @@ describe('panel round 4 - every door hands its lines on, and the list follows th
     expect(createCalls()[0][1].store_id).toBe('PUNE');
   });
 });
+
+describe('round 11 - a bill with no tax head is not shown as CGST+SGST', () => {
+  it('an old Cash Flow "+ bill" reads "Not set"; a bill with heads keeps its badge', async () => {
+    const legacy = {
+      bill_id: 'b-legacy', bill_number: 'CF-1', bill_date: '2026-08-20',
+      taxable_amount: 1000, tax_amount: 180, total_amount: 1180,
+    };
+    const intra = {
+      bill_id: 'b-intra', invoice_number: 'IN-1', invoice_date: '2026-08-21', taxable_amount: 1000,
+      tax_amount: 180, cgst_total: 90, sgst_total: 90, igst_total: 0, interstate: false, total_amount: 1180,
+    };
+    routeGets({ '/vendors/purchase-invoices': { purchase_invoices: [legacy, intra, HELD_BILL], total: 3 } });
+    renderTab();
+    await screen.findByText('Not set');
+    expect(screen.getAllByText('CGST+SGST')).toHaveLength(1);
+    expect(screen.getAllByText('IGST').length).toBeGreaterThan(0);
+    const row = screen.getByText('CF-1').closest('tr') as HTMLElement;
+    expect(within(row).getByText('Not set')).toBeTruthy();
+    expect(within(row).queryByText('CGST+SGST')).toBeNull();
+  });
+});

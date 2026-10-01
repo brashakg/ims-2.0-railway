@@ -432,7 +432,15 @@ function mapInvoiceFromApi(doc: Record<string, any>): PurchaseInvoice {
     cgst,
     sgst,
     igst,
-    is_interstate: doc.is_interstate ?? doc.interstate ?? igst > 0,
+    // A bill that never had a tax head decided (an old Cash Flow '+ bill': only
+    // taxable / tax / total) has NO verdict -- undefined, never a guessed
+    // CGST+SGST. The list shows it as 'Not set'.
+    is_interstate:
+      doc.is_interstate ??
+      doc.interstate ??
+      (['cgst', 'sgst', 'igst', 'cgst_total', 'sgst_total', 'igst_total'].some((k) => doc[k] != null)
+        ? igst > 0
+        : undefined),
     lines: mapLinesFromApi(doc.lines),
   } as PurchaseInvoice;
 }

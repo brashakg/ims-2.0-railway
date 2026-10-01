@@ -274,3 +274,24 @@ describe('draft lines -> form lines (F37: from-GRN lines arrived blank, qty 1)',
     );
   });
 });
+
+describe('a bill that never had a tax head decided', () => {
+  const legacy = {
+    bill_id: 'b-legacy', bill_number: 'CF-1', bill_date: '2026-08-20',
+    taxable_amount: 1000, tax_amount: 180, total_amount: 1180,
+  };
+
+  it('has no interstate verdict (an old Cash Flow "+ bill")', async () => {
+    mockGet.mockResolvedValue({ data: { purchase_invoices: [legacy], total: 1 } });
+    const { purchase_invoices: rows } = await purchaseInvoicesApi.list();
+    expect(rows[0].is_interstate).toBeUndefined();
+  });
+
+  it('keeps the verdict of a bill that stored heads', async () => {
+    const heads = { ...legacy, cgst_total: 90, sgst_total: 90, igst_total: 0 };
+    const ig = { ...legacy, cgst_total: 0, sgst_total: 0, igst_total: 180 };
+    mockGet.mockResolvedValue({ data: { purchase_invoices: [heads, ig], total: 2 } });
+    const { purchase_invoices: rows } = await purchaseInvoicesApi.list();
+    expect([rows[0].is_interstate, rows[1].is_interstate]).toEqual([false, true]);
+  });
+});
