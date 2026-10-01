@@ -53,6 +53,7 @@ function unit(n: number, over: Partial<StockUnit> = {}): StockUnit {
     product_id: 'P1',
     barcode: `BV--0000000${n}`,
     status: 'AVAILABLE',
+    in_shop: true,
     grn_number: 'RCPT/BV-DHN-02/26-27/0009',
     source: 'GRN',
     received_on: '2026-09-27',
@@ -83,7 +84,7 @@ beforeEach(() => {
 
 describe('the units view (from the stock ledger)', () => {
   it('lists every unit with its barcode, receipt number and status', async () => {
-    apiMock.getUnits.mockResolvedValue({ units: [unit(1), unit(2, { status: 'SOLD' })], total: 2 });
+    apiMock.getUnits.mockResolvedValue({ units: [unit(1), unit(2, { status: 'SOLD', in_shop: false })], total: 2 });
     render(<UnitLabelsModal productId="P1" title="Carrera CA 8895" onClose={() => {}} />);
     expect(await screen.findByText('BV--00000001')).toBeInTheDocument();
     expect(apiMock.getUnits).toHaveBeenCalledWith({ store_id: 'BV-DHN-02', product_id: 'P1' });
@@ -96,27 +97,33 @@ describe('the units view (from the stock ledger)', () => {
     expect(screen.queryByText(/^Cost$/)).not.toBeInTheDocument();
   });
 
-  it('words every status, and a unit being counted can still get its label', async () => {
-    // A count is exactly when a missing label turns up; the counted unit is on
-    // the shelf. A written-off unit is not, and no status shows as a raw token.
+  it('words every status, and labels exactly the units the server calls in the shop', async () => {
+    // No raw status tokens. Which units get a label is the server's in_shop
+    // (the rule the ledger's "N units" counts by), never a status list kept
+    // here: the copy here once let "Select every unit" offer 4 labels behind
+    // a "2 units" button. UNDER_AUDIT / BLIND_COUNT are outside that rule (a
+    // blind count keeps its units AVAILABLE, so a counted piece is labelable).
     apiMock.getUnits.mockResolvedValue({
-      units: [unit(1, { status: 'BLIND_COUNT' }), unit(2, { status: 'UNDER_AUDIT' }), unit(3, { status: 'VOID' })],
-      total: 3,
+      units: [
+        unit(1, { status: 'BLIND_COUNT', in_shop: false }),
+        unit(2, { status: 'UNDER_AUDIT', in_shop: false }),
+        unit(3, { status: 'VOID', in_shop: false }),
+        unit(4),
+        unit(5, { status: 'RESERVED' }),
+      ],
+      total: 5,
     });
     render(<UnitLabelsModal productId="P1" title="x" onClose={() => {}} />);
     const row = async (n: number) => (await screen.findByText(`BV--0000000${n}`)).closest('tr')!;
-    for (const [n, text] of [[1, 'In a stock count'], [2, 'Under audit']] as const) {
+    for (const [n, text] of [[1, 'In a stock count'], [2, 'Under audit'], [3, 'Written off']] as const) {
       const r = await row(n);
       expect(within(r).getByText(text)).toBeInTheDocument();
-      expect(within(r).getByRole('checkbox')).toBeEnabled();
-      expect(within(r).getByRole('button', { name: /reprint label/i })).toBeInTheDocument();
+      expect(within(r).getByRole('checkbox')).toBeDisabled();
+      expect(within(r).queryByRole('button', { name: /reprint label/i })).not.toBeInTheDocument();
     }
-    const voided = await row(3);
-    expect(within(voided).getByText('Written off')).toBeInTheDocument();
-    expect(within(voided).getByRole('checkbox')).toBeDisabled();
-    expect(within(voided).queryByRole('button', { name: /reprint label/i })).not.toBeInTheDocument();
-    fireEvent.click(within(await row(1)).getByRole('button', { name: /reprint label/i }));
-    expect(printedBarcodes()).toEqual(['BV--00000001']);
+    fireEvent.click(screen.getByRole('checkbox', { name: /select every unit/i }));
+    fireEvent.click(screen.getByRole('button', { name: /print 2 labels/i }));
+    expect(printedBarcodes()).toEqual(['BV--00000004', 'BV--00000005']);
   });
 
   it('labels every unit the ledger counts: 7 on the shelf + 2 reserved = 9 labels', async () => {

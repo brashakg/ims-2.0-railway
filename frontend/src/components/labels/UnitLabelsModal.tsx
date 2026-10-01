@@ -36,12 +36,11 @@ const STATUS_TEXT: Record<string, string> = {
   VOID: 'Written off',
 };
 
-/** A unit still physically in the shop -- the only kind worth a label. One
- *  being counted is still on the shelf: a count is when a lost label shows. */
-const IN_SHOP = new Set(['AVAILABLE', 'RESERVED', 'UNDER_AUDIT', 'BLIND_COUNT']);
-const inShop = (u: StockUnit) => IN_SHOP.has(u.status);
-/** ...and only when its barcode can actually go on the label. */
-const labelable = (u: StockUnit) => inShop(u) && !labelProblem(u.barcode);
+/** A unit the server calls in the shop (on the shelf or reserved: the rule the
+ *  ledger's "N units" counts by) -- the only kind worth a label -- and only
+ *  when its barcode can actually go on the label. No status list here: a
+ *  second copy of the rule is how the button and the dialog disagreed. */
+const labelable = (u: StockUnit) => u.in_shop && !labelProblem(u.barcode);
 
 const money = (n: number) => `₹${n.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
 
@@ -213,7 +212,7 @@ export function UnitLabelsModal({ productId, storeId: shopId, grnId, title, subt
                       <td className="py-2 pr-3">{STATUS_TEXT[u.status] || u.status}</td>
                       <td className="py-2 pr-3 text-gray-600">{u.received_on || '-'}</td>
                       <td className="py-2 pr-3 text-gray-600">
-                        {inShop(u) && labelProblem(u.barcode) ? (
+                        {u.in_shop && labelProblem(u.barcode) ? (
                           <span className="text-amber-700">{labelProblem(u.barcode)}</span>
                         ) : u.barcode_printed ? (
                           'Sent to print'

@@ -57,7 +57,8 @@ import {
 } from './inventoryQueries';
 
 /** Pieces of a product standing in the shop: on the shelf + reserved for an
- *  order. The units dialog lists exactly these as labelable (plus history). */
+ *  order. The units dialog labels the units the server marks `in_shop`, the
+ *  same rule (backend tests/test_on_hand_is_one_rule.py pins the two). */
 const unitsInShop = (i: StockItem) => (i.stock || 0) + (i.reserved || 0);
 
 export function InventoryStockPage() {

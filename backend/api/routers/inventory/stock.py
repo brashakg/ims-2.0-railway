@@ -529,6 +529,10 @@ async def list_units(
     if grn_id:
         flt["source_type"] = "GRN"
         flt["source_id"] = grn_id
+    # "In the shop" (the only units a label is for) is the ONE physical rule,
+    # item_events.on_hand_match / is_on_hand with include_reserved=True: on the
+    # shelf or reserved for an order. The ledger's "N units" (stock + reserved)
+    # buckets the same rule; tests/test_on_hand_is_one_rule.py pins the two.
     in_shop = on_hand_match(include_reserved=True)
     found = stock_repo.find_many(
         {"$and": [flt, in_shop]}, sort=[("created_at", 1)], limit=_UNITS_LIMIT
@@ -540,10 +544,12 @@ async def list_units(
             limit=_UNITS_LIMIT - len(found),
         )
     docs = [d for d in found if can_access_store_scoped(d.get("store_id"), current_user)]
+
+    def _in_shop(d: Dict) -> bool:
+        return is_on_hand(d.get("status"), include_reserved=True)
+
     # Units still in the shop first (the ones that need a label), oldest first.
-    docs.sort(
-        key=lambda d: (not is_on_hand(d.get("status")), str(d.get("created_at") or ""))
-    )
+    docs.sort(key=lambda d: (not _in_shop(d), str(d.get("created_at") or "")))
 
     from ...services.product_master import existing_product_summary
 
@@ -564,6 +570,8 @@ async def list_units(
             "product_id": pid,
             "barcode": d.get("barcode") or "",
             "status": state.value if state else (str(raw or "").strip().upper() or "UNKNOWN"),
+            # The dialog labels exactly these; it keeps no status list of its own.
+            "in_shop": _in_shop(d),
             "grn_number": d.get("grn_number") or "",
             "source": d.get("source_type") or d.get("source") or "",
             # A transfer re-homes the unit and stamps received_at; created_at

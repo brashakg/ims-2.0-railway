@@ -343,8 +343,8 @@ def test_units_view_shows_a_transferred_in_unit_by_its_transfer(world):
 def test_units_view_words_legacy_statuses_by_their_canonical_name(world):
     # A legacy unit with no status, an 'in_stock' one and a lowercase
     # 'reserved' one are all in the shop: the ledger counts them (shelf 2 +
-    # reserved 1), so the view must name them the way the dialog's in-shop
-    # set does, or those pieces are listed but can never be labelled.
+    # reserved 1), so the view must name them canonically and mark them in the
+    # shop, or those pieces are listed but can never be labelled.
     bare = world["unit"]("BV--LEGACY01", created=datetime(2026, 9, 1, 10, 0))
     world["db"]["stock_units"].update_one({"stock_id": bare}, {"$unset": {"status": ""}})
     world["unit"]("BV--LEGACY02", status="in_stock", created=datetime(2026, 9, 1, 10, 1))
@@ -354,10 +354,10 @@ def test_units_view_words_legacy_statuses_by_their_canonical_name(world):
     units = world["http"].get(
         "/inventory/units", params={"product_id": world["pid"]}
     ).json()["units"]
-    assert {u["barcode"]: u["status"] for u in units} == {
-        "BV--LEGACY01": "AVAILABLE",
-        "BV--LEGACY02": "AVAILABLE",
-        "BV--LEGACY03": "RESERVED",
+    assert {u["barcode"]: (u["status"], u["in_shop"]) for u in units} == {
+        "BV--LEGACY01": ("AVAILABLE", True),
+        "BV--LEGACY02": ("AVAILABLE", True),
+        "BV--LEGACY03": ("RESERVED", True),
     }
 
 
@@ -381,12 +381,39 @@ def test_units_on_the_shelf_survive_the_read_cap(world, monkeypatch):
     for i in range(3):  # three boxes sold long ago...
         world["unit"](f"BV--SOLD000{i}", status="SOLD", created=datetime(2026, 9, 1, 10, i))
     world["unit"]("BV--SHELF001", created=datetime(2026, 9, 20, 10, 0))  # ...one still here
+    world["unit"]("BV--RESV0001", status="RESERVED", created=datetime(2026, 9, 21, 10, 0))
     units = world["http"].get(
         "/inventory/units", params={"product_id": world["pid"]}
     ).json()["units"]
-    assert len(units) == 3
-    assert units[0]["barcode"] == "BV--SHELF001"
-    assert units[0]["status"] == "AVAILABLE"
+    # The cap trims history only: both pieces in the shop, then the newest sale.
+    assert [(u["barcode"], u["in_shop"]) for u in units] == [
+        ("BV--SHELF001", True),
+        ("BV--RESV0001", True),
+        ("BV--SOLD0002", False),
+    ]
+
+
+def test_units_in_the_shop_are_listed_first_and_match_the_ledger_count(world):
+    # Round 5 measured a sold piece listed above the reserved piece that still
+    # needs a label: the sort used "on the shelf" without "reserved".
+    world["unit"]("BV--AVAIL001", created=datetime(2026, 9, 20, 10, 0))
+    world["unit"]("BV--SOLD0001", status="SOLD", created=datetime(2026, 9, 1, 10, 0))
+    world["unit"]("BV--RESV0001", status="RESERVED", created=datetime(2026, 9, 25, 10, 0))
+    world["unit"]("BV--AUDIT001", status="UNDER_AUDIT", created=datetime(2026, 9, 2, 10, 0))
+    world["unit"]("BV--COUNT001", status="BLIND_COUNT", created=datetime(2026, 9, 3, 10, 0))
+    units = world["http"].get(
+        "/inventory/units", params={"product_id": world["pid"]}
+    ).json()["units"]
+    assert [(u["barcode"], u["in_shop"]) for u in units] == [
+        ("BV--AVAIL001", True),
+        ("BV--RESV0001", True),
+        ("BV--SOLD0001", False),
+        ("BV--AUDIT001", False),
+        ("BV--COUNT001", False),
+    ]
+    # The ledger's "N units" button (stock + reserved) offers what the dialog labels.
+    row = _ledger_row(world)
+    assert row["stock"] + row["reserved"] == sum(u["in_shop"] for u in units) == 2
 
 
 # ---------------------------------------------------------------------------

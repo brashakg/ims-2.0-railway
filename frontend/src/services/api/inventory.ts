@@ -446,6 +446,9 @@ export interface StockUnit {
   product_id: string;
   barcode: string;
   status: string;
+  /** Standing in the shop (on the shelf or reserved): the server's one rule,
+   *  the same the ledger's "N units" counts. Only these get a label. */
+  in_shop: boolean;
   grn_number: string;
   source: string;
   /** Set when a transfer re-homed the unit here (source TRANSFER). */
