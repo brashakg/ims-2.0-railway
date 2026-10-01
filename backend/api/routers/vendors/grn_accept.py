@@ -227,7 +227,7 @@ def _hand_to_store_manager(db, grn_id: str, grn: dict, over: List[dict], product
     po = grn.get("po_number") or grn.get("po_id")
     # A void is refused once a receipt has put anything on the shelf.
     try:
-        voidable = not _grn_already_minted(get_stock_repository(), _received_on(grn_id))
+        voidable = not _grn_already_minted(get_stock_repository(), _received_on(grn))
     except Exception:  # noqa: BLE001
         voidable = False
     # Opens that vendor's "Receipts still waiting", where the receipt is voided.
@@ -477,7 +477,7 @@ def _accept_grn_claimed(
                 already = _grn_already_minted(
                     stock_repo,
                     _received_on(
-                        grn_id, product_id=product_id, grn_line_index=line_index
+                        grn, product_id=product_id, grn_line_index=line_index
                     ),
                 )
             except Exception as exc:  # noqa: BLE001

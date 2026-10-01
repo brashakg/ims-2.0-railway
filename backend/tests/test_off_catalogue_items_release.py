@@ -1626,6 +1626,34 @@ def test_c1_a_receipt_whose_units_moved_shop_is_never_voided(world, monkeypatch)
     assert world.grn(grn["grn_id"])["status"] == "PARTIALLY_ACCEPTED"
 
 
+def test_c1_a_unit_received_before_this_deploy_and_moved_since_is_still_received(
+    world, monkeypatch
+):
+    """A receipt accepted on the old code (its units carry no grn_id) whose
+    Carrera unit is transferred AFTER the deploy: the transfer rewrites
+    source_id, so only the grn_number stamped at mint still names the receipt."""
+    po, grn, car_id, boss_id = _carrera_and_boss(world, [1, 2])
+    world.db.stock_units.update_one({"product_id": car_id}, {"$unset": {"grn_id": ""}})
+    _transfer_out(world, monkeypatch, car_id, 1)
+
+    _run(vd.accept_grn(grn["grn_id"], MANAGER))  # "Add to stock" again
+    finding(
+        len(_any_status_units(world, car_id)) == 1,
+        f"Origin: {len(_any_status_units(world, car_id))} Carrera units for 1 "
+        "received -- an older unit moved shop since was received a second time",
+    )
+    try:
+        _run(vd.void_grn(grn["grn_id"], MANAGER))
+        refused = None
+    except HTTPException as exc:
+        refused = exc
+    finding(
+        refused is not None and refused.status_code == 409,
+        f"Origin: a receipt whose older unit lives at another shop was voided ({refused})",
+    )
+    assert world.grn(grn["grn_id"])["status"] == "PARTIALLY_ACCEPTED"
+
+
 # -- Reading glasses record an eye size, as their Add-Product form does ---------
 
 RG_TYPED = {"category": "RG", "brand": "Titan", "model": "RG77", "colour": "BLK", "mrp": 1490}

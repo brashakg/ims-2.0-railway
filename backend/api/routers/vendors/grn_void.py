@@ -113,7 +113,7 @@ async def void_grn(
             try:
                 # By ORIGIN: a unit transferred to another shop since is still
                 # this receipt's stock.
-                already_minted = _grn_already_minted(stock_repo, _received_on(grn_id))
+                already_minted = _grn_already_minted(stock_repo, _received_on(grn))
             except Exception as exc:  # noqa: BLE001
                 logger.error(
                     "[VENDOR] GRN %s: could not check for already-minted units "
