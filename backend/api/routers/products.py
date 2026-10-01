@@ -279,22 +279,12 @@ def _validate_product_barcode_or_400(barcode, repo, this_product_id: str):
 
 
 def _refuse_barcode_held_by_another_product(code: str, repo, this_product_id: str):
-    """HTTP 409 when another product already holds this manufacturer barcode,
-    in either field it can live in (products.barcode or the gtin attribute --
-    ProductRepository.find_by_barcode reads both). A GTIN names ONE maker's
-    item: two products with it would go to Shopify/Google as the same thing."""
-    if repo is None or not code:
-        return
-    clash = repo.find_by_barcode(code)
-    if clash is not None and clash.get("product_id") != this_product_id:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Barcode '{code}' is already assigned to another product "
-                f"({clash.get('sku') or clash.get('product_id')}). "
-                "Barcodes must be unique."
-            ),
-        )
+    """HTTP 409 when another product already holds this manufacturer barcode
+    (the one rule: product_master.assert_gtin_free)."""
+    try:
+        _pm.assert_gtin_free(code, repo, this_product_id)
+    except _pm.ProductMasterError as err:
+        raise HTTPException(status_code=err.status, detail=err.message) from err
 
 
 # Fields persisted top-level on the product doc only when provided (additive).

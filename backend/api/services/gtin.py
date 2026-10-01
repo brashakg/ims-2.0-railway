@@ -34,7 +34,7 @@ No emojis (Windows cp1252).
 from __future__ import annotations
 
 import re
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 # GS1 defines exactly these four lengths: GTIN-8, GTIN-12 (UPC-A), GTIN-13
 # (EAN-13) and GTIN-14 (case/carton).
@@ -141,3 +141,22 @@ def sanitise_gtin(raw: Any) -> Optional[str]:
     if not is_valid_gtin(raw):
         return None
     return normalise_candidate(raw)
+
+
+def gtin_spellings(raw: Any) -> List[str]:
+    """Every stored spelling of ONE GTIN, for an exact-match lookup.
+
+    GS1 reads every GTIN right-aligned in 14 digits, so the UPC-A
+    036000291452, 0036000291452 and 00036000291452 are one code: two products
+    holding them would reach Shopify/Google as the same item. A non-numeric or
+    over-long value is only itself; '' / None -> [].
+    """
+    code = normalise_candidate(raw)
+    if not code:
+        return []
+    if not _DIGITS.match(code):
+        return [code]
+    g14 = code.zfill(14)
+    return sorted(
+        {code} | {g14[-n:] for n in VALID_GTIN_LENGTHS if not g14[:-n].strip("0")}
+    )

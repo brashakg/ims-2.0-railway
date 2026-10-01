@@ -51,29 +51,15 @@ _RANDOM_GENERATED = "930713281508"
 # ============================================================================
 
 
-class _FakeRepo:
-    """An in-memory product list behind the REAL find_by_barcode rule: its
-    find_one understands equality on dotted paths and a top-level $or."""
+def _FakeRepo(products: List[Dict[str, Any]]) -> ProductRepository:
+    """The REAL ProductRepository over an in-memory mongomock collection holding
+    `products`, so the real find_by_barcode query runs."""
+    import mongomock
 
-    find_by_barcode = ProductRepository.find_by_barcode
-
-    def __init__(self, products: List[Dict[str, Any]]):
-        self._products = products
-
-    @staticmethod
-    def _get(doc, path):
-        for part in path.split("."):
-            doc = doc.get(part) if isinstance(doc, dict) else None
-        return doc
-
-    def _hit(self, doc, flt):
-        return all(
-            any(self._hit(doc, sub) for sub in v) if k == "$or" else self._get(doc, k) == v
-            for k, v in flt.items()
-        )
-
-    def find_one(self, flt: Dict[str, Any]):
-        return next((p for p in self._products if self._hit(p, flt)), None)
+    coll = mongomock.MongoClient().db.products
+    for p in products:
+        coll.insert_one(dict(p))
+    return ProductRepository(coll)
 
 
 class TestBarcodeValidatorPure:
@@ -153,6 +139,36 @@ class TestBarcodeValidatorPure:
         # Re-saving the SAME product's existing barcode must NOT clash (idempotent).
         repo = _FakeRepo([{"product_id": "p1", "sku": "SKU-1", "barcode": _VALID_A}])
         _validate_product_barcode_or_400(_VALID_A, repo, "p1")
+
+    @pytest.mark.parametrize(
+        "held, typed",
+        [
+            (_UPC_A, "0" + _UPC_A),  # UPC-A held, its 13-digit form typed
+            ("0" + _UPC_A, _UPC_A),
+            (_UPC_A, "00" + _UPC_A),  # the GTIN-14 form
+            (_EAN_8, "000000" + _EAN_8),
+        ],
+    )
+    def test_one_gtin_however_padded_is_one_barcode(self, held, typed):
+        """GS1 reads a GTIN right-aligned in 14 digits: 036000291452 and
+        0036000291452 are one code, so the second product is refused."""
+        from api.routers.products import _validate_product_barcode_or_400
+
+        for field in ({"barcode": held}, {"attributes": {"gtin": held}}):
+            repo = _FakeRepo([{"product_id": "OTHER", "sku": "SKU-X", **field}])
+            with pytest.raises(HTTPException) as ei:
+                _validate_product_barcode_or_400(typed, repo, "p1")
+            assert ei.value.status_code == 409, (field, typed)
+
+    def test_different_gtins_never_clash(self):
+        from api.routers.products import _validate_product_barcode_or_400
+
+        repo = _FakeRepo([{"product_id": "OTHER", "sku": "SKU-X", "barcode": _EAN_8}])
+        _validate_product_barcode_or_400(_VALID_A, repo, "p1")
+        _validate_product_barcode_or_400(_UPC_A, repo, "p1")
+        # Ends in the held EAN-8 but is a different 13-digit GTIN: only
+        # leading ZEROS are padding.
+        _validate_product_barcode_or_400("4000696385074", repo, "p1")
 
     def test_a_code_held_as_another_products_gtin_is_rejected_409(self):
         from api.routers.products import _validate_product_barcode_or_400
@@ -449,3 +465,40 @@ class TestGtinAttributeOnTheEditDoor:
             {"id": spine.get("pim_product_id") or pid}
         )
         assert twin["gtin"] == _VALID_A
+
+
+class TestGtinAttributeOnTheCreateDoor:
+    def test_create_refuses_a_gtin_another_product_holds(self, mock_db):
+        """Uniqueness ran on the edit door only: POST /products with the GTIN
+        of an existing product saved a second holder, and both went to
+        Shopify/Google with it."""
+        from api.routers.products import create_product, ProductCreate
+
+        p1 = _create("GT-C-1")["product_id"]
+        _update(p1, attributes={"gtin": _UPC_A})
+        for typed in (_UPC_A, "0" + _UPC_A):
+            body = ProductCreate(
+                sku=f"GT-C-2-{len(typed)}", category="FRAME", brand="B",
+                model=f"M-C2-{len(typed)}", color="Black", mrp=1000.0,
+                offer_price=900.0, attributes={"gtin": typed},
+            )
+            with pytest.raises(HTTPException) as ei:
+                asyncio.run(create_product(body, _ADMIN))
+            assert ei.value.status_code == 409, typed
+            assert "GT-C-1" in str(ei.value.detail), typed
+        holders = mock_db["products"].count_documents(
+            {"attributes.gtin": {"$in": [_UPC_A, "0" + _UPC_A]}}
+        )
+        assert holders == 1
+
+    def test_create_takes_a_gtin_nobody_holds(self, mock_db):
+        from api.routers.products import create_product, ProductCreate
+
+        body = ProductCreate(
+            sku="GT-C-OK", category="FRAME", brand="B", model="M-C-OK",
+            color="Black", mrp=1000.0, offer_price=900.0,
+            attributes={"gtin": _VALID_B},
+        )
+        pid = asyncio.run(create_product(body, _ADMIN))["product_id"]
+        spine = mock_db["products"].find_one({"product_id": pid})
+        assert spine["attributes"]["gtin"] == _VALID_B

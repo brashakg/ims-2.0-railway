@@ -10,6 +10,7 @@ from typing import List, NamedTuple, Optional, Dict
 from datetime import datetime, date, timedelta
 
 from api.services.barcode import unit_barcode_match
+from api.services.gtin import gtin_spellings
 from api.utils.ist import ist_today
 
 from .base_repository import BaseRepository
@@ -70,13 +71,21 @@ class ProductRepository(BaseRepository):
 
     def find_by_barcode(self, barcode: str) -> Optional[Dict]:
         """Find the product holding this manufacturer barcode (Hub Phase 1
-        duplicate guard + the edit door's uniqueness check). It can live in
-        `barcode` or in the `gtin` attribute (what Manage Barcode and the Add
-        Product form write), so both are read. None for a blank value."""
-        if not barcode:
+        duplicate guard + the create and edit doors' uniqueness check). It can
+        live in `barcode` or in the `gtin` attribute (what Manage Barcode and the
+        Add Product form write), so both are read, in every spelling of the one
+        GTIN (a UPC-A and its 13-digit form are one code). None for a blank
+        value."""
+        spellings = gtin_spellings(barcode)
+        if not spellings:
             return None
         return self.find_one(
-            {"$or": [{"barcode": barcode}, {"attributes.gtin": barcode}]}
+            {
+                "$or": [
+                    {"barcode": {"$in": spellings}},
+                    {"attributes.gtin": {"$in": spellings}},
+                ]
+            }
         )
 
     def _category_filter(

@@ -1351,6 +1351,28 @@ def _guard_gtin_attribute(
     return cleaned
 
 
+def assert_gtin_free(code: Any, product_repo, this_product_id: Optional[str]) -> None:
+    """409 when ANOTHER product already holds this manufacturer barcode.
+
+    THE uniqueness rule for both manufacturer-barcode fields (products.barcode
+    and the gtin attribute), at every door that sets one: create, the spine
+    edit and the catalogue review editor. ProductRepository.find_by_barcode
+    reads both fields in every spelling of the one GTIN. A GTIN names ONE
+    maker's item: two products holding it would go to Shopify/Google as the
+    same thing. `this_product_id` None (a create) clashes with any holder."""
+    if not normalise_candidate(code) or not hasattr(product_repo, "find_by_barcode"):
+        return
+    clash = product_repo.find_by_barcode(code)
+    if clash is not None and clash.get("product_id") != this_product_id:
+        raise ProductMasterError(
+            f"Barcode '{normalise_candidate(code)[:40]}' is already assigned to "
+            f"another product ({clash.get('sku') or clash.get('product_id')}). "
+            "Barcodes must be unique.",
+            status=409,
+            field="gtin",
+        )
+
+
 def normalise_payload(
     *,
     category: Any,
@@ -2549,6 +2571,9 @@ def create_product(
             existing = None
     if existing is not None:
         raise _duplicate_error(existing)
+    # The gtin attribute is the manufacturer barcode that goes to Shopify: one
+    # product per GTIN at create too, not only on edit.
+    assert_gtin_free((spine.get("attributes") or {}).get("gtin"), product_repo, None)
 
     # --- STEP 1: spine FIRST + alone (single-document atomic create) ---
     # raise_on_duplicate=True so a race lost to the unique index surfaces as a
