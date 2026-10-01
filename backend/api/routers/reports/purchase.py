@@ -13,6 +13,13 @@ from ...dependencies import (
 )
 from ...services.cost_mask import mask_cost, mask_cost_list
 from ...services.reorder_policy import auto_reorder_disabled as _auto_reorder_disabled
+from ...services.reorder_policy import (
+    is_low_stock,
+    on_hand,
+    reorder_level,
+    stock_status,
+    top_up,
+)
 from ._shared import router
 
 # ----------------------------------------------------------------------------
@@ -235,6 +242,17 @@ async def purchase_recommendations(
     except Exception:
         products = {}
 
+    # Units on hand at THIS shop (the TechCherry-era products.stock_quantity is
+    # never maintained), compared with the shop's own level (D12).
+    stock_here = {
+        pid: qty
+        for (pid, _shop), qty in on_hand(
+            db.get_collection("stock_units"),
+            store_id=active_store,
+            product_ids=product_ids,
+        ).items()
+    }
+
     # 3. Build per-SKU recommendation rows.
     recs: list = []
     for pid, stats in sku_stats.items():
@@ -247,23 +265,20 @@ async def purchase_recommendations(
         velocity_90d = stats["units_sold"]
         daily_v = velocity_90d / float(lookback_days) if lookback_days else 0.0
         desired_cover = round(daily_v * cover_days)
-        current_stock = int(
-            prod.get("stock_quantity")
-            or prod.get("quantity")
-            or prod.get("current_stock")
-            or 0
-        )
-        reorder_point = int(prod.get("reorder_point") or 0)
+        current_stock = stock_here.get(pid, 0)
+        # None = no level at this shop: velocity alone decides.
+        reorder_point = reorder_level(prod, store_id=active_store)
         gap_units = max(0, desired_cover - current_stock)
-        if gap_units <= 0 and current_stock > reorder_point:
-            # No buying needed — skip.
-            continue
-        # If reorder_point breached even when desired_cover would tolerate
-        # current stock, still recommend a minimum top-up of (reorder_point - current_stock).
-        suggested_qty = max(
-            gap_units,
-            reorder_point - current_stock if reorder_point > current_stock else 0,
+        # If the shop's level is breached (reorder_policy.is_low_stock: at or
+        # under it, the same verdict as the low-stock list) even when
+        # desired_cover would tolerate current stock, still recommend a top-up
+        # back above the level.
+        top_up_units = (
+            top_up(reorder_point, current_stock)
+            if is_low_stock(prod, current_stock, store_id=active_store)
+            else 0
         )
+        suggested_qty = max(gap_units, top_up_units)
         if suggested_qty <= 0:
             continue
 
@@ -292,6 +307,9 @@ async def purchase_recommendations(
                 "daily_velocity": round(daily_v, 2),
                 "current_stock": current_stock,
                 "reorder_point": reorder_point,
+                # The server's verdict for this shop; the screen only renders it.
+                "low_stock": is_low_stock(prod, current_stock, store_id=active_store),
+                "stock_status": stock_status(reorder_point, current_stock),
                 "desired_cover": desired_cover,
                 "gap_units": gap_units,
                 "suggested_order_qty": suggested_qty,
@@ -305,7 +323,9 @@ async def purchase_recommendations(
                 "reason": (
                     f"Sold {velocity_90d} in {lookback_days}d "
                     f"(~{round(daily_v, 1)}/day). Stock {current_stock}, "
-                    f"reorder at {reorder_point}. Buy {suggested_qty} to cover "
+                    + (f"reorder at {reorder_point}. " if reorder_point is not None
+                       else "reorder level not set. ")
+                    + f"Buy {suggested_qty} to cover "
                     f"{cover_days} days."
                 ),
             }

@@ -68,12 +68,10 @@ def _reject_stock_mint_on_online_store(store_id: Optional[str], action: str) -> 
 # /overstock-analysis, the CL drawer listing, the CL power grid's near-expiry
 # flag (via is_on_hand -- it must agree with the grid's own on_hand column),
 # the Stock Ledger (via canonical_state, because it groups BY status) and
-# _on_hand_by_product.
+# _on_hand_by_product. Also read (outside that probe) by reorder_policy.on_hand:
+# every low-stock list and the transfer recommendations.
 #
-# WHAT DOES NOT, and is NOT claimed to: `transfer_recommendations` below still
-# matches a bare "AVAILABLE", because its other half is
-# StockRepository.find_low_stock and the two must move together (POS-owned
-# repository -- owner sign-off). Every ALLOCATION door in this router
+# WHAT DOES NOT, and is NOT claimed to: every ALLOCATION door in this router
 # (find_one_and_update on status=="AVAILABLE") is a different question -- "may
 # I take THIS unit" -- and is deliberately strict.
 #
