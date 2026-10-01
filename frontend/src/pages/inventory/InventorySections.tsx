@@ -100,7 +100,7 @@ export function InventoryLowStockPage() {
               </div>
               <div className="text-right">
                 <p className="text-lg font-bold text-amber-600">{item.stock} left</p>
-                <p className="text-xs text-gray-500">Min: {item.lowStockThreshold}</p>
+                <p className="text-xs text-gray-500">Min: {item.lowStockThreshold ?? 'not set'}</p>
               </div>
             </div>
           ))}

@@ -12,7 +12,6 @@ logger = logging.getLogger(__name__)
 from .auth import get_current_user, require_roles
 from ..utils.dates import to_date_str
 from ..utils.ist import ist_date_str
-from ..services.reorder_policy import low_stock_rows, reorder_level
 from ..dependencies import (
     get_order_repository,
     get_stock_repository,
@@ -23,6 +22,8 @@ from ..dependencies import (
     user_store_scope,
     get_store_repository,
 )
+
+from ..services.reorder_policy import low_stock_rows
 
 router = APIRouter(prefix="", tags=["Analytics"])
 
@@ -206,7 +207,6 @@ def _build_product_master_map(stock_rows: list) -> dict:
                         "category": 1,
                         "cost_price": 1,
                         "mrp": 1,
-                        "reorder_point": 1,
                     },
                 ):
                     pid = str(doc.get("product_id"))
@@ -258,7 +258,6 @@ def _build_product_master_map(stock_rows: list) -> dict:
                         "name": 1,
                         "category": 1,
                         "pricing": 1,
-                        "inventory": 1,
                     },
                 ):
                     pricing = doc.get("pricing") or {}
@@ -269,7 +268,6 @@ def _build_product_master_map(stock_rows: list) -> dict:
                         "category": doc.get("category"),
                         "cost_price": pricing.get("cost_price"),
                         "mrp": pricing.get("mrp"),
-                        "inventory": doc.get("inventory"),
                     }
                     # First doc in natural order matching the pid by ANY of
                     # the three keys wins == the old per-pid $or find_one.
@@ -299,8 +297,6 @@ def _build_product_master_map(stock_rows: list) -> dict:
             "category": product.get("category") or "Other",
             "cost_price": _safe_float(product.get("cost_price")),
             "mrp": _safe_float(product.get("mrp")),
-            # The product's own low-stock level (None = not set, F73).
-            "reorder_level": reorder_level(product),
         }
     return out
 
@@ -533,12 +529,10 @@ async def get_dashboard_summary(
             _safe_int(i.get("quantity")) * _safe_float(i.get("unit_price"))
             for i in inventory
         )
-        # THE low-stock list: products judged by their own level (F73), not
-        # stock_units rows (one per unit, no level).
-        low_stock_items = (
-            len(low_stock_rows(stock_repo, get_product_repository(), store_id))
-            if stock_repo is not None
-            else 0
+        # THIS shop's low-stock list by its own levels (D12). A stock_units row
+        # is one unit and carries no level, so the old per-row compare was 0.
+        low_stock_items = len(
+            low_stock_rows(get_product_repository(), stock_repo, store_id=store_id)
         )
         out_of_stock = len([i for i in inventory if _safe_int(i.get("quantity")) == 0])
 
@@ -966,18 +960,8 @@ async def get_inventory_intelligence(
             return _stock_unit_value(row, master)
 
         # Categorize items
-        # Low stock: THE low-stock list (one row per product, judged by the
-        # product's own level, F73), in stock.
-        low_stock = (
-            [
-                r
-                for r in low_stock_rows(stock_repo, get_product_repository(), store_id)
-                if _safe_int(r.get("quantity")) > 0
-            ]
-            if stock_repo is not None
-            else []
-        )
-        low_ids = {str(r.get("_id")) for r in low_stock}
+        # Low stock: THIS shop's low-stock list by its own levels (D12).
+        low_stock = low_stock_rows(get_product_repository(), stock_repo, store_id=store_id)
 
         # Dead stock: items with zero recent sales (last_sold_at > 90 days ago or never)
         # OR items with quantity but zero sales velocity
@@ -1013,10 +997,7 @@ async def get_inventory_intelligence(
             i
             for i in inventory
             if _safe_float(i.get("sales_velocity", 0)) > 0
-            and (
-                lvl := (master.get(str(i.get("product_id"))) or {}).get("reorder_level")
-            ) is not None
-            and _safe_int(i.get("quantity")) <= lvl * 1.5
+            and _safe_int(i.get("quantity")) <= _safe_int(i.get("reorder_point")) * 1.5
         ]
 
         return {
@@ -1024,19 +1005,14 @@ async def get_inventory_intelligence(
                 "count": len(low_stock),
                 "items": [
                     {
-                        "sku": _sku({"product_id": r.get("_id")}),
-                        "name": _name({"product_id": r.get("_id")}),
-                        "quantity": r.get("quantity", 0),
-                        "reorder_point": r.get("reorder_point"),
+                        "sku": _sku(i),
+                        "name": _name(i),
+                        "quantity": i.get("quantity", 0),
+                        "reorder_point": i.get("reorder_point"),
                     }
-                    for r in low_stock[:10]
+                    for i in low_stock[:10]
                 ],
-                "total_value": sum(
-                    _value(i)
-                    for i in inventory
-                    if i.get("status") == "AVAILABLE"
-                    and str(i.get("product_id")) in low_ids
-                ),
+                "total_value": sum(_value(i) for i in low_stock),
             },
             "dead_stock": {
                 "count": len(dead_stock),
@@ -1345,11 +1321,8 @@ async def get_enterprise_kpis(
         # Return null with a note rather than emit a misleading KPI.
         inventory_turnover = None  # null until beginning-period snapshot is available
 
-        # THE low-stock list (F73): the product's own level, never a unit row.
-        low_stock_count = (
-            len(low_stock_rows(stock_repo, get_product_repository(), store_id))
-            if stock_repo is not None
-            else 0
+        low_stock_count = len(
+            low_stock_rows(get_product_repository(), stock_repo, store_id=store_id)
         )
 
         # ===== TOP 5 PRODUCTS =====

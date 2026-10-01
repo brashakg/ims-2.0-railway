@@ -28,7 +28,6 @@ from ..services import stock_allocation
 from ..services.pricing_caps import evaluate_offer_price, CATEGORY_DISCOUNT_CAPS
 from ..services.gst_rates import gst_rate_for_category, hsn_for_category
 from ..services import product_master as _pm
-from ..services.reorder_policy import is_low_stock, reorder_level
 from ..services import online_delist as _delist
 from ..services.shopify_push import is_variant_of as _is_variant_of
 # THE ONLINE on-hand reader, the one the oversell-risk tile reads (panel round
@@ -1027,7 +1026,8 @@ class InventoryInput(BaseModel):
     initial_quantity: int = 0
     location_id: Optional[str] = None
     barcode: Optional[str] = None
-    reorder_level: int = -1  # -1 = not set, no low-stock alert (F73)
+    # No chain-wide reorder_level: levels are per shop (owner ruling D12),
+    # set through PUT /inventory/reorder-levels/{product_id}.
     # Owner decision (2026-07-04): -1 means "no auto-reorder" -- every reorder
     # engine skips the product until a positive qty is explicitly configured
     # (see api/services/reorder_policy.py).
@@ -1833,9 +1833,6 @@ async def create_catalog_product(
             ),
             "locations": {},
             "barcode": product.inventory.barcode if product.inventory else None,
-            "reorder_level": (
-                product.inventory.reorder_level if product.inventory else -1
-            ),
             # -1 = auto-reorder disabled (owner default; reorder_policy.py).
             "reorder_quantity": (
                 product.inventory.reorder_quantity if product.inventory else -1
@@ -2759,26 +2756,6 @@ async def adjust_product_inventory(
     }
 
 
-@router.get("/products/{product_id}/inventory")
-async def get_product_inventory(
-    product_id: str, current_user: dict = Depends(get_current_user)
-):
-    """Get inventory levels for a product across all locations"""
-    product = _get_catalog_product(product_id)
-    if product is None:
-        raise HTTPException(status_code=404, detail="Product not found")
-
-    return {
-        "product_id": product_id,
-        "sku": product["sku"],
-        "title": product["title"],
-        "total_quantity": product["inventory"]["total_quantity"],
-        "locations": product["inventory"]["locations"],
-        "reorder_level": reorder_level(product),
-        "needs_reorder": is_low_stock(product, product["inventory"]["total_quantity"]),
-    }
-
-
 # ============================================================================
 # ENDPOINTS - Shopify Sync
 # ============================================================================
@@ -2979,7 +2956,6 @@ async def import_products(
                 "inventory": {
                     "total_quantity": 0,
                     "locations": {},
-                    "reorder_level": -1,
                     "reorder_quantity": -1,
                 },
                 "shopify": {"synced": False},

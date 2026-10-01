@@ -22,8 +22,8 @@ returned `{"success": true}` without doing anything.
 Default schedule: every 5 minutes.
 Scope of MVP implementation:
   - SLA escalation scan: tasks past their `due_at` get escalated up the chain
-  - Auto-reorder trigger: when stock drops below `reorder_point`, draft a PO
-  - Both auto-act (Tier 1) since they're fully reversible.
+  - Auto-act (Tier 1) since it is fully reversible.
+  (Reorder drafts are ORACLE's, per product and shop -- owner ruling D12.)
 """
 
 from typing import Dict, Any, List
@@ -49,12 +49,12 @@ _ESCALATION_SCAN_SORT = [("due_at", 1), ("created_at", 1)]
 
 
 class TaskmasterAgent(JarvisAgent):
-    """Real execution — SLA escalation, auto-reorder, SOP enforcement."""
+    """Real execution — SLA escalation, SOP enforcement."""
 
     agent_id = "taskmaster"
     agent_name = "TASKMASTER"
     agent_type = AgentType.EXECUTOR
-    description = "Real execution — SLA escalation, auto-reorder, SOP enforcement, expense anomaly action"
+    description = "Real execution — SLA escalation, SOP enforcement, expense anomaly action"
     version = "1.0.0"
     toggleable = True
 
@@ -69,7 +69,6 @@ class TaskmasterAgent(JarvisAgent):
 
     capabilities = [
         "sla_escalation",
-        "auto_reorder_draft",
         "sop_verification",
         "expense_anomaly_action",
         "po_overdue_reminder",
@@ -87,8 +86,9 @@ class TaskmasterAgent(JarvisAgent):
         # 1. SLA escalation: overdue tasks bumped to next escalation level
         actions.extend(await self._escalate_overdue_tasks())
 
-        # 2. Auto-reorder: stock items below reorder_point → draft PO
-        actions.extend(await self._draft_reorders())
+        # 2. (Auto-reorder drafts are ORACLE's: per product AND shop, judged by
+        # that shop's own level -- owner ruling D12. TASKMASTER's chain-wide
+        # unit-row scan is gone.)
 
         # 2b. F8: aged-backorder sweep. Open PO lines past their expected_date
         # get an accountable P2 task (P1 once critically overdue 14d+). Tier 1
@@ -586,122 +586,6 @@ class TaskmasterAgent(JarvisAgent):
             )
         return actions
 
-    async def _draft_reorders(self) -> List[Dict[str, Any]]:
-        """For products at or under their OWN reorder level, draft a PO. Tier 2
-        -- DRAFT only, not auto-sent. Sending the PO requires Superadmin
-        approval.
-
-        "Low" is THE low-stock list (reorder_policy.low_stock_rows, owner
-        2026-10-01): the product's level, never a stock_units row (one unit,
-        no level). Not set (0, -1, missing) or no product row = never drafted."""
-        stock_coll = self.get_collection("stock_units")
-        po_coll = self.get_collection("purchase_orders")
-        products_coll = self.get_collection("products")
-        if stock_coll is None or po_coll is None or products_coll is None:
-            return []
-        actions = []
-        try:
-            from api.services.reorder_policy import auto_reorder_disabled, low_stock_rows
-            from api.services.purchase_numbering import next_purchase_number
-            from database.repositories.product_repository import (
-                ProductRepository,
-                StockRepository,
-            )
-
-            stock_repo = StockRepository(stock_coll)
-            product_repo = ProductRepository(products_coll)
-            stores = sorted(
-                str(s) for s in stock_coll.distinct("store_id", {"status": "AVAILABLE"}) if s
-            )
-            low_stock = [
-                (store, row)
-                for store in stores
-                for row in low_stock_rows(stock_repo, product_repo, store)
-            ][:20]
-            pids = [str(r["_id"]) for _store, r in low_stock]
-            products = {
-                str(p.get("product_id")): p
-                for p in (product_repo.find_many({"product_id": {"$in": pids}}, limit=len(pids)) if pids else [])
-            }
-            for store, row in low_stock:
-                item = products.get(str(row["_id"])) or {}
-                sku = item.get("sku")
-                # Owner decision (2026-07-04): reorder_quantity <= 0 (the -1
-                # default) = auto-reorder DISABLED -- never draft a PO for it.
-                if not sku or auto_reorder_disabled(item):
-                    continue
-                # Skip if a draft PO already exists for this SKU today.
-                #
-                # BUG-104 round-3 VERDICT: TABLED, deliberately kept on the
-                # UTC day. This is a DEDUPE KEY, not a displayed date: both
-                # sides are aware-UTC ISO strings this same function writes
-                # (created_at below), so the comparison is one self-written
-                # frame and nothing is dropped -- the only effect of the UTC
-                # day is WHICH 24h window suppresses a second draft. Two runs
-                # inside one IST day CAN straddle a UTC midnight (e.g. 04:00
-                # IST then 10:00 IST) and double-draft one PO, but every
-                # auto-draft is Tier-2 requires_approval=True, so a human
-                # sees both and approves one; the cost is a duplicate DRAFT
-                # row, never a duplicate order or money. Aligning to IST
-                # would (a) leave this dedupe-key class inconsistent with
-                # follow_ups/kicker, which round 1 tabled for the same
-                # reason, and (b) itself open a one-off window at the
-                # switchover where the key changes and a duplicate drafts
-                # anyway. Same ruling as the follow_ups scheduled_date entry
-                # in test_no_raw_calendar_derivations.ALLOWED.
-                today_start = (
-                    datetime.now(timezone.utc)
-                    .replace(hour=0, minute=0, second=0, microsecond=0)
-                    .isoformat()
-                )
-                existing_draft = po_coll.find_one(
-                    {
-                        "auto_drafted_by": self.agent_id,
-                        "sku": sku,
-                        "status": "DRAFT",
-                        "created_at": {"$gte": today_start},
-                    }
-                )
-                if existing_draft:
-                    continue
-                # An atomic per-store, per-FY serial from the shared counters
-                # (purchase_numbering), never a timestamp + sku[:6]: readable
-                # SKUs share their first 6 characters (every Ray-Ban frame is
-                # FR-RAY), so one run used to give all its drafts one number.
-                draft_po = {
-                    "po_number": next_purchase_number(
-                        self.get_collection("counters"), doc_type="PO-AUTO", store_id=store
-                    ),
-                    "sku": sku,
-                    "vendor_id": item.get("preferred_vendor_id") or item.get("default_vendor_id"),
-                    "quantity": max(row["reorder_point"] * 2 - int(row.get("quantity") or 0), 1),
-                    "status": "DRAFT",
-                    "auto_drafted_by": self.agent_id,
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                    "requires_approval": True,  # Tier 2 — Superadmin must approve before send
-                }
-                try:
-                    po_coll.insert_one(draft_po)
-                    await self._audit_log(
-                        action="po_draft",
-                        target=draft_po["po_number"],
-                        before={"sku_quantity": row.get("quantity")},
-                        after={"po_status": "DRAFT", "po_qty": draft_po["quantity"]},
-                        tier=2,
-                    )
-                    actions.append(
-                        {
-                            "action": "po_drafted",
-                            "sku": sku,
-                            "qty": draft_po["quantity"],
-                        }
-                    )
-                except Exception as e:
-                    logger.warning(f"[TASKMASTER] Failed to draft PO for {sku}: {e}")
-        except Exception as e:
-            logger.debug(f"[TASKMASTER] Reorder scan error: {e}")
-        return actions
-
     async def _sweep_aged_backorders(self) -> List[Dict[str, Any]]:
         """F8: turn aged open PO lines into accountable backorder tasks.
 
@@ -1027,10 +911,7 @@ class TaskmasterAgent(JarvisAgent):
 
     async def on_event(self, event: str, payload: Dict[str, Any]):
         """React to events from other agents."""
-        if event == "stock.below_reorder":
-            # SENTINEL or another agent saw a stock drop — run reorder check
-            await self._draft_reorders()
-        elif event == "anomaly.detected" and payload.get("kind") == "rx_out_of_range":
+        if event == "anomaly.detected" and payload.get("kind") == "rx_out_of_range":
             # ORACLE flagged a bad Rx — we record it as a task instead of
             # auto-correcting (Tier 3 advisory only)
             await self._create_advisory_task(payload)

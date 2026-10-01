@@ -555,7 +555,7 @@ class OracleAgent(JarvisAgent):
             ]}
             prod_proj = {"product_id": 1, "sku": 1, "preferred_vendor_id": 1,
                          "default_vendor_id": 1, "vendor_id": 1,
-                         "reorder_point": 1, "reorder_quantity": 1}
+                         "reorder_levels": 1, "reorder_quantity": 1}
             try:
                 prods = list(products_coll.find(prod_query, prod_proj))
             except Exception as e:  # noqa: BLE001
@@ -600,9 +600,9 @@ class OracleAgent(JarvisAgent):
                 or prod.get("default_vendor_id")
                 or prod.get("vendor_id")
             )
+            # THIS shop's level (D12); None = not set (no floor, velocity only).
             from api.services.reorder_policy import reorder_level
-            # Not set (0, -1, missing), or no product row at all, = 0 (F73).
-            reorder_point = reorder_level(prod_by_id.get(pid)) or 0
+            reorder_point = reorder_level(prod, store_id=store_id)
             qty = recommended_qty(
                 on_hand=on_hand, effective_rate=eff, horizon_days=horizon,
                 lead_time_days=self._DEFAULT_LEAD_TIME_DAYS,

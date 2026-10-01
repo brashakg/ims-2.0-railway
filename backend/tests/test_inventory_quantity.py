@@ -8,7 +8,7 @@ WITHOUT a `quantity` field. Every read that aggregates `{"$sum": "$quantity"}`
 or does `stock.get("quantity", 0)` then summed/read a MISSING field and got 0,
 so on-hand showed as zero across:
 
-  * /inventory/low-stock              (StockRepository.find_low_stock)
+  * /inventory/low-stock              (reorder_policy.low_stock_rows)
   * /inventory/transfer-recommendations
   * /inventory/sell-through-analysis
   * /inventory/overstock-analysis
@@ -174,6 +174,9 @@ def _seed_product(mongo_db, **over: Any) -> str:
         "mrp": 5000.0,
         "offer_price": 4500.0,
         "is_active": True,
+        # The shop's own reorder level (owner ruling D12): without one a
+        # product is never on the low-stock list.
+        "reorder_levels": {STORE: 5},
     }
     doc.update(over)
     mongo_db["products"].insert_one(doc)
@@ -219,9 +222,8 @@ def _seed_sold_order(mongo_db, product_id: str, qty: int, store_id: str = STORE)
 class TestLowStockOnHand:
     def test_legacy_units_count_toward_on_hand(self, client, mongo_db):
         """3 legacy units (no quantity field) must report on-hand 3, not 0,
-        and surface as low-stock at the product's own level (5). A product
-        with no level is never on the list (owner 2026-10-01, F73)."""
-        pid = _seed_product(mongo_db, reorder_point=5)
+        and only surface as low-stock under the shop's level (5)."""
+        pid = _seed_product(mongo_db)
         _seed_legacy_units(mongo_db, pid, 3)
 
         resp = client.get("/inventory/low-stock")
@@ -234,9 +236,9 @@ class TestLowStockOnHand:
         )
 
     def test_well_stocked_product_not_flagged_low(self, client, mongo_db):
-        """10 legacy units is above the product's level (5) -> not low-stock
-        (proves the count is real, not a constant)."""
-        pid = _seed_product(mongo_db, reorder_point=5)
+        """10 legacy units is above the level -> not low-stock (proves the
+        count is real, not a constant)."""
+        pid = _seed_product(mongo_db)
         _seed_legacy_units(mongo_db, pid, 10)
 
         resp = client.get("/inventory/low-stock")
@@ -384,7 +386,7 @@ class TestAddStockStampsQuantity:
 
     def test_added_units_visible_to_low_stock(self, client, mongo_db):
         """End-to-end: add_stock then low-stock reflects the new on-hand."""
-        pid = _seed_product(mongo_db, reorder_point=5)
+        pid = _seed_product(mongo_db)
         client.post("/inventory/stock/add", json={"product_id": pid, "quantity": 2})
 
         resp = client.get("/inventory/low-stock")

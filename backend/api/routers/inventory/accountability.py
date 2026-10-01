@@ -8,7 +8,6 @@ from ._shared import (
     Optional,
     Query,
     _INVENTORY_ROLES,
-    _low_stock_rows,
     datetime,
     get_product_repository,
     get_stock_repository,
@@ -21,6 +20,7 @@ from ._shared import (
 from .helpers import (
     _get_db,
 )
+from ...services.reorder_policy import low_stock_rows, on_hand
 
 # ============================================================================
 # INVENTORY INTELLIGENCE: transfer recommendations + staff accountability
@@ -39,11 +39,11 @@ class AccountabilityAssign(BaseModel):
 @router.get("/transfer-recommendations")
 async def transfer_recommendations(
     store_id: Optional[str] = Query(None),
+    threshold: int = Query(5, ge=0, le=1000),
     current_user: dict = Depends(require_roles(*_INVENTORY_ROLES)),
 ):
-    """Suggest inter-store transfers to refill the active store's low products
-    (THE low-stock list) from other stores that hold a surplus, each toward
-    twice its own reorder level -- no fixed threshold. Fail-soft."""
+    """Suggest inter-store transfers to refill the active store's low/out
+    products from other stores that hold a surplus. Fail-soft."""
     from ...services.inventory_intel import recommend_transfers
 
     stock_repo = get_stock_repository()
@@ -52,57 +52,28 @@ async def transfer_recommendations(
         return {"recommendations": [], "store_id": active_store}
 
     try:
-        low = _low_stock_rows(stock_repo, get_product_repository(), active_store)
-        low_ids = [r["_id"] for r in low if r.get("_id")]
+        # Low at THIS shop by its own level (D12); a shop with no level is
+        # never refilled. `threshold` only sizes the refill (to threshold*2).
+        low = low_stock_rows(get_product_repository(), stock_repo, store_id=active_store)
+        low_ids = [r["_id"] for r in low]
         if not low_ids:
             return {"recommendations": [], "store_id": active_store}
 
-        # Cross-store available levels for just the deficit products.
-        rows = (
-            stock_repo.aggregate(
-                [
-                    {"$match": {"product_id": {"$in": low_ids}, "status": "AVAILABLE"}},
-                    {
-                        "$group": {
-                            "_id": {"p": "$product_id", "s": "$store_id"},
-                            # One row == one unit; missing quantity counts as 1.
-                            "qty": {"$sum": {"$ifNull": ["$quantity", 1]}},
-                        }
-                    },
-                    # Flatten the pair: the repository's aggregate() turns any
-                    # non-string _id into a string (its ObjectId fix), which
-                    # left key.get() failing and this endpoint always empty.
-                    {"$project": {"_id": 0, "p": "$_id.p", "s": "$_id.s", "qty": 1}},
-                ]
-            )
-            or []
-        )
+        # Every shop's on-hand of just the deficit products (the same count).
         store_levels: Dict[str, Dict[str, int]] = {}
-        for r in rows:
-            store_levels.setdefault(r.get("p"), {})[r.get("s")] = int(r.get("qty", 0) or 0)
-
-        # Enrich with product names.
-        names: Dict[str, str] = {}
-        product_repo = get_product_repository()
-        if product_repo is not None:
-            for p in product_repo.find_many({"product_id": {"$in": low_ids}}) or []:
-                names[p.get("product_id")] = (
-                    p.get("name") or p.get("product_name") or ""
-                )
+        for (pid, sid), qty in on_hand(stock_repo, store_id=None, product_ids=low_ids).items():
+            store_levels.setdefault(pid, {})[sid] = qty
 
         low_products = [
-            {
-                "product_id": r["_id"],
-                "quantity": int(r.get("quantity", 0) or 0),
-                "reorder_point": r.get("reorder_point"),
-                "product_name": names.get(r["_id"], ""),
-            }
+            {"product_id": r["_id"], "quantity": r["quantity"], "product_name": r["name"]}
             for r in low
-            if r.get("_id")
         ]
-        recs = recommend_transfers(active_store, low_products, store_levels)
+        recs = recommend_transfers(
+            active_store, low_products, store_levels, threshold=threshold
+        )
         return {
             "store_id": active_store,
+            "threshold": threshold,
             "recommendations": recs,
             "count": len(recs),
         }

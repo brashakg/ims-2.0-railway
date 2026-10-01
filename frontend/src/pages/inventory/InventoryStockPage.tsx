@@ -40,6 +40,8 @@ import { productApi, type CreateProductPayload } from '../../services/api/produc
 import type { DisplayFixture, } from '../../services/api/displayFixtures';
 import type { DisplayPlacement } from '../../services/api/displayPlacements';
 import { BarcodeManagementModal } from '../../components/inventory/BarcodeManagementModal';
+import { REORDER_LEVEL_ROLES } from './inventoryRoles';
+import { ShopReorderLevel } from './ShopReorderLevel';
 import { UnitLabelsModal } from '../../components/labels/UnitLabelsModal';
 import { Pagination } from '../../components/common/Pagination';
 import { ImageLightbox } from '../../components/common/ImageLightbox';
@@ -97,6 +99,8 @@ export function InventoryStockPage() {
   const canAddProduct = hasRole(['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']);
   const canExport = hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']);
   const canManageBarcode = hasRole(['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'STORE_MANAGER']);
+  // THIS shop's reorder level (owner ruling D12): managers + admins set it.
+  const canSetReorderLevel = hasRole(REORDER_LEVEL_ROLES);
   // Mirrors the backend gate on GET /products/cataloguers (manager ladder).
   const canSeeCataloguers = hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER']);
 
@@ -579,6 +583,18 @@ export function InventoryStockPage() {
                             {item.reserved > 0 && (
                               <span className="text-xs text-amber-600 ml-1">+{item.reserved} reserved</span>
                             )}
+                            {storeId && item.id && (
+                              <div className="mt-0.5 whitespace-nowrap">
+                                <ShopReorderLevel
+                                  productId={item.id}
+                                  storeId={storeId}
+                                  level={item.reorder_point}
+                                  canEdit={canSetReorderLevel}
+                                  // The row AND the low-stock list/count.
+                                  onSaved={() => queryClient.invalidateQueries({ queryKey: ['inventory'] })}
+                                />
+                              </div>
+                            )}
                           </td>
                           {/* v2-2b: Zone column - primary placement. Cell click
                               deep-links to the Display layout SECTION URL with
@@ -735,6 +751,7 @@ export function InventoryStockPage() {
               : 'In-store only',
           ],
           ['Location', detailItem.location || '-'],
+          ['Reorder level (this shop)', detailItem.reorder_point == null ? 'not set' : String(detailItem.reorder_point)],
           // Attribution is a manager surface (mirrors the backend gate).
           ...(canSeeCataloguers
             ? ([['Catalogued by', detailItem.created_by_name || '-']] as Array<[string, string]>)

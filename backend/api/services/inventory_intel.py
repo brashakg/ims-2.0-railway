@@ -19,30 +19,28 @@ def recommend_transfers(
     deficit_store: str,
     low_products: List[Dict[str, Any]],
     store_levels: Dict[str, Dict[str, int]],
+    threshold: int = 5,
     target: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Suggest inter-store transfers to refill a deficit store.
 
     - deficit_store: the store that is short.
-    - low_products: [{product_id, product_name?, quantity, reorder_point}], the
-      rows of THE low-stock list (reorder_policy.low_stock_rows), each with the
-      product's own level.
+    - low_products: [{product_id, product_name?, quantity}] already <= threshold
+      at deficit_store.
     - store_levels: {product_id: {store_id: available_qty}} across ALL stores.
-    - target: level to refill the deficit store toward (default: twice the
-      product's own level; a product with no level is never refilled).
+    - target: level to refill the deficit store toward (default threshold*2).
 
     For each low product we find the store with the most EXCESS above target and
     move min(need, excess) units. A source is only tapped for what keeps it at
     or above target, so we never create a new deficit. Pure + deterministic.
     """
+    refill_to = target if target is not None else threshold * 2
     recs: List[Dict[str, Any]] = []
 
     for lp in low_products:
         pid = lp.get("product_id")
-        level = lp.get("reorder_point")
-        if not pid or (target is None and not level):
+        if not pid:
             continue
-        refill_to = target if target is not None else 2 * int(level)
         levels = store_levels.get(pid, {})
         have = int(levels.get(deficit_store, lp.get("quantity", 0)) or 0)
         need = refill_to - have

@@ -12,8 +12,8 @@ from ...utils.ist import (
 from ..auth import get_current_user, require_roles
 from ...dependencies import (
     get_order_repository,
-    get_product_repository,
     get_stock_repository,
+    get_product_repository,
     get_customer_repository,
     get_task_repository,
     get_db,
@@ -107,7 +107,7 @@ async def dashboard_stats(
 
     # Fetch inventory data
     if stock_repo is not None:
-        low_stock = low_stock_rows(stock_repo, get_product_repository(), active_store)
+        low_stock = low_stock_rows(get_product_repository(), stock_repo, store_id=active_store)
         low_stock_items = len(low_stock) if low_stock else 0
 
     # Fetch customer data
@@ -166,7 +166,7 @@ async def inventory_report(
 
     if stock_repo is not None:
         all_stock = stock_repo.find_many({"store_id": active_store}, limit=0)
-        low_stock = low_stock_rows(stock_repo, get_product_repository(), active_store)
+        low_stock = low_stock_rows(get_product_repository(), stock_repo, store_id=active_store)
 
         total_items = len(all_stock)
         total_value = sum(

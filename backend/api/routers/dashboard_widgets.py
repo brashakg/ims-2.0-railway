@@ -16,7 +16,8 @@ from datetime import datetime
 
 from ..utils.ist import ist_day_start_utc, ist_today, now_ist
 from .auth import get_current_user, require_roles
-from ..services.reorder_policy import is_low_stock, reorder_level
+from ..dependencies import validate_store_access
+from ..services.reorder_policy import low_stock_rows, out_of_stock_count
 
 # /admin/* widgets surface cross-store escalations + system status and were
 # AUTHENTICATED-only (any user) -- they bypass the admin router's gate because
@@ -267,18 +268,13 @@ async def inventory_stock_count_status(
     store_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
+    store = validate_store_access(store_id, current_user)
     products = _coll("products")
-    low = oos = total = 0
-    if products is not None:
-        for p in products.find({}):
-            if p.get("is_active") is False:
-                continue
-            total += 1
-            qty = int(p.get("stock_quantity") or p.get("quantity") or 0)
-            if qty <= 0:
-                oos += 1
-            elif is_low_stock(p, qty):
-                low += 1
+    # Sold out by the one on-hand rule, not products.stock_quantity.
+    total, oos = out_of_stock_count(products, _coll("stock_units"), store_id=store)
+    # THIS shop's low-stock list by its own levels (D12); every shop when the
+    # caller has none.
+    low = len(low_stock_rows(products, _coll("stock_units"), store_id=store))
     return {"total_products": total, "low_stock": low, "out_of_stock": oos}
 
 
@@ -395,33 +391,22 @@ async def owner_digest(
         except Exception:
             pass
 
-    low = oos = 0
-    low_items: List[Dict[str, Any]] = []
     products = _coll("products")
-    if products is not None:
-        pq: Dict[str, Any] = {}
-        if store_id:
-            pq["store_id"] = store_id
-        for p in products.find(pq):
-            if p.get("is_active") is False:
-                continue
-            qty = int(p.get("stock_quantity") or p.get("quantity") or 0)
-            rp = reorder_level(p)  # None = not set (F73)
-            is_low = qty <= 0 or is_low_stock(p, qty)
-            if qty <= 0:
-                oos += 1
-            elif is_low:
-                low += 1
-            if is_low and len(low_items) < 10:
-                low_items.append(
-                    {
-                        "name": p.get("name") or p.get("title") or p.get("sku"),
-                        "sku": p.get("sku"),
-                        "qty": qty,
-                        "reorder_point": rp,
-                        "store_id": p.get("store_id"),
-                    }
-                )
+    # Sold out by the one on-hand rule, not products.stock_quantity.
+    _total, oos = out_of_stock_count(products, _coll("stock_units"), store_id=store_id)
+    # Low stock: each shop judged by its own level (D12); store_id None = all.
+    lows = low_stock_rows(products, _coll("stock_units"), store_id=store_id)
+    low = len(lows)
+    low_items: List[Dict[str, Any]] = [
+        {
+            "name": r["name"] or r["sku"],
+            "sku": r["sku"],
+            "qty": r["quantity"],
+            "reorder_point": r["reorder_point"],
+            "store_id": r["store_id"],
+        }
+        for r in lows[:10]
+    ]
 
     total_staff = present_today = 0
     users = _coll("users")

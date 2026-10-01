@@ -10,11 +10,9 @@
 // F13/D5 the new product's readable SKU is PREVIEWED before saving, and the
 //        preview comes from the server (the minting function), never a copy.
 // F68    after Save + New the cursor is in Model No and the reorder level stays.
-// F69    the same-model chip keeps the typed colour, copies weight + reorder
-//        level, and is at least the app's 36px control height.
-// F73    reorder level -1 = not set: a new form starts blank and says 'not
-//        set', a blank level is never saved as a number, and editing a product
-//        whose level is -1 shows 'not set' instead of inventing 5.
+// F69    the same-model chip keeps the typed colour, copies weight + this
+//        shop's reorder level, and is at least the app's 36px control height.
+// (F73 reorder levels are per shop, owner D12: perShopReorderLevel*.test.tsx.)
 // F92    menu labels say what each buying door is for; Buy Desk does not claim
 //        '0 products' while it is still loading.
 
@@ -25,7 +23,7 @@ import { MemoryRouter } from 'react-router-dom';
 
 vi.mock('../../../context/AuthContext', () => ({
   useAuth: () => ({
-    user: { id: 'USR-1', name: 'Avinash', roles: ['ADMIN'] },
+    user: { id: 'USR-1', name: 'Avinash', roles: ['ADMIN'], activeStoreId: 'S1' },
     hasRole: () => true,
   }),
 }));
@@ -45,7 +43,7 @@ const SOURCE_PRODUCT = {
   hsn_code: '900410',
   gst_rate: 18,
   weight: 25,
-  reorder_point: 2,
+  reorder_levels: { S1: 2 },
   images: [],
 };
 const BRANDS = [
@@ -69,6 +67,11 @@ vi.mock('../../../services/api/products', () => ({
     updateProduct: (...a: unknown[]) => updateProduct(...a),
     previewSku: (...a: unknown[]) => previewSku(...a),
   },
+}));
+const setShopLevel = vi.fn(async () => ({}));
+vi.mock('../../../services/api/inventory', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../services/api/inventory')>()),
+  reorderApi: { setShopLevel: (...a: unknown[]) => setShopLevel(...a) },
 }));
 vi.mock('../../../services/api/productTemplates', () => ({
   productTemplatesApi: { list: vi.fn(async () => ({ templates: [] })) },
@@ -112,7 +115,7 @@ const renderPage = (url = '/catalog/add') =>
 // One change event per field, as the sibling suite does (the page re-validates
 // on every change).
 const fill = (el: HTMLElement, value: string) => fireEvent.change(el, { target: { value } });
-const reorderInput = () => screen.getByLabelText('Reorder Level') as HTMLInputElement;
+const reorderInput = () => screen.getByLabelText('Reorder level at this shop') as HTMLInputElement;
 
 async function sunglass(user: ReturnType<typeof userEvent.setup>) {
   await user.click(screen.getByText('Sunglass'));
@@ -122,14 +125,6 @@ async function sunglass(user: ReturnType<typeof userEvent.setup>) {
   fill(screen.getByLabelText(/^MRP/), '7890');
 }
 
-// Every level a save sent, -1 (not set) included; a save that sent none adds nothing.
-const sentLevels = () =>
-  [
-    ...createProduct.mock.calls.map((c) => (c[0] as Record<string, unknown>)?.reorder_point),
-    ...updateProduct.mock.calls.map((c) => (c[1] as Record<string, unknown>)?.reorder_point),
-  ].filter((v) => v !== undefined);
-// A number saved as a LEVEL. Only above 0 is a level (owner 2026-10-01).
-const savedLevels = () => sentLevels().filter((v) => typeof v === 'number' && v > 0);
 const reviewRow = (label: string) => {
   const card = screen.getByRole('heading', { name: 'Review' }).closest('.card') as HTMLElement;
   return within(card).getByText(label).closest('dl') as HTMLElement;
@@ -141,6 +136,7 @@ beforeEach(() => {
   createProduct.mockClear();
   updateProduct.mockClear();
   getProduct.mockClear();
+  setShopLevel.mockClear();
   previewSku.mockReset();
   previewSku.mockImplementation(async () => ({ category: 'SUNGLASS', sku: 'SG-RAYBAN-RB4165-601' }));
 });
@@ -264,6 +260,7 @@ describe('F68 - Save + New keeps you typing', () => {
     await waitFor(() => expect(createProduct).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(screen.getByLabelText(/^Model No/)).toHaveFocus());
     expect(reorderInput().value).toBe('2');
+    expect(setShopLevel).toHaveBeenCalledWith('P-NEW', 'S1', 2);
   });
 });
 
@@ -296,91 +293,6 @@ describe('F69 - the same-model chip', () => {
     );
     const chip = screen.getByRole('button', { name: /001/ });
     expect(chip.className).toMatch(/(^|\s)min-h-(9|10|11|12|\[(3[6-9]|4\d)px\])(\s|$)/);
-  });
-});
-
-describe('F73 - reorder level -1 = not set', () => {
-  it('a new product starts with the level blank and says not set', async () => {
-    const user = userEvent.setup();
-    renderPage();
-    await user.click(screen.getByText('Sunglass'));
-    expect(reorderInput().value).toBe('');
-    expect(reorderInput().placeholder).toMatch(/not set/i);
-    const card = screen.getByRole('heading', { name: 'Review' }).closest('.card') as HTMLElement;
-    const row = within(card).getByText('Reorder level').closest('dl') as HTMLElement;
-    expect(row).toHaveTextContent(/not set/i);
-  });
-
-  it('a typed 0 is not set: the Review says so and no level is saved', async () => {
-    const user = userEvent.setup();
-    renderPage();
-    await sunglass(user);
-    fill(reorderInput(), '0');
-    expect(reviewRow('Reorder level')).toHaveTextContent(/not set/i);
-    await user.click(screen.getByRole('button', { name: /Save product/ }));
-    await waitFor(() => expect(createProduct).toHaveBeenCalledTimes(1));
-    await new Promise((r) => setTimeout(r, 50)); // the follow-up write, if any
-    expect(sentLevels()).toEqual([]);
-  });
-
-  it('editing: a stored 0 shows not set, and 0 typed saves -1 (not set)', async () => {
-    getProduct.mockResolvedValueOnce({ ...SOURCE_PRODUCT, reorder_point: 0 });
-    const user = userEvent.setup();
-    renderPage('/catalog/add?edit=P-SRC');
-    await screen.findByRole('button', { name: /Save changes/ });
-    await waitFor(() => expect(screen.getByLabelText(/^Model No/)).toHaveValue('RB4165'));
-    expect(reorderInput().value).toBe('');
-    fill(reorderInput(), '0');
-    await user.click(screen.getByRole('button', { name: /Save changes/ }));
-    await waitFor(() => expect(updateProduct).toHaveBeenCalledTimes(1));
-    expect(sentLevels()).toEqual([-1]);
-  });
-
-  it('a level left blank is never saved as a number', async () => {
-    const user = userEvent.setup();
-    renderPage();
-    await sunglass(user);
-    fill(reorderInput(), '');
-    await user.click(screen.getByRole('button', { name: /Save product/ }));
-    await waitFor(() => expect(createProduct).toHaveBeenCalledTimes(1));
-    await new Promise((r) => setTimeout(r, 50)); // the follow-up write, if any
-    expect(savedLevels()).toEqual([]);
-  });
-
-  it('editing a product whose level is -1 shows not set, and saving keeps it unset', async () => {
-    getProduct.mockResolvedValueOnce({ ...SOURCE_PRODUCT, reorder_point: -1 });
-    const user = userEvent.setup();
-    renderPage('/catalog/add?edit=P-SRC');
-    await screen.findByRole('button', { name: /Save changes/ });
-    await waitFor(() => expect(screen.getByLabelText(/^Model No/)).toHaveValue('RB4165'));
-    expect(reorderInput().value).toBe('');
-    await user.click(screen.getByRole('button', { name: /Save changes/ }));
-    await waitFor(() => expect(updateProduct).toHaveBeenCalledTimes(1));
-    expect(sentLevels()).toEqual([-1]);
-  });
-});
-
-describe('F73 - a typed level is never silently lost', () => {
-  it.each(['2.5', '-3'])('editing: %s is refused, not saved as not set', async (typed) => {
-    const user = userEvent.setup();
-    renderPage('/catalog/add?edit=P-SRC');
-    await screen.findByRole('button', { name: /Save changes/ });
-    await waitFor(() => expect(reorderInput().value).toBe('2'));
-    fill(reorderInput(), typed);
-    await user.click(screen.getByRole('button', { name: /Save changes/ }));
-    await new Promise((r) => setTimeout(r, 50));
-    expect(updateProduct).not.toHaveBeenCalled();
-    expect(reorderInput().value).toBe(typed); // still there to correct
-  });
-
-  it('creating: 2.5 is refused, not saved without a level', async () => {
-    const user = userEvent.setup();
-    renderPage();
-    await sunglass(user);
-    fill(reorderInput(), '2.5');
-    await user.click(screen.getByRole('button', { name: /Save product/ }));
-    await new Promise((r) => setTimeout(r, 50));
-    expect(createProduct).not.toHaveBeenCalled();
   });
 
   it('the duplicate rescue keeps the typed level', async () => {

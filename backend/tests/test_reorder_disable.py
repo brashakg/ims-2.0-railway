@@ -15,19 +15,18 @@ Covers the 2026-07-04 owner decision:
        - buy_desk.build_row: buy_signal is None (FE shows "-").
        - jarvis _compute_inventory_live: low-stock alert kept, reorder
          recommendation dropped.
-       - TASKMASTER _draft_reorders: no auto-draft PO for a disabled SKU.
+     (TASKMASTER's own draft-PO scan is deleted -- ORACLE is the one reorder
+     engine; see test_per_shop_reorder_levels.py.)
   4. catalog.py InventoryInput default + products.py ProductUpdate accepts -1.
 
 Run: JWT_SECRET_KEY=test python -m pytest backend/tests/test_reorder_disable.py -q
 """
 
-import asyncio
 import os
 import sys
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.environ.setdefault("JWT_SECRET_KEY", "test")
 os.environ.setdefault("ENVIRONMENT", "test")
 
@@ -133,6 +132,9 @@ class TestCreateDoorStamp:
 # ---------------------------------------------------------------------------
 
 
+SHOP = "BV-TEST-01"
+
+
 def _alert_product(reorder_quantity):
     return {
         "sku": "FR-X-1",
@@ -141,7 +143,7 @@ def _alert_product(reorder_quantity):
         "category": "FRAME",
         "stock_quantity": 2,
         "cost_price": 1000.0,
-        "reorder_point": 5,
+        "reorder_levels": {SHOP: 5},  # this shop's own level (owner D12)
         "reorder_quantity": reorder_quantity,
     }
 
@@ -155,6 +157,7 @@ class TestStockAlertGuard:
             now=datetime(2026, 7, 4),
             dead_days=90,
             lead_time_days=14,
+            store_id=SHOP,
         )
 
     def test_enabled_product_gets_reorder_alert(self):
@@ -214,59 +217,30 @@ class TestBuyDeskGuard:
 # ---------------------------------------------------------------------------
 
 
-class _FakeColl:
-    def __init__(self, docs):
-        self._docs = [dict(d) for d in docs]
-        self.inserted = []
-
-    def find(self, query=None, projection=None):
-        query = query or {}
-        out = []
-        for d in self._docs:
-            ok = True
-            for k, v in query.items():
-                if isinstance(v, dict) and "$in" in v:
-                    if d.get(k) not in v["$in"]:
-                        ok = False
-                elif d.get(k) != v:
-                    ok = False
-            if ok:
-                out.append(dict(d))
-        return _FakeCursor(out)
-
-    def find_one(self, query=None, projection=None):
-        res = list(self.find(query))
-        return res[0] if res else None
-
-    def insert_one(self, doc):
-        self.inserted.append(dict(doc))
-
-
-class _FakeCursor(list):
-    def limit(self, n):
-        return _FakeCursor(self[:n])
-
-
 class TestJarvisGuard:
     def test_disabled_product_alerted_but_not_recommended(self, monkeypatch):
+        import mongomock
+
         from api.routers import jarvis as jv
 
-        products = _FakeColl([
+        db = mongomock.MongoClient().db
+        db.products.insert_many([
             {  # low stock + auto-reorder DISABLED -> alert only
-                "sku": "S-OFF", "name": "Disabled", "is_active": True,
-                "stock_quantity": 2, "reorder_point": 5,
+                "product_id": "P-OFF", "sku": "S-OFF", "name": "Disabled",
+                "is_active": True, "reorder_levels": {SHOP: 5},
                 "reorder_quantity": -1, "offer_price": 100,
             },
             {  # low stock + ENABLED -> alert + recommendation
-                "sku": "S-ON", "name": "Enabled", "is_active": True,
-                "stock_quantity": 2, "reorder_point": 5,
+                "product_id": "P-ON", "sku": "S-ON", "name": "Enabled",
+                "is_active": True, "reorder_levels": {SHOP: 5},
                 "reorder_quantity": 30, "offer_price": 100,
             },
         ])
-        monkeypatch.setattr(
-            jv, "get_db_collection",
-            lambda name: products if name == "products" else None,
-        )
+        db.stock_units.insert_many([
+            {"product_id": pid, "store_id": SHOP, "status": "AVAILABLE", "quantity": 1}
+            for pid in ("P-OFF", "P-OFF", "P-ON", "P-ON")
+        ])
+        monkeypatch.setattr(jv, "get_db_collection", lambda name: db[name])
         out = jv.JarvisAnalyticsEngine._compute_inventory_live()
         assert out is not None
         rec_skus = [r["sku"] for r in out["reorder_recommendations"]]
@@ -274,101 +248,3 @@ class TestJarvisGuard:
         assert "S-ON" in rec_skus
         assert "S-OFF" not in rec_skus
         assert "S-OFF" in alert_skus  # the low-stock ALERT is kept
-
-
-# ---------------------------------------------------------------------------
-# 3d. TASKMASTER auto-draft PO
-# ---------------------------------------------------------------------------
-
-
-class _FakeDb:
-    def __init__(self, colls):
-        self._colls = colls
-
-    def get_collection(self, name):
-        return self._colls.get(name)
-
-
-class TestTaskmasterGuard:
-    """TASKMASTER drafts from THE low-stock list (reorder_policy.low_stock_rows,
-    owner 2026-10-01): each product's OWN level over the real stock_units
-    aggregation. It used to match `quantity < reorder_point` on stock_units
-    rows, which carry no level, so it never drafted anything."""
-
-    def _run(self, products, units):
-        from agents.implementations.taskmaster import TaskmasterAgent
-        from strict_fakes import StrictDB
-
-        db = StrictDB()
-        db.seed("products", [dict(p) for p in products])
-        db.seed("stock_units", [dict(u) for u in units])
-        actions = asyncio.run(TaskmasterAgent(db=db)._draft_reorders())
-        return {a["sku"]: a["qty"] for a in actions}, db.get_collection("purchase_orders").docs
-
-    @staticmethod
-    def _units(pid, n, store="S1", **extra):
-        return [
-            {"stock_id": f"U-{pid}-{store}-{i}", "product_id": pid, "store_id": store,
-             "status": "AVAILABLE", **extra}
-            for i in range(n)
-        ]
-
-    def test_a_product_at_its_own_level_is_drafted(self):
-        # The audit's input: level 3, auto-reorder on (4), 2 units on hand.
-        drafted, pos = self._run(
-            [{"product_id": "P-ON", "sku": "SKU-ON", "reorder_point": 3, "reorder_quantity": 4,
-              "preferred_vendor_id": "V1"}],
-            self._units("P-ON", 2),
-        )
-        assert drafted == {"SKU-ON": 4}  # 3 * 2 - 2
-        assert [(po["sku"], po["vendor_id"], po["status"]) for po in pos] == [("SKU-ON", "V1", "DRAFT")]
-
-    def test_every_draft_gets_its_own_po_number(self):
-        """Readable SKUs share their first 6 characters (FR-RAY): the old
-        timestamp + sku[:6] number gave one run's drafts one PO number."""
-        skus = ["FR-RAYBAN-RB2140-901-50", "FR-RAYBAN-RB3025-001-58", "FR-RAYBAN-RB5154-2000-49"]
-        products = [{"product_id": f"P{i}", "sku": sku, "reorder_point": 3, "reorder_quantity": 4}
-                    for i, sku in enumerate(skus)]
-        units = [u for p in products for u in self._units(p["product_id"], 2)]
-        drafted, pos = self._run(products, units)
-        assert set(drafted) == set(skus)
-        numbers = [po["po_number"] for po in pos]
-        assert len(set(numbers)) == 3, numbers
-        assert all(n.startswith("PO-AUTO/S1/") for n in numbers), numbers
-
-    def test_no_level_or_no_product_row_is_never_drafted(self):
-        not_set = {"P-UNSET": -1, "P-ZERO": 0, "P-GARBAGE": "x"}
-        products = [{"product_id": "P-SET", "sku": "SKU-SET", "reorder_point": 2},
-                    {"product_id": "P-MISSING", "sku": "SKU-MISSING"}]
-        products += [{"product_id": pid, "sku": "SKU" + pid[1:], "reorder_point": rp}
-                     for pid, rp in not_set.items()]
-        units = [u for p in products for u in self._units(p["product_id"], 1)]
-        # A gone product's unit, and a unit row carrying its own (meaningless)
-        # level: neither decides anything.
-        units += self._units("P-NO-ROW", 1, reorder_point=10)
-        units += self._units("P-UNSET", 1, store="S2", reorder_point=10)
-        drafted, _pos = self._run(products, units)
-        assert drafted == {"SKU-SET": 3}
-
-    def test_disabled_sku_never_drafted(self):
-        drafted, pos = self._run(
-            [{"product_id": "P-OFF", "sku": "SKU-OFF", "reorder_point": 10, "reorder_quantity": -1},
-             {"product_id": "P-ON", "sku": "SKU-ON", "reorder_point": 10, "reorder_quantity": 15}],
-            self._units("P-OFF", 1) + self._units("P-ON", 1),
-        )
-        assert set(drafted) == {"SKU-ON"}
-        assert all(po["sku"] != "SKU-OFF" for po in pos)
-
-    def test_missing_reorder_quantity_is_legacy_enabled(self):
-        drafted, _pos = self._run(
-            [{"product_id": "P-LEG", "sku": "SKU-LEG", "reorder_point": 10}],
-            self._units("P-LEG", 1),
-        )
-        assert drafted == {"SKU-LEG": 19}
-
-    def test_one_draft_per_sku_when_low_in_two_shops(self):
-        drafted, pos = self._run(
-            [{"product_id": "P-ON", "sku": "SKU-ON", "reorder_point": 3}],
-            self._units("P-ON", 1, store="S1") + self._units("P-ON", 1, store="S2"),
-        )
-        assert list(drafted) == ["SKU-ON"] and len(pos) == 1

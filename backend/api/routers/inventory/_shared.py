@@ -12,11 +12,6 @@ from ..auth import get_current_user, require_roles
 from ...services import power_grid
 from ...services import barcode as barcode_svc
 from ...services.reorder_policy import auto_reorder_disabled as _reorder_disabled
-from ...services.reorder_policy import (  # the ONE reorder-level rule (F73)
-    is_low_stock as _is_low_stock,
-    low_stock_rows as _low_stock_rows,
-    reorder_level as _reorder_level,
-)
 
 # F9 / W1.4 / OS-006: the ONE backend detector for "is this store ONLINE?"
 # (store_type == ONLINE, e.g. BV-ONLINE-01 / WO-ONLINE-01). Reused verbatim from

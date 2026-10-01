@@ -19,7 +19,17 @@ import {
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { inventoryApi, vendorsApi, reorderApi } from '../../services/api/inventory';
+import { typedLevel } from '../../utils/reorderLevel';
+import { REORDER_LEVEL_ROLES } from '../../pages/inventory/inventoryRoles';
 import { ReorderPointModal, type ReorderPointData } from './ReorderPointModal';
+
+const PICK_A_SHOP = 'Pick a shop first - a reorder level belongs to one shop.';
+
+type StockStatus = 'out-of-stock' | 'critical' | 'low' | 'healthy';
+
+// Every row of the low-stock feed IS low (the server's list); the band says how.
+const toStatus = (v: unknown): StockStatus =>
+  v === 'out-of-stock' || v === 'critical' || v === 'healthy' ? v : 'low';
 
 interface Product {
   id: string;
@@ -29,7 +39,11 @@ interface Product {
   category: string;
   currentStock: number;
   reservedStock: number;
-  reorderPoint: number;
+  // This shop's level; null = not set (no low-stock alert, shown as 'not set').
+  reorderPoint: number | null;
+  // The SERVER's verdict for this shop (reorder_policy.stock_status) - this
+  // screen never decides low / critical itself.
+  status: StockStatus;
   // Real reorder_quantity from the product master. null = never configured
   // (legacy-enabled, nothing to show). <= 0 (the -1 sentinel) = the owner
   // explicitly DISABLED auto-reorder for this product.
@@ -53,7 +67,13 @@ const hasOrderableQty = (p: Product) =>
   !isAutoReorderOff(p) && p.reorderQuantity != null && p.reorderQuantity >= 1;
 
 export function ReorderDashboard() {
-  const { user } = useAuth();
+  const { user, hasRole } = useAuth();
+  // The reorder LEVEL is this shop's (owner ruling D12); the quantity / max /
+  // lead time stay product-wide, edited only by the product-edit roles.
+  const canEditProduct = hasRole(['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']);
+  // Who may set a shop's level (the server's gate, one shared list): a
+  // catalogue manager edits the product-wide fields only.
+  const canSetShopLevel = hasRole(REORDER_LEVEL_ROLES);
   const toast = useToast();
   const navigate = useNavigate();
 
@@ -82,7 +102,7 @@ export function ReorderDashboard() {
 
       // getLowStock returns { items: [{ _id: productId, quantity, reorder_point, auto_reorder_disabled }] }
       // -- only products with a SET level at or under it (reorder_policy).
-      const lowStockItems: Array<{ _id: string; quantity: number; reorder_point: number; auto_reorder_disabled?: boolean }> =
+      const lowStockItems: Array<{ _id: string; quantity: number; reorder_point: number; stock_status?: string; auto_reorder_disabled?: boolean }> =
         Array.isArray(lowStockData) ? lowStockData : lowStockData?.items ?? [];
 
       // getStock returns { items: [...stock unit docs] }
@@ -111,9 +131,8 @@ export function ReorderDashboard() {
         const stockEntry = stockByProduct.get(pid);
         const raw = stockEntry?.raw ?? {};
 
-        const currentStock = stockEntry
-          ? stockEntry.available + stockEntry.reserved
-          : Number(item.quantity ?? 0);
+        // The server's on-hand count (reorder_policy), never a client re-sum.
+        const currentStock = Number(item.quantity ?? 0);
         const reservedStock = stockEntry?.reserved ?? 0;
 
         // REAL reorder_quantity only (ledger rows now pass it through from
@@ -136,7 +155,8 @@ export function ReorderDashboard() {
           category: raw.category ?? '',
           currentStock,
           reservedStock,
-          reorderPoint: Number(item.reorder_point),
+          reorderPoint: typedLevel(item.reorder_point),
+          status: toStatus(item.stock_status),
           reorderQuantity,
           autoReorderDisabled,
           maxStock: Number(raw.max_stock ?? raw.maximum_stock ?? 50),
@@ -158,32 +178,68 @@ export function ReorderDashboard() {
   };
 
   const handleSaveReorderPoint = async (data: ReorderPointData) => {
-    try {
-      await reorderApi.updateReorderSettings(data.productId, {
-        reorder_point: data.reorderPoint,
-        reorder_quantity: data.reorderQuantity,
-        max_stock: data.maxStock,
-        lead_time_days: data.leadTimeDays,
-      });
+    // Two independent writes, each only for the roles the server lets make it:
+    // this shop's level, and the product-wide fields. One failing never blocks
+    // or hides the other.
+    const failures: string[] = [];
+    let levelSaved = false;
+    let productSaved = false;
+    // The level is sent only when it changed (a product-wide save with the level
+    // untouched never needs a shop) and only for a shop.
+    const levelChanged =
+      data.reorderPoint !== (products.find(p => p.id === data.productId)?.reorderPoint ?? null);
+    if (canSetShopLevel && levelChanged) {
+      if (!user?.activeStoreId) {
+        // Never send an empty shop (the server answers 422).
+        failures.push(PICK_A_SHOP);
+      } else {
+        try {
+          await reorderApi.setShopLevel(data.productId, user.activeStoreId, data.reorderPoint);
+          levelSaved = true;
+        } catch (error: any) {
+          failures.push(error?.message || 'Could not save the reorder level');
+        }
+      }
+    }
+    if (canEditProduct) {
+      try {
+        await reorderApi.updateReorderSettings(data.productId, {
+          reorder_quantity: data.reorderQuantity,
+          max_stock: data.maxStock,
+          lead_time_days: data.leadTimeDays,
+        });
+        productSaved = true;
+      } catch (error: any) {
+        failures.push(error?.message || 'Could not save the product settings');
+      }
+    }
 
-      // Update local state to reflect saved values
+    // Update local state to reflect what actually saved
+    if (levelSaved || productSaved) {
       setProducts(products.map(p =>
         p.id === data.productId
           ? {
               ...p,
-              reorderPoint: data.reorderPoint,
-              reorderQuantity: data.reorderQuantity,
-              autoReorderDisabled: data.reorderQuantity <= 0,
-              maxStock: data.maxStock,
-              leadTimeDays: data.leadTimeDays,
+                            ...(productSaved
+                ? {
+                    reorderQuantity: data.reorderQuantity,
+                    autoReorderDisabled: data.reorderQuantity <= 0,
+                    maxStock: data.maxStock,
+                    leadTimeDays: data.leadTimeDays,
+                  }
+                : {}),
             }
           : p
       ));
-
-      toast.success('Reorder point updated successfully');
-    } catch (error: any) {
-      throw new Error(error?.message || 'Failed to save reorder point');
     }
+
+    // The verdict (low / critical) is the server's: re-read it after a level change.
+    if (levelSaved) void loadProducts();
+
+    if (failures.length > 0) {
+      throw new Error(failures.join('; '));
+    }
+    toast.success('Reorder point updated successfully');
   };
 
   const handleGeneratePO = async () => {
@@ -298,13 +354,7 @@ export function ReorderDashboard() {
     setSelectedProducts(new Set());
   };
 
-  const getStockStatus = (product: Product) => {
-    const availableStock = product.currentStock - product.reservedStock;
-    if (availableStock <= 0) return 'out-of-stock';
-    if (availableStock <= product.reorderPoint * 0.5) return 'critical';
-    if (availableStock <= product.reorderPoint) return 'low';
-    return 'healthy';
-  };
+  const getStockStatus = (product: Product): StockStatus => product.status;
 
   const getDaysUntilStockout = (product: Product) => {
     const availableStock = product.currentStock - product.reservedStock;
@@ -538,7 +588,7 @@ export function ReorderDashboard() {
                         </div>
                       </td>
                       <td className="px-4 py-3 text-center text-sm text-gray-900">
-                        {product.reorderPoint}
+                        {product.reorderPoint ?? 'not set'}
                       </td>
                       <td className="px-4 py-3 text-center">
                         {isAutoReorderOff(product) ? (
@@ -632,12 +682,16 @@ export function ReorderDashboard() {
             brand: selectedProduct.brand,
             currentStock: selectedProduct.currentStock,
             reorderPoint: selectedProduct.reorderPoint,
+            stockStatus: selectedProduct.status,
             reorderQuantity: selectedProduct.reorderQuantity,
             maxStock: selectedProduct.maxStock,
             averageSalesPerDay: selectedProduct.averageSalesPerDay,
             leadTimeDays: selectedProduct.leadTimeDays,
           }}
           onSave={handleSaveReorderPoint}
+          productWideLocked={!canEditProduct}
+          shopLevelLocked={!canSetShopLevel || !user?.activeStoreId}
+          shopLevelNotice={canSetShopLevel && !user?.activeStoreId ? PICK_A_SHOP : undefined}
         />
       )}
     </div>

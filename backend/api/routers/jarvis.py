@@ -23,7 +23,7 @@ import logging
 
 from .auth import get_current_user
 from ..services.reorder_policy import auto_reorder_disabled as _reorder_disabled
-from ..services.reorder_policy import is_low_stock, reorder_level
+from ..services.reorder_policy import low_stock_rows, top_up
 
 # IST (TZ-P3): the server clock is UTC; every business "today" key below must be
 # the IST calendar day or the 00:00-05:30 IST window reads the PREVIOUS day.
@@ -194,8 +194,10 @@ class JarvisAnalyticsEngine:
                     inv_value += qty * price
                     if qty <= 0:
                         out_of_stock += 1
-                    elif is_low_stock(p, qty):
-                        low_stock += 1
+                # Every shop judged by its own level (D12).
+                low_stock = len(low_stock_rows(
+                    products_col, get_db_collection("stock_units"), store_id=None
+                ))
 
             # Customers
             customers_col = get_db_collection("customers")
@@ -423,14 +425,15 @@ class JarvisAnalyticsEngine:
         try:
             critical_alerts = []
             reorder_recs = []
-            total = low = oos = 0
+            total = oos = 0
             total_value = 0.0
+            by_id: Dict[str, Dict] = {}
             for p in products_col.find({}):
                 if p.get("is_active") is False:
                     continue
                 total += 1
+                by_id[str(p.get("product_id"))] = p
                 qty = int(p.get("stock_quantity") or p.get("quantity") or 0)
-                reorder = reorder_level(p)  # None = not set (F73)
                 price = float(
                     p.get("offer_price") or p.get("mrp") or p.get("cost_price") or 0
                 )
@@ -448,36 +451,46 @@ class JarvisAnalyticsEngine:
                             "demand": "unknown",
                         }
                     )
-                elif is_low_stock(p, qty):
-                    low += 1
-                    critical_alerts.append(
+            # Low stock: every shop judged by its own level (D12).
+            lows = low_stock_rows(
+                products_col, get_db_collection("stock_units"), store_id=None
+            )
+            low = len(lows)
+            for r in lows:
+                p = by_id.get(r["product_id"]) or {}
+                name = r["name"] or p.get("product_name") or "Unknown"
+                sku = r["sku"] or r["product_id"]
+                critical_alerts.append(
+                    {
+                        "type": "low_stock",
+                        "sku": sku,
+                        "product": name,
+                        "store_id": r["store_id"],
+                        "quantity": r["quantity"],
+                        "reorder_point": r["reorder_point"],
+                    }
+                )
+                # Owner decision: reorder_quantity <= 0 (default -1) means
+                # "no auto-reorder" -- keep the low-stock ALERT but never
+                # SUGGEST an order for a disabled product.
+                if p and not _reorder_disabled(p):
+                    reorder_recs.append(
                         {
-                            "type": "low_stock",
                             "sku": sku,
                             "product": name,
-                            "quantity": qty,
-                            "reorder_point": reorder,
+                            "store_id": r["store_id"],
+                            "current": r["quantity"],
+                            "recommended_order": top_up(
+                                r["reorder_point"], r["quantity"]
+                            ),
+                            "supplier": p.get("vendor") or p.get("brand") or "—",
                         }
                     )
-                    # Owner decision: reorder_quantity <= 0 (default -1) means
-                    # "no auto-reorder" -- keep the low-stock ALERT but never
-                    # SUGGEST an order for a disabled product.
-                    if not _reorder_disabled(p):
-                        reorder_recs.append(
-                            {
-                                "sku": sku,
-                                "product": name,
-                                "current": qty,
-                                "recommended_order": max(
-                                    int(p.get("reorder_quantity") or 0),
-                                    reorder * 2,
-                                    20,
-                                ),
-                                "supplier": p.get("vendor") or p.get("brand") or "—",
-                            }
-                        )
             if total == 0:
                 return None
+            # Low-stock lines first: the out-of-stock lines read the legacy
+            # stock_quantity and must not push them out of the top 8.
+            critical_alerts.sort(key=lambda a: a["type"] != "low_stock")
             healthy = max(0, total - low - oos)
             health = round(healthy / total * 100) if total else 0
             return {
@@ -1257,42 +1270,31 @@ class JarvisAnalyticsEngine:
 
                 # Low-stock items, sorted by value at risk (price * gap).
                 # More actionable than just "X items low" since it tells
-                # the operator WHICH stockouts hurt the most. The product's
-                # own level decides (reorder_policy, F73) -- the same rule as
-                # Jarvis's low-stock counts: no level (0, -1, missing) = never.
-                low_stock = []
-                for p in prod_col.aggregate(
-                    [
-                        {"$match": {"is_active": {"$ne": False}}},
-                        {
-                            "$project": {
-                                "_id": 0, "name": 1, "brand": 1, "category": 1,
-                                "store_id": 1, "stock_quantity": 1,
-                                "reorder_point": 1, "offer_price": 1, "mrp": 1,
-                            }
-                        },
-                    ]
-                ):
-                    qty = p.get("stock_quantity") or 0
-                    if not is_low_stock(p, qty):
-                        continue
-                    level = reorder_level(p)
-                    price = p.get("offer_price")
-                    if price is None:
-                        price = p.get("mrp")
-                    low_stock.append(
-                        {
-                            "name": p.get("name"),
-                            "brand": p.get("brand"),
-                            "category": p.get("category"),
-                            "store_id": p.get("store_id"),
-                            "stock_quantity": qty,
-                            "reorder_point": level,
-                            "price": price,
-                            "value_at_risk": float(price or 0) * (level - int(qty)),
-                        }
+                # the operator WHICH stockouts hurt the most. Each shop is
+                # judged by its own level (D12); every row names its shop.
+                lows = low_stock_rows(
+                    prod_col, get_db_collection("stock_units"), store_id=None
+                )
+                prices = {
+                    str(p.get("product_id")): p
+                    for p in prod_col.find(
+                        {"product_id": {"$in": [r["product_id"] for r in lows]}},
+                        {"_id": 0, "product_id": 1, "brand": 1, "category": 1,
+                         "offer_price": 1, "mrp": 1},
                     )
-                low_stock.sort(key=lambda r: r["value_at_risk"], reverse=True)
+                } if lows else {}
+                low_stock = []
+                for r in lows:
+                    p = prices.get(r["product_id"]) or {}
+                    price = float(p.get("offer_price") or p.get("mrp") or 0)
+                    gap = top_up(r["reorder_point"], r["quantity"])
+                    low_stock.append({
+                        "name": r["name"], "brand": p.get("brand"),
+                        "category": p.get("category"), "store_id": r["store_id"],
+                        "on_hand": r["quantity"], "reorder_point": r["reorder_point"],
+                        "price": price, "value_at_risk": price * gap,
+                    })
+                low_stock.sort(key=lambda x: -x["value_at_risk"])
                 low_stock = low_stock[:15]
                 ctx["low_stock_value_at_risk"] = low_stock
         except Exception as e:

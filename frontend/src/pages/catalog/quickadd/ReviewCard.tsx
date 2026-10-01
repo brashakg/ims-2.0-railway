@@ -6,7 +6,7 @@
 import { Sparkles } from 'lucide-react';
 import { categoryName, fieldLabelFor } from '../productAddShared';
 import { ReviewRow } from './parts';
-import { levelLabel, type QuickAddForm } from './useQuickAddForm';
+import type { QuickAddForm } from './useQuickAddForm';
 
 export function ReviewCard({ form }: { form: QuickAddForm }) {
   const {
@@ -68,7 +68,7 @@ export function ReviewCard({ form }: { form: QuickAddForm }) {
                 : 'Auto (Brand Master tier)')
             }
           />
-          {!isReviewMode && <ReviewRow label="Reorder level" value={levelLabel(reorderLevel)} />}
+          {!isReviewMode && <ReviewRow label="Reorder level" value={reorderLevel || 'not set'} />}
           {images.length > 0 && (
             <ReviewRow label="Images" value={`${images.length} uploaded`} />
           )}

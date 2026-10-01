@@ -1592,10 +1592,8 @@ def normalise_payload(
     # Reorder dashboard). setdefault so a door that DID supply a value
     # (via extra_fields) keeps it.
     doc.setdefault("reorder_quantity", -1)
-    # Owner ruling 2026-09-28 ("keep -1 for default"): the reorder LEVEL is
-    # born -1 = NOT SET = no low-stock alert until someone types one
-    # (reorder_policy.reorder_level is the rule every reader calls).
-    doc.setdefault("reorder_point", -1)
+    # No reorder level here: levels are per shop (owner ruling D12,
+    # products.reorder_levels), a new product has none = not set.
     # --- SEO auto-naming: mint a display name when the payload leaves it blank ---
     # The spine has historically had NO `name` column (brand+model was the
     # implicit display identity), so products created via the Add-Product flow

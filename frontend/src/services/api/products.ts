@@ -246,8 +246,8 @@ export interface UpdateProductPayload {
   images?: string[];
   // Scan-to-sell barcode persisted on the product master.
   barcode?: string;
-  // Per-product reorder configuration (Reorder dashboard).
-  reorder_point?: number;
+  // Per-product reorder configuration (Reorder dashboard). The reorder LEVEL
+  // is per shop: reorderApi.setShopLevel (owner ruling D12).
   reorder_quantity?: number;
   max_stock?: number;
   lead_time_days?: number;

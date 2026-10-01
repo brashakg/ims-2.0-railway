@@ -114,7 +114,6 @@ CL_MODALITIES = ("DAILY", "FORTNIGHTLY", "MONTHLY", "QUARTERLY", "YEARLY", "COLO
 # place -- the product_master registry. This guard reads its canonical list from
 # there instead of hand-maintaining a duplicate.
 from ..services.product_master import canonical_categories as _pm_canonical_categories
-from ..services.reorder_policy import reorder_level
 
 # Accepted-category superset for the create/update guard. Behaviour-preserving:
 # kept as the GST/HSN table keys (the canonical 13 registry categories PLUS the
@@ -671,10 +670,9 @@ class ProductUpdate(BaseModel):
 
     # ---- Per-product reorder configuration. Moved here from the retired
     # /admin/products PUT (the Reorder dashboard's only writer) so reorder
-    # settings persist through the validated path. All optional + additive. ----
-    # ge=-1: -1 = NOT SET = no low-stock alert (owner 2026-09-28), so an edit
-    # can clear a typed level back to not set.
-    reorder_point: Optional[int] = Field(None, ge=-1)
+    # settings persist through the validated path. All optional + additive.
+    # The reorder LEVEL is not here: it is per shop (owner ruling D12),
+    # written by PUT /inventory/reorder-levels/{product_id}. ----
     # ge=-1: -1 is the owner's "no auto-reorder" sentinel (reorder_policy.py),
     # so the Reorder dashboard can explicitly disable a product again.
     reorder_quantity: Optional[int] = Field(None, ge=-1)
@@ -3296,11 +3294,6 @@ async def get_product(product_id: str, current_user: dict = Depends(get_current_
                 imgs = product.get("images")
                 if isinstance(imgs, list) and imgs and isinstance(imgs[0], str):
                     product["image_url"] = imgs[0]
-            # The level the rule gives (F73): only a level above 0 is one;
-            # not set (0, -1, missing, garbage) reads -1. The edit form shows
-            # and saves this number, so it never has a rule of its own.
-            level = reorder_level(product)
-            product["reorder_point"] = -1 if level is None else level
             return product
         raise HTTPException(status_code=404, detail="Product not found")
 

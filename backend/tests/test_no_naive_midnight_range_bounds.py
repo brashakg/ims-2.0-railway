@@ -541,18 +541,6 @@ ALLOWED = {
         "ever writes till_closings, this becomes a real day-frame bug and "
         "must move to the BOUND rule first."
     ),
-    (
-        "agents/implementations/taskmaster.py",
-        ".replace(hour=0, minute=0, second=0, microsecond=0)",
-    ): (
-        "RULED, round 3 (comment at the site): a PO-dedupe KEY, not a "
-        "displayed date -- both sides are aware-UTC ISO strings this same "
-        "function writes, one self-consistent frame, nothing dropped. A run "
-        "straddling UTC midnight can double-draft one PO, but every "
-        "auto-draft is Tier-2 requires_approval so a human sees both. "
-        "Aligning would desync this dedupe-key class from follow_ups/kicker "
-        "and open a one-off duplicate window at the switchover."
-    ),
 }
 
 
