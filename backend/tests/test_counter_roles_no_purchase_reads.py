@@ -1092,7 +1092,11 @@ class _RecsColl:
 
 class _RecsDb:
     def get_collection(self, name):
-        return _RecsColl({"orders": [_SALES], "products": [_RECS_PRODUCT]}[name])
+        # stock_units: the shop's on-hand count (reorder_policy.on_hand, #1179);
+        # none on hand and no shop level, so the buy is the velocity cover alone.
+        return _RecsColl(
+            {"orders": [_SALES], "products": [_RECS_PRODUCT], "stock_units": []}[name]
+        )
 
 
 @pytest.mark.parametrize("role", rbac.ALL_ROLES)
