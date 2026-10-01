@@ -149,6 +149,8 @@ describe('each payroll section renders at its own URL inside the HR module', () 
     // Inside HRLayout now: the module header is on screen above the section.
     expect(screen.getByRole('heading', { name: /Who's on the floor/ })).toBeInTheDocument();
     expectActiveSection('Salary Sheet');
+    // The old page header is kept on every payroll section.
+    expect(screen.getByRole('heading', { name: 'Month-end, by the rupee.' })).toBeInTheDocument();
   });
 
   it('advances: the employee picker is fed by the layout load; picking one loads their advances', async () => {
@@ -171,6 +173,32 @@ describe('each payroll section renders at its own URL inside the HR module', () 
     expect(screen.getByText('ZZ Optometrist')).toBeInTheDocument();
     expect(get).toHaveBeenCalledWith(expect.stringMatching(/^\/payroll\/payslip\/EMP-1\/\d+\/\d+$/));
     expectActiveSection('Payslips');
+  });
+});
+
+describe('the picks live in PayrollLayout, so they survive moving between sections', () => {
+  it('month, year and employee picked on one section are still picked on the next', async () => {
+    const year = new Date().getFullYear();
+    renderRoute('/hr/payroll', ['ADMIN']);
+    // Sheet: pick a month and year.
+    fireEvent.change(await screen.findByTitle('Select payroll month', undefined, FIND), { target: { value: '3' } });
+    fireEvent.change(screen.getByTitle('Select payroll year'), { target: { value: String(year - 1) } });
+    // Advances: pick the employee.
+    fireEvent.click(navButton('Advances')!);
+    const advPicker = await screen.findByTitle('Select employee for advances', undefined, FIND);
+    expect(await screen.findByRole('option', { name: 'ZZ Priya Sheet' })).toBeInTheDocument();
+    fireEvent.change(advPicker, { target: { value: 'EMP-1' } });
+    expect(await screen.findByText('Pending')).toBeInTheDocument();
+    // Payslips: all three picks are still there.
+    fireEvent.click(navButton('Payslips')!);
+    const slipPicker = await screen.findByTitle('Select employee for payslip', undefined, FIND);
+    expect(slipPicker).toHaveValue('EMP-1');
+    expect(screen.getByTitle('Select payslip month')).toHaveValue('3');
+    expect(screen.getByTitle('Select payslip year')).toHaveValue(String(year - 1));
+    // And back on the sheet the month/year are unchanged too.
+    fireEvent.click(navButton('Salary Sheet')!);
+    expect(await screen.findByTitle('Select payroll month', undefined, FIND)).toHaveValue('3');
+    expect(screen.getByTitle('Select payroll year')).toHaveValue(String(year - 1));
   });
 });
 
