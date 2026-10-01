@@ -23,7 +23,7 @@ vi.mock('react-router-dom', () => ({
 import OnlineStockPage from '../OnlineStockPage';
 import { onlineStoreApi } from '../../../services/api/onlineStore';
 
-function tally(liveUnknown: boolean, onlineConfigured = true) {
+function tally(liveUnknown: boolean, onlineConfigured = true, onHandUnknown = false) {
   // The shape the client normaliser produces (onlineStoreApi.getStockTally).
   return {
     items: [],
@@ -38,7 +38,7 @@ function tally(liveUnknown: boolean, onlineConfigured = true) {
       listed_qty_live: !liveUnknown,
       listed_live_rows: 0,
       listed_mapped_rows: 0,
-      on_hand_unknown: false,
+      on_hand_unknown: onHandUnknown,
       live_listings_unknown: liveUnknown,
     },
     available: true,
@@ -67,6 +67,14 @@ describe('the live-listings UNKNOWN banner on the stock tally', () => {
     await waitFor(() => expect(onlineStoreApi.getStockTally).toHaveBeenCalled());
     expect(await screen.findAllByText(/could not read which products are live/i)).toHaveLength(1);
     expect(screen.queryByText(/mapped to Shopify yet/i)).toBeNull();
+  });
+
+  it('shows no zero strip when the shops on-hand could not be read either', async () => {
+    (onlineStoreApi.getStockTally as any).mockResolvedValue(tally(false, true, true));
+    render(<OnlineStockPage />);
+    await waitFor(() => expect(onlineStoreApi.getStockTally).toHaveBeenCalled());
+    await screen.findByText(/could not read the shops' on-hand right now/i);
+    expect(screen.queryByText(/SKUs online/i)).toBeNull();
   });
 
   it('is absent when the read worked, and an empty tally says nothing is listed', async () => {

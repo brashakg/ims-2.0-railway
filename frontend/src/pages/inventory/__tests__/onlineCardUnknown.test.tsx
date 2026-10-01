@@ -58,7 +58,8 @@ describe('the Inventory Online card', () => {
   it('says it could not read the website when the live read is unknown', () => {
     onlineStatus = { 'SKU-1': { online: null, online_stock: null } };
     renderLayout();
-    expect(screen.getByText(/could not read the website/i)).toBeInTheDocument();
+    const note = screen.getByText(/could not read the website/i);
+    expect(note.previousElementSibling).toHaveTextContent('—');
     expect(screen.queryByText(/none synced online/i)).toBeNull();
   });
 

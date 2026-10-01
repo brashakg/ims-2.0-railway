@@ -138,9 +138,13 @@ export function InventoryStockPage() {
 
     const matchesCategory = !selectedCategory || sameCategory(item.category, selectedCategory);
 
-    const isOnline = !!getOnline(item)?.online;
+    // online null = IMS could not read which listings are live: the row is
+    // neither Online nor Offline (it shows Unverified), so only 'All' has it.
+    const o = getOnline(item);
+    const unknown = !!o && o.online === null;
+    const isOnline = !!o?.online;
     const matchesAvailability =
-      availabilityFilter === 'all' ? true : availabilityFilter === 'online' ? isOnline : !isOnline;
+      availabilityFilter === 'all' ? true : unknown ? false : availabilityFilter === 'online' ? isOnline : !isOnline;
 
     return matchesSearch && matchesCategory && matchesAvailability;
   });
@@ -210,7 +214,7 @@ export function InventoryStockPage() {
         esc(item.stock ?? 0),
         esc(item.reserved ?? 0),
         esc(available),
-        esc(online?.online ? 'Yes' : 'No'),
+        esc(online?.online ? 'Yes' : online && online.online === null ? 'Unverified' : 'No'),
         esc(online?.online ? (online.online_stock ?? '') : ''),
         esc(item.location || ''),
         esc(status),

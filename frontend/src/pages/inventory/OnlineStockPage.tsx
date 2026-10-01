@@ -60,6 +60,18 @@ export default function OnlineStockPage() {
   const items = (data?.items || []).filter((i) =>
     onlyRisk ? (i.status === 'OVERSELL_RISK' || i.status === 'OVER_ALLOCATED') : true,
   );
+  // An empty table never claims "no risk" for rows nobody could verify:
+  // nothing verified (the live-listing read failed, or every row unknown)
+  // vs some rows unverified (partial coverage) vs truly clear.
+  const unverified = (s.listed_unknown ?? 0) + (s.onhand_unknown ?? 0);
+  const total = (data?.items || []).length;
+  const emptyText = data?.live_listings_unknown || (total > 0 && unverified >= total)
+    ? 'Nothing here could be verified right now — see the note above.'
+    : !onlyRisk
+      ? 'No products to show.'
+      : unverified > 0
+        ? `No overselling risk among the verified rows; ${unverified} could not be verified (see the note above).`
+        : 'No overselling risk — everything is within safe allocation.';
 
   return (
     <div className="p-6 max-w-6xl mx-auto">
@@ -116,7 +128,7 @@ export default function OnlineStockPage() {
         <div className="flex items-center gap-2 text-gray-500"><Loader2 className="w-4 h-4 animate-spin" /> Loading...</div>
       ) : (
         <>
-          <div className="grid grid-cols-3 gap-3 mb-4">
+          {!data?.live_listings_unknown && <div className="grid grid-cols-3 gap-3 mb-4">
             <div className="bg-white border border-red-200 rounded-lg p-4">
               <p className="text-xs text-gray-500 mb-1">Oversell risk</p>
               <p className="text-xl font-semibold text-red-700">{s.oversell_risk || 0}</p>
@@ -132,7 +144,7 @@ export default function OnlineStockPage() {
               <p className="text-xl font-semibold text-green-700">{s.ok || 0}</p>
               <p className="text-xs text-gray-400 mt-1">within safe allocation</p>
             </div>
-          </div>
+          </div>}
 
           <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
             <table className="w-full text-sm">
@@ -149,9 +161,7 @@ export default function OnlineStockPage() {
               <tbody className="divide-y divide-gray-100">
                 {items.length === 0 ? (
                   <tr><td colSpan={6} className="px-3 py-6 text-center text-gray-400">
-                    {data?.live_listings_unknown || (data?.listed_qty_live === false && ((s.listed_unknown ?? 0) > 0 || (s.onhand_unknown ?? 0) > 0))
-                      ? 'Nothing here could be verified right now — see the note above.'
-                      : onlyRisk ? 'No overselling risk — everything is within safe allocation.' : 'No products to show.'}
+                    {emptyText}
                   </td></tr>
                 ) : items.map((it) => (
                   <tr key={it.sku} className={it.status === 'OVERSELL_RISK' ? 'bg-red-50/40' : ''}>

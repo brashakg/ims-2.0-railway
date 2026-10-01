@@ -7,7 +7,7 @@
 // that read failed. Treat null as "not online" again -> "In-store only" on
 // every row -> fails.
 
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
 import { MemoryRouter, Outlet, Route, Routes } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -78,6 +78,37 @@ describe('the Inventory Online column', () => {
     renderAt('/inventory/stock');
     expect(screen.getAllByText('Unverified')).toHaveLength(2);
     expect(screen.queryByText('In-store only')).toBeNull();
+  });
+
+  it('keeps an unknown row out of both the Online and the Offline filter', () => {
+    onlineStatus = {
+      'FR-RAYB-3025-GLD': { online: null, online_stock: null },
+      'FR-RAYB-2140-BLK': { online: false, online_stock: null },
+    };
+    renderAt('/inventory/stock');
+    fireEvent.click(screen.getByRole('button', { name: /^Offline$/ }));
+    expect(screen.getByText('Wayfarer')).toBeInTheDocument();
+    expect(screen.queryByText('Aviator Classic')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /Online/ }));
+    expect(screen.queryByText('Aviator Classic')).toBeNull();
+  });
+
+  it('says Unverified in the detail panel and the CSV export', async () => {
+    onlineStatus = {
+      'FR-RAYB-3025-GLD': { online: null, online_stock: null },
+      'FR-RAYB-2140-BLK': { online: null, online_stock: null },
+    };
+    const blobs: Blob[] = [];
+    const create = vi.fn((b: Blob) => { blobs.push(b); return 'blob:x'; });
+    Object.assign(URL, { createObjectURL: create, revokeObjectURL: vi.fn() });
+    renderAt('/inventory/stock');
+    fireEvent.click(screen.getAllByRole('button', { name: 'View Details' })[0]);
+    expect(screen.getByText(/Unverified \(could not read the website\)/)).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole('button', { name: 'Close' })[0]);
+    fireEvent.click(screen.getByRole('button', { name: /Export/ }));
+    expect(create).toHaveBeenCalled();
+    const text = await blobs[0].text();
+    expect(text.split('\n').slice(1).every((line) => line.includes(',Unverified,'))).toBe(true);
   });
 
   it('says Online / In-store only when the read worked', () => {

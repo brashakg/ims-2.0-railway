@@ -40,13 +40,31 @@ function page(liveUnknown: boolean, onlineConfigured = true) {
 describe('the reconciliation screen when the live-listing read failed', () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it('says nothing could be verified, never "No overselling risk"', async () => {
-    (onlineStockApi.reconcile as any).mockResolvedValue(page(true));
+  it('says nothing could be verified, never "No overselling risk", and shows no zero cards', async () => {
+    // Only the flag says so: no row, no unknown count (the route's dead products read).
+    (onlineStockApi.reconcile as any).mockResolvedValue({ ...page(true), items: [], summary: {} });
     render(<OnlineStockPage />);
     await waitFor(() => expect(onlineStockApi.reconcile).toHaveBeenCalled());
     expect(await screen.findByText(/could not read which products are live/i)).toBeInTheDocument();
     expect(screen.getByText(/could be verified right now/i)).toBeInTheDocument();
     expect(screen.queryByText(/No overselling risk/i)).toBeNull();
+    expect(screen.queryByText(/within safe allocation/i)).toBeNull();
+  });
+
+  it('says how many rows could not be verified on partial coverage, never "nothing verified"', async () => {
+    const rows = [
+      { sku: 'SKU-1', name: 'A', in_store: 1, online: 1, recommended: 1, delta: 0, status: 'OK' },
+      { sku: 'SKU-2', name: 'B', in_store: 1, online: null, recommended: 1, delta: null, status: 'LISTED_UNKNOWN' },
+    ];
+    (onlineStockApi.reconcile as any).mockResolvedValue({
+      items: rows, summary: { safety_buffer: 0, ok: 1, listed_unknown: 1 },
+      online_configured: true, listed_qty_live: false, listed_live_rows: 1, listed_mapped_rows: 2,
+      live_listings_unknown: false,
+    });
+    render(<OnlineStockPage />);
+    await waitFor(() => expect(onlineStockApi.reconcile).toHaveBeenCalled());
+    expect(await screen.findByText(/among the verified rows; 1 could not be verified/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Nothing here could be verified/i)).toBeNull();
   });
 
   it('shows the note over "not mapped yet" when the whole catalogue read died', async () => {
