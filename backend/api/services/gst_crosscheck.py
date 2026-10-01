@@ -709,13 +709,7 @@ def build_crosscheck(
                     "Transfers with no input credit",
                     {"Credit denied": round(sum(_f(d.get("tax")) for d in denied), 2)},
                     0.0,
-                    note=" ".join(
-                        "Transfer from %s - sender has no GSTIN: no input credit "
-                        "(bill %s, tax %.2f); check whether outward tax applies "
-                        "with your CA."
-                        % (d.get("from_shop") or "the sending shop", d.get("bill_number"), _f(d.get("tax")))
-                        for d in denied[:20]
-                    ),
+                    note=_denied_transfers_note(denied),
                 )
             )
 
@@ -740,6 +734,25 @@ def build_crosscheck(
             "gst_payable": net_cash,
         },
     }
+
+
+_DENIED_NOTE_CAP = 20
+
+
+def _denied_transfers_note(denied: list) -> str:
+    """The note of the 'Transfers with no input credit' row. It names at most
+    _DENIED_NOTE_CAP transfers while the row's value sums all of them, so the
+    rest are counted, never silently dropped."""
+    text = " ".join(
+        "Transfer from %s - sender has no valid GSTIN: no input credit "
+        "(bill %s, tax %.2f); check whether outward tax applies "
+        "with your CA."
+        % (d.get("from_shop") or "the sending shop", d.get("bill_number") or "-", _f(d.get("tax")))
+        for d in denied[:_DENIED_NOTE_CAP]
+    )
+    if len(denied) > _DENIED_NOTE_CAP:
+        text += " (+%d more)" % (len(denied) - _DENIED_NOTE_CAP)
+    return text
 
 
 def _unregistered_note(unreg: dict) -> str:

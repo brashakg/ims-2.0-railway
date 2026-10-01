@@ -925,7 +925,7 @@ class TestTheMirrorsCreditIsTheOneHelpers:
         assert row["status"] == "INFO", row  # not a mismatch: the verdict is correct
         assert row["sources"] == {"Credit denied": bill["tax_amount"]} and bill["tax_amount"] > 0
         assert bill["bill_number"] in row["note"]
-        assert "sender has no GSTIN: no input credit" in row["note"]
+        assert "sender has no valid GSTIN: no input credit" in row["note"]
         assert "check whether outward tax applies with your CA" in row["note"]
         assert row["note"].startswith("Transfer from ")
         assert xc["summary"]["all_matched"] is True or xc["summary"]["mismatch_count"] == 0
@@ -935,6 +935,118 @@ class TestTheMirrorsCreditIsTheOneHelpers:
         self._mirror(db, "S2", "S1")
         xc = _crosscheck(db, "E1")
         assert not [c for c in xc["comparisons"] if c["metric"] == "Transfers with no input credit"]
+
+    @pytest.mark.parametrize("junk", ["URP", "NA", "00AAAAA0000A1Z5"])
+    def test_round16_a_junk_sender_gstin_gives_no_credit_and_is_listed(self, junk):
+        """Round 15 #7 (booking door): a sender whose GSTIN is present but not
+        a real one ('URP', 'NA', a bad state code) is no registered person, so
+        the mirror books itc_eligible False and the Cross-Check lists it.
+        Fails if transfers.py asks bool(from_gstin) instead of itc_claimable."""
+        db = _mongo(
+            [
+                ({"entity_id": "E1", "name": "BVOPL",
+                  "gstins": [{"gstin": BUY_JH, "state_code": "20", "is_primary": True}]},
+                 [{"store_id": "S1", "entity_id": "E1", "state_code": "20", "gstin": BUY_JH}]),
+                ({"entity_id": "E2", "name": "WizOpt",
+                  "gstins": [{"gstin": junk, "state_code": "27", "is_primary": True}]},
+                 [{"store_id": "S2", "entity_id": "E2", "state_code": "27", "gstin": junk}]),
+            ]
+        )
+        bill = self._mirror(db, "S2", "S1")
+        assert bill["vendor_gstin"] == junk, bill
+        assert bill["itc_eligible"] is False, bill
+        row = _row(_crosscheck(db, "E1"), "Transfers with no input credit")
+        assert row["sources"] == {"Credit denied": bill["tax_amount"]} and bill["tax_amount"] > 0
+
+
+def _denied_world(extra_bills=(), shops_entity="E1"):
+    db = _mongo(
+        [
+            ({"entity_id": "E1", "name": "BVOPL",
+              "gstins": [{"gstin": BUY_JH, "state_code": "20", "is_primary": True}]},
+             [{"store_id": "S1", "entity_id": "E1", "state_code": "20", "gstin": BUY_JH}]),
+            ({"entity_id": "E2", "name": "WizOpt",
+              "gstins": [{"gstin": BUY_MH, "state_code": "27", "is_primary": True}]},
+             [{"store_id": "S2", "entity_id": "E2", "state_code": "27", "gstin": BUY_MH}]),
+        ]
+    )
+    db["vendor_bills"].insert_many([dict(b) for b in extra_bills])
+    return db
+
+
+def _denied_bill(**over):
+    bill = {"bill_id": "d1", "bill_number": "TRF/D-1", "source_transfer_id": "TD1",
+            "status": "OUTSTANDING", "itc_eligible": False, "vendor_gstin": "",
+            "vendor_name": "Pune shop", "recipient_entity_id": "E1",
+            "bill_date": "2026-05-10", "invoice_date": "2026-05-10",
+            "taxable_amount": 1000, "tax_amount": 50, "cgst_total": 25.0,
+            "sgst_total": 25.0, "igst_total": 0.0}
+    bill.update(over)
+    return bill
+
+
+class TestRound16DeniedTransfersQuery:
+    """Round 15 #6 and #7: each filter of the denied-transfers query is pinned.
+    The row is absent unless the bill is a denied mirror of this company, in
+    this month, still live, whose sender really has no valid GSTIN."""
+
+    METRIC = "Transfers with no input credit"
+
+    def _has_row(self, db, entity="E1", month=5):
+        xc = _crosscheck(db, entity, month=month)
+        return [c for c in xc["comparisons"] if c["metric"] == self.METRIC]
+
+    def test_the_plain_denied_mirror_is_listed(self):
+        rows = self._has_row(_denied_world([_denied_bill()]))
+        assert rows and rows[0]["sources"] == {"Credit denied": 50.0}
+
+    def test_a_legacy_mirror_with_credit_claimed_is_not_denied(self):
+        """Empty vendor_gstin but itc_eligible True (booked before round 13):
+        the 'suppliers with no GSTIN' row owns it. Fails without the
+        itc_eligible False filter."""
+        assert not self._has_row(_denied_world([_denied_bill(itc_eligible=True)]))
+
+    def test_another_company_is_not_listed(self):
+        """Fails without the recipient_entity_id scope."""
+        assert not self._has_row(_denied_world([_denied_bill(recipient_entity_id="E2")]))
+
+    def test_another_month_is_not_listed(self):
+        """Fails without the month window."""
+        db = _denied_world([_denied_bill(bill_date="2026-06-10", invoice_date="2026-06-10")])
+        assert not self._has_row(db, month=5)
+        assert self._has_row(db, month=6)
+
+    @pytest.mark.parametrize("dead", ["CANCELLED", "cancelled", "VOID", "voided"])
+    def test_a_cancelled_bill_is_not_listed(self, dead):
+        """Fails without the dead-status exclusion."""
+        assert not self._has_row(_denied_world([_denied_bill(status=dead)]))
+
+    def test_a_valid_sender_with_credit_switched_off_is_not_listed(self):
+        """itc_eligible False but a registered sender: the denial was the
+        user's, not the missing registration. Fails without the itc_claimable
+        skip inside the loop."""
+        assert not self._has_row(_denied_world([_denied_bill(vendor_gstin=BUY_MH)]))
+
+    @pytest.mark.parametrize("junk", ["URP", "NA", "00AAAAA0000A1Z5"])
+    def test_a_junk_sender_gstin_is_listed(self, junk):
+        """Round 15 #7 (reader door). Fails if the loop asks bool(vendor_gstin)."""
+        rows = self._has_row(_denied_world([_denied_bill(vendor_gstin=junk)]))
+        assert rows and rows[0]["sources"] == {"Credit denied": 50.0}
+
+    def test_the_note_caps_at_twenty_and_counts_the_rest(self):
+        """Round 15 #3: 25 denied mirrors sum to 1250.00 but only 20 are named;
+        the note says '(+5 more)'. A bill with no number reads '-', not None."""
+        bills = [
+            _denied_bill(bill_id=f"d{i}", bill_number=f"TRF/D-{i}", source_transfer_id=f"TD{i}")
+            for i in range(24)
+        ] + [_denied_bill(bill_id=None, bill_number=None, source_transfer_id="TDX")]
+        row = self._has_row(_denied_world(bills))[0]
+        assert row["sources"] == {"Credit denied": 1250.0}
+        assert row["note"].count("Transfer from ") == 20
+        assert row["note"].endswith("(+5 more)")
+        small = self._has_row(_denied_world([_denied_bill(bill_id=None, bill_number=None)]))[0]
+        assert "(bill -," in small["note"] and "None" not in small["note"]
+        assert "more)" not in small["note"]
 
 
 # ===========================================================================
@@ -2265,6 +2377,25 @@ class TestRound13NotesNameTheRealScreen:
             assert "Settings, stores" not in src, mod.__name__
             assert "/settings?tab=stores" not in src, mod.__name__
         assert "/organization" in inspect.getsource(stores_router)
+
+    # POS file - text fix waits for owner approval
+    _DEAD_TEXT_ALLOW = {"api/routers/orders/upi.py"}
+
+    def test_round16_no_file_in_backend_api_names_the_dead_stores_screen(self):
+        """Round 15 #1: the guard above read three modules; this one reads every
+        .py under backend/api, so a dead name cannot hide in another router."""
+        import pathlib
+
+        root = pathlib.Path(__file__).resolve().parents[1] / "api"
+        dead = ("(Settings, stores)", "Settings -> Stores", "/settings?tab=stores")
+        hits = []
+        for f in root.rglob("*.py"):
+            rel = f.relative_to(root.parent).as_posix()
+            if rel in self._DEAD_TEXT_ALLOW:
+                continue
+            text = f.read_text(encoding="utf-8")
+            hits += [f"{rel}: {d}" for d in dead if d in text]
+        assert not hits, hits
         db = _FakeDB()
         db.collections["entities"].clear()
         err = _refused(pi_router._bill_recipient, db, None, None, "S1")
