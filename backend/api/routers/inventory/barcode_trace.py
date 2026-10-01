@@ -4,8 +4,9 @@ from ._shared import (
     Depends,
     Dict,
     Optional,
-    get_current_user,
+    can_access_store_scoped,
     logger,
+    require_roles,
     router,
 )
 from .helpers import (
@@ -21,12 +22,18 @@ from .helpers import (
 # collection: it collects existing audit rows + cross-collection joins in one
 # call.  Fail-soft: a missing collection returns an empty section rather than
 # 500-ing the whole response.
+#
+# The purchase section is the raw receipt (supplier or walk-in dealer, bill
+# number, price paid per line, bill photo id) and the unit carries its cost,
+# so the trace is the receipt readers' -- the same roles and store scope as
+# GET /vendors/grn/{grn_id} -- never the counter's.
+_TRACE_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
 
 
 @router.get("/barcode/{barcode}/trace")
 async def barcode_lifecycle_trace(
     barcode: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_TRACE_ROLES)),
 ):
     """Return the full movement history for a physical barcode (INV-12).
 
@@ -67,6 +74,16 @@ async def barcode_lifecycle_trace(
     try:
         # 1. Stock unit
         su = db.get_collection("stock_units").find_one({"barcode": barcode})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[INV-12] stock_unit lookup failed for barcode %s: %s", barcode, exc)
+        su = None
+    # A unit in another shop -- or no unit at all, for a store-level caller --
+    # traces as unknown: its sections are that shop's supplier, cost and sales.
+    if not can_access_store_scoped((su or {}).get("store_id"), current_user):
+        return result
+    stock_id = ""
+
+    try:
         if su:
             result["stock_unit"] = _scrub(dict(su))
             stock_id = str(su.get("stock_id") or su.get("stock_unit_id") or su.get("_id") or "")
@@ -91,11 +108,8 @@ async def barcode_lifecycle_trace(
                     ).sort("at", 1).limit(200)
                 )
                 result["audit_trail"] = _scrub_list(audit_rows)
-        else:
-            stock_id = ""
-
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[INV-12] stock_unit lookup failed for barcode %s: %s", barcode, exc)
+        logger.warning("[INV-12] purchase/audit lookup failed for barcode %s: %s", barcode, exc)
 
     try:
         # 4. Sales: orders where an item carries this barcode

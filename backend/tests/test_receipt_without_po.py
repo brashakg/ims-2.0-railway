@@ -56,6 +56,7 @@ mongomock = pytest.importorskip("mongomock")
 
 import api.dependencies as deps  # noqa: E402
 import database.connection as dbconn  # noqa: E402
+from api.routers import inventory as inv  # noqa: E402
 from api.routers import purchase_invoices as pi  # noqa: E402
 from api.routers import vendors as vd  # noqa: E402
 from api.routers.auth import get_current_user  # noqa: E402
@@ -218,6 +219,7 @@ def world(monkeypatch):
 
     app = FastAPI()
     app.include_router(vd.router, prefix="/vendors")
+    app.include_router(inv.router, prefix="/inventory")
     who = {"user": MANAGER}
     app.dependency_overrides[get_current_user] = lambda: who["user"]
     http = TestClient(app)
@@ -868,6 +870,40 @@ def test_c7_counter_staff_never_read_what_was_paid(world):
     assert [ln["unit_price"] for ln in mine.json()["items"]] == [3100.0, 420.0]
     other_shop = {**MANAGER, "store_ids": ["BV-OTHER-01"], "active_store_id": "BV-OTHER-01"}
     assert world["as_"](other_shop).get(f"/vendors/grn/{grn_id}").status_code == 404
+
+
+def _walk_in_on_the_shelf(world):
+    """The panel's walk-in body (dealer typed by name) received and accepted;
+    returns the receipt id and one minted frame unit's barcode."""
+    http = world["as_"](MANAGER)
+    created = http.post("/vendors/grn", json=_walk_in_body(world))
+    assert created.status_code == 201, created.text
+    grn_id = created.json()["grn_id"]
+    assert http.post(f"/vendors/grn/{grn_id}/accept").status_code == 200
+    return grn_id, world["db"].stock_units.find_one({"product_id": FRAME})["barcode"]
+
+
+def test_c7_the_barcode_trace_shows_no_counter_what_was_paid(world):
+    """Panel probe: GET /inventory/barcode/{barcode}/trace was open to any
+    logged-in user with no store check and returned the raw receipt -- a
+    SALES_STAFF of another shop read the dealer 'Sharma Optical', bill
+    CASH-77, unit_price [3100, 420] and the unit's cost 3100."""
+    grn_id, barcode = _walk_in_on_the_shelf(world)
+    url = f"/inventory/barcode/{barcode}/trace"
+    for role in ("SALES_STAFF", "CASHIER", "OPTOMETRIST", "WORKSHOP_STAFF"):
+        for shop in (STORE, "BV-OTHER-99"):
+            counter = {"user_id": "u-counter", "roles": [role], "store_ids": [shop], "active_store_id": shop}
+            res = world["as_"](counter).get(url)
+            assert res.status_code == 403, (role, shop, res.text)
+            assert "3100" not in res.text and "Sharma" not in res.text
+    other_shop = {**MANAGER, "store_ids": ["BV-OTHER-99"], "active_store_id": "BV-OTHER-99"}
+    hidden = world["as_"](other_shop).get(url)
+    assert hidden.status_code == 200, hidden.text
+    assert hidden.json()["stock_unit"] is None and hidden.json()["purchase"] == []
+    assert "3100" not in hidden.text and "Sharma" not in hidden.text
+    mine = world["as_"](MANAGER).get(url).json()
+    assert mine["purchase"][0]["grn_id"] == grn_id
+    assert mine["stock_unit"]["unit_cost"] == 3100.0
 
 
 def test_c7_movements_label_bought_without_po(world):
