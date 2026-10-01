@@ -133,3 +133,16 @@ export function productToFormValues(product: ProductDoc): ProductFormValues {
       : [],
   };
 }
+
+/** A maker's barcode names ONE item, so a new SKU never inherits it: the server
+ *  refuses a GTIN another product holds (product_master.assert_gtin_free), and a
+ *  copied UPC would reach Shopify/Google as the source's. The variant rulebook
+ *  (variantRules VARIANT_NEVER_KEYS) reads this same list. */
+export const MANUFACTURER_BARCODE_KEYS = ['upc', 'gtin'];
+
+/** The Clone prefill: every stored field except the manufacturer barcodes. */
+export function productToCloneValues(product: ProductDoc): ProductFormValues {
+  const values = productToFormValues(product);
+  MANUFACTURER_BARCODE_KEYS.forEach((k) => delete values.attributes[k]);
+  return values;
+}

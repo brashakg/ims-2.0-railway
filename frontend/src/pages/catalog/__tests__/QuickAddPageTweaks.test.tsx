@@ -75,6 +75,7 @@ vi.mock('../../../constants/gstRuntime', () => ({
 }));
 
 import { QuickAddPage } from '../QuickAddPage';
+import { productApi } from '../../../services/api/products';
 import {
   getCategoryFields,
   validateProductForm,
@@ -313,5 +314,21 @@ describe('9 + 12 - the Online strip', () => {
     await user.click(screen.getByLabelText('Sync to Shopify'));
     expect(screen.queryByLabelText('Publish to Shopify POS')).toBeNull();
     expect(screen.getByLabelText('Shopify tags')).toBeInTheDocument();
+  });
+});
+
+describe('10 - Clone', () => {
+  it('copies the product but never its manufacturer barcodes (a GTIN names one item)', async () => {
+    // A cloned GTIN made Save 409 ('already assigned to another product').
+    vi.mocked(productApi.getProduct).mockResolvedValueOnce({
+      ...SOURCE_PRODUCT,
+      attributes: { ...SOURCE_PRODUCT.attributes, gtin: '5901234123457', upc: '036000291452' },
+    });
+    renderPage('/catalog/add?clone=P-SRC');
+    const card = (await screen.findByRole('heading', { name: 'Review' })).closest('.card')!;
+    await waitFor(() => expect(within(card).getByText('Lens Size (mm)')).toBeInTheDocument());
+    expect(within(card).queryByText('GTIN (mfr)')).toBeNull();
+    expect(within(card).queryByText('UPC (mfr)')).toBeNull();
+    expect(screen.queryByDisplayValue('5901234123457')).toBeNull();
   });
 });

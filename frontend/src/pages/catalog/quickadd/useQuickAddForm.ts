@@ -38,6 +38,7 @@ import {
   hsnImpliesCategoryRate,
   loadCategoryRegistry,
   overlayChangedFormValues,
+  productToCloneValues,
   productToFormValues,
   productToVariantFormValues,
   promoteGapsToFormErrors,
@@ -1108,7 +1109,7 @@ export function useQuickAddForm() {
       // A clone replaces the whole form — leave variant mode if active.
       setVariantCtx(null);
       setFlaggedFields(new Set());
-      applyFormValues(productToFormValues(product));
+      applyFormValues(productToCloneValues(product));
       toast.success('Cloned into the form. Tweak the details and save as a NEW SKU.');
       window.scrollTo({ top: 0, behavior: 'smooth' });
     },

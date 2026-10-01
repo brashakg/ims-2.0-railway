@@ -1,7 +1,7 @@
 import { CATEGORY_FIELDS, getCategoryFields } from './categoryFields';
 import type { ProductFormValues } from './formModel';
 import type { ProductDoc } from './cloneMapping';
-import { productToFormValues, str } from './cloneMapping';
+import { MANUFACTURER_BARCODE_KEYS, productToFormValues, str } from './cloneMapping';
 import { inferCategoryCode } from './inferCategory';
 
 // ============================================================================
@@ -58,7 +58,7 @@ const VARIANT_COPY_FLAGGED = new Set<string>([
 
 // Identity/manufacturer codes are per-variant (or per-unit) — never copied.
 const VARIANT_NEVER_KEYS = new Set<string>([
-  'upc', 'gtin', 'full_model_no', 'serial_no', 'sku', 'barcode',
+  ...MANUFACTURER_BARCODE_KEYS, 'full_model_no', 'serial_no', 'sku', 'barcode',
   // batch-specific (CL medical shelf life) — a new variant has its own batch.
   'expiry_date',
   // provenance of the SIBLING's data (legacy Autopilot-era attr on old docs).

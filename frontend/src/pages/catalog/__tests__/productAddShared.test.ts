@@ -12,7 +12,10 @@ import { describe, it, expect } from 'vitest';
 import {
   attrChanged,
   formValuesToCatalogUpdate,
+  productToCloneValues,
+  productToFormValues,
   validateReviewForm,
+  variantFieldRule,
   type ProductFormValues,
 } from '../productAddShared';
 
@@ -77,5 +80,29 @@ describe('validateReviewForm and formValuesToCatalogUpdate stay in lockstep', ()
 
     const errors = validateReviewForm(values, baseline);
     expect(errors.brand_name).toMatch(/not in the allowed list/);
+  });
+});
+
+// Clone of a product with a manufacturer barcode: the GTIN rode into the new
+// SKU's form, so Save got a 409 ('already assigned to another product') until
+// the operator spotted and emptied the box, and the UPC rode along unchecked.
+describe('Clone never copies the manufacturer barcodes', () => {
+  const source = {
+    category: 'FRAME',
+    brand: 'Ray-Ban',
+    attributes: { colour_code: 'BLK', gtin: '5901234123457', upc: '036000291452' },
+  };
+
+  it('drops gtin and upc, keeps the rest', () => {
+    const { attributes } = productToCloneValues(source);
+    expect(attributes.gtin).toBeUndefined();
+    expect(attributes.upc).toBeUndefined();
+    expect(attributes.colour_code).toBe('BLK');
+  });
+
+  it('agrees with the variant rulebook, while Edit still loads them', () => {
+    expect(variantFieldRule('FR', 'gtin')).toBe('never');
+    expect(variantFieldRule('FR', 'upc')).toBe('never');
+    expect(productToFormValues(source).attributes.gtin).toBe('5901234123457');
   });
 });
