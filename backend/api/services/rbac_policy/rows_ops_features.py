@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Dict, List
 
+from ._core import ACCOUNTS
+
 ROWS: List[Dict[str, object]] = [
     # --- Feature #29 skills-based rostering (shares /api/v1/hr; mounted without
     # the HR finance gate). All stores clinical -> every shift needs optometrist
@@ -147,41 +149,42 @@ ROWS: List[Dict[str, object]] = [
         "store_scoped": True,
     },
     # --- Feature #18 vendor volume-rebate tracker (own /api/v1/vendor-rebates).
-    # Finance roles only (mirrors vendor bills/AP). Manual-post; reduces vendor AP. ---
+    # The accounts roles (ACCOUNTS: vendor bills/AP's one rule). Manual-post;
+    # reduces vendor AP. ---
     {
         "method": "POST",
         "path": "/api/v1/vendor-rebates/agreements",
-        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendor-rebates/agreements",
-        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "PUT",
         "path": "/api/v1/vendor-rebates/agreements/{agreement_id}",
-        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendor-rebates/agreements/{agreement_id}/preview",
-        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendor-rebates/post",
-        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendor-rebates/ledger",
-        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendor-rebates/ledger/{rebate_id}",
-        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+        "allowed": ACCOUNTS,
     },
     # Feature #1 cross-store inventory balancing (read-only proposals). Management
     # only; the route itself store-scopes the OUTPUT for a single-store manager.
@@ -230,7 +233,7 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/finance/tally/sales-jv",
         # Org-wide sales-voucher export = finance-admin only (owner decision
         # 2026-06-16; handler enforces _require_finance_admin).
-        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+        "allowed": ACCOUNTS,
     },
     # --- B2B invoices -> Tally (accountant export console + worklist). Every
     # endpoint enforces _require_finance_admin inline -> finance-admin only
@@ -238,32 +241,32 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/finance/b2b-invoices",
-        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",
         "path": "/api/v1/finance/b2b-invoices/{order_id}/tally-xml",
-        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "POST",
         "path": "/api/v1/finance/b2b-invoices/export",
-        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "POST",
         "path": "/api/v1/finance/b2b-invoices/mark-exported",
-        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "POST",
         "path": "/api/v1/finance/b2b-invoices/{order_id}/mark-done",
-        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "POST",
         "path": "/api/v1/finance/b2b-invoices/{order_id}/attention-note",
-        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+        "allowed": ACCOUNTS,
     },
     # E5 wiring: tender-routed Receipt voucher, sibling of the sales-JV export
     # (same finance role set -- finance-admin only). DARK by default -- the
@@ -271,7 +274,7 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/finance/tally/tender-receipt-jv",
-        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+        "allowed": ACCOUNTS,
     },
     # --- F17/#25 maker-checker journal entries (mounted on /finance behind the
     # finance role gate; each handler narrows further inline -- create/submit to
@@ -341,7 +344,7 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/finance/vendor-payments",
         # F60: per-vendor payables = the vendor ledger's answer (handler enforces
         # _require_finance_admin), not the finance router's manager set.
-        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+        "allowed": ACCOUNTS,
     },
     # FIN-1: GST e-invoice (IRN generation). Narrower than the router-level finance
     # gate (no AREA_MANAGER / STORE_MANAGER; matching the inline role check in
@@ -355,16 +358,16 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/finance/bank-statement/import",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",
         "path": "/api/v1/finance/bank-statement",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",
         "path": "/api/v1/finance/bank-statement/{statement_id}",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
 ]
