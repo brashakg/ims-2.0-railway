@@ -389,15 +389,16 @@ def online_status_for_skus(
     (the post-sale guard gap alarm, online_stock_writeback): a read that
     died is not a SKU that is not online.
 
-    online          -- DISPLAY + assessment flag: pushed to Shopify (product
+    online          -- legacy display flag: pushed to Shopify (product
                        gid, or the product's OWN variant carrying a variant /
                        inventory-item gid -- resolved the SAME way on the
                        product and the variant path) OR staged PUBLISHED.
-                       Includes unpurchasable Shopify DRAFTs. DISPLAY only:
-                       the Stock Tally, the reconcile screen and the nightly
-                       parity decide "is this listing live" with ONE reader,
-                       shopify_push.inventory.skus_on_live_listings, never
-                       with this flag.
+                       Includes unpurchasable Shopify DRAFTs. No screen
+                       reads it: /catalog/online-status (the Inventory
+                       screen), the Stock Tally, the reconcile screen and
+                       the nightly parity decide "is this listing live"
+                       with ONE reader, shopify_push.inventory.
+                       skus_on_live_listings.
     sellable_online -- GUARD flag: ecom.status PUBLISHED, or the product's OWN
                        variant carrying a live variant gid (same resolution on
                        both paths). PLAINLY: anything PUSHED to Shopify, even

@@ -2280,3 +2280,111 @@ def test_no_live_listing_beside_an_unread_shelf_is_still_covered(monkeypatch):
     tally = _tally(monkeypatch, db, {INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 3, LOC_B: 0}})
     assert tally["summary"].get("on_hand_unknown") is True
     assert tally["summary"]["listed_qty_live"] is True
+
+
+# ---------------------------------------------------------------------------
+# Round 17, review round 3
+# ---------------------------------------------------------------------------
+
+
+def _unminted_size_of_c1(db):
+    """SKU-2 is a size of live c1 that Shopify has no variant for yet: its
+    size row rides c1 with no inventory item, and its twin is a gid-less
+    DRAFT variant-of child."""
+    _size_of_c1(db)
+    _set(db, "catalog_variants", {"sku": "SKU-2"}, shopify_inventory_item_id=None)
+    _set(db, "catalog_products", {"id": "c2"}, **{"ecom.shopify_product_id": None, "ecom.status": "DRAFT"})
+
+
+def test_a_size_not_yet_on_shopify_is_assessed_by_no_screen(monkeypatch):
+    """Review round 3: a size not yet minted on a live parent was 'live' to
+    the one reader (its listing is), so the view showed it Unverified, the
+    tally listed it and the Inventory column called it online, forever --
+    while parity (no Shopify item to read) never compared it. The reader now
+    needs the writer's target too: not on sale, assessed by nobody. Drop
+    the target from the reader -> LISTED_UNKNOWN on the view -> fails."""
+    from api.routers import catalog
+
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 2, "BV-B": 0}})
+    _unminted_size_of_c1(db)
+    levels = {INV_1: {LOC_A: 1, LOC_B: 1}}
+    tally, parity = _tally_and_parity(monkeypatch, db, levels)
+    assert parity["drift"] == [] and parity["compared"] == 2
+    assert "SKU-2" not in tally and _reconcile(monkeypatch, db, levels, "BV-A")["SKU-2"]["status"] == "NOT_ONLINE"
+    monkeypatch.setattr(catalog, "_get_db", lambda: db)
+    body = catalog.OnlineStatusRequest(skus=["SKU-1", "SKU-2"])
+    statuses = _run(catalog.post_online_status(body, current_user={"user_id": "u1"}))["statuses"]
+    assert statuses["SKU-1"]["online"] is True and statuses["SKU-2"]["online"] is False
+
+
+def test_a_dead_products_read_on_the_tally_is_unknown_never_nothing_listed(monkeypatch):
+    """Review round 3: the Stock Tally answered a failed products read with
+    an empty, 'fully covered' tally (the reconcile route was fixed in round
+    2). It is now live_listings_unknown. Swallow it again -> fails."""
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 0, "BV-B": 0}})
+
+    def dead(*a, **k):
+        raise RuntimeError("products read died")
+
+    monkeypatch.setattr(db.get_collection("products"), "find", dead)
+    tally = _tally(monkeypatch, db, {INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 3, LOC_B: 0}})
+    assert tally["items"] == [] and tally["summary"]["live_listings_unknown"] is True
+    assert tally["summary"]["listed_qty_live"] is False
+
+
+def test_the_tally_reads_the_products_once(monkeypatch):
+    """Review round 3: stock_tally_live read the products for the Shopify
+    read and stock_tally_summary read them AGAIN for the rows, so a SKU only
+    the second read saw was skipped under 'covered'. One read, handed down.
+    Read them again in the summary -> two reads -> fails."""
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 0, "BV-B": 0}})
+    coll = db.get_collection("products")
+    real = coll.find
+    reads = []
+
+    def counted(flt=None, *a, **k):
+        if (flt or {}).get("is_active") == {"$ne": False}:
+            reads.append(1)
+        return real(flt, *a, **k)
+
+    monkeypatch.setattr(coll, "find", counted)
+    tally = _tally(monkeypatch, db, {INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 3, LOC_B: 0}})
+    assert len(reads) == 1 and {r["sku"] for r in tally["items"]} == {"SKU-1", "SKU-2"}
+
+
+def test_the_inventory_online_column_says_unknown_when_the_catalog_read_dies(monkeypatch):
+    """Review round 3: /catalog/online-status answered {} when its own
+    catalogue lookup failed (only the live read answered None), so the
+    Inventory screen still said 'In-store only' on the common blip. Every
+    asked key is now online None. Answer {} again -> fails."""
+    from api.routers import catalog
+
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 0, "BV-B": 0}})
+    monkeypatch.setattr(catalog, "_get_db", lambda: db)
+
+    def dead(*a, **k):
+        raise RuntimeError("catalog read died")
+
+    for name in ("catalog_products", "catalog_variants"):
+        monkeypatch.setattr(db.get_collection(name), "find", dead)
+        monkeypatch.setattr(db.get_collection(name), "find_one", dead)
+    body = catalog.OnlineStatusRequest(skus=["SKU-1", " SKU-2 "])
+    statuses = _run(catalog.post_online_status(body, current_user={"user_id": "u1"}))["statuses"]
+    assert {k: v["online"] for k, v in statuses.items()} == {"SKU-1": None, "SKU-2": None}
+
+
+def test_the_close_note_never_says_a_retired_listing_left_the_website():
+    """Review round 3: a retired SKU (skipped, the owner's ruling) whose
+    take-down failed still sells on a PUBLISHED listing, yet the close note
+    said it is 'no longer live on the website'. The note gives the same
+    reasons as the description. Put the old words back -> fails."""
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 0, "BV-B": 0}})
+    shop = _shopify({INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 3, LOC_B: 0}})
+    _run(sp.run_parity_tick(db, graphql=shop))
+    _retire("SKU-2", online_state="DELIST_FAILED", delist_mode="LIVE")(db)
+    out = _run(sp.run_parity_tick(db, graphql=shop))
+    assert out["tasks"]["closed"] == ["BV-A"]
+    (task,) = _tasks(db)
+    note = task["completion_notes"]
+    assert "Auto-closed" in note and "no longer live on the website" not in note
+    assert "IMS no longer sells it" in note

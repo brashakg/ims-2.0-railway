@@ -65,11 +65,20 @@ def _online_statuses(db, sku_list: List[str]) -> Dict[str, Any]:
     one the nightly parity, the Stock Tally and the reconciliation view read
     -- so the Inventory screen's Online column never calls a draft or
     taken-down listing online while those views call it not online. A
-    failed live read answers ``online`` None (unknown: the screen says
-    Unverified), never a confident "in-store only"."""
+    failed read -- the catalogue lookup itself or the live read -- answers
+    ``online`` None (unknown: the screen says Unverified), never a confident
+    "in-store only"."""
     from ..services.shopify_push.inventory import skus_on_live_listings
 
-    statuses = online_status_for_skus(db, sku_list)
+    try:
+        statuses = online_status_for_skus(db, sku_list, strict=True)
+    except Exception:  # noqa: BLE001
+        # Which keys are on Shopify at all is unknown: every key unknown,
+        # never a confident "in-store only".
+        return {
+            k: {"online": None, "sellable_online": None, "online_stock": None, "status": None}
+            for k in dict.fromkeys(s.strip() for s in sku_list if s and s.strip())
+        }
     if not statuses:
         return statuses
     try:

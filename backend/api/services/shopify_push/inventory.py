@@ -1916,7 +1916,10 @@ def skus_on_live_listings(db, skus: Iterable[str], *, strict: bool = False) -> s
     """THE one reader of "is this SKU's listing live on Shopify": the keys
     (stripped) whose listing -- the writer's own online_catalog.
     listings_for_skus, so a size is judged by its PARENT's listing -- is
-    listing_visible (a gid and PUBLISHED). Every LIVE take-down by any door
+    listing_visible (a gid and PUBLISHED), and that the writer can address
+    there (online_catalog.inventory_items_for_skus finds its Shopify
+    inventory item: a size not yet minted on Shopify is not on sale, and
+    neither the writer nor parity can reach it). Every LIVE take-down by any door
     (Take off website, the retire hook, the SUPERADMIN block cutover: all
     push_product_delist) writes DRAFT, and only a confirmed publish writes
     PUBLISHED back, so this is what Shopify sells -- never a second "taken
@@ -1925,7 +1928,7 @@ def skus_on_live_listings(db, skus: Iterable[str], *, strict: bool = False) -> s
     task assess the same SKUs. Fail-soft set() -- or, ``strict``, a failed
     read raises (the nightly parity: a dead read is never "nothing is
     live")."""
-    from ..online_catalog import _coll, listings_for_skus
+    from ..online_catalog import _coll, inventory_items_for_skus, listings_for_skus
 
     by_listing = listings_for_skus(db, list(skus or []), strict=strict)
     if not by_listing:
@@ -1939,11 +1942,13 @@ def skus_on_live_listings(db, skus: Iterable[str], *, strict: bool = False) -> s
             for d in coll.find({"id": {"$in": sorted(by_listing)}}, {"_id": 0, "id": 1, "ecom": 1})
             if listing_visible(d)
         }
+        on_live = [s for pid, keys in by_listing.items() if pid in live for s in keys]
+        targeted = inventory_items_for_skus(db, on_live) if on_live else {}
     except Exception:  # noqa: BLE001
         if strict:
             raise
         return set()
-    return {s for pid, keys in by_listing.items() if pid in live for s in keys}
+    return {s for s in on_live if s in targeted}
 
 
 def listing_already_live(product: Dict[str, Any]) -> bool:

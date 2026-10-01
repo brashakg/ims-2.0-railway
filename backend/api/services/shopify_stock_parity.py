@@ -714,7 +714,9 @@ def sync_drift_task(
         if active and (named or summary.get("compared")):
             notes = (
                 f"Auto-closed: every SKU this task named at {label} compared clean or is no "
-                f"longer live on the website ({summary.get('compared') or 0} SKU(s) compared)."
+                f"longer compared (its listing is off the website, IMS no longer sells it, it was "
+                f"deleted in Shopify admin, or its Shopify item is unmapped) "
+                f"({summary.get('compared') or 0} SKU(s) compared)."
             )
             ok = all([repo.complete_task(t.get("task_id"), notes=notes) for t in active])
             return "closed" if ok else None

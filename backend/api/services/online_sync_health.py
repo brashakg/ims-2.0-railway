@@ -293,11 +293,26 @@ def _recommended_buffer(on_hand: int) -> int:
     return min(on_hand, max(1, ceil(on_hand * 0.05)))
 
 
+def _tally_products(db, limit: int) -> List[Dict[str, Any]]:
+    """The spine rows the Stock Tally assesses (one read, shared by
+    stock_tally_live's Shopify read and stock_tally_summary's rows). Raises
+    on a failed read."""
+    return list(
+        _coll(db, "products")
+        .find(
+            {"sku": {"$nin": [None, ""]}, "is_active": {"$ne": False}},
+            {"_id": 0, "product_id": 1, "sku": 1, "name": 1},
+        )
+        .limit(limit)
+    )
+
+
 def stock_tally_summary(
     db,
     limit: int = _RECONCILE_SCAN_LIMIT,
     live: Optional[Dict[str, Any]] = None,
     on_live: Optional[set] = None,
+    products: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """READ-ONLY per-SKU reconciliation of online-listed qty vs real on-hand vs
     already-reserved -- the Online Store "Stock tally" dashboard (BVI Phase 5).
@@ -306,9 +321,11 @@ def stock_tally_summary(
     by (inventory.skus_on_live_listings: the SKU's listing -- a size's
     parent's -- is live on Shopify; a draft or taken-down one sells nothing
     and is not assessed). ``on_live`` is that answer when the caller already
-    read it (stock_tally_live reads it ONCE, for the Shopify read and the
-    rows alike); else it is read here, STRICT: a failed read tallies nothing
-    and says so (summary.live_listings_unknown), never "nothing is online".
+    read it (stock_tally_live reads the products and the live set ONCE, for
+    the Shopify read and the rows alike, and hands both down as ``products``
+    / ``on_live``); else both are read here, STRICT: a failed products or
+    live-listing read tallies nothing and says so
+    (summary.live_listings_unknown), never "nothing is online".
     No live listing at all is full coverage (nothing to read), never
     "Shopify unavailable". The LISTED
     quantity lives on Shopify, PER LOCATION; pass ``live`` (the
@@ -377,18 +394,15 @@ def stock_tally_summary(
     if db is None:
         return base
 
-    try:
-        products = list(
-            _coll(db, "products")
-            .find(
-                {"sku": {"$nin": [None, ""]}, "is_active": {"$ne": False}},
-                {"_id": 0, "product_id": 1, "sku": 1, "name": 1},
-            )
-            .limit(limit)
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[STOCK_TALLY] products scan failed: %s", exc)
-        return base
+    if products is None:
+        try:
+            products = _tally_products(db, limit)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[STOCK_TALLY] products scan failed: %s", exc)
+            # Which SKUs exist is unknown: never "nothing listed online".
+            base["summary"]["live_listings_unknown"] = True
+            base["summary"]["listed_qty_live"] = False
+            return base
     if not products:
         return base
 
@@ -613,15 +627,11 @@ async def stock_tally_live(db, limit: int = _RECONCILE_SCAN_LIMIT) -> Dict[str, 
     unavailable. Never raises."""
     live: Optional[Dict[str, Any]] = None
     on_live: Optional[set] = None
+    products: Optional[List[Dict[str, Any]]] = None
     try:
-        products = list(
-            _coll(db, "products")
-            .find(
-                {"sku": {"$nin": [None, ""]}, "is_active": {"$ne": False}},
-                {"_id": 0, "sku": 1},
-            )
-            .limit(limit)
-        )
+        # ONE products read for the Shopify read and the rows: a SKU in a
+        # second read but not the first would be skipped under "covered".
+        products = _tally_products(db, limit)
         skus = [p.get("sku") for p in products if p.get("sku")]
         if skus:
             from .shopify_push.inventory import skus_on_live_listings
@@ -635,7 +645,7 @@ async def stock_tally_live(db, limit: int = _RECONCILE_SCAN_LIMIT) -> Dict[str, 
             live = await live_listed_qty_for_skus(db, live_skus) if live_skus else None
     except Exception as exc:  # noqa: BLE001
         logger.debug("[STOCK_TALLY] live scan skipped: %s", exc)
-    return stock_tally_summary(db, limit=limit, live=live, on_live=on_live)
+    return stock_tally_summary(db, limit=limit, live=live, on_live=on_live, products=products)
 
 
 def failed_webhook_summary(db) -> Dict[str, Any]:
