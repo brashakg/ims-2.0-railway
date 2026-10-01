@@ -33,11 +33,20 @@ const COLUMNS: { key: keyof Figures; label: string }[] = [
   { key: 'owed', label: 'Owed' },
 ];
 
-// Whole rupees, on screen and in the export alike.
-const whole = (n: number) => Math.round(n);
+// Whole rupees, on screen, in the export and on the Total line alike: ONE rule.
+// The size rounds half away from zero and the sign goes back on, so an advance
+// of 1500.50 is 1501 everywhere (Math.round(-1500.5) is -1500, a rupee off the
+// paid 1501 on the same row). A figure that rounds to nothing is 0, never -0.
+const whole = (n: number) => {
+  const size = Math.round(Math.abs(n));
+  return n < 0 && size !== 0 ? -size : size;
+};
 const rupees = (n: number) => `₹${whole(n).toLocaleString('en-IN')}`;
 /** Owed below zero is money already with the supplier (an advance). */
-const owedText = (n: number) => (whole(n) < 0 ? `${rupees(-n)} advance` : rupees(n));
+const owedText = (n: number) => {
+  const w = whole(n);
+  return w < 0 ? `${rupees(-w)} advance` : rupees(w);
+};
 const thisMonth = () => (istDayString(new Date()) ?? '').slice(0, 7);
 
 export function PurchasesThisMonthSection() {
@@ -53,8 +62,9 @@ export function PurchasesThisMonthSection() {
   });
   const rows = q.data?.vendors ?? [];
 
-  // The CSV opens with the screen's numbers: the same rows, whole rupees, the
-  // Total line, and plain numbers (an advance stays -1500, summable).
+  // The CSV opens with the screen's numbers: the same rows, the same whole()
+  // for every figure and the Total line, and plain numbers (an advance shown
+  // as "Rs 1,501 advance" is -1501, summable).
   const exportCsv = () => {
     const totals = q.data?.totals;
     const line = (name: string, f: Figures, due = '', overdue = false) => ({

@@ -111,6 +111,78 @@ describe('Purchases this month', () => {
     );
   });
 
+  it('rounds a figure ending in 50 paise one way on screen, in the CSV and on the Total line', async () => {
+    // Round 3, problem 9: an advance of 1500.50 read "Paid Rs 1,501 / Rs 1,501
+    // advance" on screen but "Advance Frames,0,0,0,1501,-1500" in the CSV,
+    // because Math.round(-1500.5) is -1500. One rule now: the size rounds half
+    // away from zero and the sign goes back on.
+    roles = ['ADMIN'];
+    exportToCSV.mockClear();
+    const half = {
+      month: '2026-09',
+      vendors: [
+        { vendor_id: 'v4', vendor_name: 'Advance Frames', ordered: 0, received: 0, billed: 0, paid: 1500.5, owed: -1500.5, next_due_date: null },
+        { vendor_id: 'v5', vendor_name: 'Half Rupee Lens', ordered: 2500.5, received: 2500.5, billed: 2500.5, paid: 1500, owed: 1000.5, next_due_date: '2026-10-05', next_due_overdue: false },
+        { vendor_id: 'v6', vendor_name: 'Small Change Co', ordered: 0, received: 0, billed: 0, paid: 0.5, owed: -0.5, next_due_date: null },
+      ],
+      totals: { ordered: 2500.5, received: 2500.5, billed: 2500.5, paid: 3001, owed: -500.5 },
+    };
+    get.mockImplementation((url: string) =>
+      Promise.resolve({
+        data: url === '/stores'
+          ? { stores: [{ store_id: 'BV-DHN-01', store_name: 'Dhanbad' }] }
+          : url === '/vendors/purchases-this-month' ? half : {},
+      }),
+    );
+    open();
+
+    const advance = (await screen.findByText('Advance Frames')).closest('tr')!;
+    expect(within(advance).getByText('₹1,501')).toBeInTheDocument();
+    expect(within(advance).getByText('₹1,501 advance')).toBeInTheDocument();
+    const positive = screen.getByText('Half Rupee Lens').closest('tr')!;
+    expect(within(positive).getAllByText('₹2,501')).toHaveLength(3);
+    expect(within(positive).getByText('₹1,001')).toBeInTheDocument();
+    const small = screen.getByText('Small Change Co').closest('tr')!;
+    expect(within(small).getByText('₹1 advance')).toBeInTheDocument();
+    const total = screen.getByText('Total').closest('tr')!;
+    expect(within(total).getByText('₹501 advance')).toBeInTheDocument();
+    expect(within(total).getByText('₹3,001')).toBeInTheDocument();
+
+    // The real CSV text, from the real writer, for the rows the screen exported.
+    fireEvent.click(screen.getByRole('button', { name: /export csv/i }));
+    const [rows, , columns] = exportToCSV.mock.calls[0];
+    const { toCSV } = await vi.importActual<typeof import('../../../utils/exportUtils')>(
+      '../../../utils/exportUtils',
+    );
+    const csv = toCSV(rows, columns).split('\n');
+    expect(csv.slice(1)).toEqual([
+      '"Advance Frames",0,0,0,1501,-1501,"",""',
+      '"Half Rupee Lens",2501,2501,2501,1500,1001,"2026-10-05",""',
+      '"Small Change Co",0,0,0,1,-1,"",""',
+      '"Total",2501,2501,2501,3001,-501,"",""',
+    ]);
+
+    // Every figure cell on screen, Total line included, says the CSV's number
+    // ("Rs 1,501 advance" is -1501), and the columns come in the screen's order
+    // under the screen's names.
+    const figure = (text: string) => {
+      const m = /^₹([\d,-]+)( advance)?$/.exec(text.trim());
+      if (!m) return `unreadable: ${text}`;
+      const digits = m[1].replace(/,/g, '');
+      return m[2] ? `-${digits}` : digits;
+    };
+    const table = screen.getByRole('table');
+    const onScreen = within(table).getAllByRole('row').slice(1).map((tr) => {
+      const cells = within(tr).getAllByRole('cell').map((td) => td.textContent ?? '');
+      return [cells[0], ...cells.slice(1, 6).map(figure)].join(',');
+    });
+    const inCsv = csv.slice(1).map((l) => l.split(',').slice(0, 6).join(',').replace(/"/g, ''));
+    expect(onScreen).toEqual(inCsv);
+    const heads = within(table).getAllByRole('columnheader').map((th) => th.textContent ?? '');
+    const labels = columns.map((c: { label: string }) => c.label);
+    expect(heads.map((h, i) => labels[i].startsWith(h))).toEqual(heads.map(() => true));
+  });
+
   it('says an advance is an advance and marks an overdue next due', async () => {
     roles = ['ADMIN'];
     open();
