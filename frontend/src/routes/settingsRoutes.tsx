@@ -104,6 +104,15 @@ const SECTION_ELEMENTS: Record<SettingsTab, React.ReactElement> = {
   system: <SystemSettingsPage />,
 };
 
+// ProtectedRoute lets ADMIN through EVERY role gate (AuthContext.hasRole), so a
+// section declared SUPERADMIN-only needs this strict check or ADMIN could open
+// it by URL while the rail (which matches roles literally) hides it.
+function SuperadminOnly({ children }: { children: React.ReactNode }) {
+  const { user } = useAuth();
+  if (!(user?.roles || []).includes('SUPERADMIN')) return <Navigate to="/unauthorized" replace />;
+  return <>{children}</>;
+}
+
 // Legacy ?tab= mapper: /settings and /settings?tab=<x> land on the section
 // page, carrying any other query params along.
 function SettingsTabRedirect() {
@@ -143,7 +152,9 @@ export const settingsRoutes = (
               <ProtectedRoute>{SECTION_ELEMENTS[section.id]}</ProtectedRoute>
             ) : (
               <ProtectedRoute allowedRoles={section.role as UserRole[]}>
-                {SECTION_ELEMENTS[section.id]}
+                {section.role.length === 1 && section.role[0] === 'SUPERADMIN'
+                  ? <SuperadminOnly>{SECTION_ELEMENTS[section.id]}</SuperadminOnly>
+                  : SECTION_ELEMENTS[section.id]}
               </ProtectedRoute>
             )
           }

@@ -51,14 +51,13 @@ export const SETTINGS_SECTIONS = [
   { id: 'shopify-live-sync' as SettingsTab, label: 'Shopify live sync', icon: RefreshCw, description: 'When edited products already on Shopify are re-pushed (IST times, on/off, per-run cap)', role: ['SUPERADMIN'] },
   { id: 'audit-logs' as SettingsTab, label: 'Audit Logs', icon: History, description: 'Activity history and logs', role: ['SUPERADMIN', 'ADMIN'] },
   // Wave 6 B21: the four editors that used to sit behind a second tab layer
-  // on /settings/system. Same roles as that page, so nobody gains or loses a
-  // screen. (The backend /settings/admin-controls is SUPERADMIN-only and
-  // answers ADMIN with a 403, exactly as it did on the System tab - a gap
-  // for a later ruling, not widened or narrowed here.)
-  { id: 'modules' as SettingsTab, label: 'Store Modules', icon: Store, description: 'Which modules each store can use', role: ['SUPERADMIN', 'ADMIN'] },
-  { id: 'permissions' as SettingsTab, label: 'Role Permissions', icon: Shield, description: 'Permission matrix per role', role: ['SUPERADMIN', 'ADMIN'] },
-  { id: 'discount-caps' as SettingsTab, label: 'Discount Limits', icon: CreditCard, description: 'Max discount and approval threshold per role', role: ['SUPERADMIN', 'ADMIN'] },
-  { id: 'rules' as SettingsTab, label: 'Operational Rules', icon: Settings, description: 'Billing, inventory, HR, clinical and security rules', role: ['SUPERADMIN', 'ADMIN'] },
+  // on /settings/system. SUPERADMIN only, matching the backend: GET/PUT
+  // /settings/admin-controls are SUPERADMIN-only, so any other role would see
+  // a page whose save always fails.
+  { id: 'modules' as SettingsTab, label: 'Store Modules', icon: Store, description: 'Which modules each store can use', role: ['SUPERADMIN'] },
+  { id: 'permissions' as SettingsTab, label: 'Role Permissions', icon: Shield, description: 'Permission matrix per role', role: ['SUPERADMIN'] },
+  { id: 'discount-caps' as SettingsTab, label: 'Discount Limits', icon: CreditCard, description: 'Max discount and approval threshold per role', role: ['SUPERADMIN'] },
+  { id: 'rules' as SettingsTab, label: 'Operational Rules', icon: Settings, description: 'Billing, inventory, HR, clinical and security rules', role: ['SUPERADMIN'] },
   { id: 'system' as SettingsTab, label: 'System', icon: Database, description: 'Backup, sync, maintenance', role: ['SUPERADMIN', 'ADMIN'] },
 ];
 
