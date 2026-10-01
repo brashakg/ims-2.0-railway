@@ -29,7 +29,6 @@ export interface ProductFormValues {
   discountCategory: string;
   syncToShopify: boolean;
   shopifyTags: string[];
-  publishPOS: boolean;
   // Uploaded product-image URLs (self-hosted, from productApi.uploadProductImage).
   // Optional so existing callers that don't collect images still type-check;
   // buildProductPayload defaults it to [].
@@ -238,7 +237,7 @@ export function buildProductPayload(values: ProductFormValues): CreateProductPay
       // don't render our own storefront.
       sync_to_shopify: values.syncToShopify,
       shopify_tags: values.shopifyTags,
-      publish_to_pos: values.publishPOS,
+      // No Shopify POS publish: IMS is the till (owner ruling 2026-09-28).
     },
   };
 }

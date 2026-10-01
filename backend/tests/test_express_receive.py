@@ -230,7 +230,6 @@ def _wire(monkeypatch, *, po=None, file_store=None, product_repo=None):
         lambda: (file_store if file_store is not None else _FileStore()),
     )
     monkeypatch.setattr(vendors_mod, "generate_grn_number", lambda s: f"GRN-{s}")
-    monkeypatch.setattr(vendors_mod, "_grn_barcode", lambda s, p: "BC-TEST")
     monkeypatch.setattr(vendors_mod, "_get_db", lambda: None)
     # The accountant task is created via a call-time import of
     # api.dependencies.get_task_repository -- patch it at the source module.

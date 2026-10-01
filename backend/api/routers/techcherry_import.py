@@ -37,6 +37,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from .auth import get_current_user
+from ..services.gtin import classify_gtin, normalise_candidate
 from ..services.phone import normalize_indian_mobile
 
 router = APIRouter()
@@ -266,12 +267,12 @@ def _map_product(
     hsn = (row.get("hsn") or row.get("HSN") or "").strip()
     unit = (row.get("unit") or row.get("Unit") or "PCS").strip()
 
-    return {
+    doc = {
         "store_id": store_id,
         "name": name,
         "brand": brand,
         "category": category,
-        "barcode": barcode,
+        # TechCherry's own item code stays the SKU (and the re-import key).
         "sku": barcode or name[:60],
         "mrp": sale_price,
         "offer_price": sale_price,
@@ -284,6 +285,13 @@ def _map_product(
         "source": source,
         "techcherry_imported_at": datetime.now(timezone.utc),
     }
+    # products.barcode holds only a manufacturer GTIN (owner ruling 2026-09-28,
+    # services/gtin.py). TechCherry's codes are mostly its own ('2510647'), so
+    # one becomes the barcode only when it IS a GTIN. Omitted otherwise, never
+    # "", so the unique sparse index on products.barcode is not hit.
+    if barcode and not classify_gtin(barcode):
+        doc["barcode"] = normalise_candidate(barcode)
+    return doc
 
 
 def _map_customer(
@@ -405,7 +413,7 @@ async def import_batch(
 
     if req.type == "products":
         collection_name = "products"
-        dedup_field = "barcode"
+        dedup_field = "sku"
         mapper = _map_product
     elif req.type == "customers":
         collection_name = "customers"

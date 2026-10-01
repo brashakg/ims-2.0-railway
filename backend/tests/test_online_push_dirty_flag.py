@@ -909,7 +909,7 @@ def test_spine_put_carries_brand_attributes_and_tags_onto_the_twin_and_queues(
         db,
         monkeypatch,
         brand="Oakley",
-        attributes={"frame_color": "Matte Black", "gtin": "8901234567893"},
+        attributes={"frame_color": "Matte Black", "gtin": "8901234567890"},
         tags=["Polarised"],
     )
 
@@ -921,7 +921,7 @@ def test_spine_put_carries_brand_attributes_and_tags_onto_the_twin_and_queues(
     assert saved["attributes"]["brand_name"] == "Ray-Ban", (
         "the route's MERGED bag lands, not a partial overwrite"
     )
-    assert saved["gtin"] == "8901234567893", (
+    assert saved["gtin"] == "8901234567890", (
         "the public barcode the pseudo-variant reads top-level"
     )
     assert saved["ecom"]["seo"]["tags"] == ["polarised"], (
@@ -987,11 +987,14 @@ def test_build_pim_doc_projects_the_attribute_gtin_as_the_public_barcode():
     only ever reached Shopify as an ims.gtin metafield, never as the variant
     barcode the shopping feeds republish."""
     doc = pm._build_pim_doc(
-        {"pim_product_id": "PIM-9", "sku": "X", "attributes": {"gtin": "8901234567893"}}
+        {"pim_product_id": "PIM-9", "sku": "X", "mrp": 1000.0,
+         "attributes": {"gtin": "8901234567890"}}
     )
-    assert doc["gtin"] == "8901234567893"
+    assert doc["gtin"] == "8901234567890"
     doc["ecom"]["shopify_variant_id"] = "gid://shopify/ProductVariant/1"
-    pseudo = shopify_push._variants_for_price_push(doc, [])
-    assert pseudo and pseudo[0]["gtin"] == "8901234567893"
+    rows, _ = shopify_push.build_variant_price_inputs(
+        doc, shopify_push._variants_for_price_push(doc, [])
+    )
+    assert rows and rows[0]["barcode"] == "8901234567890"
     # tolerant of a spine with no gtin at all
     assert pm._build_pim_doc({"pim_product_id": "PIM-10"})["gtin"] is None

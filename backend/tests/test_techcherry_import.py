@@ -82,7 +82,10 @@ class TestMappers:
         assert doc is not None
         assert doc["brand"] == "RAYBAN"
         assert doc["category"] == "FRAME"
-        assert doc["barcode"] == "2510647"
+        # TechCherry's own code is the SKU, never the product barcode: that
+        # field holds only a manufacturer GTIN (owner ruling 2026-09-28).
+        assert doc["sku"] == "2510647"
+        assert "barcode" not in doc
         assert doc["mrp"] == 4790.0
         assert doc["cost_price"] == 2500.0
         assert doc["stock_quantity"] == 1
@@ -95,9 +98,18 @@ class TestMappers:
         row = {"Prod Name": "Generic frame", "Barcode": "NA", "Sale Prc": "500"}
         doc = _map_product(row, "BV-PUN-01", "techcherry")
         assert doc is not None
-        assert doc["barcode"] == ""
+        assert "barcode" not in doc
         # sku falls back to name when no barcode
         assert doc["sku"] == "Generic frame"
+
+    def test_product_mapper_keeps_a_real_gtin_as_the_barcode(self):
+        from api.routers.techcherry_import import _map_product
+        row = {"Prod Name": "Oakley frame", "Barcode": "4006381 333931", "Sale Prc": "900"}
+        doc = _map_product(row, "BV-PUN-01", "techcherry")
+        assert doc["barcode"] == "4006381333931"
+        # Our own in-store range (GS1 20-29) is never a manufacturer barcode.
+        row["Barcode"] = "2000000000015"
+        assert "barcode" not in _map_product(row, "BV-PUN-01", "techcherry")
 
     def test_product_mapper_skips_when_no_name_or_barcode(self):
         from api.routers.techcherry_import import _map_product
@@ -232,6 +244,29 @@ class TestPowerQuality:
         assert body["out_of_range_power_rows"] == 1
         assert any("INV-BAD" in n for n in body["data_quality_notes"])
         assert len(inserted) == 2
+
+
+    def test_reimporting_a_techcherry_coded_product_does_not_duplicate_it(
+        self, client, auth_headers, monkeypatch
+    ):
+        """The product barcode no longer carries TechCherry's own code, so the
+        re-import key is the SKU (which does): a second import of the same row
+        updates the first, it is not inserted twice."""
+        import mongomock
+        import api.routers.techcherry_import as tc
+
+        db = mongomock.MongoClient().db
+        monkeypatch.setattr(tc, "_get_db", lambda: db)
+        body = {
+            "type": "products",
+            "store_id": "BV-PUN-01",
+            "rows": [{"Prod Name": "RB6266", "Barcode": "2510647", "Sale Prc": "4790"}],
+        }
+        for _ in range(2):
+            r = client.post("/api/v1/admin/techcherry/import", json=body, headers=auth_headers)
+            assert r.status_code == 200, r.text
+        assert r.json()["inserted"] == 0
+        assert db.products.count_documents({"sku": "2510647"}) == 1
 
 
 # ----- endpoint auth ------------------------------------------------------

@@ -46,6 +46,7 @@ import { UnitLabelsModal } from '../../components/labels/UnitLabelsModal';
 import { Pagination } from '../../components/common/Pagination';
 import { ImageLightbox } from '../../components/common/ImageLightbox';
 import { useInventoryContext } from './InventoryLayout';
+import { stockRowMatches } from '../../utils/stockSearch';
 import {
   CATEGORIES,
   getOnlineFor,
@@ -143,10 +144,11 @@ export function InventoryStockPage() {
 
   // Filter inventory locally
   const filteredInventory = inventory.filter(item => {
-    const matchesSearch = !searchQuery ||
-      item.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      item.sku?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      item.brand?.toLowerCase().includes(searchQuery.toLowerCase());
+    const matchesSearch = stockRowMatches(
+      searchQuery,
+      [item.name, item.sku, item.brand],
+      item.unit_barcodes,
+    );
 
     const matchesCategory = !selectedCategory || sameCategory(item.category, selectedCategory);
 
@@ -215,7 +217,7 @@ export function InventoryStockPage() {
         esc(item.name),
         esc(item.brand),
         esc(item.sku),
-        esc(item.barcode || ''),
+        esc(item.gtin || ''),
         esc(category),
         esc(item.mrp ?? ''),
         esc(item.offerPrice ?? item.mrp ?? ''),
@@ -294,23 +296,11 @@ export function InventoryStockPage() {
         await reloadInventory();
       }
     } catch (err: unknown) {
-      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail || 'Import failed. Check CSV format and try again.';
+      // An ApiError's message is the server's reason (it has no .response).
+      const msg = (err as Error)?.message || 'Import failed. Check CSV format and try again.';
       toast.error(msg);
     } finally {
       setIsImporting(false);
-    }
-  };
-
-  // Handle barcode save through the SINGLE validated product-update path.
-  const handleSaveBarcode = async (barcode: string) => {
-    if (!selectedProduct) return;
-    try {
-      await productApi.updateProduct(selectedProduct.id, { barcode });
-      toast.success(`Barcode saved for ${selectedProduct.name}`);
-      await reloadInventory();
-    } catch {
-      toast.error('Failed to save barcode. Please try again.');
-      throw new Error('Failed to save barcode');
     }
   };
 
@@ -711,9 +701,11 @@ export function InventoryStockPage() {
           }}
           productId={selectedProduct.id}
           productName={selectedProduct.name}
-          currentBarcode={selectedProduct.barcode}
-          price={selectedProduct.offerPrice || selectedProduct.mrp}
-          onSave={handleSaveBarcode}
+          currentGtin={selectedProduct.gtin}
+          onSaved={() => {
+            toast.success(`Manufacturer barcode saved for ${selectedProduct.name}`);
+            reloadInventory();
+          }}
         />
       )}
 
@@ -736,6 +728,7 @@ export function InventoryStockPage() {
         const rows: Array<[string, string]> = [
           ['SKU', detailItem.sku || '-'],
           ['Units in the shop', String(unitsInShop(detailItem))],
+          ['Manufacturer barcode', detailItem.gtin || 'Not set'],
           ['Category', cat?.label || detailItem.category],
           ['MRP', formatCurrency(detailItem.mrp || 0)],
           ['Offer price', formatCurrency(detailItem.offerPrice || detailItem.mrp || 0)],

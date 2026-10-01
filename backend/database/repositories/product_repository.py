@@ -9,6 +9,8 @@ import re
 from typing import List, NamedTuple, Optional, Dict
 from datetime import datetime, date, timedelta
 
+from api.services.barcode import unit_barcode_match
+from api.services.gtin import gtin_spellings
 from api.utils.ist import ist_today
 
 from .base_repository import BaseRepository
@@ -68,12 +70,23 @@ class ProductRepository(BaseRepository):
         return self.find_one({"identity_key": identity_key})
 
     def find_by_barcode(self, barcode: str) -> Optional[Dict]:
-        """Find a product by scan-to-sell barcode (Hub Phase 1 duplicate guard).
-        Makes the create-path barcode arm functional whenever a barcode rides
-        along (e.g. a bulk/import row); returns None for a blank value."""
-        if not barcode:
+        """Find the product holding this manufacturer barcode (Hub Phase 1
+        duplicate guard + the create and edit doors' uniqueness check). It can
+        live in `barcode` or in the `gtin` attribute (what Manage Barcode and the
+        Add Product form write), so both are read, in every spelling of the one
+        GTIN (a UPC-A and its 13-digit form are one code). None for a blank
+        value."""
+        spellings = gtin_spellings(barcode)
+        if not spellings:
             return None
-        return self.find_one({"barcode": barcode})
+        return self.find_one(
+            {
+                "$or": [
+                    {"barcode": {"$in": spellings}},
+                    {"attributes.gtin": {"$in": spellings}},
+                ]
+            }
+        )
 
     def _category_filter(
         self,
@@ -294,7 +307,7 @@ class StockRepository(BaseRepository):
         return "stock_id"
 
     def find_by_barcode(self, barcode: str) -> Optional[Dict]:
-        return self.find_one({"barcode": barcode})
+        return self.find_one(unit_barcode_match(barcode))
 
     def find_by_product_store(self, product_id: str, store_id: str) -> List[Dict]:
         return self.find_many(

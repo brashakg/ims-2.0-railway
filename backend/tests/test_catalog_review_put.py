@@ -691,3 +691,123 @@ def test_name_and_tags_survive_promote_to_spine(env):
     assert spine["name"] == "Vogue VO5051 Midnight"
     # The door normalises tags (trim + lower-case, first-seen order).
     assert spine["tags"] == ["aviator", "new arrival"]
+
+
+# ---------------------------------------------------------------------------
+# The review editor's 'GTIN (mfr)' box: the manufacturer barcode that goes to
+# Shopify and Google, so the same guard + one-holder rule as the spine doors,
+# and spine and twin hold one GTIN.
+# ---------------------------------------------------------------------------
+_GTIN = "4006381333931"
+_UPC = "036000291452"
+
+
+@pytest.fixture()
+def gtin_env(env, monkeypatch):
+    """`env` with the spine repo over mongomock (the real find_by_barcode
+    query and the dotted attributes.gtin write both run), a door-created
+    twin and its spine."""
+    import mongomock
+
+    repo = ProductRepository(mongomock.MongoClient().db.products)
+    monkeypatch.setattr(deps_mod, "get_product_repository", lambda: repo)
+    doc = _bvi_doc(doc_id="twin-g1", sku="GTSKU1", barcode="5901234123457")
+    catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
+    repo.create({"product_id": "spine-g1", "pim_product_id": "twin-g1",
+                 "sku": "GTSKU1", "attributes": {"colour_code": "BLK"}})
+    return repo
+
+
+def _pushed_barcode(gtin_env, twin):
+    """What the price push sends for `twin` over the SELF row the create door
+    writes for its spine (product_master._variant_row_for -> catalog_variants,
+    loaded as push_product loads it), once on Shopify. None = omitted."""
+    import mongomock
+
+    from api.services import product_master as pm
+    from api.services.online_catalog import variant_rows_for_product
+    from api.services.shopify_push.product_input import (
+        _variants_for_price_push,
+        build_variant_price_inputs,
+    )
+
+    db = mongomock.MongoClient().db
+    row = pm._variant_row_for(gtin_env.find_by_id("spine-g1"))
+    db.catalog_variants.insert_one(
+        {**row, "shopify_variant_id": "gid://shopify/ProductVariant/1"}
+    )
+    rows = variant_rows_for_product(db, twin)
+    assert [r["sku"] for r in rows] == ["GTSKU1"] and "gtin" not in rows[0]
+    out, _ = build_variant_price_inputs(twin, _variants_for_price_push(twin, rows))
+    return out[0].get("barcode")
+
+
+@pytest.mark.parametrize("junk", ["2000000000015", "TW003HG14", "4006381333932"])
+def test_review_editor_refuses_a_junk_gtin_or_upc(gtin_env, junk):
+    for key in ("gtin", "upc"):
+        with pytest.raises(HTTPException) as exc:
+            _put("twin-g1", {"attributes": {key: junk}})
+        assert exc.value.status_code == 422, key
+        twin = catalog_mod.CATALOG_PRODUCTS["twin-g1"]
+        assert key not in twin["attributes"] and not twin.get("gtin"), key
+
+
+def test_review_editor_gtin_lands_on_twin_and_spine_and_ships(gtin_env):
+    _put("twin-g1", {"attributes": {"gtin": "4006381 333931"}})
+    twin = catalog_mod.CATALOG_PRODUCTS["twin-g1"]
+    assert twin["attributes"]["gtin"] == _GTIN
+    assert twin["gtin"] == _GTIN  # the variant barcode the push sends
+    spine = gtin_env.find_by_id("spine-g1")
+    assert spine["attributes"] == {"colour_code": "BLK", "gtin": _GTIN}
+    assert _pushed_barcode(gtin_env, twin) == _GTIN
+
+
+def test_review_editor_refuses_a_gtin_another_product_holds(gtin_env):
+    gtin_env.create({"product_id": "spine-other", "sku": "OTHER-1",
+                     "attributes": {"gtin": _UPC}})
+    for typed in (_UPC, "0" + _UPC):
+        with pytest.raises(HTTPException) as exc:
+            _put("twin-g1", {"attributes": {"gtin": typed}})
+        assert exc.value.status_code == 409, typed
+        assert "OTHER-1" in str(exc.value.detail)
+    # Its own GTIN, re-saved, is no clash.
+    _put("twin-g1", {"attributes": {"gtin": _GTIN}})
+    _put("twin-g1", {"attributes": {"gtin": _GTIN, "colour_code": "RED"}})
+
+
+def test_review_editor_remove_clears_every_barcode_the_push_reads(gtin_env):
+    """The twin's legacy top-level `barcode` is the push's fallback: a removed
+    GTIN must take it along, or the push sends that code instead."""
+    _put("twin-g1", {"attributes": {"gtin": _GTIN}})
+    _put("twin-g1", {"attributes": {"gtin": ""}})
+    twin = catalog_mod.CATALOG_PRODUCTS["twin-g1"]
+    assert not twin.get("gtin") and not twin.get("barcode")
+    assert gtin_env.find_by_id("spine-g1")["attributes"]["gtin"] == ""
+    assert _pushed_barcode(gtin_env, twin) is None
+
+
+def test_review_editor_remove_drops_the_spines_legacy_barcode(gtin_env):
+    """A code in the spine's legacy `barcode` is held by the one-holder rule:
+    Remove must take it along, or no other product can ever be given it."""
+    gtin_env.collection.update_one(
+        {"product_id": "spine-g1"}, {"$set": {"barcode": _UPC}}
+    )
+    _put("twin-g1", {"attributes": {"gtin": ""}})
+    assert "barcode" not in gtin_env.find_by_id("spine-g1")
+    assert gtin_env.find_by_barcode(_UPC) is None
+
+
+def test_catalog_create_door_refuses_a_gtin_another_product_holds(gtin_env):
+    """POST /catalog/products is a create door too: one holder per GTIN."""
+    gtin_env.create({"product_id": "spine-other", "sku": "OTHER-1",
+                     "attributes": {"gtin": _UPC}})
+    inp = catalog_mod.ProductCreateInput(
+        category="FR",
+        attributes={"brand_name": "Ray-Ban", "model_no": "RB-G-001",
+                    "colour_code": "BLK", "gtin": "0" + _UPC},
+        pricing={"mrp": 4000, "offer_price": 3600, "discount_category": "MASS"},
+    )
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(catalog_mod.create_catalog_product(inp, _user()))
+    assert exc.value.status_code == 409
+    assert "OTHER-1" in str(exc.value.detail)

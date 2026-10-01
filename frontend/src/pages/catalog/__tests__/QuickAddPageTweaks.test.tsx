@@ -75,6 +75,8 @@ vi.mock('../../../constants/gstRuntime', () => ({
 }));
 
 import { QuickAddPage } from '../QuickAddPage';
+import { productApi } from '../../../services/api/products';
+import { productTemplatesApi } from '../../../services/api/productTemplates';
 import {
   getCategoryFields,
   validateProductForm,
@@ -99,7 +101,6 @@ const blankSunglass = (over: Partial<ProductFormValues> = {}): ProductFormValues
   discountCategory: '',
   syncToShopify: false,
   shopifyTags: [],
-  publishPOS: true,
   ...over,
 });
 
@@ -270,6 +271,8 @@ describe('5 - GST rate is text, and the value still posts', () => {
       'attributes', 'brand', 'category', 'cost_price', 'description', 'gst_rate',
       'hsn_code', 'images', 'model', 'mrp', 'offer_price', 'shopify', 'weight',
     ]);
+    // A new product never asks for Shopify's POS channel (owner 2026-09-28).
+    expect(payload.shopify).not.toHaveProperty('publish_to_pos');
   });
 });
 
@@ -302,14 +305,63 @@ describe('8 - the review card uses registry labels', () => {
 });
 
 describe('9 + 12 - the Online strip', () => {
-  it('says in words what the POS switch waits on, and the tag box has a visible label', async () => {
+  it('has no Shopify POS switch (IMS is the till, F74), and the tag box has a visible label', async () => {
     const user = userEvent.setup();
     renderPage();
-    expect(screen.getByText(/turn on Sync to Shopify first/)).toBeInTheDocument();
+    expect(screen.queryByLabelText('Publish to Shopify POS')).toBeNull();
+    expect(screen.queryByText(/Shopify POS/)).toBeNull();
     expect(screen.queryByLabelText('Shopify tags')).toBeNull();
 
     await user.click(screen.getByLabelText('Sync to Shopify'));
-    expect(screen.queryByText(/turn on Sync to Shopify first/)).toBeNull();
+    expect(screen.queryByLabelText('Publish to Shopify POS')).toBeNull();
     expect(screen.getByLabelText('Shopify tags')).toBeInTheDocument();
+  });
+});
+
+describe('10 - Clone', () => {
+  it('copies the product but never its manufacturer barcodes (a GTIN names one item)', async () => {
+    // A cloned GTIN made Save 409 ('already assigned to another product').
+    vi.mocked(productApi.getProduct).mockResolvedValueOnce({
+      ...SOURCE_PRODUCT,
+      attributes: { ...SOURCE_PRODUCT.attributes, gtin: '5901234123457', upc: '036000291452' },
+    });
+    renderPage('/catalog/add?clone=P-SRC');
+    const card = (await screen.findByRole('heading', { name: 'Review' })).closest('.card')!;
+    await waitFor(() => expect(within(card).getByText('Lens Size (mm)')).toBeInTheDocument());
+    expect(within(card).queryByText('GTIN (mfr)')).toBeNull();
+    expect(within(card).queryByText('UPC (mfr)')).toBeNull();
+    expect(screen.queryByDisplayValue('5901234123457')).toBeNull();
+  });
+});
+
+describe('11 - a saved template', () => {
+  it('loads the shape but never a manufacturer barcode (the same strip as Clone)', async () => {
+    // A template saved from a product with a GTIN carried it into every new SKU.
+    vi.mocked(productTemplatesApi.list).mockResolvedValueOnce({
+      templates: [
+        {
+          template_id: 'T1',
+          name: 'RB4165 shape',
+          category: 'SG',
+          payload: {
+            ...blankSunglass({ mrp: '7890' }),
+            attributes: {
+              brand_name: 'Ray-Ban', model_no: 'RB4165', lens_size: '54',
+              gtin: '5901234123457', upc: '036000291452',
+            },
+          },
+        },
+      ],
+      total: 1,
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(screen.getByRole('button', { name: /^Templates/ }));
+    await user.click(await screen.findByText('RB4165 shape'));
+    const card = screen.getByRole('heading', { name: 'Review' }).closest('.card')!;
+    await waitFor(() => expect(within(card).getByText('Lens Size (mm)')).toBeInTheDocument());
+    expect(within(card).queryByText('GTIN (mfr)')).toBeNull();
+    expect(within(card).queryByText('UPC (mfr)')).toBeNull();
+    expect(screen.queryByDisplayValue('5901234123457')).toBeNull();
   });
 });

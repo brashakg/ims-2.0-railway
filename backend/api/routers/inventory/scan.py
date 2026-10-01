@@ -9,6 +9,7 @@ from ._shared import (
     Query,
     _INVENTORY_ROLES,
     _on_hand_status_clause,
+    barcode_svc,
     logger,
     require_roles,
     router,
@@ -66,7 +67,7 @@ async def scan_barcode_for_count(
         )
 
         # Find stock by barcode
-        stock = stock_coll.find_one({"barcode": request.barcode})
+        stock = stock_coll.find_one(barcode_svc.unit_barcode_match(request.barcode))
         if not stock:
             raise HTTPException(status_code=404, detail="Barcode not found")
 

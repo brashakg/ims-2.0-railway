@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 
 from .auth import get_current_user
 from ..dependencies import validate_store_access
+from ..services import barcode as barcode_svc
 from ..services import serial_tracking as svc
 
 router = APIRouter(tags=["serials"])
@@ -122,7 +123,6 @@ class CaptureBody(BaseModel):
     store_id: str
     category: Optional[str] = Field(None, description="Product category (for the serialized-category gate)")
     grn_id: Optional[str] = None
-    barcode: Optional[str] = None
     warranty_months: Optional[int] = None
     warranty_expiry_date: Optional[str] = None
 
@@ -154,7 +154,11 @@ async def capture(body: CaptureBody, current_user: Dict[str, Any] = Depends(get_
     try:
         unit = svc.capture_serial(
             _units(), serial=body.serial, product_id=body.product_id, store_id=body.store_id,
-            grn_id=body.grn_id, barcode=body.barcode, warranty_months=body.warranty_months,
+            grn_id=body.grn_id,
+            # Every unit's IMS code comes from the one minter -- a caller cannot
+            # hand in its own (owner ruling 2026-09-28, letters and digits only).
+            barcode=barcode_svc.mint_unit_barcode(_get_db(), body.store_id),
+            warranty_months=body.warranty_months,
             warranty_expiry_date=body.warranty_expiry_date, captured_by=current_user.get("user_id"),
         )
     except svc.SerialError as exc:
