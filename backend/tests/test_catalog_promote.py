@@ -440,3 +440,73 @@ def test_put_never_touches_review_flags(env):
     updated = catalog_mod.CATALOG_PRODUCTS[doc["id"]]
     assert updated["needs_review"] is True  # provably untouched
     assert updated["pos_ready"] is False  # promote stays the only door
+
+
+# ---------------------------------------------------------------------------
+# One maker code, one product: Approve and the bulk import are create doors too
+# (product_master.assert_gtin_free, normalised compare via find_by_barcode).
+# ---------------------------------------------------------------------------
+
+_HELD_UPC = "036000291452"  # the holder stores the 13-digit spelling
+
+
+def _gtin_holder_repo(monkeypatch):
+    """A real ProductRepository over mongomock (dotted $or/$in queries) where
+    another product already holds the GTIN, as 0036000291452."""
+    import mongomock
+
+    repo = ProductRepository(mongomock.MongoClient().db.products)
+    repo.collection.insert_one(
+        {"product_id": "spine-holder", "sku": "HOLD1", "attributes": {"gtin": "0" + _HELD_UPC}}
+    )
+    monkeypatch.setattr(deps_mod, "get_product_repository", lambda: repo)
+    return repo
+
+
+def _attrs_with_gtin(gtin):
+    return {"brand_name": "Vogue", "model_no": "VO5051", "colour_code": "BLK", "gtin": gtin}
+
+
+def test_promote_refuses_a_gtin_another_product_holds(env, monkeypatch):
+    repo = _gtin_holder_repo(monkeypatch)
+    doc = _bvi_doc(doc_id="clx0gtintwin", attributes=_attrs_with_gtin(_HELD_UPC))
+    catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
+
+    dry = _promote(doc["id"], dry_run=True)
+    assert dry["ok"] is False and dry["gaps"][0]["field"] == "gtin"
+    with pytest.raises(HTTPException) as exc:
+        _promote(doc["id"])
+    assert exc.value.status_code == 409
+    assert repo.find_one({"product_id": doc["id"]}) is None  # no spine
+    assert catalog_mod.CATALOG_PRODUCTS[doc["id"]]["needs_review"] is True
+
+
+def test_promote_with_a_free_gtin_still_approves(env, monkeypatch):
+    repo = _gtin_holder_repo(monkeypatch)
+    doc = _bvi_doc(doc_id="clx0gtinfree", attributes=_attrs_with_gtin("4006381333931"))
+    catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
+    assert _promote(doc["id"])["pos_ready"] is True
+    assert repo.find_one({"product_id": doc["id"]}) is not None
+
+
+def _import(gtin):
+    row = catalog_mod.ProductCreateInput(
+        category="FR",
+        attributes=_attrs_with_gtin(gtin),
+        pricing={"mrp": 5000.0, "offer_price": 4500.0},
+    )
+    return asyncio.run(catalog_mod.import_products([row], current_user=_user()))
+
+
+def test_import_refuses_a_row_whose_gtin_another_product_holds(env, monkeypatch):
+    _gtin_holder_repo(monkeypatch)
+    res = _import(_HELD_UPC)
+    assert res["created_count"] == 0
+    assert "already assigned" in res["errors"][0]["error"]
+    assert not catalog_mod.CATALOG_PRODUCTS
+
+
+def test_import_with_a_free_gtin_still_creates(env, monkeypatch):
+    _gtin_holder_repo(monkeypatch)
+    res = _import("4006381333931")
+    assert res["created_count"] == 1, res["errors"]

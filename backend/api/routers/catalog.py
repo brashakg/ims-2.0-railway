@@ -2560,6 +2560,10 @@ async def promote_catalog_product(
             product_repo=repo,
             db=db,
         )
+        # One product per manufacturer GTIN: Approve is a create door too.
+        _pm.assert_gtin_free(
+            (spine.get("attributes") or {}).get("gtin"), repo, product_id
+        )
     except _pm.ProductMasterError as err:
         if dry_run:
             return {
@@ -2923,6 +2927,9 @@ async def import_products(
     # Resolve the DB once so each row's SKU counter is allocated atomically +
     # persistently (the per-worker in-memory dict would collide under concurrency).
     _bulk_db = _get_db()
+    from ..dependencies import get_product_repository
+
+    _gtin_repo = get_product_repository()
 
     for i, product in enumerate(products):
         try:
@@ -2948,6 +2955,10 @@ async def import_products(
                         "gst_rate": product.gst_rate,
                     },
                     source="CATALOG",
+                )
+                # One product per manufacturer GTIN, as at every create door.
+                _pm.assert_gtin_free(
+                    (_row_spine.get("attributes") or {}).get("gtin"), _gtin_repo, None
                 )
             except _pm.ProductMasterError as req_exc:
                 detail = (
