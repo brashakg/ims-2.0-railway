@@ -13,8 +13,9 @@ no parallel state machine):
    structured error WITHOUT mutating state.
 
 2. Label payloads: the data a thermal label needs (job traveler, stage
-   sticker, ready/pickup) plus a frame-tag / CL-box payload from a
-   product / stock id. Fail-soft -- never 500.
+   sticker, ready/pickup). Fail-soft -- never 500. (Stock labels are not
+   here: the 100 x 15 mm unit label is built in the browser from
+   GET /inventory/units.)
 
 3. QZ Tray signing: silent raw (ZPL) printing through QZ Tray needs each
    request payload signed with a private key. We sign server-side (the key
@@ -623,108 +624,6 @@ async def get_job_label(
         "generated_at": datetime.now().isoformat(),
     }
     return payload
-
-
-@router.get("/workshop/product-label")
-async def get_product_label(
-    product_id: Optional[str] = Query(None),
-    stock_id: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user),
-):
-    """Frame-tag / contact-lens-box label payload from a product or stock id.
-
-    Either product_id or stock_id may be given (stock takes precedence -- a
-    stock row carries the barcode + batch/expiry for a specific unit). Fail-
-    soft: returns ok=false with a minimal payload rather than raising.
-    """
-    if not product_id and not stock_id:
-        return {
-            "ok": False,
-            "reason": "MISSING_ID",
-            "message": "Provide product_id or stock_id.",
-        }
-
-    barcode_value = stock_id or product_id
-    out: dict = {
-        "ok": True,
-        "barcode_value": barcode_value,
-        "product_id": product_id,
-        "stock_id": stock_id,
-        "is_contact_lens": False,
-        "generated_at": datetime.now().isoformat(),
-    }
-
-    # Stock unit (gives barcode + batch + expiry for a specific item).
-    stock_doc = None
-    if stock_id:
-        try:
-            stock_repo = get_stock_repository()
-            if stock_repo is not None:
-                stock_doc = stock_repo.find_by_id(stock_id)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("[LABELS] stock lookup failed: %s", e)
-    if stock_doc:
-        out["barcode_value"] = stock_doc.get("barcode") or barcode_value
-        out["batch_code"] = stock_doc.get("batch_code") or stock_doc.get("lot")
-        out["expiry"] = stock_doc.get("expiry") or stock_doc.get("expiry_date")
-        out["store_id"] = stock_doc.get("store_id")
-        if not product_id:
-            product_id = stock_doc.get("product_id")
-            out["product_id"] = product_id
-
-    # Issuing-store identity (best-effort): so a frame tag / CL box is traceable
-    # to the store/brand it was printed at in a multi-store chain.
-    store_id_resolved = out.get("store_id")
-    if store_id_resolved:
-        try:
-            store_repo = get_store_repository()
-            if store_repo is not None:
-                store = store_repo.find_by_id(store_id_resolved)
-                if store:
-                    out["store_name"] = (
-                        store.get("name") or store.get("store_name") or ""
-                    )
-                    out["store_code"] = (
-                        store.get("store_code") or store.get("code") or ""
-                    )
-                    out["store_brand"] = store.get("brand") or ""
-        except Exception as e:  # noqa: BLE001
-            logger.warning("[LABELS] product-label store lookup failed: %s", e)
-
-    # Product master (name / brand / MRP / category / CL fields).
-    if product_id:
-        try:
-            prod_repo = get_product_repository()
-            if prod_repo is not None:
-                prod = prod_repo.find_by_id(product_id)
-                if prod:
-                    out["name"] = prod.get("name") or prod.get("product_name") or ""
-                    out["brand"] = prod.get("brand") or ""
-                    out["sku"] = prod.get("sku") or ""
-                    out["category"] = prod.get("category") or ""
-                    # MRP / price -- ASCII "Rs", never the rupee glyph.
-                    mrp = prod.get("mrp") or prod.get("price")
-                    if mrp is not None:
-                        out["mrp"] = mrp
-                        out["price_label"] = f"Rs {mrp}"
-                    cl_cats = ("CONTACT_LENS", "COLORED_CONTACT_LENS", "CL")
-                    if (prod.get("category") or "").upper() in cl_cats:
-                        out["is_contact_lens"] = True
-                        out["cl"] = {
-                            "modality": prod.get("modality"),
-                            "base_curve": prod.get("base_curve"),
-                            "diameter": prod.get("diameter"),
-                            "power": prod.get("cl_power"),
-                            "cyl": prod.get("cl_cyl"),
-                            "axis": prod.get("cl_axis"),
-                            "add": prod.get("cl_add"),
-                            "color": prod.get("color"),
-                            "pack_size": prod.get("pack_size"),
-                        }
-        except Exception as e:  # noqa: BLE001
-            logger.warning("[LABELS] product lookup failed: %s", e)
-
-    return out
 
 
 @router.post("/labels/quarantine/{stock_id}")

@@ -43,6 +43,10 @@ const AgentControlPanel = lazy(() => import('../components/settings/AgentControl
 const FeatureToggles = lazy(() => import('../components/settings/FeatureToggles').then(m => ({ default: m.FeatureToggles })));
 const ShopifyLiveSyncSection = lazy(() => import('../pages/settings/SettingsShopifyLiveSync').then(m => ({ default: m.ShopifyLiveSyncSection })));
 const AuditLogSettingsPage = lazy(() => import('../pages/settings/SettingsAuditLogs').then(m => ({ default: m.AuditLogSettingsPage })));
+const StoreModulesSection = lazy(() => import('../pages/settings/SettingsAdminControls').then(m => ({ default: m.StoreModulesSection })));
+const RolePermissionsSection = lazy(() => import('../pages/settings/SettingsAdminControls').then(m => ({ default: m.RolePermissionsSection })));
+const DiscountCapsSection = lazy(() => import('../pages/settings/SettingsAdminControls').then(m => ({ default: m.DiscountCapsSection })));
+const OperationalRulesSection = lazy(() => import('../pages/settings/SettingsAdminControls').then(m => ({ default: m.OperationalRulesSection })));
 const SystemSettingsPage = lazy(() => import('../pages/settings/SettingsSystem').then(m => ({ default: m.SystemSettingsPage })));
 
 // Other admin screens (unchanged)
@@ -93,8 +97,21 @@ const SECTION_ELEMENTS: Record<SettingsTab, React.ReactElement> = {
   'feature-toggles': <FeatureTogglesSectionPage />,
   'shopify-live-sync': <ShopifyLiveSyncSection />,
   'audit-logs': <AuditLogSettingsPage />,
+  modules: <StoreModulesSection />,
+  permissions: <RolePermissionsSection />,
+  'discount-caps': <DiscountCapsSection />,
+  rules: <OperationalRulesSection />,
   system: <SystemSettingsPage />,
 };
+
+// ProtectedRoute lets ADMIN through EVERY role gate (AuthContext.hasRole), so a
+// section declared SUPERADMIN-only needs this strict check or ADMIN could open
+// it by URL while the rail (which matches roles literally) hides it.
+function SuperadminOnly({ children }: { children: React.ReactNode }) {
+  const { user } = useAuth();
+  if (!(user?.roles || []).includes('SUPERADMIN')) return <Navigate to="/unauthorized" replace />;
+  return <>{children}</>;
+}
 
 // Legacy ?tab= mapper: /settings and /settings?tab=<x> land on the section
 // page, carrying any other query params along.
@@ -135,7 +152,9 @@ export const settingsRoutes = (
               <ProtectedRoute>{SECTION_ELEMENTS[section.id]}</ProtectedRoute>
             ) : (
               <ProtectedRoute allowedRoles={section.role as UserRole[]}>
-                {SECTION_ELEMENTS[section.id]}
+                {section.role.length === 1 && section.role[0] === 'SUPERADMIN'
+                  ? <SuperadminOnly>{SECTION_ELEMENTS[section.id]}</SuperadminOnly>
+                  : SECTION_ELEMENTS[section.id]}
               </ProtectedRoute>
             )
           }

@@ -4,6 +4,9 @@
 // with one REAL page per section:
 //   /reports/sales · /reports/inventory · /reports/customers ·
 //   /reports/gst · /reports/forecast
+// Wave 6 B13: the forecast page's three panels are child routes of it:
+//   /reports/forecast (category, the index) · /reports/forecast/seasonal ·
+//   /reports/forecast/reorder
 // plus the two GST returns lifted out of their modals onto full, bookmarkable
 // pages the accountant can read a number off: /reports/gstr1 · /reports/gstr3b
 // Legacy /reports?tab=<x> deep-links (bookmarks, the module launcher in
@@ -23,6 +26,9 @@ const ReportsInventoryPage = lazy(() => import('../pages/reports/ReportsInventor
 const ReportsCustomersPage = lazy(() => import('../pages/reports/ReportsCustomersPage').then(m => ({ default: m.ReportsCustomersPage })));
 const ReportsGstPage = lazy(() => import('../pages/reports/ReportsGstPage').then(m => ({ default: m.ReportsGstPage })));
 const ReportsForecastPage = lazy(() => import('../pages/reports/ReportsForecastPage').then(m => ({ default: m.ReportsForecastPage })));
+const ForecastCategorySection = lazy(() => import('../pages/reports/ForecastSections').then(m => ({ default: m.ForecastCategorySection })));
+const ForecastSeasonalSection = lazy(() => import('../pages/reports/ForecastSections').then(m => ({ default: m.ForecastSeasonalSection })));
+const ForecastReorderSection = lazy(() => import('../pages/reports/ForecastSections').then(m => ({ default: m.ForecastReorderSection })));
 const GSTR1Page = lazy(() => import('../pages/reports/GSTR1Page').then(m => ({ default: m.GSTR1Page })));
 const GSTR3BPage = lazy(() => import('../pages/reports/GSTR3BPage').then(m => ({ default: m.GSTR3BPage })));
 const GrowthBlueprintPage = lazy(() => import('../pages/reports/GrowthBlueprintPage').then(m => ({ default: m.GrowthBlueprintPage })));
@@ -89,6 +95,13 @@ export const reportRoutes = (
           </ProtectedRoute>
         }
       />
+      {/* Forecast: the page is the shell (one load, header, summary cards,
+          panel nav - components/reports/DemandForecast); each panel is a child
+          route. The parent forecast gate is THE gate for all three panels (same
+          roles the one-URL page had), so no role is let in or shut out by the
+          split. All three panels sit in one
+          chunk (ForecastSections), so switching panels never shows the lazy
+          spinner the old useState switch never showed. */}
       <Route
         path="forecast"
         element={
@@ -96,7 +109,14 @@ export const reportRoutes = (
             <ReportsForecastPage />
           </ProtectedRoute>
         }
-      />
+      >
+        <Route index element={<ForecastCategorySection />} />
+        <Route path="seasonal" element={<ForecastSeasonalSection />} />
+        <Route path="reorder" element={<ForecastReorderSection />} />
+        {/* An unknown sub-address goes back to the forecast page, never an
+            empty shell. */}
+        <Route path="*" element={<Navigate to="/reports/forecast" replace />} />
+      </Route>
     </Route>
 
     {/* GST returns — full pages, outside the layout: no KPI strip and no
