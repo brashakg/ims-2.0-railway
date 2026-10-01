@@ -247,7 +247,9 @@ describe('review r1 #39: stock is the units for sale, reserved is apart', () => 
     rows = HELD;
     try {
       renderLedger();
-      expect(ledgerCell('Vogue VO5', 'In-Store')).toBe('3+1 reserved');
+      // The cell also carries the shop's reorder level (#1179); the stock
+      // figure leads it: 3 for sale, +1 reserved -- never 2 (reserved taken twice).
+      expect(ledgerCell('Vogue VO5', 'In-Store')).toMatch(/^3\+1 reserved(?!\d)/);
     } finally {
       rows = ROWS;
     }
