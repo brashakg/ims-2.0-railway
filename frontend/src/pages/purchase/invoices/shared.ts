@@ -5,6 +5,7 @@
 // ============================================================================
 
 import type { UserRole } from '../../../types';
+import { PAYABLES_ROLES } from '../../../components/common/CostCell';
 
 export const inr = (n?: number) => `₹${(Math.round((n || 0) * 100) / 100).toLocaleString('en-IN')}`;
 // Optical GST rates per business rules (5% frames/lenses/CL, 12% certain CL,
@@ -49,5 +50,5 @@ export function isInterstate(placeOfSupply?: string, recipientGstin?: string): b
 }
 
 // Roles allowed to approve a 3-way-match exception (release an ON_HOLD invoice
-// for payment despite a variance). Mirrors the _AP_ROLES backend gate.
-export const APPROVE_ROLES: UserRole[] = ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'];
+// for payment despite a variance): the accounts roles, as the backend gate.
+export const APPROVE_ROLES: UserRole[] = PAYABLES_ROLES;

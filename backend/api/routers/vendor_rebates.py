@@ -21,10 +21,9 @@ from pydantic import BaseModel, Field
 
 from .auth import get_current_user
 from ..services import rebate_engine as svc
+from ..services.cost_mask import can_see_cost
 
 router = APIRouter(tags=["vendor-rebates"])
-
-_AP_ROLES = {"ACCOUNTANT", "ADMIN", "SUPERADMIN"}
 
 
 def _get_db():
@@ -33,12 +32,9 @@ def _get_db():
     return get_db().db
 
 
-def _roles(user: Dict[str, Any]) -> set:
-    return {str(r).upper() for r in (user.get("roles", []) or [])}
-
-
 def _require(user: Dict[str, Any], what: str):
-    if not (_roles(user) & _AP_ROLES):
+    # Supplier money: the accounts roles (services/cost_mask "payables").
+    if not can_see_cost(user, "payables"):
         raise HTTPException(status_code=403, detail=f"not permitted to {what}")
 
 

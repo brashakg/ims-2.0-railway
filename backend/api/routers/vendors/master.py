@@ -18,6 +18,7 @@ from ._shared import (
     router,
     uuid,
 )
+from ...services.cost_mask import VENDOR_NAME_KEYS, can_see_cost, mask_vendor
 from .models import VendorCreate, VendorUpdate
 
 
@@ -48,13 +49,23 @@ async def list_vendors(
     if is_active is not None:
         filter_dict["is_active"] = is_active
 
+    # F60: the list stays open because the workshop job, vendor returns and the
+    # buy desk pick a vendor BY NAME. Who sees more of a supplier, and what a
+    # vendor by name is, is the one purchase-mask rule (services/cost_mask) --
+    # the same one that hides it on vendor returns / debit notes.
     if search:
-        # Search in name, trade name, or mobile
-        vendors = vendor_repo.search_vendors(search)
+        # A names-only caller searches only the keys it is shown. Matching the
+        # hidden gstin made ?search an oracle: "does the GSTIN start with X?"
+        # walked one character at a time recovered the whole number.
+        if can_see_cost(current_user, "purchase"):
+            vendors = vendor_repo.search_vendors(search)
+        else:
+            vendors = vendor_repo.search_vendors(search, fields=VENDOR_NAME_KEYS)
     else:
         vendors = vendor_repo.find_many(filter_dict, skip=skip, limit=limit)
+    vendors = [mask_vendor(v, current_user) for v in vendors or []]
 
-    return {"vendors": vendors or [], "total": len(vendors) if vendors else 0}
+    return {"vendors": vendors, "total": len(vendors)}
 
 
 @router.post("", status_code=201)
@@ -113,7 +124,9 @@ async def create_vendor(
 # to this handler with `vendor_id="purchase-orders"` and return 404
 # ("Vendor not found"). Same class of bug as the tasks.py route-order
 # fix in PR #103.
-async def get_vendor(vendor_id: str, current_user: dict = Depends(get_current_user)):
+async def get_vendor(
+    vendor_id: str, current_user: dict = Depends(require_roles(*_VENDOR_ROLES))
+):
     """Get vendor details"""
     vendor_repo = get_vendor_repository()
 
