@@ -15,8 +15,10 @@ The one row rule is ap_engine.supplier_rows / supplier_ledger_rows. Pinned:
   #13       Money carries its own shop. POST /vendors/{id}/payments and
             /debit-notes stamp store_id: the named bill's shop; else the shop
             asked for (?store_id or body), which a non-admin may only name as
-            his own; else the caller's active shop. The latest-bill guess is
-            only for legacy rows with no stamp.
+            his own; else a non-admin's active shop. An admin's money naming
+            no bill and no shop is left unstamped (round 3), so the
+            latest-bill rule places it -- that rule is otherwise only for
+            legacy rows with no stamp.
   #1        The as-of cutoff is for FIGURES, not for hiding rows. The payments
             and debit-notes lists show every recorded row (post-dated ones
             flagged); the ledger strikes its balance on today and lists the
@@ -427,8 +429,13 @@ def test_r2_13_money_naming_a_bill_is_stamped_with_the_bills_shop(world, kind):
 
 
 @pytest.mark.parametrize("kind", list(_KINDS))
-def test_r2_13_an_admin_names_the_shop_or_gets_his_own(world, kind):
-    coll, id_key, _ = _KINDS[kind]
+def test_r2_13_an_admin_names_the_shop_or_leaves_it_to_the_suppliers_bills(world, kind):
+    """Round 3 (review #1 / #13): an admin's money with no bill and no shop
+    named used to be stamped with HIS topbar shop (ONLINE here) -- where he
+    sits, not where the supplier's goods went. It is now left unstamped, so
+    the legacy rule places it: V-BOTH's latest bill on or before 30 Sep is
+    Dhanbad's B-HELD-D. A shop he names still wins."""
+    coll, id_key, list_key = _KINDS[kind]
     by_query = _ok(world.post(f"/vendors/{V_BOTH}/{kind}", ADMIN, _money(kind, 10.0), store_id=PUN), 201)
     by_body = _ok(world.post(f"/vendors/{V_BOTH}/{kind}", ADMIN, _money(kind, 11.0, store_id=DHN)), 201)
     by_default = _ok(world.post(f"/vendors/{V_BOTH}/{kind}", ADMIN, _money(kind, 12.0)), 201)
@@ -436,10 +443,16 @@ def test_r2_13_an_admin_names_the_shop_or_gets_his_own(world, kind):
     assert [by_query["store_id"], by_body["store_id"], by_default["store_id"], unplaced["store_id"]] == [
         PUN,
         DHN,
-        ONLINE,
+        None,
         None,
     ]
     assert world.db[coll].find_one({id_key: by_query[id_key]})["store_id"] == PUN
+    assert world.db[coll].find_one({id_key: by_default[id_key]})["store_id"] is None
+    # Never the admin's topbar shop; the supplier's shop by its bills.
+    online = {r[id_key] for r in _ok(world.get(f"/vendors/{V_BOTH}/{kind}", ADMIN, store_id=ONLINE))[list_key]}
+    dhanbad = {r[id_key] for r in _ok(world.get(f"/vendors/{V_BOTH}/{kind}", ACCT_DHN))[list_key]}
+    assert by_default[id_key] not in online
+    assert {by_default[id_key], unplaced[id_key], by_body[id_key]} <= dhanbad
 
 
 @pytest.mark.parametrize("kind", list(_KINDS))

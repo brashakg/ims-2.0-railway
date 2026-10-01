@@ -17,6 +17,8 @@ import {
   type VendorReceiptRow,
 } from '../../services/api/vendorAp';
 import { useToast } from '../../context/ToastContext';
+import { useStores } from '../../hooks/usePOSQueries';
+import { PurchaseShopName, usePurchaseShop } from '../purchase/purchaseShop';
 
 const inr = (n?: number) => `₹${Math.round(n || 0).toLocaleString('en-IN')}`;
 const AP_BUCKETS = ['current', '1_30', '31_60', '61_90', '90_plus'];
@@ -65,9 +67,12 @@ export default function CashFlowPage() {
   return (
     <div className="p-6 max-w-6xl mx-auto">
       <div className="flex items-center justify-between mb-4">
-        <h1 className="text-xl font-semibold text-gray-900 flex items-center gap-2">
-          <Banknote className="w-5 h-5" /> Cash Flow &amp; Payables
-        </h1>
+        <div>
+          <h1 className="text-xl font-semibold text-gray-900 flex items-center gap-2">
+            <Banknote className="w-5 h-5" /> Cash Flow &amp; Payables
+          </h1>
+          {dash && <PayablesShop storeId={dash.store_id} />}
+        </div>
         <button type="button" onClick={load} className="inline-flex items-center gap-1.5 text-sm text-gray-600 hover:bg-gray-100 rounded-lg px-3 py-1.5">
           <RefreshCw className="w-4 h-4" /> Refresh
         </button>
@@ -90,7 +95,12 @@ export default function CashFlowPage() {
           {tab === 'forecast' && forecast && (
             <Forecast forecast={forecast} openingCash={openingCash} setOpeningCash={setOpeningCash} onApply={load} />
           )}
-          {tab === 'aging' && aging && <Aging aging={aging} onVendor={(id, name) => setActiveVendor({ id, name })} />}
+          {tab === 'aging' && aging && (
+            <div className="space-y-2">
+              <PayablesShop storeId={dash?.store_id} testId="aging-shop" />
+              <Aging aging={aging} onVendor={(id, name) => setActiveVendor({ id, name })} />
+            </div>
+          )}
         </>
       )}
 
@@ -98,6 +108,25 @@ export default function CashFlowPage() {
         <VendorLedgerDrawer vendorId={activeVendor.id} vendorName={activeVendor.name} onClose={() => setActiveVendor(null)} onChanged={load} />
       )}
     </div>
+  );
+}
+
+/** Which shop every figure on this page covers (audit F63): the server scopes
+ *  the owner dashboard, the forecast and AP aging alike -- every shop for an
+ *  admin, the caller's own shop for anyone else -- and says which in the
+ *  dashboard's store_id. Nothing when an older server leaves it out. */
+function PayablesShop({ storeId, testId = 'payables-shop' }: { storeId: string | null | undefined; testId?: string }) {
+  if (storeId === undefined) return null;
+  return (
+    <p className="text-xs text-gray-600 mt-0.5" data-testid={testId}>
+      {storeId ? (
+        <>
+          Shop: <span className="font-medium text-gray-900"><PurchaseShopName storeId={storeId} /></span>
+        </>
+      ) : (
+        'All shops'
+      )}
+    </p>
   );
 }
 
@@ -398,6 +427,11 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: 'bill' | 'paym
   const [receipts, setReceipts] = useState<VendorReceiptRow[] | null>(null);
   const [receiptsFailed, setReceiptsFailed] = useState(false);
   const [receiptId, setReceiptId] = useState('');
+  // The shop a payment / debit note is booked to (F63). '' = the supplier's
+  // shop by its bills: the server places an admin's money that names no bill
+  // there, never on the admin's own topbar shop. Only an admin can pick one
+  // (MoneyShopField); anyone else's money is their own shop's, server-side.
+  const [moneyShop, setMoneyShop] = useState('');
 
   useEffect(() => {
     if (kind !== 'bill' || billKind !== 'GOODS') return;
@@ -436,10 +470,12 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: 'bill' | 'paym
           mode: String(f.mode || 'BANK'), tds_section: String(f.tds_section || 'NONE'),
           tds_amount: f.tds_amount !== undefined ? Number(f.tds_amount) : undefined,
           reference: String(f.reference || ''),
+          store_id: moneyShop || undefined,
         });
       } else {
         await vendorApApi.createDebitNote(vendorId, {
           amount: Number(f.amount) || 0, date: String(f.date || today), reason: String(f.reason || ''),
+          store_id: moneyShop || undefined,
         });
       }
       toast.success('Recorded');
@@ -506,11 +542,13 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: 'bill' | 'paym
           </select>
           <input className={cls} type="number" placeholder="TDS amount (optional)" onChange={(e) => set('tds_amount', e.target.value)} />
           <input className={cls} placeholder="Reference / UTR" onChange={(e) => set('reference', e.target.value)} />
+          <MoneyShopField value={moneyShop} onChange={setMoneyShop} />
         </>}
         {kind === 'debit' && <>
           <input className={cls} type="number" placeholder="Amount" onChange={(e) => set('amount', e.target.value)} />
           <input className={cls} type="date" defaultValue={today} onChange={(e) => set('date', e.target.value)} />
           <input className={`${cls} col-span-2`} placeholder="Reason (e.g. rejected goods)" onChange={(e) => set('reason', e.target.value)} />
+          <MoneyShopField value={moneyShop} onChange={setMoneyShop} />
         </>}
       </div>
       <div className="flex justify-end mt-2">
@@ -519,5 +557,46 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: 'bill' | 'paym
         </button>
       </div>
     </div>
+  );
+}
+
+type ShopRow = { store_id?: string; store_name?: string; store_code?: string };
+
+/** Which shop's account a payment / debit note goes to (audit F63). An admin
+ *  may pick one of the shops (the Purchase shop list); left on the default,
+ *  nothing is sent and the server books it to the supplier's shop by its
+ *  bills. Anyone else is told, read-only, that it is their own shop's -- the
+ *  server stamps it so whatever is sent. Nothing for a login with no shop. */
+function MoneyShopField({ value, onChange }: { value: string; onChange: (shop: string) => void }) {
+  const { canPick, ownStoreId } = usePurchaseShop();
+  if (canPick) return <MoneyShopSelect value={value} onChange={onChange} />;
+  if (!ownStoreId) return null;
+  return (
+    <p className="col-span-2 text-xs text-gray-600" data-testid="money-shop">
+      Shop: <span className="font-medium text-gray-900"><PurchaseShopName storeId={ownStoreId} /></span>
+    </p>
+  );
+}
+
+function MoneyShopSelect({ value, onChange }: { value: string; onChange: (shop: string) => void }) {
+  const { data } = useStores();
+  const shops = (Array.isArray(data) ? data : []) as ShopRow[];
+  return (
+    <label className="col-span-2 flex items-center gap-2 text-xs text-gray-600">
+      Shop
+      <select
+        className="border border-gray-300 rounded px-2 py-1 text-sm flex-1 bg-white"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        aria-label="Shop this money is for"
+      >
+        <option value="">The supplier&rsquo;s shop (by its bills)</option>
+        {shops.filter((s) => s.store_id).map((s) => (
+          <option key={s.store_id} value={s.store_id}>
+            {s.store_name || s.store_code || s.store_id}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }

@@ -23,6 +23,7 @@ from .ap_bills import (
     _recompute_bill_status,
     _rejected_goods_hold,
 )
+from ._shared import can_access_store_scoped
 
 # The answer for a named bill that is not there for the caller -- the words
 # purchase_invoices._bill_in_scope_or_404 uses, so another shop's bill and a
@@ -56,11 +57,42 @@ def _named_bill_in_scope_or_404(
     return bill
 
 
+def _named_receipt_in_scope_or_404(
+    db, vendor_id: str, grn_id: Optional[str], current_user: dict
+) -> Optional[dict]:
+    """The same shop rule (F63) on the goods receipt a debit note names: the
+    receipt must exist, be THIS supplier's, and be in the caller's reach
+    (can_access_store_scoped: ADMIN / SUPERADMIN every shop, everyone else
+    their own; a receipt with no shop, only an admin). Anything else is the
+    SAME 404 a missing receipt gets -- create_vendor_bill's words -- before
+    anything is written. Without it a Pune accountant's note naming Dhanbad's
+    receipt released Dhanbad's rejected-goods payment hold (owner ruling 7:
+    _rejected_goods_hold clears on ANY note naming the receipt) and booked
+    the credit to Pune; a receipt that did not exist was accepted too. No
+    receipt named: nothing to check. Returns the receipt (None when none)."""
+    if not grn_id or db is None:
+        return None
+    try:
+        grn = db.get_collection("grns").find_one(
+            {"grn_id": grn_id}, {"_id": 0, "grn_id": 1, "vendor_id": 1, "store_id": 1}
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Database unavailable") from exc
+    if (
+        not grn
+        or grn.get("vendor_id") != vendor_id
+        or not can_access_store_scoped(grn.get("store_id"), current_user)
+    ):
+        raise HTTPException(status_code=404, detail=f"GRN {grn_id} not found")
+    return grn
+
+
 def _money_shop(
     bill: Optional[dict],
     asked_query: Optional[str],
     asked_body: Optional[str],
     current_user: dict,
+    receipt: Optional[dict] = None,
 ) -> Optional[str]:
     """The ONE shop a payment or debit note is recorded in (F63): stamped on
     the row at write time, so ap_engine.supplier_rows books it to that shop's
@@ -70,14 +102,21 @@ def _money_shop(
 
       * money naming a bill: that bill's shop -- it settles that bill, so it
         is that shop's money (a bill with no shop: no shop);
+      * a debit note naming a goods receipt and no bill: that receipt's shop
+        -- the rejected goods it credits are that shop's;
       * else the shop asked for (?store_id or the body's store_id);
-      * else the caller's active shop -- a non-admin's own shop; an admin's
-        topbar shop, else none (an unstamped row: the legacy rule applies).
+      * else a non-admin's own active shop; an ADMIN / SUPERADMIN's money is
+        left UNSTAMPED (resolve_store_scope(None) is None for them), so the
+        legacy rule places it -- the supplier's latest bill on or before it.
+        Never the admin's topbar shop: that is where HE sits, not the
+        supplier, and stamping it filed a Pune supplier's on-account payment
+        under HQ, so Pune still owed the bill and could pay it twice.
 
     A shop asked for passes validate_store_access first: a non-admin naming
     another shop is refused (403) before anything is written. Asking for a
-    shop other than the named bill's is a contradiction (422), never silently
-    re-filed."""
+    shop other than the named bill's or receipt's -- or naming a bill and a
+    receipt of two different shops -- is a contradiction (422), never
+    silently re-filed."""
     if asked_query and asked_body and asked_query != asked_body:
         raise HTTPException(
             status_code=422,
@@ -86,18 +125,29 @@ def _money_shop(
     asked = asked_query or asked_body
     if asked:
         asked = validate_store_access(asked, current_user)
-    if bill is not None:
-        shop = bill.get("store_id")
+    if bill is not None and receipt is not None:
+        bill_shop, receipt_shop = bill.get("store_id"), receipt.get("store_id")
+        if bill_shop and receipt_shop and bill_shop != receipt_shop:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "This bill and this goods receipt belong to different "
+                    "shops. Name the bill, or the receipt, of one shop."
+                ),
+            )
+    anchor, what = (bill, "bill") if bill is not None else (receipt, "goods receipt")
+    if anchor is not None:
+        shop = anchor.get("store_id")
         if asked and asked != shop:
             raise HTTPException(
                 status_code=422,
                 detail=(
-                    "This bill is booked to another shop's account; money "
-                    "against it belongs to the bill's shop. Leave the shop out."
+                    f"This {what} is booked to another shop's account; money "
+                    f"against it belongs to the {what}'s shop. Leave the shop out."
                 ),
             )
         return shop
-    return asked or current_user.get("active_store_id")
+    return asked or resolve_store_scope(None, current_user)
 
 
 def _ledger_rows(db, vendor_id: str, scope: Optional[str]) -> tuple:
@@ -256,10 +306,14 @@ async def create_debit_note(
     vendor = vendor_repo.find_by_id(vendor_id) if vendor_repo is not None else None
     if vendor_repo is not None and vendor is None:
         raise HTTPException(status_code=404, detail="Vendor not found")
-    # F63: the bill it reduces is in the caller's shop, and the note is
-    # stamped with its shop.
-    named = _named_bill_in_scope_or_404(_get_db(), vendor_id, note.bill_id, current_user)
-    shop = _money_shop(named, store_id, note.store_id, current_user)
+    # F63: the bill it reduces and the goods receipt it credits are this
+    # supplier's and in the caller's shop (else the same 404 a missing one
+    # gets, before anything is written), and the note is stamped with their
+    # shop.
+    db_early = _get_db()
+    named = _named_bill_in_scope_or_404(db_early, vendor_id, note.bill_id, current_user)
+    receipt = _named_receipt_in_scope_or_404(db_early, vendor_id, note.grn_id, current_user)
+    shop = _money_shop(named, store_id, note.store_id, current_user, receipt)
 
     dn_id = str(uuid.uuid4())
     prefix = vendor_id[:3].upper() if vendor_id else "DN"

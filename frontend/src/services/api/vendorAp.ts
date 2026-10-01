@@ -57,6 +57,10 @@ export interface VendorPayment {
   tds_amount?: number;
   reference?: string;
   notes?: string;
+  // The shop the money is booked to (F63). Sent only when an admin picks one;
+  // left out, the server books it to the bill's shop, else (an admin's money)
+  // the supplier's shop by its bills, else the caller's own shop.
+  store_id?: string | null;
 }
 
 export interface DebitNote {
@@ -67,6 +71,9 @@ export interface DebitNote {
   amount: number;
   date: string;
   reason: string;
+  grn_id?: string;
+  // As VendorPayment.store_id; a note naming a goods receipt is that receipt's shop's.
+  store_id?: string | null;
 }
 
 // ---- Purchase Invoice (first-class AP + ITC document) -------------------
@@ -333,6 +340,9 @@ export interface ApAgingByVendor {
 
 export interface OwnerDashboard {
   as_of: string;
+  // The shop every figure covers: null = every shop (ADMIN / SUPERADMIN),
+  // else the caller's own shop. AP aging and the forecast use the same scope.
+  store_id?: string | null;
   receivables: { total: number; buckets: Record<string, number>; overdue: number };
   payables: { total: number; buckets: Record<string, number>; overdue: number; due_7d: number; due_30d: number; unallocated_credits: number };
   net_position: number;
