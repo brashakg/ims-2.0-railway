@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Dict, List
 
+from ._core import ACCOUNTS
+
 ROWS: List[Dict[str, object]] = [
     # --- /api/v1/vendor-portal ---
     {
@@ -236,7 +238,7 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/vendors/purchases-this-month",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     # Purchase Invoices (first-class AP+ITC; books the payable + ITC ledger).
     # Create/from-grn/book AND reads are accounting actions -> ACCOUNTANT/ADMIN.
