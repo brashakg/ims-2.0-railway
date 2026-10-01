@@ -60,11 +60,17 @@ def _customer_state_code(customer: Optional[dict]) -> str:
 
 
 def _build_invoice_gst_split(
-    items: list, store: Optional[dict], customer: Optional[dict]
+    items: list,
+    store: Optional[dict],
+    customer: Optional[dict],
+    place_of_supply: Optional[str] = None,
 ) -> dict:
     """C-6 (DELTA 4): per-rate CGST/SGST/IGST breakup for an order invoice.
 
     Place of supply = the CUSTOMER's state; supplier state = the STORE's state.
+    ``place_of_supply`` (the order's OWN persisted one, utils.online_gst
+    .order_place_of_supply -- an online order's delivery state) wins over the
+    customer doc when given, so the invoice prints what GSTR-1/3B file.
       * intra-state (or customer state unknown -> safe default for a single-
         state retailer): each rate's tax splits into CGST + SGST (each rate/2).
       * inter-state (both states known and different): the full tax is IGST.
@@ -92,8 +98,16 @@ def _build_invoice_gst_split(
         else ""
     )
 
-    supplier_state = _invoice_state_code(store.get("state_code"), store_gstin)
-    customer_state = _customer_state_code(customer)
+    # THE shop-state read the online seller check uses too (state_code, then
+    # the state name, then the GSTIN), so an order the check passes splits on
+    # the state it checked.
+    try:
+        from ...services.org_validation import shop_state_code
+
+        supplier_state = shop_state_code(store)
+    except Exception:  # noqa: BLE001 -- never raises, as before
+        supplier_state = ""
+    customer_state = _invoice_state_code(place_of_supply) or _customer_state_code(customer)
 
     # Inter-state only when BOTH states are known and differ. Missing customer
     # state -> assume intra (CGST+SGST), the safe default for a single-state
@@ -195,6 +209,7 @@ def _assemble_invoice(order_id: str, current_user: dict):
         # GST compliance: store must have GSTIN configured before generating invoice
         store_id = order.get("store_id") or current_user.get("active_store_id")
         store_doc = None
+        store_repo = None
         if store_id:
             try:
                 from ...dependencies import get_store_repository
@@ -202,16 +217,27 @@ def _assemble_invoice(order_id: str, current_user: dict):
                 store_repo = get_store_repository()
                 if store_repo:
                     store_doc = store_repo.find_by_id(store_id)
-                    if store_doc and not store_doc.get("gstin"):
-                        raise HTTPException(
-                            status_code=400,
-                            detail="Cannot generate invoice: store GSTIN is not configured. "
-                            "Update store settings with a valid GSTIN first.",
-                        )
-            except HTTPException:
-                raise
             except Exception:
-                pass  # don't block invoice if store lookup fails
+                pass  # don't block a POS invoice if store lookup fails
+        if store_doc and not store_doc.get("gstin"):
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot generate invoice: store GSTIN is not configured. "
+                "Update store settings with a valid GSTIN first.",
+            )
+        # A routed online order: THE seller check its booking held it on
+        # (owner Q1 -- the shipping shop's and every split-leg shop's OWN
+        # GSTIN, one GSTIN per order, a named shop). An unreadable shop is
+        # not provably fine: refused.
+        from ...services.online_fulfillment_route import seller_problem
+
+        bad = seller_problem(
+            order, store_doc, getattr(store_repo, "find_by_id", lambda _sid: None)
+        )
+        if bad:
+            raise HTTPException(
+                status_code=400, detail=f"Cannot generate invoice: {bad['message']}"
+            )
 
         # C-6 (DELTA 4): resolve the customer so the CGST/SGST/IGST split can
         # use the customer's state as the place of supply. Fail-soft: a missing
@@ -248,13 +274,14 @@ def _assemble_invoice(order_id: str, current_user: dict):
                 pass
             invoice_number = repo.next_invoice_number(store_id, store_doc=store_doc)
             repo.set_invoice(order_id, invoice_number)
-
         # Convert items to camelCase
         items_formatted = [item_to_frontend(item) for item in order.get("items", [])]
 
         # C-6 (DELTA 4): per-rate CGST/SGST/IGST tax summary + place of supply.
+        from ...utils.online_gst import order_place_of_supply
+
         gst_split = _build_invoice_gst_split(
-            order.get("items", []), store_doc, customer_doc
+            order.get("items", []), store_doc, customer_doc, order_place_of_supply(order)
         )
 
         payload = {

@@ -107,7 +107,7 @@ _INBOX_SCAN_LIMIT = 300
 # Mapper result statuses that mean "the order IS (still) in the books" -- the ONLY
 # statuses a remap may report as success. Anything else ('skipped', 'error', ...)
 # is a failure the operator must see (OS-011: 'skipped' used to toast success).
-_REMAP_OK_STATUSES = ("created", "duplicate", "replayed", "status_synced")
+_REMAP_OK_STATUSES = ("created", "duplicate", "replayed", "status_synced", "rerouted")
 
 # Server-side projection for the list (OS-063): ship ONLY what the screen renders.
 # `items` is fetched but immediately collapsed to items_count and stripped -- the
@@ -136,6 +136,7 @@ _LIST_PROJECTION: Dict[str, int] = {
     "rx_hold_reason": 1,
     "stock_hold_reason": 1,
     "fulfillment_hold": 1,
+    "fulfillment_route": 1,
     "rx_hold_cleared": 1,
     "rx_hold_cleared_at": 1,
     "invoice_number": 1,
@@ -212,6 +213,12 @@ def _slim_list_row(doc: Dict[str, Any]) -> Dict[str, Any]:
     # A doc in the orders collection IS in the books -- say so explicitly rather
     # than making the frontend infer it from the presence of an id.
     doc.setdefault("map_status", "MAPPED")
+    # Held on its seller (GSTIN) check or a failed fulfillment-order move: the
+    # screen offers Re-map, which re-routes it
+    # (online_fulfillment_route.reroute_held_order).
+    from ..services.online_fulfillment_route import reroutable
+
+    doc["remap_hold"] = reroutable(doc)
     return doc
 
 
@@ -575,6 +582,8 @@ async def remap_online_order(
     `webhook_inbox` ORDER payload. Recovers an order whose first mapping failed
     (or needs a status re-sync). Idempotent: the mapper's order-id guard means a
     re-run never creates a 2nd order -- it returns 'duplicate' + syncs the status.
+    An order booked and held on its seller check or a failed move is re-routed
+    instead (online_fulfillment_route.reroute_held_order), payload or none.
 
     404 when no ORDER webhook payload is on file for this Shopify order id
     (nothing safe to replay -- child-resource payloads such as fulfillments /
@@ -588,7 +597,30 @@ async def remap_online_order(
             status_code=503, detail="Online Store orders unavailable (no DB)"
         )
 
-    payload, webhook_id, topic = _load_last_shopify_payload(db, shopify_order_id)
+    # An order already booked and HELD on its seller check or a failed move
+    # -- or left mid-way by a Re-map that crashed (its lease) -- is re-routed
+    # from its STORED items and a fresh Shopify read: no webhook payload is
+    # needed (the inbox keeps one for 30 days at most), so those holds always
+    # have this door.
+    from ..services.online_fulfillment_route import (
+        map_routed_order,
+        reroutable,
+        reroute_held_order,
+    )
+
+    try:
+        booked = db.get_collection("orders").find_one({"shopify_order_id": str(shopify_order_id)})
+    except Exception:  # noqa: BLE001 - unreadable: the replay below decides
+        booked = None
+    if booked and (reroutable(booked) or booked.get("reroute_lease_at")):
+        try:
+            result = await reroute_held_order(db, booked["order_id"])
+        except Exception as exc:  # noqa: BLE001 - belt-and-braces; it never raises
+            result = {"status": "error", "error": f"Re-route failed: {exc}"}
+        _write_remap_audit(shopify_order_id, result, current_user)
+        return _remap_verdict(shopify_order_id, result)
+
+    payload, _webhook_id, topic = _load_last_shopify_payload(db, shopify_order_id)
     if payload is None:
         raise HTTPException(
             status_code=404,
@@ -610,18 +642,21 @@ async def remap_online_order(
         )
 
     try:
-        from ..services.online_order_mapper import map_shopify_order
-
         # A legacy topicless row was admitted by the loader ONLY because it is
-        # order-shaped (line_items, no parent order_id) -> replay as a create.
-        result = map_shopify_order(
-            payload, db, webhook_id=webhook_id, topic=topic or "orders/create"
-        )
+        # order-shaped (line_items, no parent order_id) -> replay as a create,
+        # through the routing door like the webhook (multi-location PR 5). A
+        # human replay is not a Shopify delivery: the stored delivery's
+        # webhook id is in the 30-day dedupe log and would answer 'replayed'.
+        result = await map_routed_order(payload, db, topic=topic or "orders/create")
     except Exception as exc:  # noqa: BLE001 - the mapper is fail-soft; belt-and-braces
         result = {"status": "error", "error": str(exc)}
 
     _write_remap_audit(shopify_order_id, result, current_user)
+    return _remap_verdict(shopify_order_id, result)
 
+
+def _remap_verdict(shopify_order_id: str, result: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """The Re-map door's answer for a mapper or re-route result."""
     # Explicit verdict (OS-011): the mapper fail-softs to {'status':'skipped',
     # 'reason':...} -- which carries NO 'error' key and NO order id, so the old
     # frontend inference read it as a success and toasted 'Order re-mapped into
@@ -638,6 +673,8 @@ async def remap_online_order(
             if ok
             else (result or {}).get("error") or (result or {}).get("reason") or status or "unknown"
         ),
+        # A re-route (or its refusal) says in words what happened to the hold.
+        "message": (result or {}).get("message"),
         "result": result,
     }
 
@@ -713,17 +750,34 @@ async def clear_rx_hold(
     # wrote into rx_hold_reason before the stock hold owned its own field.
     # Late import: online_store_orders must not import orders at module level.
     from .orders import order_hold_kinds
+    from ..services.online_fulfillment_route import (
+        HOLD_CAS,
+        seller_change,
+        seller_held,
+        stored_seller_problem,
+    )
 
     released = order_hold_kinds(order)
     if not released:
         raise HTTPException(
             status_code=409, detail="This order has no active hold to clear."
         )
-    _HOLD_NAMES = {"RX": "Rx hold", "STOCK": "stock hold"}
-    released_message = (
-        " and ".join(_HOLD_NAMES[k] for k in released).capitalize()
-        + " released - the order can now be fulfilled."
-    )
+    # The seller check's hold (no shop named, a shop without its own state's
+    # GSTIN, a split across GSTINs) is not a stock hold and no human can clear
+    # it away: while the problem stands no tax invoice can be issued, so the
+    # goods must not leave. Fix the cause (the shop's GSTIN in Organization,
+    # or the fulfillment orders + Re-map), then clear.
+    bad = stored_seller_problem(order, cause_only=True)
+    if bad:
+        raise HTTPException(
+            status_code=409,
+            detail=f"This hold cannot be cleared yet: {bad['message']}",
+        )
+    if seller_held(order):  # its cause is fixed: name it for what it was
+        released = ["SELLER" if k == "STOCK" else k for k in released]
+    _HOLD_NAMES = {"RX": "Rx hold", "STOCK": "stock hold", "SELLER": "seller (GSTIN) hold"}
+    names = " and ".join(_HOLD_NAMES[k] for k in released)
+    released_message = names[:1].upper() + names[1:] + " released - the order can now be fulfilled."
 
     note = (body.note or "").strip() if body and body.note else None
     prescription_id = (
@@ -743,11 +797,44 @@ async def clear_rx_hold(
         update["rx_hold_cleared_note"] = note
     if prescription_id:
         update["rx_hold_cleared_prescription_id"] = prescription_id
+    if "SELLER" in released:
+        # THE SIMPLIFIED ROOT RULE: the release never changes the invoice --
+        # number, date, seller or tax heads. A fix that changed how the shop
+        # splits the order's GST (its state or GSTIN) cannot be released:
+        # the invoice door would print one tax head and every return file the
+        # booked one. A credit note and a new booking instead.
+        from ..dependencies import get_store_repository
+
+        try:
+            store_doc = get_store_repository().find_by_id(order.get("store_id"))
+        except Exception:  # noqa: BLE001 -- unreadable: not provably unchanged
+            store_doc = None
+        if not store_doc:
+            raise HTTPException(
+                status_code=503, detail="Could not read the order's shop to check its GST split"
+            )
+        why = seller_change(order, order.get("store_id"), store_doc)
+        if why:
+            raise HTTPException(
+                status_code=409, detail=f"This seller hold cannot be cleared: {why}"
+            )
+    # Written only on the order as read (HOLD_CAS, Re-map's own condition):
+    # a Re-map or cancel landing on another worker in between (a new hold, a
+    # dead order) is never released behind its back.
     try:
-        coll.update_one({"order_id": order_id}, {"$set": update})
+        written = coll.update_one(
+            {"order_id": order_id, **{k: order.get(k) for k in HOLD_CAS}},
+            {"$set": update},
+        )
     except Exception:  # noqa: BLE001 - surface the failure, don't fake success
         raise HTTPException(
             status_code=503, detail="Could not update the order (database error)"
+        )
+    if not getattr(written, "matched_count", 0):
+        raise HTTPException(
+            status_code=409,
+            detail="The order changed while the hold was being cleared (re-routed, "
+            "cancelled or fulfilled) -- reload it and try again.",
         )
 
     _write_rx_hold_audit(

@@ -533,7 +533,20 @@ def assert_no_active_rx_hold(order: Optional[dict]) -> None:
     """Reject (400) any advance to READY / DELIVERED / FULFILLED on an order
     that still carries an active flag-and-hold, NAMING the hold (Rx, stock,
     or both). No-op for a non-held (or cleared) order, so it never blocks
-    normal fulfillment."""
+    normal fulfillment.
+
+    ALSO the dispatch gate of the online seller check (multi-location PR 5,
+    online_fulfillment_route.seller_problem -- the rule the booking held on
+    and every invoice door refuses on): goods must not leave before their
+    tax invoice can be issued, whatever happened to the hold flags."""
+    from ...services.online_fulfillment_route import stored_seller_problem
+
+    bad = stored_seller_problem(order)
+    if bad:
+        raise HTTPException(
+            status_code=400,
+            detail=f"This online order cannot be dispatched: {bad['message']}",
+        )
     kinds = order_hold_kinds(order)
     if not kinds:
         return

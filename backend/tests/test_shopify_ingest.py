@@ -36,7 +36,7 @@ os.environ.setdefault("JWT_SECRET_KEY", "test_x")
 # Pin inclusive pricing so the assertions are deterministic regardless of env.
 os.environ["GST_PRICING_MODE"] = "inclusive"
 
-from api.services import online_order_mapper, shopify_ingest
+from api.services import online_fulfillment_route, online_order_mapper, shopify_ingest
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +86,9 @@ class FakeCollection:
                 return dict(d)
         return None
 
+    def find(self, filter_=None, projection=None):
+        return [dict(d) for d in self.docs if _match(d, filter_)]
+
     def find_one_and_update(self, filter_, update, upsert=False, return_document=None):
         target = None
         for d in self.docs:
@@ -129,6 +132,9 @@ def _match(doc, filter_) -> bool:
                 if op == "$type":
                     if actual is None:
                         return False
+                elif op == "$ne":
+                    if actual == op_val:
+                        return False
                 else:
                     return False
         else:
@@ -167,6 +173,13 @@ def wired(monkeypatch):
 
     orders_coll = db.get_collection("orders")
     order_repo = OrderRepository(orders_coll)
+    # The physical shops the tests name as ONLINE_FULFILLMENT_STORE_ID: the
+    # fallback counts only when it names an ACTIVE physical shop
+    # (stores_util.physical_stores), never a typo or a closed shop.
+    for sid in ("ST-BOKARO-2", "ST-MAIN-1"):
+        db.get_collection("stores").insert_one(
+            {"store_id": sid, "store_code": sid, "store_type": "RETAIL", "is_active": True}
+        )
 
     # No product master / no store doc in these tests: SKU lookup misses (so the
     # category hint path is used) and the store state is supplied by the test
@@ -174,8 +187,17 @@ def wired(monkeypatch):
     store_state = {"code": "20"}  # Jharkhand, by default
 
     class _StoreRepo:
-        def find_by_id(self, _store_id):
-            return {"gstin": "", "state_code": store_state["code"]}
+        # Since multi-location PR 5 the SHIPPING SHOP bills the order, and a
+        # shop without a GSTIN for its state is a loud route problem (task),
+        # so the default shop carries a GSTIN registered in its own state.
+        def find_by_id(self, store_id):
+            code = store_state["code"]
+            return {
+                "store_id": store_id,
+                "store_name": "Test Shop",
+                "gstin": f"{code}AAAAA0000A1Z5",
+                "state_code": code,
+            }
 
     import api.dependencies as deps
 
@@ -394,12 +416,13 @@ def test_online_order_decrements_physical_stock(wired, monkeypatch):
 
 
 def test_online_preferred_store_is_never_claimed_against(wired, monkeypatch):
-    """With ONLINE_FULFILLMENT_STORE_ID unset the preferred store defaults to
+    """With ONLINE_FULFILLMENT_STORE_ID unset and no routing, the order bills to
     the ONLINE billing store. That store is pooled and stockless, so any
     AVAILABLE unit on it is a phantom: claiming it would report the order as
     fulfilled (claimed == expected), file a ship task at a shop with no shelf,
     and leave the real unit undecremented -- a silent oversell. The claim must
-    skip it and fall through to the physical shops."""
+    refuse it. Nor is another shop GUESSED as the seller from its stock count
+    (money panel round 3): nothing is claimed, the miss is loud."""
     import api.dependencies as deps
     from api.routers import orders as orders_mod
 
@@ -409,7 +432,7 @@ def test_online_preferred_store_is_never_claimed_against(wired, monkeypatch):
     stock = _FakeStockRepoPerStore({"BV-ONLINE-01": 3, "ST-BOKARO-2": 5})
     monkeypatch.setattr(orders_mod, "get_stock_repository", lambda: stock)
     monkeypatch.setattr(
-        shopify_ingest, "_available_stores_for_product", lambda db, pid: ["ST-BOKARO-2"]
+        online_fulfillment_route, "_stock_by_store", lambda db, pid: {"ST-BOKARO-2": 5}
     )
     monkeypatch.setattr(deps, "get_task_repository", lambda: _FakeTaskRepo())
 
@@ -419,7 +442,10 @@ def test_online_preferred_store_is_never_claimed_against(wired, monkeypatch):
     assert res["status"] == "created"
     claimed_stores = [c[1] for c in stock.claims]
     assert "BV-ONLINE-01" not in claimed_stores
-    assert claimed_stores == ["ST-BOKARO-2"]
+    assert claimed_stores == []
+    order = wired["orders"].find_one({"shopify_order_id": "7150"})
+    assert [p["code"] for p in order["fulfillment_route"]["problems"]] == ["SELLER_UNKNOWN"]
+    assert order["fulfillment_hold"] is True
 
 
 def test_online_order_unmapped_sku_skips_decrement(wired, monkeypatch):
@@ -454,6 +480,9 @@ def test_online_order_underclaim_records_loud_stock_miss(wired, monkeypatch):
     import api.dependencies as deps
     from api.routers import orders as orders_mod
 
+    # A shop IS named (the documented fallback): a route that names none
+    # claims nothing and is no oversell (SELLER_UNKNOWN owns it, below).
+    monkeypatch.setenv("ONLINE_FULFILLMENT_STORE_ID", "ST-BOKARO-2")
     monkeypatch.setattr(deps, "get_product_repository", lambda: _FakeProductRepo())
     monkeypatch.setattr(
         orders_mod, "get_stock_repository", lambda: _FakeStockRepoNoStock()
@@ -570,9 +599,11 @@ def test_lens_line_no_rx_creates_order_flagged_and_one_task(wired, monkeypatch):
 
 def test_lens_line_with_valid_rx_no_flag_no_task(wired, monkeypatch):
     """(b) spectacle-lens line, valid customer-matching non-expired Rx ->
-    no flag, no task."""
+    no flag, no task. (A named shop ships it: an order no shop is named for
+    is held on SELLER_UNKNOWN whatever its Rx.)"""
     import api.dependencies as deps
 
+    monkeypatch.setenv("ONLINE_FULFILLMENT_STORE_ID", "ST-MAIN-1")
     repo = _RxRepo(by_id={"RX-1": _valid_rx("RX-1", "555")})
     monkeypatch.setattr(deps, "get_prescription_repository", lambda: repo)
 
@@ -709,11 +740,10 @@ def test_rx_powers_from_line_properties(wired, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Multi-store fulfillment fallback (owner 2026-07-05): when the preferred
-# fulfillment store can't cover a line, the units are claimed from whichever
-# other store holds them, the split is recorded on the order, and the fallback
-# store gets a ship task. ONLINE_FULFILLMENT_FALLBACK=off pins the old
-# single-store behaviour.
+# Relocation (owner 2026-07-05, narrowed by multi-location PR 5): when the shop
+# an order is assigned to can't cover it, the WHOLE order moves to one shop that
+# holds every unit (never a per-line split, Q2), that shop bills + claims it and
+# gets a ship task. ONLINE_FULFILLMENT_FALLBACK=off pins the assigned shop.
 # ---------------------------------------------------------------------------
 
 
@@ -744,47 +774,52 @@ class _FakeTaskRepo:
         return task
 
 
-def _wire_fallback(monkeypatch, stock, stores_with_stock):
+def _wire_fallback(monkeypatch, stock):
     import api.dependencies as deps
     from api.routers import orders as orders_mod
 
     monkeypatch.setattr(deps, "get_product_repository", lambda: _FakeProductRepo())
     monkeypatch.setattr(orders_mod, "get_stock_repository", lambda: stock)
-    # The fake Mongo has no aggregate(); pin the store lookup deterministically.
+    # The fake Mongo has no aggregate(); the holdings are the fake pools (a
+    # stockless ONLINE store is never a holder -- the real reader drops it).
     monkeypatch.setattr(
-        shopify_ingest, "_available_stores_for_product", lambda db, pid: stores_with_stock
+        online_fulfillment_route,
+        "_stock_by_store",
+        lambda db, pid: {
+            s: n for s, n in stock.pools.items() if n > 0 and "ONLINE" not in s
+        },
     )
     task_repo = _FakeTaskRepo()
     monkeypatch.setattr(deps, "get_task_repository", lambda: task_repo)
     return task_repo
 
 
-def test_fallback_claims_from_other_store_and_raises_ship_task(wired, monkeypatch):
-    """Preferred store empty + another store has the unit -> the unit is claimed
-    THERE, the split lands on the order doc, a ship task goes to that store, and
-    NO stock-miss is recorded (nothing was actually oversold)."""
+def test_no_routing_never_claims_at_a_shop_guessed_from_stock(wired, monkeypatch):
+    """No routing (dark gate) and no fallback set + another store has the unit
+    -> that store is NOT guessed as the seller (its GSTIN would issue the tax
+    invoice although Shopify never assigned it; money panel round 3). Nothing
+    is claimed there, the bucket bills it LOUDLY and the miss holds the order.
+    (A MOVE to a shop that holds the order is route_order's, with Shopify's
+    routing read: test_online_fulfillment_route R2.)"""
     stock = _FakeStockRepoPerStore({"BV-ONLINE-01": 0, "ST-BOKARO-2": 5})
-    task_repo = _wire_fallback(monkeypatch, stock, ["ST-BOKARO-2"])
+    task_repo = _wire_fallback(monkeypatch, stock)
 
     res = shopify_ingest.ingest_shopify_order(
         wired["db"], _frame_order(9100, buyer_state="20"), topic="orders/create"
     )
     assert res["status"] == "created"
-    assert stock.claims == [("P-RB", "ST-BOKARO-2", res["order_id"])]
+    assert stock.claims == []
 
     order = wired["orders"].find_one({"shopify_order_id": "9100"})
-    assert order["fulfillment_stores"] == ["ST-BOKARO-2"]
-    assert order["fulfillment_breakdown"] == [
-        {"product_id": "P-RB", "store_id": "ST-BOKARO-2", "qty": 1}
-    ]
-    # Ship task raised for the fallback store, deduped per order+store.
-    assert len(task_repo.created) == 1
-    assert task_repo.created[0]["store_id"] == "ST-BOKARO-2"
-    assert task_repo.created[0]["source_ref"] == (
-        f"online_fallback_ship:{res['order_id']}:ST-BOKARO-2"
-    )
-    # No oversell: the claim succeeded, just not at the preferred store.
+    assert order["store_id"] == "BV-ONLINE-01"
+    assert [p["code"] for p in order["fulfillment_route"]["problems"]] == ["SELLER_UNKNOWN"]
+    assert order["fulfillment_hold"] is True
+    assert not [t for t in task_repo.created if "online_fallback_ship" in t["source_ref"]]
+    # Panel round 5: no false oversell for an order no shop was named for --
+    # the SELLER_UNKNOWN hold keeps its own reason and task.
     assert wired["db"].get_collection("online_stock_miss").docs == []
+    assert order["stock_hold_reason"] == order["fulfillment_route"]["problems"][0]["message"]
+    assert not [t for t in task_repo.created if "online_stock_miss" in t["source_ref"]]
 
 
 def test_fallback_prefers_configured_store_when_it_has_stock(wired, monkeypatch):
@@ -796,7 +831,7 @@ def test_fallback_prefers_configured_store_when_it_has_stock(wired, monkeypatch)
     would no longer be testing "preferred store wins"."""
     monkeypatch.setenv("ONLINE_FULFILLMENT_STORE_ID", "ST-MAIN-1")
     stock = _FakeStockRepoPerStore({"ST-MAIN-1": 3, "ST-BOKARO-2": 5})
-    task_repo = _wire_fallback(monkeypatch, stock, ["ST-BOKARO-2"])
+    task_repo = _wire_fallback(monkeypatch, stock)
 
     res = shopify_ingest.ingest_shopify_order(
         wired["db"], _frame_order(9101, buyer_state="20"), topic="orders/create"
@@ -812,8 +847,9 @@ def test_fallback_disabled_by_env_records_miss(wired, monkeypatch):
     """ONLINE_FULFILLMENT_FALLBACK=off -> old behaviour: preferred store only,
     and an empty preferred store records the loud stock miss."""
     monkeypatch.setenv("ONLINE_FULFILLMENT_FALLBACK", "off")
-    stock = _FakeStockRepoPerStore({"BV-ONLINE-01": 0, "ST-BOKARO-2": 5})
-    _wire_fallback(monkeypatch, stock, ["ST-BOKARO-2"])
+    monkeypatch.setenv("ONLINE_FULFILLMENT_STORE_ID", "ST-MAIN-1")
+    stock = _FakeStockRepoPerStore({"BV-ONLINE-01": 0, "ST-MAIN-1": 0, "ST-BOKARO-2": 5})
+    _wire_fallback(monkeypatch, stock)
 
     res = shopify_ingest.ingest_shopify_order(
         wired["db"], _frame_order(9102, buyer_state="20"), topic="orders/create"
@@ -827,8 +863,9 @@ def test_fallback_disabled_by_env_records_miss(wired, monkeypatch):
 def test_fallback_exhausted_still_records_miss(wired, monkeypatch):
     """No store anywhere has the unit -> stock miss records with the tried
     stores, exactly like the old single-store under-claim."""
+    monkeypatch.setenv("ONLINE_FULFILLMENT_STORE_ID", "ST-BOKARO-2")
     stock = _FakeStockRepoPerStore({"BV-ONLINE-01": 0, "ST-BOKARO-2": 0})
-    _wire_fallback(monkeypatch, stock, ["ST-BOKARO-2"])
+    _wire_fallback(monkeypatch, stock)
 
     res = shopify_ingest.ingest_shopify_order(
         wired["db"], _frame_order(9103, buyer_state="20"), topic="orders/create"
@@ -873,9 +910,7 @@ def test_stock_miss_holds_the_order_and_tasks_the_fulfilling_stores_manager(
     monkeypatch.setattr(
         orders_mod, "get_stock_repository", lambda: _FakeStockRepoNoStock()
     )
-    monkeypatch.setattr(
-        shopify_ingest, "_available_stores_for_product", lambda db, pid: []
-    )
+    monkeypatch.setattr(online_fulfillment_route, "_stock_by_store", lambda db, pid: {})
     task_repo = _FakeTaskRepo()
     monkeypatch.setattr(deps, "get_task_repository", lambda: task_repo)
     monkeypatch.setattr(deps, "get_user_repository", lambda: _FakeUserRepo())
@@ -926,7 +961,7 @@ def test_clean_ingest_raises_no_stock_miss_task_and_no_hold(wired, monkeypatch):
     held and must NOT task anyone."""
     monkeypatch.setenv("ONLINE_FULFILLMENT_STORE_ID", "ST-MAIN-1")
     stock = _FakeStockRepoPerStore({"ST-MAIN-1": 5})
-    task_repo = _wire_fallback(monkeypatch, stock, [])
+    task_repo = _wire_fallback(monkeypatch, stock)
 
     res = shopify_ingest.ingest_shopify_order(
         wired["db"], _frame_order(9201, buyer_state="20"), topic="orders/create"

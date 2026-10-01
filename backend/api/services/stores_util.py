@@ -92,6 +92,11 @@ _PHYSICAL_PROJECTION = {
     "store_type": 1,
     "shopify_location_id": 1,
     "shopify_location_name": 1,
+    # The seller check's fields (online_fulfillment_route.gstin_problem), so
+    # the online route prefers a shop that can invoice an order it moves.
+    "gstin": 1,
+    "state_code": 1,
+    "state": 1,
 }
 
 
@@ -99,7 +104,7 @@ def physical_stores(db) -> List[Dict[str, Any]]:
     """THE one reader of the physical shops (per-store Shopify locations,
     owner ruling 2026-09-06): every ACTIVE store that is not ONLINE, sorted by
     store_code, projected to ``{store_id, store_code, store_name, store_type,
-    shopify_location_id, shopify_location_name}``.
+    shopify_location_id, shopify_location_name, gstin, state_code, state}``.
 
     "Physical" has exactly one definition: ACTIVE and not ``_doc_is_online``,
     where active is ``is_active != False`` -- a MISSING flag is active, the

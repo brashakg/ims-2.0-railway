@@ -952,9 +952,11 @@ class NexusAgent(JarvisAgent):
         A replayed delivery (same Shopify order id or same X-Shopify-Webhook-Id)
         creates NOTHING further -- revenue is never double-counted. Fail-soft."""
         try:
-            from api.services.online_order_mapper import map_shopify_order
+            # Through the routing door (multi-location PR 5): Shopify's
+            # assigned location decides the shop that ships + bills the order.
+            from api.services.online_fulfillment_route import map_routed_order
 
-            result = map_shopify_order(
+            result = await map_routed_order(
                 payload,
                 self.db,
                 webhook_id=headers.get("x-shopify-webhook-id"),

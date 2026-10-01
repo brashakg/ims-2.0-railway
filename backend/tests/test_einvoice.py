@@ -88,6 +88,14 @@ class MockDB:
         return self._collections[name]
 
 
+def _stores():
+    """The order's own shop: its GSTIN is the e-invoice's seller GSTIN."""
+    return MockCollection([
+        {"store_id": "BV-BOK-01", "store_name": "Bokaro", "state_code": "20",
+         "gstin": "20AAAAA1234A1ZX"},
+    ])
+
+
 def _make_db_with_creds(gstin="20AAAAA1234A1ZX"):
     """Return a MockDB that has a configured einvoice integration."""
     integrations = MockCollection([
@@ -102,7 +110,7 @@ def _make_db_with_creds(gstin="20AAAAA1234A1ZX"):
             },
         }
     ])
-    return MockDB({"integrations": integrations})
+    return MockDB({"integrations": integrations, "stores": _stores()})
 
 
 def _sample_order(with_irn=False):
@@ -110,7 +118,7 @@ def _sample_order(with_irn=False):
         "id": "ORD-001",
         "order_number": "INV/2026/001",
         "invoice_number": "INV/2026/001",
-        "store_gstin": "20AAAAA1234A1ZX",
+        "store_id": "BV-BOK-01",
         "customer_name": "Test Customer",
         "grand_total": 590.0,
         "taxable_amount": 500.0,
@@ -165,7 +173,7 @@ async def test_simulated_when_no_creds(monkeypatch):
     monkeypatch.setenv("IMS_EINVOICE_ENABLED", "1")
     importlib.reload(einvoice_mod)
 
-    db = MockDB()  # empty -- no integrations
+    db = MockDB({"stores": _stores()})  # no integrations
     result = await einvoice_mod.generate_irn(db, _sample_order())
 
     assert result["status"] == einvoice_mod.STATUS_SIMULATED
@@ -423,3 +431,52 @@ def test_einvoice_qr_block_with_irn():
     # render_note should be present in that case
     if block["qr_data_uri"] is None:
         assert "TODO" in (block["render_note"] or "") or block["render_note"] == ""
+
+
+# ---------------------------------------------------------------------------
+# The seller is the order's OWN shop (money panel round 4, P6)
+# ---------------------------------------------------------------------------
+
+
+def test_seller_gstin_and_state_come_from_the_orders_own_shop():
+    """A routed B2B online order at the Pune shop: SellerDtls carries Pune's
+    own GSTIN and Maharashtra's state code -- never '' and never a default
+    '20' (no order writer stamps store_gstin / billing_gstin)."""
+    db = MockDB({"stores": MockCollection([
+        {"store_id": "PUNE", "store_name": "Pune", "state_code": "27", "gstin": "27BBBBB0000B1Z5"},
+    ])})
+    order = {"order_id": "o-p", "store_id": "PUNE", "place_of_supply": "27",
+             "customer_gstin": "27CCCCC0000C1Z5",
+             "fulfillment_route": {"store_id": "PUNE", "problems": []}}
+
+    seller, refused = einvoice_mod._seller(db, order)
+    payload = einvoice_mod._build_einvoice_json(order, seller)
+
+    assert refused is None
+    assert payload["SellerDtls"]["Gstin"] == "27BBBBB0000B1Z5"
+    assert payload["SellerDtls"]["Stcd"] == "27"
+
+
+@pytest.mark.asyncio
+async def test_a_held_seller_is_refused_loudly_before_any_irp_call(monkeypatch):
+    """The e-invoice refuses what the booking held (the one seller check): a
+    Maharashtra shop carrying a Jharkhand GSTIN -> FAILED with the reason, and
+    the IRP is never called."""
+    monkeypatch.setenv("IMS_EINVOICE_ENABLED", "1")
+    importlib.reload(einvoice_mod)
+
+    async def _no_irp(cfg, payload):
+        raise AssertionError("the IRP must not be called for a held seller")
+
+    monkeypatch.setattr(einvoice_mod, "_call_irp", _no_irp)
+    db = _make_db_with_creds()
+    db._collections["stores"] = MockCollection([
+        {"store_id": "PUNE", "store_name": "Pune", "state_code": "27", "gstin": "20AAAAA1234A1ZX"},
+    ])
+    order = {**_sample_order(), "store_id": "PUNE",
+             "fulfillment_route": {"store_id": "PUNE", "problems": []}}
+
+    result = await einvoice_mod.generate_irn(db, order)
+
+    assert result["status"] == einvoice_mod.STATUS_FAILED
+    assert "registered in state 20" in result["reason"]
