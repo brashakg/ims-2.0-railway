@@ -359,6 +359,11 @@ def test_worklists_returns_all_four_lists(monkeypatch):
                 # cn_received_at NOT present -> pending
             }
         ]),
+        # V1 bills BV-01, so its rebate note is BV-01's on the supplier
+        # ledger (F63: an accountant sees only their shop's notes).
+        "vendor_bills": _FakeCollection([
+            {"bill_id": "B-1", "vendor_id": "V1", "store_id": "BV-01", "bill_date": "2026-05-01"}
+        ]),
     })
     monkeypatch.setattr(recon_mod, "_get_db", lambda: db)
 
@@ -494,7 +499,11 @@ def test_mark_scheme_cn_received_sets_timestamp(monkeypatch):
         "amount": 5000,
     }
     coll = _FakeCollection([cn])
-    db = _FakeDB({"vendor_debit_notes": coll})
+    # V1 bills BV-01, the accountant's shop: the note is theirs to tick (F63).
+    bills = _FakeCollection(
+        [{"bill_id": "B-1", "vendor_id": "V1", "store_id": "BV-01", "bill_date": "2026-05-01"}]
+    )
+    db = _FakeDB({"vendor_debit_notes": coll, "vendor_bills": bills})
     monkeypatch.setattr(recon_mod, "_get_db", lambda: db)
 
     result = asyncio.run(mark_scheme_cn_received("CN-REB-1", current_user=_user()))

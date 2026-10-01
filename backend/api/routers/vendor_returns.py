@@ -13,6 +13,7 @@ from .auth import get_current_user, require_roles
 from ..dependencies import get_db, resolve_store_scope, validate_store_access
 
 from ..services.payables_mask import strip_vendor_return_credit
+from ..dependencies import can_access_store_scoped
 
 # A vendor return mints a debit/credit note -- a financial instrument against a
 # vendor. Restrict create + status changes to the same roles that manage vendors
@@ -287,7 +288,7 @@ async def get_vendor_return(
         # Supplier credit is the accounts roles' (services/payables_mask).
         return_doc = strip_vendor_return_credit(return_doc, current_user)
 
-        if not return_doc:
+        if not return_doc or not can_access_store_scoped(return_doc.get("store_id"), current_user):
             raise HTTPException(status_code=404, detail="Return not found")
 
         # Clean up MongoDB _id field

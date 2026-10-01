@@ -65,6 +65,7 @@ COVERAGE LIST (method, path, roles_tested)
   GET  /api/v1/inventory/accountability/shrinkage -> mgmt roles; SALES_STAFF -> 403
   GET  /api/v1/vendors/ap-aging            -> ACCOUNTANT/ADMIN; STORE_MANAGER -> 403
   GET  /api/v1/vendors/purchases-this-month -> ACCOUNTANT/ADMIN; managers + counter -> 403
+  POST /api/v1/vendors/purchase-invoices/preview -> ACCOUNTANT/ADMIN; managers + counter -> 403
   POST /api/v1/vendors/{vid}/bills         -> ACCOUNTANT/ADMIN; AREA_MANAGER -> 403
   GET  /api/v1/expenses/aging              -> ACCOUNTANT/ADMIN; SALES_CASHIER -> 403
 
@@ -1283,7 +1284,20 @@ class TestVendorFinanceRoutes:
     # Purchases this month (audit F56): what we owe each supplier, so the same
     # supplier-balance readers as ap-aging -- the policy row, not only the
     # handler's require_roles, refuses a manager and the counter.
-    @pytest.mark.parametrize("role", ["STORE_MANAGER", "AREA_MANAGER", "SALES_STAFF", "CASHIER"])
+    # Every role outside the accounts roles: the managers, the counter (incl.
+    # the retired SALES_CASHIER alias) and the catalogue / clinic / workshop.
+    _BELOW_ACCOUNTS = [
+        "STORE_MANAGER",
+        "AREA_MANAGER",
+        "SALES_STAFF",
+        "CASHIER",
+        "CATALOG_MANAGER",
+        "OPTOMETRIST",
+        "WORKSHOP_STAFF",
+        "SALES_CASHIER",
+    ]
+
+    @pytest.mark.parametrize("role", _BELOW_ACCOUNTS)
     def test_purchases_this_month_denied_below_accounts(self, client, role):
         r = client.get(
             "/api/v1/vendors/purchases-this-month",
@@ -1298,6 +1312,24 @@ class TestVendorFinanceRoutes:
             headers=ALL_ROLE_HEADERS[role],
         )
         assert_route_allowed(r, role, "GET", "/api/v1/vendors/purchases-this-month")
+
+    # The purchase-invoice preview (#1167) returns the recipient company and
+    # every line's tax for a bill -- the booking's own math, so the booking's
+    # gate: the accounts roles only, by the policy row as well as the handler.
+    _PREVIEW = "/api/v1/vendors/purchase-invoices/preview"
+    _PREVIEW_BODY = {"vendor_id": _DUMMY_VENDOR, "lines": []}
+
+    @pytest.mark.parametrize("role", _BELOW_ACCOUNTS)
+    def test_purchase_invoice_preview_denied_below_accounts(self, client, role):
+        r = client.post(self._PREVIEW, headers=ALL_ROLE_HEADERS[role], json=self._PREVIEW_BODY)
+        assert_middleware_403(r, "POST", self._PREVIEW)
+
+    @pytest.mark.parametrize("role", ["ACCOUNTANT", "ADMIN"])
+    def test_purchase_invoice_preview_allowed_for_accounts(self, matrix_client, role):
+        r = matrix_client.post(
+            self._PREVIEW, headers=ALL_ROLE_HEADERS[role], json=self._PREVIEW_BODY
+        )
+        assert_route_allowed(r, role, "POST", self._PREVIEW)
 
 
 # ===========================================================================
