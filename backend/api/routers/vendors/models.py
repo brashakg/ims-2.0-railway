@@ -408,6 +408,9 @@ class POLineCancel(BaseModel):
     product_id: Optional[str] = None
     # ...and its quantity: two lines may carry one product.
     quantity: Optional[int] = None
+    # The order's updated_at as the screen read it. Exact where the line's own
+    # fields are not: two lens powers of one product can match on every field.
+    updated_at: Optional[str] = None
 
     @field_validator("reason")
     @classmethod

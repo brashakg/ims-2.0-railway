@@ -510,6 +510,22 @@ def _received_per_line(po: dict, by_product: dict) -> list:
     return out
 
 
+def _stamp(value) -> str:
+    """An updated_at as the API sends it (a datetime goes out as isoformat)."""
+    return value.isoformat() if hasattr(value, "isoformat") else str(value or "")
+
+
+def _line_label(line: dict) -> str:
+    """How a line is named on the timeline: its own description first -- a
+    lens order has one line per power, all one product name."""
+    return (
+        line.get("description")
+        or line.get("product_name")
+        or line.get("sku")
+        or line.get("product_id")
+    )
+
+
 def _refuse_if_arrivals_unattributed(line: dict, items: list, by_product: dict) -> None:
     """A receipt counts units per PRODUCT, never per line. When some -- not
     all -- of a product's units arrived and the order carries that product on
@@ -710,7 +726,7 @@ def _settled_lines(po: dict, moved: dict, failed_ids: set, products: dict):
     touched = False
     for line in po.get("items") or []:
         pid = line.get("product_id")
-        name = line.get("product_name") or line.get("sku") or pid
+        name = _line_label(line)
         if pid in failed_ids:
             touched = True
             changes.append(
@@ -789,7 +805,7 @@ def settle_typed_in_lines(po_repo, po_id, typed_in, products, current_user) -> l
             # Nothing left to order: the same rule as a cancel that leaves
             # nothing -- the order is cancelled, never kept as an empty draft
             # that could be sent.
-            why = "None of its lines could be added to the catalogue."
+            why = "Cancelled automatically: none of its lines could be added to the catalogue."
             patch.update(
                 status="CANCELLED",
                 cancelled_at=_now_iso(),
@@ -809,10 +825,11 @@ def settle_typed_in_lines(po_repo, po_id, typed_in, products, current_user) -> l
                 patch,
                 events,
                 current_user,
-                "purchase_order.lines_settled",
+                "purchase_order.cancel" if not items else "purchase_order.lines_settled",
                 before={"items": po.get("items"), "status": po.get("status")},
                 after={"items": items, "total_amount": money["total_amount"],
-                       "status": patch.get("status", po.get("status"))},
+                       "status": patch.get("status", po.get("status")),
+                       "cancellation_reason": patch.get("cancellation_reason")},
             )
             return dropped
         except HTTPException as exc:
@@ -1026,14 +1043,19 @@ async def cancel_po_line(
     if not 0 <= line_index < len(items):
         raise HTTPException(status_code=404, detail="No such line on this order")
     line = items[line_index]
-    # What the person saw on that line. Two lines may carry one product, so the
-    # product alone does not prove the screen is current.
-    seen = (body.product_id, body.quantity)
+    # What the person saw. The order's version is exact; without it (a card
+    # built before the server answered) the line's product and quantity are
+    # checked -- two lines may carry one product. An empty value was not sent.
     shown = line.get("ordered_qty")  # what the screen shows as the line's qty
-    now = (line.get("product_id"), _qty(line.get("quantity") if shown is None else shown))
-    if any(want is not None and want != got for want, got in zip(seen, now)):
+    seen = (body.updated_at, body.product_id, body.quantity)
+    now = (
+        _stamp(po.get("updated_at")),
+        line.get("product_id"),
+        _qty(line.get("quantity") if shown is None else shown),
+    )
+    if any(want not in (None, "") and want != got for want, got in zip(seen, now)):
         raise HTTPException(status_code=409, detail=_CHANGED_MEANWHILE)
-    name = line.get("product_name") or line.get("sku") or line.get("product_id")
+    name = _line_label(line)
 
     if status == "DRAFT":
         if len(items) <= 1:

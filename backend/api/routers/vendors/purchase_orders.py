@@ -723,14 +723,17 @@ async def create_po(
         # as stored, never the totals priced before it.
         stored = po_repo.find_by_id(po_id) or {}
         if stored.get("status") == "CANCELLED":
+            # 409, never 5xx: the browser client replays every 5xx POST three
+            # times, and each replay would raise (and cancel) another order.
+            names = ", ".join(n.get("product_name") or "a typed-in item" for n in not_created)
             raise HTTPException(
-                status_code=503,
+                status_code=409,
                 detail={
                     "code": "TYPED_IN_NOT_ADDED",
                     "message": (
-                        "The typed-in items could not be added to the catalogue, "
-                        "so nothing was left to order and the order was cancelled. "
-                        "Try again in a moment."
+                        f"{names} could not be added to the catalogue, so nothing "
+                        f"was left to order and {po_number} was cancelled. Try "
+                        "again in a moment."
                     ),
                     "po_id": po_id,
                     "products_not_created": not_created,

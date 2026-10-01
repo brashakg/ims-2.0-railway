@@ -1578,11 +1578,14 @@ def test_an_order_left_with_no_line_is_cancelled_not_kept_empty(monkeypatch):
     ])
     with pytest.raises(HTTPException) as e:
         _run(v.create_po(body, _user()))
-    assert e.value.status_code == 503
+    # 409, not 5xx: the browser client replays a 5xx POST three times, and
+    # each replay raised (and cancelled) another order (review round 7, pass 3).
+    assert e.value.status_code == 409
     assert e.value.detail["code"] == "TYPED_IN_NOT_ADDED"
+    assert "Vogue VO5286" in e.value.detail["message"]
     doc = po_repo.collection.docs[0]
     assert doc["status"] == "CANCELLED" and doc["items"] == []
-    assert doc["cancellation_reason"]
+    assert doc["cancellation_reason"].startswith("Cancelled automatically")
 
 
 def test_send_refuses_an_order_with_no_line(monkeypatch):
@@ -1692,3 +1695,55 @@ def test_a_paise_cost_change_reads_as_it_is():
         [{"product_id": "P1", "product_name": "Frame", "quantity": 1, "unit_price": 12345.68}],
     )
     assert out == ["Frame: cost Rs 12345.67 -> Rs 12345.68"]
+
+
+def test_an_automatic_cancel_is_audited_as_a_cancel_with_its_reason(monkeypatch):
+    repo, audit = _wire(monkeypatch, _po())
+    _door_cannot_write(monkeypatch, _real_spine(monkeypatch))
+    _run(v.update_po("PO1", _typed_in_vogue_body(), _user()))
+    assert repo.pos["PO1"]["status"] == "CANCELLED"
+    row = audit.rows[-1]
+    assert row["action"] == "purchase_order.cancel"
+    assert row["after"]["cancellation_reason"].startswith("Cancelled automatically")
+
+
+def _lens_po():
+    lines = []
+    for sph in ("-1.00", "-2.00", "-3.00"):
+        line = _line("CL1", "Acuvue Oasys", 2, 900)
+        line["description"] = f"Acuvue Oasys SPH {sph}"
+        lines.append(line)
+    return _po(items=lines, source="cl_po_generator", updated_at="2026-10-01T10:00:00")
+
+
+def test_a_stale_screen_cannot_cancel_another_lens_power(monkeypatch):
+    """Three powers of one lens, 2 boxes each: product and quantity match on
+    every line. A screen read before a colleague's cancel removed the NEXT
+    power. The order's version the screen read is now checked."""
+    repo, _ = _wire(monkeypatch, _lens_po())
+    seen = repo.pos["PO1"]["updated_at"]
+    body = v.POLineCancel(reason="vendor out of stock", product_id="CL1", quantity=2,
+                          updated_at=seen)
+    _run(v.cancel_po_line("PO1", 0, body, _user()))
+    repo.pos["PO1"]["updated_at"] = "2026-10-01T10:05:00"  # the repository moves it
+    with pytest.raises(HTTPException) as e:
+        _run(v.cancel_po_line("PO1", 0, body, _user()))
+    assert e.value.status_code == 409
+    assert [i["description"] for i in repo.pos["PO1"]["items"]] == [
+        "Acuvue Oasys SPH -2.00", "Acuvue Oasys SPH -3.00"
+    ]
+
+
+def test_a_lens_line_cancel_names_its_power_on_the_timeline(monkeypatch):
+    repo, _ = _wire(monkeypatch, _lens_po())
+    _run(v.cancel_po_line("PO1", 1, _line_body(product_id="CL1"), _user()))
+    assert repo.pos["PO1"]["history"][-1]["detail"].startswith("Acuvue Oasys SPH -2.00: 2 units")
+
+
+def test_a_card_built_before_the_server_answered_can_still_cancel_a_line(monkeypatch):
+    """The card for a just-created draft carries product_id '' for a typed-in
+    line. An empty value was not sent -- it is no reason to refuse."""
+    repo, _ = _wire(monkeypatch, _po())
+    body = v.POLineCancel(reason="ordered twice", product_id="", quantity=2)
+    _run(v.cancel_po_line("PO1", 0, body, _user()))
+    assert [i["product_id"] for i in repo.pos["PO1"]["items"]] == ["P2"]
