@@ -39,11 +39,11 @@ class AccountabilityAssign(BaseModel):
 @router.get("/transfer-recommendations")
 async def transfer_recommendations(
     store_id: Optional[str] = Query(None),
-    threshold: int = Query(5, ge=0, le=1000),
     current_user: dict = Depends(require_roles(*_INVENTORY_ROLES)),
 ):
-    """Suggest inter-store transfers to refill the active store's low/out
-    products from other stores that hold a surplus. Fail-soft."""
+    """Suggest inter-store transfers to refill the active store's low products
+    (THE low-stock list) from other stores that hold a surplus, each toward
+    twice its own reorder level -- no fixed threshold. Fail-soft."""
     from ...services.inventory_intel import recommend_transfers
 
     stock_repo = get_stock_repository()
@@ -94,17 +94,15 @@ async def transfer_recommendations(
             {
                 "product_id": r["_id"],
                 "quantity": int(r.get("quantity", 0) or 0),
+                "reorder_point": r.get("reorder_point"),
                 "product_name": names.get(r["_id"], ""),
             }
             for r in low
             if r.get("_id")
         ]
-        recs = recommend_transfers(
-            active_store, low_products, store_levels, threshold=threshold
-        )
+        recs = recommend_transfers(active_store, low_products, store_levels)
         return {
             "store_id": active_store,
-            "threshold": threshold,
             "recommendations": recs,
             "count": len(recs),
         }

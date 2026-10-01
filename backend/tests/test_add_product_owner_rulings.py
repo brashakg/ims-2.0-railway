@@ -641,8 +641,23 @@ def test_f73_stock_low_stock_mode_and_transfer_recommendations_read_the_one_list
         low_stock=True, current_user=_MGR,
     ))
     assert {r["_id"] for r in mode["items"]} == {"P-SET"}
-    recs = asyncio.run(inv.transfer_recommendations(store_id=None, threshold=5, current_user=_MGR))
+    recs = asyncio.run(inv.transfer_recommendations(store_id=None, current_user=_MGR))
     assert {r["product_id"] for r in recs["recommendations"]} == {"P-SET"}, recs
+
+
+def test_f73_transfer_recommendations_refill_a_low_product_at_any_level(monkeypatch):
+    """A low product holding 10 or more is still refilled: the target is twice
+    the product's own level, never the old fixed threshold 5 (refill to 10),
+    which skipped P20 (level 20, 12 on hand) after the one list called it low."""
+    products = [{"product_id": "P20", "sku": "S20", "name": "P20", "reorder_point": 20}]
+    units = [dict(_one_unit("P20"), stock_id=f"U-{i}") for i in range(12)] + [
+        dict(_one_unit("P20"), stock_id=f"D-{i}", store_id="S2") for i in range(50)
+    ]
+    _repos(monkeypatch, [inv], products, units)
+    recs = asyncio.run(inv.transfer_recommendations(store_id=None, current_user=_MGR))
+    assert [(r["product_id"], r["from_store"], r["quantity"]) for r in recs["recommendations"]] == [
+        ("P20", "S2", 10)  # need 40-12=28; S2 spares 50-40=10
+    ], recs
 
 
 def test_f73_report_low_stock_counts_read_the_one_list(monkeypatch):

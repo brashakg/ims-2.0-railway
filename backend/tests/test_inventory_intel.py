@@ -27,9 +27,9 @@ from api.routers.auth import get_current_user  # noqa: E402
 
 
 def test_recommend_transfers_picks_surplus_store():
-    low = [{"product_id": "P1", "quantity": 1, "product_name": "Ray-Ban X"}]
+    low = [{"product_id": "P1", "quantity": 1, "product_name": "Ray-Ban X", "reorder_point": 5}]
     levels = {"P1": {"BLR": 1, "PUN": 40, "MUM": 12}}  # PUN has the most excess
-    recs = recommend_transfers("BLR", low, levels, threshold=5)  # target=10
+    recs = recommend_transfers("BLR", low, levels)  # target = 2 x level 5 = 10
     assert len(recs) == 1
     r = recs[0]
     assert r["from_store"] == "PUN" and r["to_store"] == "BLR"
@@ -37,15 +37,25 @@ def test_recommend_transfers_picks_surplus_store():
 
 
 def test_recommend_transfers_no_surplus_anywhere():
-    low = [{"product_id": "P2", "quantity": 0}]
+    low = [{"product_id": "P2", "quantity": 0, "reorder_point": 5}]
     levels = {"P2": {"BLR": 0, "PUN": 8}}  # PUN excess = 8-10 < 0
-    assert recommend_transfers("BLR", low, levels, threshold=5) == []
+    assert recommend_transfers("BLR", low, levels) == []
 
 
 def test_recommend_transfers_skips_already_sufficient():
-    low = [{"product_id": "P3", "quantity": 12}]  # already above target
+    low = [{"product_id": "P3", "quantity": 12, "reorder_point": 5}]  # already above target
     levels = {"P3": {"BLR": 12, "PUN": 40}}
-    assert recommend_transfers("BLR", low, levels, threshold=5) == []
+    assert recommend_transfers("BLR", low, levels) == []
+
+
+def test_recommend_transfers_refills_toward_the_products_own_level():
+    """No fixed 5: a level-20 product holding 12 is refilled toward 40; a
+    product with no level is never refilled."""
+    low = [{"product_id": "P20", "quantity": 12, "reorder_point": 20},
+           {"product_id": "PX", "quantity": 0, "reorder_point": None}]
+    levels = {"P20": {"BLR": 12, "PUN": 50}, "PX": {"BLR": 0, "PUN": 50}}
+    recs = recommend_transfers("BLR", low, levels)
+    assert [(r["product_id"], r["quantity"]) for r in recs] == [("P20", 10)]  # PUN keeps 40
 
 
 def test_shrinkage_by_custodian_attributes():
