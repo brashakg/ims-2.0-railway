@@ -23,7 +23,8 @@ orders sitting at that shop's location).
                      shop claims and ships its own part (``split``; Q2 allows
                      Shopify's split). Only a leg shop SHORT for its own part
                      is acted on (Q4): its leg moves to a mapped shop holding
-                     it (``_follow_split``), else its claim fails loud at that
+                     it that passes the seller check (``_follow_split``),
+                     else its claim fails loud at that
                      shop -- a leg that holds its units is never touched, and
                      a line IMS does not stock never moves anything. The shop
                      shipping the largest fulfillment order bills it; a leg
@@ -31,8 +32,10 @@ orders sitting at that shop's location).
                      GSTIN holds the order (``seller_problem``, the one seller
                      check), released by Re-map (``reroute_held_order``).
     shipping shop  = otherwise assigned if it covers, else the first MAPPED shop
-                     that covers the whole order (one that passes the seller
-                     check first, then the most stock), else the
+                     that covers the whole order AND passes the seller check
+                     (IMS never moves an order into a hold it creates; the
+                     shop holding the order's own units first on a Re-map,
+                     then the most stock), else the
                      assigned shop (the claim under-claims and
                      shopify_ingest._record_stock_miss holds the order + tasks
                      the shop: fail loud, IMS never splits an order itself).
@@ -219,6 +222,13 @@ def _problem(code: str, message: str) -> Dict[str, str]:
     return {"code": code, "message": message}
 
 
+def _ident(p: Dict[str, Any]) -> tuple:
+    """What a route problem is ABOUT, for "the order already had it" (a human
+    may have closed its task): its code and subject -- a MOVE_FAILED is its
+    fulfillment orders and target shop, never Shopify's wording of the error."""
+    return (p.get("code"), p.get("about") or p.get("message"))
+
+
 def _open_fos(routing: Dict[str, Any]) -> List[Dict[str, Any]]:
     """The fulfillment orders of a routing read that still need shipping --
     what route_order routes on, and what Re-map requires before it touches
@@ -264,11 +274,13 @@ def route_order(
     (``_shopify_split`` + ``_follow_split``). ``held`` (Re-map only:
     ``{product_id: {store_id: n}}``) is the units the order itself holds SOLD
     -- they count as claimable for it, so a Re-map routes without first
-    handing them back to the shelf. On a Re-map (``held`` given) nothing ever
-    moves INTO a shop that fails the seller check (``fits``): the human put
-    the order where Shopify has it, and the order's own unit at another
-    GSTIN's shop must not pull it back there -- a short shop stays short and
-    its claim names the miss.
+    handing them back to the shelf, and a move prefers the shop already
+    holding them (a Re-map retrying a failed move resends it there, never
+    hands the packed unit to another shop) -- one holding more of them than
+    the short assigned shop keeps them even when no shop covers. Nothing
+    ever moves INTO a shop that fails the seller check (``fits``), at booking
+    or Re-map: IMS never creates the hold itself -- a short shop stays short
+    and its claim names the miss.
     Never raises."""
     from .shopify_push.inventory import _mapped
     from .stores_util import physical_stores
@@ -309,7 +321,6 @@ def route_order(
     # The documented fallback counts only when it names an ACTIVE physical shop.
     raw_fallback = fallback_store_id()
     fallback = usable_fallback(shops)
-    strict = held is not None  # a Re-map: never move into a shop failing the seller check
     assigned_loc = None
     assigned = None
     reason = "FALLBACK"
@@ -354,6 +365,10 @@ def route_order(
             stock[pid].get(store_id, 0) >= q for pid, q in need.items()
         )
 
+    def own(store_id: Optional[str]) -> int:
+        """The order's own units held at the shop (Re-map; 0 at booking)."""
+        return sum(((held or {}).get(pid) or {}).get(store_id, 0) for pid in need)
+
     # Q2 + Q4: Shopify itself split the order over several mapped shops. Every
     # shop claims and ships its own part; only a shop SHORT for its own part
     # hands it on (_follow_split) -- a leg that holds its units is never
@@ -365,11 +380,14 @@ def route_order(
     # routing to follow and nothing to move: IMS never guesses a seller from
     # stock counts -- the documented fallback ships it, or no shop does (loud).
     if need and fos and not legs and not covers(assigned) and _relocation_enabled():
-        # A move needs a destination location: only a MAPPED shop can take it;
-        # one that passes the seller check first, then the most stock.
+        # A move needs a destination location: only a MAPPED shop passing the
+        # seller check can take it; one that covers first, then the one
+        # holding the order's own units, then the most stock. None covers: a
+        # shop holding more of its own units than the assigned one keeps them.
         best = sorted(
-            (s for s in mapped if s and s != assigned and covers(s) and (fits(s) or not strict)),
-            key=lambda s: (not fits(s), -sum(stock[pid].get(s, 0) for pid in need)),
+            (s for s in mapped if s and s != assigned and fits(s)
+             and (covers(s) or own(s) > own(assigned))),
+            key=lambda s: (not covers(s), -own(s), -sum(stock[pid].get(s, 0) for pid in need)),
         )
         if best:
             target = best[0]
@@ -386,7 +404,9 @@ def route_order(
                 "hold every unit, so "
                 if fallback
                 else "No fallback shop is set (ONLINE_FULFILLMENT_STORE_ID), so "
-            ) + f"IMS ships it from {target}, a mapped shop that holds every unit."
+            ) + f"IMS ships it from {target}, a mapped shop that " + (
+                "holds every unit." if covers(target) else "already holds some of its units."
+            )
         else:
             ships = "No fallback shop is set (ONLINE_FULFILLMENT_STORE_ID)."
         problems.insert(at, _problem(
@@ -401,7 +421,7 @@ def route_order(
     hold_reason: Optional[str] = None
     if legs:
         home = _gstin(doc_of.get(assigned))  # the largest leg's shop bills
-        ships = _follow_split(legs, pid_of, stock, mapped, lambda t: fits(t, home), strict)
+        ships = _follow_split(legs, pid_of, stock, mapped, lambda t: fits(t, home))
         target = ships[assigned]  # the largest fulfillment order's shop bills
         reason = "ASSIGNED" if target == assigned else "MOVED"
         split = [
@@ -544,16 +564,16 @@ def _shopify_split(fos, shop_of, pid_of, need) -> Optional[Dict[str, Dict[str, i
     return legs if got == need else None
 
 
-def _follow_split(legs, pid_of, stock, mapped, fits, strict=False) -> Dict[str, str]:
+def _follow_split(legs, pid_of, stock, mapped, fits) -> Dict[str, str]:
     """Q4 on Shopify's split: ``{leg shop: the shop that claims and ships
     that leg}``. A leg shop holding its own part ships it. A leg shop SHORT
     for its own part hands the whole leg (its fulfillment orders move) to ONE
-    mapped shop that holds it on top of what that shop already ships -- one
-    that ``fits`` the seller check (its own state's GSTIN, the billing shop's
-    GSTIN) first, then a shop already in the order (Q2: fewest locations),
-    then the most stock -- never INTO a short shop, and with ``strict`` (a
-    Re-map) never into one that fails ``fits``. None does, or relocation is
-    off: the leg stays, and its claim fails loud AT that shop."""
+    mapped shop that holds it on top of what that shop already ships and
+    ``fits`` the seller check (its own state's GSTIN, the billing shop's
+    GSTIN) -- a shop already in the order first (Q2: fewest locations), then
+    the most stock -- never INTO a short shop or one failing ``fits`` (IMS
+    never creates a seller hold itself). None does, or relocation is off: the
+    leg stays, and its claim fails loud AT that shop."""
     want: Dict[str, Dict[str, int]] = {}
     for shop, leg in legs.items():
         w = want.setdefault(shop, {})
@@ -573,13 +593,10 @@ def _follow_split(legs, pid_of, stock, mapped, fits, strict=False) -> Dict[str, 
     for s in sorted(legs, key=lambda s: (-sum(legs[s].values()), s)):
         if holds(s, {}) or not _relocation_enabled():
             continue
-        cands = [t for t in mapped if t and t != s and holds(t, want[s]) and (fits(t) or not strict)]
+        cands = [t for t in mapped if t and t != s and holds(t, want[s]) and fits(t)]
         if not cands:
             continue
-        t = min(
-            cands,
-            key=lambda t: (not fits(t), not load.get(t), -sum(stock[p].get(t, 0) for p in want[s]), t),
-        )
+        t = min(cands, key=lambda t: (not load.get(t), -sum(stock[p].get(t, 0) for p in want[s]), t))
         for p, q in want[s].items():
             load.setdefault(t, {})[p] = load.get(t, {}).get(p, 0) + q
         load[s] = {}
@@ -916,7 +933,7 @@ async def move_fulfillment_orders(db, order_id: str, had=frozenset()) -> Dict[st
     (only PLANNED moves are sent; they are claimed first, so two deliveries of
     the same order never send one move twice). A planned move that is no longer
     wanted (``_stale_move``) is SKIPPED, never sent. ``had`` (Re-map: the
-    ``(code, message)`` problems the order carried before) is never tasked
+    ``_ident`` of each problem the order carried before) is never tasked
     again -- a human may have closed that very task. Never raises."""
     from . import shopify_push
 
@@ -996,7 +1013,7 @@ async def move_fulfillment_orders(db, order_id: str, had=frozenset()) -> Dict[st
         # Name the shop each move was for: on a split leg it is not the
         # order's billing shop (order.store_id), where a human would move it.
         to = ", ".join(sorted({str(m.get("to_store_id") or m.get("to_location_id")) for m in failed}))
-        problem = _problem(
+        problem = {"about": f"{sorted(m['fulfillment_order_id'] for m in failed)} -> {to}", **_problem(
             "MOVE_FAILED",
             f"IMS could not move {len(failed)} fulfillment order(s) to {to}'s "
             f"Shopify location ({failed[0].get('error')}). The order is on hold: "
@@ -1006,7 +1023,7 @@ async def move_fulfillment_orders(db, order_id: str, had=frozenset()) -> Dict[st
             f"sends the move again; or move it to {to}'s location in Shopify admin "
             "yourself (Orders > order > Change location), then clear the hold. "
             "Until then Shopify has it (and the unit it committed) at the other shop.",
-        )
+        )}
         route["problems"] = list(route.get("problems") or []) + [problem]
         route["hold_reason"] = problem["message"]
         # Keep (or put) the order on hold -- unless another hold (a stock
@@ -1031,12 +1048,15 @@ async def move_fulfillment_orders(db, order_id: str, had=frozenset()) -> Dict[st
             _orders(db).update_one({"order_id": order_id, **flt}, upd)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[ONLINE_ROUTE] route write-back failed for %s: %s", order_id, exc)
-    if failed and (problem["code"], problem["message"]) not in had:
+    if failed and _ident(problem) not in had:
         # Only the NEW problem: the booking-time ones were tasked at booking,
         # and a human may already have closed them.
         raise_problem_tasks(db, {**order, "fulfillment_route": {**route, "problems": [problem]}})
     _stock_write_back(db, order)
     return {"moved": len(planned) - len(failed), "failed": len(failed)}
+
+
+_DEAD = ("CANCELLED", "REFUNDED")  # an order nothing ships for any more
 
 
 def _stale_move(order: Dict[str, Any]) -> Optional[str]:
@@ -1050,7 +1070,7 @@ def _stale_move(order: Dict[str, Any]) -> Optional[str]:
     write-back would offer it twice). The short claim is loud on its own
     (stock-miss hold + task at the short shop)."""
     status = str(order.get("status") or "").upper()
-    if status in ("CANCELLED", "REFUNDED"):
+    if status in _DEAD:
         return f"the order is {status}"
     if not order.get("fulfillment_hold"):
         return "the order's hold was cleared, so a human handled it"
@@ -1072,22 +1092,28 @@ _REROUTE_LEASE_SECONDS = 300
 
 
 def _fy(value) -> Optional[int]:
-    """The Indian financial year (its start year, IST) of a stored instant."""
+    """The financial year of a stored instant's IST day, by the invoice
+    allocator's own rule (order_repository.fy_start_year) -- the year whose
+    serial ``reissue_fields`` compares against."""
+    from datetime import datetime
+
+    from database.repositories.order_repository import fy_start_year
+
     from ..utils.ist import ist_date_str_from_stored
 
-    day = ist_date_str_from_stored(value)
     try:
-        year, month = int(day[:4]), int(day[5:7])
+        return fy_start_year(datetime.fromisoformat(ist_date_str_from_stored(value)))
     except (TypeError, ValueError):
         return None
-    return year if month >= 4 else year - 1
 
 
 def invoice_issued(order: Optional[Dict[str, Any]], now) -> Optional[str]:
     """THE ROOT RULE's test (owner, 2026-09-30): why the order's tax invoice
     counts as ISSUED, or None. Issued = printed by the invoice door
     (``invoice_issued_at``, stamped by orders/invoices._assemble_invoice),
-    carrying an e-invoice IRN, or sitting in a filed or fileable GSTR-1
+    carrying an e-invoice IRN or a request for one (``einvoice_requested_at``,
+    stamped by einvoice.generate_irn BEFORE the IRP call: the IRP may register
+    the number whatever IMS hears back), or sitting in a filed or fileable GSTR-1
     period: every GST view files an order its seller check lets through
     (``seller_held`` False) under ``created_at``, and a month's GSTR-1 can be
     filed once the month is over (IST). An issued invoice is NEVER re-billed,
@@ -1102,6 +1128,8 @@ def invoice_issued(order: Optional[Dict[str, Any]], now) -> Optional[str]:
     order = order or {}
     if order.get("irn") or order.get("einvoice_irn"):
         return "it carries an e-invoice IRN"
+    if order.get("einvoice_requested_at"):
+        return "an e-invoice was requested for it"
     if order.get("invoice_issued_at"):
         return "the invoice door has printed it"
     month = ist_date_str_from_stored(order.get("created_at"))[:7]
@@ -1156,19 +1184,44 @@ def _close_tasks(refs: List[str], note: str) -> None:
         logger.warning("[ONLINE_ROUTE] task close skipped for %s: %s", refs, exc)
 
 
-# The order fields Re-map's write is conditioned on: what it read once the
-# lease was held. A cancel, a print, an IRN, a hold release or another
-# Re-map landing in between changes one of them, and the write matches nothing.
-_REMAP_CAS = (
+# The order fields Re-map's and clear-hold's writes are conditioned on: what
+# each read. A cancel, a print, an e-invoice request or IRN, a hold release
+# (clear-hold: rx_pending + fulfillment_hold) or a Re-map landing in between
+# changes one of them, and the other's write matches nothing.
+HOLD_CAS = (
     "status",
     "store_id",
     "invoice_number",
     "stock_hold_reason",
+    "fulfillment_hold",
+    "rx_pending",
     "fulfillment_status",
     "shopify_fulfillment_id",
     "invoice_issued_at",
+    "einvoice_requested_at",
     "irn",
 )
+
+
+def refund_or_return(db, order: Dict[str, Any]) -> Optional[str]:
+    """Why the order's invoice must not be re-billed or re-dated because a
+    refund or return is booked or queued against it (None: none is). A
+    credit note, a return or a refund queued for the accountant
+    (shopify_refund_review) is stamped with the order's shop, invoice and
+    tax head: re-billed or re-dated under it, the credit note would file
+    before its invoice, under another GSTIN or against a superseded number.
+    THE check of Re-map and clear-hold."""
+    sid = str(order.get("shopify_order_id") or "")
+    try:
+        if db.get_collection("returns").count_documents({"order_id": order.get("order_id")}) or (
+            db.get_collection("shopify_refund_review").count_documents(
+                {"$or": [{"order_id": order.get("order_id")}] + ([{"shopify_order_id": sid}] if sid else [])}
+            )
+        ):
+            return "a refund or return is booked or queued against it -- resolve it by hand"
+    except Exception as exc:  # noqa: BLE001 -- unreadable = not provably safe
+        return f"its refunds and returns could not be read ({exc})"
+    return None
 
 
 def _remap_refusal(db, order: Dict[str, Any], took_over: bool) -> Optional[str]:
@@ -1190,20 +1243,7 @@ def _remap_refusal(db, order: Dict[str, Any], took_over: bool) -> Optional[str]:
         return "its booking is still claiming stock -- press Re-map again in a moment"
     if any(m.get("status") == "SENDING" for m in (order.get("fulfillment_route") or {}).get("moves") or []):
         return "a fulfillment-order move for it is on the wire -- press Re-map again in a moment"
-    # A refund queued for the accountant (shopify_refund_review) is stamped
-    # with the order's shop and invoice: re-billed under it, its credit note
-    # would post under the old GSTIN against a superseded number.
-    sid = str(order.get("shopify_order_id") or "")
-    try:
-        if db.get_collection("returns").count_documents({"order_id": order.get("order_id")}) or (
-            db.get_collection("shopify_refund_review").count_documents(
-                {"$or": [{"order_id": order.get("order_id")}] + ([{"shopify_order_id": sid}] if sid else [])}
-            )
-        ):
-            return "a refund or return is booked or queued against it -- resolve it by hand"
-    except Exception as exc:  # noqa: BLE001 -- unreadable = not provably safe
-        return f"its refunds and returns could not be read ({exc})"
-    return None
+    return refund_or_return(db, order)
 
 
 async def reroute_held_order(db, order_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -1214,13 +1254,17 @@ async def reroute_held_order(db, order_id: str, payload: Dict[str, Any]) -> Dict
 
     Takes its lease FIRST, then reads the order and runs every check on it,
     and again after the routing read (``_remap_refusal``); its write is
-    conditioned on what it read (``_REMAP_CAS``). Two presses, or a cancel
-    landing while Shopify answers, never both act.
+    conditioned on what it read (``HOLD_CAS``). Two presses, or a cancel
+    landing while Shopify answers, never both act. A cancel landing after
+    the write (another worker) never keeps a unit Re-map marked SOLD: every
+    unit it put back or claimed is read against the order's status AFTER
+    being marked, and given back if the order is dead (``_DEAD``).
 
     Reads Shopify's routing FRESH (a human may have moved its fulfillment
     orders in Shopify admin), routes it again with THE rule (route_order,
-    counting the units the order holds as its own and never moving it into
-    a shop that fails the seller check), keeps every unit the new route
+    counting the units the order holds as its own, preferring the shop that
+    holds them and never moving it into a shop that fails the seller check),
+    keeps every unit the new route
     still wants where it is (never swapped for another: it may be packed),
     gives back only the units the route no longer wants and claims only what
     is missing with THE claim (shopify_ingest._claim_online_units).
@@ -1236,7 +1280,8 @@ async def reroute_held_order(db, order_id: str, payload: Dict[str, Any]) -> Dict
     ``superseded_invoice_number``).
 
     Tasks: only a problem the order did not have is tasked (its retried move
-    included), a problem is closed only once the move has had its say, and
+    included, by ``_ident``), a problem is closed only once the move has had
+    its say, the booking's stock miss only once the claim came up whole, and
     only a shop that claims a NEW unit is told to ship -- a human may have
     closed the booking's tasks already.
 
@@ -1314,12 +1359,30 @@ async def reroute_held_order(db, order_id: str, payload: Dict[str, Any]) -> Dict
         stock_repo = get_stock_repository()
         find = getattr(get_store_repository(), "find_by_id", None) or (lambda _sid: None)
         freed: List[str] = []
+        kept_ids: List[str] = []  # the units Re-map never gave back
+
+        def undone_by_cancel() -> bool:
+            """The order is dead (a cancel landed while Re-map ran): every
+            unit Re-map marked SOLD for it -- all but ``kept_ids`` -- is given
+            back. Read AFTER the marking: a cancel flipping the status later
+            runs its own release after it, so either way no unit stays SOLD
+            against a cancelled order."""
+            now_status = str((coll.find_one({"order_id": order_id}) or {}).get("status") or "")
+            if now_status.upper() not in _DEAD:
+                return False
+            stock_repo.release_sold_units_for_order(
+                order_id, exclude_stock_ids=kept_ids or None, reason="ORDER_CANCELLED"
+            )
+            return True
 
         def put_back() -> None:
             """The units this Re-map gave back are the order's again -- the
-            very same ones. One a till sold meanwhile is a stock miss, loud."""
+            very same ones, while it is live. One a till sold meanwhile is a
+            stock miss, loud."""
+            if not freed:
+                return
             lost = [sid for sid in freed if not stock_repo.mark_sold(sid, order_id)]
-            if lost:
+            if not undone_by_cancel() and lost:
                 short = sorted({shop_of_unit.get(sid) or "" for sid in lost})
                 _record_stock_miss(db, order_id, short[0], "under_claim",
                                    {"lost_on_remap": lost, "short_stores": short})
@@ -1356,7 +1419,7 @@ async def reroute_held_order(db, order_id: str, payload: Dict[str, Any]) -> Dict
                     f"its tax invoice {order.get('invoice_number')} from {old} is already "
                     f"issued ({issued}), and Shopify's routing would now {change}. An "
                     "issued invoice is never re-billed, re-numbered or re-dated: move its "
-                    f"fulfillment orders back to {old}'s location in Shopify admin (Orders > "
+                    f"fulfillment orders to {old}'s location in Shopify admin (Orders > "
                     "order > Change location) and press Re-map again -- a change of seller "
                     "needs a credit note against this invoice and a new invoice through the "
                     "normal doors"
@@ -1369,10 +1432,11 @@ async def reroute_held_order(db, order_id: str, payload: Dict[str, Any]) -> Dict
                     key = (str(shop), str(ln["product_id"]))
                     want[key] = want.get(key, 0) + int(ln.get("quantity") or 1)
             keep = {k: ids[: want.get(k, 0)] for k, ids in held_ids.items()}
+            kept_ids.extend(sid for ids in keep.values() for sid in ids)
             if sum(map(len, keep.values())) < len(shop_of_unit):
                 given = stock_repo.release_sold_units_for_order(
                     order_id,
-                    exclude_stock_ids=[sid for ids in keep.values() for sid in ids] or None,
+                    exclude_stock_ids=kept_ids or None,
                     reason="ONLINE_REROUTE",
                 )
                 freed.extend(given.released)
@@ -1398,7 +1462,7 @@ async def reroute_held_order(db, order_id: str, payload: Dict[str, Any]) -> Dict
             else:
                 unset["stock_hold_reason"] = ""
             written = coll.update_one(
-                {"order_id": order_id, "reroute_lease_at": mine, **{k: order.get(k) for k in _REMAP_CAS}},
+                {"order_id": order_id, "reroute_lease_at": mine, **{k: order.get(k) for k in HOLD_CAS}},
                 {"$set": update, "$unset": unset},
             )
             if not getattr(written, "matched_count", 0):
@@ -1414,24 +1478,43 @@ async def reroute_held_order(db, order_id: str, payload: Dict[str, Any]) -> Dict
         except Exception as exc:  # noqa: BLE001 -- nothing written: its units are its own again
             put_back()
             return refused(str(exc))
-        try:  # the booking's stock miss is answered by this re-claim
-            db.get_collection("online_stock_miss").update_many(
-                {"order_id": order_id, "resolved": False},
-                {"$set": {"resolved": True, "resolution": "REROUTED", "resolved_at": now.isoformat()}},
-            )
+        misses = db.get_collection("online_stock_miss")
+        try:
+            booked_misses = [r["_id"] for r in misses.find({"order_id": order_id, "resolved": False})]
         except Exception as exc:  # noqa: BLE001
-            logger.warning("[ONLINE_ROUTE] stock-miss close skipped for %s: %s", order_id, exc)
-        done = "Re-mapped: the order was routed and its stock claimed again."
-        _close_tasks([f"online_stock_miss:{order_id}"], done)
+            logger.warning("[ONLINE_ROUTE] stock-miss read skipped for %s: %s", order_id, exc)
+            booked_misses = None
         kept: Dict[str, Dict[str, int]] = {}
         for (shop, pid), ids in keep.items():
             if ids:
                 kept.setdefault(shop, {})[pid] = len(ids)
         breakdown, stores = _claim_online_units(db, order_id, ref, items, route, held=kept)
+        if undone_by_cancel():
+            _close_tasks([f"online_fallback_ship:{order_id}:{s}" for s in stores],
+                         "The order was cancelled while Re-map ran.")
+            _stock_write_back(db, {**order, **update})
+            return refused(
+                "the order was cancelled while Re-map ran -- every unit Re-map "
+                "claimed for it is back on the shelf"
+            )
         coll.update_one(
             {"order_id": order_id},
             {"$set": {"fulfillment_breakdown": breakdown, "fulfillment_stores": stores}},
         )
+        done = "Re-mapped: the order was routed and its stock claimed again."
+        if booked_misses is not None:
+            try:  # the booking's stock miss is answered only by a WHOLE claim
+                short = misses.count_documents(
+                    {"order_id": order_id, "resolved": False, "_id": {"$nin": booked_misses}})
+                misses.update_many(
+                    {"_id": {"$in": booked_misses}},
+                    {"$set": {"resolved": True, "resolution": "SUPERSEDED" if short else "REROUTED",
+                              "resolved_at": now.isoformat()}},
+                )
+                if not short:
+                    _close_tasks([f"online_stock_miss:{order_id}"], done)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[ONLINE_ROUTE] stock-miss close skipped for %s: %s", order_id, exc)
         # A shop that no longer ships a unit of it must not pack one.
         _close_tasks(
             [f"online_fallback_ship:{order_id}:{s}"
@@ -1440,9 +1523,9 @@ async def reroute_held_order(db, order_id: str, payload: Dict[str, Any]) -> Dict
         )
         # Only a problem the order did not have -- the retried move's too: a
         # human may have closed the booking's tasks.
-        had = {(p.get("code"), p.get("message")) for p in old_route.get("problems") or []}
+        had = {_ident(p) for p in old_route.get("problems") or []}
         raise_problem_tasks(db, {**order, **update, "fulfillment_route": {**route, "problems": [
-            p for p in route["problems"] if (p.get("code"), p.get("message")) not in had]}})
+            p for p in route["problems"] if _ident(p) not in had]}})
         if any(m.get("status") == "PLANNED" for m in route.get("moves") or []):
             await move_fulfillment_orders(db, order_id, had)  # writes stock back after the move
         else:

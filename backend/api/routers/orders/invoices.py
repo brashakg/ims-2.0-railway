@@ -277,17 +277,28 @@ def _assemble_invoice(order_id: str, current_user: dict):
         # THE ROOT RULE's print stamp (online_fulfillment_route.invoice_issued):
         # a routed online order's invoice handed out here is ISSUED -- Re-map
         # and clear-hold never re-bill, re-number or re-date it. Unrecorded,
-        # it is not handed out.
+        # it is not handed out. Stamped only on the invoice being printed (its
+        # number and shop as read): a Re-map on another worker that re-billed
+        # the order in between leaves this print unrecorded -- refused, never
+        # an invoice the books list as superseded.
         if isinstance(order.get("fulfillment_route"), dict) and not order.get("invoice_issued_at"):
+            this = {"order_id": order_id, "invoice_number": invoice_number, "store_id": order.get("store_id")}
             try:
                 repo.collection.update_one(
-                    {"order_id": order_id, "invoice_issued_at": None},
+                    {**this, "invoice_issued_at": None},
                     {"$set": {"invoice_issued_at": datetime.now(timezone.utc).isoformat()}},
                 )
+                stamped = repo.collection.find_one({**this, "invoice_issued_at": {"$ne": None}})
             except Exception:  # noqa: BLE001
                 raise HTTPException(
                     status_code=503,
                     detail="Could not record this tax invoice as issued -- try again",
+                )
+            if not stamped:
+                raise HTTPException(
+                    status_code=409,
+                    detail="The order was re-billed while its invoice was being printed "
+                    "-- open it again to print the invoice it carries now.",
                 )
 
         # Convert items to camelCase

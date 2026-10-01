@@ -682,6 +682,41 @@ async def generate_irn(db, order: Dict[str, Any]) -> Dict[str, Any]:
     # ── Build the IRP request payload ────────────────────────────────────
     einvoice_json = _build_einvoice_json(order, seller)
 
+    # THE ROOT RULE (online_fulfillment_route.invoice_issued): a routed online
+    # order is ISSUED from the moment its IRN is requested -- the IRP may
+    # register this number whatever IMS hears back. Recorded BEFORE the call,
+    # and only on the invoice this payload carries (its number and shop as
+    # read): a Re-map that re-billed the order in between is never sent.
+    # ponytail: the request mark stays on a failed call too (stricter, never
+    # looser); clear it by hand if the IRP provably rejected the request.
+    if isinstance(order.get("fulfillment_route"), dict):
+        try:
+            marked = db.get_collection("orders").update_one(
+                {
+                    "order_id": order.get("order_id"),
+                    "invoice_number": order.get("invoice_number"),
+                    "store_id": order.get("store_id"),
+                    "irn": {"$in": [None, ""]},
+                },
+                {"$set": {"einvoice_requested_at": datetime.now(timezone.utc).isoformat()}},
+            )
+            ok = bool(getattr(marked, "matched_count", 0))
+        except Exception:  # noqa: BLE001 -- unrecorded: not sent
+            ok = False
+        if not ok:
+            return {
+                "status": STATUS_FAILED,
+                "irn": None,
+                "ack_no": None,
+                "ack_date": None,
+                "signed_qr": None,
+                "reason": (
+                    "The order changed (re-billed or given an IRN) since it was read, or "
+                    "the request could not be recorded -- request the e-invoice again."
+                ),
+                "einvoice_json": None,
+            }
+
     # ── Call the IRP / GSP ───────────────────────────────────────────────
     try:
         body = await _call_irp(cfg, einvoice_json)

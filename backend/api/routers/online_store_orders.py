@@ -727,7 +727,9 @@ async def clear_rx_hold(
     # Late import: online_store_orders must not import orders at module level.
     from .orders import order_hold_kinds
     from ..services.online_fulfillment_route import (
+        HOLD_CAS,
         invoice_issued,
+        refund_or_return,
         reissue_fields,
         seller_held,
         stored_seller_problem,
@@ -784,6 +786,14 @@ async def clear_rx_hold(
             "seller needs a credit note and a new invoice through the normal doors."
         )
     elif "SELLER" in released:
+        # A credit note, return or queued refund is stamped with the invoice
+        # as booked: re-dated or re-numbered now, the credit note would file
+        # before its invoice (Re-map refuses the same, the one check).
+        why = refund_or_return(db, order)
+        if why:
+            raise HTTPException(
+                status_code=409, detail=f"This seller hold cannot be cleared here: {why}"
+            )
         # The booking split the GST from the shop doc the seller check refused:
         # re-split it against the shop as fixed, the ONE re-split Re-map runs
         # too, so the invoice, GSTR-1/3B and Tally file one tax head.
@@ -804,13 +814,28 @@ async def clear_rx_hold(
         # dated now and filed in this month, numbered in this financial year
         # (THE re-issue rule, Re-map's too).
         update.update(reissue_fields(order, order.get("store_id"), now_dt))
+    # Written only on the order as read (HOLD_CAS, Re-map's own condition):
+    # a Re-map, cancel or print landing on another worker in between would
+    # otherwise be overwritten by a reseal and re-issue against the old shop.
     try:
-        coll.update_one(
-            {"order_id": order_id}, {"$set": update, **({"$unset": unset} if unset else {})}
+        written = coll.update_one(
+            {"order_id": order_id, **{k: order.get(k) for k in HOLD_CAS}},
+            {"$set": update, **({"$unset": unset} if unset else {})},
         )
     except Exception:  # noqa: BLE001 - surface the failure, don't fake success
         raise HTTPException(
             status_code=503, detail="Could not update the order (database error)"
+        )
+    if not getattr(written, "matched_count", 0):
+        void = (
+            f" (invoice serial {update['invoice_number']} drawn for it is void)"
+            if "invoice_number" in update
+            else ""
+        )
+        raise HTTPException(
+            status_code=409,
+            detail="The order changed while the hold was being cleared (re-routed, "
+            f"cancelled or invoiced){void} -- reload it and try again.",
         )
 
     _write_rx_hold_audit(
