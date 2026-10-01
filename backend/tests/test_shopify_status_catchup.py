@@ -67,6 +67,15 @@ def swept(pull, monkeypatch):
     monkeypatch.setattr(returns_router, "get_stock_repository", lambda: stock_repo)
     monkeypatch.setattr(returns_router, "get_order_repository", lambda: _OrderRepo())
     monkeypatch.setattr(deps, "get_db", lambda: _FakeConn(db), raising=False)
+    # System tasks (a blocked restock, a historical order's stock-in) land in
+    # the same FakeDB, assigned from its users.
+    from database.repositories.task_repository import TaskRepository
+    from database.repositories.user_repository import UserRepository
+
+    monkeypatch.setattr(deps, "get_task_repository",
+                        lambda: TaskRepository(db.get_collection("tasks")), raising=False)
+    monkeypatch.setattr(deps, "get_user_repository",
+                        lambda: UserRepository(db.get_collection("users")), raising=False)
     monkeypatch.delenv("SHOPIFY_REFUND_AUTO", raising=False)
 
     refund_calls = []

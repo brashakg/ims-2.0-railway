@@ -359,9 +359,11 @@ async def goods_back_refund_review(
     current_user: dict = Depends(require_roles(*_REVIEW_ROLES)),
 ) -> Dict[str, Any]:
     """The refunded goods physically came back: put them back in stock
-    (shopify_refund.goods_back), before or after the confirm. The money is the
-    confirm's, never this door's. 409 once already done or on a row with no
-    order / a rejected row; 503 when nothing could be put back (press again)."""
+    (shopify_refund.goods_back), before or after the confirm -- on an order
+    imported from Shopify's history, booked and handed to stock-in by a task
+    (status "stock_in"). The money is the confirm's, never this door's. 409
+    once already done or on a row with no order / a rejected row; 503 when
+    nothing could be put back (press again)."""
     db = _get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Refund reviews unavailable (no DB)")
@@ -378,7 +380,7 @@ async def goods_back_refund_review(
     if result["status"] == "duplicate":
         raise HTTPException(status_code=409, detail="The goods of this refund were already put back.")
     _write_audit("SHOPIFY_REFUND_REVIEW_GOODS_BACK", review_id, row, result, current_user)
-    if result["status"] != "restocked":
+    if result["status"] not in ("restocked", "stock_in"):
         raise HTTPException(
             status_code=503,
             detail=(

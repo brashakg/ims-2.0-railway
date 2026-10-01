@@ -1445,16 +1445,17 @@ def test_confirm_door_does_not_restock_twice_on_a_re_confirm(monkeypatch):
 
 
 def test_webhook_door_on_stampless_order_mints_nothing_on_the_online_store(monkeypatch):
-    """Historical import (no fulfilment stamp) + SYSTEM caller (no processing
-    store) + no configured fallback -> restock NOTHING, and the persisted doc
-    must not claim the units went to the online store."""
+    """No fulfilment stamp + SYSTEM caller (no processing store) + no
+    configured fallback -> restock NOTHING, and the persisted doc must not
+    claim the units went to the online store. (A historical import never
+    restocks at all: test_online_order_status's stock-in task.)"""
     from api.services import shopify_refund as sr
 
-    # historical: our own order-history import claimed no stock rows, so the
-    # SOLD-unit cap exempts it and THIS guard is what stops the mint.
-    order = dict(_ONLINE_ORDER, order_id="ORD-ONL-7", historical=True)
+    order = dict(_ONLINE_ORDER, order_id="ORD-ONL-7")
+    sold = {"stock_id": "STK-ONL-7", "product_id": "PRD-1", "store_id": PHYSICAL_FULFILMENT_STORE,
+            "status": "SOLD", "order_id": "ORD-ONL-7"}
     ctx = _build_ctx(
-        monkeypatch, order=order, stock_units=[], active_store=PHYSICAL_COUNTER_STORE
+        monkeypatch, order=order, stock_units=[dict(sold)], active_store=PHYSICAL_COUNTER_STORE
     )
     returns_coll = ctx["returns_coll"]
 
@@ -1481,7 +1482,7 @@ def test_webhook_door_on_stampless_order_mints_nothing_on_the_online_store(monke
                      "lines": []},
         restock_store=sr._proposed_restock_store_for_order(order),
     )
-    assert ctx["stock_repo"].units == []
+    assert ctx["stock_repo"].units == [sold]
     assert out["restock_applied"] is False
     assert out["restock_store_id"] is None
     doc = [d for d in returns_coll.docs if d.get("shopify_refund_id") == "RF-7001"][0]

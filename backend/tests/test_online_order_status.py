@@ -1081,6 +1081,13 @@ def test_a_blip_in_the_sold_read_at_the_confirm_leaves_the_restock_open(swept, m
     assert _units(swept) == [("stk-1", "SOLD")]
     ret = swept["returns"].find_one({"shopify_refund_id": "700360"})
     assert ret["restock_applied"] is False, "open, so the retry door can run"
+    # The task states the real cause and ONE action -- never "add them by hand
+    # and re-run": the re-run reactivates the still-SOLD unit (two rows, one frame).
+    [task] = swept["db"]["tasks"].find({"source_ref": f"return_restock_blocked:{ret['return_id']}"})
+    text = task["description"]
+    assert "could not read this order's SOLD units or its earlier returns" in text
+    assert "press Goods back" in text and "Never add these units by hand" in text
+    assert "no physical shop" not in text and "add them at the receiving shop" not in text
     out = asyncio.run(returns_router.retry_restock(ret["return_id"], current_user=_ACCT))
     assert out["restock_applied"] is True and _units(swept) == [("stk-1", "AVAILABLE")]
 
@@ -1200,12 +1207,17 @@ def test_a_restock_retry_that_cannot_read_the_stock_restocks_nothing(swept, monk
     assert _units(swept) == [("stk-1", "AVAILABLE")]
 
 
-# P1 phantom unit. Our own Shopify order-history import (historical, DELIVERED)
-# never claimed a stock row, so no SOLD unit guards its restock: every restock
-# MINTS a unit. Goods back, the accountant's confirm, the AUTO post and the
-# /returns/{id}/restock retry each restock the same refunded frame; every one
-# books the refund's mark on the order line first (_restock_booked), so one
-# frame is one AVAILABLE row whichever doors run, in either order.
+# Our own Shopify order-history import (historical, DELIVERED) predates IMS
+# stock: no SOLD unit guards its restock, and every phantom frame came from a
+# door minting one. So no door ever adds a stock row for it (owner 2026-10-01).
+# Goods back, the accountant's confirm, the AUTO post and the /returns/{id}/
+# restock retry book the refund's units on the order line as for every order
+# (_restock_booked), and the booking raises ONE task for the receiving shop's
+# store manager to add the frame through stock-in. A booking is taken once, so
+# one frame is one task whichever doors run, in either order.
+
+
+_MANAGER = "u-mgr-ganga"
 
 
 def _historical_refund(swept, monkeypatch, oid, rid, ims_product_id=None, **order_set):
@@ -1214,6 +1226,9 @@ def _historical_refund(swept, monkeypatch, oid, rid, ims_product_id=None, **orde
         order_set["items"] = [{**doc["items"][0], "ims_product_id": ims_product_id}]
     _set(swept, oid, historical=True, import_source="shopify_order_history",
          fulfillment_stores=["BV-GANGA-01"], **order_set)
+    if not swept["db"]["users"].find_one({"user_id": _MANAGER}):
+        swept["db"]["users"].insert_one({"user_id": _MANAGER, "roles": ["STORE_MANAGER"],
+                                         "is_active": True, "store_ids": ["BV-GANGA-01"]})
     shopify_refund.handle_shopify_refund(swept["db"], _refund(rid, oid, restock_type="return"),
                                          webhook_id=None, topic="refunds/create")
     return swept["review"].find_one({"shopify_refund_id": str(rid)})
@@ -1223,38 +1238,62 @@ def _minted(swept):
     return sorted(u["status"] for u in swept["stock_repo"].units)
 
 
+def _stock_in(swept, oid):
+    """The stock-in tasks a historical order's bookings raised."""
+    return list(swept["db"]["tasks"].find(
+        {"order_id": _doc(swept, oid)["order_id"], "task_type": "historical_stock_in"}))
+
+
+def _premark(monkeypatch):
+    """A restock as it ran before the order-line marks (every refund confirmed
+    on main): no booking, so a historical frame is minted. Returns the undo."""
+    real = shopify_refund._restock_booked
+    monkeypatch.setattr(shopify_refund, "_restock_booked",
+                        lambda order, lines, rid, restock, **kw: restock(lines))
+    return lambda: monkeypatch.setattr(shopify_refund, "_restock_booked", real)
+
+
 @pytest.mark.parametrize("goods_first", [True, False])
-def test_one_frame_of_a_historical_order_is_one_unit_goods_back_and_confirm(swept, monkeypatch, goods_first):
-    row = _historical_refund(swept, monkeypatch, 60180 + goods_first, 700380 + goods_first,
-                             status="DELIVERED")
+def test_one_frame_of_a_historical_order_is_one_stock_in_task_goods_back_and_confirm(swept, monkeypatch,
+                                                                                     goods_first):
+    oid = 60180 + goods_first
+    row = _historical_refund(swept, monkeypatch, oid, 700380 + goods_first, status="DELIVERED")
     assert row["status"] == "PENDING" and [line["restock"] for line in row["proposed_restock"]] == [True]
     doors = [lambda: _goods_back(row), lambda: _confirm(row)]
     for door in (doors if goods_first else doors[::-1]):
         door()
-    assert _minted(swept) == ["AVAILABLE"], "one frame, one unit"
+    assert _minted(swept) == [], "IMS adds no stock row for a historical frame"
+    [task] = _stock_in(swept, oid)
+    assert (task["assigned_to"], task["store_id"], task["status"]) == (_MANAGER, "BV-GANGA-01", "OPEN")
+    assert "add each frame" in task["description"] and "stock-in" in task["description"]
+    assert "re-run" not in task["description"]
+    line = _doc(swept, oid)["items"][0]
+    assert (line.get("returned_qty"), line.get("restocked_refunds")) == (1, {str(700380 + goods_first): 1})
     assert swept["ledger"].count_documents({}) == 1
 
 
 @pytest.mark.parametrize("goods_first", [True, False])
-def test_one_frame_of_a_historical_order_is_one_unit_goods_back_and_retry(swept, monkeypatch, goods_first):
-    row = _historical_refund(swept, monkeypatch, 60182 + goods_first, 700382 + goods_first,
-                             status="DELIVERED")
-    real = returns_router._restock_good_items
-    monkeypatch.setattr(returns_router, "_restock_good_items", lambda *a, **kw: {"applied": False})
-    assert _confirm(row)["result"]["restock_applied"] is False, "the confirm's restock did not land"
-    monkeypatch.setattr(returns_router, "_restock_good_items", real)
-    ret = swept["returns"].find_one({"shopify_refund_id": str(700382 + goods_first)})
+def test_one_frame_of_a_historical_order_is_one_stock_in_task_goods_back_and_retry(swept, monkeypatch,
+                                                                                  goods_first):
+    oid, rid = 60182 + goods_first, 700382 + goods_first
+    row = _historical_refund(swept, monkeypatch, oid, rid, status="DELIVERED")
+    real = returns_router._returns_coll
+    blip = _ScanFailsOnce(real())
+    monkeypatch.setattr(returns_router, "_returns_coll", lambda: blip)
+    assert _confirm(row)["result"]["restock_applied"] is False, "its returns could not be read"
+    monkeypatch.setattr(returns_router, "_returns_coll", real)
+    ret = swept["returns"].find_one({"shopify_refund_id": str(rid)})
     doors = [lambda: _goods_back(row), lambda: _retry(ret)]
     for door in (doors if goods_first else doors[::-1]):
         door()
-    assert _minted(swept) == ["AVAILABLE"], "one frame, one unit"
+    assert _minted(swept) == [] and len(_stock_in(swept, oid)) == 1, "one frame, one task"
 
 
 def test_a_refund_restocks_its_line_once_even_when_another_refund_left_a_unit_out(swept, monkeypatch):
     """Two frames on one line: refund R2 is money only (the customer keeps a
     frame), refund R1's frame comes back through Goods back. The line still
     has a unit out with the buyer, so only R1's own mark on the line stops
-    R1's confirm restocking its frame a second time."""
+    R1's confirm booking its frame a second time (a second stock-in task)."""
     oid = 60185
     _book(swept, oid, line_items=[{**_frame_order(oid)["line_items"][0], "quantity": 2}])
     _set(swept, oid, historical=True, import_source="shopify_order_history",
@@ -1266,42 +1305,42 @@ def test_a_refund_restocks_its_line_once_even_when_another_refund_left_a_unit_ou
     row = swept["review"].find_one({"shopify_refund_id": "700385"})
     _goods_back(row)
     _confirm(swept["review"].find_one({"shopify_refund_id": "700385"}))
-    assert _minted(swept) == ["AVAILABLE"], "one frame back, one unit"
+    assert _minted(swept) == [] and len(_stock_in(swept, oid)) == 1, "one frame back, one task"
 
 
-def test_one_frame_of_a_historical_order_is_one_unit_auto_then_goods_back(swept, monkeypatch):
-    """AUTO restocked it but could not issue the credit (no customer): the
+def test_one_frame_of_a_historical_order_is_one_stock_in_task_auto_then_goods_back(swept, monkeypatch):
+    """AUTO booked it but could not issue the credit (no customer): the
     NO_CUSTOMER row still offers Goods back."""
     monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "1")
     row = _historical_refund(swept, monkeypatch, 60184, 700384, status="COMPLETED", customer_id=None)
-    assert row["status"] == "NO_CUSTOMER" and _minted(swept) == ["AVAILABLE"]
+    assert row["status"] == "NO_CUSTOMER" and _minted(swept) == []
+    assert len(_stock_in(swept, 60184)) == 1
     _goods_back(row)
-    assert _minted(swept) == ["AVAILABLE"], "one frame, one unit"
+    assert _minted(swept) == [] and len(_stock_in(swept, 60184)) == 1, "one frame, one task"
 
 
 @pytest.mark.parametrize("ims_product_id", [None, "IMS-P-1"])
 def test_goods_back_on_a_row_confirmed_before_the_line_marks_restocks_nothing(swept, monkeypatch,
                                                                              ims_product_id):
     """A row the accountant confirmed before the restock marked the order line
-    (the deploy of this rule) carries no mark and no returned_qty, but its own
-    returns doc says what its restock put back. Goods back, new on that row,
-    reads it: a historical order has no SOLD unit to stop a second mint. The
-    doc's rows carry the IMS product id; the order line keeps Shopify's
-    product_id beside its ims_product_id, and the count reads the IMS one."""
+    (every refund confirmed on main) carries no mark and no returned_qty, but
+    its own returns doc says what its restock put back. Goods back, new on
+    that row, reads it: no second frame for one (a mint then, a stock-in task
+    now). The doc's rows carry the IMS product id; the order line keeps
+    Shopify's product_id beside its ims_product_id, and the count reads the
+    IMS one."""
     oid = 60187
     row = _historical_refund(swept, monkeypatch, oid, 700387, ims_product_id=ims_product_id,
                              status="DELIVERED")
+    undo = _premark(monkeypatch)
     _confirm(row)
+    undo()
     assert _minted(swept) == ["AVAILABLE"]
     ret = swept["returns"].find_one({"shopify_refund_id": "700387"})
     assert [r["product_id"] for r in ret["restocked"]] == [ims_product_id or "7001"]
-    items = _doc(swept, oid)["items"]
-    for item in items:
-        item.pop("returned_qty", None)
-        item.pop("restocked_refunds", None)
-    _set(swept, oid, items=items)
+    assert not _doc(swept, oid)["items"][0].get("restocked_refunds")
     _goods_back(swept["review"].find_one({"review_id": row["review_id"]}))
-    assert _minted(swept) == ["AVAILABLE"], "one frame, one unit"
+    assert _minted(swept) == ["AVAILABLE"] and _stock_in(swept, oid) == [], "one frame, one unit"
 
 
 def _same_line_twice(rid, oid):
@@ -1345,23 +1384,24 @@ class _WriteDown:
 
 @pytest.mark.parametrize("orders", [_WriteDown(), None], ids=["write_errors", "no_collection"])
 def test_a_restock_the_order_line_could_not_book_restocks_nothing(swept, monkeypatch, orders):
-    """The booking cannot be written: the restock goes ahead unbooked no
-    longer (the mark is all that stops the confirm minting the same
-    historical frame again). Nothing is put back, the press is released, and
-    a press once the write works puts the frame back once."""
+    """The booking cannot be written: nothing goes ahead unbooked (the mark is
+    all that stops the confirm handing the same historical frame to stock-in
+    again). No task, the press is released, and a press once the write works
+    books the frame once."""
     from fastapi import HTTPException
 
-    row = _historical_refund(swept, monkeypatch, 60191, 700391, ims_product_id="IMS-P-1",
+    oid = 60191
+    row = _historical_refund(swept, monkeypatch, oid, 700391, ims_product_id="IMS-P-1",
                              status="DELIVERED")
     real = returns_router._orders_coll
     monkeypatch.setattr(returns_router, "_orders_coll", lambda: orders)
     with pytest.raises(HTTPException) as first:
         _goods_back(row)
-    assert first.value.status_code == 503 and _minted(swept) == []
+    assert first.value.status_code == 503 and _stock_in(swept, oid) == []
     monkeypatch.setattr(returns_router, "_orders_coll", real)
-    assert _goods_back(row)["result"]["status"] == "restocked"
+    assert _goods_back(row)["result"]["status"] == "stock_in"
     _confirm(swept["review"].find_one({"review_id": row["review_id"]}))
-    assert _minted(swept) == ["AVAILABLE"], "one frame, one unit"
+    assert _minted(swept) == [] and len(_stock_in(swept, oid)) == 1, "one frame, one task"
 
 
 def test_a_booking_that_errors_part_way_releases_the_line_it_booked(monkeypatch):
@@ -1571,16 +1611,16 @@ class _RaisesBeforeTheWrite(_CommitsThenRaises):
 
 
 def test_a_booking_that_did_not_land_never_reads_another_doors_booking_as_its_own(swept, monkeypatch):
-    """A door read the order, then Goods back booked and put the frame back,
-    then the door's own booking failed without landing. The read-back
-    compared the line's mark with the door's stale read: Goods back's unit
-    read as its own, and the door minted the historical frame a second
-    time. Each attempt now looks for its own token on the line."""
+    """A door read the order, then Goods back booked the frame, then the
+    door's own booking failed without landing. The read-back compared the
+    line's mark with the door's stale read: Goods back's unit read as its own,
+    and the door put the historical frame back a second time. Each attempt
+    now looks for its own token on the line."""
     oid, rid = 60198, 700398
     row = _historical_refund(swept, monkeypatch, oid, rid, ims_product_id="IMS-P-1", status="DELIVERED")
     stale = copy.deepcopy(_doc(swept, oid))
     lines = shopify_refund._return_lines_from_proposed(row["proposed_restock"])
-    assert _goods_back(row)["result"]["status"] == "restocked" and _minted(swept) == ["AVAILABLE"]
+    assert _goods_back(row)["result"]["status"] == "stock_in"
 
     down = _RaisesBeforeTheWrite(returns_router._orders_coll())
     monkeypatch.setattr(returns_router, "_orders_coll", lambda: down)
@@ -1589,7 +1629,7 @@ def test_a_booking_that_did_not_land_never_reads_another_doors_booking_as_its_ow
         shopify_refund._restock_booked(stale, lines, str(rid), lambda ls: returns_router._restock_good_items(
             ls, stale["store_id"], "RET-X", order_id=stale["order_id"], user_id="u",
             processing_store_id=None, order=stale))
-    assert _minted(swept) == ["AVAILABLE"], "one frame, one unit"
+    assert _minted(swept) == [] and len(_stock_in(swept, oid)) == 1, "one frame, one task"
     line = _doc(swept, oid)["items"][0]
     assert (line.get("returned_qty"), line.get("restocked_refunds")) == (1, {str(rid): 1})
 
@@ -1852,28 +1892,149 @@ class _ScanFailsOnce:
 def test_goods_back_on_a_premark_row_restocks_nothing_while_the_returns_scan_blips(swept, monkeypatch):
     """A row confirmed before the line marks (every refund confirmed on main)
     has only its own returns doc to say its restock minted the frame. The
-    scan failing read as nothing back: Goods back minted it a second time
-    (a historical order has no SOLD unit to stop it)."""
+    scan failing read as nothing back: Goods back put it back a second time."""
     from fastapi import HTTPException
 
     oid = 60201
     row = _historical_refund(swept, monkeypatch, oid, 700401, status="DELIVERED")
+    undo = _premark(monkeypatch)
     _confirm(row)
+    undo()
     assert _minted(swept) == ["AVAILABLE"]
-    items = _doc(swept, oid)["items"]
-    for item in items:
-        item.pop("returned_qty", None)
-        item.pop("restocked_refunds", None)
-    _set(swept, oid, items=items)
     blip = _ScanFailsOnce(returns_router._returns_coll())
     monkeypatch.setattr(returns_router, "_returns_coll", lambda: blip)
     posted = swept["review"].find_one({"review_id": row["review_id"]})
     with pytest.raises(HTTPException) as first:
         _goods_back(posted)
     assert first.value.status_code == 503 and blip.failed
-    assert _minted(swept) == ["AVAILABLE"], "one frame, one unit"
     _goods_back(posted)
-    assert _minted(swept) == ["AVAILABLE"], "one frame, one unit"
+    assert _minted(swept) == ["AVAILABLE"] and _stock_in(swept, oid) == [], "one frame, one unit"
+
+
+def _two_frame_refund(swept, oid, rid, **order_set):
+    """A line of two frames and ONE refund "return" line of both."""
+    _book(swept, oid, line_items=[{**_frame_order(oid)["line_items"][0], "quantity": 2}])
+    if order_set:
+        _set(swept, oid, **order_set)
+    refund = _refund(rid, oid, restock_type="return", amount="1998.00")
+    refund["refund_line_items"][0]["quantity"] = 2
+    shopify_refund.handle_shopify_refund(swept["db"], refund, webhook_id=None, topic="refunds/create")
+    return swept["review"].find_one({"shopify_refund_id": str(rid)})
+
+
+def _create_fails_after(monkeypatch, repo, n):
+    real, calls = repo.create, []
+
+    def flaky(data):
+        calls.append(data)
+        if len(calls) > n:
+            raise RuntimeError("stock insert failed")
+        return real(data)
+
+    monkeypatch.setattr(repo, "create", flaky)
+    return lambda: monkeypatch.setattr(repo, "create", real)
+
+
+def _premark_one_of_two(swept, monkeypatch, row):
+    """The confirm as it ran before the marks, landing one of the two frames
+    (a mint) and leaving the restock open."""
+    undo, undo_create = _premark(monkeypatch), _create_fails_after(monkeypatch, swept["stock_repo"], 1)
+    real = returns_router._reactivate_original_unit
+    monkeypatch.setattr(returns_router, "_reactivate_original_unit", lambda *a, **kw: None)
+    assert _confirm(row)["result"]["restock_applied"] is False
+    monkeypatch.setattr(returns_router, "_reactivate_original_unit", real)
+    undo()
+    undo_create()
+
+
+def test_a_premark_unit_and_a_booked_one_are_two_units_on_a_historical_order(swept, monkeypatch):
+    """Panel P1(b). A confirm before the marks put one of two frames back
+    and left the restock open; the retry books the other. Its doc's unit was
+    never booked, so the larger of doc and mark read 1 of 2 back: Goods back
+    then booked a third frame. The retry also wrote its own rows over the
+    doc's, and the first frame left the doc that counts it. Two frames: the
+    one unit the old confirm minted, and one stock-in task for the other."""
+    oid, rid = 60206, 700406
+    row = _two_frame_refund(swept, oid, rid, historical=True, import_source="shopify_order_history",
+                            fulfillment_stores=["BV-GANGA-01"], status="DELIVERED")
+    _premark_one_of_two(swept, monkeypatch, row)
+    assert _minted(swept) == ["AVAILABLE"]
+    ret = swept["returns"].find_one({"shopify_refund_id": str(rid)})
+    assert _retry(ret)["stock_in_task"]
+    assert [r.get("minted") for r in swept["returns"].find_one({"shopify_refund_id": str(rid)})["restocked"]] == [1]
+    _goods_back(swept["review"].find_one({"review_id": row["review_id"]}))
+    assert _minted(swept) == ["AVAILABLE"]
+    [task] = _stock_in(swept, oid)
+    assert task["title"].endswith("add 1 returned frame(s) through stock-in")
+
+
+def test_a_premark_unit_and_a_booked_one_are_two_units(swept, monkeypatch):
+    """The same on a live order whose pre-mark confirm minted one frame while
+    both SOLD units stayed SOLD (the SOLD cap then does not stop it): the
+    retry reactivates one, and Goods back finds both frames back."""
+    oid, rid = 60207, 700407
+    doc = _book(swept, oid, line_items=[{**_frame_order(oid)["line_items"][0], "quantity": 2}])
+    _claim_unit(swept, doc)
+    swept["stock_repo"].units.append({**swept["stock_repo"].units[0], "stock_id": "stk-2"})
+    refund = _refund(rid, oid, restock_type="return", amount="1998.00")
+    refund["refund_line_items"][0]["quantity"] = 2
+    shopify_refund.handle_shopify_refund(swept["db"], refund, webhook_id=None, topic="refunds/create")
+    row = swept["review"].find_one({"shopify_refund_id": str(rid)})
+    _premark_one_of_two(swept, monkeypatch, row)
+    _retry(swept["returns"].find_one({"shopify_refund_id": str(rid)}))
+    _goods_back(swept["review"].find_one({"review_id": row["review_id"]}))
+    units = sorted((u["stock_id"], u["status"]) for u in swept["stock_repo"].units)
+    assert units == [("stk-1", "AVAILABLE"), ("stk-2", "SOLD"), ("stk-mint-1", "AVAILABLE")],         "two frames back, two AVAILABLE rows"
+
+
+def test_a_redrive_keeps_the_units_an_earlier_attempt_put_back(swept, monkeypatch):
+    """A guest refund's confirm cannot issue the credit (no customer), so the
+    row stays confirmable and the next confirm re-drives it. The first one
+    (before the marks) put one of two frames back; the re-drive books the
+    other. It wrote its rows over the doc's: the first frame left the doc
+    that counts it, and Goods back put it back a second time."""
+    from fastapi import HTTPException
+
+    oid, rid = 60209, 700409
+    doc = _book(swept, oid, line_items=[{**_frame_order(oid)["line_items"][0], "quantity": 2}])
+    _claim_unit(swept, doc)
+    swept["stock_repo"].units.append({**swept["stock_repo"].units[0], "stock_id": "stk-2"})
+    _set(swept, oid, customer_id=None)
+    refund = _refund(rid, oid, restock_type="return", amount="1998.00")
+    refund["refund_line_items"][0]["quantity"] = 2
+    shopify_refund.handle_shopify_refund(swept["db"], refund, webhook_id=None, topic="refunds/create")
+    row = swept["review"].find_one({"shopify_refund_id": str(rid)})
+    undo, undo_create = _premark(monkeypatch), _create_fails_after(monkeypatch, swept["stock_repo"], 1)
+    real = returns_router._reactivate_original_unit
+    monkeypatch.setattr(returns_router, "_reactivate_original_unit", lambda *a, **kw: None)
+    with pytest.raises(HTTPException):
+        _confirm(row)
+    monkeypatch.setattr(returns_router, "_reactivate_original_unit", real)
+    undo()
+    undo_create()
+    with pytest.raises(HTTPException):
+        _confirm(swept["review"].find_one({"review_id": row["review_id"]}))
+    ret = swept["returns"].find_one({"shopify_refund_id": str(rid)})
+    assert sorted(r.get("minted", 0) for r in ret["restocked"]) == [0, 1]
+    _goods_back(swept["review"].find_one({"review_id": row["review_id"]}))
+    units = sorted((u["stock_id"], u["status"]) for u in swept["stock_repo"].units)
+    assert units == [("stk-1", "AVAILABLE"), ("stk-2", "SOLD"), ("stk-mint-1", "AVAILABLE")],         "two frames back, two AVAILABLE rows"
+
+
+def test_a_stampless_historical_frame_goes_to_the_retrying_shops_manager(swept, monkeypatch):
+    """Our history import never ran the stock decrement, so it carries no
+    fulfilment stamp: the retry names the shop the restock router picks for
+    it (the retrying person's own shop) and that shop's store manager."""
+    oid, rid = 60210, 700410
+    row = _historical_refund(swept, monkeypatch, oid, rid, status="DELIVERED")
+    _set(swept, oid, fulfillment_stores=None)
+    blip = _ScanFailsOnce(returns_router._returns_coll())
+    monkeypatch.setattr(returns_router, "_returns_coll", lambda: blip)
+    assert _confirm(row)["result"]["restock_applied"] is False
+    out = _retry(swept["returns"].find_one({"shopify_refund_id": str(rid)}))
+    assert out["restock_applied"] is True and "stock-in" in out["message"]
+    [task] = _stock_in(swept, oid)
+    assert (task["store_id"], task["assigned_to"]) == ("BV-GANGA-01", _MANAGER)
 
 
 class _CommitsThenReadDown(_CommitsThenRaises):

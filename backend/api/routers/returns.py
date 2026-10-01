@@ -404,10 +404,10 @@ def _already_returned_qty(
     """The quantities the `returns` docs say were ALREADY returned for one
     (order, line): (the counter's, {Shopify refund id: that refund's}).
     `own_shopify_refund_id`: that Shopify refund's own doc (the refund handler
-    asks while it holds its claim doc) counts only the units its restock
-    already put back on THIS line (_own_restock_share), never the lines it
-    claims -- a row confirmed before the order-line marks
-    (shopify_refund._restock_booked) has nothing else to say it restocked.
+    asks while it holds its claim doc) counts only the units its restock put
+    back on THIS line before the order-line marks existed
+    (_own_restock_share), never the lines it claims -- such a row has nothing
+    else to say it restocked.
 
     A line is identified by its original order `item_id` when known, otherwise
     by `product_id`. We scan the return docs for the same order and add up
@@ -416,7 +416,7 @@ def _already_returned_qty(
     claim is the second guard). None when the docs cannot be read: an
     unreadable answer is NO answer, never nothing back -- a refund confirmed
     before the marks has only its doc to say it restocked, and reading it as
-    nothing restocks (on a historical order, mints) its unit a second time.
+    nothing restocks its unit a second time.
     """
     counter: float = 0.0
     refunds: Dict[str, float] = {}
@@ -465,13 +465,16 @@ def _own_restock_share(
     doc: Dict[str, Any], item_id: Optional[str], product_id: Optional[str]
 ) -> float:
     """The units a Shopify refund's own doc says its restock put back on ONE
-    order line. Its `restocked` rows count landed units per PRODUCT; they are
+    order line WITHOUT booking them on it: its `restocked` rows written before
+    the line marks. A row a booked restock wrote (shopify_refund._restock_booked
+    tags it `booked`) is already in the refund's mark on the line, so it is
+    never counted twice. The rows count landed units per PRODUCT; they are
     shared out over the doc's own restock lines of that product, in order, so
     a second line of the same product (a no_restock one, or one whose unit
     did not land) is never counted for a unit another line took."""
     pool: Dict[str, float] = {}
     for row in doc.get("restocked") or []:
-        if isinstance(row, dict):
+        if isinstance(row, dict) and not row.get("booked"):
             pid = str(row.get("product_id"))
             pool[pid] = pool.get(pid, 0.0) + float(row.get("reactivated") or 0) + float(
                 row.get("minted") or 0)
@@ -499,10 +502,12 @@ def _units_already_back(
     restocked_refunds {refund id: units} is what each Shopify refund's restock
     booked -- Goods back books it before the refund has any doc. The counter's
     units are the larger of its docs and its share of returned_qty (a counter
-    return books both, a legacy one only the doc); each refund's the larger of
-    its doc and its booking (a refund confirmed before the marks, or a money-
-    only one, has only the doc). The counter return door and every Shopify
-    restock cap read it. A line is matched to the docs' rows by its IMS
+    return books both, a legacy one only the doc); each other refund's the
+    larger of its doc and its booking (a money-only one has only the doc);
+    `own_shopify_refund_id`'s its booking PLUS what its doc put back before
+    the marks (_own_restock_share): those units were never booked, so the
+    larger of the two counted one door's units for both. The counter return
+    door and every Shopify restock cap read it. A line is matched to the docs' rows by its IMS
     product id: an online order line keeps Shopify's product_id beside its
     ims_product_id, and every return row carries the IMS one. Returns (every
     unit back, the part of it that is `own_shopify_refund_id`'s restock); None
@@ -518,9 +523,10 @@ def _units_already_back(
     counter, refunds = docs
     booked = {str(r): float(q or 0) for r, q in (orig_line.get("restocked_refunds") or {}).items()}
     counter = max(counter, float(orig_line.get("returned_qty") or 0) - sum(booked.values()))
-    each = {r: max(refunds.get(r, 0.0), booked.get(r, 0.0)) for r in {*refunds, *booked}}
-    return (round(counter + sum(each.values()), 4),
-            round(each.get(str(own_shopify_refund_id or ""), 0.0), 4))
+    own = str(own_shopify_refund_id or "")
+    each = {r: (refunds.get(r, 0.0) + booked.get(r, 0.0)) if r == own
+            else max(refunds.get(r, 0.0), booked.get(r, 0.0)) for r in {*refunds, *booked}}
+    return (round(counter + sum(each.values()), 4), round(each.get(own, 0.0), 4))
 
 
 def _orders_coll():
@@ -1974,14 +1980,30 @@ def _restock_intent_rows(units: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return list(per_line.values())
 
 
+def _merge_restocked(prior: Any, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """A return doc's `restocked` after another restock of it: the rows of
+    every unit an earlier attempt put back, then this attempt's rows. Written
+    over, the earlier units left the doc that counts a refund's restock
+    (_own_restock_share), and the next door restocked them again."""
+    kept = [r for r in prior or []
+            if isinstance(r, dict) and (r.get("reactivated") or r.get("minted"))]
+    return kept + list(rows or [])
+
+
 def _raise_restock_blocked_task(
     return_id: str,
     order_id: Optional[str],
     store_id: Optional[str],
     units: List[Dict[str, Any]],
     processing_store_id: Optional[str] = None,
+    unread: Optional[str] = None,
 ) -> None:
-    """Put a BLOCKED restock in front of a human.
+    """Put a BLOCKED restock in front of a human, with its real cause and ONE
+    action. `unread`: what IMS could not read just now (the order, its SOLD
+    units, its earlier returns) -- a blip, so the action is to re-run the
+    restock, which reads again; None: no physical shop could be resolved.
+    Never "add them by hand and re-run": the re-run puts back a unit already
+    added by hand (two stock rows for one frame).
 
     Without this the fail-loud branch is one Railway log line while real goods
     sit on the counter with no stock row -- developer-only recovery on a live
@@ -2001,18 +2023,26 @@ def _raise_restock_blocked_task(
                 }
             )
         )
+        if unread:
+            cause = (f"IMS could not read {unread} just now, so it put nothing "
+                     "back rather than guess")
+            action = ("re-run the restock once IMS reads again - press Goods back "
+                      "on its refund in Online Store > Refund reviews, or ask the "
+                      "IMS admin to retry it; IMS then puts each unit back once")
+        else:
+            cause = (f"the order bills to the online store {store_id}, which holds "
+                     "no stock, and no physical shop could be resolved to receive them")
+            action = ("ask the IMS admin to set the shop that receives online "
+                      "returns (ONLINE_FULFILLMENT_STORE_ID) and retry the restock "
+                      "of this return")
         create_system_task(
             get_task_repository(),
             title=f"Return {return_id}: {len(units)} unit(s) NOT back in stock",
             description=(
                 f"The refund for return {return_id} (order {order_id}) is "
-                f"recorded and paid, but the returned goods could NOT be put "
-                f"back into stock: the order bills to the online store "
-                f"{store_id}, which holds no stock, and no physical shop could "
-                f"be resolved to receive them. The items are physically with "
-                f"the person who processed the return and have NO stock row. "
-                f"Fix: set ONLINE_FULFILLMENT_STORE_ID, or add them at the "
-                f"receiving shop and re-run the restock for this return. "
+                f"recorded, but its returned goods were NOT put back in stock: "
+                f"{cause}. Do this: {action}. Never add these units by hand "
+                f"as well - IMS would count them twice. "
                 f"Items: {lines or 'see the return'}."
             ),
             priority="P1",
@@ -3794,9 +3824,11 @@ async def retry_restock(
             claim_store,
             blocked_units,
             current_user.get("active_store_id"),
+            unread="the order",
         )
         blocked_update = {
-            "restocked": _restock_intent_rows(blocked_units),
+            "restocked": _merge_restocked(claim.get("restocked"),
+                                          _restock_intent_rows(blocked_units)),
             "restock_applied": False,
             "restock_stock_ids": existing_ids,
             "restock_in_progress": False,
@@ -3865,9 +3897,10 @@ async def retry_restock(
     try:
         if refund_id and retry_order is not None:
             # None: another door just put the units back -- nothing left to do.
-            restock_result = _restock_booked(retry_order, lines, str(refund_id), _restock) or {
-                "applied": True
-            }
+            restock_result = _restock_booked(
+                retry_order, lines, str(refund_id), _restock,
+                processing_store_id=current_user.get("active_store_id"),
+            ) or {"applied": True}
         else:
             restock_result = _restock(lines)
     except Exception as exc:  # noqa: BLE001
@@ -3894,7 +3927,9 @@ async def retry_restock(
             merged_ids.append(sid)
 
     update = {
-        "restocked": restock_result.get("restocked", []),
+        # MERGED: the units an earlier attempt put back stay on the doc.
+        "restocked": _merge_restocked(claim.get("restocked"),
+                                      restock_result.get("restocked", [])),
         "restock_applied": bool(restock_result.get("applied")),
         "restock_stock_ids": merged_ids,
         "restock_in_progress": False,
@@ -3916,7 +3951,7 @@ async def retry_restock(
     # did, so Shopify has to hear about it too. Without this the online path --
     # which now routinely DEFERS recovery to this endpoint -- leaves the
     # recovered frame sellable in-shop but invisible online. Fail-soft.
-    restocked_rows = update["restocked"]
+    restocked_rows = restock_result.get("restocked") or []
     if update["restock_applied"] and restocked_rows:
         try:
             from ..services.online_stock_writeback import writeback_after_restock
@@ -3936,8 +3971,12 @@ async def retry_restock(
         "restock_stock_ids": update["restock_stock_ids"],
         "restock_store_id": update["restock_store_id"],
         "restock_store_ids": update["restock_store_ids"],
+        "stock_in_task": restock_result.get("stock_in_task"),
         "message": (
-            "Restock applied"
+            "Booked. This order predates IMS stock: a task asks the shop's store "
+            "manager to add the frame(s) through stock-in"
+            if restock_result.get("stock_in_task")
+            else "Restock applied"
             if update["restock_applied"]
             else "Restock partial - retry again"
         ),

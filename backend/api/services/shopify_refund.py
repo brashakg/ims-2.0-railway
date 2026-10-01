@@ -467,8 +467,8 @@ def _cap_restock_to_unreturned(
     what this refund's own doc says its restock already put back -- or the
     line's returned_qty, which every restock of a Shopify refund books). A
     unit a counter return or another door already took back is on the shelf
-    again -- restocking it finds no SOLD unit and MINTS a phantom (always, on
-    a historical order, which has no SOLD unit to find). This refund
+    again -- restocking it finds no SOLD unit and MINTS a phantom (on a
+    historical order: a second stock-in task for one frame). This refund
     restocks no more of a line than its own units on it (every one of its
     lines on that order line, held or not) less what its restock already put
     back there (_restock_booked's mark, or its own doc) -- never a unit it
@@ -481,7 +481,7 @@ def _cap_restock_to_unreturned(
     (the return docs, or any error) is NO answer, never nothing back: the
     lines come back as they are with unknown=True, as _cap_restock_to_sold_units
     does -- a refund confirmed before the marks has only its doc to say it
-    restocked, and a historical order no SOLD unit to stop a second mint."""
+    restocked."""
     try:
         from ..routers.returns import (
             _line_purchased_qty,
@@ -1176,6 +1176,8 @@ def _post_credit_and_restock(
     # An unreadable SOLD answer: restock nothing now and keep the restock OPEN
     # (applied=False, a task, the /returns/{id}/restock retry) -- the same
     # posture as an order that cannot be read.
+    unread = ("the order" if restock_unverified
+              else "this order's SOLD units or its earlier returns")
     restock_unverified = restock_unverified or unknown
     restock_result: Dict[str, Any] = {
         "restocked": [],
@@ -1199,9 +1201,10 @@ def _post_credit_and_restock(
             "-- re-driving the credit note ONLY (no second restock)",
             refund_id,
         )
+        # Its rows and stock ids stay: the finalize merges the prior doc's.
         restock_result = {
-            "restocked": (prior_doc or {}).get("restocked", []),
-            "restock_stock_ids": (prior_doc or {}).get("restock_stock_ids", []),
+            "restocked": [],
+            "restock_stock_ids": [],
             "applied": True,
             "skipped": [],
             "restock_store_id": (prior_doc or {}).get("restock_store_id"),
@@ -1252,7 +1255,7 @@ def _post_credit_and_restock(
             "restock_store_reason": _RESTOCK_ROUTE_UNRESOLVED,
         }
         _raise_restock_blocked_task(
-            return_id or refund_id, order_id, billing_store, units, None
+            return_id or refund_id, order_id, billing_store, units, None, unread=unread
         )
     else:
         try:
@@ -1298,15 +1301,24 @@ def _post_credit_and_restock(
         final_status = "CREDIT_FAILED"
 
     restock_applied = bool(restock_result.get("applied"))
+    # A re-drive MERGES its restock into the doc's: an earlier attempt's units
+    # stay on it (overwritten, they vanished from the doc that counts this
+    # refund's restock, and the next door restocked them again).
+    from ..routers.returns import _merge_restocked
+
+    restocked = _merge_restocked((prior_doc or {}).get("restocked"),
+                                 restock_result.get("restocked", []))
+    stock_ids = list(dict.fromkeys([*((prior_doc or {}).get("restock_stock_ids") or []),
+                                    *restock_result.get("restock_stock_ids", [])]))
     update_fields = {
         "status": final_status,
         "credit_amount": gross_refund if credit_ok else None,
         "credit_entry": credit_entry,
         "credit_note_issued": credit_ok,
         "settled_externally": bool(settled_externally),
-        "restocked": restock_result.get("restocked", []),
+        "restocked": restocked,
         "restock_applied": restock_applied,
-        "restock_stock_ids": restock_result.get("restock_stock_ids", []),
+        "restock_stock_ids": stock_ids,
         # The guard's ACTUAL routing answer overwrites the pre-guard proposal,
         # so the returns doc can never claim units went to a store they did not
         # (this door previously wrote the proposal once and never corrected it).
@@ -1367,7 +1379,10 @@ def _post_credit_and_restock(
         "restock_store_reason": restock_result.get("restock_store_reason"),
         # Empty with restock_applied=True: nothing was put back (the goods are
         # still out) -- the screen says so and points at Goods back.
-        "restock_stock_ids": restock_result.get("restock_stock_ids", []),
+        "restock_stock_ids": stock_ids,
+        # A historical order: booked, and a task hands the frames to stock-in.
+        "stock_in_task": restock_result.get("stock_in_task"),
+        "stock_in_store_id": restock_result.get("stock_in_store_id"),
     }
 
 
@@ -1489,6 +1504,7 @@ _Held = List[Tuple[Dict[str, Any], float, str]]
 def _restock_booked(
     order: Dict[str, Any], lines: List[Any], refund_id: str,
     restock: Callable[[List[Any]], Dict[str, Any]],
+    processing_store_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """The ONE way a Shopify refund's units go back in stock: Goods back, the
     confirm / AUTO post and the /returns/{id}/restock retry each call it with
@@ -1497,18 +1513,26 @@ def _restock_booked(
     its order line (_hold_returned_qty): its returned_qty, which the counter
     return door and every cap read, and this refund's mark (its units put
     back on that line), so the refund never restocks a unit of the line a
-    second time, whichever door runs first -- on a historical order too,
-    where no SOLD unit guards the restock and a second one MINTS a phantom
-    frame. A unit that did not land is un-booked; a landed one never is.
+    second time, whichever door runs first. A unit that did not land is
+    un-booked; a landed one never is. A HISTORICAL order (our own Shopify
+    order-history import, older than IMS stock) is booked the same way but
+    never restocked by any door (owner 2026-10-01): its booking raises ONE
+    task to add the frames through stock-in (_stock_in_task).
     None: another door booked those units first (nothing restocked)."""
     held = _hold_returned_qty(order, lines, refund_id)
     if held is None:
         return None
+    if order.get("historical"):
+        return _stock_in_task(order, lines, held, refund_id, processing_store_id)
     result: Dict[str, Any] = {"applied": False}
     try:
         result = restock(lines)
     finally:
         _release_unlanded(order, held, result, refund_id)
+    # Its units are in the mark: a doc row of them must never add to it.
+    for row in result.get("restocked") or []:
+        if isinstance(row, dict):
+            row["booked"] = True
     return result
 
 
@@ -1569,6 +1593,61 @@ def _release_unlanded(order: Dict[str, Any], held: _Held, result: Dict[str, Any]
             _release_returnable_qty(order.get("order_id"), orig, qty - keep, refund_id)
 
 
+def _stock_in_task(order: Dict[str, Any], lines: List[Any], held: _Held, refund_id: str,
+                   processing_store_id: Optional[str]) -> Dict[str, Any]:
+    """A historical order's booked units: IMS adds no stock row (the order
+    predates IMS stock, so a unit it puts back can only be a mint, and every
+    phantom frame came from there). ONE task per booking -- the booking is
+    taken once, so a second door books and raises nothing -- for the store
+    manager of the shop the frame goes back to (the restock router's own
+    answer) to add it through stock-in. Nothing restocked, applied: there is
+    nothing left for a door to retry."""
+    from ..routers import returns as _r
+
+    out: Dict[str, Any] = {"applied": True, "restocked": [], "restock_stock_ids": [],
+                           "restock_store_id": None, "restock_store_ids": []}
+    units = sum(qty for _, qty, _ in held)
+    if units <= 0:
+        return out
+    shop = _r._resolve_restock_store(order.get("store_id"), order.get("order_id"),
+                                     processing_store_id, order=order)["store_id"]
+    ref = order.get("order_number") or order.get("order_id")
+    items = ", ".join(sorted({str(ln.sku or ln.product_id) for ln in lines if ln.restock}))
+    task = None
+    # ponytail: best-effort like every system task (BaseRepository.create
+    # swallows its own insert error); the booking stands either way.
+    try:
+        from ..dependencies import get_task_repository, get_user_repository
+        from .task_triggers import create_system_task
+
+        users = get_user_repository()
+        managers = (users.find_managers(shop) or []) if users is not None and shop else []
+        task = create_system_task(
+            get_task_repository(),
+            title=f"Order {ref}: add {units:g} returned frame(s) through stock-in",
+            description=(
+                f"Shopify refund {refund_id} on order {ref} is booked: {units:g} unit(s) "
+                f"({items}) came back. This order was imported from Shopify's order "
+                "history, from before IMS kept its stock, so IMS holds no stock row for "
+                "these frames and does not add one itself. Do this: add each frame that "
+                f"is physically at {shop or 'your shop'} through stock-in (Inventory > "
+                "Opening Stock)."
+            ),
+            priority="P1",
+            category="Inventory",
+            store_id=shop,
+            dedupe_ref=f"historical_stock_in:{refund_id}:{uuid.uuid4().hex[:8]}",
+            assigned_to=(managers[0].get("user_id") if managers else None),
+            extra={"task_type": "historical_stock_in", "order_id": order.get("order_id"),
+                   "link": "/inventory/opening-stock",
+                   "payload": {"refund_id": refund_id, "order_id": order.get("order_id")}},
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("[SHOPIFY_REFUND] stock-in task failed for refund=%s", refund_id,
+                       exc_info=True)
+    return {**out, "stock_in_task": (task or {}).get("task_id"), "stock_in_store_id": shop}
+
+
 def goods_back(db, review: Dict[str, Any], *, user_id: Optional[str]) -> Dict[str, Any]:
     """A person says the goods of this Shopify refund physically came back:
     put its units back in stock. This is the goods leg of a refund whose goods
@@ -1582,12 +1661,14 @@ def goods_back(db, review: Dict[str, Any], *, user_id: Optional[str]) -> Dict[st
     (_cap_restock_to_returnable) and restocked the one way every door does
     (_restock_booked): no unit a counter return already took back, no line
     this refund's confirm, AUTO post or retry already restocked -- so a second
-    press, or a press before or after the confirm, never mints a phantom, on a
-    historical order too. The units it puts back are booked returned on their
+    press, or a press before or after the confirm, never mints a phantom. The
+    units it puts back are booked returned on their
     order lines, so the counter return door cannot take them back again. ONE
     press per row, claimed on the row (goods_back_at); a restock that did not
-    land releases both claims so it can be pressed again. NEVER raises. Returns
-    {"status": "restocked" | "duplicate" | "not_restocked", ...}."""
+    land releases both claims so it can be pressed again. A historical order's
+    goods are booked and handed to stock-in by a task (_stock_in_task). NEVER
+    raises. Returns {"status": "restocked" | "stock_in" | "duplicate" |
+    "not_restocked", ...}."""
     review_id = review.get("review_id")
     refund_id = _norm(review.get("shopify_refund_id"))
     try:
@@ -1642,6 +1723,8 @@ def goods_back(db, review: Dict[str, Any], *, user_id: Optional[str]) -> Dict[st
         "restock_stock_ids": result.get("restock_stock_ids", []),
         "restock_store_id": result.get("restock_store_id"),
         "restock_store_ids": result.get("restock_store_ids", []),
+        "stock_in_task": result.get("stock_in_task"),
+        "stock_in_store_id": result.get("stock_in_store_id"),
     }
     # Landed: record it. Nothing landed: release the press so it can be pressed
     # again (the caps make a re-press safe even after a partial restock).
@@ -1652,6 +1735,8 @@ def goods_back(db, review: Dict[str, Any], *, user_id: Optional[str]) -> Dict[st
     except Exception:  # noqa: BLE001
         logger.warning("[SHOPIFY_REFUND] goods-back stamp failed for review=%s", review_id,
                        exc_info=True)
+    if out["stock_in_task"]:
+        return {"status": "stock_in", **out}
     if out["restock_applied"]:
         return {"status": "restocked", **out}
     return {"status": "not_restocked", "reason": reason, **out}
