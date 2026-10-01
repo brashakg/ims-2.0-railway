@@ -57,17 +57,24 @@ import {
 import { productListPath, sectionOfError, type EditMode, type SectionId } from './shared';
 import { useProductImages } from './useProductImages';
 
-// Reorder level, form text <-> server number (owner 2026-09-28, F73). The
-// server decides what a product's level is (GET /products/{id} sends the level
-// reorder_policy gives, a legacy product's 5 included); its -1 = NOT SET shows
-// as a blank field, and a blank or invalid field is never saved as a number.
-const typedLevel = (value: unknown): number | null => {
-  const n = value === null || value === undefined || String(value).trim() === ''
-    ? NaN
-    : Number(value);
-  return Number.isInteger(n) && n >= 0 ? n : null;
+// Reorder level, form text <-> server number (owner 2026-09-28 and 2026-10-01,
+// F73). Only a whole number above 0 is a level. Blank or 0 = NOT SET (null):
+// the server's -1, 0 or a missing level all show as a blank box and 'not set'.
+// Anything else (2.5, -3) is undefined: refused at save, never saved as a
+// number and never silently turned into 'not set'.
+export const typedLevel = (value: unknown): number | null | undefined => {
+  const t = value === null || value === undefined ? '' : String(value).trim();
+  const n = t === '' ? 0 : Number(t);
+  if (!Number.isInteger(n) || n < 0) return undefined;
+  return n > 0 ? n : null;
 };
-const levelText = (rp: unknown): string => String(typedLevel(rp) ?? '');
+// A stored level for the box: anything but a level (-1, 0, garbage) is blank.
+const levelText = (rp: unknown): string => String(typedLevel(rp) || '');
+/** What the Review card prints for the typed level. */
+export const levelLabel = (text: string): string => {
+  const lv = typedLevel(text);
+  return lv === undefined ? text : lv === null ? 'not set' : String(lv);
+};
 
 export function useQuickAddForm() {
   const { hasRole, user } = useAuth();
@@ -286,12 +293,14 @@ export function useQuickAddForm() {
   }, [selectedCategory]);
 
   // F13/D5: the readable SKU a NEW product will get, previewed from the
-  // server's one minter (POST /products/sku-preview) once brand + model are in.
-  // Never built here. Edit/review keep their existing SKU.
+  // server's one minter (POST /products/sku-preview, product_master.build_sku,
+  // the function the save mints with) as soon as anything is typed -- every
+  // category, Optical Lens (no model) included. Never built here. Edit/review
+  // keep their existing SKU.
   const [skuPreview, setSkuPreview] = useState('');
   useEffect(() => {
-    if (editMode || !selectedCategory || !attributes.brand_name ||
-        !(attributes.model_no || attributes.model_name)) {
+    if (editMode || !selectedCategory ||
+        !Object.values(attributes).some((v) => String(v ?? '').trim())) {
       setSkuPreview('');
       return;
     }
@@ -595,9 +604,9 @@ export function useQuickAddForm() {
       }
       // A typed level that is not a whole number >= 0 (2.5, -3) is refused,
       // never silently saved as 'not set' (F73).
-      if (reorderLevel.trim() && typedLevel(reorderLevel) === null) {
+      if (typedLevel(reorderLevel) === undefined) {
         setOpenSections((s) => ({ ...s, inventory: true }));
-        toast.error('Reorder level must be a whole number, 0 or more. Leave it blank for not set.');
+        toast.error('Reorder level must be a whole number above 0. Leave it blank (or 0) for not set.');
         return;
       }
 
@@ -612,7 +621,8 @@ export function useQuickAddForm() {
           const payload = buildProductPayload(values);
           await productApi.updateProduct(editMode.id, {
             brand: payload.brand,
-            model: payload.model,
+            // A category with no model (Optical Lens) leaves the stored one alone.
+            model: payload.model || undefined,
             attributes: payload.attributes,
             mrp: payload.mrp,
             offer_price: payload.offer_price,
@@ -644,7 +654,7 @@ export function useQuickAddForm() {
         // update must not fail the create the user just did.
         const newId = created?.product_id || created?.id;
         const level = typedLevel(reorderLevel);
-        if (newId && level !== null) {
+        if (newId && level) {
           try {
             await productApi.updateProduct(newId, { reorder_point: level });
           } catch {
