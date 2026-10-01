@@ -319,13 +319,28 @@ _SCAN_DOORS = [
     pytest.param(f"/api/v1/inventory/stock/barcode/{UNIT_B['barcode']}", "TSC-2", id="stock-barcode"),
 ]
 
+# Every cost key each door carries today, by path. The barcode door joins the
+# product (cost, landed cost, nested pricing cost); the stock door does not.
+_DOOR_COST_KEYS = {
+    "TSC-1": [
+        "cost_price", "unit_cost",
+        "product.cost_price", "product.landed_cost", "product.pricing.cost_price",
+    ],
+    "TSC-2": ["cost_price", "unit_cost"],
+}
+# Who keeps cost on these replies: the accounts roles and the managers
+# (cost_mask's "product" context -- #1161), never the counter.
+COST_ROLES = ["ADMIN", "ACCOUNTANT", "STORE_MANAGER", "AREA_MANAGER", "CATALOG_MANAGER"]
 
+
+@pytest.mark.parametrize("role", COST_ROLES)
 @pytest.mark.parametrize("url,finding", _SCAN_DOORS)
-def test_admin_scan_reply_still_carries_cost(client, till, url, finding):
-    """Guard for the fix: only counter roles lose cost (the owner's ask)."""
-    r = client.get(url, headers=_token(["ADMIN"]))
+def test_cost_roles_keep_every_cost_key_on_the_scan_reply(client, till, url, finding, role):
+    """Guard for the fix: only counter roles lose cost (the owner's ask);
+    admins, accountants and managers keep every key, unit AND product."""
+    r = client.get(url, headers=_token([role]))
     assert r.status_code == 200, r.text
-    assert "unit_cost" in r.json() and "cost_price" in r.json(), finding
+    assert sorted(_cost_keys_in(r.json())) == sorted(_DOOR_COST_KEYS[finding]), finding
 
 
 @pytest.mark.parametrize("role", COUNTER_ROLES)
