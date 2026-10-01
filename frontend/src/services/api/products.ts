@@ -271,6 +271,9 @@ export interface UpdateProductPayload {
 // ============================================================================
 
 export interface OnlineStatus {
+  /** Live on the website: the listing (a size's parent's) is published on
+   *  Shopify -- the one reader the Online Stock views and the nightly parity
+   *  use, so a draft or taken-down listing is not online. */
   online: boolean;
   /** Live Shopify listed qty is not mirrored in IMS — null = unknown. */
   online_stock: number | null;

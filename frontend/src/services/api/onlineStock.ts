@@ -46,6 +46,9 @@ export interface ReconcileResult {
   /** Live-read coverage: online-mapped SKUs that got a live quantity vs all. */
   listed_live_rows?: number;
   listed_mapped_rows?: number;
+  /** True when IMS could not read which listings are live on Shopify: every
+   *  row is "Unverified", never "Not online". */
+  live_listings_unknown?: boolean;
 }
 
 export const onlineStockApi = {

@@ -84,7 +84,9 @@ export default function OnlineStockPage() {
       {data && data.online_configured !== false && data.listed_qty_live === false && (
         <div className="flex items-center gap-2 text-sm rounded-lg px-3 py-2 border bg-amber-50 border-amber-200 text-amber-800 mb-4">
           <AlertTriangle className="w-4 h-4 shrink-0" />
-          {(data.listed_live_rows ?? 0) > 0
+          {data.live_listings_unknown
+            ? 'IMS could not read which products are live on the website right now, so every row shows "Unverified" (never "Not online") and oversell flags can\'t fire. Refresh in a moment.'
+            : (data.listed_live_rows ?? 0) > 0
             ? `Live Shopify quantities cover ${data.listed_live_rows} of ${data.listed_mapped_rows} online SKUs on this page. Rows marked "Unverified" (Online = —) were not covered and cannot be cleared as OK.`
             : `Live Shopify quantities are unavailable right now, so online SKUs show "Unverified" (Online = —) and oversell flags can't fire.${(s.onhand_unknown ?? 0) > 0 ? '' : ' On-hand and recommended numbers are live.'}`}
         </div>

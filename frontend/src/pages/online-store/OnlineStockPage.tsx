@@ -185,6 +185,17 @@ export default function OnlineStockPage() {
         </div>
       )}
 
+      {/* IMS could not read which listings are live: nothing tallied, never "none listed". */}
+      {!loading && available && onlineConfigured && summary?.live_listings_unknown && (
+        <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 flex items-start gap-2">
+          <AlertTriangle className="w-4 h-4 text-amber-600 mt-0.5 shrink-0" />
+          <span className="text-sm text-amber-900">
+            IMS could not read which products are live on the website right now, so nothing is
+            tallied — this is not &quot;nothing listed&quot;. Refresh, or check the sync-health tile.
+          </span>
+        </div>
+      )}
+
       {/* IMS could not read the shops' on-hand: nothing tallied, never 0. */}
       {!loading && available && onlineConfigured && summary?.on_hand_unknown && (
         <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 flex items-start gap-2">
@@ -288,6 +299,8 @@ export default function OnlineStockPage() {
           <p className="text-sm">
             {search || filter !== 'ALL'
               ? 'No SKUs match this view.'
+              : summary?.live_listings_unknown || summary?.on_hand_unknown
+              ? 'Nothing is tallied right now (see the note above).'
               : 'No SKUs are listed online yet. Once products go live online, they show up here.'}
           </p>
         </div>

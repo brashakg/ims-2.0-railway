@@ -170,6 +170,9 @@ export interface StockTallySummary {
   /** True when IMS could not read the shops' on-hand: nothing is tallied and
    *  nothing is shown as 0 on hand (an unreadable shelf is never "empty"). */
   on_hand_unknown?: boolean;
+  /** True when IMS could not read which listings are live on Shopify: nothing
+   *  is tallied (a dead read is never "nothing is listed online"). */
+  live_listings_unknown?: boolean;
 }
 
 export interface StockTallyResult {
@@ -279,6 +282,7 @@ export const onlineStoreApi = {
           listed_live_rows: num(s.listed_live_rows),
           listed_mapped_rows: num(s.listed_mapped_rows),
           on_hand_unknown: !!s.on_hand_unknown,
+          live_listings_unknown: !!s.live_listings_unknown,
         },
         available: true,
         reason: null,
