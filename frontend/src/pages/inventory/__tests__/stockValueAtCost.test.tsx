@@ -48,7 +48,9 @@ vi.mock('../inventoryQueries', async (importOriginal) => {
   const idle = { data: undefined, isFetching: false, isError: false, isPending: false };
   return {
     ...actual,
-    useStock: () => ({ ...idle, data: rows }),
+    // A loaded list is a SUCCESS (review r2 #22: the tiles wait for one);
+    // `stockQuery` overrides it for the loading / failed cases.
+    useStock: () => stockQuery ?? { ...idle, isSuccess: true, data: rows },
     useLowStock: () => idle,
     useOnlineStatus: () => idle,
     useFixturesMap: () => idle,
@@ -64,6 +66,7 @@ import { InventoryLayout } from '../InventoryLayout';
 import { InventoryStockPage } from '../InventoryStockPage';
 
 let rows = ROWS;
+let stockQuery: Record<string, unknown> | null = null;
 
 function renderStrip() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -259,8 +262,10 @@ describe('review r1 #39: stock is the units for sale, reserved is apart', () => 
     rows = HELD;
     try {
       renderStrip();
-      expect(statValue('Selling value')).toBe('₹ 0.4L');
-      expect(statValue('Stock value')).toBe('₹ 0.2L');
+      // Under a lakh the tiles read whole rupees (review r2 #22), so the units
+      // counted show to the rupee: 4 x 10,000 and 4 x 5,000.
+      expect(statValue('Selling value')).toBe('₹40,000');
+      expect(statValue('Stock value')).toBe('₹20,000');
       expect(screen.getByText('at offer price (MRP if none) · shelf + reserved')).toBeInTheDocument();
     } finally {
       rows = ROWS;
@@ -307,6 +312,81 @@ describe('review r1 #39: stock is the units for sale, reserved is apart', () => 
       click.mockRestore();
       Object.defineProperty(URL, 'createObjectURL', { configurable: true, writable: true, value: origCreate });
       Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, writable: true, value: origRevoke });
+      rows = ROWS;
+    }
+  });
+});
+
+// ============================================================================
+// Review r2 #22: the value tiles never read a confident Rs 0
+// ============================================================================
+// The cost tile read "Rs 0.0L" for stock costing under Rs 5,000 (toFixed(1) of
+// lakhs) -- the F56 "Rs 0 on one screen" symptom, fixed on the Suppliers card
+// and brought back here. And while GET /inventory/stock was pending, or after
+// it failed, the rows were [] and costKnown was true, so both tiles read a
+// confident Rs 0 instead of a dash.
+
+describe('review r2 #22: the value tiles read whole rupees under a lakh, and a dash until the list loads', () => {
+  const SMALL: Record<string, unknown>[] = [
+    { id: 'p7', sku: 'FR-7', name: 'Small shop frame', category: 'FRAME', brand: 'Generic',
+      mrp: 1800, offerPrice: 1500, stock: 3, reserved: 1, cost_value: 4000, unit_cost: 1000, uncosted_units: 0 },
+  ];
+
+  it('stock costing Rs 4,000 reads Rs 4,000 at cost (and Rs 6,000 selling), never Rs 0.0L', () => {
+    rows = SMALL;
+    try {
+      renderStrip();
+      expect(statValue('Stock value')).toBe('₹4,000');
+      expect(statValue('Selling value')).toBe('₹6,000');
+      expect(screen.queryByText(/0\.0L/)).toBeNull();
+    } finally {
+      rows = ROWS;
+    }
+  });
+
+  it('a lakh is the line: Rs 99,999 in rupees, Rs 1,00,000 in lakhs', () => {
+    rows = [{ ...SMALL[0], cost_value: 99999, offerPrice: 25000, stock: 4, reserved: 0 }];
+    try {
+      const first = renderStrip();
+      expect(statValue('Stock value')).toBe('₹99,999');
+      expect(statValue('Selling value')).toBe('₹ 1.0L');
+      first.unmount();
+    } finally {
+      rows = ROWS;
+    }
+  });
+
+  it('while the stock list loads, both tiles read a dash -- not Rs 0', () => {
+    stockQuery = { data: undefined, isFetching: true, isPending: true, isError: false, isSuccess: false };
+    try {
+      renderStrip();
+      expect(statValue('Stock value')).toBe('—');
+      expect(statValue('Selling value')).toBe('—');
+      expect(screen.queryByText('₹0')).toBeNull();
+    } finally {
+      stockQuery = null;
+    }
+  });
+
+  it('after the stock list fails, both tiles read a dash and the error is shown', () => {
+    stockQuery = { data: undefined, isFetching: false, isPending: false, isError: true, isSuccess: false };
+    try {
+      renderStrip();
+      expect(statValue('Stock value')).toBe('—');
+      expect(statValue('Selling value')).toBe('—');
+      expect(screen.getByText('Failed to load inventory. Please try again.')).toBeInTheDocument();
+    } finally {
+      stockQuery = null;
+    }
+  });
+
+  it('a shop whose list LOADED empty holds nothing: Rs 0 is then the true figure', () => {
+    rows = [];
+    try {
+      renderStrip();
+      expect(statValue('Stock value')).toBe('₹0');
+      expect(statValue('Selling value')).toBe('₹0');
+    } finally {
       rows = ROWS;
     }
   });

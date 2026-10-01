@@ -99,3 +99,44 @@ describe('F47: Brand insights labels its selling figure as selling', () => {
     expect(th.textContent).toContain('at offer price, before GST');
   });
 });
+
+// ============================================================================
+// Review r2 #20: the Brands columns say which units they count
+// ============================================================================
+// GET /inventory/brand-insights counts the units FOR SALE: RESERVED is left
+// out (inventory/helpers._on_hand_by_product, called without
+// include_reserved). The "Selling value" tile above the table counts shelf +
+// reserved. Seen: Ray-Ban 3 for sale + 1 reserved at Rs 8,000 and Vogue 2 at
+// Rs 2,500 -- the tile read Rs 37,000 and the rows Rs 24,000 + Rs 5,000, both
+// under the words "Selling value" with nothing saying the units differ.
+
+describe('review r2 #20: Brands columns name their unit basis', () => {
+  beforeEach(() => {
+    inclusive = true;
+    brandInsights.mockClear();
+  });
+
+  const header = (label: string) =>
+    screen.getAllByRole('columnheader').find((h) => (h.textContent ?? '').startsWith(label))!;
+
+  it('the selling column says the reserved units are not counted', async () => {
+    render(<BrandInsightsWidget />);
+    await screen.findByText('Carrera');
+    const th = header('Selling value');
+    expect(th.textContent).toContain('for sale, reserved not counted');
+    expect(th.getAttribute('title')).toMatch(/reserved for a customer's order are not counted/);
+    // The tile it is compared with counts shelf + reserved: the column must not
+    // claim the tile's basis.
+    expect(th.textContent).not.toMatch(/shelf \+ reserved/);
+  });
+
+  it('the units column counts the same units and says so', async () => {
+    render(<BrandInsightsWidget />);
+    await screen.findByText('Carrera');
+    const th = header('On hand');
+    expect(th.textContent).toContain('for sale, reserved not counted');
+    expect(th.getAttribute('title')).toMatch(/reserved for a customer's order are not counted/);
+    // The 2 units sit under it.
+    expect(cell('Carrera', 'On hand')).toBe('2');
+  });
+});

@@ -11,6 +11,13 @@
 // there is none) -- what the stock SELLS for, not what it cost. The page's
 // "Stock value" tile is at cost, so this column is headed "Selling value" and
 // says its basis; the same words must not mean two figures on one screen.
+//
+// Review r2 #20: the units differ too. The server counts the units FOR SALE
+// (inventory/helpers._on_hand_by_product: RESERVED is excluded) for both
+// "On hand" and this column, while the "Selling value" tile above counts the
+// shelf + reserved. So both columns say "for sale, reserved not counted": a
+// shop with reserved units shows rows that add up to less than the tile, and
+// the captions say why.
 
 import { useState, useEffect } from 'react';
 import { BarChart3 } from 'lucide-react';
@@ -30,6 +37,11 @@ function fmtInt(n?: number | null): string {
   if (n === null || n === undefined || Number.isNaN(Number(n))) return '—';
   return Number(n).toLocaleString('en-IN', { maximumFractionDigits: 0 });
 }
+
+/** The unit basis of "On hand" and "Selling value" (review r2 #20). */
+const FOR_SALE = 'for sale, reserved not counted';
+const RESERVED_NOTE =
+  "Units reserved for a customer's order are not counted (the Selling value tile counts them).";
 
 /** Days-of-cover with the 999 backend cap rendered as "999+". */
 function fmtCover(n?: number | null): string {
@@ -94,13 +106,20 @@ export function BrandInsightsWidget() {
             <thead className="bg-white border-b border-gray-200 sticky top-0">
               <tr>
                 <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500">Brand</th>
-                <th className="px-4 py-2 text-right text-xs font-semibold text-gray-500">On hand</th>
                 <th
                   className="px-4 py-2 text-right text-xs font-semibold text-gray-500"
-                  title={`What this stock sells for: units on hand x the offer price (MRP when there is none), ${gstWord}. Not what it cost -- Stock value is at cost.`}
+                  title={`Units for sale. ${RESERVED_NOTE}`}
+                >
+                  On hand
+                  <span className="block text-[10px] font-normal text-gray-400">{FOR_SALE}</span>
+                </th>
+                <th
+                  className="px-4 py-2 text-right text-xs font-semibold text-gray-500"
+                  title={`What this stock sells for: units on hand x the offer price (MRP when there is none), ${gstWord}. Not what it cost -- Stock value is at cost. ${RESERVED_NOTE}`}
                 >
                   Selling value
                   <span className="block text-[10px] font-normal text-gray-400">at offer price, {gstWord}</span>
+                  <span className="block text-[10px] font-normal text-gray-400">{FOR_SALE}</span>
                 </th>
                 <th className="px-4 py-2 text-right text-xs font-semibold text-gray-500">Sold {days}d</th>
                 <th className="px-4 py-2 text-right text-xs font-semibold text-gray-500">Revenue {days}d</th>

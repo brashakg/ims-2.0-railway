@@ -55,6 +55,9 @@ import {
   useQuarantineUnlabeled,
   useStock,
 } from './inventoryQueries';
+// The Purchases report's whole-rupee rule (read-only import): the same
+// rendering the Suppliers card reads, so a small figure is never "Rs 0.0L".
+import { rupees } from '../purchase/PurchasesThisMonthSection';
 
 export interface InventoryContext {
   /** The store being viewed (layout store picker; follows the topbar store). */
@@ -127,12 +130,20 @@ export function InventoryLayout() {
   // order (stock_value's rule, unitsHeld) -- so the pair can be compared, and
   // both captions say so. A unit nobody priced adds nothing to the cost, so
   // the tile says how many there are rather than look complete (review #34).
-  const costKnown = inventory.length === 0 || inventory.some((i) => i.cost_value != null);
+  //
+  // Review r2 #22: neither tile has a figure until the list has LOADED -- while
+  // it loads, after it fails, or with no shop picked the rows are [] and the
+  // sums a confident Rs 0, so the tiles read a dash. Under a lakh a figure is
+  // whole rupees (Rs 4,000, never "Rs 0.0L"); from a lakh up, lakhs.
+  const stockLoaded = stockQ.isSuccess;
+  const costKnown =
+    stockLoaded && (inventory.length === 0 || inventory.some((i) => i.cost_value != null));
   const costValue = inventory.reduce((sum, item) => sum + (item.cost_value || 0), 0);
   const uncostedUnits = inventory.reduce((n, item) => n + (item.uncosted_units || 0), 0);
   const sellingValue = inventory.reduce(
     (sum, item) => sum + ((item.offerPrice || item.mrp || 0) * unitsHeld(item)), 0);
-  const lakh = (rupees: number) => `₹ ${(rupees / 100000).toFixed(1)}L`;
+  const tileMoney = (n: number) =>
+    Math.round(n) < 100000 ? rupees(n) : `₹ ${(n / 100000).toFixed(1)}L`;
   const onlineCount = inventory.reduce(
     (n, i) => (getOnlineFor(i, onlineStatusQ.data)?.online ? n + 1 : n), 0);
 
@@ -366,7 +377,7 @@ export function InventoryLayout() {
           </div>
           <div>
             <div className="l">Stock value</div>
-            <div className="v">{costKnown ? lakh(costValue) : '—'}</div>
+            <div className="v">{costKnown ? tileMoney(costValue) : '—'}</div>
             {/* The price on the order when the goods were received, before GST
                 (grn_accept stamps it on each unit) -- not the bill's price. */}
             <div className="d">at cost: price at receipt, ex GST · shelf + reserved</div>
@@ -390,7 +401,7 @@ export function InventoryLayout() {
           </div>
           <div>
             <div className="l">Selling value</div>
-            <div className="v">{lakh(sellingValue)}</div>
+            <div className="v">{stockLoaded ? tileMoney(sellingValue) : '—'}</div>
             <div className="d">at offer price (MRP if none) · shelf + reserved</div>
           </div>
           <div>
