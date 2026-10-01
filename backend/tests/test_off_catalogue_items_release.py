@@ -1431,6 +1431,37 @@ def test_c1_the_catalogue_task_escalates_to_someone_who_can_do_it(world):
     )
 
 
+def test_c1_asking_again_after_the_ask_was_closed_asks_again(world):
+    # The accountant asks; the catalogue manager closes the task without
+    # finishing the item; the next refused booking asks again -- and must reach
+    # someone (an ask is not a receipt's once-ever task).
+    from api.routers import purchase_invoices as _pi
+
+    _seed_user(world, ACCOUNTANT)
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+
+    def ask():
+        _run(
+            _pi.request_cataloguing(
+                _pi.CataloguingRequest(product_ids=[draft_id]), ACCOUNTANT
+            )
+        )
+        return [t for t in _open_tasks(world) if "vendor bill" in t["title"]]
+
+    (first,) = ask()
+    _run(
+        _tasks.complete_task(
+            first["task_id"], _tasks.TaskComplete(completion_notes="seen it"), CATALOGUER
+        )
+    )
+    assert world.product(draft_id).get("is_active") is False  # still unfinished
+    again = ask()
+    finding(
+        [t.get("assigned_to") for t in again] == [CATALOGUER["user_id"]],
+        f"Asking again after the ask was closed reached nobody ({again})",
+    )
+
+
 def test_an_accountant_sees_and_closes_the_task_addressed_to_accountants(world):
     # Express receive's "Book purchase invoice" is addressed to the ACCOUNTANT
     # title (grn_express). Below manager the list is your own -- and a task

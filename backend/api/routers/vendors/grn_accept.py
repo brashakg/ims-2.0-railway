@@ -901,14 +901,16 @@ def _held_item_label(prod: Optional[dict], product_id: str) -> str:
     return f"{label} (SKU {prod.get('sku')})" if prod.get("sku") else label
 
 
-def _raise_once(db, *, dedupe_ref: str, **task) -> None:
-    """ONE task per source_ref, EVER: once a person has closed it, a re-press
-    of "Add to stock" or the next catalogue save never raises it again
-    (create_system_task alone dedupes only against OPEN ones)."""
+def _raise_once(db, *, dedupe_ref: str, ever: bool = True, **task) -> None:
+    """ONE task per source_ref. `ever` (a receipt's tasks): once a person has
+    closed it, a re-press of "Add to stock" or the next catalogue save never
+    raises it again. Otherwise (a person ASKING, e.g. a bill's request for
+    cataloguing) one only while it is still open -- create_system_task's own
+    dedupe -- so asking again after it was closed reaches the person again."""
     from ...dependencies import get_task_repository
     from ...services.task_triggers import create_system_task
 
-    if db.get_collection("tasks").find_one({"source_ref": dedupe_ref}):
+    if ever and db.get_collection("tasks").find_one({"source_ref": dedupe_ref}):
         return
     create_system_task(
         get_task_repository(), priority="P2", dedupe_ref=dedupe_ref, **task
@@ -1002,15 +1004,16 @@ def _sync_catalogue_tasks(grn_id, grn, unresolved_lines, grn_status, product_rep
 
 def tell_catalogue_managers(
     db, store_id, *, dedupe: str, title: str, orphan_title: str, description: str,
-    extra: Optional[dict] = None,
+    extra: Optional[dict] = None, ever: bool = True,
 ) -> None:
     """THE door that tells the catalogue managers an item waits on them -- a
     receipt holding units (_sync_catalogue_tasks), a vendor bill that cannot be
     booked (purchase_invoices.request_cataloguing). One task per active
     CATALOG_MANAGER of the shop's legal entity, BY NAME (owner 2026-09-30),
-    once per `dedupe` + person, ever (_raise_once), in a store that person can
-    open. Nobody holding the job there fails loud: logged, and raised for the
-    admins under `orphan_title` -- never a task nobody can see."""
+    once per `dedupe` + person (_raise_once; `ever` False for an ask, which
+    reaches them again once the last one is closed), in a store that person
+    can open. Nobody holding the job there fails loud: logged, and raised for
+    the admins under `orphan_title` -- never a task nobody can see."""
     people, are_cataloguers = _people_for(
         db, store_id, "CATALOG_MANAGER", entity_wide=True
     )
@@ -1026,6 +1029,7 @@ def tell_catalogue_managers(
         _raise_once(
             db,
             dedupe_ref=f"{dedupe}:{uid or 'nobody'}",
+            ever=ever,
             title=title,
             description=description,
             category="Catalogue",

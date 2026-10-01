@@ -1317,6 +1317,8 @@ async def request_cataloguing(
                 f"No catalogue manager for {store_id}: {len(items)} item(s) "
                 "block a vendor bill"
             ),
+            # An ask: asking again once the last task was closed asks again.
+            ever=False,
             description=(
                 "A purchase invoice cannot be booked until these products are "
                 "catalogue-complete:\n"
