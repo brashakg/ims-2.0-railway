@@ -2,16 +2,22 @@
 // IMS 2.0 - Brand Insights (Inventory > Insights > Brands)
 // ============================================================================
 // KPI table per brand over GET /inventory/brand-insights: on-hand units,
-// stock value (offer basis, mrp fallback), sold + revenue over the selected
+// selling value (offer basis, mrp fallback), sold + revenue over the selected
 // window, sell-through % and days of cover. KPI math is shared server-side
 // with the Collections insights so the two tabs always agree.
 // Styled after SellThroughAnalysisWidget (AdvancedInventoryFeatures.tsx).
+//
+// Audit F47: the server's `stock_value` here is units x offer price (MRP when
+// there is none) -- what the stock SELLS for, not what it cost. The page's
+// "Stock value" tile is at cost, so this column is headed "Selling value" and
+// says its basis; the same words must not mean two figures on one screen.
 
 import { useState, useEffect } from 'react';
 import { BarChart3 } from 'lucide-react';
 // Import DIRECT from the module (not the api barrel — TS2614).
 import { inventoryApi, type BrandInsightRow } from '../../services/api/inventory';
 import { useAuth } from '../../context/AuthContext';
+import { isInclusivePricing } from '../../constants/gstRuntime';
 
 /** Indian-locale rupees, no paise (same rendering rule as the Collections
  *  pages' `rupee` helper). */
@@ -38,6 +44,9 @@ export function BrandInsightsWidget() {
   const [rows, setRows] = useState<BrandInsightRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [days, setDays] = useState(30);
+  // The offer price is the counter price: GST is inside it under the default
+  // inclusive mode, added on top under the exclusive rollback (gstRuntime).
+  const gstWord = isInclusivePricing() ? 'incl. GST' : 'before GST';
 
   useEffect(() => {
     let cancelled = false;
@@ -86,7 +95,13 @@ export function BrandInsightsWidget() {
               <tr>
                 <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500">Brand</th>
                 <th className="px-4 py-2 text-right text-xs font-semibold text-gray-500">On hand</th>
-                <th className="px-4 py-2 text-right text-xs font-semibold text-gray-500">Stock value</th>
+                <th
+                  className="px-4 py-2 text-right text-xs font-semibold text-gray-500"
+                  title={`What this stock sells for: units on hand x the offer price (MRP when there is none), ${gstWord}. Not what it cost -- Stock value is at cost.`}
+                >
+                  Selling value
+                  <span className="block text-[10px] font-normal text-gray-400">at offer price, {gstWord}</span>
+                </th>
                 <th className="px-4 py-2 text-right text-xs font-semibold text-gray-500">Sold {days}d</th>
                 <th className="px-4 py-2 text-right text-xs font-semibold text-gray-500">Revenue {days}d</th>
                 <th className="px-4 py-2 text-right text-xs font-semibold text-gray-500">Sell-through</th>
