@@ -533,6 +533,17 @@ describe('round 14 - the credit verdict is visible and settable', () => {
     expect(screen.queryByText(/No input credit/)).toBeNull();
   });
 
+  it.each([
+    ['absent', {}],
+    ['null', { itc_eligible: null }],
+  ])('shows no "No input credit" line when the preview leaves itc_eligible %s', async (_label, over) => {
+    // Only an explicit false is a denial; a preview that says nothing is not one.
+    routePosts(preview(over));
+    await openManualServicesBill({ name: 'Freight', qty: '1', price: '1000', rate: '18' });
+    await screen.findByText(/Inter-state supply:/);
+    expect(screen.queryByText(/No input credit/)).toBeNull();
+  });
+
   it('switching credit off says "switched off", re-asks the preview and books with itc_eligible false', async () => {
     routePosts(preview());
     await openManualServicesBill({ name: 'Freight', qty: '1', price: '1000', rate: '18' });
