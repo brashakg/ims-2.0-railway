@@ -2,7 +2,7 @@
 // IMS 2.0 - Protected Route Component
 // ============================================================================
 
-import { Navigate, useLocation } from 'react-router-dom';
+import { Navigate, useLocation, useOutlet } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { moduleForPath, type ModuleKey } from '../../context/ModuleContext';
 import type { UserRole } from '../../types';
@@ -29,6 +29,12 @@ export function ProtectedRoute({
 }: ProtectedRouteProps) {
   const { isAuthenticated, isLoading, hasRole, hasPermission, hasModuleAccess } = useAuth();
   const location = useLocation();
+  // A gate around a section LAYOUT (/purchase, /inventory, ...) holds the
+  // union of every section's roles; the matched section has its own, narrower
+  // gate. Naming the union on the blocked page told people to hand the work to
+  // roles the section itself refuses, so only a gate with no nested route
+  // below it names who can open the page.
+  const isLayoutGate = useOutlet() !== null;
 
   // Show loading state - don't render children until auth initialization completes
   if (isLoading) {
@@ -51,8 +57,9 @@ export function ProtectedRoute({
   if (allowedRoles && allowedRoles.length > 0) {
     if (!hasRole(allowedRoles)) {
       // Tell the blocked page who CAN open this, so it can name them.
+      const who = isLayoutGate ? undefined : allowedRoles;
       return (
-        <Navigate to="/unauthorized" state={{ from: location, allowedRoles, deniedHint }} replace />
+        <Navigate to="/unauthorized" state={{ from: location, allowedRoles: who, deniedHint }} replace />
       );
     }
   }

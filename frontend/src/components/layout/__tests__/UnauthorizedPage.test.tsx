@@ -25,6 +25,13 @@ vi.mock('../../../context/AuthContext', () => ({
   }),
 }));
 
+// The section layout itself is not under test: an Outlet is enough to let a
+// role through to the section's own gate.
+vi.mock('../../../pages/purchase/PurchaseLayout', async () => {
+  const { Outlet } = await import('react-router-dom');
+  return { PurchaseLayout: () => <Outlet /> };
+});
+
 import { UnauthorizedPage } from '../UnauthorizedPage';
 import { purchaseRoutes } from '../../../routes/purchaseRoutes';
 
@@ -72,6 +79,33 @@ describe('403 page names who can receive goods (F5)', () => {
   it('any other blocked page still says who can open it', async () => {
     renderAt('/purchase/recon-console');
     expect(await screen.findByText(/^Who can:/)).toHaveTextContent('Who can: Admin, Accountant.');
+  });
+
+  // Review round 7: the /purchase LAYOUT gate (the union of every section's
+  // roles) refused first and its list reached the page, naming workshop staff
+  // for /purchase/orders and the accountant for /purchase/vendor-returns --
+  // two roles those sections refuse.
+  it.each([
+    ['/purchase/orders', ['Workshop staff']],
+    ['/purchase/vendor-returns', ['Accountant']],
+  ])('%s: a role refused at the section layout is never told to ask %s', async (path, refused) => {
+    ROLES.splice(0, ROLES.length, 'CATALOG_MANAGER');
+    try {
+      renderAt(path);
+      expect(await screen.findByText('403')).toBeInTheDocument();
+      for (const name of refused) {
+        expect(screen.queryByText(new RegExp(name))).not.toBeInTheDocument();
+      }
+    } finally {
+      ROLES.splice(0, ROLES.length, 'WORKSHOP_STAFF');
+    }
+  });
+
+  it('a section gate still names its own roles', async () => {
+    renderAt('/purchase/orders'); // workshop staff pass the layout, not the section
+    expect(await screen.findByText(/^Who can:/)).toHaveTextContent(
+      'Who can: Admin, Area manager, Store manager, Accountant.',
+    );
   });
 
   it('opened directly (no blocked page behind it) it stays the plain message', () => {
