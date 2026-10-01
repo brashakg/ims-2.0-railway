@@ -21,6 +21,11 @@ per object in the handler.
 
 No comms. No emoji (Windows cp1252). Money is paise-exact integers; responses
 carry both paise and a rupee display field.
+
+Supplier money (owner ruling 2026-10-01): a note's amounts are the accounts
+roles' alone (services/payables_mask). The JSON reads and the issue response
+drop them for anyone else; the print and the Tally export, which are nothing
+but those amounts, answer 403 to anyone else.
 """
 
 from __future__ import annotations
@@ -44,6 +49,12 @@ from ..services.rtv_debit_note import (
     paise_to_rupees,
     render_debit_note_html,
     tally_build_debit_note_xml,
+)
+from ..services.payables_mask import (
+    AP_ROLES,
+    masks_supplier_money,
+    require_payables,
+    strip_debit_note_money,
 )
 
 logger = logging.getLogger(__name__)
@@ -178,6 +189,7 @@ def _http_from_result(res: dict) -> HTTPException:
 
 @router.get("")
 @router.get("/")
+@masks_supplier_money(strip_debit_note_money)
 async def list_debit_notes(
     store_id: Optional[str] = Query(None),
     vendor_id: Optional[str] = Query(None),
@@ -200,6 +212,7 @@ async def list_debit_notes(
 
 
 @router.post("/issue", status_code=201)
+@masks_supplier_money(strip_debit_note_money)
 async def issue_debit_note(
     body: DebitNoteIssue,
     current_user: dict = Depends(require_roles(*_DEBIT_NOTE_ROLES)),
@@ -234,6 +247,7 @@ async def issue_debit_note(
 
 
 @router.get("/{debit_note_id}")
+@masks_supplier_money(strip_debit_note_money)
 async def get_debit_note(
     debit_note_id: str, current_user: dict = Depends(get_current_user)
 ):
@@ -251,6 +265,7 @@ async def print_debit_note(
     debit_note_id: str, current_user: dict = Depends(get_current_user)
 ):
     """Printable GST debit-note HTML. Store-IDOR guarded."""
+    require_payables(current_user, "The debit note print")
     eng = _engine()
     doc = eng.get(debit_note_id)
     if doc is None:
@@ -259,13 +274,18 @@ async def print_debit_note(
     return HTMLResponse(content=render_debit_note_html(doc))
 
 
+# The Tally voucher IS the debit note's money: the accounts roles only (owner
+# ruling 2026-10-01, supplier money is ADMIN / SUPERADMIN / ACCOUNTANT's).
+_AP_ROLES = AP_ROLES
+
+
 @router.get("/{debit_note_id}/tally", response_class=PlainTextResponse)
 async def export_debit_note_tally(
     debit_note_id: str,
-    current_user: dict = Depends(require_roles(*_DEBIT_NOTE_ROLES)),
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
 ):
     """Tally import XML carrying the Debit Note voucher (balanced; debits ==
-    credits). Vendor/AP roles only. Store-IDOR guarded."""
+    credits). Accounts roles only. Store-IDOR guarded."""
     eng = _engine()
     doc = eng.get(debit_note_id)
     if doc is None:

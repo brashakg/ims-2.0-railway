@@ -50,6 +50,8 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+from .payables_mask import SUPPLIER_MONEY_ACTIONS
+
 logger = logging.getLogger(__name__)
 
 
@@ -1132,6 +1134,11 @@ class ApprovalEngine:
             return
 
         amount = doc.get("amount")
+        # An 'rtv' amount is supplier money (owner ruling 2026-10-01) and this
+        # bell rings for store / area managers too: it never carries it. The
+        # accounts roles read it on the request (services/payables_mask).
+        if doc.get("action_type") in SUPPLIER_MONEY_ACTIONS:
+            amount = None
         msg_amt = ("Rs " + format(amount, ".2f")) if amount is not None else "review"
         action = str(doc.get("action_type") or "")
         # Refund-matrix approvals land on the refund-only queue; everything else

@@ -20,6 +20,10 @@ Store scope: every write validates ``validate_store_access`` on the RMA's store
 
 Money: paisa-exact integers end-to-end. Rupee inputs are converted at the schema
 edge; responses carry both the paise integer and a rupee float for display.
+Supplier money (owner ruling 2026-10-01): the expected / received credit, the
+variance and any write-off are the accounts roles' alone -- every response
+here (reads, write results, the close refusal) goes through
+services/payables_mask.strip_rma_credit.
 
 E4: a credit whose received amount (or variance) crosses the E2-configured tier
 must carry a consumed approval token (action_type "rtv"); below the threshold the
@@ -43,6 +47,7 @@ from ..services.vendor_rma import (
     paise_to_rupees,
     rupees_to_paise,
 )
+from ..services.payables_mask import strip_rma_credit
 
 logger = logging.getLogger(__name__)
 
@@ -192,7 +197,9 @@ async def list_rmas(
         # Defensive: a store-role with no resolved store sees only its reach.
         rows = eng.list(store_ids=list(reach), vendor_id=vendor_id, status=status,
                         skip=skip, limit=limit)
-    return {"rmas": [_with_rupees(r) for r in rows], "total": len(rows)}
+    return strip_rma_credit(
+        {"rmas": [_with_rupees(r) for r in rows], "total": len(rows)}, current_user
+    )
 
 
 @router.post("", status_code=201)
@@ -230,7 +237,7 @@ async def raise_rma(
     )
     if not res.get("ok"):
         raise HTTPException(status_code=400, detail=res.get("error", "create failed"))
-    return res
+    return strip_rma_credit(res, current_user)
 
 
 @router.get("/{rma_id}")
@@ -241,7 +248,7 @@ async def get_rma(rma_id: str, current_user: dict = Depends(get_current_user)):
     if doc is None:
         raise HTTPException(status_code=404, detail="RMA not found")
     validate_store_access(doc.get("store_id"), current_user)
-    return _with_rupees(doc)
+    return strip_rma_credit(_with_rupees(doc), current_user)
 
 
 @router.post("/{rma_id}/authorize")
@@ -264,7 +271,7 @@ async def authorize_rma(
     )
     if not res.get("ok"):
         raise _http_from_result(res)
-    return res
+    return strip_rma_credit(res, current_user)
 
 
 @router.post("/{rma_id}/dispatch")
@@ -289,7 +296,7 @@ async def dispatch_rma(
     )
     if not res.get("ok"):
         raise _http_from_result(res)
-    return res
+    return strip_rma_credit(res, current_user)
 
 
 @router.post("/{rma_id}/credit-note")
@@ -354,7 +361,7 @@ async def record_credit_note(
     )
     if not res.get("ok"):
         raise _http_from_result(res)
-    return res
+    return strip_rma_credit(res, current_user)
 
 
 @router.post("/{rma_id}/reject")
@@ -372,7 +379,7 @@ async def reject_rma(
     res = eng.reject(rma_id, actor=current_user.get("user_id"), reason=body.reason or "")
     if not res.get("ok"):
         raise _http_from_result(res)
-    return res
+    return strip_rma_credit(res, current_user)
 
 
 @router.post("/{rma_id}/close")
@@ -396,8 +403,9 @@ async def close_rma(
         write_off_variance=bool(body.write_off_variance),
     )
     if not res.get("ok"):
-        raise _http_from_result(res)
-    return res
+        # A refusal over an outstanding variance names the variance.
+        raise _http_from_result(strip_rma_credit(res, current_user))
+    return strip_rma_credit(res, current_user)
 
 
 # ============================================================================

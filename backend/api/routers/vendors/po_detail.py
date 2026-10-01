@@ -18,6 +18,7 @@ from ._shared import (
     require_roles,
     router,
 )
+from ...services.payables_mask import strip_po_timeline_bills
 
 
 def _stamp_event_actors(events: list) -> None:
@@ -209,7 +210,7 @@ async def get_po_timeline(po_id: str, current_user: dict = Depends(get_current_u
     # and never an invented name); nothing stamped -> no "by" at all.
     _stamp_event_actors(events)
 
-    return {
+    body = {
         "po_id": po_id,
         "po_number": po.get("po_number"),
         "status": po.get("status"),
@@ -220,6 +221,10 @@ async def get_po_timeline(po_id: str, current_user: dict = Depends(get_current_u
         "grns": grns_out,
         "invoices": invoices_out,
     }
+    # A bill's total and paid state are supplier money (owner ruling
+    # 2026-10-01): anyone outside the accounts roles reads that the bill was
+    # booked, not its amount or whether it is paid (services/payables_mask).
+    return strip_po_timeline_bills(body, current_user)
 
 
 @router.get("/purchase-orders/{po_id}")

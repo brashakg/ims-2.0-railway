@@ -305,9 +305,11 @@ def _performance(grns, months=6, bills=None, now=FROZEN_NOW):
         _get_db=lambda: db,
         get_vendor_repository=lambda: _VendorRepo(),
     ):
+        # mtd_spend is supplier money: the accounts roles alone get it (owner
+        # ruling 2026-10-01), so the reader here is an ACCOUNTANT.
         return asyncio.run(
             vendors_mod.vendor_performance(
-                vendor_id=VENDOR, months=months, current_user={}
+                vendor_id=VENDOR, months=months, current_user={"roles": ["ACCOUNTANT"]}
             )
         )
 
