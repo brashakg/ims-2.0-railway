@@ -212,17 +212,20 @@ def test_vendor_list_names_only_outside_purchase_roles(
 
 def test_one_vendor_name_projection():
     """The vendor list and the debit note's vendor block are one projection
-    (cost_mask.VENDOR_NAME_KEYS): the vendors router keeps no vendor-name key
-    list of its own, and the list handler asks cost_mask for the vendor."""
+    (cost_mask.VENDOR_NAME_KEYS): no module under api/ keeps a vendor-name key
+    list of its own, and the list handler asks cost_mask for the vendor. (A
+    copy that names the keys some other way is held by section 18.)"""
     import ast
-    import inspect
+    from pathlib import Path
 
     from api.routers.vendors import master
 
-    tree = ast.parse(inspect.getsource(master))
+    api_dir = Path(__file__).resolve().parents[1] / "api"
     own = [
-        n.lineno
-        for n in ast.walk(tree)
+        (path.relative_to(api_dir).as_posix(), n.lineno)
+        for path in api_dir.rglob("*.py")
+        if path.name != "cost_mask.py"
+        for n in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
         if isinstance(n, (ast.Tuple, ast.List, ast.Set))
         and {"legal_name", "trade_name"}
         <= {c.value for c in n.elts if isinstance(c, ast.Constant)}
@@ -514,6 +517,7 @@ import copy  # noqa: E402
 
 from api.routers import rtv_debit_notes as dn_router  # noqa: E402
 from api.routers import vendor_returns as vr_router  # noqa: E402
+from api.services.cost_mask import can_see_cost as cost_mask_can_see  # noqa: E402
 from api.services.rtv_debit_note import build_debit_note  # noqa: E402
 
 _GSTIN = "27AAPFU0939F1ZV"
@@ -572,7 +576,9 @@ _SECRETS = (
     "rate_paise",
     "totals",
 )
-_PURCHASE_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT", "SUPERADMIN")
+_PURCHASE_ROLES = tuple(
+    r for r in rbac.ALL_ROLES if cost_mask_can_see({"roles": [r]}, "purchase")
+)
 
 
 class _Coll:
@@ -646,7 +652,9 @@ def test_workshop_reads_returns_without_prices_or_supplier(client, return_docs, 
 
 
 # Equality, not a subset (as for the names-only vendor list): no hidden key
-# leaks AND no key the Vendor Returns screen reads goes missing -- status (badge
+# leaks AND no key the Vendor Returns screen reads goes missing. These two sets
+# are the SCREEN's contract, written here on purpose -- not a copy of
+# cost_mask's allow-lists (section 18 holds the routes to those) -- status (badge
 # + Active / History tabs), vendor_name (card heading), return_id (expand +
 # keys), rtv_ref_id (return -> note map, else "Issue Debit Note" 403s),
 # debit_note_id (Print), debit_note_number (the note label).
@@ -1378,6 +1386,130 @@ def test_every_accounts_route_row_is_the_one_list(app):
     }
     assert not wrong, wrong
     assert ACCOUNTS == sorted(AP_ROLES)
+
+
+# ---------------------------------------------------------------------------
+# 18. ONE rule, followed: change cost_mask and every read changes with it
+# ---------------------------------------------------------------------------
+# A route keeping a copy of the rule -- its own role set, its own key
+# allow-list, its own vendor-by-name projection, a strip by key prefix --
+# answers exactly like cost_mask until the rule changes, so every equality test
+# above stays green while the copy drifts (panel: router copies of
+# mask_vendor_return / mask_debit_note and a _BUYER_ROLES prefix strip on
+# /products/{id} passed all of them). Each test changes the rule IN cost_mask
+# and asserts every read follows; a copy cannot.
+def _price_leaks(client, role, path):
+    resp = client.get(path, headers=_headers(role))
+    assert resp.status_code == 200, (role, path, resp.text)
+    return [s for s in _SECRETS if s in resp.text]
+
+
+def test_narrowing_the_purchase_rule_moves_every_purchase_read(
+    client, vendor_repo, return_docs, monkeypatch
+):
+    # STORE_MANAGER still passes every route gate; only the mask rule moves.
+    assert all(_price_leaks(client, "STORE_MANAGER", p) for p in RETURN_DOC_READS)
+    monkeypatch.setitem(
+        cost_mask_mod._CONTEXT_ROLES,
+        "purchase",
+        cost_mask_mod._CONTEXT_ROLES["purchase"] - {"STORE_MANAGER"},
+    )
+    for path in RETURN_DOC_READS:
+        assert not _price_leaks(client, "STORE_MANAGER", path), path
+        assert _price_leaks(client, "AREA_MANAGER", path), path
+    resp = client.get("/api/v1/vendors", headers=_headers("STORE_MANAGER"))
+    assert set(resp.json()["vendors"][0]) == _NAME_KEYS
+
+
+def _without(seq, key):
+    assert key in seq, key
+    return tuple(k for k in seq if k != key)
+
+
+def _names_only_reads(client):
+    """What WORKSHOP_STAFF reads of a return / debit note, and a cashier of a
+    vendor."""
+    def get(path, role="WORKSHOP_STAFF"):
+        resp = client.get(path, headers=_headers(role))
+        assert resp.status_code == 200, (path, resp.text)
+        return resp
+
+    returns = [
+        get("/api/v1/vendor-returns/VR1").json(),
+        get("/api/v1/vendor-returns").json()["returns"][0],
+    ]
+    notes = [
+        get("/api/v1/rtv-debit-notes/DN-1").json(),
+        get("/api/v1/rtv-debit-notes").json()["debit_notes"][0],
+    ]
+    printed = get("/api/v1/rtv-debit-notes/DN-1/print").text
+    vendor = get("/api/v1/vendors", "CASHIER").json()["vendors"][0]
+    return returns, notes, printed, vendor
+
+
+def test_the_purchase_projections_are_cost_mask_s(
+    client, vendor_repo, return_docs, monkeypatch
+):
+    # One key out of every allow-list (each a key the fixtures carry and the
+    # unchanged rule shows a names-only caller): every read must drop it.
+    returns, notes, printed, vendor = _names_only_reads(client)
+    assert all("notes" in r and "reason" in r["items"][0] for r in returns)
+    assert all("financial_year" in n and "hsn" in n["lines"][0] for n in notes)
+    assert all(n["vendor"] == {"vendor_id": "V1", "name": "Acme"} for n in notes)
+    assert "9003" in printed and {"vendor_id", "vendor_code"} <= set(vendor)
+
+    for name, keys in (
+        ("_RETURN_KEYS", ("notes",)),
+        ("_RETURN_ITEM_KEYS", ("reason",)),
+        ("_DEBIT_NOTE_KEYS", ("financial_year",)),
+        ("_DEBIT_NOTE_LINE_KEYS", ("hsn",)),
+        ("VENDOR_NAME_KEYS", ("vendor_id", "vendor_code")),
+    ):
+        narrowed = getattr(cost_mask_mod, name)
+        for key in keys:
+            narrowed = _without(narrowed, key)
+        monkeypatch.setattr(cost_mask_mod, name, narrowed)
+
+    returns, notes, printed, vendor = _names_only_reads(client)
+    assert not any("notes" in r or "reason" in r["items"][0] for r in returns), returns
+    assert not any("financial_year" in n or "hsn" in n["lines"][0] for n in notes), notes
+    assert all(n["vendor"] == {"name": "Acme"} for n in notes), notes
+    assert "9003" not in printed
+    assert not {"vendor_id", "vendor_code"} & set(vendor), vendor
+
+
+def test_narrowing_the_product_rule_moves_every_product_read(
+    client, product_repo, catalog_docs, stock_docs, monkeypatch
+):
+    monkeypatch.setitem(
+        cost_mask_mod._CONTEXT_ROLES,
+        "product",
+        cost_mask_mod._CONTEXT_ROLES["product"] - {"STORE_MANAGER"},
+    )
+    answers = _product_cost_answers(client, "STORE_MANAGER")
+    assert not any(answers.values()), answers
+    assert all(_product_cost_answers(client, "AREA_MANAGER").values())
+    monkeypatch.setattr(recs_mod, "get_db", lambda: _RecsDb())
+    resp = client.get(
+        "/api/v1/reports/purchase/recommendations",
+        params={"store_id": "BV-TEST-01"},
+        headers=_headers("STORE_MANAGER"),
+    )
+    assert resp.status_code == 200, resp.text
+    assert "1111.11" not in resp.text and "4444.44" not in resp.text, resp.text
+
+
+def test_unhiding_a_cost_field_moves_every_product_read(
+    client, product_repo, monkeypatch
+):
+    # Which fields are cost is cost_mask's answer too: a route that strips its
+    # own list (or every key starting "purchase") would keep hiding this one.
+    monkeypatch.setattr(
+        cost_mask_mod, "_ALL_MASKED", cost_mask_mod._ALL_MASKED - {"purchase_price"}
+    )
+    for path in PRODUCT_READS:
+        row = _product_rows(client, "CASHIER", path)[0]
+        assert row["purchase_price"] == 3088.88 and "cost_price" not in row, (path, row)
 
 
 # ---------------------------------------------------------------------------

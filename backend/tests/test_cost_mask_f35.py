@@ -208,9 +208,12 @@ def test_pnl_endpoint_payroll_answers_to_the_salary_gate_not_the_cost_gate(monke
 #       the one that would pick it out.
 # Not a mask: `if <role test>: raise ...` and require_roles(...) -- those are
 # gates, held by rbac_policy and its tests.
-# Ceiling: a role test in one function whose hand-made projection lives in
-# another that names no cost field is not seen; the per-role differential tests
-# (test_counter_roles_no_purchase_reads) hold those routes.
+# Ceiling: it knows the cost / margin field NAMES only. A copy of the supplier
+# masks (a return's unit_price, a debit note's GSTIN / vendor block: no cost
+# field named), a strip by key prefix, or a role test in one function whose
+# projection lives in another is not seen here. Section 18 of
+# test_counter_roles_no_purchase_reads holds those by behaviour: it changes
+# the rule in cost_mask and every read must change with it.
 import ast  # noqa: E402
 import functools  # noqa: E402
 from pathlib import Path  # noqa: E402

@@ -28,8 +28,11 @@ Role policy (DECISIONS sec 9, owner rulings 2026-09-28 / D7 / 2026-09-29):
     and their rbac_policy rows ARE rbac_policy._core.ACCOUNTS, built from it.
   * Counter roles (SALES_*, CASHIER, OPTOMETRIST, WORKSHOP_STAFF) see cost in
     no context (audit F46/F60, owner ruling D7). A router never keeps its own
-    cost role set: it asks can_see_cost / mask_cost here (a guard test in
-    tests/test_cost_mask_f35.py fails otherwise).
+    copy of this rule -- a role set, a key allow-list or a vendor-by-name
+    projection: it asks can_see_cost / mask_* here. Section 18 of
+    tests/test_counter_roles_no_purchase_reads.py changes this rule and fails
+    on any read that does not change with it; tests/test_cost_mask_f35.py
+    flags the common hand-made shapes.
 
 "Hidden" = the field is removed server-side so it never reaches the browser.
 No emoji (Windows cp1252).
