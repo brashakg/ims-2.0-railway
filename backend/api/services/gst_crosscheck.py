@@ -697,10 +697,13 @@ def build_crosscheck(
                     {"Claimed on GSTR-3B": _f(unreg.get("tax")), "Expected": 0.0},
                     0.0,
                     note=(
-                        "%d bill(s) claim this input credit although the supplier "
-                        "has no GSTIN on file, and an unregistered supplier's tax "
-                        "never reaches GSTR-2B. Add the supplier's GSTIN, or mark "
-                        "the bill as no input credit: %s"
+                        "%d bill(s) claim this input credit although the bill "
+                        "names no supplier GSTIN, and an unregistered supplier's "
+                        "tax never reaches GSTR-2B. Adding a GSTIN to the "
+                        "supplier now does not fix the bill: its CGST/SGST/IGST "
+                        "was set without the supplier's state. Book the bill "
+                        "again under the supplier's GSTIN, or mark it as no "
+                        "input credit: %s"
                         % (k, ", ".join(str(x) for x in (unreg.get("bill_numbers") or [])[:20]))
                         if k
                         else "Every claimed bill names a registered supplier."

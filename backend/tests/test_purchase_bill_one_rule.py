@@ -774,6 +774,28 @@ class TestCreditFromAnUnregisteredSupplierIsFlagged:
         assert row["status"] == "MISMATCH" and row["variance"] == 50.01
         assert "VN-1" in row["note"]
 
+    def test_a_gstin_given_to_the_supplier_later_does_not_clear_the_bill(self):
+        """Panel MEDIUM (gst_itc._itc_unplaced): the row read the vendor
+        master's CURRENT GSTIN. FR-1 from VNO (no GSTIN) through the Cash Flow
+        door booked CGST 60 + SGST 60 on our JH number. VNO then got a
+        Maharashtra GSTIN and the row read MATCH, while the bill still claims
+        CGST + SGST and the supplier's GSTR-1 carries IGST 120. The bill's own
+        supplier GSTIN, the one its head was set by, judges it."""
+        db, cli = TestEveryDoorEveryReader()._world()
+        vno = {"vendor_id": "VNO", "trade_name": "Local Fitter", "credit_days": 0}
+        db["vendors"].insert_one(dict(vno))
+        vend.get_vendor_repository = lambda: _Repo([vno], "vendor_id")
+        r = _door(cli, "VNO", **_cash_flow_bill(bill_number="FR-1", tax_amount=120, total_amount=1120))
+        assert r.status_code == 201, r.text
+        bill = db["vendor_bills"].find_one({"bill_number": "FR-1"})
+        assert bill["vendor_gstin"] is None
+        assert (bill["cgst_total"], bill["sgst_total"], bill["igst_total"]) == (60.0, 60.0, 0.0)
+
+        db["vendors"].update_one({"vendor_id": "VNO"}, {"$set": {"gstin": SUP_MH}})
+        row = _row(_crosscheck(db, "E1"), "Input credit from suppliers with no GSTIN")
+        assert (row["status"], row["variance"]) == ("MISMATCH", 120.0), row
+        assert "FR-1" in row["note"] and "Book the bill again" in row["note"]
+
 
 class TestTransferMirrorHeadsAreTheOneRule:
     def test_whenever_both_gstins_resolve_the_mirror_head_is_classify_supply(self):

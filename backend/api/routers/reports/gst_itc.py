@@ -232,10 +232,12 @@ def _itc_unplaced(db, year, mon, last_day, entity_id=None) -> dict:
     Scoped to `entity_id` plus the company-less bills (they belong to nobody,
     so every view shows them).
 
-    Also `unregistered`: credit that IS on a return although the supplier has
-    no GSTIN (neither on the bill nor on the vendor) and the bill is not
-    reverse charge -- an unregistered supplier's tax never reaches GSTR-2B, so
-    that credit cannot be claimed.
+    Also `unregistered`: credit that IS on a return although the bill names no
+    supplier GSTIN and is not reverse charge -- an unregistered supplier's tax
+    never reaches GSTR-2B, so that credit cannot be claimed. The bill's stored
+    vendor_gstin judges it, never the vendor master: the head was decided
+    without the supplier's state, so a GSTIN added to the supplier later
+    leaves the bill's head wrong.
 
     Returns {count, tax, bill_numbers, unregistered: {count, tax,
     bill_numbers}}. A read failure returns {failed: True} -- never zeros, which
@@ -278,7 +280,6 @@ def _itc_unplaced(db, year, mon, last_day, entity_id=None) -> dict:
         q: dict = {"status": {"$nin": _DEAD_BILL}, "itc_eligible": {"$ne": False}}
         if entity_id:
             q["recipient_entity_id"] = {"$in": [entity_id, None]}
-        vendor_gstin: dict = {}
         # ponytail: reads every live bill of the scope -- an undated bill is
         # in no month's window, yet is listed in every month; add a
         # "this month or undated" prefilter if this grows slow.
@@ -294,13 +295,9 @@ def _itc_unplaced(db, year, mon, last_day, entity_id=None) -> dict:
             if b.get("bill_id") not in placed or not has_heads:
                 _add(out, b, tax)
                 continue
-            if b.get("reverse_charge") or str(b.get("vendor_gstin") or "").strip():
-                continue
-            vid = b.get("vendor_id")
-            if vid not in vendor_gstin:
-                v = db["vendors"].find_one({"vendor_id": vid}, {"_id": 0, "gstin": 1})
-                vendor_gstin[vid] = str((v or {}).get("gstin") or "").strip()
-            if not vendor_gstin[vid]:
+            # The bill's own supplier GSTIN decided its head; the vendor
+            # master's current one did not, so it never clears the bill.
+            if not (b.get("reverse_charge") or str(b.get("vendor_gstin") or "").strip()):
                 _add(unreg, b, tax)
     except Exception:
         return {"count": 0, "tax": 0.0, "bill_numbers": [], "failed": True}
