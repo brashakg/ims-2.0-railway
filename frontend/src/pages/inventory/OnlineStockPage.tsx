@@ -10,7 +10,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { RefreshCcw, Loader2, AlertTriangle, CheckCircle2, ShoppingCart } from 'lucide-react';
-import { onlineStockApi, type ReconcileResult } from '../../services/api/onlineStock';
+import { onlineStockApi, type ReconcileItem, type ReconcileResult } from '../../services/api/onlineStock';
 import { storeApi } from '../../services/api/stores';
 import { useToast } from '../../context/ToastContext';
 
@@ -32,6 +32,14 @@ const STATUS_LABEL: Record<string, string> = {
   OK: 'OK',
   NOT_ONLINE: 'Not online',
 };
+
+// A row whose live Shopify number is not the one IMS sends is the row a drift
+// task names (parity files drift both ways), so "Show only at-risk" keeps it:
+// an under-listed SKU is status OK / delta 0 and would otherwise be hidden
+// behind "No overselling risk" while the task sends the manager to it.
+function listedOffRecommended(i: ReconcileItem): boolean {
+  return typeof i.online === 'number' && typeof i.recommended === 'number' && i.online !== i.recommended;
+}
 
 export default function OnlineStockPage() {
   const toast = useToast();
@@ -58,7 +66,7 @@ export default function OnlineStockPage() {
 
   const s = data?.summary || {};
   const items = (data?.items || []).filter((i) =>
-    onlyRisk ? (i.status === 'OVERSELL_RISK' || i.status === 'OVER_ALLOCATED') : true,
+    onlyRisk ? (i.status === 'OVERSELL_RISK' || i.status === 'OVER_ALLOCATED' || listedOffRecommended(i)) : true,
   );
   // An empty table never claims "no risk" for rows nobody could verify:
   // nothing verified (the live-listing read failed, or every row unknown)
