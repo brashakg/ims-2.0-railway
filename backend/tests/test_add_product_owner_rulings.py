@@ -290,6 +290,70 @@ def test_f13_guard_preview_is_what_the_create_door_mints(door):
     assert created["sku"] == preview["sku"]
 
 
+# What the Add-product form collects, per registry key (one value each).
+_FORM_VALUES = {
+    "brand_name": "Carrera", "model_no": "CA 8895", "model_name": "Acuvue Oasys",
+    "colour_code": "807/2", "colour_name": "Hazel Brown", "power": "-1.25",
+    "expiry_date": "2027-01-31", "index": "1.56", "coating": "HC",
+    "name": "Frame fitting", "subbrand": "Vista", "lens_size": "52.5", "size": "M",
+}
+
+
+def _form_post(category, attrs):
+    """The create payload the form posts (formModel.buildProductPayload):
+    brand and model straight from the same attributes, nothing invented."""
+    return prod_router.ProductCreate(
+        category=category, brand=attrs.get("brand_name", ""),
+        model=attrs.get("model_no") or attrs.get("model_name") or "",
+        attributes=dict(attrs), mrp=1000.0, offer_price=900.0,
+    )
+
+
+def _preview(category, attrs):
+    return asyncio.run(pm_router.sku_preview(
+        pm_router.SkuPreviewRequest(category=category, attributes=dict(attrs)),
+        current_user=_ADMIN,
+    ))["sku"]
+
+
+@pytest.mark.parametrize("category", pm.canonical_categories())
+def test_f13_every_category_saves_the_sku_it_previews(door, category):
+    """The Review preview and the save come from the same minter for EVERY
+    category -- Optical Lens (no model) and Services (no brand) included. The
+    form used to invent a model ('STD', or the sub-brand) only on save."""
+    spec = pm.category_spec(category)
+    attrs = {k: _FORM_VALUES[k] for k in (*spec.required, *spec.optional) if k in _FORM_VALUES}
+    created = door(_form_post(category, attrs))
+    assert created["sku"] == _preview(category, attrs)
+
+
+def test_f13_an_optical_lens_sku_reads_brand_and_sub_brand(door):
+    """Optical Lens has no model: the minter puts the sub-brand in its place,
+    and with no sub-brand mints no filler ('STD' was the form's)."""
+    lens = {"brand_name": "Essilor", "index": "1.56", "coating": "HC"}
+    assert door(_form_post("LS", dict(lens, subbrand="Crizal")))["sku"] == "LS-ESSILOR-CRIZAL"
+    assert door(_form_post("LS", lens))["sku"] == "LS-ESSILOR"
+
+
+def test_f13_the_size_keeps_its_decimal_point(door):
+    """52.5 and 525 are different eye sizes, so different SKUs; a float 54.0
+    from a catalog door is 54. A minted SKU always passes the SKU check (a
+    clone or an import may send it back)."""
+    def sku(size):
+        return pm.build_sku("FR", dict(_CARRERA, lens_size=size))
+
+    assert sku("52.5") == "FR-CARRERA-CA8895-807-52.5"
+    assert sku("525") == "FR-CARRERA-CA8895-807-525"
+    assert sku(54.0) == sku("54") == sku("54.0") == "FR-CARRERA-CA8895-807-54"
+    assert sku("52/18") == "FR-CARRERA-CA8895-807-52-18"
+    created = door(_form(brand="Carrera", model="CA8895", color="807",
+                         attributes={"lens_size": "52.5"}))
+    assert created["sku"] == "FR-CARRERA-CA8895-807-52.5"
+    assert pm.is_acceptable_sku(created["sku"])
+    again = door(_form(brand="Carrera", model="CA8895", color="809", sku=created["sku"] + "B"))
+    assert again["sku"] == created["sku"] + "B"
+
+
 def test_f13_guard_a_clash_still_gets_a_unique_sku(door):
     first = door(_form(brand="Carrera", model="CA8895", color="807"))
     # Same identity is a 409 at this door; a different size key is a new row

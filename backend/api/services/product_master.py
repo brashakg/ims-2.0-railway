@@ -42,6 +42,7 @@ SAFETY (CORRECTIONS, binding):
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import uuid
@@ -72,7 +73,9 @@ logger = logging.getLogger("ims.product_master")
 # Excel rule and Shopify both use. Deliberately NO length constraint -- the
 # canonical Excel example (SGPRADAVPR19W1AB1O153 / FRBURBERRYB31421109/7155)
 # already varies wildly, and legacy import must never be rejected.
-_SKU_PERMISSIVE = re.compile(r"^[A-Za-z0-9/_-]+$")
+# `.` is allowed because build_sku mints it in a size (52.5): every SKU the
+# minter makes must pass this check if it is ever sent back (a clone, an import).
+_SKU_PERMISSIVE = re.compile(r"^[A-Za-z0-9/._-]+$")
 
 # Valid discount cap tiers. Mirrors pricing_caps.CATEGORY_DISCOUNT_CAPS and the
 # schemas.py PRODUCT_SCHEMA.discount_category enum (SERVICE added in PM/N5).
@@ -588,13 +591,28 @@ def _sku_segment(value: Any) -> str:
     return "-".join(p for p in s.split("/") if p)
 
 
+def _size_segment(value: Any) -> str:
+    """The size part. A number keeps its decimal point, so a 52.5 eye size is
+    never the SKU of a 525 one; a whole number drops a trailing .0 (a float
+    54.0 from a catalog door is 54). Anything else is an ordinary segment."""
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return _sku_segment(value)
+    if not (math.isfinite(num) and num >= 0):
+        return _sku_segment(value)
+    return ("%f" % num).rstrip("0").rstrip(".")
+
+
 def build_sku(category: Any, attributes: Dict[str, Any], db=None) -> str:
     """Mint a NEW product's readable SKU: CATEGORY-BRAND-MODEL-COLOUR-SIZE,
     e.g. FR-CARRERA-CA8895-807-54 (owner ruling 2026-09-28, D5). Empty parts
-    are skipped. Deterministic, so POST /products/sku-preview shows the form
-    exactly what the create door will mint; a clash gets mint_unique_sku's
-    counter suffix. Existing SKUs are never re-minted (only a create without a
-    SKU calls this). `db` is unused (kept for the callers' signature)."""
+    are skipped. A category with no model (Optical Lens) uses its sub-brand
+    in the model's place: LS-ESSILOR-CRIZAL. Deterministic, so POST
+    /products/sku-preview shows the form exactly what the create door will
+    mint; a clash gets mint_unique_sku's counter suffix. Existing SKUs are
+    never re-minted (only a create without a SKU calls this). `db` is unused
+    (kept for the callers' signature)."""
     spec = category_spec(category)
     if spec is None:
         raise ProductMasterError(
@@ -604,12 +622,13 @@ def build_sku(category: Any, attributes: Dict[str, Any], db=None) -> str:
     parts = (
         spec.prefix,
         a.get("brand_name") or a.get("brand"),
-        a.get("model_no") or a.get("model_name") or a.get("model"),
+        a.get("model_no") or a.get("model_name") or a.get("model") or a.get("subbrand"),
         a.get("colour_code") or a.get("color_code") or a.get("colour_name") or a.get("color"),
-        # A frame's eye size is `lens_size` in the registry; `size` elsewhere.
-        a.get("size") or a.get("lens_size"),
     )
-    return "-".join(seg for seg in map(_sku_segment, parts) if seg)
+    # A frame's eye size is `lens_size` in the registry; `size` elsewhere.
+    size = a.get("size") or a.get("lens_size")
+    segs = [*map(_sku_segment, parts), _size_segment(size) if size else ""]
+    return "-".join(seg for seg in segs if seg)
 
 
 def _next_collision_suffix(prefix: str, db=None) -> int:
@@ -713,7 +732,7 @@ def mint_unique_sku(
 
 def is_acceptable_sku(sku: Any) -> bool:
     """Format-PERMISSIVE legacy-SKU acceptance: allow letters/digits and the
-    `/`, `-`, `_` separators with no length constraint. Legacy Shopify-style
+    `/`, `-`, `_`, `.` separators with no length constraint. Legacy Shopify-style
     SKUs (FRBURBERRYB31421109/7155) and older formats must pass."""
     if sku is None:
         return False
