@@ -71,6 +71,10 @@ def auto_reorder_disabled(product: Any) -> bool:
 
 LEVELS_FIELD = "reorder_levels"
 
+# A Mongo key (reorder_levels.<store_id>): no dots, no "$". The write model and
+# the migration script both read this one pattern.
+STORE_KEY_PATTERN = r"^[A-Za-z0-9_-]+$"
+
 
 def reorder_level(product: Any, *, store_id: Optional[str]) -> Optional[int]:
     """THIS shop's reorder level for the product, or None = not set."""
@@ -103,42 +107,30 @@ def _coll(source):
     return source.collection if isinstance(source, BaseRepository) else source
 
 
+class _StockOnly:
+    """Hands the one on-hand reader the stock_units collection it was given."""
+
+    def __init__(self, coll):
+        self._coll = coll
+
+    def get_collection(self, _name):
+        return self._coll
+
+
 def on_hand(
     stock_units, *, store_id: Optional[str], product_ids=None
 ) -> Dict[Tuple[str, str], int]:
     """Sellable units per (product_id, store_id) -- the count a level is
-    compared with (the shared on-hand rule, so the stock ledger's count and
-    this one agree). store_id None = every shop. {} if the read fails."""
-    from .item_events import on_hand_match
+    compared with. This is NOT a second rule: it asks
+    inventory_balancing._on_hand_by_product_store (item_events decides which
+    unit is on hand). store_id None = every shop. {} if the read fails."""
+    from .inventory_balancing import _on_hand_by_product_store
 
-    stock_units = _coll(stock_units)
-    if stock_units is None:
+    coll = _coll(stock_units)
+    if coll is None:
         return {}
-    match: Dict[str, Any] = dict(on_hand_match())
-    if store_id:
-        match["store_id"] = store_id
-    if product_ids is not None:
-        match["product_id"] = {"$in": list(product_ids)}
-    out: Dict[Tuple[str, str], int] = {}
-    try:
-        for r in stock_units.aggregate(
-            [
-                {"$match": match},
-                {
-                    "$group": {
-                        "_id": {"p": "$product_id", "s": "$store_id"},
-                        # One row == one unit; a legacy row with no quantity is 1.
-                        "qty": {"$sum": {"$ifNull": ["$quantity", 1]}},
-                    }
-                },
-            ]
-        ):
-            key = r.get("_id") or {}
-            if key.get("p") is not None:
-                out[(str(key["p"]), str(key.get("s")))] = int(r.get("qty") or 0)
-    except Exception:  # noqa: BLE001 - unreadable stock alerts nothing
-        return {}
-    return out
+    ids = None if product_ids is None else [str(p) for p in product_ids]
+    return _on_hand_by_product_store(_StockOnly(coll), ids, store_id)
 
 
 def low_stock_rows(
