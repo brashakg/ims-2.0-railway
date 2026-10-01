@@ -619,14 +619,55 @@ def _exec_draft_po(db, proposal: Dict[str, Any]) -> Dict[str, Any]:
         f"-{str(sku)[:6]}"
     )
     store_id = payload.get("store_id")
+    vendor_id = payload.get("vendor_id")
+    product_id = payload.get("product_id") or sku
+
+    def _one(coll_name: str, key: str, value):
+        """One document by id, or None -- a miss never blocks the draft."""
+        if not value:
+            return None
+        try:
+            return db.get_collection(coll_name).find_one({key: value})
+        except Exception:  # noqa: BLE001
+            return None
+
+    prod = _one("products", "product_id", product_id) or {}
+    vendor = _one("vendors", "vendor_id", vendor_id)
+    store_doc = _one("stores", "store_id", store_id)
+
+    # THE order shape every other door writes: `items` lines priced and taxed by
+    # the one per-line GST engine, so this draft can be edited and sent like any
+    # other. (It used to carry a bare top-level sku/quantity and no lines.)
+    from api.routers.vendors.gst import build_po_gst
+
+    cost = prod.get("cost_price") or prod.get("purchase_price") or 0
+    computed = build_po_gst(
+        [
+            {
+                "product_id": product_id,
+                "product_name": payload.get("product_name") or prod.get("name") or sku,
+                "sku": sku,
+                "quantity": qty,
+                "unit_price": float(cost or 0),
+            }
+        ],
+        lambda _pid: prod or None,
+        vendor,
+        store_doc,
+    )
     po_doc = {
         "po_id": uuid.uuid4().hex,
         "po_number": po_number,
-        "sku": sku,
-        "product_id": payload.get("product_id") or sku,
-        "vendor_id": payload.get("vendor_id"),
+        "vendor_id": vendor_id,
+        "vendor_name": (vendor or {}).get("trade_name") or (vendor or {}).get("legal_name"),
         "delivery_store_id": store_id,           # store-attributed (F7)
-        "quantity": qty,
+        "items": computed["items"],
+        "subtotal": computed["subtotal"],
+        "tax_amount": computed["tax"],
+        "total_amount": computed["total"],
+        "gst_summary": computed["gst_summary"],
+        "gst_warnings": computed["warnings"],
+        **computed["parties"],
         "status": "DRAFT",                       # DRAFT only - not sent
         "auto_drafted_by": proposal.get("created_by_agent"),
         "from_proposal_id": proposal.get("proposal_id"),

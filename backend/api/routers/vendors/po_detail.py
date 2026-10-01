@@ -293,13 +293,46 @@ async def send_po(
                 detail="This order has no lines - add what to order before sending it.",
             )
 
+        # A line must name a product that exists. This is the ONE existence
+        # check and it does not depend on the catalogue gate: a line whose
+        # product was never written (a create that failed part-way) must not
+        # go out to a vendor. Only an order bearing a `source` is exempt --
+        # cl_po / forecast lines come from system data whose ids are not on
+        # the products spine (see the gate below). Fail-soft when no product
+        # repo.
+        product_repo = get_product_repository()
+        found: dict = {}
+        if product_repo is not None and not po.get("source"):
+            ghosts = []
+            for it in po.get("items", []) or []:
+                pid = it.get("product_id")
+                prod = product_repo.find_by_id(pid) if pid else None
+                if prod is None:
+                    ghosts.append(
+                        {"product_id": pid, "missing": ["product_not_found"]}
+                    )
+                else:
+                    found[pid] = prod
+            if ghosts:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "message": (
+                            "Cannot send this order: a line names a product "
+                            "that does not exist. Remove the line or pick the "
+                            "product again."
+                        ),
+                        "code": "PO_LINE_PRODUCT_MISSING",
+                        "lines": ghosts,
+                    },
+                )
+
         # Hub Phase 2 SENT gate: a PO may be DRAFTED against an incomplete product,
         # but cannot be SENT to the vendor until every line is catalog-complete.
         # cost_price is the ONE allowed gap -- it legitimately arrives at GRN (the
         # receiving flow backfills it from this PO), so a product that is DRAFT
         # ONLY because cost is unknown is still sendable. Any OTHER gap (missing
-        # category attribute, mrp/offer, hsn/gst) blocks the send. Fail-soft when
-        # no product repo.
+        # category attribute, mrp/offer, hsn/gst) blocks the send.
         #
         # This gate governs ONLY manually-entered PO lines (the Create-PO form's
         # spine-product picker). Auto-generated POs carry a `source`:
@@ -310,17 +343,11 @@ async def send_po(
         # the gate for any PO bearing a `source`, mirroring the create-side gate
         # which only fires inside the manual create_po endpoint those flows bypass.
         # Without this, every cl_po/forecast DRAFT would 400 PO_LINES_INCOMPLETE.
-        product_repo = get_product_repository()
         if product_repo is not None and _po_catalog_gate_on() and not po.get("source"):
             blocked = []
             for it in po.get("items", []) or []:
                 pid = it.get("product_id")
-                prod = product_repo.find_by_id(pid) if pid else None
-                if prod is None:
-                    blocked.append(
-                        {"product_id": pid, "missing": ["product_not_found"]}
-                    )
-                    continue
+                prod = found[pid]
                 # Ruling 13: a PROVISIONAL row exists precisely because the buyer
                 # is ordering something nobody has catalogued yet. Blocking the
                 # send on its (inevitable) gaps would put the obstacle back at

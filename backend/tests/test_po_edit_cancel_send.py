@@ -1756,3 +1756,54 @@ def test_a_card_built_before_the_server_answered_can_still_cancel_a_line(monkeyp
     body = v.POLineCancel(reason="ordered twice", product_id="", quantity=2)
     _run(v.cancel_po_line("PO1", 0, body, _user()))
     assert [i["product_id"] for i in repo.pos["PO1"]["items"]] == ["P2"]
+
+
+# =========================================================================== #
+# One order shape: an ORACLE draft is editable and sendable like any other
+# =========================================================================== #
+
+
+def test_an_oracle_draft_can_be_edited_and_sent(monkeypatch):
+    from test_ai_proposals import FakeDB
+    from agents.proposals import ProposalStore
+
+    db = FakeDB()
+    db.get_collection("products").insert_one(
+        {"product_id": "P1", "name": "Carrera CA8895", "cost_price": 1000, "hsn_code": "9003"}
+    )
+    store = ProposalStore(db=db)
+    prop = store.create(
+        created_by_agent="oracle", proposal_type="draft_po", title="Reorder P1",
+        rationale="stock low",
+        payload={"product_id": "P1", "sku": "P1", "quantity": 4, "store_id": "S1",
+                 "vendor_id": "V1", "product_name": "Carrera CA8895"},
+    )
+    assert store.approve(prop["proposal_id"], reviewed_by="ceo")["executed"] is True
+    drafted = db.get_collection("purchase_orders").docs[0]
+    drafted.pop("_id", None)
+    assert [(i["product_id"], i["quantity"]) for i in drafted["items"]] == [("P1", 4)]
+
+    repo, _ = _wire(monkeypatch, drafted)
+    monkeypatch.setattr(v, "get_product_repository", lambda: _ProductRepo({"P1": {"product_id": "P1"}}))
+    monkeypatch.setattr(v, "_po_catalog_gate_on", lambda: False)
+    edit = _edit_body([{"product_id": "P1", "product_name": "Carrera CA8895", "sku": "P1",
+                        "quantity": 6, "unit_price": 1000}])
+    _run(v.update_po(drafted["po_id"], edit, _user()))
+    assert repo.pos[drafted["po_id"]]["items"][0]["quantity"] == 6
+    _run(v.send_po(drafted["po_id"], _user()))
+    assert repo.pos[drafted["po_id"]]["status"] == "SENT"
+
+
+@pytest.mark.parametrize("gate", [True, False])
+def test_send_refuses_a_line_whose_product_does_not_exist(monkeypatch, gate):
+    """One existence check, whatever the catalogue gate says: a create that
+    died after the order was saved can leave a line naming no product."""
+    repo, _ = _wire(monkeypatch, _po())
+    monkeypatch.setattr(v, "get_product_repository", lambda: _ProductRepo({"P1": {"product_id": "P1"}}))
+    monkeypatch.setattr(v, "_po_catalog_gate_on", lambda: gate)
+    with pytest.raises(HTTPException) as e:
+        _run(v.send_po("PO1", _user()))  # P2 names no product
+    assert e.value.status_code == 400
+    assert e.value.detail["code"] == "PO_LINE_PRODUCT_MISSING"
+    assert [l["product_id"] for l in e.value.detail["lines"]] == ["P2"]
+    assert repo.pos["PO1"]["status"] == "DRAFT"
