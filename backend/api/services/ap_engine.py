@@ -690,6 +690,90 @@ def as_of_day(as_of_iso: Optional[str] = None) -> str:
     return min(asked, today) if asked else today
 
 
+def is_post_dated(doc: dict, as_of_iso: Optional[str] = None) -> bool:
+    """True for a row dated after the as-of day (default today): recorded, but
+    not yet counted in any 'what we owe' figure. Undated rows always count."""
+    return ledger_day(doc) > as_of_day(as_of_iso)
+
+
+def supplier_rows(
+    bills: List[dict],
+    payments: List[dict],
+    debit_notes: List[dict],
+    store_id: Optional[str] = None,
+) -> tuple:
+    """Every RECORDED (bill, payment, debit note) of the supplier ledger, with
+    no as-of cutoff -- what the payments / debit-notes lists and the ledger's
+    post-dated list show. supplier_ledger_rows is these rows struck on a day.
+
+    1. An inter-company transfer's mirror bill (source_transfer_id) is not a
+       supplier purchase: one of our companies 'bills' another for frames the
+       external supplier's bill already counts. It -- and any money naming it --
+       is left out (owner ruling D13: such a move is a valued challan).
+    2. `store_id` narrows the rows to one shop, and every row has exactly one
+       shop, decided from ALL the supplier's bills whatever their date -- so a
+       row's shop never depends on the day the figures are struck:
+         * a bill: the shop its goods landed in (its store_id);
+         * money naming a bill: that bill's shop (the money settles it, so the
+           bill and its money are always in the same shop's share);
+         * money naming none (an advance, an on-account payment, a debit note
+           with no bill): the shop stamped on it when it was recorded
+           (store_id; POST /vendors/{id}/payments and /debit-notes stamp it);
+         * a legacy row with no stamp: the shop of the same supplier's latest
+           bill dated on or before it, else of its earliest bill.
+       So the shops add up to the supplier ledger. A supplier that has never
+       billed and an unstamped row have no shop: such money counts under all
+       stores only.
+    """
+    bills, payments, debit_notes = (
+        [d for d in docs or [] if isinstance(d, dict)]
+        for docs in (bills, payments, debit_notes)
+    )
+    mirror = {b.get("bill_id") for b in bills if b.get("source_transfer_id")}
+    mirror.discard(None)  # a mirror bill with no id must not swallow on-account money
+    bills = [b for b in bills if not b.get("source_transfer_id")]
+    payments, debit_notes = (
+        [d for d in docs if d.get("bill_id") not in mirror]
+        for docs in (payments, debit_notes)
+    )
+    if not store_id:
+        return bills, payments, debit_notes
+
+    shop_of_bill = {b.get("bill_id"): b.get("store_id") for b in bills if b.get("bill_id")}
+    billed: Dict[object, list] = {}
+    for b in bills:
+        billed.setdefault(b.get("vendor_id"), []).append((ledger_day(b), b.get("store_id") or ""))
+    for history in billed.values():
+        history.sort(key=lambda r: (r[0] == "", r))
+
+    def _shop(money: dict) -> Optional[str]:
+        if money.get("bill_id") in shop_of_bill:
+            return shop_of_bill[money["bill_id"]]
+        if money.get("store_id"):
+            return money["store_id"]
+        dated = billed.get(money.get("vendor_id"))
+        if not dated:
+            return None
+        day = ledger_day(money)
+        before = [r for r in dated if r[0] and day and r[0] <= day]
+        return (before[-1] if before else dated[0])[1]
+
+    return (
+        [b for b in bills if b.get("store_id") == store_id],
+        [p for p in payments if _shop(p) == store_id],
+        [d for d in debit_notes if _shop(d) == store_id],
+    )
+
+
+def split_as_of(rows: tuple, as_of: Optional[str] = None) -> tuple:
+    """((bills, payments, notes) counted on the as-of day, (bills, payments,
+    notes) dated after it). Each row by its own ledger_day; undated rows count."""
+    cutoff = as_of_day(as_of)
+    counted = tuple([d for d in docs if ledger_day(d) <= cutoff] for docs in rows)
+    later = tuple([d for d in docs if ledger_day(d) > cutoff] for docs in rows)
+    return counted, later
+
+
 def supplier_ledger_rows(
     bills: List[dict],
     payments: List[dict],
@@ -698,69 +782,63 @@ def supplier_ledger_rows(
     as_of: Optional[str] = None,
 ) -> tuple:
     """THE (bills, payments, debit notes) every 'what we owe our suppliers'
-    figure is built from (F56/F63).
+    figure is built from (F56/F63): supplier_rows (no transfer mirror bills;
+    with `store_id` one shop's share), struck on the as-of day -- only rows
+    dated on or before as_of_day (the day asked for, clamped to today) count;
+    undated rows always count. So the Purchases report, Cash Flow, AP aging,
+    the Suppliers card and the vendor ledger strike 'we owe' on the same day.
 
-    1. An inter-company transfer's mirror bill (source_transfer_id) is not a
-       supplier purchase: one of our companies 'bills' another for frames the
-       external supplier's bill already counts. It -- and any money naming it --
-       is left out (owner ruling D13: such a move is a valued challan).
-    2. `store_id` narrows the rows to one shop, and every row has exactly one
-       shop: a bill, the shop its goods landed in (store_id); money that names
-       a bill, that bill's shop; money that names none (an advance, an
-       on-account payment, a debit note with no bill), the shop of the same
-       supplier's latest bill dated on or before it, else of its earliest bill.
-       So the shops add up to the supplier ledger. A supplier that has never
-       billed has no shop: its money counts under all stores only.
-
-    3. Only rows dated on or before the as-of day (as_of_day: the day asked
-       for, clamped to today) count; undated rows always count. So the
-       Purchases report for this month, Cash Flow, AP aging, the Suppliers
-       card and the vendor ledger strike 'we owe' on the same day.
-
-    ponytail: money with no bill follows the supplier's latest bill, not a shop
-    stamped on the payment; stamp store_id on payments if a supplier serving two
-    shops is ever paid on account for one of them.
+    The cutoff applies to each row by its OWN date, after every row's shop is
+    known: a payment naming a bill keyed ahead is still that bill's shop's
+    money, never the shop of whatever earlier bill happens to be in range.
     """
-    cutoff = as_of_day(as_of)
-    bills, payments, debit_notes = (
-        [d for d in docs or [] if isinstance(d, dict) and ledger_day(d) <= cutoff]
-        for docs in (bills, payments, debit_notes)
-    )
-    mirror = {
-        b.get("bill_id")
-        for b in bills or []
-        if isinstance(b, dict) and b.get("source_transfer_id")
-    }
-    bills = [b for b in bills or [] if isinstance(b, dict) and b.get("bill_id") not in mirror]
-    payments, debit_notes = (
-        [d for d in docs or [] if isinstance(d, dict) and d.get("bill_id") not in mirror]
+    return split_as_of(supplier_rows(bills, payments, debit_notes, store_id), as_of)[0]
+
+
+def post_dated_entries(
+    bills: List[dict],
+    payments: List[dict],
+    debit_notes: List[dict],
+) -> List[dict]:
+    """The rows dated after the as-of day as ledger entries (build_ledger's
+    shape, chronological) with no running balance: recorded, so the ledger
+    shows them, but not counted in the balance until their day."""
+    entries = build_ledger(bills, payments, debit_notes)["entries"]
+    return [{k: v for k, v in e.items() if k != "balance"} for e in entries]
+
+
+def bill_as_of(
+    bill: dict,
+    payments: List[dict],
+    debit_notes: List[dict],
+    as_of: Optional[str] = None,
+) -> dict:
+    """One bill's figures on the ledger's as-of rule (default today).
+
+    outstanding     -- what is owed on it on the as-of day: its total less the
+                       money naming it dated on or before that day (floored at
+                       0) -- the figure the supplier ledger and AP aging count.
+    post_dated_money-- money naming it dated after that day (a post-dated
+                       cheque): recorded, not yet counted.
+    post_dated_until-- the latest such day, else None.
+    post_dated      -- the bill itself is dated after that day (keyed ahead).
+    """
+    bid = bill.get("bill_id")
+    mine = tuple(
+        [d for d in docs or [] if isinstance(d, dict) and d.get("bill_id") == bid]
         for docs in (payments, debit_notes)
     )
-    if not store_id:
-        return bills, payments, debit_notes
-
-    shop_of_bill = {b.get("bill_id"): b.get("store_id") for b in bills}
-    billed: Dict[object, list] = {}
-    for b in bills:
-        billed.setdefault(b.get("vendor_id"), []).append(
-            (_day(b.get("bill_date") or b.get("created_at")), b.get("store_id") or "")
-        )
-
-    def _shop(money: dict, when) -> Optional[str]:
-        if money.get("bill_id") in shop_of_bill:
-            return shop_of_bill[money["bill_id"]]
-        dated = sorted(billed.get(money.get("vendor_id"), []), key=lambda r: (r[0] == "", r))
-        if not dated:
-            return None
-        day = _day(when)
-        before = [r for r in dated if r[0] and day and r[0] <= day]
-        return (before[-1] if before else dated[0])[1]
-
-    return (
-        [b for b in bills if b.get("store_id") == store_id],
-        [p for p in payments if _shop(p, p.get("payment_date") or p.get("created_at")) == store_id],
-        [d for d in debit_notes if _shop(d, d.get("date") or d.get("created_at")) == store_id],
-    )
+    (pays, notes), (later_pays, later_notes) = split_as_of(mine, as_of)
+    later = later_pays + later_notes
+    return {
+        "outstanding": bill_outstanding(bill, pays, notes),
+        "post_dated_money": round(
+            sum(_payment_gross(p) for p in later_pays) + sum(_f(d.get("amount")) for d in later_notes),
+            2,
+        ),
+        "post_dated_until": max((ledger_day(d) for d in later), default=None),
+        "post_dated": is_post_dated(bill, as_of),
+    }
 
 
 # --- ledger ----------------------------------------------------------------

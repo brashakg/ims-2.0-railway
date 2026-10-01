@@ -19,6 +19,7 @@ from ._shared import (
     resolve_store_scope,
     router,
     uuid,
+    can_access_store_scoped,
 )
 from .models import GRN_SUBTYPE_DC
 
@@ -70,6 +71,9 @@ class VendorPaymentCreate(BaseModel):
     tds_amount: Optional[float] = Field(default=None, ge=0)  # explicit override
     reference: Optional[str] = None  # UTR / cheque no / txn id
     notes: Optional[str] = None
+    # The shop the money is paid for (F63) when no bill is named; a named
+    # bill's shop wins. See ap_payments._money_shop.
+    store_id: Optional[str] = None
 
 
 # Recognized vendor credit-note / debit-note types. Every type lands in the
@@ -95,6 +99,9 @@ class DebitNoteCreate(BaseModel):
     # Credit-note category. Defaults to RETURN_CN (the historical behaviour --
     # debit notes here were created for rejected/returned goods).
     cn_type: str = "RETURN_CN"
+    # The shop the note is for (F63) when no bill is named; a named bill's
+    # shop wins. See ap_payments._money_shop.
+    store_id: Optional[str] = None
 
     @field_validator("cn_type")
     @classmethod
@@ -111,8 +118,17 @@ def _clean(doc: dict) -> dict:
 
 
 def _recompute_bill_status(db, bill_id: Optional[str]) -> None:
-    """Re-derive a bill's status (OUTSTANDING / PARTIAL / PAID) from its
-    allocated payments + debit notes. Fail-soft."""
+    """Re-derive a bill's stored status (OUTSTANDING / PARTIAL / PAID) and
+    outstanding from its allocated payments + debit notes. Fail-soft.
+
+    The STORED pair counts every RECORDED payment and note, a post-dated
+    cheque included: it answers 'is anything left to settle on this bill once
+    what is recorded clears', so a bill a cheque has already been written for
+    is not offered for payment again, and it is never stale -- nothing has to
+    rewrite it on the cheque's day. What is owed TODAY is the supplier
+    ledger's as-of figure (ap_engine.supplier_ledger_rows: a post-dated cheque
+    is not paid until its day); GET /vendors/{id}/bills answers it per bill as
+    `outstanding`, with the post-dated money noted (ap_engine.bill_as_of)."""
     if db is None or not bill_id:
         return
     try:
@@ -166,6 +182,49 @@ async def ap_aging(
     from ..finance import _ap_rows  # the one AP row loader (call time: no cycle)
 
     return ap_engine.build_aging_by_vendor(*_ap_rows(db, scope, as_of=as_of), as_of)
+
+
+def _billed_elsewhere_unnamed(
+    db, grn_id: str, linked: Optional[dict], exc: HTTPException, current_user: dict
+) -> HTTPException:
+    """The 409 'this receipt is already billed' names the bill that billed it
+    (assert_grn_billable_header_only: 'already billed by <bill>'; a Delivery
+    Challan: 'already matched to invoice <id>'). When that bill is outside the
+    caller's shop scope -- a legacy bill with no shop, or one booked to another
+    shop -- the refusal still says the receipt is billed (the receipt is the
+    caller's), but never names the other bill. Every other refusal passes
+    through unchanged."""
+    if exc.status_code != 409:
+        return exc
+    detail = exc.detail
+    if isinstance(detail, dict) and detail.get("code") == "grn_already_billed":
+        flt = {"grn_id": grn_id}
+    elif (
+        isinstance(detail, str)
+        and (linked or {}).get("linked_bulk_invoice_id")
+        and str(linked["linked_bulk_invoice_id"]) in detail
+    ):
+        flt = {"bill_id": linked["linked_bulk_invoice_id"]}
+    else:
+        return exc
+    try:
+        other = (
+            db.get_collection("vendor_bills").find_one(flt, {"_id": 0, "store_id": 1})
+            if db is not None
+            else None
+        )
+    except Exception:  # noqa: BLE001 - unknown: do not name it
+        other = None
+    if other is not None and can_access_store_scoped(other.get("store_id"), current_user):
+        return exc
+    return HTTPException(
+        status_code=409,
+        detail={
+            "code": "grn_already_billed",
+            "message": f"Goods receipt {grn_id} is already billed. Nothing was recorded.",
+            "grn_id": grn_id,
+        },
+    )
 
 
 @router.post("/{vendor_id}/bills", status_code=201)
@@ -278,15 +337,30 @@ async def create_vendor_bill(
 
         grn_repo = get_grn_repository()
         linked = grn_repo.find_by_id(bill.grn_id) if grn_repo is not None else None
+        # F63: another shop's receipt (or one with no shop, for a non-admin)
+        # is not there for the caller -- the SAME 404 a missing receipt gets
+        # (_load_standard_grn's words), before anything is claimed or written.
+        # Without this a Pune accountant booked a bill on Dhanbad's receipt
+        # into Dhanbad's books and read it back in the 201.
+        if linked is not None and not can_access_store_scoped(
+            linked.get("store_id"), current_user
+        ):
+            raise HTTPException(status_code=404, detail=f"GRN {bill.grn_id} not found")
         _receipt_store = (linked or {}).get("store_id")
-        if linked is not None and linked.get("grn_subtype") == GRN_SUBTYPE_DC:
-            # 404 missing / 400 not-ACCEPTED / 409 already-matched.
-            dc_docs = _load_linked_dcs(db_early, [bill.grn_id])
-            # 409 mixed_vendors when the DC belongs to another vendor.
-            _assert_dcs_single_vendor_store(dc_docs, expected_vendor_id=vendor_id)
-            _dc_receipt = dc_docs[0] if dc_docs else None
-        else:
-            assert_grn_billable_header_only(db_early, bill.grn_id, vendor_id)
+        try:
+            if linked is not None and linked.get("grn_subtype") == GRN_SUBTYPE_DC:
+                # 404 missing / 400 not-ACCEPTED / 409 already-matched.
+                dc_docs = _load_linked_dcs(db_early, [bill.grn_id])
+                # 409 mixed_vendors when the DC belongs to another vendor.
+                _assert_dcs_single_vendor_store(dc_docs, expected_vendor_id=vendor_id)
+                _dc_receipt = dc_docs[0] if dc_docs else None
+            else:
+                assert_grn_billable_header_only(db_early, bill.grn_id, vendor_id)
+        except HTTPException as exc:
+            unnamed = _billed_elsewhere_unnamed(db_early, bill.grn_id, linked, exc, current_user)
+            if unnamed is exc:
+                raise
+            raise unnamed from None
 
     # Duplicate bill guard: the same vendor invoice number must not be recorded
     # twice for the same vendor. A double-entry would double the outstanding
@@ -459,8 +533,20 @@ async def list_vendor_bills(
         flt["store_id"] = scope
     try:
         bills = list(db.get_collection("vendor_bills").find(flt, {"_id": 0}))
+        ids = [b.get("bill_id") for b in bills if b.get("bill_id")]
+        money = [
+            list(db.get_collection(coll).find({"bill_id": {"$in": ids}}, {"_id": 0}))
+            for coll in ("vendor_payments", "vendor_debit_notes")
+        ]
     except Exception:
-        bills = []
+        bills, money = [], [[], []]
+    # Outstanding on the supplier ledger's as-of rule (today): a post-dated
+    # cheque is not paid until its day, so it is noted (post_dated_money /
+    # post_dated_until) instead of counted -- this list and the ledger owe the
+    # same. `status` stays the stored one, which counts every recorded payment
+    # (see _recompute_bill_status): a bill a cheque is written for reads PAID.
+    for b in bills:
+        b.update(ap_engine.bill_as_of(b, *money))
     bills.sort(key=lambda b: b.get("bill_date") or "", reverse=True)
     return {"bills": bills, "total": len(bills)}
 

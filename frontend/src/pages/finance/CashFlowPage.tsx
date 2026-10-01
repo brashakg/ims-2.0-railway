@@ -283,6 +283,11 @@ function Aging({ aging, onVendor }: { aging: ApAgingByVendor; onVendor: (id: str
 // ---------------------------------------------------------------------------
 // Vendor ledger drawer + record bill / payment / debit-note
 // ---------------------------------------------------------------------------
+// The ledger's balance counts rows dated up to today. Rows dated later (a
+// post-dated cheque, a bill keyed ahead) come back apart in `post_dated` --
+// recorded, shown, not yet counted -- with no running balance.
+type PostDatedEntry = Omit<VendorLedger['ledger']['entries'][number], 'balance'>;
+
 function VendorLedgerDrawer({ vendorId, vendorName, onClose, onChanged }: { vendorId: string; vendorName: string; onClose: () => void; onChanged: () => void }) {
   const toast = useToast();
   const [ledger, setLedger] = useState<VendorLedger | null>(null);
@@ -298,6 +303,7 @@ function VendorLedgerDrawer({ vendorId, vendorName, onClose, onChanged }: { vend
   useEffect(() => { load(); }, [load]);
 
   const refresh = () => { load(); onChanged(); };
+  const postDated = (ledger?.ledger as { post_dated?: PostDatedEntry[] } | undefined)?.post_dated ?? [];
 
   return (
     <div className="fixed inset-0 bg-black/30 flex justify-end z-50" onClick={onClose}>
@@ -346,6 +352,28 @@ function VendorLedgerDrawer({ vendorId, vendorName, onClose, onChanged }: { vend
                   ))}
                 </tbody>
               </table>
+
+              {postDated.length > 0 && (
+                <div className="mt-5" data-testid="ledger-post-dated">
+                  <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Post-dated: not in the balance yet</p>
+                  <p className="text-xs text-gray-500 mb-2">Recorded with a later date, such as a post-dated cheque. Each one counts on its own date.</p>
+                  <table className="w-full text-xs">
+                    <thead className="text-gray-400">
+                      <tr><th className="text-left py-1">Date</th><th className="text-left py-1">Type</th><th className="text-right py-1">Debit</th><th className="text-right py-1">Credit</th></tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                      {postDated.map((e, i) => (
+                        <tr key={i}>
+                          <td className="py-1 text-gray-600">{(e.date || '').slice(0, 10)}</td>
+                          <td className="py-1 text-gray-700">{e.type}<span className="text-gray-400"> {e.ref || ''}</span></td>
+                          <td className="py-1 text-right text-red-700">{e.debit ? inr(e.debit) : ''}</td>
+                          <td className="py-1 text-right text-green-700">{e.credit ? inr(e.credit) : ''}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </>
           ) : null}
         </div>

@@ -54,6 +54,15 @@ def test_every_bill_door_stamps_the_shop_the_goods_landed_in():
     assert _book_from_grn(cli, "GA", "A-1")["store_id"] == "S1"
     assert _book_from_grn(cli, "GC", "C-1")["store_id"] == "S2"
 
+    # F63: a shop-bound accountant at S2 cannot reach S1's receipt GB (the
+    # same 404 a missing receipt gets); an ADMIN sitting at S2 can, and his
+    # bill still carries the RECEIPT's shop, not his.
+    from api.routers.auth import get_current_user
+
+    async def _admin_at_s2():
+        return {"user_id": "u-admin", "roles": ["ADMIN"], "store_ids": [], "active_store_id": "S2"}
+
+    cli.app.dependency_overrides[get_current_user] = _admin_at_s2
     header = _door(
         cli, "V2", bill_number="B-9", bill_date="2026-05-09", grn_id="GB",
         taxable_amount=1000, tax_amount=50, total_amount=1050,

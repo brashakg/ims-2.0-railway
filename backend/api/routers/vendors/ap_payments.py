@@ -14,6 +14,7 @@ from ._shared import (
     resolve_store_scope,
     router,
     uuid,
+    validate_store_access,
 )
 from .ap_bills import (
     DebitNoteCreate,
@@ -38,9 +39,9 @@ def _named_bill_in_scope_or_404(
     read by id applies). Another shop's bill, another supplier's, or none at
     all answers the SAME 404 -- so the door never confirms another shop's bill
     exists -- before anything is written. No bill named (on account): nothing
-    to check."""
+    to check. Returns the bill (None when none is named)."""
     if not bill_id or db is None:
-        return
+        return None
     from ..purchase_invoices import _bill_in_scope_or_404
 
     try:
@@ -52,18 +53,65 @@ def _named_bill_in_scope_or_404(
     if bill is None:
         raise HTTPException(status_code=404, detail=_NO_BILL)
     _bill_in_scope_or_404(bill, current_user)
+    return bill
+
+
+def _money_shop(
+    bill: Optional[dict],
+    asked_query: Optional[str],
+    asked_body: Optional[str],
+    current_user: dict,
+) -> Optional[str]:
+    """The ONE shop a payment or debit note is recorded in (F63): stamped on
+    the row at write time, so ap_engine.supplier_rows books it to that shop's
+    share instead of guessing from the supplier's latest bill (a Pune
+    accountant's on-account cheque used to land in Dhanbad's ledger because
+    Dhanbad billed last).
+
+      * money naming a bill: that bill's shop -- it settles that bill, so it
+        is that shop's money (a bill with no shop: no shop);
+      * else the shop asked for (?store_id or the body's store_id);
+      * else the caller's active shop -- a non-admin's own shop; an admin's
+        topbar shop, else none (an unstamped row: the legacy rule applies).
+
+    A shop asked for passes validate_store_access first: a non-admin naming
+    another shop is refused (403) before anything is written. Asking for a
+    shop other than the named bill's is a contradiction (422), never silently
+    re-filed."""
+    if asked_query and asked_body and asked_query != asked_body:
+        raise HTTPException(
+            status_code=422,
+            detail="store_id in the address and in the body disagree",
+        )
+    asked = asked_query or asked_body
+    if asked:
+        asked = validate_store_access(asked, current_user)
+    if bill is not None:
+        shop = bill.get("store_id")
+        if asked and asked != shop:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "This bill is booked to another shop's account; money "
+                    "against it belongs to the bill's shop. Leave the shop out."
+                ),
+            )
+        return shop
+    return asked or current_user.get("active_store_id")
 
 
 def _ledger_rows(db, vendor_id: str, scope: Optional[str]) -> tuple:
-    """(bills, payments, debit notes) of one supplier by THE row rule every
-    'what we owe' figure reads (ap_engine.supplier_ledger_rows): no transfer
-    mirror bills, nothing dated after today, and with `scope` (resolve_store_
-    scope) one shop's share -- a bill's own shop; money naming a bill, that
-    bill's shop; money naming none, the shop of the supplier's latest bill on
-    or before it. So a Pune accountant's ledger, payments and debit notes are
-    Pune's share, the same figures /finance/vendor-payments?store_id= and the
-    Purchases report give that shop. ALL the supplier's bills are read, so
-    money naming a bill finds the bill's shop."""
+    """EVERY recorded (bill, payment, debit note) of one supplier by THE row
+    rule every 'what we owe' figure reads (ap_engine.supplier_rows): no
+    transfer mirror bills, and with `scope` (resolve_store_scope) one shop's
+    share -- a bill's own shop; money naming a bill, that bill's shop; other
+    money, the shop stamped on it (legacy rows: the supplier's latest bill on
+    or before it). No as-of cutoff here: the lists show every recorded row,
+    post-dated ones flagged, and the ledger strikes its balance on today
+    (ap_engine.split_as_of). So a Pune accountant's ledger, payments and debit
+    notes are Pune's share, the same figures /finance/vendor-payments?store_id=
+    and the Purchases report give that shop. ALL the supplier's bills are
+    read, so money naming a bill finds the bill's shop."""
     try:
         bills = list(
             db.get_collection("vendor_bills").find({"vendor_id": vendor_id}, {"_id": 0})
@@ -80,7 +128,16 @@ def _ledger_rows(db, vendor_id: str, scope: Optional[str]) -> tuple:
         )
     except Exception:
         bills, payments, debit_notes = [], [], []
-    return ap_engine.supplier_ledger_rows(bills, payments, debit_notes, scope)
+    return ap_engine.supplier_rows(bills, payments, debit_notes, scope)
+
+
+def _flag_post_dated(rows: list) -> list:
+    """Every recorded row, each flagged post_dated (dated after today: not yet
+    counted in the balance), newest first by its ledger day."""
+    for row in rows:
+        row["post_dated"] = ap_engine.is_post_dated(row)
+    rows.sort(key=ap_engine.ledger_day, reverse=True)
+    return rows
 
 
 @router.post("/{vendor_id}/payments", status_code=201)
@@ -88,6 +145,9 @@ async def create_vendor_payment(
     vendor_id: str,
     payment: VendorPaymentCreate,
     current_user: dict = Depends(require_roles(*_AP_ROLES)),
+    # ?store_id: the shop the money is for (_money_shop). A plain default, not
+    # Query(None), so the handler stays callable directly (tests do).
+    store_id: Optional[str] = None,
 ):
     """Record a payment to a vendor (optionally allocated to a bill, optionally
     with TDS withheld). Recomputes the allocated bill's status."""
@@ -114,8 +174,10 @@ async def create_vendor_payment(
         check_period_locked(db, payment.payment_date)
 
     # F63: the bill it settles is in the caller's shop -- checked before the
-    # hold below, whose message would describe that bill.
-    _named_bill_in_scope_or_404(db, vendor_id, payment.bill_id, current_user)
+    # hold below, whose message would describe that bill -- and the money is
+    # stamped with its shop.
+    named = _named_bill_in_scope_or_404(db, vendor_id, payment.bill_id, current_user)
+    shop = _money_shop(named, store_id, payment.store_id, current_user)
 
     # Owner ruling 7: HOLD the bill while goods were rejected and no debit note
     # exists. Until now a rejection inside the 5% match tolerance was paid in
@@ -134,6 +196,7 @@ async def create_vendor_payment(
         "vendor_name": (vendor or {}).get("trade_name")
         or (vendor or {}).get("legal_name"),
         "bill_id": payment.bill_id,
+        "store_id": shop,
         "amount": round(payment.amount, 2),
         "mode": payment.mode,
         "payment_date": payment.payment_date,
@@ -171,8 +234,10 @@ async def list_vendor_payments(
     db = _get_db()
     if db is None:
         return {"payments": [], "total": 0}
-    rows = _ledger_rows(db, vendor_id, scope)[1]
-    rows.sort(key=lambda p: p.get("payment_date") or "", reverse=True)
+    # Every recorded payment, a post-dated cheque included (flagged): the
+    # accountant must see the cheque just keyed even though the balance does
+    # not count it until its day.
+    rows = _flag_post_dated(_ledger_rows(db, vendor_id, scope)[1])
     return {"payments": rows, "total": len(rows)}
 
 
@@ -181,6 +246,9 @@ async def create_debit_note(
     vendor_id: str,
     note: DebitNoteCreate,
     current_user: dict = Depends(require_roles(*_AP_ROLES)),
+    # ?store_id: the shop the money is for (_money_shop). A plain default, not
+    # Query(None), so the handler stays callable directly (tests do).
+    store_id: Optional[str] = None,
 ):
     """Issue a debit note against a vendor (e.g. for rejected/returned goods).
     Reduces the payable. Recomputes the allocated bill's status."""
@@ -188,8 +256,10 @@ async def create_debit_note(
     vendor = vendor_repo.find_by_id(vendor_id) if vendor_repo is not None else None
     if vendor_repo is not None and vendor is None:
         raise HTTPException(status_code=404, detail="Vendor not found")
-    # F63: the bill it reduces is in the caller's shop.
-    _named_bill_in_scope_or_404(_get_db(), vendor_id, note.bill_id, current_user)
+    # F63: the bill it reduces is in the caller's shop, and the note is
+    # stamped with its shop.
+    named = _named_bill_in_scope_or_404(_get_db(), vendor_id, note.bill_id, current_user)
+    shop = _money_shop(named, store_id, note.store_id, current_user)
 
     dn_id = str(uuid.uuid4())
     prefix = vendor_id[:3].upper() if vendor_id else "DN"
@@ -200,6 +270,7 @@ async def create_debit_note(
         "vendor_name": (vendor or {}).get("trade_name")
         or (vendor or {}).get("legal_name"),
         "bill_id": note.bill_id,
+        "store_id": shop,
         "grn_id": note.grn_id,
         "amount": round(note.amount, 2),
         "date": note.date,
@@ -238,8 +309,8 @@ async def list_debit_notes(
     db = _get_db()
     if db is None:
         return {"debit_notes": [], "total": 0}
-    rows = _ledger_rows(db, vendor_id, scope)[2]
-    rows.sort(key=lambda d: d.get("date") or "", reverse=True)
+    # Every recorded note, a post-dated one included (flagged).
+    rows = _flag_post_dated(_ledger_rows(db, vendor_id, scope)[2])
     return {"debit_notes": rows, "total": len(rows)}
 
 
@@ -263,16 +334,22 @@ async def vendor_ledger(
         return {
             "vendor_id": vendor_id,
             "vendor": vendor,
-            "ledger": ap_engine.build_ledger([], [], []),
+            "ledger": {**ap_engine.build_ledger([], [], []), "post_dated": []},
             "aging": ap_engine.build_aging([], [], []),
         }
-    # The one row rule every payable screen reads (no transfer mirror bills;
-    # rows dated after today -- a post-dated cheque -- not yet counted), so
-    # the closing balance is the Suppliers card's and the report's figure.
-    bills, payments, debit_notes = _ledger_rows(db, vendor_id, scope)
+    # The one row rule every payable screen reads (no transfer mirror bills),
+    # struck on today: the entries, running balance and closing balance count
+    # only rows dated up to today, so the closing balance is the Suppliers
+    # card's and the report's figure. The rows dated later -- a post-dated
+    # cheque, a bill keyed ahead -- are recorded, so they are listed apart in
+    # `post_dated` (same entry shape, no running balance), never hidden.
+    counted, later = ap_engine.split_as_of(_ledger_rows(db, vendor_id, scope))
     return {
         "vendor_id": vendor_id,
         "vendor": vendor,
-        "ledger": ap_engine.build_ledger(bills, payments, debit_notes),
-        "aging": ap_engine.build_aging(bills, payments, debit_notes),
+        "ledger": {
+            **ap_engine.build_ledger(*counted),
+            "post_dated": ap_engine.post_dated_entries(*later),
+        },
+        "aging": ap_engine.build_aging(*counted),
     }
