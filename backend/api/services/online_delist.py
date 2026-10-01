@@ -158,44 +158,33 @@ async def delist_if_live(
             result = await shopify_push.push_product_delist(db, twin)
         data = result.to_dict()
         data["trigger"] = reason
-        stamp_take_down(db, twin, data, reason=reason)
+        twin_id = twin.get("id") or twin.get("product_id")
+        if data.get("ok"):
+            _stamp(
+                db,
+                twin_id,
+                online_state=STATE_DELISTED,
+                delisted_at=shopify_push._now(),
+                delist_reason=reason,
+                delist_error=None,
+                delist_mode=data.get("mode"),
+            )
+        else:
+            data["code"] = data.get("code") or CODE_DELIST_FAILED
+            _stamp(
+                db,
+                twin_id,
+                online_state=STATE_DELIST_FAILED,
+                delisted_at=None,
+                delist_reason=reason,
+                delist_error=data.get("error") or CODE_DELIST_FAILED,
+                delist_mode=data.get("mode"),
+            )
         write_push_audit(data, actor)
         return data
     except Exception:  # noqa: BLE001 -- the IMS write that called us stands
         logger.warning("[DELIST] take-down hook failed (IMS write stands)", exc_info=True)
         return None
-
-
-def stamp_take_down(db, twin: Dict[str, Any], data: Dict[str, Any], *, reason: str) -> None:
-    """THE "off the website" marker, spelled once: DELISTED + the push mode it
-    came from on success (online_catalog._delisted_live reads LIVE as "off
-    Shopify": the stock writer's claim read and the nightly parity), else
-    DELIST_FAILED with the error (``data["code"]`` set). The retire hook
-    stamps every result; the Take off website button stamps its LIVE
-    take-down here too, so its press is read by the same rule. Fail-soft."""
-    db = _raw_db(db)
-    twin_id = (twin or {}).get("id") or (twin or {}).get("product_id")
-    if data.get("ok"):
-        _stamp(
-            db,
-            twin_id,
-            online_state=STATE_DELISTED,
-            delisted_at=shopify_push._now(),
-            delist_reason=reason,
-            delist_error=None,
-            delist_mode=data.get("mode"),
-        )
-    else:
-        data["code"] = data.get("code") or CODE_DELIST_FAILED
-        _stamp(
-            db,
-            twin_id,
-            online_state=STATE_DELIST_FAILED,
-            delisted_at=None,
-            delist_reason=reason,
-            delist_error=data.get("error") or CODE_DELIST_FAILED,
-            delist_mode=data.get("mode"),
-        )
 
 
 def mark_for_republish(db, product: Dict[str, Any]) -> bool:

@@ -9,7 +9,10 @@ Shopify edit or a race can still let one location's live "available" drift
 away from what the writer would send there.
 
 Once a day (SENTINEL, ~03:00 IST) this samples up to N online-mapped variants
-and compares, per (SKU, MAPPED shop):
+on a LIVE listing (_sample_variants: ONE answer -- the writer's own listing,
+a size's parent's, visible by the writer's own reader and not retired in
+IMS; a draft, a taken-down or a retired listing is never compared) and
+compares, per (SKU, MAPPED shop):
 
     IMS side     = online_stock_writeback.online_quantities_for_skus(db, skus)
                    [sku][shop] -- the writer's OWN call (same rule, same
@@ -37,26 +40,19 @@ the shelf, so they are in no row here either.
 Tasks: ONE per shop (source_ref ``shopify-stock-parity-drift:<store_id>``) --
 filed on drift, refreshed (description + payload) every night while it
 drifts or still owes a SKU, completed when a later tick finds EVERY SKU the
-task names either compared clean at that shop or GONE from the online
-catalogue (retired in IMS AND its listing's take-down reached Shopify, its
-Shopify item unmapped, or answered null by Shopify -- deleted in Shopify
-admin: nothing is left to measure, so an empty catalogue closes every task
-too). A retired SKU still on sale -- a failed or DARK take-down, a retired
-size on its parent's live listing -- is compared against the writer's 0.
-payload.skus: a SKU
-leaves the task only that way -- one whose Shopify batch failed, that fell
-out of the capped sample or whose IMS side was unknown is still owed, and
-the description names it (every SKU that keeps the task open, drift or
-owed) with the numbers it last drifted with (payload.last_seen) and the
-same press as a drift tonight: unknown is not cleared, and nothing re-sends
-it by itself. A drifted SKU a SUPERADMIN blocked from online sale is named on its
-own line: no IMS button re-sends it, so the line asks for 0 in Shopify admin
-or lifting the block (on a night the block is unreadable, a SKU keeps the
-line it was last filed on: payload.lines -- except a 'retired' line, which
-says nothing about the block: a SKU filed there that is no longer retired
-is unsure). A drifted retired SKU is on its own line too: Take off website
-(a size: Send to website on its product, which refuses a blocked product),
-or 0 in Shopify admin, which clears every case.
+task names either compared clean at that shop or GONE: off the live set
+(its listing drafted or taken down by any door, or retired in IMS), its
+Shopify item unmapped, or answered null by Shopify (deleted in Shopify
+admin) -- nothing is left to measure, so an empty catalogue closes every
+task too. payload.skus: a SKU leaves the task only that way -- one whose
+Shopify batch failed, that fell out of the capped sample or whose IMS side
+was unknown is still owed, and the description names it (every SKU that
+keeps the task open, drift or owed) with the numbers it last drifted with
+(payload.last_seen): unknown is not cleared, and nothing re-sends it by
+itself. Every SKU gets the SAME one instruction (decided 2026-10-01): set
+the quantity at the shop's location in Shopify admin to the IMS number.
+It never names a press that changes a listing's status, and no IMS press
+re-sends an unchanged number (the stock pass sends only changes).
 A shop that leaves the mapped set (location cleared, claimed by two shops,
 shop deactivated) has its task closed on EVERY tick that could read the shop
 map, whether or not anything was compared: parity no longer compares it, and
@@ -374,54 +370,56 @@ async def online_non_selling_locations(db) -> set:
 
 
 def _sample_variants(db) -> Optional[List[Dict[str, Any]]]:
-    """EVERY IMS SKU (the spine ``products``, the rule's own SKU list) that
-    maps to a Shopify inventory item through THE WRITER's resolver,
-    online_catalog.inventory_items_for_skus (catalog_variants first, then the
-    catalog_products ``ecom`` fallback), in spine order and UNCAPPED: the tick
-    caps what it reads from Shopify, and the full list is what tells a SKU
-    that is GONE (a task may drop it) from one that merely fell outside
-    tonight's cap (still owed).
+    """EVERY IMS SKU (the spine ``products``, the rule's own SKU list) on a
+    LIVE listing that maps to a Shopify inventory item through THE WRITER's
+    resolver, online_catalog.inventory_items_for_skus (catalog_variants
+    first, then the catalog_products ``ecom`` fallback), in spine order and
+    UNCAPPED: the tick caps what it reads from Shopify, and the full list is
+    what tells a SKU that is GONE (a task may drop it) from one that merely
+    fell outside tonight's cap (still owed).
 
-    A product IMS stopped selling (is_active False: the Delete button's soft
-    delete, the retire hook) is still written -- the rule lists it at 0 at
-    every shop -- so it is still COMPARED, and flagged ``retired`` exactly
-    when the rule's own reader (online_stock_writeback._sku_to_pid) says it
-    is inactive: one answer, so a stale spine row can never put a SKU the
-    writer still sells on the take-down line. It has
-    left the online catalogue only once its own listing's take-down REACHED
-    Shopify (online_catalog._delisted_live: DELISTED by a LIVE delist, the
-    writer's own "off Shopify" rule). A failed or DARK take-down leaves the
-    listing ACTIVE and selling, and a size variant's take-down never drafts
-    anything (DENY + the rule's 0 on the parent's ACTIVE listing), so both
-    stay compared. Returns [{sku, inventory_item_id, retired}]; None when a
-    read failed (unknown, never "no online-mapped variants"). ponytail:
-    resolves every spine SKU; cap the scan if the catalogue grows past a few
-    thousand."""
+    LIVE is ONE answer (decided 2026-10-01): the listing that carries the SKU
+    -- the writer's own online_catalog.listings_for_skus, so a size is judged
+    by its PARENT's listing -- is visible by the writer's own reader
+    (inventory.listing_visible: a gid and PUBLISHED, which only a confirmed
+    publish writes and every LIVE take-down -- Take off website, the retire
+    hook, the SUPERADMIN block cutover, all push_product_delist -- turns to
+    DRAFT), and that listing's product is not retired in IMS (the rule's own
+    reader, online_stock_writeback._sku_to_pid: a DARK or failed take-down
+    leaves a retired listing PUBLISHED; the Catalog screen's DELIST_FAILED
+    reports that one). Any other listing is never compared. Returns
+    [{sku, inventory_item_id}]; None when a read failed (unknown, never
+    "nothing is live"). ponytail: resolves every spine SKU; cap the scan if
+    the catalogue grows past a few thousand."""
     coll = _coll(db, "products")
-    if coll is None:
+    listings = _coll(db, "catalog_products")
+    if coll is None or listings is None:
         return None
     try:
-        from .online_catalog import _delisted_live, _products_by_key, inventory_items_for_skus
+        from .online_catalog import inventory_items_for_skus, listings_for_skus
         from .online_stock_writeback import _sku_to_pid
-        from .shopify_push import is_variant_of
+        from .shopify_push.inventory import listing_visible
 
         spine = [str(d.get("sku") or "").strip()
                  for d in coll.find({"sku": {"$nin": [None, ""]}}, {"_id": 0, "sku": 1})]
         spine = [s for s in dict.fromkeys(spine) if s]
-        # "Retired" is the rule's own answer (the reader that makes it list
-        # 0), never a second loop over the spine that could disagree with it.
         resolved = _sku_to_pid(db, spine)
         if resolved is None:
             return None
         retired = resolved[1]
-        twins = _products_by_key(db, sorted(retired), strict=True)
-        drafted = {s for s, t in twins.items() if not is_variant_of(t) and _delisted_live(t.get("ecom") or {})}
-        skus = [s for s in spine if s not in drafted]
+        by_listing = listings_for_skus(db, spine, strict=True)
+        live = {
+            str(d.get("id"))
+            for d in listings.find({"id": {"$in": sorted(by_listing)}}, {"_id": 0, "id": 1, "sku": 1, "ecom": 1})
+            if listing_visible(d) and str(d.get("sku") or "").strip() not in retired
+        }
+        on_live = {s for pid, keys in by_listing.items() if pid in live for s in keys}
+        skus = [s for s in spine if s in on_live]
         items = inventory_items_for_skus(db, skus)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[STOCK_PARITY] variant sample failed: %s", exc)
         return None
-    return [{"sku": s, "inventory_item_id": items[s], "retired": s in retired} for s in skus if s in items]
+    return [{"sku": s, "inventory_item_id": items[s]} for s in skus if s in items]
 
 
 def _requested_cost(body: Any) -> Optional[int]:
@@ -593,37 +591,15 @@ def sync_drift_task(
     summary: Dict[str, Any],
     *,
     mapped_skus: Iterable[str],
-    blocked: Optional[Iterable[str]] = (),
-    retired: Iterable[str] = (),
 ) -> Optional[str]:
     """ONE shop's drift task, from that shop's own ``compare_location_parity``
     summary (source_ref ``shopify-stock-parity-drift:<store_id>``).
-    ``mapped_skus``: EVERY online-mapped SKU in the catalogue tonight
-    (_sample_variants, uncapped, less the items Shopify answered null) -- a
-    SKU the task names that is not in it is GONE (retired in IMS and taken off
-    the website, deleted in Shopify admin, or its Shopify item unmapped):
-    parity can never compare it
-    again, so it is no longer owed. ``blocked``: the drifted SKUs a SUPERADMIN
-    blocked from online sale -- IMS sends them 0 and Send to website refuses
-    them, so their line asks for the one thing that clears it (0 in Shopify
-    admin, or lifting the block), never the button; None = the block could
-    not be read tonight (online_stock_writeback._blocked_online, the
-    rule's own reader): each SKU keeps the line it was last
-    filed on (payload.lines), never moved onto the Send to website line, and
-    one never filed on a line gets a line that says the block is unknown.
-    ``retired``: the SKUs IMS
-    stopped selling (deleted / deactivated) that are still compared because
-    their listing is not proven off Shopify -- the rule lists 0, and their
-    line asks for the take-down (a size: its product's Send to website, which
-    re-sends every size's number) or 0 in Shopify admin, never the shelf.
-    A SKU both retired and blocked is on the retired line: Take off website
-    stamps the mark that closes it, while lifting the block leaves a retired
-    SKU at 0, still drifting. A size's press is its product's Send to
-    website, which refuses a blocked product (whether or not the size itself
-    is blocked), so the line says so and names the Shopify admin 0 that
-    clears every case. A 'retired' line therefore says nothing about the
-    block: on a night the block is unread, a SKU filed there that is no
-    longer retired is unsure, never moved onto the Send to website line.
+    ``mapped_skus``: EVERY SKU parity compares tonight (_sample_variants: on a
+    live listing, uncapped, less the items Shopify answered null) -- a SKU
+    the task names that is not in it is GONE (its listing drafted, taken
+    down or retired, deleted in Shopify admin, or its Shopify item unmapped):
+    parity will not compare it again while it stays so, so it is no longer
+    owed.
 
       * drift, or an active task still owed a SKU
                           -> refresh every ACTIVE task's description + payload,
@@ -633,21 +609,23 @@ def sync_drift_task(
                              or nothing is left to measure);
       * otherwise         -> leave it alone.
 
-    A SKU is still OWED when the task names it, it is still in the online
-    catalogue and it did not compare clean tonight (its Shopify batch failed,
-    it fell out of the capped sample, or its IMS side was unknown): unknown
-    is not clear, and nothing clears it by itself -- it drifted on an earlier
-    night, and the stock pass never undoes a change made on Shopify. So an
-    owed SKU keeps the numbers it last drifted with (payload.last_seen, else
-    an older payload's drift rows) and sits on the same line, with the same
-    press, as a drift tonight. payload.skus carries tonight's drift plus
-    every SKU still owed, and the description NAMES every one of them
-    (_named: past the first five, by SKU) -- the text is what
-    the store manager and the admin read (no task screen shows payload), so
-    a SKU that keeps the task open is never missing from it. Returns "filed"
-    | "refreshed" | "closed" only when EVERY write it made succeeded (the
-    repository returns False / None on a rejected write, never raises), else
-    None. Fail-soft."""
+    A SKU is still OWED when the task names it, it is still compared and it
+    did not compare clean tonight (its Shopify batch failed, it fell out of
+    the capped sample, or its IMS side was unknown): unknown is not clear,
+    and nothing clears it by itself -- it drifted on an earlier night, and
+    the stock pass never undoes a change made on Shopify. So an owed SKU
+    keeps the numbers it last drifted with (payload.last_seen, else an older
+    payload's drift rows). payload.skus carries tonight's drift plus every
+    SKU still owed, and the description NAMES every one of them (_named:
+    past the first five, by SKU) -- the text is what the store manager and
+    the admin read (no task screen shows payload).
+
+    ONE instruction for every SKU (decided 2026-10-01): set the quantity at
+    this shop's location in Shopify admin to the IMS number. No IMS press
+    re-sends an unchanged number, and the text never names a press that
+    changes a listing's status. Returns "filed" | "refreshed" | "closed"
+    only when EVERY write it made succeeded (the repository returns False /
+    None on a rejected write, never raises), else None. Fail-soft."""
     from .task_triggers import active_tasks
 
     sid = str(store.get("store_id") or "").strip()
@@ -667,28 +645,6 @@ def sync_drift_task(
                              for d in p.get("drift") or []})
                 seen.update(p.get("last_seen") or {})
             rows = drift + [{"sku": s, **seen.get(s, {}), "earlier": True} for s in sorted(owed)]
-            retired = set(retired)
-            if blocked is None:
-                # The block unread tonight: the 'send' / 'blocked' line a SKU
-                # was last filed on says whether it was blocked. A 'retired'
-                # line does not (retired wins over the block), so a SKU filed
-                # there that is no longer retired is unsure, as is one never
-                # filed -- a SKU still retired keeps the retired line.
-                lines: Dict[Any, str] = {}
-                for t in active:
-                    lines.update((t.get("payload") or {}).get("lines") or {})
-                blocked = {s for s, line in lines.items() if line == "blocked"}
-                known = {s for s, line in lines.items() if line != "retired"}
-                unsure = {d.get("sku") for d in rows} - known - retired
-            else:
-                blocked, unsure = set(blocked), set()
-            # Retired wins: 0 in Shopify admin closes a retired SKU whatever
-            # the block says, and so does Take off website on one that is not
-            # a size; lifting the block does not.
-            banned = [d for d in rows if d.get("sku") in blocked - retired]
-            off = [d for d in rows if d.get("sku") in retired]
-            unread = [d for d in rows if d.get("sku") in unsure]
-            fixable = [d for d in rows if d.get("sku") not in blocked | retired | unsure]
             parts = []
             if drift:
                 parts.append(
@@ -701,45 +657,18 @@ def sync_drift_task(
                     f"Still open from an earlier night and not compared tonight (Shopify's read "
                     f"of it failed, it was outside tonight's sample, or IMS could not read its "
                     f"shelf): {', '.join(sorted(owed))}. Not compared is not cleared: each drifted "
-                    f"on an earlier night and nothing re-sends it by itself, so it still needs "
-                    f"the step on its line below."
-                )
-            if fixable:
-                parts.append(
-                    f"Top: {_named(fixable)}. The 01:00 / 09:00 IST pass and "
-                    f"Push stock re-send only numbers IMS changed, so they never undo a change "
-                    f"made on Shopify. Store manager: check each of these products on the "
-                    f"shelf, then ask an ADMIN or SUPERADMIN (only they have the button) to "
-                    f"open it and press Send to website to re-send IMS's numbers."
-                )
-            if banned:
-                parts.append(
-                    f"Blocked from online sale by a SUPERADMIN: {_named(banned)}. IMS sends 0 for "
-                    f"a blocked product and Send to website refuses it, so no IMS button clears "
-                    f"this. Store manager: ask a SUPERADMIN to set each to 0 at {label}'s location "
-                    f"in Shopify admin, or to lift the block if it should sell online."
-                )
-            if unread:
-                parts.append(
-                    f"The SUPERADMIN online block could not be read tonight for: {_named(unread)}. "
-                    f"If one is blocked, ask a SUPERADMIN to set it to 0 at {label}'s location in "
-                    f"Shopify admin (or to lift the block); if not, check it on the shelf and ask "
-                    f"an ADMIN or SUPERADMIN to open it and press Send to website."
-                )
-            if off:
-                parts.append(
-                    f"Deleted or deactivated in IMS but still listed at {label}'s Shopify location: "
-                    f"{_named(off)}. IMS lists 0 for a retired product, and the stock pass never "
-                    f"re-sends an unchanged number. Store manager: ask an ADMIN or SUPERADMIN to "
-                    f"press Take off website on it (for a size of another product: Send to website "
-                    f"on that product, which is refused while that product is blocked from online "
-                    f"sale), or a SUPERADMIN to set it to 0 at {label}'s location in Shopify admin, "
-                    f"which clears it in every case."
+                    f"on an earlier night and nothing re-sends it by itself."
                 )
             parts.append(
+                f"Top: {_named(rows)}. The 01:00 / 09:00 IST pass and Push stock re-send only "
+                f"numbers IMS changed, so they never undo a change made on Shopify. Store manager: "
+                f"ask an ADMIN or SUPERADMIN to set each product's quantity at {label}'s location "
+                f"in Shopify admin to the IMS number above."
+            )
+            parts.append(
                 f"This task closes on the first night every product named here compares "
-                f"clean at {label} or has left the online catalogue (taken off the website, "
-                f"or deleted in Shopify admin)."
+                f"clean at {label} or is no longer live on the website (taken off it, "
+                f"deactivated or deleted in IMS, or deleted in Shopify admin)."
             )
             description = " ".join(parts)
             payload = {
@@ -748,12 +677,6 @@ def sync_drift_task(
                 "skus": sorted(owed | drifted),
                 "drift_count": summary.get("drift_count"),
                 "max_delta": summary.get("max_delta"),
-                # The line each SKU is filed on, for a night the block is unread.
-                "lines": {
-                    **{d.get("sku"): "send" for d in fixable},
-                    **{d.get("sku"): "retired" for d in off},
-                    **{d.get("sku"): "blocked" for d in banned},
-                },
                 # The numbers every named SKU last drifted with: tonight's, else carried.
                 "last_seen": {
                     **{s: seen[s] for s in owed if s in seen},
@@ -782,8 +705,8 @@ def sync_drift_task(
         # that compared something at this shop.
         if active and (named or summary.get("compared")):
             notes = (
-                f"Auto-closed: every SKU this task named at {label} compared clean or left "
-                f"the online catalogue ({summary.get('compared') or 0} SKU(s) compared)."
+                f"Auto-closed: every SKU this task named at {label} compared clean or is no "
+                f"longer live on the website ({summary.get('compared') or 0} SKU(s) compared)."
             )
             ok = all([repo.complete_task(t.get("task_id"), notes=notes) for t in active])
             return "closed" if ok else None
@@ -899,7 +822,7 @@ async def run_parity_tick(
 
     try:
         from .online_delist import _raw_db
-        from .online_stock_writeback import _blocked_online, online_quantities_for_skus
+        from .online_stock_writeback import online_quantities_for_skus
         from .shopify_push.inventory import _mapped, _stores, unmapped_holders
 
         # SENTINEL hands over the SeededDatabaseConnection wrapper, which has no
@@ -991,19 +914,11 @@ async def run_parity_tick(
 
         if repo is not None:
             mapped_skus = {v["sku"] for v in catalogue} - set(gone)
-            retired = {v["sku"] for v in catalogue if v["retired"]}
-            # Every catalogue SKU, not only tonight's drift: an owed SKU named
-            # from an earlier night needs its own line's press too.
-            # The rule's own block reader (None = unread), never a second copy.
-            blocked = _blocked_online(db, sorted({v["sku"] for v in catalogue}))
             for store in stores:
                 # inventory._mapped's spelling: a stored 'BV-A ' is mapped as 'BV-A'.
                 sid = str(store.get("store_id") or "").strip()
                 if sid in mapped:
-                    outcome = sync_drift_task(
-                        repo, store, per_store.get(sid) or {}, mapped_skus=mapped_skus,
-                        blocked=blocked, retired=retired,
-                    )
+                    outcome = sync_drift_task(repo, store, per_store.get(sid) or {}, mapped_skus=mapped_skus)
                     if outcome:
                         snapshot["tasks"][outcome].append(sid)
             snapshot["tasks"]["closed"] += retire_unmapped_drift_tasks(repo, mapped)

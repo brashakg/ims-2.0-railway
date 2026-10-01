@@ -1950,7 +1950,8 @@ def test_R3_parity_never_counts_a_shop_shopify_cannot_see(monkeypatch):
 
     monkeypatch.setattr(shopify_push, "_has_shopify_creds", lambda db, storefront_id="BV": True)
     db = _db(a=2, b=1, c=0, sold=0, d=3)
-    db.seed("catalog_variants", [{"sku": "SP-1", "shopify_inventory_item_id": INV_GID}])
+    # A LIVE listing (parity compares nothing else) carrying the item on ecom.
+    _listed(db, status="PUBLISHED")
 
     async def gql(db_, query, variables):  # noqa: ARG001
         edges = [
