@@ -57,6 +57,22 @@ def test_every_cell_of_the_table(status, fact):
     assert oos.decide({"status": f" {status.lower()} "}, fact) == GOLDEN[status][fact]
 
 
+@pytest.mark.parametrize("status", sorted(GOLDEN))
+@pytest.mark.parametrize("fact", FACTS)
+def test_only_a_conflict_cell_raises_the_conflict_task(status, fact):
+    """apply_fact on every cell: a fact the table keeps on a finished order
+    ("withheld": CANCELLED / REFUNDED / VOID) raises no task; only the
+    DELIVERED row's conflict raises the one conflict task."""
+    import mongomock
+
+    db = mongomock.MongoClient().db
+    db.orders.insert_one({"order_id": "O1", "order_number": "#1", "status": status})
+    out = oos.apply_fact(db, db.orders.find_one({"order_id": "O1"}, {"_id": 0}), fact, source="test")
+    assert out["why"] == GOLDEN[status][fact][1] and not out["failed"]
+    raised = db.tasks.count_documents({"task_type": "online_status_conflict"})
+    assert raised == (1 if out["why"] == "conflict" else 0)
+
+
 def test_no_fact_writes_nothing():
     for status in GOLDEN:
         assert oos.decide({"status": status}, None) == (None, None)
@@ -311,6 +327,7 @@ def test_a_staff_cancelled_order_is_never_flipped_to_refunded(swept):
         doc = _doc(swept, oid)
         assert (doc["status"], doc["payment_status"]) == ("CANCELLED", "REFUNDED")
         assert "status_history" not in doc
+        assert _tasks(swept, oid, "online_status_conflict") == 0, "a finished order is no conflict"
 
 
 @pytest.mark.parametrize("leg", ["mapper", "reconcile"])
@@ -350,6 +367,7 @@ def test_a_delete_on_a_finished_order_keeps_it(swept, finished):
     doc = _doc(swept, 60060)
     assert doc["status"] == finished and doc["shopify_deleted_at"]
     assert "status_before_void" not in doc and "void_reason" not in doc
+    assert _tasks(swept, 60060, "online_status_conflict") == 0, "a finished order is no conflict"
 
 
 def test_an_open_order_deleted_on_shopify_is_voided_through_the_claim(swept):
@@ -2035,6 +2053,51 @@ def test_a_stampless_historical_frame_goes_to_the_retrying_shops_manager(swept, 
     assert out["restock_applied"] is True and "stock-in" in out["message"]
     [task] = _stock_in(swept, oid)
     assert (task["store_id"], task["assigned_to"]) == ("BV-GANGA-01", _MANAGER)
+
+
+class _MissesThenReadDown:
+    """The claim's write fails before the server sees it, and so does its
+    read-back; the take-back after them goes through."""
+
+    def __init__(self, real):
+        self.real, self.missed, self.read_down = real, False, False
+
+    def __getattr__(self, name):
+        return getattr(self.real, name)
+
+    def find_one_and_update(self, *a, **kw):
+        if not self.missed:
+            self.missed = True
+            raise RuntimeError("connection reset before the write")
+        return self.real.find_one_and_update(*a, **kw)
+
+    def find_one(self, *a, **kw):
+        if self.missed and not self.read_down:
+            self.read_down = True
+            raise RuntimeError("read timed out")
+        return self.real.find_one(*a, **kw)
+
+
+def test_a_take_back_takes_back_only_its_own_write(swept, monkeypatch):
+    """Goods back booked the frame. A door working from a stale read books it
+    too: its write fails before it lands and so does its read-back, so it is
+    taken back -- by its own token, which is not on the line. Taken back by
+    the line's identity it un-booked Goods back's frame, and the next door
+    handed that frame to stock-in a second time."""
+    oid, rid = 60208, 700408
+    row = _historical_refund(swept, monkeypatch, oid, rid, ims_product_id="IMS-P-1", status="DELIVERED")
+    stale = copy.deepcopy(_doc(swept, oid))
+    lines = shopify_refund._return_lines_from_proposed(row["proposed_restock"])
+    assert _goods_back(row)["result"]["status"] == "stock_in"
+    lossy = _MissesThenReadDown(returns_router._orders_coll())
+    monkeypatch.setattr(returns_router, "_orders_coll", lambda: lossy)
+    with pytest.raises(RuntimeError):
+        shopify_refund._restock_booked(stale, lines, str(rid), lambda ls: {"applied": True})
+    assert lossy.missed and lossy.read_down
+    line = _doc(swept, oid)["items"][0]
+    assert (line.get("returned_qty"), line.get("restocked_refunds")) == (1, {str(rid): 1})
+    _confirm(swept["review"].find_one({"review_id": row["review_id"]}))
+    assert len(_stock_in(swept, oid)) == 1, "one frame, one task"
 
 
 class _CommitsThenReadDown(_CommitsThenRaises):
