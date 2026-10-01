@@ -22,5 +22,11 @@ export function PurchaseAnalyticsSection() {
     );
   }
   // Read-only analytics: an empty dataset renders as zeroed panels.
-  return <PurchaseAnalytics purchaseOrders={posQ.data ?? []} suppliers={suppliersQ.data ?? []} />;
+  return (
+    <PurchaseAnalytics
+      purchaseOrders={posQ.data?.orders ?? []}
+      totalOrders={posQ.data?.total}
+      suppliers={suppliersQ.data ?? []}
+    />
+  );
 }

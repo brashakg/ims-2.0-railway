@@ -11,11 +11,20 @@ import {
 import type { PurchaseOrder, Supplier } from './purchaseTypes';
 
 interface PurchaseAnalyticsProps {
+  /** The newest page of orders the server sent (newest first). */
   purchaseOrders: PurchaseOrder[];
+  /** Every order in scope (review round 2, #18); defaults to the page. */
+  totalOrders?: number;
   suppliers: Supplier[];
 }
 
-export function PurchaseAnalytics({ purchaseOrders, suppliers }: PurchaseAnalyticsProps) {
+export function PurchaseAnalytics({ purchaseOrders, totalOrders, suppliers }: PurchaseAnalyticsProps) {
+  // The count is the server's real total. The value and the pending count are
+  // summed over the page in hand, so when that page is a cut they say so
+  // instead of passing the latest N off as a total (review round 2, #18).
+  const shown = purchaseOrders.length;
+  const total = Math.max(totalOrders ?? shown, shown);
+  const cut = shown < total;
   return (
     <div className="space-y-6">
       <div className="grid grid-cols-1 tablet:grid-cols-4 gap-4">
@@ -26,7 +35,7 @@ export function PurchaseAnalytics({ purchaseOrders, suppliers }: PurchaseAnalyti
             </div>
             <div>
               <p className="text-sm text-gray-600">Total POs</p>
-              <p className="text-2xl font-bold text-gray-900">{purchaseOrders.length}</p>
+              <p className="text-2xl font-bold text-gray-900">{total}</p>
             </div>
           </div>
         </div>
@@ -36,7 +45,7 @@ export function PurchaseAnalytics({ purchaseOrders, suppliers }: PurchaseAnalyti
               <DollarSign className="w-5 h-5 text-green-600" />
             </div>
             <div>
-              <p className="text-sm text-gray-600">Total Value</p>
+              <p className="text-sm text-gray-600">{cut ? `Value of the latest ${shown} orders` : 'Total Value'}</p>
               <p className="text-2xl font-bold text-gray-900">
                 {'\u20B9'}{(purchaseOrders.reduce((sum, po) => sum + po.total, 0) / 100000).toFixed(1)}L
               </p>
@@ -60,7 +69,7 @@ export function PurchaseAnalytics({ purchaseOrders, suppliers }: PurchaseAnalyti
               <Clock className="w-5 h-5 text-orange-600" />
             </div>
             <div>
-              <p className="text-sm text-gray-600">Pending Approval</p>
+              <p className="text-sm text-gray-600">{cut ? `Pending approval, latest ${shown}` : 'Pending Approval'}</p>
               <p className="text-2xl font-bold text-gray-900">
                 {purchaseOrders.filter(po => po.status === 'PENDING').length}
               </p>

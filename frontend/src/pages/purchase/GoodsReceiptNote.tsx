@@ -14,6 +14,7 @@ import clsx from 'clsx';
 import { vendorsApi } from '../../services/api';
 import { productApi } from '../../services/api/products';
 import { PurchaseShopPicker, usePurchaseShop } from './purchaseShop';
+import { matchingTotal } from './purchaseQueries';
 import { useStores } from '../../hooks/usePOSQueries';
 import { useToast } from '../../context/ToastContext';
 import { GRNPrint } from '../../components/print/GRNPrint';
@@ -206,6 +207,9 @@ export function GoodsReceiptNote() {
   >([]);
   const [dcSearching, setDcSearching] = useState(false);
   const [grns, setGrns] = useState<GRN[]>([]);
+  // Every receipt in scope, from the server -- not the length of the newest
+  // page it sends (review round 2, #18).
+  const [grnTotal, setGrnTotal] = useState(0);
   const [pos, setPos] = useState<POOption[]>([]);
   const [, setIsLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -279,6 +283,7 @@ export function GoodsReceiptNote() {
         ]);
         const grnList = Array.isArray(grnResp) ? grnResp : grnResp.grns || grnResp.data || [];
         setGrns(grnList.map(transformGRN));
+        setGrnTotal(matchingTotal(grnResp, grnList.length));
         setPos(poList);
       } catch (error) {
         toast.error('Failed to load GRNs');
@@ -293,6 +298,7 @@ export function GoodsReceiptNote() {
     const response = await vendorsApi.getGRNs({ store_id: grnScope });
     const grnList = Array.isArray(response) ? response : response.grns || response.data || [];
     setGrns(grnList.map(transformGRN));
+    setGrnTotal(matchingTotal(response, grnList.length));
   };
 
   const reloadPurchaseOrders = async () => {
@@ -703,8 +709,11 @@ export function GoodsReceiptNote() {
       <div className="stat-strip">
         <div>
           <div className="l">Total GRNs</div>
-          <div className="v">{grns.length}</div>
-          <div className="d">{scopeLabel}</div>
+          <div className="v">{Math.max(grnTotal, grns.length)}</div>
+          {/* The figure is the real count; the page below is the newest cut. */}
+          <div className="d">
+            {grns.length < grnTotal ? `${scopeLabel} · latest ${grns.length} shown` : scopeLabel}
+          </div>
         </div>
         <div>
           <div className="l">Quality passed</div>
@@ -1262,6 +1271,11 @@ export function GoodsReceiptNote() {
       {/* ─────────────────────────── HISTORY ─────────────────────────── */}
       {activeTab === 'history' && (
         <div className="space-y-3">
+          {grns.length < grnTotal && (
+            <p className="text-xs" style={{ color: 'var(--ink-4)' }} data-testid="grn-list-cut">
+              Latest {grns.length} of {grnTotal} receipts, newest first.
+            </p>
+          )}
           {grns.length === 0 ? (
             <div className="card text-center py-12" style={{ color: 'var(--ink-4)' }}>
               <FileText className="w-10 h-10 mx-auto mb-3" style={{ color: 'var(--ink-5)' }} />

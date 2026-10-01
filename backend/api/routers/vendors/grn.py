@@ -83,11 +83,20 @@ async def list_grns(
             rng["$lte"] = date_to
         filter_dict["dc_date"] = rng
 
-    grns = grn_repo.find_many(filter_dict, skip=skip, limit=limit)
+    # Newest first, and `total` is every matching receipt -- not the length of
+    # this page. Unsorted, the page was the first 50 ever received, so on all
+    # stores the tab held the chain's oldest receipts and its tile called 50
+    # the total (review round 2, #18). The screen says "latest N of M".
+    grns = grn_repo.find_many(filter_dict, sort=_GRN_NEWEST_FIRST, skip=skip, limit=limit) or []
+    total = max(grn_repo.count(filter_dict), skip + len(grns))
 
-    _enrich_grn_names(grns or [])
+    _enrich_grn_names(grns)
 
-    return {"grns": grns or [], "total": len(grns) if grns else 0}
+    return {"grns": grns, "total": total}
+
+
+# Received-at descending; the id breaks a tie so pages never overlap.
+_GRN_NEWEST_FIRST = [("created_at", -1), ("_id", -1)]
 
 
 def _enrich_grn_names(grns: list) -> None:
