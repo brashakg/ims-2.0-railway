@@ -30,6 +30,9 @@ ONHAND_UNKNOWN = "ONHAND_UNKNOWN"  # online SKU, the IMS on-hand could not be re
 LISTED_UNKNOWN = "LISTED_UNKNOWN"  # online SKU, listed qty not covered by the live read
 OK = "OK"  # online within the safe allocation (listed qty KNOWN)
 NOT_ONLINE = "NOT_ONLINE"  # product isn't listed online -> not assessed
+# Live on Shopify, but its Shopify item is shared with another IMS product, so
+# the writer sends neither: not assessed, and the cause is named (fix in IMS).
+SHARES_SHOPIFY_ITEM = "SHARES_SHOPIFY_ITEM"
 
 _ORDER = {
     OVERSELL_RISK: 0,
@@ -37,7 +40,8 @@ _ORDER = {
     ONHAND_UNKNOWN: 2,
     LISTED_UNKNOWN: 3,
     OK: 4,
-    NOT_ONLINE: 5,
+    SHARES_SHOPIFY_ITEM: 5,
+    NOT_ONLINE: 6,
 }
 
 
@@ -65,6 +69,7 @@ def classify(
     is_online: Optional[bool],
     over: Optional[int],
     excess: Optional[int],
+    shares_item: bool = False,
 ) -> str:
     """online=None means the listed quantity is UNKNOWN (the live read did not
     cover this SKU) -> LISTED_UNKNOWN, never a confident OK. in_store=None
@@ -82,7 +87,11 @@ def classify(
 
     ``is_online`` None means WHETHER the listing is live is unknown (the
     live-listing read failed) -> LISTED_UNKNOWN, never a confident
-    NOT_ONLINE."""
+    NOT_ONLINE. ``shares_item``: the listing is live but its Shopify item is
+    shared with another product (the writer refuses it) -> SHARES_SHOPIFY_ITEM,
+    never NOT_ONLINE."""
+    if shares_item:
+        return SHARES_SHOPIFY_ITEM
     if is_online is None:
         return LISTED_UNKNOWN
     if not is_online:
@@ -121,6 +130,7 @@ def reconcile_items(items: List[dict]) -> dict:
         LISTED_UNKNOWN: 0,
         OK: 0,
         NOT_ONLINE: 0,
+        SHARES_SHOPIFY_ITEM: 0,
     }
     oversell_units = 0
 
@@ -134,7 +144,7 @@ def reconcile_items(items: List[dict]) -> dict:
         # An explicit None: whether the listing is live is unknown.
         is_online = None if "is_online" in it and it["is_online"] is None else bool(it.get("is_online"))
         over, excess = it.get("unbacked"), it.get("excess")
-        status = classify(in_store, online, is_online, over, excess)
+        status = classify(in_store, online, is_online, over, excess, bool(it.get("shares_item")))
         counts[status] = counts.get(status, 0) + 1
         if status == OVERSELL_RISK:
             oversell_units += over
@@ -162,6 +172,7 @@ def reconcile_items(items: List[dict]) -> dict:
             "listed_unknown": counts[LISTED_UNKNOWN],
             "ok": counts[OK],
             "not_online": counts[NOT_ONLINE],
+            "shares_item": counts[SHARES_SHOPIFY_ITEM],
             "oversell_risk_units": oversell_units,
         },
     }

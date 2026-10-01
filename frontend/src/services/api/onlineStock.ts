@@ -20,7 +20,7 @@ export interface ReconcileItem {
   /** Units listed beyond what IMS sends, counted Shopify location by location
    *  (never listed total minus recommended total); null = unknown. */
   delta: number | null;
-  status: 'OVERSELL_RISK' | 'OVER_ALLOCATED' | 'ONHAND_UNKNOWN' | 'LISTED_UNKNOWN' | 'OK' | 'NOT_ONLINE';
+  status: 'OVERSELL_RISK' | 'OVER_ALLOCATED' | 'ONHAND_UNKNOWN' | 'LISTED_UNKNOWN' | 'OK' | 'SHARES_SHOPIFY_ITEM' | 'NOT_ONLINE';
 }
 
 export interface ReconcileResult {
@@ -33,6 +33,7 @@ export interface ReconcileResult {
     listed_unknown?: number;
     ok?: number;
     not_online?: number;
+    shares_item?: number;
     oversell_risk_units?: number;
     /** The writer's own safety buffer (Shopify integration config); null when
      *  it could not be read. */

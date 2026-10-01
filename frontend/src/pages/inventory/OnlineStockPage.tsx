@@ -22,6 +22,7 @@ const STATUS_STYLE: Record<string, string> = {
   ONHAND_UNKNOWN: 'bg-blue-50 text-blue-700 border-blue-200',
   LISTED_UNKNOWN: 'bg-blue-50 text-blue-700 border-blue-200',
   OK: 'bg-green-100 text-green-800 border-green-200',
+  SHARES_SHOPIFY_ITEM: 'bg-blue-50 text-blue-700 border-blue-200',
   NOT_ONLINE: 'bg-gray-100 text-gray-500 border-gray-200',
 };
 const STATUS_LABEL: Record<string, string> = {
@@ -30,6 +31,7 @@ const STATUS_LABEL: Record<string, string> = {
   ONHAND_UNKNOWN: 'On-hand unknown',
   LISTED_UNKNOWN: 'Unverified',
   OK: 'OK',
+  SHARES_SHOPIFY_ITEM: 'Shares a Shopify item with another product - fix in IMS',
   NOT_ONLINE: 'Not online',
 };
 
@@ -66,7 +68,7 @@ export default function OnlineStockPage() {
 
   const s = data?.summary || {};
   const items = (data?.items || []).filter((i) =>
-    onlyRisk ? (i.status === 'OVERSELL_RISK' || i.status === 'OVER_ALLOCATED' || listedOffRecommended(i)) : true,
+    onlyRisk ? (i.status === 'OVERSELL_RISK' || i.status === 'OVER_ALLOCATED' || i.status === 'SHARES_SHOPIFY_ITEM' || listedOffRecommended(i)) : true,
   );
   // An empty table never claims "no risk" for rows nobody could verify:
   // nothing verified (the live-listing read failed, or every row unknown)

@@ -127,3 +127,15 @@ def test_reconcile_unknown_on_hand_rows():
     assert s["onhand_unknown"] == 1 and s["oversell_risk"] == 1 and s["oversell_risk_units"] == 3
     # A real oversell sorts above an unknown; an unknown above OK.
     assert r["items"][0]["sku"] == "B"
+
+
+def test_a_shared_item_sku_is_its_own_status_never_not_online():
+    from api.services.stock_allocation import SHARES_SHOPIFY_ITEM, reconcile_items
+
+    # classify: sharing wins over the not-live / unknown branches.
+    assert classify(10, 0, False, 0, 0, shares_item=True) == SHARES_SHOPIFY_ITEM
+    assert classify(10, 0, None, 0, 0, shares_item=True) == SHARES_SHOPIFY_ITEM
+    out = reconcile_items([{"sku": "A", "in_store": 3, "online": 0, "is_online": False, "shares_item": True,
+                            "unbacked": 0, "excess": 0}])
+    assert out["items"][0]["status"] == SHARES_SHOPIFY_ITEM
+    assert out["summary"]["shares_item"] == 1 and out["summary"]["not_online"] == 0

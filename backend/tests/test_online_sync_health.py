@@ -329,7 +329,7 @@ def _patch_online(monkeypatch, mapping):
     from api.services.shopify_push import inventory
 
     live = {s for s, v in mapping.items() if v.get("online")}
-    monkeypatch.setattr(inventory, "skus_on_live_listings", lambda db, skus, **_k: set(live))
+    monkeypatch.setattr(inventory, "live_listing_split", lambda db, skus, **_k: (set(live), set()))
     # Both screens import the name inside the function from
     # shopify_push.inventory, so patching the module attribute is sufficient.
 

@@ -68,7 +68,7 @@ def _online_statuses(db, sku_list: List[str]) -> Dict[str, Any]:
     failed read -- the catalogue lookup itself or the live read -- answers
     ``online`` None (unknown: the screen says Unverified), never a confident
     "in-store only"."""
-    from ..services.shopify_push.inventory import skus_on_live_listings
+    from ..services.shopify_push.inventory import live_listing_split
 
     try:
         statuses = online_status_for_skus(db, sku_list, strict=True)
@@ -82,11 +82,15 @@ def _online_statuses(db, sku_list: List[str]) -> Dict[str, Any]:
     if not statuses:
         return statuses
     try:
-        live: Optional[set] = skus_on_live_listings(db, list(statuses), strict=True)
+        live, shared = live_listing_split(db, list(statuses), strict=True)
     except Exception:  # noqa: BLE001
-        live = None
+        live, shared = None, set()
     for key, status in statuses.items():
-        status["online"] = None if live is None else str(key).strip() in live
+        name = str(key).strip()
+        # A SKU on a LIVE listing that shares its Shopify item with another
+        # product is on the website but the writer refuses it: unknown
+        # (Unverified), never "In-store only".
+        status["online"] = None if live is None or name in shared else name in live
     return statuses
 
 
@@ -239,7 +243,7 @@ async def online_stock_reconcile(
     skus = [p.get("sku") for p in products if p.get("sku")]
     from ..services.online_stock_writeback import _safety_buffer
     from ..services.online_sync_health import live_listed_qty_for_skus, rule_by_location
-    from ..services.shopify_push.inventory import skus_on_live_listings
+    from ..services.shopify_push.inventory import live_listing_split
     from ..services.shopify_stock_parity import unbacked_units
 
     # Online = the SKU's listing is live on Shopify: THE one reader the
@@ -248,9 +252,9 @@ async def online_stock_reconcile(
     # STRICT: a failed read is unknown (every row LISTED_UNKNOWN), never a
     # confident NOT_ONLINE beside a drift task parity keeps open.
     try:
-        on_live: Optional[set] = skus_on_live_listings(db, skus, strict=True)
+        on_live, shares_item = live_listing_split(db, skus, strict=True)
     except Exception:  # noqa: BLE001
-        on_live = None
+        on_live, shares_item = None, set()
     live_skus = [s for s in skus if on_live is not None and str(s).strip() in on_live]
 
     # Live Shopify listed quantities PER LOCATION for the live SKUs: mapped
@@ -285,6 +289,7 @@ async def online_stock_reconcile(
     for p in products:
         sku = p.get("sku")
         is_online = None if on_live is None else str(sku or "").strip() in on_live
+        shares = str(sku or "").strip() in shares_item
         # Uncovered online SKU -> None (LISTED_UNKNOWN downstream), never a
         # confident 0. Offline SKUs carry 0 (they are not assessed anyway).
         per_location = levels.get(inv_of.get(sku))
@@ -298,6 +303,7 @@ async def online_stock_reconcile(
                 "in_store": None if on_hand is None else on_hand.get(p.get("product_id"), 0),
                 "online": (listed if is_online is not False else 0),
                 "is_online": is_online,
+                "shares_item": shares,
                 # What the writer sends to the mapped shops in view (None: unknown).
                 "recommended": None if per_shop is None else sum(int(per_shop.get(sid, 0)) for sid in mapped),
                 # Listed beyond the shelf / beyond the writer's number, location

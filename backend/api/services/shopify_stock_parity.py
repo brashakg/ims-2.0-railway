@@ -606,6 +606,41 @@ def _named(rows: List[Dict[str, Any]]) -> str:
     return ", ".join(one(d) for d in rows)
 
 
+# How many shared-item SKUs one shop's task names before "and N more".
+_SHARED_NAMED_CAP = 20
+
+
+def _shared_named(skus: Iterable[str]) -> str:
+    """The shared-item SKUs a task names, capped: ``A, B, ... and N more``."""
+    names = sorted(set(skus or ()))
+    shown = ", ".join(names[:_SHARED_NAMED_CAP])
+    more = len(names) - _SHARED_NAMED_CAP
+    return f"{shown} and {more} more" if more > 0 else shown
+
+
+def shared_skus_at_shop(db, shared_skus: Iterable[str], store_id: str) -> List[str]:
+    """The shared-item SKUs that have stock on THIS shop's shelf (the shelf is
+    what the writer reads: online_stock_writeback.shelf_quantities_for_skus).
+    A shop whose shelf could not be read is unknown, never 0: its SKUs stay
+    named."""
+    names = sorted(set(shared_skus or ()))
+    if not names:
+        return []
+    try:
+        from .online_stock_writeback import shelf_quantities_for_skus
+
+        shelf = shelf_quantities_for_skus(db, names)
+    except Exception:  # noqa: BLE001
+        return names
+    sid = str(store_id or "").strip()
+    out = []
+    for s in names:
+        units = (shelf.get(s) or {}).get(sid)
+        if units is None or int(units or 0) > 0:
+            out.append(s)
+    return out
+
+
 def shop_label(store: Dict[str, Any]) -> str:
     """A shop as the Online Stock picker spells it (store_name, else the code,
     else the id), with its code beside it when they differ: "Better Vision
@@ -711,13 +746,14 @@ def sync_drift_task(
             if shared:
                 parts.append(
                     f"Two IMS products share one Shopify item - fix in IMS (IMS sends neither "
-                    f"number, so they are not compared): {', '.join(shared)}. Give each its own "
+                    f"number, so they are not compared): {_shared_named(shared)}. Give each its own "
                     f"Shopify variant, or clear the duplicated Shopify inventory item id."
                 )
             parts.append(
                 f"This task closes by itself on the first night every product named here "
                 f"compares clean at {label} or is no longer compared (its listing is off the "
-                f"website, IMS no longer sells it, or it was deleted in Shopify admin)."
+                f"website, IMS no longer sells it, it shares a Shopify item with another "
+                f"product, or it was deleted in Shopify admin)."
             )
             description = " ".join(parts)
             payload = {
@@ -756,7 +792,8 @@ def sync_drift_task(
             notes = (
                 f"Auto-closed: every SKU this task named at {label} compared clean or is no "
                 f"longer compared (its listing is off the website, IMS no longer sells it, it was "
-                f"deleted in Shopify admin, or its Shopify item is unmapped) "
+                f"deleted in Shopify admin, it shares a Shopify item with another product, or its "
+                f"Shopify item is unmapped) "
                 f"({summary.get('compared') or 0} SKU(s) compared)."
             )
             ok = all([repo.complete_task(t.get("task_id"), notes=notes) for t in active])
@@ -972,7 +1009,8 @@ async def run_parity_tick(
                 sid = str(store.get("store_id") or "").strip()
                 if sid in mapped:
                     outcome = sync_drift_task(
-                        repo, store, per_store.get(sid) or {}, mapped_skus=mapped_skus, shared_skus=shared_skus
+                        repo, store, per_store.get(sid) or {}, mapped_skus=mapped_skus,
+                        shared_skus=shared_skus_at_shop(db, shared_skus, sid),
                     )
                     if outcome:
                         snapshot["tasks"][outcome].append(sid)

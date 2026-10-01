@@ -2554,14 +2554,14 @@ def test_r18_skus_sharing_one_shopify_item_are_in_no_view_and_named_apart(monkey
     assert out["shared_item_skus"] == ["SKU-1", "SKU-2"]
     (task,) = _tasks(db)
     assert "Two IMS products share one Shopify item - fix in IMS" in task["description"]
-    assert "SKU-1, SKU-2" in task["description"]
+    assert "(IMS sends neither number, so they are not compared): SKU-1." in task["description"]  # SKU-2 has no stock at BV-A
     assert task["payload"]["skus"] == ["SKU-3"]
     # The other two readers skip them as well.
     monkeypatch.setattr("api.services.shopify_push._graphql", _shopify(levels))
     tally = _run(osh.stock_tally_live(db))
     assert {r["sku"] for r in tally["items"]} == {"SKU-3"}
     page = _reconcile_page(monkeypatch, db, levels, "BV-A")
-    assert {r["sku"] for r in page["items"] if r["status"] != "NOT_ONLINE"} == {"SKU-3"}
+    assert {r["sku"] for r in page["items"] if r["status"] not in ("NOT_ONLINE", "SHARES_SHOPIFY_ITEM")} == {"SKU-3"}
 
 
 def test_r18_an_unreadable_claim_guard_is_unknown_never_nothing_shared(monkeypatch):
@@ -2583,3 +2583,100 @@ def test_r18_an_unreadable_claim_guard_is_unknown_never_nothing_shared(monkeypat
     assert skus_on_live_listings(db, ["SKU-3"]) == set()
     out = _run(sp.run_parity_tick(db, graphql=_shopify({})))
     assert out["checked"] is False and "catalog read failed" in out["reason"]
+
+
+# ---------------------------------------------------------------------------
+# Round 19
+# ---------------------------------------------------------------------------
+
+
+def test_r19_a_shared_item_sku_is_unverified_and_named_never_not_online(monkeypatch):
+    """Review item 1. SKU-1 and SKU-2 are on a LIVE listing and share one
+    Shopify item (the writer refuses both). The Inventory column gets
+    online None (Unverified), the reconcile view its own status naming the
+    cause -- never "Not online" for a SKU that is on the website. SKU-3 is
+    unaffected. Put the shared SKUs back in the plain not-live branch
+    (online False / NOT_ONLINE) -> fails."""
+    from api.routers import catalog
+
+    db = _shared_db()
+    statuses = catalog._online_statuses(db, ["SKU-1", "SKU-2", "SKU-3"])
+    assert {k: v["online"] for k, v in statuses.items()} == {"SKU-1": None, "SKU-2": None, "SKU-3": True}
+    levels = {INV_1: {LOC_A: 3, LOC_B: 0}, INV_3: {LOC_A: 1, LOC_B: 0}, INV_2: {}}
+    page = _reconcile_page(monkeypatch, db, levels, "BV-A")
+    rows = {r["sku"]: r["status"] for r in page["items"]}
+    assert rows["SKU-1"] == rows["SKU-2"] == "SHARES_SHOPIFY_ITEM"
+    assert rows["SKU-3"] != "SHARES_SHOPIFY_ITEM"
+    assert page["summary"]["shares_item"] == 2 and page["summary"]["not_online"] == 0
+
+
+def test_r19_the_shared_item_line_names_only_skus_stocked_at_that_shop():
+    """Review item 2. SKU-1 has 3 on BV-A's shelf, SKU-2 has 0 there: BV-A's
+    task names SKU-1 only; BV-B (no stock of either) names neither.
+    Name every shared SKU at every shop (the old global line) -> fails."""
+    db = _shared_db()
+    assert sp.shared_skus_at_shop(db, ["SKU-1", "SKU-2"], "BV-A") == ["SKU-1"]
+    assert sp.shared_skus_at_shop(db, ["SKU-1", "SKU-2"], "BV-B") == []
+    levels = {INV_1: {LOC_A: 3, LOC_B: 0}, INV_3: {LOC_A: 1, LOC_B: 0}, INV_2: {}}
+    _run(sp.run_parity_tick(db, graphql=_shopify(levels)))
+    (task,) = _tasks(db)
+    text = task["description"]
+    assert "fix in IMS (IMS sends neither number, so they are not compared): SKU-1." in text
+    assert "SKU-2." not in text
+
+
+def test_r19_the_shared_item_line_is_capped_with_and_n_more():
+    """Review item 2. 25 shared SKUs at one shop: the line names the first
+    20 and says 'and 5 more'. Drop the cap -> all 25 are named -> fails."""
+    from database.repositories.task_repository import TaskRepository
+
+    db = StrictDB()
+    coll = db.seed("tasks", [])
+    shared = [f"SH-{i:02d}" for i in range(25)]
+    summary = {"drift_count": 1, "drift": [{"sku": "SKU-1", "ims": 5, "shopify": 1, "delta": 4}],
+               "tolerance": 2, "max_delta": 4, "compared": 1, "clean_skus": []}
+    out = sp.sync_drift_task(TaskRepository(coll), {"store_id": "BV-A"}, summary,
+                             mapped_skus={"SKU-1"}, shared_skus=shared)
+    assert out == "filed"
+    text = coll.docs[0]["description"]
+    assert "SH-19 and 5 more" in text and "SH-20" not in text
+
+
+def test_r19_the_texts_name_sharing_a_shopify_item_as_a_reason_a_task_closes():
+    """Review item 2. 'closes by itself' (description) and the close note both
+    list 'shares a Shopify item' beside the other reasons. Drop either
+    wording -> fails."""
+    db = _shared_db()
+    shop = _shopify({INV_1: {LOC_A: 3, LOC_B: 0}, INV_3: {LOC_A: 1, LOC_B: 0}, INV_2: {}})
+    _run(sp.run_parity_tick(db, graphql=shop))
+    (task,) = _tasks(db)
+    assert "it shares a Shopify item with another product" in task["description"]
+    shop = _shopify({INV_1: {LOC_A: 3, LOC_B: 0}, INV_3: {LOC_A: 6, LOC_B: 0}, INV_2: {}})
+    out = _run(sp.run_parity_tick(db, graphql=shop))
+    assert out["tasks"]["closed"] == ["BV-A"]
+    assert "it shares a Shopify item with another product" in _tasks(db)[0]["completion_notes"]
+
+
+def test_r19_a_retired_sku_is_never_named_as_fix_in_ims():
+    """Review item 3 (mutant: drop `if s not in retired` in _sample_variants).
+    SKU-1 is retired in IMS; it still shares INV_1 with SKU-2, but the task
+    must not tell anyone to fix a SKU IMS no longer sells."""
+    db = _shared_db()
+    _retire("SKU-1")(db)
+    out = _run(sp.run_parity_tick(db, graphql=_shopify({INV_1: {LOC_A: 3, LOC_B: 0}, INV_3: {LOC_A: 1}, INV_2: {}})))
+    assert "SKU-1" not in out["shared_item_skus"]
+
+
+def test_r19_two_available_entries_at_one_location_read_unknown():
+    """Review item 3 (mutant: `len(availables) != 1` -> `< 1`). A location
+    edge with two `available` entries is ambiguous: the item reads unknown
+    (None), never the first entry. One entry reads its number."""
+    gid = lambda v, _kind: v  # noqa: E731
+
+    def node(*quantities):
+        return {"inventoryLevels": {"edges": [{"node": {"location": {"id": LOC_A},
+                                                        "quantities": [{"name": "available", "quantity": q}
+                                                                       for q in quantities]}}]}}
+
+    assert sp._node_levels(node(3, 5), gid) is None
+    assert sp._node_levels(node(3), gid) == {LOC_A: 3}
