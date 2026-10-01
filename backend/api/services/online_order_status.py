@@ -166,7 +166,7 @@ def apply_fact(
             fields = extra(order) if callable(extra) else extra  # nosec B610
             if _claim_order_status(
                 repo, oid, to, [order.get("status")], f"system:{source}",
-                extra={**(marks or {}), **(fields or {})} or None,
+                extra={**(marks or {}), **(fields or {})} or None,  # nosec B610 - a Mongo field dict for our own helper, not Django QuerySet.extra()
             ):
                 out["to"], out["from"] = to, order.get("status")
                 return out
