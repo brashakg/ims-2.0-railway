@@ -17,7 +17,7 @@ from datetime import datetime
 from ..utils.ist import ist_day_start_utc, ist_today, now_ist
 from .auth import get_current_user, require_roles
 from ..dependencies import validate_store_access
-from ..services.reorder_policy import low_stock_rows
+from ..services.reorder_policy import low_stock_rows, out_of_stock_count
 
 # /admin/* widgets surface cross-store escalations + system status and were
 # AUTHENTICATED-only (any user) -- they bypass the admin router's gate because
@@ -270,14 +270,8 @@ async def inventory_stock_count_status(
 ):
     store = validate_store_access(store_id, current_user)
     products = _coll("products")
-    oos = total = 0
-    if products is not None:
-        for p in products.find({}):
-            if p.get("is_active") is False:
-                continue
-            total += 1
-            if int(p.get("stock_quantity") or p.get("quantity") or 0) <= 0:
-                oos += 1
+    # Sold out by the one on-hand rule, not products.stock_quantity.
+    total, oos = out_of_stock_count(products, _coll("stock_units"), store_id=store)
     # THIS shop's low-stock list by its own levels (D12); every shop when the
     # caller has none.
     low = len(low_stock_rows(products, _coll("stock_units"), store_id=store))
@@ -397,17 +391,9 @@ async def owner_digest(
         except Exception:
             pass
 
-    oos = 0
     products = _coll("products")
-    if products is not None:
-        pq: Dict[str, Any] = {}
-        if store_id:
-            pq["store_id"] = store_id
-        for p in products.find(pq):
-            if p.get("is_active") is False:
-                continue
-            if int(p.get("stock_quantity") or p.get("quantity") or 0) <= 0:
-                oos += 1
+    # Sold out by the one on-hand rule, not products.stock_quantity.
+    _total, oos = out_of_stock_count(products, _coll("stock_units"), store_id=store_id)
     # Low stock: each shop judged by its own level (D12); store_id None = all.
     lows = low_stock_rows(products, _coll("stock_units"), store_id=store_id)
     low = len(lows)

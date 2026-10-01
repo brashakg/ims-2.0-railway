@@ -311,7 +311,7 @@ export function ReportsInventoryPage() {
                       <td className="text-gray-600">{p.category || '-'}</td>
                       <td className="right text-gray-700">{p.velocity_90d}</td>
                       <td className="right">
-                        <span className={p.reorder_point != null && p.current_stock <= p.reorder_point ? 'text-red-600 font-medium' : 'text-gray-700'}>
+                        <span className={p.low_stock ? 'text-red-600 font-medium' : 'text-gray-700'}>
                           {p.current_stock}
                         </span>
                       </td>

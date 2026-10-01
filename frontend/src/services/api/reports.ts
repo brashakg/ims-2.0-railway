@@ -421,6 +421,8 @@ export const reportsApi = {
         daily_velocity: number;
         current_stock: number;
         reorder_point: number | null; // null = not set
+        low_stock: boolean; // the server's verdict (reorder_policy)
+        stock_status: 'not-set' | 'out-of-stock' | 'critical' | 'low' | 'healthy';
         desired_cover: number;
         gap_units: number;
         suggested_order_qty: number;

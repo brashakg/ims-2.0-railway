@@ -12,7 +12,13 @@ from ...dependencies import (
     validate_store_access,
 )
 from ...services.reorder_policy import auto_reorder_disabled as _auto_reorder_disabled
-from ...services.reorder_policy import is_low_stock, on_hand, reorder_level, top_up
+from ...services.reorder_policy import (
+    is_low_stock,
+    on_hand,
+    reorder_level,
+    stock_status,
+    top_up,
+)
 from ._shared import router
 
 # ----------------------------------------------------------------------------
@@ -300,6 +306,9 @@ async def purchase_recommendations(
                 "daily_velocity": round(daily_v, 2),
                 "current_stock": current_stock,
                 "reorder_point": reorder_point,
+                # The server's verdict for this shop; the screen only renders it.
+                "low_stock": is_low_stock(prod, current_stock, store_id=active_store),
+                "stock_status": stock_status(reorder_point, current_stock),
                 "desired_cover": desired_cover,
                 "gap_units": gap_units,
                 "suggested_order_qty": suggested_qty,
