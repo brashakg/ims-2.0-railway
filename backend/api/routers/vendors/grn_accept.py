@@ -20,7 +20,7 @@ from ._shared import (
     router,
 )
 from .gst import _promote_cost_from_rate
-from .po_detail import _as_read, _qty
+from .po_detail import _as_read, _qty, beyond_open_quantity
 from .numbering import (
     _cumulative_received_by_product,
     _grn_barcode,
@@ -190,21 +190,21 @@ def _hold_order_open_for_receipt(po_repo, grn) -> None:
                     "it any more. Void this receipt."
                 ),
             )
-        ordered_now: dict = {}
-        for it in po.get("items") or []:
-            pid = it.get("product_id")
-            ordered_now[pid] = ordered_now.get(pid, 0) + _qty(it.get("quantity"))
-        for line in grn.get("items") or []:
-            was = line.get("ordered_qty")
-            if was is not None and ordered_now.get(line.get("product_id"), 0) < _qty(was):
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        "Part of this order was cancelled after this delivery "
-                        "was logged, so the receipt no longer matches it. Void "
-                        "this receipt and log what arrived again."
-                    ),
-                )
+        # Earlier ACCEPTED receipts only: this receipt is not accepted yet,
+        # and a retry of its own half-minted accept must not count twice.
+        received = dict(_cumulative_received_by_product(get_grn_repository(), po_id))
+        for pid, own in (po.get("received_qty_by_product") or {}).items():
+            received[pid] = max(_qty(received.get(pid)), _qty(own))
+        over = beyond_open_quantity(po, grn.get("items") or [], received, "accepted_qty")
+        if over:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Part of this order was cancelled, so the receipt no "
+                    "longer fits it (" + ", ".join(over) + "). Void this "
+                    "receipt and log what arrived again."
+                ),
+            )
         if po_repo.update_if(po_id, _as_read(po), {}):
             return
     raise HTTPException(

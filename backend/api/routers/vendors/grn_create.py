@@ -299,6 +299,29 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
                 },
             )
 
+    # No receipt against a cancelled quantity: held to the LIVE order, so goods
+    # for a line (or part of one) the order has withdrawn are refused here and
+    # never reach the accept. grn_accept holds the same rule at accept time.
+    if po is not None:
+        from .po_detail import _received_by_product, beyond_open_quantity
+
+        over = beyond_open_quantity(
+            po,
+            [it.model_dump() for it in grn.items],
+            _received_by_product(po),
+            "received_qty",
+        )
+        if over:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "This order no longer has room for what you entered: "
+                    + ", ".join(over)
+                    + ". Those units were cancelled on the order, so they "
+                    "cannot be received against it."
+                ),
+            )
+
     # Calculate totals
     total_received = sum(item.received_qty for item in grn.items)
     total_accepted = sum(item.accepted_qty for item in grn.items)

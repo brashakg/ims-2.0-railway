@@ -413,6 +413,37 @@ def _qty(v) -> int:
         return 0
 
 
+def beyond_open_quantity(po: dict, lines, already_received: dict, qty_key: str) -> list:
+    """THE rule behind "no receipt against a cancelled quantity": the names of
+    the products on `lines` that the LIVE order no longer has room for.
+
+    A cancel lowers a line's `quantity` to what had arrived (0 for a line
+    cancelled outright), so the live quantity is the figure to hold a receipt
+    to -- never a figure stamped when the receipt was logged. Only a product
+    the order has cancelled units of is held to it; a delivery that merely
+    runs over an untouched line is a variance for the receiver to record, as
+    before. `qty_key` is the receipt's `received_qty` when logging it and its
+    `accepted_qty` when accepting it. Create and accept both call this."""
+    live: dict = {}
+    cancelled: set = set()
+    names: dict = {}
+    for it in po.get("items") or []:
+        pid = it.get("product_id")
+        names.setdefault(pid, it.get("product_name") or it.get("sku") or pid)
+        live[pid] = live.get(pid, 0) + _qty(it.get("quantity"))
+        if it.get("line_status") == "CANCELLED" or _qty(it.get("cancelled_qty")):
+            cancelled.add(pid)
+    coming: dict = {}
+    for line in lines or []:
+        pid = line.get("product_id")
+        coming[pid] = coming.get(pid, 0) + _qty(line.get(qty_key))
+    return [
+        str(names[pid])
+        for pid, qty in coming.items()
+        if qty and pid in cancelled and _qty(already_received.get(pid)) + qty > live.get(pid, 0)
+    ]
+
+
 def _po_for_change(po_id: str, current_user: dict):
     """(repo, po) for a write, behind the same store boundary as every other
     PO write: another store's order answers 404, never a hint it exists."""
