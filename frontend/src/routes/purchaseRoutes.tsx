@@ -72,7 +72,7 @@ export const purchaseRoutes = (
     <Route
       path="purchase"
       element={
-        <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'WORKSHOP_STAFF']}>
+        <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'WORKSHOP_STAFF']} namesWhoCan={false}>
           <PurchaseLayout />
         </ProtectedRoute>
       }

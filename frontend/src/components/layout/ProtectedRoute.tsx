@@ -2,7 +2,7 @@
 // IMS 2.0 - Protected Route Component
 // ============================================================================
 
-import { Navigate, useLocation, useOutlet } from 'react-router-dom';
+import { Navigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { moduleForPath, type ModuleKey } from '../../context/ModuleContext';
 import type { UserRole } from '../../types';
@@ -18,6 +18,13 @@ interface ProtectedRouteProps {
   /** One line the blocked page shows above the list of who CAN open this
    *  route (e.g. "Only managers receive goods into stock."). */
   deniedHint?: string;
+  /** false on a section LAYOUT's gate whose sections are narrower than it
+   *  (/purchase: the accountant may not open vendor returns, workshop staff
+   *  may not open orders). Its list is the union of every section's, so naming
+   *  it on the blocked page told people to hand the work to roles the section
+   *  itself refuses. Leave it on where every section shares the layout's list
+   *  (inventory, reports) -- that list is the right one to name. */
+  namesWhoCan?: boolean;
 }
 
 export function ProtectedRoute({
@@ -26,15 +33,10 @@ export function ProtectedRoute({
   requirePermission,
   requireModule,
   deniedHint,
+  namesWhoCan = true,
 }: ProtectedRouteProps) {
   const { isAuthenticated, isLoading, hasRole, hasPermission, hasModuleAccess } = useAuth();
   const location = useLocation();
-  // A gate around a section LAYOUT (/purchase, /inventory, ...) holds the
-  // union of every section's roles; the matched section has its own, narrower
-  // gate. Naming the union on the blocked page told people to hand the work to
-  // roles the section itself refuses, so only a gate with no nested route
-  // below it names who can open the page.
-  const isLayoutGate = useOutlet() !== null;
 
   // Show loading state - don't render children until auth initialization completes
   if (isLoading) {
@@ -57,7 +59,7 @@ export function ProtectedRoute({
   if (allowedRoles && allowedRoles.length > 0) {
     if (!hasRole(allowedRoles)) {
       // Tell the blocked page who CAN open this, so it can name them.
-      const who = isLayoutGate ? undefined : allowedRoles;
+      const who = namesWhoCan ? allowedRoles : undefined;
       return (
         <Navigate to="/unauthorized" state={{ from: location, allowedRoles: who, deniedHint }} replace />
       );

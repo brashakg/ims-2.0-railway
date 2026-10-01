@@ -117,7 +117,7 @@ export const settingsRoutes = (
     <Route
       path="settings"
       element={
-        <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'AREA_MANAGER', 'CATALOG_MANAGER', 'ACCOUNTANT']}>
+        <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'AREA_MANAGER', 'CATALOG_MANAGER', 'ACCOUNTANT']} namesWhoCan={false}>
           <SettingsLayout />
         </ProtectedRoute>
       }
