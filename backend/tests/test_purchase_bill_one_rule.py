@@ -1424,6 +1424,23 @@ class TestTheUnplacedCheckKeepsItsRules:
         assert row["status"] == "MISMATCH" and "NC-1" in row["note"], row
         assert xc["gstr3b"]["itc"]["total"] == 0.0
 
+    def test_a_cancelled_bill_is_not_missing_credit(self):
+        """r10 #3: placement skips a dead bill, so without the unplaced
+        check's own dead-bill filter every cancelled or void bill would read
+        as credit left off GSTR-3B -- red for credit nobody may claim."""
+        db = TestCreditLeftOffEveryReturnIsFlagged()._world()
+        db["vendor_bills"].insert_many(
+            [{"bill_id": f"d{i}", "bill_number": f"DEAD-{st}", "vendor_id": "V1", "bill_date": "2026-05-05",
+              "invoice_date": "2026-05-05", "taxable_amount": 1000, "tax_amount": 50, "cgst_total": 0.0,
+              "sgst_total": 0.0, "igst_total": 50.0, "recipient_entity_id": "E1",
+              "recipient_gstin": BUY_JH, "status": st}
+             for i, st in enumerate(("CANCELLED", "cancelled", "VOID", "voided"))]
+        )
+        xc = _crosscheck(db, "E1")
+        assert xc["itc_unplaced"]["count"] == 0, xc["itc_unplaced"]
+        assert _row(xc, "Input credit left off GSTR-3B")["status"] == "MATCH"
+        assert xc["gstr3b"]["itc"]["total"] == 0.0
+
     def test_any_credit_off_every_return_is_a_mismatch(self):
         """r10 #2: the row compared to zero within the Rs 1 rounding
         tolerance, so up to Rs 1.00 of credit on no return read MATCH and did
