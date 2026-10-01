@@ -17,13 +17,16 @@ import { useState, useEffect } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import { Settings } from 'lucide-react';
 import clsx from 'clsx';
-import { loyaltyApi, type LoyaltyProgramStats, type LoyaltySettings } from '../../../services/api/loyalty';
-import { fmtCompact, type LoyaltyOutletContext } from './loyaltyShared';
+import { loyaltyApi, type LoyaltyProgramStats, type LoyaltyRewardCreate, type LoyaltySettings } from '../../../services/api/loyalty';
+import { BLANK_REWARD, fmtCompact, type LoyaltyOutletContext } from './loyaltyShared';
 
 export function LoyaltyLayout() {
   const [stats, setStats] = useState<LoyaltyProgramStats | null>(null);
   const [settings, setSettings] = useState<LoyaltySettings | null>(null);
   const [loading, setLoading] = useState(true);
+  // 'New reward' draft, kept here so it survives section switches.
+  const [showAddReward, setShowAddReward] = useState(false);
+  const [newReward, setNewReward] = useState<LoyaltyRewardCreate>(BLANK_REWARD);
 
   useEffect(() => {
     let alive = true;
@@ -53,7 +56,11 @@ export function LoyaltyLayout() {
     });
   }, []);
 
-  const sectionContext: LoyaltyOutletContext = { stats, settings };
+  const sectionContext: LoyaltyOutletContext = {
+    stats,
+    settings,
+    rewardDraft: { showAddReward, setShowAddReward, newReward, setNewReward },
+  };
 
   return (
     <div className="inv-body" aria-busy={loading ? "true" : "false"}>

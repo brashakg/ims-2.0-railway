@@ -8,6 +8,7 @@ import { Plus, Trash2 } from 'lucide-react';
 import clsx from 'clsx';
 import { loyaltyApi, type LoyaltyReward, type LoyaltyRewardCreate } from '../../../services/api/loyalty';
 import { useToast } from '../../../context/ToastContext';
+import { BLANK_REWARD, useLoyaltyContext } from './loyaltyShared';
 
 // CRM-13: reward type badge colours (neutral palette, no cartoonish multi-colour)
 const REWARD_TYPE_STYLE: Record<string, string> = {
@@ -24,21 +25,14 @@ const REWARD_TYPE_LABEL: Record<string, string> = {
   EXPERIENCE: 'Experience',
 };
 
-const BLANK_REWARD: LoyaltyRewardCreate = {
-  name: '',
-  type: 'DISCOUNT',
-  point_cost: 100,
-  description: '',
-};
-
 export function LoyaltyRewardsSection() {
   const toast = useToast();
+  // The draft form lives in the layout (survives Overview / Tiers visits).
+  const { rewardDraft: { showAddReward, setShowAddReward, newReward, setNewReward } } = useLoyaltyContext();
 
   // CRM-13: reward catalog state
   const [rewards, setRewards] = useState<LoyaltyReward[]>([]);
   const [rewardsLoading, setRewardsLoading] = useState(false);
-  const [showAddReward, setShowAddReward] = useState(false);
-  const [newReward, setNewReward] = useState<LoyaltyRewardCreate>(BLANK_REWARD);
   const [savingReward, setSavingReward] = useState(false);
 
   // Load rewards on arrival

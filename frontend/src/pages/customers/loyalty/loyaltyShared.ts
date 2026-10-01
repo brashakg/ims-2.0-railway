@@ -4,7 +4,7 @@
 // LoyaltyProgram.tsx.
 
 import { useOutletContext } from 'react-router-dom';
-import type { LoyaltyProgramStats, LoyaltySettings } from '../../../services/api/loyalty';
+import type { LoyaltyProgramStats, LoyaltyRewardCreate, LoyaltySettings } from '../../../services/api/loyalty';
 
 // Visual metadata only (badge / colour / benefits). The real numeric
 // thresholds + point multipliers come from the loyalty engine
@@ -65,9 +65,26 @@ const tierCount = (stats: LoyaltyProgramStats | null, tierName: string) =>
 interface LoyaltyOutletContext {
   stats: LoyaltyProgramStats | null;
   settings: LoyaltySettings | null;
+  // The Rewards 'New reward' draft lives in the layout so a half-typed form
+  // survives a visit to Overview / Tiers (as it did between the old tabs).
+  rewardDraft: RewardDraft;
 }
+
+interface RewardDraft {
+  showAddReward: boolean;
+  setShowAddReward: React.Dispatch<React.SetStateAction<boolean>>;
+  newReward: LoyaltyRewardCreate;
+  setNewReward: React.Dispatch<React.SetStateAction<LoyaltyRewardCreate>>;
+}
+
+const BLANK_REWARD: LoyaltyRewardCreate = {
+  name: '',
+  type: 'DISCOUNT',
+  point_cost: 100,
+  description: '',
+};
 
 const useLoyaltyContext = () => useOutletContext<LoyaltyOutletContext>();
 
-export { LOYALTY_TIERS, fmtCompact, tierCount, useLoyaltyContext };
-export type { LoyaltyOutletContext };
+export { BLANK_REWARD, LOYALTY_TIERS, fmtCompact, tierCount, useLoyaltyContext };
+export type { LoyaltyOutletContext, RewardDraft };
