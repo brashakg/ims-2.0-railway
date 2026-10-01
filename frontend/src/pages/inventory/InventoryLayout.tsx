@@ -121,11 +121,13 @@ export function InventoryLayout() {
 
   const totalSKUs = inventory.length;
   // Audit F47: the headline is what the stock COST (the server's cost_value,
-  // sent to cost readers only); what it would SELL for is its own cell.
+  // sent to cost readers only); what it would SELL for is its own cell. Both
+  // count the same units -- every one we hold, on the shelf or reserved for an
+  // order (stock_value's rule) -- so the pair can be compared.
   const costKnown = inventory.length === 0 || inventory.some((i) => i.cost_value != null);
   const costValue = inventory.reduce((sum, item) => sum + (item.cost_value || 0), 0);
   const sellingValue = inventory.reduce(
-    (sum, item) => sum + ((item.offerPrice || item.mrp || 0) * (item.stock || 0)), 0);
+    (sum, item) => sum + ((item.offerPrice || item.mrp || 0) * ((item.stock || 0) + (item.reserved || 0))), 0);
   const lakh = (rupees: number) => `₹ ${(rupees / 100000).toFixed(1)}L`;
   const onlineCount = inventory.reduce(
     (n, i) => (getOnlineFor(i, onlineStatusQ.data)?.online ? n + 1 : n), 0);
@@ -361,7 +363,9 @@ export function InventoryLayout() {
           <div>
             <div className="l">Stock value</div>
             <div className="v">{costKnown ? lakh(costValue) : '—'}</div>
-            <div className="d">{costKnown ? 'at cost - matches the bills' : 'at cost'}</div>
+            {/* The price on the order when the goods were received, before GST
+                (grn_accept stamps it on each unit) -- not the bill's price. */}
+            <div className="d">at cost: price at receipt, ex GST</div>
           </div>
           <div>
             <div className="l">Low stock</div>

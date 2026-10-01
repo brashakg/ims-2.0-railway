@@ -106,4 +106,24 @@ describe('F47: the Inventory stock-value headline', () => {
       rows = ROWS;
     }
   });
+
+  it('F47: both tiles count the same units -- a reserved frame is in the cost and the selling value', () => {
+    // 20 on the shelf + 2 reserved for orders: cost covers 22 (stock_value), so
+    // must the selling value: 22 x 10,000 = 2.2L, not 20 x 10,000 = 2.0L.
+    rows = [{ id: 'p3', sku: 'FR-3', name: 'Vogue VO5', category: 'FRAME', brand: 'Vogue',
+      mrp: 12000, offerPrice: 10000, stock: 20, reserved: 2, cost_value: 110000, unit_cost: 5000 }];
+    try {
+      renderStrip();
+      expect(statValue('Stock value')).toBe('₹ 1.1L');
+      expect(statValue('Selling value')).toBe('₹ 2.2L');
+    } finally {
+      rows = ROWS;
+    }
+  });
+
+  it('F47: the cost tile says what cost it is -- the price at receipt, not the bill', () => {
+    renderStrip();
+    expect(screen.queryByText(/matches the bills/i)).toBeNull();
+    expect(screen.getByText('at cost: price at receipt, ex GST')).toBeInTheDocument();
+  });
 });

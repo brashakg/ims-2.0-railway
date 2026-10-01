@@ -366,3 +366,30 @@ def test_f47_the_counter_never_reads_stock_at_cost(world, path):
         return
     found = [v for v in values(resp.json()) if v is not None]
     _open(not found, f"F47: SALES_STAFF reads cost figures {found} from {path}")
+
+
+def test_f47_a_reserved_unit_is_still_stock_at_cost():
+    """A frame reserved for a customer's order is still ours and on the shelf
+    until it is sold, so the cost headline counts it -- and the Selling value
+    tile counts the same units (stock + reserved, InventoryLayout.tsx), so the
+    pair compares. Mutating stock_value to include_reserved=False turns this red."""
+    mongomock = pytest.importorskip("mongomock")
+    from api.services import stock_value
+
+    coll = mongomock.MongoClient().db.stock_units
+    coll.insert_many(
+        [
+            {"stock_id": "A", "product_id": "P", "store_id": "S1", "status": "AVAILABLE", "unit_cost": 3100},
+            {"stock_id": "R", "product_id": "P", "store_id": "S1", "status": "RESERVED", "unit_cost": 3200},
+            {"stock_id": "X", "product_id": "P", "store_id": "S1", "status": "SOLD", "unit_cost": 3000},
+        ]
+    )
+
+    class Repo:
+        def find_many(self, flt, limit=0):
+            return list(coll.find(flt, {"_id": 0}))
+
+    units = stock_value.shelf_units(Repo(), None, "S1")
+    assert sorted(u["stock_id"] for u in units) == ["A", "R"]
+    assert stock_value.total(units) == 6300.0
+    assert stock_value.by_product(units)["P"] == {"units": 2.0, "cost": 6300.0}
