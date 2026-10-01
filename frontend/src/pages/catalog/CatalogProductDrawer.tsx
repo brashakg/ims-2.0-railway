@@ -991,24 +991,29 @@ export function CatalogProductDrawer({
             >
               <Pencil className="w-3.5 h-3.5" /> Edit
             </button>
-            {/* Cloning an unfinished draft copies its gaps: finish it first. */}
+            {/* An unfinished draft is neither cloned (its gaps would copy) nor
+                ordered again (the Buy Desk cannot buy it): finish it first. */}
             {!orderedDraft && (
-              <button
-                type="button"
-                onClick={() => navigate(`/catalog/add?clone=${encodeURIComponent(id)}`)}
-                className="btn-secondary flex items-center gap-1.5 text-sm"
-                title="Duplicate as a new SKU"
-              >
-                <CopyPlus className="w-3.5 h-3.5" /> Clone
-              </button>
+              <>
+                <button
+                  type="button"
+                  onClick={() => navigate(`/catalog/add?clone=${encodeURIComponent(id)}`)}
+                  className="btn-secondary flex items-center gap-1.5 text-sm"
+                  title="Duplicate as a new SKU"
+                >
+                  <CopyPlus className="w-3.5 h-3.5" /> Clone
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    navigate(`/catalog/buy-desk?add_product=${encodeURIComponent(id)}`)
+                  }
+                  className="ml-auto flex items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                >
+                  <ShoppingCart className="w-3.5 h-3.5" /> Order stock
+                </button>
+              </>
             )}
-            <button
-              type="button"
-              onClick={() => navigate(`/catalog/buy-desk?add_product=${encodeURIComponent(id)}`)}
-              className="ml-auto flex items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
-            >
-              <ShoppingCart className="w-3.5 h-3.5" /> Order stock
-            </button>
           </div>
         )}
       </div>

@@ -7,7 +7,7 @@
 // draft whose receipt is still holding the units. The row and the drawer read
 // the one rule (isOrderedDraft): badge "Ordered — finish it", no bulk-approve
 // checkbox, it opens as its product (Edit -> ?edit=<spine>), never the import
-// approve, and it offers no Clone of an unfinished draft.
+// approve, and it offers no Clone or Order stock of an unfinished draft.
 
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -88,7 +88,7 @@ describe('an ordered draft in Needs review', () => {
     expect(screen.getByRole('checkbox', { name: 'Select Vogue VO5286' })).toBeInTheDocument();
   });
 
-  it('opens as its product: not POS-ready, no Clone, Edit goes to the spine', async () => {
+  it('opens as its product: not POS-ready, no Clone or Order stock, Edit goes to the spine', async () => {
     const user = userEvent.setup();
     renderReview();
     await user.click(await screen.findByText('Boss BOSS 1700'));
@@ -97,6 +97,7 @@ describe('an ordered draft in Needs review', () => {
     expect(within(drawer).queryByText(/POS-ready/)).toBeNull();
     expect(within(drawer).queryByText(/Needs review/)).toBeNull();
     expect(within(drawer).queryByRole('button', { name: /Clone/ })).toBeNull();
+    expect(within(drawer).queryByRole('button', { name: /Order stock/ })).toBeNull();
     await user.click(within(drawer).getByRole('button', { name: /^Edit$/ }));
     await waitFor(() => expect(where).toContain('edit=P-SPINE'));
   });
