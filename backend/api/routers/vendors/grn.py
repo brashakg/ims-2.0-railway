@@ -25,6 +25,7 @@ from ._shared import (
     validate_store_access,
 )
 from .models import GRN_SUBTYPE_DC, _GRN_SUBTYPES
+from .numbering import grn_number_pending
 
 
 # ============================================================================
@@ -304,6 +305,22 @@ def _duplicate_grn_detail(dup: dict, invoice_no) -> dict:
     """
     number = dup.get("grn_number") or dup.get("grn_id")
     status = dup.get("status") or "PENDING"
+    if grn_number_pending(dup):
+        # Saved, but its request has not given it a number yet (or died
+        # before it could): never hand out the placeholder (audit F28).
+        return {
+            "code": "GRN_DUPLICATE",
+            "grn_id": dup.get("grn_id"),
+            "grn_number": None,
+            "grn_status": status,
+            "message": (
+                f"A goods receipt for vendor invoice '{invoice_no}' was "
+                f"already saved and is still getting its receipt number - do "
+                f"not create it again. In a minute it shows numbered in the "
+                f"receiving screen's pending receipts panel; finish (accept) "
+                f"or void it there."
+            ),
+        }
     if status == "ACCEPTED":
         hint = (
             "its goods are already on the shelf. Do not receive this delivery "

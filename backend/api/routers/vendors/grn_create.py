@@ -25,6 +25,7 @@ from ._shared import (
 )
 from .models import GRNCreate, GRN_SUBTYPE_DC
 from .numbering import (
+    GRN_PLACEHOLDER_PREFIX,
     classify_grn_line_variance,
     generate_grn_number,
     grn_has_discrepancy,
@@ -34,7 +35,7 @@ from ...services.purchase_numbering import po_label
 
 
 # The placeholder a receipt carries between its insert and its number.
-_PLACEHOLDER_RE = "^PENDING/"
+_PLACEHOLDER_RE = "^" + GRN_PLACEHOLDER_PREFIX
 # A live request numbers its own row milliseconds after the insert; a row
 # still on the placeholder after this long lost its worker.
 _STRANDED_AFTER = timedelta(minutes=1)
@@ -44,12 +45,17 @@ def _number_stranded_receipts(grn_repo) -> None:
     """Number every receipt whose worker died between its insert and its
     number (a killed worker, a deploy mid-request), so no row keeps
     PENDING/<grn_id> for good (audit F28). Runs at the start of every receipt
-    create, so a retry of the stranded receipt heals it before the duplicate
-    guard names it. Fail-soft: what it cannot do now, the next create does.
+    create and every accept. A row younger than _STRANDED_AFTER may still be
+    numbered by its own request, so it is left alone: until then the
+    duplicate guard says the receipt is still getting its number and accept
+    refuses it (a placeholder must never reach a stock unit). Fail-soft: what
+    it cannot do now, the next create or accept does.
 
     ponytail: a request stalled longer than _STRANDED_AFTER between its insert
-    and its number gets numbered here AND then by itself, spending one serial;
-    a claim on the live path too would close that, if it is ever seen."""
+    and its number races this; the final write only lands on a row still on
+    its placeholder, so the row and the response never disagree, but the
+    loser's serial is spent. A claim on the live path too would close that,
+    if it is ever seen."""
     coll = getattr(grn_repo, "collection", None)
     if coll is None:
         return
@@ -81,7 +87,13 @@ def _number_stranded_receipts(grn_repo) -> None:
             if not getattr(won, "modified_count", 0):
                 continue
             coll.update_one(
-                {"grn_id": row["grn_id"], "numbering_claim": claim},
+                # Still on the placeholder: the live request may have written
+                # its own number since the claim, and that one stands.
+                {
+                    "grn_id": row["grn_id"],
+                    "numbering_claim": claim,
+                    "grn_number": {"$regex": _PLACEHOLDER_RE},
+                },
                 {
                     "$set": {"grn_number": generate_grn_number(row.get("store_id"))},
                     "$unset": {"numbering_claim": "", "numbering_claimed_at": ""},
@@ -405,7 +417,7 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
         # Placeholder until the insert wins (see the mint below the insert):
         # unique per row and a string, so the grn_number index and validator
         # accept it.
-        "grn_number": f"PENDING/{grn_id}",
+        "grn_number": f"{GRN_PLACEHOLDER_PREFIX}{grn_id}",
         "po_id": grn.po_id,
         "po_number": po.get("po_number") if po else None,
         "vendor_id": vendor_id,

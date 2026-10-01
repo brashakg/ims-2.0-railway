@@ -274,3 +274,71 @@ def test_a_stranded_receipt_is_numbered_once_even_by_two_creates(monkeypatch):
     assert db.grns.find_one({"grn_id": "G-HELD"})["grn_number"] == "PENDING/G-HELD"
     assert db.grns.find_one({"grn_id": "G-ORPHAN"})["grn_number"] == "RCPT/BV-TEST-01/26-27/0001"
     assert len(minted) == 1
+
+
+# ---------------------------------------------------------------------------
+# Verifier round 4: a placeholder is never handed out, accepted or overwritten
+# ---------------------------------------------------------------------------
+
+from api.routers.vendors.grn_accept import accept_grn  # noqa: E402
+
+
+def test_a_retry_inside_the_minute_never_names_the_placeholder(monkeypatch):
+    """The worker died between the insert and the number and the user retried
+    at once: the row is too young for the healer, so the duplicate guard
+    finds it. It used to answer 'Goods receipt PENDING/<uuid> already exists
+    ... finish (accept)'; it must not hand out a placeholder as a number."""
+    db = mongomock.MongoClient().db
+    store = _wire(monkeypatch, GRNRepository(db.grns))
+    _counting_minter(monkeypatch)
+    _stranded(db, "G-FRESH", 0, po_id="PO1", vendor_id="V1", vendor_invoice_no="JOT/26-27/0451")
+
+    with pytest.raises(HTTPException) as exc:
+        _create(_body(store))
+    assert exc.value.status_code == 409
+    detail = exc.value.detail
+    assert detail["code"] == "GRN_DUPLICATE" and detail["grn_number"] is None
+    assert "PENDING/" not in detail["message"]
+
+
+def test_accept_refuses_a_receipt_on_its_placeholder_and_numbers_a_stranded_one(monkeypatch):
+    """Accepting a receipt still on PENDING/<uuid> stamped that placeholder on
+    every minted unit, the audit row and the bill draft for good. A fresh one
+    is refused (its own request is still numbering it); a stranded one (older
+    than the minute) is numbered first, so the accept carries the real number."""
+    db = mongomock.MongoClient().db
+    _wire(monkeypatch, GRNRepository(db.grns))
+    _counting_minter(monkeypatch)
+    seen = []
+    monkeypatch.setattr(
+        v, "_accept_grn_claimed", lambda grn_id, grn, *a, **k: seen.append(grn["grn_number"]) or {}
+    )
+    _stranded(db, "G-FRESH", 0)
+    _stranded(db, "G-DEAD", 5)
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(accept_grn("G-FRESH", current_user=_user()))
+    assert exc.value.status_code == 409
+    assert exc.value.detail["code"] == "GRN_NUMBER_PENDING"
+    assert seen == []  # nothing minted
+
+    asyncio.run(accept_grn("G-DEAD", current_user=_user()))
+    assert seen == ["RCPT/BV-TEST-01/26-27/0001"]
+
+
+def test_the_healer_never_overwrites_the_number_its_own_request_wrote(monkeypatch):
+    """A live create stalled past the minute: a healer claims the row, and the
+    live request writes its number X before the healer's final write. The
+    healer used to overwrite X with Y, so the live response (and any task or
+    message built from it) said X while the row said Y."""
+    db = mongomock.MongoClient().db
+    _stranded(db, "G-SLOW", 5)
+
+    def _mint(store):
+        # The live request lands its own number between claim and write.
+        db.grns.update_one({"grn_id": "G-SLOW"}, {"$set": {"grn_number": "RCPT/LIVE/0007"}})
+        return "RCPT/HEALER/0008"
+
+    monkeypatch.setattr(v, "generate_grn_number", _mint)
+    _number_stranded_receipts(GRNRepository(db.grns))
+    assert db.grns.find_one({"grn_id": "G-SLOW"})["grn_number"] == "RCPT/LIVE/0007"
