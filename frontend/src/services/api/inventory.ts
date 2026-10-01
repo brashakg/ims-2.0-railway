@@ -3,7 +3,6 @@
 // ============================================================================
 
 import api from './client';
-import type { UserRole } from '../../types';
 
 export const inventoryApi = {
   // `opts.created_by` (cataloguer attribution) filters the per-product ledger
@@ -1004,10 +1003,6 @@ export interface VarianceLine {
 // ============================================================================
 // Reorder Settings API (per-product reorder configuration)
 // ============================================================================
-
-/** Who may set a shop's reorder level: managers their own shop, admins any
- *  (the server enforces it -- PUT /inventory/reorder-levels). */
-export const REORDER_LEVEL_ROLES: UserRole[] = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'];
 
 export const reorderApi = {
   /** ONE shop's reorder level (owner ruling D12: levels are per shop).

@@ -40,7 +40,7 @@ import { productApi, type CreateProductPayload } from '../../services/api/produc
 import type { DisplayFixture, } from '../../services/api/displayFixtures';
 import type { DisplayPlacement } from '../../services/api/displayPlacements';
 import { BarcodeManagementModal } from '../../components/inventory/BarcodeManagementModal';
-import { REORDER_LEVEL_ROLES } from '../../services/api/inventory';
+import { REORDER_LEVEL_ROLES } from './inventoryRoles';
 import { ShopReorderLevel } from './ShopReorderLevel';
 import { Pagination } from '../../components/common/Pagination';
 import { ImageLightbox } from '../../components/common/ImageLightbox';
