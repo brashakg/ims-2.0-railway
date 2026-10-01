@@ -28,6 +28,9 @@ vi.mock('../../../services/api/inventory', () => ({
   },
 }));
 
+// Only for the real getLastCost (vi.importActual) in the failed-lookup tests.
+vi.mock('../../../services/api/client', () => ({ default: { get: vi.fn() } }));
+
 import { PurchaseOrderComposer, applyPickedProduct } from '../PurchaseOrderComposer';
 import type {
   ComposerLine,
@@ -516,6 +519,58 @@ describe('PurchaseOrderComposer — a late last-cost answer never rewrites a tap
       />,
     );
     await waitFor(() => expect(cost.value).toBe('3100'));
+  });
+});
+
+// A failed last-paid lookup is handled in ONE place, the composer. The API
+// client lets the failure through: it used to swallow it, so a network error
+// looked like "this vendor was never paid" and the form never asked again.
+describe('PurchaseOrderComposer — a failed last-paid lookup', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('the API client lets the failure through to the form', async () => {
+    const { default: client } = await import('../../../services/api/client');
+    (client.get as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('Network Error'));
+    const { vendorsApi: real } = await vi.importActual<typeof import('../../../services/api/inventory')>(
+      '../../../services/api/inventory',
+    );
+    await expect(real.getLastCost('v-1', ['prod-a'])).rejects.toThrow('Network Error');
+  });
+
+  it('keeps the catalogue cost with no caption, and asks again on the next product change', async () => {
+    getLastCostMock.mockRejectedValueOnce(new Error('Network Error')).mockResolvedValue({
+      costs: { 'prod-a': { unit_price: 3100, po_number: 'PO-2', po_id: 'po-2', date: '2026-09-17T10:00:00' } },
+    });
+    renderComposer({
+      initialLines: undefined,
+      renderProductCell: ({ pickProduct }) => (
+        <>
+          <button type="button" onClick={() => pickProduct({ productId: 'prod-a', productName: 'A', sku: 'A', costPrice: 2800 })}>
+            pick a
+          </button>
+          <button type="button" onClick={() => pickProduct({ productId: 'prod-b', productName: 'B', sku: 'B', costPrice: 5000 })}>
+            pick b
+          </button>
+        </>
+      ),
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'pick a' }));
+    await waitFor(() => expect(getLastCostMock).toHaveBeenCalledTimes(1));
+    await act(async () => {});
+    const cost = screen.getByLabelText(/unit cost for line 1/i) as HTMLInputElement;
+    expect(cost.value).toBe('2800');
+    expect(screen.queryByText(/last paid/i)).not.toBeInTheDocument();
+
+    // Changed and changed back inside the lookup's short wait: the same
+    // product set as the ask that failed -- it is asked again, not skipped.
+    fireEvent.click(screen.getByRole('button', { name: 'pick b' }));
+    fireEvent.click(screen.getByRole('button', { name: 'pick a' }));
+    await waitFor(() => expect(cost.value).toBe('3100'));
+    expect(getLastCostMock).toHaveBeenCalledTimes(2);
+    expect(getLastCostMock).toHaveBeenLastCalledWith('v-1', ['prod-a']);
+    expect(screen.getByText(/last paid ₹3,100/i)).toBeInTheDocument();
   });
 });
 

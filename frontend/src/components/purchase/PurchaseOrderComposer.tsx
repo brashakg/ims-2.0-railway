@@ -436,7 +436,15 @@ export function PurchaseOrderComposer({
 
     let cancelled = false;
     const t = setTimeout(async () => {
-      const { costs } = await vendorsApi.getLastCost(vendorId, productIds);
+      let costs: Awaited<ReturnType<typeof vendorsApi.getLastCost>>['costs'];
+      try {
+        ({ costs } = await vendorsApi.getLastCost(vendorId, productIds));
+      } catch {
+        // The lookup failed: every line keeps the cost it has (the catalogue
+        // seed) with no caption, and the key is NOT recorded, so the next
+        // product or vendor change asks again. Never blocks the order.
+        return;
+      }
       if (cancelled) return;
       lastPrefillKey.current = prefillKey;
       setLines((prev) =>
