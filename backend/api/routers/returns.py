@@ -29,7 +29,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Path, Query
 from pydantic import BaseModel, Field
@@ -1380,6 +1380,39 @@ def _issue_store_credit(
     return entry
 
 
+def _order_line_units(
+    order: Optional[Dict[str, Any]],
+) -> Tuple[Dict[str, str], set]:
+    """({item_id: stock_id}, every stock_id) for the order lines that name a
+    unit -- the till records the scanned unit on its line."""
+    by_item: Dict[str, str] = {}
+    named: set = set()
+    for line in (order or {}).get("items") or []:
+        if isinstance(line, dict) and line.get("stock_id"):
+            named.add(str(line["stock_id"]))
+            iid = line.get("item_id") or line.get("id")
+            if iid:
+                by_item[str(iid)] = str(line["stock_id"])
+    return by_item, named
+
+
+def _line_unit_first(
+    candidates: List[Dict[str, Any]], own_stock_id: Optional[str], named_ids: set
+) -> List[Dict[str, Any]]:
+    """The SOLD units a returned line may match, best first: the unit the line
+    itself names, then units no line names, then units ANOTHER line names (that
+    frame is still with the customer). Stable, so the old order breaks ties --
+    the same rule orders/release.py keeps when a line is removed."""
+
+    def rank(unit: Dict[str, Any]) -> int:
+        sid = str(unit.get("stock_id") or unit.get("_id") or "")
+        if own_stock_id and sid == str(own_stock_id):
+            return 0
+        return 2 if sid in named_ids else 1
+
+    return sorted(candidates, key=rank)
+
+
 def _reactivate_original_unit(
     stock_repo: Any,
     product_id: str,
@@ -1387,6 +1420,8 @@ def _reactivate_original_unit(
     order_id: Optional[str],
     used_ids: set,
     exact_order_only: bool = False,
+    own_stock_id: Optional[str] = None,
+    named_ids: Optional[set] = None,
 ) -> Optional[str]:
     """Find the original serialized unit sold for this product and flip it back
     to AVAILABLE. Returns its stock_id, or None when no candidate is found.
@@ -1395,6 +1430,9 @@ def _reactivate_original_unit(
       1. a unit for (product_id, store_id) tied to THIS order_id with status
          SOLD - i.e. the exact unit that was sold on this order;
       2. any SOLD unit for (product_id, store_id).
+    Within a step, ``own_stock_id`` (the unit the returned order line names)
+    comes first and units ``named_ids`` holds for other lines come last
+    (_line_unit_first).
 
     ``exact_order_only`` DROPS step 2. It MUST be set whenever the store was not
     the store the sale was booked against -- i.e. the F9 online-order redirect.
@@ -1439,7 +1477,7 @@ def _reactivate_original_unit(
         logger.warning("[RETURNS] stock lookup failed: %s", exc)
         return None
 
-    for unit in candidates:
+    for unit in _line_unit_first(candidates, own_stock_id, named_ids or set()):
         sid = unit.get("stock_id") or unit.get("_id")
         if not sid or sid in used_ids:
             continue
@@ -2054,6 +2092,7 @@ def _restock_good_items(
                 per_product_default[pid] = hit["store_id"]
 
     # We have a stock repo - actually re-add each unit.
+    line_units, named_ids = _order_line_units(order)
     used_ids: set = set()
     per_line_applied: Dict[str, Dict[str, Any]] = {}
     landed_stores: List[str] = []
@@ -2102,6 +2141,8 @@ def _restock_good_items(
             # -- flipping a frame that is on somebody's face to AVAILABLE and
             # erasing their sale. Mint instead; that is the honest record.
             exact_order_only=is_online_order,
+            own_stock_id=line_units.get(str(u.get("order_item_id") or "")),
+            named_ids=named_ids,
         )
         if sid:
             row["reactivated"] += 1
@@ -2194,10 +2235,12 @@ def _reason_summary(items: List[ReturnLine]) -> str:
     return ", ".join(seen)
 
 
-def _matched_unit_serial(stock_repo, product_id, store_id, order_id) -> Optional[str]:
+def _matched_unit_serial(stock_repo, product_id, store_id, order_id,
+                         own_stock_id=None, named_ids=None) -> Optional[str]:
     """Best-effort lookup of the serial on the SOLD stock unit a return line
     refers to. Mirrors `_reactivate_original_unit`'s most-specific-first search
-    (order_id+product+store SOLD, then product+store SOLD). Returns the unit's
+    (order_id+product+store SOLD, then product+store SOLD) and its unit order
+    (_line_unit_first: the line's own unit first). Returns the unit's
     `serial` or None. Pure read, fail-soft -> None."""
     if stock_repo is None or not product_id:
         return None
@@ -2215,7 +2258,7 @@ def _matched_unit_serial(stock_repo, product_id, store_id, order_id) -> Optional
     except Exception as exc:  # noqa: BLE001
         logger.warning("[RETURNS] serial-match lookup failed: %s", exc)
         return None
-    for unit in candidates:
+    for unit in _line_unit_first(candidates, own_stock_id, named_ids or set()):
         serial = unit.get("serial")
         if serial:
             return str(serial).strip().upper()
@@ -2441,7 +2484,8 @@ def _gate_original_tender(
 
 
 def _guard_return_serial_mismatch(resolved_lines, body: "ReturnCreate",
-                                  resolved_order_id, store_id, current_user):
+                                  resolved_order_id, store_id, current_user,
+                                  order=None):
     """E3 acceptance #8 (return half): hard-block a serial-mismatched return.
 
     For each resolved return line that carries a scanned `serial`, compare it to
@@ -2465,6 +2509,7 @@ def _guard_return_serial_mismatch(resolved_lines, body: "ReturnCreate",
         return None  # cannot compare -> permissive
     if stock_repo is None:
         return None  # no serialized stock to compare against -> permissive
+    line_units, named_ids = _order_line_units(order)
     override_consumed: Optional[bool] = None  # lazy: only consume once if needed
     override_by: Optional[str] = None
     for entry in resolved_lines:
@@ -2475,7 +2520,9 @@ def _guard_return_serial_mismatch(resolved_lines, body: "ReturnCreate",
             continue  # no till serial -> skip (permissive)
         product_id = orig_line.get("product_id") or ret_line.product_id
         unit_serial = _matched_unit_serial(
-            stock_repo, product_id, store_id, resolved_order_id
+            stock_repo, product_id, store_id, resolved_order_id,
+            own_stock_id=line_units.get(str(ret_line.order_item_id or "")),
+            named_ids=named_ids,
         )
         if not unit_serial:
             continue  # no recorded serial -> skip (permissive)
@@ -2873,7 +2920,8 @@ async def create_return(
     #     manager override (E4) lets it proceed; `serial_override_by` is stamped
     #     on the return doc below.
     serial_override_by = _guard_return_serial_mismatch(
-        resolved_lines, body, resolved_order_id, store_id, current_user
+        resolved_lines, body, resolved_order_id, store_id, current_user,
+        order=order,
     )
 
     # 1. Money math (pure engine; validates negatives). returned_value is the
