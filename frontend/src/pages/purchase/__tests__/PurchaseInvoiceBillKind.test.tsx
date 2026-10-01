@@ -126,7 +126,8 @@ describe('manual invoice bill-kind declaration', () => {
     fireEvent.change(screen.getByDisplayValue(/Choose: goods, or services/), {
       target: { value: 'GOODS' },
     });
-    await screen.findByText(/Delivery Challan/);
+    // The accountant books here but cannot receive: the hint names who does.
+    expect(await screen.findByText(/Delivery Challan/)).toHaveTextContent(/store manager/);
     expect(screen.getByRole('button', { name: /Book invoice/i })).toBeDisabled();
     expect(apis.purchaseInvoicesApi.create).not.toHaveBeenCalled();
   });
