@@ -1,5 +1,6 @@
-// /hr/payroll/advances -- Advances. Moved byte-identical from the old
-// PayrollDashboard 'advances' tab; its state and handlers live in
+// /hr/payroll/advances -- Advances. Moved unchanged from the old
+// PayrollDashboard 'advances' tab (only a stray '$' left in the Deducted badge
+// was removed); its state and handlers live in
 // PayrollLayout and arrive through <Outlet context>.
 
 import { Loader2, Plus, Check, Clock, X } from 'lucide-react';

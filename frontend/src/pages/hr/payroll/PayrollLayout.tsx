@@ -14,8 +14,8 @@
 // old page's state, loaders and handlers unchanged - including the ONE
 // salary-sheet load that the Advances and Payslips employee pickers also read
 // - and hands them to the section pages through <Outlet context>. The old
-// page's own editorial header is gone (HRLayout's is on screen) and its tab
-// buttons are HRLayout's nav.
+// page's editorial header stays, as an h2 under HRLayout's h1 (one h1 per
+// page), and its tab buttons are HRLayout's nav.
 
 import { useState, useEffect } from 'react';
 import { Outlet } from 'react-router-dom';
@@ -206,7 +206,7 @@ export function PayrollLayout() {
       <div className="inv-head">
         <div>
           <div className="eyebrow mb-1.5">Payroll</div>
-          <h1>Month-end, by the rupee.</h1>
+          <h2>Month-end, by the rupee.</h2>
           <div className="hint">Basic + HRA + allowances − PF − ESI − PT − TDS − advances. Payslips, salary sheet export, month-lock after close.</div>
         </div>
       </div>

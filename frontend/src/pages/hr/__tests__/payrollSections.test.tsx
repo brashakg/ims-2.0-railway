@@ -84,6 +84,9 @@ const ADVANCES = {
   advances: [{
     advance_id: 'ADV-1', employee_id: 'EMP-1', employee_name: 'ZZ Priya Sheet',
     amount: 1000, date_requested: '2026-09-05', status: 'pending',
+  }, {
+    advance_id: 'ADV-2', employee_id: 'EMP-1', employee_name: 'ZZ Priya Sheet',
+    amount: 500, date_requested: '2026-08-05', status: 'deducted',
   }],
 };
 const PAYSLIP = {
@@ -149,8 +152,10 @@ describe('each payroll section renders at its own URL inside the HR module', () 
     // Inside HRLayout now: the module header is on screen above the section.
     expect(screen.getByRole('heading', { name: /Who's on the floor/ })).toBeInTheDocument();
     expectActiveSection('Salary Sheet');
-    // The old page header is kept on every payroll section.
-    expect(screen.getByRole('heading', { name: 'Month-end, by the rupee.' })).toBeInTheDocument();
+    // The old page header is kept on every payroll section, as an h2: HRLayout's
+    // module header is the page's one h1.
+    expect(screen.getByRole('heading', { level: 2, name: 'Month-end, by the rupee.' })).toBeInTheDocument();
+    expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
   });
 
   it('advances: the employee picker is fed by the layout load; picking one loads their advances', async () => {
@@ -159,6 +164,8 @@ describe('each payroll section renders at its own URL inside the HR module', () 
     expect(await screen.findByRole('option', { name: 'ZZ Priya Sheet' })).toBeInTheDocument();
     fireEvent.change(picker, { target: { value: 'EMP-1' } });
     expect(await screen.findByText('Pending')).toBeInTheDocument();
+    // The Deducted badge reads exactly 'Deducted' (the old tab printed a stray '$' before it).
+    expect(screen.getByText('Deducted')).toBeInTheDocument();
     expect(get).toHaveBeenCalledWith('/payroll/advances/EMP-1');
     expect(screen.getByRole('button', { name: /Record Advance/ })).toBeInTheDocument();
     expectActiveSection('Advances');
