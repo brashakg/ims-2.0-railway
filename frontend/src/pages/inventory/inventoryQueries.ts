@@ -65,8 +65,11 @@ export interface StockItem {
   brand: string;
   mrp: number;
   offerPrice: number;
+  /** Units on the shelf for sale (AVAILABLE) at this store -- reserved units
+   *  are NOT inside it (the server counts them apart, inventory/stock.py). */
   stock: number;
   quantity?: number;
+  /** Units reserved for an order: still in the shop, not for sale. */
   reserved: number;
   location?: string;
   lowStockThreshold?: number;
@@ -83,11 +86,24 @@ export interface StockItem {
   /** Cataloguer attribution: who created the product master row. */
   created_by?: string | null;
   created_by_name?: string | null;
-  /** Audit F47: what the units on the shelf COST (and per unit). Sent only to
-   *  the cost readers (managers + accounts); absent for the counter. */
+  /** Audit F47: what the units in the shop (shelf + reserved, the same units
+   *  as unitsHeld) COST, and per unit. Sent only to the cost readers
+   *  (managers + accounts); absent for the counter. unit_cost is per COSTED
+   *  unit and null when no unit has a cost -- never a made-up Rs 0. */
   cost_value?: number;
   unit_cost?: number | null;
+  /** Units with no known cost (they add nothing to cost_value), so the screen
+   *  can say "N units have no cost". Cost readers only, like cost_value. */
+  uncosted_units?: number;
 }
+
+/** Units the shop holds of a row: on the shelf + reserved for an order. The
+ *  stock-value tiles (cost and selling) count exactly these, as the server's
+ *  cost_value does (services/stock_value.py), and the ledger shows them as
+ *  `stock` available plus `reserved` -- never stock minus reserved, since
+ *  stock already excludes the reserved ones (review r1 #39). */
+export const unitsHeld = (i: Pick<StockItem, 'stock' | 'reserved'>) =>
+  (i.stock || 0) + (i.reserved || 0);
 
 /** Verbatim the old loadInventory() normalisation: one vocabulary at ingest. */
 function normalizeStockItems(data: unknown): StockItem[] {

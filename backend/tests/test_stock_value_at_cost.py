@@ -392,4 +392,190 @@ def test_f47_a_reserved_unit_is_still_stock_at_cost():
     units = stock_value.shelf_units(Repo(), None, "S1")
     assert sorted(u["stock_id"] for u in units) == ["A", "R"]
     assert stock_value.total(units) == 6300.0
-    assert stock_value.by_product(units)["P"] == {"units": 2.0, "cost": 6300.0}
+    # uncosted_units / unit_cost joined the shape with the "no cost" fix below.
+    assert stock_value.by_product(units)["P"] == {
+        "units": 2.0, "cost": 6300.0, "uncosted_units": 0.0, "unit_cost": 3150.0,
+    }
+
+
+
+# ============================================================================
+# Review r1 #34: a unit with no known cost is not "Rs 0"
+# ============================================================================
+# A shop holding 2 units of a frame nobody priced (no unit_cost / cost_price on
+# the units, no cost_price on the product) read "Cost / unit Rs 0" on the ledger
+# and added 0 to the "Stock value at cost" headline, which then looked
+# complete. The one rule (stock_value) now counts such units as UNCOSTED: they
+# add nothing to the value, the ledger row says unit_cost None and
+# uncosted_units N, and the tile can say "N units have no cost".
+#
+# The world (its own database, one shop):
+#   P-NOCOST  2 on the shelf, no cost anywhere          -> unit_cost None, 2 uncosted
+#   P-MIXED   1 at 4000 + 1 with unit_cost 0 / no price -> unit_cost 4000 (not 2000), 1 uncosted
+#   P-MASTER  1 with no own cost, product cost 2500     -> 2500 from the product, costed
+#   P-HELD    3 on the shelf + 1 reserved, 1000 each    -> stock 3, reserved 1, cost 4000
+
+_UNCOSTED_PRODUCTS = {
+    "P-NOCOST": None,
+    "P-MIXED": None,
+    "P-MASTER": 2500.0,
+    "P-HELD": None,
+}
+
+
+def _seed_uncosted(db) -> None:
+    now = datetime.utcnow()
+    for pid, master_cost in _UNCOSTED_PRODUCTS.items():
+        doc = {
+            "_id": pid, "product_id": pid, "sku": f"FR-{pid}", "brand": "Test",
+            "model": pid, "name": f"Frame {pid}", "category": "FRAME",
+            "mrp": 9000.0, "offer_price": 8000.0, "is_active": True,
+        }
+        if master_cost is not None:
+            doc["cost_price"] = master_cost
+        db["products"].insert_one(doc)
+
+    def unit(sid, pid, status="AVAILABLE", **cost):
+        return {
+            "_id": sid, "stock_id": sid, "product_id": pid, "store_id": STORE,
+            "barcode": f"BV{sid}", "quantity": 1, "status": status,
+            "created_at": now - timedelta(days=10), **cost,
+        }
+
+    db["stock_units"].insert_many(
+        [
+            unit("N1", "P-NOCOST"),
+            unit("N2", "P-NOCOST", unit_cost=None, cost_price=0),
+            unit("M1", "P-MIXED", unit_cost=4000.0, cost_price=4000.0),
+            unit("M2", "P-MIXED", unit_cost=0, cost_price=None),
+            unit("S1", "P-MASTER"),
+            unit("H1", "P-HELD", unit_cost=1000.0),
+            unit("H2", "P-HELD", unit_cost=1000.0),
+            unit("H3", "P-HELD", unit_cost=1000.0),
+            unit("H4", "P-HELD", status="RESERVED", unit_cost=1000.0),
+            unit("H5", "P-HELD", status="SOLD", unit_cost=1000.0),
+        ]
+    )
+
+
+@pytest.fixture(scope="module")
+def uncosted_db():
+    mongomock = pytest.importorskip("mongomock")
+    db = mongomock.MongoClient()[f"ims_test_uncosted_{uuid.uuid4().hex[:8]}"]
+    _seed_uncosted(db)
+    return db
+
+
+@pytest.fixture
+def uncosted_world(uncosted_db, monkeypatch):
+    from database.repositories.product_repository import (
+        ProductRepository,
+        StockRepository,
+    )
+
+    stock = lambda: StockRepository(uncosted_db["stock_units"])  # noqa: E731
+    products = lambda: ProductRepository(uncosted_db["products"])  # noqa: E731
+    monkeypatch.setattr(inv_mod, "get_stock_repository", stock)
+    monkeypatch.setattr(inv_mod, "get_product_repository", products)
+    monkeypatch.setattr(inv_mod, "_get_db", lambda: _DBProxy(uncosted_db))
+    app = FastAPI()
+    app.include_router(inv_mod.router, prefix="/inventory")
+    return _World(TestClient(app), app)
+
+
+def _rows_by_pid(world, role):
+    resp = world.get("/inventory/stock", role)
+    assert resp.status_code == 200, resp.text
+    return {r["product_id"]: r for r in resp.json()["items"]}
+
+
+def test_r1_34_a_frame_nobody_priced_has_no_unit_cost_not_rs_0(uncosted_world):
+    row = _rows_by_pid(uncosted_world, "STORE_MANAGER")["P-NOCOST"]
+    assert row["stock"] == 2
+    assert row["unit_cost"] is None, f"unit_cost {row['unit_cost']!r} for 2 unpriced units"
+    assert row["uncosted_units"] == 2
+    assert row["cost_value"] == 0
+
+
+def test_r1_34_an_unpriced_unit_does_not_halve_the_unit_cost(uncosted_world):
+    """1 unit at 4000 + 1 with no price: the per-unit cost is 4000 (the costed
+    unit), and the other unit is counted as having no cost -- not 2000."""
+    row = _rows_by_pid(uncosted_world, "STORE_MANAGER")["P-MIXED"]
+    assert row["cost_value"] == pytest.approx(4000.0)
+    assert row["unit_cost"] == pytest.approx(4000.0)
+    assert row["uncosted_units"] == 1
+
+
+def test_r1_34_the_product_cost_still_prices_a_unit_without_its_own(uncosted_world):
+    row = _rows_by_pid(uncosted_world, "STORE_MANAGER")["P-MASTER"]
+    assert row["unit_cost"] == pytest.approx(2500.0)
+    assert row["uncosted_units"] == 0
+
+
+@pytest.mark.parametrize("role", ["STORE_MANAGER", "ACCOUNTANT", "ADMIN"])
+def test_r1_34_the_rows_add_up_to_the_one_rule_with_the_uncosted_count(
+    uncosted_world, uncosted_db, role
+):
+    """What the 'Stock value at cost' tile sums (the ledger rows) equals the one
+    rule's total, and the uncosted pieces it reports equal stock_value's."""
+    from api.services import stock_value
+    from database.repositories.product_repository import (
+        ProductRepository,
+        StockRepository,
+    )
+
+    rows = _rows_by_pid(uncosted_world, role).values()
+    units = stock_value.shelf_units(
+        StockRepository(uncosted_db["stock_units"]),
+        ProductRepository(uncosted_db["products"]),
+        STORE,
+    )
+    assert sum(r["cost_value"] for r in rows) == pytest.approx(stock_value.total(units))
+    assert stock_value.total(units) == pytest.approx(4000.0 + 2500.0 + 4000.0)
+    assert sum(r["uncosted_units"] for r in rows) == stock_value.uncosted(units) == 3
+
+
+@pytest.mark.parametrize("role", COUNTER)
+def test_r1_34_the_counter_gets_no_cost_and_no_uncosted_count(uncosted_world, role):
+    for pid, row in _rows_by_pid(uncosted_world, role).items():
+        leaked = [k for k in (*COST_KEYS, "uncosted_units") if k in row]
+        assert not leaked, f"{role} row {pid} carries {leaked}"
+
+
+def test_r1_39_stock_is_the_shelf_reserved_is_apart_and_cost_covers_both(uncosted_world):
+    """Review r1 #39, the server half: a row's `stock` is the AVAILABLE units
+    only and `reserved` is counted apart (never inside stock), while its
+    cost_value covers both -- so the screen shows stock as available (no
+    second subtraction) and stock + reserved is what the value tiles count."""
+    row = _rows_by_pid(uncosted_world, "STORE_MANAGER")["P-HELD"]
+    assert (row["stock"], row["reserved"]) == (3, 1)
+    assert row["cost_value"] == pytest.approx(4000.0)  # 4 units x 1000, sold H5 not stock
+    assert row["unit_cost"] == pytest.approx(1000.0)
+
+
+def test_r1_34_the_one_rule_counts_uncosted_pieces():
+    """stock_value itself: a zero / blank / junk cost is no price; such a unit
+    adds 0, is flagged cost_known False and counted by uncosted()."""
+    mongomock = pytest.importorskip("mongomock")
+    from api.services import stock_value
+
+    coll = mongomock.MongoClient().db.stock_units
+    coll.insert_many(
+        [
+            {"stock_id": "A", "product_id": "P", "store_id": "S1", "status": "AVAILABLE", "unit_cost": 3100},
+            {"stock_id": "Z", "product_id": "P", "store_id": "S1", "status": "AVAILABLE", "unit_cost": 0},
+            {"stock_id": "J", "product_id": "P", "store_id": "S1", "status": "RESERVED", "unit_cost": "n/a", "quantity": 2},
+        ]
+    )
+
+    class Repo:
+        def find_many(self, flt, limit=0):
+            return list(coll.find(flt, {"_id": 0}))
+
+    units = stock_value.shelf_units(Repo(), None, "S1")
+    assert {u["stock_id"]: u["cost_known"] for u in units} == {"A": True, "Z": False, "J": False}
+    assert stock_value.total(units) == 3100.0
+    assert stock_value.uncosted(units) == 3
+    assert stock_value.by_product(units)["P"] == {
+        "units": 4.0, "cost": 3100.0, "uncosted_units": 3.0, "unit_cost": 3100.0,
+    }

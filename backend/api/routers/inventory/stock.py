@@ -135,22 +135,8 @@ async def get_stock(
         category=category,
         created_by=created_by,
         include_attribution=can_see_attribution,
+        shelf_cost=_shelf_cost(stock_repo, product_repo, active_store, current_user),
     )
-    # F47: what the shelf COST, per product -- for the cost readers only
-    # (managers + accounts; the counter never sees cost).
-    from ...services import stock_value
-    from ...services.cost_mask import can_see_cost
-
-    if active_store and can_see_cost(current_user, "purchase"):
-        shelf = stock_value.by_product(
-            stock_value.shelf_units(stock_repo, product_repo, active_store)
-        )
-        for row in items:
-            held = shelf.get(row["product_id"]) or {"units": 0, "cost": 0.0}
-            row["cost_value"] = held["cost"]
-            row["unit_cost"] = (
-                round(held["cost"] / held["units"], 2) if held["units"] else None
-            )
     return {"items": items, "total": len(items)}
 
 
@@ -232,6 +218,7 @@ def _build_store_ledger(
     category: Optional[str] = None,
     created_by: Optional[str] = None,
     include_attribution: bool = True,
+    shelf_cost: Optional[Dict[str, Dict]] = None,
 ) -> List[Dict]:
     """Per-product Stock Ledger rows for a store.
 
@@ -387,7 +374,44 @@ def _build_store_ledger(
             )
         )
 
+    # F47: each row's units at cost -- only when the caller may see cost
+    # (_shelf_cost answers None for everyone else, so no cost key is written).
+    if shelf_cost is not None:
+        for row in items:
+            row.update(_row_cost(shelf_cost.get(row["product_id"])))
     return items
+
+
+def _shelf_cost(
+    stock_repo, product_repo, store_id: Optional[str], user: dict
+) -> Optional[Dict[str, Dict]]:
+    """F47: what the units at this shop COST, per product -- the one stock
+    value rule (services/stock_value), for the cost readers only
+    (cost_mask "purchase": managers + accounts). None for the counter, which
+    never sees cost, and when no shop is in view."""
+    from ...services import stock_value
+    from ...services.cost_mask import can_see_cost
+
+    if not store_id or not can_see_cost(user, "purchase"):
+        return None
+    return stock_value.by_product(
+        stock_value.shelf_units(stock_repo, product_repo, store_id)
+    )
+
+
+def _row_cost(held: Optional[Dict]) -> Dict:
+    """The cost fields of one ledger row, read off stock_value.by_product.
+
+    cost_value: the units on the shelf + reserved, at cost (the same units as
+    the row's stock + reserved). unit_cost: per COSTED unit, None when no unit
+    has a cost (never Rs 0). uncosted_units: units with no cost, so the screen
+    can say so instead of quietly valuing them at nothing."""
+    held = held or {}
+    return {
+        "cost_value": held.get("cost") or 0.0,
+        "unit_cost": held.get("unit_cost"),
+        "uncosted_units": held.get("uncosted_units") or 0,
+    }
 
 
 def _ledger_row(

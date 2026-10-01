@@ -46,6 +46,7 @@ import {
   CATEGORIES,
   getOnlineFor,
   onlineStatusIds,
+  unitsHeld,
   useFixturesMap,
   useInventoryStores,
   useLowStock,
@@ -123,11 +124,14 @@ export function InventoryLayout() {
   // Audit F47: the headline is what the stock COST (the server's cost_value,
   // sent to cost readers only); what it would SELL for is its own cell. Both
   // count the same units -- every one we hold, on the shelf or reserved for an
-  // order (stock_value's rule) -- so the pair can be compared.
+  // order (stock_value's rule, unitsHeld) -- so the pair can be compared, and
+  // both captions say so. A unit nobody priced adds nothing to the cost, so
+  // the tile says how many there are rather than look complete (review #34).
   const costKnown = inventory.length === 0 || inventory.some((i) => i.cost_value != null);
   const costValue = inventory.reduce((sum, item) => sum + (item.cost_value || 0), 0);
+  const uncostedUnits = inventory.reduce((n, item) => n + (item.uncosted_units || 0), 0);
   const sellingValue = inventory.reduce(
-    (sum, item) => sum + ((item.offerPrice || item.mrp || 0) * ((item.stock || 0) + (item.reserved || 0))), 0);
+    (sum, item) => sum + ((item.offerPrice || item.mrp || 0) * unitsHeld(item)), 0);
   const lakh = (rupees: number) => `₹ ${(rupees / 100000).toFixed(1)}L`;
   const onlineCount = inventory.reduce(
     (n, i) => (getOnlineFor(i, onlineStatusQ.data)?.online ? n + 1 : n), 0);
@@ -365,7 +369,12 @@ export function InventoryLayout() {
             <div className="v">{costKnown ? lakh(costValue) : '—'}</div>
             {/* The price on the order when the goods were received, before GST
                 (grn_accept stamps it on each unit) -- not the bill's price. */}
-            <div className="d">at cost: price at receipt, ex GST</div>
+            <div className="d">at cost: price at receipt, ex GST · shelf + reserved</div>
+            {costKnown && uncostedUnits > 0 && (
+              <div className="d warn">
+                {uncostedUnits.toLocaleString('en-IN')} {uncostedUnits === 1 ? 'unit has' : 'units have'} no cost
+              </div>
+            )}
           </div>
           <div>
             <div className="l">Low stock</div>
@@ -382,7 +391,7 @@ export function InventoryLayout() {
           <div>
             <div className="l">Selling value</div>
             <div className="v">{lakh(sellingValue)}</div>
-            <div className="d">at offer price (MRP if none)</div>
+            <div className="d">at offer price (MRP if none) · shelf + reserved</div>
           </div>
           <div>
             <div className="l">View</div>
