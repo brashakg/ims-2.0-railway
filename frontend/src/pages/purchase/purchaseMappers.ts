@@ -77,6 +77,8 @@ export function mapPOtoPurchaseOrder(po: any): PurchaseOrder {
     quantity: item.ordered_qty ?? item.quantity ?? 0,
     unitCost: item.unit_price ?? item.unit_cost ?? 0,
     taxRate: item.tax_rate ?? impliedRate,
+    hsn: item.hsn || undefined,
+    gstUnresolved: item.gst_unresolved === true,
     total:
       item.total ??
       (item.quantity ?? 0) *

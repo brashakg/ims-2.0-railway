@@ -102,6 +102,11 @@ export interface ComposerSubmitPayload {
     quantity: number;
     unit_price: number;
     taxRate: number;
+    /** The line's settled GST rate and HSN, for a save that must not re-price
+     *  it (an edit). Absent when the rate was not settled (taxRate is then a
+     *  placeholder 0, never a rate to pin). */
+    gst_rate?: number;
+    hsn?: string;
     lineTotal: number;
   }>;
   subtotal: number;
@@ -472,6 +477,8 @@ export function PurchaseOrderComposer({
           quantity: l.quantity,
           unit_price: l.unitCost,
           taxRate: l.taxRate,
+          ...(l.gstResolved ? { gst_rate: l.taxRate } : {}),
+          ...(l.hsn ? { hsn: l.hsn } : {}),
           lineTotal: lineTotal(l),
         })),
         subtotal,

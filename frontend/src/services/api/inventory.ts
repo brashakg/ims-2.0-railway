@@ -899,9 +899,11 @@ export const vendorsApi = {
       };
       quantity: number;
       unit_price: number;
+      gst_rate?: number;
+      hsn?: string;
     }>;
-    expected_date?: string;
-    notes?: string;
+    expected_date?: string | null;
+    notes?: string | null;
   }) => {
     const response = await api.put(`/vendors/purchase-orders/${poId}`, po);
     return response.data;

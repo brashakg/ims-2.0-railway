@@ -945,13 +945,20 @@ async def update_po(
         if vendor is None:
             raise HTTPException(status_code=404, detail="Vendor not found")
 
-    expected = body.expected_date or None
+    # Omitted keeps what is stored (like vendor_id); an explicit null or ''
+    # clears it.
+    given = body.model_fields_set
+    expected = (
+        (body.expected_date or None)
+        if "expected_date" in given
+        else (po.get("expected_date") or None)
+    )
     if expected and expected != po.get("expected_date"):
         try:
             expected = expected_date_not_backdated(expected)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-    notes = body.notes or None
+    notes = (body.notes or None) if "notes" in given else (po.get("notes") or None)
 
     old_items = po.get("items") or []
     computed, products, typed_in = price_po_lines(

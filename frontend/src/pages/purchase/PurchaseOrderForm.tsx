@@ -474,9 +474,9 @@ function lineFromSaved(item: POItem): ComposerLine {
     quantity: item.quantity,
     unitCost: item.unitCost,
     taxRate: item.taxRate,
-    hsn: null,
+    hsn: item.hsn ?? null,
     productDetail: '',
-    gstResolved: true,
+    gstResolved: !item.gstUnresolved,
     gstMissing: null,
     costTouched: true,
     lastPaid: null,
@@ -592,8 +592,9 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, editing, onClose
               if (editing) {
                 const saved = await vendorsApi.updatePurchaseOrder(editing.id, {
                   vendor_id: payload.vendorId,
-                  expected_date: payload.expectedDate || undefined,
-                  notes: payload.notes || undefined,
+                  // A PUT keeps a field it does not carry; null clears it.
+                  expected_date: payload.expectedDate || null,
+                  notes: payload.notes || null,
                   items: payload.items.map((it) => ({
                     product_id: it.product_id,
                     product_name: it.product_name,
@@ -601,6 +602,10 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, editing, onClose
                     new_product: it.new_product,
                     quantity: it.quantity,
                     unit_price: it.unit_price,
+                    // The line's stored rate and HSN go back with it, so an
+                    // edit never re-prices a line from the catalogue.
+                    gst_rate: it.gst_rate,
+                    hsn: it.hsn,
                   })),
                 });
                 const savedPO = mapPOtoPurchaseOrder(saved);

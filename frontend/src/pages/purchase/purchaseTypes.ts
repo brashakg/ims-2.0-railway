@@ -88,6 +88,11 @@ export interface POItem {
   quantity: number;
   unitCost: number;
   taxRate: number;
+  /** The HSN stored on the line, and whether its GST rate was left unsettled
+   *  (tax_rate 0 then means "unknown", not "0%"). An edit sends them back so
+   *  saving never re-prices a line. */
+  hsn?: string;
+  gstUnresolved?: boolean;
   total: number;
   /** Units received so far (per-line received_qty, falling back to the PO
    *  header received_qty_by_product for pre-S1 POs). Drives the "N of M

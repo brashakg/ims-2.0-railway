@@ -1807,3 +1807,52 @@ def test_send_refuses_a_line_whose_product_does_not_exist(monkeypatch, gate):
     assert e.value.detail["code"] == "PO_LINE_PRODUCT_MISSING"
     assert [l["product_id"] for l in e.value.detail["lines"]] == ["P2"]
     assert repo.pos["PO1"]["status"] == "DRAFT"
+
+
+# =========================================================================== #
+# PUT semantics: omitted keeps, explicit null / '' clears (same as vendor_id)
+# =========================================================================== #
+
+
+def _kept_po():
+    return _po(expected_date="2030-01-01", notes="handle with care")
+
+
+_ONE_LINE = [{"product_id": "P1", "product_name": "Carrera CA8895", "sku": "P1",
+              "quantity": 2, "unit_price": 1000}]
+
+
+def test_an_edit_that_omits_the_date_and_notes_keeps_them(monkeypatch):
+    repo, _ = _wire(monkeypatch, _kept_po())
+    _run(v.update_po("PO1", _edit_body(_ONE_LINE), _user()))
+    doc = repo.pos["PO1"]
+    assert doc["expected_date"] == "2030-01-01"
+    assert doc["notes"] == "handle with care"
+
+
+@pytest.mark.parametrize("cleared", [None, ""])
+def test_an_edit_that_sends_null_or_empty_clears_the_date_and_notes(monkeypatch, cleared):
+    repo, _ = _wire(monkeypatch, _kept_po())
+    _run(v.update_po("PO1", _edit_body(_ONE_LINE, expected_date=cleared, notes=cleared), _user()))
+    doc = repo.pos["PO1"]
+    assert doc["expected_date"] is None
+    assert doc["notes"] is None
+
+
+def test_an_edit_that_sends_new_values_replaces_them(monkeypatch):
+    repo, _ = _wire(monkeypatch, _kept_po())
+    _run(v.update_po("PO1", _edit_body(_ONE_LINE, expected_date="2031-02-02", notes="call first"), _user()))
+    doc = repo.pos["PO1"]
+    assert (doc["expected_date"], doc["notes"]) == ("2031-02-02", "call first")
+
+
+def test_an_edit_that_carries_the_stored_rate_and_hsn_keeps_them(monkeypatch):
+    """The screen sends back each line's rate and HSN: a typed-in 12% survives
+    an edit that changes only the quantity."""
+    po = _kept_po()
+    po["items"][0].update(tax_rate=12, hsn="9004")
+    repo, _ = _wire(monkeypatch, po)
+    line = {**_ONE_LINE[0], "quantity": 5, "gst_rate": 12, "hsn": "9004"}
+    _run(v.update_po("PO1", _edit_body([line]), _user()))
+    kept = repo.pos["PO1"]["items"][0]
+    assert (kept["quantity"], kept["tax_rate"], kept["hsn"]) == (5, 12, "9004")
