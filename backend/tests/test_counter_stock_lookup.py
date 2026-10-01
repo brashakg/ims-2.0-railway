@@ -21,12 +21,34 @@ they carry money):
                                    "available", "in_transit"}, ...]}]}
 
     `stores` lists EVERY physical shop (stores_util.physical_stores), zeros
-    included, never an ONLINE store. `available` is the sellable question of
-    item_events.on_hand_match; `in_transit` counts TRANSFERRED units heading TO
-    that shop (claim_for_transfer stamps transfer_to_store_id). A search hit
-    brings its model family (same brand+model colours, variant_of sizes). No
-    database -> 200 with no items (the real-app test runs on a dev box's
+    included, never an ONLINE store. `available` is what the till may sell
+    there: StockRepository.sellable_filter, the filter find_available and the
+    sale guard count (AVAILABLE and in date, one unit per stock_units row), so
+    this shop's figure is the till tile's (GET /inventory/sellable, #1173);
+    `in_transit` counts TRANSFERRED units heading TO that shop
+    (claim_for_transfer stamps transfer_to_store_id), one unit per row too.
+    The search IS ProductRepository.search_products (active only, the same
+    answer as GET /products?search=) plus an exact SKU, product barcode,
+    manufacturer GTIN (attributes.gtin) or IMS unit barcode, active only and
+    listed FIRST, never cut by the 200-row family cap; a hit brings
+    its model family (find_similar_products' identity_key rule for colours,
+    variant_of for sizes); an inactive product never comes back. No database
+    -> 200 with no items (the real-app test runs on a dev box's
     MockDatabase), never a 500.
+
+PANEL ROUND 2 (2026-10-01) moved `available` from item_events.on_hand_match
+to the till's rule: a legacy lowercase / status-less or an expired unit is on
+hand, but the till refuses to sell it, and the counter must not promise it.
+It also dropped D7b-2's own name-word and attributes.gtin search: the lookup
+now IS search_products, so it answers a text exactly as GET /products?search=
+(the till's search) does. Widening that one search is a till change -- the
+owner's call, not this screen's.
+
+PANEL ROUND 3 (2026-10-01) put the manufacturer GTIN back as an EXACT match
+(attributes.gtin, the public barcode; not a widening of search_products), and
+made every exact match (SKU, product barcode, GTIN, unit label) come first and
+escape the caps: a contact-lens model is one product per power, and a scan of
+one power was cut from a 230-power family. An empty search answers nothing.
 
 FINDINGS (traced in code on origin/main 6068802)
 
@@ -110,10 +132,13 @@ from fastapi.testclient import TestClient  # noqa: E402
 import api.dependencies as deps  # noqa: E402
 from api.routers import inventory as inv_mod  # noqa: E402
 from api.routers.auth import ALGORITHM, SECRET_KEY, get_current_user  # noqa: E402
+from api.services.product_master import compute_identity_key  # noqa: E402
 from api.services.rbac_policy import check_access  # noqa: E402
+from api.services.rbac_policy._core import ALL_ROLES  # noqa: E402
 
-# ONE corpus of stored unit shapes with the sellable answer written BY HAND
-# (the differential probe that keeps every on-hand reader to one rule).
+# ONE corpus of every shape a stock_units row is stored in (the on-hand probe's).
+# Here the answer is not the corpus's hand-written on-hand flag but what the
+# till's own find_available sells of it -- the counter's number is the till's.
 from test_on_hand_is_one_rule import _SHAPES, _DBProxy  # noqa: E402
 
 LOOKUP_API = "/api/v1/inventory/lookup"
@@ -126,7 +151,7 @@ PHYSICAL = {S1, S2, S3}
 P54, P56, P003, RB = "P-807-54", "P-807-56", "P-003-54", "P-RB3025"
 UNIT_BARCODE = "BV91FA3858A2"  # the IMS label on one Dhanbad frame of P54
 GTIN_TOP = "8056597012345"  # P54's manufacturer barcode, top-level field
-GTIN_ATTR = "8056597099992"  # P003's, typed on the Add-Product form
+GTIN_ATTR = "8056597054321"  # P54's GTIN as the create door stores it (attributes.gtin)
 
 # What must never reach a counter screen: every value seeded below as a cost,
 # a supplier or a bill reference.
@@ -273,6 +298,8 @@ def _product(pid, sku, name, color, size, **extra):
         **_MONEY_ON_PRODUCT,
     }
     doc.update(extra)
+    # What the create door mints (product_master.normalise_payload).
+    doc["identity_key"] = compute_identity_key(doc["brand"], doc["model"], doc["color"], doc["size"])
     return doc
 
 
@@ -305,7 +332,8 @@ def _seed(db) -> None:
     )
     db["products"].insert_many(
         [
-            _product(P54, "SG-CARRERA-CA8895-807-54", "Carrera CA8895 Aviator Unisex Sunglasses - Gold", "807", "54", barcode=GTIN_TOP),
+            _product(P54, "SG-CARRERA-CA8895-807-54", "Carrera CA8895 Aviator Unisex Sunglasses - Gold", "807", "54", barcode=GTIN_TOP,
+                     attributes={"brand_name": "Carrera", "model_no": "CA8895", "colour_code": "807", "gtin": GTIN_ATTR}),
             _product(P56, "SG-CARRERA-CA8895-807-56", "Carrera CA8895 Aviator Unisex Sunglasses - Gold", "807", "56", variant_of=P54),
             _product(P003, "SG-CARRERA-CA8895-003-54", "Carrera CA8895 Aviator Unisex Sunglasses - Black", "003", "54"),
             {
@@ -313,14 +341,14 @@ def _seed(db) -> None:
                 "name": "Ray-Ban Classic RB3025 001 58", "brand": "Ray-Ban", "model": "RB3025",
                 "category": "SUNGLASS", "color": "001", "size": "58", "mrp": 9990.0,
                 "offer_price": 9990.0, "is_active": True,
+                "identity_key": compute_identity_key("Ray-Ban", "RB3025", "001", "58"),
             },
         ]
     )
-    db["products"].update_one({"_id": P003}, {"$set": {"attributes.gtin": GTIN_ATTR}})
     db["stock_units"].insert_many(
         [
-            # P54 at Dhanbad: 2 sellable (one legacy lowercase), 1 reserved,
-            # 1 sold, 1 quarantined
+            # P54 at Dhanbad: 1 the till sells, 1 legacy lowercase the till
+            # refuses, 1 reserved, 1 sold, 1 quarantined
             _unit(P54, S1, "AVAILABLE", barcode=UNIT_BARCODE),
             _unit(P54, S1, "available"),
             _unit(P54, S1, "RESERVED"),
@@ -329,8 +357,8 @@ def _seed(db) -> None:
             # P54 at Bokaro: 1 sellable, 1 shipped to Dhanbad (in transit)
             _unit(P54, S2, "AVAILABLE"),
             _unit(P54, S2, "TRANSFERRED", transfer_id="T-1", transfer_to_store_id=S1),
-            # P56 (the 56 mm size) at Pune: 1, a legacy row with no status
-            _unit(P56, S3, None),
+            # P56 (the 56 mm size) at Pune: 1
+            _unit(P56, S3),
             # P003 (black) at Bokaro: 3
             _unit(P003, S2), _unit(P003, S2), _unit(P003, S2),
             _unit(RB, S1),
@@ -391,6 +419,20 @@ def test_d7b1_every_counter_role_reaches_the_lookup_in_the_real_app(client, role
     assert resp.status_code == 200, f"{role}: {resp.status_code} {resp.text[:200]}"
 
 
+@pytest.mark.parametrize("role", ALL_ROLES)
+def test_d7b1_the_lookup_row_matches_its_gate_for_every_role(call, mongo_db, role):
+    # The route reads its gate from the row (lookup.STOCK_LOOKUP_ROLES); a
+    # literal tuple typed back into the route that drops or adds a role makes
+    # the row and the route disagree for that role, and this fails.
+    resp = call(_user(role), q="")
+    gate_admits = resp.status_code != 403
+    row_admits = check_access("GET", LOOKUP_API, [role])
+    assert gate_admits == row_admits, (
+        f"{role}: the policy row says {'yes' if row_admits else 'no'}, "
+        f"the route answers {resp.status_code}"
+    )
+
+
 def test_d7b1_no_database_is_an_empty_answer_not_a_500(call, mongo_db, monkeypatch):
     _seed(mongo_db)  # the repositories still answer; the raw handle does not
     monkeypatch.setattr(inv_mod, "_get_db", lambda: None)
@@ -406,8 +448,8 @@ _SEARCHES = [
     ("brand, any case", "carrera", P54),
     ("sku", "SG-CARRERA-CA8895-807-54", P54),
     ("manufacturer barcode (top-level)", GTIN_TOP, P54),
-    ("manufacturer GTIN typed on the form (attributes.gtin)", GTIN_ATTR, P003),
-    ("brand plus a word only in the name", "carrera aviator", P54),
+    ("manufacturer GTIN (attributes.gtin)", GTIN_ATTR, P54),
+    ("brand plus model", "carrera ca8895", P54),
     ("the IMS unit barcode on the frame's label", UNIT_BARCODE, P54),
 ]
 
@@ -420,8 +462,101 @@ def test_d7b2_the_counter_finds_the_frame_by(call, mongo_db, label, query, pid):
     assert RB not in found, f"searching by {label} ({query!r}) dragged in the Ray-Ban"
 
 
+def test_d7b2_the_search_is_the_product_search(call, mongo_db, monkeypatch):
+    # GET /products?search= and the lookup answer a text alike because the
+    # lookup calls the SAME ProductRepository.search_products. A lookup that
+    # ran its own search (BaseRepository.search with its own field list)
+    # would find P54 here behind the stub's back.
+    from database.repositories.product_repository import ProductRepository
+
+    _seed(mongo_db)
+    asked = []
+    monkeypatch.setattr(
+        ProductRepository, "search_products", lambda self, q, *a, **k: asked.append(q) or []
+    )
+    assert _ok(call(_user("CASHIER"), q="CA8895"))["items"] == []
+    assert asked == ["CA8895"]
+
+
+_DEAD = "P-DEAD"
+
+
+@pytest.mark.parametrize(
+    "label,query",
+    [("its model", "CA8895"), ("its sku", "SG-CARRERA-CA8895-999-54"),
+     ("its unit barcode", "BVDEAD000001"), ("its gtin", "8056597099990"),
+     ("a live colour's sku", "SG-CARRERA-CA8895-807-54")],
+)
+def test_d7b2_an_inactive_product_never_comes_back(call, mongo_db, label, query):
+    # is_active=False is a soft-deleted product (product_master.soft_delete_
+    # product) or a provisional PO-line one; the till's active-only search
+    # cannot bill it, so the counter must not be told it is in stock.
+    _seed(mongo_db)
+    mongo_db["products"].insert_one(
+        _product(_DEAD, "SG-CARRERA-CA8895-999-54", "Carrera CA8895 - Grey", "999", "54",
+                 is_active=False, attributes={"gtin": "8056597099990"})
+    )
+    mongo_db["stock_units"].insert_one(_unit(_DEAD, S2, barcode="BVDEAD000001"))
+    items = _items(_ok(call(_user("CASHIER"), q=query)))
+    assert _DEAD not in items, f"searching by {label}: {sorted(items)}"
+
+
+@pytest.mark.parametrize("q", ["", "   "], ids=["empty", "blank"])
+def test_d7b2_an_empty_search_answers_nothing(call, mongo_db, q):
+    # search_products("") matches EVERY active product (base_repository's
+    # empty-query rule), so without the guard a stray Enter would list the
+    # whole catalogue with every shop's count.
+    _seed(mongo_db)
+    assert _ok(call(_user("CASHIER"), q=q)) == {"store_id": S1, "items": []}
+
+
+# A contact-lens model is one product per power (owner 2026-09-28), so one
+# model can hold more rows than the lookup's caps (50 search hits, 200 family).
+_CL_POWERS = 230
+_CL_TARGET_SKU = "CLOASYS-1"  # a prefix of every other power's SKU below
+_CL_TARGET_GTIN = "0733905577766"
+_CL_TARGET_UNIT = "BVCL00000001"
+
+
+def _seed_contact_lens_family(db) -> str:
+    """230 active powers of one model; the one the counter scans is stored
+    LAST, so storage order puts it past both caps. Returns its product_id."""
+    rows = []
+    for i in range(_CL_POWERS):
+        last = i == _CL_POWERS - 1
+        pid = "P-CL-TARGET" if last else f"P-CL-{i:03d}"
+        power = f"-{(i + 1) * 0.25:.2f}"
+        rows.append({
+            "_id": pid, "product_id": pid,
+            "sku": _CL_TARGET_SKU if last else f"{_CL_TARGET_SKU}{i:03d}",
+            "name": f"Acuvue Oasys {power}", "brand": "Johnson & Johnson",
+            "model": "Acuvue Oasys", "category": "CONTACT_LENS", "size": power,
+            "mrp": 1800.0, "offer_price": 1700.0, "is_active": True,
+            "attributes": {"power": power, **({"gtin": _CL_TARGET_GTIN} if last else {})},
+            "identity_key": compute_identity_key("Johnson & Johnson", "Acuvue Oasys", None, power),
+        })
+    db["products"].insert_many(rows)
+    db["stock_units"].insert_one(_unit("P-CL-TARGET", S2, barcode=_CL_TARGET_UNIT))
+    return "P-CL-TARGET"
+
+
+@pytest.mark.parametrize(
+    "label,query",
+    [("its sku", _CL_TARGET_SKU), ("its gtin", _CL_TARGET_GTIN), ("its unit barcode", _CL_TARGET_UNIT)],
+)
+def test_d7b2_a_scanned_power_is_never_cut_from_a_big_family(call, mongo_db, label, query):
+    _seed(mongo_db)
+    target = _seed_contact_lens_family(mongo_db)
+    items = _ok(call(_user("CASHIER", S1), q=query))["items"]
+    pids = [i["product_id"] for i in items]
+    assert target in pids, f"scanning {label}: the power is missing from {len(pids)} rows"
+    assert pids[0] == target, f"scanning {label}: the scanned power is row {pids.index(target)}"
+    assert _counts(items[0])[S2] == (1, 0), "and Bokaro's box of it is counted"
+    assert len(pids) > 1, "its other powers still come with it"
+
+
 # ============================================================================
-# D7b-3  this shop, every other shop, in transit -- one on-hand rule
+# D7b-3  this shop, every other shop, in transit -- the till's own count
 # ============================================================================
 
 
@@ -438,7 +573,7 @@ def test_d7b3_counts_at_this_shop_every_other_shop_and_in_transit(call, mongo_db
     )
     assert all(s.get("store_name") for s in p54.get("stores") or []), "shops by name"
     assert _counts(p54) == {
-        S1: (2, 1),  # AVAILABLE + legacy 'available'; the Bokaro unit on its way
+        S1: (1, 1),  # AVAILABLE (not the legacy 'available'); the Bokaro unit on its way
         S2: (1, 0),  # the shipped unit is not on Bokaro's shelf any more
         S3: (0, 0),
     }
@@ -451,11 +586,20 @@ def test_d7b3_counts_at_this_shop_every_other_shop_and_in_transit(call, mongo_db
     assert _counts(_items(other).get(P54) or {}) == _counts(p54)
 
 
-@pytest.mark.parametrize("label,shape,sellable,physical", _SHAPES, ids=[s[0] for s in _SHAPES])
-def test_d7b3_a_unit_is_available_by_the_one_on_hand_rule(
-    call, mongo_db, label, shape, sellable, physical
-):
-    _seed(mongo_db)
+# Every stored shape, plus the two the till's rule adds: a dated unit either
+# side of its expiry, and a row carrying quantity > 1 (the till counts rows).
+_TILL_SHAPES = [(label, shape) for label, shape, _sell, _phys in _SHAPES] + [
+    ("AVAILABLE but past its expiry date", {"status": "AVAILABLE", "expiry_date": "2020-01-01"}),
+    ("AVAILABLE and in date", {"status": "AVAILABLE", "expiry_date": "2099-12-31"}),
+    ("AVAILABLE with quantity 3 on the row", {"status": "AVAILABLE", "quantity": 3}),
+]
+
+
+def _one_unit(mongo_db, shape) -> tuple:
+    """A product with ONE stock_units row at Dhanbad stored exactly as `shape`;
+    returns (product_id, sku, what the till's find_available sells of it)."""
+    from database.repositories.product_repository import StockRepository
+
     pid = f"PRD-{uuid.uuid4().hex[:12]}"
     sku = f"SKU-{pid[-8:]}"
     mongo_db["products"].insert_one(
@@ -466,13 +610,54 @@ def test_d7b3_a_unit_is_available_by_the_one_on_hand_rule(
             "barcode": f"BC-{uuid.uuid4().hex[:12]}", "quantity": 1}
     unit.update(shape)
     mongo_db["stock_units"].insert_one(unit)
+    return pid, sku, StockRepository(mongo_db["stock_units"]).find_available(pid, S1)
 
-    item = _items(_ok(call(_user("CASHIER", S1), q=sku))).get(pid) or {}
-    here = _stores(item).get(S1) or {}
-    assert int(here.get("available", -1)) == (1 if sellable else 0), (
-        f"a unit stored as {label} is {'SELLABLE' if sellable else 'NOT sellable'}; "
-        f"the lookup says available={here.get('available')}"
+
+@pytest.mark.parametrize("label,shape", _TILL_SHAPES, ids=[t[0] for t in _TILL_SHAPES])
+def test_d7b3_this_shops_count_is_the_tills_count(call, mongo_db, label, shape):
+    # The till tile and the sale guard read find_available; the lookup must
+    # say the same number for this shop, or the counter promises a frame the
+    # till refuses (expired, legacy status) or counts one row twice.
+    _seed(mongo_db)
+    pid, sku, till = _one_unit(mongo_db, shape)
+    here = _stores(_items(_ok(call(_user("CASHIER", S1), q=sku))).get(pid) or {}).get(S1) or {}
+    assert int(here.get("available", -1)) == till, (
+        f"a unit stored as {label}: the till sells {till}, the lookup says "
+        f"available={here.get('available')}"
     )
+
+
+@pytest.mark.parametrize(
+    "label,unit,in_transit",
+    [
+        ("shipped to Dhanbad", {"store_id": S2, "status": "TRANSFERRED"}, 1),
+        ("a shipped row with quantity 3", {"store_id": S2, "status": "TRANSFERRED", "quantity": 3}, 1),
+        ("received at Dhanbad, stamp left on", {"store_id": S1, "status": "AVAILABLE"}, 0),
+        ("sold at Dhanbad after receipt", {"store_id": S1, "status": "SOLD"}, 0),
+    ],
+)
+def test_d7b3_in_transit_is_a_transferred_unit_on_its_way(call, mongo_db, label, unit, in_transit):
+    # Only a TRANSFERRED unit is on its way: once received (or sold) the
+    # transfer_to_store_id stamp may stay on the row, and counting it would
+    # show the frame twice -- on the shelf AND on the way. One unit per row,
+    # as `available` counts them.
+    _seed(mongo_db)
+    pid, sku, _till = _one_unit(mongo_db, {"status": "SOLD"})
+    mongo_db["stock_units"].insert_one(
+        {"stock_id": f"STK-{uuid.uuid4().hex[:8]}", "product_id": pid, "quantity": 1,
+         "transfer_id": "T-9", "transfer_to_store_id": S1, **unit}
+    )
+    here = _stores(_items(_ok(call(_user("CASHIER", S1), q=sku))).get(pid) or {}).get(S1) or {}
+    assert int(here.get("in_transit", -1)) == in_transit, f"{label}: {here}"
+
+
+def test_d7b3_a_stores_doc_without_a_store_id_is_skipped_not_a_500(call, mongo_db):
+    _seed(mongo_db)
+    mongo_db["stores"].insert_one(
+        {"store_code": "BV-XX-01", "store_name": "No id", "store_type": "RETAIL", "is_active": True}
+    )
+    p54 = _items(_ok(call(_user("CASHIER"), q="CA8895"))).get(P54) or {}
+    assert set(_stores(p54)) == PHYSICAL
 
 
 # ============================================================================
@@ -510,6 +695,37 @@ def test_d7b4_a_size_variant_comes_with_its_parent_whatever_its_model_spelling(c
     assert "P-807-58" in _items(_ok(call(_user("SALES_STAFF"), q="CA8895")))
     items = _items(_ok(call(_user("SALES_STAFF"), q="SG-CARRERA-CA-8895-807-58")))
     assert {P54, P56} <= set(items), sorted(items)
+
+
+_SPELLINGS = [
+    # (label, the colour searched for, its sibling as stored, the query)
+    ("model typed with a hyphen", ("Carrera", "CA8895"), ("Carrera", "CA-8895"), "CA8895"),
+    ("model typed with a space", ("Ray-Ban", "RB4350"), ("Ray-Ban", "RB 4350"), "RB4350"),
+    ("Luxottica 0 prefix", ("Ray-Ban", "RB4350"), ("Ray-Ban", "0RB4350"), "RB4350"),
+    # scanned by its own SKU, so the capitals sibling is not a search hit too
+    ("brand in capitals", ("Ray-Ban", "RB4350"), ("RAY-BAN", "RB4350"), "SG-RB4350-BLK"),
+]
+
+
+@pytest.mark.parametrize("label,hit,sibling,query", _SPELLINGS, ids=[t[0] for t in _SPELLINGS])
+def test_d7b4_a_colour_spelled_differently_is_still_the_model(call, mongo_db, label, hit, sibling, query):
+    # Each colour is its own product; the create door folds case, separators
+    # and the 0 prefix into identity_key (normalise_identity_component), and
+    # find_similar_products lists siblings by it. Raw brand+model equality
+    # would tell the counter Bokaro has no blue when it has one.
+    _seed(mongo_db)
+    mongo_db["products"].insert_many(
+        [
+            _product("P-HIT", f"SG-{hit[1]}-BLK", f"{hit[0]} {hit[1]} - Black", "BLK", "54",
+                     brand=hit[0], model=hit[1]),
+            _product("P-BLUE", f"SG-X-{uuid.uuid4().hex[:6]}", f"{sibling[0]} {sibling[1]} - Blue",
+                     "BLU", "54", brand=sibling[0], model=sibling[1]),
+        ]
+    )
+    mongo_db["stock_units"].insert_one(_unit("P-BLUE", S2))
+    items = _items(_ok(call(_user("SALES_STAFF"), q=query)))
+    assert "P-BLUE" in items, f"{label}: {sorted(items)}"
+    assert _counts(items["P-BLUE"])[S2] == (1, 0)
 
 
 # ============================================================================
@@ -561,27 +777,15 @@ def test_d7b6_the_lookup_is_read_only(app):
 # ============================================================================
 
 
-@pytest.mark.parametrize(
-    "label,shape,sellable",
-    [pytest.param(lbl, shp, sell, id=lbl) for lbl, shp, sell, _phys in _SHAPES],
-)
-def test_d7b8_cross_store_stock_counts_by_the_one_on_hand_rule(
-    call, mongo_db, label, shape, sellable
-):
-    pid = f"PRD-{uuid.uuid4().hex[:12]}"
-    mongo_db["products"].insert_one(
-        {"_id": pid, "product_id": pid, "sku": f"SKU-{pid[-8:]}", "brand": "Vogue",
-         "model": "VO5123", "category": "FRAME", "mrp": 3000.0, "is_active": True}
-    )
-    unit = {"stock_id": f"STK-{uuid.uuid4().hex[:8]}", "product_id": pid, "store_id": S1,
-            "quantity": 1}
-    unit.update(shape)
-    mongo_db["stock_units"].insert_one(unit)
+@pytest.mark.parametrize("label,shape", _TILL_SHAPES, ids=[t[0] for t in _TILL_SHAPES])
+def test_d7b8_cross_store_stock_counts_what_the_till_sells(call, mongo_db, label, shape):
+    # One rule, one implementation: the BOPIS read and the counter lookup both
+    # call lookup.sellable_by_product_shop (find_available's filter).
+    pid, _sku, till = _one_unit(mongo_db, shape)
     body = _ok(call(_user("ADMIN"), "/inventory/cross-store-stock", product_id=pid))
     qty = {s.get("store_id"): int(s.get("available_qty", 0)) for s in body.get("stores") or []}
-    assert qty.get(S1, 0) == (1 if sellable else 0), (
-        f"a unit stored as {label} is {'SELLABLE' if sellable else 'NOT sellable'}; "
-        f"cross-store-stock says {qty.get(S1, 0)}"
+    assert qty.get(S1, 0) == till, (
+        f"a unit stored as {label}: the till sells {till}, cross-store-stock says {qty.get(S1, 0)}"
     )
 
 

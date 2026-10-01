@@ -20,7 +20,7 @@ from ._shared import (
 from .helpers import (
     _get_db,
 )
-from ...services.inventory_balancing import _on_hand_by_product_store
+from .lookup import sellable_by_product_shop
 
 # ============================================================================
 # INVENTORY INTELLIGENCE: transfer recommendations + staff accountability
@@ -128,15 +128,15 @@ async def cross_store_stock(
 
     Fail-soft: empty list on DB unavailable.
     """
-    db = _get_db()
+    stock_repo = get_stock_repository()
     product_repo = get_product_repository()
-    if db is None:
+    if stock_repo is None:
         return {"product_id": product_id, "stores": []}
 
     try:
-        # The same per-shop sellable count the counter's /inventory/lookup
-        # reads (item_events' one on-hand rule), not a second status literal.
-        on_hand = _on_hand_by_product_store(db, [product_id])
+        # The per-shop count the counter's /inventory/lookup reads: the till's
+        # own sellable question (find_available's filter), not a second literal.
+        rows = sellable_by_product_shop(stock_repo, [product_id])
 
         # Enrich with product name (once)
         product_name = ""
@@ -146,10 +146,8 @@ async def cross_store_stock(
                 product_name = p.get("name") or p.get("product_name") or ""
 
         stores = []
-        for (_pid, sid), qty in on_hand.items():
+        for (_pid, sid), qty in rows.items():
             if exclude_store_id and sid == exclude_store_id:
-                continue
-            if qty <= 0:
                 continue
             stores.append({"store_id": sid, "available_qty": qty})
 

@@ -284,7 +284,7 @@ ROWS: List[Dict[str, object]] = [
     },
     # D7b (owner 2026-09-29): the counter's read-only stock lookup -- this
     # shop, every other shop, in transit; MRP / selling price only.
-    # Mirrors inventory/lookup.py STOCK_LOOKUP_ROLES.
+    # inventory/lookup.py reads its route gate FROM this row (STOCK_LOOKUP_ROLES).
     {
         "method": "GET",
         "path": "/api/v1/inventory/lookup",
