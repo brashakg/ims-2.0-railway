@@ -30,10 +30,11 @@ vi.mock('../../../services/api/client', async (importOriginal) => {
 const REPORT = {
   month: '2026-09',
   vendors: [
-    { vendor_id: 'v1', vendor_name: 'Jharkhand Optical', ordered: 10000, received: 8400, billed: 8400, paid: 2860, owed: 5540, next_due_date: '2026-10-05' },
-    { vendor_id: 'v2', vendor_name: 'Pune Lens Co', ordered: 0, received: 0, billed: 2240, paid: 0, owed: 2240, next_due_date: null },
+    { vendor_id: 'v1', vendor_name: 'Jharkhand Optical', ordered: 10000, received: 8400, billed: 8400, paid: 2860, owed: 5540.4, next_due_date: '2026-09-09', next_due_overdue: true },
+    { vendor_id: 'v2', vendor_name: 'Pune Lens Co', ordered: 0, received: 0, billed: 2240, paid: 0, owed: 2240, next_due_date: '2026-10-05', next_due_overdue: false },
+    { vendor_id: 'v3', vendor_name: 'New Frames Co', ordered: 0, received: 0, billed: 0, paid: 1500, owed: -1500, next_due_date: null },
   ],
-  totals: { ordered: 10000, received: 8400, billed: 10640, paid: 2860, owed: 7780 },
+  totals: { ordered: 10000, received: 8400, billed: 10640, paid: 4360, owed: 6280.4 },
 };
 
 beforeEach(() => {
@@ -72,7 +73,7 @@ describe('Purchases this month', () => {
     const row = (await screen.findByText('Jharkhand Optical')).closest('tr')!;
     expect(within(row).getByText('₹5,540')).toBeInTheDocument();
     const total = screen.getByText('Total').closest('tr')!;
-    expect(within(total).getByText('₹7,780')).toBeInTheDocument();
+    expect(within(total).getByText('₹6,280')).toBeInTheDocument();
     expect(within(total).getByText('₹10,640')).toBeInTheDocument();
     // An admin opens on all stores: no store_id is sent.
     expect(reportParams()[0].store_id).toBeUndefined();
@@ -91,14 +92,47 @@ describe('Purchases this month', () => {
     );
   });
 
-  it('exports the rows it shows as CSV', async () => {
+  it('exports what the screen shows: the rows, the Total line, whole rupees, an advance as a number', async () => {
     roles = ['ADMIN'];
+    exportToCSV.mockClear();
     open();
     await screen.findByText('Jharkhand Optical');
     fireEvent.click(screen.getByRole('button', { name: /export csv/i }));
     const [rows, , columns] = exportToCSV.mock.calls[0];
-    expect(rows.map((r: { owed: number }) => r.owed)).toEqual([5540, 2240]);
-    expect(columns.map((c: { label: string }) => c.label)).toContain('Owed (Rs)');
+    expect(rows.map((r: { vendor_name: string; owed: number }) => [r.vendor_name, r.owed])).toEqual([
+      ['Jharkhand Optical', 5540],
+      ['Pune Lens Co', 2240],
+      ['New Frames Co', -1500],
+      ['Total', 6280],
+    ]);
+    expect(rows[0]).toMatchObject({ next_due_date: '2026-09-09', overdue: 'overdue' });
+    expect(columns.map((c: { key: string }) => c.key)).toEqual(
+      ['vendor_name', 'ordered', 'received', 'billed', 'paid', 'owed', 'next_due_date', 'overdue'],
+    );
+  });
+
+  it('says an advance is an advance and marks an overdue next due', async () => {
+    roles = ['ADMIN'];
+    open();
+    const advance = (await screen.findByText('New Frames Co')).closest('tr')!;
+    expect(within(advance).getByText('₹1,500 advance')).toBeInTheDocument();
+    const owed = screen.getByText('Jharkhand Optical').closest('tr')!;
+    expect(within(owed).getByText('overdue')).toBeInTheDocument();
+    const notYet = screen.getByText('Pune Lens Co').closest('tr')!;
+    expect(within(notYet).queryByText('overdue')).toBeNull();
+  });
+
+  it('a cleared month box reads this month again instead of spinning', async () => {
+    roles = ['ADMIN'];
+    open();
+    await screen.findByText('Jharkhand Optical');
+    const box = screen.getByLabelText('Month') as HTMLInputElement;
+    const current = box.value;
+    fireEvent.change(box, { target: { value: '2026-08' } });
+    await waitFor(() => expect(reportParams().some((p) => p.month === '2026-08')).toBe(true));
+    fireEvent.change(box, { target: { value: '' } });
+    await waitFor(() => expect(box.value).toBe(current));
+    expect(await screen.findByText('Jharkhand Optical')).toBeInTheDocument();
   });
 
   it('an accountant gets no shop picker and reads his own shop', async () => {

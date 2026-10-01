@@ -16,7 +16,13 @@ import { formatDateIST, istDayString } from '../../utils/datetime';
 import { usePurchaseShop } from './purchaseShop';
 
 type Figures = { ordered: number; received: number; billed: number; paid: number; owed: number };
-type VendorRow = Figures & { vendor_id: string; vendor_name: string; next_due_date: string | null };
+type VendorRow = Figures & {
+  vendor_id: string;
+  vendor_name: string;
+  next_due_date: string | null;
+  /** Past due on the day the report is as at (the month's end, or today). */
+  next_due_overdue?: boolean;
+};
 type Report = { month: string; vendors: VendorRow[]; totals: Figures };
 
 const COLUMNS: { key: keyof Figures; label: string }[] = [
@@ -27,32 +33,53 @@ const COLUMNS: { key: keyof Figures; label: string }[] = [
   { key: 'owed', label: 'Owed' },
 ];
 
-const rupees = (n: number) => `₹${Math.round(n).toLocaleString('en-IN')}`;
+// Whole rupees, on screen and in the export alike.
+const whole = (n: number) => Math.round(n);
+const rupees = (n: number) => `₹${whole(n).toLocaleString('en-IN')}`;
+/** Owed below zero is money already with the supplier (an advance). */
+const owedText = (n: number) => (whole(n) < 0 ? `${rupees(-n)} advance` : rupees(n));
+const thisMonth = () => (istDayString(new Date()) ?? '').slice(0, 7);
 
 export function PurchasesThisMonthSection() {
   const { storeId } = usePurchaseShop();
-  const [month, setMonth] = useState(() => (istDayString(new Date()) ?? '').slice(0, 7));
+  const [month, setMonth] = useState(thisMonth);
 
   const q = useQuery<Report>({
     queryKey: ['purchase', 'this-month', month, storeId ?? 'all'],
     queryFn: async () =>
       (await api.get('/vendors/purchases-this-month', {
-        params: { month, ...(storeId ? { store_id: storeId } : {}) },
+        params: { ...(month ? { month } : {}), ...(storeId ? { store_id: storeId } : {}) },
       })).data,
-    enabled: !!month,
   });
   const rows = q.data?.vendors ?? [];
 
-  const exportCsv = () =>
+  // The CSV opens with the screen's numbers: the same rows, whole rupees, the
+  // Total line, and plain numbers (an advance stays -1500, summable).
+  const exportCsv = () => {
+    const totals = q.data?.totals;
+    const line = (name: string, f: Figures, due = '', overdue = false) => ({
+      vendor_name: name,
+      ...Object.fromEntries(COLUMNS.map((c) => [c.key, whole(f[c.key])])),
+      next_due_date: due,
+      overdue: overdue ? 'overdue' : '',
+    });
     exportToCSV(
-      rows.map((r) => ({ ...r, next_due_date: r.next_due_date ?? '' })),
+      [
+        ...rows.map((r) => line(r.vendor_name, r, r.next_due_date ?? '', !!r.next_due_overdue)),
+        ...(totals ? [line('Total', totals)] : []),
+      ],
       `purchases-${month}${storeId ? `-${storeId}` : ''}`,
       [
         { key: 'vendor_name', label: 'Vendor' },
-        ...COLUMNS.map((c) => ({ key: c.key, label: `${c.label} (Rs)` })),
+        ...COLUMNS.map((c) => ({
+          key: c.key,
+          label: c.key === 'owed' ? 'Owed (Rs; below 0 = advance)' : `${c.label} (Rs)`,
+        })),
         { key: 'next_due_date', label: 'Next due' },
+        { key: 'overdue', label: 'Overdue' },
       ],
     );
+  };
 
   return (
     <div className="space-y-4">
@@ -62,7 +89,8 @@ export function PurchasesThisMonthSection() {
           <input
             type="month"
             value={month}
-            onChange={(e) => setMonth(e.target.value)}
+            // A cleared box reads this month again, never an endless spinner.
+            onChange={(e) => setMonth(e.target.value || thisMonth())}
             className="text-sm border border-gray-300 rounded px-2 py-1.5 bg-white"
           />
         </label>
@@ -104,15 +132,26 @@ export function PurchasesThisMonthSection() {
               {rows.map((r) => (
                 <tr key={r.vendor_id}>
                   <td className="px-3 py-2 font-medium text-gray-900">{r.vendor_name}</td>
-                  {COLUMNS.map((c) => <td key={c.key} className="px-3 py-2 text-right text-gray-700 whitespace-nowrap">{rupees(r[c.key])}</td>)}
-                  <td className="px-3 py-2 text-gray-700 whitespace-nowrap">{formatDateIST(r.next_due_date)}</td>
+                  {COLUMNS.map((c) => (
+                    <td key={c.key} className="px-3 py-2 text-right text-gray-700 whitespace-nowrap">
+                      {c.key === 'owed' ? owedText(r.owed) : rupees(r[c.key])}
+                    </td>
+                  ))}
+                  <td className="px-3 py-2 text-gray-700 whitespace-nowrap">
+                    {formatDateIST(r.next_due_date)}
+                    {r.next_due_overdue && <span className="ml-1.5 text-xs font-medium text-red-600">overdue</span>}
+                  </td>
                 </tr>
               ))}
             </tbody>
             <tfoot className="bg-gray-50 font-semibold text-gray-900">
               <tr>
                 <td className="px-3 py-2">Total</td>
-                {COLUMNS.map((c) => <td key={c.key} className="px-3 py-2 text-right whitespace-nowrap">{rupees(q.data!.totals[c.key])}</td>)}
+                {COLUMNS.map((c) => (
+                  <td key={c.key} className="px-3 py-2 text-right whitespace-nowrap">
+                    {c.key === 'owed' ? owedText(q.data!.totals.owed) : rupees(q.data!.totals[c.key])}
+                  </td>
+                ))}
                 <td />
               </tr>
             </tfoot>
@@ -120,7 +159,10 @@ export function PurchasesThisMonthSection() {
         </div>
       )}
       <p className="text-xs text-gray-500">
-        Billed, paid and owed are the supplier ledger's figures; owed is the balance at the end of the month.
+        Billed, paid and owed are the supplier ledger's figures; owed is the balance at the end of the
+        month, and next due the earliest due date still owed then. In one shop's view, money paid without
+        naming a bill counts at the shop of that supplier's latest bill; an advance to a supplier who has
+        never billed shows under All stores only. Transfers between our own companies are not purchases.
       </p>
     </div>
   );
