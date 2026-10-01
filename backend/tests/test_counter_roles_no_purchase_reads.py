@@ -31,8 +31,10 @@ from __future__ import annotations
 
 import asyncio
 import os
+import inspect
 import re
 import sys
+import types
 
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
 os.environ.setdefault("MONGODB_URI", "")
@@ -910,21 +912,8 @@ def test_bank_statement_handlers_refuse_managers(role):
         assert exc.value.status_code == 403
 
 
-@pytest.mark.parametrize(
-    "method,path",
-    [
-        ("POST", "/api/v1/finance/bank-statement/import"),
-        ("GET", "/api/v1/finance/bank-statement"),
-        ("GET", "/api/v1/finance/bank-statement/S1"),
-    ],
-)
-def test_bank_statement_rows_are_the_handler_gate(method, path):
-    from api.routers.finance import _require_finance_admin
-
-    row = set(rbac.policy_for(method, path)["allowed"]) - {"SUPERADMIN"}
-    assert row == {"ADMIN", "ACCOUNTANT"}
-    for role in row:
-        _require_finance_admin({"roles": [role]})  # no raise
+# The bank-statement rows are no synced copy of the handler gate: both are the
+# accounts rule (section 17, test_every_accounts_route_row_is_the_one_list).
 
 
 # ---------------------------------------------------------------------------
@@ -1211,24 +1200,76 @@ def test_supplier_payment_gates_are_the_one_ap_constant():
     assert cost_mask_mod.COST_VISIBLE_ROLES == {"SUPERADMIN", *AP_ROLES}
 
 
+class _Reached(Exception):
+    """The handler got past its role gate to the data."""
+
+
+def _reached(*_a, **_k):
+    raise _Reached
+
+
+def _admits(call):
+    """Did the handler get past its role gate? A 403 is the only refusal."""
+    try:
+        asyncio.run(call())
+    except _Reached:
+        return True
+    except HTTPException as exc:
+        return exc.status_code != 403  # past the gate, refused for another reason
+    return True
+
+
 def _supplier_payment_answers(monkeypatch, role):
     """{read: does `role` get supplier payments} for every request-time check."""
+    from api.routers.finance import bank_statement as bs
+    from api.routers.finance import survival as survival_mod
+
     monkeypatch.setattr(cash_flow_mod, "_get_db", lambda: _CashDb())
+    user = {"roles": [role]}
     body = asyncio.run(
-        cash_flow_mod.get_cash_flow(
-            period="month", store_id=None, current_user={"roles": [role]}
-        )
+        cash_flow_mod.get_cash_flow(period="month", store_id=None, current_user=user)
     )
     try:
-        rebates_router._require({"roles": [role]}, "read rebates")
+        rebates_router._require(user, "read rebates")
         rebates = True
     except HTTPException as exc:
         assert exc.status_code == 403
         rebates = False
+    # The owner reads of the same money: payables / AP aging, outflows from
+    # vendor bills, and the bank statements matched against vendor payments.
+    for mod in (cash_flow_mod, survival_mod, bs):
+        monkeypatch.setattr(mod, "_get_db", _reached)
+    upload = types.SimpleNamespace(filename="statement.txt")
     return {
         "cash-flow total": "vendor_payment_outflow" in body,
         "vendor-payments": _vendor_payments_admits(monkeypatch, role),
         "vendor rebates": rebates,
+        "owner-dashboard payables": _admits(
+            lambda: cash_flow_mod.owner_dashboard(current_user=user)
+        ),
+        "cash-flow forecast outflows": _admits(
+            lambda: cash_flow_mod.cash_flow_forecast(
+                days=90,
+                opening_cash=0.0,
+                collection_lag_days=15,
+                recurring_monthly_outflow=0.0,
+                current_user=user,
+            )
+        ),
+        "survival AP aging": _admits(
+            lambda: survival_mod.get_survival_cashflow(store_id=None, current_user=user)
+        ),
+        "bank-statement import": _admits(
+            lambda: bs.import_bank_statement(
+                file=upload, store_id=None, account_name=None, current_user=user
+            )
+        ),
+        "bank-statement list": _admits(
+            lambda: bs.list_bank_statements(store_id=None, limit=20, current_user=user)
+        ),
+        "bank-statement detail": _admits(
+            lambda: bs.get_bank_statement("S1", current_user=user)
+        ),
     }
 
 
@@ -1246,3 +1287,59 @@ def test_narrowing_the_accounts_set_moves_every_supplier_payment_read(monkeypatc
     answers = _supplier_payment_answers(monkeypatch, "ACCOUNTANT")
     assert not any(answers.values()), answers
     assert all(_supplier_payment_answers(monkeypatch, "ADMIN").values())
+
+
+# Every route whose handler-wide gate is the accounts rule, read off the code:
+# require_roles(*_AP_ROLES) (vendor AP, purchase invoices / recon, TDS), a
+# first-level _require_finance_admin (finance owner reads, ITC, Tally, GST),
+# /finance/vendor-payments' can_see_cost refusal, and vendor_rebates' _require.
+_ACCOUNTS_GATE = re.compile(
+    r"require_roles\(\*_AP_ROLES\)"
+    r"|^    _require_finance_admin\(current_user\)"
+    r'|^    if not can_see_cost\(current_user, "payables"\)'
+    r'|^    _require\(current_user, "',
+    re.M,
+)
+
+
+def _accounts_gated_routes(app):
+    out = set()
+    for route in app.routes:
+        endpoint = getattr(route, "endpoint", None)
+        try:
+            src = inspect.getsource(endpoint)
+        except (TypeError, OSError):
+            continue
+        if _ACCOUNTS_GATE.search(src):
+            out |= {(m, route.path) for m in route.methods - {"HEAD", "OPTIONS"}}
+    return out
+
+
+def test_every_accounts_route_row_is_the_one_list(app):
+    # The middleware row is the same object as the gate's constant, not a list
+    # kept equal to it: narrowing AP_ROLES moves every row with its handler.
+    from api.services.rbac_policy._core import ACCOUNTS
+
+    routes = _accounts_gated_routes(app)
+    assert {
+        ("GET", "/api/v1/finance/owner-dashboard"),
+        ("GET", "/api/v1/finance/cash-flow-forecast"),
+        ("GET", "/api/v1/finance/survival-cashflow"),
+        ("POST", "/api/v1/finance/bank-statement/import"),
+        ("GET", "/api/v1/finance/bank-statement"),
+        ("GET", "/api/v1/finance/bank-statement/{statement_id}"),
+        ("GET", "/api/v1/finance/vendor-payments"),
+        ("GET", "/api/v1/finance/itc-register"),
+        ("GET", "/api/v1/vendors/{vendor_id}/ledger"),
+        ("GET", "/api/v1/vendors/ap-aging"),
+        ("GET", "/api/v1/vendors/tds/threshold-status"),
+        ("GET", "/api/v1/vendors/tds/26q-export"),
+        ("GET", "/api/v1/vendor-rebates/ledger"),
+    } <= routes
+    wrong = {
+        (m, p): rbac.policy_for(m, p)["allowed"]
+        for m, p in routes
+        if rbac.policy_for(m, p)["allowed"] is not ACCOUNTS
+    }
+    assert not wrong, wrong
+    assert ACCOUNTS == sorted(AP_ROLES)
