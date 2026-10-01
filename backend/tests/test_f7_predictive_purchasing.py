@@ -346,6 +346,17 @@ class TestT1ProposalGeneration:
         _run_oracle(db)  # same simulated day -> dedup
         assert len(_pending(db)) == 1
 
+    def test_discontinued_product_gets_no_proposal(self):
+        """Audit F48: a discontinued product (inactive, not provisional) still
+        selling off its last units is never a reorder. The products read must
+        carry is_active, or reorder_policy never sees it."""
+        db = self._seed()
+        db.get_collection("products").update_one(
+            {"product_id": "P1"}, {"$set": {"is_active": False}}
+        )
+        assert _run_oracle(db) == 0
+        assert _pending(db) == []
+
 
 # ============================================================================
 # T2 - zero-7d / non-zero-30d fallback

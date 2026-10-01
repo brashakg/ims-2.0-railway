@@ -555,7 +555,9 @@ class OracleAgent(JarvisAgent):
             ]}
             prod_proj = {"product_id": 1, "sku": 1, "preferred_vendor_id": 1,
                          "default_vendor_id": 1, "vendor_id": 1,
-                         "reorder_levels": 1, "reorder_quantity": 1}
+                         "reorder_levels": 1, "reorder_quantity": 1,
+                         # reorder_policy.discontinued() reads these two
+                         "is_active": 1, "provisional": 1}
             try:
                 prods = list(products_coll.find(prod_query, prod_proj))
             except Exception as e:  # noqa: BLE001
