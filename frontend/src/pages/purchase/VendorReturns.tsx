@@ -89,7 +89,7 @@ export function VendorReturns() {
   const toast = useToast();
   const { user } = useAuth();
   const activeStoreId = user?.activeStoreId || ''; // a new return is raised here
-  const { storeId: listScope } = usePurchaseShop(); // audit F63: lists read the one Purchase scope
+  const { storeId: listScope, showShopOf } = usePurchaseShop(); // audit F63: lists read the one Purchase scope
   // F21: the Quarantine Queue "Create RTV" CTA deep-links here with ?stock_id=...
   // so the new return physically links that quarantined unit (backend backfills
   // rtv_vendor_id). Without reading it, the advertised one-click linkage was dead.
@@ -203,7 +203,12 @@ export function VendorReturns() {
       setItems([{ product_id: '', product_name: '', quantity: 1, reason: 'defective', unit_price: 0 }]);
       setNotes('');
 
-      // Refresh the list
+      // Refresh the list -- an admin viewing another shop is shown the shop
+      // the return was raised at (the list reloads with it), so it never vanishes.
+      if (listScope && activeStoreId && listScope !== activeStoreId) {
+        showShopOf(activeStoreId);
+        return;
+      }
       const refreshResp = await api.get('/vendor-returns/', {
         params: { store_id: listScope, limit: 100 },
       });

@@ -29,7 +29,7 @@ export function PurchaseOrdersSection() {
 
   // Cached across section switches (owner: switching felt like a reload).
   // First visit fetches; later visits render instantly + refresh in background.
-  const { storeId } = usePurchaseShop(); // audit F63: one Purchase scope
+  const { storeId, ownStoreId, showShopOf } = usePurchaseShop(); // audit F63: one Purchase scope
   const suppliersQ = useSuppliers();
   const posQ = usePurchaseOrdersQuery(storeId);
   const suppliers = suppliersQ.data ?? [];
@@ -171,7 +171,13 @@ export function PurchaseOrdersSection() {
           existingPOCount={purchaseOrders.length}
           onClose={() => setShowCreatePO(false)}
           onCreated={(newPO) => {
-            patchPOs(prev => [newPO, ...prev]);
+            // A new PO delivers to the creator's own shop (W1.4): it joins that
+            // shop's list and the all-stores list, never the list of a shop
+            // an admin happens to be viewing -- which then shows its shop (F63).
+            for (const key of new Set([ownStoreId, undefined])) {
+              queryClient.setQueryData<PurchaseOrder[]>(purchaseOrdersQueryKey(key), (old) => old && [newPO, ...old]);
+            }
+            showShopOf(ownStoreId);
             setShowCreatePO(false);
           }}
         />

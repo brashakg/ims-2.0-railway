@@ -18,16 +18,33 @@ const useChosenShop = create<{ shop: string; setShop: (shop: string) => void }>(
 }));
 
 /** `storeId` is what a Purchase list read sends as ?store_id: the admin's
- *  pick (undefined = all stores), else the caller's own shop. */
+ *  pick (undefined = all stores), else the caller's own shop. A new order or
+ *  return is raised at `ownStoreId` (the server's rule); `showShopOf` then
+ *  points an admin's list at that shop if it is showing another, so what was
+ *  just raised never vanishes from view. */
 export function usePurchaseShop() {
   const { user } = useAuth();
   const { shop, setShop } = useChosenShop();
   const canPick = !!user?.roles?.some((r) => r === 'ADMIN' || r === 'SUPERADMIN');
-  const storeId = canPick ? shop || undefined : user?.activeStoreId || undefined;
-  return { storeId, canPick, shop, setShop };
+  const ownStoreId = user?.activeStoreId || undefined;
+  const storeId = canPick ? shop || undefined : ownStoreId;
+  const showShopOf = (raisedAt: string | undefined) => {
+    if (canPick && shop && raisedAt && shop !== raisedAt) setShop(raisedAt);
+  };
+  return { storeId, ownStoreId, canPick, shop, setShop, showShopOf };
 }
 
 type StoreRow = { store_id?: string; store_name?: string; store_code?: string };
+
+const storeName = (s: StoreRow) => s.store_name || s.store_code || s.store_id;
+
+/** What a scoped figure covers, said plainly: 'all stores' or the shop's name. */
+export function useShopLabel(storeId: string | undefined): string {
+  const { data } = useStores();
+  if (!storeId) return 'all stores';
+  const row = ((Array.isArray(data) ? data : []) as StoreRow[]).find((s) => s.store_id === storeId);
+  return row ? storeName(row)! : storeId;
+}
 
 /** The admin's shop filter; renders nothing for anyone else. */
 export function PurchaseShopPicker() {
@@ -50,7 +67,7 @@ function ShopSelect({ shop, setShop }: { shop: string; setShop: (shop: string) =
         <option value="">All stores</option>
         {stores.map((s) => (
           <option key={s.store_id} value={s.store_id}>
-            {s.store_name || s.store_code || s.store_id}
+            {storeName(s)}
           </option>
         ))}
       </select>

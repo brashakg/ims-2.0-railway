@@ -172,8 +172,12 @@ export function GoodsReceiptNote() {
   // GRN's own store_id (falls back to the active store) + its legal entity.
   const [grnIdentity, setGrnIdentity] = useState<StoreIdentity | null>(null);
 
-  const storeId = user?.activeStoreId || ''; // goods are received here
-  const { storeId: grnScope } = usePurchaseShop(); // audit F63: the list reads the one Purchase scope
+  const { storeId: grnScope, canPick } = usePurchaseShop(); // audit F63: the list reads the one Purchase scope
+  // Goods are received at the shop the list shows (an admin's pick, else his
+  // own): its open orders fill the picker and the receipt lands in the order's shop.
+  const storeId = grnScope || user?.activeStoreId || '';
+  // What the counts cover, said plainly (F63): never "all stores" for one shop.
+  const scopeLabel = !grnScope ? 'all stores' : canPick ? 'the shop picked above' : 'your shop';
 
   // Resolve the GRN's issuing-store identity when the print modal opens.
   useEffect(() => {
@@ -413,6 +417,12 @@ export function GoodsReceiptNote() {
       toast.error('Pick the vendor this Delivery Challan is from');
       return;
     }
+    // A receipt with no order is recorded at the receiver's own shop (the
+    // server's rule) -- never let it vanish from a list showing another shop.
+    if (noPoDc && storeId !== user?.activeStoreId) {
+      toast.error('A receipt without a PO is recorded at your own shop: pick it in Shop to receive it');
+      return;
+    }
     if (receivedItems.length === 0) {
       toast.error(noPoDc ? 'Add the items that arrived' : 'No line items to receive on this PO');
       return;
@@ -612,7 +622,7 @@ export function GoodsReceiptNote() {
         <div>
           <div className="l">Total GRNs</div>
           <div className="v">{grns.length}</div>
-          <div className="d">all stores in scope</div>
+          <div className="d">{scopeLabel}</div>
         </div>
         <div>
           <div className="l">Quality passed</div>
