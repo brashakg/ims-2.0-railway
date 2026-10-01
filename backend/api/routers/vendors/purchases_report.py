@@ -1,14 +1,27 @@
 """Purchases this month (audit F56, owner ruling 2026-09-28).
 
 One row per vendor: what we ORDERED (orders sent in the month), RECEIVED
-(accepted goods at the order's price incl. GST), were BILLED, PAID, still OWE
-at the month's end, and the NEXT DUE date as at the month's end. Billed / paid /
-owed are the supplier ledger's own rows (ap_engine.build_ledger) over the one
-row rule every payable screen reads (finance._ap_rows ->
-ap_engine.supplier_ledger_rows: no transfer mirror bills; a shop's share when
-one shop is asked for), so this report can never disagree with the vendor
-ledger, /finance/vendor-payments, AP aging or the Cash Flow payables. Shop
-scope is the one Purchase rule (resolve_store_scope).
+(accepted goods incl. GST at the order's price, else the receipt line's own
+price -- see _received_line), were BILLED, PAID, still OWE on the as-of day
+(the month's end, today for the month we are in), and the NEXT DUE date on
+that day. Billed / paid / owed are the supplier ledger's own rows
+(ap_engine.build_ledger) over the one row rule every payable screen reads
+(finance._ap_rows -> ap_engine.supplier_ledger_rows: no transfer mirror
+bills; a shop's share when one shop is asked for), so this report can never
+disagree with the vendor ledger, /finance/vendor-payments, AP aging or the
+Cash Flow payables. Shop scope is the one Purchase rule (resolve_store_scope).
+
+The body also says what the screen must say about its own figures:
+  as_of            -- the day owed / next due are struck on (the month's end,
+                      today for the month we are in);
+  unpriced_receipt_lines -- accepted receipt lines with no price at all (no
+                      order price and none on the receipt): Received counts
+                      them 0;
+  unassigned_owed  -- all-stores view only: what is owed on rows the ledger's
+                      shop rule puts in NO shop (a bill with no shop and the
+                      money naming it, money recorded with no shop for a
+                      supplier who has never billed). The shops plus this add
+                      up to All stores. None in a one-shop view.
 """
 
 import re
@@ -45,6 +58,64 @@ def _find(db, coll: str, flt: dict) -> list:
     return list(db.get_collection(coll).find(flt, {"_id": 0}))
 
 
+def _money(value) -> float:
+    """A stored price / rate as a 2dp float; 0.0 for none or junk."""
+    try:
+        return round(float(value or 0), 2)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _received_line(gi: dict, po: Optional[dict]) -> Optional[tuple]:
+    """(qty, unit price, GST rate) one accepted receipt line counts at, or
+    None for a line with nothing accepted.
+
+    The ORDER line's price and rate first -- the very line the bill is drafted
+    from (purchase_invoice_engine.lines_from_grn, asked about this one line).
+    A legacy order line with no tax_rate counts WITHOUT GST, exactly as its
+    bill draft does (lines_from_grn reads the missing rate as 0%; the
+    accountant corrects it on the bill). A line the order does not price (a
+    delivery challan or walk-in with no order, or a product not on the order)
+    counts at the receipt line's OWN unit_price and rate -- the price
+    receiving stamps on the stock it mints (grn_accept). Neither: price 0."""
+    lines = pinv.lines_from_grn({"items": [gi]}, po)
+    if not lines:
+        return None
+    line = lines[0]
+    if line["unit_price"] > 0:
+        return line["qty"], line["unit_price"], line["gst_rate"]
+    rate = gi.get("tax_rate")
+    if rate is None:
+        rate = gi.get("gst_rate")
+    rate = line["gst_rate"] if rate is None else _money(rate)
+    return line["qty"], _money(gi.get("unit_price")), rate
+
+
+def _owed(rows: tuple) -> float:
+    """What the supplier ledger owes on (bills, payments, notes): credit less
+    debit over build_ledger's own entries -- the report's per-vendor sum."""
+    return sum(e["credit"] - e["debit"] for e in ap_engine.build_ledger(*rows)["entries"])
+
+
+def _owed_in_no_shop(db, as_of: str) -> Optional[float]:
+    """All-stores owed less every shop's owed, on THE ledger row rule
+    (ap_engine.supplier_ledger_rows) over one snapshot of the rows: exactly
+    what that rule places in no shop -- a bill with no shop and the money
+    naming it, and money recorded with no shop for a supplier who has never
+    billed. Every shop any row is stamped with is asked, so a shop a row is
+    placed in is always counted. None when the rows cannot be read."""
+    try:
+        raw = tuple(
+            _find(db, coll, {}) for coll in ("vendor_bills", "vendor_payments", "vendor_debit_notes")
+        )
+    except Exception:
+        return None
+    shops = {d.get("store_id") for docs in raw for d in docs if isinstance(d, dict) and d.get("store_id")}
+    every = _owed(ap_engine.supplier_ledger_rows(*raw, None, as_of))
+    placed = sum(_owed(ap_engine.supplier_ledger_rows(*raw, shop, as_of)) for shop in shops)
+    return round(every - placed, 2)
+
+
 @router.get("/purchases-this-month")
 async def purchases_this_month(
     month: Optional[str] = Query(None, description="YYYY-MM (IST); default this month"),
@@ -55,7 +126,21 @@ async def purchases_this_month(
     if not _MONTH.match(month):
         raise HTTPException(status_code=422, detail="month must be YYYY-MM")
     scope = resolve_store_scope(store_id, current_user)
-    body = {"month": month, "store_id": scope, "vendors": [], "totals": dict.fromkeys(_FIGURES, 0.0)}
+    month_end = date(int(month[:4]), int(month[5:]), monthrange(int(month[:4]), int(month[5:]))[1])
+    # THE as-of day (ap_engine.as_of_day): the month's end, clamped to today
+    # for the month we are in -- the day every other payable screen uses, so
+    # a post-dated cheque is unpaid here exactly as it is there. Returned, so
+    # the screen says 'owed as at <day>' instead of guessing the month's end.
+    as_of = ap_engine.as_of_day(month_end.isoformat())
+    body = {
+        "month": month,
+        "store_id": scope,
+        "as_of": as_of,
+        "vendors": [],
+        "totals": dict.fromkeys(_FIGURES, 0.0),
+        "unpriced_receipt_lines": 0,
+        "unassigned_owed": None,
+    }
     db = _get_db()
     if db is None:
         return body
@@ -63,11 +148,6 @@ async def purchases_this_month(
     from ..finance import _ap_rows  # the one AP row loader (call time: no cycle)
 
     shop = {"store_id": scope} if scope else {}
-    month_end = date(int(month[:4]), int(month[5:]), monthrange(int(month[:4]), int(month[5:]))[1])
-    # THE as-of day (ap_engine.as_of_day): the month's end, clamped to today
-    # for the month we are in -- the day every other payable screen uses, so
-    # a post-dated cheque is unpaid here exactly as it is there.
-    as_of = ap_engine.as_of_day(month_end.isoformat())
     bills, payments, notes = _ap_rows(db, scope, as_of)
 
     rows: dict = {}
@@ -87,11 +167,10 @@ async def purchases_this_month(
         if _month_of(po.get("sent_at") or po.get("created_at")) == month:
             row(po.get("vendor_id"))["ordered"] += float(po.get("total_amount") or po.get("total") or 0)
 
-    # RECEIVED: goods accepted this month at the order's price incl. GST -- the
-    # same lines the bill is drafted from (purchase_invoice_engine.lines_from_grn).
-    # ponytail: a receipt with no order (walk-in / challan) has no order price
-    # and reads 0 here until it is billed; price it from the receipt line when
-    # the owner wants walk-ins counted as received.
+    # RECEIVED: goods accepted this month, incl. GST, at the price _received_line
+    # gives each accepted line (the order's, else the receipt line's own). A
+    # line with no price anywhere counts 0 and is counted in
+    # unpriced_receipt_lines, so the screen can say so.
     grns = [
         g
         for g in _find(db, "grns", {**shop, "status": {"$in": list(_ACCEPTED)}})
@@ -100,10 +179,16 @@ async def purchases_this_month(
     po_ids = list({g.get("po_id") for g in grns if g.get("po_id")})
     pos_by_id = {p.get("po_id"): p for p in _find(db, "purchase_orders", {"po_id": {"$in": po_ids}})}
     for g in grns:
-        row(g.get("vendor_id"))["received"] += sum(
-            ln["qty"] * ln["unit_price"] * (1 + ln["gst_rate"] / 100)
-            for ln in pinv.lines_from_grn(g, pos_by_id.get(g.get("po_id")))
-        )
+        po = pos_by_id.get(g.get("po_id"))
+        for gi in g.get("items") or []:
+            counted = _received_line(gi, po)
+            if counted is None:
+                continue
+            qty, price, rate = counted
+            if price <= 0:
+                body["unpriced_receipt_lines"] += 1
+                continue
+            row(g.get("vendor_id"))["received"] += qty * price * (1 + rate / 100)
 
     # BILLED / PAID / OWED: the supplier ledger, row for row, as it stood on the
     # as-of day (_ap_rows already dropped rows dated later; undated rows count,
@@ -153,4 +238,6 @@ async def purchases_this_month(
         for k in _FIGURES:
             body["totals"][k] = round(body["totals"][k] + figures[k], 2)
     body["vendors"].sort(key=lambda v: -v["owed"])
+    if scope is None:
+        body["unassigned_owed"] = _owed_in_no_shop(db, as_of)
     return body

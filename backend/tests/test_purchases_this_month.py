@@ -925,3 +925,157 @@ def test_f63_supplier_balances_admin_with_no_store_id_sees_every_shop(world):
     assert resp.status_code == 200, resp.text
     seen = {r["vendor_id"]: (r["balance"], r["total_billed"], r["po_total"]) for r in resp.json()}
     assert seen == {VA: (5540.0, 8740.0, 17839.0), VB: (2240.0, 2240.0, 6720.0)}, seen
+
+
+# ============================================================================
+# Round 4 (review r1 #4, #8/#32, #9/#36): the report says its as-of day, values
+# a receipt with no order at its own price, and names the money in no shop
+# ============================================================================
+
+V_DC = "V-DC"  # a delivery challan, no order: 4 x 500 @ 5% accepted, billed 2100
+V_DC0 = "V-DC0"  # a challan line with no price anywhere
+V_LEG = "V-LEG"  # a legacy order line with no tax_rate
+V_NOSHOP = "V-NOSHOP"  # a bill booked with no shop, part paid against it
+
+
+def _seed_round4(db) -> None:
+    """The probe world (V-NEW's 1000 advance, recorded with no shop, is in no
+    shop) plus:
+
+      * V-DC (Dhanbad): challan DC1 (po_id None), 4 accepted at 500 + 5% GST
+        on 10 Sep = 2100; billed BC1 2100 on 15 Sep.
+      * V-DC0 (Dhanbad): challan DC0, 3 accepted, no price on the receipt.
+      * V-LEG (Pune): order PO-LEG sent 3 Sep, 2 x 1000 and NO tax_rate on the
+        line (the flat-18% era: total 2360); 2 accepted on 8 Sep.
+      * V-NOSHOP: bill NS1 700 on 5 Sep booked with no shop; 200 paid against
+        it on 6 Sep. Owed 500, in no shop.
+
+    All stores owe 5240 + 2100 + 500 = 7840. Dhanbad 5540 + 700 + 2100 = 8340,
+    Pune 0, Bokaro 0; in no shop 500 - 1000 = -500.
+    """
+    _seed_probe(db)
+    db["vendors"].insert_many([
+        {"vendor_id": V_DC, "legal_name": "Challan Lens Co", "trade_name": "Challan Lens Co"},
+        {"vendor_id": V_DC0, "legal_name": "No Price Lens Co", "trade_name": "No Price Lens Co"},
+        {"vendor_id": V_LEG, "legal_name": "Legacy Frames", "trade_name": "Legacy Frames"},
+        {"vendor_id": V_NOSHOP, "legal_name": "Services Co", "trade_name": "Services Co"},
+    ])
+
+    def challan(grn_id, vendor, items):
+        return {"grn_id": grn_id, "grn_number": grn_id, "vendor_id": vendor, "store_id": DHN,
+                "po_id": None, "grn_subtype": "DELIVERY_CHALLAN", "dc_number": grn_id,
+                "status": "ACCEPTED", "accepted_at": "2026-09-10T11:00:00", "items": items}
+
+    db["grns"].insert_many([
+        challan("DC1", V_DC, [{"product_id": "P-LENS-1", "received_qty": 4, "accepted_qty": 4,
+                               "rejected_qty": 0, "unit_price": 500.0, "tax_rate": 5.0}]),
+        challan("DC0", V_DC0, [{"product_id": "P-LENS-2", "received_qty": 3, "accepted_qty": 3,
+                                "rejected_qty": 0}]),
+        {"grn_id": "GRN-LEG", "grn_number": "GRN-LEG", "vendor_id": V_LEG, "store_id": PUN,
+         "po_id": "PO-LEG", "status": "ACCEPTED", "accepted_at": "2026-09-08T11:00:00",
+         "items": [{"product_id": "P-FRAME-L", "received_qty": 2, "accepted_qty": 2, "rejected_qty": 0}]},
+    ])
+    db["purchase_orders"].insert_one(
+        {"po_id": "PO-LEG", "po_number": "PO-LEG", "vendor_id": V_LEG, "delivery_store_id": PUN,
+         "status": "RECEIVED", "total_amount": 2360.0, "sent_at": "2026-09-03T10:00:00",
+         "created_at": "2026-09-03T08:00:00",
+         "items": [{"product_id": "P-FRAME-L", "quantity": 2, "unit_price": 1000.0}]},
+    )
+    db["vendor_bills"].insert_many([
+        {"bill_id": "BC1", "vendor_id": V_DC, "store_id": DHN, "bill_number": "BC1",
+         "bill_date": "2026-09-15", "due_date": "2026-10-15", "total_amount": 2100.0,
+         "total": 2100.0, "status": "OUTSTANDING", "linked_dc_ids": ["DC1"]},
+        {"bill_id": "NS1", "vendor_id": V_NOSHOP, "store_id": None, "bill_number": "NS1",
+         "bill_date": "2026-09-05", "due_date": "2026-10-05", "total_amount": 700.0,
+         "total": 700.0, "status": "PARTIAL"},
+    ])
+    db["vendor_payments"].insert_one(
+        {"payment_id": "P-NS1", "vendor_id": V_NOSHOP, "bill_id": "NS1", "amount": 200.0,
+         "tds_amount": 0.0, "mode": "BANK", "payment_date": "2026-09-06"},
+    )
+
+
+@pytest.fixture(scope="module")
+def round4_db():
+    yield from _fresh_db(_seed_round4)
+
+
+@pytest.fixture
+def round4(round4_db, monkeypatch):
+    _today(monkeypatch, "2026-10-01")
+    return _make_world(round4_db, monkeypatch)
+
+
+def _stored(coll: str, field: str, key: str) -> dict:
+    """One stored doc, read through the proxy the routers were handed."""
+    return vendors_pkg._get_db().get_collection(coll).find_one({field: key}, {"_id": 0})
+
+
+def test_r4_the_report_says_the_day_owed_is_struck_on(round4):
+    """#8/#32: owed and next due are struck on the month's end, or today for
+    the month we are in -- the body says which day, so the screen can print
+    'Owed as at <day>' instead of 'the end of the month'."""
+    assert _report(round4, ADMIN, month="2026-09")["as_of"] == "2026-09-30"
+    assert _report(round4, ADMIN, month="2026-10")["as_of"] == "2026-10-01"
+    # A month not yet begun is today's balance, and says so.
+    assert _report(round4, ADMIN, month="2027-03")["as_of"] == "2026-10-01"
+    assert _report(round4, ACCT_PUNE, month="2026-08")["as_of"] == "2026-08-31"
+
+
+def test_r4_received_values_a_challan_with_no_order_at_its_own_price(round4):
+    """#9/#36: goods accepted on a delivery challan with no order read
+    Received Rs 0 beside Billed Rs 2,100 -- 'billed for goods never received'.
+    The receipt line's own price and rate value them; a line with no price at
+    all counts 0 and the body says how many such lines there are."""
+    body = _report(round4, ADMIN, month="2026-09")
+    rows = _rows(body)
+    _open(
+        rows[V_DC]["received"] == pytest.approx(2100.0),
+        f"F56: a no-order challan reads Received {rows[V_DC]['received']}, its goods are worth 2100",
+    )
+    assert rows[V_DC]["billed"] == pytest.approx(2100.0)
+    assert V_DC0 not in rows, rows.get(V_DC0)  # nothing priced, nothing billed: no row
+    assert body["unpriced_receipt_lines"] == 1
+    # One shop's view counts its own receipts only.
+    assert _report(round4, ADMIN, month="2026-09", store_id=PUN)["unpriced_receipt_lines"] == 0
+    assert _report(round4, ADMIN, month="2026-09", store_id=DHN)["unpriced_receipt_lines"] == 1
+
+
+def test_r4_a_legacy_order_line_with_no_gst_rate_counts_as_its_bill_draft_does(round4):
+    """A legacy order line with no tax_rate: Received counts it WITHOUT GST,
+    exactly as the bill draft (lines_from_grn reads the missing rate as 0%),
+    never at a rate the order never stated."""
+    from api.services import purchase_invoice_engine as pinv_engine
+
+    po = _stored("purchase_orders", "po_id", "PO-LEG")
+    grn = _stored("grns", "grn_id", "GRN-LEG")
+    draft = pinv_engine.lines_from_grn(grn, po)
+    drafted = sum(ln["qty"] * ln["unit_price"] * (1 + ln["gst_rate"] / 100) for ln in draft)
+    row = _rows(_report(round4, ADMIN, month="2026-09"))[V_LEG]
+    assert (row["ordered"], row["received"]) == (2360.0, 2000.0), row
+    assert row["received"] == pytest.approx(drafted)
+
+
+def test_r4_the_money_in_no_shop_is_named_and_the_shops_add_up(round4):
+    """#4: a bill booked with no shop (and the money naming it) and money
+    recorded with no shop for a never-billed supplier count under All stores
+    only. All stores says how much that is, so the shops plus it add up."""
+    every = _report(round4, ADMIN, month="2026-09")
+    _open(
+        every.get("unassigned_owed") == pytest.approx(-500.0),
+        f"F56: All stores does not say what is owed in no shop: {every.get('unassigned_owed')}",
+    )
+    assert every["totals"]["owed"] == pytest.approx(7840.0)
+    shops = {s: _report(round4, ADMIN, month="2026-09", store_id=s) for s in (DHN, PUN, BOK)}
+    assert {s: b["totals"]["owed"] for s, b in shops.items()} == {DHN: 8340.0, PUN: 0.0, BOK: 0.0}
+    assert sum(b["totals"]["owed"] for b in shops.values()) + every["unassigned_owed"] == pytest.approx(
+        every["totals"]["owed"]
+    )
+    # A one-shop view has no 'no shop' figure; nor does a Pune login's own view.
+    assert all(b["unassigned_owed"] is None for b in shops.values())
+    assert _report(round4, ACCT_PUNE, month="2026-09")["unassigned_owed"] is None
+
+
+def test_r4_the_shops_add_up_in_the_base_world_with_nothing_unplaced(world):
+    """Every bill and every rupee in the base world has a shop: 0 in no shop."""
+    assert _report(world, ADMIN, month="2026-09")["unassigned_owed"] == pytest.approx(0.0)

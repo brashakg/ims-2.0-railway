@@ -25,7 +25,7 @@ import {
 } from 'lucide-react';
 import { useIsOnlineStore } from '../../hooks/useIsOnlineStore';
 import { useAuth } from '../../context/AuthContext';
-import { NewOrdersDeliverTo, PurchaseShopPicker } from './purchaseShop';
+import { NewOrdersDeliverTo, PurchaseShopLabel, PurchaseShopPicker } from './purchaseShop';
 import { APPROVE_ROLES } from './invoices/shared';
 
 const SECTIONS = [
@@ -89,8 +89,10 @@ export function PurchaseLayout() {
           <div className="hint">Vendor ledger, purchase orders, GRN verification with quantity + price variance, payment aging, credit notes.</div>
         </div>
         <div className="flex flex-wrap items-center gap-3">
-          {/* Audit F63: admins read every tab across all stores or one shop. */}
+          {/* Audit F63: admins read every tab across all stores or one shop;
+              everyone else is told which shop (their own) the tabs cover. */}
           <PurchaseShopPicker />
+          <PurchaseShopLabel />
           {/* Invoices page carries its own Create-from-GRN / Manual buttons; the
               variance page is read-mostly (its own Dismiss action lives inline). */}
           {headerAction && (

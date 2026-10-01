@@ -46,15 +46,37 @@ export function NewOrdersDeliverTo() {
 }
 
 function OwnShop({ storeId }: { storeId: string }) {
+  return (
+    <span className="text-xs text-gray-500">
+      New orders deliver to <PurchaseShopName storeId={storeId} />
+    </span>
+  );
+}
+
+/** A shop's name from the store list; its id until the list arrives. */
+export function PurchaseShopName({ storeId }: { storeId: string }) {
   const { data } = useStores();
   const row = ((Array.isArray(data) ? data : []) as StoreRow[]).find((s) => s.store_id === storeId);
-  return <span className="text-xs text-gray-500">New orders deliver to {row ? storeName(row) : storeId}</span>;
+  return <>{row ? storeName(row) : storeId}</>;
 }
 
 /** The admin's shop filter; renders nothing for anyone else. */
 export function PurchaseShopPicker() {
   const { canPick, shop, setShop } = usePurchaseShop();
   return canPick ? <ShopSelect shop={shop} setShop={setShop} /> : null;
+}
+
+/** Where an admin has the picker, everyone else is told -- read-only -- which
+ *  shop every Purchase figure covers: their own, the server's rule. Nothing
+ *  for an admin (the picker says it) or a login with no shop to name. */
+export function PurchaseShopLabel() {
+  const { canPick, ownStoreId } = usePurchaseShop();
+  if (canPick || !ownStoreId) return null;
+  return (
+    <span className="text-sm text-gray-600">
+      Shop: <span className="font-medium text-gray-900"><PurchaseShopName storeId={ownStoreId} /></span>
+    </span>
+  );
 }
 
 function ShopSelect({ shop, setShop }: { shop: string; setShop: (shop: string) => void }) {

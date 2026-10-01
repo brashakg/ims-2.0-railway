@@ -23,6 +23,7 @@ import { useStorePrintInfo } from '../../hooks/useStorePrintInfo';
 import { useGstStateCodes } from '../../hooks/useGstStateCodes';
 import { gstinStateCode, isInterStateSupply } from '../../constants/gst';
 import type { Supplier } from './purchaseTypes';
+import { owedText, rupees } from './PurchasesThisMonthSection';
 
 // How a purchase from this vendor is taxed. The decision this card and the PO
 // composer share lives in constants/gst.ts isInterStateSupply -- this card
@@ -71,8 +72,6 @@ interface SupplierPanelProps {
   /** Ledger figures by vendor id; absent (loading / not allowed) = no figure. */
   balances?: Record<string, SupplierBalance>;
 }
-
-const lakh = (rupees: number) => `₹${(rupees / 100000).toFixed(1)}L`;
 
 export function SupplierPanel({ suppliers, onEdit, balances }: SupplierPanelProps) {
   // The "Generate vendor portal link" action used to live on the (now
@@ -208,15 +207,18 @@ export function SupplierPanel({ suppliers, onEdit, balances }: SupplierPanelProp
             </div>
           </div>
 
+          {/* The supplier ledger's figures in the Purchases report's own words
+              and rupees (whole rupees; below 0 owed is an advance): lakh to
+              one decimal read Rs 4,999 owed as "Rs 0.0L" -- the F56 Rs 0. */}
           <div className="grid grid-cols-2 gap-3 text-sm">
             <div>
-              <p className="text-xs text-gray-600">Total Purchases</p>
-              <p className="font-semibold text-gray-900">{ledger ? lakh(ledger.total_billed) : '—'}</p>
+              <p className="text-xs text-gray-600">Billed</p>
+              <p className="font-semibold text-gray-900">{ledger ? rupees(ledger.total_billed) : '—'}</p>
             </div>
             <div>
               <p className="text-xs text-gray-600">Outstanding</p>
               <p className={`font-semibold ${nearLimit ? 'text-red-600' : 'text-gray-900'}`}>
-                {ledger ? lakh(ledger.balance) : '—'}
+                {ledger ? owedText(ledger.balance) : '—'}
               </p>
             </div>
           </div>

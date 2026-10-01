@@ -5,7 +5,10 @@
 // next due date, for one month. Every rupee is the server's
 // (GET /vendors/purchases-this-month): billed / paid / owed are the supplier
 // ledger's own rows, so this page can never disagree with the vendor ledger.
-// The shop filter is the one Purchase scope (purchaseShop.tsx).
+// The shop filter is the one Purchase scope (purchaseShop.tsx). What the page
+// says ABOUT its figures comes from the body too: the shop it covers
+// (store_id), the day owed is struck on (as_of), receipt lines with no price
+// and, for All stores, what is owed in no shop.
 
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
@@ -13,7 +16,7 @@ import { AlertTriangle, Download, Loader2 } from 'lucide-react';
 import api from '../../services/api/client';
 import { exportToCSV } from '../../utils/exportUtils';
 import { formatDateIST, istDayString } from '../../utils/datetime';
-import { usePurchaseShop } from './purchaseShop';
+import { PurchaseShopName, usePurchaseShop } from './purchaseShop';
 
 type Figures = { ordered: number; received: number; billed: number; paid: number; owed: number };
 type VendorRow = Figures & {
@@ -23,7 +26,20 @@ type VendorRow = Figures & {
   /** Past due on the day the report is as at (the month's end, or today). */
   next_due_overdue?: boolean;
 };
-type Report = { month: string; vendors: VendorRow[]; totals: Figures };
+type Report = {
+  month: string;
+  /** The shop the figures cover; null = all stores (the server's scope rule). */
+  store_id?: string | null;
+  /** The day owed and next due are struck on: the month's end, or today. */
+  as_of?: string;
+  vendors: VendorRow[];
+  /** Exact (to the paise) sums of the rows; the Total line adds the rows as shown. */
+  totals: Figures;
+  /** Accepted receipt lines with no price anywhere: Received counts them 0. */
+  unpriced_receipt_lines?: number;
+  /** All stores only: owed on rows the ledger puts in no shop. */
+  unassigned_owed?: number | null;
+};
 
 const COLUMNS: { key: keyof Figures; label: string }[] = [
   { key: 'ordered', label: 'Ordered' },
@@ -33,24 +49,39 @@ const COLUMNS: { key: keyof Figures; label: string }[] = [
   { key: 'owed', label: 'Owed' },
 ];
 
-// Whole rupees, on screen, in the export and on the Total line alike: ONE rule.
-// The size rounds half away from zero and the sign goes back on, so an advance
-// of 1500.50 is 1501 everywhere (Math.round(-1500.5) is -1500, a rupee off the
-// paid 1501 on the same row). A figure that rounds to nothing is 0, never -0.
+// Whole rupees, on screen, in the export and on the Total line alike: ONE rule
+// (the Suppliers card reads the same helpers). The size rounds half away from
+// zero and the sign goes back on, so an advance of 1500.50 is 1501 everywhere
+// (Math.round(-1500.5) is -1500, a rupee off the paid 1501 on the same row).
+// A figure that rounds to nothing is 0, never -0.
 const whole = (n: number) => {
   const size = Math.round(Math.abs(n));
   return n < 0 && size !== 0 ? -size : size;
 };
-const rupees = (n: number) => `₹${whole(n).toLocaleString('en-IN')}`;
+export const rupees = (n: number) => `₹${whole(n).toLocaleString('en-IN')}`;
 /** Owed below zero is money already with the supplier (an advance). */
-const owedText = (n: number) => {
+export const owedText = (n: number) => {
   const w = whole(n);
   return w < 0 ? `${rupees(-w)} advance` : rupees(w);
 };
+/** To the paise, for the one place an exact figure is printed. */
+const paiseText = (n: number, owed: boolean) => {
+  const text = `₹${Math.abs(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  return n < 0 ? (owed ? `${text} advance` : `-${text}`) : text;
+};
 const thisMonth = () => (istDayString(new Date()) ?? '').slice(0, 7);
+/** 'YYYY-MM-DD' of a month's last day. */
+const lastDay = (month: string) => {
+  const [y, m] = month.split('-').map(Number);
+  return `${month}-${String(new Date(y, m, 0).getDate()).padStart(2, '0')}`;
+};
+/** The Total line: each column's rows AS SHOWN (whole rupees) added up, so a
+ *  reader's -- or a spreadsheet's -- sum of the rows is the Total printed. */
+const addRows = (rows: VendorRow[]) =>
+  Object.fromEntries(COLUMNS.map((c) => [c.key, rows.reduce((sum, r) => sum + whole(r[c.key]), 0)])) as Figures;
 
 export function PurchasesThisMonthSection() {
-  const { storeId } = usePurchaseShop();
+  const { storeId, canPick } = usePurchaseShop();
   const [month, setMonth] = useState(thisMonth);
 
   const q = useQuery<Report>({
@@ -61,12 +92,12 @@ export function PurchasesThisMonthSection() {
       })).data,
   });
   const rows = q.data?.vendors ?? [];
+  const shown = addRows(rows);
 
   // The CSV opens with the screen's numbers: the same rows, the same whole()
-  // for every figure and the Total line, and plain numbers (an advance shown
-  // as "Rs 1,501 advance" is -1501, summable).
+  // for every figure, the Total line that adds them, and plain numbers (an
+  // advance shown as "Rs 1,501 advance" is -1501, summable).
   const exportCsv = () => {
-    const totals = q.data?.totals;
     const line = (name: string, f: Figures, due = '', overdue = false) => ({
       vendor_name: name,
       ...Object.fromEntries(COLUMNS.map((c) => [c.key, whole(f[c.key])])),
@@ -76,7 +107,7 @@ export function PurchasesThisMonthSection() {
     exportToCSV(
       [
         ...rows.map((r) => line(r.vendor_name, r, r.next_due_date ?? '', !!r.next_due_overdue)),
-        ...(totals ? [line('Total', totals)] : []),
+        line('Total', shown),
       ],
       `purchases-${month}${storeId ? `-${storeId}` : ''}`,
       [
@@ -99,8 +130,15 @@ export function PurchasesThisMonthSection() {
           <input
             type="month"
             value={month}
-            // A cleared box reads this month again, never an endless spinner.
-            onChange={(e) => setMonth(e.target.value || thisMonth())}
+            // Nothing after this month: a month not yet begun has no figures,
+            // only today's balance under a later month's name.
+            max={thisMonth()}
+            // A cleared box (or a later month typed past the cap) reads this
+            // month again, never an endless spinner.
+            onChange={(e) => {
+              const picked = e.target.value;
+              setMonth(picked && picked <= thisMonth() ? picked : thisMonth());
+            }}
             className="text-sm border border-gray-300 rounded px-2 py-1.5 bg-white"
           />
         </label>
@@ -113,6 +151,8 @@ export function PurchasesThisMonthSection() {
           <Download className="w-4 h-4" /> Export CSV
         </button>
       </div>
+
+      {q.data && <Caption report={q.data} />}
 
       {q.isError ? (
         <div className="p-3 bg-red-50 border border-red-200 rounded-lg flex items-start gap-2">
@@ -159,7 +199,7 @@ export function PurchasesThisMonthSection() {
                 <td className="px-3 py-2">Total</td>
                 {COLUMNS.map((c) => (
                   <td key={c.key} className="px-3 py-2 text-right whitespace-nowrap">
-                    {c.key === 'owed' ? owedText(q.data!.totals.owed) : rupees(q.data!.totals[c.key])}
+                    {c.key === 'owed' ? owedText(shown.owed) : rupees(shown[c.key])}
                   </td>
                 ))}
                 <td />
@@ -168,12 +208,67 @@ export function PurchasesThisMonthSection() {
           </table>
         </div>
       )}
-      <p className="text-xs text-gray-500">
-        Billed, paid and owed are the supplier ledger's figures; owed is the balance at the end of the
-        month, and next due the earliest due date still owed then. In one shop's view, money paid without
-        naming a bill counts at the shop of that supplier's latest bill; an advance to a supplier who has
-        never billed shows under All stores only. Transfers between our own companies are not purchases.
-      </p>
+      {q.data && <Footnote report={q.data} shown={shown} canPick={canPick} />}
     </div>
+  );
+}
+
+/** Which shop and which day the figures are for, from the body itself. */
+function Caption({ report }: { report: Report }) {
+  return (
+    <p className="text-sm text-gray-600">
+      {report.store_id ? (
+        <>
+          Shop: <span className="font-medium text-gray-900"><PurchaseShopName storeId={report.store_id} /></span>
+        </>
+      ) : (
+        <span className="font-medium text-gray-900">All stores</span>
+      )}
+      {report.as_of && <> · Owed as at {formatDateIST(report.as_of)}</>}
+    </p>
+  );
+}
+
+/** What the figures are and what they leave out -- only what is true of THIS
+ *  body: its as-of day, its shop scope (no word of an All stores view to a
+ *  login that cannot open one), and the totals' rounding. */
+function Footnote({ report, shown, canPick }: { report: Report; shown: Figures; canPick: boolean }) {
+  const asOf = report.as_of;
+  const unpriced = report.unpriced_receipt_lines ?? 0;
+  const unassigned = report.unassigned_owed ?? 0;
+  // A Total adds the rows as shown; say so, and give the exact sum wherever
+  // the two part (paise on many rows add up to rupees).
+  const drift = COLUMNS.filter((c) => whole(report.totals[c.key]) !== shown[c.key]);
+  return (
+    <p className="text-xs text-gray-500">
+      Billed, paid and owed are the supplier ledger's figures; owed is the balance as at{' '}
+      {asOf ? formatDateIST(asOf) : 'the end of the month'}
+      {asOf && (asOf === lastDay(report.month) ? ' (the end of the month)' : ' (today: the month is not over)')}, and
+      next due the earliest due date still owed then. Received is valued at the order's price incl. GST (an order
+      line with no GST rate counts without GST, as its bill draft does), or at the receipt's own price for goods on
+      no order; receipts with no price count 0
+      {unpriced > 0 && ` (${unpriced} receipt line${unpriced === 1 ? '' : 's'} in this report)`}.{' '}
+      {report.store_id ? (
+        <>
+          Money paid without naming a bill counts at the shop it was recorded for, else at the shop of that
+          supplier's latest bill.
+          {canPick &&
+            ' A bill not yet placed in a shop (and the money paid against it), and money recorded with no shop for a supplier who has never billed, count under All stores only.'}
+        </>
+      ) : (
+        <>
+          A bill not yet placed in a shop (and the money paid against it), and money recorded with no shop for a
+          supplier who has never billed, count here under All stores only
+          {whole(unassigned) !== 0 ? `; in no shop: ${owedText(unassigned)}` : ''}.
+        </>
+      )}{' '}
+      Transfers between our own companies are not purchases. Figures are rounded to the rupee and each Total adds
+      the rows as shown
+      {drift.length > 0 &&
+        `; to the paise the ${drift.length === 1 ? 'total is' : 'totals are'} ${drift
+          .map((c) => `${c.label} ${paiseText(report.totals[c.key], c.key === 'owed')}`)
+          .join(', ')}`}
+      .
+    </p>
   );
 }

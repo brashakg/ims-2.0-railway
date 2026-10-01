@@ -132,13 +132,14 @@ describe('F56: the supplier card reads what we owe from the supplier ledger', ()
     expect(screen.getByText('Jharkhand Optical')).toBeInTheDocument();
   });
 
-  it('F56: an admin sees Outstanding Rs 1.4L -- the ledger -- not Rs 0.0L', async () => {
+  it('F56: an admin sees Outstanding Rs 1,44,456 -- the ledger, in whole rupees -- not Rs 0', async () => {
     await openAs('ADMIN');
-    await vi.waitFor(() => expect(figure('Outstanding')).toBe('₹1.4L'));
+    await vi.waitFor(() => expect(figure('Outstanding')).toBe('₹1,44,456'));
   });
 
-  it('F56/F57: a store manager, who cannot read supplier balances, is never shown a confident Rs 0.0L', async () => {
+  it('F56/F57: a store manager, who cannot read supplier balances, is never shown a confident Rs 0', async () => {
     await openAs('STORE_MANAGER');
+    expect(screen.queryAllByText('₹0')).toHaveLength(0);
     expect(screen.queryAllByText('₹0.0L')).toHaveLength(0);
   });
 
@@ -147,12 +148,12 @@ describe('F56: the supplier card reads what we owe from the supplier ledger', ()
     await new Promise((r) => setTimeout(r, 50));
     expect(get.mock.calls.filter(([url]) => url === '/finance/vendor-payments')).toHaveLength(0);
     expect(figure('Outstanding')).toBe('—');
-    expect(screen.queryByText('₹1.4L')).toBeNull();
+    expect(screen.queryByText('₹1,44,456')).toBeNull();
   });
 
   it('F63: the card reads the shop the Purchase filter shows', async () => {
     await openAs('ACCOUNTANT');
-    await vi.waitFor(() => expect(figure('Outstanding')).toBe('₹1.4L'));
+    await vi.waitFor(() => expect(figure('Outstanding')).toBe('₹1,44,456'));
     const params = get.mock.calls
       .filter(([url]) => url === '/finance/vendor-payments')
       .map(([, cfg]) => (cfg as { params?: Record<string, string> } | undefined)?.params?.store_id);

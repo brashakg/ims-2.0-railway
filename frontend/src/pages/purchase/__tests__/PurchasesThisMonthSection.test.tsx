@@ -146,7 +146,10 @@ describe('Purchases this month', () => {
     expect(within(small).getByText('₹1 advance')).toBeInTheDocument();
     const total = screen.getByText('Total').closest('tr')!;
     expect(within(total).getByText('₹501 advance')).toBeInTheDocument();
-    expect(within(total).getByText('₹3,001')).toBeInTheDocument();
+    // Paid rows read 1,501 + 1,500 + 1: the Total line adds them as shown
+    // (3,002). This pin used to say 3,001 -- the server's exact 3001.00 --
+    // which is the review's #7/#33: a Total that is not the sum of its rows.
+    expect(within(total).getByText('₹3,002')).toBeInTheDocument();
 
     // The real CSV text, from the real writer, for the rows the screen exported.
     fireEvent.click(screen.getByRole('button', { name: /export csv/i }));
@@ -159,7 +162,7 @@ describe('Purchases this month', () => {
       '"Advance Frames",0,0,0,1501,-1501,"",""',
       '"Half Rupee Lens",2501,2501,2501,1500,1001,"2026-10-05",""',
       '"Small Change Co",0,0,0,1,-1,"",""',
-      '"Total",2501,2501,2501,3001,-501,"",""',
+      '"Total",2501,2501,2501,3002,-501,"",""',
     ]);
 
     // Every figure cell on screen, Total line included, says the CSV's number
@@ -213,5 +216,139 @@ describe('Purchases this month', () => {
     await screen.findByText('Jharkhand Optical');
     expect(screen.queryByLabelText('Purchase shop')).toBeNull();
     expect(reportParams()[0].store_id).toBe('BV-PUN-01');
+  });
+});
+
+// ============================================================================
+// Review r1 (#7/#33, #8/#32, #9/#36, #4, #35): what the page says about its own
+// figures comes from the body -- the Total adds the rows as shown, owed is as
+// at the body's day, the shop is the body's, and the note names only views
+// this login can open.
+// ============================================================================
+
+const STORES = [
+  { store_id: 'BV-DHN-01', store_name: 'Dhanbad' },
+  { store_id: 'BV-PUN-01', store_name: 'WizOpt Pune' },
+];
+
+function serve(report: Record<string, unknown>) {
+  get.mockImplementation((url: string) =>
+    Promise.resolve({
+      data: url === '/stores' ? { stores: STORES } : url === '/vendors/purchases-this-month' ? report : {},
+    }),
+  );
+}
+
+const footnote = () => screen.getByText(/Billed, paid and owed are the supplier ledger/).textContent ?? '';
+const caption = () => screen.getByText(/Owed as at/).textContent ?? '';
+
+describe('Purchases this month says what its figures are', () => {
+  it('#7/#33: the Total line is the sum of the rows as shown, on screen and in the CSV', async () => {
+    roles = ['ADMIN'];
+    exportToCSV.mockClear();
+    serve({
+      month: '2026-09',
+      store_id: null,
+      as_of: '2026-09-30',
+      vendors: [
+        { vendor_id: 'a', vendor_name: 'Paise One', ordered: 0, received: 0, billed: 1000.6, paid: 0, owed: 1000.6, next_due_date: null },
+        { vendor_id: 'b', vendor_name: 'Paise Two', ordered: 0, received: 0, billed: 2000.6, paid: 0, owed: 2000.6, next_due_date: null },
+      ],
+      // The exact sums: 3001.20 each, which rounds to 3,001 -- a rupee short
+      // of the 1,001 + 2,001 a reader adds up.
+      totals: { ordered: 0, received: 0, billed: 3001.2, paid: 0, owed: 3001.2 },
+      unassigned_owed: 0,
+    });
+    open();
+    await screen.findByText('Paise One');
+    const total = screen.getByText('Total').closest('tr')!;
+    expect(within(total).getAllByText('₹3,002')).toHaveLength(2);
+    expect(within(total).queryByText('₹3,001')).toBeNull();
+    // ...and says what the exact sum is, so it can be met on another screen.
+    expect(footnote()).toContain('each Total adds the rows as shown');
+    expect(footnote()).toContain('to the paise the totals are Billed ₹3,001.20, Owed ₹3,001.20');
+
+    fireEvent.click(screen.getByRole('button', { name: /export csv/i }));
+    const [rows] = exportToCSV.mock.calls[0];
+    const sum = (k: string) =>
+      rows.filter((r: { vendor_name: string }) => r.vendor_name !== 'Total').reduce((s: number, r: Record<string, number>) => s + r[k], 0);
+    const totalLine = rows.find((r: { vendor_name: string }) => r.vendor_name === 'Total');
+    expect([totalLine.billed, totalLine.owed]).toEqual([3002, 3002]);
+    expect([sum('billed'), sum('owed')]).toEqual([3002, 3002]);
+  });
+
+  it('#8/#32: owed is as at the body\'s day -- today for the month we are in, never "the end of the month"', async () => {
+    roles = ['ADMIN'];
+    serve({ ...REPORT, month: '2026-10', store_id: null, as_of: '2026-10-01', unassigned_owed: 0 });
+    open();
+    await screen.findByText('Jharkhand Optical');
+    expect(caption()).toContain('Owed as at 01 Oct 2026');
+    expect(footnote()).toContain('owed is the balance as at 01 Oct 2026 (today: the month is not over)');
+    expect(footnote()).not.toContain('end of the month');
+  });
+
+  it('#8: a month that is over is as at its last day, and says so', async () => {
+    roles = ['ADMIN'];
+    serve({ ...REPORT, store_id: null, as_of: '2026-09-30', unassigned_owed: 0 });
+    open();
+    await screen.findByText('Jharkhand Optical');
+    // en-IN spells September "Sept" in some ICU builds.
+    expect(caption()).toMatch(/Owed as at 30 Sept? 2026/);
+    expect(footnote()).toMatch(/as at 30 Sept? 2026 \(the end of the month\)/);
+  });
+
+  it('#32: the month box stops at this month, and a later month typed in reads this month', async () => {
+    roles = ['ADMIN'];
+    serve({ ...REPORT, store_id: null, as_of: '2026-09-30' });
+    open();
+    await screen.findByText('Jharkhand Optical');
+    const box = screen.getByLabelText('Month') as HTMLInputElement;
+    const now = box.value;
+    expect(now).toMatch(/^\d{4}-\d{2}$/);
+    expect(box.max).toBe(now);
+    const later = `${Number(now.slice(0, 4)) + 1}${now.slice(4)}`;
+    fireEvent.change(box, { target: { value: later } });
+    await waitFor(() => expect(box.value).toBe(now));
+    expect(reportParams().some((p) => p.month === later)).toBe(false);
+  });
+
+  it('#9/#36: the note says how Received is valued and counts the receipt lines with no price', async () => {
+    roles = ['ADMIN'];
+    serve({ ...REPORT, store_id: null, as_of: '2026-09-30', unpriced_receipt_lines: 2 });
+    open();
+    await screen.findByText('Jharkhand Optical');
+    expect(footnote()).toContain("or at the receipt's own price for goods on no order");
+    expect(footnote()).toContain('an order line with no GST rate counts without GST, as its bill draft does');
+    expect(footnote()).toContain('receipts with no price count 0 (2 receipt lines in this report)');
+  });
+
+  it('#4: All stores names the money that is in no shop', async () => {
+    roles = ['ADMIN'];
+    serve({ ...REPORT, store_id: null, as_of: '2026-09-30', unassigned_owed: -1000 });
+    open();
+    await screen.findByText('Jharkhand Optical');
+    expect(caption()).toMatch(/^All stores/);
+    expect(footnote()).toContain('A bill not yet placed in a shop (and the money paid against it)');
+    expect(footnote()).toContain('count here under All stores only; in no shop: ₹1,000 advance.');
+  });
+
+  it('#35: an accountant is told the shop the figures cover, and never of an All stores view', async () => {
+    roles = ['ACCOUNTANT'];
+    serve({ ...REPORT, store_id: 'BV-PUN-01', as_of: '2026-09-30', unassigned_owed: null });
+    open();
+    await screen.findByText('Jharkhand Optical');
+    await waitFor(() => expect(caption()).toContain('Shop: WizOpt Pune'));
+    expect(screen.queryByLabelText('Purchase shop')).toBeNull();
+    expect(footnote()).not.toMatch(/All stores/i);
+    expect(footnote()).toContain('counts at the shop it was recorded for');
+  });
+
+  it('#35: an admin narrowed to one shop is told which, and where the rest is counted', async () => {
+    roles = ['ADMIN'];
+    serve({ ...REPORT, store_id: 'BV-DHN-01', as_of: '2026-09-30', unassigned_owed: null });
+    open();
+    await screen.findByText('Jharkhand Optical');
+    await waitFor(() => expect(caption()).toContain('Shop: Dhanbad'));
+    expect(footnote()).toContain('count under All stores only.');
   });
 });
