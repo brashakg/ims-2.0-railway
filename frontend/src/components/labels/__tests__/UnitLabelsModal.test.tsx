@@ -119,6 +119,23 @@ describe('the units view (from the stock ledger)', () => {
     expect(printedBarcodes()).toEqual(['BV--00000001']);
   });
 
+  it('labels every unit the ledger counts: 7 on the shelf + 2 reserved = 9 labels', async () => {
+    // The ledger's "9 units" (stock 7 + reserved 2) opens this dialog; a
+    // reserved piece still stands on the shelf, so it gets a label too.
+    const shelf = Array.from({ length: 7 }, (_, i) => unit(i + 1));
+    const reserved = [unit(8, { status: 'RESERVED' }), unit(9, { status: 'RESERVED' })];
+    apiMock.getUnits.mockResolvedValue({ units: [...shelf, ...reserved], total: 9 });
+    render(<UnitLabelsModal productId="P1" title="x" onClose={() => {}} />);
+    const held = (await screen.findByText('BV--00000008')).closest('tr')!;
+    expect(within(held).getByText('Reserved')).toBeInTheDocument();
+    expect(within(held).getByRole('checkbox')).toBeEnabled();
+    expect(within(held).getByRole('button', { name: /reprint label/i })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('checkbox', { name: /select every unit/i }));
+    fireEvent.click(screen.getByRole('button', { name: /print 9 labels/i }));
+    expect(printedBarcodes()).toHaveLength(9);
+    await waitFor(() => expect(apiMock.markBarcodePrinted).toHaveBeenCalledWith([...shelf, ...reserved].map((u) => u.stock_id)));
+  });
+
   it('shows cost only when the server sent it', async () => {
     apiMock.getUnits.mockResolvedValue({ units: [unit(1, { cost_price: 4200 })], total: 1 });
     render(<UnitLabelsModal productId="P1" title="x" onClose={() => {}} />);
