@@ -272,12 +272,15 @@ _VARIANTS_PER_CALL = 250
 # CREATE-side companion: productCreate only ever materialises ONE variant, so
 # any REMAINING IMS variant (a second colour / size) has to be created. Same
 # ProductVariantsBulkInput shape, plus optionValues to place it on the option
-# grid. Returns the new gids (and each variant's inventoryItem gid -- the
-# oversell-guard stock target) so they can be written back for idempotency.
+# grid -- and tracked + the listing's inventoryPolicy, so the variant is BORN
+# tracked in this one mutation. Returns the new gids (and each variant's
+# inventoryItem gid -- the oversell-guard stock target) so they can be written
+# back for idempotency, plus `tracked` / `inventoryPolicy`: Shopify's own word
+# that the new variant is tracked, read back as the confirmation.
 _VARIANTS_BULK_CREATE = """
 mutation imsVariantsBulkCreate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
   productVariantsBulkCreate(productId: $productId, variants: $variants) {
-    productVariants { id title selectedOptions { name value } inventoryItem { id } }
+    productVariants { id title selectedOptions { name value } inventoryPolicy inventoryItem { id tracked } }
     userErrors { field message }
   }
 }

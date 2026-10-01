@@ -25,6 +25,7 @@ def _writeback_product(
     inventory_item_gid: Optional[str] = None,
     status: Optional[str] = None,
     tags_sent: Optional[List[str]] = None,
+    by_hand: bool = True,
 ) -> None:
     """Persist ecom.shopify_product_id (+ stamps) on the catalog_products doc and
     clear the dirty flag, for idempotent re-push.
@@ -93,7 +94,9 @@ def _writeback_product(
             # sweep to silently re-list mid-fix. Stamped here (and cleared by a
             # successful publish, the only writer of PUBLISHED) so the SWEEP can
             # skip it until a human presses that one product explicitly.
-            if status == "DRAFT":
+            # ``by_hand=False`` is the tracking guard's take-down: not a
+            # human's, so no marker -- the row stays in every queue.
+            if status == "DRAFT" and by_hand:
                 ecom["taken_down_at"] = _now()
             elif status == "PUBLISHED":
                 ecom.pop("taken_down_at", None)

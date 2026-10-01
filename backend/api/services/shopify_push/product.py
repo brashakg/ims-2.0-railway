@@ -45,7 +45,7 @@ from .publish import _publish_to_online_store
 from .inventory import (
     STOCK_TRACKING_FAILED,
     _set_variant_tracking,
-    listing_visible,
+    listing_already_live,
     plan_product_stock,
     push_skus_stock,
     sync_product_stock,
@@ -234,8 +234,26 @@ async def push_product(
 
     query = _PRODUCT_UPDATE if existing_gid else _PRODUCT_CREATE
     field_name = "productUpdate" if existing_gid else "productCreate"
+    # THE ACTIVE FLIP IS PART OF THE PUBLISH (#1141 fix-six recheck 2,
+    # oversell). An update sent ACTIVE up front, and a Draft keeps its Online
+    # Store publication -- so re-pressing a listing that had been taken down
+    # (by hand, by a retire, or by the tracking guard) put it straight back on
+    # sale BEFORE the photo, price and tracking gates below had run: under a
+    # still-refused tracking call it went live UNTRACKED, and the guard (which
+    # asks IMS's record, DRAFT) could not take it down again. A listing IMS
+    # does not record PUBLISHED is written HELD at Draft; the publish step sets
+    # it Active only after every gate has passed. A CREATE stays ACTIVE: a new
+    # product has no publication until that same gated publish step.
+    #
+    # HELD UNTIL TRACKING IS CONFIRMED, not only until IMS records PUBLISHED
+    # (recheck 3): the guard's take-down reports success once Shopify took the
+    # Draft, but its IMS write-back is fail-soft -- lost on a Mongo blip, IMS
+    # still said PUBLISHED and the next press sent ACTIVE before the tracking
+    # gate ran. A listing whose baseline records tracking as unconfirmed
+    # (``listing_already_live`` False) is held too.
+    held = bool(existing_gid) and payload.get("status") == "ACTIVE" and not listing_already_live(product)
     try:
-        body = await _graphql(db, query, {"input": payload})
+        body = await _graphql(db, query, {"input": {**payload, "status": "DRAFT"} if held else payload})
         err = _user_errors(body, field_name)
         if err:
             return PushResult(
@@ -368,7 +386,10 @@ async def push_product(
                 new_gid,
                 extra_variant_gids=[n.get("id") for n in variant_nodes if isinstance(n, dict)]
                 + list((seed_summary or {}).get("variant_gids") or []),
-                minted_variant_gids=(seed_summary or {}).get("variant_gids"),
+                # Only what seeding put on Shopify WITHOUT confirming its
+                # tracking: a size born tracked (the create carried tracked +
+                # policy and Shopify's answer said so) needs nothing more.
+                minted_variant_gids=(seed_summary or {}).get("unconfirmed_variant_gids"),
             )
         # SALES-CHANNEL PUBLISH -- the third shut door. An ACTIVE product
         # published to NO channel is invisible on bettervision.in. This used to
@@ -399,23 +420,33 @@ async def push_product(
         #     so the toast, the audit row, the tally and the sync page all say
         #     so, and the row stays queued for the retry.
         #   * ...and ONLY the first publish (recheck round 1). An already-live
-        #     listing keeps the tracking its first publish confirmed whatever a
+        #     listing whose every variant's tracking was CONFIRMED (its first
+        #     publish, or born tracked) keeps it whatever a
         #     refused re-send says (a refused bulk-update changes nothing on
         #     Shopify), so it is reported live with a stock warning -- never
         #     "NOT made visible" beside a catalog chip that reads "Live".
-        #     "First" is asked of the PUBLISH (`listing_visible`), not of the
-        #     baseline's tracked flag (recheck round 3): a size minted
-        #     untracked onto a live listing sets that flag False, and the
-        #     "press again" its own line asks for was then withheld as a first
-        #     publish -- "NOT made visible" about a listing that IS visible
-        #     with an untracked size, the opposite of the risk. Withholding an
-        #     idempotent re-publish un-publishes nothing; the truthful result
-        #     is ok + the code + the WITHOUT LIMIT line.
-        tracking_ok = (
-            (stock_summary or {}).get("code") != STOCK_TRACKING_FAILED
-            or listing_visible(product)
-        )
+        #   * ...and a variant whose tracking NOTHING confirmed on a listing
+        #     that is ALREADY visible (#1141 fix-six recheck, oversell):
+        #     withholding an idempotent re-publish un-publishes nothing, so the
+        #     stock pass TAKES THE LISTING DOWN (sync_product_stock ->
+        #     push_product_delist) and says so -- and when that take-down
+        #     FAILED the listing is live, so nothing is withheld and it is
+        #     reported live with the STILL LIVE line (recheck 2). Either way
+        #     the verdict is the stock pass's own `withhold_publish`, never
+        #     re-derived here.
+        tracking_ok = not (stock_summary or {}).get("withhold_publish")
         pub_summary = None
+        # A HELD press that withholds its publish has put the listing at Draft
+        # on Shopify: OFF the website, whatever it was before. IMS's record can
+        # lag Shopify (a lost PUBLISHED write-back, an activation in Shopify
+        # admin), so a listing that WAS showing is taken off here -- and the
+        # withheld line said only "NOT made visible" (recheck 3). Said now.
+        held_line = (
+            " -- the listing is held at Draft on Shopify, so it is OFF the website "
+            "(taken off, if it was showing) until a press passes every gate"
+            if held
+            else ""
+        )
         if new_gid and payload.get("status") == "ACTIVE":
             if seed_summary is not None:
                 priced_ok = (
@@ -430,6 +461,18 @@ async def push_product(
                 priced_ok = _has_publishable_price(product, variants)
             if priced_ok and photo_on_shopify and tracking_ok:
                 pub_summary = await _publish_to_online_store(db, new_gid)
+                if pub_summary.get("published") and held:
+                    # Every gate passed: NOW Active. Published first, so a
+                    # refused flip leaves a Draft (invisible), never the
+                    # reverse; and a Draft may be published (Shopify shows it
+                    # only once it is Active).
+                    err = await _set_product_status(db, new_gid, "ACTIVE")
+                    if err:
+                        pub_summary = {
+                            **pub_summary,
+                            "published": False,
+                            "error": f"publish withheld: the listing could not be set Active ({err})" + held_line,
+                        }
                 if pub_summary.get("published") and pid:
                     # IMS must agree with the storefront (see _writeback_product
                     # `status`): the DRAFT/PUBLISHED cards and every
@@ -441,12 +484,12 @@ async def push_product(
                 # grey box the rule exists to prevent.
                 pub_summary = {
                     "published": False,
-                    "error": "publish withheld: the photograph did not reach Shopify",
+                    "error": "publish withheld: the photograph did not reach Shopify" + held_line,
                 }
             elif not priced_ok:
                 pub_summary = {
                     "published": False,
-                    "error": "publish withheld: variant unpriced or seeding failed",
+                    "error": "publish withheld: variant unpriced or seeding failed" + held_line,
                 }
             else:
                 # Priced and photographed, but tracking + DENY did not stick:
@@ -593,7 +636,20 @@ async def push_product(
         )
 
 
-async def push_product_delist(db, product: Dict[str, Any]) -> PushResult:
+async def _set_product_status(db, product_gid: str, status: str) -> Optional[str]:
+    """productUpdate {id, status}: the error text, or None when Shopify took
+    it. Never raises. The one status write shared by the take-down (DRAFT) and
+    the publish step's held flip (ACTIVE)."""
+    try:
+        body = await _graphql(
+            db, _PRODUCT_UPDATE, {"input": {"id": _as_shopify_gid(product_gid, "Product"), "status": status}}
+        )
+        return _user_errors(body, "productUpdate") or None
+    except Exception as e:  # noqa: BLE001 -- fail-soft, never propagate
+        return str(e)
+
+
+async def push_product_delist(db, product: Dict[str, Any], *, requeue: bool = False) -> PushResult:
     """DELIST a product from the Shopify storefront: set its Shopify status to
     DRAFT (unpublished / not sellable). Used by the SUPERADMIN "block collection
     from online" cutover to take an already-synced, now-blocked product OFF the
@@ -626,7 +682,12 @@ async def push_product_delist(db, product: Dict[str, Any]) -> PushResult:
 
     The gid is deliberately re-written unchanged: _writeback_product is
     set-only for the mapping, so the take-down can never lose the Shopify id
-    (losing it would make the next push CREATE A DUPLICATE live product)."""
+    (losing it would make the next push CREATE A DUPLICATE live product).
+
+    ``requeue=True`` is the tracking guard's take-down (inventory.
+    ``_take_down_untracked``), not a human's: no ``taken_down_at`` and the row
+    stays QUEUED, so any press -- held at Draft until its gates pass --
+    retries it (#1141 fix-six recheck 2)."""
     pid = product.get("id") or product.get("product_id")
     ecom = product.get("ecom") or {}
     existing_gid = ecom.get("shopify_product_id")
@@ -679,32 +740,8 @@ async def push_product_delist(db, product: Dict[str, Any]) -> PushResult:
             reason=reason,
         )
 
-    try:
-        body = await _graphql(db, _PRODUCT_UPDATE, {"input": payload})
-        err = _user_errors(body, "productUpdate")
-        if err:
-            return PushResult(
-                mode=MODE_LIVE,
-                entity="product",
-                action="delist",
-                target_id=pid,
-                ok=False,
-                shopify_id=existing_gid,
-                payload=payload,
-                error=err,
-            )
-        if pid:
-            _writeback_product(db, pid, existing_gid, status="DRAFT")
-        return PushResult(
-            mode=MODE_LIVE,
-            entity="product",
-            action="delist",
-            target_id=pid,
-            ok=True,
-            shopify_id=existing_gid,
-            payload=payload,
-        )
-    except Exception as e:  # noqa: BLE001 -- fail-soft, never propagate
+    err = await _set_product_status(db, existing_gid, "DRAFT")
+    if err:
         return PushResult(
             mode=MODE_LIVE,
             entity="product",
@@ -713,8 +750,21 @@ async def push_product_delist(db, product: Dict[str, Any]) -> PushResult:
             ok=False,
             shopify_id=existing_gid,
             payload=payload,
-            error=str(e),
+            error=err,
         )
+    if pid:
+        _writeback_product(db, pid, existing_gid, status="DRAFT", by_hand=not requeue)
+        if requeue:
+            _requeue_unpublished(db, pid)
+    return PushResult(
+        mode=MODE_LIVE,
+        entity="product",
+        action="delist",
+        target_id=pid,
+        ok=True,
+        shopify_id=existing_gid,
+        payload=payload,
+    )
 
 
 

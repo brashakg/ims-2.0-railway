@@ -645,20 +645,25 @@ def _name_baseline_strays(
     from .shopify_push.inventory import (
         STOCK_BASELINE_STRAY,
         _stray_sku_error,
+        _strays_unread_error,
         stray_baseline_skus,
     )
 
     said = set(named)
-    strays = [s for s in stray_baseline_skus(db, skus) if s not in said]
+    try:
+        found = stray_baseline_skus(db, skus)
+    except Exception as exc:  # noqa: BLE001 -- the sale path never raises; it names
+        # STRICT like its neighbour (#1141 fix-six recheck): a dead scan is not
+        # "nothing stray". The writer's own words, and the raise names WHICH
+        # read died -- a hard-coded "(the last-sent stock read died)" blamed
+        # that read for a dead size-row read too (recheck 2).
+        _say_unknown(summary, _strays_unread_error(skus, exc))
+        return
+    strays = [s for s in found if s not in said]
     if not strays:
         return
     summary["stray_skus"] = strays
-    line = _stray_sku_error(strays)
-    if summary.get("code"):
-        summary["error"] = f"{summary.get('error') or summary['code']} -- ALSO: {line}"
-    else:
-        summary["code"] = STOCK_BASELINE_STRAY
-        summary["error"] = line
+    _say(summary, STOCK_BASELINE_STRAY, _stray_sku_error(strays))
 
 
 def _alert_unmapped_online(db, skus: List[str], summary: Dict[str, Any]) -> None:
@@ -686,13 +691,25 @@ def _alert_unmapped_online(db, skus: List[str], summary: Dict[str, Any]) -> None
     be ``logger.debug`` + return, with the catalog lookups inside
     ``online_status_for_skus`` fail-soft to {} besides, so a dead catalog read
     read as "not sellable online": no row, no P1 task, the storefront kept
-    the pre-sale number with every screen green."""
+    the pre-sale number with every screen green.
+
+    IN ITS OWN WORDS (#1141 fix-six recheck): it used to borrow
+    ``_target_error`` -- "the inventory-item mapping could not be read --
+    nothing written" -- which names the wrong read, and on the targets branch
+    runs AFTER the writer, so it said "nothing written" over a write Shopify
+    accepted."""
     try:
         from . import online_catalog
 
         statuses = online_catalog.online_status_for_skus(db, skus, strict=True)
     except Exception as exc:  # noqa: BLE001
-        _say_unknown(summary, exc)
+        _say_unknown(
+            summary,
+            f"whether {', '.join(skus[:5])} is sellable on the website could not be "
+            f"read (the online-status read died) -- a live SKU with no Shopify "
+            f"inventory item, whose sale the website never hears about, is not "
+            f"ruled out: {exc}",
+        )
         return
     online_unmapped = sorted(
         s for s in skus if (statuses.get(s) or {}).get("sellable_online")
@@ -851,23 +868,38 @@ def _unknown_run(db, summary: Dict[str, Any], exc: Exception) -> Dict[str, Any]:
     pre-move number until the next tick with every screen green; a second
     spelling of the row (recheck round 2) is how two doors come to answer the
     same failure differently. Never raises."""
-    _say_unknown(summary, exc)
+    from .shopify_push.inventory import _target_error
+
+    _say_unknown(summary, _target_error(exc))
     _record_run(db, summary)
     return summary
 
 
-def _say_unknown(summary: Dict[str, Any], exc: Exception) -> None:
-    """Stamp THE unknown verdict on a summary, in the writer's words. The dead
-    read leads (as a refusal Shopify answered leads on the writer); whatever
-    the summary already said rides under it as an ' -- ALSO:' line, never
-    lost. Split from ``_unknown_run`` for a guard that runs inside a door
-    which records its own row (``_alert_unmapped_online``): one row, not two."""
-    from .shopify_push.inventory import STOCK_ONHAND_UNKNOWN, _target_error
+def _say_unknown(summary: Dict[str, Any], line: str) -> None:
+    """Stamp THE unknown verdict (STOCK_ONHAND_UNKNOWN) on a summary; ``line``
+    names the read that died. Split from ``_unknown_run`` for a guard that
+    runs inside a door which records its own row (``_alert_unmapped_online``,
+    ``_name_baseline_strays``): one row, not two."""
+    from .shopify_push.inventory import STOCK_ONHAND_UNKNOWN
 
-    prior = summary.get("error")
-    summary["code"] = STOCK_ONHAND_UNKNOWN
-    summary["error"] = _target_error(exc) + (f" -- ALSO: {prior}" if prior else "")
+    _say(summary, STOCK_ONHAND_UNKNOWN, line)
     logger.warning("[STOCK_WRITEBACK] %s", summary["error"])
+
+
+def _say(summary: Dict[str, Any], code: str, line: str) -> None:
+    """Add one fact to a door's row, THE one way: a code already on the row
+    keeps the lead and the new line rides under it (' -- ALSO:'); else it
+    takes the code. One rule for every fact the door finds after the writer
+    (#1141 recheck 3): a stray that was FOUND kept the writer's code while a
+    stray check that DIED overwrote it, so a mixed basket's untargeted SKU
+    flipped the writer's SHOPIFY_LOCATION_UNMAPPED to STOCK_ONHAND_UNKNOWN --
+    two rankings of one question in one door."""
+    if summary.get("code"):
+        summary["error"] = f"{summary.get('error') or summary['code']} -- ALSO: {line}"
+    else:
+        prior = summary.get("error")
+        summary["code"] = code
+        summary["error"] = line + (f" -- ALSO: {prior}" if prior else "")
 
 
 def _dispatch(coro) -> None:

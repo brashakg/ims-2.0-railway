@@ -406,7 +406,7 @@ def _store_on_hand_units(db, store_id: str) -> Optional[str]:
     return f"{n} on-hand stock unit(s)" if n else None
 
 
-async def _release_location_or_refuse(db, store_id: str, location_gid) -> None:
+async def _release_location_or_refuse(db, store_id: str, location_gid) -> Optional[str]:
     """THE door behind every way a shop stops owning a Shopify location: a
     remap, a clear, a DEACTIVATION and a soft DELETE. Zero the units that
     location is advertising, re-arm the baseline, and refuse the save if that
@@ -418,14 +418,22 @@ async def _release_location_or_refuse(db, store_id: str, location_gid) -> None:
     fail-soft write-back never landing left the shelf empty, the guard happy,
     and 3 on the website. The save then dropped the shop out of
     ``physical_stores``, so its gid left the store map and ``_mapped`` never
-    targeted that location again: the units stayed on sale indefinitely."""
+    targeted that location again: the units stayed on sale indefinitely.
+
+    Returns the door's NOTE on a release that went through with something to
+    say (a zeroing refused at a location that holds no stock), else None. It
+    used to be dropped: the save read normal and no log line said what
+    Shopify had refused (#1141 recheck 3). Logged here, and the callers put
+    it on the response as ``warning``."""
     if db is None or not location_gid:
-        return
+        return None
     from ..services import shopify_push as _push
 
     released = await _push.release_store_location(db, store_id, location_gid)
     if released.get("ok"):
-        return
+        if released.get("error"):
+            logger.warning("[STORES] %s released with a note: %s", store_id, released["error"])
+        return released.get("error")
     if released.get("code") == _push.STOCK_ONHAND_UNKNOWN:
         # STRICT: an unknown shelf is never "holds nothing".
         raise _stock_unreadable(
@@ -976,6 +984,7 @@ async def update_store(
         if existing is None:
             raise HTTPException(status_code=404, detail="Store not found")
 
+        warning: Optional[str] = None
         update_data = store.model_dump(exclude_unset=True)
         db = _get_db()
         release_old = _validate_store_payload(
@@ -989,7 +998,7 @@ async def update_store(
             # pass. The save only happens if that succeeded, so a failure
             # leaves the mapping as it was instead of stranding numbers on an
             # orphaned location -- or saving a gid the diff will never send.
-            await _release_location_or_refuse(db, store_id, release_old)
+            warning = await _release_location_or_refuse(db, store_id, release_old)
         if update_data.get("shopify_location_id"):
             update_data["shopify_location_name"] = (
                 await _shopify_location_name(db, update_data["shopify_location_id"])
@@ -1012,13 +1021,13 @@ async def update_store(
             # Shopify location leaves the store map and nothing writes it
             # again. Release it first -- the gid the doc will carry AFTER this
             # write, so a remap+deactivate in one PUT releases both.
-            await _release_location_or_refuse(
+            warning = await _release_location_or_refuse(
                 db,
                 store_id,
                 update_data.get("shopify_location_id")
                 if "shopify_location_id" in update_data
                 else existing.get("shopify_location_id"),
-            )
+            ) or warning
 
         # Re-derive the store GSTIN whenever its entity or state changes, so the
         # store always bills under the correct registration.
@@ -1034,7 +1043,7 @@ async def update_store(
         update_data["updated_by"] = current_user.get("user_id")
 
         if repo.update(store_id, update_data):
-            return {"store_id": store_id, "message": "Store updated"}
+            return {"store_id": store_id, "message": "Store updated", **({"warning": warning} if warning else {})}
 
         raise HTTPException(status_code=500, detail="Failed to update store")
 
@@ -1068,7 +1077,7 @@ async def delete_store(store_id: str, current_user: dict = Depends(get_current_u
     # Same door as the PUT: a soft delete also takes the shop out of
     # physical_stores, so whatever its location is advertising must come down
     # first or it stays on sale for ever.
-    await _release_location_or_refuse(db, store_id, existing.get("shopify_location_id"))
+    warning = await _release_location_or_refuse(db, store_id, existing.get("shopify_location_id"))
     repo.update(
         store_id,
         {
@@ -1077,7 +1086,7 @@ async def delete_store(store_id: str, current_user: dict = Depends(get_current_u
             "deactivated_by": current_user.get("user_id"),
         },
     )
-    return {"store_id": store_id, "message": "Store deactivated"}
+    return {"store_id": store_id, "message": "Store deactivated", **({"warning": warning} if warning else {})}
 
 
 @router.post("/{store_id}/categories/{category}")

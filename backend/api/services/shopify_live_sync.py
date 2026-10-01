@@ -545,6 +545,7 @@ async def sync_live_products(
         logger.warning("[LIVE-SYNC] stock pass failed: %s", e)
         stock = {"ok": False, "error": str(e), "payload": {}}
     stock_payload = stock.get("payload") or {}
+    counted = "changed" in stock_payload
 
     summary = {
         "finished_at": _utc_now(),
@@ -563,11 +564,20 @@ async def sync_live_products(
         "limit": limit,
         "limit_reached": batch["limit_reached"],
         "failures": failures,
+        # A pass that stopped before counting (a dead catalogue / shop-list
+        # read) carries no counts: None, never 0 (recheck 2) -- unknown is
+        # never printed as "0 changed". `taken_down` names every listing the
+        # tracking guard took off the website this run -- in the PRODUCT pass
+        # too (recheck 3): a dirty listing's press runs the same guard, and
+        # the stock pass then sees IMS DRAFT and takes nothing down again.
         "stock": {
             "ok": bool(stock.get("ok")),
-            "changed": stock_payload.get("changed", 0),
-            "synced": stock_payload.get("synced", 0),
-            "failed": stock_payload.get("failed", 0),
+            "changed": stock_payload.get("changed"),
+            "synced": stock_payload.get("synced", 0 if counted else None),
+            "failed": stock_payload.get("failed", 0 if counted else None),
+            "taken_down": [
+                str(r.get("target_id")) for r in results if (r.get("stock") or {}).get("taken_down")
+            ] + list(stock_payload.get("taken_down") or []),
             "code": stock.get("code"),
             "error": stock.get("error"),
         },

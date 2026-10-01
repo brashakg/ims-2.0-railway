@@ -303,8 +303,14 @@ def test_an_already_mapped_product_is_published_too(db, shopify):
 
     _run(shopify_push.push_product(db, doc, []))
 
-    assert _input_of(shopify, "imsProductUpdate")["status"] == "ACTIVE"
+    # Held at Draft (IMS does not record it PUBLISHED) until every gate has
+    # passed, then published and set Active -- in that order (#1141 recheck 2).
+    updates = [c["variables"]["input"] for c in shopify.calls_of("imsProductUpdate")]
+    assert [u["status"] for u in updates] == ["DRAFT", "ACTIVE"], updates
+    assert updates[-1] == {"id": "gid://shopify/Product/900", "status": "ACTIVE"}
     assert len(shopify.calls_of("imsPublishablePublish")) == 1
+    order = [op for op in shopify.ops() if op in ("imsPublishablePublish", "imsProductUpdate")]
+    assert order == ["imsProductUpdate", "imsPublishablePublish", "imsProductUpdate"], "published BEFORE it goes Active"
 
 
 def test_ims_records_the_product_as_published(db, shopify):

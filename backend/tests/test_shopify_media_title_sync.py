@@ -571,7 +571,7 @@ def test_live_sync_runs_the_stock_pass_once_after_the_products(world, monkeypatc
 
     assert seen == [1], "the stock pass must run exactly once, after the product pass"
     assert run["stock"] == {
-        "ok": True, "changed": 3, "synced": 2, "failed": 1, "code": None, "error": None,
+        "ok": True, "changed": 3, "synced": 2, "failed": 1, "taken_down": [], "code": None, "error": None,
     }
     stored = db["online_sync_runs"].docs[0]
     assert stored["stock"]["synced"] == 2

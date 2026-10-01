@@ -517,7 +517,9 @@ def test_live_create_creates_the_remaining_variants_and_writes_back_each_gid(
     assert created_call["variables"]["variants"][0]["optionValues"] == [
         {"optionName": "Color", "name": "Gold"}
     ]
-    assert created_call["variables"]["variants"][0]["inventoryItem"] == {"sku": "S-GLD"}
+    # Born tracked + DENY in the create itself (#1141 fix-six recheck).
+    assert created_call["variables"]["variants"][0]["inventoryItem"] == {"sku": "S-GLD", "tracked": True}
+    assert created_call["variables"]["variants"][0]["inventoryPolicy"] == "DENY"
 
     assert (
         db["catalog_variants"].find_one({"sku": "S-BLK"})["shopify_variant_id"]
@@ -1290,7 +1292,7 @@ def test_mutations_select_the_inventory_item_id():
         shopify_push._PRODUCT_UPDATE,
         shopify_push._VARIANTS_BULK_CREATE,
     ):
-        assert "inventoryItem { id }" in q
+        assert "inventoryItem { id" in q
 
 
 def test_live_create_stamps_the_inventory_item_on_a_no_variant_product(monkeypatch):
