@@ -292,8 +292,20 @@ describe('unsaved edits are guarded', () => {
       document.body.appendChild(a);
       return a;
     });
+    // links to ANOTHER page that still must not prompt: new tab, download
+    const blank = document.createElement('a');
+    blank.href = '/settings/roles'; blank.target = '_blank'; blank.textContent = 'blank';
+    const dl = document.createElement('a');
+    dl.href = '/settings/roles'; dl.setAttribute('download', 'x.csv'); dl.textContent = 'dl';
+    const other = document.createElement('a');
+    other.href = '/settings/roles'; other.textContent = 'other';
+    for (const a of [blank, dl, other]) { document.body.appendChild(a); links.push(a); }
     // jsdom does not navigate on click; a prevented default would show a prompt.
-    for (const a of links) fireEvent.click(a);
+    for (const a of [...links.slice(0, 3), blank, dl]) fireEvent.click(a);
+    // ctrl / cmd / shift / alt-click and middle-click open elsewhere, no prompt
+    for (const init of [{ ctrlKey: true }, { metaKey: true }, { shiftKey: true }, { altKey: true }, { button: 1 }]) {
+      fireEvent.click(other, init);
+    }
     expect(confirmSpy).not.toHaveBeenCalled();
     // control: a link to another page still prompts
     fireEvent.click(screen.getByRole('link', { name: /^Role Permissions$/ }));
