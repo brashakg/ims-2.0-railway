@@ -20,6 +20,9 @@ import {
 } from 'lucide-react';
 import type { SettingsTab } from './settingsTypes';
 
+// A row whose role list is exactly ['SUPERADMIN'] is enforced STRICTLY by
+// settingsRoutes (a SuperadminOnly wrapper): ProtectedRoute/hasRole alone would
+// let ADMIN through by URL even though the rail hides the row.
 export const SETTINGS_SECTIONS = [
   { id: 'profile' as SettingsTab, label: 'My Profile', icon: User, description: 'Account settings and preferences', role: ['ALL'] },
   { id: 'business' as SettingsTab, label: 'Business Profile', icon: Building2, description: 'Company info and branding', role: ['SUPERADMIN', 'ADMIN'] },
