@@ -218,7 +218,11 @@ class GRNItemCreate(BaseModel):
     # only place that cost exists (no PO to read it from). accept stamps it on
     # every minted unit. Required there, and only kept there: a PO receipt is
     # costed at the order's agreed price (GRNCreate drops it on other types).
-    unit_price: Optional[float] = Field(None, gt=0)
+    # Finite (an Infinity minted units at cost inf and every receipt read then
+    # 500'd) and at most Rs 5 lakh a unit, so a slipped zero is refused rather
+    # than becoming the stock cost. ponytail: raise the cap if a single item
+    # bought over the counter ever really costs more.
+    unit_price: Optional[float] = Field(None, gt=0, le=500_000, allow_inf_nan=False)
 
     @field_validator("batch_code", "lot_number", "expiry_date", mode="before")
     @classmethod

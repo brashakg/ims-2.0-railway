@@ -395,6 +395,26 @@ def test_c7_every_line_must_carry_its_cost(world):
     assert ok.status_code == 201, ok.text
 
 
+def test_c7_a_cost_must_be_a_real_price(world):
+    """Panel probe: "unit_price": Infinity (json.loads accepts it) was taken
+    -- accept minted units at cost inf and GET /vendors/grn then 500'd on
+    every read of the store's receipts. And with no ceiling a slipped zero
+    (3100000 for 3100) became the stock cost silently."""
+    import json
+
+    from pydantic import ValidationError
+
+    for bad in (float("inf"), float("nan"), 3_100_000.0):
+        with pytest.raises(ValidationError):
+            vd.GRNItemCreate(product_id=FRAME, received_qty=1, accepted_qty=1, unit_price=bad)
+    http = world["as_"](MANAGER)
+    raw = json.dumps(_no_po_body(world)).replace("3100.0", "3100000", 1)
+    res = http.post("/vendors/grn", content=raw, headers={"content-type": "application/json"})
+    assert res.status_code == 422, res.text
+    assert world["db"].grns.count_documents({}) == 0
+    assert http.get("/vendors/grn").status_code == 200
+
+
 def _walk_in_body(world, **over):
     """The panel's probe body: a walk-in dealer by name only, no vendor_id."""
     return _no_po_body(world, vendor_id=None, dealer_name="Sharma Optical", **over)
