@@ -13,7 +13,7 @@ Other open drafts touch nearby code: Open drafts touching nearby code (keep edit
 The reproduce phase is done and pushed (commit 18ff3ca): backend/tests/test_intercompany_valued_challan.py has 15 strict-xfail tests plus 3 guards that pin the contract. BUILD the fix so every xfail passes (remove each xfail marker as it turns green) and the guards keep passing. The reproducer's notes below explain the flow on main and the open questions; where they offer a choice, take the safe one and say which in the PR body.
 
 ## Open problems found by the last review (fix every one, or show with evidence that it is wrong)
-The F51/D13 reproduce phase is done. The worktree is C:/ims-challan on branch feat/intercompany-valued-challan, made from origin/main 6068802. Commit 18ff3ca is pushed and adds one file, C:/ims-challan/backend/tests/test_intercompany_valued_challan.py. No production code changed.
+The F51/D13 reproduce phase is done. The worktree is C:/ims-challan on branch feat/intercompany-valued-challan, made from origin/main 6068802. Commit 18ff3ca is pushed and adds one file, backend/tests/test_intercompany_valued_challan.py. No production code changed.
 
 FLOW TRACED ON MAIN
 1. Create: frontend StockTransferModal.tsx:236 sends no cost, and services/api/inventory.ts:73 turns that into unit_cost 0. Backend transfers.py:1104 then saves total_value = client unit_cost x qty = Rs 0. The lines keep only the client's fields: no HSN, no cost.
