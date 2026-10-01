@@ -40,6 +40,7 @@ vi.mock('../../../services/api/stores', () => ({
 }));
 
 import { StockTransferModal } from '../StockTransferModal';
+import { inventoryApi } from '../../../services/api';
 
 async function openItemsStep() {
   render(<StockTransferModal isOpen onClose={() => {}} onTransferCreated={() => {}} />);
@@ -61,5 +62,21 @@ describe('New transfer: item search by a unit code', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Search' }));
     expect(await screen.findByText(shown)).toBeInTheDocument();
     expect(screen.queryByText(hidden)).not.toBeInTheDocument();
+  });
+
+  // A label names ONE unit: part of a code matches whole only, so 'BV' (in
+  // every code, in no name or SKU here) must not list every product on hand.
+  it.each(['BV', '0000000042'])('%s, part of a code, lists no product', async (part) => {
+    await openItemsStep();
+    vi.mocked(inventoryApi.getStock).mockClear();
+    fireEvent.change(screen.getByPlaceholderText('Search by name, SKU, or barcode...'), {
+      target: { value: part },
+    });
+    const search = screen.getByRole('button', { name: 'Search' });
+    fireEvent.click(search);
+    await waitFor(() => expect(inventoryApi.getStock).toHaveBeenCalled());
+    await waitFor(() => expect(search).toBeEnabled()); // the search has finished
+    expect(screen.queryByText('Carrera CA 8895')).not.toBeInTheDocument();
+    expect(screen.queryByText('Wayfarer')).not.toBeInTheDocument();
   });
 });
