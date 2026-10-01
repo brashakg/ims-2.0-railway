@@ -141,9 +141,11 @@ describe('F73/D12 - the Reorder dashboard', () => {
       </MemoryRouter>,
     );
     fireEvent.click(await screen.findByTitle('Configure reorder point'));
+    // The level is sent only when it changed (round 4): 2 -> 3.
+    fireEvent.change(await screen.findByPlaceholderText('not set'), { target: { value: '3' } });
     fireEvent.click(await screen.findByRole('button', { name: /save/i }));
     await waitFor(() => expect(writes().length).toBeGreaterThan(0));
     expect(chainWrite()).toBeUndefined();
-    expect(shopWrite(2)).toBeTruthy();
+    expect(shopWrite(3)).toBeTruthy();
   });
 });

@@ -65,6 +65,8 @@ describe('Reorder dashboard save, by role', () => {
     role.current = 'STORE_MANAGER';
     render(<MemoryRouter><ReorderDashboard /></MemoryRouter>);
     fireEvent.click(await screen.findByTitle('Configure reorder point'));
+    // The level is sent only when it changed (round 4): 2 -> 3.
+    fireEvent.change(await screen.findByPlaceholderText('not set'), { target: { value: '3' } });
     fireEvent.click(await screen.findByRole('button', { name: /save/i }));
     await waitFor(() => expect(putUrls().some((u) => u.includes('reorder-levels/P-FRAME'))).toBe(true));
     expect(putUrls()).not.toContain('/products/P-FRAME');
