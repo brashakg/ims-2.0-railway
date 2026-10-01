@@ -906,6 +906,23 @@ def test_c7_the_barcode_trace_shows_no_counter_what_was_paid(world):
     assert mine["stock_unit"]["unit_cost"] == 3100.0
 
 
+def test_c7_the_policy_table_answers_as_the_receipt_readers_do(world):
+    """Panel finding: the two GRN reads were gated to the purchase roles while
+    their rbac_policy rows still said AUTHENTICATED, and no test compared the
+    two. Every role asks each route that returns a receipt; the table must
+    give the handler's answer and mark the route store-scoped."""
+    from api.services import rbac_policy
+
+    grn_id, barcode = _walk_in_on_the_shelf(world)
+    for url in ("/vendors/grn", f"/vendors/grn/{grn_id}", f"/inventory/barcode/{barcode}/trace"):
+        path = f"/api/v1{url}"
+        assert rbac_policy.is_store_scoped("GET", path), path
+        for role in rbac_policy.ALL_ROLES:
+            user = {"user_id": "u-any", "roles": [role], "store_ids": [STORE], "active_store_id": STORE}
+            served = world["as_"](user).get(url).status_code != 403
+            assert served == rbac_policy.check_access("GET", path, [role]), (path, role)
+
+
 def test_c7_movements_label_bought_without_po(world):
     db = world["db"]
     _seed_receipt(db, grn_id="GRN-STD-0007", subtype="STANDARD", po_id="PO-7", po_number="PO/7")
