@@ -557,6 +557,25 @@ def test_c7_a_long_walk_in_history_never_hides_a_recent_bill(world):
     assert http.post("/vendors/grn", json=_walk_in_body(world)).status_code == 409
 
 
+def test_c7_a_no_po_receipt_names_no_purchase_order(world):
+    """A "Bought without PO" receipt posted against a real, receivable PO would
+    put PO goods on a bill that claims no input credit -- refused."""
+    world["db"].purchase_orders.insert_one(
+        {
+            "po_id": "PO-REAL-1",
+            "po_number": "PO/REAL/1",
+            "vendor_id": DEALER,
+            "delivery_store_id": STORE,
+            "status": "SENT",
+            "items": [{"product_id": FRAME, "quantity": 2, "unit_price": 3000.0}],
+        }
+    )
+    res = world["as_"](MANAGER).post("/vendors/grn", json=_no_po_body(world, po_id="PO-REAL-1"))
+    assert res.status_code == 422, res.text
+    assert "name no purchase order" in res.text
+    assert world["db"].grns.count_documents({}) == 0
+
+
 # ===========================================================================
 # 2. On the shelf through the one minting door, at the real cost
 # ===========================================================================
