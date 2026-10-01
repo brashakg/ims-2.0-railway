@@ -483,13 +483,39 @@ async def create_po(
         if vendor is None:
             raise HTTPException(status_code=404, detail="Vendor not found")
 
+    product_repo = get_product_repository()
+    # Hub Phase 2: every PO line must reference a REAL catalogued product on the
+    # `products` spine. This rejects a fabricated / placeholder id (e.g. the UI's
+    # old `new-<timestamp>` id) at PO creation, so a PO can never carry a line
+    # that GRN would later mint as ghost stock. Gated behind pm.po_catalog_gate
+    # (default ON, policy_registry). Fail-soft when no product repo. Checked
+    # BEFORE any typed line is minted below, like _refuse_items_we_already_have:
+    # a refused order leaves no provisional draft behind. A typed line is given
+    # a real id (minted, or the existing product reused) by the loop below.
+    if product_repo is not None and _po_catalog_gate_on():
+        unknown = [
+            it.product_id
+            for it in po.items
+            if it.new_product is None and product_repo.find_by_id(it.product_id) is None
+        ]
+        if unknown:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": (
+                        "One or more PO lines reference an unknown product. "
+                        "Catalog the product first, then add it to the PO."
+                    ),
+                    "code": "UNKNOWN_PRODUCT",
+                    "product_ids": unknown,
+                },
+            )
     # Ruling 13 -- BUY FIRST, CATALOGUE LATER. Any line that carried typed-in
     # identity instead of a product_id becomes a REAL row on the products spine
     # here, through the ONE product door, born provisional: inactive, no selling
     # price, catalog_status DRAFT. That keeps product_id the single join key for
     # receiving, the stock mint, the invoice and the 3-way match, instead of
     # forking identity into a second placeholder system.
-    product_repo = get_product_repository()
     _refuse_items_we_already_have(po.items, product_repo)  # audit C2
     for it in po.items:
         if it.new_product is None:
@@ -529,33 +555,6 @@ async def create_po(
         )
         it.sku = created.get("sku")
         it.new_product = None
-
-    # Hub Phase 2: every PO line must reference a REAL catalogued product on the
-    # `products` spine. This rejects a fabricated / placeholder id (e.g. the UI's
-    # old `new-<timestamp>` id) at PO creation, so a PO can never carry a line
-    # that GRN would later mint as ghost stock. Gated behind pm.po_catalog_gate
-    # (DARK by default) so the existing free-text Create-PO form keeps working
-    # until the Buy Desk picker ships. Fail-soft when no product repo. A line
-    # that arrived as a typed-in new product has just been given a real id
-    # above, so it passes this gate like any other.
-    if product_repo is not None and _po_catalog_gate_on():
-        unknown = [
-            it.product_id
-            for it in po.items
-            if product_repo.find_by_id(it.product_id) is None
-        ]
-        if unknown:
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "message": (
-                        "One or more PO lines reference an unknown product. "
-                        "Catalog the product first, then add it to the PO."
-                    ),
-                    "code": "UNKNOWN_PRODUCT",
-                    "product_ids": unknown,
-                },
-            )
 
     # Who supplies whom decides CGST+SGST vs IGST (owner: "GST should be
     # calculated according to interstate or intrastate as per GST norms").

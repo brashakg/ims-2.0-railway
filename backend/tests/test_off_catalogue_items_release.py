@@ -1036,9 +1036,14 @@ def test_c2_a_frame_typed_without_its_eye_size_is_asked_for_it(world):
     "second, code",
     [
         # The same frame again without its eye size: the 52 is on this order.
-        (dict(BOSS_TYPED, size=None), "EYE_SIZE_NEEDED"),
+        ({"new_product": dict(BOSS_TYPED, size=None)}, "EYE_SIZE_NEEDED"),
         # A line the product door refuses outright.
-        (dict(BOSS_TYPED, model="BOSS 1701", category="NOPE"), "NEW_PRODUCT_INVALID"),
+        (
+            {"new_product": dict(BOSS_TYPED, model="BOSS 1701", category="NOPE")},
+            "NEW_PRODUCT_INVALID",
+        ),
+        # A picked product gone from the catalogue since (or any API client).
+        ({"product_id": "P-GONE", "product_name": "gone"}, "UNKNOWN_PRODUCT"),
     ],
 )
 def test_c2_a_refused_order_leaves_no_draft_behind(world, second, code):
@@ -1046,7 +1051,7 @@ def test_c2_a_refused_order_leaves_no_draft_behind(world, second, code):
         world,
         [
             {"new_product": dict(BOSS_TYPED), "quantity": 1, "unit_price": 1200},
-            {"new_product": second, "quantity": 1, "unit_price": 1200},
+            {**second, "quantity": 1, "unit_price": 1200},
         ],
     )
     assert refused is not None and refused.status_code == 422, refused
