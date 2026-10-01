@@ -119,7 +119,7 @@ export function SalaryAdvancesSection() {
                     </span>
                   )}
                   {adv.status === 'deducted' && (
-                    <span className="flex items-center gap-1 text-gray-500 text-sm">$
+                    <span className="flex items-center gap-1 text-gray-500 text-sm">
                       <X className="w-4 h-4" /> Deducted
                     </span>
                   )}
