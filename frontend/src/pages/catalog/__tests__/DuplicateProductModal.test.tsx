@@ -101,6 +101,20 @@ describe('DuplicateProductModal', () => {
     expect(onAddVariant).toHaveBeenCalledTimes(1);
   });
 
+  // Audit C3: the match is a manager's typed-in draft a receipt is holding
+  // stock for. The default (Enter / primary) is to FINISH that draft.
+  it('an ordered draft leads the cataloguer to finish it', () => {
+    const { onAddVariant, onOpenExisting } = renderModal({
+      info: { ...INFO, is_active: false, catalog_status: 'DRAFT', provisional: true },
+    });
+    expect(screen.getByText(/Ordered before it was catalogued/)).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: 'Enter' });
+    expect(onOpenExisting).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole('button', { name: /Finish the ordered item/ }));
+    expect(onOpenExisting).toHaveBeenCalledTimes(2);
+    expect(onAddVariant).not.toHaveBeenCalled();
+  });
+
   it('busy disables the actions and suppresses the Enter shortcut', () => {
     const { onAddVariant } = renderModal({ busy: true });
     fireEvent.keyDown(window, { key: 'Enter' });

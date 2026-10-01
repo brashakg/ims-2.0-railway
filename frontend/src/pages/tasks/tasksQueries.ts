@@ -77,6 +77,9 @@ export interface Task {
   category: string;
   completionNotes?: string;
   attachment?: { file_id?: string; filename?: string; mime_type?: string } | null;
+  /** In-app page where the work is done (a system task's `link`, e.g. a held
+   *  receipt's items in Catalogue > Needs review). Only a same-app path. */
+  link?: string;
 }
 
 // --- normalisation ---------------------------------------------------------
@@ -133,6 +136,7 @@ export function normaliseTask(t: Record<string, any>): Task {
     category: t.category || 'ADHOC',
     completionNotes: t.completion_notes,
     attachment: t.attachment || null,
+    link: typeof t.link === 'string' && t.link.startsWith('/') && !t.link.startsWith('//') ? t.link : undefined,
   };
 }
 

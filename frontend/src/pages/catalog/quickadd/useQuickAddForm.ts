@@ -487,8 +487,10 @@ export function useQuickAddForm() {
   // productListPath) pre-scoped to its SKU.
   const handleDupOpenExisting = useCallback(() => {
     const sku = dupInfo?.sku;
+    const draftId = dupInfo?.provisional ? dupInfo.product_id : null;
     setDupInfo(null);
-    navigate(productListPath(sku));
+    // A manager's typed-in draft opens in THIS editor to be finished (audit C3).
+    navigate(draftId ? `/catalog/add?edit=${encodeURIComponent(draftId)}` : productListPath(sku));
   }, [dupInfo, navigate]);
 
   // ---- Similar-products strip (Phase 2) -------------------------------------
@@ -549,7 +551,7 @@ export function useQuickAddForm() {
           // (Review mode never reaches handleSubmit — it has its own fork.)
           const payload = buildProductPayload(values);
           const reorderNum = Number(reorderLevel);
-          await productApi.updateProduct(editMode.id, {
+          const updated = await productApi.updateProduct(editMode.id, {
             brand: payload.brand,
             model: payload.model,
             attributes: payload.attributes,
@@ -568,8 +570,11 @@ export function useQuickAddForm() {
               ? { reorder_point: reorderNum }
               : {}),
           });
+          // Finishing a product releases the units receipts held for it.
+          const released = Number((updated as { released_units?: number })?.released_units) || 0;
           toast.success(
-            editMode.sku ? `Updated ${editMode.sku} — same SKU, no new product.` : 'Product updated.'
+            (editMode.sku ? `Updated ${editMode.sku} — same SKU, no new product.` : 'Product updated.') +
+              (released ? ` ${released} held unit(s) are now on the shelf.` : '')
           );
           navigate(`/catalog?focus=${encodeURIComponent(editMode.id)}`);
           return;
@@ -725,6 +730,7 @@ export function useQuickAddForm() {
         const res = await catalogProductsApi.list({
           needs_review: true,
           is_active: 'all',
+          ordered_draft: false,
           limit: 2,
         });
         const ids = (res.products || [])
@@ -1239,12 +1245,19 @@ export function useQuickAddForm() {
       try {
         const doc = await catalogProductsApi.get(reviewId);
         if (cancelled) return;
-        if (doc.pos_ready) {
+        if (doc.pos_ready || doc.spine_product_id) {
+          // Approved already, or ordered on a PO before it was catalogued
+          // (audit C1): either way it HAS its billing row, so it is edited --
+          // and an ordered draft finished -- in the standard editor.
           removeFromReviewQueue(reviewId);
-          toast.info('This item is already approved — opening the standard editor.');
+          toast.info(
+            doc.spine_product_id
+              ? 'This item was ordered before it was catalogued — finish it here; its held stock goes on the shelf when you save.'
+              : 'This item is already approved — opening the standard editor.'
+          );
           const next = new URLSearchParams(searchParams);
           next.delete('review');
-          next.set('edit', reviewId);
+          next.set('edit', String(doc.spine_product_id || reviewId));
           setSearchParams(next, { replace: true });
           return;
         }
@@ -1308,6 +1321,7 @@ export function useQuickAddForm() {
           const res = await catalogProductsApi.list({
             needs_review: true,
             is_active: 'all',
+            ordered_draft: false,
             limit: 2,
           });
           const ids = (res.products || [])

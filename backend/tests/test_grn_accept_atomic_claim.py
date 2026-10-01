@@ -49,6 +49,9 @@ from fastapi import HTTPException  # noqa: E402
 
 from api.routers import vendors as vd  # noqa: E402
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from strict_fakes import matches  # noqa: E402
+
 
 _ADMIN = {"user_id": "u-admin", "username": "admin", "roles": ["ADMIN"]}
 
@@ -318,16 +321,12 @@ class _StockRepo:
         return row
 
     def count(self, flt):
-        return sum(
-            1 for r in self.rows if all(r.get(k) == v for k, v in (flt or {}).items())
-        )
+        # The real matcher: the router's counts use $or (_received_on), which
+        # a field-equality stand-in would silently answer 0 for.
+        return sum(1 for r in self.rows if matches(r, flt))
 
     def find_many(self, flt, *a, **k):
-        return [
-            dict(r)
-            for r in self.rows
-            if all(r.get(k) == v for k, v in (flt or {}).items())
-        ]
+        return [dict(r) for r in self.rows if matches(r, flt)]
 
 
 def _grn(status="PENDING", qty=5, **extra):

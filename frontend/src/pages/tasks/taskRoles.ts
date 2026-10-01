@@ -39,7 +39,9 @@ export const TEAM_TASK_ROLES: UserRole[] = [
  * Copied character-for-character off the existing `/my-work` and `/attendance`
  * gates in routes/taskRoutes.tsx - the established "every operational role"
  * list in this codebase - so a bisect can tell a permission change from a
- * file move.
+ * file move. Plus CATALOG_MANAGER (2026-09-29): a receipt holding units for an
+ * item not catalogued yet is a task assigned to the catalogue manager BY NAME,
+ * and a task its own assignee cannot open is nobody's task.
  */
 export const TASK_MODULE_ROLES: UserRole[] = [
   'SUPERADMIN',
@@ -51,6 +53,7 @@ export const TASK_MODULE_ROLES: UserRole[] = [
   'CASHIER',
   'SALES_STAFF',
   'WORKSHOP_STAFF',
+  'CATALOG_MANAGER',
 ];
 
 /** The runtime half of the same ruling, for nav/tab visibility. */

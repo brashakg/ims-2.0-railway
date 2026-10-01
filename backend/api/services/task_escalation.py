@@ -5,6 +5,7 @@ Resolve *who* an SLA-breached task escalates to, by climbing the org
 hierarchy:
 
     worker (any) -> STORE_MANAGER -> AREA_MANAGER -> ADMIN -> SUPERADMIN
+    CATALOG_MANAGER -> ADMIN -> SUPERADMIN
 
 The decision of *whether* to escalate lives in ``task_sla.should_escalate``;
 this module decides the *target*. Store-scoped rungs (STORE_MANAGER,
@@ -20,7 +21,8 @@ collection query) can drive it.
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Optional
+from datetime import datetime
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # Ascending authority. Anyone not listed is a "worker" (rank 1).
 _RANK: Dict[str, int] = {
@@ -35,6 +37,12 @@ ESCALATION_RUNGS: List[str] = ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERA
 
 # Rungs that are scoped to a single store/area (resolved with the store id).
 _STORE_SCOPED = {"STORE_MANAGER", "AREA_MANAGER"}
+
+# Roles that work for the legal entity, not for one shop: a shop's manager can
+# neither open their work (a catalogue manager's is Catalogue > Needs review)
+# nor do it, so a breach of theirs goes to the admins -- handing it to the
+# shop's store manager would leave it with nobody who can act on it.
+_ENTITY_ROLES = {"CATALOG_MANAGER"}
 
 
 def _authority(roles: Any) -> int:
@@ -51,6 +59,8 @@ def next_rung_role(current_roles: Any) -> Optional[str]:
     None means the owner is already at the top (SUPERADMIN) -- nowhere left
     to escalate."""
     auth = _authority(current_roles)
+    if auth == 1 and {str(r).strip().upper() for r in current_roles or []} & _ENTITY_ROLES:
+        return "ADMIN"
     if auth >= 5:  # SUPERADMIN
         return None
     if auth == 4:  # ADMIN -> SUPERADMIN
@@ -95,3 +105,50 @@ def resolve_escalation_target(
         target_role = next_rung_role([target_role])
 
     return None
+
+
+def merge_into_twin(
+    find_one: Callable[[Dict[str, Any]], Optional[Dict[str, Any]]],
+    task: Dict[str, Any],
+    target: Optional[Dict[str, Any]],
+    *,
+    by: str,
+    now: datetime,
+) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
+    """One thing told to several people at once -- a task each, sharing an
+    ``escalation_group`` (the catalogue managers' tasks for one held receipt)
+    -- climbs to ONE task at the next rung. When the person a breached task
+    would go to already holds an open task of its group, the breached one is
+    closed into that task instead of handed over a second time: returns the
+    (fields to set, history entry) that close it, else None (escalate as
+    usual). Both escalation engines -- TASKMASTER's tick and
+    POST /tasks/auto-escalate-overdue -- call this. A failed lookup escalates:
+    a duplicate beats a lost breach."""
+    group = task.get("escalation_group")
+    uid = (target or {}).get("user_id")
+    if not group or not uid:
+        return None
+    try:
+        twin = find_one(
+            {
+                "escalation_group": group,
+                "assigned_to": uid,
+                "status": {"$in": ["OPEN", "IN_PROGRESS", "ESCALATED"]},
+                "task_id": {"$ne": task.get("task_id")},
+            }
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    if not twin:
+        return None
+    note = f"Already with {uid} as task {twin.get('task_id')}."
+    return (
+        {
+            "status": "COMPLETED",
+            "completed_at": now,
+            "completed_by": by,
+            "completion_notes": note,
+            "updated_at": now,
+        },
+        {"action": "completed", "by": by, "notes": note, "at": now},
+    )

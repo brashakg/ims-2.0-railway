@@ -125,6 +125,8 @@ export interface DuplicateProductInfo {
   offer_price?: number | null;
   is_active?: boolean | null;
   catalog_status?: string | null;
+  /** Ordered on a PO before it was catalogued: finish THIS one (audit C3). */
+  provisional?: boolean | null;
   image_url?: string | null;
 }
 

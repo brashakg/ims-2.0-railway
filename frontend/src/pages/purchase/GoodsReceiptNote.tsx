@@ -15,6 +15,7 @@ import { vendorsApi } from '../../services/api';
 import { productApi } from '../../services/api/products';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { reportGrnAccept } from './grnAcceptToast';
 import { GRNPrint } from '../../components/print/GRNPrint';
 import { resolveStoreIdentity, type StoreIdentity } from '../../components/print/storeIdentity';
 
@@ -494,16 +495,7 @@ export function GoodsReceiptNote() {
         }
       }
 
-      const units = posted?.units_added ?? 0;
-      const poState =
-        posted?.po_status === 'RECEIVED'
-          ? 'PO fully received'
-          : posted?.po_status === 'PARTIALLY_RECEIVED'
-            ? 'PO partially received'
-            : '';
-      toast.success(
-        `GRN posted${units ? ` · ${units} unit${units === 1 ? '' : 's'} added to stock` : ''}${poState ? ` · ${poState}` : ''}`,
-      );
+      reportGrnAccept(toast, String(created?.grn_number || ''), posted);
 
       setActiveTab('history');
       setPoNumber('');

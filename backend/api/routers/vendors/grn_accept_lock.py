@@ -433,6 +433,31 @@ def _grn_accept_heartbeat_tick(grn_repo, grn_id: str, token, state: dict) -> Non
     state["confirmed_at"] = now
 
 
+def _received_on(grn: dict, **more) -> dict:
+    """THE filter for "the units receipt `grn` put on the shelf" (the per-line
+    repeat guard, the void check, the store manager's voidable flag) -- read by
+    the unit's ORIGIN, never its current source (owner 2026-10-01). A unit is
+    stamped at mint with the receipt and line it was received on (grn_id,
+    grn_number, grn_line_index, line_unit_seq, po_id) and nothing rewrites
+    those; a transfer re-homes it and rewrites source_type/source_id to the
+    transfer (transfers._rehome), so a count by source forgets that a
+    transferred unit was ever received.
+
+    A unit received before grn_id was stamped (any unit on prod at this deploy)
+    still carries the receipt's grn_number -- stamped at mint since #310 and
+    never rewritten -- so it is found whether or not it has been transferred,
+    then or at any time later. The source branch covers a unit minted before
+    grn_number was stamped and never transferred since.
+
+    ponytail: a unit minted before #310 (2026-05-28) AND transferred since
+    matches no branch; backfill its grn_id if prod ever has one."""
+    grn_id = grn.get("grn_id")
+    origin = [{"grn_id": grn_id}, {"source_type": "GRN", "source_id": grn_id}]
+    if grn.get("grn_number"):
+        origin.append({"grn_number": grn["grn_number"]})
+    return {"$or": origin, **more}
+
+
 def _grn_already_minted(stock_repo, flt: dict) -> int:
     """How many units this GRN LINE has already put into stock_units.
 

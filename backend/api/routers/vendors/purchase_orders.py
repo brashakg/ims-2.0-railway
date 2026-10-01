@@ -36,6 +36,131 @@ from .models import POCreate
 from .numbering import generate_po_number
 
 
+def _typed_product_payload(it) -> dict:
+    """The product-door payload for a line typed in through "Not in the
+    catalogue?" (ruling 13): born a provisional draft."""
+    np = it.new_product
+    return {
+        "category": np.category,
+        "brand": np.brand,
+        "model": np.model,
+        "colour": np.colour,
+        "size": np.size,
+        "mrp": np.mrp,
+        # The PO rate is the PROVISIONAL cost (ruling 10); the purchase invoice
+        # corrects it to the actual one (ruling 12).
+        "cost_price": it.unit_price or None,
+        "as_draft": True,
+        "provisional": True,
+    }
+
+
+class _WithThisOrder:
+    """The product store as the create loop in create_po meets it, line by
+    line: the database plus the drafts this order's EARLIER typed lines will
+    have created by then (`planned`). identity_conflict reads through it, so
+    each typed line is judged against its own order as well, before anything
+    is written. Everything else is the database's."""
+
+    def __init__(self, repo):
+        self.repo, self.planned = repo, []
+
+    def __getattr__(self, name):
+        return getattr(self.repo, name)
+
+    def find_by_identity_key(self, key):
+        mine = [p for p in self.planned if p.get("identity_key") == key]
+        return mine[0] if mine else self.repo.find_by_identity_key(key)
+
+    def find_many(self, flt, *a, **k):
+        return list(self.planned) + list(self.repo.find_many(flt, *a, **k) or [])
+
+
+def _discarded(product_repo, product_id) -> bool:
+    """A draft an admin discarded: a typed line naming it is given that draft
+    back (revive_discarded_draft), never refused behind it."""
+    return bool((product_repo.find_by_id(product_id) or {}).get("discarded_draft"))
+
+
+def _refuse_items_we_already_have(items, product_repo) -> None:
+    """Audit C2: a typed-in line that describes a product we ALREADY have
+    (active, or a draft somebody ordered earlier) never mints a hidden twin.
+
+    EVERY typed line is validated BEFORE any line is created -- against the
+    database and against the order's own earlier lines, exactly as the create
+    loop will meet them -- so a refused order leaves no draft behind (a
+    provisional draft left by a failed order sits in Needs review as
+    "ordered" when nothing was). The composer asks "already in the catalogue
+    - use it?" and resends the line with that product_id. The key is the
+    door's OWN: the canonical build with a placeholder SKU (zero writes, as
+    the catalogue promote dry-run does) stamps exactly the identity_key a
+    create would, and the answer is the door's own rule
+    (product_master.identity_conflict) -- a 409 naming the product, or a 422
+    asking a frame typed without its eye size for it (each eye size is its
+    own item, owner 09-28)."""
+    if product_repo is None or not hasattr(product_repo, "find_by_identity_key"):
+        return
+    order = _WithThisOrder(product_repo)
+    already = []
+    need_size = []
+    for idx, it in enumerate(items):
+        if it.new_product is None:
+            continue
+        try:
+            spine = _pm.build_canonical_product(
+                {**_typed_product_payload(it), "sku": "DRYRUN-PLACEHOLDER"},
+                source="FORM",
+                product_repo=product_repo,
+                db=_get_db(),
+            )
+        except _pm.ProductMasterError as err:
+            raise HTTPException(
+                status_code=err.status,
+                detail={"code": "NEW_PRODUCT_INVALID", "message": err.message, "field": err.field},
+            ) from err
+        err = _pm.identity_conflict(spine, order)
+        order.planned.append(spine)
+        if err is None:
+            continue
+        if err.status == 409 and err.conflict:
+            # No product_id: an earlier line of THIS order types the same
+            # item -- the create loop gives both lines its one draft.
+            if err.conflict.get("product_id") and not _discarded(
+                product_repo, err.conflict["product_id"]
+            ):
+                already.append({"line": idx, "existing": err.conflict})
+        elif err.code == "EYE_SIZE_NEEDED":
+            need_size.append({"line": idx, "sizes": err.sizes, "message": err.message})
+    if not already and need_size:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "EYE_SIZE_NEEDED",
+                "message": " ".join(n.pop("message") for n in need_size),
+                "lines": need_size,
+            },
+        )
+    if not already:
+        return
+
+    def _named(e: dict) -> str:
+        size = f", size {e['size']}" if e.get("size") else ""
+        return f"{e.get('name') or e.get('sku')}{size} (SKU {e.get('sku')})"
+
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": "ALREADY_IN_CATALOGUE",
+            "message": (
+                "Already in the catalogue: "
+                + ", ".join(_named(m["existing"]) for m in already)
+                + ". Use the existing product instead of typing it in."
+            ),
+            "matches": already,
+        },
+    )
+
+
 # ============================================================================
 # PURCHASE ORDER ENDPOINTS
 # ============================================================================
@@ -366,32 +491,47 @@ async def create_po(
         if vendor is None:
             raise HTTPException(status_code=404, detail="Vendor not found")
 
+    product_repo = get_product_repository()
+    # Hub Phase 2: every PO line must reference a REAL catalogued product on the
+    # `products` spine. This rejects a fabricated / placeholder id (e.g. the UI's
+    # old `new-<timestamp>` id) at PO creation, so a PO can never carry a line
+    # that GRN would later mint as ghost stock. Gated behind pm.po_catalog_gate
+    # (default ON, policy_registry). Fail-soft when no product repo. Checked
+    # BEFORE any typed line is minted below, like _refuse_items_we_already_have:
+    # a refused order leaves no provisional draft behind. A typed line is given
+    # a real id (minted, or the existing product reused) by the loop below.
+    if product_repo is not None and _po_catalog_gate_on():
+        unknown = [
+            it.product_id
+            for it in po.items
+            if it.new_product is None and product_repo.find_by_id(it.product_id) is None
+        ]
+        if unknown:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": (
+                        "One or more PO lines reference an unknown product. "
+                        "Catalog the product first, then add it to the PO."
+                    ),
+                    "code": "UNKNOWN_PRODUCT",
+                    "product_ids": unknown,
+                },
+            )
     # Ruling 13 -- BUY FIRST, CATALOGUE LATER. Any line that carried typed-in
     # identity instead of a product_id becomes a REAL row on the products spine
     # here, through the ONE product door, born provisional: inactive, no selling
     # price, catalog_status DRAFT. That keeps product_id the single join key for
     # receiving, the stock mint, the invoice and the 3-way match, instead of
     # forking identity into a second placeholder system.
-    product_repo = get_product_repository()
+    _refuse_items_we_already_have(po.items, product_repo)  # audit C2
     for it in po.items:
         if it.new_product is None:
             continue
         np = it.new_product
         try:
             created = _pm.create_via_door(
-                {
-                    "category": np.category,
-                    "brand": np.brand,
-                    "model": np.model,
-                    "colour": np.colour,
-                    "size": np.size,
-                    "mrp": np.mrp,
-                    # The PO rate is the PROVISIONAL cost (ruling 10); the
-                    # purchase invoice corrects it to the actual one (ruling 12).
-                    "cost_price": it.unit_price or None,
-                    "as_draft": True,
-                    "provisional": True,
-                },
+                _typed_product_payload(it),
                 source="FORM",
                 actor=current_user.get("user_id"),
                 actor_name=current_user.get("username"),
@@ -400,11 +540,19 @@ async def create_po(
                 db=_get_db(),
             )
         except _pm.ProductMasterError as err:
-            # An identical brand+model+colour+size already exists: reuse it
-            # rather than refusing the order or minting a twin. The buyer has
-            # just typed a description of a product we already know.
+            # Past the check above this is two lines of THIS order typing the
+            # same item, or a product created a moment ago by someone else:
+            # reuse it rather than refusing the order or minting a twin. A
+            # draft an admin discarded is ordered again here: it comes back
+            # as the ordered draft it was, to Needs review (round 5).
             if err.status == 409 and (err.conflict or {}).get("product_id"):
                 it.product_id = err.conflict["product_id"]
+                _pm.revive_discarded_draft(
+                    it.product_id,
+                    product_repo,
+                    db=_get_db(),
+                    actor=current_user.get("user_id"),
+                )
                 it.product_name = it.product_name or err.conflict.get("name")
                 it.sku = it.sku or err.conflict.get("sku")
                 it.new_product = None
@@ -423,33 +571,6 @@ async def create_po(
         )
         it.sku = created.get("sku")
         it.new_product = None
-
-    # Hub Phase 2: every PO line must reference a REAL catalogued product on the
-    # `products` spine. This rejects a fabricated / placeholder id (e.g. the UI's
-    # old `new-<timestamp>` id) at PO creation, so a PO can never carry a line
-    # that GRN would later mint as ghost stock. Gated behind pm.po_catalog_gate
-    # (DARK by default) so the existing free-text Create-PO form keeps working
-    # until the Buy Desk picker ships. Fail-soft when no product repo. A line
-    # that arrived as a typed-in new product has just been given a real id
-    # above, so it passes this gate like any other.
-    if product_repo is not None and _po_catalog_gate_on():
-        unknown = [
-            it.product_id
-            for it in po.items
-            if product_repo.find_by_id(it.product_id) is None
-        ]
-        if unknown:
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "message": (
-                        "One or more PO lines reference an unknown product. "
-                        "Catalog the product first, then add it to the PO."
-                    ),
-                    "code": "UNKNOWN_PRODUCT",
-                    "product_ids": unknown,
-                },
-            )
 
     # Who supplies whom decides CGST+SGST vs IGST (owner: "GST should be
     # calculated according to interstate or intrastate as per GST norms").

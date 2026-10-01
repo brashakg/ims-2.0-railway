@@ -3555,7 +3555,9 @@ async def update_product(
                 _pm.mirror_update_to_catalog_twin(
                     product_id=product_id,
                     current=existing,
-                    patch=update_data,
+                    # status_fields: a finished provisional draft turns active
+                    # on its twin too, and leaves the Needs-review queue.
+                    patch={**update_data, **status_fields},
                     db=_gdb(),
                 )
             except Exception:  # noqa: BLE001
@@ -3584,7 +3586,22 @@ async def update_product(
             # so the resolver sees the post-update tags/category/brand + status.
             merged = {**existing, **update_data, **status_fields}
             _refresh_collections_after_product(merged)
-            return {"message": "Product updated", "product_id": product_id}
+            # Audit C1: an edit that leaves the product catalogue-complete puts
+            # the units receipts were holding for it on the shelf -- the same
+            # accept path "Add to stock" runs (grn_accept.release_held_receipts).
+            released = 0
+            if not _pm.compute_catalog_status(merged)[1]:
+                from .vendors.grn_accept import release_held_receipts
+
+                released = sum(
+                    int(r.get("units_added") or 0)
+                    for r in release_held_receipts(product_id)
+                )
+            return {
+                "message": "Product updated",
+                "product_id": product_id,
+                "released_units": released,
+            }
 
         raise HTTPException(status_code=500, detail="Failed to update product")
 

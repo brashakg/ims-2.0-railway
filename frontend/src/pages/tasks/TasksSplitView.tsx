@@ -12,6 +12,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
+import { Link } from 'react-router-dom';
 import {
   ArrowLeft,
   CheckSquare,
@@ -489,6 +490,14 @@ function TaskDetailPanel({
             <p style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--ink-2)' }}>
               {task.description}
             </p>
+          </div>
+        )}
+
+        {task.link && (
+          <div className="d-sec">
+            <Link to={task.link} className="btn sm">
+              Open where this is done
+            </Link>
           </div>
         )}
 

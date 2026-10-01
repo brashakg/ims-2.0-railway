@@ -9,6 +9,7 @@ from ._shared import (
     datetime,
     get_audit_repository,
     get_grn_repository,
+    get_purchase_order_repository,
     get_stock_repository,
     logger,
     require_roles,
@@ -20,8 +21,49 @@ from .grn_accept_lock import (
     _claim_grn_for_accept,
     _grn_already_minted,
     _guarded_grn_write,
+    _received_on,
     _release_grn_accept_claim,
 )
+
+
+def _reopen_po_if_nothing_received(grn_repo, grn) -> None:
+    """A held receipt's accept moved its PO to PARTIALLY_RECEIVED with nothing
+    on the shelf. Voided, and with no other live receipt on the order, nothing
+    was received: the order goes back to SENT, so it reads true and can be
+    cancelled again (cancel refuses a part-received order) -- the way out for
+    a draft whose box went back to the vendor (a draft on an open order is
+    never discarded, catalog DELETE). Fail-soft: the void stands."""
+    po_id = (grn or {}).get("po_id")
+    if not po_id:
+        return
+    try:
+        po_repo = get_purchase_order_repository()
+        if po_repo is None:
+            return
+        po = po_repo.find_by_id(po_id)
+        if not po or po.get("status") not in ("PARTIALLY_RECEIVED", "PARTIAL"):
+            return
+        live = grn_repo.find_many({"po_id": po_id, "status": {"$ne": "VOID"}}) or []
+        if live:
+            return
+        po_repo.update(
+            po_id,
+            {
+                "status": "SENT",
+                "items": [
+                    {**it, "received_qty": 0, "line_status": "OPEN"}
+                    for it in (po.get("items") or [])
+                ],
+                "received_qty_by_product": {},
+                "total_received_qty": 0,
+            },
+        )
+    except Exception:  # noqa: BLE001 - the void stands; the PO status is advisory
+        logger.warning(
+            "[VENDOR] PO %s: could not reopen after its receipt was voided",
+            po_id,
+            exc_info=True,
+        )
 
 
 @router.post("/grn/{grn_id}/void")
@@ -31,10 +73,12 @@ async def void_grn(
     """Void a goods-receipt note that never put stock on the shelf
     (duplicate/mistake cleanup).
 
-    Two gates, and the second one matters more than it looks. PENDING-only is
-    the bookkeeping gate: an ACCEPTED / PARTIALLY_ACCEPTED GRN has already
-    minted stock_units and must be corrected through a vendor return. But
-    PENDING does NOT imply "no stock": the accept flow flips the status only
+    Two gates, and the second one matters more than it looks. The status gate
+    is the bookkeeping one: an ACCEPTED GRN has minted stock_units and must be
+    corrected through a vendor return; a PENDING one normally has not, nor has
+    a PARTIALLY_ACCEPTED one whose every line was held for the catalogue (a
+    second receipt of the same box, say). But the status does NOT imply "no
+    stock": the accept flow flips the status only
     AFTER the mint loop, so a worker killed mid-accept leaves the receipt
     PENDING with real units already on the shelf. Voiding THAT orphans those
     units (PO receipt math only sums ACCEPTED GRNs) and licenses a full re-mint
@@ -56,12 +100,17 @@ async def void_grn(
         raise HTTPException(status_code=404, detail="GRN not found")
     if not can_access_store_scoped(grn.get("store_id"), current_user):
         raise HTTPException(status_code=404, detail="GRN not found")
-    if grn.get("status") != "PENDING":
+    # A PARTIALLY_ACCEPTED receipt whose every line was HELD (product not
+    # catalogued yet) put nothing on the shelf either -- and a second receipt of
+    # the same box is exactly that. The stock gate below is what proves "nothing
+    # on the shelf" for both; for a held receipt it must be able to look.
+    status = grn.get("status")
+    if status not in ("PENDING", "PARTIALLY_ACCEPTED"):
         raise HTTPException(
             status_code=400,
             detail=(
-                "Only a PENDING GRN can be voided. This one is "
-                f"{grn.get('status')} -- accepted stock must be corrected via a "
+                "Only a receipt that put nothing on the shelf can be voided. This "
+                f"one is {status} -- accepted stock must be corrected via a "
                 "vendor return."
             ),
         )
@@ -92,11 +141,20 @@ async def void_grn(
         # nothing on the shelf, we do not void it. Read UNDER the claim, so no
         # accept can be minting while we look.
         stock_repo = get_stock_repository()
+        if stock_repo is None and status != "PENDING":
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Could not check whether this goods receipt has already put "
+                    "stock on the shelf, so it was not voided. Try again in a "
+                    "moment."
+                ),
+            )
         if stock_repo is not None:
             try:
-                already_minted = _grn_already_minted(
-                    stock_repo, {"source_type": "GRN", "source_id": grn_id}
-                )
+                # By ORIGIN: a unit transferred to another shop since is still
+                # this receipt's stock.
+                already_minted = _grn_already_minted(stock_repo, _received_on(grn))
             except Exception as exc:  # noqa: BLE001
                 logger.error(
                     "[VENDOR] GRN %s: could not check for already-minted units "
@@ -112,6 +170,15 @@ async def void_grn(
                         "again in a moment."
                     ),
                 ) from exc
+            if already_minted > 0 and status != "PENDING":
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"This goods receipt has already put {already_minted} "
+                        "unit(s) into stock, so it cannot be voided -- accepted "
+                        "stock must be corrected via a vendor return."
+                    ),
+                )
             if already_minted > 0:
                 raise HTTPException(
                     status_code=409,
@@ -133,7 +200,7 @@ async def void_grn(
         # earlier version of this comment credited the wrong filter and would
         # have led the next reader to delete the one that is doing real work.
         #
-        #   * status PENDING -- carries BOTH the "no stall, two clerks" shape
+        #   * status (as read above) -- carries BOTH the "no stall, two clerks" shape
         #     and the parked-count shape. The PENDING assertion above reads the
         #     doc fetched BEFORE the claim, and the claim itself admits
         #     PARTIALLY_ACCEPTED, so without this filter a colleague's accept
@@ -164,7 +231,7 @@ async def void_grn(
             grn_repo,
             {
                 "grn_id": grn_id,
-                "status": "PENDING",
+                "status": status,
                 "accept_lock_token": claim_token,
             },
             {"$set": void_patch},
@@ -240,6 +307,18 @@ async def void_grn(
                 )
         except Exception:  # noqa: BLE001 - audit must never block the void
             pass
+
+        try:
+            from .grn_accept import _complete_receipt_tasks
+            from ._shared import _get_db
+
+            _db = _get_db()
+            if _db is not None:
+                _complete_receipt_tasks(_db, grn_id, "The receipt was voided.")
+        except Exception:  # noqa: BLE001 - a task problem never undoes the void
+            pass
+
+        _reopen_po_if_nothing_received(grn_repo, grn)
 
         return {
             "message": "GRN voided",

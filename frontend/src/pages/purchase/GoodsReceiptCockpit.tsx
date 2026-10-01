@@ -46,6 +46,7 @@ import { ExpressReceivePanel } from './ExpressReceivePanel';
 import type { TwoStepPrefill } from './ExpressReceivePanel';
 import { PurchaseStatusChip } from '../../components/purchase/PurchaseStatusChip';
 import { RECEIVABLE_PO_STATUSES } from './purchaseTypes';
+import { heldLinesSummary, reportGrnAccept } from './grnAcceptToast';
 
 // ---- Local types -----------------------------------------------------------
 
@@ -279,13 +280,13 @@ export function GoodsReceiptCockpit() {
       vendor_invoice_no?: string;
       created_at?: string;
       items?: unknown[];
-      // A PARTIALLY_ACCEPTED receipt is one whose uncatalogued lines were HELD:
-      // real stock was minted for the rest, and the held lines are waiting for
-      // someone to finish the product. It belongs in this panel too -- it was
-      // the one state the panel did not query, while the accept-time toast
-      // sent people here to find it.
+      // A PARTIALLY_ACCEPTED receipt is one holding some lines back -- for the
+      // catalogue, or beyond its order for the store manager -- with none,
+      // some or most of its goods in stock. It belongs in this panel too -- it
+      // was the one state the panel did not query, while the accept-time
+      // toast sent people here to find it.
       status?: string;
-      heldLines?: number;
+      held?: string;
     }>
   >([]);
   const [grnActionBusy, setGrnActionBusy] = useState<string | null>(null);
@@ -311,7 +312,7 @@ export function GoodsReceiptCockpit() {
               created_at: g.created_at ? String(g.created_at) : undefined,
               items: Array.isArray(g.items) ? g.items : [],
               status: String(g.status || 'PENDING'),
-              heldLines: Array.isArray(g.unresolved_lines) ? g.unresolved_lines.length : 0,
+              held: heldLinesSummary(g.unresolved_lines).text,
             }))
         );
       } catch {
@@ -325,10 +326,7 @@ export function GoodsReceiptCockpit() {
     setGrnActionBusy(grnId);
     try {
       const res = await vendorsApi.acceptGRN(grnId);
-      toast.success(
-        `GRN ${grnNumber} accepted — ${res.units_added ?? 0} units added to stock` +
-          (res.po_status ? ` · PO ${res.po_status}` : ''),
-      );
+      reportGrnAccept(toast, grnNumber, res);
       if (highlightGrn === grnNumber) setHighlightGrn(null);
       await loadPendingGrns(vendorId);
       await loadCockpit(vendorId);
@@ -714,15 +712,7 @@ export function GoodsReceiptCockpit() {
       // QC accept/reject was already captured per line above.
       try {
         const acc = await vendorsApi.acceptGRN(result.grn_id);
-        toast.success(
-          `GRN ${result.grn_number} complete — ${acc.units_added ?? result.total_received} units added to stock` +
-            (acc.po_status ? ` · PO ${acc.po_status}` : ''),
-        );
-        if (acc.grn_status === 'PARTIALLY_ACCEPTED') {
-          toast.warning(
-            'Some lines were held because their product is not catalogued yet — finish those products, then press "Add to stock" again on this receipt in the "Receipts still waiting" panel below.',
-          );
-        }
+        reportGrnAccept(toast, result.grn_number, acc, result.total_received);
       } catch (acceptErr) {
         toast.warning(
           `GRN ${result.grn_number} was saved but could NOT be added to stock: ` +
@@ -1399,9 +1389,13 @@ export function GoodsReceiptCockpit() {
                       A <strong>pending</strong> receipt was created but never accepted, so its
                       units are NOT in stock and its PO still shows as receivable — accept the
                       correct one, and void duplicates (safe: a pending GRN has added nothing).
-                      A <strong>partly accepted</strong> one put most of its goods into stock but
-                      held the lines whose product is not catalogued yet; finish those products,
-                      then press "Add to stock" again to release them.
+                      A <strong>partly accepted</strong> one is holding some lines back, and may
+                      have none of its goods in stock yet. A line waiting to be catalogued goes on
+                      the shelf by itself once the catalogue manager finishes the product ("Add to
+                      stock" tries again now). A line beyond what the PO ordered (a second receipt
+                      of the same box, say) waits for the store manager: void the receipt if the
+                      vendor sent nothing extra and none of it is in stock, or press "Add to
+                      stock" if they did.
                     </p>
                     <div className="space-y-2">
                       {pendingGrns.map((g) => (
@@ -1419,7 +1413,7 @@ export function GoodsReceiptCockpit() {
                             <PurchaseStatusChip status={g.status || 'PENDING'} kind="grn" />
                             {g.status === 'PARTIALLY_ACCEPTED' && (
                               <span className="text-amber-700">
-                                {' '}· {g.heldLines || 'some'} line(s) waiting to be catalogued
+                                {' '}· {g.held}
                               </span>
                             )}
                             {g.vendor_invoice_no && (
@@ -1444,17 +1438,18 @@ export function GoodsReceiptCockpit() {
                               )}
                               Add to stock
                             </button>
-                            {g.status === 'PARTIALLY_ACCEPTED' ? null : (
-                              <button
-                                type="button"
-                                onClick={() => voidPendingGrn(g.grn_id, g.grn_number)}
-                                disabled={grnActionBusy === g.grn_id}
-                                className="btn-secondary !py-1 !px-3 text-xs flex items-center gap-1.5 disabled:opacity-50"
-                              >
-                                <X className="w-3.5 h-3.5" />
-                                Void (duplicate)
-                              </button>
-                            )}
+                            {/* A held receipt can be a second receipt of the same box: the
+                                store manager voids it here. The server refuses the void if
+                                the receipt put anything on the shelf. */}
+                            <button
+                              type="button"
+                              onClick={() => voidPendingGrn(g.grn_id, g.grn_number)}
+                              disabled={grnActionBusy === g.grn_id}
+                              className="btn-secondary !py-1 !px-3 text-xs flex items-center gap-1.5 disabled:opacity-50"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                              Void (duplicate)
+                            </button>
                           </div>
                         </div>
                       ))}
