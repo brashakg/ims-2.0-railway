@@ -76,7 +76,8 @@ def _online_statuses(db, sku_list: List[str]) -> Dict[str, Any]:
         # Which keys are on Shopify at all is unknown: every key unknown,
         # never a confident "in-store only".
         return {
-            k: {"online": None, "sellable_online": None, "online_stock": None, "status": None}
+            k: {"online": None, "sellable_online": None, "online_stock": None, "status": None,
+                "shares_item": False}
             for k in dict.fromkeys(s.strip() for s in sku_list if s and s.strip())
         }
     if not statuses:
@@ -90,6 +91,9 @@ def _online_statuses(db, sku_list: List[str]) -> Dict[str, Any]:
         # A SKU on a LIVE listing that shares its Shopify item with another
         # product is on the website but the writer refuses it: unknown
         # (Unverified), never "In-store only".
+        # shares_item names the cause, so a screen can tell it from a failed
+        # read (both are online None).
+        status["shares_item"] = live is not None and name in shared
         status["online"] = None if live is None or name in shared else name in live
     return statuses
 
@@ -301,7 +305,9 @@ async def online_stock_reconcile(
                 "name": f"{p.get('brand', '') or ''} {p.get('model', '') or ''}".strip(),
                 # UNKNOWN on-hand is None (ONHAND_UNKNOWN), never a confident 0.
                 "in_store": None if on_hand is None else on_hand.get(p.get("product_id"), 0),
-                "online": (listed if is_online is not False else 0),
+                # A shared SKU is live but the writer refuses it: its listed
+                # number is not shown as a confident 0 (None = unknown).
+                "online": None if shares else (listed if is_online is not False else 0),
                 "is_online": is_online,
                 "shares_item": shares,
                 # What the writer sends to the mapped shops in view (None: unknown).

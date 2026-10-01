@@ -28,7 +28,7 @@ describe('the reconciliation screen for a shared-item SKU', () => {
   it('names the cause and the fix, and keeps the row under "Show only at-risk"', async () => {
     (onlineStockApi.reconcile as any).mockResolvedValue({
       items: [
-        { sku: 'SKU-1', name: 'A', in_store: 3, online: 0, recommended: 0, delta: 0, status: 'SHARES_SHOPIFY_ITEM' },
+        { sku: 'SKU-1', name: 'A', in_store: 3, online: null, recommended: 0, delta: null, status: 'SHARES_SHOPIFY_ITEM' },
       ],
       summary: { safety_buffer: 0, shares_item: 1 },
       online_configured: true,
@@ -40,6 +40,9 @@ describe('the reconciliation screen for a shared-item SKU', () => {
     render(<OnlineStockPage />);
     await waitFor(() => expect(onlineStockApi.reconcile).toHaveBeenCalled());
     expect(await screen.findByText('Shares a Shopify item with another product - fix in IMS')).toBeInTheDocument();
+    // The website number is unknown, shown as a dash, never a confident 0.
+    const cells = screen.getByText('SKU-1').closest('tr')!.querySelectorAll('td');
+    expect(cells[3].textContent).toBe('—');
     expect(screen.queryByText('Not online')).toBeNull();
   });
 });

@@ -277,6 +277,9 @@ export interface OnlineStatus {
    *  not read which listings are live (show it as unverified, never
    *  "in-store only"). */
   online: boolean | null;
+  /** The listing is live but its Shopify item is shared with another IMS
+   *  product (the writer refuses it): online is null, and this names why. */
+  shares_item?: boolean;
   /** Live Shopify listed qty is not mirrored in IMS — null = unknown. */
   online_stock: number | null;
   status?: string | null;

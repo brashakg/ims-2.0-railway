@@ -2602,11 +2602,17 @@ def test_r19_a_shared_item_sku_is_unverified_and_named_never_not_online(monkeypa
     db = _shared_db()
     statuses = catalog._online_statuses(db, ["SKU-1", "SKU-2", "SKU-3"])
     assert {k: v["online"] for k, v in statuses.items()} == {"SKU-1": None, "SKU-2": None, "SKU-3": True}
+    # The cause rides on the row: shared is not a failed read (both are None).
+    assert {k: v["shares_item"] for k, v in statuses.items()} == {"SKU-1": True, "SKU-2": True, "SKU-3": False}
     levels = {INV_1: {LOC_A: 3, LOC_B: 0}, INV_3: {LOC_A: 1, LOC_B: 0}, INV_2: {}}
     page = _reconcile_page(monkeypatch, db, levels, "BV-A")
     rows = {r["sku"]: r["status"] for r in page["items"]}
     assert rows["SKU-1"] == rows["SKU-2"] == "SHARES_SHOPIFY_ITEM"
     assert rows["SKU-3"] != "SHARES_SHOPIFY_ITEM"
+    # Never a confident 0: the website number and the delta are unknown.
+    for r in page["items"]:
+        if r["sku"] in ("SKU-1", "SKU-2"):
+            assert r["online"] is None and r["delta"] is None
     assert page["summary"]["shares_item"] == 2 and page["summary"]["not_online"] == 0
 
 
@@ -2680,3 +2686,45 @@ def test_r19_two_available_entries_at_one_location_read_unknown():
 
     assert sp._node_levels(node(3, 5), gid) is None
     assert sp._node_levels(node(3), gid) == {LOC_A: 3}
+
+
+def test_r20_a_failed_online_status_read_is_not_a_shared_item(monkeypatch):
+    """Review item 1: shares_item is true only for a SKU the live read found
+    shared; a dead catalogue read is unknown with shares_item False (the
+    screen says Unverified, not the shared label)."""
+    from api.routers import catalog
+
+    def boom(*_a, **_k):
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(catalog, "online_status_for_skus", boom)
+    out = catalog._online_statuses(_shared_db(), ["SKU-1"])
+    assert out["SKU-1"]["online"] is None and out["SKU-1"]["shares_item"] is False
+
+
+@pytest.mark.parametrize("shelf_read", ["raises", "empty"])
+def test_r20_an_unreadable_shelf_keeps_every_shared_sku_named(monkeypatch, shelf_read):
+    """Review item 3. shared_skus_at_shop names a shared SKU unless the shelf
+    shows 0 THERE. A shelf read that raises, or returns {} (nothing known),
+    is unknown, never 0: both SKUs stay named in the shop's task. `units is
+    None or` dropped -> the {} case fails; `except -> return []` -> the raises
+    case fails."""
+    from api.services import online_stock_writeback as osw
+
+    def boom(db, skus):
+        raise RuntimeError("shelf read died")
+
+    monkeypatch.setattr(osw, "shelf_quantities_for_skus", boom if shelf_read == "raises" else (lambda db, skus: {}))
+    assert sp.shared_skus_at_shop(_shared_db(), ["SKU-2", "SKU-1"], "BV-A") == ["SKU-1", "SKU-2"]
+
+
+def test_r20_reconcile_rows_put_shares_item_before_not_online():
+    """Review item 3: the row order is ... OK, SHARES_SHOPIFY_ITEM, NOT_ONLINE.
+    Swap the two in _ORDER -> fails."""
+    from api.services import stock_allocation as sa
+
+    items = [
+        {"sku": "N", "in_store": 1, "online": 0, "is_online": False},
+        {"sku": "S", "in_store": 1, "online": None, "is_online": False, "shares_item": True},
+    ]
+    assert [r["sku"] for r in sa.reconcile_items(items)["items"]] == ["S", "N"]

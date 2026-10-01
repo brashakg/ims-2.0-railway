@@ -13,6 +13,7 @@ import { RefreshCcw, Loader2, AlertTriangle, CheckCircle2, ShoppingCart } from '
 import { onlineStockApi, type ReconcileItem, type ReconcileResult } from '../../services/api/onlineStock';
 import { storeApi } from '../../services/api/stores';
 import { useToast } from '../../context/ToastContext';
+import { SHARES_ITEM_LABEL } from './sharedItem';
 
 interface StoreOpt { store_id: string; store_name?: string; store_code?: string; }
 
@@ -31,7 +32,7 @@ const STATUS_LABEL: Record<string, string> = {
   ONHAND_UNKNOWN: 'On-hand unknown',
   LISTED_UNKNOWN: 'Unverified',
   OK: 'OK',
-  SHARES_SHOPIFY_ITEM: 'Shares a Shopify item with another product - fix in IMS',
+  SHARES_SHOPIFY_ITEM: SHARES_ITEM_LABEL,
   NOT_ONLINE: 'Not online',
 };
 
