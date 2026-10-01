@@ -20,6 +20,7 @@ from ._shared import (
 from .helpers import (
     _get_db,
 )
+from .lookup import sellable_by_product_shop
 from ...services.reorder_policy import low_stock_rows, on_hand
 
 # ============================================================================
@@ -104,25 +105,9 @@ async def cross_store_stock(
         return {"product_id": product_id, "stores": []}
 
     try:
-        rows = (
-            stock_repo.aggregate(
-                [
-                    {
-                        "$match": {
-                            "product_id": product_id,
-                            "status": "AVAILABLE",
-                        }
-                    },
-                    {
-                        "$group": {
-                            "_id": "$store_id",
-                            "quantity": {"$sum": {"$ifNull": ["$quantity", 1]}},
-                        }
-                    },
-                ]
-            )
-            or []
-        )
+        # The per-shop count the counter's /inventory/lookup reads: the till's
+        # own sellable question (find_available's filter), not a second literal.
+        rows = sellable_by_product_shop(stock_repo, [product_id])
 
         # Enrich with product name (once)
         product_name = ""
@@ -132,14 +117,8 @@ async def cross_store_stock(
                 product_name = p.get("name") or p.get("product_name") or ""
 
         stores = []
-        for r in rows:
-            sid = r.get("_id")
-            if not sid:
-                continue
+        for (_pid, sid), qty in rows.items():
             if exclude_store_id and sid == exclude_store_id:
-                continue
-            qty = int(r.get("quantity") or 0)
-            if qty <= 0:
                 continue
             stores.append({"store_id": sid, "available_qty": qty})
 

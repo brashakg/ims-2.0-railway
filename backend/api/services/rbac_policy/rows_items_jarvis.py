@@ -267,7 +267,9 @@ ROWS: List[Dict[str, object]] = [
             "WORKSHOP_STAFF",
         ],
     },
-    # POS-7: BOPIS / ship-from-store cross-store stock lookup
+    # POS-7: BOPIS / ship-from-store cross-store stock lookup. Mirrors its
+    # route gate (_INVENTORY_ROLES); counter roles read stock through
+    # /inventory/lookup below (D7b).
     {
         "method": "GET",
         "path": "/api/v1/inventory/cross-store-stock",
@@ -275,6 +277,22 @@ ROWS: List[Dict[str, object]] = [
             "ADMIN",
             "AREA_MANAGER",
             "CATALOG_MANAGER",
+            "STORE_MANAGER",
+            "SUPERADMIN",
+            "WORKSHOP_STAFF",
+        ],
+    },
+    # D7b (owner 2026-09-29): the counter's read-only stock lookup -- this
+    # shop, every other shop, in transit; MRP / selling price only.
+    # inventory/lookup.py reads its route gate FROM this row (STOCK_LOOKUP_ROLES).
+    {
+        "method": "GET",
+        "path": "/api/v1/inventory/lookup",
+        "allowed": [
+            "ADMIN",
+            "AREA_MANAGER",
+            "CASHIER",
+            "OPTOMETRIST",
             "SALES_CASHIER",
             "SALES_STAFF",
             "STORE_MANAGER",
