@@ -9,10 +9,13 @@ Shopify edit or a race can still let one location's live "available" drift
 away from what the writer would send there.
 
 Once a day (SENTINEL, ~03:00 IST) this samples up to N online-mapped variants
-on a LIVE listing (_sample_variants: ONE answer -- the writer's own listing,
-a size's parent's, visible by the writer's own reader and not retired in
-IMS; a draft, a taken-down or a retired listing is never compared) and
-compares, per (SKU, MAPPED shop):
+on a LIVE listing (_sample_variants: ONE answer, the reader the Stock Tally
+and the reconciliation view share -- inventory.skus_on_live_listings: the
+writer's own listing, a size's parent's, visible by the writer's own
+listing_visible; a draft or taken-down listing is never compared, and
+neither is a SKU retired in IMS. A retired product's listing whose
+take-down failed or ran DARK still says PUBLISHED and still sells its
+active sizes, so they stay compared) and compares, per (SKU, MAPPED shop):
 
     IMS side     = online_stock_writeback.online_quantities_for_skus(db, skus)
                    [sku][shop] -- the writer's OWN call (same rule, same
@@ -41,8 +44,8 @@ Tasks: ONE per shop (source_ref ``shopify-stock-parity-drift:<store_id>``) --
 filed on drift, refreshed (description + payload) every night while it
 drifts or still owes a SKU, completed when a later tick finds EVERY SKU the
 task names either compared clean at that shop or GONE: off the live set
-(its listing drafted or taken down by any door, or the SKU or its listing's
-product retired in IMS), its Shopify item unmapped, or answered null by
+(its listing drafted or taken down by any door, or the SKU itself retired
+in IMS), its Shopify item unmapped, or answered null by
 Shopify (deleted in Shopify admin) -- nothing is left to measure, so an
 empty catalogue closes every task too. payload.skus: a SKU leaves the task
 only that way -- one whose Shopify batch failed, that fell out of the
@@ -595,8 +598,8 @@ def sync_drift_task(
     ``mapped_skus``: EVERY SKU parity compares tonight (_sample_variants: on a
     live listing, uncapped, less the items Shopify answered null) -- a SKU
     the task names that is not in it is GONE (its listing drafted or taken
-    down, the SKU or its listing's product retired, deleted in Shopify admin,
-    or its Shopify item unmapped):
+    down, the SKU itself retired, deleted in Shopify admin, or its Shopify
+    item unmapped):
     parity will not compare it again while it stays so, so it is no longer
     owed.
 

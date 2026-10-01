@@ -626,15 +626,25 @@ def skus_claiming_inventory_items(db, gids: List[str]) -> Dict[str, List[str]]:
 def listings_for_skus(db, skus: List[str], *, strict: bool = False) -> Dict[str, List[str]]:
     """``{catalog product id: [requested keys]}`` -- THE listing that carries
     each key, for the stock baseline (``ecom.online_stock`` lives on the
-    listing): the PARENT of the catalog_variants row that matches it (a size
-    row rides its parent's listing), else the catalog_products row whose own
-    sku / barcode it is -- and a variant-of twin resolves to its PARENT twin
-    (``ecom.variant_of.twin_id``), never to itself: a size variant owns no
-    listing and must never carry a baseline the schedule never diffs. The
-    same two lookups ``inventory_items_for_skus`` resolves targets with, so
-    the target and the listing can never disagree. Fail-soft ``{}`` -- or,
-    ``strict``, a raised read (the nightly parity: a dead read is never "no
-    listing is live")."""
+    listing) and for THE "is this listing live" reader
+    (shopify_push.inventory.skus_on_live_listings). In order, the same
+    precedence ``inventory_items_for_skus`` resolves the TARGET with, so the
+    target and the listing never disagree:
+      1. the catalog_variants row that IS the key's target (it carries the
+         inventory item): its PARENT's listing (a size row rides its
+         parent's listing);
+      2. the key's OWN catalog_variants row (its sku is the key -- a size not
+         yet minted on Shopify): its parent's listing;
+      3. else the catalog_products row whose own sku / barcode it is -- and a
+         variant-of twin resolves to its PARENT twin
+         (``ecom.variant_of.twin_id``), never to itself: a size variant owns
+         no listing and must never carry a baseline the schedule never diffs.
+    A row matched only through another product's barcode that carries no
+    item never names the listing (the target falls through to step 3 too),
+    and a size row whose parent link lands nowhere falls through to step 3
+    instead of naming no listing. Fail-soft ``{}`` -- or, ``strict``, a
+    raised read (the nightly parity: a dead read is never "no listing is
+    live")."""
     keys = _clean_keys(skus)
     if not keys or db is None:
         return {}
@@ -646,9 +656,15 @@ def listings_for_skus(db, skus: List[str], *, strict: bool = False) -> Dict[str,
 
     variants = _variants_by_key(db, keys, strict=strict)
     parents = _parents_for_variants(db, list(variants.values()), strict=strict)
+    placed = set()
     for key, var in variants.items():
-        _add(_parent_from(parents, var).get("id"), key)
-    remaining = [k for k in keys if k not in variants]
+        targeted = bool(normalize_sku(var.get("shopify_inventory_item_id")))
+        if targeted or normalize_sku(var.get("sku")) == key:
+            pid = _parent_from(parents, var).get("id")
+            if pid:
+                _add(pid, key)
+                placed.add(key)
+    remaining = [k for k in keys if k not in placed]
     for key, doc in _products_by_key(db, remaining, strict=strict).items():
         link = (doc.get("ecom") or {}).get("variant_of")
         pid = (link.get("twin_id") if isinstance(link, dict) else None) or doc.get("id")

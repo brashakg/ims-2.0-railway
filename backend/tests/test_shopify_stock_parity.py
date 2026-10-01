@@ -2019,3 +2019,199 @@ def test_the_step_points_at_the_number_ims_sends_now(monkeypatch):
     _one_safe_step(text)
     db.get_collection("stock_units").update_one({"stock_id": "SKU-1-BV-A-0"}, {"$set": {"status": "SOLD"}})
     assert _reconcile(monkeypatch, db, levels, "BV-A")["SKU-1"]["recommended"] == 4
+
+
+# ---------------------------------------------------------------------------
+# Round 17, review round 1: the one live reader, read honestly everywhere
+# ---------------------------------------------------------------------------
+
+
+def _dead_live_read(db, where):
+    """One catalog read behind the live set dies: the listings' status read
+    (skus_on_live_listings' own find) or the parent-listing read inside
+    listings_for_skus."""
+    coll = db.get_collection("catalog_products")
+    real = coll.find
+
+    def find(flt=None, *a, **k):
+        if where == "status" and "$in" in ((flt or {}).get("id") or {}):
+            raise RuntimeError("live read died")
+        if where == "parents" and any("id" in c for c in (flt or {}).get("$or") or []):
+            raise RuntimeError("parent read died")
+        return real(flt, *a, **k)
+
+    coll.find = find
+    return lambda: setattr(coll, "find", real)
+
+
+@pytest.mark.parametrize("where", ["status", "parents"])
+def test_a_dead_live_listing_read_is_unknown_on_both_screens(monkeypatch, where):
+    """Review round 1 (fail-soft screens): night 1 files BV-A (SKU-2: IMS 0
+    vs LOC_A 3). Then a read behind the live set dies. Parity compares
+    nothing and keeps the task OPEN; the screens must say UNKNOWN, never a
+    confident 'not online' beside it: every BV-A row LISTED_UNKNOWN with
+    live_listings_unknown, and the Stock Tally tallies nothing and says so.
+    Read the reader fail-soft on the screens (set() on a dead read) -> every
+    row NOT_ONLINE, the tally 'nothing listed' -> fails."""
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 0, "BV-B": 0}})
+    _size_of_c1(db)
+    levels = {INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 3, LOC_B: 0}}
+    _run(sp.run_parity_tick(db, graphql=_shopify(levels)))
+    restore = _dead_live_read(db, where)
+    out = _run(sp.run_parity_tick(db, graphql=_shopify(levels)))
+    assert out["checked"] is False and _tasks(db)[0]["status"] == "OPEN"
+    page = _reconcile_page(monkeypatch, db, levels, "BV-A")
+    assert {r["sku"]: r["status"] for r in page["items"]} == {"SKU-1": "LISTED_UNKNOWN", "SKU-2": "LISTED_UNKNOWN"}
+    assert page["live_listings_unknown"] is True and page["listed_qty_live"] is False
+    assert page["summary"]["not_online"] == 0
+    tally = _tally(monkeypatch, db, levels)
+    assert tally["items"] == [] and tally["summary"]["live_listings_unknown"] is True
+    assert tally["summary"]["listed_qty_live"] is False
+    restore()
+    assert _reconcile(monkeypatch, db, levels, "BV-A")["SKU-2"]["status"] == "OVERSELL_RISK"
+
+
+def test_the_tally_reads_the_live_set_once(monkeypatch):
+    """Review round 1: stock_tally_live read the live set for the Shopify
+    read and AGAIN for the rows; a second read that died answered 'fully
+    live, 0 SKUs, 0 at risk' with no banner beside an open task. It is read
+    once and handed down. Read it again inside stock_tally_summary -> the
+    second (dying) read blanks the tally -> fails."""
+    from api.services.shopify_push import inventory
+
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 0, "BV-B": 0}})
+    real = inventory.skus_on_live_listings
+    calls = []
+
+    def once(db_, skus, **k):
+        calls.append(1)
+        if len(calls) > 1:
+            raise RuntimeError("second read died")
+        return real(db_, skus, **k)
+
+    monkeypatch.setattr(inventory, "skus_on_live_listings", once)
+    tally = _tally(monkeypatch, db, {INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 3, LOC_B: 0}})
+    assert len(calls) == 1
+    rows = {r["sku"]: r for r in tally["items"]}
+    assert rows["SKU-2"]["oversell_risk"] is True and tally["summary"]["listed_qty_live"] is True
+
+
+def test_no_live_listing_is_covered_never_shopify_unavailable(monkeypatch):
+    """Review round 1: with every listing a DRAFT (nothing published yet),
+    there is nothing to read from Shopify -- the pages must not say 'Live
+    Shopify quantities are unavailable'. listed_qty_live is True on both
+    (vacuous coverage), and nothing is assessed. Drop the no-live-listing
+    case -> listed_qty_live False -> fails."""
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 0, "BV-B": 0}})
+    for c in ("c1", "c2"):
+        _set(db, "catalog_products", {"id": c}, **{"ecom.status": "DRAFT"})
+    levels = {INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 3, LOC_B: 0}}
+    tally = _tally(monkeypatch, db, levels)
+    assert tally["items"] == [] and tally["summary"]["listed_qty_live"] is True
+    assert not tally["summary"].get("live_listings_unknown")
+    page = _reconcile_page(monkeypatch, db, levels, "BV-A")
+    assert page["listed_qty_live"] is True and page["live_listings_unknown"] is False
+    assert {r["status"] for r in page["items"]} == {"NOT_ONLINE"}
+
+
+def test_both_screens_read_shopify_only_for_live_skus(monkeypatch):
+    """Review round 1 test gap: the screens hand the Shopify level read only
+    the SKUs on a live listing, so a drafted SKU never takes a slot of the
+    capped read or counts in listed_mapped_rows. Hand it every SKU again ->
+    SKU-2 (drafted) is read and counted -> fails."""
+    from api.services import online_sync_health as osh
+
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 0, "BV-B": 0}})
+    _set(db, "catalog_products", {"id": "c2"}, **{"ecom.status": "DRAFT"})
+    asked = []
+    real = osh.live_listed_qty_for_skus
+
+    async def spy(db_, skus, *a, **k):
+        asked.append(sorted(skus))
+        return await real(db_, skus, *a, **k)
+
+    monkeypatch.setattr(osh, "live_listed_qty_for_skus", spy)
+    levels = {INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 3, LOC_B: 0}}
+    tally = _tally(monkeypatch, db, levels)
+    page = _reconcile_page(monkeypatch, db, levels, "BV-A")
+    assert asked == [["SKU-1"], ["SKU-1"]]
+    assert tally["summary"]["listed_mapped_rows"] == page["listed_mapped_rows"] == 1
+
+
+def test_a_spine_sku_with_a_space_is_unknown_on_the_screens_never_not_online(monkeypatch):
+    """Review round 1 test gap: the reader answers stripped keys; a spine
+    row stored 'SKU-2 ' is on a live listing, so the screens assess it (its
+    level is keyed by the stripped SKU, so it reads unknown) -- never NOT
+    ONLINE / missing. Compare the raw key with the reader's -> NOT_ONLINE
+    on the view, no tally row -> fails."""
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 0, "BV-B": 0}})
+    _set(db, "products", {"sku": "SKU-2"}, sku="SKU-2 ")
+    levels = {INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 3, LOC_B: 0}}
+    row = _reconcile(monkeypatch, db, levels, "BV-A")["SKU-2 "]
+    assert row["status"] == "LISTED_UNKNOWN"
+    tally = {r["sku"]: r for r in _tally(monkeypatch, db, levels)["items"]}
+    assert "SKU-2 " in tally and tally["SKU-2 "]["online_listed_qty"] is None
+
+
+def _listing_unplaced_by_parent(db):
+    """Case A: SKU-2's size row points at the SPINE id 'p1' (made before the
+    twin existed) and parent_sku SKU-1, while twin c1 carries a legacy sku --
+    no parent link lands. Its own twin c2 is a size of c1."""
+    _size_of_c1(db)
+    _set(db, "catalog_variants", {"sku": "SKU-2"}, parent_product_id="p1", parent_sku="SKU-1")
+    _set(db, "catalog_products", {"id": "c1"}, sku="SKU-1-LEGACY")
+    _set(db, "products", {"sku": "SKU-1"}, pim_product_id="c1")
+    _set(db, "catalog_variants", {"sku": "SKU-1"}, parent_sku="SKU-1-LEGACY")
+
+
+def _listing_shadowed_by_a_barcode(db):
+    """Case B: SKU-2 is a standalone listing whose item sits only on c2's
+    ecom (no variant row of its own); an unrelated, unpushed size row of a
+    DRAFT product c3 carries barcode 'SKU-2'."""
+    db.get_collection("catalog_variants").delete_one({"sku": "SKU-2"})
+    _set(db, "catalog_products", {"id": "c2"}, **{"ecom.shopify_inventory_item_id": INV_2})
+    db.seed("catalog_products", [_listing(3, "SKU-3", status="DRAFT")])
+    db.seed("catalog_variants", [{"sku": "SKU-3-M", "barcode": "SKU-2", "parent_product_id": "c3"}])
+
+
+@pytest.mark.parametrize("case", [_listing_unplaced_by_parent, _listing_shadowed_by_a_barcode])
+def test_the_listing_is_the_one_that_carries_the_target(monkeypatch, case):
+    """Review round 1 (listings_for_skus' blind spot): the writer's target
+    for SKU-2 is INV_2, but the listing reader named no listing (a parent
+    link that lands nowhere) or an unrelated DRAFT listing (another
+    product's barcode), so parity skipped SKU-2 and both screens called it
+    not online while LOC_A sells 3 against a 0 shelf. The listing now
+    follows the target's own precedence: parity files BV-A, the view says
+    OVERSELL_RISK, the tally flags it. Put back 'every matched variant row
+    names its parent, none falls through' -> fails."""
+    from api.services import online_catalog
+
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 0, "BV-B": 0}})
+    case(db)
+    assert online_catalog.inventory_items_for_skus(db, ["SKU-2"]) == {"SKU-2": INV_2}
+    levels = {INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 3, LOC_B: 0}}
+    tally, parity = _tally_and_parity(monkeypatch, db, levels)
+    assert [(d["sku"], d["store_id"], d["ims"], d["shopify"]) for d in parity["drift"]] == [("SKU-2", "BV-A", 0, 3)]
+    assert _reconcile(monkeypatch, db, levels, "BV-A")["SKU-2"]["status"] == "OVERSELL_RISK"
+    assert tally["SKU-2"]["oversell_risk"] is True
+
+
+def test_the_inventory_online_column_reads_the_one_live_reader(monkeypatch):
+    """Review round 1: the Inventory screen's Online column and count read
+    /catalog/online-status, whose `online` counted a draft (gid OR
+    PUBLISHED). After Take off website (DRAFT, gid kept) it said Online
+    while the Online Stock view said NOT_ONLINE. `online` is now the one
+    live reader. Serve online_status_for_skus().online again -> SKU-2 reads
+    online -> fails."""
+    from api.routers import catalog
+
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 0, "BV-B": 0}})
+    _set(db, "catalog_products", {"id": "c2"}, **_TAKEN_DOWN)
+    monkeypatch.setattr(catalog, "_get_db", lambda: db)
+    body = catalog.OnlineStatusRequest(skus=["SKU-1", "SKU-2"])
+    statuses = _run(catalog.post_online_status(body, current_user={"user_id": "u1"}))["statuses"]
+    assert {k: v["online"] for k, v in statuses.items()} == {"SKU-1": True, "SKU-2": False}
+    got = _run(catalog.get_online_status(skus="SKU-1,SKU-2", current_user={"user_id": "u1"}))["statuses"]
+    assert {k: v["online"] for k, v in got.items()} == {"SKU-1": True, "SKU-2": False}
+    view = _reconcile(monkeypatch, db, {INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 3, LOC_B: 0}}, "BV-A")
+    assert view["SKU-2"]["status"] == "NOT_ONLINE"

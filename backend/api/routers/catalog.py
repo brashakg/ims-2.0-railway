@@ -59,6 +59,27 @@ _VALID_DISCOUNT_CATEGORIES = frozenset(CATEGORY_DISCOUNT_CAPS.keys())
 # (online_stock is null here; see /online-store/stock-tally for a live read).
 
 
+def _online_statuses(db, sku_list: List[str]) -> Dict[str, Any]:
+    """online_status_for_skus with ``online`` read through THE one "is this
+    listing live on Shopify" reader (inventory.skus_on_live_listings) -- the
+    one the nightly parity, the Stock Tally and the reconciliation view read
+    -- so the Inventory screen's Online column never calls a draft or
+    taken-down listing online while those views call it not online. A
+    failed read answers {} (unknown), the endpoint's fail-soft shape."""
+    from ..services.shopify_push.inventory import skus_on_live_listings
+
+    statuses = online_status_for_skus(db, sku_list)
+    if not statuses:
+        return statuses
+    try:
+        live = skus_on_live_listings(db, list(statuses), strict=True)
+    except Exception:  # noqa: BLE001
+        return {}
+    for key, status in statuses.items():
+        status["online"] = str(key).strip() in live
+    return statuses
+
+
 @router.get("/online-status")
 async def get_online_status(
     skus: str = Query(..., description="Comma-separated SKUs to look up"),
@@ -67,7 +88,7 @@ async def get_online_status(
     """For each SKU, whether it's online (on Shopify, per the IMS catalog).
     Returns {statuses: {sku: {online, online_stock(null), status}}}."""
     sku_list = [s.strip() for s in (skus or "").split(",") if s.strip()]
-    return {"statuses": online_status_for_skus(_get_db(), sku_list)}
+    return {"statuses": _online_statuses(_get_db(), sku_list)}
 
 
 class OnlineStatusRequest(BaseModel):
@@ -85,7 +106,7 @@ async def post_online_status(
     proxy length limits -> net::ERR_CONNECTION_CLOSED, blanking the "Online"
     column (QA F12). Same response shape as the GET."""
     sku_list = [s.strip() for s in (body.skus or []) if s and s.strip()]
-    return {"statuses": online_status_for_skus(_get_db(), sku_list)}
+    return {"statuses": _online_statuses(_get_db(), sku_list)}
 
 
 @router.get("/online-summary")
@@ -203,13 +224,19 @@ async def online_stock_reconcile(
 
     # Online = the SKU's listing is live on Shopify: THE one reader the
     # nightly parity and the Stock Tally read (a draft or taken-down listing
-    # sells nothing and is not assessed, exactly as parity skips it).
-    on_live = skus_on_live_listings(db, skus)
+    # sells nothing and is not assessed, exactly as parity skips it). Read
+    # STRICT: a failed read is unknown (every row LISTED_UNKNOWN), never a
+    # confident NOT_ONLINE beside a drift task parity keeps open.
+    try:
+        on_live: Optional[set] = skus_on_live_listings(db, skus, strict=True)
+    except Exception:  # noqa: BLE001
+        on_live = None
+    live_skus = [s for s in skus if on_live is not None and str(s).strip() in on_live]
 
     # Live Shopify listed quantities PER LOCATION for the live SKUs: mapped
     # SKUs first, cap on the mapped set, coverage counts carried through
     # (None when unavailable).
-    live = await live_listed_qty_for_skus(db, [s for s in skus if str(s).strip() in on_live])
+    live = await live_listed_qty_for_skus(db, live_skus) if live_skus else None
     variants = (live or {}).get("variants") or []
     # Parity's full level (the Online column, OVER_ALLOCATED) and the level
     # the storefront sells from (OVERSELL_RISK): live_listed_qty_for_skus.
@@ -237,7 +264,7 @@ async def online_stock_reconcile(
     items = []
     for p in products:
         sku = p.get("sku")
-        is_online = str(sku or "").strip() in on_live
+        is_online = None if on_live is None else str(sku or "").strip() in on_live
         # Uncovered online SKU -> None (LISTED_UNKNOWN downstream), never a
         # confident 0. Offline SKUs carry 0 (they are not assessed anyway).
         per_location = levels.get(inv_of.get(sku))
@@ -249,14 +276,14 @@ async def online_stock_reconcile(
                 "name": f"{p.get('brand', '') or ''} {p.get('model', '') or ''}".strip(),
                 # UNKNOWN on-hand is None (ONHAND_UNKNOWN), never a confident 0.
                 "in_store": None if on_hand is None else on_hand.get(p.get("product_id"), 0),
-                "online": (listed if is_online else 0),
+                "online": (listed if is_online is not False else 0),
                 "is_online": is_online,
                 # What the writer sends to the mapped shops in view (None: unknown).
                 "recommended": None if per_shop is None else sum(int(per_shop.get(sid, 0)) for sid in mapped),
                 # Listed beyond the shelf / beyond the writer's number, location
                 # by location (None: unknown).
-                "unbacked": (None if over is None else over.get(sku)) if is_online else 0,
-                "excess": (None if excess is None else excess.get(sku)) if is_online else 0,
+                "unbacked": (None if over is None else over.get(sku)) if is_online is not False else 0,
+                "excess": (None if excess is None else excess.get(sku)) if is_online is not False else 0,
             }
         )
 
@@ -265,7 +292,11 @@ async def online_stock_reconcile(
     result["online_configured"] = online_mapping_available(db)
     live_rows = int(live["live"]) if live else 0
     mapped_rows = int(live["mapped"]) if live else 0
-    result["listed_qty_live"] = bool(live) and mapped_rows > 0 and live_rows >= mapped_rows
+    # No live listing at all (the read succeeded) = nothing to read: covered,
+    # not "Shopify unavailable".
+    result["listed_qty_live"] = (on_live is not None and not live_skus) or (
+        bool(live) and mapped_rows > 0 and live_rows >= mapped_rows)
+    result["live_listings_unknown"] = on_live is None
     result["listed_live_rows"] = live_rows
     result["listed_mapped_rows"] = mapped_rows
     return result

@@ -297,6 +297,7 @@ def stock_tally_summary(
     db,
     limit: int = _RECONCILE_SCAN_LIMIT,
     live: Optional[Dict[str, Any]] = None,
+    on_live: Optional[set] = None,
 ) -> Dict[str, Any]:
     """READ-ONLY per-SKU reconciliation of online-listed qty vs real on-hand vs
     already-reserved -- the Online Store "Stock tally" dashboard (BVI Phase 5).
@@ -304,7 +305,12 @@ def stock_tally_summary(
     "Which SKUs are online" is THE one reader the nightly parity compares
     by (inventory.skus_on_live_listings: the SKU's listing -- a size's
     parent's -- is live on Shopify; a draft or taken-down one sells nothing
-    and is not assessed). The LISTED
+    and is not assessed). ``on_live`` is that answer when the caller already
+    read it (stock_tally_live reads it ONCE, for the Shopify read and the
+    rows alike); else it is read here, STRICT: a failed read tallies nothing
+    and says so (summary.live_listings_unknown), never "nothing is online".
+    No live listing at all is full coverage (nothing to read), never
+    "Shopify unavailable". The LISTED
     quantity lives on Shopify, PER LOCATION; pass ``live`` (the
     live_listed_qty_for_skus answer: qty, variants, levels, live, mapped) to
     compare against it. Without it, online_listed_qty is reported as None
@@ -388,6 +394,21 @@ def stock_tally_summary(
 
     pids = [p.get("product_id") for p in products if p.get("product_id")]
     skus = [p.get("sku") for p in products if p.get("sku")]
+    if on_live is None:
+        # THE one "is this listing live on Shopify" reader, shared with the
+        # nightly parity and the reconciliation screen, read STRICT: a dead
+        # read is unknown -- nothing tallied, and the page says why.
+        try:
+            on_live = skus_on_live_listings(db, skus, strict=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[STOCK_TALLY] live-listing read failed: %s", exc)
+            base["summary"]["live_listings_unknown"] = True
+            base["summary"]["listed_qty_live"] = False
+            return base
+    if not on_live:
+        # No live listing: nothing to read from Shopify -- covered, never
+        # "Shopify unavailable".
+        base["summary"]["listed_qty_live"] = True
     on_hand = _on_hand_by_product(db, pids)
     # `sent` carries the SUPERADMIN online block (0 at every shop); `shelf` does not.
     shelf, sent, mapped = (rule_by_location(db, skus) if on_hand is not None else None) or (None, None, {})
@@ -409,9 +430,6 @@ def stock_tally_summary(
         else ({}, {})
     )
     reserved = _reserved_by_product(db, pids)
-    # THE one "is this listing live on Shopify" reader, shared with the
-    # nightly parity and the reconciliation screen (set() on any failure).
-    on_live = skus_on_live_listings(db, skus)
 
     items: List[Dict[str, Any]] = []
     keys: List[tuple] = []
@@ -477,7 +495,7 @@ def stock_tally_summary(
             "total_reserved": tot_reserved,
             "total_sellable": tot_sellable,
             "online_configured": online_mapping_available(db),
-            "listed_qty_live": listed_live,
+            "listed_qty_live": listed_live or not on_live,
             "listed_live_rows": live_rows,
             "listed_mapped_rows": mapped_rows,
         },
@@ -594,6 +612,7 @@ async def stock_tally_live(db, limit: int = _RECONCILE_SCAN_LIMIT) -> Dict[str, 
     Degrades to the honest-unknown tally (listed None) when the live read is
     unavailable. Never raises."""
     live: Optional[Dict[str, Any]] = None
+    on_live: Optional[set] = None
     try:
         products = list(
             _coll(db, "products")
@@ -607,11 +626,16 @@ async def stock_tally_live(db, limit: int = _RECONCILE_SCAN_LIMIT) -> Dict[str, 
         if skus:
             from .shopify_push.inventory import skus_on_live_listings
 
-            on_live = skus_on_live_listings(db, skus)
-            live = await live_listed_qty_for_skus(db, [s for s in skus if str(s).strip() in on_live])
+            # ONE strict read of the live set, for the Shopify read AND the
+            # rows (a second read could disagree with the first). A failure
+            # leaves on_live None: the tally reads it again and reports a
+            # dead read as unknown.
+            on_live = skus_on_live_listings(db, skus, strict=True)
+            live_skus = [s for s in skus if str(s).strip() in on_live]
+            live = await live_listed_qty_for_skus(db, live_skus) if live_skus else None
     except Exception as exc:  # noqa: BLE001
         logger.debug("[STOCK_TALLY] live scan skipped: %s", exc)
-    return stock_tally_summary(db, limit=limit, live=live)
+    return stock_tally_summary(db, limit=limit, live=live, on_live=on_live)
 
 
 def failed_webhook_summary(db) -> Dict[str, Any]:

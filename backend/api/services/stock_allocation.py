@@ -62,7 +62,7 @@ def recommend_allocation(
 def classify(
     in_store: Optional[int],
     online: Optional[int],
-    is_online: bool,
+    is_online: Optional[bool],
     over: Optional[int],
     excess: Optional[int],
 ) -> str:
@@ -78,7 +78,13 @@ def classify(
     behind a listing could not be read -> ONHAND_UNKNOWN.
 
     ``excess``: the same count against the WRITER's number (its buffer, its
-    online block) instead of the shelf -> OVER_ALLOCATED; None is unknown."""
+    online block) instead of the shelf -> OVER_ALLOCATED; None is unknown.
+
+    ``is_online`` None means WHETHER the listing is live is unknown (the
+    live-listing read failed) -> LISTED_UNKNOWN, never a confident
+    NOT_ONLINE."""
+    if is_online is None:
+        return LISTED_UNKNOWN
     if not is_online:
         return NOT_ONLINE
     if in_store is None:
@@ -125,7 +131,8 @@ def reconcile_items(items: List[dict]) -> dict:
         in_store: Optional[int] = None if in_store_raw is None else _int(in_store_raw)
         online_raw = it.get("online")
         online: Optional[int] = None if online_raw is None else _int(online_raw)
-        is_online = bool(it.get("is_online"))
+        # An explicit None: whether the listing is live is unknown.
+        is_online = None if "is_online" in it and it["is_online"] is None else bool(it.get("is_online"))
         over, excess = it.get("unbacked"), it.get("excess")
         status = classify(in_store, online, is_online, over, excess)
         counts[status] = counts.get(status, 0) + 1
