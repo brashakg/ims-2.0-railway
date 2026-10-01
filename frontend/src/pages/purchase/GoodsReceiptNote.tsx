@@ -13,6 +13,7 @@ import { Check, AlertCircle, Package, FileText, Printer, Loader2, Trash2 } from 
 import clsx from 'clsx';
 import { vendorsApi } from '../../services/api';
 import { grnCockpitApi, type UploadDocResult } from '../../services/api/grnCockpit';
+import { istDayString } from '../../utils/datetime';
 import { productApi } from '../../services/api/products';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
@@ -178,7 +179,11 @@ export function GoodsReceiptNote() {
   // number/date if any. Posts a NO_PO receipt; its bill claims no GST credit.
   const [isNoPo, setIsNoPo] = useState(false);
   const [dealerName, setDealerName] = useState('');
-  const [billDate, setBillDate] = useState(new Date().toISOString().split('T')[0]);
+  // Today in IST (toISOString is the UTC day -- yesterday before 05:30 IST).
+  // Reset whenever the mode is ticked, or the next walk-in receipt carried the
+  // previous bill's date into its receipt and, later, its bill draft.
+  const istToday = () => istDayString(new Date()) ?? '';
+  const [billDate, setBillDate] = useState(istToday);
   const [billPhoto, setBillPhoto] = useState<UploadDocResult | null>(null);
   const [uploading, setUploading] = useState(false);
   const [grns, setGrns] = useState<GRN[]>([]);
@@ -781,6 +786,7 @@ export function GoodsReceiptNote() {
                     setDcVendorId('');
                     setDealerName('');
                     setBillPhoto(null);
+                    setBillDate(istToday());
                     setDcQuery('');
                     setDcResults([]);
                   }}
@@ -830,10 +836,15 @@ export function GoodsReceiptNote() {
                     />
                   </div>
                   <div>
-                    <label className="block text-xs font-medium mb-1" style={{ color: 'var(--ink-4)' }}>
+                    <label
+                      htmlFor="no-po-bill-date"
+                      className="block text-xs font-medium mb-1"
+                      style={{ color: 'var(--ink-4)' }}
+                    >
                       Bill date
                     </label>
                     <input
+                      id="no-po-bill-date"
                       type="date"
                       value={billDate}
                       onChange={(e) => setBillDate(e.target.value)}

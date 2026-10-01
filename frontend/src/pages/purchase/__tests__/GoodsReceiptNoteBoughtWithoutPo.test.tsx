@@ -131,4 +131,26 @@ describe('C7 / D14 - bought without a PO', () => {
       expect.objectContaining({ product_id: 'P-FR1', received_qty: 2, unit_price: 3100 }),
     ]);
   });
+
+  it('the bill date starts at today in IST and never carries over to the next walk-in bill', async () => {
+    // 01:30 IST on 1 October is still 30 September in UTC.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-30T20:00:00Z'));
+    try {
+      render(<GoodsReceiptNote />);
+      await waitFor(() => expect(api.getGRNs).toHaveBeenCalled());
+      const mode = () => screen.getByLabelText(/Bought without (a )?PO/i, { selector: 'input' });
+      const billDate = () => screen.getByLabelText(/Bill date/i) as HTMLInputElement;
+
+      fireEvent.click(mode());
+      expect(billDate().value).toBe('2026-10-01');
+      fireEvent.change(billDate(), { target: { value: '2026-09-14' } });
+      // Out of the mode and back in (as after a posted receipt): a fresh bill.
+      fireEvent.click(mode());
+      fireEvent.click(mode());
+      expect(billDate().value).toBe('2026-10-01');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
