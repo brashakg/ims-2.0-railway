@@ -2347,8 +2347,10 @@ def _book_mirror_purchase(transfer: Dict) -> None:
             "total_amount": round(taxable + tax, 2),
             "total": round(taxable + tax, 2),
             # ITC eligibility: inter-entity transfers are stock-in-trade, so
-            # eligible by default. The CA can flag itc_blocked if needed.
-            "itc_eligible": True,
+            # claimable -- decided by the ONE helper every booking door and
+            # reader uses: a sending shop with no valid registration gives no
+            # credit. The CA can flag itc_blocked if needed.
+            "itc_eligible": ov.itc_claimable(from_gstin),
             "itc_blocked": False,
             "status": "OUTSTANDING",
             "auto_generated": True,

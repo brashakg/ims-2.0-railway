@@ -866,6 +866,56 @@ class TestTransferMirrorHeadsAreTheOneRule:
             trf._get_db = saved
 
 
+class TestTheMirrorsCreditIsTheOneHelpers:
+    """Round 13 #2: the mirror booked itc_eligible True as a literal while the
+    reader asks itc_claimable(vendor_gstin). A sending shop with no
+    registration has no GSTIN to claim against."""
+
+    @staticmethod
+    def _world():
+        return _mongo(
+            [
+                ({"entity_id": "E1", "name": "BVOPL",
+                  "gstins": [{"gstin": BUY_JH, "state_code": "20", "is_primary": True}]},
+                 [{"store_id": "S1", "entity_id": "E1", "state_code": "20", "gstin": BUY_JH},
+                  {"store_id": "PUNE", "entity_id": "E1", "state_code": "27", "gstin": None}]),
+                ({"entity_id": "E2", "name": "WizOpt",
+                  "gstins": [{"gstin": BUY_MH, "state_code": "27", "is_primary": True}]},
+                 [{"store_id": "S2", "entity_id": "E2", "state_code": "27", "gstin": BUY_MH}]),
+            ]
+        )
+
+    @staticmethod
+    def _mirror(db, src, dst):
+        from api.routers import transfers as trf
+
+        saved = trf._get_db
+        try:
+            trf._get_db = lambda: db
+            trf._book_mirror_purchase({
+                "id": "t", "transfer_number": "T", "total_value": 1000, "items": [],
+                "from_location_id": src, "to_location_id": dst,
+                "completed_at": "2026-05-10T05:00:00",
+            })
+        finally:
+            trf._get_db = saved
+        return db["vendor_bills"].find_one({}, {"_id": 0})
+
+    def test_a_sender_with_no_registration_gives_no_credit_and_the_row_clears(self):
+        db = self._world()
+        bill = self._mirror(db, "PUNE", "S1")
+        assert bill["vendor_gstin"] == "" and bill["itc_eligible"] is False, bill
+        xc = _crosscheck(db, "E1")
+        assert _row(xc, "Input credit from suppliers with no GSTIN")["status"] == "MATCH"
+        assert xc["gstr3b"]["itc"]["total"] == 0.0
+
+    def test_a_registered_sender_keeps_the_credit(self):
+        db = self._world()
+        bill = self._mirror(db, "S2", "S1")
+        assert bill["vendor_gstin"] == BUY_MH and bill["itc_eligible"] is True, bill
+        assert _crosscheck(db, "E1")["gstr3b"]["itc"]["total"] == bill["tax_amount"] > 0
+
+
 # ===========================================================================
 # Panel round 4 -- a bill's date, the form's shop, the debit note's head,
 # the list, and a company with no GST number
@@ -1743,6 +1793,8 @@ class TestTheNoGstinNoteNamesOnlyWhatTheAppCanDo:
         )
         db["stores"].insert_one({"store_id": "S9", "entity_id": "E2", "state_code": "29"})
         assert _mirror(db, "S9", "S1")["vendor_gstin"] == ""
+        # A mirror made before round 14 (it booked credit as a literal True).
+        db["vendor_bills"].update_many({}, {"$set": {"itc_eligible": True}})
         row = _row(_crosscheck(db, "E1"), self.NOTE)
         assert row["status"] == "MISMATCH", row
         low = row["note"].lower()
@@ -1772,8 +1824,10 @@ class TestTheMirrorHeadIsTheOneRule:
         assert bill["interstate"] is verdict is False
         assert (bill["cgst_total"], bill["sgst_total"], bill["igst_total"]) == (25.0, 25.0, 0.0)
         assert bill["place_of_supply"] == ""
+        # Round 14: a sender with no registration gives no credit, so the row clears.
+        assert bill["itc_eligible"] is False
         row = _row(_crosscheck(db, "E1"), "Input credit from suppliers with no GSTIN")
-        assert row["status"] == "MISMATCH" and "TRF/TR-9" in row["note"], row
+        assert row["status"] == "MATCH", row
 
     def test_the_reverse_direction_is_flagged_as_unplaced(self):
         """S1 -> PUNE: PUNE has no registration, so the mirror is on no return
