@@ -2423,7 +2423,14 @@ def clone_and_vary(
     if src is None:
         raise ProductMasterError("Source product not found.", status=404)
 
-    base_attrs = _overlay_attributes(src)  # canonical attrs incl. legacy overlay
+    # canonical attrs incl. legacy overlay -- never the source's manufacturer
+    # barcodes: a GTIN names ONE trade item, so a new SKU never inherits one (a
+    # variation may still carry its own).
+    base_attrs = {
+        k: v
+        for k, v in _overlay_attributes(src).items()
+        if k not in MANUFACTURER_BARCODE_ATTRIBUTES
+    }
     base_payload: Dict[str, Any] = {}
     for f in _CLONE_CATALOG_FIELDS:
         if src.get(f) is not None:

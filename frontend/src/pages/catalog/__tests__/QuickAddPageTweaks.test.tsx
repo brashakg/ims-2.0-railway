@@ -76,6 +76,7 @@ vi.mock('../../../constants/gstRuntime', () => ({
 
 import { QuickAddPage } from '../QuickAddPage';
 import { productApi } from '../../../services/api/products';
+import { productTemplatesApi } from '../../../services/api/productTemplates';
 import {
   getCategoryFields,
   validateProductForm,
@@ -326,6 +327,38 @@ describe('10 - Clone', () => {
     });
     renderPage('/catalog/add?clone=P-SRC');
     const card = (await screen.findByRole('heading', { name: 'Review' })).closest('.card')!;
+    await waitFor(() => expect(within(card).getByText('Lens Size (mm)')).toBeInTheDocument());
+    expect(within(card).queryByText('GTIN (mfr)')).toBeNull();
+    expect(within(card).queryByText('UPC (mfr)')).toBeNull();
+    expect(screen.queryByDisplayValue('5901234123457')).toBeNull();
+  });
+});
+
+describe('11 - a saved template', () => {
+  it('loads the shape but never a manufacturer barcode (the same strip as Clone)', async () => {
+    // A template saved from a product with a GTIN carried it into every new SKU.
+    vi.mocked(productTemplatesApi.list).mockResolvedValueOnce({
+      templates: [
+        {
+          template_id: 'T1',
+          name: 'RB4165 shape',
+          category: 'SG',
+          payload: {
+            ...blankSunglass({ mrp: '7890' }),
+            attributes: {
+              brand_name: 'Ray-Ban', model_no: 'RB4165', lens_size: '54',
+              gtin: '5901234123457', upc: '036000291452',
+            },
+          },
+        },
+      ],
+      total: 1,
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(screen.getByRole('button', { name: /^Templates/ }));
+    await user.click(await screen.findByText('RB4165 shape'));
+    const card = screen.getByRole('heading', { name: 'Review' }).closest('.card')!;
     await waitFor(() => expect(within(card).getByText('Lens Size (mm)')).toBeInTheDocument());
     expect(within(card).queryByText('GTIN (mfr)')).toBeNull();
     expect(within(card).queryByText('UPC (mfr)')).toBeNull();

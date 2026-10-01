@@ -49,6 +49,7 @@ import {
   validateReviewForm,
   variantFieldRule,
   variantFlaggedFormFields,
+  withoutManufacturerBarcodes,
 } from '../productAddShared';
 import {
   readReviewQueue,
@@ -1085,7 +1086,8 @@ export function useQuickAddForm() {
       // A template load replaces the whole form — leave variant mode if active.
       setVariantCtx(null);
       setFlaggedFields(new Set());
-      applyFormValues(tpl.payload);
+      // A template starts a NEW SKU: never with a maker's barcode (same strip as Clone).
+      applyFormValues(withoutManufacturerBarcodes(tpl.payload));
       setTemplatesOpen(false);
       toast.success(`Loaded template "${tpl.name}". Edit and save as a new product.`);
       window.scrollTo({ top: 0, behavior: 'smooth' });

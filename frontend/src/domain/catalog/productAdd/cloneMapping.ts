@@ -140,9 +140,15 @@ export function productToFormValues(product: ProductDoc): ProductFormValues {
  *  (variantRules VARIANT_NEVER_KEYS) reads this same list. */
 export const MANUFACTURER_BARCODE_KEYS = ['upc', 'gtin'];
 
+/** `values` minus the manufacturer barcodes: THE strip for every prefill that
+ *  starts a NEW SKU from another's data (Clone, a saved template). */
+export function withoutManufacturerBarcodes(values: ProductFormValues): ProductFormValues {
+  const attributes = { ...(values.attributes || {}) };
+  MANUFACTURER_BARCODE_KEYS.forEach((k) => delete attributes[k]);
+  return { ...values, attributes };
+}
+
 /** The Clone prefill: every stored field except the manufacturer barcodes. */
 export function productToCloneValues(product: ProductDoc): ProductFormValues {
-  const values = productToFormValues(product);
-  MANUFACTURER_BARCODE_KEYS.forEach((k) => delete values.attributes[k]);
-  return values;
+  return withoutManufacturerBarcodes(productToFormValues(product));
 }
