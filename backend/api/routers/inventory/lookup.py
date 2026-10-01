@@ -87,9 +87,9 @@ def _find(product_repo, stock_repo, q):
     product barcode, its manufacturer GTIN (attributes.gtin) or an IMS unit
     label -- then the active search hits, then their model family (other
     colours by the identity_key rule, other eye sizes by variant_of), so one
-    scan answers "in any colour?". The exact ones come first and are never
-    capped, so a scanned contact-lens power is never cut from a 300-power
-    family. Inactive (soft-deleted / draft) products never come back."""
+    scan answers "in any colour?". The exact ones come first, ahead of the
+    50-hit search and the 200-row family caps, so a scanned contact-lens
+    power is never cut from a 300-power family. Inactive (soft-deleted / draft) products never come back."""
     exact = [{"sku": q}, {"barcode": q}, {"attributes.gtin": q}]
     unit = stock_repo.find_by_barcode(q)
     if unit and unit.get("product_id"):
@@ -99,7 +99,7 @@ def _find(product_repo, stock_repo, q):
     hits += product_repo.search_products(q, limit=_HITS)
     hit_ids = [p["product_id"] for p in hits if p.get("product_id")]
     ids = list(hit_ids)
-    # ponytail: 3 indexed reads per distinct model among <= 51 hits; fold into
+    # ponytail: 3 indexed reads per distinct model among <= 100 hits; fold into
     # one identity_key $regex only if a broad brand search ever feels slow.
     for cat, brand, model in {(p.get("category"), p.get("brand"), p.get("model")) for p in hits}:
         similar = find_similar_products(
