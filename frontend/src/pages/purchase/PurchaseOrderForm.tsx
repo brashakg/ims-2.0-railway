@@ -25,6 +25,7 @@ import type {
 import { mapPOtoPurchaseOrder } from './purchaseMappers';
 import { CATEGORIES } from '../../domain/catalog/productAdd';
 import type { Supplier, PurchaseOrder, POItem } from './purchaseTypes';
+import { typedInNotAddedMessage } from './typedInNotAdded';
 
 interface PickedProduct {
   productId: string;
@@ -604,6 +605,8 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, editing, onClose
                 });
                 onCreated(mapPOtoPurchaseOrder(saved));
                 toast.success(`${editing.poNumber} saved`);
+                const notAdded = typedInNotAddedMessage(saved?.products_not_created);
+                if (notAdded) toast.warning(notAdded);
                 return;
               }
               const storeId = user?.activeStoreId ?? 'default';
@@ -651,6 +654,8 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, editing, onClose
 
               onCreated(newPO);
               toast.success(`Purchase Order ${newPO.poNumber} created as Draft`);
+              const notAdded = typedInNotAddedMessage(resp.products_not_created);
+              if (notAdded) toast.warning(notAdded);
               // Say what is missing rather than letting a short tax total pass
               // unnoticed -- the server is the authority on the rate, so this
               // reports what it actually stored, including the lines it taxed

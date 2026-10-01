@@ -667,6 +667,9 @@ export interface CreatedPurchaseOrder {
     taxed: boolean;
   }>;
   cost_filled?: Array<{ product_id: string; cost_price: number }>;
+  /** Typed-in lines whose product could not be written after the order was
+   *  saved (taken off the order, or to be checked). */
+  products_not_created?: Array<{ product_id: string; product_name?: string | null; reason: string }>;
   message?: string;
 }
 
