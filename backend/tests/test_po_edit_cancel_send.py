@@ -34,6 +34,7 @@ from fastapi import HTTPException  # noqa: E402
 from pydantic import ValidationError  # noqa: E402
 
 from api.routers import vendors as v  # noqa: E402
+from api.routers.vendors.models import cancel_reason  # noqa: E402
 from database.repositories.vendor_repository import PurchaseOrderRepository  # noqa: E402
 from strict_fakes import StrictCollection, matches  # noqa: E402
 
@@ -1862,3 +1863,43 @@ def test_an_edit_that_carries_the_stored_rate_and_hsn_keeps_them(monkeypatch):
     _run(v.update_po("PO1", _edit_body([line]), _user()))
     kept = repo.pos["PO1"]["items"][0]
     assert (kept["quantity"], kept["tax_rate"], kept["hsn"]) == (5, 12, "9004")
+
+
+def test_an_edit_that_omits_the_rate_and_hsn_keeps_the_stored_ones(monkeypatch):
+    """A client that does not echo rate/HSN back must not see a typed-in 12% /
+    9004 revert to the catalogue's 5% / 9003."""
+    po = _kept_po()
+    po["items"][0].update(tax_rate=12, hsn="9004")
+    repo, _ = _wire(monkeypatch, po)
+
+    class _Catalogue:
+        def find_by_id(self, pid):
+            return {"product_id": pid, "hsn_code": "9003", "gst_rate": 5}
+
+    monkeypatch.setattr(v, "get_product_repository", lambda: _Catalogue())
+    line = {k: val for k, val in _ONE_LINE[0].items() if k not in ("gst_rate", "hsn")}
+    line["quantity"] = 5
+    _run(v.update_po("PO1", _edit_body([line]), _user()))
+    kept = repo.pos["PO1"]["items"][0]
+    assert (kept["quantity"], kept["tax_rate"], kept["hsn"]) == (5, 12, "9004")
+    # An explicit value still wins.
+    _run(v.update_po("PO1", _edit_body([{**line, "gst_rate": 18, "hsn": "9005"}]), _user()))
+    kept = repo.pos["PO1"]["items"][0]
+    assert (kept["tax_rate"], kept["hsn"]) == (18, "9005")
+
+
+@pytest.mark.parametrize(
+    "blank",
+    ["\u3164\u3164\u3164", "\u115f\u1160\uffa0", "\u0301\u0301\u0301", "\ufe0f\ufe0f\ufe0f",
+     "ab\u3164", "a\ufe0f\u0301"],
+)
+def test_a_reason_of_invisible_fillers_or_bare_marks_is_refused(blank):
+    with pytest.raises(ValidationError):
+        v.POLineCancel(reason=blank)
+    with pytest.raises(ValueError):  # the whole-order cancel uses the same rule
+        cancel_reason(blank)
+
+
+@pytest.mark.parametrize("ok", ["damaged in transit", "गलत माल"])
+def test_real_reasons_still_pass(ok):
+    assert v.POLineCancel(reason=ok).reason == ok

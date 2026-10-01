@@ -968,6 +968,20 @@ async def update_po(
     notes = (body.notes or None) if "notes" in given else (po.get("notes") or None)
 
     old_items = po.get("items") or []
+    # An edit that omits a line's GST rate or HSN keeps the stored one for the
+    # same product (an explicit value wins), so a typed-in rate does not
+    # silently revert to the catalogue's for a client that does not echo it.
+    stored_gst: dict = {}
+    for old in old_items:
+        stored_gst.setdefault(old.get("product_id"), old)
+    for line in body.items:
+        old = stored_gst.get(line.product_id) if line.new_product is None else None
+        if old is None:
+            continue
+        if line.gst_rate is None and old.get("tax_rate") is not None:
+            line.gst_rate = old["tax_rate"]
+        if not line.hsn and old.get("hsn"):
+            line.hsn = old["hsn"]
     computed, products, typed_in = price_po_lines(
         body.items, vendor, po.get("delivery_store_id"), current_user
     )
