@@ -25,7 +25,7 @@ import {
 } from 'lucide-react';
 import { useIsOnlineStore } from '../../hooks/useIsOnlineStore';
 import { useAuth } from '../../context/AuthContext';
-import { PurchaseShopPicker, usePurchaseShop, useShopLabel } from './purchaseShop';
+import { NewOrdersDeliverTo, PurchaseShopPicker } from './purchaseShop';
 import { APPROVE_ROLES } from './invoices/shared';
 
 const SECTIONS = [
@@ -48,8 +48,6 @@ export function PurchaseLayout() {
   const { pathname } = useLocation();
   const navigate = useNavigate();
   const { hasRole } = useAuth();
-  const { canPick, ownStoreId } = usePurchaseShop();
-  const ownShop = useShopLabel(ownStoreId);
 
   // Warm the sibling section chunks once the browser is idle, so the FIRST
   // click on any tab renders without the lazy-chunk download spinner (owner
@@ -104,9 +102,7 @@ export function PurchaseLayout() {
           )}
           {/* F63: whatever shop the filter shows, a new PO delivers to the
               admin's own shop (W1.4) -- say which before he creates it. */}
-          {canPick && pathname === '/purchase/orders' && (
-            <span className="text-xs text-gray-500">New orders deliver to {ownShop}</span>
-          )}
+          {pathname === '/purchase/orders' && <NewOrdersDeliverTo />}
         </div>
       </div>
 

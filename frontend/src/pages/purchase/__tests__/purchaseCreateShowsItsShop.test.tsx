@@ -51,7 +51,7 @@ vi.mock('../../../services/api/client', async (importOriginal) => {
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
-import { usePurchaseShop } from '../purchaseShop';
+import { NewOrdersDeliverTo, usePurchaseShop } from '../purchaseShop';
 import { PurchaseOrdersSection } from '../PurchaseOrdersSection';
 import { VendorReturns } from '../VendorReturns';
 import { GoodsReceiptNote } from '../GoodsReceiptNote';
@@ -127,6 +127,22 @@ describe('F63: a new PO or return shows in its own shop', () => {
     expect((http.post.mock.calls[0][1] as { store_id: string }).store_id).toBe('BV-DHN-01');
     await waitFor(() => expect(shopNow).toBe('BV-DHN-01'));
     await waitFor(() => expect(reads('/vendor-returns/')).toContain('BV-DHN-01'));
+  });
+});
+
+describe('F63: New PO says where it delivers', () => {
+  it('an admin viewing Pune is told new orders deliver to his own Dhanbad; an accountant sees no hint', async () => {
+    roles = ['ADMIN'];
+    http.get.mockImplementation((url: string) =>
+      Promise.resolve({ data: url === '/stores' ? { stores: [{ store_id: 'BV-DHN-01', store_name: 'Better Vision Dhanbad' }] } : {} }),
+    );
+    open(<NewOrdersDeliverTo />, 'BV-PUN-01');
+    expect(await screen.findByText('New orders deliver to Better Vision Dhanbad')).toBeInTheDocument();
+    cleanup();
+    roles = ['ACCOUNTANT'];
+    open(<NewOrdersDeliverTo />, '');
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.queryByText(/New orders deliver to/)).toBeNull();
   });
 });
 
