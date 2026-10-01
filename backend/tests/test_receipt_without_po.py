@@ -724,6 +724,30 @@ def test_c7_receipts_list_finds_and_names_bought_without_po(world):
     assert rows[0]["vendor_name"] == "Sharma Optical, Bank More"
 
 
+def test_c7_counter_staff_never_read_what_was_paid(world):
+    """Panel probe: a no-PO receipt stores the cost per line and the dealer's
+    name, and both GRN reads were open to any logged-in user -- SALES_STAFF
+    and CASHIER read unit_price [3100, 420] and 'Sharma Optical'. The reads
+    are the purchase roles' (the same gate as #1161), store-scoped."""
+    http = world["as_"](MANAGER)
+    created = http.post("/vendors/grn", json=_walk_in_body(world))
+    assert created.status_code == 201, created.text
+    grn_id = created.json()["grn_id"]
+    for role in ("SALES_STAFF", "CASHIER"):
+        counter = {**MANAGER, "user_id": f"u-{role.lower()}", "roles": [role]}
+        http = world["as_"](counter)
+        listed = http.get("/vendors/grn", params={"grn_subtype": "NO_PO"})
+        detail = http.get(f"/vendors/grn/{grn_id}")
+        assert listed.status_code == 403, (role, listed.text)
+        assert detail.status_code == 403, (role, detail.text)
+        assert "3100" not in listed.text + detail.text
+    mine = world["as_"](MANAGER).get(f"/vendors/grn/{grn_id}")
+    assert mine.status_code == 200
+    assert [ln["unit_price"] for ln in mine.json()["items"]] == [3100.0, 420.0]
+    other_shop = {**MANAGER, "store_ids": ["BV-OTHER-01"], "active_store_id": "BV-OTHER-01"}
+    assert world["as_"](other_shop).get(f"/vendors/grn/{grn_id}").status_code == 404
+
+
 def test_c7_movements_label_bought_without_po(world):
     db = world["db"]
     _seed_receipt(db, grn_id="GRN-STD-0007", subtype="STANDARD", po_id="PO-7", po_number="PO/7")
