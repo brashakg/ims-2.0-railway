@@ -8,7 +8,8 @@
  * (frontend/src/components/labels/unitLabel.ts, imported, never copied) in
  * Chromium under print media and measures what would print:
  *
- *   - the barcode text, the MRP and the size are shown whole, inside the window;
+ *   - the barcode text and the exact MRP (paise too) are shown whole, inside
+ *     the window, and so is a size that fits its line;
  *   - nothing is painted over anything else (a clamped long model or colour
  *     must be cut, not overprint the next line);
  *   - the text beside the widest barcode a label accepts keeps >= 12 mm;
