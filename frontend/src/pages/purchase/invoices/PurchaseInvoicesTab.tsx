@@ -302,6 +302,9 @@ function InvoiceList({ invoices, onOpen }: { invoices: PurchaseInvoice[]; onOpen
                 <td className="px-3 py-2">
                   <div className="font-medium text-gray-900">{pi.vendor_name || pi.vendor_id}</div>
                   <div className="text-xs text-gray-500">{pi.vendor_invoice_no}</div>
+                  {pi.itc_eligible === false && (
+                    <span className="mt-0.5 inline-flex items-center px-1.5 py-0.5 rounded-full text-[11px] font-medium bg-amber-100 text-amber-800" title="This bill claims no input credit">No credit</span>
+                  )}
                 </td>
                 <td className="px-3 py-2 text-gray-700">{(pi.vendor_invoice_date || '').slice(0, 10)}</td>
                 <td className="px-3 py-2 text-xs text-gray-500">

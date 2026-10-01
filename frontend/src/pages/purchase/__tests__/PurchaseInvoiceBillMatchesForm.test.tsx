@@ -517,3 +517,75 @@ describe('round 11 - a bill with no tax head is not shown as CGST+SGST', () => {
     expect(within(row).queryByText('CGST+SGST')).toBeNull();
   });
 });
+
+describe('round 14 - the credit verdict is visible and settable', () => {
+  it('shows "no valid GSTIN" when the preview says no credit, and nothing when it says credit', async () => {
+    routePosts(preview({ itc_eligible: false }));
+    await openManualServicesBill({ name: 'Freight', qty: '1', price: '1000', rate: '18' });
+    expect(await screen.findByText('No input credit: the supplier has no valid GSTIN')).toBeTruthy();
+    expect(screen.queryByText('No input credit: switched off')).toBeNull();
+  });
+
+  it('shows no line when the preview says the credit is claimable', async () => {
+    routePosts(preview({ itc_eligible: true }));
+    await openManualServicesBill({ name: 'Freight', qty: '1', price: '1000', rate: '18' });
+    await screen.findByText(/Inter-state supply:/);
+    expect(screen.queryByText(/No input credit/)).toBeNull();
+  });
+
+  it('switching credit off says "switched off", re-asks the preview and books with itc_eligible false', async () => {
+    routePosts(preview());
+    await openManualServicesBill({ name: 'Freight', qty: '1', price: '1000', rate: '18' });
+    await screen.findByText(/Inter-state supply:/);
+    expect(previewCalls().at(-1)?.[1].itc_eligible).toBe(true);
+    expect(previewCalls().at(-1)?.[1].reverse_charge).toBe(false);
+
+    routePosts(preview({ itc_eligible: false }));
+    const before = previewCalls().length;
+    fireEvent.click(screen.getByRole('switch', { name: /Claim input credit/ }));
+    expect(await screen.findByText('No input credit: switched off')).toBeTruthy();
+    expect(previewCalls().length).toBeGreaterThan(before);
+    const asked = previewCalls().at(-1)?.[1];
+    expect(asked.itc_eligible).toBe(false);
+
+    fireEvent.click(screen.getByRole('button', { name: /Book invoice/i }));
+    await waitFor(() => expect(createCalls()).toHaveLength(1));
+    expect(createCalls()[0][1]).toEqual(asked);
+    expect(createCalls()[0][1].itc_eligible).toBe(false);
+  });
+
+  it('ticking Reverse charge re-asks the preview and books with reverse_charge true', async () => {
+    routePosts(preview({ itc_eligible: false }));
+    await openManualServicesBill({ name: 'Freight', qty: '1', price: '1000', rate: '18' });
+    await screen.findByText('No input credit: the supplier has no valid GSTIN');
+
+    routePosts(preview({ itc_eligible: true }));
+    fireEvent.click(screen.getByRole('checkbox', { name: /Reverse charge/ }));
+    await waitFor(() => expect(previewCalls().at(-1)?.[1].reverse_charge).toBe(true));
+    await screen.findByText(/Inter-state supply:/);
+    expect(screen.queryByText(/No input credit/)).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: /Book invoice/i }));
+    await waitFor(() => expect(createCalls()).toHaveLength(1));
+    expect(createCalls()[0][1].reverse_charge).toBe(true);
+    expect(createCalls()[0][1].itc_eligible).toBe(true);
+  });
+
+  it('the list and the detail drawer badge a stored itc_eligible=false bill "No credit"', async () => {
+    routeGets({
+      '/vendors/purchase-invoices': {
+        purchase_invoices: [
+          { ...HELD_BILL, itc_eligible: false },
+          { ...HELD_BILL, bill_id: 'b-ok', invoice_id: 'b-ok', invoice_number: 'MLH-78', itc_eligible: true },
+        ],
+        total: 2,
+      },
+    });
+    renderTab();
+    // The list: one badge, on the no-credit bill only.
+    expect(await screen.findAllByText('No credit')).toHaveLength(1);
+    // The drawer for that bill carries it too (list badge + drawer badge).
+    fireEvent.click(screen.getAllByRole('button', { name: /View detail/ })[0]);
+    await waitFor(() => expect(screen.getAllByText('No credit')).toHaveLength(2));
+  });
+});

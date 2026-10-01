@@ -77,6 +77,9 @@ export function InvoiceFormDrawer({
   const [vendorInvoiceDate, setVendorInvoiceDate] = useState((prefill.vendor_invoice_date || today).slice(0, 10));
   const [recipientGstin, setRecipientGstin] = useState(prefill.recipient_gstin ?? '');
   const [notes, setNotes] = useState('');
+  // The two credit switches the server already takes (POST and /preview).
+  const [reverseCharge, setReverseCharge] = useState(false);
+  const [claimCredit, setClaimCredit] = useState(true);
   const [lines, setLines] = useState<EditLine[]>(initialLines);
   const [saving, setSaving] = useState(false);
 
@@ -121,11 +124,13 @@ export function InvoiceFormDrawer({
     // the backend runs the DC tally + flips dc_matched on each DC.
     linked_dc_ids: linkedDcIds && linkedDcIds.length ? linkedDcIds : undefined,
     bill_kind: receiptLinked ? 'GOODS' : (billKind || undefined),
+    reverse_charge: reverseCharge,
+    itc_eligible: claimCredit,
   };
   // What the tax depends on (not the invoice no. or notes): a change here asks
   // the server again, and Book waits until the answer is for THIS form. The
   // shop is in it: a bill with no receipt is booked for store_id's company.
-  const taxKey = JSON.stringify([payload.vendor_id, payload.recipient_gstin, payload.grn_id, payload.linked_dc_ids, payload.store_id, payload.lines]);
+  const taxKey = JSON.stringify([payload.vendor_id, payload.recipient_gstin, payload.grn_id, payload.linked_dc_ids, payload.store_id, payload.reverse_charge, payload.itc_eligible, payload.lines]);
   const [preview, setPreview] = useState<{ key: string; data?: PurchaseInvoicePreview; error?: string } | null>(null);
   const wantsPreview = Boolean(vendorId) && validLines.length > 0;
   useEffect(() => {
@@ -274,6 +279,27 @@ export function InvoiceFormDrawer({
                       : <>Pick the supplier and add a line to see the tax.</>}
               </div>
             </div>
+          </div>
+
+          {/* Input credit: the server's verdict for THIS form, and the two switches */}
+          <div className="rounded-lg border border-gray-200 px-3 py-2 space-y-2">
+            <div className="flex flex-wrap gap-x-6 gap-y-2">
+              <label className="inline-flex items-center gap-2 text-sm text-gray-700">
+                <input type="checkbox" checked={reverseCharge} onChange={(e) => setReverseCharge(e.target.checked)} />
+                Reverse charge
+              </label>
+              <label className="inline-flex items-center gap-2 text-sm text-gray-700">
+                <input type="checkbox" role="switch" checked={claimCredit} onChange={(e) => setClaimCredit(e.target.checked)} />
+                Claim input credit
+              </label>
+            </div>
+            {pv && pv.itc_eligible === false && (
+              <p className="text-xs font-medium text-amber-800">
+                {claimCredit
+                  ? 'No input credit: the supplier has no valid GSTIN'
+                  : 'No input credit: switched off'}
+              </p>
+            )}
           </div>
 
           {/* Line items */}

@@ -113,6 +113,8 @@ export interface PurchaseInvoice {
   recipient_gstin?: string;       // our GSTIN receiving the supply
   vendor_gstin?: string;
   is_interstate?: boolean;
+  // false = this bill claims NO input credit (server verdict, itc_claimable).
+  itc_eligible?: boolean;
   lines: PurchaseInvoiceLine[];
   taxable_amount: number;
   cgst: number;
@@ -257,6 +259,13 @@ export interface PurchaseInvoiceCreate {
   // What the bill is FOR ('GOODS' | 'SERVICES'). Required by the server on a
   // receipt-less booking; a GOODS bill refuses without its receipt link.
   bill_kind?: 'GOODS' | 'SERVICES';
+  // Reverse charge: we pay the tax, and may claim it even from an
+  // unregistered supplier. Server default false.
+  reverse_charge?: boolean;
+  // The user's own switch for input credit (server default true); the server
+  // still refuses credit when the supplier has no valid GSTIN and the bill is
+  // not reverse charge.
+  itc_eligible?: boolean;
 }
 
 // POST /preview: what the booking WILL store for the form as it stands (the
@@ -268,6 +277,8 @@ export interface PurchaseInvoicePreview {
   supplier_state?: string | null;
   supply_place_recipient?: string | null;
   interstate: boolean;
+  // Will the booking claim input credit? The server's one itc_claimable verdict.
+  itc_eligible?: boolean;
   lines: Array<{ taxable: number; gst_rate: number; cgst: number; sgst: number; igst: number; line_total: number }>;
   taxable_total: number;
   cgst_total: number;
@@ -492,6 +503,8 @@ function toInvoiceWire(payload: PurchaseInvoiceCreate) {
     notes: payload.notes,
     linked_dc_ids: payload.linked_dc_ids,
     bill_kind: payload.bill_kind,
+    reverse_charge: payload.reverse_charge,
+    itc_eligible: payload.itc_eligible,
     lines: payload.lines.map((l) => ({
       product_id: l.product_id,
       description: l.product_name,
