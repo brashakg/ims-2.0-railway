@@ -2090,3 +2090,107 @@ class TestRound12ThePoComposerShowsTheServersHead:
             ).status_code == 403
         finally:
             self._restore()
+
+
+class TestRound13OneItcClaimableHelper:
+    """Round 13 items 1+2: ONE helper decides claimable credit, so booking,
+    /preview and the reader agree. Under reverse charge the recipient pays the
+    tax and may claim it even from an unregistered supplier."""
+
+    def _vendor(self, db, gstin):
+        db["vendors"].insert_one({"vendor_id": "VN", "trade_name": "Local", "gstin": gstin, "credit_days": 0})
+
+    def test_the_helper_truth_table(self):
+        from api.services.org_validation import itc_claimable
+
+        assert itc_claimable(SUP_MH) is True
+        assert itc_claimable("NA") is False
+        assert itc_claimable("NA", reverse_charge=True) is True
+        assert itc_claimable(None, reverse_charge=True) is True
+        assert itc_claimable(SUP_MH, user_allows=False) is False
+        assert itc_claimable("NA", reverse_charge=True, user_allows=False) is False
+        assert itc_claimable(SUP_MH, reverse_charge=True, user_allows=False) is False
+
+    def test_an_rcm_bill_from_an_na_vendor_keeps_its_credit(self):
+        db = TestCreditLeftOffEveryReturnIsFlagged()._world()
+        self._vendor(db, "NA")
+        r = _app(db).post(_URL, json=_services(vendor_id="VN", invoice_number="RC-1", reverse_charge=True))
+        assert r.status_code == 201, r.text
+        assert r.json()["itc_eligible"] is True
+        xc = _crosscheck(db, "E1")["gstr3b"]
+        assert xc["rcm"]["total"] == 180.0 and xc["itc"]["total"] == 180.0
+        assert _register(db)["total_itc"] == 180.0
+        assert _row(_crosscheck(db, "E1"), "Input credit from suppliers with no GSTIN")["status"] == "MATCH"
+
+    def test_a_non_rcm_bill_from_an_na_vendor_has_none(self):
+        db = TestCreditLeftOffEveryReturnIsFlagged()._world()
+        self._vendor(db, "NA")
+        r = _app(db).post(_URL, json=_services(vendor_id="VN", invoice_number="NR-1"))
+        assert r.status_code == 201, r.text
+        assert r.json()["itc_eligible"] is False
+        assert _crosscheck(db, "E1")["gstr3b"]["itc"]["total"] == 0.0
+
+    @pytest.mark.parametrize(
+        "gstin,rcm,user,want",
+        [
+            (SUP_MH, False, True, True),
+            (SUP_MH, False, False, False),
+            ("NA", False, True, False),
+            ("NA", True, True, True),
+            ("NA", True, False, False),
+        ],
+    )
+    def test_the_preview_says_what_the_booking_stores(self, gstin, rcm, user, want):
+        db = TestCreditLeftOffEveryReturnIsFlagged()._world()
+        self._vendor(db, gstin)
+        extra = dict(vendor_id="VN", reverse_charge=rcm, itc_eligible=user)
+        pre = _app(db).post(f"{_URL}/preview", json={"lines": _services()["lines"], **extra})
+        assert pre.status_code == 200, pre.text
+        r = _app(db).post(_URL, json=_services(invoice_number="PV-1", **extra))
+        assert r.status_code == 201, r.text
+        assert pre.json()["itc_eligible"] is r.json()["itc_eligible"] is want
+
+
+class TestRound13NotesNameTheRealScreen:
+    def test_the_mirror_note_names_organization_and_table_4(self):
+        from api.services.gst_crosscheck import _unregistered_note
+
+        note = _unregistered_note({"bill_numbers": ["TRF/T-1"], "transfer_bill_numbers": ["TRF/T-1"]})
+        assert (
+            "Add the sending shop's company registration in Organization (left menu) "
+            "so later transfers carry one; on the GST portal, leave this credit out "
+            "of Table 4 of the GSTR-3B you file: TRF/T-1"
+        ) in note
+        assert "Settings, companies" not in note
+
+    def test_the_debit_note_refusal_names_organization(self):
+        import inspect
+        from api.services import rtv_debit_note
+
+        src = inspect.getsource(rtv_debit_note)
+        assert "shop's state in Organization (left menu) or correct the shop's state" in src
+        assert "Settings, companies" not in src
+
+    def test_the_booking_refusals_name_organization(self):
+        db = _FakeDB()
+        db.collections["entities"].clear()
+        err = _refused(pi_router._bill_recipient, db, None, None, "S1")
+        assert "Add the company and its GSTIN in Organization (left menu)" in err.detail["message"]
+        assert "Settings, companies" not in err.detail["message"]
+
+
+class TestRound13NoRegistrationReceiptShop:
+    def test_a_typed_company_gstin_at_a_shop_with_no_registration_is_422(self):
+        """A receipt at a shop the company holds no number for, plus a typed
+        company GSTIN, is refused -- never booked on the typed number."""
+        db = _one_company(
+            [{"store_id": "S1", "entity_id": "E1", "state_code": "20", "gstin": BUY_JH},
+             {"store_id": "BLR", "entity_id": "E1", "state_code": "29", "gstin": None}],
+            gstins=(BUY_JH,),
+        )
+        err = _refused(pi_router._bill_recipient, db, "BLR", BUY_JH)
+        assert err.status_code == 422
+        assert err.detail["code"] == "RECIPIENT_GSTIN_NOT_RECEIPT_SHOP"
+        assert err.detail["message"].startswith(
+            f"{BUY_JH} is not the GST number of the shop that received the goods (BLR, which has none)."
+        )

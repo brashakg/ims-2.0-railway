@@ -207,6 +207,17 @@ def has_valid_gstin(value) -> bool:
     return validate_gstin(value, verify_checksum=False)
 
 
+def itc_claimable(supplier_gstin, reverse_charge=False, user_allows=True) -> bool:
+    """THE answer to 'is this bill's input credit claimable'. The user did not
+    switch credit off AND (the bill is reverse charge OR the supplier has a
+    valid GSTIN). Under GST reverse charge the recipient pays the tax and may
+    claim it even when the supplier is unregistered. Booking, /preview and the
+    ITC reader all call this, so the three can never disagree."""
+    return bool(user_allows) and (
+        bool(reverse_charge) or has_valid_gstin(supplier_gstin)
+    )
+
+
 def validate_ifsc(ifsc: Optional[str]) -> bool:
     return bool(_IFSC_RE.match(_norm(ifsc)))
 

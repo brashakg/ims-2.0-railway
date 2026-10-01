@@ -757,7 +757,7 @@ def _unregistered_note(unreg: dict) -> str:
             "company, so IMS set the head from the two shops' GST numbers "
             "with no sender registration. They do not appear in Purchase "
             "Invoices and cannot be booked again. Add the sending shop's "
-            "company registration (Settings, companies) so later transfers "
+            "company registration in Organization (left menu) so later transfers "
             "carry one; on the GST portal, leave this credit out of Table 4 "
             "of the GSTR-3B you file: %s" % (len(mirrors), ", ".join(mirrors[:20]))
         )

@@ -862,7 +862,7 @@ class DebitNoteEngine:
                 "error": "seller_has_no_gstin",
                 "message": f"{name} has no GST number for shop {store_id}, so no "
                 "debit note was issued. Add the company's registration for the "
-                "shop's state (Settings, companies) or correct the shop's state "
+                "shop's state in Organization (left menu) or correct the shop's state "
                 "or GSTIN (Settings, stores).",
             }
 

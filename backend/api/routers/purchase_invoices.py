@@ -187,6 +187,10 @@ class PurchaseInvoicePreview(BaseModel):
     linked_dc_ids: Optional[List[str]] = None
     recipient_gstin: Optional[str] = None
     store_id: Optional[str] = None  # see PurchaseInvoiceCreate.store_id
+    # Same two switches POST / takes, so the preview's itc_eligible is the
+    # booking's (one helper, org_validation.itc_claimable).
+    itc_eligible: bool = True
+    reverse_charge: bool = False
 
 
 def _clean(doc: dict) -> dict:
@@ -1181,7 +1185,7 @@ def _bill_recipient(
                 "RECIPIENT_NO_COMPANY_MASTER",
                 "There is no company master, so IMS cannot tell which of our "
                 "GST numbers this bill is for. Add the company and its GSTIN "
-                "(Settings, companies)"
+                "in Organization (left menu)"
                 + (", or type our GSTIN as printed on the supplier's bill." if gstin_box else "."),
             )
         return {"recipient_entity_id": entity_id, "recipient_gstin": gstin}
@@ -1240,7 +1244,7 @@ def _bill_recipient(
             "RECIPIENT_COMPANY_HAS_NO_GSTIN",
             f"{name} has no GST number in the company master, so this bill "
             "cannot be put on a GST return. Add the company's GSTIN "
-            "(Settings, companies), then record the bill again.",
+            "in Organization (left menu), then record the bill again.",
         )
     shop_gstin = ov.shop_gstin(entity, shop)
     if not shop_gstin:
@@ -1254,7 +1258,7 @@ def _bill_recipient(
                 + f"{name} holds none for the shop's state "
                 f"({ov.state_name(state) or 'not set'}). Correct the shop's "
                 "state or GSTIN (Settings, stores), or add the company's "
-                "registration for that state (Settings, companies)"
+                "registration for that state in Organization (left menu)"
             )
         else:
             why = (
@@ -1869,7 +1873,9 @@ async def create_purchase_invoice(
         # Round 12 item 6: no valid supplier GSTIN on the invoice, no input
         # credit -- decided here, once, so the register, GSTR-3B and the
         # Cross-Check all read it from the stored flag.
-        "itc_eligible": bool(body.itc_eligible) and ov.has_valid_gstin(supplier_gstin),
+        "itc_eligible": ov.itc_claimable(
+            supplier_gstin, body.reverse_charge, body.itc_eligible
+        ),
         "reverse_charge": bool(body.reverse_charge),
         "outstanding": total,
         "status": "OUTSTANDING",
@@ -2111,7 +2117,9 @@ async def preview_purchase_invoice(
     )
     return {
         "vendor_gstin": supplier_gstin,
-        "itc_eligible": ov.has_valid_gstin(supplier_gstin),
+        "itc_eligible": ov.itc_claimable(
+            supplier_gstin, body.reverse_charge, body.itc_eligible
+        ),
         "recipient_entity_id": recipient.get("recipient_entity_id"),
         "recipient_gstin": recipient.get("recipient_gstin"),
         "supplier_state": computed["supplier_state"],

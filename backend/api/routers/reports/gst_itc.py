@@ -4,7 +4,7 @@ import re
 from datetime import date
 
 from ...services.ap_engine import iso_bill_date
-from ...services.org_validation import has_valid_gstin, shop_gstins
+from ...services.org_validation import itc_claimable, shop_gstins
 
 # ============================================================================
 # GST RETURNS - GSTR-3B (Summary Return)
@@ -298,7 +298,7 @@ def _itc_unplaced(db, year, mon, last_day, entity_id=None) -> dict:
                 continue
             # The bill's own supplier GSTIN decided its head; the vendor
             # master's current one did not, so it never clears the bill.
-            if not (b.get("reverse_charge") or has_valid_gstin(b.get("vendor_gstin"))):
+            if not itc_claimable(b.get("vendor_gstin"), b.get("reverse_charge")):
                 _add(unreg, b, tax)
                 if b.get("source_transfer_id"):
                     unreg["transfer_bill_numbers"].append(
