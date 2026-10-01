@@ -12,7 +12,7 @@ import clsx from 'clsx';
 import { useToast } from '../../context/ToastContext';
 import { adminSystemApi, policiesApi } from '../../services/api';
 import { financeApi } from '../../services/api/finance';
-import { AdminControlPanel } from '../../components/settings/AdminControlPanel';
+import { AdminControlPanel } from './SettingsAdminControls';
 import { AutoLogoutSettings } from '../../components/settings/AutoLogoutSettings';
 
 export function SystemSettingsPage() {
