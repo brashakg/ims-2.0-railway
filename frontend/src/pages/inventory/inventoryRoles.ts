@@ -52,6 +52,19 @@ export const POWER_GRID_ROLES: UserRole[] = [
   'OPTOMETRIST',
 ];
 
+/**
+ * Who may set a shop's reorder level (owner ruling D12): managers their own
+ * shop, admins any. The SAME set as the server's gate on
+ * PUT /inventory/reorder-levels (pinned by test_per_shop_reorder_levels.py).
+ * CATALOG_MANAGER is NOT in it - they edit the product-wide fields only.
+ */
+export const REORDER_LEVEL_ROLES: UserRole[] = [
+  'SUPERADMIN',
+  'ADMIN',
+  'AREA_MANAGER',
+  'STORE_MANAGER',
+];
+
 /** Nav visibility for the two sections that live behind tighter gates. */
 export function canManageInventory(roles: readonly string[] | undefined | null): boolean {
   if (!roles) return false;

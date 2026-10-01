@@ -57,6 +57,9 @@ import {
 } from '../reviewQueue';
 import { productListPath, sectionOfError, type EditMode, type SectionId } from './shared';
 import { useProductImages } from './useProductImages';
+import { reorderApi } from '../../../services/api/inventory';
+import { REORDER_LEVEL_ROLES } from '../../inventory/inventoryRoles';
+import { typedLevel, levelText, isLevelInputValid, LEVEL_INPUT_ERROR } from '../../../utils/reorderLevel';
 
 export function useQuickAddForm() {
   const { hasRole, user } = useAuth();
@@ -80,8 +83,21 @@ export function useQuickAddForm() {
 
   // Inventory. Stock is added via Goods Receipt (GRN), and both the SKU and our
   // internal barcode are auto-assigned (SKU at create, barcode at GRN) — there
-  // is no manual quantity or barcode entry here. Only the reorder level is set.
-  const [reorderLevel, setReorderLevel] = useState('5');
+  // is no manual quantity or barcode entry here. Only the reorder level is set:
+  // the level at the user's active shop ('' = not set), written only by the
+  // roles that may set a shop's level (a catalogue manager has none to set).
+  const [reorderLevel, setReorderLevel] = useState('');
+  // The browser's verdict on malformed number text (its value reads as '').
+  const [reorderBadInput, setReorderBadInput] = useState(false);
+  const reorderShop = user?.activeStoreId || '';
+  const canSetReorderLevel = !!reorderShop && hasRole(REORDER_LEVEL_ROLES);
+  // Edit mode: the product's per-shop levels as loaded. The field shows the
+  // ACTIVE shop's (an effect, not the loader: the signed-in user -- and so
+  // the shop -- can arrive after the product does on a fresh page load).
+  const [editLevels, setEditLevels] = useState<Record<string, unknown> | null>(null);
+  useEffect(() => {
+    if (editLevels) setReorderLevel(levelText(editLevels[reorderShop]));
+  }, [editLevels, reorderShop]);
 
   // Online (Shopify)
   const [syncToShopify, setSyncToShopify] = useState(false);
@@ -309,7 +325,9 @@ export function useQuickAddForm() {
       setOfferPrice('');
       setCostPrice('');
       setDiscountCategory('');
-      setReorderLevel('5');
+      setReorderLevel('');
+      setReorderBadInput(false);
+      setEditLevels(null);
       setSyncToShopify(false);
       setShopifyTags([]);
       setImages([]);
@@ -536,16 +554,29 @@ export function useQuickAddForm() {
         return;
       }
 
+      if (canSetReorderLevel && (reorderBadInput || !isLevelInputValid(reorderLevel))) {
+        toast.error(LEVEL_INPUT_ERROR);
+        return;
+      }
+      // THIS shop's level, written on its own (never inside the product).
+      // Fail-soft: a failed level write must not fail the product save.
+      const saveShopLevel = async (productId: string) => {
+        try {
+          await reorderApi.setShopLevel(productId, reorderShop, typedLevel(reorderLevel));
+        } catch {
+          toast.warning('Product saved, but the reorder level could not be saved.');
+        }
+      };
+
       setIsSubmitting(true);
       try {
         if (editMode?.kind === 'spine') {
           // EDIT-IN-PLACE: one validated PUT. Identity (SKU/barcode/category)
-          // is never sent — it is immutable through this door; reorder_point
-          // rides inside the same PUT (no follow-up write), and the 409
+          // is never sent — it is immutable through this door; the shop's
+          // reorder level follows as its own write, and the 409
           // dup-rescue branch can't fire (PUT never throws DuplicateProductError).
           // (Review mode never reaches handleSubmit — it has its own fork.)
           const payload = buildProductPayload(values);
-          const reorderNum = Number(reorderLevel);
           await productApi.updateProduct(editMode.id, {
             brand: payload.brand,
             model: payload.model,
@@ -561,10 +592,13 @@ export function useQuickAddForm() {
             ...(payload.discount_category
               ? { discount_category: payload.discount_category }
               : {}),
-            ...(Number.isFinite(reorderNum) && reorderNum >= 0
-              ? { reorder_point: reorderNum }
-              : {}),
           });
+          // Only a level the user changed: an untouched one sends nothing (it
+          // could clear an unset level or overwrite a newer save by someone else).
+          const loadedLevel = typedLevel(levelText(editLevels?.[reorderShop]));
+          if (canSetReorderLevel && typedLevel(reorderLevel) !== loadedLevel) {
+            await saveShopLevel(editMode.id);
+          }
           toast.success(
             editMode.sku ? `Updated ${editMode.sku} — same SKU, no new product.` : 'Product updated.'
           );
@@ -572,19 +606,12 @@ export function useQuickAddForm() {
           return;
         }
         const created = await productApi.createProduct(buildProductPayload(values));
-        // Persist the reorder level via a follow-up update on the new product_id
-        // (ProductCreate doesn't model reorder_point; ProductUpdate does). The
+        // A TYPED level is this shop's, written for the new product_id. The
         // SKU is auto-minted by the backend and our internal barcode is assigned
-        // at Goods Receipt — neither is entered here. Fail-soft: a failed reorder
-        // update must not fail the create the user just did.
+        // at Goods Receipt — neither is entered here.
         const newId = created?.product_id || created?.id;
-        const reorderNum = Number(reorderLevel);
-        if (newId && Number.isFinite(reorderNum) && reorderNum >= 0) {
-          try {
-            await productApi.updateProduct(newId, { reorder_point: reorderNum });
-          } catch {
-            toast.warning('Product created, but the reorder level could not be saved.');
-          }
+        if (newId && canSetReorderLevel && typedLevel(reorderLevel) !== null) {
+          await saveShopLevel(newId);
         }
         // Surface the auto-assigned SKU (and barcode, if the backend returned one)
         // so the operator sees the clean system-generated identifiers.
@@ -633,7 +660,7 @@ export function useQuickAddForm() {
     },
     [
       currentValues, toast, resetForm, navigate, variantCtx, startNextVariant,
-      editMode, reorderLevel,
+      editMode, editLevels, reorderLevel, reorderBadInput, canSetReorderLevel, reorderShop,
     ]
   );
 
@@ -1197,9 +1224,10 @@ export function useQuickAddForm() {
           setFlaggedFields(new Set());
           applyFormValues(productToFormValues(product));
           setEditMode({ kind: 'spine', id: editId, sku: String(product.sku || '') });
-          // Prefill the reorder level so the single PUT round-trips it.
-          const rp = Number((product as { reorder_point?: unknown }).reorder_point);
-          setReorderLevel(Number.isFinite(rp) && rp >= 0 ? String(rp) : '5');
+          // THIS shop's level; not set here = blank (never another shop's,
+          // never the old chain-wide reorder_point). See editLevels above.
+          const levels = (product as { reorder_levels?: Record<string, unknown> }).reorder_levels;
+          setEditLevels(levels && typeof levels === 'object' ? levels : {});
         }
       } catch {
         if (!cancelled) toast.error('Could not load the product to edit.');
@@ -1402,7 +1430,7 @@ export function useQuickAddForm() {
     weight, setWeight,
     mrp, setMrp, offerPrice, setOfferPrice, costPrice, setCostPrice,
     discountCategory,
-    reorderLevel, setReorderLevel,
+    reorderLevel, setReorderLevel, setReorderBadInput, canSetReorderLevel, reorderShop,
     syncToShopify, setSyncToShopify, shopifyTags, setShopifyTags,
     images, setImages,
     displayName, setDisplayName, reviewTags, setReviewTags,
