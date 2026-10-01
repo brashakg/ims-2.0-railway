@@ -295,3 +295,74 @@ describe('a bill that never had a tax head decided', () => {
     expect([rows[0].is_interstate, rows[1].is_interstate]).toEqual([false, true]);
   });
 });
+
+describe('round 12 mapper hardening (#10, #11, #12)', () => {
+  it('#10 a null / non-object line is dropped, not thrown on', async () => {
+    mockGet.mockResolvedValue({
+      data: {
+        purchase_invoices: [
+          { purchase_invoice_id: 'pi_1', lines: [null, 'x', 7, [], { description: 'Frame', qty: 2 }] },
+        ],
+        total: 1,
+      },
+    });
+    const { purchase_invoices } = await purchaseInvoicesApi.list();
+    expect(purchase_invoices).toHaveLength(1);
+    expect(purchase_invoices[0].lines).toHaveLength(1);
+    expect(purchase_invoices[0].lines[0].product_name).toBe('Frame');
+  });
+
+  it('#10 a draft with lines:[null] still opens', async () => {
+    mockGet.mockResolvedValue({ data: { vendor_id: 'v', lines: [null] } });
+    const draft = await purchaseInvoicesApi.createFromGrn('G1');
+    expect(draft.lines).toEqual([]);
+  });
+
+  it('#11 the id is purchase_invoice_id, else bill_id, invoice_id, id, _id', async () => {
+    for (const [doc, want] of [
+      [{ purchase_invoice_id: 'a', id: 'z' }, 'a'],
+      [{ bill_id: 'b' }, 'b'],
+      [{ invoice_id: 'c' }, 'c'],
+      [{ id: 'd' }, 'd'],
+      [{ _id: 'e' }, 'e'],
+      [{ purchase_invoice_id: '', _id: 'f' }, 'f'],
+    ] as const) {
+      mockGet.mockResolvedValue({ data: { purchase_invoices: [doc], total: 1 } });
+      const { purchase_invoices } = await purchaseInvoicesApi.list();
+      expect(purchase_invoices[0].purchase_invoice_id).toBe(want);
+    }
+  });
+
+  it('#11 a write with no id throws and sends nothing; a read returns null', async () => {
+    for (const bad of ['', undefined, null, 'undefined']) {
+      await expect(
+        purchaseInvoicesApi.approveException(bad as unknown as string, { reason: 'ok' }),
+      ).rejects.toThrow(/no id/);
+    }
+    expect(await purchaseInvoicesApi.getMatch(undefined as unknown as string)).toBeNull();
+    expect(mockPost).not.toHaveBeenCalled();
+    expect(mockGet).not.toHaveBeenCalled();
+  });
+
+  it('#11 a real id still posts', async () => {
+    mockPost.mockResolvedValue({ data: { ok: true } });
+    await purchaseInvoicesApi.approveException('pi_9', { reason: 'ok' });
+    expect(mockPost).toHaveBeenCalledWith(
+      '/vendors/purchase-invoices/pi_9/approve-exception',
+      { reason: 'ok' },
+    );
+  });
+
+  it('#12 an empty string falls through to the alias (name and HSN)', async () => {
+    mockGet.mockResolvedValue({
+      data: {
+        purchase_invoices: [
+          { purchase_invoice_id: 'p', lines: [{ hsn_code: '', hsn: '9003', product_name: '', description: 'X' }] },
+        ],
+        total: 1,
+      },
+    });
+    const { purchase_invoices } = await purchaseInvoicesApi.list();
+    expect(purchase_invoices[0].lines[0]).toMatchObject({ hsn_code: '9003', product_name: 'X' });
+  });
+});

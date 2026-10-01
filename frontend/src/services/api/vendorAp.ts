@@ -4,6 +4,7 @@
 // Import this directly (not via the services/api barrel) -- newly-added
 // services don't resolve through the barrel re-export (TS2614).
 
+import { requireInvoiceId } from './requireId';
 import api from './client';
 import type { ReconBlock } from './purchaseRecon';
 
@@ -401,10 +402,16 @@ export const vendorApApi = {
 // (F37), and a booked bill's detail drawer read 'Line 1 | - | -' on every row.
 function mapLinesFromApi(lines: unknown): PurchaseInvoiceLine[] {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return ((Array.isArray(lines) ? lines : []) as Record<string, any>[]).map((l) => ({
+  // A null / string / number entry is not a line: drop it, never throw (a
+  // throw in list() renders as an empty list, in createFromGrn as a toast).
+  const objects = (Array.isArray(lines) ? lines : []).filter(
+    (l): l is Record<string, any> => !!l && typeof l === 'object' && !Array.isArray(l),
+  );
+  return objects.map((l) => ({
     ...l,
-    product_name: l.product_name ?? l.description ?? '',
-    hsn_code: l.hsn_code ?? l.hsn ?? '',
+    // `||`, not `??`: an empty string is "not there", so the alias still wins.
+    product_name: l.product_name || l.description || '',
+    hsn_code: l.hsn_code || l.hsn || '',
     quantity: l.quantity ?? l.qty ?? 0,
     taxable_amount: l.taxable_amount ?? l.taxable,
   })) as PurchaseInvoiceLine[];
@@ -426,7 +433,8 @@ function mapInvoiceFromApi(doc: Record<string, any>): PurchaseInvoice {
     ...doc,
     // The stored doc carries bill_id / invoice_id; every Approve / match /
     // recon door acts on purchase_invoice_id (F7: they POSTed /undefined/).
-    purchase_invoice_id: doc.purchase_invoice_id ?? doc.bill_id ?? doc.invoice_id,
+    purchase_invoice_id:
+      doc.purchase_invoice_id || doc.bill_id || doc.invoice_id || doc.id || doc._id,
     vendor_invoice_no: doc.vendor_invoice_no ?? doc.invoice_number ?? doc.bill_number ?? '',
     vendor_invoice_date: doc.vendor_invoice_date ?? doc.invoice_date ?? doc.bill_date ?? '',
     cgst,
@@ -575,6 +583,8 @@ export const purchaseInvoicesApi = {
   // (404/500) or the invoice has no PO/GRN to match -> the drawer hides the
   // section instead of throwing/white-screening.
   getMatch: async (id: string): Promise<PurchaseInvoiceMatch | null> => {
+    // A read: no id means no request (never GET /undefined/match), and null.
+    if (!id) return null;
     try {
       const res = await api.get(`/vendors/purchase-invoices/${id}/match`);
       const env = res.data as MatchEnvelope;
@@ -595,6 +605,7 @@ export const purchaseInvoicesApi = {
     id: string,
     payload: { reason: string },
   ): Promise<ApproveExceptionResult> => {
+    requireInvoiceId(id);
     const res = await api.post(`/vendors/purchase-invoices/${id}/approve-exception`, payload);
     return res.data as ApproveExceptionResult;
   },

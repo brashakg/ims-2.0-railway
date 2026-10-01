@@ -10,6 +10,7 @@
 //   GET  /api/v1/vendors/recon/worklists                       -- 4 worklists
 
 import api from './client';
+import { requireInvoiceId } from './requireId';
 
 // ---- Types ---------------------------------------------------------------
 
@@ -130,6 +131,7 @@ export const purchaseReconApi = {
    * Fail-soft: returns null on error so the UI degrades gracefully.
    */
   getRecon: async (invoiceId: string): Promise<ReconResponse | null> => {
+    if (!invoiceId) return null; // never GET /undefined/recon
     try {
       const res = await api.get(`/vendors/purchase-invoices/${invoiceId}/recon`);
       return res.data as ReconResponse;
@@ -144,6 +146,7 @@ export const purchaseReconApi = {
    * THROWS on error so the UI can show a toast failure.
    */
   upsertRecon: async (invoiceId: string, payload: ReconUpdate): Promise<ReconResponse> => {
+    requireInvoiceId(invoiceId);
     const res = await api.post(`/vendors/purchase-invoices/${invoiceId}/recon`, payload);
     return res.data as ReconResponse;
   },
