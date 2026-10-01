@@ -135,6 +135,16 @@ describe('purchaseInvoicesApi.list -> mapInvoiceFromApi', () => {
     expect(row.purchase_invoice_id).toBe('b_9');
   });
 
+  it('gives a Cash Flow "+ bill" row (bill_id only, no invoice_id) its id', async () => {
+    // That door stores bill_id alone; without the bill_id fallback its row
+    // opened /purchase-invoices/undefined/match and approved /undefined/.
+    mockGet.mockResolvedValue({
+      data: { purchase_invoices: [{ bill_id: 'b_2', bill_number: 'BILL-22', vendor_id: 'v' }] },
+    });
+    const row = (await purchaseInvoicesApi.list()).purchase_invoices[0];
+    expect(row.purchase_invoice_id).toBe('b_2');
+  });
+
   it('handles a missing purchase_invoices array without throwing', async () => {
     mockGet.mockResolvedValue({ data: {} });
     const result = await purchaseInvoicesApi.list();
