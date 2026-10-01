@@ -77,8 +77,9 @@ export function InvoiceFormDrawer({
   const [vendorInvoiceDate, setVendorInvoiceDate] = useState((prefill.vendor_invoice_date || today).slice(0, 10));
   const [recipientGstin, setRecipientGstin] = useState(prefill.recipient_gstin ?? '');
   const [notes, setNotes] = useState('');
-  // The two credit switches the server already takes (POST and /preview).
-  const [reverseCharge, setReverseCharge] = useState(false);
+  // One credit switch (it can only turn credit OFF). No reverse-charge tick:
+  // accounts payable does not handle reverse charge yet, so the form must not
+  // offer it (owner/CA ruling needed first).
   const [claimCredit, setClaimCredit] = useState(true);
   const [lines, setLines] = useState<EditLine[]>(initialLines);
   const [saving, setSaving] = useState(false);
@@ -124,13 +125,12 @@ export function InvoiceFormDrawer({
     // the backend runs the DC tally + flips dc_matched on each DC.
     linked_dc_ids: linkedDcIds && linkedDcIds.length ? linkedDcIds : undefined,
     bill_kind: receiptLinked ? 'GOODS' : (billKind || undefined),
-    reverse_charge: reverseCharge,
     itc_eligible: claimCredit,
   };
   // What the tax depends on (not the invoice no. or notes): a change here asks
   // the server again, and Book waits until the answer is for THIS form. The
   // shop is in it: a bill with no receipt is booked for store_id's company.
-  const taxKey = JSON.stringify([payload.vendor_id, payload.recipient_gstin, payload.grn_id, payload.linked_dc_ids, payload.store_id, payload.reverse_charge, payload.itc_eligible, payload.lines]);
+  const taxKey = JSON.stringify([payload.vendor_id, payload.recipient_gstin, payload.grn_id, payload.linked_dc_ids, payload.store_id, payload.itc_eligible, payload.lines]);
   const [preview, setPreview] = useState<{ key: string; data?: PurchaseInvoicePreview; error?: string } | null>(null);
   const wantsPreview = Boolean(vendorId) && validLines.length > 0;
   useEffect(() => {
@@ -281,13 +281,9 @@ export function InvoiceFormDrawer({
             </div>
           </div>
 
-          {/* Input credit: the server's verdict for THIS form, and the two switches */}
+          {/* Input credit: the server's verdict for THIS form, and the one switch */}
           <div className="rounded-lg border border-gray-200 px-3 py-2 space-y-2">
             <div className="flex flex-wrap gap-x-6 gap-y-2">
-              <label className="inline-flex items-center gap-2 text-sm text-gray-700">
-                <input type="checkbox" checked={reverseCharge} onChange={(e) => setReverseCharge(e.target.checked)} />
-                Reverse charge
-              </label>
               <label className="inline-flex items-center gap-2 text-sm text-gray-700">
                 <input type="checkbox" role="switch" checked={claimCredit} onChange={(e) => setClaimCredit(e.target.checked)} />
                 Claim input credit
