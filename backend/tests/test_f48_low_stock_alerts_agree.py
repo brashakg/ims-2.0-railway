@@ -7,7 +7,8 @@ so with real stock living in stock_units it answered "No Alerts" while the strip
 said LOW STOCK 1.
 
 Contract: the low-stock row names the product; Alerts reads the same ledger,
-flags exactly the low-stock products as LOW_STOCK (one rule: find_low_stock),
+flags the low-stock products as LOW_STOCK (one rule: reorder_policy.low_stock_rows,
+each shop's own level since D12),
 and never calls stock that arrived today dead.
 """
 
@@ -34,6 +35,7 @@ _PRODUCTS = [
         "name": "Ray-Ban RB3025 Aviator - Gold",
         "brand": "Ray-Ban",
         "sku": "RB3025-GLD",
+        "reorder_levels": {"S1": 5},  # this shop's level (D12)
         "category": "SUNGLASS",
         "cost_price": 5000,
     },
@@ -42,6 +44,7 @@ _PRODUCTS = [
         "name": "Ray-Ban Wayfarer",
         "brand": "Ray-Ban",
         "sku": "RB2140",
+        "reorder_levels": {"S1": 5},  # this shop's level (D12)
         "category": "SUNGLASS",
         "cost_price": 4000,
     },
@@ -133,17 +136,17 @@ import pytest  # noqa: E402
 )
 def test_a_legacy_unit_does_not_split_the_count(monkeypatch, legacy):
     """5 units marked AVAILABLE plus 1 legacy unit: both screens count the
-    same units, so Alerts can never say 'Only 6 left - at or below' beside
-    Low stock's '5 left, Min 5'."""
+    same units (reorder_policy.on_hand, the legacy unit included), so Alerts
+    and Low stock both say 6 at this shop's level of 6, never 5 beside 6."""
     units = _units("P-AV", 5) + _units("P-AV", 1, **legacy)
     if legacy["status"] is None:
         units[-1].pop("status")
-    _wire(monkeypatch, units=units)
+    _wire(monkeypatch, units=units, products=[{**_PRODUCTS[0], "reorder_levels": {"S1": 6}}])
     (row,) = _low()["items"]
     (alert,) = [a for a in _alerts()["alerts"] if a["productName"].startswith("Ray-Ban RB3025")]
-    assert alert["currentStock"] == row["quantity"] == 5
+    assert alert["currentStock"] == row["quantity"] == 6
     assert alert["alertType"] == "LOW_STOCK"
-    assert alert["actionRequired"] == "Only 5 left - at or below the low-stock level"
+    assert alert["actionRequired"] == "Only 6 left - at or below the low-stock level"
 
 
 def test_dead_stock_outranks_the_low_list(monkeypatch):
@@ -249,3 +252,21 @@ def test_a_provisional_product_is_not_discontinued(monkeypatch):
     (row,) = _low()["items"]
     assert row["auto_reorder_disabled"] is False
     assert row["discontinued"] is False
+
+
+# ---------------------------------------------------------------------------
+# After the per-shop reorder levels (D12, #1179): the shop's own level decides
+# ---------------------------------------------------------------------------
+
+
+def test_the_shops_own_level_decides_on_both_screens(monkeypatch):
+    """4 Aviators at a shop whose level is 2, and 4 Wayfarers with no level
+    set: neither is low on Low stock, so Alerts must not call either low (a
+    fixed 5-unit cut would call both 'Only 4 left')."""
+    products = [
+        {**_PRODUCTS[0], "reorder_levels": {"S1": 2}},
+        {**_PRODUCTS[1], "reorder_levels": {"S2": 9}},  # another shop's level only
+    ]
+    _wire(monkeypatch, units=_units("P-AV", 4) + _units("P-WAY", 4), products=products)
+    assert _low()["items"] == []
+    assert not [a for a in _alerts()["alerts"] if a["alertType"] == "LOW_STOCK"]

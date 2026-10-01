@@ -6,7 +6,6 @@ from ._shared import (
     Optional,
     Query,
     _SOLD_STATUSES,
-    _on_hand_status_clause,
     datetime,
     get_current_user,
     logger,
@@ -17,8 +16,8 @@ from ._shared import (
 from .helpers import (
     _get_db,
     _had_the_window,
+    _shelf_by_product,
 )
-from database.repositories.product_repository import group_with_oldest_arrival
 
 # ============================================================================
 # ADVANCED INVENTORY FEATURES (IMS 2.0)
@@ -85,23 +84,7 @@ async def get_non_moving_stock(
         # own four-spelling list, which is how a lowercase `reserved` unit was
         # stock here and gone to the count. One serialized row == one unit; a
         # row with no `quantity` counts as one.
-        stock_match = dict(_on_hand_status_clause(include_reserved=True))
-        if active_store:
-            stock_match["store_id"] = active_store
-        shelf = {
-            str(r["_id"]): r
-            for r in stock_coll.aggregate(
-                [
-                    {"$match": stock_match},
-                    *group_with_oldest_arrival(
-                        {
-                            "_id": "$product_id",
-                            "quantity": {"$sum": {"$ifNull": ["$quantity", 1]}},
-                        }
-                    ),
-                ]
-            )
-        }
+        shelf = _shelf_by_product(stock_coll, active_store)
 
         # Find non-moving products
         non_moving = []

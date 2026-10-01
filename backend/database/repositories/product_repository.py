@@ -504,30 +504,18 @@ class StockRepository(BaseRepository):
             return 0
         return max(total - self.find_available(product_id, store_id), 0)
 
-    @staticmethod
-    def _available_by_product_pipeline(store_id: str) -> List[Dict]:
+    def find_low_stock(self, store_id: str, threshold: int = 5) -> List[Dict]:
         # One stock_units row == one physical unit. Legacy rows have no
         # `quantity` field, so summing `$quantity` raw yields 0 and every
         # product looks out-of-stock. $ifNull treats a missing quantity as 1.
-        return [
+        pipeline = [
             {"$match": {"store_id": store_id, "status": "AVAILABLE"}},
-            *group_with_oldest_arrival(
-                {
+            {
+                "$group": {
                     "_id": "$product_id",
                     "quantity": {"$sum": {"$ifNull": ["$quantity", 1]}},
                 }
-            ),
-        ]
-
-    def available_by_product(self, store_id: str) -> List[Dict]:
-        """AVAILABLE units per product at a store ({_id, quantity, oldest}).
-        find_low_stock is exactly these rows cut at its threshold, so a screen
-        that shows the count (Inventory > Alerts) cannot disagree with the
-        low-stock list (audit F48)."""
-        return self.aggregate(self._available_by_product_pipeline(store_id))
-
-    def find_low_stock(self, store_id: str, threshold: int = 5) -> List[Dict]:
-        pipeline = self._available_by_product_pipeline(store_id) + [
+            },
             {"$match": {"quantity": {"$lte": threshold}}},
             {"$sort": {"quantity": 1}},
         ]

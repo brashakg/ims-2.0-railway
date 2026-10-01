@@ -101,7 +101,7 @@ export function InventoryLowStockPage() {
               <div className="flex items-center gap-4">
                 <div className="text-right">
                   <p className="text-lg font-bold text-amber-600">{item.stock} left</p>
-                  <p className="text-xs text-gray-500">Min: {item.lowStockThreshold || item.minStock || 5}</p>
+                  <p className="text-xs text-gray-500">Min: {item.lowStockThreshold ?? 'not set'}</p>
                 </div>
                 {/* Raise the PO where POs are raised from stock: the reorder desk. */}
                 <Link to="/inventory/reorders" className="btn-outline text-sm">Raise PO</Link>

@@ -68,12 +68,10 @@ def _reject_stock_mint_on_online_store(store_id: Optional[str], action: str) -> 
 # /overstock-analysis, the CL drawer listing, the CL power grid's near-expiry
 # flag (via is_on_hand -- it must agree with the grid's own on_hand column),
 # the Stock Ledger (via canonical_state, because it groups BY status) and
-# _on_hand_by_product.
+# _on_hand_by_product. Also read (outside that probe) by reorder_policy.on_hand:
+# every low-stock list and the transfer recommendations.
 #
-# WHAT DOES NOT, and is NOT claimed to: `transfer_recommendations` below still
-# matches a bare "AVAILABLE", because its other half is
-# StockRepository.find_low_stock and the two must move together (POS-owned
-# repository -- owner sign-off). Every ALLOCATION door in this router
+# WHAT DOES NOT, and is NOT claimed to: every ALLOCATION door in this router
 # (find_one_and_update on status=="AVAILABLE") is a different question -- "may
 # I take THIS unit" -- and is deliberately strict.
 #
@@ -173,6 +171,36 @@ def _had_the_window(arrived, now: datetime, days: int) -> bool:
     stock as undated (its created_at is the entry day, not an arrival)."""
     arrived = _parse_expiry(arrived)
     return arrived is None or (now - arrived).days >= days
+
+
+def _shelf_by_product(stock_coll, store_id: Optional[str]) -> Dict[str, dict]:
+    """On-hand units per product at ``store_id`` (every shop when None) and when
+    the oldest arrived: {product_id: {quantity, oldest, undated}}.
+
+    The PHYSICAL question (a reserved frame is still on this shelf), through the
+    shared on-hand clause; one serialized row == one unit, a row with no
+    `quantity` counts as one. ``oldest`` is the arrival rule
+    (product_repository.group_with_oldest_arrival) that _had_the_window judges.
+    Non-moving and Alerts both read it."""
+    from database.repositories.product_repository import group_with_oldest_arrival
+
+    match = dict(_on_hand_status_clause(include_reserved=True))
+    if store_id:
+        match["store_id"] = store_id
+    return {
+        str(r["_id"]): r
+        for r in stock_coll.aggregate(
+            [
+                {"$match": match},
+                *group_with_oldest_arrival(
+                    {
+                        "_id": "$product_id",
+                        "quantity": {"$sum": {"$ifNull": ["$quantity", 1]}},
+                    }
+                ),
+            ]
+        )
+    }
 
 
 def compute_days_until_expiry(expiry, now: Optional[datetime] = None) -> Optional[int]:

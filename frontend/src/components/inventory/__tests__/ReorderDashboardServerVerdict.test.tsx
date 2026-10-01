@@ -50,7 +50,8 @@ const ledger = (extra: Record<string, unknown>) => ({
   ],
 });
 const verdict = (off: boolean, discontinued = false) => ({
-  items: [{ _id: 'P1', quantity: 3, auto_reorder_disabled: off, discontinued }],
+  // reorder_point: this shop's level (D12), unchanged by the save below.
+  items: [{ _id: 'P1', quantity: 3, reorder_point: 10, auto_reorder_disabled: off, discontinued }],
 });
 
 async function saveQty5ThenGeneratePO() {

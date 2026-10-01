@@ -11,7 +11,6 @@ from ._shared import (
     _reorder_disabled,
     datetime,
     get_current_user,
-    get_stock_repository,
     logger,
     router,
     timedelta,
@@ -20,7 +19,13 @@ from ._shared import (
 from .helpers import (
     _get_db,
     _had_the_window,
-    _parse_expiry,  # generic stored-timestamp parser (ISO / date / datetime)
+    _shelf_by_product,
+)
+from ...services.reorder_policy import (
+    is_low_stock,
+    low_stock_rows,
+    on_hand,
+    reorder_level,
 )
 
 # ============================================================================
@@ -29,9 +34,11 @@ from .helpers import (
 #
 # Replaces the old hardcoded mock list (Vogue Cat Eye / Prada Baroque / etc.)
 # the component used to render. Computes real, actionable alerts from the
-# catalogue and each product's AVAILABLE units at the store (the low-stock
-# list's own count, StockRepository.available_by_product) joined to
-# `orders.items` by barcode for sales velocity.
+# catalogue, each product's units on hand AT THE SHOP (reorder_policy.on_hand)
+# and that shop's own reorder level (D12), joined to `orders.items` by barcode
+# for sales velocity. No level at the shop = no LOW_STOCK / REORDER_ALERT.
+# A product on the shop's low-stock list (reorder_policy.low_stock_rows, the
+# list GET /inventory/low-stock shows) is LOW_STOCK here too (audit F48).
 #
 # Each product yields AT MOST ONE alert, chosen by priority:
 #   REORDER_ALERT > LOW_STOCK (selling low) > DEAD_STOCK
@@ -107,6 +114,7 @@ def _build_stock_alert(
     now: datetime,
     dead_days: int,
     lead_time_days: int,
+    store_id: Optional[str] = None,
     low_stock: bool = False,
     stocked_since: Optional[datetime] = None,
 ) -> Optional[dict]:
@@ -114,17 +122,21 @@ def _build_stock_alert(
     single frontend-shaped (camelCase) StockAlert dict, or None if the product
     warrants no alert. No DB access, so it is fully unit-testable.
 
-    ``low_stock``: the product is on GET /inventory/low-stock (the ONE low-stock
-    rule, StockRepository.find_low_stock) -- Alerts says LOW_STOCK for it too
-    unless a stronger verdict (REORDER, selling low, DEAD_STOCK) applies
-    (audit F48). ``stocked_since``: when the
-    oldest unit on the shelf arrived; stock younger than the dead-stock window
-    has not had the chance to sell and is never called dead. None = unknown
-    (legacy rows) = eligible, as before.
+    `stock_quantity` is the units on hand at `store_id`; the reorder level is
+    that shop's own (reorder_policy). A shop with no level gets no LOW_STOCK
+    or REORDER_ALERT (owner ruling D12: not set = no low-stock alert).
+
+    ``low_stock``: the product is on the shop's low-stock list (the ONE
+    low-stock rule, reorder_policy.low_stock_rows) -- Alerts says LOW_STOCK for
+    it too unless a stronger verdict (REORDER, selling low, DEAD_STOCK) applies
+    (audit F48). ``stocked_since``: when the oldest unit on the shelf arrived;
+    stock younger than the dead-stock window has not had the chance to sell
+    and is never called dead. None = unknown = old (helpers._had_the_window).
     """
     stock = int(product.get("stock_quantity", 0) or 0)
     cost = float(product.get("cost_price", 0) or 0)
-    reorder_point = int(product.get("reorder_point", 0) or 0)
+    reorder_point = reorder_level(product, store_id=store_id)  # None = not set
+    has_level = reorder_point is not None
     # Owner decision (2026-07-04): reorder_quantity <= 0 (the new -1 default)
     # means auto-reorder is DISABLED for this product -- never emit a
     # REORDER_ALERT / restock suggestion for it. Informational alerts
@@ -165,10 +177,14 @@ def _build_stock_alert(
     #    (or is already at/below an explicit reorder point, or out of stock
     #     while still selling).
     out_of_stock_but_selling = stock <= 0 and velocity > 0
-    below_reorder_point = reorder_point > 0 and stock <= reorder_point and velocity > 0
+    below_reorder_point = (
+        is_low_stock(product, stock, store_id=store_id) and velocity > 0
+    )
     runs_out_soon = projected is not None and projected <= lead_time_days
-    if not reorder_suggestions_off and (
-        out_of_stock_but_selling or below_reorder_point or runs_out_soon
+    if (
+        has_level
+        and not reorder_suggestions_off
+        and (out_of_stock_but_selling or below_reorder_point or runs_out_soon)
     ):
         target = velocity * lead_time_days * 2  # cover 2x lead time
         recommended = max(int(round(target - stock)), 1)
@@ -194,7 +210,12 @@ def _build_stock_alert(
     # 2. LOW_STOCK — sells, getting low, but not yet reorder-critical.
     # When auto-reorder is disabled the alert stays (it is informational)
     # but with NO suggested restock qty (recommendedOrder 0, costImpact 0).
-    if velocity > 0 and projected is not None and projected <= lead_time_days * 2:
+    if (
+        has_level
+        and velocity > 0
+        and projected is not None
+        and projected <= lead_time_days * 2
+    ):
         return _low_stock(
             base, stock, cost, velocity, lead_time_days, reorder_suggestions_off,
             f"Stock running low (~{int(projected)} days left)",
@@ -338,12 +359,12 @@ async def get_stock_alerts(
         now = datetime.utcnow()
         thirty_cutoff = now - timedelta(days=30)
 
-        # The catalogue is shared; stock is per store and lives in
-        # stock_units. Filtering products by products.store_id and reading the
-        # legacy products.stock_quantity field made every alert vanish once
-        # stock moved to the ledger (audit F48: "No Alerts" beside LOW STOCK 1).
-        # Inactive products are read too: one still on the shelf is on the
-        # low-stock list, so it is scored here (see the loop below).
+        # The catalogue is shared (products carry no store_id); stock and the
+        # level are the shop's own. Reading products.store_id and the legacy
+        # products.stock_quantity made every alert vanish once stock moved to
+        # the ledger (audit F48: "No Alerts" beside LOW STOCK 1). Inactive
+        # products are read too: one still on the shelf can be on the low-stock
+        # list, so it is scored here (see the loop below).
         products = list(
             products_coll.find(
                 {},
@@ -360,8 +381,7 @@ async def get_stock_alerts(
                     "mrp": 1,
                     "offer_price": 1,
                     "cost_price": 1,
-                    "stock_quantity": 1,
-                    "reorder_point": 1,
+                    "reorder_levels": 1,
                     "reorder_quantity": 1,
                 },
             )
@@ -371,22 +391,26 @@ async def get_stock_alerts(
             orders_coll, active_store, thirty_cutoff
         )
 
-        # Units per product at this store and when the oldest arrived, from
-        # the SAME rows the low-stock list cuts at its threshold
-        # (StockRepository.available_by_product / find_low_stock), so Alerts
-        # and Low stock count the same units and cannot disagree (audit F48).
-        on_hand: Dict[str, dict] = {}
-        low_ids: set = set()
-        stock_repo = get_stock_repository()
-        if active_store and stock_repo is not None:
-            on_hand = {
-                str(r["_id"]): r
-                for r in stock_repo.available_by_product(active_store)
-                if r.get("_id")
+        # Units on hand per product at this shop (every shop when none): the
+        # count the low-stock list compares with its level (reorder_policy.
+        # on_hand), so the two screens cannot disagree (audit F48).
+        stock_units = db.get_collection("stock_units")
+        units: Dict[str, int] = {}
+        for (pid, _shop), qty in on_hand(stock_units, store_id=active_store).items():
+            units[pid] = units.get(pid, 0) + qty
+        # THE low-stock list for this shop (a level is a shop's own: none
+        # without a shop), and when each product's oldest unit arrived.
+        low_ids = (
+            {
+                r["product_id"]
+                for r in low_stock_rows(
+                    products_coll, stock_units, store_id=active_store
+                )
             }
-            low_ids = {
-                str(r.get("_id")) for r in stock_repo.find_low_stock(active_store)
-            }
+            if active_store
+            else set()
+        )
+        shelf = _shelf_by_product(stock_units, active_store)
 
         alerts: List[dict] = []
         for p in products:
@@ -396,18 +420,18 @@ async def get_stock_alerts(
             # has units here -- the low-stock list counts units whatever the
             # catalogue flag, and the two screens must agree (audit F48). It
             # never gets a reorder: the policy treats it as reorder-off.
-            if p.get("is_active") is False and pid not in on_hand:
+            if p.get("is_active") is False and not units.get(pid):
                 continue
-            units = on_hand.get(pid) or {}
             alert = _build_stock_alert(
-                {**p, "stock_quantity": int(units.get("quantity") or 0)},
+                {**p, "stock_quantity": units.get(pid, 0)},
                 sold_30=sales_30.get(barcode, 0),
                 last_sale=last_sales.get(barcode),
                 now=now,
                 dead_days=dead_days,
                 lead_time_days=lead_time_days,
+                store_id=active_store,
                 low_stock=pid in low_ids,
-                stocked_since=_parse_expiry(units.get("oldest")),
+                stocked_since=(shelf.get(pid) or {}).get("oldest"),
             )
             if alert:
                 alerts.append(alert)
