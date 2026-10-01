@@ -109,6 +109,8 @@ export const ROUTES: ReadonlyArray<{ path: string; ready?: string }> = [
   { path: '/hr/shifts' },
   { path: '/hr/leaderboard' },
   { path: '/hr/payroll' },
+  { path: '/hr/payroll/advances' },
+  { path: '/hr/payroll/payslips' },
   { path: '/hr/salary-setup' },
   { path: '/hr/payroll-run' },
   { path: '/incentive' },
