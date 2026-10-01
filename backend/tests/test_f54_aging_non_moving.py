@@ -63,29 +63,27 @@ class _ProductRepo:
         return _PRODUCTS.get(pid)
 
 
-class _Coll:
-    def __init__(self, docs):
-        self.docs = docs
+def _mongo(monkeypatch, units=_UNITS):
+    """The catalogue + ``units`` on mongomock behind the REAL repositories, so
+    every screen runs the repository's own arrival rule, not a copy of it."""
+    import mongomock
 
-    def find(self, flt=None, projection=None):
-        flt = flt or {}
-        return [
-            dict(d)
-            for d in self.docs
-            if all(d.get(k) == v for k, v in flt.items() if not k.startswith("$") and not isinstance(v, dict))
-        ]
+    from database.repositories.product_repository import ProductRepository, StockRepository
 
-    def find_one(self, *a, **k):
-        return None
+    db = mongomock.MongoClient().db
+    db.products.insert_many(
+        [{"_id": p["product_id"], **p, "barcode": p["sku"], "cost_price": 3000} for p in _PRODUCTS.values()]
+    )
+    if units:
+        db.stock_units.insert_many([dict(u) for u in units])
+    monkeypatch.setattr(inv, "get_stock_repository", lambda: StockRepository(db.stock_units))
+    monkeypatch.setattr(inv, "get_product_repository", lambda: ProductRepository(db.products))
+    monkeypatch.setattr(inv, "_get_db", lambda: db)
+    return db
 
 
-class _Db:
-    def get_collection(self, name):
-        return {
-            "products": _Coll([{"_id": p["product_id"], **p} for p in _PRODUCTS.values()]),
-            "orders": _Coll([]),
-            "stock_units": _Coll(_UNITS),
-        }[name]
+def _non_moving():
+    return asyncio.run(get_non_moving_stock(days=90, category=None, store_id=None, current_user=_MGR))
 
 
 def _aging(monkeypatch):
@@ -114,8 +112,8 @@ def test_unsold_new_stock_gets_no_slow_mover_verdict(monkeypatch):
 
 
 def test_non_moving_counts_only_shelf_stock_older_than_the_window(monkeypatch):
-    monkeypatch.setattr(inv, "_get_db", lambda: _Db())
-    res = asyncio.run(get_non_moving_stock(days=90, category=None, store_id=None, current_user=_MGR))
+    _mongo(monkeypatch)
+    res = _non_moving()
     ids = [p["product_id"] for p in res["products"]]
     assert ids == ["P-OLD"]  # not today's Aviators, not the 0-stock Havana
     assert res["products"][0]["current_stock"] == 2
@@ -130,16 +128,8 @@ def test_non_moving_stock_column_is_what_is_on_the_shelf(monkeypatch):
         {"product_id": "P-OLD", "store_id": "S1", "status": "AVAILABLE", "created_at": _NOW}
         for _ in range(3)
     ]
-
-    class _MixedDb(_Db):
-        def get_collection(self, name):
-            if name == "stock_units":
-                return _Coll(units)
-            return super().get_collection(name)
-
-    monkeypatch.setattr(inv, "_get_db", lambda: _MixedDb())
-    res = asyncio.run(get_non_moving_stock(days=90, category=None, store_id=None, current_user=_MGR))
-    (row,) = res["products"]
+    _mongo(monkeypatch, units)
+    (row,) = _non_moving()["products"]
     assert row["product_id"] == "P-OLD"
     assert row["current_stock"] == 5
 
@@ -168,22 +158,16 @@ def test_unknown_stock_age_is_old_on_every_screen(monkeypatch, stamp):
             # group_with_oldest_arrival: None when undated, else the lone string.
             return [{"_id": "P-OLD", "quantity": 1, "oldest": stamp, "total_value": 0}]
 
-    class _LegacyDb(_Db):
-        def get_collection(self, name):
-            if name == "stock_units":
-                return _Coll([unit])
-            return super().get_collection(name)
-
+    _mongo(monkeypatch, [unit])
     monkeypatch.setattr(inv, "get_stock_repository", lambda: _LegacyStockRepo())
     monkeypatch.setattr(inv, "get_product_repository", lambda: _ProductRepo())
-    monkeypatch.setattr(inv, "_get_db", lambda: _LegacyDb())
     aging = asyncio.run(
         get_stock_aging_report(
             store_id=None, category=None, classification=None, min_days=None, current_user=_MGR
         )
     )
     (row,) = aging["products"]
-    non_moving = asyncio.run(get_non_moving_stock(days=90, category=None, store_id=None, current_user=_MGR))
+    non_moving = _non_moving()
     assert [p["product_id"] for p in non_moving["products"]] == ["P-OLD"]
     assert row["classification"] == "C"  # not NEW
     # ...and the age in the same row says old too: no made-up 0 days, the
@@ -206,21 +190,11 @@ def test_legacy_units_beside_todays_receipt_are_old_on_every_screen(monkeypatch)
     today' (no DEAD_STOCK) while Non-moving, judging unit by unit, listed the
     same 5 as old. One rule: an undated unit makes the product's age unknown,
     and unknown is old -- on all three screens, and min_days keeps it."""
-    import mongomock
-
-    from database.repositories.product_repository import ProductRepository, StockRepository
-
-    db = mongomock.MongoClient().db
-    db.products.insert_one(
-        {"_id": "P-OLD", **_PRODUCTS["P-OLD"], "barcode": "CM", "cost_price": 3000}
-    )
-    db.stock_units.insert_many(
+    _mongo(
+        monkeypatch,
         [{"product_id": "P-OLD", "store_id": "S1", "status": "AVAILABLE"} for _ in range(5)]
-        + [{"product_id": "P-OLD", "store_id": "S1", "status": "AVAILABLE", "created_at": _NOW}]
+        + [{"product_id": "P-OLD", "store_id": "S1", "status": "AVAILABLE", "created_at": _NOW}],
     )
-    monkeypatch.setattr(inv, "get_stock_repository", lambda: StockRepository(db.stock_units))
-    monkeypatch.setattr(inv, "get_product_repository", lambda: ProductRepository(db.products))
-    monkeypatch.setattr(inv, "_get_db", lambda: db)
 
     aging = asyncio.run(
         get_stock_aging_report(
@@ -237,5 +211,52 @@ def test_legacy_units_beside_todays_receipt_are_old_on_every_screen(monkeypatch)
     )
     assert [a["alertType"] for a in alerts["alerts"]] == ["DEAD_STOCK"]
 
-    non_moving = asyncio.run(get_non_moving_stock(days=90, category=None, store_id=None, current_user=_MGR))
+    non_moving = _non_moving()
     assert [(p["product_id"], p["current_stock"]) for p in non_moving["products"]] == [("P-OLD", 6)]
+
+
+# ---------------------------------------------------------------------------
+# Verifier round 5: opening stock is undated, not "arrived the day typed in"
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("today_too", [False, True], ids=["opening-only", "beside-a-receipt"])
+def test_opening_stock_is_old_on_every_screen(monkeypatch, today_too):
+    """8 never-sold frames entered as opening stock 10 days ago (pre-IMS stock:
+    nobody knows when they reached the shelf). Read as an arrival, the entry
+    day made them NEW / 0-30 on Aging, never DEAD_STOCK and never non-moving
+    for 90 days -- every shop's whole go-live stock. They are undated, so old,
+    exactly like the same 8 with no date; a unit received today beside them
+    does not make them young."""
+    units = [
+        {
+            "product_id": "P-OLD",
+            "store_id": "S1",
+            "status": "AVAILABLE",
+            "source": "OPENING_STOCK",
+            "created_at": _NOW - timedelta(days=10),
+        }
+        for _ in range(8)
+    ]
+    if today_too:
+        units.append({"product_id": "P-OLD", "store_id": "S1", "status": "AVAILABLE", "created_at": _NOW})
+    _mongo(monkeypatch, units)
+
+    aging = asyncio.run(
+        get_stock_aging_report(
+            store_id=None, category=None, classification=None, min_days=None, current_user=_MGR
+        )
+    )
+    (row,) = aging["products"]
+    assert (row["classification"], row["daysInStock"], row["ageCategory"]) == ("C", None, "180+")
+
+    alerts = asyncio.run(
+        inv.get_stock_alerts(
+            store_id=None, dead_days=90, lead_time_days=14, limit=200, current_user=_MGR
+        )
+    )
+    assert [a["alertType"] for a in alerts["alerts"]] == ["DEAD_STOCK"]
+
+    assert [(p["product_id"], p["current_stock"]) for p in _non_moving()["products"]] == [
+        ("P-OLD", 9 if today_too else 8)
+    ]

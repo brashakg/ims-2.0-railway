@@ -168,8 +168,9 @@ def _had_the_window(arrived, now: datetime, days: int) -> bool:
 
     THE rule for a stock age verdict -- Aging's NEW grace, Alerts' DEAD_STOCK
     and Non-moving all read it. A missing or unreadable arrival date is legacy
-    stock: old, it has had the window. (Every current stock_units writer stamps
-    a real created_at, so only legacy rows take that branch.)"""
+    stock: old, it has had the window. ``arrived`` comes from
+    product_repository.group_with_oldest_arrival, which also reads opening
+    stock as undated (its created_at is the entry day, not an arrival)."""
     arrived = _parse_expiry(arrived)
     return arrived is None or (now - arrived).days >= days
 

@@ -18,6 +18,7 @@ from .helpers import (
     _get_db,
     _had_the_window,
 )
+from database.repositories.product_repository import group_with_oldest_arrival
 
 # ============================================================================
 # ADVANCED INVENTORY FEATURES (IMS 2.0)
@@ -77,39 +78,45 @@ async def get_non_moving_stock(
             for item in order.get("items", []):
                 sold_products.add(item.get("product_id"))
 
+        # On-hand units per product here, and when the oldest arrived. Count
+        # ONLY on-hand units -- counting ALL stock_units rows let SOLD units
+        # inflate current_stock (10 sold, 0 available showed 10). The PHYSICAL
+        # question, through the shared clause: this reader used to carry its
+        # own four-spelling list, which is how a lowercase `reserved` unit was
+        # stock here and gone to the count. One serialized row == one unit; a
+        # row with no `quantity` counts as one.
+        stock_match = dict(_on_hand_status_clause(include_reserved=True))
+        if active_store:
+            stock_match["store_id"] = active_store
+        shelf = {
+            str(r["_id"]): r
+            for r in stock_coll.aggregate(
+                [
+                    {"$match": stock_match},
+                    *group_with_oldest_arrival(
+                        {
+                            "_id": "$product_id",
+                            "quantity": {"$sum": {"$ifNull": ["$quantity", 1]}},
+                        }
+                    ),
+                ]
+            )
+        }
+
         # Find non-moving products
         non_moving = []
         for product in products:
             product_id = str(product.get("_id"))
             if product_id not in sold_products:
-                # Count ONLY on-hand units -- counting ALL stock_units rows
-                # let SOLD units inflate current_stock (10 sold, 0 available
-                # showed 10). The PHYSICAL question, through the shared clause:
-                # this reader used to carry its own four-spelling list, which
-                # is how a lowercase `reserved` unit was stock here and gone to
-                # the count.
-                stock_filter = {
-                    "product_id": product_id,
-                    **_on_hand_status_clause(include_reserved=True),
-                }
-                if active_store:
-                    stock_filter["store_id"] = active_store
-                stock = stock_coll.find(stock_filter)
-                # One serialized stock row == one physical unit; rows with no
-                # `quantity` field still count as one unit on hand. The VERDICT
-                # needs a unit that has sat on the shelf for the whole window: a
-                # unit received this morning has not had N days to sell (audit
-                # F54; _had_the_window: unknown age = legacy = old). The Stock column
-                # still shows everything on the shelf.
-                total_qty = 0
-                aged_qty = 0
-                for s in stock:
-                    qty = s.get("quantity", 1)
-                    total_qty += qty
-                    if _had_the_window(s.get("created_at"), now, days):
-                        aged_qty += qty
-                if aged_qty <= 0:
-                    continue  # nothing has had the window: not non-moving
+                # The VERDICT needs stock that has sat on the shelf for the
+                # whole window: a unit received this morning has not had N days
+                # to sell (audit F54). The oldest unit decides, by the arrival
+                # rule Aging and Alerts use (unknown age, opening stock
+                # included, is old). The Stock column shows everything here.
+                row = shelf.get(product_id) or {}
+                total_qty = row.get("quantity", 0)
+                if total_qty <= 0 or not _had_the_window(row.get("oldest"), now, days):
+                    continue  # nothing here, or nothing has had the window
 
                 # Get last sold date (at the active store)
                 last_order_filter = {"items.product_id": product_id}

@@ -37,15 +37,28 @@ def group_with_oldest_arrival(group: Dict) -> List[Dict]:
     today read as arrived today on Aging and Alerts while Non-moving, judging
     unit by unit, called the same 5 old (audit F54). Unknown age is legacy
     stock, so old (inventory.helpers._had_the_window): one undated unit makes
-    the whole group's ``oldest`` None."""
+    the whole group's ``oldest`` None.
+
+    Opening stock is undated too: it is pre-IMS stock, and its created_at is
+    the day someone typed it in, not the day it reached the shelf. Read as an
+    arrival, a whole shop's go-live stock was NEW, never dead and never
+    non-moving for 30-90 days. (Owner question open since 09-30; this keeps
+    main's verdict for it. To date it by entry instead, drop the source test.)
+
+    THE arrival rule: Aging, Alerts and Non-moving all group through here."""
+    dated = {
+        "$and": [
+            {"$ifNull": ["$created_at", False]},
+            # $ifNull: mongomock drops a comparison on a missing field.
+            {"$ne": [{"$ifNull": ["$source", None]}, "OPENING_STOCK"]},
+        ]
+    }
     return [
         {
             "$group": {
                 **group,
                 "oldest": {"$min": "$created_at"},
-                "undated": {
-                    "$sum": {"$cond": [{"$ifNull": ["$created_at", False]}, 0, 1]}
-                },
+                "undated": {"$sum": {"$cond": [dated, 0, 1]}},
             }
         },
         {"$addFields": {"oldest": {"$cond": [{"$gt": ["$undated", 0]}, None, "$oldest"]}}},
