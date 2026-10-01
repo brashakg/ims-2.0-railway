@@ -1,5 +1,7 @@
 """Low-stock, expiring, barcode lookups and POST /stock/add."""
 
+import contextvars
+
 from ._shared import (
     Depends,
     Dict,
@@ -74,6 +76,111 @@ async def get_low_stock_alerts(
         item["auto_reorder_disabled"] = _reorder_disabled(products_by_id.get(pid, {}))
 
     return {"items": items}
+
+
+_NEVER_GATED_AT = 10**6  # a line the guard lets through at this size, it never gates
+
+# True only while GET /inventory/sellable is asking the sale guard a question.
+_ASKING_THE_GUARD = contextvars.ContextVar("asking_the_sale_guard", default=False)
+
+
+def _not_while_asking(record) -> bool:
+    """A filter on the sale guard's logger: drop its records during an ask."""
+    return not _ASKING_THE_GUARD.get()
+
+
+def _guard_sells(line: dict, qty: int, store: Optional[str]) -> bool:
+    """Does the Complete-sale guard (orders/stock._assert_serialized_stock_available,
+    called exactly as order-create calls it, never changed for this) let a line
+    of `qty` through at `store`?
+
+    An ask is not a sale, so the guard's log is muted for the ask alone: a till
+    polling a contact lens with expired boxes would otherwise log '[STOCK]
+    expired unit(s) held back from sale' every 30 s. The mute is a context
+    variable, so a real sale refused on another request still logs.
+    ponytail: a refused ask still runs the guard's expired-unit count, one
+    indexed read per tracked tile per poll; the guard is not touched to skip it."""
+    from ..orders import stock as guard
+
+    guard.logger.addFilter(_not_while_asking)  # a no-op after the first ask
+    asking = _ASKING_THE_GUARD.set(True)
+    try:
+        guard._assert_serialized_stock_available([{**line, "quantity": qty}], store)
+    except HTTPException as exc:
+        if exc.status_code != 409:
+            raise
+        return False
+    finally:
+        _ASKING_THE_GUARD.reset(asking)
+    return True
+
+
+def _most_it_sells(sells, hint: int) -> Optional[int]:
+    """The largest quantity `sells(q)` lets through, or None when it lets
+    _NEVER_GATED_AT through (the guard does not gate the line). Assumes only
+    that the rule is monotone (refusing q means refusing q + 1). `hint` is
+    where the search starts, never the answer."""
+    if sells(hint + 1):
+        if sells(_NEVER_GATED_AT):
+            return None
+        lo, hi = hint + 1, _NEVER_GATED_AT  # stock arrived since the hint
+    elif hint == 0 or sells(hint):
+        return hint  # the usual answer: two asks
+    else:
+        lo, hi = 0, hint  # stock left since the hint
+    while hi - lo > 1:  # sells(lo) (0 always does), never sells(hi)
+        mid = (lo + hi) // 2
+        lo, hi = (mid, hi) if sells(mid) else (lo, mid)
+    return lo
+
+
+@router.get("/sellable")
+def get_sellable_counts(
+    product_ids: str = Query(..., description="Comma-separated product ids, at most 100."),
+    item_types: Optional[str] = Query(
+        None,
+        description="Comma-separated order item_type per id, same order (the till's mapCategory).",
+    ),
+    current_user: dict = Depends(get_current_user),
+):
+    """F46: the till's per-tile stock badge and cart-line warning. For each id,
+    the most order-create's oversell guard would let one line sell, found by
+    ASKING THE GUARD (_guard_sells): every number returned is a quantity it let
+    through, one more is a quantity it refused; None when it never gates the
+    line. find_available only picks the first question.
+
+    The store is the one in the sign-in token, where create_order binds the
+    guard (create.py: store_id = current_user['active_store_id']), and the reply
+    names it: the till shows a figure only when that is the screen's shop. No
+    caller-named store. `canonical` is the id the guard sums a line under
+    (_canonical_pid), so the cart adds a SKU line and a product_id line of one
+    product together, as the guard does. Read-only; a plain def, so its reads
+    run off the event loop."""
+    from ..orders.stock import _canonical_pid
+
+    store = current_user.get("active_store_id")
+    ids = [p.strip() for p in product_ids.split(",") if p.strip()]
+    if len(ids) > 100:
+        raise HTTPException(status_code=400, detail="At most 100 product ids per call")
+    types = [t.strip() for t in (item_types or "").split(",")]
+    stock_repo = get_stock_repository()
+    product_repo = get_product_repository()
+
+    # ponytail: per id, 1-4 reads to resolve it, 1 for the hint, then two asks
+    # of the guard (1 read each untracked, 2-3 tracked): 4-10 indexed reads. A
+    # receipt or sale landing mid-call bisects instead (~20 asks, rare). <= 24
+    # tiles + the cart per call; move to one aggregate if that ever hurts.
+    sellable: Dict[str, Optional[int]] = {}
+    canonical: Dict[str, str] = {}
+    for i, pid in enumerate(ids):
+        canon = canonical[pid] = _canonical_pid(product_repo, pid)
+        line = {"product_id": canon, "item_type": types[i] if i < len(types) else ""}
+        try:
+            hint = max(0, int(stock_repo.find_available(canon, store)))
+        except Exception:  # noqa: BLE001 -- only a hint; the guard decides
+            hint = 0
+        sellable[pid] = _most_it_sells(lambda q, line=line: _guard_sells(line, q, store), hint)
+    return {"store_id": store, "sellable": sellable, "canonical": canonical}
 
 
 @router.get("/barcode/{barcode}")

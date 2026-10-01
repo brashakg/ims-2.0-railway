@@ -269,6 +269,16 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/inventory/sell-through-analysis",
         "allowed": "AUTHENTICATED",
     },
+    # F46: the till's stock badge + cart warning -- per-product sellable
+    # count, asked of the oversell guard, at the store in the caller's
+    # sign-in token (where create_order binds the guard; no ?store_id). Any
+    # POS role reads it; store_scoped: only ever the caller's own store.
+    {
+        "method": "GET",
+        "path": "/api/v1/inventory/sellable",
+        "allowed": "AUTHENTICATED",
+        "store_scoped": True,
+    },
     {
         # Brand-wise KPI rollup for the Inventory Insights tab (2026-07-05).
         # Same posture as the sell-through/overstock reads above: any
