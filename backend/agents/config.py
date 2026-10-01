@@ -95,7 +95,7 @@ DEFAULT_AGENT_CONFIGS = [
         "toggleable": True,
         "schedule_type": "interval",
         "schedule_value": "300",
-        "description": "Task execution — auto-reorder, SOP enforcement, escalations",
+        "description": "Task execution — SOP enforcement, escalations",
         "hero": "Taskmaster",
         "config_overrides": {},
     },

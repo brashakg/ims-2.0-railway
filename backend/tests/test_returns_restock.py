@@ -544,6 +544,10 @@ def test_return_mints_when_no_original_unit(ctx):
     assert minted[0]["source_type"] == "RETURN"
     assert minted[0]["source_id"] == data["return_id"]
     assert data["restocked"][0]["minted"] == 1
+    # A piece back on the shelf needs a barcode of its own: without one it
+    # cannot be scanned at the till and its label printed blank bars.
+    assert minted[0]["barcode"].startswith("BV-")
+    assert minted[0]["barcode_printed"] is False
 
 
 def test_damaged_return_does_not_restock(ctx):

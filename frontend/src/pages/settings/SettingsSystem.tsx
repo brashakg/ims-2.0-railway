@@ -9,10 +9,11 @@
 import { useState, useEffect } from 'react';
 import { RefreshCw, Database, Target, Save, ChevronRight } from 'lucide-react';
 import clsx from 'clsx';
+import { Link } from 'react-router-dom';
+import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { adminSystemApi, policiesApi } from '../../services/api';
 import { financeApi } from '../../services/api/finance';
-import { AdminControlPanel } from '../../components/settings/AdminControlPanel';
 import { AutoLogoutSettings } from '../../components/settings/AutoLogoutSettings';
 
 export function SystemSettingsPage() {
@@ -44,6 +45,8 @@ export function SystemSettingsPage() {
 }
 
 function SystemSection({ systemStatus }: { systemStatus: { database: string; api: string; version: string } | null }) {
+  const { user } = useAuth();
+  const isSuperadmin = (user?.roles || []).includes('SUPERADMIN');
   const toast = useToast();
 
   return (
@@ -104,10 +107,25 @@ function SystemSection({ systemStatus }: { systemStatus: { database: string; api
         </div>
       </div>
 
-      <div className="card mt-6">
-        <h2 className="text-lg font-semibold text-gray-900 mb-4">Admin Controls -- Store & Role Configuration</h2>
-        <AdminControlPanel />
-      </div>
+      {/* Admin controls (SUPERADMIN): the four editors are pages of their own. */}
+      {isSuperadmin && (
+        <div className="bg-white border border-gray-200 rounded-lg p-4" data-testid="admin-controls-links">
+          <p className="font-medium text-gray-900 mb-1">Admin controls</p>
+          <p className="text-sm text-gray-500">
+            {[
+              ['/settings/modules', 'Store Modules'],
+              ['/settings/permissions', 'Role Permissions'],
+              ['/settings/discount-caps', 'Discount Limits'],
+              ['/settings/rules', 'Operational Rules'],
+            ].map(([to, label], i) => (
+              <span key={to}>
+                {i > 0 && ' · '}
+                <Link to={to} className="text-blue-600 hover:underline">{label}</Link>
+              </span>
+            ))}
+          </p>
+        </div>
+      )}
 
       {/* F34 target-ticker config (SUPERADMIN/ADMIN; the System tab is already
           role-gated to them). Persisted to the two E2 policy keys. */}

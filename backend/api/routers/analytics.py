@@ -23,6 +23,8 @@ from ..dependencies import (
     get_store_repository,
 )
 
+from ..services.reorder_policy import low_stock_rows
+
 router = APIRouter(prefix="", tags=["Analytics"])
 
 # Roles allowed to read enterprise analytics / KPI dashboards. These surface
@@ -527,12 +529,10 @@ async def get_dashboard_summary(
             _safe_int(i.get("quantity")) * _safe_float(i.get("unit_price"))
             for i in inventory
         )
+        # THIS shop's low-stock list by its own levels (D12). A stock_units row
+        # is one unit and carries no level, so the old per-row compare was 0.
         low_stock_items = len(
-            [
-                i
-                for i in inventory
-                if _safe_int(i.get("quantity")) <= _safe_int(i.get("reorder_point"))
-            ]
+            low_stock_rows(get_product_repository(), stock_repo, store_id=store_id)
         )
         out_of_stock = len([i for i in inventory if _safe_int(i.get("quantity")) == 0])
 
@@ -960,13 +960,8 @@ async def get_inventory_intelligence(
             return _stock_unit_value(row, master)
 
         # Categorize items
-        # Low stock: quantity at or below reorder point
-        low_stock = [
-            i
-            for i in inventory
-            if _safe_int(i.get("quantity")) <= _safe_int(i.get("reorder_point"))
-            and _safe_int(i.get("quantity")) > 0
-        ]
+        # Low stock: THIS shop's low-stock list by its own levels (D12).
+        low_stock = low_stock_rows(get_product_repository(), stock_repo, store_id=store_id)
 
         # Dead stock: items with zero recent sales (last_sold_at > 90 days ago or never)
         # OR items with quantity but zero sales velocity
@@ -1013,7 +1008,7 @@ async def get_inventory_intelligence(
                         "sku": _sku(i),
                         "name": _name(i),
                         "quantity": i.get("quantity", 0),
-                        "reorder_point": i.get("reorder_point", 0),
+                        "reorder_point": i.get("reorder_point"),
                     }
                     for i in low_stock[:10]
                 ],
@@ -1327,11 +1322,7 @@ async def get_enterprise_kpis(
         inventory_turnover = None  # null until beginning-period snapshot is available
 
         low_stock_count = len(
-            [
-                i
-                for i in inventory
-                if _safe_int(i.get("quantity")) <= _safe_int(i.get("reorder_point"))
-            ]
+            low_stock_rows(get_product_repository(), stock_repo, store_id=store_id)
         )
 
         # ===== TOP 5 PRODUCTS =====

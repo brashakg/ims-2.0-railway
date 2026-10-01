@@ -586,7 +586,7 @@ def _exec_draft_po(db, proposal: Dict[str, Any]) -> Dict[str, Any]:
     Reversible: create a DRAFT purchase order (NOT sent to the vendor).
 
     Reuses the SAME ``purchase_orders`` collection + DRAFT shape the rest of
-    the system uses (vendors.create_po, TASKMASTER._draft_reorders). Sending
+    the system uses (vendors.create_po). Sending
     the PO to the vendor is a SEPARATE, non-reversible action gated by the
     /vendors '.../send' endpoint and is never auto-executed here.
 

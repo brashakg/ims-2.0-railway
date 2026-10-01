@@ -11,6 +11,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 
 const toastMock = vi.hoisted(() => ({
   success: vi.fn(),
@@ -28,6 +29,18 @@ vi.mock('../../../services/api/grnCockpit', () => ({
 
 vi.mock('../../../context/ToastContext', () => ({
   useToast: () => toastMock,
+}));
+
+// F26: the success card's "Print labels" opens the receipt's units.
+const getUnitsMock = vi.hoisted(() => vi.fn());
+vi.mock('../../../services/api/inventory', () => ({
+  inventoryApi: { getUnits: getUnitsMock, markBarcodePrinted: vi.fn() },
+}));
+vi.mock('../../../context/AuthContext', () => ({
+  useAuth: () => ({
+    user: { activeStoreId: 'BV-BOK-01', roles: ['STORE_MANAGER'] },
+    hasRole: (r: string[]) => r.includes('STORE_MANAGER'),
+  }),
 }));
 
 import { ExpressReceivePanel } from '../ExpressReceivePanel';
@@ -234,6 +247,32 @@ describe('ExpressReceivePanel — clean box goes express', () => {
     expect(screen.getByText(/sent to accounts/i)).toBeInTheDocument();
     expect(screen.getByText('MATCHED')).toBeInTheDocument();
     expect(screen.getByText(/43,896/)).toBeInTheDocument();
+  });
+});
+
+describe('ExpressReceivePanel - labels after the box is on the shelf (F26)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('"Print labels" opens the units THIS receipt put on the shelf', async () => {
+    expressMock.mockResolvedValue(EXPRESS_OK);
+    getUnitsMock.mockResolvedValue({ units: [], total: 0 });
+    const { container } = render(
+      <MemoryRouter>
+        <ExpressReceivePanel
+          po={PO}
+          onCancel={vi.fn()}
+          onReceived={vi.fn()}
+          onFallbackToTwoStep={vi.fn()}
+          onOpenPendingReceipts={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+    await passStep1(container);
+    await passStep2();
+    fireEvent.click(screen.getByRole('button', { name: /put on shelf & send to accounts/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /print labels/i }));
+    expect(await screen.findByRole('dialog', { name: /print stock labels/i })).toBeInTheDocument();
+    expect(getUnitsMock).toHaveBeenCalledWith({ grn_id: 'grn-1' });
   });
 });
 
