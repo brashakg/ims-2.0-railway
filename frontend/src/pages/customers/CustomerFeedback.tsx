@@ -86,6 +86,7 @@ export function CustomerFeedback() {
           <div className="eyebrow" style={{ marginBottom: 6 }}>CRM · Feedback</div>
           <h1>What they actually thought.</h1>
           <div className="hint">NPS collected after delivered orders. Score distribution, promoter/detractor segments, and verbatim responses.</div>
+          <div className="hint">NPS detractors automatically create manager follow-up tasks, which appear on the Follow-ups dashboard.</div>
         </div>
       </div>
 
