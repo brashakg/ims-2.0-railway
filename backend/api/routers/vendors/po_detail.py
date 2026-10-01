@@ -287,7 +287,7 @@ async def send_po(
 
         if po.get("status") != "DRAFT":
             raise HTTPException(status_code=400, detail="Only draft POs can be sent")
-        if not any(_qty(it.get("quantity")) for it in po.get("items") or []):
+        if not po.get("items"):
             raise HTTPException(
                 status_code=400,
                 detail="This order has no lines - add what to order before sending it.",
