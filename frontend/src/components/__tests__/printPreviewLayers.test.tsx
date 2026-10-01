@@ -28,7 +28,6 @@ vi.mock('../../context/ToastContext', () => ({
 vi.mock('../../services/api/labels', () => ({
   labelsApi: {
     getJobLabel: vi.fn().mockResolvedValue(null),
-    getProductLabel: vi.fn().mockResolvedValue({ barcode_value: 'X0001' }),
   },
 }));
 
@@ -56,7 +55,7 @@ describe('print previews sit on the shared z-[70] layer', () => {
   it('LabelPreviewModal (workshop thermal label)', () => {
     render(
       <LabelPreviewModal
-        spec={{ kind: 'product', productId: 'P1' }}
+        spec={{ kind: 'job', jobId: 'J1', type: 'stage' }}
         onClose={vi.fn()}
       />,
     );

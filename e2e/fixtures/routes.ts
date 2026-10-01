@@ -181,6 +181,8 @@ export const ROUTES: ReadonlyArray<{ path: string; ready?: string }> = [
   { path: '/reports/customers' },
   { path: '/reports/gst' },
   { path: '/reports/forecast' },
+  { path: '/reports/forecast/seasonal' },
+  { path: '/reports/forecast/reorder' },
   { path: '/reports/gstr1' },
   { path: '/reports/gstr3b' },
   { path: '/reports/blueprint' },
@@ -212,6 +214,10 @@ export const ROUTES: ReadonlyArray<{ path: string; ready?: string }> = [
   { path: '/settings/feature-toggles' },
   { path: '/settings/shopify-live-sync' },
   { path: '/settings/audit-logs' },
+  { path: '/settings/modules' },
+  { path: '/settings/permissions' },
+  { path: '/settings/discount-caps' },
+  { path: '/settings/rules' },
   { path: '/settings/system' },
   { path: '/organization' },
   { path: '/setup' },
@@ -238,6 +244,12 @@ export const EXCLUSIONS: ReadonlyArray<{ path: string; reason: string }> = [
   {
     path: '/hr',
     reason: 'redirect-only: index maps the legacy ?tab= onto /hr/<section>, all probed above.',
+  },
+  {
+    path: '/reports/forecast/*',
+    reason:
+      'redirect-only: catch-all; any unknown forecast sub-address Navigates to '
+      + '/reports/forecast, which is probed above.',
   },
   {
     path: '/hr/monthly-summary',
