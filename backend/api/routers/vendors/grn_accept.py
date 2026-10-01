@@ -901,7 +901,9 @@ def _held_item_label(prod: Optional[dict], product_id: str) -> str:
     return f"{label} (SKU {prod.get('sku')})" if prod.get("sku") else label
 
 
-def _raise_once(db, *, dedupe_ref: str, ever: bool = True, **task) -> None:
+def _raise_once(
+    db, *, dedupe_ref: str, ever: bool = True, priority: str = "P2", **task
+) -> None:
     """ONE task per source_ref. `ever` (a receipt's tasks): once a person has
     closed it, a re-press of "Add to stock" or the next catalogue save never
     raises it again. Otherwise (a person ASKING, e.g. a bill's request for
@@ -913,7 +915,7 @@ def _raise_once(db, *, dedupe_ref: str, ever: bool = True, **task) -> None:
     if ever and db.get_collection("tasks").find_one({"source_ref": dedupe_ref}):
         return
     create_system_task(
-        get_task_repository(), priority="P2", dedupe_ref=dedupe_ref, **task
+        get_task_repository(), priority=priority, dedupe_ref=dedupe_ref, **task
     )
 
 
@@ -1013,7 +1015,12 @@ def tell_catalogue_managers(
     once per `dedupe` + person (_raise_once; `ever` False for an ask, which
     reaches them again once the last one is closed), in a store that person
     can open. Nobody holding the job there fails loud: logged, and raised for
-    the admins under `orphan_title` -- never a task nobody can see."""
+    the admins under `orphan_title` -- never a task nobody can see.
+
+    Escalates after a day (owner 2026-09-30): P3, whose acknowledge clock is a
+    day (task_sla.DEFAULT_SLA), due a day out. The people's tasks share one
+    escalation_group, so they climb to ONE task at the next rung
+    (task_escalation.merge_into_twin)."""
     people, are_cataloguers = _people_for(
         db, store_id, "CATALOG_MANAGER", entity_wide=True
     )
@@ -1030,10 +1037,12 @@ def tell_catalogue_managers(
             db,
             dedupe_ref=f"{dedupe}:{uid or 'nobody'}",
             ever=ever,
+            priority="P3",
+            due_at=datetime.now() + timedelta(days=1),
             title=title,
             description=description,
             category="Catalogue",
             store_id=task_store,
             assigned_to=uid,
-            extra=extra or {},
+            extra={**(extra or {}), "escalation_group": dedupe},
         )

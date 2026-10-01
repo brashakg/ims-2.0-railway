@@ -1431,6 +1431,65 @@ def test_c1_the_catalogue_task_escalates_to_someone_who_can_do_it(world):
     )
 
 
+def _escalate_after(world, monkeypatch, engine, hours):
+    """Run one SLA escalation pass `hours` after the tasks were raised, through
+    either real engine: the TASKMASTER tick or POST /tasks/auto-escalate-overdue."""
+    real = vd.datetime
+
+    class _Later(real):
+        @classmethod
+        def now(cls, tz=None):
+            return real.now(tz) + vd.timedelta(hours=hours)
+
+    if engine == "taskmaster":
+        from agents.implementations import taskmaster as _tm
+
+        monkeypatch.setattr(_tm, "datetime", _Later)
+        _run(_tm.TaskmasterAgent(db=world.db)._escalate_overdue_tasks())
+    else:
+        monkeypatch.setattr(_tasks, "datetime", _Later)
+        _run(_tasks.auto_escalate_overdue_tasks(store_id=None, current_user=ADMIN))
+
+
+ENGINES = pytest.mark.parametrize("engine", ["taskmaster", "endpoint"])
+
+
+@ENGINES
+def test_c1_the_catalogue_task_escalates_after_a_day_not_before(world, monkeypatch, engine):
+    # Owner 2026-09-30: the catalogue manager's task escalates after a DAY.
+    _seed_user(world, ADMIN)
+    world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    _escalate_after(world, monkeypatch, engine, hours=23)
+    finding(
+        [t.get("assigned_to") for t in _open_tasks(world)] == [CATALOGUER["user_id"]]
+        and _task_list(CATALOGUER, None),
+        "C1: the catalogue task escalated within a day "
+        f"({[(t.get('assigned_to'), t.get('escalation_reason')) for t in _open_tasks(world)]})",
+    )
+    _escalate_after(world, monkeypatch, engine, hours=25)
+    finding(
+        [t.get("assigned_to") for t in _open_tasks(world)] == [ADMIN["user_id"]],
+        "C1: the catalogue task did not escalate after a day "
+        f"({[t.get('assigned_to') for t in _open_tasks(world)]})",
+    )
+
+
+@ENGINES
+def test_c1_two_catalogue_managers_escalate_as_one_task(world, monkeypatch, engine):
+    # One task each, by name -- but the receipt reaches the next rung ONCE.
+    _seed_user(world, ADMIN)
+    _seed_user(world, dict(CATALOGUER, user_id="u-cat-2", username="catalog.two"))
+    world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    assert len(_open_tasks(world)) == 2
+    _escalate_after(world, monkeypatch, engine, hours=25)
+    held = [t for t in _open_tasks(world) if t.get("assigned_to") == ADMIN["user_id"]]
+    finding(
+        len(_open_tasks(world)) == 1 and len(held) == 1,
+        "C1: one held receipt escalated as "
+        f"{[(t.get('assigned_to'), t.get('title')) for t in _open_tasks(world)]}",
+    )
+
+
 def test_c1_asking_again_after_the_ask_was_closed_asks_again(world):
     # The accountant asks; the catalogue manager closes the task without
     # finishing the item; the next refused booking asks again -- and must reach

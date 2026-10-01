@@ -44,7 +44,7 @@ from ..services.task_sla import (
     should_escalate,
     sla_for,
 )
-from ..services.task_escalation import resolve_escalation_target
+from ..services.task_escalation import merge_into_twin, resolve_escalation_target
 from ..services.task_notify import notify_escalation
 from ..services.sop_checklist import (
     apply_item_toggle,
@@ -388,6 +388,14 @@ def _escalate_and_reassign(
             task.get("store_id"),
             assignee or {"user_id": task.get("assigned_to")},
         )
+
+    merged = merge_into_twin(repo.find_one, task, target, by=by, now=now)
+    if merged:
+        fields, entry = merged
+        repo.update(
+            task.get("task_id"), {**fields, "history": (task.get("history") or []) + [entry]}
+        )
+        return None
 
     new_level = task.get("escalation_level", 0) + 1
     history_entry = {

@@ -269,7 +269,10 @@ class TaskmasterAgent(JarvisAgent):
                 DEFAULT_SLA,
                 MAX_ESCALATION_LEVEL,
             )
-            from api.services.task_escalation import resolve_escalation_target
+            from api.services.task_escalation import (
+                merge_into_twin,
+                resolve_escalation_target,
+            )
             from api.services.task_notify import notify_escalation
         except Exception as e:
             logger.debug(f"[TASKMASTER] escalation modules import failed: {e}")
@@ -374,6 +377,23 @@ class TaskmasterAgent(JarvisAgent):
                     task.get("store_id"),
                     assignee or {"user_id": task.get("assigned_to")},
                 )
+                merged = merge_into_twin(
+                    coll.find_one, task, target, by=self.agent_id, now=now
+                )
+                if merged:
+                    try:
+                        coll.update_one(
+                            {"_id": task["_id"]},
+                            {"$set": merged[0], "$push": {"history": merged[1]}},
+                        )
+                        actions.append(
+                            {"action": "task_merged", "task_id": task.get("task_id")}
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"[TASKMASTER] Failed to merge task {task.get('_id')}: {e}"
+                        )
+                    continue
                 set_fields = {
                     "status": "ESCALATED",
                     "escalation_level": new_level,

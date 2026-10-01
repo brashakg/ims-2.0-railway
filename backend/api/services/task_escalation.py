@@ -21,7 +21,8 @@ collection query) can drive it.
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Optional
+from datetime import datetime
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # Ascending authority. Anyone not listed is a "worker" (rank 1).
 _RANK: Dict[str, int] = {
@@ -104,3 +105,50 @@ def resolve_escalation_target(
         target_role = next_rung_role([target_role])
 
     return None
+
+
+def merge_into_twin(
+    find_one: Callable[[Dict[str, Any]], Optional[Dict[str, Any]]],
+    task: Dict[str, Any],
+    target: Optional[Dict[str, Any]],
+    *,
+    by: str,
+    now: datetime,
+) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
+    """One thing told to several people at once -- a task each, sharing an
+    ``escalation_group`` (the catalogue managers' tasks for one held receipt)
+    -- climbs to ONE task at the next rung. When the person a breached task
+    would go to already holds an open task of its group, the breached one is
+    closed into that task instead of handed over a second time: returns the
+    (fields to set, history entry) that close it, else None (escalate as
+    usual). Both escalation engines -- TASKMASTER's tick and
+    POST /tasks/auto-escalate-overdue -- call this. A failed lookup escalates:
+    a duplicate beats a lost breach."""
+    group = task.get("escalation_group")
+    uid = (target or {}).get("user_id")
+    if not group or not uid:
+        return None
+    try:
+        twin = find_one(
+            {
+                "escalation_group": group,
+                "assigned_to": uid,
+                "status": {"$in": ["OPEN", "IN_PROGRESS", "ESCALATED"]},
+                "task_id": {"$ne": task.get("task_id")},
+            }
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    if not twin:
+        return None
+    note = f"Already with {uid} as task {twin.get('task_id')}."
+    return (
+        {
+            "status": "COMPLETED",
+            "completed_at": now,
+            "completed_by": by,
+            "completion_notes": note,
+            "updated_at": now,
+        },
+        {"action": "completed", "by": by, "notes": note, "at": now},
+    )
