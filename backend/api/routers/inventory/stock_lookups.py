@@ -23,8 +23,15 @@ from ._shared import (
 from .models import (
     StockAddRequest,
 )
+from pydantic import StrictInt
+
 from ._shared import BaseModel, Field, _STOCK_MANAGER_ROLES
-from ...services.reorder_policy import LEVELS_FIELD, STORE_KEY_PATTERN, low_stock_rows
+from ...services.reorder_policy import (
+    LEVELS_FIELD,
+    MAX_LEVEL,
+    STORE_KEY_PATTERN,
+    low_stock_rows,
+)
 from .helpers import (
     _get_db,
     _reject_stock_mint_on_online_store,
@@ -332,10 +339,11 @@ async def add_stock(
 
 
 class ReorderLevelWrite(BaseModel):
-    """One shop's reorder level. level None or -1 = clear it (not set)."""
+    """One shop's reorder level. `level` is REQUIRED: null (or -1) clears it
+    (not set); only a real JSON integer is a level (true/false/'7' are 422)."""
 
     store_id: str = Field(..., min_length=1, max_length=64, pattern=STORE_KEY_PATTERN)
-    level: Optional[int] = Field(None, ge=-1, le=100000)
+    level: Optional[StrictInt] = Field(..., ge=-1, le=MAX_LEVEL)
 
 
 @router.put("/reorder-levels/{product_id}")
@@ -363,10 +371,28 @@ async def set_reorder_level(
         raise HTTPException(status_code=404, detail="Shop not found")
     level = body.level if body.level is not None and body.level >= 0 else None
     key = f"{LEVELS_FIELD}.{store}"
-    res = repo.collection.update_one(
-        {"product_id": product_id},
-        {"$set": {key: level}} if level is not None else {"$unset": {key: ""}},
-    )
-    if not res.matched_count:
+    coll = repo.collection
+    if level is not None:
+        # reorder_levels that is not an object (null, absent, a string, a list)
+        # cannot take a dotted $set: set the whole dict first, guarded so a real
+        # dict is never replaced; otherwise the dotted path.
+        res = coll.update_one(
+            {"product_id": product_id, LEVELS_FIELD: {"$not": {"$type": "object"}}},
+            {"$set": {LEVELS_FIELD: {store: level}}},
+        )
+        if not res.matched_count:
+            res = coll.update_one({"product_id": product_id}, {"$set": {key: level}})
+        found = bool(res.matched_count)
+    else:
+        # Only a real dict can hold a level to clear; anything else is already
+        # not set (and cannot take a dotted $unset).
+        res = coll.update_one(
+            {"product_id": product_id, LEVELS_FIELD: {"$type": "object"}},
+            {"$unset": {key: ""}},
+        )
+        found = bool(res.matched_count) or (
+            coll.find_one({"product_id": product_id}, {"_id": 1}) is not None
+        )
+    if not found:
         raise HTTPException(status_code=404, detail="Product not found")
     return {"product_id": product_id, "store_id": store, "level": level}

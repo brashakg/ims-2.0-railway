@@ -44,19 +44,25 @@ sys.path.insert(
     0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "backend")
 )
 # The field and the shop-key pattern are the write model's own, not copies.
-from api.services.reorder_policy import LEVELS_FIELD, STORE_KEY_PATTERN  # noqa: E402
+from api.services.reorder_policy import (  # noqa: E402
+    LEVELS_FIELD,
+    MAX_LEVEL,
+    STORE_KEY_PATTERN,
+    whole_number,
+)
 
 FORM_DEFAULT = 5
 _SHOP_KEY = re.compile(STORE_KEY_PATTERN)
 
 
 def _typed(value) -> int:
-    """The old chain value if the owner typed it, else 0 (= not set)."""
-    try:
-        n = int(value)
-    except (TypeError, ValueError):
+    """The old chain value if the owner typed it, else 0 (= not set). Read through
+    the policy's own whole-number reader (bool, 2.9, '7', inf, NaN = garbage);
+    never raises."""
+    n = whole_number(value)
+    if n is None or not 1 <= n <= MAX_LEVEL or n == FORM_DEFAULT:
         return 0
-    return n if n >= 1 and n != FORM_DEFAULT else 0
+    return n
 
 
 def plan(db) -> List[Dict]:
@@ -85,10 +91,11 @@ def apply(db, rows) -> Dict[str, int]:
     """Write each planned level, never over a level a shop already has."""
     written = 0
     for row in rows:
-        # A doc whose reorder_levels is null (or absent) cannot take a dotted
-        # $set: set the whole dict instead.
+        # A doc whose reorder_levels is not an object (null, absent, a string, a
+        # list) cannot take a dotted $set: set the whole dict instead, guarded
+        # so a real dict is never replaced.
         whole = db["products"].update_one(
-            {"product_id": row["product_id"], LEVELS_FIELD: None},
+            {"product_id": row["product_id"], LEVELS_FIELD: {"$not": {"$type": "object"}}},
             {"$set": {LEVELS_FIELD: dict(row["levels"])}},
         )
         if whole.modified_count:
