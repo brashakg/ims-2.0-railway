@@ -340,6 +340,27 @@ def test_units_view_shows_a_transferred_in_unit_by_its_transfer(world):
     assert u["from_store_id"] == STORE
 
 
+def test_units_view_words_legacy_statuses_by_their_canonical_name(world):
+    # A legacy unit with no status, an 'in_stock' one and a lowercase
+    # 'reserved' one are all in the shop: the ledger counts them (shelf 2 +
+    # reserved 1), so the view must name them the way the dialog's in-shop
+    # set does, or those pieces are listed but can never be labelled.
+    bare = world["unit"]("BV--LEGACY01", created=datetime(2026, 9, 1, 10, 0))
+    world["db"]["stock_units"].update_one({"stock_id": bare}, {"$unset": {"status": ""}})
+    world["unit"]("BV--LEGACY02", status="in_stock", created=datetime(2026, 9, 1, 10, 1))
+    world["unit"]("BV--LEGACY03", status="reserved", created=datetime(2026, 9, 1, 10, 2))
+    row = _ledger_row(world)
+    assert (row["stock"], row["reserved"]) == (2, 1)
+    units = world["http"].get(
+        "/inventory/units", params={"product_id": world["pid"]}
+    ).json()["units"]
+    assert {u["barcode"]: u["status"] for u in units} == {
+        "BV--LEGACY01": "AVAILABLE",
+        "BV--LEGACY02": "AVAILABLE",
+        "BV--LEGACY03": "RESERVED",
+    }
+
+
 def test_units_view_received_on_is_the_ist_day_of_minting(world):
     world["unit"]("BV--NIGHT001", created=datetime(2026, 9, 26, 20, 0, 0))
     (u,) = world["http"].get(
