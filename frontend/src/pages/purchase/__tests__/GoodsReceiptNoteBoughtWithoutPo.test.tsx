@@ -4,11 +4,7 @@
 // A cash buy from a local dealer can only be logged today by calling it a
 // "Delivery Challan": no price per item, and the History tab then reads
 // "Against Unknown PO". Ruling D14: a plain "Bought without PO" receipt with
-// the dealer, each item's cost and the bill, labelled as such in the list.
-//
-// Both tests are `it.fails` (the vitest twin of pytest xfail strict=True) until
-// the build lands: an unexpected pass fails the run, so the marker must come
-// off in the commit that makes it pass.
+// the dealer, each item's cost and the bill photo, labelled as such in the list.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
@@ -29,9 +25,11 @@ const api = vi.hoisted(() => ({
 }));
 
 const products = vi.hoisted(() => ({ getProducts: vi.fn() }));
+const cockpit = vi.hoisted(() => ({ uploadDoc: vi.fn() }));
 
 vi.mock('../../../services/api', () => ({ vendorsApi: api }));
 vi.mock('../../../services/api/products', () => ({ productApi: products }));
+vi.mock('../../../services/api/grnCockpit', () => ({ grnCockpitApi: cockpit }));
 vi.mock('../../../context/ToastContext', () => ({ useToast: () => toastMock }));
 vi.mock('../../../context/AuthContext', () => ({
   useAuth: () => ({ user: { activeStoreId: 'S1', roles: ['STORE_MANAGER'] } }),
@@ -55,10 +53,15 @@ beforeEach(() => {
   });
   api.createGRN.mockResolvedValue({ grn_id: 'NOPO-NEW-1' });
   api.acceptGRN.mockResolvedValue({ units_added: 2 });
+  cockpit.uploadDoc.mockResolvedValue({
+    file_id: 'F-BILL-1',
+    filename: 'cash-memo.png',
+    mime: 'image/png',
+  });
 });
 
 describe('C7 / D14 - bought without a PO', () => {
-  it.fails('History names a walk-in purchase "Bought without PO", not "Unknown PO"', async () => {
+  it('History names a walk-in purchase "Bought without PO", not "Unknown PO"', async () => {
     api.getGRNs.mockResolvedValue({
       grns: [
         {
@@ -85,7 +88,7 @@ describe('C7 / D14 - bought without a PO', () => {
     expect(screen.queryByText(/Unknown PO/i)).not.toBeInTheDocument();
   });
 
-  it.fails('the receive form takes the dealer and each line cost, and posts a NO_PO receipt', async () => {
+  it('the receive form takes the dealer, each line cost and the bill photo, and posts a NO_PO receipt', async () => {
     render(<GoodsReceiptNote />);
     await waitFor(() => expect(api.getGRNs).toHaveBeenCalled());
 
@@ -104,6 +107,17 @@ describe('C7 / D14 - bought without a PO', () => {
     fireEvent.change(screen.getByLabelText('Quantity on line 1'), { target: { value: '2' } });
     fireEvent.change(screen.getByLabelText(/Cost on line 1/i), { target: { value: '3100' } });
     fireEvent.click(screen.getByLabelText(/Tally line 1/));
+
+    // No bill photo yet: refused on the client, nothing reaches the server.
+    fireEvent.click(screen.getByRole('button', { name: /Post GRN/i }));
+    await waitFor(() =>
+      expect(toastMock.error).toHaveBeenCalledWith(expect.stringMatching(/photo of the dealer's bill/)),
+    );
+    expect(api.createGRN).not.toHaveBeenCalled();
+
+    const photo = new File(['memo'], 'cash-memo.png', { type: 'image/png' });
+    fireEvent.change(screen.getByLabelText(/Bill photo/i), { target: { files: [photo] } });
+    await waitFor(() => expect(screen.getByText(/Attached: cash-memo.png/)).toBeInTheDocument());
     fireEvent.click(screen.getByRole('button', { name: /Post GRN/i }));
 
     await waitFor(() => expect(api.createGRN).toHaveBeenCalledTimes(1));
@@ -112,6 +126,7 @@ describe('C7 / D14 - bought without a PO', () => {
     expect(body.po_id).toBeUndefined();
     expect(body.vendor_id).toBe('V-77');
     expect(body.dc_number).toBeUndefined();
+    expect(body.attachment_file_id).toBe('F-BILL-1');
     expect(body.items).toEqual([
       expect.objectContaining({ product_id: 'P-FR1', received_qty: 2, unit_price: 3100 }),
     ]);
