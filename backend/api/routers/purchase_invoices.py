@@ -73,13 +73,14 @@ from ..services import landed_cost as lc
 from ..services import purchase_invoice_engine as pinv
 from ..services import purchase_match as pmatch
 from ..services import product_master as _pm
+from ..services.cost_mask import AP_ROLES
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-# Money-out / books action: limited to ADMIN / ACCOUNTANT. SUPERADMIN auto-passes
-# via require_roles. Mirrors the _AP_ROLES gate on vendor bills/payments.
-_AP_ROLES = ("ADMIN", "ACCOUNTANT")
+# Money-out / books action: the accounts roles (services/cost_mask.AP_ROLES, the
+# vendor bills / payments gate). SUPERADMIN auto-passes via require_roles.
+_AP_ROLES = AP_ROLES
 
 
 def _get_db():

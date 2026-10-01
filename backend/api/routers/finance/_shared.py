@@ -652,9 +652,12 @@ def _scope_store(store_id, current_user):
 
 
 def _require_finance_admin(current_user: dict) -> None:
-    """Org-wide financials are owner/accountant material."""
-    roles = current_user.get("roles", []) or []
-    if not any(r in roles for r in ("SUPERADMIN", "ADMIN", "ACCOUNTANT")):
+    """Org-wide financials are owner/accountant material: the accounts roles,
+    asked of services/cost_mask "payables" (AP_ROLES) -- the one rule the
+    vendor ledger and /finance/vendor-payments answer. These routes read
+    supplier money (AP aging, bills, vendor payments, ITC, Tally), so they
+    never keep a role list of their own."""
+    if not can_see_cost(current_user, "payables"):
         raise HTTPException(
             status_code=403, detail="Owner financials require ADMIN / ACCOUNTANT"
         )

@@ -165,7 +165,10 @@ export function ReorderDashboard() {
           lastOrderDate: raw.last_order_date ?? raw.last_purchase_date ?? undefined,
           supplierId: raw.supplier_id ?? raw.vendor_id ?? undefined,
           supplierName: raw.supplier_name ?? raw.vendor_name ?? undefined,
-          unitCost: raw.unit_cost ?? raw.cost_price ?? raw.mrp ?? undefined,
+          // The ledger row's cost_price, present only for the product-cost roles
+          // (backend cost_mask). Never the MRP: that priced the estimate AND the
+          // generated PO lines at retail, and a PO rate becomes the product's cost.
+          unitCost: raw.cost_price ?? undefined,
         };
       });
 
@@ -447,7 +450,7 @@ export function ReorderDashboard() {
             <div>
               <p className="text-sm text-gray-500">Est. PO Value</p>
               <p className="text-2xl font-bold text-green-600">
-                &#8377;{(totalValue / 100000).toFixed(1)}L
+                <CostCell value={totalValue} />
               </p>
             </div>
           </div>
