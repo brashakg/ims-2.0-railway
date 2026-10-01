@@ -1,16 +1,16 @@
 // ============================================================================
 // Add / edit product - the reorder level is THIS shop's (audit F73, owner D12)
 // ============================================================================
-// The owner (2026-09-29): reorder points are PER SHOP. The form today saves
+// The owner (2026-09-29): reorder points are PER SHOP. Before the fix the form saved
 // one chain-wide `reorder_point` (useQuickAddForm: a follow-up
 // updateProduct(newId, { reorder_point }) after create, the same key inside
 // the edit PUT), and edit mode pre-fills that chain value -- so a level typed
 // for Dhanbad lands on Bokaro too, and a product with no level at this shop
 // shows somebody else's number.
 //
-// it.fails until the fix lands (vitest's strict xfail). The network is the
-// seam: productApi is a spy for whatever the fix calls, and the axios client is
-// a spy, so the tests ask only WHAT was written and shown.
+// Committed as it.fails first (reproducing the finding); passes with the fix.
+// The network is the seam: productApi is a spy for whatever the fix calls, and
+// the axios client is a spy, so the tests ask only WHAT was written and shown.
 
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -124,7 +124,7 @@ beforeEach(() => {
 });
 
 describe('F73/D12 - add product', () => {
-  it.fails('a typed level is saved for this shop only, never as one chain-wide reorder_point', async () => {
+  it('a typed level is saved for this shop only, never as one chain-wide reorder_point', async () => {
     const user = userEvent.setup();
     renderPage();
     await user.click(screen.getByText('Sunglass'));
@@ -141,7 +141,7 @@ describe('F73/D12 - add product', () => {
 });
 
 describe('F73/D12 - edit product', () => {
-  it.fails("shows THIS shop's level, never the chain-wide value", async () => {
+  it("shows THIS shop's level, never the chain-wide value", async () => {
     renderPage('/catalog/add?edit=P-SRC');
     await waitFor(() => expect(productSpies.getProduct).toHaveBeenCalled());
     await waitFor(() => expect(shopReorderInput().value).toBe('2'));
@@ -149,7 +149,7 @@ describe('F73/D12 - edit product', () => {
     expect(shown).not.toContain('5');
   });
 
-  it.fails("saving an edit writes this shop's level, never reorder_point inside the product PUT", async () => {
+  it("saving an edit writes this shop's level, never reorder_point inside the product PUT", async () => {
     const user = userEvent.setup();
     renderPage('/catalog/add?edit=P-SRC');
     await waitFor(() => expect(productSpies.getProduct).toHaveBeenCalled());

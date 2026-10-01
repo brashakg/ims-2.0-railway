@@ -3,6 +3,7 @@
 // ============================================================================
 
 import api from './client';
+import type { UserRole } from '../../types';
 
 export const inventoryApi = {
   // `opts.created_by` (cataloguer attribution) filters the per-product ledger
@@ -979,22 +980,32 @@ export interface VarianceLine {
 // Reorder Settings API (per-product reorder configuration)
 // ============================================================================
 
+/** Who may set a shop's reorder level: managers their own shop, admins any
+ *  (the server enforces it -- PUT /inventory/reorder-levels). */
+export const REORDER_LEVEL_ROLES: UserRole[] = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'];
+
 export const reorderApi = {
+  /** ONE shop's reorder level (owner ruling D12: levels are per shop).
+   *  null clears it = not set = no low-stock alert. */
+  setShopLevel: async (productId: string, storeId: string, level: number | null) => {
+    const response = await api.put(
+      `/inventory/reorder-levels/${encodeURIComponent(productId)}`,
+      { store_id: storeId, level },
+    );
+    return response.data as { product_id: string; store_id: string; level: number | null };
+  },
+
   updateReorderSettings: async (
     productId: string,
     settings: {
-      reorder_point: number;
       reorder_quantity: number;
       max_stock: number;
       lead_time_days: number;
     }
   ) => {
-    // Persist reorder settings via the SINGLE validated product-update path
-    // (`PUT /products/{id}` in routers/products.py). Previously this hit the
-    // now-retired, unvalidated `PUT /admin/products/{id}` -- consolidated so
-    // there is exactly one validated writer to the `products` collection.
-    // reorder_point / reorder_quantity / max_stock / lead_time_days are
-    // explicit optional fields on the backend ProductUpdate schema.
+    // Persist the product's chain-wide reorder settings via the SINGLE
+    // validated product-update path (`PUT /products/{id}` in
+    // routers/products.py). The reorder LEVEL is per shop: setShopLevel.
     const response = await api.put(`/products/${productId}`, settings);
     return response.data;
   },

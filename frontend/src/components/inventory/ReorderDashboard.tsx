@@ -53,7 +53,10 @@ const hasOrderableQty = (p: Product) =>
   !isAutoReorderOff(p) && p.reorderQuantity != null && p.reorderQuantity >= 1;
 
 export function ReorderDashboard() {
-  const { user } = useAuth();
+  const { user, hasRole } = useAuth();
+  // The reorder LEVEL is this shop's (owner ruling D12); the quantity / max /
+  // lead time stay product-wide, edited only by the product-edit roles.
+  const canEditProduct = hasRole(['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']);
   const toast = useToast();
   const navigate = useNavigate();
 
@@ -80,8 +83,9 @@ export function ReorderDashboard() {
         inventoryApi.getStock(storeId).catch(() => ({ items: [] })),
       ]);
 
-      // getLowStock returns { items: [{ _id: productId, quantity, auto_reorder_disabled }] }
-      const lowStockItems: Array<{ _id: string; quantity: number; auto_reorder_disabled?: boolean }> =
+      // getLowStock returns { items: [{ _id: productId, quantity, reorder_point, auto_reorder_disabled }] }
+      // -- only products with a SET level at or under it (reorder_policy).
+      const lowStockItems: Array<{ _id: string; quantity: number; reorder_point: number; auto_reorder_disabled?: boolean }> =
         Array.isArray(lowStockData) ? lowStockData : lowStockData?.items ?? [];
 
       // getStock returns { items: [...stock unit docs] }
@@ -135,7 +139,7 @@ export function ReorderDashboard() {
           category: raw.category ?? '',
           currentStock,
           reservedStock,
-          reorderPoint: Number(raw.reorder_point ?? raw.reorder_level ?? 10),
+          reorderPoint: Number(item.reorder_point),
           reorderQuantity,
           autoReorderDisabled,
           maxStock: Number(raw.max_stock ?? raw.maximum_stock ?? 50),
@@ -158,12 +162,15 @@ export function ReorderDashboard() {
 
   const handleSaveReorderPoint = async (data: ReorderPointData) => {
     try {
-      await reorderApi.updateReorderSettings(data.productId, {
-        reorder_point: data.reorderPoint,
-        reorder_quantity: data.reorderQuantity,
-        max_stock: data.maxStock,
-        lead_time_days: data.leadTimeDays,
-      });
+      // THIS shop's level, for this shop only (never one chain-wide value).
+      await reorderApi.setShopLevel(data.productId, user?.activeStoreId ?? '', data.reorderPoint);
+      if (canEditProduct) {
+        await reorderApi.updateReorderSettings(data.productId, {
+          reorder_quantity: data.reorderQuantity,
+          max_stock: data.maxStock,
+          lead_time_days: data.leadTimeDays,
+        });
+      }
 
       // Update local state to reflect saved values
       setProducts(products.map(p =>
@@ -171,10 +178,14 @@ export function ReorderDashboard() {
           ? {
               ...p,
               reorderPoint: data.reorderPoint,
-              reorderQuantity: data.reorderQuantity,
-              autoReorderDisabled: data.reorderQuantity <= 0,
-              maxStock: data.maxStock,
-              leadTimeDays: data.leadTimeDays,
+              ...(canEditProduct
+                ? {
+                    reorderQuantity: data.reorderQuantity,
+                    autoReorderDisabled: data.reorderQuantity <= 0,
+                    maxStock: data.maxStock,
+                    leadTimeDays: data.leadTimeDays,
+                  }
+                : {}),
             }
           : p
       ));
@@ -637,6 +648,7 @@ export function ReorderDashboard() {
             leadTimeDays: selectedProduct.leadTimeDays,
           }}
           onSave={handleSaveReorderPoint}
+          productWideLocked={!canEditProduct}
         />
       )}
     </div>

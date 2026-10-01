@@ -33,6 +33,10 @@ interface ReorderPointModalProps {
     leadTimeDays?: number;
   };
   onSave: (data: ReorderPointData) => Promise<void>;
+  /** The reorder LEVEL is this shop's (owner ruling D12). The quantity / max
+   *  stock / lead time are product-wide: read-only for a role that cannot
+   *  edit the product (they are not saved for it). */
+  productWideLocked?: boolean;
 }
 
 export interface ReorderPointData {
@@ -44,7 +48,7 @@ export interface ReorderPointData {
   leadTimeDays: number;
 }
 
-export function ReorderPointModal({ isOpen, onClose, product, onSave }: ReorderPointModalProps) {
+export function ReorderPointModal({ isOpen, onClose, product, onSave, productWideLocked = false }: ReorderPointModalProps) {
   const toast = useToast();
 
   // Seed from the REAL master value only. <= 0 (the -1 sentinel) means the
@@ -54,7 +58,7 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave }: ReorderP
   const startDisabled = product.reorderQuantity != null && product.reorderQuantity <= 0;
 
   const [isSaving, setIsSaving] = useState(false);
-  const [reorderPoint, setReorderPoint] = useState(product.reorderPoint || 10);
+  const [reorderPoint, setReorderPoint] = useState(product.reorderPoint ?? 0);
   const [autoReorderOff, setAutoReorderOff] = useState(startDisabled);
   const [reorderQuantity, setReorderQuantity] = useState<number | ''>(
     product.reorderQuantity != null && product.reorderQuantity >= 1
@@ -92,16 +96,17 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave }: ReorderP
   }, [autoCalculate, autoReorderOff, avgSalesPerDay, leadTimeDays, leadTimeStock, safetyStock]);
 
   const handleSubmit = async () => {
-    // Validation
-    if (reorderPoint <= 0) {
-      toast.error('Reorder point must be greater than 0');
+    // Validation (0 is a real level: alert once this shop runs out)
+    if (reorderPoint < 0) {
+      toast.error('Reorder level must be 0 or more');
       return;
     }
     // Resolve the quantity to persist: -1 (the backend's "auto-reorder off"
     // sentinel) when disabled, otherwise a real qty >= 1. An untouched save
-    // on a disabled product therefore KEEPS it disabled.
+    // on a disabled product therefore KEEPS it disabled. (Not saved at all
+    // when the product-wide fields are locked.)
     let reorderQuantityToSave: number;
-    if (autoReorderOff) {
+    if (autoReorderOff || productWideLocked) {
       reorderQuantityToSave = -1;
     } else {
       if (typeof reorderQuantity !== 'number' || reorderQuantity < 1) {
@@ -110,11 +115,11 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave }: ReorderP
       }
       reorderQuantityToSave = reorderQuantity;
     }
-    if (maxStock < reorderPoint) {
+    if (!productWideLocked && maxStock < reorderPoint) {
       toast.error('Max stock must be greater than or equal to reorder point');
       return;
     }
-    if (leadTimeDays <= 0) {
+    if (!productWideLocked && leadTimeDays <= 0) {
       toast.error('Lead time must be greater than 0');
       return;
     }
@@ -222,6 +227,12 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave }: ReorderP
           </div>
 
           {/* Configuration Fields */}
+          {productWideLocked && (
+            <p className="mb-4 text-xs text-gray-600">
+              You set this shop&apos;s reorder level. The quantity, maximum stock and lead
+              time apply to every shop and are set by the catalogue team.
+            </p>
+          )}
           <div className="space-y-6">
             {/* Lead Time */}
             <div>
@@ -234,7 +245,7 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave }: ReorderP
                 max="365"
                 value={leadTimeDays}
                 onChange={(e) => setLeadTimeDays(parseInt(e.target.value) || 1)}
-                disabled={autoCalculate && isSaving}
+                disabled={(autoCalculate && isSaving) || productWideLocked}
                 className="input-field w-full"
               />
               <p className="text-xs text-gray-500 mt-1">
@@ -245,13 +256,13 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave }: ReorderP
             {/* Reorder Point */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
-                Reorder Point (Units) *
+                Reorder level at this shop (units) *
               </label>
               <input
                 type="number"
-                min="1"
+                min="0"
                 value={reorderPoint}
-                onChange={(e) => setReorderPoint(parseInt(e.target.value) || 1)}
+                onChange={(e) => setReorderPoint(Math.max(0, parseInt(e.target.value) || 0))}
                 disabled={autoCalculate || isSaving}
                 className="input-field w-full"
               />
@@ -274,7 +285,7 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave }: ReorderP
                   type="checkbox"
                   checked={autoReorderOff}
                   onChange={(e) => setAutoReorderOff(e.target.checked)}
-                  disabled={isSaving}
+                  disabled={isSaving || productWideLocked}
                   className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
                 />
                 <span className="text-sm text-gray-700">Auto-reorder disabled</span>
@@ -287,7 +298,7 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave }: ReorderP
                   const v = parseInt(e.target.value, 10);
                   setReorderQuantity(Number.isNaN(v) ? '' : v);
                 }}
-                disabled={autoReorderOff || autoCalculate || isSaving}
+                disabled={autoReorderOff || autoCalculate || isSaving || productWideLocked}
                 className="input-field w-full disabled:bg-gray-100 disabled:text-gray-400"
               />
               <p className="text-xs text-gray-500 mt-1">
@@ -311,7 +322,7 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave }: ReorderP
                 min={reorderPoint}
                 value={maxStock}
                 onChange={(e) => setMaxStock(parseInt(e.target.value) || maxStock)}
-                disabled={autoCalculate || isSaving}
+                disabled={autoCalculate || isSaving || productWideLocked}
                 className="input-field w-full"
               />
               <p className="text-xs text-gray-500 mt-1">

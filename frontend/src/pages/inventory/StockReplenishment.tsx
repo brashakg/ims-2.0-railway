@@ -96,7 +96,7 @@ export function StockReplenishment() {
           .filter((item) => item.auto_reorder_disabled !== true)
           .map((item: any) => {
           const currentStock = item.current_stock ?? item.stock ?? item.quantity ?? 0;
-          const reorderLevel = item.reorder_level ?? item.lowStockThreshold ?? item.minStock ?? item.min_stock ?? 0;
+          const reorderLevel = item.reorder_point ?? item.reorder_level ?? item.lowStockThreshold ?? item.minStock ?? item.min_stock ?? 0;
           // Real gap to refill back up to the reorder point; at least 1.
           const reorderQty = Math.max(1, reorderLevel - currentStock);
           return {

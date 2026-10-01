@@ -2,17 +2,16 @@
 // Per-shop reorder levels on the stock screens - audit F73, owner D12
 // ============================================================================
 // The owner (2026-09-29): reorder points are PER SHOP; a manager sets their own
-// shop's level, an admin any shop. Today the only stock-screen editor is the
+// shop's level, an admin any shop. Before the fix the only stock-screen editor was the
 // Reorder dashboard, which (a) lists only products ALREADY on the low-stock
 // list -- so a product whose level is 'not set' can never be given one there --
 // and (b) saves through PUT /products/{id}: one chain-wide reorder_point that a
 // store manager is refused (ADMIN/CATALOG_MANAGER only) and that, when an admin
 // saves it, changes every shop at once.
 //
-// Each test is it.fails until the fix lands (vitest's strict xfail: it turns
-// red the moment the behaviour starts passing, so the marker must be dropped
-// with the fix). The network is the one seam: the axios client is a spy, so a
-// test only asks WHAT was written, never which helper wrote it.
+// Each test was committed as it.fails first (reproducing the finding) and
+// passes with the fix. The network is the one seam: the axios client is a spy,
+// so a test only asks WHAT was written, never which helper wrote it.
 
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -115,7 +114,7 @@ function renderLedger() {
 }
 
 describe('F73/D12 - the stock ledger', () => {
-  it.fails("lets a store manager give a 'not set' product THIS shop's level, written for this shop only", async () => {
+  it("lets a store manager give a 'not set' product THIS shop's level, written for this shop only", async () => {
     renderLedger();
     const row = screen.getByText('Carrera CA8895').closest('tr') as HTMLElement;
     // The control (named 'reorder level') may be the input itself or a button
@@ -135,7 +134,7 @@ describe('F73/D12 - the stock ledger', () => {
 });
 
 describe('F73/D12 - the Reorder dashboard', () => {
-  it.fails("saves the level for the manager's own shop, never one chain-wide reorder_point", async () => {
+  it("saves the level for the manager's own shop, never one chain-wide reorder_point", async () => {
     render(
       <MemoryRouter>
         <ReorderDashboard />

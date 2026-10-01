@@ -11,7 +11,8 @@ import type { QuickAddForm } from './useQuickAddForm';
 
 export function InventorySection({ form }: { form: QuickAddForm }) {
   const {
-    isReviewMode, reorderLevel, setReorderLevel, images, setImages, variantCtx,
+    isReviewMode, reorderLevel, setReorderLevel, canSetReorderLevel, reorderShop,
+    images, setImages, variantCtx,
     imageInputRef, onImageInputChange, onImageDrop, dragActive, setDragActive,
     uploadingImages, editingImages, removeImage, editImage,
     openSections, toggleSection, sectionIssues,
@@ -39,20 +40,20 @@ export function InventorySection({ form }: { form: QuickAddForm }) {
           Stock and reorder settings come after approval — approving creates the sellable
           billing product; stock then arrives via Goods Receipt (GRN).
         </p>
-      ) : (
+      ) : canSetReorderLevel ? (
         // Action-first: the one sentence you can act on leads, and the
         // explainer sits BESIDE the lone input instead of under three
-        // empty columns.
+        // empty columns. The level is THIS shop's (owner ruling D12).
         <div className="grid grid-cols-1 tablet:grid-cols-[minmax(0,1fr)_minmax(0,3fr)] gap-3 tablet:gap-4 items-start">
           <div>
             <label className="block text-xs font-medium text-gray-700 mb-1" htmlFor="qa-field-reorder_level">
-              Reorder Level
+              Reorder level at this shop
             </label>
             <input
               id="qa-field-reorder_level"
               type="number"
-              title="Reorder Level"
-              placeholder="5"
+              title={`Reorder level at ${reorderShop}`}
+              placeholder="not set"
               value={reorderLevel}
               onChange={(e) => setReorderLevel(e.target.value)}
               className="input-field w-full"
@@ -61,12 +62,19 @@ export function InventorySection({ form }: { form: QuickAddForm }) {
           </div>
           <p className="text-xs text-gray-600 tablet:pt-5">
             <span className="font-semibold text-gray-800">
-              Set the reorder level and you&apos;ll be alerted when stock falls below it.
+              Set this shop&apos;s reorder level and you&apos;ll be alerted when its stock falls to it.
             </span>{' '}
+            Left blank it is not set: no low-stock alert here. Every shop sets its own.{' '}
             Stock is added via Goods Receipt (GRN), not here. The SKU is assigned when the
             product is created and the internal barcode at goods receipt — neither is typed.
           </p>
         </div>
+      ) : (
+        <p className="text-xs text-gray-600 mt-2">
+          Reorder levels are set shop by shop, by each shop&apos;s manager on Inventory &gt; Stock.
+          Stock is added via Goods Receipt (GRN); the SKU and internal barcode are assigned
+          automatically.
+        </p>
       )}
 
       {/* Product images — real upload (durably stored + served by the
