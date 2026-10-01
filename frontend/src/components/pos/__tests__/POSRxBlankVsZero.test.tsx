@@ -59,6 +59,7 @@ vi.mock('../../../context/AuthContext', () => ({ useAuth: () => MOCK_AUTH }));
 
 vi.mock('../../../hooks/usePOSQueries', () => ({
   useProducts: () => ({ data: [], isLoading: false }),
+  useSellableStock: () => ({ data: undefined }),
   useCustomerSearch: () => ({ data: [], isLoading: false }),
   useCustomer: () => ({ data: null }),
   useStores: () => ({ data: [], isLoading: false }),
