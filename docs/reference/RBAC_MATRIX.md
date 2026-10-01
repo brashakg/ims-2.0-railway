@@ -1105,6 +1105,13 @@ are the exact current gate (SUPERADMIN always implied).
 
 ### `/api/v1/vendors`
 
+> Receiving goods (log a delivery, accept it, express receive, void, escalate,
+> upload the receipt document, the receiving cockpit) is **managers only** --
+> store manager, area manager, admin, superadmin; NOT the accountant (owner
+> ruling 2026-09-28). The catalogue manager may raise a purchase order, which
+> is always a DRAFT (its own capability key `vendors:po-draft`); sending,
+> editing and cancelling stay with the four order roles.
+
 | Method | Path | Allowed | S |
 |---|---|---|---|
 | `GET` | `/api/v1/vendors` | AUTH |  |
@@ -1113,14 +1120,21 @@ are the exact current gate (SUPERADMIN always implied).
 | `POST` | `/api/v1/vendors/` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `GET` | `/api/v1/vendors/ap-aging` | ADMIN, ACCOUNTANT |  |
 | `GET` | `/api/v1/vendors/grn` | AUTH |  |
-| `POST` | `/api/v1/vendors/grn` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
+| `POST` | `/api/v1/vendors/grn` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |
+| `POST` | `/api/v1/vendors/grn/express` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |
+| `POST` | `/api/v1/vendors/grn/upload-doc` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |
 | `GET` | `/api/v1/vendors/grn/{grn_id}` | AUTH |  |
-| `POST` | `/api/v1/vendors/grn/{grn_id}/accept` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `POST` | `/api/v1/vendors/grn/{grn_id}/escalate` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
+| `POST` | `/api/v1/vendors/grn/{grn_id}/accept` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |
+| `POST` | `/api/v1/vendors/grn/{grn_id}/escalate` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |
+| `POST` | `/api/v1/vendors/grn/{grn_id}/void` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |
+| `GET` | `/api/v1/vendors/goods-receipt/cockpit` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |
+| `GET` | `/api/v1/vendors/last-cost` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT, CATALOG_MANAGER |  |
 | `GET` | `/api/v1/vendors/purchase-orders` | AUTH |  |
-| `POST` | `/api/v1/vendors/purchase-orders` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
+| `POST` | `/api/v1/vendors/purchase-orders` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT, CATALOG_MANAGER |  |
 | `GET` | `/api/v1/vendors/purchase-orders/{po_id}` | AUTH |  |
+| `PUT` | `/api/v1/vendors/purchase-orders/{po_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `POST` | `/api/v1/vendors/purchase-orders/{po_id}/cancel` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
+| `POST` | `/api/v1/vendors/purchase-orders/{po_id}/items/{line_index}/cancel` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `POST` | `/api/v1/vendors/purchase-orders/{po_id}/send` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `GET` | `/api/v1/vendors/{vendor_id}` | AUTH |  |
 | `PUT` | `/api/v1/vendors/{vendor_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
