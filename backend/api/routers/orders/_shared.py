@@ -538,7 +538,9 @@ def assert_no_active_rx_hold(order: Optional[dict]) -> None:
     ALSO the dispatch gate of the online seller check (multi-location PR 5,
     online_fulfillment_route.seller_problem -- the rule the booking held on
     and every invoice door refuses on): goods must not leave before their
-    tax invoice can be issued, whatever happened to the hold flags."""
+    tax invoice can be issued, whatever happened to the hold flags. Nor
+    while a Re-map is moving its stock claims, or stopped mid-way (its
+    lease): its write may have lifted the hold before the claim settled."""
     from ...services.online_fulfillment_route import stored_seller_problem
 
     bad = stored_seller_problem(order)
@@ -546,6 +548,14 @@ def assert_no_active_rx_hold(order: Optional[dict]) -> None:
         raise HTTPException(
             status_code=400,
             detail=f"This online order cannot be dispatched: {bad['message']}",
+        )
+    if (order or {}).get("reroute_lease_at"):
+        raise HTTPException(
+            status_code=400,
+            detail="This online order cannot be dispatched: a Re-map of it is running "
+            "or stopped mid-way, so its stock claim may not be settled. Press Re-map "
+            "on the Online orders screen (if it says another Re-map is running, "
+            "press it again in a few minutes).",
         )
     kinds = order_hold_kinds(order)
     if not kinds:

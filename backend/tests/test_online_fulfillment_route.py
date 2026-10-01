@@ -103,9 +103,12 @@ Rules pinned (each was reverted in the source and seen red, see the PR notes):
      fresh route to another shop, one failing the seller check, or a fix
      that changes the shop's GST split is refused (a credit note and a new
      booking); a released hold keeps its booked number and date, in any
-     month or financial year. Re-map refuses a line Shopify shows fulfilled,
-     refunded or closed; needs no webhook payload; carries on a crashed
-     Re-map's unsettled claim; files a still-short claim's task at the shop
+     month or financial year. Re-map refuses an IMS line Shopify shows
+     fulfilled, refunded or closed (a line IMS claims nothing for never
+     blocks); needs no webhook payload; carries on a crashed Re-map's
+     unsettled claim, offered on the list and never dispatched meanwhile;
+     offers a move back only to a billing shop with a Shopify location;
+     files a still-short claim's task at the shop
      short now; keeps the tasked problems on the route for every sender of
      its move; keeps an Rx-pending order held
 """
@@ -2036,7 +2039,8 @@ def test_remap_never_changes_a_seller_unknown_orders_seller(world, monkeypatch, 
 
     assert not out["ok"] and out["result"]["status"] == "refused", out
     assert "from BV-BOK-01, not from BV-ONLINE-01" in out["message"], out
-    assert "credit note" in out["message"]
+    # The online bucket has no Shopify location: no move back is offered.
+    assert "credit note" in out["message"] and "Change location" not in out["message"]
     after = db.orders.find_one({"order_id": res["order_id"]}, {"_id": 0})
     for k in ("store_id", "invoice_number", "invoice_date", "created_at", "stock_hold_reason"):
         assert after[k] == order[k], k
@@ -2168,7 +2172,13 @@ def test_a_remap_that_crashed_mid_claim_is_carried_on_by_the_next_press(world, m
     unsettled), claimed 1 of 2 units and died, its lease left behind. The
     next press refused -- 'not held' -- leaving the order releasable with 1
     unit SOLD and the other on sale. The stale lease is taken over before
-    that check now: carried on, both units claimed, the claim settled."""
+    that check now: carried on, both units claimed, the claim settled. Until
+    then the list offers Re-map for it (the hold is gone, so it did not) and
+    no door dispatches it with one unit unclaimed."""
+    from fastapi import HTTPException
+    from api.routers import online_store_orders as oso
+    from api.routers.orders import assert_no_active_rx_hold
+
     db = world["db"]
     payload, res, _o = _short_held_at_bokaro(world, 60110, qty=2)
     oid = res["order_id"]
@@ -2178,6 +2188,11 @@ def test_a_remap_that_crashed_mid_claim_is_carried_on_by_the_next_press(world, m
     db.orders.update_one({"order_id": oid}, {
         "$set": {"fulfillment_hold": False, "reroute_lease_at": "2000-01-01T00:00:00+00:00"},
         "$unset": {"stock_hold_reason": "", "fulfillment_breakdown": "", "fulfillment_stores": ""}})
+    crashed = db.orders.find_one({"order_id": oid}, {"_id": 0})
+    listed = db.orders.find_one({"order_id": oid}, dict(oso._LIST_PROJECTION))  # the list's read
+    assert oso._slim_list_row(listed)["remap_hold"] is True
+    with pytest.raises(HTTPException, match="a Re-map of it is running or stopped mid-way"):
+        assert_no_active_rx_hold(crashed)
 
     out = _remap(world, monkeypatch, payload)
 
@@ -2186,6 +2201,8 @@ def test_a_remap_that_crashed_mid_claim_is_carried_on_by_the_next_press(world, m
     assert _sold_at(db, oid) == ["BV-BOK-01", "BV-BOK-01"]
     assert sum(r["qty"] for r in after["fulfillment_breakdown"]) == 2
     assert after["fulfillment_hold"] is False and "reroute_lease_at" not in after
+    assert oso._slim_list_row(dict(after))["remap_hold"] is False
+    assert_no_active_rx_hold(after)
 
 
 @pytest.mark.parametrize("then", ["shopify_takes_it", "bokaro_restocked"])
@@ -2224,7 +2241,8 @@ def test_remap_is_the_door_out_of_a_failed_move(world, monkeypatch, then):
     if then == "bokaro_restocked":
         assert not out["ok"] and out["result"]["status"] == "refused", out
         assert "from BV-BOK-01, not from BV-RAN-01" in out["message"], out
-        assert "credit note" in out["message"]
+        # Ranchi has a Shopify location: moving it back there is offered too.
+        assert "credit note" in out["message"] and "to BV-RAN-01's location" in out["message"]
         assert after["fulfillment_hold"] is True and after["stock_hold_reason"] == order["stock_hold_reason"]
         assert world["shop"].moves()[sent:] == [] and "superseded_invoice_number" not in after
         return
@@ -3355,6 +3373,29 @@ def test_remap_never_frees_a_unit_shopify_shows_shipped(world, monkeypatch, edit
     assert db.stock_units.find_one({"store_id": "BV-BOK-01", "product_id": "P-OA"})["status"] == "AVAILABLE"
     after = db.orders.find_one({"order_id": oid}, {"_id": 0})
     assert after["fulfillment_hold"] is True and after["stock_hold_reason"] == order["stock_hold_reason"]
+
+
+def test_a_line_ims_claims_nothing_for_never_blocks_remap(world, monkeypatch):
+    """[LOW] Round 13, item 2's refusal counted EVERY order line: a gift card
+    (no IMS product) Shopify fulfils at payment left Re-map refusing the
+    seller-held order forever -- 'goods may have left' -- although Re-map
+    moves only the frame's claim. Only the lines IMS claims count."""
+    db = world["db"]
+    db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": {"gstin": ""}})
+    _stock(db, "BV-BOK-01", "P-RB", 1)
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 1)])
+    world["shop"].fo(FO_2, LOC_BOK, lines=[(9001, 0)], status="CLOSED")  # the gift card
+    payload = _order(60160, lines=(("RB-1234", 1), ("GIFT-1", 1)))
+    res, order = _book(world, payload)
+    assert [p["code"] for p in order["fulfillment_route"]["problems"]] == ["SHOP_GSTIN_MISSING"]
+    db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": {"gstin": "20AAAAA0000A1Z5"}})
+
+    out = _remap(world, monkeypatch, payload)
+
+    assert out["ok"] and "the hold is lifted" in out["message"], out
+    after = db.orders.find_one({"order_id": res["order_id"]}, {"_id": 0})
+    assert after["invoice_number"] == order["invoice_number"] and after["fulfillment_hold"] is False
+    assert _sold_at(db, res["order_id"]) == ["BV-BOK-01"]
 
 
 def test_another_sender_of_a_remaps_move_never_reopens_its_closed_task(world, monkeypatch):

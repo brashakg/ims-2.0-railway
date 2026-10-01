@@ -773,6 +773,15 @@ def reroutable(order: Optional[Dict[str, Any]]) -> bool:
     return _held_on(order, SELLER_CODES + ("MOVE_FAILED",))
 
 
+def remappable(order: Optional[Dict[str, Any]]) -> bool:
+    """THE orders the Re-map door re-routes (``reroute_held_order``, no
+    webhook payload needed) and the list offers it for: held on a hold
+    Re-map releases (``reroutable``), or a Re-map is running on it or
+    stopped mid-way (its lease, taken over once stale -- the crashed one's
+    write may have lifted the hold before its claim settled)."""
+    return reroutable(order) or bool((order or {}).get("reroute_lease_at"))
+
+
 def seller_problem(
     order: Dict[str, Any],
     store_doc: Optional[Dict[str, Any]],
@@ -1099,7 +1108,10 @@ _REROUTE_LEASE_SECONDS = 300
 
 
 def seller_change(
-    order: Dict[str, Any], store_id: Optional[str], store_doc: Optional[Dict[str, Any]]
+    order: Dict[str, Any],
+    store_id: Optional[str],
+    store_doc: Optional[Dict[str, Any]],
+    old_ships: bool = True,
 ) -> Optional[str]:
     """THE SIMPLIFIED ROOT RULE (owner, 2026-10-01): Re-map and clear-hold
     NEVER change an order's invoice number, invoice date, seller shop or tax
@@ -1114,7 +1126,10 @@ def seller_change(
         while every return files the stored head.
 
     Either way the way out is a credit note against the invoice and a new
-    booking through the normal doors."""
+    booking through the normal doors -- or, when the billing shop can ship
+    it (``old_ships``: it has a mapped Shopify location; the online bucket
+    of a SELLER_UNKNOWN order has none), moving its fulfillment orders back
+    there."""
     from ..utils.online_gst import order_place_of_supply
     from .shopify_ingest import _seller_gst_fields
 
@@ -1124,12 +1139,16 @@ def seller_change(
         "through the normal doors"
     )
     if store_id != old:
+        back = (
+            f"move its fulfillment orders to {old}'s location in Shopify admin "
+            "(Orders > order > Change location) and press Re-map again, or "
+            if old_ships
+            else ""
+        )
         return (
             f"Shopify's routing would now ship it from {store_id}, not from {old}, "
             f"which billed it (invoice {number}). IMS never changes an order's "
-            f"seller, invoice or tax: move its fulfillment orders to {old}'s "
-            "location in Shopify admin (Orders > order > Change location) and press "
-            f"Re-map again, or {fix}"
+            f"seller, invoice or tax: {back}{fix}"
         )
     buyer = order.get("gst_buyer") or {"state": order_place_of_supply(order) or ""}
     now = _seller_gst_fields(order.get("items") or [], store_doc, buyer).get("interstate")
@@ -1145,10 +1164,12 @@ def seller_change(
 
 
 def _open_short(items: List[Dict[str, Any]], fos: List[Dict[str, Any]]) -> bool:
-    """Shopify's fresh read leaves a line of the order with less OPEN
-    (unfulfilled) quantity than IMS booked: fulfilled, refunded or closed in
-    Shopify -- the goods may have left. A line the read does not name (an
-    older transcript) is counted in units."""
+    """Shopify's fresh read leaves an IMS line of the order (one whose units
+    IMS claims) with less OPEN (unfulfilled) quantity than IMS booked:
+    fulfilled, refunded or closed in Shopify -- the goods may have left. A
+    line IMS claims nothing for (a gift card Shopify fulfils at payment) never
+    blocks: Re-map moves only claims. A line the read does not name (an older
+    transcript) is counted in units."""
     left: Dict[str, int] = {}
     for f in fos:
         for ln in f.get("lines") or []:
@@ -1156,6 +1177,8 @@ def _open_short(items: List[Dict[str, Any]], fos: List[Dict[str, Any]]) -> bool:
             left[lid] = left.get(lid, 0) + int((ln or {}).get("qty") or 0)
     want: Dict[str, int] = {}
     for it in items or []:
+        if not it.get("ims_product_id"):
+            continue
         lid = str(it.get("shopify_line_item_id") or "")
         want[lid] = want.get(lid, 0) + int(it.get("quantity") or 1)
     if "" in left or "" in want:
@@ -1425,7 +1448,8 @@ async def reroute_held_order(db, order_id: str) -> Dict[str, Any]:
             bad = seller_problem({"store_id": store_id, "fulfillment_route": route}, store_doc, find)
             if bad and store_id == old:
                 raise ValueError(f"Shopify's routing leaves it failing the seller check -- {bad['message']}")
-            change = seller_change(order, store_id, store_doc)
+            locs = shop_locations(db)  # None: unreadable -- offer the move back
+            change = seller_change(order, store_id, store_doc, locs is None or old in locs)
             if change:
                 raise ValueError(change)
             # Keep each unit the new route still wants at its shop; give back

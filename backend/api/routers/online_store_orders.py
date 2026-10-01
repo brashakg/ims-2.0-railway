@@ -137,6 +137,7 @@ _LIST_PROJECTION: Dict[str, int] = {
     "stock_hold_reason": 1,
     "fulfillment_hold": 1,
     "fulfillment_route": 1,
+    "reroute_lease_at": 1,
     "rx_hold_cleared": 1,
     "rx_hold_cleared_at": 1,
     "invoice_number": 1,
@@ -216,9 +217,9 @@ def _slim_list_row(doc: Dict[str, Any]) -> Dict[str, Any]:
     # Held on its seller (GSTIN) check or a failed fulfillment-order move: the
     # screen offers Re-map, which re-routes it
     # (online_fulfillment_route.reroute_held_order).
-    from ..services.online_fulfillment_route import reroutable
+    from ..services.online_fulfillment_route import remappable
 
-    doc["remap_hold"] = reroutable(doc)
+    doc["remap_hold"] = remappable(doc)
     return doc
 
 
@@ -604,7 +605,7 @@ async def remap_online_order(
     # have this door.
     from ..services.online_fulfillment_route import (
         map_routed_order,
-        reroutable,
+        remappable,
         reroute_held_order,
     )
 
@@ -612,7 +613,7 @@ async def remap_online_order(
         booked = db.get_collection("orders").find_one({"shopify_order_id": str(shopify_order_id)})
     except Exception:  # noqa: BLE001 - unreadable: the replay below decides
         booked = None
-    if booked and (reroutable(booked) or booked.get("reroute_lease_at")):
+    if booked and remappable(booked):
         try:
             result = await reroute_held_order(db, booked["order_id"])
         except Exception as exc:  # noqa: BLE001 - belt-and-braces; it never raises
