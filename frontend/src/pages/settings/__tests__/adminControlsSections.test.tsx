@@ -166,6 +166,16 @@ describe('the gates: SUPERADMIN only, matching the backend', () => {
     },
   );
 
+  // Every ['SUPERADMIN']-only row is strict, not just the four new ones.
+  it.each(['agents', 'feature-toggles', 'shopify-live-sync'])('ADMIN is refused /settings/%s, SUPERADMIN is admitted', async (section) => {
+    const denied = renderRoute(`/settings/${section}`, ['ADMIN']);
+    expect(await screen.findByText('ZZ-DENIED', undefined, FIND)).toBeInTheDocument();
+    denied.unmount();
+    renderRoute(`/settings/${section}`, ['SUPERADMIN']);
+    await waitFor(() => expect(screen.queryByText('ZZ-DENIED')).toBeNull(), FIND);
+    expect(await screen.findByRole('link', { name: /^System$/ }, FIND)).toBeInTheDocument();
+  });
+
   it('a legacy /settings?tab=rules link lands on the rules section', async () => {
     renderRoute('/settings?tab=rules', ['SUPERADMIN']);
     expect(await screen.findByText('Low Stock Alert Threshold', undefined, FIND)).toBeInTheDocument();
@@ -255,5 +265,62 @@ describe('unsaved edits are guarded', () => {
     fireEvent.click(screen.getByRole('button', { name: /^Save Discount Limits$/ }));
     await waitFor(() => expect(mockUpdateAdminControls).toHaveBeenCalled());
     expect(screen.getByText('Unsaved changes')).toBeInTheDocument();
+  });
+
+  it('an edit made while a save is in flight stays dirty', async () => {
+    let finish!: () => void;
+    mockUpdateAdminControls.mockReset().mockReturnValue(new Promise<void>((r) => { finish = () => r(); }));
+    renderRoute('/settings/discount-caps', ['SUPERADMIN']);
+    const input = await screen.findByDisplayValue('7', undefined, FIND);
+    fireEvent.change(input, { target: { value: '9' } });
+    fireEvent.click(screen.getByRole('button', { name: /^Save Discount Limits$/ }));
+    await waitFor(() => expect(mockUpdateAdminControls).toHaveBeenCalledTimes(1));
+    fireEvent.change(screen.getByDisplayValue('9'), { target: { value: '11' } }); // mid-flight
+    finish();
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Save Discount Limits$/ })).not.toBeDisabled());
+    expect(screen.getByText('Unsaved changes')).toBeInTheDocument();
+  });
+
+  it('does not prompt for a link to the current page, mailto: or tel:', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    renderRoute('/settings/discount-caps', ['SUPERADMIN']);
+    fireEvent.change(await screen.findByDisplayValue('7', undefined, FIND), { target: { value: '9' } });
+    const links = ['/', 'mailto:a@b.co', 'tel:+911234567890'].map((href) => {
+      const a = document.createElement('a');
+      a.href = href === '/' ? window.location.pathname : href;
+      a.textContent = href;
+      document.body.appendChild(a);
+      return a;
+    });
+    // jsdom does not navigate on click; a prevented default would show a prompt.
+    for (const a of links) fireEvent.click(a);
+    expect(confirmSpy).not.toHaveBeenCalled();
+    // control: a link to another page still prompts
+    fireEvent.click(screen.getByRole('link', { name: /^Role Permissions$/ }));
+    expect(confirmSpy).toHaveBeenCalledTimes(1);
+    links.forEach((a) => a.remove());
+    confirmSpy.mockRestore();
+  });
+
+  it('beforeunload is cancelled while dirty; no listener after a save or after unmount', async () => {
+    const add = vi.spyOn(window, 'addEventListener');
+    const remove = vi.spyOn(window, 'removeEventListener');
+    const fire = () => { const e = new Event('beforeunload', { cancelable: true }); window.dispatchEvent(e); return e.defaultPrevented; };
+    const view = renderRoute('/settings/discount-caps', ['SUPERADMIN']);
+    const input = await screen.findByDisplayValue('7', undefined, FIND);
+    expect(fire()).toBe(false); // clean: no prompt
+    fireEvent.change(input, { target: { value: '9' } });
+    expect(fire()).toBe(true); // dirty: cancelled
+    await save(/^Save Discount Limits$/);
+    await waitFor(() => expect(screen.queryByText('Unsaved changes')).toBeNull());
+    expect(fire()).toBe(false); // listener gone after the save
+    fireEvent.change(screen.getByDisplayValue('9'), { target: { value: '10' } });
+    expect(fire()).toBe(true);
+    view.unmount();
+    expect(fire()).toBe(false); // none left after unmount
+    const live = (spy: typeof add) => spy.mock.calls.filter((c) => c[0] === 'beforeunload').length;
+    expect(live(add)).toBe(live(remove)); // every add was removed
+    add.mockRestore();
+    remove.mockRestore();
   });
 });
