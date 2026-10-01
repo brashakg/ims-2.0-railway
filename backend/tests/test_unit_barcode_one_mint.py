@@ -368,3 +368,29 @@ def test_stock_ledger_rows_carry_their_on_hand_unit_codes():
     (row,) = _build_store_ledger(StockRepository(db.stock_units), _Products(), STORE)
     assert row["stock"] == 2
     assert sorted(row["unit_barcodes"]) == ["BV--91FA3858", "BV0000000042"]
+
+
+@pytest.mark.parametrize(
+    "typed",
+    [
+        "BV000000004",  # one digit short: the till still treats it as a barcode
+        "0000000042",  # the shop prefix left off
+        "BV00000000421",  # one digit too many
+        ".*",  # regex characters are literal text, not a pattern
+        "BV00000000.2",
+        "BV0+42",
+    ],
+)
+def test_a_unit_code_matches_whole_never_a_part_or_a_pattern(typed):
+    """The lookup ignores letter case only. A partial code, or one carrying
+    regex characters, must find NO unit (404 at the till), never some other
+    unit that happens to contain it."""
+    import mongomock
+    from database.repositories.product_repository import StockRepository
+
+    coll = mongomock.MongoClient().db.stock_units
+    for n in range(40, 50):
+        coll.insert_one({"stock_id": f"SU-{n}", "barcode": f"BV00000000{n}"})
+    repo = StockRepository(coll)
+    assert repo.find_by_barcode("bv0000000042")["stock_id"] == "SU-42"
+    assert repo.find_by_barcode(typed) is None, typed
