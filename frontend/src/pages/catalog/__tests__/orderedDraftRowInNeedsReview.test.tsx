@@ -7,7 +7,8 @@
 // draft whose receipt is still holding the units. The row and the drawer read
 // the one rule (isOrderedDraft): badge "Ordered — finish it", no bulk-approve
 // checkbox, it opens as its product (Edit -> ?edit=<spine>), never the import
-// approve, and it offers no Clone or Order stock of an unfinished draft.
+// approve, and it offers no Clone or Order stock of an unfinished draft --
+// whether the drawer holds the catalogue copy or the product itself.
 
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -24,10 +25,24 @@ vi.mock('../../../context/ToastContext', () => ({
   useToast: () => ({ success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() }),
 }));
 vi.mock('../../../components/shell/NavBadge', () => ({ refreshNavCounts: vi.fn() }));
+// The same draft as its product: Needs review -> Edit -> a save that leaves a
+// gap returns to /catalog?focus=<spine>, which opens THIS doc.
+const SPINE = {
+  product_id: 'P-SPINE',
+  sku: 'FRBOSSBOSS1700C2',
+  category: 'FR',
+  brand: 'Boss',
+  model: 'BOSS 1700',
+  provisional: true,
+  is_active: false,
+  catalog_status: 'DRAFT',
+  mrp: 2990,
+};
 vi.mock('../../../services/api/products', () => ({
   productApi: {
     getProducts: vi.fn(async () => ({ products: [], total: 0 })),
     getBrandOptions: vi.fn(async () => ({ brands: [] })),
+    getProduct: vi.fn(async () => SPINE),
   },
   catalogApi: { getOnlineSummary: vi.fn(async () => ({ catalog: null })) },
 }));
@@ -100,5 +115,18 @@ describe('an ordered draft in Needs review', () => {
     expect(within(drawer).queryByRole('button', { name: /Order stock/ })).toBeNull();
     await user.click(within(drawer).getByRole('button', { name: /^Edit$/ }));
     await waitFor(() => expect(where).toContain('edit=P-SPINE'));
+  });
+
+  it('opened as the product doc itself, it is still the unfinished ordered draft', async () => {
+    render(
+      <MemoryRouter initialEntries={['/catalog?focus=P-SPINE']}>
+        <CatalogManagerPage segment="catalog" />
+      </MemoryRouter>,
+    );
+    const drawer = await screen.findByRole('dialog', { name: 'Boss BOSS 1700' });
+    expect(within(drawer).getByText(/Ordered — finish it/)).toBeInTheDocument();
+    expect(within(drawer).queryByText(/Inactive/)).toBeNull();
+    expect(within(drawer).queryByRole('button', { name: /Clone/ })).toBeNull();
+    expect(within(drawer).queryByRole('button', { name: /Order stock/ })).toBeNull();
   });
 });
