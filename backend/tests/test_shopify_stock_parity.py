@@ -2062,6 +2062,8 @@ def test_a_dead_live_listing_read_is_unknown_on_both_screens(monkeypatch, where)
     assert out["checked"] is False and _tasks(db)[0]["status"] == "OPEN"
     page = _reconcile_page(monkeypatch, db, levels, "BV-A")
     assert {r["sku"]: r["status"] for r in page["items"]} == {"SKU-1": "LISTED_UNKNOWN", "SKU-2": "LISTED_UNKNOWN"}
+    # Review round 2: the columns beside 'Unverified' are unknown too, never a confident 0.
+    assert {r["sku"]: (r["online"], r["delta"]) for r in page["items"]} == {"SKU-1": (None, None), "SKU-2": (None, None)}
     assert page["live_listings_unknown"] is True and page["listed_qty_live"] is False
     assert page["summary"]["not_online"] == 0
     tally = _tally(monkeypatch, db, levels)
@@ -2153,6 +2155,15 @@ def test_a_spine_sku_with_a_space_is_unknown_on_the_screens_never_not_online(mon
     assert "SKU-2 " in tally and tally["SKU-2 "]["online_listed_qty"] is None
 
 
+def _listing_target_on_the_product_row(db):
+    """Case C (review round 2): SKU-2's own size row carries NO item and
+    hangs under a DRAFT listing c3, while its PUBLISHED twin c2 carries the
+    item on its ecom -- the target is c2's, so the listing is c2."""
+    db.seed("catalog_products", [_listing(3, "SKU-3", status="DRAFT")])
+    _set(db, "catalog_variants", {"sku": "SKU-2"}, parent_product_id="c3", shopify_inventory_item_id=None)
+    _set(db, "catalog_products", {"id": "c2"}, **{"ecom.shopify_inventory_item_id": INV_2})
+
+
 def _listing_unplaced_by_parent(db):
     """Case A: SKU-2's size row points at the SPINE id 'p1' (made before the
     twin existed) and parent_sku SKU-1, while twin c1 carries a legacy sku --
@@ -2174,7 +2185,8 @@ def _listing_shadowed_by_a_barcode(db):
     db.seed("catalog_variants", [{"sku": "SKU-3-M", "barcode": "SKU-2", "parent_product_id": "c3"}])
 
 
-@pytest.mark.parametrize("case", [_listing_unplaced_by_parent, _listing_shadowed_by_a_barcode])
+@pytest.mark.parametrize("case", [_listing_unplaced_by_parent, _listing_shadowed_by_a_barcode,
+                                  _listing_target_on_the_product_row])
 def test_the_listing_is_the_one_that_carries_the_target(monkeypatch, case):
     """Review round 1 (listings_for_skus' blind spot): the writer's target
     for SKU-2 is INV_2, but the listing reader named no listing (a parent
@@ -2183,7 +2195,9 @@ def test_the_listing_is_the_one_that_carries_the_target(monkeypatch, case):
     not online while LOC_A sells 3 against a 0 shelf. The listing now
     follows the target's own precedence: parity files BV-A, the view says
     OVERSELL_RISK, the tally flags it. Put back 'every matched variant row
-    names its parent, none falls through' -> fails."""
+    names its parent, none falls through' -> fails; review round 2: name an
+    item-less own size row's parent before the product row that carries
+    the target -> case C judges SKU-2 by the DRAFT c3 -> fails."""
     from api.services import online_catalog
 
     db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 0, "BV-B": 0}})
@@ -2215,3 +2229,54 @@ def test_the_inventory_online_column_reads_the_one_live_reader(monkeypatch):
     assert {k: v["online"] for k, v in got.items()} == {"SKU-1": True, "SKU-2": False}
     view = _reconcile(monkeypatch, db, {INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 3, LOC_B: 0}}, "BV-A")
     assert view["SKU-2"]["status"] == "NOT_ONLINE"
+
+
+def test_a_dead_products_read_on_the_reconcile_view_is_unknown_never_covered(monkeypatch):
+    """Review round 2: the reconcile route swallowed a failed products read
+    into 'no SKUs', and no SKU meant no live SKU, so the page said 'fully
+    covered' and 'No overselling risk' beside BV-A's open task. A dead
+    products read is unknown: live_listings_unknown, listed_qty_live False.
+    Swallow it into [] again -> listed_qty_live True -> fails."""
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 0, "BV-B": 0}})
+    levels = {INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 3, LOC_B: 0}}
+    _run(sp.run_parity_tick(db, graphql=_shopify(levels)))
+    coll = db.get_collection("products")
+
+    def dead(*a, **k):
+        raise RuntimeError("products read died")
+
+    monkeypatch.setattr(coll, "find", dead)
+    page = _reconcile_page(monkeypatch, db, levels, "BV-A")
+    assert page["items"] == [] and page["live_listings_unknown"] is True
+    assert page["listed_qty_live"] is False and _tasks(db)[0]["status"] == "OPEN"
+
+
+def test_the_inventory_online_column_says_unknown_on_a_dead_live_read(monkeypatch):
+    """Review round 2: a failed live read answered {} on /catalog/online-status,
+    so the Inventory screen showed every row 'In-store only' and the card
+    'none synced online' -- a confident 'not online' beside an open task.
+    The statuses stay and `online` is None (the screen says Unverified).
+    Answer {} or online False again -> fails."""
+    from api.routers import catalog
+
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 0, "BV-B": 0}})
+    monkeypatch.setattr(catalog, "_get_db", lambda: db)
+    _dead_live_read(db, "status")
+    body = catalog.OnlineStatusRequest(skus=["SKU-1", "SKU-2"])
+    statuses = _run(catalog.post_online_status(body, current_user={"user_id": "u1"}))["statuses"]
+    assert {k: v["online"] for k, v in statuses.items()} == {"SKU-1": None, "SKU-2": None}
+
+
+def test_no_live_listing_beside_an_unread_shelf_is_still_covered(monkeypatch):
+    """Review round 2 test gap: with no live listing the tally has nothing
+    to read from Shopify, even on a night a shop's shelf cannot be read (the
+    on-hand-unknown early return): listed_qty_live stays True, so the page
+    shows the on-hand note alone, not a second 'Shopify unavailable' one.
+    Drop the early no-live-listing branch -> False -> fails."""
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 0, "BV-B": 0}})
+    for c in ("c1", "c2"):
+        _set(db, "catalog_products", {"id": c}, **{"ecom.status": "DRAFT"})
+    _fail_shelf(monkeypatch, "BV-A")
+    tally = _tally(monkeypatch, db, {INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 3, LOC_B: 0}})
+    assert tally["summary"].get("on_hand_unknown") is True
+    assert tally["summary"]["listed_qty_live"] is True

@@ -65,18 +65,19 @@ def _online_statuses(db, sku_list: List[str]) -> Dict[str, Any]:
     one the nightly parity, the Stock Tally and the reconciliation view read
     -- so the Inventory screen's Online column never calls a draft or
     taken-down listing online while those views call it not online. A
-    failed read answers {} (unknown), the endpoint's fail-soft shape."""
+    failed live read answers ``online`` None (unknown: the screen says
+    Unverified), never a confident "in-store only"."""
     from ..services.shopify_push.inventory import skus_on_live_listings
 
     statuses = online_status_for_skus(db, sku_list)
     if not statuses:
         return statuses
     try:
-        live = skus_on_live_listings(db, list(statuses), strict=True)
+        live: Optional[set] = skus_on_live_listings(db, list(statuses), strict=True)
     except Exception:  # noqa: BLE001
-        return {}
+        live = None
     for key, status in statuses.items():
-        status["online"] = str(key).strip() in live
+        status["online"] = None if live is None else str(key).strip() in live
     return statuses
 
 
@@ -211,8 +212,18 @@ async def online_stock_reconcile(
             )
             .limit(limit)
         )
-    except Exception:
-        products = []
+    except Exception:  # noqa: BLE001
+        # Which SKUs exist is unknown: never "nothing to reconcile, fully
+        # covered" beside a drift task parity keeps open.
+        return {
+            "items": [],
+            "summary": {},
+            "online_configured": online_mapping_available(db),
+            "listed_qty_live": False,
+            "listed_live_rows": 0,
+            "listed_mapped_rows": 0,
+            "live_listings_unknown": True,
+        }
 
     pids = [p.get("product_id") for p in products if p.get("product_id")]
     on_hand = _on_hand_by_product(db, pids, store_id)
