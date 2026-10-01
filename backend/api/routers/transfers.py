@@ -2128,6 +2128,14 @@ def _store_entity(db, store_id: str) -> str:
     return ""
 
 
+def _shop_gst(db, store_id: str) -> tuple:
+    """(entity_id, gstin, state) of one side of a transfer -- the registration
+    the FIN-3 mirror bill books on. ('', '', '') on a miss / DB absent."""
+    entity_id = _store_entity(db, store_id)
+    state = _store_state_code(db, store_id)
+    return entity_id, _entity_gstin_for_state(db, entity_id, state), state
+
+
 def _entity_gstin_for_state(db, entity_id: str, state_code: str) -> str:
     """Return the GSTIN the entity bills under in `state_code`; '' on miss.
 
@@ -2160,14 +2168,6 @@ def _entity_gstin_for_state(db, entity_id: str, state_code: str) -> str:
             exc,
         )
     return ""
-
-
-def _shop_gst(db, store_id: str) -> tuple:
-    """(entity_id, gstin, state) of one side of a transfer -- the registration
-    the FIN-3 mirror bill books on. ('', '', '') on a miss / DB absent."""
-    entity_id = _store_entity(db, store_id)
-    state = _store_state_code(db, store_id)
-    return entity_id, _entity_gstin_for_state(db, entity_id, state), state
 
 
 def _transfer_registrations(db, transfer: Dict) -> tuple:
