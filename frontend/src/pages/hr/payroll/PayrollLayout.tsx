@@ -202,6 +202,15 @@ export function PayrollLayout() {
 
   return (
     <>
+      {/* Editorial header (kept from the old PayrollDashboard) */}
+      <div className="inv-head">
+        <div>
+          <div className="eyebrow mb-1.5">Payroll</div>
+          <h1>Month-end, by the rupee.</h1>
+          <div className="hint">Basic + HRA + allowances − PF − ESI − PT − TDS − advances. Payslips, salary sheet export, month-lock after close.</div>
+        </div>
+      </div>
+
       {/* Error Alert */}
       {error && (
         <div className="bg-red-50/20 border border-red-600 text-red-600 px-4 py-3 rounded-lg flex items-center gap-2">
