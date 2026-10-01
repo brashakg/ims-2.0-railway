@@ -12,7 +12,7 @@
 // sibling's rows with the copy it happened to load (the one-button panel used
 // to send all four on every save).
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { settingsApi } from '../../services/api/settings';
 import { adminStoreApi } from '../../services/api/stores';
 import {
@@ -156,6 +156,9 @@ function useUnsavedGuard(dirty: boolean) {
     const onClick = (e: MouseEvent) => {
       const a = (e.target as Element | null)?.closest?.('a[href]') as HTMLAnchorElement | null;
       if (!a || a.target === '_blank' || a.getAttribute('href')?.startsWith('#')) return;
+      // mailto:/tel: and a link back to this very page do not leave it.
+      if (a.protocol !== 'http:' && a.protocol !== 'https:') return;
+      if (a.pathname === window.location.pathname) return;
       if (!window.confirm('You have unsaved changes on this page - leave without saving?')) {
         e.preventDefault();
         e.stopPropagation();
@@ -170,24 +173,38 @@ function useUnsavedGuard(dirty: boolean) {
   }, [dirty]);
 }
 
-/** dirty flag + guard: markDirty() on a user edit, clean() after a save. */
+/**
+ * dirty flag + guard: markDirty() on a user edit. beginSave() is called when a
+ * save starts and returns the function to call when it succeeds; that clears
+ * dirty only if no edit landed in between (an edit made while the save was in
+ * flight is not in the saved payload and must stay guarded).
+ */
 function useDirty() {
   const [dirty, setDirty] = useState(false);
+  const version = useRef(0);
   useUnsavedGuard(dirty);
-  return { dirty, markDirty: () => setDirty(true), clean: () => setDirty(false) };
+  return {
+    dirty,
+    markDirty: () => { version.current += 1; setDirty(true); },
+    beginSave: () => {
+      const at = version.current;
+      return () => { if (version.current === at) setDirty(false); };
+    },
+  };
 }
 
-function SaveBar({ label, payload, dirty, onSaved }: {
-  label: string; payload: () => AdminControlsPayload; dirty: boolean; onSaved: () => void;
+function SaveBar({ label, payload, dirty, beginSave }: {
+  label: string; payload: () => AdminControlsPayload; dirty: boolean; beginSave: () => () => void;
 }) {
   const toast = useToast();
   const [isSaving, setIsSaving] = useState(false);
 
   const handleSave = async () => {
     setIsSaving(true);
+    const saved = beginSave();
     try {
       await settingsApi.updateAdminControls(payload());
-      onSaved();
+      saved();
       toast.success('Admin settings saved successfully');
     } catch {
       toast.error('Failed to save settings');
@@ -219,7 +236,7 @@ export function StoreModulesSection() {
   // Store module access — fetch dynamically
   const [storeModules, setStoreModules] = useState<StoreModuleConfig[]>(DEFAULT_STORES);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const { dirty, markDirty, clean } = useDirty();
+  const { dirty, markDirty, beginSave } = useDirty();
 
   useEffect(() => {
     // Fetch stores
@@ -295,7 +312,7 @@ export function StoreModulesSection() {
       <SaveBar
         label="Store Modules"
         dirty={dirty}
-        onSaved={clean}
+        beginSave={beginSave}
         payload={() => ({ store_modules: Object.fromEntries(storeModules.map(s => [s.storeId, s.modules])) })}
       />
     </div>
@@ -318,7 +335,7 @@ export function RolePermissionsSection() {
     }))
   );
   const [loadError, setLoadError] = useState<string | null>(null);
-  const { dirty, markDirty, clean } = useDirty();
+  const { dirty, markDirty, beginSave } = useDirty();
 
   useEffect(() => {
     // Load saved admin controls
@@ -384,7 +401,7 @@ export function RolePermissionsSection() {
       <SaveBar
         label="Role Permissions"
         dirty={dirty}
-        onSaved={clean}
+        beginSave={beginSave}
         payload={() => ({ role_permissions: Object.fromEntries(rolePermissions.map(rp => [rp.roleId, rp.permissions])) })}
       />
     </div>
@@ -399,7 +416,7 @@ export function DiscountCapsSection() {
   // Discount limits
   const [discountLimits, setDiscountLimitsState] = useState<DiscountLimit[]>(DEFAULT_DISCOUNT_LIMITS);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const { dirty, markDirty, clean } = useDirty();
+  const { dirty, markDirty, beginSave } = useDirty();
   // User edits go through this so they mark the page dirty; the load below does not.
   const setDiscountLimits = (u: (prev: DiscountLimit[]) => DiscountLimit[]) => { markDirty(); setDiscountLimitsState(u); };
 
@@ -469,7 +486,7 @@ export function DiscountCapsSection() {
           ))}
         </div>
       </div>
-      <SaveBar label="Discount Limits" payload={() => ({ discount_limits: discountLimits })} dirty={dirty} onSaved={clean} />
+      <SaveBar label="Discount Limits" payload={() => ({ discount_limits: discountLimits })} dirty={dirty} beginSave={beginSave} />
     </div>
   );
 }
@@ -482,7 +499,7 @@ export function OperationalRulesSection() {
   // Operational rules
   const [rules, setRulesState] = useState<OperationalRule[]>(DEFAULT_RULES);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const { dirty, markDirty, clean } = useDirty();
+  const { dirty, markDirty, beginSave } = useDirty();
   // User edits go through this so they mark the page dirty; the load below does not.
   const setRules = (u: (prev: OperationalRule[]) => OperationalRule[]) => { markDirty(); setRulesState(u); };
 
@@ -574,7 +591,7 @@ export function OperationalRulesSection() {
       <SaveBar
         label="Operational Rules"
         dirty={dirty}
-        onSaved={clean}
+        beginSave={beginSave}
         payload={() => ({ operational_rules: Object.fromEntries(rules.map(r => [r.id, r.value])) })}
       />
     </div>
