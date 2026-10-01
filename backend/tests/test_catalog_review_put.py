@@ -774,3 +774,19 @@ def test_review_editor_remove_clears_every_barcode_the_push_reads(gtin_env):
     twin = {**twin, "ecom": {"shopify_variant_id": "gid://shopify/ProductVariant/1"}}
     rows, _ = build_variant_price_inputs(twin, _variants_for_price_push(twin, []))
     assert "barcode" not in rows[0]
+
+
+def test_catalog_create_door_refuses_a_gtin_another_product_holds(gtin_env):
+    """POST /catalog/products is a create door too: one holder per GTIN."""
+    gtin_env.create({"product_id": "spine-other", "sku": "OTHER-1",
+                     "attributes": {"gtin": _UPC}})
+    inp = catalog_mod.ProductCreateInput(
+        category="FR",
+        attributes={"brand_name": "Ray-Ban", "model_no": "RB-G-001",
+                    "colour_code": "BLK", "gtin": "0" + _UPC},
+        pricing={"mrp": 4000, "offer_price": 3600, "discount_category": "MASS"},
+    )
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(catalog_mod.create_catalog_product(inp, _user()))
+    assert exc.value.status_code == 409
+    assert "OTHER-1" in str(exc.value.detail)

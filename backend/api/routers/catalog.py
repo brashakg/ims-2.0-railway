@@ -1776,6 +1776,12 @@ async def create_catalog_product(
     # form AND catalog doors" flow. When there is no DB (_pr is None) the catalog
     # save below also falls back to in-memory, so there is no orphan to guard.
     _pr = get_product_repository()
+    # One product per manufacturer GTIN at this create door too (the same rule
+    # as the form and edit doors).
+    try:
+        _pm.assert_gtin_free((_spine.get("attributes") or {}).get("gtin"), _pr, None)
+    except _pm.ProductMasterError as err:
+        raise HTTPException(status_code=err.status, detail=err.message) from err
     if _pr is not None:
         try:
             _spine_created = _pr.create(_spine, raise_on_duplicate=True)
