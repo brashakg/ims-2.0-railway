@@ -904,19 +904,21 @@ INDEXES = {
             },
             "name": "uniq_std_vendor_invoice_store",
         },
-        # D14: one live "Bought without PO" receipt per bill photo. A retried
-        # or double-pressed post re-sends the same uploaded file, and a walk-in
-        # dealer has no vendor_id for the index above to key on -- the atomic
-        # twin of vendors.grn._find_duplicate_no_po_grn. A VOID frees it.
+        # D14: one live "Bought without PO" receipt per bill photo per shop,
+        # keyed on the photo's sha256 -- a double-pressed post re-sends the
+        # same file, a retry after a reload uploads the same bytes under a new
+        # file id, and a walk-in dealer has no vendor_id for the index above
+        # to key on. The atomic twin of vendors.grn._find_duplicate_no_po_grn.
+        # A VOID frees it.
         {
-            "keys": [("attachment_file_id", 1)],
+            "keys": [("store_id", 1), ("attachment_sha256", 1)],
             "unique": True,
             "partialFilterExpression": {
                 "grn_subtype": "NO_PO",
-                "attachment_file_id": {"$type": "string"},
+                "attachment_sha256": {"$type": "string"},
                 "status": {"$in": ["PENDING", "PARTIALLY_ACCEPTED", "ACCEPTED"]},
             },
-            "name": "uniq_nopo_bill_photo",
+            "name": "uniq_nopo_bill_hash",
         },
     ],
     "tasks": [

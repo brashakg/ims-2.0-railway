@@ -266,10 +266,13 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
     # with DIFFERENT invoice numbers per shipment and passes untouched. A
     # "Bought without PO" receipt from a walk-in dealer (no vendor_id) is
     # matched by its bill photo or the dealer's bill number instead (D14).
+    # The photo's content hash (upload-doc stamps it) makes the same bill
+    # uploaded again -- a new file id, the same bytes -- the same bill.
+    photo_sha = None if is_dc else (_attachment_meta or {}).get("sha256")
     if not is_dc:
         dup = _find_duplicate_standard_grn(
             grn_repo, grn.po_id, vendor_id, grn.vendor_invoice_no
-        ) or _find_duplicate_no_po_grn(grn_repo, grn, store_id)
+        ) or _find_duplicate_no_po_grn(grn_repo, grn, store_id, photo_sha=photo_sha)
         if dup is not None:
             raise HTTPException(
                 status_code=409,
@@ -372,6 +375,8 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
         "attachment_file_id": None if is_dc else grn.attachment_file_id,
         "attachment_filename": None if is_dc else grn.attachment_filename,
         "attachment_mime": None if is_dc else grn.attachment_mime,
+        # D14: the bill photo's sha256 -- the uniq_nopo_bill_hash key.
+        "attachment_sha256": photo_sha,
         "items": item_docs,
         "total_received": total_received,
         "total_accepted": total_accepted,
@@ -440,7 +445,7 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
                     grn.vendor_invoice_no,
                     exclude_grn_id=grn_id,
                 ) or _find_duplicate_no_po_grn(
-                    grn_repo, grn, store_id, exclude_grn_id=grn_id
+                    grn_repo, grn, store_id, photo_sha=photo_sha, exclude_grn_id=grn_id
                 )
             except Exception:  # noqa: BLE001
                 dup = None

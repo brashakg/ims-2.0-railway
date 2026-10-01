@@ -36,6 +36,7 @@ No emoji (Windows cp1252).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import sys
 import uuid
@@ -228,13 +229,20 @@ def world(monkeypatch):
     return {"db": db, "files": files, "as_": as_}
 
 
-def _bill_photo(world):
-    """A bill photo exactly as POST /vendors/grn/upload-doc stores it."""
+def _bill_photo(world, content=None):
+    """A bill photo exactly as POST /vendors/grn/upload-doc stores it, sha256
+    stamped. A fresh photo each call unless the same bytes are passed again."""
+    content = content or b"\x89PNG cash memo " + uuid.uuid4().bytes
     return world["files"].put(
-        content=b"\x89PNG cash memo",
+        content=content,
         filename="cash-memo.png",
         mime_type="image/png",
-        metadata={"kind": "grn_document", "uploaded_by": "u-mgr", "store_id": STORE},
+        metadata={
+            "kind": "grn_document",
+            "uploaded_by": "u-mgr",
+            "store_id": STORE,
+            "sha256": hashlib.sha256(content).hexdigest(),
+        },
     )
 
 
@@ -448,13 +456,14 @@ def test_c7_a_new_photo_of_the_same_dealer_bill_is_still_the_same_bill(world):
 
 
 def test_c7_two_posts_at_once_meet_the_bill_photo_index(world, monkeypatch):
-    """Two identical posts at the same moment both pass the look-up; the
-    partial unique index on the bill photo makes the second insert fail, and
-    that must read as the same 409 -- never a second receipt."""
+    """Two posts of one bill at the same moment both pass the look-up; the
+    partial unique index on the bill photo's hash makes the second insert
+    fail -- even when the photo was uploaded again under a new file id -- and
+    that must read as the same 409, never a second receipt."""
     from api.routers.vendors import grn_create as gc
     from database.schemas import get_all_indexes
 
-    spec = next(i for i in get_all_indexes()["grns"] if i.get("name") == "uniq_nopo_bill_photo")
+    spec = next(i for i in get_all_indexes()["grns"] if i.get("name") == "uniq_nopo_bill_hash")
     world["db"].grns.create_index(
         spec["keys"],
         unique=True,
@@ -462,8 +471,10 @@ def test_c7_two_posts_at_once_meet_the_bill_photo_index(world, monkeypatch):
         partialFilterExpression=spec["partialFilterExpression"],
     )
     http = world["as_"](MANAGER)
-    body = _walk_in_body(world, vendor_invoice_no=None)
+    memo = b"\x89PNG the one cash memo"
+    body = _walk_in_body(world, vendor_invoice_no=None, attachment_file_id=_bill_photo(world, memo))
     assert http.post("/vendors/grn", json=body).status_code == 201
+    body["attachment_file_id"] = _bill_photo(world, memo)
 
     real = gc._find_duplicate_no_po_grn
     calls = {"n": 0}
@@ -476,6 +487,74 @@ def test_c7_two_posts_at_once_meet_the_bill_photo_index(world, monkeypatch):
     raced = http.post("/vendors/grn", json=body)
     assert raced.status_code == 409, raced.text
     assert world["db"].grns.count_documents({}) == 1
+
+
+def test_c7_the_same_bill_photo_uploaded_again_is_the_same_bill(world):
+    """Panel probe: a dealer's cash bill with NO number, posted again after a
+    page reload with the same image uploaded again (a new file id): 201, 201
+    -- the guard compared file ids only, and the dealer + number check has no
+    number to go on. The upload door's sha256 is the bill's identity."""
+    http = world["as_"](MANAGER)
+
+    def upload():
+        res = http.post(
+            "/vendors/grn/upload-doc",
+            files={"file": ("cash-memo.png", b"\x89PNG one cash memo", "image/png")},
+        )
+        assert res.status_code == 200, res.text
+        return res.json()["file_id"]
+
+    photo, photo_again = upload(), upload()
+    assert photo != photo_again
+    first = http.post("/vendors/grn", json=_walk_in_body(world, vendor_invoice_no=None, attachment_file_id=photo))
+    assert first.status_code == 201, first.text
+    again = http.post("/vendors/grn", json=_walk_in_body(world, vendor_invoice_no=None, attachment_file_id=photo_again))
+    assert again.status_code == 409, again.text
+    assert again.json()["detail"]["grn_id"] == first.json()["grn_id"]
+    assert world["db"].grns.count_documents({}) == 1
+
+
+def test_c7_a_supplier_picked_or_typed_by_name_is_the_same_seller(world):
+    """Panel probe: receipt 1 picked the supplier from the list, receipt 2
+    typed the same supplier's name; same bill number, fresh photos: 201, 201
+    in either order -- 10 units on the shelf for a 5-unit bill."""
+    http = world["as_"](MANAGER)
+    assert http.post("/vendors/grn", json=_no_po_body(world)).status_code == 201
+    typed = _no_po_body(world, vendor_id=None, dealer_name="Bank More Optical")
+    assert http.post("/vendors/grn", json=typed).status_code == 409
+    # The other order, with the legal name typed.
+    typed = _no_po_body(world, vendor_id=None, dealer_name="bank more optical traders", vendor_invoice_no="CASH-88")
+    assert http.post("/vendors/grn", json=typed).status_code == 201
+    picked = _no_po_body(world, vendor_invoice_no="CASH-88")
+    assert http.post("/vendors/grn", json=picked).status_code == 409
+    # Another dealer's bill that happens to carry the same number is another purchase.
+    other = _no_po_body(world, vendor_id=None, dealer_name="Sharma Optical")
+    assert http.post("/vendors/grn", json=other).status_code == 201
+    assert world["db"].grns.count_documents({}) == 3
+
+
+def test_c7_a_long_walk_in_history_never_hides_a_recent_bill(world):
+    """Panel probe: the guard read the shop's first 500 walk-in receipts with
+    no sort -- the OLDEST -- so past 500 the same dealer + bill number posted
+    twice gave 201, 201."""
+    world["db"].grns.insert_many(
+        [
+            {
+                "grn_id": f"GRN-OLD-{n:04d}",
+                "grn_subtype": "NO_PO",
+                "store_id": STORE,
+                "status": "ACCEPTED",
+                "dealer_name": f"Old Dealer {n}",
+                "vendor_invoice_no": f"OLD-{n}",
+                "vendor_invoice_no_norm": f"OLD{n}",
+                "created_at": "2026-04-01T10:00:00",
+            }
+            for n in range(500)
+        ]
+    )
+    http = world["as_"](MANAGER)
+    assert http.post("/vendors/grn", json=_walk_in_body(world)).status_code == 201
+    assert http.post("/vendors/grn", json=_walk_in_body(world)).status_code == 409
 
 
 # ===========================================================================
