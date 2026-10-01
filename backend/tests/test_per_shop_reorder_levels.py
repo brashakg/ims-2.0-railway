@@ -572,3 +572,106 @@ def test_migration_apply_writes_the_levels_once():
     assert _levels_of(db, "P-KEEP") == {DHN: 7, BOK: 2}
     assert _levels_of(db, "P-FORM5") == {}
     assert mod.plan(db) == []  # idempotent
+
+
+def test_migration_apply_survives_a_null_levels_dict():
+    mod = _script()
+    db = mongomock.MongoClient().db
+    db.products.insert_one({"product_id": "P-NULL", "reorder_point": 3, "reorder_levels": None})
+    db.stock_units.insert_many(_units("P-NULL", DHN, 1) + _units("P-NULL", BOK, 1))
+    mod.apply(db, mod.plan(db))
+    assert _levels_of(db, "P-NULL") == {DHN: 3, BOK: 3}
+    assert mod.plan(db) == []
+
+
+# ---------------------------------------------------------------------------
+# 5. Review round 3: garbage is not a level, one top-up, one status band
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "garbage", [True, 2.9, -0.5, float("inf"), float("-inf"), float("nan"), "5", [5], {"a": 1}]
+)
+def test_only_a_real_integer_is_a_level(garbage):
+    from api.services.reorder_policy import is_low_stock, reorder_level
+
+    prod = {"product_id": "P", **_levels({DHN: garbage})}
+    assert reorder_level(prod, store_id=DHN) is None
+    assert is_low_stock(prod, 0, store_id=DHN) is False  # no level = no alert
+
+
+def test_real_levels_still_read_and_floats_that_are_whole_pass():
+    from api.services.reorder_policy import reorder_level
+
+    assert reorder_level({**_levels({DHN: 0})}, store_id=DHN) == 0
+    assert reorder_level({**_levels({DHN: 3})}, store_id=DHN) == 3
+    assert reorder_level({**_levels({DHN: 4.0})}, store_id=DHN) == 4  # Mongo double
+
+
+@pytest.mark.parametrize("count", [float("inf"), float("nan"), 2.5, "3", True])
+def test_a_garbage_on_hand_never_raises_and_never_alerts(count):
+    from api.services.reorder_policy import is_low_stock
+
+    prod = {"product_id": "P", **_levels({DHN: 5})}
+    assert is_low_stock(prod, count, store_id=DHN) is False
+
+
+def test_top_up_is_one_rule():
+    from api.services.reorder_policy import top_up
+
+    assert top_up(5, 2) == 4  # back to one above the level
+    assert top_up(5, 5) == 1
+    assert top_up(5, 6) == 0
+    assert top_up(0, 0) == 1
+    assert top_up(None, 0) == 0  # not set = nothing to order
+    assert top_up(-1, 0) == 0
+
+
+def test_the_low_stock_feed_carries_the_servers_top_up_and_band(world):
+    from api.services.reorder_policy import low_stock_rows, top_up
+
+    world.products.insert_one(_product("P-TOP", **_levels({DHN: 6})))
+    world.stock_units.insert_many(_units("P-TOP", DHN, 2))
+    rows = [r for r in low_stock_rows(world.products, world.stock_units, store_id=DHN)
+            if r["product_id"] == "P-TOP"]
+    assert len(rows) == 1
+    assert rows[0]["top_up_qty"] == top_up(6, 2) == 5
+    assert rows[0]["stock_status"] == "critical"  # 2 <= half of 6
+    # Purchase report agrees: same product, same shop, same quantity.
+    world.orders.insert_many(_orders("P-TOP", DHN, 2))  # slow: only the level recommends
+    body = _get("/api/v1/reports/purchase/recommendations", store_id=DHN, min_velocity=2)
+    rec = [r for r in body["recommendations"] if r["product_id"] == "P-TOP"]
+    assert rec and rec[0]["suggested_order_qty"] == rows[0]["top_up_qty"]
+    feed = _get("/api/v1/inventory/low-stock", store_id=DHN)["items"]
+    assert [i["top_up_qty"] for i in feed if i["product_id"] == "P-TOP"] == [5]
+
+
+def test_stock_status_bands_come_from_the_server():
+    from api.services.reorder_policy import stock_status
+
+    assert stock_status(None, 0) == "not-set"
+    assert stock_status(5, 6) == "healthy"
+    assert stock_status(5, 5) == "low"
+    assert stock_status(5, 2) == "critical"
+    assert stock_status(5, 0) == "out-of-stock"
+    assert stock_status(0, 0) == "out-of-stock"
+
+
+def test_reserved_units_never_make_a_product_low(world):
+    # Level 5, 6 sellable on hand, 2 reserved: the server says not low, so no
+    # screen may say low (the dashboard now reads this list, not its own sum).
+    from api.services.reorder_policy import low_stock_rows
+
+    world.products.insert_one(_product("P-RES", **_levels({DHN: 5})))
+    world.stock_units.insert_many(_units("P-RES", DHN, 6) + [
+        {**u, "stock_id": u["stock_id"] + "-R"} for u in _units("P-RES", DHN, 2, status="RESERVED")
+    ])
+    assert "P-RES" not in [r["product_id"] for r in low_stock_rows(world.products, world.stock_units, store_id=DHN)]
+
+
+def test_catalogue_twin_is_not_stamped_with_a_chain_wide_level():
+    import inspect
+    from api.routers import catalog
+
+    src = inspect.getsource(catalog)
+    assert '"reorder_level"' not in src

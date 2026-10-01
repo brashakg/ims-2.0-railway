@@ -12,7 +12,7 @@ from ...dependencies import (
     validate_store_access,
 )
 from ...services.reorder_policy import auto_reorder_disabled as _auto_reorder_disabled
-from ...services.reorder_policy import is_low_stock, on_hand, reorder_level
+from ...services.reorder_policy import is_low_stock, on_hand, reorder_level, top_up
 from ._shared import router
 
 # ----------------------------------------------------------------------------
@@ -266,12 +266,12 @@ async def purchase_recommendations(
         # under it, the same verdict as the low-stock list) even when
         # desired_cover would tolerate current stock, still recommend a top-up
         # back above the level.
-        top_up = (
-            max(0, (reorder_point or 0) + 1 - current_stock)
+        top_up_units = (
+            top_up(reorder_point, current_stock)
             if is_low_stock(prod, current_stock, store_id=active_store)
             else 0
         )
-        suggested_qty = max(gap_units, top_up)
+        suggested_qty = max(gap_units, top_up_units)
         if suggested_qty <= 0:
             continue
 

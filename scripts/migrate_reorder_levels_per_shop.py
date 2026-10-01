@@ -85,6 +85,15 @@ def apply(db, rows) -> Dict[str, int]:
     """Write each planned level, never over a level a shop already has."""
     written = 0
     for row in rows:
+        # A doc whose reorder_levels is null (or absent) cannot take a dotted
+        # $set: set the whole dict instead.
+        whole = db["products"].update_one(
+            {"product_id": row["product_id"], LEVELS_FIELD: None},
+            {"$set": {LEVELS_FIELD: dict(row["levels"])}},
+        )
+        if whole.modified_count:
+            written += len(row["levels"])
+            continue
         for shop, level in row["levels"].items():
             key = f"{LEVELS_FIELD}.{shop}"
             res = db["products"].update_one(

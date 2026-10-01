@@ -76,27 +76,67 @@ LEVELS_FIELD = "reorder_levels"
 STORE_KEY_PATTERN = r"^[A-Za-z0-9_-]+$"
 
 
+def _whole(value: Any) -> Optional[int]:
+    """A real integer or None. bool, non-integral floats, inf/NaN, strings and
+    anything else are NOT numbers a level (or a count) may be read from.
+    Never raises."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        try:
+            return int(value) if value == int(value) else None
+        except (OverflowError, ValueError):  # inf, NaN
+            return None
+    return None
+
+
 def reorder_level(product: Any, *, store_id: Optional[str]) -> Optional[int]:
-    """THIS shop's reorder level for the product, or None = not set."""
+    """THIS shop's reorder level for the product, or None = not set.
+    Only a real whole number >= 0 is a level; garbage is not set."""
     if not store_id or not isinstance(product, dict):
         return None
     levels = product.get(LEVELS_FIELD)
     if not isinstance(levels, dict):
         return None
-    try:
-        level = int(levels.get(store_id))
-    except (TypeError, ValueError):
-        return None
-    return level if level >= 0 else None
+    level = _whole(levels.get(store_id))
+    return level if level is not None and level >= 0 else None
 
 
 def is_low_stock(product: Any, on_hand: Any, *, store_id: Optional[str]) -> bool:
     """True when the shop has a level and its on-hand is at or under it."""
     level = reorder_level(product, store_id=store_id)
-    try:
-        return level is not None and int(on_hand or 0) <= level
-    except (TypeError, ValueError):
+    if level is None:
         return False
+    count = 0 if on_hand is None else _whole(on_hand)
+    return count is not None and count <= level
+
+
+def top_up(level: Any, on_hand: Any) -> int:
+    """ONE top-up rule: units to order to get back to one above the level
+    (0 when there is no level or the shop is already above it). The purchase
+    report and the replenishment screen both read this."""
+    lvl = _whole(level)
+    count = 0 if on_hand is None else _whole(on_hand)
+    if lvl is None or lvl < 0 or count is None:
+        return 0
+    return max(0, lvl + 1 - count)
+
+
+def stock_status(level: Any, on_hand: Any) -> str:
+    """The server's band for a shop's stock: 'not-set' (no level, no alert),
+    'out-of-stock', 'critical' (at or under half the level), 'low' (at or
+    under the level) or 'healthy'. The only place the bands are decided."""
+    lvl = _whole(level)
+    count = 0 if on_hand is None else _whole(on_hand)
+    if lvl is None or lvl < 0 or count is None:
+        return "not-set"
+    if count <= 0:
+        return "out-of-stock" if count <= lvl else "healthy"
+    if count <= lvl * 0.5:
+        return "critical"
+    return "low" if count <= lvl else "healthy"
 
 
 def _coll(source):
@@ -139,7 +179,8 @@ def low_stock_rows(
     """THE low-stock list: one row per (product, shop) at or under that
     shop's own level -- a shop that has sold out (0 units) included.
     store_id None = every shop (the owner's all-shops views). Each row:
-    {_id, product_id, store_id, quantity, reorder_point, sku, name}.
+    {_id, product_id, store_id, quantity, reorder_point, stock_status,
+    top_up_qty, sku, name}.
     `products` / `stock_units`: repositories or raw collections. A missing
     collection or a failed read -> [] (never alert on a level we could not
     read)."""
@@ -191,6 +232,10 @@ def low_stock_rows(
                         "store_id": shop,
                         "quantity": qty,
                         "reorder_point": reorder_level(p, store_id=shop),
+                        "stock_status": stock_status(
+                            reorder_level(p, store_id=shop), qty
+                        ),
+                        "top_up_qty": top_up(reorder_level(p, store_id=shop), qty),
                         "sku": p.get("sku") or "",
                         "name": p.get("name") or "",
                     }
