@@ -856,6 +856,7 @@ def test_a_saved_edit_writes_the_typed_in_product_under_the_lines_id(monkeypatch
     lines = repo.pos["PO1"]["items"]
     assert [i["product_id"] for i in lines] == [prod["product_id"]] * 2
     assert [i["sku"] for i in lines] == [prod["sku"]] * 2
+    assert len(repo.updates) == 1, "one write: the edit, nothing to repair after"
     actions = [r["action"] for r in audit.rows]
     assert actions.index("purchase_order.edit") < actions.index("product.created")
 
