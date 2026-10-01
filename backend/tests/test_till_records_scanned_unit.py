@@ -444,3 +444,26 @@ def test_return_serial_check_reads_the_scanned_lines_own_unit(client, till):
         )
         is None
     )
+
+
+# ---------------------------------------------------------------------------
+# TSC-3: the trace's sale lines go through the one cost rule
+# ---------------------------------------------------------------------------
+# TSU-4 made the trace find the scanned sale, so it now returns that order's
+# lines -- and each line carries cost_at_sale. The route is open to every
+# signed-in user, so the lines pass through cost_mask like the scan replies.
+
+
+@pytest.mark.parametrize("role", COUNTER_ROLES)
+def test_trace_sale_lines_carry_no_cost_for_counter_roles(client, till, role):
+    r = _sell(client, [_line(stock_id=UNIT_B["stock_id"])])
+    assert r.status_code in (200, 201), r.text
+    url = f"/api/v1/inventory/barcode/{UNIT_B['barcode']}/trace"
+
+    admin = client.get(url, headers=_token(["ADMIN"])).json()["sales"]
+    assert admin[0]["matched_lines"][0]["cost_at_sale"] == 4000.0  # the guard
+
+    sales = client.get(url, headers=_token([role])).json()["sales"]
+    assert [s["order_number"] for s in sales] == [s["order_number"] for s in admin]
+    for line in sales[0]["matched_lines"]:
+        assert "cost_at_sale" not in line and "cost_price" not in line, line

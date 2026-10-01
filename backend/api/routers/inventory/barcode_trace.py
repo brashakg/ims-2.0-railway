@@ -11,6 +11,7 @@ from ._shared import (
 from .helpers import (
     _get_db,
 )
+from ...services.cost_mask import mask_cost
 
 # ============================================================================
 # INV-12: BARCODE LIFECYCLE TRACE
@@ -114,8 +115,11 @@ async def barcode_lifecycle_trace(
             ).sort("created_at", 1).limit(50)
         )
         for order in orders:
+            # Every signed-in role reads this route: a sale line's
+            # cost_at_sale goes through the one cost rule.
             matching = [
-                i for i in (order.get("items") or order.get("order_items") or [])
+                mask_cost(dict(i), current_user, "product")
+                for i in (order.get("items") or order.get("order_items") or [])
                 if i.get("barcode") == barcode
                 or (stock_id and i.get("stock_id") == stock_id)
             ]
