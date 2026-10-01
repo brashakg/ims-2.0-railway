@@ -46,6 +46,7 @@ import { ExpressReceivePanel } from './ExpressReceivePanel';
 import type { TwoStepPrefill } from './ExpressReceivePanel';
 import { PurchaseStatusChip } from '../../components/purchase/PurchaseStatusChip';
 import { RECEIVABLE_PO_STATUSES } from './purchaseTypes';
+import { PurchaseShopName, PurchaseShopPicker, usePurchaseShop } from './purchaseShop';
 
 // ---- Local types -----------------------------------------------------------
 
@@ -202,6 +203,8 @@ function PrintLabelsDialog({ grnId, productIds, onClose }: PrintLabelsDialogProp
 interface InboxPO {
   po_id: string;
   po_number: string;
+  /** The shop the order delivers to (named on the card on all stores). */
+  store_id: string;
   vendor_id: string;
   vendor_name: string;
   status: string;
@@ -217,9 +220,16 @@ interface InboxPO {
 export function GoodsReceiptCockpit() {
   const { user } = useAuth();
   const toast = useToast();
-  const storeId = user?.activeStoreId || '';
-  // W1.4 / OS-006: receiving books stock at the active store. An ONLINE store
-  // holds no stock — warn up front (backend rejects the GRN with 400 too).
+  // Audit F63: the ONE Purchase shop scope (purchaseShop.tsx). An admin reads
+  // the shop picked on the Purchase tabs -- every shop when he picks none --
+  // so the order he pressed Receive on (listed under that same pick) is open
+  // here, not missing because his own shop is another. Everyone else keeps
+  // their own shop, as before (the server scopes them to it either way).
+  const { storeId: purchaseShop, canPick } = usePurchaseShop();
+  const storeId = (canPick ? purchaseShop : user?.activeStoreId) || '';
+  // W1.4 / OS-006: a PO's goods are booked at its delivery shop -- the shop
+  // in scope. An ONLINE store holds no stock — warn up front (backend rejects
+  // the GRN with 400 too).
   const onlineStore = useIsOnlineStore(storeId);
 
   // ---- Vendor picker state -------------------------------------------------
@@ -435,6 +445,7 @@ export function GoodsReceiptCockpit() {
           return {
             po_id: String(p.po_id ?? p._id ?? ''),
             po_number: String(p.po_number ?? ''),
+            store_id: String(p.delivery_store_id ?? ''),
             vendor_id: String(p.vendor_id ?? ''),
             vendor_name:
               String(p.vendor_name ?? '').trim() || String(p.vendor_id ?? ''),
@@ -500,6 +511,17 @@ export function GoodsReceiptCockpit() {
     setVendorId(vid);
     startTransition(() => loadCockpit(vid));
   };
+
+  // An admin moving the shop filter: the vendor list and an open vendor's
+  // cockpit follow it (the inbox reloads through loadInbox's own effect).
+  const shownScope = useRef(storeId);
+  useEffect(() => {
+    if (shownScope.current === storeId) return;
+    shownScope.current = storeId;
+    setVendorsLoaded(false);
+    if (vendorId) startTransition(() => loadCockpit(vendorId));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storeId]);
 
   // ---- Deep-link support: /purchase/receive?vendor_id=&po_id= --------------
   // The PO list's "Receive" button lands here with vendor + PO preselected:
@@ -792,15 +814,20 @@ export function GoodsReceiptCockpit() {
                 : 'Every box on its way to you, across all vendors. Tap one when it lands — bill first, then stock.'}
             </p>
           </div>
-          {vendorId && (
-            <button
-              type="button"
-              className="btn sm"
-              onClick={() => onVendorChange('')}
-            >
-              <Inbox className="w-3.5 h-3.5" /> All deliveries
-            </button>
-          )}
+          <div className="flex items-center gap-3 flex-wrap">
+            {/* Audit F63: an admin's Purchase shop filter (nothing for anyone
+                else) -- what this page lists follows it. */}
+            <PurchaseShopPicker />
+            {vendorId && (
+              <button
+                type="button"
+                className="btn sm"
+                onClick={() => onVendorChange('')}
+              >
+                <Inbox className="w-3.5 h-3.5" /> All deliveries
+              </button>
+            )}
+          </div>
         </div>
 
         {/* W1.4 / OS-006: online-store warning — receiving books stock here. */}
@@ -922,6 +949,12 @@ export function GoodsReceiptCockpit() {
                         >
                           {row.po_number}
                         </p>
+                        {/* All stores mixes shops: say where this box goes. */}
+                        {!storeId && row.store_id && (
+                          <p className="text-xs mt-0.5" style={{ color: 'var(--ink-4)' }}>
+                            For <PurchaseShopName storeId={row.store_id} />
+                          </p>
+                        )}
                         <p
                           className="text-xs mt-1"
                           style={{ color: 'var(--ink-4)' }}
@@ -1475,7 +1508,7 @@ export function GoodsReceiptCockpit() {
                       className="text-center py-8 text-sm"
                       style={{ color: 'var(--ink-4)' }}
                     >
-                      No open POs for this vendor at this store.
+                      No open POs for this vendor {storeId ? 'at this store' : 'in any store'}.
                     </div>
                   ) : (
                     <div className="space-y-2 p-4">

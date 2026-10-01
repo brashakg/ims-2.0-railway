@@ -255,7 +255,7 @@ export default function FinanceDashboard() {
         financeApi.getOutstanding({ store_id: storeId }),
         financeApi.getCashFlow({ period: 'month', store_id: storeId }),
         financeApi.getBudget(),
-        canSeePayables ? financeApi.getVendorPayments() : Promise.resolve([]),
+        canSeePayables ? financeApi.getVendorPayments(storeId) : Promise.resolve([]),
       ]);
 
       setRevenueData(rev.status === 'fulfilled' ? mapRevenue(rev.value) : []);
