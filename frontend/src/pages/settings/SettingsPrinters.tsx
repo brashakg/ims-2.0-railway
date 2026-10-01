@@ -237,9 +237,17 @@ function UnitLabelCard() {
   const toast = useToast();
   const host = window.location.host;
   const [offset, setOffset] = useState(() => String(getLabelOffsetMm()));
+  /** True when the offset was kept; when this browser blocks site data it is
+   *  not, the labels print flush left, and the card says exactly that. */
   const save = () => {
-    setLabelOffsetMm(Number(offset));
+    const kept = setLabelOffsetMm(Number(offset));
     setOffset(String(getLabelOffsetMm()));
+    if (!kept) {
+      toast.error(
+        `This browser did not keep the offset (site data is blocked for ${host}), so labels print flush left. Allow site data for IMS and save again.`,
+      );
+    }
+    return kept;
   };
   return (
     <div className="card">
@@ -272,8 +280,7 @@ function UnitLabelCard() {
           type="button"
           className="btn-primary"
           onClick={() => {
-            save();
-            toast.success(`Label offset saved on this computer for ${host}`);
+            if (save()) toast.success(`Label offset saved on this computer for ${host}`);
           }}
         >
           <Save className="w-4 h-4 mr-2" />

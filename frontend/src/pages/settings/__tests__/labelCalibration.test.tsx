@@ -18,14 +18,13 @@
   Object.defineProperty(globalThis, 'localStorage', { value: ls, configurable: true, writable: true });
 })();
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 
 const printMock = vi.hoisted(() => vi.fn(() => ({ method: 'html', message: '' })));
+const toastMock = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() }));
 vi.mock('../../../services/printWindow', () => ({ printHtmlFallback: printMock }));
-vi.mock('../../../context/ToastContext', () => ({
-  useToast: () => ({ success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() }),
-}));
+vi.mock('../../../context/ToastContext', () => ({ useToast: () => toastMock }));
 vi.mock('../../../services/api', () => ({
   settingsApi: {
     getPrinterSettings: vi.fn().mockResolvedValue({ receipt_printer_width: 80, label_size: '50x25' }),
@@ -36,6 +35,11 @@ vi.mock('../../../services/api', () => ({
 
 import { PrinterSettingsPage } from '../SettingsPrinters';
 import { getLabelOffsetMm } from '../../../components/labels/unitLabel';
+
+beforeEach(() => {
+  localStorage.clear();
+  Object.values(toastMock).forEach((f) => f.mockClear());
+});
 
 describe('label calibration', () => {
   it('saves the offset on this computer and prints the test label at it', async () => {
@@ -62,8 +66,23 @@ describe('label calibration', () => {
     fireEvent.click(screen.getByRole('button', { name: /save offset/i }));
     expect(getLabelOffsetMm()).toBe(7);
     expect(printMock).not.toHaveBeenCalled();
+    expect(toastMock.success).toHaveBeenCalledWith(expect.stringMatching(/saved on this computer/i));
     expect(screen.getByText(window.location.host)).toBeInTheDocument();
     expect(screen.getByText(/at another web address, set it there too/i)).toBeInTheDocument();
+  });
+
+  it('says the offset was NOT kept when the browser blocks site data, never "saved"', async () => {
+    render(<PrinterSettingsPage />);
+    const input = await screen.findByLabelText(/printable area starts/i);
+    const blocked = vi.spyOn(localStorage, 'setItem').mockImplementation(() => {
+      throw new DOMException('blocked', 'SecurityError');
+    });
+    fireEvent.change(input, { target: { value: '7' } });
+    fireEvent.click(screen.getByRole('button', { name: /save offset/i }));
+    blocked.mockRestore();
+    expect(toastMock.success).not.toHaveBeenCalled();
+    expect(toastMock.error).toHaveBeenCalledWith(expect.stringMatching(/did not keep the offset.*flush left/i));
+    expect(input).toHaveValue(0); // what will actually print
   });
 
   it('offers no label-size choice (it drove nothing; stock labels are 100 x 15 mm)', async () => {

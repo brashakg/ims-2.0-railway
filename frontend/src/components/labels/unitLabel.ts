@@ -52,11 +52,14 @@ export function getLabelOffsetMm(): number {
   }
 }
 
-export function setLabelOffsetMm(mm: number): void {
+/** False when this browser will not keep it (site data blocked): labels then
+ *  print flush left, and the caller must say so instead of "saved". */
+export function setLabelOffsetMm(mm: number): boolean {
   try {
     localStorage.setItem(OFFSET_KEY, String(clampOffset(mm)));
+    return true;
   } catch {
-    /* storage blocked: the default (flush left) stays in force */
+    return false;
   }
 }
 

@@ -87,6 +87,15 @@ describe('the unit label page', () => {
     expect(getLabelOffsetMm()).toBe(0);
   });
 
+  it('reports when the browser will not keep the offset', () => {
+    expect(setLabelOffsetMm(5)).toBe(true);
+    const blocked = vi.spyOn(localStorage, 'setItem').mockImplementation(() => {
+      throw new DOMException('blocked', 'SecurityError');
+    });
+    expect(setLabelOffsetMm(9)).toBe(false);
+    blocked.mockRestore();
+  });
+
   it('prints the unit barcode text, brand + model, colour + size and MRP', () => {
     const text = parse(unitLabelsDocument([CARRERA])).body.textContent || '';
     expect(text).toContain('BV--E5145C6A');
