@@ -697,8 +697,9 @@ class ProductUpdate(BaseModel):
 
     # ---- Per-product reorder configuration. Moved here from the retired
     # /admin/products PUT (the Reorder dashboard's only writer) so reorder
-    # settings persist through the validated path. All optional + additive. ----
-    reorder_point: Optional[int] = Field(None, ge=0)
+    # settings persist through the validated path. All optional + additive.
+    # The reorder LEVEL is not here: it is per shop (owner ruling D12),
+    # written by PUT /inventory/reorder-levels/{product_id}. ----
     # ge=-1: -1 is the owner's "no auto-reorder" sentinel (reorder_policy.py),
     # so the Reorder dashboard can explicitly disable a product again.
     reorder_quantity: Optional[int] = Field(None, ge=-1)

@@ -21,6 +21,7 @@ from .helpers import (
     _get_db,
 )
 from .lookup import sellable_by_product_shop
+from ...services.reorder_policy import low_stock_rows, on_hand
 
 # ============================================================================
 # INVENTORY INTELLIGENCE: transfer recommendations + staff accountability
@@ -52,51 +53,21 @@ async def transfer_recommendations(
         return {"recommendations": [], "store_id": active_store}
 
     try:
-        low = stock_repo.find_low_stock(active_store, threshold) or []
-        low_ids = [r["_id"] for r in low if r.get("_id")]
+        # Low at THIS shop by its own level (D12); a shop with no level is
+        # never refilled. `threshold` only sizes the refill (to threshold*2).
+        low = low_stock_rows(get_product_repository(), stock_repo, store_id=active_store)
+        low_ids = [r["_id"] for r in low]
         if not low_ids:
             return {"recommendations": [], "store_id": active_store}
 
-        # Cross-store available levels for just the deficit products.
-        rows = (
-            stock_repo.aggregate(
-                [
-                    {"$match": {"product_id": {"$in": low_ids}, "status": "AVAILABLE"}},
-                    {
-                        "$group": {
-                            "_id": {"p": "$product_id", "s": "$store_id"},
-                            # One row == one unit; missing quantity counts as 1.
-                            "qty": {"$sum": {"$ifNull": ["$quantity", 1]}},
-                        }
-                    },
-                ]
-            )
-            or []
-        )
+        # Every shop's on-hand of just the deficit products (the same count).
         store_levels: Dict[str, Dict[str, int]] = {}
-        for r in rows:
-            key = r.get("_id", {})
-            store_levels.setdefault(key.get("p"), {})[key.get("s")] = int(
-                r.get("qty", 0) or 0
-            )
-
-        # Enrich with product names.
-        names: Dict[str, str] = {}
-        product_repo = get_product_repository()
-        if product_repo is not None:
-            for p in product_repo.find_many({"product_id": {"$in": low_ids}}) or []:
-                names[p.get("product_id")] = (
-                    p.get("name") or p.get("product_name") or ""
-                )
+        for (pid, sid), qty in on_hand(stock_repo, store_id=None, product_ids=low_ids).items():
+            store_levels.setdefault(pid, {})[sid] = qty
 
         low_products = [
-            {
-                "product_id": r["_id"],
-                "quantity": int(r.get("quantity", 0) or 0),
-                "product_name": names.get(r["_id"], ""),
-            }
+            {"product_id": r["_id"], "quantity": r["quantity"], "product_name": r["name"]}
             for r in low
-            if r.get("_id")
         ]
         recs = recommend_transfers(
             active_store, low_products, store_levels, threshold=threshold

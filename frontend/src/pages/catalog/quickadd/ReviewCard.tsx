@@ -63,7 +63,7 @@ export function ReviewCard({ form }: { form: QuickAddForm }) {
                 : 'Auto (Brand Master tier)')
             }
           />
-          {!isReviewMode && <ReviewRow label="Reorder level" value={reorderLevel || '—'} />}
+          {!isReviewMode && <ReviewRow label="Reorder level" value={reorderLevel || 'not set'} />}
           {images.length > 0 && (
             <ReviewRow label="Images" value={`${images.length} uploaded`} />
           )}

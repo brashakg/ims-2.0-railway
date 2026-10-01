@@ -70,4 +70,22 @@ describe('OwnerDigestCard', () => {
     render(<OwnerDigestCard storeId="BV-BOK-02" />);
     await waitFor(() => expect(mockGet).toHaveBeenCalledWith('BV-BOK-02'));
   });
+
+  it("shows a real reorder level of 0, and nothing for 'not set'", async () => {
+    mockGet.mockResolvedValue({
+      ...DIGEST,
+      expanded: {
+        ...DIGEST.expanded,
+        low_stock_items: [
+          { name: 'Zero Level', sku: 'Z0', qty: 0, reorder_point: 0 },
+          { name: 'Unset Level', sku: 'U0', qty: 1, reorder_point: null },
+        ],
+      },
+    });
+    render(<OwnerDigestCard />);
+    await waitFor(() => screen.getByText(/12,345/));
+    fireEvent.click(screen.getByRole('button', { name: /Expand/i }));
+    expect(screen.getByText(/0 left \/ RP 0/)).toBeInTheDocument();
+    expect(screen.getByText('1 left')).toBeInTheDocument();
+  });
 });
