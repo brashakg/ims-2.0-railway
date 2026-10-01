@@ -145,8 +145,8 @@ export default function OnlineStockPage() {
         suggested safety buffer; it does not change stock or reserve anything.
       </p>
 
-      {/* Summary strip */}
-      {!loading && available && summary && (
+      {/* Summary strip -- not when nothing was tallied (an unknown is never a 0). */}
+      {!loading && available && summary && !summary.live_listings_unknown && !summary.on_hand_unknown && (
         <div className="mb-4 grid gap-3 grid-cols-2 sm:grid-cols-3 lg:grid-cols-5">
           <SummaryStat label="SKUs online" value={summary.skus_checked} />
           <SummaryStat
@@ -175,7 +175,7 @@ export default function OnlineStockPage() {
       )}
 
       {/* No Shopify-mapped products yet: nothing to tally. */}
-      {!loading && available && !onlineConfigured && (
+      {!loading && available && !onlineConfigured && !summary?.live_listings_unknown && (
         <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 flex items-start gap-2">
           <Info className="w-4 h-4 text-amber-600 mt-0.5 shrink-0" />
           <span className="text-sm text-amber-900">
@@ -186,7 +186,7 @@ export default function OnlineStockPage() {
       )}
 
       {/* IMS could not read which listings are live: nothing tallied, never "none listed". */}
-      {!loading && available && onlineConfigured && summary?.live_listings_unknown && (
+      {!loading && available && summary?.live_listings_unknown && (
         <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 flex items-start gap-2">
           <AlertTriangle className="w-4 h-4 text-amber-600 mt-0.5 shrink-0" />
           <span className="text-sm text-amber-900">
@@ -208,7 +208,8 @@ export default function OnlineStockPage() {
       )}
 
       {/* Live Shopify read unavailable or PARTIAL: uncovered rows show "—". */}
-      {!loading && available && onlineConfigured && summary?.listed_qty_live === false && (
+      {!loading && available && onlineConfigured && summary?.listed_qty_live === false
+        && !summary?.live_listings_unknown && !summary?.on_hand_unknown && (
         <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 flex items-start gap-2">
           <Info className="w-4 h-4 text-amber-600 mt-0.5 shrink-0" />
           <span className="text-sm text-amber-900">

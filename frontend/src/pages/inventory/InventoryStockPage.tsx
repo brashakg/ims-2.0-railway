@@ -598,6 +598,9 @@ export function InventoryStockPage() {
                       <td className="px-4 py-3 text-center">
                         {(() => {
                           const o = getOnline(item);
+                          if (o && o.online === null) {
+                            return <span className="text-xs text-amber-700">Unverified</span>;
+                          }
                           if (!o?.online) {
                             return <span className="text-xs text-gray-400">In-store only</span>;
                           }
@@ -707,7 +710,9 @@ export function InventoryStockPage() {
               ? typeof online.online_stock === 'number'
                 ? `Yes (${online.online_stock} online)`
                 : 'Yes'
-              : 'In-store only',
+              : online && online.online === null
+                ? 'Unverified (could not read the website)'
+                : 'In-store only',
           ],
           ['Location', detailItem.location || '-'],
           // Attribution is a manager surface (mirrors the backend gate).

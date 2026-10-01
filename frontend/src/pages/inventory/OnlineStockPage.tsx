@@ -73,7 +73,7 @@ export default function OnlineStockPage() {
       </div>
       <p className="text-sm text-gray-500 mb-4">Stops you selling the same item online and in-store. "Recommended" = what IMS sends to the website: each shop's shelf minus the safety buffer{typeof s.safety_buffer === 'number' ? ` (${s.safety_buffer})` : ''}, for the shops mapped to a Shopify location, and 0 for a product a SUPERADMIN blocked from online sale or IMS no longer sells.</p>
 
-      {data && data.online_configured === false && (
+      {data && data.online_configured === false && !data.live_listings_unknown && (
         <div className="flex items-center gap-2 text-sm rounded-lg px-3 py-2 border bg-blue-50 border-blue-200 text-blue-800 mb-4">
           <AlertTriangle className="w-4 h-4 shrink-0" />
           No products are mapped to Shopify yet, so there are no online quantities to reconcile.
@@ -81,7 +81,7 @@ export default function OnlineStockPage() {
         </div>
       )}
 
-      {data && data.online_configured !== false && data.listed_qty_live === false && (
+      {data && (data.online_configured !== false || data.live_listings_unknown) && data.listed_qty_live === false && (
         <div className="flex items-center gap-2 text-sm rounded-lg px-3 py-2 border bg-amber-50 border-amber-200 text-amber-800 mb-4">
           <AlertTriangle className="w-4 h-4 shrink-0" />
           {data.live_listings_unknown
@@ -149,7 +149,9 @@ export default function OnlineStockPage() {
               <tbody className="divide-y divide-gray-100">
                 {items.length === 0 ? (
                   <tr><td colSpan={6} className="px-3 py-6 text-center text-gray-400">
-                    {onlyRisk ? 'No overselling risk — everything is within safe allocation.' : 'No products to show.'}
+                    {data?.live_listings_unknown || (data?.listed_qty_live === false && ((s.listed_unknown ?? 0) > 0 || (s.onhand_unknown ?? 0) > 0))
+                      ? 'Nothing here could be verified right now — see the note above.'
+                      : onlyRisk ? 'No overselling risk — everything is within safe allocation.' : 'No products to show.'}
                   </td></tr>
                 ) : items.map((it) => (
                   <tr key={it.sku} className={it.status === 'OVERSELL_RISK' ? 'bg-red-50/40' : ''}>

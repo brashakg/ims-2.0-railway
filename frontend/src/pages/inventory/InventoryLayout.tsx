@@ -124,6 +124,8 @@ export function InventoryLayout() {
     (sum, item) => sum + ((item.offerPrice || item.mrp || 0) * (item.stock || 0)), 0);
   const onlineCount = inventory.reduce(
     (n, i) => (getOnlineFor(i, onlineStatusQ.data)?.online ? n + 1 : n), 0);
+  // null = IMS could not read which listings are live: never "none synced".
+  const onlineUnknown = inventory.some((i) => getOnlineFor(i, onlineStatusQ.data)?.online === null);
 
   const isLoading = stockQ.isFetching;
   const error = stockQ.isError ? 'Failed to load inventory. Please try again.' : null;
@@ -367,8 +369,8 @@ export function InventoryLayout() {
           </div>
           <div>
             <div className="l">Online</div>
-            <div className="v" style={{ color: onlineCount > 0 ? 'var(--ok, #059669)' : 'var(--ink)' }}>{onlineCount}</div>
-            <div className="d">{onlineCount > 0 ? 'listed in Shopify' : 'none synced online'}</div>
+            <div className="v" style={{ color: onlineCount > 0 ? 'var(--ok, #059669)' : 'var(--ink)' }}>{onlineUnknown ? '—' : onlineCount}</div>
+            <div className="d">{onlineUnknown ? 'could not read the website' : onlineCount > 0 ? 'listed in Shopify' : 'none synced online'}</div>
           </div>
           <div>
             <div className="l">Categories</div>
