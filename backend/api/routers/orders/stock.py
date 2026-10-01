@@ -660,7 +660,7 @@ def _mark_units_sold(
                 if not store_id:
                     continue
                 try:
-                    claimed = stock_repo.claim_one_available(
+                    got = stock_repo.claim_one_available(
                         pid, store_id, order_id, used
                     )
                 except Exception as exc:  # noqa: BLE001
@@ -670,9 +670,9 @@ def _mark_units_sold(
                         store_id,
                         exc,
                     )
-                    claimed = None
-                if claimed:
-                    sid = str(claimed)
+                    got = None
+                if got:
+                    sid = str(got)
                 else:
                     # No AVAILABLE unit to claim: genuinely out of stock (the
                     # pre-persist assert normally catches this) or we lost a

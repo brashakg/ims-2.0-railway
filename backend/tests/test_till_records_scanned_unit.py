@@ -248,20 +248,77 @@ def test_same_unit_scanned_twice_on_one_bill_is_refused(client, till):
     scanned = _line(stock_id=UNIT_B["stock_id"])
     r = _sell(client, [scanned, dict(scanned)])
     assert r.status_code == 409, r.text
-    assert "su-b" in r.text.lower(), r.text
+    # The gate's own refusal, not the claim's later "not available".
+    assert "su-b" in r.text.lower() and "twice" in r.text.lower(), r.text
     # Nothing left the shelf.
     assert _unit(till, "SU-A")["status"] == "AVAILABLE"
     assert _unit(till, "SU-B")["status"] == "AVAILABLE"
 
 
-def test_typed_line_before_a_scanned_line_sells_both_units(client, till):
+def test_typed_line_before_a_scanned_line_sells_both_units(client, till, caplog):
     """FIFO would pick SU-A for the typed line and SU-A is scanned onto the
-    NEXT line: both units still leave, to this order."""
+    NEXT line: both units still leave, to this order, with no false alarm."""
     r = _sell(client, [_line(), _line(stock_id=UNIT_A["stock_id"])])
     assert r.status_code in (200, 201), r.text
+    assert "NOT SELLABLE" not in caplog.text
     order_id = _order_id(r)
     assert _unit(till, "SU-A")["order_id"] == order_id
     assert _unit(till, "SU-B")["status"] == "SOLD" and _unit(till, "SU-B")["order_id"] == order_id
+
+
+def test_typed_line_with_no_units_before_a_scanned_line_raises_no_alarm(
+    client, till, caplog
+):
+    """A typed accessory with no units on the shelf finds nothing to take;
+    the scanned frame after it is still this order's, with no false
+    'reconcile manually' alarm."""
+    from api.routers import orders as om
+
+    om.get_product_repository().create(
+        {
+            "product_id": "ACC-CASE-1",
+            "name": "Hard case",
+            "sku": "ACC-CASE-1",
+            "category": "ACCESSORY",
+            "hsn_code": "420232",
+            "mrp": 500.0,
+            "offer_price": 500.0,
+            "is_active": True,
+        }
+    )
+    case = _line(
+        item_type="ACCESSORY", product_id="ACC-CASE-1", product_name="Hard case",
+        sku="ACC-CASE-1", category="ACCESSORY", unit_price=500.0,
+    )
+    r = _sell(client, [case, _line(stock_id=UNIT_B["stock_id"])])
+    assert r.status_code in (200, 201), r.text
+    assert "NOT SELLABLE" not in caplog.text
+    b = _unit(till, "SU-B")
+    assert b["status"] == "SOLD" and b["order_id"] == _order_id(r), b
+    assert _unit(till, "SU-A")["status"] == "AVAILABLE"
+
+
+def test_scanned_quantity_two_then_another_scanned_line_raises_no_alarm(
+    client, till, caplog
+):
+    """SU-A with quantity 2 takes SU-A plus the first free unit (SU-C); the
+    next scanned line's SU-B is still this order's, with no false alarm."""
+    till["stock"].create(
+        {
+            "stock_id": "SU-C", "barcode": "BVC00000003", "product_id": PID,
+            "store_id": STORE, "status": "AVAILABLE", "quantity": 1,
+            "unit_cost": 4000.0, "cost_price": 4000.0, "cost_source": "GRN_PO",
+        }
+    )
+    r = _sell(
+        client, [_line(stock_id="SU-A", quantity=2), _line(stock_id="SU-B")]
+    )
+    assert r.status_code in (200, 201), r.text
+    assert "NOT SELLABLE" not in caplog.text
+    order_id = _order_id(r)
+    for sid in ("SU-A", "SU-B", "SU-C"):
+        u = _unit(till, sid)
+        assert u["status"] == "SOLD" and u["order_id"] == order_id, u
 
 
 def _till2_sells_su_b_after_till1s_check(client, monkeypatch, door="create"):
@@ -353,6 +410,35 @@ def test_a_scanned_line_added_to_a_draft_is_claimed_before_the_save(
     assert added.status_code == 409, added.text
     assert len(_order(till, order_id)["items"]) == 1
     assert _unit(till, "SU-B")["order_id"] == _order_id(till2[0])
+
+
+def test_an_added_line_that_fails_to_save_gives_back_its_scanned_unit(
+    client, till, monkeypatch
+):
+    """POST /orders/{id}/items claims SU-B before the save; when the items
+    write fails, SU-B goes back on the shelf -- not SOLD to a line that does
+    not exist."""
+    first = _sell(client, [_line()])  # a draft with SU-A on it
+    assert first.status_code in (200, 201), first.text
+    order_id = _order_id(first)
+
+    real_update = till["orders"].update
+
+    def items_write_fails(oid, data, *a, **k):
+        if "items" in data:
+            raise RuntimeError("update failed")
+        return real_update(oid, data, *a, **k)
+
+    monkeypatch.setattr(till["orders"], "update", items_write_fails)
+    added = client.post(
+        f"/api/v1/orders/{order_id}/items",
+        json=_line(stock_id="SU-B"),
+        headers=_token(["SUPERADMIN"]),
+    )
+    assert added.status_code == 500, added.text
+    b = _unit(till, "SU-B")
+    assert b["status"] == "AVAILABLE" and not b.get("order_id"), b
+    assert len(_order(till, order_id)["items"]) == 1
 
 
 def test_typed_line_cannot_oversell_past_the_scanned_unit(client, till):
