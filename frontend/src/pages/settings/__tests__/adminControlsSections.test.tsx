@@ -106,7 +106,7 @@ async function save(label: RegExp) {
 
 describe('each admin editor renders at its own URL and saves only its own key', () => {
   it('modules: the store x module grid', async () => {
-    renderRoute('/settings/modules', ['ADMIN']);
+    renderRoute('/settings/modules', ['SUPERADMIN']);
     expect(await screen.findByText('ZZ Ranchi Main', undefined, FIND)).toBeInTheDocument();
     expect(mockGetStores).toHaveBeenCalledTimes(1);
     await expectActiveLink(/^Store Modules$/);
@@ -118,7 +118,7 @@ describe('each admin editor renders at its own URL and saves only its own key', 
   });
 
   it('permissions: the permission x role matrix with the stored grants', async () => {
-    renderRoute('/settings/permissions', ['ADMIN']);
+    renderRoute('/settings/permissions', ['SUPERADMIN']);
     expect(await screen.findByText('void orders', undefined, FIND)).toBeInTheDocument();
     // Defaults light 16 permissions x {SUPERADMIN, ADMIN} = 32 dots; the stored
     // STORE_MANAGER void_orders grant is the 33rd. Wait for it before saving.
@@ -132,7 +132,7 @@ describe('each admin editor renders at its own URL and saves only its own key', 
   });
 
   it('discount-caps: the per-role cap cards with the stored values', async () => {
-    renderRoute('/settings/discount-caps', ['ADMIN']);
+    renderRoute('/settings/discount-caps', ['SUPERADMIN']);
     expect(await screen.findByText('ZZ Floor Staff', undefined, FIND)).toBeInTheDocument();
     expect(screen.getByDisplayValue('7')).toBeInTheDocument();
     await expectActiveLink(/^Discount Limits$/);
@@ -141,7 +141,7 @@ describe('each admin editor renders at its own URL and saves only its own key', 
   });
 
   it('rules: the rule list by category with the stored values, inert security rules hidden', async () => {
-    renderRoute('/settings/rules', ['ADMIN']);
+    renderRoute('/settings/rules', ['SUPERADMIN']);
     // The labels are code defaults and paint first; the stored 42 is the load.
     expect(await screen.findByDisplayValue('42', undefined, FIND)).toBeInTheDocument();
     expect(screen.getByText('Low Stock Alert Threshold')).toBeInTheDocument();
@@ -154,11 +154,14 @@ describe('each admin editor renders at its own URL and saves only its own key', 
   });
 });
 
-describe('the gates are the System page\'s: SUPERADMIN + ADMIN only', () => {
-  it.each(['modules', 'permissions', 'discount-caps', 'rules'])(
-    'STORE_MANAGER is refused /settings/%s',
-    async (section) => {
-      renderRoute(`/settings/${section}`, ['STORE_MANAGER']);
+const FOUR = ['modules', 'permissions', 'discount-caps', 'rules'];
+const FOUR_LABELS = [/^Store Modules$/, /^Role Permissions$/, /^Discount Limits$/, /^Operational Rules$/];
+
+describe('the gates: SUPERADMIN only, matching the backend', () => {
+  it.each(FOUR.flatMap((section) => [['STORE_MANAGER', section], ['ADMIN', section]]))(
+    '%s is refused /settings/%s',
+    async (role, section) => {
+      renderRoute(`/settings/${section}`, [role]);
       expect(await screen.findByText('ZZ-DENIED', undefined, FIND)).toBeInTheDocument();
     },
   );
@@ -166,5 +169,91 @@ describe('the gates are the System page\'s: SUPERADMIN + ADMIN only', () => {
   it('a legacy /settings?tab=rules link lands on the rules section', async () => {
     renderRoute('/settings?tab=rules', ['SUPERADMIN']);
     expect(await screen.findByText('Low Stock Alert Threshold', undefined, FIND)).toBeInTheDocument();
+  });
+});
+
+describe('rail visibility', () => {
+  it('SUPERADMIN sees all four admin-control entries', async () => {
+    renderRoute('/settings/system', ['SUPERADMIN']);
+    await screen.findByRole('link', { name: /^System$/ }, FIND);
+    for (const label of FOUR_LABELS) expect(screen.getByRole('link', { name: label })).toBeInTheDocument();
+  });
+
+  it('ADMIN sees System but none of the four', async () => {
+    renderRoute('/settings/system', ['ADMIN']);
+    await screen.findByRole('link', { name: /^System$/ }, FIND);
+    for (const label of FOUR_LABELS) expect(screen.queryByRole('link', { name: label })).toBeNull();
+  });
+
+  it('STORE_MANAGER sees none of the four (nor System)', async () => {
+    renderRoute('/settings/profile', ['STORE_MANAGER']);
+    await screen.findByRole('link', { name: /^My Profile$/ }, FIND);
+    for (const label of FOUR_LABELS) expect(screen.queryByRole('link', { name: label })).toBeNull();
+    expect(screen.queryByRole('link', { name: /^System$/ })).toBeNull();
+  });
+});
+
+describe('/settings/system no longer mounts the panel', () => {
+  it('SUPERADMIN: no editor and no load of admin-controls, just a link row to the four pages', async () => {
+    renderRoute('/settings/system', ['SUPERADMIN']);
+    const row = await screen.findByTestId('admin-controls-links', undefined, FIND);
+    expect(row.querySelectorAll('a')).toHaveLength(4);
+    expect(row.querySelector('a[href="/settings/discount-caps"]')).not.toBeNull();
+    expect(screen.queryByRole('button', { name: /^Save (Store Modules|Role Permissions|Discount Limits|Operational Rules)$/ })).toBeNull();
+    expect(mockGetAdminControls).not.toHaveBeenCalled();
+  });
+
+  it('ADMIN: no link row', async () => {
+    renderRoute('/settings/system', ['ADMIN']);
+    // Wait for the System body itself, so the absence below is not just "not rendered yet".
+    expect(await screen.findByText('Backup Database', undefined, FIND)).toBeInTheDocument();
+    expect(screen.queryByTestId('admin-controls-links')).toBeNull();
+  });
+});
+
+describe('a failed load is shown, not swallowed', () => {
+  it.each(FOUR)('/settings/%s shows an error alert when GET admin-controls fails', async (section) => {
+    mockGetAdminControls.mockReset().mockRejectedValue(new Error('403'));
+    renderRoute(`/settings/${section}`, ['SUPERADMIN']);
+    expect(await screen.findByRole('alert', undefined, FIND)).toHaveTextContent(/Could not load the saved settings/);
+  });
+
+  it('no alert when the load succeeds', async () => {
+    renderRoute('/settings/discount-caps', ['SUPERADMIN']);
+    await screen.findByText('ZZ Floor Staff', undefined, FIND);
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+});
+
+describe('unsaved edits are guarded', () => {
+  it('leaving with an unsaved edit asks first; cancel keeps you on the page', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    renderRoute('/settings/discount-caps', ['SUPERADMIN']);
+    fireEvent.change(await screen.findByDisplayValue('7', undefined, FIND), { target: { value: '9' } });
+    expect(screen.getByText('Unsaved changes')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('link', { name: /^Role Permissions$/ }));
+    expect(confirmSpy).toHaveBeenCalledTimes(1);
+    expect(screen.getByDisplayValue('9')).toBeInTheDocument(); // still here, edit intact
+    confirmSpy.mockRestore();
+  });
+
+  it('no prompt before any edit, and none after a successful save', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    renderRoute('/settings/discount-caps', ['SUPERADMIN']);
+    fireEvent.change(await screen.findByDisplayValue('7', undefined, FIND), { target: { value: '9' } });
+    await save(/^Save Discount Limits$/);
+    await waitFor(() => expect(screen.queryByText('Unsaved changes')).toBeNull());
+    fireEvent.click(screen.getByRole('link', { name: /^Role Permissions$/ }));
+    expect(confirmSpy).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
+  });
+
+  it('a failed save keeps the page dirty', async () => {
+    mockUpdateAdminControls.mockReset().mockRejectedValue(new Error('403'));
+    renderRoute('/settings/discount-caps', ['SUPERADMIN']);
+    fireEvent.change(await screen.findByDisplayValue('7', undefined, FIND), { target: { value: '9' } });
+    fireEvent.click(screen.getByRole('button', { name: /^Save Discount Limits$/ }));
+    await waitFor(() => expect(mockUpdateAdminControls).toHaveBeenCalled());
+    expect(screen.getByText('Unsaved changes')).toBeInTheDocument();
   });
 });
