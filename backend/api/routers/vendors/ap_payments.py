@@ -214,6 +214,10 @@ async def vendor_ledger(
         )
     except Exception:
         bills, payments, debit_notes = [], [], []
+    # The one row rule every payable screen reads (no transfer mirror bills;
+    # rows dated after today -- a post-dated cheque -- not yet counted), so
+    # the closing balance is the Suppliers card's and the report's figure.
+    bills, payments, debit_notes = ap_engine.supplier_ledger_rows(bills, payments, debit_notes)
     return {
         "vendor_id": vendor_id,
         "vendor": vendor,

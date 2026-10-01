@@ -195,10 +195,11 @@ async def get_cash_flow(
 # === Owner cash-flow dashboard + forecast (ADMIN / ACCOUNTANT) ===
 
 
-def _ap_rows(db, store_id=None):
+def _ap_rows(db, store_id=None, as_of=None):
     """(bills, payments, debit notes) -- the supplier ledger's rows, for every
     AP figure: ap_engine.supplier_ledger_rows (no transfer mirror bills; one
-    shop's rows when `store_id` is given). ALL bills: dropping the PAID ones
+    shop's rows when `store_id` is given; rows dated up to `as_of`, clamped to
+    today -- a post-dated cheque is not paid yet). ALL bills: dropping the PAID ones
     left their payments behind to net off the vendor as if they were
     on-account money (F56)."""
     try:
@@ -207,7 +208,7 @@ def _ap_rows(db, store_id=None):
         dn = list(db.get_collection("vendor_debit_notes").find({}, {"_id": 0}))
     except Exception:
         bills, payments, dn = [], [], []
-    return ap_engine.supplier_ledger_rows(bills, payments, dn, store_id)
+    return ap_engine.supplier_ledger_rows(bills, payments, dn, store_id, as_of)
 
 
 def _ar_aging(db, now: datetime) -> dict:

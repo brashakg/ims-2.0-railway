@@ -160,7 +160,7 @@ async def ap_aging(
         return {"as_of": as_of, "totals": {}, "vendors": []}
     from ..finance import _ap_rows  # the one AP row loader (call time: no cycle)
 
-    return ap_engine.build_aging_by_vendor(*_ap_rows(db), as_of)
+    return ap_engine.build_aging_by_vendor(*_ap_rows(db, as_of=as_of), as_of)
 
 
 @router.post("/{vendor_id}/bills", status_code=201)

@@ -41,11 +41,6 @@ def _month_of(value) -> str:
     return ist_date_str_from_stored(value)[:7]
 
 
-def _dated(doc: dict):
-    """The date a ledger row is entered on -- the field build_ledger reads."""
-    return doc.get("bill_date") or doc.get("payment_date") or doc.get("date") or doc.get("created_at")
-
-
 def _find(db, coll: str, flt: dict) -> list:
     return list(db.get_collection(coll).find(flt, {"_id": 0}))
 
@@ -68,10 +63,12 @@ async def purchases_this_month(
     from ..finance import _ap_rows  # the one AP row loader (call time: no cycle)
 
     shop = {"store_id": scope} if scope else {}
-    bills, payments, notes = _ap_rows(db, scope)
     month_end = date(int(month[:4]), int(month[5:]), monthrange(int(month[:4]), int(month[5:]))[1])
-    # 'Next due' as at the month's end -- or today, for the month we are in.
-    as_of = min(month_end, now_ist_naive().date()).isoformat()
+    # THE as-of day (ap_engine.as_of_day): the month's end, clamped to today
+    # for the month we are in -- the day every other payable screen uses, so
+    # a post-dated cheque is unpaid here exactly as it is there.
+    as_of = ap_engine.as_of_day(month_end.isoformat())
+    bills, payments, notes = _ap_rows(db, scope, as_of)
 
     rows: dict = {}
 
@@ -108,20 +105,20 @@ async def purchases_this_month(
             for ln in pinv.lines_from_grn(g, pos_by_id.get(g.get("po_id")))
         )
 
-    # BILLED / PAID / OWED: the supplier ledger, row for row, as it stood at the
-    # month's end (rows dated later did not exist yet; undated rows count, as
-    # in the closing balance).
-    def upto_month(docs, vid):
-        return [d for d in docs if d.get("vendor_id") == vid and _month_of(_dated(d)) <= month]
+    # BILLED / PAID / OWED: the supplier ledger, row for row, as it stood on the
+    # as-of day (_ap_rows already dropped rows dated later; undated rows count,
+    # as in the closing balance). A row's month is its ledger day's month.
+    def of_vendor(docs, vid):
+        return [d for d in docs if d.get("vendor_id") == vid]
 
     vendor_ids = {d.get("vendor_id") for d in bills + payments + notes} | set(rows)
     next_due: dict = {}
     for vid in vendor_ids:
-        v_bills, v_pays, v_notes = (upto_month(docs, vid) for docs in (bills, payments, notes))
+        v_bills, v_pays, v_notes = (of_vendor(docs, vid) for docs in (bills, payments, notes))
         r = row(vid)
         for entry in ap_engine.build_ledger(v_bills, v_pays, v_notes)["entries"]:
             r["owed"] += entry["credit"] - entry["debit"]
-            if _month_of(entry.get("date")) == month:
+            if ap_engine.ledger_day(entry)[:7] == month:
                 if entry["type"] == "BILL":
                     r["billed"] += entry["credit"]
                 elif entry["type"] == "PAYMENT":
