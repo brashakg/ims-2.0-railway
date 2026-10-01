@@ -602,6 +602,7 @@ class TaskmasterAgent(JarvisAgent):
         actions = []
         try:
             from api.services.reorder_policy import auto_reorder_disabled, low_stock_rows
+            from api.services.purchase_numbering import next_purchase_number
             from database.repositories.product_repository import (
                 ProductRepository,
                 StockRepository,
@@ -613,14 +614,16 @@ class TaskmasterAgent(JarvisAgent):
                 str(s) for s in stock_coll.distinct("store_id", {"status": "AVAILABLE"}) if s
             )
             low_stock = [
-                row for store in stores for row in low_stock_rows(stock_repo, product_repo, store)
+                (store, row)
+                for store in stores
+                for row in low_stock_rows(stock_repo, product_repo, store)
             ][:20]
-            pids = [str(r["_id"]) for r in low_stock]
+            pids = [str(r["_id"]) for _store, r in low_stock]
             products = {
                 str(p.get("product_id")): p
                 for p in (product_repo.find_many({"product_id": {"$in": pids}}, limit=len(pids)) if pids else [])
             }
-            for row in low_stock:
+            for store, row in low_stock:
                 item = products.get(str(row["_id"])) or {}
                 sku = item.get("sku")
                 # Owner decision (2026-07-04): reorder_quantity <= 0 (the -1
@@ -661,8 +664,14 @@ class TaskmasterAgent(JarvisAgent):
                 )
                 if existing_draft:
                     continue
+                # An atomic per-store, per-FY serial from the shared counters
+                # (purchase_numbering), never a timestamp + sku[:6]: readable
+                # SKUs share their first 6 characters (every Ray-Ban frame is
+                # FR-RAY), so one run used to give all its drafts one number.
                 draft_po = {
-                    "po_number": f"PO-AUTO-{datetime.now(timezone.utc).strftime('%y%m%d-%H%M%S')}-{sku[:6]}",
+                    "po_number": next_purchase_number(
+                        self.get_collection("counters"), doc_type="PO-AUTO", store_id=store
+                    ),
                     "sku": sku,
                     "vendor_id": item.get("preferred_vendor_id") or item.get("default_vendor_id"),
                     "quantity": max(row["reorder_point"] * 2 - int(row.get("quantity") or 0), 1),

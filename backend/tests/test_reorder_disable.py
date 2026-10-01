@@ -323,6 +323,19 @@ class TestTaskmasterGuard:
         assert drafted == {"SKU-ON": 4}  # 3 * 2 - 2
         assert [(po["sku"], po["vendor_id"], po["status"]) for po in pos] == [("SKU-ON", "V1", "DRAFT")]
 
+    def test_every_draft_gets_its_own_po_number(self):
+        """Readable SKUs share their first 6 characters (FR-RAY): the old
+        timestamp + sku[:6] number gave one run's drafts one PO number."""
+        skus = ["FR-RAYBAN-RB2140-901-50", "FR-RAYBAN-RB3025-001-58", "FR-RAYBAN-RB5154-2000-49"]
+        products = [{"product_id": f"P{i}", "sku": sku, "reorder_point": 3, "reorder_quantity": 4}
+                    for i, sku in enumerate(skus)]
+        units = [u for p in products for u in self._units(p["product_id"], 2)]
+        drafted, pos = self._run(products, units)
+        assert set(drafted) == set(skus)
+        numbers = [po["po_number"] for po in pos]
+        assert len(set(numbers)) == 3, numbers
+        assert all(n.startswith("PO-AUTO/S1/") for n in numbers), numbers
+
     def test_no_level_or_no_product_row_is_never_drafted(self):
         not_set = {"P-UNSET": -1, "P-ZERO": 0, "P-GARBAGE": "x"}
         products = [{"product_id": "P-SET", "sku": "SKU-SET", "reorder_point": 2},
