@@ -1127,8 +1127,9 @@ def _bill_recipient(
         )
         shop = {} if holder else _store(fallback_store_id)
         entity_id = (holder or {}).get("entity_id") or shop.get("entity_id")
-    if not entity_id and len(entities) == 1:
-        entity_id = entities[0].get("entity_id")
+    # No "the only company is this shop's" guess: a shop with no entity_id has
+    # no GSTIN by org_validation.shop_gstin, the answer every other reader
+    # (GSTR-3B scope, Cross-Check, RTV note, transfer) gives, so it is refused.
     entity = next(
         (e for e in entities if entity_id and e.get("entity_id") == entity_id), None
     )
@@ -1143,11 +1144,18 @@ def _bill_recipient(
             + (
                 f"the receiving shop {receipt_store_id} has no company set."
                 if receipt_store_id
-                else "pick the shop it is for (top bar)"
-                + (
-                    ", or type our GSTIN as printed on the supplier's bill."
-                    if gstin_box
-                    else ", then record the bill again."
+                else (
+                    (
+                        f"shop {shop.get('store_id')} has no company set "
+                        "(Settings, stores)"
+                        if shop.get("store_id")
+                        else "pick the shop it is for (top bar)"
+                    )
+                    + (
+                        ", or type our GSTIN as printed on the supplier's bill."
+                        if gstin_box
+                        else ", then record the bill again."
+                    )
                 )
             ),
         )

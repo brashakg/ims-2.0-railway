@@ -24,6 +24,7 @@ from ..dependencies import (
 # W1.4 / OS-032: shared ONLINE store-type detector -- a transfer must never
 # land stock on a pooled, stockless ONLINE store.
 from ..services import org_validation as ov
+from ..services.purchase_invoice_engine import classify_supply
 from ..services.stores_util import is_online_store
 
 logger = logging.getLogger(__name__)
@@ -1999,9 +2000,9 @@ def _shop_gst(db, store_id: str) -> tuple:
     """(entity_id, gstin, state) of one side of a transfer: THE shop's GSTIN
     (org_validation.shop_gstin -- the one every bill door books on) and the
     state that registration decides, its first two digits (owner,
-    2026-09-30). A shop with no GSTIN of its company keeps its declared state
-    and an EMPTY GSTIN -- never the company's primary, never another state's
-    number -- so the miss stays loud: reports._compute_gstr1 flags the bill
+    2026-09-30). A shop with no GSTIN of its company has an EMPTY GSTIN and an
+    EMPTY state -- never its declared state, the company's primary, or another
+    state's number -- so the miss stays loud: reports._compute_gstr1 flags the bill
     and the portal export drops the row instead of a wrong counterparty.
     ('', '', '') on a miss / DB absent."""
     if db is None or not store_id:
@@ -2023,8 +2024,7 @@ def _shop_gst(db, store_id: str) -> tuple:
         logger.warning("[TRANSFER] shop GST lookup failed for %s: %s", store_id, exc)
         return "", "", ""
     gstin = ov.shop_gstin(entity, store) or ""
-    state = gstin[:2] or ov.resolve_state_code(store.get("state_code"), store.get("state"))
-    return entity_id, gstin, state
+    return entity_id, gstin, gstin[:2]
 
 
 def _tax_split(tax: float, interstate: bool):
@@ -2219,11 +2219,12 @@ def _book_mirror_purchase(transfer: Dict) -> None:
         return
 
     try:
-        # GST: intra/inter-state from the sending registration's state vs the
-        # receiving registration's (a deemed sale under Sch I Entry 2 between
-        # two GSTINs; the GSTINs are the "vendor" and the recipient below).
-        # from_state / to_state were resolved for the gate above; reuse them.
-        interstate = bool(from_state and to_state and from_state != to_state)
+        # GST: the ONE tax-head rule (purchase_invoice_engine.classify_supply)
+        # on the two registrations -- a deemed sale under Sch I Entry 2 between
+        # two GSTINs, the "vendor" and the recipient below. A shop with no
+        # registration has '' here, so its bill is flagged as unplaced by the
+        # Cross-Check instead of getting a head from a declared state.
+        interstate = bool(classify_supply(from_gstin, to_gstin)["interstate"])
 
         # NEW-GST-TRANSFER-RATES (GAP B): per-line taxable + GST at each
         # product's REAL rate via gst_rates.resolve_gst_rate (was: flat 18% on

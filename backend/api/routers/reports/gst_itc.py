@@ -240,10 +240,11 @@ def _itc_unplaced(db, year, mon, last_day, entity_id=None) -> dict:
     leaves the bill's head wrong.
 
     Returns {count, tax, bill_numbers, unregistered: {count, tax,
-    bill_numbers}}. A read failure returns {failed: True} -- never zeros, which
+    bill_numbers, transfer_bill_numbers}} (the last lists the stock-transfer
+    mirror bills among them -- the system made those, no one booked them). A read failure returns {failed: True} -- never zeros, which
     the Cross-Check would show as a green row."""
     out = {"count": 0, "tax": 0.0, "bill_numbers": []}
-    unreg = {"count": 0, "tax": 0.0, "bill_numbers": []}
+    unreg = {"count": 0, "tax": 0.0, "bill_numbers": [], "transfer_bill_numbers": []}
     if db is None:
         return {**out, "unregistered": unreg}
 
@@ -299,6 +300,10 @@ def _itc_unplaced(db, year, mon, last_day, entity_id=None) -> dict:
             # master's current one did not, so it never clears the bill.
             if not (b.get("reverse_charge") or str(b.get("vendor_gstin") or "").strip()):
                 _add(unreg, b, tax)
+                if b.get("source_transfer_id"):
+                    unreg["transfer_bill_numbers"].append(
+                        b.get("bill_number") or b.get("bill_id")
+                    )
     except Exception:
         return {"count": 0, "tax": 0.0, "bill_numbers": [], "failed": True}
     return {**out, "unregistered": unreg}

@@ -794,7 +794,8 @@ class TestCreditFromAnUnregisteredSupplierIsFlagged:
         db["vendors"].update_one({"vendor_id": "VNO"}, {"$set": {"gstin": SUP_MH}})
         row = _row(_crosscheck(db, "E1"), "Input credit from suppliers with no GSTIN")
         assert (row["status"], row["variance"]) == ("MISMATCH", 120.0), row
-        assert "FR-1" in row["note"] and "Book the bill again" in row["note"]
+        assert "FR-1" in row["note"]
+        assert "book the bill again" not in row["note"].lower()
 
 
 class TestTransferMirrorHeadsAreTheOneRule:
@@ -1615,7 +1616,10 @@ class TestRoundEightReaders:
         finally:
             trf._get_db = saved
         bill = db["vendor_bills"].find_one({}, {"_id": 0})
-        assert (bill["recipient_gstin"], bill["igst_total"]) == ("", 50.0)
+        # r11: PUNE has no registration, so the one tax-head rule sees no
+        # recipient state and books CGST + SGST; the head is not guessed from
+        # PUNE's declared Maharashtra. The bill is still on no return.
+        assert (bill["recipient_gstin"], bill["interstate"], bill["igst_total"]) == ("", False, 0.0)
         assert _itc_from_vendor_bills(db, "PUNE", 2026, 5, 31) == (0.0, 0.0, 0.0)
         xc = _crosscheck(db, "E1")
         assert xc["gstr3b"]["itc"]["total"] == 0.0
@@ -1660,3 +1664,115 @@ class TestRoundEightReaders:
         assert _row(_crosscheck(db, "E1"), "Input credit left off GSTR-3B")["status"] == "MATCH"
         row = _row(_crosscheck(db, "E2"), "Input credit left off GSTR-3B")
         assert row["status"] == "MISMATCH" and "WZ-1" in row["note"], row
+
+
+# ===========================================================================
+# Round 11 -- the no-GSTIN note, the mirror's head, the sole-company guess
+# and the legacy badge
+# ===========================================================================
+
+
+def _mirror(db, src, dst, number="TR-9"):
+    from api.routers import transfers as trf
+
+    saved = trf._get_db
+    try:
+        trf._get_db = lambda: db
+        trf._book_mirror_purchase({
+            "id": "t" + number, "transfer_number": number, "total_value": 1000, "items": [],
+            "from_location_id": src, "to_location_id": dst,
+            "completed_at": "2026-05-10T05:00:00",
+        })
+    finally:
+        trf._get_db = saved
+    return db["vendor_bills"].find_one({"source_transfer_id": "t" + number}, {"_id": 0})
+
+
+class TestTheNoGstinNoteNamesOnlyWhatTheAppCanDo:
+    NOTE = "Input credit from suppliers with no GSTIN"
+
+    def test_a_booked_bills_note_never_says_to_book_it_again(self):
+        """r11 #1: rebooking the same vendor + invoice number is a 409, and a
+        second vendor record books the credit twice. The note says so."""
+        db = TestCreditLeftOffEveryReturnIsFlagged()._world()
+        db["vendors"].insert_one({"vendor_id": "VN", "trade_name": "Local Fitter", "credit_days": 0})
+        r = _app(db).post(_URL, json=_services(vendor_id="VN", invoice_number="VN-1"))
+        assert r.status_code == 201, r.text
+        note = _row(_crosscheck(db, "E1"), self.NOTE)["note"]
+        low = note.lower()
+        assert "VN-1" in note and "stock-transfer" not in low
+        assert "do not book it again" in low and "twice" in low
+        assert "book the bill again" not in low and "mark it as no" not in low
+
+    def test_a_transfer_mirror_gets_its_own_truthful_text(self):
+        """r11 #1: a mirror (made by SYSTEM, source_transfer_id set) from a
+        sender with no registration. Its head was decided from the two shops'
+        GST numbers, not 'without the supplier's state', and nothing can
+        rebook it."""
+        db = _one_company(
+            [{"store_id": "S1", "entity_id": "E1", "state_code": "20", "gstin": BUY_JH}]
+        )
+        db["entities"].insert_one(
+            {"entity_id": "E2", "name": "WizOpt", "gstins": [{"gstin": BUY_MH, "state_code": "27"}]}
+        )
+        db["stores"].insert_one({"store_id": "S9", "entity_id": "E2", "state_code": "29"})
+        assert _mirror(db, "S9", "S1")["vendor_gstin"] == ""
+        row = _row(_crosscheck(db, "E1"), self.NOTE)
+        assert row["status"] == "MISMATCH", row
+        low = row["note"].lower()
+        assert "TRF/TR-9" in row["note"] and "stock-transfer" in low
+        assert "without the supplier's state" not in low
+        assert "book the bill again" not in low and "mark it as no" not in low
+        assert "cannot be booked again" in low
+
+
+class TestTheMirrorHeadIsTheOneRule:
+    def _world(self):
+        return _one_company(
+            [{"store_id": "S1", "entity_id": "E1", "state_code": "20", "gstin": BUY_JH},
+             {"store_id": "PUNE", "entity_id": "E1", "state_code": "27", "gstin": None}]
+        )
+
+    def test_a_shop_with_no_registration_gets_no_head_from_its_declared_state(self):
+        """r11 #2, the reviewer's case: E1 holds only 20...; PUNE has no GSTIN
+        and declares 27. PUNE -> S1 of 1000 was IGST 50 by the declared state;
+        classify_supply('', 20...) is CGST + SGST."""
+        from api.services.purchase_invoice_engine import classify_supply
+
+        db = self._world()
+        bill = _mirror(db, "PUNE", "S1")
+        assert (bill["vendor_gstin"], bill["recipient_gstin"]) == ("", BUY_JH)
+        verdict = classify_supply(bill["vendor_gstin"], bill["recipient_gstin"])["interstate"]
+        assert bill["interstate"] is verdict is False
+        assert (bill["cgst_total"], bill["sgst_total"], bill["igst_total"]) == (25.0, 25.0, 0.0)
+        assert bill["place_of_supply"] == ""
+        row = _row(_crosscheck(db, "E1"), "Input credit from suppliers with no GSTIN")
+        assert row["status"] == "MISMATCH" and "TRF/TR-9" in row["note"], row
+
+    def test_the_reverse_direction_is_flagged_as_unplaced(self):
+        """S1 -> PUNE: PUNE has no registration, so the mirror is on no return
+        and the Cross-Check says so, whatever PUNE declares."""
+        db = self._world()
+        bill = _mirror(db, "S1", "PUNE")
+        assert (bill["recipient_gstin"], bill["igst_total"]) == ("", 0.0)
+        xc = _crosscheck(db, "E1")
+        row = _row(xc, "Input credit left off GSTR-3B")
+        assert row["status"] == "MISMATCH" and "TRF/TR-9" in row["note"], row
+
+
+class TestNoSoleCompanyGuess:
+    def test_a_shop_with_no_company_is_refused_even_with_one_company(self):
+        """r11 #3: with exactly one company in the master, a shop with no
+        entity_id was given that company's registration (IGST 180 on 20...),
+        while GSTR-3B, the Cross-Check and the RTV note all read it as having
+        none. The bill door now agrees: refused, nothing booked."""
+        db = _one_company([{"store_id": "S9", "state_code": "20"}])
+        r = _app_as(db, "S9").post(_URL, json=_services(store_id="S9"))
+        assert r.status_code == 422, r.text
+        detail = r.json()["detail"]
+        assert detail["code"] == "RECIPIENT_UNRESOLVED"
+        assert "S9" in detail["message"] and "no company" in detail["message"]
+        assert db["vendor_bills"].count_documents({}) == 0
+        from api.services import org_validation as ov
+
+        assert ov.shop_gstins(db)["S9"] == ""

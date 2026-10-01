@@ -696,18 +696,7 @@ def build_crosscheck(
                     "Input credit from suppliers with no GSTIN",
                     {"Claimed on GSTR-3B": _f(unreg.get("tax")), "Expected": 0.0},
                     0.0,
-                    note=(
-                        "%d bill(s) claim this input credit although the bill "
-                        "names no supplier GSTIN, and an unregistered supplier's "
-                        "tax never reaches GSTR-2B. Adding a GSTIN to the "
-                        "supplier now does not fix the bill: its CGST/SGST/IGST "
-                        "was set without the supplier's state. Book the bill "
-                        "again under the supplier's GSTIN, or mark it as no "
-                        "input credit: %s"
-                        % (k, ", ".join(str(x) for x in (unreg.get("bill_numbers") or [])[:20]))
-                        if k
-                        else "Every claimed bill names a registered supplier."
-                    ),
+                    note=_unregistered_note(unreg) if k else "Every claimed bill names a registered supplier.",
                 )
             )
 
@@ -732,3 +721,42 @@ def build_crosscheck(
             "gst_payable": net_cash,
         },
     }
+
+
+def _unregistered_note(unreg: dict) -> str:
+    """The note of the 'Input credit from suppliers with no GSTIN' row. It names
+    only what the app can do: nothing edits or cancels a booked bill, and a
+    second booking of the same supplier invoice (another vendor record, or the
+    same one with 'no input credit') is either refused as a duplicate or claims
+    the credit TWICE -- so it never says 'book again'. Stock-transfer mirror
+    bills (made by the system, hidden from Purchase Invoices) get their own
+    text: their head came from the two shops' GST numbers, not a supplier."""
+    mirrors = [str(x) for x in (unreg.get("transfer_bill_numbers") or [])]
+    skip = set(mirrors)
+    own = [str(x) for x in (unreg.get("bill_numbers") or []) if str(x) not in skip]
+    parts = []
+    if own:
+        parts.append(
+            "%d bill(s) claim this input credit although the bill names no "
+            "supplier GSTIN, and an unregistered supplier's tax never reaches "
+            "GSTR-2B. Adding a GSTIN to the supplier now does not fix the "
+            "bill: its CGST/SGST/IGST was set without the supplier's state. "
+            "The app cannot edit or cancel a booked bill, and booking the same "
+            "supplier invoice again would claim its credit twice, so do not "
+            "book it again. Leave this credit out of the GSTR-3B you file "
+            "(Table 4) and have the stored bill corrected by the developer: %s"
+            % (len(own), ", ".join(own[:20]))
+        )
+    if mirrors:
+        parts.append(
+            "%d stock-transfer bill(s) were made by the system when a transfer "
+            "was received, and the sending shop has no GST number of its "
+            "company, so the head was set from the two shops' GST numbers "
+            "with no sender registration. They do not appear in Purchase "
+            "Invoices and cannot be booked again. Add the sending shop's "
+            "company registration (Settings, companies) for later transfers; "
+            "leave this credit out of the GSTR-3B you file (Table 4) and have "
+            "the stored bill corrected by the developer: %s"
+            % (len(mirrors), ", ".join(mirrors[:20]))
+        )
+    return " ".join(parts)
