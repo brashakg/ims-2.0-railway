@@ -7,7 +7,9 @@ Seeds the minimum fixed data the Playwright E2E suite asserts against:
               which carry a GSTIN so GST tax invoices generate. Users too
               (admin / admin123, SUPERADMIN, geo-exempt).
   - Products: a 5% FRAME priced at exactly Rs 999 (the canonical GST-inclusive
-              case) and an 18% SUNGLASS at Rs 1180, both with real product_ids.
+              case) and an 18% SUNGLASS at Rs 1180, both with real product_ids,
+              plus a frame whose name ends " - Havana" like every minted name,
+              so the till tiles the layout gate measures draw their colour line.
   - Stock   : one AVAILABLE serialized unit per product at BV-BOK-01 so the
               sale links real on-hand (orders.create only checks existence,
               but seeding stock keeps reports honest).
@@ -63,6 +65,25 @@ E2E_PRODUCTS = [
         "hsn_code": "9004",
         "gst_rate": 18,
         "lens_type": "Non-Polarized",
+        "is_active": True,
+    },
+    {
+        # A minted name ends " - {Colour}" (product_naming.build_product_name);
+        # the till tile puts the colour on its own line (F46), so /pos/new and
+        # /pos/counter are measured with that line drawn. No stock: nothing
+        # sells it, and the products list is not filtered by stock.
+        "_id": "e2e-frame-havana",
+        "product_id": "e2e-frame-havana",
+        "name": "E2E Test Frame Colour - Havana",
+        "sku": "E2E-FR-HAV",
+        "category": "FRAMES",
+        "brand": "E2E Optics",
+        "model": "FrameHavana",
+        "mrp": 1499,
+        "offer_price": 1499,
+        "hsn_code": "9003",
+        "gst_rate": 5,
+        "frame_type": "Full Rim",
         "is_active": True,
     },
 ]

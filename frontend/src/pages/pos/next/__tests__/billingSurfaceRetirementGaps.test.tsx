@@ -36,8 +36,11 @@ vi.mock('../../../../components/pos/submitOrder', async (importOriginal) => ({
   submitPosOrder: (...a: unknown[]) => submitPosOrder(...a),
 }));
 
+// F46: the cart's sellable counts. Returns nothing unless a test hands it a map.
+const useSellableStock = vi.fn();
 vi.mock('../../../../hooks/usePOSQueries', () => ({
   useProducts: () => ({ data: [], isLoading: false }),
+  useSellableStock: (...a: unknown[]) => useSellableStock(...a),
 }));
 vi.mock('../../../../hooks/useIsOnlineStore', () => ({ useIsOnlineStore: () => false }));
 
@@ -58,7 +61,12 @@ vi.mock('../../../../components/pos/CustomerCardWithLoyalty', () => ({
     <button type="button" onClick={onChange}>change-customer</button>
   ),
 }));
-vi.mock('../../../../components/pos/POSCart', () => ({ CartSidebar: () => <div>cart</div> }));
+// The cart echoes the stock counts it was handed (F46).
+vi.mock('../../../../components/pos/POSCart', () => ({
+  CartSidebar: ({ stock }: { stock?: { sellable: Record<string, number | null> } }) => (
+    <div>cart{stock ? `:${JSON.stringify(stock.sellable)}` : ''}</div>
+  ),
+}));
 vi.mock('../../../../components/pos/DiscountModal', () => ({
   DiscountModal: () => null,
   toDiscountItem: (x: unknown) => x,
@@ -81,7 +89,14 @@ vi.mock('../PosWidgets', () => ({ PosWidgets: () => null }));
 vi.mock('../SaleCompleteScreen', () => ({
   default: (p: { orderId: string }) => <div>sale-complete:{p.orderId}</div>,
 }));
-vi.mock('../ProductResultsStrip', () => ({ default: () => null }));
+// The strip reports the store it was handed (F46: its tiles' counts are keyed by it).
+const stripStores = vi.fn();
+vi.mock('../ProductResultsStrip', () => ({
+  default: ({ storeId }: { storeId: string }) => {
+    stripStores(storeId);
+    return null;
+  },
+}));
 vi.mock('../DeliveryOptionsRow', () => ({ default: () => null }));
 
 import { BillingSurface } from '../BillingSurface';
@@ -118,6 +133,38 @@ const completeSale = async () => {
 beforeEach(() => {
   usePOSStore.getState().resetTransaction();
   submitPosOrder.mockReset().mockResolvedValue({ ok: true, orderId: 'o-1' });
+  useSellableStock.mockReset().mockReturnValue({ data: undefined });
+  stripStores.mockReset();
+});
+
+describe("F46: the cart hears what this shop can sell", () => {
+  it("asks for the cart lines' counts at the till's store and hands them to the cart", () => {
+    seed({ lines: ['FRAME'] });
+    useSellableStock.mockReturnValue({ data: { store_id: 'BV-BOK-01', sellable: { 'p-0': 0 } } });
+    render(<BillingSurface />);
+    expect(useSellableStock).toHaveBeenCalledWith(
+      'BV-BOK-01',
+      [expect.objectContaining({ product_id: 'p-0' })],
+    );
+    expect(screen.getByText('cart:{"p-0":0}')).toBeTruthy();
+  });
+
+  it("keys the cart and the strip by the signed-in shop, never a till draft's leftover store", () => {
+    // posStore.store_id survives in the persisted 'ims-pos-draft' (the retired
+    // till set it). Complete sale checks the signed-in shop, so the stock
+    // figures must be that shop's.
+    usePOSStore.getState().setStoreId('BV-OTHER-02');
+    try {
+      seed({ lines: ['FRAME'] });
+      render(<BillingSurface />);
+      expect(useSellableStock).toHaveBeenCalled();
+      for (const [storeId] of useSellableStock.mock.calls) expect(storeId).toBe('BV-BOK-01');
+      expect(stripStores).toHaveBeenCalled();
+      for (const [storeId] of stripStores.mock.calls) expect(storeId).toBe('BV-BOK-01');
+    } finally {
+      usePOSStore.getState().setStoreId('');
+    }
+  });
 });
 
 describe('G1: the sale type the lab depends on is derived from the bill', () => {
