@@ -88,6 +88,14 @@ describe('Inventory > Stock search finds a unit by its own code', () => {
     expect(screen.getByText(shown)).toBeInTheDocument();
     expect(screen.queryByText(hidden)).not.toBeInTheDocument();
   });
+
+  // A label names ONE unit, so a code matches whole: part of one lists nothing.
+  it.each(['BV', 'bv00000000', 'BV000000004'])('%s (part of a code) lists no product', (part) => {
+    renderPage();
+    search(part);
+    expect(screen.queryByText('Carrera CA 8895')).not.toBeInTheDocument();
+    expect(screen.queryByText('Wayfarer')).not.toBeInTheDocument();
+  });
 });
 
 describe('Manage Barcode from the stock row', () => {
