@@ -506,3 +506,15 @@ def test_due_in_7_days_leaves_the_overdue_bills_out(world):
     assert org["payables"]["overdue"] == pytest.approx(1800.0 + DHN_OWED)
     info = [a for a in org["alerts"] if "within 7 days" in a["label_template"]]
     assert [a["amount"] for a in info] == [pytest.approx(3000.0)]
+
+
+def test_the_budget_hooks_survival_view_is_the_callers_shop_too(world):
+    """GET /finance/budget?mode=survival embeds the same survival view: a Pune
+    accountant reads Pune's AP there exactly as on /finance/survival-cashflow;
+    an admin's AP stays org-wide."""
+    pune = world.ok("/finance/budget", ACCT_PUNE, mode="survival")
+    assert _survival_bills(pune) == {"BP1", "BP2", "BP3"}
+    assert _survival_ap_paise(pune) == int(PUNE_OWED * 100)
+    assert pune["survival"]["ap_scope"] == "STORE"
+    whole = world.ok("/finance/budget", ADMIN, mode="survival")
+    assert _survival_bills(whole) == {"BP1", "BP2", "BP3", "BD1"}
