@@ -52,10 +52,12 @@ Pins, each with its revert named in the test:
     Shopify admin quantity, never a press that changes a listing's
     status); the worst delta is over drifted rows only.
   * round 17: a retired SKU (a size too) is never compared, so every SKU a
-    task names is a row in its shop's view; a retired product's listing is
-    found by the retire hook's own link (_resolve_twin, strict); live is
+    task names is a row in its shop's view; live is ONE reader
+    (inventory.skus_on_live_listings) for parity, the Stock Tally and the
+    reconciliation screen -- no second "taken down" computation, and the
+    screen tests read it unpatched; live is
     listing_visible (a staged-PUBLISHED draft and a gid-less PUBLISHED twin
-    are not live, an untracked live listing is); a dead status or twin read
+    are not live, an untracked live listing is); a dead status read
     touches no task; a deactivated location sells nothing; the task names
     EVERY SKU with both numbers and sends the admin to the shop's
     Recommended (IMS's number now), never to a number it carries.
@@ -837,9 +839,8 @@ def test_unbacked_units_per_location_never_pooled():
 
 
 def _tally(monkeypatch, db, levels):
-    from api.services import online_catalog, online_sync_health as osh
+    from api.services import online_sync_health as osh
 
-    monkeypatch.setattr(online_catalog, "online_status_for_skus", lambda db, skus: {s: {"online": True} for s in skus})
     monkeypatch.setattr("api.services.shopify_push._graphql", _shopify(levels))
     return _run(osh.stock_tally_live(db))
 
@@ -885,7 +886,6 @@ def _reconcile_page(monkeypatch, db, levels, store_id):
     from api.routers import catalog
 
     monkeypatch.setattr(catalog, "_get_db", lambda: db)
-    monkeypatch.setattr(catalog, "online_status_for_skus", lambda db, skus: {s: {"online": True} for s in skus})
     monkeypatch.setattr(catalog, "online_mapping_available", lambda db: True)
     monkeypatch.setattr("api.services.shopify_push._graphql", _shopify(levels))
     return _run(catalog.online_stock_reconcile(store_id=store_id, limit=1000, current_user={"user_id": "u1"}))
@@ -1053,7 +1053,8 @@ def test_tally_a_listing_ims_has_no_rule_for_is_a_risk(monkeypatch):
     inv_9 = "gid://shopify/InventoryItem/99"
     db = _db({"SKU-1": {"BV-A": 1, "BV-B": 0}})
     db.seed("products", [{"sku": "SKU-9"}])
-    db.seed("catalog_variants", [{"sku": "SKU-9", "shopify_inventory_item_id": inv_9}])
+    db.seed("catalog_products", [_listing(9, "SKU-9")])
+    db.seed("catalog_variants", [{"sku": "SKU-9", "parent_product_id": "c9", "shopify_inventory_item_id": inv_9}])
     out = _tally(monkeypatch, db, {INV_1: {LOC_A: 1, LOC_B: 0}, INV_2: {}, inv_9: {LOC_A: 4}})
     rows = {r["sku"]: r for r in out["items"]}
     assert _cols(rows["SKU-9"], "online_listed_qty", "sellable", "oversell_risk") == (4, 0, True)
@@ -1615,7 +1616,7 @@ def _ban(db, *skus):
                                   "online_sync_blocked": True, "products": [{"sku": s} for s in skus]}])
 
 
-@pytest.mark.parametrize("dead", ["retired_reader", "parent_listing_read", "live_listing_read", "retired_twin_read"])
+@pytest.mark.parametrize("dead", ["retired_reader", "parent_listing_read", "live_listing_read"])
 def test_an_unreadable_live_answer_touches_no_task(monkeypatch, dead):
     """Round 14's test gap, round 16's reader. Night 1 files SKU-2 (IMS 0 vs
     LOC_A 3). Night 2 one read behind 'is this listing live' fails: the
@@ -1623,14 +1624,12 @@ def test_an_unreadable_live_answer_touches_no_task(monkeypatch, dead):
     the read of the listing that carries each SKU (the parents of the
     catalog_variants rows, inside online_catalog.listings_for_skus), or
     (round 17) the read of those listings' status (listing_visible's
-    input), or the retire hook's twin read for a retired product
-    (online_delist._resolve_twin). Which SKU is live is unknown, so the
-    tick compares nothing and leaves BV-A's task exactly as it was. Read
-    the failed answer as 'none retired' (`retired = set()`), call
-    listings_for_skus fail-soft (strict=False: no listing found, nothing
-    live), read a dead status read as 'nothing live' (`live = set()`) or
-    call _resolve_twin fail-soft (no twin: the retired product's listing
-    stays live) -> the night is 'checked' -> fails."""
+    input, inside inventory.skus_on_live_listings). Which SKU is live is
+    unknown, so the tick compares nothing and leaves BV-A's task exactly as
+    it was. Read the failed answer as 'none retired' (`retired = set()`),
+    call listings_for_skus fail-soft (strict=False: no listing found,
+    nothing live) or call skus_on_live_listings fail-soft (a dead status
+    read is 'nothing live') -> the night is 'checked' -> fails."""
     import copy
 
     from api.services import online_stock_writeback as wb
@@ -1644,15 +1643,6 @@ def test_an_unreadable_live_answer_touches_no_task(monkeypatch, dead):
     real = coll.find
     if dead == "retired_reader":
         monkeypatch.setattr(wb, "_sku_to_pid", lambda db_, skus: None)
-    elif dead == "retired_twin_read":
-        # A product retired since night 1 (no listing of its own carries a
-        # SKU parity compares): its twin read dies.
-        db.seed("products", [{"product_id": "p3", "sku": "SKU-3", "is_active": False}])
-
-        def find_one(*a, **k):
-            raise RuntimeError("twin read died")
-
-        coll.find_one = find_one
     else:
         def find(flt=None, *a, **k):
             if dead == "parent_listing_read" and any("id" in c for c in (flt or {}).get("$or") or []):
@@ -1755,8 +1745,17 @@ _LIVE_STATES = {
     "retired_take_down_dark": (False, _retire("SKU-2", online_state="DELISTED", delist_mode="SIMULATED"), False),
     "retired_twin_by_pim_link": (False, _retire_by_pim("SKU-2", "c2"), False),
     "size_parent_taken_down": (True, lambda db: _set(db, "catalog_products", {"id": "c1"}, **_TAKEN_DOWN), False),
-    "size_parent_retired": (True, _retire("SKU-1", online_state="DELIST_FAILED", delist_mode="LIVE"), False),
-    "size_parent_retired_by_pim_link": (True, _retire_by_pim("SKU-1", "c1"), False),
+    # Round 17 (open problem 1): ONE reader, no second "taken down"
+    # computation. A retired product whose take-down failed (or ran DARK)
+    # leaves its listing PUBLISHED, and that listing still sells its ACTIVE
+    # size: the size stays compared, as both screens assess it. So does one
+    # an ADMIN re-published after a LIVE retire (Send to website writes
+    # PUBLISHED back and clears every off stamp).
+    "size_parent_retired": (True, _retire("SKU-1", online_state="DELIST_FAILED", delist_mode="LIVE"), True),
+    "size_parent_retired_dark": (True, _retire("SKU-1", online_state="DELISTED", delist_mode="SIMULATED"), True),
+    "size_parent_retired_by_pim_link": (True, _retire_by_pim("SKU-1", "c1"), True),
+    "size_parent_retired_then_republished": (True, _retire("SKU-1", status="PUBLISHED", online_state=None,
+                                                           taken_down_at=None), True),
     # Round 17: a retired SKU is never compared, a size too -- no shop's view lists it.
     "size_retired_on_a_live_parent": (True, _retire("SKU-2"), False),
     "still_live": (False, lambda db: None, True),
@@ -1781,14 +1780,16 @@ def test_parity_compares_only_skus_on_a_live_listing(state):
     SKU-2 left the live set. Round 17: so does a retired SIZE on its
     parent's live listing (no shop's view lists a retired SKU), a
     staged-PUBLISHED draft and a PUBLISHED twin with no gid (live is
-    listing_visible, never the status alone), and a retired product whose
-    twin only the retire hook's pim_product_id link reaches (its own sku is
-    a legacy one). The controls stay compared and the task is refreshed: an
-    untouched listing, and a live one recorded untracked. Drop
-    listing_visible, or re-spell it as status == PUBLISHED -> a draft stays
-    compared; drop the retired SKU check -> a retired size stays compared;
-    link a listing to its retired product by sku only -> a size rides a
-    retired parent; judge live by listing_already_live -> the untracked
+    listing_visible, never the status alone). The controls stay compared
+    and the task is refreshed: an untouched listing, a live one recorded
+    untracked, and -- round 17's open problem 1 -- an ACTIVE size whose
+    retired parent's listing is still PUBLISHED (its take-down failed, ran
+    DARK, or was undone by a re-publish): that listing still sells the size.
+    Drop listing_visible, or re-spell it as status == PUBLISHED -> a draft
+    stays compared; drop the retired SKU check -> a retired size stays
+    compared; put back a second 'taken down' computation (the retired
+    product's twin found by _resolve_twin) -> the size on a still-PUBLISHED
+    listing is dropped; judge live by listing_already_live -> the untracked
     listing is dropped -> fails."""
     size, change, compared = _LIVE_STATES[state]
     db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 0, "BV-B": 0}})
@@ -1806,6 +1807,64 @@ def test_parity_compares_only_skus_on_a_live_listing(state):
     else:
         assert out["tasks"] == {"filed": [], "refreshed": [], "closed": ["BV-A"]}
         assert out["drift"] == [] and _tasks(db)[0]["status"] == "COMPLETED"
+
+
+@pytest.mark.parametrize("state", list(_LIVE_STATES))
+def test_a_shops_view_and_its_task_read_one_live_reader(monkeypatch, state):
+    """Round 17, open problem 2: 'is this listing live on Shopify' had two
+    readers -- parity's listing_visible and the screens' online flag (a gid
+    OR PUBLISHED, so a draft counted). Take off website pressed LIVE on c2
+    (DRAFT, gid kept), BV-A's shelf 0 and LOC_A still 3: parity closed
+    BV-A's task while BV-A's view said SKU-2 OVERSELL_RISK. Now ONE reader
+    (inventory.skus_on_live_listings), with NO monkeypatch of it here: for
+    every listing state of round 16/17, SKU-2 is in BV-A's task exactly
+    when BV-A's view assesses it (not NOT_ONLINE) and the Stock Tally lists it;
+    an assessed row shows the task's two numbers and its oversell; a row
+    not assessed is NOT_ONLINE, never an alarm. Put the screens back on
+    online_status_for_skus().online -> a drafted listing is assessed and
+    alarms beside no task -> fails."""
+    size, change, compared = _LIVE_STATES[state]
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 0, "BV-B": 0}})
+    if size:
+        _size_of_c1(db)
+    change(db)
+    levels = {INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 3, LOC_B: 0}}
+    tally, parity = _tally_and_parity(monkeypatch, db, levels)
+    assert [(d["sku"], d["store_id"], d["ims"], d["shopify"]) for d in parity["drift"]] == (
+        [("SKU-2", "BV-A", 0, 3)] if compared else [])
+    assert [t["store_id"] for t in _tasks(db)] == (["BV-A"] if compared else [])
+    view = _reconcile(monkeypatch, db, levels, "BV-A")
+    row = view.get("SKU-2")
+    assert ("SKU-2" in tally) is compared
+    assert bool(row and row["status"] != "NOT_ONLINE") is compared
+    if compared:
+        assert _cols(row, "online", "recommended", "status") == (3, 0, "OVERSELL_RISK")
+        assert tally["SKU-2"]["oversell_risk"] is True
+    elif row is not None:
+        assert _cols(row, "online", "status") == (0, "NOT_ONLINE")
+
+
+def test_the_take_off_website_press_leaves_no_alarm_beside_a_closed_task(monkeypatch):
+    """Round 17, open problem 2 through the real door: night 1 files BV-A
+    (SKU-2: IMS 0 vs LOC_A 3); an ADMIN presses Take off website LIVE on c2
+    (DRAFT, gid kept). Night 2 closes the task, and BV-A's view reads SKU-2
+    NOT_ONLINE, the Stock Tally no longer lists it -- never OVERSELL_RISK
+    with no task beside it. Screens on the old online flag -> fails."""
+    from api.routers import online_store_push as osp
+
+    db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 0, "BV-B": 0}})
+    levels = {INV_1: {LOC_A: 1, LOC_B: 1}, INV_2: {LOC_A: 3, LOC_B: 0}}
+    _run(sp.run_parity_tick(db, graphql=_shopify(levels)))
+    assert _reconcile(monkeypatch, db, levels, "BV-A")["SKU-2"]["status"] == "OVERSELL_RISK"
+    _live_shopify(monkeypatch)
+    monkeypatch.setattr(osp, "_get_db", lambda: db)
+    res = _run(osp.take_down_product("c2", current_user={"user_id": "u1", "roles": ["ADMIN"]}))["result"]
+    assert res["mode"] == "LIVE"
+    tally, parity = _tally_and_parity(monkeypatch, db, levels)
+    assert parity["tasks"]["closed"] == ["BV-A"]
+    row = _reconcile(monkeypatch, db, levels, "BV-A")["SKU-2"]
+    assert _cols(row, "online", "status") == (0, "NOT_ONLINE")
+    assert "SKU-2" not in tally
 
 
 def _live_shopify(monkeypatch):

@@ -380,35 +380,30 @@ def _sample_variants(db) -> Optional[List[Dict[str, Any]]]:
     what tells a SKU that is GONE (a task may drop it) from one that merely
     fell outside tonight's cap (still owed).
 
-    LIVE is ONE answer (decided 2026-10-01): the listing that carries the SKU
-    -- the writer's own online_catalog.listings_for_skus, so a size is judged
-    by its PARENT's listing -- is visible by the writer's own reader
-    (inventory.listing_visible: a gid and PUBLISHED, which only a confirmed
-    publish writes and every LIVE take-down -- Take off website, the retire
-    hook, the SUPERADMIN block cutover, all push_product_delist -- turns to
-    DRAFT). RETIRED is skipped, by the rule's own reader
-    (online_stock_writeback._sku_to_pid), twice: the SKU itself (a size too
-    -- the retire hook takes a size off sale on its parent's listing, and
-    the Stock Tally and the reconciliation screen list no retired SKU, so a
-    shop's view always holds every SKU its task names), and every SKU on the
-    listing the retire hook takes down for a retired product, found by the
-    hook's own link (online_delist._resolve_twin: pim_product_id, product_id,
-    id, then sku -- never a second spelling). A DARK or failed take-down
-    leaves that listing PUBLISHED; the Catalog screen's DELIST_FAILED reports
-    it. Returns [{sku, inventory_item_id}]; None when a read failed
+    LIVE is ONE answer (decided 2026-10-01), read through ONE reader shared
+    with the Stock Tally and the reconciliation screen:
+    inventory.skus_on_live_listings -- the listing that carries the SKU (the
+    writer's own online_catalog.listings_for_skus, so a size is judged by its
+    PARENT's listing) is listing_visible (a gid and PUBLISHED, which only a
+    confirmed publish writes and every LIVE take-down -- Take off website,
+    the retire hook, the SUPERADMIN block cutover, all push_product_delist
+    -- turns to DRAFT). There is no second "taken down" computation: a
+    retired product's listing whose take-down failed or ran DARK still says
+    PUBLISHED and still sells its active sizes, so they stay compared, as
+    both screens assess them. A RETIRED SKU itself is skipped, by the rule's
+    own reader (online_stock_writeback._sku_to_pid): the writer sends it 0
+    and neither screen lists it, so a shop's view always holds every SKU its
+    task names. Returns [{sku, inventory_item_id}]; None when a read failed
     (unknown, never "nothing is live"). ponytail: resolves every spine SKU
-    and one twin per retired product (up to 4 reads each); batch them if
-    the catalogue grows past a few thousand."""
+    (up to 4 reads); batch them if the catalogue grows past a few thousand."""
     coll = _coll(db, "products")
     listings = _coll(db, "catalog_products")
     if coll is None or listings is None:
         return None
     try:
-        from .online_catalog import inventory_items_for_skus, listings_for_skus
-        from .online_delist import _resolve_twin
+        from .online_catalog import inventory_items_for_skus
         from .online_stock_writeback import _sku_to_pid
-        from .shopify_push import is_variant_of
-        from .shopify_push.inventory import listing_visible
+        from .shopify_push.inventory import skus_on_live_listings
 
         spine = [str(d.get("sku") or "").strip()
                  for d in coll.find({"sku": {"$nin": [None, ""]}}, {"_id": 0, "sku": 1})]
@@ -416,24 +411,8 @@ def _sample_variants(db) -> Optional[List[Dict[str, Any]]]:
         resolved = _sku_to_pid(db, spine)
         if resolved is None:
             return None
-        pid_of, retired = resolved
-        # The rows the rule read as retired, and the listing the retire hook
-        # takes down for each (a size's twin owns none: only the size is off).
-        rows = coll.find({"product_id": {"$in": list({pid_of[s] for s in retired})}}, {"_id": 0})
-        taken = set()
-        for row in rows:
-            sku = str(row.get("sku") or "").strip()
-            if sku in retired and row.get("product_id") == pid_of[sku]:
-                twin = _resolve_twin(db, row, strict=True)
-                if twin is not None and not is_variant_of(twin):
-                    taken.add(str(twin.get("id")))
-        by_listing = listings_for_skus(db, spine, strict=True)
-        live = {
-            str(d.get("id"))
-            for d in listings.find({"id": {"$in": sorted(by_listing)}}, {"_id": 0, "id": 1, "ecom": 1})
-            if listing_visible(d) and str(d.get("id")) not in taken
-        }
-        on_live = {s for pid, keys in by_listing.items() if pid in live for s in keys}
+        retired = resolved[1]
+        on_live = skus_on_live_listings(db, spine, strict=True)
         skus = [s for s in spine if s in on_live and s not in retired]
         items = inventory_items_for_skus(db, skus)
     except Exception as exc:  # noqa: BLE001

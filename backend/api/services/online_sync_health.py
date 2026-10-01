@@ -301,7 +301,10 @@ def stock_tally_summary(
     """READ-ONLY per-SKU reconciliation of online-listed qty vs real on-hand vs
     already-reserved -- the Online Store "Stock tally" dashboard (BVI Phase 5).
 
-    "Which SKUs are online" comes from IMS Mongo (online_catalog). The LISTED
+    "Which SKUs are online" is THE one reader the nightly parity compares
+    by (inventory.skus_on_live_listings: the SKU's listing -- a size's
+    parent's -- is live on Shopify; a draft or taken-down one sells nothing
+    and is not assessed). The LISTED
     quantity lives on Shopify, PER LOCATION; pass ``live`` (the
     live_listed_qty_for_skus answer: qty, variants, levels, live, mapped) to
     compare against it. Without it, online_listed_qty is reported as None
@@ -341,7 +344,8 @@ def stock_tally_summary(
 
     100% read-only + fail-soft: no DB -> empty envelope. NEVER mutates stock,
     NEVER reserves a unit."""
-    from .online_catalog import online_mapping_available, online_status_for_skus
+    from .online_catalog import online_mapping_available
+    from .shopify_push.inventory import skus_on_live_listings
     from .shopify_stock_parity import unbacked_units
 
     online_qty: Optional[Dict[str, int]] = (live or {}).get("qty") if live else None
@@ -405,7 +409,9 @@ def stock_tally_summary(
         else ({}, {})
     )
     reserved = _reserved_by_product(db, pids)
-    online = online_status_for_skus(db, skus)  # {} on any failure
+    # THE one "is this listing live on Shopify" reader, shared with the
+    # nightly parity and the reconciliation screen (set() on any failure).
+    on_live = skus_on_live_listings(db, skus)
 
     items: List[Dict[str, Any]] = []
     keys: List[tuple] = []
@@ -415,11 +421,11 @@ def stock_tally_summary(
     for p in products:
         sku = p.get("sku")
         pid = p.get("product_id")
-        o = online.get(sku, {})
-        # Only assess SKUs that are actually listed online. A product that is
-        # not online can't oversell online, so it is skipped from the tally
-        # (the reconcile screen elsewhere shows the full catalog).
-        if not bool(o.get("online")):
+        # Only assess SKUs whose listing is live on Shopify (the same reader
+        # parity compares by). A draft or taken-down listing sells nothing,
+        # so it is skipped from the tally (the reconcile screen elsewhere
+        # shows the full catalog).
+        if str(sku or "").strip() not in on_live:
             continue
         oh = int(on_hand.get(pid, 0) or 0)
         rv = int(reserved.get(pid, 0) or 0)
@@ -599,7 +605,10 @@ async def stock_tally_live(db, limit: int = _RECONCILE_SCAN_LIMIT) -> Dict[str, 
         )
         skus = [p.get("sku") for p in products if p.get("sku")]
         if skus:
-            live = await live_listed_qty_for_skus(db, skus)
+            from .shopify_push.inventory import skus_on_live_listings
+
+            on_live = skus_on_live_listings(db, skus)
+            live = await live_listed_qty_for_skus(db, [s for s in skus if str(s).strip() in on_live])
     except Exception as exc:  # noqa: BLE001
         logger.debug("[STOCK_TALLY] live scan skipped: %s", exc)
     return stock_tally_summary(db, limit=limit, live=live)

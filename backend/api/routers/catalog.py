@@ -126,8 +126,10 @@ async def online_stock_reconcile(
     (Shopify) per SKU, PER SHOPIFY LOCATION, against THE ONE RULE the writer
     sends (online_sync_health.rule_by_location).
 
-    Post-BVI: "which SKUs are online" comes from the IMS catalog (Mongo), and
-    the LISTED quantity is read LIVE from Shopify for the online-mapped SKUs
+    Post-BVI: "which SKUs are online" is the SKU's listing live on Shopify
+    (inventory.skus_on_live_listings, the reader the nightly parity and the
+    Stock Tally share), and the LISTED quantity is read LIVE from Shopify for
+    the live, online-mapped SKUs
     (creds-gated, read-only, capped to the MAPPED set), per location. With
     ``store_id`` the row is that shop's own Shopify location, in full, as
     parity compares it (an unmapped shop lists 0 and is recommended 0);
@@ -147,7 +149,10 @@ async def online_stock_reconcile(
         drift task can sit beside OK (under-listed) and OVER_ALLOCATED beside
         no task (within tolerance). Parity compares only a SKU IMS still
         sells (a retired one is on neither this page nor a task) on a live
-        listing, so every SKU a shop's drift task names is a row here
+        listing, and a row is assessed (is_online) by the SAME reader
+        (inventory.skus_on_live_listings: a draft or taken-down listing is
+        assessed by neither), so every SKU a shop's drift task names is a
+        row here
         (within ``limit``), and that shop's Online and ``recommended`` are
         the two numbers the task names, read now (the task's are from the
         night it compared them); ``recommended`` is the number its
@@ -191,15 +196,20 @@ async def online_stock_reconcile(
     pids = [p.get("product_id") for p in products if p.get("product_id")]
     on_hand = _on_hand_by_product(db, pids, store_id)
     skus = [p.get("sku") for p in products if p.get("sku")]
-    online = online_status_for_skus(db, skus)  # {sku: {online, status, ...}}
-
-    # Live Shopify listed quantities PER LOCATION: mapped SKUs first, cap on
-    # the mapped set, coverage counts carried through (None when unavailable).
     from ..services.online_stock_writeback import _safety_buffer
     from ..services.online_sync_health import live_listed_qty_for_skus, rule_by_location
+    from ..services.shopify_push.inventory import skus_on_live_listings
     from ..services.shopify_stock_parity import unbacked_units
 
-    live = await live_listed_qty_for_skus(db, skus)
+    # Online = the SKU's listing is live on Shopify: THE one reader the
+    # nightly parity and the Stock Tally read (a draft or taken-down listing
+    # sells nothing and is not assessed, exactly as parity skips it).
+    on_live = skus_on_live_listings(db, skus)
+
+    # Live Shopify listed quantities PER LOCATION for the live SKUs: mapped
+    # SKUs first, cap on the mapped set, coverage counts carried through
+    # (None when unavailable).
+    live = await live_listed_qty_for_skus(db, [s for s in skus if str(s).strip() in on_live])
     variants = (live or {}).get("variants") or []
     # Parity's full level (the Online column, OVER_ALLOCATED) and the level
     # the storefront sells from (OVERSELL_RISK): live_listed_qty_for_skus.
@@ -227,8 +237,7 @@ async def online_stock_reconcile(
     items = []
     for p in products:
         sku = p.get("sku")
-        o = online.get(sku, {})
-        is_online = bool(o.get("online"))
+        is_online = str(sku or "").strip() in on_live
         # Uncovered online SKU -> None (LISTED_UNKNOWN downstream), never a
         # confident 0. Offline SKUs carry 0 (they are not assessed anyway).
         per_location = levels.get(inv_of.get(sku))

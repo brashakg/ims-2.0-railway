@@ -393,9 +393,11 @@ def online_status_for_skus(
                        gid, or the product's OWN variant carrying a variant /
                        inventory-item gid -- resolved the SAME way on the
                        product and the variant path) OR staged PUBLISHED.
-                       Includes unpurchasable Shopify DRAFTs. Gates the
-                       stock-tally oversell assessment (online_sync_health)
-                       and the reconcile screen.
+                       Includes unpurchasable Shopify DRAFTs. DISPLAY only:
+                       the Stock Tally, the reconcile screen and the nightly
+                       parity decide "is this listing live" with ONE reader,
+                       shopify_push.inventory.skus_on_live_listings, never
+                       with this flag.
     sellable_online -- GUARD flag: ecom.status PUBLISHED, or the product's OWN
                        variant carrying a live variant gid (same resolution on
                        both paths). PLAINLY: anything PUSHED to Shopify, even
@@ -447,8 +449,8 @@ def online_status_for_skus(
         # an oversell alert before it is purchasable) rather than silence for
         # live SKUs whose IMS status lags Shopify. Only a staged-but-never-
         # pushed DRAFT (no gid anywhere) stays out of both flags. `online`
-        # matters beyond display: it gates the stock-tally oversell assessment
-        # (online_sync_health) and the reconcile screen.
+        # is display only: the stock tally, the reconcile screen and parity
+        # read inventory.skus_on_live_listings instead.
         var_pushed = bool(
             normalize_sku(var.get("shopify_variant_id"))
             or normalize_sku(var.get("shopify_inventory_item_id"))

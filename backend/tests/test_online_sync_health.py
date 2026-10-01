@@ -320,14 +320,18 @@ def _tally_db():
 
 
 def _patch_online(monkeypatch, mapping):
-    """Stub online_status_for_skus (IMS Mongo catalog) with a fixed mapping."""
-    from api.services import online_catalog
+    """Stub THE one "is this listing live on Shopify" reader
+    (inventory.skus_on_live_listings, shared with parity and the
+    reconciliation screen) with the SKUs `mapping` marks online. These tests
+    pin the tally's on-hand / reserved arithmetic over a _FakeDb without a
+    catalogue; the reader itself is exercised against real catalogue rows in
+    test_shopify_stock_parity."""
+    from api.services.shopify_push import inventory
 
-    monkeypatch.setattr(
-        online_catalog, "online_status_for_skus", lambda db, skus: mapping
-    )
-    # stock_tally imports the name inside the function from .online_catalog, so
-    # patching the module attribute is sufficient.
+    live = {s for s, v in mapping.items() if v.get("online")}
+    monkeypatch.setattr(inventory, "skus_on_live_listings", lambda db, skus, **_k: set(live))
+    # Both screens import the name inside the function from
+    # shopify_push.inventory, so patching the module attribute is sufficient.
 
 
 def test_stock_tally_failsoft_no_db():
@@ -411,8 +415,8 @@ def test_a_lowercase_reserved_unit_is_still_a_reservation(monkeypatch):
 
 
 def test_stock_tally_no_mapped_products_is_empty(monkeypatch):
-    """No Shopify-mapped products in the IMS catalog -> online_status_for_skus
-    returns {} -> no SKU is treated as online, so the tally is empty (never
+    """No Shopify-mapped products in the IMS catalog -> the live-listing reader
+    returns nothing -> no SKU is treated as online, so the tally is empty (never
     raises)."""
     _patch_online(monkeypatch, {})
     out = sh.stock_tally_summary(_tally_db())
@@ -636,9 +640,7 @@ def test_the_catalog_reconciliation_screen_reads_the_same_on_hand_as_the_tile(mo
         }
     )
     monkeypatch.setattr(catalog, "_get_db", lambda: db)
-    monkeypatch.setattr(
-        catalog, "online_status_for_skus", lambda db, skus: {"SKU-ONLINE-ONLY": {"online": True}}
-    )
+    _patch_online(monkeypatch, {"SKU-ONLINE-ONLY": {"online": True}})
     monkeypatch.setattr(catalog, "online_mapping_available", lambda db: True)
 
     async def _listed(db, skus, **kw):  # noqa: ARG001 -- the website shows 1
@@ -793,7 +795,7 @@ def test_R9_the_reconciliation_screen_shows_an_unknown_on_hand_as_unknown(monkey
 
     db = _unknown_shelf_db()
     monkeypatch.setattr(catalog, "_get_db", lambda: db)
-    monkeypatch.setattr(catalog, "online_status_for_skus", lambda db, skus: {"SKU-REAL": {"online": True}})
+    _patch_online(monkeypatch, {"SKU-REAL": {"online": True}})
     monkeypatch.setattr(catalog, "online_mapping_available", lambda db: True)
 
     async def _listed(db, skus, **kw):  # noqa: ARG001 -- the website shows 3
