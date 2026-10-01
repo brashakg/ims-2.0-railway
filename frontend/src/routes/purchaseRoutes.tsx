@@ -11,6 +11,7 @@ import { lazy } from 'react';
 import { Route, Navigate, useSearchParams } from 'react-router-dom';
 import { ProtectedRoute } from '../components/layout/ProtectedRoute';
 import type { UserRole } from '../types';
+import { APPROVE_ROLES } from '../pages/purchase/invoices/shared';
 
 const PurchaseLayout = lazy(() => import('../pages/purchase/PurchaseLayout').then(m => ({ default: m.PurchaseLayout })));
 const PurchaseOrdersSection = lazy(() => import('../pages/purchase/PurchaseOrdersSection').then(m => ({ default: m.PurchaseOrdersSection })));
@@ -127,7 +128,7 @@ export const purchaseRoutes = (
       <Route
         path="this-month"
         element={
-          <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'ACCOUNTANT']}>
+          <ProtectedRoute allowedRoles={APPROVE_ROLES}>
             <PurchasesThisMonthSection />
           </ProtectedRoute>
         }

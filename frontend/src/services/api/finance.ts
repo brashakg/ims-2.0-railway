@@ -28,8 +28,11 @@ export const financeApi = {
     return response.data;
   },
 
-  getVendorPayments: async () => {
-    const response = await api.get('/finance/vendor-payments');
+  /** Per-supplier ledger figures; `storeId` = one shop's share (no id = every shop). */
+  getVendorPayments: async (storeId?: string) => {
+    const response = storeId
+      ? await api.get('/finance/vendor-payments', { params: { store_id: storeId } })
+      : await api.get('/finance/vendor-payments');
     return response.data;
   },
 

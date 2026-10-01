@@ -10,9 +10,11 @@
 // Ruling 2026-09-28: one payable rule -- the supplier ledger. Every
 // ledger-shaped read below answers the SAME Rs 1,44,456 (the vendor ledger,
 // /finance/vendor-payments, AP aging, the new report), so the card may read any
-// of them; what it may not do is invent a zero. A role that cannot read
-// supplier balances (a store manager -- the server refuses him) is shown no
-// figure at all rather than Rs 0.0L.
+// of them; what it may not do is invent a zero. A role that may not read
+// supplier balances (a store manager -- owner ruling 2026-09-29: ADMIN +
+// ACCOUNTANT only) never ASKS for them: the mocked server below answers him
+// 200, as this branch's /finance/vendor-payments still does, so only the
+// screen's own gate keeps the figure off his card.
 //
 // The HTTP client itself is mocked (not vendorsApi), so the fix is free to pick
 // its ledger reader. These were `it.fails` pins while the finding was open;
@@ -62,13 +64,13 @@ function forbidden() {
   return Promise.reject(Object.assign(new Error('Forbidden'), { response: { status: 403, data: {} } }));
 }
 
-/** Every ledger-shaped read answers the one figure; balance reads refuse a
- *  role outside the supplier-balance readers, as the server does. */
+/** Every ledger-shaped read answers the one figure; the vendor ledger reads
+ *  refuse a role outside the supplier-balance readers. /finance/vendor-payments
+ *  does NOT (the manager gate there lands with #1161): the screen must not ask. */
 function route(url: string) {
   const readsBalances = roles.some((r) => ['ADMIN', 'ACCOUNTANT', 'SUPERADMIN'].includes(r));
   if (url === '/vendors' || url === '/vendors/') return Promise.resolve({ data: { vendors: [VENDOR], total: 1 } });
   const balanceRead =
-    url === '/finance/vendor-payments' ||
     url === '/vendors/ap-aging' ||
     url.startsWith('/vendors/purchases-this-month') ||
     /^\/vendors\/v1\/(ledger|bills|payments)/.test(url);
@@ -100,6 +102,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { SuppliersSection } from '../SuppliersSection';
 
 beforeEach(() => {
+  get.mockReset();
   get.mockImplementation((url: string) => route(url));
 });
 
@@ -137,5 +140,22 @@ describe('F56: the supplier card reads what we owe from the supplier ledger', ()
   it('F56/F57: a store manager, who cannot read supplier balances, is never shown a confident Rs 0.0L', async () => {
     await openAs('STORE_MANAGER');
     expect(screen.queryAllByText('₹0.0L')).toHaveLength(0);
+  });
+
+  it('owner ruling 2026-09-29: a store manager never asks for what we owe -- no figure even when the server would answer', async () => {
+    await openAs('STORE_MANAGER');
+    await new Promise((r) => setTimeout(r, 50));
+    expect(get.mock.calls.filter(([url]) => url === '/finance/vendor-payments')).toHaveLength(0);
+    expect(figure('Outstanding')).toBe('—');
+    expect(screen.queryByText('₹1.4L')).toBeNull();
+  });
+
+  it('F63: the card reads the shop the Purchase filter shows', async () => {
+    await openAs('ACCOUNTANT');
+    await vi.waitFor(() => expect(figure('Outstanding')).toBe('₹1.4L'));
+    const params = get.mock.calls
+      .filter(([url]) => url === '/finance/vendor-payments')
+      .map(([, cfg]) => (cfg as { params?: Record<string, string> } | undefined)?.params?.store_id);
+    expect(params).toEqual(['BV-DHN-01']);
   });
 });
