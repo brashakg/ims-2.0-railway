@@ -745,7 +745,7 @@ def sync_drift_task(
             shared = sorted(set(shared_skus or ()))
             if shared:
                 parts.append(
-                    f"Two IMS products share one Shopify item - fix in IMS (IMS sends neither "
+                    f"Shares a Shopify item with another product - fix in IMS (IMS sends neither "
                     f"number, so they are not compared): {_shared_named(shared)}. Give each its own "
                     f"Shopify variant, or clear the duplicated Shopify inventory item id."
                 )

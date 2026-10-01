@@ -2553,7 +2553,7 @@ def test_r18_skus_sharing_one_shopify_item_are_in_no_view_and_named_apart(monkey
     assert [d["sku"] for d in out["drift"]] == ["SKU-3"]
     assert out["shared_item_skus"] == ["SKU-1", "SKU-2"]
     (task,) = _tasks(db)
-    assert "Two IMS products share one Shopify item - fix in IMS" in task["description"]
+    assert "Shares a Shopify item with another product - fix in IMS" in task["description"]
     assert "(IMS sends neither number, so they are not compared): SKU-1." in task["description"]  # SKU-2 has no stock at BV-A
     assert task["payload"]["skus"] == ["SKU-3"]
     # The other two readers skip them as well.
