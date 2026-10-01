@@ -305,8 +305,10 @@ def test_purchase_roles_still_find_a_vendor_by_gstin(client, real_vendor_repo, r
 # write them plus the Vendor Returns screen (/purchase/vendor-returns also lets
 # WORKSHOP_STAFF in: it logs defective pairs). RMAs have no screen, so only
 # their writers read them.
-_RETURN_WRITERS = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
-_RETURN_READERS = _RETURN_WRITERS + ("WORKSHOP_STAFF",)
+# cost_mask's tuples, not lists written here: the owner ruling they encode is
+# pinned once, in test_the_purchase_rule_follows_the_owner_rulings.
+from api.services.cost_mask import PURCHASE_ROLES as _RETURN_WRITERS  # noqa: E402
+from api.services.cost_mask import RETURN_READERS as _RETURN_READERS  # noqa: E402
 
 SIBLING_READS = [
     ("/api/v1/vendor-returns", "/api/v1/vendor-returns", _RETURN_READERS),
@@ -1376,3 +1378,63 @@ def test_every_accounts_route_row_is_the_one_list(app):
     }
     assert not wrong, wrong
     assert ACCOUNTS == sorted(AP_ROLES)
+
+
+# ---------------------------------------------------------------------------
+# 19. ONE purchase list in rbac_policy: every purchase-gated row IS it
+# ---------------------------------------------------------------------------
+# The accounts rows became _core.ACCOUNTS (section 17); the purchase rows still
+# spelled the four roles, so widening cost_mask.PURCHASE_ROLES opened the
+# handler gates and the vendor-list mask while the middleware rows kept
+# refusing: two answers for one role until each row was edited by hand. Every
+# route whose code gate is a purchase tuple is read off the code here, and its
+# row must be the same object as the one list built from that tuple.
+_PURCHASE_GATE = re.compile(
+    r"require_roles\(\*(_VENDOR_ROLES|PURCHASE_ROLES|_VENDOR_RETURN_ROLES"
+    r"|_DEBIT_NOTE_ROLES|_VENDOR_RMA_ROLES)\)"
+)
+_READERS_GATE = re.compile(r"require_roles\(\*_VENDOR_RETURN_READERS\)")
+
+
+def test_every_purchase_route_row_is_the_one_list(app):
+    from api.services.rbac_policy._core import PURCHASE, RETURN_READERS
+
+    want = {}
+    for route in app.routes:
+        try:
+            src = inspect.getsource(route.endpoint)
+        except (AttributeError, TypeError, OSError):
+            continue
+        if _PURCHASE_GATE.search(src):
+            gate = PURCHASE
+        elif _READERS_GATE.search(src):
+            gate = RETURN_READERS
+        else:
+            continue
+        for method in route.methods - {"HEAD", "OPTIONS"}:
+            want[(method, route.path)] = gate
+    assert {
+        ("GET", "/api/v1/vendors/{vendor_id}"),
+        ("GET", "/api/v1/vendors/purchase-orders"),
+        ("GET", "/api/v1/vendors/grn"),
+        ("GET", "/api/v1/vendor-rma/{rma_id}"),
+        ("GET", "/api/v1/vendor-returns/{return_id}"),
+        ("GET", "/api/v1/rtv-debit-notes/{debit_note_id}/print"),
+        ("POST", "/api/v1/rtv-debit-notes/issue"),
+    } <= set(want)
+    wrong = {
+        key: rbac.policy_for(*key)["allowed"]
+        for key, gate in want.items()
+        if rbac.policy_for(*key)["allowed"] is not gate
+    }
+    assert not wrong, wrong
+    assert PURCHASE == sorted(PURCHASE_ROLES)
+    assert RETURN_READERS == sorted(_RETURN_READERS)
+    assert vr_router._VENDOR_RETURN_READERS is _RETURN_READERS
+
+
+def test_the_purchase_rule_follows_the_owner_rulings():
+    # D7 / 2026-09-29: who buys, receives and pays suppliers sees what was paid
+    # and to whom; the workshop reads returns without it; the counter never.
+    assert set(PURCHASE_ROLES) == {"ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT"}
+    assert set(_RETURN_READERS) == set(PURCHASE_ROLES) | {"WORKSHOP_STAFF"}

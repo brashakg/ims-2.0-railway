@@ -11,7 +11,7 @@ from datetime import datetime
 import uuid
 from .auth import require_roles
 from ..dependencies import get_db, resolve_store_scope, validate_store_access
-from ..services.cost_mask import PURCHASE_ROLES, mask_vendor_return
+from ..services.cost_mask import PURCHASE_ROLES, RETURN_READERS, mask_vendor_return
 
 # A vendor return mints a debit/credit note -- a financial instrument against a
 # vendor. Restrict create + status changes to the same roles that manage vendors
@@ -24,8 +24,9 @@ _VENDOR_RETURN_ROLES = PURCHASE_ROLES
 # WORKSHOP_STAFF, who logs the defective pair). SALES_STAFF / CASHIER /
 # OPTOMETRIST have no screen and no read. rtv_debit_notes reads use this too.
 # Owner ruling 2026-09-29: WORKSHOP_STAFF sees the item, quantity and reason
-# only -- services/cost_mask strips the prices on every read.
-_VENDOR_RETURN_READERS = (*_VENDOR_RETURN_ROLES, "WORKSHOP_STAFF")
+# only -- services/cost_mask strips the prices on every read. The tuple is
+# cost_mask.RETURN_READERS, so the rbac_policy rows are the same list.
+_VENDOR_RETURN_READERS = RETURN_READERS
 
 router = APIRouter()
 

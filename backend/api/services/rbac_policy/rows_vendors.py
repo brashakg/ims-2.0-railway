@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-from ._core import ACCOUNTS
+from ._core import ACCOUNTS, PURCHASE, RETURN_READERS
 
 ROWS: List[Dict[str, object]] = [
     # --- /api/v1/vendor-portal ---
@@ -38,54 +38,36 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/vendor-returns",
-        "allowed": [
-            "ACCOUNTANT",
-            "ADMIN",
-            "AREA_MANAGER",
-            "STORE_MANAGER",
-            "WORKSHOP_STAFF",
-        ],
+        "allowed": RETURN_READERS,
         "store_scoped": True,
     },
     # Writes = the handler's require_roles(*_VENDOR_RETURN_ROLES).
     {
         "method": "POST",
         "path": "/api/v1/vendor-returns",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendor-returns/",
-        "allowed": [
-            "ACCOUNTANT",
-            "ADMIN",
-            "AREA_MANAGER",
-            "STORE_MANAGER",
-            "WORKSHOP_STAFF",
-        ],
+        "allowed": RETURN_READERS,
         "store_scoped": True,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendor-returns/",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendor-returns/{return_id}",
-        "allowed": [
-            "ACCOUNTANT",
-            "ADMIN",
-            "AREA_MANAGER",
-            "STORE_MANAGER",
-            "WORKSHOP_STAFF",
-        ],
+        "allowed": RETURN_READERS,
         "store_scoped": True,
     },
     {
         "method": "PATCH",
         "path": "/api/v1/vendor-returns/{return_id}/status",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
     # --- /api/v1/vendor-rma (N4 Vendor RMA + credit-note reconciliation) ---
     # An RMA + its vendor credit note are financial instruments against a
@@ -96,61 +78,61 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/vendor-rma",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
         "store_scoped": True,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendor-rma/",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
         "store_scoped": True,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendor-rma",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
         "store_scoped": True,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendor-rma/",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
         "store_scoped": True,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendor-rma/{rma_id}",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
         "store_scoped": True,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendor-rma/{rma_id}/authorize",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
         "store_scoped": True,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendor-rma/{rma_id}/dispatch",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
         "store_scoped": True,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendor-rma/{rma_id}/credit-note",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
         "store_scoped": True,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendor-rma/{rma_id}/reject",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
         "store_scoped": True,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendor-rma/{rma_id}/close",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
         "store_scoped": True,
     },
     # --- /api/v1/rtv-debit-notes (F20 GST debit note ON TOP of an RTV) ---
@@ -158,66 +140,42 @@ ROWS: List[Dict[str, object]] = [
     # returned. Issuing + Tally export are gated to the same vendor/AP role set
     # vendor_returns / vendor_rma use (a cashier can NEVER issue a debit note).
     # F60: GET list/detail/print carry the vendor GSTIN and the note total, so
-    # they go to the Vendor Returns readers (vendor_returns._VENDOR_RETURN_READERS),
+    # they go to the Vendor Returns readers (cost_mask.RETURN_READERS),
     # store-scoped per object in the handler.
     {
         "method": "GET",
         "path": "/api/v1/rtv-debit-notes",
-        "allowed": [
-            "ACCOUNTANT",
-            "ADMIN",
-            "AREA_MANAGER",
-            "STORE_MANAGER",
-            "WORKSHOP_STAFF",
-        ],
+        "allowed": RETURN_READERS,
         "store_scoped": True,
     },
     {
         "method": "GET",
         "path": "/api/v1/rtv-debit-notes/",
-        "allowed": [
-            "ACCOUNTANT",
-            "ADMIN",
-            "AREA_MANAGER",
-            "STORE_MANAGER",
-            "WORKSHOP_STAFF",
-        ],
+        "allowed": RETURN_READERS,
         "store_scoped": True,
     },
     {
         "method": "POST",
         "path": "/api/v1/rtv-debit-notes/issue",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
         "store_scoped": True,
     },
     {
         "method": "GET",
         "path": "/api/v1/rtv-debit-notes/{debit_note_id}",
-        "allowed": [
-            "ACCOUNTANT",
-            "ADMIN",
-            "AREA_MANAGER",
-            "STORE_MANAGER",
-            "WORKSHOP_STAFF",
-        ],
+        "allowed": RETURN_READERS,
         "store_scoped": True,
     },
     {
         "method": "GET",
         "path": "/api/v1/rtv-debit-notes/{debit_note_id}/print",
-        "allowed": [
-            "ACCOUNTANT",
-            "ADMIN",
-            "AREA_MANAGER",
-            "STORE_MANAGER",
-            "WORKSHOP_STAFF",
-        ],
+        "allowed": RETURN_READERS,
         "store_scoped": True,
     },
     {
         "method": "GET",
         "path": "/api/v1/rtv-debit-notes/{debit_note_id}/tally",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
         "store_scoped": True,
     },
     # --- /api/v1/vendors ---
@@ -229,13 +187,13 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/vendors",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
     {"method": "GET", "path": "/api/v1/vendors/", "allowed": "AUTHENTICATED"},
     {
         "method": "POST",
         "path": "/api/v1/vendors/",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
     {
         "method": "GET",
@@ -247,13 +205,13 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/vendors/grn",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
         "store_scoped": True,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendors/grn",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
     # Procurement Phase 2: one-shot express receive for a CLEAN delivery
     # (create + accept + invoice-draft preview + accountant task, server-side).
@@ -263,35 +221,35 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/vendors/grn/express",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendors/grn/{grn_id}",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
         "store_scoped": True,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendors/grn/{grn_id}/accept",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendors/grn/{grn_id}/void",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendors/grn/{grn_id}/escalate",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
     # P1/S2: vendor-first goods-receipt cockpit (open POs + worklists for the
     # receiving screen). Same gate as receiving -- the receiving roles.
     {
         "method": "GET",
         "path": "/api/v1/vendors/goods-receipt/cockpit",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
     # P1/S3: the ops user uploads the mandatory goods-receipt document (vendor
     # invoice/challan) here BEFORE creating the GRN. Same gate as creating the
@@ -299,7 +257,7 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/vendors/grn/upload-doc",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
     # P1/S3: stream the attached goods-receipt document (accountant recon links
     # here). Store-scoped object access inside the handler; the role gate is the
@@ -307,7 +265,7 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/vendors/grn/{grn_id}/document",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
     # Purchase Invoices (first-class AP+ITC; books the payable + ITC ledger).
     # Create/from-grn/book AND reads are accounting actions -> ACCOUNTANT/ADMIN.
@@ -435,46 +393,46 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/vendors/purchase-orders",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
     # Last-paid price lookup for the PO / Buy-Desk form (vendor roles; the
     # endpoint additionally store-scopes each PO it reads).
     {
         "method": "GET",
         "path": "/api/v1/vendors/last-cost",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendors/purchase-orders",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendors/purchase-orders/from-forecast",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendors/purchase-orders/{po_id}",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
     # PO lifecycle timeline (read-only; the endpoint store-scopes the PO like
     # get_po). The purchase roles, same as reading the PO itself (F60).
     {
         "method": "GET",
         "path": "/api/v1/vendors/purchase-orders/{po_id}/timeline",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendors/purchase-orders/{po_id}/cancel",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendors/purchase-orders/{po_id}/send",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
     # F8 PO-vs-GRN variance: dismiss a variance/backorder line with a mandatory
     # justification (single-doc PO $push + one audit row). An accounting-style
@@ -500,12 +458,12 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/vendors/{vendor_id}",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
     {
         "method": "PUT",
         "path": "/api/v1/vendors/{vendor_id}",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
     # F60: bills / debit notes / ledger / payments are what the owner owes a
     # vendor -> ACCOUNTANT/ADMIN, the same gate as /ap-aging (their aggregate).
@@ -563,12 +521,12 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/vendors/{vendor_id}/performance",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendors/{vendor_id}/purchase-history",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
     {
         "method": "GET",
@@ -578,12 +536,12 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/vendors/{vendor_id}/sku-aliases",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
     {
         "method": "DELETE",
         "path": "/api/v1/vendors/{vendor_id}/sku-aliases/{alias_id}",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
     # FIN-11: TDS threshold status + quarterly 26Q/27EQ export
     {

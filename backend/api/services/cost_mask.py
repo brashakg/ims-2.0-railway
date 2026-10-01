@@ -51,6 +51,11 @@ COST_VISIBLE_ROLES = {"SUPERADMIN", *AP_ROLES}
 # and RMA gates ARE this tuple, and the "purchase" context admits exactly it.
 # SUPERADMIN passes every require_roles gate on its own.
 PURCHASE_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
+# Who reads vendor returns and RTV debit notes: the purchase roles plus the
+# Vendor Returns screen's WORKSHOP_STAFF (logs the defective pair), who is shown
+# the item, quantity and reason only (mask_vendor_return / mask_debit_note).
+# Their read gates ARE this tuple.
+RETURN_READERS = (*PURCHASE_ROLES, "WORKSHOP_STAFF")
 # context -> the roles it admits on top of COST_VISIBLE_ROLES.
 _CONTEXT_ROLES = {
     "purchase": set(PURCHASE_ROLES),
