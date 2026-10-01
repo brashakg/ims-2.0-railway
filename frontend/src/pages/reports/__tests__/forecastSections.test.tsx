@@ -159,3 +159,11 @@ describe('each panel keeps the roles /reports/forecast had', () => {
     },
   );
 });
+
+describe('an unknown forecast sub-address', () => {
+  it('goes back to the forecast page (category panel), not an empty shell', async () => {
+    renderPanel('/reports/forecast/anything');
+    expect(await screen.findByText('ZZ Frames', undefined, FIND)).toBeInTheDocument();
+    await expectActivePanelLink(/^Category Forecast$/);
+  });
+});

@@ -97,8 +97,9 @@ export const reportRoutes = (
       />
       {/* Forecast: the page is the shell (one load, header, summary cards,
           panel nav - components/reports/DemandForecast); each panel is a child
-          route. Every panel carries the SAME gate the one-URL page had, so no
-          role is let in or shut out by the split. All three panels sit in one
+          route. The parent forecast gate is THE gate for all three panels (same
+          roles the one-URL page had), so no role is let in or shut out by the
+          split. All three panels sit in one
           chunk (ForecastSections), so switching panels never shows the lazy
           spinner the old useState switch never showed. */}
       <Route
@@ -109,30 +110,12 @@ export const reportRoutes = (
           </ProtectedRoute>
         }
       >
-        <Route
-          index
-          element={
-            <ProtectedRoute allowedRoles={REPORTS_ROLES}>
-              <ForecastCategorySection />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="seasonal"
-          element={
-            <ProtectedRoute allowedRoles={REPORTS_ROLES}>
-              <ForecastSeasonalSection />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="reorder"
-          element={
-            <ProtectedRoute allowedRoles={REPORTS_ROLES}>
-              <ForecastReorderSection />
-            </ProtectedRoute>
-          }
-        />
+        <Route index element={<ForecastCategorySection />} />
+        <Route path="seasonal" element={<ForecastSeasonalSection />} />
+        <Route path="reorder" element={<ForecastReorderSection />} />
+        {/* An unknown sub-address goes back to the forecast page, never an
+            empty shell. */}
+        <Route path="*" element={<Navigate to="/reports/forecast" replace />} />
       </Route>
     </Route>
 
