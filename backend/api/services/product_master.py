@@ -1323,32 +1323,40 @@ def _guard_gtin_attribute(
     it, so one bad cell never blocks a 2,000-row import while still never
     persisting garbage. Empty stays empty in both modes. A valid GTIN is kept
     bare ('4006381 333931' -> '4006381333931'), so one GTIN is one value.
+
+    The `upc` attribute ('UPC (mfr)') is the same kind of code -- a UPC is a
+    GTIN-12 -- and reaches Shopify as the ims.upc metafield and the
+    description's 'UPC Code' row, so it gets the same rule.
     """
     attrs = attributes or {}
-    if "gtin" not in attrs:
-        return attrs
-    raw = attrs["gtin"]
-    if not normalise_candidate(raw):
-        return attrs
-    if is_valid_gtin(raw):
-        return {**attrs, "gtin": normalise_candidate(raw)}
-    reason = classify_gtin(raw)
-    if strict:
-        raise ProductMasterError(
-            f"'{str(raw)[:40]}' is not a valid GTIN ({reason}). A GTIN is 8, 12, "
-            "13 or 14 digits with a valid check digit. Leave it blank if the "
-            "manufacturer barcode is unknown.",
-            status=422,
-            field="gtin",
+    for key in _MANUFACTURER_BARCODE_KEYS:
+        raw = attrs.get(key)
+        if not normalise_candidate(raw):
+            continue
+        if is_valid_gtin(raw):
+            attrs = {**attrs, key: normalise_candidate(raw)}
+            continue
+        reason = classify_gtin(raw)
+        if strict:
+            raise ProductMasterError(
+                f"'{str(raw)[:40]}' is not a valid {key.upper()} ({reason}). A "
+                "GTIN/UPC is 8, 12, 13 or 14 digits with a valid check digit. "
+                "Leave it blank if the manufacturer barcode is unknown.",
+                status=422,
+                field=key,
+            )
+        logger.warning(
+            "[PM] dropping invalid %s on a draft/import row: reason=%s value=%.60r",
+            key,
+            reason,
+            raw,
         )
-    logger.warning(
-        "[PM] dropping invalid gtin on a draft/import row: reason=%s value=%.60r",
-        reason,
-        raw,
-    )
-    cleaned = dict(attrs)
-    cleaned.pop("gtin", None)
-    return cleaned
+        attrs = {k: v for k, v in attrs.items() if k != key}
+    return attrs
+
+
+# The attributes that hold a MANUFACTURER's barcode (validated as GTINs).
+_MANUFACTURER_BARCODE_KEYS = ("gtin", "upc")
 
 
 def assert_gtin_free(code: Any, product_repo, this_product_id: Optional[str]) -> None:

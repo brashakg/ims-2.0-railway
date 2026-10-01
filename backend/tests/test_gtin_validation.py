@@ -229,6 +229,30 @@ def test_draft_door_drops_the_bad_gtin():
     assert "gtin" not in doc["attributes"]
 
 
+def _upc_payload(upc):
+    p = _payload("")
+    p["attributes"] = {**p["attributes"], "upc": upc}
+    return p
+
+
+@pytest.mark.parametrize("junk", ["2000000000015", "TW003HG14", "036000291453"])
+def test_the_upc_attribute_gets_the_gtin_rule(junk):
+    """'UPC (mfr)' is a second manufacturer-barcode box (ims.upc metafield,
+    the description's 'UPC Code' row) that nothing validated: our own 20-29
+    code, a model number or a wrong check digit was saved and published."""
+    from api.services.product_master import ProductMasterError, normalise_payload
+
+    with pytest.raises(ProductMasterError) as exc:
+        normalise_payload(**_upc_payload(junk))
+    assert exc.value.status == 422
+    assert exc.value.field == "upc"
+    assert "upc" not in normalise_payload(force_draft=True, **_upc_payload(junk))[
+        "attributes"
+    ]
+    doc = normalise_payload(**_upc_payload("0360-0029 1452"))
+    assert doc["attributes"]["upc"] == "036000291452"
+
+
 # ---------------------------------------------------------------------------
 # Storage door: CatalogVariantRepository.upsert
 # ---------------------------------------------------------------------------

@@ -375,6 +375,16 @@ class TestGtinAttributeOnTheEditDoor:
         saved = mock_db["products"].find_one({"product_id": pid})
         assert "gtin" not in (saved.get("attributes") or {})
 
+    def test_edit_door_refuses_a_junk_upc(self, mock_db):
+        """The 'UPC (mfr)' attribute is a manufacturer barcode too."""
+        pid = _create("GT-UPC")["product_id"]
+        with pytest.raises(HTTPException) as ei:
+            _update(pid, attributes={"upc": _INTERNAL})
+        assert ei.value.status_code == 422
+        saved = mock_db["products"].find_one({"product_id": pid})
+        assert "upc" not in (saved.get("attributes") or {})
+        _update(pid, attributes={"upc": _UPC_A})
+
     def test_a_saved_gtin_reaches_the_shopify_push(self, mock_db):
         from api.services.shopify_push.product_input import (
             _variants_for_price_push,
