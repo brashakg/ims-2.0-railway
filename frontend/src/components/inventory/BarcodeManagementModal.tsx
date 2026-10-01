@@ -47,8 +47,10 @@ export function BarcodeManagementModal({
     }
   }, [isOpen, currentGtin]);
 
-  // An emptied box on a product that HAS a GTIN removes it (a wrong code,
-  // say the neighbouring frame's box, must not keep going to Shopify/Google).
+  // An emptied box on a product that HAS a GTIN removes it from IMS, so IMS
+  // stops sending it (a wrong code, say the neighbouring frame's box). IMS
+  // never blanks a barcode already on Shopify (decided 2026-10-01): that one
+  // is cleared in Shopify admin.
   const code = barcode.trim();
   const removing = !code && !!currentGtin;
 
@@ -138,7 +140,8 @@ export function BarcodeManagementModal({
           <p className="text-sm text-gray-600">
             The 8, 12, 13 or 14-digit code printed on the maker&apos;s box. It is kept for
             reference and goes to Shopify and Google with the next website push; empty the box to
-            remove a wrong one. IMS scans and
+            remove a wrong one from IMS (a product already on the website keeps its Shopify
+            barcode until it is cleared in Shopify admin). IMS scans and
             labels each unit with its own IMS barcode, minted when the stock is received.
           </p>
         </div>
