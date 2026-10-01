@@ -94,4 +94,38 @@ describe('Goods back on a Shopify refund row', () => {
     expect(banner.textContent).toMatch(/press Goods\s+back/);
     expect(banner.textContent).not.toMatch(/Add them at the receiving shop/);
   });
+
+  it('hands a historical order frame to stock-in, never says it was put back', async () => {
+    // Owner 2026-10-01: an order imported from Shopify's history predates IMS
+    // stock, so Goods back books the frame and a task sends it to stock-in.
+    vi.mocked(refundReviewsApi.goodsBack).mockResolvedValueOnce({
+      review_id: 'open',
+      result: { status: 'stock_in', stock_in_store_id: 'BV-GANGA-01' },
+    } as never);
+    const user = userEvent.setup();
+    render(<RefundReviewsPage />);
+    await screen.findByText('BV-open');
+    await user.click(screen.getAllByRole('button', { name: /Goods back/ })[0]);
+
+    await waitFor(() => expect(toast.success).toHaveBeenCalled());
+    const said = String(vi.mocked(toast.success).mock.calls.at(-1)?.[0]);
+    expect(said).toMatch(/store manager of BV-GANGA-01 to add the frame through stock-in/);
+    expect(said).not.toMatch(/put back in stock/);
+  });
+
+  it('says the same after a confirm that booked a historical frame', async () => {
+    vi.mocked(refundReviewsApi.confirm).mockResolvedValueOnce({
+      review_id: 'open',
+      status: 'POSTED',
+      result: { status: 'credited', restock_applied: true, restock_stock_ids: [], stock_in_task: 'TSK-1' },
+    } as never);
+    const user = userEvent.setup();
+    render(<RefundReviewsPage />);
+    await user.click(await screen.findByRole('button', { name: /Confirm/ }));
+
+    await waitFor(() => expect(toast.success).toHaveBeenCalled());
+    const said = String(vi.mocked(toast.success).mock.calls.at(-1)?.[0]);
+    expect(said).toMatch(/add the frame through stock-in/);
+    expect(said).not.toMatch(/No stock was put back/);
+  });
 });

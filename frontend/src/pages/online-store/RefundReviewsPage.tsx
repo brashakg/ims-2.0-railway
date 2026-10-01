@@ -52,6 +52,13 @@ const STATUS_META: Record<string, { label: string; chip: string }> = {
 
 const OPEN_STATUSES = ['PENDING', 'DISCREPANCY', 'CREDIT_FAILED', 'NO_CUSTOMER'];
 
+// An order imported from Shopify's history predates IMS stock: IMS books its
+// returned frames but never adds a stock row itself (owner 2026-10-01).
+const stockInNote = (store?: string | null) =>
+  'This order predates IMS stock, so IMS added no stock row: a task asks the store manager' +
+  (store ? ` of ${store}` : '') +
+  ' to add the frame through stock-in.';
+
 /** Neutral presentation for a status this build doesn't know (OS-062): before,
  *  an unrecognised value borrowed PENDING's amber 'Awaiting review' chip while
  *  the row offered no actions — claiming work was waiting that could not be
@@ -165,6 +172,8 @@ export default function RefundReviewsPage() {
             restock_store_ids?: string[] | null;
             restock_stock_ids?: string[] | null;
             return_id?: string | null;
+            stock_in_task?: string | null;
+            stock_in_store_id?: string | null;
           };
           // An idempotent re-confirm returns {status:'duplicate'} with NO
           // restock_applied key. Reading that as `false` would pin the red
@@ -179,7 +188,9 @@ export default function RefundReviewsPage() {
             result.restock_store_ids && result.restock_store_ids.length > 0
               ? result.restock_store_ids.join(', ')
               : result.restock_store_id || '';
-          if (result.restock_applied && result.restock_stock_ids?.length === 0) {
+          if (result.stock_in_task) {
+            toast.success(`Credit note posted. ${stockInNote(result.stock_in_store_id)}`);
+          } else if (result.restock_applied && result.restock_stock_ids?.length === 0) {
             // Nothing to put back now: the goods are still with the customer.
             toast.success(
               'Credit note posted. No stock was put back - if the goods physically come back, press Goods back.',
@@ -210,8 +221,13 @@ export default function RefundReviewsPage() {
             );
           }
         } else if (action === 'goods-back') {
-          await refundReviewsApi.goodsBack(review.review_id);
-          toast.success('Goods put back in stock.');
+          const res = await refundReviewsApi.goodsBack(review.review_id);
+          const back = (res?.result ?? {}) as { status?: string; stock_in_store_id?: string | null };
+          toast.success(
+            back.status === 'stock_in'
+              ? `Goods booked back. ${stockInNote(back.stock_in_store_id)}`
+              : 'Goods put back in stock.',
+          );
         } else {
           await refundReviewsApi.reject(review.review_id);
           toast.success('Refund review rejected.');
