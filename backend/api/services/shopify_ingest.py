@@ -369,8 +369,9 @@ def _online_store_id(payload: Dict[str, Any]) -> str:
 def _gst_buyer(payload: Dict[str, Any]) -> Dict[str, str]:
     """The BUYER side of an online order's GST split -- the delivery state
     (the place of supply) and the buyer's GSTIN -- persisted on the order as
-    ``gst_buyer`` so a re-split when a seller hold lifts reads exactly what
-    the booking read."""
+    ``gst_buyer`` so the check that a lifted seller hold leaves the booked
+    tax heads standing (online_fulfillment_route.seller_change) reads exactly
+    what the booking read."""
     cust = payload.get("customer") if isinstance(payload.get("customer"), dict) else {}
     return {
         "state": _delivery_state(payload),
@@ -386,8 +387,9 @@ def _seller_gst_fields(
     """The seller-dependent GST fields of an online order -- place of supply
     (the buyer's delivery state) and, ONLY on a successful split, interstate /
     tax_summary / tax_totals -- from THE place-of-supply split the offline POS
-    uses. ONE rule for the booking and the re-split when a seller hold lifts
-    (reseal_seller_gst). ``buyer`` is ``_gst_buyer``'s dict.
+    uses. ONE rule for the booking and the check that a lifted seller hold
+    leaves the booked tax heads standing (online_fulfillment_route
+    .seller_change). ``buyer`` is ``_gst_buyer``'s dict.
 
     OS-008 follow-up (P2): on a FAILED split the three keys are OMITTED, not
     defaulted to interstate=False / empty tax -- a real bool False would
@@ -420,24 +422,6 @@ def _seller_gst_fields(
             tax_totals=gst_split.get("totals", {}),
         )
     return out
-
-
-def reseal_seller_gst(
-    order: Dict[str, Any], store_doc: Optional[Dict[str, Any]]
-) -> Tuple[Dict[str, Any], Dict[str, str]]:
-    """THE re-split of a routed online order against its shop AS IT IS NOW --
-    run by every door that lifts (or re-routes) a seller hold: Re-map
-    (online_fulfillment_route.reroute_held_order) and clear-hold
-    (routers.online_store_orders). The booking froze interstate / tax_totals /
-    place_of_supply_assumed from the very shop doc the seller check refused;
-    GSTR-1/3B and Tally file the STORED flag while the invoice door splits
-    live, so a hold lifted without this files one tax head and prints the
-    other. Returns ($set, $unset) for the order."""
-    from ..utils.online_gst import order_place_of_supply
-
-    buyer = order.get("gst_buyer") or {"state": order_place_of_supply(order) or ""}
-    fields = _seller_gst_fields(order.get("items") or [], store_doc, buyer)
-    return fields, {k: "" for k in ("interstate", "tax_summary", "tax_totals") if k not in fields}
 
 
 def claim_plan(items: List[Dict[str, Any]], route: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
@@ -724,9 +708,17 @@ def _record_stock_miss(db, order_id, store_id, reason, detail=None) -> None:
             "[SHOPIFY_INGEST] stock-miss hold skipped for %s: %s", order_id, exc
         )
 
-    # ONE task per order (dedupe_ref), store-scoped to the fulfilling store and
-    # best-effort assigned to its STORE_MANAGER; an unassigned/unacked task
-    # climbs the escalation ladder on its own.
+    raise_stock_miss_task(
+        order_id, (order or {}).get("order_number") or order_id, store_id, reason, detail
+    )
+
+
+def raise_stock_miss_task(order_id, order_ref, store_id, reason, detail=None) -> None:
+    """THE stock-miss task: ONE per order (dedupe_ref), store-scoped to the
+    SHORT shop and best-effort assigned to its STORE_MANAGER; an
+    unassigned/unacked task climbs the escalation ladder on its own. Raised
+    by _record_stock_miss, and by a Re-map whose claim is short at another
+    shop than the one already tasked. Fail-soft."""
     try:
         from ..dependencies import get_task_repository, get_user_repository
         from .task_triggers import create_system_task
@@ -741,7 +733,6 @@ def _record_stock_miss(db, order_id, store_id, reason, detail=None) -> None:
         except Exception:  # noqa: BLE001
             assigned = None
 
-        order_ref = (order or {}).get("order_number") or order_id
         expected = claimed = None
         short_at: List[str] = []
         if isinstance(detail, dict):
@@ -1971,8 +1962,8 @@ def ingest_shopify_order(
         # omits them so the heuristic fallback is not frozen out by a
         # definitive interstate=False.
         **seller_gst,
-        # What that split read of the buyer, for the re-split when a seller
-        # hold lifts (reseal_seller_gst).
+        # What that split read of the buyer, for the check that a lifted
+        # seller hold leaves these tax heads standing (seller_change).
         **({"gst_buyer": gst_buyer} if route is not None else {}),
         # Multi-location PR 5: which shop ships (and so bills) this order, how
         # it was chosen, the Shopify fulfillment orders it may fulfil, planned

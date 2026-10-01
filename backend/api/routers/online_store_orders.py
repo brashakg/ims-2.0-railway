@@ -582,6 +582,8 @@ async def remap_online_order(
     `webhook_inbox` ORDER payload. Recovers an order whose first mapping failed
     (or needs a status re-sync). Idempotent: the mapper's order-id guard means a
     re-run never creates a 2nd order -- it returns 'duplicate' + syncs the status.
+    An order booked and held on its seller check or a failed move is re-routed
+    instead (online_fulfillment_route.reroute_held_order), payload or none.
 
     404 when no ORDER webhook payload is on file for this Shopify order id
     (nothing safe to replay -- child-resource payloads such as fulfillments /
@@ -595,7 +597,30 @@ async def remap_online_order(
             status_code=503, detail="Online Store orders unavailable (no DB)"
         )
 
-    payload, webhook_id, topic = _load_last_shopify_payload(db, shopify_order_id)
+    # An order already booked and HELD on its seller check or a failed move
+    # -- or left mid-way by a Re-map that crashed (its lease) -- is re-routed
+    # from its STORED items and a fresh Shopify read: no webhook payload is
+    # needed (the inbox keeps one for 30 days at most), so those holds always
+    # have this door.
+    from ..services.online_fulfillment_route import (
+        map_routed_order,
+        reroutable,
+        reroute_held_order,
+    )
+
+    try:
+        booked = db.get_collection("orders").find_one({"shopify_order_id": str(shopify_order_id)})
+    except Exception:  # noqa: BLE001 - unreadable: the replay below decides
+        booked = None
+    if booked and (reroutable(booked) or booked.get("reroute_lease_at")):
+        try:
+            result = await reroute_held_order(db, booked["order_id"])
+        except Exception as exc:  # noqa: BLE001 - belt-and-braces; it never raises
+            result = {"status": "error", "error": f"Re-route failed: {exc}"}
+        _write_remap_audit(shopify_order_id, result, current_user)
+        return _remap_verdict(shopify_order_id, result)
+
+    payload, _webhook_id, topic = _load_last_shopify_payload(db, shopify_order_id)
     if payload is None:
         raise HTTPException(
             status_code=404,
@@ -617,22 +642,21 @@ async def remap_online_order(
         )
 
     try:
-        from ..services.online_fulfillment_route import map_routed_order
-
         # A legacy topicless row was admitted by the loader ONLY because it is
         # order-shaped (line_items, no parent order_id) -> replay as a create,
-        # through the routing door like the webhook (multi-location PR 5).
-        # An order already booked and HELD on its seller check or a failed
-        # move is re-routed (re-read Shopify, re-claim at the shop that ships
-        # it, re-bill a seller hold) -- the door those holds' text points at.
-        result = await map_routed_order(
-            payload, db, webhook_id=webhook_id, topic=topic or "orders/create", reroute=True
-        )
+        # through the routing door like the webhook (multi-location PR 5). A
+        # human replay is not a Shopify delivery: the stored delivery's
+        # webhook id is in the 30-day dedupe log and would answer 'replayed'.
+        result = await map_routed_order(payload, db, topic=topic or "orders/create")
     except Exception as exc:  # noqa: BLE001 - the mapper is fail-soft; belt-and-braces
         result = {"status": "error", "error": str(exc)}
 
     _write_remap_audit(shopify_order_id, result, current_user)
+    return _remap_verdict(shopify_order_id, result)
 
+
+def _remap_verdict(shopify_order_id: str, result: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """The Re-map door's answer for a mapper or re-route result."""
     # Explicit verdict (OS-011): the mapper fail-softs to {'status':'skipped',
     # 'reason':...} -- which carries NO 'error' key and NO order id, so the old
     # frontend inference read it as a success and toasted 'Order re-mapped into
@@ -728,9 +752,7 @@ async def clear_rx_hold(
     from .orders import order_hold_kinds
     from ..services.online_fulfillment_route import (
         HOLD_CAS,
-        invoice_issued,
-        refund_or_return,
-        reissue_fields,
+        seller_change,
         seller_held,
         stored_seller_problem,
     )
@@ -775,67 +797,44 @@ async def clear_rx_hold(
         update["rx_hold_cleared_note"] = note
     if prescription_id:
         update["rx_hold_cleared_prescription_id"] = prescription_id
-    unset: Dict[str, str] = {}
-    issued = invoice_issued(order, now_dt) if "SELLER" in released else None
-    if issued:
-        # THE ROOT RULE: an issued tax invoice is never re-split, re-dated or
-        # re-numbered -- the hold lifts, the invoice stays as issued.
-        released_message += (
-            f" Its tax invoice {order.get('invoice_number')} was already issued "
-            f"({issued}), so it keeps its number, date and GST split; a change of "
-            "seller needs a credit note and a new invoice through the normal doors."
-        )
-    elif "SELLER" in released:
-        # A credit note, return or queued refund is stamped with the invoice
-        # as booked: re-dated or re-numbered now, the credit note would file
-        # before its invoice (Re-map refuses the same, the one check).
-        why = refund_or_return(db, order)
-        if why:
-            raise HTTPException(
-                status_code=409, detail=f"This seller hold cannot be cleared here: {why}"
-            )
-        # The booking split the GST from the shop doc the seller check refused:
-        # re-split it against the shop as fixed, the ONE re-split Re-map runs
-        # too, so the invoice, GSTR-1/3B and Tally file one tax head.
+    if "SELLER" in released:
+        # THE SIMPLIFIED ROOT RULE: the release never changes the invoice --
+        # number, date, seller or tax heads. A fix that changed how the shop
+        # splits the order's GST (its state or GSTIN) cannot be released:
+        # the invoice door would print one tax head and every return file the
+        # booked one. A credit note and a new booking instead.
         from ..dependencies import get_store_repository
-        from ..services.shopify_ingest import reseal_seller_gst
 
         try:
             store_doc = get_store_repository().find_by_id(order.get("store_id"))
-        except Exception:  # noqa: BLE001 -- unreadable: not provably fixed
+        except Exception:  # noqa: BLE001 -- unreadable: not provably unchanged
             store_doc = None
         if not store_doc:
             raise HTTPException(
-                status_code=503, detail="Could not read the order's shop to re-split its GST"
+                status_code=503, detail="Could not read the order's shop to check its GST split"
             )
-        gst_set, unset = reseal_seller_gst(order, store_doc)
-        update.update(gst_set)
-        # No tax invoice was issued while it was held: the one issued now is
-        # dated now and filed in this month, numbered in this financial year
-        # (THE re-issue rule, Re-map's too).
-        update.update(reissue_fields(order, order.get("store_id"), now_dt))
+        why = seller_change(order, order.get("store_id"), store_doc)
+        if why:
+            raise HTTPException(
+                status_code=409, detail=f"This seller hold cannot be cleared: {why}"
+            )
     # Written only on the order as read (HOLD_CAS, Re-map's own condition):
-    # a Re-map, cancel or print landing on another worker in between would
-    # otherwise be overwritten by a reseal and re-issue against the old shop.
+    # a Re-map or cancel landing on another worker in between (a new hold, a
+    # dead order) is never released behind its back.
     try:
         written = coll.update_one(
             {"order_id": order_id, **{k: order.get(k) for k in HOLD_CAS}},
-            {"$set": update, **({"$unset": unset} if unset else {})},
+            {"$set": update},
         )
     except Exception:  # noqa: BLE001 - surface the failure, don't fake success
         raise HTTPException(
             status_code=503, detail="Could not update the order (database error)"
         )
     if not getattr(written, "matched_count", 0):
-        void = (
-            f" (invoice serial {update['invoice_number']} drawn for it is void)"
-            if "invoice_number" in update
-            else ""
-        )
         raise HTTPException(
             status_code=409,
             detail="The order changed while the hold was being cleared (re-routed, "
-            f"cancelled or invoiced){void} -- reload it and try again.",
+            "cancelled or fulfilled) -- reload it and try again.",
         )
 
     _write_rx_hold_audit(

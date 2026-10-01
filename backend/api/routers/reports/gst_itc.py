@@ -415,8 +415,9 @@ def _order_held_off_returns(db, order) -> dict:
     SAME question, so the returns of one GSTIN never disagree on a held
     order. None for an order never routed (POS, a historical import).
     A seller hold still standing keeps it off too, even once its cause is
-    fixed: its stored split is the booking's until clear-hold or Re-map
-    re-splits and dates it (the order then files in its release month)."""
+    fixed: only the door that lifts it (clear-hold or Re-map) checks the fix
+    leaves the booked tax heads standing. Lifted, the order files under its
+    booked invoice date -- Re-map and clear-hold never change it."""
     from ...services.online_fulfillment_route import stored_seller_problem
 
     return stored_seller_problem(order, _db_store_finder(db))
