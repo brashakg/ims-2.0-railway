@@ -22,13 +22,21 @@
 //     a full screen at /incentive.
 //
 // SALARY GATE (owner ruling 2026-08-10, fully strict, no accountant carve-out):
-// /hr/payroll and /hr/salary-setup render gross_salary / net_pay / the
+// /hr/payroll/* and /hr/salary-setup render gross_salary / net_pay / the
 // Structured-CTC master, so both are now SUPERADMIN + ADMIN only. They used to
 // admit AREA_MANAGER / STORE_MANAGER / ACCOUNTANT, who were stopped only by a
-// backend 403 - a menu item that always refused.
+// backend 403 - a menu item that always refused. The list (SALARY_ROLES) lives
+// in pages/hr/payroll/payrollShared.ts so HRLayout's nav reads the same one.
+//
+// Wave 6 B14: the payroll page's three tabs (Salary Sheet / Advances /
+// Payslips) are sections of the HR module now, one URL each under the layout:
+//   /hr/payroll (the sheet, index) · /hr/payroll/advances · /hr/payroll/payslips
+// The old page never honoured a ?tab= (useState only) and nothing in the app
+// linked it, so there is no legacy link to forward.
 import { lazy } from 'react';
 import { Route, Navigate, useSearchParams } from 'react-router-dom';
 import { ProtectedRoute } from '../components/layout/ProtectedRoute';
+import { SALARY_ROLES } from '../pages/hr/payroll/payrollShared';
 import type { UserRole } from '../types';
 
 const HRLayout = lazy(() => import('../pages/hr/HRLayout').then(m => ({ default: m.HRLayout })));
@@ -37,7 +45,10 @@ const HRLeavePage = lazy(() => import('../pages/hr/HRLeavePage').then(m => ({ de
 const HRLeaderboardPage = lazy(() => import('../pages/hr/HRLeaderboardPage').then(m => ({ default: m.HRLeaderboardPage })));
 const WeekOffSwap = lazy(() => import('../components/hr/WeekOffSwap').then(m => ({ default: m.WeekOffSwap })));
 const ShiftSetup = lazy(() => import('../components/hr/ShiftSetup').then(m => ({ default: m.ShiftSetup })));
-const PayrollDashboard = lazy(() => import('../pages/hr/PayrollDashboard').then(m => ({ default: m.PayrollDashboard })));
+const PayrollLayout = lazy(() => import('../pages/hr/payroll/PayrollLayout').then(m => ({ default: m.PayrollLayout })));
+const SalarySheetSection = lazy(() => import('../pages/hr/payroll/SalarySheetSection').then(m => ({ default: m.SalarySheetSection })));
+const SalaryAdvancesSection = lazy(() => import('../pages/hr/payroll/SalaryAdvancesSection').then(m => ({ default: m.SalaryAdvancesSection })));
+const PayslipsSection = lazy(() => import('../pages/hr/payroll/PayslipsSection').then(m => ({ default: m.PayslipsSection })));
 const SalarySetupPage = lazy(() => import('../pages/hr/SalarySetupPage').then(m => ({ default: m.SalarySetupPage })));
 const PayrollRunPage = lazy(() => import('../pages/hr/PayrollRunPage').then(m => ({ default: m.PayrollRunPage })));
 
@@ -46,8 +57,6 @@ const HR_ROLES: UserRole[] = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANA
 // Shift config is manager-tier, matching the backend require_roles gate (the
 // tab was hidden from ACCOUNTANT on the old page for the same reason).
 const SHIFT_ROLES: UserRole[] = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'];
-// Salary-bearing screens. Owner ruling 2026-08-10 — do not widen.
-const SALARY_ROLES: UserRole[] = ['SUPERADMIN', 'ADMIN'];
 
 // Legacy ?tab= mapper: /hr and /hr?tab=leave land on the section page,
 // carrying every other query param along.
@@ -122,6 +131,22 @@ export const hrRoutes = (
           </ProtectedRoute>
         }
       />
+      {/* Payroll — SUPERADMIN + ADMIN only (SALARY_ROLES). The gate sits ONCE
+          on the subtree: a section only ever renders inside this layout's
+          Outlet, so every payroll address is refused to the same roles the
+          old /hr/payroll refused, and no section can be gated differently. */}
+      <Route
+        path="payroll"
+        element={
+          <ProtectedRoute allowedRoles={SALARY_ROLES}>
+            <PayrollLayout />
+          </ProtectedRoute>
+        }
+      >
+        <Route index element={<SalarySheetSection />} />
+        <Route path="advances" element={<SalaryAdvancesSection />} />
+        <Route path="payslips" element={<PayslipsSection />} />
+      </Route>
     </Route>
 
     {/* Retired tabs → the real screen (see the header note). Both live
@@ -133,15 +158,7 @@ export const hrRoutes = (
     <Route path="hr/attendance" element={<Navigate to="/hr/today" replace />} />
     <Route path="hr/self-service" element={<Navigate to="/my-work" replace />} />
 
-    {/* Salary-bearing screens — SUPERADMIN + ADMIN only. */}
-    <Route
-      path="hr/payroll"
-      element={(
-        <ProtectedRoute allowedRoles={SALARY_ROLES}>
-          <PayrollDashboard />
-        </ProtectedRoute>
-      )}
-    />
+    {/* Salary-bearing screen — SUPERADMIN + ADMIN only. */}
     <Route
       path="hr/salary-setup"
       element={(

@@ -16,9 +16,13 @@ import {
   Link, Boxes, CircleDot, Layers,
   User, Building2, Receipt, Bell, History, Printer,
   Shield, Bot, Award, Sliders, RotateCcw, ToggleLeft, RefreshCw,
+  Store, CreditCard, Settings,
 } from 'lucide-react';
 import type { SettingsTab } from './settingsTypes';
 
+// A row whose role list is exactly ['SUPERADMIN'] is enforced STRICTLY by
+// settingsRoutes (a SuperadminOnly wrapper): ProtectedRoute/hasRole alone would
+// let ADMIN through by URL even though the rail hides the row.
 export const SETTINGS_SECTIONS = [
   { id: 'profile' as SettingsTab, label: 'My Profile', icon: User, description: 'Account settings and preferences', role: ['ALL'] },
   { id: 'business' as SettingsTab, label: 'Business Profile', icon: Building2, description: 'Company info and branding', role: ['SUPERADMIN', 'ADMIN'] },
@@ -49,6 +53,14 @@ export const SETTINGS_SECTIONS = [
   // Backend keys are SUPERADMIN write-only (policy registry), so the tab matches.
   { id: 'shopify-live-sync' as SettingsTab, label: 'Shopify live sync', icon: RefreshCw, description: 'When edited products already on Shopify are re-pushed (IST times, on/off, per-run cap)', role: ['SUPERADMIN'] },
   { id: 'audit-logs' as SettingsTab, label: 'Audit Logs', icon: History, description: 'Activity history and logs', role: ['SUPERADMIN', 'ADMIN'] },
+  // Wave 6 B21: the four editors that used to sit behind a second tab layer
+  // on /settings/system. SUPERADMIN only, matching the backend: GET/PUT
+  // /settings/admin-controls are SUPERADMIN-only, so any other role would see
+  // a page whose save always fails.
+  { id: 'modules' as SettingsTab, label: 'Store Modules', icon: Store, description: 'Which modules each store can use', role: ['SUPERADMIN'] },
+  { id: 'permissions' as SettingsTab, label: 'Role Permissions', icon: Shield, description: 'Permission matrix per role', role: ['SUPERADMIN'] },
+  { id: 'discount-caps' as SettingsTab, label: 'Discount Limits', icon: CreditCard, description: 'Max discount and approval threshold per role', role: ['SUPERADMIN'] },
+  { id: 'rules' as SettingsTab, label: 'Operational Rules', icon: Settings, description: 'Billing, inventory, HR, clinical and security rules', role: ['SUPERADMIN'] },
   { id: 'system' as SettingsTab, label: 'System', icon: Database, description: 'Backup, sync, maintenance', role: ['SUPERADMIN', 'ADMIN'] },
 ];
 
@@ -85,6 +97,10 @@ export const SETTINGS_GROUP_OF: Record<SettingsTab, GroupId> = {
   'feature-toggles': 'system',
   'shopify-live-sync': 'system',
   'audit-logs': 'system',
+  modules: 'system',
+  permissions: 'system',
+  'discount-caps': 'system',
+  rules: 'system',
   system: 'system',
 };
 
