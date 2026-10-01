@@ -1400,9 +1400,10 @@ async def create_purchase_invoice(
     # book -- software cannot read the carton.)
     #
     # A genuine no-order purchase (goods bought over the counter, no PO) has a
-    # way out the UI can actually WALK: the Goods Receipt screen's
-    # Delivery-Challan mode receives without a PO (vendor picker + product
-    # lines), and the receipt it posts is linkable from every billing door.
+    # way out the UI can actually WALK: the Goods Receipt screen's "Bought
+    # without PO" mode (dealer, cost per line, bill photo), whose receipt is
+    # linkable from every billing door and claims no input credit (D14). A
+    # supplier's delivery on a challan keeps the Delivery-Challan mode.
     if not body.grn_id and not body.linked_dc_ids:
         if (
             body.po_id
@@ -1416,11 +1417,7 @@ async def create_purchase_invoice(
                     "message": (
                         "Link the goods receipt for this bill before booking "
                         "it - the quantities have to be tallied before the "
-                        "purchase is final. If the goods arrived without a "
-                        "purchase order, log them as a Delivery Challan on "
-                        "the Goods Receipt screen (tick 'This is a Delivery "
-                        "Challan', pick the vendor, add what arrived), then "
-                        "bill against that receipt."
+                        "purchase is final. " + ap_engine.NO_RECEIPT_WAY_OUT
                     ),
                 },
             )

@@ -248,11 +248,8 @@ async def create_vendor_bill(
                     "message": (
                         "This bill is for goods, so link the goods receipt "
                         "before recording it - the quantities have to be "
-                        "tallied before the purchase is final. If the goods "
-                        "arrived without a purchase order, log them as a "
-                        "Delivery Challan on the Goods Receipt screen (tick "
-                        "'This is a Delivery Challan', pick the vendor, add "
-                        "what arrived), then link that receipt here."
+                        "tallied before the purchase is final. "
+                        + ap_engine.NO_RECEIPT_WAY_OUT
                     ),
                 },
             )
@@ -264,9 +261,10 @@ async def create_vendor_bill(
     # again. Reuse the purchase-invoice guards (imported at call time, like
     # check_period_locked above, so no cross-router import cycle).
     #
-    # A DELIVERY CHALLAN receipt is billable here too (the whole point of the
-    # no-PO receive path: goods bought over the counter get a DC receipt, and
-    # THIS is the screen the accountant records the bill on). The DC takes the
+    # A DELIVERY CHALLAN receipt is billable here too (a supplier's goods that
+    # came on a challan, often with no PO -- THIS is the screen the accountant
+    # records the bill on; a walk-in buy has its own no-credit "Bought without
+    # PO" receipt, D14, billed like a PO receipt below). The DC takes the
     # same one-bill-per-receipt stance as the STANDARD header guard, enforced
     # by CLAIMING the DC (dc_matched) before the bill is written -- so neither
     # a second header bill nor a later consolidated /from-dcs invoice can bill

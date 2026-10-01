@@ -859,8 +859,11 @@ export function GoodsReceiptCockpit() {
                 )}
               </div>
               <p className="text-xs mt-2" style={{ color: 'var(--ink-4)' }}>
-                Goods that arrived with a delivery challan (tax invoice to
-                follow) are logged on the{' '}
+                Goods bought without a PO from a local dealer (tick
+                &lsquo;Bought without PO&rsquo; &mdash; each item&rsquo;s cost and the
+                bill photo; no GST credit is claimed), and goods that arrived
+                with a delivery challan (tax invoice to follow), are logged on
+                the{' '}
                 <Link
                   to="/purchase/grn"
                   className="underline"
@@ -957,7 +960,7 @@ export function GoodsReceiptCockpit() {
                   style={{ color: 'var(--ink-4)' }}
                   onClick={() => setShowClassicPicker(true)}
                 >
-                  Receive without a PO / Delivery Challan
+                  Bought without PO / Delivery Challan
                 </button>
               </div>
             )}
