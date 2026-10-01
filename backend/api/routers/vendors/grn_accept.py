@@ -5,7 +5,7 @@ from ._shared import (
     HTTPException,
     List,
     Optional,
-    _VENDOR_ROLES,
+    _RECEIVE_ROLES,
     _get_db,
     _pm,
     can_access_store_scoped,
@@ -43,7 +43,7 @@ from .grn_accept_lock import (
 
 @router.post("/grn/{grn_id}/accept")
 async def accept_grn(
-    grn_id: str, current_user: dict = Depends(require_roles(*_VENDOR_ROLES))
+    grn_id: str, current_user: dict = Depends(require_roles(*_RECEIVE_ROLES))
 ):
     """Post a goods-receipt note: mint serialized stock for the accepted units,
     advance the PO to PARTIALLY_RECEIVED / RECEIVED, and write an audit trail.
@@ -81,7 +81,7 @@ async def _accept_grn_impl(grn_id: str, current_user: dict) -> dict:
     store-scope guard, the PENDING/PARTIALLY_ACCEPTED status gate, idempotent
     per-(grn, line) stock minting, PO receipt math and the audit trail all run
     here unchanged for both callers. Callers pass the authenticated
-    ``current_user`` their own ``require_roles(*_VENDOR_ROLES)`` gate produced.
+    ``current_user`` their own ``require_roles(*_RECEIVE_ROLES)`` gate produced.
     """
     grn_repo = get_grn_repository()
     stock_repo = get_stock_repository()
