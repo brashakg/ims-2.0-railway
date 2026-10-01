@@ -181,9 +181,11 @@ def _order_id(resp):
 # ---------------------------------------------------------------------------
 
 
-def test_scanned_line_sells_that_unit_and_its_label_finds_the_order(client, till):
+def test_scanned_line_sells_that_unit_and_its_label_finds_the_order(client, till, caplog):
     r = _sell(client, [_line(stock_id=UNIT_B["stock_id"])])
     assert r.status_code in (200, 201), r.text
+    # Claimed before the save; the after-save pass must not cry "reconcile".
+    assert "NOT SELLABLE" not in caplog.text
     order_id = _order_id(r)
     assert order_id
 
@@ -260,6 +262,97 @@ def test_typed_line_before_a_scanned_line_sells_both_units(client, till):
     order_id = _order_id(r)
     assert _unit(till, "SU-A")["order_id"] == order_id
     assert _unit(till, "SU-B")["status"] == "SOLD" and _unit(till, "SU-B")["order_id"] == order_id
+
+
+def _till2_sells_su_b_after_till1s_check(client, monkeypatch, door="create"):
+    """Run till 2's whole SU-B sale right after till 1's stock check passes;
+    returns a list that then holds till 2's response. `door` is the orders
+    module whose check is raced (create, or items for an added line)."""
+    import importlib
+
+    from fastapi.testclient import TestClient
+
+    door_mod = importlib.import_module("api.routers.orders." + door)
+
+    real_gate = door_mod._assert_serialized_stock_available
+    till2 = []
+
+    def gate_then_till2_sells(items, store_id):
+        real_gate(items, store_id)
+        if not till2:  # only inside till 1's request
+            till2.append(None)
+            till2[0] = TestClient(client.app).post(
+                "/api/v1/orders",
+                json={"customer_id": "cust-till", "items": [_line(stock_id="SU-B")]},
+                headers=_token(["SUPERADMIN"]),
+            )
+
+    monkeypatch.setattr(door_mod, "_assert_serialized_stock_available", gate_then_till2_sells)
+    return till2
+
+
+def _order_ids(till):
+    return [o["order_id"] for o in till["db"].get_collection("orders").find({}, {"order_id": 1})]
+
+
+def test_two_tills_racing_for_one_scanned_unit_bill_it_once(client, till, monkeypatch):
+    """TSU-8: till 1's check passes, then till 2 sells the same scanned unit
+    (a reprinted duplicate label) before till 1 saves. Till 1 must get a 409
+    with no bill -- not a second tax invoice that took no unit off stock."""
+    till2 = _till2_sells_su_b_after_till1s_check(client, monkeypatch)
+    till1 = _sell(client, [_line(stock_id="SU-B")])
+
+    assert till2[0].status_code in (200, 201), till2[0].text
+    assert till1.status_code == 409, till1.text
+    assert "su-b" in till1.text.lower(), till1.text
+    assert _order_ids(till) == [_order_id(till2[0])]  # one bill
+    assert _unit(till, "SU-B")["order_id"] == _order_id(till2[0])
+    assert _unit(till, "SU-A")["status"] == "AVAILABLE"
+
+
+def test_a_lost_race_gives_back_the_units_already_claimed(client, till, monkeypatch):
+    """TSU-8: till 1 bills SU-A and SU-B and loses SU-B to till 2. SU-A, which
+    till 1 had already claimed, goes back on the shelf -- not SOLD to a bill
+    that does not exist."""
+    till2 = _till2_sells_su_b_after_till1s_check(client, monkeypatch)
+    till1 = _sell(client, [_line(stock_id="SU-A"), _line(stock_id="SU-B")])
+
+    assert till1.status_code == 409, till1.text
+    assert _order_ids(till) == [_order_id(till2[0])]
+    a = _unit(till, "SU-A")
+    assert a["status"] == "AVAILABLE" and not a.get("order_id"), a
+
+
+def test_a_bill_that_fails_to_save_gives_back_its_scanned_unit(client, till, monkeypatch):
+    def save_fails(*_a, **_k):
+        raise RuntimeError("insert failed")
+
+    monkeypatch.setattr(till["orders"], "create_unique", save_fails)
+    r = _sell(client, [_line(stock_id="SU-B")])
+    assert r.status_code == 500, r.text
+    b = _unit(till, "SU-B")
+    assert b["status"] == "AVAILABLE" and not b.get("order_id"), b
+
+
+def test_a_scanned_line_added_to_a_draft_is_claimed_before_the_save(
+    client, till, monkeypatch
+):
+    """The add-line door has the same check-then-save gap: losing SU-B to
+    another till after the check is a 409, and the draft keeps its one line."""
+    first = _sell(client, [_line()])  # a draft with SU-A on it
+    assert first.status_code in (200, 201), first.text
+    order_id = _order_id(first)
+
+    till2 = _till2_sells_su_b_after_till1s_check(client, monkeypatch, door="items")
+    added = client.post(
+        f"/api/v1/orders/{order_id}/items",
+        json=_line(stock_id="SU-B"),
+        headers=_token(["SUPERADMIN"]),
+    )
+    assert till2[0].status_code in (200, 201), till2[0].text
+    assert added.status_code == 409, added.text
+    assert len(_order(till, order_id)["items"]) == 1
+    assert _unit(till, "SU-B")["order_id"] == _order_id(till2[0])
 
 
 def test_typed_line_cannot_oversell_past_the_scanned_unit(client, till):

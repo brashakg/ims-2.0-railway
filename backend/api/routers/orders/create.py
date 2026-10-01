@@ -40,8 +40,10 @@ from .numbering import (
 from .stock import (
     _assert_serialized_stock_available,
     _canonical_pid,
+    _claim_scanned_units,
     _lens_reservation_key,
     _mark_units_sold,
+    _release_claimed_units,
     _resolve_billable_product,
     _resolve_product_doc,
 )
@@ -1026,7 +1028,14 @@ async def create_order(
             ],
         }
 
+        claimed_units: set = set()
         try:
+            # Scanned units are claimed (atomic) BEFORE the save: a till that
+            # lost its unit to another till since the gate gets a 409 here, and
+            # no bill exists. The release below gives back the lens cells.
+            claimed_units = _claim_scanned_units(
+                precomputed_order_id, items_data, store_id
+            )
             # P3-B: order_number carries a UNIQUE sparse index. Under
             # concurrency two creates can mint the same value and the loser
             # hits a Mongo E11000 -- which previously 500'd. create_unique
@@ -1043,11 +1052,13 @@ async def create_order(
             # Order persist failed AFTER reservations succeeded -- run
             # the compensating release so the cells don't leak.
             logger.error(
-                "[ORDERS] order_repo.create failed; releasing %d lens "
+                "[ORDERS] order not saved (%s); releasing %d lens "
                 "reservations for order %s",
+                create_exc,
                 len(lens_reservations),
                 precomputed_order_id,
             )
+            _release_claimed_units(precomputed_order_id, claimed_units)
             try:
                 from ...services.lens_stock_hook import release_for_cancel
 
@@ -1064,6 +1075,8 @@ async def create_order(
                         pass  # fail-soft compensating action
             except Exception:  # noqa: BLE001
                 pass
+            if isinstance(create_exc, HTTPException):
+                raise  # the claim's 409 (unit sold on another bill)
             raise HTTPException(
                 status_code=500,
                 detail="Failed to create order: {0}".format(create_exc),
@@ -1114,7 +1127,7 @@ async def create_order(
             # collide across orders). Fail-soft: a stock-side failure logs and
             # never blocks the POS sale - bad stock data must not break revenue.
             try:
-                _mark_units_sold(created_order_id, items_data, store_id)
+                _mark_units_sold(created_order_id, items_data, store_id, claimed_units)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[STOCK] mark_units_sold failed: %s", exc)
 
@@ -1195,6 +1208,7 @@ async def create_order(
             # retried request is indistinguishable from the original create.
             return _order_create_response(created)
 
+        _release_claimed_units(precomputed_order_id, claimed_units)
         raise HTTPException(status_code=500, detail="Failed to create order")
 
     return {
