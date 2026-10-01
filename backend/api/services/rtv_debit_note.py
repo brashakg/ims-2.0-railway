@@ -863,7 +863,7 @@ class DebitNoteEngine:
                 "message": f"{name} has no GST number for shop {store_id}, so no "
                 "debit note was issued. Add the company's registration for the "
                 "shop's state in Organization (left menu) or correct the shop's state "
-                "or GSTIN (Settings, stores).",
+                "or GSTIN in Organization (left menu).",
             }
 
         # P1: resolve the source lines + enrich each with product-derived GST

@@ -574,7 +574,7 @@ async def go_live_checklist(current_user: dict = Depends(require_roles("ADMIN"))
             if active_stores == 0
             else f"{active_stores} active store(s)."
         ),
-        "/settings?tab=stores",
+        "/organization",
     )
 
     # 2. Stores missing a GSTIN
@@ -597,7 +597,7 @@ async def go_live_checklist(current_user: dict = Depends(require_roles("ADMIN"))
                 if stores_no_gstin == 0
                 else f"{stores_no_gstin} store(s) have no GSTIN — required on a GST tax invoice."
             ),
-            "/settings?tab=stores",
+            "/organization",
         )
 
     # 2b. A shop whose record disagrees with its registration. The GSTIN
@@ -637,7 +637,7 @@ async def go_live_checklist(current_user: dict = Depends(require_roles("ADMIN"))
                     else "Bills, returns and orders follow each store's GSTIN, not its "
                     "declared state -- fix these records: " + "; ".join(off[:5])
                 ),
-                "/settings?tab=stores",
+                "/organization",
             )
         except Exception:
             add(
@@ -646,7 +646,7 @@ async def go_live_checklist(current_user: dict = Depends(require_roles("ADMIN"))
                 "WARN",
                 0,
                 "Could not read the stores and companies to check this.",
-                "/settings?tab=stores",
+                "/organization",
             )
 
     # 3. Staff logins (active, non-superadmin/admin — someone to run a till)

@@ -1199,7 +1199,7 @@ def _bill_recipient(
                 else (
                     (
                         f"shop {shop.get('store_id')} has no company set "
-                        "(Settings, stores)"
+                        "in Organization (left menu)"
                         if shop.get("store_id")
                         else "pick the shop it is for (top bar)"
                     )
@@ -1257,7 +1257,7 @@ def _bill_recipient(
                 + (f"its own ({own}) is not one of {name}'s, and " if own else "")
                 + f"{name} holds none for the shop's state "
                 f"({ov.state_name(state) or 'not set'}). Correct the shop's "
-                "state or GSTIN (Settings, stores), or add the company's "
+                "state or GSTIN in Organization (left menu), or add the company's "
                 "registration for that state in Organization (left menu)"
             )
         else:
