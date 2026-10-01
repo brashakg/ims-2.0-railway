@@ -27,6 +27,7 @@ import {
   FileText,
   Loader2,
   Package,
+  Printer,
   Upload,
   X,
 } from 'lucide-react';
@@ -41,6 +42,7 @@ import type {
 import { useToast } from '../../context/ToastContext';
 import { PurchaseStatusChip } from '../../components/purchase/PurchaseStatusChip';
 import { AttachmentZone } from './AttachmentZone';
+import { UnitLabelsModal } from '../../components/labels/UnitLabelsModal';
 
 // ---- Two-step fallback contract (cockpit opens its classic form with this) --
 
@@ -179,6 +181,8 @@ export function ExpressReceivePanel({
   const toast = useToast();
 
   const [stage, setStage] = useState<PanelStage>({ kind: 'steps', step: 1 });
+  // F26: after the box is on the shelf, its units' labels (one per piece).
+  const [showLabels, setShowLabels] = useState(false);
 
   // ---- Step 1: bill first ----------------------------------------------------
   const [upload, setUpload] = useState<UploadDocResult | null>(null);
@@ -466,13 +470,25 @@ export function ExpressReceivePanel({
                 Bill total: <span className="font-medium">{fmtMoney(total)}</span>
               </p>
             )}
-            <div className="flex gap-3 mt-4">
+            <div className="flex gap-3 mt-4 flex-wrap">
+              <button type="button" className="btn" onClick={() => setShowLabels(true)}>
+                <Printer className="w-4 h-4" />
+                Print labels
+              </button>
               <button type="button" className="btn accent" onClick={onReceived}>
                 Done
               </button>
             </div>
           </div>
         </div>
+        {showLabels && (
+          <UnitLabelsModal
+            grnId={r.grn_id}
+            title="Print stock labels?"
+            subtitle={`Receipt ${r.grn_number}: one label per piece put on the shelf.`}
+            onClose={() => setShowLabels(false)}
+          />
+        )}
       </div>
     );
   }
