@@ -218,6 +218,14 @@ ROWS: List[Dict[str, object]] = [
         "allowed": "AUTHENTICATED",
         "store_scoped": True,
     },
+    # One shop's reorder level (owner ruling D12): store / area managers
+    # their own shops (the handler's validate_store_access), admins any shop.
+    {
+        "method": "PUT",
+        "path": "/api/v1/inventory/reorder-levels/{product_id}",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER", "SUPERADMIN"],
+        "store_scoped": True,
+    },
     # Movements ledger (Movements tab): merged GRN/order/transfer event feed.
     # Mirrors the /inventory/stock row -- any authenticated role may read its
     # own store's ledger; store_scoped stops cross-store reads via ?store_id=.
@@ -263,6 +271,16 @@ ROWS: List[Dict[str, object]] = [
         "method": "GET",
         "path": "/api/v1/inventory/sell-through-analysis",
         "allowed": "AUTHENTICATED",
+    },
+    # F46: the till's stock badge + cart warning -- per-product sellable
+    # count, asked of the oversell guard, at the store in the caller's
+    # sign-in token (where create_order binds the guard; no ?store_id). Any
+    # POS role reads it; store_scoped: only ever the caller's own store.
+    {
+        "method": "GET",
+        "path": "/api/v1/inventory/sellable",
+        "allowed": "AUTHENTICATED",
+        "store_scoped": True,
     },
     {
         # Brand-wise KPI rollup for the Inventory Insights tab (2026-07-05).

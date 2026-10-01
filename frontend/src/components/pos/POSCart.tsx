@@ -8,6 +8,7 @@
 
 import { ShoppingCart, X } from 'lucide-react';
 import { usePOSStore, type CartLineItem } from '../../stores/posStore';
+import type { SellableStock } from '../../services/api/inventory';
 
 /** Next free pair label for a cart ("Pair 1", "Pair 2", …). Gaps left by a
     removed pair are reused, so labels stay small and stable. */
@@ -18,6 +19,18 @@ export function nextPairId(cart: { pair_id?: string }[]): string {
   return `Pair ${n}`;
 }
 
+/** F46: the warning a cart line carries when this shop cannot sell it, or
+ *  not that many. `sellable` is the oversell guard's own count (null = the
+ *  guard does not gate the line; undefined = not known yet -> no warning);
+ *  `wanted` is every line of that product added up, as the guard sums them.
+ *  A WARNING only: the guard at Complete sale is what refuses the sale. */
+export function stockWarning(sellable: number | null | undefined, wanted: number): string | null {
+  if (typeof sellable !== 'number' || wanted <= sellable) return null;
+  return sellable <= 0
+    ? 'Not in stock at this shop - the sale will be refused'
+    : `Only ${sellable} in stock at this shop`;
+}
+
 /** `onOpenDiscount` is OPTIONAL on purpose. The classic surface opens the
  *  discount modal from its review step, so it passes nothing and its cart is
  *  byte-identical to before. The new one-screen surfaces have no review step -
@@ -25,10 +38,21 @@ export function nextPairId(cart: { pair_id?: string }[]): string {
  *  Discount control. */
 export function CartSidebar({
   onOpenDiscount,
+  stock,
 }: {
   onOpenDiscount?: (line: CartLineItem) => void;
+  /** F46: this shop's sellable counts for the cart lines (useSellableStock). */
+  stock?: SellableStock;
 } = {}) {
   const store = usePOSStore();
+  // Lines add up under the id the guard sums them by, so a line picked by its
+  // _id and the same product scanned count as one product, as at Complete sale.
+  const canonOf = (pid: string) => stock?.canonical?.[pid] || pid;
+  const wantedByProduct = new Map<string, number>();
+  for (const i of store.cart || []) {
+    const key = canonOf(i.product_id);
+    wantedByProduct.set(key, (wantedByProduct.get(key) || 0) + i.quantity);
+  }
   const opticalCount = (store.cart || []).filter((i) => i.is_optical).length;
   const pairIds = Array.from(
     new Set((store.cart || []).map((i) => i.pair_id).filter(Boolean) as string[])
@@ -97,197 +121,185 @@ export function CartSidebar({
             Empty cart
           </div>
         )}
-        {(store.cart || []).map((item) => (
-          <div
-            key={item.id}
-            style={{
-              background: 'var(--surface)',
-              border: '1px solid var(--line)',
-              borderRadius: 8,
-              padding: 10,
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between' }}>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <p
-                  style={{
-                    margin: 0,
-                    fontSize: 13,
-                    fontWeight: 500,
-                    color: 'var(--ink)',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  {item.name}
-                </p>
-                <p style={{ margin: '2px 0 0', fontSize: 11, color: 'var(--ink-4)' }}>{item.brand}</p>
-                {item.lens_details && (
-                  <p style={{ margin: '2px 0 0', fontSize: 11, color: 'var(--info)' }}>
-                    {item.lens_details.type}
-                  </p>
-                )}
-              </div>
-              <button
-                onClick={() => store.removeFromCart(item.id)}
-                className="btn icon ghost sm"
-                style={{ marginLeft: 6, minWidth: 44, minHeight: 44 }}
-                aria-label={`Remove ${item.name}`}
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            </div>
+        {(store.cart || []).map((item) => {
+          const warning = stockWarning(
+            stock?.sellable[item.product_id],
+            wantedByProduct.get(canonOf(item.product_id)) || 0,
+          );
+          return (
             <div
+              key={item.id}
               style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                marginTop: 8,
+                background: 'var(--surface)',
+                border: '1px solid var(--line)',
+                borderRadius: 8,
+                padding: 10,
               }}
             >
-              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                {/* 44px minimum: these run on shop iPads. They were 22x22 —
-                    half a fingertip — on every surface. */}
-                <button
-                  onClick={() => store.updateQuantity(item.id, item.quantity - 1)}
-                  style={{
-                    minWidth: 44,
-                    minHeight: 44,
-                    borderRadius: 6,
-                    border: '1px solid var(--line-strong)',
-                    background: 'var(--surface)',
-                    fontFamily: 'var(--font-mono)',
-                    fontSize: 14,
-                    cursor: 'pointer',
-                  }}
-                  aria-label="Decrease quantity"
-                >
-                  −
-                </button>
-                <input
-                  type="number"
-                  min="1"
-                  max="99"
-                  value={item.quantity}
-                  aria-label={`Quantity for ${item.name}`}
-                  onChange={(e) => {
-                    const v = parseInt(e.target.value) || 1;
-                    store.updateQuantity(item.id, Math.max(1, Math.min(99, v)));
-                  }}
-                  onFocus={(e) => e.target.select()}
-                  style={{
-                    width: 44,
-                    minHeight: 44,
-                    textAlign: 'center',
-                    fontFamily: 'var(--font-mono)',
-                    fontSize: 13,
-                    border: '1px solid var(--line-strong)',
-                    borderRadius: 6,
-                    padding: '2px 4px',
-                    background: 'var(--surface)',
-                    color: 'var(--ink)',
-                  }}
-                />
-                <button
-                  onClick={() => store.updateQuantity(item.id, item.quantity + 1)}
-                  style={{
-                    minWidth: 44,
-                    minHeight: 44,
-                    borderRadius: 6,
-                    border: '1px solid var(--line-strong)',
-                    background: 'var(--surface)',
-                    fontFamily: 'var(--font-mono)',
-                    fontSize: 14,
-                    cursor: 'pointer',
-                  }}
-                  aria-label="Increase quantity"
-                >
-                  +
-                </button>
-              </div>
-              <div style={{ textAlign: 'right' }}>
-                {item.discount_percent > 0 && (
-                  <span style={{ fontSize: 11, color: 'var(--ok)', marginRight: 6 }}>
-                    −{item.discount_percent}%
-                  </span>
-                )}
-                <span
-                  className="figure"
-                  style={{
-                    fontSize: 13,
-                    color: 'var(--ink)',
-                  }}
-                >
-                  ₹{Math.round(item.line_total).toLocaleString('en-IN')}
-                </span>
-              </div>
-            </div>
-            {onOpenDiscount && (
-              <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 8 }}>
-                {/* HQ-OFFER GUARD, mirroring the classic surface (POSLayout's
-                    review table). An item already discounted by HQ - offer_price
-                    below MRP - takes NO further store discount: the order-create
-                    door refuses it with a 403 for non-admins, and for an ADMIN it
-                    does NOT refuse, which would sell below the HQ floor. Either
-                    way the control must not be offerable. Without this the
-                    cashier quotes a price, takes the cash, and only then finds
-                    the sale cannot be saved. */}
-                {item.offer_price && item.offer_price < item.mrp ? (
-                  <span
-                    title="Already discounted by HQ (offer below MRP) — no further store discount"
+              <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between' }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <p
                     style={{
-                      minHeight: 44,
-                      padding: '0 10px',
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      borderRadius: 6,
-                      fontSize: 11,
-                      border: '1px solid var(--line)',
-                      background: 'var(--surface-2, #f4f4f2)',
-                      color: 'var(--ink-3)',
-                      cursor: 'not-allowed',
+                      margin: 0,
+                      fontSize: 13,
+                      fontWeight: 500,
+                      color: 'var(--ink)',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
                     }}
                   >
-                    HQ offer — no discount
-                  </span>
-                ) : (
+                    {item.name}
+                  </p>
+                  <p style={{ margin: '2px 0 0', fontSize: 11, color: 'var(--ink-4)' }}>{item.brand}</p>
+                  {item.lens_details && (
+                    <p style={{ margin: '2px 0 0', fontSize: 11, color: 'var(--info)' }}>
+                      {item.lens_details.type}
+                    </p>
+                  )}
+                  {warning && (
+                    <p
+                      role="alert"
+                      style={{
+                        margin: '4px 0 0',
+                        padding: '2px 6px',
+                        borderRadius: 4,
+                        fontSize: 11,
+                        fontWeight: 500,
+                        color: 'var(--err)',
+                        background: 'var(--err-50)',
+                      }}
+                    >
+                      {warning}
+                    </p>
+                  )}
+                </div>
                 <button
-                  type="button"
-                  onClick={() => onOpenDiscount(item)}
-                  style={{
-                    minHeight: 44,
-                    padding: '0 10px',
-                    borderRadius: 6,
-                    fontSize: 11,
-                    fontWeight: 500,
-                    cursor: 'pointer',
-                    border: '1px solid var(--line)',
-                    background: 'var(--surface)',
-                    color: 'var(--ink-2)',
-                  }}
+                  onClick={() => store.removeFromCart(item.id)}
+                  className="btn icon ghost sm"
+                  style={{ marginLeft: 6, minWidth: 44, minHeight: 44 }}
+                  aria-label={`Remove ${item.name}`}
                 >
-                  {item.discount_percent > 0 ? `Discount ${item.discount_percent}%` : 'Discount'}
+                  <X className="w-3.5 h-3.5" />
                 </button>
-                )}
-                {item.discount_percent > 0 && item.discount_reason && (
-                  <span style={{ fontSize: 11, color: 'var(--ink-3)' }} title={item.discount_reason}>
-                    {item.discount_reason.slice(0, 28)}
-                  </span>
-                )}
               </div>
-            )}
-            {/* PAIR LINKING (owner spec 4): one bill can carry several
-                Rx+frame PAIRS for the same customer. Shown only when the cart
-                actually holds more than one optical line — a single-pair sale
-                (the common case) sees no extra chrome. */}
-            {item.is_optical && opticalCount > 1 && (
-              <div style={{ marginTop: 6, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                {pairIds.map((pid) => (
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  marginTop: 8,
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                  {/* 44px minimum: these run on shop iPads. They were 22x22 —
+                      half a fingertip — on every surface. */}
                   <button
-                    key={pid}
+                    onClick={() => store.updateQuantity(item.id, item.quantity - 1)}
+                    style={{
+                      minWidth: 44,
+                      minHeight: 44,
+                      borderRadius: 6,
+                      border: '1px solid var(--line-strong)',
+                      background: 'var(--surface)',
+                      fontFamily: 'var(--font-mono)',
+                      fontSize: 14,
+                      cursor: 'pointer',
+                    }}
+                    aria-label="Decrease quantity"
+                  >
+                    −
+                  </button>
+                  <input
+                    type="number"
+                    min="1"
+                    max="99"
+                    value={item.quantity}
+                    aria-label={`Quantity for ${item.name}`}
+                    onChange={(e) => {
+                      const v = parseInt(e.target.value) || 1;
+                      store.updateQuantity(item.id, Math.max(1, Math.min(99, v)));
+                    }}
+                    onFocus={(e) => e.target.select()}
+                    style={{
+                      width: 44,
+                      minHeight: 44,
+                      textAlign: 'center',
+                      fontFamily: 'var(--font-mono)',
+                      fontSize: 13,
+                      border: '1px solid var(--line-strong)',
+                      borderRadius: 6,
+                      padding: '2px 4px',
+                      background: 'var(--surface)',
+                      color: 'var(--ink)',
+                    }}
+                  />
+                  <button
+                    onClick={() => store.updateQuantity(item.id, item.quantity + 1)}
+                    style={{
+                      minWidth: 44,
+                      minHeight: 44,
+                      borderRadius: 6,
+                      border: '1px solid var(--line-strong)',
+                      background: 'var(--surface)',
+                      fontFamily: 'var(--font-mono)',
+                      fontSize: 14,
+                      cursor: 'pointer',
+                    }}
+                    aria-label="Increase quantity"
+                  >
+                    +
+                  </button>
+                </div>
+                <div style={{ textAlign: 'right' }}>
+                  {item.discount_percent > 0 && (
+                    <span style={{ fontSize: 11, color: 'var(--ok)', marginRight: 6 }}>
+                      −{item.discount_percent}%
+                    </span>
+                  )}
+                  <span
+                    className="figure"
+                    style={{
+                      fontSize: 13,
+                      color: 'var(--ink)',
+                    }}
+                  >
+                    ₹{Math.round(item.line_total).toLocaleString('en-IN')}
+                  </span>
+                </div>
+              </div>
+              {onOpenDiscount && (
+                <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 8 }}>
+                  {/* HQ-OFFER GUARD, mirroring the classic surface (POSLayout's
+                      review table). An item already discounted by HQ - offer_price
+                      below MRP - takes NO further store discount: the order-create
+                      door refuses it with a 403 for non-admins, and for an ADMIN it
+                      does NOT refuse, which would sell below the HQ floor. Either
+                      way the control must not be offerable. Without this the
+                      cashier quotes a price, takes the cash, and only then finds
+                      the sale cannot be saved. */}
+                  {item.offer_price && item.offer_price < item.mrp ? (
+                    <span
+                      title="Already discounted by HQ (offer below MRP) — no further store discount"
+                      style={{
+                        minHeight: 44,
+                        padding: '0 10px',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        borderRadius: 6,
+                        fontSize: 11,
+                        border: '1px solid var(--line)',
+                        background: 'var(--surface-2, #f4f4f2)',
+                        color: 'var(--ink-3)',
+                        cursor: 'not-allowed',
+                      }}
+                    >
+                      HQ offer — no discount
+                    </span>
+                  ) : (
+                  <button
                     type="button"
-                    onClick={() => store.setLinePair(item.id, item.pair_id === pid ? null : pid)}
+                    onClick={() => onOpenDiscount(item)}
                     style={{
                       minHeight: 44,
                       padding: '0 10px',
@@ -296,50 +308,84 @@ export function CartSidebar({
                       fontWeight: 500,
                       cursor: 'pointer',
                       border: '1px solid var(--line)',
-                      background: item.pair_id === pid ? 'var(--ink)' : 'var(--surface)',
-                      color: item.pair_id === pid ? '#fff' : 'var(--ink-2)',
+                      background: 'var(--surface)',
+                      color: 'var(--ink-2)',
                     }}
                   >
-                    {pid}
+                    {item.discount_percent > 0 ? `Discount ${item.discount_percent}%` : 'Discount'}
                   </button>
-                ))}
-                <button
-                  type="button"
-                  onClick={() => store.setLinePair(item.id, nextPairId(store.cart || []))}
+                  )}
+                  {item.discount_percent > 0 && item.discount_reason && (
+                    <span style={{ fontSize: 11, color: 'var(--ink-3)' }} title={item.discount_reason}>
+                      {item.discount_reason.slice(0, 28)}
+                    </span>
+                  )}
+                </div>
+              )}
+              {/* PAIR LINKING (owner spec 4): one bill can carry several
+                  Rx+frame PAIRS for the same customer. Shown only when the cart
+                  actually holds more than one optical line — a single-pair sale
+                  (the common case) sees no extra chrome. */}
+              {item.is_optical && opticalCount > 1 && (
+                <div style={{ marginTop: 6, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  {pairIds.map((pid) => (
+                    <button
+                      key={pid}
+                      type="button"
+                      onClick={() => store.setLinePair(item.id, item.pair_id === pid ? null : pid)}
+                      style={{
+                        minHeight: 44,
+                        padding: '0 10px',
+                        borderRadius: 6,
+                        fontSize: 11,
+                        fontWeight: 500,
+                        cursor: 'pointer',
+                        border: '1px solid var(--line)',
+                        background: item.pair_id === pid ? 'var(--ink)' : 'var(--surface)',
+                        color: item.pair_id === pid ? '#fff' : 'var(--ink-2)',
+                      }}
+                    >
+                      {pid}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => store.setLinePair(item.id, nextPairId(store.cart || []))}
+                    style={{
+                      minHeight: 44,
+                      padding: '0 10px',
+                      borderRadius: 6,
+                      fontSize: 11,
+                      cursor: 'pointer',
+                      border: '1px dashed var(--line-strong, var(--line))',
+                      background: 'transparent',
+                      color: 'var(--ink-3)',
+                    }}
+                  >
+                    + New pair
+                  </button>
+                </div>
+              )}
+              {item.is_optical && (
+                <input
+                  placeholder="PD / Fitting / Tint notes…"
+                  value={item.item_note || ''}
+                  onChange={(e) => store.updateItemNote(item.id, e.target.value)}
                   style={{
-                    minHeight: 44,
-                    padding: '0 10px',
-                    borderRadius: 6,
-                    fontSize: 11,
-                    cursor: 'pointer',
-                    border: '1px dashed var(--line-strong, var(--line))',
-                    background: 'transparent',
-                    color: 'var(--ink-3)',
+                    marginTop: 6,
+                    width: '100%',
+                    padding: '4px 8px',
+                    fontSize: 10.5,
+                    border: '1px solid var(--line)',
+                    borderRadius: 4,
+                    background: 'var(--surface-2)',
+                    color: 'var(--ink)',
                   }}
-                >
-                  + New pair
-                </button>
-              </div>
-            )}
-            {item.is_optical && (
-              <input
-                placeholder="PD / Fitting / Tint notes…"
-                value={item.item_note || ''}
-                onChange={(e) => store.updateItemNote(item.id, e.target.value)}
-                style={{
-                  marginTop: 6,
-                  width: '100%',
-                  padding: '4px 8px',
-                  fontSize: 10.5,
-                  border: '1px solid var(--line)',
-                  borderRadius: 4,
-                  background: 'var(--surface-2)',
-                  color: 'var(--ink)',
-                }}
-              />
-            )}
-          </div>
-        ))}
+                />
+              )}
+            </div>
+          );
+        })}
       </div>
 
       {/* Totals footer */}

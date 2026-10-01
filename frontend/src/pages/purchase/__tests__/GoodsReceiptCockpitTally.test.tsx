@@ -41,10 +41,11 @@ vi.mock('../../../services/api/inventory', () => ({
     acceptGRN: vi.fn(),
     voidGRN: vi.fn(),
   },
-}));
-
-vi.mock('../../../services/api/labels', () => ({
-  default: { getProductLabel: vi.fn() },
+  // F26: the labels dialog after receiving lists the receipt's units.
+  inventoryApi: {
+    getUnits: vi.fn(),
+    markBarcodePrinted: vi.fn(),
+  },
 }));
 
 vi.mock('../../../context/ToastContext', () => ({
@@ -52,7 +53,10 @@ vi.mock('../../../context/ToastContext', () => ({
 }));
 
 vi.mock('../../../context/AuthContext', () => ({
-  useAuth: () => ({ user: { activeStoreId: 'S1', roles: ['STORE_MANAGER'] } }),
+  useAuth: () => ({
+    user: { activeStoreId: 'S1', roles: ['STORE_MANAGER'] },
+    hasRole: (r: string[]) => r.includes('STORE_MANAGER'),
+  }),
 }));
 
 vi.mock('../../../hooks/useIsOnlineStore', () => ({
@@ -111,7 +115,7 @@ vi.mock('../ExpressReceivePanel', () => ({
 
 import { GoodsReceiptCockpit } from '../GoodsReceiptCockpit';
 import { grnCockpitApi } from '../../../services/api/grnCockpit';
-import { vendorsApi } from '../../../services/api/inventory';
+import { inventoryApi, vendorsApi } from '../../../services/api/inventory';
 
 const listVendorsMock = grnCockpitApi.listVendors as unknown as ReturnType<typeof vi.fn>;
 const getCockpitMock = grnCockpitApi.getCockpit as unknown as ReturnType<typeof vi.fn>;
@@ -119,6 +123,7 @@ const createGRNMock = grnCockpitApi.createGRN as unknown as ReturnType<typeof vi
 const getGRNsMock = vendorsApi.getGRNs as unknown as ReturnType<typeof vi.fn>;
 const getPOsMock = vendorsApi.getPurchaseOrders as unknown as ReturnType<typeof vi.fn>;
 const acceptGRNMock = vendorsApi.acceptGRN as unknown as ReturnType<typeof vi.fn>;
+const getUnitsMock = inventoryApi.getUnits as unknown as ReturnType<typeof vi.fn>;
 
 const OPEN_PO = {
   po_id: 'po-1',
@@ -169,6 +174,7 @@ describe('GoodsReceiptCockpit two-step receive - ruling 14 (the tally)', () => {
       total_received: 28,
     });
     acceptGRNMock.mockResolvedValue({ units_added: 26, po_status: 'RECEIVED' });
+    getUnitsMock.mockResolvedValue({ units: [], total: 0 });
   });
 
   it('refuses to post a receipt while a line is still unticked', async () => {
@@ -226,5 +232,40 @@ describe('GoodsReceiptCockpit two-step receive - ruling 14 (the tally)', () => {
     // (no GST credit), not only challan goods.
     const link = await screen.findByRole('link', { name: /classic GRN screen/i });
     expect(link.parentElement?.textContent).toMatch(/Bought without PO/);
+  });
+
+  it("F26: after receiving, the labels dialog lists THIS receipt's units - no fake success", async () => {
+    await openTwoStepForm();
+    fireEvent.click(screen.getByRole('checkbox', { name: /tally line 1/i }));
+    fireEvent.click(screen.getByRole('checkbox', { name: /tally line 2/i }));
+    fireEvent.click(screen.getByRole('button', { name: /create goods receipt/i }));
+
+    await screen.findByRole('dialog', { name: /print stock labels/i });
+    // The dialog can land before its load effect runs: wait for the read.
+    await waitFor(() => expect(getUnitsMock).toHaveBeenCalledWith({ grn_id: 'G1' }));
+    // Nothing was printed, so nothing may claim it was.
+    expect(await screen.findByText(/nothing to print/i)).toBeInTheDocument();
+    expect(toastMock.success).not.toHaveBeenCalledWith(expect.stringMatching(/label/i));
+  });
+
+  it('F26: "Add to stock" on a waiting receipt also opens ITS labels', async () => {
+    getGRNsMock.mockImplementation(async (p: { status?: string }) =>
+      p.status === 'PENDING'
+        ? { grns: [{ grn_id: 'G7', grn_number: 'RCPT/S1/26-27/0007', vendor_id: 'V1', status: 'PENDING', items: [] }] }
+        : { grns: [] },
+    );
+    acceptGRNMock.mockResolvedValue({ units_added: 3, po_status: 'RECEIVED' });
+    // The vendor's worklists (no PO picked) carry the "Receipts still waiting" panel.
+    render(
+      <MemoryRouter initialEntries={['/purchase/receive?vendor_id=V1']}>
+        <GoodsReceiptCockpit />
+      </MemoryRouter>,
+    );
+    await screen.findByText(/receipts still waiting/i, undefined, { timeout: 5000 });
+    fireEvent.click(await screen.findByRole('button', { name: /add to stock/i }, { timeout: 5000 }));
+    await screen.findByRole('dialog', { name: /print stock labels/i });
+    expect(acceptGRNMock).toHaveBeenCalledWith('G7');
+    // The dialog can land before its load effect runs: wait for the read.
+    await waitFor(() => expect(getUnitsMock).toHaveBeenCalledWith({ grn_id: 'G7' }));
   });
 });

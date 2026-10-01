@@ -38,6 +38,8 @@ vi.mock('../../../components/print/GRNPrint', () => ({ GRNPrint: () => null }));
 vi.mock('../../../components/print/storeIdentity', () => ({
   resolveStoreIdentity: vi.fn().mockResolvedValue(null),
 }));
+// The labels dialog (#1164) has its own suite.
+vi.mock('../../../components/labels/UnitLabelsModal', () => ({ UnitLabelsModal: () => null }));
 
 import { GoodsReceiptNote } from '../GoodsReceiptNote';
 

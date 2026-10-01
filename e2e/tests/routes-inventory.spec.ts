@@ -78,8 +78,9 @@ test('coverage has not silently shrunk', () => {
       '/purchase/invoices/book -- every one a Navigate, none a screen; +2 for ' +
       'the parameterised eye-examination page /clinical/test/:entryId and its ' +
       'amend form, which need a seeded queue entry and a seeded eye_test that ' +
-      'seed_e2e.py does not create). ' +
+      'seed_e2e.py does not create; +1 for the redirect-only forecast catch-all ' +
+      '/reports/forecast/*). ' +
       'If an exclusion is genuinely new and justified, raise the ceiling here in the ' +
       'same commit that adds it -- deliberately, not by accident.',
-  ).toEqual({ probedAtLeast: true, exclusions: 29 });
+  ).toEqual({ probedAtLeast: true, exclusions: 30 });
 });

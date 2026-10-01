@@ -214,7 +214,6 @@ def initialize_registry(db=None):
     subscribe_event("deploy.failure",    "pixel")
 
     # TASKMASTER acts on actionable signals (the only agent that writes state)
-    subscribe_event("stock.below_reorder", "taskmaster")
     subscribe_event("anomaly.detected",    "taskmaster")
     subscribe_event("sla.breached",        "taskmaster")
 
