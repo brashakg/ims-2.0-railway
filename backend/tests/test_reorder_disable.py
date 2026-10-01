@@ -27,6 +27,7 @@ import sys
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.environ.setdefault("JWT_SECRET_KEY", "test")
 os.environ.setdefault("ENVIRONMENT", "test")
 
@@ -289,47 +290,72 @@ class _FakeDb:
 
 
 class TestTaskmasterGuard:
-    def _run(self, stock_docs, product_docs):
-        from agents.implementations.taskmaster import TaskmasterAgent
+    """TASKMASTER drafts from THE low-stock list (reorder_policy.low_stock_rows,
+    owner 2026-10-01): each product's OWN level over the real stock_units
+    aggregation. It used to match `quantity < reorder_point` on stock_units
+    rows, which carry no level, so it never drafted anything."""
 
-        stock = _FakeColl(stock_docs)
-        pos = _FakeColl([])
-        products = _FakeColl(product_docs)
-        audit = _FakeColl([])
-        # The reorder scan matches $expr {quantity < reorder_point} -- the
-        # fake can't evaluate $expr, so pre-filter and serve everything.
-        stock.find = lambda q=None, p=None: _FakeCursor(
-            [dict(d) for d in stock_docs]
+    def _run(self, products, units):
+        from agents.implementations.taskmaster import TaskmasterAgent
+        from strict_fakes import StrictDB
+
+        db = StrictDB()
+        db.seed("products", [dict(p) for p in products])
+        db.seed("stock_units", [dict(u) for u in units])
+        actions = asyncio.run(TaskmasterAgent(db=db)._draft_reorders())
+        return {a["sku"]: a["qty"] for a in actions}, db.get_collection("purchase_orders").docs
+
+    @staticmethod
+    def _units(pid, n, store="S1", **extra):
+        return [
+            {"stock_id": f"U-{pid}-{store}-{i}", "product_id": pid, "store_id": store,
+             "status": "AVAILABLE", **extra}
+            for i in range(n)
+        ]
+
+    def test_a_product_at_its_own_level_is_drafted(self):
+        # The audit's input: level 3, auto-reorder on (4), 2 units on hand.
+        drafted, pos = self._run(
+            [{"product_id": "P-ON", "sku": "SKU-ON", "reorder_point": 3, "reorder_quantity": 4,
+              "preferred_vendor_id": "V1"}],
+            self._units("P-ON", 2),
         )
-        agent = TaskmasterAgent(db=_FakeDb({
-            "stock_units": stock,
-            "purchase_orders": pos,
-            "products": products,
-            "agent_audit_log": audit,
-        }))
-        actions = asyncio.run(agent._draft_reorders())
-        return actions, pos
+        assert drafted == {"SKU-ON": 4}  # 3 * 2 - 2
+        assert [(po["sku"], po["vendor_id"], po["status"]) for po in pos] == [("SKU-ON", "V1", "DRAFT")]
+
+    def test_no_level_or_no_product_row_is_never_drafted(self):
+        not_set = {"P-UNSET": -1, "P-ZERO": 0, "P-GARBAGE": "x"}
+        products = [{"product_id": "P-SET", "sku": "SKU-SET", "reorder_point": 2},
+                    {"product_id": "P-MISSING", "sku": "SKU-MISSING"}]
+        products += [{"product_id": pid, "sku": "SKU" + pid[1:], "reorder_point": rp}
+                     for pid, rp in not_set.items()]
+        units = [u for p in products for u in self._units(p["product_id"], 1)]
+        # A gone product's unit, and a unit row carrying its own (meaningless)
+        # level: neither decides anything.
+        units += self._units("P-NO-ROW", 1, reorder_point=10)
+        units += self._units("P-UNSET", 1, store="S2", reorder_point=10)
+        drafted, _pos = self._run(products, units)
+        assert drafted == {"SKU-SET": 3}
 
     def test_disabled_sku_never_drafted(self):
-        actions, pos = self._run(
-            stock_docs=[
-                {"sku": "SKU-OFF", "quantity": 1, "reorder_point": 10},
-                {"sku": "SKU-ON", "quantity": 1, "reorder_point": 10},
-            ],
-            product_docs=[
-                {"sku": "SKU-OFF", "reorder_quantity": -1},
-                {"sku": "SKU-ON", "reorder_quantity": 15},
-            ],
+        drafted, pos = self._run(
+            [{"product_id": "P-OFF", "sku": "SKU-OFF", "reorder_point": 10, "reorder_quantity": -1},
+             {"product_id": "P-ON", "sku": "SKU-ON", "reorder_point": 10, "reorder_quantity": 15}],
+            self._units("P-OFF", 1) + self._units("P-ON", 1),
         )
-        drafted = [a["sku"] for a in actions]
-        assert "SKU-ON" in drafted
-        assert "SKU-OFF" not in drafted
-        assert all(po["sku"] != "SKU-OFF" for po in pos.inserted)
+        assert set(drafted) == {"SKU-ON"}
+        assert all(po["sku"] != "SKU-OFF" for po in pos)
 
-    def test_legacy_sku_without_master_row_still_drafts(self):
-        actions, _pos = self._run(
-            stock_docs=[{"sku": "SKU-LEGACY", "quantity": 1,
-                         "reorder_point": 10}],
-            product_docs=[],
+    def test_missing_reorder_quantity_is_legacy_enabled(self):
+        drafted, _pos = self._run(
+            [{"product_id": "P-LEG", "sku": "SKU-LEG", "reorder_point": 10}],
+            self._units("P-LEG", 1),
         )
-        assert [a["sku"] for a in actions] == ["SKU-LEGACY"]
+        assert drafted == {"SKU-LEG": 19}
+
+    def test_one_draft_per_sku_when_low_in_two_shops(self):
+        drafted, pos = self._run(
+            [{"product_id": "P-ON", "sku": "SKU-ON", "reorder_point": 3}],
+            self._units("P-ON", 1, store="S1") + self._units("P-ON", 1, store="S2"),
+        )
+        assert list(drafted) == ["SKU-ON"] and len(pos) == 1

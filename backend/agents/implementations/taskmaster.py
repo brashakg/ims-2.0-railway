@@ -587,45 +587,45 @@ class TaskmasterAgent(JarvisAgent):
         return actions
 
     async def _draft_reorders(self) -> List[Dict[str, Any]]:
-        """For SKUs below reorder_point, draft a PO. Tier 2 — DRAFT only,
-        not auto-sent. Sending the PO requires Superadmin approval."""
+        """For products at or under their OWN reorder level, draft a PO. Tier 2
+        -- DRAFT only, not auto-sent. Sending the PO requires Superadmin
+        approval.
+
+        "Low" is THE low-stock list (reorder_policy.low_stock_rows, owner
+        2026-10-01): the product's level, never a stock_units row (one unit,
+        no level). Not set (0, -1, missing) or no product row = never drafted."""
         stock_coll = self.get_collection("stock_units")
         po_coll = self.get_collection("purchase_orders")
-        if stock_coll is None or po_coll is None:
+        products_coll = self.get_collection("products")
+        if stock_coll is None or po_coll is None or products_coll is None:
             return []
         actions = []
         try:
-            low_stock = list(
-                stock_coll.find(
-                    {
-                        "$expr": {"$lt": ["$quantity", "$reorder_point"]},
-                    }
-                ).limit(20)
+            from api.services.reorder_policy import auto_reorder_disabled, low_stock_rows
+            from database.repositories.product_repository import (
+                ProductRepository,
+                StockRepository,
             )
-            # Owner decision (2026-07-04): a product whose master carries
-            # reorder_quantity <= 0 (the new -1 default) has auto-reorder
-            # DISABLED -- never draft a PO for it. Batch-resolve the flag from
-            # the products spine by SKU; fail-soft (lookup trouble -> no skus
-            # marked disabled, legacy behaviour).
-            disabled_skus: set = set()
-            try:
-                from api.services.reorder_policy import auto_reorder_disabled
 
-                skus = [i.get("sku") for i in low_stock if i.get("sku")]
-                products_coll = self.get_collection("products")
-                if products_coll is not None and skus:
-                    for prod in products_coll.find(
-                        {"sku": {"$in": skus}},
-                        {"sku": 1, "reorder_quantity": 1},
-                    ):
-                        if auto_reorder_disabled(prod):
-                            disabled_skus.add(prod.get("sku"))
-            except Exception as e:  # noqa: BLE001 - guard is fail-soft
-                logger.debug(f"[TASKMASTER] reorder-disable lookup failed: {e}")
-                disabled_skus = set()
-            for item in low_stock:
+            stock_repo = StockRepository(stock_coll)
+            product_repo = ProductRepository(products_coll)
+            stores = sorted(
+                str(s) for s in stock_coll.distinct("store_id", {"status": "AVAILABLE"}) if s
+            )
+            low_stock = [
+                row for store in stores for row in low_stock_rows(stock_repo, product_repo, store)
+            ][:20]
+            pids = [str(r["_id"]) for r in low_stock]
+            products = {
+                str(p.get("product_id")): p
+                for p in (product_repo.find_many({"product_id": {"$in": pids}}, limit=len(pids)) if pids else [])
+            }
+            for row in low_stock:
+                item = products.get(str(row["_id"])) or {}
                 sku = item.get("sku")
-                if sku in disabled_skus:
+                # Owner decision (2026-07-04): reorder_quantity <= 0 (the -1
+                # default) = auto-reorder DISABLED -- never draft a PO for it.
+                if not sku or auto_reorder_disabled(item):
                     continue
                 # Skip if a draft PO already exists for this SKU today.
                 #
@@ -664,10 +664,8 @@ class TaskmasterAgent(JarvisAgent):
                 draft_po = {
                     "po_number": f"PO-AUTO-{datetime.now(timezone.utc).strftime('%y%m%d-%H%M%S')}-{sku[:6]}",
                     "sku": sku,
-                    "vendor_id": item.get("default_vendor_id"),
-                    "quantity": max(
-                        item.get("reorder_point", 0) * 2 - item.get("quantity", 0), 1
-                    ),
+                    "vendor_id": item.get("preferred_vendor_id") or item.get("default_vendor_id"),
+                    "quantity": max(row["reorder_point"] * 2 - int(row.get("quantity") or 0), 1),
                     "status": "DRAFT",
                     "auto_drafted_by": self.agent_id,
                     "created_at": datetime.now(timezone.utc).isoformat(),
@@ -678,7 +676,7 @@ class TaskmasterAgent(JarvisAgent):
                     await self._audit_log(
                         action="po_draft",
                         target=draft_po["po_number"],
-                        before={"sku_quantity": item.get("quantity")},
+                        before={"sku_quantity": row.get("quantity")},
                         after={"po_status": "DRAFT", "po_qty": draft_po["quantity"]},
                         tier=2,
                     )
