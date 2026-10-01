@@ -19,7 +19,10 @@ async function _openHtml(path: string): Promise<void> {
     headers: token ? { Authorization: `Bearer ${token}` } : undefined,
   });
   if (!res.ok) {
-    throw new Error(`Failed to render document (${res.status})`);
+    // The server says why it refused (ship first, a GSTIN missing, ...).
+    const body = await res.json().catch(() => null);
+    const detail = typeof body?.detail === 'string' ? body.detail : '';
+    throw new Error(detail || `Failed to render document (${res.status})`);
   }
   const html = await res.text();
   const win = window.open('', '_blank');

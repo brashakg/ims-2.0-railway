@@ -560,8 +560,8 @@ export function StockTransferManagement() {
                   onClick={async () => {
                     try {
                       await printDocumentsApi.openTransferChallan(selectedTransfer.id);
-                    } catch {
-                      toast.error('Could not open delivery challan');
+                    } catch (e) {
+                      toast.error(`Could not open delivery challan: ${errMsg(e)}`);
                     }
                   }}
                   className="btn-outline flex items-center gap-2 text-sm"
