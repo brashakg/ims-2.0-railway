@@ -9,7 +9,7 @@
 // here. Then the same table's gates: every panel admits exactly the roles the
 // one-URL page admitted.
 
-import { Suspense } from 'react';
+import { Suspense, Children, isValidElement, type ReactElement, type ReactNode } from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
@@ -165,5 +165,26 @@ describe('an unknown forecast sub-address', () => {
     renderPanel('/reports/forecast/anything');
     expect(await screen.findByText('ZZ Frames', undefined, FIND)).toBeInTheDocument();
     await expectActivePanelLink(/^Category Forecast$/);
+  });
+});
+
+// The render tests above cannot see the forecast gate: the `reports` layout
+// gate carries the same role list and refuses first. So the forecast gate is
+// pinned here, straight off the shipped route table.
+describe('the forecast route gate, read off the real route table', () => {
+  const childrenOf = (el: ReactElement): ReactElement[] =>
+    Children.toArray((el.props as { children?: ReactNode }).children).filter(isValidElement) as ReactElement[];
+  const routePath = (el: ReactElement) => (el.props as { path?: string }).path;
+
+  it('forecast is gated to exactly the roles the one-URL page admitted', () => {
+    const top = childrenOf(reportRoutes as ReactElement);
+    const reports = top.find((r) => routePath(r) === 'reports');
+    expect(reports).toBeDefined();
+    const forecast = childrenOf(reports!).find((r) => routePath(r) === 'forecast');
+    expect(forecast).toBeDefined();
+    const gate = (forecast!.props as { element: ReactElement }).element;
+    expect((gate.props as { allowedRoles?: string[] }).allowedRoles).toEqual(
+      ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'],
+    );
   });
 });
