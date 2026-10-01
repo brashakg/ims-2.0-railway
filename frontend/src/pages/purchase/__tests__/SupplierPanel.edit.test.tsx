@@ -17,6 +17,12 @@ const toastMock = vi.hoisted(() => ({
 }));
 vi.mock('../../../context/ToastContext', () => ({ useToast: () => toastMock }));
 
+// The ACTIVE shop is the buyer; steer it per test.
+const auth = vi.hoisted(() => ({ store: 'S1' as string | undefined }));
+vi.mock('../../../context/AuthContext', () => ({
+  useAuth: () => ({ user: { id: 'u1', roles: ['ADMIN'], activeStoreId: auth.store } }),
+}));
+
 // The tax head of each vendor is the SERVER's verdict (GET
 // /vendors/po-gst-heads: shop_gstin + classify_supply). Stub the transport and
 // steer the answer per test; the card only maps it onto a chip.
@@ -53,6 +59,7 @@ vi.mock('../../../services/api/entities', () => ({
 }));
 
 import { SupplierPanel } from '../SupplierPanel';
+import { vendorsApi as poApi } from '../../../services/api/inventory';
 import type { Supplier } from '../purchaseTypes';
 
 const base: Supplier = {
@@ -80,6 +87,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   poHeads.current = {};
   poHeads.down = false;
+  auth.store = 'S1';
 });
 
 describe('SupplierPanel edit button', () => {
@@ -152,5 +160,22 @@ describe('SupplierPanel GST treatment chip (the server decides)', () => {
     expect(screen.getByText(/unregistered \(no gstin\)/i)).toBeInTheDocument();
     expect(screen.queryByText(/CGST \+ SGST/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/tax split unknown/i)).not.toBeInTheDocument();
+  });
+});
+
+describe('SupplierPanel follows the active shop', () => {
+  it('asks the server for the ACTIVE shop, and again when the shop is switched', async () => {
+    poHeads.current = { v1: true };
+    const { rerender } = render(<SupplierPanel suppliers={[base]} />);
+    await screen.findByText(/\bIGST\b/i);
+    expect(poApi.getPoGstHeads).toHaveBeenLastCalledWith('S1');
+
+    // Top-bar shop switch: the mounted tab re-asks for the new shop.
+    auth.store = 'PUNE';
+    poHeads.current = { v1: false };
+    rerender(<SupplierPanel suppliers={[base]} />);
+    expect(await screen.findByText(/CGST \+ SGST/i)).toBeInTheDocument();
+    expect(poApi.getPoGstHeads).toHaveBeenLastCalledWith('PUNE');
+    expect(screen.queryByText(/\bIGST\b/i)).not.toBeInTheDocument();
   });
 });

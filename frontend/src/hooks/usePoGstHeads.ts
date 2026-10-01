@@ -17,25 +17,34 @@ import { vendorsApi } from '../services/api/inventory';
 export type PoGstHeads = Record<string, boolean | null>;
 
 export function usePoGstHeads(storeId?: string | null): PoGstHeads {
-  const [heads, setHeads] = useState<PoGstHeads>({});
+  const store = storeId || '';
+  // The verdict is kept WITH the shop it was decided for, and only handed out
+  // for that shop: on a shop switch the very next render has no verdict (never
+  // the previous shop's IGST / CGST + SGST for a frame), and a late answer for
+  // the old shop can never be shown for the new one.
+  const [state, setState] = useState<{ store: string; heads: PoGstHeads }>({
+    store,
+    heads: {},
+  });
 
   useEffect(() => {
     let alive = true;
-    setHeads({});
     vendorsApi
-      .getPoGstHeads(storeId || undefined)
+      .getPoGstHeads(store || undefined)
       .then((r) => {
-        if (alive) setHeads(r?.heads ?? {});
+        if (alive) setState({ store, heads: r?.heads ?? {} });
       })
       .catch(() => {
-        if (alive) setHeads({});
+        if (alive) setState({ store, heads: {} });
       });
     return () => {
       alive = false;
     };
-  }, [storeId]);
+  }, [store]);
 
-  return heads;
+  return state.store === store ? state.heads : EMPTY;
 }
+
+const EMPTY: PoGstHeads = {};
 
 export default usePoGstHeads;

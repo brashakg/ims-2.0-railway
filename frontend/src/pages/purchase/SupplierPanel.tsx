@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { vendorsApi } from '../../services/api';
 import { useToast } from '../../context/ToastContext';
+import { useAuth } from '../../context/AuthContext';
 import { usePoGstHeads } from '../../hooks/usePoGstHeads';
 import { useGstStateCodes } from '../../hooks/useGstStateCodes';
 import { gstinStateCode } from '../../constants/gst';
@@ -60,7 +61,10 @@ export function SupplierPanel({ suppliers, onEdit }: SupplierPanelProps) {
   const [portalForVendor, setPortalForVendor] = useState<{ id: string; name: string } | null>(null);
   // The buying store's own GST REGISTRATION decides how a purchase from each
   // vendor is taxed. Same state -> CGST + SGST; another state -> IGST.
-  const heads = usePoGstHeads();
+  // The ACTIVE shop is the buyer (same as the order form), so the chips follow
+  // a top-bar shop switch.
+  const { user } = useAuth();
+  const heads = usePoGstHeads(user?.activeStoreId);
   const stateNames = useGstStateCodes();
 
   return (
