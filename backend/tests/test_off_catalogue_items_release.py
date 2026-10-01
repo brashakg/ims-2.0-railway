@@ -1396,8 +1396,11 @@ def test_c1_a_held_draft_is_never_discarded_behind_its_receipt(world):
     )
     assert world.product(draft_id)["provisional"] is True
 
-    # The units go back: the manager voids the receipt, then the admin deletes.
+    # The units go back: the manager voids the receipt and cancels the order
+    # (round 5: a draft an open order names is not discarded either), then the
+    # admin deletes.
     _run(vd.void_grn(grn["grn_id"], MANAGER))
+    _run(vd.cancel_po(po["po_id"], "box went back", MANAGER))
     _run(_catalog.delete_catalog_product(twin["id"], ADMIN))
     sku = world.product(draft_id)["sku"]
     finding(
@@ -1894,3 +1897,194 @@ def test_c2_a_frame_still_carrying_an_old_size_is_found_by_its_eye_size(world):
         "size 52 (SKU" in refused.detail["message"],
         f"C2: the answer names the old size, not the eye size ({refused.detail['message']!r})",
     )
+
+
+# ---------------------------------------------------------------------------
+# Round 5 -- a discarded draft: never behind an open order or a receipt, and
+# ordering the item again gets the draft back
+# ---------------------------------------------------------------------------
+
+
+def _delete_refusal(world, draft_id):
+    try:
+        _run(_catalog.delete_catalog_product(_twin_of(world, draft_id)["id"], ADMIN))
+    except HTTPException as exc:
+        return exc
+    return None
+
+
+def test_r5_a_draft_on_an_open_order_is_never_discarded(world):
+    # Review round 4, problem 1: the sent order is not received yet. Deleting
+    # the draft then receiving the box held it behind a deleted product, with
+    # a task pointing at a Needs-review queue it had left, and finishing it
+    # minted AVAILABLE units of a product that stayed deleted.
+    _seed_user(world, ADMIN)
+    po = world.raise_po(
+        [{"new_product": dict(BOSS_TYPED), "quantity": 2, "unit_price": 1200}]
+    )
+    draft_id = po["items"][0]["product_id"]
+
+    refused = _delete_refusal(world, draft_id)
+    finding(
+        refused is not None
+        and refused.status_code == 409
+        and po["po_number"] in str(refused.detail),
+        f"R5: the draft was deleted while {po['po_number']} is still open ({refused})",
+    )
+    assert world.product(draft_id)["provisional"] is True
+    assert world.product(draft_id).get("discarded_draft") is not True
+    assert _twin_of(world, draft_id)["needs_review"] is True
+
+    # The box still arrives: it is held behind a draft that is in Needs review.
+    grn, accepted = world.receive_everything(po)
+    assert accepted["grn_status"] == "PARTIALLY_ACCEPTED"
+    assert world.product(draft_id)["sku"] in _needs_review_list(world)
+
+    # Once the order is cancelled (nothing received yet), the draft can go.
+    po2 = world.raise_po(
+        [{"new_product": dict(CARRERA_TYPED), "quantity": 1, "unit_price": 3200}]
+    )
+    carrera = po2["items"][0]["product_id"]
+    assert _delete_refusal(world, carrera) is not None
+    _run(vd.cancel_po(po2["po_id"], "ordered by mistake", MANAGER))
+    assert _delete_refusal(world, carrera) is None
+    assert world.product(carrera).get("discarded_draft") is True
+    assert world.product(carrera)["provisional"] is False
+
+
+def test_r5_a_draft_a_receipt_names_is_never_discarded(world):
+    # A receipt with no order at all (a delivery challan) naming the draft:
+    # the order is cancelled, but the box is here.
+    _seed_user(world, ADMIN)
+    po = world.raise_po(
+        [{"new_product": dict(BOSS_TYPED), "quantity": 2, "unit_price": 1200}]
+    )
+    draft_id = po["items"][0]["product_id"]
+    _run(vd.cancel_po(po["po_id"], "came on a challan instead", MANAGER))
+    created = _run(
+        vd.create_grn(
+            vd.GRNCreate(
+                grn_subtype="DELIVERY_CHALLAN",
+                vendor_id=VENDOR,
+                dc_number="DC-0901",
+                dc_date="2026-09-28",
+                items=[
+                    vd.GRNItemCreate(
+                        product_id=draft_id,
+                        received_qty=2,
+                        accepted_qty=2,
+                        rejected_qty=0,
+                        tallied=True,
+                    )
+                ],
+                attachment_file_id="F-RECEIPT-PHOTO",
+                attachment_filename="dc.jpg",
+                attachment_mime="image/jpeg",
+            ),
+            MANAGER,
+        )
+    )
+    refused = _delete_refusal(world, draft_id)
+    finding(
+        refused is not None
+        and refused.status_code == 409
+        and created["grn_number"] in str(refused.detail),
+        f"R5: the draft was deleted while receipt {created['grn_number']} names it",
+    )
+    _run(vd.void_grn(created["grn_id"], MANAGER))
+    assert _delete_refusal(world, draft_id) is None
+
+
+def test_r5_voiding_the_only_receipt_reopens_the_order(world):
+    # The held accept moved the order to PARTIALLY_RECEIVED with nothing on
+    # the shelf; cancel refuses a part-received order. Voided, nothing was
+    # received: the order is SENT again and can be cancelled.
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    assert world.db.purchase_orders.find_one({"po_id": po["po_id"]})["status"] == (
+        "PARTIALLY_RECEIVED"
+    )
+    _run(vd.void_grn(grn["grn_id"], MANAGER))
+    stored = world.db.purchase_orders.find_one({"po_id": po["po_id"]})
+    finding(
+        stored["status"] == "SENT",
+        f"R5: an order whose only receipt was voided still reads {stored['status']}",
+    )
+    assert [it["received_qty"] for it in stored["items"]] == [0]
+    _run(vd.cancel_po(po["po_id"], "box went back", MANAGER))
+
+
+def test_r5_voiding_one_of_two_receipts_keeps_the_order_part_received(world):
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    dup, _ = _receive_again(world, po, "JOT/26-27/0702")
+    _run(vd.void_grn(dup["grn_id"], MANAGER))
+    stored = world.db.purchase_orders.find_one({"po_id": po["po_id"]})
+    assert stored["status"] == "PARTIALLY_RECEIVED"
+
+
+def test_r5_a_discarded_draft_is_ordered_again_by_typing_it(world):
+    # Review round 4, problem 2: after a discard, typing the item again was
+    # refused ALREADY_IN_CATALOGUE naming the deleted row; picking that row was
+    # refused at send. The identity key is unique, so the draft itself comes
+    # back -- to Needs review, still off -- and the item is ordered.
+    _seed_user(world, ADMIN)
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    _run(vd.void_grn(grn["grn_id"], MANAGER))
+    _run(vd.cancel_po(po["po_id"], "box went back", MANAGER))
+    assert _delete_refusal(world, draft_id) is None
+    sku = world.product(draft_id)["sku"]
+    assert sku not in _needs_review_list(world)
+
+    refused = _refused_po(
+        world,
+        [
+            {"new_product": dict(BOSS_TYPED), "quantity": 2, "unit_price": 1200},
+            {"new_product": dict(BOSS_TYPED), "quantity": 1, "unit_price": 1200},
+        ],
+    )
+    finding(
+        refused is None,
+        f"R5: ordering a discarded item again was refused ({getattr(refused, 'detail', None)})",
+    )
+    again = world.db.purchase_orders.find_one({"status": "SENT"})
+    assert [it["product_id"] for it in again["items"]] == [draft_id, draft_id]
+    assert len(world.products_named("Boss", "BOSS 1700")) == 1
+    spine = world.product(draft_id)
+    finding(
+        spine["provisional"] is True and spine.get("discarded_draft") is False,
+        f"R5: the draft did not come back as an ordered draft ({spine})",
+    )
+    assert spine["is_active"] is False
+    twin = _twin_of(world, draft_id)
+    assert twin["needs_review"] is True
+    assert "is_active" not in twin and "deleted_at" not in twin
+    finding(
+        sku in _needs_review_list(world),
+        "R5: the re-ordered draft is not in Needs review",
+    )
+
+    # And it lands like any ordered draft: held, a task, finished, on the shelf.
+    grn2, accepted = world.receive_everything(again, invoice_no="JOT/26-27/0801")
+    assert accepted["grn_status"] == "PARTIALLY_ACCEPTED"
+    assert any("Finish" in t.get("title", "") for t in _open_tasks(world))
+    world.finish_draft(draft_id, offer=2790)
+    assert len(world.units(draft_id)) == 3
+    assert world.product(draft_id)["is_active"] is True
+
+
+def test_r5_a_deleted_catalogued_item_is_still_answered_with_it(world):
+    # Only a DISCARDED DRAFT is given back. A catalogued product the admin
+    # deleted is not silently revived by a manager's typed line.
+    _seed_user(world, ADMIN)
+    existing = world.catalogue_frame(
+        "Carrera", "CA 8895", "807", "54", mrp=6990, offer=6490, cost=3155.76
+    )
+    _run(_catalog.delete_catalog_product(_twin_of_sku(world, existing["sku"])["id"], ADMIN))
+    refused = _refused_po(
+        world, [{"new_product": dict(CARRERA_TYPED), "quantity": 1, "unit_price": 3200}]
+    )
+    assert refused is not None and refused.status_code == 409
+    assert world.product(existing["product_id"])["is_active"] is False
+
+
+def _twin_of_sku(world, sku):
+    return world.db.catalog_products.find_one({"sku": sku})
