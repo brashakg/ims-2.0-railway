@@ -6,9 +6,8 @@ The owner (D12): reorder points are PER SHOP. -1 (or missing) = NOT SET = no
 low-stock alert; screens say "not set", never -1. A shop without its own level
 has none -- the old chain-wide `reorder_point` is not a default for it.
 
-Every test below reproduces one finding on main and is committed as
-xfail(strict=True); the fix flips them to passing (and strict makes a test that
-starts passing early fail loudly).
+Every test below reproduced one finding on main (committed as strict xfail
+first); the fix made them pass.
 
 THE CONTRACT the fix builds to (the only names these tests pin):
   * storage   `products.reorder_levels` = {<store_id>: int}; -1 / absent = not
@@ -72,10 +71,6 @@ _BOK_MGR = {"user_id": "m-bok", "username": "bok", "roles": ["STORE_MANAGER"],
             "active_store_id": BOK, "store_ids": [BOK]}
 _DHN_SALES = {"user_id": "s-dhn", "username": "sales", "roles": ["SALES_STAFF"],
               "active_store_id": DHN, "store_ids": [DHN]}
-
-
-def _xfail(why):
-    return pytest.mark.xfail(strict=True, reason=f"F73/D12 per-shop reorder levels: {why}")
 
 
 def _levels(by_store):
@@ -229,7 +224,6 @@ def _find(obj, key):
 # ---------------------------------------------------------------------------
 
 
-@_xfail("reorder_policy has no per-shop level; the only level is the chain-wide reorder_point")
 def test_the_rule_reads_the_shops_own_level_and_nothing_else():
     from api.services.reorder_policy import is_low_stock, reorder_level
 
@@ -253,7 +247,6 @@ def test_the_rule_reads_the_shops_own_level_and_nothing_else():
 # ---------------------------------------------------------------------------
 
 
-@_xfail("StockRepository.find_low_stock uses a fixed threshold 5 for every product at every shop")
 def test_low_stock_list_is_per_shop(world):
     dhn = _get("/api/v1/inventory/low-stock", store_id=DHN)["items"]
     bok = _get("/api/v1/inventory/low-stock", store_id=BOK)["items"]
@@ -262,7 +255,6 @@ def test_low_stock_list_is_per_shop(world):
     assert bok == []  # the audit's Bokaro frame
 
 
-@_xfail("GET /inventory/stock?low_stock=true is find_low_stock(threshold 5)")
 def test_stock_low_stock_mode_is_per_shop(world):
     dhn = _get("/api/v1/inventory/stock", store_id=DHN, low_stock="true")["items"]
     bok = _get("/api/v1/inventory/stock", store_id=BOK, low_stock="true")["items"]
@@ -270,7 +262,6 @@ def test_stock_low_stock_mode_is_per_shop(world):
     assert bok == []
 
 
-@_xfail("the ledger row passes the chain-wide reorder_point through (stock.py _ledger_row)")
 def test_stock_ledger_row_carries_this_shops_level_and_verdict(world):
     def rows(store):
         items = _get("/api/v1/inventory/stock", store_id=store)["items"]
@@ -282,7 +273,6 @@ def test_stock_ledger_row_carries_this_shops_level_and_verdict(world):
     assert rows(BOK) == {"P-FRAME": (None, False), "P-OWNER": (None, False)}
 
 
-@_xfail("/inventory/alerts reads products.stock_quantity + the chain reorder_point, and filters products by store_id")
 def test_stock_alerts_are_per_shop(world):
     def alerts(store):
         return {a["sku"]: a for a in _get("/api/v1/inventory/alerts", store_id=store)["alerts"]}
@@ -297,8 +287,6 @@ def test_stock_alerts_are_per_shop(world):
         assert a.get("reorderPoint") is None, a
 
 
-@_xfail("transfer recommendations judge the receiving shop by a caller threshold (5), not its "
-        "level -- and are dead on main: BaseRepository.aggregate stringifies the {p, s} group _id")
 def test_transfer_recommendations_only_refill_a_shop_that_has_a_level(world):
     def recs(store):
         res = _get("/api/v1/inventory/transfer-recommendations", store_id=store, threshold=5)
@@ -308,7 +296,6 @@ def test_transfer_recommendations_only_refill_a_shop_that_has_a_level(world):
     assert recs(BOK) == set()  # no level at Bokaro: nothing to refill
 
 
-@_xfail("reports inventory summary / dashboard / inventory report count find_low_stock(threshold 5)")
 def test_report_low_stock_counts_are_per_shop(world):
     for store, want in ((DHN, 1), (BOK, 0)):
         summary = _get("/api/v1/reports/inventory/summary", store_id=store)
@@ -317,7 +304,6 @@ def test_report_low_stock_counts_are_per_shop(world):
         assert _get("/api/v1/reports/inventory", store_id=store)["lowStock"] == want, store
 
 
-@_xfail("analytics counts read reorder_point off stock_units rows (one unit, no level)")
 def test_analytics_low_stock_counts_are_per_shop(world):
     for store, want in ((DHN, 1), (BOK, 0)):
         summary = _get("/api/v1/analytics/dashboard-summary", store_id=store, period="month")
@@ -328,7 +314,6 @@ def test_analytics_low_stock_counts_are_per_shop(world):
         assert _find(kpis, "low_stock_items") == want, store
 
 
-@_xfail("dashboard widgets read products.stock_quantity against the chain reorder_point and ignore the shop")
 def test_dashboard_widgets_are_per_shop(world):
     for store, want in ((DHN, 1), (BOK, 0)):
         status = _get("/api/v1/inventory/stock-count-status", store_id=store)
@@ -343,7 +328,6 @@ def test_dashboard_widgets_are_per_shop(world):
     assert (bok["today"]["low_stock"], bok["expanded"]["low_stock_items"]) == (0, [])
 
 
-@_xfail("Jarvis counts and lists low stock from products.stock_quantity vs the chain reorder_point")
 def test_jarvis_low_stock_is_per_shop(world):
     from api.routers import jarvis
 
@@ -359,23 +343,18 @@ def test_jarvis_low_stock_is_per_shop(world):
     assert listed == [("Carrera P-FRAME", DHN, 2)]
 
 
-@_xfail("TASKMASTER drafts from a reorder_point on the stock_units row, chain-wide, with no shop on the draft")
-def test_taskmaster_never_drafts_for_a_shop_without_a_level(world):
+def test_taskmaster_never_drafts_a_reorder(world):
+    """TASKMASTER's chain-wide scan (a reorder_point on a unit row, drafts with
+    no shop) is deleted: ORACLE is the one reorder engine, per product AND shop."""
     from agents.implementations.taskmaster import TaskmasterAgent
 
-    if not hasattr(TaskmasterAgent, "_draft_reorders"):
-        return  # deleted: ORACLE is the one reorder engine -- also a fix
-    # What the scan reads: a reorder_point ON the unit row. Bokaro's legacy rows
-    # carry 5; the rest carry the import's 0 (mongomock's $expr needs the field
-    # present; real Mongo reads a missing one as null, which never matches).
-    world.stock_units.update_many({}, {"$set": {"reorder_point": 0}})
+    agent = TaskmasterAgent(db=world)
+    assert not hasattr(agent, "_draft_reorders")
     world.stock_units.update_many({"store_id": BOK}, {"$set": {"reorder_point": 5}})
-    asyncio.run(TaskmasterAgent(db=world)._draft_reorders())
-    drafts = list(world.purchase_orders.find({}))
-    assert all(d.get("store_id") == DHN for d in drafts), drafts
+    asyncio.run(agent.on_event("stock.below_reorder", {"sku": "SKU-P-FRAME"}))
+    assert list(world.purchase_orders.find({})) == []
 
 
-@_xfail("ORACLE tops every shop up to the chain-wide reorder_point")
 def test_oracle_proposals_carry_the_shops_level(world):
     from agents.implementations.oracle import OracleAgent
 
@@ -387,7 +366,6 @@ def test_oracle_proposals_carry_the_shops_level(world):
     assert got[("P-OWNER", DHN)] in (None, 0)
 
 
-@_xfail("the purchase recommendations report uses the chain-wide reorder_point at every shop")
 def test_purchase_recommendations_use_the_shops_level(world):
     def recs(store):
         res = _get("/api/v1/reports/purchase/recommendations", store_id=store, min_velocity=2)
@@ -397,7 +375,6 @@ def test_purchase_recommendations_use_the_shops_level(world):
     assert recs(BOK) == {"P-FRAME": None, "P-OWNER": None}
 
 
-@_xfail("GET /catalog/products/{id}/inventory: needs_reorder = chain total <= chain reorder_level (default 5)")
 def test_catalog_inventory_never_says_needs_reorder_on_a_chain_default(world):
     world.catalog_products.insert_one({
         "id": "C-FRAME", "sku": "SKU-P-FRAME", "title": "Carrera P-FRAME",
@@ -418,7 +395,6 @@ def _levels_of(world, pid):
     return (world.products.find_one({"product_id": pid}) or {}).get("reorder_levels") or {}
 
 
-@_xfail("no per-shop write exists; PUT /products/{id} is ADMIN/CATALOG_MANAGER-only and chain-wide")
 def test_store_manager_sets_their_own_shops_level_only(world):
     res = _set_level(_BOK_MGR, "P-FRAME", BOK, 1)
     assert res.status_code == 200, res.text
@@ -427,7 +403,6 @@ def test_store_manager_sets_their_own_shops_level_only(world):
     assert _ids(_get("/api/v1/inventory/low-stock", user=_BOK_MGR, store_id=BOK)["items"]) == {"P-FRAME"}
 
 
-@_xfail("no per-shop write exists to refuse another shop")
 def test_store_manager_cannot_set_another_shops_level(world):
     assert _set_level(_BOK_MGR, "P-FRAME", BOK, 1).status_code == 200  # the route exists
     assert _set_level(_BOK_MGR, "P-FRAME", DHN, 9).status_code == 403
@@ -435,7 +410,6 @@ def test_store_manager_cannot_set_another_shops_level(world):
     assert _levels_of(world, "P-FRAME") == {DHN: 2, BOK: 1}
 
 
-@_xfail("no per-shop write exists for an admin to set any shop")
 def test_admin_sets_any_shop_and_clears_back_to_not_set(world):
     assert _set_level(_ADMIN, "P-FRAME", PUN, 4).status_code == 200
     assert _levels_of(world, "P-FRAME").get(PUN) == 4
@@ -484,7 +458,6 @@ def _migration_db():
     return db
 
 
-@_xfail("no migration script exists")
 def test_migration_dry_run_plans_owner_values_and_writes_nothing():
     mod = _script()
     db = _migration_db()
@@ -498,7 +471,6 @@ def test_migration_dry_run_plans_owner_values_and_writes_nothing():
     assert mod.parse_args([]).apply is False  # dry run unless --apply
 
 
-@_xfail("no migration script exists")
 def test_migration_apply_writes_the_levels_once():
     mod = _script()
     db = _migration_db()

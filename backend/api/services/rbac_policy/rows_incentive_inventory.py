@@ -215,6 +215,14 @@ ROWS: List[Dict[str, object]] = [
         "allowed": "AUTHENTICATED",
         "store_scoped": True,
     },
+    # One shop's reorder level (owner ruling D12): store / area managers
+    # their own shops (the handler's validate_store_access), admins any shop.
+    {
+        "method": "PUT",
+        "path": "/api/v1/inventory/reorder-levels/{product_id}",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER", "SUPERADMIN"],
+        "store_scoped": True,
+    },
     # Movements ledger (Movements tab): merged GRN/order/transfer event feed.
     # Mirrors the /inventory/stock row -- any authenticated role may read its
     # own store's ledger; store_scoped stops cross-store reads via ?store_id=.

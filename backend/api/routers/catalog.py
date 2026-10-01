@@ -2778,27 +2778,6 @@ async def adjust_product_inventory(
     }
 
 
-@router.get("/products/{product_id}/inventory")
-async def get_product_inventory(
-    product_id: str, current_user: dict = Depends(get_current_user)
-):
-    """Get inventory levels for a product across all locations"""
-    product = _get_catalog_product(product_id)
-    if product is None:
-        raise HTTPException(status_code=404, detail="Product not found")
-
-    return {
-        "product_id": product_id,
-        "sku": product["sku"],
-        "title": product["title"],
-        "total_quantity": product["inventory"]["total_quantity"],
-        "locations": product["inventory"]["locations"],
-        "reorder_level": product["inventory"]["reorder_level"],
-        "needs_reorder": product["inventory"]["total_quantity"]
-        <= product["inventory"]["reorder_level"],
-    }
-
-
 # ============================================================================
 # ENDPOINTS - Shopify Sync
 # ============================================================================

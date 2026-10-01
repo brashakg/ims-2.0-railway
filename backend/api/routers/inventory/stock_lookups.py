@@ -21,6 +21,8 @@ from ._shared import (
 from .models import (
     StockAddRequest,
 )
+from ._shared import BaseModel, Field, _STOCK_MANAGER_ROLES
+from ...services.reorder_policy import low_stock_rows
 from .helpers import (
     _get_db,
     _reject_stock_mint_on_online_store,
@@ -47,7 +49,9 @@ async def get_low_stock_alerts(
     if repo is None:
         return {"items": []}
 
-    items = repo.find_low_stock(active_store)
+    # THIS shop's low-stock list: each product judged by the shop's own level
+    # (reorder_policy.low_stock_rows, owner ruling D12).
+    items = low_stock_rows(get_product_repository(), repo, store_id=active_store)
 
     # Join the product masters in ONE $in query (fail-soft: a join failure
     # only means the flag stays False, i.e. legacy-enabled behaviour).
@@ -218,3 +222,37 @@ async def add_stock(
         }
 
     return {"stock_id": str(uuid.uuid4()), "barcode": generate_barcode("STR", "PRD")}
+
+
+class ReorderLevelWrite(BaseModel):
+    """One shop's reorder level. level None or -1 = clear it (not set)."""
+
+    # A Mongo key (reorder_levels.<store_id>): no dots, no "$".
+    store_id: str = Field(..., min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    level: Optional[int] = Field(None, ge=-1, le=100000)
+
+
+@router.put("/reorder-levels/{product_id}")
+async def set_reorder_level(
+    product_id: str,
+    body: ReorderLevelWrite,
+    current_user: dict = Depends(require_roles(*_STOCK_MANAGER_ROLES)),
+):
+    """Set or clear ONE shop's reorder level for a product (owner ruling D12:
+    reorder points are per shop). A store / area manager sets their own shops
+    only (validate_store_access 403s any other); ADMIN / SUPERADMIN any shop.
+    The level is never pushed to Shopify, so the product is not marked dirty.
+    The response says `level: null` for not set, never -1."""
+    store = validate_store_access(body.store_id, current_user)
+    repo = get_product_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Products are unavailable")
+    level = body.level if body.level is not None and body.level >= 0 else None
+    key = f"reorder_levels.{store}"
+    res = repo.collection.update_one(
+        {"product_id": product_id},
+        {"$set": {key: level}} if level is not None else {"$unset": {key: ""}},
+    )
+    if not res.matched_count:
+        raise HTTPException(status_code=404, detail="Product not found")
+    return {"product_id": product_id, "store_id": store, "level": level}

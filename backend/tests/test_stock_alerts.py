@@ -9,6 +9,9 @@ The classifier `_build_stock_alert` is a pure function (no DB), so these
 tests exercise the real decision logic directly: each product yields at
 most ONE alert, chosen by priority
     REORDER_ALERT > LOW_STOCK > DEAD_STOCK > OVERSTOCK > FAST_MOVING.
+REORDER_ALERT / LOW_STOCK need the shop's own reorder level (owner ruling
+D12): the products below carry a typed level of 0 at SHOP unless a test says
+otherwise, and a shop with no level gets neither.
 """
 
 from __future__ import annotations
@@ -24,13 +27,17 @@ import pytest  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from functools import partial  # noqa: E402
+
 from api.routers.inventory import (  # noqa: E402
-    _build_stock_alert,
+    _build_stock_alert as _classify_at,
     _summarise_alert_stats,
     _empty_alert_stats,
 )
 
 NOW = datetime(2026, 5, 21, 12, 0, 0)
+SHOP = "BV-TEST-01"
+_build_stock_alert = partial(_classify_at, store_id=SHOP)
 
 
 def _product(**overrides) -> dict:
@@ -44,7 +51,7 @@ def _product(**overrides) -> dict:
         "offer_price": 8000.0,
         "cost_price": 4000.0,
         "stock_quantity": 10,
-        "reorder_point": 0,
+        "reorder_levels": {SHOP: 0},  # a typed level: alert once sold out
     }
     base.update(overrides)
     return base
@@ -90,7 +97,7 @@ class TestReorderAlert:
     def test_explicit_reorder_point_triggers_even_with_cover(self):
         # slow sale but stock at/below an explicit reorder point
         alert = _build_stock_alert(
-            _product(stock_quantity=3, reorder_point=5),
+            _product(stock_quantity=3, reorder_levels={SHOP: 5}),
             sold_30=3,  # 0.1/day → 30 days cover, but below reorder point
             last_sale=NOW - timedelta(days=2),
             now=NOW,
@@ -98,6 +105,22 @@ class TestReorderAlert:
             lead_time_days=14,
         )
         assert alert["alertType"] == "REORDER_ALERT"
+        assert alert["reorderPoint"] == 5
+
+    @pytest.mark.parametrize("levels", [{}, {SHOP: -1}, {"BV-OTHER-01": 5}])
+    def test_no_level_at_this_shop_is_never_a_reorder_or_low_alert(self, levels):
+        # Selling out fast, but this shop never set a level (or set it at
+        # another shop): no REORDER_ALERT / LOW_STOCK, and 'not set', never -1.
+        alert = _build_stock_alert(
+            _product(stock_quantity=1, reorder_levels=levels),
+            sold_30=60,
+            last_sale=NOW - timedelta(days=1),
+            now=NOW,
+            dead_days=90,
+            lead_time_days=14,
+        )
+        assert alert is None or alert["alertType"] not in ("REORDER_ALERT", "LOW_STOCK")
+        assert alert is None or alert["reorderPoint"] is None
 
 
 # --------------------------------------------------------------------------
