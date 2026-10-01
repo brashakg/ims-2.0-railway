@@ -385,7 +385,7 @@ async def create_vendor_bill(
         "total_amount": round(bill.total_amount, 2),
         "outstanding": round(bill.total_amount, 2),
         # No valid supplier GSTIN, no input credit (purchase_invoices does the
-        # same on its doors): one rule, org_validation.has_valid_gstin.
+        # same on its doors): one rule, org_validation.itc_claimable.
         "itc_eligible": itc_claimable(supplier_gstin),
         "po_id": bill.po_id,
         "grn_id": bill.grn_id,
