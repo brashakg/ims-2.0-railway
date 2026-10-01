@@ -254,6 +254,38 @@ def test_f12_off_brand_products_never_starve_push_all_pending(monkeypatch):
     assert out["cap_reached"] is False
 
 
+def test_f12_a_live_listing_whose_brand_is_switched_off_is_named_in_the_run(monkeypatch):
+    """A live Carrera listing edited after its brand went off the website is
+    not pushed (the one gate), so it keeps selling at its last pushed price:
+    the live-sync run names it in its failures, never just a count."""
+    from api.services import policy_engine as pe
+    from api.services import shopify_live_sync as live_sync
+
+    async def _boom(*_a, **_k):  # pragma: no cover - must never run
+        raise AssertionError("no Shopify network in tests")
+
+    async def _no_stock(db):
+        return sp.PushResult(ok=True, mode=sp.MODE_SIMULATED, entity="stock",
+                             action="sync", target_id="all", payload={})
+
+    monkeypatch.setattr(sp, "_graphql", _boom)
+    monkeypatch.setattr(sp, "sync_stock_levels", _no_stock)
+    monkeypatch.setattr(deps, "get_audit_repository", lambda: None)
+    db = _db()
+    monkeypatch.setattr(pe, "_coll", lambda name="policy_settings": db[name])
+    doc = _live_doc("Carrera")
+    doc["ecom"]["locally_modified"] = True
+    doc["offer_price"] = 4900.0  # the raise that never reaches the website
+    db.seed("catalog_products", [doc])
+    run = _run(live_sync.sync_live_products(db, trigger="manual", actor="u-admin"))
+    assert (run["selected"], run["attempted"], run["live_not_pushed"]) == (1, 0, 1)
+    assert [(f["sku"], f["code"]) for f in run["failures"]] == [
+        ("SKU-Carrera", live_sync.LIVE_NOT_PUSHED)
+    ]
+    assert "not for the website" in run["failures"][0]["error"]
+    assert "still live" in run["failures"][0]["error"]
+
+
 # ---------------------------------------------------------------------------
 # F13 / D5 - readable SKU for new products, previewed by the same function
 # ---------------------------------------------------------------------------
