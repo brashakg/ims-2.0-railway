@@ -105,8 +105,21 @@ describe('the unit label page', () => {
     expect(doc.querySelector('.info .size')?.textContent).toBe('54');
   });
 
+  it('prints the MRP exactly: paise when it has them, never rounded', () => {
+    // MRP is stored as a float (the add-product form parses "1499.5"). Rounded
+    // to whole rupees it printed "MRP ₹1,500" -- above what the till charges --
+    // and 0.4 printed "MRP ₹0".
+    const mrpOf = (mrp: number) =>
+      parse(unitLabelsDocument([{ ...CARRERA, mrp }])).querySelector('.mrp')?.textContent;
+    expect(mrpOf(1499.5)).toBe('MRP ₹1,499.50');
+    expect(mrpOf(1499.99)).toBe('MRP ₹1,499.99');
+    expect(mrpOf(0.4)).toBe('MRP ₹0.40');
+    expect(mrpOf(1234567.89)).toBe('MRP ₹12,34,567.89');
+    expect(mrpOf(8990)).toBe('MRP ₹8,990'); // whole rupees: no ".00"
+  });
+
   it('prints no price for a unit with no MRP (an import with no price stores 0)', () => {
-    for (const mrp of [0, null, undefined]) {
+    for (const mrp of [0, -1, -0.5, null, undefined, Number.NaN]) {
       const text = parse(unitLabelsDocument([{ ...CARRERA, mrp }])).body.textContent || '';
       expect(text, String(mrp)).not.toMatch(/MRP|₹/);
     }

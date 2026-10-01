@@ -120,11 +120,15 @@ function esc(v: unknown): string {
     .replace(/"/g, '&quot;');
 }
 
-/** No price is printed for a unit with no MRP: an imported product with no
- *  price is stored as 0, and a label reading "MRP ₹0" is a wrong price. */
+/** The MRP exactly as stored, never rounded (owner 2026-10-01): whole rupees
+ *  print without decimals, a price with paise prints them (1,499.50). No price
+ *  for a unit with no MRP: an import with no price stores 0, and "MRP ₹0" is a
+ *  wrong price. */
 function mrpText(mrp?: number | null): string {
   const n = Number(mrp);
-  return mrp != null && n > 0 ? `MRP ₹${n.toLocaleString('en-IN', { maximumFractionDigits: 0 })}` : '';
+  if (mrp == null || !(n > 0)) return '';
+  const decimals = Number.isInteger(n) ? 0 : 2;
+  return `MRP ₹${n.toLocaleString('en-IN', { minimumFractionDigits: decimals, maximumFractionDigits: 20 })}`;
 }
 
 function labelHtml(u: UnitLabelData, offsetMm: number, extraClass = ''): string {
