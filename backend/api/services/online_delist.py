@@ -80,14 +80,16 @@ def _raw_db(db):
     return inner if inner is not None else db
 
 
-def _resolve_twin(db, product: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _resolve_twin(db, product: Dict[str, Any], *, strict: bool = False) -> Optional[Dict[str, Any]]:
     """The catalog_products twin (the doc that carries ecom.shopify_product_id).
 
     A doc with an `ecom` sub-doc IS a catalog doc. A spine row is keyed to its
     twin by pim_product_id (the create door's own link), then product_id / id
     (legacy convergence twins share the spine id), then sku -- the same order
     online_catalog.stamp_online_state uses. Sequential find_one (no $or) so the
-    in-memory MockCollection resolves identically. Fail-soft -> None."""
+    in-memory MockCollection resolves identically. Fail-soft -> None, or,
+    ``strict``, a raised read (the nightly parity: a dead read is never "no
+    twin")."""
     if "ecom" in product:
         return product
     if db is None:
@@ -106,6 +108,8 @@ def _resolve_twin(db, product: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if product.get("sku"):
             return coll.find_one({"sku": product["sku"]})
     except Exception:  # noqa: BLE001
+        if strict:
+            raise
         logger.warning("[DELIST] twin lookup failed", exc_info=True)
     return None
 
