@@ -192,11 +192,12 @@ def load_brand_tier(db, brand_name: str) -> Optional[str]:
 def load_brand_sync_default(db, brand_name: str) -> bool:
     """The brand's `sync_to_shopify_default` flag (Settings -> Brand Master).
 
-    Used by the product create door to stamp `sync_to_shopify` INTENT on new
-    spine products when the payload doesn't say explicitly. NOTE: nothing
-    pushes to Shopify from IMS anymore (the BVI app owns Shopify) -- this is
-    a recorded intent for the future BVI-side push. FAIL-SOFT: unknown brand /
-    no db / read failure -> False (never sync by accident)."""
+    THE website rule (owner ruling 2026-09-29, D6): the brand default always
+    decides whether a product goes to the website, read LIVE: the Shopify
+    push refuses a product whose brand says no (shopify_push.
+    product_push_refusal) and the Add-product form's read-only line shows it
+    (GET /products/brand-options). Products store no copy of it. FAIL-SOFT:
+    unknown brand / no db / read failure -> False (never sync by accident)."""
     doc = _find_active_brand(db, brand_name)
     if doc is None:
         return False

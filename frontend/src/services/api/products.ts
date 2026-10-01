@@ -92,9 +92,8 @@ export interface CreateProductPayload {
   discount_category?: string;
   images?: string[];
   shopify?: {
-    // Online-store staging flags for a new product. IMS owns Shopify writes
-    // directly; the actual push happens from the Online Store module.
-    sync_to_shopify: boolean;
+    // Online-store staging for a new product. Whether it goes to the website
+    // at all is the brand's Brand Master default, never sent from here (D6).
     shopify_tags?: string[];
     publish_to_pos?: boolean;
   };
@@ -110,6 +109,15 @@ export interface CreateProductPayload {
 // payload as a typed DuplicateProductError — the shared axios interceptor
 // would otherwise flatten the object detail into a generic string Error.
 // ---------------------------------------------------------------------------
+/** One Brand Master row as the Add-product form needs it. */
+export interface BrandOption {
+  name: string;
+  subbrands: string[];
+  tier?: string;
+  /** The brand default that decides whether its products go to the website (D6). */
+  sync_to_shopify_default?: boolean;
+}
+
 export interface DuplicateProductInfo {
   product_id?: string | null;
   sku?: string | null;
@@ -391,13 +399,20 @@ export const productApi = {
   // applicable to the category (short code like 'FR' or canonical), each with
   // its sub-brand names — drives the Brand Name select and restricts the
   // Sub Brand select per selected brand. Authenticated (not admin-gated).
-  getBrandOptions: async (
-    category?: string
-  ): Promise<{ brands: Array<{ name: string; subbrands: string[]; tier?: string }> }> => {
+  getBrandOptions: async (category?: string): Promise<{ brands: BrandOption[] }> => {
     const response = await api.get('/products/brand-options', { params: { category } });
-    return response.data as {
-      brands: Array<{ name: string; subbrands: string[]; tier?: string }>;
-    };
+    return response.data as { brands: BrandOption[] };
+  },
+
+  // The SKU a NEW product will get, from the server's one minter
+  // (product_master.build_sku) -- the form shows it before saving and never
+  // builds a SKU itself. A clash on save adds a number to the end.
+  previewSku: async (
+    category: string,
+    attributes: Record<string, string>
+  ): Promise<{ category: string | null; sku: string }> => {
+    const response = await api.post('/products/sku-preview', { category, attributes });
+    return response.data as { category: string | null; sku: string };
   },
 
   getBrands: async (category?: string) => {

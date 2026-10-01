@@ -48,6 +48,7 @@ vi.mock('../../../services/api/products', () => ({
   productApi: {
     getCategoryRegistry: vi.fn(async () => { throw new Error('offline'); }),
     getBrandOptions: vi.fn(async () => ({ brands: [] })),
+    previewSku: vi.fn(async () => ({ category: 'SUNGLASS', sku: '' })),
     getProduct: vi.fn(async () => SOURCE_PRODUCT),
     uploadProductImage: vi.fn(async () => ({ url: '/api/v1/products/image/f1' })),
     createProduct: (...a: unknown[]) => createProduct(...a),
@@ -75,6 +76,7 @@ vi.mock('../../../constants/gstRuntime', () => ({
 }));
 
 import { QuickAddPage } from '../QuickAddPage';
+import { productApi } from '../../../services/api/products';
 import {
   getCategoryFields,
   validateProductForm,
@@ -97,7 +99,6 @@ const blankSunglass = (over: Partial<ProductFormValues> = {}): ProductFormValues
   gstRate: '18',
   mrp: '',
   discountCategory: '',
-  syncToShopify: false,
   shopifyTags: [],
   publishPOS: true,
   ...over,
@@ -302,14 +303,20 @@ describe('8 - the review card uses registry labels', () => {
 });
 
 describe('9 + 12 - the Online strip', () => {
-  it('says in words what the POS switch waits on, and the tag box has a visible label', async () => {
+  it('has no website or POS switch (the brand default decides, D6), and the tag box has a visible label', async () => {
     const user = userEvent.setup();
+    // A brand the Brand Master sends to the website opens the tag box. The
+    // form reads every brand's default once, on load (as the push gate does).
+    vi.mocked(productApi.getBrandOptions).mockResolvedValueOnce({
+      brands: [{ name: 'Ray-Ban', subbrands: [], sync_to_shopify_default: true }],
+    });
     renderPage();
-    expect(screen.getByText(/turn on Sync to Shopify first/)).toBeInTheDocument();
+    expect(screen.queryByLabelText('Sync to Shopify')).toBeNull();
+    expect(screen.queryByLabelText('Publish to Shopify POS')).toBeNull();
     expect(screen.queryByLabelText('Shopify tags')).toBeNull();
 
-    await user.click(screen.getByLabelText('Sync to Shopify'));
-    expect(screen.queryByText(/turn on Sync to Shopify first/)).toBeNull();
-    expect(screen.getByLabelText('Shopify tags')).toBeInTheDocument();
+    await user.click(screen.getByText('Sunglass'));
+    fill(screen.getByLabelText(/^Brand Name/), 'Ray-Ban');
+    expect(await screen.findByLabelText('Shopify tags')).toBeInTheDocument();
   });
 });

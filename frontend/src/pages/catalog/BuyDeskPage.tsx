@@ -25,7 +25,9 @@ const ECOM_LABEL: Record<EcomState, string> = {
   NOT_LISTED: 'Not listed',
   STAGED: 'Staged',
   LIVE: 'Live',
-  PUSH_LOCKED: 'Push-locked',
+  // The push refuses it: a push-locked brand, or Brand Master keeps the
+  // brand off the website (owner D6).
+  PUSH_LOCKED: 'Not for website',
 };
 
 function readinessChip(row: BuyDeskRow) {
@@ -201,7 +203,11 @@ export default function BuyDeskPage() {
           />
         </div>
         <div className="text-sm text-gray-500">
-          {rows.length} products · <span className="font-medium text-green-700">{readyCount} ready to buy</span>
+          {!loading && (
+            <>
+              {rows.length} products · <span className="font-medium text-green-700">{readyCount} ready to buy</span>
+            </>
+          )}
         </div>
       </div>
 

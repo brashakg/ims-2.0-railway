@@ -62,7 +62,6 @@ export function catalogDocToFormValues(doc: CatalogProductDoc): ProductFormValue
     name: str(doc.name) || str(doc.title),
     tags: docTags(doc),
     // Online flags are meaningless on an imported doc (BVI owns Shopify).
-    syncToShopify: false,
     shopifyTags: [],
     publishPOS: true,
   };

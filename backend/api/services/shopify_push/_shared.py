@@ -335,6 +335,32 @@ def push_lock_reason(db, entity: str, doc: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def product_push_refusal(db, product: Dict[str, Any]) -> Optional[str]:
+    """Why this product must not be written to Shopify, or None. THE product
+    gate: push_product, push_variant_prices, the image push and the press/live
+    sweep queue all ask it first, so none of them can disagree.
+
+    A push-locked brand (above), or a brand Settings > Brand Master keeps off the
+    website (owner ruling 2026-09-29, D6: the brand default ALWAYS decides,
+    read live -- products store no copy of it). Unknown brand / read trouble ->
+    refused (fail-closed, never list by accident).
+
+    Stock is deliberately NOT gated: a listing already live when its brand is
+    switched off keeps a true stock count until someone takes it down (Online
+    Store > Take down), so the website never sells a frame that is not there."""
+    lock = push_lock_reason(db, "product", product)
+    if lock:
+        return lock
+    from .. import catalog_dictionary
+
+    brand = product.get("brand") or product.get("vendor") or (
+        product.get("attributes") or {}
+    ).get("brand_name")
+    if not catalog_dictionary.load_brand_sync_default(db, brand):
+        return "brand '%s' is not for the website (Settings > Brand Master)" % (brand or "-")
+    return None
+
+
 def is_variant_of(doc: Any) -> bool:
     """THE variant-of predicate (owner ruling 2026-09-06): True for a catalog
     twin that is a SIZE VARIANT of another product. Such a product is its own

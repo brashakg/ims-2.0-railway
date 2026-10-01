@@ -1,18 +1,17 @@
-// Quick Add - ONLINE. The compact always-visible Shopify strip (sync switch,
-// the POS switch that says what it waits on, and the tag box). Hidden in
-// review mode - the imported doc's real online status is in the banner and
-// these create-time flags are not part of the review PUT.
-// MOVED verbatim out of QuickAddPage.tsx (Wave 3 file diet).
+// Quick Add - ONLINE. Whether the product goes to the website is the BRAND's
+// default (Settings > Brand Master), never a per-product switch (owner ruling
+// 2026-09-29, D6): the strip says what the brand decides, read-only, and the
+// tag box shows only for a brand that goes online. No Shopify POS switch
+// either (IMS is the till). Hidden in review mode - the imported doc's real
+// online status is in the banner.
 
 import { Globe, X } from 'lucide-react';
-import clsx from 'clsx';
 import type { QuickAddForm } from './useQuickAddForm';
 
 export function OnlineStrip({ form }: { form: QuickAddForm }) {
-  const {
-    isReviewMode, syncToShopify, setSyncToShopify, publishPOS, setPublishPOS,
-    shopifyTags, setShopifyTags,
-  } = form;
+  const { isReviewMode, attributes, brandGoesOnline, shopifyTags, setShopifyTags } = form;
+  const brand = (attributes.brand_name || '').trim();
+  const goesOnline = brandGoesOnline(brand);
 
   return (
     <>
@@ -23,45 +22,15 @@ export function OnlineStrip({ form }: { form: QuickAddForm }) {
             <Globe className="w-4 h-4 text-bv" />
             Online
           </span>
-          <label className="flex min-h-10 items-center gap-2 cursor-pointer">
-            <span className="relative inline-flex items-center">
-              <input
-                type="checkbox"
-                title="Sync to Shopify"
-                aria-label="Sync to Shopify"
-                checked={syncToShopify}
-                onChange={(e) => setSyncToShopify(e.target.checked)}
-                className="sr-only peer"
-              />
-              <span className="w-9 h-5 bg-gray-300 rounded-full peer peer-checked:after:translate-x-4 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-bv"></span>
-            </span>
-            <span className="text-sm text-gray-800">Sync to Shopify</span>
-          </label>
-          <label className={clsx('flex min-h-10 items-center gap-2', syncToShopify ? 'cursor-pointer' : 'cursor-not-allowed')}>
-            <span className="relative inline-flex items-center">
-              <input
-                type="checkbox"
-                title="Publish to Shopify POS"
-                aria-label="Publish to Shopify POS"
-                checked={publishPOS}
-                disabled={!syncToShopify}
-                onChange={(e) => setPublishPOS(e.target.checked)}
-                className="sr-only peer"
-              />
-              <span className={clsx(
-                "w-9 h-5 rounded-full peer peer-checked:after:translate-x-4 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-bv",
-                syncToShopify ? 'bg-gray-300' : 'bg-gray-200'
-              )}></span>
-            </span>
-            <span className={clsx('text-sm', syncToShopify ? 'text-gray-800' : 'text-gray-500')}>
-              Publish to Shopify POS
-            </span>
-            {!syncToShopify && (
-              <span className="text-xs text-gray-500">— turn on Sync to Shopify first</span>
-            )}
-          </label>
+          <p className="text-sm text-gray-700">
+            {!brand
+              ? 'Website: decided by the brand default (Settings > Brand Master).'
+              : goesOnline === undefined
+                ? `Website: no - ${brand} has no brand default in Settings > Brand Master.`
+                : `Website: ${goesOnline ? 'yes' : 'no'} - ${brand}'s brand default (Settings > Brand Master).`}
+          </p>
         </div>
-        {syncToShopify && (
+        {goesOnline && (
           <div className="mt-2.5">
             <label className="block text-xs font-medium text-gray-700 mb-1" htmlFor="qa-shopify-tags">
               Shopify tags
