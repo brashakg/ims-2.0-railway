@@ -362,6 +362,14 @@ class TestBarcodeUpdateEndpoint:
 # never sent anywhere.
 
 
+@pytest.fixture
+def mirror_on(monkeypatch):
+    """The production default (pm.mirror_enabled ON): the create door writes the
+    catalog_variants row. Pinned, because another module's import-time
+    os.environ.setdefault can have switched it off for the whole run."""
+    monkeypatch.setenv("PM_MIRROR_ENABLED", "1")
+
+
 def _pushed_barcodes(db, twin):
     """What the price push sends for `twin` over the catalog_variants rows the
     create door REALLY wrote (variant_rows_for_product, as push_product loads
@@ -403,7 +411,7 @@ class TestGtinAttributeOnTheEditDoor:
         assert "upc" not in (saved.get("attributes") or {})
         _update(pid, attributes={"upc": _UPC_A})
 
-    def test_a_saved_gtin_reaches_the_shopify_push(self, mock_db):
+    def test_a_saved_gtin_reaches_the_shopify_push(self, mock_db, mirror_on):
         from api.services.online_catalog import variant_rows_for_product
 
         created = _create("GT-OK")
@@ -423,7 +431,7 @@ class TestGtinAttributeOnTheEditDoor:
         # ... and once the product is on Shopify the push sends the product's.
         assert _pushed_barcodes(mock_db, twin) == {"GT-OK": _VALID_A}
 
-    def test_a_size_variant_keeps_its_own_gtin_on_the_parents_push(self, mock_db):
+    def test_a_size_variant_keeps_its_own_gtin_on_the_parents_push(self, mock_db, mirror_on):
         """The parent's push carries every row the create door wrote under
         it: its self row ships the PARENT's GTIN, the size variant's row its
         own -- never the parent's (a GTIN names one trade item)."""
@@ -471,7 +479,7 @@ class TestGtinAttributeOnTheEditDoor:
         saved = mock_db["products"].find_one({"product_id": pid})
         assert not saved["attributes"].get("gtin")
 
-    def test_remove_barcode_clears_every_barcode_the_push_reads(self, mock_db):
+    def test_remove_barcode_clears_every_barcode_the_push_reads(self, mock_db, mirror_on):
         """Manage Barcode > Remove (attributes.gtin = '') cleared only the twin's
         gtin; the push falls back to the twin's legacy top-level `barcode`, so
         it went on sending that code."""
