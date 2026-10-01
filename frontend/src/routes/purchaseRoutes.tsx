@@ -81,10 +81,13 @@ export const purchaseRoutes = (
           </ProtectedRoute>
         }
       />
+      {/* Purchase invoices are supplier bills -- what we owe and have paid
+          (owner ruling 2026-10-01): the accounts roles only, the same set as
+          every /vendors/purchase-invoices/* read (APPROVE_ROLES). */}
       <Route
         path="invoices"
         element={
-          <ProtectedRoute allowedRoles={PURCHASE_ROLES}>
+          <ProtectedRoute allowedRoles={APPROVE_ROLES}>
             <PurchaseInvoicesSection />
           </ProtectedRoute>
         }
@@ -106,11 +109,12 @@ export const purchaseRoutes = (
         }
       />
       {/* Vendor Returns keeps its wider historical gate (WORKSHOP_STAFF logs
-          defective pairs; ACCOUNTANT is not in this flow). */}
+          defective pairs). ACCOUNTANT reads it too: the supplier credit and
+          the GST debit notes on these returns are the accounts roles' to see. */}
       <Route
         path="vendor-returns"
         element={
-          <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'WORKSHOP_STAFF']}>
+          <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'WORKSHOP_STAFF']}>
             <VendorReturns />
           </ProtectedRoute>
         }

@@ -30,7 +30,9 @@ import { APPROVE_ROLES } from './invoices/shared';
 
 const SECTIONS = [
   { path: '/purchase/orders', label: 'Purchase Orders', icon: FileText },
-  { path: '/purchase/invoices', label: 'Purchase Invoices', icon: Receipt },
+  // Supplier bills -- what we owe and have paid: the accounts roles only
+  // (owner ruling 2026-10-01; the route reads the same APPROVE_ROLES).
+  { path: '/purchase/invoices', label: 'Purchase Invoices', icon: Receipt, roles: APPROVE_ROLES },
   { path: '/purchase/variance', label: 'Variance', icon: PackageX },
   { path: '/purchase/suppliers', label: 'Suppliers', icon: Truck },
   { path: '/purchase/vendor-returns', label: 'Vendor Returns', icon: AlertTriangle },

@@ -8,17 +8,22 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Loader2, FileText, Copy, Check } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
+import { useAuth } from '../../context/AuthContext';
+import { PAYABLES_ROLES } from '../../components/common/CostCell';
 import { approvalsApi } from '../../services/api/approvals';
 import type { ApprovalRequest } from '../../services/api/approvals';
 import { formatDateTimeIST } from '../../utils/datetime';
 import {
   actionLabel,
   formatRupees,
+  shownAmount,
   StatusBadge,
 } from '../../components/approvals/ApprovalRequestCard';
 
 export function MyRequestsPage() {
   const toast = useToast();
+  const { hasRole } = useAuth();
+  const canSeePayables = hasRole(PAYABLES_ROLES);
   const [rows, setRows] = useState<ApprovalRequest[]>([]);
   const [loading, setLoading] = useState(true);
   const [copied, setCopied] = useState<string | null>(null);
@@ -95,7 +100,7 @@ export function MyRequestsPage() {
                       {actionLabel(r.action_type)}
                     </td>
                     <td className="px-4 py-2 text-right font-mono">
-                      {formatRupees(r.amount)}
+                      {formatRupees(shownAmount(r, canSeePayables))}
                     </td>
                     <td className="px-4 py-2">
                       <StatusBadge status={r.status} />

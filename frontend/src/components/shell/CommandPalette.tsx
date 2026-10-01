@@ -121,7 +121,7 @@ const EXTRA_JUMPS: ExtraJump[] = [
     label: 'Vendor Returns',
     route: '/purchase/vendor-returns',
     hint: 'Stock & supply',
-    requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'WORKSHOP_STAFF'],
+    requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'WORKSHOP_STAFF'],
   },
 ];
 

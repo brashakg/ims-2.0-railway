@@ -7,7 +7,9 @@
 //   header  : PO number + vendor + PurchaseStatusChip
 //   timeline: chronological events in the owner vocabulary
 //             (Ordered / Sent / Box received / On shelf / Bill settled)
-//   lists   : raw linked GRNs + purchase invoices with their statuses
+//   lists   : raw linked GRNs + purchase invoices with their statuses (a
+//             bill's amount, paid state and the "Bill settled" event are
+//             supplier money: PAYABLES_ROLES only, owner ruling 2026-10-01)
 //   footer  : ONE derived next-step action --
 //             DRAFT                      -> "Send to vendor" (parent callback;
 //                                           PurchaseTable routes it to the PO
@@ -34,6 +36,7 @@ import {
 import { useNavigate } from 'react-router-dom';
 import { vendorsApi } from '../../services/api/inventory';
 import { useAuth } from '../../context/AuthContext';
+import { PAYABLES_ROLES } from '../common/CostCell';
 import { PurchaseStatusChip } from './PurchaseStatusChip';
 import { RECEIVABLE_PO_STATUSES } from '../../pages/purchase/purchaseTypes';
 import type { POStatus } from '../../pages/purchase/purchaseTypes';
@@ -142,10 +145,6 @@ function fmtDateTime(at: string | null | undefined): string {
  *  a role a button that lands on /unauthorized. */
 const RECEIVE_ROLES = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] as const;
 
-/** AP-capable roles (mirrors the /purchase/recon-console gate -- the invoice
- *  booking surface is an accountant function). */
-const AP_ROLES = ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] as const;
-
 /** GRN statuses that mean accepted stock is on the shelf and billable. */
 const ACCEPTED_GRN_STATUSES = new Set(['ACCEPTED', 'PARTIALLY_ACCEPTED']);
 
@@ -206,6 +205,12 @@ export function deriveNextStep(
 export function POLifecycleDrawer({ poId, poNumber, onClose, onSendToVendor }: POLifecycleDrawerProps) {
   const navigate = useNavigate();
   const { hasRole } = useAuth();
+  // Supplier money (owner ruling 2026-10-01): what a bill against this PO is
+  // for, whether it is paid, and the "Bill settled" event are the accounts
+  // roles' alone. The server already sends anyone else a bill with no total
+  // and a neutral BOOKED status; this keeps the drawer from stating a paid
+  // state it was never told.
+  const canSeePayables = hasRole(PAYABLES_ROLES);
   const closeRef = useRef<HTMLButtonElement | null>(null);
 
   const [timeline, setTimeline] = useState<POTimeline | null>(null);
@@ -245,7 +250,8 @@ export function POLifecycleDrawer({ poId, poNumber, onClose, onSendToVendor }: P
     ? deriveNextStep(timeline, {
         canSend: Boolean(onSendToVendor),
         canReceive: hasRole([...RECEIVE_ROLES]),
-        canBookInvoice: hasRole([...AP_ROLES]),
+        // Booking a supplier bill is an accounts function (PAYABLES_ROLES).
+        canBookInvoice: hasRole(PAYABLES_ROLES),
       })
     : null;
 
@@ -259,7 +265,9 @@ export function POLifecycleDrawer({ poId, poNumber, onClose, onSendToVendor }: P
     navigate(nextStep.to);
   };
 
-  const events = timeline?.events ?? [];
+  const events = (timeline?.events ?? []).filter(
+    (ev) => canSeePayables || String(ev.kind || '').toLowerCase() !== 'bill_settled',
+  );
   const grns = timeline?.grns ?? [];
   const invoices = timeline?.invoices ?? [];
 
@@ -409,10 +417,10 @@ export function POLifecycleDrawer({ poId, poNumber, onClose, onSendToVendor }: P
                           <p className="text-sm font-medium text-gray-900 truncate">{inv.invoice_number}</p>
                           <p className="text-xs text-gray-500">
                             {fmtDateTime(inv.created_at)}
-                            {typeof inv.total === 'number' && ` · ₹${inv.total.toLocaleString()}`}
+                            {canSeePayables && typeof inv.total === 'number' && ` · ₹${inv.total.toLocaleString()}`}
                           </p>
                         </div>
-                        <PurchaseStatusChip status={inv.status} kind="invoice" />
+                        {canSeePayables && inv.status && <PurchaseStatusChip status={inv.status} kind="invoice" />}
                       </div>
                     ))}
                   </div>

@@ -7,6 +7,8 @@
 // pending card and bubble up to the parent, which opens the PIN modal.
 
 import { useNow } from '../../hooks/useNow';
+import { useAuth } from '../../context/AuthContext';
+import { PAYABLES_ROLES } from '../common/CostCell';
 import { formatDateTimeIST, toDate } from '../../utils/datetime';
 import type { ApprovalRequest } from '../../services/api/approvals';
 
@@ -60,6 +62,22 @@ export function formatRupees(amount: number | null | undefined): string {
   return `₹${amount.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
 }
 
+/** Action types whose amount is supplier money (owner ruling 2026-10-01): an
+ *  'rtv' request's amount is the credit a supplier gave us on a vendor RMA. */
+const SUPPLIER_MONEY_ACTIONS = new Set(['rtv']);
+
+/** The amount this reader may see on a request: a supplier-money amount is
+ *  PAYABLES_ROLES' alone, so anyone else gets null (formatRupees shows an
+ *  em-dash). The server already drops it for them; this keeps a stale or wider
+ *  answer off the screen too. Every other action type keeps its amount. */
+export function shownAmount(
+  request: Pick<ApprovalRequest, 'action_type' | 'amount'>,
+  canSeePayables: boolean,
+): number | null | undefined {
+  if (!canSeePayables && SUPPLIER_MONEY_ACTIONS.has(request.action_type)) return null;
+  return request.amount;
+}
+
 /** Human countdown to a deadline relative to `now`. Returns null once past. */
 export function remainingLabel(expiresAt: string | null, now: Date): string | null {
   const d = toDate(expiresAt);
@@ -96,6 +114,7 @@ export function ApprovalRequestCard({
 }: Props) {
   // 1s tick only matters when a live countdown is visible (pending rows).
   const now = useNow(showActions ? 1000 : 60_000);
+  const { hasRole } = useAuth();
   const isRequested = request.status === 'REQUESTED';
   const remaining = isRequested ? remainingLabel(request.expires_at, now) : null;
 
@@ -152,7 +171,7 @@ export function ApprovalRequestCard({
         </div>
         <div className="text-right shrink-0">
           <div className="font-mono text-sm text-gray-900">
-            {formatRupees(request.amount)}
+            {formatRupees(shownAmount(request, hasRole(PAYABLES_ROLES)))}
           </div>
           {isRequested &&
             (remaining ? (
