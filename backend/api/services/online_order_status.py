@@ -153,8 +153,11 @@ def apply_fact(
             out.update(why=why, terminal_withheld=why in ("withheld", "conflict"))
             if why == "held":
                 _raise_rx_task(db, order, source)
-            elif why == "conflict":
-                _raise_conflict_task(db, order, fact, source)
+            elif why == "conflict" and not _raise_conflict_task(db, order, fact, source):
+                # No task, so no marks either: the event stays unmarked and
+                # its redelivery or the sweep raises the one task again.
+                out["failed"] = True
+                return out
             oid = order.get("order_id")
             if not oid:
                 return out
@@ -204,14 +207,15 @@ def _raise_rx_task(db, order: Dict[str, Any], source: str) -> None:
                      order.get("order_id"), exc_info=True)
 
 
-def _raise_conflict_task(db, order: Dict[str, Any], fact: str, source: str) -> None:
+def _raise_conflict_task(db, order: Dict[str, Any], fact: str, source: str) -> bool:
     """ONE task per order, forever (ruling 2): the order doc's
     status_conflict_at marker is claimed atomically first, so a replay, the
-    hourly sweep, a remap or a closed task never raise a second one. Never
-    raises."""
+    hourly sweep, a remap or a closed task never raise a second one. True:
+    the task is raised (now, or by the event that holds the marker); False:
+    neither the marker nor the task landed. Never raises."""
     oid = order.get("order_id")
     if not oid:
-        return
+        return True
     try:
         orders = db.get_collection("orders")
         claim = orders.update_one(
@@ -222,11 +226,11 @@ def _raise_conflict_task(db, order: Dict[str, Any], fact: str, source: str) -> N
             }},
         )
         if not getattr(claim, "modified_count", 0):
-            return
+            return True
     except Exception:  # noqa: BLE001
         logger.warning("[%s] status-conflict marker claim failed for order=%s", source, oid,
                        exc_info=True)
-        return
+        return False
     ref = order.get("order_number") or oid
     verb = _VERB.get(fact, str(fact).lower())
     try:
@@ -264,6 +268,7 @@ def _raise_conflict_task(db, order: Dict[str, Any], fact: str, source: str) -> N
             "created_at": datetime.now(timezone.utc).isoformat(),
             "created_by": f"system:{source}",
         })
+        return True
     except Exception:  # noqa: BLE001 -- release the marker so the next event retries
         logger.warning("[%s] status-conflict task insert failed for order=%s", source, oid,
                        exc_info=True)
@@ -274,3 +279,4 @@ def _raise_conflict_task(db, order: Dict[str, Any], fact: str, source: str) -> N
             )
         except Exception:  # noqa: BLE001
             logger.debug("[%s] status-conflict marker release failed", source, exc_info=True)
+        return False
