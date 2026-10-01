@@ -432,8 +432,12 @@ def _ledger_row(
         "barcode": sample_unit.get("barcode", "") or product.get("barcode", ""),
         # Every on-hand unit's IMS code at this shop (the search boxes match it).
         "unit_barcodes": sample_unit.get("unit_barcodes", []),
-        # The manufacturer's GTIN -- what Inventory > Manage Barcode edits.
-        "gtin": (product.get("attributes") or {}).get("gtin") or "",
+        # The manufacturer's GTIN -- what Inventory > Manage Barcode edits. A
+        # legacy products.barcode shows too (main's old modal wrote it there),
+        # so it can be seen and removed; saving moves it to the gtin attribute.
+        "gtin": (product.get("attributes") or {}).get("gtin")
+        or product.get("barcode")
+        or "",
         "location": sample_unit.get("location_code", "")
         or product.get("location_code", ""),
         "location_code": sample_unit.get("location_code", "")

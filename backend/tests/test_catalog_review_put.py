@@ -776,6 +776,17 @@ def test_review_editor_remove_clears_every_barcode_the_push_reads(gtin_env):
     assert "barcode" not in rows[0]
 
 
+def test_review_editor_remove_drops_the_spines_legacy_barcode(gtin_env):
+    """A code in the spine's legacy `barcode` is held by the one-holder rule:
+    Remove must take it along, or no other product can ever be given it."""
+    gtin_env.collection.update_one(
+        {"product_id": "spine-g1"}, {"$set": {"barcode": _UPC}}
+    )
+    _put("twin-g1", {"attributes": {"gtin": ""}})
+    assert "barcode" not in gtin_env.find_by_id("spine-g1")
+    assert gtin_env.find_by_barcode(_UPC) is None
+
+
 def test_catalog_create_door_refuses_a_gtin_another_product_holds(gtin_env):
     """POST /catalog/products is a create door too: one holder per GTIN."""
     gtin_env.create({"product_id": "spine-other", "sku": "OTHER-1",

@@ -3405,6 +3405,7 @@ async def update_product(
         # OPTICAL_LENS index/coating) can be filled and auto-promoted by the
         # restamp below. An explicit value in the patch wins; existing keys are
         # preserved. Persisted as the full merged attributes dict.
+        _gtin_written = False
         if "attributes" in update_data:
             # Case ONLY the keys this submit carries, BEFORE the merge. Casing
             # the merged bag would rewrite every stored attribute on every
@@ -3423,6 +3424,7 @@ async def update_product(
             _refuse_barcode_held_by_another_product(
                 _patch.get("gtin"), repo, product_id
             )
+            _gtin_written = "gtin" in _patch
             update_data["attributes"] = {
                 **(existing.get("attributes") or {}),
                 **_patch,
@@ -3496,6 +3498,8 @@ async def update_product(
         )
 
         if repo.update(product_id, update_data):
+            if _gtin_written and "barcode" not in update_data:
+                _pm.drop_legacy_spine_barcode(repo, product_id)
             # Compact field-classified audit row (scorecard corrections): the
             # spine PUT is the primary FE edit door, and without this row an
             # other-user pricing-only edit would be (over-)counted as a

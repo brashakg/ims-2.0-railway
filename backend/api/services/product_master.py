@@ -1372,6 +1372,17 @@ def twin_barcode_fields(gtin: Any) -> Dict[str, Any]:
     return {"gtin": None, "barcode": None}
 
 
+def drop_legacy_spine_barcode(product_repo, product_id: Any) -> None:
+    """The gtin attribute is a product's ONE manufacturer-barcode home, so a
+    door that writes it drops the legacy products.barcode (main's old Manage
+    Barcode wrote there). Left behind, a removed code stayed on the product:
+    assert_gtin_free still found it and no screen could clear it. $unset, never
+    "" or None: products.barcode carries a unique sparse index."""
+    coll = getattr(product_repo, "collection", None)
+    if coll is not None and product_id:
+        coll.update_one({"product_id": product_id}, {"$unset": {"barcode": ""}})
+
+
 def assert_gtin_free(code: Any, product_repo, this_product_id: Optional[str]) -> None:
     """409 when ANOTHER product already holds this manufacturer barcode.
 

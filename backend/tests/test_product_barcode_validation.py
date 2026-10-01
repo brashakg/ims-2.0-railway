@@ -472,6 +472,29 @@ class TestGtinAttributeOnTheEditDoor:
         assert row["gtin"] == _VALID_A
         assert row["barcode"] == "BV0000000042"
 
+    @pytest.mark.parametrize("new_gtin", ["", _VALID_B])
+    def test_a_legacy_product_barcode_shows_and_moves_off_with_the_gtin(
+        self, mock_db, new_gtin
+    ):
+        """Main's old Manage Barcode wrote products.barcode. The modal now edits
+        the gtin attribute only, so that code showed as 'Not set', Remove left
+        it in place, and the one-holder rule still refused it on the right
+        frame (409) with no screen able to clear it."""
+        from api.routers.inventory.stock import _ledger_row
+
+        p1 = _create("PR-L-1")["product_id"]
+        p2 = _create("PR-L-2")["product_id"]
+        mock_db["products"].update_one(
+            {"product_id": p1}, {"$set": {"barcode": _VALID_A}}
+        )
+        spine = mock_db["products"].find_one({"product_id": p1})
+        assert _ledger_row(spine, 1, 0, {}, "BV-TEST-01")["gtin"] == _VALID_A
+        _update(p1, attributes={"gtin": new_gtin})  # Remove, or a new code
+        assert "barcode" not in mock_db["products"].find_one({"product_id": p1})
+        _update(p2, attributes={"gtin": _VALID_A})  # the box EAN moves frames
+        spine2 = mock_db["products"].find_one({"product_id": p2})
+        assert spine2["attributes"]["gtin"] == _VALID_A
+
     def test_a_gtin_already_on_another_product_is_refused_409(self, mock_db):
         """Manage Barcode moved from products.barcode (409 on a duplicate) to
         attributes.gtin, which only checked the format: two products could both

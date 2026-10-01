@@ -2299,6 +2299,7 @@ async def update_catalog_product(
                     _spine_id,
                     {"attributes.gtin": (existing.get("attributes") or {}).get("gtin") or ""},
                 )
+                _pm.drop_legacy_spine_barcode(_pr, _spine_id)
     except Exception:  # noqa: BLE001
         logger.warning(
             "[CATALOG] spine sync on update skipped for %s", product_id, exc_info=True
