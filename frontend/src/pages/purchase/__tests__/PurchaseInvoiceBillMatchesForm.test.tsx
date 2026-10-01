@@ -538,7 +538,7 @@ describe('round 14 - the credit verdict is visible and settable', () => {
     await openManualServicesBill({ name: 'Freight', qty: '1', price: '1000', rate: '18' });
     await screen.findByText(/Inter-state supply:/);
     expect(previewCalls().at(-1)?.[1].itc_eligible).toBe(true);
-    expect(previewCalls().at(-1)?.[1].reverse_charge).toBe(false);
+    expect(previewCalls().at(-1)?.[1].reverse_charge).not.toBe(true);
 
     routePosts(preview({ itc_eligible: false }));
     const before = previewCalls().length;
@@ -554,21 +554,17 @@ describe('round 14 - the credit verdict is visible and settable', () => {
     expect(createCalls()[0][1].itc_eligible).toBe(false);
   });
 
-  it('ticking Reverse charge re-asks the preview and books with reverse_charge true', async () => {
+  it('the form offers no Reverse charge tick and never sends reverse_charge true', async () => {
     routePosts(preview({ itc_eligible: false }));
     await openManualServicesBill({ name: 'Freight', qty: '1', price: '1000', rate: '18' });
     await screen.findByText('No input credit: the supplier has no valid GSTIN');
-
-    routePosts(preview({ itc_eligible: true }));
-    fireEvent.click(screen.getByRole('checkbox', { name: /Reverse charge/ }));
-    await waitFor(() => expect(previewCalls().at(-1)?.[1].reverse_charge).toBe(true));
-    await screen.findByText(/Inter-state supply:/);
-    expect(screen.queryByText(/No input credit/)).toBeNull();
+    expect(screen.queryByRole('checkbox', { name: /Reverse charge/ })).toBeNull();
+    expect(screen.queryByText(/Reverse charge/i)).toBeNull();
+    expect(previewCalls().at(-1)?.[1].reverse_charge).not.toBe(true);
 
     fireEvent.click(screen.getByRole('button', { name: /Book invoice/i }));
     await waitFor(() => expect(createCalls()).toHaveLength(1));
-    expect(createCalls()[0][1].reverse_charge).toBe(true);
-    expect(createCalls()[0][1].itc_eligible).toBe(true);
+    expect(createCalls()[0][1].reverse_charge).not.toBe(true);
   });
 
   it('the list and the detail drawer badge a stored itc_eligible=false bill "No credit"', async () => {
@@ -588,4 +584,20 @@ describe('round 14 - the credit verdict is visible and settable', () => {
     fireEvent.click(screen.getAllByRole('button', { name: /View detail/ })[0]);
     await waitFor(() => expect(screen.getAllByText('No credit')).toHaveLength(2));
   });
+  it.each([['absent', undefined], ['null', null]])(
+    'a bill with itc_eligible %s is not badged "No credit" in the list or the drawer',
+    async (_label, value) => {
+      const bill: Record<string, unknown> = { ...HELD_BILL };
+      delete bill.itc_eligible;
+      if (value === null) bill.itc_eligible = null;
+      routeGets({ '/vendors/purchase-invoices': { purchase_invoices: [bill], total: 1 } });
+      renderTab();
+      await screen.findAllByRole('button', { name: /View detail/ });
+      expect(screen.queryByText('No credit')).toBeNull();
+      fireEvent.click(screen.getAllByRole('button', { name: /View detail/ })[0]);
+      // The drawer is open once its Approve / detail content mounts; badge still absent.
+      await screen.findAllByText(new RegExp(String(bill.invoice_number ?? 'MLH'), 'i'));
+      expect(screen.queryByText('No credit')).toBeNull();
+    },
+  );
 });
