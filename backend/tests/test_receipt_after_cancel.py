@@ -126,3 +126,78 @@ def test_a_receipt_logged_before_the_cancel_is_refused_at_accept(monkeypatch, cu
     assert "Ray-Ban" in e.value.detail
     assert stock.units == [], "no stock against the cancelled units"
     assert grn_repo.docs[gid]["status"] == "PENDING"
+
+
+def _atomic_claims(grn_repo):
+    """Give the fake receipt repo the guarded-update primitive the real one has,
+    so the accept CLAIM is recorded (a repo without it fails open)."""
+    import types
+    from strict_fakes import matches
+
+    def find_one_and_update(self, flt, patch):
+        for d in self.docs.values():
+            if matches(d, flt):
+                before = dict(d)
+                d.update(patch.get("$set", {}))
+                return before
+        return None
+
+    grn_repo.find_one_and_update = types.MethodType(find_one_and_update, grn_repo)
+
+
+def _two_pending_of_two(monkeypatch):
+    po = _po(_line("P1", "Frame X", 5),
+             _line("P2", "Ray-Ban", 3, cancelled_qty=1, received_qty=1))
+    po["status"] = "PARTIALLY_RECEIVED"
+    po["received_qty_by_product"] = {"P2": 1}
+    grn_repo, po_repo, stock, _t = _wire(monkeypatch, po=po)
+    _atomic_claims(grn_repo)
+    a = _create("normal", _items("P2", 2), _user(), inv="INV-A")["grn_id"]
+    b = _create("normal", _items("P2", 2), _user(), inv="INV-B")["grn_id"]
+    return grn_repo, stock, a, b
+
+
+def test_two_accepts_in_flight_on_one_open_quantity_mint_once(monkeypatch):
+    """2 open, two pending receipts of 2: while A is still minting, B's accept
+    is refused -- exactly 2 units, never 4."""
+    import threading
+
+    grn_repo, stock, a, b = _two_pending_of_two(monkeypatch)
+    inside, release = threading.Event(), threading.Event()
+    real_create = stock.create
+
+    def slow_create(doc):
+        inside.set()
+        assert release.wait(10)
+        return real_create(doc)
+
+    stock.create = slow_create
+    outcome = {}
+
+    def accept_a():
+        try:
+            outcome["a"] = asyncio.run(vendors_mod.accept_grn(a, current_user=_user()))
+        except Exception as exc:  # noqa: BLE001
+            outcome["a"] = exc
+
+    t = threading.Thread(target=accept_a)
+    t.start()
+    assert inside.wait(10), "A never reached its first stock create"
+    try:
+        with pytest.raises(HTTPException) as e:
+            asyncio.run(vendors_mod.accept_grn(b, current_user=_user()))
+        assert e.value.status_code == 409
+    finally:
+        release.set()
+        t.join(15)
+    assert not isinstance(outcome.get("a"), Exception), outcome
+    assert len([u for u in stock.units if u["product_id"] == "P2"]) == 2
+
+
+def test_two_accepts_one_after_the_other_mint_once(monkeypatch):
+    grn_repo, stock, a, b = _two_pending_of_two(monkeypatch)
+    asyncio.run(vendors_mod.accept_grn(a, current_user=_user()))
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(vendors_mod.accept_grn(b, current_user=_user()))
+    assert e.value.status_code == 409
+    assert len([u for u in stock.units if u["product_id"] == "P2"]) == 2

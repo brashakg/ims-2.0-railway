@@ -195,6 +195,16 @@ def _hold_order_open_for_receipt(po_repo, grn) -> None:
             # yet, and a retry of its own half-minted accept must not count
             # twice.
             got = dict(_cumulative_received_by_product(get_grn_repository(), po_id))
+            # Plus every OTHER receipt for this order that another accept has
+            # claimed and may be minting right now: it is not ACCEPTED yet, but
+            # its units are about to be on the shelf. Each accept sets its
+            # claim BEFORE it reads here, so of two racing accepts at least
+            # one sees the other (both may -- then both are told to accept
+            # again, never both mint).
+            for other in _claimed_receipts_for_order(get_grn_repository(), po_id, grn):
+                for line in other.get("items") or []:
+                    pid = line.get("product_id")
+                    got[pid] = _qty(got.get(pid)) + _qty(line.get("accepted_qty"))
             for pid, own in (po.get("received_qty_by_product") or {}).items():
                 got[pid] = max(_qty(got.get(pid)), _qty(own))
             return got
@@ -215,6 +225,30 @@ def _hold_order_open_for_receipt(po_repo, grn) -> None:
         status_code=409,
         detail="This order kept changing while the delivery was being accepted - accept it again.",
     )
+
+
+def _claimed_receipts_for_order(grn_repo, po_id, this_grn) -> list:
+    """Receipts of this order, other than `this_grn`, that hold an accept claim
+    but are not ACCEPTED yet (still minting, or held for a product that is not
+    catalogued). Fails CLOSED: an unreadable list must not let two accepts
+    both think the open quantity is theirs."""
+    if grn_repo is None:
+        return []
+    try:
+        rows = grn_repo.find_many({"po_id": po_id}, limit=1000) or []
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=503,
+            detail="Could not check the other deliveries on this order - try again.",
+        ) from exc
+    return [
+        r
+        for r in rows
+        if isinstance(r, dict)
+        and r.get("grn_id") != this_grn.get("grn_id")
+        and r.get("status") in ("PENDING", "PARTIALLY_ACCEPTED")
+        and r.get("accept_lock_at")
+    ]
 
 
 def _accept_grn_claimed(
