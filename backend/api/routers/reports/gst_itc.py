@@ -240,13 +240,16 @@ def _itc_unplaced(db, year, mon, last_day, entity_id=None) -> dict:
     leaves the bill's head wrong.
 
     Returns {count, tax, bill_numbers, unregistered: {count, tax,
-    bill_numbers, transfer_bill_numbers}} (the last lists the stock-transfer
+    bill_numbers, transfer_bill_numbers}, denied_transfers: [{bill_number,
+    from_shop, tax}]} (denied_transfers = mirrors given NO credit because the
+    sender has no valid GSTIN; unregistered's last lists the stock-transfer
     mirror bills among them -- the system made those, no one booked them). A read failure returns {failed: True} -- never zeros, which
     the Cross-Check would show as a green row."""
     out = {"count": 0, "tax": 0.0, "bill_numbers": []}
+    denied: dict = {"transfers": []}
     unreg = {"count": 0, "tax": 0.0, "bill_numbers": [], "transfer_bill_numbers": []}
     if db is None:
-        return {**out, "unregistered": unreg}
+        return {**out, "unregistered": unreg, "denied_transfers": []}
 
     def _add(acc, bill, tax):
         acc["count"] += 1
@@ -304,9 +307,35 @@ def _itc_unplaced(db, year, mon, last_day, entity_id=None) -> dict:
                     unreg["transfer_bill_numbers"].append(
                         b.get("bill_number") or b.get("bill_id")
                     )
+        # Transfer mirrors whose credit IS denied (the sending shop has no valid
+        # GSTIN): the right verdict, but the filer must be told, so they are
+        # listed for the Cross-Check. Same scope and month window as above.
+        dq: dict = {
+            "status": {"$nin": _DEAD_BILL},
+            "itc_eligible": False,
+            "source_transfer_id": {"$exists": True, "$ne": None},
+        }
+        if entity_id:
+            dq["recipient_entity_id"] = {"$in": [entity_id, None]}
+        denied["transfers"] = []
+        for b in db["vendor_bills"].find(dq, {"_id": 0}):
+            dates = (b.get("invoice_date"), b.get("bill_date"))
+            in_month = any(isinstance(d, str) and d[:10] in days for d in dates)
+            if not in_month and any(_dated(d) for d in dates):
+                continue
+            tax = round(float(b.get("tax_amount") or 0), 2)
+            if tax <= 0 or itc_claimable(b.get("vendor_gstin"), b.get("reverse_charge")):
+                continue
+            denied["transfers"].append(
+                {
+                    "bill_number": b.get("bill_number") or b.get("bill_id"),
+                    "from_shop": b.get("vendor_name") or b.get("vendor_id") or "",
+                    "tax": tax,
+                }
+            )
     except Exception:
         return {"count": 0, "tax": 0.0, "bill_numbers": [], "failed": True}
-    return {**out, "unregistered": unreg}
+    return {**out, "unregistered": unreg, "denied_transfers": denied["transfers"]}
 
 
 def _transfer_outward_bills(db, active_store, year, mon, last_day):

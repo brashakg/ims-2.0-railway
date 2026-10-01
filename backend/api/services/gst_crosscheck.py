@@ -702,6 +702,23 @@ def build_crosscheck(
                 )
             )
 
+        denied = [d for d in (unplaced.get("denied_transfers") or []) if isinstance(d, dict)]
+        if denied:
+            comparisons.append(
+                _cmp_row(
+                    "Transfers with no input credit",
+                    {"Credit denied": round(sum(_f(d.get("tax")) for d in denied), 2)},
+                    0.0,
+                    note=" ".join(
+                        "Transfer from %s - sender has no GSTIN: no input credit "
+                        "(bill %s, tax %.2f); check whether outward tax applies "
+                        "with your CA."
+                        % (d.get("from_shop") or "the sending shop", d.get("bill_number"), _f(d.get("tax")))
+                        for d in denied[:20]
+                    ),
+                )
+            )
+
     mismatches =[c for c in comparisons if c["status"] == "MISMATCH"]
 
     return {
