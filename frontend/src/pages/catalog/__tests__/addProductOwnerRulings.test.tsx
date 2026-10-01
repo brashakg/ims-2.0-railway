@@ -97,6 +97,7 @@ vi.mock('../../../services/api/buyDesk', () => ({
 
 import { QuickAddPage } from '../QuickAddPage';
 import { DuplicateProductError } from '../../../services/api/products';
+import { productApi } from '../../../services/api/products';
 import BuyDeskPage from '../BuyDeskPage';
 import { useSimilarProducts } from '../useSimilarProducts';
 import { NAV_GROUPS } from '../../../components/shell/navConfig';
@@ -168,6 +169,28 @@ describe('F12 / D6 - the brand default decides the website', () => {
     await waitFor(() => expect(screen.getByText(/brand default/i).textContent).toMatch(/Oakley/));
     // Same sentence with only the name swapped would mean the verdict never moved.
     expect(screen.getByText(/brand default/i).textContent).not.toBe(rayBan.replace('Ray-Ban', 'Oakley'));
+  });
+
+  it('the line asks every brand, without case, as the push gate does', async () => {
+    // Brand Master lists Ray-Ban for another category only, so the Sunglass
+    // brand list leaves it out; the product is a legacy 'RAY-BAN'. The push
+    // gate (load_brand_sync_default: any category, no case) publishes it.
+    vi.mocked(productApi.getBrandOptions).mockImplementation(async (category?: string) => ({
+      brands: category ? BRANDS.filter((b) => b.name !== 'Ray-Ban') : BRANDS,
+    }));
+    getProduct.mockResolvedValueOnce({
+      ...SOURCE_PRODUCT, brand: 'RAY-BAN',
+      attributes: { ...SOURCE_PRODUCT.attributes, brand_name: 'RAY-BAN' },
+    });
+    try {
+      renderPage('/catalog/add?edit=P-SRC');
+      await screen.findByRole('button', { name: /Save changes/ });
+      await waitFor(() => expect(screen.getByText(/brand default/i).textContent).toMatch(/Website: yes/));
+      expect(within(screen.getByRole('heading', { name: 'Review' }).closest('.card') as HTMLElement)
+        .getByText('Will sync')).toBeInTheDocument();
+    } finally {
+      vi.mocked(productApi.getBrandOptions).mockImplementation(async () => ({ brands: BRANDS }));
+    }
   });
 
   it('the create payload carries no sync choice for the server to honour', async () => {

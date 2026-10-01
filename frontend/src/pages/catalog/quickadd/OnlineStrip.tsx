@@ -9,9 +9,9 @@ import { Globe, X } from 'lucide-react';
 import type { QuickAddForm } from './useQuickAddForm';
 
 export function OnlineStrip({ form }: { form: QuickAddForm }) {
-  const { isReviewMode, attributes, brandSyncs, shopifyTags, setShopifyTags } = form;
+  const { isReviewMode, attributes, brandGoesOnline, shopifyTags, setShopifyTags } = form;
   const brand = (attributes.brand_name || '').trim();
-  const goesOnline = brandSyncs[brand];
+  const goesOnline = brandGoesOnline(brand);
 
   return (
     <>
