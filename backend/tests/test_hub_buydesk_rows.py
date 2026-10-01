@@ -226,6 +226,14 @@ def test_rows_endpoint_assembles_and_surfaces_push_lock(monkeypatch):
             "attributes": {"brand_name": "Cartier"},
             "catalog_status": "DRAFT",
         },
+        {
+            "product_id": "P3",
+            "sku": "CA-1",
+            "brand": "Carrera",
+            "category": "FRAME",
+            "attributes": {"brand_name": "Carrera"},
+            "ecom": {"staged": True},
+        },
     ]
     monkeypatch.setattr(bdr, "get_product_repository", lambda: _Repo(products))
     monkeypatch.setattr(bdr, "_get_db", lambda: _DB())
@@ -235,13 +243,21 @@ def test_rows_endpoint_assembles_and_surfaces_push_lock(monkeypatch):
         "push_lock_reason",
         lambda db, entity, doc: "locked" if (doc.get("brand") == "Cartier") else None,
     )
+    # Brand Master keeps Carrera off the website (owner D6): the push refuses
+    # it, so a staged Carrera must not show Staged.
+    from api.services import catalog_dictionary
+
+    monkeypatch.setattr(
+        catalog_dictionary, "load_brand_sync_default", lambda db, brand: brand != "Carrera"
+    )
     out = _run(
         bdr.buy_desk_rows(store_id=None, limit=200, skip=0, current_user=_VIEWER)
     )
-    assert out["total"] == 2
+    assert out["total"] == 3
     by_id = {r["product_id"]: r for r in out["rows"]}
     assert by_id["P1"]["ecom_state"] == bd.ECOM_NOT_LISTED
     assert by_id["P2"]["ecom_state"] == bd.ECOM_PUSH_LOCKED
+    assert by_id["P3"]["ecom_state"] == bd.ECOM_PUSH_LOCKED
     assert (
         by_id["P1"]["on_hand"] == 0 and by_id["P1"]["buy_signal"] is None
     )  # no velocity

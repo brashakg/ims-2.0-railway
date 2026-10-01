@@ -8,7 +8,7 @@ against open POs so the operator never double-orders.
 
 Pure assembly (build_row / buy_signal) + thin lookups; reuses the canonical
 engines for the catalog/ecom truth (product_master.catalog_readiness,
-shopify_push.push_lock_reason) and self-contained aggregations for stock / open-PO
+shopify_push.product_push_refusal) and self-contained aggregations for stock / open-PO
 / sales-velocity so a missing sub-signal degrades that ONE field to a safe default
 rather than failing the row. No emoji (Windows cp1252). No writes.
 """
@@ -52,8 +52,9 @@ def buy_signal(
 
 
 def ecom_state(product: Dict[str, Any], push_locked: bool) -> str:
-    """Honest online-store state. PUSH_LOCKED wins (a locked brand can never be
-    pushed). Else derive from the product's ecom sub-doc: a live Shopify gid ->
+    """Honest online-store state. PUSH_LOCKED wins (`push_locked` = the push
+    gate shopify_push.product_push_refusal refuses it: a push-locked brand or
+    one Brand Master keeps off the website). Else derive from the product's ecom sub-doc: a live Shopify gid ->
     LIVE; a staged/listed intent -> STAGED; otherwise NOT_LISTED."""
     if push_locked:
         return ECOM_PUSH_LOCKED

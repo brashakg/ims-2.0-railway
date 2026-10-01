@@ -183,7 +183,9 @@ async def buy_desk_rows(
                 "purchasable": False,
             }
         try:
-            locked = bool(_sp.push_lock_reason(db, "product", p))
+            # THE product gate (push-lock or brand off the website), so the
+            # chip never says Staged for a product the push will refuse.
+            locked = bool(_sp.product_push_refusal(db, p))
         except Exception:  # noqa: BLE001
             locked = False
         rows.append(
