@@ -377,6 +377,38 @@ def test_d13_the_paper_and_the_books_ask_one_rule(db, monkeypatch):
     assert db["vendor_bills"].count_documents({"source_transfer_id": t["id"]}) == 0
 
 
+def test_d13_same_company_shop_without_a_gstin_is_a_data_gap(db):
+    """Hirapur -> Bank More, both company Z, Bank More with no GSTIN or state:
+    IMS cannot place the shop on a registration, so ship is refused as a data
+    gap (never guessed either way) -- and the refusal says so, instead of
+    calling a one-company move 'between two GST registrations'."""
+    db["stores"].update_one(
+        {"store_id": "ST-DHN-2"}, {"$set": {"gstin": "", "state": "", "state_code": ""}}
+    )
+    t = _create("ST-DHN-2")
+    with pytest.raises(HTTPException) as exc:
+        _ship(t["id"])
+    assert exc.value.status_code == 400
+    assert "Bank More Dhanbad" in exc.value.detail and "cannot tell" in exc.value.detail
+    assert "between two GST registrations" not in exc.value.detail
+    assert db["stock_units"].count_documents({"status": "AVAILABLE"}) == 2
+
+
+def test_f51_letterhead_and_consignor_block_print_one_gstin(db):
+    """Dhanbad declares state code 'JH' (not its registration's '20') and company
+    Z's PRIMARY is the Maharashtra GSTIN: print_legal's own state match misses
+    and falls back to that primary, while the one shop rule answers Dhanbad's
+    own GSTIN. The page must carry one consignor GSTIN, not both."""
+    db["stores"].update_one({"store_id": "ST-DHN-1"}, {"$set": {"state_code": "JH"}})
+    db["entities"].update_one({"entity_id": "ENT-Z"}, {"$set": {"gstins": [
+        {"gstin": GSTIN_Z_JH, "state_code": "20", "state_name": "Jharkhand"},
+        {"gstin": GSTIN_Z_MH, "state_code": "27", "state_name": "Maharashtra", "is_primary": True},
+    ]}})
+    html = _challan(_shipped("ST-BOK-1")["id"])
+    assert GSTIN_Z_JH in html[: html.index('class="party-grid"')], "the letterhead's GSTIN"
+    assert GSTIN_Z_MH not in html
+
+
 def test_d13_printing_the_challan_writes_nothing(db):
     """Guard: the challan is a paper, never a sale -- printing it books no
     invoice, order, bill or GSTR-1 row."""

@@ -447,6 +447,14 @@ def render_delivery_challan(
     # Rule 55 copy markers (the LegalHeader uses COPY_MARKER_MODES which does
     # not include delivery_challan -> defaults to rule_48; force rule_55 here).
     header["copy_marker"] = copy_marker_block(copy_marker, mode="rule_55")
+    if consignor_gstin:
+        # One consignor GSTIN per page: the letterhead prints the caller's
+        # (the one shop rule, org_validation.shop_gstin), never a second answer
+        # from print_legal's state match / primary fallback.
+        header["supplier_kv"] = [
+            (k, consignor_gstin if k == "GSTIN / UIN" else v)
+            for k, v in header.get("supplier_kv") or []
+        ]
 
     head = _header_fragment(header, "Delivery Challan")
     banner = _not_a_tax_invoice("Delivery Challan - Not a Tax Invoice (CGST Rule 55)")

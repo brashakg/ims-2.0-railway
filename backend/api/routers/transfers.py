@@ -2159,6 +2159,15 @@ def _gstin_gap(transfer: Dict, src: tuple, dst: tuple) -> str:
     ]
     if not missing:
         return ""
+    if src[0] == dst[0]:
+        # One company, a shop with no GSTIN: it may or may not be the other
+        # shop's registration -- refused as a data gap, never guessed either
+        # way (shop_gstin: None is a refusal; the mirror bill books it too).
+        return (
+            " and ".join(missing)
+            + " has no GSTIN on file, so IMS cannot tell whether this move stays "
+            "inside one GST registration. Add the shop's GSTIN first."
+        )
     return (
         " and ".join(missing)
         + " has no GSTIN on file. A transfer between two GST registrations "
