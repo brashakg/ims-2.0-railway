@@ -1608,7 +1608,10 @@ def _stock_in_task(order: Dict[str, Any], lines: List[Any], held: _Held, refund_
     there is nothing left for a door to retry. A task that did not land is
     no booking: it is released and the restock stays open, so the next door
     books it and raises the task again (kept, nothing recorded the frame and
-    every later door answered "already done")."""
+    every later door answered "already done"). A task that landed with its
+    reply lost (the insert raised after the commit) is read back by its own
+    per-booking ref before the booking is released: released, the next door
+    booked the frame again and raised a second task for it."""
     from ..routers import returns as _r
 
     out: Dict[str, Any] = {"applied": True, "restocked": [], "restock_stock_ids": [],
@@ -1620,10 +1623,11 @@ def _stock_in_task(order: Dict[str, Any], lines: List[Any], held: _Held, refund_
                                      processing_store_id, order=order)["store_id"]
     ref = order.get("order_number") or order.get("order_id")
     items = ", ".join(sorted({str(ln.sku or ln.product_id) for ln in lines if ln.restock}))
+    task_ref = f"historical_stock_in:{refund_id}:{uuid.uuid4().hex[:8]}"
     task = tasks = None
     try:
         from ..dependencies import get_task_repository, get_user_repository
-        from .task_triggers import create_system_task
+        from .task_triggers import active_tasks, create_system_task
 
         tasks = get_task_repository()
         users = get_user_repository()
@@ -1642,12 +1646,15 @@ def _stock_in_task(order: Dict[str, Any], lines: List[Any], held: _Held, refund_
             priority="P1",
             category="Inventory",
             store_id=shop,
-            dedupe_ref=f"historical_stock_in:{refund_id}:{uuid.uuid4().hex[:8]}",
+            dedupe_ref=task_ref,
             assigned_to=(managers[0].get("user_id") if managers else None),
             extra={"task_type": "historical_stock_in", "order_id": order.get("order_id"),
                    "link": "/inventory/opening-stock",
                    "payload": {"refund_id": refund_id, "order_id": order.get("order_id")}},
         )
+        # ponytail: a read-back that also fails releases (a second task is
+        # possible only on two misses in a row).
+        task = task or next(iter(active_tasks(tasks, task_ref)), None)
     except Exception:  # noqa: BLE001
         logger.warning("[SHOPIFY_REFUND] stock-in task failed for refund=%s", refund_id,
                        exc_info=True)

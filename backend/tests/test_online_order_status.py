@@ -1438,6 +1438,32 @@ def test_a_stock_in_task_that_did_not_land_leaves_the_frame_to_the_next_door(swe
     assert _minted(swept) == [] and len(_stock_in(swept, oid)) == 1, "one frame, one task"
 
 
+def test_a_stock_in_task_whose_reply_was_lost_is_one_task(swept, monkeypatch):
+    """The task insert commits and then raises (a socket timeout after the
+    commit): BaseRepository.create answers None. Released on that None, the
+    booking let the confirm book the frame again and raise a second task --
+    two tasks, two stock rows for one frame. The task is read back by its
+    own ref first: it landed, so the booking and its one task stay."""
+    oid, rid = 60194, 700394
+    row = _historical_refund(swept, monkeypatch, oid, rid, status="DELIVERED")
+    tasks = swept["db"]["tasks"]
+    real = tasks.insert_one
+
+    def lands_then_raises(doc, *a, **kw):
+        real(doc, *a, **kw)
+        raise RuntimeError("socket timeout after the commit")
+
+    monkeypatch.setattr(tasks, "insert_one", lands_then_raises)
+    back = _goods_back(row)["result"]
+    monkeypatch.setattr(tasks, "insert_one", real)
+    [task] = _stock_in(swept, oid)
+    assert (back["status"], back["stock_in_task"]) == ("stock_in", task["task_id"])
+    _confirm(swept["review"].find_one({"review_id": row["review_id"]}))
+    assert _minted(swept) == [] and len(_stock_in(swept, oid)) == 1, "one frame, one task"
+    line = _doc(swept, oid)["items"][0]
+    assert (line.get("returned_qty"), line.get("restocked_refunds")) == (1, {str(rid): 1})
+
+
 def test_a_refund_restocks_its_line_once_even_when_another_refund_left_a_unit_out(swept, monkeypatch):
     """Two frames on one line: refund R2 is money only (the customer keeps a
     frame), refund R1's frame comes back through Goods back. The line still
