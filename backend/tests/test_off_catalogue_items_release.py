@@ -428,6 +428,36 @@ def test_c1_finishing_never_reactivates_what_the_cataloguer_switched_off(world):
         "C1: finishing the draft switched back on a product the cataloguer "
         "switched off in the same save",
     )
+    # Review round 5, pass 3: finished while switched off, it stayed an
+    # ordered draft for good -- in Needs review, and switching it on later
+    # left it provisional. Finished is finished.
+    sku = world.product(draft_id)["sku"]
+    finding(
+        world.product(draft_id).get("provisional") is False
+        and sku not in _needs_review_list(world),
+        "R5: a draft finished while switched off is still an ordered draft",
+    )
+    _run(_products.update_product(draft_id, _products.ProductUpdate(is_active=True), CATALOGUER))
+    assert world.product(draft_id)["is_active"] is True
+
+
+def test_r5_a_finished_row_still_marked_ordered_leaves_the_queue_on_its_next_save(world):
+    # Rows finished while switched off before this rule: ACTIVE, provisional.
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    world.finish_draft(draft_id, offer=2790)
+    world.db.products.update_one(
+        {"product_id": draft_id}, {"$set": {"provisional": True, "is_active": False}}
+    )
+    world.db.catalog_products.update_one(
+        {"spine_product_id": draft_id}, {"$set": {"needs_review": True}}
+    )
+    _run(_products.update_product(draft_id, _products.ProductUpdate(offer_price=2690), CATALOGUER))
+    finding(
+        world.product(draft_id).get("provisional") is False
+        and world.product(draft_id)["sku"] not in _needs_review_list(world),
+        "R5: a finished row still marked as an ordered draft never leaves Needs review",
+    )
+    assert world.product(draft_id)["is_active"] is False
 
 
 def test_c1_the_held_draft_is_in_needs_review_at_the_top(world):

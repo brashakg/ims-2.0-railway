@@ -3543,10 +3543,12 @@ def apply_restamp_atomic(
     coll = getattr(product_repo, "collection", None)
     if coll is not None and hasattr(coll, "find_one_and_update"):
         try:
-            coll.find_one_and_update(
-                {"product_id": product_id, "catalog_status": CATALOG_STATUS_DRAFT},
-                {"$set": fields},
+            guard = (
+                {"catalog_status": CATALOG_STATUS_DRAFT}
+                if "catalog_status" in fields
+                else {"provisional": True}  # the finished-but-still-ordered repair
             )
+            coll.find_one_and_update({"product_id": product_id, **guard}, {"$set": fields})
             return fields
         except Exception as exc:  # noqa: BLE001 - a restamp must never break an edit
             logger.warning("[PM] atomic restamp failed for %s: %s", product_id, exc)
@@ -3583,17 +3585,27 @@ def restamp_on_update(current: Dict[str, Any], patch: Dict[str, Any]) -> Dict[st
     """
     prior = effective_catalog_status(current or {})
     if prior == CATALOG_STATUS_ACTIVE:
-        return {}  # forward-only: live rows are never demoted or re-judged.
+        # forward-only: live rows are never demoted or re-judged. One repair:
+        # a FINISHED row still marked as an ordered draft (finished while
+        # switched off before this rule) leaves the ordered-draft state --
+        # Needs review and the PIM doors' "finish it in the editor" refusal --
+        # on its next save; its is_active is the cataloguer's, untouched.
+        if (current or {}).get("provisional"):
+            return {"provisional": False}
+        return {}
 
     # prior is an explicit DRAFT: complete -> ACTIVE (auto-flip), else refresh gaps.
     merged = {**(current or {}), **(patch or {})}
     status, gaps = compute_catalog_status(merged)
     if status == CATALOG_STATUS_ACTIVE:
         fields = {"catalog_status": CATALOG_STATUS_ACTIVE, "done_gaps": []}
-        if (current or {}).get("provisional") and (patch or {}).get("is_active") is not False:
+        if (current or {}).get("provisional"):
             # Ordered before it was catalogued: born inactive ONLY because it
             # was incomplete (normalise_payload), so finishing it is what makes
-            # it sellable. An is_active False sent in the same save wins.
-            fields.update({"is_active": True, "provisional": False})
+            # it sellable. An is_active False sent in the same save wins -- but
+            # either way it is finished: no longer an ordered draft.
+            fields["provisional"] = False
+            if (patch or {}).get("is_active") is not False:
+                fields["is_active"] = True
         return fields
     return {"catalog_status": CATALOG_STATUS_DRAFT, "done_gaps": gaps}
