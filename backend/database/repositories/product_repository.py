@@ -251,12 +251,17 @@ class ProductRepository(BaseRepository):
             )
         # What the till's rule finds comes FIRST, then what only the wide rule
         # adds -- so no result limit can push a brand/model/SKU match off the
-        # list behind, say, thirty 'Gunmetal Gray' frames for 'ray'.
-        head_q = self._search_query(query, list(self.SEARCH_FIELDS), extra)
+        # list behind, say, thirty 'Gunmetal Gray' frames for 'ray'. Both
+        # halves sit INSIDE the wide query, so the list is exactly what
+        # count_search_products counts -- even where the till's rule finds
+        # more ('  ' is everything to the till, nothing to the wide rule).
+        wide_q = self._product_search_query(query, extra)
+        till_q = self._search_query(query, list(self.SEARCH_FIELDS), extra)
+        head_q = {"$and": [wide_q, till_q]}
         head = self.find_many(head_q, skip=skip, limit=limit)
         if len(head) >= limit:
             return head
-        tail_q = {"$and": [self._product_search_query(query, extra), {"$nor": [head_q]}]}
+        tail_q = {"$and": [wide_q, {"$nor": [till_q]}]}
         return head + self.find_many(
             tail_q,
             skip=max(0, skip - self.count(head_q)),
