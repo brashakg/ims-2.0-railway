@@ -721,8 +721,6 @@ def _stamp_shipped_value(line: Dict, units: List[Dict]) -> None:
             logger.warning("[TRANSFER] product lookup for the ship value failed: %s", exc)
     line["hsn_code"] = (
         line.get("hsn_code")
-        or product.get("hsn_code")
-        or hsn_for_category(product.get("category"))
         or ""
     )
     line["shipped_barcodes"] = [str(u["barcode"]) for u in units if u.get("barcode")]
