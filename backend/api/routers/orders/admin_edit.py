@@ -552,6 +552,9 @@ async def superadmin_invoice_change(
                     if isinstance(order.get("interstate"), bool)
                     else None
                 ),
+                # No returns doc behind this note: the row names its parent,
+                # so the GST returns hold it with a held sale (never filed).
+                order_id=order.get("order_id"),
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[ORDERS] store-credit bump skipped: %s", exc)

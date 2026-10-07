@@ -2235,15 +2235,16 @@ def test_a_remap_that_crashed_mid_claim_is_carried_on_by_the_next_press(world, m
     assert_no_active_rx_hold(after)
 
 
-@pytest.mark.parametrize("why", ["routing_502", "gate_dark", "seller_check", "refund_mark", "part_closed"])
+@pytest.mark.parametrize("why", ["routing_502", "gate_dark", "seller_check"])
 def test_a_refused_takeover_keeps_the_crashed_remaps_lease(world, monkeypatch, why):
     """[LOW-MEDIUM] Round 16, item 1: the press taking over a crashed Re-map's
     stale lease was refused -- Shopify's routing read a 502, the gate dark,
-    the seller check, a refund mark, a line part-closed -- and its finally
-    deleted the lease, the only mark of the unsettled claim: 1 of 2 units
-    SOLD, the hold lifted, the list no longer offering Re-map and the order
-    dispatchable with a unit never claimed. The lease stays now, STALE: still
-    offered, still blocked, and the next press carries on at once."""
+    the seller check -- and its finally deleted the lease, the only mark of
+    the unsettled claim: 1 of 2 units SOLD, the hold lifted, the list no
+    longer offering Re-map and the order dispatchable with a unit never
+    claimed. The lease stays now, STALE: still offered, still blocked, and
+    the next press carries on at once. (A cause no press gets past settles
+    the claim instead: test_a_takeover_refused_for_good_settles_...)"""
     from fastapi import HTTPException
     from api.routers import online_store_orders as oso
     from api.routers.orders import assert_no_active_rx_hold
@@ -2254,12 +2255,8 @@ def test_a_refused_takeover_keeps_the_crashed_remaps_lease(world, monkeypatch, w
         world["shop"].read_error = "502 Bad Gateway"
     elif why == "gate_dark":
         monkeypatch.setattr(shopify_push, "_live_or_reason", lambda _db: (False, "writes_disabled"))
-    elif why == "seller_check":
-        db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": {"gstin": ""}})
-    elif why == "refund_mark":
-        db.orders.update_one({"order_id": oid}, {"$inc": {route_mod.REFUND_MARK: 1}})
     else:
-        world["shop"].fos[0]["lineItems"]["nodes"][0]["remainingQuantity"] = 1
+        db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": {"gstin": ""}})
 
     out = _remap(world, monkeypatch, payload)
 
@@ -2269,8 +2266,6 @@ def test_a_refused_takeover_keeps_the_crashed_remaps_lease(world, monkeypatch, w
     assert oso._slim_list_row(dict(after))["remap_hold"] is True
     with pytest.raises(HTTPException, match="a Re-map of it is running or stopped mid-way"):
         assert_no_active_rx_hold(after)
-    if why in ("refund_mark", "part_closed"):
-        return  # resolved by hand; the order stays marked
     # The cause gone, the very next press carries on (the lease left stale).
     world["shop"].read_error = None
     monkeypatch.setattr(shopify_push, "_live_or_reason", lambda _db: (True, None))
@@ -3201,10 +3196,14 @@ def test_a_return_on_an_order_no_shop_shipped_mints_nothing(world, monkeypatch):
 
 def _cancel_door(db, order_id):
     """THE cancel door's two acts (orders/cancel.py), as another worker runs
-    them: flip the status, then release every unit still SOLD against it."""
+    them: its claim flips the status (stamping its reason), then it releases
+    every unit still SOLD against the order."""
+    from api.routers.orders.release import _claim_order_for_cancel
+    from database.repositories.order_repository import OrderRepository
     from database.repositories.product_repository import StockRepository
 
-    db.orders.update_one({"order_id": order_id}, {"$set": {"status": "CANCELLED"}})
+    assert _claim_order_for_cancel(OrderRepository(db.orders), order_id,
+                                   "Customer changed their mind", {"user_id": "u-counter"})
     StockRepository(db.stock_units).release_sold_units_for_order(order_id)
 
 
@@ -3807,3 +3806,251 @@ def test_a_remap_that_died_after_settling_its_claim_is_finished_by_the_next_pres
     assert world["tasks"].open_refs(ship) == [] and world["tasks"].open_refs(seller) == []
     assert wrote == ["BV-BOK-01"]
     assert "reroute_lease_at" not in db.orders.find_one({"order_id": oid})
+
+
+# ---------------------------------------------------------------------------
+# R24 -- money panel, round 17
+# ---------------------------------------------------------------------------
+
+
+def _shopify_cancel(world, payload, refunded=False):
+    """orders/cancelled -- a cancel made in Shopify -- through the mapper, as
+    the webhook drain runs it: the status flips and NO unit is released (the
+    refund's restock brings the order's units back)."""
+    from api.services import online_order_mapper
+
+    cancelled = {**payload, "cancelled_at": "2026-10-07T10:00:00+05:30"}
+    if refunded:
+        cancelled["financial_status"] = "refunded"
+    online_order_mapper.map_shopify_order(cancelled, world["db"], topic="orders/cancelled")
+
+
+def _refund_restock(world, monkeypatch, oid, lines):
+    """The Shopify refund door's restock ('Restock items' ticked), called as
+    shopify_refund calls it: the order's own store and the order itself."""
+    from api.routers import returns
+    from database.repositories.product_repository import StockRepository
+
+    db = world["db"]
+    monkeypatch.setattr(returns, "get_stock_repository", lambda: StockRepository(db.stock_units))
+    monkeypatch.setattr(returns, "_get_db", lambda: db)
+    order = db.orders.find_one({"order_id": oid})
+    return returns._restock_good_items(
+        [returns.ReturnLine(product_id=pid, return_qty=q, unit_price=892.0) for pid, q in lines],
+        order["store_id"], f"RET-{oid}", order_id=oid, user_id="SYSTEM_SHOPIFY_REFUND",
+        processing_store_id=None, order=order)
+
+
+def _frames(db):
+    """One stock row is one frame: (shop, product) per row."""
+    return sorted((u["store_id"], u["product_id"]) for u in db.stock_units.find())
+
+
+@pytest.mark.parametrize("held", ["move_failed", "gstin_fixed", "split_moved", "split_leg"])
+def test_a_shopify_cancel_mid_remap_leaves_one_row_per_frame(world, monkeypatch, held):
+    """[MEDIUM] Round 17, items 1 + 4: a cancel made in Shopify ('Restock
+    items' ticked) lands after Re-map's write and before its claim. Shopify's
+    cancel releases no unit: its refund's restock reactivates the units SOLD
+    to the order and MINTS only what it cannot find. Re-map freed every unit
+    sold to the dead order -- the IMS cancel door's rule -- so the restock
+    minted: two AVAILABLE rows for one frame, sold at the till and written to
+    Shopify. It never stamped where the units were either, so a split leg's
+    unit was looked for at the billing shop. Re-map leaves a Shopify-dead
+    order's units SOLD to it now, where it stamped them: one row per frame."""
+    from api.services import shopify_ingest
+
+    db = world["db"]
+    if held == "move_failed":
+        payload, res, _o = _move_failed_at_ranchi(world, 61101)
+        lines = [("P-RB", 1)]
+    elif held == "gstin_fixed":
+        payload, res, _o = _gstin_missing_at_bokaro(world, 61102)
+        db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": {"gstin": "20AAAAA0000A1Z5"}})
+        lines = [("P-RB", 1)]
+    elif held == "split_moved":  # Re-map gives Pune's OA back and claims Bokaro's
+        payload, res, _o = _split_sellers(world, 61103, bokaro_oa=1)
+        world["shop"].fos[1]["assignedLocation"]["location"]["id"] = LOC_BOK
+        lines = [("P-RB", 1), ("P-OA", 1)]
+    else:  # MOVE_FAILED on a split leg: the OA is Dhanbad's, the order Bokaro's
+        res, _o = _split_leg_move_refused(world, 61104)
+        payload = _order(61104, lines=(("RB-1234", 2), ("OA-5", 1)))
+        world["shop"].move_error = None
+        lines = [("P-RB", 2), ("P-OA", 1)]
+    oid = res["order_id"]
+    frames = _frames(db)
+    real = shopify_ingest._claim_online_units
+
+    def shopify_cancels_then_claim(*a, **k):
+        _shopify_cancel(world, payload, refunded=held == "gstin_fixed")
+        return real(*a, **k)
+
+    monkeypatch.setattr(shopify_ingest, "_claim_online_units", shopify_cancels_then_claim)
+    out = asyncio.run(route_mod.reroute_held_order(db, oid))
+
+    assert out["status"] == "refused" and "cancelled while Re-map ran" in out["message"], out
+    restocked = _refund_restock(world, monkeypatch, oid, lines)
+    assert [r["minted"] for r in restocked["restocked"]] == [0] * len(lines), restocked
+    assert _frames(db) == frames
+    assert {u["status"] for u in db.stock_units.find()} == {"AVAILABLE"}
+
+
+@pytest.mark.parametrize("cause", ["refund_mark", "part_closed", "shipped"])
+def test_a_takeover_refused_for_good_settles_the_half_claim_loudly(world, monkeypatch, cause):
+    """[LOW-MEDIUM] Round 17, item 5: a crashed Re-map left 1 of 2 units
+    claimed and its lease; the press taking it over is refused for a cause
+    no later press gets past -- a refund mark (a counter that never goes
+    down), a line Shopify closed, a fulfilment. Every press answered '...
+    resolve it by hand', clear-hold had no hold to clear (the crashed write
+    lifted it) and the dispatch gate refused for good on the lease: no door
+    out but a database edit. The half claim is settled as it stands now --
+    the booking's own under-claim: a stock hold with its task -- and the
+    lease comes off, so clear-hold is the door once a human resolved it."""
+    from fastapi import HTTPException
+    from api.routers.orders import assert_no_active_rx_hold
+
+    db = world["db"]
+    payload, oid = _crashed_mid_claim(world, 61110 + len(cause))
+    if cause == "refund_mark":
+        route_mod.mark_refund_or_return(db, oid)
+    elif cause == "part_closed":
+        world["shop"].fos[0]["lineItems"]["nodes"][0]["remainingQuantity"] = 1
+    else:
+        db.orders.update_one({"order_id": oid}, {"$set": {"fulfillment_status": "PARTIAL"}})
+
+    out = _remap(world, monkeypatch, payload)
+
+    assert not out["ok"] and "another Re-map" not in out["message"], out
+    after = db.orders.find_one({"order_id": oid}, {"_id": 0})
+    assert "reroute_lease_at" not in after and _sold_at(db, oid) == ["BV-BOK-01"]
+    assert after["fulfillment_hold"] is True and after["stock_hold_reason"]
+    assert after["fulfillment_breakdown"] == [{"product_id": "P-RB", "store_id": "BV-BOK-01", "qty": 1}]
+    miss = db.online_stock_miss.find_one({"order_id": oid, "reason": "remap_stopped"})
+    assert miss and miss["detail"]["expected"] == 2 and miss["detail"]["claimed"] == 1, miss
+    assert world["tasks"].open_refs(f"online_stock_miss:{oid}") == [f"online_stock_miss:{oid}"]
+    with pytest.raises(HTTPException, match="stock"):
+        assert_no_active_rx_hold(after)
+    assert _clear_hold(world, monkeypatch, oid)["released"] == ["STOCK"]
+    assert_no_active_rx_hold(db.orders.find_one({"order_id": oid}, {"_id": 0}))
+
+
+def test_a_remap_dead_with_its_move_on_the_wire_lets_go_once_its_claim_settled(world, monkeypatch):
+    """[LOW-MEDIUM] Round 17, item 2: MOVE_FAILED at Ranchi; Re-map writes,
+    claims, stamps its claim and dies with its move on the wire (SENDING),
+    its lease stale. Every later press refused ('on the wire') and kept the
+    lease, so once the human moved the order in Shopify admin and cleared the
+    hold, the dispatch gate refused it forever. Its claim settled, the
+    refused press lets the lease go."""
+    from api.routers.orders import assert_no_active_rx_hold
+
+    db = world["db"]
+    payload, res, _o = _move_failed_at_ranchi(world, 61120)
+    oid = res["order_id"]
+    real = shopify_push._graphql
+
+    async def die_on_the_wire(db_, query, variables):
+        if "imsFulfillmentOrderMove" in query:
+            raise _Died()
+        return await real(db_, query, variables)
+
+    monkeypatch.setattr(shopify_push, "_graphql", die_on_the_wire)
+    with pytest.raises(_Died):
+        asyncio.run(route_mod.reroute_held_order(db, oid))
+    monkeypatch.setattr(shopify_push, "_graphql", real)
+    crashed = db.orders.find_one({"order_id": oid})
+    assert [m["status"] for m in crashed["fulfillment_route"]["moves"]] == ["SENDING"]
+    assert "fulfillment_breakdown" in crashed and crashed["fulfillment_hold"] is True
+    db.orders.update_one({"order_id": oid}, {"$set": {"reroute_lease_at": "2000-01-01T00:00:00+00:00"}})
+
+    out = _remap(world, monkeypatch, payload)
+
+    assert not out["ok"] and "on the wire" in out["message"], out
+    assert "reroute_lease_at" not in db.orders.find_one({"order_id": oid})
+    # The human moves it in Shopify admin and clears the hold, as its text says.
+    assert _clear_hold(world, monkeypatch, oid)["released"] == ["STOCK"]
+    assert_no_active_rx_hold(db.orders.find_one({"order_id": oid}, {"_id": 0}))
+
+
+@pytest.mark.parametrize("landing", ["an_rx_flag", "a_refund_mark"])
+def test_a_takeover_whose_write_misses_keeps_or_settles_the_crashed_claim(world, monkeypatch, landing):
+    """[LOW] Round 17, item 6: the crashed Re-map's claim unsettled, a change
+    lands between the takeover's checks and its write, so the write matches
+    nothing. An Rx flag is a change a later press gets past: the lease stays
+    (stale), the order still blocked, never dispatched with 1 of 2 units
+    claimed, and the next press carries on. A refund mark is not: the half
+    claim is settled loudly at once (a stock hold, its task, no lease)."""
+    from fastapi import HTTPException
+    from api.routers.orders import assert_no_active_rx_hold
+
+    db = world["db"]
+    payload, oid = _crashed_mid_claim(world, 61130 + len(landing))
+    real = route_mod.route_order
+
+    def route_then_a_change(*a, **k):
+        if landing == "an_rx_flag":
+            db.orders.update_one({"order_id": oid}, {"$set": {"rx_pending": True}})
+        else:
+            route_mod.mark_refund_or_return(db, oid)
+        return real(*a, **k)
+
+    monkeypatch.setattr(route_mod, "route_order", route_then_a_change)
+    out = _remap(world, monkeypatch, payload)
+    monkeypatch.setattr(route_mod, "route_order", real)
+
+    assert not out["ok"] and "changed while Re-map ran" in out["message"], out
+    after = db.orders.find_one({"order_id": oid}, {"_id": 0})
+    assert _sold_at(db, oid) == ["BV-BOK-01"]
+    if landing == "a_refund_mark":
+        assert "reroute_lease_at" not in after and after["fulfillment_hold"] is True
+        assert db.online_stock_miss.find_one({"order_id": oid, "reason": "remap_stopped"})
+        return
+    assert after.get("reroute_lease_at")
+    with pytest.raises(HTTPException, match="a Re-map of it is running or stopped mid-way"):
+        assert_no_active_rx_hold(after)
+
+    out = _remap(world, monkeypatch, payload)
+
+    assert out["ok"] and out["result"]["status"] == "rerouted", out
+    after = db.orders.find_one({"order_id": oid}, {"_id": 0})
+    assert _sold_at(db, oid) == ["BV-BOK-01", "BV-BOK-01"] and "reroute_lease_at" not in after
+    assert after["fulfillment_hold"] is True  # the Rx hold stands
+
+
+def test_a_superadmin_credit_note_on_a_held_sale_is_not_filed_either(world, monkeypatch):
+    """[MEDIUM] Round 17, item 3: the dark gate books the order SELLER_UNKNOWN
+    at the online bucket, held off GSTR-1 and GSTR-3B; its hold text says
+    'issue a credit note against invoice N'. The SUPERADMIN post-invoice
+    credit note (CN- ref, no RET- id) was filed in CDNR and netted in
+    GSTR-3B: output tax reversed on a supply never declared. The note's row
+    names its order now, so the held sale's rule finds it."""
+    from api.routers import finance as finance_mod
+    from api.routers import returns
+    from api.routers.orders import admin_edit
+    from api.routers.orders.models import SuperadminInvoiceChange
+    from database.repositories.customer_repository import CustomerRepository
+    from database.repositories.order_repository import OrderRepository
+
+    db = world["db"]
+    monkeypatch.setattr(shopify_push, "_live_or_reason", lambda _db: (False, "writes_disabled"))
+    _res, held = _book(world, _order(61140))
+    assert held["store_id"] == "BV-ONLINE-01" and held["invoice_number"] and held["fulfillment_hold"]
+    monkeypatch.setattr(admin_edit, "get_order_repository", lambda: OrderRepository(db.orders))
+    monkeypatch.setattr(admin_edit, "_get_db", lambda: db)
+    monkeypatch.setattr(admin_edit, "_write_order_edit_audit", lambda **k: None)
+    monkeypatch.setattr(finance_mod, "check_period_locked", lambda *a, **k: None)
+    monkeypatch.setattr(returns, "_get_db", lambda: db)
+    monkeypatch.setattr(returns, "get_customer_repository", lambda: CustomerRepository(db.customers))
+
+    out = asyncio.run(admin_edit.superadmin_invoice_change(
+        held["order_id"],
+        SuperadminInvoiceChange(mode="CREDIT_NOTE", reason="Half off, agreed", cart_discount_percent=50),
+        current_user={"user_id": "u1", "roles": ["SUPERADMIN"], "active_store_id": "BV-ONLINE-01"}))
+
+    assert out["note_type"] == "CREDIT_NOTE", out
+    assert db.credit_note_ledger.find_one({"type": "ISSUED", "store_id": "BV-ONLINE-01"})["tax"] > 0
+    filed = _gstr1(world, monkeypatch, held, "BV-ONLINE-01")
+    assert filed["b2cs"] == [] and filed["cdnr"] == [], filed["cdnr"]
+    assert [i for i in filed["validation"]["issues"] if "credit note" in i["issue"]]
+    g3 = _gstr3b(world, monkeypatch, held, "BV-ONLINE-01")
+    assert g3["outwardTaxableValue"] == 0.0
+    assert g3["creditNotes"] == {"integratedTax": 0.0, "centralTax": 0.0,
+                                 "stateTax": 0.0, "taxableValue": 0.0}, g3["creditNotes"]
