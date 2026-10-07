@@ -28,7 +28,11 @@ vi.mock('../../../services/api', () => ({
   productApi: { getProducts: vi.fn().mockResolvedValue({ products: [] }) },
 }));
 vi.mock('../../../services/api/inventory', () => ({
-  vendorsApi: { getLastCost: vi.fn().mockResolvedValue({ costs: {} }) },
+  vendorsApi: {
+    getLastCost: vi.fn().mockResolvedValue({ costs: {} }),
+    // usePoGstHeads (main #1167): the shop's GST heads for the composer.
+    getPoGstHeads: vi.fn().mockResolvedValue({ shop_gstin: '20AABCU9603R1Z1', heads: {} }),
+  },
 }));
 vi.mock('../../../services/api/stores', () => ({
   storeApi: { getStore: vi.fn().mockResolvedValue({ gstin: '20AABCU9603R1Z1', state: 'Jharkhand' }) },

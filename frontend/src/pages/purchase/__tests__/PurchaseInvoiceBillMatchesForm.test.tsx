@@ -474,6 +474,8 @@ describe('panel round 4 - every door hands its lines on, and the list follows th
       expect(mockPost).toHaveBeenCalledWith('/vendors/purchase-invoices/request-cataloguing', {
         product_ids: ['P1'],
         note: undefined,
+        // The bill's shop: its catalogue managers are the ones asked.
+        store_id: 'S1',
       }),
     );
     expect(toastMock.error).toHaveBeenCalledWith(expect.stringMatching(/still missing Selling Price/));

@@ -146,9 +146,9 @@ describe('manual invoice bill-kind declaration', () => {
 
   it('a booking refused for an uncatalogued product asks the catalogue manager of the bill\'s shop', async () => {
     apis.purchaseInvoicesApi.create.mockRejectedValue({
-      response: {
-        data: { detail: { code: 'PRODUCT_NOT_CATALOGUED', lines: [{ product_id: 'P-DRAFT' }] } },
-      },
+      code: 'PRODUCT_NOT_CATALOGUED',
+      message: 'P-DRAFT is still missing Selling Price.',
+      detail: { code: 'PRODUCT_NOT_CATALOGUED', lines: [{ product_id: 'P-DRAFT' }] },
     });
     apis.purchaseInvoicesApi.requestCataloguing.mockResolvedValue({ requested: [] });
     await openManualForm();
@@ -156,6 +156,7 @@ describe('manual invoice bill-kind declaration', () => {
     fireEvent.change(screen.getByDisplayValue(/Choose: goods, or services/), {
       target: { value: 'SERVICES' },
     });
+    await previewSettled();
     fireEvent.click(screen.getByRole('button', { name: /Book invoice/i }));
     await waitFor(() =>
       expect(apis.purchaseInvoicesApi.requestCataloguing).toHaveBeenCalledWith(
@@ -168,9 +169,9 @@ describe('manual invoice bill-kind declaration', () => {
 
   it('an ask nobody received is said, never swallowed', async () => {
     apis.purchaseInvoicesApi.create.mockRejectedValue({
-      response: {
-        data: { detail: { code: 'PRODUCT_NOT_CATALOGUED', lines: [{ product_id: 'P-DRAFT' }] } },
-      },
+      code: 'PRODUCT_NOT_CATALOGUED',
+      message: 'P-DRAFT is still missing Selling Price.',
+      detail: { code: 'PRODUCT_NOT_CATALOGUED', lines: [{ product_id: 'P-DRAFT' }] },
     });
     apis.purchaseInvoicesApi.requestCataloguing.mockRejectedValue(
       new Error('The catalogue manager could not be asked. Try again.'),
@@ -180,6 +181,7 @@ describe('manual invoice bill-kind declaration', () => {
     fireEvent.change(screen.getByDisplayValue(/Choose: goods, or services/), {
       target: { value: 'SERVICES' },
     });
+    await previewSettled();
     fireEvent.click(screen.getByRole('button', { name: /Book invoice/i }));
     await waitFor(() =>
       expect(toastMock.warning).toHaveBeenCalledWith(

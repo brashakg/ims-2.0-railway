@@ -34,7 +34,7 @@ vi.mock('../../../services/api', () => ({ vendorsApi: api }));
 vi.mock('../../../services/api/products', () => ({ productApi: products }));
 vi.mock('../../../context/ToastContext', () => ({ useToast: () => toastMock }));
 vi.mock('../../../context/AuthContext', () => ({
-  useAuth: () => ({ user: { activeStoreId: 'S1', roles: ['STORE_MANAGER'] } }),
+  useAuth: () => ({ user: { activeStoreId: 'S1', roles: ['STORE_MANAGER'] }, hasRole: () => true }),
 }));
 vi.mock('../../../components/print/GRNPrint', () => ({ GRNPrint: () => null }));
 vi.mock('../../../components/print/storeIdentity', () => ({

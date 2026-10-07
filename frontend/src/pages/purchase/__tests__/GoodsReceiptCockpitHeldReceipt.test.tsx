@@ -55,7 +55,7 @@ vi.mock('../../../context/ToastContext', () => ({
 }));
 
 vi.mock('../../../context/AuthContext', () => ({
-  useAuth: () => ({ user: { activeStoreId: 'BV-DHN-02', roles: ['STORE_MANAGER'] } }),
+  useAuth: () => ({ user: { activeStoreId: 'BV-DHN-02', roles: ['STORE_MANAGER'] }, hasRole: () => true }),
 }));
 
 vi.mock('../../../hooks/useIsOnlineStore', () => ({
