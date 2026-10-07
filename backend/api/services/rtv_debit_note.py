@@ -79,6 +79,8 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Dict, List, Optional
 from xml.sax.saxutils import escape
 
+from .purchase_invoice_engine import classify_supply
+
 logger = logging.getLogger(__name__)
 
 COLLECTION = "debit_notes"
@@ -284,12 +286,14 @@ def build_debit_note(
                  ``rtv_doc['lines']`` when empty.
     ``serial``   the pre-allocated FY-scoped debit-note number (the router mints
                  it atomically; this builder is pure and never touches the DB).
-    ``seller``   our issuing entity (name/gstin/state/address). State decides
-                 intra-vs-inter against the vendor's state.
+    ``seller``   our issuing entity (name/gstin/state/address). Its GSTIN and
+                 the vendor's decide intra-vs-inter (below).
 
-    Inter-vs-intra: the vendor (recipient of the return) is the place-of-supply.
-    inter-state when BOTH state codes are known and differ; missing -> assume
-    intra (CGST+SGST), the safe single-state default (matches the sales splitter).
+    Inter-vs-intra: the note reverses the purchase bill's credit, so it takes
+    the BILL's head -- purchase_invoice_engine.classify_supply on the same two
+    GSTINs (the vendor's, ours). A typed state on a vendor with no GSTIN no
+    longer decides it: the bill books that vendor intra-state, and reversing
+    IGST against a CGST + SGST credit left both heads wrong.
     """
     rtv_doc = rtv_doc if isinstance(rtv_doc, dict) else {}
     vendor = vendor if isinstance(vendor, dict) else {}
@@ -302,11 +306,9 @@ def build_debit_note(
         vendor.get("state_code"), vendor_gstin, vendor.get("state"),
         (vendor.get("address") or {}).get("state_code") if isinstance(vendor.get("address"), dict) else None,
     )
-    if seller_state and vendor_state:
-        is_inter_state = seller_state != vendor_state
-    else:
-        is_inter_state = False  # safe intra default (CGST+SGST)
-    place_of_supply = vendor_state or seller_state
+    head = classify_supply(vendor_gstin, seller_gstin)
+    is_inter_state = head["interstate"]
+    place_of_supply = head["itc_place_of_supply"] or vendor_state or seller_state
 
     src_lines = lines or rtv_doc.get("lines") or rtv_doc.get("items") or []
     norm_lines = [_norm_line(ln, is_inter_state) for ln in src_lines if isinstance(ln, dict)]
@@ -847,6 +849,22 @@ class DebitNoteEngine:
         existing = self.get_by_rtv(str(rtv_id))
         if existing is not None:
             return {"ok": True, "idempotent": True, "debit_note": existing}
+
+        # The note reverses credit taken on OUR GSTIN. With none to issue
+        # under, every bill door refuses the bill (purchase_invoices.
+        # _bill_recipient); the note is refused too -- never a blank GSTIN.
+        if not str((seller or {}).get("gstin") or "").strip():
+            store_id = rtv_doc.get("store_id") or "?"
+            name = (seller or {}).get("name") or "Our company"
+            return {
+                "ok": False,
+                "http": 422,
+                "error": "seller_has_no_gstin",
+                "message": f"{name} has no GST number for shop {store_id}, so no "
+                "debit note was issued. Add the company's registration for the "
+                "shop's state in Organization (left menu) or correct the shop's state "
+                "or GSTIN in Organization (left menu).",
+            }
 
         # P1: resolve the source lines + enrich each with product-derived GST
         # rate + HSN (the source RTV docs don't persist them). Fail loud on a

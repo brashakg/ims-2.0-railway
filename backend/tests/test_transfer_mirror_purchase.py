@@ -34,9 +34,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from api.routers.transfers import (  # noqa: E402
     _tax_split,
     _book_mirror_purchase,
-    _store_state_code,
-    _store_entity,
-    _entity_gstin_for_state,
 )
 
 
@@ -73,7 +70,7 @@ def test_tax_split_zero():
 
 
 # ============================================================================
-# Stubs for DB-backed helpers (_store_state_code, _store_entity, etc.)
+# Stubs for the DB the transfer helpers read (stores, entities, vendor_bills)
 # ============================================================================
 
 
