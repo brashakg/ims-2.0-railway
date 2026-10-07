@@ -189,6 +189,16 @@ class POCreate(BaseModel):
     def _expected_date_not_backdated(cls, v):
         return expected_date_not_backdated(v)
 
+    @field_validator("delivery_store_id")
+    @classmethod
+    def _a_shop(cls, v):
+        # A blank store skips the store check (it means "the caller's own")
+        # and leaves an order no shop can see or receive.
+        v = v.strip()
+        if not v:
+            raise ValueError("Choose the shop this order is delivered to")
+        return v
+
 
 class GRNItemCreate(BaseModel):
     # F9: optional -- a no-PO Delivery Challan line has no PO item to reference.

@@ -138,14 +138,10 @@ def test_cancel_po_cross_store_404_no_mutation(monkeypatch):
     assert repo.mutations == []
 
 
-def test_create_po_other_store_403(monkeypatch):
-    monkeypatch.setattr(
-        vendors_mod, "get_purchase_order_repository", lambda: _PORepo(None)
-    )
-    monkeypatch.setattr(vendors_mod, "get_vendor_repository", lambda: None)
-    body = vendors_mod.POCreate(
+def _create_body(store):
+    return vendors_mod.POCreate(
         vendor_id="V1",
-        delivery_store_id="STORE-B",
+        delivery_store_id=store,
         items=[
             vendors_mod.POItemCreate(
                 product_id="P1",
@@ -156,9 +152,30 @@ def test_create_po_other_store_403(monkeypatch):
             )
         ],
     )
+
+
+# The catalogue manager raises a draft for its OWN shop only (owner ruling
+# 2026-09-28), held by the same check as the store manager.
+@pytest.mark.parametrize("role", ["STORE_MANAGER", "CATALOG_MANAGER"])
+def test_create_po_other_store_403(monkeypatch, role):
+    repo = _PORepo(None)
+    monkeypatch.setattr(vendors_mod, "get_purchase_order_repository", lambda: repo)
+    monkeypatch.setattr(vendors_mod, "get_vendor_repository", lambda: None)
     with pytest.raises(HTTPException) as e:
-        asyncio.run(vendors_mod.create_po(body, _user(["STORE_MANAGER"], "STORE-A")))
+        asyncio.run(vendors_mod.create_po(_create_body("STORE-B"), _user([role], "STORE-A")))
     assert e.value.status_code == 403
+    assert repo.mutations == []
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_create_po_without_a_shop_is_refused(blank):
+    """A blank store skips the store check and leaves an order only an admin
+    can see -- so no role may save one."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        _create_body(blank)
+    assert _create_body(" STORE-A ").delivery_store_id == "STORE-A"
 
 
 # --------------------------------------------------------------------------- #
