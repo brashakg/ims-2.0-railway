@@ -378,3 +378,77 @@ def test_the_pending_panel_never_names_a_placeholder(monkeypatch):
         ("G-DEAD", "RCPT/BV-TEST-01/26-27/0001")
     ]
     assert db.grns.find_one({"grn_id": "G-DEAD"})["grn_number"] == "RCPT/BV-TEST-01/26-27/0001"
+
+
+# ---------------------------------------------------------------------------
+# Verifier round 8: the live create numbers its row through the same claim
+# ---------------------------------------------------------------------------
+
+
+def _stalled_repo(db, stall):
+    """GRNRepository whose create() is followed by `stall(db, row_id)`: the
+    request freezes right after its insert while the rest of the shop runs."""
+
+    class _Stalled(GRNRepository):
+        def create(self, doc, **kw):
+            created = super().create(doc, **kw)
+            stall(db, doc["grn_id"])
+            return created
+
+    return _Stalled(db.grns)
+
+
+def _a_minute_passes(db, grn_id, **extra):
+    old = datetime.now() - timedelta(minutes=5)
+    db.grns.update_one({"grn_id": grn_id}, {"$set": {"created_at": old, **extra}})
+
+
+def test_a_create_stalled_past_the_minute_keeps_the_number_the_healer_gave_it(monkeypatch):
+    """The request stalled over a minute between its insert and its number.
+    Another create's healer numbered the row 0001 (and an accept in that
+    window stamps 0001 on the units). The stalled request then minted 0002
+    and wrote it over 0001: 0001 vanished from the GST series and the
+    receipt's number no longer matched its stock."""
+    db = mongomock.MongoClient().db
+
+    def stall(db, grn_id):
+        _a_minute_passes(db, grn_id)
+        _number_stranded_receipts(GRNRepository(db.grns))  # the next create
+        assert db.grns.find_one({"grn_id": grn_id})["grn_number"].endswith("/0001")
+
+    store = _wire(monkeypatch, _stalled_repo(db, stall))
+    minted = _counting_minter(monkeypatch)
+
+    res = _create(_body(store))
+
+    (row,) = list(db.grns.find())
+    assert row["grn_number"] == "RCPT/BV-TEST-01/26-27/0001"  # never overwritten
+    assert res["grn_number"] == row["grn_number"]
+    assert len(minted) == 1  # no serial spent
+
+
+def test_a_create_whose_claim_is_taken_over_never_overwrites_the_number(monkeypatch):
+    """The request claimed its row, then stalled over a minute before its
+    write: a healer took the dead-looking claim over and wrote its number.
+    The stalled write must land nowhere, and the response names the row's
+    number (the one serial it minted is spent: the ponytail in grn.py)."""
+    db = mongomock.MongoClient().db
+    store = _wire(monkeypatch, GRNRepository(db.grns))
+    seq = itertools.count(1)
+    calls = []
+
+    def _mint(store_id):
+        calls.append(store_id)
+        if len(calls) == 1:  # the live request, stalled after its claim
+            (row,) = list(db.grns.find())
+            _a_minute_passes(db, row["grn_id"], numbering_claimed_at=datetime.now() - timedelta(minutes=5))
+            _number_stranded_receipts(GRNRepository(db.grns))
+        return f"RCPT/{store_id}/26-27/{next(seq):04d}"
+
+    monkeypatch.setattr(v, "generate_grn_number", _mint)
+
+    res = _create(_body(store))
+
+    (row,) = list(db.grns.find())
+    assert row["grn_number"] == "RCPT/BV-TEST-01/26-27/0001"  # the healer's
+    assert res["grn_number"] == row["grn_number"]

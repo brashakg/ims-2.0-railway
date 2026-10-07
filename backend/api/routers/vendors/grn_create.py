@@ -27,11 +27,13 @@ from .numbering import (
     classify_grn_line_variance,
     generate_grn_number,
     grn_has_discrepancy,
+    grn_number_pending,
 )
 from .grn import (
     _duplicate_grn_detail,
     _enrich_grn_names,
     _find_duplicate_standard_grn,
+    _number_receipt,
     _number_stranded_receipts,
 )
 from ...services.purchase_numbering import po_label
@@ -458,15 +460,32 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
     # identical receipts that both passed the duplicate check race to the
     # index, and the loser is refused above before it takes a number (audit
     # F28: the loser used to burn one, leaving a gap in a GST series). A worker
-    # that dies between the insert and this write leaves the row on its
+    # that dies between the insert and the number leaves the row on its
     # placeholder; _number_stranded_receipts numbers it on the next create,
-    # accept or receipts list.
-    grn_number = generate_grn_number(store_id)
-    if grn_repo is not None and not grn_repo.update(grn_id, {"grn_number": grn_number}):
-        # Never leave a receipt carrying the placeholder. ponytail: the number
-        # is spent if this write fails after the mint (a DB failure mid-request).
-        grn_repo.delete(grn_id)
-        raise HTTPException(status_code=500, detail="Failed to save goods receipt")
+    # accept or receipts list. Both go through _number_receipt (claim, mint,
+    # guarded write), so a request that stalled past _STRANDED_AFTER finds its
+    # row already numbered by the healer and reports THAT number: it never
+    # mints a second one or overwrites the first (already on any unit an
+    # accept minted meanwhile).
+    if grn_repo is None:
+        grn_number = generate_grn_number(store_id)
+    else:
+        grn_number = _number_receipt(grn_repo, grn_id, store_id)
+        if grn_number is None:
+            row = grn_repo.find_by_id(grn_id) or {}
+            if not row.get("grn_number") or grn_number_pending(row):
+                # Saved, and another worker is numbering it right now: never
+                # hand out the placeholder. The receipts list shows it once
+                # numbered; a retry gets the duplicate guard, not a second one.
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "The goods receipt is saved and is still getting its "
+                        "receipt number. Refresh the receipts list in a minute; "
+                        "do not enter it again."
+                    ),
+                )
+            grn_number = row["grn_number"]
     grn_doc["grn_number"] = grn_number
 
     # F9: audit the DC log (immutable; a DC is the accountable checkpoint between

@@ -39,26 +39,67 @@ _PLACEHOLDER_RE = "^" + GRN_PLACEHOLDER_PREFIX
 _STRANDED_AFTER = timedelta(minutes=1)
 
 
+def _number_receipt(grn_repo, grn_id: str, store_id) -> Optional[str]:
+    """THE receipt numbering write, shared by the live create and the
+    stranded-receipt healer below (audit F28). Claim the row while it is still
+    on its placeholder, THEN mint, THEN write the number only onto a row still
+    on its placeholder under this claim. Whoever loses the row takes no
+    number, and a number already written is never overwritten. Returns the
+    number written, or None when another worker has (or had) the row.
+
+    A claim older than _STRANDED_AFTER belonged to a worker that died; it is
+    taken over. ponytail: a worker stalled longer than that between its claim
+    and its write spends one serial (the takeover numbers the row, the stalled
+    write lands nowhere); a counter reservation released on loss would close
+    it, if it is ever seen.
+
+    A repository without a collection (the in-memory test doubles) has one
+    worker and no healer: mint and write."""
+    coll = getattr(grn_repo, "collection", None)
+    if coll is None:
+        number = generate_grn_number(store_id)
+        return number if grn_repo.update(grn_id, {"grn_number": number}) else None
+    now = datetime.now()
+    claim = str(uuid.uuid4())
+    won = coll.update_one(
+        {
+            "grn_id": grn_id,
+            "grn_number": {"$regex": _PLACEHOLDER_RE},
+            "$or": [
+                {"numbering_claimed_at": {"$exists": False}},
+                {"numbering_claimed_at": {"$lt": now - _STRANDED_AFTER}},
+            ],
+        },
+        {"$set": {"numbering_claim": claim, "numbering_claimed_at": now}},
+    )
+    if not getattr(won, "modified_count", 0):
+        return None
+    number = generate_grn_number(store_id)
+    wrote = coll.update_one(
+        {"grn_id": grn_id, "numbering_claim": claim, "grn_number": {"$regex": _PLACEHOLDER_RE}},
+        {
+            "$set": {"grn_number": number},
+            "$unset": {"numbering_claim": "", "numbering_claimed_at": ""},
+        },
+    )
+    return number if getattr(wrote, "modified_count", 0) else None
+
+
 def _number_stranded_receipts(grn_repo) -> None:
     """Number every receipt whose worker died between its insert and its
     number (a killed worker, a deploy mid-request), so no row keeps
     PENDING/<grn_id> for good (audit F28). Runs at the start of every receipt
-    create, accept and list (the pending receipts panel). A row younger than _STRANDED_AFTER may still be
-    numbered by its own request, so it is left alone: until then the
-    duplicate guard says the receipt is still getting its number and accept
-    refuses it (a placeholder must never reach a stock unit). Fail-soft: what
-    it cannot do now, the next create or accept does.
-
-    ponytail: a request stalled longer than _STRANDED_AFTER between its insert
-    and its number races this; the final write only lands on a row still on
-    its placeholder, so the row and the response never disagree, but the
-    loser's serial is spent. A claim on the live path too would close that,
-    if it is ever seen."""
+    create, accept and list (the pending receipts panel). A row younger than
+    _STRANDED_AFTER may still be numbered by its own request, so it is left
+    alone: until then the duplicate guard says the receipt is still getting
+    its number and accept refuses it (a placeholder must never reach a stock
+    unit). Each row goes through _number_receipt, the same claimed write the
+    live create uses, so a stalled create and this never both number a row.
+    Fail-soft: what it cannot do now, the next create or accept does."""
     coll = getattr(grn_repo, "collection", None)
     if coll is None:
         return
-    now = datetime.now()
-    stale = now - _STRANDED_AFTER
+    stale = datetime.now() - _STRANDED_AFTER
     try:
         rows = list(
             coll.find(
@@ -67,36 +108,7 @@ def _number_stranded_receipts(grn_repo) -> None:
             ).limit(20)
         )
         for row in rows:
-            # Claim before minting: two creates at once must not both number
-            # it (the loser would spend a serial). A claim older than
-            # _STRANDED_AFTER belonged to a worker that died too; take it over.
-            claim = str(uuid.uuid4())
-            won = coll.update_one(
-                {
-                    "grn_id": row["grn_id"],
-                    "grn_number": {"$regex": _PLACEHOLDER_RE},
-                    "$or": [
-                        {"numbering_claimed_at": {"$exists": False}},
-                        {"numbering_claimed_at": {"$lt": stale}},
-                    ],
-                },
-                {"$set": {"numbering_claim": claim, "numbering_claimed_at": now}},
-            )
-            if not getattr(won, "modified_count", 0):
-                continue
-            coll.update_one(
-                # Still on the placeholder: the live request may have written
-                # its own number since the claim, and that one stands.
-                {
-                    "grn_id": row["grn_id"],
-                    "numbering_claim": claim,
-                    "grn_number": {"$regex": _PLACEHOLDER_RE},
-                },
-                {
-                    "$set": {"grn_number": generate_grn_number(row.get("store_id"))},
-                    "$unset": {"numbering_claim": "", "numbering_claimed_at": ""},
-                },
-            )
+            _number_receipt(grn_repo, row["grn_id"], row.get("store_id"))
     except Exception as exc:  # noqa: BLE001
         logger.warning("[VENDOR] stranded receipt numbering skipped: %s", exc)
 
