@@ -12,6 +12,7 @@ import { Route, Navigate, useSearchParams } from 'react-router-dom';
 import { ProtectedRoute } from '../components/layout/ProtectedRoute';
 import type { UserRole } from '../types';
 import { APPROVE_ROLES } from '../pages/purchase/invoices/shared';
+import { RETURN_READERS } from '../pages/purchase/purchaseRoles';
 
 const PurchaseLayout = lazy(() => import('../pages/purchase/PurchaseLayout').then(m => ({ default: m.PurchaseLayout })));
 const PurchaseOrdersSection = lazy(() => import('../pages/purchase/PurchaseOrdersSection').then(m => ({ default: m.PurchaseOrdersSection })));
@@ -111,13 +112,13 @@ export const purchaseRoutes = (
           </ProtectedRoute>
         }
       />
-      {/* Vendor Returns keeps its wider historical gate (WORKSHOP_STAFF logs
-          defective pairs). ACCOUNTANT reads it too: the supplier credit and
-          the GST debit notes on these returns are the accounts roles' to see. */}
+      {/* Vendor Returns: RETURN_READERS, the backend's read list -- the
+          purchase roles plus WORKSHOP_STAFF (logs defective pairs). The
+          ACCOUNTANT owns the debit notes (owner ruling 2026-10-07, R2). */}
       <Route
         path="vendor-returns"
         element={
-          <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'WORKSHOP_STAFF']}>
+          <ProtectedRoute allowedRoles={RETURN_READERS}>
             <VendorReturns />
           </ProtectedRoute>
         }

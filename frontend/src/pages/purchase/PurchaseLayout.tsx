@@ -27,6 +27,7 @@ import { useIsOnlineStore } from '../../hooks/useIsOnlineStore';
 import { useAuth } from '../../context/AuthContext';
 import { NewOrdersDeliverTo, PurchaseShopGate, PurchaseShopLabel, PurchaseShopPicker } from './purchaseShop';
 import { APPROVE_ROLES } from './invoices/shared';
+import { RETURN_READERS } from './purchaseRoles';
 
 const SECTIONS = [
   { path: '/purchase/orders', label: 'Purchase Orders', icon: FileText },
@@ -35,7 +36,7 @@ const SECTIONS = [
   { path: '/purchase/invoices', label: 'Purchase Invoices', icon: Receipt, roles: APPROVE_ROLES },
   { path: '/purchase/variance', label: 'Variance', icon: PackageX },
   { path: '/purchase/suppliers', label: 'Suppliers', icon: Truck },
-  { path: '/purchase/vendor-returns', label: 'Vendor Returns', icon: AlertTriangle },
+  { path: '/purchase/vendor-returns', label: 'Vendor Returns', icon: AlertTriangle, roles: RETURN_READERS },
   { path: '/purchase/analytics', label: 'Analytics', icon: TrendingUp },
   // Audit F56: what we ordered, received, were billed, paid and owe -- the
   // supplier-balance readers only (APPROVE_ROLES = the API's _AP_ROLES; the

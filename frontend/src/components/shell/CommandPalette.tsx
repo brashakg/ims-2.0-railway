@@ -23,6 +23,7 @@ import { useAuth } from '../../context/AuthContext';
 import { moduleForPath } from '../../context/ModuleContext';
 import { filterVisibleGroups, hasAnyRole } from './navConfig';
 import { Icon } from './Icon';
+import { RETURN_READERS } from '../../pages/purchase/purchaseRoles';
 import type { UserRole } from '../../types';
 
 // ----------------------------------------------------------------------------
@@ -121,7 +122,7 @@ const EXTRA_JUMPS: ExtraJump[] = [
     label: 'Vendor Returns',
     route: '/purchase/vendor-returns',
     hint: 'Stock & supply',
-    requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'WORKSHOP_STAFF'],
+    requireRoles: RETURN_READERS,
   },
 ];
 
