@@ -66,10 +66,14 @@ describe("a task's link", () => {
     expect(link).toHaveAttribute('href', '/catalog/review');
   });
 
-  it('is never rendered for an address outside the app', async () => {
-    getTasks.mockResolvedValue({ tasks: [task('//evil.example/x')], total: 1 });
-    renderMine();
-    await screen.findAllByText(/Finish 1 item\(s\) held/);
-    expect(screen.queryByRole('link', { name: /Open where this is done/ })).toBeNull();
-  });
+  // Browsers read '/\\host' as '//host' and strip tabs/newlines from a URL.
+  it.each(['//evil.example/x', '/\\evil.example/x', '/\t/evil.example/x', 'https://evil.example/x'])(
+    'is never rendered for an address outside the app (%j)',
+    async (href) => {
+      getTasks.mockResolvedValue({ tasks: [task(href)], total: 1 });
+      renderMine();
+      await screen.findAllByText(/Finish 1 item\(s\) held/);
+      expect(screen.queryByRole('link', { name: /Open where this is done/ })).toBeNull();
+    },
+  );
 });
