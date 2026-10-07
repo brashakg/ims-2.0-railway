@@ -34,7 +34,7 @@ export default function StockLookupPage() {
   const [text, setText] = useState('');
   const [q, setQ] = useState('');
   const input = useRef<HTMLInputElement>(null);
-  const { data, isFetching, error } = useQuery({
+  const { data, isFetching, error, refetch } = useQuery({
     queryKey: ['inventory', 'lookup', q],
     queryFn: async () => (await api.get<LookupResult>('/inventory/lookup', { params: { q } })).data,
     enabled: q.length > 0,
@@ -43,7 +43,11 @@ export default function StockLookupPage() {
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    setQ(text.trim());
+    const next = text.trim();
+    // The same barcode scanned again is the same query key, so setQ alone
+    // would not ask again; a frame sold since must not still read 1.
+    if (next && next === q) void refetch();
+    else setQ(next);
     // A scanner types into the focused box and presses Enter: select what is
     // there so the next scan replaces it instead of being glued onto it.
     input.current?.select();
