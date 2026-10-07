@@ -698,10 +698,15 @@ def _stamp_shipped_value(line: Dict, units: List[Dict]) -> None:
     unit that carries no cost of its own (owner 2026-09-28: shelf units carry
     the product's cost); a unit with neither leaves the line at 0, so a valued
     challan refuses instead of printing a short value (a move between two
-    registrations never gets here: _assert_valued_paper stops it). The challan, the
-    transfer's total_value and the FIN-3 mirror bill all read these stamps:
-    one value per transfer. Fail-soft: a product lookup error only loses the
-    fallbacks -- the units have already moved, so this never raises."""
+    registrations never gets here: _assert_valued_paper stops it). A line that
+    shipped nothing keeps no client-typed figure (a BOPIS line carries the SALE
+    price): its rate is the product's cost, else 0. The challan, the transfer's
+    total_value and the FIN-3 mirror bill all price at this one rate through
+    _line_value -- the challan on the units SHIPPED, the mirror bill on the
+    units RECEIVED, so a short receipt books less than the challan shows (the
+    bill records both: qty_basis + challan_value; the CA decides). Fail-soft:
+    a product lookup error only loses the fallbacks -- the units have already
+    moved, so this never raises."""
     from ..services.gst_rates import hsn_for_category
 
     product: Dict = {}
@@ -721,20 +726,28 @@ def _stamp_shipped_value(line: Dict, units: List[Dict]) -> None:
         or ""
     )
     line["shipped_barcodes"] = [str(u["barcode"]) for u in units if u.get("barcode")]
-    if units:
-        costs = [
-            _first_cost(u.get("unit_cost"), u.get("cost_price"), product.get("cost_price"))
-            for u in units
-        ]
-        # ponytail: one average rate per line (exact for a line of one cost);
-        # per-unit rows if lines of mixed-cost units ever need their own rates.
+    costs = [
+        _first_cost(u.get("unit_cost"), u.get("cost_price"), product.get("cost_price"))
+        for u in units
+    ]
+    # ponytail: one average rate per line (exact for a line of one cost);
+    # per-unit rows if lines of mixed-cost units ever need their own rates.
+    if costs:
         line["unit_cost"] = sum(costs) / len(costs) if all(costs) else 0.0
+    else:
+        line["unit_cost"] = _first_cost(product.get("cost_price"))
+
+
+def _line_value(qty, cost) -> float:
+    """qty x the line's stamped cost, rounded to the paisa: THE line value the
+    challan / total_value (qty shipped) and the FIN-3 mirror bill (qty
+    received) share. Pure."""
+    return round(_qty(qty) * _first_cost(cost), 2)
 
 
 def _shipped_line_value(line: Dict) -> float:
-    """What a shipped line is worth: units shipped x their own cost, rounded to
-    the paisa -- the same per-line rounding the FIN-3 mirror bill uses. Pure."""
-    return round(_qty(line.get("quantity_shipped")) * _first_cost(line.get("unit_cost")), 2)
+    """What a shipped line is worth: units shipped x their own cost. Pure."""
+    return _line_value(line.get("quantity_shipped"), line.get("unit_cost"))
 
 
 def _transferred_pool(stock_repo, transfer, product_id, prefer):
@@ -2279,14 +2292,8 @@ def _mirror_bill_lines(db, transfer: Dict, interstate: bool) -> List[Dict]:
         qty_raw = item.get("quantity_received")
         if qty_raw is None:
             qty_raw = item.get("quantity_requested")
-        try:
-            qty = int(float(qty_raw or 0))
-        except (TypeError, ValueError):
-            qty = 0
-        try:
-            cost = float(item.get("unit_cost") or 0)
-        except (TypeError, ValueError):
-            cost = 0.0
+        qty = _qty(qty_raw)
+        cost = _first_cost(item.get("unit_cost"))
         if qty <= 0 or cost <= 0:
             continue
 
@@ -2311,7 +2318,7 @@ def _mirror_bill_lines(db, transfer: Dict, interstate: bool) -> List[Dict]:
         ).strip()
         rate = resolve_gst_rate(hsn_code=hsn or None, category=category)
 
-        taxable = round(qty * cost, 2)
+        taxable = _line_value(qty, cost)
         split = split_line_gst(taxable, rate, interstate)
         lines.append(
             {
@@ -2514,6 +2521,12 @@ def _book_mirror_purchase(transfer: Dict) -> None:
             "igst_total": igst,
             "total_amount": round(taxable + tax, 2),
             "total": round(taxable + tax, 2),
+            # D13: the bill books the units RECEIVED (no input credit on goods
+            # that never arrived); the valued challan showed the units SHIPPED.
+            # Both on the bill, so a short receipt's gap is visible -- which
+            # one the sender's GSTR-1 reports is the CA's call.
+            "qty_basis": "received",
+            "challan_value": round(float(transfer.get("total_value") or 0), 2),
             # ITC eligibility: inter-entity transfers are stock-in-trade, so
             # claimable -- decided by the ONE helper every booking door and
             # reader uses: a sending shop with no valid registration gives no

@@ -172,8 +172,9 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def _create(to_store, qty=2, unit_cost=0.0, by=ADMIN):
-    """The transfer modal's exact payload: inventory.ts sends unit_cost ?? 0."""
+def _create(to_store, qty=2, unit_cost=0.0, by=ADMIN, extra=()):
+    """The transfer modal's exact payload: inventory.ts sends unit_cost ?? 0.
+    `extra`: more TransferItemInput lines after the frame's."""
     body = transfers.TransferInput(
         transfer_type="store_to_store",
         from_location_id="ST-DHN-1", from_location_name="Hirapur Dhanbad",
@@ -184,7 +185,8 @@ def _create(to_store, qty=2, unit_cost=0.0, by=ADMIN):
             transfers.TransferItemInput(
                 product_id=PRODUCT["product_id"], sku=PRODUCT["sku"],
                 product_name=PRODUCT["name"], quantity_requested=qty, unit_cost=unit_cost,
-            )
+            ),
+            *extra,
         ],
     )
     return _run(transfers.create_transfer(body, by))["transfer"]
@@ -329,10 +331,11 @@ def test_d13_challan_is_valued_exactly_when_the_gstins_differ(db, to_store):
     assert _shows_amount(html, 2 * UNIT_COST) is crosses
 
 
-def _receive_and_complete(t):
+def _receive_and_complete(t, received=2):
     line_id = transfers._get_transfer(t["id"])["items"][0]["id"]
     _run(transfers.receive_transfer(
-        t["id"], [transfers.TransferItemReceive(transfer_item_id=line_id, quantity_received=2)], ADMIN,
+        t["id"], [transfers.TransferItemReceive(transfer_item_id=line_id, quantity_received=received)],
+        ADMIN,
     ))
     _run(transfers.complete_transfer(t["id"], None, ADMIN))
 
@@ -344,6 +347,21 @@ def test_d13_any_mirror_bill_carries_the_challan_value(db):
     assert [b.get("taxable_amount") for b in bills] == [pytest.approx(2 * UNIT_COST)] * len(bills)
     assert bills, "the mirror bill is still booked at complete today"
     assert bills[0]["lines"][0]["hsn"] == HSN, "the bill's HSN is the challan's"
+
+
+def test_d13_short_receipt_bill_states_its_basis_and_the_challan_value(db):
+    """Ship 2 at 1850, receive 1: the challan and total_value stay at the 2 that
+    LEFT (3700); the mirror bill books the 1 that ARRIVED (1850 -- no input
+    credit on goods never received) and says so on the bill, next to the
+    challan's value, so the gap is visible instead of two silent figures.
+    Which one the sender's GSTR-1 reports is the CA's call (owner ruling D13)."""
+    t = _shipped("ST-BOK-1")
+    _receive_and_complete(t, received=1)
+    assert transfers._get_transfer(t["id"])["total_value"] == pytest.approx(2 * UNIT_COST)
+    assert _shows_amount(_challan(t["id"]), 2 * UNIT_COST)
+    (bill,) = db["vendor_bills"].find({"source_transfer_id": t["id"]})
+    assert bill["taxable_amount"] == pytest.approx(UNIT_COST)
+    assert (bill["qty_basis"], bill["challan_value"]) == ("received", pytest.approx(2 * UNIT_COST))
 
 
 def test_d13_the_paper_and_the_books_ask_one_rule(db, monkeypatch):
@@ -481,3 +499,22 @@ def test_f51_a_transfer_shipped_without_a_value_never_prints_at_rs_0(db):
     with pytest.raises(HTTPException) as exc:
         _challan(t["id"])
     assert exc.value.status_code == 409
+
+
+def test_f51_a_line_that_shipped_nothing_prints_a_cost_not_the_client_figure(db):
+    """Line 2 has no unit on the shelf and a client-typed unit_cost (a BOPIS
+    line carries the SALE price): after ship its rate is the product's cost,
+    never the typed figure under 'Rate (at cost)'."""
+    db["products"].insert_one({
+        "product_id": "P-LENS", "sku": "LN-1", "name": "Lens pair", "category": "LENS",
+        "hsn_code": "900150", "cost_price": 1200.0,
+    })
+    lens = transfers.TransferItemInput(
+        product_id="P-LENS", sku="LN-1", product_name="Lens pair",
+        quantity_requested=1, unit_cost=9999,
+    )
+    t = _create("ST-BOK-1", extra=[lens])
+    _ship(t["id"])
+    line = transfers._get_transfer(t["id"])["items"][1]
+    assert (line["quantity_shipped"], line["unit_cost"]) == (0, pytest.approx(1200.0))
+    assert not _shows_amount(_challan(t["id"]), 9999)
