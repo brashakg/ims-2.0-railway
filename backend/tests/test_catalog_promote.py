@@ -530,3 +530,69 @@ def test_an_imported_then_approved_gtin_reaches_the_price_push(env, monkeypatch)
     twin["ecom"] = {"shopify_variant_id": "gid://shopify/ProductVariant/1"}
     rows, _ = build_variant_price_inputs(twin, _variants_for_price_push(twin, []))
     assert rows[0]["barcode"] == "4006381333931"
+
+
+@pytest.fixture()
+def shared_db(env, monkeypatch):
+    """`env` on ONE mongomock db, as in production: the catalog door's twins
+    and the spine repo read and write the same database."""
+    import mongomock
+
+    db = mongomock.MongoClient().db
+    repo = ProductRepository(db.products)
+    monkeypatch.setattr(catalog_mod, "_get_db", lambda: db)
+    monkeypatch.setattr(deps_mod, "get_product_repository", lambda: repo)
+    return db
+
+
+def _import_rows(*gtins):
+    rows = [
+        catalog_mod.ProductCreateInput(
+            category="FR",
+            attributes={**_attrs_with_gtin(g), "model_no": f"VO{i}"},
+            pricing={"mrp": 5000.0, "offer_price": 4500.0},
+        )
+        for i, g in enumerate(gtins)
+    ]
+    return asyncio.run(catalog_mod.import_products(rows, current_user=_user()))
+
+
+def test_import_keeps_one_product_per_gtin_across_rows_and_batches(shared_db):
+    """The import writes only a catalog_products twin (no spine) and queues it
+    for the push, which sends the twin's gtin as its variant barcode: two rows
+    with one GTIN were two Shopify listings carrying the same barcode."""
+    res = _import_rows("4006381333931", "04006381333931")
+    assert res["created_count"] == 1
+    assert [e["index"] for e in res["errors"]] == [1]
+    assert "already assigned" in res["errors"][0]["error"]
+    again = _import_rows("4006381333931")
+    assert again["created_count"] == 0 and "already assigned" in again["errors"][0]["error"]
+    assert shared_db.catalog_products.count_documents({}) == 1
+
+
+def test_a_create_door_sees_an_imported_twins_gtin(shared_db):
+    """Quick Add / the catalog create door read only spines, so an imported
+    twin's GTIN was free to take."""
+    assert _import_rows("4006381333931")["created_count"] == 1
+    row = catalog_mod.ProductCreateInput(
+        category="FR",
+        attributes={**_attrs_with_gtin("4006381333931"), "model_no": "VO-NEW"},
+        pricing={"mrp": 5000.0, "offer_price": 4500.0},
+    )
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(catalog_mod.create_catalog_product(row, current_user=_user()))
+    assert exc.value.status_code == 409
+    assert shared_db.products.count_documents({}) == 0
+
+
+def test_an_imported_twin_approves_and_re_saves_its_own_gtin(shared_db):
+    """The twin itself is never the clash: Approve keys the check on its id,
+    and the review editor on a spineless twin passes the twin's id."""
+    assert _import_rows("4006381333931")["created_count"] == 1
+    (pid,) = [d["id"] for d in shared_db.catalog_products.find({})]
+    inp = catalog_mod.ProductUpdateInput(
+        attributes={"gtin": "4006381333931", "colour_code": "RED"}
+    )
+    asyncio.run(catalog_mod.update_catalog_product(pid, inp, _user()))
+    assert shared_db.catalog_products.find_one({"id": pid})["attributes"]["colour_code"] == "RED"
+    assert _promote(pid)["pos_ready"] is True

@@ -51,14 +51,19 @@ _RANDOM_GENERATED = "930713281508"
 # ============================================================================
 
 
-def _FakeRepo(products: List[Dict[str, Any]]) -> ProductRepository:
+def _FakeRepo(
+    products: List[Dict[str, Any]], twins: List[Dict[str, Any]] = ()
+) -> ProductRepository:
     """The REAL ProductRepository over an in-memory mongomock collection holding
-    `products`, so the real find_by_barcode query runs."""
+    `products` (and `twins` in the same db's catalog_products), so the real
+    find_by_barcode / find_twin_by_barcode queries run."""
     import mongomock
 
     coll = mongomock.MongoClient().db.products
     for p in products:
         coll.insert_one(dict(p))
+    for t in twins:
+        coll.database["catalog_products"].insert_one(dict(t))
     return ProductRepository(coll)
 
 
@@ -179,6 +184,79 @@ class TestBarcodeValidatorPure:
         with pytest.raises(HTTPException) as ei:
             _validate_product_barcode_or_400(_VALID_A, repo, "p1")
         assert ei.value.status_code == 409
+
+
+    @pytest.mark.parametrize(
+        "own, other, typed",
+        [
+            ({"barcode": _VALID_A}, {"attributes": {"gtin": _VALID_A}}, _VALID_A),
+            ({"attributes": {"gtin": _UPC_A}}, {"attributes": {"gtin": "0" + _UPC_A}}, _UPC_A),
+        ],
+    )
+    def test_the_edited_products_own_code_never_hides_another_holder(
+        self, own, other, typed
+    ):
+        """find_one returned ONE holder: when it was the product being edited
+        the check passed, and a second holder went unseen (Manage Barcode
+        re-saving A's legacy barcode as its gtin while B held it). The verdict
+        no longer depends on which document Mongo returns first."""
+        from api.routers.products import _validate_product_barcode_or_400
+
+        repo = _FakeRepo(
+            [
+                {"product_id": "A", "sku": "SKU-A", **own},
+                {"product_id": "B", "sku": "SKU-B", **other},
+            ]
+        )
+        for this, holder in (("A", "SKU-B"), ("B", "SKU-A")):
+            with pytest.raises(HTTPException) as ei:
+                _validate_product_barcode_or_400(typed, repo, this)
+            assert ei.value.status_code == 409 and holder in str(ei.value.detail)
+
+    @pytest.mark.parametrize(
+        "held", [{"attributes": {"gtin": _VALID_A}}, {"gtin": "0" + _VALID_A}]
+    )
+    def test_a_catalogue_twin_with_no_spine_holds_its_gtin(self, held):
+        """POST /catalog/products/import writes only a catalog_products twin,
+        and the push sends a twin's gtin as its variant barcode: the one-holder
+        rule reads twins too, in every spelling."""
+        from api.routers.products import _validate_product_barcode_or_400
+
+        repo = _FakeRepo([], twins=[{"id": "imp-1", "sku": "IMP-1", **held}])
+        for this in (None, "p1"):
+            with pytest.raises(HTTPException) as ei:
+                _validate_product_barcode_or_400(_VALID_A, repo, this)
+            assert ei.value.status_code == 409 and "IMP-1" in str(ei.value.detail)
+        # The twin itself (the review editor on a spineless twin) is no clash.
+        _validate_product_barcode_or_400(_VALID_A, repo, "imp-1")
+
+    def test_a_products_own_twin_is_not_a_clash(self):
+        """A spine's twin carries the same gtin; it is keyed on the spine's
+        pim_product_id (door-created), its product_id (legacy) or its sku."""
+        from api.routers.products import _validate_product_barcode_or_400
+
+        repo = _FakeRepo(
+            [
+                {"product_id": "p1", "sku": "S1", "pim_product_id": "pim-1",
+                 "attributes": {"gtin": _VALID_A}},
+                {"product_id": "p2", "attributes": {"gtin": _VALID_B}},
+                {"product_id": "p3", "sku": "S3", "attributes": {"gtin": _UPC_A}},
+            ],
+            twins=[
+                {"id": "pim-1", "sku": "S1", "gtin": _VALID_A},
+                {"id": "p2", "gtin": _VALID_B},
+                {"id": "bvi-3", "sku": "S3", "attributes": {"gtin": _UPC_A}},
+            ],
+        )
+        _validate_product_barcode_or_400(_VALID_A, repo, "p1")
+        _validate_product_barcode_or_400(_VALID_B, repo, "p2")
+        _validate_product_barcode_or_400(_UPC_A, repo, "p3")
+        # ... while another product's twin still clashes.
+        repo.collection.database["catalog_products"].insert_one(
+            {"id": "imp-9", "sku": "IMP-9", "gtin": _EAN_8}
+        )
+        with pytest.raises(HTTPException):
+            _validate_product_barcode_or_400(_EAN_8, repo, "p1")
 
 
 # ============================================================================

@@ -2019,8 +2019,11 @@ async def update_catalog_product(
             _typed = _pm._guard_gtin_attribute(_typed, strict=True)
             if "gtin" in _typed:
                 _gtin_repo = get_product_repository()
+                # A spineless twin (an import) is its own holder: its id.
                 _pm.assert_gtin_free(
-                    _typed["gtin"], _gtin_repo, _spine_product_id(_gtin_repo, existing)
+                    _typed["gtin"],
+                    _gtin_repo,
+                    _spine_product_id(_gtin_repo, existing) or existing.get("id"),
                 )
             product.attributes = _typed
             merged_attrs = {**(existing.get("attributes") or {}), **_typed}

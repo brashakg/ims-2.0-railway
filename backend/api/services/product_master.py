@@ -1391,14 +1391,21 @@ def assert_gtin_free(code: Any, product_repo, this_product_id: Optional[str]) ->
     edit and the catalogue review editor. ProductRepository.find_by_barcode
     reads both fields in every spelling of the one GTIN. A GTIN names ONE
     maker's item: two products holding it would go to Shopify/Google as the
-    same thing. `this_product_id` None (a create) clashes with any holder."""
+    same thing. `this_product_id` None (a create) clashes with any holder.
+    Catalogue twins count too (find_twin_by_barcode): the bulk import writes
+    only a twin, and the push sends a twin's gtin."""
     if not normalise_candidate(code) or not hasattr(product_repo, "find_by_barcode"):
         return
-    clash = product_repo.find_by_barcode(code)
-    if clash is not None and clash.get("product_id") != this_product_id:
+    clash = product_repo.find_by_barcode(code, exclude_product_id=this_product_id)
+    if clash is None and hasattr(product_repo, "find_twin_by_barcode"):
+        clash = product_repo.find_twin_by_barcode(
+            code, exclude_product_id=this_product_id
+        )
+    if clash is not None:
+        holder = clash.get("sku") or clash.get("product_id") or clash.get("id")
         raise ProductMasterError(
             f"Barcode '{normalise_candidate(code)[:40]}' is already assigned to "
-            f"another product ({clash.get('sku') or clash.get('product_id')}). "
+            f"another product ({holder}). "
             "Barcodes must be unique.",
             status=409,
             field="gtin",

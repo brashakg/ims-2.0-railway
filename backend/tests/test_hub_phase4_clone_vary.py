@@ -44,8 +44,15 @@ class _FakeRepo:
             return None
         return next((dict(r) for r in self.rows if r.get("identity_key") == key), None)
 
-    def find_by_barcode(self, bc):
-        return next((dict(r) for r in self.rows if r.get("barcode") == bc), None)
+    def find_by_barcode(self, bc, exclude_product_id=None):
+        return next(
+            (
+                dict(r)
+                for r in self.rows
+                if r.get("barcode") == bc and r.get("product_id") != exclude_product_id
+            ),
+            None,
+        )
 
     def create(self, data, *, raise_on_duplicate=False):
         # identity collision (Phase-1 dup guard backstop) -> simulate the index raise
