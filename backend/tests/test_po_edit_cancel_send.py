@@ -859,7 +859,7 @@ def _typed_in_vogue_body():
     return _edit_body([{"new_product": dict(_VOGUE), "quantity": 1, "unit_price": 2000}])
 
 
-@pytest.mark.parametrize("status", ["SENT", "ACKNOWLEDGED", "RECEIVED", "CANCELLED"])
+@pytest.mark.parametrize("status", ["SENT", "ACKNOWLEDGED", "PARTIALLY_RECEIVED", "RECEIVED", "CANCELLED"])
 def test_an_edit_refused_for_status_creates_no_typed_in_product(monkeypatch, status):
     """Verifier round 6: the DRAFT check must stop an edit before a typed-in
     line reaches the product door. Moving it after the pricing left a
