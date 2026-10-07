@@ -159,10 +159,19 @@ def should_escalate(
             )
         return False, ""
 
-    # Overdue clock -- due_at (canonical) or due_date (legacy fallback).
+    # Overdue clock -- due_at (canonical) or due_date (legacy fallback). A task
+    # may carry its own `overdue_grace_minutes` (a producer whose deadline IS
+    # the escalation point, e.g. the catalogue task: a day, acknowledged or
+    # not); it moves only this clock, never the re-escalation cadence above.
     due = _as_dt(task.get("due_at")) or _as_dt(task.get("due_date"))
-    if due is not None and now >= due + timedelta(minutes=sla["grace_minutes"]):
-        return True, f"Overdue past SLA grace ({sla['grace_minutes']}m)"
+    grace = sla["grace_minutes"]
+    if task.get("overdue_grace_minutes") is not None:
+        try:
+            grace = max(0, int(task["overdue_grace_minutes"]))
+        except (TypeError, ValueError):
+            pass
+    if due is not None and now >= due + timedelta(minutes=grace):
+        return True, f"Overdue past SLA grace ({grace}m)"
 
     # Ack clock -- only while still OPEN (unacknowledged).
     if status == "OPEN":

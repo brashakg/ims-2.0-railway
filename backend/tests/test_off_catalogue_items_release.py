@@ -2570,3 +2570,22 @@ def test_r5_the_identity_migration_rekeys_everything_but_the_collisions(world):
     assert stats["collisions"] == 1
     assert world.product(b["product_id"])["identity_key"] == "carrera|ca8895|807-b"
     assert world.product(c["product_id"])["identity_key"] == "carrera|ca8895|807-c"
+
+
+@ENGINES
+def test_r5_an_acknowledged_catalogue_task_still_escalates_after_a_day(world, monkeypatch, engine):
+    # Review round 5, pass 2: pressing Acknowledge stopped the P3 ack clock,
+    # and the overdue clock added the P3 grace (3 days) to the day it was due:
+    # one click bought four days.
+    _seed_user(world, ADMIN)
+    world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    (task,) = _open_tasks(world)
+    _run(_tasks.acknowledge_task(task["task_id"], CATALOGUER))
+    _escalate_after(world, monkeypatch, engine, hours=23)
+    assert [t.get("assigned_to") for t in _open_tasks(world)] == [CATALOGUER["user_id"]]
+    _escalate_after(world, monkeypatch, engine, hours=25)
+    finding(
+        [t.get("assigned_to") for t in _open_tasks(world)] == [ADMIN["user_id"]],
+        "R5: an acknowledged catalogue task did not escalate after a day "
+        f"({[(t.get('assigned_to'), t.get('status')) for t in _open_tasks(world)]})",
+    )

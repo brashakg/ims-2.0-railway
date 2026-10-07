@@ -1102,8 +1102,9 @@ def tell_catalogue_managers(
     can open. Nobody holding the job there fails loud: logged, and raised for
     the admins under `orphan_title` -- never a task nobody can see.
 
-    Escalates after a day (owner 2026-09-30): P3, whose acknowledge clock is a
-    day (task_sla.DEFAULT_SLA), due a day out. The people's tasks share one
+    Escalates after a day (owner 2026-09-30), acknowledged or not: P3, whose
+    acknowledge clock is a day (task_sla.DEFAULT_SLA), due a day out with no
+    overdue grace (overdue_grace_minutes 0). The people's tasks share one
     escalation_group, so they climb to ONE task at the next rung
     (task_escalation.merge_into_twin)."""
     people, are_cataloguers = _people_for(
@@ -1129,5 +1130,7 @@ def tell_catalogue_managers(
             category="Catalogue",
             store_id=task_store,
             assigned_to=uid,
-            extra={**(extra or {}), "escalation_group": dedupe},
+            # Due a day out, and overdue THEN: pressing Acknowledge stops the
+            # P3 ack clock, and the P3 grace would add three more days.
+            extra={**(extra or {}), "escalation_group": dedupe, "overdue_grace_minutes": 0},
         )
