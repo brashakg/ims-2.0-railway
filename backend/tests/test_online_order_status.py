@@ -1488,8 +1488,11 @@ def test_goods_back_on_a_row_confirmed_before_the_line_marks_restocks_nothing(sw
     ret = swept["returns"].find_one({"shopify_refund_id": "700387"})
     assert [r["product_id"] for r in ret["restocked"]] == [ims_product_id or "7001"]
     assert not _doc(swept, oid)["items"][0].get("restocked_refunds")
-    _goods_back(swept["review"].find_one({"review_id": row["review_id"]}))
+    back = _goods_back(swept["review"].find_one({"review_id": row["review_id"]}))["result"]
     assert _minted(swept) == ["AVAILABLE"] and _stock_in(swept, oid) == [], "one frame, one unit"
+    # It says what happened -- its confirm put the frame back -- never "a task
+    # asks the store manager to add the frame" with no task behind it.
+    assert (back["status"], back["stock_in_task"]) == ("restocked", None)
 
 
 def _same_line_twice(rid, oid):

@@ -1658,6 +1658,13 @@ def _stock_in_task(order: Dict[str, Any], lines: List[Any], held: _Held, refund_
     return {**out, "stock_in_task": task.get("task_id"), "stock_in_store_id": shop}
 
 
+def _booked_for(order: Dict[str, Any], refund_id: str) -> bool:
+    """True when some line of `order` carries a booking of `refund_id`'s
+    restock (_hold_returned_qty's mark)."""
+    return any(_f((it.get("restocked_refunds") or {}).get(refund_id)) > 0
+               for it in order.get("items") or [] if isinstance(it, dict))
+
+
 def _close_blocked_task(tasks: Any, refund_id: str) -> None:
     """Close the blocked-restock task (returns._raise_restock_blocked_task) of
     this refund's return: the re-run it asked for has booked the frames, and
@@ -1765,8 +1772,11 @@ def goods_back(db, review: Dict[str, Any], *, user_id: Optional[str]) -> Dict[st
         logger.warning("[SHOPIFY_REFUND] goods-back stamp failed for review=%s", review_id,
                        exc_info=True)
     # A historical order's frame is booked, never put back in stock: by this
-    # press (its task) or by the door that booked it first (that door's task).
-    if out["stock_in_task"] or (out["restock_applied"] and order.get("historical")):
+    # press (its task) or by the door that booked it first (that door's task,
+    # its booking on the line). A refund confirmed before the marks has no
+    # booking: its restock put the frame back, and no task exists to name.
+    if out["stock_in_task"] or (out["restock_applied"] and order.get("historical")
+                                and _booked_for(order, refund_id)):
         return {"status": "stock_in", **out}
     if out["restock_applied"]:
         return {"status": "restocked", **out}
