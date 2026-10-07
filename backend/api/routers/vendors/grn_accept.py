@@ -1051,6 +1051,20 @@ def _sync_catalogue_tasks(grn_id, grn, unresolved_lines, grn_status, product_rep
                 db, grn_id, "Nothing on the receipt is beyond its order now.", category="Purchase"
             )
         unresolved_lines = [ln for ln in unresolved_lines if ln not in over]
+        # A line whose product is not on the spine at all (a lens-catalogue id
+        # on an auto-PO, a deleted row) has nothing a catalogue manager can
+        # finish: no Needs-review row, no product editor, no release on save.
+        # It is never put on their list as work they can do; it fails loud.
+        unknown = [ln for ln in unresolved_lines if ln.get("reason") == "not_catalogued"]
+        if unknown:
+            logger.error(
+                "[VENDOR] GRN %s holds %d line(s) for products that do not exist "
+                "on the catalogue spine (%s) -- no catalogue task can finish them",
+                grn_id,
+                len(unknown),
+                ", ".join(str(ln.get("product_id")) for ln in unknown),
+            )
+        unresolved_lines = [ln for ln in unresolved_lines if ln not in unknown]
         if not unresolved_lines:
             _complete_receipt_tasks(
                 db,

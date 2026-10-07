@@ -2589,3 +2589,34 @@ def test_r5_an_acknowledged_catalogue_task_still_escalates_after_a_day(world, mo
         "R5: an acknowledged catalogue task did not escalate after a day "
         f"({[(t.get('assigned_to'), t.get('status')) for t in _open_tasks(world)]})",
     )
+
+
+def test_r5_a_line_for_no_product_at_all_is_never_the_cataloguers_task(world, caplog):
+    # Review round 5, pass 3: a receipt line whose product is not on the spine
+    # (a lens-catalogue id on a contact-lens auto-PO) was put on the catalogue
+    # manager's list as "finish it in Needs review" -- there is nothing there.
+    existing = world.catalogue_frame(
+        "Carrera", "CA 8895", "807", "54", mrp=6990, offer=6490, cost=3155.76
+    )
+    po = world.raise_po(
+        [
+            {
+                "product_id": existing["product_id"],
+                "product_name": "Carrera CA 8895 807",
+                "sku": existing["sku"],
+                "quantity": 1,
+                "unit_price": 3200,
+            }
+        ]
+    )
+    items = [dict(po["items"][0], product_id="LENSCAT-ACUVUE-OASYS--2.50")]
+    world.db.purchase_orders.update_one({"po_id": po["po_id"]}, {"$set": {"items": items}})
+    po = world.db.purchase_orders.find_one({"po_id": po["po_id"]})
+    with caplog.at_level("ERROR"):
+        world.receive_everything(po)
+    finding(
+        not [t for t in _open_tasks(world) if t.get("category") == "Catalogue"],
+        "R5: the catalogue manager got a task for a product that does not exist "
+        f"({[t.get('title') for t in _open_tasks(world)]})",
+    )
+    assert "do not exist on the catalogue spine" in caplog.text
