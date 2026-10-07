@@ -251,7 +251,8 @@ export default function FinanceDashboard() {
       const [rev, pnl, gst, out, cf, bud, vend] = await Promise.allSettled([
         financeApi.getRevenue({ period: 'month', store_id: storeId }),
         financeApi.getPnl({ store_id: storeId, from_date: dateFrom, to_date: dateTo }),
-        financeApi.getGstSummary(),
+        // Input tax from supplier bills: accounts only (R1), as the server.
+        canSeePayables ? financeApi.getGstSummary() : Promise.resolve(null),
         financeApi.getOutstanding({ store_id: storeId }),
         financeApi.getCashFlow({ period: 'month', store_id: storeId }),
         financeApi.getBudget(),
@@ -302,7 +303,9 @@ export default function FinanceDashboard() {
             ? financeApi.getPnlByStore({ from_date: dateFrom, to_date: dateTo })
             : Promise.resolve({ stores: [] }),
           financeApi.getPnlByCategory({ from_date: dateFrom, to_date: dateTo, store_id: storeId }),
-          financeApi.getGstReconciliation({ month: d.getMonth() + 1, year: d.getFullYear() }),
+          canSeePayables
+            ? financeApi.getGstReconciliation({ month: d.getMonth() + 1, year: d.getFullYear() })
+            : Promise.resolve({ entities: [] }),
         ]);
         setPnlByStore(ps2.status === 'fulfilled' ? (ps2.value?.stores || []) : []);
         setPnlByCategory(pc2.status === 'fulfilled' ? (pc2.value?.categories || []) : []);

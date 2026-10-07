@@ -17,6 +17,7 @@ import {
 import type { IconName } from './Icon';
 import type { NavBadgeKey } from './NavBadge';
 import type { UserRole } from '../../types';
+import { PAYABLES_ROLES } from '../common/CostCell';
 
 export interface NavItem {
   id: string;
@@ -206,7 +207,8 @@ export const NAV_GROUPS: NavGroup[] = [
       // now full pages he can bookmark and read a number off without fighting
       // two nested scrollbars. requireRoles mirrors the route gate.
       { id: 'gstr1', label: 'GSTR-1', to: '/reports/gstr1', icon: 'receipt', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
-      { id: 'gstr3b', label: 'GSTR-3B', to: '/reports/gstr3b', icon: 'receipt', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
+      // GSTR-3B carries input tax from supplier bills: accounts only (R1).
+      { id: 'gstr3b', label: 'GSTR-3B', to: '/reports/gstr3b', icon: 'receipt', requireRoles: PAYABLES_ROLES },
       // Online refunds: Shopify refunds -> proposed GST credit notes awaiting
       // accountant confirmation. The /online-store/refund-reviews route already
       // admits ACCOUNTANT, but the "Online Store" nav item does not -- this gives

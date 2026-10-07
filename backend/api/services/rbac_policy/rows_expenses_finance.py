@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Dict, List
 
+from ._core import ACCOUNTS
+
 ROWS: List[Dict[str, object]] = [
     # --- /api/v1/expenses ---
     {"method": "GET", "path": "/api/v1/expenses", "allowed": "AUTHENTICATED"},
@@ -200,7 +202,8 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/finance/gst/summary",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        # Owner ruling 2026-10-07 (R1): input credit from supplier bills.
+        "allowed": ACCOUNTS,
     },
     {
         "method": "POST",

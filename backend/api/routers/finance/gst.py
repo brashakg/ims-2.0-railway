@@ -15,6 +15,7 @@ from ._shared import (
     _REAL_ORDER_STATUS_FILTER,
     _customer_state_map,
     _get_db,
+    _require_finance_admin,
     _split_output_tax,
     _store_state_map,
     router,
@@ -56,6 +57,10 @@ async def get_gst_summary(
     year: Optional[int] = None,
     current_user: dict = Depends(get_current_user),
 ):
+    # Owner ruling 2026-10-07 (R1): the input credit (and the net payable
+    # struck with it) is summed from supplier bills -- the accounts roles'
+    # alone, the one rule (_require_finance_admin -> cost_mask AP_ROLES).
+    _require_finance_admin(current_user)
     db = _get_db()
     if db is None:
         return {

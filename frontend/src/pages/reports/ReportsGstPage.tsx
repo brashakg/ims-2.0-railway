@@ -13,11 +13,15 @@ import { FileText, Loader2 } from 'lucide-react';
 import { ReportCardsGrid } from './ReportCardsGrid';
 import { useReportsContext } from './ReportsLayout';
 import { useDiscountAnalysis } from './reportsQueries';
+import { useAuth } from '../../context/AuthContext';
+import { PAYABLES_ROLES } from '../../components/common/CostCell';
 
 export function ReportsGstPage() {
   const { storeId, startDate, endDate } = useReportsContext();
   const discQ = useDiscountAnalysis({ storeId, startDate, endDate });
   const discountAnalysis = discQ.data;
+  // GSTR-3B (input tax from supplier bills) is the accounts roles' (R1).
+  const canSeeInputTax = useAuth().hasRole(PAYABLES_ROLES);
 
   return (
     <>
@@ -37,9 +41,11 @@ export function ReportsGstPage() {
               <Link to="/reports/gstr1" className="btn-primary text-sm">
                 View GSTR-1
               </Link>
-              <Link to="/reports/gstr3b" className="btn-outline text-sm">
-                View GSTR-3B
-              </Link>
+              {canSeeInputTax && (
+                <Link to="/reports/gstr3b" className="btn-outline text-sm">
+                  View GSTR-3B
+                </Link>
+              )}
             </div>
           </div>
         </div>

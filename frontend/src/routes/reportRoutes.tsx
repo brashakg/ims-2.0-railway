@@ -18,6 +18,7 @@ import { lazy } from 'react';
 import { Route, Navigate, useSearchParams } from 'react-router-dom';
 import { ProtectedRoute } from '../components/layout/ProtectedRoute';
 import { legacyTabTarget } from '../pages/reports/legacyTabRedirect';
+import { PAYABLES_ROLES } from '../components/common/CostCell';
 import type { UserRole } from '../types';
 
 const ReportsLayout = lazy(() => import('../pages/reports/ReportsLayout').then(m => ({ default: m.ReportsLayout })));
@@ -130,10 +131,13 @@ export const reportRoutes = (
         </ProtectedRoute>
       }
     />
+    {/* GSTR-3B's Table 4 ITC and RCM are summed from supplier bills: the
+        accounts roles only (owner ruling 2026-10-07, R1), the same list as
+        GET /reports/gstr3b. */}
     <Route
       path="reports/gstr3b"
       element={
-        <ProtectedRoute allowedRoles={REPORTS_ROLES}>
+        <ProtectedRoute allowedRoles={PAYABLES_ROLES}>
           <GSTR3BPage />
         </ProtectedRoute>
       }
