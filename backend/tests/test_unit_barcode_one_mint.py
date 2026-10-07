@@ -394,3 +394,35 @@ def test_a_unit_code_matches_whole_never_a_part_or_a_pattern(typed):
     repo = StockRepository(coll)
     assert repo.find_by_barcode("bv0000000042")["stock_id"] == "SU-42"
     assert repo.find_by_barcode(typed) is None, typed
+
+
+@pytest.mark.parametrize("typed", [" ", "   ", "\t"])
+def test_a_blank_code_finds_no_unit_at_either_door(monkeypatch, typed):
+    """A blank code stripped to '' became the pattern '^$' and found any unit
+    stored with barcode '' (GET /inventory/barcode/%20, a count scan of ' ')."""
+    import mongomock
+    from fastapi import HTTPException
+    from api.routers import inventory as inv
+    from database.repositories.product_repository import StockRepository
+
+    db = mongomock.MongoClient().db
+    db.stock_units.insert_one(
+        {"stock_id": "S-EMPTY", "barcode": "", "product_id": "P1",
+         "store_id": STORE, "status": "AVAILABLE"}
+    )
+    db.products.insert_one({"_id": "P1", "sku": "S1", "brand": "B", "model": "M"})
+    monkeypatch.setattr(inv, "get_stock_repository", lambda: StockRepository(db.stock_units))
+    monkeypatch.setattr(inv, "get_product_repository", lambda: None)
+    monkeypatch.setattr(inv, "_get_db", lambda: db)
+
+    with pytest.raises(HTTPException) as till:
+        _run(inv.get_stock_by_barcode_short(typed, None, _MGR))
+    assert till.value.status_code == 404
+    with pytest.raises(HTTPException) as count:
+        _run(
+            inv.scan_barcode_for_count(
+                inv.BarcodeScanRequest(barcode=typed, physical_count=1), None, _MGR
+            )
+        )
+    assert count.value.status_code == 404
+    assert _trace(monkeypatch, db, typed)["stock_unit"] is None
