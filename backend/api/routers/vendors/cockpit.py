@@ -8,6 +8,7 @@ from ._shared import (
     _VENDOR_ROLES,
     _pm,
     can_access_store_scoped,
+    get_grn_repository,
     get_product_repository,
     get_purchase_order_repository,
     logger,
@@ -18,6 +19,7 @@ from ._shared import (
     _get_db,
 )
 from .gst import po_gst_context
+from .numbering import grn_line_unit_cost, po_unit_prices
 
 
 @router.get("/goods-receipt/cockpit")
@@ -150,14 +152,23 @@ async def get_last_purchase_cost(
     product_ids: str = Query(..., description="Comma-separated product_ids to price"),
     current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
 ):
-    """Most-recent agreed purchase price per product for this vendor, from PO
-    history -- so the PO / Buy-Desk form can pre-fill "last paid Rs X on <date>"
-    instead of the operator guessing the cost (procurement Phase 2C).
+    """The price this vendor was last really paid, per product -- so the PO /
+    Buy-Desk form can pre-fill "last paid Rs X on <date>" instead of the
+    operator guessing the cost (procurement Phase 2C). THE one last-paid rule:
 
-    Reads the vendor's POs newest-first (capped) and takes the first line hit
-    per requested product_id. Read-only, fail-soft: DB trouble or no history
-    yields an empty map (the form then just shows a blank cost). Registered
-    ABOVE /purchase-orders/{po_id} so the literal path wins.
+      1. the cost at acceptance (numbering.grn_line_unit_cost -- the cost goods
+         receipt stamps on the units it mints) on this vendor's newest ACCEPTED
+         goods receipt with accepted units of the product, dated by acceptance;
+      2. else the price on this vendor's newest order that was sent to it
+         (sent, acknowledged, part- or fully received), dated when it was sent.
+
+    A DRAFT was never agreed and a CANCELLED order never bought, so neither is
+    ever a price paid: the form would put a typo or a dropped quote over the
+    catalogue cost, and that becomes the cost at acceptance.
+
+    Read-only, store-scoped, fail-soft: DB trouble or no history yields an
+    empty map (the form keeps the catalogue cost, no caption). Registered ABOVE
+    /purchase-orders/{po_id} so the literal path wins.
 
     Shape: {"costs": {product_id: {unit_price, po_number, po_id, date}, ...}}.
     """
@@ -170,42 +181,77 @@ async def get_last_purchase_cost(
         return {"costs": {}}
 
     costs: dict = {}
+
+    def _take(pid, price, doc, date):
+        price = round(price or 0, 2)
+        if price > 0:
+            costs[pid] = {
+                "unit_price": price,
+                "po_number": doc.get("po_number"),
+                "po_id": doc.get("po_id"),
+                "date": date,
+            }
+
     try:
-        # Newest POs for this vendor first; walk lines until every requested
-        # product has a price (or the cap is hit). A DRAFT was never agreed and
-        # a CANCELLED order was never bought, so neither is a price paid -- the
-        # PO form would otherwise put a typo or a dropped quote over the
-        # catalogue cost, and that becomes the cost at goods-receipt acceptance.
-        pos = po_repo.find_many(
-            {"vendor_id": vendor_id, "status": {"$nin": ["DRAFT", "CANCELLED"]}},
-            sort=[("created_at", -1)],
-            limit=100,
+        grn_repo = get_grn_repository()
+        grns = (
+            grn_repo.find_many(
+                {"vendor_id": vendor_id, "status": "ACCEPTED"},
+                sort=[("accepted_at", -1)],
+                limit=100,
+            )
+            if grn_repo is not None
+            else []
         )
-        for po in pos or []:
+        po_prices: dict = {}  # po_id -> po_unit_prices, one read per order
+        for grn in grns or []:
+            if len(costs) >= len(wanted):
+                break
             # Only surface prices from stores the caller may see (cross-store
             # roles pass); never leak another store's negotiated cost.
-            if not can_access_store_scoped(po.get("delivery_store_id"), current_user):
+            if not can_access_store_scoped(grn.get("store_id"), current_user):
                 continue
-            for it in po.get("items", []) or []:
+            for it in grn.get("items", []) or []:
                 if not isinstance(it, dict):
                     continue
                 pid = it.get("product_id")
                 if pid not in wanted or pid in costs:
                     continue
                 try:
-                    price = round(float(it.get("unit_price") or 0), 2)
+                    if int(it.get("accepted_qty") or 0) <= 0:
+                        continue  # wholly rejected: nothing was bought
                 except (TypeError, ValueError):
                     continue
-                if price <= 0:
+                po_id = grn.get("po_id")
+                if po_id not in po_prices:
+                    po_prices[po_id] = (
+                        po_unit_prices(po_repo.find_by_id(po_id)) if po_id else {}
+                    )
+                _take(
+                    pid,
+                    grn_line_unit_cost(it, po_prices[po_id]),
+                    grn,
+                    grn.get("accepted_at") or grn.get("created_at"),
+                )
+
+        if len(costs) < len(wanted):
+            pos = po_repo.find_many(
+                {
+                    "vendor_id": vendor_id,
+                    "status": {"$in": [*_RECEIVABLE_PO_STATUSES, "RECEIVED"]},
+                },
+                sort=[("created_at", -1)],
+                limit=100,
+            )
+            for po in pos or []:
+                if len(costs) >= len(wanted):
+                    break
+                if not can_access_store_scoped(po.get("delivery_store_id"), current_user):
                     continue
-                costs[pid] = {
-                    "unit_price": price,
-                    "po_number": po.get("po_number"),
-                    "po_id": po.get("po_id"),
-                    "date": po.get("created_at"),
-                }
-            if len(costs) >= len(wanted):
-                break
+                prices = po_unit_prices(po)
+                for pid in wanted - costs.keys():
+                    if pid in prices:
+                        _take(pid, prices[pid], po, po.get("sent_at") or po.get("created_at"))
     except Exception as e:  # noqa: BLE001 - read-only helper, never a blocker
         logger.warning("[VENDOR] last-cost lookup failed: %s", e)
         return {"costs": {}}

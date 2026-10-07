@@ -270,3 +270,35 @@ def _cumulative_received_by_product(grn_repo, po_id: str) -> dict:
             except (TypeError, ValueError):
                 continue
     return totals
+
+
+def po_unit_prices(po) -> dict:
+    """product_id -> the agreed unit_price on a PO (the first line wins).
+
+    Half of THE cost-at-acceptance rule (grn_line_unit_cost): goods-receipt
+    accept stamps it on the units it mints, and /vendors/last-cost reads it back
+    as the price paid. One rule, one implementation -- do not re-derive it.
+    """
+    prices: dict = {}
+    for it in (po or {}).get("items", []) or []:
+        if not isinstance(it, dict):
+            continue
+        pid = it.get("product_id")
+        if pid is None or pid in prices:
+            continue
+        try:
+            prices[pid] = round(float(it.get("unit_price") or 0), 2)
+        except (TypeError, ValueError):
+            continue
+    return prices
+
+
+def grn_line_unit_cost(item: dict, po_prices: dict) -> float:
+    """The cost at acceptance of one goods-receipt line: the line's own
+    unit_price when it carries one, else its PO's price for the product
+    (po_unit_prices). 0.0 = no cost known."""
+    fallback = po_prices.get(item.get("product_id"), 0.0)
+    try:
+        return float(item.get("unit_price") or 0) or fallback
+    except (TypeError, ValueError):
+        return fallback

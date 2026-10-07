@@ -25,6 +25,8 @@ from .numbering import (
     _grn_barcode,
     _grn_stock_audit,
     compute_po_receipt_state,
+    grn_line_unit_cost,
+    po_unit_prices,
 )
 from .grn_accept_lock import (
     _GRN_MINT_DUPLICATE,
@@ -187,20 +189,9 @@ def _accept_grn_claimed(
     # problem here leaves po_unit_price empty and the units mint exactly as
     # before (no unit_cost), never blocking receiving.
     po_unit_price: dict = {}
-    po_for_cost = None
     if po_repo is not None and po_id:
         try:
-            po_for_cost = po_repo.find_by_id(po_id)
-            for it in (po_for_cost or {}).get("items", []) or []:
-                if not isinstance(it, dict):
-                    continue
-                pid = it.get("product_id")
-                if pid is None or pid in po_unit_price:
-                    continue
-                try:
-                    po_unit_price[pid] = round(float(it.get("unit_price") or 0), 2)
-                except (TypeError, ValueError):
-                    continue
+            po_unit_price = po_unit_prices(po_repo.find_by_id(po_id))
         except Exception:  # noqa: BLE001
             po_unit_price = {}
 
@@ -307,12 +298,7 @@ def _accept_grn_claimed(
             # Prefer the GRN line's own unit_price if it carries one, else the PO
             # price. ADDITIVE: only stamped when we have a positive cost, so a
             # priceless receipt mints exactly as before.
-            try:
-                line_cost = float(item.get("unit_price") or 0) or po_unit_price.get(
-                    product_id, 0.0
-                )
-            except (TypeError, ValueError):
-                line_cost = po_unit_price.get(product_id, 0.0)
+            line_cost = grn_line_unit_cost(item, po_unit_price)
             cost_fields = {}
             if line_cost and line_cost > 0:
                 cost_fields = {
