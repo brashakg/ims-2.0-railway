@@ -2083,8 +2083,415 @@ def test_r5_a_deleted_catalogued_item_is_still_answered_with_it(world):
         world, [{"new_product": dict(CARRERA_TYPED), "quantity": 1, "unit_price": 3200}]
     )
     assert refused is not None and refused.status_code == 409
+    # Never "already in the catalogue -- use it?": that would order stock of a
+    # product nobody can sell (review round 5).
+    finding(
+        refused.detail.get("code") == "SWITCHED_OFF_IN_CATALOGUE",
+        f"R5: a switched-off product was offered as 'use it' ({refused.detail})",
+    )
+    assert "switched off" in refused.detail["message"]
     assert world.product(existing["product_id"])["is_active"] is False
+    assert world.db.purchase_orders.count_documents({}) == 0
 
 
 def _twin_of_sku(world, sku):
     return world.db.catalog_products.find_one({"sku": sku})
+
+
+# ---------------------------------------------------------------------------
+# Round 5, review pass 1 -- the revive, the discard guard and the reopen
+# ---------------------------------------------------------------------------
+
+from api.routers.vendors import grn_accept as _grn_accept  # noqa: E402
+from api.routers.vendors import purchase_orders as _po_mod  # noqa: E402
+
+
+def _discard(world, draft_id, po, grn=None):
+    """The box went back: void the receipt (if any), cancel the order, then
+    the admin discards the draft."""
+    _seed_user(world, ADMIN)
+    if grn is not None:
+        _run(vd.void_grn(grn["grn_id"], MANAGER))
+    _run(vd.cancel_po(po["po_id"], "box went back", MANAGER))
+    assert _delete_refusal(world, draft_id) is None
+    assert world.product(draft_id)["discarded_draft"] is True
+
+
+class _Truthless:
+    """What a pymongo Database hands back for an unknown attribute: a
+    Collection, whose truth value raises."""
+
+    def __init__(self, coll):
+        self._coll = coll
+
+    def __bool__(self):
+        raise NotImplementedError("Collection objects do not implement truth value testing")
+
+    def __getattr__(self, name):
+        return getattr(self._coll, name)
+
+
+class _PymongoShaped:
+    """The production `_get_db()` (vendors._shared): a raw pymongo Database.
+    StrictDB answers `is_connected = True`; a real Database answers any
+    attribute with a Collection."""
+
+    def __init__(self, db):
+        self._db = db
+
+    def get_collection(self, name):
+        return self._db.get_collection(name)
+
+    def __getitem__(self, name):
+        return self._db.get_collection(name)
+
+    def __getattr__(self, name):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return _Truthless(self._db.get_collection(name))
+
+
+def test_r5_revive_works_on_the_production_db_shape(world, monkeypatch):
+    # Review pass 1 (HIGH): getattr(db, "is_connected", True) on a pymongo
+    # Database is a Collection; bool() of it raised after the spine was half
+    # revived, the order 500'd, and the draft was left out of Needs review.
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    _discard(world, draft_id, po, grn)
+    monkeypatch.setattr(_po_mod, "_get_db", lambda: _PymongoShaped(world.db))
+    again = world.raise_po(
+        [{"new_product": dict(BOSS_TYPED), "quantity": 1, "unit_price": 1200}]
+    )
+    assert again["items"][0]["product_id"] == draft_id
+    finding(
+        world.product(draft_id)["provisional"] is True
+        and world.product(draft_id)["sku"] in _needs_review_list(world),
+        "R5: on the production db shape the draft did not come back to Needs review",
+    )
+
+
+def test_r5_a_discarded_draft_switched_on_since_is_never_switched_off(world):
+    # Review pass 1 (HIGH): the discard mark outlived a later switch-on, so a
+    # manager's typed line turned a live product back into an inactive draft.
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    _discard(world, draft_id, po, grn)
+    world.finish_draft(draft_id, offer=2790)
+    _run(
+        _products.update_product(
+            draft_id, _products.ProductUpdate(is_active=True), CATALOGUER
+        )
+    )
+    assert world.product(draft_id)["is_active"] is True
+
+    refused = _refused_po(
+        world, [{"new_product": dict(BOSS_TYPED), "quantity": 1, "unit_price": 1200}]
+    )
+    finding(
+        world.product(draft_id)["is_active"] is True
+        and not world.product(draft_id).get("provisional"),
+        "R5: a typed line switched a live product back into a draft",
+    )
+    assert refused is not None and refused.detail.get("code") == "ALREADY_IN_CATALOGUE"
+
+
+def test_r5_a_discarded_draft_finished_since_is_never_revived(world):
+    # Review pass 1: finished while discarded (it stays off), then typed again
+    # -- revived with catalog_status ACTIVE, its box went straight on the shelf
+    # for a product that is off. It is an ordinary switched-off product now.
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    _discard(world, draft_id, po, grn)
+    world.finish_draft(draft_id, offer=2790)
+    assert world.product(draft_id)["catalog_status"] != "DRAFT"
+
+    refused = _refused_po(
+        world, [{"new_product": dict(BOSS_TYPED), "quantity": 1, "unit_price": 1200}]
+    )
+    finding(
+        refused is not None and refused.detail.get("code") == "SWITCHED_OFF_IN_CATALOGUE",
+        f"R5: a finished, switched-off draft was revived ({getattr(refused, 'detail', None)})",
+    )
+    assert world.product(draft_id).get("provisional") is False
+
+
+def test_r5_a_discarded_frame_is_not_revived_by_a_typed_sunglass(world):
+    # Review pass 3: the revive dropped what the buyer typed -- a sunglass
+    # (18% GST) would be ordered as the discarded frame (5%).
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    _discard(world, draft_id, po, grn)
+    refused = _refused_po(
+        world,
+        [{"new_product": {**BOSS_TYPED, "category": "SG"}, "quantity": 1, "unit_price": 1200}],
+    )
+    finding(
+        world.product(draft_id).get("discarded_draft") is True,
+        "R5: a typed sunglass revived the discarded frame",
+    )
+    assert refused is not None and refused.status_code == 409
+
+
+def test_r5_a_revived_draft_carries_the_mrp_typed_this_time(world):
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    _discard(world, draft_id, po, grn)
+    world.raise_po(
+        [{"new_product": {**BOSS_TYPED, "mrp": 3190}, "quantity": 1, "unit_price": 1200}]
+    )
+    finding(
+        world.product(draft_id)["mrp"] == 3190,
+        f"R5: the revive kept the discarded MRP ({world.product(draft_id)['mrp']})",
+    )
+    assert _twin_of(world, draft_id)["mrp"] == 3190
+    actions = [a.get("action") for a in world.db.audit_logs.find({})]
+    assert "product.draft_discarded" in actions
+    assert "product.discarded_draft_revived" in actions
+
+
+class _NeverStores:
+    def __init__(self, repo):
+        self._repo = repo
+
+    def __getattr__(self, name):
+        return getattr(self._repo, name)
+
+    def create(self, doc, *a, **k):
+        return None
+
+
+def test_r5_an_order_that_is_not_stored_never_revives_the_draft(world, monkeypatch):
+    # Review pass 1: the revive ran in the create loop; an order that then
+    # failed to store left the discarded draft back in Needs review, ordered by
+    # nothing -- and finishing it from there would switch it on.
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    _discard(world, draft_id, po, grn)
+    real = _po_mod.get_purchase_order_repository
+    monkeypatch.setattr(_po_mod, "get_purchase_order_repository", lambda: _NeverStores(real()))
+    body = vd.POCreate(
+        vendor_id=VENDOR,
+        delivery_store_id=STORE,
+        items=[vd.POItemCreate(new_product=dict(BOSS_TYPED), quantity=1, unit_price=1200)],
+    )
+    _run(vd.create_po(body, MANAGER))
+    finding(
+        world.product(draft_id).get("discarded_draft") is True
+        and world.product(draft_id).get("provisional") is False,
+        "R5: an order that was never stored brought the discarded draft back",
+    )
+    assert world.product(draft_id)["sku"] not in _needs_review_list(world)
+
+
+def test_r5_a_receipt_that_accepted_none_of_the_draft_does_not_hold_it(world):
+    # Review pass 1: a broken box (every unit rejected) left an ACCEPTED
+    # receipt naming the draft, and the refusal told the admin to void it and
+    # to cancel the order -- both refused by the server.
+    _seed_user(world, ADMIN)
+    po = world.raise_po(
+        [{"new_product": dict(BOSS_TYPED), "quantity": 2, "unit_price": 1200}]
+    )
+    draft_id = po["items"][0]["product_id"]
+    created = _run(
+        vd.create_grn(
+            vd.GRNCreate(
+                po_id=po["po_id"],
+                vendor_invoice_no="JOT/26-27/0991",
+                vendor_invoice_date="2026-09-28",
+                items=[
+                    vd.GRNItemCreate(
+                        product_id=draft_id,
+                        received_qty=2,
+                        accepted_qty=0,
+                        rejected_qty=2,
+                        tallied=True,
+                    )
+                ],
+                attachment_file_id="F-RECEIPT-PHOTO",
+                attachment_filename="bill.jpg",
+                attachment_mime="image/jpeg",
+            ),
+            MANAGER,
+        )
+    )
+    _run(vd.accept_grn(created["grn_id"], MANAGER))
+    refused = _delete_refusal(world, draft_id)
+    assert refused is not None and refused.status_code == 409
+    detail = str(refused.detail)
+    finding(
+        created["grn_number"] not in detail,
+        f"R5: a receipt that accepted none of the draft blocks its discard ({detail})",
+    )
+    stored = world.db.purchase_orders.find_one({"po_id": po["po_id"]})
+    if stored["status"] in ("DRAFT", "SENT", "ACKNOWLEDGED"):
+        assert "cancel" in detail.lower()
+    else:
+        # The order cannot be cancelled; the refusal never says to.
+        finding(
+            "cancel that order" not in detail and "cannot be cancelled" in detail,
+            f"R5: the refusal tells the admin to cancel an order cancel refuses ({detail})",
+        )
+
+
+def test_r5_the_discard_refuses_loudly_when_orders_cannot_be_read(world, monkeypatch):
+    _seed_user(world, ADMIN)
+    po = world.raise_po(
+        [{"new_product": dict(BOSS_TYPED), "quantity": 2, "unit_price": 1200}]
+    )
+    draft_id = po["items"][0]["product_id"]
+    monkeypatch.setattr(_grn_accept, "draft_discard_blockers", lambda pid: None)
+    refused = _delete_refusal(world, draft_id)
+    finding(
+        refused is not None and refused.status_code == 503,
+        f"R5: the draft was discarded although its orders could not be read ({refused})",
+    )
+    assert world.product(draft_id)["provisional"] is True
+
+
+def test_r5_a_draft_whose_copy_predates_the_needs_review_mark_is_still_a_draft(world):
+    # Drafts typed before this deploy have a catalogue copy with no
+    # needs_review / spine_product_id: the spine's provisional flag decides.
+    _seed_user(world, ADMIN)
+    po = world.raise_po(
+        [{"new_product": dict(BOSS_TYPED), "quantity": 2, "unit_price": 1200}]
+    )
+    draft_id = po["items"][0]["product_id"]
+    world.db.catalog_products.update_one(
+        {"spine_product_id": draft_id},
+        {"$unset": {"needs_review": ""}},
+    )
+    refused = _delete_refusal(world, draft_id)
+    assert refused is not None and refused.status_code == 409
+
+
+def test_r5_a_void_never_reopens_a_cancelled_order(world):
+    _seed_user(world, ADMIN)
+    po = world.raise_po(
+        [{"new_product": dict(BOSS_TYPED), "quantity": 2, "unit_price": 1200}]
+    )
+    draft_id = po["items"][0]["product_id"]
+    created = _run(
+        vd.create_grn(
+            vd.GRNCreate(
+                po_id=po["po_id"],
+                vendor_invoice_no="JOT/26-27/0992",
+                vendor_invoice_date="2026-09-28",
+                items=[
+                    vd.GRNItemCreate(
+                        product_id=draft_id, received_qty=2, accepted_qty=2,
+                        rejected_qty=0, tallied=True,
+                    )
+                ],
+                attachment_file_id="F-RECEIPT-PHOTO",
+                attachment_filename="bill.jpg",
+                attachment_mime="image/jpeg",
+            ),
+            MANAGER,
+        )
+    )
+    _run(vd.cancel_po(po["po_id"], "cancelled before the box was counted", MANAGER))
+    _run(vd.void_grn(created["grn_id"], MANAGER))
+    assert world.db.purchase_orders.find_one({"po_id": po["po_id"]})["status"] == "CANCELLED"
+
+
+def test_r5_a_legacy_partial_order_is_reopened_too(world):
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    world.db.purchase_orders.update_one({"po_id": po["po_id"]}, {"$set": {"status": "PARTIAL"}})
+    _run(vd.void_grn(grn["grn_id"], MANAGER))
+    assert world.db.purchase_orders.find_one({"po_id": po["po_id"]})["status"] == "SENT"
+    assert "purchase.po_reopened_after_void" in [
+        a.get("action") for a in world.db.audit_logs.find({})
+    ]
+
+
+def test_r5_the_reopen_never_undoes_a_receipt_counted_meanwhile(world):
+    # Review pass 1: the reopen read "no live receipt" and then wrote SENT and
+    # zero received unguarded; an accept of another receipt committing in
+    # between was undone. The write lands only while nothing is counted.
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    world.db.purchase_orders.update_one(
+        {"po_id": po["po_id"]}, {"$set": {"total_received_qty": 1}}
+    )
+    _run(vd.void_grn(grn["grn_id"], MANAGER))
+    stored = world.db.purchase_orders.find_one({"po_id": po["po_id"]})
+    finding(
+        stored["status"] == "PARTIALLY_RECEIVED" and stored["total_received_qty"] == 1,
+        f"R5: the reopen overwrote a counted receipt ({stored['status']})",
+    )
+
+
+def test_r5_a_discarded_draft_is_never_received(world):
+    # Review pass 2: a delivery challan could still receive a discarded draft;
+    # held, its task pointed at a queue it had left.
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    _discard(world, draft_id, po, grn)
+    try:
+        _run(
+            vd.create_grn(
+                vd.GRNCreate(
+                    grn_subtype="DELIVERY_CHALLAN",
+                    vendor_id=VENDOR,
+                    dc_number="DC-0902",
+                    dc_date="2026-09-28",
+                    items=[
+                        vd.GRNItemCreate(
+                            product_id=draft_id, received_qty=2, accepted_qty=2,
+                            rejected_qty=0, tallied=True,
+                        )
+                    ],
+                ),
+                MANAGER,
+            )
+        )
+        refused = None
+    except HTTPException as exc:
+        refused = exc
+    finding(
+        refused is not None
+        and refused.status_code == 409
+        and refused.detail.get("code") == "DISCARDED_DRAFT",
+        f"R5: a discarded draft was received ({refused})",
+    )
+
+
+def test_r5_a_discarded_draft_switched_on_unfinished_is_never_switched_off(world):
+    # Switched on by hand while still a draft (catalog_status DRAFT): it is a
+    # live product now, never turned back into an inactive draft by a typed line.
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    _discard(world, draft_id, po, grn)
+    world.db.products.update_one({"product_id": draft_id}, {"$set": {"is_active": True}})
+    assert world.product(draft_id)["catalog_status"] == "DRAFT"
+    _refused_po(
+        world, [{"new_product": dict(BOSS_TYPED), "quantity": 1, "unit_price": 1200}]
+    )
+    finding(
+        world.product(draft_id)["is_active"] is True,
+        "R5: a typed line switched a live (unfinished) product off",
+    )
+
+
+def test_r5_a_waiting_receipt_that_accepts_none_of_the_draft_does_not_block(world):
+    _seed_user(world, ADMIN)
+    po = world.raise_po(
+        [{"new_product": dict(BOSS_TYPED), "quantity": 2, "unit_price": 1200}]
+    )
+    draft_id = po["items"][0]["product_id"]
+    _run(
+        vd.create_grn(
+            vd.GRNCreate(
+                po_id=po["po_id"],
+                vendor_invoice_no="JOT/26-27/0993",
+                vendor_invoice_date="2026-09-28",
+                items=[
+                    vd.GRNItemCreate(
+                        product_id=draft_id, received_qty=2, accepted_qty=0,
+                        rejected_qty=2, tallied=True,
+                    )
+                ],
+                attachment_file_id="F-RECEIPT-PHOTO",
+                attachment_filename="bill.jpg",
+                attachment_mime="image/jpeg",
+            ),
+            MANAGER,
+        )
+    )
+    _run(vd.cancel_po(po["po_id"], "box broken, not re-sent", MANAGER))
+    refused = _delete_refusal(world, draft_id)
+    finding(
+        refused is None,
+        f"R5: a receipt accepting none of the draft blocks its discard ({refused})",
+    )
