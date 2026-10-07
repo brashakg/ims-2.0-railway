@@ -212,12 +212,15 @@ def routed(db, monkeypatch):
 
 
 def _accountant(uid="ACC1"):
+    # A shop of its own (BV-1, where every fixture row below lives): a login
+    # that is not ADMIN / SUPERADMIN and has no shop reads no shop's figures
+    # (owner ruling 2026-10-07, R3 -- api.dependencies.resolve_store_scope).
     return {
         "user_id": uid,
         "full_name": "Books",
         "roles": ["ACCOUNTANT"],
-        "store_ids": [],
-        "active_store_id": None,
+        "store_ids": ["BV-1"],
+        "active_store_id": "BV-1",
     }
 
 
@@ -267,6 +270,7 @@ def _expense(category, amount, store="BV-1", day="2026-06-05", status="APPROVED"
 def _bill(bill_id, total, due, vendor_id="V-1", vendor_name="Lens Co", critical=False):
     return {
         "bill_id": bill_id,
+        "store_id": "BV-1",
         "bill_number": f"INV-{bill_id}",
         "vendor_id": vendor_id,
         "vendor_name": vendor_name,
