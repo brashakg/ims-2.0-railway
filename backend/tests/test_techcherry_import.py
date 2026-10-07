@@ -291,3 +291,69 @@ class TestEndpointAuth:
             headers=auth_headers,
         )
         assert r.status_code == 422  # Pydantic literal validation
+
+
+# ----- one product per manufacturer GTIN ------------------------------------
+
+
+class TestGtinOneHolder:
+    """The import is a door that writes products.barcode, so it obeys the same
+    one-holder rule (product_master.assert_gtin_free) as every other door."""
+
+    def _import(self, client, auth_headers, monkeypatch, rows, overwrite=True):
+        import mongomock
+        import api.routers.techcherry_import as tc
+
+        if not hasattr(self, "db"):
+            self.db = mongomock.MongoClient().db
+            # P1 holds the UPC-A 036000291452 in its 13-digit spelling.
+            self.db.products.insert_one(
+                {"product_id": "P1", "sku": "BV-P1",
+                 "attributes": {"gtin": "0036000291452"}}
+            )
+        monkeypatch.setattr(tc, "_get_db", lambda: self.db)
+        r = client.post(
+            "/api/v1/admin/techcherry/import",
+            json={"type": "products", "store_id": "BV-PUN-01", "rows": rows,
+                  "overwrite": overwrite},
+            headers=auth_headers,
+        )
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    def test_a_gtin_another_product_holds_is_not_imported(
+        self, client, auth_headers, monkeypatch
+    ):
+        out = self._import(
+            client, auth_headers, monkeypatch,
+            [{"Prod Name": "RB frame", "Barcode": "036000291452"}],
+        )
+        assert out["inserted"] == 0
+        assert len(out["errors"]) == 1
+        assert "RB frame" in out["errors"][0] and "BV-P1" in out["errors"][0]
+        assert self.db.products.count_documents({}) == 1
+
+    def test_a_free_gtin_still_imports_and_reimports(
+        self, client, auth_headers, monkeypatch
+    ):
+        rows = [{"Prod Name": "Faber", "Barcode": "4006381333931"}]
+        assert self._import(client, auth_headers, monkeypatch, rows)["inserted"] == 1
+        # Re-importing the row that holds it updates it: not a second holder.
+        again = self._import(client, auth_headers, monkeypatch, rows)
+        assert (again["updated"], again["errors"]) == (1, [])
+        assert self.db.products.count_documents({"barcode": "4006381333931"}) == 1
+
+    def test_the_holder_reimported_in_another_spelling_is_still_itself(
+        self, client, auth_headers, monkeypatch
+    ):
+        """'036000291452' and '0036000291452' are one GTIN: a re-import of the
+        row holding it, spelt the other way, updates it."""
+        import mongomock
+
+        self.db = mongomock.MongoClient().db
+        self.db.products.insert_one(
+            {"sku": "036000291452", "store_id": "BV-PUN-01", "barcode": "0036000291452"}
+        )
+        rows = [{"Prod Name": "RB frame", "Barcode": "036000291452"}]
+        out = self._import(client, auth_headers, monkeypatch, rows)
+        assert (out["updated"], out["errors"]) == (1, [])

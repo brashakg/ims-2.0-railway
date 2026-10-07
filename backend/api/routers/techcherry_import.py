@@ -37,8 +37,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from .auth import get_current_user
-from ..services.gtin import classify_gtin, normalise_candidate
+from ..services.gtin import classify_gtin, gtin_spellings, normalise_candidate
 from ..services.phone import normalize_indian_mobile
+from ..services.product_master import ProductMasterError, assert_gtin_free
 
 router = APIRouter()
 
@@ -486,7 +487,20 @@ async def import_batch(
             if req.type in ("products", "orders"):
                 query["store_id"] = req.store_id
 
-            existing = col.find_one(query, {"_id": 1})
+            existing = col.find_one(query, {"_id": 1, "barcode": 1})
+            # One product per manufacturer GTIN, as at every other door. A
+            # re-import of the row that already holds it adds no holder.
+            code = doc.get("barcode")
+            if code and (existing or {}).get("barcode") not in gtin_spellings(code):
+                from database.repositories import ProductRepository
+
+                try:
+                    assert_gtin_free(code, ProductRepository(col), None)
+                except ProductMasterError as e:
+                    resp.errors.append(
+                        f"{doc['name'] or key_value}: {e.message} Not imported."
+                    )
+                    continue
             if existing:
                 if req.overwrite:
                     col.update_one({"_id": existing["_id"]}, {"$set": doc})
