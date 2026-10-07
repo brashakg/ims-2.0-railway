@@ -27,8 +27,6 @@ export interface ProductFormValues {
   offerPrice?: string;
   costPrice?: string;
   discountCategory: string;
-  shopifyTags: string[];
-  publishPOS: boolean;
   // Uploaded product-image URLs (self-hosted, from productApi.uploadProductImage).
   // Optional so existing callers that don't collect images still type-check;
   // buildProductPayload defaults it to [].
@@ -233,12 +231,6 @@ export function buildProductPayload(values: ProductFormValues): CreateProductPay
     // Uploaded image URLs (durably stored + served by the backend). Empty when
     // the operator didn't add any.
     images: Array.isArray(values.images) ? values.images : [],
-    shopify: {
-      // No sync choice: the brand's Brand Master default decides whether a
-      // product goes to the website (owner 2026-09-29, D6).
-      shopify_tags: values.shopifyTags,
-      publish_to_pos: values.publishPOS,
-    },
   };
 }
 

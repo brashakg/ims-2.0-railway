@@ -231,9 +231,6 @@ export function productToVariantFormValues(
     offerPrice: base.offerPrice,
     costPrice: base.costPrice,
     discountCategory: base.discountCategory,
-    // A new variant never inherits online flags (same rule as clone).
-    shopifyTags: [],
-    publishPOS: true,
     // Images are NEVER auto-copied — sourceImages powers the one-click button.
     images: [],
   };

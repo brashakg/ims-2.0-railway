@@ -99,8 +99,6 @@ const blankSunglass = (over: Partial<ProductFormValues> = {}): ProductFormValues
   gstRate: '18',
   mrp: '',
   discountCategory: '',
-  shopifyTags: [],
-  publishPOS: true,
   ...over,
 });
 
@@ -266,10 +264,10 @@ describe('5 - GST rate is text, and the value still posts', () => {
     const payload = createProduct.mock.calls[0][0] as Record<string, unknown>;
     expect(payload.gst_rate).toBe(18);
     expect(payload.hsn_code).toBe('900410');
-    // The posted shape is the one buildProductPayload has always produced.
+    // The posted shape: no 'shopify' block (POST /products never stored it).
     expect(Object.keys(payload).sort()).toEqual([
       'attributes', 'brand', 'category', 'cost_price', 'description', 'gst_rate',
-      'hsn_code', 'images', 'model', 'mrp', 'offer_price', 'shopify', 'weight',
+      'hsn_code', 'images', 'model', 'mrp', 'offer_price', 'weight',
     ]);
   });
 });
@@ -303,20 +301,22 @@ describe('8 - the review card uses registry labels', () => {
 });
 
 describe('9 + 12 - the Online strip', () => {
-  it('has no website or POS switch (the brand default decides, D6), and the tag box has a visible label', async () => {
+  it('has no website or POS switch (the brand default decides, D6), and no tag box that never saves', async () => {
     const user = userEvent.setup();
-    // A brand the Brand Master sends to the website opens the tag box. The
-    // form reads every brand's default once, on load (as the push gate does).
+    // A brand the Brand Master sends to the website. The form reads every
+    // brand's default once, on load (as the push gate does).
     vi.mocked(productApi.getBrandOptions).mockResolvedValueOnce({
       brands: [{ name: 'Ray-Ban', subbrands: [], sync_to_shopify_default: true }],
     });
     renderPage();
     expect(screen.queryByLabelText('Sync to Shopify')).toBeNull();
     expect(screen.queryByLabelText('Publish to Shopify POS')).toBeNull();
-    expect(screen.queryByLabelText('Shopify tags')).toBeNull();
 
     await user.click(screen.getByText('Sunglass'));
     fill(screen.getByLabelText(/^Brand Name/), 'Ray-Ban');
-    expect(await screen.findByLabelText('Shopify tags')).toBeInTheDocument();
+    expect(await screen.findByText(/Website: yes - Ray-Ban/)).toBeInTheDocument();
+    // POST /products stores no Shopify tags, so the form offers no box for them.
+    expect(screen.queryByLabelText('Shopify tags')).toBeNull();
+    expect(screen.queryByPlaceholderText(/Type a tag/)).toBeNull();
   });
 });

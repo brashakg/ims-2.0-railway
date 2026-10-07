@@ -28,8 +28,6 @@ const fv = (
   mrp: '5000',
   offerPrice: '4500',
   discountCategory: '',
-  shopifyTags: [],
-  publishPOS: true,
   ...over,
 });
 

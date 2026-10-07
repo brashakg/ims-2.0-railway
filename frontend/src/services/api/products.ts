@@ -91,12 +91,6 @@ export interface CreateProductPayload {
   cost_price?: number;
   discount_category?: string;
   images?: string[];
-  shopify?: {
-    // Online-store staging for a new product. Whether it goes to the website
-    // at all is the brand's Brand Master default, never sent from here (D6).
-    shopify_tags?: string[];
-    publish_to_pos?: boolean;
-  };
 }
 
 // ---------------------------------------------------------------------------

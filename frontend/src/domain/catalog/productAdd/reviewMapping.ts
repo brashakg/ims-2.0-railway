@@ -61,9 +61,6 @@ export function catalogDocToFormValues(doc: CatalogProductDoc): ProductFormValue
     // Review extras: display name (name wins, title fallback) + tags.
     name: str(doc.name) || str(doc.title),
     tags: docTags(doc),
-    // Online flags are meaningless on an imported doc (BVI owns Shopify).
-    shopifyTags: [],
-    publishPOS: true,
   };
 }
 

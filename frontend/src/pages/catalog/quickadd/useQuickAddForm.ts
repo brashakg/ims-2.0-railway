@@ -98,11 +98,6 @@ export function useQuickAddForm() {
     if (editLevels) setReorderLevel(levelText(editLevels[reorderShop]));
   }, [editLevels, reorderShop]);
 
-  // Online (Shopify). Whether the product goes to the website is the brand's
-  // Brand Master default (brandSyncs below), never a per-product switch (D6).
-  const [shopifyTags, setShopifyTags] = useState<string[]>([]);
-  const [publishPOS, setPublishPOS] = useState(true);
-
   // Product images (Part 1): self-hosted URLs returned by the upload endpoint.
   const [images, setImages] = useState<string[]>([]);
 
@@ -348,8 +343,6 @@ export function useQuickAddForm() {
       offerPrice,
       costPrice,
       discountCategory,
-      shopifyTags,
-      publishPOS,
       images,
       // Review-mode extras (ignored by buildProductPayload / create doors).
       name: displayName,
@@ -357,7 +350,7 @@ export function useQuickAddForm() {
     }),
     [
       selectedCategory, attributes, description, hsnCode, gstRate, weight, mrp,
-      offerPrice, costPrice, discountCategory, shopifyTags, publishPOS,
+      offerPrice, costPrice, discountCategory,
       images, displayName, reviewTags,
     ]
   );
@@ -380,8 +373,6 @@ export function useQuickAddForm() {
       if (!keepIdentity) setReorderLevel('');
       setReorderBadInput(false);
       setEditLevels(null);
-      setShopifyTags([]);
-      setPublishPOS(true);
       setImages([]);
       setErrors({});
       setDisplayName('');
@@ -409,8 +400,6 @@ export function useQuickAddForm() {
     setOfferPrice(v.offerPrice || '');
     setCostPrice(v.costPrice || '');
     setDiscountCategory(v.discountCategory || '');
-    setShopifyTags(Array.isArray(v.shopifyTags) ? v.shopifyTags : []);
-    setPublishPOS(v.publishPOS !== false);
     setImages(Array.isArray(v.images) ? v.images : []);
     // Review extras — blank for every non-review prefill (template/clone/
     // variant all leave them undefined).
@@ -1504,8 +1493,6 @@ export function useQuickAddForm() {
     mrp, setMrp, offerPrice, setOfferPrice, costPrice, setCostPrice,
     discountCategory,
     reorderLevel, setReorderLevel, setReorderBadInput, canSetReorderLevel, reorderShop,
-    shopifyTags, setShopifyTags,
-    publishPOS, setPublishPOS,
     images, setImages,
     displayName, setDisplayName, reviewTags, setReviewTags,
     // options fed from the server
