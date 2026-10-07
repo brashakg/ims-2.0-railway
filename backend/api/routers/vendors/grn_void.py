@@ -26,13 +26,18 @@ from .grn_accept_lock import (
 )
 
 
-def _reopen_po_if_nothing_received(grn_repo, grn) -> None:
+def _reopen_po_if_nothing_received(grn_repo, grn, current_user=None) -> None:
     """A held receipt's accept moved its PO to PARTIALLY_RECEIVED with nothing
-    on the shelf. Voided, and with no other live receipt on the order, nothing
-    was received: the order goes back to SENT, so it reads true and can be
-    cancelled again (cancel refuses a part-received order) -- the way out for
-    a draft whose box went back to the vendor (a draft on an open order is
-    never discarded, catalog DELETE). Fail-soft: the void stands."""
+    on the shelf. Voided, and with no other live receipt on the order and
+    nothing counted received, nothing was received: the order goes back to
+    SENT, so it reads true and can be cancelled again (cancel refuses a
+    part-received order) -- the way out for a draft whose box went back (a
+    draft an open order still expects is never discarded, catalog DELETE).
+
+    One GUARDED write: it lands only while the order is still part-received
+    with nothing counted received, so an accept of another receipt that
+    commits in between (it writes the received counts) is never undone.
+    Fail-soft: the void stands."""
     po_id = (grn or {}).get("po_id")
     if not po_id:
         return
@@ -43,21 +48,33 @@ def _reopen_po_if_nothing_received(grn_repo, grn) -> None:
         po = po_repo.find_by_id(po_id)
         if not po or po.get("status") not in ("PARTIALLY_RECEIVED", "PARTIAL"):
             return
-        live = grn_repo.find_many({"po_id": po_id, "status": {"$ne": "VOID"}}) or []
-        if live:
+        if grn_repo.find_many({"po_id": po_id, "status": {"$ne": "VOID"}}):
             return
-        po_repo.update(
-            po_id,
+        result = po_repo.collection.update_one(
             {
-                "status": "SENT",
-                "items": [
-                    {**it, "received_qty": 0, "line_status": "OPEN"}
-                    for it in (po.get("items") or [])
-                ],
-                "received_qty_by_product": {},
-                "total_received_qty": 0,
+                "po_id": po_id,
+                "status": {"$in": ["PARTIALLY_RECEIVED", "PARTIAL"]},
+                "total_received_qty": {"$in": [0, None]},
             },
+            {"$set": {"status": "SENT", "updated_at": datetime.now()}},
         )
+        if not getattr(result, "modified_count", 0):
+            return
+        audit = get_audit_repository()
+        if audit is not None:
+            audit.create(
+                {
+                    "action": "purchase.po_reopened_after_void",
+                    "entity_type": "purchase_order",
+                    "entity_id": po_id,
+                    "user_id": (current_user or {}).get("user_id"),
+                    "detail": {
+                        "po_number": po.get("po_number"),
+                        "status_was": po.get("status"),
+                        "voided_grn": grn.get("grn_number") or grn.get("grn_id"),
+                    },
+                }
+            )
     except Exception:  # noqa: BLE001 - the void stands; the PO status is advisory
         logger.warning(
             "[VENDOR] PO %s: could not reopen after its receipt was voided",
@@ -318,7 +335,7 @@ async def void_grn(
         except Exception:  # noqa: BLE001 - a task problem never undoes the void
             pass
 
-        _reopen_po_if_nothing_received(grn_repo, grn)
+        _reopen_po_if_nothing_received(grn_repo, grn, current_user)
 
         return {
             "message": "GRN voided",
