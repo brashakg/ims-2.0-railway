@@ -715,3 +715,24 @@ class TestGtinAttributeOnTheCreateDoor:
         pid = asyncio.run(create_product(body, _ADMIN))["product_id"]
         spine = mock_db["products"].find_one({"product_id": pid})
         assert spine["attributes"]["gtin"] == _VALID_B
+
+
+class TestSearchFindsTheMakersCode:
+    def test_a_code_saved_by_manage_barcode_is_found_by_search(self, mock_db):
+        """Manage Barcode saves attributes.gtin (and drops the legacy
+        products.barcode); search read only `barcode`, so the maker's code
+        stopped finding its product (command palette, Returns, Quick Add's
+        clone-by-barcode)."""
+        from api.routers.admin_catalog import list_products
+
+        pid = _create("SR-1")["product_id"]
+        mock_db["products"].update_one(
+            {"product_id": pid}, {"$set": {"barcode": _VALID_A}}
+        )
+        _update(pid, attributes={"gtin": _VALID_A})
+        assert "barcode" not in mock_db["products"].find_one({"product_id": pid})
+        repo = ProductRepository(mock_db["products"])
+        assert [p["product_id"] for p in repo.search_products(_VALID_A)] == [pid]
+        assert repo.count_search_products(_VALID_A) == 1
+        found = asyncio.run(list_products(search=_VALID_A))["products"]
+        assert [p["product_id"] for p in found] == [pid]

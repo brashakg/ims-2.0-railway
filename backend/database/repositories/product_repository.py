@@ -49,7 +49,9 @@ class ProductRepository(BaseRepository):
 
     # Tokenized-search fields. `barcode` is ADDITIVE (Catalog Manager scanner
     # passthrough): it can only ADD matches for existing callers, never remove.
-    SEARCH_FIELDS = ("brand", "model", "sku", "variant", "barcode")
+    # `attributes.gtin` is where Manage Barcode now saves the maker's code
+    # (it used to write `barcode`), so a search by that code keeps finding it.
+    SEARCH_FIELDS = ("brand", "model", "sku", "variant", "barcode", "attributes.gtin")
 
     @property
     def entity_name(self) -> str:
