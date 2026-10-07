@@ -19,7 +19,7 @@ Semantics (single source of truth for every consumer):
                               are still on a shelf (audit F48). A PROVISIONAL
                               product (ruling 13: bought before it was
                               catalogued) is inactive too but NOT discontinued
-                              -- until it is catalogued or deleted.
+                              -- until it is switched on or deleted.
 
 Consumers (each guards with auto_reorder_disabled()):
   - api/routers/inventory.py      /inventory/alerts restock suggestions
@@ -41,32 +41,33 @@ from typing import Any, Dict, List, Optional, Tuple
 
 # Every product field discontinued() reads. A reader that projects products
 # asks for all of these, or the rule judges a doc missing half its facts.
-DISCONTINUED_FIELDS = ("is_active", "provisional", "catalog_status", "deleted_at")
+DISCONTINUED_FIELDS = ("is_active", "provisional", "switched_on_at", "deleted_at")
 
 
 def discontinued(product: Any) -> bool:
     """THE discontinued rule: inactive (is_active False), unless it is a
-    provisional buy that has not been switched on yet.
+    provisional buy nobody has switched on or deleted yet.
 
     The PO door (product_master, ruling 13) stamps a buy-first-catalogue-later
-    product `provisional`, inactive and catalog_status DRAFT. Nothing ever
-    clears `provisional`, so the flag alone cannot tell 'not switched on yet'
-    from 'switched on, sold, switched off'. Still new = provisional AND still
-    a DRAFT (catalog_status only ever moves DRAFT -> ACTIVE, so a catalogued
-    product never reads DRAFT again) AND never deleted (deleted_at).
-    ponytail: a provisional product switched on while still a DRAFT and then
-    switched off (not deleted) still reads new; it needs a sale-history read
-    to catch, which this pure rule does not do."""
+    product `provisional` and inactive, and finishing its catalogue does not
+    switch it on, so a frame bought on a PO, catalogued and received is still
+    inactive and must not read 'Discontinued'. `provisional` is never
+    cleared, so the two facts that end 'new' are read instead: switched_on_at
+    (ProductRepository.update stamps it whenever a door writes is_active True;
+    every spine door writes through it) and deleted_at (the catalog DELETE
+    stamps it on the spine). catalog_status is NOT one of them: the
+    catalogue restamp moves it without switching anything on.
+    ponytail: a provisional product never switched on whose is_active False is
+    merely re-sent still reads new (nothing tells that write from an edit
+    that left the toggle alone); deleting it is what retires it."""
     if not isinstance(product, dict) or product.get("is_active") is not False:
         return False
-    from .product_master import CATALOG_STATUS_DRAFT, effective_catalog_status
-
-    not_switched_on_yet = (
+    still_new = (
         bool(product.get("provisional"))
+        and not product.get("switched_on_at")
         and not product.get("deleted_at")
-        and effective_catalog_status(product) == CATALOG_STATUS_DRAFT
     )
-    return not not_switched_on_yet
+    return not still_new
 
 
 def auto_reorder_disabled(product: Any) -> bool:

@@ -7,7 +7,7 @@ Product and Stock data access operations
 import logging
 import re
 from typing import List, NamedTuple, Optional, Dict
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 
 from api.utils.ist import ist_today
 
@@ -92,6 +92,18 @@ class ProductRepository(BaseRepository):
     @property
     def id_field(self) -> str:
         return "product_id"
+
+    def update(self, id: str, data: Dict) -> bool:
+        """BaseRepository.update, plus: a write that switches the product on
+        stamps `switched_on_at`. A provisional buy (ruling 13) is born
+        inactive and keeps `provisional` for good, so this stamp is how
+        reorder_policy.discontinued() tells 'not switched on yet' from
+        'switched on, sold, switched off'. Every spine door that writes
+        is_active (catalog drawer, PUT /products, /products/master) writes
+        through here."""
+        if data.get("is_active") is True:
+            data["switched_on_at"] = datetime.now(timezone.utc)
+        return super().update(id, data)
 
     def find_by_sku(self, sku: str) -> Optional[Dict]:
         return self.find_one({"sku": sku})
