@@ -2620,3 +2620,24 @@ def test_r5_a_line_for_no_product_at_all_is_never_the_cataloguers_task(world, ca
         f"({[t.get('title') for t in _open_tasks(world)]})",
     )
     assert "do not exist on the catalogue spine" in caplog.text
+
+
+def test_r5_the_eye_size_rule_does_not_depend_on_the_order_of_lines(world):
+    # Review round 5, pass 3: [sizeless, 52] made two Boss 1700 C2 (a
+    # sizeless twin) while [52, sizeless] was refused.
+    refused = _refused_po(
+        world,
+        [
+            {"new_product": dict(BOSS_TYPED, size=None), "quantity": 1, "unit_price": 1200},
+            {"new_product": dict(BOSS_TYPED), "quantity": 1, "unit_price": 1200},
+        ],
+    )
+    finding(
+        refused is not None
+        and refused.status_code == 422
+        and refused.detail.get("code") == "EYE_SIZE_NEEDED"
+        and [ln["line"] for ln in refused.detail["lines"]] == [0],
+        f"R5: a sizeless line typed before its sized twin was accepted ({getattr(refused, 'detail', None)})",
+    )
+    assert world.products_named("Boss", "BOSS 1700") == []
+    assert world.db.purchase_orders.count_documents({}) == 0

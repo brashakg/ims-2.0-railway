@@ -99,6 +99,7 @@ def _refuse_items_we_already_have(items, product_repo) -> dict:
     switched_off = []
     need_size = []
     revive = {}
+    built = []
     for idx, it in enumerate(items):
         if it.new_product is None:
             continue
@@ -114,6 +115,12 @@ def _refuse_items_we_already_have(items, product_repo) -> dict:
                 status_code=err.status,
                 detail={"code": "NEW_PRODUCT_INVALID", "message": err.message, "field": err.field},
             ) from err
+        built.append((idx, spine))
+    # Lines typed WITH a size are judged first, so a line typed without one is
+    # met by every sized line of this order whatever their order on the form
+    # ([sizeless, 52] and [52, sizeless] answer alike: EYE_SIZE_NEEDED).
+    built.sort(key=lambda b: (not _pm.normalise_identity_component(b[1].get("size")), b[0]))
+    for idx, spine in built:
         err = _pm.identity_conflict(spine, order)
         order.planned.append(spine)
         if err is None:
