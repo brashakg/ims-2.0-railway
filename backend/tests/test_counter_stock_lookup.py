@@ -433,6 +433,28 @@ def test_d7b1_the_lookup_row_matches_its_gate_for_every_role(call, mongo_db, rol
     )
 
 
+def test_d7b1_the_screen_and_the_server_admit_the_same_roles():
+    # The route reads its gate from the row, so the test above cannot catch a
+    # row that drops a manager (the menu shows Stock Lookup, every search 403s)
+    # or a role added to the screen list only (a menu row the server refuses).
+    # The screen list is the row minus SALES_CASHIER (sign-in folds it into
+    # SALES_STAFF), and the roles the ruling does not name are in neither.
+    from api.services.rbac_policy import policy_for
+
+    src = open(os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "frontend", "src", "pages", "inventory", "inventoryRoles.ts",
+    )).read()
+    m = re.search(r"STOCK_LOOKUP_ROLES[^=]*=\s*\[([^\]]*)\]", src)
+    assert m, "STOCK_LOOKUP_ROLES is not in inventoryRoles.ts"
+    screen = set(re.findall(r"'([A-Z_]+)'", m.group(1)))
+    row = set(policy_for("GET", LOOKUP_API)["allowed"])
+    assert screen == row - {"SALES_CASHIER"}, (
+        f"screen only: {sorted(screen - row)}, server only: {sorted(row - screen - {'SALES_CASHIER'})}"
+    )
+    assert not row & {"WORKSHOP_STAFF", "ACCOUNTANT", "CATALOG_MANAGER"}, sorted(row)
+
+
 def test_d7b1_no_database_is_an_empty_answer_not_a_500(call, mongo_db, monkeypatch):
     _seed(mongo_db)  # the repositories still answer; the raw handle does not
     monkeypatch.setattr(inv_mod, "_get_db", lambda: None)

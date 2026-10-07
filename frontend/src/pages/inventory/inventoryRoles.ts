@@ -54,9 +54,9 @@ export const POWER_GRID_ROLES: UserRole[] = [
 
 /**
  * The read-only Stock lookup (owner ruling D7b, 2026-09-29): the counter
- * roles plus the manager ladder. Mirrors STOCK_LOOKUP_ROLES on the backend
- * (routers/inventory/lookup.py) minus SALES_CASHIER, which sign-in folds
- * into SALES_STAFF.
+ * roles plus the manager ladder. The SAME set as the server's row for
+ * GET /inventory/lookup minus SALES_CASHIER, which sign-in folds into
+ * SALES_STAFF (pinned by test_counter_stock_lookup.py).
  */
 export const STOCK_LOOKUP_ROLES: UserRole[] = [
   'SUPERADMIN',
