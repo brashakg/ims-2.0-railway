@@ -817,6 +817,31 @@ def test_the_signed_shiprocket_webhook_delivers_on_a_known_awb(swept):
     assert _doc(swept, 60121)["status"] == "SHIPPED"
 
 
+@pytest.mark.parametrize("leg", ["poll", "webhook"])
+@pytest.mark.parametrize("status", ["CONFIRMED", "PROCESSING", "READY"])
+def test_a_parcel_out_on_an_unshipped_order_is_delivered_by_either_courier_leg(swept, monkeypatch,
+                                                                              status, leg):
+    """An Rx / stock hold kept the order at CONFIRMED when its Shopify
+    fulfilment landed (the reconcile still wrote its awb); an admin then
+    cleared the hold. Shiprocket's DELIVERED delivers it through the ONE
+    table on both courier legs -- the poll used to read SHIPPED orders only,
+    so it stayed CONFIRMED forever where the webhook delivered it."""
+    _book(swept, 60128)
+    _set(swept, 60128, status=status, awb="AWB-H")
+
+    async def fake_track(db, awb):
+        return SyncResult(ok=True, provider="shiprocket", kind="pull", payload={"latest_status": "DELIVERED"})
+
+    monkeypatch.setattr(nexus_module, "shiprocket_track_awb", fake_track)
+    agent = nexus_module.NexusAgent(db=swept["db"])
+    if leg == "poll":
+        asyncio.run(agent._sync_shiprocket_outbound())
+    else:
+        asyncio.run(agent._handle_shiprocket_webhook({"awb": "AWB-H", "current_status": "DELIVERED"}))
+    doc = _doc(swept, 60128)
+    assert doc["status"] == "DELIVERED" and doc["delivered_at"]
+
+
 _HELD = {"rx_pending": True, "fulfillment_hold": True, "rx_hold_reasons": ["RX_MISSING"]}
 
 

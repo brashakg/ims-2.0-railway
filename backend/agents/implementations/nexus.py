@@ -187,14 +187,16 @@ class NexusAgent(JarvisAgent):
 
     async def _sync_shiprocket_outbound(self) -> SyncResult:
         """
-        For each order in SHIPPED state with an AWB, pull the latest
-        tracking status from Shiprocket and update orders if changed. A
-        courier DELIVERED is the delivery (owner ruling 2026-09-28): it moves
-        the order through the ONE transition table (online_order_status) --
-        asked on every poll, not only on a tracking change, so a held order or
-        a lost race retries next hour (the query only returns SHIPPED orders).
+        For each order with an AWB whose status a courier DELIVERED moves
+        (the ONE transition table: online_order_status.moved_by -- an order
+        held at CONFIRMED with its parcel out is asked too, as the webhook
+        asks it), pull the latest tracking status from Shiprocket and update
+        orders if changed. A courier DELIVERED is the delivery (owner ruling
+        2026-09-28): it moves the order through the table -- asked on every
+        poll, not only on a tracking change, so a held order or a lost race
+        retries next hour.
         """
-        from api.services.online_order_status import DELIVER, apply_fact, courier_fact
+        from api.services.online_order_status import DELIVER, apply_fact, courier_fact, moved_by
         from api.services.shopify_fulfillment import awb_filter, tracked_awbs
 
         orders_coll = self.get_collection("orders")
@@ -207,7 +209,7 @@ class NexusAgent(JarvisAgent):
             # cannot track) stays SHIPPED, and without the rotation 50 of them
             # would hold every slot and starve each later delivery.
             shipped_with_awb = list(orders_coll.find({
-                "status": "SHIPPED",
+                "status": {"$in": list(moved_by(DELIVER))},
                 "awb": {"$exists": True, "$ne": ""},
             }).sort("tracking_polled_at", 1).limit(50))
         except Exception as e:

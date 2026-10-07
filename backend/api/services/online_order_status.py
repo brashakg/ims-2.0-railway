@@ -105,6 +105,12 @@ def courier_fact(current_status: Any) -> Optional[str]:
     return DELIVER if str(current_status or "").strip().upper() == "DELIVERED" else None
 
 
+def moved_by(fact: str) -> Tuple[str, ...]:
+    """The statuses TABLE moves on `fact`: the orders a leg that states it
+    (the Shiprocket poll's DELIVER) has to ask about."""
+    return tuple(frm for frm, row in TABLE.items() if row.get(fact) not in (KEEP, TASK))
+
+
 def decide(order: Dict[str, Any], fact: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
     """(target status or None, why): why is "conflict" (a TASK cell),
     "withheld" (a finished status kept against a different fact), "held" (an
