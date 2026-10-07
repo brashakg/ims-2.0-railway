@@ -299,6 +299,17 @@ def _seed(db) -> None:
        Challan, unbilled), GRN-P1 (Pune, billed by the shop-less legacy bill
        LEG-1), GRN-P2 (Pune, billed by Pune's own bill B-P2-OWN), GRN-P3
        (Pune, unbilled)."""
+    # #1167: every bill door books on the receiving shop's own registration
+    # (org_validation.shop_gstin) and refuses a bill with no company master.
+    db["entities"].insert_one({
+        "entity_id": "E1", "legal_name": "Better Vision Opticals Pvt Ltd",
+        "gstins": [{"gstin": "20ZZZZZ9999Z1Z9", "state_code": "20", "is_primary": True},
+                   {"gstin": "27ZZZZZ9999Z1Z9", "state_code": "27"}],
+    })
+    db["stores"].insert_many([
+        {"store_id": DHN, "entity_id": "E1", "state_code": "20", "gstin": "20ZZZZZ9999Z1Z9"},
+        {"store_id": PUN, "entity_id": "E1", "state_code": "27", "gstin": "27ZZZZZ9999Z1Z9"},
+    ])
     db["vendors"].insert_many([
         {"vendor_id": V_BOTH, "legal_name": "Two Shop Optics", "trade_name": "Two Shop Optics", "is_active": True, "credit_days": 30},
         {"vendor_id": V_PDC, "legal_name": "Cheque Lens Co", "trade_name": "Cheque Lens Co", "is_active": True, "credit_days": 30},
