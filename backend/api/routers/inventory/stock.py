@@ -350,10 +350,18 @@ def _build_store_ledger(
 
     # ---- 3. Edge case - units exist for a product that's NOT in the
     # active catalog (deactivated SKU still on the shelf). Surface those
-    # rows too so the manager can see + clear them. ------------------
-    for pid, on_hand in on_hand_by_product.items():
+    # rows too so the manager can see + clear them. A product whose ONLY
+    # units here are RESERVED (a discontinued frame set aside for a
+    # customer's order) is held stock as much: the "Stock value at cost"
+    # tile sums these rows and the one stock-value rule counts reserved
+    # units, so it needs its row too (review r3 #6). ------------------
+    held_pids = list(on_hand_by_product) + [
+        pid for pid in reserved_by_product if pid not in on_hand_by_product
+    ]
+    for pid in held_pids:
         if pid in seen_pids:
             continue
+        on_hand = on_hand_by_product.get(pid, 0)
         product = product_repo.find_by_id(pid) or {"product_id": pid}
         # Respect the cataloguer filter on stranded rows too -- a unit whose
         # product was created by someone else must not leak into a filtered

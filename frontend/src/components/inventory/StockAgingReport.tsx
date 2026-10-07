@@ -21,6 +21,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { inventoryApi } from '../../services/api';
 import { exportToCSV as exportRowsToCSV } from '../../utils/exportUtils';
+import { rupees } from '../../pages/purchase/PurchasesThisMonthSection';
 
 interface AgingProduct {
   id: string;
@@ -119,6 +120,11 @@ export function StockAgingReport() {
     : products
         .filter((p) => p.classification === 'C')
         .reduce((sum, p) => sum + (p.value ?? 0), 0);
+  // Review r3 #16: the inventory tiles' rule (InventoryLayout tileMoney) --
+  // under a lakh a figure is whole rupees (Rs 4,000, never "Rs 0.0L"); from a
+  // lakh up, lakhs.
+  const tiedCapitalText = (n: number) =>
+    Math.round(n) < 100000 ? rupees(n) : `₹${(n / 100000).toFixed(1)}L`;
   const averageAge =
     products.reduce((sum, p) => sum + p.daysInStock, 0) / products.length || 0;
   const oldStockCount = products.filter((p) => p.daysInStock > 90).length;
@@ -331,7 +337,7 @@ export function StockAgingReport() {
           <div className="mt-2 pt-2 border-t border-red-200">
             <p className="text-xs text-red-700">
               Tied capital (at cost):{' '}
-              {slowMovingValue == null ? '—' : `₹${(slowMovingValue / 100000).toFixed(1)}L`}
+              {slowMovingValue == null ? '—' : tiedCapitalText(slowMovingValue)}
             </p>
           </div>
         </div>

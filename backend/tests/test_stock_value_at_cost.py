@@ -579,3 +579,130 @@ def test_r1_34_the_one_rule_counts_uncosted_pieces():
     assert stock_value.by_product(units)["P"] == {
         "units": 4.0, "cost": 3100.0, "uncosted_units": 3.0, "unit_cost": 3100.0,
     }
+
+
+# ============================================================================
+# Review r3 #6: a product held ONLY as reserved stock still has its ledger row
+# ============================================================================
+# The "Stock value at cost . shelf + reserved" tile (InventoryLayout.tsx) sums
+# the /inventory/stock ledger rows' cost_value; /reports/inventory sums every
+# unit the one rule (stock_value.shelf_units) counts, reserved ones included.
+# The ledger listed the active catalogue plus stranded products that had units
+# ON THE SHELF -- so a discontinued frame whose only unit here is set aside for
+# a customer's order got no row, and the tile read less than the report.
+#
+# The world (its own database):
+#   P-ACT   active,      1 on the shelf + 1 reserved, 800 each   -> 1600
+#   P-OLD   deactivated, 1 reserved at 1200 (Dhanbad)             -> 1200
+#           + 1 reserved at 5000 at ANOTHER shop                   -> not Dhanbad's
+#   P-GONE  deactivated, its only unit here SOLD                   -> no row
+#   Dhanbad's stock at cost = 1600 + 1200 = 2800
+
+_R3_HELD_AT_COST = 2800.0
+
+
+def _seed_reserved_only(db) -> None:
+    now = datetime.utcnow()
+    for pid, active in (("P-ACT", True), ("P-OLD", False), ("P-GONE", False)):
+        db["products"].insert_one(
+            {
+                "_id": pid, "product_id": pid, "sku": f"FR-{pid}", "brand": "Test",
+                "model": pid, "name": f"Frame {pid}", "category": "FRAME",
+                "mrp": 3000.0, "offer_price": 2500.0, "is_active": active,
+            }
+        )
+
+    def unit(sid, pid, status, cost, store=STORE):
+        return {
+            "_id": sid, "stock_id": sid, "product_id": pid, "store_id": store,
+            "barcode": f"BV{sid}", "quantity": 1, "status": status,
+            "unit_cost": cost, "cost_price": cost,
+            "created_at": now - timedelta(days=10),
+        }
+
+    db["stock_units"].insert_many(
+        [
+            unit("A1", "P-ACT", "AVAILABLE", 800.0),
+            unit("A2", "P-ACT", "RESERVED", 800.0),
+            unit("O1", "P-OLD", "RESERVED", 1200.0),
+            unit("O2", "P-OLD", "RESERVED", 5000.0, store=OTHER),
+            unit("G1", "P-GONE", "SOLD", 700.0),
+        ]
+    )
+
+
+@pytest.fixture(scope="module")
+def reserved_only_db():
+    mongomock = pytest.importorskip("mongomock")
+    db = mongomock.MongoClient()[f"ims_test_reserved_only_{uuid.uuid4().hex[:8]}"]
+    _seed_reserved_only(db)
+    return db
+
+
+@pytest.fixture
+def reserved_only_world(reserved_only_db, monkeypatch):
+    from database.repositories.product_repository import (
+        ProductRepository,
+        StockRepository,
+    )
+
+    stock = lambda: StockRepository(reserved_only_db["stock_units"])  # noqa: E731
+    products = lambda: ProductRepository(reserved_only_db["products"])  # noqa: E731
+    for mod in (inv_mod, reports_mod):
+        monkeypatch.setattr(mod, "get_stock_repository", stock)
+        monkeypatch.setattr(mod, "get_product_repository", products)
+    proxy = _DBProxy(reserved_only_db)
+    monkeypatch.setattr(inv_mod, "_get_db", lambda: proxy)
+    monkeypatch.setattr(reports_mod, "get_db", lambda: proxy)
+    app = FastAPI()
+    app.include_router(inv_mod.router, prefix="/inventory")
+    app.include_router(reports_mod.router, prefix="/reports")
+    return _World(TestClient(app), app)
+
+
+def test_r3_6_a_frame_held_only_as_reserved_has_its_ledger_row(reserved_only_world):
+    rows = _rows_by_pid(reserved_only_world, "STORE_MANAGER")
+    assert "P-OLD" in rows, f"no ledger row for the reserved-only frame: {sorted(rows)}"
+    row = rows["P-OLD"]
+    assert (row["stock"], row["reserved"]) == (0, 1)
+    # Only Dhanbad's reserved unit -- the one at another shop is not ours here.
+    assert row["cost_value"] == pytest.approx(1200.0)
+    assert row["unit_cost"] == pytest.approx(1200.0)
+    # A discontinued product with nothing held here (its unit was sold) is
+    # still not listed: the row is for held stock, not every unit ever.
+    assert "P-GONE" not in rows
+
+
+@pytest.mark.parametrize("role", ["STORE_MANAGER", "AREA_MANAGER", "ACCOUNTANT", "ADMIN"])
+def test_r3_6_the_cost_tile_equals_the_stock_value_report(reserved_only_world, role):
+    """The tile's sum of the ledger rows == /reports/inventory totalValue: one
+    'shelf + reserved at cost' figure, the reserved-only frame in both."""
+    rows = _rows_by_pid(reserved_only_world, role).values()
+    tile = sum(r.get("cost_value") or 0 for r in rows)
+    resp = reserved_only_world.get("/reports/inventory", role)
+    assert resp.status_code == 200, resp.text
+    report = resp.json()["totalValue"]
+    assert report == pytest.approx(_R3_HELD_AT_COST)
+    assert tile == pytest.approx(report), (
+        f"{role}: the cost tile reads {tile}, /reports/inventory {report}"
+    )
+
+
+@pytest.mark.parametrize("role", COUNTER)
+def test_r3_6_the_counter_sees_the_reserved_row_without_cost(reserved_only_world, role):
+    """The new row is masked exactly like every other: the counter sees the
+    held frame (stock 0, reserved 1) and no cost figure on it."""
+    row = _rows_by_pid(reserved_only_world, role)["P-OLD"]
+    assert row["reserved"] == 1
+    leaked = [k for k in (*COST_KEYS, "uncosted_units") if k in row]
+    assert not leaked, f"{role} reserved-only row carries {leaked}"
+
+
+def test_r3_6_the_reserved_only_row_obeys_the_category_filter(reserved_only_world):
+    """The stranded-row filters still apply to it: a FRAME held as reserved is
+    listed under FRAME and left out of a SUNGLASS view."""
+    frames = reserved_only_world.get("/inventory/stock", "STORE_MANAGER", category="FRAME")
+    sunglasses = reserved_only_world.get("/inventory/stock", "STORE_MANAGER", category="SUNGLASS")
+    assert frames.status_code == sunglasses.status_code == 200
+    assert "P-OLD" in {r["product_id"] for r in frames.json()["items"]}
+    assert "P-OLD" not in {r["product_id"] for r in sunglasses.json()["items"]}
