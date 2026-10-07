@@ -76,13 +76,7 @@ class _WithThisOrder:
         return list(self.planned) + list(self.repo.find_many(flt, *a, **k) or [])
 
 
-def _discarded(product_repo, product_id) -> bool:
-    """A draft an admin discarded: a typed line naming it is given that draft
-    back (revive_discarded_draft), never refused behind it."""
-    return bool((product_repo.find_by_id(product_id) or {}).get("discarded_draft"))
-
-
-def _refuse_items_we_already_have(items, product_repo) -> None:
+def _refuse_items_we_already_have(items, product_repo) -> dict:
     """Audit C2: a typed-in line that describes a product we ALREADY have
     (active, or a draft somebody ordered earlier) never mints a hidden twin.
 
@@ -99,10 +93,12 @@ def _refuse_items_we_already_have(items, product_repo) -> None:
     asking a frame typed without its eye size for it (each eye size is its
     own item, owner 09-28)."""
     if product_repo is None or not hasattr(product_repo, "find_by_identity_key"):
-        return
+        return {}
     order = _WithThisOrder(product_repo)
     already = []
+    switched_off = []
     need_size = []
+    revive = {}
     for idx, it in enumerate(items):
         if it.new_product is None:
             continue
@@ -125,12 +121,40 @@ def _refuse_items_we_already_have(items, product_repo) -> None:
         if err.status == 409 and err.conflict:
             # No product_id: an earlier line of THIS order types the same
             # item -- the create loop gives both lines its one draft.
-            if err.conflict.get("product_id") and not _discarded(
-                product_repo, err.conflict["product_id"]
-            ):
+            pid = err.conflict.get("product_id")
+            if not pid:
+                continue
+            found = product_repo.find_by_id(pid) or {}
+            if _pm.revivable_discarded_draft(found, category=spine.get("category")):
+                # Round 5: a draft an admin discarded is ordered again -- the
+                # order gets that draft back once it is stored (create_po).
+                revive[idx] = found
+            elif found.get("is_active") is False and not found.get("provisional"):
+                # Deleted or switched off: "use it?" would order stock of a
+                # product nobody can sell. A person switches it back on first.
+                switched_off.append({"line": idx, "existing": err.conflict})
+            else:
                 already.append({"line": idx, "existing": err.conflict})
         elif err.code == "EYE_SIZE_NEEDED":
             need_size.append({"line": idx, "sizes": err.sizes, "message": err.message})
+    def _named(e: dict) -> str:
+        size = f", size {e['size']}" if e.get("size") else ""
+        return f"{e.get('name') or e.get('sku')}{size} (SKU {e.get('sku')})"
+
+    if switched_off:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "SWITCHED_OFF_IN_CATALOGUE",
+                "message": (
+                    "In the catalogue but switched off: "
+                    + ", ".join(_named(m["existing"]) for m in switched_off)
+                    + ". Ask the catalogue manager to switch it back on, then "
+                    "order it -- nothing was ordered."
+                ),
+                "matches": switched_off,
+            },
+        )
     if not already and need_size:
         raise HTTPException(
             status_code=422,
@@ -141,11 +165,7 @@ def _refuse_items_we_already_have(items, product_repo) -> None:
             },
         )
     if not already:
-        return
-
-    def _named(e: dict) -> str:
-        size = f", size {e['size']}" if e.get("size") else ""
-        return f"{e.get('name') or e.get('sku')}{size} (SKU {e.get('sku')})"
+        return revive
 
     raise HTTPException(
         status_code=409,
@@ -524,11 +544,20 @@ async def create_po(
     # price, catalog_status DRAFT. That keeps product_id the single join key for
     # receiving, the stock mint, the invoice and the 3-way match, instead of
     # forking identity into a second placeholder system.
-    _refuse_items_we_already_have(po.items, product_repo)  # audit C2
-    for it in po.items:
+    revive = _refuse_items_we_already_have(po.items, product_repo)  # audit C2
+    revive_after = []
+    for idx, it in enumerate(po.items):
         if it.new_product is None:
             continue
         np = it.new_product
+        if idx in revive:
+            found = revive[idx]
+            it.product_id = found["product_id"]
+            it.product_name = it.product_name or found.get("name")
+            it.sku = it.sku or found.get("sku")
+            revive_after.append((found["product_id"], np.mrp))
+            it.new_product = None
+            continue
         try:
             created = _pm.create_via_door(
                 _typed_product_payload(it),
@@ -542,17 +571,9 @@ async def create_po(
         except _pm.ProductMasterError as err:
             # Past the check above this is two lines of THIS order typing the
             # same item, or a product created a moment ago by someone else:
-            # reuse it rather than refusing the order or minting a twin. A
-            # draft an admin discarded is ordered again here: it comes back
-            # as the ordered draft it was, to Needs review (round 5).
+            # reuse it rather than refusing the order or minting a twin.
             if err.status == 409 and (err.conflict or {}).get("product_id"):
                 it.product_id = err.conflict["product_id"]
-                _pm.revive_discarded_draft(
-                    it.product_id,
-                    product_repo,
-                    db=_get_db(),
-                    actor=current_user.get("user_id"),
-                )
                 it.product_name = it.product_name or err.conflict.get("name")
                 it.sku = it.sku or err.conflict.get("sku")
                 it.new_product = None
@@ -631,8 +652,9 @@ async def create_po(
                 "cost_source": _PO_PROVISIONAL_COST_SOURCE,
             }
 
+    stored = None
     if po_repo is not None:
-        po_repo.create(
+        stored = po_repo.create(
             {
                 "po_id": po_id,
                 "po_number": po_number,
@@ -656,6 +678,31 @@ async def create_po(
                 "created_at": datetime.now().isoformat(),
             }
         )
+
+    # Round 5: the discarded drafts this order names come back to Needs
+    # review -- only now that the order exists, so a failed order never
+    # undoes an admin's discard.
+    if stored and revive_after:
+        audit_repo = get_audit_repository()
+        for pid, typed_mrp in revive_after:
+            try:
+                _pm.revive_discarded_draft(
+                    pid,
+                    product_repo,
+                    db=_get_db(),
+                    actor=current_user.get("user_id"),
+                    mrp=typed_mrp,
+                    audit_repo=audit_repo,
+                    po_number=po_number,
+                )
+            except Exception:  # noqa: BLE001 - the order stands; send refuses the line
+                logger.error(
+                    "[VENDOR] PO %s: could not bring discarded draft %s back to "
+                    "Needs review; the order cannot be sent until it is",
+                    po_number,
+                    pid,
+                    exc_info=True,
+                )
 
     # Audit the cost figures this PO wrote onto the product spine -- cost feeds
     # margin and valuation, so "who set this cost and from where" must be

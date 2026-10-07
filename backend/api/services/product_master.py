@@ -2723,24 +2723,76 @@ def identity_conflict(spine: Dict[str, Any], product_repo) -> Optional[ProductMa
     return err
 
 
-def revive_discarded_draft(
-    product_id: str, product_repo, db=None, actor: Optional[str] = None
-) -> bool:
+def revivable_discarded_draft(spine: Optional[Dict[str, Any]], category: Any = None) -> bool:
     """A draft an admin discarded (catalog DELETE's `discarded_draft` mark)
-    that a manager orders AGAIN by typing it in comes back as the ordered
-    draft it was: provisional on the spine, in Needs review on its catalogue
-    copy, never switched on. Its identity key is unique, so a second row for
-    the item can never be made -- without this the discarded row would block
-    every new order of it behind a product nobody can see.
+    that is STILL a discarded draft: switched off and unfinished
+    (catalog_status DRAFT). A row finished or switched on since is an ordinary
+    product, never quietly turned back into a draft. With `category`, the typed
+    item must be the same kind of product (a sunglass typed against a
+    discarded frame is not the same item -- tax and fields differ)."""
+    spine = spine or {}
+    if not (
+        spine.get("discarded_draft")
+        and spine.get("is_active") is False
+        and str(spine.get("catalog_status") or "").upper() == "DRAFT"
+    ):
+        return False
+    if category is None:
+        return True
+    return str(spine.get("category") or "").upper() == str(category or "").upper()
 
-    True when the row was a discarded draft and is now a draft again; False
-    (nothing written) for any other product."""
+
+def revive_discarded_draft(
+    product_id: str,
+    product_repo,
+    db=None,
+    actor: Optional[str] = None,
+    mrp: Any = None,
+    audit_repo=None,
+    po_number: Optional[str] = None,
+) -> bool:
+    """A discarded draft (revivable_discarded_draft) that a manager orders
+    AGAIN by typing it in comes back as the ordered draft it was: provisional
+    on the spine, in Needs review on its catalogue copy, never switched on, at
+    the MRP the manager typed this time. Its identity key is unique, so a
+    second row for the item can never be made -- without this the discarded
+    row would block every new order of it behind a product nobody can see.
+
+    Called AFTER the order that names it is stored (create_po), so a failed
+    order never undoes an admin's discard. The catalogue copy is written
+    first: a failure there leaves the spine still discarded (the order's send
+    then refuses the line, loudly), never a provisional spine whose copy is
+    missing from Needs review. True when revived; False (nothing written) for
+    any other product."""
     if product_repo is None or not product_id:
         return False
     spine = product_repo.find_by_id(product_id)
-    if not spine or not spine.get("discarded_draft"):
+    if not revivable_discarded_draft(spine):
         return False
     now = datetime.now().isoformat()
+    price: Dict[str, Any] = {}
+    if mrp not in (None, "") and mrp != spine.get("mrp"):
+        price = {"mrp": mrp}
+    # `db is not None`, never a truth test of an attribute: on a pymongo
+    # Database any attribute is a Collection, and bool() of one raises
+    # (the same trap services/online_delist._raw_db works around).
+    if db is not None:
+        cat = db.get_collection("catalog_products")
+        twin_id = spine.get("pim_product_id") or product_id
+        # Back as _build_pim_doc made it: in Needs review, naming its
+        # spine, with no projected is_active and no delete stamp.
+        cat.update_one(
+            {"id": twin_id},
+            {
+                "$set": {
+                    "needs_review": True,
+                    "spine_product_id": product_id,
+                    **price,
+                    **({"pricing.mrp": price["mrp"]} if price else {}),
+                },
+                "$unset": {"is_active": "", "deleted_at": "", "deleted_by": ""},
+            },
+        )
     product_repo.update(
         product_id,
         {
@@ -2749,26 +2801,32 @@ def revive_discarded_draft(
             "discarded_draft": False,
             "revived_at": now,
             "revived_by": actor,
+            **price,
         },
     )
-    if db is not None and getattr(db, "is_connected", True):
-        cat = db.get_collection("catalog_products")
-        if cat is not None:
-            twin_id = spine.get("pim_product_id") or product_id
-            # Back as _build_pim_doc made it: in Needs review, naming its
-            # spine, with no projected is_active and no delete stamp.
-            cat.update_one(
-                {"id": twin_id},
-                {
-                    "$set": {"needs_review": True, "spine_product_id": product_id},
-                    "$unset": {"is_active": "", "deleted_at": "", "deleted_by": ""},
-                },
-            )
     logger.info(
         "[PRODUCT_MASTER] discarded draft %s ordered again by %s: back in Needs review",
         product_id,
         actor,
     )
+    if audit_repo is not None:
+        try:
+            audit_repo.create(
+                {
+                    "action": "product.discarded_draft_revived",
+                    "entity_type": "product",
+                    "entity_id": product_id,
+                    "user_id": actor,
+                    "detail": {
+                        "sku": spine.get("sku"),
+                        "po_number": po_number,
+                        "discarded_at": spine.get("discarded_at"),
+                        **({"mrp_was": spine.get("mrp"), "mrp": price["mrp"]} if price else {}),
+                    },
+                }
+            )
+        except Exception:  # noqa: BLE001 - the audit never undoes the revive
+            logger.warning("[PRODUCT_MASTER] revive audit failed for %s", product_id, exc_info=True)
     return True
 
 
