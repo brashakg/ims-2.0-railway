@@ -739,22 +739,35 @@ def online_summary(db) -> Dict[str, Any]:
 # accepts can never disagree.
 
 
-def product_online_state(doc: Dict[str, Any]) -> Dict[str, Any]:
-    """The Catalog screen's per-row truth for ONE catalog_products doc.
+def product_online_state(doc: Dict[str, Any], refusal: Optional[str]) -> Dict[str, Any]:
+    """The per-row online truth for ONE catalog_products doc -- the Catalog
+    screen, the products list and the Buy Desk all read it.
+
+    ``refusal`` is THE push gate's verdict for this same doc
+    (shopify_push.product_push_refusal(db, doc): a push-locked brand, or a
+    brand Brand Master keeps off the website). The caller asks the gate; no
+    screen decides on its own whether a product may go online, so a screen
+    and the push can never give two answers for one product.
 
       has_photo -- the push predicate (absolute http(s) URL on image_url /
                    images[] / image; missing, None, "" and a relative path
                    are all "no photo", exactly as the publish gate sees them)
-      queued    -- ecom.locally_modified, the ONE flag the push sweep walks
-                   and the pending count reads
+      queued    -- ecom.locally_modified AND the gate lets it through: the
+                   rows the push sweep actually walks (it skips a refused
+                   one) and the pending counts read
       online    -- DELIST_FAILED  IMS retired it (deleted / deactivated) but
                                   the automatic take-down failed: STILL LIVE
                                   on Shopify (services/online_delist)
                    LIVE     on Shopify (_ecom_online: gid present or PUBLISHED)
-                            and not taken down by the retire hook
+                            and not taken down by the retire hook -- even when
+                            the gate now refuses it (see `note`)
+                   NOT_FOR_WEBSITE  not live and the gate refuses it
                    BLOCKED  not live and no usable photo: the push refuses it
                    QUEUED   has a photo, waiting for a human to press push
                    OFF      not live, not queued
+      note      -- a LIVE listing the gate now refuses: it still sells (stock
+                   keeps syncing) but its price and images no longer sync.
+                   None otherwise.
 
     Pure; never raises."""
     # Lazy: shopify_push is the heavy Shopify client module and this helper
@@ -765,21 +778,36 @@ def product_online_state(doc: Dict[str, Any]) -> Dict[str, Any]:
     ecom = doc.get("ecom") if isinstance(doc.get("ecom"), dict) else {}
     has_photo = bool(product_photo_urls(doc))
     # A size variant is NEVER queued as a listing (the sweep skips it; its
-    # price/stock ride the parent), so the column and catalog_counts.pending
-    # must not show a dirty child as QUEUED.
-    queued = bool(ecom.get("locally_modified")) and not is_variant_of(doc)
+    # price/stock ride the parent), and neither is a product the gate refuses
+    # (the sweep skips it too, until its brand is ticked), so the column and
+    # catalog_counts.pending must not show either as QUEUED.
+    queued = bool(ecom.get("locally_modified")) and not is_variant_of(doc) and not refusal
     delist_state = str(ecom.get("online_state") or "").upper()
+    note = None
     if delist_state == "DELIST_FAILED":
         online = "DELIST_FAILED"
     elif _ecom_online(ecom) and delist_state != "DELISTED":
         online = "LIVE"
+        if refusal:
+            note = "Price and images no longer sync: %s" % refusal
+    elif refusal:
+        online = "NOT_FOR_WEBSITE"
     elif not has_photo:
         online = "BLOCKED"
     elif queued:
         online = "QUEUED"
     else:
         online = "OFF"
-    return {"has_photo": has_photo, "online": online, "queued": queued}
+    return {"has_photo": has_photo, "online": online, "queued": queued, "note": note}
+
+
+def doc_online_state(db, doc: Dict[str, Any]) -> Dict[str, Any]:
+    """product_online_state with THE push gate asked for this doc -- what every
+    reader with a db calls. ponytail: one brand_masters read per doc; cache the
+    brand map per request if the catalogue grows past a few hundred rows."""
+    from .shopify_push import product_push_refusal
+
+    return product_online_state(doc, product_push_refusal(db, doc))
 
 
 def stamp_online_state(db, products: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -817,9 +845,10 @@ def stamp_online_state(db, products: List[Dict[str, Any]]) -> List[Dict[str, Any
         twin = by_id.get(str(p.get("pim_product_id") or "")) or by_sku.get(
             str(p.get("sku") or "")
         )
-        state = product_online_state(twin if twin is not None else p)
+        state = doc_online_state(db, twin if twin is not None else p)
         p["has_photo"] = state["has_photo"]
         p["online"] = state["online"]
+        p["online_note"] = state["note"]
     return products
 
 
@@ -831,14 +860,14 @@ def _in_catalog(doc: Dict[str, Any]) -> bool:
 
 def catalog_counts(db) -> Dict[str, int]:
     """The Catalog screen's counts row, tallied over catalog_products with the
-    SAME product_online_state the per-row columns use -- so the figures and
-    the rows cannot disagree.
+    SAME doc_online_state the per-row columns use (push gate included) -- so
+    the figures and the rows cannot disagree.
 
       in_catalog / smartglasses / own / no_photo / live -- over the catalog
           population (_in_catalog)
-      pending      -- every dirty row, population or not: it is what the
-                      "push all pending" sweep walks, and the number must
-                      agree with the Online Store screen's pending count
+      pending      -- every queued row, population or not: what the "push all
+                      pending" sweep walks (a row the gate refuses is not),
+                      the same figure as the Online Store screen's pending
       needs_review -- imports awaiting review (the review queue's total)
 
     ponytail: one Python pass over the catalog (~80 rows); aggregate in Mongo
@@ -859,7 +888,7 @@ def catalog_counts(db) -> Dict[str, int]:
         from .product_master import resolve_category
 
         for doc in prods.find({}, {"_id": 0}):
-            state = product_online_state(doc)
+            state = doc_online_state(db, doc)
             if state["queued"]:
                 out["pending"] += 1
             if doc.get("needs_review") is True:

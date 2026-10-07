@@ -52,15 +52,19 @@ export interface CatalogProductDoc {
    *  http(s) URL). Never re-derive it here: what the screen calls a photo and
    *  what the publish gate accepts must be one rule. */
   has_photo?: boolean;
-  /** Server-computed: LIVE (on Shopify) / QUEUED (waiting for a human to
-   *  press push) / OFF / BLOCKED (no usable photo — cannot go online). */
+  /** Server-computed with THE push gate: LIVE (on Shopify) / QUEUED (waiting
+   *  for a human to press push) / OFF / BLOCKED (no usable photo — cannot go
+   *  online) / NOT_FOR_WEBSITE (Brand Master keeps the brand off the website). */
   online?: OnlineState;
+  /** Server-computed: set on a LIVE listing the push gate now refuses — it
+   *  still sells, but its price and images no longer sync. */
+  online_note?: string | null;
   [k: string]: unknown;
 }
 
 // DELIST_FAILED: IMS retired the product (deleted / deactivated) but the
 // automatic Shopify take-down failed -- it is STILL LIVE on the storefront.
-export type OnlineState = 'LIVE' | 'QUEUED' | 'OFF' | 'BLOCKED' | 'DELIST_FAILED';
+export type OnlineState = 'LIVE' | 'QUEUED' | 'OFF' | 'BLOCKED' | 'NOT_FOR_WEBSITE' | 'DELIST_FAILED';
 export type PhotoFilter = 'has' | 'missing';
 
 export interface CatalogProductListResponse {

@@ -20,7 +20,7 @@ from api.services.cost_mask import mask_cost, mask_cost_list
 from ..services.online_catalog import (
     online_status_for_skus,
     online_summary,
-    product_online_state,
+    doc_online_state,
     reconcile_store_barcodes,
     online_mapping_available,
 )
@@ -1687,13 +1687,15 @@ async def list_catalog_products(
     if not isinstance(photo, str):
         photo = None
 
-    # Photo + online truth, ONE rule (online_catalog.product_online_state),
-    # stamped before the filters so the photo filter reads the same value the
-    # column shows.
+    # Photo + online truth, ONE rule (online_catalog.product_online_state,
+    # with THE push gate's verdict), stamped before the filters so the photo
+    # filter reads the same value the column shows.
+    db = _get_db()
     for p in products:
-        state = product_online_state(p)
+        state = doc_online_state(db, p)
         p["has_photo"] = state["has_photo"]
         p["online"] = state["online"]
+        p["online_note"] = state["note"]
     if photo:
         want = photo == "has"
         products = [p for p in products if p.get("has_photo") is want]

@@ -17,7 +17,8 @@
 //   has_photo — the Shopify push's own predicate (an absolute http(s) URL on
 //               the doc the push reads), so "Photo: Missing" here IS "the
 //               push would refuse it"
-//   online    — LIVE / QUEUED / OFF / BLOCKED (blocked = no usable photo)
+//   online    — LIVE / QUEUED / OFF / BLOCKED (blocked = no usable photo) /
+//               NOT_FOR_WEBSITE (the push gate refuses the brand)
 // and the counts row at the top is the server's tally with the same rule
 // (GET /catalog/online-summary → catalog), so the figures and the rows
 // cannot disagree. "Waiting to push" reads ecom.locally_modified — the flag
@@ -111,6 +112,11 @@ const ONLINE_LABEL: Record<OnlineState, { text: string; cls: string; title: stri
   QUEUED: { text: 'Queued', cls: 'chip info', title: 'Waiting for a human to press push' },
   OFF: { text: 'Off', cls: 'chip', title: 'Not online, not queued' },
   BLOCKED: { text: 'Blocked', cls: 'chip', title: 'No usable photo — cannot go online' },
+  NOT_FOR_WEBSITE: {
+    text: 'Not for website',
+    cls: 'chip',
+    title: 'Settings > Brand Master keeps this brand off the website — the push refuses it',
+  },
   DELIST_FAILED: {
     text: 'Still live',
     cls: 'chip err',
@@ -119,13 +125,16 @@ const ONLINE_LABEL: Record<OnlineState, { text: string; cls: string; title: stri
   },
 };
 
-function OnlineChip({ state }: { state: OnlineState | undefined }) {
+function OnlineChip({ state, note }: { state: OnlineState | undefined; note?: string | null }) {
   const meta = state ? ONLINE_LABEL[state] : undefined;
   if (!meta) return <span className="chip">—</span>;
   return (
-    <span className={clsx(meta.cls, state === 'BLOCKED' && 'text-gray-400')} title={meta.title}>
-      {meta.text}
-    </span>
+    <>
+      <span className={clsx(meta.cls, state === 'BLOCKED' && 'text-gray-400')} title={note || meta.title}>
+        {meta.text}
+      </span>
+      {note && <div className="mt-0.5 max-w-[16rem] text-[11px] leading-snug text-amber-700">{note}</div>}
+    </>
   );
 }
 
@@ -869,7 +878,7 @@ export function CatalogManagerPage({
                         <PhotoChip has={hasPhoto} />
                       </td>
                       <td className="px-3 py-2 align-middle" data-testid="online-cell">
-                        <OnlineChip state={online} />
+                        <OnlineChip state={online} note={doc.online_note as string | null | undefined} />
                       </td>
                       <td className="px-3 py-2 align-middle text-right">
                         {hasPhoto === false ? (

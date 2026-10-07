@@ -745,7 +745,7 @@ def test_live_sync_never_selects_a_child_as_a_listing(monkeypatch):
     assert run["selected"] == 0 and run["awaiting_first_publish"] == 0 and run["attempted"] == 0
     assert osp._product_counts(db) == {"staged": 1, "pushed": 1, "pending": 0}
     assert catalog_counts(db)["pending"] == 0
-    state = product_online_state(_twin(db, "tw-child"))
+    state = product_online_state(_twin(db, "tw-child"), None)
     assert state["queued"] is False and state["online"] == "OFF"
 
 
