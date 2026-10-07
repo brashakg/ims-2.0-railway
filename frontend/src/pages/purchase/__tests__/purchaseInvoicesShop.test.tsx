@@ -57,7 +57,8 @@ const PUNE_DC = {
   grn_id: 'DC-P', dc_number: 'DC 31', vendor_id: 'V1', vendor_name: 'Frames Wala',
   store_id: 'WO-PUN-01', dc_date: '2026-09-20', total_accepted: 2,
 };
-// What the server's GET /from-grn and /from-dcs drafts carry: no store_id.
+// What the server's GET /from-grn and /from-dcs drafts carry. The from-grn
+// draft names the receipt's shop (store_id); the from-dcs one carries none.
 const DRAFT = {
   status: 'DRAFT', vendor_id: 'V1', vendor_name: 'Frames Wala',
   lines: [{ product_id: 'P1', description: 'Frame', hsn: '9003', qty: 1, unit_price: 100, gst_rate: 5 }],
@@ -84,6 +85,11 @@ beforeEach(() => {
     if (url === '/stores') return { data: { stores: STORES } };
     if (url === '/vendors/purchase-invoices') return { data: { purchase_invoices: [], total: 0 } };
     if (url === '/vendors/grn') return { data: { grns: p.grn_subtype ? dcs : grns.filter((g) => g.status === p.status) } };
+    if (url.startsWith('/vendors/purchase-invoices/from-grn/')) {
+      const id = url.split('/').pop();
+      const g = grns.find((r) => r.grn_id === id);
+      return { data: { ...DRAFT, grn_id: id, store_id: g?.store_id } };
+    }
     if (url.startsWith('/vendors/purchase-invoices/from-')) return { data: DRAFT };
     return { data: null };
   });

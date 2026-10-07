@@ -325,7 +325,9 @@ def rtv(monkeypatch):
     db = FakeDB()
     db.get_collection("entities").insert_one(
         {"entity_id": "E1", "code": "BV", "legal_name": "Better Vision Pvt Ltd",
-         "gstin": "20ABCDE1234F1Z5", "state_code": "20"})
+         # The note's GSTIN is read from the company's registrations (#1167).
+         "gstins": [{"gstin": "20ABCDE1234F1Z5", "state_code": "20", "is_primary": True}],
+         "state_code": "20"})
     db.get_collection("stores").insert_one(
         {"store_id": "S1", "entity_id": "E1", "name": "BV Ranchi", "state_code": "20"})
     db.get_collection("vendors").insert_one(

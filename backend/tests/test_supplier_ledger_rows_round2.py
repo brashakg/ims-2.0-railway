@@ -300,6 +300,18 @@ def _seed(db) -> None:
        Challan, unbilled), GRN-P1 (Pune, billed by the shop-less legacy bill
        LEG-1), GRN-P2 (Pune, billed by Pune's own bill B-P2-OWN), GRN-P3
        (Pune, unbilled)."""
+    # The company master the bill doors read for the buyer's GSTIN (#1167): each
+    # shop belongs to a company with a registration in its state.
+    db["entities"].insert_many([
+        {"entity_id": "E-BV", "name": "Better Vision",
+         "gstins": [{"gstin": "20AAAAA0000A1Z5", "state_code": "20", "is_primary": True}]},
+        {"entity_id": "E-WO", "name": "WizOpt",
+         "gstins": [{"gstin": "27BBBBB1111B1Z5", "state_code": "27", "is_primary": True}]},
+    ])
+    db["stores"].insert_many([
+        {"store_id": DHN, "entity_id": "E-BV", "state_code": "20", "gstin": "20AAAAA0000A1Z5"},
+        {"store_id": PUN, "entity_id": "E-WO", "state_code": "27", "gstin": "27BBBBB1111B1Z5"},
+    ])
     db["vendors"].insert_many([
         {"vendor_id": V_BOTH, "legal_name": "Two Shop Optics", "trade_name": "Two Shop Optics", "is_active": True, "credit_days": 30},
         {"vendor_id": V_PDC, "legal_name": "Cheque Lens Co", "trade_name": "Cheque Lens Co", "is_active": True, "credit_days": 30},

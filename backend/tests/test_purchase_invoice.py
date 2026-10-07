@@ -607,7 +607,8 @@ class TestListAndGet:
         it too; a stock-transfer mirror is not a supplier bill."""
         db = _FakeDB()
         db.collections["vendor_bills"] += [
-            {"bill_id": "legacy1", "vendor_id": "V1", "bill_number": "OLD-1", "total_amount": 500},
+            {"bill_id": "legacy1", "vendor_id": "V1", "bill_number": "OLD-1", "total_amount": 500,
+             "store_id": "S1"},  # in the accountant's shop (F63: a bill with no shop is an admin's only)
             {"bill_id": "m1", "bill_number": "TRF/T1", "source_transfer_id": "T1", "total_amount": 900},
         ]
         cli = _app(db)

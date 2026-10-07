@@ -2429,6 +2429,9 @@ async def draft_invoice_from_grn(
         "po_id": po_id,
         "grn_id": grn_id,
         "grn_number": grn.get("grn_number"),
+        # The shop the bill is booked to (the receipt's, F63): the booking form
+        # names it, so an admin on All stores sees where the bill goes.
+        "store_id": grn.get("store_id"),
         "lines": computed["lines"],
         "taxable_total": computed["taxable_total"],
         "cgst_total": computed["cgst_total"],

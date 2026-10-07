@@ -67,6 +67,9 @@ def test_every_bill_door_stamps_the_shop_the_goods_landed_in():
         return {"user_id": "u-admin", "roles": ["ADMIN"], "store_ids": [], "active_store_id": "S2"}
 
     cli.app.dependency_overrides[get_current_user] = _admin_at_s2
+    # The draft names the shop the bill will be booked to (the receipt's), so
+    # the booking form can say so to an admin viewing another shop.
+    assert cli.get(f"{_URL}/from-grn/GA").json()["store_id"] == "S1"
     assert _book_from_grn(cli, "GA", "A-1")["store_id"] == "S1"
     header = _door(
         cli, "V2", bill_number="B-9", bill_date="2026-05-09", grn_id="GB",

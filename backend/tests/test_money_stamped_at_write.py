@@ -107,6 +107,18 @@ def _bill(bill_id, vendor, store, on, total, due, **extra) -> dict:
 
 
 def _seed(db) -> None:
+    # The company master the bill doors read for the buyer's GSTIN (#1167): each
+    # shop belongs to a company with a registration in its state.
+    db["entities"].insert_many([
+        {"entity_id": "E-BV", "name": "Better Vision",
+         "gstins": [{"gstin": "20AAAAA0000A1Z5", "state_code": "20", "is_primary": True}]},
+        {"entity_id": "E-WO", "name": "WizOpt",
+         "gstins": [{"gstin": "27BBBBB1111B1Z5", "state_code": "27", "is_primary": True}]},
+    ])
+    db["stores"].insert_many([
+        {"store_id": DHN, "entity_id": "E-BV", "state_code": "20", "gstin": "20AAAAA0000A1Z5"},
+        {"store_id": PUN, "entity_id": "E-WO", "state_code": "27", "gstin": "27BBBBB1111B1Z5"},
+    ])
     db["vendors"].insert_many([
         {"vendor_id": v, "legal_name": v, "trade_name": v, "is_active": True, "credit_days": 30}
         for v in (V_BOTH, V_X, V_NEW, V_MIRROR, V_LEG)

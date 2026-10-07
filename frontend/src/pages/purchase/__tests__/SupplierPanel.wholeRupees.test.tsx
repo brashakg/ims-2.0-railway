@@ -16,6 +16,10 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
 
+vi.mock('../../../context/AuthContext', () => ({
+  // The GST-head chips follow the active shop (usePoGstHeads(user.activeStoreId)).
+  useAuth: () => ({ user: { id: 'U1', roles: ['ACCOUNTANT'], activeStoreId: 'BV-DHN-01', storeIds: ['BV-DHN-01'] } }),
+}));
 vi.mock('../../../context/ToastContext', () => ({
   useToast: () => ({ success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() }),
 }));
