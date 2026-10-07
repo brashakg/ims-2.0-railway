@@ -2944,3 +2944,22 @@ def test_r5_a_draft_finished_by_the_cost_promote_leaves_the_queue_and_releases(w
         f"R5: the held units stayed held after the cost promote finished the draft "
         f"({len(world.units(draft_id))} on the shelf)",
     )
+
+
+def test_r5_each_store_manager_is_told_of_a_receipt_beyond_its_order(world):
+    # Review round 5, pass 2 (mutant M18): the store manager's per-person key
+    # was unpinned -- with the person dropped, only the first of two store
+    # managers was ever told.
+    _seed_user(world, dict(MANAGER, user_id="u-mgr-2", username="mgr.two"))
+    po, grn1, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    grn2, _ = _receive_again(world, po, "JOT/26-27/0701-DUP2")
+    world.finish_draft(draft_id, offer=2790)
+    told = sorted(
+        t.get("assigned_to")
+        for t in _open_tasks(world)
+        if t.get("grn_id") == grn2["grn_id"] and t.get("category") == "Purchase"
+    )
+    finding(
+        told == sorted([MANAGER["user_id"], "u-mgr-2"]),
+        f"R5: a receipt beyond its order told {told}, not both store managers",
+    )
