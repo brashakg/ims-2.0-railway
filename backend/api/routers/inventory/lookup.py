@@ -90,7 +90,7 @@ def _find(product_repo, stock_repo, q):
     scan answers "in any colour?". The exact ones come first, ahead of the
     50-hit search and the 200-row family caps, so a scanned contact-lens
     power is never cut from a 300-power family. Inactive (soft-deleted / draft) products never come back."""
-    exact = [{"sku": q}, {"barcode": q}, {"attributes.gtin": q}]
+    exact = [{"sku": q}, {"attributes.gtin": q}]
     unit = stock_repo.find_by_barcode(q)
     if unit and unit.get("product_id"):
         exact.append({"product_id": unit["product_id"]})

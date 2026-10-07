@@ -64,4 +64,25 @@ describe('Stock lookup screen', () => {
     expect(box.selectionStart).toBe(0);
     expect(box.selectionEnd).toBe('BV91FA3858A2'.length);
   });
+
+  it('asks again when the same barcode is scanned twice', async () => {
+    // Round 5: the same scan is the same query key, so the screen kept the
+    // first answer - a frame sold at the till since still read 1 here.
+    const sold = { ...item('X', 12990, 11990), stores: [{ ...item('X', 0, 0).stores[0], available: 0 }] };
+    mockGet.mockReset();
+    mockGet
+      .mockResolvedValueOnce({ data: { store_id: 'S1', items: [item('X', 12990, 11990)] } })
+      .mockResolvedValueOnce({ data: { store_id: 'S1', items: [sold] } });
+    const box = renderPage();
+    const scan = () => {
+      fireEvent.change(box, { target: { value: 'BV91FA3858A2' } });
+      fireEvent.submit(box.closest('form')!);
+    };
+    const here = () => within(screen.getByText('Frame X').closest('tr')!).getAllByRole('cell')[5].textContent;
+    scan();
+    await waitFor(() => expect(here()).toBe('1'));
+    scan();
+    await waitFor(() => expect(here()).toBe('0'));
+    expect(mockGet).toHaveBeenCalledTimes(2);
+  });
 });

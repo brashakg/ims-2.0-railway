@@ -514,6 +514,7 @@ def test_d7b2_an_empty_search_answers_nothing(call, mongo_db, q):
 # model can hold more rows than the lookup's caps (50 search hits, 200 family).
 _CL_POWERS = 230
 _CL_TARGET_SKU = "CLOASYS-1"  # a prefix of every other power's SKU below
+_CL_TARGET_BARCODE = "PBOASYS-1"  # and of every other power's product barcode
 _CL_TARGET_GTIN = "0733905577766"
 _CL_TARGET_UNIT = "BVCL00000001"
 
@@ -529,6 +530,7 @@ def _seed_contact_lens_family(db) -> str:
         rows.append({
             "_id": pid, "product_id": pid,
             "sku": _CL_TARGET_SKU if last else f"{_CL_TARGET_SKU}{i:03d}",
+            "barcode": _CL_TARGET_BARCODE if last else f"{_CL_TARGET_BARCODE}{i:03d}",
             "name": f"Acuvue Oasys {power}", "brand": "Johnson & Johnson",
             "model": "Acuvue Oasys", "category": "CONTACT_LENS", "size": power,
             "mrp": 1800.0, "offer_price": 1700.0, "is_active": True,
@@ -542,7 +544,8 @@ def _seed_contact_lens_family(db) -> str:
 
 @pytest.mark.parametrize(
     "label,query",
-    [("its sku", _CL_TARGET_SKU), ("its gtin", _CL_TARGET_GTIN), ("its unit barcode", _CL_TARGET_UNIT)],
+    [("its sku", _CL_TARGET_SKU), ("its product barcode", _CL_TARGET_BARCODE),
+     ("its gtin", _CL_TARGET_GTIN), ("its unit barcode", _CL_TARGET_UNIT)],
 )
 def test_d7b2_a_scanned_power_is_never_cut_from_a_big_family(call, mongo_db, label, query):
     _seed(mongo_db)
