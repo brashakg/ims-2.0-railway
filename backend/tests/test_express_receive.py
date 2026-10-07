@@ -241,7 +241,18 @@ def _wire(monkeypatch, *, po=None, file_store=None, product_repo=None):
     monkeypatch.setattr(pi_mod, "get_grn_repository", lambda: grn_repo)
     monkeypatch.setattr(pi_mod, "get_purchase_order_repository", lambda: po_repo)
     monkeypatch.setattr(pi_mod, "get_vendor_repository", lambda: None)
-    monkeypatch.setattr(pi_mod, "_get_db", lambda: None)
+    # The invoice draft names a company + GSTIN for the receiving shop (a draft
+    # with none is a 422, which the express door reports as "no draft").
+    import mongomock
+
+    mdb = mongomock.MongoClient().db
+    mdb["entities"].insert_one(
+        {"entity_id": "E1", "gstins": [{"gstin": "27ZZZZZ9999Z1Z9", "state_code": "27"}]}
+    )
+    mdb["stores"].insert_one(
+        {"store_id": "STORE-A", "entity_id": "E1", "state_code": "27", "gstin": "27ZZZZZ9999Z1Z9"}
+    )
+    monkeypatch.setattr(pi_mod, "_get_db", lambda: mdb)
 
     return grn_repo, po_repo, stock_repo, task_repo
 

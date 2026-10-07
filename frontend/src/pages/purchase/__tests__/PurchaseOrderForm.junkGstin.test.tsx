@@ -1,24 +1,17 @@
 // ============================================================================
-// IMS 2.0 - Create PO screen: a junk "88..." vendor GSTIN gets NO tax verdict
+// IMS 2.0 - Create PO screen: the tax head is the SERVER's, not the browser's
 // ============================================================================
-// The last wire nothing pinned. gstStateCode is pinned pure, the composer is
-// pinned given the `interstate` prop, and the supplier CARD is pinned in both
-// worlds -- but no test proved the Create-PO FORM actually routes its verdict
-// through isInterStateSupply's state-list gate. Rewiring the form to the raw
-// prefix comparison (`gstStateCode(vendor.gstNumber) !==
-// gstStateCode(store.gstin)`, no gate) passed tsc AND the full 1,068-test
-// suite, while a junk "88..." GSTIN printed "Different states -- the vendor
-// charges IGST." on a real purchase order (88 != 20 as raw digits, over a
-// state that does not exist -- the engine reads NO state off that GSTIN).
+// The composer used to decide the head itself from the vendor's GSTIN and the
+// shop's raw `store.gstin` -- a second GSTIN rule beside the server's
+// shop_gstin (a blank own GSTIN read "cannot tell", a stale own GSTIN a stale
+// head, a junk "88..." prefix a confident IGST). Round 12 #3: the form asks
+// GET /vendors/po-gst-heads (shop_gstin + classify_supply) and shows exactly
+// that: true -> IGST, false -> CGST + SGST, null/missing -> no verdict.
 //
-// So this file renders the real PurchaseOrderForm, picks a junk-88 vendor,
-// and asserts no verdict appears -- with the state list DOWN and UP.
-//
-// ORDER MATTERS: useGstStateCodes caches module-level. A rejected load leaves
-// the cache EMPTY (retried next mount), a successful one fills it for every
-// later test in the file -- so the DOWN test must run first.
+// This renders the real PurchaseOrderForm, picks the vendor, and steers the
+// server's answer. It also pins that the form no longer reads the shop record.
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 
 vi.mock('../../../context/ToastContext', () => ({
@@ -40,20 +33,17 @@ vi.mock('../../../services/api', () => ({
 
 // The composer's cost-prefill api -- never fires here (no line has a product).
 vi.mock('../../../services/api/inventory', () => ({
-  vendorsApi: { getLastCost: vi.fn().mockResolvedValue({ costs: {} }) },
-}));
-
-// The receiving shop: a real Jharkhand (20) registration.
-vi.mock('../../../services/api/stores', () => ({
-  storeApi: {
-    getStore: vi.fn().mockResolvedValue({ gstin: '20AABCU9603R1Z1', state: 'Jharkhand' }),
+  vendorsApi: {
+    getLastCost: vi.fn().mockResolvedValue({ costs: {} }),
+    getPoGstHeads: getHeads,
   },
 }));
 
-// The state-list endpoint, steered per test: rejected first (DOWN), then a
-// served list that -- like the real org_validation list -- has no state "88".
-const metaMock = vi.hoisted(() => vi.fn());
-vi.mock('../../../services/api/entities', () => ({ entitiesApi: { meta: metaMock } }));
+// The server's verdict per vendor, steered per test.
+const heads = vi.hoisted(() => ({ current: {} as Record<string, boolean | null> }));
+const getHeads = vi.hoisted(() => vi.fn());
+const getStore = vi.hoisted(() => vi.fn());
+vi.mock('../../../services/api/stores', () => ({ storeApi: { getStore } }));
 
 import { PurchaseOrderForm } from '../PurchaseOrderForm';
 import type { Supplier } from '../purchaseTypes';
@@ -101,34 +91,52 @@ async function renderFormAndPickJunkVendor() {
 }
 
 function expectNoVerdict() {
-  // The honest fallback is on screen (proves the totals box rendered) ...
   expect(
     screen.getByText(/add the GST number to this vendor and to this shop/i),
   ).toBeInTheDocument();
-  // ... and neither verdict is. Under the raw-prefix rewiring both of these
-  // light up as "IGST" / "Different states" (88 != 20); under a falsy-unknown
-  // regression the "Same state" sentence appears instead.
   expect(screen.queryByText(/\bIGST\b/)).not.toBeInTheDocument();
   expect(screen.queryByText(/Different states/i)).not.toBeInTheDocument();
   expect(screen.queryByText(/Same state/i)).not.toBeInTheDocument();
 }
 
-describe('Create PO screen with a junk "88..." vendor GSTIN', () => {
-  it('state list DOWN: no verdict for the whole session', async () => {
-    metaMock.mockRejectedValue(new Error('503'));
+beforeEach(() => {
+  vi.clearAllMocks();
+  heads.current = {};
+  getHeads.mockImplementation(async () => ({ shop_gstin: '20AABCU9603R1Z1', heads: heads.current }));
+});
+
+describe('Create PO screen shows the tax head the server resolved', () => {
+  it('asks for the head of the ACTIVE shop and never reads the shop record', async () => {
+    await renderFormAndPickJunkVendor();
+    expect(getHeads).toHaveBeenCalledWith('BV-BOK-01');
+    expect(getStore).not.toHaveBeenCalled();
+  });
+
+  it('server null (junk "88..." vendor GSTIN, or a shop with no number): no verdict', async () => {
+    heads.current = { v1: null };
     await renderFormAndPickJunkVendor();
     expectNoVerdict();
   });
 
-  it('state list UP (no state 88 in it): still no verdict', async () => {
-    metaMock.mockResolvedValue({
-      state_codes: [
-        { code: '20', name: 'Jharkhand' },
-        { code: '27', name: 'Maharashtra' },
-      ],
-      entity_types: [],
-    });
+  it('server endpoint down: no verdict, the form still works', async () => {
+    getHeads.mockRejectedValue(new Error('503'));
     await renderFormAndPickJunkVendor();
     expectNoVerdict();
+  });
+
+  it('server true: IGST', async () => {
+    heads.current = { v1: true };
+    await renderFormAndPickJunkVendor();
+    expect(await screen.findByText(/Different states/i)).toBeInTheDocument();
+    expect(screen.getAllByText('IGST').length).toBeGreaterThan(0);
+  });
+
+  it('server false: CGST + SGST, whatever the vendor GSTIN prefix says', async () => {
+    // The vendor row carries an 88 prefix; the browser would call that IGST
+    // (88 != 20). The server's answer is the one shown.
+    heads.current = { v1: false };
+    await renderFormAndPickJunkVendor();
+    expect(await screen.findByText(/Same state/i)).toBeInTheDocument();
+    expect(screen.queryByText(/\bIGST\b/)).not.toBeInTheDocument();
   });
 });
