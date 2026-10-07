@@ -17,11 +17,27 @@ const toastMock = vi.hoisted(() => ({
 }));
 vi.mock('../../../context/ToastContext', () => ({ useToast: () => toastMock }));
 
-// The buying store's identity (its GST state) comes from the shared print-info
-// hook; stub the fetch, not the component under test.
-const storeInfo = vi.hoisted(() => ({ current: null as null | Record<string, unknown> }));
-vi.mock('../../../hooks/useStorePrintInfo', () => ({
-  useStorePrintInfo: () => storeInfo.current,
+// The ACTIVE shop is the buyer; steer it per test.
+const auth = vi.hoisted(() => ({ store: 'S1' as string | undefined }));
+vi.mock('../../../context/AuthContext', () => ({
+  useAuth: () => ({ user: { id: 'u1', roles: ['ADMIN'], activeStoreId: auth.store } }),
+}));
+
+// The tax head of each vendor is the SERVER's verdict (GET
+// /vendors/po-gst-heads: shop_gstin + classify_supply). Stub the transport and
+// steer the answer per test; the card only maps it onto a chip.
+const poHeads = vi.hoisted(() => ({
+  current: {} as Record<string, boolean | null>,
+  down: false,
+}));
+vi.mock('../../../services/api/inventory', () => ({
+  vendorsApi: {
+    getPoGstHeads: vi.fn(async () =>
+      poHeads.down
+        ? { shop_gstin: '', heads: {} }
+        : { shop_gstin: '20AABCU9603R1Z1', heads: poHeads.current },
+    ),
+  },
 }));
 
 vi.mock('../../../services/api', () => ({
@@ -43,6 +59,7 @@ vi.mock('../../../services/api/entities', () => ({
 }));
 
 import { SupplierPanel } from '../SupplierPanel';
+import { vendorsApi as poApi } from '../../../services/api/inventory';
 import type { Supplier } from '../purchaseTypes';
 
 const base: Supplier = {
@@ -68,13 +85,9 @@ const base: Supplier = {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  // Buying store is REGISTERED in Jharkhand (20) unless a test says otherwise.
-  // Its gstin is what taxes the purchase; stores.py stamps it from the entity's
-  // registrations, while state_code below comes from the store's address.
-  storeInfo.current = {
-    storeName: 'BV Bokaro', address: '', city: '', state: 'Jharkhand', pincode: '',
-    stateCode: '20', gstin: '20AABCU9603R1Z1',
-  };
+  poHeads.current = {};
+  poHeads.down = false;
+  auth.store = 'S1';
 });
 
 describe('SupplierPanel edit button', () => {
@@ -93,105 +106,76 @@ describe('SupplierPanel edit button', () => {
   });
 });
 
-describe('SupplierPanel GST treatment chip', () => {
-  it('shows CGST+SGST for a vendor in the same state as the buying store', async () => {
-    // FAIL-CLOSED: the chip reads "unknown" until the server's state list
-    // lands, so every verdict below is awaited, never read off the first paint.
+describe('SupplierPanel GST treatment chip (the server decides)', () => {
+  it('shows CGST+SGST when the server says false', async () => {
+    poHeads.current = { v1: false };
     render(<SupplierPanel suppliers={[base]} />);
     expect(await screen.findByText(/CGST \+ SGST/i)).toBeInTheDocument();
     expect(screen.queryByText(/\bIGST\b/i)).not.toBeInTheDocument();
   });
 
-  it('shows IGST for a vendor in another state', async () => {
+  it('shows IGST when the server says true', async () => {
+    poHeads.current = { v1: true };
     const mh: Supplier = { ...base, state: 'Maharashtra', stateCode: '27', gstNumber: '27AAPFU0939F1ZV' };
     render(<SupplierPanel suppliers={[mh]} />);
     expect(await screen.findByText(/\bIGST\b/i)).toBeInTheDocument();
   });
 
-  it('derives the state code from the GSTIN when the vendor row has none stored', async () => {
-    // Legacy vendors created before state_code was persisted.
+  it('derives the state NAME from the GSTIN when the vendor row has none stored', async () => {
+    poHeads.current = { v1: true };
     const legacy: Supplier = { ...base, stateCode: undefined, gstNumber: '27AAPFU0939F1ZV', state: '' };
     render(<SupplierPanel suppliers={[legacy]} />);
-    expect(await screen.findByText(/\bIGST\b/i)).toBeInTheDocument();
-    // The name is looked up from the server's state-code list, not a second
-    // hardcoded copy in the browser.
     expect(await screen.findByText(/Maharashtra/)).toBeInTheDocument();
   });
 
-  it('reads as UNKNOWN, never as "same state", when the buying store has no GST state', () => {
-    // The dangerous shape: a helper that answers "is this inter-state?" with a
-    // boolean has no way to say "I do not know", so false doubles as "same
-    // state" and the card prints "Same state - CGST + SGST" over a vendor whose
-    // tax split nobody has established. That is a wrong-tax statement shown to
-    // staff. Unknown must read as unknown.
-    storeInfo.current = { storeName: 'X', address: '', city: '', state: '', pincode: '' };
+  it('reads UNKNOWN, never a split, when the server says null', async () => {
+    poHeads.current = { v1: null };
     render(<SupplierPanel suppliers={[base]} />);
-    expect(screen.getByText(/tax split unknown/i)).toBeInTheDocument();
+    expect(await screen.findByText(/tax split unknown/i)).toBeInTheDocument();
     expect(screen.queryByText(/CGST \+ SGST/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/\bIGST\b/i)).not.toBeInTheDocument();
   });
 
-  it("uses the store's REGISTRATION, never its address, to decide the split", async () => {
-    // The configuration this business actually has: a store whose address is in
-    // one state while it bills under an entity registered in another (WizOpt's
-    // online store bills under BV Opticals Pvt Ltd). stores.py derives
-    // state_code from the ADDRESS and gstin from the ENTITY, so the two
-    // legitimately disagree.
-    //
-    // determine_place_of_supply reads the recipient GSTIN and nothing else, so
-    // an address-first card prints the opposite verdict to the bill it is
-    // sitting next to. Registration wins.
-    storeInfo.current = {
-      storeName: 'WizOpt Online', address: '', city: '', state: 'Maharashtra',
-      pincode: '', stateCode: '27', gstin: '20AABCU9603R1Z1',
-    };
+  it('reads UNKNOWN for a vendor the server did not answer for, and while it is down', async () => {
+    poHeads.down = true;
     render(<SupplierPanel suppliers={[base]} />);
+    expect(await screen.findByText(/tax split unknown/i)).toBeInTheDocument();
+    expect(screen.queryByText(/CGST \+ SGST/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\bIGST\b/i)).not.toBeInTheDocument();
+  });
+
+  it('never works the head out of the vendor GSTIN itself (a stale stored state is ignored)', async () => {
+    // Vendor GSTIN says Maharashtra and the stored state says Jharkhand; the
+    // chip follows the SERVER (false -> CGST + SGST), not either field.
+    poHeads.current = { v1: false };
+    const moved: Supplier = { ...base, stateCode: '20', state: 'Jharkhand', gstNumber: '27AAPFU0939F1ZV' };
+    render(<SupplierPanel suppliers={[moved]} />);
     expect(await screen.findByText(/CGST \+ SGST/i)).toBeInTheDocument();
     expect(screen.queryByText(/\bIGST\b/i)).not.toBeInTheDocument();
   });
 
-  it("uses the vendor's GSTIN, never a stale stored state code, for the split", async () => {
-    // Same rule on the other side. A vendor row can carry a state_code written
-    // before its GSTIN was corrected; the bill will be taxed off the GSTIN, so
-    // the card must be too.
-    const moved: Supplier = { ...base, stateCode: '20', state: 'Jharkhand', gstNumber: '27AAPFU0939F1ZV' };
-    render(<SupplierPanel suppliers={[moved]} />);
-    expect(await screen.findByText(/\bIGST\b/i)).toBeInTheDocument();
-    expect(screen.queryByText(/CGST \+ SGST/i)).not.toBeInTheDocument();
-  });
-
-  it('renders NO tax verdict for a vendor GSTIN whose state code the server does not know', async () => {
-    // "88" parses as two digits but is not an Indian GST state. The engine's
-    // parser (org_validation) reads NO state off such a GSTIN, so the card
-    // must not print "Other state - IGST" (88 != 20) over a state that does
-    // not exist. Honest fallback: the unknown chip.
-    const junk: Supplier = { ...base, stateCode: undefined, state: '', gstNumber: '88AABCU9603R1ZF' };
-    render(<SupplierPanel suppliers={[junk]} />);
-    expect(await screen.findByText(/tax split unknown/i)).toBeInTheDocument();
-    expect(screen.queryByText(/\bIGST\b/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/CGST \+ SGST/i)).not.toBeInTheDocument();
-  });
-
-  it("renders NO tax verdict when the buying store's own GSTIN carries an unknown state code", async () => {
-    // Same gate on the buyer side: a store GSTIN with a junk prefix must not
-    // anchor an IGST/CGST claim against a real vendor state.
-    storeInfo.current = {
-      storeName: 'X', address: '', city: '', state: '', pincode: '',
-      gstin: '99AABCU9603R1ZF',
-    };
-    render(<SupplierPanel suppliers={[base]} />);
-    expect(await screen.findByText(/tax split unknown/i)).toBeInTheDocument();
-    expect(screen.queryByText(/\bIGST\b/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/CGST \+ SGST/i)).not.toBeInTheDocument();
-  });
-
   it('shows no tax chip at all for an unregistered vendor', () => {
-    // No GSTIN means no GST on the purchase -- neither split applies, and the
-    // GSTIN line already says "Unregistered".
     const unregistered: Supplier = { ...base, gstNumber: '', stateCode: undefined, state: '' };
     render(<SupplierPanel suppliers={[unregistered]} />);
     expect(screen.getByText(/unregistered \(no gstin\)/i)).toBeInTheDocument();
     expect(screen.queryByText(/CGST \+ SGST/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/tax split unknown/i)).not.toBeInTheDocument();
+  });
+});
+
+describe('SupplierPanel follows the active shop', () => {
+  it('asks the server for the ACTIVE shop, and again when the shop is switched', async () => {
+    poHeads.current = { v1: true };
+    const { rerender } = render(<SupplierPanel suppliers={[base]} />);
+    await screen.findByText(/\bIGST\b/i);
+    expect(poApi.getPoGstHeads).toHaveBeenLastCalledWith('S1');
+
+    // Top-bar shop switch: the mounted tab re-asks for the new shop.
+    auth.store = 'PUNE';
+    poHeads.current = { v1: false };
+    rerender(<SupplierPanel suppliers={[base]} />);
+    expect(await screen.findByText(/CGST \+ SGST/i)).toBeInTheDocument();
+    expect(poApi.getPoGstHeads).toHaveBeenLastCalledWith('PUNE');
+    expect(screen.queryByText(/\bIGST\b/i)).not.toBeInTheDocument();
   });
 });

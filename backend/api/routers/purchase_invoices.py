@@ -67,8 +67,10 @@ from ..dependencies import (
     get_purchase_order_repository,
     get_grn_repository,
     get_audit_repository,
+    validate_store_access,
 )
 from ..services import ap_engine
+from ..services import org_validation as ov
 from ..services import landed_cost as lc
 from ..services import purchase_invoice_engine as pinv
 from ..services import purchase_match as pmatch
@@ -121,13 +123,17 @@ class PurchaseInvoiceCreate(BaseModel):
     lines: List[PurchaseInvoiceLine] = Field(..., min_length=1)
     po_id: Optional[str] = None
     grn_id: Optional[str] = None
-    # Recipient (buyer) -- which of our legal entities is claiming the ITC.
-    # Either the entity id (we resolve its GSTIN for the place-of-supply state)
-    # or an explicit recipient GSTIN. Drives the IGST vs CGST/SGST decision.
-    recipient_entity_id: Optional[str] = None
+    # Our GSTIN as printed on the supplier's bill. Optional: the server decides
+    # WHICH entity receives (the receiving shop's -- see _bill_recipient) and
+    # only accepts a GSTIN that entity holds. There is deliberately no entity-id
+    # or place-of-supply field: the tax head is the supplier's GSTIN state vs
+    # this GSTIN's state, nothing a client calls "place of supply" (F6).
     recipient_gstin: Optional[str] = None
-    # Optional 2-digit place-of-supply state override (else the recipient state).
-    place_of_supply: Optional[str] = None
+    # The shop the form was filled at (a bill with no receipt is that shop's
+    # company's). Sent by the preview AND the booking, so a shop switched in
+    # another tab between the two cannot move the bill; the token's active
+    # shop only when absent. Checked by validate_store_access (403).
+    store_id: Optional[str] = None
     tds: float = Field(0, ge=0)
     itc_eligible: bool = True
     # GST reverse charge (RCM): when True this is an inward supply on which the
@@ -164,6 +170,28 @@ class PurchaseInvoiceCreate(BaseModel):
         must not create a phantom distinct bill). Case is preserved -- vendor
         invoice numbers can be case-significant."""
         return v.strip() if isinstance(v, str) else v
+
+    @field_validator("invoice_date", mode="before")
+    @classmethod
+    def _require_invoice_date(cls, v):
+        """ap_engine.iso_bill_date: a blank or '05/05/2026' date booked with
+        no due date, on no GSTR-3B and under no period lock."""
+        return ap_engine.iso_bill_date(v)
+
+
+class PurchaseInvoicePreview(BaseModel):
+    """The form as it stands: what POST / would book, minus the paperwork."""
+
+    vendor_id: str
+    lines: List[PurchaseInvoiceLine] = Field(default_factory=list)
+    grn_id: Optional[str] = None
+    linked_dc_ids: Optional[List[str]] = None
+    recipient_gstin: Optional[str] = None
+    store_id: Optional[str] = None  # see PurchaseInvoiceCreate.store_id
+    # Same two switches POST / takes, so the preview's itc_eligible is the
+    # booking's (one helper, org_validation.itc_claimable).
+    itc_eligible: bool = True
+    reverse_charge: bool = False
 
 
 def _clean(doc: dict) -> dict:
@@ -973,97 +1001,281 @@ def _apply_valuation_trueup(db, invoice_doc, computed, config) -> Optional[list]
 # ---------------------------------------------------------------------------
 
 
-def _entity_gstin_for_state(entity: dict, state_code: Optional[str]) -> Optional[str]:
-    """Pick the entity GSTIN to use as the recipient.
-
-    Prefer the GSTIN whose state matches `state_code` (a multi-GSTIN entity has
-    one per state); else the primary GSTIN; else the first. Returns None when
-    the entity has no GSTINs.
-    """
-    gstins = (entity or {}).get("gstins") or []
-    if not isinstance(gstins, list) or not gstins:
-        return None
-    sc = (state_code or "").strip()
-    if sc:
-        for g in gstins:
-            if isinstance(g, dict) and str(g.get("state_code") or "").strip() == sc:
-                return g.get("gstin")
-    for g in gstins:
-        if isinstance(g, dict) and g.get("is_primary"):
-            return g.get("gstin")
-    first = gstins[0]
-    return first.get("gstin") if isinstance(first, dict) else None
-
-
-def _resolve_recipient(db, body_entity_id, body_gstin, body_pos) -> dict:
-    """Resolve {recipient_entity_id, recipient_gstin} for an invoice.
-
-    An explicit recipient_gstin always wins. Otherwise, when a recipient entity
-    is given (or there is a single entity to default to), pick its GSTIN for the
-    requested place-of-supply state. Fail-soft: returns whatever it can derive.
-    """
-    recipient_gstin = (body_gstin or "").strip().upper() or None
-    entity_id = body_entity_id
-    if recipient_gstin:
-        return {"recipient_entity_id": entity_id, "recipient_gstin": recipient_gstin}
-    if db is None:
-        return {"recipient_entity_id": entity_id, "recipient_gstin": None}
-    try:
-        coll = db.get_collection("entities")
-        entity = None
-        if entity_id:
-            entity = coll.find_one({"entity_id": entity_id}, {"_id": 0})
-        else:
-            # Default to the sole entity when there is exactly one, so a
-            # single-entity client doesn't have to pass it every time.
-            docs = list(coll.find({}, {"_id": 0}).limit(2))
-            if len(docs) == 1:
-                entity = docs[0]
-                entity_id = entity.get("entity_id")
-        if entity:
-            recipient_gstin = _entity_gstin_for_state(entity, body_pos)
-    except Exception:
-        pass
-    return {"recipient_entity_id": entity_id, "recipient_gstin": recipient_gstin}
-
-
-def _delivery_store_declared_state(db, grn_doc, linked_dc_ids) -> Optional[str]:
-    """2-digit declared state of the store the goods were DELIVERED to, or None.
-
-    The purchase-order door (vendors._po_gst_parties) passes the delivery
-    store's declared state as the explicit place of supply -- the norm-correct
-    answer for goods. This resolves the same value for the bill door: the
-    receiving store comes from the linked GRN (or the first linked DC -- a
-    cross-store consolidation is rejected by _assert_dcs_single_vendor_store
-    anyway), and its state is read exactly the way the PO reads it
-    (state_code first, the state name as fallback). Fail-soft: any miss
-    returns None and the engine keeps its existing recipient-GSTIN fallback.
-    """
+def _receipt_store_id(db, grn_doc, linked_dc_ids) -> Optional[str]:
+    """The shop the goods were DELIVERED to -- for the booking, its preview
+    and the DC draft alike: the linked GRN's store, else the first linked DC
+    that names one (a legacy DC with no store is skipped; two different shops
+    are refused by _assert_dcs_single_vendor_store). Fail-soft: None on a miss."""
     store_id = (grn_doc or {}).get("store_id")
-    if not store_id and linked_dc_ids and db is not None:
+    for dc_id in linked_dc_ids or []:
+        if store_id or db is None:
+            break
         try:
             dc = db.get_collection("grns").find_one(
-                {"grn_id": linked_dc_ids[0]}, {"_id": 0, "store_id": 1}
+                {"grn_id": dc_id}, {"_id": 0, "store_id": 1}
             )
-            store_id = (dc or {}).get("store_id")
         except Exception:
-            store_id = None
-    if db is None or not store_id:
-        return None
-    try:
-        store_doc = (
-            db.get_collection("stores").find_one(
-                {"store_id": store_id}, {"_id": 0, "state_code": 1, "state": 1}
+            dc = None
+        store_id = (dc or {}).get("store_id")
+    return store_id or None
+
+
+def _draft_lines(db, receipt: dict, po: Optional[dict]) -> list:
+    """A receipt's billable lines for BOTH drafts (from-GRN, from-DCs), with
+    the name and HSN the receipt and its PO lack taken from the catalogue: a
+    receipt line stores only product_id + quantities and a DC has no PO, so the
+    DC door opened every line blank and the form would not book until each
+    name was retyped. Fail-soft: a catalogue miss leaves the line as it was."""
+    lines = pinv.lines_from_grn(receipt, po)
+    missing = {
+        ln["product_id"]
+        for ln in lines
+        if ln.get("product_id") and not (ln.get("description") and ln.get("hsn"))
+    }
+    if not missing or db is None:
+        return lines
+    products: dict = {}
+    for pid in missing:
+        try:
+            products[pid] = db.get_collection("products").find_one(
+                {"product_id": pid}, {"_id": 0, "name": 1, "hsn_code": 1}
+            ) or {}
+        except Exception:
+            products[pid] = {}
+    for ln in lines:
+        p = products.get(ln.get("product_id")) or {}
+        ln["description"] = ln.get("description") or p.get("name")
+        ln["hsn"] = ln.get("hsn") or p.get("hsn_code")
+    return lines
+
+
+def _registrations(entity: Optional[dict]) -> set:
+    """Every GSTIN an entity holds, upper-cased."""
+    return {
+        str(g.get("gstin") or "").strip().upper()
+        for g in (entity or {}).get("gstins") or []
+        if isinstance(g, dict) and g.get("gstin")
+    }
+
+
+def _refuse_recipient(code: str, message: str):
+    raise HTTPException(status_code=422, detail={"code": code, "message": message})
+
+
+def _bill_recipient(
+    db,
+    receipt_store_id,
+    body_gstin,
+    fallback_store_id=None,
+    gstin_box=True,
+    current_user=None,
+) -> dict:
+    """THE recipient of a purchase bill -- one resolution for every bill door
+    (the booking, its preview, both drafts, the Cash Flow '+ bill'), decided on
+    the server (F40: a bill with no company is invisible to GSTR-3B).
+
+    The SHOP: the one the goods were received at. Only a bill with no receipt
+    (services, freight) looks further: the company that holds the GSTIN typed
+    on it, else the booking user's active shop. A receipt's shop is never
+    replaced by the user's, so the draft (which has no user shop) and the
+    booking always name the same company.
+
+    The COMPANY: the shop's; the only company when there is exactly one.
+    Refused (422) when companies exist and none can be named -- a bill with
+    recipient_entity_id null drops out of every GSTR-3B.
+
+    The GSTIN: when the goods were received at a shop it is ALWAYS that shop's
+    (org_validation.shop_gstin) -- a typed GSTIN that differs is refused 422,
+    never allowed to move the credit to another registration. With no receipt
+    shop, the typed one: refused unless that company holds it (a typo, or
+    another company's number, would move the credit and the tax head) and
+    unless the caller can reach a shop of that company (403); else
+    THE shop's GSTIN (org_validation.shop_gstin, the one answer every door
+    reads: its own when its company holds it, else the company's
+    registration for the shop's state); refused (422) when the company holds
+    no GSTIN at all, or none that is the shop's -- never the company's
+    primary, which put a Pune shop's Maharashtra purchase on the Jharkhand
+    return as IGST while its purchase order said CGST + SGST.
+
+    `gstin_box`: whether the caller's form has a Recipient GSTIN box, so a
+    refusal never tells the accountant to type into a box that is not there
+    (the Cash Flow '+ bill' form has none). A company master that cannot be
+    read is a 503, never 'no companies'.
+    """
+    gstin = (body_gstin or "").strip().upper() or None
+    if db is None:
+        if not gstin:
+            _refuse_recipient(
+                "RECIPIENT_UNRESOLVED",
+                "Cannot tell which of our GST numbers this bill is for. "
+                "Nothing was recorded -- try again shortly.",
             )
-            or {}
+        return {"recipient_entity_id": None, "recipient_gstin": gstin}
+
+    def _store(store_id) -> dict:
+        if not store_id:
+            return {}
+        try:
+            return db.get_collection("stores").find_one(
+                {"store_id": store_id},
+                {"_id": 0, "store_id": 1, "entity_id": 1, "gstin": 1, "state_code": 1, "state": 1},
+            ) or {}
+        except Exception:
+            return {}
+
+    try:
+        entities = [
+            e
+            for e in db.get_collection("entities").find({}, {"_id": 0})
+            if isinstance(e, dict)
+        ]
+    except Exception as exc:
+        # Never read as "no company master": that branch books a typed GSTIN
+        # unchecked and a bill with no company.
+        raise HTTPException(
+            status_code=503,
+            detail="Could not read our companies to decide who this bill is "
+            "for. Nothing was recorded -- try again shortly.",
+        ) from exc
+
+    if receipt_store_id:
+        shop = _store(receipt_store_id)
+        entity_id = shop.get("entity_id")
+    else:
+        holder = next(
+            (e for e in entities if gstin and gstin in _registrations(e)), None
         )
-    except Exception:
-        return None
-    return (
-        pinv.state_code_of(store_doc.get("state_code"))
-        or pinv.state_code_of(store_doc.get("state"))
-        or None
+        shop = {} if holder else _store(fallback_store_id)
+        entity_id = (holder or {}).get("entity_id") or shop.get("entity_id")
+        if holder and current_user is not None:
+            # A typed number must not move credit onto a company the caller
+            # has no shop in (store_id=S2 is 403; so is S2's GSTIN typed).
+            from ..dependencies import user_store_scope
+
+            cross, allowed = user_store_scope(current_user)
+            if not cross:
+                reach = False
+                try:
+                    reach = any(
+                        d.get("store_id") in allowed
+                        for d in db.get_collection("stores").find(
+                            {"entity_id": entity_id}, {"_id": 0, "store_id": 1}
+                        )
+                        if isinstance(d, dict)
+                    )
+                except Exception:
+                    reach = False
+                if not reach:
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"No access to any shop of {holder.get('name') or entity_id}, "
+                        f"the company that holds {gstin}.",
+                    )
+    # No "the only company is this shop's" guess: a shop with no entity_id has
+    # no GSTIN by org_validation.shop_gstin, the answer every other reader
+    # (GSTR-3B scope, Cross-Check, RTV note, transfer) gives, so it is refused.
+    entity = next(
+        (e for e in entities if entity_id and e.get("entity_id") == entity_id), None
     )
+    if not entities:
+        # No company master at all (a fresh install): nothing to scope by and
+        # nothing to check a typed number against -- but a bill must still
+        # name a GSTIN: with none typed the head would be a guess.
+        if not gstin:
+            _refuse_recipient(
+                "RECIPIENT_NO_COMPANY_MASTER",
+                "There is no company master, so IMS cannot tell which of our "
+                "GST numbers this bill is for. Add the company and its GSTIN "
+                "in Organization (left menu)"
+                + (", or type our GSTIN as printed on the supplier's bill." if gstin_box else "."),
+            )
+        return {"recipient_entity_id": entity_id, "recipient_gstin": gstin}
+    if entity is None:
+        _refuse_recipient(
+            "RECIPIENT_UNRESOLVED",
+            "Cannot tell which of our companies this bill is for: "
+            + (
+                f"the receiving shop {receipt_store_id} has no company set."
+                if receipt_store_id
+                else (
+                    (
+                        f"shop {shop.get('store_id')} has no company set "
+                        "in Organization (left menu)"
+                        if shop.get("store_id")
+                        else "pick the shop it is for (top bar)"
+                    )
+                    + (
+                        ", or type our GSTIN as printed on the supplier's bill."
+                        if gstin_box
+                        else ", then record the bill again."
+                    )
+                )
+            ),
+        )
+    held = _registrations(entity)
+    name = entity.get("name") or entity.get("entity_id")
+    if gstin:
+        if gstin not in held:
+            _refuse_recipient(
+                "RECIPIENT_GSTIN_NOT_OURS",
+                f"{gstin} is not one of {name}'s GST numbers"
+                + (f" ({', '.join(sorted(held))})" if held else "")
+                + ". Check our GSTIN as printed on the supplier's bill.",
+            )
+        if receipt_store_id:
+            # The receiving shop decides the registration; a typed number can only
+            # agree with it.
+            shop_reg = ov.shop_gstin(entity, shop)
+            if gstin != shop_reg:
+                _refuse_recipient(
+                    "RECIPIENT_GSTIN_NOT_RECEIPT_SHOP",
+                    f"{gstin} is not the GST number of the shop that received the "
+                    f"goods ({receipt_store_id}"
+                    + (f", {shop_reg}" if shop_reg else ", which has none")
+                    + "). The credit goes to the receiving shop's registration; "
+                    "clear the Recipient GSTIN box, or pick the shop the goods "
+                    "were received at.",
+                )
+        return {"recipient_entity_id": entity_id, "recipient_gstin": gstin}
+    if not held:
+        # Booked with no GSTIN, the bill counted on EVERY return of the
+        # company (gst_itc._itc_match keeps a GSTIN-less bill company-wide):
+        # 180 of tax was claimed as 360 across two shops' filings.
+        _refuse_recipient(
+            "RECIPIENT_COMPANY_HAS_NO_GSTIN",
+            f"{name} has no GST number in the company master, so this bill "
+            "cannot be put on a GST return. Add the company's GSTIN "
+            "in Organization (left menu), then record the bill again.",
+        )
+    shop_gstin = ov.shop_gstin(entity, shop)
+    if not shop_gstin:
+        sid = shop.get("store_id")
+        if sid:
+            state = ov.resolve_state_code(shop.get("state_code"), shop.get("state"))
+            own = shop.get("gstin")
+            why = (
+                f"Shop {sid} has no GST number of {name}: "
+                + (f"its own ({own}) is not one of {name}'s, and " if own else "")
+                + f"{name} holds none for the shop's state "
+                f"({ov.state_name(state) or 'not set'}). Correct the shop's "
+                "state or GSTIN in Organization (left menu), or add the company's "
+                "registration for that state in Organization (left menu)"
+            )
+        else:
+            why = (
+                f"Cannot tell which of {name}'s GST numbers this bill is for: "
+                "pick the shop it is for (top bar)"
+            )
+        _refuse_recipient(
+            "RECIPIENT_SHOP_HAS_NO_GSTIN",
+            why
+            + (
+                ", or type our GSTIN as printed on the supplier's bill."
+                if gstin_box and not receipt_store_id
+                else ", then record the bill again."
+            ),
+        )
+    return {"recipient_entity_id": entity_id, "recipient_gstin": shop_gstin}
 
 
 def _vendor_gstin(db, vendor: Optional[dict], vendor_id: str) -> Optional[str]:
@@ -1079,6 +1291,31 @@ def _vendor_gstin(db, vendor: Optional[dict], vendor_id: str) -> Optional[str]:
         return (v or {}).get("gstin")
     except Exception:
         return None
+
+
+def _bill_math(db, vendor, body, grn_doc, current_user):
+    """Everything a booking stores about tax: (supplier GSTIN, recipient,
+    computed invoice). POST / books it and POST /preview shows it through this
+    one call on the same body, so the form cannot preview one tax head, split
+    or paisa and the ledger store another (F6 / F40) -- nor another shop: the
+    shop is the form's own store_id, never whichever the token names by the
+    time Book is pressed. A receipt's shop decides a receipt's bill, so the
+    form's shop is only checked (403) when it is the one that counts."""
+    supplier_gstin = _vendor_gstin(db, vendor, body.vendor_id)
+    receipt_store = _receipt_store_id(db, grn_doc, body.linked_dc_ids)
+    recipient = _bill_recipient(
+        db,
+        receipt_store,
+        body.recipient_gstin,
+        None if receipt_store else validate_store_access(body.store_id, current_user),
+        current_user=current_user,
+    )
+    computed = pinv.compute_invoice(
+        [ln.model_dump() for ln in body.lines],
+        supplier_gstin,
+        recipient.get("recipient_gstin"),
+    )
+    return supplier_gstin, recipient, computed
 
 
 def _line_product_ids(lines) -> list:
@@ -1339,14 +1576,20 @@ async def create_purchase_invoice(
     """Create a first-class purchase invoice: compute the per-line CGST/SGST vs
     IGST split from supplier-vs-recipient state, reconcile taxable+tax == total,
     and book it as an AP payable (due date from the vendor's credit terms, with
-    a per-vendor duplicate-invoice guard). Writes ``place_of_supply`` so the ITC
-    register classifies it correctly."""
+    a per-vendor duplicate-invoice guard). Stores the tax heads every ITC
+    reader reports as stored."""
     vendor_repo = get_vendor_repository()
     vendor = vendor_repo.find_by_id(body.vendor_id) if vendor_repo is not None else None
     if vendor_repo is not None and vendor is None:
         raise HTTPException(status_code=404, detail="Vendor not found")
 
     db = _get_db()
+
+    # Accounting period lock on the bill's own month, as the Cash Flow '+ bill'
+    # door always had (this door checked only a DC's date, below).
+    from .finance import check_period_locked
+
+    check_period_locked(db, body.invoice_date)
 
     # F3: a STANDARD PO-backed GRN must be ACCEPTED before it can be billed -- a
     # GRN mints stock only at accept time, so booking against a PENDING /
@@ -1474,30 +1717,15 @@ async def create_purchase_invoice(
         except Exception:
             pass  # fail-soft: skip dup check on DB error, proceed
 
-    supplier_gstin = _vendor_gstin(db, vendor, body.vendor_id)
-    recipient = _resolve_recipient(
-        db, body.recipient_entity_id, body.recipient_gstin, body.place_of_supply
-    )
-
-    # Place of supply for GOODS follows the delivery location. When the client
-    # sends no explicit place_of_supply, default it to the DELIVERY store's
-    # declared state -- the same answer the purchase order already passes
-    # (vendors._po_gst_parties) -- instead of letting the engine fall back to
-    # the recipient GSTIN's state: a store carrying a fallback GSTIN registered
-    # in another state would otherwise book the OPPOSITE inter-state verdict on
-    # the bill vs its own PO. An explicit client value stays authoritative, and
-    # _resolve_recipient above deliberately still sees the RAW body value:
-    # which of our registrations claims the ITC is the separate, owner-gated
-    # recipient-GSTIN question this default must not touch.
-    place_of_supply = body.place_of_supply or _delivery_store_declared_state(
-        db, grn_doc, body.linked_dc_ids
-    )
-
-    computed = pinv.compute_invoice(
-        [ln.model_dump() for ln in body.lines],
-        supplier_gstin,
-        recipient.get("recipient_gstin"),
-        place_of_supply,
+    # THE tax-head rule (F6): the supplier's GSTIN state vs our GSTIN's state
+    # -- the two registrations printed on the bill, and exactly what the form
+    # previews (POST /preview runs this same _bill_math). No client "place of
+    # supply" and no delivery-state default feeds it: the draft handed back the
+    # SUPPLIER's state under that name, the form sent it back, and reading it
+    # as the buyer's state stored a Maharashtra supplier's IGST bill as
+    # CGST+SGST.
+    supplier_gstin, recipient, computed = _bill_math(
+        db, vendor, body, grn_doc, current_user
     )
 
     # Reconcile a client-supplied grand total against the server math.
@@ -1590,12 +1818,10 @@ async def create_purchase_invoice(
         "vendor_gstin": supplier_gstin,
         "recipient_entity_id": recipient.get("recipient_entity_id"),
         "recipient_gstin": recipient.get("recipient_gstin"),
-        # WRITE place_of_supply = the SUPPLIER (counterparty) state so the
-        # existing itc_reconcile.build_itc_register test (place_of_supply vs the
-        # recipient entity's primary state) fires IGST on inter-state buys. This
-        # is THE FIX: the field used to be unwritten, so every inter-state
-        # purchase was mis-classified intra-state (CGST+SGST). The legal
-        # recipient-side place of supply is kept separately for display.
+        # place_of_supply = the SUPPLIER (counterparty) state, as it always
+        # has been on a stored bill; the legal recipient-side place of supply
+        # is kept separately for display. The ITC readers read the stored
+        # heads below, never a re-derivation from either.
         "place_of_supply": computed["itc_place_of_supply"],
         "supply_place_recipient": computed["place_of_supply"],
         "supplier_state": computed["supplier_state"],
@@ -1645,7 +1871,12 @@ async def create_purchase_invoice(
             else body.bill_kind
         ),
         "tds": round(body.tds, 2),
-        "itc_eligible": bool(body.itc_eligible),
+        # Round 12 item 6: no valid supplier GSTIN on the invoice, no input
+        # credit -- decided here, once, so the register, GSTR-3B and the
+        # Cross-Check all read it from the stored flag.
+        "itc_eligible": ov.itc_claimable(
+            supplier_gstin, body.reverse_charge, body.itc_eligible
+        ),
         "reverse_charge": bool(body.reverse_charge),
         "outstanding": total,
         "status": "OUTSTANDING",
@@ -1862,6 +2093,49 @@ async def create_purchase_invoice(
 # ---------------------------------------------------------------------------
 
 
+@router.post("/preview")
+async def preview_purchase_invoice(
+    body: PurchaseInvoicePreview,
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
+):
+    """What the booking WILL store for this form -- the recipient, the tax head
+    and every line's split, from the very _bill_math POST / books with. Nothing
+    is written. The Purchase Invoices form shows this instead of doing its own
+    GST math: its own copy previewed CGST + SGST on a manual bill the server
+    booked as IGST, called a junk-prefix GSTIN inter-state, and rounded a
+    paisa differently (panel on F6/F40)."""
+    vendor_repo = get_vendor_repository()
+    vendor = vendor_repo.find_by_id(body.vendor_id) if vendor_repo is not None else None
+    if vendor_repo is not None and vendor is None:
+        raise HTTPException(status_code=404, detail="Vendor not found")
+    db = _get_db()
+    grn_doc = None
+    if body.grn_id and not body.linked_dc_ids:
+        grn_repo = get_grn_repository()
+        grn_doc = grn_repo.find_by_id(body.grn_id) if grn_repo is not None else None
+    supplier_gstin, recipient, computed = _bill_math(
+        db, vendor, body, grn_doc, current_user
+    )
+    return {
+        "vendor_gstin": supplier_gstin,
+        "itc_eligible": ov.itc_claimable(
+            supplier_gstin, body.reverse_charge, body.itc_eligible
+        ),
+        "recipient_entity_id": recipient.get("recipient_entity_id"),
+        "recipient_gstin": recipient.get("recipient_gstin"),
+        "supplier_state": computed["supplier_state"],
+        "supply_place_recipient": computed["place_of_supply"],
+        "interstate": computed["interstate"],
+        "lines": computed["lines"],
+        "taxable_total": computed["taxable_total"],
+        "cgst_total": computed["cgst_total"],
+        "sgst_total": computed["sgst_total"],
+        "igst_total": computed["igst_total"],
+        "tax_total": computed["tax_total"],
+        "total": computed["total"],
+    }
+
+
 def _stamp_bill_actor_names(db, bills: list) -> None:
     """Add ``*_name`` beside the raw user ids the AP screens print.
 
@@ -1896,13 +2170,16 @@ async def list_purchase_invoices(
     # same gate as the create/approve writes, instead of any authenticated user.
     current_user: dict = Depends(require_roles(*_AP_ROLES)),
 ):
-    """List first-class purchase invoices (doc_type=PURCHASE_INVOICE), newest
-    first. Header-only legacy bills are excluded from this view. Filterable by
+    """List every supplier bill, newest first: the screen's line-detail
+    invoices AND the Cash Flow '+ bill' door's header-only bills -- the same
+    bills the ITC register and GSTR-3B count (listing only doc_type
+    PURCHASE_INVOICE showed 3 rows and Rs 150 where they read Rs 330). A
+    stock-transfer mirror is not a supplier bill and stays out. Filterable by
     vendor / status / unmatched (no PO or GRN link)."""
     db = _get_db()
     if db is None:
         return {"purchase_invoices": [], "total": 0}
-    flt: dict = {"doc_type": "PURCHASE_INVOICE"}
+    flt: dict = {"source_transfer_id": None}
     if vendor_id:
         flt["vendor_id"] = vendor_id
     if status:
@@ -1918,7 +2195,29 @@ async def list_purchase_invoices(
         key=lambda r: r.get("invoice_date") or r.get("bill_date") or "", reverse=True
     )
     _stamp_bill_actor_names(db, rows)
+    _stamp_receipt_numbers(db, rows)
     return {"purchase_invoices": rows, "total": len(rows)}
+
+
+def _stamp_receipt_numbers(db, rows) -> None:
+    """A Cash Flow '+ bill' stores its receipt as grn_id alone, so its row
+    read 'Manual' under Refs. Stamp the receipt's number (the id when the
+    receipt cannot be read) on every row that links one. Fail-soft."""
+    ids = {r["grn_id"] for r in rows if r.get("grn_id") and not r.get("grn_number")}
+    if not ids:
+        return
+    try:
+        numbers = {
+            g.get("grn_id"): g.get("grn_number")
+            for g in db.get_collection("grns").find(
+                {"grn_id": {"$in": sorted(ids)}}, {"_id": 0, "grn_id": 1, "grn_number": 1}
+            )
+        }
+    except Exception:
+        numbers = {}
+    for r in rows:
+        if r.get("grn_id") in ids:
+            r["grn_number"] = numbers.get(r["grn_id"]) or r["grn_id"]
 
 
 @router.get("/from-grn/{grn_id}")
@@ -1961,31 +2260,13 @@ async def draft_invoice_from_grn(
         vendor = vendor_repo.find_by_id(vendor_id)
 
     supplier_gstin = _vendor_gstin(db, vendor, vendor_id) if vendor_id else None
-    # Default the recipient to the entity that owns the receiving store.
-    recipient_entity_id = None
-    try:
-        if db is not None and grn.get("store_id"):
-            store_doc = db.get_collection("stores").find_one(
-                {"store_id": grn.get("store_id")},
-                {"_id": 0, "entity_id": 1},
-            )
-            recipient_entity_id = (store_doc or {}).get("entity_id")
-    except Exception:
-        recipient_entity_id = None
-    # No place-of-supply hint: the bill receives on the entity's PRIMARY
-    # registration. For a single-state entity that is the only GSTIN it has.
-    # For an entity registered in TWO states buying for a shop outside its
-    # primary state, this still classifies differently from the purchase order
-    # (which reads the receiving shop's own state) -- a known, open
-    # disagreement. Changing it would RE-CLASSIFY live purchase bills, and this
-    # business does not re-state, so it is an owner decision that has not been
-    # taken. It is written down here and in the PR rather than half-built: a
-    # switch nobody can reach is not a decision, it is dead code.
-    recipient = _resolve_recipient(db, recipient_entity_id, None, None)
+    recipient = _bill_recipient(
+        db, grn.get("store_id"), None, current_user.get("active_store_id")
+    )
 
-    raw_lines = pinv.lines_from_grn(grn, po)
+    raw_lines = _draft_lines(db, grn, po)
     computed = pinv.compute_invoice(
-        raw_lines, supplier_gstin, recipient.get("recipient_gstin"), None
+        raw_lines, supplier_gstin, recipient.get("recipient_gstin")
     )
 
     return {
@@ -2057,11 +2338,9 @@ async def draft_invoice_from_dcs(
     agg: dict = {}
     order: list = []
     resolved_vendor_id = vendor_id
-    store_id = None
     for dc in dc_docs:
         resolved_vendor_id = resolved_vendor_id or dc.get("vendor_id")
-        store_id = store_id or dc.get("store_id")
-        for ln in pinv.lines_from_grn(dc, None):
+        for ln in _draft_lines(db, dc, None):
             pid = ln.get("product_id")
             key = pid if pid is not None else f"_noid_{len(order)}"
             if key not in agg:
@@ -2081,20 +2360,12 @@ async def draft_invoice_from_dcs(
     supplier_gstin = (
         _vendor_gstin(db, vendor, resolved_vendor_id) if resolved_vendor_id else None
     )
-    # Default the recipient to the entity that owns the receiving store.
-    recipient_entity_id = None
-    try:
-        if db is not None and store_id:
-            store = db.get_collection("stores").find_one(
-                {"store_id": store_id}, {"_id": 0, "entity_id": 1}
-            )
-            recipient_entity_id = (store or {}).get("entity_id")
-    except Exception:
-        recipient_entity_id = None
-    recipient = _resolve_recipient(db, recipient_entity_id, None, None)
+    recipient = _bill_recipient(
+        db, _receipt_store_id(db, None, ids), None, current_user.get("active_store_id")
+    )
 
     computed = pinv.compute_invoice(
-        raw_lines, supplier_gstin, recipient.get("recipient_gstin"), None
+        raw_lines, supplier_gstin, recipient.get("recipient_gstin")
     )
 
     return {
@@ -2215,12 +2486,15 @@ async def get_invoice_match(
     # F1: 3-way match detail (PO vs GRN vs invoice) is AP data -- AP roles only.
     current_user: dict = Depends(require_roles(*_AP_ROLES)),
 ):
-    """Return the stored 3-way match detail for an invoice.
+    """Return the stored 3-way match verdict and detail for an invoice.
 
-    If the invoice was booked before a match was run, or had no PO/GRN link,
-    match_detail is None and match_status reflects that (None / the stored
-    verdict). Re-computes on the fly from the linked PO/GRN when the stored
-    detail is absent but a link exists (so an older invoice still answers)."""
+    The verdict is ONLY the stored match_status -- the one payment holds and
+    approve-exception read. A bill with none (a Cash Flow '+ bill', booked
+    header-only; a bill from before the match existed) answers None: a
+    verdict recomputed here said 'On hold' over an Approve button that
+    approve-exception then refused (400), on a bill nobody was holding.
+    The detail is re-computed from the linked PO/GRN only to explain a stored
+    verdict whose detail is missing, and only from the bill's own lines."""
     db = _get_db()
     if db is None:
         return {"invoice_id": invoice_id, "match_status": None, "match_detail": None}
@@ -2235,19 +2509,24 @@ async def get_invoice_match(
 
     detail = doc.get("match_detail")
     status = doc.get("match_status")
-    if detail is None and (doc.get("po_id") or doc.get("grn_id")):
-        # Lazily recompute for invoices booked before Phase 2 (or where the
-        # stored detail was dropped). Read-only -- does not persist.
+    if (
+        detail is None
+        and status is not None
+        and doc.get("lines")
+        and (doc.get("po_id") or doc.get("grn_id"))
+    ):
+        # The stored detail was dropped: explain the stored verdict.
+        # Read-only -- does not persist, never changes the verdict.
         cfg = _resolved_purchase_config(db)
         detail = _run_match_for_invoice(
             db,
             doc.get("po_id"),
             doc.get("grn_id"),
-            doc.get("lines") or [],
+            doc.get("lines"),
             cfg["match_tolerance_pct"],
         )
-        if detail and status is None:
-            status = detail.get("match_status")
+        if detail:
+            detail = {**detail, "match_status": status}
 
     return {
         "invoice_id": invoice_id,
@@ -2451,16 +2730,21 @@ def _check_bill_period_open(db, doc: dict) -> None:
     an unverifiable period must not proceed (the lock would otherwise be
     silently bypassed by a bill with no date). check_period_locked itself is
     fail-soft on DB errors -- infrastructure noise still never blocks."""
-    posting_date = doc.get("invoice_date") or doc.get("bill_date")
-    if not posting_date or not str(posting_date).strip():
+    try:
+        # '09/05/2026' too: check_period_locked skips a date it cannot parse.
+        posting_date = ap_engine.iso_bill_date(
+            doc.get("invoice_date") or doc.get("bill_date")
+        )
+    except ValueError:
         raise HTTPException(
             status_code=422,
             detail=(
-                "This bill has no posting date (invoice_date/bill_date), so the "
+                "This bill has no usable posting date (invoice_date/bill_date "
+                "as YYYY-MM-DD, from 1 July 2017 to today), so the "
                 "accounting-period lock cannot be checked. Set the bill's date "
                 "before capturing or allocating landed costs."
             ),
-        )
+        ) from None
     try:
         from .finance import check_period_locked
 

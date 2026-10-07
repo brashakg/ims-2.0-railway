@@ -15,7 +15,10 @@ rule on the other column (recheck round 1): an UNKNOWN on-hand (in_store=None
 confident 0 + OVERSELL_RISK.
 
 DB-free + unit-testable. The catalog router fetches per-SKU {in_store, online,
-is_online} and calls reconcile_items().
+is_online} plus the per-LOCATION counts (the writer's number and the units
+no shelf backs, shopify_stock_parity.unbacked_units) and calls
+reconcile_items(). There is no pooled comparison here: recommend_allocation is
+the writer's per-shop call (online_stock_writeback), never a pooled total.
 """
 
 from typing import List, Optional
@@ -27,6 +30,9 @@ ONHAND_UNKNOWN = "ONHAND_UNKNOWN"  # online SKU, the IMS on-hand could not be re
 LISTED_UNKNOWN = "LISTED_UNKNOWN"  # online SKU, listed qty not covered by the live read
 OK = "OK"  # online within the safe allocation (listed qty KNOWN)
 NOT_ONLINE = "NOT_ONLINE"  # product isn't listed online -> not assessed
+# Live on Shopify, but its Shopify item is shared with another IMS product, so
+# the writer sends neither: not assessed, and the cause is named (fix in IMS).
+SHARES_SHOPIFY_ITEM = "SHARES_SHOPIFY_ITEM"
 
 _ORDER = {
     OVERSELL_RISK: 0,
@@ -34,7 +40,8 @@ _ORDER = {
     ONHAND_UNKNOWN: 2,
     LISTED_UNKNOWN: 3,
     OK: 4,
-    NOT_ONLINE: 5,
+    SHARES_SHOPIFY_ITEM: 5,
+    NOT_ONLINE: 6,
 }
 
 
@@ -57,36 +64,65 @@ def recommend_allocation(
 
 
 def classify(
-    in_store: Optional[int], online: Optional[int], recommended: Optional[int], is_online: bool
+    in_store: Optional[int],
+    online: Optional[int],
+    is_online: Optional[bool],
+    over: Optional[int],
+    excess: Optional[int],
+    shares_item: bool = False,
 ) -> str:
     """online=None means the listed quantity is UNKNOWN (the live read did not
     cover this SKU) -> LISTED_UNKNOWN, never a confident OK. in_store=None
     means the ON-HAND is unknown (the shop list or the stock read failed) ->
-    ONHAND_UNKNOWN, never a confident 0 + OVERSELL_RISK."""
+    ONHAND_UNKNOWN, never a confident 0 + OVERSELL_RISK.
+
+    ``over``: the units listed that no shelf backs, counted LOCATION BY
+    LOCATION by the caller (shopify_stock_parity.unbacked_units) -- there is
+    no pooled ``online - in_store`` here: a pooled total lets one shop's
+    shelf (or unmapped Pune's) back another shop's listing. None = a shop
+    behind a listing could not be read -> ONHAND_UNKNOWN.
+
+    ``excess``: the same count against the WRITER's number (its buffer, its
+    online block) instead of the shelf -> OVER_ALLOCATED; None is unknown.
+
+    ``is_online`` None means WHETHER the listing is live is unknown (the
+    live-listing read failed) -> LISTED_UNKNOWN, never a confident
+    NOT_ONLINE. ``shares_item``: the listing is live but its Shopify item is
+    shared with another product (the writer refuses it) -> SHARES_SHOPIFY_ITEM,
+    never NOT_ONLINE."""
+    if shares_item:
+        return SHARES_SHOPIFY_ITEM
+    if is_online is None:
+        return LISTED_UNKNOWN
     if not is_online:
         return NOT_ONLINE
     if in_store is None:
         return ONHAND_UNKNOWN
     if online is None:
         return LISTED_UNKNOWN
-    if online > in_store:
+    if over is None:
+        return ONHAND_UNKNOWN
+    if over > 0:
         return OVERSELL_RISK
-    if online > recommended:
+    if excess is None:
+        return ONHAND_UNKNOWN
+    if excess > 0:
         return OVER_ALLOCATED
     return OK
 
 
-def reconcile_items(
-    items: List[dict],
-    safety_buffer: int = 0,
-    max_online: Optional[int] = None,
-) -> dict:
-    """items: [{sku, name?, in_store, online, is_online}] where online may be
-    None = listed qty unknown and in_store may be None = on-hand unknown.
-    Returns per-SKU rows (recommended allocation + status + delta) sorted
-    worst-first, plus a summary. `delta` = online - recommended (positive =>
-    listed more than is safe); None when either side is unknown."""
-    rows: List[dict] = []
+def reconcile_items(items: List[dict]) -> dict:
+    """items: [{sku, name?, in_store, online, is_online, recommended,
+    unbacked, excess}] where online may be None = listed qty unknown and
+    in_store may be None = on-hand unknown; ``recommended`` is the writer's
+    number and ``unbacked`` / ``excess`` are classify's per-location ``over``
+    / ``excess`` -- all three from the caller, None = unknown. Nothing here
+    re-derives them from a pooled on-hand.
+    Returns per-SKU rows (recommended + status + delta) sorted worst-first
+    (status, then units no shelf backs, then delta), plus a summary. `delta`
+    = ``excess``: units listed beyond what the writer sends, location by
+    location (positive => listed more than is safe); None when unknown."""
+    keyed: List[tuple] = []
     counts = {
         OVERSELL_RISK: 0,
         OVER_ALLOCATED: 0,
@@ -94,6 +130,7 @@ def reconcile_items(
         LISTED_UNKNOWN: 0,
         OK: 0,
         NOT_ONLINE: 0,
+        SHARES_SHOPIFY_ITEM: 0,
     }
     oversell_units = 0
 
@@ -104,32 +141,27 @@ def reconcile_items(
         in_store: Optional[int] = None if in_store_raw is None else _int(in_store_raw)
         online_raw = it.get("online")
         online: Optional[int] = None if online_raw is None else _int(online_raw)
-        is_online = bool(it.get("is_online"))
-        rec: Optional[int] = (
-            None if in_store is None else recommend_allocation(in_store, safety_buffer, max_online)
-        )
-        status = classify(in_store, online, rec, is_online)
+        # An explicit None: whether the listing is live is unknown.
+        is_online = None if "is_online" in it and it["is_online"] is None else bool(it.get("is_online"))
+        over, excess = it.get("unbacked"), it.get("excess")
+        status = classify(in_store, online, is_online, over, excess, bool(it.get("shares_item")))
         counts[status] = counts.get(status, 0) + 1
         if status == OVERSELL_RISK:
-            oversell_units += (online or 0) - (in_store or 0)
-        rows.append(
-            {
-                "sku": it.get("sku"),
-                "name": it.get("name"),
-                "in_store": in_store,
-                "online": online,
-                "recommended": rec,
-                "delta": (None if online is None or rec is None else online - rec),
-                "status": status,
-            }
-        )
+            oversell_units += over
+        delta = None if in_store is None or online is None else excess
+        row = {
+            "sku": it.get("sku"),
+            "name": it.get("name"),
+            "in_store": in_store,
+            "online": online,
+            "recommended": it.get("recommended"),
+            "delta": delta,
+            "status": status,
+        }
+        keyed.append(((_ORDER.get(status, 9), -(over or 0), -(delta or 0)), row))
 
-    rows.sort(
-        key=lambda r: (
-            _ORDER.get(r["status"], 9),
-            -(r["delta"] if isinstance(r["delta"], int) else 0),
-        )
-    )
+    keyed.sort(key=lambda kr: kr[0])
+    rows = [r for _, r in keyed]
     return {
         "items": rows,
         "summary": {
@@ -140,7 +172,7 @@ def reconcile_items(
             "listed_unknown": counts[LISTED_UNKNOWN],
             "ok": counts[OK],
             "not_online": counts[NOT_ONLINE],
+            "shares_item": counts[SHARES_SHOPIFY_ITEM],
             "oversell_risk_units": oversell_units,
-            "safety_buffer": max(0, _int(safety_buffer)),
         },
     }
