@@ -83,7 +83,7 @@ Do these in any order, whenever you're ready for that feature. For each: make th
 
 ### E. UPI QR on bills + auto payment matching
 **Why:** show a scannable UPI QR on the bill and auto-tick the payment.
-1. In the app **Settings → Stores**, set each store's **UPI VPA** (your `name@bank` UPI id). *(The QR works with just this.)*
+1. In the app **Organization (left menu)**, set each store's **UPI VPA** (your `name@bank` UPI id). *(The QR works with just this.)*
 2. For auto-matching, sign up at **razorpay.com** → copy **Key Id + Key Secret** → app **Settings → Integrations → Razorpay**.
 
 ### F. Online store go-live (Shopify) — the BVI cutover

@@ -481,3 +481,36 @@ describe('audit stamps name a person', () => {
     expect(line.textContent).not.toContain('by');
   });
 });
+
+describe('the expanded Tax cell', () => {
+  async function expandTax(partial: Partial<PurchaseInvoice>) {
+    const bill = inv({
+      purchase_invoice_id: 'pi-tax-1',
+      vendor_invoice_no: 'INV-TAX-1',
+      po_id: 'po-9',
+      ...partial,
+    });
+    listMock.mockResolvedValue({ purchase_invoices: [bill], total: 1 });
+    renderConsole();
+    const row = (await screen.findByText('INV-TAX-1')).closest('tr') as HTMLElement;
+    fireEvent.click(within(row).getByLabelText('Expand'));
+    return screen.findByText('Tax', { selector: 'span' });
+  }
+
+  it('says "Tax head not set" for a bill with no head (round 12 #13)', async () => {
+    const label = await expandTax({
+      is_interstate: undefined,
+      cgst: undefined,
+      sgst: undefined,
+      igst: undefined,
+    });
+    expect(label.parentElement).toHaveTextContent('Tax head not set');
+    expect(label.parentElement?.textContent).not.toMatch(/CGST|SGST|IGST/);
+  });
+
+  it('shows the split when the head is decided', async () => {
+    const label = await expandTax({ is_interstate: false, cgst: 25, sgst: 25, igst: 0 });
+    expect(label.parentElement?.textContent).toMatch(/CGST .*25.* \+ SGST .*25/);
+    expect(label.parentElement?.textContent).not.toContain('Tax head not set');
+  });
+});
