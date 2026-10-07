@@ -444,7 +444,7 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/vendors/{vendor_id}/bills",
-        "allowed": "AUTHENTICATED",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
     },
     {
         "method": "POST",
@@ -454,7 +454,7 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/vendors/{vendor_id}/debit-notes",
-        "allowed": "AUTHENTICATED",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
     },
     {
         "method": "POST",
@@ -464,12 +464,12 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/vendors/{vendor_id}/ledger",
-        "allowed": "AUTHENTICATED",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
     },
     {
         "method": "GET",
         "path": "/api/v1/vendors/{vendor_id}/payments",
-        "allowed": "AUTHENTICATED",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
     },
     {
         "method": "POST",

@@ -477,6 +477,36 @@ def test_d7_counter_role_reading_a_valued_transfer_sees_no_cost(db):
     assert _shows_amount(seen, UNIT_COST) and _shows_amount(seen, 2 * UNIT_COST)
 
 
+def test_d7_counter_role_cannot_read_the_mirror_bill(app, db):
+    """The FIN-3 mirror bill now carries each unit's own cost, filed under the
+    sending company's entity_id as its vendor_id. The vendor bill / ledger /
+    payment / debit-note reads are the accounts roles' -- at the route gate AND
+    in the rbac_policy row -- so a counter role at the receiving shop is
+    refused both ways (D7; owner 09-29: vendor payments = admin + accountant)."""
+    from api.services import rbac_policy as rbac
+
+    t = _shipped("ST-BOK-1")
+    _receive_and_complete(t)
+    (bill,) = db["vendor_bills"].find({"source_transfer_id": t["id"]})
+    assert bill["vendor_id"] == "ENT-Z"
+    assert bill["lines"][0]["unit_price"] == pytest.approx(UNIT_COST)
+    staff, accountant = _user("SALES_STAFF", "ST-BOK-1"), _user("ACCOUNTANT")
+    for read in ("bills", "ledger", "payments", "debit-notes"):
+        route = next(
+            r for r in app.routes
+            if getattr(r, "path", None) == f"/api/v1/vendors/{{vendor_id}}/{read}"
+            and "GET" in r.methods
+        )
+        gate = next(d.call for d in route.dependant.dependencies if d.name == "current_user")
+        with pytest.raises(HTTPException) as exc:
+            _run(gate(current_user=staff))
+        assert exc.value.status_code == 403, read
+        assert _run(gate(current_user=accountant)) is accountant, read
+        url = f"/api/v1/vendors/{bill['vendor_id']}/{read}"
+        assert not rbac.check_access("GET", url, staff["roles"]), read
+        assert rbac.check_access("GET", url, accountant["roles"]), read
+
+
 def test_d7_workshop_staff_pick_ship_and_receive_replies_carry_no_cost(db):
     """WORKSHOP_STAFF picks, ships and receives (the only non-cost role on those
     four routes, owner 09-29: workshop staff never see prices paid). The line
