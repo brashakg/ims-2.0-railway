@@ -35,7 +35,7 @@ export function ReportsGstPage() {
           <div>
             <h4 className="font-medium text-gray-900">GST Filing Data Ready</h4>
             <p className="text-sm text-gray-500 mt-1">
-              GST data for the period has been compiled. Download the reports for GSTR-1 and GSTR-3B filing.
+              GST data for the period has been compiled. Download the {canSeeInputTax ? 'reports for GSTR-1 and GSTR-3B' : 'report for GSTR-1'} filing.
             </p>
             <div className="flex gap-3 mt-3">
               <Link to="/reports/gstr1" className="btn-primary text-sm">
