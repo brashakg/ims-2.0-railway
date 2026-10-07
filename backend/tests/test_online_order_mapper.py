@@ -232,6 +232,10 @@ def wired(monkeypatch):
     monkeypatch.setattr(deps, "get_product_repository", lambda: None)
     monkeypatch.setattr(deps, "get_store_repository", lambda: _StoreRepo())
     monkeypatch.setattr(deps, "get_customer_repository", lambda: customer_repo)
+    # The booking's route / stock-miss tasks (create_system_task) stay out of
+    # the app DB: on a local run nothing clears it, and the next test's
+    # dashboard read of `tasks` met them.
+    monkeypatch.setattr(deps, "get_task_repository", lambda: None)
 
     return {
         "db": db,
