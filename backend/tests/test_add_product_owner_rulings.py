@@ -373,11 +373,45 @@ def test_f13_every_category_saves_the_sku_it_previews(door, category):
 
 
 def test_f13_an_optical_lens_sku_reads_brand_and_sub_brand(door):
-    """Optical Lens has no model: the minter puts the sub-brand in its place,
-    and with no sub-brand mints no filler ('STD' was the form's)."""
+    """Optical Lens has no model, colour or size: the minter reads its
+    sub-brand, coating and index in their place, and with no sub-brand mints
+    no filler ('STD' was the form's)."""
     lens = {"brand_name": "Essilor", "index": "1.56", "coating": "HC"}
-    assert door(_form_post("LS", dict(lens, subbrand="Crizal")))["sku"] == "LS-ESSILOR-CRIZAL"
-    assert door(_form_post("LS", lens))["sku"] == "LS-ESSILOR"
+    assert door(_form_post("LS", dict(lens, subbrand="Crizal")))["sku"] == "LS-ESSILOR-CRIZAL-HC-1.56"
+    assert door(_form_post("LS", lens))["sku"] == "LS-ESSILOR-HC-1.56"
+
+
+_CRIZAL = {"brand_name": "Essilor", "subbrand": "Crizal", "index": "1.56", "coating": "HC"}
+
+
+def test_f13_the_same_lens_twice_is_a_duplicate(door):
+    """The form posts an Optical Lens with a blank model. The duplicate key
+    still names it (brand, sub-brand, coating, index), so the exact same lens
+    saved twice is the 409 rescue, never a second row LS-...-1001."""
+    from fastapi import HTTPException
+
+    first = door(_form_post("LS", _CRIZAL))
+    assert first["model"] == "Crizal"
+    assert first["identity_key"] == "essilor|crizal|hc|156"
+    with pytest.raises(HTTPException) as exc:
+        door(_form_post("LS", _CRIZAL))
+    assert exc.value.status_code == 409
+    assert exc.value.detail["code"] == "DUPLICATE_PRODUCT"
+    assert exc.value.detail["existing"]["sku"] == first["sku"]
+
+
+def test_f13_a_lens_is_named_for_its_sub_brand(door):
+    assert door(_form_post("LS", _CRIZAL))["name"] == "Essilor Crizal Lenses"
+
+
+def test_f13_a_second_lens_of_a_sub_brand_saves_the_sku_it_previews(door):
+    """Crizal 1.67 after Crizal 1.56: a different lens, so it saves -- and
+    under the SKU the Review showed, not the first one's plus a counter."""
+    door(_form_post("LS", _CRIZAL))
+    second = dict(_CRIZAL, index="1.67")
+    preview = _preview("LS", second)
+    created = door(_form_post("LS", second))
+    assert created["sku"] == preview == "LS-ESSILOR-CRIZAL-HC-1.67"
 
 
 def test_f13_the_size_keeps_its_decimal_point(door):

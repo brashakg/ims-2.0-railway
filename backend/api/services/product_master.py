@@ -49,7 +49,7 @@ import uuid
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .gst_rates import (
     gst_rate_for_category,
@@ -613,8 +613,9 @@ def _size_segment(value: Any) -> str:
 def build_sku(category: Any, attributes: Dict[str, Any], db=None) -> str:
     """Mint a NEW product's readable SKU: CATEGORY-BRAND-MODEL-COLOUR-SIZE,
     e.g. FR-CARRERA-CA8895-807-54 (owner ruling 2026-09-28, D5). Empty parts
-    are skipped. A category with no model (Optical Lens) uses its sub-brand
-    in the model's place: LS-ESSILOR-CRIZAL. Deterministic, so POST
+    are skipped. The parts are identity_parts -- the same ones the duplicate
+    key folds -- so an Optical Lens (no model, colour or size) reads its
+    sub-brand, coating and index: LS-ESSILOR-CRIZAL-HC-1.56. Deterministic, so POST
     /products/sku-preview shows the form exactly what the create door will
     mint; a clash gets mint_unique_sku's counter suffix. Existing SKUs are
     never re-minted (only a create without a SKU calls this). `db` is unused
@@ -625,16 +626,13 @@ def build_sku(category: Any, attributes: Dict[str, Any], db=None) -> str:
             f"Unknown product category '{category}'.", status=422, field="category"
         )
     a = attributes or {}
-    parts = (
-        spec.prefix,
-        a.get("brand_name") or a.get("brand"),
-        a.get("model_no") or a.get("model_name") or a.get("model") or a.get("subbrand"),
-    )
-    colour = a.get("colour_code") or a.get("color_code") or a.get("colour_name") or a.get("color")
-    # A frame's eye size is `lens_size` in the registry; `size` elsewhere.
-    size = a.get("size") or a.get("lens_size")
+    brand, model, colour, size = identity_parts(a)
+    # The SKU also reads a frame's `color_code` spelling and its eye size
+    # (`lens_size` in the registry), which the duplicate key does not.
+    colour = a.get("colour_code") or a.get("color_code") or colour
+    size = size or a.get("lens_size")
     segs = [
-        *map(_sku_segment, parts),
+        *map(_sku_segment, (spec.prefix, brand, model)),
         _sku_segment(colour, keep_separators=True),
         _size_segment(size) if size else "",
     ]
@@ -1023,16 +1021,38 @@ def set_twin_tags(doc: Dict[str, Any], tags: Any) -> List[str]:
 def _derive_brand_model_color_size(
     attributes: Dict[str, Any],
 ) -> Dict[str, Optional[str]]:
-    """Map category attribute keys onto the spine identity columns."""
+    """Map category attribute keys onto the spine identity columns. A
+    category with no model (Optical Lens) names its sub-brand in the model's
+    place, so the model column and the display name say Crizal."""
     attrs = attributes or {}
     return {
         "brand": attrs.get("brand_name") or attrs.get("brand"),
-        "model": attrs.get("model_no") or attrs.get("model_name") or attrs.get("model"),
+        "model": attrs.get("model_no")
+        or attrs.get("model_name")
+        or attrs.get("model")
+        or attrs.get("subbrand"),
         "color": attrs.get("colour_code")
         or attrs.get("colour_name")
         or attrs.get("color"),
         "size": attrs.get("size"),
     }
+
+
+def identity_parts(attributes: Dict[str, Any]) -> Tuple[Any, Any, Any, Any]:
+    """(brand, model, colour, size): what tells one product from another --
+    THE parts build_sku mints from and the duplicate key (compute_identity_key)
+    folds, so a lens the guard calls new also gets a SKU of its own and the
+    Review preview is the SKU it saves. An Optical Lens has no colour or size:
+    its coating and index stand in (Crizal 1.56 HC and Crizal 1.67 HC are two
+    products; the same Crizal 1.56 HC twice is one)."""
+    ids = _derive_brand_model_color_size(attributes)
+    a = attributes or {}
+    return (
+        ids["brand"],
+        ids["model"],
+        ids["color"] or a.get("coating"),
+        ids["size"] or a.get("index"),
+    )
 
 
 def normalise_identity_component(value: Any) -> str:
@@ -1560,7 +1580,7 @@ def normalise_payload(
     # Stamped only when brand+model are both present (the minimum that makes an
     # identity meaningful); categories without a brand/model -- e.g. SERVICES --
     # carry no identity_key and are not identity-deduped.
-    _ident = compute_identity_key(ids["brand"], ids["model"], ids["color"], ids["size"])
+    _ident = compute_identity_key(*identity_parts(attributes))
     if _ident:
         doc["identity_key"] = _ident
     if dc is not None:
