@@ -348,7 +348,8 @@ def _seed_probe(db) -> None:
       * V-IST: an order sent and a receipt accepted at 01:30 / 00:30 IST on
         1 September (naive-UTC 31 August 20:00 / 19:00).
 
-    The ledgers: VA 5540, VB 0, V-NEW -1000, V-BX 700 -> all stores owe 5240.
+    The ledgers: VA 5540, VB 0, V-NEW -1000, V-BX 700 -> all stores owe 6240
+    and have 1000 paid ahead (THE ONE 'WE OWE' RULE: never netted).
     """
     _seed(db)
 
@@ -656,7 +657,10 @@ def test_f63_a_first_time_admin_is_not_parked_on_the_online_store(monkeypatch):
 
 
 def _payables_everywhere(w) -> dict:
-    """What we owe, as each screen reads it (all stores)."""
+    """What we owe, as each screen reads it (all stores), by THE ONE 'WE OWE'
+    RULE (round 3 #1): the sum of each supplier's balance above 0. Vendor
+    Payments' rows stay signed per supplier, so its 'Total Payable' adds the
+    positive ones."""
     dash = w.get("/finance/owner-dashboard", ADMIN).json()["payables"]
     aging = w.get("/vendors/ap-aging", ADMIN).json()["totals"]
     vp = w.get("/finance/vendor-payments", ADMIN).json()
@@ -664,17 +668,33 @@ def _payables_everywhere(w) -> dict:
     return {
         "cash_flow": dash["total"],
         "ap_aging": aging["net_payable"],
-        "vendor_payments": round(sum(r["balance"] for r in vp), 2),
+        "vendor_payments": round(sum(max(r["balance"], 0.0) for r in vp), 2),
         "report": report["owed"],
+    }
+
+
+def _paid_ahead_everywhere(w) -> dict:
+    """The money paid ahead to suppliers, a figure apart on each screen."""
+    dash = w.get("/finance/owner-dashboard", ADMIN).json()["payables"]
+    aging = w.get("/vendors/ap-aging", ADMIN).json()["totals"]
+    vp = w.get("/finance/vendor-payments", ADMIN).json()
+    return {
+        "cash_flow": dash["advances"],
+        "ap_aging": aging["advances"],
+        "vendor_payments": round(sum(max(-r["balance"], 0.0) for r in vp), 2),
     }
 
 
 def test_f56_every_screen_owes_one_figure_with_a_transfer_and_an_advance(probe):
     """A transfer mirror bill read 10,930 on three screens and 7,780 on Vendor
     Payments; an advance to a vendor with no bills read 7,780 on AP aging and
-    6,780 elsewhere. The ledgers owe 5240 and so does every screen."""
+    6,780 elsewhere. The ledgers owe 5540 + 700 = 6240 and so does every
+    screen; V-NEW's 1000 is paid ahead, shown apart and never taken off
+    (round 3 #1: round 2 netted it to 5240 everywhere)."""
     figures = _payables_everywhere(probe)
-    _open(set(figures.values()) == {5240.0}, f"F56: 'we owe' differs by screen: {figures}")
+    _open(set(figures.values()) == {6240.0}, f"F56: 'we owe' differs by screen: {figures}")
+    ahead = _paid_ahead_everywhere(probe)
+    _open(set(ahead.values()) == {1000.0}, f"F56: 'paid ahead' differs by screen: {ahead}")
 
 
 def test_f56_a_transfer_mirror_bill_is_not_a_supplier_purchase(probe):
@@ -690,12 +710,14 @@ def test_f56_a_transfer_mirror_bill_is_not_a_supplier_purchase(probe):
 
 def test_f56_cash_flow_card_reconciles_to_its_headline(probe):
     """Headline, overdue and the aging bars are one figure: what is still owed
-    on bills after on-account money, less advances beyond a supplier's bills."""
+    on bills after each supplier's own on-account money. An advance beyond a
+    supplier's bills is a figure apart, never taken off the headline (round 3
+    #1: round 2 pinned bars - advances == headline)."""
     p = probe.get("/finance/owner-dashboard", ADMIN).json()["payables"]
     bars = round(sum(p["buckets"].values()), 2)
-    assert bars - p["unallocated_credits"] == pytest.approx(p["total"])
+    assert bars == pytest.approx(p["total"]) == 6240.0
     assert p["overdue"] <= bars
-    assert p["unallocated_credits"] == pytest.approx(1000.0)  # V-NEW's advance
+    assert p["advances"] == p["unallocated_credits"] == pytest.approx(1000.0)  # V-NEW's advance
 
 
 def test_f56_shop_view_is_the_supplier_ledger_and_shops_add_up(world):
@@ -713,9 +735,13 @@ def test_f56_shop_view_is_the_supplier_ledger_and_shops_add_up(world):
 
 
 def test_f56_an_advance_to_a_never_billed_supplier_is_all_stores_only(probe):
-    total = _report(probe, ADMIN, month="2026-09")["totals"]["owed"]
-    parts = sum(_report(probe, ADMIN, month="2026-09", store_id=s)["totals"]["owed"] for s in (DHN, PUN, BOK))
-    assert parts == pytest.approx(total + 1000.0)
+    """V-NEW's 1000 advance (no bills, no shop) shows under All stores only --
+    as money paid ahead, never taken off what we owe the others (round 3 #1:
+    this pinned All stores owing 1000 less than its shops)."""
+    every = _report(probe, ADMIN, month="2026-09")["totals"]
+    shops = [_report(probe, ADMIN, month="2026-09", store_id=s)["totals"] for s in (DHN, PUN, BOK)]
+    assert sum(t["owed"] for t in shops) == pytest.approx(every["owed"]) == 6240.0
+    assert (every["advances"], sum(t["advances"] for t in shops)) == (1000.0, 0.0)
     assert _rows(_report(probe, ADMIN, month="2026-09"))[V_NEW]["owed"] == pytest.approx(-1000.0)
 
 
@@ -1059,20 +1085,23 @@ def test_r4_a_legacy_order_line_with_no_gst_rate_counts_as_its_bill_draft_does(r
 def test_r4_the_money_in_no_shop_is_named_and_the_shops_add_up(round4):
     """#4: a bill booked with no shop (and the money naming it) and money
     recorded with no shop for a never-billed supplier count under All stores
-    only. All stores says how much that is, so the shops plus it add up."""
+    only. All stores says how much that is, so the shops plus it add up --
+    owed and paid ahead each on its own (round 3 #1: this pinned the no-shop
+    figure as 500 owed less V-NEW's 1000 advance = -500, and All stores
+    owing 7840 = 8840 owed less that advance)."""
     every = _report(round4, ADMIN, month="2026-09")
     _open(
-        every.get("unassigned_owed") == pytest.approx(-500.0),
-        f"F56: All stores does not say what is owed in no shop: {every.get('unassigned_owed')}",
+        (every.get("unassigned_owed"), every.get("unassigned_advances")) == (500.0, 1000.0),
+        "F56: All stores does not say what is owed and paid ahead in no shop: "
+        f"{every.get('unassigned_owed')} / {every.get('unassigned_advances')}",
     )
-    assert every["totals"]["owed"] == pytest.approx(7840.0)
+    assert (every["totals"]["owed"], every["totals"]["advances"]) == (8840.0, 1000.0)
     shops = {s: _report(round4, ADMIN, month="2026-09", store_id=s) for s in (DHN, PUN, BOK)}
     assert {s: b["totals"]["owed"] for s, b in shops.items()} == {DHN: 8340.0, PUN: 0.0, BOK: 0.0}
-    assert sum(b["totals"]["owed"] for b in shops.values()) + every["unassigned_owed"] == pytest.approx(
-        every["totals"]["owed"]
-    )
+    for k, unplaced in (("owed", "unassigned_owed"), ("advances", "unassigned_advances")):
+        assert sum(b["totals"][k] for b in shops.values()) + every[unplaced] == pytest.approx(every["totals"][k])
     # A one-shop view has no 'no shop' figure; nor does a Pune login's own view.
-    assert all(b["unassigned_owed"] is None for b in shops.values())
+    assert all(b["unassigned_owed"] is None and b["unassigned_advances"] is None for b in shops.values())
     assert _report(round4, ACCT_PUNE, month="2026-09")["unassigned_owed"] is None
 
 
@@ -1282,3 +1311,210 @@ def test_r5_received_counts_units_in_stock_never_held_lines_or_serial_rows(stock
         f"F56: Received Sep {_received(stocked, '2026-09')} / Oct {_received(stocked, '2026-10')}, "
         "want 400 / 2000 (only units put into stock, each in its month)",
     )
+
+
+# ============================================================================
+# Round 6 (review round 3 #1, report side): THE ONE 'WE OWE' RULE -- owed adds
+# only the suppliers we owe; money paid ahead to another supplier is its own
+# figure and is never taken off it
+# ============================================================================
+
+V_ADV = "V-ADV"  # paid 11,000 against a 1,000 bill: 10,000 paid ahead
+V_OWE = "V-OWE"  # a 5,000 bill, due 9 Sep, nothing paid
+
+
+def _seed_one_rule(db) -> None:
+    """Two Dhanbad suppliers, nothing else.
+
+      * V-ADV: bill BA 1 Aug 1000; 11,000 paid on account on 2 Aug, stamped
+        Dhanbad. Ledger -10,000: paid ahead.
+      * V-OWE: bill BB 10 Aug 5000, due 9 Sep, unpaid. Ledger 5,000: owed.
+
+    We owe 5,000 and have 10,000 paid ahead -- never 'Rs 5,000 advance'.
+    """
+    db["vendors"].insert_many([
+        {"vendor_id": V_ADV, "legal_name": "Advance Optics", "trade_name": "Advance Optics"},
+        {"vendor_id": V_OWE, "legal_name": "Owed Lens Co", "trade_name": "Owed Lens Co"},
+    ])
+    db["vendor_bills"].insert_many([
+        {"bill_id": "BA", "vendor_id": V_ADV, "store_id": DHN, "bill_number": "BA",
+         "bill_date": "2026-08-01", "due_date": "2026-08-31", "total_amount": 1000.0,
+         "total": 1000.0, "status": "PAID"},
+        {"bill_id": "BB", "vendor_id": V_OWE, "store_id": DHN, "bill_number": "BB",
+         "bill_date": "2026-08-10", "due_date": "2026-09-09", "total_amount": 5000.0,
+         "total": 5000.0, "status": "OUTSTANDING"},
+    ])
+    db["vendor_payments"].insert_one(
+        {"payment_id": "PA", "vendor_id": V_ADV, "bill_id": None, "store_id": DHN, "amount": 11000.0,
+         "tds_amount": 0.0, "mode": "BANK", "payment_date": "2026-08-02"},
+    )
+
+
+@pytest.fixture
+def one_rule(monkeypatch):
+    gen = _fresh_db(_seed_one_rule)
+    db = next(gen)
+    _today(monkeypatch, "2026-10-01")
+    yield _make_world(db, monkeypatch)
+    next(gen, None)
+
+
+def test_r6_one_suppliers_advance_never_cancels_another_suppliers_debt(one_rule):
+    """Round 3 #1: the report's Total Owed read -5,000 ('Rs 5,000 advance')
+    while Rs 5,000 was overdue to Owed Lens Co: V-ADV's advance was netted
+    against V-OWE's bill. Owed is 5,000 and 10,000 is paid ahead, apart --
+    in every month, All stores and the shop alike; each row keeps its own
+    signed ledger balance."""
+    for month in ("2026-08", "2026-09", "2026-10"):
+        for params in ({}, {"store_id": DHN}):
+            body = _report(one_rule, ADMIN, month=month, **params)
+            totals = body["totals"]
+            _open(
+                (totals["owed"], totals["advances"]) == (5000.0, 10000.0),
+                f"F56: {month} {params or 'all stores'} owes {totals['owed']} with "
+                f"{totals.get('advances')} paid ahead; want 5000 owed and 10000 paid ahead",
+            )
+            rows = _rows(body)
+            assert (rows[V_ADV]["owed"], rows[V_OWE]["owed"]) == (-10000.0, 5000.0), rows
+    # Each row is that supplier's own ledger, signed.
+    for vid in (V_ADV, V_OWE):
+        ledger = one_rule.get(f"/vendors/{vid}/ledger", ADMIN).json()["ledger"]
+        assert _rows(_report(one_rule, ADMIN, month="2026-09"))[vid]["owed"] == pytest.approx(
+            ledger["closing_balance"]
+        )
+    sep = _report(one_rule, ADMIN, month="2026-09")
+    assert (sep["unassigned_owed"], sep["unassigned_advances"]) == (0.0, 0.0)
+    assert (_rows(sep)[V_OWE]["next_due_date"], _rows(sep)[V_OWE]["next_due_overdue"]) == ("2026-09-09", True)
+
+
+# ============================================================================
+# Round 6 (review round 3 #3): a closed month's Received does not move when
+# its goods later move between our shops, or when the receipt is re-accepted
+# ============================================================================
+
+V_MOVE = "V-MOVE"  # PO-R: 3 x P-MOVE at 1000 + 12%, received in Dhanbad on 5 Sep
+
+
+def _seed_moving(db) -> None:
+    """The held receipt (GRN-H, V-HOLD) plus GRN-R: 3 frames received into
+    Dhanbad. Its number is a real-shaped one, not its id, so the units are
+    known by the number grn_accept stamps on them."""
+    _seed_held(db)
+    db["vendors"].insert_one({"vendor_id": V_MOVE, "legal_name": "Moving Frames", "trade_name": "Moving Frames"})
+    db["purchase_orders"].insert_one({
+        "po_id": "PO-R", "po_number": "PO-R", "vendor_id": V_MOVE, "delivery_store_id": DHN,
+        "status": "SENT", "total_amount": 3360.0, "sent_at": "2026-09-02T10:00:00",
+        "created_at": "2026-09-02T08:00:00",
+        "items": [{"product_id": "P-MOVE", "quantity": 3, "unit_price": 1000.0, "tax_rate": 12.0}],
+    })
+    db["grns"].insert_one({
+        "_id": "GRN-R", "grn_id": "GRN-R", "grn_number": "RCPT/BV-DHN-01/2627/0007", "vendor_id": V_MOVE,
+        "store_id": DHN, "po_id": "PO-R", "status": "PENDING", "created_at": "2026-09-05T05:00:00",
+        "items": [{"product_id": "P-MOVE", "received_qty": 3, "accepted_qty": 3, "rejected_qty": 0}],
+    })
+
+
+@pytest.fixture
+def moving(monkeypatch):
+    """The real accept engine and the real transfer stock moves
+    (transfers._apply_ship_stock_move / _apply_receive_stock_move, whose
+    _rehome rewrites a unit's source_type / source_id) over one Mongo."""
+    from database.repositories import base_repository
+    from database.repositories.product_repository import StockRepository
+
+    from api.routers import transfers as transfers_mod
+    from api.routers.vendors import grn_accept, grn_accept_lock
+
+    gen = _fresh_db(_seed_moving)
+    db = next(gen)
+    world = _make_world(db, monkeypatch)
+    spine = _Spine("P-CAT", "P-MOVE")
+    monkeypatch.setenv("PM_MIRROR_ENABLED", "")
+    stock = lambda: StockRepository(db["stock_units"])  # noqa: E731
+    monkeypatch.setattr(vendors_pkg, "get_stock_repository", stock)
+    monkeypatch.setattr(vendors_pkg, "get_product_repository", lambda: spine)
+    monkeypatch.setattr(transfers_mod, "get_stock_repository", stock)
+    monkeypatch.setattr(transfers_mod, "_get_db", lambda: _DBProxy(db))
+    monkeypatch.setattr(transfers_mod, "_writeback_units_left", lambda *a, **k: None)
+    for mod in (grn_accept, grn_accept_lock, base_repository):
+        monkeypatch.setattr(mod, "datetime", _Clock)
+    _today(monkeypatch, "2026-10-05")
+    yield world, db, spine
+    next(gen, None)
+
+
+def _accept_receipt(grn_id: str, day_utc: datetime) -> dict:
+    import asyncio
+
+    _Clock.at = day_utc
+    return asyncio.new_event_loop().run_until_complete(vendors_pkg.accept_grn(grn_id, ADMIN))
+
+
+def _move(product_id: str, units: int, transfer_id: str) -> list:
+    """Ship `units` of a product from Dhanbad and receive them in Pune, through
+    the real transfer stock moves. Returns the moved stock ids."""
+    from api.routers import transfers as transfers_mod
+
+    transfer = {
+        "id": transfer_id, "transfer_number": transfer_id, "from_location_id": DHN, "to_location_id": PUN,
+        "items": [{"product_id": product_id, "quantity_requested": units}],
+    }
+    transfers_mod._apply_ship_stock_move(transfer)
+    for line in transfer["items"]:
+        line["quantity_received"] = line["quantity_shipped"]
+    transfers_mod._apply_receive_stock_move(transfer)
+    return [sid for line in transfer["items"] for sid in line.get("received_stock_ids") or []]
+
+
+def _received_of(world, vendor: str, month: str, **params) -> float:
+    return _rows(_report(world, ADMIN, month=month, **params)).get(vendor, {}).get("received", 0.0)
+
+
+def test_r6_received_stays_in_its_month_when_the_goods_move_to_another_shop(moving):
+    """Round 3 #3: GRN-R put 3 frames into Dhanbad's stock on 5 Sep (3360).
+    In October one is moved to Pune: the move rewrites the unit's source to
+    the transfer, and September Received fell to 2240 -- then rose back to
+    3360 once all three had moved (no unit left naming the receipt, so it
+    fell back on accepted_at). A closed month must not move with the goods."""
+    world, db, _ = moving
+    first = _accept_receipt("GRN-R", datetime(2026, 9, 5, 6, 0, 0))  # 11:30 IST, 5 Sep
+    assert (first["grn_status"], first["units_added"]) == ("ACCEPTED", 3), first
+    want = {"2026-09": 3360.0, "2026-10": 0.0}
+
+    def received():
+        return {m: _received_of(world, V_MOVE, m) for m in want}
+
+    assert received() == want
+
+    moved = _move("P-MOVE", 1, "TR-1")  # October
+    assert len(moved) == 1
+    unit = db["stock_units"].find_one({"stock_id": moved[0]})
+    # The real re-home: the unit no longer names the receipt as its source.
+    assert (unit["source_type"], unit["source_id"], unit["store_id"]) == ("TRANSFER", "TR-1", PUN), unit
+    _open(received() == want, f"F56: one frame moved to Pune in October, and Received reads {received()}")
+    # Dhanbad received the goods; Pune bought nothing from the supplier.
+    assert _received_of(world, V_MOVE, "2026-09", store_id=DHN) == pytest.approx(3360.0)
+    assert _received_of(world, V_MOVE, "2026-09", store_id=PUN) == 0.0
+
+    assert len(_move("P-MOVE", 2, "TR-2")) == 2
+    assert db["stock_units"].count_documents({"product_id": "P-MOVE", "source_type": "GRN"}) == 0
+    _open(received() == want, f"F56: all three frames moved to Pune, and Received reads {received()}")
+    assert _received_of(world, V_MOVE, "2026-09", store_id=DHN) == pytest.approx(3360.0)
+
+
+def test_r6_a_re_accept_after_a_move_keeps_septembers_received(moving):
+    """Round 3 #3 (with the double-mint): GRN-H put P-CAT into stock on 25
+    Sep and held P-NEW. P-CAT is moved to Pune in October; P-NEW is then
+    catalogued and the receipt re-accepted on 2 Oct. September fell to 0 and
+    October read 3360 (the moved frame plus the unit the re-accept mints
+    again for it). September keeps its 1120; October is P-NEW's 2240 -- a
+    line never counts more than it accepted."""
+    world, db, spine = moving
+    first = _accept_receipt("GRN-H", datetime(2026, 9, 25, 6, 0, 0))
+    assert (first["grn_status"], first["units_added"]) == ("PARTIALLY_ACCEPTED", 1), first
+    assert len(_move("P-CAT", 1, "TR-H")) == 1
+    spine.products["P-NEW"] = _catalogued("P-NEW")  # 'Catalog now'
+    again = _accept_receipt("GRN-H", datetime(2026, 10, 2, 6, 0, 0))
+    assert again["grn_status"] == "ACCEPTED", again
+    got = (_received_of(world, V_HOLD, "2026-09"), _received_of(world, V_HOLD, "2026-10"))
+    _open(got == (1120.0, 2240.0), f"F56: after a move and a re-accept Received is Sep/Oct {got}, want 1120 / 2240")

@@ -34,7 +34,9 @@ const REPORT = {
     { vendor_id: 'v2', vendor_name: 'Pune Lens Co', ordered: 0, received: 0, billed: 2240, paid: 0, owed: 2240, next_due_date: '2026-10-05', next_due_overdue: false },
     { vendor_id: 'v3', vendor_name: 'New Frames Co', ordered: 0, received: 0, billed: 0, paid: 1500, owed: -1500, next_due_date: null },
   ],
-  totals: { ordered: 10000, received: 8400, billed: 10640, paid: 4360, owed: 6280.4 },
+  // THE ONE 'WE OWE' RULE: owed adds the suppliers we owe (5540.4 + 2240);
+  // New Frames Co's 1500 is paid ahead, apart -- never taken off owed.
+  totals: { ordered: 10000, received: 8400, billed: 10640, paid: 4360, owed: 7780.4, advances: 1500 },
 };
 
 beforeEach(() => {
@@ -73,7 +75,11 @@ describe('Purchases this month', () => {
     const row = (await screen.findByText('Jharkhand Optical')).closest('tr')!;
     expect(within(row).getByText('₹5,540')).toBeInTheDocument();
     const total = screen.getByText('Total').closest('tr')!;
-    expect(within(total).getByText('₹6,280')).toBeInTheDocument();
+    // Owed 5,540 + 2,240, and the 1,500 paid ahead apart (it read 6,280: the
+    // advance netted off another supplier's debt -- round 3 #1).
+    expect(within(total).getByText('₹7,780')).toBeInTheDocument();
+    expect(within(total).getByText('₹1,500')).toBeInTheDocument();
+    expect(within(total).queryByText('₹6,280')).toBeNull();
     expect(within(total).getByText('₹10,640')).toBeInTheDocument();
     // An admin opens on all stores: no store_id is sent.
     expect(reportParams()[0].store_id).toBeUndefined();
@@ -92,23 +98,26 @@ describe('Purchases this month', () => {
     );
   });
 
-  it('exports what the screen shows: the rows, the Total line, whole rupees, an advance as a number', async () => {
+  it('exports what the screen shows: the rows, the Total line, whole rupees, owed and paid ahead apart', async () => {
     roles = ['ADMIN'];
     exportToCSV.mockClear();
     open();
     await screen.findByText('Jharkhand Optical');
     fireEvent.click(screen.getByRole('button', { name: /export csv/i }));
     const [rows, , columns] = exportToCSV.mock.calls[0];
-    expect(rows.map((r: { vendor_name: string; owed: number }) => [r.vendor_name, r.owed])).toEqual([
-      ['Jharkhand Optical', 5540],
-      ['Pune Lens Co', 2240],
-      ['New Frames Co', -1500],
-      ['Total', 6280],
+    type Line = { vendor_name: string; owed: number; advances: number };
+    expect(rows.map((r: Line) => [r.vendor_name, r.owed, r.advances])).toEqual([
+      ['Jharkhand Optical', 5540, 0],
+      ['Pune Lens Co', 2240, 0],
+      ['New Frames Co', 0, 1500],
+      // Round 3 #1: the Total owed read 6280 (the advance netted off).
+      ['Total', 7780, 1500],
     ]);
     expect(rows[0]).toMatchObject({ next_due_date: '2026-09-09', overdue: 'overdue' });
     expect(columns.map((c: { key: string }) => c.key)).toEqual(
-      ['vendor_name', 'ordered', 'received', 'billed', 'paid', 'owed', 'next_due_date', 'overdue'],
+      ['vendor_name', 'ordered', 'received', 'billed', 'paid', 'owed', 'advances', 'next_due_date', 'overdue'],
     );
+    expect(columns.find((c: { key: string }) => c.key === 'advances').label).toBe('Paid ahead (Rs)');
   });
 
   it('rounds a figure ending in 50 paise one way on screen, in the CSV and on the Total line', async () => {
@@ -125,7 +134,7 @@ describe('Purchases this month', () => {
         { vendor_id: 'v5', vendor_name: 'Half Rupee Lens', ordered: 2500.5, received: 2500.5, billed: 2500.5, paid: 1500, owed: 1000.5, next_due_date: '2026-10-05', next_due_overdue: false },
         { vendor_id: 'v6', vendor_name: 'Small Change Co', ordered: 0, received: 0, billed: 0, paid: 0.5, owed: -0.5, next_due_date: null },
       ],
-      totals: { ordered: 2500.5, received: 2500.5, billed: 2500.5, paid: 3001, owed: -500.5 },
+      totals: { ordered: 2500.5, received: 2500.5, billed: 2500.5, paid: 3001, owed: 1000.5, advances: 1501 },
     };
     get.mockImplementation((url: string) =>
       Promise.resolve({
@@ -136,16 +145,20 @@ describe('Purchases this month', () => {
     );
     open();
 
+    // Paid 1,501 and Paid ahead 1,501 on one row: one rounding for both.
     const advance = (await screen.findByText('Advance Frames')).closest('tr')!;
-    expect(within(advance).getByText('₹1,501')).toBeInTheDocument();
-    expect(within(advance).getByText('₹1,501 advance')).toBeInTheDocument();
+    expect(within(advance).getAllByText('₹1,501')).toHaveLength(2);
     const positive = screen.getByText('Half Rupee Lens').closest('tr')!;
     expect(within(positive).getAllByText('₹2,501')).toHaveLength(3);
     expect(within(positive).getByText('₹1,001')).toBeInTheDocument();
     const small = screen.getByText('Small Change Co').closest('tr')!;
-    expect(within(small).getByText('₹1 advance')).toBeInTheDocument();
+    expect(within(small).getAllByText('₹1')).toHaveLength(2);
     const total = screen.getByText('Total').closest('tr')!;
-    expect(within(total).getByText('₹501 advance')).toBeInTheDocument();
+    // Owed is Half Rupee Lens' 1,001 alone; the 1,501 + 1 paid ahead is its
+    // own 1,502 (round 3 #1: this Total read "Rs 501 advance", netted).
+    expect(within(total).getByText('₹1,001')).toBeInTheDocument();
+    expect(within(total).getByText('₹1,502')).toBeInTheDocument();
+    expect(within(total).queryByText(/advance/)).toBeNull();
     // Paid rows read 1,501 + 1,500 + 1: the Total line adds them as shown
     // (3,002). This pin used to say 3,001 -- the server's exact 3001.00 --
     // which is the review's #7/#33: a Total that is not the sum of its rows.
@@ -159,38 +172,37 @@ describe('Purchases this month', () => {
     );
     const csv = toCSV(rows, columns).split('\n');
     expect(csv.slice(1)).toEqual([
-      '"Advance Frames",0,0,0,1501,-1501,"",""',
-      '"Half Rupee Lens",2501,2501,2501,1500,1001,"2026-10-05",""',
-      '"Small Change Co",0,0,0,1,-1,"",""',
-      '"Total",2501,2501,2501,3002,-501,"",""',
+      '"Advance Frames",0,0,0,1501,0,1501,"",""',
+      '"Half Rupee Lens",2501,2501,2501,1500,1001,0,"2026-10-05",""',
+      '"Small Change Co",0,0,0,1,0,1,"",""',
+      '"Total",2501,2501,2501,3002,1001,1502,"",""',
     ]);
 
-    // Every figure cell on screen, Total line included, says the CSV's number
-    // ("Rs 1,501 advance" is -1501), and the columns come in the screen's order
-    // under the screen's names.
+    // Every figure cell on screen, Total line included, says the CSV's number,
+    // and the columns come in the screen's order under the screen's names.
     const figure = (text: string) => {
-      const m = /^₹([\d,-]+)( advance)?$/.exec(text.trim());
-      if (!m) return `unreadable: ${text}`;
-      const digits = m[1].replace(/,/g, '');
-      return m[2] ? `-${digits}` : digits;
+      const m = /^₹([\d,]+)$/.exec(text.trim());
+      return m ? m[1].replace(/,/g, '') : `unreadable: ${text}`;
     };
     const table = screen.getByRole('table');
     const onScreen = within(table).getAllByRole('row').slice(1).map((tr) => {
       const cells = within(tr).getAllByRole('cell').map((td) => td.textContent ?? '');
-      return [cells[0], ...cells.slice(1, 6).map(figure)].join(',');
+      return [cells[0], ...cells.slice(1, 7).map(figure)].join(',');
     });
-    const inCsv = csv.slice(1).map((l) => l.split(',').slice(0, 6).join(',').replace(/"/g, ''));
+    const inCsv = csv.slice(1).map((l) => l.split(',').slice(0, 7).join(',').replace(/"/g, ''));
     expect(onScreen).toEqual(inCsv);
     const heads = within(table).getAllByRole('columnheader').map((th) => th.textContent ?? '');
     const labels = columns.map((c: { label: string }) => c.label);
     expect(heads.map((h, i) => labels[i].startsWith(h))).toEqual(heads.map(() => true));
   });
 
-  it('says an advance is an advance and marks an overdue next due', async () => {
+  it('shows an advance under Paid ahead, not as owed, and marks an overdue next due', async () => {
     roles = ['ADMIN'];
     open();
     const advance = (await screen.findByText('New Frames Co')).closest('tr')!;
-    expect(within(advance).getByText('₹1,500 advance')).toBeInTheDocument();
+    const heads = screen.getAllByRole('columnheader').map((th) => th.textContent);
+    const cell = (tr: HTMLElement, head: string) => within(tr).getAllByRole('cell')[heads.indexOf(head)].textContent;
+    expect([cell(advance, 'Owed'), cell(advance, 'Paid ahead')]).toEqual(['₹0', '₹1,500']);
     const owed = screen.getByText('Jharkhand Optical').closest('tr')!;
     expect(within(owed).getByText('overdue')).toBeInTheDocument();
     const notYet = screen.getByText('Pune Lens Co').closest('tr')!;
@@ -322,14 +334,24 @@ describe('Purchases this month says what its figures are', () => {
     expect(footnote()).toContain('receipts with no price count 0 (2 receipt lines in this report)');
   });
 
-  it('#4: All stores names the money that is in no shop', async () => {
+  it('#4: All stores names the money that is in no shop, owed and paid ahead apart', async () => {
     roles = ['ADMIN'];
-    serve({ ...REPORT, store_id: null, as_of: '2026-09-30', unassigned_owed: -1000 });
+    serve({ ...REPORT, store_id: null, as_of: '2026-09-30', unassigned_owed: 500, unassigned_advances: 1000 });
     open();
     await screen.findByText('Jharkhand Optical');
     expect(caption()).toMatch(/^All stores/);
     expect(footnote()).toContain('A bill not yet placed in a shop (and the money paid against it)');
-    expect(footnote()).toContain('count here under All stores only; in no shop: ₹1,000 advance.');
+    // Round 3 #1: this read "in no shop: Rs 500 advance" (500 owed less 1,000
+    // paid ahead, netted).
+    expect(footnote()).toContain('count here under All stores only; in no shop: ₹500 owed, ₹1,000 paid ahead.');
+  });
+
+  it('#4: nothing in no shop says nothing', async () => {
+    roles = ['ADMIN'];
+    serve({ ...REPORT, store_id: null, as_of: '2026-09-30', unassigned_owed: 0, unassigned_advances: 0 });
+    open();
+    await screen.findByText('Jharkhand Optical');
+    expect(footnote()).toContain('count here under All stores only.');
   });
 
   it('#35: an accountant is told the shop the figures cover, and never of an All stores view', async () => {
@@ -374,5 +396,53 @@ describe('Purchases this month says what Received and owed leave out (review r2 
       "A return's credit (a vendor-return credit note, an RMA credit, an RTV debit note) lowers owed only once " +
         'it is recorded as a debit note on the supplier (Cash Flow & Payables, Debit note).',
     );
+  });
+});
+
+describe("Purchases this month follows THE ONE 'WE OWE' RULE (review round 3 #1)", () => {
+  // The review's world: Advance Optics was paid 11,000 against a 1,000 bill
+  // (10,000 paid ahead); Owed Lens Co's 5,000 bill is overdue. The Total
+  // read "Rs 5,000 advance" -- one supplier's advance cancelling another's
+  // debt. We owe 5,000 and have 10,000 paid ahead, two figures.
+  const ONE_RULE = {
+    month: '2026-09',
+    store_id: null,
+    as_of: '2026-09-30',
+    vendors: [
+      { vendor_id: 'owe', vendor_name: 'Owed Lens Co', ordered: 0, received: 0, billed: 0, paid: 0, owed: 5000, next_due_date: '2026-09-09', next_due_overdue: true },
+      { vendor_id: 'adv', vendor_name: 'Advance Optics', ordered: 0, received: 0, billed: 0, paid: 0, owed: -10000, next_due_date: null },
+    ],
+    totals: { ordered: 0, received: 0, billed: 0, paid: 0, owed: 5000, advances: 10000 },
+    unassigned_owed: 0,
+    unassigned_advances: 0,
+  };
+
+  it('the Total owes 5,000 with 10,000 paid ahead, on screen and in the CSV', async () => {
+    roles = ['ADMIN'];
+    exportToCSV.mockClear();
+    serve(ONE_RULE);
+    open();
+    await screen.findByText('Advance Optics');
+    const heads = screen.getAllByRole('columnheader').map((th) => th.textContent);
+    expect(heads).toContain('Paid ahead');
+    const total = screen.getByText('Total').closest('tr')!;
+    const cell = (head: string) => within(total).getAllByRole('cell')[heads.indexOf(head)].textContent;
+    expect([cell('Owed'), cell('Paid ahead')]).toEqual(['₹5,000', '₹10,000']);
+    expect(total.textContent).not.toMatch(/advance/);
+    expect(footnote()).toContain(
+      'Owed adds only the suppliers we owe and is never reduced by money paid ahead to another supplier',
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /export csv/i }));
+    const [rows] = exportToCSV.mock.calls[0];
+    const line = rows.find((r: { vendor_name: string }) => r.vendor_name === 'Total');
+    expect([line.owed, line.advances]).toEqual([5000, 10000]);
+    // Every column of the CSV adds up to its Total line: nothing netted.
+    for (const key of ['owed', 'advances']) {
+      const sum = rows
+        .filter((r: { vendor_name: string }) => r.vendor_name !== 'Total')
+        .reduce((s: number, r: Record<string, number>) => s + r[key], 0);
+      expect(sum).toBe(line[key]);
+    }
   });
 });
