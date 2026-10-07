@@ -130,4 +130,26 @@ describe('manual invoice bill-kind declaration', () => {
     expect(screen.getByRole('button', { name: /Book invoice/i })).toBeDisabled();
     expect(apis.purchaseInvoicesApi.create).not.toHaveBeenCalled();
   });
+
+  it('a booking refused for an uncatalogued product asks the catalogue manager of the bill\'s shop', async () => {
+    apis.purchaseInvoicesApi.create.mockRejectedValue({
+      response: {
+        data: { detail: { code: 'PRODUCT_NOT_CATALOGUED', lines: [{ product_id: 'P-DRAFT' }] } },
+      },
+    });
+    apis.purchaseInvoicesApi.requestCataloguing.mockResolvedValue({ requested: [] });
+    await openManualForm();
+    fillManualHeaderAndLine();
+    fireEvent.change(screen.getByDisplayValue(/Choose: goods, or services/), {
+      target: { value: 'SERVICES' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Book invoice/i }));
+    await waitFor(() =>
+      expect(apis.purchaseInvoicesApi.requestCataloguing).toHaveBeenCalledWith(
+        ['P-DRAFT'],
+        undefined,
+        'S1',
+      ),
+    );
+  });
 });

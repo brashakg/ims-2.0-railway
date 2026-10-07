@@ -2690,3 +2690,97 @@ def test_r5_another_receipt_with_the_same_number_is_never_this_ones_units(world)
         accepted["units_added"] == 1 and len(_any_status_units(world, existing["product_id"])) == 2,
         f"R5: another receipt's unit with the same number stopped this one's mint ({accepted})",
     )
+
+
+def _two_entities(world):
+    world.db.stores.update_one({"store_id": STORE}, {"$set": {"entity_id": "E-BV"}})
+    world.db.seed("stores", [{"store_id": "WO-PUN-01", "entity_id": "E-WIZ", "is_active": True}])
+    world.db.seed(
+        "users",
+        [
+            {
+                "user_id": "u-cat-wiz",
+                "username": "catalog.wiz",
+                "roles": ["CATALOG_MANAGER"],
+                "store_ids": ["WO-PUN-01"],
+                "is_active": True,
+            }
+        ],
+    )
+
+
+def test_r5_a_bills_ask_goes_to_the_bills_shop_not_the_askers(world):
+    # Review round 5, pass 2: the ask was routed by the accountant's session
+    # shop, so a WizOpt bill booked from a Better Vision session told Better
+    # Vision's catalogue manager.
+    from api.routers import purchase_invoices as _pi
+
+    _two_entities(world)
+    po = world.raise_po(
+        [{"new_product": dict(BOSS_TYPED), "quantity": 2, "unit_price": 1200}]
+    )
+    accountant = dict(ACCOUNTANT, store_ids=[STORE, "WO-PUN-01"], active_store_id=STORE)
+    _run(
+        _pi.request_cataloguing(
+            _pi.CataloguingRequest(product_ids=[po["items"][0]["product_id"]], store_id="WO-PUN-01"),
+            accountant,
+        )
+    )
+    asked = [t.get("assigned_to") for t in _open_tasks(world) if "vendor bill" in t.get("title", "")]
+    finding(asked == ["u-cat-wiz"], f"R5: the bill's ask went to {asked}, not WizOpt's catalogue manager")
+
+
+def test_r5_a_bills_ask_with_no_shop_given_uses_the_receipts_shop(world):
+    from api.routers import purchase_invoices as _pi
+
+    _seed_user(world, ADMIN)
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    admin = dict(ADMIN, active_store_id=None)
+    _run(_pi.request_cataloguing(_pi.CataloguingRequest(product_ids=[draft_id]), admin))
+    asked = [t for t in _open_tasks(world) if "vendor bill" in t.get("title", "")]
+    finding(
+        [t.get("assigned_to") for t in asked] == [CATALOGUER["user_id"]],
+        "R5: an ask with no shop went to "
+        f"{[(t.get('assigned_to'), t.get('title')) for t in asked]}",
+    )
+
+
+def test_r5_a_bills_ask_for_a_shop_the_asker_cannot_open_is_refused(world):
+    from api.routers import purchase_invoices as _pi
+
+    _two_entities(world)
+    po = world.raise_po(
+        [{"new_product": dict(BOSS_TYPED), "quantity": 2, "unit_price": 1200}]
+    )
+    try:
+        _run(
+            _pi.request_cataloguing(
+                _pi.CataloguingRequest(product_ids=[po["items"][0]["product_id"]], store_id="WO-PUN-01"),
+                ACCOUNTANT,
+            )
+        )
+        refused = None
+    except HTTPException as exc:
+        refused = exc
+    assert refused is not None and refused.status_code == 403
+
+
+def test_r5_a_bills_ask_nobody_received_is_never_answered_requested(world, monkeypatch):
+    # Review round 5, pass 2: a failed ask answered 201 "Cataloguing requested".
+    from api.routers import purchase_invoices as _pi
+
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+
+    def _boom(*a, **k):
+        raise RuntimeError("tasks collection down")
+
+    monkeypatch.setattr(_grn_accept, "tell_catalogue_managers", _boom)
+    try:
+        _run(_pi.request_cataloguing(_pi.CataloguingRequest(product_ids=[draft_id]), ACCOUNTANT))
+        refused = None
+    except HTTPException as exc:
+        refused = exc
+    finding(
+        refused is not None and refused.status_code == 503,
+        f"R5: an ask nobody received was answered 'Cataloguing requested' ({refused})",
+    )

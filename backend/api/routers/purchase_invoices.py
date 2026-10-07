@@ -63,6 +63,8 @@ from pydantic import BaseModel, Field, field_validator
 
 from .auth import get_current_user, require_roles
 from ..dependencies import (
+    can_access_store_scoped,
+    validate_store_access,
     get_vendor_repository,
     get_purchase_order_repository,
     get_grn_repository,
@@ -1252,6 +1254,9 @@ class CataloguingRequest(BaseModel):
 
     product_ids: List[str] = Field(..., min_length=1)
     note: Optional[str] = None
+    # The BILL's shop (the drawer's prefill.store_id): the catalogue managers
+    # of ITS legal entity are told, never those of the asker's session shop.
+    store_id: Optional[str] = None
 
 
 @router.post("/request-cataloguing", status_code=201)
@@ -1301,9 +1306,7 @@ async def request_cataloguing(
     ]
     # The catalogue managers BY NAME, through the one door a held receipt uses
     # too -- a task with no assignee is one no catalogue manager's list shows.
-    store_id = current_user.get("active_store_id") or next(
-        iter(current_user.get("store_ids") or []), None
-    )
+    store_id = _shop_for_the_ask(db, body, current_user, items)
     try:
         from .vendors.grn_accept import tell_catalogue_managers
 
@@ -1326,10 +1329,50 @@ async def request_cataloguing(
                 + (f"\n\nNote: {body.note}" if body.note else "")
             ),
         )
-    except Exception:  # noqa: BLE001 - asking must never 500 the screen
-        logger.warning("[PI] could not raise the cataloguing task", exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+        # Never a 201 "Cataloguing requested" for an ask nobody received.
+        logger.error("[PI] could not raise the cataloguing task", exc_info=True)
+        raise HTTPException(
+            status_code=503,
+            detail="The catalogue manager could not be asked. Try again.",
+        ) from exc
 
     return {"requested": items, "message": "Cataloguing requested"}
+
+
+def _shop_for_the_ask(db, body: "CataloguingRequest", current_user: dict, items) -> str:
+    """The shop whose catalogue managers a bill's ask goes to: the bill's
+    shop (checked against the asker's access), else the shop of the latest
+    receipt naming one of the products, else the asker's session shop. None
+    of them -> 422: an ask is never routed to 'No catalogue manager for None'
+    while a catalogue manager exists."""
+    if body.store_id:
+        return validate_store_access(body.store_id, current_user)
+    if db is not None:
+        try:
+            grn = db.get_collection("grns").find_one(
+                {
+                    "items.product_id": {"$in": [i["product_id"] for i in items]},
+                    "status": {"$ne": "VOID"},
+                },
+                {"_id": 0, "store_id": 1},
+                sort=[("created_at", -1)],
+            )
+            if (grn or {}).get("store_id") and can_access_store_scoped(
+                grn["store_id"], current_user
+            ):
+                return grn["store_id"]
+        except Exception:  # noqa: BLE001
+            logger.warning("[PI] receipt shop lookup for the ask failed", exc_info=True)
+    store_id = current_user.get("active_store_id") or next(
+        iter(current_user.get("store_ids") or []), None
+    )
+    if not store_id:
+        raise HTTPException(
+            status_code=422,
+            detail="Say which shop the bill is for, so its catalogue manager is asked.",
+        )
+    return store_id
 
 
 # ---------------------------------------------------------------------------

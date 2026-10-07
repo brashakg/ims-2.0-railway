@@ -176,7 +176,11 @@ export function InvoiceFormDrawer({
         // The accountant holds no products:write, so the refusal has to come
         // with a way forward: raise the task for the cataloguer.
         try {
-          await purchaseInvoicesApi.requestCataloguing(blocked);
+          await purchaseInvoicesApi.requestCataloguing(
+            blocked,
+            undefined,
+            prefill.store_id ?? user?.activeStoreId ?? undefined,
+          );
           toast.info('Asked the cataloguer to finish these items — the bill can be booked after that');
         } catch {
           /* the refusal above is the message that matters */
