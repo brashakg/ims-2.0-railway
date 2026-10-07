@@ -42,20 +42,16 @@ def test_buy_signal_floors_at_zero_when_covered():
 # ---------------------------------------------------------------------------
 
 
-def test_ecom_state_push_locked_wins():
-    assert (
-        bd.ecom_state({"ecom": {"shopify_product_id": "g"}}, True)
-        == bd.ECOM_PUSH_LOCKED
-    )
-
-
-def test_ecom_state_live_and_staged_and_not_listed():
-    assert (
-        bd.ecom_state({"ecom": {"shopify_product_id": "gid://x"}}, False)
-        == bd.ECOM_LIVE
-    )
-    assert bd.ecom_state({"ecom": {"status": "STAGED"}}, False) == bd.ECOM_STAGED
-    assert bd.ecom_state({}, False) == bd.ECOM_NOT_LISTED
+def test_ecom_state_reads_the_one_online_verdict():
+    """The chip maps online_catalog.product_online_state -- the Catalog
+    screen's verdict, push gate included -- never a rule of its own."""
+    assert bd.ecom_state("LIVE") == bd.ECOM_LIVE
+    # Retired in IMS but the take-down failed: still selling on Shopify.
+    assert bd.ecom_state("DELIST_FAILED") == bd.ECOM_LIVE
+    assert bd.ecom_state("NOT_FOR_WEBSITE") == bd.ECOM_PUSH_LOCKED
+    assert bd.ecom_state("QUEUED") == bd.ECOM_STAGED
+    for off in ("OFF", "BLOCKED", None):
+        assert bd.ecom_state(off) == bd.ECOM_NOT_LISTED
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +72,6 @@ def test_build_row_shape():
     row = bd.build_row(
         product,
         readiness=readiness,
-        push_locked=False,
         on_hand=4,
         on_order=2,
         velocity_per_day=1.0,
@@ -99,7 +94,6 @@ def test_build_row_preferred_vendor_passthrough():
     row = bd.build_row(
         {"product_id": "P2", "preferred_vendor_id": "V-9"},
         readiness=readiness,
-        push_locked=False,
         on_hand=0,
         on_order=0,
         velocity_per_day=None,
@@ -109,7 +103,6 @@ def test_build_row_preferred_vendor_passthrough():
     row_blank = bd.build_row(
         {"product_id": "P3", "preferred_vendor_id": ""},
         readiness=readiness,
-        push_locked=False,
         on_hand=0,
         on_order=0,
         velocity_per_day=None,
@@ -133,7 +126,6 @@ def test_build_row_carries_the_products_gst_identity():
             "gst_rate": 5.0,
         },
         readiness=readiness,
-        push_locked=False,
         on_hand=0,
         on_order=0,
         velocity_per_day=None,
@@ -146,7 +138,6 @@ def test_build_row_carries_the_products_gst_identity():
     nil = bd.build_row(
         {"product_id": "P5", "hsn_code": "902140", "gst_rate": 0.0},
         readiness=readiness,
-        push_locked=False,
         on_hand=0,
         on_order=0,
         velocity_per_day=None,
@@ -158,7 +149,6 @@ def test_build_row_carries_the_products_gst_identity():
     bare = bd.build_row(
         {"product_id": "P6"},
         readiness=readiness,
-        push_locked=False,
         on_hand=0,
         on_order=0,
         velocity_per_day=None,
@@ -187,16 +177,22 @@ class _Repo:
 
 
 class _Coll:
+    def __init__(self, docs=()):
+        self._docs = list(docs)
+
     def aggregate(self, _p):
         return iter([])
 
     def find(self, *a, **k):
-        return iter([])
+        return iter([dict(d) for d in self._docs])
 
 
 class _DB:
-    def get_collection(self, _n):
-        return _Coll()
+    def __init__(self, twins=()):
+        self._twins = twins
+
+    def get_collection(self, n):
+        return _Coll(self._twins if n == "catalog_products" else ())
 
 
 def test_rows_endpoint_assembles_and_surfaces_push_lock(monkeypatch):
@@ -232,14 +228,31 @@ def test_rows_endpoint_assembles_and_surfaces_push_lock(monkeypatch):
             "brand": "Carrera",
             "category": "FRAME",
             "attributes": {"brand_name": "Carrera"},
-            "ecom": {"staged": True},
+            "pim_product_id": "T3",
+        },
+        {
+            # A Carrera listing ALREADY LIVE on Shopify (its twin carries the
+            # gid) from before Brand Master switched Carrera off.
+            "product_id": "P4",
+            "sku": "CA-2",
+            "brand": "Carrera",
+            "category": "FRAME",
+            "pim_product_id": "T4",
         },
     ]
+    twins = [
+        {"id": "T3", "sku": "CA-1", "brand": "Carrera", "images": ["https://x/a.jpg"],
+         "ecom": {"status": "DRAFT", "locally_modified": True}},
+        {"id": "T4", "sku": "CA-2", "brand": "Carrera", "images": ["https://x/b.jpg"],
+         "ecom": {"status": "PUBLISHED", "shopify_product_id": "gid://shopify/Product/4"}},
+    ]
     monkeypatch.setattr(bdr, "get_product_repository", lambda: _Repo(products))
-    monkeypatch.setattr(bdr, "_get_db", lambda: _DB())
+    monkeypatch.setattr(bdr, "_get_db", lambda: _DB(twins))
     # P2's brand Cartier is push-locked
+    from api.services.shopify_push import _shared
+
     monkeypatch.setattr(
-        bdr._sp,
+        _shared,
         "push_lock_reason",
         lambda db, entity, doc: "locked" if (doc.get("brand") == "Cartier") else None,
     )
@@ -253,11 +266,19 @@ def test_rows_endpoint_assembles_and_surfaces_push_lock(monkeypatch):
     out = _run(
         bdr.buy_desk_rows(store_id=None, limit=200, skip=0, current_user=_VIEWER)
     )
-    assert out["total"] == 3
+    assert out["total"] == 4
     by_id = {r["product_id"]: r for r in out["rows"]}
     assert by_id["P1"]["ecom_state"] == bd.ECOM_NOT_LISTED
     assert by_id["P2"]["ecom_state"] == bd.ECOM_PUSH_LOCKED
+    # Queued with a photo, but the gate refuses its brand: Not for website.
     assert by_id["P3"]["ecom_state"] == bd.ECOM_PUSH_LOCKED
+    assert by_id["P3"]["ecom_note"] is None
+    # LIVE on Shopify: never "Not for website" on a listing that still sells;
+    # a plain note says its price and images no longer sync.
+    assert by_id["P4"]["ecom_state"] == bd.ECOM_LIVE
+    assert "Price and images no longer sync" in by_id["P4"]["ecom_note"]
+    assert "Carrera" in by_id["P4"]["ecom_note"]
+    assert by_id["P1"]["ecom_note"] is None
     assert (
         by_id["P1"]["on_hand"] == 0 and by_id["P1"]["buy_signal"] is None
     )  # no velocity

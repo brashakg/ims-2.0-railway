@@ -50,7 +50,7 @@ function readinessChip(row: BuyDeskRow) {
   );
 }
 
-function ecomChip(state: EcomState) {
+function ecomChip(state: EcomState, note?: string | null) {
   const tone =
     state === 'LIVE'
       ? 'bg-green-50 text-green-700'
@@ -60,10 +60,16 @@ function ecomChip(state: EcomState) {
           ? 'bg-blue-50 text-blue-700'
           : 'bg-gray-100 text-gray-600';
   return (
-    <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${tone}`}>
-      {state === 'PUSH_LOCKED' && <Lock className="h-3 w-3" />}
-      {ECOM_LABEL[state]}
-    </span>
+    <>
+      <span
+        className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${tone}`}
+        title={note || undefined}
+      >
+        {state === 'PUSH_LOCKED' && <Lock className="h-3 w-3" />}
+        {ECOM_LABEL[state]}
+      </span>
+      {note && <div className="mt-0.5 max-w-[16rem] text-[11px] leading-snug text-amber-700">{note}</div>}
+    </>
   );
 }
 
@@ -280,7 +286,7 @@ export default function BuyDeskPage() {
                     </div>
                   </td>
                   <td className="px-4 py-2.5">{readinessChip(r)}</td>
-                  <td className="px-4 py-2.5">{ecomChip(r.ecom_state)}</td>
+                  <td className="px-4 py-2.5">{ecomChip(r.ecom_state, r.ecom_note)}</td>
                   <td className="px-4 py-2.5 text-right tabular-nums">{r.on_hand}</td>
                   <td className="px-4 py-2.5 text-right tabular-nums text-gray-500">{r.on_order}</td>
                   <td className="px-4 py-2.5 text-right tabular-nums font-semibold text-gray-900">

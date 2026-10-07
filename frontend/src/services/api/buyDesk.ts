@@ -26,6 +26,9 @@ export interface BuyDeskRow {
   catalog_status: string | null;
   readiness: BuyDeskReadiness;
   ecom_state: EcomState;
+  /** Set on a LIVE listing the push gate now refuses: it still sells, but its
+   *  price and images no longer sync. */
+  ecom_note?: string | null;
   on_hand: number;
   on_order: number;
   /** Suggested order qty, netted against on_hand + on_order. null = no sales signal yet. */

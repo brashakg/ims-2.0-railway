@@ -8,7 +8,8 @@ against open POs so the operator never double-orders.
 
 Pure assembly (build_row / buy_signal) + thin lookups; reuses the canonical
 engines for the catalog/ecom truth (product_master.catalog_readiness,
-shopify_push.product_push_refusal) and self-contained aggregations for stock / open-PO
+online_catalog.stamp_online_state -- the Catalog screen's verdict, push gate
+included) and self-contained aggregations for stock / open-PO
 / sales-velocity so a missing sub-signal degrades that ONE field to a safe default
 rather than failing the row. No emoji (Windows cp1252). No writes.
 """
@@ -51,25 +52,19 @@ def buy_signal(
     return suggested if suggested > 0 else 0
 
 
-def ecom_state(product: Dict[str, Any], push_locked: bool) -> str:
-    """Honest online-store state. PUSH_LOCKED wins (`push_locked` = the push
-    gate shopify_push.product_push_refusal refuses it: a push-locked brand or
-    one Brand Master keeps off the website). Else derive from the product's ecom sub-doc: a live Shopify gid ->
-    LIVE; a staged/listed intent -> STAGED; otherwise NOT_LISTED."""
-    if push_locked:
-        return ECOM_PUSH_LOCKED
-    ecom = product.get("ecom") or {}
-    if ecom.get("shopify_product_id"):
+def ecom_state(online: Optional[str]) -> str:
+    """The Buy Desk chip from the ONE online verdict
+    (online_catalog.product_online_state, stamped on the row as `online` by
+    stamp_online_state from the twin the push reads, push gate included):
+    a listing on Shopify -> LIVE, even when the gate now refuses it (the row's
+    note says its price and images no longer sync; it is still selling);
+    refused and not live -> PUSH_LOCKED ("Not for website"); queued for a push
+    -> STAGED; otherwise NOT_LISTED."""
+    if online in ("LIVE", "DELIST_FAILED"):
         return ECOM_LIVE
-    if (
-        ecom.get("listed")
-        or ecom.get("staged")
-        or str(ecom.get("status") or "").upper()
-        in (
-            "STAGED",
-            "LISTED",
-        )
-    ):
+    if online == "NOT_FOR_WEBSITE":
+        return ECOM_PUSH_LOCKED
+    if online == "QUEUED":
         return ECOM_STAGED
     return ECOM_NOT_LISTED
 
@@ -78,14 +73,14 @@ def build_row(
     product: Dict[str, Any],
     *,
     readiness: Dict[str, Any],
-    push_locked: bool,
     on_hand: int,
     on_order: int,
     velocity_per_day: Optional[float],
     lead_days: int = DEFAULT_LEAD_DAYS,
 ) -> Dict[str, Any]:
     """Assemble one Buy Desk row (pure). `readiness` is the
-    product_master.catalog_readiness() dict for this product."""
+    product_master.catalog_readiness() dict for this product; `online` /
+    `online_note` are stamped on it by online_catalog.stamp_online_state."""
     attrs = product.get("attributes") or {}
     return {
         "product_id": product.get("product_id"),
@@ -100,7 +95,8 @@ def build_row(
             "blockers": readiness.get("blockers") or [],
             "purchasable": bool(readiness.get("purchasable")),
         },
-        "ecom_state": ecom_state(product, push_locked),
+        "ecom_state": ecom_state(product.get("online")),
+        "ecom_note": product.get("online_note") or None,
         "on_hand": int(on_hand or 0),
         "on_order": int(on_order or 0),
         # Owner decision (2026-07-04): reorder_quantity <= 0 (the new -1

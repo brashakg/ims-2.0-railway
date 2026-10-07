@@ -22,7 +22,7 @@ from .auth import require_roles
 from ..dependencies import get_product_repository, resolve_store_scope
 from ..services import buy_desk as _bd
 from ..services import product_master as _pm
-from ..services import shopify_push as _sp
+from ..services.online_catalog import stamp_online_state
 
 router = APIRouter()
 logger = logging.getLogger("ims.buy_desk_router")
@@ -169,6 +169,10 @@ async def buy_desk_rows(
     on_hand = _on_hand_map(db, product_ids, store_id)
     on_order = _on_order_map(db, product_ids)
     velocity = _velocity_map(db, product_ids)
+    # The online chip: the Catalog screen's own verdict, judged on each row's
+    # twin (the doc the push reads) with THE push gate -- one answer for one
+    # product on every screen.
+    stamp_online_state(db, products)
 
     rows: List[Dict[str, Any]] = []
     for p in products:
@@ -182,17 +186,10 @@ async def buy_desk_rows(
                 "blockers": [],
                 "purchasable": False,
             }
-        try:
-            # THE product gate (push-lock or brand off the website), so the
-            # chip never says Staged for a product the push will refuse.
-            locked = bool(_sp.product_push_refusal(db, p))
-        except Exception:  # noqa: BLE001
-            locked = False
         rows.append(
             _bd.build_row(
                 p,
                 readiness=readiness,
-                push_locked=locked,
                 on_hand=on_hand.get(pid, 0),
                 on_order=on_order.get(pid, 0),
                 velocity_per_day=velocity.get(pid),
