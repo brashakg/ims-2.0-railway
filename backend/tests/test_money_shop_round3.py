@@ -11,9 +11,13 @@ the same 404 a missing one gets.
             with HIS topbar shop (HQ / ONLINE). For a Pune-only supplier the
             Pune accountant then saw the bill still owed on every screen, and
             could pay it again. Now an admin's money with no bill, no receipt
-            and no shop named is left UNSTAMPED, so the legacy rule places it
-            (the supplier's latest bill on or before it). A shop the admin
-            names still wins; a non-admin's money is still his own shop's.
+            and no shop named takes the supplier's shop by its bills (the
+            ledger's legacy rule: its latest bill on or before the money,
+            else its earliest), worked out and STAMPED when it is written
+            (round 3 review #2 / #8 -- left unstamped, it moved shops when
+            another shop later booked a back-dated bill; see
+            test_money_stamped_at_write.py). A shop the admin names still
+            wins; a non-admin's money is still his own shop's.
   #2 / #7   A debit note naming a goods receipt (grn_id) never checked it: a
             Pune accountant's note on Dhanbad's receipt released Dhanbad's
             rejected-goods payment hold (owner ruling 7) and booked the
@@ -268,9 +272,11 @@ def test_r3_1_an_admin_at_hq_pays_a_pune_supplier_on_account_and_pune_owes_nothi
         "amount": 5000.0, "payment_date": "2026-09-20", "mode": "BANK", "reference": "NEFT-1",
     }), 201)
 
-    assert made["store_id"] is None, f"#1: the admin's money was filed under {made['store_id']}"
+    # Pune's, by V-PUN's own bills -- never the admin's topbar HQ -- and
+    # stamped when written (round 3 #2 / #8), so a later bill cannot move it.
+    assert made["store_id"] == PUN, f"#1: the admin's money was filed under {made['store_id']}"
     stored = world.db["vendor_payments"].find_one({"payment_id": made["payment_id"]}, {"_id": 0})
-    assert stored["store_id"] is None, "#1: stored with the admin's topbar shop"
+    assert stored["store_id"] == PUN, "#1: not stamped with the supplier's shop"
 
     after = _pune_owes(world, V_PUN)
     assert after == {"ledger": 0.0, "report_owed": 0.0, "report_paid": 5000.0, "aging": 0.0, "card": 0.0}, (

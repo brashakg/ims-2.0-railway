@@ -87,30 +87,72 @@ def _named_receipt_in_scope_or_404(
     return grn
 
 
+def _shop_by_the_suppliers_bills(db, vendor_id: str, money: dict) -> Optional[str]:
+    """The shop the supplier ledger gives money that names no bill and carries
+    no shop -- ap_engine.supplier_rows' legacy rule (the supplier's latest
+    bill dated on or before the money, else its earliest bill; transfer
+    mirror bills left out) -- worked out NOW, from the supplier's bills as
+    they stand, so the caller can STAMP it. supplier_rows itself decides:
+    `money` (its date fields only) is offered to it once per shop the
+    supplier has billed, so the shop stamped is exactly the shop the ledger
+    would have placed the row in at this moment.
+
+    None when the supplier has never billed a shop (or the bill the rule
+    picks has no shop): the money stays unstamped, under all stores only.
+
+    Unreadable bills are a 503: writing the row unstamped would let its shop
+    move later, which is what stamping is for."""
+    if db is None or not vendor_id:
+        return None
+    try:
+        bills = list(
+            db.get_collection("vendor_bills").find({"vendor_id": vendor_id}, {"_id": 0})
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Database unavailable") from exc
+    probe = {**money, "vendor_id": vendor_id, "bill_id": None, "store_id": None}
+    shops = sorted({b.get("store_id") for b in bills if isinstance(b, dict) and b.get("store_id")})
+    for shop in shops:
+        if ap_engine.supplier_rows(bills, [probe], [], shop)[1]:
+            return shop
+    return None
+
+
 def _money_shop(
     bill: Optional[dict],
     asked_query: Optional[str],
     asked_body: Optional[str],
     current_user: dict,
     receipt: Optional[dict] = None,
+    *,
+    db=None,
+    vendor_id: Optional[str] = None,
+    money: Optional[dict] = None,
 ) -> Optional[str]:
-    """The ONE shop a payment or debit note is recorded in (F63): stamped on
+    """The ONE shop a payment or debit note is recorded in (F63): STAMPED on
     the row at write time, so ap_engine.supplier_rows books it to that shop's
-    share instead of guessing from the supplier's latest bill (a Pune
-    accountant's on-account cheque used to land in Dhanbad's ledger because
-    Dhanbad billed last).
+    share for good -- never re-guessed on a later read (a Pune accountant's
+    on-account cheque used to land in Dhanbad's ledger because Dhanbad billed
+    last; an admin's unstamped payment moved shops when another shop later
+    booked a back-dated bill, so a closed month changed and the first shop
+    owed a paid bill again).
 
       * money naming a bill: that bill's shop -- it settles that bill, so it
-        is that shop's money (a bill with no shop: no shop);
-      * a debit note naming a goods receipt and no bill: that receipt's shop
-        -- the rejected goods it credits are that shop's;
-      * else the shop asked for (?store_id or the body's store_id);
-      * else a non-admin's own active shop; an ADMIN / SUPERADMIN's money is
-        left UNSTAMPED (resolve_store_scope(None) is None for them), so the
-        legacy rule places it -- the supplier's latest bill on or before it.
-        Never the admin's topbar shop: that is where HE sits, not the
-        supplier, and stamping it filed a Pune supplier's on-account payment
-        under HQ, so Pune still owed the bill and could pay it twice.
+        is that shop's money (a bill with no shop: no shop; the ledger puts
+        money naming a bill with the bill, whatever is stamped);
+      * a debit note naming a goods receipt with a shop, and no bill: that
+        receipt's shop -- the rejected goods it credits are that shop's;
+      * else (on account, or a receipt with NO shop on record -- a legacy
+        receipt only an admin reaches) the shop asked for (?store_id or the
+        body's store_id);
+      * else a non-admin's own active shop;
+      * else (ADMIN / SUPERADMIN, or a login with no shop, naming none) the
+        supplier's shop by its bills -- _shop_by_the_suppliers_bills, the
+        ledger's own legacy rule -- worked out now and stamped. Never the
+        admin's topbar shop: that is where HE sits, not the supplier. If the
+        supplier bills more than one shop the rule still picks one (the Cash
+        Flow form offers an explicit Shop select). A supplier that has never
+        billed a shop: unstamped, under all stores only.
 
     A shop asked for passes validate_store_access first: a non-admin naming
     another shop is refused (403) before anything is written. Asking for a
@@ -135,19 +177,36 @@ def _money_shop(
                     "shops. Name the bill, or the receipt, of one shop."
                 ),
             )
-    anchor, what = (bill, "bill") if bill is not None else (receipt, "goods receipt")
-    if anchor is not None:
-        shop = anchor.get("store_id")
+    if bill is not None:
+        shop = bill.get("store_id")
         if asked and asked != shop:
             raise HTTPException(
                 status_code=422,
                 detail=(
-                    f"This {what} is booked to another shop's account; money "
-                    f"against it belongs to the {what}'s shop. Leave the shop out."
+                    "This bill is booked to another shop's account; money "
+                    "against it belongs to the bill's shop. Leave the shop out."
+                    if shop
+                    else "This bill has no shop on record, so money against it "
+                    "stays with the bill, under all stores only. Leave the shop out."
                 ),
             )
         return shop
-    return asked or resolve_store_scope(None, current_user)
+    if receipt is not None and receipt.get("store_id"):
+        shop = receipt["store_id"]
+        if asked and asked != shop:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "This goods receipt is booked to another shop's account; "
+                    "money against it belongs to the goods receipt's shop. "
+                    "Leave the shop out."
+                ),
+            )
+        return shop
+    shop = asked or resolve_store_scope(None, current_user)
+    if shop:
+        return shop
+    return _shop_by_the_suppliers_bills(db, vendor_id, money or {})
 
 
 def _ledger_rows(db, vendor_id: str, scope: Optional[str]) -> tuple:
@@ -225,9 +284,19 @@ async def create_vendor_payment(
 
     # F63: the bill it settles is in the caller's shop -- checked before the
     # hold below, whose message would describe that bill -- and the money is
-    # stamped with its shop.
+    # stamped with its shop (an admin's naming no bill and no shop: the
+    # supplier's shop by its bills, worked out on this row's own dates).
+    created_at = datetime.now().isoformat()
     named = _named_bill_in_scope_or_404(db, vendor_id, payment.bill_id, current_user)
-    shop = _money_shop(named, store_id, payment.store_id, current_user)
+    shop = _money_shop(
+        named,
+        store_id,
+        payment.store_id,
+        current_user,
+        db=db,
+        vendor_id=vendor_id,
+        money={"payment_date": payment.payment_date, "created_at": created_at},
+    )
 
     # Owner ruling 7: HOLD the bill while goods were rejected and no debit note
     # exists. Until now a rejection inside the 5% match tolerance was paid in
@@ -256,7 +325,7 @@ async def create_vendor_payment(
         "reference": payment.reference,
         "notes": payment.notes,
         "created_by": current_user.get("user_id"),
-        "created_at": datetime.now().isoformat(),
+        "created_at": created_at,
     }
     db = _get_db()
     if db is not None:
@@ -309,11 +378,22 @@ async def create_debit_note(
     # F63: the bill it reduces and the goods receipt it credits are this
     # supplier's and in the caller's shop (else the same 404 a missing one
     # gets, before anything is written), and the note is stamped with their
-    # shop.
+    # shop (a receipt with no shop on record: the shop asked for; an admin's
+    # naming none: the supplier's shop by its bills).
     db_early = _get_db()
     named = _named_bill_in_scope_or_404(db_early, vendor_id, note.bill_id, current_user)
     receipt = _named_receipt_in_scope_or_404(db_early, vendor_id, note.grn_id, current_user)
-    shop = _money_shop(named, store_id, note.store_id, current_user, receipt)
+    created_at = datetime.now().isoformat()
+    shop = _money_shop(
+        named,
+        store_id,
+        note.store_id,
+        current_user,
+        receipt,
+        db=db_early,
+        vendor_id=vendor_id,
+        money={"date": note.date, "created_at": created_at},
+    )
 
     dn_id = str(uuid.uuid4())
     prefix = vendor_id[:3].upper() if vendor_id else "DN"
@@ -336,7 +416,7 @@ async def create_debit_note(
         "cn_type": note.cn_type,
         "source": note.cn_type,
         "created_by": current_user.get("user_id"),
-        "created_at": datetime.now().isoformat(),
+        "created_at": created_at,
     }
     db = _get_db()
     if db is not None:
