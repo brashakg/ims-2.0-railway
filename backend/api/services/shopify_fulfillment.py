@@ -259,6 +259,11 @@ def reconcile_fulfillment(
         # takes them over from a newer one (the write matches only while the
         # stored watermark is not newer), and a cancelled / failed parcel
         # never takes them over while another parcel is still live.
+        # An order reconciled before the clocks (no watermark) holds its
+        # newest fulfilment -- the old reconcile stamped the last one it saw:
+        # only that fulfilment itself, the order's first, or a live one over
+        # a cancelled / failed stamp takes the fields over (fail closed: the
+        # sweep re-feeds every older parcel, which would replace the newer).
         others = [p for p in order.get(PARCEL_AWBS) or []
                   if isinstance(p, dict) and p.get("awb") and p.get("id") != _clock_key(payload)]
         watermark = _to_naive_utc(payload.get("updated_at"))
@@ -268,9 +273,12 @@ def reconcile_fulfillment(
             newer: Dict[str, Any] = {}
             if watermark is not None:
                 takeover[FULFILLMENT_WATERMARK] = watermark
-                newer = {"$or": [{FULFILLMENT_WATERMARK: {"$lte": watermark}},
-                                 {FULFILLMENT_WATERMARK: {"$exists": False}},
-                                 {FULFILLMENT_WATERMARK: None}]}
+                legacy = [{FULFILLMENT_WATERMARK: None, "shopify_fulfillment_id": {
+                    "$in": [None, "", fulfillment_id, f"gid://shopify/Fulfillment/{fulfillment_id}"]}}]
+                if live:
+                    legacy.append({FULFILLMENT_WATERMARK: None,
+                                   "fulfillment_status": {"$in": ["CANCELLED", "ERROR"]}})
+                newer = {"$or": [{FULFILLMENT_WATERMARK: {"$lte": watermark}}, *legacy]}
             orders.update_one({**oid, **newer}, {"$set": takeover})
         clock: Dict[str, Any] = {"updated_at": datetime.now(timezone.utc).isoformat()}
         if not fulfillment_id:
@@ -278,6 +286,14 @@ def reconcile_fulfillment(
         else:
             if watermark is not None:
                 clock[f"{FULFILLMENT_CLOCKS}.{_clock_key(payload)}"] = watermark
+            # The parcel list of an order reconciled before it starts with the
+            # parcel the old reconcile stamped: the courier legs (tracked_awbs)
+            # keep tracking it beside this one.
+            stamped = _clock_key({"id": order.get("shopify_fulfillment_id")})
+            if stamped not in ("f", _clock_key(payload)) and not isinstance(order.get(PARCEL_AWBS), list):
+                gone = _norm(order.get("fulfillment_status")).upper() in ("CANCELLED", "ERROR")
+                orders.update_one({**oid, PARCEL_AWBS: {"$exists": False}}, {"$set": {PARCEL_AWBS: [
+                    {"id": stamped, "awb": "" if gone else _norm(order.get("awb"))}]}})
             _write_parcel(orders, oid, _clock_key(payload),
                           (tracking_number or None) if live else "", clock, watermark)
         order_status = res["to"] or current_status

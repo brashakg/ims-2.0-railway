@@ -919,6 +919,65 @@ def test_a_split_shipment_is_delivered_by_its_live_parcel(swept, monkeypatch, sp
     assert doc["status"] == "DELIVERED" and doc["delivered_at"]
 
 
+# An order a fulfillments/* webhook reconciled BEFORE the clocks: no watermark,
+# no per-fulfilment clocks, no parcel list -- stamped with the last (newest)
+# fulfilment the old reconcile applied, F2 / AWB-2.
+_LEGACY = {
+    "label_cancelled_and_reissued": (
+        [(1, "AWB-1", "cancelled", _T("00:40")), (2, "AWB-2", "success", _T("00:59"))], ["AWB-2"]),
+    "split_shipment": (
+        [(1, "AWB-1", "success", _T("00:40")), (2, "AWB-2", "success", _T("00:59"))], ["AWB-2", "AWB-1"]),
+}
+
+
+@pytest.mark.parametrize("sweep", [False, True], ids=["no_sweep", "after_a_sweep"])
+@pytest.mark.parametrize("case", sorted(_LEGACY))
+def test_the_sweep_never_puts_an_older_parcel_over_one_reconciled_before_the_clocks(
+        swept, monkeypatch, case, sweep):
+    """The first sweep re-feeds every parcel the doc does not stamp. With no
+    watermark the takeover matched any parcel, so the older F1 replaced F2 --
+    the cancelled label, or the other half of a split -- and the parcel list
+    it started left AWB-2 out: Shiprocket's AWB-2 DELIVERED found no order.
+    Such an order holds its newest fulfilment; the list starts with it."""
+    oid = 60129
+    events, tracked = _LEGACY[case]
+    _book(swept, oid)
+    _set(swept, oid, status="SHIPPED", shopify_fulfillment_id="2", awb="AWB-2",
+         tracking_number="AWB-2", fulfillment_status="FULFILLED")
+    if sweep:
+        swept["state"]["orders"] = [_pulled(oid, fulfillment_status="fulfilled", updated_at=LATER,
+                                            fulfillments=[_fulfilment(oid, fid, tracking_number=awb,
+                                                                      status=st, created_at=at,
+                                                                      updated_at=at)
+                                                          for fid, awb, st, at in events])]
+        swept["run"]()
+    doc = _doc(swept, oid)
+    assert (doc["shopify_fulfillment_id"], doc["awb"], doc["fulfillment_status"]) == (
+        "2", "AWB-2", "FULFILLED")
+    assert sorted(shopify_fulfillment.tracked_awbs(doc)) == sorted(tracked if sweep else ["AWB-2"])
+    agent = nexus_module.NexusAgent(db=swept["db"])
+    asyncio.run(agent._handle_shiprocket_webhook({"awb": "AWB-2", "current_status": "DELIVERED"}))
+    assert _doc(swept, oid)["status"] == "DELIVERED"
+
+
+def test_a_live_label_takes_over_a_cancelled_one_reconciled_before_the_clocks(swept):
+    """The old reconcile stamped F1, cancelled; the re-issued F2 arrives after
+    the deploy. The order holds no live fulfilment, so F2 takes the tracking
+    fields over -- held on the cancelled label, the order page showed a dead
+    AWB for good."""
+    oid = 60130
+    _book(swept, oid)
+    _set(swept, oid, status="SHIPPED", shopify_fulfillment_id="1", awb="AWB-1",
+         tracking_number="AWB-1", fulfillment_status="CANCELLED")
+    shopify_fulfillment.reconcile_fulfillment(swept["db"], _fulfilment(
+        oid, 2, tracking_number="AWB-2", created_at=_T("02:00"), updated_at=_T("02:00")),
+        topic="fulfillments/create")
+    doc = _doc(swept, oid)
+    assert (doc["shopify_fulfillment_id"], doc["awb"], doc["fulfillment_status"]) == (
+        "2", "AWB-2", "FULFILLED")
+    assert shopify_fulfillment.tracked_awbs(doc) == ["AWB-2"]
+
+
 def test_reconciles_of_two_parcels_from_one_stale_read_keep_both(swept, monkeypatch):
     """Two reconciles of different parcels overlap (two workers, or the sweep
     beside a webhook): each read the order before the other wrote. The

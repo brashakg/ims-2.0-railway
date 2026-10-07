@@ -957,11 +957,14 @@ def test_a_delivered_order_and_a_newer_delivered_fulfilment_is_no_terminal_hold(
     """The fulfilment leg asks the mapper's ONE rule -- 'would it CHANGE a
     terminal status' -- not 'is the order terminal': a newer delivered parcel
     on an order both sides hold DELIVERED lands its tracking and reports
-    nothing held back."""
+    nothing held back. Parcel 70 was applied on its clock (00:30), so 71 is
+    known to be newer (an order reconciled before the clocks keeps its own
+    stamp: test_online_order_status, the older-parcel sweep test)."""
     _book(swept, 53004)
     swept["orders"].update_one({"shopify_order_id": "53004"}, {"$set": {
         "status": "DELIVERED", "fulfillment_status": "FULFILLED", "shopify_fulfillment_id": "70",
         "awb": "AWB-70", "tracking_number": "AWB-70", "shipment_status": "in_transit",
+        "shopify_fulfillment_updated_at": datetime(2026, 9, 6, 0, 30),
     }})
     swept["state"]["orders"] = [_pulled(53004, fulfillment_status="fulfilled", fulfillments=[
         _fulfilment(53004, 71, shipment_status="delivered")])]
