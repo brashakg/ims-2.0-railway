@@ -25,6 +25,8 @@ interface FinanceFiltersProps {
   onDateToChange: (date: string) => void;
   activeTab: TabType;
   onTabChange: (tab: TabType) => void;
+  /** false hides the Vendor Payments tab (payables are ADMIN / ACCOUNTANT only). */
+  canSeePayables?: boolean;
 }
 
 // ---- Indian financial year (Apr–Mar), computed from the current IST date ----
@@ -86,6 +88,7 @@ export default function FinanceFilters({
   onDateToChange,
   activeTab,
   onTabChange,
+  canSeePayables = true,
 }: FinanceFiltersProps) {
   return (
     <>
@@ -136,7 +139,7 @@ export default function FinanceFilters({
 
       {/* Tabs */}
       <div className="flex flex-wrap gap-2 mb-6 border-b border-gray-200">
-        {TABS.map(({ id, label, icon: Icon }) => (
+        {TABS.filter((t) => canSeePayables || t.id !== 'vendor-payments').map(({ id, label, icon: Icon }) => (
           <button
             key={id}
             onClick={() => onTabChange(id)}
