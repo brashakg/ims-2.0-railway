@@ -1857,7 +1857,7 @@ def test_an_edit_that_carries_the_stored_rate_and_hsn_keeps_them(monkeypatch):
     """The screen sends back each line's rate and HSN: a typed-in 12% survives
     an edit that changes only the quantity."""
     po = _kept_po()
-    po["items"][0].update(tax_rate=12, hsn="9004")
+    po["items"][0].update(tax_rate=12, hsn="9004", gst_source="line", gst_unresolved=False)
     repo, _ = _wire(monkeypatch, po)
     line = {**_ONE_LINE[0], "quantity": 5, "gst_rate": 12, "hsn": "9004"}
     _run(v.update_po("PO1", _edit_body([line]), _user()))
@@ -1869,7 +1869,7 @@ def test_an_edit_that_omits_the_rate_and_hsn_keeps_the_stored_ones(monkeypatch):
     """A client that does not echo rate/HSN back must not see a typed-in 12% /
     9004 revert to the catalogue's 5% / 9003."""
     po = _kept_po()
-    po["items"][0].update(tax_rate=12, hsn="9004")
+    po["items"][0].update(tax_rate=12, hsn="9004", gst_source="line", gst_unresolved=False)
     repo, _ = _wire(monkeypatch, po)
 
     class _Catalogue:
@@ -1888,10 +1888,107 @@ def test_an_edit_that_omits_the_rate_and_hsn_keeps_the_stored_ones(monkeypatch):
     assert (kept["tax_rate"], kept["hsn"]) == (18, "9005")
 
 
+def _unresolved_draft(monkeypatch, catalogued):
+    """A draft line whose product had no HSN and no rate when it was made:
+    stored at 0% and flagged unresolved. The form leaves its rate out."""
+    from api.routers.vendors.gst import build_po_gst
+
+    stored = build_po_gst(_ONE_LINE, lambda pid: {"product_id": pid}, None, None)["items"][0]
+    assert (stored["tax_rate"], stored["gst_unresolved"]) == (0.0, True)
+    repo, _ = _wire(monkeypatch, _po(items=[stored]))
+
+    class _Catalogue:
+        def find_by_id(self, pid):
+            return {"product_id": pid, **catalogued}
+
+    monkeypatch.setattr(v, "get_product_repository", lambda: _Catalogue())
+    _run(v.update_po("PO1", _edit_body([{**_ONE_LINE[0], "quantity": 5}]), _user()))
+    return repo.pos["PO1"]["items"][0]
+
+
+def test_an_edit_works_out_again_a_rate_that_was_never_settled(monkeypatch):
+    """Catalogued at 12% since: the edit taxes it, never pins the stored 0%."""
+    kept = _unresolved_draft(monkeypatch, {"hsn_code": "9004", "gst_rate": 12})
+    assert (kept["tax_rate"], kept["gst_unresolved"], kept["line_tax"]) == (12, False, 600)
+    assert kept["gst_source"] != "line"
+
+
+def test_an_edit_keeps_a_still_unknown_rate_flagged(monkeypatch):
+    kept = _unresolved_draft(monkeypatch, {})
+    assert kept["gst_unresolved"] is True and kept["gst_missing"]
+    assert kept["gst_source"] != "line"
+
+
+def test_an_edit_that_omits_the_rate_of_a_product_typed_at_two_rates_is_refused(monkeypatch):
+    """Two lines of one product typed at 5% and 12%: which one an omitted
+    rate meant is not known, so the server asks rather than guesses."""
+    po = _po(items=[_line("P1", "Carrera CA8895", 2, 1000, rate=5),
+                    _line("P1", "Carrera CA8895", 1, 1000, rate=12)])
+    for it in po["items"]:
+        it.update(gst_source="line", gst_unresolved=False)
+    repo, _ = _wire(monkeypatch, po)
+    with pytest.raises(HTTPException) as e:
+        _run(v.update_po("PO1", _edit_body([_ONE_LINE[0], _ONE_LINE[0]]), _user()))
+    assert e.value.status_code == 422
+    assert [it["tax_rate"] for it in repo.pos["PO1"]["items"]] == [5, 12]
+    # Sending the rates settles it.
+    _run(v.update_po("PO1", _edit_body([{**_ONE_LINE[0], "gst_rate": 5},
+                                         {**_ONE_LINE[0], "gst_rate": 12, "quantity": 4}]), _user()))
+    assert [it["tax_rate"] for it in repo.pos["PO1"]["items"]] == [5, 12]
+
+
+@pytest.mark.parametrize("sent,want", [
+    ({"gst_rate": None}, (5.0, "9004")),  # rate back to the catalogue's, HSN kept
+    ({"hsn": ""}, (12, "9003")),  # HSN back to the catalogue's, typed rate kept
+    ({"gst_rate": None, "hsn": ""}, (5.0, "9003")),
+])
+def test_an_edit_that_sends_null_or_empty_goes_back_to_the_catalogue(monkeypatch, sent, want):
+    """Stored 12% / 9004 typed, catalogue 5% / 9003: an explicit null or ''
+    is not an omission -- it clears the typed value."""
+    po = _kept_po()
+    po["items"][0].update(tax_rate=12, hsn="9004", gst_source="line", gst_unresolved=False)
+    repo, _ = _wire(monkeypatch, po)
+
+    class _Catalogue:
+        def find_by_id(self, pid):
+            return {"product_id": pid, "hsn_code": "9003", "gst_rate": 5}
+
+    monkeypatch.setattr(v, "get_product_repository", lambda: _Catalogue())
+    _run(v.update_po("PO1", _edit_body([{**_ONE_LINE[0], **sent}]), _user()))
+    kept = repo.pos["PO1"]["items"][0]
+    assert (kept["tax_rate"], kept["hsn"]) == want
+
+
+def test_a_form_edit_of_a_product_with_a_typed_and_an_unsettled_line(monkeypatch):
+    """P1 typed at 12% on one line and never settled on another. The form sends
+    the typed rate and leaves the unsettled one out: no refusal, the typed line
+    stays 12%, the other is worked out from the catalogue (now 5%)."""
+    from api.routers.vendors.gst import build_po_gst
+
+    unsettled = build_po_gst(_ONE_LINE, lambda pid: {"product_id": pid}, None, None)["items"][0]
+    typed = {**unsettled, "tax_rate": 12, "gst_source": "line", "gst_unresolved": False}
+    repo, _ = _wire(monkeypatch, _po(items=[typed, unsettled]))
+
+    class _Catalogue:
+        def find_by_id(self, pid):
+            return {"product_id": pid, "hsn_code": "9003", "gst_rate": 5}
+
+    monkeypatch.setattr(v, "get_product_repository", lambda: _Catalogue())
+    _run(v.update_po("PO1", _edit_body([{**_ONE_LINE[0], "gst_rate": 12},
+                                         {**_ONE_LINE[0], "quantity": 3}]), _user()))
+    a, b = repo.pos["PO1"]["items"]
+    assert (a["tax_rate"], b["tax_rate"], b["gst_unresolved"]) == (12, 5.0, False)
+
+
 @pytest.mark.parametrize(
     "blank",
     ["\u3164\u3164\u3164", "\u115f\u1160\uffa0", "\u0301\u0301\u0301", "\ufe0f\ufe0f\ufe0f",
-     "ab\u3164", "a\ufe0f\u0301"],
+     "ab\u3164", "a\ufe0f\u0301",
+     # invisible marks that would count after a letter unless stripped
+     "a\u034f\u034f", "ab\u034f", "a\u180b\u180b", "ab\u180c", "ab\u180d", "ab\u180f",
+     "ab\u17b4", "ab\u17b5",
+     # accents are no letters: one letter with two accents, two with one
+     "a\u0301\u0301", "ab\u0301"],
 )
 def test_a_reason_of_invisible_fillers_or_bare_marks_is_refused(blank):
     with pytest.raises(ValidationError):
@@ -1900,6 +1997,6 @@ def test_a_reason_of_invisible_fillers_or_bare_marks_is_refused(blank):
         cancel_reason(blank)
 
 
-@pytest.mark.parametrize("ok", ["damaged in transit", "गलत माल"])
+@pytest.mark.parametrize("ok", ["damaged in transit", "गलत माल", "नहीं", "café"])
 def test_real_reasons_still_pass(ok):
     assert v.POLineCancel(reason=ok).reason == ok
