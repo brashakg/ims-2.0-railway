@@ -51,8 +51,9 @@ interface Product {
   // The server's verdict (reorder_policy.py, via /inventory/low-stock): the
   // one reorder rule. Never re-decided here.
   autoReorderDisabled: boolean;
-  // The server's discontinued verdict (reorder_policy.py: inactive, but a
-  // provisional buy is not): says WHY it is off, decides nothing.
+  // The server's discontinued verdict (reorder_policy.discontinued: inactive,
+  // except a provisional buy not yet switched on or deleted): says WHY it is
+  // off, decides nothing.
   discontinued: boolean;
   maxStock: number;
   leadTimeDays: number;
