@@ -506,9 +506,19 @@ def build_aging(
     does with on-account money (F56). So `items`, every bucket and
     `total_outstanding` are what is still owed after it, and an 'overdue' figure
     can never exceed what we owe that vendor. Credit left over once all of a
-    vendor's bills are settled is `unallocated_credits` (an advance with the
-    supplier). net_payable = total_outstanding - unallocated_credits, floored at
-    0: the supplier ledgers' closing balance.
+    vendor's bills are settled is that vendor's advance (paid ahead of its
+    bills).
+
+    THE ONE 'WE OWE' RULE (F56): per supplier, its ledger closing balance on
+    the as-of day is either owed (> 0: its open bills after its own credit) or
+    an advance (< 0: its credit beyond its bills) -- never both. So, over any
+    set of suppliers:
+      owed     = SUM of max(balance, 0) = total_outstanding = SUM(buckets)
+      advances = SUM of max(-balance, 0) = unallocated_credits
+    An advance is its own figure ('paid ahead to suppliers'). It is NEVER taken
+    off owed: one supplier's advance does not settle another supplier's bills,
+    so netting them (and flooring the difference at 0) hid what we owe.
+    `net_payable` is kept for older readers and is owed, nothing else.
     """
     as_of = parse_date(as_of_iso) or now_ist_naive()
     items: List[dict] = []
@@ -591,8 +601,13 @@ def build_aging(
         "as_of": as_of.date().isoformat(),
         "buckets": buckets,
         "total_outstanding": total_out,
+        # THE 'we owe' figure and the money paid ahead, apart (see above).
+        "owed": total_out,
+        "advances": unallocated,
+        # Older key, same figure as `advances`.
         "unallocated_credits": unallocated,
-        "net_payable": round(max(total_out - unallocated, 0.0), 2),
+        # Older key, same figure as `owed` (no advance is subtracted).
+        "net_payable": total_out,
         # Sort: undatable bills (-1) sort first (they are the most uncertain and
         # need attention), then by days_past_due descending (most overdue first).
         "items": sorted(
@@ -611,9 +626,15 @@ def build_aging_by_vendor(
     """Org-wide AP aging grouped by vendor, plus a grand-total summary.
 
     Returns {as_of, totals:{buckets,total_outstanding,...}, vendors:[...]}.
-    Each vendor row carries its own bucket split + outstanding. Every vendor in
-    the rows is a row -- one holding only an advance too, or the totals would
-    owe more than the supplier ledgers do (F56).
+    Each vendor row carries its own bucket split + outstanding, and its own
+    signed ledger `balance` (owed - advances; below 0 = paid ahead). Every
+    vendor in the rows is a row -- one holding only an advance too.
+
+    The totals follow THE ONE 'WE OWE' RULE (build_aging): `owed` (= the
+    buckets added up = total_outstanding) is the sum of each supplier's
+    positive balance, and `advances` the sum of each supplier's money paid
+    ahead, a figure apart. One supplier's advance is never taken off what we
+    owe another (F56); `net_payable` (older key) is owed.
     """
     bills, payments, debit_notes = (
         [d for d in docs or [] if isinstance(d, dict)]
@@ -642,22 +663,29 @@ def build_aging_by_vendor(
                 "vendor_name": name,
                 "buckets": ag["buckets"],
                 "total_outstanding": ag["total_outstanding"],
+                "owed": ag["owed"],
+                "advances": ag["advances"],
+                # This supplier's own ledger balance, signed (< 0 = advance).
+                "balance": round(ag["owed"] - ag["advances"], 2),
                 "unallocated_credits": ag["unallocated_credits"],
                 "net_payable": ag["net_payable"],
             }
         )
         for k in AGING_BUCKETS:
             totals[k] = round(totals[k] + ag["buckets"][k], 2)
-        grand_out = round(grand_out + ag["total_outstanding"], 2)
-        grand_unalloc = round(grand_unalloc + ag["unallocated_credits"], 2)
+        grand_out = round(grand_out + ag["owed"], 2)
+        grand_unalloc = round(grand_unalloc + ag["advances"], 2)
 
     return {
         "as_of": (parse_date(as_of_iso) or now_ist_naive()).date().isoformat(),
         "totals": {
             "buckets": totals,
             "total_outstanding": grand_out,
+            "owed": grand_out,
+            "advances": grand_unalloc,
             "unallocated_credits": grand_unalloc,
-            "net_payable": round(max(grand_out - grand_unalloc, 0.0), 2),
+            # Older key: owed. No supplier's advance comes off it.
+            "net_payable": grand_out,
         },
         "vendors": sorted(vendor_rows, key=lambda x: -x["net_payable"]),
     }

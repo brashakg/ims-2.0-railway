@@ -462,20 +462,24 @@ async def owner_dashboard(current_user: dict = Depends(get_current_user)):
         "store_id": scope,
         "receivables": ar,
         "payables": {
-            # What we owe = the supplier ledgers' balance (bills - payments -
-            # debit notes, on-account money included), not the gross of the
-            # open bills (F56). buckets / overdue / due_*d are what is still
-            # owed on the bills once on-account money has settled the oldest
-            # (ap_engine.build_aging), so sum(buckets) - unallocated_credits
-            # (advances beyond a supplier's bills) == total.
-            "total": ap["net_payable"],
+            # THE ONE 'WE OWE' RULE (F56, ap_engine.build_aging): per supplier,
+            # its ledger balance (bills - payments - debit notes; its own
+            # on-account money settles its own oldest bills). `total` = what
+            # we owe = the sum of each supplier's balance above 0 = the
+            # buckets added up; overdue / due_*d are parts of it.
+            "total": ap["owed"],
             "buckets": ap["buckets"],
             "overdue": ap_overdue,
             "due_7d": due_7d,
             "due_30d": due_30d,
-            "unallocated_credits": ap["unallocated_credits"],
+            # Money paid ahead to suppliers (the sum of each supplier's balance
+            # below 0): a figure apart, never taken off `total` -- one
+            # supplier's advance does not pay another's bills.
+            "advances": ap["advances"],
+            # Older key, same figure as `advances`.
+            "unallocated_credits": ap["advances"],
         },
-        "net_position": round(ar["total"] - ap["net_payable"], 2),
+        "net_position": round(ar["total"] - ap["owed"], 2),
         "this_month": {
             "revenue": revenue,
             "expenses": expenses,

@@ -198,13 +198,17 @@ def test_build_aging_credit_beyond_the_bills_is_an_advance():
 
 def test_build_aging_by_vendor_counts_a_vendor_holding_only_an_advance():
     """F56: a Rs 1000 advance to a vendor with no bills dropped out of AP aging
-    (grouped by the bills' vendors), so its total owed 1000 more than the
-    ledgers, Cash Flow, the report and Vendor Payments."""
+    (grouped by the bills' vendors). It is a row -- and, by THE ONE 'WE OWE'
+    RULE (round 3 #1), a figure APART: v1 is still owed its 7780 (v-new's
+    advance does not pay v1's bill), and 1000 is paid ahead. Round 2 netted
+    them to 6780, which is what this test pinned until round 3."""
     bills = [_bill(bid="b1", total=7780, due="2026-01-01")]
     pays = [{"vendor_id": "v-new", "vendor_name": "New Co", "amount": 1000, "tds_amount": 0}]
     rep = build_aging_by_vendor(bills, pays, [], as_of_iso="2026-02-01")
     flat = build_aging(bills, pays, [], as_of_iso="2026-02-01")
-    assert rep["totals"]["net_payable"] == flat["net_payable"] == 6780.0
+    assert rep["totals"]["owed"] == flat["owed"] == 7780.0
+    assert rep["totals"]["net_payable"] == flat["net_payable"] == 7780.0
+    assert rep["totals"]["advances"] == flat["advances"] == 1000.0
     assert rep["totals"]["unallocated_credits"] == 1000.0
     assert {v["vendor_id"] for v in rep["vendors"]} == {"v1", "v-new"}
     assert next(v for v in rep["vendors"] if v["vendor_id"] == "v-new")["vendor_name"] == "New Co"

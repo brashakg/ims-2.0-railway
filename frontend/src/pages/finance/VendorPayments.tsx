@@ -77,8 +77,23 @@ export function SupplierFiguresShop() {
   );
 }
 
+/** THE ONE 'WE OWE' RULE (audit F56), from the signed per-supplier ledger
+ *  balances: what we owe is the sum of the balances above 0; money paid ahead
+ *  to suppliers (the balances below 0) is a figure apart, never taken off it --
+ *  one supplier's advance does not pay another's bills. Each row keeps its own
+ *  signed balance. */
+function owedAndAdvances(vendorPayments: VendorPaymentData[]) {
+  let owed = 0;
+  let advances = 0;
+  for (const v of vendorPayments) {
+    if (v.amount_due > 0) owed += v.amount_due;
+    else if (v.amount_due < 0) advances -= v.amount_due;
+  }
+  return { owed, advances };
+}
+
 export default function VendorPayments({ vendorPayments }: VendorPaymentsProps) {
-  const totalDue = vendorPayments.reduce((s, v) => s + v.amount_due, 0);
+  const { owed: totalDue, advances } = owedAndAdvances(vendorPayments);
   // Only a supplier we still owe has a due: an advance or a settled account
   // is not one (same sign rule as the status badge).
   const withDues = vendorPayments.filter((v) => v.amount_due > 0).length;
@@ -88,10 +103,15 @@ export default function VendorPayments({ vendorPayments }: VendorPaymentsProps) 
     <div className="space-y-6">
       <SupplierFiguresShop />
       {/* Summary */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <div className="bg-white border border-gray-200 rounded-lg p-4">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        <div className="bg-white border border-gray-200 rounded-lg p-4" data-testid="vp-total-payable">
           <p className="text-sm text-slate-600">Total Payable</p>
           <p className="text-2xl font-bold text-gray-900 mt-1">{formatCurrency(totalDue)}</p>
+        </div>
+        <div className="bg-white border border-gray-200 rounded-lg p-4" data-testid="vp-advances">
+          <p className="text-sm text-slate-600">Advances</p>
+          <p className="text-2xl font-bold text-blue-700 mt-1">{formatCurrency(advances)}</p>
+          <p className="text-xs text-slate-500 mt-1">Paid ahead to suppliers; not taken off the Total Payable</p>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <p className="text-sm text-slate-600">Vendors with Dues</p>
