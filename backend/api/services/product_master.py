@@ -2665,6 +2665,20 @@ def create_product(
     return created
 
 
+def strict_find_many(product_repo, flt: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """find_many that RAISES on a read error. BaseRepository.find_many prints
+    and returns [] -- for a duplicate check that is "nothing exists", a
+    licence to create a twin. Reads the raw collection when there is one; a
+    repo may offer its own `find_many_strict` (the PO's order-aware view)."""
+    own = getattr(product_repo, "find_many_strict", None)
+    if callable(own):
+        return list(own(flt))
+    coll = getattr(product_repo, "collection", None)
+    if coll is not None and callable(getattr(coll, "find", None)):
+        return list(coll.find(flt))
+    return list(product_repo.find_many(flt) or [])
+
+
 def _keyed_before_eye_size(
     spine: Dict[str, Any], key: str, product_repo
 ) -> Optional[Dict[str, Any]]:
@@ -2724,14 +2738,23 @@ def identity_conflict(spine: Dict[str, Any], product_repo) -> Optional[ProductMa
     ):
         return None
     prefix = key + "|"
-    sized = [
-        p
-        for p in product_repo.find_many(
-            {"identity_key": {"$regex": "^" + re.escape(prefix)}}
+    try:
+        rows = strict_find_many(
+            product_repo, {"identity_key": {"$regex": "^" + re.escape(prefix)}}
         )
-        or []
-        if str(p.get("identity_key") or "").startswith(prefix)
-    ]
+    except Exception as exc:  # noqa: BLE001
+        # Fail loud: a swallowed read would answer "no sized rows" and let a
+        # sizeless twin through.
+        logger.error("[PRODUCT_MASTER] eye-size check could not read %s*: %s", prefix, exc)
+        err = ProductMasterError(
+            "Could not check the catalogue for this item's eye sizes, so nothing "
+            "was created. Try again.",
+            status=503,
+            field="lens_size",
+        )
+        err.code = "CATALOGUE_UNREADABLE"
+        return err
+    sized = [p for p in rows if str(p.get("identity_key") or "").startswith(prefix)]
     if not sized:
         return None
     sizes = sorted({str(existing_product_summary(p).get("size")) for p in sized})

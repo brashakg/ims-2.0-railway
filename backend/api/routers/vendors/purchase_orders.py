@@ -75,6 +75,9 @@ class _WithThisOrder:
     def find_many(self, flt, *a, **k):
         return list(self.planned) + list(self.repo.find_many(flt, *a, **k) or [])
 
+    def find_many_strict(self, flt):
+        return list(self.planned) + _pm.strict_find_many(self.repo, flt)
+
 
 def _refuse_items_we_already_have(items, product_repo) -> dict:
     """Audit C2: a typed-in line that describes a product we ALREADY have
@@ -144,6 +147,12 @@ def _refuse_items_we_already_have(items, product_repo) -> dict:
                 already.append({"line": idx, "existing": err.conflict})
         elif err.code == "EYE_SIZE_NEEDED":
             need_size.append({"line": idx, "sizes": err.sizes, "message": err.message})
+        else:
+            # The check itself failed (the catalogue could not be read): refuse.
+            raise HTTPException(
+                status_code=err.status,
+                detail={"code": err.code or "NEW_PRODUCT_INVALID", "message": err.message, "field": err.field},
+            )
     def _named(e: dict) -> str:
         size = f", size {e['size']}" if e.get("size") else ""
         return f"{e.get('name') or e.get('sku')}{size} (SKU {e.get('sku')})"

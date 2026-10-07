@@ -2884,3 +2884,27 @@ def test_r5_a_bills_ask_for_two_items_waits_for_both(world):
     assert len(_asks(world)) == 1
     world.finish_draft(carrera, offer=6490)
     assert not _asks(world)
+
+
+def test_r5_the_eye_size_check_refuses_loudly_when_it_cannot_read(world, monkeypatch):
+    # Review round 5, pass 3: BaseRepository.find_many swallows a read error
+    # and returns [], so the check read "no sized rows" and the sizeless twin
+    # was created.
+    world.catalogue_frame("Boss", "BOSS 1700", "C2", "52", mrp=2990, offer=2790, cost=1200)
+    real_find = world.db.products.find
+
+    def _find(flt=None, *a, **k):
+        if "$regex" in str((flt or {}).get("identity_key", "")):
+            raise RuntimeError("read timed out")
+        return real_find(flt, *a, **k)
+
+    monkeypatch.setattr(world.db.products, "find", _find)
+    refused = _refused_po(
+        world, [{"new_product": dict(BOSS_TYPED, size=None), "quantity": 1, "unit_price": 1200}]
+    )
+    finding(
+        refused is not None and refused.status_code == 503,
+        f"R5: the eye-size check passed when it could not read ({getattr(refused, 'detail', None)})",
+    )
+    monkeypatch.setattr(world.db.products, "find", real_find)
+    assert len(world.products_named("Boss", "BOSS 1700")) == 1
