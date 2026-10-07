@@ -477,6 +477,34 @@ def test_d7_counter_role_reading_a_valued_transfer_sees_no_cost(db):
     assert _shows_amount(seen, UNIT_COST) and _shows_amount(seen, 2 * UNIT_COST)
 
 
+def test_d7_workshop_staff_pick_ship_and_receive_replies_carry_no_cost(db):
+    """WORKSHOP_STAFF picks, ships and receives (the only non-cost role on those
+    four routes, owner 09-29: workshop staff never see prices paid). The line
+    is costed from the start, as a BOPIS line is; ship stamps the units' own
+    cost. None of the four replies may carry it."""
+    t = _create("ST-BOK-1", unit_cost=UNIT_COST)
+    line_id = t["items"][0]["id"]
+    picker = _user("WORKSHOP_STAFF")
+    receiver = _user("WORKSHOP_STAFF", "ST-BOK-1")
+    replies = {
+        "start-picking": _run(transfers.start_picking(t["id"], picker)),
+        "complete-picking": _run(transfers.complete_picking(
+            t["id"], [{"item_id": line_id, "quantity_picked": 2}], picker
+        )),
+        "ship": _run(transfers.ship_transfer(t["id"], None, None, None, False, picker)),
+        "receive": _run(transfers.receive_transfer(
+            t["id"],
+            [transfers.TransferItemReceive(transfer_item_id=line_id, quantity_received=2)],
+            receiver,
+        )),
+    }
+    for route, reply in replies.items():
+        text = json.dumps(reply, default=str)
+        assert not _shows_amount(text, UNIT_COST), route
+        assert not _shows_amount(text, 2 * UNIT_COST), route
+    assert transfers._get_transfer(t["id"])["total_value"] == pytest.approx(2 * UNIT_COST)
+
+
 # ===========================================================================
 # Where the value comes from when a unit carries no cost of its own
 # ===========================================================================
