@@ -2429,6 +2429,10 @@ async def draft_invoice_from_grn(
         "po_id": po_id,
         "grn_id": grn_id,
         "grn_number": grn.get("grn_number"),
+        # The shop the bill will book to -- the booking's own rule (F63), so
+        # the form can say it on every door, the deep link included.
+        "store_id": _receipt_store_id(db, grn, None)
+        or current_user.get("active_store_id"),
         "lines": computed["lines"],
         "taxable_total": computed["taxable_total"],
         "cgst_total": computed["cgst_total"],

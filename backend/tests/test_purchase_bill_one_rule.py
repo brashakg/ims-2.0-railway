@@ -245,6 +245,8 @@ class TestTheShopsOwnRegistration:
         doc = cli.post(_URL, json=body).json()
         assert doc["recipient_gstin"] == BUY_MH and doc["interstate"] is False
         assert (doc["cgst_total"], doc["sgst_total"], doc["igst_total"]) == (25.0, 25.0, 0.0)
+        # The draft names the shop the bill books to (the form says it).
+        assert draft["store_id"] == doc["store_id"] == "PUNE"
         po_verdict = _po_gst_parties(db.collections["vendors"][0], pune)["interstate"]
         assert po_verdict is doc["interstate"] is False
 
@@ -316,6 +318,7 @@ class TestTheRecipientIsNeverGuessed:
         assert draft["recipient_entity_id"] == doc["recipient_entity_id"] == "E1"
         assert draft["recipient_gstin"] == doc["recipient_gstin"] == BUY_JH
         assert draft["interstate"] is doc["interstate"] is True
+        assert draft["store_id"] == doc["store_id"] == "S1"
 
     def test_a_typed_gstin_is_checked_even_when_the_company_lists_none(self):
         """P16: a company with no registrations on file cannot vouch for a
