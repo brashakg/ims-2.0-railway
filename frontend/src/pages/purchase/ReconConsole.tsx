@@ -1252,7 +1252,7 @@ export default function ReconConsole() {
             One queue of purchase invoices — attest each (Reconciled / Tally / GST / Paid), batch-confirm auto-matched ones
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <PurchaseShopPicker />
           {invoices.length > 0 && (
             <span className="text-xs text-gray-500 bg-gray-100 px-2.5 py-1 rounded-full">
