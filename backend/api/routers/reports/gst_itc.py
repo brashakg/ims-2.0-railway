@@ -1,5 +1,10 @@
 """Vendor-bill ITC, stock-transfer and credit-note helpers for the GST returns."""
 
+import re
+from datetime import date
+
+from ...services.ap_engine import iso_bill_date
+from ...services.org_validation import itc_claimable, shop_gstins
 
 # ============================================================================
 # GST RETURNS - GSTR-3B (Summary Return)
@@ -10,39 +15,67 @@ _DEAD_BILL = ["CANCELLED", "cancelled", "VOID", "voided"]
 
 
 def _itc_store_scope(db, active_store):
-    """(entity_id, gstin, shops) of the store whose return is being filed:
-    `shops` is every store that carries the same GSTIN (just this one when it
-    has none) -- the shops whose receipts that one filing covers. Fail-soft."""
+    """(entity_id, gstin, shops) of the store whose return is being filed.
+    `gstin` is THE shop's GSTIN (org_validation.shop_gstin -- the one the
+    bill door books its purchases on), '' when it has none; `shops` is every
+    store whose GSTIN is the same (just this one when it has none) -- the
+    shops whose receipts that one filing covers. Reading the raw stores.gstin
+    here put a bill booked on a GSTIN-less shop's company number on no return
+    at all. Fail-soft."""
     try:
-        row = db["stores"].find_one(
-            {"store_id": active_store}, {"entity_id": 1, "gstin": 1}
-        )
-        gstin = str((row or {}).get("gstin", "") or "").strip()
-        shops = {active_store}
-        if gstin:
-            shops.update(
-                s.get("store_id")
-                for s in db["stores"].find({"gstin": gstin}, {"store_id": 1})
-            )
+        gstins = shop_gstins(db)
+        row = db["stores"].find_one({"store_id": active_store}, {"entity_id": 1})
     except Exception:
         return None, "", [active_store]
-    return (row or {}).get("entity_id"), gstin, sorted(x for x in shops if x)
+    gstin = gstins.get(active_store, "")
+    shops = {active_store}
+    if gstin:
+        shops.update(sid for sid, g in gstins.items() if g == gstin)
+    return (row or {}).get("entity_id"), gstin, sorted(shops)
+
+
+def _month_days(year, mon, last_day) -> list:
+    """THE days of a GST return's month: each day of the month that THE
+    bill-date rule every door books through (ap_engine.iso_bill_date: a real
+    calendar day from the start of GST to today in IST) accepts. A bill is in
+    the month when the first ten characters of its date are one of them (a
+    transfer mirror stores a full IST timestamp). Placement (_itc_month) and
+    the Cross-Check's unplaced count read this one list, so a stored non-day
+    like '2026-04-31' is on no month's return and flagged in every month --
+    a string range placed it on April's."""
+    days = []
+    for n in range(1, last_day + 1):
+        try:
+            days.append(iso_bill_date(date(year, mon, n).isoformat()))
+        except ValueError:
+            pass
+    return days
 
 
 def _itc_month(year, mon, last_day) -> list:
-    """The string-date month window (invoice_date / bill_date are ISO strings)."""
-    month_lo = f"{year:04d}-{mon:02d}-01"
-    month_hi = f"{year:04d}-{mon:02d}-{last_day:02d}T23:59:59"
-    return [
-        {"invoice_date": {"$gte": month_lo, "$lte": month_hi}},
-        {"bill_date": {"$gte": month_lo, "$lte": month_hi}},
-    ]
+    """The bills dated in the month (_month_days) on invoice_date or bill_date."""
+    day = {"$in": [re.compile("^" + d) for d in _month_days(year, mon, last_day)]}
+    return [{"invoice_date": day}, {"bill_date": day}]
 
 
-def _itc_match(shops, entity_id, store_gstin, year, mon, last_day) -> dict:
-    """THE placement of input credit on ONE GSTIN's GSTR-3B Table 4 -- the
-    single query every ITC read (the return, its GSTIN slice, the Cross-Check's
-    count of credit left off every return) is built from.
+def _dated(value) -> bool:
+    """Is a bill dated `value` on SOME month's return? The same rule as
+    _month_days, read on the day part: '' / '09/05/2026' / '2026-04-31' (no
+    such day) / '2062-05-09' / a non-string are on none."""
+    if not isinstance(value, str):
+        return False
+    try:
+        iso_bill_date(value[:10])
+    except ValueError:
+        return False
+    return True
+
+
+def _placement(shops, entity_id, store_gstin, year, mon, last_day) -> dict:
+    """THE placement of a vendor bill on ONE GSTIN's GSTR-3B -- the single
+    query Table 4 (input credit, _itc_match) and Table 3.1(d) (reverse charge,
+    _rcm_from_vendor_bills) are both built from, so a reverse-charge bill's
+    liability and its credit always land on the same return.
 
     A bill counts on the return of the GSTIN it was RECEIVED on: one GSTIN, one
     filing, so every store of a multi-store GSTIN produces the SAME Table 4 and
@@ -57,30 +90,31 @@ def _itc_match(shops, entity_id, store_gstin, year, mon, last_day) -> dict:
         outward supply (NEW-GST-TRANSFER-OUTWARD), and two shops sharing one
         GSTIN (a shop stamped with its company's other-state number) print the
         same Table 4, so the Cross-Check's once-per-GSTIN count is the same
-        whichever shop it meets first;
+        whichever shop it meets first. A shop with NO GSTIN keeps no mirror:
+        it files no return, so that credit is left off every return and
+        _itc_unplaced flags it;
       * a legacy purchase bill that names no GSTIN stays company-wide.
     Always scoped to the store's company (recipient_entity_id) when it has one,
-    and to live, ITC-eligible bills dated in the month.
+    and to live bills dated in the month.
     """
-    transfer_keep: list = []
+    # A transfer mirror this return does NOT keep. source_transfer_id uses
+    # {$exists,$ne None} to stay aligned with the sender-side collector
+    # (_transfer_outward_bills). A shop with no GSTIN files no return, so it
+    # keeps none: placed on to_store_id alone, a mirror into a shop its
+    # company holds no registration for read as filed (Cross-Check ITC 50,
+    # 'left off' MATCH) while the company's real return claimed nothing.
+    other_mirror: dict = {"source_transfer_id": {"$exists": True, "$ne": None}}
     if store_gstin:
-        transfer_keep.append({"recipient_gstin": store_gstin})
-    transfer_keep.append(
-        {"recipient_gstin": {"$in": ["", None]}, "to_store_id": {"$in": list(shops)}}
-    )
+        other_mirror["$nor"] = [
+            {"recipient_gstin": store_gstin},
+            {"recipient_gstin": {"$in": ["", None]}, "to_store_id": {"$in": list(shops)}},
+        ]
     this_gstin = ["", None] + ([store_gstin] if store_gstin else [])
     vb_match: dict = {
         "status": {"$nin": _DEAD_BILL},
-        "itc_eligible": {"$ne": False},
         "$or": _itc_month(year, mon, last_day),
         "$nor": [
-            # A transfer mirror meeting NEITHER keep-condition. source_transfer_id
-            # uses {$exists,$ne None} to stay aligned with the sender-side
-            # collector (_transfer_outward_bills).
-            {
-                "source_transfer_id": {"$exists": True, "$ne": None},
-                "$nor": transfer_keep,
-            },
+            other_mirror,
             # A purchase bill received on ANOTHER of our GSTINs.
             {"source_transfer_id": None, "recipient_gstin": {"$nin": this_gstin}},
         ],
@@ -90,8 +124,36 @@ def _itc_match(shops, entity_id, store_gstin, year, mon, last_day) -> dict:
     return vb_match
 
 
-def _sum_itc(db, match):
-    """(igst, cgst, sgst) summed from the bills' own stored heads."""
+def _itc_match(shops, entity_id, store_gstin, year, mon, last_day) -> dict:
+    """Table 4: the bills _placement puts on this GSTIN's return that carry
+    input credit -- every ITC read (the return, its GSTIN slice, the
+    Cross-Check's count of credit left off every return) is built from it."""
+    return {
+        **_placement(shops, entity_id, store_gstin, year, mon, last_day),
+        "itc_eligible": {"$ne": False},
+    }
+
+
+def _gstin_bound(shops, store_gstin) -> dict:
+    """The GSTIN-BOUND part of a return (R1): bills received on this GSTIN,
+    plus GSTIN-less transfer mirrors received at any shop carrying it. The
+    rest of a placed figure is company-wide (legacy bills naming no GSTIN),
+    so the Cross-Check counts this part once per GSTIN, the rest once per
+    company."""
+    bound: list = [
+        {
+            "source_transfer_id": {"$exists": True, "$ne": None},
+            "recipient_gstin": {"$in": ["", None]},
+            "to_store_id": {"$in": list(shops)},
+        }
+    ]
+    if store_gstin:
+        bound.insert(0, {"recipient_gstin": store_gstin})
+    return {"$or": bound}
+
+
+def _sum_heads(db, match):
+    """(igst, cgst, sgst, taxable) summed from the bills' own stored heads."""
     pipeline = [
         {"$match": match},
         {
@@ -100,18 +162,17 @@ def _sum_itc(db, match):
                 "igst": {"$sum": "$igst_total"},
                 "cgst": {"$sum": "$cgst_total"},
                 "sgst": {"$sum": "$sgst_total"},
+                "taxable": {"$sum": "$taxable_amount"},
             }
         },
     ]
     res = list(db["vendor_bills"].aggregate(pipeline))
     if res:
         a = res[0]
-        return (
-            float(a.get("igst", 0.0) or 0.0),
-            float(a.get("cgst", 0.0) or 0.0),
-            float(a.get("sgst", 0.0) or 0.0),
+        return tuple(
+            float(a.get(k, 0.0) or 0.0) for k in ("igst", "cgst", "sgst", "taxable")
         )
-    return 0.0, 0.0, 0.0
+    return 0.0, 0.0, 0.0, 0.0
 
 
 def _itc_from_vendor_bills(db, active_store, year, mon, last_day):
@@ -124,9 +185,9 @@ def _itc_from_vendor_bills(db, active_store, year, mon, last_day):
         return 0.0, 0.0, 0.0
     try:
         entity_id, store_gstin, shops = _itc_store_scope(db, active_store)
-        return _sum_itc(
+        return _sum_heads(
             db, _itc_match(shops, entity_id, store_gstin, year, mon, last_day)
-        )
+        )[:3]
     except Exception:
         pass
     return 0.0, 0.0, 0.0
@@ -135,8 +196,8 @@ def _itc_from_vendor_bills(db, active_store, year, mon, last_day):
 def _itc_gstin_from_vendor_bills(db, active_store, year, mon, last_day):
     """R1: the GSTIN-BOUND slice of Table-4 ITC -- every bill received on this
     store's GSTIN (purchase bills and transfer mirrors alike), plus transfer
-    mirrors with no GSTIN received at any shop carrying that GSTIN (at this
-    shop alone when it has none). Returns (igst, cgst, sgst); fail-soft ->
+    mirrors with no GSTIN received at any shop carrying that GSTIN (nothing
+    when it has none). Returns (igst, cgst, sgst); fail-soft ->
     zeros.
 
     The same _itc_match AND-ed with the GSTIN binding, so (this) + (the
@@ -150,17 +211,8 @@ def _itc_gstin_from_vendor_bills(db, active_store, year, mon, last_day):
         return 0.0, 0.0, 0.0
     try:
         entity_id, store_gstin, shops = _itc_store_scope(db, active_store)
-        bound: list = [
-            {
-                "source_transfer_id": {"$exists": True, "$ne": None},
-                "recipient_gstin": {"$in": ["", None]},
-                "to_store_id": {"$in": shops},
-            }
-        ]
-        if store_gstin:
-            bound.insert(0, {"recipient_gstin": store_gstin})
         match = _itc_match(shops, entity_id, store_gstin, year, mon, last_day)
-        return _sum_itc(db, {"$and": [match, {"$or": bound}]})
+        return _sum_heads(db, {"$and": [match, _gstin_bound(shops, store_gstin)]})[:3]
     except Exception:
         pass
     return 0.0, 0.0, 0.0
@@ -169,65 +221,77 @@ def _itc_gstin_from_vendor_bills(db, active_store, year, mon, last_day):
 def _itc_unplaced(db, year, mon, last_day, entity_id=None) -> dict:
     """Booked input credit that NO GSTIN's GSTR-3B counts this month: a bill
     with no company (recipient_entity_id null -- every screen bill before F40),
-    a bill whose GSTIN is no shop's, or a bill with tax but no stored heads
-    (Table 4 sums the heads). Placement is _itc_match run for every shop that
-    has a company (the Cross-Check never counts a company-less shop's credit),
-    so this cannot disagree with the returns. Scoped to `entity_id` plus the
-    company-less bills (they belong to nobody, so every view shows them).
+    a bill whose GSTIN is no shop's, a bill with tax but no stored heads
+    (Table 4 sums the heads), or a bill no month can place (not _dated: listed
+    in every month, since it is on none). Placement is _itc_match run for
+    every shop that has a company, on THE shop's GSTIN (org_validation.
+    shop_gstins, the same answer GSTR-3B's scope reads), so this cannot
+    disagree with the returns. A shop with no company places nothing: its
+    GSTR-3B has no company filter, so it would mark every company's
+    GSTIN-less bill as placed while the Cross-Check counts none of its credit.
+    Scoped to `entity_id` plus the company-less bills (they belong to nobody,
+    so every view shows them).
 
-    Also `unregistered`: credit that IS on a return although the supplier has
-    no GSTIN (neither on the bill nor on the vendor) and the bill is not
-    reverse charge -- an unregistered supplier's tax never reaches GSTR-2B, so
-    that credit cannot be claimed.
+    Also `unregistered`: credit that IS on a return although the bill names no
+    supplier GSTIN and is not reverse charge -- an unregistered supplier's tax
+    never reaches GSTR-2B, so that credit cannot be claimed. The bill's stored
+    vendor_gstin judges it, never the vendor master: the head was decided
+    without the supplier's state, so a GSTIN added to the supplier later
+    leaves the bill's head wrong.
 
     Returns {count, tax, bill_numbers, unregistered: {count, tax,
-    bill_numbers}}. A read failure returns {failed: True} -- never zeros, which
+    bill_numbers, transfer_bill_numbers}, denied_transfers: [{bill_number,
+    from_shop, tax}]} (denied_transfers = mirrors given NO credit because the
+    sender has no valid GSTIN; unregistered's last lists the stock-transfer
+    mirror bills among them -- the system made those, no one booked them). A read failure returns {failed: True} -- never zeros, which
     the Cross-Check would show as a green row."""
     out = {"count": 0, "tax": 0.0, "bill_numbers": []}
-    unreg = {"count": 0, "tax": 0.0, "bill_numbers": []}
+    denied: dict = {"transfers": []}
+    unreg = {"count": 0, "tax": 0.0, "bill_numbers": [], "transfer_bill_numbers": []}
     if db is None:
-        return {**out, "unregistered": unreg}
+        return {**out, "unregistered": unreg, "denied_transfers": []}
 
     def _add(acc, bill, tax):
         acc["count"] += 1
         acc["tax"] = round(acc["tax"] + tax, 2)
         acc["bill_numbers"].append(bill.get("bill_number") or bill.get("bill_id"))
 
+    days = set(_month_days(year, mon, last_day))
     try:
-        stores = list(
-            db["stores"].find({}, {"_id": 0, "store_id": 1, "entity_id": 1, "gstin": 1})
-        )
+        gstins = shop_gstins(db)
         by_gstin: dict = {}
-        for st in stores:
-            g = str(st.get("gstin") or "").strip()
+        for sid, g in gstins.items():
             if g:
-                by_gstin.setdefault(g, []).append(st.get("store_id"))
+                by_gstin.setdefault(g, []).append(sid)
         placed = set()
-        for st in stores:
-            if not st.get("entity_id"):
+        filings = set()
+        for st in db["stores"].find({}, {"_id": 0, "store_id": 1, "entity_id": 1}):
+            eid = st.get("entity_id")
+            if not eid:
                 continue
-            g = str(st.get("gstin") or "").strip()
+            g = gstins.get(st.get("store_id"), "")
+            filing = (eid, g or st.get("store_id"))
+            if filing in filings:
+                continue  # one GSTIN, one filing: same placement
+            filings.add(filing)
             match = _itc_match(
-                by_gstin.get(g) or [st.get("store_id")],
-                st.get("entity_id"),
-                g,
-                year,
-                mon,
-                last_day,
+                by_gstin.get(g) or [st.get("store_id")], eid, g, year, mon, last_day
             )
             placed.update(
                 b.get("bill_id")
                 for b in db["vendor_bills"].find(match, {"_id": 0, "bill_id": 1})
             )
-        q: dict = {
-            "status": {"$nin": _DEAD_BILL},
-            "itc_eligible": {"$ne": False},
-            "$or": _itc_month(year, mon, last_day),
-        }
+        q: dict = {"status": {"$nin": _DEAD_BILL}, "itc_eligible": {"$ne": False}}
         if entity_id:
             q["recipient_entity_id"] = {"$in": [entity_id, None]}
-        vendor_gstin: dict = {}
+        # ponytail: reads every live bill of the scope -- an undated bill is
+        # in no month's window, yet is listed in every month; add a
+        # "this month or undated" prefilter if this grows slow.
         for b in db["vendor_bills"].find(q, {"_id": 0}):
+            dates = (b.get("invoice_date"), b.get("bill_date"))
+            in_month = any(isinstance(d, str) and d[:10] in days for d in dates)
+            if not in_month and any(_dated(d) for d in dates):
+                continue  # another month's return places it
             tax = round(float(b.get("tax_amount") or 0), 2)
             if tax <= 0:
                 continue
@@ -235,17 +299,43 @@ def _itc_unplaced(db, year, mon, last_day, entity_id=None) -> dict:
             if b.get("bill_id") not in placed or not has_heads:
                 _add(out, b, tax)
                 continue
-            if b.get("reverse_charge") or str(b.get("vendor_gstin") or "").strip():
-                continue
-            vid = b.get("vendor_id")
-            if vid not in vendor_gstin:
-                v = db["vendors"].find_one({"vendor_id": vid}, {"_id": 0, "gstin": 1})
-                vendor_gstin[vid] = str((v or {}).get("gstin") or "").strip()
-            if not vendor_gstin[vid]:
+            # The bill's own supplier GSTIN decided its head; the vendor
+            # master's current one did not, so it never clears the bill.
+            if not itc_claimable(b.get("vendor_gstin"), b.get("reverse_charge")):
                 _add(unreg, b, tax)
+                if b.get("source_transfer_id"):
+                    unreg["transfer_bill_numbers"].append(
+                        b.get("bill_number") or b.get("bill_id")
+                    )
+        # Transfer mirrors whose credit IS denied (the sending shop has no valid
+        # GSTIN): the right verdict, but the filer must be told, so they are
+        # listed for the Cross-Check. Same scope and month window as above.
+        dq: dict = {
+            "status": {"$nin": _DEAD_BILL},
+            "itc_eligible": False,
+            "source_transfer_id": {"$exists": True, "$ne": None},
+        }
+        if entity_id:
+            dq["recipient_entity_id"] = {"$in": [entity_id, None]}
+        denied["transfers"] = []
+        for b in db["vendor_bills"].find(dq, {"_id": 0}):
+            dates = (b.get("invoice_date"), b.get("bill_date"))
+            in_month = any(isinstance(d, str) and d[:10] in days for d in dates)
+            if not in_month and any(_dated(d) for d in dates):
+                continue
+            tax = round(float(b.get("tax_amount") or 0), 2)
+            if tax <= 0 or itc_claimable(b.get("vendor_gstin"), b.get("reverse_charge")):
+                continue
+            denied["transfers"].append(
+                {
+                    "bill_number": b.get("bill_number") or b.get("bill_id"),
+                    "from_shop": b.get("vendor_name") or b.get("vendor_id") or "",
+                    "tax": tax,
+                }
+            )
     except Exception:
         return {"count": 0, "tax": 0.0, "bill_numbers": [], "failed": True}
-    return {**out, "unregistered": unreg}
+    return {**out, "unregistered": unreg, "denied_transfers": denied["transfers"]}
 
 
 def _transfer_outward_bills(db, active_store, year, mon, last_day):
@@ -269,16 +359,11 @@ def _transfer_outward_bills(db, active_store, year, mon, last_day):
     if db is None:
         return []
     try:
-        month_lo = f"{year:04d}-{mon:02d}-01"
-        month_hi = f"{year:04d}-{mon:02d}-{last_day:02d}T23:59:59"
         query = {
             "source_transfer_id": {"$exists": True, "$ne": None},
             "from_store_id": active_store,
-            "status": {"$nin": ["CANCELLED", "cancelled", "VOID", "voided"]},
-            "$or": [
-                {"invoice_date": {"$gte": month_lo, "$lte": month_hi}},
-                {"bill_date": {"$gte": month_lo, "$lte": month_hi}},
-            ],
+            "status": {"$nin": _DEAD_BILL},
+            "$or": _itc_month(year, mon, last_day),
         }
         return [b for b in db["vendor_bills"].find(query) if isinstance(b, dict)]
     except Exception:

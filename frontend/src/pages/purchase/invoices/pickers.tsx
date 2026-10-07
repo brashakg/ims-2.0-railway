@@ -21,6 +21,7 @@ import { PurchaseShopName, usePurchaseShop } from '../purchaseShop';
 import { matchingTotal } from '../purchaseQueries';
 import type { Supplier } from '../purchaseTypes';
 import { errMsg } from './shared';
+import { istDayString } from '../../../utils/datetime';
 
 /** On All stores, each row of a Purchase list names the shop it belongs to --
  *  the shop a bill, receipt or return is booked to, the shop an order
@@ -39,13 +40,15 @@ function ScopeWords({ storeId }: { storeId?: string }) {
 }
 
 // ============================================================================
-// GRN picker: choose an ACCEPTED GRN to bill, calls createFromGrn for a draft
+// GRN picker: choose an ACCEPTED GRN to bill. `onPick` is the tab's one
+// from-GRN door (the deep link uses it too), so a refused draft behaves the
+// same whichever way the receipt was opened.
 // ============================================================================
 export function GrnPickerModal({
-  onClose, onPicked,
+  onClose, onPick,
 }: {
   onClose: () => void;
-  onPicked: (prefill: Partial<PurchaseInvoice>, lines: PurchaseInvoiceLine[]) => void;
+  onPick: (grnId: string) => Promise<void>;
 }) {
   const toast = useToast();
   const { storeId, canPick } = usePurchaseShop(); // audit F63: the invoice list's scope
@@ -84,46 +87,10 @@ export function GrnPickerModal({
     })();
   }, [storeId]);
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const pick = async (grn: any) => {
-    const grnId = grn.grn_id;
+  const pick = async (grnId: string) => {
     setBusyId(grnId);
     try {
-      const draft = await purchaseInvoicesApi.createFromGrn(grnId);
-      onPicked(
-        {
-          vendor_id: draft.vendor_id ?? grn.vendor_id,
-          vendor_name: draft.vendor_name ?? grn.vendor_name,
-          vendor_invoice_no: draft.vendor_invoice_no ?? grn.vendor_invoice_no,
-          vendor_invoice_date: draft.vendor_invoice_date ?? grn.vendor_invoice_date,
-          po_id: draft.po_id ?? grn.po_id,
-          po_number: draft.po_number ?? grn.po_number,
-          grn_id: draft.grn_id ?? grnId,
-          grn_number: draft.grn_number ?? grn.grn_number,
-          vendor_gstin: draft.vendor_gstin,
-          recipient_gstin: draft.recipient_gstin,
-          store_id: draft.store_id ?? grn.store_id,
-        },
-        draft.lines ?? [],
-      );
-    } catch (e) {
-      // Fail-soft: backend draft route not ready -> still let the user proceed
-      // with a header prefilled from the GRN; they fill the lines manually.
-      toast.warning(errMsg(e, 'Could not auto-prefill from GRN; opening a blank invoice for this GRN.'));
-      onPicked(
-        {
-          vendor_id: grn.vendor_id,
-          vendor_name: grn.vendor_name,
-          vendor_invoice_no: grn.vendor_invoice_no,
-          vendor_invoice_date: grn.vendor_invoice_date,
-          po_id: grn.po_id,
-          po_number: grn.po_number,
-          grn_id: grnId,
-          grn_number: grn.grn_number,
-          store_id: grn.store_id,
-        },
-        [],
-      );
+      await onPick(grnId);
     } finally {
       setBusyId(null);
     }
@@ -192,7 +159,7 @@ export function GrnPickerModal({
                       {busyId === g.grn_id ? <Loader2 className="w-4 h-4 animate-spin" /> : null} Ask for cataloguing
                     </button>
                   ) : (
-                    <button type="button" onClick={() => pick(g)} disabled={busyId === g.grn_id} className="btn sm primary disabled:opacity-60">
+                    <button type="button" onClick={() => pick(g.grn_id)} disabled={busyId === g.grn_id} className="btn sm primary disabled:opacity-60">
                       {busyId === g.grn_id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />} Invoice
                     </button>
                   )}
@@ -222,8 +189,9 @@ export function DcPickerModal({
 }) {
   const toast = useToast();
   const { storeId } = usePurchaseShop(); // audit F63: the invoice list's scope
-  const todayIso = new Date().toISOString().slice(0, 10);
-  const thirtyAgoIso = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+  // IST days (owner ruling): the UTC day is yesterday from 00:00 to 05:30 IST.
+  const todayIso = istDayString(new Date()) ?? '';
+  const thirtyAgoIso = istDayString(Date.now() - 30 * 86400000) ?? '';
   const [vendorId, setVendorId] = useState('');
   const [dateFrom, setDateFrom] = useState(thirtyAgoIso);
   const [dateTo, setDateTo] = useState(todayIso);

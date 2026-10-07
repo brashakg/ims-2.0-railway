@@ -313,7 +313,9 @@ class _FakeDB:
                     ],
                 },
             ],
-            "stores": [{"store_id": "S1", "entity_id": "E1"}],
+            # Every shop is stamped with its state at birth (stores.create_store);
+            # its GSTIN is then its company's registration for that state.
+            "stores": [{"store_id": "S1", "entity_id": "E1", "state_code": "20"}],
         }
 
     def get_collection(self, name):
@@ -448,12 +450,14 @@ class TestCreateBooksApAndItc:
 
     def test_intrastate_create_books_cgst_sgst(self):
         db = _FakeDB()
-        # Make the recipient entity Maharashtra so it matches the MH supplier.
+        # Make the recipient entity (and its shop) Maharashtra so it matches
+        # the MH supplier.
         db.collections["entities"][0]["gstins"][0] = {
             "gstin": BUY_MH,
             "state_code": "27",
             "is_primary": True,
         }
+        db.collections["stores"][0]["state_code"] = "27"
         cli = _app(db)
         r = cli.post("/api/v1/vendors/purchase-invoices", json=_invoice_body())
         assert r.status_code == 201, r.text
@@ -531,25 +535,43 @@ class TestCreateBooksApAndItc:
         )
         assert r.status_code == 201, r.text
 
-    def test_explicit_recipient_gstin_overrides_entity(self):
+    def test_typed_recipient_gstin_cannot_override_the_receiving_shop(self):
+        """Round 12 item 1: goods received at S1 (Jharkhand registration) are
+        S1's, whatever number is typed. A company's OTHER registration typed
+        against them is refused, not booked onto the other return."""
         db = _FakeDB()
-        # E1 is a two-state entity: the typed MH GSTIN is one of its own
-        # registrations (a GSTIN the entity does not hold is refused -- see
-        # test_purchase_bill_matches_form).
         db.collections["entities"][0]["gstins"].append(
             {"gstin": BUY_MH, "state_code": "27", "is_primary": False}
         )
         cli = _app(db)
-        # Pass an explicit MH recipient GSTIN -> intra-state with the MH supplier.
         r = cli.post(
             "/api/v1/vendors/purchase-invoices",
             json=_invoice_body(recipient_gstin=BUY_MH, recipient_entity_id=None),
         )
-        assert r.status_code == 201, r.text
-        doc = r.json()
-        # Explicit MH recipient GSTIN -> intra-state with the MH supplier.
-        assert doc["place_of_supply"] == "27" and doc["interstate"] is False
-        assert doc["cgst_total"] == 25.0 and doc["igst_total"] == 0.0
+        assert r.status_code == 422, r.text
+        assert r.json()["detail"]["code"] == "RECIPIENT_GSTIN_NOT_RECEIPT_SHOP"
+        assert BUY_MH in r.json()["detail"]["message"]
+        assert not [x for x in db.collections.get("purchase_invoices", [])]
+
+    def test_receiving_shop_registration_is_the_recipient(self):
+        """The same GRN at a Maharashtra shop books intra-state on the MH
+        registration with the MH supplier (typed number absent or equal)."""
+        for typed in (None, BUY_MH):
+            db = _FakeDB()
+            db.collections["entities"][0]["gstins"].append(
+                {"gstin": BUY_MH, "state_code": "27", "is_primary": False}
+            )
+            db.collections["stores"][0].update({"state_code": "27", "gstin": BUY_MH})
+            cli = _app(db)
+            body = _invoice_body(recipient_entity_id=None)
+            body.pop("recipient_gstin", None)
+            if typed:
+                body["recipient_gstin"] = typed
+            r = cli.post("/api/v1/vendors/purchase-invoices", json=body)
+            assert r.status_code == 201, r.text
+            doc = r.json()
+            assert doc["recipient_gstin"] == BUY_MH and doc["interstate"] is False
+            assert doc["cgst_total"] == 25.0 and doc["igst_total"] == 0.0
 
 
 class TestRoleGating:
@@ -579,27 +601,22 @@ class TestRoleGating:
 
 
 class TestListAndGet:
-    def test_list_returns_only_purchase_invoices(self):
+    def test_list_returns_every_supplier_bill_but_no_transfer_mirror(self):
+        """A header-only bill (the Cash Flow '+ bill' door, no doc_type) is a
+        supplier bill the ITC register and GSTR-3B count, so the list shows
+        it too; a stock-transfer mirror is not a supplier bill."""
         db = _FakeDB()
-        # A legacy header-only bill (no doc_type) must NOT appear in the list.
-        db.collections["vendor_bills"].append(
-            {
-                "bill_id": "legacy1",
-                "vendor_id": "V1",
-                "bill_number": "OLD-1",
-                "total_amount": 500,
-            }
-        )
+        db.collections["vendor_bills"] += [
+            {"bill_id": "legacy1", "vendor_id": "V1", "bill_number": "OLD-1", "total_amount": 500},
+            {"bill_id": "m1", "bill_number": "TRF/T1", "source_transfer_id": "T1", "total_amount": 900},
+        ]
         cli = _app(db)
         cli.post("/api/v1/vendors/purchase-invoices", json=_invoice_body())
         r = cli.get("/api/v1/vendors/purchase-invoices")
         assert r.status_code == 200
         data = r.json()
-        assert data["total"] == 1
-        assert all(
-            row.get("doc_type") == "PURCHASE_INVOICE"
-            for row in data["purchase_invoices"]
-        )
+        assert data["total"] == 2
+        assert sorted(row["bill_number"] for row in data["purchase_invoices"]) == ["INV-001", "OLD-1"]
 
     def test_get_by_id(self):
         db = _FakeDB()
@@ -865,12 +882,13 @@ class TestDuplicateInvoiceRaceMaps409:
 
 
 class TestBillTaxHeadIsTheRegistrations:
-    def test_the_shops_address_does_not_override_the_registrations(self):
-        """MH supplier, goods at a shop whose address says Maharashtra, our
-        registration on the bill is Jharkhand: IGST, as the form shows --
-        not the CGST+SGST the address alone would imply."""
+    def test_the_shops_own_registration_decides_not_its_address(self):
+        """MH supplier, goods at a shop whose address says Maharashtra but
+        whose record carries our Jharkhand registration: IGST on that number
+        -- the registration decides the state (owner, 2026-09-30), not the
+        CGST+SGST the address alone would imply."""
         db = _FakeDB()
-        db.collections["stores"][0]["state_code"] = "27"  # S1's address: MH
+        db.collections["stores"][0].update({"state_code": "27", "gstin": BUY_JH})
         cli = _app(db)
         r = cli.post("/api/v1/vendors/purchase-invoices", json=_invoice_body())
         assert r.status_code == 201, r.text
@@ -894,13 +912,32 @@ class TestBillTaxHeadIsTheRegistrations:
         assert _receipt_store_id(db, {"store_id": "S3"}, ["DC1"]) == "S3"
         assert _receipt_store_id(db, None, None) is None
 
-    def test_store_without_declared_state_keeps_gstin_fallback(self):
-        """A store with NO declared state changes nothing: the registrations
-        answer (inter-state here)."""
-        db = _FakeDB()  # S1 carries no state_code / state
-        cli = _app(db)
-        r = cli.post("/api/v1/vendors/purchase-invoices", json=_invoice_body())
+    def test_a_shop_with_no_registration_of_its_company_is_refused(self):
+        """No GSTIN on the shop's record and its company holds none for the
+        shop's state (or it has no state): refused and nothing written --
+        never booked on the company's primary, which is another state's
+        return. The receipt carries no typed GSTIN (the from-GRN door)."""
+        for shop in ({"state_code": "27"}, {"state_code": None}):
+            db = _FakeDB()
+            db.collections["stores"][0].update(shop)
+            body = _invoice_body()
+            body.pop("recipient_gstin", None)
+            r = _app(db).post("/api/v1/vendors/purchase-invoices", json=body)
+            assert r.status_code == 422, r.text
+            assert r.json()["detail"]["code"] == "RECIPIENT_SHOP_HAS_NO_GSTIN"
+            assert db.collections["vendor_bills"] == []
+
+    def test_a_gstin_less_shop_receives_on_its_states_registration(self):
+        """Pune shop, no GSTIN on its record, company holds 20 (primary) and
+        27: a Maharashtra vendor's bill is CGST + SGST on the 27 number --
+        its PO's verdict -- not IGST on the primary."""
+        db = _FakeDB()
+        db.collections["entities"][0]["gstins"].append({"gstin": BUY_MH, "state_code": "27"})
+        db.collections["stores"][0]["state_code"] = "27"
+        body = _invoice_body()
+        body.pop("recipient_gstin", None)
+        r = _app(db).post("/api/v1/vendors/purchase-invoices", json=body)
         assert r.status_code == 201, r.text
         doc = r.json()
-        assert doc["supply_place_recipient"] == "20"
-        assert doc["interstate"] is True
+        assert doc["recipient_gstin"] == BUY_MH and doc["interstate"] is False
+        assert (doc["cgst_total"], doc["sgst_total"], doc["igst_total"]) == (25.0, 25.0, 0.0)

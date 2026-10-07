@@ -106,8 +106,10 @@ def test_a_longer_digit_run_is_not_a_state_code():
 # The requirement, at the door: a debit note reversing an inter-state purchase
 # ---------------------------------------------------------------------------
 
-MH_VENDOR = {"name": "Luxottica India", "state": "27-Maharashtra"}
-JH_SELLER = {"name": "BV Opticals", "state": "20-Jharkhand"}
+# The head is the BILL's (classify_supply on the two GSTINs); the portal-form
+# state is what the note prints as each party's state code.
+MH_VENDOR = {"name": "Luxottica India", "gstin": "27ABCDE1234F1Z5", "state": "27-Maharashtra"}
+JH_SELLER = {"name": "BV Opticals", "gstin": "20ZZZZZ9999Z1Z9", "state": "20-Jharkhand"}
 LINE = [{"sku": "RB1", "qty": 2, "unit_cost": 1000.0, "gst_rate": 18.0}]
 
 
@@ -132,8 +134,16 @@ def test_debit_note_on_a_portal_form_vendor_charges_igst_like_the_bill_did():
     assert pinv.state_code_of("20-Jharkhand") == "20"
 
 
+def test_a_typed_state_without_a_gstin_is_intra_like_the_bill():
+    """The bill books a supplier with no GSTIN intra-state (classify_supply);
+    the note reversing it must too, or the reversal lands on the other head."""
+    note = _note({"name": "Local Fitter", "state": "27-Maharashtra"}, JH_SELLER)
+    assert note["vendor"]["state_code"] == "27"
+    assert note["is_inter_state"] is pinv.classify_supply(None, JH_SELLER["gstin"])["interstate"] is False
+
+
 def test_debit_note_within_one_state_still_splits_cgst_sgst():
-    note = _note(MH_VENDOR, {"name": "BV Mumbai", "state": "27-Maharashtra"})
+    note = _note(MH_VENDOR, {"name": "BV Mumbai", "gstin": "27ZZZZZ9999Z1Z9", "state": "27-Maharashtra"})
     assert note["is_inter_state"] is False
     ln = note["lines"][0]
     assert ln["cgst_paise"] == 18000

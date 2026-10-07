@@ -4,6 +4,7 @@
 // Import this directly (not via the services/api barrel) -- newly-added
 // services don't resolve through the barrel re-export (TS2614).
 
+import { cleanInvoiceId, firstInvoiceId, invoiceIdSegment, requireInvoiceId } from './requireId';
 import api from './client';
 import type { ReconBlock } from './purchaseRecon';
 
@@ -124,6 +125,8 @@ export interface PurchaseInvoice {
   recipient_gstin?: string;       // our GSTIN receiving the supply
   vendor_gstin?: string;
   is_interstate?: boolean;
+  // false = this bill claims NO input credit (server verdict, itc_claimable).
+  itc_eligible?: boolean;
   lines: PurchaseInvoiceLine[];
   taxable_amount: number;
   cgst: number;
@@ -268,6 +271,13 @@ export interface PurchaseInvoiceCreate {
   // What the bill is FOR ('GOODS' | 'SERVICES'). Required by the server on a
   // receipt-less booking; a GOODS bill refuses without its receipt link.
   bill_kind?: 'GOODS' | 'SERVICES';
+  // Reverse charge: we pay the tax, and may claim it even from an
+  // unregistered supplier. Server default false.
+  reverse_charge?: boolean;
+  // The user's own switch for input credit (server default true); the server
+  // still refuses credit when the supplier has no valid GSTIN and the bill is
+  // not reverse charge.
+  itc_eligible?: boolean;
 }
 
 // POST /preview: what the booking WILL store for the form as it stands (the
@@ -279,6 +289,8 @@ export interface PurchaseInvoicePreview {
   supplier_state?: string | null;
   supply_place_recipient?: string | null;
   interstate: boolean;
+  // Will the booking claim input credit? The server's one itc_claimable verdict.
+  itc_eligible?: boolean;
   lines: Array<{ taxable: number; gst_rate: number; cgst: number; sgst: number; igst: number; line_total: number }>;
   taxable_total: number;
   cgst_total: number;
@@ -433,6 +445,29 @@ export const vendorApApi = {
   },
 };
 
+// A server line -- a DRAFT's or a STORED bill's alike -- uses the create()
+// wire keys description / hsn / qty / taxable. Alias them onto the FE keys, the
+// exact reverse of toInvoiceWire: the draft's lines arrived blank with qty 1
+// (F37), and a booked bill's detail drawer read 'Line 1 | - | -' on every row.
+// A null / string / number / array entry is not an object row: drop it, never
+// throw (a throw in list() renders as an empty list, in createFromGrn as a toast).
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function isRow(x: unknown): x is Record<string, any> {
+  return !!x && typeof x === 'object' && !Array.isArray(x);
+}
+
+function mapLinesFromApi(lines: unknown): PurchaseInvoiceLine[] {
+  const objects = (Array.isArray(lines) ? lines : []).filter(isRow);
+  return objects.map((l) => ({
+    ...l,
+    // `||`, not `??`: an empty string is "not there", so the alias still wins.
+    product_name: l.product_name || l.description || '',
+    hsn_code: l.hsn_code || l.hsn || '',
+    quantity: l.quantity ?? l.qty ?? 0,
+    taxable_amount: l.taxable_amount ?? l.taxable,
+  })) as PurchaseInvoiceLine[];
+}
+
 // The stored vendor_bills doc uses invoice_number / bill_number for the
 // supplier invoice no, invoice_date / bill_date for the date, cgst_total /
 // sgst_total / igst_total for the GST split, and `interstate` for the tax-type
@@ -449,33 +484,43 @@ function mapInvoiceFromApi(doc: Record<string, any>): PurchaseInvoice {
     ...doc,
     // The stored doc carries bill_id / invoice_id; every Approve / match /
     // recon door acts on purchase_invoice_id (F7: they POSTed /undefined/).
-    purchase_invoice_id: doc.purchase_invoice_id ?? doc.bill_id ?? doc.invoice_id,
+    purchase_invoice_id: firstInvoiceId(
+      doc.purchase_invoice_id,
+      doc.bill_id,
+      doc.invoice_id,
+      doc.id,
+      doc._id,
+    ),
     vendor_invoice_no: doc.vendor_invoice_no ?? doc.invoice_number ?? doc.bill_number ?? '',
     vendor_invoice_date: doc.vendor_invoice_date ?? doc.invoice_date ?? doc.bill_date ?? '',
     cgst,
     sgst,
     igst,
-    is_interstate: doc.is_interstate ?? doc.interstate ?? igst > 0,
+    // A bill that never had a tax head decided (an old Cash Flow '+ bill': only
+    // taxable / tax / total) has NO verdict -- undefined, never a guessed
+    // CGST+SGST. The list shows it as 'Not set'.
+    is_interstate:
+      doc.is_interstate ??
+      doc.interstate ??
+      (['cgst', 'sgst', 'igst', 'cgst_total', 'sgst_total', 'igst_total'].some((k) => doc[k] != null)
+        ? igst > 0
+        : undefined),
+    lines: mapLinesFromApi(doc.lines),
   } as PurchaseInvoice;
 }
 
 // A server DRAFT (from-grn / from-dcs) uses the create() wire keys -- header
-// invoice_number / invoice_date, lines description / hsn / qty. Alias them onto
-// the FE keys, the exact reverse of create(), so the form shows the receipt's
-// products, HSNs and accepted quantities (F37: they arrived blank, qty 1).
+// invoice_number / invoice_date, lines as above.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function mapDraftFromApi(d: Record<string, any>): PurchaseInvoiceDraft {
+function mapDraftFromApi(raw: unknown): PurchaseInvoiceDraft {
+  // data: null (or anything that is not an object) is an empty draft, never a
+  // crash into the toast.
+  const d: Record<string, any> = isRow(raw) ? raw : {};
   return {
     ...d,
     vendor_invoice_no: d.vendor_invoice_no ?? d.invoice_number ?? '',
     vendor_invoice_date: d.vendor_invoice_date ?? d.invoice_date ?? '',
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    lines: ((d.lines ?? []) as Record<string, any>[]).map((l) => ({
-      ...l,
-      product_name: l.product_name ?? l.description ?? '',
-      hsn_code: l.hsn_code ?? l.hsn ?? '',
-      quantity: l.quantity ?? l.qty ?? 0,
-    })),
+    lines: mapLinesFromApi(d.lines),
   } as PurchaseInvoiceDraft;
 }
 
@@ -496,6 +541,8 @@ function toInvoiceWire(payload: PurchaseInvoiceCreate) {
     notes: payload.notes,
     linked_dc_ids: payload.linked_dc_ids,
     bill_kind: payload.bill_kind,
+    reverse_charge: payload.reverse_charge,
+    itc_eligible: payload.itc_eligible,
     lines: payload.lines.map((l) => ({
       product_id: l.product_id,
       description: l.product_name,
@@ -514,16 +561,15 @@ export const purchaseInvoicesApi = {
   list: async (params?: { vendor_id?: string; store_id?: string; status?: string }) => {
     try {
       const res = await api.get('/vendors/purchase-invoices', { params });
-      const d = res.data as { purchase_invoices?: Record<string, unknown>[]; total?: number };
-      const rows = (d.purchase_invoices ?? []).map(mapInvoiceFromApi);
+      const d = (res.data ?? {}) as { purchase_invoices?: unknown; total?: number };
+      // One null / junk row never blanks the list.
+      const rows = (Array.isArray(d.purchase_invoices) ? d.purchase_invoices : [])
+        .filter(isRow)
+        .map(mapInvoiceFromApi);
       return { purchase_invoices: rows, total: d.total ?? rows.length };
     } catch {
       return { purchase_invoices: [] as PurchaseInvoice[], total: 0 };
     }
-  },
-  get: async (id: string) => {
-    const res = await api.get(`/vendors/purchase-invoices/${id}`);
-    return res.data as PurchaseInvoice;
   },
   // Writes THROW so booking failures (validation, missing GRN, period lock) are
   // surfaced loudly to the user rather than silently swallowed.
@@ -533,7 +579,7 @@ export const purchaseInvoicesApi = {
   // this seam so the form code + TS types stay stable and the POST never 422s.
   create: async (payload: PurchaseInvoiceCreate) => {
     const res = await api.post('/vendors/purchase-invoices', toInvoiceWire(payload));
-    return mapInvoiceFromApi(res.data as Record<string, unknown>);
+    return mapInvoiceFromApi(isRow(res.data) ? res.data : {});
   },
   // What create() WOULD store for this payload -- recipient, tax head, every
   // line's split -- from the server's own booking math (POST /preview writes
@@ -601,8 +647,11 @@ export const purchaseInvoicesApi = {
   // (404/500) or the invoice has no PO/GRN to match -> the drawer hides the
   // section instead of throwing/white-screening.
   getMatch: async (id: string): Promise<PurchaseInvoiceMatch | null> => {
+    // A read: no id means no request (never GET /undefined/match), and null.
+    const key = cleanInvoiceId(id);
+    if (!key) return null;
     try {
-      const res = await api.get(`/vendors/purchase-invoices/${id}/match`);
+      const res = await api.get(`/vendors/purchase-invoices/${invoiceIdSegment(key)}/match`);
       const env = res.data as MatchEnvelope;
       const detail = env?.match_detail;
       if (detail && Array.isArray(detail.lines)) return detail;
@@ -621,7 +670,11 @@ export const purchaseInvoicesApi = {
     id: string,
     payload: { reason: string },
   ): Promise<ApproveExceptionResult> => {
-    const res = await api.post(`/vendors/purchase-invoices/${id}/approve-exception`, payload);
+    const key = requireInvoiceId(id);
+    const res = await api.post(
+      `/vendors/purchase-invoices/${invoiceIdSegment(key)}/approve-exception`,
+      payload,
+    );
     return res.data as ApproveExceptionResult;
   },
   // Phase 2: the active match/valuation settings (read-only display). Fail-soft

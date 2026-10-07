@@ -19,6 +19,7 @@ import {
 import { useToast } from '../../context/ToastContext';
 import { useStores } from '../../hooks/usePOSQueries';
 import { PurchaseShopName, usePurchaseShop } from '../purchase/purchaseShop';
+import { istDayString } from '../../utils/datetime';
 
 const inr = (n?: number) => `₹${Math.round(n || 0).toLocaleString('en-IN')}`;
 const AP_BUCKETS = ['current', '1_30', '31_60', '61_90', '90_plus'];
@@ -447,7 +448,10 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: 'bill' | 'paym
   const shopName = useShopNamer();
   const [saving, setSaving] = useState(false);
   const [f, setF] = useState<Record<string, string | number>>({});
-  const today = new Date().toISOString().slice(0, 10);
+  // The IST business day, like every other bill door: toISOString() is the
+  // UTC day, so a bill keyed at 01:00 IST on 1 October booked 30 September
+  // and landed on September's GSTR-3B.
+  const today = istDayString(new Date()) ?? '';
   const set = (k: string, v: string | number) => setF((p) => ({ ...p, [k]: v }));
 
   // Goods bills must link their goods receipt (owner ruling 15) — this form

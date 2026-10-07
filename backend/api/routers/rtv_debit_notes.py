@@ -119,11 +119,19 @@ def _load_seller(db, store_id: Optional[str], entity_id: Optional[str]) -> dict:
             ent = db.get_collection("entities").find_one({"entity_id": eid}) or {}
         except Exception:  # noqa: BLE001
             ent = {}
+    # The GSTIN the returned goods' bill was received on (the one shop-GSTIN
+    # rule, org_validation.shop_gstin): the note reverses that bill's credit,
+    # so its head is decided on the same two GSTINs, and the registration
+    # decides the state. None -> '' and the engine refuses the note, as every
+    # bill door refuses the bill; the company's top-level number is never read.
+    from ..services.org_validation import shop_gstin
+
+    gstin = shop_gstin(ent, store) or ""
     return {
         "entity_id": eid,
         "name": ent.get("legal_name") or ent.get("name") or store.get("name") or "",
-        "gstin": (ent.get("gstin") or store.get("gstin") or ""),
-        "state_code": ent.get("state_code") or store.get("state_code") or "",
+        "gstin": gstin,
+        "state_code": gstin[:2],
         "address": ent.get("address") or store.get("address") or "",
     }
 

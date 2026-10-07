@@ -171,7 +171,7 @@ class _FakeDB:
                     ],
                 }
             ],
-            "stores": [{"store_id": "S1", "entity_id": "E1"}],
+            "stores": [{"store_id": "S1", "entity_id": "E1", "state_code": "20"}],
             "purchase_settings": [],
             "period_locks": [],
             "stock_units": [],

@@ -873,7 +873,14 @@ def _line(**over):
 def _book(products, po_id="PO1", grn_id="G1", lines=None, bill_kind=None):
     # copy: the fake collection mutates in place, and these fixtures are
     # module-level dicts shared by every test in the class.
-    db = _DB(products=[dict(p) for p in products], vendor_bills=[], vendors=[])
+    db = _DB(
+        products=[dict(p) for p in products],
+        vendor_bills=[],
+        vendors=[],
+        # The bill must name a company + GSTIN (a bill with none is a 422).
+        entities=[{"entity_id": "E1", "gstins": [{"gstin": "27ZZZZZ9999Z1Z9", "state_code": "27"}]}],
+        stores=[{"store_id": "BV-01", "entity_id": "E1", "state_code": "27", "gstin": "27ZZZZZ9999Z1Z9"}],
+    )
     saved = (pi_mod._get_db, pi_mod.get_vendor_repository, pi_mod.get_audit_repository)
     pi_mod._get_db = lambda: db
 
@@ -895,7 +902,13 @@ def _book(products, po_id="PO1", grn_id="G1", lines=None, bill_kind=None):
         )
         out = asyncio.run(
             pi_mod.create_purchase_invoice(
-                body, {"user_id": "u1", "roles": ["ACCOUNTANT"]}
+                body,
+                {
+                    "user_id": "u1",
+                    "roles": ["ACCOUNTANT"],
+                    "active_store_id": "BV-01",
+                    "store_ids": ["BV-01"],
+                },
             )
         )
         return out, db

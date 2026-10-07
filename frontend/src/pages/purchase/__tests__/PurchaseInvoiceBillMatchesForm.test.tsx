@@ -20,16 +20,21 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
-vi.mock('../../../services/api/client', () => ({
+// Only the axios instance is stubbed; buildApiError stays the real transform.
+vi.mock('../../../services/api/client', async (orig) => ({
+  ...(await orig<typeof import('../../../services/api/client')>()),
   default: { get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn() },
 }));
 const toastMock = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() }));
 vi.mock('../../../context/ToastContext', () => ({ useToast: () => toastMock }));
+// The accountant's shop (the top-bar picker); a test may switch it.
+const auth = vi.hoisted(() => ({ store: 'S1' }));
 vi.mock('../../../context/AuthContext', () => ({
-  useAuth: () => ({ user: { activeStoreId: 'S1', roles: ['ACCOUNTANT'] }, hasRole: () => true }),
+  useAuth: () => ({ user: { activeStoreId: auth.store, roles: ['ACCOUNTANT'] }, hasRole: () => true }),
 }));
 
-import api from '../../../services/api/client';
+import type { AxiosError } from 'axios';
+import api, { buildApiError } from '../../../services/api/client';
 import { PurchaseInvoicesTab } from '../PurchaseInvoicesTab';
 
 const mockGet = api.get as unknown as ReturnType<typeof vi.fn>;
@@ -113,23 +118,23 @@ function routeGets(extra: Record<string, unknown> = {}) {
   });
 }
 
-function renderTab(path = '/purchase/invoices') {
-  render(
-    <MemoryRouter initialEntries={[path]}>
-      <PurchaseInvoicesTab suppliers={[{ id: 'V1', name: 'Mumbai Lens House', gstNumber: '27ABCDE1234F1Z5' }] as never} />
-    </MemoryRouter>,
-  );
-}
+const tab = (path = '/purchase/invoices') => (
+  <MemoryRouter initialEntries={[path]}>
+    <PurchaseInvoicesTab suppliers={[{ id: 'V1', name: 'Mumbai Lens House', gstNumber: '27ABCDE1234F1Z5' }] as never} />
+  </MemoryRouter>
+);
+const renderTab = (path?: string) => render(tab(path));
 
 beforeEach(() => {
   vi.clearAllMocks();
+  auth.store = 'S1';
   routeGets();
   routePosts();
 });
 
 // The manual form: Services, the Maharashtra supplier, one line.
 async function openManualServicesBill(line: { name: string; qty: string; price: string; rate: string }) {
-  renderTab();
+  const view = renderTab();
   fireEvent.click(await screen.findByRole('button', { name: /Manual invoice/i }));
   fireEvent.change(await screen.findByDisplayValue(/Choose: goods, or services/), { target: { value: 'SERVICES' } });
   fireEvent.change(screen.getByDisplayValue('Select supplier...'), { target: { value: 'V1' } });
@@ -140,6 +145,7 @@ async function openManualServicesBill(line: { name: string; qty: string; price: 
   fireEvent.change(price, { target: { value: line.price } });
   const rate = screen.getAllByRole('combobox').find((el) => (el as HTMLSelectElement).value === '5') as HTMLSelectElement;
   fireEvent.change(rate, { target: { value: line.rate } });
+  return view;
 }
 
 describe('F7 - the Approve doors reach the real bill', () => {
@@ -198,18 +204,25 @@ describe('F37 + F6 - invoice from a goods receipt', () => {
     ]);
   });
 
-  it('a receipt with no supplier invoice date opens on today and books a date', async () => {
+  it('a receipt with no supplier invoice date opens on the IST day and books it', async () => {
     // The draft carries invoice_date null; the box opened blank (`'' ?? today`
-    // is ''), the bill booked with invoice_date '' and no due date.
-    routeGets({ '/vendors/purchase-invoices/from-grn/G1': { ...GRN_DRAFT, invoice_date: null } });
-    renderTab('/purchase/invoices?grn_id=G1');
-    const today = new Date().toISOString().slice(0, 10);
-    await screen.findByText(/Inter-state supply:/);
-    expect((document.querySelector('input[type="date"]') as HTMLInputElement).value).toBe(today);
+    // is ''), the bill booked with invoice_date '' and no due date. Then it
+    // opened on the UTC day: at 01:00 IST on 1 October that is 30 September,
+    // so the bill fell into September's GSTR-3B (or its lock).
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-30T19:30:00Z')); // 2026-10-01 01:00 IST
+    try {
+      routeGets({ '/vendors/purchase-invoices/from-grn/G1': { ...GRN_DRAFT, invoice_date: null } });
+      renderTab('/purchase/invoices?grn_id=G1');
+      await screen.findByText(/Inter-state supply:/);
+      expect((document.querySelector('input[type="date"]') as HTMLInputElement).value).toBe('2026-10-01');
 
-    fireEvent.click(screen.getByRole('button', { name: /Book invoice/i }));
-    await waitFor(() => expect(createCalls()).toHaveLength(1));
-    expect(createCalls()[0][1].invoice_date).toBe(today);
+      fireEvent.click(screen.getByRole('button', { name: /Book invoice/i }));
+      await waitFor(() => expect(createCalls()).toHaveLength(1));
+      expect(createCalls()[0][1].invoice_date).toBe('2026-10-01');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("shows the server's IGST and sends no place of supply", async () => {
@@ -303,4 +316,299 @@ describe('panel round 2 - every tax figure on the form is the server preview', (
     answer({ data: preview() });
     await waitFor(() => expect(screen.getByRole('button', { name: /Book invoice/i })).not.toBeDisabled());
   });
+});
+
+describe('panel round 4 - every door hands its lines on, and the list follows the drawer', () => {
+  // GET /vendors/grn answers by what is asked: accepted receipts, or open DCs.
+  function routeReceipts(rows: { grns: unknown[] }, dcs: { grns: unknown[] }, extra: Record<string, unknown> = {}) {
+    routeGets(extra);
+    const base = mockGet.getMockImplementation() as (url: string, cfg?: unknown) => Promise<unknown>;
+    mockGet.mockImplementation(async (url: string, cfg?: { params?: Record<string, unknown> }) => {
+      if (url !== '/vendors/grn') return base(url, cfg);
+      if (cfg?.params?.grn_subtype === 'DELIVERY_CHALLAN') return { data: dcs };
+      return { data: cfg?.params?.status === 'ACCEPTED' ? rows : { grns: [] } };
+    });
+  }
+
+  it('Create from GRN: the picked receipt opens with its products, HSNs and quantities', async () => {
+    routeReceipts(
+      { grns: [{ grn_id: 'G1', grn_number: 'RCPT 0004', vendor_id: 'V1', vendor_name: 'Mumbai Lens House', status: 'ACCEPTED', total_accepted: 3 }] },
+      { grns: [] },
+      { '/vendors/purchase-invoices/from-grn/G1': GRN_DRAFT },
+    );
+    renderTab();
+    fireEvent.click(await screen.findByRole('button', { name: /Create from GRN/ }));
+    const picker = within((await screen.findByText('Pick an accepted GRN to invoice')).closest('.fixed') as HTMLElement);
+    fireEvent.click(await picker.findByRole('button', { name: /Invoice/ }));
+
+    expect(await screen.findByDisplayValue('Carrera CA 8895 807')).toBeTruthy();
+    expect(screen.getByDisplayValue('9003')).toBeTruthy();
+    expect(screen.getByDisplayValue('3')).toBeTruthy();
+  });
+
+  it.each(['the GRN picker', 'the ?grn_id= link'])(
+    'a refused receipt draft opens no form from %s, only the reason',
+    async (door) => {
+      // The draft door refuses on purpose (the receipt's shop has no company):
+      // the picker opened 'Invoice from GRN' with one blank line anyway, and
+      // the preview and Book then hit the same 422.
+      const refusal = buildApiError({
+        message: 'Request failed with status code 422',
+        response: {
+          status: 422,
+          data: { detail: { code: 'RECIPIENT_UNRESOLVED', message: 'Shop S9 has no company set. Set it in Settings, then bill this receipt.' } },
+        },
+      } as unknown as AxiosError<never>);
+      routeReceipts(
+        { grns: [{ grn_id: 'G1', grn_number: 'RCPT 0004', vendor_id: 'V1', vendor_name: 'Mumbai Lens House', status: 'ACCEPTED', total_accepted: 3, store_id: 'S9' }] },
+        { grns: [] },
+      );
+      const base = mockGet.getMockImplementation() as (url: string, cfg?: unknown) => Promise<unknown>;
+      mockGet.mockImplementation(async (url: string, cfg?: unknown) => {
+        if (url === '/vendors/purchase-invoices/from-grn/G1') throw refusal;
+        return base(url, cfg);
+      });
+      if (door === 'the GRN picker') {
+        renderTab();
+        fireEvent.click(await screen.findByRole('button', { name: /Create from GRN/ }));
+        const picker = within((await screen.findByText('Pick an accepted GRN to invoice')).closest('.fixed') as HTMLElement);
+        fireEvent.click(await picker.findByRole('button', { name: /Invoice/ }));
+      } else {
+        renderTab('/purchase/invoices?grn_id=G1');
+      }
+
+      await waitFor(() => expect(toastMock.error).toHaveBeenCalledWith(expect.stringMatching(/has no company set/)));
+      expect(toastMock.warning).not.toHaveBeenCalled();
+      expect(screen.queryByText(/Invoice from GRN/)).toBeNull();
+      expect(screen.queryByRole('button', { name: /Book invoice/i })).toBeNull();
+      expect(previewCalls()).toHaveLength(0);
+    },
+  );
+
+  it('Match DCs to Invoice: the draft opens with the challans\' products, HSNs and quantities', async () => {
+    routeReceipts(
+      { grns: [] },
+      { grns: [{ grn_id: 'D1', dc_number: 'DC-7', vendor_id: 'V1', vendor_name: 'Mumbai Lens House', dc_date: '2026-09-10', total_accepted: 2, store_id: 'S1' }] },
+      {
+        '/vendors/purchase-invoices/from-dcs': {
+          status: 'DRAFT', vendor_id: 'V1', vendor_name: 'Mumbai Lens House', vendor_gstin: '27ABCDE1234F1Z5',
+          recipient_gstin: '20AAFCB6528A1ZD', linked_dc_ids: ['D1'],
+          lines: [{ product_id: 'P2', description: 'Ray-Ban RB3025 L0205', hsn: '9004', qty: 2, unit_price: 5000, gst_rate: 18 }],
+        },
+      },
+    );
+    renderTab();
+    fireEvent.click(await screen.findByRole('button', { name: /Match DCs to Invoice/ }));
+    fireEvent.click(await screen.findByRole('checkbox'));
+    fireEvent.click(screen.getByRole('button', { name: /Generate Draft Invoice \(1\)/ }));
+
+    expect(await screen.findByDisplayValue('Ray-Ban RB3025 L0205')).toBeTruthy();
+    expect(screen.getByDisplayValue('9004')).toBeTruthy();
+    expect(screen.getByDisplayValue('2')).toBeTruthy();
+  });
+
+  it('the detail drawer Approve takes the bill off hold in the list behind it', async () => {
+    // Without it the hold card kept its Approve door, and pressing it again was
+    // a 400 ('Only an invoice on ON_HOLD_EXCEPTION can be exception-approved').
+    mockPost.mockResolvedValue({ data: { match_status: 'MATCHED_OVERRIDE' } });
+    renderTab();
+    expect(await screen.findByText('On hold')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: /View detail/ }));
+    fireEvent.change(await screen.findByPlaceholderText(/Why release this invoice for payment/), {
+      target: { value: 'Supplier price rise agreed by phone' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Approve exception/ }));
+    await waitFor(() => expect(toastMock.success).toHaveBeenCalled());
+    fireEvent.click(await screen.findByRole('button', { name: 'Close' }));
+
+    await waitFor(() => expect(screen.queryByPlaceholderText(/Why release this invoice for payment/)).toBeNull());
+    expect(screen.queryByRole('button', { name: /^Approve$/ })).toBeNull();
+    expect(screen.queryByText('On hold')).toBeNull();
+    expect(screen.getByText('Override approved')).toBeTruthy();
+  });
+
+  it("a booked bill's detail drawer shows its own lines (stored as description / hsn / qty / taxable)", async () => {
+    const SVC = {
+      bill_id: 'b-svc-1', invoice_id: 'b-svc-1', doc_type: 'PURCHASE_INVOICE', vendor_id: 'V1',
+      vendor_name: 'Mumbai Lens House', invoice_number: 'FR-9', invoice_date: '2026-09-10', bill_kind: 'SERVICES',
+      taxable_amount: 1000.11, tax_amount: 120.01, igst_total: 120.01, total_amount: 1120.12, interstate: true,
+      lines: [{ description: 'Freight to Ranchi', hsn: '9965', qty: 3, unit_price: 333.37, taxable: 1000.11,
+        gst_rate: 12, cgst: 0, sgst: 0, igst: 120.01, line_total: 1120.12 }],
+    };
+    routeGets({
+      '/vendors/purchase-invoices': { purchase_invoices: [SVC], total: 1 },
+      '/vendors/purchase-invoices/b-svc-1/match': {},
+    });
+    renderTab();
+    fireEvent.click(await screen.findByTitle('View 3-way match detail'));
+    const table = within((await screen.findByText('Invoice lines')).parentElement as HTMLElement);
+    const cells = table.getAllByRole('cell').map((c) => c.textContent);
+    expect(cells).toEqual(['Freight to Ranchi', '9965', '3', '₹333.37', '12%', '₹1,000.11']);
+  });
+
+  it('a PRODUCT_NOT_CATALOGUED refusal on Book asks the cataloguer for the named products', async () => {
+    const refusal = buildApiError({
+      message: 'Request failed with status code 422',
+      response: {
+        status: 422,
+        data: {
+          detail: {
+            code: 'PRODUCT_NOT_CATALOGUED',
+            message: 'Carrera CA 8895 807 is still missing Selling Price. Finish cataloguing it, then book the bill.',
+            lines: [{ product_id: 'P1', product: 'Carrera CA 8895 807', missing: ['Selling Price'] }],
+          },
+        },
+      },
+    } as unknown as AxiosError<never>);
+    mockPost.mockImplementation(async (url: string) => {
+      if (url.endsWith('/preview')) return { data: preview() };
+      if (url === '/vendors/purchase-invoices') throw refusal;
+      return { data: { requested: [] } };
+    });
+    routeGets({ '/vendors/purchase-invoices/from-grn/G1': GRN_DRAFT });
+    renderTab('/purchase/invoices?grn_id=G1');
+    await screen.findByText(/Inter-state supply:/);
+    fireEvent.click(screen.getByRole('button', { name: /Book invoice/i }));
+
+    await waitFor(() =>
+      expect(mockPost).toHaveBeenCalledWith('/vendors/purchase-invoices/request-cataloguing', {
+        product_ids: ['P1'],
+        note: undefined,
+      }),
+    );
+    expect(toastMock.error).toHaveBeenCalledWith(expect.stringMatching(/still missing Selling Price/));
+  });
+
+  it('the form asks again when the shop changes, and Book sends the shop it asked about', async () => {
+    // A bill with no receipt is booked for store_id's company; the preview key
+    // left the shop out, so a switched shop kept the old shop's figures.
+    const view = await openManualServicesBill({ name: 'Freight', qty: '1', price: '1000', rate: '18' });
+    await screen.findByText(/Inter-state supply:/);
+    expect(previewCalls().at(-1)?.[1].store_id).toBe('S1');
+    const asked = previewCalls().length;
+    auth.store = 'PUNE';
+    view.rerender(tab());
+    await waitFor(() => expect(previewCalls().length).toBeGreaterThan(asked));
+    expect(previewCalls().at(-1)?.[1].store_id).toBe('PUNE');
+    await waitFor(() => expect(screen.getByRole('button', { name: /Book invoice/i })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: /Book invoice/i }));
+    await waitFor(() => expect(createCalls()).toHaveLength(1));
+    expect(createCalls()[0][1].store_id).toBe('PUNE');
+  });
+});
+
+describe('round 11 - a bill with no tax head is not shown as CGST+SGST', () => {
+  it('an old Cash Flow "+ bill" reads "Not set"; a bill with heads keeps its badge', async () => {
+    const legacy = {
+      bill_id: 'b-legacy', bill_number: 'CF-1', bill_date: '2026-08-20',
+      taxable_amount: 1000, tax_amount: 180, total_amount: 1180,
+    };
+    const intra = {
+      bill_id: 'b-intra', invoice_number: 'IN-1', invoice_date: '2026-08-21', taxable_amount: 1000,
+      tax_amount: 180, cgst_total: 90, sgst_total: 90, igst_total: 0, interstate: false, total_amount: 1180,
+    };
+    routeGets({ '/vendors/purchase-invoices': { purchase_invoices: [legacy, intra, HELD_BILL], total: 3 } });
+    renderTab();
+    await screen.findByText('Not set');
+    expect(screen.getAllByText('CGST+SGST')).toHaveLength(1);
+    expect(screen.getAllByText('IGST').length).toBeGreaterThan(0);
+    const row = screen.getByText('CF-1').closest('tr') as HTMLElement;
+    expect(within(row).getByText('Not set')).toBeTruthy();
+    expect(within(row).queryByText('CGST+SGST')).toBeNull();
+  });
+});
+
+describe('round 14 - the credit verdict is visible and settable', () => {
+  it('shows "no valid GSTIN" when the preview says no credit, and nothing when it says credit', async () => {
+    routePosts(preview({ itc_eligible: false }));
+    await openManualServicesBill({ name: 'Freight', qty: '1', price: '1000', rate: '18' });
+    expect(await screen.findByText('No input credit: the supplier has no valid GSTIN')).toBeTruthy();
+    expect(screen.queryByText('No input credit: switched off')).toBeNull();
+  });
+
+  it('shows no line when the preview says the credit is claimable', async () => {
+    routePosts(preview({ itc_eligible: true }));
+    await openManualServicesBill({ name: 'Freight', qty: '1', price: '1000', rate: '18' });
+    await screen.findByText(/Inter-state supply:/);
+    expect(screen.queryByText(/No input credit/)).toBeNull();
+  });
+
+  it.each([
+    ['absent', {}],
+    ['null', { itc_eligible: null }],
+  ])('shows no "No input credit" line when the preview leaves itc_eligible %s', async (_label, over) => {
+    // Only an explicit false is a denial; a preview that says nothing is not one.
+    routePosts(preview(over));
+    await openManualServicesBill({ name: 'Freight', qty: '1', price: '1000', rate: '18' });
+    await screen.findByText(/Inter-state supply:/);
+    expect(screen.queryByText(/No input credit/)).toBeNull();
+  });
+
+  it('switching credit off says "switched off", re-asks the preview and books with itc_eligible false', async () => {
+    routePosts(preview());
+    await openManualServicesBill({ name: 'Freight', qty: '1', price: '1000', rate: '18' });
+    await screen.findByText(/Inter-state supply:/);
+    expect(previewCalls().at(-1)?.[1].itc_eligible).toBe(true);
+    expect(previewCalls().at(-1)?.[1].reverse_charge).not.toBe(true);
+
+    routePosts(preview({ itc_eligible: false }));
+    const before = previewCalls().length;
+    fireEvent.click(screen.getByRole('switch', { name: /Claim input credit/ }));
+    expect(await screen.findByText('No input credit: switched off')).toBeTruthy();
+    expect(previewCalls().length).toBeGreaterThan(before);
+    const asked = previewCalls().at(-1)?.[1];
+    expect(asked.itc_eligible).toBe(false);
+
+    fireEvent.click(screen.getByRole('button', { name: /Book invoice/i }));
+    await waitFor(() => expect(createCalls()).toHaveLength(1));
+    expect(createCalls()[0][1]).toEqual(asked);
+    expect(createCalls()[0][1].itc_eligible).toBe(false);
+  });
+
+  it('the form offers no Reverse charge tick and never sends reverse_charge true', async () => {
+    routePosts(preview({ itc_eligible: false }));
+    await openManualServicesBill({ name: 'Freight', qty: '1', price: '1000', rate: '18' });
+    await screen.findByText('No input credit: the supplier has no valid GSTIN');
+    expect(screen.queryByRole('checkbox', { name: /Reverse charge/ })).toBeNull();
+    expect(screen.queryByText(/Reverse charge/i)).toBeNull();
+    expect(previewCalls().at(-1)?.[1].reverse_charge).not.toBe(true);
+
+    fireEvent.click(screen.getByRole('button', { name: /Book invoice/i }));
+    await waitFor(() => expect(createCalls()).toHaveLength(1));
+    expect(createCalls()[0][1].reverse_charge).not.toBe(true);
+  });
+
+  it('the list and the detail drawer badge a stored itc_eligible=false bill "No credit"', async () => {
+    routeGets({
+      '/vendors/purchase-invoices': {
+        purchase_invoices: [
+          { ...HELD_BILL, itc_eligible: false },
+          { ...HELD_BILL, bill_id: 'b-ok', invoice_id: 'b-ok', invoice_number: 'MLH-78', itc_eligible: true },
+        ],
+        total: 2,
+      },
+    });
+    renderTab();
+    // The list: one badge, on the no-credit bill only.
+    expect(await screen.findAllByText('No credit')).toHaveLength(1);
+    // The drawer for that bill carries it too (list badge + drawer badge).
+    fireEvent.click(screen.getAllByRole('button', { name: /View detail/ })[0]);
+    await waitFor(() => expect(screen.getAllByText('No credit')).toHaveLength(2));
+  });
+  it.each([['absent', undefined], ['null', null]])(
+    'a bill with itc_eligible %s is not badged "No credit" in the list or the drawer',
+    async (_label, value) => {
+      const bill: Record<string, unknown> = { ...HELD_BILL };
+      delete bill.itc_eligible;
+      if (value === null) bill.itc_eligible = null;
+      routeGets({ '/vendors/purchase-invoices': { purchase_invoices: [bill], total: 1 } });
+      renderTab();
+      await screen.findAllByRole('button', { name: /View detail/ });
+      expect(screen.queryByText('No credit')).toBeNull();
+      fireEvent.click(screen.getAllByRole('button', { name: /View detail/ })[0]);
+      // The drawer is open once its Approve / detail content mounts; badge still absent.
+      await screen.findAllByText(new RegExp(String(bill.invoice_number ?? 'MLH'), 'i'));
+      expect(screen.queryByText('No credit')).toBeNull();
+    },
+  );
 });
