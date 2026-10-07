@@ -2188,6 +2188,22 @@ def _short_held_at_bokaro(world, order_id, qty=1):
     return payload, res, order
 
 
+def _crashed_mid_claim(world, order_id):
+    """A Re-map wrote (the hold lifted, the claim unsettled), claimed 1 of 2
+    units at Bokaro and died, its lease left behind (stale)."""
+    db = world["db"]
+    payload, res, _o = _short_held_at_bokaro(world, order_id, qty=2)
+    oid = res["order_id"]
+    # Its write landed (its fresh route, no seller problem on it), one unit claimed.
+    db.stock_units.update_one({"stock_id": "U-BV-BOK-01-P-RB-0"},
+                              {"$set": {"status": "SOLD", "order_id": oid}})
+    db.orders.update_one({"order_id": oid}, {
+        "$set": {"fulfillment_hold": False, "reroute_lease_at": "2000-01-01T00:00:00+00:00",
+                 "fulfillment_route.problems": []},
+        "$unset": {"stock_hold_reason": "", "fulfillment_breakdown": "", "fulfillment_stores": ""}})
+    return payload, oid
+
+
 def test_a_remap_that_crashed_mid_claim_is_carried_on_by_the_next_press(world, monkeypatch):
     """[LOW] Round 13, item 3: a Re-map wrote (the hold lifted, the claim
     unsettled), claimed 1 of 2 units and died, its lease left behind. The
@@ -2201,16 +2217,7 @@ def test_a_remap_that_crashed_mid_claim_is_carried_on_by_the_next_press(world, m
     from api.routers.orders import assert_no_active_rx_hold
 
     db = world["db"]
-    payload, res, _o = _short_held_at_bokaro(world, 60110, qty=2)
-    oid = res["order_id"]
-    # The crashed Re-map's leftovers: its write landed (its fresh route, no
-    # seller problem on it), one unit claimed.
-    db.stock_units.update_one({"stock_id": "U-BV-BOK-01-P-RB-0"},
-                              {"$set": {"status": "SOLD", "order_id": oid}})
-    db.orders.update_one({"order_id": oid}, {
-        "$set": {"fulfillment_hold": False, "reroute_lease_at": "2000-01-01T00:00:00+00:00",
-                 "fulfillment_route.problems": []},
-        "$unset": {"stock_hold_reason": "", "fulfillment_breakdown": "", "fulfillment_stores": ""}})
+    payload, oid = _crashed_mid_claim(world, 60110)
     crashed = db.orders.find_one({"order_id": oid}, {"_id": 0})
     listed = db.orders.find_one({"order_id": oid}, dict(oso._LIST_PROJECTION))  # the list's read
     assert oso._slim_list_row(listed)["remap_hold"] is True
@@ -2226,6 +2233,89 @@ def test_a_remap_that_crashed_mid_claim_is_carried_on_by_the_next_press(world, m
     assert after["fulfillment_hold"] is False and "reroute_lease_at" not in after
     assert oso._slim_list_row(dict(after))["remap_hold"] is False
     assert_no_active_rx_hold(after)
+
+
+@pytest.mark.parametrize("why", ["routing_502", "gate_dark", "seller_check", "refund_mark", "part_closed"])
+def test_a_refused_takeover_keeps_the_crashed_remaps_lease(world, monkeypatch, why):
+    """[LOW-MEDIUM] Round 16, item 1: the press taking over a crashed Re-map's
+    stale lease was refused -- Shopify's routing read a 502, the gate dark,
+    the seller check, a refund mark, a line part-closed -- and its finally
+    deleted the lease, the only mark of the unsettled claim: 1 of 2 units
+    SOLD, the hold lifted, the list no longer offering Re-map and the order
+    dispatchable with a unit never claimed. The lease stays now, STALE: still
+    offered, still blocked, and the next press carries on at once."""
+    from fastapi import HTTPException
+    from api.routers import online_store_orders as oso
+    from api.routers.orders import assert_no_active_rx_hold
+
+    db = world["db"]
+    payload, oid = _crashed_mid_claim(world, 60120 + len(why))
+    if why == "routing_502":
+        world["shop"].read_error = "502 Bad Gateway"
+    elif why == "gate_dark":
+        monkeypatch.setattr(shopify_push, "_live_or_reason", lambda _db: (False, "writes_disabled"))
+    elif why == "seller_check":
+        db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": {"gstin": ""}})
+    elif why == "refund_mark":
+        db.orders.update_one({"order_id": oid}, {"$inc": {route_mod.REFUND_MARK: 1}})
+    else:
+        world["shop"].fos[0]["lineItems"]["nodes"][0]["remainingQuantity"] = 1
+
+    out = _remap(world, monkeypatch, payload)
+
+    assert not out["ok"] and "another Re-map" not in out["message"], out
+    after = db.orders.find_one({"order_id": oid}, {"_id": 0})
+    assert after.get("reroute_lease_at") and _sold_at(db, oid) == ["BV-BOK-01"]
+    assert oso._slim_list_row(dict(after))["remap_hold"] is True
+    with pytest.raises(HTTPException, match="a Re-map of it is running or stopped mid-way"):
+        assert_no_active_rx_hold(after)
+    if why in ("refund_mark", "part_closed"):
+        return  # resolved by hand; the order stays marked
+    # The cause gone, the very next press carries on (the lease left stale).
+    world["shop"].read_error = None
+    monkeypatch.setattr(shopify_push, "_live_or_reason", lambda _db: (True, None))
+    db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": {"gstin": "20AAAAA0000A1Z5"}})
+
+    out = _remap(world, monkeypatch, payload)
+
+    assert out["ok"] and out["result"]["status"] == "rerouted", out
+    after = db.orders.find_one({"order_id": oid}, {"_id": 0})
+    assert _sold_at(db, oid) == ["BV-BOK-01", "BV-BOK-01"] and "reroute_lease_at" not in after
+    assert_no_active_rx_hold(after)
+
+
+def test_a_remap_stopped_after_its_write_leaves_its_lease_for_the_next_press(world, monkeypatch):
+    """[LOW] Round 16, item 1, the same hole from a fresh press: its write
+    lifted the hold, then its claim raised. The lease stays (stale), so the
+    order stays marked and the next press carries on."""
+    from fastapi import HTTPException
+    from api.routers import online_store_orders as oso
+    from api.routers.orders import assert_no_active_rx_hold
+    from api.services import shopify_ingest
+
+    db = world["db"]
+    payload, res, _o = _short_held_at_bokaro(world, 60140)
+    oid = res["order_id"]
+    real = shopify_ingest._claim_online_units
+
+    def down(*_a, **_k):
+        raise RuntimeError("stock_units unreachable")
+
+    monkeypatch.setattr(shopify_ingest, "_claim_online_units", down)
+    with pytest.raises(RuntimeError):
+        asyncio.run(route_mod.reroute_held_order(db, oid))
+    after = db.orders.find_one({"order_id": oid}, {"_id": 0})
+    assert after["fulfillment_hold"] is False and after.get("reroute_lease_at")
+    assert oso._slim_list_row(dict(after))["remap_hold"] is True
+    with pytest.raises(HTTPException, match="a Re-map of it is running or stopped mid-way"):
+        assert_no_active_rx_hold(after)
+    monkeypatch.setattr(shopify_ingest, "_claim_online_units", real)
+
+    out = _remap(world, monkeypatch, payload)
+
+    assert out["ok"] and out["result"]["status"] == "rerouted", out
+    assert _sold_at(db, oid) == ["BV-BOK-01"]
+    assert "reroute_lease_at" not in db.orders.find_one({"order_id": oid})
 
 
 @pytest.mark.parametrize("then", ["shopify_takes_it", "bokaro_restocked"])
@@ -3177,6 +3267,43 @@ def test_a_cancel_after_remaps_write_never_claims_a_unit(world, monkeypatch):
     assert db.stock_units.count_documents({"status": "AVAILABLE"}) == 1
     assert world["tasks"].open_refs(f"online_fallback_ship:{oid}") == []
     assert wrote == [1]
+
+
+def test_a_cancel_before_remaps_claim_leaves_no_unit_sold_to_the_dead_order(world, monkeypatch):
+    """[LOW] Round 16, item 2: seller-held at Bokaro, 2 ordered, 1 claimed
+    (U-BV-BOK-01-P-RB-0); the GSTIN fixed, Bokaro restocks one. The cancel
+    door lands after Re-map's write and releases that unit; Re-map's claim
+    keeps 1 by count and FIFO-claims the very same unit again. The undo
+    spared the units Re-map kept, so it stayed SOLD to the CANCELLED order
+    while Re-map said every unit was back on the shelf. Every unit sold to a
+    dead order goes back now."""
+    from api.services import shopify_ingest
+
+    db = world["db"]
+    db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": {"gstin": ""}})
+    _stock(db, "BV-BOK-01", "P-RB", 1)
+    world["shop"].fo(FO_1, LOC_BOK, units=2)
+    payload = _order(60130, lines=(("RB-1234", 2),))
+    res, order = _book(world, payload)
+    oid = res["order_id"]
+    assert [p["code"] for p in order["fulfillment_route"]["problems"]] == ["SHOP_GSTIN_MISSING"]
+    assert _sold_at(db, oid) == ["BV-BOK-01"]
+    db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": {"gstin": "20AAAAA0000A1Z5"}})
+    db.stock_units.insert_one({"stock_id": "U-NEW", "product_id": "P-RB",
+                               "store_id": "BV-BOK-01", "status": "AVAILABLE"})
+    real = shopify_ingest._claim_online_units
+
+    def cancel_then_claim(*a, **k):
+        _cancel_door(db, oid)
+        return real(*a, **k)
+
+    monkeypatch.setattr(shopify_ingest, "_claim_online_units", cancel_then_claim)
+    out = asyncio.run(route_mod.reroute_held_order(db, oid))
+
+    assert out["status"] == "refused" and "cancelled while Re-map ran" in out["message"], out
+    assert _sold_at(db, oid) == []
+    assert db.stock_units.count_documents({"store_id": "BV-BOK-01", "status": "AVAILABLE"}) == 2
+    assert "reroute_lease_at" not in db.orders.find_one({"order_id": oid})
 
 
 @pytest.mark.parametrize("printed", [False, True])

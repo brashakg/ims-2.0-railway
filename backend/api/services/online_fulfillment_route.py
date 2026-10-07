@@ -1366,7 +1366,8 @@ async def reroute_held_order(db, order_id: str) -> Dict[str, Any]:
     fulfilled, refunded or closed); a refund or return booked or queued on
     it; routing unreadable (dark included); the booking's claim not settled
     yet or a move on the wire; another Re-map mid-flight; the fresh route
-    names no shop, would change the seller or fails the seller check."""
+    names no shop, would change the seller or fails the seller check. A
+    refused press that took over a crashed Re-map's lease leaves it stale."""
     from datetime import datetime, timedelta, timezone
 
     from .shopify_ingest import (
@@ -1403,6 +1404,13 @@ async def reroute_held_order(db, order_id: str) -> Dict[str, Any]:
             else _remap_refusal(db, order, False) or "the order could not be read"
         )
     took_over = bool(order.get("reroute_lease_at"))
+    # The lease comes off only once the claim is settled: a fresh press
+    # refused before its write touched nothing; else its claim stamped, or a
+    # cancel's undo gave every unit back. Any other exit -- a takeover (a
+    # crashed Re-map's claim) refused for any reason, a run stopped after its
+    # write -- leaves it STALE: the order stays marked (offered Re-map, never
+    # dispatched) and the next press carries on at once.
+    settled = not took_over
     try:
         why = _remap_refusal(db, order, took_over)
         if why:
@@ -1441,17 +1449,15 @@ async def reroute_held_order(db, order_id: str) -> Dict[str, Any]:
         kept_ids: List[str] = []  # the units Re-map never gave back
 
         def undone_by_cancel() -> bool:
-            """The order is dead (a cancel landed while Re-map ran): every
-            unit Re-map marked SOLD for it -- all but ``kept_ids`` -- is given
-            back. Read AFTER the marking: a cancel flipping the status later
-            runs its own release after it, so either way no unit stays SOLD
-            against a cancelled order."""
+            """The order is dead (a cancel landed while Re-map ran): EVERY
+            unit SOLD to it is given back -- kept ones too: the cancel may have
+            released a kept unit that Re-map's claim then took again. Read AFTER the
+            marking: a cancel flipping the status later runs its own release
+            after it, so either way no unit stays SOLD against a dead order."""
             now_status = str((coll.find_one({"order_id": order_id}) or {}).get("status") or "")
             if now_status.upper() not in _DEAD:
                 return False
-            stock_repo.release_sold_units_for_order(
-                order_id, exclude_stock_ids=kept_ids or None, reason="ORDER_CANCELLED"
-            )
+            stock_repo.release_sold_units_for_order(order_id, reason="ORDER_CANCELLED")
             return True
 
         def put_back() -> None:
@@ -1526,11 +1532,13 @@ async def reroute_held_order(db, order_id: str) -> Dict[str, Any]:
                 update["stock_hold_reason"] = hold
             else:
                 unset["stock_hold_reason"] = ""
+            settled = False  # the write lifts the hold: unsettled until the claim is stamped
             written = coll.update_one(
                 {"order_id": order_id, "reroute_lease_at": mine, **{k: order.get(k) for k in HOLD_CAS}},
                 {"$set": update, "$unset": unset},
             )
             if not getattr(written, "matched_count", 0):
+                settled = not took_over  # nothing written
                 raise ValueError(
                     "the order changed while Re-map ran (cancelled, released, fulfilled "
                     "or re-routed) -- press Re-map again"
@@ -1550,6 +1558,7 @@ async def reroute_held_order(db, order_id: str) -> Dict[str, Any]:
                 kept.setdefault(shop, {})[pid] = len(ids)
         breakdown, stores = _claim_online_units(db, order_id, ref, items, route, held=kept)
         if undone_by_cancel():
+            settled = True  # a dead order holds no unit: nothing left to claim
             _close_tasks([f"online_fallback_ship:{order_id}:{s}" for s in stores],
                          "The order was cancelled while Re-map ran.")
             _stock_write_back(db, {**order, **update})
@@ -1561,6 +1570,7 @@ async def reroute_held_order(db, order_id: str) -> Dict[str, Any]:
             {"order_id": order_id},
             {"$set": {"fulfillment_breakdown": breakdown, "fulfillment_stores": stores}},
         )
+        settled = True
         done = "Re-mapped: the order was routed and its stock claimed again."
         if booked_misses is not None:
             try:  # the booking's stock miss is answered only by a WHOLE claim
@@ -1615,7 +1625,10 @@ async def reroute_held_order(db, order_id: str) -> Dict[str, Any]:
         }
         _close_tasks([f"online_route:{c}:{order_id}" for c in sorted(gone)], done)
     finally:
-        coll.update_one({"order_id": order_id, "reroute_lease_at": mine}, {"$unset": {"reroute_lease_at": ""}})
+        coll.update_one(
+            {"order_id": order_id, "reroute_lease_at": mine},
+            {"$unset": {"reroute_lease_at": ""}} if settled else {"$set": {"reroute_lease_at": stale}},
+        )
     final = coll.find_one({"order_id": order_id}) or {}
     held = final.get("stock_hold_reason")
     return {
