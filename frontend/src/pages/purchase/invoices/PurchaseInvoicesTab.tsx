@@ -80,47 +80,53 @@ export function PurchaseInvoicesTab({ suppliers }: { suppliers: Supplier[] }) {
 
   const openManual = () => setForm({ prefill: {}, lines: [blankLine()] });
 
+  // THE one way a receipt's bill is opened -- the GRN picker's Invoice button
+  // and the ?grn_id= deep link both come here. Fetch the from-GRN draft and
+  // open the booking form prefilled. A refused draft (e.g. the receipt's shop
+  // has no company, or its company no GSTIN) shows the server's reason and
+  // opens NO form: the preview and Book would hit the same refusal, so a
+  // blank form only had the accountant retype lines for nothing.
+  const toast = useToast();
+  const openGrn = async (grnId: string) => {
+    try {
+      const draft = await purchaseInvoicesApi.createFromGrn(grnId);
+      openFromGrnDraft(
+        {
+          vendor_id: draft.vendor_id,
+          vendor_name: draft.vendor_name,
+          vendor_invoice_no: draft.vendor_invoice_no,
+          vendor_invoice_date: draft.vendor_invoice_date,
+          po_id: draft.po_id,
+          po_number: draft.po_number,
+          grn_id: draft.grn_id ?? grnId,
+          grn_number: draft.grn_number,
+          vendor_gstin: draft.vendor_gstin,
+          recipient_gstin: draft.recipient_gstin,
+          store_id: draft.store_id,
+        },
+        draft.lines ?? [],
+      );
+    } catch (e) {
+      toast.error(errMsg(e, 'Could not open the invoice draft for this receipt'));
+    }
+  };
+
   // Deep-link auto-open: /purchase?tab=purchase-invoices&grn_id=<id> (the
   // /purchase/invoices/book redirect used by the express-receive accountant
-  // task and the PO timeline drawer). Fetch the from-GRN draft ONCE and open
-  // the booking form prefilled; clear the param so refresh/back doesn't
-  // re-open. Fail-soft: a blocked draft (e.g. GRN not ACCEPTED) surfaces the
-  // server's message as a toast and leaves the tab usable.
-  const toast = useToast();
+  // task and the PO timeline drawer). Opens the draft ONCE, then clears the
+  // param so refresh/back doesn't re-open.
   const [searchParams, setSearchParams] = useSearchParams();
   const autoOpenRanRef = useRef(false);
   useEffect(() => {
     const grnId = searchParams.get('grn_id');
     if (!grnId || autoOpenRanRef.current) return;
     autoOpenRanRef.current = true;
-    (async () => {
-      try {
-        const draft = await purchaseInvoicesApi.createFromGrn(grnId);
-        openFromGrnDraft(
-          {
-            vendor_id: draft.vendor_id,
-            vendor_name: draft.vendor_name,
-            vendor_invoice_no: draft.vendor_invoice_no,
-            vendor_invoice_date: draft.vendor_invoice_date,
-            po_id: draft.po_id,
-            po_number: draft.po_number,
-            grn_id: draft.grn_id ?? grnId,
-            grn_number: draft.grn_number,
-            vendor_gstin: draft.vendor_gstin,
-            recipient_gstin: draft.recipient_gstin,
-            store_id: draft.store_id,
-          },
-          draft.lines ?? [],
-        );
-      } catch (e) {
-        toast.error(errMsg(e, 'Could not open the invoice draft for this receipt'));
-      } finally {
-        // Drop grn_id but keep the tab param so the URL stays truthful.
-        const next = new URLSearchParams(searchParams);
-        next.delete('grn_id');
-        setSearchParams(next, { replace: true });
-      }
-    })();
+    openGrn(grnId).finally(() => {
+      // Drop grn_id but keep the tab param so the URL stays truthful.
+      const next = new URLSearchParams(searchParams);
+      next.delete('grn_id');
+      setSearchParams(next, { replace: true });
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams]);
 
@@ -202,7 +208,7 @@ export function PurchaseInvoicesTab({ suppliers }: { suppliers: Supplier[] }) {
       {pickingGrn && (
         <GrnPickerModal
           onClose={() => setPickingGrn(false)}
-          onPicked={openFromGrnDraft}
+          onPick={openGrn}
         />
       )}
 
@@ -290,6 +296,10 @@ function InvoiceList({ invoices, onOpen }: { invoices: PurchaseInvoice[]; onOpen
         </thead>
         <tbody className="divide-y divide-gray-100">
           {invoices.map((pi) => {
+            // No stored verdict and no head amounts = no tax head was ever
+            // decided (old Cash Flow bill): say so, do not show CGST+SGST.
+            const headNotSet =
+              pi.is_interstate == null && !pi.cgst && !pi.sgst && !pi.igst;
             const inter = pi.is_interstate ?? (pi.igst || 0) > 0;
             return (
               <tr
@@ -301,6 +311,9 @@ function InvoiceList({ invoices, onOpen }: { invoices: PurchaseInvoice[]; onOpen
                 <td className="px-3 py-2">
                   <div className="font-medium text-gray-900">{pi.vendor_name || pi.vendor_id}</div>
                   <div className="text-xs text-gray-500">{pi.vendor_invoice_no}</div>
+                  {pi.itc_eligible === false && (
+                    <span className="mt-0.5 inline-flex items-center px-1.5 py-0.5 rounded-full text-[11px] font-medium bg-amber-100 text-amber-800" title="This bill claims no input credit">No credit</span>
+                  )}
                 </td>
                 <td className="px-3 py-2 text-gray-700">{(pi.vendor_invoice_date || '').slice(0, 10)}</td>
                 <td className="px-3 py-2 text-xs text-gray-500">
@@ -309,8 +322,8 @@ function InvoiceList({ invoices, onOpen }: { invoices: PurchaseInvoice[]; onOpen
                   {!pi.po_number && !pi.grn_number && <span className="text-gray-400">Manual</span>}
                 </td>
                 <td className="px-3 py-2 text-center">
-                  <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${inter ? 'bg-purple-100 text-purple-800' : 'bg-blue-100 text-blue-800'}`}>
-                    {inter ? 'IGST' : 'CGST+SGST'}
+                  <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${headNotSet ? 'bg-gray-100 text-gray-600' : inter ? 'bg-purple-100 text-purple-800' : 'bg-blue-100 text-blue-800'}`}>
+                    {headNotSet ? 'Not set' : inter ? 'IGST' : 'CGST+SGST'}
                   </span>
                 </td>
                 <td className="px-3 py-2 text-right text-gray-700">{inr(pi.taxable_amount)}</td>

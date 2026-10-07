@@ -117,7 +117,6 @@ from ._shared import (  # noqa: F401
     _split_output_tax,
     _store_maps,
     _store_state_map,
-    _store_gstin_map,
     _customer_state_map,
     pnl_by_category,
     is_period_locked,

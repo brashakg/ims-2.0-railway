@@ -623,6 +623,12 @@ def test_missing_posting_date_fails_closed_422(db, monkeypatch):
     with pytest.raises(HTTPException) as exc:
         asyncio.run(r.allocate_invoice_landed_costs("PI-2", current_user=_acct()))
     assert exc.value.status_code == 422
+    # A dd/mm/yyyy date the lock cannot parse is no date either (it was waved
+    # through: check_period_locked skips what it cannot parse).
+    _seed_bill(db, bill_id="PI-3", invoice_id="PI-3", bill_date="15/05/2026", invoice_date="15/05/2026")
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(r.set_invoice_landed_costs("PI-3", _set_body(), current_user=_acct()))
+    assert exc.value.status_code == 422
 
 
 def test_allocate_409_when_capture_changed_after_read(db, monkeypatch):

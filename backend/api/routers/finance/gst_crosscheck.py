@@ -12,6 +12,7 @@ from typing import Optional
 from fastapi import Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from ..auth import get_current_user
+from ...services.org_validation import shop_gstins
 from ._shared import (
     _REAL_ORDER_STATUS_FILTER,
     _customer_state_map,
@@ -19,7 +20,6 @@ from ._shared import (
     _iso_now,
     _order_is_interstate,
     _require_finance_admin,
-    _store_gstin_map,
     _store_maps,
     _store_state_map,
     gst_reconciliation,
@@ -250,7 +250,15 @@ def _run_gst_cross_check(db, m: int, y: int, entity_id: Optional[str]) -> dict:
     period = f"{y:04d}-{m:02d}"
 
     s2e, enames = _store_maps(db)
-    s2g = _store_gstin_map(db)
+    # THE shop's GSTIN (the one GSTR-3B's scope files on), so a report's
+    # GSTIN-bound slice is counted once per filing. Unreadable -> the ITC
+    # leg is dead (no sign-off), never a silent per-store sum.
+    try:
+        s2g = shop_gstins(db)
+        gstins_failed = False
+    except Exception:  # noqa: BLE001
+        logger.exception("cross-check: shop GSTINs unreadable")
+        s2g, gstins_failed = {}, True
     if entity_id:
         store_ids = [sid for sid, eid in s2e.items() if eid == entity_id]
         if not store_ids:
@@ -356,7 +364,7 @@ def _run_gst_cross_check(db, m: int, y: int, entity_id: Optional[str]) -> dict:
     # missing from GSTR-3B can never read green.
     unplaced = _itc_unplaced(db, y, m, monthrange(y, m)[1], entity_id)
     # A bill read that failed is a dead ITC leg too (HR-1): no sign-off.
-    itc_leg_failed = itc_leg_failed or bool(unplaced.get("failed"))
+    itc_leg_failed = itc_leg_failed or gstins_failed or bool(unplaced.get("failed"))
     result =_xc.build_crosscheck(gstr1, gstr3b, books, tally, unplaced=unplaced)
     result.update(
         {

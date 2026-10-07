@@ -381,6 +381,13 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/vendors/last-cost",
         "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
+    # The tax head each vendor's purchase carries at a shop (the PO composer
+    # and the Suppliers cards show it; same roles as the PO form itself).
+    {
+        "method": "GET",
+        "path": "/api/v1/vendors/po-gst-heads",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+    },
     {
         "method": "POST",
         "path": "/api/v1/vendors/purchase-orders",

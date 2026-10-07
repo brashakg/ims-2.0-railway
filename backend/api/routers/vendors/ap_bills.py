@@ -60,6 +60,11 @@ class VendorBillCreate(BaseModel):
     def _normalize_bill_kind(cls, v):
         return ap_engine.normalize_bill_kind(v)
 
+    @field_validator("bill_date", mode="before")
+    @classmethod
+    def _iso_bill_date(cls, v):
+        return ap_engine.iso_bill_date(v)
+
 
 class VendorPaymentCreate(BaseModel):
     amount: float = Field(..., gt=0)  # cash actually paid to the vendor
@@ -410,6 +415,7 @@ async def create_vendor_bill(
     # GSTR-3B. Refused (422) before anything is claimed or written.
     from ..purchase_invoices import _bill_recipient, _vendor_gstin
     from ...services.purchase_invoice_engine import split_header_tax
+    from ...services.org_validation import itc_claimable
 
     supplier_gstin = _vendor_gstin(db_early, vendor, vendor_id)
     recipient = _bill_recipient(
@@ -452,6 +458,9 @@ async def create_vendor_bill(
         "igst_total": heads["igst_total"],
         "total_amount": round(bill.total_amount, 2),
         "outstanding": round(bill.total_amount, 2),
+        # No valid supplier GSTIN, no input credit (purchase_invoices does the
+        # same on its doors): one rule, org_validation.itc_claimable.
+        "itc_eligible": itc_claimable(supplier_gstin),
         "po_id": bill.po_id,
         "grn_id": bill.grn_id,
         # A receipt-linked bill IS a goods bill whatever the caller declared;

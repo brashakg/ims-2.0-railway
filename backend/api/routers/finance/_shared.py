@@ -496,23 +496,6 @@ def _store_state_map(db) -> dict:
     return out
 
 
-def _store_gstin_map(db) -> dict:
-    """store_id -> GSTIN. Used to dedupe transfer-borne ITC once per GSTIN in the
-    GST cross-check aggregator (R1): a same-entity cross-state stock transfer is
-    claimed by the RECEIVING GSTIN only, so sibling stores of one entity with
-    different GSTINs return different transfer ITC."""
-    out: dict = {}
-    try:
-        for s in db.get_collection("stores").find(
-            {}, {"_id": 0, "store_id": 1, "gstin": 1}
-        ):
-            if s.get("store_id"):
-                out[s["store_id"]] = str(s.get("gstin") or "").strip()
-    except Exception:
-        pass
-    return out
-
-
 def _customer_state_map(db) -> dict:
     """customer_id -> state (for intra/inter-state GST classification)."""
     out: dict = {}
