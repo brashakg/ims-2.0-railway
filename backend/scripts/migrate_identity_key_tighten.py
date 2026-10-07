@@ -22,9 +22,11 @@ SAFETY
 ------
   * Dry run by default. Nothing is written without --apply.
   * Collisions are detected BEFORE any write. If two products would land on the
-    same new key, NOTHING is written and both rows are printed: that means the
+    same new key, THOSE rows are left on their old keys and printed: the
     tightened rule considers them the same product, which is a merge decision
-    for a human, never for a migration.
+    for a human, never for a migration. Every other row is re-keyed (an
+    all-or-nothing run left the whole catalogue on the old keys behind one
+    twin), and the exit code is 1 while any collision remains.
   * Idempotent: a row whose key is already correct is skipped.
   * Only `products` carries identity_key (verified on production: 76/76 rows;
     catalog_products and catalog_variants store none), so only that collection
@@ -95,6 +97,10 @@ def run(products, *, apply: bool) -> Dict[str, Any]:
         by_new[new].append(doc.get("sku") or pid)
 
     # Collisions: two rows that the tightened rule says are the same product.
+    # Those keys are left alone and reported -- merging them is a human
+    # decision -- while every other row is re-keyed: an all-or-nothing run
+    # left the whole catalogue on the old keys behind one twin.
+    colliding = set()
     for key, skus in by_new.items():
         existing_others = [
             d.get("sku")
@@ -103,17 +109,20 @@ def run(products, *, apply: bool) -> Dict[str, Any]:
         ]
         if len(skus) > 1 or existing_others:
             stats["collisions"] += 1
+            colliding.add(key)
             print(f"  [COLLISION] new key {key!r} claimed by: {skus + existing_others}")
 
     if stats["collisions"]:
         print(
-            f"\nREFUSING TO WRITE: {stats['collisions']} collision(s). The tightened "
-            "rule considers those rows the same product. Merging them is a human "
-            "decision -- resolve in the catalogue first, then re-run."
+            f"\nNOT RE-KEYING {stats['collisions']} collision(s): the tightened rule "
+            "considers those rows the same product. Merging them is a human "
+            "decision -- resolve in the catalogue, then re-run. Every other row "
+            "is re-keyed below."
         )
-        return stats
 
     for pid, (old, new, sku) in sorted(planned.items(), key=lambda kv: str(kv[0])):
+        if new in colliding:
+            continue
         stats["rewritten"] += 1
         print(f"  {sku}: {old!r} -> {new!r}")
         if apply:

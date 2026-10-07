@@ -2665,6 +2665,30 @@ def create_product(
     return created
 
 
+def _keyed_before_eye_size(
+    spine: Dict[str, Any], key: str, product_repo
+) -> Optional[Dict[str, Any]]:
+    """A frame catalogued before eye size joined the key (0cfb09d) still
+    carries the 3-part brand|model|colour key until
+    scripts/migrate_identity_key_tighten.py has re-keyed it. Typed WITH its
+    eye size, the same frame keys 4-part and would miss it -- a silent twin.
+    So an eye-size item also looks up its key without the size, and a row
+    found there is the same product when ITS eye size (derived the one way,
+    _derive_brand_model_color_size) is the one typed. A row there with no eye
+    size, or another one, is a different item."""
+    if _size_attribute_key(spine.get("category")) != "lens_size" or key.count("|") < 3:
+        return None
+    sizeless, typed_size = key.rsplit("|", 1)
+    row = product_repo.find_by_identity_key(sizeless)
+    if not row:
+        return None
+    attrs = row.get("attributes") if isinstance(row.get("attributes"), dict) else {}
+    derived = _derive_brand_model_color_size(attrs, row.get("category"))["size"]
+    if normalise_identity_component(derived) == typed_size:
+        return row
+    return None
+
+
 def identity_conflict(spine: Dict[str, Any], product_repo) -> Optional[ProductMasterError]:
     """THE one "we already have this" rule. The create door's guard (above)
     and the PO's typed-line check (purchase_orders) both run it, so the two
@@ -2679,6 +2703,8 @@ def identity_conflict(spine: Dict[str, Any], product_repo) -> Optional[ProductMa
     key = spine.get("identity_key")
     if existing is None and key and hasattr(product_repo, "find_by_identity_key"):
         existing = product_repo.find_by_identity_key(key)
+    if existing is None and key and hasattr(product_repo, "find_by_identity_key"):
+        existing = _keyed_before_eye_size(spine, key, product_repo)
     if (
         existing is None
         and spine.get("barcode")

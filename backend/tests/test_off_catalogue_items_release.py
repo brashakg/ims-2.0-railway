@@ -2495,3 +2495,78 @@ def test_r5_a_waiting_receipt_that_accepts_none_of_the_draft_does_not_block(worl
         refused is None,
         f"R5: a receipt accepting none of the draft blocks its discard ({refused})",
     )
+
+
+# ---------------------------------------------------------------------------
+# Review round 5, pass 3 (HIGH): frames catalogued before eye size joined the
+# key keep a 3-part key until the migration runs
+# ---------------------------------------------------------------------------
+
+
+def _pre_deploy_frame(world, lens_size="54"):
+    existing = world.catalogue_frame(
+        "Carrera", "CA 8895", "807", lens_size, mrp=6990, offer=6490, cost=3155.76
+    )
+    world.db.products.update_one(
+        {"product_id": existing["product_id"]},
+        {"$set": {"identity_key": "carrera|ca8895|807"}},
+    )
+    return existing
+
+
+def test_r5_a_frame_keyed_before_this_deploy_is_still_found_by_its_eye_size(world):
+    existing = _pre_deploy_frame(world)
+    refused = _refused_po(
+        world, [{"new_product": dict(CARRERA_TYPED), "quantity": 1, "unit_price": 3200}]
+    )
+    finding(
+        refused is not None
+        and refused.detail.get("code") == "ALREADY_IN_CATALOGUE"
+        and refused.detail["matches"][0]["existing"]["product_id"] == existing["product_id"],
+        f"R5: a typed line twinned a frame keyed before this deploy ({getattr(refused, 'detail', None)})",
+    )
+    try:
+        world.catalogue_frame("Carrera", "CA 8895", "807", "54", mrp=6990, offer=6490, cost=3100)
+        added = None
+    except HTTPException as exc:
+        added = exc
+    finding(
+        added is not None and added.status_code == 409,
+        "R5: Add product twinned a frame keyed before this deploy",
+    )
+    assert len(world.products_named("Carrera", "CA 8895")) == 1
+
+
+def test_r5_another_eye_size_of_a_frame_keyed_before_this_deploy_is_its_own_item(world):
+    _pre_deploy_frame(world, lens_size="54")
+    po = world.raise_po(
+        [{"new_product": {**CARRERA_TYPED, "size": "52"}, "quantity": 1, "unit_price": 3200}]
+    )
+    assert po["items"][0]["product_id"]
+    assert len(world.products_named("Carrera", "CA 8895")) == 2
+
+
+def test_r5_the_identity_migration_rekeys_everything_but_the_collisions(world):
+    from scripts.migrate_identity_key_tighten import run
+
+    a = world.catalogue_frame("Boss", "BOSS 1701", "C2", "50", mrp=2990, offer=2790, cost=1200)
+    b = world.catalogue_frame("Carrera", "CA 8895", "807", "54", mrp=6990, offer=6490, cost=3100)
+    c = world.catalogue_frame("Carrera", "CA 8895", "807", "56", mrp=6990, offer=6490, cost=3100)
+    for pid, old in (
+        (a["product_id"], "boss|boss1701|c2"),
+        (b["product_id"], "carrera|ca8895|807-b"),
+        (c["product_id"], "carrera|ca8895|807-c"),
+    ):
+        world.db.products.update_one({"product_id": pid}, {"$set": {"identity_key": old}})
+    # c is made to collide with b: the same eye size.
+    world.db.products.update_one(
+        {"product_id": c["product_id"]}, {"$set": {"attributes.lens_size": "54"}}
+    )
+    stats = run(world.db.products, apply=True)
+    finding(
+        world.product(a["product_id"])["identity_key"] == "boss|boss1701|c2|50",
+        "R5: one collision stopped the migration re-keying an unrelated frame",
+    )
+    assert stats["collisions"] == 1
+    assert world.product(b["product_id"])["identity_key"] == "carrera|ca8895|807-b"
+    assert world.product(c["product_id"])["identity_key"] == "carrera|ca8895|807-c"
