@@ -33,7 +33,12 @@ vi.mock('../../../services/api', () => ({
 }));
 
 const getLastCost = vi.hoisted(() => vi.fn());
-vi.mock('../../../services/api/inventory', () => ({ vendorsApi: { getLastCost } }));
+vi.mock('../../../services/api/inventory', () => ({
+  vendorsApi: {
+    getLastCost,
+    getPoGstHeads: vi.fn().mockResolvedValue({ shop_gstin: '', heads: {} }),
+  },
+}));
 
 vi.mock('../../../services/api/stores', () => ({
   storeApi: {

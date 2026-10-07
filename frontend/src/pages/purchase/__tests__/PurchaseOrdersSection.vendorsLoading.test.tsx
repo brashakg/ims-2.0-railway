@@ -35,7 +35,10 @@ vi.mock('../../../services/api', () => ({
 }));
 
 vi.mock('../../../services/api/inventory', () => ({
-  vendorsApi: { getLastCost: vi.fn().mockResolvedValue({ costs: {} }) },
+  vendorsApi: {
+    getLastCost: vi.fn().mockResolvedValue({ costs: {} }),
+    getPoGstHeads: vi.fn().mockResolvedValue({ shop_gstin: '', heads: {} }),
+  },
 }));
 
 vi.mock('../../../services/api/stores', () => ({

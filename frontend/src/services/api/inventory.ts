@@ -817,11 +817,6 @@ export const vendorsApi = {
     return response.data as CreatedPurchaseOrder;
   },
 
-  // Procurement Phase 2C: most-recent agreed purchase price per product for a
-  // vendor, from PO history -- lets the PO composer pre-fill "last paid Rs X on
-  // <date>" instead of the buyer guessing. Store-scoped + fail-soft on the
-  // server: no history / DB trouble yields an empty `costs` map. Batch every
-  // line's product_id into ONE call.
   // The tax head each vendor's purchase carries at a shop, decided on the
   // server (shop_gstin + classify_supply). true = IGST, false = CGST + SGST,
   // null = cannot tell. Fail-soft: {} -> every card says "cannot tell".
@@ -839,6 +834,11 @@ export const vendorsApi = {
     }
   },
 
+  // Procurement Phase 2C: most-recent agreed purchase price per product for a
+  // vendor, from PO history -- lets the PO composer pre-fill "last paid Rs X on
+  // <date>" instead of the buyer guessing. Store-scoped + fail-soft on the
+  // server: no history / DB trouble yields an empty `costs` map. Batch every
+  // line's product_id into ONE call.
   getLastCost: async (
     vendorId: string,
     productIds: string[],
