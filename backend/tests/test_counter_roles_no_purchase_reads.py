@@ -1447,12 +1447,12 @@ def test_narrowing_the_accounts_set_moves_every_supplier_payment_read(monkeypatc
 
 
 # Every route whose handler-wide gate is the accounts rule, read off the code:
-# require_roles(*_AP_ROLES) (vendor AP, purchase invoices / recon, TDS), a
-# first-level _require_finance_admin (finance owner reads, ITC, Tally, GST),
-# /finance/vendor-payments' can_see_cost refusal, and vendor_rebates' _require.
+# a require_roles on the AP_ROLES object itself (vendor AP, purchase invoices /
+# recon, TDS -- section 20), a first-level _require_finance_admin (finance
+# owner reads, ITC, Tally, GST), /finance/vendor-payments' can_see_cost
+# refusal, and vendor_rebates' _require.
 _ACCOUNTS_GATE = re.compile(
-    r"require_roles\(\*_AP_ROLES\)"
-    r"|^    _require_finance_admin\(current_user\)"
+    r"^    _require_finance_admin\(current_user\)"
     r'|^    if not can_see_cost\(current_user, "payables"\)'
     r'|^    _require\(current_user, "',
     re.M,
@@ -1467,7 +1467,7 @@ def _accounts_gated_routes(app):
             src = inspect.getsource(endpoint)
         except (TypeError, OSError):
             continue
-        if _ACCOUNTS_GATE.search(src):
+        if _ACCOUNTS_GATE.search(src) or _route_gate_constant(route) is AP_ROLES:
             out |= {(m, route.path) for m in route.methods - {"HEAD", "OPTIONS"}}
     return out
 
@@ -1634,26 +1634,18 @@ def test_unhiding_a_cost_field_moves_every_product_read(
 # handler gates and the vendor-list mask while the middleware rows kept
 # refusing: two answers for one role until each row was edited by hand. Every
 # route whose code gate is a purchase tuple is read off the code here, and its
-# row must be the same object as the one list built from that tuple.
-_PURCHASE_GATE = re.compile(
-    r"require_roles\(\*(_VENDOR_ROLES|PURCHASE_ROLES|_VENDOR_RETURN_ROLES"
-    r"|_DEBIT_NOTE_ROLES|_VENDOR_RMA_ROLES)\)"
-)
-_READERS_GATE = re.compile(r"require_roles\(\*_VENDOR_RETURN_READERS\)")
-
-
+# row must be the same object as the one list built from that tuple. The
+# code gate is the object its require_roles resolves to (section 20), never
+# its spelling.
 def test_every_purchase_route_row_is_the_one_list(app):
     from api.services.rbac_policy._core import PURCHASE, RETURN_READERS
 
     want = {}
     for route in app.routes:
-        try:
-            src = inspect.getsource(route.endpoint)
-        except (AttributeError, TypeError, OSError):
-            continue
-        if _PURCHASE_GATE.search(src):
+        const = _route_gate_constant(route)
+        if const is PURCHASE_ROLES:
             gate = PURCHASE
-        elif _READERS_GATE.search(src):
+        elif const is _RETURN_READERS:
             gate = RETURN_READERS
         else:
             continue
@@ -1684,3 +1676,71 @@ def test_the_purchase_rule_follows_the_owner_rulings():
     # and to whom; the workshop reads returns without it; the counter never.
     assert set(PURCHASE_ROLES) == {"ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT"}
     assert set(_RETURN_READERS) == set(PURCHASE_ROLES) | {"WORKSHOP_STAFF"}
+
+
+# ---------------------------------------------------------------------------
+# 20. No hand-written role list in the purchase / supplier-money routers
+# ---------------------------------------------------------------------------
+# Sections 17 and 19 read each route's gate off its code BY NAME, so a gate
+# written out as roles -- require_roles("ADMIN", "ACCOUNTANT") or a local
+# tuple spelling them -- dropped out of both checks and every test stayed green
+# (panel mutants: the PO timeline and a vendor's payments list). Every
+# require_roles in these routers must be require_roles(*NAME) where NAME IS one
+# of cost_mask's role constants (identity, not equality), and sections 17 / 19
+# classify a route by that object, not by its spelling.
+import ast  # noqa: E402
+import importlib  # noqa: E402
+import pkgutil  # noqa: E402
+import textwrap  # noqa: E402
+
+_GATE_CONSTANTS = (AP_ROLES, PURCHASE_ROLES, _RETURN_READERS)
+_MONEY_ROUTERS = (
+    "vendors", "finance", "purchase_invoices", "purchase_recon",
+    "rtv_debit_notes", "vendor_returns", "vendor_rma", "vendor_rebates",
+)
+
+
+def _role_gates(src, namespace):
+    """The object every require_roles(...) call in `src` gates on: the constant
+    NAME resolves to for require_roles(*NAME), None for anything else."""
+    for node in ast.walk(ast.parse(textwrap.dedent(src))):
+        func = getattr(node, "func", None)
+        if getattr(func, "id", getattr(func, "attr", None)) != "require_roles":
+            continue
+        (arg,) = node.args if len(node.args) == 1 and not node.keywords else (None,)
+        if isinstance(arg, ast.Starred) and isinstance(arg.value, ast.Name):
+            yield node.lineno, namespace.get(arg.value.id)
+        else:
+            yield node.lineno, None
+
+
+def _route_gate_constant(route):
+    """The cost_mask constant a route's own require_roles gates on, or None."""
+    try:
+        src = inspect.getsource(route.endpoint)
+    except (AttributeError, TypeError, OSError):
+        return None
+    for _line, gate in _role_gates(src, route.endpoint.__globals__):
+        for const in _GATE_CONSTANTS:
+            if gate is const:
+                return const
+    return None
+
+
+def _money_router_modules():
+    for name in _MONEY_ROUTERS:
+        mod = importlib.import_module(f"api.routers.{name}")
+        yield mod
+        for info in pkgutil.iter_modules(getattr(mod, "__path__", [])):
+            yield importlib.import_module(f"{mod.__name__}.{info.name}")
+
+
+def test_every_money_router_gate_is_a_cost_mask_constant():
+    found, wrong = 0, []
+    for mod in _money_router_modules():
+        for line, gate in _role_gates(inspect.getsource(mod), vars(mod)):
+            found += 1
+            if not any(gate is const for const in _GATE_CONSTANTS):
+                wrong.append(f"{mod.__name__}:{line}")
+    assert found >= 70, found  # the scan reads the routers, not nothing
+    assert not wrong, wrong
