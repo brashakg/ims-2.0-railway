@@ -300,10 +300,12 @@ def test_admins_keep_every_suppliers_balance(finance, role):
     assert rows[VA]["total_debit_notes"] == 200.0
 
 
-def test_an_accountant_with_no_shop_keeps_every_suppliers_balance(finance):
+def test_an_accountant_with_no_shop_reads_no_suppliers_balance(finance):
+    """Owner ruling 2026-10-07 (R3): it used to read every shop's balances --
+    the one shop rule gave a no-shop login the admins' 'all stores'."""
     resp = finance("/vendor-payments", _user("ACCOUNTANT"))
-    assert resp.status_code == 200, resp.text
-    assert {r["vendor_id"]: r["balance"] for r in resp.json()} == OWED
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["detail"] == "Your login has no shop assigned - ask an admin to assign one."
 
 
 @pytest.mark.parametrize("asked", [None, PUN])

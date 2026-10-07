@@ -25,6 +25,9 @@ const GoodsReceiptCockpit = lazy(() => import('../pages/purchase/GoodsReceiptCoc
 const VendorReturns = lazy(() => import('../pages/purchase/VendorReturns').then(m => ({ default: m.VendorReturns })));
 // Purchase S6: Accountant Reconciliation Console
 const ReconConsole = lazy(() => import('../pages/purchase/ReconConsole'));
+// Owner ruling 2026-10-07 (R3): the screens outside PurchaseLayout take its
+// no-shop gate too (lazy: the shop module stays out of the first download).
+const PurchaseShopGate = lazy(() => import('../pages/purchase/purchaseShop').then(m => ({ default: m.PurchaseShopGate })));
 
 // The module gate for the section pages — identical to the old /purchase gate.
 const PURCHASE_ROLES: UserRole[] = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'];
@@ -154,7 +157,7 @@ export const purchaseRoutes = (
       path="purchase/grn"
       element={
         <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
-          <GoodsReceiptNote />
+          <PurchaseShopGate><GoodsReceiptNote /></PurchaseShopGate>
         </ProtectedRoute>
       }
     />
@@ -167,7 +170,7 @@ export const purchaseRoutes = (
       path="purchase/receive"
       element={
         <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
-          <GoodsReceiptCockpit />
+          <PurchaseShopGate><GoodsReceiptCockpit /></PurchaseShopGate>
         </ProtectedRoute>
       }
     />
@@ -179,7 +182,7 @@ export const purchaseRoutes = (
       path="purchase/recon-console"
       element={
         <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'ACCOUNTANT']}>
-          <ReconConsole />
+          <PurchaseShopGate><ReconConsole /></PurchaseShopGate>
         </ProtectedRoute>
       }
     />

@@ -85,11 +85,24 @@ describe('the Purchase header names the shop a non-admin reads', () => {
     expect(label()).toBeNull();
   });
 
-  it('a login with no shop is not handed a made-up one', async () => {
-    roles = ['ACCOUNTANT'];
+  // Owner ruling 2026-10-07 (R3): it used to open the tab -- and the server
+  // handed it every shop. Now: the plain message, no tab, no list requested.
+  it.each([['ACCOUNTANT'], ['STORE_MANAGER']])('%s with no shop reads the message, not a tab', async (role) => {
+    roles = [role];
     activeStoreId = undefined;
     open();
-    await screen.findByText('report');
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Your login has no shop assigned - ask an admin to assign one.',
+    );
+    expect(screen.queryByText('report')).toBeNull();
     expect(label()).toBeNull();
+  });
+
+  it('an admin with no shop still opens the tab on all stores', async () => {
+    roles = ['ADMIN'];
+    activeStoreId = undefined;
+    open();
+    expect(await screen.findByText('report')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 });

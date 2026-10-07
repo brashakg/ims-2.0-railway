@@ -25,7 +25,7 @@ import {
 } from 'lucide-react';
 import { useIsOnlineStore } from '../../hooks/useIsOnlineStore';
 import { useAuth } from '../../context/AuthContext';
-import { NewOrdersDeliverTo, PurchaseShopLabel, PurchaseShopPicker } from './purchaseShop';
+import { NewOrdersDeliverTo, PurchaseShopGate, PurchaseShopLabel, PurchaseShopPicker } from './purchaseShop';
 import { APPROVE_ROLES } from './invoices/shared';
 
 const SECTIONS = [
@@ -155,7 +155,9 @@ export function PurchaseLayout() {
         </nav>
       </div>
 
-      <Outlet />
+      <PurchaseShopGate>
+        <Outlet />
+      </PurchaseShopGate>
     </div>
   );
 }

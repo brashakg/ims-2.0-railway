@@ -7,7 +7,12 @@
 // the server (api.dependencies.resolve_store_scope: no store_id = all stores
 // for ADMIN/SUPERADMIN, the caller's own shop for anyone else, 403 for another
 // shop); this only carries the admin's pick between tabs.
+//
+// Owner ruling 2026-10-07 (R3): anyone else with NO shop gets no shop's data.
+// The server refuses them (resolve_store_scope, the same words as NO_SHOP);
+// PurchaseShopGate says so instead of loading a screen of 403s.
 
+import type { ReactNode } from 'react';
 import { create } from 'zustand';
 import { useAuth } from '../../context/AuthContext';
 import { useStores } from '../../hooks/usePOSQueries';
@@ -31,7 +36,23 @@ export function usePurchaseShop() {
   const showShopOf = (raisedAt: string | undefined) => {
     if (canPick && shop && raisedAt && shop !== raisedAt) setShop(raisedAt);
   };
-  return { storeId, ownStoreId, canPick, shop, setShop, showShopOf };
+  const noShop = !canPick && !ownStoreId;
+  return { storeId, ownStoreId, canPick, noShop, shop, setShop, showShopOf };
+}
+
+/** The server's refusal for a login with no shop (api.dependencies NO_SHOP_DETAIL). */
+export const NO_SHOP = 'Your login has no shop assigned - ask an admin to assign one.';
+
+/** Wraps every Purchase screen: a non-admin login with no shop reads the plain
+ *  message and nothing else -- no list is requested. */
+export function PurchaseShopGate({ children }: { children: ReactNode }) {
+  const { noShop } = usePurchaseShop();
+  if (!noShop) return <>{children}</>;
+  return (
+    <p role="alert" className="m-4 p-4 rounded border border-amber-200 bg-amber-50 text-sm text-amber-900">
+      {NO_SHOP}
+    </p>
+  );
 }
 
 type StoreRow = { store_id?: string; store_name?: string; store_code?: string };
