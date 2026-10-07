@@ -60,8 +60,10 @@ SALE_DONE_ANY_CASE = tuple(
     v for s in (*SALE_DONE_STATUSES, "FULFILLED") for v in (s, s.lower(), s.title())
 )
 BOOKED_STATUSES = frozenset({"CONFIRMED", "PROCESSING", "READY", "SHIPPED", "DELIVERED"})
-# Targets an active Rx / stock hold withholds (the deliver-guard's own rule).
-_HOLDABLE = frozenset({"SHIPPED", "DELIVERED"})
+# The goods have left the shop, with the courier or the customer: the targets
+# an active Rx / stock hold withholds (the deliver-guard's own rule), and a
+# Shopify refund's goods-out rule (shopify_refund: a person decides).
+GOODS_OUT = frozenset({_LIVE[SHIP], _LIVE[DELIVER]})
 _VERB = {CANCEL: "cancelled", REFUND: "refunded", DELETE: "deleted"}
 _ALREADY = frozenset({(DELETE, "VOIDED"), (SHIP, "DELIVERED")})
 
@@ -118,7 +120,7 @@ def decide(order: Dict[str, Any], fact: Optional[str]) -> Tuple[Optional[str], O
         # delivered order was shipped) -- no disagreement to report.
         same = _LIVE[fact] == frm or (fact, frm) in _ALREADY
         return None, ("withheld" if frm in TERMINAL and not same else None)
-    if cell in _HOLDABLE:
+    if cell in GOODS_OUT:
         from ..routers.orders import order_has_active_rx_hold
 
         if order_has_active_rx_hold(order):

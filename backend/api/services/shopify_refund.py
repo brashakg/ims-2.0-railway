@@ -71,6 +71,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from .online_order_status import GOODS_OUT
+
 logger = logging.getLogger(__name__)
 
 _REVIEW_COLLECTION = "shopify_refund_review"
@@ -872,7 +874,7 @@ def handle_shopify_refund(
         # Goods out with the courier or the customer: a person decides, even
         # under AUTO -- the units are not on any shelf to put back yet.
         goods_out = bool(
-            str(order.get("status") or "").strip().upper() in ("SHIPPED", "DELIVERED")
+            str(order.get("status") or "").strip().upper() in GOODS_OUT
             or order.get("awb")
             or order.get("shopify_fulfillment_id")
         )

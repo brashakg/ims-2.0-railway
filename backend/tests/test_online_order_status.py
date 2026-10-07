@@ -1081,6 +1081,26 @@ def test_a_refund_on_goods_out_waits_for_a_person_even_under_auto(swept, monkeyp
     assert swept["returns"].count_documents({}) == 0 and swept["ledger"].count_documents({}) == 0
 
 
+def test_an_order_shipped_by_its_orders_body_alone_is_goods_out(swept, monkeypatch):
+    """orders/fulfilled lands SHIPPED (the mapper's own SHIP fact) before any
+    fulfillments/* reconcile stamps awb or shopify_fulfillment_id: the status
+    is all that says the frame is with the courier, so AUTO still waits for a
+    person -- posted, it put stk-1 back on the shelf while it was in transit."""
+    monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "1")
+    doc = _book(swept, 60142)
+    _claim_unit(swept, doc)
+    swept["real_map"](_pulled(60142, fulfillment_status="fulfilled"), swept["db"],
+                      webhook_id="ful-60142", topic="orders/fulfilled")
+    shipped = _doc(swept, 60142)
+    assert shipped["status"] == "SHIPPED"
+    assert not {"awb", "shopify_fulfillment_id"} & {k for k, v in shipped.items() if v}
+    res = shopify_refund.handle_shopify_refund(swept["db"], _refund(700342, 60142, restock_type="return"),
+                                               webhook_id=None, topic="refunds/create")
+
+    assert res["status"] == "queued"
+    assert [(u["stock_id"], u["status"]) for u in swept["stock_repo"].units] == [("stk-1", "SOLD")]
+
+
 _HANDED_OVER = {"status": "DELIVERED", "status_updated_by": "u1"}
 
 
