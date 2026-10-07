@@ -1280,11 +1280,106 @@ def _admits(call):
     return True
 
 
+# The purchase screens' reads of supplier-bill money: the PO drawer's bill
+# amount + paid status (/purchase-orders/{po_id}/timeline) and the vendor
+# card's month-to-date bill total (/{vendor_id}/performance). Their route gate
+# admits the store / area manager (a PO is theirs to chase); the bill money in
+# them is the payables rule's alone.
+_BILL_TOTAL = 8888.88
+_MTD_TOTAL = 6666.66
+
+
+class _Cursor(list):
+    def limit(self, _n):
+        return self
+
+    def sort(self, *_a, **_k):
+        return self
+
+
+class _BillDb:
+    """One PAID purchase bill on PO1, dated this month; every other collection
+    is empty."""
+
+    def get_collection(self, name):
+        from api.routers.vendors._shared import now_ist
+
+        bill = {
+            "doc_type": "PURCHASE_INVOICE", "po_id": "PO1", "vendor_id": "V1",
+            "bill_id": "B1", "invoice_number": "INV-9", "status": "PAID",
+            "total": _BILL_TOTAL, "total_amount": _MTD_TOTAL,
+            "bill_date": now_ist().strftime("%Y-%m-01"),
+            "created_at": "2026-06-06T10:00:00",
+        }
+        rows = [bill] if name == "vendor_bills" else []
+        return types.SimpleNamespace(find=lambda *_a, **_k: _Cursor(rows))
+
+
+class _TimelinePORepo:
+    def find_by_id(self, po_id):
+        return {
+            "po_id": po_id, "po_number": "PO-1", "vendor_id": "V1",
+            "delivery_store_id": "BV-TEST-01", "status": "RECEIVED",
+        }
+
+
+def _bill_reads(monkeypatch):
+    monkeypatch.setattr(
+        vendors_mod, "get_purchase_order_repository", lambda: _TimelinePORepo()
+    )
+    monkeypatch.setattr(
+        vendors_mod,
+        "get_grn_repository",
+        lambda: types.SimpleNamespace(find_many=lambda *_a, **_k: []),
+    )
+    monkeypatch.setattr(vendors_mod, "_get_db", lambda: _BillDb())
+    monkeypatch.setattr(
+        vendors_mod,
+        "get_vendor_repository",
+        lambda: types.SimpleNamespace(find_by_id=lambda _vid: None),
+    )
+
+
+def _bill_money_answers(monkeypatch, role):
+    """{read: does `role` get the bill money} for the two purchase-screen reads,
+    handlers called directly (past their purchase-role gate)."""
+    _bill_reads(monkeypatch)
+    user = {"roles": [role], "store_ids": ["BV-TEST-01"], "active_store_id": "BV-TEST-01"}
+    tl = asyncio.run(vendors_mod.get_po_timeline("PO1", current_user=user))
+    perf = asyncio.run(vendors_mod.vendor_performance("V1", months=6, current_user=user))
+    (inv,) = tl["invoices"]
+    assert inv["invoice_number"] == "INV-9", inv  # that a bill exists stays
+    (event,) = [e for e in tl["events"] if e["kind"] == "bill_settled"]
+    return {
+        "po-timeline bill total": "total" in inv,
+        "po-timeline bill status": "status" in inv,
+        "po-timeline event status": "PAID" in event["detail"],
+        "vendor mtd spend": "mtd_spend" in perf,
+    }
+
+
+@pytest.mark.parametrize("role", ("STORE_MANAGER", "AREA_MANAGER", "ACCOUNTANT", "ADMIN"))
+def test_supplier_bill_money_on_the_purchase_screens_is_accounts_only(
+    client, monkeypatch, role
+):
+    _bill_reads(monkeypatch)
+    sees = role in AP_ROLES
+    tl = client.get("/api/v1/vendors/purchase-orders/PO1/timeline", headers=_headers(role))
+    perf = client.get("/api/v1/vendors/V1/performance", headers=_headers(role))
+    assert tl.status_code == perf.status_code == 200, (tl.text, perf.text)
+    assert "INV-9" in tl.text, tl.text
+    assert (str(_BILL_TOTAL) in tl.text) is sees, tl.text
+    assert ("PAID" in tl.text) is sees, tl.text
+    assert ("mtd_spend" in perf.json()) is sees, perf.text
+    assert (str(_MTD_TOTAL) in perf.text) is sees, perf.text
+
+
 def _supplier_payment_answers(monkeypatch, role):
     """{read: does `role` get supplier payments} for every request-time check."""
     from api.routers.finance import bank_statement as bs
     from api.routers.finance import survival as survival_mod
 
+    bills = _bill_money_answers(monkeypatch, role)
     monkeypatch.setattr(cash_flow_mod, "_get_db", lambda: _CashDb())
     user = {"roles": [role]}
     body = asyncio.run(
@@ -1302,6 +1397,7 @@ def _supplier_payment_answers(monkeypatch, role):
         monkeypatch.setattr(mod, "_get_db", _reached)
     upload = types.SimpleNamespace(filename="statement.txt")
     return {
+        **bills,
         "cash-flow total": "vendor_payment_outflow" in body,
         "vendor-payments": _vendor_payments_admits(monkeypatch, role),
         "vendor rebates": rebates,

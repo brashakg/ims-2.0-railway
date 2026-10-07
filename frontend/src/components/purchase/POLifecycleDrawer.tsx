@@ -75,7 +75,9 @@ export interface POTimelineGRN {
 export interface POTimelineInvoice {
   bill_id: string;
   invoice_number: string;
-  status: string;
+  /** status + total are supplier-bill money: the server sends them to the
+   *  accounts roles only (cost_mask "payables"); anyone else gets neither. */
+  status?: string | null;
   total?: number | null;
   created_at?: string | null;
 }
@@ -410,7 +412,7 @@ export function POLifecycleDrawer({ poId, poNumber, onClose, onSendToVendor }: P
                             {typeof inv.total === 'number' && ` · ₹${inv.total.toLocaleString()}`}
                           </p>
                         </div>
-                        <PurchaseStatusChip status={inv.status} kind="invoice" />
+                        {inv.status && <PurchaseStatusChip status={inv.status} kind="invoice" />}
                       </div>
                     ))}
                   </div>

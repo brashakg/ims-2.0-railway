@@ -17,6 +17,7 @@ from ._shared import (
     require_roles,
     router,
 )
+from ...services.cost_mask import can_see_cost
 
 
 def _stamp_event_actors(events: list) -> None:
@@ -146,6 +147,10 @@ async def get_po_timeline(
         logger.warning("[VENDOR] po-timeline grn lookup failed: %s", e)
 
     # Purchase invoices linked to this PO or any of its GRNs -> "Bill settled".
+    # A bill's amount and paid status are supplier payments: the one payables
+    # rule (owner ruling 2026-09-29). Anyone else learns only that a bill
+    # exists and its number.
+    show_bills = can_see_cost(current_user, "payables")
     invoices_out: list = []
     try:
         db = _get_db()
@@ -160,16 +165,18 @@ async def get_po_timeline(
                 )
             )
             for r in rows:
-                invoices_out.append(
-                    {
-                        "bill_id": r.get("bill_id"),
-                        "invoice_number": r.get("invoice_number")
-                        or r.get("bill_number"),
-                        "status": r.get("status"),
-                        "total": r.get("total"),
-                        "created_at": r.get("created_at"),
-                    }
-                )
+                inv = {
+                    "bill_id": r.get("bill_id"),
+                    "invoice_number": r.get("invoice_number")
+                    or r.get("bill_number"),
+                    "created_at": r.get("created_at"),
+                }
+                detail = "Purchase invoice booked"
+                if show_bills:
+                    inv["status"] = r.get("status")
+                    inv["total"] = r.get("total")
+                    detail += f" ({r.get('status') or 'OUTSTANDING'})"
+                invoices_out.append(inv)
                 events.append(
                     {
                         "kind": "bill_settled",
@@ -177,7 +184,7 @@ async def get_po_timeline(
                         "at": r.get("created_at"),
                         "ref": r.get("invoice_number") or r.get("bill_number"),
                         "actor": r.get("created_by"),
-                        "detail": f"Purchase invoice booked ({r.get('status') or 'OUTSTANDING'})",
+                        "detail": detail,
                     }
                 )
     except Exception as e:  # noqa: BLE001
