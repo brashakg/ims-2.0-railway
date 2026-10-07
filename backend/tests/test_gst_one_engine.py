@@ -227,7 +227,10 @@ def test_forecast_auto_draft_charges_the_hsn_rate_not_a_flat_18(monkeypatch):
         ]
     }
     po_repo = _Repo()
-    monkeypatch.setattr(v, "_get_db", lambda: _DB(orders=[order], products=[product]))
+    company = {"entity_id": "E1", "gstins": [{"gstin": _JH_STORE["gstin"], "state_code": "20"}]}
+    monkeypatch.setattr(
+        v, "_get_db", lambda: _DB(orders=[order], products=[product], entities=[company])
+    )
     monkeypatch.setattr(v, "is_online_store", lambda db_, sid: False)
     monkeypatch.setattr(v, "get_purchase_order_repository", lambda: po_repo)
     monkeypatch.setattr(v, "get_vendor_repository", lambda: _Repo(_MH_VENDOR))
@@ -459,12 +462,14 @@ _MH_SHOP_WITH_JH_GSTIN = {
 }
 
 
-def test_the_order_reads_the_place_of_supply_off_the_shop_not_its_paperwork():
-    """stores.py falls back to the entity's PRIMARY registration when the
-    entity holds none in the shop's state, so a Maharashtra shop can be stamped
-    with a Jharkhand GSTIN. Goods delivered in Maharashtra from a Maharashtra
-    vendor are CGST + SGST; the shop's own state decides, not the fallback."""
-    assert _po_verdict(_MH_VENDOR, _MH_SHOP_WITH_JH_GSTIN) is False
+def test_the_order_follows_the_registration_not_the_declared_state():
+    """Owner, 2026-09-30: the registration decides the state. A Maharashtra
+    shop stamped with its company's Jharkhand number receives on that number,
+    so a Maharashtra vendor's goods are IGST on the order exactly as on the
+    bill; the go-live checklist names the shop so its record gets fixed. The
+    order used to read the shop's declared state and say CGST + SGST while
+    the bill said IGST."""
+    assert _po_verdict(_MH_VENDOR, _MH_SHOP_WITH_JH_GSTIN) is True
 
 
 def _entity_db():
@@ -481,32 +486,31 @@ def _entity_db():
                     {"gstin": "27AABCU9603R1ZX", "state_code": "27"},
                 ],
             }
-        ]
+        ],
+        stores=[_MH_SHOP_WITH_JH_GSTIN],
     )
 
 
-def test_the_bill_receives_on_the_primary_gstin_and_says_so_out_loud():
-    """The residual disagreement, pinned as LIVE BEHAVIOUR -- nothing stubbed.
-
-    A two-state entity buying for a shop outside its primary state: the BILL
-    receives on the entity's primary (Jharkhand) registration and reads
-    inter-state, while the purchase ORDER reads the receiving shop's own state
-    and says intra-state. That is what production does today, on every code
-    path, with no switch anywhere to change it.
-
-    An earlier round shipped an owner "gate" here that was supposed to make the
-    two agree. It could not be armed by anybody -- its policy key was absent
-    from the registry, so policy_engine.get_policy returned the caller's default
-    before it ever looked at the DB, the entity, the store or the environment --
-    and the test that "proved" it worked monkeypatched the very function whose
-    unreachability WAS the defect. The dead path is gone. This test asserts the
-    real answer instead of a stubbed one, so it changes the day someone changes
-    recipient resolution for real, and never before.
-    """
-    recipient = pi._resolve_recipient(_entity_db(), "E1", None, None)
-    assert recipient["recipient_gstin"] == "20AABCU9603R1ZM"  # the JH primary
+def test_the_order_and_the_bill_read_one_shop_gstin():
+    """The residual disagreement is gone, nothing stubbed: the bill's
+    recipient and the order's tax head both read org_validation.shop_gstin
+    (the order through vendors.po_gst_context), so a shop whose record and
+    declared state disagree gets ONE verdict on both documents."""
+    db = _entity_db()
+    recipient = pi._bill_recipient(db, _MH_SHOP_WITH_JH_GSTIN["store_id"], None)
+    assert recipient["recipient_gstin"] == "20AABCU9603R1ZM"  # its own, held
     assert _bill_verdict(_MH_VENDOR, recipient["recipient_gstin"]) is True
-    assert _po_verdict(_MH_VENDOR, _MH_SHOP_WITH_JH_GSTIN) is False
+    import api.routers.vendors.gst as po_gst
+
+    saved = (po_gst.get_store_repository, po_gst._get_db)
+    try:
+        po_gst.get_store_repository = lambda: _Repo(dict(_MH_SHOP_WITH_JH_GSTIN))
+        po_gst._get_db = lambda: db
+        _, store_doc = v.po_gst_context("WO-TEST-01", None)
+    finally:
+        po_gst.get_store_repository, po_gst._get_db = saved
+    assert store_doc["gstin"] == recipient["recipient_gstin"]
+    assert _po_verdict(_MH_VENDOR, store_doc) is True
 
 
 def test_no_purchase_invoice_setting_is_read_through_an_unregistered_key():

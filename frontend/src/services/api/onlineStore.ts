@@ -117,7 +117,8 @@ const PLACEHOLDER: OnlineStoreSummary = {
 // ----------------------------------------------------------------------------
 // GET /api/v1/online-store/stock-tally reconciles, per online-listed SKU, what
 // the storefront lists vs the real physical on-hand vs what is already reserved,
-// and flags oversell-risk (listed > sellable). It is STRICTLY read-only — no
+// and flags oversell-risk PER SHOPIFY LOCATION (the backend decides it; never
+// re-derive it here from the summed columns). It is STRICTLY read-only — no
 // allocation/reserve is performed here (that write-path is a deferred follow-up).
 // Graceful degradation: any error (404 stale deploy / 403 outside the ecom gate)
 // resolves to an empty, unavailable envelope so the screen always renders.
@@ -131,15 +132,23 @@ export interface StockTallyRow {
   /** What the storefront currently lists (LIVE Shopify read); null = unknown
    *  (live read unavailable — rendered as an em dash, never a fake 0). */
   online_listed_qty: number | null;
-  /** AVAILABLE serialized stock units (physical on-hand). */
+  /** AVAILABLE serialized stock units on every physical shelf, unmapped shops
+   *  included (physical on-hand; display only -- never an oversell input). */
   on_hand: number;
   /** RESERVED serialized stock units. */
   reserved: number;
-  /** on_hand - reserved (floored at 0) — what is actually free to sell. */
+  /** What IMS's stock writer sends to the website: each MAPPED shop's shelf
+   *  minus the safety buffer (0 when the SKU is online-blocked), summed over
+   *  the mapped shops. Not on_hand - reserved: unmapped shops are sold
+   *  online nowhere. */
   sellable: number;
   /** A conservative reserve suggestion to keep off the listing (not enforced). */
   recommended_buffer: number;
-  /** True when online_listed_qty > sellable (can sell a unit that isn't free). */
+  /** True when SOME Shopify location lists more than the shelf of the shop
+   *  mapped to it, lists at a location no IMS shop claims, or lists against a
+   *  shop IMS could not read -- decided per location by the backend. NOT
+   *  online_listed_qty > sellable: the totals can match while one location
+   *  sells units its shop does not have. */
   oversell_risk: boolean;
 }
 
@@ -161,6 +170,9 @@ export interface StockTallySummary {
   /** True when IMS could not read the shops' on-hand: nothing is tallied and
    *  nothing is shown as 0 on hand (an unreadable shelf is never "empty"). */
   on_hand_unknown?: boolean;
+  /** True when IMS could not read which listings are live on Shopify: nothing
+   *  is tallied (a dead read is never "nothing is listed online"). */
+  live_listings_unknown?: boolean;
 }
 
 export interface StockTallyResult {
@@ -270,6 +282,7 @@ export const onlineStoreApi = {
           listed_live_rows: num(s.listed_live_rows),
           listed_mapped_rows: num(s.listed_mapped_rows),
           on_hand_unknown: !!s.on_hand_unknown,
+          live_listings_unknown: !!s.live_listings_unknown,
         },
         available: true,
         reason: null,
@@ -1957,7 +1970,7 @@ export const pushApi = {
 // fail-soft here: any error (403 non-superadmin / 404 stale deploy / network)
 // resolves to a safe "unavailable" shape so a tile renders empty rather than
 // crashing the page. NONE of these arm or bypass the push gates.
-//   - GET /admin/online-store/sync-health   last sync / reconcile / webhooks / drift
+//   - GET /admin/online-store/sync-health   last sync / webhooks / drift
 //   - GET /admin/online-store/parity        IMS catalog counts vs what has a gid
 //   - GET /admin/online-store/drift         live dual-writer drift check (needs creds)
 // Import DIRECTLY from this module (NOT the api barrel — TS2614, per past sessions).
@@ -1996,7 +2009,6 @@ export interface SyncHealth {
     last_pushed_at?: string | null;
     pushed_products?: number;
   } | null;
-  reconcile?: { checked?: boolean; oversell_risk?: number; count?: number } | null;
   webhooks?: { checked?: boolean; failed?: number; skipped?: number } | null;
   drift?: { checked?: boolean; reason?: string | null } | null;
   stock_miss?: { checked?: boolean; unresolved?: number } | null;
