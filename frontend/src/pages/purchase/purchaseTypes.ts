@@ -44,6 +44,10 @@ export interface PurchaseOrder {
   poNumber: string;
   supplierId: string;
   supplierName: string;
+  /** The shop the order delivers to (purchase_orders.delivery_store_id) --
+   *  the shop its receipt is booked at. On All stores each order card names
+   *  it (review r3 #10). Absent on an order that predates the field. */
+  deliveryStoreId?: string;
   date: string;
   expectedDelivery: string;
   status: POStatus;

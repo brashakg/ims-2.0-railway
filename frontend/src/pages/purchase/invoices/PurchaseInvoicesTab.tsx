@@ -28,7 +28,7 @@ import { usePurchaseShop } from '../purchaseShop';
 import type { Supplier } from '../purchaseTypes';
 import { inr, errMsg } from './shared';
 import { ExceptionsPanel } from './ExceptionsPanel';
-import { GrnPickerModal, DcPickerModal } from './pickers';
+import { GrnPickerModal, DcPickerModal, RowShop } from './pickers';
 import { InvoiceFormDrawer, blankLine, type EditLine } from './InvoiceFormDrawer';
 import { InvoiceDetailDrawer, MatchBadge, ConfigNote } from './InvoiceDetailDrawer';
 
@@ -195,7 +195,7 @@ export function PurchaseInvoicesTab({ suppliers }: { suppliers: Supplier[] }) {
             }}
             onViewDetail={setDetailInvoice}
           />
-          <InvoiceList invoices={invoices} onOpen={setDetailInvoice} />
+          <InvoiceList invoices={invoices} onOpen={setDetailInvoice} showShop={!storeId} />
         </>
       )}
 
@@ -254,7 +254,14 @@ export function PurchaseInvoicesTab({ suppliers }: { suppliers: Supplier[] }) {
 // ============================================================================
 // List of booked / draft purchase invoices
 // ============================================================================
-function InvoiceList({ invoices, onOpen }: { invoices: PurchaseInvoice[]; onOpen: (pi: PurchaseInvoice) => void }) {
+// On All stores (no shop in scope) each bill names the shop it is booked to:
+// two shops' bills from one supplier otherwise read as identical rows, and an
+// admin could not tell which shop owes which (review r3 #10).
+function InvoiceList({ invoices, onOpen, showShop }: {
+  invoices: PurchaseInvoice[];
+  onOpen: (pi: PurchaseInvoice) => void;
+  showShop: boolean;
+}) {
   if (invoices.length === 0) {
     return (
       <div className="text-center py-12 bg-white border border-gray-200 rounded-lg">
@@ -301,6 +308,7 @@ function InvoiceList({ invoices, onOpen }: { invoices: PurchaseInvoice[]; onOpen
                 <td className="px-3 py-2">
                   <div className="font-medium text-gray-900">{pi.vendor_name || pi.vendor_id}</div>
                   <div className="text-xs text-gray-500">{pi.vendor_invoice_no}</div>
+                  {showShop && <RowShop storeId={pi.store_id} />}
                 </td>
                 <td className="px-3 py-2 text-gray-700">{(pi.vendor_invoice_date || '').slice(0, 10)}</td>
                 <td className="px-3 py-2 text-xs text-gray-500">

@@ -9,6 +9,13 @@ import {
   Truck,
 } from 'lucide-react';
 import type { PurchaseOrder, Supplier } from './purchaseTypes';
+import { rupees } from './PurchasesThisMonthSection';
+
+/** A money tile: whole rupees below a lakh (Rs 3,000, never "Rs 0.0L" -- the
+ *  F56 "Rs 0 on one screen" symptom), lakhs from there up. The Inventory value
+ *  tiles' rule (review r3 #16). */
+const tileMoney = (n: number) =>
+  Math.round(n) < 100000 ? rupees(n) : `\u20B9${(n / 100000).toFixed(1)}L`;
 
 interface PurchaseAnalyticsProps {
   /** The newest page of orders the server sent (newest first). */
@@ -47,7 +54,7 @@ export function PurchaseAnalytics({ purchaseOrders, totalOrders, suppliers }: Pu
             <div>
               <p className="text-sm text-gray-600">{cut ? `Value of the latest ${shown} orders` : 'Total Value'}</p>
               <p className="text-2xl font-bold text-gray-900">
-                {'\u20B9'}{(purchaseOrders.reduce((sum, po) => sum + po.total, 0) / 100000).toFixed(1)}L
+                {tileMoney(purchaseOrders.reduce((sum, po) => sum + po.total, 0))}
               </p>
             </div>
           </div>

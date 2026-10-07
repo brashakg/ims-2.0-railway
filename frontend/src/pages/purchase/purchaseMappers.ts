@@ -87,6 +87,7 @@ export function mapPOtoPurchaseOrder(po: any): PurchaseOrder {
     poNumber: po.po_number ?? '',
     supplierId: po.vendor_id ?? '',
     supplierName: po.vendor_name ?? '',
+    deliveryStoreId: po.delivery_store_id || undefined,
     date: po.created_at ? po.created_at.split('T')[0] : '',
     expectedDelivery: po.expected_date ?? '',
     status: (po.status ?? 'DRAFT') as POStatus,

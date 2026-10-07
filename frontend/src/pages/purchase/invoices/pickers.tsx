@@ -18,13 +18,16 @@ import {
 import { vendorsApi } from '../../../services/api';
 import { useToast } from '../../../context/ToastContext';
 import { PurchaseShopName, usePurchaseShop } from '../purchaseShop';
+import { matchingTotal } from '../purchaseQueries';
 import type { Supplier } from '../purchaseTypes';
 import { errMsg } from './shared';
 
-/** On All stores, each receipt row names the shop it was received at. */
-function RowShop({ storeId }: { storeId?: string }) {
+/** On All stores, each row of a Purchase list names the shop it belongs to --
+ *  the shop a bill, receipt or return is booked to, the shop an order
+ *  delivers to. Shared by every Purchase list (review r3 #10). */
+export function RowShop({ storeId }: { storeId?: string | null }) {
   return (
-    <div className="text-xs text-gray-500">
+    <div className="text-xs text-gray-500" data-testid="row-shop">
       {storeId ? <>For <PurchaseShopName storeId={storeId} /></> : 'No shop on record'}
     </div>
   );
@@ -45,9 +48,12 @@ export function GrnPickerModal({
   onPicked: (prefill: Partial<PurchaseInvoice>, lines: PurchaseInvoiceLine[]) => void;
 }) {
   const toast = useToast();
-  const { storeId } = usePurchaseShop(); // audit F63: the invoice list's scope
+  const { storeId, canPick } = usePurchaseShop(); // audit F63: the invoice list's scope
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [grns, setGrns] = useState<any[]>([]);
+  // Every receipt the two reads match, from the server's `total` -- each read
+  // is only its newest page, so the list can be a cut (review r3 #13).
+  const [grnTotal, setGrnTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
 
@@ -65,9 +71,13 @@ export function GrnPickerModal({
           vendorsApi.getGRNs({ status: 'ACCEPTED', ...scope }),
           vendorsApi.getGRNs({ status: 'PARTIALLY_ACCEPTED', ...scope }),
         ]);
-        setGrns([...(ok?.grns ?? []), ...(held?.grns ?? [])]);
+        const okRows = ok?.grns ?? [];
+        const heldRows = held?.grns ?? [];
+        setGrns([...okRows, ...heldRows]);
+        setGrnTotal(matchingTotal(ok, okRows.length) + matchingTotal(held, heldRows.length));
       } catch {
         setGrns([]);
+        setGrnTotal(0);
       } finally {
         setLoading(false);
       }
@@ -136,6 +146,12 @@ export function GrnPickerModal({
             </div>
           ) : (
             <div className="space-y-2">
+              {grns.length < grnTotal && (
+                <p className="text-xs text-gray-500" data-testid="grn-picker-cut">
+                  Latest {grns.length} of {grnTotal} receipts, newest first.
+                  {canPick && !storeId ? ' Pick a shop in the Shop filter to narrow the list.' : ''}
+                </p>
+              )}
               {grns.map((g) => {
                 const heldLines: Array<{ product_id?: string }> = g.unresolved_lines || [];
                 const held = g.status === 'PARTIALLY_ACCEPTED' || heldLines.length > 0;

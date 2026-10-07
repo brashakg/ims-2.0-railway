@@ -15,8 +15,10 @@
 // here (the fixture prices the line so no line figure equals a credit figure).
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { ReactNode } from 'react';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
 const apiMock = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), patch: vi.fn() }));
 const dnMock = vi.hoisted(() => ({
@@ -37,6 +39,14 @@ vi.mock('../../../context/AuthContext', () => ({
 }));
 
 import { VendorReturns } from '../VendorReturns';
+
+// The app's query cache: on All stores (an admin's default) each return card
+// names its shop from the cached store list (review r3 #10).
+const withCache = (node: ReactNode) => (
+  <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+    {node}
+  </QueryClientProvider>
+);
 
 // A return the supplier has credited: value Rs 7,000, credit note CN-9 for
 // Rs 5,000. The one line is 2 x Rs 3,000 (= Rs 6,000), so no item figure
@@ -78,9 +88,11 @@ function load() {
 
 async function openReturn() {
   render(
-    <MemoryRouter>
-      <VendorReturns />
-    </MemoryRouter>,
+    withCache(
+      <MemoryRouter>
+        <VendorReturns />
+      </MemoryRouter>,
+    ),
   );
   fireEvent.click(await screen.findByText('Acme Optics'));
   await screen.findByText('DN/26-27/0001');
@@ -120,9 +132,11 @@ describe('VendorReturns - a manager reads the return, not the supplier credit', 
     dnMock.list.mockResolvedValue({ debit_notes: [], total: 0 });
     dnMock.issue.mockResolvedValue({ debit_note: NOTE, idempotent: false });
     render(
-      <MemoryRouter>
-        <VendorReturns />
-      </MemoryRouter>,
+      withCache(
+        <MemoryRouter>
+          <VendorReturns />
+        </MemoryRouter>,
+      ),
     );
     fireEvent.click(await screen.findByText('Acme Optics'));
     fireEvent.click(await screen.findByRole('button', { name: 'Issue Debit Note' }));

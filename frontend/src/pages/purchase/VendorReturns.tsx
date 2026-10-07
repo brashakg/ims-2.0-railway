@@ -18,6 +18,7 @@ import { useSearchParams } from 'react-router-dom';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import { usePurchaseShop } from './purchaseShop';
+import { RowShop } from './invoices/pickers';
 import api from '../../services/api/client';
 import { rtvDebitNotesApi, type DebitNote } from '../../services/api/rtvDebitNotes';
 import { PAYABLES_ROLES } from '../../components/common/CostCell';
@@ -429,6 +430,8 @@ export function VendorReturns() {
                       </span>
                     </div>
                     <p className="text-gray-500 text-sm">Return ID: {ret.return_id}</p>
+                    {/* On All stores each return names the shop it was raised at (r3 #10). */}
+                    {!listScope && <RowShop storeId={ret.store_id} />}
                   </div>
                   <div className="text-right">
                     <p className="text-lg font-bold text-gray-900">{rupees(ret.total_value)}</p>

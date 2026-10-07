@@ -15,6 +15,7 @@ import { vendorsApi } from '../../services/api';
 import { productApi } from '../../services/api/products';
 import { PurchaseShopPicker, usePurchaseShop } from './purchaseShop';
 import { matchingTotal } from './purchaseQueries';
+import { RowShop } from './invoices/pickers';
 import { useStores } from '../../hooks/usePOSQueries';
 import { useToast } from '../../context/ToastContext';
 import { GRNPrint } from '../../components/print/GRNPrint';
@@ -618,13 +619,26 @@ export function GoodsReceiptNote() {
     }
   };
 
-  const tabs: Array<[typeof activeTab, string, number]> = [
-    ['create', 'Create GRN', 0],
-    ['history', 'History', grns.length],
+  // The list is the server's newest page. When that page is a cut, every
+  // count taken over it -- the Quality tiles, the tab badges, the discrepancy
+  // report -- says it covers the latest N, so it never sits beside the real
+  // Total GRNs as if it were a total of its own (review r3 #12).
+  const listCut = grns.length < grnTotal;
+  const ofLatest = (what: string) => (listCut ? `${what} · of latest ${grns.length}` : what);
+  const discrepantCount = grns.filter(
+    (g) => g.total_rejected > 0 || g.total_received !== g.total_accepted,
+  ).length;
+  const tabs: Array<[typeof activeTab, string, string | null]> = [
+    ['create', 'Create GRN', null],
+    [
+      'history',
+      'History',
+      grns.length === 0 ? null : listCut ? `latest ${grns.length} of ${grnTotal}` : String(grns.length),
+    ],
     [
       'discrepancies',
       'Discrepancies',
-      grns.filter((g) => g.total_rejected > 0 || g.total_received !== g.total_accepted).length,
+      discrepantCount === 0 ? null : listCut ? `${discrepantCount} in latest ${grns.length}` : String(discrepantCount),
     ],
   ];
 
@@ -720,34 +734,34 @@ export function GoodsReceiptNote() {
           <div className="v" style={{ color: 'var(--ok)' }}>
             {grns.filter((g) => g.quality_status === 'passed').length}
           </div>
-          <div className="d good">clean receipts</div>
+          <div className="d good">{ofLatest('clean receipts')}</div>
         </div>
         <div>
           <div className="l">Conditional</div>
           <div className="v" style={{ color: 'var(--warn)' }}>
             {grns.filter((g) => g.quality_status === 'conditional').length}
           </div>
-          <div className="d warn">partial accept</div>
+          <div className="d warn">{ofLatest('partial accept')}</div>
         </div>
         <div>
           <div className="l">Failed quality</div>
           <div className="v" style={{ color: 'var(--err)' }}>
             {grns.filter((g) => g.quality_status === 'failed').length}
           </div>
-          <div className="d bad">debit note raised</div>
+          <div className="d bad">{ofLatest('debit note raised')}</div>
         </div>
       </div>
 
       {/* Tabs */}
       <div className="inv-tabs">
-        {tabs.map(([tab, label, count]) => (
+        {tabs.map(([tab, label, badge]) => (
           <button
             key={tab}
             className={activeTab === tab ? 'on' : ''}
             onClick={() => startTransition(() => setActiveTab(tab))}
           >
             {label}
-            {count > 0 && <span className="count">· {count}</span>}
+            {badge && <span className="count">· {badge}</span>}
           </button>
         ))}
       </div>
@@ -1291,6 +1305,8 @@ export function GoodsReceiptNote() {
                   <div>
                     <p className="font-semibold mono" style={{ color: 'var(--ink)' }}>{grn.grn_number}</p>
                     <p className="text-sm" style={{ color: 'var(--ink-4)' }}>Against {grn.po_number}</p>
+                    {/* On All stores each receipt names the shop it was booked at (r3 #10). */}
+                    {!grnScope && <RowShop storeId={grn.store_id} />}
                   </div>
                   <div className="flex items-center gap-2">
                     <span className={clsx('chip', qualityChip(grn.quality_status))}>
@@ -1347,6 +1363,7 @@ export function GoodsReceiptNote() {
               <p className="font-semibold" style={{ color: 'var(--ink)' }}>Discrepancy report</p>
               <p className="text-sm mt-1" style={{ color: 'var(--ink-3)' }}>
                 Items with variance between PO quantity and received quantity, or quality inspection failures.
+                {listCut && ` Checked over the latest ${grns.length} of ${grnTotal} receipts only.`}
               </p>
             </div>
           </div>
@@ -1358,7 +1375,9 @@ export function GoodsReceiptNote() {
             if (discrepant.length === 0) {
               return (
                 <div className="card text-center py-8" style={{ color: 'var(--ink-4)' }}>
-                  No discrepancies — all received goods matched their POs and passed inspection.
+                  {listCut
+                    ? `No discrepancies in the latest ${grns.length} receipts.`
+                    : 'No discrepancies — all received goods matched their POs and passed inspection.'}
                 </div>
               );
             }
@@ -1371,6 +1390,7 @@ export function GoodsReceiptNote() {
                     <div>
                       <p className="font-semibold mono" style={{ color: 'var(--ink)' }}>{g.grn_number}</p>
                       <p className="text-sm" style={{ color: 'var(--ink-4)' }}>Against {g.po_number}</p>
+                      {!grnScope && <RowShop storeId={g.store_id} />}
                     </div>
                     <span className={clsx('chip', isQualityFail ? 'err' : 'warn')}>
                       {isQualityFail ? 'Quality rejection' : 'Quantity variance'}

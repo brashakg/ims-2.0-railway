@@ -147,7 +147,8 @@ describe('#18 Analytics: Total POs is the real count; page sums are labelled as 
     await screen.findByText('Total POs');
     expect(figureUnder('Total POs')).toBe('312');
     expect(screen.getByText('Value of the latest 50 orders')).toBeInTheDocument();
-    expect(figureUnder('Value of the latest 50 orders')).toBe('₹0.5L');
+    // 50 x Rs 1,000 is under a lakh: whole rupees, not "Rs 0.5L" (review r3 #16).
+    expect(figureUnder('Value of the latest 50 orders')).toBe('₹50,000');
     expect(screen.queryByText('Total Value')).toBeNull();
     expect(screen.getByText('Pending approval, latest 50')).toBeInTheDocument();
   });
