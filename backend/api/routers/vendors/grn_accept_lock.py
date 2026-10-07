@@ -466,8 +466,10 @@ def _received_on(grn: dict, **more) -> dict:
 
 
 def _number_is_this_receipts_alone(number) -> bool:
-    """True when exactly one receipt carries `number`. Unknown (no database,
-    a read error) reads False: the number is then not used, never guessed."""
+    """True when exactly one receipt carries `number`. A read error reads
+    True -- fail CLOSED: the number branch then still counts the units (at
+    worst one extra blocks a void or a mint, loudly), where dropping it would
+    let a moved legacy unit be received twice. No database reads False."""
     try:
         from ._shared import get_grn_repository
 
@@ -479,8 +481,8 @@ def _number_is_this_receipts_alone(number) -> bool:
             return int(coll.count_documents({"grn_number": number}) or 0) == 1
         return len(repo.find_many({"grn_number": number}) or []) == 1
     except Exception:  # noqa: BLE001
-        logger.warning("[VENDOR] receipt-number uniqueness check failed for %s", number, exc_info=True)
-        return False
+        logger.error("[VENDOR] receipt-number uniqueness check failed for %s", number, exc_info=True)
+        return True
 
 
 def _grn_already_minted(stock_repo, flt: dict) -> int:

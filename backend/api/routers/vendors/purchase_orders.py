@@ -647,8 +647,12 @@ async def create_po(
     # sent, and the next of 40 lines should already see the product as costed.
     # Never overwrites an existing cost.
     cost_filled = []
-    for item in po.items:
-        prod = products.get(item.product_id)
+    # A discarded draft this order brings back is revived only once the order
+    # is stored (below); filling its cost first would restamp the still-
+    # discarded row and strand it. Its cost is filled right after the revive.
+    reviving = {pid for pid, _ in revive_after}
+
+    def _fill_cost(item, prod):
         if _promote_cost_from_rate(
             item.product_id,
             prod,
@@ -667,6 +671,10 @@ async def create_po(
                 "cost_price": round(item.unit_price, 2),
                 "cost_source": _PO_PROVISIONAL_COST_SOURCE,
             }
+
+    for item in po.items:
+        if item.product_id not in reviving:
+            _fill_cost(item, products.get(item.product_id))
 
     stored = None
     if po_repo is not None:
@@ -702,7 +710,7 @@ async def create_po(
         audit_repo = get_audit_repository()
         for pid, typed_mrp in revive_after:
             try:
-                _pm.revive_discarded_draft(
+                revived = _pm.revive_discarded_draft(
                     pid,
                     product_repo,
                     db=_get_db(),
@@ -711,14 +719,21 @@ async def create_po(
                     audit_repo=audit_repo,
                     po_number=po_number,
                 )
-            except Exception:  # noqa: BLE001 - the order stands; send refuses the line
+            except Exception:  # noqa: BLE001 - the order stands; logged loudly below
+                revived = False
+                logger.error("[VENDOR] PO %s: revive of %s raised", po_number, pid, exc_info=True)
+            if not revived:
+                # The receipt then refuses the line (DISCARDED_DRAFT): loud, never silent.
                 logger.error(
                     "[VENDOR] PO %s: could not bring discarded draft %s back to "
-                    "Needs review; the order cannot be sent until it is",
+                    "Needs review; its receipt will be refused until it is",
                     po_number,
                     pid,
-                    exc_info=True,
                 )
+                continue
+            for item in po.items:
+                if item.product_id == pid:
+                    _fill_cost(item, product_repo.find_by_id(pid))
 
     # Audit the cost figures this PO wrote onto the product spine -- cost feeds
     # margin and valuation, so "who set this cost and from where" must be

@@ -60,6 +60,15 @@ def _reopen_po_if_nothing_received(grn_repo, grn, current_user=None) -> None:
         )
         if not getattr(result, "modified_count", 0):
             return
+        # A receipt created meanwhile whose accept HELD its lines writes the
+        # same "part received, nothing counted" the guard matches: re-check,
+        # and put the order back if one appeared (it is not nothing-received).
+        if grn_repo.find_many({"po_id": po_id, "status": {"$ne": "VOID"}}):
+            po_repo.collection.update_one(
+                {"po_id": po_id, "status": "SENT"},
+                {"$set": {"status": po.get("status"), "updated_at": datetime.now()}},
+            )
+            return
         audit = get_audit_repository()
         if audit is not None:
             audit.create(

@@ -161,9 +161,12 @@ def draft_discard_blockers(product_id: str) -> Optional[List[str]]:
     if po_repo is None or grn_repo is None:
         return None
     blockers: List[str] = []
-    for po in po_repo.find_many(
-        {"items.product_id": product_id, "status": {"$nin": list(_PO_DONE_STATUSES)}}
-    ) or []:
+    # Strict reads (the raw collections): BaseRepository.find_many prints a
+    # read error and answers [] -- "nothing names it", a licence to discard.
+    # A read error raises; the delete answers 503.
+    for po in _pm.strict_find_many(
+        po_repo, {"items.product_id": product_id, "status": {"$nin": list(_PO_DONE_STATUSES)}}
+    ):
         lines = [it for it in (po.get("items") or []) if it.get("product_id") == product_id]
         if lines and all(
             _line_qty(it, "received_qty") >= _line_qty(it, "ordered_qty", "quantity") > 0
@@ -182,9 +185,10 @@ def draft_discard_blockers(product_id: str) -> Optional[List[str]]:
                 "received other goods, so it cannot be cancelled. Finish the item "
                 "in the product editor instead."
             )
-    for g in grn_repo.find_many(
-        {"items.product_id": product_id, "status": {"$in": ["PENDING", "PARTIALLY_ACCEPTED", "ESCALATED"]}}
-    ) or []:
+    for g in _pm.strict_find_many(
+        grn_repo,
+        {"items.product_id": product_id, "status": {"$in": ["PENDING", "PARTIALLY_ACCEPTED", "ESCALATED"]}},
+    ):
         status = str(g.get("status") or "").upper()
         if status == "PARTIALLY_ACCEPTED":
             if not any(
@@ -416,8 +420,9 @@ def _put_on_shelf(
     if claim_token is None:
         raise _grn_accept_conflict(grn_repo, grn_id)
 
+    deferred_releases: List[str] = []
     try:
-        return _accept_grn_claimed(
+        result = _accept_grn_claimed(
             grn_id,
             grn,
             current_user,
@@ -427,6 +432,7 @@ def _put_on_shelf(
             claim_token,
             claimed_at,
             order_cap=order_cap,
+            deferred_releases=deferred_releases,
         )
     except Exception:
         # Nothing was committed we can attribute to this call, or the accept
@@ -435,6 +441,11 @@ def _put_on_shelf(
         # per-(grn, line) mint guard makes that retry idempotent.
         _release_grn_accept_claim(grn_repo, grn_id, claim_token)
         raise
+    # The receipt's cost finished a draft mid-accept (gst._finished_by_the_promote):
+    # its OTHER held receipts go on the shelf now that this claim is handed back.
+    for pid in dict.fromkeys(deferred_releases):
+        release_held_receipts(pid)
+    return result
 
 
 def _accept_grn_claimed(
@@ -447,6 +458,7 @@ def _accept_grn_claimed(
     claim_token: Optional[str] = None,
     claimed_at=None,
     order_cap: bool = False,
+    deferred_releases: Optional[List[str]] = None,
 ) -> dict:
     """The accept body, run ONLY by the caller that won the F8 claim.
 
@@ -608,7 +620,8 @@ def _accept_grn_claimed(
                 # fills only a MISSING cost, then atomically restamps so a DRAFT
                 # whose only gap was cost_price becomes ACTIVE right here.
                 _promote_cost_from_rate(
-                    product_id, prod, line_cost, "GRN_PO", product_repo
+                    product_id, prod, line_cost, "GRN_PO", product_repo,
+                    deferred_releases=deferred_releases,
                 )
 
             # Hub Phase 2: only mint sellable AVAILABLE stock for a CATALOG-
@@ -988,7 +1001,7 @@ def _held_item_label(prod: Optional[dict], product_id: str) -> str:
 
 def _raise_once(
     db, *, dedupe_ref: str, ever: bool = True, priority: str = "P2", **task
-) -> None:
+) -> bool:
     """ONE task per source_ref. `ever` (a receipt's tasks): once a person has
     closed it, a re-press of "Add to stock" or the next catalogue save never
     raises it again. Otherwise (a person ASKING, e.g. a bill's request for
@@ -997,10 +1010,19 @@ def _raise_once(
     from ...dependencies import get_task_repository
     from ...services.task_triggers import create_system_task
 
-    if ever and db.get_collection("tasks").find_one({"source_ref": dedupe_ref}):
-        return
-    create_system_task(
-        get_task_repository(), priority=priority, dedupe_ref=dedupe_ref, **task
+    tasks = db.get_collection("tasks")
+    if ever and tasks.find_one({"source_ref": dedupe_ref}):
+        return True
+    repo = get_task_repository()
+    create_system_task(repo, priority=priority, dedupe_ref=dedupe_ref, **task)
+    # create_system_task answers None both for "already open" and for a write
+    # it swallowed: whether the person now HAS the task is read back from the
+    # same store it was written to (a failed read reads "not told").
+    if repo is None:
+        return False
+    return any(
+        str(t.get("status", "")).upper() in _TASK_OPEN
+        for t in repo.find_many({"source_ref": dedupe_ref}) or []
     )
 
 
@@ -1156,7 +1178,7 @@ def _sync_catalogue_tasks(grn_id, grn, unresolved_lines, grn_status, product_rep
 def tell_catalogue_managers(
     db, store_id, *, dedupe: str, title: str, orphan_title: str, description: str,
     extra: Optional[dict] = None, ever: bool = True,
-) -> None:
+) -> int:
     """THE door that tells the catalogue managers an item waits on them -- a
     receipt holding units (_sync_catalogue_tasks), a vendor bill that cannot be
     booked (purchase_invoices.request_cataloguing). One task per active
@@ -1182,8 +1204,9 @@ def tell_catalogue_managers(
             store_id,
         )
         title = orphan_title
+    told = 0
     for uid, task_store in people or [(None, store_id)]:
-        _raise_once(
+        told += _raise_once(
             db,
             dedupe_ref=f"{dedupe}:{uid or 'nobody'}",
             ever=ever,
@@ -1198,3 +1221,4 @@ def tell_catalogue_managers(
             # P3 ack clock, and the P3 grace would add three more days.
             extra={**(extra or {}), "escalation_group": dedupe, "overdue_grace_minutes": 0},
         )
+    return told

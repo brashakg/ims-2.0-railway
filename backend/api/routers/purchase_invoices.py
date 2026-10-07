@@ -1310,7 +1310,7 @@ async def request_cataloguing(
     try:
         from .vendors.grn_accept import tell_catalogue_managers
 
-        tell_catalogue_managers(
+        told = tell_catalogue_managers(
             db,
             store_id,
             dedupe="catalogue-for-bill:"
@@ -1332,6 +1332,8 @@ async def request_cataloguing(
                 + (f"\n\nNote: {body.note}" if body.note else "")
             ),
         )
+        if not told:
+            raise RuntimeError("no task was stored for the ask")
     except Exception as exc:  # noqa: BLE001
         # Never a 201 "Cataloguing requested" for an ask nobody received.
         logger.error("[PI] could not raise the cataloguing task", exc_info=True)

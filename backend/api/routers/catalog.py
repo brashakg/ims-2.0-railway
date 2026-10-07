@@ -2770,7 +2770,11 @@ async def delete_catalog_product(
     if is_draft:
         from .vendors.grn_accept import draft_discard_blockers
 
-        blockers = draft_discard_blockers(_spine_id) if _spine_id else None
+        try:
+            blockers = draft_discard_blockers(_spine_id) if _spine_id else None
+        except Exception:  # noqa: BLE001 - unreadable reads as "cannot check"
+            logger.error("[CATALOG] discard check could not read for %s", product_id, exc_info=True)
+            blockers = None
         if blockers is None:
             raise HTTPException(
                 status_code=503,

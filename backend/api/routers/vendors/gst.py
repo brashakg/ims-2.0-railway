@@ -15,7 +15,9 @@ _PO_PROVISIONAL_COST_SOURCE = "PO_RATE"
 _COST_SOURCE_RANK = {_PO_PROVISIONAL_COST_SOURCE: 1, "GRN_PO": 2}
 
 
-def _promote_cost_from_rate(product_id, prod, unit_cost, source, product_repo) -> bool:
+def _promote_cost_from_rate(
+    product_id, prod, unit_cost, source, product_repo, deferred_releases=None
+) -> bool:
     """Fill a product's missing cost_price from an agreed line rate.
 
     ONE place for the two moments a purchase reveals a cost: the rate typed on
@@ -52,11 +54,13 @@ def _promote_cost_from_rate(product_id, prod, unit_cost, source, product_repo) -
         logger.warning("[VENDOR] cost promote skipped for %s: %s", product_id, exc)
         return False
     if fields.get("provisional") is False:
-        _finished_by_the_promote(product_id, prod, {"cost_price": cost, **fields})
+        _finished_by_the_promote(
+            product_id, prod, {"cost_price": cost, **fields}, deferred_releases
+        )
     return True
 
 
-def _finished_by_the_promote(product_id, prod, patch) -> None:
+def _finished_by_the_promote(product_id, prod, patch, deferred_releases=None) -> None:
     """The cost was an ordered draft's last gap: it is finished here, not in
     the product editor, so do what the editor's save does -- its catalogue
     copy leaves Needs review (the one mirror rule) and the units receipts hold
@@ -69,6 +73,18 @@ def _finished_by_the_promote(product_id, prod, patch) -> None:
         )
     except Exception:  # noqa: BLE001
         logger.warning("[VENDOR] twin mirror after cost promote failed for %s", product_id, exc_info=True)
+    try:
+        from .grn_accept import close_catalogue_asks
+
+        close_catalogue_asks(product_id, "The item is catalogued.")
+    except Exception:  # noqa: BLE001
+        logger.warning("[VENDOR] closing asks after cost promote failed for %s", product_id, exc_info=True)
+    if deferred_releases is not None:
+        # Inside a receipt's accept (its claim held): releasing now would try
+        # to claim that very receipt and count it as busy against the order.
+        # The accept releases once its own claim is handed back.
+        deferred_releases.append(product_id)
+        return
     try:
         from .grn_accept import release_held_receipts
 

@@ -2676,7 +2676,24 @@ def strict_find_many(product_repo, flt: Dict[str, Any]) -> List[Dict[str, Any]]:
     coll = getattr(product_repo, "collection", None)
     if coll is not None and callable(getattr(coll, "find", None)):
         return list(coll.find(flt))
-    return list(product_repo.find_many(flt) or [])
+    if callable(getattr(product_repo, "find_many", None)):
+        return list(product_repo.find_many(flt) or [])
+    # A minimal store with no list read: an exact identity key it can answer.
+    if set(flt) == {"identity_key"} and isinstance(flt["identity_key"], str):
+        row = product_repo.find_by_identity_key(flt["identity_key"])
+        return [row] if row else []
+    return []
+
+
+def _catalogue_unreadable() -> "ProductMasterError":
+    err = ProductMasterError(
+        "Could not check the catalogue for this item, so nothing was created. "
+        "Try again.",
+        status=503,
+        field="lens_size",
+    )
+    err.code = "CATALOGUE_UNREADABLE"
+    return err
 
 
 def _keyed_before_eye_size(
@@ -2693,13 +2710,17 @@ def _keyed_before_eye_size(
     if _size_attribute_key(spine.get("category")) != "lens_size" or key.count("|") < 3:
         return None
     sizeless, typed_size = key.rsplit("|", 1)
-    row = product_repo.find_by_identity_key(sizeless)
-    if not row:
-        return None
-    attrs = row.get("attributes") if isinstance(row.get("attributes"), dict) else {}
-    derived = _derive_brand_model_color_size(attrs, row.get("category"))["size"]
-    if normalise_identity_component(derived) == typed_size:
-        return row
+    # Strict: a read error raises (identity_conflict answers 503), never "no row".
+    # A store that offers no list read at all (a minimal stub) is asked by key.
+    for row in strict_find_many(product_repo, {"identity_key": sizeless}):
+        if row.get("identity_key") != sizeless:
+            continue
+        attrs = row.get("attributes") if isinstance(row.get("attributes"), dict) else {}
+        # Read as the migration and existing_product_summary read it: the
+        # derived eye size, else a legacy top-level `size`.
+        derived = _derive_brand_model_color_size(attrs, row.get("category"))["size"] or row.get("size")
+        if normalise_identity_component(derived) == typed_size:
+            return row
     return None
 
 
@@ -2718,7 +2739,11 @@ def identity_conflict(spine: Dict[str, Any], product_repo) -> Optional[ProductMa
     if existing is None and key and hasattr(product_repo, "find_by_identity_key"):
         existing = product_repo.find_by_identity_key(key)
     if existing is None and key and hasattr(product_repo, "find_by_identity_key"):
-        existing = _keyed_before_eye_size(spine, key, product_repo)
+        try:
+            existing = _keyed_before_eye_size(spine, key, product_repo)
+        except Exception as exc:  # noqa: BLE001 - fail loud, never a silent twin
+            logger.error("[PRODUCT_MASTER] legacy-key check could not read %s: %s", key, exc)
+            return _catalogue_unreadable()
     if (
         existing is None
         and spine.get("barcode")
@@ -2746,14 +2771,7 @@ def identity_conflict(spine: Dict[str, Any], product_repo) -> Optional[ProductMa
         # Fail loud: a swallowed read would answer "no sized rows" and let a
         # sizeless twin through.
         logger.error("[PRODUCT_MASTER] eye-size check could not read %s*: %s", prefix, exc)
-        err = ProductMasterError(
-            "Could not check the catalogue for this item's eye sizes, so nothing "
-            "was created. Try again.",
-            status=503,
-            field="lens_size",
-        )
-        err.code = "CATALOGUE_UNREADABLE"
-        return err
+        return _catalogue_unreadable()
     sized = [p for p in rows if str(p.get("identity_key") or "").startswith(prefix)]
     if not sized:
         return None
