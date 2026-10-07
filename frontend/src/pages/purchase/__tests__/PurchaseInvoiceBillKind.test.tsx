@@ -152,4 +152,27 @@ describe('manual invoice bill-kind declaration', () => {
       ),
     );
   });
+
+  it('an ask nobody received is said, never swallowed', async () => {
+    apis.purchaseInvoicesApi.create.mockRejectedValue({
+      response: {
+        data: { detail: { code: 'PRODUCT_NOT_CATALOGUED', lines: [{ product_id: 'P-DRAFT' }] } },
+      },
+    });
+    apis.purchaseInvoicesApi.requestCataloguing.mockRejectedValue(
+      new Error('The catalogue manager could not be asked. Try again.'),
+    );
+    await openManualForm();
+    fillManualHeaderAndLine();
+    fireEvent.change(screen.getByDisplayValue(/Choose: goods, or services/), {
+      target: { value: 'SERVICES' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Book invoice/i }));
+    await waitFor(() =>
+      expect(toastMock.warning).toHaveBeenCalledWith(
+        expect.stringContaining('could not be asked'),
+      ),
+    );
+    expect(toastMock.info).not.toHaveBeenCalled();
+  });
 });

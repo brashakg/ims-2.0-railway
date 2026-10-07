@@ -182,8 +182,9 @@ export function InvoiceFormDrawer({
             prefill.store_id ?? user?.activeStoreId ?? undefined,
           );
           toast.info('Asked the cataloguer to finish these items — the bill can be booked after that');
-        } catch {
-          /* the refusal above is the message that matters */
+        } catch (askErr) {
+          // Never silent: the accountant must know nobody was asked.
+          toast.warning(errMsg(askErr, 'The catalogue manager could not be asked. Try again.'));
         }
       }
     } finally {
