@@ -218,7 +218,8 @@ def _request_in_reach(eng: ApprovalEngine, doc: Dict[str, Any], user: Dict[str, 
     if uid and uid in (doc.get("requested_by"), doc.get("consumed_by")):
         return True
     _cross, stores = user_store_scope(user)
-    # pylint: disable=protected-access -- the engine's one shop rule, reused
+    # The engine's one shop rule, reused rather than copied.
+    # pylint: disable-next=protected-access
     return eng._store_scope_ok(doc.get("store_id"), set(_roles(user)), sorted(stores))
 
 
