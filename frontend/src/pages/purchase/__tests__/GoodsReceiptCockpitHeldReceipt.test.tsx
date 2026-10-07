@@ -167,8 +167,11 @@ describe('Receive Goods - a receipt held for cataloguing (audit C1)', () => {
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
     voidGRNMock.mockResolvedValue({ grn_status: 'VOID' });
     const row = await heldRow();
+    const cockpitLoads = getCockpitMock.mock.calls.length;
     fireEvent.click(within(row).getByRole('button', { name: /void/i }));
     await waitFor(() => expect(voidGRNMock).toHaveBeenCalledWith('g-held'));
+    // The void can put the order back to SENT: the open-order list reloads.
+    await waitFor(() => expect(getCockpitMock.mock.calls.length).toBeGreaterThan(cockpitLoads));
     confirmSpy.mockRestore();
   });
 

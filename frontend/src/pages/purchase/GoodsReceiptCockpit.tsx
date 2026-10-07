@@ -363,6 +363,9 @@ export function GoodsReceiptCockpit() {
       toast.success(`GRN ${grnNumber} voided`);
       if (highlightGrn === grnNumber) setHighlightGrn(null);
       await loadPendingGrns(vendorId);
+      // A voided held receipt can put its order back to SENT (nothing was
+      // received): the open-order list must not keep the old "Box received".
+      await loadCockpit(vendorId);
     } catch (err) {
       // The void refusal is the ONLY guidance for a receipt that holds
       // unaccounted stock, and its actionable clause is at the end — give it
