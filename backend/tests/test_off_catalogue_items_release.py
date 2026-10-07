@@ -2814,3 +2814,26 @@ def test_r5_a_bills_ask_nobody_received_is_never_answered_requested(world, monke
         refused is not None and refused.status_code == 503,
         f"R5: an ask nobody received was answered 'Cataloguing requested' ({refused})",
     )
+
+
+@ENGINES
+def test_r5_a_catalogue_manager_who_is_also_a_store_manager_escalates_to_the_admin(
+    world, monkeypatch, engine
+):
+    # Review round 5, pass 2: a catalogue manager who also holds STORE_MANAGER
+    # ranked as a store manager, so their catalogue task climbed to an area
+    # manager -- who cannot open the catalogue.
+    _seed_user(world, ADMIN)
+    _seed_user(world, {"user_id": "u-area", "username": "area", "roles": ["AREA_MANAGER"], "store_ids": [STORE]})
+    world.db.users.update_one(
+        {"user_id": CATALOGUER["user_id"]}, {"$set": {"roles": ["CATALOG_MANAGER", "STORE_MANAGER"]}}
+    )
+    world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    cat = [t for t in _open_tasks(world) if t.get("category") == "Catalogue"]
+    assert [t.get("assigned_to") for t in cat] == [CATALOGUER["user_id"]]
+    _escalate_after(world, monkeypatch, engine, hours=25)
+    cat = [t for t in _open_tasks(world) if t.get("category") == "Catalogue"]
+    finding(
+        [t.get("assigned_to") for t in cat] == [ADMIN["user_id"]],
+        f"R5: the catalogue task climbed to {[t.get('assigned_to') for t in cat]}, not the admin",
+    )

@@ -387,6 +387,7 @@ def _escalate_and_reassign(
             user_repo.find_by_role,
             task.get("store_id"),
             assignee or {"user_id": task.get("assigned_to")},
+            category=task.get("category"),
         )
 
     merged = merge_into_twin(repo.find_one, task, target, by=by, now=now)

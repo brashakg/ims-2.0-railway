@@ -53,13 +53,19 @@ def _authority(roles: Any) -> int:
     return best
 
 
-def next_rung_role(current_roles: Any) -> Optional[str]:
+def next_rung_role(current_roles: Any, category: Any = None) -> Optional[str]:
     """Return the role to escalate TO given the current owner's roles.
+
+    A catalogue task (category "Catalogue") held by a catalogue manager goes
+    to the admins whatever else that person is: a store or area manager can
+    open neither Needs review nor the product editor. Their other tasks climb
+    the ladder of their highest rank.
 
     None means the owner is already at the top (SUPERADMIN) -- nowhere left
     to escalate."""
     auth = _authority(current_roles)
-    if auth == 1 and {str(r).strip().upper() for r in current_roles or []} & _ENTITY_ROLES:
+    entity = {str(r).strip().upper() for r in current_roles or []} & _ENTITY_ROLES
+    if entity and (auth == 1 or (str(category or "").strip().lower() == "catalogue" and auth < 4)):
         return "ADMIN"
     if auth >= 5:  # SUPERADMIN
         return None
@@ -76,6 +82,7 @@ def resolve_escalation_target(
     find_by_role: Callable[[str, Optional[str]], List[Dict[str, Any]]],
     store_id: Optional[str],
     assignee_user: Optional[Dict[str, Any]],
+    category: Any = None,
 ) -> Optional[Dict[str, Any]]:
     """Find the next person up the ladder to own a breached task.
 
@@ -87,7 +94,7 @@ def resolve_escalation_target(
     straight to ADMIN. Never returns the current assignee."""
     assignee_user = assignee_user or {}
     assignee_id = assignee_user.get("user_id")
-    target_role = next_rung_role(assignee_user.get("roles"))
+    target_role = next_rung_role(assignee_user.get("roles"), category)
 
     # Guard against pathological loops (max 4 rungs in the ladder).
     for _ in range(len(ESCALATION_RUNGS) + 1):

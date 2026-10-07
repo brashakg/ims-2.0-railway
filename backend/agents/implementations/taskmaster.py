@@ -376,6 +376,7 @@ class TaskmasterAgent(JarvisAgent):
                     _find_by_role,
                     task.get("store_id"),
                     assignee or {"user_id": task.get("assigned_to")},
+                    category=task.get("category"),
                 )
                 merged = merge_into_twin(
                     coll.find_one, task, target, by=self.agent_id, now=now
