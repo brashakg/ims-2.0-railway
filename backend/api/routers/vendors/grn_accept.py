@@ -20,7 +20,13 @@ from ._shared import (
     router,
 )
 from .gst import _promote_cost_from_rate
-from .po_detail import _as_read, _qty, beyond_open_quantity
+from .po_detail import (
+    _as_read,
+    _qty,
+    _received_by_product,
+    _units_minted_for,
+    beyond_open_quantity,
+)
 from .numbering import (
     _cumulative_received_by_product,
     _grn_barcode,
@@ -191,22 +197,32 @@ def _hold_order_open_for_receipt(po_repo, grn) -> None:
                 ),
             )
         def earlier_receipts() -> dict:
-            # Earlier ACCEPTED receipts only: this receipt is not accepted
-            # yet, and a retry of its own half-minted accept must not count
-            # twice.
-            got = dict(_cumulative_received_by_product(get_grn_repository(), po_id))
-            # Plus every OTHER receipt for this order that another accept has
-            # claimed and may be minting right now: it is not ACCEPTED yet, but
-            # its units are about to be on the shelf. Each accept sets its
-            # claim BEFORE it reads here, so of two racing accepts at least
+            # What every OTHER receipt that another accept has claimed has not
+            # put in stock YET: it may be minting right now. Each accept sets
+            # its claim BEFORE it reads here, so of two racing accepts at least
             # one sees the other (both may -- then both are told to accept
-            # again, never both mint).
+            # again, never both mint). Read FIRST: a claimed receipt leaves
+            # this list only once it is ACCEPTED or its accept has stopped
+            # with what it minted in stock, and both are read after this, so
+            # it is never missed in between (counted twice at worst, which
+            # only refuses).
+            coming: dict = {}
             for other in _claimed_receipts_for_order(get_grn_repository(), po_id, grn):
+                claimed: dict = {}
                 for line in other.get("items") or []:
                     pid = line.get("product_id")
-                    got[pid] = _qty(got.get(pid)) + _qty(line.get("accepted_qty"))
-            for pid, own in (po.get("received_qty_by_product") or {}).items():
-                got[pid] = max(_qty(got.get(pid)), _qty(own))
+                    claimed[pid] = claimed.get(pid, 0) + _qty(line.get("accepted_qty"))
+                for pid, qty in claimed.items():
+                    stocked = _units_minted_for(po_id, pid, other.get("grn_id"))
+                    coming[pid] = coming.get(pid, 0) + max(0, qty - stocked)
+            # Plus the count logging a receipt is held to (accepted receipts,
+            # the order's own count and the units actually in stock -- a
+            # part-accepted or escalated receipt's units are in no receipt
+            # sum), less this receipt's own units: its quantity already covers
+            # them on a retry or a re-accept after "Catalog now".
+            got = _received_by_product(po, leave_out_grn=grn.get("grn_id"))
+            for pid, qty in coming.items():
+                got[pid] = _qty(got.get(pid)) + qty
             return got
 
         over = beyond_open_quantity(po, grn.get("items") or [], earlier_receipts, "accepted_qty")

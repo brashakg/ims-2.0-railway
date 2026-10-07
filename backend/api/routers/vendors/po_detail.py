@@ -5,6 +5,7 @@ from datetime import timezone
 from ._shared import (
     Depends,
     HTTPException,
+    Optional,
     Query,
     _VENDOR_ROLES,
     _get_db,
@@ -516,37 +517,39 @@ def _refuse_if_box_waiting(po_id: str) -> None:
         )
 
 
-def _units_minted_for(po_id: str, product_id: str) -> int:
-    """Units a goods receipt actually put in stock for this order and product,
-    whatever that receipt's status is now. A part-accepted receipt that was
-    then ESCALATED counts in no receipt sum, yet its units are on the shelf.
-    Fails CLOSED (503): an unreadable stock table must not make arrived stock
-    look cancellable."""
+def _units_minted_for(po_id: str, product_id: str, grn_id: Optional[str] = None) -> int:
+    """Units a goods receipt actually put in stock for this order and product
+    (only receipt `grn_id`'s when given), whatever that receipt's status is
+    now. A part-accepted receipt that was then ESCALATED counts in no receipt
+    sum, yet its units are on the shelf. Fails CLOSED (503): an unreadable
+    stock table must not make arrived stock look cancellable."""
     stock_repo = get_stock_repository()
     if stock_repo is None:
         return 0
+    flt = {"source_type": "GRN", "po_id": po_id, "product_id": product_id}
+    if grn_id:
+        flt["source_id"] = grn_id
     try:
-        return _grn_already_minted(
-            stock_repo,
-            {"source_type": "GRN", "po_id": po_id, "product_id": product_id},
-        )
+        return _grn_already_minted(stock_repo, flt)
     except Exception as exc:  # noqa: BLE001
         logger.error("[VENDOR] PO %s: could not count received units: %s", po_id, exc)
         raise HTTPException(
             status_code=503,
             detail=(
                 "Could not check what has already arrived on this order, so "
-                "nothing was cancelled. Try again in a moment."
+                "nothing was changed. Try again in a moment."
             ),
         ) from exc
 
 
-def _received_by_product(po: dict) -> dict:
+def _received_by_product(po: dict, leave_out_grn: Optional[str] = None) -> dict:
     """Units on the shelf per product: the most of the ACCEPTED receipts' sum
     (the count grn_accept closes an order on), the units receipts actually
-    minted for this order (a part-accepted receipt that was escalated is in no
+    minted for this order (a part-accepted or escalated receipt is in no
     receipt sum), and the order's own copy (grn_accept's fallback writes only
-    the status, so it can lag)."""
+    the status, so it can lag). Logging a receipt and accepting one both ask
+    this; the accept leaves out the units of the receipt being accepted
+    (`leave_out_grn`), which its own quantity already covers."""
     po_id = po.get("po_id")
     out = dict(_cumulative_received_by_product(get_grn_repository(), po_id))
     header = po.get("received_qty_by_product") or {}
@@ -555,6 +558,8 @@ def _received_by_product(po: dict) -> dict:
         pid = it.get("product_id")
         if pid not in minted:
             minted[pid] = _units_minted_for(po_id, pid)
+            if leave_out_grn:
+                minted[pid] -= _units_minted_for(po_id, pid, leave_out_grn)
         own = header.get(pid)
         own = _qty(it.get("received_qty") if own is None else own)
         out[pid] = max(_qty(out.get(pid)), own, minted[pid])
