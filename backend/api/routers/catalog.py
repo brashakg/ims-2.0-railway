@@ -2832,6 +2832,10 @@ async def delete_catalog_product(
             product_id,
             exc_info=True,
         )
+    if discarded_draft and _spine_id:
+        from .vendors.grn_accept import close_catalogue_asks
+
+        close_catalogue_asks(_spine_id, "The item was discarded from the catalogue.")
     if discarded_draft:
         # The discard is a decision a later re-order undoes
         # (revive_discarded_draft audits that side): record who made it.

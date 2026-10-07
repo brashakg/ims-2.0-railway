@@ -2837,3 +2837,50 @@ def test_r5_a_catalogue_manager_who_is_also_a_store_manager_escalates_to_the_adm
         [t.get("assigned_to") for t in cat] == [ADMIN["user_id"]],
         f"R5: the catalogue task climbed to {[t.get('assigned_to') for t in cat]}, not the admin",
     )
+
+
+def _asks(world):
+    return [t for t in _open_tasks(world) if "vendor bill" in t.get("title", "")]
+
+
+def test_r5_a_bills_ask_closes_when_the_item_is_finished(world, monkeypatch):
+    # Review round 5, pass 2: the ask carried no receipt, so nothing closed
+    # it; every catalogue manager's copy went to the admin a day later for
+    # work already done.
+    from api.routers import purchase_invoices as _pi
+
+    _seed_user(world, ADMIN)
+    _seed_user(world, dict(CATALOGUER, user_id="u-cat-2", username="catalog.two"))
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    _run(_pi.request_cataloguing(_pi.CataloguingRequest(product_ids=[draft_id]), ACCOUNTANT))
+    assert len(_asks(world)) == 2
+    world.finish_draft(draft_id, offer=2790)
+    finding(not _asks(world), f"R5: the bill's ask is still open after the item was finished ({_asks(world)})")
+    _escalate_after(world, monkeypatch, "endpoint", hours=25)
+    assert not [t for t in _open_tasks(world) if t.get("assigned_to") == ADMIN["user_id"]]
+
+
+def test_r5_a_bills_ask_closes_when_the_item_is_discarded(world):
+    from api.routers import purchase_invoices as _pi
+
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    _run(_pi.request_cataloguing(_pi.CataloguingRequest(product_ids=[draft_id]), ACCOUNTANT))
+    _discard(world, draft_id, po, grn)
+    finding(not _asks(world), "R5: the bill's ask is still open after the item was discarded")
+
+
+def test_r5_a_bills_ask_for_two_items_waits_for_both(world):
+    from api.routers import purchase_invoices as _pi
+
+    po = world.raise_po(
+        [
+            {"new_product": dict(BOSS_TYPED), "quantity": 1, "unit_price": 1200},
+            {"new_product": dict(CARRERA_TYPED), "quantity": 1, "unit_price": 3200},
+        ]
+    )
+    boss, carrera = (it["product_id"] for it in po["items"])
+    _run(_pi.request_cataloguing(_pi.CataloguingRequest(product_ids=[boss, carrera]), ACCOUNTANT))
+    world.finish_draft(boss, offer=2790)
+    assert len(_asks(world)) == 1
+    world.finish_draft(carrera, offer=6490)
+    assert not _asks(world)

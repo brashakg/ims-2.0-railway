@@ -3597,6 +3597,9 @@ async def update_product(
                     int(r.get("units_added") or 0)
                     for r in release_held_receipts(product_id)
                 )
+                from .vendors.grn_accept import close_catalogue_asks
+
+                close_catalogue_asks(product_id, "The item is catalogued.")
             return {
                 "message": "Product updated",
                 "product_id": product_id,

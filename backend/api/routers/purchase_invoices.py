@@ -1322,6 +1322,9 @@ async def request_cataloguing(
             ),
             # An ask: asking again once the last task was closed asks again.
             ever=False,
+            # Closed when the items are finished or discarded
+            # (grn_accept.close_catalogue_asks).
+            extra={"product_ids": [i["product_id"] for i in items]},
             description=(
                 "A purchase invoice cannot be booked until these products are "
                 "catalogue-complete:\n"

@@ -1028,6 +1028,56 @@ def _complete_receipt_tasks(db, grn_id, note: str, category: Optional[str] = Non
     )
 
 
+def close_catalogue_asks(product_id: str, note: str) -> None:
+    """Close the asks for cataloguing (a vendor bill's, purchase_invoices.
+    request_cataloguing) that name `product_id` once nothing they name waits
+    any more: every product on the ask is catalogue-complete, or was
+    discarded. Called when a product is finished (PUT /products/{id}) or
+    discarded (catalog DELETE). An ask carries no receipt, so the receipt's
+    own closing (_complete_receipt_tasks) never reaches it. Fail-soft."""
+    try:
+        db = _get_db()
+        if db is None or not product_id:
+            return
+        tasks = db.get_collection("tasks")
+        products = db.get_collection("products")
+        now = datetime.now()
+        for t in tasks.find(
+            {
+                "category": "Catalogue",
+                "source": "SYSTEM",
+                "status": {"$in": _TASK_OPEN},
+                "product_ids": product_id,
+            }
+        ):
+            waiting = []
+            for pid in t.get("product_ids") or []:
+                prod = products.find_one({"product_id": pid}) or {}
+                if prod.get("discarded_draft") or not prod:
+                    continue
+                if _pm.compute_catalog_status(prod)[1]:
+                    waiting.append(pid)
+            if waiting:
+                continue
+            tasks.update_one(
+                {"task_id": t.get("task_id"), "status": {"$in": _TASK_OPEN}},
+                {
+                    "$set": {
+                        "status": "COMPLETED",
+                        "completed_at": now,
+                        "updated_at": now,
+                        "completed_by": "system",
+                        "completion_notes": note,
+                    },
+                    "$push": {
+                        "history": {"action": "completed", "by": "system", "notes": note, "at": now}
+                    },
+                },
+            )
+    except Exception:  # noqa: BLE001 - a task problem never undoes a save
+        logger.warning("[CATALOGUE] could not close the asks naming %s", product_id, exc_info=True)
+
+
 def _sync_catalogue_tasks(grn_id, grn, unresolved_lines, grn_status, product_repo):
     """A receipt holding lines for the catalogue raises ONE task per catalogue
     manager (once per receipt + person, ever -- _raise_once) naming the items,
