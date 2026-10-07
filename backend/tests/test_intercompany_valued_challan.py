@@ -262,9 +262,12 @@ def test_f51_value_counts_the_units_that_left_not_the_request(db):
 def test_f51_challan_names_both_gstins_and_the_consignee_address(db):
     t = _shipped("ST-BOK-1")
     html = _challan(t["id"])
-    assert GSTIN_Z_JH in html, "consignor GSTIN (Dhanbad's own)"
-    assert GSTIN_Y_JH in html, "consignee GSTIN (Bokaro's own)"
-    assert "Plot 7 Ram Mandir Road" in html and "827004" in html
+    # The consignor / consignee block itself (the letterhead also prints the
+    # issuing shop's GSTIN, so a page-wide search would not see it go).
+    party = html[html.index('class="party-grid"'):html.index('class="lines"')]
+    assert GSTIN_Z_JH in party, "consignor GSTIN (Dhanbad's own)"
+    assert GSTIN_Y_JH in party, "consignee GSTIN (Bokaro's own)"
+    assert "Plot 7 Ram Mandir Road" in party and "827004" in party
 
 
 def test_f51_challan_serial_column_prints_the_unit_barcodes(db):
