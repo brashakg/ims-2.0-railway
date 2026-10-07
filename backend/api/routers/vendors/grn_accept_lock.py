@@ -449,13 +449,38 @@ def _received_on(grn: dict, **more) -> dict:
     then or at any time later. The source branch covers a unit minted before
     grn_number was stamped and never transferred since.
 
+    Receipt numbers are not unique on prod (before #711 every BV-... shop
+    shared one minute-stamped series), so the number names a unit only when
+    it belongs to this receipt alone -- else another receipt's units would
+    block this one's void or stop its mint.
+
     ponytail: a unit minted before #310 (2026-05-28) AND transferred since
-    matches no branch; backfill its grn_id if prod ever has one."""
+    matches no branch, nor does a pre-grn_id unit of a duplicated number that
+    has been transferred; backfill its grn_id if prod ever has one."""
     grn_id = grn.get("grn_id")
     origin = [{"grn_id": grn_id}, {"source_type": "GRN", "source_id": grn_id}]
-    if grn.get("grn_number"):
-        origin.append({"grn_number": grn["grn_number"]})
+    number = grn.get("grn_number")
+    if number and _number_is_this_receipts_alone(number):
+        origin.append({"grn_number": number})
     return {"$or": origin, **more}
+
+
+def _number_is_this_receipts_alone(number) -> bool:
+    """True when exactly one receipt carries `number`. Unknown (no database,
+    a read error) reads False: the number is then not used, never guessed."""
+    try:
+        from ._shared import get_grn_repository
+
+        repo = get_grn_repository()
+        if repo is None:
+            return False
+        coll = getattr(repo, "collection", None)
+        if coll is not None and callable(getattr(coll, "count_documents", None)):
+            return int(coll.count_documents({"grn_number": number}) or 0) == 1
+        return len(repo.find_many({"grn_number": number}) or []) == 1
+    except Exception:  # noqa: BLE001
+        logger.warning("[VENDOR] receipt-number uniqueness check failed for %s", number, exc_info=True)
+        return False
 
 
 def _grn_already_minted(stock_repo, flt: dict) -> int:

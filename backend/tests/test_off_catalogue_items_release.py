@@ -2641,3 +2641,52 @@ def test_r5_the_eye_size_rule_does_not_depend_on_the_order_of_lines(world):
     )
     assert world.products_named("Boss", "BOSS 1700") == []
     assert world.db.purchase_orders.count_documents({}) == 0
+
+
+def test_r5_another_receipt_with_the_same_number_is_never_this_ones_units(world):
+    # Review round 5, pass 1: receipt numbers are not unique on prod (before
+    # #711 every BV-... shop shared one series). R1's unit, found by number,
+    # blocked the void of an empty R2 and stopped R2's own mint.
+    existing = world.catalogue_frame(
+        "Carrera", "CA 8895", "807", "54", mrp=6990, offer=6490, cost=3155.76
+    )
+    line = {
+        "product_id": existing["product_id"],
+        "product_name": "Carrera CA 8895 807",
+        "sku": existing["sku"],
+        "quantity": 1,
+        "unit_price": 3200,
+    }
+    po1 = world.raise_po([dict(line)])
+    r1, _ = world.receive_everything(po1, invoice_no="JOT/26-27/0951")
+    po2 = world.raise_po([dict(line)])
+    r2 = _run(
+        vd.create_grn(
+            vd.GRNCreate(
+                po_id=po2["po_id"],
+                vendor_invoice_no="JOT/26-27/0952",
+                vendor_invoice_date="2026-09-28",
+                items=[
+                    vd.GRNItemCreate(
+                        product_id=existing["product_id"], received_qty=1,
+                        accepted_qty=1, rejected_qty=0, tallied=True,
+                    )
+                ],
+                attachment_file_id="F-RECEIPT-PHOTO",
+                attachment_filename="bill.jpg",
+                attachment_mime="image/jpeg",
+            ),
+            MANAGER,
+        )
+    )
+    legacy = "GRN-BV--2606101432"
+    for rid in (r1["grn_id"], r2["grn_id"]):
+        world.db.grns.update_one({"grn_id": rid}, {"$set": {"grn_number": legacy}})
+    world.db.stock_units.update_one(
+        {"product_id": existing["product_id"]}, {"$set": {"grn_number": legacy}}
+    )
+    accepted = _run(vd.accept_grn(r2["grn_id"], MANAGER))
+    finding(
+        accepted["units_added"] == 1 and len(_any_status_units(world, existing["product_id"])) == 2,
+        f"R5: another receipt's unit with the same number stopped this one's mint ({accepted})",
+    )
