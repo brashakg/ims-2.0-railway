@@ -24,7 +24,7 @@ These tests pin the fix -- REDIRECT, never block, never drop:
     anywhere, applied=False so the retry surface keeps it visible;
   * an ordinary in-store return is behaviourally unchanged;
   * the Shopify write-back is handed the PHYSICAL store, never the online one;
-  * the pooled on-hand the write-back publishes EXCLUDES online-store units.
+  * the write-back reads on-hand ONE shop at a time (the pooled branch is gone).
 
 Isolated fakes only -- no Mongo, no network.
 """
@@ -1900,7 +1900,7 @@ def test_resolver_returns_none_when_no_physical_store_exists(resolver_db):
 
 
 # ===========================================================================
-# 4. The write-back's POOLED on-hand excludes online-store units.
+# 4. The write-back's on-hand is per shop -- the pooled branch is gone.
 # ===========================================================================
 
 
@@ -1956,57 +1956,22 @@ def _wb_db(units, stores):
     return _DB(), stock_coll
 
 
-def test_pooled_on_hand_excludes_units_on_an_online_store():
-    """A phantom AVAILABLE unit parked on the online store must NOT be published
-    to Shopify -- no shop can pick it."""
+def test_on_hand_for_skus_has_no_pooled_branch():
+    """Multi-location PR 4 deleted the POOLED ``store_id=None`` branch (a
+    chain-wide number that ignored the online block and the per-shop buffer).
+    A falsy store_id is UNKNOWN: {} and no aggregate at all. Restore the pooled
+    branch -> {"RB-1": 2} and a $nin match -> this fails."""
     units = [
-        {"product_id": "PRD-1", "store_id": PHYSICAL_FULFILMENT_STORE,
-         "status": "AVAILABLE"},
-        {"product_id": "PRD-1", "store_id": PHYSICAL_COUNTER_STORE,
-         "status": "AVAILABLE"},
-        {"product_id": "PRD-1", "store_id": ONLINE_STORE, "status": "AVAILABLE"},
+        {"product_id": "PRD-1", "store_id": PHYSICAL_FULFILMENT_STORE, "status": "AVAILABLE"},
+        {"product_id": "PRD-1", "store_id": PHYSICAL_COUNTER_STORE, "status": "AVAILABLE"},
     ]
-    db, stock_coll = _wb_db(
-        units, [{"store_id": ONLINE_STORE, "store_type": "ONLINE"}]
-    )
-    out = wb._on_hand_for_skus(db, ["RB-1"], None)
-    assert out == {"RB-1": 2}
-    assert ONLINE_STORE in stock_coll.last_match["store_id"]["$nin"]
-
-
-def test_pooled_on_hand_excludes_a_new_online_store_by_store_type():
-    units = [
-        {"product_id": "PRD-1", "store_id": PHYSICAL_COUNTER_STORE,
-         "status": "AVAILABLE"},
-        {"product_id": "PRD-1", "store_id": "NEW-ONLINE-99", "status": "AVAILABLE"},
-    ]
-    db, _ = _wb_db(units, [{"store_id": "NEW-ONLINE-99", "store_type": "ONLINE"}])
-    assert wb._on_hand_for_skus(db, ["RB-1"], None) == {"RB-1": 1}
-
-
-def test_pooled_on_hand_still_counts_every_physical_store():
-    """The exclusion must never shrink a real shop's contribution."""
-    units = [
-        {"product_id": "PRD-1", "store_id": PHYSICAL_FULFILMENT_STORE,
-         "status": "AVAILABLE"},
-        {"product_id": "PRD-1", "store_id": PHYSICAL_COUNTER_STORE,
-         "status": "AVAILABLE"},
-        {"product_id": "PRD-1", "store_id": "BV-RAN-01", "status": "AVAILABLE"},
-    ]
-    db, _ = _wb_db(units, [])
-    assert wb._on_hand_for_skus(db, ["RB-1"], None) == {"RB-1": 3}
-
-
-def test_online_store_ids_falls_back_to_known_ids_when_lookup_fails():
-    """A `stores` blow-up must never degrade the exclusion to 'exclude nothing'."""
-
-    class _BoomDB:
-        def get_collection(self, name):
-            raise RuntimeError("mongo down")
-
-    ids = wb._online_store_ids(_BoomDB())
-    assert ONLINE_STORE in ids
-    assert "WO-ONLINE-01" in ids
+    db, stock_coll = _wb_db(units, [])
+    assert wb._on_hand_for_skus(db, ["RB-1"], None) == {}
+    assert wb._on_hand_for_skus(db, ["RB-1"], "") == {}
+    assert stock_coll.last_match is None
+    # one shop still counts exactly its own shelf
+    assert wb._on_hand_for_skus(db, ["RB-1"], PHYSICAL_COUNTER_STORE) == {"RB-1": 1}
+    assert stock_coll.last_match["store_id"] == PHYSICAL_COUNTER_STORE
 
 
 # ===========================================================================

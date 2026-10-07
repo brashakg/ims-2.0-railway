@@ -18,7 +18,10 @@ beside the per-store one (`shopify_set_inventory_available`,
 POST /online-store/repush-oversell), the second sku -> listing resolver
 (`_products_for_skus`; `online_catalog.listings_for_skus` is the one) and
 the second baseline writer (`zero_stock_ledger_entry`; push_skus_stock's
-write-back is the one).
+write-back is the one), and the pooled parity with its pooled on-hand helper
+(`_pooled_availability`, `_shopify_available_by_item`, `_online_store_ids`)
+and its pooled task filer (`file_drift_task`; multi-location PR 4 compares
+per location and syncs one task per shop).
 
 Pure-Python AST walk (no rg/grep binary needed), the
 test_no_legacy_stock_collection.py pattern. ONE allowed read of the env
@@ -50,6 +53,12 @@ DEAD_CALLS = {
     # second implementations of the listing resolver / baseline writer
     "_products_for_skus",
     "zero_stock_ledger_entry",
+    # the pooled parity and its pooled on-hand helper (multi-location PR 4)
+    "_pooled_availability",
+    "_shopify_available_by_item",
+    "_online_store_ids",
+    # the pooled drift-task filer (one bare-ref task for the whole chain)
+    "file_drift_task",
 }
 DEAD_NAMES = {"_online_location_cache"}
 # DEAD CALL SHAPES: a live function that must never be called a particular way.
@@ -57,10 +66,10 @@ DEAD_NAMES = {"_online_location_cache"}
 # offence. `_on_hand_for_skus(db, skus, None)` is the POOLED branch its own
 # docstring calls a LIVE TRAP: it returns a chain-pooled number that ignores
 # the SUPERADMIN online block and the per-shop safety buffer, i.e. the #1125
-# rule, and it is the exact shape three files used before this PR. Deletion is
-# deferred to PR 4 by design s3.6, so until then the shape is pinned here (its
-# own unit tests keep exercising the branch, which is why nothing else named
-# it). THE per-shop rule is online_stock_writeback.online_quantities_for_skus.
+# rule, and it is the exact shape three files used before this PR. PR 4
+# deleted the branch (a falsy store_id now reads UNKNOWN, {}), so the shape can
+# only ever be a bug -- still pinned. THE per-shop rule is
+# online_stock_writeback.online_quantities_for_skus.
 DEAD_NONE_ARGS = {"_on_hand_for_skus": (2, "store_id")}
 # Only shrinks. Relative to backend/.
 ENV_PIN_ALLOWED = {

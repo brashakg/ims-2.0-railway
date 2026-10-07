@@ -14,9 +14,7 @@ import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import { vendorsApi, productApi } from '../../services/api';
 import { ApiError } from '../../services/api/client';
-import { storeApi } from '../../services/api/stores';
-import { isInterStateSupply } from '../../constants/gst';
-import { useGstStateCodes } from '../../hooks/useGstStateCodes';
+import { usePoGstHeads } from '../../hooks/usePoGstHeads';
 import { PurchaseOrderComposer } from '../../components/purchase/PurchaseOrderComposer';
 import type {
   ComposerVendorOption,
@@ -482,42 +480,15 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
 
   const vendorOptions = suppliers.map(supplierToVendor);
 
-  // Which of OUR GSTINs is receiving decides CGST+SGST vs IGST. With 3 legal
-  // entities over 4 GSTINs in 2 states, that is a per-shop fact, so read the
-  // shop rather than assume a home state. Fail-soft: no shop -> the composer
-  // says the split could not be told rather than showing a wrong one.
+  // Which of OUR GSTINs is receiving decides CGST+SGST vs IGST, and the SERVER
+  // decides it (shop_gstin + classify_supply, the rule the order and the bill
+  // book with) -- never the shop's raw GSTIN field read here. Unknown (loading,
+  // no GSTIN, a prefix that is not a state) is null: the composer says "cannot
+  // tell" rather than showing a wrong split.
   const storeId = user?.activeStoreId ?? '';
-  const [store, setStore] = useState<{ gstin?: string; state?: string } | null>(null);
   const [vendorId, setVendorId] = useState('');
-  useEffect(() => {
-    if (!storeId) return;
-    let cancelled = false;
-    storeApi
-      .getStore(storeId)
-      .then((doc) => {
-        if (!cancelled) setStore(doc || null);
-      })
-      .catch(() => {
-        if (!cancelled) setStore(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [storeId]);
-
-  const vendor = suppliers.find((s) => s.id === vendorId);
-  // Server-fed state list: a GSTIN prefix it does not contain ("88...") is not
-  // a state, so the composer says "cannot tell" instead of quoting IGST off a
-  // registration the engine reads no state from. Fail-closed until it loads.
-  const stateNames = useGstStateCodes();
-  const interstate =
-    vendor && store
-      ? isInterStateSupply(
-          { gstin: vendor.gstNumber, state: vendor.state },
-          { gstin: store.gstin, state: store.state },
-          stateNames,
-        )
-      : null;
+  const heads = usePoGstHeads(storeId);
+  const interstate: boolean | null = vendorId ? (heads[vendorId] ?? null) : null;
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-start justify-center z-50 p-4 overflow-y-auto">

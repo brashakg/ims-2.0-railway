@@ -59,6 +59,45 @@ _VALID_DISCOUNT_CATEGORIES = frozenset(CATEGORY_DISCOUNT_CAPS.keys())
 # (online_stock is null here; see /online-store/stock-tally for a live read).
 
 
+def _online_statuses(db, sku_list: List[str]) -> Dict[str, Any]:
+    """online_status_for_skus with ``online`` read through THE one "is this
+    listing live on Shopify" reader (inventory.skus_on_live_listings) -- the
+    one the nightly parity, the Stock Tally and the reconciliation view read
+    -- so the Inventory screen's Online column never calls a draft or
+    taken-down listing online while those views call it not online. A
+    failed read -- the catalogue lookup itself or the live read -- answers
+    ``online`` None (unknown: the screen says Unverified), never a confident
+    "in-store only"."""
+    from ..services.shopify_push.inventory import live_listing_split
+
+    try:
+        statuses = online_status_for_skus(db, sku_list, strict=True)
+    except Exception:  # noqa: BLE001
+        # Which keys are on Shopify at all is unknown: every key unknown,
+        # never a confident "in-store only".
+        return {
+            k: {"online": None, "sellable_online": None, "online_stock": None, "status": None,
+                "shares_item": False}
+            for k in dict.fromkeys(s.strip() for s in sku_list if s and s.strip())
+        }
+    if not statuses:
+        return statuses
+    try:
+        live, shared = live_listing_split(db, list(statuses), strict=True)
+    except Exception:  # noqa: BLE001
+        live, shared = None, set()
+    for key, status in statuses.items():
+        name = str(key).strip()
+        # A SKU on a LIVE listing that shares its Shopify item with another
+        # product is on the website but the writer refuses it: unknown
+        # (Unverified), never "In-store only".
+        # shares_item names the cause, so a screen can tell it from a failed
+        # read (both are online None).
+        status["shares_item"] = live is not None and name in shared
+        status["online"] = None if live is None or name in shared else name in live
+    return statuses
+
+
 @router.get("/online-status")
 async def get_online_status(
     skus: str = Query(..., description="Comma-separated SKUs to look up"),
@@ -67,7 +106,7 @@ async def get_online_status(
     """For each SKU, whether it's online (on Shopify, per the IMS catalog).
     Returns {statuses: {sku: {online, online_stock(null), status}}}."""
     sku_list = [s.strip() for s in (skus or "").split(",") if s.strip()]
-    return {"statuses": online_status_for_skus(_get_db(), sku_list)}
+    return {"statuses": _online_statuses(_get_db(), sku_list)}
 
 
 class OnlineStatusRequest(BaseModel):
@@ -85,7 +124,7 @@ async def post_online_status(
     proxy length limits -> net::ERR_CONNECTION_CLOSED, blanking the "Online"
     column (QA F12). Same response shape as the GET."""
     sku_list = [s.strip() for s in (body.skus or []) if s and s.strip()]
-    return {"statuses": online_status_for_skus(_get_db(), sku_list)}
+    return {"statuses": _online_statuses(_get_db(), sku_list)}
 
 
 @router.get("/online-summary")
@@ -119,24 +158,58 @@ async def online_stock_reconcile(
     store_id: Optional[str] = Query(
         None, description="Limit in-store on-hand to one store"
     ),
-    safety_buffer: int = Query(
-        0, ge=0, le=1000, description="Units to hold back from online"
-    ),
     limit: int = Query(1000, ge=1, le=5000),
     current_user: dict = Depends(get_current_user),
 ):
     """Reconcile in-store physical on-hand (IMS) vs online-listed stock
-    (Shopify) per SKU and flag overselling risk + a recommended safe online
-    allocation (on-hand minus safety_buffer).
+    (Shopify) per SKU, PER SHOPIFY LOCATION, against THE ONE RULE the writer
+    sends (online_sync_health.rule_by_location).
 
-    Post-BVI: "which SKUs are online" comes from the IMS catalog (Mongo), and
-    the LISTED quantity is read LIVE from Shopify for the online-mapped SKUs
-    (creds-gated, read-only, capped to the MAPPED set). Honesty contract
-    (audit fix-round P1): an online SKU the live read did NOT cover carries
-    online=null and classifies LISTED_UNKNOWN -- never a confident 0/OK.
+    Post-BVI: "which SKUs are online" is the SKU's listing live on Shopify
+    (inventory.skus_on_live_listings, the reader the nightly parity and the
+    Stock Tally share), and the LISTED quantity is read LIVE from Shopify for
+    the live, online-mapped SKUs
+    (creds-gated, read-only, capped to the MAPPED set), per location. With
+    ``store_id`` the row is that shop's own Shopify location, in full, as
+    parity compares it (an unmapped shop lists 0 and is recommended 0);
+    without it the row sums every mapped location plus every other location
+    the storefront sells from (live_listed_qty_for_skus ``levels``).
+    Either way the verdict is decided location by location
+    (shopify_stock_parity.unbacked_units) -- never one shop's (or unmapped
+    Pune's) shelf backing another shop's listing:
+      * OVERSELL_RISK  -- a location the storefront sells from lists beyond
+        the shelf behind it;
+      * OVER_ALLOCATED -- a location lists beyond what the writer sends there
+        (its safety buffer, the SUPERADMIN online block), sells online or
+        not, by even one unit. Same level, same writer's number as the
+        nightly parity, but not its verdict: parity also files a location
+        listing FEWER than the writer sends, and lets a gap within its
+        tolerance pass where the writer sends more than 0 -- so a shop's
+        drift task can sit beside OK (under-listed) and OVER_ALLOCATED beside
+        no task (within tolerance). Parity compares only a SKU IMS still
+        sells (a retired one is on neither this page nor a task) on a live
+        listing, and a row is assessed (is_online) by the SAME reader
+        (inventory.skus_on_live_listings: a draft or taken-down listing is
+        assessed by neither), so every SKU a shop's drift task names is a
+        row here
+        (within ``limit``), and that shop's Online and ``recommended`` are
+        the two numbers the task names, read now (the task's are from the
+        night it compared them); ``recommended`` is the number its
+        instruction asks for (shopify_stock_parity.sync_drift_task);
+      * ``recommended`` -- what the writer sends, summed over the mapped shops
+        in view. The buffer is the writer's own (the Shopify integration's
+        safety_buffer); this page has no second one;
+      * ``delta`` -- units listed beyond what the writer sends, counted
+        location by location (never listed-total minus recommended-total).
+    Honesty contract (audit fix-round P1): an online SKU the live read did NOT
+    cover carries online=null and classifies LISTED_UNKNOWN; a rule IMS could
+    not read classifies ONHAND_UNKNOWN -- never a confident 0/OK.
     listed_qty_live is True only on FULL mapped coverage;
     listed_live_rows / listed_mapped_rows expose partial coverage.
     Read-only + fail-soft."""
+    # The shop key as the writer's map (inventory._mapped) and the rule spell
+    # it: a stored 'BV-A ' is mapped, and its shelf read, as 'BV-A'.
+    store_id = (store_id or "").strip() or None
     db = _get_db()
     if db is None:
         return {
@@ -156,45 +229,106 @@ async def online_stock_reconcile(
             )
             .limit(limit)
         )
-    except Exception:
-        products = []
+    except Exception:  # noqa: BLE001
+        # Which SKUs exist is unknown: never "nothing to reconcile, fully
+        # covered" beside a drift task parity keeps open.
+        return {
+            "items": [],
+            "summary": {},
+            "online_configured": online_mapping_available(db),
+            "listed_qty_live": False,
+            "listed_live_rows": 0,
+            "listed_mapped_rows": 0,
+            "live_listings_unknown": True,
+        }
 
     pids = [p.get("product_id") for p in products if p.get("product_id")]
     on_hand = _on_hand_by_product(db, pids, store_id)
     skus = [p.get("sku") for p in products if p.get("sku")]
-    online = online_status_for_skus(db, skus)  # {sku: {online, status, ...}}
+    from ..services.online_stock_writeback import _safety_buffer
+    from ..services.online_sync_health import live_listed_qty_for_skus, rule_by_location
+    from ..services.shopify_push.inventory import live_listing_split
+    from ..services.shopify_stock_parity import unbacked_units
 
-    # Live Shopify listed quantities: mapped SKUs first, cap on the mapped set,
-    # coverage counts carried through (None when the read is unavailable).
-    from ..services.online_sync_health import live_listed_qty_for_skus
+    # Online = the SKU's listing is live on Shopify: THE one reader the
+    # nightly parity and the Stock Tally read (a draft or taken-down listing
+    # sells nothing and is not assessed, exactly as parity skips it). Read
+    # STRICT: a failed read is unknown (every row LISTED_UNKNOWN), never a
+    # confident NOT_ONLINE beside a drift task parity keeps open.
+    try:
+        on_live, shares_item = live_listing_split(db, skus, strict=True)
+    except Exception:  # noqa: BLE001
+        on_live, shares_item = None, set()
+    live_skus = [s for s in skus if on_live is not None and str(s).strip() in on_live]
 
-    live = await live_listed_qty_for_skus(db, skus)
-    online_qty = (live or {}).get("qty") or {}
+    # Live Shopify listed quantities PER LOCATION for the live SKUs: mapped
+    # SKUs first, cap on the mapped set, coverage counts carried through
+    # (None when unavailable).
+    live = await live_listed_qty_for_skus(db, live_skus) if live_skus else None
+    variants = (live or {}).get("variants") or []
+    # Parity's full level (the Online column, OVER_ALLOCATED) and the level
+    # the storefront sells from (OVERSELL_RISK): live_listed_qty_for_skus.
+    levels = (live or {}).get("levels") or {}
+    selling = (live or {}).get("selling") or {}
+    # The shelf and the writer's number per shop + the writer's own shop ->
+    # location map (one shop's entry with store_id). None = unknown ->
+    # ONHAND_UNKNOWN, never clean.
+    shelf, sent, mapped = rule_by_location(db, skus, store_id=store_id) or (None, None, None)
+    if store_id:
+        # ONE shop = its OWN location only; a shop with no location lists 0.
+        # An unreadable map = which location is unknown -> listed unknown.
+        gid = (mapped or {}).get(store_id)
+
+        def own(lv):
+            return {} if mapped is None else {
+                inv: ({gid: per.get(gid, 0)} if gid else {}) for inv, per in lv.items()
+            }
+
+        levels, selling = own(levels), own(selling)
+    over = None if shelf is None else unbacked_units(variants, shelf, selling, mapped)
+    excess = None if sent is None else unbacked_units(variants, sent, levels, mapped)
+    inv_of = {v["sku"]: v["inventory_item_id"] for v in variants}
 
     items = []
     for p in products:
         sku = p.get("sku")
-        o = online.get(sku, {})
-        is_online = bool(o.get("online"))
+        is_online = None if on_live is None else str(sku or "").strip() in on_live
+        shares = str(sku or "").strip() in shares_item
         # Uncovered online SKU -> None (LISTED_UNKNOWN downstream), never a
         # confident 0. Offline SKUs carry 0 (they are not assessed anyway).
-        listed = online_qty.get(sku)
+        per_location = levels.get(inv_of.get(sku))
+        listed = None if per_location is None else sum(int(q) for q in per_location.values())
+        per_shop = None if sent is None else sent.get(sku)
         items.append(
             {
                 "sku": sku,
                 "name": f"{p.get('brand', '') or ''} {p.get('model', '') or ''}".strip(),
                 # UNKNOWN on-hand is None (ONHAND_UNKNOWN), never a confident 0.
                 "in_store": None if on_hand is None else on_hand.get(p.get("product_id"), 0),
-                "online": (listed if is_online else 0),
+                # A shared SKU is live but the writer refuses it: its listed
+                # number is not shown as a confident 0 (None = unknown).
+                "online": None if shares else (listed if is_online is not False else 0),
                 "is_online": is_online,
+                "shares_item": shares,
+                # What the writer sends to the mapped shops in view (None: unknown).
+                "recommended": None if per_shop is None else sum(int(per_shop.get(sid, 0)) for sid in mapped),
+                # Listed beyond the shelf / beyond the writer's number, location
+                # by location (None: unknown).
+                "unbacked": (None if over is None else over.get(sku)) if is_online is not False else 0,
+                "excess": (None if excess is None else excess.get(sku)) if is_online is not False else 0,
             }
         )
 
-    result = stock_allocation.reconcile_items(items, safety_buffer=safety_buffer)
+    result = stock_allocation.reconcile_items(items)
+    result["summary"]["safety_buffer"] = _safety_buffer(db)
     result["online_configured"] = online_mapping_available(db)
     live_rows = int(live["live"]) if live else 0
     mapped_rows = int(live["mapped"]) if live else 0
-    result["listed_qty_live"] = bool(live) and mapped_rows > 0 and live_rows >= mapped_rows
+    # No live listing at all (the read succeeded) = nothing to read: covered,
+    # not "Shopify unavailable".
+    result["listed_qty_live"] = (on_live is not None and not live_skus) or (
+        bool(live) and mapped_rows > 0 and live_rows >= mapped_rows)
+    result["live_listings_unknown"] = on_live is None
     result["listed_live_rows"] = live_rows
     result["listed_mapped_rows"] = mapped_rows
     return result
@@ -1026,7 +1160,8 @@ class InventoryInput(BaseModel):
     initial_quantity: int = 0
     location_id: Optional[str] = None
     barcode: Optional[str] = None
-    reorder_level: int = 5
+    # No chain-wide reorder_level: levels are per shop (owner ruling D12),
+    # set through PUT /inventory/reorder-levels/{product_id}.
     # Owner decision (2026-07-04): -1 means "no auto-reorder" -- every reorder
     # engine skips the product until a positive qty is explicitly configured
     # (see api/services/reorder_policy.py).
@@ -1893,9 +2028,6 @@ async def create_catalog_product(
             ),
             "locations": {},
             "barcode": product.inventory.barcode if product.inventory else None,
-            "reorder_level": (
-                product.inventory.reorder_level if product.inventory else 5
-            ),
             # -1 = auto-reorder disabled (owner default; reorder_policy.py).
             "reorder_quantity": (
                 product.inventory.reorder_quantity if product.inventory else -1
@@ -2924,27 +3056,6 @@ async def adjust_product_inventory(
     }
 
 
-@router.get("/products/{product_id}/inventory")
-async def get_product_inventory(
-    product_id: str, current_user: dict = Depends(get_current_user)
-):
-    """Get inventory levels for a product across all locations"""
-    product = _get_catalog_product(product_id)
-    if product is None:
-        raise HTTPException(status_code=404, detail="Product not found")
-
-    return {
-        "product_id": product_id,
-        "sku": product["sku"],
-        "title": product["title"],
-        "total_quantity": product["inventory"]["total_quantity"],
-        "locations": product["inventory"]["locations"],
-        "reorder_level": product["inventory"]["reorder_level"],
-        "needs_reorder": product["inventory"]["total_quantity"]
-        <= product["inventory"]["reorder_level"],
-    }
-
-
 # ============================================================================
 # ENDPOINTS - Shopify Sync
 # ============================================================================
@@ -3139,7 +3250,6 @@ async def import_products(
                 "inventory": {
                     "total_quantity": 0,
                     "locations": {},
-                    "reorder_level": 5,
                     "reorder_quantity": -1,
                 },
                 "shopify": {"synced": False},

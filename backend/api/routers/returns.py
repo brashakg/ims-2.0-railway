@@ -2123,6 +2123,11 @@ def _restock_good_items(
         # carries NO order_id / sold_at (it is unsold shelf stock); a later sale
         # stamps the new order_id cleanly.
         try:
+            # Same unit-barcode scheme as a goods receipt (vendors/numbering
+            # _grn_barcode): a piece back on the shelf must scan at the till
+            # and get a label like any other unit.
+            from .inventory.helpers import generate_barcode
+
             created = stock_repo.create(
                 {
                     # F9: unit_store is guaranteed PHYSICAL here -- an online
@@ -2130,6 +2135,8 @@ def _restock_good_items(
                     # one returned early without minting anything.
                     "store_id": unit_store,
                     "product_id": pid,
+                    "barcode": generate_barcode(unit_store, pid),
+                    "barcode_printed": False,
                     "quantity": 1,
                     "status": "AVAILABLE",
                     "source_type": "RETURN",

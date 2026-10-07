@@ -453,11 +453,12 @@ def gst_pricing_mode() -> str:
 # ask one engine. That is a statement about those three, NOT about the whole
 # codebase: reports.py and finance.py still halve tax inline (and do it the
 # naive way -- `round(tax/2, 2)` for BOTH heads, which loses the odd paisa:
-# measured, cgst + sgst != tax on 5 of 6 probe amounts), routers/transfers.py
-# keeps its own `_tax_split`, and services/rtv_debit_note.py splits in integer
-# paise because its documents are minted in paise. Folding those in is a
-# behaviour change in each of those documents, so it is not done here. Do not
-# write "no caller has a second one" until that list is empty and re-measured.
+# measured, cgst + sgst != tax on 5 of 6 probe amounts), and
+# services/rtv_debit_note.py splits in integer paise because its documents are
+# minted in paise. routers/transfers.py `_tax_split` now just wraps split_gst.
+# Folding the rest in is a behaviour change in each of those documents, so it
+# is not done here. Do not write "no caller has a second one" until that list
+# is empty and re-measured.
 # resolve_gst_rate() above is the FORGIVING resolver used at the sales counter
 # (it must always return a number so a bill can be raised). The purchase side
 # needs the OPPOSITE guarantee -- a purchase order that quietly invents a rate

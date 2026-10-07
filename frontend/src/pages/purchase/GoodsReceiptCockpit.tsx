@@ -19,7 +19,6 @@ import {
   X,
   CheckCircle2,
   AlertCircle,
-  Printer,
   ChevronDown,
   ChevronUp,
   Loader2,
@@ -30,7 +29,7 @@ import {
 import clsx from 'clsx';
 import { grnCockpitApi } from '../../services/api/grnCockpit';
 import { vendorsApi } from '../../services/api/inventory';
-import labelsApi from '../../services/api/labels';
+import { UnitLabelsModal } from '../../components/labels/UnitLabelsModal';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { useIsOnlineStore } from '../../hooks/useIsOnlineStore';
@@ -108,93 +107,6 @@ function SectionHeader({ title, count }: { title: string; count?: number }) {
   );
 }
 
-// ---- Print-labels dialog ---------------------------------------------------
-
-interface PrintLabelsDialogProps {
-  grnId: string;
-  productIds: string[];
-  onClose: () => void;
-}
-
-function PrintLabelsDialog({ grnId, productIds, onClose }: PrintLabelsDialogProps) {
-  const toast = useToast();
-  const [printing, setPrinting] = useState(false);
-
-  const handlePrint = async () => {
-    setPrinting(true);
-    try {
-      // Best-effort: call getProductLabel for the first product_id as a sample
-      // (the labels API is designed for individual product/stock units; a full
-      // batch-print endpoint may be added in a future slice).
-      for (const pid of productIds.slice(0, productIds.length)) {
-        try {
-          await labelsApi.getProductLabel({ product_id: pid });
-        } catch {
-          // Fail soft per product
-        }
-      }
-      toast.success('Label print request sent to label printer');
-      onClose();
-    } catch {
-      toast.error('Label print failed');
-    } finally {
-      setPrinting(false);
-    }
-  };
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center"
-      style={{ background: 'rgba(0,0,0,0.35)' }}
-    >
-      <div
-        className="card"
-        style={{ width: 360, maxWidth: '90vw', padding: 24 }}
-      >
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="font-semibold" style={{ color: 'var(--ink)' }}>
-            Print stock labels?
-          </h3>
-          <button
-            type="button"
-            onClick={onClose}
-            className="btn sm"
-            aria-label="Close"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-        <p className="text-sm mb-5" style={{ color: 'var(--ink-3)' }}>
-          GRN created successfully. Print barcode labels for the{' '}
-          {productIds.length} received product{productIds.length === 1 ? '' : 's'}
-          now, or skip and print later from the Inventory screen.
-        </p>
-        <p className="text-xs mb-5" style={{ color: 'var(--ink-4)' }}>
-          GRN ref: <span className="mono">{grnId}</span>
-        </p>
-        <div className="flex gap-3 justify-end">
-          <button type="button" className="btn" onClick={onClose}>
-            Skip for now
-          </button>
-          <button
-            type="button"
-            className="btn accent"
-            onClick={handlePrint}
-            disabled={printing}
-          >
-            {printing ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              <Printer className="w-4 h-4" />
-            )}
-            Print labels
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // ---- Deliveries-inbox card row ----------------------------------------------
 // One receivable PO across ANY vendor for the user's store scope. Mapped
 // client-side from the existing GET /vendors/purchase-orders payload (the same
@@ -262,7 +174,7 @@ export function GoodsReceiptCockpit() {
   // ---- Post-GRN dialog -----------------------------------------------------
   const [printDialog, setPrintDialog] = useState<{
     grnId: string;
-    productIds: string[];
+    grnNumber: string;
   } | null>(null);
 
   // ---- Collapsible pending sections ----------------------------------------
@@ -328,6 +240,8 @@ export function GoodsReceiptCockpit() {
       const res = await vendorsApi.acceptGRN(grnId);
       reportGrnAccept(toast, grnNumber, res);
       if (highlightGrn === grnNumber) setHighlightGrn(null);
+      // F26: these units are just received too - their labels, same dialog.
+      setPrintDialog({ grnId, grnNumber });
       await loadPendingGrns(vendorId);
       await loadCockpit(vendorId);
       void loadInbox();
@@ -724,9 +638,8 @@ export function GoodsReceiptCockpit() {
         );
       }
 
-      // Show print-labels dialog
-      const productIds = [...new Set(items.map((i) => i.product_id))];
-      setPrintDialog({ grnId: result.grn_id, productIds });
+      // F26: the units this receipt put on the shelf, each with its own label.
+      setPrintDialog({ grnId: result.grn_id, grnNumber: result.grn_number });
 
       // Refresh cockpit + deliveries inbox
       onCancelPO();
@@ -764,9 +677,10 @@ export function GoodsReceiptCockpit() {
   return (
     <>
       {printDialog && (
-        <PrintLabelsDialog
+        <UnitLabelsModal
           grnId={printDialog.grnId}
-          productIds={printDialog.productIds}
+          title="Print stock labels?"
+          subtitle={`Receipt ${printDialog.grnNumber}: one label per piece put on the shelf.`}
           onClose={() => setPrintDialog(null)}
         />
       )}

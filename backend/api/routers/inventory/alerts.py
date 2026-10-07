@@ -18,6 +18,7 @@ from ._shared import (
 from .helpers import (
     _get_db,
 )
+from ...services.reorder_policy import is_low_stock, on_hand, reorder_level
 
 # ============================================================================
 # 7. UNIFIED STOCK ALERTS  (feeds StockAlertsOverview.tsx)
@@ -25,8 +26,9 @@ from .helpers import (
 #
 # Replaces the old hardcoded mock list (Vogue Cat Eye / Prada Baroque / etc.)
 # the component used to render. Computes real, actionable alerts from the
-# `products` collection (where TechCherry-imported stock-on-hand lives as
-# `stock_quantity`) joined to `orders.items` by barcode for sales velocity.
+# catalogue, each product's units on hand AT THE SHOP (reorder_policy.on_hand)
+# and that shop's own reorder level (D12), joined to `orders.items` by barcode
+# for sales velocity. No level at the shop = no LOW_STOCK / REORDER_ALERT.
 #
 # Each product yields AT MOST ONE alert, chosen by priority:
 #   REORDER_ALERT > LOW_STOCK > DEAD_STOCK > OVERSTOCK > FAST_MOVING
@@ -81,14 +83,20 @@ def _build_stock_alert(
     now: datetime,
     dead_days: int,
     lead_time_days: int,
+    store_id: Optional[str] = None,
 ) -> Optional[dict]:
     """Pure classifier — given a product doc plus its sales signals, return a
     single frontend-shaped (camelCase) StockAlert dict, or None if the product
     warrants no alert. No DB access, so it is fully unit-testable.
+
+    `stock_quantity` is the units on hand at `store_id`; the reorder level is
+    that shop's own (reorder_policy). A shop with no level gets no LOW_STOCK
+    or REORDER_ALERT (owner ruling D12: not set = no low-stock alert).
     """
     stock = int(product.get("stock_quantity", 0) or 0)
     cost = float(product.get("cost_price", 0) or 0)
-    reorder_point = int(product.get("reorder_point", 0) or 0)
+    reorder_point = reorder_level(product, store_id=store_id)  # None = not set
+    has_level = reorder_point is not None
     # Owner decision (2026-07-04): reorder_quantity <= 0 (the new -1 default)
     # means auto-reorder is DISABLED for this product -- never emit a
     # REORDER_ALERT / restock suggestion for it. Informational alerts
@@ -124,10 +132,14 @@ def _build_stock_alert(
     #    (or is already at/below an explicit reorder point, or out of stock
     #     while still selling).
     out_of_stock_but_selling = stock <= 0 and velocity > 0
-    below_reorder_point = reorder_point > 0 and stock <= reorder_point and velocity > 0
+    below_reorder_point = (
+        is_low_stock(product, stock, store_id=store_id) and velocity > 0
+    )
     runs_out_soon = projected is not None and projected <= lead_time_days
-    if not reorder_suggestions_off and (
-        out_of_stock_but_selling or below_reorder_point or runs_out_soon
+    if (
+        has_level
+        and not reorder_suggestions_off
+        and (out_of_stock_but_selling or below_reorder_point or runs_out_soon)
     ):
         target = velocity * lead_time_days * 2  # cover 2x lead time
         recommended = max(int(round(target - stock)), 1)
@@ -153,7 +165,12 @@ def _build_stock_alert(
     # 2. LOW_STOCK — sells, getting low, but not yet reorder-critical.
     # When auto-reorder is disabled the alert stays (it is informational)
     # but with NO suggested restock qty (recommendedOrder 0, costImpact 0).
-    if velocity > 0 and projected is not None and projected <= lead_time_days * 2:
+    if (
+        has_level
+        and velocity > 0
+        and projected is not None
+        and projected <= lead_time_days * 2
+    ):
         recommended = (
             0
             if reorder_suggestions_off
@@ -298,15 +315,14 @@ async def get_stock_alerts(
         now = datetime.utcnow()
         thirty_cutoff = now - timedelta(days=30)
 
-        prod_filter: Dict = {"is_active": {"$ne": False}}
-        if active_store:
-            prod_filter["store_id"] = active_store
-
+        # The catalogue is shared (products carry no store_id); stock and
+        # the level are the shop's own.
         products = list(
             products_coll.find(
-                prod_filter,
+                {"is_active": {"$ne": False}},
                 {
                     "_id": 0,
+                    "product_id": 1,
                     "name": 1,
                     "brand": 1,
                     "category": 1,
@@ -315,8 +331,7 @@ async def get_stock_alerts(
                     "mrp": 1,
                     "offer_price": 1,
                     "cost_price": 1,
-                    "stock_quantity": 1,
-                    "reorder_point": 1,
+                    "reorder_levels": 1,
                     "reorder_quantity": 1,
                 },
             )
@@ -326,16 +341,24 @@ async def get_stock_alerts(
             orders_coll, active_store, thirty_cutoff
         )
 
+        # Units on hand per product at this shop (every shop when none).
+        units: Dict[str, int] = {}
+        for (pid, _shop), qty in on_hand(
+            db.get_collection("stock_units"), store_id=active_store
+        ).items():
+            units[pid] = units.get(pid, 0) + qty
+
         alerts: List[dict] = []
         for p in products:
             barcode = p.get("barcode") or p.get("sku") or ""
             alert = _build_stock_alert(
-                p,
+                {**p, "stock_quantity": units.get(str(p.get("product_id")), 0)},
                 sold_30=sales_30.get(barcode, 0),
                 last_sale=last_sales.get(barcode),
                 now=now,
                 dead_days=dead_days,
                 lead_time_days=lead_time_days,
+                store_id=active_store,
             )
             if alert:
                 alerts.append(alert)
