@@ -45,13 +45,15 @@ beforeEach(() => {
   );
 });
 
-function open() {
+function open(path = '/purchase/this-month') {
   render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-      <MemoryRouter initialEntries={['/purchase/this-month']}>
+      <MemoryRouter initialEntries={[path]}>
         <Routes>
           <Route path="/purchase" element={<PurchaseLayout />}>
             <Route path="this-month" element={<div>report</div>} />
+            <Route path="orders" element={<div>report</div>} />
+            <Route path="suppliers" element={<div>report</div>} />
           </Route>
         </Routes>
       </MemoryRouter>
@@ -96,6 +98,29 @@ describe('the Purchase header names the shop a non-admin reads', () => {
     );
     expect(screen.queryByText('report')).toBeNull();
     expect(label()).toBeNull();
+  });
+
+  // The header's create buttons sit outside the gate: they used to stay up
+  // next to the message and open nothing (no section is mounted).
+  it.each([
+    ['/purchase/orders', 'New PO'],
+    ['/purchase/suppliers', 'New supplier'],
+  ])('%s: no shop, no %s button', async (path, button) => {
+    roles = ['STORE_MANAGER'];
+    activeStoreId = undefined;
+    open(path);
+    await screen.findByRole('alert');
+    expect(screen.queryByRole('button', { name: button })).toBeNull();
+  });
+
+  it.each([
+    ['/purchase/orders', 'New PO'],
+    ['/purchase/suppliers', 'New supplier'],
+  ])('%s: with a shop the %s button is there', async (path, button) => {
+    roles = ['STORE_MANAGER'];
+    activeStoreId = 'BV-DHN-01';
+    open(path);
+    expect(await screen.findByRole('button', { name: button })).toBeInTheDocument();
   });
 
   it('an admin with no shop still opens the tab on all stores', async () => {

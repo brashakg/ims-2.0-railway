@@ -25,7 +25,7 @@ import {
 } from 'lucide-react';
 import { useIsOnlineStore } from '../../hooks/useIsOnlineStore';
 import { useAuth } from '../../context/AuthContext';
-import { NewOrdersDeliverTo, PurchaseShopGate, PurchaseShopLabel, PurchaseShopPicker } from './purchaseShop';
+import { NewOrdersDeliverTo, PurchaseShopGate, PurchaseShopLabel, PurchaseShopPicker, usePurchaseShop } from './purchaseShop';
 import { APPROVE_ROLES } from './invoices/shared';
 import { RETURN_READERS } from './purchaseRoles';
 
@@ -51,6 +51,7 @@ export function PurchaseLayout() {
   const { pathname } = useLocation();
   const navigate = useNavigate();
   const { hasRole } = useAuth();
+  const { noShop } = usePurchaseShop();
 
   // Warm the sibling section chunks once the browser is idle, so the FIRST
   // click on any tab renders without the lazy-chunk download spinner (owner
@@ -72,9 +73,11 @@ export function PurchaseLayout() {
     });
   }, []);
 
-  // Sections whose primary create action lives in the header.
-  const headerAction =
-    pathname === '/purchase/orders'
+  // Sections whose primary create action lives in the header. None for a
+  // login with no shop (R3): the gate below mounts no section to open.
+  const headerAction = noShop
+    ? null
+    : pathname === '/purchase/orders'
       ? 'New PO'
       : pathname === '/purchase/suppliers'
         ? 'New supplier'
