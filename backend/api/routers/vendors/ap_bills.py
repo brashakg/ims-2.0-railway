@@ -59,6 +59,11 @@ class VendorBillCreate(BaseModel):
     def _normalize_bill_kind(cls, v):
         return ap_engine.normalize_bill_kind(v)
 
+    @field_validator("bill_date", mode="before")
+    @classmethod
+    def _iso_bill_date(cls, v):
+        return ap_engine.iso_bill_date(v)
+
 
 class VendorPaymentCreate(BaseModel):
     amount: float = Field(..., gt=0)  # cash actually paid to the vendor
@@ -268,6 +273,7 @@ async def create_vendor_bill(
     # a second header bill nor a later consolidated /from-dcs invoice can bill
     # the same goods again.
     _dc_receipt = None
+    _receipt_store = None
     if bill.grn_id:
         from ..purchase_invoices import (
             assert_grn_billable_header_only,
@@ -277,6 +283,7 @@ async def create_vendor_bill(
 
         grn_repo = get_grn_repository()
         linked = grn_repo.find_by_id(bill.grn_id) if grn_repo is not None else None
+        _receipt_store = (linked or {}).get("store_id")
         if linked is not None and linked.get("grn_subtype") == GRN_SUBTYPE_DC:
             # 404 missing / 400 not-ACCEPTED / 409 already-matched.
             dc_docs = _load_linked_dcs(db_early, [bill.grn_id])
@@ -327,6 +334,27 @@ async def create_vendor_bill(
         except Exception:
             pass  # fail-soft: skip dup check on DB error, proceed with insert
 
+    # F40 on this door too: the recipient company + GSTIN and the tax heads
+    # every bill door stores, from the SAME rule (purchase_invoices.
+    # _bill_recipient + the engine's classify_supply). This door used to write
+    # none of them, so its credit counted in the ITC register and in no
+    # GSTR-3B. Refused (422) before anything is claimed or written.
+    from ..purchase_invoices import _bill_recipient, _vendor_gstin
+    from ...services.purchase_invoice_engine import split_header_tax
+    from ...services.org_validation import itc_claimable
+
+    supplier_gstin = _vendor_gstin(db_early, vendor, vendor_id)
+    recipient = _bill_recipient(
+        db_early,
+        _receipt_store,
+        None,
+        current_user.get("active_store_id"),
+        gstin_box=False,
+    )
+    heads = split_header_tax(
+        bill.tax_amount, supplier_gstin, recipient.get("recipient_gstin")
+    )
+
     credit_days = int((vendor or {}).get("credit_days", 30) or 30)
     due_date = ap_engine.compute_due_date(bill.bill_date, credit_days)
     bill_id = str(uuid.uuid4())
@@ -339,10 +367,23 @@ async def create_vendor_bill(
         "bill_date": bill.bill_date,
         "due_date": due_date,
         "credit_days": credit_days,
+        "vendor_gstin": supplier_gstin,
+        "recipient_entity_id": recipient.get("recipient_entity_id"),
+        "recipient_gstin": recipient.get("recipient_gstin"),
+        "place_of_supply": heads["itc_place_of_supply"],
+        "supply_place_recipient": heads["place_of_supply"],
+        "supplier_state": heads["supplier_state"],
+        "interstate": heads["interstate"],
         "taxable_amount": round(bill.taxable_amount, 2),
         "tax_amount": round(bill.tax_amount, 2),
+        "cgst_total": heads["cgst_total"],
+        "sgst_total": heads["sgst_total"],
+        "igst_total": heads["igst_total"],
         "total_amount": round(bill.total_amount, 2),
         "outstanding": round(bill.total_amount, 2),
+        # No valid supplier GSTIN, no input credit (purchase_invoices does the
+        # same on its doors): one rule, org_validation.itc_claimable.
+        "itc_eligible": itc_claimable(supplier_gstin),
         "po_id": bill.po_id,
         "grn_id": bill.grn_id,
         # A receipt-linked bill IS a goods bill whatever the caller declared;

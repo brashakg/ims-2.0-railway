@@ -660,6 +660,15 @@ class TestDuplicateVendorBill:
             "vendors",
             [{"vendor_id": "v-1", "legal_name": "Acme", "credit_days": 30}],
         )
+        # A bill must name a company + GSTIN (none is a 422): the user's shop S1.
+        db.seed(
+            "entities",
+            [{"entity_id": "E1", "gstins": [{"gstin": "27ZZZZZ9999Z1Z9", "state_code": "27"}]}],
+        )
+        db.seed(
+            "stores",
+            [{"store_id": "S1", "entity_id": "E1", "state_code": "27", "gstin": "27ZZZZZ9999Z1Z9"}],
+        )
         monkeypatch.setattr(v, "_get_db", lambda: db)
 
         class _VendorRepo:

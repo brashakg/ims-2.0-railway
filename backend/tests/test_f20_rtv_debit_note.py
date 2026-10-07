@@ -227,10 +227,12 @@ class FakeDB:
 @pytest.fixture
 def db():
     d = FakeDB()
-    # Seed an entity (prefix) + vendor + a source vendor_return.
+    # Seed an entity (prefix) + vendor + a source vendor_return. The note's
+    # GSTIN is read from the company's registrations (gstins), as the bill's.
     d.get_collection("entities").insert_one(
         {"entity_id": "E1", "code": "BV", "legal_name": "Better Vision Pvt Ltd",
-         "gstin": "20ABCDE1234F1Z5", "state_code": "20", "address": "Ranchi"}
+         "gstins": [{"gstin": "20ABCDE1234F1Z5", "state_code": "20", "is_primary": True}],
+         "state_code": "20", "address": "Ranchi"}
     )
     d.get_collection("stores").insert_one(
         {"store_id": "S1", "entity_id": "E1", "name": "BV Ranchi",

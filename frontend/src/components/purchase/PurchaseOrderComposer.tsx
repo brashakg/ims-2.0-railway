@@ -120,7 +120,7 @@ export interface PurchaseOrderComposerProps {
   /** Is this an inter-state purchase? true -> IGST, false -> CGST + SGST,
    *  null/undefined -> we cannot tell from the GST numbers we hold, so the
    *  totals say so rather than pretending. The caller works this out from the
-   *  chosen vendor and the receiving store (see isInterStateSupply). */
+   *  chosen vendor and the receiving shop, as the SERVER decides it (usePoGstHeads). */
   interstate?: boolean | null;
   vendorsLoading?: boolean;
   initialVendorId?: string;

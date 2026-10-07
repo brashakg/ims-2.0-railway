@@ -23,13 +23,10 @@ vi.mock('../../../services/api', () => ({
   productApi: { getProducts: vi.fn().mockResolvedValue({ products: [] }) },
 }));
 vi.mock('../../../services/api/inventory', () => ({
-  vendorsApi: { getLastCost: vi.fn().mockResolvedValue({ costs: {} }) },
-}));
-vi.mock('../../../services/api/stores', () => ({
-  storeApi: { getStore: vi.fn().mockResolvedValue({ gstin: '20AABCU9603R1Z1', state: 'Jharkhand' }) },
-}));
-vi.mock('../../../services/api/entities', () => ({
-  entitiesApi: { meta: vi.fn().mockResolvedValue({ state_codes: [], entity_types: [] }) },
+  vendorsApi: {
+    getLastCost: vi.fn().mockResolvedValue({ costs: {} }),
+    getPoGstHeads: vi.fn().mockResolvedValue({ heads: { v1: false } }),
+  },
 }));
 
 import { PurchaseOrderForm } from '../PurchaseOrderForm';

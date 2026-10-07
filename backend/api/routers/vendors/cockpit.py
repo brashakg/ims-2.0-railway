@@ -6,6 +6,7 @@ from ._shared import (
     Query,
     _RECEIVABLE_PO_STATUSES,
     _RECEIVE_ROLES,
+    _VENDOR_ROLES,
     _pm,
     can_access_store_scoped,
     get_product_repository,
@@ -14,8 +15,11 @@ from ._shared import (
     require_roles,
     resolve_store_scope,
     router,
+    validate_store_access,
+    _get_db,
 )
 from .purchase_orders import _PO_DRAFT_ROLES
+from .gst import po_gst_context
 
 
 @router.get("/goods-receipt/cockpit")
@@ -206,3 +210,44 @@ async def get_last_purchase_cost(
         return {"costs": {}}
 
     return {"costs": costs}
+
+
+@router.get("/po-gst-heads")
+async def get_po_gst_heads(
+    store_id: Optional[str] = Query(None, description="Receiving shop (default: your active shop)"),
+    current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
+):
+    """The tax head each vendor's purchase would carry at this shop, decided
+    HERE so the PO composer and the Suppliers cards show the verdict the order
+    and the bill will book, never one the browser works out from the shop's
+    raw GSTIN field (round 12 #3).
+
+    The shop's side is THE shop's GSTIN (org_validation.shop_gstin, through
+    po_gst_context); the head is purchase_invoice_engine.classify_supply -- the
+    one rule. `heads[vendor_id]` is True (IGST), False (CGST + SGST) or None
+    when either side has no state to read (no GSTIN, or a prefix that is not a
+    state): the screen says "cannot tell", never a guess.
+
+    Shape: {store_id, shop_gstin, heads: {vendor_id: bool|None}}."""
+    from ...services.purchase_invoice_engine import classify_supply
+
+    sid = validate_store_access(store_id, current_user) if store_id else current_user.get("active_store_id")
+    if not sid:
+        return {"store_id": None, "shop_gstin": "", "heads": {}}
+    _, store_doc = po_gst_context(sid, None)
+    shop_gstin = str((store_doc or {}).get("gstin") or "").strip()
+    heads: dict = {}
+    db = _get_db()
+    if db is not None:
+        try:
+            for v in db.get_collection("vendors").find({}, {"_id": 0, "vendor_id": 1, "gstin": 1}).limit(5000):
+                vid = v.get("vendor_id")
+                if not vid:
+                    continue
+                verdict = classify_supply(str(v.get("gstin") or "").strip(), shop_gstin)
+                both = verdict["supplier_state"] and verdict["recipient_state"]
+                heads[vid] = bool(verdict["interstate"]) if both else None
+        except Exception as exc:  # noqa: BLE001 - a read aid, never blocks the PO
+            logger.warning("[VENDOR] po-gst-heads read failed: %s", exc)
+            heads = {}
+    return {"store_id": sid, "shop_gstin": shop_gstin, "heads": heads}

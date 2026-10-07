@@ -132,13 +132,23 @@ class _FakeStoreRepo:
 
 
 def _patch_store(mp, store):
+    """The shop, and its company holding both registrations: the PO reads THE
+    shop's GSTIN (org_validation.shop_gstin), which needs the company."""
+    import mongomock
+
+    db = mongomock.MongoClient().db
+    db["entities"].insert_one(
+        {"entity_id": "E1", "gstins": [{"gstin": _JH_STORE["gstin"]}, {"gstin": _MH_STORE["gstin"]}]}
+    )
     mp.setattr(v, "get_store_repository", lambda: _FakeStoreRepo(store))
+    mp.setattr(v, "_get_db", lambda: db)
 
 
 # Jharkhand = state code 20, Maharashtra = 27. Real 15-char GSTIN shapes.
-_JH_STORE = {"store_id": "BV-TEST-01", "gstin": "20AABCU9603R1ZM", "state": "Jharkhand"}
+_JH_STORE = {"store_id": "BV-TEST-01", "entity_id": "E1", "gstin": "20AABCU9603R1ZM", "state": "Jharkhand"}
 _MH_STORE = {
     "store_id": "WO-TEST-01",
+    "entity_id": "E1",
     "gstin": "27AABCU9603R1ZX",
     "state": "Maharashtra",
 }

@@ -177,6 +177,26 @@ describe('the goods/services declaration on the Record-Bill form', () => {
     expect(await screen.findByText(/No unbilled goods receipts/)).toHaveTextContent(/store manager/);
   });
 
+  it('books the IST day by default, not the UTC day', async () => {
+    // 2026-10-01 01:00 IST is still 30 September in UTC: the form defaulted
+    // to the UTC day and the bill landed on September's GSTR-3B.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-30T19:30:00Z'));
+    try {
+      await openBillForm();
+      fillHeader();
+      expect((document.querySelector('input[type="date"]') as HTMLInputElement).value).toBe('2026-10-01');
+      fireEvent.change(screen.getByDisplayValue('This bill is for…'), {
+        target: { value: 'SERVICES' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(apis.vendorApApi.createBill).toHaveBeenCalledTimes(1));
+      expect(apis.vendorApApi.createBill.mock.calls[0][1].bill_date).toBe('2026-10-01');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('a receipts endpoint that is down shows the error state, not an empty list', async () => {
     apis.vendorApApi.listReceipts.mockResolvedValue(null); // listReceipts maps failures to null
     await openBillForm();
