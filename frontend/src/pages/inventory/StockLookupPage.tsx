@@ -6,7 +6,10 @@
 // shop and on their way to each - every colour and eye size of the model. The
 // server sends MRP and selling price only (GET /inventory/lookup builds its
 // answer from an allow-list), so there is no cost to hide here. The price
-// shown is the till's own (posPriceGuard), never a re-typed chain.
+// shown is the till's own (posPriceGuard), never a re-typed chain. Where the
+// till does not count a product (no stock unit at that shop, or a lens whose
+// stock is the Power Grid) the server says tracked: false - a 0 there would
+// be a limit the till does not keep.
 
 import { useRef, useState, type FormEvent } from 'react';
 import { useQuery } from '@tanstack/react-query';
@@ -15,11 +18,11 @@ import api from '../../services/api/client';
 import { apiDetailMessage } from '../../utils/errorHandler';
 import { posPriceGuard } from '../../components/pos/productIntake';
 
-interface ShopCount { store_id: string; store_name: string; available: number; in_transit: number }
+interface ShopCount { store_id: string; store_name: string; available: number; in_transit: number; tracked: boolean }
 interface LookupItem {
   product_id: string; sku?: string; name?: string; brand?: string; model?: string;
   color?: string; size?: string | number; mrp?: number; offer_price?: number;
-  stores: ShopCount[];
+  lens_grid?: boolean; stores: ShopCount[];
 }
 interface LookupResult { store_id?: string; items: LookupItem[] }
 
@@ -119,12 +122,18 @@ export default function StockLookupPage() {
                     <td className="px-3 py-2">{it.size || '-'}</td>
                     <td className="px-3 py-2 text-right whitespace-nowrap">{rupees(it.mrp)}</td>
                     <td className="px-3 py-2 text-right whitespace-nowrap">{tillPrice(it)}</td>
-                    {shops.map((s) => {
+                    {it.lens_grid && !it.stores.some((s) => s.tracked) ? (
+                      <td colSpan={shops.length} className="px-3 py-2 text-center text-gray-500">see Power Grid</td>
+                    ) : shops.map((s) => {
                       const c = counts.get(s.store_id);
                       const n = c?.available ?? 0;
                       return (
                         <td key={s.store_id} className={`px-3 py-2 text-center ${s.store_id === here ? 'bg-blue-50' : ''}`}>
-                          <span className={n > 0 ? 'font-semibold text-gray-900' : 'text-gray-400'}>{n}</span>
+                          {c?.tracked ? (
+                            <span className={n > 0 ? 'font-semibold text-gray-900' : 'text-gray-400'}>{n}</span>
+                          ) : (
+                            <span className="text-xs text-gray-400">not tracked here</span>
+                          )}
                           {(c?.in_transit ?? 0) > 0 && (
                             <div className="text-xs text-amber-700">+{c!.in_transit} on the way</div>
                           )}

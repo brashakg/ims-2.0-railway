@@ -4,6 +4,8 @@
 //     screen showed "Rs 0" / "-" while the till charged Rs 12,990;
 //   - after a scan (Enter) the box is selected, so the next scan replaces the
 //     text instead of being appended to it ("...A2BV91...A3" matched nothing).
+// Round 5: a shop the till does not count reads 'not tracked here', a lens
+// 'see Power Grid' - never a 0 the till would not keep.
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -17,7 +19,7 @@ import StockLookupPage from '../StockLookupPage';
 
 const item = (product_id: string, mrp: number, offer_price: number | null) => ({
   product_id, sku: product_id, name: `Frame ${product_id}`, mrp, offer_price,
-  stores: [{ store_id: 'S1', store_name: 'Dhanbad', available: 1, in_transit: 0 }],
+  stores: [{ store_id: 'S1', store_name: 'Dhanbad', available: 1, in_transit: 0, tracked: true }],
 });
 
 function renderPage() {
@@ -84,5 +86,24 @@ describe('Stock lookup screen', () => {
     scan();
     await waitFor(() => expect(here()).toBe('0'));
     expect(mockGet).toHaveBeenCalledTimes(2);
+  });
+
+  it('says not tracked where the till does not count it, and sends a lens to the Power Grid', async () => {
+    const bokaro = { store_id: 'S2', store_name: 'Bokaro', available: 0, in_transit: 0, tracked: false };
+    const frame = { ...item('F', 3000, 3000), stores: [...item('F', 0, 0).stores, bokaro] };
+    const lens = {
+      ...item('L', 3000, 3000), lens_grid: true,
+      stores: [{ ...item('L', 0, 0).stores[0], tracked: false }, bokaro],
+    };
+    mockGet.mockReset();
+    mockGet.mockResolvedValue({ data: { store_id: 'S1', items: [frame, lens] } });
+    const box = renderPage();
+    fireEvent.change(box, { target: { value: 'F' } });
+    fireEvent.submit(box.closest('form')!);
+    await waitFor(() => expect(screen.getByText('Frame F')).toBeTruthy());
+    const shopCells = (name: string) =>
+      within(screen.getByText(name).closest('tr')!).getAllByRole('cell').slice(5).map((c) => c.textContent);
+    expect(shopCells('Frame F')).toEqual(['1', 'not tracked here']);
+    expect(shopCells('Frame L')).toEqual(['see Power Grid']);
   });
 });
