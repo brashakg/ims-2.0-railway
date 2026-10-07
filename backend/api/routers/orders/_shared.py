@@ -537,8 +537,8 @@ def assert_no_active_rx_hold(order: Optional[dict]) -> None:
 
     ALSO the dispatch gate of the online seller check (multi-location PR 5,
     online_fulfillment_route.seller_problem -- the rule the booking held on
-    and every invoice door refuses on): goods must not leave before their
-    tax invoice can be issued, whatever happened to the hold flags. Nor
+    and every invoice door refuses on): goods must not leave while the
+    seller hold stands, named for its cause. Nor
     while a Re-map is moving its stock claims, or stopped mid-way (its
     lease): its write may have lifted the hold before the claim settled."""
     from ...services.online_fulfillment_route import stored_seller_problem

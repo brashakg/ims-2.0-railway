@@ -1800,6 +1800,7 @@ def ingest_shopify_order(
             {"store_id": store_id, "fulfillment_route": route},
             store_doc,
             getattr(store_repo, "find_by_id", lambda _sid: None),
+            cause_only=True,  # the booking DECIDES the hold
         )
         if bad_seller:
             route["problems"].append(bad_seller)

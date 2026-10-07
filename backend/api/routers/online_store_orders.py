@@ -753,6 +753,7 @@ async def clear_rx_hold(
     from .orders import order_hold_kinds
     from ..services.online_fulfillment_route import (
         HOLD_CAS,
+        SELLER_RELEASED,
         seller_change,
         seller_held,
         stored_seller_problem,
@@ -774,7 +775,8 @@ async def clear_rx_hold(
             status_code=409,
             detail=f"This hold cannot be cleared yet: {bad['message']}",
         )
-    if seller_held(order):  # its cause is fixed: name it for what it was
+    seller = seller_held(order)
+    if seller:  # its cause is fixed: name it for what it was
         released = ["SELLER" if k == "STOCK" else k for k in released]
     _HOLD_NAMES = {"RX": "Rx hold", "STOCK": "stock hold", "SELLER": "seller (GSTIN) hold"}
     names = " and ".join(_HOLD_NAMES[k] for k in released)
@@ -798,7 +800,9 @@ async def clear_rx_hold(
         update["rx_hold_cleared_note"] = note
     if prescription_id:
         update["rx_hold_cleared_prescription_id"] = prescription_id
-    if "SELLER" in released:
+    if seller:
+        # The verdict every door reads (seller_held): released, for good.
+        update[f"fulfillment_route.{SELLER_RELEASED}"] = now_dt.isoformat()
         # THE SIMPLIFIED ROOT RULE: the release never changes the invoice --
         # number, date, seller or tax heads. A fix that changed how the shop
         # splits the order's GST (its state or GSTIN) cannot be released:

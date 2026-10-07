@@ -473,8 +473,11 @@ async def test_a_held_seller_is_refused_loudly_before_any_irp_call(monkeypatch):
     db._collections["stores"] = MockCollection([
         {"store_id": "PUNE", "store_name": "Pune", "state_code": "27", "gstin": "20AAAAA1234A1ZX"},
     ])
+    # The booking held it (the door reads that verdict, never re-judges an
+    # order the booking passed on today's shop records).
     order = {**_sample_order(), "store_id": "PUNE",
-             "fulfillment_route": {"store_id": "PUNE", "problems": []}}
+             "fulfillment_route": {"store_id": "PUNE", "problems": [
+                 {"code": "SHOP_GSTIN_MISSING", "message": "held at booking"}]}}
 
     result = await einvoice_mod.generate_irn(db, order)
 

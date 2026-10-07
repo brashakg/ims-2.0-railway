@@ -319,8 +319,7 @@ async def push_fulfillment(
 
     # 2b. The online seller check (multi-location PR 5, the rule the booking
     #     held on and every invoice door refuses on): no Shopify fulfilment
-    #     for goods whose tax invoice cannot be issued -- whatever became of
-    #     the hold flags.
+    #     while the order's seller hold stands.
     from .online_fulfillment_route import stored_seller_problem
 
     bad_seller = stored_seller_problem(order)

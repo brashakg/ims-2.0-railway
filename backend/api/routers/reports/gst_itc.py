@@ -409,15 +409,14 @@ def _db_store_finder(db):
 
 def _order_held_off_returns(db, order) -> dict:
     """The seller-check problem that keeps an order OFF the GST returns (None
-    when it files). THE rule the booking held on and the invoice door, the
-    challan, the e-invoice and GSTR-1 refuse on
-    (online_fulfillment_route.seller_problem) -- GSTR-3B and Tally ask the
-    SAME question, so the returns of one GSTIN never disagree on a held
-    order. None for an order never routed (POS, a historical import).
-    A seller hold still standing keeps it off too, even once its cause is
-    fixed: only the door that lifts it (clear-hold or Re-map) checks the fix
-    leaves the booked tax heads standing. Lifted, the order files under its
-    booked invoice date -- Re-map and clear-hold never change it."""
+    when it files): the seller hold its booking put on it still stands
+    (online_fulfillment_route.seller_problem -- the invoice door, the
+    challan, the e-invoice and GSTR-1 refuse on the same one; GSTR-3B and
+    Tally ask the SAME question, so the returns of one GSTIN never disagree
+    on a held order). Never re-judged on today's shop records: an order
+    never held, or released, files under its booked invoice date even if a
+    shop's GSTIN or state is edited later -- Re-map and clear-hold never
+    change it. None for an order never routed (POS, a historical import)."""
     from ...services.online_fulfillment_route import stored_seller_problem
 
     return stored_seller_problem(order, _db_store_finder(db))
