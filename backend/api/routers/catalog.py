@@ -2752,25 +2752,26 @@ async def delete_catalog_product(
                 status_code=409,
                 detail=(
                     f"Receipt {', '.join(holding)} is holding units of this item. "
-                    "Finish the item in the product editor, or void the receipt in "
-                    "Receive Goods if the units are going back, then delete it."
+                    "Finish the item in the product editor -- or, if none of that "
+                    "receipt's units went on the shelf and they are going back, "
+                    "void it in Receive Goods, then delete the item."
                 ),
             )
     # Round 5: a DRAFT (ordered before it was catalogued) is not discarded
-    # while an open order or a receipt still names it. Discarded, the box
-    # would arrive held behind a deleted product, its task pointing at a
-    # Needs-review queue it has left; finishing it there would mint sellable-
-    # looking units of a product that stays deleted. Cancel the order (or void
-    # the receipt) first. If the orders cannot be read, refuse -- fail loudly.
+    # while an open order line still expects it or a receipt still waits on it
+    # (draft_discard_blockers). Discarded, the box would arrive held behind a
+    # deleted product, its task pointing at a Needs-review queue it has left.
+    # The refusal names, per blocker, only an action the server allows. If the
+    # orders cannot be read, refuse -- fail loudly.
     spine_doc = _pr.find_by_id(_spine_id) if (_pr is not None and _spine_id) else None
     is_draft = bool((spine_doc or {}).get("provisional")) or bool(
         product.get("spine_product_id") and product.get("needs_review")
     )
     if is_draft:
-        from .vendors.grn_accept import orders_and_receipts_naming
+        from .vendors.grn_accept import draft_discard_blockers
 
-        naming = orders_and_receipts_naming(_spine_id) if _spine_id else None
-        if naming is None:
+        blockers = draft_discard_blockers(_spine_id) if _spine_id else None
+        if blockers is None:
             raise HTTPException(
                 status_code=503,
                 detail=(
@@ -2778,15 +2779,10 @@ async def delete_catalog_product(
                     "draft, so it was not deleted. Try again."
                 ),
             )
-        if naming:
+        if blockers:
             raise HTTPException(
                 status_code=409,
-                detail=(
-                    f"This item is on {', '.join(naming)}. Cancel the purchase "
-                    "order in Purchase Orders (or void the receipt in Receive "
-                    "Goods if the units are going back), then delete it -- or "
-                    "finish it in the product editor."
-                ),
+                detail="This draft was not deleted. " + " ".join(blockers),
             )
     # A discarded ordered draft (_refuse_ordered_draft's mark) leaves the
     # Needs-review queue, and is no longer provisional: finishing a
@@ -2836,6 +2832,25 @@ async def delete_catalog_product(
             product_id,
             exc_info=True,
         )
+    if discarded_draft:
+        # The discard is a decision a later re-order undoes
+        # (revive_discarded_draft audits that side): record who made it.
+        try:
+            from ..dependencies import get_audit_repository
+
+            _audit = get_audit_repository()
+            if _audit is not None:
+                _audit.create(
+                    {
+                        "action": "product.draft_discarded",
+                        "entity_type": "product",
+                        "entity_id": _spine_id or product_id,
+                        "user_id": current_user.get("user_id"),
+                        "detail": {"sku": product.get("sku"), "twin_id": product_id},
+                    }
+                )
+        except Exception:  # noqa: BLE001 - the audit never undoes the delete
+            logger.warning("[CATALOG] discard audit failed for %s", product_id, exc_info=True)
 
     # Sync audit gap #2 (owner, 2026-09-06): a deleted product must stop being
     # SOLD ONLINE too. The ONE take-down rule (services/online_delist ->

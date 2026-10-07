@@ -125,12 +125,30 @@ def held_receipts(product_id: str) -> List[dict]:
 
 # A PO in one of these will never bring the item in again.
 _PO_DONE_STATUSES = ("CANCELLED", "RECEIVED", "CLOSED")
+# A PO in one of these can still be cancelled (po_detail.cancel_po refuses a
+# part-received one).
+_PO_CANCELLABLE_STATUSES = ("DRAFT", "SENT", "ACKNOWLEDGED")
 
 
-def orders_and_receipts_naming(product_id: str) -> Optional[List[str]]:
-    """Every open purchase order (not cancelled, not fully received) and every
-    receipt that is not void naming `product_id` on a line, as the numbers a
-    person reads ("PO/... (purchase order)", "RCPT/... (receipt)").
+def _line_qty(it: dict, *keys) -> int:
+    for k in keys:
+        try:
+            if it.get(k) is not None:
+                return int(it.get(k) or 0)
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
+def draft_discard_blockers(product_id: str) -> Optional[List[str]]:
+    """What still brings `product_id` in, or still waits on it -- each as one
+    sentence a person can act on, naming only an action the server allows.
+
+      * an open order line for it that has not been received in full (order
+        not cancelled, not fully received, not closed);
+      * a receipt still waiting on it: PENDING with a line for it that is
+        accepting units, or PARTIALLY_ACCEPTED holding it. A finished receipt
+        whose line for it accepted nothing (all rejected) waits on nothing.
 
     A draft one of these names is still coming in, or already here: discarding
     it would leave a box arriving for -- or held behind -- a deleted product,
@@ -142,15 +160,52 @@ def orders_and_receipts_naming(product_id: str) -> Optional[List[str]]:
     grn_repo = get_grn_repository()
     if po_repo is None or grn_repo is None:
         return None
-    orders = po_repo.find_many(
+    blockers: List[str] = []
+    for po in po_repo.find_many(
         {"items.product_id": product_id, "status": {"$nin": list(_PO_DONE_STATUSES)}}
-    ) or []
-    receipts = grn_repo.find_many(
-        {"items.product_id": product_id, "status": {"$ne": "VOID"}}
-    ) or []
-    return [
-        f"{p.get('po_number') or p.get('po_id')} (purchase order)" for p in orders
-    ] + [f"{g.get('grn_number') or g.get('grn_id')} (receipt)" for g in receipts]
+    ) or []:
+        lines = [it for it in (po.get("items") or []) if it.get("product_id") == product_id]
+        if lines and all(
+            _line_qty(it, "received_qty") >= _line_qty(it, "ordered_qty", "quantity") > 0
+            for it in lines
+        ):
+            continue
+        number = po.get("po_number") or po.get("po_id")
+        if str(po.get("status") or "").upper() in _PO_CANCELLABLE_STATUSES:
+            blockers.append(
+                f"Purchase order {number} still orders it: cancel that order in "
+                "Purchase Orders first."
+            )
+        else:
+            blockers.append(
+                f"Purchase order {number} still expects it, and has already "
+                "received other goods, so it cannot be cancelled. Finish the item "
+                "in the product editor instead."
+            )
+    for g in grn_repo.find_many(
+        {"items.product_id": product_id, "status": {"$in": ["PENDING", "PARTIALLY_ACCEPTED", "ESCALATED"]}}
+    ) or []:
+        status = str(g.get("status") or "").upper()
+        if status == "PARTIALLY_ACCEPTED":
+            if not any(
+                (u or {}).get("product_id") == product_id for u in (g.get("unresolved_lines") or [])
+            ):
+                continue
+        elif not any(
+            it.get("product_id") == product_id and _line_qty(it, "accepted_qty") > 0
+            for it in (g.get("items") or [])
+        ):
+            continue
+        number = g.get("grn_number") or g.get("grn_id")
+        if status == "ESCALATED":
+            blockers.append(f"Receipt {number} names it and is escalated: an admin decides it first.")
+        else:
+            blockers.append(
+                f"Receipt {number} is holding it: if none of that receipt's units "
+                "went on the shelf and they are going back, void it in Receive "
+                "Goods; otherwise finish the item in the product editor."
+            )
+    return blockers
 
 
 def release_held_receipts(product_id: str) -> List[dict]:
