@@ -464,9 +464,14 @@ def test_d7_counter_role_reading_a_valued_transfer_sees_no_cost(db):
     pending = _run(transfers.get_pending_transfers(None, staff))
     summary = _run(transfers.get_transfer_analytics(None, None, None, staff))
     where = _run(transfers.get_location_transfer_analytics("ST-DHN-1", staff))
+    # The receiving shop's counter: its INCOMING list holds the transfer.
+    there = _run(transfers.get_location_transfer_analytics(
+        "ST-BOK-1", _user("SALES_STAFF", "ST-BOK-1")
+    ))
     assert many["transfers"], "the counter role can list the transfer"
     assert pending["ready_to_ship"], "the counter role sees it pending"
-    for payload in (one, many, pending, summary, where):
+    assert (where["outgoing"]["total"], there["incoming"]["total"]) == (1, 1)
+    for payload in (one, many, pending, summary, where, there):
         text = json.dumps(payload, default=str)
         assert not _shows_amount(text, UNIT_COST)
         assert not _shows_amount(text, 2 * UNIT_COST)
