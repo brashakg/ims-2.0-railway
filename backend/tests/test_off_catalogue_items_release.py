@@ -2963,3 +2963,241 @@ def test_r5_each_store_manager_is_told_of_a_receipt_beyond_its_order(world):
         told == sorted([MANAGER["user_id"], "u-mgr-2"]),
         f"R5: a receipt beyond its order told {told}, not both store managers",
     )
+
+
+# ---------------------------------------------------------------------------
+# Review round 5, second review round
+# ---------------------------------------------------------------------------
+
+
+def _raising(real, when, exc="read timed out"):
+    def _wrapped(flt=None, *a, **k):
+        if when(flt or {}):
+            raise RuntimeError(exc)
+        return real(flt, *a, **k)
+
+    return _wrapped
+
+
+def test_r5b_a_receipt_number_check_that_cannot_read_fails_closed(world, monkeypatch):
+    # The uniqueness check swallowed a read error and dropped the number
+    # branch: a legacy unit moved since was received a second time.
+    po, grn, car_id, boss_id = _carrera_and_boss(world, [1, 2])
+    world.db.stock_units.update_one({"product_id": car_id}, {"$unset": {"grn_id": ""}})
+    _transfer_out(world, monkeypatch, car_id, 1)
+    monkeypatch.setattr(
+        world.db.grns,
+        "count_documents",
+        _raising(world.db.grns.count_documents, lambda f: set(f) == {"grn_number"}),
+    )
+    _run(vd.accept_grn(grn["grn_id"], MANAGER))
+    finding(
+        len(_any_status_units(world, car_id)) == 1,
+        f"R5b: {len(_any_status_units(world, car_id))} Carrera units for 1 received after a failed number check",
+    )
+
+
+def test_r5b_the_discard_guard_refuses_when_orders_cannot_be_read(world, monkeypatch):
+    # The guard read through BaseRepository.find_many, which answers [] on a
+    # read error: the draft was discarded with an open order expecting it.
+    _seed_user(world, ADMIN)
+    po = world.raise_po([{"new_product": dict(BOSS_TYPED), "quantity": 2, "unit_price": 1200}])
+    draft_id = po["items"][0]["product_id"]
+    monkeypatch.setattr(
+        world.db.purchase_orders,
+        "find",
+        _raising(world.db.purchase_orders.find, lambda f: "items.product_id" in f),
+    )
+    refused = _delete_refusal(world, draft_id)
+    finding(
+        refused is not None and refused.status_code == 503,
+        f"R5b: the draft was discarded although its orders could not be read ({refused})",
+    )
+    assert world.product(draft_id).get("discarded_draft") is not True
+
+
+def test_r5b_the_legacy_key_check_refuses_when_it_cannot_read(world, monkeypatch):
+    _pre_deploy_frame(world)
+    monkeypatch.setattr(
+        world.db.products,
+        "find",
+        _raising(world.db.products.find, lambda f: f.get("identity_key") == "carrera|ca8895|807"),
+    )
+    refused = _refused_po(
+        world, [{"new_product": dict(CARRERA_TYPED), "quantity": 1, "unit_price": 3200}]
+    )
+    finding(
+        refused is not None and refused.status_code == 503,
+        f"R5b: the legacy-key check passed when it could not read ({getattr(refused, 'detail', None)})",
+    )
+
+
+def test_r5b_a_legacy_frame_with_only_a_top_level_size_is_found(world):
+    existing = _pre_deploy_frame(world)
+    world.db.products.update_one(
+        {"product_id": existing["product_id"]},
+        {"$unset": {"attributes.lens_size": ""}, "$set": {"size": "54"}},
+    )
+    refused = _refused_po(
+        world, [{"new_product": dict(CARRERA_TYPED), "quantity": 1, "unit_price": 3200}]
+    )
+    finding(
+        refused is not None and refused.detail.get("code") == "ALREADY_IN_CATALOGUE",
+        f"R5b: a legacy frame with a top-level size was twinned ({getattr(refused, 'detail', None)})",
+    )
+
+
+def test_r5b_the_reopen_never_resets_an_order_another_receipt_now_holds(world, monkeypatch):
+    # A receipt created between the void's check and its write, whose accept
+    # HELD its lines, writes the same "part received, nothing counted".
+    po, grn1, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    grn2, _ = _receive_again(world, po, "JOT/26-27/0701-R2")
+    from database.repositories import base_repository as _br
+
+    real = _br.BaseRepository.find_many
+    calls = {"n": 0}
+
+    def _first_misses_r2(self, flt=None, *a, **k):
+        rows = real(self, flt, *a, **k)
+        if isinstance(flt, dict) and flt.get("po_id") == po["po_id"] and "status" in flt:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return [r for r in rows if r.get("grn_id") != grn2["grn_id"]]
+        return rows
+
+    monkeypatch.setattr(_br.BaseRepository, "find_many", _first_misses_r2)
+    _run(vd.void_grn(grn1["grn_id"], MANAGER))
+    monkeypatch.setattr(_br.BaseRepository, "find_many", real)
+    stored = world.db.purchase_orders.find_one({"po_id": po["po_id"]})
+    finding(
+        stored["status"] == "PARTIALLY_RECEIVED",
+        f"R5b: the order went back to {stored['status']} while another receipt holds its units",
+    )
+
+
+def test_r5b_a_revived_draft_whose_only_gap_was_cost_is_receivable(world):
+    # The PO's cost fill ran before the revive, restamped the still-discarded
+    # row ACTIVE, and the revive refused it: the order sent but its receipt
+    # was refused DISCARDED_DRAFT, and typing it again said "switched off".
+    _seed_user(world, ADMIN)
+    po = world.raise_po([{"new_product": dict(BOSS_TYPED), "quantity": 1, "unit_price": 0}])
+    draft_id = po["items"][0]["product_id"]
+    world.finish_draft(draft_id, offer=2790)  # only the cost is missing now
+    _run(vd.cancel_po(po["po_id"], "ordered by mistake", MANAGER))
+    assert _delete_refusal(world, draft_id) is None
+    again = world.raise_po([{"new_product": dict(BOSS_TYPED), "quantity": 2, "unit_price": 1200}])
+    assert again["items"][0]["product_id"] == draft_id
+    finding(
+        world.product(draft_id).get("discarded_draft") is False,
+        f"R5b: the re-ordered draft stayed discarded ({world.product(draft_id)})",
+    )
+    grn, accepted = world.receive_everything(again, invoice_no="JOT/26-27/0811")
+    assert accepted["units_added"] == 2
+
+
+def test_r5b_a_draft_the_receipts_cost_finishes_releases_its_sibling_receipt(world):
+    # Inside receipt A's accept the GRN cost fill finished the draft; the
+    # release ran there, tried to claim A itself and held receipt B as
+    # "more than ordered" (A's claim counted as busy).
+    po = world.raise_po([{"new_product": dict(BOSS_TYPED), "quantity": 2, "unit_price": 1200}])
+    draft_id = po["items"][0]["product_id"]
+    a = _receive(world, world.db.purchase_orders.find_one({"po_id": po["po_id"]}), [1], "JOT/26-27/0821")
+    b = _receive(world, world.db.purchase_orders.find_one({"po_id": po["po_id"]}), [1], "JOT/26-27/0822")
+    # A row finished while switched off before the provisional rule: ACTIVE,
+    # still provisional, its cost only the PO's provisional rate.
+    world.db.products.update_one(
+        {"product_id": draft_id},
+        {"$set": {"catalog_status": "ACTIVE", "offer_price": 2790, "done_gaps": [], "cost_source": "PO_RATE"}},
+    )
+    _run(vd.accept_grn(a["grn_id"], MANAGER))
+    statuses = [world.grn(g["grn_id"])["status"] for g in (a, b)]
+    finding(
+        statuses == ["ACCEPTED", "ACCEPTED"] and len(world.units(draft_id)) == 2,
+        f"R5b: finishing mid-accept left {statuses}, {len(world.units(draft_id))} units",
+    )
+    assert not [t for t in _open_tasks(world) if str(t.get("source_ref", "")).startswith("grn_over_order")]
+
+
+def test_r5b_a_bills_ask_whose_task_was_never_stored_is_not_answered_requested(world, monkeypatch):
+    from api.routers import purchase_invoices as _pi
+    from database.repositories import task_repository as _tr
+
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+
+    def _down(self, *a, **k):
+        raise RuntimeError("tasks collection down")
+
+    monkeypatch.setattr(_tr.TaskRepository, "create", _down)
+    try:
+        _run(_pi.request_cataloguing(_pi.CataloguingRequest(product_ids=[draft_id]), ACCOUNTANT))
+        refused = None
+    except HTTPException as exc:
+        refused = exc
+    finding(
+        refused is not None and refused.status_code == 503,
+        f"R5b: an ask whose task write failed was answered 'requested' ({refused})",
+    )
+
+
+def test_r5b_finishing_one_item_never_closes_another_receipts_task(world):
+    from api.routers import purchase_invoices as _pi
+
+    po1, grn1, boss = world.order_and_receive(BOSS_TYPED, qty=1, cost=1200)
+    po2 = world.raise_po([{"new_product": dict(CARRERA_TYPED), "quantity": 1, "unit_price": 3200}])
+    carrera = po2["items"][0]["product_id"]
+    world.receive_everything(po2, invoice_no="JOT/26-27/0831")
+    _run(_pi.request_cataloguing(_pi.CataloguingRequest(product_ids=[boss]), ACCOUNTANT))
+    world.finish_draft(boss, offer=2790)
+    open_cat = [t for t in _open_tasks(world) if t.get("category") == "Catalogue"]
+    finding(
+        [t.get("grn_id") for t in open_cat] == [world.db.grns.find_one({"po_id": po2["po_id"]})["grn_id"]],
+        f"R5b: finishing Boss closed {[t.get('title') for t in open_cat]}",
+    )
+    assert world.product(carrera)["provisional"] is True
+
+
+def test_r5b_the_discard_guard_counts_escalated_and_fully_received(world):
+    _seed_user(world, ADMIN)
+    po = world.raise_po([{"new_product": dict(BOSS_TYPED), "quantity": 2, "unit_price": 1200}])
+    draft_id = po["items"][0]["product_id"]
+    created = _run(
+        vd.create_grn(
+            vd.GRNCreate(
+                po_id=po["po_id"], vendor_invoice_no="JOT/26-27/0841", vendor_invoice_date="2026-09-28",
+                items=[vd.GRNItemCreate(product_id=draft_id, received_qty=2, accepted_qty=2, rejected_qty=0, tallied=True)],
+                attachment_file_id="F-RECEIPT-PHOTO", attachment_filename="bill.jpg", attachment_mime="image/jpeg",
+            ),
+            MANAGER,
+        )
+    )
+    world.db.grns.update_one({"grn_id": created["grn_id"]}, {"$set": {"status": "ESCALATED"}})
+    world.db.purchase_orders.update_one({"po_id": po["po_id"]}, {"$set": {"status": "CANCELLED"}})
+    refused = _delete_refusal(world, draft_id)
+    assert refused is not None and "escalated" in str(refused.detail)
+    # An order whose line was received exactly in full expects nothing more.
+    world.db.grns.update_one({"grn_id": created["grn_id"]}, {"$set": {"status": "VOID"}})
+    items = [dict(po["items"][0], received_qty=2)]
+    world.db.purchase_orders.update_one(
+        {"po_id": po["po_id"]}, {"$set": {"status": "PARTIALLY_RECEIVED", "items": items}}
+    )
+    assert _delete_refusal(world, draft_id) is None
+
+
+def test_r5b_a_later_save_heals_a_stale_ordered_draft_copy_only(world):
+    # The mirror heal: a spine no longer provisional whose ordered-draft copy
+    # still says "Ordered - finish it" is healed by any save; an import
+    # awaiting review (no spine mark) keeps its flag.
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    world.finish_draft(draft_id, offer=2790)
+    world.db.catalog_products.update_one({"spine_product_id": draft_id}, {"$set": {"needs_review": True}})
+    world.db.catalog_products.insert_one({"id": "imp-1", "sku": "IMP-1", "needs_review": True})
+    _run(_products.update_product(draft_id, _products.ProductUpdate(offer_price=2690), CATALOGUER))
+    assert _twin_of(world, draft_id)["needs_review"] is False
+    assert world.db.catalog_products.find_one({"id": "imp-1"})["needs_review"] is True
+    # A save of any other product never touches an import awaiting review.
+    other = world.catalogue_frame("Carrera", "CA 8895", "807", "54", mrp=6990, offer=6490, cost=3100)
+    _run(_products.update_product(other["product_id"], _products.ProductUpdate(offer_price=6390), CATALOGUER))
+    finding(
+        world.db.catalog_products.find_one({"id": "imp-1"})["needs_review"] is True,
+        "R5b: saving an unrelated product cleared an import's needs_review",
+    )

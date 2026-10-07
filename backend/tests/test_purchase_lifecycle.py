@@ -1146,8 +1146,10 @@ class _TaskRepo:
     def __init__(self):
         self.rows = []
 
-    def find_many(self, _flt):
-        return []
+    def find_many(self, flt):
+        # Reads what was written (the ask reads its task back to know the
+        # catalogue manager was really told).
+        return [r for r in self.rows if all(r.get(k) == v for k, v in (flt or {}).items())]
 
     def create(self, doc):
         self.rows.append(doc)
