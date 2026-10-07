@@ -15,6 +15,8 @@ vi.mock('../../../hooks/usePOSQueries', () => ({
   useStores: () => ({ data: [] }),
 }));
 vi.mock('../../../context/ToastContext', () => ({ useToast: () => toast }));
+// The Purchase shop picker and shop names read the store list (react-query).
+vi.mock('../../../hooks/usePOSQueries', () => ({ useStores: () => ({ data: [] }) }));
 vi.mock('../../../context/AuthContext', () => ({
   useAuth: () => ({ user: { activeStoreId: 's1', roles: ['ADMIN'] }, hasRole: () => true }),
 }));

@@ -23,7 +23,11 @@ vi.mock('../../../context/AuthContext', () => ({
 vi.mock('../../../context/ToastContext', () => ({
   useToast: () => ({ success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() }),
 }));
-vi.mock('../../../hooks/useStorePrintInfo', () => ({ useStorePrintInfo: () => null }));
+// The tax chip is the server's verdict for the active shop (#1167); not under test here.
+vi.mock('../../../context/AuthContext', () => ({
+  useAuth: () => ({ user: { id: 'u1', roles: ['ADMIN'], activeStoreId: 'S1' } }),
+}));
+vi.mock('../../../hooks/usePoGstHeads', () => ({ usePoGstHeads: () => ({}) }));
 vi.mock('../../../services/api', () => ({ vendorsApi: { generatePortalToken: vi.fn() } }));
 vi.mock('../../../services/api/entities', () => ({
   entitiesApi: { meta: vi.fn().mockResolvedValue({ state_codes: [], entity_types: [] }) },

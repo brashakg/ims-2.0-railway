@@ -26,11 +26,9 @@ vi.mock('../../../services/api/client', async (orig) => ({
   default: { get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn() },
 }));
 const toastMock = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() }));
-vi.mock('../../../hooks/usePOSQueries', () => ({
-  // PurchaseShopName (the booking form / picker shop line) reads the store list.
-  useStores: () => ({ data: [] }),
-}));
 vi.mock('../../../context/ToastContext', () => ({ useToast: () => toastMock }));
+// The Purchase shop picker and shop names read the store list (react-query).
+vi.mock('../../../hooks/usePOSQueries', () => ({ useStores: () => ({ data: [] }) }));
 // The accountant's shop (the top-bar picker); a test may switch it.
 const auth = vi.hoisted(() => ({ store: 'S1' }));
 vi.mock('../../../context/AuthContext', () => ({
