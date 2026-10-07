@@ -3064,6 +3064,16 @@ def mirror_update_to_catalog_twin(
             # A finished provisional draft leaves the Needs-review queue it
             # entered at the PO door (_build_pim_doc).
             cat_patch["needs_review"] = False
+        elif not (current or {}).get("provisional") and patch.get("provisional") is not True:
+            # A spine that is no longer an ordered draft (finished by another
+            # door -- the PO/GRN cost promote -- or before this rule) never
+            # leaves its copy in Needs review as "Ordered - finish it": any
+            # later save heals it. Only the ordered-draft mark (spine_product_id)
+            # is touched; an import awaiting review keeps its flag.
+            cat.update_one(
+                {"spine_product_id": product_id, "needs_review": True},
+                {"$set": {"needs_review": False}},
+            )
         if "tags" in patch:
             # The dot-path form of set_twin_tags: same field, same normaliser.
             cat_patch["ecom.seo.tags"] = normalise_tags(patch["tags"])

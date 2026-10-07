@@ -45,13 +45,36 @@ def _promote_cost_from_rate(product_id, prod, unit_cost, source, product_repo) -
             return False
     try:
         product_repo.update(product_id, {"cost_price": cost, "cost_source": source})
-        _pm.apply_restamp_atomic(
+        fields = _pm.apply_restamp_atomic(
             product_id, prod, {"cost_price": cost}, product_repo=product_repo
         )
     except Exception as exc:  # noqa: BLE001 - a cost promote never blocks the PO/GRN
         logger.warning("[VENDOR] cost promote skipped for %s: %s", product_id, exc)
         return False
+    if fields.get("provisional") is False:
+        _finished_by_the_promote(product_id, prod, {"cost_price": cost, **fields})
     return True
+
+
+def _finished_by_the_promote(product_id, prod, patch) -> None:
+    """The cost was an ordered draft's last gap: it is finished here, not in
+    the product editor, so do what the editor's save does -- its catalogue
+    copy leaves Needs review (the one mirror rule) and the units receipts hold
+    for it go on the shelf (the one release). Fail-soft: the cost stands."""
+    try:
+        from api.dependencies import get_db
+
+        _pm.mirror_update_to_catalog_twin(
+            product_id=product_id, current=prod, patch=patch, db=get_db()
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("[VENDOR] twin mirror after cost promote failed for %s", product_id, exc_info=True)
+    try:
+        from .grn_accept import release_held_receipts
+
+        release_held_receipts(product_id)
+    except Exception:  # noqa: BLE001
+        logger.warning("[VENDOR] release after cost promote failed for %s", product_id, exc_info=True)
 
 
 def _po_gst_parties(vendor, store_doc) -> dict:

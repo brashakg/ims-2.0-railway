@@ -2908,3 +2908,39 @@ def test_r5_the_eye_size_check_refuses_loudly_when_it_cannot_read(world, monkeyp
     )
     monkeypatch.setattr(world.db.products, "find", real_find)
     assert len(world.products_named("Boss", "BOSS 1700")) == 1
+
+
+def test_r5_a_draft_finished_by_the_cost_promote_leaves_the_queue_and_releases(world):
+    # Review round 5, pass 3: a draft whose last gap was its cost was finished
+    # by the PO cost promote -- ACTIVE and on, yet its copy stayed "Ordered -
+    # finish it" in Needs review for good, and its held receipt kept 0 units.
+    po = world.raise_po(
+        [{"new_product": dict(BOSS_TYPED), "quantity": 2, "unit_price": 0}]
+    )
+    draft_id = po["items"][0]["product_id"]
+    world.finish_draft(draft_id, offer=2790)  # cost is still missing
+    assert world.product(draft_id)["provisional"] is True
+    grn, accepted = world.receive_everything(po)
+    assert accepted["grn_status"] == "PARTIALLY_ACCEPTED"
+    sku = world.product(draft_id)["sku"]
+    world.raise_po(
+        [
+            {
+                "product_id": draft_id,
+                "product_name": "Boss 1700 C2",
+                "sku": sku,
+                "quantity": 1,
+                "unit_price": 1200,
+            }
+        ]
+    )
+    assert world.product(draft_id)["provisional"] is False
+    finding(
+        sku not in _needs_review_list(world),
+        "R5: a draft finished by the cost promote is still 'Ordered - finish it'",
+    )
+    finding(
+        len(world.units(draft_id)) == 2 and world.grn(grn["grn_id"])["status"] == "ACCEPTED",
+        f"R5: the held units stayed held after the cost promote finished the draft "
+        f"({len(world.units(draft_id))} on the shelf)",
+    )
