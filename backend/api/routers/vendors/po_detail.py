@@ -973,20 +973,38 @@ async def update_po(
     notes = (body.notes or None) if "notes" in given else (po.get("notes") or None)
 
     old_items = po.get("items") or []
-    # An edit that omits a line's GST rate or HSN keeps the stored one for the
-    # same product (an explicit value wins), so a typed-in rate does not
-    # silently revert to the catalogue's for a client that does not echo it.
-    stored_gst: dict = {}
+    # A line that OMITS its GST rate or HSN keeps the stored one of that
+    # product, as the form does by sending it back; an explicit value wins,
+    # and an explicit null or '' goes back to the catalogue's. Only a rate
+    # TYPED on the stored line is kept: any other was worked out, and is worked
+    # out again -- an UNRESOLVED line is stored at 0%, and keeping that would
+    # pin it at 0% and hide its "GST not settled" warning (the form leaves its
+    # rate out for exactly that line). So a product with any line not typed
+    # (None below) keeps nothing; one typed at two rates cannot tell which was
+    # meant, so the edit is refused.
+    stored: dict = {}
     for old in old_items:
-        stored_gst.setdefault(old.get("product_id"), old)
+        pid = old.get("product_id")
+        typed = old.get("tax_rate") if old.get("gst_source") == "line" else None
+        stored.setdefault((pid, "gst_rate"), set()).add(typed)
+        stored.setdefault((pid, "hsn"), set()).add(old.get("hsn") or None)
     for line in body.items:
-        old = stored_gst.get(line.product_id) if line.new_product is None else None
-        if old is None:
+        if line.new_product is not None:
             continue
-        if line.gst_rate is None and old.get("tax_rate") is not None:
-            line.gst_rate = old["tax_rate"]
-        if not line.hsn and old.get("hsn"):
-            line.hsn = old["hsn"]
+        for field in ("gst_rate", "hsn"):
+            kept = stored.get((line.product_id, field)) or {None}
+            if field in line.model_fields_set or None in kept:
+                continue
+            if len(kept) > 1:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"{line.product_name} is on this order with more than "
+                        f"one {'GST rate' if field == 'gst_rate' else 'HSN'} "
+                        "- send it for each of its lines."
+                    ),
+                )
+            setattr(line, field, next(iter(kept)))
     computed, products, typed_in = price_po_lines(
         body.items, vendor, po.get("delivery_store_id"), current_user
     )
