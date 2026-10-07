@@ -89,9 +89,15 @@ describe('the Purchase header names the shop a non-admin reads', () => {
 
   // Owner ruling 2026-10-07 (R3): it used to open the tab -- and the server
   // handed it every shop. Now: the plain message, no tab, no list requested.
-  it.each([['ACCOUNTANT'], ['STORE_MANAGER']])('%s with no shop reads the message, not a tab', async (role) => {
+  // A blank shop id is no shop: the app's one rule (utils/storeAccess
+  // hasNoActiveStore), never sent on as ?store_id='  '.
+  it.each([
+    ['ACCOUNTANT', undefined],
+    ['STORE_MANAGER', undefined],
+    ['ACCOUNTANT', '  '],
+  ])('%s with no shop (%j) reads the message, not a tab', async (role, shop) => {
     roles = [role];
-    activeStoreId = undefined;
+    activeStoreId = shop;
     open();
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'Your login has no shop assigned - ask an admin to assign one.',

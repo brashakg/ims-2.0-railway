@@ -119,3 +119,78 @@ def test_r1_admins_and_accounts_still_read_it(client, path, params, role):
 def test_r1_sales_gst_stays_with_the_managers(path):
     allowed = rbac_policy.policy_for("GET", path)["allowed"]
     assert set(MANAGERS) <= set(allowed), (path, allowed)
+
+
+# ---------------------------------------------------------------------------
+# One shop rule for the input credit (R3): the GST summary and the ITC
+# register read the same shop's supplier bills
+# ---------------------------------------------------------------------------
+# GET /finance/gst/summary summed EVERY shop's bills for any reader while the
+# ITC register gave the same login its own shop's: a Pune accountant read
+# 351 (Dhanbad's 240 in it) on one tab and 111 on the next, and a login with
+# no shop got 200 there and 403 here. Both now ask resolve_store_scope.
+
+DHN, PUN = "BV-DHN-01", "WO-PUN-01"
+
+
+def _shop_user(role: str, store) -> dict:
+    return {"user_id": f"u-{role.lower()}-{store}", "roles": [role],
+            "store_ids": [store] if store else [], "active_store_id": store}
+
+
+@pytest.fixture
+def shops(monkeypatch):
+    mongomock = pytest.importorskip("mongomock")
+    db = mongomock.MongoClient().db
+    db["vendor_bills"].insert_many([
+        {"bill_id": "B1", "store_id": DHN, "bill_date": "2026-09-10",
+         "taxable_amount": 2000.0, "tax_amount": 240.0, "status": "OUTSTANDING"},
+        {"bill_id": "B2", "store_id": PUN, "bill_date": "2026-09-12",
+         "taxable_amount": 1000.0, "tax_amount": 111.0, "status": "OUTSTANDING"},
+    ])
+
+    class _Proxy:
+        is_connected = True
+
+        def get_collection(self, name):
+            return db[name]
+
+        __getitem__ = get_collection
+
+    monkeypatch.setattr(finance_pkg, "_get_db", lambda: _Proxy())
+    app = FastAPI()
+    app.include_router(finance_pkg.router, prefix="/api/v1/finance")
+    tc = TestClient(app)
+
+    def get(path, user, **params):
+        app.dependency_overrides[get_current_user] = lambda: user
+        return tc.get(f"/api/v1/finance{path}", params=params)
+
+    return get
+
+
+def _input_credit(shops, user):
+    summary = shops("/gst/summary", user, month=9, year=2026)
+    register = shops("/itc-register", user, period="2026-09")
+    return summary, register
+
+
+@pytest.mark.parametrize(
+    "user,want",
+    [
+        (_shop_user("ACCOUNTANT", PUN), 111.0),
+        (_shop_user("ACCOUNTANT", DHN), 240.0),
+        (_shop_user("ADMIN", DHN), 351.0),  # admins read every shop
+    ],
+)
+def test_the_summary_and_the_register_read_one_shops_input_credit(shops, user, want):
+    summary, register = _input_credit(shops, user)
+    assert summary.status_code == register.status_code == 200, (summary.text, register.text)
+    assert summary.json()["gst_input_credit"] == want
+    assert register.json()["total_itc"] == want
+
+
+def test_a_login_with_no_shop_reads_neither(shops):
+    summary, register = _input_credit(shops, _shop_user("ACCOUNTANT", None))
+    assert summary.status_code == register.status_code == 403
+    assert "351" not in summary.text

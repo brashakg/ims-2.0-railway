@@ -10,6 +10,7 @@ import clsx from 'clsx';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { PAYABLES_ROLES } from '../../components/common/CostCell';
+import { PurchaseShopGate, usePurchaseShop } from '../purchase/purchaseShop';
 
 import type { TabType } from './financeTypes';
 import type {
@@ -188,6 +189,10 @@ export default function FinanceDashboard() {
   // /ap-aging. A manager gets no tab and no schedule rather than an empty list
   // that reads as "we owe nobody".
   const canSeePayables = (user?.roles || []).some((r) => PAYABLES_ROLES.includes(r));
+  // What we owe suppliers reads the one Purchase shop scope, as Purchase >
+  // Suppliers does: an admin's pick there (every shop until he picks one),
+  // anyone else's own shop.
+  const { storeId: supplierShop } = usePurchaseShop();
 
   // Tab management
   const [activeTab, setActiveTab] = useState<TabType>('revenue-pl');
@@ -239,7 +244,7 @@ export default function FinanceDashboard() {
     loadFinanceData();
     // user?.activeStoreId is load-bearing — without it the topbar store-switch
     // updates AuthContext but the finance data stays pinned to the old store.
-  }, [activeTab, dateFrom, dateTo, selectedYear, user?.activeStoreId]);
+  }, [activeTab, dateFrom, dateTo, selectedYear, user?.activeStoreId, supplierShop]);
 
   const loadFinanceData = async () => {
     setIsLoading(true);
@@ -256,7 +261,7 @@ export default function FinanceDashboard() {
         financeApi.getOutstanding({ store_id: storeId }),
         financeApi.getCashFlow({ period: 'month', store_id: storeId }),
         financeApi.getBudget(),
-        canSeePayables ? financeApi.getVendorPayments(storeId) : Promise.resolve([]),
+        canSeePayables ? financeApi.getVendorPayments(supplierShop) : Promise.resolve([]),
       ]);
 
       setRevenueData(rev.status === 'fulfilled' ? mapRevenue(rev.value) : []);
@@ -275,12 +280,8 @@ export default function FinanceDashboard() {
       setBudgetRestricted(
         bud.status === 'fulfilled' && !!(bud.value as any)?.categories_partially_restricted,
       );
-      // /cash-flow's org view also leaves supplier payments out of "Total
-      // outflows" for anyone outside PAYABLES_ROLES, and says so with its own
-      // flag (vendor_payments_restricted): the same short total, the same notice.
       setCashFlowRestricted(
-        cf.status === 'fulfilled' &&
-          !!((cf.value as any)?.expenses_partially_restricted || (cf.value as any)?.vendor_payments_restricted),
+        cf.status === 'fulfilled' && !!(cf.value as any)?.expenses_partially_restricted,
       );
 
       // Reflect the real period-lock state for the selected month.
@@ -601,7 +602,9 @@ export default function FinanceDashboard() {
             />
           )}
           {activeTab === 'cash-flow' && (
-            <>
+            // R3: the server refuses a non-admin login with no shop; say so
+            // rather than show its refused read as a month of Rs 0.
+            <PurchaseShopGate>
               {/* "Total outflows" below is short by whatever was withheld from
                   this role. Say so above the number, not after it. */}
               <RestrictedTotalsNotice
@@ -610,7 +613,7 @@ export default function FinanceDashboard() {
                 className="mb-4"
               />
               <CashFlowPanel cashFlow={cashFlow} />
-            </>
+            </PurchaseShopGate>
           )}
           {activeTab === 'period' && (
             <PeriodManagement

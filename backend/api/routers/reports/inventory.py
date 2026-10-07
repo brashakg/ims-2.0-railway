@@ -52,9 +52,8 @@ async def inventory_summary(
     all_stock = stock_value.shelf_units(stock_repo, get_product_repository(), active_store)
     low_stock = low_stock_rows(get_product_repository(), stock_repo, store_id=active_store)
 
-    total_value = (
-        stock_value.total(all_stock) if can_see_cost(current_user, "purchase") else None
-    )
+    show_cost = can_see_cost(current_user, "purchase")
+    total_value = stock_value.total(all_stock) if show_cost else None
 
     out_of_stock = [s for s in all_stock if s.get("quantity", 0) <= 0]
 
@@ -63,6 +62,8 @@ async def inventory_summary(
             "total_items": len(all_stock),
             "total_quantity": sum(s.get("quantity", 0) for s in all_stock),
             "total_value": total_value,
+            # Units with no cost add Rs 0 to total_value; said, not hidden.
+            "uncosted_units": stock_value.uncosted(all_stock) if show_cost else None,
             "low_stock_count": len(low_stock) if low_stock else 0,
             "out_of_stock_count": len(out_of_stock),
         }
@@ -105,6 +106,7 @@ async def inventory_valuation(
         "valuation": {
             "by_category": list(by_category.values()),
             "total": round(total, 2),
+            "uncosted_units": stock_value.uncosted(all_stock),
         }
     }
 

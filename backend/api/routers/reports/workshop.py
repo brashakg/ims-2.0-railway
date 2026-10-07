@@ -531,6 +531,8 @@ async def daily_stock_count(
         "summary": {
             "total_items": total_items,
             "total_value": round(total_value, 2) if show_cost else None,
+            # Units with no cost add Rs 0 to total_value; said, not hidden.
+            "uncosted_units": stock_value.uncosted(all_stock) if show_cost else None,
             "total_quantity": sum(item.get("quantity", 0) for item in all_stock),
         },
     }

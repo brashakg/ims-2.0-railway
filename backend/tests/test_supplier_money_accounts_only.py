@@ -712,3 +712,70 @@ def test_vendor_rebates_ask_the_payables_rule(monkeypatch):
     vendor_rebates._require(ACCT_PUNE, "view vendor rebates")
     monkeypatch.setitem(cost_mask._CONTEXT_ROLES, "payables", {"STORE_MANAGER"})
     vendor_rebates._require(manager, "view vendor rebates")  # the one rule moved
+
+
+# ============================================================================
+# The accounts roles are ONE object, and the RBAC matrix says what the rows say
+# ============================================================================
+# _core.ACCOUNTS is sorted(cost_mask.AP_ROLES): narrowing AP_ROLES moves every
+# row and handler that IS it. A row (or a handler tuple) that spells the same
+# roles out by hand stayed put under that mutation and every test stayed
+# green -- two definitions of 'the accounts roles'.
+
+
+def test_every_accounts_row_in_the_vendor_rows_is_the_one_list():
+    from api.services.rbac_policy import rows_vendors
+    from api.services.rbac_policy._core import ACCOUNTS
+
+    spelled = [
+        (r["method"], r["path"])
+        for r in rows_vendors.ROWS
+        if r.get("allowed") == ACCOUNTS and r["allowed"] is not ACCOUNTS
+    ]
+    assert not spelled, spelled
+
+
+def test_the_purchase_invoice_gate_is_the_accounts_rule():
+    from api.routers import purchase_invoices
+    from api.services.cost_mask import AP_ROLES
+
+    assert purchase_invoices._AP_ROLES is AP_ROLES
+
+
+_MATRIX = os.path.join(_BACKEND, "..", "docs", "reference", "RBAC_MATRIX.md")
+# Every row the supplier-money rulings (2026-09-28 .. 10-07) moved.
+_MOVED = (
+    ("GET", "/api/v1/finance/gst/summary"),
+    ("GET", "/api/v1/finance/vendor-payments"),
+    ("GET", "/api/v1/reports/gstr3b"),
+    ("GET", "/api/v1/reports/gstr3b/gstn-json"),
+    ("GET", "/api/v1/rtv-debit-notes/{debit_note_id}/print"),
+    ("GET", "/api/v1/rtv-debit-notes/{debit_note_id}/tally"),
+    ("GET", "/api/v1/vendors/purchases-this-month"),
+    ("GET", "/api/v1/vendors/{vendor_id}/bills"),
+    ("GET", "/api/v1/vendors/{vendor_id}/debit-notes"),
+    ("GET", "/api/v1/vendors/{vendor_id}/ledger"),
+    ("GET", "/api/v1/vendors/{vendor_id}/payments"),
+)
+
+
+@pytest.mark.skipif(not os.path.exists(_MATRIX), reason="docs/ not shipped here")
+@pytest.mark.parametrize("method,path", _MOVED)
+def test_the_rbac_matrix_says_what_the_row_says(method, path):
+    import re
+
+    from api.services import rbac_policy
+
+    with open(_MATRIX, encoding="utf-8") as fh:
+        doc = {
+            (m, p): (cell.strip(), s.strip())
+            for m, p, cell, s in re.findall(
+                r"^\| `(\w+)` \| `([^`]+)` \| ([^|]*)\| ([^|]*)\|", fh.read(), re.M
+            )
+        }
+    row = next(r for r in rbac_policy.POLICY if (r["method"], r["path"]) == (method, path))
+    assert (method, path) in doc, f"{method} {path} is missing from RBAC_MATRIX.md"
+    cell, scoped = doc[(method, path)]
+    want = "AUTH" if row["allowed"] == "AUTHENTICATED" else set(row["allowed"]) - {"SUPERADMIN"}
+    got = cell if cell in ("AUTH", "PUBLIC") else {r.strip() for r in cell.split(",")} - {"SUPERADMIN"}
+    assert (got, scoped) == (want, "S" if row.get("store_scoped") else "")

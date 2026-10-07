@@ -16,6 +16,7 @@ import type { ReactNode } from 'react';
 import { create } from 'zustand';
 import { useAuth } from '../../context/AuthContext';
 import { useStores } from '../../hooks/usePOSQueries';
+import { hasNoActiveStore, userSeesAllStores } from '../../utils/storeAccess';
 
 const useChosenShop = create<{ shop: string; setShop: (shop: string) => void }>((set) => ({
   shop: '',
@@ -30,7 +31,9 @@ const useChosenShop = create<{ shop: string; setShop: (shop: string) => void }>(
 export function usePurchaseShop() {
   const { user } = useAuth();
   const { shop, setShop } = useChosenShop();
-  const canPick = !!user?.roles?.some((r) => r === 'ADMIN' || r === 'SUPERADMIN');
+  // The app's one store-access rule (utils/storeAccess): who sees every shop,
+  // and what counts as no shop at all (blank or whitespace).
+  const canPick = userSeesAllStores(user?.roles);
   const ownStoreId = user?.activeStoreId || undefined;
   const storeId = canPick ? shop || undefined : ownStoreId;
   const showShopOf = (raisedAt: string | undefined) => {

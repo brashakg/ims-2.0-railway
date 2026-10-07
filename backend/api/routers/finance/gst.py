@@ -10,6 +10,7 @@ from ...utils.ist import now_ist, ist_day_start_utc
 from typing import Optional
 from fastapi import Depends
 from ..auth import get_current_user
+from ...dependencies import resolve_store_scope
 from ...services import ap_engine
 from ._shared import (
     _REAL_ORDER_STATUS_FILTER,
@@ -61,6 +62,11 @@ async def get_gst_summary(
     # struck with it) is summed from supplier bills -- the accounts roles'
     # alone, the one rule (_require_finance_admin -> cost_mask AP_ROLES).
     _require_finance_admin(current_user)
+    # One shop rule (resolve_store_scope), as the ITC register: every shop for
+    # an admin, the caller's own shop for anyone else, 403 for a login with no
+    # shop (R3). Sales and supplier bills alike, so the net payable is one
+    # shop's both sides and the input credit equals the register's.
+    scope = resolve_store_scope(None, current_user)
     db = _get_db()
     if db is None:
         return {
@@ -95,6 +101,8 @@ async def get_gst_summary(
         "created_at": {"$gte": start, "$lt": end},
         "status": _REAL_ORDER_STATUS_FILTER,
     }
+    if scope:
+        sales_match["store_id"] = scope
     # Fetch the matched sales rows once with the fields the CGST/SGST/IGST
     # classifier needs (the split happens below). The prior aggregation summed
     # total_tax then split it 50/50, which mis-stated every inter-state sale and
@@ -129,7 +137,7 @@ async def get_gst_summary(
     gst_paid_excluded = 0.0  # surfaced so the report can show what was held back
     try:
         for _b in db.get_collection("vendor_bills").find(
-            {},
+            {"store_id": scope} if scope else {},
             {
                 "_id": 0,
                 "bill_date": 1,

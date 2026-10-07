@@ -63,6 +63,21 @@ describe('Stock aging Tied capital (review r3 #16)', () => {
     await waitFor(async () => expect(await tiedCapital()).toBe('Tied capital (at cost): ₹2.5L'));
   });
 
+  it('counts the units with no cost instead of valuing them at Rs 0 (F47)', async () => {
+    // P-COST: 2 units at 1,000. P-NOCOST: 3 units with no cost anywhere -- the
+    // server values it 0 and says uncostedUnits 3.
+    products = [
+      { ...row('P-COST', 'C', 2000), quantity: 2 },
+      { ...row('P-NOCOST', 'C', 0), quantity: 3, uncostedUnits: 3 },
+    ];
+    render(<StockAgingReport />);
+    await waitFor(async () => expect(await tiedCapital()).toBe('Tied capital (at cost): ₹2,000'));
+    expect(screen.getByText('3 units have no cost')).toBeInTheDocument();
+    const cell = screen.getByText('Frame P-NOCOST').closest('tr')!;
+    expect(cell.textContent).toContain('no cost');
+    expect(cell.textContent).not.toContain('₹0');
+  });
+
   it('shows a dash, not a figure, for a login that is not shown cost', async () => {
     products = [row('p1', 'C', null)];
     render(<StockAgingReport />);

@@ -35,6 +35,10 @@ const apis = vi.hoisted(() => ({
 
 vi.mock('../../../services/api/vendorAp', () => apis);
 vi.mock('../../../context/ToastContext', () => ({ useToast: () => toastMock }));
+// The page opens for a login with a shop (a no-shop login reads the R3 message).
+vi.mock('../../../context/AuthContext', () => ({
+  useAuth: () => ({ user: { id: 'u-acct', roles: ['ACCOUNTANT'], activeStoreId: 'BV-DHN-01' } }),
+}));
 
 import CashFlowPage from '../CashFlowPage';
 

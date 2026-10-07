@@ -82,13 +82,14 @@ from ..services import landed_cost as lc
 from ..services import purchase_invoice_engine as pinv
 from ..services import purchase_match as pmatch
 from ..services import product_master as _pm
+from ..services.cost_mask import AP_ROLES
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-# Money-out / books action: limited to ADMIN / ACCOUNTANT. SUPERADMIN auto-passes
-# via require_roles. Mirrors the _AP_ROLES gate on vendor bills/payments.
-_AP_ROLES = ("ADMIN", "ACCOUNTANT")
+# Money-out / books action: the accounts roles (services/cost_mask.AP_ROLES, the
+# vendor bills / payments gate). SUPERADMIN auto-passes via require_roles.
+_AP_ROLES = AP_ROLES
 
 
 def _get_db():
@@ -1399,20 +1400,24 @@ def _vendor_gstin(db, vendor: Optional[dict], vendor_id: str) -> Optional[str]:
 
 
 def _bill_math(db, vendor, body, grn_doc, current_user):
-    """Everything a booking stores about tax: (supplier GSTIN, recipient,
-    computed invoice). POST / books it and POST /preview shows it through this
-    one call on the same body, so the form cannot preview one tax head, split
-    or paisa and the ledger store another (F6 / F40) -- nor another shop: the
-    shop is the form's own store_id, never whichever the token names by the
-    time Book is pressed. A receipt's shop decides a receipt's bill, so the
-    form's shop is only checked (403) when it is the one that counts."""
+    """Everything a booking stores about tax and shop: (supplier GSTIN,
+    recipient, computed invoice, the bill's shop). POST / books it and POST
+    /preview shows it through this one call on the same body, so the form
+    cannot preview one tax head, split or paisa and the ledger store another
+    (F6 / F40) -- nor another shop: the shop is the form's own store_id, never
+    whichever the token names by the time Book is pressed. A receipt's shop
+    decides a receipt's bill, so the form's shop is only checked (403) when it
+    is the one that counts. The bill is stored under the SAME shop its
+    recipient GSTIN was taken from, so its tax and its Purchase tabs never
+    name two different shops."""
     supplier_gstin = _vendor_gstin(db, vendor, body.vendor_id)
     receipt_store = _receipt_store_id(db, grn_doc, body.linked_dc_ids)
+    bill_store = receipt_store or validate_store_access(body.store_id, current_user)
     recipient = _bill_recipient(
         db,
         receipt_store,
         body.recipient_gstin,
-        None if receipt_store else validate_store_access(body.store_id, current_user),
+        None if receipt_store else bill_store,
         current_user=current_user,
     )
     computed = pinv.compute_invoice(
@@ -1420,7 +1425,7 @@ def _bill_math(db, vendor, body, grn_doc, current_user):
         supplier_gstin,
         recipient.get("recipient_gstin"),
     )
-    return supplier_gstin, recipient, computed
+    return supplier_gstin, recipient, computed, bill_store
 
 
 def _line_product_ids(lines) -> list:
@@ -1836,7 +1841,7 @@ async def create_purchase_invoice(
     # SUPPLIER's state under that name, the form sent it back, and reading it
     # as the buyer's state stored a Maharashtra supplier's IGST bill as
     # CGST+SGST.
-    supplier_gstin, recipient, computed = _bill_math(
+    supplier_gstin, recipient, computed, bill_store = _bill_math(
         db, vendor, body, grn_doc, current_user
     )
 
@@ -1932,10 +1937,10 @@ async def create_purchase_invoice(
         "invoice_id": invoice_id,
         "doc_type": "PURCHASE_INVOICE",
         "vendor_id": body.vendor_id,
-        # The shop the goods landed in (else the booker's shop, the same
-        # fallback the recipient takes): every Purchase tab scopes on it (F63).
-        "store_id": _receipt_store_id(db, grn_doc, body.linked_dc_ids)
-        or current_user.get("active_store_id"),
+        # The shop the goods landed in, else the form's shop -- the one the
+        # recipient GSTIN was taken from (_bill_math): every Purchase tab
+        # scopes on it (F63).
+        "store_id": bill_store,
         "vendor_name": (vendor or {}).get("trade_name")
         or (vendor or {}).get("legal_name"),
         "vendor_gstin": supplier_gstin,
@@ -2245,7 +2250,7 @@ async def preview_purchase_invoice(
             _grn_in_scope_or_404(grn_doc, current_user, f"GRN {body.grn_id} not found")
     if body.linked_dc_ids:
         _dcs_in_scope_or_404(db, body.linked_dc_ids, current_user)
-    supplier_gstin, recipient, computed = _bill_math(
+    supplier_gstin, recipient, computed, _ = _bill_math(
         db, vendor, body, grn_doc, current_user
     )
     return {
