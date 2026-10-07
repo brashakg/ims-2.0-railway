@@ -1942,22 +1942,32 @@ def test_R3_a_blocked_sku_in_a_dead_batch_is_still_the_strict_abort():
 
 
 def test_R3_parity_never_counts_a_shop_shopify_cannot_see(monkeypatch):
-    """R3 (parity's known second rule): _pooled_availability summed on-hand
-    over ALL physical shops and compared it against the sum of a SKU's Shopify
-    inventoryLevels -- which only exist at MAPPED locations. An unmapped shop
-    holding 3 units of a listed SKU therefore read as 3 units of drift on a
-    perfectly correct system: past the default tolerance of 2, a false drift
-    row and the deduped shopify-stock-parity-drift task. Running it through
-    online_quantities_for_skus at buffer 0, restricted to inventory._mapped,
-    also fixes the SUPERADMIN-blocked divergence the comment already named.
-    Revert to `_on_hand_for_skus(db, skus, None)` -> 3 -> fails."""
+    """R3, per location since multi-location PR 4. The pooled parity summed
+    on-hand over shops and compared it with the sum of a SKU's Shopify levels,
+    so an unmapped shop's units (no location, no level) read as drift on a
+    correct system. Now every row is one MAPPED shop against its own location:
+    BV-D (unmapped, 3 units) is in no row and is REPORTED as an unmapped
+    holder, and no drift task is filed. Revert run_parity_tick to build rows
+    over every physical shop -> a BV-D row -> fails (the per-location rules
+    are pinned one by one in test_shopify_stock_parity.py)."""
     from api.services import shopify_stock_parity as parity
 
-    db = _listed(_db(a=0, b=0, c=0, sold=0, d=3))  # every mapped shop empty, BV-D unmapped
-    assert parity._pooled_availability(db, ["SP-1"]) == {"SP-1": 0}
-    # a mapped shop's units DO count
-    db2 = _listed(_db(a=2, b=1, c=0, sold=0, d=3))
-    assert parity._pooled_availability(db2, ["SP-1"]) == {"SP-1": 3}
+    monkeypatch.setattr(shopify_push, "_has_shopify_creds", lambda db, storefront_id="BV": True)
+    db = _db(a=2, b=1, c=0, sold=0, d=3)
+    # A LIVE listing (parity compares nothing else) carrying the item on ecom.
+    _listed(db, status="PUBLISHED")
+
+    async def gql(db_, query, variables):  # noqa: ARG001
+        edges = [
+            {"node": {"location": {"id": loc}, "quantities": [{"name": "available", "quantity": q}]}}
+            for loc, q in ((LOC_A, 2), (LOC_B, 1), (LOC_C, 0))
+        ]
+        return {"data": {"nodes": [{"id": INV_GID, "inventoryLevels": {"edges": edges}}]}}
+
+    out = _run(parity.run_parity_tick(db, graphql=gql))
+    assert out["compared"] == 3 and out["drift_count"] == 0
+    assert [h["store_id"] for h in out["unmapped_holders"]] == ["BV-D"]
+    assert out["task_filed"] is False
 
 
 # ---------------------------------------------------------------------------
