@@ -6,6 +6,7 @@ import clsx from 'clsx';
 import type { OutstandingReceivable, VendorPaymentData } from './financeTypes';
 import { formatCurrency } from './financeUtils';
 import { SupplierFiguresShop, SupplierStatusBadge } from './VendorPayments';
+import { PurchaseShopGate } from '../purchase/purchaseShop';
 
 interface OutstandingPanelProps {
   outstanding: OutstandingReceivable[];
@@ -99,6 +100,7 @@ export default function OutstandingPanel({ outstanding, vendorPayments }: Outsta
 
       {/* Vendor Payments */}
       {vendorPayments && (
+      <PurchaseShopGate>
       <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
         <div className="bg-slate-50 px-6 py-4 border-b border-gray-200">
           <h3 className="text-gray-900 font-semibold">Vendor Payment Schedule</h3>
@@ -131,6 +133,7 @@ export default function OutstandingPanel({ outstanding, vendorPayments }: Outsta
           </table>
         </div>
       </div>
+      </PurchaseShopGate>
       )}
     </div>
   );

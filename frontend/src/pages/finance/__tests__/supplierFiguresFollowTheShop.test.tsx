@@ -135,6 +135,25 @@ describe('Finance dashboard - supplier figures follow the dashboard shop', () =>
     expect(screen.queryByText(/^Shop:/)).toBeNull();
   });
 
+  // Owner ruling 2026-10-07 (R3): the server refuses a non-admin login with no
+  // shop (403). The dashboard turns a refused read into an empty list, which
+  // used to print 'All shops' over 'Total Payable Rs 0' -- we owe nobody.
+  it.each([[/vendor payments/i], [/outstanding/i]])(
+    'an accountant with no shop reads the message, not an empty all-shops figure (%s)',
+    async (tab) => {
+      roles = ['ACCOUNTANT'];
+      activeStoreId = '';
+      api.getVendorPayments.mockRejectedValue({ response: { status: 403 } });
+      await openTab(tab);
+      expect(await screen.findByRole('alert')).toHaveTextContent(
+        'Your login has no shop assigned - ask an admin to assign one.',
+      );
+      expect(screen.queryByText('All shops')).toBeNull();
+      expect(screen.queryByText('Total Payable')).toBeNull();
+      expect(screen.queryByText(/vendor payment schedule/i)).toBeNull();
+    },
+  );
+
   it('a shop missing from the store list is named by its id', async () => {
     activeStoreId = 'BV-NEW-09';
     await openTab(/vendor payments/i);

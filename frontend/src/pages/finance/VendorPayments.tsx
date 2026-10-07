@@ -9,6 +9,7 @@ import { storeApi } from '../../services/api/stores';
 import { normalizeStore } from '../../utils/storeAccess';
 import type { VendorPaymentData } from './financeTypes';
 import { formatCurrency } from './financeUtils';
+import { PurchaseShopGate } from '../purchase/purchaseShop';
 
 interface VendorPaymentsProps {
   vendorPayments: VendorPaymentData[];
@@ -99,7 +100,10 @@ export default function VendorPayments({ vendorPayments }: VendorPaymentsProps) 
   const withDues = vendorPayments.filter((v) => v.amount_due > 0).length;
   const overdueCount = vendorPayments.filter((v) => v.days_overdue > 0).length;
 
+  // R3: a non-admin login with no shop reads the plain message, never an
+  // 'All shops' Rs 0 (the server refused the read).
   return (
+    <PurchaseShopGate>
     <div className="space-y-6">
       <SupplierFiguresShop />
       {/* Summary */}
@@ -169,5 +173,6 @@ export default function VendorPayments({ vendorPayments }: VendorPaymentsProps) 
         </table>
       </div>
     </div>
+    </PurchaseShopGate>
   );
 }

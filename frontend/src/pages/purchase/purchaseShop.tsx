@@ -43,8 +43,10 @@ export function usePurchaseShop() {
 /** The server's refusal for a login with no shop (api.dependencies NO_SHOP_DETAIL). */
 export const NO_SHOP = 'Your login has no shop assigned - ask an admin to assign one.';
 
-/** Wraps every Purchase screen: a non-admin login with no shop reads the plain
- *  message and nothing else -- no list is requested. */
+/** Wraps every Purchase screen, and the Finance dashboard's supplier figures
+ *  (same server rule): a non-admin login with no shop reads the plain message
+ *  and nothing else -- no Purchase list is requested, and no refused read
+ *  shows as an empty 'we owe nobody' total. */
 export function PurchaseShopGate({ children }: { children: ReactNode }) {
   const { noShop } = usePurchaseShop();
   if (!noShop) return <>{children}</>;
