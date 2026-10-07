@@ -1,6 +1,6 @@
 """Purchase-order GST engine: party resolution, line rates, PO tax build."""
 
-from ._shared import _pm, get_store_repository, get_vendor_repository, logger
+from ._shared import _get_db, _pm, get_store_repository, get_vendor_repository, logger, ov
 
 
 # How far along the purchase a cost figure came from. A LATER step may correct
@@ -67,13 +67,12 @@ def _po_gst_parties(vendor, store_doc) -> dict:
     vendor's bill; the order that precedes it now calls exactly those, so the
     order and the bill cannot return opposite verdicts on one purchase.
 
-    One thing this passes that the bill does not: the delivery store's OWN
-    declared state, as the explicit place of supply. Place of supply for goods
-    is where delivery terminates -- and stores.py `_derive_store_gstin` falls
-    back to the entity's PRIMARY registration when the entity holds none in the
-    store's state, so a Maharashtra shop can be stamped with a Jharkhand GSTIN.
-    Reading the shop's own state first keeps the physical delivery, not the
-    paperwork fallback, in charge.
+    The shop's side is its GSTIN alone -- po_gst_context hands in THE shop's
+    GSTIN (org_validation.shop_gstin, the one its bill books on), and the
+    registration decides the state (owner, 2026-09-30). Its declared state is
+    not an input: a Maharashtra shop stamped with a Jharkhand number used to
+    be ordered CGST + SGST and billed IGST; the go-live checklist flags that
+    shop instead.
 
     Returns the same FIELD NAMES the bill writes (`supply_place_recipient`,
     `supplier_state`, `interstate`) with the same meanings. There is
@@ -93,12 +92,7 @@ def _po_gst_parties(vendor, store_doc) -> dict:
     store_doc = store_doc if isinstance(store_doc, dict) else {}
     vendor_gstin = str(vendor_doc.get("gstin") or "").strip()
     store_gstin = str(store_doc.get("gstin") or "").strip()
-    store_declared = pinv.state_code_of(
-        store_doc.get("state_code")
-    ) or pinv.state_code_of(store_doc.get("state"))
-    pos, interstate = pinv.determine_place_of_supply(
-        vendor_gstin, store_gstin, store_declared
-    )
+    pos, interstate = pinv.determine_place_of_supply(vendor_gstin, store_gstin)
     supplier_state = pinv.state_code_of(vendor_gstin)
     return {
         "vendor_gstin": vendor_gstin,
@@ -254,9 +248,13 @@ def build_po_gst(raw_lines, product_of, vendor, store_doc) -> dict:
 
 
 def po_gst_context(store_id, vendor_id):
-    """(vendor_doc, store_doc) for a PO's place-of-supply decision. Fail-soft:
-    a missing repo/doc degrades to None, which build_po_gst reads as
-    'assumed intra-state' rather than inventing a state."""
+    """(vendor_doc, store_doc) for a PO's place-of-supply decision -- the ONE
+    reader every PO door calls. store_doc's `gstin` is THE shop's GSTIN
+    (org_validation.shop_gstin: its own when its company holds it, else the
+    company's registration for its state), '' when it has none or its
+    company cannot be read. Fail-soft: a missing repo/doc degrades to None /
+    '', which build_po_gst reads as 'assumed intra-state' rather than
+    inventing a state."""
     vendor_doc = None
     store_doc = None
     try:
@@ -271,4 +269,17 @@ def po_gst_context(store_id, vendor_id):
             store_doc = store_repo.find_by_id(store_id)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[VENDOR] PO store lookup failed: %s", exc)
+    if isinstance(store_doc, dict):
+        entity = None
+        try:
+            if store_doc.get("entity_id"):
+                entity = _get_db().get_collection("entities").find_one(
+                    {"entity_id": store_doc["entity_id"]}, {"_id": 0, "gstins": 1}
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[VENDOR] PO company lookup failed: %s", exc)
+        store_doc = {
+            **store_doc,
+            "gstin": ov.shop_gstin(entity if isinstance(entity, dict) else None, store_doc) or "",
+        }
     return vendor_doc, store_doc

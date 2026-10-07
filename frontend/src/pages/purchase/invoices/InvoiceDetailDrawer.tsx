@@ -268,6 +268,9 @@ export function InvoiceDetailDrawer({
             <h3 className="font-semibold text-gray-900 flex items-center gap-2">
               <FileText className="w-5 h-5" /> {invoice.vendor_name || invoice.vendor_id}
               <span className="text-sm font-normal text-gray-500">· {invoice.vendor_invoice_no}</span>
+              {invoice.itc_eligible === false && (
+                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800" title="This bill claims no input credit">No credit</span>
+              )}
             </h3>
             <div className="text-xs text-gray-500 mt-0.5 flex flex-wrap gap-x-3">
               <span>{(invoice.vendor_invoice_date || '').slice(0, 10)}</span>

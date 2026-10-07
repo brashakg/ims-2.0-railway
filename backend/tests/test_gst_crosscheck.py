@@ -152,8 +152,9 @@ def _store_gstr3b_split(
     out_c=0.0, out_s=0.0, out_i=0.0, out_taxable=0.0,
 ):
     """A per-store GSTR-3B carrying the R1 ITC split (itcAvailableRegular +
-    itcAvailableTransfer, summing to itcAvailable). Regular ITC is entity-scoped
-    (identical across sibling stores); the transfer slice is GSTIN-scoped."""
+    itcAvailableGstin, summing to itcAvailable). Regular ITC is entity-scoped
+    (identical across sibling stores); the GSTIN-bound slice (here: transfer
+    bills) is GSTIN-scoped."""
     return {
         "period": "2026-04",
         "outwardTaxableValue": out_taxable,
@@ -169,7 +170,7 @@ def _store_gstr3b_split(
             "integratedTax": reg_i, "centralTax": reg_c, "stateTax": reg_s,
             "cess": 0.0,
         },
-        "itcAvailableTransfer": {
+        "itcAvailableGstin": {
             "integratedTax": trf_i, "centralTax": trf_c, "stateTax": trf_s,
             "cess": 0.0,
         },

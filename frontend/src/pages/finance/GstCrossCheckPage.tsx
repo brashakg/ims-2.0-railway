@@ -288,12 +288,9 @@ export default function GstCrossCheckPage() {
                     <td className="px-4 py-2 text-gray-700">
                       {row.metric}
                       {row.note && (
-                        <span
-                          className="ml-1 text-gray-300 cursor-help"
-                          title={row.note}
-                        >
-                          &#9432;
-                        </span>
+                        <p className="mt-0.5 text-xs font-normal text-gray-500" data-testid="crosscheck-note">
+                          {row.note}
+                        </p>
                       )}
                     </td>
                     {cols.map((c) => (

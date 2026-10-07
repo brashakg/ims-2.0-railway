@@ -35,7 +35,7 @@ os.environ.setdefault("ENVIRONMENT", "test")
 from api.routers import finance as finance_router  # noqa: E402
 from api.routers import orders as orders_router  # noqa: E402
 from api.routers import stores as stores_router  # noqa: E402
-from api.services import gstn_export, itc_reconcile, print_legal  # noqa: E402
+from api.services import gstn_export, print_legal  # noqa: E402
 from api.services import purchase_invoice_engine as pinv  # noqa: E402
 from api.services import rtv_debit_note as rtv  # noqa: E402
 from api.services.org_validation import resolve_state_code  # noqa: E402
@@ -106,8 +106,10 @@ def test_a_longer_digit_run_is_not_a_state_code():
 # The requirement, at the door: a debit note reversing an inter-state purchase
 # ---------------------------------------------------------------------------
 
-MH_VENDOR = {"name": "Luxottica India", "state": "27-Maharashtra"}
-JH_SELLER = {"name": "BV Opticals", "state": "20-Jharkhand"}
+# The head is the BILL's (classify_supply on the two GSTINs); the portal-form
+# state is what the note prints as each party's state code.
+MH_VENDOR = {"name": "Luxottica India", "gstin": "27ABCDE1234F1Z5", "state": "27-Maharashtra"}
+JH_SELLER = {"name": "BV Opticals", "gstin": "20ZZZZZ9999Z1Z9", "state": "20-Jharkhand"}
 LINE = [{"sku": "RB1", "qty": 2, "unit_cost": 1000.0, "gst_rate": 18.0}]
 
 
@@ -132,8 +134,16 @@ def test_debit_note_on_a_portal_form_vendor_charges_igst_like_the_bill_did():
     assert pinv.state_code_of("20-Jharkhand") == "20"
 
 
+def test_a_typed_state_without_a_gstin_is_intra_like_the_bill():
+    """The bill books a supplier with no GSTIN intra-state (classify_supply);
+    the note reversing it must too, or the reversal lands on the other head."""
+    note = _note({"name": "Local Fitter", "state": "27-Maharashtra"}, JH_SELLER)
+    assert note["vendor"]["state_code"] == "27"
+    assert note["is_inter_state"] is pinv.classify_supply(None, JH_SELLER["gstin"])["interstate"] is False
+
+
 def test_debit_note_within_one_state_still_splits_cgst_sgst():
-    note = _note(MH_VENDOR, {"name": "BV Mumbai", "state": "27-Maharashtra"})
+    note = _note(MH_VENDOR, {"name": "BV Mumbai", "gstin": "27ZZZZZ9999Z1Z9", "state": "27-Maharashtra"})
     assert note["is_inter_state"] is False
     ln = note["lines"][0]
     assert ln["cgst_paise"] == 18000
@@ -179,20 +189,21 @@ def test_an_unanswerable_state_takes_the_documented_intra_default():
 
 SURVIVORS = {
     "print_legal._state_code_of": lambda v: print_legal._state_code_of(v),
-    "itc_reconcile._state_code": lambda v: itc_reconcile._state_code(v),
     "gstn_export._state_code": lambda v: gstn_export._state_code(v),
     "stores._state_code_for": lambda v: stores_router._state_code_for(v, None) or "",
     "finance._norm_state": lambda v: finance_router._norm_state(v),
 }
 
 KNOWN_DIVERGENCE = {
-    #  input             (chain, print_legal, itc, gstn, stores, finance)
-    "27-Maharashtra": ("27", "27", "27", "", "", "27-Maharashtra"),
-    "Maharashtra (27)": ("", "27", "27", "", "", "Maharashtra (27)"),
-    "MH": ("27", "", "", "", "27", "27"),
-    "Maharashtra": ("27", "", "", "27", "27", "27"),
-    "27AAAAA0000A1Z5": ("27", "27", "27", "", "", "27AAAAA0000A1Z5"),
-    "190001": ("", "19", "19", "", "", "190001"),
+    #  input             (chain, print_legal, gstn, stores, finance)
+    # itc_reconcile._state_code was folded away (the ITC register reads each
+    # bill's stored heads; a legacy bill is split by purchase_invoice_engine).
+    "27-Maharashtra": ("27", "27", "", "", "27-Maharashtra"),
+    "Maharashtra (27)": ("", "27", "", "", "Maharashtra (27)"),
+    "MH": ("27", "", "", "27", "27"),
+    "Maharashtra": ("27", "", "27", "27", "27"),
+    "27AAAAA0000A1Z5": ("27", "27", "", "", "27AAAAA0000A1Z5"),
+    "190001": ("", "19", "", "", "190001"),
 }
 
 
