@@ -16,9 +16,10 @@ they carry money):
     GET /api/v1/inventory/lookup?q=<text>          (inventory package router)
     200 -> {"store_id": <this shop = the caller's active store>,
             "items": [{"product_id", "sku", "name", "brand", "model",
-                       "color", "size", "mrp", "offer_price",
+                       "color", "size", "mrp", "offer_price", "lens_grid",
                        "stores": [{"store_id", "store_name",
-                                   "available", "in_transit"}, ...]}]}
+                                   "available", "in_transit",
+                                   "tracked"}, ...]}]}
 
     `stores` lists EVERY physical shop (stores_util.physical_stores), zeros
     included, never an ONLINE store. `available` is what the till may sell
@@ -27,6 +28,10 @@ they carry money):
     this shop's figure is the till tile's (GET /inventory/sellable, #1173);
     `in_transit` counts TRANSFERRED units heading TO that shop
     (claim_for_transfer stamps transfer_to_store_id), one unit per row too.
+    `tracked` is false where the till's sale guard does not count the
+    product -- no stock_units row of it at that shop, or a LENS line (its
+    stock is the lens grid; `lens_grid` says so) -- exactly where GET
+    /inventory/sellable answers None; the screen then never shows a 0.
     The search IS ProductRepository.search_products (active only, the same
     answer as GET /products?search=) plus an exact SKU, product barcode,
     manufacturer GTIN (attributes.gtin) or IMS unit barcode, active only and
@@ -674,6 +679,54 @@ def test_d7b3_in_transit_is_a_transferred_unit_on_its_way(call, mongo_db, label,
     )
     here = _stores(_items(_ok(call(_user("CASHIER", S1), q=sku))).get(pid) or {}).get(S1) or {}
     assert int(here.get("in_transit", -1)) == in_transit, f"{label}: {here}"
+
+
+# Round 5: where the till's sale guard does not count a product it sells any
+# quantity (orders/stock: tracked == 0 -> no check; a LENS line is the lens
+# grid's), and GET /inventory/sellable says None. A 0 there is no limit, so
+# the lookup says tracked: false -- the screen reads 'not tracked here', or
+# 'see Power Grid' for a lens -- never 0. The till is asked, not re-typed.
+_TRACKING = [
+    # (label, category, the till's item_type for it (mapCategory), units as (shop, status))
+    ("a frame with a unit here", "FRAME", "FRAME", [(S1, "AVAILABLE")]),
+    ("a frame whose only unit here is sold", "FRAME", "FRAME", [(S1, "SOLD")]),
+    ("a frame stocked only at Bokaro", "FRAME", "FRAME", [(S2, "AVAILABLE")]),
+    ("a frame with no unit anywhere", "FRAME", "FRAME", []),
+    ("an optical lens with a unit here", "OPTICAL_LENS", "LENS", [(S1, "AVAILABLE")]),
+    ("an optical lens with no unit", "OPTICAL_LENS", "LENS", []),
+]
+
+
+@pytest.mark.parametrize("label,category,till_type,units", _TRACKING, ids=[t[0] for t in _TRACKING])
+def test_d7b3_a_shop_the_till_does_not_count_is_not_tracked(
+    call, mongo_db, monkeypatch, label, category, till_type, units
+):
+    from api.routers import orders as om
+    from database.repositories.product_repository import StockRepository
+
+    _seed(mongo_db)
+    # the sale guard reads the same stock_units the lookup reads
+    monkeypatch.setattr(om, "get_stock_repository", lambda: StockRepository(mongo_db["stock_units"]))
+    pid = "P-TRACK"
+    mongo_db["products"].insert_one(
+        {"_id": pid, "product_id": pid, "sku": "SKU-TRACK-1", "brand": "Zeiss", "model": "TRK1",
+         "category": category, "mrp": 3000.0, "offer_price": 3000.0, "is_active": True}
+    )
+    for shop, status in units:
+        mongo_db["stock_units"].insert_one(_unit(pid, shop, status))
+
+    item = _items(_ok(call(_user("CASHIER", S1), q="SKU-TRACK-1")))[pid]
+    assert item.get("lens_grid") is (till_type == "LENS"), f"{label}: {item.get('lens_grid')}"
+    for shop in (S1, S2):
+        cell = _stores(item)[shop]
+        till = _ok(call(_user("CASHIER", shop), "/inventory/sellable",
+                        product_ids=pid, item_types=till_type))["sellable"][pid]
+        assert cell.get("tracked") is (till is not None), (
+            f"{label} at {shop}: the till {'limits it to ' + str(till) if till is not None else 'does not count it'}, "
+            f"the lookup says tracked={cell.get('tracked')}"
+        )
+        if till is not None:
+            assert cell["available"] == till
 
 
 def test_d7b3_a_stores_doc_without_a_store_id_is_skipped_not_a_500(call, mongo_db):

@@ -19,6 +19,13 @@ Every rule is reused, not re-typed:
   * sellable    -- StockRepository.sellable_filter, the filter find_available
                    and the sale guard count (AVAILABLE and in date), one unit
                    per stock_units row -- so this shop's figure is the till's;
+  * tracked     -- where the sale guard limits a sale at all: the line takes
+                   serialized stock (orders/stock._takes_serialized_stock -- a
+                   LENS line's stock is the lens grid) and the shop holds any
+                   stock_units row of it (the guard's `tracked` count). Where
+                   it does not, the till sells any quantity and GET
+                   /inventory/sellable says None, so the lookup says
+                   tracked: false rather than a 0 the till ignores;
   * the shops   -- stores_util.physical_stores;
   * in transit  -- item_events.status_match(TRANSFERRED) + transfer_to_store_id
                    (what StockRepository.claim_for_transfer stamps).
@@ -35,7 +42,7 @@ from ._shared import (
 )
 from .helpers import _get_db
 from ...services.item_events import status_match
-from ...services.product_master import find_similar_products
+from ...services.product_master import find_similar_products, resolve_category
 from ...services.rbac_policy import policy_for
 from ...services.stores_util import physical_stores
 
@@ -70,6 +77,30 @@ def sellable_by_product_shop(stock_repo, pids):
     return _units_by_product_shop(
         stock_repo, stock_repo.sellable_filter({"$in": list(pids)}, {"$ne": None})
     )
+
+
+def _till_item_type(product):
+    """The item_type the till puts on this product's line (POS mapCategory):
+    an OPTICAL_LENS product goes out as LENS, its stock held by the lens grid."""
+    return "LENS" if resolve_category(product.get("category")) == "OPTICAL_LENS" else ""
+
+
+def _guard_limits(stock_repo, products):
+    """{(product_id, shop)} where the till's sale guard
+    (orders/stock._assert_serialized_stock_available) limits a sale: the till's
+    line for it takes serialized stock (_takes_serialized_stock, imported) and
+    the shop holds ANY stock_units row of it, whatever its status -- the
+    guard's own `tracked` count, one aggregate for every product and shop.
+    Anywhere else the guard sells any quantity (GET /inventory/sellable: None)."""
+    from ..orders.stock import _takes_serialized_stock
+
+    pids = [
+        str(p["product_id"])
+        for p in products
+        if p.get("product_id")
+        and _takes_serialized_stock({"product_id": str(p["product_id"]), "item_type": _till_item_type(p)})
+    ]
+    return set(_units_by_product_shop(stock_repo, {"product_id": {"$in": pids}}))
 
 
 def _in_transit_by_product_shop(stock_repo, pids, shop_ids):
@@ -149,6 +180,7 @@ async def stock_lookup(
     shop_ids = [str(s["store_id"]) for s in shops]
     available = sellable_by_product_shop(stock_repo, pids)
     in_transit = _in_transit_by_product_shop(stock_repo, pids, shop_ids)
+    limited = _guard_limits(stock_repo, products)
 
     items, seen = [], set()
     for p in products:
@@ -157,12 +189,15 @@ async def stock_lookup(
             continue
         seen.add(pid)
         item = {"product_id": pid, **{k: p.get(k) for k in _PRODUCT_FIELDS}}
+        item["lens_grid"] = _till_item_type(p) == "LENS"
         item["stores"] = [
             {
                 "store_id": sid,
                 "store_name": s.get("store_name") or s.get("store_code") or sid,
                 "available": available.get((pid, sid), 0),
                 "in_transit": in_transit.get((pid, sid), 0),
+                # False: the till does not count this product here, so 0 is no limit.
+                "tracked": (pid, sid) in limited,
             }
             for sid, s in zip(shop_ids, shops)
         ]
