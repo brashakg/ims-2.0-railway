@@ -250,6 +250,40 @@ def test_every_colour_field_the_catalogue_stores_is_searched():
 
 
 @pytest.fixture
+def dashed():
+    """A product with a code that STARTS with a hyphen, beside a plain one."""
+    yield from _repo_over(
+        [
+            {
+                "_id": "P-DASH",
+                "product_id": "P-DASH",
+                "sku": "FR-LK-AIR01",
+                "brand": "Lenskart",
+                "model": "AIR01",
+                "variant": "-01",
+                "is_active": True,
+            },
+            {
+                "_id": "P-PLAIN",
+                "product_id": "P-PLAIN",
+                "sku": "FR-TIT-T2000",
+                "brand": "Titan",
+                "model": "T2000",
+                "is_active": True,
+            },
+        ]
+    )
+
+
+@pytest.mark.parametrize("typed", ["-", "--", "- -", "  "])
+def test_nothing_to_look_for_lists_nothing_and_counts_nothing(dashed, typed):
+    """Only hyphens and spaces: the list is empty, like its count. The till's
+    rule (whitespace = everything, '-' = a code starting '-') used to put rows
+    on the list while the count said 0."""
+    assert _ids(dashed, typed) == set()
+
+
+@pytest.fixture
 def lens():
     """A contact lens whose name carries regex characters: brackets, a plus
     and a dot."""
@@ -418,4 +452,5 @@ def test_the_endpoint_opts_in_only_with_match_anywhere(repo, monkeypatch):
 
     assert _list(search="8895") == (set(), 0)
     assert _list(search="8895", match="anywhere") == ({"P-CAR"}, 1)
+    assert _list(search="  ", match="anywhere") == (set(), 0)
     assert _list(search="8895") == (set(), 0)
