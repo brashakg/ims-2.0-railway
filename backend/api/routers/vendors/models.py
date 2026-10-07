@@ -421,26 +421,38 @@ class POLineCancel(BaseModel):
 def cancel_reason(v) -> str:
     """ONE rule for a cancel reason (whole order or one line): invisible
     characters (zero-width space, BOM and other format characters) and
-    surrounding whitespace removed (also the blank Hangul fillers and
-    variation selectors), then at least 3 letters or digits -- 'qty
-    typo' passes; a blank, '...', '???' or a zero-width string does not. Vowel
-    signs count with their letter, so a short Hindi reason is a reason; the
-    joiners that Indic scripts need are kept."""
+    surrounding whitespace removed (also every other character Unicode marks
+    default-ignorable: the blank Hangul fillers, variation selectors, the
+    grapheme joiner, the Khmer inherent vowels), then at least 3 letters or
+    digits -- 'qty typo' passes; a blank, '...', '???' or a zero-width string
+    does not. Vowel signs count with their letter, so a short Hindi reason is
+    a reason; the joiners that Indic scripts need are kept."""
     import unicodedata
 
-    blank_fillers = "\u115f\u1160\u3164\uffa0"
+    # The Default_Ignorable_Code_Point characters that are not format (Cf)
+    # characters, so the category test below would keep them.
+    ignorable = "\u034f\u115f\u1160\u17b4\u17b5\u180b\u180c\u180d\u180f\u3164\uffa0"
     text = "".join(
         c
         for c in str(v or "")
-        if c not in blank_fillers
+        if c not in ignorable
         and not (0xFE00 <= ord(c) <= 0xFE0F or 0xE0100 <= ord(c) <= 0xE01EF)
         and (
             c in "\t\n\u200c\u200d"
             or unicodedata.category(c) not in ("Cf", "Cc", "Zl", "Zp")
         )
     ).strip()
-    # Letters and digits count; a vowel sign or accent counts only when it
-    # follows a counted character, so a run of bare marks is not a reason.
+    # Letters and digits count; a script's vowel sign counts only when it
+    # follows a counted character, so a run of bare marks is not a reason. An
+    # accent from the shared combining blocks is no letter of any script and
+    # never counts: 'a' with two accents is one letter.
+    def accent(ch):
+        o = ord(ch)
+        return any(lo <= o <= hi for lo, hi in (
+            (0x0300, 0x036F), (0x1AB0, 0x1AFF), (0x1DC0, 0x1DFF),
+            (0x20D0, 0x20FF), (0xFE20, 0xFE2F),
+        ))
+
     counted = 0
     after_base = False
     for c in text:
@@ -449,7 +461,7 @@ def cancel_reason(v) -> str:
             counted += 1
             after_base = True
         elif cat == "M":
-            if after_base:
+            if after_base and not accent(c):
                 counted += 1
         else:
             after_base = False

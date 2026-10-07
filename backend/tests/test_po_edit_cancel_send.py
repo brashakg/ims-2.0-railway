@@ -1983,7 +1983,12 @@ def test_a_form_edit_of_a_product_with_a_typed_and_an_unsettled_line(monkeypatch
 @pytest.mark.parametrize(
     "blank",
     ["\u3164\u3164\u3164", "\u115f\u1160\uffa0", "\u0301\u0301\u0301", "\ufe0f\ufe0f\ufe0f",
-     "ab\u3164", "a\ufe0f\u0301"],
+     "ab\u3164", "a\ufe0f\u0301",
+     # invisible marks that would count after a letter unless stripped
+     "a\u034f\u034f", "ab\u034f", "a\u180b\u180b", "ab\u180c", "ab\u180d", "ab\u180f",
+     "ab\u17b4", "ab\u17b5",
+     # accents are no letters: one letter with two accents, two with one
+     "a\u0301\u0301", "ab\u0301"],
 )
 def test_a_reason_of_invisible_fillers_or_bare_marks_is_refused(blank):
     with pytest.raises(ValidationError):
@@ -1992,6 +1997,6 @@ def test_a_reason_of_invisible_fillers_or_bare_marks_is_refused(blank):
         cancel_reason(blank)
 
 
-@pytest.mark.parametrize("ok", ["damaged in transit", "गलत माल"])
+@pytest.mark.parametrize("ok", ["damaged in transit", "गलत माल", "नहीं", "café"])
 def test_real_reasons_still_pass(ok):
     assert v.POLineCancel(reason=ok).reason == ok
