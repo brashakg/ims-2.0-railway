@@ -545,3 +545,42 @@ def test_reconcile_store_barcodes_is_retired_noop():
     assert out["retired"] is True
     assert out["applied"] is False
     assert "deleted" in out["error"]
+
+
+# ---------------------------------------------------------------------------
+# Multi-location PR 4, round 17: listings_for_skus follows the target
+# ---------------------------------------------------------------------------
+
+
+def test_listings_a_product_row_target_that_is_a_size_names_its_parent():
+    """Review round 3 test gap: a key whose target sits on a catalog_products
+    row's ecom, where that row is a variant-of twin (a size), is placed on
+    the PARENT twin, never on the size itself. Place it on the row's own id
+    -> {'c2': [...]} -> fails."""
+    from strict_fakes import StrictDB
+    from api.services.online_catalog import inventory_items_for_skus, listings_for_skus
+
+    db = StrictDB()
+    db.seed("catalog_products", [
+        {"id": "c1", "sku": "P-1", "ecom": {"shopify_product_id": "gid://shopify/Product/1", "status": "PUBLISHED"}},
+        {"id": "c2", "sku": "P-1-M", "ecom": {"shopify_inventory_item_id": "gid://shopify/InventoryItem/2",
+                                              "variant_of": {"twin_id": "c1", "sku": "P-1"}}},
+    ])
+    db.seed("catalog_variants", [])
+    assert inventory_items_for_skus(db, ["P-1-M"]) == {"P-1-M": "gid://shopify/InventoryItem/2"}
+    assert listings_for_skus(db, ["P-1-M"]) == {"c1": ["P-1-M"]}
+
+
+def test_listings_a_barcode_only_match_without_an_item_names_no_listing():
+    """Review round 3 test gap: a key that matches only another product's
+    item-less size row by barcode, with no product row of its own, names no
+    listing (the target names none either). Let any matched row name its
+    parent -> {'c3': ['X-9']} -> fails."""
+    from strict_fakes import StrictDB
+    from api.services.online_catalog import inventory_items_for_skus, listings_for_skus
+
+    db = StrictDB()
+    db.seed("catalog_products", [{"id": "c3", "sku": "P-3", "ecom": {"status": "DRAFT"}}])
+    db.seed("catalog_variants", [{"sku": "P-3-M", "barcode": "X-9", "parent_product_id": "c3"}])
+    assert inventory_items_for_skus(db, ["X-9"]) == {}
+    assert listings_for_skus(db, ["X-9"]) == {}

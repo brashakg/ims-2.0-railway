@@ -40,6 +40,9 @@ import { productApi, type CreateProductPayload } from '../../services/api/produc
 import type { DisplayFixture, } from '../../services/api/displayFixtures';
 import type { DisplayPlacement } from '../../services/api/displayPlacements';
 import { BarcodeManagementModal } from '../../components/inventory/BarcodeManagementModal';
+import { REORDER_LEVEL_ROLES } from './inventoryRoles';
+import { SHARES_ITEM_LABEL, isOnlineRow, isOnlineUnknown } from './sharedItem';
+import { ShopReorderLevel } from './ShopReorderLevel';
 import { UnitLabelsModal } from '../../components/labels/UnitLabelsModal';
 import { Pagination } from '../../components/common/Pagination';
 import { ImageLightbox } from '../../components/common/ImageLightbox';
@@ -97,6 +100,8 @@ export function InventoryStockPage() {
   const canAddProduct = hasRole(['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']);
   const canExport = hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']);
   const canManageBarcode = hasRole(['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'STORE_MANAGER']);
+  // THIS shop's reorder level (owner ruling D12): managers + admins set it.
+  const canSetReorderLevel = hasRole(REORDER_LEVEL_ROLES);
   // Mirrors the backend gate on GET /products/cataloguers (manager ladder).
   const canSeeCataloguers = hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER']);
 
@@ -146,9 +151,15 @@ export function InventoryStockPage() {
 
     const matchesCategory = !selectedCategory || sameCategory(item.category, selectedCategory);
 
-    const isOnline = !!getOnline(item)?.online;
+    // online null = IMS could not read which listings are live: the row is
+    // neither Online nor Offline (it shows Unverified), so only 'All' has it.
+    const o = getOnline(item);
+    // A live SKU that shares its Shopify item is online (the listing is
+    // live), so it stays in the Online filter; it has no Offline leg.
+    const unknown = isOnlineUnknown(o);
+    const isOnline = isOnlineRow(o);
     const matchesAvailability =
-      availabilityFilter === 'all' ? true : availabilityFilter === 'online' ? isOnline : !isOnline;
+      availabilityFilter === 'all' ? true : unknown ? false : availabilityFilter === 'online' ? isOnline : !isOnline;
 
     return matchesSearch && matchesCategory && matchesAvailability;
   });
@@ -166,9 +177,9 @@ export function InventoryStockPage() {
   );
 
   const getStockStatus = (item: StockItem) => {
-    const threshold = item.lowStockThreshold || item.minStock || 5;
     if (item.stock === 0) return { label: 'Out of Stock', class: 'badge-error' };
-    if (item.stock <= threshold) return { label: 'Low Stock', class: 'badge-warning' };
+    // The server decides against the product's own level; not set = no badge.
+    if (item.low_stock) return { label: 'Low Stock', class: 'badge-warning' };
     return { label: 'In Stock', class: 'badge-success' };
   };
 
@@ -218,7 +229,7 @@ export function InventoryStockPage() {
         esc(item.stock ?? 0),
         esc(item.reserved ?? 0),
         esc(available),
-        esc(online?.online ? 'Yes' : 'No'),
+        esc(online?.shares_item ? SHARES_ITEM_LABEL : online?.online ? 'Yes' : online && online.online === null ? 'Unverified' : 'No'),
         esc(online?.online ? (online.online_stock ?? '') : ''),
         esc(item.location || ''),
         esc(status),
@@ -579,6 +590,18 @@ export function InventoryStockPage() {
                             {item.reserved > 0 && (
                               <span className="text-xs text-amber-600 ml-1">+{item.reserved} reserved</span>
                             )}
+                            {storeId && item.id && (
+                              <div className="mt-0.5 whitespace-nowrap">
+                                <ShopReorderLevel
+                                  productId={item.id}
+                                  storeId={storeId}
+                                  level={item.reorder_point}
+                                  canEdit={canSetReorderLevel}
+                                  // The row AND the low-stock list/count.
+                                  onSaved={() => queryClient.invalidateQueries({ queryKey: ['inventory'] })}
+                                />
+                              </div>
+                            )}
                           </td>
                           {/* v2-2b: Zone column - primary placement. Cell click
                               deep-links to the Display layout SECTION URL with
@@ -614,6 +637,12 @@ export function InventoryStockPage() {
                       <td className="px-4 py-3 text-center">
                         {(() => {
                           const o = getOnline(item);
+                          if (o?.shares_item) {
+                            return <span className="text-xs text-blue-700">{SHARES_ITEM_LABEL}</span>;
+                          }
+                          if (o && o.online === null) {
+                            return <span className="text-xs text-amber-700">Unverified</span>;
+                          }
                           if (!o?.online) {
                             return <span className="text-xs text-gray-400">In-store only</span>;
                           }
@@ -728,13 +757,18 @@ export function InventoryStockPage() {
           ['Available', String(available)],
           [
             'Online',
-            online?.online
+            online?.shares_item
+              ? SHARES_ITEM_LABEL
+              : online?.online
               ? typeof online.online_stock === 'number'
                 ? `Yes (${online.online_stock} online)`
                 : 'Yes'
-              : 'In-store only',
+              : online && online.online === null
+                ? 'Unverified (could not read the website)'
+                : 'In-store only',
           ],
           ['Location', detailItem.location || '-'],
+          ['Reorder level (this shop)', detailItem.reorder_point == null ? 'not set' : String(detailItem.reorder_point)],
           // Attribution is a manager surface (mirrors the backend gate).
           ...(canSeeCataloguers
             ? ([['Catalogued by', detailItem.created_by_name || '-']] as Array<[string, string]>)

@@ -315,7 +315,7 @@ def _physical_readers(mongo_db, http, pid, barcode) -> Dict[str, int]:
 def _sellable_readers(mongo_db, pid, sku) -> Dict[str, int]:
     from api.routers.buy_desk import _on_hand_map
     from api.routers.inventory import _on_hand_by_product
-    from api.services import collection_insights, inventory_balancing
+    from api.services import collection_insights, inventory_balancing, reorder_policy
     from api.services import online_stock_writeback, online_sync_health
 
     db = _DBProxy(mongo_db)
@@ -332,6 +332,13 @@ def _sellable_readers(mongo_db, pid, sku) -> Dict[str, int]:
     )
     out["inventory_balancing._on_hand_by_product_store"] = int(
         inventory_balancing._on_hand_by_product_store(db, [pid]).get((pid, STORE), 0)
+        or 0
+    )
+    # the per-shop low-stock verdict compares a level with THIS count
+    out["reorder_policy.on_hand"] = int(
+        reorder_policy.on_hand(
+            mongo_db["stock_units"], store_id=STORE, product_ids=[pid]
+        ).get((pid, STORE), 0)
         or 0
     )
     out["online_stock_writeback._on_hand_for_skus"] = int(

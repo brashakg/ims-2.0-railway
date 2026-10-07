@@ -86,9 +86,10 @@ class _TaskRepo:
         self.docs: List[Dict[str, Any]] = []
 
     def find_many(self, query):
-        return [
-            t for t in self.docs if all(t.get(k) == v for k, v in (query or {}).items())
-        ]
+        def ok(val, cond):  # the dedupe read filters status with $in
+            return val in cond["$in"] if isinstance(cond, dict) else val == cond
+
+        return [t for t in self.docs if all(ok(t.get(k), v) for k, v in (query or {}).items())]
 
     def create(self, task):
         self.docs.append(dict(task))

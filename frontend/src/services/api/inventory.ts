@@ -822,6 +822,23 @@ export const vendorsApi = {
   // <date>" instead of the buyer guessing. Store-scoped + fail-soft on the
   // server: no history / DB trouble yields an empty `costs` map. Batch every
   // line's product_id into ONE call.
+  // The tax head each vendor's purchase carries at a shop, decided on the
+  // server (shop_gstin + classify_supply). true = IGST, false = CGST + SGST,
+  // null = cannot tell. Fail-soft: {} -> every card says "cannot tell".
+  getPoGstHeads: async (
+    storeId?: string,
+  ): Promise<{ shop_gstin: string; heads: Record<string, boolean | null> }> => {
+    try {
+      const response = await api.get('/vendors/po-gst-heads', {
+        params: storeId ? { store_id: storeId } : undefined,
+      });
+      const d = response.data ?? {};
+      return { shop_gstin: d.shop_gstin ?? '', heads: d.heads ?? {} };
+    } catch {
+      return { shop_gstin: '', heads: {} };
+    }
+  },
+
   getLastCost: async (
     vendorId: string,
     productIds: string[],
@@ -907,14 +924,6 @@ export const vendorsApi = {
         dc_matched: false,
         status: 'ACCEPTED',
       },
-    });
-    return response.data;
-  },
-
-  // F9 — draft a consolidated invoice from a set of DCs (does not persist).
-  draftInvoiceFromDCs: async (dcIds: string[], vendorId?: string) => {
-    const response = await api.get('/vendors/purchase-invoices/from-dcs', {
-      params: { dc_ids: dcIds.join(','), vendor_id: vendorId },
     });
     return response.data;
   },
@@ -1045,21 +1054,27 @@ export interface VarianceLine {
 // ============================================================================
 
 export const reorderApi = {
+  /** ONE shop's reorder level (owner ruling D12: levels are per shop).
+   *  null clears it = not set = no low-stock alert. */
+  setShopLevel: async (productId: string, storeId: string, level: number | null) => {
+    const response = await api.put(
+      `/inventory/reorder-levels/${encodeURIComponent(productId)}`,
+      { store_id: storeId, level },
+    );
+    return response.data as { product_id: string; store_id: string; level: number | null };
+  },
+
   updateReorderSettings: async (
     productId: string,
     settings: {
-      reorder_point: number;
       reorder_quantity: number;
       max_stock: number;
       lead_time_days: number;
     }
   ) => {
-    // Persist reorder settings via the SINGLE validated product-update path
-    // (`PUT /products/{id}` in routers/products.py). Previously this hit the
-    // now-retired, unvalidated `PUT /admin/products/{id}` -- consolidated so
-    // there is exactly one validated writer to the `products` collection.
-    // reorder_point / reorder_quantity / max_stock / lead_time_days are
-    // explicit optional fields on the backend ProductUpdate schema.
+    // Persist the product's chain-wide reorder settings via the SINGLE
+    // validated product-update path (`PUT /products/{id}` in
+    // routers/products.py). The reorder LEVEL is per shop: setShopLevel.
     const response = await api.put(`/products/${productId}`, settings);
     return response.data;
   },
