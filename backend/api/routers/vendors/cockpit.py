@@ -172,9 +172,12 @@ async def get_last_purchase_cost(
     costs: dict = {}
     try:
         # Newest POs for this vendor first; walk lines until every requested
-        # product has a price (or the cap is hit).
+        # product has a price (or the cap is hit). A DRAFT was never agreed and
+        # a CANCELLED order was never bought, so neither is a price paid -- the
+        # PO form would otherwise put a typo or a dropped quote over the
+        # catalogue cost, and that becomes the cost at goods-receipt acceptance.
         pos = po_repo.find_many(
-            {"vendor_id": vendor_id},
+            {"vendor_id": vendor_id, "status": {"$nin": ["DRAFT", "CANCELLED"]}},
             sort=[("created_at", -1)],
             limit=100,
         )

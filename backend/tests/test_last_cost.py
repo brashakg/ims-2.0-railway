@@ -25,17 +25,24 @@ class _PORepo:
         self._pos = pos
 
     def find_many(self, flt, sort=None, skip=0, limit=100):
-        # Honour the vendor filter + newest-first (the docs are pre-sorted here).
-        return [p for p in self._pos if p.get("vendor_id") == flt.get("vendor_id")]
+        # Honour the vendor + status filters, newest-first (docs pre-sorted here).
+        excluded = (flt.get("status") or {}).get("$nin", [])
+        return [
+            p
+            for p in self._pos
+            if p.get("vendor_id") == flt.get("vendor_id")
+            and p.get("status") not in excluded
+        ]
 
 
-def _po(po_id, po_number, created_at, items, store="S1"):
+def _po(po_id, po_number, created_at, items, store="S1", status="RECEIVED"):
     return {
         "po_id": po_id,
         "po_number": po_number,
         "vendor_id": "V1",
         "delivery_store_id": store,
         "created_at": created_at,
+        "status": status,
         "items": items,
     }
 
@@ -75,6 +82,21 @@ def test_returns_most_recent_price_per_product(monkeypatch):
     assert out["costs"]["P1"]["po_number"] == "PO-2"
     assert out["costs"]["P1"]["date"] == "2026-06-12"
     assert out["costs"]["P2"]["unit_price"] == 999.0  # only on the older PO
+
+
+def test_draft_and_cancelled_prices_are_not_last_paid(monkeypatch):
+    # The newest PO is CANCELLED (P1 at 9999) and a DRAFT carries P2 at 31000;
+    # only the older RECEIVED order is a price actually paid.
+    pos = [
+        _po("PO3", "PO-3", "2026-10-01", [{"product_id": "P1", "unit_price": 9999}], status="CANCELLED"),
+        _po("PO4", "PO-4", "2026-09-30", [{"product_id": "P2", "unit_price": 31000}], status="DRAFT"),
+        _po("PO1", "PO-1", "2026-09-01", [{"product_id": "P1", "unit_price": 3100}], status="RECEIVED"),
+    ]
+    monkeypatch.setattr(v, "get_purchase_order_repository", lambda: _PORepo(pos))
+    out = _call(vendor_id="V1", product_ids="P1,P2", current_user=_user())
+    assert out["costs"]["P1"]["unit_price"] == 3100.0
+    assert out["costs"]["P1"]["po_number"] == "PO-1"
+    assert "P2" not in out["costs"]
 
 
 def test_cross_store_price_not_leaked(monkeypatch):
