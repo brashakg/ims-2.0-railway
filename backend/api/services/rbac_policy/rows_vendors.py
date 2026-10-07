@@ -296,6 +296,13 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/vendors/purchase-invoices/from-grn/{grn_id}",
         "allowed": ACCOUNTS,
     },
+    # The form's live tax preview: what POST would book (same _bill_math),
+    # nothing written -- same accounting gate as the booking it previews.
+    {
+        "method": "POST",
+        "path": "/api/v1/vendors/purchase-invoices/preview",
+        "allowed": ACCOUNTS,
+    },
     # F9: consolidate N Delivery Challans into a draft bulk invoice (accounting
     # action -> ACCOUNTANT/ADMIN, same gate as from-grn).
     {
@@ -400,6 +407,13 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/vendors/last-cost",
+        "allowed": PURCHASE,
+    },
+    # The tax head each vendor's purchase carries at a shop (the PO composer
+    # and the Suppliers cards show it; same roles as the PO form itself).
+    {
+        "method": "GET",
+        "path": "/api/v1/vendors/po-gst-heads",
         "allowed": PURCHASE,
     },
     {

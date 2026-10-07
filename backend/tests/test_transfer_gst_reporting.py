@@ -38,8 +38,8 @@ Adversarial-review hardening (PR #899 follow-up), all tested here:
     as the orders in the return.
 
 All tests are pure (no live DB) via a small in-memory Mongo-subset evaluator
-(handles the exact operators the collectors use: $exists/$ne/$nin/$in/$gte/
-$lte/$or/$nor and aggregate $match+$group/$sum).
+(handles the exact operators the collectors use: $exists/$ne/$nin/$in (with
+patterns)/$gte/$lte/$lt/$or/$nor and aggregate $match+$group/$sum).
 """
 
 from __future__ import annotations
@@ -93,14 +93,24 @@ def _match(doc, query):
                         return False
                 elif op == "$in":
                     # Mongo: {$in: [null]} also matches a MISSING field --
-                    # doc.get() returning None reproduces that.
-                    if val not in arg:
+                    # doc.get() returning None reproduces that. A compiled
+                    # pattern in the list matches a string field (the GST
+                    # month's days, reports.gst_itc._itc_month).
+                    if not any(
+                        (isinstance(val, str) and bool(a.search(val)))
+                        if hasattr(a, "search")
+                        else val == a
+                        for a in arg
+                    ):
                         return False
                 elif op == "$gte":
                     if val is None or not (val >= arg):
                         return False
                 elif op == "$lte":
                     if val is None or not (val <= arg):
+                        return False
+                elif op == "$lt":
+                    if val is None or not (val < arg):
                         return False
                 else:
                     raise NotImplementedError(f"operator {op} not supported")
@@ -353,11 +363,18 @@ def test_intrastate_per_line_split_paisa_exact(static_rates):
     equals the rounded line sums even on odd-paise lines."""
     db = _mini_db()
     # ent_send JH -> a hypothetical ent_recv JH store: reuse mh_store but move
-    # it to state 20 for this test.
+    # it to state 20 on a Jharkhand registration of ent_recv -- the GSTIN
+    # decides the state (owner, 2026-09-30), so a declared state alone does
+    # not make the move intra-state.
+    recv_jh = "20BBGAA1234J1ZX"
     for s in db["stores"].docs:
         if s["store_id"] == "mh_store":
             s["state_code"] = "20"
             s["state"] = "Jharkhand"
+            s["gstin"] = recv_jh
+    for e in db["entities"].docs:
+        if e["entity_id"] == "ent_recv":
+            e["gstins"].append({"state_code": "20", "gstin": recv_jh})
     t = _mixed_transfer()
     # Odd-paise costs: 3 x 333.35 = 1000.05 @5%; 1 x 466.63 @18%.
     t["items"][0].update(
@@ -680,8 +697,10 @@ def test_missing_destination_gstin_stays_empty_and_loud(static_rates, monkeypatc
     file. The old gstins[0] fallback stamped the SENDER's own GSTIN as the
     recipient (a supply-to-self B2B row the portal rejects) and the validation
     never fired. Now: recipient stays '', the GSTR-1 validation flags it, the
-    portal export drops the row, and the ITC falls back to the RECEIVING store
-    only."""
+    portal export drops the row. Its credit is on NO return: the receiving
+    shop holds no GSTIN of its company, so it files none (the shop-GSTIN rule,
+    org_validation.shop_gstin) -- the Cross-Check lists it as credit left
+    off GSTR-3B instead of counting it on a return nobody files."""
     from api.services.gstn_export import to_gstr1_json
 
     db = _mini_db()
@@ -709,11 +728,13 @@ def test_missing_destination_gstin_stays_empty_and_loud(static_rates, monkeypatc
     out = to_gstr1_json(rep, gstin=rep["gstin"], period="2026-06")
     assert out["b2b"] == []
 
-    # ITC fallback: recipient GSTIN empty -> only the RECEIVING store claims.
+    # No GSTIN to receive on -> no return claims it, and the check says so.
     recv_3b = reports._compute_gstr3b("2026-06", "mh_send_branch")
     send_3b = reports._compute_gstr3b("2026-06", "jh_store")
-    assert recv_3b["itcAvailable"]["integratedTax"] == 460.0
+    assert recv_3b["itcAvailable"]["integratedTax"] == 0.0
     assert send_3b["itcAvailable"]["integratedTax"] == 0.0
+    left_off = reports._itc_unplaced(db, 2026, 6, 30, "ent_send")
+    assert (left_off["count"], left_off["tax"]) == (1, 460.0), left_off
 
 
 # ============================================================================

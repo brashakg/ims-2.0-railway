@@ -5,13 +5,11 @@ A single fail-soft summary of the IMS <-> online-store (Shopify) sync for
 the SUPERADMIN integrations/status surface (council D10). It answers:
 
   1. last_shopify_sync    -- when did NEXUS last successfully sync Shopify?
-  2. pending_reconcile    -- SKUs mis-listed online (oversell-risk +
-                             over-allocated). Reuses /catalog/online-stock-reconcile.
-  3. failed_webhooks      -- inbound webhook envelopes that failed or were skipped.
-  4. drift                -- gids that Shopify updated AFTER our last_pushed_at
+  2. failed_webhooks      -- inbound webhook envelopes that failed or were skipped.
+  3. drift                -- gids that Shopify updated AFTER our last_pushed_at
                              (dual-writer violation detector, Step 3).
-  5. parity              -- catalog counts vs what has a Shopify gid (Step 6a).
-  6. uploads_audit        -- product images still pointing at /uploads/ local paths
+  4. parity              -- catalog counts vs what has a Shopify gid (Step 6a).
+  5. uploads_audit        -- product images still pointing at /uploads/ local paths
                              (Step 6b; hard cutover prereq).
 
 Additional callables (NEXUS / endpoint use):
@@ -47,8 +45,8 @@ from .item_events import StockState, on_hand_match, status_match
 
 logger = logging.getLogger(__name__)
 
-# Cap how many products we scan for the reconcile diff so the status tile stays
-# cheap even on a large catalog. Matches the catalog endpoint's default ceiling.
+# Cap how many products the Stock Tally scans so it stays cheap on a large
+# catalog. Matches the catalog reconciliation endpoint's default ceiling.
 _RECONCILE_SCAN_LIMIT = 1000
 
 
@@ -139,9 +137,10 @@ def _on_hand_by_product(
     An unreadable shop list is UNKNOWN -> None, never "every unit counts" and
     never "no unit counts".
 
-    Still POOLED, though (PR 4's job): it compares an IMS total that includes
-    the deliberately unmapped Gangadham Pune against a per-location Shopify
-    sum, so Pune's shelf still reads as covered online when it is invisible."""
+    A PHYSICAL count for display only (the shelf total, deliberately unmapped
+    Pune included). It never decides an oversell: the online comparison is per
+    Shopify location (rule_by_location + shopify_stock_parity.unbacked_units),
+    because a pooled total let Pune's shelf back another shop's listing."""
     if db is None or not product_ids:
         return {}
     match: Dict[str, Any] = {
@@ -182,83 +181,55 @@ def _on_hand_by_product(
     return out
 
 
-def pending_reconcile_summary(
-    db, safety_buffer: int = 0, limit: int = _RECONCILE_SCAN_LIMIT
-) -> Dict[str, Any]:
-    """Count SKUs whose online listing is out of sync with physical on-hand,
-    REUSING the exact reconcile logic behind /catalog/online-stock-reconcile.
+def rule_by_location(db, skus: List[str], *, store_id: Optional[str] = None):
+    """``(shelf, sent, mapped)`` for an IMS-vs-Shopify comparison PER LOCATION:
+    ``shelf`` is each shop's physical shelf (online_stock_writeback.
+    shelf_quantities_for_skus: what backs a listing, the OVERSELL line -- no
+    buffer, no online block: a blocked SKU's shelf still backs what is
+    listed, so listing it is OVER-ALLOCATED, never an oversell); ``sent`` is
+    THE ONE RULE at the writer's own buffer with the block
+    (online_quantities_for_skus: sellable / recommended / OVER-ALLOCATED);
+    ``mapped`` is the writer's own shop -> Shopify location map
+    (inventory._mapped). Both reads are the writer's own functions.
+    With ``store_id`` the map is that shop's own entry only ({} for a shop
+    with no usable location), so another shop's failed read never blanks it.
+    ``store_id`` is spelled as the map's keys are (stripped: the route
+    strips it once, where it arrives). An EMPTY store_id is no filter --
+    all stores -- exactly as the route and
+    _on_hand_by_product read it (a ``store_id=`` query string once narrowed
+    the map to {} here while the shelf stayed pooled: every listing looked
+    unclaimed and every online SKU read OVERSELL_RISK).
 
-    Returns a small summary: total scanned, oversell_risk, over_allocated,
-    pending (= oversell_risk + over_allocated), oversell_risk_units, plus
-    online_configured (IMS Mongo carries Shopify-mapped objects). NOTE: this
-    sync tile has no live Shopify read, so listed quantities are unknown here
-    and only structural mismatches surface; the live quantity comparison is the
-    nightly shopify_stock_parity check + the stock-tally endpoint.
-    Fail-soft -> zeros."""
-    from .online_catalog import online_mapping_available, online_status_for_skus
-    from . import stock_allocation
-
-    base = {
-        "scanned": 0,
-        "oversell_risk": 0,
-        "over_allocated": 0,
-        "pending": 0,
-        "oversell_risk_units": 0,
-        "onhand_unknown": 0,
-        "online_configured": online_mapping_available(db),
-    }
-    if db is None:
-        return base
-
+    ``shelf`` / ``sent`` are None when UNKNOWN (the shop list, the block, the
+    buffer or any shop in the map could not be read): unknown is never a 0
+    behind a listing. The whole answer is None only when the map itself could
+    not be read. Never raises. ponytail: every shop's shelf is read twice per
+    page load; one read + a derived buffer if a page ever measures slow."""
     try:
-        products = list(
-            _coll(db, "products")
-            .find(
-                {"sku": {"$nin": [None, ""]}, "is_active": {"$ne": False}},
-                {"_id": 0, "product_id": 1, "sku": 1},
-            )
-            .limit(limit)
-        )
+        from .online_stock_writeback import online_quantities_for_skus, shelf_quantities_for_skus
+        from .shopify_push.inventory import _mapped, _stores
+
+        mapped = _mapped(_stores(db))
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[SYNC_HEALTH] products scan failed: %s", exc)
-        return base
-    if not products:
-        return base
+        logger.warning("[STOCK_TALLY] shop -> location map unreadable: %s", exc)
+        return None
+    if store_id:
+        mapped = {store_id: mapped[store_id]} if store_id in mapped else {}
 
-    pids = [p.get("product_id") for p in products if p.get("product_id")]
-    on_hand = _on_hand_by_product(db, pids)
-    skus = [p.get("sku") for p in products if p.get("sku")]
-    online = online_status_for_skus(db, skus)  # {} on any failure
+    def known(read):
+        try:
+            quantities = read(db, skus)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[STOCK_TALLY] per-location rule unreadable: %s", exc)
+            return None
+        if skus and not quantities:
+            return None
+        # A shop whose shelf read failed is absent from EVERY sku's inner dict.
+        if any(sid not in per_shop for per_shop in quantities.values() for sid in mapped):
+            return None
+        return quantities
 
-    items = []
-    for p in products:
-        sku = p.get("sku")
-        o = online.get(sku, {})
-        items.append(
-            {
-                "sku": sku,
-                # UNKNOWN on-hand is None (ONHAND_UNKNOWN), never 0.
-                "in_store": None if on_hand is None else on_hand.get(p.get("product_id"), 0),
-                # Listed qty is unknown without a live Shopify read (None -> 0
-                # in the pure reconciler; an unknown qty can never false-flag).
-                "online": int(o.get("online_stock") or 0),
-                "is_online": bool(o.get("online")),
-            }
-        )
-
-    result = stock_allocation.reconcile_items(items, safety_buffer=safety_buffer)
-    summary = result.get("summary", {})
-    oversell = int(summary.get("oversell_risk") or 0)
-    over_alloc = int(summary.get("over_allocated") or 0)
-    return {
-        "scanned": int(summary.get("total") or 0),
-        "oversell_risk": oversell,
-        "over_allocated": over_alloc,
-        "pending": oversell + over_alloc,
-        "oversell_risk_units": int(summary.get("oversell_risk_units") or 0),
-        "onhand_unknown": int(summary.get("onhand_unknown") or 0),
-        "online_configured": online_mapping_available(db),
-    }
+    return known(shelf_quantities_for_skus), known(online_quantities_for_skus), mapped
 
 
 def _reserved_by_product(
@@ -322,52 +293,87 @@ def _recommended_buffer(on_hand: int) -> int:
     return min(on_hand, max(1, ceil(on_hand * 0.05)))
 
 
+def _tally_products(db, limit: int) -> List[Dict[str, Any]]:
+    """The spine rows the Stock Tally assesses (one read, shared by
+    stock_tally_live's Shopify read and stock_tally_summary's rows). Raises
+    on a failed read."""
+    return list(
+        _coll(db, "products")
+        .find(
+            {"sku": {"$nin": [None, ""]}, "is_active": {"$ne": False}},
+            {"_id": 0, "product_id": 1, "sku": 1, "name": 1},
+        )
+        .limit(limit)
+    )
+
+
 def stock_tally_summary(
     db,
     limit: int = _RECONCILE_SCAN_LIMIT,
-    online_qty: Optional[Dict[str, int]] = None,
-    listed_coverage: Optional[Dict[str, int]] = None,
+    live: Optional[Dict[str, Any]] = None,
+    on_live: Optional[set] = None,
+    products: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """READ-ONLY per-SKU reconciliation of online-listed qty vs real on-hand vs
     already-reserved -- the Online Store "Stock tally" dashboard (BVI Phase 5).
 
-    "Which SKUs are online" comes from IMS Mongo (online_catalog). The LISTED
-    quantity lives on Shopify; pass ``online_qty`` ({sku: live available}, from
-    live_listed_qty_for_skus / the stock-tally endpoint) to compare against it.
-    Without it, online_listed_qty is reported as None (honest unknown -- never
-    a fake 0) and oversell_risk stays False for those rows.
+    "Which SKUs are online" is THE one reader the nightly parity compares
+    by (inventory.skus_on_live_listings: the SKU's listing -- a size's
+    parent's -- is live on Shopify; a draft or taken-down one sells nothing
+    and is not assessed). ``on_live`` is that answer when the caller already
+    read it (stock_tally_live reads the products and the live set ONCE, for
+    the Shopify read and the rows alike, and hands both down as ``products``
+    / ``on_live``); else both are read here, STRICT: a failed products or
+    live-listing read tallies nothing and says so
+    (summary.live_listings_unknown), never "nothing is online".
+    No live listing at all is full coverage (nothing to read), never
+    "Shopify unavailable". The LISTED
+    quantity lives on Shopify, PER LOCATION; pass ``live`` (the
+    live_listed_qty_for_skus answer: qty, variants, levels, live, mapped) to
+    compare against it. Without it, online_listed_qty is reported as None
+    (honest unknown -- never a fake 0) and oversell_risk stays False.
 
     For each online-eligible SKU it reports:
-      - online_listed_qty : live Shopify available when known, else None
-      - on_hand           : AVAILABLE serialized stock_units (reuses
-                            _on_hand_by_product -- NOT re-derived)
+      - online_listed_qty : live Shopify available, summed over parity's
+                            level (every mapped location in full, any other
+                            the storefront sells from), else None
+      - on_hand           : AVAILABLE units on every physical shelf
+                            (_on_hand_by_product; display only -- unmapped
+                            Pune included, and it is sold online nowhere)
       - reserved          : RESERVED serialized stock_units (reuses
                             _reserved_by_product)
-      - sellable          : max(0, on_hand - reserved)
+      - sellable          : THE ONE RULE (the writer's own call, its buffer and
+                            the SUPERADMIN online block) summed over the MAPPED
+                            shops -- what IMS lets the website sell
       - recommended_buffer: a conservative reserve suggestion (not enforced)
-      - oversell_risk     : online_listed_qty > sellable, only when the listed
-                            qty is actually known
+      - oversell_risk     : some Shopify location the storefront sells from
+                            lists more than the SHELF
+                            behind it (the physical shelf -- no buffer, no
+                            online block; the same line the
+                            reconciliation screen draws), counted by
+                            shopify_stock_parity.unbacked_units, only when the
+                            listed qty is actually known -- a location listing
+                            against a shop IMS could not read is a risk, never
+                            "no risk". Per location, never pooled.
 
     Plus a summary {skus_checked, at_risk_count, total_online_listed,
     total_on_hand, total_reserved, total_sellable, online_configured,
     listed_qty_live, listed_live_rows, listed_mapped_rows}.
 
-    ``listed_coverage`` ({live, mapped} from live_listed_qty_for_skus) makes
-    partial coverage explicit: listed_qty_live is True ONLY on FULL mapped
-    coverage (audit fix-round P1 -- a partially-covered read must not present
-    itself as fully live). Rows outside coverage stay None/no-risk.
+    ``live``'s coverage counts ({live, mapped}) make partial coverage
+    explicit: listed_qty_live is True ONLY on FULL mapped coverage (audit
+    fix-round P1 -- a partially-covered read must not present itself as fully
+    live). Rows outside coverage stay None/no-risk.
 
     100% read-only + fail-soft: no DB -> empty envelope. NEVER mutates stock,
     NEVER reserves a unit."""
-    from .online_catalog import online_mapping_available, online_status_for_skus
+    from .online_catalog import online_mapping_available
+    from .shopify_push.inventory import skus_on_live_listings
+    from .shopify_stock_parity import unbacked_units
 
-    live_rows = mapped_rows = 0
-    if online_qty is not None:
-        live_rows = len(online_qty)
-        mapped_rows = len(online_qty)
-    if listed_coverage:
-        live_rows = int(listed_coverage.get("live") or 0)
-        mapped_rows = int(listed_coverage.get("mapped") or 0)
+    online_qty: Optional[Dict[str, int]] = (live or {}).get("qty") if live else None
+    live_rows = int((live or {}).get("live") or 0)
+    mapped_rows = int((live or {}).get("mapped") or 0)
     # "Live" only when we actually read Shopify AND covered every mapped SKU.
     listed_live = online_qty is not None and mapped_rows > 0 and live_rows >= mapped_rows
     base: Dict[str, Any] = {
@@ -388,73 +394,86 @@ def stock_tally_summary(
     if db is None:
         return base
 
-    try:
-        products = list(
-            _coll(db, "products")
-            .find(
-                {"sku": {"$nin": [None, ""]}, "is_active": {"$ne": False}},
-                {"_id": 0, "product_id": 1, "sku": 1, "name": 1},
-            )
-            .limit(limit)
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[STOCK_TALLY] products scan failed: %s", exc)
-        return base
+    if products is None:
+        try:
+            products = _tally_products(db, limit)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[STOCK_TALLY] products scan failed: %s", exc)
+            # Which SKUs exist is unknown: never "nothing listed online".
+            base["summary"]["live_listings_unknown"] = True
+            base["summary"]["listed_qty_live"] = False
+            return base
     if not products:
         return base
 
     pids = [p.get("product_id") for p in products if p.get("product_id")]
+    skus = [p.get("sku") for p in products if p.get("sku")]
+    if on_live is None:
+        # THE one "is this listing live on Shopify" reader, shared with the
+        # nightly parity and the reconciliation screen, read STRICT: a dead
+        # read is unknown -- nothing tallied, and the page says why.
+        try:
+            on_live = skus_on_live_listings(db, skus, strict=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[STOCK_TALLY] live-listing read failed: %s", exc)
+            base["summary"]["live_listings_unknown"] = True
+            base["summary"]["listed_qty_live"] = False
+            return base
+    if not on_live:
+        # No live listing: nothing to read from Shopify -- covered, never
+        # "Shopify unavailable".
+        base["summary"]["listed_qty_live"] = True
     on_hand = _on_hand_by_product(db, pids)
-    if on_hand is None:
+    # `sent` carries the SUPERADMIN online block (0 at every shop); `shelf` does not.
+    shelf, sent, mapped = (rule_by_location(db, skus) if on_hand is not None else None) or (None, None, {})
+    if on_hand is None or shelf is None or sent is None:
         # UNKNOWN is not "every shelf empty": nothing is tallied, and the
         # page says why instead of printing 0 on hand for every listed SKU.
         base["summary"]["on_hand_unknown"] = True
         return base
+    # OVERSELL is judged against the SHELF (no buffer, no block), exactly as the
+    # reconciliation screen judges it; the buffer is what `sellable` shows.
+    # The same two per-location counts the reconciliation screen sorts by:
+    # beyond the shelf (the risk) and beyond the writer's number (the order).
+    unbacked, excess = (
+        (
+            unbacked_units(live.get("variants") or [], shelf, live.get("selling") or {}, mapped),
+            unbacked_units(live.get("variants") or [], sent, live.get("levels") or {}, mapped),
+        )
+        if live
+        else ({}, {})
+    )
     reserved = _reserved_by_product(db, pids)
-    skus = [p.get("sku") for p in products if p.get("sku")]
-    online = online_status_for_skus(db, skus)  # {} on any failure
-
-    # SUPERADMIN "block a collection from online sale": a product in an
-    # online_sync_blocked collection is NOT sellable online (sellable forced to 0
-    # below) even if physically in stock. Resolve the blocked subset once.
-    # Fail-soft -> empty set.
-    try:
-        from .online_block import blocked_skus as _blocked_skus
-
-        blocked = _blocked_skus(db, [s for s in skus if s])
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("[STOCK_TALLY] block lookup skipped: %s", exc)
-        blocked = set()
 
     items: List[Dict[str, Any]] = []
+    keys: List[tuple] = []
     at_risk = 0
     tot_listed = tot_on_hand = tot_reserved = tot_sellable = 0
 
     for p in products:
         sku = p.get("sku")
         pid = p.get("product_id")
-        o = online.get(sku, {})
-        # Only assess SKUs that are actually listed online. A product that is
-        # not online can't oversell online, so it is skipped from the tally
-        # (the reconcile screen elsewhere shows the full catalog).
-        if not bool(o.get("online")):
+        # Only assess SKUs whose listing is live on Shopify (the same reader
+        # parity compares by). A draft or taken-down listing sells nothing,
+        # so it is skipped from the tally (the reconcile screen elsewhere
+        # shows the full catalog).
+        if str(sku or "").strip() not in on_live:
             continue
         oh = int(on_hand.get(pid, 0) or 0)
         rv = int(reserved.get(pid, 0) or 0)
-        # A blocked-collection product is never sellable online regardless of
-        # physical stock (a brand ban); force its sellable to 0 so it can never
-        # show as available online.
-        # `on_hand` is the SELLABLE reader (AVAILABLE-ish only) and RESERVED
-        # is a different status, so the two counts are DISJOINT -- the reserved
-        # units were never inside `oh`. Subtracting them counted every
-        # reservation twice and under-stated what the storefront may list.
-        sellable = 0 if sku in blocked else oh
+        # What the WRITER sends to the mapped shops' locations. RESERVED is a
+        # different status from on hand, so it was never inside the rule's
+        # shelf count -- subtracting it would count every reservation twice.
+        per_shop = sent.get(sku) or {}
+        sellable = sum(int(per_shop.get(sid, 0) or 0) for sid in mapped)
         # Listed qty: only from a live Shopify read (online_qty). Unknown ->
         # None, and an unknown quantity can never flag (or hide) a risk row.
         listed: Optional[int] = None
         if online_qty is not None and online_qty.get(sku) is not None:
             listed = int(online_qty.get(sku) or 0)
-        risk = listed is not None and listed > sellable
+        # None = a location lists units against a shelf IMS could not read:
+        # unknown is never "no risk".
+        risk = listed is not None and unbacked.get(sku, 0) != 0
         if risk:
             at_risk += 1
         tot_listed += listed or 0
@@ -473,14 +492,12 @@ def stock_tally_summary(
                 "oversell_risk": risk,
             }
         )
+        keys.append((0 if risk else 1, -(unbacked.get(sku) or 0), -(excess.get(sku) or 0)))
 
-    # Worst first: oversell-risk rows on top, then by how far over they list.
-    items.sort(
-        key=lambda r: (
-            0 if r["oversell_risk"] else 1,
-            -((r["online_listed_qty"] or 0) - r["sellable"]),
-        )
-    )
+    # Worst first, per location (never listed-total minus sellable-total):
+    # oversell-risk rows on top, most units no shelf backs first, then by the
+    # units listed beyond what the writer sends.
+    items = [r for _, r in sorted(zip(keys, items), key=lambda kr: kr[0])]
 
     return {
         "items": items,
@@ -492,7 +509,7 @@ def stock_tally_summary(
             "total_reserved": tot_reserved,
             "total_sellable": tot_sellable,
             "online_configured": online_mapping_available(db),
-            "listed_qty_live": listed_live,
+            "listed_qty_live": listed_live or not on_live,
             "listed_live_rows": live_rows,
             "listed_mapped_rows": mapped_rows,
         },
@@ -515,11 +532,29 @@ async def live_listed_qty_for_skus(
     Returns None when the live read is unavailable (no creds / no mapping /
     read error), else:
         {
-          "qty":    {sku: available},  # only SKUs Shopify actually returned
-          "mapped": int,               # online-mapped SKUs in the input
-          "live":   int,               # == len(qty) (may be < mapped)
-          "capped": bool,              # True when mapped > cap
+          "qty":      {sku: available},  # `levels` summed; only SKUs
+                                         # Shopify actually returned
+          "variants": [{sku, inventory_item_id}],  # the SKUs read
+          "levels":   {inventory_item_id: {location_gid: available}},
+                      # parity's view: every MAPPED location in full, any
+                      # other less the locations Shopify's list proves
+                      # cannot sell online (online_non_selling_locations)
+          "selling":  {inventory_item_id: {location_gid: available}},
+                      # less EVERY such location, mapped or not
+          "mapped":   int,               # online-mapped SKUs in the input
+          "live":     int,               # == len(qty) (may be < mapped)
+          "capped":   bool,              # True when mapped > cap
         }
+    Decided 2026-10-01: parity measures whether Shopify holds the writer's
+    number at each mapped location, so ``levels`` (parity's full level) is
+    what the Online column and the OVER_ALLOCATED verdict read -- a shop's
+    reconcile view shows the two numbers its drift task names (the verdicts
+    are different questions: OVER_ALLOCATED is any unit listed past the
+    writer's number; parity drift is either way, past its tolerance where
+    the writer sends more than 0) -- and ``selling`` is
+    what the oversell verdict reads (units at a location that cannot sell
+    online oversell nothing). Both per location, via
+    shopify_stock_parity.unbacked_units; ``qty`` is for display only.
     READ-ONLY + fail-soft, never raises."""
     try:
         from .shopify_push import _has_shopify_creds
@@ -527,7 +562,7 @@ async def live_listed_qty_for_skus(
         if not _has_shopify_creds(db):
             return None
         from .online_catalog import inventory_items_for_skus
-        from .shopify_stock_parity import _shopify_available_by_item
+        from .shopify_stock_parity import online_non_selling_locations, shopify_levels_by_item
 
         clean = [str(s).strip() for s in (skus or []) if str(s or "").strip()]
         # Mapped FIRST, then cap -- preserving the caller's SKU order.
@@ -538,18 +573,42 @@ async def live_listed_qty_for_skus(
         cap = max(0, int(cap))
         capped = len(mapped_ordered) > cap
         inv_map = {s: inv_map_full[s] for s in mapped_ordered[:cap]}
-        avail = await _shopify_available_by_item(
-            db, sorted(set(inv_map.values()))
-        )
+        levels = await shopify_levels_by_item(db, sorted(set(inv_map.values())))
+        if levels is None:
+            return None
+        # An item Shopify answered null (deleted there) is listed-UNKNOWN on
+        # these screens, as an unread batch is: absent, never a level. A
+        # location Shopify's list proves cannot sell online (inactive, or
+        # unticked for online orders -- the writer's own rule) oversells
+        # nothing, so `selling` drops it; one missing from that list still
+        # counts (unknown). `levels` is parity's own view: a MAPPED location
+        # in full (the writer writes its number there, sells or not -- parity
+        # files drift on it), any other location only while it sells.
+        dead = await online_non_selling_locations(db)
+        claimed: set = set()
+        if dead:
+            from .shopify_push.inventory import _mapped, _stores
+
+            claimed = set(_mapped(_stores(db)).values())
+        levels = {
+            inv: {g: q for g, q in per.items() if g in claimed or g not in dead}
+            for inv, per in levels.items()
+            if per is not None
+        }
+        selling = {inv: {g: q for g, q in per.items() if g not in dead} for inv, per in levels.items()}
+        # LISTED is parity's level, summed.
         qty: Dict[str, int] = {}
         for sku, inv in inv_map.items():
-            q = avail.get(inv)
-            if q is not None:
-                qty[sku] = int(q)
+            per_location = levels.get(inv)
+            if per_location is not None:
+                qty[sku] = sum(int(q) for q in per_location.values())
         if not qty:
             return None
         return {
             "qty": qty,
+            "variants": [{"sku": s, "inventory_item_id": inv} for s, inv in inv_map.items()],
+            "levels": levels,
+            "selling": selling,
             "mapped": len(mapped_ordered),
             "live": len(qty),
             "capped": capped,
@@ -561,33 +620,32 @@ async def live_listed_qty_for_skus(
 
 async def stock_tally_live(db, limit: int = _RECONCILE_SCAN_LIMIT) -> Dict[str, Any]:
     """stock_tally_summary with LIVE Shopify listed quantities: reads the real
-    'available' per online-mapped SKU (creds-gated, read-only) and feeds it
-    into the pure tally WITH its coverage counts, so partial coverage is
-    explicit (listed_qty_live is only True on full mapped coverage). Degrades
-    to the honest-unknown tally (listed None) when the live read is
+    'available' per online-mapped SKU and location (creds-gated, read-only)
+    and feeds it into the tally WITH its coverage counts, so partial coverage
+    is explicit (listed_qty_live is only True on full mapped coverage).
+    Degrades to the honest-unknown tally (listed None) when the live read is
     unavailable. Never raises."""
-    online_qty: Optional[Dict[str, int]] = None
-    coverage: Optional[Dict[str, int]] = None
+    live: Optional[Dict[str, Any]] = None
+    on_live: Optional[set] = None
+    products: Optional[List[Dict[str, Any]]] = None
     try:
-        products = list(
-            _coll(db, "products")
-            .find(
-                {"sku": {"$nin": [None, ""]}, "is_active": {"$ne": False}},
-                {"_id": 0, "sku": 1},
-            )
-            .limit(limit)
-        )
+        # ONE products read for the Shopify read and the rows: a SKU in a
+        # second read but not the first would be skipped under "covered".
+        products = _tally_products(db, limit)
         skus = [p.get("sku") for p in products if p.get("sku")]
         if skus:
-            live = await live_listed_qty_for_skus(db, skus)
-            if live is not None:
-                online_qty = live["qty"]
-                coverage = {"live": live["live"], "mapped": live["mapped"]}
+            from .shopify_push.inventory import skus_on_live_listings
+
+            # ONE strict read of the live set, for the Shopify read AND the
+            # rows (a second read could disagree with the first). A failure
+            # leaves on_live None: the tally reads it again and reports a
+            # dead read as unknown.
+            on_live = skus_on_live_listings(db, skus, strict=True)
+            live_skus = [s for s in skus if str(s).strip() in on_live]
+            live = await live_listed_qty_for_skus(db, live_skus) if live_skus else None
     except Exception as exc:  # noqa: BLE001
         logger.debug("[STOCK_TALLY] live scan skipped: %s", exc)
-    return stock_tally_summary(
-        db, limit=limit, online_qty=online_qty, listed_coverage=coverage
-    )
+    return stock_tally_summary(db, limit=limit, live=live, on_live=on_live, products=products)
 
 
 def failed_webhook_summary(db) -> Dict[str, Any]:
@@ -702,7 +760,7 @@ def fulfillment_store_health(db) -> Dict[str, Any]:
     return out
 
 
-def sync_health(db, safety_buffer: int = 0) -> Dict[str, Any]:
+def sync_health(db) -> Dict[str, Any]:
     """Assemble the full online-store sync-health summary. Fully fail-soft:
     each section degrades to its empty/zero shape independently, so the status
     tile always renders.
@@ -711,6 +769,13 @@ def sync_health(db, safety_buffer: int = 0) -> Dict[str, Any]:
     Shopify creds are absent (the common case during build) it degrades to
     {checked: False, reason: ...}. A live check requires awaiting detect_drift()
     directly -- sync_health calls the sync shim which is a no-op without creds.
+
+    There is no oversell count here: the tile has no live Shopify read, and
+    an oversell is decided per Shopify location against a LIVE level (the
+    reconciliation screen and the Stock Tally, via
+    shopify_stock_parity.unbacked_units). The pooled `reconcile` block it used
+    to carry compared nothing (its listed qty was always 0) and was a second,
+    pooled copy of that rule -- deleted in multi-location PR 4.
 
     The `fulfillment_store` block (R6) warns when online orders would decrement
     stock at a store that holds no serialized units (a silent oversell footgun).
@@ -731,7 +796,6 @@ def sync_health(db, safety_buffer: int = 0) -> Dict[str, Any]:
         "last_shopify_sync": last_shopify_sync(db),
         "last_successful_shopify_sync_at": last_successful_shopify_sync_at(db),
         "catalog_push": last_catalog_push(db),
-        "reconcile": pending_reconcile_summary(db, safety_buffer=safety_buffer),
         "webhooks": failed_webhook_summary(db),
         "drift": drift,
         "fulfillment_store": fulfillment_store_health(db),

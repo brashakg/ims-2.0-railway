@@ -41,6 +41,7 @@ import type { DisplayFixture, } from '../../services/api/displayFixtures';
 import type { DisplayPlacement } from '../../services/api/displayPlacements';
 import { BarcodeManagementModal } from '../../components/inventory/BarcodeManagementModal';
 import { REORDER_LEVEL_ROLES } from './inventoryRoles';
+import { SHARES_ITEM_LABEL, isOnlineRow, isOnlineUnknown } from './sharedItem';
 import { ShopReorderLevel } from './ShopReorderLevel';
 import { UnitLabelsModal } from '../../components/labels/UnitLabelsModal';
 import { Pagination } from '../../components/common/Pagination';
@@ -150,9 +151,15 @@ export function InventoryStockPage() {
 
     const matchesCategory = !selectedCategory || sameCategory(item.category, selectedCategory);
 
-    const isOnline = !!getOnline(item)?.online;
+    // online null = IMS could not read which listings are live: the row is
+    // neither Online nor Offline (it shows Unverified), so only 'All' has it.
+    const o = getOnline(item);
+    // A live SKU that shares its Shopify item is online (the listing is
+    // live), so it stays in the Online filter; it has no Offline leg.
+    const unknown = isOnlineUnknown(o);
+    const isOnline = isOnlineRow(o);
     const matchesAvailability =
-      availabilityFilter === 'all' ? true : availabilityFilter === 'online' ? isOnline : !isOnline;
+      availabilityFilter === 'all' ? true : unknown ? false : availabilityFilter === 'online' ? isOnline : !isOnline;
 
     return matchesSearch && matchesCategory && matchesAvailability;
   });
@@ -222,7 +229,7 @@ export function InventoryStockPage() {
         esc(item.stock ?? 0),
         esc(item.reserved ?? 0),
         esc(available),
-        esc(online?.online ? 'Yes' : 'No'),
+        esc(online?.shares_item ? SHARES_ITEM_LABEL : online?.online ? 'Yes' : online && online.online === null ? 'Unverified' : 'No'),
         esc(online?.online ? (online.online_stock ?? '') : ''),
         esc(item.location || ''),
         esc(status),
@@ -630,6 +637,12 @@ export function InventoryStockPage() {
                       <td className="px-4 py-3 text-center">
                         {(() => {
                           const o = getOnline(item);
+                          if (o?.shares_item) {
+                            return <span className="text-xs text-blue-700">{SHARES_ITEM_LABEL}</span>;
+                          }
+                          if (o && o.online === null) {
+                            return <span className="text-xs text-amber-700">Unverified</span>;
+                          }
                           if (!o?.online) {
                             return <span className="text-xs text-gray-400">In-store only</span>;
                           }
@@ -744,11 +757,15 @@ export function InventoryStockPage() {
           ['Available', String(available)],
           [
             'Online',
-            online?.online
+            online?.shares_item
+              ? SHARES_ITEM_LABEL
+              : online?.online
               ? typeof online.online_stock === 'number'
                 ? `Yes (${online.online_stock} online)`
                 : 'Yes'
-              : 'In-store only',
+              : online && online.online === null
+                ? 'Unverified (could not read the website)'
+                : 'In-store only',
           ],
           ['Location', detailItem.location || '-'],
           ['Reorder level (this shop)', detailItem.reorder_point == null ? 'not set' : String(detailItem.reorder_point)],
