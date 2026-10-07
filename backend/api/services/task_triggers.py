@@ -177,6 +177,22 @@ def _person_holding(role: str, store_id: Optional[str]) -> Optional[str]:
     return None
 
 
+def active_tasks(repo: Any, source_ref: Any) -> List[Dict[str, Any]]:
+    """The ACTIVE (open / in progress / escalated) tasks on ``source_ref`` --
+    THE dedupe read. The status filter is IN the query: the repository's
+    default page is 100 rows, so a ref with 100 closed episodes pushed its one
+    open row off the page and every re-run filed a new task (and a closer
+    found none to close). ``source_ref`` may be a Mongo condition (a prefix
+    ``$regex``). Raises on a read error; callers decide: a real repository's
+    ``find_many`` swallows the error into [] -- "no active task", which let a
+    dedupe file a second task beside the open one -- so its collection is read
+    directly (a fake repo without one keeps ``find_many``)."""
+    query = {"source_ref": source_ref, "status": {"$in": sorted(_ACTIVE)}}
+    coll = getattr(repo, "collection", None)
+    rows = list(coll.find(query)) if coll is not None else (repo.find_many(query) or [])
+    return [t for t in rows if str(t.get("status", "")).upper() in _ACTIVE]
+
+
 def create_system_task(
     repo: Any,
     *,
@@ -192,7 +208,9 @@ def create_system_task(
 ) -> Optional[Dict[str, Any]]:
     """Create a SYSTEM task, deduped by source_ref: if an ACTIVE task already
     exists for the same source_ref, do nothing (avoids a task per re-run).
-    Returns the created task, or None if deduped / no repo.
+    Returns the created task, or None if deduped / no repo / the insert
+    failed -- BaseRepository.create swallows a rejected insert into None, and
+    handing back the unsaved dict then reported a task nobody can open.
 
     ``extra``: optional ADDITIVE fields merged onto the task doc (e.g. a deep
     ``link`` path or a structured ``payload`` the frontend keys on). Extra keys
@@ -208,11 +226,7 @@ def create_system_task(
     if str(assigned_to or "").upper() in VALID_ROLES:
         assigned_to = _person_holding(str(assigned_to).upper(), store_id)
     try:
-        existing = repo.find_many({"source_ref": dedupe_ref}) or []
-        if any(
-            str(t.get("status", "")).upper() in {"OPEN", "IN_PROGRESS", "ESCALATED"}
-            for t in existing
-        ):
+        if active_tasks(repo, dedupe_ref):
             return None
     except Exception:  # noqa: BLE001
         pass  # dedupe is best-effort
@@ -256,7 +270,6 @@ def create_system_task(
         for k, v in extra.items():
             task.setdefault(k, v)
     try:
-        created = repo.create(task)
-        return created or task
+        return repo.create(task) or None
     except Exception:  # noqa: BLE001
         return None

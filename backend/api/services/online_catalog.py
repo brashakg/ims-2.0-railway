@@ -389,13 +389,16 @@ def online_status_for_skus(
     (the post-sale guard gap alarm, online_stock_writeback): a read that
     died is not a SKU that is not online.
 
-    online          -- DISPLAY + assessment flag: pushed to Shopify (product
+    online          -- legacy display flag: pushed to Shopify (product
                        gid, or the product's OWN variant carrying a variant /
                        inventory-item gid -- resolved the SAME way on the
                        product and the variant path) OR staged PUBLISHED.
-                       Includes unpurchasable Shopify DRAFTs. Gates the
-                       stock-tally oversell assessment (online_sync_health)
-                       and the reconcile screen.
+                       Includes unpurchasable Shopify DRAFTs. No screen
+                       reads it: /catalog/online-status (the Inventory
+                       screen), the Stock Tally, the reconcile screen and
+                       the nightly parity decide "is this listing live"
+                       with ONE reader, shopify_push.inventory.
+                       skus_on_live_listings.
     sellable_online -- GUARD flag: ecom.status PUBLISHED, or the product's OWN
                        variant carrying a live variant gid (same resolution on
                        both paths). PLAINLY: anything PUSHED to Shopify, even
@@ -447,8 +450,8 @@ def online_status_for_skus(
         # an oversell alert before it is purchasable) rather than silence for
         # live SKUs whose IMS status lags Shopify. Only a staged-but-never-
         # pushed DRAFT (no gid anywhere) stays out of both flags. `online`
-        # matters beyond display: it gates the stock-tally oversell assessment
-        # (online_sync_health) and the reconcile screen.
+        # is display only: the stock tally, the reconcile screen and parity
+        # read inventory.skus_on_live_listings instead.
         var_pushed = bool(
             normalize_sku(var.get("shopify_variant_id"))
             or normalize_sku(var.get("shopify_inventory_item_id"))
@@ -621,16 +624,28 @@ def skus_claiming_inventory_items(db, gids: List[str]) -> Dict[str, List[str]]:
     return {gid: sorted(skus) for gid, skus in out.items()}
 
 
-def listings_for_skus(db, skus: List[str]) -> Dict[str, List[str]]:
+def listings_for_skus(db, skus: List[str], *, strict: bool = False) -> Dict[str, List[str]]:
     """``{catalog product id: [requested keys]}`` -- THE listing that carries
     each key, for the stock baseline (``ecom.online_stock`` lives on the
-    listing): the PARENT of the catalog_variants row that matches it (a size
-    row rides its parent's listing), else the catalog_products row whose own
-    sku / barcode it is -- and a variant-of twin resolves to its PARENT twin
+    listing) and for THE "is this listing live" reader
+    (shopify_push.inventory.skus_on_live_listings). A key with a TARGET is
+    placed exactly where ``inventory_items_for_skus`` found it, so the
+    target and the listing never disagree:
+      1. the catalog_variants row that carries the inventory item: its
+         PARENT's listing (a size row rides its parent's listing);
+      2. else the catalog_products row whose ``ecom`` carries it (its own
+         sku / barcode): that listing.
+    A key with NO target yet (a size not yet minted on Shopify) is placed
+    by its own catalog_variants row (its sku is the key) -> that row's
+    parent, else by its catalog_products row. Either way a catalog_products
+    row that is a variant-of twin resolves to its PARENT twin
     (``ecom.variant_of.twin_id``), never to itself: a size variant owns no
-    listing and must never carry a baseline the schedule never diffs. The
-    same two lookups ``inventory_items_for_skus`` resolves targets with, so
-    the target and the listing can never disagree. Fail-soft ``{}``."""
+    listing and must never carry a baseline the schedule never diffs. A row
+    matched only through another product's barcode that carries no item
+    never names the listing, and a size row whose parent link lands nowhere
+    falls through to the catalog_products row instead of naming no
+    listing. Fail-soft ``{}`` -- or, ``strict``, a raised read (the nightly
+    parity: a dead read is never "no listing is live")."""
     keys = _clean_keys(skus)
     if not keys or db is None:
         return {}
@@ -640,15 +655,33 @@ def listings_for_skus(db, skus: List[str]) -> Dict[str, List[str]]:
         if pid and key not in out.setdefault(str(pid), []):
             out[str(pid)].append(key)
 
-    variants = _variants_by_key(db, keys)
-    parents = _parents_for_variants(db, list(variants.values()))
-    for key, var in variants.items():
-        _add(_parent_from(parents, var).get("id"), key)
-    remaining = [k for k in keys if k not in variants]
-    for key, doc in _products_by_key(db, remaining).items():
+    variants = _variants_by_key(db, keys, strict=strict)
+    parents = _parents_for_variants(db, list(variants.values()), strict=strict)
+    placed = set()
+
+    def _place(key: str, pid: Any) -> None:
+        if pid:
+            _add(pid, key)
+            placed.add(key)
+
+    def _listing_of(doc: Dict[str, Any]) -> Any:
         link = (doc.get("ecom") or {}).get("variant_of")
-        pid = (link.get("twin_id") if isinstance(link, dict) else None) or doc.get("id")
-        _add(pid, key)
+        return (link.get("twin_id") if isinstance(link, dict) else None) or doc.get("id")
+
+    for key, var in variants.items():  # 1. the variant row that IS the target
+        if normalize_sku(var.get("shopify_inventory_item_id")):
+            _place(key, _parent_from(parents, var).get("id"))
+    rest = [k for k in keys if k not in placed]
+    products = _products_by_key(db, rest, strict=strict) if rest else {}
+    for key, doc in products.items():  # 2. the product row whose ecom IS the target
+        if normalize_sku((doc.get("ecom") or {}).get("shopify_inventory_item_id")):
+            _place(key, _listing_of(doc))
+    for key, var in variants.items():  # no target: the key's own size row
+        if key not in placed and normalize_sku(var.get("sku")) == key:
+            _place(key, _parent_from(parents, var).get("id"))
+    for key, doc in products.items():  # ... else its product row
+        if key not in placed:
+            _place(key, _listing_of(doc))
     return out
 
 

@@ -25,6 +25,7 @@ const apis = vi.hoisted(() => ({
     list: vi.fn(),
     get: vi.fn(),
     create: vi.fn(),
+    preview: vi.fn(),
     createFromGrn: vi.fn(),
     createFromDcs: vi.fn(),
     getOpenDcs: vi.fn(),
@@ -85,17 +86,28 @@ function fillManualHeaderAndLine() {
   fireEvent.change(qty, { target: { value: '21' } });
 }
 
+// Book waits for the server's tax preview of the form as it stands.
+async function previewSettled() {
+  await screen.findByText(/Intra-state supply:/);
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   apis.purchaseInvoicesApi.list.mockResolvedValue({ purchase_invoices: [], total: 0 });
   apis.purchaseInvoicesApi.getConfig.mockResolvedValue(null);
   apis.purchaseInvoicesApi.create.mockResolvedValue({});
+  apis.purchaseInvoicesApi.preview.mockResolvedValue({
+    interstate: false, supplier_state: '27', supply_place_recipient: '27',
+    recipient_gstin: '27ZZZZZ9999Z1Z9', lines: [],
+    taxable_total: 0, cgst_total: 0, sgst_total: 0, igst_total: 0, tax_total: 0, total: 0,
+  });
 });
 
 describe('manual invoice bill-kind declaration', () => {
   it('booking without the declaration never reaches the server', async () => {
     await openManualForm();
     fillManualHeaderAndLine();
+    await previewSettled();
     fireEvent.click(screen.getByRole('button', { name: /Book invoice/i }));
     await waitFor(() =>
       expect(toastMock.error).toHaveBeenCalledWith(
@@ -111,6 +123,7 @@ describe('manual invoice bill-kind declaration', () => {
     fireEvent.change(screen.getByDisplayValue(/Choose: goods, or services/), {
       target: { value: 'SERVICES' },
     });
+    await previewSettled();
     fireEvent.click(screen.getByRole('button', { name: /Book invoice/i }));
     await waitFor(() =>
       expect(apis.purchaseInvoicesApi.create).toHaveBeenCalledTimes(1),

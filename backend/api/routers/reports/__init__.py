@@ -81,7 +81,8 @@ from .gst_base import (  # noqa: F401  # re-exported: see _ReportsModule
 )
 from .gst_itc import (  # noqa: F401  # re-exported: see _ReportsModule
     _itc_from_vendor_bills,
-    _itc_transfer_from_vendor_bills,
+    _itc_gstin_from_vendor_bills,
+    _itc_unplaced,
     _transfer_outward_bills,
     _transfer_b2b_rows,
     _return_interstate_flag,
@@ -139,6 +140,7 @@ from .gstr3b import (  # noqa: F401  # re-exported: see _ReportsModule
     _credit_note_totals,
     _transfer_outward_totals,
     _rcm_from_vendor_bills,
+    _rcm_gstin_from_vendor_bills,
     _compute_gstr3b,
     gstr3b_report,
     gstr3b_gstn_json,

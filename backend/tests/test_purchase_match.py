@@ -321,7 +321,7 @@ class _FakeDB:
                     ],
                 },
             ],
-            "stores": [{"store_id": "S1", "entity_id": "E1"}],
+            "stores": [{"store_id": "S1", "entity_id": "E1", "state_code": "27"}],
             "products": [
                 # A REAL, fully catalogued product: the purchase-invoice gate
                 # (ruling 15) refuses to settle a bill for an incomplete one, so
