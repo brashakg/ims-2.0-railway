@@ -3,9 +3,12 @@
 // ============================================================================
 // A READ-ONLY reconciliation dashboard: per online-listed SKU it shows what the
 // storefront lists vs the real physical on-hand vs what is already reserved,
-// derives the sellable count (on_hand - reserved), flags oversell-risk
-// (listed > sellable), and suggests a conservative buffer to keep off the
-// listing. It answers "am I about to sell the same unit twice online + in-store".
+// shows what IMS's stock writer sends (sellable: each mapped shop's shelf minus
+// the safety buffer), shows the backend's oversell-risk flag (some Shopify
+// location lists more than its own shop's shelf -- decided per location, never
+// from the summed columns on this page), and suggests a conservative buffer to
+// keep off the listing. It answers "am I about to sell the same unit twice
+// online + in-store".
 //
 // STRICTLY READ-ONLY. This screen NEVER reserves/allocates a unit and NEVER
 // changes on-hand math — it only reports. The write-path allocation (marking
@@ -142,8 +145,8 @@ export default function OnlineStockPage() {
         suggested safety buffer; it does not change stock or reserve anything.
       </p>
 
-      {/* Summary strip */}
-      {!loading && available && summary && (
+      {/* Summary strip -- not when nothing was tallied (an unknown is never a 0). */}
+      {!loading && available && summary && !summary.live_listings_unknown && !summary.on_hand_unknown && (
         <div className="mb-4 grid gap-3 grid-cols-2 sm:grid-cols-3 lg:grid-cols-5">
           <SummaryStat label="SKUs online" value={summary.skus_checked} />
           <SummaryStat
@@ -165,19 +168,30 @@ export default function OnlineStockPage() {
             oversell risk
           </span>
           <span className="text-sm text-red-900">
-            These list more online than is free to sell — reduce the online quantity (or restock)
-            before they can oversell.
+            A Shopify location lists more of these than its own shop has on the shelf — reduce
+            the online quantity (or restock) before they can oversell.
           </span>
         </div>
       )}
 
       {/* No Shopify-mapped products yet: nothing to tally. */}
-      {!loading && available && !onlineConfigured && (
+      {!loading && available && !onlineConfigured && !summary?.live_listings_unknown && (
         <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 flex items-start gap-2">
           <Info className="w-4 h-4 text-amber-600 mt-0.5 shrink-0" />
           <span className="text-sm text-amber-900">
             No products in the catalog are mapped to Shopify yet, so there is nothing to tally.
             Push products to the online store and they appear here.
+          </span>
+        </div>
+      )}
+
+      {/* IMS could not read which listings are live: nothing tallied, never "none listed". */}
+      {!loading && available && summary?.live_listings_unknown && (
+        <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 flex items-start gap-2">
+          <AlertTriangle className="w-4 h-4 text-amber-600 mt-0.5 shrink-0" />
+          <span className="text-sm text-amber-900">
+            IMS could not read which products are live on the website right now, so nothing is
+            tallied — this is not &quot;nothing listed&quot;. Refresh, or check the sync-health tile.
           </span>
         </div>
       )}
@@ -194,7 +208,8 @@ export default function OnlineStockPage() {
       )}
 
       {/* Live Shopify read unavailable or PARTIAL: uncovered rows show "—". */}
-      {!loading && available && onlineConfigured && summary?.listed_qty_live === false && (
+      {!loading && available && onlineConfigured && summary?.listed_qty_live === false
+        && !summary?.live_listings_unknown && !summary?.on_hand_unknown && (
         <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 flex items-start gap-2">
           <Info className="w-4 h-4 text-amber-600 mt-0.5 shrink-0" />
           <span className="text-sm text-amber-900">
@@ -285,6 +300,8 @@ export default function OnlineStockPage() {
           <p className="text-sm">
             {search || filter !== 'ALL'
               ? 'No SKUs match this view.'
+              : summary?.live_listings_unknown || summary?.on_hand_unknown
+              ? 'Nothing is tallied right now (see the note above).'
               : 'No SKUs are listed online yet. Once products go live online, they show up here.'}
           </p>
         </div>

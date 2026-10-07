@@ -71,6 +71,10 @@ export interface StockItem {
   location?: string;
   lowStockThreshold?: number;
   minStock?: number;
+  /** The product's reorder level; null = not set (no low-stock alert). */
+  reorder_point?: number | null;
+  /** The server's low-stock verdict (reorder_policy.is_low_stock). */
+  low_stock?: boolean;
   barcode?: string;
   storeBarcode?: string;
   /** Procurement Phase 1 (additive from /inventory/stock): the latest ACCEPTED
@@ -93,7 +97,8 @@ function normalizeStockItems(data: unknown): StockItem[] {
     ...item,
     name: item.name || item.productName || 'Unknown Product',
     stock: item.stock || item.quantity || 0,
-    lowStockThreshold: item.lowStockThreshold || item.minStock || 5,
+    // The product's own level (null = not set), never an invented 5 (F73).
+    lowStockThreshold: item.reorder_point ?? undefined,
     reserved: item.reserved || 0,
     category: canonicalCategory(item.category) as ProductCategory,
   }));
@@ -144,7 +149,12 @@ export function useOnlineStatus(ids: string[]) {
       try {
         return await catalogApi.getOnlineStatus(ids);
       } catch {
-        return {}; // fail-soft: bridge off -> no badges (as before)
+        // A failed call is UNKNOWN for every id (the screens say Unverified),
+        // never {} -- a missing key read as "In-store only", a confident
+        // false negative.
+        return Object.fromEntries(
+          ids.map((id): [string, OnlineStatus] => [id, { online: null, online_stock: null, status: null }]),
+        );
       }
     },
   });

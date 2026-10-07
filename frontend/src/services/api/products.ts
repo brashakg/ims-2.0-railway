@@ -238,8 +238,8 @@ export interface UpdateProductPayload {
   images?: string[];
   // Scan-to-sell barcode persisted on the product master.
   barcode?: string;
-  // Per-product reorder configuration (Reorder dashboard).
-  reorder_point?: number;
+  // Per-product reorder configuration (Reorder dashboard). The reorder LEVEL
+  // is per shop: reorderApi.setShopLevel (owner ruling D12).
   reorder_quantity?: number;
   max_stock?: number;
   lead_time_days?: number;
@@ -271,7 +271,15 @@ export interface UpdateProductPayload {
 // ============================================================================
 
 export interface OnlineStatus {
-  online: boolean;
+  /** Live on the website: the listing (a size's parent's) is published on
+   *  Shopify -- the one reader the Online Stock views and the nightly parity
+   *  use, so a draft or taken-down listing is not online. null = IMS could
+   *  not read which listings are live (show it as unverified, never
+   *  "in-store only"). */
+  online: boolean | null;
+  /** The listing is live but its Shopify item is shared with another IMS
+   *  product (the writer refuses it): online is null, and this names why. */
+  shares_item?: boolean;
   /** Live Shopify listed qty is not mirrored in IMS — null = unknown. */
   online_stock: number | null;
   status?: string | null;

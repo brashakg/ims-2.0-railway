@@ -40,6 +40,14 @@ vi.mock('../../../components/print/GRNPrint', () => ({ GRNPrint: () => null }));
 vi.mock('../../../components/print/storeIdentity', () => ({
   resolveStoreIdentity: vi.fn().mockResolvedValue(null),
 }));
+// The labels dialog has its own suite; here only WHICH receipt it opens for.
+vi.mock('../../../components/labels/UnitLabelsModal', () => ({
+  UnitLabelsModal: ({ grnId, title }: { grnId?: string; title: string }) => (
+    <div role="dialog" aria-label={title}>
+      labels for {grnId}
+    </div>
+  ),
+}));
 
 import { GoodsReceiptNote } from '../GoodsReceiptNote';
 
@@ -110,6 +118,25 @@ describe('no-PO Delivery-Challan receiving', () => {
     ]);
     // and the receipt is posted (stock minted) right after
     await waitFor(() => expect(api.acceptGRN).toHaveBeenCalledWith('DC-NEW-1'));
+  });
+
+  it('F26: once posted, the labels dialog opens for THIS receipt', async () => {
+    await openNoPoDc();
+    fireEvent.change(screen.getByPlaceholderText(/DC\/26\/05\/118/), {
+      target: { value: 'DC/26/08/9' },
+    });
+    fireEvent.change(screen.getByDisplayValue('Select the vendor…'), {
+      target: { value: 'V-77' },
+    });
+    await addFrameLine();
+    fireEvent.change(screen.getByLabelText('Quantity on line 1'), {
+      target: { value: '20' },
+    });
+    fireEvent.click(screen.getByLabelText(/Tally line 1/));
+    fireEvent.click(screen.getByRole('button', { name: /Post GRN/i }));
+
+    const dialog = await screen.findByRole('dialog', { name: /print stock labels/i });
+    expect(dialog).toHaveTextContent('labels for DC-NEW-1');
   });
 
   it('an unticked line never reaches the server', async () => {

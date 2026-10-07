@@ -25,8 +25,12 @@ from .gst_base import (
 )
 from .gst_itc import (
     _cn_foreign_store,
+    _gstin_bound,
     _itc_from_vendor_bills,
-    _itc_transfer_from_vendor_bills,
+    _itc_gstin_from_vendor_bills,
+    _itc_store_scope,
+    _placement,
+    _sum_heads,
     _ledger_row_return_doc,
     _return_interstate_flag,
     _transfer_outward_bills,
@@ -225,54 +229,45 @@ def _transfer_outward_totals(db, active_store, year, mon, last_day):
     return igst, cgst, sgst, taxable
 
 
+def _rcm_placed(db, active_store, year, mon, last_day):
+    """The reverse-charge bills THE bill placement (gst_itc._placement) puts
+    on this store's GSTIN's return, and that placement's GSTIN-bound part:
+    (match, bound match), or None when the store cannot be read."""
+    entity_id, store_gstin, shops = _itc_store_scope(db, active_store)
+    match = {
+        **_placement(shops, entity_id, store_gstin, year, mon, last_day),
+        "reverse_charge": True,
+    }
+    return match, {"$and": [match, _gstin_bound(shops, store_gstin)]}
+
+
 def _rcm_from_vendor_bills(db, active_store, year, mon, last_day):
     """NEW-GST-RCM: inward supplies LIABLE TO REVERSE CHARGE for the month
-    (GSTR-3B Table 3.1(d)) -- vendor_bills flagged reverse_charge=True, scoped to
-    the store's entity. On these the BUYER owes the GST (paid in cash, then
-    claimed as ITC separately). Returns (igst, cgst, sgst, taxable). Mirrors
-    _itc_from_vendor_bills' entity + string-date-window match. Fail-soft -> zeros."""
+    (GSTR-3B Table 3.1(d)) -- vendor_bills flagged reverse_charge=True. On
+    these the BUYER owes the GST (paid in cash, then claimed as ITC in Table 4).
+    Placed by the SAME rule as that credit (gst_itc._placement: the GSTIN the
+    bill was received on), so a Maharashtra bill's liability and its credit
+    are on the Maharashtra return -- never the liability on the company's
+    Jharkhand return with nothing to offset it. Returns (igst, cgst, sgst,
+    taxable). Fail-soft -> zeros."""
     if db is None:
         return 0.0, 0.0, 0.0, 0.0
     try:
-        entity_id = None
-        try:
-            _srow = db["stores"].find_one({"store_id": active_store}, {"entity_id": 1})
-            entity_id = (_srow or {}).get("entity_id")
-        except Exception:
-            entity_id = None
-        month_lo = f"{year:04d}-{mon:02d}-01"
-        month_hi = f"{year:04d}-{mon:02d}-{last_day:02d}T23:59:59"
-        vb_match: dict = {
-            "reverse_charge": True,
-            "status": {"$nin": ["CANCELLED", "cancelled", "VOID", "voided"]},
-            "$or": [
-                {"invoice_date": {"$gte": month_lo, "$lte": month_hi}},
-                {"bill_date": {"$gte": month_lo, "$lte": month_hi}},
-            ],
-        }
-        if entity_id:
-            vb_match["recipient_entity_id"] = entity_id
-        pipeline = [
-            {"$match": vb_match},
-            {
-                "$group": {
-                    "_id": None,
-                    "igst": {"$sum": "$igst_total"},
-                    "cgst": {"$sum": "$cgst_total"},
-                    "sgst": {"$sum": "$sgst_total"},
-                    "taxable": {"$sum": "$taxable_amount"},
-                }
-            },
-        ]
-        res = list(db["vendor_bills"].aggregate(pipeline))
-        if res:
-            a = res[0]
-            return (
-                float(a.get("igst", 0.0) or 0.0),
-                float(a.get("cgst", 0.0) or 0.0),
-                float(a.get("sgst", 0.0) or 0.0),
-                float(a.get("taxable", 0.0) or 0.0),
-            )
+        return _sum_heads(db, _rcm_placed(db, active_store, year, mon, last_day)[0])
+    except Exception:
+        pass
+    return 0.0, 0.0, 0.0, 0.0
+
+
+def _rcm_gstin_from_vendor_bills(db, active_store, year, mon, last_day):
+    """R1 for Table 3.1(d): the GSTIN-bound slice of _rcm_from_vendor_bills, so
+    the Cross-Check counts it once per GSTIN and the company-wide remainder
+    (legacy bills naming no GSTIN) once per company -- exactly as it counts
+    the credit. Returns (igst, cgst, sgst, taxable); fail-soft -> zeros."""
+    if db is None:
+        return 0.0, 0.0, 0.0, 0.0
+    try:
+        return _sum_heads(db, _rcm_placed(db, active_store, year, mon, last_day)[1])
     except Exception:
         pass
     return 0.0, 0.0, 0.0, 0.0
@@ -288,7 +283,8 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
 
     Table 3.1 - Outward taxable supplies: derived from completed sales invoices.
     Table 4   - ITC available: derived from recorded purchase invoices
-                (vendor_bills cgst/sgst/igst_total), scoped to the store's entity.
+                (vendor_bills cgst/sgst/igst_total), placed on the store's GSTIN
+                (gst_itc._itc_match).
                 Returns zeros when no purchase data is present.
     Table 6.1 - Payment of tax: net cash liability = output tax - ITC.
     Returns all-zero figures when no data exists for the period.
@@ -319,7 +315,7 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
     itc_cgst = 0.0
     itc_sgst = 0.0
 
-    # R1: transfer-borne (GSTIN-scoped) ITC slice, split out of the total above.
+    # R1: the GSTIN-bound ITC slice, split out of the total above.
     t_itc_igst = 0.0
     t_itc_cgst = 0.0
     t_itc_sgst = 0.0
@@ -329,6 +325,8 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
     rcm_cgst = 0.0
     rcm_sgst = 0.0
     rcm_taxable = 0.0
+    # ...and its GSTIN-bound slice (R1), counted once per GSTIN by the Cross-Check.
+    t_rcm = (0.0, 0.0, 0.0, 0.0)
 
     # Credit-note totals + the per-head excess the zero-clamp would otherwise
     # swallow SILENTLY (filled below when a DB is present).
@@ -459,12 +457,13 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
         itc_igst, itc_cgst, itc_sgst = _itc_from_vendor_bills(
             db, active_store, year, mon, last_day
         )
-        # R1: split the transfer-borne (GSTIN-scoped) slice out of the total so
+        # R1: split the GSTIN-bound slice (every bill received on this GSTIN,
+        # plus GSTIN-less transfer mirrors at any shop on that GSTIN) out of the total so
         # the cross-check aggregator can dedupe it once per GSTIN while the
-        # regular (entity-scoped) remainder is deduped once per entity. The
-        # transfer slice uses the SAME filters restricted to source_transfer_id
-        # bills, so regular = total - transfer exactly.
-        t_itc_igst, t_itc_cgst, t_itc_sgst = _itc_transfer_from_vendor_bills(
+        # company-wide remainder (legacy bills naming no GSTIN) is deduped once
+        # per company. The slice is the SAME _itc_match AND-ed with the GSTIN
+        # binding, so remainder = total - slice exactly.
+        t_itc_igst, t_itc_cgst, t_itc_sgst = _itc_gstin_from_vendor_bills(
             db, active_store, year, mon, last_day
         )
 
@@ -472,6 +471,7 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
         rcm_igst, rcm_cgst, rcm_sgst, rcm_taxable = _rcm_from_vendor_bills(
             db, active_store, year, mon, last_day
         )
+        t_rcm = _rcm_gstin_from_vendor_bills(db, active_store, year, mon, last_day)
 
     # Net cash liability = (output tax - ITC) + reverse-charge tax. RCM is always
     # discharged in CASH (it cannot be set off against ITC), so it adds on top of
@@ -516,6 +516,14 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
             "stateTax": _r(rcm_sgst),
             "cess": 0.0,
         },
+        # R1: the GSTIN-bound part of Table 3.1(d) (bills received on this
+        # GSTIN); the rest is company-wide. Same split as itcAvailableGstin.
+        "inwardSuppliesReverseChargeGstin": {
+            "integratedTax": _r(t_rcm[0]),
+            "centralTax": _r(t_rcm[1]),
+            "stateTax": _r(t_rcm[2]),
+            "taxableValue": _r(t_rcm[3]),
+        },
         "zeroRatedValue": 0.0,
         "zeroRatedSupplies": {
             "integratedTax": 0.0,
@@ -529,17 +537,18 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
             "stateTax": _r(itc_sgst),
             "cess": 0.0,
         },
-        # R1: itcAvailable split into the entity-scoped regular remainder and the
-        # GSTIN-scoped transfer slice (regular + transfer == itcAvailable). The
-        # cross-check aggregator dedupes each at its true scope so a multi-GSTIN
-        # entity's ITC is independent of store enumeration order.
+        # R1: itcAvailable split into the company-wide remainder (bills naming
+        # no GSTIN) and the GSTIN-bound slice (remainder + slice ==
+        # itcAvailable). The cross-check aggregator dedupes each at its true
+        # scope, so a multi-GSTIN company's ITC is independent of store
+        # enumeration order and no bill counts on two registrations.
         "itcAvailableRegular": {
             "integratedTax": _r(itc_igst - t_itc_igst),
             "centralTax": _r(itc_cgst - t_itc_cgst),
             "stateTax": _r(itc_sgst - t_itc_sgst),
             "cess": 0.0,
         },
-        "itcAvailableTransfer": {
+        "itcAvailableGstin": {
             "integratedTax": _r(t_itc_igst),
             "centralTax": _r(t_itc_cgst),
             "stateTax": _r(t_itc_sgst),

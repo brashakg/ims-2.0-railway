@@ -100,7 +100,7 @@ def _db() -> StrictDB:
             }
         ],
     )
-    db.seed("stores", [{"store_id": "S1", "entity_id": "E1"}])
+    db.seed("stores", [{"store_id": "S1", "entity_id": "E1", "state_code": "27"}])
     db.seed("vendor_bills", [])
     return db
 

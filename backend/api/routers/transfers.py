@@ -24,6 +24,8 @@ from ..services.cost_mask import can_see_cost, mask_cost
 
 # W1.4 / OS-032: shared ONLINE store-type detector -- a transfer must never
 # land stock on a pooled, stockless ONLINE store.
+from ..services import org_validation as ov
+from ..services.purchase_invoice_engine import classify_supply
 from ..services.stores_util import is_online_store
 
 logger = logging.getLogger(__name__)
@@ -2088,86 +2090,35 @@ async def get_location_transfer_analytics(
 # missing we default to intra-state (conservative -- never misroutes IGST).
 
 
-def _store_state_code(db, store_id: str) -> str:
-    """Return the 2-digit GST state code for a store; '' on miss/DB absent."""
-    if db is None or not store_id:
-        return ""
-    try:
-        store = db.get_collection("stores").find_one(
-            {"store_id": store_id},
-            {"_id": 0, "state": 1, "state_code": 1, "gstin": 1},
-        )
-        if not store:
-            return ""
-        # Prefer explicit state_code field.
-        sc = str(store.get("state_code") or "").strip()
-        if sc:
-            return sc[:2]
-        # Fall back to first 2 chars of the store's GSTIN.
-        gstin = str(store.get("gstin") or "").strip()
-        if len(gstin) >= 2:
-            return gstin[:2]
-    except Exception as exc:  # noqa: BLE001 - fail-soft
-        logger.warning("[TRANSFER] state lookup failed for %s: %s", store_id, exc)
-    return ""
-
-
-def _store_entity(db, store_id: str) -> str:
-    """Return the entity_id the store belongs to; '' on miss/DB absent."""
-    if db is None or not store_id:
-        return ""
-    try:
-        store = db.get_collection("stores").find_one(
-            {"store_id": store_id},
-            {"_id": 0, "entity_id": 1},
-        )
-        if store:
-            return str(store.get("entity_id") or "")
-    except Exception as exc:  # noqa: BLE001 - fail-soft
-        logger.warning("[TRANSFER] entity lookup failed for %s: %s", store_id, exc)
-    return ""
-
-
 def _shop_gst(db, store_id: str) -> tuple:
-    """(entity_id, gstin, state) of one side of a transfer -- the registration
-    the FIN-3 mirror bill books on. ('', '', '') on a miss / DB absent."""
-    entity_id = _store_entity(db, store_id)
-    state = _store_state_code(db, store_id)
-    return entity_id, _entity_gstin_for_state(db, entity_id, state), state
-
-
-def _entity_gstin_for_state(db, entity_id: str, state_code: str) -> str:
-    """Return the GSTIN the entity bills under in `state_code`; '' on miss.
-
-    STRICT state match only -- NO first-GSTIN fallback. The old gstins[0]
-    fallback could return a GSTIN from the WRONG state: on a same-entity
-    cross-state transfer with no destination-state GSTIN on file it stamped the
-    SENDER's own filing GSTIN as the recipient (a supply-to-self B2B row the
-    portal rejects), and the empty-recipient-GSTIN validation warning never
-    fired because the field wasn't empty. Returning '' keeps the miss LOUD:
-    reports._compute_gstr1 flags the bill and the portal export drops the row
-    instead of uploading a wrong counterparty.
-    """
-    if db is None or not entity_id:
-        return ""
+    """(entity_id, gstin, state) of one side of a transfer: THE shop's GSTIN
+    (org_validation.shop_gstin -- the one every bill door books on) and the
+    state that registration decides, its first two digits (owner,
+    2026-09-30). A shop with no GSTIN of its company has an EMPTY GSTIN and an
+    EMPTY state -- never its declared state, the company's primary, or another
+    state's number -- so the miss stays loud: reports._compute_gstr1 flags the bill
+    and the portal export drops the row instead of a wrong counterparty.
+    ('', '', '') on a miss / DB absent."""
+    if db is None or not store_id:
+        return "", "", ""
     try:
-        entity = db.get_collection("entities").find_one(
-            {"entity_id": entity_id},
-            {"_id": 0, "gstins": 1},
+        store = db.get_collection("stores").find_one(
+            {"store_id": store_id},
+            {"_id": 0, "entity_id": 1, "gstin": 1, "state_code": 1, "state": 1},
+        ) or {}
+        entity_id = str(store.get("entity_id") or "")
+        entity = (
+            db.get_collection("entities").find_one(
+                {"entity_id": entity_id}, {"_id": 0, "gstins": 1}
+            )
+            if entity_id
+            else None
         )
-        if not entity:
-            return ""
-        for g in entity.get("gstins") or []:
-            if str(g.get("state_code") or g.get("state") or "")[:2] == state_code:
-                return str(g.get("gstin") or "")
     except Exception as exc:  # noqa: BLE001 - fail-soft
-        logger.warning(
-            "[TRANSFER] GSTIN lookup failed entity=%s state=%s: %s",
-            entity_id,
-            state_code,
-            exc,
-        )
-    return ""
+        logger.warning("[TRANSFER] shop GST lookup failed for %s: %s", store_id, exc)
+        return "", "", ""
+    gstin = ov.shop_gstin(entity, store) or ""
+    return entity_id, gstin, gstin[:2]
 
 
 def _transfer_registrations(db, transfer: Dict) -> tuple:
@@ -2245,18 +2196,11 @@ def _assert_valued_paper(transfer: Dict) -> None:
 
 
 def _tax_split(tax: float, interstate: bool):
-    """Return (cgst, sgst, igst) for a tax amount.
+    """Return (cgst, sgst, igst) for a tax amount -- gst_rates.split_gst, the
+    one splitter every bill door and the GSTR readers use (no second copy)."""
+    from ..services.gst_rates import split_gst
 
-    Intra-state: CGST = SGST = half each (residual trick avoids +/-1 paisa drift).
-    Inter-state: IGST = full tax, CGST = SGST = 0.
-    Pure, no I/O.
-    """
-    tax = round(float(tax or 0), 2)
-    if interstate:
-        return 0.0, 0.0, tax
-    half = round(tax / 2, 2)
-    sgst = round(tax - half, 2)
-    return half, sgst, 0.0
+    return split_gst(tax, interstate)
 
 
 def _bill_date_ist(completed_at_raw) -> str:
@@ -2409,9 +2353,11 @@ def _book_mirror_purchase(transfer: Dict) -> None:
 
     # NEW-GST-TRANSFER-IGST: a stock move books a mirror purchase (and GST) when it
     # crosses a GSTIN boundary -- that is EITHER a different legal entity OR a
-    # different STATE. A same-PAN inter-STATE transfer is a deemed supply between
-    # distinct GSTINs (Sch I) and attracts IGST. The ONE rule shared with the D13
-    # valued delivery challan (_transfer_registrations).
+    # different registration. A same-PAN inter-STATE transfer is a deemed supply
+    # between distinct GSTINs (Sch I) and attracts IGST. Each side's GSTIN and
+    # state come from the one shop-GSTIN rule (_shop_gst), so two shops on ONE
+    # registration never book a supply to themselves -- and the crossing test is
+    # the ONE rule shared with the D13 valued delivery challan.
     (from_entity, from_gstin, from_state), (to_entity, to_gstin, to_state), crosses = (
         _transfer_registrations(db, transfer)
     )
@@ -2434,13 +2380,12 @@ def _book_mirror_purchase(transfer: Dict) -> None:
         return
 
     try:
-        # GST: detect intra/inter-state from the sending (supply) store's state
-        # vs the receiving store's state (consistent with GST Act -- place of
-        # supply = location of goods at time of supply for stock transfers within
-        # the same taxpayer group treated as deemed sale under Sch I Entry 2).
-        # from_state / to_state were already resolved for the GSTIN-boundary gate
-        # above; reuse them here.
-        interstate = bool(from_state and to_state and from_state != to_state)
+        # GST: the ONE tax-head rule (purchase_invoice_engine.classify_supply)
+        # on the two registrations -- a deemed sale under Sch I Entry 2 between
+        # two GSTINs, the "vendor" and the recipient below. A shop with no
+        # registration has '' here, so its bill is flagged as unplaced by the
+        # Cross-Check instead of getting a head from a declared state.
+        interstate = bool(classify_supply(from_gstin, to_gstin)["interstate"])
 
         # NEW-GST-TRANSFER-RATES (GAP B): per-line taxable + GST at each
         # product's REAL rate via gst_rates.resolve_gst_rate (was: flat 18% on
@@ -2570,8 +2515,10 @@ def _book_mirror_purchase(transfer: Dict) -> None:
             "total_amount": round(taxable + tax, 2),
             "total": round(taxable + tax, 2),
             # ITC eligibility: inter-entity transfers are stock-in-trade, so
-            # eligible by default. The CA can flag itc_blocked if needed.
-            "itc_eligible": True,
+            # claimable -- decided by the ONE helper every booking door and
+            # reader uses: a sending shop with no valid registration gives no
+            # credit. The CA can flag itc_blocked if needed.
+            "itc_eligible": ov.itc_claimable(from_gstin),
             "itc_blocked": False,
             "status": "OUTSTANDING",
             "auto_generated": True,

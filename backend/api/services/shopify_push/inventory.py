@@ -1912,6 +1912,62 @@ def listing_visible(product: Dict[str, Any]) -> bool:
     )
 
 
+def live_listing_split(db, skus: Iterable[str], *, strict: bool = False) -> Tuple[set, set]:
+    """``(live, shared)`` -- the one "is this SKU's listing live" answer, split
+    on the writer's own duplicate-inventory-item guard. ``shared`` holds the
+    live, addressable SKUs whose Shopify inventory item another SKU also claims
+    (``_duplicates_or_error``, the guard ``push_skus_stock`` applies): the
+    writer sends NEITHER, so nothing can be compared or set for them and they
+    are in no view and no tally. An unreadable guard is UNKNOWN: strict raises,
+    fail-soft gives ``(set(), set())``."""
+    from ..online_catalog import _coll, inventory_items_for_skus, listings_for_skus
+
+    by_listing = listings_for_skus(db, list(skus or []), strict=strict)
+    if not by_listing:
+        return set(), set()
+    coll = _coll(db, "catalog_products")
+    try:
+        if coll is None:
+            raise RuntimeError("catalog_products unavailable")
+        live = {
+            str(d.get("id"))
+            for d in coll.find({"id": {"$in": sorted(by_listing)}}, {"_id": 0, "id": 1, "ecom": 1})
+            if listing_visible(d)
+        }
+        on_live = [s for pid, keys in by_listing.items() if pid in live for s in keys]
+        targeted = inventory_items_for_skus(db, on_live) if on_live else {}
+        addressable = {s: targeted[s] for s in on_live if s in targeted}
+        duplicates, claim_error = _duplicates_or_error(db, addressable)
+        if claim_error:
+            raise RuntimeError(claim_error)
+    except Exception:  # noqa: BLE001
+        if strict:
+            raise
+        return set(), set()
+    shared = {s for skus_ in duplicates.values() for s in skus_ if s in addressable}
+    return set(addressable) - shared, shared
+
+
+def skus_on_live_listings(db, skus: Iterable[str], *, strict: bool = False) -> set:
+    """THE one reader of "is this SKU's listing live on Shopify": the keys
+    (stripped) whose listing -- the writer's own online_catalog.
+    listings_for_skus, so a size is judged by its PARENT's listing -- is
+    listing_visible (a gid and PUBLISHED), that the writer can address there
+    (online_catalog.inventory_items_for_skus finds its Shopify inventory
+    item: a size not yet minted on Shopify is not on sale), and whose item no
+    other SKU claims (the writer's duplicate guard: it sends neither, so
+    ``live_listing_split`` names them apart). Every LIVE take-down by any door
+    (Take off website, the retire hook, the SUPERADMIN block cutover: all
+    push_product_delist) writes DRAFT, and only a confirmed publish writes
+    PUBLISHED back, so this is what Shopify sells -- never a second "taken
+    down" computation beside it. The nightly parity, the Stock Tally and
+    the reconciliation screen all read it, so a shop's view and its drift
+    task assess the same SKUs. Fail-soft set() -- or, ``strict``, a failed
+    read raises (the nightly parity: a dead read is never "nothing is
+    live")."""
+    return live_listing_split(db, skus, strict=strict)[0]
+
+
 def listing_already_live(product: Dict[str, Any]) -> bool:
     """Visible AND no stock pass has recorded its tracking as unset
     (``ecom.online_stock.tracked`` False: a size minted untracked, or the
