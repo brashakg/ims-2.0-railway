@@ -272,6 +272,19 @@ def test_a_door_made_product_is_found_by_the_words_the_till_shows(db, q, want):
     assert _ids(db, q) == (want, len(want))
 
 
+@pytest.mark.parametrize("q", ["-", "- -"])
+def test_a_word_of_only_hyphens_starts_no_word(db, q):
+    # Every door-made title has " - " before its colour. A word made only of
+    # hyphens starts no word, so the till lists what main listed for it (a
+    # code that STARTS with "-"), and nothing here -- the purchase-order box,
+    # which lists nothing for it, still holds every row the till lists.
+    _door(db, "SG-GLD", "SUNGLASS", brand_name="Ray-Ban", model_no="RB3025",
+          colour_code="001", frame_color="Gold")
+    assert " - " in db.products.find_one({"product_id": "SG-GLD"})["name"]
+    assert _ids(db, q) == ([], 0)
+    assert _ids(db, q, match="anywhere") == ([], 0)
+
+
 @pytest.mark.parametrize("q, want", [("SGRAY", ["SG-RB"]), ("sgo", ["SG-OK"])])
 def test_the_purchase_order_box_finds_a_title_word_only_from_its_start(db, q, want):
     # "SGRAY" starts every door-made Ray-Ban sunglass SKU. The Oakley's title

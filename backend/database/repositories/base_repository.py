@@ -387,10 +387,11 @@ class BaseRepository(ABC, Generic[T]):
     # searched; none by default.
     WORD_SEARCH_FIELDS: tuple = ()
 
-    # A word starts the field or follows a space, hyphen, slash, dot or
-    # underscore. ponytail: not index-assisted like ^ is; a scan is fine at
-    # catalogue size, a text index if it ever is not.
-    _WORD_START = r"(?:^|[\s\-/._])"
+    # A word starts the field or follows a space or one of these breaks.
+    # ponytail: not index-assisted like ^ is; a scan is fine at catalogue
+    # size, a text index if it ever is not.
+    _WORD_BREAKS = "-/._"
+    _WORD_START = r"(?:^|[\s" + re.escape(_WORD_BREAKS) + "])"
 
     def _search_query(
         self, text: str, fields: List[str], filter: Dict = None, word_fields=None
@@ -414,12 +415,15 @@ class BaseRepository(ABC, Generic[T]):
     def _search_token(self, tok: str, fields, word_fields=None) -> Dict:
         """One typed word's clause, the one place the word rule is built: it
         STARTS one of `fields`, or, in word_fields (default: the repository's
-        WORD_SEARCH_FIELDS), any word of it."""
+        WORD_SEARCH_FIELDS), any word of it. A word made only of breaks ('-')
+        starts no word, so it matches from the field start only."""
         if word_fields is None:
             word_fields = self.WORD_SEARCH_FIELDS
         esc = re.escape(tok)
         start = {"$regex": "^" + esc, "$options": "i"}
         word = {"$regex": self._WORD_START + esc, "$options": "i"}
+        if not tok.strip(self._WORD_BREAKS):
+            word = start
         return {"$or": [{f: word if f in word_fields else start} for f in fields]}
 
     def aggregate(self, pipeline: List[Dict]) -> List[Dict]:
