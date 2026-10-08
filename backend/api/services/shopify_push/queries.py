@@ -179,16 +179,19 @@ mutation imsProductReorderMedia($id: ID!, $moves: [MoveInput!]!) {
 """
 # READ-ONLY: the media a live product carries today, for the adoption
 # runbook (scripts/adopt_shopify_media_map.py) that claims pre-media_map media
-# as IMS-owned by a positive identity match (media.match_media_to_photos).
-# originalSource is the url Shopify was handed at attach; image.url the CDN
-# copy (its file name is the only trace of the source name). alt is NOT read:
-# IMS attaches every photo with alt '', so an alt can never identify one.
+# as IMS-owned by a positive identity match (media.match_media_to_photos), and
+# for the design-queue press (media.push_image), which reads the listing before
+# it attaches. originalSource is the url Shopify was handed at attach; image.url
+# the CDN copy (its file name is the only trace of the source name; null until
+# the media is READY); status is READY / PROCESSING / UPLOADED / FAILED. alt is
+# NOT read: IMS attaches every photo with alt '', so an alt can never identify
+# one.
 _PRODUCT_MEDIA_QUERY = """
 query imsProductMedia($id: ID!) {
   product(id: $id) {
     id
     media(first: 250) {
-      nodes { id ... on MediaImage { image { url } originalSource { url } } }
+      nodes { id status ... on MediaImage { image { url } originalSource { url } } }
     }
   }
 }

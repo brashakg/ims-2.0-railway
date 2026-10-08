@@ -62,7 +62,9 @@ VALID_TRANSITIONS: Dict[str, set] = {
 
 # Presentation/linkage fields a caller may patch via update() (everything that
 # is NOT identity, lifecycle-controlled, or a server-owned timestamp). Lifecycle
-# moves go through assign/set_status/attach_edited, not update().
+# moves go through assign/set_status/attach_edited, not update(). The Shopify
+# record (shopify_image_id / shopify_image_src) is written only by the press
+# (shopify_push.media._writeback_image), never patched here.
 _PATCHABLE_FIELDS = (
     "url",
     "kind",
@@ -72,7 +74,6 @@ _PATCHABLE_FIELDS = (
     "design_notes",
     "variant_id",
     "submitted_by",
-    "shopify_image_id",
 )
 
 
@@ -181,7 +182,7 @@ class ProductImageRepository(BaseRepository):
 
     def update(self, image_id: str, data: Dict) -> bool:
         """Patch an image's presentation/linkage fields (url / kind / source /
-        position / alt_text / design_notes / variant_id / shopify_image_id).
+        position / alt_text / design_notes / variant_id / submitted_by).
 
         Identity, lifecycle-controlled fields (status / assigned_to / edited_url /
         reviewed_by / approved_at) and server timestamps are stripped -- those

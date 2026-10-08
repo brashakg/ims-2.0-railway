@@ -55,6 +55,8 @@ class _SpyGraphQL:
         self._response = response
 
     async def __call__(self, db, query, variables):
+        if "imsProductMedia" in query:  # the press reads the listing first
+            return {"data": {"product": {"id": variables["id"], "media": {"nodes": []}}}}
         self.calls.append({"query": query, "variables": variables})
         return self._response
 
@@ -97,10 +99,11 @@ def test_writeback_uses_primary_key_when_image_id_present():
         {"image_id": "I1", "product_id": "P1", "url": "u", "shopify_image_id": None}
     )
     doc = db["product_images"].find_one({"image_id": "I1"})
-    ok = shopify_push._writeback_image(db, doc, "gid://shopify/MediaImage/1")
+    ok = shopify_push._writeback_image(db, doc, "gid://shopify/MediaImage/1", "u")
     assert ok is True
     saved = db["product_images"].find_one({"image_id": "I1"})
     assert saved["shopify_image_id"] == "gid://shopify/MediaImage/1"
+    assert saved["shopify_image_src"] == "u"
 
 
 def test_writeback_falls_back_to_natural_key_when_image_id_null():
@@ -116,7 +119,7 @@ def test_writeback_falls_back_to_natural_key_when_image_id_null():
         }
     )
     doc = db["product_images"].find_one({"product_id": "P1"})
-    ok = shopify_push._writeback_image(db, doc, "gid://shopify/MediaImage/2")
+    ok = shopify_push._writeback_image(db, doc, "gid://shopify/MediaImage/2", doc["url"])
     assert ok is True
     saved = db["product_images"].find_one({"product_id": "P1"})
     assert saved["shopify_image_id"] == "gid://shopify/MediaImage/2"
@@ -127,7 +130,7 @@ def test_writeback_returns_false_when_no_stable_key():
     caller then fails loudly instead of writing blindly)."""
     db = _EngineDB()
     ok = shopify_push._writeback_image(
-        db, {"image_id": None, "product_id": None, "url": None}, "gid://x/1"
+        db, {"image_id": None, "product_id": None, "url": None}, "gid://x/1", "u"
     )
     assert ok is False
 
@@ -183,7 +186,7 @@ def test_push_image_live_fails_loud_when_writeback_cannot_persist(monkeypatch):
     reports ok=False (not a silent ok=True) with the gid preserved for audit --
     the safeguard that stops an un-recorded create from being re-pushed."""
     _force_live(monkeypatch, _MEDIA_OK)
-    monkeypatch.setattr(shopify_push, "_writeback_image", lambda db, image, gid: False)
+    monkeypatch.setattr(shopify_push, "_writeback_image", lambda db, image, gid, src: False)
     db = _EngineDB()
     db["catalog_products"].insert_one(
         {"id": "P1", "ecom": {"shopify_product_id": "gid://shopify/Product/111"}}
