@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import List, Optional
 from datetime import datetime, timedelta
 import uuid
-from ..auth import get_current_user, require_roles
+from ..auth import get_current_user, holds_role, require_roles
 from ...dependencies import (
     get_vendor_repository,
     get_purchase_order_repository,

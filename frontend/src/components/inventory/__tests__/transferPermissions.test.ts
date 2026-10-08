@@ -14,6 +14,7 @@ import {
   canReceive,
   canComplete,
   canCancel,
+  canPrintChallan,
   isSourceSide,
   isDestSide,
   type TransferActor,
@@ -139,5 +140,16 @@ describe('ship / receive / complete gates match backend status windows', () => {
       activeStoreId: 'STORE-B',
     };
     expect(canComplete(workshopB, t({ status: 'received' }))).toBe(false);
+  });
+});
+
+describe("canPrintChallan — the server's own answer, never a role list", () => {
+  it('offers the Delivery Challan only when the server says this user prints it', () => {
+    expect(canPrintChallan({ can_print_challan: true })).toBe(true);
+    expect(canPrintChallan({ can_print_challan: false })).toBe(false);
+  });
+
+  it('offers nothing when the reply does not say (an older server)', () => {
+    expect(canPrintChallan({})).toBe(false);
   });
 });

@@ -11,6 +11,9 @@ Role policy (DECISIONS sec 9):
     (context="catalog_edit"), never on operational views (inventory ledger, reports).
   * AREA_MANAGER and below (STORE_MANAGER, OPTOMETRIST, SALES_*, WORKSHOP_STAFF)
     -- cost + margin are stripped from the payload; the FE renders "-".
+  * context="product" -- per-unit cost (owner ruling 2026-09-28: managers see
+    per-unit cost, counter staff never, D7): AREA_MANAGER / STORE_MANAGER /
+    CATALOG_MANAGER too. A stock transfer's value is its units' own cost.
 
 "Hidden" = the field is removed server-side so it never reaches the browser.
 No emoji (Windows cp1252).
@@ -19,6 +22,7 @@ from typing import Dict, List
 
 COST_VISIBLE_ROLES = {"SUPERADMIN", "ADMIN", "ACCOUNTANT"}
 CATALOG_FORM_ROLES = {"CATALOG_MANAGER"}
+UNIT_COST_ROLES = {"AREA_MANAGER", "STORE_MANAGER", "CATALOG_MANAGER"}
 
 # Raw cost fields that may appear on product / stock / order-line payloads.
 _COST_FIELDS = {"cost_price", "cost_value", "cost_at_sale", "unit_cost"}
@@ -46,6 +50,8 @@ def can_see_cost(user: dict, context: str = "default") -> bool:
     if roles & COST_VISIBLE_ROLES:
         return True
     if context == "catalog_edit" and (roles & CATALOG_FORM_ROLES):
+        return True
+    if context == "product" and (roles & UNIT_COST_ROLES):
         return True
     return False
 

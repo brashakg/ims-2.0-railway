@@ -160,8 +160,11 @@ def transfer_env(monkeypatch):
         "notes": "Stock rebalance",
         "created_at": "2026-06-15T09:00:00",
     }
-    # Force the in-memory fallback in transfers persistence (no Mongo).
+    # Force the in-memory fallback in transfers persistence (no Mongo) -- and
+    # no raw db for the shop GST read either (the test app's MockDatabase has
+    # no get_collection; a real read error refuses, 503).
     monkeypatch.setattr(transfers_router, "_transfers_coll", lambda: None)
+    monkeypatch.setattr(transfers_router, "_get_db", lambda: None)
     # #754 fail-loud guard: the transfer challan resolves the source store via
     # the print_identity helpers (not the removed _get_db); seed them.
     _seed_print_identity(monkeypatch)
@@ -282,7 +285,8 @@ def test_transfer_challan_endpoint_returns_html(transfer_env):
     assert "DELIVERY CHALLAN" in body.upper()
     assert "Frame Classic" in body
     assert "BV Bokaro" in body and "BV Ranchi" in body
-    assert "DC/TRF/" in body
+    # F51: the challan carries the transfer's own number, not an internal code.
+    assert "TRF-202606-1" in body and "DC/TRF/" not in body
 
 
 # ===========================================================================

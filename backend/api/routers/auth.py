@@ -641,6 +641,14 @@ async def get_current_user(
         )
 
 
+def holds_role(current_user: dict, *allowed_roles: str) -> bool:
+    """require_roles' check, for a caller already in hand (a route that hides
+    one field rather than refusing): holds one of `allowed_roles`; SUPERADMIN
+    always does."""
+    roles = set((current_user or {}).get("roles", []) or [])
+    return "SUPERADMIN" in roles or bool(roles & set(allowed_roles))
+
+
 def require_roles(*allowed_roles: str):
     """Reusable RBAC dependency factory. Returns a dependency that 403s unless
     the user holds one of `allowed_roles`. SUPERADMIN always passes.
@@ -655,8 +663,7 @@ def require_roles(*allowed_roles: str):
     allowed = set(allowed_roles)
 
     async def _dep(current_user: dict = Depends(get_current_user)) -> dict:
-        roles = set(current_user.get("roles", []) or [])
-        if "SUPERADMIN" in roles or (roles & allowed):
+        if holds_role(current_user, *allowed):
             return current_user
         raise HTTPException(
             status_code=403,
