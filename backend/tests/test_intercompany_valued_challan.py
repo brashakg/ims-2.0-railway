@@ -908,6 +908,15 @@ def test_owner_the_challan_button_is_offered_exactly_to_whom_the_server_prints_i
 _MANAGERS_AND_ACCOUNTS = {"SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT"}
 
 
+def _prints(tid, user):
+    """Whether the challan route prints this transfer's challan for `user`."""
+    try:
+        _challan(tid, user)
+    except HTTPException:
+        return False
+    return True
+
+
 def test_d13_inter_state_challan_prints_one_place_of_supply(db):
     """r5: Dhanbad -> Pune printed two places of supply -- the meta row's
     'Maharashtra (27)' and the letterhead's 'Place of supply' row with
@@ -1004,3 +1013,62 @@ def test_d13_ship_refuses_when_it_cannot_read_the_shops(db, monkeypatch):
     assert exc.value.status_code == 503
     assert db["stock_units"].count_documents({"status": "AVAILABLE"}) == 2
     assert transfers._get_transfer(t["id"])["status"] == transfers.TransferStatus.APPROVED
+
+
+@pytest.mark.parametrize("case", ["valued_before_ship", "cannot_place", "gstin_lost_after_ship"])
+def test_owner_the_challan_button_matches_the_route_on_every_move(db, case):
+    """r5: the flag said True to managers and accounts on a move IMS cannot
+    place (the route answers 400) and on a valued move before ship (409): the
+    button showed, then failed. It asks the route's own gate now
+    (print_documents.challan_gate), role by role."""
+    if case == "cannot_place":
+        _blank(db, "two_companies_one_gstin")
+    t = _create("ST-BOK-1")
+    if case == "gstin_lost_after_ship":
+        _ship(t["id"])
+        _blank(db, "two_companies_one_gstin")
+    printers = set()
+    for role in _ROLES:
+        user = _user(role)
+        offered = _run(transfers.get_transfer(t["id"], user))["transfer"]["can_print_challan"]
+        printed = _prints(t["id"], user)
+        assert offered is printed, (role, case)
+        if printed:
+            printers.add(role)
+    assert printers == (_MANAGERS_AND_ACCOUNTS if case == "gstin_lost_after_ship" else set())
+
+
+def test_owner_every_transfer_action_reply_carries_the_routes_answer(db):
+    """r5: the screen replaces its transfer with each action's reply, so a
+    reply without can_print_challan hides the button -- right after Ship,
+    when a valued challan first prints. Create, update, approve, ship,
+    receive, complete and cancel each answer what the route does then."""
+    area = _user("AREA_MANAGER", "ST-DHN-1")
+    receiver = _user("STORE_MANAGER", "ST-BOK-1")
+    t = _create("ST-BOK-1", by=SOURCE_MANAGER)  # pending approval, valued
+    tid = t["id"]
+    line_id = t["items"][0]["id"]
+    steps = [
+        ("create", SOURCE_MANAGER, lambda: t, False),
+        ("update", SOURCE_MANAGER, lambda: _run(transfers.update_transfer(
+            tid, transfers.TransferUpdate(notes="Packed in two boxes"), SOURCE_MANAGER
+        ))["transfer"], False),
+        ("approve", area, lambda: _run(transfers.approve_transfer(
+            tid, transfers.TransferApproval(approved=True), area
+        ))["transfer"], False),
+        ("ship", SOURCE_MANAGER, lambda: _ship(tid), True),
+        ("receive", receiver, lambda: _run(transfers.receive_transfer(
+            tid,
+            [transfers.TransferItemReceive(transfer_item_id=line_id, quantity_received=2)],
+            receiver,
+        ))["transfer"], True),
+        ("complete", receiver, lambda: _run(
+            transfers.complete_transfer(tid, None, receiver)
+        )["transfer"], True),
+    ]
+    for name, user, act, expected in steps:
+        reply = act()
+        assert reply.get("can_print_challan") is _prints(tid, user) is expected, name
+    other = _create("ST-DHN-2")  # unvalued: the area manager prints it
+    cancelled = _run(transfers.cancel_transfer(other["id"], "Not needed", area))["transfer"]
+    assert cancelled.get("can_print_challan") is _prints(other["id"], area) is True

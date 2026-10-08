@@ -67,11 +67,9 @@ _CHALLAN_ROLES = (
 
 
 def may_print_challan(current_user: dict, valued: bool = False) -> bool:
-    """THE challan print rule: the challan roles print a delivery challan; a
-    VALUED one (a move between two GST registrations, D13) carries the units'
-    cost, so only managers and accounts (D7; owner 2026-10-08). The route
-    below refuses by it and every transfer read hands the screen its answer
-    (transfers._caller_view), so the button never offers a 403."""
+    """THE challan print rule by role: the challan roles print a delivery
+    challan; a VALUED one (a move between two GST registrations, D13) carries
+    the units' cost, so only managers and accounts (D7; owner 2026-10-08)."""
     roles = (current_user or {}).get("roles") or []
     return any(r in _CHALLAN_ROLES for r in roles) and (
         not valued or can_see_cost(current_user, "product")
@@ -84,6 +82,39 @@ def _require_challan_role(current_user: dict) -> None:
             status_code=403,
             detail="Not permitted to print a delivery challan.",
         )
+
+
+def challan_gate(transfer: Dict[str, Any], current_user: dict) -> tuple:
+    """THE rule for whether a transfer's challan prints for this caller, before
+    its lines are read: the challan roles; a move IMS cannot place prints for
+    no one (ship's own 400); a VALUED one only for managers and accounts and
+    only once shipped (its value is what left the shop). Raises the route's
+    refusal, else returns the registrations (transfers._transfer_registrations).
+    The route refuses by it and every transfer reply hands the screen its
+    answer (transfers._can_print_challan), so the button never offers a
+    refusal."""
+    from .transfers import _get_db, _gstin_gap, _transfer_registrations
+
+    _require_challan_role(current_user)
+    src, dst, valued = _transfer_registrations(_get_db(), transfer)
+    if valued is None:
+        # IMS cannot place a shop on a registration: no paper either way.
+        raise HTTPException(status_code=400, detail=_gstin_gap(transfer, src, dst))
+    if valued:
+        # D7: the value is the units' own cost -- never a counter role's.
+        if not may_print_challan(current_user, valued=True):
+            raise HTTPException(
+                status_code=403,
+                detail="This challan carries the stock's cost. "
+                "Ask the store manager to print it.",
+            )
+        if not transfer.get("stock_shipped"):
+            raise HTTPException(
+                status_code=409,
+                detail="Ship the transfer first: a challan between two GST "
+                "registrations is valued at the units that leave the shop.",
+            )
+    return src, dst, valued
 
 
 def _challan_number(prefix: str, ref: str) -> str:
@@ -210,14 +241,11 @@ async def delivery_challan_for_transfer(
     from .transfers import (
         _assert_transfer_access,
         _first_cost,
-        _get_db,
         _get_transfer,
-        _gstin_gap,
         _line_expected_qty,
         _line_hsn,
         _require_hsn,
         _shipped_line_value,
-        _transfer_registrations,
     )
 
     transfer = _get_transfer(transfer_id)
@@ -238,26 +266,9 @@ async def delivery_challan_for_transfer(
     from_name = transfer.get("from_location_name") or ""
     to_name = transfer.get("to_location_name") or ""
 
-    src, dst, valued = _transfer_registrations(_get_db(), transfer)
+    src, dst, valued = challan_gate(transfer, current_user)
     from_gstin, to_gstin = src[1], dst[1]
     shipped = bool(transfer.get("stock_shipped"))
-    if valued is None:
-        # IMS cannot place a shop on a registration: no paper either way.
-        raise HTTPException(status_code=400, detail=_gstin_gap(transfer, src, dst))
-    if valued:
-        # D7: the value is the units' own cost -- never a counter role's.
-        if not may_print_challan(current_user, valued=True):
-            raise HTTPException(
-                status_code=403,
-                detail="This challan carries the stock's cost. "
-                "Ask the store manager to print it.",
-            )
-        if not shipped:
-            raise HTTPException(
-                status_code=409,
-                detail="Ship the transfer first: a challan between two GST "
-                "registrations is valued at the units that leave the shop.",
-            )
 
     items: List[Dict[str, Any]] = []
     for it in transfer.get("items", []) or []:

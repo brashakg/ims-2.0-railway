@@ -316,20 +316,20 @@ def _in_callers_stores(transfers: List[Dict], current_user: dict) -> List[Dict]:
 
 
 def _can_print_challan(transfer: Dict, current_user: dict) -> bool:
-    """Whether the caller may print this transfer's delivery challan: the
-    challan route's own rule (print_documents.may_print_challan) on this
-    transfer's verdict (_transfer_registrations). Only a role that prints the
-    unvalued challan alone (the counter) needs the verdict; a move IMS cannot
-    place prints for no one."""
-    from .print_documents import may_print_challan
+    """Whether the challan route prints this transfer's delivery challan for
+    the caller: its own gate (print_documents.challan_gate), asked, not
+    copied -- a move IMS cannot place prints for no one, a valued one for
+    managers and accounts once shipped."""
+    from .print_documents import challan_gate
 
-    if may_print_challan(current_user, valued=True):
-        return True
-    # ponytail: four reads per transfer for a counter role's list; batch the
-    # shops (org_validation.shop_gstins) if that list ever gets slow.
-    return may_print_challan(current_user) and (
-        _transfer_registrations(_get_db(), transfer)[2] is False
-    )
+    # ponytail: four shop reads per UNSHIPPED transfer in a list (a shipped
+    # one reads ship's stamp); batch the shops (org_validation.shop_gstins)
+    # if that list ever gets slow.
+    try:
+        challan_gate(transfer, current_user)
+    except HTTPException:
+        return False
+    return True
 
 
 def _caller_view(transfer: Dict, current_user: dict) -> Dict:
