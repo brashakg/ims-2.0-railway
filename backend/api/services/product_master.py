@@ -42,7 +42,6 @@ SAFETY (CORRECTIONS, binding):
 
 from __future__ import annotations
 
-import math
 import os
 import re
 import uuid
@@ -597,17 +596,27 @@ def _sku_segment(value: Any, keep_separators: bool = False) -> str:
     return "/".join(p for p in s.split("/") if p)
 
 
+def _plain_number(value: Any) -> Optional[str]:
+    """A size or lens index written as a plain decimal, in its shortest form,
+    digit for digit as typed: '1.50' and '1.5' are 1.5, '54.0' and a float
+    54.0 are 54, 54.1234567 stays 54.1234567. None for anything else (a sign,
+    an exponent, text): that is kept as typed. THE size rule the SKU
+    (_size_segment) and the duplicate key (compute_identity_key) share, so
+    the guard calls two spellings of one lens the same lens exactly when the
+    SKU does."""
+    m = re.fullmatch(r"(\d*)(?:\.(\d*))?", str("" if value is None else value).strip())
+    if not m or not (m.group(1) or m.group(2)):
+        return None
+    whole = m.group(1).lstrip("0") or "0"
+    frac = (m.group(2) or "").rstrip("0")
+    return whole + ("." + frac if frac else "")
+
+
 def _size_segment(value: Any) -> str:
     """The size part. A number keeps its decimal point, so a 52.5 eye size is
-    never the SKU of a 525 one; a whole number drops a trailing .0 (a float
-    54.0 from a catalog door is 54). Anything else is an ordinary segment."""
-    try:
-        num = float(value)
-    except (TypeError, ValueError):
-        return _sku_segment(value, keep_separators=True)
-    if not (math.isfinite(num) and num >= 0):
-        return _sku_segment(value, keep_separators=True)
-    return ("%f" % num).rstrip("0").rstrip(".")
+    never the SKU of a 525 one, and is written in its shortest form
+    (_plain_number). Anything else is an ordinary segment."""
+    return _plain_number(value) or _sku_segment(value, keep_separators=True)
 
 
 def build_sku(category: Any, attributes: Dict[str, Any], db=None) -> str:
@@ -1044,15 +1053,15 @@ def identity_parts(attributes: Dict[str, Any]) -> Tuple[Any, Any, Any, Any]:
     folds, so a lens the guard calls new also gets a SKU of its own and the
     Review preview is the SKU it saves. An Optical Lens has no colour or size:
     its coating and index stand in (Crizal 1.56 HC and Crizal 1.67 HC are two
-    products; the same Crizal 1.56 HC twice is one)."""
+    products; the same Crizal 1.56 HC twice is one). A lens with no sub-brand
+    is the brand's own line: its coating takes the model's place, so Hoya HC
+    1.56 saved twice is still one product and the SKU mints no filler."""
     ids = _derive_brand_model_color_size(attributes)
     a = attributes or {}
-    return (
-        ids["brand"],
-        ids["model"],
-        ids["color"] or a.get("coating"),
-        ids["size"] or a.get("index"),
-    )
+    model, colour = ids["model"], ids["color"] or a.get("coating")
+    if not model and not ids["color"]:
+        model, colour = colour, None
+    return (ids["brand"], model, colour, ids["size"] or a.get("index"))
 
 
 def normalise_identity_component(value: Any) -> str:
@@ -1112,7 +1121,7 @@ def compute_identity_key(
     if not b or not m:
         return None
     parts = [b, m, _norm(colour)]
-    s = _norm(size)
+    s = _norm(_plain_number(size) or size)
     if s:
         parts.append(s)
     return "|".join(parts)

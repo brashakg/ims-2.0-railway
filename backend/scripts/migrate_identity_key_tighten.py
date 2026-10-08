@@ -40,28 +40,23 @@ from typing import Any, Dict
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from api.services.product_master import compute_identity_key  # noqa: E402
+from api.services.product_master import compute_identity_key, identity_parts  # noqa: E402
 
 
 def _identity_of(doc: Dict[str, Any]):
-    """Read the identity fields the way the spine writes them.
-
-    Mirrors backfill_dedupe_prep._identity_of: the spine stores brand/model/
-    color/size at the top level, with attributes as the fallback for rows that
-    came in through the catalogue door.
+    """The key the create door stamps (product_master.normalise_payload:
+    compute_identity_key(*identity_parts(attributes)) -- the one rule, never a
+    copy here), read from the row's attributes. The top-level identity
+    columns only fill in what a row's attributes lack (an older row with
+    none). So an Optical Lens keeps its sub-brand, coating and index:
+    Crizal 1.56 HC and Crizal 1.67 HC are two products here too.
     """
     attrs = doc.get("attributes") if isinstance(doc.get("attributes"), dict) else {}
-    brand = doc.get("brand") or doc.get("brand_name") or attrs.get("brand_name") or attrs.get("brand")
-    model = doc.get("model") or doc.get("model_no") or attrs.get("model_no") or attrs.get("model")
-    colour = (
-        doc.get("color")
-        or doc.get("colour")
-        or doc.get("colour_code")
-        or attrs.get("colour_code")
-        or attrs.get("color")
-    )
-    size = doc.get("size") or attrs.get("size")
-    return compute_identity_key(brand, model, colour, size)
+    top = {k: doc.get(k) for k in (
+        "brand", "brand_name", "model", "model_no", "model_name", "subbrand",
+        "color", "colour_code", "colour_name", "size", "coating", "index",
+    )}
+    return compute_identity_key(*identity_parts({**top, **{k: v for k, v in attrs.items() if v}}))
 
 
 def run(products, *, apply: bool) -> Dict[str, Any]:

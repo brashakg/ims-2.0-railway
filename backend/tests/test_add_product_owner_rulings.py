@@ -489,6 +489,59 @@ def test_f13_the_size_keeps_its_decimal_point(door):
     assert again["sku"] == created["sku"] + "B"
 
 
+def _dup(door, payload):
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        door(payload)
+    assert exc.value.status_code == 409
+    return exc.value.detail["existing"]
+
+
+def test_f13_a_lens_with_no_sub_brand_is_still_guarded(door):
+    """Sub Brand is optional for a lens: Hoya HC 1.56 saved twice is one lens."""
+    hoya = {"brand_name": "Hoya", "index": "1.56", "coating": "HC"}
+    first = door(_form_post("LS", hoya))
+    assert first["identity_key"] and first["sku"] == "LS-HOYA-HC-1.56"
+    assert _dup(door, _form_post("LS", hoya))["sku"] == first["sku"]
+    # ... and a different coating is a different lens.
+    assert door(_form_post("LS", dict(hoya, coating="ARC")))["sku"] == "LS-HOYA-ARC-1.56"
+
+
+def test_f13_one_index_two_spellings_is_one_lens(door):
+    """The form sends '1.50'; a spreadsheet row drops the zero ('1.5'). The SKU
+    calls them the same size, and so does the duplicate key."""
+    first = door(_form_post("LS", dict(_CRIZAL, index="1.50")))
+    assert first["sku"] == "LS-ESSILOR-CRIZAL-HC-1.5"
+    assert _dup(door, _form_post("LS", dict(_CRIZAL, index="1.5")))["sku"] == first["sku"]
+
+
+def test_f13_an_odd_size_is_written_as_typed():
+    """The size is never read through a float: no float noise, no rounding."""
+    def seg(size):
+        return pm.build_sku("FR", dict(_CARRERA, lens_size=size)).rsplit("-", 1)[-1]
+
+    assert seg("1e300") == "1E300"
+    assert seg("54.1234567") == "54.1234567"
+    assert seg("0.00000001") == "0.00000001"
+    assert seg("nan") == "NAN"
+
+
+def test_f13_the_key_rebuild_tool_writes_the_create_door_key(door):
+    """migrate_identity_key_tighten (the mandatory key rebuild) derives the key
+    with the create door's own rule: two Crizal lenses are no collision, and a
+    lens key it leaves on file still catches the same lens."""
+    from scripts import migrate_identity_key_tighten as mig
+
+    door(_form_post("LS", _CRIZAL))
+    door(_form_post("LS", dict(_CRIZAL, index="1.67")))
+    door(_form_post("LS", {"brand_name": "Hoya", "index": "1.56", "coating": "HC"}))
+    stats = mig.run(door.repo.collection, apply=True)
+    assert stats["collisions"] == 0 and stats["rewritten"] == 0
+    assert stats["unchanged"] == 3
+    _dup(door, _form_post("LS", _CRIZAL))
+
+
 def test_f13_guard_a_clash_still_gets_a_unique_sku(door):
     first = door(_form(brand="Carrera", model="CA8895", color="807"))
     # Same identity is a 409 at this door; a different size key is a new row
