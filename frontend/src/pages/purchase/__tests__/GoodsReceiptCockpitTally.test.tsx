@@ -253,4 +253,26 @@ describe('GoodsReceiptCockpit two-step receive - ruling 14 (the tally)', () => {
     // The dialog can land before its load effect runs: wait for the read.
     await waitFor(() => expect(getUnitsMock).toHaveBeenCalledWith({ grn_id: 'G7' }));
   });
+
+  it('a held (partly accepted) receipt can be voided from the waiting panel', async () => {
+    // An order with no room left refuses the held receipt's re-accept and says
+    // to void it; the panel must offer that, and the server refuses a void of
+    // one that put units on the shelf.
+    getGRNsMock.mockImplementation(async (p: { status?: string }) =>
+      p.status === 'PARTIALLY_ACCEPTED'
+        ? { grns: [{ grn_id: 'G8', grn_number: 'RCPT/S1/26-27/0008', vendor_id: 'V1', status: 'PARTIALLY_ACCEPTED', items: [] }] }
+        : { grns: [] },
+    );
+    const voidGRNMock = vendorsApi.voidGRN as unknown as ReturnType<typeof vi.fn>;
+    voidGRNMock.mockResolvedValue({ grn_status: 'VOID' });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    render(
+      <MemoryRouter initialEntries={['/purchase/receive?vendor_id=V1']}>
+        <GoodsReceiptCockpit />
+      </MemoryRouter>,
+    );
+    await screen.findByText(/receipts still waiting/i, undefined, { timeout: 5000 });
+    fireEvent.click(await screen.findByRole('button', { name: /void/i }, { timeout: 5000 }));
+    await waitFor(() => expect(voidGRNMock).toHaveBeenCalledWith('G8'));
+  });
 });

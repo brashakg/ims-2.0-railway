@@ -529,3 +529,57 @@ def test_a_catalog_now_re_accept_in_flight_is_seen(monkeypatch):
         t.join(15)
     assert out_r1["r"]["grn_status"] == "ACCEPTED", out_r1
     assert _p2_units(stock) == 2
+
+
+def _held_then_full(monkeypatch, with_p1):
+    """2 of P2 live (2 cancelled), P1 3 open. R1 (P2 x2, plus P1 x3 when
+    `with_p1`) is accepted while P2 is not catalogued: P2 is held. P2 is
+    catalogued and R2 (P2 x2) takes the room. R1 can no longer be accepted."""
+    from api.services import product_master as pm
+
+    po = _po(_line("P1", "Frame X", 3), _line("P2", "Ray-Ban", 2))
+    po["items"].append(_line("P2", "Ray-Ban", 0, ordered_qty=0, cancelled_qty=2,
+                             line_status="CANCELLED"))
+    grn_repo, _po_repo, stock, _t = _wire(monkeypatch, po=po, product_repo=_Products("P1", "P2"))
+    _atomic_claims(grn_repo)
+    _mongo_filters(grn_repo)
+    lines = _items("P2", 2) + (_items("P1", 3) if with_p1 else [])
+    r1 = _create("normal", lines, _user(), inv="INV-A")["grn_id"]
+    r2 = _create("normal", _items("P2", 2), _user(), inv="INV-B")["grn_id"]
+    monkeypatch.setattr(
+        pm, "compute_catalog_status",
+        lambda prod: ("DRAFT", ["hsn_code"]) if prod.get("product_id") == "P2" else ("ACTIVE", []),
+    )
+    assert _accept(r1)["grn_status"] == "PARTIALLY_ACCEPTED"
+    monkeypatch.setattr(pm, "compute_catalog_status", lambda prod: ("ACTIVE", []))
+    assert _accept(r2)["grn_status"] == "ACCEPTED" and _p2_units(stock) == 2
+    out = _accept(r1)
+    assert isinstance(out, HTTPException) and out.status_code == 409, out
+    return grn_repo, stock, r1, out.detail
+
+
+def test_a_held_receipt_the_order_has_no_room_for_can_be_voided(monkeypatch):
+    """Nothing of R1 is in stock: the refusal says void, the void works, and
+    the order's cancels are no longer held up by it."""
+    grn_repo, stock, r1, detail = _held_then_full(monkeypatch, with_p1=False)
+    assert "Void this receipt" in detail
+    with pytest.raises(HTTPException) as e:
+        vendors_mod._refuse_if_box_waiting("PO-1")
+    assert e.value.status_code == 409
+    out = asyncio.run(vendors_mod.void_grn(r1, current_user=_user()))
+    assert out["grn_status"] == "VOID" and grn_repo.docs[r1]["status"] == "VOID"
+    vendors_mod._refuse_if_box_waiting("PO-1")  # no longer waiting
+    assert _p2_units(stock) == 2
+
+
+def test_a_held_receipt_with_stock_points_to_escalation_not_void(monkeypatch):
+    """R1 put its 3 P1 in stock, so it cannot be voided: the refusal says to
+    escalate it, and the void refuses."""
+    grn_repo, stock, r1, detail = _held_then_full(monkeypatch, with_p1=True)
+    assert "escalate" in detail and "Void this receipt" not in detail
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(vendors_mod.void_grn(r1, current_user=_user()))
+    assert e.value.status_code == 409
+    assert grn_repo.docs[r1]["status"] == "PARTIALLY_ACCEPTED"
+    asyncio.run(vendors_mod.escalate_grn(r1, note="no room left", current_user=_user()))
+    vendors_mod._refuse_if_box_waiting("PO-1")  # escalated: no longer waiting

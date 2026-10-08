@@ -24,6 +24,9 @@ from .grn_accept_lock import (
 )
 
 
+_VOIDABLE = ("PENDING", "PARTIALLY_ACCEPTED")
+
+
 @router.post("/grn/{grn_id}/void")
 async def void_grn(
     grn_id: str, current_user: dict = Depends(require_roles(*_RECEIVE_ROLES))
@@ -31,13 +34,15 @@ async def void_grn(
     """Void a goods-receipt note that never put stock on the shelf
     (duplicate/mistake cleanup).
 
-    Two gates, and the second one matters more than it looks. PENDING-only is
-    the bookkeeping gate: an ACCEPTED / PARTIALLY_ACCEPTED GRN has already
-    minted stock_units and must be corrected through a vendor return. But
-    PENDING does NOT imply "no stock": the accept flow flips the status only
-    AFTER the mint loop, so a worker killed mid-accept leaves the receipt
-    PENDING with real units already on the shelf. Voiding THAT orphans those
-    units (PO receipt math only sums ACCEPTED GRNs) and licenses a full re-mint
+    Two gates, and the second one matters more than it looks. The status is
+    the bookkeeping gate: an ACCEPTED GRN has minted stock_units and must be
+    corrected through a vendor return, so only a PENDING or a held
+    (PARTIALLY_ACCEPTED) one may be voided. Neither status implies "no
+    stock": a held receipt minted its catalogued lines, and the accept flow
+    flips the status only AFTER the mint loop, so a worker killed mid-accept
+    leaves the receipt PENDING with real units already on the shelf. Voiding
+    THAT orphans those units (PO receipt math only sums ACCEPTED GRNs) and
+    licenses a full re-mint
     under a new grn_id -- which the per-(grn, line, unit) unique index cannot
     catch, because it keys on source_id. So voiding is refused whenever
     stock_units already holds a row for this receipt, and the operator is told
@@ -56,11 +61,15 @@ async def void_grn(
         raise HTTPException(status_code=404, detail="GRN not found")
     if not can_access_store_scoped(grn.get("store_id"), current_user):
         raise HTTPException(status_code=404, detail="GRN not found")
-    if grn.get("status") != "PENDING":
+    # A held receipt (PARTIALLY_ACCEPTED) is voidable too: when every line was
+    # held it put nothing in stock, and an order with no room left for it
+    # refuses its re-accept -- without a void it would wedge the receipt and
+    # every cancel on the order. The stock gate below refuses one that did.
+    if grn.get("status") not in _VOIDABLE:
         raise HTTPException(
             status_code=400,
             detail=(
-                "Only a PENDING GRN can be voided. This one is "
+                "Only a pending or held GRN can be voided. This one is "
                 f"{grn.get('status')} -- accepted stock must be corrected via a "
                 "vendor return."
             ),
@@ -133,14 +142,15 @@ async def void_grn(
         # earlier version of this comment credited the wrong filter and would
         # have led the next reader to delete the one that is doing real work.
         #
-        #   * status PENDING -- carries BOTH the "no stall, two clerks" shape
-        #     and the parked-count shape. The PENDING assertion above reads the
+        #   * status AS READ -- carries BOTH the "no stall, two clerks" shape
+        #     and the parked-count shape. The status assertion above reads the
         #     doc fetched BEFORE the claim, and the claim itself admits
         #     PARTIALLY_ACCEPTED, so without this filter a colleague's accept
-        #     landing in between voids a receipt that now holds stock. Measured
-        #     with the token filter REMOVED: both of those still 409 here,
-        #     because by then the doc is ACCEPTED / PARTIALLY_ACCEPTED and no
-        #     longer matches.
+        #     landing in between voids a receipt that now holds stock (a
+        #     receipt read PENDING must still be PENDING; one read held,
+        #     held). Measured with the token filter REMOVED: both of those
+        #     still 409 here, because by then the doc is ACCEPTED /
+        #     PARTIALLY_ACCEPTED and no longer matches.
         #
         #   * accept_lock_token -- its UNIQUE job is the shape where the doc is
         #     still PENDING when the parked void wakes up, so the status filter
@@ -164,7 +174,7 @@ async def void_grn(
             grn_repo,
             {
                 "grn_id": grn_id,
-                "status": "PENDING",
+                "status": grn.get("status"),  # as read: changed meanwhile -> refused
                 "accept_lock_token": claim_token,
             },
             {"$set": void_patch},

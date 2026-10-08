@@ -229,8 +229,8 @@ def _hold_order_open_for_receipt(po_repo, grn) -> None:
                 status_code=409,
                 detail=(
                     "Part of this order was cancelled, so the receipt no "
-                    "longer fits it (" + ", ".join(over) + "). Void this "
-                    "receipt and log what arrived again."
+                    "longer fits it (" + ", ".join(over) + "). "
+                    + _way_out_of(grn)
                 ),
             )
         if po_repo.update_if(po_id, _as_read(po), {}):
@@ -238,6 +238,27 @@ def _hold_order_open_for_receipt(po_repo, grn) -> None:
     raise HTTPException(
         status_code=409,
         detail="This order kept changing while the delivery was being accepted - accept it again.",
+    )
+
+
+def _way_out_of(grn) -> str:
+    """What clears a receipt the order no longer has room for. A void, while
+    it has put nothing in stock (pending, or held for cataloguing with nothing
+    minted) -- void takes both. Once it holds stock, a void would leave those
+    units with no receipt behind them, so it can only be escalated; until
+    then every cancel on the order waits for it."""
+    stock_repo = get_stock_repository()
+    try:
+        shelved = stock_repo is not None and _grn_already_minted(
+            stock_repo, {"source_type": "GRN", "source_id": grn.get("grn_id")}
+        )
+    except Exception:  # noqa: BLE001 - unknown: never advise a void
+        shelved = True
+    if not shelved:
+        return "Void this receipt and log what arrived again."
+    return (
+        "It has already put units in stock, so it cannot be voided - escalate "
+        "it to head office, which takes it off the order's waiting list."
     )
 
 

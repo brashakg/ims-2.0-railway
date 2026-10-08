@@ -1315,7 +1315,8 @@ export function GoodsReceiptCockpit() {
                       correct one, and void duplicates (safe: a pending GRN has added nothing).
                       A <strong>partly accepted</strong> one put most of its goods into stock but
                       held the lines whose product is not catalogued yet; finish those products,
-                      then press "Add to stock" again to release them.
+                      then press "Add to stock" again to release them. If the order no longer
+                      has room for it, void it (only possible while none of it is in stock).
                     </p>
                     <div className="space-y-2">
                       {pendingGrns.map((g) => (
@@ -1358,17 +1359,17 @@ export function GoodsReceiptCockpit() {
                               )}
                               Add to stock
                             </button>
-                            {g.status === 'PARTIALLY_ACCEPTED' ? null : (
-                              <button
-                                type="button"
-                                onClick={() => voidPendingGrn(g.grn_id, g.grn_number)}
-                                disabled={grnActionBusy === g.grn_id}
-                                className="btn-secondary !py-1 !px-3 text-xs flex items-center gap-1.5 disabled:opacity-50"
-                              >
-                                <X className="w-3.5 h-3.5" />
-                                Void (duplicate)
-                              </button>
-                            )}
+                            {/* A held receipt can be voided too while none of it is in
+                                stock; the server refuses one that put units on the shelf. */}
+                            <button
+                              type="button"
+                              onClick={() => voidPendingGrn(g.grn_id, g.grn_number)}
+                              disabled={grnActionBusy === g.grn_id}
+                              className="btn-secondary !py-1 !px-3 text-xs flex items-center gap-1.5 disabled:opacity-50"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                              Void (duplicate)
+                            </button>
                           </div>
                         </div>
                       ))}

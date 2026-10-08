@@ -6,8 +6,9 @@ the PO stayed receivable, operators re-received, and duplicate PENDING GRNs
 piled up with no way to clear them (live-hit by the owner 2026-07-04, three
 identical GRNs). POST /vendors/grn/{id}/void closes that hole:
 
-  * PENDING-only -- an ACCEPTED/PARTIALLY_ACCEPTED GRN has minted stock and
-    must be corrected via a vendor return, so voiding it is 400.
+  * PENDING or held (PARTIALLY_ACCEPTED) only, and only while it has put
+    nothing in stock -- an ACCEPTED GRN must be corrected via a vendor return
+    (400); a held one with units on the shelf is refused (409).
   * Store-scoped like accept: a cross-store caller reads 404 (existence not
     disclosed).
   * The row is KEPT with status VOID (audit/numbering continuity); the accept
@@ -86,14 +87,32 @@ def test_void_accepted_grn_is_400(monkeypatch):
     assert repo.updated is None
 
 
-def test_void_partially_accepted_is_400_too(monkeypatch):
-    # PARTIALLY_ACCEPTED has already minted SOME stock -- not voidable.
+class _Stock:
+    def __init__(self, units):
+        self.units = units
+
+    def count(self, flt):
+        return self.units
+
+
+def test_a_held_receipt_with_units_in_stock_is_not_voided(monkeypatch):
+    # PARTIALLY_ACCEPTED that minted SOME stock -- voiding would orphan it.
     repo = _FakeGRNRepo(_grn(status="PARTIALLY_ACCEPTED"))
     _patch(monkeypatch, repo)
+    monkeypatch.setattr(v, "get_stock_repository", lambda: _Stock(2))
     with pytest.raises(HTTPException) as exc:
         asyncio.run(void_grn("G1", current_user=_user()))
-    assert exc.value.status_code == 400
+    assert exc.value.status_code == 409
     assert repo.updated is None
+
+
+def test_a_held_receipt_with_nothing_in_stock_is_voided(monkeypatch):
+    # Every line held for cataloguing: nothing on the shelf, so it can go.
+    repo = _FakeGRNRepo(_grn(status="PARTIALLY_ACCEPTED"))
+    _patch(monkeypatch, repo)
+    monkeypatch.setattr(v, "get_stock_repository", lambda: _Stock(0))
+    res = asyncio.run(void_grn("G1", current_user=_user()))
+    assert res["grn_status"] == "VOID" and repo.updated[1]["status"] == "VOID"
 
 
 def test_missing_grn_is_404(monkeypatch):
