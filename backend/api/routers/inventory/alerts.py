@@ -145,9 +145,10 @@ def _build_stock_alert(
     # still apply. See api/services/reorder_policy.py, which also turns
     # reorder off for a discontinued product (reorder_policy.discontinued).
     reorder_suggestions_off = _reorder_disabled(product)
-    # A discontinued product still on the shelf is scored only as LOW_STOCK
-    # (no qty) or DEAD_STOCK: 'keep well stocked' or 'excess units' is advice
-    # for a product the counter can still sell (audit F48).
+    # A discontinued product still on the shelf is scored only as DEAD_STOCK,
+    # or LOW_STOCK (no qty) while the low-stock list holds it: 'running low',
+    # 'keep well stocked' or 'excess units' is advice for a product the
+    # counter can still sell (audit F48).
     discontinued = _discontinued(product)
 
     velocity = (sold_30 or 0) / 30.0  # units/day from the last 30 days
@@ -211,8 +212,11 @@ def _build_stock_alert(
     # 2. LOW_STOCK — sells, getting low, but not yet reorder-critical.
     # When auto-reorder is disabled the alert stays (it is informational)
     # but with NO suggested restock qty (recommendedOrder 0, costImpact 0).
+    # Never for a discontinued product: it is not restocked, and the
+    # low-stock list leaves it out until it is at its level.
     if (
         has_level
+        and not discontinued
         and velocity > 0
         and projected is not None
         and projected <= lead_time_days * 2
@@ -258,7 +262,8 @@ def _build_stock_alert(
     if low_stock:
         return _low_stock(
             base, stock, cost, velocity, lead_time_days, reorder_suggestions_off,
-            f"Only {stock} left - at or below the low-stock level",
+            f"Only {stock} left - "
+            + ("discontinued, not reordered" if discontinued else "at or below the low-stock level"),
         )
 
     # 4/5. OVERSTOCK vs FAST_MOVING (both require active selling)

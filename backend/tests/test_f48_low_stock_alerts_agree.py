@@ -217,9 +217,37 @@ def test_a_discontinued_product_still_selling_is_never_a_reorder(monkeypatch):
     assert alert["productName"] == "Ray-Ban RB3025 Aviator - Gold"
     assert alert["alertType"] == "LOW_STOCK"
     assert alert["recommendedOrder"] == 0 and alert["costImpact"] == 0
+    assert alert["actionRequired"] == "Only 3 left - discontinued, not reordered"
     (row,) = _low()["items"]
     assert row["auto_reorder_disabled"] is True
     assert row["discontinued"] is True
+
+
+@pytest.mark.parametrize("provisional", [False, True], ids=["discontinued", "provisional-not-switched-on"])
+def test_an_inactive_product_selling_above_its_level(monkeypatch, provisional):
+    """Round 11 probe: inactive, this shop's level 5, 10 units here, 20 sold
+    this month. Low stock leaves it out (10 is above 5). Discontinued, Alerts
+    said 'Stock running low (~15 days left)' for a product nobody restocks;
+    it must say nothing. A provisional buy never switched on is new, not
+    discontinued, so it is still told it is running low -- which needs the
+    products read to carry 'provisional'."""
+    product = {**_PRODUCTS[0], "is_active": False, "reorder_quantity": 5}
+    if provisional:
+        product["provisional"] = True
+    db = _wire(monkeypatch, units=_units("P-AV", 10), products=[product])
+    db.orders.insert_many([
+        {
+            "status": "DELIVERED", "store_id": "S1", "created_at": _NOW - timedelta(days=d % 25 + 1),
+            "items": [{"barcode": "RB3025-GLD", "quantity": 1}],
+        }
+        for d in range(20)
+    ])
+    assert _low()["items"] == []
+    verdicts = [(a["alertType"], a["actionRequired"]) for a in _alerts()["alerts"]]
+    if provisional:
+        assert verdicts == [("LOW_STOCK", "Stock running low (~15 days left)")]
+    else:
+        assert verdicts == []
 
 
 # ---------------------------------------------------------------------------
