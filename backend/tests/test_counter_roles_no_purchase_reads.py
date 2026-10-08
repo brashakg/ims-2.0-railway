@@ -1019,9 +1019,11 @@ def stock_docs(monkeypatch):
 STOCK_READS = ({}, {"product_id": "P1"})
 
 
-def _product_cost_answers(client, role):
-    """{product route: did the body carry the per-unit cost} for one role."""
-    out = {p: "cost_price" in _product_rows(client, role, p)[0] for p in PRODUCT_READS}
+def _product_cost_rows(client, role):
+    """{product-cost read: the object its per-unit cost sits on} for one role:
+    every product read the "product" context gates, the purchase
+    recommendations (recs_db) included."""
+    out = {p: _product_rows(client, role, p)[0] for p in PRODUCT_READS}
     for params in STOCK_READS:
         resp = client.get(
             "/api/v1/inventory/stock",
@@ -1031,14 +1033,14 @@ def _product_cost_answers(client, role):
         assert resp.status_code == 200, (role, params, resp.text)
         row = resp.json()["items"][0]
         assert row["product_id"] == "P1"
-        out[f"inventory/stock {params}"] = bool({"cost_price", "unit_cost"} & set(row))
+        out[f"inventory/stock {params}"] = row
     resp = client.get(
         "/api/v1/inventory/units",
         params={"store_id": "BV-TEST-01", "product_id": "P1"},
         headers=_headers(role),
     )
     assert resp.status_code == 200, (role, resp.text)
-    out["inventory/units"] = "cost_price" in resp.json()["units"][0]
+    out["inventory/units"] = resp.json()["units"][0]
     for path, key in (
         ("/api/v1/catalog/products", "products"),
         ("/api/v1/catalog/products/C1", "product"),
@@ -1048,8 +1050,26 @@ def _product_cost_answers(client, role):
         doc = resp.json()[key]
         doc = doc[0] if isinstance(doc, list) else doc
         assert doc["pricing"]["mrp"] == 5000
-        out[path] = "cost_price" in doc["pricing"]
+        out[path] = doc["pricing"]
+    resp = client.get(
+        "/api/v1/reports/purchase/recommendations",
+        params={"store_id": "BV-TEST-01"},
+        headers=_headers(role),
+    )
+    assert resp.status_code == 200, (role, resp.text)
+    body = resp.json()
+    assert body["recommendations"][0]["suggested_order_qty"] == 4
+    out["recommendations"] = body["recommendations"][0]
+    out["recommendations summary"] = body["summary"]
     return out
+
+
+def _product_cost_answers(client, role):
+    """{product-cost read: did it carry any cost field} for one role."""
+    return {
+        route: bool(cost_mask_mod._ALL_MASKED & set(row))
+        for route, row in _product_cost_rows(client, role).items()
+    }
 
 
 def _product_cost_roles():
@@ -1058,7 +1078,7 @@ def _product_cost_roles():
 
 @pytest.mark.parametrize("role", rbac.ALL_ROLES)
 def test_product_cost_is_one_answer_on_every_product_route(
-    client, product_repo, catalog_docs, stock_docs, role
+    client, product_repo, catalog_docs, stock_docs, recs_db, role
 ):
     want = role in _product_cost_roles()
     answers = _product_cost_answers(client, role)
@@ -1154,6 +1174,11 @@ class _RecsDb:
         return _RecsColl(
             {"orders": [_SALES], "products": [_RECS_PRODUCT], "stock_units": []}[name]
         )
+
+
+@pytest.fixture
+def recs_db(monkeypatch):
+    monkeypatch.setattr(recs_mod, "get_db", lambda: _RecsDb())
 
 
 @pytest.mark.parametrize("role", rbac.ALL_ROLES)
@@ -1627,7 +1652,7 @@ def test_the_purchase_projections_are_cost_mask_s(
 
 
 def test_narrowing_the_product_rule_moves_every_product_read(
-    client, product_repo, catalog_docs, stock_docs, monkeypatch
+    client, product_repo, catalog_docs, stock_docs, recs_db, monkeypatch
 ):
     monkeypatch.setitem(
         cost_mask_mod._CONTEXT_ROLES,
@@ -1637,7 +1662,6 @@ def test_narrowing_the_product_rule_moves_every_product_read(
     answers = _product_cost_answers(client, "STORE_MANAGER")
     assert not any(answers.values()), answers
     assert all(_product_cost_answers(client, "AREA_MANAGER").values())
-    monkeypatch.setattr(recs_mod, "get_db", lambda: _RecsDb())
     resp = client.get(
         "/api/v1/reports/purchase/recommendations",
         params={"store_id": "BV-TEST-01"},
@@ -1648,16 +1672,26 @@ def test_narrowing_the_product_rule_moves_every_product_read(
 
 
 def test_unhiding_a_cost_field_moves_every_product_read(
-    client, product_repo, monkeypatch
+    client, product_repo, catalog_docs, stock_docs, recs_db, monkeypatch
 ):
-    # Which fields are cost is cost_mask's answer too: a route that strips its
-    # own list (or every key starting "purchase") would keep hiding this one.
-    monkeypatch.setattr(
-        cost_mask_mod, "_ALL_MASKED", cost_mask_mod._ALL_MASKED - {"purchase_price"}
-    )
-    for path in PRODUCT_READS:
-        row = _product_rows(client, "CASHIER", path)[0]
-        assert row["purchase_price"] == 3088.88 and "cost_price" not in row, (path, row)
+    # Which fields are cost is cost_mask's answer too, on every product-cost
+    # read: a route that asks can_see_cost for WHO but keeps its own list of
+    # WHICH fields (a pop of cost_price, every key starting "cost" or
+    # "purchase", cost_price added for some roles) keeps hiding the one field
+    # unhidden here, or shows another.
+    masked = cost_mask_mod._ALL_MASKED
+    shown = {
+        route: masked & set(row)
+        for route, row in _product_cost_rows(client, "ADMIN").items()
+    }
+    assert all(shown.values()), shown
+    for field in sorted(set().union(*shown.values())):
+        monkeypatch.setattr(cost_mask_mod, "_ALL_MASKED", masked - {field})
+        # /products caches its masked page; a rule change is a new page.
+        monkeypatch.setattr(cache_mod, "cache", _JsonCache())
+        rows = _product_cost_rows(client, "CASHIER")
+        seen = {route: keys & set(rows[route]) for route, keys in shown.items()}
+        assert seen == {r: k & {field} for r, k in shown.items()}, (field, seen)
 
 
 # ---------------------------------------------------------------------------
