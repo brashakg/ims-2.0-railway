@@ -27,10 +27,11 @@ vi.mock('../../../services/api/client', async (orig) => ({
 }));
 const toastMock = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() }));
 vi.mock('../../../context/ToastContext', () => ({ useToast: () => toastMock }));
-// The accountant's shop (the top-bar picker); a test may switch it.
-const auth = vi.hoisted(() => ({ store: 'S1' }));
+// The accountant's shop (the top-bar picker); a test may switch it. `ap` is
+// whether the user holds an accounts role (hasRole(APPROVE_ROLES)).
+const auth = vi.hoisted(() => ({ store: 'S1', ap: true }));
 vi.mock('../../../context/AuthContext', () => ({
-  useAuth: () => ({ user: { activeStoreId: auth.store, roles: ['ACCOUNTANT'] }, hasRole: () => true }),
+  useAuth: () => ({ user: { activeStoreId: auth.store, roles: ['ACCOUNTANT'] }, hasRole: () => auth.ap }),
 }));
 
 import type { AxiosError } from 'axios';
@@ -128,6 +129,7 @@ const renderTab = (path?: string) => render(tab(path));
 beforeEach(() => {
   vi.clearAllMocks();
   auth.store = 'S1';
+  auth.ap = true;
   routeGets();
   routePosts();
 });
@@ -565,17 +567,65 @@ describe('round 14 - the credit verdict is visible and settable', () => {
     expect(createCalls()[0][1].itc_eligible).toBe(false);
   });
 
-  it('the form offers no Reverse charge tick and never sends reverse_charge true', async () => {
-    routePosts(preview({ itc_eligible: false }));
+  it('an accounts role ticks Reverse charge: asked, shown as what the supplier is owed, and booked', async () => {
+    // Freight Rs 1000 @ 18% under reverse charge, as the server answers it.
+    const rcm = preview({
+      reverse_charge: true,
+      lines: [{ taxable: 1000, gst_rate: 18, cgst: 0, sgst: 0, igst: 180, line_total: 1180 }],
+      taxable_total: 1000, igst_total: 180, tax_total: 180, total: 1000,
+    });
+    routePosts(preview());
     await openManualServicesBill({ name: 'Freight', qty: '1', price: '1000', rate: '18' });
-    await screen.findByText('No input credit: the supplier has no valid GSTIN');
-    expect(screen.queryByRole('checkbox', { name: /Reverse charge/ })).toBeNull();
-    expect(screen.queryByText(/Reverse charge/i)).toBeNull();
-    expect(previewCalls().at(-1)?.[1].reverse_charge).not.toBe(true);
+    await screen.findByText(/Inter-state supply:/);
+    expect(previewCalls().at(-1)?.[1].reverse_charge).toBe(false);
+    expect(screen.queryByText(/You pay this GST/)).toBeNull();
+
+    routePosts(rcm);
+    const before = previewCalls().length;
+    fireEvent.click(screen.getByRole('switch', { name: /Reverse charge/ }));
+    expect(
+      await screen.findByText('You pay this GST (₹180) to the government; the supplier is owed ₹1,000'),
+    ).toBeTruthy();
+    expect(previewCalls().length).toBeGreaterThan(before);
+    const asked = previewCalls().at(-1)?.[1];
+    expect(asked.reverse_charge).toBe(true);
+    expect(form().getByText('Supplier is owed')).toBeTruthy();
 
     fireEvent.click(screen.getByRole('button', { name: /Book invoice/i }));
     await waitFor(() => expect(createCalls()).toHaveLength(1));
-    expect(createCalls()[0][1].reverse_charge).not.toBe(true);
+    expect(createCalls()[0][1]).toEqual(asked);
+    expect(createCalls()[0][1].reverse_charge).toBe(true);
+  });
+
+  it('a role outside accounts sees no Reverse charge option and never sends it', async () => {
+    auth.ap = false;
+    routePosts(preview());
+    await openManualServicesBill({ name: 'Freight', qty: '1', price: '1000', rate: '18' });
+    await screen.findByText(/Inter-state supply:/);
+    expect(screen.queryByRole('switch', { name: /Reverse charge/ })).toBeNull();
+    expect(screen.queryByText(/Reverse charge/i)).toBeNull();
+    expect(previewCalls().at(-1)?.[1].reverse_charge).toBe(false);
+
+    fireEvent.click(screen.getByRole('button', { name: /Book invoice/i }));
+    await waitFor(() => expect(createCalls()).toHaveLength(1));
+    expect(createCalls()[0][1].reverse_charge).toBe(false);
+  });
+
+  it('the list and the detail drawer badge a reverse-charge bill and show what the supplier is owed', async () => {
+    routeGets({
+      '/vendors/purchase-invoices': {
+        purchase_invoices: [
+          { ...HELD_BILL, reverse_charge: true, total_amount: 9300, tax_amount: 465 },
+          { ...HELD_BILL, bill_id: 'b-ok', invoice_id: 'b-ok', invoice_number: 'MLH-78' },
+        ],
+        total: 2,
+      },
+    });
+    renderTab();
+    expect(await screen.findAllByText('Reverse charge')).toHaveLength(1);
+    expect(screen.getAllByText('₹9,300').length).toBeGreaterThan(0);
+    fireEvent.click(screen.getAllByRole('button', { name: /View detail/ })[0]);
+    await waitFor(() => expect(screen.getAllByText('Reverse charge')).toHaveLength(2));
   });
 
   it('the list and the detail drawer badge a stored itc_eligible=false bill "No credit"', async () => {

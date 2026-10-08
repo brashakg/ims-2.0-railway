@@ -271,6 +271,9 @@ export function InvoiceDetailDrawer({
               {invoice.itc_eligible === false && (
                 <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800" title="This bill claims no input credit">No credit</span>
               )}
+              {invoice.reverse_charge === true && (
+                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800" title="You pay this GST to the government; the supplier is owed the taxable value">Reverse charge</span>
+              )}
             </h3>
             <div className="text-xs text-gray-500 mt-0.5 flex flex-wrap gap-x-3">
               <span>{(invoice.vendor_invoice_date || '').slice(0, 10)}</span>

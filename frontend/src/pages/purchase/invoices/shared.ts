@@ -30,6 +30,7 @@ export function errMsg(e: unknown, fb: string) {
   return e instanceof Error ? e.message : fb;
 }
 
-// Roles allowed to approve a 3-way-match exception (release an ON_HOLD invoice
-// for payment despite a variance). Mirrors the _AP_ROLES backend gate.
+// The accounts roles: they approve a 3-way-match exception (release an ON_HOLD
+// invoice for payment despite a variance) and alone see the bill form's
+// Reverse charge option. Mirrors the _AP_ROLES backend gate.
 export const APPROVE_ROLES: UserRole[] = ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'];

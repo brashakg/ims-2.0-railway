@@ -305,6 +305,9 @@ function InvoiceList({ invoices, onOpen }: { invoices: PurchaseInvoice[]; onOpen
                   {pi.itc_eligible === false && (
                     <span className="mt-0.5 inline-flex items-center px-1.5 py-0.5 rounded-full text-[11px] font-medium bg-amber-100 text-amber-800" title="This bill claims no input credit">No credit</span>
                   )}
+                  {pi.reverse_charge === true && (
+                    <span className="mt-0.5 ml-1 inline-flex items-center px-1.5 py-0.5 rounded-full text-[11px] font-medium bg-blue-100 text-blue-800" title="You pay this GST to the government; the supplier is owed the taxable value">Reverse charge</span>
+                  )}
                 </td>
                 <td className="px-3 py-2 text-gray-700">{(pi.vendor_invoice_date || '').slice(0, 10)}</td>
                 <td className="px-3 py-2 text-xs text-gray-500">
