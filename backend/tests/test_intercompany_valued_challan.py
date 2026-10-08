@@ -701,24 +701,73 @@ def test_f51_a_crossing_transfer_that_shipped_nothing_prints_no_rs_0_challan(db)
     assert exc.value.status_code == 409 and "Nothing left the shop" in exc.value.detail
 
 
-@pytest.mark.parametrize("gap", ["one_company_no_gstins", "shop_without_a_company"])
-def test_d13_a_move_ims_cannot_place_is_refused_on_both_sides(db, gap):
-    """r2 'cannot tell = refuse', applied to every case: company Z's GSTINs not
-    entered yet (Dhanbad -> Pune, both blank) and a shop with no company
-    (Bokaro, entity_id unset). Ship is refused with nothing moved, and the
-    challan -- even for a counter role -- is refused, never the unvalued
-    paper with no GSTINs."""
+_CANNOT_PLACE = {
+    # company Z's GSTINs not entered yet: Dhanbad -> Pune, both blank
+    "one_company_no_gstins": "ST-PUN-1",
+    # a shop with no company: Bokaro, entity_id unset
+    "shop_without_a_company": "ST-BOK-1",
+    # r4 #1: ONE shop of one company without its GSTIN (Bank More blank)
+    "one_shop_without_a_gstin": "ST-DHN-2",
+    # ...and of two companies (Bokaro's GSTIN not entered)
+    "two_companies_one_gstin": "ST-BOK-1",
+}
+
+
+def _blank(db, gap):
     if gap == "one_company_no_gstins":
-        to_store = "ST-PUN-1"
         db["entities"].update_one({"entity_id": "ENT-Z"}, {"$set": {"gstins": []}})
-    else:
-        to_store = "ST-BOK-1"
+    elif gap == "shop_without_a_company":
         db["stores"].update_one({"store_id": "ST-BOK-1"}, {"$unset": {"entity_id": ""}})
-    t = _create(to_store)
-    with pytest.raises(HTTPException) as exc:
+    elif gap == "one_shop_without_a_gstin":
+        db["stores"].update_one(
+            {"store_id": "ST-DHN-2"}, {"$set": {"gstin": "", "state": "", "state_code": ""}}
+        )
+    else:
+        db["stores"].update_one({"store_id": "ST-BOK-1"}, {"$set": {"gstin": ""}})
+        db["entities"].update_one({"entity_id": "ENT-Y"}, {"$set": {"gstins": []}})
+
+
+@pytest.mark.parametrize("gap", list(_CANNOT_PLACE))
+def test_d13_a_move_ims_cannot_place_is_refused_on_both_sides(db, gap):
+    """r2 'cannot tell = refuse', applied to every case (r4 #1: one blank
+    GSTIN is a 'cannot tell' too, not 'two registrations'). Ship is refused
+    with nothing moved, and the challan gives ship's own answer to every role
+    -- never a counter role's 403, a manager's 'ship first' (ship would then
+    refuse), or the unvalued paper with no GSTINs."""
+    _blank(db, gap)
+    t = _create(_CANNOT_PLACE[gap])
+    with pytest.raises(HTTPException) as ship:
         _ship(t["id"])
-    assert exc.value.status_code == 400 and "cannot tell" in exc.value.detail
+    assert ship.value.status_code == 400 and "cannot tell" in ship.value.detail
     assert db["stock_units"].count_documents({"status": "AVAILABLE"}) == 2
-    with pytest.raises(HTTPException) as exc:
-        _challan(t["id"], _user("SALES_STAFF"))
-    assert exc.value.status_code == 400 and "cannot tell" in exc.value.detail
+    for user in (_user("SALES_STAFF"), SOURCE_MANAGER):
+        with pytest.raises(HTTPException) as paper:
+            _challan(t["id"], user)
+        assert (paper.value.status_code, paper.value.detail) == (400, ship.value.detail)
+
+
+# ===========================================================================
+# Panel round 4
+# ===========================================================================
+
+
+@pytest.mark.parametrize("blank", ["one_shop", "both_shops"])
+def test_d13_a_move_that_became_cannot_tell_after_ship_books_one_way(db, blank):
+    """r4 #1 (c): Hirapur -> Bank More ships on ONE registration; a GSTIN is
+    then lost before complete -- Bank More's alone, or the company's (both
+    shops). The goods have moved and the mirror bill cannot refuse, so both
+    cases answer the same: booked at the units' cost with the missing GSTIN
+    blank -- flagged by GSTR-1's validation and the Cross-Check, never one
+    booked and the other silently left off (it was: one blank booked Rs 3700,
+    both blank booked nothing)."""
+    t = _shipped("ST-DHN-2")
+    if blank == "one_shop":
+        _blank(db, "one_shop_without_a_gstin")
+    else:
+        db["entities"].update_one({"entity_id": "ENT-Z"}, {"$set": {"gstins": []}})
+    _receive_and_complete(t)
+    (bill,) = db["vendor_bills"].find({"source_transfer_id": t["id"]})
+    assert bill["taxable_amount"] == pytest.approx(2 * UNIT_COST)
+    assert bill["recipient_gstin"] == ""
+    assert bill["vendor_gstin"] == ("" if blank == "both_shops" else GSTIN_Z_JH)
+

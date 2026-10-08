@@ -2161,28 +2161,30 @@ def _shop_gst(db, store_id: str) -> tuple:
 def _transfer_registrations(db, transfer: Dict) -> tuple:
     """(source, destination, crosses): each side's (entity_id, gstin, state)
     and whether the move crosses a GST registration -- a different company OR
-    a different GSTIN of one company (Sch I deemed supply). ONE rule for the
-    FIN-3 mirror bill and the D13 valued delivery challan, so the paper and the
-    books can never disagree about whether a move is between two
+    a different GSTIN of one company (Sch I deemed supply). ONE rule for ship,
+    the D13 valued delivery challan and the FIN-3 mirror bill, so the paper
+    and the books can never disagree about whether a move is between two
     registrations. `crosses` is None when IMS cannot tell (r2: refuse, never
-    guess): a company is involved but a shop's GSTIN is not on file -- one
-    company's two GSTIN-less shops, or a shop with no company. Ship and the
-    challan refuse that as a data gap; the mirror bill books nothing (None is
-    falsy), as it never booked a side with no company. No company on either
-    side -> False."""
+    guess): a company is involved but EITHER shop's GSTIN is not on file (one
+    blank or both, one company or two, or a shop with no company). Ship and
+    the challan refuse that as a data gap. The mirror bill, booked after the
+    goods moved, cannot refuse: it books such a move with the blank GSTIN,
+    flagged on GSTR-1's validation and the Cross-Check (never a supply left
+    off unseen), when both shops have a company to name on it. No company on
+    either side -> False."""
     src = _shop_gst(db, transfer.get("from_location_id") or "")
     dst = _shop_gst(db, transfer.get("to_location_id") or "")
-    if src[0] and dst[0] and src != dst:
-        return src, dst, True
+    if src[1] and dst[1]:
+        return src, dst, src != dst
     # ponytail: two company-less shops stay False (an org with no company on
     # file books nothing anywhere); refuse them too if one ever runs that way.
-    cannot_tell = bool(src[0] or dst[0]) and not (src[1] and dst[1])
-    return src, dst, None if cannot_tell else False
+    return src, dst, None if (src[0] or dst[0]) else False
 
 
 def _gstin_gap(transfer: Dict, src: tuple, dst: tuple) -> str:
-    """'' when both sides of a registration-crossing move have a GSTIN, else
-    the sentence naming the store(s) without one (ship and the challan)."""
+    """The refusal for a move IMS cannot place (_transfer_registrations
+    None), naming the store(s) with no GSTIN on file -- ship and the challan
+    give this one reason."""
     missing = [
         name or "A store"
         for name, side in (
@@ -2191,22 +2193,11 @@ def _gstin_gap(transfer: Dict, src: tuple, dst: tuple) -> str:
         )
         if not side[1]
     ]
-    if not missing:
-        return ""
-    if not (src[0] and dst[0]) or src[0] == dst[0]:
-        # One company (or a shop with none), a shop with no GSTIN: it may or
-        # may not be the other shop's registration -- refused as a data gap,
-        # never guessed either way (shop_gstin: None is a refusal).
-        return (
-            " and ".join(missing)
-            + " has no GSTIN of its company on file, so IMS cannot tell whether "
-            "this move stays inside one GST registration. Set the shop's company "
-            "and GSTIN first."
-        )
     return (
         " and ".join(missing)
-        + " has no GSTIN on file. A transfer between two GST registrations "
-        "travels on a valued delivery challan, which needs both."
+        + " has no GSTIN of its company on file, so IMS cannot tell which GST "
+        "registration this move leaves or enters. Set the shop's company and "
+        "GSTIN first."
     )
 
 
@@ -2222,9 +2213,8 @@ def _assert_valued_paper(transfer: Dict) -> None:
     src, dst, crosses = _transfer_registrations(db, transfer)
     if crosses is False:
         return
-    gap = _gstin_gap(transfer, src, dst)
-    if gap:
-        raise HTTPException(status_code=400, detail=gap)
+    if crosses is None:
+        raise HTTPException(status_code=400, detail=_gstin_gap(transfer, src, dst))
     units = db.get_collection("stock_units")
     in_stock = False
     for line in transfer.get("items") or []:
@@ -2421,7 +2411,9 @@ def _book_mirror_purchase(transfer: Dict) -> None:
     (from_entity, from_gstin, from_state), (to_entity, to_gstin, to_state), crosses = (
         _transfer_registrations(db, transfer)
     )
-    if not crosses:
+    # 'Cannot tell' (None) books too: the goods already moved, and the blank
+    # GSTIN keeps the bill loud (see _transfer_registrations).
+    if crosses is False or not (from_entity and to_entity):
         return
 
     # Idempotent: skip if we already wrote the bill for this transfer.

@@ -244,9 +244,6 @@ async def delivery_challan_for_transfer(
                 detail="Ship the transfer first: a challan between two GST "
                 "registrations is valued at the units that leave the shop.",
             )
-        gap = _gstin_gap(transfer, src, dst)
-        if gap:
-            raise HTTPException(status_code=400, detail=gap)
 
     items: List[Dict[str, Any]] = []
     for it in transfer.get("items", []) or []:
