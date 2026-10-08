@@ -2,6 +2,8 @@
 // IMS 2.0 - Purchase Management Types
 // ============================================================================
 
+import type { UserRole } from '../../types';
+
 export type TabType = 'purchase-orders' | 'purchase-invoices' | 'variance' | 'suppliers' | 'vendor-returns' | 'analytics';
 export type POStatus =
   | 'DRAFT'
@@ -91,6 +93,18 @@ export function byPerson(name?: string | null, id?: string | null): string {
   const who = name || id;
   return who ? ` by ${who}` : '';
 }
+
+/** Who receives goods into stock. Owner ruling 2026-09-28: RECEIVING IS
+ *  MANAGERS ONLY -- not the accountant (bills and payments stay theirs), and
+ *  workshop staff hand the box to one of these. ONE list for the receive
+ *  routes, the Receive Goods menu item, every Receive button and the blocked
+ *  page that names them; mirrors the backend _RECEIVE_ROLES (+ SUPERADMIN). */
+export const RECEIVING_MANAGER_ROLES: readonly UserRole[] = [
+  'SUPERADMIN',
+  'ADMIN',
+  'AREA_MANAGER',
+  'STORE_MANAGER',
+];
 
 /** PO statuses the Goods-Receipt cockpit can receive against (mirrors the
  *  backend _RECEIVABLE_PO_STATUSES tuple in vendors.py). */

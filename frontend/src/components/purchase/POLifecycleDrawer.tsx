@@ -35,7 +35,7 @@ import { useNavigate } from 'react-router-dom';
 import { vendorsApi } from '../../services/api/inventory';
 import { useAuth } from '../../context/AuthContext';
 import { PurchaseStatusChip } from './PurchaseStatusChip';
-import { RECEIVABLE_PO_STATUSES } from '../../pages/purchase/purchaseTypes';
+import { RECEIVABLE_PO_STATUSES, RECEIVING_MANAGER_ROLES } from '../../pages/purchase/purchaseTypes';
 import type { POStatus } from '../../pages/purchase/purchaseTypes';
 
 // ---------------------------------------------------------------------------
@@ -138,9 +138,6 @@ function fmtDateTime(at: string | null | undefined): string {
   });
 }
 
-/** Mirrors the /purchase/receive ProtectedRoute gate in App.tsx -- never hand
- *  a role a button that lands on /unauthorized. */
-const RECEIVE_ROLES = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] as const;
 
 /** AP-capable roles (mirrors the /purchase/recon-console gate -- the invoice
  *  booking surface is an accountant function). */
@@ -244,7 +241,7 @@ export function POLifecycleDrawer({ poId, poNumber, onClose, onSendToVendor }: P
   const nextStep = timeline
     ? deriveNextStep(timeline, {
         canSend: Boolean(onSendToVendor),
-        canReceive: hasRole([...RECEIVE_ROLES]),
+        canReceive: hasRole([...RECEIVING_MANAGER_ROLES]),
         canBookInvoice: hasRole([...AP_ROLES]),
       })
     : null;
