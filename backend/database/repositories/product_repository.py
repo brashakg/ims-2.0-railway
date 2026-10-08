@@ -197,6 +197,13 @@ class ProductRepository(BaseRepository):
             limit=limit,
         )
 
+    def search_products_filter(self, query: str) -> Dict:
+        """The filter search_products(query) runs (active only), for a caller
+        that counts it inside a wider $or -- the counter stock lookup."""
+        return self._search_query(
+            query, list(self.SEARCH_FIELDS), self._search_extra_filter(None, True)
+        )
+
     def count_search_products(
         self,
         query: str,

@@ -48,7 +48,7 @@ from ._shared import (
 from .helpers import _get_db
 from ...services.gtin import sanitise_gtin
 from ...services.item_events import status_match
-from ...services.product_master import find_similar_products
+from ...services.product_master import find_similar_products, model_family_query
 from ...services.rbac_policy import policy_for
 from ...services.stores_util import physical_stores
 
@@ -106,7 +106,7 @@ def _in_transit_by_product_shop(stock_repo, pids, shop_ids):
 
 
 def _find(product_repo, stock_repo, q):
-    """(products, exact ids): the products `q` names exactly -- its SKU, its
+    """(products, exact ids, total): the products `q` names exactly -- its SKU, its
     product barcode, its manufacturer GTIN (attributes.gtin) or an IMS unit
     label -- then the active search hits, then their model family (other
     colours by the identity_key rule, other eye sizes by variant_of), so one
@@ -129,7 +129,8 @@ def _find(product_repo, stock_repo, q):
     ids = list(hit_ids)
     # ponytail: 3 indexed reads per distinct model among <= 100 hits; fold into
     # one identity_key $regex only if a broad brand search ever feels slow.
-    for cat, brand, model in {(p.get("category"), p.get("brand"), p.get("model")) for p in hits}:
+    models = {(p.get("category"), p.get("brand"), p.get("model")) for p in hits}
+    for cat, brand, model in models:
         similar = find_similar_products(
             product_repo.collection, category=cat, brand=brand, model=model, limit=4 * _HITS
         )
@@ -139,15 +140,23 @@ def _find(product_repo, stock_repo, q):
             if s.get("product_id")
         ]
     if not ids:
-        return [], exact_ids
+        return [], exact_ids, 0
     ids += [p["variant_of"] for p in hits if p.get("variant_of")]
     family = [{"product_id": {"$in": ids}}, {"variant_of": {"$in": ids}}]
+    # `total`: the same answer with no cap -- the exact codes, every search
+    # match, every row of each hit's model (its identity_key family) and the
+    # variant_of links -- so the screen can say when a cap cut rows.
+    # ponytail: a size child of a sibling the cap dropped is not counted.
+    uncapped = exact + [product_repo.search_products_filter(q)] + family + [
+        f for f in (model_family_query(*m) for m in models) if f
+    ]
+    total = product_repo.count({"$or": uncapped, "is_active": True})
     # ponytail: the family is capped at 200 in storage order; the hits above
     # it never are. Sort the family by power/size if a counter ever asks.
     family = product_repo.find_many(
         {"$or": family, "is_active": True, "product_id": {"$nin": hit_ids}}, limit=4 * _HITS
     )
-    return hits + family, exact_ids
+    return hits + family, exact_ids, total
 
 
 @router.get("/lookup")
@@ -168,7 +177,7 @@ async def stock_lookup(
     if not q or not hasattr(db, "get_collection") or product_repo is None or stock_repo is None:
         return {"store_id": here, "items": []}
 
-    products, exact_ids = _find(product_repo, stock_repo, q)
+    products, exact_ids, total = _find(product_repo, stock_repo, q)
     pids = sorted({str(p["product_id"]) for p in products if p.get("product_id")})
     if not pids:
         return {"store_id": here, "items": []}
@@ -203,5 +212,6 @@ async def stock_lookup(
     # What the scan named first, then the model by colour and size.
     items.sort(key=lambda i: (i["product_id"] not in exact_ids,
                               *(str(i.get(k) or "") for k in ("brand", "model", "color", "size"))))
-    return {"store_id": here, "items": items,
+    # The caps (50 hits, 200 per family) cut a big contact-lens model: say so.
+    return {"store_id": here, "items": items, "total": total, "truncated": total > len(items),
             "not_counted_item_types": not_counted, "lens_grid_item_types": lens_grid}

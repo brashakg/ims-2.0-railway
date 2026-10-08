@@ -559,12 +559,12 @@ _CL_TARGET_GTIN = "0733905577766"
 _CL_TARGET_UNIT = "BVCL00000001"
 
 
-def _seed_contact_lens_family(db) -> str:
-    """230 active powers of one model; the one the counter scans is stored
+def _seed_contact_lens_family(db, powers: int = _CL_POWERS) -> str:
+    """`powers` active powers of one model; the one the counter scans is stored
     LAST, so storage order puts it past both caps. Returns its product_id."""
     rows = []
-    for i in range(_CL_POWERS):
-        last = i == _CL_POWERS - 1
+    for i in range(powers):
+        last = i == powers - 1
         pid = "P-CL-TARGET" if last else f"P-CL-{i:03d}"
         power = f"-{(i + 1) * 0.25:.2f}"
         rows.append({
@@ -596,6 +596,47 @@ def test_d7b2_a_scanned_power_is_never_cut_from_a_big_family(call, mongo_db, lab
     assert pids[0] == target, f"scanning {label}: the scanned power is row {pids.index(target)}"
     assert _counts(items[0])[S2] == (1, 0), "and Bokaro's box of it is counted"
     assert len(pids) > 1, "its other powers still come with it"
+
+
+# Round 7: the caps (50 search hits, 200 per family) cut a big contact-lens
+# model, and nothing told the counter -- who would say "we don't have that
+# power" while the till sells it. The answer now carries the uncapped total.
+@pytest.mark.parametrize(
+    "label,query",
+    [("its model", "Acuvue"), ("its brand", "Johnson"), ("its unit barcode", _CL_TARGET_UNIT)],
+)
+def test_d7b2_a_family_cut_by_the_caps_says_how_big_it_is(call, mongo_db, label, query):
+    _seed(mongo_db)
+    _seed_contact_lens_family(mongo_db, 300)
+    # a retired power of the model is not one the counter can sell
+    mongo_db["products"].insert_one({
+        "_id": "P-CL-OFF", "product_id": "P-CL-OFF", "sku": "CLOFF", "brand": "Johnson & Johnson",
+        "model": "Acuvue Oasys", "category": "CONTACT_LENS", "size": "-99.00", "is_active": False,
+        "identity_key": compute_identity_key("Johnson & Johnson", "Acuvue Oasys", None, "-99.00"),
+    })
+    body = _ok(call(_user("CASHIER", S1), q=query))
+    shown = len(body["items"])
+    assert shown < 300, f"by {label}: the caps still hold ({shown} rows)"
+    assert (body.get("total"), body.get("truncated")) == (300, True), f"by {label}: {shown} rows shown"
+
+
+def test_d7b2_a_search_cut_at_its_cap_says_so(call, mongo_db):
+    # 60 one-colour models of one brand: the 50-hit search cap cuts 10 that
+    # no hit's family brings back.
+    mongo_db["products"].insert_many([
+        {"_id": f"P-VO-{i}", "product_id": f"P-VO-{i}", "sku": f"FR-VOGUE-{i:03d}", "brand": "Vogue",
+         "model": f"VO{i:04d}", "category": "FRAME", "color": "BLK", "size": "52", "mrp": 3000.0,
+         "is_active": True, "identity_key": compute_identity_key("Vogue", f"VO{i:04d}", "BLK", "52")}
+        for i in range(60)
+    ])
+    body = _ok(call(_user("CASHIER"), q="Vogue"))
+    assert (len(body["items"]), body.get("total"), body.get("truncated")) == (50, 60, True)
+
+
+def test_d7b2_an_answer_the_caps_did_not_cut_is_not_flagged(call, mongo_db):
+    _seed(mongo_db)
+    body = _ok(call(_user("CASHIER"), q="CA8895"))
+    assert (body.get("total"), body.get("truncated")) == (len(body["items"]), False), body.get("total")
 
 
 # ============================================================================
