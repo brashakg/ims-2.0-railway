@@ -303,6 +303,13 @@ def _live_or_reason(db) -> Tuple[bool, Optional[str]]:
     return True, None
 
 
+def _product_brand(doc: Dict[str, Any]) -> Any:
+    """A product's brand as the push gates read it: the spine's `brand`, else a
+    Shopify-shaped `vendor`, else `attributes.brand_name` -- a CATALOG-door twin
+    carries only the last, and the website gate fails closed on no brand."""
+    return doc.get("brand") or doc.get("vendor") or (doc.get("attributes") or {}).get("brand_name")
+
+
 def push_lock_reason(db, entity: str, doc: Dict[str, Any]) -> Optional[str]:
     """Hub Phase 5 (owner DECISION C): return a reason if this entity is push-
     LOCKED, else None. A locked brand (product) or collection handle in the
@@ -324,8 +331,7 @@ def push_lock_reason(db, entity: str, doc: Dict[str, Any]) -> Optional[str]:
         return str(v or "").strip().lower()
 
     if entity == "product":
-        attrs = doc.get("attributes") or {}
-        brand = _norm(doc.get("brand") or doc.get("vendor") or attrs.get("brand_name"))
+        brand = _norm(_product_brand(doc))
         if brand and brand in {_norm(b) for b in (locks.get("brands") or [])}:
             return "brand '%s' is push-locked" % brand
     elif entity == "collection":
@@ -355,10 +361,7 @@ def product_push_refusal(db, product: Dict[str, Any]) -> Optional[str]:
         return lock
     from .. import catalog_dictionary
 
-    brand = product.get("brand") or product.get("vendor") or (
-        product.get("attributes") or {}
-    ).get("brand_name")
-    return catalog_dictionary.brand_website_refusal(db, brand)
+    return catalog_dictionary.brand_website_refusal(db, _product_brand(product))
 
 
 def is_variant_of(doc: Any) -> bool:

@@ -330,6 +330,36 @@ def test_f12_every_refusal_says_its_own_reason(monkeypatch):
     assert st["online"] == "NOT_FOR_WEBSITE" and misspelt in st["note"]
 
 
+def test_f12_the_gate_reads_a_brand_from_vendor_or_attributes(monkeypatch):
+    """A CATALOG-door twin carries its brand only in attributes.brand_name and
+    a Shopify-shaped doc only in vendor. The gate fails closed on no brand, so
+    if it stopped reading either one, every such product would silently leave
+    the website ('the product has no brand')."""
+    from api.services import policy_engine as pe
+    from api.services.online_catalog import doc_online_state
+
+    db = _db()
+    photo = {"images": ["https://cdn.example.com/p.jpg"]}
+    twin = {"attributes": {"brand_name": "Ray-Ban"}, **photo}
+    assert sp.product_push_refusal(db, twin) is None
+    assert sp.product_push_refusal(db, {"vendor": "Ray-Ban"}) is None
+    assert "not for the website" in sp.product_push_refusal(db, {"attributes": {"brand_name": "Carrera"}})
+    assert "not for the website" in sp.product_push_refusal(db, {"vendor": "Carrera"})
+    # The spine's own brand comes first, then vendor.
+    assert "not for the website" in sp.product_push_refusal(
+        db, {"brand": "Carrera", "vendor": "Ray-Ban", "attributes": {"brand_name": "Ray-Ban"}})
+    assert "not for the website" in sp.product_push_refusal(
+        db, {"vendor": "Carrera", "attributes": {"brand_name": "Ray-Ban"}})
+    assert doc_online_state(db, twin)["online"] != "NOT_FOR_WEBSITE"
+    assert _run(sp.push_product(db, {"id": "T1", "sku": "T1", "title": "t", **twin},
+                                blocked=False)).action == "create"
+    # ... and the push lock reads the same brand.
+    monkeypatch.setattr(pe, "get_policy", lambda key, default=None: (
+        {"brands": ["ray-ban"]} if key == "ecom.shopify_push_locks" else default))
+    assert "push-locked" in sp.product_push_refusal(db, twin)
+    assert "push-locked" in sp.product_push_refusal(db, {"vendor": "Ray-Ban"})
+
+
 # ---------------------------------------------------------------------------
 # F13 / D5 - readable SKU for new products, previewed by the same function
 # ---------------------------------------------------------------------------
