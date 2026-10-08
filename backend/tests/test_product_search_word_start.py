@@ -71,11 +71,15 @@ def db(monkeypatch):
     return db
 
 
-def _ids(db, q, **params):
+def _get(q, **params):
     app = FastAPI()
     app.include_router(products_router, prefix="/api/v1/products")
     app.dependency_overrides[get_current_user] = lambda: _CASHIER
-    res = TestClient(app).get("/api/v1/products", params={"search": q, **params})
+    return TestClient(app).get("/api/v1/products", params={"search": q, **params})
+
+
+def _ids(db, q, **params):
+    res = _get(q, **params)
     assert res.status_code == 200, res.text[:300]
     body = res.json()
     return [p["product_id"] for p in body["products"]], body["total_count"]
@@ -125,6 +129,13 @@ def test_a_legacy_colour_only_in_variant_is_matched_from_its_start(catalogue):
     # treats it as one too), so "matte" starts it and "black" does not.
     assert _ids(catalogue, "matte") == (["SG-AVI"], 1)
     assert _ids(catalogue, "black") == ([], 0)
+
+
+def test_a_search_is_at_most_100_characters(catalogue):
+    # A pasted wall of text cannot build a huge regex; 100 still searches.
+    assert _ids(catalogue, "Air Optix".ljust(100)) == (["CL-AIR"], 1)
+    res = _get("Air Optix".ljust(101))
+    assert res.status_code == 422, res.text[:300]
 
 
 def test_every_typed_word_is_required(catalogue):

@@ -828,7 +828,9 @@ class BulkOfferRequest(BulkScopeFilter):
 async def list_products(
     category: Optional[str] = Query(None),
     brand: Optional[str] = Query(None),
-    search: Optional[str] = Query(None),
+    # 100 characters: far past any name or code typed or scanned at the
+    # till or the counter, and no pasted wall of text builds a huge regex.
+    search: Optional[str] = Query(None, max_length=100),
     match: Optional[str] = Query(
         None,
         pattern="^anywhere$",
@@ -836,8 +838,9 @@ async def list_products(
             "'anywhere' = the purchase-order product box's wide search: the "
             "model number anywhere in the model, brands spelt with or without "
             "spaces/hyphens, colour words, the GTIN (audit F21). Absent = the "
-            "till's rule: every word from the START of brand / model / SKU / "
-            "variant / barcode (POS, goods receipt and every other search box)."
+            "till's rule: every word STARTS a word of brand / model / name / "
+            "model name / subbrand, or the start of SKU / variant / barcode "
+            "(POS, goods receipt and every other search box)."
         ),
     ),
     tag: Optional[str] = Query(
