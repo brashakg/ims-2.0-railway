@@ -2201,14 +2201,27 @@ def _gstin_gap(transfer: Dict, src: tuple, dst: tuple) -> str:
     )
 
 
+def _require_hsn(name: str, hsn: str) -> None:
+    """D13: a challan between two GST registrations carries each line's HSN.
+    ONE refusal for ship and the challan, so goods never leave on a move
+    whose paper cannot print."""
+    if not hsn:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{name} has no HSN code. Add the product's HSN first: a "
+            "challan between two GST registrations carries one.",
+        )
+
+
 def _assert_valued_paper(transfer: Dict) -> None:
     """D13: a move between two GST registrations travels on a VALUED delivery
     challan, so it ships only when that paper can be printed -- both GSTINs on
-    file, at least one unit on the shelf to send (never a Rs 0 paper), and a
-    cost for every unit that may leave (its own, else the product's). A move
-    IMS cannot place (crosses None) is refused as the data gap it is. Refused
-    BEFORE any unit moves: once shipped, the value is fixed
-    (_stamp_shipped_value), so a cost entered afterwards could not reach it."""
+    file, at least one unit on the shelf to send (never a Rs 0 paper), an HSN
+    and a cost for every line whose units may leave (the unit's own cost, else
+    the product's). A move IMS cannot place (crosses None) is refused as the
+    data gap it is. Refused BEFORE any unit moves: once shipped, the value is
+    fixed (_stamp_shipped_value), so a cost entered afterwards could not reach
+    it."""
     db = _get_db()
     src, dst, crosses = _transfer_registrations(db, transfer)
     if crosses is False:
@@ -2230,8 +2243,9 @@ def _assert_valued_paper(transfer: Dict) -> None:
             continue
         in_stock = True
         product = db.get_collection("products").find_one(
-            {"product_id": pid}, {"_id": 0, "cost_price": 1}
+            {"product_id": pid}, {"_id": 0, "cost_price": 1, "hsn_code": 1, "category": 1}
         ) or {}
+        _require_hsn(line.get("product_name") or pid, _line_hsn(line, product))
         if _first_cost(product.get("cost_price")):
             continue
         # ponytail: any cost-less unit on the shelf refuses, not only the ones

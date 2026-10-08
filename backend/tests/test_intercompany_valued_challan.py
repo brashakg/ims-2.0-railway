@@ -641,12 +641,14 @@ def test_d13_challan_and_mirror_bill_answer_one_hsn_when_the_ship_lookup_fails(d
     """The ship-time product read is fail-soft. When only it fails, the line is
     stamped with no HSN; the valued challan and the FIN-3 mirror bill must then
     still print / book the SAME HSN (one rule, transfers._line_hsn), never a
-    blank paper beside a 900311 GSTR-1 row."""
+    blank paper beside a 900311 GSTR-1 row. (Only the read AFTER the units
+    moved fails: the ship guard's read before them is a refusal door.)"""
     real = mongomock.collection.Collection.find_one
 
     def flaky(self, filter=None, *args, **kwargs):
         projection = args[0] if args else kwargs.get("projection")
-        if self.name == "products" and projection and "hsn_code" in projection:
+        moved = self.database["stock_units"].count_documents({"status": "TRANSFERRED"})
+        if self.name == "products" and projection and "hsn_code" in projection and moved:
             raise RuntimeError("products read failed")
         return real(self, filter, *args, **kwargs)
 
@@ -661,14 +663,25 @@ def test_d13_challan_and_mirror_bill_answer_one_hsn_when_the_ship_lookup_fails(d
     assert bill["lines"][0]["hsn"] == HSN
 
 
-def test_d13_valued_challan_refuses_a_line_with_no_hsn(db):
-    """D13: the valued challan carries an HSN; a product with none (and no
-    category to give one) is refused, never printed blank."""
+def test_d13_a_line_with_no_hsn_never_ships_and_never_prints(db):
+    """D13: the valued challan carries an HSN. A product with none (and no
+    category to give one) is refused at SHIP with the challan's own reason --
+    nothing moves, so goods never leave on a paper that cannot print (r4 #2)
+    -- and a transfer that shipped before its HSN went missing is refused at
+    print, never printed blank."""
     db["products"].update_one({}, {"$set": {"hsn_code": "", "category": "MISC"}})
-    t = _shipped("ST-BOK-1")
-    with pytest.raises(HTTPException) as exc:
+    t = _create("ST-BOK-1")
+    with pytest.raises(HTTPException) as ship:
+        _ship(t["id"])
+    assert ship.value.status_code == 409 and "HSN" in ship.value.detail
+    assert db["stock_units"].count_documents({"status": "AVAILABLE"}) == 2
+    db["products"].update_one({}, {"$set": {"hsn_code": HSN}})
+    _ship(t["id"])
+    db["products"].update_one({}, {"$set": {"hsn_code": ""}})
+    db["stock_transfers"].update_one({"id": t["id"]}, {"$set": {"items.0.hsn_code": ""}})
+    with pytest.raises(HTTPException) as paper:
         _challan(t["id"])
-    assert exc.value.status_code == 409 and "HSN" in exc.value.detail
+    assert (paper.value.status_code, paper.value.detail) == (409, ship.value.detail)
 
 
 def test_d13_inter_state_challan_names_the_destination_as_place_of_supply(db):

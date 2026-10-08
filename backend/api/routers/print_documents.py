@@ -202,6 +202,7 @@ async def delivery_challan_for_transfer(
         _gstin_gap,
         _line_expected_qty,
         _line_hsn,
+        _require_hsn,
         _shipped_line_value,
         _transfer_registrations,
     )
@@ -272,12 +273,8 @@ async def delivery_challan_for_transfer(
                     detail=f"No value was recorded for {row['product_name']} when "
                     "this transfer shipped, so its valued challan cannot be printed.",
                 )
-            if row["qty"] and not row["hsn_code"]:
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"{row['product_name']} has no HSN code. Add the product's "
-                    "HSN first: a challan between two GST registrations carries one.",
-                )
+            if row["qty"]:
+                _require_hsn(row["product_name"], row["hsn_code"])
         items.append(row)
     if valued and not any(r["qty"] for r in items):
         # F51: never a Rs 0 paper between two registrations.
