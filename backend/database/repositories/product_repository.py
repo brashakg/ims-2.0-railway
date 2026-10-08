@@ -284,19 +284,17 @@ class ProductRepository(BaseRepository):
         limit: int = 100,
         anywhere: bool = False,
     ) -> List[Dict]:
-        extra = self._search_extra_filter(category, is_active, created_by)
+        scope = {"is_active": is_active, "created_by": created_by}
+        till_q = self.search_products_filter(query, category, **scope)
         if not anywhere:
-            return self.search(
-                query, list(self.SEARCH_FIELDS), extra, skip=skip, limit=limit
-            )
+            return self.find_many(till_q, skip=skip, limit=limit)
         # What the till's rule finds comes FIRST, then what only the wide rule
         # adds -- so no result limit can push a brand/model/SKU match off the
         # list behind, say, thirty 'Gunmetal Gray' frames for 'ray'. Both
         # halves sit INSIDE the wide query, so the list is exactly what
         # count_search_products counts -- even where the till's rule finds
         # more ('  ' is everything to the till, nothing to the wide rule).
-        wide_q = self._product_search_query(query, extra)
-        till_q = self._search_query(query, list(self.SEARCH_FIELDS), extra)
+        wide_q = self.search_products_filter(query, category, anywhere=True, **scope)
         head_q = {"$and": [wide_q, till_q]}
         head = self.find_many(head_q, skip=skip, limit=limit)
         if len(head) >= limit:
@@ -308,12 +306,22 @@ class ProductRepository(BaseRepository):
             limit=limit - len(head),
         )
 
-    def search_products_filter(self, query: str) -> Dict:
-        """The filter search_products(query) runs (active only), for a caller
-        that counts it inside a wider $or -- the counter stock lookup."""
-        return self._search_query(
-            query, list(self.SEARCH_FIELDS), self._search_extra_filter(None, True)
-        )
+    def search_products_filter(
+        self,
+        query: str,
+        category: str = None,
+        *,
+        is_active: Optional[bool] = True,
+        created_by: Optional[str] = None,
+        anywhere: bool = False,
+    ) -> Dict:
+        """THE filter search_products lists and count_search_products counts --
+        one builder, so a list, its total and the counter stock lookup's total
+        (which ORs it into a wider query) can never disagree."""
+        extra = self._search_extra_filter(category, is_active, created_by)
+        if anywhere:
+            return self._product_search_query(query, extra)
+        return self._search_query(query, list(self.SEARCH_FIELDS), extra)
 
     def count_search_products(
         self,
@@ -324,10 +332,11 @@ class ProductRepository(BaseRepository):
         created_by: Optional[str] = None,
         anywhere: bool = False,
     ) -> int:
-        extra = self._search_extra_filter(category, is_active, created_by)
-        if not anywhere:
-            return self.search_count(query, list(self.SEARCH_FIELDS), extra)
-        return self.count(self._product_search_query(query, extra))
+        return self.count(
+            self.search_products_filter(
+                query, category, is_active=is_active, created_by=created_by, anywhere=anywhere
+            )
+        )
 
     def cataloguer_stats(self) -> List[Dict]:
         """Per-creator cataloguing rollup (attribution feature).

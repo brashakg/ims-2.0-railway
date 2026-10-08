@@ -644,8 +644,19 @@ def test_d7b2_a_search_cut_at_its_cap_says_so(call, mongo_db):
 
 
 def test_d7b2_an_answer_the_caps_did_not_cut_is_not_flagged(call, mongo_db):
+    # Round 9: `total` counts the search through search_products_filter, the
+    # one filter search_products lists by. A second copy that read `name` too
+    # counted the case below, so a whole list read 'Showing 3 of 4 products';
+    # the one filter losing its active flag lists the grey and counts it not.
     _seed(mongo_db)
+    mongo_db["products"].insert_many([
+        _product("P-GREY", "SG-CARRERA-CA8895-999-54", "Carrera CA8895 - Grey", "999", "54",
+                 is_active=False),
+        {"_id": "P-CASE", "product_id": "P-CASE", "sku": "AC-HARD-CASE", "name": "CA8895 hard case",
+         "brand": "Generic", "model": "HC1", "category": "ACCESSORIES", "is_active": True},
+    ])
     body = _ok(call(_user("CASHIER"), q="CA8895"))
+    assert {P54, P56, P003} <= set(_items(body)) and "P-CASE" not in _items(body)
     assert (body.get("total"), body.get("truncated")) == (len(body["items"]), False), body.get("total")
 
 
