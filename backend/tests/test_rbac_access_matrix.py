@@ -58,7 +58,7 @@ COVERAGE LIST (method, path, roles_tested)
   POST /api/v1/loyalty/adjust              -> ADMIN/SUPERADMIN; STORE_MANAGER -> 403
   PUT  /api/v1/loyalty/settings            -> SUPERADMIN; ADMIN -> 403
   GET  /api/v1/admin/techcherry/status     -> SUPERADMIN (self-enforced 404-hiding); ADMIN -> 404
-  GET  /api/v1/settings/admin-controls     -> SUPERADMIN; ADMIN -> 403
+  GET  /api/v1/settings/admin-controls     -> SUPERADMIN/ADMIN; STORE_MANAGER -> 403
   GET  /api/v1/hr/attendance               -> HR-mgmt roles; SALES_STAFF -> 403
   GET  /api/v1/hr/leaves                   -> HR-mgmt roles; OPTOMETRIST -> 403
   POST /api/v1/transfers                   -> mgmt+super roles; CASHIER -> 403
@@ -1157,18 +1157,26 @@ class TestLoyaltyAdminRoutes:
 
 
 # ===========================================================================
-# SECTION 17: Settings admin-controls (SUPERADMIN only)
+# SECTION 17: Settings admin-controls (SUPERADMIN/ADMIN - owner 2026-10-08:
+# the chain default credit limit is editable by both)
 # ===========================================================================
 
 class TestSettingsAdminControls:
-    """GET/PUT /settings/admin-controls are SUPERADMIN-only."""
+    """GET/PUT /settings/admin-controls are SUPERADMIN/ADMIN only."""
 
-    def test_admin_controls_denied_for_admin(self, client):
+    def test_admin_controls_denied_for_store_manager(self, client):
         r = client.get(
+            "/api/v1/settings/admin-controls",
+            headers=ALL_ROLE_HEADERS["STORE_MANAGER"],
+        )
+        assert_middleware_403(r, "GET", "/api/v1/settings/admin-controls")
+
+    def test_admin_controls_allowed_for_admin(self, matrix_client):
+        r = matrix_client.get(
             "/api/v1/settings/admin-controls",
             headers=ALL_ROLE_HEADERS["ADMIN"],
         )
-        assert_middleware_403(r, "GET", "/api/v1/settings/admin-controls")
+        assert_route_allowed(r, "ADMIN", "GET", "/api/v1/settings/admin-controls")
 
     def test_admin_controls_allowed_for_superadmin(self, matrix_client):
         r = matrix_client.get(
@@ -1437,7 +1445,8 @@ class TestPolicyConsistencyWithLiveApp:
         ("GET", "/api/v1/analytics-v2/anomaly-detection", "AREA_MANAGER", False),
         # Settings
         ("GET", "/api/v1/settings/admin-controls", "SUPERADMIN", True),
-        ("GET", "/api/v1/settings/admin-controls", "ADMIN", False),
+        ("GET", "/api/v1/settings/admin-controls", "ADMIN", True),
+        ("GET", "/api/v1/settings/admin-controls", "STORE_MANAGER", False),
         # Expenses aging
         ("GET", "/api/v1/expenses/aging", "ACCOUNTANT", True),
         ("GET", "/api/v1/expenses/aging", "SALES_CASHIER", False),

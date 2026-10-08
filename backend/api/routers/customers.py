@@ -463,8 +463,8 @@ class CustomerUpdate(BaseModel):
     billing_address: Optional[dict] = None
     marketing_consent: Optional[bool] = None
     patients: Optional[List[PatientCreate]] = None
-    # POS-4: per-customer credit limit (khata). 0 = no limit (unlimited).
-    # B2B accounts typically carry a non-zero limit; B2C defaults to 0.
+    # POS-4: per-customer credit limit (khata). 0 or unset = no limit of
+    # their own, so the chain default applies (effective_credit_limit).
     credit_limit: Optional[float] = Field(default=None, ge=0)
     # F39 note: `tags` are deliberately NOT a field here. The generic
     # PUT /{customer_id} is only AUTHENTICATED -- exposing tags on this model
@@ -1563,6 +1563,19 @@ async def get_customer_orders(
     return {"orders": orders}
 
 
+def effective_credit_limit(customer_doc: Optional[dict]) -> float:
+    """The credit limit that applies to a customer (owner ruling 2026-10-08):
+    their own limit when they have one, else the chain default from
+    Settings > Operational Rules (Rs 1,50,000 unless changed there). Read by
+    the till's CREDIT check (orders/payments.py) and the credit summary."""
+    own = float((customer_doc or {}).get("credit_limit") or 0)
+    if own > 0:
+        return own
+    from .settings import chain_default_credit_limit
+
+    return chain_default_credit_limit()
+
+
 def _ar_outstanding(customer_id: str, customer_doc: Optional[dict]) -> float:
     """Sum of CREDIT-tendered amounts still unpaid for a customer.
 
@@ -1625,9 +1638,9 @@ async def get_customer_credit_summary(
     Response shape:
       {
         "customer_id": "...",
-        "credit_limit": 50000.0,  // 0 = unlimited
+        "credit_limit": 50000.0,  // the limit in force (effective_credit_limit)
         "ar_outstanding": 12500.0,
-        "ar_available": 37500.0,  // limit - outstanding; null when unlimited
+        "ar_available": 37500.0,  // limit - outstanding
         "limit_exceeded": false
       }
 
@@ -1639,7 +1652,7 @@ async def get_customer_credit_summary(
         _scoped_customer_or_404(customer_id, current_user) if repo is not None else None
     )
 
-    credit_limit = float((customer or {}).get("credit_limit") or 0)
+    credit_limit = effective_credit_limit(customer)
     ar_outstanding = _ar_outstanding(customer_id, customer)
     ar_available = (
         None if credit_limit == 0 else round(credit_limit - ar_outstanding, 2)

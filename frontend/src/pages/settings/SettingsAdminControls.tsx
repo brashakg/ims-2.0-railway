@@ -1,131 +1,38 @@
 // ============================================================================
-// IMS 2.0 - Settings · Admin controls (Wave 6 B21)
+// IMS 2.0 - Settings · Operational Rules (/settings/rules)
 // ============================================================================
-// The old AdminControlPanel kept four editors behind a second tab layer on
-// /settings/system with no address. Each is now its own settings section:
-//   /settings/modules        StoreModulesSection      admin_controls.store_modules
-//   /settings/permissions    RolePermissionsSection   admin_controls.role_permissions
-//   /settings/discount-caps  DiscountCapsSection      admin_controls.discount_limits
-//   /settings/rules          OperationalRulesSection  admin_controls.operational_rules
-// Editor bodies moved verbatim. Each section loads and saves ONLY its own key:
-// the backend PUT is a `$set` of the keys sent, so a section never rewrites a
-// sibling's rows with the copy it happened to load (the one-button panel used
-// to send all four on every save).
+// Owner rulings 2026-10-08: the Store Modules, Role Permissions and Discount
+// Limits editors and every operational rule that duplicated a rule IMS already
+// enforces elsewhere (discount caps, oversell block, per-store geo-fence,
+// per-shift grace, per-Rx validity, auto-logout, ...) were removed. Two rules
+// remain, saved to admin_controls.operational_rules:
+//   default_credit_limit  live - the till's credit check uses it for a
+//                         customer with no limit of their own
+//   auto_round_off        not read yet; the round-off job decides it
 
 import { useState, useEffect, useRef } from 'react';
 import { settingsApi } from '../../services/api/settings';
-import { adminStoreApi } from '../../services/api/stores';
-import {
-  Shield, Eye, EyeOff, Save, Loader2,
-  ShoppingCart, Stethoscope, Wrench, Package, BarChart3,
-  Users, FileText, CreditCard, Settings,
-} from 'lucide-react';
+import { Save, Loader2 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import clsx from 'clsx';
 
-// -----------------------------------------------------------------------
-// Types
-// -----------------------------------------------------------------------
-
-interface StoreModuleConfig {
-  storeId: string;
-  storeName: string;
-  modules: Record<string, boolean>;
-}
-
-interface RolePermission {
-  roleId: string;
-  roleName: string;
-  permissions: Record<string, boolean>;
-}
-
-interface DiscountLimit {
-  roleId: string;
-  roleName: string;
-  maxDiscountPercent: number;
-  requiresApproval: boolean;
-  approvalThreshold: number;
-}
-
 interface OperationalRule {
-  id: string;
+  id: 'auto_round_off' | 'default_credit_limit';
   label: string;
   description: string;
-  value: boolean | number | string;
-  type: 'toggle' | 'number' | 'select';
-  options?: string[];
-  category: 'billing' | 'inventory' | 'hr' | 'clinical' | 'security';
+  value: boolean | number;
+  type: 'toggle' | 'number';
 }
 
-// -----------------------------------------------------------------------
-// Constants
-// -----------------------------------------------------------------------
-
-const MODULES = [
-  { id: 'pos', label: 'Point of Sale', icon: ShoppingCart },
-  { id: 'clinical', label: 'Eye Clinic', icon: Stethoscope },
-  { id: 'workshop', label: 'Workshop', icon: Wrench },
-  { id: 'inventory', label: 'Inventory', icon: Package },
-  { id: 'reports', label: 'Reports', icon: BarChart3 },
-  { id: 'hr', label: 'HR & Payroll', icon: Users },
-  { id: 'finance', label: 'Finance', icon: CreditCard },
-  { id: 'crm', label: 'CRM & Loyalty', icon: Users },
-  { id: 'tasks', label: 'Tasks & SOPs', icon: FileText },
-  { id: 'settings', label: 'Settings', icon: Settings },
-];
-
-const PERMISSIONS = [
-  'create_orders', 'void_orders', 'apply_discount', 'view_reports',
-  'edit_products', 'manage_stock', 'process_returns', 'view_financials',
-  'manage_users', 'lock_periods', 'export_data', 'delete_records',
-  'approve_expenses', 'manage_payroll', 'view_audit_logs', 'manage_stores',
-];
-
-const ROLES = [
-  { id: 'SUPERADMIN', name: 'Superadmin' },
-  { id: 'ADMIN', name: 'Admin' },
-  { id: 'AREA_MANAGER', name: 'Area Manager' },
-  { id: 'STORE_MANAGER', name: 'Store Manager' },
-  { id: 'ACCOUNTANT', name: 'Accountant' },
-  { id: 'CATALOG_MANAGER', name: 'Catalog Manager' },
-  { id: 'OPTOMETRIST', name: 'Optometrist' },
-  // SALES_CASHIER merged into SALES_STAFF (backlog #12).
-  { id: 'SALES_STAFF', name: 'Sales Staff' },
-  { id: 'WORKSHOP_STAFF', name: 'Workshop Staff' },
-];
-
-const DEFAULT_STORES: StoreModuleConfig[] = [];
-// Stores are now fetched dynamically from the API
-
-const DEFAULT_DISCOUNT_LIMITS: DiscountLimit[] = [
-  { roleId: 'SUPERADMIN', roleName: 'Superadmin', maxDiscountPercent: 100, requiresApproval: false, approvalThreshold: 0 },
-  { roleId: 'ADMIN', roleName: 'Admin', maxDiscountPercent: 50, requiresApproval: false, approvalThreshold: 0 },
-  { roleId: 'STORE_MANAGER', roleName: 'Store Manager', maxDiscountPercent: 25, requiresApproval: false, approvalThreshold: 0 },
-  // SALES_CASHIER merged into SALES_STAFF (backlog #12); survivor cap is 10%.
-  { roleId: 'SALES_STAFF', roleName: 'Sales Staff', maxDiscountPercent: 10, requiresApproval: true, approvalThreshold: 5 },
-  { roleId: 'OPTOMETRIST', roleName: 'Optometrist', maxDiscountPercent: 0, requiresApproval: false, approvalThreshold: 0 },
-  { roleId: 'WORKSHOP_STAFF', roleName: 'Workshop Staff', maxDiscountPercent: 0, requiresApproval: false, approvalThreshold: 0 },
-];
-
+// Shown until the load lands. The credit default the till enforces comes from
+// the server (GET returns the value in force), never from this placeholder.
 const DEFAULT_RULES: OperationalRule[] = [
-  { id: 'require_customer', label: 'Require Customer for All Sales', description: 'No walk-in quick sales without customer', value: false, type: 'toggle', category: 'billing' },
-  { id: 'auto_round_off', label: 'Auto Round-off to Nearest ₹1', description: 'Round invoice totals', value: true, type: 'toggle', category: 'billing' },
-  { id: 'credit_limit', label: 'Default Credit Limit (₹)', description: 'Max credit per customer', value: 50000, type: 'number', category: 'billing' },
-  { id: 'credit_approval', label: 'Credit Above Limit Needs Approval', description: 'Manager approval for credit exceeding limit', value: true, type: 'toggle', category: 'billing' },
-  { id: 'negative_stock', label: 'Allow Negative Stock Billing', description: 'Sell even when stock is 0', value: false, type: 'toggle', category: 'inventory' },
-  { id: 'low_stock_threshold', label: 'Low Stock Alert Threshold', description: 'Warn when stock falls below this', value: 5, type: 'number', category: 'inventory' },
-  { id: 'auto_reorder', label: 'Auto-Generate Reorder POs', description: 'Auto-create POs when stock is low', value: false, type: 'toggle', category: 'inventory' },
-  { id: 'geo_fence_radius', label: 'Geo-fence Radius (meters)', description: 'Max distance for attendance check-in', value: 200, type: 'number', category: 'hr' },
-  { id: 'late_threshold', label: 'Late Arrival Threshold (minutes)', description: 'Minutes after shift start to mark late', value: 15, type: 'number', category: 'hr' },
-  { id: 'require_prescription', label: 'Require Rx for Lens Orders', description: 'Block lens billing without prescription', value: true, type: 'toggle', category: 'clinical' },
-  { id: 'rx_validity_days', label: 'Prescription Validity (days)', description: 'Days before Rx expires', value: 180, type: 'number', category: 'clinical' },
-  { id: 'session_timeout', label: 'Session Timeout (minutes)', description: 'Auto-logout after inactivity', value: 30, type: 'number', category: 'security' },
-  { id: 'password_expiry', label: 'Force Password Change (days)', description: 'Days before password must be changed', value: 90, type: 'number', category: 'security' },
-  { id: 'two_factor', label: 'Require 2FA for Admin Roles', description: 'Two-factor auth for admin and above', value: false, type: 'toggle', category: 'security' },
+  { id: 'auto_round_off', label: 'Auto Round-off to Nearest ₹1', description: 'Round invoice totals', value: true, type: 'toggle' },
+  { id: 'default_credit_limit', label: 'Default Credit Limit (₹)', description: 'For a customer with no credit limit of their own. A credit sale over the limit is blocked at the till.', value: 150000, type: 'number' },
 ];
 
 // -----------------------------------------------------------------------
-// Save bar - the one save door for all four sections
+// Save bar
 // -----------------------------------------------------------------------
 
 type AdminControlsPayload = Parameters<typeof settingsApi.updateAdminControls>[0];
@@ -232,270 +139,7 @@ function SaveBar({ label, payload, dirty, beginSave }: {
 }
 
 // -----------------------------------------------------------------------
-// /settings/modules - which modules each store can use
-// -----------------------------------------------------------------------
-
-export function StoreModulesSection() {
-  // Store module access — fetch dynamically
-  const [storeModules, setStoreModules] = useState<StoreModuleConfig[]>(DEFAULT_STORES);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const { dirty, markDirty, beginSave } = useDirty();
-
-  useEffect(() => {
-    // Fetch stores
-    adminStoreApi.getStores().then((data: any) => {
-      const storeList = Array.isArray(data?.stores || data) ? (data?.stores || data) : [];
-      if (storeList.length > 0) {
-        setStoreModules(storeList.map((s: any) => ({
-          storeId: s.store_id || s.store_code || s.id,
-          storeName: s.store_name || s.name || '',
-          modules: s.modules || { pos: true, clinical: true, workshop: true, inventory: true, reports: true, hr: true, finance: true, crm: true, tasks: true, settings: true },
-        })));
-      }
-    }).catch(() => setLoadError(LOAD_ERROR));
-
-    // Load saved admin controls
-    settingsApi.getAdminControls().then((data: any) => {
-      if (data?.store_modules && Object.keys(data.store_modules).length > 0) {
-        setStoreModules(prev => prev.map(s => ({
-          ...s,
-          modules: data.store_modules[s.storeId] || s.modules,
-        })));
-      }
-    }).catch(() => setLoadError(LOAD_ERROR));
-  }, []);
-
-  const toggleStoreModule = (storeId: string, moduleId: string) => {
-    markDirty();
-    setStoreModules(prev => prev.map(s =>
-      s.storeId === storeId ? { ...s, modules: { ...s.modules, [moduleId]: !s.modules[moduleId] } } : s
-    ));
-  };
-
-  return (
-    <div className="space-y-6">
-      <LoadError message={loadError} />
-      <div className="space-y-4">
-        <p className="text-sm text-gray-500">Control which modules are available at each store location.</p>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead className="bg-white text-gray-500 text-left">
-              <tr>
-                <th className="px-4 py-3 sticky left-0 bg-white z-10">Store</th>
-                {MODULES.map(m => (
-                  <th key={m.id} className="px-3 py-3 text-center whitespace-nowrap">
-                    <div className="flex flex-col items-center gap-1">
-                      <m.icon className="w-4 h-4" />
-                      <span className="text-xs">{m.label}</span>
-                    </div>
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-700">
-              {storeModules.map(store => (
-                <tr key={store.storeId} className="text-gray-900">
-                  <td className="px-4 py-3 font-medium sticky left-0 bg-white z-10 whitespace-nowrap">{store.storeName}</td>
-                  {MODULES.map(m => (
-                    <td key={m.id} className="px-3 py-3 text-center">
-                      <button
-                        onClick={() => toggleStoreModule(store.storeId, m.id)}
-                        className={clsx('p-1 rounded', store.modules[m.id] ? 'text-green-600' : 'text-gray-600')}
-                      >
-                        {store.modules[m.id] ? <Eye className="w-5 h-5" /> : <EyeOff className="w-5 h-5" />}
-                      </button>
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-      <SaveBar
-        label="Store Modules"
-        dirty={dirty}
-        beginSave={beginSave}
-        payload={() => ({ store_modules: Object.fromEntries(storeModules.map(s => [s.storeId, s.modules])) })}
-      />
-    </div>
-  );
-}
-
-// -----------------------------------------------------------------------
-// /settings/permissions - the role x permission matrix
-// -----------------------------------------------------------------------
-
-export function RolePermissionsSection() {
-  // Role permissions
-  const [rolePermissions, setRolePermissions] = useState<RolePermission[]>(
-    ROLES.map(role => ({
-      roleId: role.id,
-      roleName: role.name,
-      permissions: Object.fromEntries(
-        PERMISSIONS.map(p => [p, ['SUPERADMIN', 'ADMIN'].includes(role.id)])
-      ),
-    }))
-  );
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const { dirty, markDirty, beginSave } = useDirty();
-
-  useEffect(() => {
-    // Load saved admin controls
-    settingsApi.getAdminControls().then((data: any) => {
-      if (data?.role_permissions) {
-        setRolePermissions(prev => prev.map(rp => ({
-          ...rp,
-          permissions: data.role_permissions[rp.roleId] || rp.permissions,
-        })));
-      }
-    }).catch(() => setLoadError(LOAD_ERROR));
-  }, []);
-
-  return (
-    <div className="space-y-6">
-      <LoadError message={loadError} />
-      <div className="space-y-4">
-        <p className="text-sm text-gray-500">Fine-grained permission control for each role across all modules.</p>
-        <div className="overflow-x-auto">
-          <table className="w-full text-xs">
-            <thead className="bg-white text-gray-500 text-left">
-              <tr>
-                <th className="px-3 py-2 sticky left-0 bg-white z-10">Permission</th>
-                {ROLES.map(role => (
-                  <th key={role.id} className="px-2 py-2 text-center whitespace-nowrap">{role.name}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-700">
-              {PERMISSIONS.map(perm => (
-                <tr key={perm} className="text-gray-900">
-                  <td className="px-3 py-2 font-medium sticky left-0 bg-white z-10 whitespace-nowrap capitalize">
-                    {perm.replace(/_/g, ' ')}
-                  </td>
-                  {rolePermissions.map(role => (
-                    <td key={role.roleId} className="px-2 py-2 text-center">
-                      <button
-                        onClick={() => {
-                          if (role.roleId === 'SUPERADMIN') return; // Can't modify superadmin
-                          markDirty();
-                          setRolePermissions(prev => prev.map(rp =>
-                            rp.roleId === role.roleId
-                              ? { ...rp, permissions: { ...rp.permissions, [perm]: !rp.permissions[perm] } }
-                              : rp
-                          ));
-                        }}
-                        className={clsx(
-                          'inline-block w-3 h-3 rounded-full transition-colors',
-                          role.permissions[perm] ? 'bg-green-500' : 'bg-red-500/30',
-                          role.roleId !== 'SUPERADMIN' && 'cursor-pointer hover:ring-2 hover:ring-white/30'
-                        )}
-                        disabled={role.roleId === 'SUPERADMIN'}
-                        title={role.permissions[perm] ? 'Enabled - click to disable' : 'Disabled - click to enable'}
-                      />
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-      <SaveBar
-        label="Role Permissions"
-        dirty={dirty}
-        beginSave={beginSave}
-        payload={() => ({ role_permissions: Object.fromEntries(rolePermissions.map(rp => [rp.roleId, rp.permissions])) })}
-      />
-    </div>
-  );
-}
-
-// -----------------------------------------------------------------------
-// /settings/discount-caps - max discount + approval threshold per role
-// -----------------------------------------------------------------------
-
-export function DiscountCapsSection() {
-  // Discount limits
-  const [discountLimits, setDiscountLimitsState] = useState<DiscountLimit[]>(DEFAULT_DISCOUNT_LIMITS);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const { dirty, markDirty, beginSave } = useDirty();
-  // User edits go through this so they mark the page dirty; the load below does not.
-  const setDiscountLimits = (u: (prev: DiscountLimit[]) => DiscountLimit[]) => { markDirty(); setDiscountLimitsState(u); };
-
-  useEffect(() => {
-    // Load saved admin controls
-    settingsApi.getAdminControls().then((data: any) => {
-      if (data?.discount_limits?.length > 0) {
-        setDiscountLimitsState(data.discount_limits);
-      }
-    }).catch(() => setLoadError(LOAD_ERROR));
-  }, []);
-
-  return (
-    <div className="space-y-6">
-      <LoadError message={loadError} />
-      <div className="space-y-4">
-        <p className="text-sm text-gray-500">Set maximum discount percentages and approval requirements per role.</p>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          {discountLimits.map(dl => (
-            <div key={dl.roleId} className="bg-white border border-gray-200 rounded-lg p-4">
-              <div className="flex items-center gap-2 mb-3">
-                <Shield className="w-4 h-4 text-gray-500" />
-                <h4 className="font-medium text-gray-900">{dl.roleName}</h4>
-              </div>
-              <div className="space-y-3">
-                <div>
-                  <label className="text-xs text-gray-500">Max Discount %</label>
-                  <input
-                    type="number"
-                    min={0}
-                    max={100}
-                    value={dl.maxDiscountPercent}
-                    onChange={(e) => setDiscountLimits(prev => prev.map(d =>
-                      d.roleId === dl.roleId ? { ...d, maxDiscountPercent: Number(e.target.value) } : d
-                    ))}
-                    className="w-full mt-1 bg-white border border-gray-300 text-gray-900 rounded px-3 py-1.5 text-sm"
-                  />
-                </div>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={dl.requiresApproval}
-                    onChange={() => setDiscountLimits(prev => prev.map(d =>
-                      d.roleId === dl.roleId ? { ...d, requiresApproval: !d.requiresApproval } : d
-                    ))}
-                    className="rounded border-gray-300"
-                  />
-                  <label className="text-xs text-gray-700">Requires approval above threshold</label>
-                </div>
-                {dl.requiresApproval && (
-                  <div>
-                    <label className="text-xs text-gray-500">Approval Threshold %</label>
-                    <input
-                      type="number"
-                      min={0}
-                      max={dl.maxDiscountPercent}
-                      value={dl.approvalThreshold}
-                      onChange={(e) => setDiscountLimits(prev => prev.map(d =>
-                        d.roleId === dl.roleId ? { ...d, approvalThreshold: Number(e.target.value) } : d
-                      ))}
-                      className="w-full mt-1 bg-white border border-gray-300 text-gray-900 rounded px-3 py-1.5 text-sm"
-                    />
-                  </div>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-      <SaveBar label="Discount Limits" payload={() => ({ discount_limits: discountLimits })} dirty={dirty} beginSave={beginSave} />
-    </div>
-  );
-}
-
-// -----------------------------------------------------------------------
-// /settings/rules - operational rules by category
+// /settings/rules - the operational rules
 // -----------------------------------------------------------------------
 
 export function OperationalRulesSection() {
@@ -521,75 +165,47 @@ export function OperationalRulesSection() {
   return (
     <div className="space-y-6">
       <LoadError message={loadError} />
-      <div className="space-y-6">
-        {['billing', 'inventory', 'hr', 'clinical', 'security'].map(category => {
-          // COUNCIL RULING §3: HIDE inert security controls. session_timeout +
-          // two_factor (2FA) are written to admin_controls.operational_rules but
-          // NOTHING in the backend reads/enforces them -- a visible-but-inert
-          // auth control is a false-security lie, so it's hidden until wired.
-          // (password_expiry stays: force-change-on-first-login IS enforced.)
-          const INERT_RULE_IDS = new Set(['session_timeout', 'two_factor']);
-          const categoryRules = rules.filter(r => r.category === category && !INERT_RULE_IDS.has(r.id));
-          if (categoryRules.length === 0) return null;
-          return (
-            <div key={category}>
-              <h3 className="text-sm font-semibold text-gray-700 uppercase tracking-wider mb-3 border-b border-gray-200 pb-2">
-                {category.charAt(0).toUpperCase() + category.slice(1)} Rules
-              </h3>
-              <div className="space-y-3">
-                {categoryRules.map(rule => (
-                  <div key={rule.id} className="flex items-center justify-between p-3 bg-white border border-gray-200 rounded-lg">
-                    <div className="flex-1 min-w-0 mr-4">
-                      <p className="text-sm font-medium text-gray-900">{rule.label}</p>
-                      <p className="text-xs text-gray-500 mt-0.5">{rule.description}</p>
-                    </div>
-                    <div className="flex-shrink-0">
-                      {rule.type === 'toggle' && (
-                        <button
-                          onClick={() => setRules(prev => prev.map(r =>
-                            r.id === rule.id ? { ...r, value: !r.value } : r
-                          ))}
-                          className={clsx(
-                            'relative inline-flex h-7 w-12 items-center rounded-full transition-colors',
-                            rule.value ? 'bg-green-600' : 'bg-gray-600'
-                          )}
-                        >
-                          <span className={clsx(
-                            'inline-block h-5 w-5 rounded-full bg-white transition-transform',
-                            rule.value ? 'translate-x-6' : 'translate-x-1'
-                          )} />
-                        </button>
-                      )}
-                      {rule.type === 'number' && (
-                        <input
-                          type="number"
-                          value={rule.value as number}
-                          onChange={(e) => setRules(prev => prev.map(r =>
-                            r.id === rule.id ? { ...r, value: Number(e.target.value) } : r
-                          ))}
-                          className="w-24 bg-white border border-gray-300 text-gray-900 rounded px-2 py-1 text-sm text-right"
-                        />
-                      )}
-                      {rule.type === 'select' && rule.options && (
-                        <select
-                          value={rule.value as string}
-                          onChange={(e) => setRules(prev => prev.map(r =>
-                            r.id === rule.id ? { ...r, value: e.target.value } : r
-                          ))}
-                          className="bg-white border border-gray-300 text-gray-900 rounded px-2 py-1 text-sm"
-                        >
-                          {rule.options.map(opt => (
-                            <option key={opt} value={opt}>{opt}</option>
-                          ))}
-                        </select>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
+      <div className="space-y-3">
+        {rules.map(rule => (
+          <div key={rule.id} className="flex items-center justify-between p-3 bg-white border border-gray-200 rounded-lg">
+            <div className="flex-1 min-w-0 mr-4">
+              <p className="text-sm font-medium text-gray-900">{rule.label}</p>
+              <p className="text-xs text-gray-500 mt-0.5">{rule.description}</p>
             </div>
-          );
-        })}
+            <div className="flex-shrink-0">
+              {rule.type === 'toggle' && (
+                <button
+                  onClick={() => setRules(prev => prev.map(r =>
+                    r.id === rule.id ? { ...r, value: !r.value } : r
+                  ))}
+                  aria-label={rule.label}
+                  aria-pressed={!!rule.value}
+                  className={clsx(
+                    'relative inline-flex h-7 w-12 items-center rounded-full transition-colors',
+                    rule.value ? 'bg-green-600' : 'bg-gray-600'
+                  )}
+                >
+                  <span className={clsx(
+                    'inline-block h-5 w-5 rounded-full bg-white transition-transform',
+                    rule.value ? 'translate-x-6' : 'translate-x-1'
+                  )} />
+                </button>
+              )}
+              {rule.type === 'number' && (
+                <input
+                  type="number"
+                  min={1}
+                  aria-label={rule.label}
+                  value={rule.value as number}
+                  onChange={(e) => setRules(prev => prev.map(r =>
+                    r.id === rule.id ? { ...r, value: Number(e.target.value) } : r
+                  ))}
+                  className="w-32 bg-white border border-gray-300 text-gray-900 rounded px-2 py-1 text-sm text-right"
+                />
+              )}
+            </div>
+          </div>
+        ))}
       </div>
       <SaveBar
         label="Operational Rules"
