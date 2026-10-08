@@ -495,12 +495,14 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
         t_rcm = _rcm_gstin_from_vendor_bills(db, active_store, year, mon, last_day)
         itc_rcm = _rcm_credit_from_vendor_bills(db, active_store, year, mon, last_day)
 
-    # Net cash liability = (output tax - ITC) + reverse-charge tax. RCM is always
-    # discharged in CASH (it cannot be set off against ITC), so it adds on top of
-    # the output-minus-ITC cash. When there are no RCM bills these terms are 0.
-    cash_igst = net_cash_due(out_igst, itc_igst, rcm_igst)
-    cash_cgst = net_cash_due(out_cgst, itc_cgst, rcm_cgst)
-    cash_sgst = net_cash_due(out_sgst, itc_sgst, rcm_sgst)
+    # Net cash liability = output tax less the ITC the law lets set it off
+    # (across heads: IGST credit also pays CGST/SGST), plus reverse-charge tax,
+    # always discharged in CASH. One rule: net_cash_due.
+    cash_igst, cash_cgst, cash_sgst = net_cash_due(
+        (out_igst, out_cgst, out_sgst),
+        (itc_igst, itc_cgst, itc_sgst),
+        (rcm_igst, rcm_cgst, rcm_sgst),
+    )
 
     def _r(v: float) -> float:
         return round(v, 2)
@@ -591,10 +593,13 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
             "stateTax": _r(out_sgst),
             "cess": 0.0,
         },
+        # Table 6.1 "paid through ITC": the credit the cash rule actually used
+        # -- the liability less what net_cash_due leaves for cash. Never the
+        # whole credit: reverse-charge tax and unused credit are not set off.
         "itcUtilized": {
-            "integratedTax": _r(itc_igst),
-            "centralTax": _r(itc_cgst),
-            "stateTax": _r(itc_sgst),
+            "integratedTax": _r(out_igst + rcm_igst - cash_igst),
+            "centralTax": _r(out_cgst + rcm_cgst - cash_cgst),
+            "stateTax": _r(out_sgst + rcm_sgst - cash_sgst),
             "cess": 0.0,
         },
         "taxPaidCash": {

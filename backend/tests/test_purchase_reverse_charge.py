@@ -475,6 +475,99 @@ class TestOtherReaders:
         assert out["reverse_charge_tax"] == 0.0
         assert out["net_gst_payable"] == 0.0
 
+    def test_gstr3b_payment_table_adds_up_on_the_owners_case(self):
+        """No sales, one RCM freight bill, credit on. Table 6.1 must read:
+        tax payable 0 + reverse charge 180 - credit used 0 = cash 180. The
+        credit is NOT used (reverse-charge tax is never set off by it); it
+        carries forward."""
+        _db, _cli = _world()
+        _book(_cli, _bill("GTA-1", rcm=True))
+        g = _gstr3b()
+        assert g["itcUtilized"] == {"integratedTax": 0.0, "centralTax": 0.0, "stateTax": 0.0, "cess": 0.0}
+        for h in ("integratedTax", "centralTax", "stateTax"):
+            assert (g["taxPayable"][h] + g["inwardSuppliesReverseCharge"][h] - g["itcUtilized"][h]
+                    == g["taxPaidCash"][h])
+
+    def _sales_month(self, *, rcm):
+        """Rs 1000 GST on Jharkhand sales (CGST 500 + SGST 500) and Rs 180 of
+        IGST credit from a Maharashtra supplier -- the plain month of a shop
+        that buys out of state."""
+        db, cli = _world()
+        _book(cli, _bill("FR-1", rcm=rcm))
+        db["orders"].insert_one(
+            {"order_id": "O1", "store_id": "S1", "status": "COMPLETED", "tax_amount": 1000.0,
+             "grand_total": 6000.0, "created_at": datetime(2026, 5, 10, 6, 0)}
+        )
+        return db
+
+    def test_igst_credit_pays_cgst_and_sgst_on_every_gst_screen(self):
+        """CGST Act s.49(5): IGST credit IGST does not need pays CGST and SGST.
+        GSTR-3B used to set off head by head only, so it asked for Rs 1000 in
+        cash where the law (and the Finance GST panel) owe Rs 820."""
+        db = self._sales_month(rcm=False)
+        g = _gstr3b()
+        cash = g["taxPaidCash"]
+        assert (cash["integratedTax"], cash["centralTax"], cash["stateTax"]) == (0.0, 320.0, 500.0)
+        assert g["itcUtilized"]["centralTax"] == 180.0
+        total = cash["integratedTax"] + cash["centralTax"] + cash["stateTax"]
+        assert total == _summary()["net_gst_payable"] == 820.0
+        xc = _run_gst_cross_check(db, 5, 2026, "E1")
+        assert total == xc["summary"]["gst_payable"]
+        # The Cross-Check's own recomputation agrees too (same rule, no copy).
+        row = next(r for r in xc["comparisons"] if r["metric"] == "Net GST payable (cash)")
+        assert row["status"] == "MATCH"
+
+    def test_a_reverse_charge_sales_month_agrees_on_every_gst_screen(self):
+        """The same month with the bill under reverse charge: 1000 - 180 of
+        credit + 180 reverse charge in cash = 1000, on GSTR-3B, the Finance
+        panel and the Cross-Check alike."""
+        db = self._sales_month(rcm=True)
+        cash = _gstr3b()["taxPaidCash"]
+        total = cash["integratedTax"] + cash["centralTax"] + cash["stateTax"]
+        assert total == _summary()["net_gst_payable"] == 1000.0
+        assert total == _run_gst_cross_check(db, 5, 2026, "E1")["summary"]["gst_payable"]
+
+    def test_the_finance_summary_sets_off_by_the_bills_own_heads(self):
+        """CGST credit never pays SGST, on the Finance panel as on GSTR-3B:
+        CGST credit 100 against sales of CGST 50 + SGST 50 leaves SGST 50 in
+        cash (a plain total would read 0)."""
+        db, _cli = _world()
+        db["vendor_bills"].insert_one(
+            {"bill_id": "C", "vendor_id": "V1", "bill_date": "2026-05-04", "status": "RECEIVED",
+             "taxable_amount": 1000.0, "tax_amount": 100.0, "cgst_total": 100.0, "sgst_total": 0.0}
+        )
+        db["orders"].insert_one(
+            {"order_id": "O1", "store_id": "S1", "status": "COMPLETED", "tax_amount": 100.0,
+             "grand_total": 1100.0, "created_at": datetime(2026, 5, 10, 6, 0)}
+        )
+        out = _summary()
+        assert out["net_gst_payable"] == 50.0
+        assert out["gst_input_credit_carried_forward"] == 50.0
+
+
+class TestCashRule:
+    """THE set-off (gst_itc.net_cash_due), per head (igst, cgst, sgst)."""
+
+    @staticmethod
+    def _due(out, credit, rcm=(0.0, 0.0, 0.0)):
+        from api.routers.reports.gst_itc import net_cash_due
+
+        return net_cash_due(out, credit, rcm)
+
+    def test_reverse_charge_is_paid_in_cash_whatever_the_credit(self):
+        assert self._due((0, 0, 0), (180, 0, 0), (180, 0, 0)) == (180, 0, 0)
+
+    def test_igst_credit_pays_igst_then_cgst_then_sgst(self):
+        assert self._due((100, 500, 500), (700, 0, 0)) == (0, 0, 400)
+
+    def test_cgst_and_sgst_credit_pay_igst_but_never_each_other(self):
+        assert self._due((100, 0, 0), (0, 30, 40)) == (30, 0, 0)
+        assert self._due((0, 0, 100), (0, 100, 0)) == (0, 0, 100)
+        assert self._due((0, 100, 0), (0, 0, 100)) == (0, 100, 0)
+
+    def test_spare_credit_carries_forward_never_below_zero(self):
+        assert self._due((100, 50, 50), (300, 80, 80)) == (0, 0, 0)
+
     def test_the_po_timeline_names_what_the_supplier_is_owed(self):
         from api.routers.vendors import po_detail
 

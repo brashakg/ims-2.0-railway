@@ -14,12 +14,30 @@ from ...services.org_validation import itc_claimable, shop_gstins
 _DEAD_BILL = ["CANCELLED", "cancelled", "VOID", "voided"]
 
 
-def net_cash_due(output_tax: float, credit: float, rcm_tax: float) -> float:
-    """THE GSTR-3B cash rule: input credit sets off output tax down to zero (an
-    excess carries forward, never refunded here), and reverse-charge tax is
-    always paid in CASH on top -- credit can never set it off. GSTR-3B uses it
-    per head; the Finance GST summary on the month's totals."""
-    return max(0.0, output_tax - credit) + rcm_tax
+def net_cash_due(output_tax, credit, rcm_tax) -> tuple:
+    """THE GSTR-3B cash rule, per head. Each argument and the result is an
+    (igst, cgst, sgst) triple; the result is the cash due on each head.
+
+    Input credit sets off output tax as the CGST Act orders it (s.49(5), s.49A,
+    rule 88A): IGST credit pays IGST first, then CGST and SGST (CGST first here;
+    the law allows any order, the total is the same); CGST and SGST credit pay
+    their own head, then IGST -- never each other. Credit left over carries
+    forward (never refunded here). Reverse-charge tax is always paid in CASH on
+    top: credit never sets it off. GSTR-3B, the Cross-Check and the Finance GST
+    summary all call this -- none keeps its own copy."""
+    out_i, out_c, out_s = output_tax
+    itc_i, itc_c, itc_s = credit
+    igst_left = max(0.0, itc_i - out_i)
+    due_c = max(0.0, out_c - itc_c)
+    due_s = max(0.0, out_s - itc_s)
+    # IGST still due after IGST credit, less the CGST and SGST credit their own
+    # head did not need.
+    due_i = max(0.0, max(0.0, out_i - itc_i) - max(0.0, itc_c - out_c) - max(0.0, itc_s - out_s))
+    # IGST credit IGST did not need pays CGST, then SGST.
+    to_c = min(igst_left, due_c)
+    due_s = max(0.0, due_s - (igst_left - to_c))
+    due_c -= to_c
+    return due_i + rcm_tax[0], due_c + rcm_tax[1], due_s + rcm_tax[2]
 
 
 def _itc_store_scope(db, active_store):

@@ -553,18 +553,21 @@ def test_build_crosscheck_net_cash_row_advisory_multi_entity():
     # cross-entity totals ONCE per head (clamp-of-sums) while netCash clamps PER
     # entity then sums (sum-of-clamps). They diverge without bound in the
     # combined view, so the row must be advisory (INFO) and NOT count -- netCash
-    # is the correct figure. E1 has an IGST-ITC surplus, E2 an IGST liability.
+    # is the correct figure. E1's IGST credit of 140000 pays its own CGST and
+    # SGST (100000, s.49(5)) and leaves 40000 spare; E2 owes 30000 IGST, which
+    # E1's spare credit must not pay.
     gstr3b = aggregate_gstr3b(
-        [_store_gstr3b_split(out_c=50000.0, out_s=50000.0, reg_i=40000.0),
+        [_store_gstr3b_split(out_c=50000.0, out_s=50000.0, reg_i=140000.0),
          _store_gstr3b_split(out_i=30000.0)],
         ["E1", "E2"], ["G1", "G2"],
     )
     assert gstr3b["bucketCount"] == 2
-    # sum-of-clamps: E1 100000 (IGST ITC wasted, out_i=0) + E2 30000 = 130000.
-    assert gstr3b["netCash"]["total"] == 130000.0
+    # sum-of-clamps: E1 0 + E2 30000 = 30000.
+    assert gstr3b["netCash"]["total"] == 30000.0
     res = build_crosscheck({}, gstr3b, {}, {})
     row = next(c for c in res["comparisons"] if c["metric"] == "Net GST payable (cash)")
-    # clamp-of-sums comparator = 100000, so a 30000 gap is real but advisory.
+    # clamp-of-sums comparator = 0 (E1's spare 40000 nets E2's 30000), so a
+    # 30000 gap is real but advisory.
     assert row["variance"] == 30000.0
     assert row["status"] == "INFO"
     assert "Net GST payable (cash)" not in res["summary"]["mismatch_metrics"]

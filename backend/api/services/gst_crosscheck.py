@@ -260,8 +260,8 @@ def aggregate_gstr3b(
     empty: gst_itc._placement keeps no transfer mirror on a shop with no
     GSTIN, which files no return).
 
-    Net cash is derived ENTITY-LEVEL after aggregation as per-head
-    max(0, out - itc) + rcm and summed across entities -- one entity's ITC
+    Net cash is derived ENTITY-LEVEL after aggregation by GSTR-3B's cash rule
+    (gst_itc.net_cash_due) and summed across entities -- one entity's ITC
     surplus can never offset another entity's output tax (distinct GSTINs file
     separately), and RCM is always discharged in cash on top.
 
@@ -363,11 +363,18 @@ def aggregate_gstr3b(
     rcm_s = sum(b["rcm_s"] for b in vals)
     rcm_i = sum(b["rcm_i"] for b in vals)
     rcm_taxable = sum(b["rcm_taxable"] for b in vals)
-    # Net cash: per entity, per head, output minus ITC clamped at 0, plus RCM;
-    # then summed across entities.
-    cash_c = sum(max(0.0, b["out_c"] - b["itc_c"]) + b["rcm_c"] for b in vals)
-    cash_s = sum(max(0.0, b["out_s"] - b["itc_s"]) + b["rcm_s"] for b in vals)
-    cash_i = sum(max(0.0, b["out_i"] - b["itc_i"]) + b["rcm_i"] for b in vals)
+    # Net cash: per entity, by GSTR-3B's own cash rule (net_cash_due -- the
+    # tax math stays in reports); then summed across entities.
+    from ..routers.reports.gst_itc import net_cash_due
+
+    cash_i = cash_c = cash_s = 0.0
+    for b in vals:
+        e_i, e_c, e_s = net_cash_due(
+            (b["out_i"], b["out_c"], b["out_s"]),
+            (b["itc_i"], b["itc_c"], b["itc_s"]),
+            (b["rcm_i"], b["rcm_c"], b["rcm_s"]),
+        )
+        cash_i, cash_c, cash_s = cash_i + e_i, cash_c + e_c, cash_s + e_s
 
     return {
         "outwardTaxableValue": _r(out_taxable),
@@ -516,18 +523,21 @@ def build_crosscheck(
     )
     head_note = (deemed_note + " " + state_note).strip() if deemed_note else state_note
 
-    # Per-head net cash the SAME way GSTR-3B derives it (output minus ITC clamped
-    # at 0, plus RCM), so this row is like-for-like and only breaks on a real
-    # 3B math error. In a single-entity view it equals gstr3b.netCash exactly.
-    out_c = _f(gstr3b.get("cgst"))
-    out_s = _f(gstr3b.get("sgst"))
-    out_i = _f(gstr3b.get("igst"))
+    # Net cash by the SAME rule GSTR-3B uses (net_cash_due), so this row is
+    # like-for-like and only breaks on a real 3B math error. In a single-entity
+    # view it equals gstr3b.netCash exactly.
+    from ..routers.reports.gst_itc import net_cash_due
+
     itc = gstr3b.get("itc") or {}
     rcm = gstr3b.get("rcm") or {}
     net_expected = round(
-        max(0.0, out_c - _f(itc.get("cgst"))) + _f(rcm.get("cgst"))
-        + max(0.0, out_s - _f(itc.get("sgst"))) + _f(rcm.get("sgst"))
-        + max(0.0, out_i - _f(itc.get("igst"))) + _f(rcm.get("igst")),
+        sum(
+            net_cash_due(
+                tuple(_f(gstr3b.get(h)) for h in ("igst", "cgst", "sgst")),
+                tuple(_f(itc.get(h)) for h in ("igst", "cgst", "sgst")),
+                tuple(_f(rcm.get(h)) for h in ("igst", "cgst", "sgst")),
+            )
+        ),
         2,
     )
     # R2: net_expected clamps the CROSS-ENTITY totals once per head (clamp-of-

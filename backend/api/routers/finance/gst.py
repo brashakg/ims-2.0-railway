@@ -126,6 +126,10 @@ async def get_gst_summary(
     # owed to the government in cash whatever its credit. Counting the credit
     # without the liability read net payable short by exactly this.
     rcm_tax = 0.0
+    # The credit by head, for the set-off (net_cash_due): a bill's CGST and SGST
+    # are its own; the rest of its tax counts as IGST credit, which pays any
+    # head -- so a legacy bill with no heads sets off as its total always did.
+    itc_c = itc_s = 0.0
     # 3.1(d)'s own "dead bill", and GSTR-3B's own cash rule.
     from ..reports.gst_itc import _DEAD_BILL, net_cash_due
 
@@ -142,6 +146,8 @@ async def get_gst_summary(
                 "received": 1,
                 "itc_eligible": 1,
                 "reverse_charge": 1,
+                "cgst_total": 1,
+                "sgst_total": 1,
             },
         ):
             _bd = ap_engine.parse_date(_b.get("bill_date"))
@@ -152,12 +158,15 @@ async def get_gst_summary(
                 rcm_tax += _tax
             if _itc_eligible_bill(_b):
                 gst_paid += _tax
+                itc_c += float(_b.get("cgst_total") or 0)
+                itc_s += float(_b.get("sgst_total") or 0)
             else:
                 gst_paid_excluded += _tax
     except Exception:
         gst_paid = 0.0
         gst_paid_excluded = 0.0
         rcm_tax = 0.0
+        itc_c = itc_s = 0.0
     gst_paid = round(gst_paid, 2)
     gst_paid_excluded = round(gst_paid_excluded, 2)
     rcm_tax = round(rcm_tax, 2)
@@ -170,11 +179,23 @@ async def get_gst_summary(
         _sales_orders, _store_state_map(db), _customer_state_map(db)
     )
     gst_collected = round(cgst + sgst + igst, 2)
-    # GSTR-3B's cash rule (net_cash_due): credit sets off the output tax down to
-    # zero and never the reverse-charge tax, which is paid in cash on top. The
-    # credit left over carries to next month (shown, so the panel adds up).
-    net_payable = round(net_cash_due(gst_collected, gst_paid, rcm_tax), 2)
-    credit_carried = round(max(0.0, gst_paid - gst_collected), 2)
+    # GSTR-3B's cash rule (net_cash_due): credit sets off the output tax as the
+    # law orders it, never the reverse-charge tax, which is paid in cash on top
+    # (its head does not change the total). The credit it did not use carries
+    # to next month (shown, so the panel adds up).
+    net_payable = round(
+        sum(
+            net_cash_due(
+                (igst, cgst, sgst),
+                (gst_paid - itc_c - itc_s, itc_c, itc_s),
+                (rcm_tax, 0.0, 0.0),
+            )
+        ),
+        2,
+    )
+    credit_used = gst_collected + rcm_tax - net_payable
+    # max() only keeps a float -0.0 off the screen; the rule is net_cash_due's.
+    credit_carried = round(max(0.0, gst_paid - credit_used), 2)
 
     # Filing status. GSTR-1 is due the 11th and GSTR-3B the 20th of the month
     # AFTER the tax period. For December (m==12) that is January of the NEXT
