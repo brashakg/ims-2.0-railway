@@ -731,6 +731,15 @@ def _first_cost(*candidates) -> float:
     return 0.0
 
 
+def _unit_cost(unit: Dict, product: Dict) -> float:
+    """THE cost of one stock unit: its own (unit_cost / cost_price, stamped at
+    its goods receipt or opening stock), else the product master's. One rule
+    for the ship guard (which refuses a crossing move with a unit at 0) and the
+    ship stamp (which values the line by it), so a unit the guard passes is
+    never stamped at 0. Pure."""
+    return _first_cost(unit.get("unit_cost"), unit.get("cost_price"), product.get("cost_price"))
+
+
 def _stamp_shipped_value(line: Dict, units: List[Dict]) -> None:
     """F51 / D13: stamp on a line what LEFT the shop -- the units' barcodes,
     the product's HSN, and the units' OWN cost (unit_cost / cost_price, stamped
@@ -761,10 +770,7 @@ def _stamp_shipped_value(line: Dict, units: List[Dict]) -> None:
             logger.warning("[TRANSFER] product lookup for the ship value failed: %s", exc)
     line["hsn_code"] = _line_hsn(line, product)
     line["shipped_barcodes"] = [str(u["barcode"]) for u in units if u.get("barcode")]
-    costs = [
-        _first_cost(u.get("unit_cost"), u.get("cost_price"), product.get("cost_price"))
-        for u in units
-    ]
+    costs = [_unit_cost(u, product) for u in units]
     # ponytail: one average rate per line (exact for a line of one cost);
     # per-unit rows if lines of mixed-cost units ever need their own rates.
     if costs:
@@ -1551,7 +1557,12 @@ async def ship_transfer(
             status_code=400,
             detail="Transfer must be approved or packed before shipping",
         )
-    _assert_valued_paper(transfer)
+    src, dst, crosses = _assert_valued_paper(transfer)
+    # D13: the registrations the goods leave on, so the challan and the
+    # mirror bill keep ship's answer (_transfer_registrations).
+    transfer["gst_registrations"] = {
+        "source": list(src), "destination": list(dst), "crosses": crosses,
+    }
 
     # Create Shiprocket shipment if requested
     if create_shiprocket:
@@ -2158,7 +2169,10 @@ def _shop_gst(db, store_id: str) -> tuple:
     EMPTY state -- never its declared state, the company's primary, or another
     state's number -- so the miss stays loud: reports._compute_gstr1 flags the bill
     and the portal export drops the row instead of a wrong counterparty.
-    ('', '', '') on a miss / DB absent."""
+    ('', '', '') on a miss / DB absent. A READ ERROR raises 503, never reads
+    as 'no company': ship and the challan are refusal doors, so they refuse
+    when they cannot read the shops (a blank read would place a two-company
+    move on no registration and let it ship unvalued)."""
     if db is None or not store_id:
         return "", "", ""
     try:
@@ -2174,9 +2188,13 @@ def _shop_gst(db, store_id: str) -> tuple:
             if entity_id
             else None
         )
-    except Exception as exc:  # noqa: BLE001 - fail-soft
+    except Exception as exc:  # noqa: BLE001 - refuse, never guess
         logger.warning("[TRANSFER] shop GST lookup failed for %s: %s", store_id, exc)
-        return "", "", ""
+        raise HTTPException(
+            status_code=503,
+            detail="IMS could not read the shops' GST registrations just now. "
+            "Nothing has moved; try again.",
+        ) from exc
     gstin = ov.shop_gstin(entity, store) or ""
     return entity_id, gstin, gstin[:2]
 
@@ -2194,7 +2212,15 @@ def _transfer_registrations(db, transfer: Dict) -> tuple:
     goods moved, cannot refuse: it books such a move with the blank GSTIN,
     flagged on GSTR-1's validation and the Cross-Check (never a supply left
     off unseen), when both shops have a company to name on it. No company on
-    either side -> False."""
+    either side -> False.
+
+    Once shipped, the answer is the one ship placed the move on
+    (`gst_registrations`, stamped by ship_transfer): the goods left on that
+    paper, so a GSTIN entered or lost afterwards changes neither the challan
+    nor the mirror bill booked at complete."""
+    stamp = transfer.get("gst_registrations")
+    if isinstance(stamp, dict):
+        return tuple(stamp["source"]), tuple(stamp["destination"]), stamp["crosses"]
     src = _shop_gst(db, transfer.get("from_location_id") or "")
     dst = _shop_gst(db, transfer.get("to_location_id") or "")
     if src[1] and dst[1]:
@@ -2236,19 +2262,20 @@ def _require_hsn(name: str, hsn: str) -> None:
         )
 
 
-def _assert_valued_paper(transfer: Dict) -> None:
+def _assert_valued_paper(transfer: Dict) -> tuple:
     """D13: a move between two GST registrations travels on a VALUED delivery
     challan, so it ships only when that paper can be printed -- both GSTINs on
     file, at least one unit on the shelf to send (never a Rs 0 paper), an HSN
-    and a cost for every line whose units may leave (the unit's own cost, else
-    the product's). A move IMS cannot place (crosses None) is refused as the
-    data gap it is. Refused BEFORE any unit moves: once shipped, the value is
-    fixed (_stamp_shipped_value), so a cost entered afterwards could not reach
-    it."""
+    and a cost for every line whose units may leave (_unit_cost, the rule the
+    ship stamp values them by). A move IMS cannot place (crosses None) is
+    refused as the data gap it is. Refused BEFORE any unit moves: once shipped,
+    the value is fixed (_stamp_shipped_value), so a cost entered afterwards
+    could not reach it. Returns the registrations, which ship stamps on the
+    transfer (_transfer_registrations)."""
     db = _get_db()
-    src, dst, crosses = _transfer_registrations(db, transfer)
+    src, dst, crosses = registrations = _transfer_registrations(db, transfer)
     if crosses is False:
-        return
+        return registrations
     if crosses is None:
         raise HTTPException(status_code=400, detail=_gstin_gap(transfer, src, dst))
     units = db.get_collection("stock_units")
@@ -2262,20 +2289,17 @@ def _assert_valued_paper(transfer: Dict) -> None:
             "store_id": transfer.get("from_location_id"),
             "status": STOCK_STATUS_AVAILABLE,
         }
-        if not units.count_documents(shelf):
+        on_shelf = list(units.find(shelf, {"_id": 0, "unit_cost": 1, "cost_price": 1}))
+        if not on_shelf:
             continue
         in_stock = True
         product = db.get_collection("products").find_one(
             {"product_id": pid}, {"_id": 0, "cost_price": 1, "hsn_code": 1, "category": 1}
         ) or {}
         _require_hsn(line.get("product_name") or pid, _line_hsn(line, product))
-        if _first_cost(product.get("cost_price")):
-            continue
         # ponytail: any cost-less unit on the shelf refuses, not only the ones
         # ship would pick; the fix (a product cost price) is the same.
-        if units.count_documents(
-            {**shelf, "unit_cost": {"$not": {"$gt": 0}}, "cost_price": {"$not": {"$gt": 0}}}
-        ):
+        if not all(_unit_cost(u, product) for u in on_shelf):
             raise HTTPException(
                 status_code=409,
                 detail=f"{line.get('product_name') or pid} has no cost price and "
@@ -2291,6 +2315,7 @@ def _assert_valued_paper(transfer: Dict) -> None:
             "A transfer between two GST registrations travels on a challan valued "
             "at the units that leave the shop: enter the stock first.",
         )
+    return registrations
 
 
 def _tax_split(tax: float, interstate: bool):
@@ -2444,12 +2469,18 @@ def _book_mirror_purchase(transfer: Dict) -> None:
     # between distinct GSTINs (Sch I) and attracts IGST. Each side's GSTIN and
     # state come from the one shop-GSTIN rule (_shop_gst), so two shops on ONE
     # registration never book a supply to themselves -- and the crossing test is
-    # the ONE rule shared with the D13 valued delivery challan.
-    (from_entity, from_gstin, from_state), (to_entity, to_gstin, to_state), crosses = (
-        _transfer_registrations(db, transfer)
-    )
+    # the ONE rule shared with the D13 valued delivery challan -- the answer
+    # ship stamped, so the books keep the registrations the goods left on.
+    try:
+        (from_entity, from_gstin, from_state), (to_entity, to_gstin, to_state), crosses = (
+            _transfer_registrations(db, transfer)
+        )
+    except HTTPException as exc:  # a shop read failed (legacy, unstamped) - fail-soft
+        logger.warning("[TRANSFER] mirror bill skipped for %s: %s", transfer.get("id"), exc.detail)
+        return
     # 'Cannot tell' (None) books too: the goods already moved, and the blank
-    # GSTIN keeps the bill loud (see _transfer_registrations).
+    # GSTIN keeps the bill loud (see _transfer_registrations). Only a transfer
+    # shipped before ship stamped its answer can reach it.
     if crosses is False or not (from_entity and to_entity):
         return
 

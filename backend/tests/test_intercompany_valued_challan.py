@@ -297,14 +297,24 @@ def test_f51_challan_before_ship_is_refused(db):
 
 
 @pytest.mark.parametrize("side", ["consignor", "consignee"])
-def test_f51_challan_is_refused_when_a_side_has_no_gstin(db, side):
+def test_d13_a_shipped_move_keeps_the_registrations_it_left_on(db, side):
+    """r5: ship stamps its answer (transfers._transfer_registrations). A
+    GSTIN lost after Dhanbad -> Bokaro shipped changes neither the paper nor
+    the books: the challan still prints valued with the two GSTINs the goods
+    left on, and the mirror bill books between those two. (A move with a
+    GSTIN missing is refused at ship instead --
+    test_d13_ship_is_refused_when_a_side_has_no_gstin.)"""
     store_id, entity_id = ("ST-DHN-1", "ENT-Z") if side == "consignor" else ("ST-BOK-1", "ENT-Y")
     t = _shipped("ST-BOK-1")
     db["stores"].update_one({"store_id": store_id}, {"$set": {"gstin": ""}})
     db["entities"].update_one({"entity_id": entity_id}, {"$set": {"gstins": []}})
-    with pytest.raises(HTTPException) as exc:
-        _challan(t["id"])
-    assert 400 <= exc.value.status_code < 500
+    html = _challan(t["id"])
+    party = html[html.index('class="party-grid"'):html.index('class="lines"')]
+    assert GSTIN_Z_JH in party and GSTIN_Y_JH in party
+    assert _shows_amount(html, 2 * UNIT_COST)
+    _receive_and_complete(t)
+    (bill,) = db["vendor_bills"].find({"source_transfer_id": t["id"]})
+    assert (bill["vendor_gstin"], bill["recipient_gstin"]) == (GSTIN_Z_JH, GSTIN_Y_JH)
 
 
 # ===========================================================================
@@ -765,24 +775,23 @@ def test_d13_a_move_ims_cannot_place_is_refused_on_both_sides(db, gap):
 
 
 @pytest.mark.parametrize("blank", ["one_shop", "both_shops"])
-def test_d13_a_move_that_became_cannot_tell_after_ship_books_one_way(db, blank):
-    """r4 #1 (c): Hirapur -> Bank More ships on ONE registration; a GSTIN is
-    then lost before complete -- Bank More's alone, or the company's (both
-    shops). The goods have moved and the mirror bill cannot refuse, so both
-    cases answer the same: booked at the units' cost with the missing GSTIN
-    blank -- flagged by GSTR-1's validation and the Cross-Check, never one
-    booked and the other silently left off (it was: one blank booked Rs 3700,
-    both blank booked nothing)."""
+def test_d13_a_move_shipped_on_one_registration_books_nothing_later(db, blank):
+    """r5 (was r4 #1 (c)): Hirapur -> Bank More ships on ONE registration
+    (the unvalued challan prints); a GSTIN is then lost before complete --
+    Bank More's alone, or the company's (both shops). The mirror bill reads
+    ship's answer, so both cases answer the same: no supply to itself (it
+    was: ENT-Z -> ENT-Z booked at 3700 with CGST 92.50 + SGST 92.50 on blank
+    GSTINs, Rs 185 on Hirapur's GSTR-3B 3.1(a)), and the paper stays the one
+    that travelled."""
     t = _shipped("ST-DHN-2")
     if blank == "one_shop":
         _blank(db, "one_shop_without_a_gstin")
     else:
         db["entities"].update_one({"entity_id": "ENT-Z"}, {"$set": {"gstins": []}})
     _receive_and_complete(t)
-    (bill,) = db["vendor_bills"].find({"source_transfer_id": t["id"]})
-    assert bill["taxable_amount"] == pytest.approx(2 * UNIT_COST)
-    assert bill["recipient_gstin"] == ""
-    assert bill["vendor_gstin"] == ("" if blank == "both_shops" else GSTIN_Z_JH)
+    assert db["vendor_bills"].count_documents({"source_transfer_id": t["id"]}) == 0
+    html = _challan(t["id"], _user("SALES_STAFF"))
+    assert t["transfer_number"] in html and not _shows_amount(html, 2 * UNIT_COST)
 
 
 def test_d13_challan_total_value_is_the_sum_of_its_lines(db):
@@ -925,6 +934,25 @@ def test_d7_finance_reconciliation_lists_the_callers_stores_only(db, monkeypatch
     assert mine["transfers"][0]["items"][0]["unit_cost"] == pytest.approx(UNIT_COST)
 
 
+@pytest.mark.parametrize(
+    "own",
+    [{"unit_cost": "1850"}, {"cost_price": UNIT_COST}, {"unit_cost": 0, "cost_price": UNIT_COST}],
+    ids=["unit_cost_as_text", "cost_price_only", "zero_unit_cost_with_cost_price"],
+)
+def test_d13_the_ship_guard_and_the_ship_stamp_ask_one_unit_cost(db, own):
+    """r5: 'this unit has a cost' had two copies -- the ship guard's Mongo
+    predicate and the stamp's _first_cost. The product has no cost, so only
+    the unit's own can value it: a unit the guard lets leave is valued at
+    that cost (never stamped 0, its challan then refused for good), and a
+    cost the stamp reads is never refused at ship (text '1850' was)."""
+    db["stock_units"].update_many({}, {"$unset": {"unit_cost": "", "cost_price": ""}})
+    db["stock_units"].update_many({}, {"$set": own})
+    db["products"].update_one({}, {"$set": {"cost_price": 0}})
+    t = _shipped("ST-BOK-1")
+    assert transfers._get_transfer(t["id"])["items"][0]["unit_cost"] == pytest.approx(UNIT_COST)
+    assert _shows_amount(_challan(t["id"]), 2 * UNIT_COST)
+
+
 def test_d7_the_scorecard_spend_follows_the_payables_gate_role_by_role(app, db, monkeypatch):
     """r5: the scorecard's month-to-date spend sums supplier bills, so it is
     shown exactly to whom the bill read admits (_AP_ROLES via require_roles)
@@ -951,3 +979,28 @@ def test_d7_the_scorecard_spend_follows_the_payables_gate_role_by_role(app, db, 
         if has_spend:
             shown.add(role)
     assert shown == {"SUPERADMIN", "ADMIN", "ACCOUNTANT"}
+
+
+def test_d13_ship_refuses_when_it_cannot_read_the_shops(db, monkeypatch):
+    """r5: the ship guard failed open on a read error -- a failed shop lookup
+    read as 'no company', so Dhanbad -> Bokaro with a cost-less unit shipped
+    at Rs 0 and its valued challan then refused for good (and cancel refuses
+    an in-transit move). A refusal door refuses when it cannot read the
+    shops: 503, nothing moved."""
+    db["stock_units"].update_one({"stock_id": "SU-2"}, {"$unset": {"unit_cost": "", "cost_price": ""}})
+    db["products"].update_one({}, {"$set": {"cost_price": 0}})
+    t = _create("ST-BOK-1")
+    real = mongomock.collection.Collection.find_one
+
+    def flaky(self, *args, **kwargs):
+        if self.name == "stores":
+            raise RuntimeError("stores read failed")
+        return real(self, *args, **kwargs)
+
+    with monkeypatch.context() as m:
+        m.setattr(mongomock.collection.Collection, "find_one", flaky)
+        with pytest.raises(HTTPException) as exc:
+            _ship(t["id"])
+    assert exc.value.status_code == 503
+    assert db["stock_units"].count_documents({"status": "AVAILABLE"}) == 2
+    assert transfers._get_transfer(t["id"])["status"] == transfers.TransferStatus.APPROVED
