@@ -19,7 +19,7 @@ import {
 import { useToast } from '../../../context/ToastContext';
 import { useAuth } from '../../../context/AuthContext';
 import { byPerson } from '../purchaseTypes';
-import { inr, errMsg, APPROVE_ROLES } from './shared';
+import { inr, errMsg, APPROVE_ROLES, rcmNote } from './shared';
 
 // ============================================================================
 // Phase 2 - 3-way match: badge + valuation/tolerance note + detail drawer
@@ -280,6 +280,9 @@ export function InvoiceDetailDrawer({
               {invoice.po_number && <span>PO {invoice.po_number}</span>}
               {invoice.grn_number && <span>GRN {invoice.grn_number}</span>}
               <span className="font-medium text-gray-700">{inr(invoice.total_amount)}</span>
+              {invoice.reverse_charge === true && (
+                <span className="font-medium text-blue-800">{rcmNote(invoice.tax_amount, invoice.total_amount)}</span>
+              )}
             </div>
           </div>
           <button type="button" onClick={onClose} className="text-gray-400 hover:text-gray-700"><X className="w-5 h-5" /></button>

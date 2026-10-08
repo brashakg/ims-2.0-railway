@@ -27,11 +27,16 @@ vi.mock('../../../services/api/client', async (orig) => ({
 }));
 const toastMock = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() }));
 vi.mock('../../../context/ToastContext', () => ({ useToast: () => toastMock }));
-// The accountant's shop (the top-bar picker); a test may switch it. `ap` is
-// whether the user holds an accounts role (hasRole(APPROVE_ROLES)).
-const auth = vi.hoisted(() => ({ store: 'S1', ap: true }));
+// The accountant's shop (the top-bar picker) and role; a test may switch
+// either. hasRole is AuthContext's own rule (SUPERADMIN/ADMIN pass, else any
+// asked role held), so a test asks WHICH roles get a control, not a boolean.
+const auth = vi.hoisted(() => ({ store: 'S1', role: 'ACCOUNTANT' }));
 vi.mock('../../../context/AuthContext', () => ({
-  useAuth: () => ({ user: { activeStoreId: auth.store, roles: ['ACCOUNTANT'] }, hasRole: () => auth.ap }),
+  useAuth: () => ({
+    user: { activeStoreId: auth.store, roles: [auth.role] },
+    hasRole: (r: string | string[]) =>
+      ['SUPERADMIN', 'ADMIN'].includes(auth.role) || [r].flat().includes(auth.role),
+  }),
 }));
 
 import type { AxiosError } from 'axios';
@@ -129,7 +134,7 @@ const renderTab = (path?: string) => render(tab(path));
 beforeEach(() => {
   vi.clearAllMocks();
   auth.store = 'S1';
-  auth.ap = true;
+  auth.role = 'ACCOUNTANT';
   routeGets();
   routePosts();
 });
@@ -568,6 +573,7 @@ describe('round 14 - the credit verdict is visible and settable', () => {
   });
 
   it('an accounts role ticks Reverse charge: asked, shown as what the supplier is owed, and booked', async () => {
+    auth.role = 'ACCOUNTANT';
     // Freight Rs 1000 @ 18% under reverse charge, as the server answers it.
     const rcm = preview({
       reverse_charge: true,
@@ -597,8 +603,8 @@ describe('round 14 - the credit verdict is visible and settable', () => {
     expect(createCalls()[0][1].reverse_charge).toBe(true);
   });
 
-  it('a role outside accounts sees no Reverse charge option and never sends it', async () => {
-    auth.ap = false;
+  it.each(['STORE_MANAGER', 'AREA_MANAGER'])('%s (outside accounts) sees no Reverse charge option and never sends it', async (role) => {
+    auth.role = role;
     routePosts(preview());
     await openManualServicesBill({ name: 'Freight', qty: '1', price: '1000', rate: '18' });
     await screen.findByText(/Inter-state supply:/);
@@ -624,8 +630,14 @@ describe('round 14 - the credit verdict is visible and settable', () => {
     renderTab();
     expect(await screen.findAllByText('Reverse charge')).toHaveLength(1);
     expect(screen.getAllByText('₹9,300').length).toBeGreaterThan(0);
+    // Visible text, not a tooltip (a touch tablet shows none): the row says
+    // what the shop pays the government and what the supplier is owed.
+    const note = 'You pay this GST (₹465) to the government; the supplier is owed ₹9,300';
+    expect(screen.getAllByText(note)).toHaveLength(1);
+    expect(screen.getAllByText('Supplier is owed')).toHaveLength(1);
     fireEvent.click(screen.getAllByRole('button', { name: /View detail/ })[0]);
     await waitFor(() => expect(screen.getAllByText('Reverse charge')).toHaveLength(2));
+    expect(screen.getAllByText(note)).toHaveLength(2);
   });
 
   it('the list and the detail drawer badge a stored itc_eligible=false bill "No credit"', async () => {

@@ -26,7 +26,7 @@ import {
 import { useToast } from '../../../context/ToastContext';
 import { useAuth } from '../../../context/AuthContext';
 import type { Supplier } from '../purchaseTypes';
-import { inr, errMsg } from './shared';
+import { inr, errMsg, rcmNote } from './shared';
 import { ExceptionsPanel } from './ExceptionsPanel';
 import { GrnPickerModal, DcPickerModal } from './pickers';
 import { InvoiceFormDrawer, blankLine, type EditLine } from './InvoiceFormDrawer';
@@ -306,7 +306,10 @@ function InvoiceList({ invoices, onOpen }: { invoices: PurchaseInvoice[]; onOpen
                     <span className="mt-0.5 inline-flex items-center px-1.5 py-0.5 rounded-full text-[11px] font-medium bg-amber-100 text-amber-800" title="This bill claims no input credit">No credit</span>
                   )}
                   {pi.reverse_charge === true && (
-                    <span className="mt-0.5 ml-1 inline-flex items-center px-1.5 py-0.5 rounded-full text-[11px] font-medium bg-blue-100 text-blue-800" title="You pay this GST to the government; the supplier is owed the taxable value">Reverse charge</span>
+                    <>
+                      <span className="mt-0.5 ml-1 inline-flex items-center px-1.5 py-0.5 rounded-full text-[11px] font-medium bg-blue-100 text-blue-800">Reverse charge</span>
+                      <div className="mt-0.5 text-[11px] text-blue-800">{rcmNote(pi.tax_amount, pi.total_amount)}</div>
+                    </>
                   )}
                 </td>
                 <td className="px-3 py-2 text-gray-700">{(pi.vendor_invoice_date || '').slice(0, 10)}</td>
@@ -324,7 +327,12 @@ function InvoiceList({ invoices, onOpen }: { invoices: PurchaseInvoice[]; onOpen
                 <td className="px-3 py-2 text-right text-gray-500">{pi.cgst ? inr(pi.cgst) : '-'}</td>
                 <td className="px-3 py-2 text-right text-gray-500">{pi.sgst ? inr(pi.sgst) : '-'}</td>
                 <td className="px-3 py-2 text-right text-gray-500">{pi.igst ? inr(pi.igst) : '-'}</td>
-                <td className="px-3 py-2 text-right font-semibold text-gray-900">{inr(pi.total_amount)}</td>
+                <td className="px-3 py-2 text-right font-semibold text-gray-900">
+                  {inr(pi.total_amount)}
+                  {pi.reverse_charge === true && (
+                    <div className="text-[11px] font-normal text-blue-800">Supplier is owed</div>
+                  )}
+                </td>
                 {anyMatch && (
                   <td className="px-3 py-2 text-center">
                     {pi.match_status ? <MatchBadge status={pi.match_status} /> : <span className="text-gray-300 text-xs">-</span>}

@@ -21,7 +21,7 @@ import {
 import { useToast } from '../../../context/ToastContext';
 import { useAuth } from '../../../context/AuthContext';
 import type { Supplier } from '../purchaseTypes';
-import { inr, GST_RATES, errMsg, APPROVE_ROLES } from './shared';
+import { inr, GST_RATES, errMsg, APPROVE_ROLES, rcmNote } from './shared';
 import { istDayString } from '../../../utils/datetime';
 
 // The product ids a PRODUCT_NOT_CATALOGUED refusal names, so the accountant can
@@ -301,7 +301,7 @@ export function InvoiceFormDrawer({
             </div>
             {pv?.reverse_charge && (
               <p className="text-xs font-medium text-blue-800">
-                You pay this GST ({inr(pv.tax_total)}) to the government; the supplier is owed {inr(pv.total)}
+                {rcmNote(pv.tax_total, pv.total)}
               </p>
             )}
             {pv && pv.itc_eligible === false && (

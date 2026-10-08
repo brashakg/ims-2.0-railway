@@ -12,6 +12,11 @@ export const inr = (n?: number) => `₹${(Math.round((n || 0) * 100) / 100).toLo
 // 18% sunglasses/watches/accessories, plus 0/28 for completeness).
 export const GST_RATES = [0, 5, 12, 18, 28];
 
+// A reverse-charge bill in one sentence: the form, the list and the detail
+// drawer all say it, as visible text (a touch tablet shows no tooltip).
+export const rcmNote = (tax?: number, owed?: number) =>
+  `You pay this GST (${inr(tax)}) to the government; the supplier is owed ${inr(owed)}`;
+
 // The server's `detail` is a string on some routes and a structured object
 // ({code, message, lines}) on others -- the purchase-invoice gates are the
 // latter. String()-ing an object rendered "[object Object]" at the user, which
