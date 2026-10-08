@@ -4578,6 +4578,66 @@ def test_remap_resends_a_failed_billing_leg_move_to_the_shop_that_bills_it(world
     assert after["fulfillment_hold"] is False
 
 
+def test_a_move_refused_after_a_clear_hold_on_the_wire_holds_the_order(world, monkeypatch):
+    """[LOW] Round 20, item 3: round 19's input
+    (test_a_move_on_the_wire_never_undoes_what_landed_meanwhile[clear_hold])
+    with Shopify REFUSING the move. The clear-hold landing while it was on
+    the wire left the seller's text in stock_hold_reason, and the failed
+    move re-held only an order whose reason was its own or none: the order
+    was dispatchable while FO_2 (and the unit Shopify committed) sat at
+    Ranchi, its MOVE_FAILED task saying 'on hold ... press Re-map', with no
+    Re-map offered. A failed move always leaves the order held now, on its
+    own text, and Re-map resends it."""
+    from fastapi import HTTPException
+    from api.routers import online_store_orders as oso
+    from api.routers.orders import assert_no_active_rx_hold
+
+    db = world["db"]
+    _shop(db, "BV-DHN-01", "BV Dhanbad", "", LOC_DHN)
+    _stock(db, "BV-BOK-01", "P-RB", 2)
+    _stock(db, "BV-BOK-01", "P-OA", 1)
+    _stock(db, "BV-DHN-01", "P-RB", 1)
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 2)])
+    world["shop"].fo(FO_3, LOC_DHN, lines=[(9000, 1)])
+    world["shop"].fo(FO_2, LOC_RAN, lines=[(9001, 1)])
+    world["shop"].move_error = "Location does not stock the item"
+    payload = _order(61272, lines=(("RB-1234", 3), ("OA-5", 1)))
+    monkeypatch.setattr(oso, "_get_db", lambda: db)
+    monkeypatch.setattr(oso, "_write_rx_hold_audit", lambda *a, **k: None)
+    real = shopify_push._graphql
+    landed = {}
+
+    async def clear_mid_move(db_, query, variables):
+        if "imsFulfillmentOrderMove" in query and not landed:
+            oid = db.orders.find_one({"shopify_order_id": str(payload["id"])})["order_id"]
+            db.stores.update_one({"store_id": "BV-DHN-01"}, {"$set": {"gstin": "20AAAAA0000A1Z5"}})
+            landed["out"] = await oso.clear_rx_hold(
+                oid, None, current_user={"user_id": "u1", "roles": ["ADMIN"]})
+        return await real(db_, query, variables)
+
+    monkeypatch.setattr(shopify_push, "_graphql", clear_mid_move)
+    res, _order_doc = _book(world, payload)
+    oid = res["order_id"]
+
+    assert "Seller (GSTIN) hold released" in landed["out"]["message"], landed
+    after = db.orders.find_one({"order_id": oid}, {"_id": 0})
+    [failed] = [p for p in after["fulfillment_route"]["problems"] if p["code"] == "MOVE_FAILED"]
+    assert after["fulfillment_hold"] is True and after["stock_hold_reason"] == failed["message"]
+    with pytest.raises(HTTPException):
+        assert_no_active_rx_hold(after)
+    assert route_mod.remappable(after)
+    assert after["fulfillment_route"].get(route_mod.SELLER_RELEASED)  # the release stands
+
+    monkeypatch.setattr(shopify_push, "_graphql", real)
+    world["shop"].move_error = None
+    out = _remap(world, monkeypatch, payload)
+
+    assert out["ok"] and out["result"]["status"] == "rerouted", out
+    assert world["shop"].moves()[-1] == {"id": FO_2, "newLocationId": LOC_BOK}
+    after = db.orders.find_one({"order_id": oid}, {"_id": 0})
+    assert after["fulfillment_hold"] is False and after["store_id"] == "BV-BOK-01"
+
+
 def test_remap_counts_a_shops_own_units_only_beyond_its_own_leg(world, monkeypatch):
     """[LOW] Round 20, item 1, same-line variant: Shopify splits RB x3 --
     FO_1 Bokaro (RB 2), FO_2 Ranchi (RB 1, short). Bokaro holds only its 2,

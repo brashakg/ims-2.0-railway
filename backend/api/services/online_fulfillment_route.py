@@ -1092,9 +1092,13 @@ async def move_fulfillment_orders(db, order_id: str) -> Dict[str, Any]:
         )}
         route["hold_reason"] = problem["message"]
         # Keep (or put) the order on hold -- unless another hold (a stock
-        # miss, a seller GSTIN) already owns the reason, which stays.
+        # miss, a seller GSTIN) already owns the reason AND still holds it,
+        # which stays. One a clear-hold released while Shopify answered holds
+        # nothing any more: the failed move takes the reason, so the order is
+        # held and Re-map offered, as its text says.
         holds = [
-            ({"stock_hold_reason": {"$in": [None, pending]}},
+            ({"$or": [{"stock_hold_reason": {"$in": [None, pending]}},
+                      {"fulfillment_hold": {"$ne": True}}]},
              {"$set": {"fulfillment_hold": True, "stock_hold_reason": problem["message"]}}),
         ]
     else:
