@@ -85,6 +85,15 @@ class _MemGRNRepo:
     def find_by_id(self, grn_id):
         return self.find_one({"grn_id": grn_id})
 
+    def update(self, grn_id, fields):
+        # create() inserts under a placeholder number; the real one is set
+        # once the insert has won (audit F28).
+        for d in self.docs:
+            if d.get("grn_id") == grn_id:
+                d.update(fields)
+                return True
+        return False
+
 
 class _FakePORepo:
     def find_by_id(self, po_id):

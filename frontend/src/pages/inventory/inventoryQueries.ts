@@ -75,6 +75,8 @@ export interface StockItem {
   reorder_point?: number | null;
   /** The server's low-stock verdict (reorder_policy.is_low_stock). */
   low_stock?: boolean;
+  /** The server's discontinued verdict (reorder_policy.discontinued): never reordered. */
+  discontinued?: boolean;
   barcode?: string;
   storeBarcode?: string;
   /** Procurement Phase 1 (additive from /inventory/stock): the latest ACCEPTED
