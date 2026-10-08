@@ -40,7 +40,11 @@ from typing import Any, Dict
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from api.services.product_master import compute_identity_key, identity_parts  # noqa: E402
+from api.services.product_master import (  # noqa: E402
+    ProductMasterError,
+    compute_identity_key,
+    identity_parts,
+)
 
 
 def _identity_of(doc: Dict[str, Any]):
@@ -67,7 +71,7 @@ def _identity_of(doc: Dict[str, Any]):
 def run(products, *, apply: bool) -> Dict[str, Any]:
     rows = list(products.find({}))
     stats = {"scanned": len(rows), "unchanged": 0, "rewritten": 0,
-             "now_none": 0, "collisions": 0}
+             "now_none": 0, "collisions": 0, "unreadable": 0}
 
     planned: Dict[str, Any] = {}
     by_new = defaultdict(list)
@@ -75,7 +79,14 @@ def run(products, *, apply: bool) -> Dict[str, Any]:
     for doc in rows:
         pid = doc.get("product_id") or doc.get("_id")
         old = doc.get("identity_key")
-        new = _identity_of(doc)
+        try:
+            new = _identity_of(doc)
+        except ProductMasterError as exc:
+            # e.g. a contact lens whose stored power is not a number: a human
+            # fixes the row; the rest of the rebuild goes on.
+            stats["unreadable"] += 1
+            print(f"  [skip] {doc.get('sku')}: {exc.message} -- fix the row, keeping {old!r}")
+            continue
         if new is None:
             # Brand or model missing -> no identity at all. Leave whatever is
             # there alone; clearing it is a separate decision.
@@ -133,7 +144,7 @@ def main() -> int:
     stats = run(db["products"], apply=apply)
     print(
         "\nscanned={scanned} unchanged={unchanged} rewritten={rewritten} "
-        "no-identity={now_none} collisions={collisions}".format(**stats)
+        "no-identity={now_none} collisions={collisions} unreadable={unreadable}".format(**stats)
     )
     if not apply and stats["rewritten"]:
         print("\nRe-run with --apply to write these.")

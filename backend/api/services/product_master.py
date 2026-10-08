@@ -48,7 +48,7 @@ import uuid
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 
 from .gst_rates import (
@@ -1052,6 +1052,11 @@ def _derive_brand_model_color_size(
 _CONTACT_LENSES = ("CONTACT_LENS", "COLORED_CONTACT_LENS")
 # A contact lens's power fields as the form records them: (label, key).
 _CL_POWER_FIELDS = (("", "power"), ("C", "cl_cyl"), ("X", "cl_axis"), ("A", "cl_add"))
+# A power as people write it: a sign (ASCII, the Unicode minus or a dash pasted
+# from Word/PDF, or +), up to 3 digits, a '.' or ',' decimal part, an optional
+# D/DS; PL or PLANO is 0. Digits are bounded, so an exponent or a 400-digit
+# number never reaches the arithmetic.
+_CL_POWER_RE = re.compile(r"([-+\u2212\u2013\u2014]?)\s*(\d{1,3})?(?:[.,](\d{1,3}))?\s*(?:DS?)?")
 
 
 def _cl_power(attributes: Dict[str, Any]) -> Optional[str]:
@@ -1059,21 +1064,28 @@ def _cl_power(attributes: Dict[str, Any]) -> Optional[str]:
     is its own item): SPH, then C cylinder, X axis, A add, e.g.
     M125/CM075/X180. A sign is a letter ('-' separates SKU parts): -1.25 is
     M125, +1.25 and 1.25 are P125, 0 is PL (plano); in hundredths, so -1.25
-    is never -12.50 (M1250). A zero cylinder or add is none. Text that is not
-    a number is kept as typed."""
+    is never -12.50 (M1250). A zero cylinder or add is none. Anything that is
+    not a power is refused (422 naming the field): text kept as typed lost
+    its sign in the SKU and the key, so -1.25D was the duplicate of +1.25D."""
     out = []
     for label, key in _CL_POWER_FIELDS:
         raw = str(attributes.get(key) if attributes.get(key) is not None else "").strip()
         if not raw:
             continue
-        try:
-            d = Decimal(raw)
-        except InvalidOperation:
-            d = None
-        if d is None or not d.is_finite():
-            out.append(label + raw)
-        elif key == "cl_axis":
-            out.append("X%d" % int(d))
+        m = _CL_POWER_RE.fullmatch(raw.upper())
+        if raw.upper() in ("PL", "PLANO"):
+            d = Decimal(0)
+        elif m and (m.group(2) or m.group(3)):
+            d = Decimal("%s.%s" % (m.group(2) or "0", m.group(3) or "0"))
+            d = d if m.group(1) in ("", "+") else -d
+        else:
+            raise ProductMasterError(
+                f"{key} '{raw[:20]}' is not a number (write it like -1.25).",
+                status=422,
+                field=key,
+            )
+        if key == "cl_axis":
+            out.append("X%d" % int(abs(d)))
         elif d == 0:
             if key == "power":
                 out.append("PL")

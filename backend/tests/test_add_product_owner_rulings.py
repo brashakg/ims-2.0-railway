@@ -660,6 +660,73 @@ def test_cl_power_key_rebuild_matches_the_create_door(door):
     assert _dup(door, _form_post("CL", dict(_OASYS, power="0.00")))["sku"] == "P-CL0"
 
 
+def test_cl_power_keeps_its_sign_however_it_is_written(door):
+    """Power is a free-text box: a unit, a space, a comma, or a minus pasted
+    from Word or a PDF (Unicode minus, en or em dash) keeps its sign. The
+    opposite power is a new product; the same power, however spelt, is the
+    409 (text kept as typed lost its sign: +1.25D was the duplicate of -1.25D,
+    and an en-dash -1.25 a second product beside -1.25)."""
+    minus = door(_form_post("CL", _OASYS))
+    plus = door(_form_post("CL", dict(_OASYS, power="+1.25D")))
+    assert (minus["sku"], plus["sku"]) == ("CL-ACUVUE-OASYS-M125", "CL-ACUVUE-OASYS-P125")
+    for spelt in ("-1.25D", "-1.25 DS", "- 1.25", "\u22121.25", "\u20131.25", "\u20141,25", "-1.25d"):
+        assert _dup(door, _form_post("CL", dict(_OASYS, power=spelt)))["sku"] == minus["sku"], spelt
+    for spelt in ("+1.25 DS", "+ 1.25", "+1,25", "1.25"):
+        assert _dup(door, _form_post("CL", dict(_OASYS, power=spelt)))["sku"] == plus["sku"], spelt
+    plano = door(_form_post("CL", dict(_OASYS, power="Plano")))
+    assert plano["sku"] == "CL-ACUVUE-OASYS-PL"
+    assert _dup(door, _form_post("CL", dict(_OASYS, power="0.00")))["sku"] == plano["sku"]
+
+
+def test_cl_a_zero_cylinder_or_add_is_none(door):
+    """-1.25 with cylinder 0 or add 0 is the -1.25 lens: the same power twice,
+    however spelt, is one product (and the SKU the Review shows is its SKU)."""
+    first = door(_form_post("CL", _OASYS))
+    for zero in ({"cl_cyl": "0"}, {"cl_add": "0.00"}, {"cl_cyl": "-0.00", "cl_add": "+0"}):
+        other = dict(_OASYS, **zero)
+        assert _preview("CL", other) == first["sku"], zero
+        assert _dup(door, _form_post("CL", other))["sku"] == first["sku"], zero
+
+
+def test_cl_a_power_that_is_not_a_number_is_refused_not_a_crash(door):
+    """A power or axis in exponent form ('1E+5000') crashed the preview and the
+    save with a 500 (Python's int digit limit) and a bigger one stalled the
+    server; '1e400' minted a 400-digit SKU. Anything that is not a power is a
+    422 naming the field, at the preview and at the save."""
+    from fastapi import HTTPException
+
+    for key, junk in (("power", "1E+5000"), ("cl_axis", "1E+5000"), ("power", "1e400"),
+                      ("cl_cyl", "9" * 5000), ("cl_add", "NaN"), ("power", "-"),
+                      ("power", "abc"), ("power", "Infinity")):
+        with pytest.raises(pm.ProductMasterError) as exc:
+            pm.build_sku("CL", dict(_OASYS, **{key: junk}))
+        assert (exc.value.status, exc.value.field) == (422, key), (key, junk)
+    with pytest.raises(HTTPException) as preview:
+        _preview("CL", dict(_OASYS, cl_axis="1E+5000"))
+    assert preview.value.status_code == 422
+    with pytest.raises(HTTPException) as save:
+        door(_form_post("CL", dict(_OASYS, power="1E+5000")))
+    assert save.value.status_code == 422
+    assert door.repo.collection.count_documents({}) == 0
+
+
+def test_cl_key_rebuild_skips_a_row_whose_power_is_not_a_number(door):
+    """A stored lens whose power is not a number is named for a human to fix;
+    the rest of the rebuild goes on."""
+    from scripts import migrate_identity_key_tighten as mig
+
+    for pid, power in (("P-JUNK", "ask"), ("P-OK", "-1.25D")):
+        door.repo.collection.insert_one({
+            "product_id": pid, "sku": pid, "category": "CONTACT_LENS", "is_active": True,
+            "brand": "Acuvue", "model": "Oasys", "identity_key": "acuvue|oasys|" + pid,
+            "attributes": dict(_OASYS, power=power),
+        })
+    stats = mig.run(door.repo.collection, apply=True)
+    assert (stats["unreadable"], stats["rewritten"], stats["collisions"]) == (1, 1, 0)
+    assert door.repo.find_by_id("P-OK")["identity_key"] == "acuvue|oasys||m125"
+    assert door.repo.find_by_id("P-JUNK")["identity_key"] == "acuvue|oasys|P-JUNK"
+
+
 def test_f13_guard_a_clash_still_gets_a_unique_sku(door):
     first = door(_form(brand="Carrera", model="CA8895", color="807"))
     # Same identity is a 409 at this door; a different size key is a new row
