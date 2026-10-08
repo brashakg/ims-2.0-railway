@@ -207,7 +207,7 @@ def test_admin_router_is_admin_gated():
     for method, path in (
         ("POST", "/api/v1/admin/brands"),
         ("POST", "/api/v1/admin/hsn"),
-        ("POST", "/api/v1/admin/discounts/role-caps"),
+        ("POST", "/api/v1/admin/discounts/tier-discounts"),
         ("POST", "/api/v1/admin/system/backups"),
         ("PUT", "/api/v1/admin/system/settings"),
     ):

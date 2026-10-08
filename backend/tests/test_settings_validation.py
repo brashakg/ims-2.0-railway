@@ -487,7 +487,7 @@ class TestFeatureToggleCacheInvalidation:
 
         put = client.patch(
             f"/api/v1/settings/feature-toggles/{store_id}",
-            json={"features": {"workshop-module": False}},
+            json={"features": {"split-payments": False}},
             headers=auth_headers,
         )
         assert put.status_code == 200, put.text
@@ -499,7 +499,7 @@ class TestFeatureToggleCacheInvalidation:
             headers=auth_headers,
         )
         assert get.status_code == 200
-        assert get.json().get("features", {}).get("workshop-module") is False
+        assert get.json().get("features", {}).get("split-payments") is False
 
 
 # ---------------------------------------------------------------------------

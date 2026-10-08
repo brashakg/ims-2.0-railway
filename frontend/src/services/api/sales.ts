@@ -825,16 +825,6 @@ export const adminDiscountApi = {
     return response.data;
   },
 
-  getRoleDiscountCaps: async () => {
-    const response = await api.get('/admin/discounts/role-caps');
-    return response.data;
-  },
-
-  setRoleDiscountCap: async (role: string, maxDiscount: number) => {
-    const response = await api.post('/admin/discounts/role-caps', { role, max_discount: maxDiscount });
-    return response.data;
-  },
-
   // The caps the POS ACTUALLY enforces, sourced from code constants
   // (role_caps.py + pricing_caps.py). Read-only -- there is no setter, because
   // changing a cap is a code change + deploy, not a DB write.

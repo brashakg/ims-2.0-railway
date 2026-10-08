@@ -108,50 +108,6 @@ async def get_discount_rules():
     return defaults
 
 
-@router.get("/discounts/role-caps")
-async def get_role_discount_caps():
-    """Per-role maximum discount %."""
-    defaults = {
-        "SUPERADMIN": 100,
-        "ADMIN": 100,
-        "AREA_MANAGER": 25,
-        "STORE_MANAGER": 20,
-        # SALES_CASHIER merged into SALES_STAFF (backlog #12); both were 10%.
-        "SALES_STAFF": 10,
-    }
-    coll = _coll("role_discount_caps")
-    if coll is not None:
-        for d in coll.find({}):
-            role = d.get("role")
-            if role:
-                defaults[role] = d.get("max_discount", defaults.get(role, 0))
-    return {"role_caps": defaults}
-
-
-class RoleCapBody(BaseModel):
-    role: str
-    max_discount: float = Field(..., ge=0, le=100)
-
-
-@router.post("/discounts/role-caps")
-async def set_role_discount_cap(body: RoleCapBody):
-    coll = _coll("role_discount_caps")
-    if coll is None:
-        raise HTTPException(status_code=503, detail="Database not available")
-    coll.update_one(
-        {"role": body.role},
-        {
-            "$set": {
-                "role": body.role,
-                "max_discount": body.max_discount,
-                "updated_at": _now_iso(),
-            }
-        },
-        upsert=True,
-    )
-    return {"role": body.role, "max_discount": body.max_discount}
-
-
 @router.get("/discounts/enforced-caps")
 async def get_enforced_discount_caps():
     """The discount caps the POS ACTUALLY enforces, sourced from the live code

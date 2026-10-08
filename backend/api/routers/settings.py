@@ -2468,19 +2468,6 @@ async def update_admin_controls(
 
 DEFAULT_APPROVAL_WORKFLOWS = [
     {
-        "id": "wf-001",
-        "type": "DISCOUNT_APPROVAL",
-        "name": "Discount Approval",
-        "description": "Requires manager approval when a discount exceeds the configured threshold.",
-        "isEnabled": True,
-        "thresholdType": "PERCENTAGE",
-        "thresholdValue": 15,
-        "approverRoles": ["ADMIN", "STORE_MANAGER"],
-        "escalationTimeout": 2,
-        "notifyOnRequest": True,
-        "notifyOnApproval": True,
-    },
-    {
         "id": "wf-002",
         "type": "REFUND_APPROVAL",
         "name": "Refund Approval",
@@ -2519,19 +2506,6 @@ DEFAULT_APPROVAL_WORKFLOWS = [
         "notifyOnRequest": True,
         "notifyOnApproval": False,
     },
-    {
-        "id": "wf-005",
-        "type": "CREDIT_SALE",
-        "name": "Credit Sale Approval",
-        "description": "Credit sales require manager approval before processing.",
-        "isEnabled": False,
-        "thresholdType": "AMOUNT",
-        "thresholdValue": 5000,
-        "approverRoles": ["ADMIN", "STORE_MANAGER", "ACCOUNTANT"],
-        "escalationTimeout": 1,
-        "notifyOnRequest": True,
-        "notifyOnApproval": True,
-    },
 ]
 
 
@@ -2563,6 +2537,13 @@ async def get_approval_workflows(current_user: dict = Depends(get_current_user))
         doc = collection.find_one({"_id": "default"})
         if doc:
             doc.pop("_id", None)
+            # Owner 2026-10-08: the discount and credit-sale rows duplicated the
+            # discount caps and the credit-limit block - a copy saved before
+            # the removal is not shown (and so not saved back).
+            doc["workflows"] = [
+                w for w in doc.get("workflows") or []
+                if w.get("type") not in ("DISCOUNT_APPROVAL", "CREDIT_SALE")
+            ]
             return doc
     return {"workflows": DEFAULT_APPROVAL_WORKFLOWS}
 
@@ -2593,8 +2574,6 @@ async def update_approval_workflows(
 
 DEFAULT_FEATURE_TOGGLES: Dict[str, bool] = {
     "pos-quick-sale": True,
-    "eye-test-module": True,
-    "workshop-module": True,
     "loyalty-points": False,
     "split-payments": True,
     "credit-billing": True,
