@@ -177,6 +177,15 @@ describe('Stock lookup screen', () => {
     expect(shopCells('Frame P')).toEqual(cells);
   });
 
+  // Round 9: a contact lens is one product per power and its name carries
+  // none, so the row shows the power the server sends next to any size.
+  it('shows each power, so the rows of one model can be told apart', async () => {
+    const cl = (id: string, power: string) => ({ ...product(id, 'CONTACT_LENS'), name: 'Acuvue Oasys Contact Lenses', power });
+    await search({ items: [cl('A', '-0.25'), cl('B', '-0.50'), { ...product('F', 'FRAME'), size: '54' }] }, 'Frame F');
+    const sizes = screen.getAllByRole('row').slice(1).map((r) => within(r).getAllByRole('cell')[2].textContent);
+    expect(sizes).toEqual(['-0.25', '-0.50', '54']);
+  });
+
   // Round 7: the server caps the rows (50 hits, 200 per family), so a big
   // contact-lens model is cut; the screen says so instead of looking whole.
   // Round 8: 'products', not 'powers' (a frame list is cut too), and never

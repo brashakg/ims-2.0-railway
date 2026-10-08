@@ -16,7 +16,7 @@ they carry money):
     GET /api/v1/inventory/lookup?q=<text>          (inventory package router)
     200 -> {"store_id": <this shop = the caller's active store>,
             "items": [{"product_id", "sku", "name", "brand", "model",
-                       "category", "colour_code", "size", "mrp", "offer_price",
+                       "category", "colour_code", "size", "power", "mrp", "offer_price",
                        "stores": [{"store_id", "store_name",
                                    "available", "in_transit",
                                    "tracked"}, ...]}],
@@ -43,8 +43,10 @@ they carry money):
     answer as GET /products?search=) plus an exact SKU, product barcode,
     manufacturer GTIN (attributes.gtin) or IMS unit barcode, active only and
     listed FIRST, never cut by the 200-row family cap; a hit brings
-    its model family (find_similar_products' identity_key rule for colours,
-    variant_of for sizes); an inactive product never comes back. No database
+    its model family (model_family_query, the identity_key rule
+    find_similar_products lists by, for colours, sizes and powers; variant_of
+    for sizes); an inactive product never comes back. `total` counts the
+    search through the same search_products_filter search_products runs. No database
     -> 200 with no items (the real-app test runs on a dev box's
     MockDatabase), never a 500.
 
@@ -564,22 +566,32 @@ _CL_TARGET_UNIT = "BVCL00000001"
 
 
 def _seed_contact_lens_family(db, powers: int = _CL_POWERS) -> str:
-    """`powers` active powers of one model; the one the counter scans is stored
-    LAST, so storage order puts it past both caps. Returns its product_id."""
+    """`powers` active powers of one model, each in the create door's shape
+    (product_master.normalise_payload, built once and copied: the power only
+    in attributes.power and cl_power, the name and identity_key without it, no
+    top-level size). The one the counter scans is stored LAST, so storage
+    order puts it past both caps. Returns its product_id."""
+    from api.services.product_master import normalise_payload
+
+    door = normalise_payload(
+        category="CONTACT_LENS", mrp=1800.0, offer_price=1700.0, cost_price=900.0,
+        sku=_CL_TARGET_SKU,
+        attributes={"brand_name": "Johnson & Johnson", "model_name": "Acuvue Oasys",
+                    "power": "-0.25", "expiry_date": "2028-01-01"},
+        extra_fields={"cl_power": -0.25},
+    )
+    assert "size" not in door and "0.25" not in door["name"], "the door keeps the power apart"
     rows = []
     for i in range(powers):
         last = i == powers - 1
         pid = "P-CL-TARGET" if last else f"P-CL-{i:03d}"
         power = f"-{(i + 1) * 0.25:.2f}"
         rows.append({
-            "_id": pid, "product_id": pid,
+            **door, "_id": pid, "product_id": pid, "cl_power": float(power),
             "sku": _CL_TARGET_SKU if last else f"{_CL_TARGET_SKU}{i:03d}",
             "barcode": _CL_TARGET_BARCODE if last else f"{_CL_TARGET_BARCODE}{i:03d}",
-            "name": f"Acuvue Oasys {power}", "brand": "Johnson & Johnson",
-            "model": "Acuvue Oasys", "category": "CONTACT_LENS", "size": power,
-            "mrp": 1800.0, "offer_price": 1700.0, "is_active": True,
-            "attributes": {"power": power, **({"gtin": _CL_TARGET_GTIN} if last else {})},
-            "identity_key": compute_identity_key("Johnson & Johnson", "Acuvue Oasys", None, power),
+            "attributes": {**door["attributes"], "power": power,
+                           **({"gtin": _CL_TARGET_GTIN} if last else {})},
         })
     db["products"].insert_many(rows)
     db["stock_units"].insert_one(_unit("P-CL-TARGET", S2, barcode=_CL_TARGET_UNIT))
@@ -602,7 +614,9 @@ def test_d7b2_a_scanned_power_is_never_cut_from_a_big_family(call, mongo_db, lab
     # scanned to scan; only the scanned power carries it.
     assert [i["product_id"] for i in items if i.get("exact") is True] == [target], label
     assert _counts(items[0])[S2] == (1, 0), "and Bokaro's box of it is counted"
-    assert len(pids) > 1, "its other powers still come with it"
+    # Round 9: every other power, up to the 200-row family cap -- even though
+    # the door gives all of a model's powers ONE identity_key.
+    assert len(pids) > 200, f"scanning {label}: only {len(pids)} of the model's powers came with it"
 
 
 # Round 7: the caps (50 search hits, 200 per family) cut a big contact-lens
@@ -888,6 +902,34 @@ def test_d7b4_a_frames_eye_size_is_the_create_doors(call, mongo_db):
     assert [(i["product_id"], str(i.get("size"))) for i in items] == [
         ("P-OO9208-52", "52"), ("P-OO9208-54", "54"),
     ], items
+
+
+def test_d7b4_each_power_reads_its_own_power(call, mongo_db):
+    # Round 9: a contact lens is one product per power (owner 2026-09-28) and
+    # the create door keeps the power in attributes.power / cl_power, minting
+    # a name, SKU and identity_key without it -- so every row of a model read
+    # 'Johnson & Johnson Acuvue Oasys Contact Lenses' with its own count and
+    # nobody could say which was -0.50. A reading glass keeps its power alike.
+    from api.services.product_master import normalise_payload
+
+    _seed_contact_lens_family(mongo_db, 3)
+    # stored highest power first, so the rows' order is the lookup's sort
+    powers = list(mongo_db["products"].find())[::-1]
+    mongo_db["products"].delete_many({})
+    mongo_db["products"].insert_many(powers)
+    rg = normalise_payload(
+        category="READING_GLASSES", mrp=800.0, offer_price=700.0, cost_price=300.0,
+        sku="RG-VISION-RG1-BLK",
+        attributes={"brand_name": "Vision", "model_no": "RG1", "colour_code": "BLK", "power": "+1.50"},
+    )
+    rg["product_id"] = rg["_id"] = "P-RG1"
+    mongo_db["products"].insert_one(rg)
+    items = _ok(call(_user("SALES_STAFF"), q="Acuvue"))["items"]
+    assert len({i["name"] for i in items}) == 1, "the name tells no power apart"
+    assert [(i["product_id"], i.get("power")) for i in items] == [
+        ("P-CL-000", "-0.25"), ("P-CL-001", "-0.50"), ("P-CL-TARGET", "-0.75"),
+    ], items
+    assert _items(_ok(call(_user("SALES_STAFF"), q="RG1")))["P-RG1"].get("power") == "+1.50"
 
 
 @pytest.mark.parametrize("label,query", [("unit barcode", UNIT_BARCODE),

@@ -28,6 +28,8 @@ interface ShopCount { store_id: string; store_name: string; available: number; i
 interface LookupItem {
   product_id: string; sku?: string; name?: string; brand?: string; model?: string;
   category?: string; colour_code?: string; size?: string | number; mrp?: number; offer_price?: number;
+  /** A contact lens / reading glass is one product per power; its name carries none. */
+  power?: string | number;
   /** The scanned/typed code named this product exactly (sku, barcode, GTIN, unit label). */
   exact?: boolean;
   stores: ShopCount[];
@@ -125,7 +127,7 @@ export default function StockLookupPage() {
               <tr>
                 <th className="px-3 py-2 font-medium min-w-[13rem]">Product</th>
                 <th className="px-3 py-2 font-medium">Colour</th>
-                <th className="px-3 py-2 font-medium">Size</th>
+                <th className="px-3 py-2 font-medium">Size / power</th>
                 <th className="px-3 py-2 font-medium text-right">MRP</th>
                 <th className="px-3 py-2 font-medium text-right">Price</th>
                 {shops.map((s) => (
@@ -148,7 +150,9 @@ export default function StockLookupPage() {
                       <div className="text-xs text-gray-500">{it.sku}</div>
                     </td>
                     <td className="px-3 py-2">{it.colour_code || '-'}</td>
-                    <td className="px-3 py-2">{it.size || '-'}</td>
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      {[it.size, it.power].filter((v) => v != null && v !== '').join(' / ') || '-'}
+                    </td>
                     <td className="px-3 py-2 text-right whitespace-nowrap">{rupees(it.mrp)}</td>
                     <td className="px-3 py-2 text-right whitespace-nowrap">{tillPrice(it)}</td>
                     {lensGrid.includes(lineType) ? (

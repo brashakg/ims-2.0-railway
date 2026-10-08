@@ -8,15 +8,17 @@ from an allow-list, never from the product or stock document.
 
 Every rule is reused, not re-typed:
   * search      -- ProductRepository.search_products, the active-only search
-                   GET /products?search= runs, plus an exact SKU, product
+                   GET /products?search= runs (its total counts the same
+                   search_products_filter), plus an exact SKU, product
                    barcode or manufacturer GTIN (attributes.gtin or the legacy
                    top-level gtin, read through gtin.sanitise_gtin) and the IMS
                    unit barcode via StockRepository.find_by_barcode (the till's
                    scan lookup), active products only;
   * the price   -- mrp + offer_price only; the screen shows the till's own
                    offer||mrp (posPriceGuard), never a cost, supplier or bill;
-  * the model   -- product_master.find_similar_products (the identity_key
-                   'brand|model|' rule) for colours, variant_of for sizes;
+  * the model   -- product_master.model_family_query (the identity_key
+                   'brand|model|' rule find_similar_products lists by) for
+                   colours, sizes and powers, plus variant_of for sizes;
   * sellable    -- StockRepository.sellable_filter, the filter find_available
                    and the sale guard count (AVAILABLE and in date), one unit
                    per stock_units row -- so this shop's figure is the till's;
@@ -52,11 +54,7 @@ from ._shared import (
 from .helpers import _get_db
 from ...services.gtin import sanitise_gtin
 from ...services.item_events import status_match
-from ...services.product_master import (
-    existing_product_summary,
-    find_similar_products,
-    model_family_query,
-)
+from ...services.product_master import existing_product_summary, model_family_query
 from ...services.rbac_policy import policy_for
 from ...services.stores_util import physical_stores
 
@@ -66,9 +64,11 @@ STOCK_LOOKUP_ROLES = tuple(policy_for("GET", "/api/v1/inventory/lookup")["allowe
 
 # The ONLY product fields a counter sees, read off the catalogue's one display
 # projection (product_master.existing_product_summary: a frame's eye size is
-# attributes.lens_size there). An allow-list, so a cost, supplier or bill
-# field added to the product doc or the projection can never reach this screen.
-_PRODUCT_FIELDS = ("sku", "name", "brand", "model", "category", "colour_code", "size", "mrp", "offer_price")
+# attributes.lens_size there, a contact lens's power attributes.power). An
+# allow-list, so a cost, supplier or bill field added to the product doc or
+# the projection can never reach this screen.
+_PRODUCT_FIELDS = ("sku", "name", "brand", "model", "category", "colour_code", "size", "power",
+                   "mrp", "offer_price")
 _HITS = 50
 
 
@@ -119,10 +119,11 @@ def _find(product_repo, stock_repo, q):
     """(products, exact ids, total): the products `q` names exactly -- its SKU, its
     product barcode, its manufacturer GTIN (attributes.gtin) or an IMS unit
     label -- then the active search hits, then their model family (other
-    colours by the identity_key rule, other eye sizes by variant_of), so one
-    scan answers "in any colour?". The exact ones come first, ahead of the
-    50-hit search and the 200-row family caps, so a scanned contact-lens
-    power is never cut from a 300-power family. Inactive (soft-deleted / draft) products never come back.
+    colours, sizes and powers by the identity_key rule, an eye size also by
+    variant_of), so one scan answers "in any colour?". The exact ones come
+    first, ahead of the 50-hit search and the 200-row family caps, so a
+    scanned contact-lens power is never cut from a 300-power family.
+    Inactive (soft-deleted / draft) products never come back.
     A code is matched as typed AND as the one GTIN rule reads it
     (gtin.sanitise_gtin: '8 056597 054324' is 8056597054324), in the GTIN
     fields the catalogue reads (attributes.gtin, then the legacy top-level
@@ -136,30 +137,20 @@ def _find(product_repo, stock_repo, q):
     exact_ids = {str(p["product_id"]) for p in hits if p.get("product_id")}
     hits += product_repo.search_products(q, limit=_HITS)
     hit_ids = [p["product_id"] for p in hits if p.get("product_id")]
-    ids = list(hit_ids)
-    # ponytail: 3 indexed reads per distinct model among <= 100 hits; fold into
-    # one identity_key $regex only if a broad brand search ever feels slow.
-    models = {(p.get("category"), p.get("brand"), p.get("model")) for p in hits}
-    for cat, brand, model in models:
-        similar = find_similar_products(
-            product_repo.collection, category=cat, brand=brand, model=model, limit=4 * _HITS
-        )
-        ids += [
-            s["product_id"]
-            for s in similar["siblings"] + [similar["exact_match"] or {}]
-            if s.get("product_id")
-        ]
-    if not ids:
+    if not hit_ids:
         return [], exact_ids, 0
-    ids += [p["variant_of"] for p in hits if p.get("variant_of")]
-    family = [{"product_id": {"$in": ids}}, {"variant_of": {"$in": ids}}]
-    # `total`: the same answer with no cap -- the exact codes, every search
-    # match, every row of each hit's model (its identity_key family) and the
-    # variant_of links -- so the screen can say when a cap cut rows.
-    # ponytail: a size child of a sibling the cap dropped is not counted.
-    uncapped = exact + [product_repo.search_products_filter(q)] + family + [
+    # The family: every row of each hit's model (model_family_query, the
+    # identity_key 'brand|model|' rule find_similar_products lists by -- every
+    # colour, size and power, even powers the door gave one identity_key) and
+    # the hits' variant_of links (an eye size whose model is spelled apart).
+    models = {(p.get("category"), p.get("brand"), p.get("model")) for p in hits}
+    ids = hit_ids + [p["variant_of"] for p in hits if p.get("variant_of")]
+    family = [{"product_id": {"$in": ids}}, {"variant_of": {"$in": ids}}] + [
         f for f in (model_family_query(*m) for m in models) if f
     ]
+    # `total`: the same answer with no cap -- the exact codes, every search
+    # match and the whole family -- so the screen can say when a cap cut rows.
+    uncapped = exact + [product_repo.search_products_filter(q)] + family
     total = product_repo.count({"$or": uncapped, "is_active": True})
     # ponytail: the family is capped at 200 in storage order; the hits above
     # it never are. Sort the family by power/size if a counter ever asks.
@@ -224,9 +215,11 @@ async def stock_lookup(
             for sid, s in zip(shop_ids, shops)
         ]
         items.append(item)
-    # What the scan named first, then the model by colour and size.
-    items.sort(key=lambda i: (not i["exact"],
-                              *(str(i.get(k) or "") for k in ("brand", "model", "colour_code", "size"))))
+    # What the scan named first, then the model by colour, size and power.
+    # ponytail: power sorts as text (-0.25, -0.50 ... -10.00 before -2.00);
+    # sort it as a number if a counter ever reads a long power list here.
+    items.sort(key=lambda i: (not i["exact"], *(str(i.get(k) or "") for k in
+                                                ("brand", "model", "colour_code", "size", "power"))))
     # The caps (50 hits, 200 per family) cut a big contact-lens model: say so.
     return {"store_id": here, "items": items, "total": total, "truncated": total > len(items),
             "not_counted_item_types": not_counted, "lens_grid_item_types": lens_grid}

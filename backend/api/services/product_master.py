@@ -1121,6 +1121,12 @@ def existing_product_summary(existing: Dict[str, Any]) -> Dict[str, Any]:
         attrs.get("colour_code") or attrs.get("colour_name") or existing.get("color")
     )
     size = existing.get("size") or attrs.get("lens_size") or attrs.get("size")
+    # A contact lens or reading glass is one product per power (owner
+    # 2026-09-28): the create door keeps it in attributes.power (the form also
+    # sends a contact lens's as cl_power) and mints a name without it.
+    power = attrs.get("power")
+    if power in (None, ""):
+        power = existing.get("cl_power")
     # Display name: the doc's auto-minted `name` wins (product_naming stamps it
     # at create time); legacy rows created before that fall back to "Brand
     # Model".
@@ -1141,6 +1147,7 @@ def existing_product_summary(existing: Dict[str, Any]) -> Dict[str, Any]:
         "model": model,
         "colour_code": colour,
         "size": size,
+        "power": power,
         "mrp": existing.get("mrp"),
         "offer_price": existing.get("offer_price"),
         "is_active": existing.get("is_active"),
