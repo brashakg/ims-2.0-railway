@@ -3622,3 +3622,30 @@ def test_r6_the_eye_size_rule_is_for_eye_size_categories_only(world):
     po = world.raise_po([{"new_product": dict(typed), "quantity": 5, "unit_price": 90}])
     assert po["items"][0]["product_id"]
     assert len(world.products_named("Zeiss", "Lens Wipes")) == 2
+
+
+def test_r6_the_one_time_script_raises_the_tasks_for_receipts_held_before_c1(world, monkeypatch):
+    # R1-34: a receipt held before this deploy raised nothing. The script finds
+    # it and raises its tasks through the accept's own door; dry run writes
+    # nothing; a second run raises nothing.
+    import importlib
+
+    from api.routers.vendors import grn_accept as _ga
+
+    monkeypatch.setattr(_ga, "_get_db", _ga._get_db)
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    monkeypatch.syspath_prepend(os.path.join(repo_root, "scripts"))
+    script = importlib.import_module("raise_held_receipt_tasks")
+
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    world.db.tasks.delete_many({})  # held before C1: nobody was told
+    assert [g["grn_id"] for g in script.run(world.db, commit=False)] == [grn["grn_id"]]
+    assert list(world.db.tasks.find({})) == []
+
+    script.run(world.db, commit=True)
+    told = [t for t in _open_tasks(world) if t.get("grn_id") == grn["grn_id"]]
+    finding(
+        [(t["assigned_to"], t["category"]) for t in told] == [(CATALOGUER["user_id"], "Catalogue")],
+        f"R1-34: the script raised {[(t.get('assigned_to'), t.get('title')) for t in told]}",
+    )
+    assert script.run(world.db, commit=False) == []
