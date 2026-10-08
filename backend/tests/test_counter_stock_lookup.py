@@ -433,7 +433,7 @@ def test_d7b1_every_counter_role_reaches_the_lookup_in_the_real_app(client, role
     assert resp.status_code == 200, f"{role}: {resp.status_code} {resp.text[:200]}"
 
 
-@pytest.mark.parametrize("role", ALL_ROLES)
+@pytest.mark.parametrize("role", ALL_ROLES + ["INVESTOR"])
 def test_d7b1_the_lookup_row_matches_its_gate_for_every_role(call, mongo_db, role):
     # The route reads its gate from the row (lookup.STOCK_LOOKUP_ROLES); a
     # literal tuple typed back into the route that drops or adds a role makes
@@ -466,7 +466,10 @@ def test_d7b1_the_screen_and_the_server_admit_the_same_roles():
     assert screen == row - {"SALES_CASHIER"}, (
         f"screen only: {sorted(screen - row)}, server only: {sorted(row - screen - {'SALES_CASHIER'})}"
     )
-    assert not row & {"WORKSHOP_STAFF", "ACCOUNTANT", "CATALOG_MANAGER"}, sorted(row)
+    # Exactly the ruled roles: the four counter roles plus the managers --
+    # nothing else from ALL_ROLES (WORKSHOP_STAFF, ACCOUNTANT, CATALOG_MANAGER,
+    # DESIGN_MANAGER), and never INVESTOR.
+    assert row == set(COUNTER_ROLES) | {"SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"}, sorted(row)
 
 
 def test_d7b1_no_database_is_an_empty_answer_not_a_500(call, mongo_db, monkeypatch):
