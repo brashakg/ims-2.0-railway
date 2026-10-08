@@ -22,6 +22,17 @@ export const sectionOfError = (key: string): SectionId =>
 export const productListPath = (sku?: string | null): string =>
   `/inventory/stock${sku ? `?search=${encodeURIComponent(sku)}` : ''}`;
 
+/** Where "open the existing product" lands for a product the server named
+ *  (the 409 popup, the exact-match hint): an item ordered before it was
+ *  catalogued opens in THIS editor to be finished (audit C3) -- its held
+ *  stock goes on the shelf when it is saved; anything else, the product list. */
+export const existingProductPath = (
+  info?: { sku?: string | null; product_id?: string | null; provisional?: boolean | null } | null,
+): string =>
+  info?.provisional && info.product_id
+    ? `/catalog/add?edit=${encodeURIComponent(info.product_id)}`
+    : productListPath(info?.sku);
+
 // The page's edit target, discriminated by which collection it edits:
 //   kind='spine'   — /catalog/add?edit=<id>: EDIT-IN-PLACE of a billing
 //                    `products` row (one validated PUT /products/{id}).

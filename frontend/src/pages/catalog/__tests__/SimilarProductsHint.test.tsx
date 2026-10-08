@@ -129,10 +129,23 @@ describe('SimilarProductsHint — exact-match warning', () => {
     expect(screen.getByRole('alert')).toHaveTextContent(/enter a different colour/);
   });
 
-  it('Open it fires the popup product-open path with the SKU', () => {
+  it('Open it fires the popup product-open path with the existing product', () => {
     const { onOpenExisting } = renderHint();
     fireEvent.click(screen.getByRole('button', { name: 'Open it' }));
-    expect(onOpenExisting).toHaveBeenCalledWith('FRRB2140GRN');
+    expect(onOpenExisting).toHaveBeenCalledWith(EXACT.exact_match);
+  });
+
+  // Audit C3 (R1-85): the exact item a manager ordered before it was
+  // catalogued is finished, never added again -- the hint says so and hands
+  // the caller the draft (existingProductPath opens it in the editor).
+  it('an ordered draft as the exact match leads to finishing it', () => {
+    const draft = { ...EXACT.exact_match!, provisional: true };
+    mockHook.mockReturnValue({ data: { ...EXACT, exact_match: draft }, armed: true });
+    const { onOpenExisting } = renderHint();
+    expect(screen.getByRole('alert')).toHaveTextContent(/ordered before it was catalogued/);
+    expect(screen.getByRole('alert')).not.toHaveTextContent(/already exists/);
+    fireEvent.click(screen.getByRole('button', { name: 'Finish it' }));
+    expect(onOpenExisting).toHaveBeenCalledWith(draft);
   });
 
   it('the Open link is out of the Tab order too', () => {

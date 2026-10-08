@@ -18,6 +18,7 @@ import {
   productApi,
   DuplicateProductError,
   type DuplicateProductInfo,
+  type SimilarProductSummary,
 } from '../../../services/api/products';
 // Import the templates service DIRECTLY from its module (not the api barrel —
 // the barrel re-export fails to resolve for new services, TS2614).
@@ -54,7 +55,7 @@ import {
   writeReviewQueue,
   removeFromReviewQueue,
 } from '../reviewQueue';
-import { productListPath, sectionOfError, type EditMode, type SectionId } from './shared';
+import { existingProductPath, sectionOfError, type EditMode, type SectionId } from './shared';
 import { useProductImages } from './useProductImages';
 import { reorderApi } from '../../../services/api/inventory';
 import { REORDER_LEVEL_ROLES } from '../../inventory/inventoryRoles';
@@ -501,14 +502,12 @@ export function useQuickAddForm() {
     }
   }, [dupInfo, enterVariantMode, toast]);
 
-  // Rescue popup: open the existing product in the stock ledger (see
-  // productListPath) pre-scoped to its SKU.
+  // Rescue popup: open the existing product (existingProductPath -- an
+  // ordered draft opens here to be finished, anything else the stock ledger).
   const handleDupOpenExisting = useCallback(() => {
-    const sku = dupInfo?.sku;
-    const draftId = dupInfo?.provisional ? dupInfo.product_id : null;
+    const target = existingProductPath(dupInfo);
     setDupInfo(null);
-    // A manager's typed-in draft opens in THIS editor to be finished (audit C3).
-    navigate(draftId ? `/catalog/add?edit=${encodeURIComponent(draftId)}` : productListPath(sku));
+    navigate(target);
   }, [dupInfo, navigate]);
 
   // ---- Similar-products strip (Phase 2) -------------------------------------
@@ -529,8 +528,8 @@ export function useQuickAddForm() {
   );
 
   const handleSimilarOpen = useCallback(
-    (sku?: string | null) => {
-      navigate(productListPath(sku));
+    (existing?: SimilarProductSummary | null) => {
+      navigate(existingProductPath(existing));
     },
     [navigate]
   );
