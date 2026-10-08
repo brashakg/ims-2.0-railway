@@ -1,8 +1,17 @@
-"""GET /vendors/last-cost -- last-paid price per product for a vendor, from PO
-history (procurement Phase 2C: pre-fill the cost box instead of guessing).
+"""GET /vendors/last-cost -- the price a vendor was last really paid per product
+(procurement Phase 2C: pre-fill the cost box instead of guessing).
 
-Read-only, fail-soft, store-scoped. Calls the router function directly with a
-fake PO repo (the test_grn_void / test_po_store_boundary style).
+THE one rule: the cost at acceptance of the vendor's newest accepted goods-
+receipt line (read back off the units the receipt minted), dated by acceptance;
+only if there is none, the price on its newest order that was SENT to it, dated
+when it was sent. Never a DRAFT / CANCELLED / APPROVED / PENDING order, never a
+cancelled line, never a receipt line that accepted nothing. Read-only, fail-soft, store-scoped.
+
+Calls the router functions directly over the REAL PurchaseOrderRepository /
+GRNRepository / StockRepository on strict in-memory collections, and every
+receipt is accepted through the REAL goods-receipt accept: the status filters
+and the newest-first sorts are the real ones, and the cost read back is the one
+acceptance stamped -- not a fake's guess of either.
 """
 
 from __future__ import annotations
@@ -18,123 +27,319 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pytest  # noqa: E402
 
 from api.routers import vendors as v  # noqa: E402
+from api.routers.vendors.models import GRNItemCreate  # noqa: E402
+from database.repositories.product_repository import StockRepository  # noqa: E402
+from database.repositories.vendor_repository import (  # noqa: E402
+    GRNRepository,
+    PurchaseOrderRepository,
+)
+from strict_fakes import StrictCollection  # noqa: E402
+
+_ADMIN = {
+    "user_id": "admin",
+    "username": "admin",
+    "roles": ["ADMIN"],
+    "active_store_id": "S1",
+    "store_ids": ["S1"],
+}
 
 
-class _PORepo:
-    def __init__(self, pos):
-        self._pos = pos
-
-    def find_many(self, flt, sort=None, skip=0, limit=100):
-        # Honour the vendor filter + newest-first (the docs are pre-sorted here).
-        return [p for p in self._pos if p.get("vendor_id") == flt.get("vendor_id")]
-
-
-def _po(po_id, po_number, created_at, items, store="S1"):
-    return {
-        "po_id": po_id,
-        "po_number": po_number,
-        "vendor_id": "V1",
-        "delivery_store_id": store,
-        "created_at": created_at,
-        "items": items,
-    }
-
-
-def _user(roles=("STORE_MANAGER",), active="S1", stores=None):
+def _user(roles=("STORE_MANAGER",), active="S1"):
     return {
         "user_id": "u1",
         "username": "t",
         "roles": list(roles),
         "active_store_id": active,
-        "store_ids": stores if stores is not None else [active],
+        "store_ids": [active],
     }
 
 
-def _call(**kw):
-    return asyncio.run(v.get_last_purchase_cost(**kw))
+class _World:
+    """One vendor's purchase history on the real repositories."""
+
+    def __init__(self, monkeypatch):
+        self.pos = PurchaseOrderRepository(StrictCollection("purchase_orders"))
+        self.grns = GRNRepository(StrictCollection("grns"))
+        self.stock = StockRepository(StrictCollection("stock_units"))
+        monkeypatch.setattr(v, "get_purchase_order_repository", lambda: self.pos)
+        monkeypatch.setattr(v, "get_grn_repository", lambda: self.grns)
+        monkeypatch.setattr(v, "get_stock_repository", lambda: self.stock)
+        # Accept mints without the catalogue gate and the item-event ledger.
+        monkeypatch.setattr(v, "get_product_repository", lambda: None)
+        monkeypatch.setattr(v, "_get_db", lambda: None)
+        monkeypatch.setattr(v, "is_online_store", lambda db, sid: False)
+
+    def po(self, n, price, status="SENT", sent_at=None, created_at="2026-01-01", store="S1", pid="P1"):
+        """PO-<n> for one product. created_at is deliberately far from sent_at:
+        the answer must never be ranked or dated by it."""
+        doc = {
+            "po_id": f"PO{n}",
+            "po_number": f"PO-{n}",
+            "vendor_id": "V1",
+            "delivery_store_id": store,
+            "created_at": created_at,
+            "status": status,
+            "items": [{"product_id": pid, "quantity": 2, "unit_price": price}],
+        }
+        if sent_at:
+            doc["sent_at"] = sent_at
+        self.pos.collection.insert_one(doc)
+        return doc
+
+    def receive(self, n, po, lines, accepted_at, store="S1", status=None):
+        """Log GRN-<n> against `po` and accept it through the REAL accept, then
+        pin its acceptance time (accept stamps the wall clock). Every line must
+        pass the real GRNItemCreate: received_qty is required and equals
+        accepted + rejected, so a rejected line and a short-shipped 0 line are
+        told apart exactly as the receipt screens send them."""
+        for line in lines:
+            GRNItemCreate(**line)
+        gid = f"G{n}"
+        self.grns.collection.insert_one(
+            {
+                "grn_id": gid,
+                "grn_number": f"GRN-{n}",
+                "po_id": po["po_id"],
+                "po_number": po["po_number"],
+                "vendor_id": "V1",
+                "store_id": store,
+                "status": "PENDING",
+                "created_at": "2026-01-01T00:00:00",
+                "items": lines,
+            }
+        )
+        if status == "PENDING":
+            return  # logged at the counter, never accepted
+        out = asyncio.run(v.accept_grn(gid, _ADMIN))
+        assert out["grn_status"] == "ACCEPTED", out
+        patch = {"accepted_at": accepted_at}
+        if status:
+            patch["status"] = status
+        self.grns.collection.update_one({"grn_id": gid}, {"$set": patch})
 
 
-def test_returns_most_recent_price_per_product(monkeypatch):
-    # Newest PO first (the repo returns them in order). P1 last paid 420 on the
-    # newest PO, P2 only on the older one.
-    pos = [
-        _po("PO2", "PO-2", "2026-06-12", [{"product_id": "P1", "unit_price": 420}]),
-        _po(
-            "PO1",
-            "PO-1",
-            "2026-05-01",
-            [
-                {"product_id": "P1", "unit_price": 400},
-                {"product_id": "P2", "unit_price": 999},
-            ],
-        ),
-    ]
-    monkeypatch.setattr(v, "get_purchase_order_repository", lambda: _PORepo(pos))
-    out = _call(vendor_id="V1", product_ids="P1,P2", current_user=_user())
-    assert out["costs"]["P1"]["unit_price"] == 420.0
-    assert out["costs"]["P1"]["po_number"] == "PO-2"
-    assert out["costs"]["P1"]["date"] == "2026-06-12"
-    assert out["costs"]["P2"]["unit_price"] == 999.0  # only on the older PO
+def _costs(product_ids="P1", user=None):
+    return asyncio.run(
+        v.get_last_purchase_cost(
+            vendor_id="V1", product_ids=product_ids, current_user=user or _user()
+        )
+    )["costs"]
+
+
+def test_the_accepted_receipt_cost_wins_and_is_dated_by_acceptance(monkeypatch):
+    # P1 was received and accepted against PO-1 at 3100 on 12 Sep (and against
+    # PO-0 at 2900 in June). PO-5 quoting 3500 was sent later but has not
+    # arrived: it is not what the vendor was paid.
+    w = _World(monkeypatch)
+    po0 = w.po(0, 2900, sent_at="2026-05-21T10:00:00")
+    po1 = w.po(1, 3100, sent_at="2026-09-03T10:00:00")
+    w.po(5, 3500, sent_at="2026-10-01T10:00:00")
+    w.receive(0, po0, [{"product_id": "P1", "received_qty": 1, "accepted_qty": 1}], "2026-06-01T11:00:00")
+    w.receive(1, po1, [{"product_id": "P1", "received_qty": 2, "accepted_qty": 2}], "2026-09-12T16:30:00")
+    assert w.pos.find_by_id("PO1")["status"] == "RECEIVED"
+    hit = _costs()["P1"]
+    assert hit["unit_price"] == 3100.0
+    assert hit["po_number"] == "PO-1"
+    assert hit["date"] == "2026-09-12T16:30:00"  # the receipt, not the order
+
+
+def test_a_receipt_line_priced_on_its_own_keeps_that_price(monkeypatch):
+    # The receipt line says 3050 against an order at 3100: acceptance stamps
+    # 3050 on the units, so 3050 is what was paid.
+    w = _World(monkeypatch)
+    po1 = w.po(1, 3100, sent_at="2026-09-03T10:00:00")
+    w.receive(
+        1,
+        po1,
+        [{"product_id": "P1", "received_qty": 2, "accepted_qty": 2, "unit_price": 3050}],
+        "2026-09-12T16:30:00",
+    )
+    assert {u["unit_cost"] for u in w.stock.collection.docs} == {3050.0}
+    assert _costs()["P1"]["unit_price"] == 3050.0
+
+
+def test_a_receipt_with_a_held_line_still_counts(monkeypatch):
+    # PARTIALLY_ACCEPTED: another line waits for cataloguing, but P1's units are
+    # on the shelf at their cost -- the newest price really paid.
+    w = _World(monkeypatch)
+    po0 = w.po(0, 2900, sent_at="2026-05-21T10:00:00")
+    po1 = w.po(1, 3100, sent_at="2026-09-03T10:00:00")
+    w.receive(0, po0, [{"product_id": "P1", "received_qty": 1, "accepted_qty": 1}], "2026-06-01T11:00:00")
+    w.receive(
+        1,
+        po1,
+        [{"product_id": "P1", "received_qty": 2, "accepted_qty": 2}],
+        "2026-09-12T16:30:00",
+        status="PARTIALLY_ACCEPTED",
+    )
+    assert _costs()["P1"]["unit_price"] == 3100.0
+
+
+@pytest.mark.parametrize("status", ["DRAFT", "CANCELLED", "APPROVED", "PENDING"])
+def test_an_order_never_sent_is_no_price_paid(monkeypatch, status):
+    # A history of only drafts, cancelled orders, or states the vendor flow
+    # never sent answers nothing: the form keeps the catalogue cost and shows
+    # no caption.
+    w = _World(monkeypatch)
+    w.po(3, 9999, status=status)
+    assert _costs() == {}
+
+
+def test_draft_and_cancelled_never_beat_an_older_sent_order(monkeypatch):
+    w = _World(monkeypatch)
+    w.po(3, 9999, status="CANCELLED", sent_at="2026-10-01T10:00:00")
+    w.po(4, 31000, status="DRAFT", created_at="2026-09-30")
+    w.po(1, 3100, status="RECEIVED", sent_at="2026-09-01T10:00:00")
+    w.po(2, 31000, status="DRAFT", created_at="2026-09-30", pid="P2")
+    out = _costs("P1,P2")
+    assert out["P1"]["unit_price"] == 3100.0
+    assert out["P1"]["po_number"] == "PO-1"
+    assert "P2" not in out
+
+
+def test_a_cancelled_line_is_no_price_paid(monkeypatch):
+    # The newest sent order had its P1 line cancelled (a line cancel, draft
+    # #1165): only the older order's price was agreed and bought.
+    w = _World(monkeypatch)
+    w.po(1, 3100, sent_at="2026-09-01T10:00:00")
+    po5 = w.po(5, 9999, sent_at="2026-10-01T10:00:00")
+    po5["items"][0]["line_status"] = "CANCELLED"
+    w.pos.collection.update_one({"po_id": "PO5"}, {"$set": {"items": po5["items"]}})
+    assert _costs()["P1"]["unit_price"] == 3100.0
+
+
+@pytest.mark.parametrize(
+    "status", ["SENT", "ACKNOWLEDGED", "PARTIAL", "PARTIALLY_RECEIVED", "RECEIVED"]
+)
+def test_every_order_sent_to_the_vendor_counts(monkeypatch, status):
+    w = _World(monkeypatch)
+    w.po(3, 3100, status=status, sent_at="2026-10-01T10:00:00")
+    assert _costs()["P1"]["unit_price"] == 3100.0
+
+
+def test_an_order_is_ranked_and_dated_by_when_it_was_sent(monkeypatch):
+    # PO-A was raised first but sent last; nothing has arrived from either.
+    w = _World(monkeypatch)
+    w.po("A", 3000, created_at="2026-09-01", sent_at="2026-09-10T10:00:00")
+    w.po("B", 3200, created_at="2026-09-05", sent_at="2026-09-06T10:00:00")
+    hit = _costs()["P1"]
+    assert hit["unit_price"] == 3000.0
+    assert hit["date"] == "2026-09-10T10:00:00"  # sent, not created
+
+
+def test_a_logged_but_unaccepted_receipt_leaves_the_order_standing(monkeypatch):
+    # The goods are at the counter but nobody has accepted them yet: the sent
+    # order is still the last price agreed.
+    w = _World(monkeypatch)
+    po5 = w.po(5, 3500, sent_at="2026-10-01T10:00:00")
+    w.receive(5, po5, [{"product_id": "P1", "received_qty": 2, "accepted_qty": 2}], None, status="PENDING")
+    assert _costs()["P1"]["unit_price"] == 3500.0
+
+
+def test_an_all_rejected_receipt_is_not_a_price_paid(monkeypatch):
+    # PO-7's delivery came in and every P1 was rejected (P2 was accepted). The
+    # older accepted PO-1 receipt is the last price really paid for P1.
+    w = _World(monkeypatch)
+    po1 = w.po(1, 3100, sent_at="2026-09-01T10:00:00")
+    po7 = w.po(7, 9999, sent_at="2026-09-20T10:00:00")
+    po7["items"].append({"product_id": "P2", "quantity": 1, "unit_price": 500})
+    w.pos.collection.update_one({"po_id": "PO7"}, {"$set": {"items": po7["items"]}})
+    w.receive(1, po1, [{"product_id": "P1", "received_qty": 2, "accepted_qty": 2}], "2026-09-12T16:30:00")
+    w.receive(
+        7,
+        po7,
+        [
+            {"product_id": "P1", "received_qty": 2, "accepted_qty": 0, "rejected_qty": 2},
+            {"product_id": "P2", "received_qty": 1, "accepted_qty": 1},
+        ],
+        "2026-10-02T09:00:00",
+    )
+    assert w.pos.find_by_id("PO7")["status"] == "PARTIALLY_RECEIVED"
+    hit = _costs()["P1"]
+    assert hit["unit_price"] == 3100.0
+    assert hit["date"] == "2026-09-12T16:30:00"
+
+
+def test_an_order_whose_only_receipt_rejected_everything_does_not_count(monkeypatch):
+    # Still PARTIALLY_RECEIVED (sent, part-received), but nothing of P1 was ever
+    # taken in: its 9999 is a quote the shop refused, not a price paid.
+    w = _World(monkeypatch)
+    po7 = w.po(7, 9999, sent_at="2026-09-20T10:00:00")
+    w.receive(
+        7,
+        po7,
+        [{"product_id": "P1", "received_qty": 2, "accepted_qty": 0, "rejected_qty": 2}],
+        "2026-10-02T09:00:00",
+    )
+    assert w.pos.find_by_id("PO7")["status"] == "PARTIALLY_RECEIVED"
+    assert _costs() == {}
+
+
+_P1_TAKEN = {"product_id": "P1", "received_qty": 2, "accepted_qty": 2}
+
+
+@pytest.mark.parametrize(
+    "p2_line, price, po_number, date",
+    [
+        # /purchase/grn sends a line for every PO item: P2 arrived as 0.
+        ({"product_id": "P2", "received_qty": 0, "accepted_qty": 0}, 500.0, "PO-1", "2026-09-01T10:00:00"),
+        # The receiving cockpit drops a 0 line: same delivery, same answer.
+        (None, 500.0, "PO-1", "2026-09-01T10:00:00"),
+        # P2 arrived and was all rejected: PO-1's 500 was refused, not paid.
+        ({"product_id": "P2", "received_qty": 1, "accepted_qty": 0, "rejected_qty": 1}, 450.0, "PO-0", "2026-06-01T10:00:00"),
+    ],
+    ids=["grn-screen-zero-line", "cockpit-no-line", "rejected-line"],
+)
+def test_a_short_shipped_line_leaves_its_order_price_standing(monkeypatch, p2_line, price, po_number, date):
+    # PO-1 (P1 3100, P2 500) came in with P1 only; P2 is still due. A line that
+    # arrived as 0 is no delivery, so PO-1's 500 is still P2's last price agreed.
+    w = _World(monkeypatch)
+    w.po(0, 450, sent_at="2026-06-01T10:00:00", pid="P2")
+    po1 = w.po(1, 3100, sent_at="2026-09-01T10:00:00")
+    po1["items"].append({"product_id": "P2", "quantity": 1, "unit_price": 500})
+    w.pos.collection.update_one({"po_id": "PO1"}, {"$set": {"items": po1["items"]}})
+    w.receive(1, po1, [_P1_TAKEN] + ([p2_line] if p2_line else []), "2026-09-05T12:00:00")
+    assert w.pos.find_by_id("PO1")["status"] == "PARTIALLY_RECEIVED"
+    out = _costs("P1,P2")
+    assert out["P1"]["unit_price"] == 3100.0
+    assert (out["P2"]["unit_price"], out["P2"]["po_number"], out["P2"]["date"]) == (price, po_number, date)
 
 
 def test_cross_store_price_not_leaked(monkeypatch):
-    # The only PO carrying P1 is for STORE-B; a STORE-A manager must not see it.
-    pos = [
-        _po(
-            "PO9",
-            "PO-9",
-            "2026-06-12",
-            [{"product_id": "P1", "unit_price": 420}],
-            store="STORE-B",
-        )
-    ]
-    monkeypatch.setattr(v, "get_purchase_order_repository", lambda: _PORepo(pos))
-    out = _call(vendor_id="V1", product_ids="P1", current_user=_user(active="STORE-A"))
-    assert out["costs"] == {}
-
-
-def test_admin_sees_any_store(monkeypatch):
-    pos = [
-        _po(
-            "PO9",
-            "PO-9",
-            "2026-06-12",
-            [{"product_id": "P1", "unit_price": 420}],
-            store="STORE-B",
-        )
-    ]
-    monkeypatch.setattr(v, "get_purchase_order_repository", lambda: _PORepo(pos))
-    out = _call(
-        vendor_id="V1",
-        product_ids="P1",
-        current_user=_user(roles=("ADMIN",), active="STORE-A"),
-    )
-    assert out["costs"]["P1"]["unit_price"] == 420.0
+    # The only order and receipt carrying P1 are for STORE-B; a STORE-A
+    # manager must not see either.
+    w = _World(monkeypatch)
+    po9 = w.po(9, 420, sent_at="2026-06-12T10:00:00", store="STORE-B")
+    w.po(8, 450, sent_at="2026-06-30T10:00:00", store="STORE-B")
+    w.receive(9, po9, [{"product_id": "P1", "received_qty": 1, "accepted_qty": 1}], "2026-06-20T10:00:00", store="STORE-B")
+    assert _costs(user=_user(active="STORE-A")) == {}
+    # A cross-store role sees the receipt.
+    assert _costs(user=_user(roles=("ADMIN",), active="STORE-A"))["P1"]["unit_price"] == 420.0
 
 
 def test_zero_and_missing_prices_skipped(monkeypatch):
-    pos = [
-        _po(
-            "PO1",
-            "PO-1",
-            "2026-06-12",
-            [
-                {"product_id": "P1", "unit_price": 0},
-                {"product_id": "P2"},  # no price
-            ],
-        ),
-    ]
-    monkeypatch.setattr(v, "get_purchase_order_repository", lambda: _PORepo(pos))
-    out = _call(vendor_id="V1", product_ids="P1,P2,P3", current_user=_user())
-    assert out["costs"] == {}
+    w = _World(monkeypatch)
+    w.po(1, 0, sent_at="2026-06-12T10:00:00")
+    w.pos.collection.insert_one(
+        {
+            "po_id": "PO2",
+            "po_number": "PO-2",
+            "vendor_id": "V1",
+            "delivery_store_id": "S1",
+            "status": "SENT",
+            "sent_at": "2026-06-13T10:00:00",
+            "items": [{"product_id": "P2"}],  # no price
+        }
+    )
+    assert _costs("P1,P2,P3") == {}
 
 
 def test_empty_inputs_and_no_repo(monkeypatch):
-    monkeypatch.setattr(v, "get_purchase_order_repository", lambda: _PORepo([]))
-    assert _call(vendor_id="", product_ids="P1", current_user=_user())["costs"] == {}
-    assert _call(vendor_id="V1", product_ids="", current_user=_user())["costs"] == {}
+    _World(monkeypatch)
+    assert asyncio.run(v.get_last_purchase_cost(vendor_id="", product_ids="P1", current_user=_user()))["costs"] == {}
+    assert asyncio.run(v.get_last_purchase_cost(vendor_id="V1", product_ids="", current_user=_user()))["costs"] == {}
     monkeypatch.setattr(v, "get_purchase_order_repository", lambda: None)
-    assert _call(vendor_id="V1", product_ids="P1", current_user=_user())["costs"] == {}
+    assert _costs() == {}
 
 
 def test_rbac_row_catalogued():
@@ -164,3 +369,80 @@ def test_the_catalogue_manager_gets_the_last_paid_price_for_a_buy_desk_draft():
     from api.services import rbac_policy
 
     assert rbac_policy.check_access("GET", "/api/v1/vendors/last-cost", ["CATALOG_MANAGER"])
+
+
+def _flood(w, n=101, pid="P9"):
+    """`n` accepted receipts of `pid`, each accepted after anything a test set
+    up before calling this. Their orders were sent in 2025, OLDER than every
+    order a test makes, so the order list never hides one of those."""
+    for i in range(n):
+        po = w.po(f"F{i}", 100, sent_at="2025-12-01T09:00:00", pid=pid)
+        w.receive(f"F{i}", po, [{"product_id": pid, "received_qty": 1, "accepted_qty": 1}], f"2026-05-01T10:{i // 60:02d}:{i % 60:02d}")
+
+
+def test_a_receipt_older_than_100_receipts_of_other_products_still_wins(monkeypatch):
+    # A frames distributor delivers to six shops: P1's last accepted receipt is
+    # older than 101 receipts of P9. PO-2 for P1 was sent later but has not
+    # arrived -- it is not a price paid, however busy the vendor is.
+    w = _World(monkeypatch)
+    po1 = w.po(1, 3100, sent_at="2026-01-02T10:00:00")
+    w.receive(1, po1, [{"product_id": "P1", "received_qty": 2, "accepted_qty": 2}], "2026-01-05T10:00:00")
+    _flood(w)
+    w.po(2, 3500, sent_at="2026-10-01T10:00:00")
+    hit = _costs()["P1"]
+    assert hit["unit_price"] == 3100.0
+    assert hit["po_number"] == "PO-1"
+    assert hit["date"] == "2026-01-05T10:00:00"
+
+
+def test_a_rejected_delivery_older_than_100_receipts_is_still_no_price(monkeypatch):
+    w = _World(monkeypatch)
+    po7 = w.po(7, 9999, sent_at="2026-01-02T10:00:00")
+    w.receive(7, po7, [{"product_id": "P1", "received_qty": 2, "accepted_qty": 0, "rejected_qty": 2}], "2026-01-05T10:00:00")
+    _flood(w)
+    assert _costs() == {}
+
+
+def test_a_receipt_line_price_older_than_100_receipts_is_kept(monkeypatch):
+    w = _World(monkeypatch)
+    po1 = w.po(1, 3100, sent_at="2026-01-02T10:00:00")
+    w.receive(1, po1, [{"product_id": "P1", "received_qty": 2, "accepted_qty": 2, "unit_price": 3050}], "2026-01-05T10:00:00")
+    _flood(w)
+    assert _costs()["P1"]["unit_price"] == 3050.0
+
+
+def test_a_busy_line_on_the_same_form_never_hides_another_lines_receipt(monkeypatch):
+    # The form asks for P1 and P2. P2 was last received in January; P1 came in
+    # 101 times since. P2's newer sent-not-arrived order is still no price paid.
+    w = _World(monkeypatch)
+    po2 = w.po(2, 500, sent_at="2026-01-02T10:00:00", pid="P2")
+    w.receive(2, po2, [{"product_id": "P2", "received_qty": 1, "accepted_qty": 1}], "2026-01-05T10:00:00")
+    _flood(w, pid="P1")
+    w.po(3, 900, sent_at="2026-10-01T10:00:00", pid="P2")
+    out = _costs("P1,P2")
+    assert out["P1"]["unit_price"] == 100.0
+    assert out["P2"]["unit_price"] == 500.0
+    assert out["P2"]["date"] == "2026-01-05T10:00:00"
+
+
+def test_an_order_older_than_100_orders_of_other_products_still_answers(monkeypatch):
+    # Nothing has arrived yet; P1's sent order is older than 101 sent orders
+    # of P9. It is still the last price agreed, not "no history".
+    w = _World(monkeypatch)
+    w.po(1, 3100, sent_at="2026-01-02T10:00:00")
+    for i in range(101):
+        w.po(f"F{i}", 100, sent_at=f"2026-05-01T10:{i // 60:02d}:{i % 60:02d}", pid="P9")
+    assert _costs()["P1"]["unit_price"] == 3100.0
+
+
+def test_a_busy_line_on_the_same_form_never_hides_another_lines_order(monkeypatch):
+    # Nothing has arrived. The form asks for P1 and P2; P1 was ordered 101 times
+    # after P2's one sent order, which is still P2's last price agreed.
+    w = _World(monkeypatch)
+    w.po(2, 500, sent_at="2026-01-02T10:00:00", pid="P2")
+    for i in range(101):
+        w.po(f"F{i}", 100, sent_at=f"2026-05-01T10:{i // 60:02d}:{i % 60:02d}")
+    out = _costs("P1,P2")
+    assert out["P1"]["unit_price"] == 100.0
+    assert out["P2"]["unit_price"] == 500.0
+    assert out["P2"]["po_number"] == "PO-2"

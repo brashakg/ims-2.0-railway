@@ -181,6 +181,7 @@ export function PurchaseOrdersSection() {
       {showCreatePO && (
         <PurchaseOrderForm
           suppliers={suppliers}
+          suppliersLoading={suppliersQ.isPending}
           existingPOCount={purchaseOrders.length}
           onClose={() => setShowCreatePO(false)}
           onCreated={(newPO) => {

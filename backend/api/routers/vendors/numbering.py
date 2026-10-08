@@ -7,6 +7,17 @@ from ._shared import Optional, _get_db, datetime, uuid
 # HELPER FUNCTIONS
 # ============================================================================
 
+# The number a receipt carries between its insert and its real number (audit
+# F28: the serial is minted only once the insert has won, so a refused
+# duplicate spends none).
+GRN_PLACEHOLDER_PREFIX = "PENDING/"
+
+
+def grn_number_pending(grn) -> bool:
+    """Is this receipt still on its placeholder? Such a receipt has no
+    document number yet, so nothing may copy its number anywhere."""
+    return str((grn or {}).get("grn_number") or "").startswith(GRN_PLACEHOLDER_PREFIX)
+
 
 def _counters_collection():
     """Shared ``counters`` collection for atomic purchase numbering. Fail-soft:
