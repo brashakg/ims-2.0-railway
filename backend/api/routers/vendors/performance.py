@@ -3,10 +3,12 @@
 from ._shared import (
     Depends,
     Query,
+    _AP_ROLES,
     _VENDOR_ROLES,
     _get_db,
     datetime,
     get_current_user,
+    holds_role,
     get_vendor_repository,
     ist_date_str,
     logger,
@@ -15,7 +17,6 @@ from ._shared import (
     router,
     timedelta,
 )
-from ...services.cost_mask import can_see_cost
 
 
 # ============================================================================
@@ -158,10 +159,12 @@ async def vendor_performance(
     # vendor with no GRNs in the window still reports what we've billed this
     # month. Fail-soft: any error -> 0.0 (honest, never fabricated). It sums
     # supplier bills, so it is the one payables rule's (owner ruling
-    # 2026-09-29): anyone else gets no mtd_spend key at all.
+    # 2026-09-29) -- the bill / ledger / payment reads' own role list
+    # (_AP_ROLES, the same check require_roles makes): anyone else gets no
+    # mtd_spend key at all.
     bills = (
         {"mtd_spend": _vendor_mtd_spend(db, vendor_id)}
-        if can_see_cost(current_user, "payables")
+        if holds_role(current_user, *_AP_ROLES)
         else {}
     )
     # QC pass-rate joins GRN QC (accepted/received) + workshop QC (job pass/fail)

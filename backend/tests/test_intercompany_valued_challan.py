@@ -923,3 +923,31 @@ def test_d7_finance_reconciliation_lists_the_callers_stores_only(db, monkeypatch
     mine = _run(budget.get_reconciliation(SOURCE_MANAGER))
     assert mine["pending_transfers"] == 1
     assert mine["transfers"][0]["items"][0]["unit_cost"] == pytest.approx(UNIT_COST)
+
+
+def test_d7_the_scorecard_spend_follows_the_payables_gate_role_by_role(app, db, monkeypatch):
+    """r5: the scorecard's month-to-date spend sums supplier bills, so it is
+    shown exactly to whom the bill read admits (_AP_ROLES via require_roles)
+    -- one list, not cost_mask's fallback."""
+    from api.routers.vendors import performance
+
+    monkeypatch.setattr(performance, "_get_db", lambda: db)
+    monkeypatch.setattr(performance, "get_vendor_repository", lambda: None)
+    route = next(
+        r for r in app.routes
+        if getattr(r, "path", None) == "/api/v1/vendors/{vendor_id}/bills" and "GET" in r.methods
+    )
+    gate = next(d.call for d in route.dependant.dependencies if d.name == "current_user")
+    shown = set()
+    for role in _ROLES:
+        user = _user(role)
+        try:
+            _run(gate(current_user=user))
+            admitted = True
+        except HTTPException:
+            admitted = False
+        has_spend = "mtd_spend" in _run(performance.vendor_performance("ENT-Z", 6, user))
+        assert has_spend is admitted, role
+        if has_spend:
+            shown.add(role)
+    assert shown == {"SUPERADMIN", "ADMIN", "ACCOUNTANT"}
