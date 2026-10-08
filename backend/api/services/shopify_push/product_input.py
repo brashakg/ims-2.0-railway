@@ -11,7 +11,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from agents.nexus_providers import _as_shopify_gid
 from ..ecom_category_map import ims_to_shopify_type
-from ..gtin import manufacturer_barcode_key, sanitise_gtin
+from ..gtin import (
+    MANUFACTURER_BARCODE_ATTRIBUTES,
+    fold_barcode_spellings,
+    manufacturer_barcode_key,
+    sanitise_gtin,
+)
 from ..shopify_tag_gen import generate_attribute_tags, merge_tag_lists
 
 from ._shared import logger
@@ -158,15 +163,12 @@ mutation metafieldsDelete($metafields: [MetafieldIdentifierInput!]!) {
 
 
 def _manufacturer_codes(attrs: Dict[str, Any]) -> Dict[str, Any]:
-    """{'gtin' / 'upc': the raw value} for each manufacturer-barcode attribute
-    the product holds, its key matched in any letter case ('GTIN', 'Upc'); the
-    exact key wins over another spelling. Both metafield builders read it."""
-    codes: Dict[str, Any] = {}
-    for k, v in attrs.items():
-        key = manufacturer_barcode_key(k)
-        if key and (k == key or key not in codes):
-            codes[key] = v
-    return codes
+    """{'gtin' / 'upc': the value} for each manufacturer-barcode attribute the
+    product holds, its key in any letter case ('GTIN', 'Upc') read by THE fold
+    every write door stores with (gtin.fold_barcode_spellings), so the ims.*
+    metafields carry what the next save stores. Both metafield builders read it."""
+    folded = fold_barcode_spellings(attrs)
+    return {k: folded[k] for k in MANUFACTURER_BARCODE_ATTRIBUTES if k in folded}
 
 
 def build_removed_metafields(product: Dict[str, Any]) -> List[Dict[str, Any]]:

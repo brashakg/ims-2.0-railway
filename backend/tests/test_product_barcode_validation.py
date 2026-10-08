@@ -1016,3 +1016,13 @@ class TestBarcodeKeysInAnyLetterCase:
         assert build_removed_metafields({"attributes": {"GTIN": ""}}) == [
             {"namespace": "ims", "key": "gtin"}
         ]
+        # The push reads THE fold the next save stores with: a junk first
+        # spelling is skipped and the next one is the code (set, or removed).
+        from api.services.product_master import _guard_gtin_attribute
+
+        junk_first = {"GTIN": _INTERNAL, "Gtin": _VALID_A}
+        assert _guard_gtin_attribute(junk_first, strict=True) == {"gtin": _VALID_A}
+        assert mf(junk_first) == [("gtin", _VALID_A)]
+        assert build_removed_metafields({"attributes": {"GTIN": _INTERNAL, "Gtin": ""}}) == [
+            {"namespace": "ims", "key": "gtin"}
+        ]
