@@ -34,6 +34,8 @@ interface LookupResult {
   store_id?: string; items: LookupItem[];
   /** The sale guard's own item_type lists (orders/stock._takes_serialized_stock). */
   not_counted_item_types?: string[]; lens_grid_item_types?: string[];
+  /** Rows the search names with no cap; truncated when the caps cut some. */
+  total?: number; truncated?: boolean;
 }
 
 const rupees = (n?: number) => (n == null ? '-' : `₹${n.toLocaleString('en-IN')}`);
@@ -106,6 +108,13 @@ export default function StockLookupPage() {
       ) : q && data && items.length === 0 ? (
         <p className="text-sm text-gray-600">No product matches "{q}".</p>
       ) : items.length > 0 ? (
+        <>
+        {data?.truncated && (
+          <p className="text-sm text-amber-800 mb-2">
+            Showing {items.length.toLocaleString('en-IN')} of {(data.total ?? 0).toLocaleString('en-IN')} powers
+            {' '}- scan the box or type the power to narrow
+          </p>
+        )}
         <div className="overflow-x-auto border border-gray-200 rounded-lg">
           <table className="min-w-full text-sm">
             <thead className="bg-gray-50 text-left text-gray-600">
@@ -168,6 +177,7 @@ export default function StockLookupPage() {
             </tbody>
           </table>
         </div>
+        </>
       ) : null}
     </div>
   );

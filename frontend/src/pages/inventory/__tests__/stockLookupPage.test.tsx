@@ -165,6 +165,18 @@ describe('Stock lookup screen', () => {
     expect(shopCells('Frame P')).toEqual(cells);
   });
 
+  // Round 7: the server caps the rows (50 hits, 200 per family), so a big
+  // contact-lens model is cut; the screen says so instead of looking whole.
+  const CUT = 'Showing 1 of 300 powers - scan the box or type the power to narrow';
+  it('says when the caps cut the list, and how big it is', async () => {
+    await search({ items: [product('P', 'CONTACT_LENS')], total: 300, truncated: true }, 'Frame P');
+    expect(screen.getByText(CUT)).toBeTruthy();
+  });
+  it('says nothing about a cut when the list is whole', async () => {
+    await search({ items: [product('P', 'CONTACT_LENS')], total: 1, truncated: false }, 'Frame P');
+    expect(screen.queryByText(/^Showing/)).toBeNull();
+  });
+
   it.each(STOCK_LOOKUP_ROLES.map((r) => [r]))(
     'sends a %s to the Power Grid only if its route gate admits them',
     async (role) => {
