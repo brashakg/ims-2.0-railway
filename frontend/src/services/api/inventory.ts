@@ -886,11 +886,16 @@ export const vendorsApi = {
     po_id?: string;
     vendor_invoice_no?: string;
     vendor_invoice_date?: string;
-    // F9 — Delivery-Challan subtype + fields.
-    grn_subtype?: 'STANDARD' | 'DELIVERY_CHALLAN';
+    // F9 — Delivery-Challan subtype + fields. D14 — NO_PO: bought from a local
+    // dealer without a PO (supplier or dealer_name, a cost per line, bill photo).
+    grn_subtype?: 'STANDARD' | 'DELIVERY_CHALLAN' | 'NO_PO';
     dc_number?: string;
     dc_date?: string;
     vendor_id?: string;
+    dealer_name?: string;
+    attachment_file_id?: string;
+    attachment_filename?: string;
+    attachment_mime?: string;
     items: Array<{
       po_item_id?: string;
       product_id: string;
@@ -901,6 +906,9 @@ export const vendorsApi = {
       // Ruling 14: the receiver's per-line tally tick. A PO-backed receipt is
       // refused (422 LINES_NOT_TALLIED) until every line carries it.
       tallied?: boolean;
+      // NO_PO only: the cost paid per unit (required there) and the expiry.
+      unit_price?: number;
+      expiry_date?: string;
     }>;
     notes?: string;
   }) => {

@@ -109,6 +109,12 @@ def test_refused_duplicate_challan_takes_no_receipt_number(monkeypatch):
             return _C()
 
     monkeypatch.setattr(v, "_get_db", lambda: _Db())
+    # A receipt with no PO must name a supplier on file (a challan included).
+    monkeypatch.setattr(
+        v,
+        "get_vendor_repository",
+        lambda: type("_V", (), {"find_by_id": lambda self, vid: {"vendor_id": vid}})(),
+    )
     dc = GRNCreate(
         po_id=None,
         vendor_id="V1",
@@ -181,16 +187,18 @@ def test_two_identical_receipts_at_once_leave_no_gap(monkeypatch):
     # Hold both requests together just after the duplicate pre-check, so both
     # pass it before either inserts (the re-probe after a refused insert runs
     # with exclude_grn_id and is not held).
-    real_check = v._find_duplicate_standard_grn
+    real_check = v._find_duplicate_receipt
     barrier = threading.Barrier(2, timeout=10)
 
-    def _held(grn_repo, po_id, vendor_id, invoice_no, exclude_grn_id=None):
-        dup = real_check(grn_repo, po_id, vendor_id, invoice_no, exclude_grn_id=exclude_grn_id)
+    def _held(grn_repo, grn, vendor_id, photo_sha=None, exclude_grn_id=None):
+        dup = real_check(
+            grn_repo, grn, vendor_id, photo_sha=photo_sha, exclude_grn_id=exclude_grn_id
+        )
         if exclude_grn_id is None:
             barrier.wait()
         return dup
 
-    monkeypatch.setattr(v, "_find_duplicate_standard_grn", _held)
+    monkeypatch.setattr(v, "_find_duplicate_receipt", _held)
 
     results, errors = [], []
 
@@ -212,7 +220,7 @@ def test_two_identical_receipts_at_once_leave_no_gap(monkeypatch):
     (saved,) = repo.docs
     assert saved["grn_number"] == results[0]["grn_number"]  # stored as issued
 
-    monkeypatch.setattr(v, "_find_duplicate_standard_grn", real_check)  # race over
+    monkeypatch.setattr(v, "_find_duplicate_receipt", real_check)  # race over
     nxt = _create(_body(store, invoice_no="JOT/26-27/0466"))
     assert nxt["grn_number"].endswith("/0002")  # 0001, 0002: no gap
 

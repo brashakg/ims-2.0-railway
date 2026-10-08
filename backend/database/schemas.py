@@ -903,7 +903,23 @@ INDEXES = {
                 "status": {"$in": ["PENDING", "PARTIALLY_ACCEPTED", "ACCEPTED"]},
             },
             "name": "uniq_std_vendor_invoice_store",
-        }
+        },
+        # D14: one live "Bought without PO" receipt per bill photo per shop,
+        # keyed on the photo's sha256 -- a double-pressed post re-sends the
+        # same file, a retry after a reload uploads the same bytes under a new
+        # file id, and a walk-in dealer has no vendor_id for the index above
+        # to key on. The atomic twin of vendors.grn._find_duplicate_no_po_grn.
+        # A VOID frees it.
+        {
+            "keys": [("store_id", 1), ("attachment_sha256", 1)],
+            "unique": True,
+            "partialFilterExpression": {
+                "grn_subtype": "NO_PO",
+                "attachment_sha256": {"$type": "string"},
+                "status": {"$in": ["PENDING", "PARTIALLY_ACCEPTED", "ACCEPTED"]},
+            },
+            "name": "uniq_nopo_bill_hash",
+        },
     ],
     "tasks": [
         {"keys": [("task_number", 1)], "unique": True},
@@ -2246,6 +2262,14 @@ COLLECTIONS.update({
         "indexes": [
             {"keys": [("bill_id", 1)], "unique": True, "sparse": True},
             {"keys": [("vendor_id", 1), ("bill_number", 1)]},
+            # The same-bill rule's atomic twin (connection.ensure_indexes
+            # builds the same): year + folded number (+ walk-in dealer).
+            {
+                "keys": [("vendor_id", 1), ("bill_number_key", 1)],
+                "unique": True,
+                "partialFilterExpression": {"bill_number_key": {"$type": "string"}},
+                "name": "uniq_vendor_bill_number_key",
+            },
             {"keys": [("po_id", 1)], "sparse": True},
             {"keys": [("grn_id", 1)], "sparse": True},
             {"keys": [("status", 1)]},

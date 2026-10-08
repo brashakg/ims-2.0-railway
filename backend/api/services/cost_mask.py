@@ -59,6 +59,14 @@ PURCHASE_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
 # the item, quantity and reason only (mask_vendor_return / mask_debit_note).
 # Their read gates ARE this tuple.
 RETURN_READERS = (*PURCHASE_ROLES, "WORKSHOP_STAFF")
+# Who receives goods into stock -- log, accept, express-receive, void or
+# escalate a receipt, its bill-photo upload and the receiving screen. Owner
+# ruling 2026-09-28: RECEIVING IS MANAGERS ONLY; the accountant keeps bills,
+# payments and the receipt reads. Defined ONCE, here: the receiving gates
+# (routers/vendors/_shared._RECEIVE_ROLES) ARE this tuple, their rbac_policy
+# rows are rbac_policy._core.RECEIVE, and the frontend RECEIVING_MANAGER_ROLES
+# is pinned to it (receivingRoles.test.ts).
+RECEIVE_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER")
 # context -> the roles it admits on top of COST_VISIBLE_ROLES.
 _CONTEXT_ROLES = {
     "purchase": set(PURCHASE_ROLES),
@@ -120,6 +128,30 @@ def mask_cost_list(docs: List[dict], user: dict, context: str = "default") -> Li
     if can_see_cost(user, context):
         return docs
     return [mask_cost(d, user, context) if isinstance(d, dict) else d for d in (docs or [])]
+
+
+# A goods receipt's line carries the price paid as `unit_price` (a "Bought
+# without PO" receipt records it): on a receipt line that IS the cost. Not in
+# _COST_FIELDS because an order line's unit_price is the selling price.
+_RECEIPT_LINE_COST_FIELDS = _ALL_MASKED | {"unit_price"}
+
+
+def mask_receipt(grn: dict, user: dict) -> dict:
+    """The one cost rule on a goods receipt: unless the caller may see cost,
+    a copy of the receipt without its cost fields and without the price paid
+    on each of its lines. Never edits `grn` (see mask_cost). Every read that
+    returns a receipt -- GET /vendors/grn, GET /vendors/grn/{id}, the barcode
+    trace -- goes through this."""
+    if not isinstance(grn, dict) or can_see_cost(user):
+        return grn
+    out = mask_cost(grn, user)
+    out["items"] = [
+        {k: v for k, v in it.items() if k not in _RECEIPT_LINE_COST_FIELDS}
+        if isinstance(it, dict)
+        else it
+        for it in grn.get("items") or []
+    ]
+    return out
 
 
 def mask_fields(doc: Dict, user: dict, context: str = "default") -> Dict:

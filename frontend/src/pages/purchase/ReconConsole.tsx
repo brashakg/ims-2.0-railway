@@ -532,10 +532,10 @@ function QueueRow({
                 PO {invoice.po_number ?? invoice.po_id}
               </Link>
             )}
+            {/* Plain text: the receiving screen is managers only (owner
+                ruling 2026-09-28), so it is no link for the accountant. */}
             {(invoice.grn_number || invoice.grn_id) && (
-              <Link to="/purchase/grn" className="text-blue-600 hover:underline">
-                GRN {invoice.grn_number ?? invoice.grn_id}
-              </Link>
+              <span className="text-gray-700">GRN {invoice.grn_number ?? invoice.grn_id}</span>
             )}
             {dcCount > 0 && (
               <Link to="/purchase/invoices" className="text-blue-600 hover:underline">

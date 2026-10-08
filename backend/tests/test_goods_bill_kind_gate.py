@@ -270,9 +270,15 @@ class TestHeaderBillMustDeclareItsKind:
         assert r.status_code == 422, r.text
         d = r.json()["detail"]
         assert d["code"] == "GRN_LINK_REQUIRED"
-        # The way out must be one the screens can actually walk now.
+        # The way out must be one the screens can actually walk now -- and the
+        # booker (ADMIN / ACCOUNTANT) may not receive, so it names who does.
         assert "Delivery Challan" in d["message"]
         assert "Goods Receipt" in d["message"]
+        assert "store manager" in d["message"]
+        # D14: a walk-in buy goes on a 'Bought without PO' receipt (no
+        # credit) -- never told to pose as a challan, whose bill claims it.
+        assert "Bought without PO" in d["message"]
+        assert "log them as a Delivery Challan" not in d["message"]
         assert _bills(db) == []
 
     def test_a_declared_services_bill_books_exactly_as_before(self):
@@ -580,6 +586,9 @@ class TestBothDoorsEnforceTheSameRule:
         for msg in (d1["message"], d2["message"]):
             assert "Delivery Challan" in msg
             assert "Goods Receipt" in msg
+            assert "store manager" in msg
+            assert "Bought without PO" in msg
+        assert d1["message"].endswith(d2["message"].split("final. ", 1)[1])
         assert _bills(db) == []
 
     def test_missing_declaration_refuses_identically_on_both_doors(self):

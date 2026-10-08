@@ -5,6 +5,7 @@ from ._shared import (
     Optional,
     Query,
     _RECEIVABLE_PO_STATUSES,
+    _RECEIVE_ROLES,
     _VENDOR_ROLES,
     _pm,
     can_access_store_scoped,
@@ -27,7 +28,7 @@ from .grn_accept_lock import _GRN_TERMINAL_ACCEPT_STATUSES
 async def goods_receipt_cockpit(
     vendor_id: str = Query(..., description="Vendor to receive against"),
     store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
+    current_user: dict = Depends(require_roles(*_RECEIVE_ROLES)),
 ):
     """Vendor-first goods-receipt cockpit (Purchase P1 / S2).
 

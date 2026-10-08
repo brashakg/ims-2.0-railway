@@ -1739,7 +1739,7 @@ def test_unhiding_a_cost_field_moves_every_product_read(
 # code gate is the object its require_roles resolves to (section 20), never
 # its spelling.
 def test_every_purchase_route_row_is_the_one_list(app):
-    from api.services.rbac_policy._core import PURCHASE, RETURN_READERS
+    from api.services.rbac_policy._core import PURCHASE, RECEIVE, RETURN_READERS
 
     want = {}
     for route in app.routes:
@@ -1748,6 +1748,8 @@ def test_every_purchase_route_row_is_the_one_list(app):
             gate = PURCHASE
         elif const is _RETURN_READERS:
             gate = RETURN_READERS
+        elif const is RECEIVE_ROLES:
+            gate = RECEIVE
         else:
             continue
         for method in route.methods - {"HEAD", "OPTIONS"}:
@@ -1760,6 +1762,8 @@ def test_every_purchase_route_row_is_the_one_list(app):
         ("GET", "/api/v1/vendor-returns/{return_id}"),
         ("GET", "/api/v1/rtv-debit-notes/{debit_note_id}/print"),
         ("POST", "/api/v1/rtv-debit-notes/issue"),
+        ("POST", "/api/v1/vendors/grn"),
+        ("POST", "/api/v1/vendors/grn/{grn_id}/accept"),
     } <= set(want)
     wrong = {
         key: rbac.policy_for(*key)["allowed"]
@@ -1794,7 +1798,9 @@ import importlib  # noqa: E402
 import pkgutil  # noqa: E402
 import textwrap  # noqa: E402
 
-_GATE_CONSTANTS = (AP_ROLES, PURCHASE_ROLES, _RETURN_READERS)
+from api.services.cost_mask import RECEIVE_ROLES  # noqa: E402
+
+_GATE_CONSTANTS = (AP_ROLES, PURCHASE_ROLES, _RETURN_READERS, RECEIVE_ROLES)
 _MONEY_ROUTERS = (
     "vendors", "finance", "purchase_invoices", "purchase_recon",
     "rtv_debit_notes", "vendor_returns", "vendor_rma", "vendor_rebates",

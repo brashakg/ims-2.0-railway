@@ -219,6 +219,21 @@ describe('GoodsReceiptCockpit two-step receive - ruling 14 (the tally)', () => {
     expect(payload.items[1]).toMatchObject({ product_id: 'prod-b', received_qty: 20, rejected_qty: 2 });
   });
 
+  it('sends a walk-in buy to "Bought without PO", not to a challan (D14)', async () => {
+    render(
+      <MemoryRouter initialEntries={['/purchase/receive']}>
+        <GoodsReceiptCockpit />
+      </MemoryRouter>,
+    );
+    // The landing's way out names the walk-in mode...
+    const door = await screen.findByRole('button', { name: /Bought without PO/i }, { timeout: 5000 });
+    fireEvent.click(door);
+    // ...and the note it opens sends that buy to the classic screen's mode
+    // (no GST credit), not only challan goods.
+    const link = await screen.findByRole('link', { name: /classic GRN screen/i });
+    expect(link.parentElement?.textContent).toMatch(/Bought without PO/);
+  });
+
   it("F26: after receiving, the labels dialog lists THIS receipt's units - no fake success", async () => {
     await openTwoStepForm();
     fireEvent.click(screen.getByRole('checkbox', { name: /tally line 1/i }));

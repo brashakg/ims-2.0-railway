@@ -14,6 +14,9 @@ Pure, DB-free helpers for the purchase-side GST:
                           -> ITC AT RISK (chase the vendor; may need reversal)
       - only_in_2b     -> supplier reported it but you have no bill booked
                           -> missing purchase entry (book it, then claim)
+      - booked_no_credit -> supplier reported it and the bill IS booked, but
+                          it claims no credit (bought without a PO, D14, or
+                          17(5)-blocked): nothing to claim, nothing to book
 
     The sum identity (P0 #1): every rupee booked must land somewhere -- the
     return now reports itc_safe + itc_in_mismatch + itc_at_risk == total
@@ -145,8 +148,12 @@ def reconcile_gstr2b(
 ) -> dict:
     """Match booked vendor bills against GSTR-2B rows. Returns buckets + summary.
 
-    book_rows:   [{gstin, invoice_no, taxable, tax, bill_id, vendor_name, bill_date}]
+    book_rows:   [{gstin, invoice_no, taxable, tax, bill_id, vendor_name,
+                   bill_date, claims_credit (default True)}]
     gstr2b_rows: [{gstin, invoice_no, taxable, tax}]
+
+    A booked bill that claims no credit counts in no ITC total; it only
+    answers its own 2B row (booked_no_credit), which is then not "only in 2B".
 
     Sum identity (P0 #1): total booked ITC == itc_safe + itc_in_mismatch +
     itc_at_risk. The pre-fix code dropped mismatched book_tax from BOTH the
@@ -176,7 +183,7 @@ def reconcile_gstr2b(
             "tax": _f(r.get("tax")),
         }
 
-    matched, mismatch, only_books = [], [], []
+    matched, mismatch, only_books, no_credit = [], [], [], []
     seen_2b = set()
     itc_safe = 0.0
     itc_in_mismatch = 0.0
@@ -188,6 +195,21 @@ def reconcile_gstr2b(
             continue
         key = (_norm_gstin(row.get("gstin")), _norm_inv(row.get("invoice_no")))
         book_tax = _f(row.get("tax"))
+        if row.get("claims_credit") is False:
+            if key in b2:
+                seen_2b.add(key)
+                no_credit.append(
+                    {
+                        "gstin": row.get("gstin"),
+                        "invoice_no": row.get("invoice_no"),
+                        "vendor_name": row.get("vendor_name"),
+                        "bill_id": row.get("bill_id"),
+                        "bill_date": row.get("bill_date"),
+                        "book_tax": book_tax,
+                        "portal_tax": b2[key]["tax"],
+                    }
+                )
+            continue
         total_book_tax += book_tax
         bill_date = row.get("bill_date")
         days_old = None
@@ -246,6 +268,7 @@ def reconcile_gstr2b(
             "mismatch": len(mismatch),
             "only_in_books": len(only_books),
             "only_in_2b": len(only_2b),
+            "booked_no_credit": len(no_credit),
             "itc_safe_to_claim": round(itc_safe, 2),
             "itc_in_mismatch": round(itc_in_mismatch, 2),
             "itc_at_risk": round(itc_at_risk, 2),
@@ -255,4 +278,5 @@ def reconcile_gstr2b(
         "mismatch": mismatch,
         "only_in_books": sorted(only_books, key=lambda x: -(x.get("book_tax") or 0)),
         "only_in_2b": sorted(only_2b, key=lambda x: -(x.get("tax") or 0)),
+        "booked_no_credit": no_credit,
     }

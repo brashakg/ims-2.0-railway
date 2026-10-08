@@ -14,7 +14,7 @@ import { getStatusBadge } from './statusBadge';
 import { PurchaseStatusChip } from '../../components/purchase/PurchaseStatusChip';
 import { POLifecycleDrawer } from '../../components/purchase/POLifecycleDrawer';
 import { useAuth } from '../../context/AuthContext';
-import { RECEIVABLE_PO_STATUSES } from './purchaseTypes';
+import { RECEIVABLE_PO_STATUSES, RECEIVING_MANAGER_ROLES } from './purchaseTypes';
 import type { PurchaseOrder } from './purchaseTypes';
 
 interface PurchaseTableProps {
@@ -77,10 +77,9 @@ function downloadPO(po: PurchaseOrder) {
 export function PurchaseTable({ purchaseOrders, onViewPO }: PurchaseTableProps) {
   const navigate = useNavigate();
   const { hasRole } = useAuth();
-  // Mirrors the /purchase/receive ProtectedRoute gate in App.tsx so a role
-  // is never handed a button that lands on /unauthorized. Phase 2: ACCOUNTANT
-  // added — express receive is for ALL receiving roles (backend gate matches).
-  const canReceive = hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']);
+  // Mirrors the /purchase/receive route gate so a role is never handed a
+  // button that lands on /unauthorized (receiving is managers only).
+  const canReceive = hasRole([...RECEIVING_MANAGER_ROLES]);
   // Phase 2: clicking the PO number opens the lifecycle drawer (timeline +
   // GRNs + invoices + one derived next-step action).
   const [timelinePO, setTimelinePO] = useState<PurchaseOrder | null>(null);

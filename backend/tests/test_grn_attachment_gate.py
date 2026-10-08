@@ -90,7 +90,15 @@ class _FakeUpload:
         return self._content
 
 
+class _KnownVendors:
+    """The supplier master: a receipt with no PO must name one on file."""
+
+    def find_by_id(self, vid):
+        return {"vendor_id": vid} if vid == "V1" else None
+
+
 def _patch_grn(mp, grn_repo, po_repo=None):
+    mp.setattr(v, "get_vendor_repository", lambda: _KnownVendors())
     mp.setattr(v, "get_grn_repository", lambda: grn_repo)
     mp.setattr(v, "get_purchase_order_repository", lambda: po_repo)
     mp.setattr(v, "generate_grn_number", lambda store: "GRN-TEST-1")
@@ -331,3 +339,22 @@ def test_download_doc_cross_store_is_404(monkeypatch):
             )
         )
     assert exc.value.status_code == 404
+
+
+def test_delivery_challan_names_a_supplier_on_file(monkeypatch):
+    """A challan with no PO names its supplier itself: a vendor_id no supplier
+    record holds ('V-GHOST') put stock on the shelf under nobody, and its bill
+    could never be booked (404 for that vendor, mismatch for any other)."""
+    grn_repo = _FakeGRNRepo()
+    _patch_grn(monkeypatch, grn_repo, _FakePORepo())
+    grn = GRNCreate(
+        grn_subtype="DELIVERY_CHALLAN",
+        vendor_id="V-GHOST",
+        dc_number="DC-99",
+        dc_date="2026-06-16",
+        items=_std_items(),
+    )
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(create_grn(grn, current_user=_user()))
+    assert exc.value.status_code == 422
+    assert grn_repo.created is None

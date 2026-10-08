@@ -35,6 +35,9 @@ export interface ReconcileSummary {
   mismatch: number;
   only_in_books: number;
   only_in_2b: number;
+  /** Bills the supplier filed that are booked but claim no credit (bought
+   *  without a PO, or 17(5)-blocked) -- they answer their 2B row. */
+  booked_no_credit?: number;
   itc_safe_to_claim: number;
   itc_in_mismatch: number;
   itc_at_risk: number;
@@ -48,9 +51,10 @@ export interface ReconcileResult {
   mismatch: Array<Record<string, unknown>>;
   only_in_books: Array<Record<string, unknown>>;
   only_in_2b: Array<Record<string, unknown>>;
+  booked_no_credit?: Array<Record<string, unknown>>;
 }
 
-export type ItcBucket = 'matched' | 'mismatch' | 'only_in_books' | 'only_in_2b';
+export type ItcBucket = 'matched' | 'mismatch' | 'only_in_books' | 'only_in_2b' | 'booked_no_credit';
 
 export const itcApi = {
   register: async (period?: string) => {

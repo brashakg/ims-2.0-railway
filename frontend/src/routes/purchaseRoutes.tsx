@@ -9,6 +9,7 @@
 import { lazy } from 'react';
 import { Route, Navigate, useSearchParams } from 'react-router-dom';
 import { ProtectedRoute } from '../components/layout/ProtectedRoute';
+import { RECEIVING_MANAGER_ROLES } from '../pages/purchase/purchaseTypes';
 import type { UserRole } from '../types';
 
 const PurchaseLayout = lazy(() => import('../pages/purchase/PurchaseLayout').then(m => ({ default: m.PurchaseLayout })));
@@ -136,20 +137,20 @@ export const purchaseRoutes = (
     <Route
       path="purchase/grn"
       element={
-        <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
+        <ProtectedRoute allowedRoles={[...RECEIVING_MANAGER_ROLES]}>
           <GoodsReceiptNote />
         </ProtectedRoute>
       }
     />
 
     {/* Procurement Phase 2: Deliveries inbox + guided express
-        receive (mandatory attachment gate). ALL receiving roles —
-        mirrors the backend /vendors/grn* gate (owner decision:
-        express receive for all receiving staff). */}
+        receive (mandatory attachment gate). Managers only (owner
+        ruling 2026-09-28: receiving stays with them) — mirrors the
+        backend /vendors/grn* gate. */}
     <Route
       path="purchase/receive"
       element={
-        <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
+        <ProtectedRoute allowedRoles={[...RECEIVING_MANAGER_ROLES]}>
           <GoodsReceiptCockpit />
         </ProtectedRoute>
       }

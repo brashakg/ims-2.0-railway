@@ -14,6 +14,7 @@ import {
   INVENTORY_MANAGE_ROLES,
   POWER_GRID_ROLES,
 } from '../../pages/inventory/inventoryRoles';
+import { RECEIVING_MANAGER_ROLES } from '../../pages/purchase/purchaseTypes';
 import type { IconName } from './Icon';
 import type { NavBadgeKey } from './NavBadge';
 import type { UserRole } from '../../types';
@@ -116,9 +117,9 @@ export const NAV_GROUPS: NavGroup[] = [
       { id: 'buy-desk', label: 'Buy Desk', to: '/catalog/buy-desk', icon: 'cart', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
       // Receive Goods stays in the sidebar: it is the daily-work door for
       // receiving staff (the Purchase page's per-PO "Receive" button lands on
-      // the same screen with the PO prefilled). ACCOUNTANT added to match the
-      // /purchase/receive route gate in App.tsx.
-      { id: 'grn-cockpit', label: 'Receive Goods', to: '/purchase/receive', icon: 'truck', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
+      // the same screen with the PO prefilled). Same list as the
+      // /purchase/receive route gate: managers only.
+      { id: 'grn-cockpit', label: 'Receive Goods', to: '/purchase/receive', icon: 'truck', requireRoles: [...RECEIVING_MANAGER_ROLES] },
       // De-dup (owner 2026-07-05): managers/admins reach Vendor Returns via
       // Purchase -> Vendor Returns tab; the sidebar shortcut stays ONLY for
       // WORKSHOP_STAFF, who cannot open /purchase at all.

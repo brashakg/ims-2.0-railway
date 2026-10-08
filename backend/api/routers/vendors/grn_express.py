@@ -3,7 +3,7 @@
 from ._shared import (
     Depends,
     HTTPException,
-    _VENDOR_ROLES,
+    _RECEIVE_ROLES,
     get_grn_repository,
     logger,
     require_roles,
@@ -13,17 +13,16 @@ from .models import (
     ExpressGRNCreate,
     GRNCreate,
     GRNItemCreate,
-    GRN_SUBTYPE_DC,
     GRN_SUBTYPE_STANDARD,
 )
 from .grn_create import _create_grn_impl
-from .grn_accept import _accept_grn_impl
+from .grn_accept import _accept_grn_impl, _raise_book_bill_task
 
 
 @router.post("/grn/express", status_code=201)
 async def express_receive_grn(
     body: ExpressGRNCreate,
-    current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
+    current_user: dict = Depends(require_roles(*_RECEIVE_ROLES)),
 ):
     """One-shot receiving chain for a CLEAN delivery (procurement Phase 2).
 
@@ -50,16 +49,18 @@ async def express_receive_grn(
     void it -- never a silently stranded PENDING GRN.
     """
     # 1) STANDARD-only: a Delivery Challan has no vendor invoice at receipt
-    # time, so there is nothing to draft/match -- express cannot apply.
-    if body.grn_subtype == GRN_SUBTYPE_DC:
+    # time, so there is nothing to draft/match -- express cannot apply; goods
+    # bought without a PO have no order to receive against. An allow-list, so
+    # a receipt kind added later is refused here, never posted as STANDARD.
+    if body.grn_subtype != GRN_SUBTYPE_STANDARD:
         raise HTTPException(
             status_code=400,
             detail={
                 "code": "EXPRESS_STANDARD_ONLY",
                 "message": (
                     "Express receive applies to STANDARD PO-backed receipts "
-                    "only. Log a Delivery Challan through the normal "
-                    "receiving screen."
+                    "only. Log a Delivery Challan, or goods bought without a "
+                    "PO, through the normal receiving screen."
                 ),
             },
         )
@@ -225,50 +226,30 @@ async def express_receive_grn(
     # pattern; fail-soft -- a task failure never rolls back the receive).
     accountant_task_id = None
     try:
-        from ...services.task_triggers import create_system_task
-        from ...dependencies import get_task_repository
-
         grn_doc = None
         try:
             _repo = get_grn_repository()
             grn_doc = _repo.find_by_id(grn_id) if _repo is not None else None
         except Exception:  # noqa: BLE001
             grn_doc = None
-        vendor_label = (
-            (draft or {}).get("vendor_name")
-            or (grn_doc or {}).get("vendor_name")
-            or (grn_doc or {}).get("vendor_id")
-            or "vendor"
-        )
-        book_link = f"/purchase/invoices/book?grn_id={grn_id}"
-        task = create_system_task(
-            get_task_repository(),
-            title=f"Book purchase invoice for GRN {grn_number} ({vendor_label})",
-            description=(
-                f"Express receive completed for goods receipt {grn_number} "
-                f"(vendor invoice {body.vendor_invoice_no}). Review the draft "
-                f"and book the purchase invoice: {book_link}."
-                + (
-                    f" 3-way match preview: {match_preview['match_status']} "
-                    f"({match_preview['exception_count']} exception(s))."
-                    if match_preview
-                    else ""
-                )
+        task = _raise_book_bill_task(
+            grn_id,
+            (grn_doc or {}).get("store_id"),
+            grn_number,
+            "express receive",
+            "Express receive completed. Review the draft and book the "
+            "purchase invoice."
+            + (
+                f" 3-way match preview: {match_preview['match_status']} "
+                f"({match_preview['exception_count']} exception(s))."
+                if match_preview
+                else ""
             ),
-            priority="P2",
-            category="Purchase",
-            store_id=(grn_doc or {}).get("store_id"),
-            dedupe_ref=f"express_invoice:{grn_id}",
-            assigned_to="ACCOUNTANT",
-            extra={
-                "link": book_link,
-                "payload": {
-                    "grn_id": grn_id,
-                    "grn_number": grn_number,
-                    "po_id": body.po_id,
-                    "match_status": (match_preview or {}).get("match_status"),
-                    "exception_count": (match_preview or {}).get("exception_count"),
-                },
+            {
+                "grn_number": grn_number,
+                "po_id": body.po_id,
+                "match_status": (match_preview or {}).get("match_status"),
+                "exception_count": (match_preview or {}).get("exception_count"),
             },
         )
         if task:

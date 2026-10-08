@@ -1,5 +1,6 @@
 """INV-12 barcode lifecycle trace."""
 
+from ...services import cost_mask
 from ._shared import (
     Depends,
     Dict,
@@ -68,7 +69,11 @@ async def barcode_lifecycle_trace(
         # 1. Stock unit
         su = db.get_collection("stock_units").find_one({"barcode": barcode})
         if su:
-            result["stock_unit"] = _scrub(dict(su))
+            # Every signed-in role reads this route: the unit's cost goes
+            # through the one cost rule.
+            result["stock_unit"] = cost_mask.mask_cost(
+                _scrub(dict(su)), current_user, "product"
+            )
             stock_id = str(su.get("stock_id") or su.get("stock_unit_id") or su.get("_id") or "")
 
             # 2. Purchase / GRN origin
@@ -81,7 +86,11 @@ async def barcode_lifecycle_trace(
                     # Alternate collection name used by GRN repo
                     grn = db.get_collection("goods_receipt_notes").find_one({"grn_id": grn_id})
                 if grn:
-                    result["purchase"] = [_scrub(dict(grn))]
+                    # The price paid per line (a "Bought without PO" receipt
+                    # records it) is the same cost, under the same rule.
+                    result["purchase"] = [
+                        cost_mask.mask_receipt(_scrub(dict(grn)), current_user)
+                    ]
 
             # 3. Audit trail (stock_audit rows keyed on this unit's id)
             if stock_id:

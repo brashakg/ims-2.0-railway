@@ -23,6 +23,8 @@ GST state-code list (used by the e-invoice / e-way-bill systems).
 import re
 from typing import Optional
 
+from .ap_engine import GRN_SUBTYPE_NO_PO
+
 # GST state codes (2-digit) -> state / UT name. Source: GSTN state-code master.
 INDIAN_STATE_CODES = {
     "01": "Jammu and Kashmir",
@@ -207,14 +209,20 @@ def has_valid_gstin(value) -> bool:
     return validate_gstin(value, verify_checksum=False)
 
 
-def itc_claimable(supplier_gstin, reverse_charge=False, user_allows=True) -> bool:
+def itc_claimable(
+    supplier_gstin, reverse_charge=False, user_allows=True, receipt=None
+) -> bool:
     """THE answer to 'is this bill's input credit claimable'. The user did not
-    switch credit off AND (the bill is reverse charge OR the supplier has a
-    valid GSTIN). Under GST reverse charge the recipient pays the tax and may
-    claim it even when the supplier is unregistered. Booking, /preview and the
-    ITC reader all call this, so the three can never disagree."""
-    return bool(user_allows) and (
-        bool(reverse_charge) or has_valid_gstin(supplier_gstin)
+    switch credit off AND the bill is not against a "Bought without PO"
+    receipt (``receipt``, the linked GRN doc; owner ruling D14) AND (the bill
+    is reverse charge OR the supplier has a valid GSTIN). Under GST reverse
+    charge the recipient pays the tax and may claim it even when the supplier
+    is unregistered. Booking, /preview and the ITC reader all call this, so the
+    three can never disagree."""
+    return (
+        bool(user_allows)
+        and (receipt or {}).get("grn_subtype") != GRN_SUBTYPE_NO_PO
+        and (bool(reverse_charge) or has_valid_gstin(supplier_gstin))
     )
 
 

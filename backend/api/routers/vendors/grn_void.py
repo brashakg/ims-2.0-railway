@@ -4,7 +4,7 @@ from ._shared import (
     Depends,
     HTTPException,
     Query,
-    _VENDOR_ROLES,
+    _RECEIVE_ROLES,
     can_access_store_scoped,
     datetime,
     get_audit_repository,
@@ -27,7 +27,7 @@ from .grn_accept_lock import (
 
 @router.post("/grn/{grn_id}/void")
 async def void_grn(
-    grn_id: str, current_user: dict = Depends(require_roles(*_VENDOR_ROLES))
+    grn_id: str, current_user: dict = Depends(require_roles(*_RECEIVE_ROLES))
 ):
     """Void a goods-receipt note that never put stock on the shelf
     (duplicate/mistake cleanup).
@@ -264,7 +264,7 @@ async def void_grn(
 async def escalate_grn(
     grn_id: str,
     note: str = Query(...),
-    current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
+    current_user: dict = Depends(require_roles(*_RECEIVE_ROLES)),
 ):
     """Escalate GRN to HQ for review"""
     grn_repo = get_grn_repository()
