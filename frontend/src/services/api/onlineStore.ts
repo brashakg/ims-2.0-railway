@@ -2312,6 +2312,8 @@ export interface RefundReview {
   updated_at?: string | null;
   resolved_by?: string | null;
   resolved_at?: string | null;
+  /** Set once a person pressed Goods back and the units were put back. */
+  goods_back_at?: string | null;
 }
 
 export interface RefundReviewsResult {
@@ -2365,6 +2367,15 @@ export const refundReviewsApi = {
   confirm: async (reviewId: string): Promise<Record<string, any>> => {
     const res = await api.post(
       `${REFUND_REVIEWS_BASE}/${encodeURIComponent(reviewId)}/confirm`,
+    );
+    return (res?.data ?? {}) as Record<string, any>;
+  },
+
+  /** Goods back: the refunded goods physically came back -- put them back in
+   *  stock (no money moves; that is the confirm's). Throws on failure. */
+  goodsBack: async (reviewId: string): Promise<Record<string, any>> => {
+    const res = await api.post(
+      `${REFUND_REVIEWS_BASE}/${encodeURIComponent(reviewId)}/goods-back`,
     );
     return (res?.data ?? {}) as Record<string, any>;
   },

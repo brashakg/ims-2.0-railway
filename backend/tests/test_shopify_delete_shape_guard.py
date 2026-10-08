@@ -226,8 +226,10 @@ def test_documented_order_delete_body_still_voids(db):
 
 def test_genuine_order_delete_with_delivery_metadata_still_voids(db):
     """Pure delivery metadata alongside the id is still a genuine delete. Pins
-    the allowed-key margin so a future tightening is a conscious choice."""
-    _seed_order(db, shopify_order_id="5001", status="PACKED")
+    the allowed-key margin so a future tightening is a conscious choice. (An
+    open order: the transition table voids only CONFIRMED / PROCESSING / READY
+    / SHIPPED; an unknown status such as "PACKED" is kept.)"""
+    _seed_order(db, shopify_order_id="5001", status="PROCESSING")
 
     res = handle_shopify_order_delete(
         db,

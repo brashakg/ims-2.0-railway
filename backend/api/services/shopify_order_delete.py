@@ -7,14 +7,22 @@ change) rather than silently left as a live/confirmed sale. BVI absorbed order
 deletions today; when BVI is retired IMS must, or a deleted Shopify order would
 keep counting as IMS revenue / an open fulfilment forever.
 
+The status move is the ONE transition table's (online_order_status, fact
+DELETE): an open order (CONFIRMED / PROCESSING / READY / SHIPPED) is VOIDED; a
+DELIVERED one stays DELIVERED with ONE task for a person (owner ruling
+2026-09-28); a finished one (CANCELLED / REFUNDED) stays as it is -- finance
+leaves VOID in revenue, so voiding a cancelled order would count it again.
+
 CONTRACT (mirrors shopify_fulfillment.reconcile_fulfillment exactly):
   * Match the IMS order by shopify_order_id (the `orders/delete` payload is just
     {"id": <order_id>}). NOT found -> log + no-op (fail-soft; never crash the
     NEXUS drain loop).
-  * NEVER hard-delete. We $set status=VOID + shopify_deleted_at (and keep the
-    prior lifecycle status in status_before_void for the audit trail). Because we
-    only $set a marker, a re-delivered webhook is naturally IDEMPOTENT: once
-    shopify_deleted_at is present we return "duplicate" and touch nothing.
+  * NEVER hard-delete. shopify_deleted_at rides the table's VOID claim (with
+    the prior lifecycle status in status_before_void for the audit trail), or
+    lands alone when the table keeps the status. Because we only $set a
+    marker, a re-delivered webhook is naturally IDEMPOTENT: once
+    shopify_deleted_at is present we return "duplicate" and touch nothing; a
+    write that failed left no marker, so the re-delivery retries it.
   * HISTORICAL import orders (bvi_import) are skipped -- they were settled outside
     IMS books and must never be flipped.
 
@@ -35,12 +43,6 @@ from .shopify_delete_shape import (
 )
 
 logger = logging.getLogger(__name__)
-
-# The IMS lifecycle status a deleted Shopify order is parked in. VOID is already a
-# recognised terminal status across the online path (see shopify_fulfillment
-# _TERMINAL_STATUSES) so finance / fulfilment aggregations exclude it.
-_VOID_STATUS = "VOID"
-
 
 def _norm(value: Any) -> str:
     return str(value or "").strip()
@@ -68,8 +70,10 @@ def handle_shopify_order_delete(
 
     Idempotent on the shopify_deleted_at marker. NEVER raises (the NEXUS drain
     loop relies on this). Returns a structured result dict:
-      {"status": "voided"|"duplicate"|"order_not_found"|"skipped"|"simulated"|
-                 "error", "shopify_order_id": <str>, ...}
+      {"status": "voided"|"kept"|"duplicate"|"order_not_found"|"skipped"|
+                 "simulated"|"error", "shopify_order_id": <str>, ...}
+    "kept": the table kept the status (DELIVERED -> conflict_task, or a
+    finished order -> terminal_withheld).
     """
     try:
         payload = payload if isinstance(payload, dict) else {}
@@ -148,38 +152,51 @@ def handle_shopify_order_delete(
 
         now = datetime.now(timezone.utc).isoformat()
         prior_status = _norm(order.get("status")).upper() or None
-        update: Dict[str, Any] = {
-            "status": _VOID_STATUS,
-            "shopify_deleted_at": now,
-            "void_reason": "Shopify orders/delete webhook",
-            "updated_at": now,
-        }
-        # Preserve the lifecycle status the order held before the delete so the
-        # void is auditable / reversible (we never overwrite an existing snapshot).
-        if prior_status and not order.get("status_before_void"):
-            update["status_before_void"] = prior_status
 
-        try:
-            coll = db.get_collection("orders")
-            coll.update_one(
-                {"shopify_order_id": shopify_order_id}, {"$set": update}
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[SHOPIFY_ORDER_DELETE] order update failed: %s", exc)
-            return {"status": "error", "error": str(exc)}
+        from .online_order_status import DELETE, apply_fact
+
+        def extra(current: Dict[str, Any]) -> Dict[str, Any]:
+            # Preserve the lifecycle status the void moves (the one its claim
+            # was decided on, read again after a lost race) so the void is
+            # auditable / reversible; never overwrite an existing snapshot.
+            fields: Dict[str, Any] = {"void_reason": "Shopify orders/delete webhook"}
+            before = _norm(current.get("status")).upper()
+            if before and not current.get("status_before_void"):
+                fields["status_before_void"] = before
+            return fields
+
+        # The marker rides the status claim (or lands alone when the table
+        # keeps the status): a failed write leaves no marker, so a re-delivered
+        # orders/delete retries instead of returning "duplicate".
+        res = apply_fact(
+            db, order, DELETE, source="SHOPIFY_ORDER_DELETE", extra=extra,
+            marks={"shopify_deleted_at": now, "updated_at": now},
+        )
+        if res["failed"]:
+            return {"status": "error", "error": "status write failed",
+                    "shopify_order_id": shopify_order_id, "order_id": order.get("order_id")}
 
         logger.info(
-            "[SHOPIFY_ORDER_DELETE] order=%s shopify_order=%s VOIDED "
-            "(was status=%s)",
+            "[SHOPIFY_ORDER_DELETE] order=%s shopify_order=%s -> %s (was status=%s)",
             order.get("order_id"),
             shopify_order_id,
+            res["to"] or f"kept ({res['why'] or 'no move'})",
             prior_status or "-",
         )
+        if res["to"] == "VOID":
+            return {
+                "status": "voided",
+                "shopify_order_id": shopify_order_id,
+                "order_id": order.get("order_id"),
+                "status_before_void": _norm(res["from"]).upper() or None,
+            }
         return {
-            "status": "voided",
+            "status": "kept",
             "shopify_order_id": shopify_order_id,
             "order_id": order.get("order_id"),
-            "status_before_void": prior_status,
+            "order_status": prior_status,
+            "terminal_withheld": res["terminal_withheld"],
+            "conflict_task": res["why"] == "conflict",
         }
     except Exception as exc:  # noqa: BLE001 -- the drain loop must never die here
         logger.warning(

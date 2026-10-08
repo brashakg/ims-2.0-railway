@@ -359,12 +359,15 @@ class TestReturnsOverRefund:
                 "gst_rate": 18.0,
                 "taxable_value": 100,
                 "tax_amount": 18,
-                "returned_qty": 1,  # already fully returned
+                # The read the pre-check made: nothing returned yet...
+                "returned_qty": 0,
             }
         )
         coll_doc = returns_ctx["order_repo"].collection.docs[0]
         coll_doc["items"][0]["quantity"] = 5
         coll_doc["items"].append(copy.deepcopy(order["items"][1]))
+        # ...then a concurrent return took the last unit before this claim.
+        coll_doc["items"][1]["returned_qty"] = 1
 
         body = _ret_body(
             items=[

@@ -954,3 +954,41 @@ async def test_a_legacy_string_dated_order_is_stamped_with_its_ist_day(
         "was stamped with the UTC day while its datetime twin got the IST "
         "day, so the SHAPE of the row decided the accounting date" % (dates,)
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("per_store", [True, False])
+async def test_a_shopify_fulfilled_online_order_is_in_that_nights_file(
+    monkeypatch, fake_db_with_stores, per_store
+):
+    """Owner ruling 2026-09-28: an online order Shopify fulfilled is SHIPPED
+    until the courier delivers it (it used to go straight to DELIVERED). It is
+    the same sale for the books: the night's Tally file must carry it, on the
+    per-store path and the chain-wide fallback alike -- the export keys on
+    created_at, so a sale left out that night is never exported at all."""
+    from agents.implementations import nexus as nexus_module
+    from api import dependencies as deps_module
+    from database.repositories.store_repository import StoreRepository
+
+    db = fake_db_with_stores
+    nexus = nexus_module.NexusAgent(db=db)
+    nexus.get_collection = lambda name: db.get_collection(name)
+    monkeypatch.setattr(nexus_module, "ist_today", lambda: EXPORT_DAY + timedelta(days=1))
+    if per_store:
+        store_repo = StoreRepository(db.get_collection("stores"))
+        monkeypatch.setattr(deps_module, "get_store_repository", lambda: store_repo)
+    else:
+        def _no_repo():
+            raise RuntimeError("StoreRepository unavailable")
+
+        monkeypatch.setattr(deps_module, "get_store_repository", _no_repo)
+    orders = db.get_collection("orders")
+    for oid, status in (("O-SHIPPED", "SHIPPED"), ("O-DELIVERED", "DELIVERED"),
+                        ("O-CONFIRMED", "CONFIRMED")):
+        orders.insert_one(_make_order(order_id=oid, store_id="BV-GK1", status=status,
+                                      created_iso=IN_WINDOW_ISO))
+
+    assert (await nexus._build_tally_export()).ok is True
+    rows = db.get_collection("tally_exports").docs
+    assert len(rows) == 1
+    assert _voucher_ids(rows[0]["xml"]) == {"O-SHIPPED", "O-DELIVERED"}
