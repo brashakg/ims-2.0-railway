@@ -1369,7 +1369,12 @@ def test_c7_the_barcode_trace_shows_no_counter_what_was_paid(world):
     receipt and unit to any signed-in user -- a SALES_STAFF read the unit's
     cost 3100 and each line's price paid [3100, 420]. The route stays open to
     every signed-in role (the sale, transfer and return history carries no
-    cost); what was paid goes through the one cost rule (cost_mask)."""
+    cost); what was paid goes through the one cost rule (cost_mask): the
+    unit's cost through its "product" context (#1161: the managers read a
+    product's per-unit cost, the counter never), each receipt line's price
+    paid through mask_receipt."""
+    from api.services.cost_mask import can_see_cost
+
     grn_id, barcode = _walk_in_on_the_shelf(world)
     url = f"/inventory/barcode/{barcode}/trace"
     for role in ("SALES_STAFF", "CASHIER", "OPTOMETRIST", "WORKSHOP_STAFF", "STORE_MANAGER", "AREA_MANAGER"):
@@ -1379,7 +1384,9 @@ def test_c7_the_barcode_trace_shows_no_counter_what_was_paid(world):
         body = res.json()
         assert body["stock_unit"]["barcode"] == barcode
         assert body["purchase"][0]["grn_id"] == grn_id
-        assert not {"unit_cost", "cost_price"} & set(body["stock_unit"]), (role, body)
+        sees_unit_cost = can_see_cost(counter, "product")
+        assert sees_unit_cost == role.endswith("_MANAGER"), role  # owner ruling D7
+        assert bool({"unit_cost", "cost_price"} & set(body["stock_unit"])) == sees_unit_cost, (role, body)
         assert [sorted(it) for it in body["purchase"][0]["items"]] and all(
             "unit_price" not in it for it in body["purchase"][0]["items"]
         ), (role, body)
