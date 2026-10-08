@@ -147,6 +147,22 @@ describe('POLifecycleDrawer — timeline rendering', () => {
   });
 });
 
+describe('POLifecycleDrawer — supplier bill without its money', () => {
+  it('a bill sent without total / status shows its number and nothing in their place', async () => {
+    // A store / area manager's timeline: the server drops the bill amount and
+    // paid status (supplier payments are the accounts roles' only).
+    getPOTimeline.mockResolvedValue(
+      makeTimeline({
+        invoices: [{ bill_id: 'B1', invoice_number: 'INV-9', created_at: '2026-06-06T10:00:00Z' }],
+      }),
+    );
+    renderDrawer();
+    expect(await screen.findByText('INV-9')).toBeInTheDocument();
+    expect(screen.queryByText('Unknown')).not.toBeInTheDocument();
+    expect(screen.queryByText(/₹/)).not.toBeInTheDocument();
+  });
+});
+
 describe('POLifecycleDrawer — next-step derivation', () => {
   it('DRAFT -> "Send to vendor" fires the parent callback', async () => {
     getPOTimeline.mockResolvedValue(makeTimeline({ status: 'DRAFT', events: [{ kind: 'ordered', label: 'Ordered', at: '2026-06-01T10:00:00Z' }] }));

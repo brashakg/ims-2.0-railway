@@ -14,7 +14,6 @@ from ._shared import (
     _po_catalog_gate_on,
     datetime,
     get_audit_repository,
-    get_current_user,
     get_product_repository,
     get_purchase_order_repository,
     get_vendor_repository,
@@ -34,6 +33,7 @@ from .gst import (
 )
 from .models import POCreate
 from .numbering import generate_po_number
+from ...services.cost_mask import PO_DRAFT_ROLES
 
 
 # ============================================================================
@@ -48,7 +48,7 @@ async def list_pos(
     store_id: Optional[str] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
 ):
     """List purchase orders with filters"""
     po_repo = get_purchase_order_repository()
@@ -624,7 +624,8 @@ def fill_cost_from_rate(po_id, po_number, items, products, current_user) -> list
 # DRAFT, so adding the role here grants exactly "draft" -- sending, editing and
 # cancelling stay on _VENDOR_ROLES (the rbac row carves this route its own
 # capability key so the vendors:write union does not grow; see capabilities).
-_PO_DRAFT_ROLES = (*_VENDOR_ROLES, "CATALOG_MANAGER")
+# Defined once in services/cost_mask.
+_PO_DRAFT_ROLES = PO_DRAFT_ROLES
 
 
 @router.post("/purchase-orders", status_code=201)

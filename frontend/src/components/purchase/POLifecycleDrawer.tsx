@@ -6,7 +6,7 @@
 // lifecycle from GET /vendors/purchase-orders/{po_id}/timeline (PR #869):
 //   header  : PO number + vendor + PurchaseStatusChip
 //   timeline: chronological events in the owner vocabulary
-//             (Draft raised / Sent / Box received / On shelf / Bill settled)
+//             (Draft raised / Sent / Box received / On shelf / Bill booked)
 //   lists   : raw linked GRNs + purchase invoices with their statuses
 //   footer  : ONE derived next-step action --
 //             DRAFT                      -> "Send to vendor" (parent callback;
@@ -36,6 +36,7 @@ import {
 import { useNavigate } from 'react-router-dom';
 import { vendorsApi } from '../../services/api/inventory';
 import { useAuth } from '../../context/AuthContext';
+import { PAYABLES_ROLES } from '../common/CostCell';
 import { PurchaseStatusChip } from './PurchaseStatusChip';
 import { formatDateTimeIST } from '../../utils/datetime';
 import { RECEIVABLE_PO_STATUSES, RECEIVING_MANAGER_ROLES } from '../../pages/purchase/purchaseTypes';
@@ -79,7 +80,9 @@ export interface POTimelineGRN {
 export interface POTimelineInvoice {
   bill_id: string;
   invoice_number: string;
-  status: string;
+  /** status + total are supplier-bill money: the server sends them to the
+   *  accounts roles only (cost_mask "payables"); anyone else gets neither. */
+  status?: string | null;
   total?: number | null;
   created_at?: string | null;
 }
@@ -136,10 +139,6 @@ const EVENT_ICON_CLASSES: Record<string, string> = {
 /** Date+time in IST, e.g. "16 Jun 2026, 2:45 pm" (a zoneless stamp is the
  *  server's UTC clock -- see utils/datetime). Blank when there is none. */
 const fmtDateTime = (at: string | null | undefined) => formatDateTimeIST(at, '');
-
-/** AP-capable roles (mirrors the /purchase/recon-console gate -- the invoice
- *  booking surface is an accountant function). */
-const AP_ROLES = ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] as const;
 
 /** GRN statuses that mean accepted stock is on the shelf and billable. */
 const ACCEPTED_GRN_STATUSES = new Set(['ACCEPTED', 'PARTIALLY_ACCEPTED']);
@@ -240,7 +239,8 @@ export function POLifecycleDrawer({ poId, poNumber, onClose, onSendToVendor }: P
     ? deriveNextStep(timeline, {
         canSend: Boolean(onSendToVendor),
         canReceive: hasRole([...RECEIVING_MANAGER_ROLES]),
-        canBookInvoice: hasRole([...AP_ROLES]),
+        // Booking a supplier bill is an accounts function (PAYABLES_ROLES).
+        canBookInvoice: hasRole(PAYABLES_ROLES),
       })
     : null;
 
@@ -407,7 +407,7 @@ export function POLifecycleDrawer({ poId, poNumber, onClose, onSendToVendor }: P
                             {typeof inv.total === 'number' && ` · ₹${inv.total.toLocaleString()}`}
                           </p>
                         </div>
-                        <PurchaseStatusChip status={inv.status} kind="invoice" />
+                        {inv.status && <PurchaseStatusChip status={inv.status} kind="invoice" />}
                       </div>
                     ))}
                   </div>
