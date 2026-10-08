@@ -527,6 +527,20 @@ def test_f13_an_odd_size_is_written_as_typed():
     assert seg("nan") == "NAN"
 
 
+def test_f13_a_non_ascii_digit_never_reaches_the_sku():
+    """A Devanagari or fullwidth digit (a CSV import, the catalog import) is
+    not a plain number: it never goes into the SKU, so the SKU minted is one
+    the SKU check accepts when a clone or a re-import sends it back."""
+    for category, attrs in (
+        ("FR", dict(_CARRERA, lens_size="५४")),  # Devanagari 54
+        ("FR", dict(_CARRERA, lens_size="５４")),  # fullwidth 54
+        ("LS", dict(_CRIZAL, index="१.५६")),  # Devanagari 1.56
+    ):
+        sku = pm.build_sku(category, attrs)
+        assert pm.is_acceptable_sku(sku), sku
+        assert sku in ("FR-CARRERA-CA8895-807", "LS-ESSILOR-CRIZAL-HC")
+
+
 def test_f13_the_key_rebuild_tool_writes_the_create_door_key(door):
     """migrate_identity_key_tighten (the mandatory key rebuild) derives the key
     with the create door's own rule: two Crizal lenses are no collision, and a

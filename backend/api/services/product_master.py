@@ -603,8 +603,9 @@ def _plain_number(value: Any) -> Optional[str]:
     an exponent, text): that is kept as typed. THE size rule the SKU
     (_size_segment) and the duplicate key (compute_identity_key) share, so
     the guard calls two spellings of one lens the same lens exactly when the
-    SKU does."""
-    m = re.fullmatch(r"(\d*)(?:\.(\d*))?", str("" if value is None else value).strip())
+    SKU does. ASCII digits only: a Devanagari or fullwidth digit is not a
+    plain number, so it never reaches a SKU that is_acceptable_sku refuses."""
+    m = re.fullmatch(r"([0-9]*)(?:\.([0-9]*))?", str("" if value is None else value).strip())
     if not m or not (m.group(1) or m.group(2)):
         return None
     whole = m.group(1).lstrip("0") or "0"
