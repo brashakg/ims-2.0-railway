@@ -620,9 +620,11 @@ class TestGtinAttributeOnTheEditDoor:
         from api.routers.inventory.stock import _ledger_row
 
         product = {"product_id": "P1", "attributes": attrs, "barcode": _VALID_A}
-        assert _ledger_row(product, 1, 0, {}, "BV-TEST-01")["gtin"] == _VALID_A
+        row = _ledger_row(product, 1, 0, {}, "BV-TEST-01")
+        assert (row["gtin"], row["unverified_barcode"]) == ("", _VALID_A)
         product.pop("barcode")
-        assert _ledger_row(product, 1, 0, {}, "BV-TEST-01")["gtin"] == ""
+        row = _ledger_row(product, 1, 0, {}, "BV-TEST-01")
+        assert (row["gtin"], row["unverified_barcode"]) == ("", "")
 
     @pytest.mark.parametrize("new_gtin", ["", _VALID_B])
     def test_a_legacy_product_barcode_shows_and_moves_off_with_the_gtin(
@@ -640,12 +642,37 @@ class TestGtinAttributeOnTheEditDoor:
             {"product_id": p1}, {"$set": {"barcode": _VALID_A}}
         )
         spine = mock_db["products"].find_one({"product_id": p1})
-        assert _ledger_row(spine, 1, 0, {}, "BV-TEST-01")["gtin"] == _VALID_A
-        _update(p1, attributes={"gtin": new_gtin})  # Remove, or a new code
+        assert _ledger_row(spine, 1, 0, {}, "BV-TEST-01")["unverified_barcode"] == _VALID_A
+        _update(p1, attributes={"gtin": new_gtin})  # Remove old code, or a new code
         assert "barcode" not in mock_db["products"].find_one({"product_id": p1})
         _update(p2, attributes={"gtin": _VALID_A})  # the box EAN moves frames
         spine2 = mock_db["products"].find_one({"product_id": p2})
         assert spine2["attributes"]["gtin"] == _VALID_A
+
+    def test_a_legacy_generated_code_never_becomes_the_shopify_barcode(
+        self, mock_db, mirror_on
+    ):
+        """Main's old Manage Barcode > Generate wrote random EAN-13s to
+        products.barcode: 12 random digits + a correct check digit, so most
+        pass the format check. The stock row offered that code as the saved
+        GTIN, and Save Barcode on the untouched box sent it to Shopify as the
+        maker's barcode. It is now an UNVERIFIED value apart from the gtin: the
+        box opens empty, and what the box holds pushes no barcode."""
+        from api.routers.inventory.stock import _ledger_row
+
+        generated = "5260181590836"
+        pid = _create("PRB-LEG")["product_id"]
+        mock_db["products"].update_one(
+            {"product_id": pid}, {"$set": {"barcode": generated}}
+        )
+        spine = mock_db["products"].find_one({"product_id": pid})
+        row = _ledger_row(spine, 1, 0, {}, "BV-TEST-01")
+        assert row["unverified_barcode"] == generated
+        _update(pid, attributes={"gtin": row["gtin"]})  # the box, untouched
+        twin = mock_db["catalog_products"].find_one(
+            {"id": spine.get("pim_product_id") or pid}
+        )
+        assert _pushed_barcodes(mock_db, twin) == {"PRB-LEG": None}
 
     def test_a_gtin_already_on_another_product_is_refused_409(self, mock_db):
         """Manage Barcode moved from products.barcode (409 on a duplicate) to

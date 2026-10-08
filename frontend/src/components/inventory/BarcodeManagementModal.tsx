@@ -10,6 +10,10 @@
 // Product form's "GTIN (mfr)" box writes and the Shopify push reads (the old
 // product `barcode` field never reached Shopify). The server
 // (services/gtin.py) decides what is a GTIN; its refusal is shown in words.
+//
+// A legacy product barcode (main's old modal wrote it; its Generate made random
+// EAN-13s that pass the format check) is NOT the maker's: it is shown apart as
+// an old code, never put in the box, so Save always needs a typed code.
 
 import { useState, useEffect } from 'react';
 import { X, AlertCircle, CheckCircle } from 'lucide-react';
@@ -23,6 +27,8 @@ interface BarcodeManagementModalProps {
   productName: string;
   /** The product's saved manufacturer GTIN (never a unit's IMS barcode). */
   currentGtin?: string;
+  /** A legacy product barcode: unverified, never offered as the GTIN. */
+  oldCode?: string;
   onSaved?: () => void;
 }
 
@@ -32,18 +38,19 @@ export function BarcodeManagementModal({
   productId,
   productName,
   currentGtin,
+  oldCode,
   onSaved,
 }: BarcodeManagementModalProps) {
   const [barcode, setBarcode] = useState(currentGtin || '');
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState(false);
+  const [success, setSuccess] = useState<string | null>(null);
 
   useEffect(() => {
     if (isOpen) {
       setBarcode(currentGtin || '');
       setError(null);
-      setSuccess(false);
+      setSuccess(null);
     }
   }, [isOpen, currentGtin]);
 
@@ -54,18 +61,14 @@ export function BarcodeManagementModal({
   const code = barcode.trim();
   const removing = !code && !!currentGtin;
 
-  const handleSave = async () => {
-    if (!code && !removing) {
-      setError("Type the barcode printed on the manufacturer's box");
-      return;
-    }
-
+  // Saving the gtin attribute (even '') also drops the legacy product barcode.
+  const save = async (gtin: string, done: string) => {
     setIsSaving(true);
     setError(null);
 
     try {
-      await productApi.updateProduct(productId, { attributes: { gtin: code } });
-      setSuccess(true);
+      await productApi.updateProduct(productId, { attributes: { gtin } });
+      setSuccess(done);
       onSaved?.();
       setTimeout(() => {
         onClose();
@@ -77,6 +80,14 @@ export function BarcodeManagementModal({
     } finally {
       setIsSaving(false);
     }
+  };
+
+  const handleSave = () => {
+    if (!code && !removing) {
+      setError("Type the barcode printed on the manufacturer's box");
+      return;
+    }
+    void save(code, removing ? 'Barcode removed.' : 'Barcode saved successfully!');
   };
 
   if (!isOpen) return null;
@@ -101,6 +112,22 @@ export function BarcodeManagementModal({
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-6 space-y-4">
+          {oldCode && !currentGtin && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+              <p>
+                Old IMS code <span className="font-mono">{oldCode}</span> - not a maker barcode;
+                type the code printed on the maker&apos;s box.
+              </p>
+              <button
+                type="button"
+                onClick={() => void save('', 'Old code removed.')}
+                disabled={isSaving}
+                className="mt-2 font-medium underline disabled:opacity-50"
+              >
+                Remove old code
+              </button>
+            </div>
+          )}
           <div>
             <label htmlFor="mfr-barcode" className="block text-sm font-medium text-gray-700 mb-2">
               Manufacturer barcode (UPC / EAN)
@@ -113,7 +140,7 @@ export function BarcodeManagementModal({
               onChange={(e) => {
                 setBarcode(e.target.value);
                 setError(null);
-                setSuccess(false);
+                setSuccess(null);
               }}
               placeholder="e.g. 8056597720373"
               className={clsx(
@@ -132,7 +159,7 @@ export function BarcodeManagementModal({
             {success && (
               <p className="text-sm text-green-600 mt-1 flex items-center gap-1">
                 <CheckCircle className="w-4 h-4" />
-                {removing ? 'Barcode removed.' : 'Barcode saved successfully!'}
+                {success}
               </p>
             )}
           </div>

@@ -715,6 +715,7 @@ export function InventoryStockPage() {
           productId={selectedProduct.id}
           productName={selectedProduct.name}
           currentGtin={selectedProduct.gtin}
+          oldCode={selectedProduct.unverified_barcode}
           onSaved={() => {
             toast.success(`Manufacturer barcode saved for ${selectedProduct.name}`);
             reloadInventory();

@@ -77,8 +77,10 @@ export interface StockItem {
   low_stock?: boolean;
   barcode?: string;
   storeBarcode?: string;
-  /** The manufacturer GTIN (attributes.gtin, else a legacy product barcode) -- what Manage Barcode edits. */
+  /** The manufacturer GTIN (attributes.gtin) -- what Manage Barcode edits. */
   gtin?: string;
+  /** A legacy product barcode with no gtin saved: UNVERIFIED (main's old Generate made random ones), never the GTIN. */
+  unverified_barcode?: string;
   /** The IMS code of every unit on hand at this shop (the search box matches it). */
   unit_barcodes?: string[];
   /** Procurement Phase 1 (additive from /inventory/stock): the latest ACCEPTED

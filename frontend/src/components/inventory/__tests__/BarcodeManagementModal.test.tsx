@@ -22,7 +22,7 @@ vi.mock('../../../services/api/products', () => ({
 import { buildApiError } from '../../../services/api/client';
 import { BarcodeManagementModal } from '../BarcodeManagementModal';
 
-function renderModal(currentGtin = '', onSaved = vi.fn()) {
+function renderModal(currentGtin = '', onSaved = vi.fn(), oldCode = '') {
   render(
     <BarcodeManagementModal
       isOpen
@@ -30,6 +30,7 @@ function renderModal(currentGtin = '', onSaved = vi.fn()) {
       productId="P-42"
       productName="Carrera CA 8895 Havana"
       currentGtin={currentGtin}
+      oldCode={oldCode}
       onSaved={onSaved}
     />,
   );
@@ -90,6 +91,31 @@ describe('Manage Barcode (manufacturer UPC / EAN only)', () => {
     const remove = screen.getByRole('button', { name: /remove barcode/i });
     expect(remove).toBeEnabled();
     fireEvent.click(remove);
+    await waitFor(() =>
+      expect(updateProduct).toHaveBeenCalledWith('P-42', { attributes: { gtin: '' } }),
+    );
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
+  });
+
+  it('shows an old product barcode apart and never puts it in the box to save', () => {
+    // Main's old Generate wrote random EAN-13s to the product barcode; most pass
+    // the format check. Offered as the saved GTIN, Save on the untouched box sent
+    // one to Shopify as the maker's barcode.
+    renderModal('', vi.fn(), '5260181590836');
+    expect(screen.getByText(/not a maker barcode/i)).toHaveTextContent(
+      "Old IMS code 5260181590836 - not a maker barcode; type the code printed on the maker's box",
+    );
+    expect(screen.getByLabelText(/manufacturer barcode/i)).toHaveValue('');
+    const save = screen.getByRole('button', { name: /save barcode/i });
+    expect(save).toBeDisabled();
+    fireEvent.click(save);
+    expect(updateProduct).not.toHaveBeenCalled();
+  });
+
+  it('removes an old product barcode only on its own button', async () => {
+    updateProduct.mockResolvedValue({});
+    const onSaved = renderModal('', vi.fn(), '5260181590836');
+    fireEvent.click(screen.getByRole('button', { name: /remove old code/i }));
     await waitFor(() =>
       expect(updateProduct).toHaveBeenCalledWith('P-42', { attributes: { gtin: '' } }),
     );

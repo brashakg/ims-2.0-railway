@@ -39,6 +39,8 @@ const ITEMS: StockItem[] = [
     id: 'P2', sku: 'FR-RAYB-2140-BLK', name: 'Wayfarer', brand: 'Ray-Ban',
     category: 'FR', mrp: 9990, offerPrice: 9990, stock: 1, reserved: 0,
     barcode: 'BV--91FA3858', unit_barcodes: ['BV--91FA3858'],
+    // main's old Generate wrote a random EAN-13 to the product barcode
+    unverified_barcode: '5260181590836',
   },
 ];
 
@@ -104,5 +106,13 @@ describe('Manage Barcode from the stock row', () => {
     search('Carrera');
     fireEvent.click(screen.getByRole('button', { name: 'Manage Barcode' }));
     expect(screen.getByLabelText(/manufacturer barcode/i)).toHaveValue('4006381333931');
+  });
+
+  it('shows an old product barcode apart and opens with an empty box', () => {
+    renderPage();
+    search('Wayfarer');
+    fireEvent.click(screen.getByRole('button', { name: 'Manage Barcode' }));
+    expect(screen.getByLabelText(/manufacturer barcode/i)).toHaveValue('');
+    expect(screen.getByText(/not a maker barcode/i)).toHaveTextContent('Old IMS code 5260181590836');
   });
 });
