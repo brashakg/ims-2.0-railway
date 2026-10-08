@@ -329,6 +329,25 @@ export function formatPushResult(label: string, r: PushResult): string {
 }
 
 // ----------------------------------------------------------------------------
+// formatPhotoPublish — the Design Queue's Publish toast in plain words. A LIVE
+// press says what happened to the photo on the website (backend push_image:
+// create = sent, update = swapped, noop = already there, never a raw id); a
+// refusal is the backend's own plain sentence. A dry-run keeps the SIMULATED
+// line above.
+// ----------------------------------------------------------------------------
+const PHOTO_OUTCOME: Record<string, string> = {
+  create: 'sent to the website.',
+  update: 'the new photo is on the website and the old one was taken down.',
+  noop: 'already on the website, so nothing was sent.',
+};
+
+export function formatPhotoPublish(label: string, r: PushResult): string {
+  if (r.mode !== 'LIVE') return formatPushResult(label, r);
+  if (!r.ok) return `${label}: ${r.error || 'not published'}`;
+  return `${label}: ${PHOTO_OUTCOME[r.action] || 'published.'}`;
+}
+
+// ----------------------------------------------------------------------------
 // pushToastLevel — how LOUD that line should be, in ONE place. An ok result
 // carrying a code did all it could but not all it was pressed for: the product
 // is live at the OLD price (PRICE_NOT_SYNCED), or live with its stock refused
