@@ -4667,3 +4667,111 @@ def test_remap_counts_a_shops_own_units_only_beyond_its_own_leg(world, monkeypat
     assert world["shop"].moves()[-1] == {"id": FO_2, "newLocationId": LOC_DHN}
     assert "U-BV-DHN-01-P-RB-0" in _units(db, oid)
     assert db.stock_units.find_one({"stock_id": "U-BOK-RB-NEW"})["status"] == "AVAILABLE"
+
+
+# ---------------------------------------------------------------------------
+# R28 -- money panel, round 22
+# ---------------------------------------------------------------------------
+
+
+def _short_leg_held_at_dhanbad(world, order_id):
+    """Shopify splits RB -> Bokaro (holds it), OA -> BV Dhanbad, which has no
+    GSTIN and no OA, and no shop holds one: booked with Dhanbad's leg short
+    (its stock miss) and HELD on Dhanbad's SHOP_GSTIN_MISSING. Then
+    Organization gives Dhanbad its GSTIN and Dhanbad receives an OA."""
+    db = world["db"]
+    _shop(db, "BV-DHN-01", "BV Dhanbad", "", LOC_DHN)
+    _stock(db, "BV-BOK-01", "P-RB", 1)
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 1)])
+    world["shop"].fo(FO_2, LOC_DHN, lines=[(9001, 1)])
+    payload = _order(order_id, lines=(("RB-1234", 1), ("OA-5", 1)))
+    res, order = _book(world, payload)
+    assert [p["code"] for p in order["fulfillment_route"]["problems"]] == ["SHOP_GSTIN_MISSING"]
+    assert order["fulfillment_hold"] is True and _sold_at(db, res["order_id"]) == ["BV-BOK-01"]
+    db.stores.update_one({"store_id": "BV-DHN-01"}, {"$set": {"gstin": "20AAAAA0000A1Z5"}})
+    _stock(db, "BV-DHN-01", "P-OA", 1)
+    return payload, res, order
+
+
+@pytest.mark.parametrize("leg", [False, True])
+def test_clearing_a_fixed_seller_hold_never_releases_an_unclaimed_order(world, monkeypatch, leg):
+    """[LOW-MEDIUM] Round 22, item 1: Shopify assigned Bokaro, which had no
+    GSTIN and no RB (or, ``leg``, a split leg's shop Dhanbad had neither):
+    booked 0 of 1 (1 of 2) claimed, a stock miss open at the short shop, held
+    on SHOP_GSTIN_MISSING. The stock miss left no marker of its own (the
+    seller's text kept the reason), so once Organization fixed the GSTIN and
+    the shop restocked, clear-hold released the whole order: dispatchable,
+    Shopify-fulfilled, its unit never claimed and still on sale (an
+    oversell), the miss's task still open. Clear-hold releases only the
+    seller part now and keeps the stock hold -- Re-map's own answer."""
+    from fastapi import HTTPException
+    from api.routers.orders import assert_no_active_rx_hold
+    from api.services.shopify_ingest import STOCK_MISS_REASON
+
+    db = world["db"]
+    if leg:
+        _p, res, order = _short_leg_held_at_dhanbad(world, 62001)
+        short = "BV-DHN-01"
+    else:
+        _p, res, order = _short_held_at_bokaro(world, 62002)
+        short = "BV-BOK-01"
+    oid = res["order_id"]
+    # The stock miss's own marker; the seller's text still names the hold.
+    assert order["stock_miss_reason"] == STOCK_MISS_REASON
+    assert order["stock_hold_reason"] == order["fulfillment_route"]["problems"][0]["message"]
+    sold = _sold_at(db, oid)
+
+    out = _clear_hold(world, monkeypatch, oid)
+
+    assert not isinstance(out, HTTPException), out.detail
+    assert out["released"] == ["SELLER"] and out["fulfillment_hold"] is True, out
+    assert out["message"].startswith("Seller (GSTIN) hold released") and "stock hold stands" in out["message"]
+    after = db.orders.find_one({"order_id": oid}, {"_id": 0})
+    assert after["fulfillment_route"].get(route_mod.SELLER_RELEASED) and not route_mod.seller_held(after)
+    assert after["fulfillment_hold"] is True and after["stock_hold_reason"] == STOCK_MISS_REASON
+    with pytest.raises(HTTPException) as gate:
+        assert_no_active_rx_hold(after)
+    assert gate.value.status_code == 400
+    assert _sold_at(db, oid) == sold  # nothing claimed behind the human's back
+    assert db.stock_units.count_documents({"store_id": short, "status": "AVAILABLE"}) == 1
+    assert _open_miss_tasks(world, oid) == [short]
+    assert db.online_stock_miss.count_documents({"order_id": oid, "resolved": False}) == 1
+
+    # The stock hold is its own now: the human who resolved the stock clears it.
+    out = _clear_hold(world, monkeypatch, oid)
+    assert out["released"] == ["STOCK"] and out["fulfillment_hold"] is False, out
+    assert db.orders.find_one({"order_id": oid})["fulfillment_hold"] is False
+
+
+def test_a_stock_miss_recorded_while_clear_hold_runs_keeps_the_order_held(world, monkeypatch):
+    """[LOW-MEDIUM] Round 22, item 1, the compare-and-set: a seller-held order
+    whose unit is claimed; its GSTIN fixed, clear-hold reads it -- and a stock
+    miss lands before the write (a refused Re-map's put_back on another
+    worker lost its unit to a till). The release wrote on the order as read
+    and lifted the stock miss's hold with it. The marker is in HOLD_CAS now:
+    the release refuses, the order stays held."""
+    import api.dependencies as deps
+    from api.services.shopify_ingest import _record_stock_miss
+
+    db = world["db"]
+    _p, res, _o = _gstin_missing_at_bokaro(world, 62003)
+    oid = res["order_id"]
+    db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": {"gstin": "20AAAAA0000A1Z5"}})
+    stores = deps.get_store_repository()
+    landed = []
+
+    class _MissMidRelease:
+        def find_by_id(self, sid):
+            if not landed:  # after clear-hold's read, before its write
+                landed.append(1)
+                _record_stock_miss(db, oid, "BV-BOK-01", "under_claim", {"lost_on_remap": ["U-1"]})
+            return stores.find_by_id(sid)
+
+    monkeypatch.setattr(deps, "get_store_repository", lambda: _MissMidRelease())
+
+    out = _clear_hold(world, monkeypatch, oid)
+
+    assert landed and getattr(out, "status_code", None) == 409, out
+    assert "changed while the hold was being cleared" in out.detail
+    after = db.orders.find_one({"order_id": oid}, {"_id": 0})
+    assert after["fulfillment_hold"] is True and route_mod.seller_held(after)

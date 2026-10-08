@@ -776,11 +776,19 @@ async def clear_rx_hold(
             detail=f"This hold cannot be cleared yet: {bad['message']}",
         )
     seller = seller_held(order)
+    # A stock miss under the seller hold (its own marker): the release lifts
+    # only the seller part and the stock hold stands -- Re-map's own answer
+    # (its claim comes up short, so it holds again). No unit was claimed.
+    stock_left = order.get("stock_miss_reason") if seller else None
     if seller:  # its cause is fixed: name it for what it was
         released = ["SELLER" if k == "STOCK" else k for k in released]
     _HOLD_NAMES = {"RX": "Rx hold", "STOCK": "stock hold", "SELLER": "seller (GSTIN) hold"}
     names = " and ".join(_HOLD_NAMES[k] for k in released)
-    released_message = names[:1].upper() + names[1:] + " released - the order can now be fulfilled."
+    released_message = names[:1].upper() + names[1:] + (
+        f" released - the stock hold stands: {stock_left}"
+        if stock_left
+        else " released - the order can now be fulfilled."
+    )
 
     note = (body.note or "").strip() if body and body.note else None
     prescription_id = (
@@ -790,7 +798,7 @@ async def clear_rx_hold(
     now_dt = datetime.now(timezone.utc).replace(tzinfo=None)
     update = {
         "rx_pending": False,
-        "fulfillment_hold": False,
+        "fulfillment_hold": bool(stock_left),
         "rx_hold_cleared": True,
         "rx_hold_cleared_by": current_user.get("user_id"),
         "rx_hold_cleared_at": now_dt.isoformat(),
@@ -800,6 +808,8 @@ async def clear_rx_hold(
         update["rx_hold_cleared_note"] = note
     if prescription_id:
         update["rx_hold_cleared_prescription_id"] = prescription_id
+    if stock_left:
+        update["stock_hold_reason"] = stock_left
     if seller:
         # The verdict every door reads (seller_held): released, for good.
         update[f"fulfillment_route.{SELLER_RELEASED}"] = now_dt.isoformat()
@@ -852,7 +862,7 @@ async def clear_rx_hold(
     return {
         "order_id": order_id,
         "rx_pending": False,
-        "fulfillment_hold": False,
+        "fulfillment_hold": bool(stock_left),
         "rx_hold_cleared": True,
         # What was actually released, so the FE toast / caller can say it.
         "released": released,

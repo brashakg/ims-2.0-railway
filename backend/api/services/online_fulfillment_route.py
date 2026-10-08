@@ -1283,11 +1283,13 @@ REFUND_MARK = "refund_or_return_marks"
 
 # The order fields Re-map's and clear-hold's writes are conditioned on: what
 # each read. A cancel, a fulfilment, a hold release (clear-hold: rx_pending +
-# fulfillment_hold), a refund or return (REFUND_MARK) or a Re-map landing in
-# between changes one of them, and the other's write matches nothing.
+# fulfillment_hold), a stock miss (its own marker), a refund or return
+# (REFUND_MARK) or a Re-map landing in between changes one of them, and the
+# other's write matches nothing.
 HOLD_CAS = (
     "status",
     "stock_hold_reason",
+    "stock_miss_reason",
     "fulfillment_hold",
     "rx_pending",
     "fulfillment_status",

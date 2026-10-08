@@ -629,6 +629,13 @@ def _raise_fallback_ship_tasks(
         )
 
 
+# The stock miss's hold text, and its own marker on the order (stock_miss_reason).
+STOCK_MISS_REASON = (
+    "Stock could not be claimed for this paid online order "
+    "(oversell) - resolve stock, then clear the hold."
+)
+
+
 def _record_stock_miss(db, order_id, store_id, reason, detail=None) -> None:
     """Fail-LOUD record of an online stock-decrement miss (an oversell: a paid
     online order whose physical units could not all be claimed). Logs at ERROR
@@ -680,7 +687,9 @@ def _record_stock_miss(db, order_id, store_id, reason, detail=None) -> None:
     # labelled "Rx hold" sent staff chasing a prescription that was never the
     # problem (orders.order_hold_kinds tells the two apart; it also still
     # recognises legacy orders whose stock reason landed in rx_hold_reason).
-    # clear-rx-hold releases it after the stock is resolved. The reason field
+    # clear-rx-hold releases it after the stock is resolved. The miss ALWAYS
+    # leaves its own marker (stock_miss_reason): clear-hold of a fixed seller
+    # hold releases only the seller part while it stands. The reason field
     # is taken over only from the route's own pending-move / fulfillment-order
     # text (a move lifts exactly that text, so it must never lift a stock
     # miss): the seller check's hold keeps its reason -- it names what blocks
@@ -692,16 +701,16 @@ def _record_stock_miss(db, order_id, store_id, reason, detail=None) -> None:
         )
         if orders is not None:
             order = orders.find_one({"order_id": order_id})
-            hold_set: Dict[str, Any] = {"fulfillment_hold": True}
+            hold_set: Dict[str, Any] = {
+                "fulfillment_hold": True,
+                "stock_miss_reason": STOCK_MISS_REASON,
+            }
             if (order or {}).get("stock_hold_reason") in (
                 None,
                 "",
                 ((order or {}).get("fulfillment_route") or {}).get("hold_reason"),
             ):
-                hold_set["stock_hold_reason"] = (
-                    "Stock could not be claimed for this paid online order "
-                    "(oversell) - resolve stock, then clear the hold."
-                )
+                hold_set["stock_hold_reason"] = STOCK_MISS_REASON
             orders.update_one({"order_id": order_id}, {"$set": hold_set})
     except Exception as exc:  # noqa: BLE001
         logger.warning(
