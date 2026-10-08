@@ -7,24 +7,34 @@
 // server sends MRP and selling price only (GET /inventory/lookup builds its
 // answer from an allow-list), so there is no cost to hide here. The price
 // shown is the till's own (posPriceGuard), never a re-typed chain. Where the
-// till does not count a product (no stock unit at that shop, or a lens whose
-// stock is the Power Grid) the server says tracked: false - a 0 there would
-// be a limit the till does not keep.
+// till does not count a product a 0 would be a limit the till does not keep,
+// so the cell says so instead: the till's own line type (mapCategory,
+// imported) checked against the sale guard's own lists (the server sends
+// them) and the shop's `tracked` (it holds a unit of it). A lens is counted
+// by power in the Power Grid; only a role that may open it is sent there.
 
 import { useRef, useState, type FormEvent } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import { Link } from 'react-router-dom';
 import { Search, Loader2 } from 'lucide-react';
 import api from '../../services/api/client';
 import { apiDetailMessage } from '../../utils/errorHandler';
 import { posPriceGuard } from '../../components/pos/productIntake';
+import { mapCategory } from '../../components/pos/submitOrder';
+import { useAuth } from '../../context/AuthContext';
+import { POWER_GRID_ROLES } from './inventoryRoles';
 
 interface ShopCount { store_id: string; store_name: string; available: number; in_transit: number; tracked: boolean }
 interface LookupItem {
   product_id: string; sku?: string; name?: string; brand?: string; model?: string;
-  color?: string; size?: string | number; mrp?: number; offer_price?: number;
-  lens_grid?: boolean; stores: ShopCount[];
+  category?: string; color?: string; size?: string | number; mrp?: number; offer_price?: number;
+  stores: ShopCount[];
 }
-interface LookupResult { store_id?: string; items: LookupItem[] }
+interface LookupResult {
+  store_id?: string; items: LookupItem[];
+  /** The sale guard's own item_type lists (orders/stock._takes_serialized_stock). */
+  not_counted_item_types?: string[]; lens_grid_item_types?: string[];
+}
 
 const rupees = (n?: number) => (n == null ? '-' : `₹${n.toLocaleString('en-IN')}`);
 /** What the till puts on the line; '-' where the till refuses the price. */
@@ -37,6 +47,8 @@ export default function StockLookupPage() {
   const [text, setText] = useState('');
   const [q, setQ] = useState('');
   const input = useRef<HTMLInputElement>(null);
+  // The Power Grid's own route gate, asked the way ProtectedRoute asks it.
+  const canOpenGrid = useAuth().hasRole(POWER_GRID_ROLES);
   const { data, isFetching, error, refetch } = useQuery({
     queryKey: ['inventory', 'lookup', q],
     queryFn: async () => (await api.get<LookupResult>('/inventory/lookup', { params: { q } })).data,
@@ -57,6 +69,8 @@ export default function StockLookupPage() {
   };
 
   const items = data?.items ?? [];
+  const notCounted = data?.not_counted_item_types ?? [];
+  const lensGrid = data?.lens_grid_item_types ?? [];
   // This shop first, then the others in the server's (store code) order.
   const here = data?.store_id;
   const shops = [...(items[0]?.stores ?? [])].sort(
@@ -112,6 +126,8 @@ export default function StockLookupPage() {
             <tbody className="divide-y divide-gray-100">
               {items.map((it) => {
                 const counts = new Map(it.stores.map((s) => [s.store_id, s]));
+                // The item_type the till puts on this product's line.
+                const lineType = mapCategory(it.category || '');
                 return (
                   <tr key={it.product_id}>
                     <td className="px-3 py-2">
@@ -122,14 +138,20 @@ export default function StockLookupPage() {
                     <td className="px-3 py-2">{it.size || '-'}</td>
                     <td className="px-3 py-2 text-right whitespace-nowrap">{rupees(it.mrp)}</td>
                     <td className="px-3 py-2 text-right whitespace-nowrap">{tillPrice(it)}</td>
-                    {it.lens_grid && !it.stores.some((s) => s.tracked) ? (
-                      <td colSpan={shops.length} className="px-3 py-2 text-center text-gray-500">see Power Grid</td>
+                    {lensGrid.includes(lineType) ? (
+                      <td colSpan={shops.length} className="px-3 py-2 text-center text-gray-500">
+                        {canOpenGrid ? (
+                          <Link to="/inventory/power-grid" className="underline">see Power Grid</Link>
+                        ) : (
+                          'counted by power - ask the optometrist or a manager'
+                        )}
+                      </td>
                     ) : shops.map((s) => {
                       const c = counts.get(s.store_id);
                       const n = c?.available ?? 0;
                       return (
                         <td key={s.store_id} className={`px-3 py-2 text-center ${s.store_id === here ? 'bg-blue-50' : ''}`}>
-                          {c?.tracked ? (
+                          {c?.tracked && !notCounted.includes(lineType) ? (
                             <span className={n > 0 ? 'font-semibold text-gray-900' : 'text-gray-400'}>{n}</span>
                           ) : (
                             <span className="text-xs text-gray-400">not tracked here</span>
