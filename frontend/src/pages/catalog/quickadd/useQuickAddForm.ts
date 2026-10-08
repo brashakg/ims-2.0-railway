@@ -447,7 +447,9 @@ export function useQuickAddForm() {
   // the duplicate-rescue popup's default action and the ?variant=<id> deep
   // link (the "+ Variant" button in the product list emits that URL).
   // `keep` (the same-model chip, F69): what the operator already typed wins
-  // over the sibling's copy -- the typed colour is never wiped.
+  // over the sibling's copy -- the typed colour is never wiped -- except the
+  // locked identity (brand, model): that is the sibling's own spelling, so a
+  // typed '0RB4165' never mints a SKU outside the model's SG-RAYBAN-RB4165-*.
   const enterVariantMode = useCallback(
     (
       product: ProductDoc,
@@ -459,7 +461,9 @@ export function useQuickAddForm() {
         return;
       }
       const typed = Object.fromEntries(
-        Object.entries(keep?.attributes || {}).filter(([, v]) => String(v ?? '').trim()),
+        Object.entries(keep?.attributes || {}).filter(
+          ([k, v]) => !seed.locked.includes(k) && String(v ?? '').trim(),
+        ),
       );
       const typedWeight = String(keep?.weight ?? '').trim();
       applyFormValues({

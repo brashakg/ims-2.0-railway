@@ -348,6 +348,45 @@ describe('F69 - the same-model chip', () => {
     expect(copiedFlag(weightInput())).toBe(false);
   });
 
+  it("keeps the model's own spelling of its brand and model, and the typed colour", async () => {
+    // The identity folds '0RB4165' onto RB4165, so the strip offers the
+    // RB4165 chip; the variant must then be RB4165 (SKU SG-RAYBAN-RB4165-710),
+    // never '0RB4165' beside Model Name 'RB4165' under SG-RAYBAN-0RB4165-710.
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(screen.getByText('Sunglass'));
+    fill(screen.getByLabelText(/^Brand Name/), 'Ray-Ban');
+    fill(screen.getByLabelText(/^Model No/), '0RB4165');
+    fill(screen.getByLabelText(/^Colour Code/), '710');
+    fill(screen.getByLabelText(/^MRP/), '7890');
+    await user.click(screen.getByRole('button', { name: 'same model chip' }));
+    await screen.findByRole('button', { name: /Save variant/ });
+    expect(screen.getByLabelText(/^Model No/)).toHaveValue('RB4165');
+    expect(screen.getByLabelText(/^Colour Code/)).toHaveValue('710');
+    await user.click(screen.getByRole('button', { name: /Save variant/ }));
+    await waitFor(() => expect(createProduct).toHaveBeenCalledTimes(1));
+    expect(createProduct.mock.calls[0][0]).toMatchObject({
+      model: 'RB4165',
+      attributes: expect.objectContaining({ model_no: 'RB4165', colour_code: '710' }),
+    });
+  });
+
+  it.each([[-1], ['-1'], ['abc'], [2.5]])(
+    "a sibling's level %s is not a level: shown as not set, never as a number",
+    async (level) => {
+      // Owner: -1 = not set, and never shows as -1 (it would also be refused
+      // by the save as LEVEL_INPUT_ERROR).
+      getProduct.mockResolvedValueOnce({ ...SOURCE_PRODUCT, reorder_levels: { S1: level } });
+      const user = userEvent.setup();
+      renderPage();
+      await sunglass(user);
+      await user.click(screen.getByRole('button', { name: 'same model chip' }));
+      await screen.findByRole('button', { name: /Save variant/ });
+      expect(reorderInput().value).toBe('');
+      expect(reviewRow('Reorder level')).toHaveTextContent('not set');
+    },
+  );
+
   it("a catalogue manager's Review never shows a level the save will not write", async () => {
     // CATALOG_MANAGER sets no shop's level (REORDER_LEVEL_ROLES): the sibling's
     // level 2 at S1 must not appear on the Review of a save that writes none.
