@@ -14,6 +14,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../../context/AuthContext';
 import { useToast } from '../../../context/ToastContext';
+import { PRODUCT_COST_ROLES } from '../../../components/common/CostCell';
 import {
   productApi,
   DuplicateProductError,
@@ -282,9 +283,9 @@ export function useQuickAddForm() {
   }, [selectedCategory]);
 
   const canAddProduct = hasRole(['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']);
-  // F35: cost price + margin are visible only to cost-authorised roles (matches
-  // the Guided wizard). CATALOG_MANAGER may set cost on this product form.
-  const canSeeCost = hasRole(['SUPERADMIN', 'ADMIN', 'ACCOUNTANT', 'CATALOG_MANAGER']);
+  // F35: cost price + margin follow the one product-cost rule (CostCell's
+  // PRODUCT_COST_ROLES = the backend's cost_mask "product" context).
+  const canSeeCost = hasRole(PRODUCT_COST_ROLES);
 
   const currentValues = useCallback(
     (): ProductFormValues => ({

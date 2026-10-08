@@ -25,7 +25,7 @@ from ._shared import (
     timedelta,
     validate_store_access,
 )
-from ...services.cost_mask import can_see_cost, mask_cost_list
+from ...services.cost_mask import mask_cost_list
 from ...services.item_events import on_hand_match
 from ...utils.ist import ist_date_str_from_stored
 from .helpers import (
@@ -128,9 +128,13 @@ async def get_stock(
 
     # Mode 2: per-unit detail for one product. Consumers (e.g. transfer
     # picker that selects specific stock_ids) want the raw stock_units rows.
+    # A unit carries the cost it was received at (GRN / opening stock): the
+    # one product-cost rule decides who sees it, here and on the ledger rows.
     if product_id:
         stock = mask_cost_list(
-            stock_repo.find_by_product_store(product_id, active_store), current_user
+            stock_repo.find_by_product_store(product_id, active_store),
+            current_user,
+            "product",
         )
         return {"items": stock, "total": len(stock)}
 
@@ -147,7 +151,7 @@ async def get_stock(
         created_by=created_by,
         include_attribution=can_see_attribution,
     )
-    return {"items": items, "total": len(items)}
+    return {"items": mask_cost_list(items, current_user, "product"), "total": len(items)}
 
 
 def _last_grn_by_product(store_id: Optional[str]) -> Dict[str, Dict]:
@@ -424,6 +428,9 @@ def _ledger_row(
         "model": model,
         "category": product.get("category", ""),
         "mrp": mrp,
+        # Per-unit cost (the Reorder dashboard's PO estimate and PO rate);
+        # get_stock strips it outside cost_mask's "product" context.
+        "cost_price": product.get("cost_price"),
         "offerPrice": offer_price,
         "offer_price": offer_price,
         "stock": on_hand,
@@ -510,7 +517,7 @@ async def list_units(
     own barcode, per physical piece. This is where those pieces are listed and
     their labels printed from. Each unit carries the label fields (brand, model,
     colour, size, MRP) so the label renderer needs no second fetch. cost_price
-    only for roles that already see cost (cost_mask.can_see_cost).
+    answers to the one product-cost rule (cost_mask "product"), as the ledger.
     """
     if not product_id and not grn_id:
         raise HTTPException(status_code=400, detail="Provide product_id or grn_id")
@@ -558,7 +565,6 @@ async def list_units(
     from ...services.product_master import existing_product_summary
 
     products: Dict[str, Dict] = {}
-    show_cost = can_see_cost(current_user)
     units = []
     for d in docs:
         pid = d.get("product_id") or ""
@@ -593,11 +599,10 @@ async def list_units(
             "colour": p.get("colour_code") or "",
             "size": p.get("size") or "",
             "mrp": p.get("mrp"),
+            "cost_price": d.get("cost_price"),
         }
-        if show_cost:
-            unit["cost_price"] = d.get("cost_price")
         units.append(unit)
-    return {"units": units, "total": len(units)}
+    return {"units": mask_cost_list(units, current_user, "product"), "total": len(units)}
 
 
 class BarcodePrintedRequest(BaseModel):
