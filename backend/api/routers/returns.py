@@ -1266,9 +1266,14 @@ def _issue_store_credit(
     bump_balance: bool = True,
     interstate: Optional[bool] = None,
     store_id: Optional[str] = None,
+    order_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Append an ISSUED credit-note ledger entry (the GSTR-1 CDNR source) and,
     by default, bump the customer's running store-credit balance.
+
+    ``order_id``: the order the note reverses, stamped on the row by a door
+    whose note has no returns doc (no RET- ref) -- the GST returns find its
+    parent there (reports.gst_itc._ledger_row_return_doc).
 
     Store attribution (`store_id`): the credit note must be booked under the
     SAME store -- hence the same GSTIN -- the parent invoice was filed under,
@@ -1349,6 +1354,8 @@ def _issue_store_credit(
     # and keep the legacy state-compare fallback.
     if isinstance(interstate, bool):
         entry["interstate"] = interstate
+    if order_id:
+        entry["order_id"] = order_id
 
     # Externally-settled (card/gateway refund): record the CDNR row but do NOT
     # add redeemable balance -> zero the delta, hold the balance, mark it.

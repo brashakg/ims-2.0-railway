@@ -3807,3 +3807,49 @@ def test_a_remap_that_died_after_settling_its_claim_is_finished_by_the_next_pres
     assert world["tasks"].open_refs(ship) == [] and world["tasks"].open_refs(seller) == []
     assert wrote == ["BV-BOK-01"]
     assert "reroute_lease_at" not in db.orders.find_one({"order_id": oid})
+
+
+# ---------------------------------------------------------------------------
+# R24 -- money panel, round 17
+# ---------------------------------------------------------------------------
+
+
+def test_a_superadmin_credit_note_on_a_held_sale_is_not_filed_either(world, monkeypatch):
+    """[MEDIUM] Round 17, item 3: the dark gate books the order SELLER_UNKNOWN
+    at the online bucket, held off GSTR-1 and GSTR-3B; its hold text says
+    'issue a credit note against invoice N'. The SUPERADMIN post-invoice
+    credit note (CN- ref, no RET- id) was filed in CDNR and netted in
+    GSTR-3B: output tax reversed on a supply never declared. The note's row
+    names its order now, so the held sale's rule finds it."""
+    from api.routers import finance as finance_mod
+    from api.routers import returns
+    from api.routers.orders import admin_edit
+    from api.routers.orders.models import SuperadminInvoiceChange
+    from database.repositories.customer_repository import CustomerRepository
+    from database.repositories.order_repository import OrderRepository
+
+    db = world["db"]
+    monkeypatch.setattr(shopify_push, "_live_or_reason", lambda _db: (False, "writes_disabled"))
+    _res, held = _book(world, _order(61140))
+    assert held["store_id"] == "BV-ONLINE-01" and held["invoice_number"] and held["fulfillment_hold"]
+    monkeypatch.setattr(admin_edit, "get_order_repository", lambda: OrderRepository(db.orders))
+    monkeypatch.setattr(admin_edit, "_get_db", lambda: db)
+    monkeypatch.setattr(admin_edit, "_write_order_edit_audit", lambda **k: None)
+    monkeypatch.setattr(finance_mod, "check_period_locked", lambda *a, **k: None)
+    monkeypatch.setattr(returns, "_get_db", lambda: db)
+    monkeypatch.setattr(returns, "get_customer_repository", lambda: CustomerRepository(db.customers))
+
+    out = asyncio.run(admin_edit.superadmin_invoice_change(
+        held["order_id"],
+        SuperadminInvoiceChange(mode="CREDIT_NOTE", reason="Half off, agreed", cart_discount_percent=50),
+        current_user={"user_id": "u1", "roles": ["SUPERADMIN"], "active_store_id": "BV-ONLINE-01"}))
+
+    assert out["note_type"] == "CREDIT_NOTE", out
+    assert db.credit_note_ledger.find_one({"type": "ISSUED", "store_id": "BV-ONLINE-01"})["tax"] > 0
+    filed = _gstr1(world, monkeypatch, held, "BV-ONLINE-01")
+    assert filed["b2cs"] == [] and filed["cdnr"] == [], filed["cdnr"]
+    assert [i for i in filed["validation"]["issues"] if "credit note" in i["issue"]]
+    g3 = _gstr3b(world, monkeypatch, held, "BV-ONLINE-01")
+    assert g3["outwardTaxableValue"] == 0.0
+    assert g3["creditNotes"] == {"integratedTax": 0.0, "centralTax": 0.0,
+                                 "stateTax": 0.0, "taxableValue": 0.0}, g3["creditNotes"]
