@@ -6,7 +6,7 @@
 // lifecycle from GET /vendors/purchase-orders/{po_id}/timeline (PR #869):
 //   header  : PO number + vendor + PurchaseStatusChip
 //   timeline: chronological events in the owner vocabulary
-//             (Ordered / Sent / Box received / On shelf / Bill settled)
+//             (Ordered / Sent / Box received / On shelf / Bill booked)
 //   lists   : raw linked GRNs + purchase invoices with their statuses
 //   footer  : ONE derived next-step action --
 //             DRAFT                      -> "Send to vendor" (parent callback;

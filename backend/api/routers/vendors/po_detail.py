@@ -146,10 +146,12 @@ async def get_po_timeline(
     except Exception as e:  # noqa: BLE001
         logger.warning("[VENDOR] po-timeline grn lookup failed: %s", e)
 
-    # Purchase invoices linked to this PO or any of its GRNs -> "Bill settled".
+    # Purchase invoices linked to this PO or any of its GRNs -> "Bill booked".
     # A bill's amount and paid status are supplier payments: the one payables
     # rule (owner ruling 2026-09-29). Anyone else learns only that a bill
-    # exists and its number.
+    # exists and its number -- so the label states the booking, never payment
+    # ("Bill settled" told a store manager an OUTSTANDING bill was paid once
+    # the status qualifier was hidden from him).
     show_bills = can_see_cost(current_user, "payables")
     invoices_out: list = []
     try:
@@ -180,7 +182,7 @@ async def get_po_timeline(
                 events.append(
                     {
                         "kind": "bill_settled",
-                        "label": "Bill settled",
+                        "label": "Bill booked",
                         "at": r.get("created_at"),
                         "ref": r.get("invoice_number") or r.get("bill_number"),
                         "actor": r.get("created_by"),
