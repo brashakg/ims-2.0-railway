@@ -147,6 +147,13 @@ const blankNewProduct = (): ComposerNewProduct => ({
   mrp: 0,
 });
 
+/** The size box a category's catalogue records -- a frame's eye size, an
+ *  accessory's size -- or none: anywhere else the server drops a size (audit
+ *  C2/C3), so the form neither shows one nor sends or echoes a hidden one. */
+function sizeFieldFor(category: string) {
+  return getCategoryFields(category).find((f) => f.name === 'lens_size' || f.name === 'size');
+}
+
 function NewProductFields({
   value,
   onChange,
@@ -157,11 +164,7 @@ function NewProductFields({
   onCancel: () => void;
 }) {
   const set = (patch: Partial<ComposerNewProduct>) => onChange({ ...value, ...patch });
-  // A size box only where the catalogue records one (a frame's eye size, an
-  // accessory's size): anywhere else the server drops it (audit C2/C3).
-  const sizeField = getCategoryFields(value.category).find(
-    (f) => f.name === 'lens_size' || f.name === 'size',
-  );
+  const sizeField = sizeFieldFor(value.category);
   return (
     <div className="p-2 bg-amber-50 border border-amber-200 rounded-lg space-y-2">
       <div className="flex items-center justify-between">
@@ -549,7 +552,13 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
                 product_id: it.product_id,
                 product_name: it.product_name,
                 sku: it.sku,
-                new_product: it.new_product,
+                // A size typed under one category stays in the form's state after
+                // switching to a category with no size box: never sent, never
+                // echoed back in the "Use it?" question (R1-89).
+                new_product:
+                  it.new_product && !sizeFieldFor(it.new_product.category)
+                    ? { ...it.new_product, size: '' }
+                    : it.new_product,
                 quantity: it.quantity,
                 unit_price: it.unit_price,
               }));

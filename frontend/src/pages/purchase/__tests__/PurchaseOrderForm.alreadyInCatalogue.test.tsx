@@ -123,6 +123,35 @@ describe('Create PO - a typed-in item that is already in the catalogue (audit C2
     expect(screen.queryByLabelText('New item size')).toBeNull();
   });
 
+  // R1-89: a size typed under a frame stays in the form's state after the
+  // category changes to one with no size box -- it is neither sent nor echoed.
+  it('a size the form no longer shows is never sent nor echoed in "use it?"', async () => {
+    createPO
+      .mockRejectedValueOnce(alreadyInCatalogue())
+      .mockResolvedValueOnce({ po_id: 'po-1', po_number: 'PO-BV-DHN-02-0001' });
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    render(<PurchaseOrderForm suppliers={[vendor]} existingPOCount={0} onClose={() => {}} onCreated={() => {}} />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    fireEvent.change(screen.getByLabelText('Vendor'), { target: { value: 'v1' } });
+    fireEvent.click(screen.getByRole('button', { name: /not in the catalogue\?/i }));
+    fireEvent.change(screen.getByLabelText('New item category'), { target: { value: 'FR' } });
+    fireEvent.change(screen.getByLabelText('New item brand'), { target: { value: 'Carrera' } });
+    fireEvent.change(screen.getByLabelText('New item model number'), { target: { value: 'CA 8895' } });
+    fireEvent.change(screen.getByLabelText('New item colour code'), { target: { value: '807' } });
+    fireEvent.change(screen.getByLabelText('New item size'), { target: { value: '54' } });
+    fireEvent.change(screen.getByLabelText('New item category'), { target: { value: 'WT' } });
+    expect(screen.queryByLabelText('New item size')).toBeNull();
+    fireEvent.change(screen.getByLabelText('New item MRP'), { target: { value: '6990' } });
+    fireEvent.change(screen.getByLabelText('Unit cost for line 1'), { target: { value: '3200' } });
+    fireEvent.click(screen.getByRole('button', { name: /create as draft/i }));
+
+    await waitFor(() => expect(createPO).toHaveBeenCalledTimes(2));
+    expect(createPO.mock.calls[0][0].items[0].new_product.size || '').toBe('');
+    expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/you typed carrera ca 8895 807\./i));
+  });
+
   it('on "no" it creates nothing', async () => {
     createPO.mockRejectedValueOnce(alreadyInCatalogue());
     vi.spyOn(window, 'confirm').mockReturnValue(false);
