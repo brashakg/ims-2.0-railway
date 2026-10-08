@@ -1,12 +1,13 @@
 """The till and the counter lookup find multi-word names (owner 2026-10-08).
 
-Every typed word must START A WORD of a product's brand, model or variant (the
-field start, or after a space, hyphen, slash, dot or underscore), so "Air
-Optix", "Acuvue Oasys" and "Ray Ban Aviator" are found while "ray" still never
-finds "Spray Cleaner" or "Gunmetal Gray". Codes (SKU, barcode) keep matching
-from their start, and a field-start hit still comes first. Driven through GET /api/v1/products?search=
-(the till's product query; the counter lookup runs the same search_products)
-over mongomock.
+Every typed word must START A WORD of a product's brand or model (the field
+start, or after a space, hyphen, slash, dot or underscore), so "Air Optix",
+"Acuvue Oasys" and "Ray Ban Aviator" are found while "ray" still never finds
+"Spray Cleaner" or "Gunmetal Gray". Codes (SKU, variant, barcode) keep matching
+from their start, and a field-start hit still comes first. Driven through GET
+/api/v1/products?search= (the till's product query; the counter lookup runs the
+same search_products) over mongomock, and once over the fallback mock DB that
+local no-Mongo mode runs on.
 
 Run: JWT_SECRET_KEY=test ENVIRONMENT=test python -m pytest backend/tests/test_product_search_word_start.py -q
 """
@@ -95,13 +96,19 @@ def catalogue(db):
 @pytest.mark.parametrize(
     "q, pid",
     [("Air Optix", "CL-AIR"), ("air optix", "CL-AIR"), ("optix", "CL-AIR"),
-     ("Acuvue Oasys", "CL-OAS"), ("Ray Ban Aviator", "SG-AVI"),
-     ("aviator black", "SG-AVI")],
+     ("Acuvue Oasys", "CL-OAS"), ("Ray Ban Aviator", "SG-AVI")],
 )
 def test_a_multi_word_name_is_found(catalogue, q, pid):
     ids, total = _ids(catalogue, q)
     assert ids == [pid]
     assert total == 1
+
+
+def test_variant_is_a_code_matched_from_its_start(catalogue):
+    # One rule per field: the purchase-order box (#1170) also treats variant
+    # as a code, so "black" is not a word-start hit on "Matte Black".
+    assert _ids(catalogue, "matte") == (["SG-AVI"], 1)
+    assert _ids(catalogue, "black") == ([], 0)
 
 
 def test_every_typed_word_is_required(catalogue):
@@ -147,3 +154,14 @@ def test_pages_split_across_the_two_tiers_and_count_matches(db):
     page2, total2 = _ids(db, "RB3025", skip=1, limit=1)
     assert (page1, page2) == (["SG-CODE"], ["SG-WORD"])
     assert total1 == total2 == 2
+
+
+def test_every_product_search_uses_the_same_rule(catalogue):
+    # The rule is the repository's, not a call's: a plain search over the
+    # product fields (as any other ranked search builds on) finds what the
+    # till finds.
+    from database.repositories.product_repository import ProductRepository
+
+    repo = ProductRepository(catalogue.products)
+    plain = repo.search("optix", list(repo.SEARCH_FIELDS), {"is_active": True})
+    assert [d["product_id"] for d in plain] == ["CL-AIR"]

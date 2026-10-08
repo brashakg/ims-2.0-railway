@@ -319,7 +319,6 @@ class BaseRepository(ABC, Generic[T]):
         filter: Dict = None,
         skip: int = 0,
         limit: int = 100,
-        word_fields: tuple = (),
     ) -> List[Dict]:
         """
         Tokenized text search across fields.
@@ -330,11 +329,11 @@ class BaseRepository(ABC, Generic[T]):
         "Fastrack P357" finds a doc with brand="Fastrack" + model="P357BK1".
 
         A token matches a field from its START (^), so a SKU like "P357BK1"
-        matches P357BK1* but not RAY-P357BK1. In `word_fields` it may instead
-        start ANY word of the field ("optix" finds "Air Optix", "ban" finds
-        "Ray-Ban"), and "ray" still never finds "Spray" or "Gray"; the
-        field-start hits come first, so a wider rule never pushes an exact SKU
-        or a scanned barcode down the list.
+        matches P357BK1* but not RAY-P357BK1. In the repository's
+        WORD_SEARCH_FIELDS it may instead start ANY word of the field ("optix"
+        finds "Air Optix", "ban" finds "Ray-Ban"), and "ray" still never finds
+        "Spray" or "Gray"; the field-start hits come first, so a wider rule
+        never pushes an exact SKU or a scanned barcode down the list.
 
         Args:
             text: Search text (one or more whitespace-separated tokens)
@@ -342,41 +341,50 @@ class BaseRepository(ABC, Generic[T]):
             filter: Additional filter
             skip / limit: pagination passthrough to find_many. Defaults match
                 find_many's own defaults so existing callers are unchanged.
-            word_fields: the subset of `fields` searched by word start.
 
         Returns:
             Matching documents
         """
         try:
-            query = self._search_query(text, fields, filter, word_fields)
-            head_q = self._search_query(text, fields, filter)
+            query = self._search_query(text, fields, filter)
+            head_q = self._search_query(text, fields, filter, word_fields=())
             if head_q == query:
                 return self.find_many(query, skip=skip, limit=limit)
-            # head_q is a subset of query: its hits first, then the rest of
-            # query -- together exactly what search_count counts.
-            head = self.find_many(head_q, skip=skip, limit=limit)
-            if limit and len(head) >= limit:
-                return head
-            tail_q = {"$and": [query, {"$nor": [head_q]}]}
-            return head + self.find_many(
-                tail_q,
-                skip=max(0, skip - self.count(head_q)),
-                limit=limit - len(head) if limit else 0,
-            )
+            return self.find_ranked(query, head_q, skip=skip, limit=limit)
         except Exception as e:
             print(f"Error searching {self.entity_name}s: {e}")
             return []
 
-    def search_count(
-        self, text: str, fields: List[str], filter: Dict = None, word_fields: tuple = ()
-    ) -> int:
+    def find_ranked(
+        self, query: Dict, first: Dict, skip: int = 0, limit: int = 100
+    ) -> List[Dict]:
+        """One page of `query`'s hits, those also matching `first` ranked
+        first. Both halves sit inside `query`, so paging through returns every
+        hit exactly once and count(query) is the true total. limit=0 = all.
+        The one head-then-rest split: a ranked search calls this."""
+        head_q = {"$and": [query, first]}
+        head = self.find_many(head_q, skip=skip, limit=limit)
+        if limit and len(head) >= limit:
+            return head
+        return head + self.find_many(
+            {"$and": [query, {"$nor": [first]}]},
+            skip=max(0, skip - self.count(head_q)),
+            limit=limit - len(head) if limit else 0,
+        )
+
+    def search_count(self, text: str, fields: List[str], filter: Dict = None) -> int:
         """Count of documents the SAME search() query would match (pre-slice),
         so a paginated caller can render a true total. Fail-soft 0."""
         try:
-            return self.count(self._search_query(text, fields, filter, word_fields))
+            return self.count(self._search_query(text, fields, filter))
         except Exception as e:
             print(f"Error counting {self.entity_name} search: {e}")
             return 0
+
+    # Fields a search token may match at ANY word start (the rest match from
+    # their start). Set per repository, so a field has ONE rule wherever it is
+    # searched; none by default.
+    WORD_SEARCH_FIELDS: tuple = ()
 
     # A word starts the field or follows a space, hyphen, slash, dot or
     # underscore. ponytail: not index-assisted like ^ is; a scan is fine at
@@ -384,11 +392,16 @@ class BaseRepository(ABC, Generic[T]):
     _WORD_START = r"(?:^|[\s\-/._])"
 
     def _search_query(
-        self, text: str, fields: List[str], filter: Dict = None, word_fields: tuple = ()
+        self, text: str, fields: List[str], filter: Dict = None, word_fields=None
     ) -> Dict:
         """Build the tokenized search query search() executes. Shared with
-        search_count so the list and its total can never drift."""
+        search_count so the list and its total can never drift. word_fields
+        defaults to the repository's WORD_SEARCH_FIELDS; () = from the start
+        only (search()'s first-ranked hits)."""
         import re
+
+        if word_fields is None:
+            word_fields = self.WORD_SEARCH_FIELDS
 
         tokens = [t for t in (text or "").split() if t]
         if not tokens:

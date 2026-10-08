@@ -48,11 +48,11 @@ class ProductRepository(BaseRepository):
     # Tokenized-search fields. `barcode` is ADDITIVE (Catalog Manager scanner
     # passthrough): it can only ADD matches for existing callers, never remove.
     SEARCH_FIELDS = ("brand", "model", "sku", "variant", "barcode")
-    # Name fields a typed word may match at ANY word start, so "Air Optix",
-    # "Acuvue Oasys" and "Ray Ban Aviator" are found (owner-approved for the
-    # till and the counter lookup, 2026-10-08). Codes (sku, barcode) keep
-    # matching from their start.
-    WORD_SEARCH_FIELDS = ("brand", "model", "variant")
+    # The NAME fields a typed word may match at ANY word start, so the till
+    # and the counter lookup find "Air Optix", "Acuvue Oasys" and "Ray Ban
+    # Aviator" (owner-approved 2026-10-08). The codes (sku, variant, barcode)
+    # keep matching from their start.
+    WORD_SEARCH_FIELDS = ("brand", "model")
 
     @property
     def entity_name(self) -> str:
@@ -200,7 +200,6 @@ class ProductRepository(BaseRepository):
             self._search_extra_filter(category, is_active, created_by),
             skip=skip,
             limit=limit,
-            word_fields=self.WORD_SEARCH_FIELDS,
         )
 
     def count_search_products(
@@ -215,7 +214,6 @@ class ProductRepository(BaseRepository):
             query,
             list(self.SEARCH_FIELDS),
             self._search_extra_filter(category, is_active, created_by),
-            word_fields=self.WORD_SEARCH_FIELDS,
         )
 
     def cataloguer_stats(self) -> List[Dict]:

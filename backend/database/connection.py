@@ -254,9 +254,10 @@ class DatabaseConnection:
         _idx("products", "is_active", background=True)
         _idx("products", [("store_id", 1), ("category", 1)], background=True)
         # Search indexes for the searchable fields (brand, model, sku, variant).
-        # search() anchors code fields with ^ so MongoDB can use these; brand,
-        # model and variant also match at any word start (product
-        # WORD_SEARCH_FIELDS), which scans. Compound indexes on each field + is_active for the common filter.
+        # search() anchors code fields with ^ so MongoDB can use these; brand
+        # and model also match at any word start (product WORD_SEARCH_FIELDS),
+        # which scans. Compound indexes on each field + is_active for the
+        # common filter.
         _idx("products", [("brand", 1), ("is_active", 1)], background=True)
         _idx("products", [("model", 1), ("is_active", 1)], background=True)
         _idx("products", [("variant", 1), ("is_active", 1)], background=True)
