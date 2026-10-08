@@ -82,6 +82,15 @@ export interface ComposerLine {
   // Set true once the operator (or a caller default) has typed a cost -- guards
   // the last-cost prefill from ever overwriting a value someone chose.
   costTouched?: boolean;
+  /** The manager is in this cost box right now (set on focus, cleared on
+   *  blur). A last-cost answer that lands meanwhile only captions the line:
+   *  rewriting the box under the caret dropped the selection, so '2950'
+   *  typed into a box that had just become 3100 read 31002950 (audit F67).
+   *  Leaving it without typing puts that last-paid price in (takeLastPaid). */
+  costFocused?: boolean;
+  /** The picked product's own catalogue cost -- the seed the box falls back
+   *  to when the chosen vendor has no price history for it. */
+  catalogCost?: number;
   // Populated by the last-cost lookup so we can render the muted caption. Not
   // sent to the server.
   lastPaid?: { unitPrice: number; date?: string | null } | null;
@@ -155,6 +164,9 @@ export interface PurchaseOrderComposerProps {
   onVendorChange?: (vendorId: string) => void;
   /** Whether a line may be removed. Manual form: yes (min 1). Buy Desk: no. */
   allowRemoveLine?: boolean;
+  /** Told whether the operator has entered anything since the form opened,
+   *  so the caller can ask before throwing it away (audit F87). */
+  onDirtyChange?: (dirty: boolean) => void;
   onSubmit: (payload: ComposerSubmitPayload) => Promise<void>;
   submitLabel?: string;
   submittingLabel?: string;
@@ -215,17 +227,19 @@ export function applyPickedProduct(
     detail?: string;
   },
 ): ComposerLine {
-  const keepCost = line.costTouched || line.unitCost > 0;
+  const catalogCost = picked.costPrice && picked.costPrice > 0 ? picked.costPrice : 0;
   const { taxRate, hsn, gstResolved, gstMissing } = gstForProduct(picked);
   return {
     ...line,
     productId: picked.productId,
     productName: picked.productName,
     sku: picked.sku,
-    // Seed from the catalog cost only when the line still has none; the buyer
-    // can always override. This is NOT the last-paid prefill (that runs off the
-    // vendor lookup) -- it's the catalog's own cost_price fallback.
-    unitCost: keepCost ? line.unitCost : picked.costPrice && picked.costPrice > 0 ? picked.costPrice : 0,
+    // Seed from the catalogue cost unless the buyer typed one. The seed is the
+    // form's own guess, so the vendor's last-paid lookup still replaces it
+    // (audit F22) -- and a cost auto-filled for the PREVIOUS product is not
+    // carried over to this one.
+    unitCost: line.costTouched ? line.unitCost : catalogCost,
+    catalogCost,
     // The picked product carries its own GST rate + HSN. Nothing is guessed:
     // a product with neither leaves the line unresolved and visibly flagged.
     taxRate,
@@ -237,12 +251,56 @@ export function applyPickedProduct(
   };
 }
 
+// The line's product is gone -- cleared ("Change product") or swapped for an
+// item typed in because it is not catalogued. Everything that came WITH that
+// product goes with it, including a cost the FORM filled for it (catalogue
+// seed or last paid): left behind, it would be sent as the price of an item
+// nobody priced. A cost the buyer typed stays -- it is theirs.
+export function releaseProduct(line: ComposerLine, patch: Partial<ComposerLine> = {}): ComposerLine {
+  return {
+    ...line,
+    productId: '',
+    productName: '',
+    sku: '',
+    newProduct: null,
+    taxRate: 0,
+    hsn: null,
+    productDetail: '',
+    gstResolved: false,
+    gstMissing: null,
+    lastPaid: null,
+    catalogCost: 0,
+    unitCost: line.costTouched ? line.unitCost : 0,
+    ...patch,
+  };
+}
+
+// The ONE rule for when the form puts the last price paid to this vendor in
+// the cost box (owner: it wins over the catalogue cost): there is one, the
+// manager has not typed a cost, and they are not in the box right now. Run
+// when the answer lands AND when they leave the box, so the box ends up the
+// same whichever comes first -- and whatever the other lines do.
+function takeLastPaid(l: ComposerLine): ComposerLine {
+  return l.lastPaid && !l.costTouched && !l.costFocused
+    ? { ...l, unitCost: l.lastPaid.unitPrice }
+    : l;
+}
+
 // ISO string -> "4 Jul 2026" (human-friendly, fail-soft to '' on garbage).
 function formatPaidDate(raw?: string | null): string {
   if (!raw) return '';
   const d = new Date(raw);
   if (Number.isNaN(d.getTime())) return '';
   return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+}
+
+// What the operator has put on the form, as one comparable string.
+function enteredSig(lines: ComposerLine[], expectedDate: string, notes: string): string {
+  return JSON.stringify([
+    expectedDate,
+    notes.trim(),
+    lines.map((l) => [l.productId, l.newProduct ?? null, l.quantity, l.costTouched ? l.unitCost : null]),
+  ]);
 }
 
 const blankLine = (): ComposerLine => ({
@@ -279,6 +337,7 @@ export function PurchaseOrderComposer({
   onAddLine,
   onVendorChange,
   allowRemoveLine = false,
+  onDirtyChange,
   onSubmit,
   submitLabel = 'Create as Draft',
   submittingLabel = 'Creating...',
@@ -296,6 +355,15 @@ export function PurchaseOrderComposer({
   // Synchronous re-entry guard: `disabled={saving}` only bites next render, so a
   // same-tick double-click could otherwise fire two POSTs.
   const submittingRef = useRef(false);
+
+  // Audit F87: has the operator entered anything since the form opened? Only
+  // what THEY put there counts -- a cost the form filled itself (catalogue /
+  // last paid) does not, and a preselected vendor is where the form started.
+  const [pristine] = useState(() => enteredSig(lines, expectedDate, notes));
+  const dirty = vendorId !== initialVendorId || enteredSig(lines, expectedDate, notes) !== pristine;
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
 
   // A caller can preselect a vendor asynchronously (Buy Desk resolves the single
   // preferred vendor only after the active vendor list loads). Adopt it -- but
@@ -330,49 +398,54 @@ export function PurchaseOrderComposer({
 
   // ------------------------------------------------------------------------
   // COST PREFILL (Phase 2C). When a vendor is chosen AND lines carry products,
-  // batch every product_id into ONE getLastCost call and, for each line whose
-  // cost is still untouched/blank, fill it from the last agreed price and stash
-  // the caption. Never overwrites a value the operator typed. Re-runs when the
-  // vendor changes or a new product appears. Fail-soft: empty -> no caption.
+  // batch every product_id into ONE getLastCost call. EVERY line gets the
+  // caption with the last price agreed with THIS vendor -- a typed cost too,
+  // so the buyer sees what they are bargaining against. Only a line whose
+  // cost the operator has not typed has its box filled, over the catalogue
+  // seed too (audit F22: the seed used to block the lookup, so it never ran).
+  // Re-runs when the vendor changes or a new product appears. Fail-soft: no
+  // history -> the seed stays, no caption.
   // ------------------------------------------------------------------------
-  // Signature of "which products need a price under which vendor" -- lets us
-  // debounce/guard so adding lines one at a time doesn't spam the endpoint and
-  // we don't refetch when nothing relevant changed.
-  const prefillKey = useMemo(() => {
-    const pids = lines
-      .filter((l) => l.productId && !l.costTouched && !(l.unitCost > 0))
-      .map((l) => l.productId)
-      .sort();
-    return `${vendorId}::${pids.join(',')}`;
-  }, [vendorId, lines]);
-
-  const lastPrefillKey = useRef<string>('');
+  // Signature of "which products need a price under which vendor": the
+  // lookup runs whenever it changes, debounced so adding lines one at a time
+  // doesn't spam the endpoint. A string, so a Qty or cost keystroke (same
+  // products) does not restart the debounce and hold the answer back until
+  // the manager is already in the cost box. No memory of the last answered
+  // set: a product cleared and picked back lost its price with the pick, so
+  // coming back to an earlier set is asked again too.
+  const prefillIds = useMemo(
+    () =>
+      lines
+        .filter((l) => l.productId)
+        .map((l) => l.productId)
+        .sort()
+        .join(','),
+    [lines],
+  );
 
   useEffect(() => {
-    if (!vendorId) return;
-    if (prefillKey === lastPrefillKey.current) return;
-
-    const productIds = lines
-      .filter((l) => l.productId && !l.costTouched && !(l.unitCost > 0))
-      .map((l) => l.productId);
-    if (productIds.length === 0) {
-      lastPrefillKey.current = prefillKey;
-      return;
-    }
+    if (!vendorId || !prefillIds) return;
+    const productIds = prefillIds.split(',');
 
     let cancelled = false;
     const t = setTimeout(async () => {
-      const { costs } = await vendorsApi.getLastCost(vendorId, productIds);
+      let costs: Awaited<ReturnType<typeof vendorsApi.getLastCost>>['costs'];
+      try {
+        ({ costs } = await vendorsApi.getLastCost(vendorId, productIds));
+      } catch {
+        // The lookup failed: every line keeps the cost it has (the catalogue
+        // seed) with no caption; the next product or vendor change asks
+        // again. Never blocks the order.
+        return;
+      }
       if (cancelled) return;
-      lastPrefillKey.current = prefillKey;
       setLines((prev) =>
         prev.map((l) => {
-          // Re-check the guard against CURRENT state: the operator may have
-          // typed a cost while the request was in flight.
-          if (!l.productId || l.costTouched || l.unitCost > 0) return l;
-          const hit = costs[l.productId];
+          const hit = l.productId ? costs[l.productId] : undefined;
           if (!hit || !(hit.unit_price > 0)) return l;
-          return { ...l, unitCost: hit.unit_price, lastPaid: { unitPrice: hit.unit_price, date: hit.date } };
+          // Re-checked against CURRENT state: the operator may have typed a
+          // cost -- or be in the box -- while the request was in flight.
+          return takeLastPaid({ ...l, lastPaid: { unitPrice: hit.unit_price, date: hit.date } });
         }),
       );
     }, 250);
@@ -381,20 +454,25 @@ export function PurchaseOrderComposer({
       cancelled = true;
       clearTimeout(t);
     };
-  }, [prefillKey, vendorId, lines]);
+  }, [prefillIds, vendorId]);
 
-  // When the vendor changes, a cost we AUTO-prefilled from the previous vendor's
-  // history no longer applies -- reset it to blank (and drop its caption) so the
-  // new vendor's lookup repaints it. Operator-typed costs (costTouched) are left
-  // exactly as chosen; we never overwrite a value someone entered.
+  // When the vendor changes, the previous vendor's price no longer applies:
+  // every caption goes (a typed cost must not sit under another vendor's
+  // price either), and a cost we AUTO-prefilled goes back to the catalogue
+  // seed, so the new vendor's lookup repaints both. Operator-typed costs
+  // (costTouched) are left exactly as chosen; we never overwrite a value
+  // someone entered.
   const prevVendorRef = useRef(vendorId);
   useEffect(() => {
     if (prevVendorRef.current === vendorId) return;
     prevVendorRef.current = vendorId;
-    lastPrefillKey.current = '';
     setLines((prev) =>
       prev.map((l) =>
-        l.lastPaid && !l.costTouched ? { ...l, unitCost: 0, lastPaid: null } : l,
+        !l.lastPaid
+          ? l
+          : l.costTouched
+            ? { ...l, lastPaid: null }
+            : { ...l, unitCost: l.catalogCost ?? 0, lastPaid: null },
       ),
     );
   }, [vendorId]);
@@ -554,31 +632,18 @@ export function PurchaseOrderComposer({
                     pickProduct: (p) =>
                       setLines((prev) => prev.map((l, i) => (i === index ? applyPickedProduct(l, p) : l))),
                     clearProduct: () =>
-                      updateLine(index, {
-                        productId: '',
-                        productName: '',
-                        sku: '',
-                        taxRate: 0,
-                        hsn: null,
-                        productDetail: '',
-                        gstResolved: false,
-                        gstMissing: null,
-                        newProduct: null,
-                        lastPaid: null,
-                      }),
+                      setLines((prev) => prev.map((l, i) => (i === index ? releaseProduct(l) : l))),
                     setNewProduct: (np) =>
-                      updateLine(index, {
-                        newProduct: np,
-                        productId: '',
-                        productName: np ? `${np.brand} ${np.model}`.trim() : '',
-                        sku: '',
-                        taxRate: 0,
-                        hsn: null,
-                        productDetail: '',
-                        gstResolved: false,
-                        gstMissing: null,
-                        lastPaid: null,
-                      }),
+                      setLines((prev) =>
+                        prev.map((l, i) =>
+                          i === index
+                            ? releaseProduct(l, {
+                                newProduct: np,
+                                productName: np ? `${np.brand} ${np.model}`.trim() : '',
+                              })
+                            : l,
+                        ),
+                      ),
                   })}
                 </div>
                 <div className="grid grid-cols-12 gap-2 items-start">
@@ -588,6 +653,8 @@ export function PurchaseOrderComposer({
                       type="number"
                       min="1"
                       value={line.quantity}
+                      // Audit F67: a tap selects the 1, so typing 4 gives 4, not 14.
+                      onFocus={(e) => e.target.select()}
                       onChange={(e) => updateLine(index, { quantity: parseInt(e.target.value) || 0 })}
                       className="input-field text-sm"
                       aria-label={`Quantity for line ${index + 1}`}
@@ -600,6 +667,15 @@ export function PurchaseOrderComposer({
                       min="0"
                       step="0.01"
                       value={line.unitCost}
+                      onFocus={(e) => {
+                        e.target.select();
+                        if (!line.costFocused) updateLine(index, { costFocused: true });
+                      }}
+                      onBlur={() =>
+                        setLines((prev) =>
+                          prev.map((l, i) => (i === index ? takeLastPaid({ ...l, costFocused: false }) : l)),
+                        )
+                      }
                       onChange={(e) =>
                         updateLine(index, {
                           unitCost: parseFloat(e.target.value) || 0,
@@ -609,10 +685,11 @@ export function PurchaseOrderComposer({
                       className="input-field text-sm"
                       aria-label={`Unit cost for line ${index + 1}`}
                     />
-                    {line.lastPaid && paidDate ? (
+                    {line.lastPaid ? (
                       <p className="mt-1 text-xs text-gray-400">
                         last paid {'₹'}
-                        {line.lastPaid.unitPrice.toLocaleString('en-IN')} on {paidDate}
+                        {line.lastPaid.unitPrice.toLocaleString('en-IN')}
+                        {paidDate ? ` on ${paidDate}` : ''}
                       </p>
                     ) : null}
                   </div>

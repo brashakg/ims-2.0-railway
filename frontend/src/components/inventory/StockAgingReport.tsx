@@ -34,12 +34,16 @@ interface AgingProduct {
   value: number | null;
   /** Units with no cost: they add Rs 0 to `value` and are said, not hidden. */
   uncostedUnits: number;
-  daysInStock: number;
+  // null = unknown arrival date (legacy stock): old by the server's one rule
+  // (audit F54), so it ages as the oldest, never as 0 days.
+  daysInStock: number | null;
   lastSaleDate?: string;
   salesLast30Days: number;
   salesLast90Days: number;
   turnoverRate: number;
-  classification: 'A' | 'B' | 'C'; // A=Fast, B=Medium, C=Slow
+  // A=Fast, B=Medium, C=Slow. NEW = younger than the grace window with no
+  // sales yet - no verdict until it has had its chance to sell (audit F54).
+  classification: 'A' | 'B' | 'C' | 'NEW';
   ageCategory: '0-30' | '31-60' | '61-90' | '91-180' | '180+';
 }
 
@@ -78,7 +82,7 @@ export function StockAgingReport() {
         quantity: p.quantity || 0,
         value: p.value ?? null,
         uncostedUnits: p.uncostedUnits || 0,
-        daysInStock: p.daysInStock || 0,
+        daysInStock: p.daysInStock ?? null,
         lastSaleDate: p.lastSaleDate || undefined,
         salesLast30Days: p.salesLast30Days || 0,
         salesLast90Days: p.salesLast90Days || 0,
@@ -131,15 +135,16 @@ export function StockAgingReport() {
   // lakh up, lakhs.
   const tiedCapitalText = (n: number) =>
     Math.round(n) < 100000 ? rupees(n) : `₹${(n / 100000).toFixed(1)}L`;
-  const averageAge =
-    products.reduce((sum, p) => sum + p.daysInStock, 0) / products.length || 0;
-  const oldStockCount = products.filter((p) => p.daysInStock > 90).length;
+  const knownAges = products.flatMap((p) => (p.daysInStock === null ? [] : [p.daysInStock]));
+  const averageAge = knownAges.reduce((sum, d) => sum + d, 0) / knownAges.length || 0;
+  const oldStockCount = products.filter((p) => p.daysInStock === null || p.daysInStock > 90).length;
 
   const getClassificationBadge = (classification: AgingProduct['classification']) => {
     const config = {
       A: { label: 'Fast Mover', color: 'bg-green-50 text-green-700 border-green-200' },
       B: { label: 'Medium Mover', color: 'bg-amber-50 text-amber-700 border-amber-200' },
       C: { label: 'Slow Mover', color: 'bg-red-50 text-red-700 border-red-200' },
+      NEW: { label: 'New stock', color: 'bg-gray-50 text-gray-700 border-gray-200' },
     };
 
     return (
@@ -151,7 +156,8 @@ export function StockAgingReport() {
     );
   };
 
-  const getAgeBadge = (days: number) => {
+  const getAgeBadge = (days: number | null) => {
+    if (days === null) return { color: 'text-red-600', icon: '⬤' };
     if (days <= 30) return { color: 'text-green-600', icon: '✓' };
     if (days <= 60) return { color: 'text-blue-600', icon: '○' };
     if (days <= 90) return { color: 'text-amber-600', icon: '△' };
@@ -173,7 +179,7 @@ export function StockAgingReport() {
       Category: p.category,
       Classification: p.classification,
       'Age Category': p.ageCategory,
-      'Days In Stock': p.daysInStock,
+      'Days In Stock': p.daysInStock ?? 'Unknown',
       Quantity: p.quantity,
       'Value at cost (Rs)': p.value ?? '',
       'Units with no cost': p.value == null ? '' : p.uncostedUnits,
@@ -486,11 +492,13 @@ export function StockAgingReport() {
                         <div className="flex flex-col items-center gap-1">
                           <span
                             className={`text-xl font-bold ${ageBadge.color}`}
-                            title={`${product.daysInStock} days`}
+                            title={product.daysInStock === null ? 'Arrival date unknown (legacy stock)' : `${product.daysInStock} days`}
                           >
                             {ageBadge.icon}
                           </span>
-                          <span className="text-xs text-gray-500">{product.daysInStock}d</span>
+                          <span className="text-xs text-gray-500">
+                            {product.daysInStock === null ? 'Unknown' : `${product.daysInStock}d`}
+                          </span>
                         </div>
                       </td>
                       <td className="px-4 py-3 text-center">

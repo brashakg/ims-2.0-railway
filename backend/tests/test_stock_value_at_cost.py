@@ -439,7 +439,9 @@ def _seed_uncosted(db) -> None:
         return {
             "_id": sid, "stock_id": sid, "product_id": pid, "store_id": STORE,
             "barcode": f"BV{sid}", "quantity": 1, "status": status,
-            "created_at": now - timedelta(days=10), **cost,
+            # Past the aging grace window (#1169, F54), so an unsold product
+            # gets its slow-mover verdict rather than NEW.
+            "created_at": now - timedelta(days=120), **cost,
         }
 
     db["stock_units"].insert_many(

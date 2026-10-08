@@ -627,6 +627,13 @@ class _GRNRepo:
         self.created.append(doc)
         return doc
 
+    def update(self, grn_id, fields):
+        for d in self.created:
+            if d.get("grn_id") == grn_id:
+                d.update(fields)
+                return True
+        return False
+
     def find_by_id(self, gid):
         for d in self.created:
             if d.get("grn_id") == gid:
