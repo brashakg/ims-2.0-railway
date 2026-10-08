@@ -856,3 +856,64 @@ def test_r3_shops_and_admins_still_read_their_stock(two_shop_reports, path, para
     assert _stock_value(two_shop_reports(path, dhn, **params).json()) == 3000.0
     # An admin with no shop asked reads every shop (admins see all shops).
     assert _stock_value(two_shop_reports(path, _shopless("ADMIN"), **params).json()) == 13000.0
+
+
+# Stock aging on the same shop rule (panel 2026-10-08). It took its shop from
+# validate_store_access -- None for a login with no shop -- so it COUNTED only
+# the units with no store_id (one legacy unit) while it VALUED every shop's
+# (shelf_units(None)): quantity 1 at Rs 9,993, Dhanbad's cost leaking into a
+# row that should read Rs 1,111, for managers and accounts alike.
+
+
+@pytest.fixture
+def aging_two_shops(monkeypatch):
+    mongomock = pytest.importorskip("mongomock")
+    from database.repositories.product_repository import (
+        ProductRepository,
+        StockRepository,
+    )
+
+    db = mongomock.MongoClient()[f"ims_test_aging_{uuid.uuid4().hex[:8]}"]
+    db["products"].insert_one(
+        {"_id": "P1", "product_id": "P1", "sku": "FR-P1", "name": "Frame P1",
+         "category": "FRAME", "mrp": 9000.0, "is_active": True}
+    )
+    old = datetime.utcnow() - timedelta(days=120)
+    db["stock_units"].insert_many(
+        [
+            {"_id": f"D{i}", "product_id": "P1", "store_id": STORE, "quantity": 1,
+             "status": "AVAILABLE", "unit_cost": 4441.0, "created_at": old}
+            for i in range(2)
+        ]
+        + [{"_id": "L1", "product_id": "P1", "quantity": 1, "status": "AVAILABLE",
+            "unit_cost": 1111.0, "created_at": old}]
+    )
+    monkeypatch.setattr(inv_mod, "get_stock_repository", lambda: StockRepository(db["stock_units"]))
+    monkeypatch.setattr(inv_mod, "get_product_repository", lambda: ProductRepository(db["products"]))
+    app = FastAPI()
+    app.include_router(inv_mod.router, prefix="/inventory")
+    client = TestClient(app)
+
+    def get(user):
+        app.dependency_overrides[get_current_user] = lambda: user
+        return client.get("/inventory/aging")
+
+    return get
+
+
+@pytest.mark.parametrize("role", ["STORE_MANAGER", "AREA_MANAGER", "ACCOUNTANT"])
+def test_r3_stock_aging_refuses_a_login_with_no_shop(aging_two_shops, role):
+    resp = aging_two_shops(_shopless(role))
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["detail"] == "Your login has no shop assigned - ask an admin to assign one."
+    assert "9993" not in resp.text and "8882" not in resp.text
+
+
+def test_stock_aging_values_exactly_the_units_it_counts(aging_two_shops):
+    dhn = {"user_id": "u-sm", "roles": ["STORE_MANAGER"], "store_ids": [STORE], "active_store_id": STORE}
+    (row,) = aging_two_shops(dhn).json()["products"]
+    assert (row["quantity"], row["value"]) == (2, 8882.0)
+    # An admin with no shop asked reads every shop -- every unit counted is
+    # every unit valued, never one unit at three units' cost.
+    (row,) = aging_two_shops(_shopless("ADMIN")).json()["products"]
+    assert (row["quantity"], row["value"]) == (3, 9993.0)

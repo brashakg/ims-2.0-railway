@@ -9,9 +9,9 @@ from ._shared import (
     get_current_user,
     get_product_repository,
     get_stock_repository,
+    resolve_store_scope,
     router,
     timedelta,
-    validate_store_access,
 )
 from .helpers import _had_the_window, _parse_expiry
 from database.repositories.product_repository import group_with_oldest_arrival
@@ -40,7 +40,12 @@ async def get_stock_aging_report(
     """
     stock_repo = get_stock_repository()
     product_repo = get_product_repository()
-    active_store = validate_store_access(store_id, current_user)
+    # THE shop rule (F63/R3): an admin with no shop asked reads every shop,
+    # anyone else their own, a non-admin with no shop is refused. The units
+    # counted and the units valued (stock_value.shelf_units) share this one
+    # scope, so a row's value is always the cost of the units it counts.
+    active_store = resolve_store_scope(store_id, current_user)
+    at_shop = {"store_id": active_store} if active_store else {}
 
     # Category-filter fix: normalise short codes / plurals to canonical.
     if category:
@@ -61,7 +66,7 @@ async def get_stock_aging_report(
     stock_pipeline = [
         {
             "$match": {
-                "store_id": active_store,
+                **at_shop,
                 **_on_hand_status_clause(include_reserved=True),
             }
         },
@@ -92,7 +97,7 @@ async def get_stock_aging_report(
     sold_30d_pipeline = [
         {
             "$match": {
-                "store_id": active_store,
+                **at_shop,
                 "status": "SOLD",
                 "sold_at": {"$gte": thirty_days_ago},
             }
@@ -102,7 +107,7 @@ async def get_stock_aging_report(
     sold_90d_pipeline = [
         {
             "$match": {
-                "store_id": active_store,
+                **at_shop,
                 "status": "SOLD",
                 "sold_at": {"$gte": ninety_days_ago},
             }
@@ -110,7 +115,7 @@ async def get_stock_aging_report(
         {"$group": {"_id": "$product_id", "sales_90d": {"$sum": 1}}},
     ]
     last_sale_pipeline = [
-        {"$match": {"store_id": active_store, "status": "SOLD"}},
+        {"$match": {**at_shop, "status": "SOLD"}},
         {"$group": {"_id": "$product_id", "last_sale": {"$max": "$sold_at"}}},
     ]
 
