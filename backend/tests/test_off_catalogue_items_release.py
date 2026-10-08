@@ -3496,3 +3496,20 @@ def test_r6_the_taskmaster_audits_a_merge(world, monkeypatch):
         sorted(r["action"] for r in rows) == ["task_escalation", "task_merged"],
         f"R1-31: the TASKMASTER audit trail reads {[r['action'] for r in rows]}",
     )
+
+
+def test_r6_a_refused_order_takes_no_po_number(world):
+    # R1-72: the number is consecutive per shop and FY; a refusal must not
+    # leave a hole in it.
+    world.catalogue_frame("Carrera", "CA 8895", "807", "54", mrp=6990, offer=6490, cost=3155.76)
+    first = world.raise_po([{"new_product": dict(BOSS_TYPED), "quantity": 1, "unit_price": 1200}])
+    refused = _refused_po(
+        world, [{"new_product": dict(CARRERA_TYPED), "quantity": 1, "unit_price": 3200}]
+    )
+    assert refused is not None and refused.status_code == 409
+    second = world.raise_po([{"new_product": dict(BOSS_1701), "quantity": 1, "unit_price": 1300}])
+    a, b = (int(p["po_number"].rsplit("/", 1)[-1]) for p in (first, second))
+    finding(
+        b == a + 1,
+        f"R1-72: a refused order burned a PO number ({first['po_number']} -> {second['po_number']})",
+    )

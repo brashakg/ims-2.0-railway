@@ -519,7 +519,6 @@ async def create_po(
         )
 
     po_id = str(uuid.uuid4())
-    po_number = generate_po_number(po.delivery_store_id)
 
     # Validate vendor exists
     if vendor_repo is not None:
@@ -608,6 +607,11 @@ async def create_po(
         )
         it.sku = created.get("sku")
         it.new_product = None
+
+    # The number is taken only once every refusal above has passed (vendor,
+    # unknown product, already in the catalogue, eye size, an invalid typed
+    # line): a refused order never burns a consecutive PO number (R1-72).
+    po_number = generate_po_number(po.delivery_store_id)
 
     # Who supplies whom decides CGST+SGST vs IGST (owner: "GST should be
     # calculated according to interstate or intrastate as per GST norms").
