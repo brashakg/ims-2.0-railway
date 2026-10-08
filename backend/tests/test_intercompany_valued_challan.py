@@ -908,3 +908,18 @@ def test_d13_inter_state_challan_prints_one_place_of_supply(db):
     answers = re.findall(r'<td class="k">place of supply</td><td>([^<]*)</td>', html, re.I)
     assert answers == ["Maharashtra (27)"], answers
     assert '<td class="k">Dispatched from</td><td>Shop 33 Park Market' in html
+
+
+def test_d7_finance_reconciliation_lists_the_callers_stores_only(db, monkeypatch):
+    """r5: GET /finance/reconciliation listed every shop's in-transit
+    transfers with their lines -- now the units' own cost -- to any manager.
+    It reads through the one transfer store reach (_in_callers_stores)."""
+    from api.routers.finance import budget
+
+    monkeypatch.setattr(budget, "_get_db", lambda: db)
+    _shipped("ST-BOK-1")
+    outsider = _run(budget.get_reconciliation(_user("STORE_MANAGER", "ST-PUN-1")))
+    assert (outsider["pending_transfers"], outsider["transfers"]) == (0, [])
+    mine = _run(budget.get_reconciliation(SOURCE_MANAGER))
+    assert mine["pending_transfers"] == 1
+    assert mine["transfers"][0]["items"][0]["unit_cost"] == pytest.approx(UNIT_COST)

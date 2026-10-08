@@ -301,8 +301,9 @@ def _in_callers_stores(transfers: List[Dict], current_user: dict) -> List[Dict]:
     """The transfers touching the caller's stores, either side --
     user_store_scope, the one store reach: SUPERADMIN / ADMIN see every
     transfer, everyone else (AREA_MANAGER included) their own stores'. Every
-    transfer list and figure (list, /pending, both analytics) reads through
-    here, so none shows another region's transfers or their cost."""
+    transfer list and figure (list, /pending, both analytics, and finance's
+    /reconciliation) reads through here, so none shows another region's
+    transfers or their cost."""
     is_cross_store, allowed_stores = user_store_scope(current_user)
     if is_cross_store:
         return transfers
