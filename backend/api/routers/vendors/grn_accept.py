@@ -25,9 +25,8 @@ from .numbering import (
     _grn_barcode,
     _grn_stock_audit,
     compute_po_receipt_state,
-    grn_number_pending,
 )
-from .grn import _number_stranded_receipts
+from .grn import _require_receipt_number
 from .grn_accept_lock import (
     _GRN_MINT_DUPLICATE,
     _advance_grn_terminal_status,
@@ -104,25 +103,10 @@ async def _accept_grn_impl(grn_id: str, current_user: dict) -> dict:
     if not can_access_store_scoped(grn.get("store_id"), current_user):
         raise HTTPException(status_code=404, detail="GRN not found")
 
-    # A receipt still on its PENDING/<id> placeholder has no number yet, and
-    # accepting it would stamp the placeholder on every unit, the audit row and
-    # the bill draft for good (audit F28). A stranded one (its request died)
-    # is numbered here once it is old enough; a fresh one is still being
-    # numbered by its own request, so wait for it.
-    if grn_number_pending(grn):
-        _number_stranded_receipts(grn_repo)
-        grn = grn_repo.find_by_id(grn_id) or grn
-    if grn_number_pending(grn):
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "GRN_NUMBER_PENDING",
-                "message": (
-                    "This goods receipt is still getting its receipt number. "
-                    "Wait a minute, then accept it again."
-                ),
-            },
-        )
+    # A receipt still on its PENDING/<id> placeholder has no number yet: a
+    # stranded one (its request died) is numbered here, a fresh one is refused
+    # until its own request has numbered it (audit F28).
+    grn = _require_receipt_number(grn_repo, grn)
 
     # PENDING is the normal first accept. PARTIALLY_ACCEPTED is re-accept after a
     # "Catalog now" -- some lines were held last time because their product was

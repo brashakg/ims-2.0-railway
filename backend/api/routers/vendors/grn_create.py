@@ -35,6 +35,7 @@ from .grn import (
     _find_duplicate_standard_grn,
     _number_receipt,
     _number_stranded_receipts,
+    _receipt_numbered,
 )
 from ...services.purchase_numbering import po_label
 
@@ -576,6 +577,11 @@ async def get_grn(grn_id: str, current_user: dict = Depends(get_current_user)):
     grn = grn_repo.find_by_id(grn_id)
     if not grn:
         raise HTTPException(status_code=404, detail="GRN not found")
+    # A stranded receipt is numbered first; one its own request is still
+    # numbering has no number to show yet, never its placeholder (audit F28).
+    grn = _receipt_numbered(grn_repo, grn)
+    if grn_number_pending(grn):
+        grn = {**grn, "grn_number": None}
 
     _enrich_grn_names([grn])
 

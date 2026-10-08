@@ -14,6 +14,7 @@ from ._shared import (
     require_roles,
     router,
 )
+from .grn import _require_receipt_number
 from .grn_accept_lock import (
     _GRN_TERMINAL_ACCEPT_STATUSES,
     _GRN_WRITE_ERROR,
@@ -56,6 +57,11 @@ async def void_grn(
         raise HTTPException(status_code=404, detail="GRN not found")
     if not can_access_store_scoped(grn.get("store_id"), current_user):
         raise HTTPException(status_code=404, detail="GRN not found")
+    # The void audit is immutable and the response names the receipt: a
+    # receipt still on its PENDING/<id> placeholder is numbered first (a
+    # stranded one) or refused until its own request has numbered it (audit
+    # F28), so neither ever carries the placeholder.
+    grn = _require_receipt_number(grn_repo, grn)
     if grn.get("status") != "PENDING":
         raise HTTPException(
             status_code=400,

@@ -452,3 +452,53 @@ def test_a_create_whose_claim_is_taken_over_never_overwrites_the_number(monkeypa
     (row,) = list(db.grns.find())
     assert row["grn_number"] == "RCPT/BV-TEST-01/26-27/0001"  # the healer's
     assert res["grn_number"] == row["grn_number"]
+
+
+# ---------------------------------------------------------------------------
+# Round 11: void and GET /grn/{grn_id} read one receipt
+# ---------------------------------------------------------------------------
+
+
+def test_void_and_the_receipt_read_never_carry_the_placeholder(monkeypatch):
+    """A worker died between the insert and the number. Voiding that receipt
+    wrote 'PENDING/G-VOID' into the immutable void audit and the response,
+    and GET /grn/{id} returned it as the receipt number. Both number a
+    stranded receipt first; one its own request is still numbering is
+    refused by the void (nothing written) and shows no number on the read."""
+    from database.repositories.product_repository import StockRepository
+
+    db = mongomock.MongoClient().db
+    _wire(monkeypatch, GRNRepository(db.grns))
+    _counting_minter(monkeypatch)
+    audits = []
+
+    class _Audit:
+        def create(self, doc):
+            audits.append(doc)
+            return doc
+
+    monkeypatch.setattr(v, "get_audit_repository", lambda: _Audit())
+    monkeypatch.setattr(v, "get_stock_repository", lambda: StockRepository(db.stock_units))
+    # A batch of older stranded rows ahead of it: one receipt's read numbers
+    # THAT receipt, not whichever 20 the healer's sweep picks up first.
+    for i in range(20):
+        _stranded(db, f"G-OTHER-{i}", 10, po_id="PO2")
+    _stranded(db, "G-VOID", 5, po_id="PO1")
+    _stranded(db, "G-READ", 5, po_id="PO1")
+    _stranded(db, "G-FRESH", 0, po_id="PO1")
+
+    res = asyncio.run(v.void_grn("G-VOID", current_user=_user()))
+    assert res["grn_number"] == "RCPT/BV-TEST-01/26-27/0001"
+    assert [a["details"]["grn_number"] for a in audits] == ["RCPT/BV-TEST-01/26-27/0001"]
+    assert db.grns.find_one({"grn_id": "G-VOID"})["status"] == "VOID"
+
+    assert asyncio.run(v.get_grn("G-READ", current_user=_user()))["grn_number"] == (
+        "RCPT/BV-TEST-01/26-27/0002"
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(v.void_grn("G-FRESH", current_user=_user()))
+    assert exc.value.status_code == 409
+    assert exc.value.detail["code"] == "GRN_NUMBER_PENDING"
+    assert len(audits) == 1 and db.grns.find_one({"grn_id": "G-FRESH"})["status"] == "PENDING"
+    assert asyncio.run(v.get_grn("G-FRESH", current_user=_user()))["grn_number"] is None
