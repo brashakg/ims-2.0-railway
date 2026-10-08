@@ -234,6 +234,9 @@ async def push_product(
 
     query = _PRODUCT_UPDATE if existing_gid else _PRODUCT_CREATE
     field_name = "productUpdate" if existing_gid else "productCreate"
+    # Asked BEFORE any write-back touches the row: is this listing on the
+    # website as the press starts? (A create never is.)
+    was_live = bool(existing_gid) and listing_visible(product)
     try:
         body = await _graphql(db, query, {"input": payload})
         err = _user_errors(body, field_name)
@@ -329,6 +332,16 @@ async def push_product(
                         "product_level_inventory_item_gid"
                     ),
                 )
+        # A SIZE CREATED ON A LIVE LISTING is on sale the moment it exists. Its
+        # create call carried tracked + the stop-at-0 policy; when Shopify's
+        # answer does not confirm both, the size may sell without limit, so the
+        # listing comes OFF the website (Draft) before anything else is written
+        # and the press says so. The take-down marks it taken down, so no sweep
+        # re-lists it; the next human press re-sends tracking to every size.
+        unconfirmed = dict((seed_summary or {}).get("unconfirmed_variants") or {})
+        take_down = None
+        if unconfirmed and was_live:
+            take_down = await push_product_delist(db, product)
         # THE PHOTOGRAPHS, IN THIS SAME PRESS. "Has a photo in IMS" and "has a
         # photo on Shopify" are different questions, and only the second one
         # protects the storefront -- photographs used to push on a SEPARATE,
@@ -361,14 +374,19 @@ async def push_product(
         # withholds it -- see `tracking_ok` below.
         stock_summary = None
         if new_gid:
+            # "Minted" for the already-live check = every variant this press
+            # newly linked EXCEPT a size whose create answer confirmed its
+            # tracking (it is as tracked as the first publish's variants).
+            seeded_gids = list((seed_summary or {}).get("variant_gids") or []) + list(unconfirmed)
+            confirmed = set((seed_summary or {}).get("confirmed_variant_gids") or [])
             stock_summary = await sync_product_stock(
                 db,
                 product,
                 variants,
                 new_gid,
                 extra_variant_gids=[n.get("id") for n in variant_nodes if isinstance(n, dict)]
-                + list((seed_summary or {}).get("variant_gids") or []),
-                minted_variant_gids=(seed_summary or {}).get("variant_gids"),
+                + seeded_gids,
+                minted_variant_gids=[g for g in seeded_gids if g not in confirmed],
             )
         # SALES-CHANNEL PUBLISH -- the third shut door. An ACTIVE product
         # published to NO channel is invisible on bettervision.in. This used to
@@ -416,7 +434,28 @@ async def push_product(
             or listing_visible(product)
         )
         pub_summary = None
-        if new_gid and payload.get("status") == "ACTIVE":
+        if take_down is not None:
+            names = ", ".join(sorted(str(s) for s in unconfirmed.values()))
+            why = (
+                f"Shopify did not confirm stock tracking + stop selling at 0 on the "
+                f"new size(s) {names}"
+            )
+            pub_summary = {
+                "published": False,
+                "code": STOCK_TRACKING_FAILED,
+                "error": (
+                    f"{why} -- the listing was taken OFF the website (Draft) so they "
+                    f"cannot oversell; press Send to website again"
+                ) if take_down.ok else (
+                    f"{why}, and taking the listing off the website FAILED "
+                    f"({take_down.error}) -- it is STILL LIVE and they may sell without "
+                    f"limit; set it to Draft in Shopify admin now"
+                ),
+                # Off the website = withheld; still live = a failure, never
+                # "not made visible".
+                "reason": "publish_withheld" if take_down.ok else None,
+            }
+        elif new_gid and payload.get("status") == "ACTIVE":
             if seed_summary is not None:
                 priced_ok = (
                     not seed_summary.get("errors")
@@ -571,7 +610,7 @@ async def push_product(
             reason=(
                 ("archived_not_listed" if archived_not_listed else None)
                 if published_ok
-                else "publish_withheld"
+                else (pub_summary or {}).get("reason", "publish_withheld")
             ),
             metafields=mf_summary,
             variant_prices=vp_summary,

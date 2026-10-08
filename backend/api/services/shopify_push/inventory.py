@@ -2003,7 +2003,8 @@ async def sync_product_stock(
     tracked: Dict[str, Any] = {"updated": 0, "errors": []}
     # "Already live" covers the variants an earlier publish CONFIRMED, never
     # one this press minted (``minted_variant_gids``: what seeding just put on
-    # Shopify, its gid on no IMS row yet). For that variant this IS the first
+    # Shopify, its gid on no IMS row yet -- less a size whose own create answer
+    # confirmed tracked + the policy, product.py). For that variant this IS the first
     # publish, and on a published product it is visible the moment it exists:
     # a size added to a live listing under a refused tracking call went out
     # UNTRACKED while the line said "the listing keeps the tracking its first

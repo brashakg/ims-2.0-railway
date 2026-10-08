@@ -273,11 +273,14 @@ _VARIANTS_PER_CALL = 250
 # any REMAINING IMS variant (a second colour / size) has to be created. Same
 # ProductVariantsBulkInput shape, plus optionValues to place it on the option
 # grid. Returns the new gids (and each variant's inventoryItem gid -- the
-# oversell-guard stock target) so they can be written back for idempotency.
+# oversell-guard stock target) so they can be written back for idempotency,
+# plus the tracked flag and the policy the create row asked for: a size
+# minted onto a live listing is on sale the moment it exists, so Shopify's
+# own answer is what confirms it cannot sell past 0.
 _VARIANTS_BULK_CREATE = """
 mutation imsVariantsBulkCreate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
   productVariantsBulkCreate(productId: $productId, variants: $variants) {
-    productVariants { id title selectedOptions { name value } inventoryItem { id } }
+    productVariants { id title selectedOptions { name value } inventoryPolicy inventoryItem { id tracked } }
     userErrors { field message }
   }
 }

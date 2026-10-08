@@ -3440,10 +3440,12 @@ def test_R10_a_size_minted_onto_a_live_listing_under_a_refused_tracking_call_is_
     recorded tracked=True, and -- the new SKU's row written beside it -- the
     sweep saw no diff: nothing ever re-sent tracking. Measured on a754644.
 
-    For the minted variant this IS the first publish: the WITHOUT LIMIT line,
-    tracked=False on the baseline, and the next pass re-sends tracking to it.
-    Drop `and not [...]` from `live` in sync_product_stock -> 're-confirmed',
-    tracked True, the sweep a noop -> this fails."""
+    For the minted variant this IS the first publish: tracked=False on the
+    baseline, and the next pass re-sends tracking to it. Drop `and not [...]`
+    from `live` in sync_product_stock -> tracked True, the sweep a noop ->
+    this fails. (Since the #1172 rebuild the size is created tracked + DENY in
+    its own create call; this answer does not confirm it, so the listing is
+    also taken off the website -- test_per_store_stock_honest.py.)"""
     minted = "gid://shopify/ProductVariant/77"
     db = _db(a=2, b=1, c=0)
     db.seed("products", [{"product_id": "spine-S", "sku": "SP-1-S"}, {"product_id": "spine-L", "sku": "SP-1-L"}])
@@ -3474,9 +3476,10 @@ def test_R10_a_size_minted_onto_a_live_listing_under_a_refused_tracking_call_is_
     _live(monkeypatch, spy)
     res = _run(shopify_push.push_product(db, db.get_collection("catalog_products").find_one({"id": "cat-1"}), variants))
     assert len(spy.calls_for("productVariantsBulkCreate")) == 1, "the size was minted onto the live listing"
-    assert res.ok is True and res.code == shopify_push.STOCK_TRACKING_FAILED, res
-    assert "WITHOUT LIMIT" in res.error and "Throttled" in res.error, res.error
-    assert "keeps the tracking" not in res.error, "nothing ever confirmed tracking on the minted size"
+    assert res.ok is False and res.code == shopify_push.STOCK_TRACKING_FAILED, res
+    assert "taken OFF the website" in res.error, res.error
+    assert "WITHOUT LIMIT" in res.stock["error"] and "Throttled" in res.stock["error"], res.stock
+    assert "keeps the tracking" not in res.stock["error"], "nothing ever confirmed tracking on the minted size"
     assert _baseline(db)["tracked"] is False, "so the next pass re-sends tracking"
     assert _baseline(db)["quantities"]["SP-1-L"] == {"BV-A": 1, "BV-B": 0, "BV-C": 0}, "the true numbers still went out"
     # The next tick, Shopify answering: tracking reaches the minted size with
