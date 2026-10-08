@@ -321,3 +321,80 @@ def test_rbac_row_catalogued():
         "AREA_MANAGER",
         "STORE_MANAGER",
     }
+
+
+def _flood(w, n=101, pid="P9"):
+    """`n` accepted receipts of `pid`, each accepted after anything a test set
+    up before calling this. Their orders were sent in 2025, OLDER than every
+    order a test makes, so the order list never hides one of those."""
+    for i in range(n):
+        po = w.po(f"F{i}", 100, sent_at="2025-12-01T09:00:00", pid=pid)
+        w.receive(f"F{i}", po, [{"product_id": pid, "accepted_qty": 1}], f"2026-05-01T10:{i // 60:02d}:{i % 60:02d}")
+
+
+def test_a_receipt_older_than_100_receipts_of_other_products_still_wins(monkeypatch):
+    # A frames distributor delivers to six shops: P1's last accepted receipt is
+    # older than 101 receipts of P9. PO-2 for P1 was sent later but has not
+    # arrived -- it is not a price paid, however busy the vendor is.
+    w = _World(monkeypatch)
+    po1 = w.po(1, 3100, sent_at="2026-01-02T10:00:00")
+    w.receive(1, po1, [{"product_id": "P1", "accepted_qty": 2}], "2026-01-05T10:00:00")
+    _flood(w)
+    w.po(2, 3500, sent_at="2026-10-01T10:00:00")
+    hit = _costs()["P1"]
+    assert hit["unit_price"] == 3100.0
+    assert hit["po_number"] == "PO-1"
+    assert hit["date"] == "2026-01-05T10:00:00"
+
+
+def test_a_rejected_delivery_older_than_100_receipts_is_still_no_price(monkeypatch):
+    w = _World(monkeypatch)
+    po7 = w.po(7, 9999, sent_at="2026-01-02T10:00:00")
+    w.receive(7, po7, [{"product_id": "P1", "accepted_qty": 0, "rejected_qty": 2}], "2026-01-05T10:00:00")
+    _flood(w)
+    assert _costs() == {}
+
+
+def test_a_receipt_line_price_older_than_100_receipts_is_kept(monkeypatch):
+    w = _World(monkeypatch)
+    po1 = w.po(1, 3100, sent_at="2026-01-02T10:00:00")
+    w.receive(1, po1, [{"product_id": "P1", "accepted_qty": 2, "unit_price": 3050}], "2026-01-05T10:00:00")
+    _flood(w)
+    assert _costs()["P1"]["unit_price"] == 3050.0
+
+
+def test_a_busy_line_on_the_same_form_never_hides_another_lines_receipt(monkeypatch):
+    # The form asks for P1 and P2. P2 was last received in January; P1 came in
+    # 101 times since. P2's newer sent-not-arrived order is still no price paid.
+    w = _World(monkeypatch)
+    po2 = w.po(2, 500, sent_at="2026-01-02T10:00:00", pid="P2")
+    w.receive(2, po2, [{"product_id": "P2", "accepted_qty": 1}], "2026-01-05T10:00:00")
+    _flood(w, pid="P1")
+    w.po(3, 900, sent_at="2026-10-01T10:00:00", pid="P2")
+    out = _costs("P1,P2")
+    assert out["P1"]["unit_price"] == 100.0
+    assert out["P2"]["unit_price"] == 500.0
+    assert out["P2"]["date"] == "2026-01-05T10:00:00"
+
+
+def test_an_order_older_than_100_orders_of_other_products_still_answers(monkeypatch):
+    # Nothing has arrived yet; P1's sent order is older than 101 sent orders
+    # of P9. It is still the last price agreed, not "no history".
+    w = _World(monkeypatch)
+    w.po(1, 3100, sent_at="2026-01-02T10:00:00")
+    for i in range(101):
+        w.po(f"F{i}", 100, sent_at=f"2026-05-01T10:{i // 60:02d}:{i % 60:02d}", pid="P9")
+    assert _costs()["P1"]["unit_price"] == 3100.0
+
+
+def test_a_busy_line_on_the_same_form_never_hides_another_lines_order(monkeypatch):
+    # Nothing has arrived. The form asks for P1 and P2; P1 was ordered 101 times
+    # after P2's one sent order, which is still P2's last price agreed.
+    w = _World(monkeypatch)
+    w.po(2, 500, sent_at="2026-01-02T10:00:00", pid="P2")
+    for i in range(101):
+        w.po(f"F{i}", 100, sent_at=f"2026-05-01T10:{i // 60:02d}:{i % 60:02d}")
+    out = _costs("P1,P2")
+    assert out["P1"]["unit_price"] == 100.0
+    assert out["P2"]["unit_price"] == 500.0
+    assert out["P2"]["po_number"] == "PO-2"

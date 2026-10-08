@@ -209,9 +209,15 @@ async def get_last_purchase_cost(
                 {
                     "vendor_id": vendor_id,
                     "status": {"$in": list(_GRN_TERMINAL_ACCEPT_STATUSES)},
+                    "items.product_id": {"$in": sorted(wanted)},
                 },
                 sort=[("accepted_at", -1)],
-                limit=100,
+                # No cap: a capped read let a busy vendor's newer receipts push
+                # a product's last receipt (or its rejected delivery) out of
+                # view, and the order fallback then answered with a price
+                # never paid. ponytail: reads every accepted receipt carrying
+                # a wanted product; stream a projected cursor if that grows.
+                limit=0,
             )
             if grn_repo is not None and stock_repo is not None
             else []
@@ -247,9 +253,10 @@ async def get_last_purchase_cost(
                 {
                     "vendor_id": vendor_id,
                     "status": {"$in": [*_RECEIVABLE_PO_STATUSES, "RECEIVED"]},
+                    "items.product_id": {"$in": sorted(wanted - costs.keys())},
                 },
                 sort=[("sent_at", -1), ("created_at", -1)],
-                limit=100,
+                limit=0,  # uncapped for the same reason as the receipts above
             )
             for po in pos or []:
                 if len(costs) >= len(wanted):
