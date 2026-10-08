@@ -182,14 +182,11 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/inventory/barcode/{barcode}",
         "allowed": "AUTHENTICATED",
     },
-    # INV-12: barcode lifecycle trace (purchase->sale->transfer->return). Its
-    # purchase section is the receipt (supplier, price paid) -> the receipt
-    # readers, store-scoped in the handler, like GET /vendors/grn/{grn_id}.
+    # INV-12: barcode lifecycle trace (purchase->sale->transfer->return)
     {
         "method": "GET",
         "path": "/api/v1/inventory/barcode/{barcode}/trace",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
-        "store_scoped": True,
+        "allowed": "AUTHENTICATED",
     },
     {
         "method": "GET",

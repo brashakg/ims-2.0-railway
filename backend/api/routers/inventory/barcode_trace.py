@@ -1,18 +1,17 @@
 """INV-12 barcode lifecycle trace."""
 
+from ...services import cost_mask
 from ._shared import (
     Depends,
     Dict,
     Optional,
-    can_access_store_scoped,
+    get_current_user,
     logger,
-    require_roles,
     router,
 )
 from .helpers import (
     _get_db,
 )
-from ..vendors._shared import _VENDOR_ROLES
 
 # ============================================================================
 # INV-12: BARCODE LIFECYCLE TRACE
@@ -23,17 +22,12 @@ from ..vendors._shared import _VENDOR_ROLES
 # collection: it collects existing audit rows + cross-collection joins in one
 # call.  Fail-soft: a missing collection returns an empty section rather than
 # 500-ing the whole response.
-#
-# The purchase section is the raw receipt (supplier or walk-in dealer, bill
-# number, price paid per line, bill photo id) and the unit carries its cost,
-# so the trace is the receipt readers' -- the same roles (one constant) and
-# store scope as GET /vendors/grn/{grn_id} -- never the counter's.
 
 
 @router.get("/barcode/{barcode}/trace")
 async def barcode_lifecycle_trace(
     barcode: str,
-    current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
+    current_user: dict = Depends(get_current_user),
 ):
     """Return the full movement history for a physical barcode (INV-12).
 
@@ -74,18 +68,12 @@ async def barcode_lifecycle_trace(
     try:
         # 1. Stock unit
         su = db.get_collection("stock_units").find_one({"barcode": barcode})
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[INV-12] stock_unit lookup failed for barcode %s: %s", barcode, exc)
-        su = None
-    # A unit in another shop -- or no unit at all, for a store-level caller --
-    # traces as unknown: its sections are that shop's supplier, cost and sales.
-    if not can_access_store_scoped((su or {}).get("store_id"), current_user):
-        return result
-    stock_id = ""
-
-    try:
         if su:
-            result["stock_unit"] = _scrub(dict(su))
+            # Every signed-in role reads this route: the unit's cost goes
+            # through the one cost rule.
+            result["stock_unit"] = cost_mask.mask_cost(
+                _scrub(dict(su)), current_user, "product"
+            )
             stock_id = str(su.get("stock_id") or su.get("stock_unit_id") or su.get("_id") or "")
 
             # 2. Purchase / GRN origin
@@ -98,7 +86,16 @@ async def barcode_lifecycle_trace(
                     # Alternate collection name used by GRN repo
                     grn = db.get_collection("goods_receipt_notes").find_one({"grn_id": grn_id})
                 if grn:
-                    result["purchase"] = [_scrub(dict(grn))]
+                    grn = _scrub(dict(grn))
+                    # The price paid per line (a "Bought without PO" receipt
+                    # records it) is the same cost, under the same rule.
+                    if not cost_mask.can_see_cost(current_user, "product"):
+                        grn["items"] = [
+                            {k: v for k, v in it.items() if k != "unit_price"}
+                            for it in grn.get("items") or []
+                            if isinstance(it, dict)
+                        ]
+                    result["purchase"] = [grn]
 
             # 3. Audit trail (stock_audit rows keyed on this unit's id)
             if stock_id:
@@ -108,8 +105,11 @@ async def barcode_lifecycle_trace(
                     ).sort("at", 1).limit(200)
                 )
                 result["audit_trail"] = _scrub_list(audit_rows)
+        else:
+            stock_id = ""
+
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[INV-12] purchase/audit lookup failed for barcode %s: %s", barcode, exc)
+        logger.warning("[INV-12] stock_unit lookup failed for barcode %s: %s", barcode, exc)
 
     try:
         # 4. Sales: orders where an item carries this barcode
