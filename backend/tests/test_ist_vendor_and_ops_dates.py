@@ -307,7 +307,8 @@ def _performance(grns, months=6, bills=None, now=FROZEN_NOW):
     ):
         return asyncio.run(
             vendors_mod.vendor_performance(
-                vendor_id=VENDOR, months=months, current_user={}
+                # an accounts role: mtd_spend is supplier-bill money
+                vendor_id=VENDOR, months=months, current_user={"roles": ["ACCOUNTANT"]}
             )
         )
 
