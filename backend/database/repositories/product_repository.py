@@ -45,14 +45,19 @@ class StockReleaseResult(NamedTuple):
 class ProductRepository(BaseRepository):
     """Repository for Product operations"""
 
-    # Tokenized-search fields. `barcode` is ADDITIVE (Catalog Manager scanner
-    # passthrough): it can only ADD matches for existing callers, never remove.
-    SEARCH_FIELDS = ("brand", "model", "sku", "variant", "barcode")
-    # The NAME fields a typed word may match at ANY word start, so the till
-    # and the counter lookup find "Air Optix", "Acuvue Oasys" and "Ray Ban
-    # Aviator" (owner-approved 2026-10-08). The codes (sku, variant, barcode)
-    # keep matching from their start.
-    WORD_SEARCH_FIELDS = ("brand", "model")
+    # Tokenized-search fields. The NAME fields a typed word may match at ANY
+    # word start, so the till and the counter lookup find "Air Optix",
+    # "Acuvue Oasys" and "Ray Ban Aviator" (owner-approved 2026-10-08).
+    # `name` is the minted title the till card shows (it carries the shape:
+    # "Ray-Ban RB3025 Aviator Sunglasses"); a SUNGLASS/FRAME's spine model is
+    # its model_no, so its model_name and a lens's subbrand ("Acuvue") are
+    # searched where they live. The codes (sku, variant, barcode) keep
+    # matching from their start; `barcode` is the Catalog Manager scanner
+    # passthrough.
+    WORD_SEARCH_FIELDS = (
+        "brand", "model", "name", "attributes.model_name", "attributes.subbrand",
+    )
+    SEARCH_FIELDS = WORD_SEARCH_FIELDS + ("sku", "variant", "barcode")
 
     @property
     def entity_name(self) -> str:

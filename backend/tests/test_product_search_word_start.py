@@ -1,13 +1,13 @@
 """The till and the counter lookup find multi-word names (owner 2026-10-08).
 
-Every typed word must START A WORD of a product's brand or model (the field
-start, or after a space, hyphen, slash, dot or underscore), so "Air Optix",
-"Acuvue Oasys" and "Ray Ban Aviator" are found while "ray" still never finds
-"Spray Cleaner" or "Gunmetal Gray". Codes (SKU, variant, barcode) keep matching
-from their start, and a field-start hit still comes first. Driven through GET
-/api/v1/products?search= (the till's product query; the counter lookup runs the
-same search_products) over mongomock, and once over the fallback mock DB that
-local no-Mongo mode runs on.
+Every typed word must START A WORD of a product's brand, model, minted name,
+model_name or subbrand (the field start, or after a space, hyphen, slash, dot
+or underscore), so "Air Optix", "Acuvue Oasys" and "Ray Ban Aviator" are
+found while "ray" still never finds "Spray Cleaner" or "Gunmetal Gray". Codes
+(SKU, variant, barcode) keep matching from their start, and a field-start hit
+still comes first. Driven through GET /api/v1/products?search= (the till's
+product query; the counter lookup runs the same search_products) over
+mongomock, and once over the fallback mock DB that local no-Mongo mode runs on.
 
 Run: JWT_SECRET_KEY=test ENVIRONMENT=test python -m pytest backend/tests/test_product_search_word_start.py -q
 """
@@ -211,3 +211,32 @@ def test_the_fallback_mock_db_lists_what_it_counts(q):
                 "oasys": ["CL-OAS"]}[q]
     assert [d["product_id"] for d in repo.search_products(q)] == expected
     assert repo.count_search_products(q) == len(expected)
+
+
+def _door(db, pid, category, **attrs):
+    # A product exactly as the one create door builds it: a SUNGLASS's spine
+    # model is its model_no, so "Aviator" lives only in the minted name or
+    # attributes.model_name, and a lens's "Acuvue" only in attributes.subbrand.
+    from api.services import product_master as pm
+
+    doc = pm.normalise_payload(category=category, attributes=attrs, mrp=5000.0,
+                               offer_price=5000.0, as_draft=True, db=None)
+    db.products.insert_one({**doc, "product_id": pid})
+
+
+@pytest.mark.parametrize(
+    "q, want",
+    [("Ray Ban Aviator", ["SG-SHAPE", "SG-NAME"]),
+     ("aviator", ["SG-SHAPE", "SG-NAME"]),
+     ("Ray Ban Aviator Classic", ["SG-NAME"]),
+     ("Acuvue Oasys", ["CL-SUB"]), ("acuvue", ["CL-SUB"])],
+)
+def test_a_door_made_product_is_found_by_the_words_the_till_shows(db, q, want):
+    _door(db, "SG-SHAPE", "SUNGLASS", brand_name="Ray-Ban", model_no="RB3025",
+          colour_code="001", model_name="Aviator", shape="Aviator")
+    _door(db, "SG-NAME", "SUNGLASS", brand_name="Ray-Ban", model_no="RB3026",
+          colour_code="001", model_name="Aviator Classic")
+    _door(db, "CL-SUB", "CONTACT_LENS", brand_name="Johnson & Johnson",
+          subbrand="Acuvue", model_name="Oasys 1-Day")
+    assert _ids(db, q) == (want, len(want))
+
