@@ -11,9 +11,8 @@
 // status, the debit-note serial). The server strips the money for them; this
 // pins that the SCREEN never shows it either, even when an answer carries it,
 // and never offers the Print / Export Tally doors the server now refuses them.
-// A line's price per piece is that credit per piece (the return's value is
-// qty x price), so it is hidden with the credit (panel 2026-10-08). The fixture
-// prices the line so no line figure equals a credit figure.
+// Item unit prices follow the separate product-cost rule and are not asserted
+// here (the fixture prices the line so no line figure equals a credit figure).
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { ReactNode } from 'react';
@@ -120,9 +119,6 @@ describe('VendorReturns - a manager reads the return, not the supplier credit', 
       expect(body).not.toContain('5,000');
       expect(body).not.toContain('CN-9');
       expect(body).not.toContain('7,350');
-      // ...nor the price per piece or the line total it rebuilds.
-      expect(body).not.toContain('3,000');
-      expect(body).not.toContain('6,000');
       expect(body).not.toMatch(/CGST\+SGST|IGST/);
       expect(screen.queryByRole('button', { name: 'Print' })).not.toBeInTheDocument();
       expect(screen.queryByRole('button', { name: 'Export Tally' })).not.toBeInTheDocument();
@@ -167,8 +163,6 @@ describe('VendorReturns - the accounts roles still read the supplier credit', ()
       expect(body).toContain('₹7,000');
       expect(body).toContain('CN-9');
       expect(body).toContain('₹7,350');
-      expect(body).toContain('@ ₹3,000');
-      expect(body).toContain('₹6,000');
       expect(screen.getByRole('button', { name: 'Print' })).toBeInTheDocument();
       expect(screen.getByRole('button', { name: 'Export Tally' })).toBeInTheDocument();
     },

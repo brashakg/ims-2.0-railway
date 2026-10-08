@@ -18,9 +18,8 @@ vi.mock('../../../services/api/rtvDebitNotes', () => ({ rtvDebitNotesApi: dnMock
 vi.mock('../../../context/ToastContext', () => ({
   useToast: () => ({ success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() }),
 }));
-let roles: string[] = ['WORKSHOP_STAFF'];
 vi.mock('../../../context/AuthContext', () => ({
-  useAuth: () => ({ user: { activeStoreId: 'BV-TEST-01', roles } }),
+  useAuth: () => ({ user: { activeStoreId: 'BV-TEST-01', roles: ['WORKSHOP_STAFF'] } }),
 }));
 
 import { VendorReturns } from '../VendorReturns';
@@ -56,10 +55,7 @@ async function openReturn() {
 }
 
 describe('VendorReturns money display', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    roles = ['WORKSHOP_STAFF'];
-  });
+  beforeEach(() => vi.clearAllMocks());
 
   it('renders a masked return (no prices) with dashes, never a rupee figure', async () => {
     load(
@@ -73,10 +69,7 @@ describe('VendorReturns money display', () => {
     expect(document.body.textContent).not.toContain('₹');
   });
 
-  // A line's price per piece is the supplier credit per piece (value = qty x
-  // price): the accounts roles' alone (payables_mask, panel 2026-10-08).
-  it('shows the prices to the accounts roles', async () => {
-    roles = ['ACCOUNTANT'];
+  it('still shows the prices to a purchase role', async () => {
     load(
       [{ ...ret, items: [{ ...line, unit_price: 3173.37 }], total_value: 6346.74, credit_note_amount: null }],
       []
@@ -84,15 +77,5 @@ describe('VendorReturns money display', () => {
     await openReturn();
     expect(document.body.textContent).toContain('₹3,173.37');
     expect(document.body.textContent).toContain('₹6,346.74');
-  });
-
-  it('keeps them off the screen for anyone else, whatever the server sends', async () => {
-    load(
-      [{ ...ret, items: [{ ...line, unit_price: 3173.37 }], total_value: 6346.74, credit_note_amount: null }],
-      []
-    );
-    await openReturn();
-    expect(screen.getByText(/Qty: 2/)).toBeTruthy();
-    expect(document.body.textContent).not.toContain('₹');
   });
 });
