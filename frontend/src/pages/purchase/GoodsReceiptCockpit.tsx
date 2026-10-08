@@ -127,10 +127,16 @@ interface InboxPO {
 // Main page
 // ============================================================================
 
+// The server's grn_void._DROP_ROLES (SUPERADMIN passes every role gate).
+const DROP_OVER_ORDER_ROLES: string[] = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'];
+
 export function GoodsReceiptCockpit() {
   const { user } = useAuth();
   const toast = useToast();
   const storeId = user?.activeStoreId || '';
+  // 'Not received' is the receiving managers' (owner 2026-09-28; the server's
+  // drop-over-order roles): anyone else is told who presses it.
+  const canDropOverOrder = (user?.roles || []).some((r) => DROP_OVER_ORDER_ROLES.includes(r));
   // W1.4 / OS-006: receiving books stock at the active store. An ONLINE store
   // holds no stock — warn up front (backend rejects the GRN with 400 too).
   const onlineStore = useIsOnlineStore(storeId);
@@ -1387,7 +1393,11 @@ export function GoodsReceiptCockpit() {
                             {/* A held receipt can be a second receipt of the same box: the
                                 store manager voids it here. The server refuses the void if
                                 the receipt put anything on the shelf. */}
-                            {g.overOrder ? (
+                            {g.overOrder && !canDropOverOrder ? (
+                              <span className="text-xs text-gray-500">
+                                The store manager marks the extra units not received
+                              </span>
+                            ) : g.overOrder ? (
                               <button
                                 type="button"
                                 onClick={() => dropOverOrder(g.grn_id, g.grn_number)}

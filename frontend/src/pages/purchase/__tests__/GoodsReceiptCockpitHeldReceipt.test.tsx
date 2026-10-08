@@ -55,8 +55,10 @@ vi.mock('../../../context/ToastContext', () => ({
   useToast: () => toastMock,
 }));
 
+const authState = vi.hoisted(() => ({ roles: ['STORE_MANAGER'] as string[] }));
+
 vi.mock('../../../context/AuthContext', () => ({
-  useAuth: () => ({ user: { activeStoreId: 'BV-DHN-02', roles: ['STORE_MANAGER'] }, hasRole: () => true }),
+  useAuth: () => ({ user: { activeStoreId: 'BV-DHN-02', roles: authState.roles }, hasRole: () => true }),
 }));
 
 vi.mock('../../../hooks/useIsOnlineStore', () => ({
@@ -113,6 +115,7 @@ async function heldRow(): Promise<HTMLElement> {
 describe('Receive Goods - a receipt held for cataloguing (audit C1)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    authState.roles = ['STORE_MANAGER'];
     listVendorsMock.mockResolvedValue([
       { vendor_id: 'V-JOT', display_name: 'Jharkhand Optical Traders' },
     ]);
@@ -228,6 +231,30 @@ describe('Receive Goods - a receipt held for cataloguing (audit C1)', () => {
     await waitFor(() => expect(getCockpitMock.mock.calls.length).toBeGreaterThan(cockpitLoads));
     expect(toastMock.success).toHaveBeenCalledWith(expect.stringMatching(/2 unit\(s\) marked not received/));
     confirmSpy.mockRestore();
+  });
+
+  // Panel round 7: receiving is managers only -- the server refuses 'Not
+  // received' to an accountant (403), so the screen does not offer it and
+  // says who does it (the 09-28 ruling: the blocked page says who can).
+  it('below manager, a receipt held beyond its order names the store manager instead', async () => {
+    authState.roles = ['ACCOUNTANT'];
+    getGRNsMock.mockImplementation(async (params: { status?: string }) =>
+      params?.status === 'PARTIALLY_ACCEPTED'
+        ? {
+            grns: [
+              {
+                ...HELD_GRN,
+                unresolved_lines: [
+                  { product_id: 'p-boss', accepted_qty: 2, reason: 'over_order', ordered: 2, on_shelf: 2 },
+                ],
+              },
+            ],
+          }
+        : { grns: [] },
+    );
+    const row = await heldRow();
+    expect(within(row).queryByRole('button', { name: /not received/i })).toBeNull();
+    expect(within(row).getByText(/the store manager marks the extra units not received/i)).toBeTruthy();
   });
 
   it('a receipt held only for the catalogue offers no "Not received"', async () => {
