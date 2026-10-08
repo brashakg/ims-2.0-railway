@@ -189,6 +189,10 @@ export interface POSState {
   // Per-sale cash accountability (optional; see CashTenderCapture).
   cash_tender: CashTenderCapture | null;
 
+  // The SERVER's price for the cart (POST /orders/quote) and the cart it
+  // priced. Read it through getQuotedBill, which ignores a stale one.
+  bill_quote: BillQuote | null;
+
   // UI state
   is_processing: boolean;
 
@@ -233,6 +237,9 @@ export interface POSState {
   // Passing percent=0 clears the discount.
   setCartDiscount: (percent: number, reason?: string, approvedBy?: string) => void;
 
+  // The server's bill quote (components/pos/billQuote.ts keeps it fresh).
+  setBillQuote: (quote: BillQuote | null) => void;
+
   // Order
   setOrderResult: (orderId: string, orderNumber: string) => void;
   setProcessing: (val: boolean) => void;
@@ -263,13 +270,17 @@ export interface POSState {
   // Computed getters
   getSubtotal: () => number;
   getTotalDiscount: () => number;
-  /** The bill's value after GST, BEFORE round off (= taxable + GST). */
+  /** The bill's value after GST, BEFORE round off (= taxable + GST): the
+   *  till's own ESTIMATE, shown only until the server's quote lands. */
   getBillValue: () => number;
-  /** The bill's PAYABLE: getBillValue rounded once to the nearest rupee
-   *  (owner ruling 2026-10-08). What the cashier collects. */
+  /** The server's quote for THIS cart, or null while none is current. */
+  getQuotedBill: () => BillQuote | null;
+  /** The bill's PAYABLE, what the cashier collects: the server's quote,
+   *  rounded to the rupee by the server (owner ruling 2026-10-08). Until the
+   *  quote lands, the unrounded estimate. The till never rounds a bill. */
   getGrandTotal: () => number;
-  /** The paise that rounding moved (payable - bill value): the bill's own
-   *  "Round off" line. Never part of taxable value or GST. */
+  /** The server's round off for this cart (its own "Round off" line; never
+   *  taxable value or GST); 0 until the quote lands. */
   getRoundOff: () => number;
   getTax: () => number;
   getTaxBreakdown: () => CartTaxBreakdown;
@@ -294,15 +305,24 @@ export interface CartTaxBreakdown {
 // Helpers
 // ============================================================================
 
-/** Bill round off (owner ruling 2026-10-08): the payable is rounded ONCE,
- *  after GST, to the nearest rupee -- 50 paise and above up, below down.
- *  The cashier takes the money BEFORE the order exists, so the till has to
- *  quote the rupee the server will bill; this is the till's mirror of the
- *  server's rule (backend orders/_shared.round_bill), which stays the
- *  authority on order-create. Only getGrandTotal / getRoundOff call it. */
-function roundBill(billValue: number): { payable: number; roundOff: number } {
-  const payable = Math.round(billValue);
-  return { payable, roundOff: Math.round((payable - billValue) * 100) / 100 };
+/** The server's price for a cart (POST /orders/quote): the bill create will
+ *  make, rounded to the rupee by the server (owner ruling 2026-10-08). */
+export interface BillQuote {
+  /** billQuoteKey of the cart this quote priced. */
+  key: string;
+  grand_total: number;
+  round_off: number;
+  tax: number;
+  total_discount: number;
+}
+
+/** Everything the server prices a cart on. A quote whose key differs from the
+ *  live cart's is stale and is never shown or collected against. */
+export function billQuoteKey(s: { cart?: CartLineItem[]; cart_discount_percent?: number }): string {
+  return JSON.stringify([
+    (s.cart || []).map((i) => [i.category, i.quantity, i.unit_price, i.discount_percent]),
+    s.cart_discount_percent || 0,
+  ]);
 }
 
 function calcLineTotal(item: { unit_price: number; quantity: number; discount_percent: number }): number {
@@ -370,6 +390,7 @@ const initialState = {
   appliedVoucher: undefined,
   pendingLoyaltyRedeem: null,
   cash_tender: null,
+  bill_quote: null as BillQuote | null,
 };
 
 // ============================================================================
@@ -537,6 +558,8 @@ export const usePOSStore = create<POSState>()(
       },
 
       // --- Order ---
+      setBillQuote: (quote) => set({ bill_quote: quote }),
+
       setOrderResult: (orderId: string, orderNumber: string) => set({ order_id: orderId, order_number: orderNumber }),
       setProcessing: (val: boolean) => set({ is_processing: val }),
 
@@ -756,9 +779,14 @@ export const usePOSStore = create<POSState>()(
         return Math.round(total * 100) / 100;
       },
 
-      getGrandTotal: () => roundBill(get().getBillValue()).payable,
+      getQuotedBill: () => {
+        const q = get().bill_quote;
+        return q && q.key === billQuoteKey(get()) ? q : null;
+      },
 
-      getRoundOff: () => roundBill(get().getBillValue()).roundOff,
+      getGrandTotal: () => get().getQuotedBill()?.grand_total ?? get().getBillValue(),
+
+      getRoundOff: () => get().getQuotedBill()?.round_off ?? 0,
 
       getTax: () => get().getTaxBreakdown().totalTax,
 

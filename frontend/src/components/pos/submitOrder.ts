@@ -14,19 +14,10 @@ import { orderApi, loyaltyApi, workshopApi } from '../../services/api';
 import { canonicalCategory } from '../../utils/categoryNormalize';
 import type { CashTenderCapture } from '../../stores/posStore';
 import { buildPaymentBody } from './paymentBody';
+import { orderLinesOf, refreshBillQuote } from './billQuote';
 
-export function mapCategory(cat: string): string {
-  // item_type vocabulary for the order payload (drives backend GST item_type-
-  // wins). Canonicalise the input first so EVERY category spelling (short code,
-  // plural, canonical) resolves; outputs are unchanged from the legacy map.
-  const canonical = canonicalCategory(cat);
-  const map: Record<string, string> = {
-    FRAME: 'FRAME', SUNGLASS: 'SUNGLASS', OPTICAL_LENS: 'LENS',
-    CONTACT_LENS: 'CONTACT_LENS', COLORED_CONTACT_LENS: 'CONTACT_LENS',
-    ACCESSORIES: 'ACCESSORY', WATCH: 'WATCH', SMARTWATCH: 'SMARTWATCH', SERVICES: 'SERVICE',
-  };
-  return map[canonical] || canonical || cat;
-}
+// The order-line vocabulary lives with the line builder the quote shares.
+export { mapCategory } from './billQuote';
 
 export interface SubmitPosOrderResult {
   ok: boolean;
@@ -75,6 +66,22 @@ export async function submitPosOrder(
     }
   }
 
+  // THE bill total is the SERVER's (POST /orders/quote, priced by create's own
+  // math and rounded to the rupee there): take a fresh quote now, so the
+  // tenders below are checked against the rupee this order will bill. The
+  // till never rounds a bill itself, and never collects against an estimate.
+  try {
+    await refreshBillQuote();
+  } catch {
+    return {
+      ok: false,
+      error: 'Could not get the bill total from the server. Check the connection and try again.',
+    };
+  }
+  if (!store.getQuotedBill()) {
+    return { ok: false, error: 'The bill changed while it was being priced. Check the total and try again.' };
+  }
+
   if (store.getBalance() > 0.01 && !store.is_advance_payment) {
     return { ok: false, error: 'Payment incomplete. Add payments or enable "Advance payment only".' };
   }
@@ -111,22 +118,7 @@ export async function submitPosOrder(
       order_type: store.sale_type,
       salesperson_id: store.salesperson_id,
       salesperson_name: store.salesperson_name,
-      items: (store.cart || []).map((item: any) => ({
-        item_type: mapCategory(item.category),
-        product_id: item.product_id,
-        product_name: item.name,
-        sku: item.sku,
-        brand: item.brand,
-        subbrand: item.subbrand,
-        category: item.category,
-        quantity: item.quantity,
-        unit_price: item.unit_price,
-        discount_percent: item.discount_percent,
-        discount_reason: item.discount_reason || undefined,
-        prescription_id: item.linked_prescription_id,
-        lens_details: item.lens_details,
-        item_note: item.item_note || undefined,
-      })),
+      items: orderLinesOf(store.cart),
       notes: store.cart_note || undefined,
       // Phase 6.7 — pass delivery + cart-discount fields through to backend
       delivery_date: store.delivery_date || undefined,
