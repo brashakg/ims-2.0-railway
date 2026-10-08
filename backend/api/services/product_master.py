@@ -1232,10 +1232,12 @@ def find_similar_products(
     filter (spec: siblings are same-category). No new index is needed: the
     identity_key index serves the prefix scan.
 
-      * exact_match  -- the row whose identity_key equals compute_identity_key(
-                        brand, model, colour, size): the row a create would 409
-                        against. NOT category-filtered (the create-door dup
-                        check isn't either -- parity over prettiness).
+      * exact_match  -- the row a create would 409 against, by THE create
+                        door's rule (identity_conflict). NOT category-filtered
+                        (the door's check isn't either -- parity over
+                        prettiness).
+      * eye_size_needed -- the eye sizes the door's 422 EYE_SIZE_NEEDED names
+                        for an eye-size item typed without one, else [].
       * siblings     -- same category + brand + model, ANY colour/size, capped
                         at `limit`, exact match excluded (the warning line
                         already shows it).
@@ -1271,19 +1273,32 @@ def find_similar_products(
             "identity_key": {"$regex": "^" + re.escape(prefix)},
         }
 
-        exact_key = compute_identity_key(brand, model, colour, size)
-        exact_doc = (
-            products_collection.find_one({"identity_key": exact_key})
-            if exact_key
-            else None
+        # "Exact" is THE create door's answer (identity_conflict), never a
+        # rule of its own: a frame keyed before eye size joined the key, a
+        # sizeless frame catalogued by eye size and a discarded draft get the
+        # same answer here as on Save.
+        from database.repositories.product_repository import ProductRepository
+
+        answer = identity_conflict(
+            {
+                "category": canonical,
+                "brand": brand,
+                "model": model,
+                "color": colour,
+                "size": size,
+                "identity_key": compute_identity_key(brand, model, colour, size),
+            },
+            ProductRepository(products_collection),
         )
+        code = getattr(answer, "code", None)
+        exact = answer.conflict if code == "DUPLICATE_PRODUCT" else None
 
         docs = list(
             products_collection.find(sibling_query)
             .sort("identity_key", 1)
             .limit(int(limit) + 1)
         )
-        exact_ident = (exact_doc or {}).get("identity_key")
+        exact_ident = (exact or {}).get("identity_key")
         siblings = [
             existing_product_summary(d)
             for d in docs
@@ -1311,7 +1326,9 @@ def find_similar_products(
             )
 
         return {
-            "exact_match": existing_product_summary(exact_doc) if exact_doc else None,
+            "exact_match": exact,
+            # Typed without the eye size it is catalogued by: Save asks for it.
+            "eye_size_needed": list(answer.sizes) if code == "EYE_SIZE_NEEDED" else [],
             "siblings": siblings,
             "model_colour_count": model_colour_count,
         }
@@ -2743,7 +2760,9 @@ def identity_conflict(spine: Dict[str, Any], product_repo) -> Optional[ProductMa
     brand/model/colour is catalogued BY eye size (each eye size is its own item,
     owner 09-28) -> 422 EYE_SIZE_NEEDED naming the sizes: it cannot be told
     apart from them, so it is never created as a sizeless twin."""
-    existing = product_repo.find_by_sku(spine.get("sku"))
+    # A blank SKU names no product (find_one({"sku": None}) would match any row
+    # without one).
+    existing = product_repo.find_by_sku(spine["sku"]) if spine.get("sku") else None
     key = spine.get("identity_key")
     eye_item = _size_attribute_key(spine.get("category")) == "lens_size"
     sizeless = not normalise_identity_component(spine.get("size"))

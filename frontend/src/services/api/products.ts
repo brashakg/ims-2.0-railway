@@ -145,9 +145,8 @@ export class DuplicateProductError extends Error {
 
 // ---------------------------------------------------------------------------
 // Live "similar products" lookup (dup-detect Phase 2, GET /products/similar).
-// The backend classifies against THE same normalised identity the create door
-// 409s on: `exact_match` = the row this exact colour(/size) would collide
-// with; `siblings` = other colours/sizes of the same category+brand+model
+// The backend answers "exact" with THE create door's own rule
+// (identity_conflict): `exact_match` = the row Save would 409 against; `siblings` = other colours/sizes of the same category+brand+model
 // (capped at 12); `model_colour_count` = the true distinct-colour total.
 // Fail-soft server-side: DB trouble returns the empty shape with 200.
 // Each summary row is product_master.existing_product_summary — the same
@@ -157,6 +156,9 @@ export type SimilarProductSummary = DuplicateProductInfo;
 
 export interface SimilarProductsResponse {
   exact_match: SimilarProductSummary | null;
+  /** Typed without the eye size this item is catalogued by: the eye sizes
+   *  Save's 422 EYE_SIZE_NEEDED names (the door's one rule), else []. */
+  eye_size_needed?: string[];
   siblings: SimilarProductSummary[];
   model_colour_count: number;
 }

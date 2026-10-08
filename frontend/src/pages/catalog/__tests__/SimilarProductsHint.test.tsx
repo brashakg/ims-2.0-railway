@@ -148,6 +148,19 @@ describe('SimilarProductsHint — exact-match warning', () => {
     expect(onOpenExisting).toHaveBeenCalledWith(draft);
   });
 
+  // Panel round 7 (one rule, Add product): Save brings a discarded draft back
+  // and its popup opens it -- the hint never sends it to the stock list.
+  it('a discarded draft as the exact match says Save brings it back, with no link', () => {
+    const discarded = { ...EXACT.exact_match!, discarded_draft: true, category: 'FRAME' };
+    mockHook.mockReturnValue({ data: { ...EXACT, exact_match: discarded }, armed: true });
+    const { onOpenExisting } = renderHint();
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      /draft discarded earlier — SKU\s*FRRB2140GRN\. Saving it as\s*frame\s*brings it back/
+    );
+    expect(screen.queryByRole('button', { name: 'Open it' })).toBeNull();
+    expect(onOpenExisting).not.toHaveBeenCalled();
+  });
+
   it('the Open link is out of the Tab order too', () => {
     renderHint();
     expect(screen.getByRole('button', { name: 'Open it' })).toHaveAttribute('tabindex', '-1');
@@ -158,5 +171,21 @@ describe('SimilarProductsHint — exact-match warning', () => {
     expect(screen.getByRole('alert')).toBeInTheDocument();
     expect(screen.queryByText(/This model exists in/)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'BLK' })).not.toBeInTheDocument();
+  });
+});
+
+// Panel round 7: a sizeless frame catalogued by eye size gets Save's own
+// EYE_SIZE_NEEDED answer before Save, never "This exact colour already exists".
+describe('SimilarProductsHint — eye size needed', () => {
+  it('names the eye sizes Save would ask for, and no exact-colour warning', () => {
+    mockHook.mockReturnValue({
+      data: { exact_match: null, eye_size_needed: ['52', '54'], siblings: [], model_colour_count: 1 },
+      armed: true,
+    });
+    renderHint();
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      /in the catalogue by eye size \(52, 54\)\. Type the eye size/
+    );
+    expect(screen.queryByText(/already exists/)).toBeNull();
   });
 });
