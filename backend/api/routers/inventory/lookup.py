@@ -9,7 +9,8 @@ from an allow-list, never from the product or stock document.
 Every rule is reused, not re-typed:
   * search      -- ProductRepository.search_products, the active-only search
                    GET /products?search= runs, plus an exact SKU, product
-                   barcode or manufacturer GTIN (attributes.gtin) and the IMS
+                   barcode or manufacturer GTIN (attributes.gtin or the legacy
+                   top-level gtin, read through gtin.sanitise_gtin) and the IMS
                    unit barcode via StockRepository.find_by_barcode (the till's
                    scan lookup), active products only;
   * the price   -- mrp + offer_price only; the screen shows the till's own
@@ -45,6 +46,7 @@ from ._shared import (
     router,
 )
 from .helpers import _get_db
+from ...services.gtin import sanitise_gtin
 from ...services.item_events import status_match
 from ...services.product_master import find_similar_products
 from ...services.rbac_policy import policy_for
@@ -110,8 +112,13 @@ def _find(product_repo, stock_repo, q):
     colours by the identity_key rule, other eye sizes by variant_of), so one
     scan answers "in any colour?". The exact ones come first, ahead of the
     50-hit search and the 200-row family caps, so a scanned contact-lens
-    power is never cut from a 300-power family. Inactive (soft-deleted / draft) products never come back."""
-    exact = [{"sku": q}, {"barcode": q}, {"attributes.gtin": q}]
+    power is never cut from a 300-power family. Inactive (soft-deleted / draft) products never come back.
+    A code is matched as typed AND as the one GTIN rule reads it
+    (gtin.sanitise_gtin: '8 056597 054324' is 8056597054324), in the GTIN
+    fields the catalogue reads (attributes.gtin, then the legacy top-level
+    gtin -- product_master's `attrs.get("gtin") or spine.get("gtin")`)."""
+    codes = list({q, sanitise_gtin(q)} - {None})
+    exact = [{"sku": q}] + [{f: {"$in": codes}} for f in ("barcode", "attributes.gtin", "gtin")]
     unit = stock_repo.find_by_barcode(q)
     if unit and unit.get("product_id"):
         exact.append({"product_id": unit["product_id"]})

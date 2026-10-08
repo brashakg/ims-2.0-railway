@@ -163,7 +163,8 @@ PHYSICAL = {S1, S2, S3}
 P54, P56, P003, RB = "P-807-54", "P-807-56", "P-003-54", "P-RB3025"
 UNIT_BARCODE = "BV91FA3858A2"  # the IMS label on one Dhanbad frame of P54
 GTIN_TOP = "8056597012345"  # P54's manufacturer barcode, top-level field
-GTIN_ATTR = "8056597054321"  # P54's GTIN as the create door stores it (attributes.gtin)
+GTIN_ATTR = "8056597054324"  # P54's GTIN as the create door stores it (attributes.gtin)
+GTIN_LEGACY = "8056597111119"  # a legacy top-level `gtin` on P54 (product_master reads it second)
 
 # What must never reach a counter screen: every value seeded below as a cost,
 # a supplier or a bill reference.
@@ -344,7 +345,7 @@ def _seed(db) -> None:
     )
     db["products"].insert_many(
         [
-            _product(P54, "SG-CARRERA-CA8895-807-54", "Carrera CA8895 Aviator Unisex Sunglasses - Gold", "807", "54", barcode=GTIN_TOP,
+            _product(P54, "SG-CARRERA-CA8895-807-54", "Carrera CA8895 Aviator Unisex Sunglasses - Gold", "807", "54", barcode=GTIN_TOP, gtin=GTIN_LEGACY,
                      attributes={"brand_name": "Carrera", "model_no": "CA8895", "colour_code": "807", "gtin": GTIN_ATTR}),
             _product(P56, "SG-CARRERA-CA8895-807-56", "Carrera CA8895 Aviator Unisex Sunglasses - Gold", "807", "56", variant_of=P54),
             _product(P003, "SG-CARRERA-CA8895-003-54", "Carrera CA8895 Aviator Unisex Sunglasses - Black", "003", "54"),
@@ -483,6 +484,11 @@ _SEARCHES = [
     ("sku", "SG-CARRERA-CA8895-807-54", P54),
     ("manufacturer barcode (top-level)", GTIN_TOP, P54),
     ("manufacturer GTIN (attributes.gtin)", GTIN_ATTR, P54),
+    # Round 7: a code goes through the one GTIN rule (gtin.sanitise_gtin), so
+    # one typed as printed under the bars, or with hyphens, is the same GTIN.
+    ("manufacturer GTIN typed as printed, with spaces", "8 056597 054324", P54),
+    ("manufacturer GTIN typed with hyphens", "805-6597-05432-4", P54),
+    ("the legacy top-level gtin", GTIN_LEGACY, P54),
     ("brand plus model", "carrera ca8895", P54),
     ("the IMS unit barcode on the frame's label", UNIT_BARCODE, P54),
 ]
