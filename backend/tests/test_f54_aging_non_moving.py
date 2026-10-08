@@ -216,30 +216,27 @@ def test_legacy_units_beside_todays_receipt_are_old_on_every_screen(monkeypatch)
 
 
 # ---------------------------------------------------------------------------
-# Verifier round 5: opening stock is undated, not "arrived the day typed in"
+# Owner ruling 2026-10-08: opening stock ages from the day it was entered
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("today_too", [False, True], ids=["opening-only", "beside-a-receipt"])
-def test_opening_stock_is_old_on_every_screen(monkeypatch, today_too):
-    """8 never-sold frames entered as opening stock 10 days ago (pre-IMS stock:
-    nobody knows when they reached the shelf). Read as an arrival, the entry
-    day made them NEW / 0-30 on Aging, never DEAD_STOCK and never non-moving
-    for 90 days -- every shop's whole go-live stock. They are undated, so old,
-    exactly like the same 8 with no date; a unit received today beside them
-    does not make them young."""
+@pytest.mark.parametrize("days_ago", [0, 100], ids=["entered-today", "entered-100-days-ago"])
+def test_opening_stock_ages_from_the_day_it_was_entered(monkeypatch, days_ago):
+    """A shop whose whole stock is 8 never-sold frames entered as opening
+    stock. Entered today, it is 0 days old: NEW on Aging (not 'unknown' /
+    180+), not DEAD_STOCK on Alerts, not on Non-moving. The same stock
+    entered 100 days ago has sat out every window: 100 days, C, dead and
+    non-moving."""
     units = [
         {
             "product_id": "P-OLD",
             "store_id": "S1",
             "status": "AVAILABLE",
             "source": "OPENING_STOCK",
-            "created_at": _NOW - timedelta(days=10),
+            "created_at": _NOW - timedelta(days=days_ago),
         }
         for _ in range(8)
     ]
-    if today_too:
-        units.append({"product_id": "P-OLD", "store_id": "S1", "status": "AVAILABLE", "created_at": _NOW})
     _mongo(monkeypatch, units)
 
     aging = asyncio.run(
@@ -248,15 +245,18 @@ def test_opening_stock_is_old_on_every_screen(monkeypatch, today_too):
         )
     )
     (row,) = aging["products"]
-    assert (row["classification"], row["daysInStock"], row["ageCategory"]) == ("C", None, "180+")
-
     alerts = asyncio.run(
         inv.get_stock_alerts(
             store_id=None, dead_days=90, lead_time_days=14, limit=200, current_user=_MGR
         )
     )
-    assert [a["alertType"] for a in alerts["alerts"]] == ["DEAD_STOCK"]
+    dead = [a["alertType"] for a in alerts["alerts"] if a["alertType"] == "DEAD_STOCK"]
+    listed = [(p["product_id"], p["current_stock"]) for p in _non_moving()["products"]]
 
-    assert [(p["product_id"], p["current_stock"]) for p in _non_moving()["products"]] == [
-        ("P-OLD", 9 if today_too else 8)
-    ]
+    if days_ago == 0:
+        assert (row["classification"], row["daysInStock"], row["ageCategory"]) == ("NEW", 0, "0-30")
+        assert aging["summary"]["oldStockCount"] == 0
+        assert dead == [] and listed == []
+    else:
+        assert (row["classification"], row["daysInStock"], row["ageCategory"]) == ("C", 100, "91-180")
+        assert dead == ["DEAD_STOCK"] and listed == [("P-OLD", 8)]

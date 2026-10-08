@@ -94,8 +94,9 @@ async def get_non_moving_stock(
                 # The VERDICT needs stock that has sat on the shelf for the
                 # whole window: a unit received this morning has not had N days
                 # to sell (audit F54). The oldest unit decides, by the arrival
-                # rule Aging and Alerts use (unknown age, opening stock
-                # included, is old). The Stock column shows everything here.
+                # rule Aging and Alerts use (unknown age is old; opening
+                # stock ages from its entry day). The Stock column shows
+                # everything here.
                 row = shelf.get(product_id) or {}
                 total_qty = row.get("quantity", 0)
                 if total_qty <= 0 or not _had_the_window(row.get("oldest"), now, days):
