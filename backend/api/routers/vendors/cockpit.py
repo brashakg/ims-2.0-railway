@@ -9,8 +9,10 @@ from ._shared import (
     _VENDOR_ROLES,
     _pm,
     can_access_store_scoped,
+    get_grn_repository,
     get_product_repository,
     get_purchase_order_repository,
+    get_stock_repository,
     logger,
     require_roles,
     resolve_store_scope,
@@ -19,6 +21,7 @@ from ._shared import (
     _get_db,
 )
 from .gst import po_gst_context
+from .grn_accept_lock import _GRN_TERMINAL_ACCEPT_STATUSES
 
 
 @router.get("/goods-receipt/cockpit")
@@ -151,14 +154,30 @@ async def get_last_purchase_cost(
     product_ids: str = Query(..., description="Comma-separated product_ids to price"),
     current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
 ):
-    """Most-recent agreed purchase price per product for this vendor, from PO
-    history -- so the PO / Buy-Desk form can pre-fill "last paid Rs X on <date>"
-    instead of the operator guessing the cost (procurement Phase 2C).
+    """The price this vendor was last really paid, per product -- so the PO /
+    Buy-Desk form can pre-fill "last paid Rs X on <date>" instead of the
+    operator guessing the cost (procurement Phase 2C). THE one last-paid rule:
 
-    Reads the vendor's POs newest-first (capped) and takes the first line hit
-    per requested product_id. Read-only, fail-soft: DB trouble or no history
-    yields an empty map (the form then just shows a blank cost). Registered
-    ABOVE /purchase-orders/{po_id} so the literal path wins.
+      1. the cost at acceptance of this vendor's newest accepted goods-receipt
+         line for the product, dated by that receipt's acceptance. It is READ
+         BACK from the units the receipt minted (goods-receipt accept stamps
+         each one with unit_cost), never re-derived here, so the two can never
+         disagree. A line that accepted nothing minted nothing and never answers;
+      2. only if there is none, the price on this vendor's newest order that was
+         sent to it (sent, acknowledged, part- or fully received), dated when it
+         was sent -- skipping a cancelled line, and an order whose receipts for
+         the product received units but accepted none (a rejected delivery is
+         no price paid). A receipt line that arrived as 0 (short-shipped, still
+         due) is no delivery at all: that order still answers.
+
+    A DRAFT was never agreed and a CANCELLED (or APPROVED / PENDING, never sent)
+    order never bought, so none of them is ever a price paid: the form would put
+    a typo or a dropped quote over the catalogue cost, and that becomes the cost
+    at acceptance.
+
+    Read-only, store-scoped, fail-soft: DB trouble or no history yields an
+    empty map (the form keeps the catalogue cost, no caption). Registered ABOVE
+    /purchase-orders/{po_id} so the literal path wins.
 
     Shape: {"costs": {product_id: {unit_price, po_number, po_id, date}, ...}}.
     """
@@ -171,39 +190,95 @@ async def get_last_purchase_cost(
         return {"costs": {}}
 
     costs: dict = {}
+
+    def _take(pid, price, doc, date):
+        try:
+            price = round(float(price or 0), 2)
+        except (TypeError, ValueError):
+            return
+        if price > 0:
+            costs[pid] = {
+                "unit_price": price,
+                "po_number": doc.get("po_number"),
+                "po_id": doc.get("po_id"),
+                "date": date,
+            }
+
     try:
-        # Newest POs for this vendor first; walk lines until every requested
-        # product has a price (or the cap is hit).
-        pos = po_repo.find_many(
-            {"vendor_id": vendor_id},
-            sort=[("created_at", -1)],
-            limit=100,
+        grn_repo = get_grn_repository()
+        stock_repo = get_stock_repository()
+        grns = (
+            grn_repo.find_many(
+                {
+                    "vendor_id": vendor_id,
+                    "status": {"$in": list(_GRN_TERMINAL_ACCEPT_STATUSES)},
+                    "items.product_id": {"$in": sorted(wanted)},
+                },
+                sort=[("accepted_at", -1)],
+                # No cap: a capped read let a busy vendor's newer receipts push
+                # a product's last receipt (or its rejected delivery) out of
+                # view, and the order fallback then answered with a price
+                # never paid. ponytail: reads every accepted receipt carrying
+                # a wanted product; stream a projected cursor if that grows.
+                limit=0,
+            )
+            if grn_repo is not None and stock_repo is not None
+            else []
         )
-        for po in pos or []:
-            # Only surface prices from stores the caller may see (cross-store
-            # roles pass); never leak another store's negotiated cost.
-            if not can_access_store_scoped(po.get("delivery_store_id"), current_user):
-                continue
-            for it in po.get("items", []) or []:
-                if not isinstance(it, dict):
-                    continue
-                pid = it.get("product_id")
-                if pid not in wanted or pid in costs:
-                    continue
-                try:
-                    price = round(float(it.get("unit_price") or 0), 2)
-                except (TypeError, ValueError):
-                    continue
-                if price <= 0:
-                    continue
-                costs[pid] = {
-                    "unit_price": price,
-                    "po_number": po.get("po_number"),
-                    "po_id": po.get("po_id"),
-                    "date": po.get("created_at"),
-                }
+        received = set()  # (po_id, product_id) some receipt already delivered
+        for grn in grns or []:
             if len(costs) >= len(wanted):
                 break
+            items = [it for it in grn.get("items", []) or [] if isinstance(it, dict)]
+            lines = {it.get("product_id") for it in items}
+            # Delivered = units arrived. The /purchase/grn screen sends a 0 line
+            # for every PO item that did not come; the cockpit drops it. Both
+            # must leave that order's price standing.
+            received |= {
+                (grn.get("po_id"), it.get("product_id"))
+                for it in items
+                if (it.get("received_qty") or 0) > 0
+            }
+            # Only surface prices from stores the caller may see (cross-store
+            # roles pass); never leak another store's negotiated cost.
+            if not can_access_store_scoped(grn.get("store_id"), current_user):
+                continue
+            for pid in (lines & wanted) - costs.keys():
+                unit = stock_repo.find_one(
+                    {
+                        "source_type": "GRN",
+                        "source_id": grn.get("grn_id"),
+                        "product_id": pid,
+                        "unit_cost": {"$gt": 0},
+                    }
+                )
+                if unit:
+                    _take(pid, unit.get("unit_cost"), grn, grn.get("accepted_at"))
+
+        if len(costs) < len(wanted):
+            pos = po_repo.find_many(
+                {
+                    "vendor_id": vendor_id,
+                    "status": {"$in": [*_RECEIVABLE_PO_STATUSES, "RECEIVED"]},
+                    "items.product_id": {"$in": sorted(wanted - costs.keys())},
+                },
+                sort=[("sent_at", -1), ("created_at", -1)],
+                limit=0,  # uncapped for the same reason as the receipts above
+            )
+            for po in pos or []:
+                if len(costs) >= len(wanted):
+                    break
+                if not can_access_store_scoped(po.get("delivery_store_id"), current_user):
+                    continue
+                for it in po.get("items", []) or []:
+                    if not isinstance(it, dict) or it.get("line_status") == "CANCELLED":
+                        continue  # a line cancel (draft #1165) bought nothing
+                    pid = it.get("product_id")
+                    if pid not in wanted or pid in costs:
+                        continue
+                    if (po.get("po_id"), pid) in received:
+                        continue  # delivered, and every unit was rejected
+                    _take(pid, it.get("unit_price"), po, po.get("sent_at"))
     except Exception as e:  # noqa: BLE001 - read-only helper, never a blocker
         logger.warning("[VENDOR] last-cost lookup failed: %s", e)
         return {"costs": {}}

@@ -24,16 +24,22 @@ from ._shared import (
 from ...services.cost_mask import mask_receipt
 from .models import GRNCreate, GRN_SUBTYPE_DC
 from .numbering import (
+    GRN_PLACEHOLDER_PREFIX,
     classify_grn_line_variance,
     generate_grn_number,
     grn_has_discrepancy,
+    grn_number_pending,
 )
 from .grn import (
     _bill_key,
     _duplicate_grn_detail,
     _enrich_grn_names,
     _find_duplicate_receipt,
+    _number_receipt,
+    _number_stranded_receipts,
+    _receipt_numbered,
 )
+from ...services.purchase_numbering import po_label
 
 
 @router.post("/grn", status_code=201)
@@ -56,13 +62,17 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
     """
     grn_repo = get_grn_repository()
     po_repo = get_purchase_order_repository()
+    if grn_repo is not None:
+        _number_stranded_receipts(grn_repo)
 
     grn_id = str(uuid.uuid4())
     store_id = current_user.get("active_store_id")
     is_dc = grn.grn_subtype == GRN_SUBTYPE_DC
-    # grn_number is generated AFTER the receiving store is finalised (a standard
-    # PO-backed GRN is re-pointed to the PO's delivery store below), so the
-    # per-store serial reflects the store the goods are actually booked to.
+    # grn_number is minted LAST, after the receiving store is final (a standard
+    # PO-backed GRN is re-pointed to the PO's delivery store below), after
+    # every refusal (duplicate invoice / DC, untallied lines) AND after the
+    # insert itself. The receipt number is a GST document series with no gaps:
+    # a refused receipt must not consume one (audit F28).
 
     # F-S3: mandatory goods-receipt document. The ops user physically receiving a
     # STANDARD shipment MUST attach the vendor invoice/challan (image or PDF)
@@ -225,10 +235,6 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
                 ),
             )
 
-    # Now that the receiving store is final (re-pointed to the PO's delivery
-    # store for a standard PO-backed GRN), mint the per-store GRN serial.
-    grn_number = generate_grn_number(store_id)
-
     # F9: DC-specific guards (uniqueness + period lock). Both are best-effort on
     # a DB error (fail-soft) but a found duplicate is a hard 409.
     if is_dc:
@@ -364,7 +370,10 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
 
     grn_doc = {
         "grn_id": grn_id,
-        "grn_number": grn_number,
+        # Placeholder until the insert wins (see the mint below the insert):
+        # unique per row and a string, so the grn_number index and validator
+        # accept it.
+        "grn_number": f"{GRN_PLACEHOLDER_PREFIX}{grn_id}",
         "po_id": grn.po_id,
         "po_number": po.get("po_number") if po else None,
         "vendor_id": vendor_id,
@@ -469,6 +478,39 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
                 )
             raise HTTPException(status_code=500, detail="Failed to save goods receipt")
 
+    # Mint the per-store receipt serial only now that the row is in: every
+    # guard has passed AND the unique indexes accepted the insert. Two
+    # identical receipts that both passed the duplicate check race to the
+    # index, and the loser is refused above before it takes a number (audit
+    # F28: the loser used to burn one, leaving a gap in a GST series). A worker
+    # that dies between the insert and the number leaves the row on its
+    # placeholder; _number_stranded_receipts numbers it on the next create,
+    # accept or receipts list. Both go through _number_receipt (claim, mint,
+    # guarded write), so a request that stalled past _STRANDED_AFTER finds its
+    # row already numbered by the healer and reports THAT number: it never
+    # mints a second one or overwrites the first (already on any unit an
+    # accept minted meanwhile).
+    if grn_repo is None:
+        grn_number = generate_grn_number(store_id)
+    else:
+        grn_number = _number_receipt(grn_repo, grn_id, store_id)
+        if grn_number is None:
+            row = grn_repo.find_by_id(grn_id) or {}
+            if not row.get("grn_number") or grn_number_pending(row):
+                # Saved, and another worker is numbering it right now: never
+                # hand out the placeholder. The receipts list shows it once
+                # numbered; a retry gets the duplicate guard, not a second one.
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "The goods receipt is saved and is still getting its "
+                        "receipt number. Refresh the receipts list in a minute; "
+                        "do not enter it again."
+                    ),
+                )
+            grn_number = row["grn_number"]
+    grn_doc["grn_number"] = grn_number
+
     # F9: audit the DC log (immutable; a DC is the accountable checkpoint between
     # physical lens arrival and workshop work). Fail-soft -- never blocks save.
     if is_dc:
@@ -506,12 +548,12 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
             from ...services.task_triggers import create_system_task
             from ...dependencies import get_task_repository
 
-            po_label = grn_doc.get("po_number") or grn.po_id
+            po_ref = po_label(grn_doc.get("po_number"), grn.po_id)
             create_system_task(
                 get_task_repository(),
-                title=f"GRN discrepancy on PO {po_label}",
+                title=f"GRN discrepancy on {po_ref}",
                 description=(
-                    f"Goods receipt {grn_number} against PO {po_label} shows a "
+                    f"Goods receipt {grn_number} against {po_ref} shows a "
                     f"discrepancy: received {total_received}, accepted "
                     f"{total_accepted}, rejected {total_rejected}"
                     + (
@@ -526,6 +568,11 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
                 category="Purchase",
                 store_id=grn_doc.get("store_id"),
                 dedupe_ref=f"grn:{grn_id}",
+                # Owner ruling 2026-09-29 (D17): a goods-received-with-a-problem
+                # task goes to THAT shop's store manager, by name. A quantity
+                # discrepancy is not a price/bill problem, so accounts are not
+                # copied.
+                assigned_to="STORE_MANAGER",
             )
         except Exception:
             pass
@@ -556,6 +603,11 @@ async def get_grn(
     grn = grn_repo.find_by_id(grn_id)
     if not grn or not can_access_store_scoped(grn.get("store_id"), current_user):
         raise HTTPException(status_code=404, detail="GRN not found")
+    # A stranded receipt is numbered first; one its own request is still
+    # numbering has no number to show yet, never its placeholder (audit F28).
+    grn = _receipt_numbered(grn_repo, grn)
+    if grn_number_pending(grn):
+        grn = {**grn, "grn_number": None}
 
     _enrich_grn_names([grn])
 

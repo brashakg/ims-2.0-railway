@@ -52,6 +52,10 @@ class _FakeGRNRepo:
         self.created = doc
         return doc
 
+    def update(self, grn_id, fields):
+        self.created.update(fields)
+        return True
+
     def find_one(self, query):
         return self._preset
 
