@@ -753,3 +753,31 @@ def test_f69_create_door_keeps_the_weight(door):
 def test_f73_new_product_has_no_chain_wide_level(door):
     created = door(_form())
     assert "reorder_point" not in created and "reorder_levels" not in created
+
+
+# ---------------------------------------------------------------------------
+# Owner 2026-10-08 - the Buy Desk 'Create draft PO' asks the PO create gate
+# ---------------------------------------------------------------------------
+
+
+def test_the_draft_po_roles_are_the_po_create_gate():
+    """The screen's PURCHASE_ROLES (Buy Desk 'Create draft PO', the Purchase
+    pages) is the server's PO create gate: _VENDOR_ROLES + SUPERADMIN (who
+    always passes require_roles), the same as the route's rbac row -- and a
+    catalogue manager is in neither (owner 2026-10-08)."""
+    import re as _re
+    from api.routers.vendors._shared import _VENDOR_ROLES
+    from api.services.rbac_policy import POLICY
+
+    src = open(os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "frontend", "src", "pages", "purchase", "purchaseRoles.ts",
+    ), encoding="utf-8").read()
+    m = _re.search(r"PURCHASE_ROLES[^=]*=\s*\[([^\]]*)\]", src)
+    assert m, "PURCHASE_ROLES is not in purchaseRoles.ts"
+    screen = set(_re.findall(r"'([A-Z_]+)'", m.group(1)))
+    assert screen == set(_VENDOR_ROLES) | {"SUPERADMIN"}
+    row = next(r for r in POLICY if r["method"] == "POST"
+               and r["path"] == "/api/v1/vendors/purchase-orders")
+    assert set(row["allowed"]) | {"SUPERADMIN"} == screen
+    assert "CATALOG_MANAGER" not in screen

@@ -20,6 +20,8 @@ import {
 } from 'lucide-react';
 import { buyDeskApi, type BuyDeskRow, type EcomState } from '../../services/api/buyDesk';
 import BuyDeskDraftPOModal from './BuyDeskDraftPOModal';
+import { useAuth } from '../../context/AuthContext';
+import { PURCHASE_ROLES } from '../purchase/purchaseRoles';
 
 const ECOM_LABEL: Record<EcomState, string> = {
   NOT_LISTED: 'Not listed',
@@ -74,6 +76,9 @@ function ecomChip(state: EcomState, note?: string | null) {
 }
 
 export default function BuyDeskPage() {
+  // Only a role the server lets raise a PO selects rows for a draft PO
+  // (owner 2026-10-08: not a catalogue manager).
+  const canDraftPO = useAuth().hasRole(PURCHASE_ROLES);
   const [rows, setRows] = useState<BuyDeskRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -246,16 +251,18 @@ export default function BuyDeskPage() {
           <table className="w-full min-w-[860px] text-sm">
             <thead className="bg-gray-50 text-left text-xs uppercase tracking-wide text-gray-500">
               <tr>
-                <th className="px-4 py-2.5 w-10">
-                  <input
-                    type="checkbox"
-                    aria-label="Select all purchasable products"
-                    checked={allSelected}
-                    disabled={selectablePids.length === 0}
-                    onChange={toggleAll}
-                    className="h-4 w-4 rounded border-gray-300"
-                  />
-                </th>
+                {canDraftPO && (
+                  <th className="px-4 py-2.5 w-10">
+                    <input
+                      type="checkbox"
+                      aria-label="Select all purchasable products"
+                      checked={allSelected}
+                      disabled={selectablePids.length === 0}
+                      onChange={toggleAll}
+                      className="h-4 w-4 rounded border-gray-300"
+                    />
+                  </th>
+                )}
                 <th className="px-4 py-2.5">Product</th>
                 <th className="px-4 py-2.5">Catalog</th>
                 <th className="px-4 py-2.5">Online</th>
@@ -268,17 +275,19 @@ export default function BuyDeskPage() {
             <tbody className="divide-y divide-gray-100">
               {filtered.map((r) => (
                 <tr key={r.product_id} className="hover:bg-gray-50">
-                  <td className="px-4 py-2.5">
-                    <input
-                      type="checkbox"
-                      aria-label={`Select ${r.name || r.sku || r.product_id}`}
-                      checked={selected.has(r.product_id)}
-                      disabled={!r.purchasable}
-                      onChange={() => toggleRow(r.product_id)}
-                      className="h-4 w-4 rounded border-gray-300 disabled:opacity-40"
-                      title={r.purchasable ? '' : 'Finish cataloguing this product to purchase it'}
-                    />
-                  </td>
+                  {canDraftPO && (
+                    <td className="px-4 py-2.5">
+                      <input
+                        type="checkbox"
+                        aria-label={`Select ${r.name || r.sku || r.product_id}`}
+                        checked={selected.has(r.product_id)}
+                        disabled={!r.purchasable}
+                        onChange={() => toggleRow(r.product_id)}
+                        className="h-4 w-4 rounded border-gray-300 disabled:opacity-40"
+                        title={r.purchasable ? '' : 'Finish cataloguing this product to purchase it'}
+                      />
+                    </td>
+                  )}
                   <td className="px-4 py-2.5">
                     <div className="font-medium text-gray-900">{r.name || r.sku || r.product_id}</div>
                     <div className="text-xs text-gray-500">
@@ -317,7 +326,7 @@ export default function BuyDeskPage() {
         )}
       </div>
 
-      {selected.size > 0 && (
+      {canDraftPO && selected.size > 0 && (
         <div className="sticky bottom-4 z-10 flex items-center justify-between gap-4 rounded-xl border border-gray-200 bg-white px-4 py-3 shadow-lg">
           <span className="text-sm text-gray-700">
             <span className="font-semibold text-gray-900">{selected.size}</span> product

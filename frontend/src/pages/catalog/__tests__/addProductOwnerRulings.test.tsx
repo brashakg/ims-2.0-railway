@@ -18,6 +18,8 @@
 // (F73 reorder levels are per shop, owner D12: perShopReorderLevel*.test.tsx.)
 // F92    menu labels say what each buying door is for; Buy Desk does not claim
 //        '0 products' while it is still loading.
+// 10-08  Buy Desk 'Create draft PO' is hidden from a catalogue manager: the
+//        page asks the server's PO create gate (PURCHASE_ROLES).
 
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -119,6 +121,7 @@ import { DuplicateProductError } from '../../../services/api/products';
 import BuyDeskPage from '../BuyDeskPage';
 import { useSimilarProducts } from '../useSimilarProducts';
 import { NAV_GROUPS } from '../../../components/shell/navConfig';
+import { PURCHASE_ROLES } from '../../purchase/purchaseRoles';
 
 const renderPage = (url = '/catalog/add') =>
   render(
@@ -415,5 +418,43 @@ describe('F92 - two buying doors, each says what it is for', () => {
     );
     expect(await screen.findByText(/Loading/)).toBeInTheDocument();
     expect(screen.queryByText(/\b0 products\b/)).toBeNull();
+  });
+});
+
+describe('Owner 2026-10-08 - a catalogue manager raises no PO from the Buy Desk', () => {
+  const ROW = {
+    product_id: 'P1', sku: 'SG-RAYBAN-RB4165-601', name: 'Ray-Ban RB4165 601', brand: 'Ray-Ban',
+    category: 'SG', catalog_status: 'COMPLETE',
+    readiness: { complete: true, missing: [], blockers: [], purchasable: true },
+    ecom_state: 'NOT_LISTED', on_hand: 0, on_order: 0, buy_signal: 2, purchasable: true,
+  };
+  // ?add_product= preselects the row, as Quick Add's 'Order this now' does.
+  const renderBuyDesk = () => {
+    getRows.mockResolvedValue({ rows: [ROW], total: 1, store_id: 'S1' });
+    render(
+      <MemoryRouter initialEntries={['/catalog/buy-desk?add_product=P1']}>
+        <BuyDeskPage />
+      </MemoryRouter>,
+    );
+  };
+
+  it('hides Create draft PO, and the row picks that lead to it', async () => {
+    auth.roles = ['CATALOG_MANAGER'];
+    renderBuyDesk();
+    expect(await screen.findByText('Ray-Ban RB4165 601')).toBeInTheDocument();
+    expect(screen.queryByRole('checkbox')).toBeNull();
+    // Not even once the ?add_product= preselect has run.
+    await expect(
+      screen.findByRole('button', { name: /Create draft PO/ }, { timeout: 500 }),
+    ).rejects.toThrow();
+  });
+
+  // The server's PO create gate, shared (pinned to the server by
+  // test_add_product_owner_rulings.py): every role in it still drafts.
+  it.each(PURCHASE_ROLES)('%s still drafts a PO (guard)', async (role) => {
+    auth.roles = [role];
+    renderBuyDesk();
+    expect(await screen.findByRole('button', { name: /Create draft PO/ })).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: 'Select Ray-Ban RB4165 601' })).toBeChecked();
   });
 });
