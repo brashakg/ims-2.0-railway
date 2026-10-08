@@ -979,6 +979,72 @@ def test_a_live_label_takes_over_a_cancelled_one_reconciled_before_the_clocks(sw
     assert shopify_fulfillment.tracked_awbs(doc) == ["AWB-2"]
 
 
+_PRE_CLOCK_F1 = dict(status="SHIPPED", shopify_fulfillment_id="1", awb="AWB-1",
+                     tracking_number="AWB-1", fulfillment_status="FULFILLED")
+
+
+def _reconcile(swept, oid, fid, awb, st, at, **over):
+    return shopify_fulfillment.reconcile_fulfillment(swept["db"], _fulfilment(
+        oid, fid, tracking_number=awb, status=st, created_at=at, updated_at=at, **over))
+
+
+def test_a_reissued_label_reconciled_before_the_cancel_of_a_pre_clock_one_takes_over(swept):
+    """The old reconcile stamped F1, live. Shopify cancels it (02:00) and
+    re-issues the label as F2 (02:01), whose create is reconciled first
+    (out-of-order delivery, or four workers). F2 is the newer fulfilment
+    (Shopify's ids increase), so it takes the fields over; F1's cancel then
+    clears only its own parcel. Held on the stamp, the order kept the dead
+    AWB-1 for good, through F2's own 03:00 update."""
+    oid = 60133
+    _book(swept, oid)
+    _set(swept, oid, **_PRE_CLOCK_F1)
+    _reconcile(swept, oid, 2, "AWB-2", "success", _T("02:01"))
+    _reconcile(swept, oid, 1, "AWB-1", "cancelled", _T("02:00"))
+    _reconcile(swept, oid, 2, "AWB-2", "success", _T("03:00"), shipment_status="in_transit")
+    doc = _doc(swept, oid)
+    assert (doc["shopify_fulfillment_id"], doc["awb"], doc["fulfillment_status"]) == (
+        "2", "AWB-2", "FULFILLED")
+    assert shopify_fulfillment.tracked_awbs(doc) == ["AWB-2"]
+
+
+@pytest.mark.parametrize("body", [(1, 2), (2, 1)], ids=["f1_first", "f2_first"])
+def test_the_sweep_heals_a_missed_cancel_and_reissue_of_a_pre_clock_label(swept, body):
+    """Both webhooks missed: the hourly body carries F1 cancelled (02:00) and
+    F2 live (02:01) on an order stamped F1 live before the clocks. The sweep
+    feeds F1 (Shopify cancelled the parcel the order shows live) and F2 takes
+    the fields over, in one sweep. Unfed, F1's dead AWB-1 was copied into the
+    parcel list as live and the courier legs polled it."""
+    oid = 60134
+    _book(swept, oid)
+    _set(swept, oid, **_PRE_CLOCK_F1)
+    events = {1: ("AWB-1", "cancelled", _T("02:00")), 2: ("AWB-2", "success", _T("02:01"))}
+    swept["state"]["orders"] = [_pulled(oid, fulfillment_status="fulfilled", updated_at=LATER,
+                                        fulfillments=[_fulfilment(oid, fid, tracking_number=events[fid][0],
+                                                                  status=events[fid][1],
+                                                                  created_at=events[fid][2],
+                                                                  updated_at=events[fid][2])
+                                                      for fid in body])]
+    for _ in range(2):  # healed by the first sweep, and the next one keeps it
+        swept["run"]()
+        doc = _doc(swept, oid)
+        assert (doc["shopify_fulfillment_id"], doc["awb"]) == ("2", "AWB-2")
+        assert shopify_fulfillment.tracked_awbs(doc) == ["AWB-2"]
+
+
+def test_a_cancelled_newer_label_never_takes_over_a_live_pre_clock_one(swept):
+    """A label made and voided (F2, cancelled) on an order stamped F1 live
+    before the clocks: the stamped parcel is live, so the cancelled one never
+    takes the fields over, newer id or not."""
+    oid = 60135
+    _book(swept, oid)
+    _set(swept, oid, **_PRE_CLOCK_F1)
+    _reconcile(swept, oid, 2, "AWB-2", "cancelled", _T("02:01"))
+    doc = _doc(swept, oid)
+    assert (doc["shopify_fulfillment_id"], doc["awb"], doc["fulfillment_status"]) == (
+        "1", "AWB-1", "FULFILLED")
+    assert shopify_fulfillment.tracked_awbs(doc) == ["AWB-1"]
+
+
 def test_reconciles_of_two_parcels_from_one_stale_read_keep_both(swept, monkeypatch):
     """Two reconciles of different parcels overlap (two workers, or the sweep
     beside a webhook): each read the order before the other wrote. The

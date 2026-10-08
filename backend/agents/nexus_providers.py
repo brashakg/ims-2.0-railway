@@ -335,8 +335,14 @@ def _fulfilment_moved(f: Dict[str, Any], existing: Dict[str, Any]) -> bool:
     one the IMS order carries, or it carries a tracking number / shipment
     status the reconcile WOULD write -- its own _tracking_fields, which leaves
     out an empty one (an empty field never clears the older fulfilment's, so
-    comparing it would re-fire the reconcile every hour)."""
-    from api.services.shopify_fulfillment import _tracking_fields, fulfilment_clock
+    comparing it would re-fire the reconcile every hour) -- or Shopify has
+    cancelled / failed the one the order shows live (a missed cancel: unfed,
+    the courier legs tracked its dead AWB for good)."""
+    from api.services.shopify_fulfillment import (
+        _FULFILLMENT_STATUS_MAP,
+        _tracking_fields,
+        fulfilment_clock,
+    )
     from api.services.shopify_ingest import _to_naive_utc
 
     clock, at = _to_naive_utc(fulfilment_clock(existing, f)), _to_naive_utc(f.get("updated_at"))
@@ -346,11 +352,13 @@ def _fulfilment_moved(f: Dict[str, Any], existing: Dict[str, Any]) -> bool:
     # The IMS->Shopify push stamps the GraphQL gid (gid://shopify/Fulfillment/N);
     # the REST body and the webhook reconcile carry the bare N. Same fulfilment.
     stamped = str(existing.get("shopify_fulfillment_id") or "").rsplit("/", 1)[-1]
+    gone = ("CANCELLED", "ERROR")
+    cancelled = _FULFILLMENT_STATUS_MAP.get(str(f.get("status") or "").strip().lower()) in gone
     return str(f.get("id")) != stamped or any(
         fields[k].lower() != str(existing.get(k) or "").lower()
         for k in ("tracking_number", "shipment_status")
         if k in fields
-    )
+    ) or cancelled != (str(existing.get("fulfillment_status") or "").upper() in gone)
 
 
 def _order_topic(
