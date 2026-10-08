@@ -3201,3 +3201,96 @@ def test_r5b_a_later_save_heals_a_stale_ordered_draft_copy_only(world):
         world.db.catalog_products.find_one({"id": "imp-1"})["needs_review"] is True,
         "R5b: saving an unrelated product cleared an import's needs_review",
     )
+
+
+# ---------------------------------------------------------------------------
+# Round 6 (2026-10-08): the open list after the cloud round
+# ---------------------------------------------------------------------------
+
+
+def _receive_some(world, po, qtys, invoice_no):
+    """Receive Goods for the lines named in `qtys` ({product_id: n}) only,
+    then "Add to stock"."""
+    created = _run(
+        vd.create_grn(
+            vd.GRNCreate(
+                po_id=po["po_id"],
+                vendor_invoice_no=invoice_no,
+                vendor_invoice_date="2026-09-28",
+                items=[
+                    vd.GRNItemCreate(
+                        product_id=pid, received_qty=q, accepted_qty=q, rejected_qty=0, tallied=True
+                    )
+                    for pid, q in qtys.items()
+                ],
+                attachment_file_id="F-RECEIPT-PHOTO",
+                attachment_filename="bill.jpg",
+                attachment_mime="image/jpeg",
+            ),
+            MANAGER,
+        )
+    )
+    accepted = _run(vd.accept_grn(created["grn_id"], MANAGER))
+    return created, accepted
+
+
+def _mixed_held_receipt(world):
+    """A PO for the typed Boss x2 and a catalogued Carrera x1. Receipt 1 brings
+    the Boss (held for the catalogue); receipt 2 -- a second count of the same
+    box -- brings Boss x2 AND the Carrera (shelved at once). Finishing the
+    Boss shelves receipt 1 and holds receipt 2's Boss line beyond the order:
+    one shelved line, one over-order line on ONE receipt (R1-13)."""
+    carrera = world.catalogue_frame(
+        "Carrera", "CA 8895", "807", "54", mrp=6990, offer=6490, cost=3155.76
+    )
+    po = world.raise_po(
+        [
+            {"new_product": dict(BOSS_TYPED), "quantity": 2, "unit_price": 1200},
+            {
+                "product_id": carrera["product_id"],
+                "product_name": "Carrera CA 8895 807",
+                "sku": carrera["sku"],
+                "quantity": 1,
+                "unit_price": 3200,
+            },
+        ]
+    )
+    boss = po["items"][0]["product_id"]
+    grn1, _ = _receive_some(world, po, {boss: 2}, "JOT/26-27/0901")
+    grn2, _ = _receive_some(
+        world, po, {boss: 2, carrera["product_id"]: 1}, "JOT/26-27/0901-DUP"
+    )
+    return po, boss, carrera["product_id"], grn1, grn2
+
+
+def _po_received(world, po):
+    stored = world.db.purchase_orders.find_one({"po_id": po["po_id"]})
+    return stored["status"], {it["product_id"]: it.get("received_qty") for it in stored["items"]}
+
+
+def _audit_rows(world, action):
+    return [
+        a
+        for name in world.db.list_collection_names()
+        for a in world.db.get_collection(name).find({"action": action})
+    ]
+
+
+def test_r6_a_held_receipts_shelved_lines_count_on_its_order(world):
+    po, boss, carrera, grn1, grn2 = _mixed_held_receipt(world)
+    # Receipt 2's Carrera is on the shelf although the receipt still holds Boss.
+    assert len(world.units(carrera)) == 1
+    status, received = _po_received(world, po)
+    finding(
+        received[carrera] == 1,
+        f"R1-13: the order reads {received[carrera]} Carrera received with 1 on the shelf",
+    )
+    world.finish_draft(boss, offer=2790)
+    held = world.grn(grn2["grn_id"])
+    assert held["status"] == "PARTIALLY_ACCEPTED"
+    assert [ln["reason"] for ln in held["unresolved_lines"]] == ["over_order"]
+    status, received = _po_received(world, po)
+    finding(
+        status == "RECEIVED" and received == {boss: 2, carrera: 1},
+        f"R1-13: every ordered unit is on the shelf but the order reads {status} {received}",
+    )

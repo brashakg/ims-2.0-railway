@@ -448,6 +448,59 @@ def _put_on_shelf(
     return result
 
 
+def refresh_po_received(po_repo, grn_repo, po_id) -> Optional[str]:
+    """Advance a PO's received state from its receipts: sum what every receipt
+    put on the shelf (_cumulative_received_by_product) and compare against
+    the ordered lines -- full receipt -> RECEIVED, otherwise PARTIALLY_RECEIVED.
+    Run by every accept and by dropping a receipt's units held beyond its
+    order. Fail-soft: answers the new status, or None with no PO to update."""
+    po_status = None
+    if po_repo is not None and po_id:
+        try:
+            po = po_repo.find_by_id(po_id)
+            received_by_product = _cumulative_received_by_product(grn_repo, po_id)
+            po_items = (po.get("items") if po else []) or []
+            po_status = compute_po_receipt_state(po_items, received_by_product)
+            # Map the cumulative per-product received qty down onto each PO line
+            # + derive the line residual status (drives the receiving cockpit's
+            # "open POs" / "pending not-received" panels).
+            updated_items = []
+            for it in po_items:
+                ordered = it.get("ordered_qty", it.get("quantity", 0)) or 0
+                recv = received_by_product.get(it.get("product_id"), 0)
+                updated_items.append(
+                    {
+                        **it,
+                        "received_qty": recv,
+                        "line_status": (
+                            "RECEIVED"
+                            if ordered and recv >= ordered
+                            else ("PARTIAL" if recv > 0 else "OPEN")
+                        ),
+                    }
+                )
+            po_repo.update(
+                po_id,
+                {
+                    "status": po_status,
+                    "items": updated_items,
+                    "received_qty_by_product": received_by_product,
+                    "total_received_qty": sum(received_by_product.values()),
+                    "last_received_at": datetime.now().isoformat(),
+                },
+            )
+        except Exception:  # noqa: BLE001
+            # Never lose the stock write on a PO-update failure. Best effort:
+            # at least flag the PO as partially received.
+            try:
+                po_repo.update(po_id, {"status": "PARTIALLY_RECEIVED"})
+                po_status = "PARTIALLY_RECEIVED"
+            except Exception:  # noqa: BLE001
+                pass
+
+    return po_status
+
+
 def _accept_grn_claimed(
     grn_id: str,
     grn: dict,
@@ -858,52 +911,8 @@ def _accept_grn_claimed(
             ),
         }
 
-    # Advance the PO received state. Sum the accepted qty across EVERY accepted
-    # GRN for this PO (this one is now ACCEPTED) and compare against the ordered
-    # lines: full receipt -> RECEIVED, otherwise PARTIALLY_RECEIVED. Fail-soft.
-    po_status = None
-    if po_repo is not None and po_id:
-        try:
-            po = po_repo.find_by_id(po_id)
-            received_by_product = _cumulative_received_by_product(grn_repo, po_id)
-            po_items = (po.get("items") if po else []) or []
-            po_status = compute_po_receipt_state(po_items, received_by_product)
-            # Map the cumulative per-product received qty down onto each PO line
-            # + derive the line residual status (drives the receiving cockpit's
-            # "open POs" / "pending not-received" panels).
-            updated_items = []
-            for it in po_items:
-                ordered = it.get("ordered_qty", it.get("quantity", 0)) or 0
-                recv = received_by_product.get(it.get("product_id"), 0)
-                updated_items.append(
-                    {
-                        **it,
-                        "received_qty": recv,
-                        "line_status": (
-                            "RECEIVED"
-                            if ordered and recv >= ordered
-                            else ("PARTIAL" if recv > 0 else "OPEN")
-                        ),
-                    }
-                )
-            po_repo.update(
-                po_id,
-                {
-                    "status": po_status,
-                    "items": updated_items,
-                    "received_qty_by_product": received_by_product,
-                    "total_received_qty": sum(received_by_product.values()),
-                    "last_received_at": datetime.now().isoformat(),
-                },
-            )
-        except Exception:  # noqa: BLE001
-            # Never lose the stock write on a PO-update failure. Best effort:
-            # at least flag the PO as partially received.
-            try:
-                po_repo.update(po_id, {"status": "PARTIALLY_RECEIVED"})
-                po_status = "PARTIALLY_RECEIVED"
-            except Exception:  # noqa: BLE001
-                pass
+    # Advance the PO received state (refresh_po_received). Fail-soft.
+    po_status = refresh_po_received(po_repo, grn_repo, po_id)
 
     _sync_catalogue_tasks(grn_id, grn, unresolved_lines, grn_status, product_repo)
 
