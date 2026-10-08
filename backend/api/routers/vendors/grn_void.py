@@ -291,22 +291,56 @@ async def escalate_grn(
     note: str = Query(...),
     current_user: dict = Depends(require_roles(*_RECEIVE_ROLES)),
 ):
-    """Escalate GRN to HQ for review"""
+    """Escalate a receipt to head office. It leaves the order's waiting list
+    (a cancel no longer waits for it); the units it put in stock still count
+    as arrived.
+
+    Only a PENDING or held receipt: an accepted one is corrected through a
+    vendor return and a void one is gone. And never while it is being
+    accepted -- escalate takes the SAME claim accept and void take. Without
+    it, escalating a receipt mid-accept dropped it from the receipts another
+    accept counts whole (the two-accepts guard), so both minted; and an
+    escalation landing between an accept's claim and its first unit put a
+    whole delivery behind an ESCALATED receipt. Store-scoped like accept and
+    void (another store's receipt reads as 404)."""
     grn_repo = get_grn_repository()
+    if grn_repo is None:
+        return {"message": "GRN escalated to HQ", "grn_id": grn_id}
 
-    if grn_repo is not None:
-        grn = grn_repo.find_by_id(grn_id)
-        if not grn:
-            raise HTTPException(status_code=404, detail="GRN not found")
-
-        grn_repo.update(
-            grn_id,
+    grn = grn_repo.find_by_id(grn_id)
+    if not grn or not can_access_store_scoped(grn.get("store_id"), current_user):
+        raise HTTPException(status_code=404, detail="GRN not found")
+    if grn.get("status") not in _VOIDABLE:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Only a pending or held goods receipt can be escalated. This "
+                f"one is {grn.get('status')}."
+            ),
+        )
+    claim_token = _claim_grn_for_accept(grn_repo, grn_id, current_user.get("user_id"))
+    if claim_token is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This goods receipt is being accepted right now, so it cannot "
+                "be escalated. Wait for that to finish, then refresh."
+            ),
+        )
+    try:
+        _write_under_claim(
+            grn_repo,
+            grn,
+            claim_token,
             {
                 "status": "ESCALATED",
                 "escalated_at": datetime.now().isoformat(),
                 "escalated_by": current_user.get("user_id"),
                 "escalation_note": note,
             },
+            "escalated",
         )
+    finally:
+        _release_grn_accept_claim(grn_repo, grn_id, claim_token)
 
     return {"message": "GRN escalated to HQ", "grn_id": grn_id}

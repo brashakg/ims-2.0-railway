@@ -858,3 +858,50 @@ def test_a_cancel_waits_on_an_unreadable_receipt_list(monkeypatch):
         asyncio.run(vendors_mod.cancel_po("PO-1", reason="vendor closed", current_user=_user()))
     assert e.value.status_code == 503
     assert po_repo.po == before
+
+
+@pytest.mark.parametrize("status", ["ACCEPTED", "VOID"])
+def test_escalate_refuses_an_accepted_or_void_receipt(monkeypatch, status):
+    """Owner ruling R3: an accepted receipt is corrected by a vendor return
+    and a void one is gone -- neither can be escalated."""
+    po = _po(_line("P1", "Frame X", 5), _line("P2", "Ray-Ban", 3))
+    grn_repo, _po_repo, _stock, _t = _wire(monkeypatch, po=po)
+    _atomic_claims(grn_repo)
+    gid = _create("normal", _items("P1", 2), _user())["grn_id"]
+    grn_repo.docs[gid]["status"] = status
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(vendors_mod.escalate_grn(gid, note="dispute", current_user=_user()))
+    assert e.value.status_code == 400
+    assert grn_repo.docs[gid]["status"] == status and "escalated_at" not in grn_repo.docs[gid]
+
+
+def test_escalate_cannot_drop_a_receipt_out_of_the_two_accepts_guard(monkeypatch):
+    """Owner ruling R3. 2 open on P2. A is being accepted (parked in its
+    mint): escalating A is refused (409), so A stays a claimed receipt that B
+    counts whole and B is refused -- never both minting 4 against 2 open."""
+    grn_repo, stock, a, b = _two_pending_of_two(monkeypatch)
+    inside, release = _parked(monkeypatch, stock, "create", lambda doc: True)
+    t, out_a = _in_background(a)
+    assert inside.wait(10), "A never reached its first stock create"
+    try:
+        with pytest.raises(HTTPException) as e:
+            asyncio.run(vendors_mod.escalate_grn(a, note="dispute", current_user=_user()))
+        assert e.value.status_code == 409
+        assert grn_repo.docs[a]["status"] == "PENDING"
+        out = _accept(b)
+        assert isinstance(out, HTTPException) and out.status_code == 409, out
+    finally:
+        release.set()
+        t.join(15)
+    assert out_a["r"]["grn_status"] == "ACCEPTED", out_a
+    assert _p2_units(stock) == 2
+
+
+def test_escalate_is_store_scoped(monkeypatch):
+    grn_repo, _po_repo, _stock, _t = _wire(monkeypatch)
+    gid = _create("normal", _items("P1", 2), _user())["grn_id"]
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(vendors_mod.escalate_grn(gid, note="dispute",
+                                             current_user=_user(active="STORE-B")))
+    assert e.value.status_code == 404
+    assert grn_repo.docs[gid]["status"] == "PENDING"
