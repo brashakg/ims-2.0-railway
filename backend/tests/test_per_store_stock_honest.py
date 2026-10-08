@@ -292,6 +292,24 @@ def test_2_a_stray_size_is_not_sold_out(monkeypatch):
     assert out["sold_out"] is False
 
 
+def test_2_unconfirmed_tracking_on_a_live_listing_is_not_sold_out(monkeypatch):
+    """A live listing whose last pass recorded tracking as NOT set, every
+    shelf 0, the tracking re-send refused: the press stays live with
+    'sells WITHOUT LIMIT' -- and that is not SOLD OUT, whatever the numbers
+    say. Drop the tracking override in sync_product_stock -> sold_out True
+    beside WITHOUT LIMIT -> fails."""
+    left = {"quantities": {"SP-1": {"BV-A": 1, "BV-B": 0, "BV-C": 0}}, "tracked": False, "policy": "DENY"}
+    db = _db(a=0, b=0, c=0)
+    db.seed("catalog_products", [_catalog_row("cat-1", "SP-1", gid=True, status="PUBLISHED",
+                                              locally_modified=True, online_stock=left)])
+    spy = _ThrottledTracking(_responses())
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.push_product(db, _cat(db), []))
+    assert res.ok is True and res.code == shopify_push.STOCK_TRACKING_FAILED, res
+    assert "WITHOUT LIMIT" in res.error and res.stock["set"] == 3, res
+    assert res.stock["sold_out"] is False
+
+
 # ---------------------------------------------------------------------------
 # 3. a read that died is unknown and named
 # ---------------------------------------------------------------------------
