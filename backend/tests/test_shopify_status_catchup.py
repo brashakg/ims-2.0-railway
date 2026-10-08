@@ -958,11 +958,13 @@ def test_a_delivered_order_and_a_newer_delivered_fulfilment_is_no_terminal_hold(
     terminal status' -- not 'is the order terminal': a newer delivered parcel
     on an order both sides hold DELIVERED lands its tracking and reports
     nothing held back. Parcel 70 was reconciled before the clocks (no
-    watermark): 71 is the newer fulfilment by Shopify's increasing ids."""
+    watermark; written at 00:30): 71 is the newer fulfilment by Shopify's
+    increasing ids, and its body (01:00) is newer than that write."""
     _book(swept, 53004)
     swept["orders"].update_one({"shopify_order_id": "53004"}, {"$set": {
         "status": "DELIVERED", "fulfillment_status": "FULFILLED", "shopify_fulfillment_id": "70",
         "awb": "AWB-70", "tracking_number": "AWB-70", "shipment_status": "in_transit",
+        "updated_at": "2026-09-06T00:30:00+00:00",
     }})
     swept["state"]["orders"] = [_pulled(53004, fulfillment_status="fulfilled", fulfillments=[
         _fulfilment(53004, 71, shipment_status="delivered")])]

@@ -1045,8 +1045,9 @@ def test_a_live_label_takes_over_a_cancelled_one_reconciled_before_the_clocks(sw
     assert shopify_fulfillment.tracked_awbs(doc) == ["AWB-2"]
 
 
+# The old reconcile's write: its stamp, and the moment it wrote it.
 _PRE_CLOCK_F1 = dict(status="SHIPPED", shopify_fulfillment_id="1", awb="AWB-1",
-                     tracking_number="AWB-1", fulfillment_status="FULFILLED")
+                     tracking_number="AWB-1", fulfillment_status="FULFILLED", updated_at=_T("00:30"))
 
 
 def _reconcile(swept, oid, fid, awb, st, at, **over):
@@ -1095,6 +1096,41 @@ def test_the_sweep_heals_a_missed_cancel_and_reissue_of_a_pre_clock_label(swept,
         doc = _doc(swept, oid)
         assert (doc["shopify_fulfillment_id"], doc["awb"]) == ("2", "AWB-2")
         assert shopify_fulfillment.tracked_awbs(doc) == ["AWB-2"]
+
+
+@pytest.mark.parametrize("leg", ["webhook", "sweep"])
+def test_an_older_body_of_a_newer_parcel_never_rewinds_a_pre_clock_order(swept, leg):
+    """The old reconcile applied F1's 05:00 delivered update last (stamp F1,
+    AWB-1, delivered, written 05:00:30). F2 -- a larger id, so newer by
+    Shopify's ids -- last moved at 01:05 (in transit): its late retry, or
+    the sweep's body, took the tracking fields over and rewound the display
+    to F2 in transit, and the next sweep flipped it back to F1. A body older
+    than the order's last write never takes them over; sweeps leave it."""
+    oid = 60137
+    _book(swept, oid)
+    _set(swept, oid, status="DELIVERED", shopify_fulfillment_id="1", awb="AWB-1",
+         tracking_number="AWB-1", fulfillment_status="FULFILLED", shipment_status="delivered",
+         updated_at="2026-09-06T05:00:30+00:00")
+    f1 = _fulfilment(oid, 1, tracking_number="AWB-1", status="success", shipment_status="delivered",
+                     created_at=_T("00:40"), updated_at=_T("05:00"))
+    f2 = _fulfilment(oid, 2, tracking_number="AWB-2", status="success", shipment_status="in_transit",
+                     created_at=_T("01:00"), updated_at=_T("01:05"))
+    shown = ("1", "AWB-1", "delivered", None)
+    if leg == "webhook":
+        shopify_fulfillment.reconcile_fulfillment(swept["db"], f2, topic="fulfillments/update")
+        sweeps = 0
+    else:
+        swept["state"]["orders"] = [_pulled(oid, fulfillment_status="fulfilled", updated_at=LATER,
+                                            fulfillments=[f1, f2])]
+        sweeps = 2
+    for i in range(sweeps + 1):
+        if i:
+            swept["run"]()
+        doc = _doc(swept, oid)
+        assert (doc["shopify_fulfillment_id"], doc["awb"], doc["shipment_status"],
+                doc.get(shopify_fulfillment.FULFILLMENT_WATERMARK)) == shown, i
+        assert doc["status"] == "DELIVERED"
+    assert sorted(shopify_fulfillment.tracked_awbs(_doc(swept, oid))) == ["AWB-1", "AWB-2"]
 
 
 def test_a_cancelled_newer_label_never_takes_over_a_live_pre_clock_one(swept):

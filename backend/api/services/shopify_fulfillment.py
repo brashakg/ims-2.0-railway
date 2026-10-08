@@ -275,6 +275,11 @@ def reconcile_fulfillment(
         # sweep re-feeds every older parcel), and a live one takes them over
         # a cancelled / failed stamp. Its parcel list starts with the stamped
         # parcel, which counts as live beside this one until it is cancelled.
+        # A newer one whose body is older than the order's last IMS write
+        # (updated_at: the latest moment the state it shows can be from)
+        # never takes them over: a late retry, or the sweep's body of a
+        # parcel that went quiet before the stamped one was delivered,
+        # rewound the display, and sweep after sweep flipped it back.
         stamp = order.get("shopify_fulfillment_id")
         stamped = _clock_key({"id": stamp})
         seed = None
@@ -291,7 +296,9 @@ def reconcile_fulfillment(
             if watermark is not None:
                 takeover[FULFILLMENT_WATERMARK] = watermark
                 legacy = []
-                if _fulfilment_rank(fulfillment_id) >= _fulfilment_rank(stamp):
+                rank, held = _fulfilment_rank(fulfillment_id), _fulfilment_rank(stamp)
+                shown = _to_naive_utc(order.get("updated_at")) if stamp and rank != held else None
+                if rank >= held and (shown is None or watermark >= shown):
                     legacy.append({FULFILLMENT_WATERMARK: None, "shopify_fulfillment_id": stamp})
                 if live:
                     legacy.append({FULFILLMENT_WATERMARK: None,
