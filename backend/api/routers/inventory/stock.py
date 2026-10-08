@@ -25,7 +25,7 @@ from ._shared import (
     timedelta,
     validate_store_access,
 )
-from ...services.cost_mask import can_see_cost, mask_cost_list
+from ...services.cost_mask import mask_cost_list
 from ...services.item_events import on_hand_match
 from ...utils.ist import ist_date_str_from_stored
 from .helpers import (
@@ -154,6 +154,8 @@ async def get_stock(
     )
     # The count of units with no cost goes with the cost: one rule, the same
     # context that masks the cost fields below.
+    from ...services.cost_mask import can_see_cost
+
     if not can_see_cost(current_user, "product"):
         for row in items:
             row.pop("uncosted_units", None)
