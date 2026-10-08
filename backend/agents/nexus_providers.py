@@ -625,6 +625,7 @@ def tally_build_day_voucher_xml(
         sgst = float(o.get("sgst_amount", 0) or 0)
         igst = float(o.get("igst_amount", 0) or 0)
         total = float(o.get("grand_total", 0) or 0)
+        round_off = float(o.get("round_off", 0) or 0)
 
         narration_block = (
             f"\n    <NARRATION>{escaped_narration}</NARRATION>" if escaped_narration else ""
@@ -658,6 +659,21 @@ def tally_build_day_voucher_xml(
       <AMOUNT>{sgst:.2f}</AMOUNT>
     </ALLLEDGERENTRIES.LIST>"""
 
+        # Round Off leg (owner ruling 2026-10-08): the party owes the rounded
+        # total, Sales carries the taxable value, so the paise the bill moved
+        # get their own ledger -- a credit when the bill rounded up, a debit
+        # when it rounded down. No leg (byte-identical XML) on a whole bill.
+        round_off_entry = (
+            f"""
+    <ALLLEDGERENTRIES.LIST>
+      <LEDGERNAME>Round Off</LEDGERNAME>
+      <ISDEEMEDPOSITIVE>{'No' if round_off > 0 else 'Yes'}</ISDEEMEDPOSITIVE>
+      <AMOUNT>{round_off:.2f}</AMOUNT>
+    </ALLLEDGERENTRIES.LIST>"""
+            if round_off
+            else ""
+        )
+
         # Party leg: COMPUTE the sign, never prefix a literal '-'. A literal
         # prefix emitted "-0.00" for a fully-discounted zero-total order and
         # "--1180.00" for a negative total -- neither is a number Tally can
@@ -680,7 +696,7 @@ def tally_build_day_voucher_xml(
       <LEDGERNAME>Sales A/c</LEDGERNAME>
       <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
       <AMOUNT>{subtotal:.2f}</AMOUNT>
-    </ALLLEDGERENTRIES.LIST>{tax_entries}
+    </ALLLEDGERENTRIES.LIST>{tax_entries}{round_off_entry}
   </VOUCHER>"""
         vouchers.append(voucher)
 
@@ -1047,6 +1063,13 @@ def _reshape_one_order(
     oid = _order_identity(row)
     tax, tax_key = _first_present_amount(row, _TAX_FIELD_CHAIN)
     grand, _gross_key = _first_present_amount(row, _GROSS_FIELD_CHAIN)
+    # Owner ruling 2026-10-08: a till bill's gross is rounded to the rupee and
+    # the paise it moved are `round_off`, booked on their own Round Off leg.
+    # Every check below prices the INVOICE VALUE (gross before round off) --
+    # round off is neither Sales nor GST -- and the party leg keeps the gross.
+    round_off, _ro_key = _first_present_amount(row, ("round_off",))
+    payable = grand
+    grand = round(grand - round_off, 2)
     line_tax = _order_line_tax(row)
     declared_net, net_key = _first_present_amount(row, ("subtotal",))
 
@@ -1163,7 +1186,8 @@ def _reshape_one_order(
         row["sgst_amount"] = sgst
     # Sales A/c must carry the TAXABLE value, never the gross.
     row["subtotal"] = emitted_net
-    row["grand_total"] = grand
+    row["grand_total"] = payable
+    row["round_off"] = round_off
     return row
 
 
@@ -1192,6 +1216,9 @@ def _voucher_legs(row: Dict[str, Any]) -> List[Dict[str, Any]]:
         legs.append(
             {"ledger": "SGST Output", "amount": float(row.get("sgst_amount", 0) or 0)}
         )
+    round_off = float(row.get("round_off", 0) or 0)
+    if round_off:
+        legs.append({"ledger": "Round Off", "amount": round_off})
     return legs
 
 
@@ -1375,6 +1402,10 @@ def validate_voucher_balance(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
         # only `grand_total` here false-flagged a CORRECT voucher built from a
         # legacy order that carries `total` instead.
         grand, _ = _amounts_or_zero(o, _GROSS_FIELD_CHAIN)
+        # The identity is on the invoice value BEFORE the bill's round off
+        # (owner ruling 2026-10-08): taxable + tax + round_off == grand_total.
+        round_off, _ = _amounts_or_zero(o, ("round_off",))
+        invoice_value = round(grand - round_off, 2)
         taxable = _resolve_order_taxable(o)
         tax, _ = _amounts_or_zero(o, _TAX_FIELD_CHAIN)
         subtotal, _ = _amounts_or_zero(o, ("subtotal",))
@@ -1399,12 +1430,12 @@ def validate_voucher_balance(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
             unverified += 1
             continue
 
-        batch_grand += grand
+        batch_grand += invoice_value
         batch_taxable += taxable
         batch_tax += tax
 
         expected = round(taxable + tax, 2)
-        delta = round(grand - expected, 2)
+        delta = round(invoice_value - expected, 2)
         if abs(delta) >= 0.5:
             mismatches.append(
                 {

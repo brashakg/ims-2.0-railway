@@ -625,7 +625,9 @@ async def get_tally_sales_jv(
             o["igst_amount"] = 0.0
             o["cgst_amount"] = cgst
             o["sgst_amount"] = sgst
-        o["subtotal"] = round(grand - tax, 2)
+        # Sales A/c = taxable: the bill's round_off goes on its own Round Off
+        # leg (the formatter reads it off the order), never into Sales.
+        o["subtotal"] = round(grand - float(o.get("round_off") or 0) - tax, 2)
         o["grand_total"] = grand
 
     store_meta = {}
