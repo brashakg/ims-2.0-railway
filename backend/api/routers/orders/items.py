@@ -200,7 +200,7 @@ async def add_order_item(
         items = _existing_items + [item_data]
         cart_discount_percent = order.get("cart_discount_percent", 0) or 0
         gst = _compute_per_category_gst(items, cart_discount_percent)
-        grand_total = round(gst["taxable"] + gst["tax"], 2)
+        grand_total = gst["grand_total"]
 
         # Fcostfloor (chair P1): the add-items path must honor the SAME
         # post-discount cost+pct% floor as create_order -- it mirrored every
@@ -295,6 +295,7 @@ async def add_order_item(
                     "tax_amount": gst["tax"],
                     "total_discount": gst["total_discount"],
                     "grand_total": grand_total,
+                    "round_off": gst["round_off"],
                     "balance_due": grand_total - order.get("amount_paid", 0),
                 },
             )
@@ -380,7 +381,7 @@ async def remove_order_item(
         # Recalculate totals (per-category GST, mirrors create_order).
         cart_discount_percent = order.get("cart_discount_percent", 0) or 0
         gst = _compute_per_category_gst(items, cart_discount_percent)
-        grand_total = round(gst["taxable"] + gst["tax"], 2)
+        grand_total = gst["grand_total"]
 
         # PERSIST FIRST, THEN RELEASE (panel must-fix 6). This used to release
         # the stock BEFORE the write and discard repo.update's return value --
@@ -401,6 +402,7 @@ async def remove_order_item(
                     "tax_amount": gst["tax"],
                     "total_discount": gst["total_discount"],
                     "grand_total": grand_total,
+                    "round_off": gst["round_off"],
                     "balance_due": grand_total - order.get("amount_paid", 0),
                 },
             )

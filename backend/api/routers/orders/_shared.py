@@ -18,6 +18,7 @@ from fastapi import APIRouter, HTTPException, Depends, Query, Header
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import Any, Dict, List, Optional
 from datetime import datetime, date, timedelta
+from decimal import ROUND_HALF_UP, Decimal
 from enum import Enum
 import math
 import uuid
@@ -155,6 +156,21 @@ def _is_known_gst_category(value) -> bool:
     return str(value).strip().upper() in _GST_CATEGORY_TABLE
 
 
+def round_bill(total: float) -> tuple:
+    """THE bill round-off rule (owner ruling 2026-10-08): the payable total is
+    rounded ONCE, after GST, to the nearest rupee -- 50 paise and above up,
+    below 50 paise down. Returns ``(payable, round_off)``; ``round_off`` is the
+    signed paise the bill moved (payable - total). It is NOT taxable value and
+    NOT tax. Every till bill total reaches this through
+    _compute_per_category_gst; the till screen's live preview
+    (posStore.getGrandTotal) mirrors it and the order-create response is the
+    authority. Never call it a second time on a figure that is already rounded.
+    """
+    exact = round(float(total or 0.0), 2)
+    payable = float(Decimal(str(exact)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    return payable, round(payable - exact, 2)
+
+
 def _compute_per_category_gst(items: list, cart_discount_pct: float) -> dict:
     """Per-category GST aggregation. Mirrors the frontend's getGrandTotal
     so cart total = sum of taxable + sum of tax across rates.
@@ -172,6 +188,10 @@ def _compute_per_category_gst(items: list, cart_discount_pct: float) -> dict:
       cart_discount_amount  — subtotal − taxable when cart_discount_pct > 0
       total_discount        — cart_discount_amount + Σ item.discount_amount
                               (used by Pune Module iii payout aggregation)
+      grand_total           — the bill's PAYABLE: taxable + tax, rounded to
+                              the nearest rupee by round_bill (the stored total)
+      round_off             — grand_total - (taxable + tax); its own invoice
+                              line, never part of taxable or tax
     """
     cart_discount_pct = max(0.0, min(100.0, cart_discount_pct or 0.0))
     cart_factor = 1.0 - (cart_discount_pct / 100.0)
@@ -236,10 +256,13 @@ def _compute_per_category_gst(items: list, cart_discount_pct: float) -> dict:
         max(per_rate_taxable, key=per_rate_taxable.get) if per_rate_taxable else 18.0
     )
     total_discount = round(item_discount_sum + cart_discount_amount, 2)
+    grand_total, round_off = round_bill(taxable + tax)
     return {
         "subtotal": round(subtotal, 2),
         "taxable": taxable,
         "tax": tax,
+        "grand_total": grand_total,
+        "round_off": round_off,
         "dominant_rate": dominant_rate,
         "cart_discount_amount": cart_discount_amount,
         "total_discount": total_discount,
@@ -306,6 +329,7 @@ def order_to_frontend(order: dict) -> dict:
         "patient_name": "patientName",
         "salesperson_id": "salespersonId",
         "grand_total": "grandTotal",
+        "round_off": "roundOff",
         "tax_amount": "taxAmount",
         "tax_rate": "taxRate",
         "amount_paid": "amountPaid",

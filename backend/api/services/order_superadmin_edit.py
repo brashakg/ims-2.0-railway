@@ -133,12 +133,10 @@ def recompute_totals(items: List[Dict[str, Any]], cart_discount_pct: float, gst_
     ``gst_fn`` is orders._compute_per_category_gst, injected so this module
     stays DB / import-cycle free. It stamps gst_rate / taxable_value /
     tax_amount onto each item IN PLACE (same as create) and returns the
-    aggregate dict; we add the resolved ``grand_total`` on top.
+    aggregate dict, whose ``grand_total`` / ``round_off`` are the bill's
+    rounded payable and its round off -- the SAME figures create bills.
     """
-    gst = gst_fn(items, cart_discount_pct)
-    grand_total = round(gst["taxable"] + gst["tax"], 2)
-    gst["grand_total"] = grand_total
-    return gst
+    return gst_fn(items, cart_discount_pct)
 
 
 def order_money_snapshot(order: Dict[str, Any]) -> Dict[str, Any]:
@@ -151,6 +149,7 @@ def order_money_snapshot(order: Dict[str, Any]) -> Dict[str, Any]:
         "total_discount": _f(order.get("total_discount")),
         "tax_amount": _f(order.get("tax_amount")),
         "grand_total": _f(order.get("grand_total")),
+        "round_off": _f(order.get("round_off")),
         "amount_paid": _f(order.get("amount_paid")),
         "balance_due": _f(order.get("balance_due")),
         "customer_id": order.get("customer_id"),
@@ -220,6 +219,11 @@ def compute_invoice_delta(
         "old_tax": old_tax,
         "new_tax": new_tax,
         "tax_delta": round(new_tax - old_tax, 2),
+        # The change in the bill's round off -- part of the note's amount,
+        # never of its taxable value or tax.
+        "round_off_delta": round(
+            _f(after.get("round_off")) - _f(before.get("round_off")), 2
+        ),
         "direction": direction,
         "note_type": note_type,
     }
@@ -251,6 +255,7 @@ def build_money_diff(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[str,
         "total_discount",
         "tax_amount",
         "grand_total",
+        "round_off",
         "customer_id",
         "customer_name",
         "invoice_number",
@@ -335,7 +340,15 @@ def build_credit_note_doc(
         # Signed change in grand-total + its GST component, both rounded.
         "amount": amount,
         "tax_amount": round(abs(delta["tax_delta"]), 2),
-        "taxable_amount": round(amount - abs(delta["tax_delta"]), 2),
+        # Taxable = the note amount less its GST and less the round-off
+        # change (signed in the note's own direction): round off is never
+        # taxable value.
+        "taxable_amount": round(
+            amount
+            - abs(delta["tax_delta"])
+            - (1 if delta["delta"] >= 0 else -1) * _f(delta.get("round_off_delta")),
+            2,
+        ),
         "old_grand_total": delta["old_grand_total"],
         "new_grand_total": delta["new_grand_total"],
         "reason": reason,

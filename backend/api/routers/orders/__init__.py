@@ -88,6 +88,7 @@ from ._shared import (  # noqa: F401
     LOW_GST_CATEGORIES,
     _is_known_gst_category,
     _compute_per_category_gst,
+    round_bill,
     router,
     to_camel_case,
     _stamp_status_actor_names,

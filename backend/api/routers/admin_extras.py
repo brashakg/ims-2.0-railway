@@ -316,9 +316,9 @@ async def get_system_status():
 @router.get("/system/settings")
 async def get_system_settings():
     coll = _coll("system_settings")
+    # No round-off keys here: bill round off is ONE fixed rule (nearest rupee,
+    # owner ruling 2026-10-08) in orders._shared.round_bill, not a setting.
     defaults = {
-        "round_off_enabled": True,
-        "round_off_paise": 50,
         "auto_logout_minutes": 480,
         "low_stock_alert_enabled": True,
         "backup_reminder_days": 7,

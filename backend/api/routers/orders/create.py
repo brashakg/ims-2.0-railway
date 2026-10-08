@@ -753,7 +753,10 @@ async def create_order(
         cart_discount_amount = gst["cart_discount_amount"]
         total_discount = gst["total_discount"]
         tax_rate = gst["dominant_rate"]
-        grand_total = round(taxable_after_cart_discount + tax_amount, 2)
+        # The bill's payable, rounded to the nearest rupee ONCE by the engine
+        # (round_bill); round_off is its own line, outside taxable and tax.
+        grand_total = gst["grand_total"]
+        round_off = gst["round_off"]
 
         # Fcostfloor (DECISIONS sec 9, owner sign-off 2026-06-09): E2-flag-
         # gated post-discount cost+pct% floor on each DISCOUNTED line's
@@ -980,6 +983,9 @@ async def create_order(
             "tax_amount": tax_amount,
             "total_discount": total_discount,
             "grand_total": grand_total,
+            # Owner ruling 2026-10-08: the ONE stored round-off figure that
+            # reprints, refunds and reports read (never re-derive it).
+            "round_off": round_off,
             # Self-label the GST model this order was billed under, so any
             # deploy-skew / flag-flip order is identifiable + reports can trust
             # the stored per-line taxable/tax without guessing the era.
