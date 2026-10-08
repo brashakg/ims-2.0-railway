@@ -240,3 +240,17 @@ def test_a_door_made_product_is_found_by_the_words_the_till_shows(db, q, want):
           subbrand="Acuvue", model_name="Oasys 1-Day")
     assert _ids(db, q) == (want, len(want))
 
+
+def test_other_searches_keep_matching_from_the_field_start(db):
+    # The any-word-start rule is the PRODUCT repository's alone: a customer,
+    # vendor, order or user search keeps the field-start rule.
+    from database.repositories.customer_repository import CustomerRepository
+    from database.repositories.vendor_repository import VendorRepository
+
+    db.customers.insert_one({"customer_id": "C1", "name": "Anita Ray",
+                             "mobile": "98 76543210"})
+    db.vendors.insert_one({"vendor_id": "V1", "legal_name": "Lux Ray Pvt Ltd"})
+    customers = CustomerRepository(db.customers)
+    assert customers.search_customers("ray") == []
+    assert customers.search_customers("7654") == []
+    assert VendorRepository(db.vendors).search_vendors("ray") == []
