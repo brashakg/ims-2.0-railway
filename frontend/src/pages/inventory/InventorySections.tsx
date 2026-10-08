@@ -103,8 +103,13 @@ export function InventoryLowStockPage() {
                   <p className="text-lg font-bold text-amber-600">{item.stock} left</p>
                   <p className="text-xs text-gray-500">Min: {item.lowStockThreshold ?? 'not set'}</p>
                 </div>
-                {/* Raise the PO where POs are raised from stock: the reorder desk. */}
-                <Link to="/inventory/reorders" className="btn-outline text-sm">Raise PO</Link>
+                {/* Raise the PO where POs are raised from stock: the reorder desk.
+                    Never for a product the server says is discontinued. */}
+                {item.discontinued ? (
+                  <span className="text-xs text-gray-500">Discontinued - not reordered</span>
+                ) : (
+                  <Link to="/inventory/reorders" className="btn-outline text-sm">Raise PO</Link>
+                )}
               </div>
             </div>
           ))}
