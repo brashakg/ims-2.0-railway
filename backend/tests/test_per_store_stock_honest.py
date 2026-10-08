@@ -372,19 +372,27 @@ def test_3_a_dead_listing_read_on_a_sale_is_named_never_sold_out(monkeypatch):
     assert "parent read died" in out["error"] and out["sold_out"] is False, out
 
 
-def test_3_a_dead_stray_check_on_a_sale_with_no_target_is_named(monkeypatch):
-    """A sale of a SKU with no Shopify target asks the stray question from
-    the SKU side (stray_baseline_skus). Its read dying was 'no stray': no
-    row, no line. Now a not-ok row names it."""
+@pytest.mark.parametrize("dead", ["last-sent stock", "size rows"])
+def test_3_a_dead_stray_check_on_a_sale_with_no_target_is_named(monkeypatch, dead):
+    """A sale of SP-9, a SKU with no Shopify target that cat-1's last-sent
+    record still shows at 1, asks the stray question from the SKU side
+    (stray_baseline_skus). A dead read there -- the listings' last-sent
+    stock, or cat-1's size rows -- was 'no stray' (or every size a stray).
+    Now a not-ok row names the dead read."""
+    sent = {"quantities": {"SP-1": {"BV-A": 0, "BV-B": 0, "BV-C": 0}, "SP-9": {"BV-A": 1}},
+            "tracked": True, "policy": "DENY"}
     db = _db(a=1, b=0, c=0, sku="SP-9")
-    db.seed("catalog_products", [])
-    _kill(db, "catalog_products", lambda f: "ecom.online_stock.quantities" in f, "baseline read died")
+    db.seed("catalog_products", [_catalog_row("cat-1", "SP-1", gid=True, status="PUBLISHED", online_stock=sent)])
+    if dead == "last-sent stock":
+        _kill(db, "catalog_products", lambda f: "ecom.online_stock.quantities" in f, "read died")
+    else:
+        _kill(db, "catalog_variants", lambda f: "parent_product_id" in f or "parent_sku" in f, "read died")
     _live(monkeypatch, _Spy(_responses()))
     out = _run(wb.writeback_skus(db, ["SP-9"], "BV-A", source="sale"))
     assert out["code"] == shopify_push.STOCK_ONHAND_UNKNOWN, out
-    assert "stray" in out["error"] and "baseline read died" in out["error"], out["error"]
+    assert "stray" in out["error"] and "read died" in out["error"], out["error"]
     (row,) = list(db.get_collection("sync_runs").find({}))
-    assert row["ok"] is False and "baseline read died" in row["error"]
+    assert row["ok"] is False and "read died" in row["error"]
 
 
 def test_3_a_dead_online_status_read_names_that_read_and_claims_no_write(monkeypatch):
