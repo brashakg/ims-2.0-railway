@@ -33,8 +33,11 @@ No emojis (Windows cp1252).
 
 from __future__ import annotations
 
+import logging
 import re
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger("ims.gtin")
 
 # GS1 defines exactly these four lengths: GTIN-8, GTIN-12 (UPC-A), GTIN-13
 # (EAN-13) and GTIN-14 (case/carton).
@@ -68,6 +71,41 @@ def manufacturer_barcode_key(key: Any) -> Optional[str]:
     lower-cases keys into ims.* metafields, so 'GTIN' publishes as ims.gtin."""
     k = str(key).strip().lower()
     return k if k in MANUFACTURER_BARCODE_ATTRIBUTES else None
+
+
+def fold_barcode_spellings(attributes: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """`attributes` with every manufacturer-barcode key in another spelling
+    ('GTIN', ' Upc ') folded onto gtin / upc and REMOVED. THE rule for every
+    write of attributes -- the guard on a submit, the merge doors on the merged
+    bag, normalise_stored_gtins on a stored row -- so another spelling never
+    survives a write: no screen shows one, the one-holder check cannot see one
+    and a clone would carry it.
+
+    The exact key wins: the other spelling is then never read. Without it the
+    first spelling that is a GTIN (stored sanitised) or blank is the code; a
+    junk one is dropped and logged. Every other key passes through as it is."""
+    src = attributes or {}
+    out: Dict[str, Any] = {}
+    for k, raw in src.items():
+        key = manufacturer_barcode_key(k)
+        if key is None or key == k:
+            out[k] = raw
+            continue
+        if key in src or key in out:
+            continue
+        clean = sanitise_gtin(raw)
+        if clean or not normalise_candidate(raw):
+            out[key] = clean or raw
+            continue
+        logger.warning(
+            "[GTIN] dropping invalid %s (key %r): reason=%s value=%.60r",
+            key,
+            k,
+            classify_gtin(raw),
+            raw,
+        )
+    return out
+
 
 _RESTRICTED_PREFIXES = frozenset(str(n) for n in range(20, 30))
 _RESTRICTED_UPC_PREFIXES = frozenset("0" + p for p in _RESTRICTED_PREFIXES)

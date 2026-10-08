@@ -797,6 +797,36 @@ def test_review_editor_remove_drops_the_spines_legacy_barcode(gtin_env):
     assert gtin_env.find_by_barcode(_UPC) is None
 
 
+@pytest.mark.parametrize("typed", ["", None])
+def test_review_editor_takes_an_old_spelling_out_of_twin_and_spine(gtin_env, typed):
+    """Twin and spine hold the code under the old spelling 'GTIN'. A Remove
+    ('') must take it out of both; an unrelated edit (None: gtin not sent)
+    folds it onto the one key. Either way 'GTIN' never survives the write."""
+    catalog_mod.CATALOG_PRODUCTS["twin-g1"]["attributes"]["GTIN"] = _GTIN
+    gtin_env.collection.update_one(
+        {"product_id": "spine-g1"}, {"$set": {"attributes.GTIN": _GTIN}}
+    )
+    patch = {"colour_code": "RED"} if typed is None else {"gtin": typed}
+    _put("twin-g1", {"attributes": patch})
+    twin_attrs = catalog_mod.CATALOG_PRODUCTS["twin-g1"]["attributes"]
+    assert "GTIN" not in twin_attrs
+    assert twin_attrs["gtin"] == (_GTIN if typed is None else "")
+    if typed is not None:
+        assert "GTIN" not in gtin_env.find_by_id("spine-g1")["attributes"]
+
+
+def test_promote_folds_the_twins_old_spelling(env):
+    """Approve builds the spine through the door (the guard folds 'GTIN'),
+    and the twin's own copy of the old spelling goes in the stamp's write."""
+    doc = _bvi_doc(doc_id="clx0rvfold1", sku="RVFOLD1")
+    doc["attributes"]["GTIN"] = "4006381 333931"
+    catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
+    _promote(doc["id"])
+    assert env["repo"].find_by_id(doc["id"])["attributes"]["gtin"] == _GTIN
+    twin_attrs = catalog_mod.CATALOG_PRODUCTS[doc["id"]]["attributes"]
+    assert "GTIN" not in twin_attrs and twin_attrs["gtin"] == _GTIN
+
+
 def test_catalog_create_door_refuses_a_gtin_another_product_holds(gtin_env):
     """POST /catalog/products is a create door too: one holder per GTIN."""
     gtin_env.create({"product_id": "spine-other", "sku": "OTHER-1",

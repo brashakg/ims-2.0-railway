@@ -56,7 +56,9 @@ from .gst_rates import (
     resolve_gst_rate_strict,
 )
 from .gtin import (
+    MANUFACTURER_BARCODE_ATTRIBUTES,
     classify_gtin,
+    fold_barcode_spellings,
     manufacturer_barcode_key,
     normalise_candidate,
     sanitise_gtin,
@@ -1335,30 +1337,24 @@ def _guard_gtin_attribute(
     description's 'UPC Code' row, so it gets the same rule.
 
     Keys match in any letter case ('GTIN', 'Upc' publish as ims.gtin / ims.upc
-    too) and fold onto the one key. The exact key wins when both are sent: the
-    other spelling is then never read. Without the exact key the first
-    spelling is the code: a valid one folds on, a junk one is DROPPED and
+    too) and fold onto the one key (gtin.fold_barcode_spellings, THE fold): the
+    exact key wins, and a junk code under another spelling is DROPPED and
     logged in BOTH modes, never a 422. No screen shows a 'GTIN' key (the GTIN
     box and Manage Barcode read 'gtin'), yet Quick Add sends every stored key
     back, so a 422 on an old stored 'GTIN' left the product unsaveable with
     nothing on screen to fix.
     """
-    src = attributes or {}
-    attrs: Dict[str, Any] = {}
-    for k, raw in src.items():
-        key = manufacturer_barcode_key(k)
-        if key is None:
-            attrs[k] = raw
+    attrs = fold_barcode_spellings(attributes)
+    for key in MANUFACTURER_BARCODE_ATTRIBUTES:
+        if key not in attrs:
             continue
-        other_spelling = k != key
-        if other_spelling and (key in src or key in attrs):
-            continue
+        raw = attrs[key]
         clean = sanitise_gtin(raw)
         if clean or not normalise_candidate(raw):
             attrs[key] = clean or raw
             continue
         reason = classify_gtin(raw)
-        if strict and not other_spelling:
+        if strict:
             raise ProductMasterError(
                 f"'{str(raw)[:40]}' is not a valid {key.upper()} ({reason}). A "
                 "GTIN/UPC is 8, 12, 13 or 14 digits with a valid check digit. "
@@ -1367,12 +1363,9 @@ def _guard_gtin_attribute(
                 field=key,
             )
         logger.warning(
-            "[PM] dropping invalid %s (key %r): reason=%s value=%.60r",
-            key,
-            k,
-            reason,
-            raw,
+            "[PM] dropping invalid %s: reason=%s value=%.60r", key, reason, raw
         )
+        del attrs[key]
     return attrs
 
 
@@ -1393,10 +1386,26 @@ def drop_legacy_spine_barcode(product_repo, product_id: Any) -> None:
     door that writes it drops the legacy products.barcode (main's old Manage
     Barcode wrote there). Left behind, a removed code stayed on the product:
     assert_gtin_free still found it and no screen could clear it. $unset, never
-    "" or None: products.barcode carries a unique sparse index."""
+    "" or None: products.barcode carries a unique sparse index. The gtin key
+    in another spelling ('GTIN') goes too: the gtin just written wins
+    (gtin.fold_barcode_spellings), and the catalogue editor writes the spine's
+    attributes.gtin alone, so nothing else would remove it."""
     coll = getattr(product_repo, "collection", None)
-    if coll is not None and product_id:
-        coll.update_one({"product_id": product_id}, {"$unset": {"barcode": ""}})
+    if coll is None or not product_id:
+        return
+    attrs = (coll.find_one({"product_id": product_id}, {"attributes": 1}) or {}).get(
+        "attributes"
+    )
+    unset = {"barcode": ""}
+    if isinstance(attrs, dict):
+        unset.update(
+            {
+                f"attributes.{k}": ""
+                for k in attrs
+                if k != "gtin" and manufacturer_barcode_key(k) == "gtin"
+            }
+        )
+    coll.update_one({"product_id": product_id}, {"$unset": unset})
 
 
 def assert_gtin_free(code: Any, product_repo, this_product_id: Optional[str]) -> None:

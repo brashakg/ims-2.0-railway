@@ -3443,10 +3443,11 @@ async def update_product(
                 _patch.get("gtin"), repo, product_id
             )
             _gtin_written = "gtin" in _patch
-            update_data["attributes"] = {
-                **(existing.get("attributes") or {}),
-                **_patch,
-            }
+            # A stored barcode key in another spelling ('GTIN') folds onto the
+            # one key and leaves storage in this write, so Remove removes it.
+            update_data["attributes"] = _pm.fold_barcode_spellings(
+                {**(existing.get("attributes") or {}), **_patch}
+            )
             # Catalog Dictionary: the update path must enforce the same
             # owner-configured value lists as the create door (create runs it
             # inside normalise_payload; PUT does not go through that path).

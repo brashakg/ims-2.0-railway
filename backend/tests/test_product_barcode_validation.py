@@ -880,6 +880,66 @@ class TestBarcodeKeysInAnyLetterCase:
             _update(p2, attributes={"Gtin": _VALID_A})
         assert ei.value.status_code == 409
 
+    def test_quick_add_remove_takes_an_old_spelling_out_of_storage(
+        self, mock_db, mirror_on
+    ):
+        """The panel's probe. A holds a real code under the old spelling 'GTIN'
+        (main's PUT stored keys as sent). Quick Add's Remove sends every stored
+        key back with gtin ''. The merge used to keep 'GTIN' in storage: the
+        code stayed on A, invisible to the one-holder check, and Clone A -> C
+        carried it to C. Now the write folds it away on spine and twin."""
+        from api.routers.products import ProductCreate, create_product
+
+        a = _create("KC-RM-A")["product_id"]
+        mock_db["products"].update_one(
+            {"product_id": a}, {"$set": {"attributes.GTIN": _VALID_A}}
+        )
+        sent = dict(mock_db["products"].find_one({"product_id": a})["attributes"])
+        _update(a, attributes={**sent, "gtin": ""})
+        spine = mock_db["products"].find_one({"product_id": a})
+        assert {k: v for k, v in spine["attributes"].items() if "gtin" in k.lower()} == {
+            "gtin": ""
+        }
+        twin = mock_db["catalog_products"].find_one(
+            {"id": spine.get("pim_product_id") or a}
+        )
+        assert _VALID_A not in str(twin)
+        # Clone A -> C (a new colour), even one that copies every stored
+        # attribute: no code.
+        body = ProductCreate(
+            sku="KC-RM-C", category="FRAME", brand="B", model="M-KC-RM-A",
+            color="Red", mrp=1000.0, offer_price=900.0,
+            attributes={**spine["attributes"], "colour_code": "Red"},
+        )
+        c = asyncio.run(create_product(body, _ADMIN))["product_id"]
+        assert _VALID_A not in str(mock_db["products"].find_one({"product_id": c}))
+        assert ProductRepository(mock_db["products"]).find_by_barcode(_VALID_A) is None
+
+    def test_any_save_folds_an_old_spelling_so_a_clone_cannot_hold_it_twice(
+        self, mock_db, mirror_on
+    ):
+        """Without Remove: a Quick Add save of A (the box left alone) folds
+        'GTIN' onto attributes.gtin, so the one-holder check sees A and a
+        clone that copied the code is refused."""
+        from api.routers.products import ProductCreate, create_product
+
+        a = _create("KC-KEEP-A")["product_id"]
+        mock_db["products"].update_one(
+            {"product_id": a}, {"$set": {"attributes.GTIN": _VALID_A}}
+        )
+        sent = dict(mock_db["products"].find_one({"product_id": a})["attributes"])
+        _update(a, attributes={**sent, "frame_material": "TR90"})
+        attrs = mock_db["products"].find_one({"product_id": a})["attributes"]
+        assert attrs["gtin"] == _VALID_A and "GTIN" not in attrs
+        body = ProductCreate(
+            sku="KC-KEEP-C", category="FRAME", brand="B", model="M-KC-KEEP-C",
+            color="Black", mrp=1000.0, offer_price=900.0,
+            attributes={"GTIN": _VALID_A},
+        )
+        with pytest.raises(HTTPException) as ei:
+            asyncio.run(create_product(body, _ADMIN))
+        assert ei.value.status_code == 409
+
     def test_the_guard_folds_every_spelling_onto_the_one_key(self):
         from api.services.product_master import ProductMasterError, _guard_gtin_attribute
 

@@ -2160,7 +2160,10 @@ async def update_catalog_product(
                     _spine_product_id(_gtin_repo, existing) or existing.get("id"),
                 )
             product.attributes = _typed
-            merged_attrs = {**(existing.get("attributes") or {}), **_typed}
+            # Another stored spelling of a barcode key folds on and goes.
+            merged_attrs = _pm.fold_barcode_spellings(
+                {**(existing.get("attributes") or {}), **_typed}
+            )
             merged_attrs = _pm.enforce_dictionary_values(
                 existing.get("category"), merged_attrs, db=_get_db()
             )
@@ -2782,6 +2785,13 @@ async def promote_catalog_product(
     }
     if minted_sku:
         stamp["sku"] = minted_sku
+    # The spine got the barcode keys folded (the door's guard); the twin's own
+    # copy of another spelling ('GTIN') goes in this same write.
+    _doc_attrs = doc.get("attributes")
+    if isinstance(_doc_attrs, dict):
+        _folded = _pm.fold_barcode_spellings(_doc_attrs)
+        if _folded != _doc_attrs:
+            stamp["attributes"] = _folded
     try:
         coll = _catalog_coll()
         if coll is not None:
