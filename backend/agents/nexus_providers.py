@@ -409,7 +409,12 @@ def _sweep_booked_order(db, order, raw, existing, sid: str, live: bool) -> tuple
         _shopify_payload_stale,
         map_shopify_order,
     )
-    from api.services.shopify_fulfillment import fulfilment_body_stale, reconcile_fulfillment
+    from api.services.shopify_fulfillment import (
+        FULFILLMENT_WATERMARK,
+        fulfilment_body_stale,
+        fulfilment_clock,
+        reconcile_fulfillment,
+    )
     from api.services.shopify_refund import _refund_already_processed, handle_shopify_refund
 
     key = f"pull:{sid}:{raw.get('updated_at') or ''}"
@@ -484,9 +489,15 @@ def _sweep_booked_order(db, order, raw, existing, sid: str, live: bool) -> tuple
             ful_stale = fulfilment_body_stale(existing, raw)
             # EVERY fulfilment that moved, each on its own clock: a split
             # shipment's older parcel can be the one the courier delivered.
-            for f in [] if ful_stale else _fulfilments(raw):
-                if not _fulfilment_moved(f, existing):
-                    continue
+            # An order reconciled before the clocks has none for the parcel
+            # it shows: beside a moved one, that parcel is fed too, so the two
+            # are compared on their own clocks in this sweep (unfed, a newer
+            # parcel's older body showed for an hour).
+            fs = [] if ful_stale else _fulfilments(raw)
+            moved = [f for f in fs if _fulfilment_moved(f, existing)]
+            if moved and existing.get(FULFILLMENT_WATERMARK) is None:
+                moved = [f for f in fs if f in moved or fulfilment_clock(existing, f) is None]
+            for f in moved:
                 res = feed("fulfillments/update", f,
                            lambda f=f: reconcile_fulfillment(db, f, topic="fulfillments/update"))
                 # The same transition table held the SHIPPED / DELIVERED flip back.

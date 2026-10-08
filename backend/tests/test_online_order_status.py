@@ -1099,13 +1099,14 @@ def test_the_sweep_heals_a_missed_cancel_and_reissue_of_a_pre_clock_label(swept,
 
 
 @pytest.mark.parametrize("leg", ["webhook", "sweep"])
-def test_an_older_body_of_a_newer_parcel_never_rewinds_a_pre_clock_order(swept, leg):
+def test_an_older_body_of_a_newer_parcel_is_settled_by_the_sweep_on_a_pre_clock_order(swept, leg):
     """The old reconcile applied F1's 05:00 delivered update last (stamp F1,
-    AWB-1, delivered, written 05:00:30). F2 -- a larger id, so newer by
-    Shopify's ids -- last moved at 01:05 (in transit): its late retry, or
-    the sweep's body, took the tracking fields over and rewound the display
-    to F2 in transit, and the next sweep flipped it back to F1. A body older
-    than the order's last write never takes them over; sweeps leave it."""
+    AWB-1, delivered; no clock for it). F2 -- a larger id, newer by Shopify's
+    ids -- last moved at 01:05 (in transit). Its late retry takes the fields
+    over (no clock says F1's state is newer); the sweep feeds the unclocked
+    F1 beside a moved F2, so the two are compared on their own clocks: F1
+    delivered shows after the FIRST sweep and stays. Unfed, the sweep's own
+    F2 body showed F2 in transit for an hour."""
     oid = 60137
     _book(swept, oid)
     _set(swept, oid, status="DELIVERED", shopify_fulfillment_id="1", awb="AWB-1",
@@ -1115,22 +1116,51 @@ def test_an_older_body_of_a_newer_parcel_never_rewinds_a_pre_clock_order(swept, 
                      created_at=_T("00:40"), updated_at=_T("05:00"))
     f2 = _fulfilment(oid, 2, tracking_number="AWB-2", status="success", shipment_status="in_transit",
                      created_at=_T("01:00"), updated_at=_T("01:05"))
-    shown = ("1", "AWB-1", "delivered", None)
     if leg == "webhook":
-        shopify_fulfillment.reconcile_fulfillment(swept["db"], f2, topic="fulfillments/update")
-        sweeps = 0
-    else:
-        swept["state"]["orders"] = [_pulled(oid, fulfillment_status="fulfilled", updated_at=LATER,
-                                            fulfillments=[f1, f2])]
-        sweeps = 2
-    for i in range(sweeps + 1):
-        if i:
-            swept["run"]()
+        shopify_fulfillment.reconcile_fulfillment(swept["db"], copy.deepcopy(f2), topic="fulfillments/update")
+    swept["state"]["orders"] = [_pulled(oid, fulfillment_status="fulfilled", updated_at=LATER,
+                                        fulfillments=[f1, f2])]
+    for i in range(2):
+        swept["run"]()
         doc = _doc(swept, oid)
         assert (doc["shopify_fulfillment_id"], doc["awb"], doc["shipment_status"],
-                doc.get(shopify_fulfillment.FULFILLMENT_WATERMARK)) == shown, i
+                doc.get(shopify_fulfillment.FULFILLMENT_WATERMARK)) == (
+            "1", "AWB-1", "delivered", datetime(2026, 9, 6, 5, 0)), i
         assert doc["status"] == "DELIVERED"
     assert sorted(shopify_fulfillment.tracked_awbs(_doc(swept, oid))) == ["AWB-1", "AWB-2"]
+
+
+@pytest.mark.parametrize("case", ["label_reissued", "split_delivered"])
+def test_a_new_parcel_drained_after_its_order_body_takes_over_a_pre_clock_order(swept, case):
+    """Shopify sends orders/updated with every fulfilment change; its drain
+    moves the order's IMS updated_at past the new parcel's own clock. Held
+    against that write, F2 -- a re-issued label (F1 cancelled), or a second
+    parcel that arrives delivered -- read as older and never took the
+    tracking fields over: the order showed the dead AWB-1 (or parcel 1 in
+    transit on a DELIVERED order) for good, as no sweep moved a parcel that
+    then had its own clock. A parcel is compared only with its own clock."""
+    oid = 60138
+    reissued = case == "label_reissued"
+    _book(swept, oid)
+    _set(swept, oid, **_PRE_CLOCK_F1, shipment_status="in_transit")
+    f1 = _fulfilment(oid, 1, tracking_number="AWB-1", status="cancelled" if reissued else "success",
+                     shipment_status="in_transit", created_at=_T("00:40"), updated_at=_T("02:00"))
+    f2 = _fulfilment(oid, 2, tracking_number="AWB-2", status="success", created_at=_T("02:01"),
+                     updated_at=_T("02:01"), **({} if reissued else {"shipment_status": "delivered"}))
+    body = _pulled(oid, fulfillment_status="fulfilled", updated_at=_T("02:02"), fulfillments=[f1, f2])
+    swept["real_map"](copy.deepcopy(body), swept["db"], webhook_id=f"u-{oid}", topic="orders/updated")
+    shopify_fulfillment.reconcile_fulfillment(swept["db"], copy.deepcopy(f2), topic="fulfillments/create")
+    if reissued:
+        shopify_fulfillment.reconcile_fulfillment(swept["db"], copy.deepcopy(f1), topic="fulfillments/update")
+    swept["state"]["orders"] = [body]
+    for i in range(2):
+        swept["run"]()
+        doc = _doc(swept, oid)
+        assert (doc["shopify_fulfillment_id"], doc["awb"], doc["fulfillment_status"]) == (
+            "2", "AWB-2", "FULFILLED"), i
+    assert (doc["status"], doc["shipment_status"]) == (
+        ("SHIPPED", "in_transit") if reissued else ("DELIVERED", "delivered"))
+    assert sorted(shopify_fulfillment.tracked_awbs(doc)) == (["AWB-2"] if reissued else ["AWB-1", "AWB-2"])
 
 
 def test_a_cancelled_newer_label_never_takes_over_a_live_pre_clock_one(swept):
