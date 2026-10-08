@@ -940,6 +940,19 @@ export const vendorsApi = {
     return response.data;
   },
 
+  // 'Not received' for the units a held receipt holds beyond its order (the
+  // store manager's answer when the vendor sent nothing extra); the rest of
+  // the receipt stands.
+  dropOverOrder: async (grnId: string) => {
+    const response = await api.post(`/vendors/grn/${grnId}/drop-over-order`);
+    return response.data as {
+      dropped_units: number;
+      units_added?: number;
+      grn_status: string;
+      po_status?: string | null;
+    };
+  },
+
   escalateGRN: async (grnId: string, note: string) => {
     const response = await api.post(`/vendors/grn/${grnId}/escalate`, null, { params: { note } });
     return response.data;

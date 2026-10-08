@@ -267,6 +267,13 @@ def _ordered_by_product(po_repo, po_id) -> dict:
     return ordered
 
 
+def _po_units_received(stock_repo, po_id, product_id) -> int:
+    """Every unit of `product_id` its PO has put on the shelf, by ORIGIN (po_id
+    is stamped at mint and a transfer never rewrites it), in any status, at any
+    shop -- what fills the order. Raises on a read error (fail closed)."""
+    return _grn_already_minted(stock_repo, {"po_id": po_id, "product_id": product_id})
+
+
 def _over_the_order(
     grn_repo, stock_repo, grn_id, po_id, product_id, to_mint, ordered
 ) -> Optional[dict]:
@@ -284,9 +291,7 @@ def _over_the_order(
     status and at ANY shop: a unit sold or transferred since was still
     received, so it still fills the order. Both counts fail closed (raise):
     the receipt then stays held."""
-    on_shelf = _grn_already_minted(
-        stock_repo, {"po_id": po_id, "product_id": product_id}
-    )
+    on_shelf = _po_units_received(stock_repo, po_id, product_id)
     live_since = (
         datetime.now() - timedelta(seconds=_GRN_ACCEPT_LOCK_STALE_SECONDS)
     ).isoformat()
@@ -314,11 +319,6 @@ def _hand_to_store_manager(db, grn_id: str, grn: dict, over: List[dict], product
     shop = _shop_label(db, store_id)
     receipt = grn.get("grn_number") or grn_id
     po = grn.get("po_number") or grn.get("po_id")
-    # A void is refused once a receipt has put anything on the shelf.
-    try:
-        voidable = not _grn_already_minted(get_stock_repository(), _received_on(grn))
-    except Exception:  # noqa: BLE001
-        voidable = False
     # Opens that vendor's "Receipts still waiting", where the receipt is voided.
     vendor_id = grn.get("vendor_id")
     link = "/purchase/receive" + (f"?vendor_id={quote(str(vendor_id))}" if vendor_id else "")
@@ -347,17 +347,13 @@ def _hand_to_store_manager(db, grn_id: str, grn: dict, over: List[dict], product
                 else ""
             )
         )
+        # Both answers work whatever else the receipt put on the shelf (a void
+        # does not, once it has: R1-14), so the advice never goes stale.
         description = (
             f"Receipt {receipt} at {shop} is holding more than its order needs "
-            f"({item}). "
-            + (
-                "If it is a second receipt of the same box, void it in Receive Goods "
-                "> Receipts still waiting. "
-                if voidable
-                else ""
-            )
-            + "If the vendor really sent the extra units, press 'Add to stock' on it "
-            "in Receive Goods > Receipts still waiting."
+            f"({item}). In Receive Goods > Receipts still waiting: if the vendor "
+            "did not send these extra units (a second receipt of the same box, "
+            "say), press 'Not received'; if they really did, press 'Add to stock'."
         )
         for uid, task_store in people or [(None, store_id)]:
             _raise_once(

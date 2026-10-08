@@ -3294,3 +3294,103 @@ def test_r6_a_held_receipts_shelved_lines_count_on_its_order(world):
         status == "RECEIVED" and received == {boss: 2, carrera: 1},
         f"R1-13: every ordered unit is on the shelf but the order reads {status} {received}",
     )
+
+
+def test_r6_units_beyond_the_order_are_marked_not_received(world):
+    _seed_user(world, ADMIN)
+    po, boss, carrera, grn1, grn2 = _mixed_held_receipt(world)
+    world.finish_draft(boss, offer=2790)
+    gid = grn2["grn_id"]
+    # A void is refused: the receipt put the Carrera on the shelf.
+    with pytest.raises(HTTPException) as refused:
+        _run(vd.void_grn(gid, MANAGER))
+    assert refused.value.status_code == 409
+    (task,) = _mgr_tasks(world, gid)
+    # R1-14: the advice works whatever else the receipt shelved -- no void.
+    finding(
+        "Not received" in task["description"] and "void" not in task["description"].lower(),
+        f"R1-14: the store manager's task advises {task['description']!r}",
+    )
+
+    out = _run(vd.drop_over_order(gid, MANAGER))
+    stored = world.grn(gid)
+    finding(
+        stored["status"] == "ACCEPTED" and out["dropped_units"] == 2,
+        f"R1-13: the receipt has no honest exit ({stored['status']}, {out})",
+    )
+    line = next(it for it in stored["items"] if it["product_id"] == boss)
+    assert (line["accepted_qty"], line["received_qty"], line["dropped_qty"]) == (0, 0, 2)
+    # The header totals follow the lines: Carrera x1 is all the receipt took.
+    assert (stored["total_received"], stored["total_accepted"]) == (1, 1)
+    # What was on the shelf stays; nothing new is minted.
+    assert len(world.units(boss)) == 2 and len(world.units(carrera)) == 1
+    assert _po_received(world, po) == ("RECEIVED", {boss: 2, carrera: 1})
+    finding(not _mgr_tasks(world, gid), "R1-13: the store manager's task outlived the answer")
+    assert [a["user_id"] for a in _audit_rows(world, "grn.over_order_dropped")] == [MANAGER["user_id"]]
+    # Pressed twice: nothing is beyond the order any more.
+    with pytest.raises(HTTPException) as again:
+        _run(vd.drop_over_order(gid, MANAGER))
+    assert again.value.status_code == 400
+
+
+def test_r6_not_received_drops_only_what_is_beyond_the_order(world):
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    # Held only for the catalogue: nothing to drop.
+    with pytest.raises(HTTPException) as refused:
+        _run(vd.drop_over_order(grn["grn_id"], MANAGER))
+    assert refused.value.status_code == 400
+    assert world.grn(grn["grn_id"])["unresolved_lines"][0]["reason"] == "incomplete_catalog"
+
+
+def test_r6_not_received_keeps_what_the_order_still_wanted_and_the_catalogue_hold(world):
+    # One receipt: Boss x2 against 1 ordered (over the order once the Boss is
+    # finished) and the Boss 1701 still waiting to be catalogued. "Not
+    # received" drops only the unit beyond the order -- the one the order
+    # wanted goes on the shelf -- and leaves the 1701 held, with its
+    # cataloguer's task.
+    po, d_id, e_id = _two_drafts_po(world)
+    grn = _receive(world, po, [2, 1], "JOT/26-27/0951")
+    gid = grn["grn_id"]
+    world.finish_draft(d_id, offer=2790)
+    assert sorted(ln["reason"] for ln in world.grn(gid)["unresolved_lines"]) == [
+        "incomplete_catalog",
+        "over_order",
+    ]
+    assert len(_mgr_tasks(world, gid)) == 1
+
+    out = _run(vd.drop_over_order(gid, MANAGER))
+    stored = world.grn(gid)
+    line = next(it for it in stored["items"] if it["product_id"] == d_id)
+    finding(
+        (out["dropped_units"], line["accepted_qty"], line["dropped_qty"]) == (1, 1, 1)
+        and len(world.units(d_id)) == 1,
+        f"R1-13: 'Not received' dropped {out['dropped_units']} of the 2 Boss "
+        f"against 1 ordered ({len(world.units(d_id))} on the shelf)",
+    )
+    assert (stored["total_received"], stored["total_accepted"]) == (2, 2)
+    finding(
+        stored["status"] == "PARTIALLY_ACCEPTED"
+        and [ln["reason"] for ln in stored["unresolved_lines"]] == ["incomplete_catalog"],
+        f"R1-13: the catalogue hold went with the drop: {stored['status']} {stored['unresolved_lines']}",
+    )
+    assert not _mgr_tasks(world, gid)
+    assert [t["category"] for t in _open_tasks(world) if t.get("grn_id") == gid] == ["Catalogue"]
+    assert _po_received(world, po)[1] == {d_id: 1, e_id: 0}
+
+    world.finish_draft(e_id, offer=2890)
+    assert world.grn(gid)["status"] == "ACCEPTED"
+    assert _po_received(world, po) == ("RECEIVED", {d_id: 1, e_id: 1})
+
+
+def test_r6_not_received_is_for_the_receiving_managers_only():
+    from api.services.rbac_policy import rows_vendors
+
+    rows = [
+        r
+        for v in vars(rows_vendors).values()
+        if isinstance(v, list)
+        for r in v
+        if isinstance(r, dict) and str(r.get("path", "")).endswith("/grn/{grn_id}/drop-over-order")
+    ]
+    assert len(rows) == 1 and "ACCOUNTANT" not in rows[0]["allowed"]
+    assert vd._DROP_ROLES == ("ADMIN", "AREA_MANAGER", "STORE_MANAGER")

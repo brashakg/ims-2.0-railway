@@ -199,6 +199,8 @@ export function GoodsReceiptCockpit() {
       // toast sent people here to find it.
       status?: string;
       held?: string;
+      // Lines held beyond the order: the store manager's 'Not received'.
+      overOrder?: number;
     }>
   >([]);
   const [grnActionBusy, setGrnActionBusy] = useState<string | null>(null);
@@ -225,6 +227,7 @@ export function GoodsReceiptCockpit() {
               items: Array.isArray(g.items) ? g.items : [],
               status: String(g.status || 'PENDING'),
               held: heldLinesSummary(g.unresolved_lines).text,
+              overOrder: heldLinesSummary(g.unresolved_lines).over,
             }))
         );
       } catch {
@@ -288,6 +291,33 @@ export function GoodsReceiptCockpit() {
         err instanceof Error ? err.message : `Failed to void GRN ${grnNumber}`,
         20000,
       );
+    } finally {
+      setGrnActionBusy(null);
+    }
+  };
+
+  // The vendor sent nothing extra: the units a held receipt holds beyond its
+  // order are marked not received; what it put on the shelf stays (R1-13).
+  const dropOverOrder = async (grnId: string, grnNumber: string) => {
+    if (
+      !window.confirm(
+        `Mark the units ${grnNumber} holds beyond its order as NOT received? ` +
+          'Use this when the vendor did not send them (a second receipt of the same box, say). ' +
+          'Units the order still wanted go on the shelf; anything already on the shelf stays.',
+      )
+    )
+      return;
+    setGrnActionBusy(grnId);
+    try {
+      const res = await vendorsApi.dropOverOrder(grnId);
+      toast.success(
+        `GRN ${grnNumber}: ${res.dropped_units} unit(s) marked not received` +
+          (res.units_added ? `; ${res.units_added} the order still wanted added to stock` : ''),
+      );
+      await loadPendingGrns(vendorId);
+      await loadCockpit(vendorId);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : `Failed to update GRN ${grnNumber}`, 20000);
     } finally {
       setGrnActionBusy(null);
     }
@@ -1310,9 +1340,8 @@ export function GoodsReceiptCockpit() {
                       have none of its goods in stock yet. A line waiting to be catalogued goes on
                       the shelf by itself once the catalogue manager finishes the product ("Add to
                       stock" tries again now). A line beyond what the PO ordered (a second receipt
-                      of the same box, say) waits for the store manager: void the receipt if the
-                      vendor sent nothing extra and none of it is in stock, or press "Add to
-                      stock" if they did.
+                      of the same box, say) waits for the store manager: press "Not received" if
+                      the vendor sent nothing extra, or "Add to stock" if they did.
                     </p>
                     <div className="space-y-2">
                       {pendingGrns.map((g) => (
@@ -1358,6 +1387,17 @@ export function GoodsReceiptCockpit() {
                             {/* A held receipt can be a second receipt of the same box: the
                                 store manager voids it here. The server refuses the void if
                                 the receipt put anything on the shelf. */}
+                            {g.overOrder ? (
+                              <button
+                                type="button"
+                                onClick={() => dropOverOrder(g.grn_id, g.grn_number)}
+                                disabled={grnActionBusy === g.grn_id}
+                                className="btn-secondary !py-1 !px-3 text-xs flex items-center gap-1.5 disabled:opacity-50"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                                Not received
+                              </button>
+                            ) : null}
                             <button
                               type="button"
                               onClick={() => voidPendingGrn(g.grn_id, g.grn_number)}

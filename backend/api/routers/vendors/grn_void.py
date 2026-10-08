@@ -107,7 +107,7 @@ async def void_grn(
     stock": the accept flow flips the status only
     AFTER the mint loop, so a worker killed mid-accept leaves the receipt
     PENDING with real units already on the shelf. Voiding THAT orphans those
-    units (PO receipt math only sums ACCEPTED GRNs) and licenses a full re-mint
+    units (PO receipt math reads only the accepted lines of a live receipt) and licenses a full re-mint
     under a new grn_id -- which the per-(grn, line, unit) unique index cannot
     catch, because it keys on source_id. So voiding is refused whenever
     stock_units already holds a row for this receipt, and the operator is told
@@ -115,7 +115,7 @@ async def void_grn(
 
     Store-scoped like accept (cross-store reads as 404). The receipt row is kept
     (audit trail, numbering continuity) with status VOID -- the accept endpoint
-    refuses VOID rows, and PO receipt math only ever sums ACCEPTED GRNs.
+    refuses VOID rows, and PO receipt math never counts a VOID one.
     """
     grn_repo = get_grn_repository()
     if grn_repo is None:
@@ -148,7 +148,7 @@ async def void_grn(
     # lookup, the cost backfill write and the already-minted count -- passes
     # every gate here while the accept is still about to mint. The accept then
     # puts the whole delivery onto a VOID receipt: real sellable units behind a
-    # voided doc, PO receipt math permanently short (it sums ACCEPTED GRNs only),
+    # voided doc, PO receipt math permanently short (it never counts a VOID receipt),
     # and re-accepting impossible because accept refuses a non-PENDING receipt.
     # Taking the claim closes both orderings, not just accept-then-void.
     claim_token = _claim_grn_for_accept(grn_repo, grn_id, current_user.get("user_id"))
@@ -383,3 +383,195 @@ async def escalate_grn(
         )
 
     return {"message": "GRN escalated to HQ", "grn_id": grn_id}
+
+
+# The receiving MANAGERS (owner 2026-09-28: receiving is managers only) -- and
+# the over-order task is the shop's store manager's (2026-09-29).
+_DROP_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER")
+
+
+@router.post("/grn/{grn_id}/drop-over-order")
+async def drop_over_order(
+    grn_id: str, current_user: dict = Depends(require_roles(*_DROP_ROLES))
+):
+    """'Not received' for the units a receipt holds BEYOND its order (the
+    catalogue release's order cap, reason over_order): the vendor did not send
+    them -- a second receipt of the same box, say. The way out for a held
+    receipt that already put other lines on the shelf, which a void refuses
+    (R1-13); "Add to stock" is the other answer, when the extra units really
+    came.
+
+    Only what is beyond the order is dropped: each such line keeps the units
+    it put on the shelf (by their origin, _received_on) plus what its order
+    still has room for (ordered less every unit the order already put on the
+    shelf, _po_units_received); the rest leaves its accepted and received
+    counts, recorded as dropped_qty. Kept units not yet on the shelf go there
+    through THE one path (_put_on_shelf, order cap on) once this claim is
+    handed back. Lines held for the catalogue stay held. The PO's received
+    counts are refreshed, the store manager's over-order tasks close when
+    nothing is beyond the order any more, and an audit row records who said
+    so. Under the accept claim, so no accept runs meanwhile; every read fails
+    closed."""
+    from .grn_accept import (
+        _complete_receipt_tasks,
+        _ordered_by_product,
+        _po_units_received,
+        _put_on_shelf,
+        refresh_po_received,
+    )
+    from ._shared import _get_db
+
+    grn_repo = get_grn_repository()
+    if grn_repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    grn = grn_repo.find_by_id(grn_id)
+    if not grn or not can_access_store_scoped(grn.get("store_id"), current_user):
+        raise HTTPException(status_code=404, detail="GRN not found")
+    held = grn.get("unresolved_lines") or []
+    over = {ln.get("product_id") for ln in held if ln.get("reason") == "over_order"}
+    if grn.get("status") != "PARTIALLY_ACCEPTED" or not over:
+        raise HTTPException(
+            status_code=400,
+            detail="Nothing on this receipt is held beyond its order.",
+        )
+    stock_repo = get_stock_repository()
+    po_repo = get_purchase_order_repository()
+    po_id = grn.get("po_id")
+    unreadable = HTTPException(
+        status_code=503,
+        detail="Could not count what this receipt and its order put on the shelf. Try again.",
+    )
+    if stock_repo is None or po_repo is None or not po_id:
+        raise unreadable
+    claim_token = _claim_grn_for_accept(grn_repo, grn_id, current_user.get("user_id"))
+    if claim_token is None:
+        raise HTTPException(
+            status_code=409,
+            detail="This receipt is being accepted right now. Refresh in a moment.",
+        )
+    try:
+        try:
+            ordered = _ordered_by_product(po_repo, po_id)
+            items, still_over, dropped, to_shelve, room = [], [], 0, 0, {}
+            for idx, it in enumerate(grn.get("items") or []):
+                pid = it.get("product_id")
+                accepted = int(it.get("accepted_qty") or 0)
+                if pid not in over or accepted <= 0:
+                    items.append(it)
+                    continue
+                on_line = _grn_already_minted(
+                    stock_repo, _received_on(grn, product_id=pid, grn_line_index=idx)
+                )
+                if pid not in room:
+                    room[pid] = max(
+                        0, ordered.get(pid, 0) - _po_units_received(stock_repo, po_id, pid)
+                    )
+                take = min(max(0, accepted - on_line), room[pid])
+                room[pid] -= take
+                drop = max(0, accepted - on_line - take)
+                dropped += drop
+                to_shelve += take
+                if take:
+                    still_over.append(
+                        {"product_id": pid, "accepted_qty": on_line + take, "reason": "over_order"}
+                    )
+                items.append(
+                    {
+                        **it,
+                        "accepted_qty": accepted - drop,
+                        "received_qty": max(0, int(it.get("received_qty") or 0) - drop),
+                        "dropped_qty": int(it.get("dropped_qty") or 0) + drop,
+                    }
+                )
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001 - fail closed
+            raise unreadable from exc
+        rest = [ln for ln in held if ln.get("reason") != "over_order"] + still_over
+        status = "PARTIALLY_ACCEPTED" if rest else "ACCEPTED"
+        patch = {
+            "items": items,
+            # The header totals (vendor performance reads them) follow the lines.
+            "total_received": max(0, int(grn.get("total_received") or 0) - dropped),
+            "total_accepted": max(0, int(grn.get("total_accepted") or 0) - dropped),
+            "unresolved_lines": rest,
+            "status": status,
+            "over_order_dropped_by": current_user.get("user_id"),
+            "over_order_dropped_at": datetime.now().isoformat(),
+        }
+        written = _guarded_grn_write(
+            grn_repo,
+            {"grn_id": grn_id, "status": "PARTIALLY_ACCEPTED", "accept_lock_token": claim_token},
+            {"$set": patch},
+        )
+        if written is None:
+            written = bool(grn_repo.update(grn_id, patch))
+        if written is not True:
+            raise HTTPException(
+                status_code=503 if written is _GRN_WRITE_ERROR else 409,
+                detail="The receipt changed while this ran. Refresh and check it before trying again.",
+            )
+        po_status = refresh_po_received(po_repo, grn_repo, po_id)
+        if not still_over:
+            try:
+                _db = _get_db()
+                if _db is not None:
+                    _complete_receipt_tasks(
+                        _db,
+                        grn_id,
+                        "The units held beyond the order were not received.",
+                        category="Purchase",
+                    )
+            except Exception:  # noqa: BLE001 - a task problem never undoes the drop
+                logger.warning("[VENDOR] GRN %s: over-order tasks not closed", grn_id, exc_info=True)
+        try:
+            audit = get_audit_repository()
+            if audit is not None:
+                audit.create(
+                    {
+                        "action": "grn.over_order_dropped",
+                        "entity_type": "grn",
+                        "entity_id": grn_id,
+                        "user_id": current_user.get("user_id"),
+                        "detail": {
+                            "grn_number": grn.get("grn_number"),
+                            "po_id": po_id,
+                            "dropped_units": dropped,
+                            "kept_units": to_shelve,
+                            "products": sorted(str(p) for p in over),
+                        },
+                    }
+                )
+        except Exception:  # noqa: BLE001 - the audit never undoes the drop
+            logger.warning("[VENDOR] GRN %s: drop audit failed", grn_id, exc_info=True)
+    finally:
+        _release_grn_accept_claim(grn_repo, grn_id, claim_token)
+    out = {
+        "message": f"{dropped} unit(s) held beyond the order were marked not received",
+        "grn_id": grn_id,
+        "grn_status": status,
+        "dropped_units": dropped,
+        "units_added": 0,
+        "po_status": po_status,
+        "unresolved_lines": rest,
+    }
+    if to_shelve:
+        # The units within the order the vendor did send go on the shelf now,
+        # through the one path, with the order cap still on.
+        try:
+            shelved = _put_on_shelf(
+                grn_repo, grn_id, grn_repo.find_by_id(grn_id), current_user, order_cap=True
+            )
+            out.update(
+                grn_status=shelved.get("grn_status"),
+                units_added=shelved.get("units_added") or 0,
+                po_status=shelved.get("po_status"),
+                unresolved_lines=shelved.get("unresolved_lines") or [],
+            )
+        except Exception:  # noqa: BLE001 - the drop stands; 'Add to stock' shelves them
+            logger.error(
+                "[VENDOR] GRN %s: the units kept within the order were not shelved",
+                grn_id,
+                exc_info=True,
+            )
+    return out

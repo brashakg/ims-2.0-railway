@@ -43,6 +43,7 @@ vi.mock('../../../services/api/inventory', () => ({
     getPurchaseOrders: vi.fn(),
     acceptGRN: vi.fn(),
     voidGRN: vi.fn(),
+    dropOverOrder: vi.fn(),
   },
 }));
 
@@ -72,6 +73,7 @@ const getGRNsMock = vendorsApi.getGRNs as unknown as ReturnType<typeof vi.fn>;
 const getPOsMock = vendorsApi.getPurchaseOrders as unknown as ReturnType<typeof vi.fn>;
 const acceptGRNMock = vendorsApi.acceptGRN as unknown as ReturnType<typeof vi.fn>;
 const voidGRNMock = vendorsApi.voidGRN as unknown as ReturnType<typeof vi.fn>;
+const dropMock = (vendorsApi as unknown as { dropOverOrder: ReturnType<typeof vi.fn> }).dropOverOrder;
 
 const HELD_NO = 'RCPT/BV-DHN-02/26-27/0022';
 
@@ -197,5 +199,39 @@ describe('Receive Goods - a receipt held for cataloguing (audit C1)', () => {
     expect(within(row).getByText(/1 line\(s\) beyond the order, for the store manager/i)).toBeTruthy();
     expect(within(row).queryByText(/waiting to be catalogued/i)).toBeNull();
     expect(screen.queryByText(/put most of its goods into stock/i)).toBeNull();
+  });
+
+  // R1-13: a held receipt that already shelved other lines cannot be voided;
+  // its units beyond the order are marked "Not received" instead, and the
+  // open orders reload (the order may now read received in full).
+  it('a receipt held beyond its order offers "Not received"', async () => {
+    getGRNsMock.mockImplementation(async (params: { status?: string }) =>
+      params?.status === 'PARTIALLY_ACCEPTED'
+        ? {
+            grns: [
+              {
+                ...HELD_GRN,
+                unresolved_lines: [
+                  { product_id: 'p-boss', accepted_qty: 2, reason: 'over_order', ordered: 2, on_shelf: 2 },
+                ],
+              },
+            ],
+          }
+        : { grns: [] },
+    );
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    dropMock.mockResolvedValue({ dropped_units: 2, grn_status: 'ACCEPTED' });
+    const row = await heldRow();
+    const cockpitLoads = getCockpitMock.mock.calls.length;
+    fireEvent.click(within(row).getByRole('button', { name: /not received/i }));
+    await waitFor(() => expect(dropMock).toHaveBeenCalledWith('g-held'));
+    await waitFor(() => expect(getCockpitMock.mock.calls.length).toBeGreaterThan(cockpitLoads));
+    expect(toastMock.success).toHaveBeenCalledWith(expect.stringMatching(/2 unit\(s\) marked not received/));
+    confirmSpy.mockRestore();
+  });
+
+  it('a receipt held only for the catalogue offers no "Not received"', async () => {
+    const row = await heldRow();
+    expect(within(row).queryByRole('button', { name: /not received/i })).toBeNull();
   });
 });
