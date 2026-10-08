@@ -1125,15 +1125,31 @@ _COST_CELL = os.path.join(
 )
 
 
+_FRONTEND_SRC = os.path.dirname(os.path.dirname(os.path.dirname(_COST_CELL)))
+# Every frontend check on per-unit product cost outside CostCell itself (the
+# Add/Edit-product form's cost field and margin) reads the one list.
+_PRODUCT_COST_SCREENS = ("pages/catalog/quickadd/useQuickAddForm.ts",)
+
+
+def _assert_screens_read(name, screens):
+    """Each screen imports CostCell's `name` and uses it."""
+    for rel in screens:
+        with open(os.path.join(_FRONTEND_SRC, rel), encoding="utf-8") as fh:
+            # Code only: a comment naming the list is not a use of it.
+            code = re.sub(r"/\*.*?\*/|//[^\n]*", "", fh.read(), flags=re.S)
+        assert re.search(r"import\s*\{[^}]*\b" + name + r"\b", code), rel
+        assert len(re.findall(r"\b" + name + r"\b", code)) >= 2, rel
+
+
 @pytest.mark.skipif(not os.path.exists(_COST_CELL), reason="frontend/ not shipped here")
 def test_frontend_cost_cell_is_the_product_context():
     with open(_COST_CELL, encoding="utf-8") as fh:
         m = re.search(r"PRODUCT_COST_ROLES[^=]*=\s*\[([^\]]*)\]", fh.read())
     assert m, "CostCell.tsx no longer declares PRODUCT_COST_ROLES"
     assert set(re.findall(r"'([A-Z_]+)'", m.group(1))) == _product_cost_roles()
+    _assert_screens_read("PRODUCT_COST_ROLES", _PRODUCT_COST_SCREENS)
 
 
-_FRONTEND_SRC = os.path.dirname(os.path.dirname(os.path.dirname(_COST_CELL)))
 # Every frontend check on supplier payments (Finance dashboard tab + schedule,
 # booking a supplier bill, approving a match exception) reads the one list.
 _PAYABLES_SCREENS = (
@@ -1151,12 +1167,7 @@ def test_frontend_payables_roles_are_the_payables_context():
     assert m, "CostCell.tsx no longer declares PAYABLES_ROLES"
     want = {r for r in rbac.ALL_ROLES if can_see_cost({"roles": [r]}, "payables")}
     assert set(re.findall(r"'([A-Z_]+)'", m.group(1))) == want
-    for rel in _PAYABLES_SCREENS:
-        with open(os.path.join(_FRONTEND_SRC, rel), encoding="utf-8") as fh:
-            # Code only: a comment naming the list is not a use of it.
-            code = re.sub(r"/\*.*?\*/|//[^\n]*", "", fh.read(), flags=re.S)
-        assert re.search(r"import\s*\{[^}]*\bPAYABLES_ROLES\b", code), rel
-        assert len(re.findall(r"\bPAYABLES_ROLES\b", code)) >= 2, rel
+    _assert_screens_read("PAYABLES_ROLES", _PAYABLES_SCREENS)
 
 
 # ---------------------------------------------------------------------------
