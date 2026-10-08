@@ -30,7 +30,6 @@ import clsx from 'clsx';
 import { grnCockpitApi } from '../../services/api/grnCockpit';
 import { vendorsApi } from '../../services/api/inventory';
 import { UnitLabelsModal } from '../../components/labels/UnitLabelsModal';
-import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { useIsOnlineStore } from '../../hooks/useIsOnlineStore';
 import type {
@@ -130,15 +129,13 @@ interface InboxPO {
 // ============================================================================
 
 export function GoodsReceiptCockpit() {
-  const { user } = useAuth();
   const toast = useToast();
   // Audit F63: the ONE Purchase shop scope (purchaseShop.tsx). An admin reads
   // the shop picked on the Purchase tabs -- every shop when he picks none --
   // so the order he pressed Receive on (listed under that same pick) is open
   // here, not missing because his own shop is another. Everyone else keeps
   // their own shop, as before (the server scopes them to it either way).
-  const { storeId: purchaseShop, canPick } = usePurchaseShop();
-  const storeId = (canPick ? purchaseShop : user?.activeStoreId) || '';
+  const storeId = usePurchaseShop().storeId || '';
   // W1.4 / OS-006: a PO's goods are booked at its delivery shop -- the shop
   // in scope. An ONLINE store holds no stock — warn up front (backend rejects
   // the GRN with 400 too).
