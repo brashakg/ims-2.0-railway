@@ -110,7 +110,7 @@ function SystemSection({ systemStatus }: { systemStatus: { database: string; api
         <p className="font-medium text-gray-900 mb-1">Admin controls</p>
         <p className="text-sm text-gray-500">
           <Link to="/settings/rules" className="text-blue-600 hover:underline">Operational Rules</Link>
-          {' '}- default credit limit and bill round-off
+          {' '}- default credit limit for customers
         </p>
       </div>
 

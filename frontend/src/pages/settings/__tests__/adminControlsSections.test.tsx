@@ -3,7 +3,9 @@
 // ============================================================================
 // Store Modules, Role Permissions and Discount Limits are gone (each duplicated
 // a rule IMS enforces elsewhere), and so is every operational rule except the
-// default credit limit (live) and round-off (left for its own job). Every test
+// default credit limit (live) and round-off (left for its own job - not shown,
+// since bills are not rounded to the rupee, but its stored value is saved back
+// unchanged). Every test
 // drives the REAL settingsRoutes table, so the URL-to-section mapping and the
 // role gates under test are the ones the app ships. Fixtures use non-default
 // values so a page rendering its code defaults fails here.
@@ -94,13 +96,29 @@ const REMOVED_RULES = [
   'Session Timeout (minutes)', 'Force Password Change (days)', 'Require 2FA for Admin Roles',
 ];
 
-describe('/settings/rules: the default credit limit and round-off, nothing else', () => {
-  it.each(['SUPERADMIN', 'ADMIN'])('%s sees the stored values and saves exactly the two rules', async (role) => {
+describe('/settings/rules: the default credit limit, nothing else', () => {
+  it.each(['SUPERADMIN', 'ADMIN'])('%s sees the stored limit, no round-off, and saves the stored round-off back', async (role) => {
     renderRoute('/settings/rules', [role]);
     expect(await screen.findByDisplayValue('90000', undefined, FIND)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Auto Round-off/ })).toHaveAttribute('aria-pressed', 'false');
     expect(await screen.findByRole('link', { name: /^Operational Rules$/ }, FIND)).toHaveAttribute('aria-current', 'page');
+    // IMS does not round bills to the rupee: no toggle and no text claims it does.
+    expect(screen.queryByRole('button', { name: /round-off/i })).toBeNull();
+    expect(document.body.textContent).not.toMatch(/round[- ]?off|round invoice/i);
     expect(await save()).toEqual({ operational_rules: { auto_round_off: false, default_credit_limit: 90000 } });
+  });
+
+  it.each(['', '0', '-5'])('a credit limit of %j says why and is not sent', async (value) => {
+    renderRoute('/settings/rules', ['ADMIN']);
+    fireEvent.change(await screen.findByDisplayValue('90000', undefined, FIND), { target: { value } });
+    expect(screen.getByRole('alert')).toHaveTextContent('Enter an amount above ₹0');
+    const button = screen.getByRole('button', { name: /^Save Operational Rules$/ });
+    expect(button).toBeDisabled();
+    fireEvent.click(button);
+    expect(mockUpdateAdminControls).not.toHaveBeenCalled();
+    // a valid amount clears the message and saves
+    fireEvent.change(screen.getByRole('spinbutton'), { target: { value: '25000' } });
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(await save()).toEqual({ operational_rules: { auto_round_off: false, default_credit_limit: 25000 } });
   });
 
   it('an edited default credit limit is what is saved', async () => {
@@ -169,6 +187,7 @@ describe('the removed screens are gone from routes and nav', () => {
     const row = await screen.findByTestId('admin-controls-links', undefined, FIND);
     const links = Array.from(row.querySelectorAll('a')).map((a) => a.getAttribute('href'));
     expect(links).toEqual(['/settings/rules']);
+    expect(row.textContent).not.toMatch(/round[- ]?off/i);
     expect(mockGetAdminControls).not.toHaveBeenCalled();
   });
 
