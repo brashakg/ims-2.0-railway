@@ -1181,6 +1181,29 @@ def _duplicate_error(existing: Dict[str, Any]) -> "ProductMasterError":
 SIMILAR_SIBLINGS_CAP = 12
 
 
+def model_family_query(category: Any, brand: Any, model: Any) -> Optional[Dict[str, Any]]:
+    """The filter for every row of one model -- same category, any colour or
+    size -- or None when the category or brand/model does not normalise.
+    find_similar_products lists by it; the counter stock lookup counts by it.
+
+    "brand|model|" -- the trailing | delimiter guarantees "rb21" can never
+    prefix-match "rb213". The normaliser now strips every character outside
+    [a-z0-9], so no regex metacharacter can reach the key; re.escape stays as
+    belt-and-braces against that ever changing.
+    """
+    canonical = resolve_category(category)
+    if canonical is None:
+        return None
+    b = normalise_identity_component(brand)
+    m = normalise_identity_component(model)
+    if not b or not m:
+        return None
+    return {
+        "category": canonical,
+        "identity_key": {"$regex": "^" + re.escape(f"{b}|{m}|")},
+    }
+
+
 def find_similar_products(
     products_collection,
     *,
@@ -1229,23 +1252,9 @@ def find_similar_products(
     try:
         if products_collection is None:
             return empty
-        canonical = resolve_category(category)
-        if canonical is None:
+        sibling_query = model_family_query(category, brand, model)
+        if sibling_query is None:
             return empty
-        b = normalise_identity_component(brand)
-        m = normalise_identity_component(model)
-        if not b or not m:
-            return empty
-
-        # "brand|model|" -- the trailing | delimiter guarantees "rb21" can
-        # never prefix-match "rb213". The normaliser now strips every character
-        # outside [a-z0-9], so no regex metacharacter can reach the key;
-        # re.escape stays as belt-and-braces against that ever changing.
-        prefix = f"{b}|{m}|"
-        sibling_query = {
-            "category": canonical,
-            "identity_key": {"$regex": "^" + re.escape(prefix)},
-        }
 
         exact_key = compute_identity_key(brand, model, colour, size)
         exact_doc = (

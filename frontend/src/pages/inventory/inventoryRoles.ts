@@ -53,6 +53,22 @@ export const POWER_GRID_ROLES: UserRole[] = [
 ];
 
 /**
+ * The read-only Stock lookup (owner ruling D7b, 2026-09-29): the counter
+ * roles plus the manager ladder. The SAME set as the server's row for
+ * GET /inventory/lookup minus SALES_CASHIER, which sign-in folds into
+ * SALES_STAFF (pinned by test_counter_stock_lookup.py).
+ */
+export const STOCK_LOOKUP_ROLES: UserRole[] = [
+  'SUPERADMIN',
+  'ADMIN',
+  'AREA_MANAGER',
+  'STORE_MANAGER',
+  'SALES_STAFF',
+  'CASHIER',
+  'OPTOMETRIST',
+];
+
+/**
  * Who may set a shop's reorder level (owner ruling D12): managers their own
  * shop, admins any. The SAME set as the server's gate on
  * PUT /inventory/reorder-levels (pinned by test_per_shop_reorder_levels.py).

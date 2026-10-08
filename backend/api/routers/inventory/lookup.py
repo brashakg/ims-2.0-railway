@@ -1,0 +1,232 @@
+"""D7b (owner ruling 2026-09-29): the counter's READ-ONLY stock lookup.
+
+Counter staff search a frame by brand, model, SKU or barcode and see how many
+the till can sell at THIS shop, at every other shop, and how many are on their
+way to each shop, with the model's other colours and eye sizes. Nothing here
+writes, and nothing but MRP / selling price leaves it: the response is built
+from an allow-list, never from the product or stock document.
+
+Every rule is reused, not re-typed:
+  * search      -- ProductRepository.search_products, the active-only search
+                   GET /products?search= runs, plus an exact SKU, product
+                   barcode or manufacturer GTIN (attributes.gtin or the legacy
+                   top-level gtin, read through gtin.sanitise_gtin) and the IMS
+                   unit barcode via StockRepository.find_by_barcode (the till's
+                   scan lookup), active products only;
+  * the price   -- mrp + offer_price only; the screen shows the till's own
+                   offer||mrp (posPriceGuard), never a cost, supplier or bill;
+  * the model   -- product_master.find_similar_products (the identity_key
+                   'brand|model|' rule) for colours, variant_of for sizes;
+  * sellable    -- StockRepository.sellable_filter, the filter find_available
+                   and the sale guard count (AVAILABLE and in date), one unit
+                   per stock_units row -- so this shop's figure is the till's;
+  * tracked     -- the sale guard's `tracked` question
+                   (orders/stock._assert_serialized_stock_available): does the
+                   shop hold a stock_units row of it, whatever its status. The
+                   guard asks it inline in a till file, so this re-states its
+                   match; the real guard is the oracle for one shop per
+                   lifecycle state and stored shape, each its sole row
+                   (test_d7b3_a_shop_the_till_does_not_count_is_not_tracked). The
+                   guard counts a line only there AND when the line's item_type
+                   takes serialized stock. That item_type is the till's
+                   (POS mapCategory, TypeScript), so the SCREEN puts it on each
+                   product -- importing mapCategory -- and checks it against
+                   the guard's own lists, sent here as they are
+                   (not_counted_item_types, lens_grid_item_types). Nothing here
+                   maps a category, so a till spelling ('LENSES', 'SVC') can
+                   never read differently on this screen;
+  * the shops   -- stores_util.physical_stores;
+  * in transit  -- item_events.status_match(TRANSFERRED) + transfer_to_store_id
+                   (what StockRepository.claim_for_transfer stamps).
+"""
+
+from ._shared import (
+    Depends,
+    Query,
+    StockState,
+    get_product_repository,
+    get_stock_repository,
+    require_roles,
+    router,
+)
+from .helpers import _get_db
+from ...services.gtin import sanitise_gtin
+from ...services.item_events import status_match
+from ...services.product_master import (
+    existing_product_summary,
+    find_similar_products,
+    model_family_query,
+)
+from ...services.rbac_policy import policy_for
+from ...services.stores_util import physical_stores
+
+# The route gate IS the rbac_policy row (rows_items_jarvis.py): one list, so
+# the row and the route can never disagree about a role.
+STOCK_LOOKUP_ROLES = tuple(policy_for("GET", "/api/v1/inventory/lookup")["allowed"])
+
+# The ONLY product fields a counter sees, read off the catalogue's one display
+# projection (product_master.existing_product_summary: a frame's eye size is
+# attributes.lens_size there). An allow-list, so a cost, supplier or bill
+# field added to the product doc or the projection can never reach this screen.
+_PRODUCT_FIELDS = ("sku", "name", "brand", "model", "category", "colour_code", "size", "mrp", "offer_price")
+_HITS = 50
+
+
+def _units_by_product_shop(stock_repo, match, shop_field="$store_id"):
+    """{(product_id, shop): stock_units rows matching `match`} -- one unit per
+    row, the way find_available counts them. Both columns go through here."""
+    rows = stock_repo.aggregate(
+        [
+            {"$match": match},
+            {"$group": {"_id": {"p": "$product_id", "s": shop_field}, "n": {"$sum": 1}}},
+            # aggregate() stringifies a non-string _id, so lift the key out.
+            {"$project": {"_id": 0, "p": "$_id.p", "s": "$_id.s", "n": 1}},
+        ]
+    )
+    return {(str(r["p"]), str(r["s"])): int(r["n"]) for r in rows if r.get("p") and r.get("s")}
+
+
+def sellable_by_product_shop(stock_repo, pids):
+    """{(product_id, shop): units the till may sell there} for many products at
+    every shop: find_available's own sellable_filter, so a shop's figure is the
+    one its sale guard counts. Shared with GET /inventory/cross-store-stock."""
+    return _units_by_product_shop(
+        stock_repo, stock_repo.sellable_filter({"$in": list(pids)}, {"$ne": None})
+    )
+
+
+def _guard_lists():
+    """(not counted, lens grid): the order item_types the sale guard never
+    counts against stock_units -- _takes_serialized_stock's own sets, sent as
+    they are -- and the ones whose stock the lens grid holds."""
+    from ..orders import stock as guard
+
+    lens = guard._LENS_RESERVED_ITEM_TYPES
+    return sorted(guard._NON_SERIALIZED_ITEM_TYPES | lens), sorted(lens)
+
+
+def _in_transit_by_product_shop(stock_repo, pids, shop_ids):
+    """{(product_id, destination shop): units shipped to it, not yet received}."""
+    match = {
+        "product_id": {"$in": pids},
+        "transfer_to_store_id": {"$in": shop_ids},
+        **status_match(StockState.TRANSFERRED),
+    }
+    return _units_by_product_shop(stock_repo, match, "$transfer_to_store_id")
+
+
+def _find(product_repo, stock_repo, q):
+    """(products, exact ids, total): the products `q` names exactly -- its SKU, its
+    product barcode, its manufacturer GTIN (attributes.gtin) or an IMS unit
+    label -- then the active search hits, then their model family (other
+    colours by the identity_key rule, other eye sizes by variant_of), so one
+    scan answers "in any colour?". The exact ones come first, ahead of the
+    50-hit search and the 200-row family caps, so a scanned contact-lens
+    power is never cut from a 300-power family. Inactive (soft-deleted / draft) products never come back.
+    A code is matched as typed AND as the one GTIN rule reads it
+    (gtin.sanitise_gtin: '8 056597 054324' is 8056597054324), in the GTIN
+    fields the catalogue reads (attributes.gtin, then the legacy top-level
+    gtin -- product_master's `attrs.get("gtin") or spine.get("gtin")`)."""
+    codes = list({q, sanitise_gtin(q)} - {None})
+    exact = [{"sku": q}] + [{f: {"$in": codes}} for f in ("barcode", "attributes.gtin", "gtin")]
+    unit = stock_repo.find_by_barcode(q)
+    if unit and unit.get("product_id"):
+        exact.append({"product_id": unit["product_id"]})
+    hits = product_repo.find_many({"$or": exact, "is_active": True}, limit=_HITS)
+    exact_ids = {str(p["product_id"]) for p in hits if p.get("product_id")}
+    hits += product_repo.search_products(q, limit=_HITS)
+    hit_ids = [p["product_id"] for p in hits if p.get("product_id")]
+    ids = list(hit_ids)
+    # ponytail: 3 indexed reads per distinct model among <= 100 hits; fold into
+    # one identity_key $regex only if a broad brand search ever feels slow.
+    models = {(p.get("category"), p.get("brand"), p.get("model")) for p in hits}
+    for cat, brand, model in models:
+        similar = find_similar_products(
+            product_repo.collection, category=cat, brand=brand, model=model, limit=4 * _HITS
+        )
+        ids += [
+            s["product_id"]
+            for s in similar["siblings"] + [similar["exact_match"] or {}]
+            if s.get("product_id")
+        ]
+    if not ids:
+        return [], exact_ids, 0
+    ids += [p["variant_of"] for p in hits if p.get("variant_of")]
+    family = [{"product_id": {"$in": ids}}, {"variant_of": {"$in": ids}}]
+    # `total`: the same answer with no cap -- the exact codes, every search
+    # match, every row of each hit's model (its identity_key family) and the
+    # variant_of links -- so the screen can say when a cap cut rows.
+    # ponytail: a size child of a sibling the cap dropped is not counted.
+    uncapped = exact + [product_repo.search_products_filter(q)] + family + [
+        f for f in (model_family_query(*m) for m in models) if f
+    ]
+    total = product_repo.count({"$or": uncapped, "is_active": True})
+    # ponytail: the family is capped at 200 in storage order; the hits above
+    # it never are. Sort the family by power/size if a counter ever asks.
+    family = product_repo.find_many(
+        {"$or": family, "is_active": True, "product_id": {"$nin": hit_ids}}, limit=4 * _HITS
+    )
+    return hits + family, exact_ids, total
+
+
+@router.get("/lookup")
+async def stock_lookup(
+    q: str = Query("", max_length=100, description="Brand, model, SKU or barcode"),
+    current_user: dict = Depends(require_roles(*STOCK_LOOKUP_ROLES)),
+):
+    """Read-only: per physical shop, how many of each matching product the
+    till can sell now and how many are on their way there. MRP and selling
+    price only -- no cost, supplier or bill."""
+    here = current_user.get("active_store_id")
+    q = q.strip()
+    db = _get_db()
+    product_repo = get_product_repository()
+    stock_repo = get_stock_repository()
+    # No usable handle -- None, or a dev box's MockDatabase, which has no
+    # get_collection -- is an empty answer, never a 500.
+    if not q or not hasattr(db, "get_collection") or product_repo is None or stock_repo is None:
+        return {"store_id": here, "items": []}
+
+    products, exact_ids, total = _find(product_repo, stock_repo, q)
+    pids = sorted({str(p["product_id"]) for p in products if p.get("product_id")})
+    if not pids:
+        return {"store_id": here, "items": []}
+    # A stores doc with no store_id is no shop anyone can stock or sell from.
+    shops = [s for s in physical_stores(db) if s.get("store_id")]
+    shop_ids = [str(s["store_id"]) for s in shops]
+    available = sellable_by_product_shop(stock_repo, pids)
+    in_transit = _in_transit_by_product_shop(stock_repo, pids, shop_ids)
+    # The guard's `tracked` match: any stock_units row of it at the shop, any
+    # status -- never filter this by status (pinned per state against the guard).
+    tracked = set(_units_by_product_shop(stock_repo, {"product_id": {"$in": pids}}))
+    not_counted, lens_grid = _guard_lists()
+
+    items, seen = [], set()
+    for p in products:
+        pid = str(p.get("product_id") or "")
+        if not pid or pid in seen:
+            continue
+        seen.add(pid)
+        shown = existing_product_summary(p)
+        item = {"product_id": pid, **{k: shown.get(k) for k in _PRODUCT_FIELDS}}
+        # What the code named exactly (sku, barcode, GTIN, unit label): the
+        # screen does not tell a counter who has just scanned it to scan.
+        item["exact"] = pid in exact_ids
+        item["stores"] = [
+            {
+                "store_id": sid,
+                "store_name": s.get("store_name") or s.get("store_code") or sid,
+                "available": available.get((pid, sid), 0),
+                "in_transit": in_transit.get((pid, sid), 0),
+                # False: no unit of it here, so the till's guard sells any quantity.
+                "tracked": (pid, sid) in tracked,
+            }
+            for sid, s in zip(shop_ids, shops)
+        ]
+        items.append(item)
+    # What the scan named first, then the model by colour and size.
+    items.sort(key=lambda i: (not i["exact"],
+                              *(str(i.get(k) or "") for k in ("brand", "model", "colour_code", "size"))))
+    # The caps (50 hits, 200 per family) cut a big contact-lens model: say so.
+    return {"store_id": here, "items": items, "total": total, "truncated": total > len(items),
+            "not_counted_item_types": not_counted, "lens_grid_item_types": lens_grid}

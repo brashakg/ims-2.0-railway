@@ -32,6 +32,7 @@ import {
   INVENTORY_MODULE_ROLES,
   INVENTORY_MANAGE_ROLES,
   POWER_GRID_ROLES,
+  STOCK_LOOKUP_ROLES,
 } from '../pages/inventory/inventoryRoles';
 
 const InventoryLayout = lazy(() => import('../pages/inventory/InventoryLayout').then(m => ({ default: m.InventoryLayout })));
@@ -54,6 +55,7 @@ const InventoryRebalancePage = lazy(() => import('../pages/inventory/InventorySe
 const InventoryQuarantinePage = lazy(() => import('../pages/inventory/InventorySections').then(m => ({ default: m.InventoryQuarantinePage })));
 const PowerGridPage = lazy(() => import('../pages/inventory/PowerGridPage'));
 const OnlineStockPage = lazy(() => import('../pages/inventory/OnlineStockPage'));
+const StockLookupPage = lazy(() => import('../pages/inventory/StockLookupPage'));
 const StockReplenishment = lazy(() => import('../pages/inventory/StockReplenishment').then(m => ({ default: m.StockReplenishment })));
 const StockAudit = lazy(() => import('../pages/inventory/StockAudit').then(m => ({ default: m.StockAudit })));
 const OpeningStockImport = lazy(() => import('../pages/inventory/OpeningStockImport').then(m => ({ default: m.OpeningStockImport })));
@@ -151,6 +153,17 @@ export const inventoryRoutes = (
       element={
         <ProtectedRoute allowedRoles={POWER_GRID_ROLES}>
           <PowerGridPage />
+        </ProtectedRoute>
+      }
+    />
+
+    {/* D7b: the counter's read-only stock lookup - outside the module
+        layout, which counter roles cannot open. */}
+    <Route
+      path="inventory/lookup"
+      element={
+        <ProtectedRoute allowedRoles={STOCK_LOOKUP_ROLES}>
+          <StockLookupPage />
         </ProtectedRoute>
       }
     />
