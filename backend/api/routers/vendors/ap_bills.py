@@ -295,40 +295,32 @@ async def create_vendor_bill(
         else:
             assert_grn_billable_header_only(db_early, bill.grn_id, vendor_id)
 
-    # Duplicate bill guard: the same vendor invoice number must not be recorded
-    # twice for the same vendor. A double-entry would double the outstanding
-    # payable and produce a duplicate payment row in the ledger.
-    # Compared case/punctuation-FOLDED through the ONE normaliser
-    # (purchase_invoice_engine.normalize_invoice_no -- the same fold the GRN
-    # duplicate guard and the line-detail invoice door use): the exact-string
-    # check here let 'GO-INV/9007' book the payable a second time next to
-    # 'GO-INV-9007'. ponytail: linear scan over one vendor's bills; index a
-    # normalised column if a vendor ever holds thousands.
+    # Duplicate bill guard: THE same-bill rule (purchase_invoices.
+    # find_duplicate_bill -> purchase_invoice_engine.same_bill), the one the
+    # receiving door and the line-detail invoice door use. A double entry
+    # would double the outstanding payable and the ledger's payment row; a
+    # number the supplier reuses in a new financial year, or another walk-in
+    # dealer's bill under the same stand-in supplier, is a new bill.
+    from ..purchase_invoices import bill_dealer, bill_number_key, find_duplicate_bill
+
+    dealer = bill_dealer(linked)
     if db_early is not None:
         try:
-            from ...services.purchase_invoice_engine import normalize_invoice_no
-
-            _target = normalize_invoice_no(bill.bill_number)
-            _rows = db_early.get_collection("vendor_bills").find(
-                {"vendor_id": vendor_id},
-                {"_id": 0, "bill_id": 1, "bill_number": 1},
+            dup = find_duplicate_bill(
+                db_early,
+                vendor_id,
+                bill.bill_number,
+                bill.bill_date,
+                po_id=bill.po_id,
+                dealer=dealer,
             )
-            dup = None
-            if _target:
-                dup = next(
-                    (
-                        r
-                        for r in _rows
-                        if normalize_invoice_no(r.get("bill_number")) == _target
-                    ),
-                    None,
-                )
             if dup:
                 raise HTTPException(
                     status_code=409,
                     detail=(
                         f"Bill number '{bill.bill_number}' is already recorded "
-                        f"for this vendor. Duplicate vendor invoices are not allowed."
+                        f"for this vendor in this financial year. Duplicate "
+                        f"vendor invoices are not allowed."
                     ),
                 )
         except HTTPException:
@@ -367,6 +359,11 @@ async def create_vendor_bill(
         or (vendor or {}).get("legal_name"),
         "bill_number": bill.bill_number,
         "bill_date": bill.bill_date,
+        # The walk-in dealer this bill is from (D14) and the bill's identity
+        # for the uniq_vendor_bill_number_key index (the same-bill rule's
+        # atomic twin, shared with the line-detail invoice door).
+        "dealer_name": dealer,
+        "bill_number_key": bill_number_key(bill.bill_number, bill.bill_date, dealer),
         "due_date": due_date,
         "credit_days": credit_days,
         "vendor_gstin": supplier_gstin,
@@ -442,6 +439,17 @@ async def create_vendor_bill(
                         bill.grn_id,
                         bill_id,
                     )
+            # The same-bill rule's atomic twin (uniq_vendor_bill_number_key):
+            # a rival booking of this bill won the race -- the guard's 409.
+            if exc.__class__.__name__ == "DuplicateKeyError":
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Bill number '{bill.bill_number}' is already recorded "
+                        f"for this vendor in this financial year. Duplicate "
+                        f"vendor invoices are not allowed."
+                    ),
+                ) from exc
             raise HTTPException(status_code=500, detail="Failed to save bill") from exc
     return _clean(doc)
 

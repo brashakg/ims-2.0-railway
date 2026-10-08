@@ -86,16 +86,11 @@ async def barcode_lifecycle_trace(
                     # Alternate collection name used by GRN repo
                     grn = db.get_collection("goods_receipt_notes").find_one({"grn_id": grn_id})
                 if grn:
-                    grn = _scrub(dict(grn))
                     # The price paid per line (a "Bought without PO" receipt
                     # records it) is the same cost, under the same rule.
-                    if not cost_mask.can_see_cost(current_user, "product"):
-                        grn["items"] = [
-                            {k: v for k, v in it.items() if k != "unit_price"}
-                            for it in grn.get("items") or []
-                            if isinstance(it, dict)
-                        ]
-                    result["purchase"] = [grn]
+                    result["purchase"] = [
+                        cost_mask.mask_receipt(_scrub(dict(grn)), current_user)
+                    ]
 
             # 3. Audit trail (stock_audit rows keyed on this unit's id)
             if stock_id:

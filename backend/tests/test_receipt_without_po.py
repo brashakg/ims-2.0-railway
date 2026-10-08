@@ -499,7 +499,7 @@ def test_c7_the_startup_index_copies_equal_the_schema(world):
     """The atomic backstops are defined twice -- schemas.py INDEXES (what the
     race tests build) and connection.ensure_indexes (what prod builds at
     startup). Re-keying the startup copy left every test green; this compares
-    the two for both receipt indexes."""
+    the two for both receipt indexes and the bills' same-bill index."""
     from database.connection import DatabaseConnection
     from database.schemas import get_all_indexes
 
@@ -510,7 +510,7 @@ def test_c7_the_startup_index_copies_equal_the_schema(world):
             self.name = name
 
         def create_index(self, keys, **kw):
-            if self.name == "grns" and kw.get("name"):
+            if self.name in ("grns", "vendor_bills") and kw.get("name"):
                 built[kw["name"]] = (list(keys), kw.get("unique", False), kw.get("partialFilterExpression"))
 
     class _DB:
@@ -524,11 +524,14 @@ def test_c7_the_startup_index_copies_equal_the_schema(world):
         conn.ensure_indexes()
     finally:
         conn._db, conn._connected = saved
-    for spec in get_all_indexes()["grns"]:
-        if spec.get("name") in ("uniq_std_vendor_invoice_store", "uniq_nopo_bill_hash"):
+    names = ("uniq_std_vendor_invoice_store", "uniq_nopo_bill_hash", "uniq_vendor_bill_number_key")
+    for spec in get_all_indexes()["grns"] + get_all_indexes()["vendor_bills"]:
+        if spec.get("name") in names:
             want = (list(spec["keys"]), True, spec["partialFilterExpression"])
             assert built[spec["name"]] == want, spec["name"]
-    assert {"uniq_std_vendor_invoice_store", "uniq_nopo_bill_hash"} <= set(built)
+    assert set(names) <= set(built)
+    # The every-year bills index it replaces is gone from the startup path.
+    assert "uniq_purchase_invoice_vendor_number" not in built
 
 
 def test_c7_the_same_bill_photo_uploaded_again_is_the_same_bill(world):
@@ -609,15 +612,15 @@ def test_c7_one_dealer_bill_is_one_receipt_in_every_shop(world):
 
 
 def test_c7_a_bill_number_is_one_bill_per_financial_year(world):
-    """Panel probe: dealer 'Sharma Optical', bill '1' dated 2026-09-01 -> 201;
-    the same dealer's bill '1' dated 2027-05-01 -> 409, though invoice serials
+    """Panel probe: dealer 'Sharma Optical', bill '1' dated 2025-09-01 -> 201;
+    the same dealer's bill '1' a year on -> 409, though invoice serials
     restart every 1 April (GST rule 46). Inside one year it is the same bill."""
     http = world["as_"](MANAGER)
-    first = _walk_in_body(world, vendor_invoice_no="1", vendor_invoice_date="2026-09-01")
+    first = _walk_in_body(world, vendor_invoice_no="1", vendor_invoice_date="2025-09-01")
     assert http.post("/vendors/grn", json=first).status_code == 201
-    same_year = _walk_in_body(world, vendor_invoice_no="1", vendor_invoice_date="2027-03-31")
+    same_year = _walk_in_body(world, vendor_invoice_no="1", vendor_invoice_date="2026-03-31")
     assert http.post("/vendors/grn", json=same_year).status_code == 409
-    next_year = _walk_in_body(world, vendor_invoice_no="1", vendor_invoice_date="2027-04-01")
+    next_year = _walk_in_body(world, vendor_invoice_no="1", vendor_invoice_date="2026-04-01")
     assert http.post("/vendors/grn", json=next_year).status_code == 201, "a new year's bill 1"
     # A supplier picked from the list, and a receipt written before the key
     # carried the year (found through the supplier, not the key): the same.
@@ -630,39 +633,43 @@ def test_c7_a_bill_number_is_one_bill_per_financial_year(world):
             "status": "ACCEPTED",
             "vendor_invoice_no": "7",
             "vendor_invoice_no_norm": "7",
-            "vendor_invoice_date": "2026-09-01",
-            "created_at": "2026-09-01T10:00:00",
+            "vendor_invoice_date": "2025-09-01",
+            "created_at": "2025-09-01T10:00:00",
         }
     )
-    picked = _no_po_body(world, vendor_invoice_no="7", vendor_invoice_date="2026-10-01")
+    picked = _no_po_body(world, vendor_invoice_no="7", vendor_invoice_date="2025-10-01")
     assert http.post("/vendors/grn", json=picked).status_code == 409
-    picked = _no_po_body(world, vendor_invoice_no="7", vendor_invoice_date="2027-04-01")
+    picked = _no_po_body(world, vendor_invoice_no="7", vendor_invoice_date="2026-04-01")
     assert http.post("/vendors/grn", json=picked).status_code == 201
 
 
 def test_c7_a_po_supplier_reuses_its_serial_next_year_through_the_index(world):
     """The same rule for a PO receipt, and the atomic backstop agrees: the
     uniq_std_vendor_invoice_store index is keyed on the bill's year + number,
-    so next year's INV-9 is not refused by the index either (that refusal
-    read as a 500 'Failed to save goods receipt')."""
+    so next year's INV-9 on a new order is not refused by the index either
+    (that refusal read as a 500 'Failed to save goods receipt'). One order's
+    INV-9 is one bill whatever the dates say (panel probe: entered on 31 March
+    and again on 1 April -- the screen stamped the day received -- was 201,
+    stock minted twice)."""
     from database.schemas import get_all_indexes
 
     spec = next(i for i in get_all_indexes()["grns"] if i.get("name") == "uniq_std_vendor_invoice_store")
     world["db"].grns.create_index(spec["keys"], unique=True, name=spec["name"], partialFilterExpression=spec["partialFilterExpression"])
-    world["db"].purchase_orders.insert_one(
-        {
-            "po_id": "PO-FY-1",
-            "po_number": "PO/FY/1",
-            "vendor_id": DEALER,
-            "delivery_store_id": STORE,
-            "status": "SENT",
-            "items": [{"product_id": FRAME, "quantity": 9, "unit_price": 3000.0}],
-        }
-    )
+    for po in ("PO-FY-1", "PO-FY-2"):
+        world["db"].purchase_orders.insert_one(
+            {
+                "po_id": po,
+                "po_number": po.replace("-", "/"),
+                "vendor_id": DEALER,
+                "delivery_store_id": STORE,
+                "status": "SENT",
+                "items": [{"product_id": FRAME, "quantity": 9, "unit_price": 3000.0}],
+            }
+        )
 
-    def po_receipt(date):
+    def po_receipt(date, po="PO-FY-1"):
         return {
-            "po_id": "PO-FY-1",
+            "po_id": po,
             "vendor_invoice_no": "INV-9",
             "vendor_invoice_date": date,
             "attachment_file_id": _bill_photo(world),
@@ -670,12 +677,38 @@ def test_c7_a_po_supplier_reuses_its_serial_next_year_through_the_index(world):
         }
 
     http = world["as_"](MANAGER)
-    assert http.post("/vendors/grn", json=po_receipt("2026-09-01")).status_code == 201
-    assert http.post("/vendors/grn", json=po_receipt("2026-11-01")).status_code == 409
-    nxt = http.post("/vendors/grn", json=po_receipt("2027-04-15"))
+    assert http.post("/vendors/grn", json=po_receipt("2026-03-31")).status_code == 201
+    assert http.post("/vendors/grn", json=po_receipt("2026-03-15")).status_code == 409
+    again = http.post("/vendors/grn", json=po_receipt("2026-04-01"))
+    assert again.status_code == 409, ("one order, one INV-9", again.text)
+    nxt = http.post("/vendors/grn", json=po_receipt("2026-04-15", po="PO-FY-2"))
     assert nxt.status_code == 201, nxt.text
     keys = sorted(g["vendor_invoice_no_norm"] for g in world["db"].grns.find({}))
-    assert keys == ["2026-27|INV9", "2027-28|INV9"]
+    assert keys == ["2025-26|INV9", "2026-27|INV9"]
+
+
+def test_c7_a_slipped_bill_year_is_refused_not_a_new_bill(world):
+    """Panel probe: 'Sharma Optical' bill '5' dated 2026-09-14 received; the
+    same bill posted again with a fresh photo and the year slipped
+    (2027-09-14, 0202-09-14, 2062-09-14) -> 201 at the same shop or another,
+    and accepting both put 10 units on the shelf for one 5-unit bill. The
+    receipt door holds the bill date to THE bill-date rule of the bill doors
+    (ap_engine.iso_bill_date: a real date from the start of GST to today)."""
+    world["db"].stores.insert_one({"store_id": SHOP_B, "store_name": "BV No-PO Shop B", "store_type": "RETAIL", "entity_id": ENTITY, "is_active": True})
+    http = world["as_"](MANAGER)
+    first = http.post("/vendors/grn", json=_walk_in_body(world, vendor_invoice_no="5", vendor_invoice_date="2026-09-14"))
+    assert first.status_code == 201, first.text
+    for slipped in ("14/09/2026", "2027-09-14", "0202-09-14", "2062-09-14"):
+        here = world["as_"](MANAGER).post("/vendors/grn", json=_walk_in_body(world, vendor_invoice_no="5", vendor_invoice_date=slipped))
+        assert here.status_code == 422, (slipped, here.text)
+        body_b = _at_shop_b(world, vendor_id=None, dealer_name="Sharma Optical", vendor_invoice_no="5", vendor_invoice_date=slipped)
+        there = world["as_"](MANAGER_B).post("/vendors/grn", json=body_b)
+        assert there.status_code == 422, (slipped, there.text)
+    assert "start of GST" in here.text
+    assert world["db"].grns.count_documents({}) == 1
+    # No date on the bill is still a bill (the day received stands in).
+    undated = world["as_"](MANAGER).post("/vendors/grn", json=_walk_in_body(world, vendor_invoice_no="6", vendor_invoice_date=""))
+    assert undated.status_code == 201, undated.text
 
 
 def test_c7_a_voided_receipt_frees_its_bill(world):
@@ -738,6 +771,25 @@ def test_c7_receiving_is_the_managers(world):
         for role in rbac_policy.ALL_ROLES:
             want = role in _shared._RECEIVE_ROLES or role == "SUPERADMIN"
             assert rbac_policy.check_access(method, path, [role]) == want, (method, path, role)
+        # The handler's own gate is the same list as its row (panel: void,
+        # escalate, the receiving screen and upload-doc could drift back to
+        # _VENDOR_ROLES with every test green -- the middleware's row hid it).
+        assert _handler_gate(method, path) == set(_shared._RECEIVE_ROLES), (method, path)
+
+
+def _handler_gate(method, path):
+    """The role set a vendors-router handler's require_roles(...) closes over,
+    for the route at `path` (as the policy table writes it)."""
+    sub = path.removeprefix("/api/v1/vendors")
+    route = next(
+        r for r in vd.router.routes if getattr(r, "path", None) == sub and method in r.methods
+    )
+    dep = route.dependant.dependencies
+    for d in dep:
+        for cell in getattr(d.call, "__closure__", None) or ():
+            if isinstance(cell.cell_contents, set):
+                return cell.cell_contents
+    raise AssertionError(f"no require_roles gate on {method} {path}")
 
 
 def test_c7_a_long_walk_in_history_never_hides_a_recent_bill(world):
@@ -1011,6 +1063,116 @@ def test_d14_header_only_bill_door_claims_no_itc_either(world):
     assert float(summary.get("gst_input_credit") or 0) == 0.0
 
 
+def _bill_index(world):
+    """The bills' atomic same-bill twin, exactly as schemas.py declares it."""
+    from database.schemas import get_all_indexes
+
+    spec = next(i for i in get_all_indexes()["vendor_bills"] if i.get("name") == "uniq_vendor_bill_number_key")
+    world["db"].vendor_bills.create_index(
+        spec["keys"], unique=True, name=spec["name"], partialFilterExpression=spec["partialFilterExpression"]
+    )
+
+
+def _on_the_shelf(world, **over):
+    http = world["as_"](MANAGER)
+    created = http.post("/vendors/grn", json=_no_po_body(world, **over))
+    assert created.status_code == 201, created.text
+    grn_id = created.json()["grn_id"]
+    assert http.post(f"/vendors/grn/{grn_id}/accept").status_code == 200
+    return grn_id
+
+
+def _line_bill(grn_id, number, date, vendor=DEALER):
+    body = _invoice_body(grn_id, number)
+    body.invoice_date, body.vendor_id = date, vendor
+    return _run(pi.create_purchase_invoice(body, current_user=ACCOUNTANT))
+
+
+def _header_bill(grn_id, number, date, vendor=DEALER, **over):
+    bill = vd.VendorBillCreate(
+        bill_number=number,
+        bill_date=date,
+        taxable_amount=6200.0,
+        tax_amount=310.0,
+        total_amount=6510.0,
+        grn_id=grn_id,
+        **over,
+    )
+    return _run(vd.create_vendor_bill(vendor, bill, current_user=ACCOUNTANT))
+
+
+def test_c7_a_bill_on_the_shelf_books_under_its_own_number(world):
+    """Panel probe: supplier V-DEALER's receipt INV-9 dated 2025-09-01 was
+    received, accepted and billed; INV-9 dated 2026-09-14 (a new financial
+    year, GST rule 46) was received (201) and its stock minted -- and booking
+    its bill then failed 409 on BOTH bill doors, which still refused any
+    number the supplier had used in any year. One same-bill rule on every
+    door (purchase_invoice_engine.same_bill), with its atomic twin."""
+    from fastapi import HTTPException
+
+    _bill_index(world)
+    last_year = _on_the_shelf(world, vendor_invoice_no="INV-9", vendor_invoice_date="2025-09-01")
+    _line_bill(last_year, "INV-9", "2025-09-01")
+    this_year = _on_the_shelf(world, vendor_invoice_no="INV-9", vendor_invoice_date="2026-09-14")
+    _line_bill(this_year, "INV-9", "2026-09-14")
+    # The header-only door, the same way round.
+    old = _on_the_shelf(world, vendor_invoice_no="INV-11", vendor_invoice_date="2024-09-01")
+    _header_bill(old, "INV-11", "2024-09-01")
+    new = _on_the_shelf(world, vendor_invoice_no="INV-11", vendor_invoice_date="2025-09-01")
+    _header_bill(new, "INV-11", "2025-09-01")
+    assert world["db"].vendor_bills.count_documents({}) == 4
+    keys = sorted(b["bill_number_key"] for b in world["db"].vendor_bills.find({}))
+    assert keys == ["2024-25|INV11", "2025-26|INV11", "2025-26|INV9", "2026-27|INV9"]
+    # Inside one year it is still one bill, on either door -- refused by the
+    # rule itself, not only by the index (dropped, so the rule is what is read).
+    world["db"].vendor_bills.drop_index("uniq_vendor_bill_number_key")
+    _seed_receipt(world["db"], grn_id="GRN-SEED-0901", subtype="STANDARD", po_id="PO-SEED-1")
+    with pytest.raises(HTTPException) as line:
+        _line_bill("GRN-SEED-0901", "inv/9", "2026-09-20")
+    assert line.value.status_code == 409 and "already recorded" in str(line.value.detail)
+    with pytest.raises(HTTPException) as header:
+        _header_bill(None, "INV 11", "2026-03-01", bill_kind="SERVICES")
+    assert header.value.status_code == 409 and "already recorded" in str(header.value.detail)
+    keys = sorted(b["bill_number_key"] for b in world["db"].vendor_bills.find({}))
+    assert keys == ["2024-25|INV11", "2025-26|INV11", "2025-26|INV9", "2026-27|INV9"]
+
+
+def test_c7_two_walk_in_dealers_bill_one_are_two_bills(world):
+    """Panel probe: 'Sharma Optical' bill 1 and 'Gupta Optical' bill 1 are two
+    bills to the receipt rule; a typed dealer has no supplier record, so the
+    accountant books both under one picked supplier -- and the second was
+    refused 409. A walk-in dealer's bill is that dealer's, whichever supplier
+    stands in for them; the dealer is kept on the bill."""
+    _bill_index(world)
+    sharma = _on_the_shelf(world, vendor_id=None, dealer_name="Sharma Optical", vendor_invoice_no="1")
+    gupta = _on_the_shelf(world, vendor_id=None, dealer_name="Gupta Optical", vendor_invoice_no="1")
+    _line_bill(sharma, "1", "2026-09-14")
+    _header_bill(gupta, "1", "2026-09-14")
+    bills = {b["dealer_name"]: b for b in world["db"].vendor_bills.find({}, {"_id": 0})}
+    assert set(bills) == {"Sharma Optical", "Gupta Optical"}
+    assert {b["vendor_id"] for b in bills.values()} == {DEALER}
+
+
+def test_c7_the_same_bill_rule_is_one_function():
+    """The rule's cases, through the one implementation every door calls."""
+    from api.services.purchase_invoice_engine import same_bill
+
+    vendors = {"V1": {"trade_name": "Bank More Optical", "legal_name": "Bank More Optical Traders"}}
+    find = vendors.get
+
+    def bill(no="INV-9", fy=2026, po=None, vid="V1", dealer=None):
+        return {"no": no, "fy": fy, "po_id": po, "vendor_id": vid, "dealer_name": dealer}
+
+    assert same_bill(bill(), bill(no="inv/9"), find)
+    assert not same_bill(bill(), bill(fy=2025), find)
+    assert same_bill(bill(fy=None), bill(fy=2025), find)  # an unknown year matches
+    assert same_bill(bill(po="PO-B", fy=2025), bill(po="PO-B", fy=2026), find)
+    assert not same_bill(bill(), bill(vid="V2"), find)
+    assert same_bill(bill(), bill(vid=None, dealer="bank more optical traders"), find)
+    assert not same_bill(bill(vid=None, dealer="Sharma Optical"), bill(vid=None, dealer="Gupta Optical"), find)
+    assert not same_bill(bill(no=""), bill(no=""), find)
+
+
 def test_d14_naming_a_challan_too_cannot_smuggle_the_credit_back(world):
     """Panel probe: grn_id = a no-PO receipt PLUS linked_dc_ids = an unrelated
     open challan of the same dealer and shop. The receipt was never read on
@@ -1160,11 +1322,35 @@ def test_c7_counter_staff_never_read_what_was_paid(world):
         assert listed.status_code == 403, (role, listed.text)
         assert detail.status_code == 403, (role, detail.text)
         assert "3100" not in listed.text + detail.text
-    mine = world["as_"](MANAGER).get(f"/vendors/grn/{grn_id}")
-    assert mine.status_code == 200
-    assert [ln["unit_price"] for ln in mine.json()["items"]] == [3100.0, 420.0]
     other_shop = {**MANAGER, "store_ids": ["BV-OTHER-01"], "active_store_id": "BV-OTHER-01"}
     assert world["as_"](other_shop).get(f"/vendors/grn/{grn_id}").status_code == 404
+
+
+def test_c7_what_was_paid_has_one_visibility_rule(world):
+    """Panel probe: as STORE_MANAGER the barcode trace showed line prices
+    [None, None] (cost_mask) while GET /vendors/grn/{id} and the list returned
+    [3100, 420]; AREA_MANAGER the same. The price paid on a receipt line is
+    cost: every read that returns a receipt goes through the one cost rule
+    (cost_mask.mask_receipt) -- the managers who receive read the receipt,
+    not what was paid; the roles that see cost read both."""
+    grn_id, barcode = _walk_in_on_the_shelf(world)
+    reads = (
+        lambda http: http.get(f"/vendors/grn/{grn_id}").json(),
+        lambda http: http.get("/vendors/grn", params={"grn_subtype": "NO_PO"}).json()["grns"][0],
+        lambda http: http.get(f"/inventory/barcode/{barcode}/trace").json()["purchase"][0],
+    )
+    for role in ("STORE_MANAGER", "AREA_MANAGER"):
+        user = {**MANAGER, "user_id": f"u-{role.lower()}", "roles": [role]}
+        for read in reads:
+            grn = read(world["as_"](user))
+            assert grn["grn_id"] == grn_id, (role, grn)
+            assert [it.get("unit_price") for it in grn["items"]] == [None, None], (role, grn)
+            assert [it["accepted_qty"] for it in grn["items"]] == [2, 3], (role, grn)
+    for role in ("ADMIN", "ACCOUNTANT"):
+        user = {**MANAGER, "user_id": f"u-{role.lower()}", "roles": [role]}
+        for read in reads:
+            grn = read(world["as_"](user))
+            assert [it["unit_price"] for it in grn["items"]] == [3100.0, 420.0], (role, grn)
 
 
 def _walk_in_on_the_shelf(world):
@@ -1186,7 +1372,7 @@ def test_c7_the_barcode_trace_shows_no_counter_what_was_paid(world):
     cost); what was paid goes through the one cost rule (cost_mask)."""
     grn_id, barcode = _walk_in_on_the_shelf(world)
     url = f"/inventory/barcode/{barcode}/trace"
-    for role in ("SALES_STAFF", "CASHIER", "OPTOMETRIST", "WORKSHOP_STAFF"):
+    for role in ("SALES_STAFF", "CASHIER", "OPTOMETRIST", "WORKSHOP_STAFF", "STORE_MANAGER", "AREA_MANAGER"):
         counter = {"user_id": "u-counter", "roles": [role], "store_ids": [STORE], "active_store_id": STORE}
         res = world["as_"](counter).get(url)
         assert res.status_code == 200, (role, res.text)

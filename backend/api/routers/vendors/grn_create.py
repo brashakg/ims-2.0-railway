@@ -21,6 +21,7 @@ from ._shared import (
     router,
     uuid,
 )
+from ...services.cost_mask import mask_receipt
 from .models import GRNCreate, GRN_SUBTYPE_DC
 from .numbering import (
     classify_grn_line_variance,
@@ -558,4 +559,7 @@ async def get_grn(
 
     _enrich_grn_names([grn])
 
-    return grn
+    # What was paid (a "Bought without PO" line's cost) goes through the one
+    # cost rule, as on the barcode trace: managers receive, but only the roles
+    # that see cost read it back.
+    return mask_receipt(grn, current_user)

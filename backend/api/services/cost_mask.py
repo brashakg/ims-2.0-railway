@@ -71,6 +71,30 @@ def mask_cost_list(docs: List[dict], user: dict, context: str = "default") -> Li
     return [mask_cost(d, user, context) if isinstance(d, dict) else d for d in (docs or [])]
 
 
+# A goods receipt's line carries the price paid as `unit_price` (a "Bought
+# without PO" receipt records it): on a receipt line that IS the cost. Not in
+# _COST_FIELDS because an order line's unit_price is the selling price.
+_RECEIPT_LINE_COST_FIELDS = _ALL_MASKED | {"unit_price"}
+
+
+def mask_receipt(grn: dict, user: dict) -> dict:
+    """The one cost rule on a goods receipt (in place): unless the caller may
+    see cost, strip the cost fields from the receipt and the price paid from
+    each of its lines. Every read that returns a receipt -- GET /vendors/grn,
+    GET /vendors/grn/{id}, the barcode trace -- goes through this. Returns
+    `grn`."""
+    if not isinstance(grn, dict) or can_see_cost(user):
+        return grn
+    mask_cost(grn, user)
+    grn["items"] = [
+        {k: v for k, v in it.items() if k not in _RECEIPT_LINE_COST_FIELDS}
+        if isinstance(it, dict)
+        else it
+        for it in grn.get("items") or []
+    ]
+    return grn
+
+
 def mask_fields(doc: Dict, user: dict, context: str = "default") -> Dict:
     """Alias for masking an aggregate payload (e.g. a P&L dict) in place."""
     return mask_cost(doc, user, context)

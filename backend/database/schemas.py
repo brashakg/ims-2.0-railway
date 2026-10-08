@@ -2262,6 +2262,14 @@ COLLECTIONS.update({
         "indexes": [
             {"keys": [("bill_id", 1)], "unique": True, "sparse": True},
             {"keys": [("vendor_id", 1), ("bill_number", 1)]},
+            # The same-bill rule's atomic twin (connection.ensure_indexes
+            # builds the same): year + folded number (+ walk-in dealer).
+            {
+                "keys": [("vendor_id", 1), ("bill_number_key", 1)],
+                "unique": True,
+                "partialFilterExpression": {"bill_number_key": {"$type": "string"}},
+                "name": "uniq_vendor_bill_number_key",
+            },
             {"keys": [("po_id", 1)], "sparse": True},
             {"keys": [("grn_id", 1)], "sparse": True},
             {"keys": [("status", 1)]},

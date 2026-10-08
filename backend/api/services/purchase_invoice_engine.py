@@ -34,6 +34,7 @@ every amount. Which head carries the odd paisa is NOT fixed -- measured over
 """
 
 import re
+from datetime import date
 from typing import List, Optional, Tuple
 
 _INVOICE_NO_JUNK = re.compile(r"[^0-9A-Z]+")
@@ -55,6 +56,81 @@ def normalize_invoice_no(value) -> str:
     if value is None:
         return ""
     return _INVOICE_NO_JUNK.sub("", str(value).upper())
+
+
+def bill_fy(bill_date, received=None) -> Optional[int]:
+    """The financial year (its start year) a supplier bill belongs to: its own
+    date when that is a real bill date under THE bill-date rule
+    (ap_engine.iso_bill_date -- a date from the start of GST to today), else
+    the day the goods were received (a stored instant). None when neither
+    reads as a date. GST rule 46 makes an invoice serial unique only WITHIN a
+    financial year -- a dealer's bill '1' may restart every 1 April."""
+    from .ap_engine import iso_bill_date
+    from ..utils.ist import fy_start_year_ist, ist_date_str_from_stored
+
+    try:
+        return fy_start_year_ist(date.fromisoformat(iso_bill_date(bill_date)))
+    except ValueError:
+        pass
+    if received is None:
+        return None
+    try:
+        return fy_start_year_ist(date.fromisoformat(ist_date_str_from_stored(received)))
+    except ValueError:
+        return None
+
+
+def bill_key(number, bill_date, received=None) -> Optional[str]:
+    """A bill's identity under GST rule 46 -- its financial year and its folded
+    number ('2026-27|GOINV9007'); the bare folded number when no year can be
+    read. None when the bill has no number. The receipts' unique index keys on
+    it (grns.vendor_invoice_no_norm), and the bills' with the typed dealer
+    appended (vendor_bills.bill_number_key)."""
+    norm = normalize_invoice_no(number)
+    if not norm:
+        return None
+    fy = bill_fy(bill_date, received)
+    return f"{fy}-{str(fy + 1)[-2:]}|{norm}" if fy is not None else norm
+
+
+def same_bill(mine: dict, theirs: dict, find_vendor) -> bool:
+    """THE same-bill rule of every door that records a supplier's bill: the
+    receiving door (vendors.grn._find_duplicate_receipt) and both bill doors
+    (the line-detail purchase invoice and the header-only vendor bill). Each
+    side is {"no", "fy", "po_id", "vendor_id", "dealer_name"}. Two are one bill
+    when the case/punctuation-folded numbers match and
+      * they name the same purchase order (one order's delivery under one
+        number, whatever the dates read -- a receipt stamped with the day it
+        arrived must not slip into the next year at midnight on 31 March), or
+      * they fall in the same financial year (GST rule 46: serials restart
+        each year; an unknown year matches any) AND come from the same seller:
+        the same supplier record when both name one, else a typed dealer's
+        name folded against the other's typed name or its supplier's trade /
+        legal name (find_vendor(vendor_id) -> the supplier row). Two suppliers
+        on file are compared by record only: two GSTINs trading under one name
+        are two sellers with two serials."""
+    norm = normalize_invoice_no(mine.get("no"))
+    if not norm or normalize_invoice_no(theirs.get("no")) != norm:
+        return False
+    if mine.get("po_id") and theirs.get("po_id") == mine.get("po_id"):
+        return True
+    fy, their_fy = mine.get("fy"), theirs.get("fy")
+    if fy is not None and their_fy is not None and fy != their_fy:
+        return False
+    vid, their_vid = mine.get("vendor_id"), theirs.get("vendor_id")
+    if vid and their_vid:
+        return vid == their_vid
+
+    def names(vendor_id, typed) -> set:
+        try:
+            v = (find_vendor(vendor_id) if vendor_id else None) or {}
+        except Exception:  # noqa: BLE001 - fail-soft: the typed name still counts
+            v = {}
+        out = {normalize_invoice_no(n) for n in (v.get("trade_name"), v.get("legal_name"), typed)}
+        out.discard("")
+        return out
+
+    return bool(names(vid, mine.get("dealer_name")) & names(their_vid, theirs.get("dealer_name")))
 
 
 def _f(v) -> float:

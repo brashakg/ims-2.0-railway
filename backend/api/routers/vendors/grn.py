@@ -1,9 +1,11 @@
 """Goods receipt list, document upload/download and duplicate detection."""
 
-from datetime import date, datetime
+from datetime import datetime
 
 from ...services.ap_engine import GRN_SUBTYPE_NO_PO
-from ...utils.ist import fy_start_year_ist, ist_date_str_from_stored
+from ...services.cost_mask import mask_receipt
+from ...services.purchase_invoice_engine import bill_fy, same_bill
+from ...services.purchase_invoice_engine import bill_key as _bill_key
 from ._shared import (
     ALLOWED_MIME_TYPES,
     Depends,
@@ -94,6 +96,9 @@ async def list_grns(
     grns = grn_repo.find_many(filter_dict, skip=skip, limit=limit)
 
     _enrich_grn_names(grns or [])
+    # The price paid on a line goes through the one cost rule (cost_mask).
+    for g in grns or []:
+        mask_receipt(g, current_user)
 
     return {"grns": grns or [], "total": len(grns) if grns else 0}
 
@@ -256,51 +261,19 @@ async def download_grn_doc(
     )
 
 
-def _bill_fy(bill_date, received_at=None) -> Optional[int]:
-    """The financial year (its start year) a supplier bill belongs to: its
-    own date, else the day the goods were received. None when neither reads
-    as a date. GST rule 46 makes an invoice serial unique only WITHIN a
-    financial year -- a dealer's bill '1' may restart every 1 April."""
-    for day in (str(bill_date or "")[:10], ist_date_str_from_stored(received_at)):
-        try:
-            return fy_start_year_ist(date.fromisoformat(day))
-        except ValueError:
-            continue
-    return None
-
-
-def _bill_key(invoice_no, bill_date, received_at) -> Optional[str]:
-    """A bill's identity under GST rule 46 -- its financial year and its
-    case/punctuation-folded number ('2026-27|GOINV9007') -- stored as
-    vendor_invoice_no_norm, the key of the uniq_std_vendor_invoice_store
-    partial unique index, so the atomic backstop is per year too. (Rows
-    written before it carry the bare folded number; the guard below reads
-    both shapes.) None when the bill has no number."""
-    norm = _normalize_invoice_no(invoice_no)
-    if not norm:
-        return None
-    fy = _bill_fy(bill_date, received_at)
-    return f"{fy}-{str(fy + 1)[-2:]}|{norm}" if fy is not None else norm
-
-
 def _find_duplicate_receipt(grn_repo, grn, vendor_id, photo_sha=None, exclude_grn_id=None):
-    """THE same-bill rule for every receipt but a Delivery Challan (its own
-    guard keys on the DC number): the first live (non-VOID) receipt, in ANY
-    shop, already holding this bill. It is the same bill when it has
+    """The first live (non-VOID) receipt, in ANY shop, already holding this
+    bill -- for every receipt but a Delivery Challan (its own guard keys on
+    the DC number). It is the same bill when it has
       * the same bill photo, for a "Bought without PO" receipt (D14) -- the
         same upload (a double-pressed post) or the same bytes uploaded again
         (a retry after a page reload mints a new file id; upload-doc stamps
         the sha256, which every receipt keeps), or
-      * the same seller's same bill number in the same financial year (GST
-        rule 46: serials restart each year). The number is case/punctuation-
-        folded. The seller is the same purchase order, the same supplier
-        picked from the list, or -- when either receipt typed the dealer's
-        name instead -- that name folded against the other's supplier trade /
-        legal name or typed name. (Two suppliers picked from the list are
-        compared by record only: two GSTINs trading under one name are two
-        sellers with two serials.)
+      * the same bill under THE same-bill rule (purchase_invoice_engine.
+        same_bill, which both bill doors use too): the same purchase order's
+        number, or the same seller's number in the same financial year.
     A VOIDed receipt frees its bill (the sanctioned correction path). The
-    atomic twins: uniq_std_vendor_invoice_store (keyed on _bill_key) and
+    atomic twins: uniq_std_vendor_invoice_store (keyed on bill_key) and
     uniq_nopo_bill_hash. Fail-soft on a vendor read.
 
     ponytail: candidates are the newest 500 receipts carrying this bill
@@ -331,8 +304,8 @@ def _find_duplicate_receipt(grn_repo, grn, vendor_id, photo_sha=None, exclude_gr
     norm = _normalize_invoice_no(grn.vendor_invoice_no)
     if not norm:
         return None
-    fy = _bill_fy(grn.vendor_invoice_date, datetime.now())
-    key = _bill_key(grn.vendor_invoice_no, grn.vendor_invoice_date, datetime.now())
+    now = datetime.now()
+    key = _bill_key(grn.vendor_invoice_no, grn.vendor_invoice_date, now)
     candidates: dict = {}
     for flt in (
         {"vendor_invoice_no_norm": key},
@@ -349,35 +322,26 @@ def _find_duplicate_receipt(grn_repo, grn, vendor_id, photo_sha=None, exclude_gr
         for r in rows:
             candidates.setdefault(r.get("grn_id"), r)
 
-    names_of: dict = {}
+    def find_vendor(vid):
+        repo = get_vendor_repository()
+        return repo.find_by_id(vid) if repo is not None else None
 
-    def names(vid, dealer) -> set:
-        if vid and vid not in names_of:
-            try:
-                repo = get_vendor_repository()
-                v = (repo.find_by_id(vid) if repo is not None else None) or {}
-            except Exception:  # noqa: BLE001
-                v = {}
-            names_of[vid] = {
-                _normalize_invoice_no(v.get("trade_name")),
-                _normalize_invoice_no(v.get("legal_name")),
-            }
-        out = set(names_of.get(vid) or ()) | {_normalize_invoice_no(dealer)}
-        out.discard("")
-        return out
-
+    mine = {
+        "no": norm,
+        "fy": bill_fy(grn.vendor_invoice_date, now),
+        "po_id": grn.po_id,
+        "vendor_id": vendor_id,
+        "dealer_name": grn.dealer_name,
+    }
     for r in candidates.values():
-        if not live(r) or _normalize_invoice_no(r.get("vendor_invoice_no")) != norm:
-            continue
-        their_fy = _bill_fy(r.get("vendor_invoice_date"), r.get("created_at"))
-        if fy is not None and their_fy is not None and their_fy != fy:
-            continue
-        if grn.po_id and r.get("po_id") == grn.po_id:
-            return r
-        if vendor_id and r.get("vendor_id"):
-            if r.get("vendor_id") == vendor_id:
-                return r
-        elif names(vendor_id, grn.dealer_name) & names(r.get("vendor_id"), r.get("dealer_name")):
+        theirs = {
+            "no": r.get("vendor_invoice_no"),
+            "fy": bill_fy(r.get("vendor_invoice_date"), r.get("created_at")),
+            "po_id": r.get("po_id"),
+            "vendor_id": r.get("vendor_id"),
+            "dealer_name": r.get("dealer_name"),
+        }
+        if live(r) and same_bill(mine, theirs, find_vendor):
             return r
     return None
 

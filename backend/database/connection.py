@@ -826,25 +826,30 @@ class DatabaseConnection:
         # invoice guard lives in app code (legacy prod data may already have one).
         _idx("vendor_bills", "bill_id", unique=True, sparse=True, background=True)
         _idx("vendor_bills", [("vendor_id", 1), ("bill_number", 1)], background=True)
-        # F4: DB-level duplicate-invoice backstop. The same vendor tax-invoice
-        # number must never be booked twice as a PURCHASE_INVOICE -- a double
-        # entry doubles the payable AND the ITC. The app-level check-then-insert
-        # in create_purchase_invoice races; this UNIQUE index is the atomic
-        # guard (insert loser -> DuplicateKeyError -> 409). PARTIAL to
-        # doc_type == PURCHASE_INVOICE so legacy header-only vendor_bills (and
-        # rows with a null/missing bill_number) are never indexed and can't
-        # collide. If prod already holds duplicate PURCHASE_INVOICE rows this
-        # build fails SOFT (logged, never aborts boot -- see _idx); a data-hygiene
-        # pass must de-dupe before the index can take effect.
+        # F4: DB-level duplicate-invoice backstop -- the atomic twin of THE
+        # same-bill rule (purchase_invoices.find_duplicate_bill). The app-level
+        # check-then-insert on both bill doors races; this UNIQUE index makes
+        # the insert loser a DuplicateKeyError -> 409. Keyed on what every new
+        # bill stores as bill_number_key: the bill's financial year + folded
+        # number (+ the typed dealer of a walk-in buy), so a supplier's serial
+        # reused in a new year (GST rule 46) and two walk-in dealers' bill '1'
+        # under one stand-in supplier are two bills. PARTIAL to rows carrying
+        # the key: legacy bills (no key) are never indexed -- the app-level
+        # rule still reads them.
+        #
+        # It replaces uniq_purchase_invoice_vendor_number (vendor_id +
+        # bill_number, every year) which refused next year's bill '1' as a
+        # 409 while its goods were already on the shelf: drop it first.
+        try:
+            self._db["vendor_bills"].drop_index("uniq_purchase_invoice_vendor_number")
+        except Exception:  # noqa: BLE001 - absent on a fresh database
+            pass
         _idx(
             "vendor_bills",
-            [("vendor_id", 1), ("bill_number", 1)],
+            [("vendor_id", 1), ("bill_number_key", 1)],
             unique=True,
-            partialFilterExpression={
-                "doc_type": "PURCHASE_INVOICE",
-                "bill_number": {"$type": "string"},
-            },
-            name="uniq_purchase_invoice_vendor_number",
+            partialFilterExpression={"bill_number_key": {"$type": "string"}},
+            name="uniq_vendor_bill_number_key",
             background=True,
         )
         _idx("vendor_bills", "po_id", sparse=True, background=True)

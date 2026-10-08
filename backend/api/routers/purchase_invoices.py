@@ -698,6 +698,84 @@ def _release_grn_units(db, grn, claim, invoice_id):
         )
 
 
+def bill_dealer(receipt) -> Optional[str]:
+    """The walk-in dealer a bill is from: the name typed on its "Bought without
+    PO" receipt when that receipt picked no supplier (D14) -- the supplier the
+    bill is then booked under only stands in for the dealer, so the dealer is
+    the seller. None for every other bill."""
+    if (
+        receipt
+        and receipt.get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO
+        and not receipt.get("vendor_id")
+    ):
+        return receipt.get("dealer_name") or None
+    return None
+
+
+def bill_number_key(number, bill_date, dealer=None) -> Optional[str]:
+    """What vendor_bills.bill_number_key stores: the bill's financial year and
+    folded number (pinv.bill_key), plus the folded dealer for a walk-in buy --
+    the key of the uniq_vendor_bill_number_key index, the atomic twin of
+    find_duplicate_bill. None when the bill has no number."""
+    key = pinv.bill_key(number, bill_date)
+    if key and dealer:
+        key = f"{key}|{pinv.normalize_invoice_no(dealer)}"
+    return key
+
+
+def find_duplicate_bill(db, vendor_id, number, bill_date, po_id=None, dealer=None):
+    """The bill of this supplier already recorded as the same bill under THE
+    same-bill rule (pinv.same_bill -- the receiving door's rule too): the same
+    PO's number, or the same seller's number in the same financial year. Both
+    bill doors call it, so a bill whose receipt went on the shelf can be booked
+    under its real number. Raises on a DB error (the callers fail soft).
+
+    ponytail: a linear scan over one supplier's bills (a walk-in dealer's are
+    under the supplier that stands in for them); index bill_number_key here if
+    a supplier ever holds thousands."""
+    target = pinv.normalize_invoice_no(number)
+    if not target or db is None:
+        return None
+    mine = {
+        "no": target,
+        "fy": pinv.bill_fy(bill_date),
+        "po_id": po_id,
+        "vendor_id": None if dealer else vendor_id,
+        "dealer_name": dealer,
+    }
+    vendors = db.get_collection("vendors")
+
+    def find_vendor(vid):
+        return vendors.find_one({"vendor_id": vid}, {"_id": 0})
+
+    rows = db.get_collection("vendor_bills").find(
+        {"vendor_id": vendor_id},
+        {
+            "_id": 0,
+            "bill_id": 1,
+            "bill_number": 1,
+            "bill_date": 1,
+            "invoice_date": 1,
+            "po_id": 1,
+            "vendor_id": 1,
+            "dealer_name": 1,
+        },
+    )
+    for r in rows:
+        if pinv.normalize_invoice_no(r.get("bill_number")) != target:
+            continue
+        theirs = {
+            "no": r.get("bill_number"),
+            "fy": pinv.bill_fy(r.get("bill_date") or r.get("invoice_date")),
+            "po_id": r.get("po_id"),
+            "vendor_id": None if r.get("dealer_name") else r.get("vendor_id"),
+            "dealer_name": r.get("dealer_name"),
+        }
+        if pinv.same_bill(mine, theirs, find_vendor):
+            return r
+    return None
+
+
 def assert_grn_billable_header_only(db, grn_id, vendor_id):
     """The same two guards for the HEADER-ONLY vendor-bill door
     (vendors.create_vendor_bill), which accepts a grn_id but carries no lines.
@@ -1697,32 +1775,24 @@ async def create_purchase_invoice(
     # Ruling 15 -- and only for CATALOGUED products, naming what is missing.
     _assert_products_catalogued(body.lines, _line_products(db, body.lines))
 
-    # Duplicate-invoice guard (application-level; mirrors create_vendor_bill).
-    # The same vendor tax-invoice number must not be booked twice -- a double
-    # entry would double the payable AND double-count the ITC. Compared
-    # case/punctuation-FOLDED (pinv.normalize_invoice_no, the SAME normaliser
-    # the GRN duplicate guard uses): the exact-string check let 'GO-INV/9007'
-    # book the payable a second time next to 'GO-INV-9007'. ponytail: linear
-    # scan over one vendor's bills; index vendor_invoice_no_norm here too if a
-    # vendor ever holds thousands.
+    # Duplicate-invoice guard: THE same-bill rule (find_duplicate_bill ->
+    # pinv.same_bill), the one the receiving door and the header bill door
+    # use. A double entry would double the payable AND double-count the ITC;
+    # a bill number the supplier reuses in a new financial year (GST rule 46)
+    # is a new bill, and a walk-in dealer's bill is that dealer's, whichever
+    # supplier stands in for them -- else goods on the shelf held a bill that
+    # could not be booked under its real number.
+    dealer = bill_dealer(grn_doc)
     if db is not None:
         try:
-            target = pinv.normalize_invoice_no(body.invoice_number)
-            dup = None
-            if target:
-                rows = db.get_collection("vendor_bills").find(
-                    {"vendor_id": body.vendor_id},
-                    {"_id": 0, "bill_id": 1, "bill_number": 1},
-                )
-                dup = next(
-                    (
-                        r
-                        for r in rows
-                        if pinv.normalize_invoice_no(r.get("bill_number"))
-                        == target
-                    ),
-                    None,
-                )
+            dup = find_duplicate_bill(
+                db,
+                body.vendor_id,
+                body.invoice_number,
+                body.invoice_date,
+                po_id=body.po_id,
+                dealer=dealer,
+            )
             if dup:
                 recorded = dup.get("bill_number")
                 variant = (
@@ -1734,8 +1804,8 @@ async def create_purchase_invoice(
                     status_code=409,
                     detail=(
                         f"Invoice number '{body.invoice_number}' is already "
-                        f"recorded for this vendor{variant}. Duplicate vendor "
-                        f"invoices are not allowed."
+                        f"recorded for this vendor{variant} in this financial "
+                        f"year. Duplicate vendor invoices are not allowed."
                     ),
                 )
         except HTTPException:
@@ -1857,6 +1927,13 @@ async def create_purchase_invoice(
         "invoice_number": body.invoice_number,
         "bill_date": body.invoice_date,
         "invoice_date": body.invoice_date,
+        # The walk-in dealer this bill is from (D14) and the bill's identity
+        # for the uniq_vendor_bill_number_key index (the same-bill rule's
+        # atomic twin).
+        "dealer_name": dealer,
+        "bill_number_key": bill_number_key(
+            body.invoice_number, body.invoice_date, dealer
+        ),
         "due_date": due_date,
         "credit_days": credit_days,
         "po_id": body.po_id,
@@ -1963,8 +2040,8 @@ async def create_purchase_invoice(
                     status_code=409,
                     detail=(
                         f"Invoice number '{body.invoice_number}' is already "
-                        f"recorded for this vendor. Duplicate vendor invoices are "
-                        f"not allowed."
+                        f"recorded for this vendor in this financial year. "
+                        f"Duplicate vendor invoices are not allowed."
                     ),
                 ) from exc
             raise HTTPException(

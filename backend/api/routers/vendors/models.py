@@ -316,6 +316,18 @@ class GRNCreate(BaseModel):
         s = str(v or GRN_SUBTYPE_STANDARD).strip().upper().replace("-", "_")
         return s if s in _GRN_SUBTYPES else GRN_SUBTYPE_STANDARD
 
+    @field_validator("vendor_invoice_date", mode="before")
+    @classmethod
+    def _bill_date(cls, v):
+        """THE bill-date rule of every bill door (ap_engine.iso_bill_date): a
+        real date from the start of GST to today. The bill's financial year
+        decides whether its number is a new bill (the same-bill rule), so a
+        slipped year ('2027-09-14', '0202-09-14') would put one bill on the
+        shelf twice. Blank = no date on the bill."""
+        if v is None or not str(v).strip():
+            return None
+        return ap_engine.iso_bill_date(v)
+
     @model_validator(mode="after")
     def _validate_subtype_fields(self):
         """F9 subtype-specific required-field guard.
