@@ -805,6 +805,28 @@ def test_buyers_and_catalog_still_read_product_cost(client, product_repo, role, 
     assert row["purchase_price"] == 3088.88
 
 
+# The no-Mongo MockCollection hands back the stored dict itself: a counter read
+# must not strip the cost off the product for the next reader (an ADMIN, and
+# orders/create.py's cost_at_sale).
+@pytest.mark.parametrize("path", PRODUCT_READS)
+def test_counter_read_leaves_the_stored_product_cost(client, monkeypatch, path):
+    from database.connection import MockCollection
+    from database.repositories.product_repository import ProductRepository
+
+    repo = ProductRepository(MockCollection("products"))
+    repo.collection.insert_one(
+        {**_PRODUCT, "_id": "P1", "pricing": {"mrp": 5000, "cost_price": 3173.37}}
+    )
+    monkeypatch.setattr(products_mod, "get_product_repository", lambda: repo)
+    monkeypatch.setattr(cache_mod, "cache", _JsonCache())
+
+    assert "cost_price" not in _product_rows(client, "CASHIER", path)[0]
+    stored = repo.find_by_id("P1")
+    assert stored["cost_price"] == 3173.37
+    assert stored["pricing"]["cost_price"] == 3173.37
+    assert _product_rows(client, "ADMIN", path)[0]["cost_price"] == 3173.37
+
+
 # ACCOUNTANT and CASHIER share the attribution tier ("staff") the key already
 # carried, so only the cost tier keeps their cached pages apart.
 @pytest.mark.parametrize(

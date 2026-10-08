@@ -98,18 +98,21 @@ def can_see_cost(user: dict, context: str = "default") -> bool:
     return bool(roles & (COST_VISIBLE_ROLES | _CONTEXT_ROLES.get(context, set())))
 
 
+def _strip(doc: dict) -> dict:
+    return {k: v for k, v in doc.items() if k not in _ALL_MASKED}
+
+
 def mask_cost(doc: dict, user: dict, context: str = "default") -> dict:
-    """Strip cost + margin fields from `doc` (in place) unless the caller may see
-    cost. Also handles a nested `pricing.cost_price`. Returns `doc`."""
+    """`doc` without cost + margin fields (top level and `pricing`) unless the
+    caller may see cost. Returns a copy and never edits `doc`: a repository may
+    hand back the stored dict itself (the no-Mongo MockCollection does), and
+    masking it would strip the cost for the next reader and for the sale."""
     if not isinstance(doc, dict) or can_see_cost(user, context):
         return doc
-    for field in _ALL_MASKED:
-        doc.pop(field, None)
-    pricing = doc.get("pricing")
-    if isinstance(pricing, dict):
-        for field in _ALL_MASKED:
-            pricing.pop(field, None)
-    return doc
+    out = _strip(doc)
+    if isinstance(out.get("pricing"), dict):
+        out["pricing"] = _strip(out["pricing"])
+    return out
 
 
 def mask_cost_list(docs: List[dict], user: dict, context: str = "default") -> List[dict]:
@@ -120,7 +123,7 @@ def mask_cost_list(docs: List[dict], user: dict, context: str = "default") -> Li
 
 
 def mask_fields(doc: Dict, user: dict, context: str = "default") -> Dict:
-    """Alias for masking an aggregate payload (e.g. a P&L dict) in place."""
+    """Alias for masking an aggregate payload (e.g. a P&L dict)."""
     return mask_cost(doc, user, context)
 
 
