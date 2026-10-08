@@ -2355,6 +2355,12 @@ def test_r5_a_receipt_that_accepted_none_of_the_draft_does_not_hold_it(world):
             "cancel that order" not in detail and "cannot be cancelled" in detail,
             f"R5: the refusal tells the admin to cancel an order cancel refuses ({detail})",
         )
+        # R1-5 (owner 2026-10-08): the way out is the rest of the LINE, which a
+        # person cancels until draft #1165's door lands -- said in plain words.
+        finding(
+            "ask the purchase manager to cancel the rest of that line" in detail.lower(),
+            f"R1-5: the refusal does not say the rest of the line can be cancelled ({detail})",
+        )
 
 
 def test_r5_the_discard_refuses_loudly_when_orders_cannot_be_read(world, monkeypatch):
@@ -3174,6 +3180,13 @@ def test_r5b_the_discard_guard_counts_escalated_and_fully_received(world):
     world.db.purchase_orders.update_one({"po_id": po["po_id"]}, {"$set": {"status": "CANCELLED"}})
     refused = _delete_refusal(world, draft_id)
     assert refused is not None and "escalated" in str(refused.detail)
+    # R1-90/97: it names only an action the server allows -- nobody can
+    # "decide" an escalated receipt here, but the item can be finished.
+    finding(
+        "admin decides" not in str(refused.detail)
+        and "finish the item in the product editor" in str(refused.detail),
+        f"R1-90: the escalated blocker reads {refused.detail!r}",
+    )
     # An order whose line was received exactly in full expects nothing more.
     world.db.grns.update_one({"grn_id": created["grn_id"]}, {"$set": {"status": "VOID"}})
     items = [dict(po["items"][0], received_qty=2)]

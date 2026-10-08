@@ -180,10 +180,13 @@ def draft_discard_blockers(product_id: str) -> Optional[List[str]]:
                 "Purchase Orders first."
             )
         else:
+            # No door cancels the unreceived rest of one line yet (draft
+            # #1165 adds it): a person does, so the sentence names the person.
             blockers.append(
                 f"Purchase order {number} still expects it, and has already "
-                "received other goods, so it cannot be cancelled. Finish the item "
-                "in the product editor instead."
+                "received other goods, so the order itself cannot be cancelled. "
+                "Ask the purchase manager to cancel the rest of that line, or "
+                "finish the item in the product editor."
             )
     for g in _pm.strict_find_many(
         grn_repo,
@@ -202,7 +205,13 @@ def draft_discard_blockers(product_id: str) -> Optional[List[str]]:
             continue
         number = g.get("grn_number") or g.get("grn_id")
         if status == "ESCALATED":
-            blockers.append(f"Receipt {number} names it and is escalated: an admin decides it first.")
+            # No door settles an escalated receipt here (neither accept nor
+            # void takes one): name the action that works, nothing else.
+            blockers.append(
+                f"Receipt {number} names it and is escalated to head office, so it "
+                "can be neither accepted nor voided here: finish the item in the "
+                "product editor."
+            )
         else:
             blockers.append(
                 f"Receipt {number} is holding it: if none of that receipt's units "
