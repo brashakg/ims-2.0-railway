@@ -42,7 +42,7 @@ Contract pinned (the build follows it): the stock ledger rows carry
 report equals the same on-hand cost; aging values stock at cost.
 
 These were strict xfails while the finding was open; the fix (one rule,
-api/services/stock_value.py, seen through cost_mask.can_see_cost(user, "purchase"))
+api/services/stock_value.py, seen through cost_mask's "product" context)
 turned them into plain tests. A regression raises FindingStillOpen.
 
 Run: JWT_SECRET_KEY=test ENVIRONMENT=test python -m pytest
