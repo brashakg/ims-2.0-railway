@@ -49,6 +49,7 @@ vi.mock('../../../context/AuthContext', () => ({
 }));
 
 import { PurchaseInvoicesTab } from '../PurchaseInvoicesTab';
+import { InvoiceFormDrawer } from '../invoices/InvoiceFormDrawer';
 
 const SUPPLIER = {
   id: 'V-77',
@@ -164,6 +165,41 @@ describe('manual invoice bill-kind declaration', () => {
         undefined,
         'S1',
       ),
+    );
+  });
+
+  // R2-19: a bill drafted from a receipt carries its shop (prefill.store_id);
+  // the ask goes to THAT shop's catalogue manager, not the session shop's.
+  it("a receipt's bill asks the catalogue manager of the bill's shop, not the session's", async () => {
+    apis.purchaseInvoicesApi.create.mockRejectedValue({
+      code: 'PRODUCT_NOT_CATALOGUED',
+      message: 'P-DRAFT is still missing Selling Price.',
+      detail: { code: 'PRODUCT_NOT_CATALOGUED', lines: [{ product_id: 'P-DRAFT' }] },
+    });
+    apis.purchaseInvoicesApi.requestCataloguing.mockResolvedValue({ requested: [] });
+    render(
+      <MemoryRouter>
+        <InvoiceFormDrawer
+          suppliers={[SUPPLIER] as never}
+          prefill={{
+            vendor_id: 'V-77',
+            vendor_invoice_no: 'FW-3302',
+            vendor_invoice_date: '2026-09-28',
+            grn_id: 'g-1',
+            store_id: 'S2',
+          } as never}
+          initialLines={[
+            { product_id: 'P-DRAFT', product_name: 'Boss 1700', quantity: '2', unit_price: '1200', gst_rate: '5' },
+          ]}
+          onClose={() => {}}
+          onBooked={() => {}}
+        />
+      </MemoryRouter>,
+    );
+    await previewSettled();
+    fireEvent.click(screen.getByRole('button', { name: /Book invoice/i }));
+    await waitFor(() =>
+      expect(apis.purchaseInvoicesApi.requestCataloguing).toHaveBeenCalledWith(['P-DRAFT'], undefined, 'S2'),
     );
   });
 
