@@ -495,7 +495,9 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/vendors/{vendor_id}/performance",
-        "allowed": "AUTHENTICATED",
+        # = the handler's require_roles(*_VENDOR_ROLES); mtd_spend (supplier
+        # bills, incl. FIN-3 transfer bills) is masked in the handler (D7).
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
     {
         "method": "GET",
