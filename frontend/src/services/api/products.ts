@@ -108,8 +108,6 @@ export interface BrandOption {
   name: string;
   subbrands: string[];
   tier?: string;
-  /** The brand default that decides whether its products go to the website (D6). */
-  sync_to_shopify_default?: boolean;
 }
 
 export interface DuplicateProductInfo {
@@ -708,7 +706,7 @@ export const adminBrandApi = {
     warranty?: number;
     description?: string;
     status?: string;
-    /** Default Shopify-sync intent stamped on new products of this brand. */
+    /** Whether this brand's products go to the website (D6; the push gate reads it live). */
     sync_to_shopify_default?: boolean;
   }) => {
     const response = await api.post('/admin/brands', data);

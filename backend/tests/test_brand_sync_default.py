@@ -5,9 +5,10 @@ Covers the 2026-07-04 Brand Master upgrades:
 
   1. admin_catalog: BrandCreate persists sync_to_shopify_default (default
      False), BrandUpdate can flip it (incl. explicitly back to False).
-  2. catalog_dictionary.load_brand_sync_default: True only for an ACTIVE
-     brand doc with the flag True; fail-soft False otherwise.
-  3. GET /products/brand-options exposes sync_to_shopify_default per brand.
+  2. (Gone: the loader that read the flag outside the push gate.)
+  3. GET /products/brand-options gives no website answer: that is the push
+     gate's alone (GET /products/website-verdict), and a second answer here
+     skipped the push lock.
   4. (Moved: the brand default decides the website LIVE at push time and no
      create door stores a copy -- owner 2026-09-29, D6; see
      test_add_product_owner_rulings.py.)
@@ -156,44 +157,20 @@ class TestBrandCrudPersistsFlag:
 
 
 # ---------------------------------------------------------------------------
-# 2. Loader semantics
+# 3. /products/brand-options gives no second website answer
 # ---------------------------------------------------------------------------
 
 
-class TestLoadBrandSyncDefault:
-    def test_true_only_when_flag_true(self):
-        assert cd.load_brand_sync_default(_db(), "Ray-Ban") is True
-        assert cd.load_brand_sync_default(_db(), "ray-ban") is True  # ci match
-        assert cd.load_brand_sync_default(_db(), "Titan") is False
-        assert cd.load_brand_sync_default(_db(), "NoFlag") is False
-
-    def test_fail_soft_false(self):
-        assert cd.load_brand_sync_default(None, "Ray-Ban") is False
-        assert cd.load_brand_sync_default(_db(), "Unknown") is False
-        assert cd.load_brand_sync_default(_db(), "") is False
-
-        class _Boom:
-            def get_collection(self, name):
-                raise RuntimeError("down")
-
-        assert cd.load_brand_sync_default(_Boom(), "Ray-Ban") is False
-
-
-# ---------------------------------------------------------------------------
-# 3. /products/brand-options exposes the flag
-# ---------------------------------------------------------------------------
-
-
-class TestBrandOptionsExposesFlag:
-    def test_flag_included_per_brand(self, monkeypatch):
+class TestBrandOptionsHasNoWebsiteAnswer:
+    def test_no_website_flag_per_brand(self, monkeypatch):
         monkeypatch.setattr(deps, "get_db", lambda: _db())
         out = asyncio.run(prod_router.get_brand_options(
             category=None, current_user={"user_id": "u1"}
         ))
         by_name = {b["name"]: b for b in out["brands"]}
-        assert by_name["Ray-Ban"]["sync_to_shopify_default"] is True
-        assert by_name["Titan"]["sync_to_shopify_default"] is False
-        assert by_name["NoFlag"]["sync_to_shopify_default"] is False
+        assert by_name["Ray-Ban"] == {"name": "Ray-Ban", "subbrands": [], "tier": "PREMIUM"}
+        assert all("sync_to_shopify_default" not in b for b in out["brands"])
+        assert not hasattr(cd, "load_brand_sync_default")
 
 
 # ---------------------------------------------------------------------------

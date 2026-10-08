@@ -229,12 +229,6 @@ def brand_website_refusal(db, brand_name: str) -> Optional[str]:
     return None
 
 
-def load_brand_sync_default(db, brand_name: str) -> bool:
-    """True when the brand goes to the website: brand_website_refusal says
-    nothing against it."""
-    return brand_website_refusal(db, brand_name) is None
-
-
 def load_subbrand_options(db, brand_name: str) -> Optional[List[str]]:
     """Subbrand names configured for the ACTIVE Brand-Master brand matching
     `brand_name` (case-insensitive). Returns:

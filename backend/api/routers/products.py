@@ -2031,8 +2031,9 @@ async def get_brand_options(
     canonical name like 'FRAME'; omit for all), each with its sub-brand names
     so the form can restrict the Sub Brand select per selected brand.
 
-    Shape: {"brands": [{"name": str, "subbrands": [str, ...], "tier": str|None,
-    "sync_to_shopify_default": bool}, ...]}.
+    Shape: {"brands": [{"name": str, "subbrands": [str, ...], "tier": str|None}, ...]}.
+    Whether a brand goes to the website is NOT here: that is the push gate's
+    answer alone (GET /products/website-verdict, owner D6).
     Fail-soft: db trouble -> {"brands": []}.
     """
     try:
@@ -2053,16 +2054,7 @@ async def get_brand_options(
             # tier: shown read-only in the form's Review (the product's
             # discount band derives from it at create time).
             tier = _cd.load_brand_tier(db, name)
-            brands.append(
-                {
-                    "name": name,
-                    "subbrands": subs,
-                    "tier": tier,
-                    # Whether the brand goes to the website (Settings ->
-                    # Brand Master, owner D6); the form's read-only line.
-                    "sync_to_shopify_default": _cd.load_brand_sync_default(db, name),
-                }
-            )
+            brands.append({"name": name, "subbrands": subs, "tier": tier})
         return {"brands": brands}
     except Exception as e:  # noqa: BLE001 - read-only projection, never a blocker
         logger.warning("[CATALOG-DICT] brand-options read failed: %s", e)
