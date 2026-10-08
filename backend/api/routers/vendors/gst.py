@@ -53,7 +53,10 @@ def _promote_cost_from_rate(
     except Exception as exc:  # noqa: BLE001 - a cost promote never blocks the PO/GRN
         logger.warning("[VENDOR] cost promote skipped for %s: %s", product_id, exc)
         return False
-    if fields.get("provisional") is False:
+    # The product editor's rule (products.update_product): a write that leaves
+    # the product catalogue-complete releases what receipts hold for it --
+    # ordered or not (panel P5).
+    if not _pm.compute_catalog_status({**prod, "cost_price": cost, **fields})[1]:
         _finished_by_the_promote(
             product_id, prod, {"cost_price": cost, **fields}, deferred_releases
         )
@@ -61,8 +64,9 @@ def _promote_cost_from_rate(
 
 
 def _finished_by_the_promote(product_id, prod, patch, deferred_releases=None) -> None:
-    """The cost was an ordered draft's last gap: it is finished here, not in
-    the product editor, so do what the editor's save does -- its catalogue
+    """The cost left the product catalogue-complete (an ordered draft's or a
+    catalogue draft's last gap, say): it is finished here, not in the product
+    editor, so do what the editor's save does -- its catalogue
     copy leaves Needs review (the one mirror rule) and the units receipts hold
     for it go on the shelf (the one release). Fail-soft: the cost stands."""
     try:
