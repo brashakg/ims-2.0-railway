@@ -3461,3 +3461,38 @@ def test_r6_the_cataloguers_task_says_what_is_still_held(world):
         f"R1-22: the open task reads {task['title']!r} / {task['description']!r}",
     )
     assert world.grn(grn["grn_id"])["status"] == "PARTIALLY_ACCEPTED"
+
+
+def test_r6_a_manual_escalation_into_a_twin_says_so(world):
+    # R1-50 / R1-103: two catalogue managers' tasks for one receipt; the first
+    # went to the admin. Escalating the second by hand closes it into the
+    # admin's -- said by name, never "no higher owner found" or a raw id.
+    _seed_user(world, dict(ADMIN, full_name="Asha Admin"))
+    _seed_user(world, dict(CATALOGUER, user_id="u-cat-2", username="catalog.two"))
+    world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    by = {t["assigned_to"]: t for t in _open_tasks(world)}
+    first, second = by[CATALOGUER["user_id"]], by["u-cat-2"]
+    _run(_tasks.escalate_task(first["task_id"], None, CATALOGUER))
+    assert world.db.tasks.find_one({"task_id": first["task_id"]})["assigned_to"] == ADMIN["user_id"]
+    out = _run(_tasks.escalate_task(second["task_id"], None, dict(CATALOGUER, user_id="u-cat-2")))
+    finding(
+        out["status"] == "COMPLETED" and "no higher owner" not in out["message"],
+        f"R1-50: a manual escalation into its twin answered {out}",
+    )
+    finding(
+        "Asha Admin" in out["message"] and ADMIN["user_id"] not in out["message"],
+        f"R1-103: the merge note reads {out['message']!r}",
+    )
+
+
+def test_r6_the_taskmaster_audits_a_merge(world, monkeypatch):
+    # R1-31: every TASKMASTER action records a before/after row -- the merge too.
+    _seed_user(world, ADMIN)
+    _seed_user(world, dict(CATALOGUER, user_id="u-cat-2", username="catalog.two"))
+    world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    _escalate_after(world, monkeypatch, "taskmaster", hours=25)
+    rows = list(world.db.agent_audit_log.find({}))
+    finding(
+        sorted(r["action"] for r in rows) == ["task_escalation", "task_merged"],
+        f"R1-31: the TASKMASTER audit trail reads {[r['action'] for r in rows]}",
+    )
