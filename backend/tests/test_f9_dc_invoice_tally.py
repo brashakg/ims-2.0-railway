@@ -213,6 +213,14 @@ class _GRNRepo:
         return self._coll.count_documents(flt)
 
 
+class _KnownVendors:
+    """The supplier master the DC fixtures name (a receipt with no PO must
+    name a supplier on file)."""
+
+    def find_by_id(self, vid):
+        return {"vendor_id": vid, "trade_name": "Lens Lab"} if vid == "V1" else None
+
+
 class _PORepo:
     def __init__(self, po):
         self._po = po
@@ -296,6 +304,7 @@ def _restore_globals():
         vendors_router.get_purchase_order_repository,
         vendors_router.get_audit_repository,
         vendors_router.validate_store_access,
+        vendors_router.get_vendor_repository,
     )
     saved_pi = (
         pi_router._get_db,
@@ -317,6 +326,7 @@ def _restore_globals():
         vendors_router.get_purchase_order_repository,
         vendors_router.get_audit_repository,
         vendors_router.validate_store_access,
+        vendors_router.get_vendor_repository,
     ) = saved_v
     (
         pi_router._get_db,
@@ -346,6 +356,7 @@ def _vendors_client(db, grn_repo, po=None, audit=None, roles=("STORE_MANAGER",))
     vendors_router.get_purchase_order_repository = lambda: _PORepo(po) if po else None
     vendors_router.get_audit_repository = lambda: audit
     vendors_router.validate_store_access = lambda sid, u: sid or u.get("active_store_id")
+    vendors_router.get_vendor_repository = lambda: _KnownVendors()
     return TestClient(app)
 
 
