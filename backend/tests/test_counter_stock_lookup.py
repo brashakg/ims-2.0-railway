@@ -16,10 +16,11 @@ they carry money):
     GET /api/v1/inventory/lookup?q=<text>          (inventory package router)
     200 -> {"store_id": <this shop = the caller's active store>,
             "items": [{"product_id", "sku", "name", "brand", "model",
-                       "color", "size", "mrp", "offer_price", "lens_grid",
+                       "category", "color", "size", "mrp", "offer_price",
                        "stores": [{"store_id", "store_name",
                                    "available", "in_transit",
-                                   "tracked"}, ...]}]}
+                                   "tracked"}, ...]}],
+            "not_counted_item_types": [...], "lens_grid_item_types": [...]}
 
     `stores` lists EVERY physical shop (stores_util.physical_stores), zeros
     included, never an ONLINE store. `available` is what the till may sell
@@ -28,10 +29,16 @@ they carry money):
     this shop's figure is the till tile's (GET /inventory/sellable, #1173);
     `in_transit` counts TRANSFERRED units heading TO that shop
     (claim_for_transfer stamps transfer_to_store_id), one unit per row too.
-    `tracked` is false where the till's sale guard does not count the
-    product -- no stock_units row of it at that shop, or a LENS line (its
-    stock is the lens grid; `lens_grid` says so) -- exactly where GET
-    /inventory/sellable answers None; the screen then never shows a 0.
+    `tracked` is the sale guard's own `tracked` count: the shop holds a
+    stock_units row of it, any status. The guard counts a line only there AND
+    when the line's item_type is not in `not_counted_item_types` (its own
+    _takes_serialized_stock sets: a LENS line is the lens grid's,
+    `lens_grid_item_types`; a SERVICE / eye-test line has no stock). The
+    item_type is the TILL's -- POS mapCategory, TypeScript -- so the screen
+    puts it on each product's `category` (importing mapCategory) and this
+    server never maps a category. tracked AND not in the list is exactly
+    where GET /inventory/sellable answers a number; the screen never shows a
+    0 anywhere else.
     The search IS ProductRepository.search_products (active only, the same
     answer as GET /products?search=) plus an exact SKU, product barcode,
     manufacturer GTIN (attributes.gtin) or IMS unit barcode, active only and
@@ -683,24 +690,23 @@ def test_d7b3_in_transit_is_a_transferred_unit_on_its_way(call, mongo_db, label,
 
 # Round 5: where the till's sale guard does not count a product it sells any
 # quantity (orders/stock: tracked == 0 -> no check; a LENS line is the lens
-# grid's), and GET /inventory/sellable says None. A 0 there is no limit, so
-# the lookup says tracked: false -- the screen reads 'not tracked here', or
-# 'see Power Grid' for a lens -- never 0. The till is asked, not re-typed.
-_TRACKING = [
-    # (label, category, the till's item_type for it (mapCategory), units as (shop, status))
-    ("a frame with a unit here", "FRAME", "FRAME", [(S1, "AVAILABLE")]),
-    ("a frame whose only unit here is sold", "FRAME", "FRAME", [(S1, "SOLD")]),
-    ("a frame stocked only at Bokaro", "FRAME", "FRAME", [(S2, "AVAILABLE")]),
-    ("a frame with no unit anywhere", "FRAME", "FRAME", []),
-    ("an optical lens with a unit here", "OPTICAL_LENS", "LENS", [(S1, "AVAILABLE")]),
-    ("an optical lens with no unit", "OPTICAL_LENS", "LENS", []),
+# grid's; a SERVICE line has no stock), and GET /inventory/sellable says None.
+# A 0 there is no limit, so the screen reads 'not tracked here', or the lens
+# pointer -- never 0.
+# Round 6: the item_type is the till's own (POS mapCategory, TypeScript; its
+# category -> item_type half is pinned by the screen's vitest). This corpus is
+# every item_type mapCategory can send plus the guard's own service types, and
+# the oracle for each is the REAL guard behind GET /inventory/sellable -- the
+# server's lists are asked, never re-typed here.
+_TILL_ITEM_TYPES = [
+    "FRAME", "SUNGLASS", "READING_GLASSES", "CONTACT_LENS", "LENS", "ACCESSORY",
+    "WATCH", "SMARTWATCH", "SMARTGLASSES", "WALL_CLOCK", "HEARING_AID",
+    "SERVICE", "EYE_TEST", "CONSULTATION", "",
 ]
 
 
-@pytest.mark.parametrize("label,category,till_type,units", _TRACKING, ids=[t[0] for t in _TRACKING])
-def test_d7b3_a_shop_the_till_does_not_count_is_not_tracked(
-    call, mongo_db, monkeypatch, label, category, till_type, units
-):
+@pytest.mark.parametrize("item_type", _TILL_ITEM_TYPES, ids=[t or "blank" for t in _TILL_ITEM_TYPES])
+def test_d7b3_a_shop_the_till_does_not_count_is_not_tracked(call, mongo_db, monkeypatch, item_type):
     from api.routers import orders as om
     from database.repositories.product_repository import StockRepository
 
@@ -710,23 +716,41 @@ def test_d7b3_a_shop_the_till_does_not_count_is_not_tracked(
     pid = "P-TRACK"
     mongo_db["products"].insert_one(
         {"_id": pid, "product_id": pid, "sku": "SKU-TRACK-1", "brand": "Zeiss", "model": "TRK1",
-         "category": category, "mrp": 3000.0, "offer_price": 3000.0, "is_active": True}
+         "category": "ANY", "mrp": 3000.0, "offer_price": 3000.0, "is_active": True}
     )
-    for shop, status in units:
-        mongo_db["stock_units"].insert_one(_unit(pid, shop, status))
+    # Dhanbad: a box in date; Bokaro: only an expired box (tracked, sells 0);
+    # Pune: no unit at all.
+    mongo_db["stock_units"].insert_many(
+        [_unit(pid, S1, expiry_date="2099-12-31"), _unit(pid, S2, expiry_date="2020-01-01")]
+    )
 
-    item = _items(_ok(call(_user("CASHIER", S1), q="SKU-TRACK-1")))[pid]
-    assert item.get("lens_grid") is (till_type == "LENS"), f"{label}: {item.get('lens_grid')}"
-    for shop in (S1, S2):
+    body = _ok(call(_user("CASHIER", S1), q="SKU-TRACK-1"))
+    not_counted = body.get("not_counted_item_types")
+    assert isinstance(not_counted, list), f"the guard's lists ride on the answer: {sorted(body)}"
+    assert set(body.get("lens_grid_item_types") or []) <= set(not_counted), "a lens-grid line is never counted"
+    item = _items(body)[pid]
+    for shop in (S1, S2, S3):
         cell = _stores(item)[shop]
         till = _ok(call(_user("CASHIER", shop), "/inventory/sellable",
-                        product_ids=pid, item_types=till_type))["sellable"][pid]
-        assert cell.get("tracked") is (till is not None), (
-            f"{label} at {shop}: the till {'limits it to ' + str(till) if till is not None else 'does not count it'}, "
-            f"the lookup says tracked={cell.get('tracked')}"
+                        product_ids=pid, item_types=item_type))["sellable"][pid]
+        # The screen's rule: a count only where the shop holds a unit AND the
+        # till's line type is one the guard counts.
+        counted = bool(cell.get("tracked")) and item_type not in not_counted
+        assert counted is (till is not None), (
+            f"a {item_type or 'blank'} line at {shop}: the till "
+            f"{'limits it to ' + str(till) if till is not None else 'does not count it'}, "
+            f"the screen would {'show ' + str(cell.get('available')) if counted else 'say not tracked'}"
         )
         if till is not None:
             assert cell["available"] == till
+
+
+def test_d7b3_the_lens_line_is_the_lens_grids(call, mongo_db):
+    # The till sends an optical lens as item_type LENS (mapCategory); its stock
+    # is the lens grid's, so the screen points there instead of a count.
+    _seed(mongo_db)
+    body = _ok(call(_user("CASHIER", S1), q="CA8895"))
+    assert "LENS" in (body.get("lens_grid_item_types") or []), body.get("lens_grid_item_types")
 
 
 def test_d7b3_a_stores_doc_without_a_store_id_is_skipped_not_a_500(call, mongo_db):

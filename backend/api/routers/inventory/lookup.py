@@ -19,13 +19,17 @@ Every rule is reused, not re-typed:
   * sellable    -- StockRepository.sellable_filter, the filter find_available
                    and the sale guard count (AVAILABLE and in date), one unit
                    per stock_units row -- so this shop's figure is the till's;
-  * tracked     -- where the sale guard limits a sale at all: the line takes
-                   serialized stock (orders/stock._takes_serialized_stock -- a
-                   LENS line's stock is the lens grid) and the shop holds any
-                   stock_units row of it (the guard's `tracked` count). Where
-                   it does not, the till sells any quantity and GET
-                   /inventory/sellable says None, so the lookup says
-                   tracked: false rather than a 0 the till ignores;
+  * tracked     -- the sale guard's own `tracked` count
+                   (orders/stock._assert_serialized_stock_available): the shop
+                   holds a stock_units row of it, whatever its status. The
+                   guard counts a line only there AND when the line's item_type
+                   takes serialized stock. That item_type is the till's
+                   (POS mapCategory, TypeScript), so the SCREEN puts it on each
+                   product -- importing mapCategory -- and checks it against
+                   the guard's own lists, sent here as they are
+                   (not_counted_item_types, lens_grid_item_types). Nothing here
+                   maps a category, so a till spelling ('LENSES', 'SVC') can
+                   never read differently on this screen;
   * the shops   -- stores_util.physical_stores;
   * in transit  -- item_events.status_match(TRANSFERRED) + transfer_to_store_id
                    (what StockRepository.claim_for_transfer stamps).
@@ -42,7 +46,7 @@ from ._shared import (
 )
 from .helpers import _get_db
 from ...services.item_events import status_match
-from ...services.product_master import find_similar_products, resolve_category
+from ...services.product_master import find_similar_products
 from ...services.rbac_policy import policy_for
 from ...services.stores_util import physical_stores
 
@@ -52,7 +56,7 @@ STOCK_LOOKUP_ROLES = tuple(policy_for("GET", "/api/v1/inventory/lookup")["allowe
 
 # The ONLY product fields a counter sees. An allow-list, so a cost, supplier or
 # bill field added to the product doc later can never reach this screen.
-_PRODUCT_FIELDS = ("sku", "name", "brand", "model", "color", "size", "mrp", "offer_price")
+_PRODUCT_FIELDS = ("sku", "name", "brand", "model", "category", "color", "size", "mrp", "offer_price")
 _HITS = 50
 
 
@@ -79,28 +83,14 @@ def sellable_by_product_shop(stock_repo, pids):
     )
 
 
-def _till_item_type(product):
-    """The item_type the till puts on this product's line (POS mapCategory):
-    an OPTICAL_LENS product goes out as LENS, its stock held by the lens grid."""
-    return "LENS" if resolve_category(product.get("category")) == "OPTICAL_LENS" else ""
+def _guard_lists():
+    """(not counted, lens grid): the order item_types the sale guard never
+    counts against stock_units -- _takes_serialized_stock's own sets, sent as
+    they are -- and the ones whose stock the lens grid holds."""
+    from ..orders import stock as guard
 
-
-def _guard_limits(stock_repo, products):
-    """{(product_id, shop)} where the till's sale guard
-    (orders/stock._assert_serialized_stock_available) limits a sale: the till's
-    line for it takes serialized stock (_takes_serialized_stock, imported) and
-    the shop holds ANY stock_units row of it, whatever its status -- the
-    guard's own `tracked` count, one aggregate for every product and shop.
-    Anywhere else the guard sells any quantity (GET /inventory/sellable: None)."""
-    from ..orders.stock import _takes_serialized_stock
-
-    pids = [
-        str(p["product_id"])
-        for p in products
-        if p.get("product_id")
-        and _takes_serialized_stock({"product_id": str(p["product_id"]), "item_type": _till_item_type(p)})
-    ]
-    return set(_units_by_product_shop(stock_repo, {"product_id": {"$in": pids}}))
+    lens = guard._LENS_RESERVED_ITEM_TYPES
+    return sorted(guard._NON_SERIALIZED_ITEM_TYPES | lens), sorted(lens)
 
 
 def _in_transit_by_product_shop(stock_repo, pids, shop_ids):
@@ -180,7 +170,9 @@ async def stock_lookup(
     shop_ids = [str(s["store_id"]) for s in shops]
     available = sellable_by_product_shop(stock_repo, pids)
     in_transit = _in_transit_by_product_shop(stock_repo, pids, shop_ids)
-    limited = _guard_limits(stock_repo, products)
+    # The guard's `tracked`: any stock_units row of it at the shop, any status.
+    tracked = set(_units_by_product_shop(stock_repo, {"product_id": {"$in": pids}}))
+    not_counted, lens_grid = _guard_lists()
 
     items, seen = [], set()
     for p in products:
@@ -189,15 +181,14 @@ async def stock_lookup(
             continue
         seen.add(pid)
         item = {"product_id": pid, **{k: p.get(k) for k in _PRODUCT_FIELDS}}
-        item["lens_grid"] = _till_item_type(p) == "LENS"
         item["stores"] = [
             {
                 "store_id": sid,
                 "store_name": s.get("store_name") or s.get("store_code") or sid,
                 "available": available.get((pid, sid), 0),
                 "in_transit": in_transit.get((pid, sid), 0),
-                # False: the till does not count this product here, so 0 is no limit.
-                "tracked": (pid, sid) in limited,
+                # False: no unit of it here, so the till's guard sells any quantity.
+                "tracked": (pid, sid) in tracked,
             }
             for sid, s in zip(shop_ids, shops)
         ]
@@ -205,4 +196,5 @@ async def stock_lookup(
     # What the scan named first, then the model by colour and size.
     items.sort(key=lambda i: (i["product_id"] not in exact_ids,
                               *(str(i.get(k) or "") for k in ("brand", "model", "color", "size"))))
-    return {"store_id": here, "items": items}
+    return {"store_id": here, "items": items,
+            "not_counted_item_types": not_counted, "lens_grid_item_types": lens_grid}
