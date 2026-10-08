@@ -610,6 +610,20 @@ class TestGtinAttributeOnTheEditDoor:
         assert row["gtin"] == _VALID_A
         assert row["barcode"] == ""
 
+    @pytest.mark.parametrize("attrs", [["FRAME"], "FRAME", 7])
+    def test_a_product_whose_attributes_are_not_a_dict_keeps_the_ledger_up(
+        self, attrs
+    ):
+        """The product list is chain-wide and has no try around each row: one
+        legacy product with attributes=["FRAME"] raised AttributeError and
+        took Inventory > Stock down (500) at every shop."""
+        from api.routers.inventory.stock import _ledger_row
+
+        product = {"product_id": "P1", "attributes": attrs, "barcode": _VALID_A}
+        assert _ledger_row(product, 1, 0, {}, "BV-TEST-01")["gtin"] == _VALID_A
+        product.pop("barcode")
+        assert _ledger_row(product, 1, 0, {}, "BV-TEST-01")["gtin"] == ""
+
     @pytest.mark.parametrize("new_gtin", ["", _VALID_B])
     def test_a_legacy_product_barcode_shows_and_moves_off_with_the_gtin(
         self, mock_db, new_gtin

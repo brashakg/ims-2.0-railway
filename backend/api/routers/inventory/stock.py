@@ -424,6 +424,7 @@ def _ledger_row(
     name = product.get("name") or f"{brand} {model}".strip() or product.get("sku", "")
     mrp = float(product.get("mrp", 0) or 0)
     offer_price = float(product.get("offer_price", mrp) or mrp)
+    attrs = product.get("attributes")
     return {
         "id": pid,
         "product_id": pid,
@@ -449,7 +450,8 @@ def _ledger_row(
         # The manufacturer's GTIN -- what Inventory > Manage Barcode edits. A
         # legacy products.barcode shows too (main's old modal wrote it there),
         # so it can be seen and removed; saving moves it to the gtin attribute.
-        "gtin": (product.get("attributes") or {}).get("gtin")
+        # A legacy row whose attributes are not a dict must not 500 the page.
+        "gtin": (attrs.get("gtin") if isinstance(attrs, dict) else None)
         or product.get("barcode")
         or "",
         "location": sample_unit.get("location_code", "")
