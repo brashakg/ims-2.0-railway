@@ -532,6 +532,38 @@ def test_a_conflict_task_whose_reply_was_lost_is_one_task(swept, monkeypatch):
     assert _tasks(swept, oid, "online_status_conflict") == 1
 
 
+def test_a_conflict_task_lost_while_another_event_held_its_marker_is_raised(swept, monkeypatch):
+    """Ruling 2's ONE task, with two workers: Shopify sends orders/cancelled
+    (A) and orders/updated (B) for one cancel of a DELIVERED order. A claims
+    the marker; B, finding it held, counted the task as raised and wrote its
+    marks; then A's insert failed and A released the marker. The cancel was
+    marked, so the sweep never fed it again: no task at all. A held marker
+    counts only once its task has landed."""
+    oid = 60168
+    _book(swept, oid)
+    _set(swept, oid, status="DELIVERED", fulfillment_status="FULFILLED")
+    tasks, lost = swept["db"]["tasks"], []
+    real = tasks.insert_one
+    body = _pulled(oid, cancelled_at=CANCELLED_AT, fulfillment_status="fulfilled")
+
+    def b_runs_then_a_fails(doc, *a, **kw):
+        if not lost:
+            lost.append(doc)
+            swept["real_map"](copy.deepcopy(body), swept["db"], webhook_id=f"u-{oid}", topic="orders/updated")
+            raise RuntimeError("tasks write down")
+        return real(doc, *a, **kw)
+
+    monkeypatch.setattr(tasks, "insert_one", b_runs_then_a_fails)
+    swept["real_map"](copy.deepcopy(body), swept["db"], webhook_id=f"c-{oid}", topic="orders/cancelled")
+    swept["state"]["orders"] = [body]
+    for _ in range(2):
+        swept["run"]()
+    doc = _doc(swept, oid)
+    assert lost and (doc["status"], doc["shopify_cancelled_at"]) == ("DELIVERED", CANCELLED_AT)
+    assert doc["status_conflict_at"] is not None
+    assert _tasks(swept, oid, "online_status_conflict") == 1
+
+
 def test_three_lost_races_write_nothing_and_say_so(swept, monkeypatch):
     from api.routers.orders import release
 

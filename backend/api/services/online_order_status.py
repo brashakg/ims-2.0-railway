@@ -219,8 +219,8 @@ def _raise_conflict_task(db, order: Dict[str, Any], fact: str, source: str) -> b
     """ONE task per order, forever (ruling 2): the order doc's
     status_conflict_at marker is claimed atomically first, so a replay, the
     hourly sweep, a remap or a closed task never raise a second one. True:
-    the task is raised (now, or by the event that holds the marker); False:
-    neither the marker nor the task landed. Never raises."""
+    the task is raised (now, or already by the event that holds the marker);
+    False: no task yet. Never raises."""
     oid = order.get("order_id")
     if not oid:
         return True
@@ -234,7 +234,16 @@ def _raise_conflict_task(db, order: Dict[str, Any], fact: str, source: str) -> b
             }},
         )
         if not getattr(claim, "modified_count", 0):
-            return True
+            # Held by another event: raised only once its task has landed.
+            # Trusted before that, this event wrote its marks (the sweep then
+            # never fed it again) while the holder's insert could still fail
+            # and release the marker -- no task at all. Unlanded, this event
+            # stays unmarked and the next one, or the sweep, raises the task.
+            # ponytail: a holder that dies between its claim and its insert
+            # leaves the marker with no task, and every later event fails
+            # (the sweep reports it each hour); a lease on the marker if so.
+            return db.get_collection("tasks").find_one(
+                {"task_type": "online_status_conflict", "order_id": oid}) is not None
     except Exception:  # noqa: BLE001
         logger.warning("[%s] status-conflict marker claim failed for order=%s", source, oid,
                        exc_info=True)
