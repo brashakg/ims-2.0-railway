@@ -139,6 +139,36 @@ describe('no-PO Delivery-Challan receiving', () => {
     expect(dialog).toHaveTextContent('labels for DC-NEW-1');
   });
 
+  // Audit C1: the one reading of an accept (reportGrnAccept) -- a receipt that
+  // still holds lines is never a green "GRN posted".
+  it('a posted receipt that still holds lines warns, never a green success', async () => {
+    api.acceptGRN.mockResolvedValue({
+      units_added: 0,
+      grn_status: 'PARTIALLY_ACCEPTED',
+      unresolved_lines: [{ product_id: 'P-FR1', reason: 'incomplete_catalog' }],
+    });
+    await openNoPoDc();
+    fireEvent.change(screen.getByPlaceholderText(/DC\/26\/05\/118/), {
+      target: { value: 'DC/26/08/9' },
+    });
+    fireEvent.change(screen.getByDisplayValue('Select the vendor…'), {
+      target: { value: 'V-77' },
+    });
+    await addFrameLine();
+    fireEvent.change(screen.getByLabelText('Quantity on line 1'), {
+      target: { value: '20' },
+    });
+    fireEvent.click(screen.getByLabelText(/Tally line 1/));
+    fireEvent.click(screen.getByRole('button', { name: /Post GRN/i }));
+    await waitFor(() =>
+      expect(toastMock.warning).toHaveBeenCalledWith(
+        expect.stringMatching(/waiting to be catalogued/),
+        expect.anything(),
+      ),
+    );
+    expect(toastMock.success).not.toHaveBeenCalled();
+  });
+
   it('an unticked line never reaches the server', async () => {
     await openNoPoDc();
     fireEvent.change(screen.getByPlaceholderText(/DC\/26\/05\/118/), {

@@ -148,4 +148,16 @@ describe('an ordered draft in Needs review', () => {
     await waitFor(() => expect(list).toHaveBeenCalled());
     expect(list).toHaveBeenCalledWith(expect.objectContaining({ ordered_draft: false }));
   });
+
+  it('a review item that vanished falls forward to the next import, never an ordered draft', async () => {
+    const api = await import('../../../services/api/catalog');
+    (api.catalogProductsApi.get as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => {
+      const gone = new api.CatalogRequestError('gone') as unknown as { status: number };
+      gone.status = 404;
+      throw gone;
+    });
+    renderAt('/catalog/add?review=CAT-GONE');
+    await waitFor(() => expect(list).toHaveBeenCalled());
+    expect(list).toHaveBeenCalledWith(expect.objectContaining({ ordered_draft: false }));
+  });
 });

@@ -137,4 +137,21 @@ describe('an ordered draft in Needs review', () => {
     expect(within(drawer).queryByRole('button', { name: /Clone/ })).toBeNull();
     expect(within(drawer).queryByRole('button', { name: /Order stock/ })).toBeNull();
   });
+
+  it('in the catalogue list it is the ordered draft, never a dimmed inactive row', async () => {
+    const { productApi } = await import('../../../services/api/products');
+    (productApi.getProducts as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      products: [SPINE],
+      total: 1,
+    });
+    render(
+      <MemoryRouter initialEntries={['/catalog']}>
+        <CatalogManagerPage segment="catalog" />
+      </MemoryRouter>,
+    );
+    const row = (await screen.findByText('Boss BOSS 1700')).closest('tr') as HTMLElement;
+    expect(within(row).getByText(/Ordered — finish it/)).toBeInTheDocument();
+    expect(within(row).queryByText(/Inactive/)).toBeNull();
+    expect(row.className).not.toMatch(/opacity-60/);
+  });
 });
