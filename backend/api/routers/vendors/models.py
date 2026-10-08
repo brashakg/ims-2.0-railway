@@ -440,8 +440,12 @@ def cancel_reason(v) -> str:
     import unicodedata
 
     # The Default_Ignorable_Code_Point characters that are not format (Cf)
-    # characters, so the category test below would keep them.
-    ignorable = "\u034f\u115f\u1160\u17b4\u17b5\u180b\u180c\u180d\u180f\u3164\uffa0"
+    # characters, so the category test below would keep them (U+16FE4 is the
+    # Khitan small script filler, a mark since Unicode 13).
+    ignorable = (
+        "\u034f\u115f\u1160\u17b4\u17b5\u180b\u180c\u180d\u180f\u3164\uffa0"
+        "\U00016fe4"
+    )
     text = "".join(
         c
         for c in str(v or "")

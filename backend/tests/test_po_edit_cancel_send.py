@@ -2043,7 +2043,7 @@ def test_a_form_edit_of_a_product_with_a_typed_and_an_unsettled_line(monkeypatch
      "\u115f\u115f\u115f", "\u1160\u1160\u1160", "\uffa0\uffa0\uffa0",
      # invisible marks that would count after a letter unless stripped
      "a\u034f\u034f", "ab\u034f", "a\u180b\u180b", "ab\u180c", "ab\u180d", "ab\u180f",
-     "ab\u17b4", "ab\u17b5",
+     "ab\u17b4", "ab\u17b5", "ab\U00016fe4",
      # accents are no letters: one letter with two accents, two with one
      "a\u0301\u0301", "ab\u0301",
      # one mark per letter: a letter padded with a script's own marks
