@@ -342,3 +342,33 @@ def test_units_of_a_receipt_whose_status_did_not_flip_count_at_the_next_accept(m
     assert isinstance(out, HTTPException) and out.status_code == 409, out
     assert _accept(r1)["grn_status"] == "ACCEPTED"
     assert _p2_units(stock) == 2
+
+
+# --------------------------------------------------------------------------- #
+# Review round 10.
+# --------------------------------------------------------------------------- #
+
+
+def test_an_unreadable_receipt_list_refuses_the_accept(monkeypatch):
+    """A holds its claim; B's read of the order's receipts errors. Through the
+    real repository (whose find_many turns an error into []) that read must
+    still fail CLOSED -- 503, nothing minted -- not read 'nobody in flight'."""
+    from database.repositories.vendor_repository import GRNRepository
+    from strict_fakes import StrictCollection
+    from api.routers.vendors import grn_accept as ga
+
+    fake, stock, a, b = _two_pending_of_two(monkeypatch)
+    real = GRNRepository(StrictCollection("grns", [copy.deepcopy(d) for d in fake.docs.values()]))
+    monkeypatch.setattr(vendors_mod, "get_grn_repository", lambda: real)
+    assert ga._claim_grn_for_accept(real, a, "mgr_a")
+    real_find = real.collection.find
+
+    def find(flt=None, *args, **kw):
+        if flt == {"po_id": "PO-1"}:
+            raise RuntimeError("socket timeout")
+        return real_find(flt, *args, **kw)
+
+    real.collection.find = find
+    out = _accept(b)
+    assert isinstance(out, HTTPException) and out.status_code == 503, out
+    assert _p2_units(stock) == 0

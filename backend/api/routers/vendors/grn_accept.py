@@ -247,11 +247,19 @@ def _claimed_receipts_for_order(grn_repo, po_id, this_grn) -> list:
     """Receipts of this order, other than `this_grn`, that hold an accept claim
     but are not ACCEPTED yet (still minting, or held for a product that is not
     catalogued). Fails CLOSED: an unreadable list must not let two accepts
-    both think the open quantity is theirs."""
+    both think the open quantity is theirs -- so it reads through the RAW
+    collection, because BaseRepository.find_many swallows a driver error into
+    [] ("nobody else in flight"); the same reason _grn_already_minted counts
+    through it. Only a minimal mock whose collection has no find uses
+    find_many."""
     if grn_repo is None:
         return []
+    finder = getattr(getattr(grn_repo, "collection", None), "find", None)
     try:
-        rows = grn_repo.find_many({"po_id": po_id}, limit=1000) or []
+        if callable(finder):
+            rows = list(finder({"po_id": po_id}))
+        else:
+            rows = grn_repo.find_many({"po_id": po_id}, limit=1000) or []
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(
             status_code=503,
