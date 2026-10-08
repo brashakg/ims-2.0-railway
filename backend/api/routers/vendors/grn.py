@@ -89,9 +89,9 @@ def _number_stranded_receipts(grn_repo) -> None:
     """Number every receipt whose worker died between its insert and its
     number (a killed worker, a deploy mid-request), so no row keeps
     PENDING/<grn_id> for good (audit F28). Runs at the start of every receipt
-    create, accept and list (the pending receipts panel). A row younger than
-    _STRANDED_AFTER may still be numbered by its own request, so it is left
-    alone: until then the duplicate guard says the receipt is still getting
+    create, accept and list (the pending receipts panel) and PO timeline. A
+    row younger than _STRANDED_AFTER may still be numbered by its own
+    request, so it is left alone: until then the duplicate guard says the receipt is still getting
     its number and accept refuses it (a placeholder must never reach a stock
     unit). Each row goes through _number_receipt, the same claimed write the
     live create uses, so a stalled create and this never both number a row.
