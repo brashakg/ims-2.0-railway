@@ -10,6 +10,7 @@
 //   GET  /api/v1/vendors/recon/worklists                       -- 4 worklists
 
 import api from './client';
+import { cleanInvoiceId, invoiceIdSegment, requireInvoiceId } from './requireId';
 
 // ---- Types ---------------------------------------------------------------
 
@@ -130,8 +131,10 @@ export const purchaseReconApi = {
    * Fail-soft: returns null on error so the UI degrades gracefully.
    */
   getRecon: async (invoiceId: string): Promise<ReconResponse | null> => {
+    const key = cleanInvoiceId(invoiceId);
+    if (!key) return null; // never GET /undefined/recon
     try {
-      const res = await api.get(`/vendors/purchase-invoices/${invoiceId}/recon`);
+      const res = await api.get(`/vendors/purchase-invoices/${invoiceIdSegment(key)}/recon`);
       return res.data as ReconResponse;
     } catch {
       return null;
@@ -144,7 +147,8 @@ export const purchaseReconApi = {
    * THROWS on error so the UI can show a toast failure.
    */
   upsertRecon: async (invoiceId: string, payload: ReconUpdate): Promise<ReconResponse> => {
-    const res = await api.post(`/vendors/purchase-invoices/${invoiceId}/recon`, payload);
+    const key = requireInvoiceId(invoiceId);
+    const res = await api.post(`/vendors/purchase-invoices/${invoiceIdSegment(key)}/recon`, payload);
     return res.data as ReconResponse;
   },
 

@@ -191,7 +191,7 @@ docker compose restart
 ## 📚 Next Steps
 
 1. **Change default password** (Settings → Change Password)
-2. **Configure stores** (Settings → Stores)
+2. **Configure stores** (Organization, left menu)
 3. **Add users** (Settings → Users)
 4. **Import products** (Products → Import)
 5. **Configure roles** (Settings → Roles & Permissions)

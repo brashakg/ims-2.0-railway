@@ -270,7 +270,7 @@ GRN_SUBTYPE_DC = "DELIVERY_CHALLAN"
 # D14 (owner 2026-09-29): goods bought from a local / walk-in dealer with no
 # PO. Supplier on file OR the dealer's name, a cost on every line, the bill
 # photo (same mandatory-document gate as STANDARD), bill number/date if any.
-# Its bill books no input tax credit (ap_engine.itc_eligible).
+# Its bill books no input tax credit (org_validation.itc_claimable).
 GRN_SUBTYPE_NO_PO = ap_engine.GRN_SUBTYPE_NO_PO
 _GRN_SUBTYPES = (GRN_SUBTYPE_STANDARD, GRN_SUBTYPE_DC, GRN_SUBTYPE_NO_PO)
 

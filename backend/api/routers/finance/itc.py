@@ -18,37 +18,6 @@ from .gst import _itc_eligible_bill
 # === GST input-tax-credit (ITC) reconciliation (ADMIN / ACCOUNTANT) ===
 
 
-def _primary_entity_state(db, entity_id: Optional[str] = None) -> Optional[str]:
-    """Resolve the primary state code for the entity.
-
-    When `entity_id` is given, take that entity's `primary_state` / `state`.
-    Otherwise pick the first entity in the DB. Returns None when no entity
-    matches -- in that case the ITC register falls back to intra-state
-    behaviour (existing rows aren't reclassified).
-    """
-    try:
-        coll = db.get_collection("entities")
-        if entity_id:
-            doc = coll.find_one(
-                {"entity_id": entity_id},
-                {"_id": 0, "primary_state": 1, "state": 1, "state_code": 1},
-            )
-        else:
-            doc = coll.find_one(
-                {}, {"_id": 0, "primary_state": 1, "state": 1, "state_code": 1}
-            )
-        if not doc:
-            return None
-        return (
-            doc.get("primary_state")
-            or doc.get("state_code")
-            or doc.get("state")
-            or None
-        )
-    except Exception:
-        return None
-
-
 @router.get("/itc-register")
 async def itc_register(
     period: Optional[str] = Query(None, description="YYYY-MM filter; omit for all"),
@@ -93,7 +62,14 @@ async def itc_register(
                     "bill_date": 1,
                     "taxable_amount": 1,
                     "tax_amount": 1,
-                    "place_of_supply": 1,
+                    # The bill's own heads -- the register reports them as
+                    # stored (F40); a legacy bill without them is split by the
+                    # engine's rule from its two GSTINs.
+                    "cgst_total": 1,
+                    "sgst_total": 1,
+                    "igst_total": 1,
+                    "vendor_gstin": 1,
+                    "recipient_gstin": 1,
                     "status": 1,
                     "itc_blocked": 1,
                     "itc_eligible": 1,
@@ -104,8 +80,7 @@ async def itc_register(
     except Exception:
         raw_bills = []
     bills = [b for b in raw_bills if _itc_eligible_bill(b)]
-    entity_state = _primary_entity_state(db, entity_id)
-    out = itc_reconcile.build_itc_register(bills, entity_state=entity_state)
+    out = itc_reconcile.build_itc_register(bills)
     if period:
         out["periods"] = [p for p in out["periods"] if p.get("period") == period]
     return out

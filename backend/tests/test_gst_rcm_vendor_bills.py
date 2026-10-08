@@ -20,6 +20,11 @@ class _Coll:
     def find_one(self, flt, proj=None):
         return self._fo
 
+    def find(self, flt=None, proj=None):
+        # The shop-GSTIN read (org_validation.shop_gstins) lists stores and
+        # companies; this world has one shop of E1 and no registrations.
+        return iter([])
+
     def aggregate(self, pipeline):
         self.agg_pipeline = pipeline
         return iter(self._agg)
@@ -30,7 +35,9 @@ class _DB:
         self._map = {"stores": stores_coll, "vendor_bills": vb_coll}
 
     def __getitem__(self, name):
-        return self._map[name]
+        return self._map.get(name) or _Coll()
+
+    get_collection = __getitem__
 
 
 def test_rcm_sums_reverse_charge_bills_entity_scoped():

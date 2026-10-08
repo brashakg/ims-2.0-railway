@@ -117,7 +117,6 @@ from ._shared import (  # noqa: F401
     _split_output_tax,
     _store_maps,
     _store_state_map,
-    _store_gstin_map,
     _customer_state_map,
     pnl_by_category,
     is_period_locked,
@@ -168,7 +167,6 @@ from .survival import (  # noqa: F401
     get_survival_cashflow,
 )
 from .itc import (  # noqa: F401
-    _primary_entity_state,
     itc_register,
     Gstr2bRow,
     Gstr2bReconcileBody,

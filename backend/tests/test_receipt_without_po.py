@@ -361,12 +361,14 @@ def test_c7_only_a_no_po_receipt_takes_a_typed_cost():
 def test_d14_the_itc_rule_itself():
     """One rule for both bill doors: no credit on a no-PO receipt's bill, and
     an operator's own "no credit" on any other bill still stands."""
-    from api.services import ap_engine
+    from api.services.org_validation import itc_claimable
 
-    assert ap_engine.itc_eligible({"grn_subtype": "NO_PO"}, True) is False
-    assert ap_engine.itc_eligible({"grn_subtype": "STANDARD"}, True) is True
-    assert ap_engine.itc_eligible(None) is True
-    assert ap_engine.itc_eligible({"grn_subtype": "STANDARD"}, False) is False
+    reg = "20AACCD5678E1ZX"
+    assert itc_claimable(reg, False, True, {"grn_subtype": "NO_PO"}) is False
+    assert itc_claimable(reg, True, True, {"grn_subtype": "NO_PO"}) is False
+    assert itc_claimable(reg, False, True, {"grn_subtype": "STANDARD"}) is True
+    assert itc_claimable(reg) is True
+    assert itc_claimable(reg, False, False, {"grn_subtype": "STANDARD"}) is False
 
 
 def test_c7_no_po_receipt_needs_the_bill_photo(world):

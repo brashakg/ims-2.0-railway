@@ -120,18 +120,9 @@ def normalize_bill_kind(value):
 
 # Owner ruling D14 (2026-09-29): goods bought from a local / walk-in dealer
 # without a purchase order arrive on a "Bought without PO" receipt, and a bill
-# booked against one claims NO input tax credit -- whatever the client sent.
-# BOTH bill doors (purchase_invoices.create_purchase_invoice and
-# vendors.create_vendor_bill) stamp itc_eligible through here, so every ITC
-# reader (the register, /gst/summary, GSTR-3B Table 4 -- all skip
-# itc_eligible False) leaves it out.
+# booked against one claims NO input tax credit -- whatever the client sent
+# (org_validation.itc_claimable, the one credit rule, reads it).
 GRN_SUBTYPE_NO_PO = "NO_PO"
-
-
-def itc_eligible(receipt: Optional[dict], requested=True) -> bool:
-    """The itc_eligible a bill against ``receipt`` (its GRN doc, or None) is
-    stored with."""
-    return bool(requested) and (receipt or {}).get("grn_subtype") != GRN_SUBTYPE_NO_PO
 
 
 def _f(v) -> float:
@@ -160,6 +151,39 @@ def parse_date(s) -> Optional[datetime]:
         return datetime.fromisoformat(txt[:10])
     except ValueError:
         return None
+
+
+# GST began on 1 July 2017: no GSTR-3B exists for an earlier month.
+GST_START = date(2017, 7, 1)
+
+
+def iso_bill_date(value) -> str:
+    """THE bill-date rule of every bill door (the line-detail invoice and the
+    Cash Flow '+ bill'): a real calendar date written YYYY-MM-DD, from the
+    start of GST (GST_START) to today in IST, returned in that form. Every GST
+    return places a bill in its month by comparing this string
+    (reports.gst_itc._itc_month) and the period lock parses it, so a bill
+    dated '' or '09/05/2026' was on no GSTR-3B and under no lock -- and one
+    dated '0202-05-09' (a half-typed year) or '2062-05-09' only on a return
+    nobody files. ValueError otherwise, for the schema validator to report."""
+    txt = str(value or "").strip()
+    d = None
+    if len(txt) == 10 and txt[4] == txt[7] == "-" and (txt[:4] + txt[5:7] + txt[8:]).isdigit():
+        try:
+            d = date.fromisoformat(txt)
+        except ValueError:
+            pass
+    if d is None:
+        raise ValueError(
+            "Bill date must be a real date written YYYY-MM-DD, as printed on "
+            "the supplier's bill"
+        )
+    if not GST_START <= d <= now_ist_naive().date():
+        raise ValueError(
+            f"Bill date {txt} is not between 1 July 2017 (the start of GST) and "
+            "today -- check the year as printed on the supplier's bill"
+        )
+    return d.isoformat()
 
 
 def compute_due_date(bill_date_iso: str, credit_days: int) -> Optional[str]:
