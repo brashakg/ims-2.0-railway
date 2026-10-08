@@ -3513,3 +3513,49 @@ def test_r6_a_refused_order_takes_no_po_number(world):
         b == a + 1,
         f"R1-72: a refused order burned a PO number ({first['po_number']} -> {second['po_number']})",
     )
+
+
+def test_r6_a_sizeless_line_against_a_legacy_sized_frame_asks_for_the_eye_size(world):
+    # R2-15: a frame keyed before eye size joined the key carries the 3-part
+    # key a SIZELESS typed line makes; it is the 54 item (the migration re-keys
+    # it so), so both doors ask for the eye size, never "use it?".
+    _pre_deploy_frame(world, lens_size="54")
+    refused = _refused_po(
+        world, [{"new_product": {**CARRERA_TYPED, "size": None}, "quantity": 1, "unit_price": 3200}]
+    )
+    finding(
+        refused is not None
+        and refused.status_code == 422
+        and refused.detail.get("code") == "EYE_SIZE_NEEDED"
+        and "54" in refused.detail["message"],
+        f"R2-15: a sizeless line against a legacy 54 got {getattr(refused, 'detail', None)}",
+    )
+    with pytest.raises(HTTPException) as added:
+        world.catalogue_frame("Carrera", "CA 8895", "807", None, mrp=6990, offer=6490, cost=3100)
+    assert added.value.status_code == 422
+    assert len(world.products_named("Carrera", "CA 8895")) == 1
+
+
+def test_r6_a_discarded_draft_never_names_an_eye_size_the_catalogue_has(world):
+    # R1-98: the only sized Boss 1700 C2 is a discarded draft -- "in the
+    # catalogue by eye size (52)" is false; a sizeless Boss is its own item.
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    _discard(world, draft_id, po, grn)
+    po2 = world.raise_po(
+        [{"new_product": {**BOSS_TYPED, "size": None}, "quantity": 1, "unit_price": 1200}]
+    )
+    finding(
+        po2["items"][0]["product_id"] != draft_id,
+        "R1-98: a sizeless Boss was refused for the discarded 52",
+    )
+    assert world.product(draft_id)["discarded_draft"] is True
+
+
+def test_r6_the_eye_size_rule_is_for_eye_size_categories_only(world):
+    # R2-19: an accessory keeps its own `size`; a sizeless one beside a sized
+    # one is its own item, never EYE_SIZE_NEEDED.
+    typed = {"category": "ACCESSORIES", "brand": "Zeiss", "model": "Lens Wipes", "mrp": 199}
+    world.raise_po([{"new_product": {**typed, "size": "M"}, "quantity": 5, "unit_price": 90}])
+    po = world.raise_po([{"new_product": dict(typed), "quantity": 5, "unit_price": 90}])
+    assert po["items"][0]["product_id"]
+    assert len(world.products_named("Zeiss", "Lens Wipes")) == 2
