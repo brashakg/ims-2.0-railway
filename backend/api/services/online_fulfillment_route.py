@@ -1011,15 +1011,16 @@ async def move_fulfillment_orders(db, order_id: str) -> Dict[str, Any]:
     if "fulfillment_breakdown" not in order:
         return {"moved": 0, "failed": 0}
     stale = _stale_move(order)
+    sending = [
+        ({**m, "status": "SKIPPED", "error": stale} if stale else {**m, "status": "SENDING"})
+        if m in planned
+        else m
+        for m in moves
+    ]
     try:
         claimed = _orders(db).update_one(
             {"order_id": order_id, "fulfillment_route.moves": route.get("moves")},
-            {"$set": {"fulfillment_route.moves": [
-                ({**m, "status": "SKIPPED", "error": stale} if stale else {**m, "status": "SENDING"})
-                if m in planned
-                else m
-                for m in moves
-            ]}},
+            {"$set": {"fulfillment_route.moves": sending}},
         )
         # ponytail: a crash between this claim and the write below leaves the
         # moves SENDING (never retried) -- the order stays held under the
@@ -1078,7 +1079,6 @@ async def move_fulfillment_orders(db, order_id: str) -> Dict[str, Any]:
             "yourself (Orders > order > Change location), then clear the hold. "
             "Until then Shopify has it (and the unit it committed) at the other shop.",
         )}
-        route["problems"] = list(route.get("problems") or []) + [problem]
         route["hold_reason"] = problem["message"]
         # Keep (or put) the order on hold -- unless another hold (a stock
         # miss, a seller GSTIN) already owns the reason, which stays.
@@ -1101,13 +1101,27 @@ async def move_fulfillment_orders(db, order_id: str) -> Dict[str, Any]:
              {"$set": {"fulfillment_hold": False}, "$unset": {"stock_hold_reason": ""}}),
             ({"stock_hold_reason": pending}, {"$unset": {"stock_hold_reason": ""}}),
         ] if pending else []
+    # Only the route fields the move owns, and only on the moves it claimed:
+    # a clear-hold landing while Shopify answered (its seller_released_at)
+    # stays, and a Re-map that wrote a new route meanwhile is never undone.
+    write: Dict[str, Any] = {"$set": {
+        "fulfillment_route.moves": moves,
+        "fulfillment_route.fulfillment_order_ids": fo_ids,
+        "fulfillment_route.hold_reason": route.get("hold_reason"),
+    }}
+    if failed:
+        write["$push"] = {"fulfillment_route.problems": problem}
+    ours = False
     try:
-        _orders(db).update_one({"order_id": order_id}, {"$set": {"fulfillment_route": route}})
-        for flt, upd in holds:
+        ours = bool(getattr(_orders(db).update_one(
+            {"order_id": order_id, "fulfillment_route.moves": sending}, write), "matched_count", 0))
+        if not ours:
+            logger.warning("[ONLINE_ROUTE] route of %s re-written while its move was sent: left as is", order_id)
+        for flt, upd in holds if ours else []:
             _orders(db).update_one({"order_id": order_id, **flt}, upd)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[ONLINE_ROUTE] route write-back failed for %s: %s", order_id, exc)
-    if failed and _ident(problem) not in _tasked(route):
+    if failed and ours and _ident(problem) not in _tasked(route):
         # Only the NEW problem: the booking-time ones were tasked at booking,
         # and a human may already have closed them.
         raise_problem_tasks(db, {**order, "fulfillment_route": {**route, "problems": [problem]}})

@@ -4148,3 +4148,70 @@ def test_a_superadmin_credit_note_on_a_held_sale_is_not_filed_either(world, monk
     assert g3["outwardTaxableValue"] == 0.0
     assert g3["creditNotes"] == {"integratedTax": 0.0, "centralTax": 0.0,
                                  "stateTax": 0.0, "taxableValue": 0.0}, g3["creditNotes"]
+
+
+# ---------------------------------------------------------------------------
+# R26 -- money panel, round 19
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("landing", ["clear_hold", "remap_write"])
+def test_a_move_on_the_wire_never_undoes_what_landed_meanwhile(world, monkeypatch, landing):
+    """[LOW] Round 19, item 4: Shopify splits RB x3 + OA x1 -- FO_1 Bokaro
+    (RB 2), FO_3 Dhanbad, a new Jharkhand shop with no GSTIN yet (RB 1),
+    FO_2 Ranchi (OA 1). Ranchi is short, so the booking plans Ranchi ->
+    Bokaro and holds the order SHOP_GSTIN_MISSING on Dhanbad's leg. While
+    the booking's move is on the wire, the admin sets Dhanbad's GSTIN and
+    presses clear-hold: released. The move then wrote back the WHOLE route it
+    read before, erasing seller_released_at -- held off every GST door again
+    with no hold flag to clear. The move writes only its own route fields
+    now, and only on the moves it claimed (a Re-map's route written meanwhile
+    stays too)."""
+    from api.routers import online_store_orders as oso
+
+    db = world["db"]
+    _shop(db, "BV-DHN-01", "BV Dhanbad", "", LOC_DHN)
+    _stock(db, "BV-BOK-01", "P-RB", 2)
+    _stock(db, "BV-BOK-01", "P-OA", 1)
+    _stock(db, "BV-DHN-01", "P-RB", 1)
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 2)])
+    world["shop"].fo(FO_3, LOC_DHN, lines=[(9000, 1)])
+    world["shop"].fo(FO_2, LOC_RAN, lines=[(9001, 1)])
+    payload = _order(61240 + len(landing), lines=(("RB-1234", 3), ("OA-5", 1)))
+    monkeypatch.setattr(oso, "_get_db", lambda: db)
+    monkeypatch.setattr(oso, "_write_rx_hold_audit", lambda *a, **k: None)
+    real = shopify_push._graphql
+    landed = {}
+
+    async def land_mid_move(db_, query, variables):
+        if "imsFulfillmentOrderMove" in query and not landed:
+            oid = db.orders.find_one({"shopify_order_id": str(payload["id"])})["order_id"]
+            if landing == "clear_hold":
+                db.stores.update_one({"store_id": "BV-DHN-01"}, {"$set": {"gstin": "20AAAAA0000A1Z5"}})
+                landed["out"] = await oso.clear_rx_hold(
+                    oid, None, current_user={"user_id": "u1", "roles": ["ADMIN"]})
+            else:  # a Re-map's write: a whole new route, held on its own planned move
+                pending = db.orders.find_one({"order_id": oid})["fulfillment_route"]["hold_reason"]
+                landed["route"] = {"store_id": "BV-BOK-01", "problems": [], "hold_reason": pending,
+                                   "moves": [{"fulfillment_order_id": FO_3, "to_location_id": LOC_BOK,
+                                              "to_store_id": "BV-BOK-01", "status": "PLANNED"}],
+                                   "rerouted_at": "2026-10-08T10:00:00+00:00"}
+                db.orders.update_one({"order_id": oid}, {"$set": {
+                    "fulfillment_route": landed["route"], "stock_hold_reason": pending,
+                    "fulfillment_hold": True}})
+        return await real(db_, query, variables)
+
+    monkeypatch.setattr(shopify_push, "_graphql", land_mid_move)
+    res, _order_doc = _book(world, payload)
+
+    assert world["shop"].moves() == [{"id": FO_2, "newLocationId": LOC_BOK}]
+    after = db.orders.find_one({"order_id": res["order_id"]}, {"_id": 0})
+    if landing == "remap_write":  # its route and its hold stand
+        assert after["fulfillment_route"] == landed["route"]
+        assert after["fulfillment_hold"] is True
+        assert after["stock_hold_reason"] == landed["route"]["hold_reason"]
+        return
+    assert "Seller (GSTIN) hold released" in landed["out"]["message"], landed
+    assert after["fulfillment_route"].get(route_mod.SELLER_RELEASED)
+    assert not route_mod.seller_held(after) and after["fulfillment_hold"] is False
+    assert [m["status"] for m in after["fulfillment_route"]["moves"]] == ["MOVED"]
