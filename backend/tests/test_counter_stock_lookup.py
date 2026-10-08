@@ -718,10 +718,30 @@ def test_d7b3_a_shop_the_till_does_not_count_is_not_tracked(call, mongo_db, monk
         {"_id": pid, "product_id": pid, "sku": "SKU-TRACK-1", "brand": "Zeiss", "model": "TRK1",
          "category": "ANY", "mrp": 3000.0, "offer_price": 3000.0, "is_active": True}
     )
-    # Dhanbad: a box in date; Bokaro: only an expired box (tracked, sells 0);
-    # Pune: no unit at all.
+    # Round 7: the guard's `tracked` is ANY status, so a shop that sold or
+    # reserved its last unit is tracked (the till refuses, /sellable says 0)
+    # -- a lookup that counted only AVAILABLE rows would read 'not tracked'.
+    sold, reserved, mixed = "S4-RANCHI", "S5-JAMSHEDPUR", "S6-NAGPUR"
+    mongo_db["stores"].insert_many(
+        [{"store_id": s, "store_code": s, "store_name": s, "store_type": "RETAIL", "is_active": True}
+         for s in (sold, reserved, mixed)]
+    )
+    # Dhanbad: 2 boxes in date plus a sold, a reserved, an expired and a
+    # shipped-away row; Bokaro: only an expired box (tracked, sells 0); Pune:
+    # no unit at all; Ranchi: only a SOLD row; Jamshedpur: only a RESERVED
+    # row; Nagpur: a unit shipped to Dhanbad and an expired box.
     mongo_db["stock_units"].insert_many(
-        [_unit(pid, S1, expiry_date="2099-12-31"), _unit(pid, S2, expiry_date="2020-01-01")]
+        [
+            _unit(pid, S1, expiry_date="2099-12-31"), _unit(pid, S1, expiry_date="2099-12-31"),
+            _unit(pid, S1, "SOLD"), _unit(pid, S1, "RESERVED"),
+            _unit(pid, S1, expiry_date="2020-01-01"),
+            _unit(pid, S1, "TRANSFERRED", transfer_to_store_id=S2),
+            _unit(pid, S2, expiry_date="2020-01-01"),
+            _unit(pid, sold, "SOLD"),
+            _unit(pid, reserved, "RESERVED"),
+            _unit(pid, mixed, "TRANSFERRED", transfer_to_store_id=S1),
+            _unit(pid, mixed, expiry_date="2020-01-01"),
+        ]
     )
 
     body = _ok(call(_user("CASHIER", S1), q="SKU-TRACK-1"))
@@ -729,7 +749,7 @@ def test_d7b3_a_shop_the_till_does_not_count_is_not_tracked(call, mongo_db, monk
     assert isinstance(not_counted, list), f"the guard's lists ride on the answer: {sorted(body)}"
     assert set(body.get("lens_grid_item_types") or []) <= set(not_counted), "a lens-grid line is never counted"
     item = _items(body)[pid]
-    for shop in (S1, S2, S3):
+    for shop in (S1, S2, S3, sold, reserved, mixed):
         cell = _stores(item)[shop]
         till = _ok(call(_user("CASHIER", shop), "/inventory/sellable",
                         product_ids=pid, item_types=item_type))["sellable"][pid]
