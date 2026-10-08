@@ -18,6 +18,7 @@ from ._shared import (
     require_roles,
     router,
 )
+from .numbering import grn_number_pending
 
 
 def _stamp_event_actors(events: list) -> None:
@@ -103,8 +104,16 @@ async def get_po_timeline(po_id: str, current_user: dict = Depends(get_current_u
     try:
         grn_repo = get_grn_repository()
         if grn_repo is not None:
+            # Same as the receipts list (audit F28): number a stranded
+            # receipt first, and leave out one still on its PENDING/<id>
+            # placeholder -- the drawer must never print it as a number.
+            from .grn import _number_stranded_receipts  # lazy: keeps route order
+
+            _number_stranded_receipts(grn_repo)
             grns = grn_repo.find_many({"po_id": po_id}, limit=200) or []
             for g in grns:
+                if grn_number_pending(g):
+                    continue
                 gid = g.get("grn_id")
                 if gid:
                     grn_ids.append(gid)

@@ -452,3 +452,30 @@ def test_a_create_whose_claim_is_taken_over_never_overwrites_the_number(monkeypa
     (row,) = list(db.grns.find())
     assert row["grn_number"] == "RCPT/BV-TEST-01/26-27/0001"  # the healer's
     assert res["grn_number"] == row["grn_number"]
+
+
+# ---------------------------------------------------------------------------
+# Panel round: the PO timeline drawer reads every receipt on the PO
+# ---------------------------------------------------------------------------
+
+
+def test_the_po_timeline_never_names_a_placeholder(monkeypatch):
+    """A worker died between the insert and the number, and the buyer opened
+    the PO drawer before anyone created, accepted or listed receipts. It
+    printed 'PENDING/G-DEAD - Goods receipt logged' as the receipt number.
+    The timeline numbers a stranded row itself; a row its own request is
+    still numbering is left out until it has a number."""
+    db = mongomock.MongoClient().db
+    _wire(monkeypatch, GRNRepository(db.grns))
+    monkeypatch.setattr(v, "_get_db", lambda: db)
+    _counting_minter(monkeypatch)
+    _stranded(db, "G-DEAD", 5, po_id="PO1", total_received=10)
+    _stranded(db, "G-FRESH", 0, po_id="PO1")
+
+    out = asyncio.run(v.get_po_timeline("PO1", current_user=_user()))
+
+    assert sorted((e["kind"], e["ref"]) for e in out["events"]) == [
+        ("box_received", "RCPT/BV-TEST-01/26-27/0001"),
+        ("ordered", "PO-TEST-1"),
+    ]
+    assert [g["grn_number"] for g in out["grns"]] == ["RCPT/BV-TEST-01/26-27/0001"]
