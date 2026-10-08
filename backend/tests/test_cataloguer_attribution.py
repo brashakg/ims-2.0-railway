@@ -379,13 +379,13 @@ class FakeListRepo(FakeProductRepo):
         self.calls: List[Dict] = []
 
     def search_products(self, query, category=None, *, is_active=True,
-                        created_by=None, skip=0, limit=100):
+                        created_by=None, skip=0, limit=100, anywhere=False):
         self.calls.append({"branch": "search", "created_by": created_by})
         return [d for d in self.docs.values()
                 if not created_by or d.get("created_by") == created_by]
 
     def count_search_products(self, query, category=None, *, is_active=True,
-                              created_by=None):
+                              created_by=None, anywhere=False):
         return len([d for d in self.docs.values()
                     if not created_by or d.get("created_by") == created_by])
 

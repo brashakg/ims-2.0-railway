@@ -1715,6 +1715,10 @@ def _grn_create_ok(monkeypatch, store, thief):
             self.created = doc
             return doc
 
+        def update(self, _grn_id, fields):
+            self.created.update(fields)
+            return True
+
         def find_many(self, *_a, **_k):
             return []
 
@@ -1955,6 +1959,10 @@ def test_cross_store_receiving_is_not_blocked_by_the_attachment_bind(
         def create(self, doc):
             _GrnRepo.created = doc
             return doc
+
+        def update(self, _grn_id, fields):
+            _GrnRepo.created.update(fields)
+            return True
 
         def find_many(self, *_a, **_k):
             return []

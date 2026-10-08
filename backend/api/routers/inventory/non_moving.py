@@ -6,7 +6,6 @@ from ._shared import (
     Optional,
     Query,
     _SOLD_STATUSES,
-    _on_hand_status_clause,
     datetime,
     get_current_user,
     logger,
@@ -16,6 +15,8 @@ from ._shared import (
 )
 from .helpers import (
     _get_db,
+    _had_the_window,
+    _shelf_by_product,
 )
 
 # ============================================================================
@@ -60,7 +61,8 @@ async def get_non_moving_stock(
         products = list(products_coll.find(query, {"_id": 1, "name": 1, "sku": 1}))
 
         # Get products with sales in last N days (at the active store)
-        cutoff_date = datetime.utcnow() - timedelta(days=days)
+        now = datetime.utcnow()
+        cutoff_date = now - timedelta(days=days)
         sold_products = set()
 
         orders_filter = {
@@ -75,27 +77,30 @@ async def get_non_moving_stock(
             for item in order.get("items", []):
                 sold_products.add(item.get("product_id"))
 
+        # On-hand units per product here, and when the oldest arrived. Count
+        # ONLY on-hand units -- counting ALL stock_units rows let SOLD units
+        # inflate current_stock (10 sold, 0 available showed 10). The PHYSICAL
+        # question, through the shared clause: this reader used to carry its
+        # own four-spelling list, which is how a lowercase `reserved` unit was
+        # stock here and gone to the count. One serialized row == one unit; a
+        # row with no `quantity` counts as one.
+        shelf = _shelf_by_product(stock_coll, active_store)
+
         # Find non-moving products
         non_moving = []
         for product in products:
             product_id = str(product.get("_id"))
             if product_id not in sold_products:
-                # Count ONLY on-hand units -- counting ALL stock_units rows
-                # let SOLD units inflate current_stock (10 sold, 0 available
-                # showed 10). The PHYSICAL question, through the shared clause:
-                # this reader used to carry its own four-spelling list, which
-                # is how a lowercase `reserved` unit was stock here and gone to
-                # the count.
-                stock_filter = {
-                    "product_id": product_id,
-                    **_on_hand_status_clause(include_reserved=True),
-                }
-                if active_store:
-                    stock_filter["store_id"] = active_store
-                stock = stock_coll.find(stock_filter)
-                # One serialized stock row == one physical unit; rows with no
-                # `quantity` field still count as one unit on hand.
-                total_qty = sum(s.get("quantity", 1) for s in stock)
+                # The VERDICT needs stock that has sat on the shelf for the
+                # whole window: a unit received this morning has not had N days
+                # to sell (audit F54). The oldest unit decides, by the arrival
+                # rule Aging and Alerts use (unknown age is old; opening
+                # stock ages from its entry day). The Stock column shows
+                # everything here.
+                row = shelf.get(product_id) or {}
+                total_qty = row.get("quantity", 0)
+                if total_qty <= 0 or not _had_the_window(row.get("oldest"), now, days):
+                    continue  # nothing here, or nothing has had the window
 
                 # Get last sold date (at the active store)
                 last_order_filter = {"items.product_id": product_id}
