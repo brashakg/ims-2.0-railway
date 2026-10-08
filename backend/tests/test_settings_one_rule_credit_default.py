@@ -106,6 +106,31 @@ def test_no_saved_default_means_rs_150000(db):
     assert customers_module.effective_credit_limit({"customer_id": "C1"}) == 150000.0
 
 
+class _Unreadable:
+    def find_one(self, *a, **kw):
+        raise RuntimeError("settings store down")
+
+
+@pytest.fixture(params=["store down", "abc", "Infinity", float("inf"), float("nan")])
+def unreadable_default(request, db, monkeypatch):
+    """A saved default the check cannot use: the read raises, or a non-number /
+    infinity / NaN written outside the strict PUT."""
+    if request.param == "store down":
+        for m in {settings_module, importlib.import_module("api.routers.settings")}:
+            monkeypatch.setattr(m, "_get_settings_collection", lambda n: _Unreadable())
+    else:
+        db["admin_controls"].insert_one({"_id": "default", "operational_rules": {"default_credit_limit": request.param}})
+
+
+def test_an_unreadable_default_falls_back_to_rs_150000_never_unlimited(unreadable_default, till):
+    assert customers_module.effective_credit_limit({"customer_id": "C1"}) == 150000.0
+    coll = till({"customer_id": "C1"})
+    with pytest.raises(HTTPException) as exc:
+        _credit(140001.0)  # 10,000 owed + 1,40,001 > 1,50,000
+    assert exc.value.status_code == 400
+    assert coll.find_one({"order_id": "ORD-1"})["payments"] == []
+
+
 @pytest.mark.parametrize("own", [None, 0, 0.0])
 def test_a_customer_with_no_limit_of_their_own_gets_the_default(db, own):
     doc = {"customer_id": "C1"} if own is None else {"customer_id": "C1", "credit_limit": own}

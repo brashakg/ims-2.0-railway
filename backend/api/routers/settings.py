@@ -2436,15 +2436,15 @@ DEFAULT_CREDIT_LIMIT = 150000.0  # owner ruling 2026-10-08: Rs 1,50,000
 
 def chain_default_credit_limit() -> float:
     """Credit limit for a customer with none of their own: the value saved on
-    Settings > Operational Rules, else Rs 1,50,000. Never raises - a missing or
-    unreadable value falls back to the ruling, never to 'unlimited'."""
+    Settings > Operational Rules, else Rs 1,50,000. Never raises - a missing,
+    unreadable or infinite value falls back to the ruling, never to 'unlimited'."""
     try:
         coll = _get_settings_collection("admin_controls")
         doc = coll.find_one({"_id": "default"}) if coll is not None else None
         value = float(((doc or {}).get("operational_rules") or {}).get("default_credit_limit") or 0)
     except Exception:  # noqa: BLE001
         value = 0.0
-    return value if value > 0 else DEFAULT_CREDIT_LIMIT
+    return value if 0 < value < float("inf") else DEFAULT_CREDIT_LIMIT  # NaN fails both
 
 
 class OperationalRules(BaseModel):
