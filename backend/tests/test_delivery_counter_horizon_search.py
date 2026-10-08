@@ -239,6 +239,23 @@ def test_search_does_not_return_orders_that_are_not_awaiting_collection(
     assert "ord-done" not in _ids(r)
 
 
+@pytest.mark.parametrize("q", [None, "Rakesh", "9876543210"], ids=["queue", "name", "phone"])
+def test_a_shipped_order_awaits_the_counter_like_a_ready_one(client, counter, q):
+    """Owner 2026-10-08: the counter MAY Mark Delivered a SHIPPED order. A
+    click-and-collect order Shopify marked fulfilled is SHIPPED (ruling 1),
+    and the queue and its name / phone search kept READY only: "Nothing
+    awaiting collection", so only a scan of the exact id found it. Every
+    status the transition table lets the counter deliver is in the queue;
+    an order not yet ready never is."""
+    _seed_customer(counter["customers"])
+    _seed_order(counter["orders"], "ord-ready", IN_WINDOW)
+    _seed_order(counter["orders"], "ord-shipped", IN_WINDOW, status="SHIPPED")
+    _seed_order(counter["orders"], "ord-confirmed", IN_WINDOW, status="CONFIRMED")
+    r = _get(client, _headers(["SALES_CASHIER"]), **({"q": q} if q else {}))
+    assert r.status_code == 200, r.text
+    assert _ids(r) == {"ord-ready", "ord-shipped"}
+
+
 def test_search_does_not_return_another_customers_order(client, counter):
     _seed_customer(counter["customers"])
     _seed_order(
