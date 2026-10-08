@@ -3394,3 +3394,52 @@ def test_r6_not_received_is_for_the_receiving_managers_only():
     ]
     assert len(rows) == 1 and "ACCOUNTANT" not in rows[0]["allowed"]
     assert vd._DROP_ROLES == ("ADMIN", "AREA_MANAGER", "STORE_MANAGER")
+
+
+def test_r6_a_product_finished_during_an_accept_is_released_after_it(world, monkeypatch):
+    # R1-19 (follow-ups 1 and 43): the cataloguer's save lands while a
+    # manager's "Add to stock" holds the receipt's claim. The save's release
+    # loses the claim (409, swallowed); the accept had read the product
+    # before the save and holds the line. Whoever finishes last must see the
+    # other: the units go on the shelf.
+    from api.routers.vendors import grn_accept as _ga
+
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    real_flip = _ga._advance_grn_terminal_status
+    saved = []
+
+    def _save_meanwhile(*a, **k):
+        # Still under the accept's claim: the line is held, nothing flipped.
+        if not saved:
+            # The cataloguer's request runs on its own (another worker): a
+            # thread with its own event loop.
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(1) as pool:
+                saved.append(pool.submit(world.finish_draft, draft_id, 2790).result())
+            # The save's own release lost the claim to this accept.
+            saved.append(len(world.units(draft_id)))
+        return real_flip(*a, **k)
+
+    monkeypatch.setattr(_ga, "_advance_grn_terminal_status", _save_meanwhile)
+    _run(vd.accept_grn(grn["grn_id"], MANAGER))
+    assert saved[1] == 0, "the save's release was not raced"
+    assert saved and saved[0]["catalog_status"] == "ACTIVE"
+    finding(
+        len(world.units(draft_id)) == 2 and world.grn(grn["grn_id"])["status"] == "ACCEPTED",
+        f"R1-19: a product finished during an accept left {len(world.units(draft_id))} "
+        f"of 2 units on the shelf ({world.grn(grn['grn_id'])['status']})",
+    )
+
+
+def test_r6_a_release_never_restamps_when_the_receipt_was_accepted(world):
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    first = world.grn(grn["grn_id"])["accepted_at"]
+    world.finish_draft(draft_id, offer=2790)
+    stored = world.grn(grn["grn_id"])
+    assert stored["status"] == "ACCEPTED"
+    finding(
+        stored["accepted_at"] == first,
+        f"R1-21: the release restamped accepted_at ({first} -> {stored['accepted_at']})",
+    )
+    assert stored["last_accepted_at"] >= first

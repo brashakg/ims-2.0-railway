@@ -439,6 +439,21 @@ def _put_on_shelf(
         raise
     # The receipt's cost finished a draft mid-accept (gst._finished_by_the_promote):
     # its OTHER held receipts go on the shelf now that this claim is handed back.
+    # And a line held for the catalogue whose product is complete NOW was
+    # finished while this claim was held: that save's release lost the claim
+    # to this accept (and swallowed its 409), so the release is run here, the
+    # claim handed back -- whichever of the two finishes last sees the other
+    # (R1-19, follow-ups 1 and 43).
+    product_repo = get_product_repository()
+    for ln in result.get("unresolved_lines") or []:
+        if ln.get("reason") != "incomplete_catalog" or product_repo is None:
+            continue
+        try:
+            now_prod = product_repo.find_by_id(ln.get("product_id"))
+        except Exception:  # noqa: BLE001 - the hold stands; 'Add to stock' retries
+            continue
+        if now_prod is not None and not _pm.compute_catalog_status(now_prod)[1]:
+            deferred_releases.append(ln["product_id"])
     for pid in dict.fromkeys(deferred_releases):
         release_held_receipts(pid)
     return result
@@ -874,7 +889,10 @@ def _accept_grn_claimed(
         grn_id,
         claim_token,
         {
-            "accepted_at": datetime.now().isoformat(),
+            # When the receipt was FIRST accepted: a later release or re-accept
+            # of its held lines never restamps it (R1-21); it is last_accepted_at.
+            "accepted_at": grn.get("accepted_at") or datetime.now().isoformat(),
+            "last_accepted_at": datetime.now().isoformat(),
             "accepted_by": user_id,
             "units_added": units_added,
             "unresolved_lines": unresolved_lines,
