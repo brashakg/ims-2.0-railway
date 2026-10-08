@@ -14,12 +14,14 @@ its own. Its helpers are PURE: each returns a copy without the supplier money
 and never mutates what it was given; an accounts caller gets the input back
 unchanged.
 
-What this module does NOT do: hide the price paid per piece or the supplier
-from the workshop on a vendor return / debit note (owner ruling 2026-09-29).
-That is the cost rule's, and its projections (cost_mask.mask_vendor_return /
-mask_debit_note) arrive with #1161 -- not on this branch. Where both apply,
-these helpers run on top, so either rule alone hides the money from a role it
-excludes. The PO timeline's bill masking is NOT here either: it is the
+A vendor return's or RMA line's price per piece IS the supplier credit per
+piece (the credit is quantity x that price), so it is hidden with the credit
+from everyone outside the accounts roles -- managers and workshop included.
+What this module does NOT do: hide the supplier from the workshop on a vendor
+return / debit note (owner ruling 2026-09-29). That is the cost rule's, and
+its projections (cost_mask.mask_vendor_return / mask_debit_note) arrive with
+#1161 -- not on this branch. Where both apply, these helpers run on top, so
+either rule alone hides the money from a role it excludes. The PO timeline's bill masking is NOT here either: it is the
 inline can_see_cost(user, "payables") check in routers/vendors/po_detail
 (#1161's text, one implementation).
 
@@ -70,7 +72,8 @@ def _without(node: Any, drop: Callable[[str], bool],
 # --- RTV GST debit note (routers/rtv_debit_notes) ---------------------------
 # Every amount the note carries: per-line rate / taxable / tax / total, the
 # totals block and its rupee twin. The GST RATE (a percentage) and the
-# quantities stay -- they are not money owed.
+# quantities stay -- they are not money owed, and with the rate (the return
+# line's unit_price) hidden on the return too, nothing rebuilds the amount.
 _DEBIT_NOTE_MONEY = frozenset({
     "rate_paise", "taxable_paise", "cgst_paise", "sgst_paise", "igst_paise",
     "tax_paise", "line_total_paise", "grand_total_paise",
@@ -90,9 +93,11 @@ def strip_debit_note_money(doc: Any, user: Optional[dict]) -> Any:
 # The credit the supplier owes us for the returned goods: total_value is the
 # credit-note amount once credit_issued (vendor_returns PATCH copies it), and
 # the credit-note number is that credit's reference. items[].unit_price is the
-# per-piece cost and follows the cost rule (cost_mask), not this one.
+# same credit per piece: total_value IS sum(quantity x unit_price), so a
+# one-line return showed the hidden credit outright (panel 2026-10-08). It
+# goes with the credit; the item, quantity and reason stay.
 _VENDOR_RETURN_CREDIT = frozenset({
-    "total_value", "credit_note_amount", "credit_note_number",
+    "total_value", "credit_note_amount", "credit_note_number", "unit_price",
 })
 
 
@@ -108,12 +113,14 @@ def strip_vendor_return_credit(doc: Any, user: Optional[dict]) -> Any:
 # Expected credit, every credit received (the total and each credit note's
 # amount), the variance between them and any written-off residual, in paise
 # and rupees; line_expected_paise is a line's share of the expected credit.
-# The per-unit cost (unit_cost_paise) follows the cost rule.
+# A line's unit_cost_paise (unit_cost, the rupee form it is taken in) is that
+# credit per piece -- line_expected = qty x unit_cost_paise -- so it goes too.
 _RMA_CREDIT = frozenset({
     "expected_credit_paise", "expected_credit_rupees",
     "received_credit_paise", "received_credit_rupees",
     "variance_paise", "variance_rupees",
     "written_off_paise", "line_expected_paise", "received_paise",
+    "unit_cost_paise", "unit_cost",
 })
 # The engine writes the amount into its own status-history notes
 # (services/vendor_rma record_credit_note / close_rma); keep the event, drop

@@ -58,11 +58,14 @@ DEBIT_NOTE_MONEY = {
     "rate_paise", "taxable_paise", "cgst_paise", "sgst_paise", "igst_paise",
     "tax_paise", "line_total_paise", "grand_total_paise", "totals", "totals_rupees",
 }
-RETURN_CREDIT = {"total_value", "credit_note_amount", "credit_note_number"}
+# A line's price per piece is the credit per piece (credit = qty x price),
+# so it is supplier money too (panel 2026-10-08).
+RETURN_CREDIT = {"total_value", "credit_note_amount", "credit_note_number", "unit_price"}
 RMA_CREDIT = {
     "expected_credit_paise", "expected_credit_rupees", "received_credit_paise",
     "received_credit_rupees", "variance_paise", "variance_rupees",
     "written_off_paise", "line_expected_paise", "received_paise",
+    "unit_cost_paise", "unit_cost",
 }
 
 
@@ -77,6 +80,15 @@ def _user(role: str, uid: str = "") -> Dict[str, Any]:
         "store_ids": ["S1"],
         "active_store_id": "S1",
     }
+
+
+def _numbers(node: Any) -> list:
+    """Every number at any depth."""
+    if isinstance(node, dict):
+        return [n for v in node.values() for n in _numbers(v)]
+    if isinstance(node, list):
+        return [n for v in node for n in _numbers(v)]
+    return [node] if isinstance(node, (int, float)) and not isinstance(node, bool) else []
 
 
 def _keys(node: Any) -> set:
@@ -553,6 +565,9 @@ def test_vendor_return_reads_have_no_credit_outside_accounts(vret, role):
     assert listed["total"] == 2
     assert detail["status"] == "credit_issued"
     assert detail["items"][0]["quantity"] == 1  # the goods still read
+    # Nothing rebuilds the credit: VR-DONE is one piece at Rs 800, credit
+    # Rs 800, and VR-OPEN two at Rs 1,500 -- no 800 or 1500 anywhere.
+    assert not {800.0, 1500.0, 3000.0} & set(_numbers(listed) + _numbers(detail)), role
 
 
 @pytest.mark.parametrize("role", ACCOUNTS)
@@ -560,6 +575,7 @@ def test_vendor_return_reads_keep_credit_for_accounts(vret, role):
     listed, detail = _ret_reads(vret, role)
     assert detail["credit_note_amount"] == 800.0
     assert detail["credit_note_number"] == "CN-2609"
+    assert detail["items"][0]["unit_price"] == 800.0
     assert {r["return_id"]: r["total_value"] for r in listed["returns"]} == {
         "VR-OPEN": 3000.0, "VR-DONE": 800.0}
 
@@ -650,6 +666,9 @@ def test_rma_never_shows_a_manager_the_credit(rma, role):
     assert detail["status"] == "CREDIT_RECEIVED"
     assert detail["credit_notes"][0]["credit_note_number"] == "CN-Z1"
     assert detail["lines"][0]["quantity"] == 2
+    # Two pieces at Rs 1,500: no 150000 (per piece) or 300000 (expected) left
+    # to multiply back into the credit.
+    assert not {150000, 300000, 1500.0, 3000.0} & set(_numbers(listed) + _numbers(detail))
 
     # The close refusal names the outstanding variance -- not to a manager.
     with pytest.raises(HTTPException) as ei:
@@ -729,6 +748,17 @@ def test_every_rma_write_result_goes_through_the_strip(rma, monkeypatch, write, 
     assert (RMA_CREDIT <= set(res)) is shown and bool(set(res) & RMA_CREDIT) is shown
 
 
+@pytest.mark.parametrize("role", COUNTER)
+def test_rma_reads_give_the_counter_no_credit_per_piece(rma, role):
+    """GET /vendor-rma is AUTHENTICATED: a workshop or sales login reading a
+    manager's RMA got lines[].unit_cost_paise, the credit per piece."""
+    rid, _ = _rma_to_credit(rma, "STORE_MANAGER")
+    listed, detail = _rma_reads(rma, rid, role)
+    for body in (listed, detail):
+        assert not _keys(body) & RMA_CREDIT, (role, _keys(body) & RMA_CREDIT)
+    assert not {150000, 300000} & set(_numbers(listed) + _numbers(detail))
+
+
 @pytest.mark.parametrize("role", ("ACCOUNTANT", "ADMIN"))
 def test_rma_accounts_see_the_credit(rma, role):
     rid, writes = _rma_to_credit(rma, role)
@@ -741,6 +771,7 @@ def test_rma_accounts_see_the_credit(rma, role):
     assert detail["variance_rupees"] == 2000.0
     assert detail["credit_notes"][0]["received_paise"] == 100000
     assert listed["rmas"][0]["variance_paise"] == 200000
+    assert detail["lines"][0]["unit_cost_paise"] == 150000
     assert any(h.get("notes") == "credit note CN-Z1 for 100000 paise"
                for h in detail["status_history"])
     with pytest.raises(HTTPException) as ei:

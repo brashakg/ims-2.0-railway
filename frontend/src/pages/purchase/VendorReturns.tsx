@@ -31,8 +31,9 @@ interface ReturnItem {
   unit_price: number;
 }
 
-// WORKSHOP_STAFF reads a return without its prices (server-side cost mask,
-// owner ruling 2026-09-29): the money keys are simply absent -> shown as "-".
+// Outside PAYABLES_ROLES a return reads without its prices: a line's price is
+// the supplier credit per piece (server-side payables_mask), so the money
+// keys are simply absent -> shown as "-".
 type ReturnLine = Omit<ReturnItem, 'unit_price'> & { unit_price?: number };
 
 interface VendorReturn {
@@ -94,11 +95,12 @@ const STATUS_LABELS: Record<string, string> = {
 };
 
 // Supplier money (owner ruling 2026-10-01): the credit a supplier owes us on a
-// return (its value, the credit-note amount and number) and the GST debit
-// note's amounts are for PAYABLES_ROLES alone. The server already drops them
-// for anyone else; these copies keep them off the screen whatever it sends.
+// return (its value, each line's price per piece -- value = qty x price -- and
+// the credit-note amount and number) and the GST debit note's amounts are for
+// PAYABLES_ROLES alone. The server already drops them for anyone else; these
+// copies keep them off the screen whatever it sends.
 function withoutReturnCredit(ret: VendorReturn): VendorReturn {
-  const out = { ...ret };
+  const out = { ...ret, items: (ret.items || []).map(({ unit_price: _price, ...line }) => line) };
   delete out.total_value;
   delete out.credit_note_amount;
   delete out.credit_note_number;
