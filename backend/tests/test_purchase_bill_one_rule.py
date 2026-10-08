@@ -2384,7 +2384,8 @@ class TestRound13NotesNameTheRealScreen:
         import pathlib
 
         root = pathlib.Path(__file__).resolve().parents[1] / "api"
-        dead = ("(Settings, stores)", "Settings -> Stores", "/settings?tab=stores")
+        dead = ("(Settings, stores)", "Settings -> Stores", "/settings?tab=stores",
+                "Store Setup -> UPI VPA")
         hits = []
         for f in root.rglob("*.py"):
             rel = f.relative_to(root.parent).as_posix()
