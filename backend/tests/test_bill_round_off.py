@@ -157,6 +157,65 @@ def test_adding_and_removing_a_draft_line_re_rounds_the_bill(
     assert (saved["grand_total"], saved["round_off"], saved["balance_due"]) == (1000.0, 0.0, 1000.0)
 
 
+def _quote(client, headers, items, bill_pct=0.0):
+    return client.post(
+        "/api/v1/orders/quote",
+        json={"items": items, "cart_discount_percent": bill_pct},
+        headers=headers,
+    )
+
+
+def _disc_frame(price, line_pct):
+    return dict(_frame_item(price), discount_percent=line_pct,
+                discount_reason="regular customer")
+
+
+def test_till_quote_of_the_rs_265_cart_is_255(client, auth_headers, patched_orders):
+    """A Rs 265 frame, 1.5% line and 2.5% bill discount: 254.499375 before
+    rounding, billed 254.50 -> Rs 255. A till rounding its own per-line paise
+    reached 254.49 and quoted Rs 254, a rupee short of the order it created."""
+    q = _quote(client, auth_headers, [_disc_frame(265.0, 1.5)], 2.5)
+    assert q.status_code == 200, q.text
+    assert (q.json()["grand_total"], q.json()["round_off"]) == (255.0, 0.5)
+
+
+@pytest.mark.parametrize(
+    "price, line_pct, bill_pct",
+    [(265.0, 1.5, 2.5), (1000.49, 0.0, 0.0), (999.0, 7.5, 5.0), (1234.0, 3.5, 7.5),
+     (1999.0, 0.5, 10.0)],
+)
+def test_till_quote_is_the_bill_create_makes(
+    client, auth_headers, patched_orders, price, line_pct, bill_pct
+):
+    """ONE pricing for the till: the quote it collects against and the order
+    it then creates carry the same payable, round off, GST and discount."""
+    item = _disc_frame(price, line_pct)
+    q = _quote(client, auth_headers, [item], bill_pct)
+    assert q.status_code == 200, q.text
+    extra = (
+        {"cart_discount_percent": bill_pct, "cart_discount_reason": "festival offer"}
+        if bill_pct else {}
+    )
+    resp = _post_order(client, auth_headers, [item], **extra)
+    assert resp.status_code in (200, 201), resp.text
+    saved = _saved(patched_orders, resp.json()["order_id"])
+    quoted = q.json()
+    assert (quoted["grand_total"], quoted["round_off"]) == (
+        saved["grand_total"], saved["round_off"]
+    )
+    assert (quoted["tax"], quoted["total_discount"]) == (
+        saved["tax_amount"], saved["total_discount"]
+    )
+
+
+def test_till_quote_is_for_roles_that_bill(client, patched_orders):
+    from tests.test_returns_gst_refund import _staff_token
+
+    r = _quote(client, {"Authorization": f"Bearer {_staff_token(['ACCOUNTANT'])}"},
+               [_frame_item(1000.5)])
+    assert r.status_code == 403, r.text
+
+
 def test_order_view_carries_round_off_for_the_screens():
     from api.routers.orders import order_to_frontend
 

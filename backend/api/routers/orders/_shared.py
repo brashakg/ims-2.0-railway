@@ -156,15 +156,26 @@ def _is_known_gst_category(value) -> bool:
     return str(value).strip().upper() in _GST_CATEGORY_TABLE
 
 
+def bill_line_value(unit_price: float, quantity: float, discount_percent: float) -> tuple:
+    """THE pre-GST value of one till line: ``(discount_amount, item_total)`` --
+    price x quantity less its line discount, unrounded (the GST engine rounds
+    once, per line, after the bill discount). Order create and the till's bill
+    quote (POST /orders/quote) both price their lines here, so the quote is
+    exactly the figure create will bill."""
+    gross = unit_price * quantity
+    discount_amount = gross * (discount_percent / 100)
+    return discount_amount, gross - discount_amount
+
+
 def round_bill(total: float) -> tuple:
     """THE bill round-off rule (owner ruling 2026-10-08): the payable total is
     rounded ONCE, after GST, to the nearest rupee -- 50 paise and above up,
     below 50 paise down. Returns ``(payable, round_off)``; ``round_off`` is the
     signed paise the bill moved (payable - total). It is NOT taxable value and
     NOT tax. Every till bill total reaches this through
-    _compute_per_category_gst; the till screen's live preview
-    (posStore.getGrandTotal) mirrors it and the order-create response is the
-    authority. Never call it a second time on a figure that is already rounded.
+    _compute_per_category_gst; the till never rounds on its own -- it shows
+    and collects the figure POST /orders/quote returns from this same engine.
+    Never call it a second time on a figure that is already rounded.
     """
     exact = round(float(total or 0.0), 2)
     payable = float(Decimal(str(exact)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))

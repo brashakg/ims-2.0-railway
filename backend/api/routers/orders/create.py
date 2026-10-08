@@ -10,6 +10,7 @@ import uuid
 from database.repositories.order_repository import derive_bill_type
 from datetime import datetime, timedelta
 from fastapi import Depends, HTTPException, Header
+from pydantic import BaseModel, Field
 from typing import Any, Dict, List, Optional
 from ..auth import get_current_user
 from ...dependencies import (
@@ -23,10 +24,12 @@ from ._shared import (
     POS_WRITE_ROLES,
     _compute_per_category_gst,
     _get_db,
+    bill_line_value,
     logger,
     router,
 )
 from .pricing import (
+    OrderItemCreate,
     _enforce_line_pricing,
     assert_stack_within_cap,
     effective_line_discount_pct,
@@ -394,8 +397,6 @@ async def create_order(
         is_admin = any(r in user_roles for r in ["SUPERADMIN", "ADMIN"])
 
         for item in order.items:
-            item_total = item.unit_price * item.quantity
-
             # ---- Per-line price integrity + discount caps (SHARED gate) ----
             # BUG-119/BUG-118 ceiling / cost floor / HQ-offer rule / role +
             # category + luxury-brand cap / reason requirement all live in
@@ -412,8 +413,9 @@ async def create_order(
             )
             _loyalty_eff = _line_gate["loyalty_eff"]
 
-            discount_amount = item_total * (item.discount_percent / 100)
-            item_subtotal = item_total - discount_amount
+            discount_amount, item_subtotal = bill_line_value(
+                item.unit_price, item.quantity, item.discount_percent
+            )
 
             # ============================================================
             # INCENTIVE AUTO-TAGGING
@@ -1208,4 +1210,51 @@ async def create_order(
         "order_number": generate_order_number(store_id or "STR"),
         "status": "DRAFT",
         "message": "Order created successfully",
+    }
+
+
+class BillQuoteRequest(BaseModel):
+    """The till's cart, exactly as it will POST it to create the order."""
+
+    items: List[OrderItemCreate]
+    cart_discount_percent: float = Field(default=0.0, ge=0.0, le=100.0)
+
+
+@router.post("/quote")
+async def quote_bill(
+    body: BillQuoteRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """The till's bill total, priced by order create's own line value
+    (bill_line_value) and GST engine (_compute_per_category_gst, which rounds
+    the payable to the rupee). Read-only: nothing is saved or reserved.
+
+    The cashier takes the money BEFORE the order exists, so the till shows and
+    collects THIS figure and never rounds a bill itself -- the same
+    server-quote pattern as POST /returns/quote.
+
+    ponytail: promotions (PROMO_ENGINE_ENABLED, dark by default) are not in the
+    quote; price them here too before that engine is switched on.
+    """
+    if not any(r in current_user.get("roles", []) for r in POS_WRITE_ROLES):
+        raise HTTPException(
+            status_code=403, detail="Your role is not permitted to create orders."
+        )
+    lines = []
+    for item in body.items:
+        discount_amount, item_total = bill_line_value(
+            item.unit_price, item.quantity, item.discount_percent
+        )
+        lines.append(
+            {
+                "item_type": item.item_type,
+                "category": item.category,
+                "discount_amount": discount_amount,
+                "item_total": item_total,
+            }
+        )
+    gst = _compute_per_category_gst(lines, body.cart_discount_percent)
+    return {
+        k: gst[k]
+        for k in ("subtotal", "taxable", "tax", "total_discount", "grand_total", "round_off")
     }
