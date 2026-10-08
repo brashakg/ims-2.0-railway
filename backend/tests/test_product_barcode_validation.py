@@ -819,17 +819,45 @@ class TestEveryDoorStoresTheGtinDigitsOnly:
 
 class TestBarcodeKeysInAnyLetterCase:
     @pytest.mark.parametrize("key", ["GTIN", "Upc", " gtin "])
-    def test_an_in_store_code_under_another_spelling_is_refused(
+    def test_an_in_store_code_under_another_spelling_is_dropped(
         self, mock_db, mirror_on, key
     ):
+        """No screen shows a 'GTIN' key, so a junk code under one is dropped
+        (never stored, never published), not a 422 nobody can act on."""
         from api.services.shopify_push.product_input import build_product_metafields
 
         pid = _create(f"KC-{key.strip()}")["product_id"]
-        with pytest.raises(HTTPException) as ei:
-            _update(pid, attributes={key: _INTERNAL})
-        assert ei.value.status_code == 422
+        _update(pid, attributes={key: _INTERNAL, "frame_material": "TR90"})
         spine = mock_db["products"].find_one({"product_id": pid})
+        assert spine["attributes"]["frame_material"] == "TR90"
         assert _INTERNAL not in str(spine.get("attributes"))
+        twin = mock_db["catalog_products"].find_one(
+            {"id": spine.get("pim_product_id") or pid}
+        )
+        assert _INTERNAL not in str(build_product_metafields(twin))
+
+    @pytest.mark.parametrize("gtin", [None, _VALID_A, ""])
+    def test_an_old_stored_spelling_never_blocks_a_quick_add_save(
+        self, mock_db, mirror_on, gtin
+    ):
+        """Main's PUT stored keys as sent, so a product can hold
+        attributes.GTIN = an in-store code. Quick Add sends every stored key
+        back; the GTIN box shows only 'gtin'. The save must go through with the
+        box left alone (None), filled, or cleared (Remove)."""
+        from api.services.shopify_push.product_input import build_product_metafields
+
+        pid = _create(f"KC-OLD-{gtin}")["product_id"]
+        mock_db["products"].update_one(
+            {"product_id": pid}, {"$set": {"attributes.GTIN": _INTERNAL}}
+        )
+        sent = dict(mock_db["products"].find_one({"product_id": pid})["attributes"])
+        if gtin is not None:
+            sent["gtin"] = gtin
+        sent["frame_material"] = "Acetate"
+        _update(pid, attributes=sent)
+        spine = mock_db["products"].find_one({"product_id": pid})
+        assert spine["attributes"]["frame_material"] == "Acetate"
+        assert spine["attributes"].get("gtin") == gtin
         twin = mock_db["catalog_products"].find_one(
             {"id": spine.get("pim_product_id") or pid}
         )
@@ -853,15 +881,24 @@ class TestBarcodeKeysInAnyLetterCase:
         assert ei.value.status_code == 409
 
     def test_the_guard_folds_every_spelling_onto_the_one_key(self):
-        from api.services.product_master import _guard_gtin_attribute
+        from api.services.product_master import ProductMasterError, _guard_gtin_attribute
 
         for attrs in ({"gtin": _VALID_A, "GTIN": _VALID_B}, {"GTIN": _VALID_B, "gtin": _VALID_A}):
             assert _guard_gtin_attribute(attrs, strict=True) == {"gtin": _VALID_A}
         assert _guard_gtin_attribute({"Upc": " 0360-0029-1452"}, strict=True) == {"upc": _UPC_A}
-        # A draft/import row drops a junk code under any spelling.
-        assert _guard_gtin_attribute({"GTIN": _INTERNAL, "frame_material": "TR90"}, strict=False) == {
-            "frame_material": "TR90"
-        }
+        # Both modes drop a junk code under another spelling.
+        for strict in (True, False):
+            assert _guard_gtin_attribute(
+                {"GTIN": _INTERNAL, "frame_material": "TR90"}, strict=strict
+            ) == {"frame_material": "TR90"}
+        # The exact key wins, in either order: the other spelling is never read.
+        for exact in (_VALID_A, ""):
+            for attrs in ({"GTIN": _INTERNAL, "gtin": exact}, {"gtin": exact, "GTIN": _INTERNAL}):
+                assert _guard_gtin_attribute(attrs, strict=True) == {"gtin": exact}
+        # The exact key itself is still refused when junk (the GTIN box shows it).
+        with pytest.raises(ProductMasterError) as ei:
+            _guard_gtin_attribute({"GTIN": _VALID_A, "gtin": _INTERNAL}, strict=True)
+        assert getattr(ei.value, "status", None) == 422
 
     def test_the_metafields_carry_only_a_publishable_gtin(self):
         from api.services.shopify_push.product_input import (

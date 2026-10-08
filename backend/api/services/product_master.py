@@ -1332,24 +1332,33 @@ def _guard_gtin_attribute(
 
     The `upc` attribute ('UPC (mfr)') is the same kind of code -- a UPC is a
     GTIN-12 -- and reaches Shopify as the ims.upc metafield and the
-    description's 'UPC Code' row, so it gets the same rule. Keys match in any
-    letter case ('GTIN', 'Upc' publish as ims.gtin / ims.upc too): such a key is
-    checked the same way and folded onto the one key, which wins when both
-    are sent.
+    description's 'UPC Code' row, so it gets the same rule.
+
+    Keys match in any letter case ('GTIN', 'Upc' publish as ims.gtin / ims.upc
+    too) and fold onto the one key. The exact key wins when both are sent: the
+    other spelling is then never read. Without the exact key the first
+    spelling is the code: a valid one folds on, a junk one is DROPPED and
+    logged in BOTH modes, never a 422. No screen shows a 'GTIN' key (the GTIN
+    box and Manage Barcode read 'gtin'), yet Quick Add sends every stored key
+    back, so a 422 on an old stored 'GTIN' left the product unsaveable with
+    nothing on screen to fix.
     """
+    src = attributes or {}
     attrs: Dict[str, Any] = {}
-    for k, raw in (attributes or {}).items():
+    for k, raw in src.items():
         key = manufacturer_barcode_key(k)
         if key is None:
             attrs[k] = raw
             continue
+        other_spelling = k != key
+        if other_spelling and (key in src or key in attrs):
+            continue
         clean = sanitise_gtin(raw)
         if clean or not normalise_candidate(raw):
-            if k == key or key not in attrs:
-                attrs[key] = clean or raw
+            attrs[key] = clean or raw
             continue
         reason = classify_gtin(raw)
-        if strict:
+        if strict and not other_spelling:
             raise ProductMasterError(
                 f"'{str(raw)[:40]}' is not a valid {key.upper()} ({reason}). A "
                 "GTIN/UPC is 8, 12, 13 or 14 digits with a valid check digit. "
@@ -1358,8 +1367,9 @@ def _guard_gtin_attribute(
                 field=key,
             )
         logger.warning(
-            "[PM] dropping invalid %s on a draft/import row: reason=%s value=%.60r",
+            "[PM] dropping invalid %s (key %r): reason=%s value=%.60r",
             key,
+            k,
             reason,
             raw,
         )
