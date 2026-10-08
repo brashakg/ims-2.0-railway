@@ -455,19 +455,25 @@ def render_delivery_challan(
     # Rule 55 copy markers (the LegalHeader uses COPY_MARKER_MODES which does
     # not include delivery_challan -> defaults to rule_48; force rule_55 here).
     header["copy_marker"] = copy_marker_block(copy_marker, mode="rule_55")
-    if consignor_gstin:
-        # One consignor registration per page: the letterhead's GSTIN AND its
-        # state are the caller's (the one shop rule, org_validation.shop_gstin;
-        # the state is the GSTIN's first two digits), never a second answer
-        # from print_legal's state match / primary fallback.
-        code = consignor_gstin[:2]
-        mine = {
+    # One consignor registration per page: the letterhead's GSTIN AND its
+    # state are the caller's (the one shop rule, org_validation.shop_gstin;
+    # the state is the GSTIN's first two digits), never a second answer from
+    # print_legal's state match / primary fallback. And one place of supply:
+    # the meta row's. The letterhead's shop address (print_legal labels it
+    # "Place of supply") is where a challan's goods leave from.
+    code = consignor_gstin[:2]
+    mine = (
+        {
             "GSTIN / UIN": consignor_gstin,
             "State / Code": " / ".join(p for p in (state_name(code), code) if p),
         }
-        header["supplier_kv"] = [
-            (k, mine.get(k, v)) for k, v in header.get("supplier_kv") or []
-        ]
+        if consignor_gstin
+        else {}
+    )
+    header["supplier_kv"] = [
+        ("Dispatched from" if k == "Place of supply" else k, mine.get(k, v))
+        for k, v in header.get("supplier_kv") or []
+    ]
 
     head = _header_fragment(header, "Delivery Challan")
     banner = _not_a_tax_invoice("Delivery Challan - Not a Tax Invoice (CGST Rule 55)")

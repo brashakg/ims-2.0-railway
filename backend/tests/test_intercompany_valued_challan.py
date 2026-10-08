@@ -890,3 +890,21 @@ def test_owner_the_challan_button_is_offered_exactly_to_whom_the_server_prints_i
         managers_and_accounts if to_store == "ST-BOK-1"
         else managers_and_accounts | {"SALES_STAFF", "SALES_CASHIER"}
     )
+
+
+# ===========================================================================
+# Panel round 5
+# ===========================================================================
+
+_MANAGERS_AND_ACCOUNTS = {"SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT"}
+
+
+def test_d13_inter_state_challan_prints_one_place_of_supply(db):
+    """r5: Dhanbad -> Pune printed two places of supply -- the meta row's
+    'Maharashtra (27)' and the letterhead's 'Place of supply' row with
+    Dhanbad's shop address. One answer per page; the shop address stays, as
+    where the goods leave from."""
+    html = _challan(_shipped("ST-PUN-1")["id"])
+    answers = re.findall(r'<td class="k">place of supply</td><td>([^<]*)</td>', html, re.I)
+    assert answers == ["Maharashtra (27)"], answers
+    assert '<td class="k">Dispatched from</td><td>Shop 33 Park Market' in html
