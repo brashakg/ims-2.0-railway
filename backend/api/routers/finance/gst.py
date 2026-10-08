@@ -10,6 +10,7 @@ from ...utils.ist import now_ist, ist_day_start_utc
 from typing import Optional
 from fastapi import Depends
 from ..auth import get_current_user
+from ...dependencies import resolve_store_scope
 from ...services import ap_engine
 from ._shared import (
     _REAL_ORDER_STATUS_FILTER,
@@ -61,6 +62,14 @@ async def get_gst_summary(
     # struck with it) is summed from supplier bills -- the accounts roles'
     # alone, the one rule (_require_finance_admin -> cost_mask AP_ROLES).
     _require_finance_admin(current_user)
+    # The one shop rule (F63), as the ITC register and GSTR-2B books beside
+    # it: ADMIN / SUPERADMIN read every shop; an accountant reads their own
+    # shop's sales tax and input credit, never every shop's (panel
+    # 2026-10-08: one accountant read three input-credit totals for a month).
+    # A login with no shop is refused (R3). GSTR-3B stays per GSTIN: it is
+    # the filing, and a GSTIN can cover more than one shop.
+    scope = resolve_store_scope(None, current_user)
+    at_shop = {"store_id": scope} if scope else {}
     db = _get_db()
     if db is None:
         return {
@@ -92,6 +101,7 @@ async def get_gst_summary(
     # uses _REVENUE_EXPR (grand_total) -- `$total` is a legacy field modern
     # orders don't carry, so summing it returned ~0.
     sales_match = {
+        **at_shop,
         "created_at": {"$gte": start, "$lt": end},
         "status": _REAL_ORDER_STATUS_FILTER,
     }
@@ -129,7 +139,7 @@ async def get_gst_summary(
     gst_paid_excluded = 0.0  # surfaced so the report can show what was held back
     try:
         for _b in db.get_collection("vendor_bills").find(
-            {},
+            at_shop,
             {
                 "_id": 0,
                 "bill_date": 1,
