@@ -754,6 +754,7 @@ async def clear_rx_hold(
     from ..services.online_fulfillment_route import (
         HOLD_CAS,
         SELLER_RELEASED,
+        closed_month,
         seller_change,
         seller_held,
         stored_seller_problem,
@@ -820,7 +821,9 @@ async def clear_rx_hold(
         # number, date, seller or tax heads. A fix that changed how the shop
         # splits the order's GST (its state or GSTIN) cannot be released:
         # the invoice door would print one tax head and every return file the
-        # booked one. A credit note and a new booking instead.
+        # booked one. Nor is a sale released into a month closed in Finance
+        # (closed_month): it files in its booking month, already filed. A
+        # credit note and a new booking instead.
         from ..dependencies import get_store_repository
 
         try:
@@ -831,7 +834,7 @@ async def clear_rx_hold(
             raise HTTPException(
                 status_code=503, detail="Could not read the order's shop to check its GST split"
             )
-        why = seller_change(order, order.get("store_id"), store_doc)
+        why = seller_change(order, order.get("store_id"), store_doc) or closed_month(db, order)
         if why:
             raise HTTPException(
                 status_code=409, detail=f"This seller hold cannot be cleared: {why}"

@@ -1245,6 +1245,30 @@ def seller_change(
     )
 
 
+def closed_month(db, order: Dict[str, Any]) -> Optional[str]:
+    """Why lifting a SELLER hold must be refused (None: go on): the month the
+    sale files in -- its booking's IST month, the one GSTR-1, GSTR-3B and the
+    Tally JV select it by (created_at) -- is closed in Finance (the period
+    lock every posting door checks). The release never re-dates the invoice
+    (``seller_change``), so released now the sale would land in a return
+    already filed and no later return would carry it. Clear-hold and Re-map
+    ask it of a seller-held order only: any other order was never held off
+    the returns."""
+    from ..routers.finance._shared import is_period_locked
+    from ..utils.ist import ist_date_str_from_stored
+
+    day = ist_date_str_from_stored((order or {}).get("created_at"))
+    if not is_period_locked(db, day[5:7], day[:4]):
+        return None
+    number = order.get("invoice_number")
+    return (
+        f"its sale files in {day[5:7]}/{day[:4]}, a month closed in Finance, and invoice "
+        f"{number} keeps its date: released now it would land in a return already filed. "
+        "IMS never changes an order's seller, invoice or tax: issue a credit note against "
+        f"invoice {number} and re-book the order through the normal doors"
+    )
+
+
 def _open_short(items: List[Dict[str, Any]], fos: List[Dict[str, Any]]) -> bool:
     """Shopify's fresh read leaves an IMS line of the order (one whose units
     IMS claims) with less OPEN (unfulfilled) quantity than IMS booked:
@@ -1363,6 +1387,10 @@ def _remap_refusal(db, order: Dict[str, Any], took_over: bool) -> Optional[str]:
     stock write-back may not have run, settled claim or not."""
     if not took_over and not reroutable(order):
         return "the order is not held on its seller (GSTIN) check or a failed fulfillment-order move"
+    if seller_held(order):
+        why = closed_month(db, order)
+        if why:
+            return why
     try:
         why = _past_remap(db, order)
     except Exception as exc:  # noqa: BLE001 -- unreadable = not provably safe
@@ -1567,8 +1595,9 @@ async def reroute_held_order(db, order_id: str) -> Dict[str, Any]:
     -- and only a shop that claims a NEW unit is told to ship.
 
     Still a problem -> it stays held under the new reason. Refused, the order
-    untouched (no unit given back, no task raised): not reroutable;
-    dispatched, cancelled or fulfilled (in IMS, or a line Shopify shows
+    untouched (no unit given back, no task raised): not reroutable; a
+    seller hold whose sale files in a month closed in Finance
+    (``closed_month``); dispatched, cancelled or fulfilled (in IMS, or a line Shopify shows
     fulfilled, refunded or closed); a refund or return booked or queued on
     it; routing unreadable (dark included); the booking's claim not settled
     yet or a move on the wire; another Re-map mid-flight; the fresh route

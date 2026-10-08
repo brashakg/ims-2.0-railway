@@ -2792,6 +2792,46 @@ def test_a_released_seller_hold_keeps_its_invoice_number_and_date(world, monkeyp
     assert db.counters.find_one({"_id": {"$regex": "BV-BOK-01"}})["seq"] == 1
 
 
+@pytest.mark.parametrize("door", ["clear_hold", "remap"])
+@pytest.mark.parametrize("days", [40, 400])
+def test_a_seller_hold_is_never_released_into_a_closed_month(world, monkeypatch, door, days):
+    """[MEDIUM] Held SHOP_GSTIN_MISSING at Bokaro, booked 40 (or 400: a past
+    financial year) days ago. That month's GSTR-1 was filed with the sale
+    held off, and the month closed in Finance. Bokaro gets its GSTIN and the
+    release is pressed: it succeeded and the CLOSED month's GSTR-1 grew a
+    row -- output tax in no return that was filed. The release keeps the
+    invoice date (the root rule), so it refuses now: a credit note and a
+    re-booking."""
+    from datetime import datetime, timedelta, timezone
+    from api.utils.ist import ist_date_str
+
+    db = world["db"]
+    payload, res, _o = _gstin_missing_at_bokaro(
+        world, 60180 + (door == "remap") + 2 * (days == 400))
+    booked = datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0) - timedelta(days=days)
+    db.orders.update_one({"order_id": res["order_id"]},
+                         {"$set": {"created_at": booked, "invoice_date": booked}})
+    order = db.orders.find_one({"order_id": res["order_id"]}, {"_id": 0})
+    assert _gstr1(world, monkeypatch, order, "BV-BOK-01")["b2cs"] == []  # filed, held off
+    month = ist_date_str(booked)
+    db.period_locks.insert_one({"month": int(month[5:7]), "year": int(month[:4])})
+    db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": {"gstin": "20AAAAA0000A1Z5"}})
+
+    if door == "remap":
+        out = _remap(world, monkeypatch, payload)
+        assert not out["ok"] and "closed in Finance" in out["message"], out
+        assert "credit note" in out["message"]
+    else:
+        out = _clear_hold(world, monkeypatch, res["order_id"])
+        assert getattr(out, "status_code", None) == 409, out
+        assert "closed in Finance" in out.detail and "credit note" in out.detail
+
+    after = db.orders.find_one({"order_id": res["order_id"]}, {"_id": 0})
+    assert after["fulfillment_hold"] is True and route_mod.seller_held(after)
+    assert after["stock_hold_reason"] == order["stock_hold_reason"]
+    assert _gstr1(world, monkeypatch, after, "BV-BOK-01")["b2cs"] == []
+
+
 def test_remap_never_reopens_a_task_a_human_closed(world, monkeypatch):
     """[LOW] Input A: the fallback BV-BOK-01 is mapped, Shopify has the order
     at unmapped Pune, only Ranchi holds it and Shopify refuses the move:
