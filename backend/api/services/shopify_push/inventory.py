@@ -1670,17 +1670,17 @@ async def push_skus_stock(
     # as the per-shop "last written" numbers, and a refused chunk must not
     # read as written (the baseline above already only takes the accepted rows).
     summary["quantities"] = written_per_sku
-    # LIVE AND SOLD OUT, said by the writer (recheck round 2): every number
-    # Shopify accepted was 0. Correct (IMS is master, the shelf is empty) but
-    # the listing now reads sold out with no code to say so -- and the drawer
-    # toast re-derived it in TypeScript from `quantities` while the sweep's
-    # tally spelled "sold out" as `set == 0` under a code and the summary
-    # line said nothing. One fact, one stamp; both screens print it. Nothing
-    # written is NOT this (that is the code's line, "NO stock written").
-    summary["sold_out"] = bool(written_per_sku) and all(
+    summary["ok"] = _rows_ok(summary, holders, conflicts, mapped, locations)
+    # LIVE AND SOLD OUT, said by the writer once (both screens print this
+    # stamp): every number written was 0 AND the pass is `ok` -- which is
+    # every listed SKU accepted at every mapped shop and nothing unknown (no
+    # refused write, no unreadable shelf, no unmapped holder, no stray size or
+    # location, no unread check). "Every number Shopify accepted was 0" alone
+    # said SOLD OUT over a refused shop still showing its old number, and over
+    # Pune holding the unit.
+    summary["sold_out"] = summary["ok"] and all(
         int(q) == 0 for rows in written_per_sku.values() for q in rows.values()
     )
-    summary["ok"] = _rows_ok(summary, holders, conflicts, mapped, locations)
     if summary["errors"] and not summary["error"]:
         summary["error"] = "; ".join(str(e) for e in summary["errors"][:5])
     return summary
@@ -2041,6 +2041,7 @@ async def sync_product_stock(
     summary["tracked"] = tracked["updated"]
     summary["errors"] = list(tracked["errors"]) + list(summary["errors"])
     summary["ok"] = summary["ok"] and not tracked["errors"]
+    summary["sold_out"] = summary["sold_out"] and summary["ok"]  # unconfirmed tracking is unknown
     if tracked["errors"]:
         # The worse failure gets the code (recheck round 2, first-push): with
         # ok=False and NO code the press promoted nothing, the drawer toast and

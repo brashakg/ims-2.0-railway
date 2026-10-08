@@ -224,3 +224,69 @@ def test_1_a_refused_take_down_says_the_listing_is_still_live(monkeypatch):
     assert "STILL LIVE" in res.error and "Shopify admin" in res.error and "SP-1-L" in res.error, res.error
     assert _cat(db)["ecom"]["status"] == "PUBLISHED"
     assert spy.calls_for("publishablePublish") == []
+
+
+# ---------------------------------------------------------------------------
+# 2. SOLD OUT only when every mapped shop was written 0 and nothing is unknown
+# ---------------------------------------------------------------------------
+
+
+class _RefuseAt(_Spy):
+    """inventorySetQuantities refused for any call carrying a row at `loc`."""
+
+    def __init__(self, loc, responses):
+        super().__init__(responses)
+        self._loc = loc
+
+    async def __call__(self, db, query, variables):  # noqa: ARG002
+        if "inventorySetQuantities" in query:
+            rows = variables["input"]["quantities"]
+            if any(r["locationId"] == self._loc for r in rows):
+                self.calls.append({"query": query, "variables": variables})
+                return _set_error("INVALID_LOCATION", "location is not active")
+        return await super().__call__(db, query, variables)
+
+
+def _sold_out(db, spy, monkeypatch):
+    _live(monkeypatch, spy)
+    return _run(shopify_push.push_skus_stock(db, ["SP-1"], source="sale"))
+
+
+def test_2_sold_out_when_every_mapped_shop_was_written_zero(monkeypatch):
+    out = _sold_out(_listed(_db(a=0, b=0, c=0)), _Spy(_responses()), monkeypatch)
+    assert out["ok"] is True and out["set"] == 3 and out["sold_out"] is True, out
+
+
+def test_2_a_refused_shop_is_not_sold_out(monkeypatch):
+    """BV-B's write refused: Shopify still shows BV-B's old number. A and C
+    accepted 0, so 'every accepted number is 0' was true -- and false about
+    the website. Stamp from the accepted rows only -> True -> fails."""
+    out = _sold_out(_listed(_db(a=0, b=0, c=0)), _RefuseAt(LOC_B, _responses()), monkeypatch)
+    assert out["set"] == 2 and out["code"] == shopify_push.STOCK_WRITE_FAILED, out
+    assert out["sold_out"] is False
+
+
+def test_2_an_unreadable_shelf_is_not_sold_out(monkeypatch):
+    db = _listed(_db(a=0, b=0, c=0))
+    _break_shop(db, "BV-B")
+    out = _sold_out(db, _Spy(_responses()), monkeypatch)
+    assert out["unknown_stores"] == ["BV-B"] and out["set"] == 2, out
+    assert out["sold_out"] is False
+
+
+def test_2_an_unmapped_holder_is_not_sold_out(monkeypatch):
+    """BV-D has no location and holds the unit: the mapped shops at 0 are
+    not the whole truth."""
+    out = _sold_out(_listed(_db(a=0, b=0, c=0, d=1)), _Spy(_responses()), monkeypatch)
+    assert [h["store_id"] for h in out["unmapped_stores"]] == ["BV-D"] and out["set"] == 3, out
+    assert out["sold_out"] is False
+
+
+def test_2_a_stray_size_is_not_sold_out(monkeypatch):
+    """The baseline still shows SP-1-X (a size row deleted off the parent)
+    at 2 on Shopify; IMS no longer writes it, so the listing is selling it."""
+    sent = {"quantities": {"SP-1": {"BV-A": 1, "BV-B": 0, "BV-C": 0}, "SP-1-X": {"BV-A": 2}},
+            "tracked": True, "policy": "DENY"}
+    out = _sold_out(_listed(_db(a=0, b=0, c=0), online_stock=sent), _Spy(_responses()), monkeypatch)
+    assert out["stray_skus"] == ["SP-1-X"] and out["set"] == 3, out
+    assert out["sold_out"] is False
