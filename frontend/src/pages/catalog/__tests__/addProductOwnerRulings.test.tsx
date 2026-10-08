@@ -11,8 +11,10 @@
 // F13/D5 the new product's readable SKU is PREVIEWED before saving, and the
 //        preview comes from the server (the minting function), never a copy.
 // F68    after Save + New the cursor is in Model No and the reorder level stays.
-// F69    the same-model chip keeps the typed colour, copies weight + this
-//        shop's reorder level, and is at least the app's 36px control height.
+// F69    the same-model chip keeps the typed colour and weight (never flagged
+//        as copied), copies the rest of the weight + this shop's reorder level
+//        -- only for a role whose save writes a level, a catalogue manager's
+//        Review says 'not set' -- and is at least the 36px control height.
 // (F73 reorder levels are per shop, owner D12: perShopReorderLevel*.test.tsx.)
 // F92    menu labels say what each buying door is for; Buy Desk does not claim
 //        '0 products' while it is still loading.
@@ -22,10 +24,15 @@ import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 
+// The signed-in roles (ADMIN unless a test says otherwise) and the real
+// AuthContext.hasRole rule: ADMIN / SUPERADMIN pass every gate, anyone else
+// needs the role -- so a CATALOG_MANAGER test sees what a catalogue manager does.
+const auth = vi.hoisted(() => ({ roles: ['ADMIN'] as string[] }));
 vi.mock('../../../context/AuthContext', () => ({
   useAuth: () => ({
-    user: { id: 'USR-1', name: 'Avinash', roles: ['ADMIN'], activeStoreId: 'S1' },
-    hasRole: () => true,
+    user: { id: 'USR-1', name: 'Avinash', roles: auth.roles, activeStoreId: 'S1' },
+    hasRole: (r: string | string[]) =>
+      auth.roles.some((x) => x === 'ADMIN' || x === 'SUPERADMIN' || [r].flat().includes(x)),
   }),
 }));
 vi.mock('../../../context/ToastContext', () => ({
@@ -124,6 +131,9 @@ const renderPage = (url = '/catalog/add') =>
 // on every change).
 const fill = (el: HTMLElement, value: string) => fireEvent.change(el, { target: { value } });
 const reorderInput = () => screen.getByLabelText('Reorder level at this shop') as HTMLInputElement;
+const weightInput = () => screen.getByTitle('Weight (g)') as HTMLInputElement;
+// The amber 'copied - confirm or edit' ring a copied value carries.
+const copiedFlag = (el: HTMLElement) => /(^|\s)ring-amber-400(\s|$)/.test(el.className);
 
 async function sunglass(user: ReturnType<typeof userEvent.setup>) {
   await user.click(screen.getByText('Sunglass'));
@@ -139,6 +149,7 @@ const reviewRow = (label: string) => {
 };
 
 beforeEach(() => {
+  auth.roles = ['ADMIN'];
   Element.prototype.scrollIntoView = vi.fn() as unknown as typeof Element.prototype.scrollIntoView;
   window.scrollTo = vi.fn() as unknown as typeof window.scrollTo;
   createProduct.mockClear();
@@ -303,9 +314,45 @@ describe('F69 - the same-model chip', () => {
     await sunglass(user);
     await user.click(screen.getByRole('button', { name: 'same model chip' }));
     await waitFor(() => expect(getProduct).toHaveBeenCalledWith('P-SRC'));
-    await waitFor(() => expect((screen.getByTitle('Weight (g)') as HTMLInputElement).value).toBe('25'));
+    await waitFor(() => expect(weightInput().value).toBe('25'));
+    expect(copiedFlag(weightInput())).toBe(true); // the sibling's: confirm it
     expect((screen.getByLabelText(/^Colour Code/) as HTMLInputElement).value).toBe('601');
     expect(reorderInput().value).toBe('2');
+  });
+
+  it('a weight the operator typed is kept, and never flagged as copied', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await sunglass(user);
+    fill(weightInput(), '30');
+    await user.click(screen.getByRole('button', { name: 'same model chip' }));
+    await screen.findByRole('button', { name: /Save variant/ });
+    expect(weightInput().value).toBe('30');
+    expect(copiedFlag(weightInput())).toBe(false);
+  });
+
+  it("a catalogue manager's Review never shows a level the save will not write", async () => {
+    // CATALOG_MANAGER sets no shop's level (REORDER_LEVEL_ROLES): the sibling's
+    // level 2 at S1 must not appear on the Review of a save that writes none.
+    auth.roles = ['CATALOG_MANAGER'];
+    const user = userEvent.setup();
+    renderPage();
+    await sunglass(user);
+    expect(screen.queryByLabelText('Reorder level at this shop')).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'same model chip' }));
+    await screen.findByRole('button', { name: /Save variant/ });
+    expect(reviewRow('Reorder level')).toHaveTextContent('not set');
+    await user.click(screen.getByRole('button', { name: /Save variant/ }));
+    await waitFor(() => expect(createProduct).toHaveBeenCalledTimes(1));
+    expect(setShopLevel).not.toHaveBeenCalled();
+    expect(reviewRow('Reorder level')).toHaveTextContent('not set'); // the next variant too
+  });
+
+  it("a catalogue manager's ?variant= link copies no level either", async () => {
+    auth.roles = ['CATALOG_MANAGER'];
+    renderPage('/catalog/add?variant=P-SRC');
+    await screen.findByRole('button', { name: /Save variant/ });
+    expect(reviewRow('Reorder level')).toHaveTextContent('not set');
   });
 
   it('the chip is at least the 36px control height', async () => {

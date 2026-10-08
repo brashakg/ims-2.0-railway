@@ -461,16 +461,20 @@ export function useQuickAddForm() {
       const typed = Object.fromEntries(
         Object.entries(keep?.attributes || {}).filter(([, v]) => String(v ?? '').trim()),
       );
+      const typedWeight = String(keep?.weight ?? '').trim();
       applyFormValues({
         ...seed.values,
         attributes: { ...seed.values.attributes, ...typed },
-        weight: keep?.weight || seed.values.weight,
+        weight: typedWeight || seed.values.weight,
       });
       // The level copies like the rest of the model (F69): the sibling's level
-      // at THIS shop (D12); typed wins.
+      // at THIS shop (D12); typed wins. Only for a role whose save writes it --
+      // anyone else's Review must say 'not set', which is what the save leaves.
       setReorderLevel(
-        keep?.reorderLevel ||
-          levelText((product as { reorder_levels?: Record<string, unknown> }).reorder_levels?.[reorderShop]),
+        !canSetReorderLevel
+          ? ''
+          : keep?.reorderLevel ||
+              levelText((product as { reorder_levels?: Record<string, unknown> }).reorder_levels?.[reorderShop]),
       );
       setVariantCtx({
         sourceProductId: seed.sourceProductId,
@@ -488,11 +492,13 @@ export function useQuickAddForm() {
                 .join(', ')}).`
             : '',
       });
-      setFlaggedFields(new Set(seed.flagged.filter((k) => !(k in typed))));
-      focusAttrField(seed.cleared.find((k) => !(k in typed)) || null);
+      // A value the operator typed is theirs, never 'copied - confirm'.
+      const typedKeys = new Set([...Object.keys(typed), ...(typedWeight ? ['weight'] : [])]);
+      setFlaggedFields(new Set(seed.flagged.filter((k) => !typedKeys.has(k))));
+      focusAttrField(seed.cleared.find((k) => !typedKeys.has(k)) || null);
       window.scrollTo({ top: 0, behavior: 'smooth' });
     },
-    [applyFormValues, focusAttrField, toast, reorderShop]
+    [applyFormValues, focusAttrField, toast, reorderShop, canSetReorderLevel]
   );
 
   // Leave variant mode -> a fresh blank form ("New model" button / Esc).
