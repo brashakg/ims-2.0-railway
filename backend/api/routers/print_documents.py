@@ -18,7 +18,9 @@ Routes (mounted at /api/v1/print):
   GET /api/v1/print/delivery-challan/transfer/{transfer_id}
 
 Auth: POS-capable roles + ACCOUNTANT (the challan render is read-only but
-surfaces party + line data, so it sits one tier wider than POS writes).
+surfaces party + line data, so it sits one tier wider than POS writes); a
+VALUED transfer challan carries cost, so managers and accounts only
+(may_print_challan).
 Store-scope is enforced (validate_store_access) so a store-bound user cannot
 print a challan for another store's order/transfer. SUPERADMIN/ADMIN pass.
 """
@@ -64,9 +66,20 @@ _CHALLAN_ROLES = (
 )
 
 
+def may_print_challan(current_user: dict, valued: bool = False) -> bool:
+    """THE challan print rule: the challan roles print a delivery challan; a
+    VALUED one (a move between two GST registrations, D13) carries the units'
+    cost, so only managers and accounts (D7; owner 2026-10-08). The route
+    below refuses by it and every transfer read hands the screen its answer
+    (transfers._caller_view), so the button never offers a 403."""
+    roles = (current_user or {}).get("roles") or []
+    return any(r in _CHALLAN_ROLES for r in roles) and (
+        not valued or can_see_cost(current_user, "product")
+    )
+
+
 def _require_challan_role(current_user: dict) -> None:
-    roles = current_user.get("roles", []) if current_user else []
-    if not any(r in _CHALLAN_ROLES for r in roles):
+    if not may_print_challan(current_user):
         raise HTTPException(
             status_code=403,
             detail="Not permitted to print a delivery challan.",
@@ -233,7 +246,7 @@ async def delivery_challan_for_transfer(
         raise HTTPException(status_code=400, detail=_gstin_gap(transfer, src, dst))
     if valued:
         # D7: the value is the units' own cost -- never a counter role's.
-        if not can_see_cost(current_user, "product"):
+        if not may_print_challan(current_user, valued=True):
             raise HTTPException(
                 status_code=403,
                 detail="This challan carries the stock's cost. "

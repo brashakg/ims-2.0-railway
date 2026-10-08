@@ -854,3 +854,39 @@ def test_d7_transfer_figures_are_the_callers_stores_only(db):
     assert summary["total_value"] == incoming["value"] == pytest.approx(2 * UNIT_COST)
     assert [t["to_location_id"] for t in _listed(_user("AREA_MANAGER", "ST-DHN-1"))] == ["ST-BOK-1"]
 
+
+_ROLES = (
+    "SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT", "SALES_STAFF",
+    "SALES_CASHIER", "WORKSHOP_STAFF", "OPTOMETRIST", "CATALOG_MANAGER",
+)
+
+
+@pytest.mark.parametrize("to_store", ["ST-BOK-1", "ST-DHN-2"])
+def test_owner_the_challan_button_is_offered_exactly_to_whom_the_server_prints_it(db, to_store):
+    """Owner 2026-10-08: the valued challan is printed by managers and
+    accounts only (today's challan roles), so the Delivery Challan button is
+    hidden from every role the server would refuse. Every transfer reply
+    carries the server's own answer (can_print_challan, from the route's rule
+    print_documents.may_print_challan), and it matches the print route, role
+    by role, on a valued (Dhanbad -> Bokaro) and an unvalued (Hirapur -> Bank
+    More) transfer."""
+    t = _shipped(to_store)
+    printers = set()
+    for role in _ROLES:
+        user = _user(role)
+        offered = _run(transfers.get_transfer(t["id"], user))["transfer"]["can_print_challan"]
+        listed = [x["can_print_challan"] for x in _listed(user) if x["id"] == t["id"]]
+        try:
+            _challan(t["id"], user)
+            printed = True
+        except HTTPException as exc:
+            assert exc.status_code == 403, (role, exc.detail)
+            printed = False
+        assert offered is printed and listed == [printed], (role, to_store)
+        if printed:
+            printers.add(role)
+    managers_and_accounts = {"SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT"}
+    assert printers == (
+        managers_and_accounts if to_store == "ST-BOK-1"
+        else managers_and_accounts | {"SALES_STAFF", "SALES_CASHIER"}
+    )

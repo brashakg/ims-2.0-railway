@@ -314,14 +314,37 @@ def _in_callers_stores(transfers: List[Dict], current_user: dict) -> List[Dict]:
     ]
 
 
-def _mask_transfer_cost(transfer: Dict, current_user: dict) -> Dict:
-    """D7: counter roles never see what the units cost. A transfer carries its
-    units' own cost (each line's unit_cost, the total_value -- F51), so a
-    caller outside the per-unit cost roles gets a copy without them. Never
-    mutates the stored doc (the in-memory fallback hands out the original)."""
-    if not isinstance(transfer, dict) or can_see_cost(current_user, "product"):
+def _can_print_challan(transfer: Dict, current_user: dict) -> bool:
+    """Whether the caller may print this transfer's delivery challan: the
+    challan route's own rule (print_documents.may_print_challan) on this
+    transfer's verdict (_transfer_registrations). Only a role that prints the
+    unvalued challan alone (the counter) needs the verdict; a move IMS cannot
+    place prints for no one."""
+    from .print_documents import may_print_challan
+
+    if may_print_challan(current_user, valued=True):
+        return True
+    # ponytail: four reads per transfer for a counter role's list; batch the
+    # shops (org_validation.shop_gstins) if that list ever gets slow.
+    return may_print_challan(current_user) and (
+        _transfer_registrations(_get_db(), transfer)[2] is False
+    )
+
+
+def _caller_view(transfer: Dict, current_user: dict) -> Dict:
+    """The transfer as the caller may see it -- every transfer reply goes
+    through here. D7: counter roles never see what the units cost (each line's
+    unit_cost, the total_value -- F51). And `can_print_challan`, so the screen
+    shows the Delivery Challan button only to whom the server prints it (owner
+    2026-10-08: the valued challan is managers' and accounts' only). A copy:
+    never mutates the stored doc (the in-memory fallback hands out the
+    original)."""
+    if not isinstance(transfer, dict):
         return transfer
-    out = {k: v for k, v in transfer.items() if k != "total_value"}
+    out = dict(transfer, can_print_challan=_can_print_challan(transfer, current_user))
+    if can_see_cost(current_user, "product"):
+        return out
+    out.pop("total_value", None)
     out["items"] = [
         mask_cost(dict(it), current_user, "product") if isinstance(it, dict) else it
         for it in transfer.get("items") or []
@@ -1099,7 +1122,7 @@ async def list_transfers(
     end = start + limit
 
     return {
-        "transfers": [_mask_transfer_cost(t, current_user) for t in transfers[start:end]],
+        "transfers": [_caller_view(t, current_user) for t in transfers[start:end]],
         "total": total,
         "page": page,
         "limit": limit,
@@ -1135,7 +1158,7 @@ async def get_pending_transfers(
             or t.get("to_location_id") == location_id
         ]
 
-    transfers = [_mask_transfer_cost(t, current_user) for t in transfers]
+    transfers = [_caller_view(t, current_user) for t in transfers]
     return {
         "pending_approval": [
             t for t in transfers if t.get("status") == TransferStatus.PENDING_APPROVAL
@@ -1164,7 +1187,7 @@ async def get_transfer(
     # IDOR guard: both parties (source + destination stores) may read.
     _assert_transfer_access(transfer, current_user, side="either")
 
-    return {"transfer": _mask_transfer_cost(transfer, current_user)}
+    return {"transfer": _caller_view(transfer, current_user)}
 
 
 @router.post("")
@@ -1307,7 +1330,7 @@ async def create_transfer(
     _save_transfer(transfer_data)
 
     return {
-        "transfer": transfer_data,
+        "transfer": _caller_view(transfer_data, current_user),
         "message": f"Transfer {transfer_number} created successfully",
     }
 
@@ -1343,7 +1366,7 @@ async def update_transfer(
     transfer["updated_at"] = datetime.now().isoformat()
 
     _save_transfer(transfer)
-    return {"transfer": transfer, "message": "Transfer updated successfully"}
+    return {"transfer": _caller_view(transfer, current_user), "message": "Transfer updated successfully"}
 
 
 @router.post("/{transfer_id}/approve")
@@ -1396,7 +1419,7 @@ async def approve_transfer(
     )
 
     _save_transfer(transfer)
-    return {"transfer": transfer, "message": message}
+    return {"transfer": _caller_view(transfer, current_user), "message": message}
 
 
 @router.post("/{transfer_id}/start-picking")
@@ -1439,7 +1462,7 @@ async def start_picking(
     )
 
     _save_transfer(transfer)
-    return {"transfer": _mask_transfer_cost(transfer, current_user), "message": "Picking started"}
+    return {"transfer": _caller_view(transfer, current_user), "message": "Picking started"}
 
 
 @router.post("/{transfer_id}/complete-picking")
@@ -1493,7 +1516,7 @@ async def complete_picking(
 
     _save_transfer(transfer)
     return {
-        "transfer": _mask_transfer_cost(transfer, current_user),
+        "transfer": _caller_view(transfer, current_user),
         "message": "Picking completed, ready for shipment",
     }
 
@@ -1571,7 +1594,7 @@ async def ship_transfer(
 
     _save_transfer(transfer)
     return {
-        "transfer": _mask_transfer_cost(transfer, current_user),
+        "transfer": _caller_view(transfer, current_user),
         "message": "Transfer shipped",
         "tracking": {
             "number": transfer.get("tracking_number"),
@@ -1775,7 +1798,7 @@ async def receive_transfer(
 
     _save_transfer(transfer)
     return {
-        "transfer": _mask_transfer_cost(transfer, current_user),
+        "transfer": _caller_view(transfer, current_user),
         "message": "Items received",
         "summary": {
             "expected": total_expected,
@@ -1840,7 +1863,7 @@ async def complete_transfer(
     # Fail-soft -- never blocks the status flip.
     _book_mirror_purchase(transfer)
 
-    return {"transfer": transfer, "message": "Transfer completed"}
+    return {"transfer": _caller_view(transfer, current_user), "message": "Transfer completed"}
 
 
 def _transfer_has_moved_stock(transfer: Dict) -> bool:
@@ -1999,7 +2022,7 @@ async def cancel_transfer(
                 ea_request_id,
             )
 
-    return {"transfer": transfer, "message": "Transfer cancelled"}
+    return {"transfer": _caller_view(transfer, current_user), "message": "Transfer cancelled"}
 
 
 # ============================================================================
