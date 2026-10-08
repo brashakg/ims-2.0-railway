@@ -96,7 +96,14 @@ _MEDIA_OK = {
 def test_writeback_uses_primary_key_when_image_id_present():
     db = _EngineDB()
     db["product_images"].insert_one(
-        {"image_id": "I1", "product_id": "P1", "url": "u", "shopify_image_id": None}
+        {
+            "image_id": "I1",
+            "product_id": "P1",
+            "url": "u",
+            "shopify_image_id": None,
+            "shopify_image_sent": "u",
+            "shopify_image_sent_id": "gid://shopify/MediaImage/1",
+        }
     )
     doc = db["product_images"].find_one({"image_id": "I1"})
     ok = shopify_push._writeback_image(db, doc, "gid://shopify/MediaImage/1", "u")
@@ -104,6 +111,8 @@ def test_writeback_uses_primary_key_when_image_id_present():
     saved = db["product_images"].find_one({"image_id": "I1"})
     assert saved["shopify_image_id"] == "gid://shopify/MediaImage/1"
     assert saved["shopify_image_src"] == "u"
+    # the send is resolved: no other row may treat it as still on its way
+    assert (saved["shopify_image_sent"], saved["shopify_image_sent_id"]) == (None, None)
 
 
 def test_writeback_falls_back_to_natural_key_when_image_id_null():
@@ -199,7 +208,7 @@ def test_push_image_live_fails_loud_when_writeback_cannot_persist(monkeypatch):
 
     assert res.ok is False
     assert res.shopify_id == "gid://shopify/MediaImage/900"  # gid kept for reconcile
-    assert "write-back failed" in (res.error or "")
+    assert res.error == shopify_push.media._NOT_RECORDED  # plain words, no raw id
 
 
 def test_push_image_live_writeback_true_keeps_ok(monkeypatch):

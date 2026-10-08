@@ -63,7 +63,7 @@ VALID_TRANSITIONS: Dict[str, set] = {
 # Presentation/linkage fields a caller may patch via update() (everything that
 # is NOT identity, lifecycle-controlled, or a server-owned timestamp). Lifecycle
 # moves go through assign/set_status/attach_edited, not update(). The Shopify
-# record (shopify_image_id / _src / _sent) is written only by the press
+# record (shopify_image_id / _src / _sent / _sent_id) is written only by the press
 # (shopify_push.media.push_image), never patched here.
 _PATCHABLE_FIELDS = (
     "url",
