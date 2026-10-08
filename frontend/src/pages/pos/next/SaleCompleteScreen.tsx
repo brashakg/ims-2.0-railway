@@ -92,6 +92,8 @@ interface OrderView {
   totalDiscount?: number;
   taxAmount?: number;
   grandTotal?: number;
+  /** The bill's stored round off (owner ruling 2026-10-08), signed paise. */
+  roundOff?: number;
   amountPaid?: number;
   balanceDue?: number;
   items?: OrderLine[];
@@ -617,6 +619,12 @@ export function CompletionScreen({
             <div className="mt-3 pt-3 border-t border-gray-200">
               {typeof order?.totalDiscount === 'number' && order.totalDiscount > 0 && (
                 <Stat label="Discount" value={inr(order.totalDiscount, { withPaise: false })} />
+              )}
+              {Number(order?.roundOff || 0) !== 0 && (
+                <Stat
+                  label="Round off"
+                  value={`${Number(order?.roundOff) > 0 ? '+' : '−'}${inr(Math.abs(Number(order?.roundOff)))}`}
+                />
               )}
               <Stat
                 label="Total"

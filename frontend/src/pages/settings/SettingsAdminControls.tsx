@@ -109,7 +109,9 @@ const DEFAULT_DISCOUNT_LIMITS: DiscountLimit[] = [
 
 const DEFAULT_RULES: OperationalRule[] = [
   { id: 'require_customer', label: 'Require Customer for All Sales', description: 'No walk-in quick sales without customer', value: false, type: 'toggle', category: 'billing' },
-  { id: 'auto_round_off', label: 'Auto Round-off to Nearest ₹1', description: 'Round invoice totals', value: true, type: 'toggle', category: 'billing' },
+  // No round-off toggle: every bill rounds to the nearest rupee, one fixed rule
+  // (owner ruling 2026-10-08, backend orders/_shared.round_bill). The old
+  // auto_round_off switch was read by nothing.
   { id: 'credit_limit', label: 'Default Credit Limit (₹)', description: 'Max credit per customer', value: 50000, type: 'number', category: 'billing' },
   { id: 'credit_approval', label: 'Credit Above Limit Needs Approval', description: 'Manager approval for credit exceeding limit', value: true, type: 'toggle', category: 'billing' },
   { id: 'negative_stock', label: 'Allow Negative Stock Billing', description: 'Sell even when stock is 0', value: false, type: 'toggle', category: 'inventory' },

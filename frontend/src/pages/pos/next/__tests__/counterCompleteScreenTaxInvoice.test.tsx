@@ -148,4 +148,20 @@ describe('the general counter completion screen', () => {
     await waitFor(() => expect(sendNotification).toHaveBeenCalledTimes(1));
     expect(sendNotification.mock.calls[0][0]).toMatchObject({ template_id: 'ORDER_CONFIRMED' });
   });
+
+  it("shows the bill's Round off line from the server's order, never re-derived", async () => {
+    // Owner ruling 2026-10-08: the bill is rounded to the nearest rupee and
+    // the paise it moved print as their own line -- read off the order.
+    getOrder.mockResolvedValue({ ...ORDER, grandTotal: 5001, amountPaid: 5001, roundOff: 0.5 });
+    mount(<SaleCompleteScreen orderId="o-1" />);
+    await screen.findByText(/Asha Verma/);
+    expect(screen.getByText('Round off')).toBeTruthy();
+    expect(screen.getByText('+₹0.50')).toBeTruthy();
+  });
+
+  it('shows no Round off line on a whole-rupee bill', async () => {
+    mount(<SaleCompleteScreen orderId="o-1" />);
+    await screen.findByText(/Asha Verma/);
+    expect(screen.queryByText('Round off')).toBeNull();
+  });
 });

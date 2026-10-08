@@ -263,7 +263,14 @@ export interface POSState {
   // Computed getters
   getSubtotal: () => number;
   getTotalDiscount: () => number;
+  /** The bill's value after GST, BEFORE round off (= taxable + GST). */
+  getBillValue: () => number;
+  /** The bill's PAYABLE: getBillValue rounded once to the nearest rupee
+   *  (owner ruling 2026-10-08). What the cashier collects. */
   getGrandTotal: () => number;
+  /** The paise that rounding moved (payable - bill value): the bill's own
+   *  "Round off" line. Never part of taxable value or GST. */
+  getRoundOff: () => number;
   getTax: () => number;
   getTaxBreakdown: () => CartTaxBreakdown;
   getTaxableValue: () => number;
@@ -286,6 +293,17 @@ export interface CartTaxBreakdown {
 // ============================================================================
 // Helpers
 // ============================================================================
+
+/** Bill round off (owner ruling 2026-10-08): the payable is rounded ONCE,
+ *  after GST, to the nearest rupee -- 50 paise and above up, below down.
+ *  The cashier takes the money BEFORE the order exists, so the till has to
+ *  quote the rupee the server will bill; this is the till's mirror of the
+ *  server's rule (backend orders/_shared.round_bill), which stays the
+ *  authority on order-create. Only getGrandTotal / getRoundOff call it. */
+function roundBill(billValue: number): { payable: number; roundOff: number } {
+  const payable = Math.round(billValue);
+  return { payable, roundOff: Math.round((payable - billValue) * 100) / 100 };
+}
 
 function calcLineTotal(item: { unit_price: number; quantity: number; discount_percent: number }): number {
   const gross = item.unit_price * item.quantity;
@@ -708,7 +726,7 @@ export const usePOSStore = create<POSState>()(
         return { totalTax: Math.round(totalTax * 100) / 100, rates, lineRates };
       },
 
-      getGrandTotal: () => {
+      getBillValue: () => {
         // GST_PRICING_MODE (read at runtime from /health, see gstRuntime):
         //   INCLUSIVE (default, owner decision / QA F3): the counter price IS
         //     the all-in price; total = sum of inclusive line totals (GST is
@@ -738,12 +756,17 @@ export const usePOSStore = create<POSState>()(
         return Math.round(total * 100) / 100;
       },
 
+      getGrandTotal: () => roundBill(get().getBillValue()).payable,
+
+      getRoundOff: () => roundBill(get().getBillValue()).roundOff,
+
       getTax: () => get().getTaxBreakdown().totalTax,
 
       getTaxableValue: () => {
-        // Pre-tax taxable base = grand - tax. Correct in BOTH modes:
-        // inclusive -> gross/(1+rate); exclusive -> the line total (gross).
-        return Math.round((get().getGrandTotal() - get().getTax()) * 100) / 100;
+        // Pre-tax taxable base = bill value - tax (round off is outside it).
+        // Correct in BOTH modes: inclusive -> gross/(1+rate); exclusive -> the
+        // line total (gross).
+        return Math.round((get().getBillValue() - get().getTax()) * 100) / 100;
       },
 
       getTotalPaid: () => {

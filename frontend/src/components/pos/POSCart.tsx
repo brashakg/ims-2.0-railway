@@ -59,6 +59,8 @@ export function CartSidebar({
   ).sort();
   const subtotal = store.getSubtotal();
   const grand = store.getGrandTotal();
+  // The paise the bill was rounded by (owner ruling 2026-10-08) -- its own line.
+  const roundOff = store.getRoundOff();
   const totalDiscount = store.getTotalDiscount();
   // GST-inclusive: GST is the tax extracted from WITHIN the (inclusive)
   // grand total, not added on top. See posStore.getTax.
@@ -415,6 +417,14 @@ export function CartSidebar({
           <span>GST</span>
           <span className="figure" style={{ fontSize: 'inherit' }}>₹{Math.round(gst).toLocaleString('en-IN')}</span>
         </div>
+        {roundOff !== 0 && (
+          <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--ink-3)' }}>
+            <span>Round off</span>
+            <span className="figure" style={{ fontSize: 'inherit' }} data-testid="cart-round-off">
+              {roundOff > 0 ? '+' : '−'}₹{Math.abs(roundOff).toFixed(2)}
+            </span>
+          </div>
+        )}
         <div
           style={{
             display: 'flex',
