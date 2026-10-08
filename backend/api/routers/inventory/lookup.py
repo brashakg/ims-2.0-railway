@@ -52,7 +52,11 @@ from ._shared import (
 from .helpers import _get_db
 from ...services.gtin import sanitise_gtin
 from ...services.item_events import status_match
-from ...services.product_master import find_similar_products, model_family_query
+from ...services.product_master import (
+    existing_product_summary,
+    find_similar_products,
+    model_family_query,
+)
 from ...services.rbac_policy import policy_for
 from ...services.stores_util import physical_stores
 
@@ -60,9 +64,11 @@ from ...services.stores_util import physical_stores
 # the row and the route can never disagree about a role.
 STOCK_LOOKUP_ROLES = tuple(policy_for("GET", "/api/v1/inventory/lookup")["allowed"])
 
-# The ONLY product fields a counter sees. An allow-list, so a cost, supplier or
-# bill field added to the product doc later can never reach this screen.
-_PRODUCT_FIELDS = ("sku", "name", "brand", "model", "category", "color", "size", "mrp", "offer_price")
+# The ONLY product fields a counter sees, read off the catalogue's one display
+# projection (product_master.existing_product_summary: a frame's eye size is
+# attributes.lens_size there). An allow-list, so a cost, supplier or bill
+# field added to the product doc or the projection can never reach this screen.
+_PRODUCT_FIELDS = ("sku", "name", "brand", "model", "category", "colour_code", "size", "mrp", "offer_price")
 _HITS = 50
 
 
@@ -201,7 +207,8 @@ async def stock_lookup(
         if not pid or pid in seen:
             continue
         seen.add(pid)
-        item = {"product_id": pid, **{k: p.get(k) for k in _PRODUCT_FIELDS}}
+        shown = existing_product_summary(p)
+        item = {"product_id": pid, **{k: shown.get(k) for k in _PRODUCT_FIELDS}}
         # What the code named exactly (sku, barcode, GTIN, unit label): the
         # screen does not tell a counter who has just scanned it to scan.
         item["exact"] = pid in exact_ids
@@ -219,7 +226,7 @@ async def stock_lookup(
         items.append(item)
     # What the scan named first, then the model by colour and size.
     items.sort(key=lambda i: (not i["exact"],
-                              *(str(i.get(k) or "") for k in ("brand", "model", "color", "size"))))
+                              *(str(i.get(k) or "") for k in ("brand", "model", "colour_code", "size"))))
     # The caps (50 hits, 200 per family) cut a big contact-lens model: say so.
     return {"store_id": here, "items": items, "total": total, "truncated": total > len(items),
             "not_counted_item_types": not_counted, "lens_grid_item_types": lens_grid}

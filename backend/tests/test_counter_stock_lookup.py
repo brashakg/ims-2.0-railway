@@ -16,7 +16,7 @@ they carry money):
     GET /api/v1/inventory/lookup?q=<text>          (inventory package router)
     200 -> {"store_id": <this shop = the caller's active store>,
             "items": [{"product_id", "sku", "name", "brand", "model",
-                       "category", "color", "size", "mrp", "offer_price",
+                       "category", "colour_code", "size", "mrp", "offer_price",
                        "stores": [{"store_id", "store_name",
                                    "available", "in_transit",
                                    "tracked"}, ...]}],
@@ -848,8 +848,32 @@ def test_d7b4_one_model_lists_every_colour_and_size(call, mongo_db):
     items = _items(_ok(call(_user("SALES_STAFF"), q="CA8895")))
     assert {P54, P56, P003} <= set(items), sorted(items)
     assert RB not in items
-    got = {pid: (items[pid].get("color"), str(items[pid].get("size"))) for pid in (P54, P56, P003)}
+    got = {pid: (items[pid].get("colour_code"), str(items[pid].get("size"))) for pid in (P54, P56, P003)}
     assert got == {P54: ("807", "54"), P56: ("807", "56"), P003: ("003", "54")}
+
+
+def test_d7b4_a_frames_eye_size_is_the_create_doors(call, mongo_db):
+    # Round 8: the create door keeps a frame / sunglass eye size in
+    # attributes.lens_size, with no top-level size, so reading only `size`
+    # showed '-' on both rows and the 52 and 54 of one model looked the same.
+    # The lookup reads the catalogue's one display projection
+    # (existing_product_summary), which takes lens_size.
+    from api.services.product_master import normalise_payload
+
+    for size in (54, 52):
+        doc = normalise_payload(
+            category="SUNGLASS", mrp=9990.0, offer_price=8990.0, cost_price=4000.0,
+            sku=f"SG-OAKLEY-OO9208-BLK-{size}",
+            attributes={"brand_name": "Oakley", "model_no": "OO9208", "colour_code": "BLK",
+                        "lens_size": size},
+        )
+        assert "size" not in doc, "the door keeps the eye size in attributes only"
+        doc["product_id"] = doc["_id"] = f"P-OO9208-{size}"
+        mongo_db["products"].insert_one(doc)
+    items = _ok(call(_user("SALES_STAFF"), q="OO9208"))["items"]
+    assert [(i["product_id"], str(i.get("size"))) for i in items] == [
+        ("P-OO9208-52", "52"), ("P-OO9208-54", "54"),
+    ], items
 
 
 @pytest.mark.parametrize("label,query", [("unit barcode", UNIT_BARCODE),
