@@ -334,9 +334,10 @@ def _resolve_original_line(
     return None
 
 
-def _sum_prior_refunds(order_id: Optional[str]) -> float:
-    """Total net_refund already issued for an order across COMPLETED returns
-    (BUG-096 cumulative monetary cap). Fail-soft -> 0.0 when unavailable."""
+def _sum_prior_refunds(order_id: Optional[str], field: str = "net_refund") -> float:
+    """Total ``field`` (net_refund by default) already issued for an order across
+    COMPLETED returns (BUG-096 cumulative monetary cap). Fail-soft -> 0.0 when
+    unavailable."""
     if not order_id:
         return 0.0
     coll = _returns_coll()
@@ -347,7 +348,7 @@ def _sum_prior_refunds(order_id: Optional[str]) -> float:
         for doc in coll.find({"order_id": order_id}, {"_id": 0}):
             if doc.get("status") != "COMPLETED":
                 continue
-            net = doc.get("net_refund")
+            net = doc.get(field)
             if net is not None:
                 try:
                     total += float(net)
@@ -648,24 +649,40 @@ def _return_round_off(
     order: Optional[Dict[str, Any]],
     order_id: Optional[str],
     lines: List[ReturnLine],
+    lines_gross: float,
 ) -> float:
-    """The share of the bill's round off this return gives back.
+    """The share of the bill's round off this return gives back (signed).
 
     Owner ruling 2026-10-08: a FULL return refunds what was paid (the rounded
     bill); a PARTIAL return refunds its lines at their real value and never
-    re-rounds the original. So the order's stored ``round_off`` goes back with
-    the return that brings back the LAST unit -- one return of everything, or
-    the final piece of several -- and with no other, and the returns of one
-    bill always add up to what the customer paid for it. 0 for a bill made
-    before the ruling (no ``round_off``).
+    re-rounds the original. Both are measured against what is LEFT of the bill
+    (its rounded grand_total less every earlier return's gross):
+      * the return that brings back the LAST unit -- one return of everything,
+        or the final piece of several -- refunds exactly what is left, so the
+        returns of one bill always add up to what the customer paid for it;
+      * any other return refunds its lines, but never more than is left. On a
+        rounded-DOWN bill whose kept lines are worth less than the round off,
+        the lines alone would refund more than was paid (and the amount-paid
+        cap would refuse the refund), so the round off comes off this one.
+    Returns ``refund - lines_gross``. 0 for a bill made before the ruling (no
+    ``round_off``), whose returns keep the old pricing exactly.
     """
     round_off = float((order or {}).get("round_off") or 0.0)
     if not round_off or not order_id:
         return 0.0
+    left = max(
+        round(
+            float((order or {}).get("grand_total") or 0.0)
+            - _sum_prior_refunds(order_id, "gross_refund"),
+            2,
+        ),
+        0.0,
+    )
     idx = _order_line_index(order)
     returning = [
         (_resolve_original_line(ln, idx), float(ln.return_qty or 0)) for ln in lines
     ]
+    completes = True
     for line in (order or {}).get("items") or []:
         if not isinstance(line, dict):
             continue
@@ -674,8 +691,10 @@ def _return_round_off(
             order_id, line.get("item_id") or line.get("id"), line.get("product_id")
         )
         if already + back_now < _line_purchased_qty(line) - 1e-9:
-            return 0.0
-    return round(round_off, 2)
+            completes = False
+            break
+    refund = left if completes else min(lines_gross, left)
+    return round(refund - lines_gross, 2)
 
 
 def _price_return(
@@ -686,15 +705,16 @@ def _price_return(
     """THE refund pricing for a return, shared by the quote and the POST so the
     two can never disagree: ``(priced_lines, gross_refund, round_off)``.
     ``gross_refund`` is what the customer paid for the returned units -- the
-    lines' billed gross plus, on the return that completes the bill, its
-    round off. ``priced_lines`` stay the lines' own values (the GST reversal is
-    backed out of those, never out of the round off). 400 on a bad line."""
+    lines' billed gross plus this return's share of the bill's round off (see
+    _return_round_off). ``priced_lines`` stay the lines' own values (the GST
+    reversal is backed out of those, never out of the round off). 400 on a bad
+    line."""
     priced_lines = _priced_return_lines(lines, order)
     try:
         lines_gross = engine.returned_value(priced_lines)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    round_off = _return_round_off(order, order_id, lines)
+    round_off = _return_round_off(order, order_id, lines, lines_gross)
     return priced_lines, round(lines_gross + round_off, 2), round_off
 
 

@@ -141,3 +141,46 @@ def test_full_credit_note_keeps_round_off_out_of_taxable_and_tax(monkeypatch):
     assert entry["taxable"] == 952.85
 
 
+
+
+@pytest.mark.parametrize(
+    "prices, first_refund",
+    [
+        # A frame and a free case: the bill rounds DOWN by more than the kept
+        # line is worth, so the frame alone refunds what was paid, not 1000.49.
+        ([1000.49, 0.0], 1000.0),
+        ([1000.20, 0.10], 1000.0),  # bill 1000.30 -> 1000
+    ],
+)
+def test_partial_return_never_refunds_more_than_was_paid(
+    monkeypatch, prices, first_refund
+):
+    order = _ro_order(prices)
+    assert order["grand_total"] == 1000.0 and order["round_off"] < 0
+    client, returns_coll, ledger_coll = _returns_client(monkeypatch, order)
+    q = client.post("/api/v1/returns/quote", json=_return_body([1]), headers=_hdr())
+    assert q.status_code == 200, q.text
+    assert q.json()["net_refund"] == first_refund
+    r1 = client.post("/api/v1/returns", json=_return_body([1]), headers=_hdr())
+    assert r1.status_code in (200, 201), r1.text  # was 400 at the amount-paid cap
+    assert returns_coll.docs[-1]["net_refund"] == first_refund
+    # The rest of the bill comes back for what is left of it, never below 0.
+    r2 = client.post("/api/v1/returns", json=_return_body([2]), headers=_hdr())
+    assert r2.status_code in (200, 201), r2.text
+    assert round(sum(d["net_refund"] for d in returns_coll.docs), 2) == 1000.0
+    assert all(d["net_refund"] >= 0 for d in returns_coll.docs)
+
+
+def test_capped_partial_credit_note_keeps_the_lines_taxable_value(monkeypatch):
+    order = _ro_order([1000.49, 0.0])
+    frame = order["items"][0]
+    client, _, ledger_coll = _returns_client(monkeypatch, order)
+    r = client.post(
+        "/api/v1/returns", json=_return_body([1], "CREDIT_NOTE"), headers=_hdr()
+    )
+    assert r.status_code in (200, 201), r.text
+    entry = ledger_coll.docs[-1]
+    assert entry["net_refund"] == 1000.0
+    # The frame's own tax and taxable value; the -0.49 is neither.
+    assert entry["tax"] == frame["tax_amount"]
+    assert entry["taxable"] == frame["taxable_value"]
