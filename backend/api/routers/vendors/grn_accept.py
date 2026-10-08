@@ -1087,12 +1087,17 @@ def _raise_once(
 def _complete_receipt_tasks(db, grn_id, note: str, category: Optional[str] = None) -> None:
     """Close the open system tasks raised for this receipt (both kinds, or one
     `category`) -- the receipt no longer needs that person."""
-    flt = {"grn_id": grn_id, "source": "SYSTEM", "status": {"$in": _TASK_OPEN}}
+    flt = {"grn_id": grn_id, "source": "SYSTEM"}
     if category:
         flt["category"] = category
+    complete_tasks(db, flt, note)
+
+
+def complete_tasks(db, flt: dict, note: str) -> None:
+    """Close the OPEN tasks `flt` matches as done by the system, with `note`."""
     now = datetime.now()
     db.get_collection("tasks").update_many(
-        flt,
+        {**flt, "status": {"$in": _TASK_OPEN}},
         {
             "$set": {
                 "status": "COMPLETED",
@@ -1119,10 +1124,7 @@ def close_catalogue_asks(product_id: str, note: str) -> None:
         db = _get_db()
         if db is None or not product_id:
             return
-        tasks = db.get_collection("tasks")
-        products = db.get_collection("products")
-        now = datetime.now()
-        for t in tasks.find(
+        for t in db.get_collection("tasks").find(
             {
                 "category": "Catalogue",
                 "source": "SYSTEM",
@@ -1130,32 +1132,22 @@ def close_catalogue_asks(product_id: str, note: str) -> None:
                 "product_ids": product_id,
             }
         ):
-            waiting = []
-            for pid in t.get("product_ids") or []:
-                prod = products.find_one({"product_id": pid}) or {}
-                if prod.get("discarded_draft") or not prod:
-                    continue
-                if _pm.compute_catalog_status(prod)[1]:
-                    waiting.append(pid)
-            if waiting:
-                continue
-            tasks.update_one(
-                {"task_id": t.get("task_id"), "status": {"$in": _TASK_OPEN}},
-                {
-                    "$set": {
-                        "status": "COMPLETED",
-                        "completed_at": now,
-                        "updated_at": now,
-                        "completed_by": "system",
-                        "completion_notes": note,
-                    },
-                    "$push": {
-                        "history": {"action": "completed", "by": "system", "notes": note, "at": now}
-                    },
-                },
-            )
+            if not asks_still_waiting(db, t.get("product_ids") or []):
+                complete_tasks(db, {"task_id": t.get("task_id")}, note)
     except Exception:  # noqa: BLE001 - a task problem never undoes a save
         logger.warning("[CATALOGUE] could not close the asks naming %s", product_id, exc_info=True)
+
+
+def asks_still_waiting(db, product_ids) -> List[str]:
+    """The products an ask for cataloguing still waits on: those that exist,
+    were not discarded, and are not catalogue-complete yet."""
+    products = db.get_collection("products")
+    waiting = []
+    for pid in product_ids:
+        prod = products.find_one({"product_id": pid}) or {}
+        if prod and not prod.get("discarded_draft") and _pm.compute_catalog_status(prod)[1]:
+            waiting.append(pid)
+    return waiting
 
 
 def _sync_catalogue_tasks(grn_id, grn, unresolved_lines, grn_status, product_repo):

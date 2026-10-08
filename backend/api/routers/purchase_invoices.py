@@ -1513,8 +1513,27 @@ async def request_cataloguing(
     only exit is a developer is a wall.
     """
     db = _get_db()
+    items = _ask_items(db, body.product_ids)
+    store_id = _shop_for_the_ask(db, body, current_user, items)
+    try:
+        told = ask_catalogue_managers(db, store_id, items, body.note)
+        if not told:
+            raise RuntimeError("no task was stored for the ask")
+    except Exception as exc:  # noqa: BLE001
+        # Never a 201 "Cataloguing requested" for an ask nobody received.
+        logger.error("[PI] could not raise the cataloguing task", exc_info=True)
+        raise HTTPException(
+            status_code=503,
+            detail="The catalogue manager could not be asked. Try again.",
+        ) from exc
+
+    return {"requested": items, "message": "Cataloguing requested"}
+
+
+def _ask_items(db, product_ids) -> list:
+    """Each product an ask names, with what it is still missing."""
     items = []
-    for pid in dict.fromkeys(body.product_ids):
+    for pid in dict.fromkeys(product_ids):
         prod = None
         if db is not None:
             try:
@@ -1536,50 +1555,44 @@ async def request_cataloguing(
             }
         )
 
+    return items
+
+
+def ask_catalogue_managers(db, store_id, items, note=None) -> int:
+    """THE ask for cataloguing: the catalogue managers BY NAME, through the
+    one door a held receipt uses too -- a task with no assignee is one no
+    catalogue manager's list shows. request_cataloguing runs it, and so does
+    scripts/raise_held_receipt_tasks.py for an ask raised before that door.
+    Answers how many people now hold the task."""
+    from .vendors.grn_accept import tell_catalogue_managers
+
     lines = [
         f"- {i['product']}: needs "
         + (", ".join(i["missing"]) if i["missing"] else "review")
         for i in items
     ]
-    # The catalogue managers BY NAME, through the one door a held receipt uses
-    # too -- a task with no assignee is one no catalogue manager's list shows.
-    store_id = _shop_for_the_ask(db, body, current_user, items)
-    try:
-        from .vendors.grn_accept import tell_catalogue_managers
-
-        told = tell_catalogue_managers(
-            db,
-            store_id,
-            dedupe="catalogue-for-bill:"
-            + ",".join(sorted(i["product_id"] for i in items)),
-            title=f"Finish cataloguing {len(items)} item(s) - a vendor bill is waiting",
-            orphan_title=(
-                f"No catalogue manager for {store_id}: {len(items)} item(s) "
-                "block a vendor bill"
-            ),
-            # An ask: asking again once the last task was closed asks again.
-            ever=False,
-            # Closed when the items are finished or discarded
-            # (grn_accept.close_catalogue_asks).
-            extra={"product_ids": [i["product_id"] for i in items]},
-            description=(
-                "A purchase invoice cannot be booked until these products are "
-                "catalogue-complete:\n"
-                + "\n".join(lines)
-                + (f"\n\nNote: {body.note}" if body.note else "")
-            ),
-        )
-        if not told:
-            raise RuntimeError("no task was stored for the ask")
-    except Exception as exc:  # noqa: BLE001
-        # Never a 201 "Cataloguing requested" for an ask nobody received.
-        logger.error("[PI] could not raise the cataloguing task", exc_info=True)
-        raise HTTPException(
-            status_code=503,
-            detail="The catalogue manager could not be asked. Try again.",
-        ) from exc
-
-    return {"requested": items, "message": "Cataloguing requested"}
+    return tell_catalogue_managers(
+        db,
+        store_id,
+        dedupe="catalogue-for-bill:"
+        + ",".join(sorted(i["product_id"] for i in items)),
+        title=f"Finish cataloguing {len(items)} item(s) - a vendor bill is waiting",
+        orphan_title=(
+            f"No catalogue manager for {store_id}: {len(items)} item(s) "
+            "block a vendor bill"
+        ),
+        # An ask: asking again once the last task was closed asks again.
+        ever=False,
+        # Closed when the items are finished or discarded
+        # (grn_accept.close_catalogue_asks).
+        extra={"product_ids": [i["product_id"] for i in items]},
+        description=(
+            "A purchase invoice cannot be booked until these products are "
+            "catalogue-complete:\n"
+            + "\n".join(lines)
+            + (f"\n\nNote: {note}" if note else "")
+        ),
+    )
 
 
 def _shop_for_the_ask(db, body: "CataloguingRequest", current_user: dict, items) -> str:
