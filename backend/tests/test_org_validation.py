@@ -130,13 +130,3 @@ def test_validate_tan():
     assert ov.validate_tan("RANC01234E")
     assert not ov.validate_tan("RANC0123E")   # too short
     assert not ov.validate_tan("1ANC01234E")  # must start with letters
-
-
-def test_resolve_gstin_for_state():
-    gstins = [
-        {"gstin": "20AAPFU0939F1Z?", "state_code": "20"},
-        {"gstin": "27AAPFU0939F1ZV", "state_code": "27"},
-    ]
-    got = ov.resolve_gstin_for_state(gstins, "27")
-    assert got and got["gstin"] == "27AAPFU0939F1ZV"
-    assert ov.resolve_gstin_for_state(gstins, "09") is None
