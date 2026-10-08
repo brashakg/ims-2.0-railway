@@ -12,7 +12,7 @@ export function ReviewCard({ form }: { form: QuickAddForm }) {
   const {
     selectedCategory, attributes, mrp, offerPrice, canSeeCost, costPrice,
     weight, hsnCode, gstRate, hsnMatchesCategory, discountCategory, brandTiers,
-    isReviewMode, reorderLevel, images, brandGoesOnline, editMode, skuPreview,
+    isReviewMode, reorderLevel, images, websiteVerdict, editMode, skuPreview,
   } = form;
 
   return (
@@ -72,7 +72,7 @@ export function ReviewCard({ form }: { form: QuickAddForm }) {
           {images.length > 0 && (
             <ReviewRow label="Images" value={`${images.length} uploaded`} />
           )}
-          {brandGoesOnline(attributes.brand_name) && !isReviewMode && (
+          {websiteVerdict?.online && !isReviewMode && (
             <ReviewRow label="Shopify" value="Will sync" />
           )}
         </dl>

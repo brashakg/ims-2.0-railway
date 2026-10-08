@@ -115,7 +115,9 @@ const ONLINE_LABEL: Record<OnlineState, { text: string; cls: string; title: stri
   NOT_FOR_WEBSITE: {
     text: 'Not for website',
     cls: 'chip',
-    title: 'Settings > Brand Master keeps this brand off the website — the push refuses it',
+    // The row's note carries the push gate's own reason (a brand switched off,
+    // misspelt or inactive in Brand Master, a push lock); this is the fallback.
+    title: 'The push refuses it',
   },
   DELIST_FAILED: {
     text: 'Still live',

@@ -49,6 +49,7 @@ vi.mock('../../../services/api/products', () => ({
     getCategoryRegistry: vi.fn(async () => { throw new Error('offline'); }),
     getBrandOptions: vi.fn(async () => ({ brands: [] })),
     previewSku: vi.fn(async () => ({ category: 'SUNGLASS', sku: '' })),
+    getWebsiteVerdict: vi.fn(async (brand: string) => ({ brand, online: true, reason: null })),
     getProduct: vi.fn(async () => SOURCE_PRODUCT),
     uploadProductImage: vi.fn(async () => ({ url: '/api/v1/products/image/f1' })),
     createProduct: (...a: unknown[]) => createProduct(...a),
@@ -76,7 +77,6 @@ vi.mock('../../../constants/gstRuntime', () => ({
 }));
 
 import { QuickAddPage } from '../QuickAddPage';
-import { productApi } from '../../../services/api/products';
 import {
   getCategoryFields,
   validateProductForm,
@@ -303,11 +303,7 @@ describe('8 - the review card uses registry labels', () => {
 describe('9 + 12 - the Online strip', () => {
   it('has no website or POS switch (the brand default decides, D6), and no tag box that never saves', async () => {
     const user = userEvent.setup();
-    // A brand the Brand Master sends to the website. The form reads every
-    // brand's default once, on load (as the push gate does).
-    vi.mocked(productApi.getBrandOptions).mockResolvedValueOnce({
-      brands: [{ name: 'Ray-Ban', subbrands: [], sync_to_shopify_default: true }],
-    });
+    // A brand the push gate sends to the website (GET /products/website-verdict).
     renderPage();
     expect(screen.queryByLabelText('Sync to Shopify')).toBeNull();
     expect(screen.queryByLabelText('Publish to Shopify POS')).toBeNull();

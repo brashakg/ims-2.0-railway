@@ -193,34 +193,27 @@ export function useQuickAddForm() {
   // is no longer picked per product — the backend derives it from this tier
   // (category force wins); shown read-only in the Review.
   const [brandTiers, setBrandTiers] = useState<Record<string, string>>({});
-  // Brand name (lower-cased) -> its Brand Master website default (D6), shown
-  // read-only. EVERY active brand, whatever the category, matched without case:
-  // the push gate (shopify_push.product_push_refusal ->
-  // catalog_dictionary.load_brand_sync_default) matches the brand the same way
-  // and computes each value here, so the line never disagrees with the push
-  // (a brand Brand Master lists for Sunglass only still decides a Frame).
-  const [brandSyncs, setBrandSyncs] = useState<Record<string, boolean>>({});
+  // Whether the typed brand goes to the website, and why not (D6), shown
+  // read-only: THE push gate's own verdict (GET /products/website-verdict ->
+  // shopify_push.product_push_refusal: a push-locked brand, or the brand's
+  // Brand Master default), never worked out here, so the line cannot disagree
+  // with the push. undefined = being asked; null = could not be asked.
+  const [websiteVerdict, setWebsiteVerdict] = useState<
+    { online: boolean; reason: string | null } | null | undefined
+  >(undefined);
+  const verdictBrand = String(attributes.brand_name || '').trim();
   useEffect(() => {
+    setWebsiteVerdict(undefined);
+    if (!verdictBrand) return;
     let alive = true;
-    productApi
-      .getBrandOptions()
-      .then((r) => {
-        if (!alive) return;
-        const syncs: Record<string, boolean> = {};
-        (r.brands || []).forEach((b) => {
-          if (b?.name) syncs[b.name.trim().toLowerCase()] = b.sync_to_shopify_default === true;
-        });
-        setBrandSyncs(syncs);
-      })
-      .catch(() => { /* no line verdict: the strip says the brand decides */ });
-    return () => { alive = false; };
-  }, []);
-  /** Whether the brand goes to the website; undefined = not in Brand Master. */
-  const brandGoesOnline = useCallback(
-    (brand: string | undefined): boolean | undefined =>
-      brandSyncs[String(brand || '').trim().toLowerCase()],
-    [brandSyncs],
-  );
+    const t = window.setTimeout(() => {
+      productApi
+        .getWebsiteVerdict(verdictBrand)
+        .then((r) => { if (alive) setWebsiteVerdict({ online: r.online === true, reason: r.reason ?? null }); })
+        .catch(() => { if (alive) setWebsiteVerdict(null); });
+    }, 300);
+    return () => { alive = false; window.clearTimeout(t); };
+  }, [verdictBrand]);
 
   // Load the canonical category field registry once (shared module cache). The
   // required/optional flags the form renders + validates derive from it so they
@@ -1496,7 +1489,7 @@ export function useQuickAddForm() {
     images, setImages,
     displayName, setDisplayName, reviewTags, setReviewTags,
     // options fed from the server
-    subbrandsByBrand, brandTiers, brandGoesOnline, skuPreview,
+    subbrandsByBrand, brandTiers, websiteVerdict, skuPreview,
     // accordion + validation surface
     errors, showAdvanced, setShowAdvanced,
     openSections, toggleSection, liveErrors, sectionIssues, jumpToField,

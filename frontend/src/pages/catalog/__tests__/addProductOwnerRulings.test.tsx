@@ -5,8 +5,9 @@
 // the rendered screen.
 //
 // F12/D6 the brand default ALWAYS decides the website: no Sync to Shopify
-//        switch on Add / Edit / Quick add, a read-only line names the brand
-//        default, and the create payload carries no sync choice.
+//        switch on Add / Edit / Quick add, a read-only line shows the push
+//        gate's own verdict (GET /products/website-verdict) and its reason,
+//        and the create payload carries no sync choice.
 // F13/D5 the new product's readable SKU is PREVIEWED before saving, and the
 //        preview comes from the server (the minting function), never a copy.
 // F68    after Save + New the cursor is in Model No and the reorder level stays.
@@ -47,15 +48,22 @@ const SOURCE_PRODUCT = {
   images: [],
 };
 const BRANDS = [
-  { name: 'Ray-Ban', subbrands: [], tier: 'PREMIUM', sync_to_shopify_default: true },
+  { name: 'Ray-Ban', subbrands: [], tier: 'PREMIUM' },
   // Oakley, not Carrera: the brand select's offline fallback list has no Carrera.
-  { name: 'Oakley', subbrands: [], tier: 'PREMIUM', sync_to_shopify_default: false },
+  { name: 'Oakley', subbrands: [], tier: 'PREMIUM' },
 ];
 
 const createProduct = vi.fn(async () => ({ product_id: 'P-NEW', sku: 'SG-RAYBAN-RB4165-601' }));
 const updateProduct = vi.fn(async () => ({}));
 const getProduct = vi.fn(async () => SOURCE_PRODUCT as Record<string, unknown>);
 const previewSku = vi.fn(async () => ({ category: 'SUNGLASS', sku: 'SG-RAYBAN-RB4165-601' }));
+// The server's push-gate verdict per brand (shopify_push.product_push_refusal).
+// A stand-in for the server: the form must show whatever it answers.
+const gateVerdict = (brand: string) =>
+  brand === 'Ray-Ban'
+    ? { brand, online: true, reason: null }
+    : { brand, online: false, reason: `brand '${brand}' is not for the website (Settings > Brand Master)` };
+const getWebsiteVerdict = vi.fn(async (brand: string) => gateVerdict(brand));
 vi.mock('../../../services/api/products', () => ({
   DuplicateProductError: class DuplicateProductError extends Error {},
   productApi: {
@@ -66,6 +74,7 @@ vi.mock('../../../services/api/products', () => ({
     createProduct: (...a: unknown[]) => createProduct(...a),
     updateProduct: (...a: unknown[]) => updateProduct(...a),
     previewSku: (...a: unknown[]) => previewSku(...a),
+    getWebsiteVerdict: (b: string) => getWebsiteVerdict(b),
   },
 }));
 const setShopLevel = vi.fn(async () => ({}));
@@ -100,7 +109,6 @@ vi.mock('../../../services/api/buyDesk', () => ({
 
 import { QuickAddPage } from '../QuickAddPage';
 import { DuplicateProductError } from '../../../services/api/products';
-import { productApi } from '../../../services/api/products';
 import BuyDeskPage from '../BuyDeskPage';
 import { useSimilarProducts } from '../useSimilarProducts';
 import { NAV_GROUPS } from '../../../components/shell/navConfig';
@@ -139,6 +147,8 @@ beforeEach(() => {
   setShopLevel.mockClear();
   previewSku.mockReset();
   previewSku.mockImplementation(async () => ({ category: 'SUNGLASS', sku: 'SG-RAYBAN-RB4165-601' }));
+  getWebsiteVerdict.mockReset();
+  getWebsiteVerdict.mockImplementation(async (brand: string) => gateVerdict(brand));
 });
 
 describe('F12 / D6 - the brand default decides the website', () => {
@@ -154,39 +164,61 @@ describe('F12 / D6 - the brand default decides the website', () => {
     expect(screen.queryByLabelText('Sync to Shopify')).toBeNull();
   });
 
-  it('a read-only line names the brand default, and follows the brand', async () => {
+  const websiteLine = () => screen.getByText(/^Website:/).textContent || '';
+  const reviewCard = () =>
+    screen.getByRole('heading', { name: 'Review' }).closest('.card') as HTMLElement;
+
+  it('a read-only line shows the push gate verdict, and follows the brand', async () => {
     const user = userEvent.setup();
     renderPage();
     await sunglass(user);
-    const rayBan = (await screen.findByText(/brand default/i)).textContent || '';
-    expect(rayBan).toMatch(/Ray-Ban/);
+    await waitFor(() => expect(websiteLine()).toMatch(/^Website: yes - Ray-Ban's brand default/));
+    expect(within(reviewCard()).getByText('Will sync')).toBeInTheDocument();
 
     fill(screen.getByLabelText(/^Brand Name/), 'Oakley');
-    await waitFor(() => expect(screen.getByText(/brand default/i).textContent).toMatch(/Oakley/));
-    // Same sentence with only the name swapped would mean the verdict never moved.
-    expect(screen.getByText(/brand default/i).textContent).not.toBe(rayBan.replace('Ray-Ban', 'Oakley'));
+    await waitFor(() => expect(websiteLine()).toBe(
+      "Website: no - brand 'Oakley' is not for the website (Settings > Brand Master).",
+    ));
+    expect(within(reviewCard()).queryByText('Will sync')).toBeNull();
+    expect(getWebsiteVerdict).toHaveBeenLastCalledWith('Oakley');
   });
 
-  it('the line asks every brand, without case, as the push gate does', async () => {
-    // Brand Master lists Ray-Ban for another category only, so the Sunglass
-    // brand list leaves it out; the product is a legacy 'RAY-BAN'. The push
-    // gate (load_brand_sync_default: any category, no case) publishes it.
-    vi.mocked(productApi.getBrandOptions).mockImplementation(async (category?: string) => ({
-      brands: category ? BRANDS.filter((b) => b.name !== 'Ray-Ban') : BRANDS,
-    }));
+  it('the line is the server verdict for the typed brand, never a lookup of its own', async () => {
+    // A legacy product whose brand Brand Master does not list, and a
+    // push-locked brand that Brand Master has ticked: the server refuses both
+    // (shopify_push.product_push_refusal) and the form says exactly that.
     getProduct.mockResolvedValueOnce({
-      ...SOURCE_PRODUCT, brand: 'RAY-BAN',
-      attributes: { ...SOURCE_PRODUCT.attributes, brand_name: 'RAY-BAN' },
+      ...SOURCE_PRODUCT, brand: 'RayBan',
+      attributes: { ...SOURCE_PRODUCT.attributes, brand_name: 'RayBan' },
     });
-    try {
-      renderPage('/catalog/add?edit=P-SRC');
-      await screen.findByRole('button', { name: /Save changes/ });
-      await waitFor(() => expect(screen.getByText(/brand default/i).textContent).toMatch(/Website: yes/));
-      expect(within(screen.getByRole('heading', { name: 'Review' }).closest('.card') as HTMLElement)
-        .getByText('Will sync')).toBeInTheDocument();
-    } finally {
-      vi.mocked(productApi.getBrandOptions).mockImplementation(async () => ({ brands: BRANDS }));
-    }
+    getWebsiteVerdict.mockImplementation(async (brand: string) => ({
+      brand, online: false,
+      reason: `brand '${brand}' is not in Settings > Brand Master (check its spelling, or whether the brand was renamed)`,
+    }));
+    renderPage('/catalog/add?edit=P-SRC');
+    await screen.findByRole('button', { name: /Save changes/ });
+    await waitFor(() => expect(websiteLine()).toMatch(/^Website: no - brand 'RayBan' is not in Settings > Brand Master/));
+    expect(getWebsiteVerdict).toHaveBeenCalledWith('RayBan');
+    expect(within(reviewCard()).queryByText('Will sync')).toBeNull();
+
+    getWebsiteVerdict.mockImplementation(async (brand: string) => ({
+      brand, online: false, reason: "brand 'oakley' is push-locked",
+    }));
+    fill(screen.getByLabelText(/^Brand Name/), 'Oakley');
+    await waitFor(() => expect(websiteLine()).toBe("Website: no - brand 'oakley' is push-locked."));
+    expect(within(reviewCard()).queryByText('Will sync')).toBeNull();
+  });
+
+  it('a failed check is said as such, never blamed on Brand Master', async () => {
+    // GET /products/website-verdict fails: the form cannot know, so it says
+    // so -- not 'no' for a brand Brand Master may well send to the website.
+    getWebsiteVerdict.mockRejectedValue(new Error('network'));
+    const user = userEvent.setup();
+    renderPage();
+    await sunglass(user);
+    await waitFor(() => expect(websiteLine()).toMatch(/^Website: could not be checked just now/));
+    expect(websiteLine()).not.toMatch(/^Website: (no|yes)/);
+    expect(within(reviewCard()).queryByText('Will sync')).toBeNull();
   });
 
   it('the create payload carries no sync choice for the server to honour', async () => {

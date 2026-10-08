@@ -56,8 +56,9 @@ export interface CatalogProductDoc {
    *  for a human to press push) / OFF / BLOCKED (no usable photo — cannot go
    *  online) / NOT_FOR_WEBSITE (Brand Master keeps the brand off the website). */
   online?: OnlineState;
-  /** Server-computed: set on a LIVE listing the push gate now refuses — it
-   *  still sells, but its price and images no longer sync. */
+  /** Server-computed: the push gate's own reason whenever it refuses the row —
+   *  a LIVE listing still sells but its price and images no longer sync; a
+   *  NOT_FOR_WEBSITE row says why (brand off / misspelt / inactive, a lock). */
   online_note?: string | null;
   [k: string]: unknown;
 }

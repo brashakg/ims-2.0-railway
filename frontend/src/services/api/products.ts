@@ -406,6 +406,17 @@ export const productApi = {
     return response.data as { brands: BrandOption[] };
   },
 
+  // Whether a product of this brand goes to the website, and why not: THE
+  // push gate's own answer (shopify_push.product_push_refusal -- a push-locked
+  // brand, or the brand's Brand Master default). The form shows it and never
+  // works it out itself.
+  getWebsiteVerdict: async (
+    brand: string
+  ): Promise<{ brand: string; online: boolean; reason: string | null }> => {
+    const response = await api.get('/products/website-verdict', { params: { brand } });
+    return response.data as { brand: string; online: boolean; reason: string | null };
+  },
+
   // The SKU a NEW product will get, from the server's one minter
   // (product_master.build_sku) -- the form shows it before saving and never
   // builds a SKU itself. A clash on save adds a number to the end.
