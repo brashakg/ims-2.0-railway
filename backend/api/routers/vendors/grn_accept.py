@@ -24,14 +24,14 @@ from .po_detail import (
     _as_read,
     _qty,
     _received_by_product,
+    _received_per_line,
+    _refresh_received,
     beyond_open_quantity,
 )
 from .numbering import (
-    _cumulative_received_by_product,
     _grn_barcode,
     _grn_stock_audit,
     compute_po_receipt_state,
-    po_line_status,
 )
 from .grn_accept_lock import (
     _GRN_MINT_DUPLICATE,
@@ -658,9 +658,14 @@ def _accept_grn_claimed(
             ),
         }
 
-    # Advance the PO received state. Sum the accepted qty across EVERY accepted
-    # GRN for this PO (this one is now ACCEPTED) and compare against the ordered
-    # lines: full receipt -> RECEIVED, otherwise PARTIALLY_RECEIVED. Fail-soft.
+    # Advance the PO received state from what arrived per product -- the SAME
+    # count the cancels write (po_detail._received_by_product: the accepted
+    # receipts, the units in stock, the order's own copy), shared out over
+    # each product's lines in order -- and compare it against the ordered
+    # lines: full receipt -> RECEIVED, otherwise PARTIALLY_RECEIVED. Counting
+    # ACCEPTED receipts only dropped the units a part-accepted or escalated
+    # receipt put on the shelf, and reopened a line a cancel had closed over
+    # them. Fail-soft.
     #
     # The write is guarded like every other PO change (_as_read): a manager's
     # "cancel what is still due" landing between this read and this write must
@@ -674,22 +679,14 @@ def _accept_grn_claimed(
                 po = po_repo.find_by_id(po_id)
                 if not po or po.get("status") == "CANCELLED":
                     break  # a withdrawn order stays withdrawn
-                received_by_product = _cumulative_received_by_product(grn_repo, po_id)
-                po_items = po.get("items") or []
-                state = compute_po_receipt_state(po_items, received_by_product)
-                # Map the cumulative per-product received qty down onto each PO
-                # line + derive the line residual status (drives the receiving
-                # cockpit's "open POs" / "pending not-received" panels).
-                updated_items = []
-                for it in po_items:
-                    recv = received_by_product.get(it.get("product_id"), 0)
-                    updated_items.append(
-                        {
-                            **it,
-                            "received_qty": recv,
-                            "line_status": po_line_status(it, recv),
-                        }
-                    )
+                received_by_product = _received_by_product(po)
+                # Each line's received qty + residual status (drives the
+                # receiving cockpit's "open POs" / "pending not-received" panels).
+                updated_items = [dict(it) for it in po.get("items") or []]
+                _refresh_received(
+                    updated_items, _received_per_line(po, received_by_product)
+                )
+                state = compute_po_receipt_state(updated_items, received_by_product)
                 if po_repo.update_if(
                     po_id,
                     _as_read(po),

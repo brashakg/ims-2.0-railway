@@ -434,3 +434,49 @@ def test_a_receipt_in_flight_counts_whole_when_stock_rows_are_gone(monkeypatch):
         t.join(15)
     assert out_b["r"]["grn_status"] == "ACCEPTED", out_b
     assert _p2_units(stock) == 2
+
+
+def _mongo_filters(grn_repo):
+    """find_many that reads a filter as Mongo does ($in and all), so the
+    cancel's "a receipt is still waiting" look sees the fake's receipts."""
+    import types
+    from strict_fakes import matches
+
+    def find_many(self, flt, limit=1000):
+        return [dict(d) for d in self.docs.values() if matches(d, flt or {})][:limit]
+
+    grn_repo.find_many = types.MethodType(find_many, grn_repo)
+
+
+def test_an_accept_keeps_what_a_cancel_closed_over_shelved_units(monkeypatch):
+    """P1 3, P2 5, P3 1. R0 = P2 x2 + P3 x1 holds P3 (not catalogued), so its 2
+    P2 are on the shelf; R0 is escalated. Cancelling the P2 line leaves it at
+    2 received, 3 cancelled. Accepting R1 (P1 x3) then re-derives the order
+    from the same count the cancel wrote -- the P2 line stays received."""
+    from api.services import product_master as pm
+
+    monkeypatch.setattr(
+        pm, "compute_catalog_status",
+        lambda prod: ("DRAFT", ["hsn_code"]) if prod.get("product_id") == "P3" else ("ACTIVE", []),
+    )
+    po = _po(_line("P1", "Frame X", 3), _line("P2", "Ray-Ban", 5))
+    po["items"].append(_line("P3", "Vogue", 1))
+    po.update(vendor_gstin="", store_gstin="")
+    grn_repo, po_repo, stock, _t = _wire(monkeypatch, po=po,
+                                         product_repo=_Products("P1", "P2", "P3"))
+    _atomic_claims(grn_repo)
+    _mongo_filters(grn_repo)
+    r0 = _create("normal", _items("P2", 2) + _items("P3", 1), _user(), inv="INV-0")["grn_id"]
+    assert _accept(r0)["grn_status"] == "PARTIALLY_ACCEPTED"
+    asyncio.run(vendors_mod.escalate_grn(r0, note="held line", current_user=_user()))
+    asyncio.run(vendors_mod.cancel_po_line(
+        "PO-1", 1, vendors_mod.POLineCancel(reason="vendor short", product_id="P2"), _user()))
+    p2 = po_repo.po["items"][1]
+    assert (p2["quantity"], p2["received_qty"], p2["cancelled_qty"], p2["line_status"]) == (
+        2, 2, 3, "RECEIVED")
+    r1 = _create("normal", _items("P1", 3), _user(), inv="INV-1")["grn_id"]
+    assert _accept(r1)["grn_status"] == "ACCEPTED"
+    p2 = po_repo.po["items"][1]
+    assert (p2["received_qty"], p2["line_status"]) == (2, "RECEIVED")
+    assert po_repo.po["received_qty_by_product"]["P2"] == 2
+    assert po_repo.po["items"][0]["received_qty"] == 3

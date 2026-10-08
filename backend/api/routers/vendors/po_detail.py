@@ -548,22 +548,27 @@ def _received_by_product(po: dict, leave_out_grn: Optional[str] = None) -> dict:
     (the count grn_accept closes an order on), the units receipts actually
     minted for this order (a part-accepted or escalated receipt is in no
     receipt sum), and the order's own copy (grn_accept's fallback writes only
-    the status, so it can lag). Logging a receipt and accepting one both ask
-    this; the accept leaves out the units of the receipt being accepted
-    (`leave_out_grn`), which its own quantity already covers."""
+    the status, so it can lag). Logging a receipt, accepting one, a cancel
+    and an accept's write-back of the order all ask this. The accept leaves
+    out the units the receipt being accepted already put in stock
+    (`leave_out_grn`) -- from the stock count, and from the order's own copy,
+    which an earlier write-back took from that count -- because its own
+    quantity already covers them."""
     po_id = po.get("po_id")
     out = dict(_cumulative_received_by_product(get_grn_repository(), po_id))
     header = po.get("received_qty_by_product") or {}
     minted: dict = {}
+    left_out: dict = {}
     for it in po.get("items") or []:
         pid = it.get("product_id")
         if pid not in minted:
-            minted[pid] = _units_minted_for(po_id, pid)
-            if leave_out_grn:
-                minted[pid] -= _units_minted_for(po_id, pid, leave_out_grn)
-        own = header.get(pid)
-        own = _qty(it.get("received_qty") if own is None else own)
-        out[pid] = max(_qty(out.get(pid)), own, minted[pid])
+            left_out[pid] = (
+                _units_minted_for(po_id, pid, leave_out_grn) if leave_out_grn else 0
+            )
+            minted[pid] = _units_minted_for(po_id, pid) - left_out[pid]
+        stored = header.get(pid)
+        stored = _qty(it.get("received_qty") if stored is None else stored)
+        out[pid] = max(_qty(out.get(pid)), _qty(stored - left_out[pid]), minted[pid])
     return out
 
 
