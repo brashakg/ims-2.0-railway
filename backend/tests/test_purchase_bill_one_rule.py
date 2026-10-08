@@ -2378,9 +2378,6 @@ class TestRound13NotesNameTheRealScreen:
             assert "/settings?tab=stores" not in src, mod.__name__
         assert "/organization" in inspect.getsource(stores_router)
 
-    # POS file - text fix waits for owner approval
-    _DEAD_TEXT_ALLOW = {"api/routers/orders/upi.py"}
-
     def test_round16_no_file_in_backend_api_names_the_dead_stores_screen(self):
         """Round 15 #1: the guard above read three modules; this one reads every
         .py under backend/api, so a dead name cannot hide in another router."""
@@ -2391,8 +2388,6 @@ class TestRound13NotesNameTheRealScreen:
         hits = []
         for f in root.rglob("*.py"):
             rel = f.relative_to(root.parent).as_posix()
-            if rel in self._DEAD_TEXT_ALLOW:
-                continue
             text = f.read_text(encoding="utf-8")
             hits += [f"{rel}: {d}" for d in dead if d in text]
         assert not hits, hits
