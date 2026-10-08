@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-from ._core import ACCOUNTS, PURCHASE, RETURN_READERS
+from ._core import ACCOUNTS, PURCHASE, RECEIVE, RETURN_READERS
 
 ROWS: List[Dict[str, object]] = [
     # --- /api/v1/vendor-portal ---
@@ -215,7 +215,7 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/vendors/grn",
-        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": RECEIVE,
     },
     # Procurement Phase 2: one-shot express receive for a CLEAN delivery
     # (create + accept + invoice-draft preview + accountant task, server-side).
@@ -224,7 +224,7 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/vendors/grn/express",
-        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": RECEIVE,
     },
     {
         "method": "GET",
@@ -235,24 +235,24 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/vendors/grn/{grn_id}/accept",
-        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": RECEIVE,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendors/grn/{grn_id}/void",
-        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": RECEIVE,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendors/grn/{grn_id}/escalate",
-        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": RECEIVE,
     },
     # P1/S2: vendor-first goods-receipt cockpit (open POs + worklists for the
     # receiving screen). Same gate as receiving -- the receiving roles.
     {
         "method": "GET",
         "path": "/api/v1/vendors/goods-receipt/cockpit",
-        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": RECEIVE,
     },
     # P1/S3: the ops user uploads the mandatory goods-receipt document (vendor
     # invoice/challan) here BEFORE creating the GRN. Same gate as creating the
@@ -260,7 +260,7 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/vendors/grn/upload-doc",
-        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": RECEIVE,
     },
     # P1/S3: stream the attached goods-receipt document (accountant recon links
     # here). Store-scoped object access inside the handler; the role gate is the

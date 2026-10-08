@@ -1,5 +1,6 @@
 // Owner ruling 2026-09-28: RECEIVING IS MANAGERS ONLY. The backend half is
-// one tuple (vendors/_shared.py _RECEIVE_ROLES, pinned by
+// one tuple (services/cost_mask.py RECEIVE_ROLES, which vendors/_shared.py
+// _RECEIVE_ROLES is, pinned by
 // test_c7_receiving_is_the_managers); this pins the frontend half to it, so
 // re-adding ACCOUNTANT to RECEIVING_MANAGER_ROLES -- which would hand the
 // accountant the Receive Goods menu item, the /purchase/grn and
@@ -17,10 +18,10 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const src = (rel: string) => readFileSync(path.resolve(here, rel), 'utf8');
 
 describe('receiving is the managers only, on both sides', () => {
-  it('RECEIVING_MANAGER_ROLES is the backend _RECEIVE_ROLES plus SUPERADMIN', () => {
-    const backend = src('../../../../../backend/api/routers/vendors/_shared.py');
-    const m = backend.match(/^_RECEIVE_ROLES = \(([^)]*)\)/m);
-    expect(m, 'the _RECEIVE_ROLES tuple is no longer where this test reads it').not.toBeNull();
+  it('RECEIVING_MANAGER_ROLES is the backend RECEIVE_ROLES plus SUPERADMIN', () => {
+    const backend = src('../../../../../backend/api/services/cost_mask.py');
+    const m = backend.match(/^RECEIVE_ROLES = \(([^)]*)\)/m);
+    expect(m, 'the RECEIVE_ROLES tuple is no longer where this test reads it').not.toBeNull();
     const roles = [...m![1].matchAll(/"([A-Z_]+)"/g)].map((r) => r[1]);
     expect(roles.length).toBeGreaterThan(0);
     expect([...RECEIVING_MANAGER_ROLES].sort()).toEqual(['SUPERADMIN', ...roles].sort());
