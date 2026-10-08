@@ -706,9 +706,8 @@ def _stamp_shipped_value(line: Dict, units: List[Dict]) -> None:
     units RECEIVED, so a short receipt books less than the challan shows (the
     bill records both: qty_basis + challan_value; the CA decides). Fail-soft:
     a product lookup error only loses the fallbacks -- the units have already
-    moved, so this never raises."""
-    from ..services.gst_rates import hsn_for_category
-
+    moved, so this never raises (a line stamped without an HSN is answered
+    again by _line_hsn wherever it is read)."""
     product: Dict = {}
     db = _get_db()
     if db is not None and line.get("product_id"):
@@ -719,12 +718,7 @@ def _stamp_shipped_value(line: Dict, units: List[Dict]) -> None:
             ) or {}
         except Exception as exc:  # noqa: BLE001 - fail-soft
             logger.warning("[TRANSFER] product lookup for the ship value failed: %s", exc)
-    line["hsn_code"] = (
-        line.get("hsn_code")
-        or product.get("hsn_code")
-        or hsn_for_category(product.get("category"))
-        or ""
-    )
+    line["hsn_code"] = _line_hsn(line, product)
     line["shipped_barcodes"] = [str(u["barcode"]) for u in units if u.get("barcode")]
     costs = [
         _first_cost(u.get("unit_cost"), u.get("cost_price"), product.get("cost_price"))
@@ -736,6 +730,36 @@ def _stamp_shipped_value(line: Dict, units: List[Dict]) -> None:
         line["unit_cost"] = sum(costs) / len(costs) if all(costs) else 0.0
     else:
         line["unit_cost"] = _first_cost(product.get("cost_price"))
+
+
+def _line_hsn(line: Dict, product: Optional[Dict] = None) -> str:
+    """THE HSN of a transfer line -- one rule for the ship stamp, the valued
+    challan and the FIN-3 mirror bill (D13): the line's own (stamped at ship),
+    else the product master's, else its category's. `product` is the master
+    row when the caller already read it; None looks it up here, fail-soft.
+    '' when nothing answers (a valued challan refuses that line)."""
+    from ..services.gst_rates import hsn_for_category
+
+    if product is None and not line.get("hsn_code"):
+        db = _get_db()
+        try:
+            product = (
+                db.get_collection("products").find_one(
+                    {"product_id": line.get("product_id")},
+                    {"_id": 0, "hsn_code": 1, "category": 1},
+                )
+                if db is not None and line.get("product_id")
+                else None
+            )
+        except Exception as exc:  # noqa: BLE001 - fail-soft
+            logger.warning("[TRANSFER] product lookup for the HSN failed: %s", exc)
+    product = product if isinstance(product, dict) else {}
+    return str(
+        line.get("hsn_code")
+        or product.get("hsn_code")
+        or hsn_for_category(line.get("category") or product.get("category"))
+        or ""
+    ).strip()
 
 
 def _line_value(qty, cost) -> float:
@@ -2140,10 +2164,20 @@ def _transfer_registrations(db, transfer: Dict) -> tuple:
     a different GSTIN of one company (Sch I deemed supply). ONE rule for the
     FIN-3 mirror bill and the D13 valued delivery challan, so the paper and the
     books can never disagree about whether a move is between two
-    registrations. A side with no company never crosses (nothing to book)."""
+    registrations. `crosses` is None when IMS cannot tell (r2: refuse, never
+    guess): a company is involved but a shop's GSTIN is not on file -- one
+    company's two GSTIN-less shops, or a shop with no company. Ship and the
+    challan refuse that as a data gap; the mirror bill books nothing (None is
+    falsy), as it never booked a side with no company. No company on either
+    side -> False."""
     src = _shop_gst(db, transfer.get("from_location_id") or "")
     dst = _shop_gst(db, transfer.get("to_location_id") or "")
-    return src, dst, bool(src[0] and dst[0]) and src != dst
+    if src[0] and dst[0] and src != dst:
+        return src, dst, True
+    # ponytail: two company-less shops stay False (an org with no company on
+    # file books nothing anywhere); refuse them too if one ever runs that way.
+    cannot_tell = bool(src[0] or dst[0]) and not (src[1] and dst[1])
+    return src, dst, None if cannot_tell else False
 
 
 def _gstin_gap(transfer: Dict, src: tuple, dst: tuple) -> str:
@@ -2159,14 +2193,15 @@ def _gstin_gap(transfer: Dict, src: tuple, dst: tuple) -> str:
     ]
     if not missing:
         return ""
-    if src[0] == dst[0]:
-        # One company, a shop with no GSTIN: it may or may not be the other
-        # shop's registration -- refused as a data gap, never guessed either
-        # way (shop_gstin: None is a refusal; the mirror bill books it too).
+    if not (src[0] and dst[0]) or src[0] == dst[0]:
+        # One company (or a shop with none), a shop with no GSTIN: it may or
+        # may not be the other shop's registration -- refused as a data gap,
+        # never guessed either way (shop_gstin: None is a refusal).
         return (
             " and ".join(missing)
-            + " has no GSTIN on file, so IMS cannot tell whether this move stays "
-            "inside one GST registration. Add the shop's GSTIN first."
+            + " has no GSTIN of its company on file, so IMS cannot tell whether "
+            "this move stays inside one GST registration. Set the shop's company "
+            "and GSTIN first."
         )
     return (
         " and ".join(missing)
@@ -2178,20 +2213,32 @@ def _gstin_gap(transfer: Dict, src: tuple, dst: tuple) -> str:
 def _assert_valued_paper(transfer: Dict) -> None:
     """D13: a move between two GST registrations travels on a VALUED delivery
     challan, so it ships only when that paper can be printed -- both GSTINs on
-    file, and a cost for every unit that may leave (its own, else the
-    product's). Refused BEFORE any unit moves: once shipped, the value is fixed
+    file, at least one unit on the shelf to send (never a Rs 0 paper), and a
+    cost for every unit that may leave (its own, else the product's). A move
+    IMS cannot place (crosses None) is refused as the data gap it is. Refused
+    BEFORE any unit moves: once shipped, the value is fixed
     (_stamp_shipped_value), so a cost entered afterwards could not reach it."""
     db = _get_db()
     src, dst, crosses = _transfer_registrations(db, transfer)
-    if not crosses:
+    if crosses is False:
         return
     gap = _gstin_gap(transfer, src, dst)
     if gap:
         raise HTTPException(status_code=400, detail=gap)
+    units = db.get_collection("stock_units")
+    in_stock = False
     for line in transfer.get("items") or []:
         pid = line.get("product_id")
         if not pid:
             continue
+        shelf = {
+            "product_id": pid,
+            "store_id": transfer.get("from_location_id"),
+            "status": STOCK_STATUS_AVAILABLE,
+        }
+        if not units.count_documents(shelf):
+            continue
+        in_stock = True
         product = db.get_collection("products").find_one(
             {"product_id": pid}, {"_id": 0, "cost_price": 1}
         ) or {}
@@ -2199,14 +2246,8 @@ def _assert_valued_paper(transfer: Dict) -> None:
             continue
         # ponytail: any cost-less unit on the shelf refuses, not only the ones
         # ship would pick; the fix (a product cost price) is the same.
-        if db.get_collection("stock_units").count_documents(
-            {
-                "product_id": pid,
-                "store_id": transfer.get("from_location_id"),
-                "status": STOCK_STATUS_AVAILABLE,
-                "unit_cost": {"$not": {"$gt": 0}},
-                "cost_price": {"$not": {"$gt": 0}},
-            }
+        if units.count_documents(
+            {**shelf, "unit_cost": {"$not": {"$gt": 0}}, "cost_price": {"$not": {"$gt": 0}}}
         ):
             raise HTTPException(
                 status_code=409,
@@ -2215,6 +2256,14 @@ def _assert_valued_paper(transfer: Dict) -> None:
                 "price before shipping: a transfer between two GST registrations "
                 "is valued at cost.",
             )
+    if not in_stock:
+        raise HTTPException(
+            status_code=409,
+            detail=f"None of these items is in stock at "
+            f"{transfer.get('from_location_name') or 'the sending shop'} in IMS. "
+            "A transfer between two GST registrations travels on a challan valued "
+            "at the units that leave the shop: enter the stock first.",
+        )
 
 
 def _tax_split(tax: float, interstate: bool):
@@ -2284,7 +2333,7 @@ def _mirror_bill_lines(db, transfer: Dict, interstate: bool) -> List[Dict]:
     Fail-soft: any product-master lookup error degrades that line to the
     app-wide resolve_gst_rate fallback (optical-dominant 5%); never raises.
     """
-    from ..services.gst_rates import hsn_for_category, resolve_gst_rate
+    from ..services.gst_rates import resolve_gst_rate
     from ..services.purchase_invoice_engine import split_line_gst
 
     try:
@@ -2319,12 +2368,7 @@ def _mirror_bill_lines(db, transfer: Dict, interstate: bool) -> List[Dict]:
         product = product if isinstance(product, dict) else {}
 
         category = item.get("category") or product.get("category")
-        hsn = str(
-            item.get("hsn_code")
-            or product.get("hsn_code")
-            or hsn_for_category(category)
-            or ""
-        ).strip()
+        hsn = _line_hsn(item, product)
         rate = resolve_gst_rate(hsn_code=hsn or None, category=category)
 
         taxable = _line_value(qty, cost)

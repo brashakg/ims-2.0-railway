@@ -31,6 +31,7 @@ from __future__ import annotations
 from html import escape
 from typing import Any, Dict, List, Optional
 
+from .org_validation import state_name
 from .print_legal import (
     LegalHeader,
     amount_in_words,
@@ -430,6 +431,13 @@ def render_delivery_challan(
     owner-configured content actually reaches the printed challan.
     """
     items = items or []
+    if consignee_gstin and place_of_supply is None:
+        # Rule 55: the place of supply is where the goods go -- the consignee
+        # registration's state (its GSTIN's first two digits), never the
+        # consignor's state the letterhead would default to.
+        place_of_supply = "{0} ({1})".format(
+            state_name(consignee_gstin[:2]) or "", consignee_gstin[:2]
+        ).strip()
 
     header = LegalHeader(
         entity=entity,
@@ -448,12 +456,17 @@ def render_delivery_challan(
     # not include delivery_challan -> defaults to rule_48; force rule_55 here).
     header["copy_marker"] = copy_marker_block(copy_marker, mode="rule_55")
     if consignor_gstin:
-        # One consignor GSTIN per page: the letterhead prints the caller's
-        # (the one shop rule, org_validation.shop_gstin), never a second answer
+        # One consignor registration per page: the letterhead's GSTIN AND its
+        # state are the caller's (the one shop rule, org_validation.shop_gstin;
+        # the state is the GSTIN's first two digits), never a second answer
         # from print_legal's state match / primary fallback.
+        code = consignor_gstin[:2]
+        mine = {
+            "GSTIN / UIN": consignor_gstin,
+            "State / Code": " / ".join(p for p in (state_name(code), code) if p),
+        }
         header["supplier_kv"] = [
-            (k, consignor_gstin if k == "GSTIN / UIN" else v)
-            for k, v in header.get("supplier_kv") or []
+            (k, mine.get(k, v)) for k, v in header.get("supplier_kv") or []
         ]
 
     head = _header_fragment(header, "Delivery Challan")

@@ -201,6 +201,7 @@ async def delivery_challan_for_transfer(
         _get_transfer,
         _gstin_gap,
         _line_expected_qty,
+        _line_hsn,
         _shipped_line_value,
         _transfer_registrations,
     )
@@ -226,6 +227,9 @@ async def delivery_challan_for_transfer(
     src, dst, valued = _transfer_registrations(_get_db(), transfer)
     from_gstin, to_gstin = src[1], dst[1]
     shipped = bool(transfer.get("stock_shipped"))
+    if valued is None:
+        # IMS cannot place a shop on a registration: no paper either way.
+        raise HTTPException(status_code=400, detail=_gstin_gap(transfer, src, dst))
     if valued:
         # D7: the value is the units' own cost -- never a counter role's.
         if not can_see_cost(current_user, "product"):
@@ -250,7 +254,7 @@ async def delivery_challan_for_transfer(
             continue
         row = {
             "product_name": it.get("product_name") or it.get("sku") or "",
-            "hsn_code": it.get("hsn_code") or it.get("hsn") or "",
+            "hsn_code": _line_hsn(it),
             # What left the shop once shipped; the request before that.
             "qty": _line_expected_qty(it)
             if shipped
@@ -271,7 +275,20 @@ async def delivery_challan_for_transfer(
                     detail=f"No value was recorded for {row['product_name']} when "
                     "this transfer shipped, so its valued challan cannot be printed.",
                 )
+            if row["qty"] and not row["hsn_code"]:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"{row['product_name']} has no HSN code. Add the product's "
+                    "HSN first: a challan between two GST registrations carries one.",
+                )
         items.append(row)
+    if valued and not any(r["qty"] for r in items):
+        # F51: never a Rs 0 paper between two registrations.
+        raise HTTPException(
+            status_code=409,
+            detail="Nothing left the shop on this transfer, so there is no valued "
+            "challan to print.",
+        )
 
     to_legal = str((to_entity or {}).get("legal_name") or "").strip()
     consignee_address = ", ".join(

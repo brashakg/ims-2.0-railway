@@ -350,12 +350,13 @@ def test_d13_any_mirror_bill_carries_the_challan_value(db):
 
 
 def test_d13_short_receipt_bill_states_its_basis_and_the_challan_value(db):
-    """Ship 2 at 1850, receive 1: the challan and total_value stay at the 2 that
-    LEFT (3700); the mirror bill books the 1 that ARRIVED (1850 -- no input
-    credit on goods never received) and says so on the bill, next to the
-    challan's value, so the gap is visible instead of two silent figures.
-    Which one the sender's GSTR-1 reports is the CA's call (owner ruling D13)."""
-    t = _shipped("ST-BOK-1")
+    """Request 3, ship the 2 on the shelf at 1850, receive 1: the challan and
+    total_value stay at the 2 that LEFT (3700, never the 3 requested = 5550);
+    the mirror bill books the 1 that ARRIVED (1850 -- no input credit on goods
+    never received) and says so on the bill, next to the challan's value, so
+    the gap is visible instead of two silent figures. Which one the sender's
+    GSTR-1 reports is the CA's call (owner ruling D13)."""
+    t = _shipped("ST-BOK-1", qty=3)
     _receive_and_complete(t, received=1)
     assert transfers._get_transfer(t["id"])["total_value"] == pytest.approx(2 * UNIT_COST)
     assert _shows_amount(_challan(t["id"]), 2 * UNIT_COST)
@@ -405,8 +406,13 @@ def test_f51_letterhead_and_consignor_block_print_one_gstin(db):
         {"gstin": GSTIN_Z_MH, "state_code": "27", "state_name": "Maharashtra", "is_primary": True},
     ]}})
     html = _challan(_shipped("ST-BOK-1")["id"])
-    assert GSTIN_Z_JH in html[: html.index('class="party-grid"')], "the letterhead's GSTIN"
+    head = html[: html.index('class="party-grid"')]
+    assert GSTIN_Z_JH in head, "the letterhead's GSTIN"
     assert GSTIN_Z_MH not in html
+    # ...and the state printed beside it is that registration's, not the
+    # primary's (was 'Maharashtra / JH' next to a Jharkhand GSTIN).
+    assert '<td class="k">State / Code</td><td>Jharkhand / 20</td>' in head
+    assert "Maharashtra" not in html
 
 
 def test_d13_printing_the_challan_writes_nothing(db):
@@ -482,12 +488,15 @@ def test_d7_counter_role_reading_a_valued_transfer_sees_no_cost(db):
     assert _shows_amount(seen, UNIT_COST) and _shows_amount(seen, 2 * UNIT_COST)
 
 
-def test_d7_counter_role_cannot_read_the_mirror_bill(app, db):
+def test_d7_counter_role_cannot_read_the_mirror_bill(app, db, monkeypatch):
     """The FIN-3 mirror bill now carries each unit's own cost, filed under the
     sending company's entity_id as its vendor_id. The vendor bill / ledger /
     payment / debit-note reads are the accounts roles' -- at the route gate AND
     in the rbac_policy row -- so a counter role at the receiving shop is
-    refused both ways (D7; owner 09-29: vendor payments = admin + accountant)."""
+    refused both ways (D7; owner 09-29: vendor payments = admin + accountant).
+    The vendor scorecard (/performance) is the purchase roles', and its
+    month-to-date spend -- the sum of those bills -- the accounts roles' only."""
+    from api.routers.vendors import performance
     from api.services import rbac_policy as rbac
 
     t = _shipped("ST-BOK-1")
@@ -496,7 +505,7 @@ def test_d7_counter_role_cannot_read_the_mirror_bill(app, db):
     assert bill["vendor_id"] == "ENT-Z"
     assert bill["lines"][0]["unit_price"] == pytest.approx(UNIT_COST)
     staff, accountant = _user("SALES_STAFF", "ST-BOK-1"), _user("ACCOUNTANT")
-    for read in ("bills", "ledger", "payments", "debit-notes"):
+    for read in ("bills", "ledger", "payments", "debit-notes", "performance"):
         route = next(
             r for r in app.routes
             if getattr(r, "path", None) == f"/api/v1/vendors/{{vendor_id}}/{read}"
@@ -510,6 +519,13 @@ def test_d7_counter_role_cannot_read_the_mirror_bill(app, db):
         url = f"/api/v1/vendors/{bill['vendor_id']}/{read}"
         assert not rbac.check_access("GET", url, staff["roles"]), read
         assert rbac.check_access("GET", url, accountant["roles"]), read
+
+    monkeypatch.setattr(performance, "_get_db", lambda: db)
+    monkeypatch.setattr(performance, "get_vendor_repository", lambda: None)
+    manager = _user("STORE_MANAGER", "ST-BOK-1")
+    assert "mtd_spend" not in _run(performance.vendor_performance("ENT-Z", 6, manager))
+    books = _run(performance.vendor_performance("ENT-Z", 6, accountant))
+    assert books["mtd_spend"] == pytest.approx(bill["total_amount"])
 
 
 def test_d7_workshop_staff_pick_ship_and_receive_replies_carry_no_cost(db):
@@ -613,3 +629,96 @@ def test_f51_a_line_that_shipped_nothing_prints_a_cost_not_the_client_figure(db)
     line = transfers._get_transfer(t["id"])["items"][1]
     assert (line["quantity_shipped"], line["unit_cost"]) == (0, pytest.approx(1200.0))
     assert not _shows_amount(_challan(t["id"]), 9999)
+
+
+# ===========================================================================
+# Panel round 3 -- one HSN, one consignor state, the place of supply, no Rs 0
+# paper, and "cannot tell" refused on both sides
+# ===========================================================================
+
+
+def test_d13_challan_and_mirror_bill_answer_one_hsn_when_the_ship_lookup_fails(db, monkeypatch):
+    """The ship-time product read is fail-soft. When only it fails, the line is
+    stamped with no HSN; the valued challan and the FIN-3 mirror bill must then
+    still print / book the SAME HSN (one rule, transfers._line_hsn), never a
+    blank paper beside a 900311 GSTR-1 row."""
+    real = mongomock.collection.Collection.find_one
+
+    def flaky(self, filter=None, *args, **kwargs):
+        projection = args[0] if args else kwargs.get("projection")
+        if self.name == "products" and projection and "hsn_code" in projection:
+            raise RuntimeError("products read failed")
+        return real(self, filter, *args, **kwargs)
+
+    t = _create("ST-BOK-1")
+    with monkeypatch.context() as m:
+        m.setattr(mongomock.collection.Collection, "find_one", flaky)
+        _ship(t["id"])
+    assert transfers._get_transfer(t["id"])["items"][0]["hsn_code"] == "", "the read failed"
+    assert f"<td>{HSN}</td>" in _challan(t["id"])
+    _receive_and_complete(t)
+    (bill,) = db["vendor_bills"].find({"source_transfer_id": t["id"]})
+    assert bill["lines"][0]["hsn"] == HSN
+
+
+def test_d13_valued_challan_refuses_a_line_with_no_hsn(db):
+    """D13: the valued challan carries an HSN; a product with none (and no
+    category to give one) is refused, never printed blank."""
+    db["products"].update_one({}, {"$set": {"hsn_code": "", "category": "MISC"}})
+    t = _shipped("ST-BOK-1")
+    with pytest.raises(HTTPException) as exc:
+        _challan(t["id"])
+    assert exc.value.status_code == 409 and "HSN" in exc.value.detail
+
+
+def test_d13_inter_state_challan_names_the_destination_as_place_of_supply(db):
+    """Dhanbad (Jharkhand GSTIN) -> Pune (Maharashtra GSTIN): Rule 55 wants the
+    place of supply of an inter-state move -- the consignee's state, not the
+    consignor's the letterhead defaults to."""
+    html = _challan(_shipped("ST-PUN-1")["id"])
+    assert '<td class="k">Place of Supply</td><td>Maharashtra (27)</td>' in html
+
+
+def test_f51_a_crossing_move_with_nothing_on_the_shelf_never_ships(db):
+    """Dhanbad -> Bokaro with both units SOLD: shipping would move 0 units and
+    the valued challan would read 'Total Quantity 0 / Rs 0.00' between two
+    GSTINs -- the F51 paper. Refused before ship; nothing changes."""
+    db["stock_units"].update_many({}, {"$set": {"status": "SOLD"}})
+    t = _create("ST-BOK-1")
+    with pytest.raises(HTTPException) as exc:
+        _ship(t["id"])
+    assert exc.value.status_code == 409 and "in stock" in exc.value.detail
+    assert transfers._get_transfer(t["id"])["status"] == transfers.TransferStatus.APPROVED
+
+
+def test_f51_a_crossing_transfer_that_shipped_nothing_prints_no_rs_0_challan(db):
+    """A crossing transfer already shipped with 0 units (before the ship guard,
+    or a lost race for the units) is refused at print, never a Rs 0 paper."""
+    t = _shipped("ST-BOK-1")
+    db["stock_transfers"].update_one({"id": t["id"]}, {"$set": {"items.0.quantity_shipped": 0}})
+    with pytest.raises(HTTPException) as exc:
+        _challan(t["id"])
+    assert exc.value.status_code == 409 and "Nothing left the shop" in exc.value.detail
+
+
+@pytest.mark.parametrize("gap", ["one_company_no_gstins", "shop_without_a_company"])
+def test_d13_a_move_ims_cannot_place_is_refused_on_both_sides(db, gap):
+    """r2 'cannot tell = refuse', applied to every case: company Z's GSTINs not
+    entered yet (Dhanbad -> Pune, both blank) and a shop with no company
+    (Bokaro, entity_id unset). Ship is refused with nothing moved, and the
+    challan -- even for a counter role -- is refused, never the unvalued
+    paper with no GSTINs."""
+    if gap == "one_company_no_gstins":
+        to_store = "ST-PUN-1"
+        db["entities"].update_one({"entity_id": "ENT-Z"}, {"$set": {"gstins": []}})
+    else:
+        to_store = "ST-BOK-1"
+        db["stores"].update_one({"store_id": "ST-BOK-1"}, {"$unset": {"entity_id": ""}})
+    t = _create(to_store)
+    with pytest.raises(HTTPException) as exc:
+        _ship(t["id"])
+    assert exc.value.status_code == 400 and "cannot tell" in exc.value.detail
+    assert db["stock_units"].count_documents({"status": "AVAILABLE"}) == 2
+    with pytest.raises(HTTPException) as exc:
+        _challan(t["id"], _user("SALES_STAFF"))
+    assert exc.value.status_code == 400 and "cannot tell" in exc.value.detail
