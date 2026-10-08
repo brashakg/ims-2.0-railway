@@ -547,6 +547,8 @@ class OracleAgent(JarvisAgent):
         products_coll = self.get_collection("products")
         prod_by_id: Dict[str, Dict[str, Any]] = {}
         if products_coll is not None:
+            from api.services.reorder_policy import DISCONTINUED_FIELDS
+
             wanted = set(wanted_ids)
             prod_query = {"$or": [
                 {"product_id": {"$in": wanted_ids}},
@@ -555,7 +557,8 @@ class OracleAgent(JarvisAgent):
             ]}
             prod_proj = {"product_id": 1, "sku": 1, "preferred_vendor_id": 1,
                          "default_vendor_id": 1, "vendor_id": 1,
-                         "reorder_levels": 1, "reorder_quantity": 1}
+                         "reorder_levels": 1, "reorder_quantity": 1,
+                         **{f: 1 for f in DISCONTINUED_FIELDS}}
             try:
                 prods = list(products_coll.find(prod_query, prod_proj))
             except Exception as e:  # noqa: BLE001
@@ -766,6 +769,7 @@ class OracleAgent(JarvisAgent):
                             "severity": "HIGH",
                             "summary": f"Rx {rx.get('prescription_id')} {eye_key} SPH={sph} exceeds ±20.00 limit",
                             "prescription_id": rx.get("prescription_id"),
+                            "store_id": rx.get("store_id"),
                             "eye": eye_key,
                             "sph": sph,
                         })

@@ -12,7 +12,10 @@ from ..auth import get_current_user, require_roles
 from ...services import power_grid
 from ...services import barcode as barcode_svc
 from ...services.online_order_status import SALE_DONE_ANY_CASE
-from ...services.reorder_policy import auto_reorder_disabled as _reorder_disabled
+from ...services.reorder_policy import (
+    auto_reorder_disabled as _reorder_disabled,
+    discontinued as _discontinued,
+)
 
 # F9 / W1.4 / OS-006: the ONE backend detector for "is this store ONLINE?"
 # (store_type == ONLINE, e.g. BV-ONLINE-01 / WO-ONLINE-01). Reused verbatim from
