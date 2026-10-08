@@ -3662,3 +3662,631 @@ def test_r6_the_one_time_script_raises_the_tasks_for_receipts_held_before_c1(wor
         f"R1-34: the script raised {[(t.get('assigned_to'), t.get('title')) for t in told]}",
     )
     assert script.run(world.db, commit=False) == []
+
+
+# ---------------------------------------------------------------------------
+# Round 6: rules a fresh mutant sweep found unpinned
+# ---------------------------------------------------------------------------
+
+
+def test_r6_a_held_receipt_holding_only_another_item_never_names_the_draft(world):
+    # A broken Boss box (every unit rejected) on a receipt that holds the
+    # Boss 1701 for the catalogue: the receipt holds nothing of the Boss, so
+    # the Boss's discard refusal never names it (only the order, which still
+    # expects it, is named).
+    _seed_user(world, ADMIN)
+    po, d_id, e_id = _two_drafts_po(world)
+    created = _run(
+        vd.create_grn(
+            vd.GRNCreate(
+                po_id=po["po_id"],
+                vendor_invoice_no="JOT/26-27/0961",
+                vendor_invoice_date="2026-09-28",
+                items=[
+                    vd.GRNItemCreate(
+                        product_id=d_id, received_qty=1, accepted_qty=0, rejected_qty=1, tallied=True
+                    ),
+                    vd.GRNItemCreate(
+                        product_id=e_id, received_qty=1, accepted_qty=1, rejected_qty=0, tallied=True
+                    ),
+                ],
+                attachment_file_id="F-RECEIPT-PHOTO",
+                attachment_filename="bill.jpg",
+                attachment_mime="image/jpeg",
+            ),
+            MANAGER,
+        )
+    )
+    _run(vd.accept_grn(created["grn_id"], MANAGER))
+    assert [ln["product_id"] for ln in world.grn(created["grn_id"])["unresolved_lines"]] == [e_id]
+    refused = _delete_refusal(world, d_id)
+    assert refused is not None and po["po_number"] in str(refused.detail)
+    finding(
+        created["grn_number"] not in str(refused.detail),
+        f"A receipt holding only another item blocks the Boss's discard ({refused.detail})",
+    )
+
+
+def test_r6_a_release_shelves_in_the_name_of_the_manager_who_accepted(world):
+    # Receiving is managers only: the units a catalogue save releases are
+    # received as the manager who pressed "Add to stock" on the receipt, never
+    # as whoever keyed the receipt in.
+    other = _seed_user(world, dict(MANAGER, user_id="u-mgr-dhn2-b", username="mgr.dhn2.b"))
+    po = world.raise_po([{"new_product": dict(BOSS_TYPED), "quantity": 2, "unit_price": 1200}])
+    draft_id = po["items"][0]["product_id"]
+    created = _run(
+        vd.create_grn(
+            vd.GRNCreate(
+                po_id=po["po_id"],
+                vendor_invoice_no="JOT/26-27/0971",
+                vendor_invoice_date="2026-09-28",
+                items=[
+                    vd.GRNItemCreate(
+                        product_id=draft_id, received_qty=2, accepted_qty=2, rejected_qty=0, tallied=True
+                    )
+                ],
+                attachment_file_id="F-RECEIPT-PHOTO",
+                attachment_filename="bill.jpg",
+                attachment_mime="image/jpeg",
+            ),
+            MANAGER,
+        )
+    )
+    _run(vd.accept_grn(created["grn_id"], other))
+    world.finish_draft(draft_id, offer=2790)
+    units = world.units(draft_id)
+    finding(
+        len(units) == 2 and {u.get("created_by") for u in units} == {other["user_id"]},
+        f"The release received the units as {sorted({str(u.get('created_by')) for u in units})}",
+    )
+    assert world.grn(created["grn_id"])["accepted_by"] == other["user_id"]
+
+
+def test_r6_a_revived_draft_typed_again_is_the_draft_on_order(world):
+    # A revived draft is switched off (is_active False) AND on order
+    # (provisional): typed on yet another order it is "already on order -- use
+    # it?", never "switched off, ask to switch it back on".
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    _discard(world, draft_id, po, grn)
+    po2 = world.raise_po([{"new_product": dict(BOSS_TYPED), "quantity": 1, "unit_price": 1200}])
+    assert po2["items"][0]["product_id"] == draft_id
+    revived = world.product(draft_id)
+    assert revived["is_active"] is False and revived["provisional"] is True
+    refused = _refused_po(
+        world, [{"new_product": dict(BOSS_TYPED), "quantity": 1, "unit_price": 1200}]
+    )
+    detail = getattr(refused, "detail", None) or {}
+    finding(
+        detail.get("code") == "ALREADY_IN_CATALOGUE"
+        and detail["matches"][0]["existing"]["product_id"] == draft_id,
+        f"A revived draft typed again was answered {detail}",
+    )
+
+
+def test_r6_with_no_catalogue_manager_the_admin_is_told_before_the_superadmin(world):
+    # Nobody holds the job: the ADMIN gets it -- the SUPERADMIN only when
+    # there is no admin at all.
+    world.db.users.update_one({"user_id": CATALOGUER["user_id"]}, {"$set": {"is_active": False}})
+    _seed_user(world, ADMIN)
+    _seed_user(world, {"user_id": "u-super", "username": "owner", "roles": ["SUPERADMIN"], "store_ids": []})
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    told = sorted(str(t.get("assigned_to")) for t in _open_tasks(world))
+    finding(told == [ADMIN["user_id"]], f"No catalogue manager: the task went to {told}")
+
+
+def test_r6_a_task_a_person_closed_is_never_rewritten(world):
+    # The refresh (R1-22) is for a task still open: one a person has closed
+    # keeps the words it was closed with.
+    po, d_id, e_id = _two_drafts_po(world)
+    _receive(world, po, [1, 1], "JOT/26-27/0981")
+    (task,) = [t for t in _open_tasks(world) if t.get("category") == "Catalogue"]
+    world.db.tasks.update_one({"task_id": task["task_id"]}, {"$set": {"status": "COMPLETED"}})
+    world.finish_draft(d_id, offer=2790)
+    stored = world.db.tasks.find_one({"task_id": task["task_id"]})
+    finding(
+        (stored["title"], stored["description"]) == (task["title"], task["description"]),
+        f"A closed task was rewritten to {stored['title']!r}",
+    )
+
+
+def test_r6_a_sizeless_frame_catalogued_sizeless_is_used(world):
+    # A frame the catalogue has WITHOUT an eye size, typed without one, is
+    # that item ("use it?"), never "type the eye size".
+    world.catalogue_frame("Boss", "BOSS 1700", "C2", None, mrp=2990, offer=2790, cost=1200)
+    refused = _refused_po(
+        world, [{"new_product": {**BOSS_TYPED, "size": None}, "quantity": 1, "unit_price": 1200}]
+    )
+    detail = getattr(refused, "detail", None) or {}
+    finding(
+        detail.get("code") == "ALREADY_IN_CATALOGUE",
+        f"A sizeless frame typed sizeless got {detail}",
+    )
+
+
+def test_r6_already_in_the_catalogue_is_asked_before_the_eye_size(world):
+    # One order, one line we already have and one frame typed without its eye
+    # size: "use it?" comes first (the form resends with the product), the
+    # eye size after -- never the other way round.
+    world.catalogue_frame("Carrera", "CA 8895", "807", "54", mrp=6990, offer=6490, cost=3155.76)
+    world.catalogue_frame("Boss", "BOSS 1700", "C2", "52", mrp=2990, offer=2790, cost=1200)
+    refused = _refused_po(
+        world,
+        [
+            {"new_product": dict(CARRERA_TYPED), "quantity": 1, "unit_price": 3200},
+            {"new_product": {**BOSS_TYPED, "size": None}, "quantity": 1, "unit_price": 1200},
+        ],
+    )
+    detail = getattr(refused, "detail", None) or {}
+    finding(
+        detail.get("code") == "ALREADY_IN_CATALOGUE" and [m["line"] for m in detail["matches"]] == [0],
+        f"The order was answered {detail}",
+    )
+
+
+def test_r6_a_bills_ask_closes_when_the_cost_fill_finishes_the_item(world):
+    # The ask closes however the item is finished -- here by the PO's cost
+    # fill, its last gap, not the product editor.
+    from api.routers import purchase_invoices as _pi
+
+    po = world.raise_po([{"new_product": dict(BOSS_TYPED), "quantity": 2, "unit_price": 0}])
+    draft_id = po["items"][0]["product_id"]
+    world.finish_draft(draft_id, offer=2790)  # cost is still missing
+    _run(_pi.request_cataloguing(_pi.CataloguingRequest(product_ids=[draft_id]), ACCOUNTANT))
+    assert _asks(world)
+    world.raise_po(
+        [
+            {
+                "product_id": draft_id,
+                "product_name": "Boss 1700 C2",
+                "sku": world.product(draft_id)["sku"],
+                "quantity": 1,
+                "unit_price": 1200,
+            }
+        ]
+    )
+    assert world.product(draft_id)["provisional"] is False
+    finding(not _asks(world), f"The bill's ask outlived the cost fill that finished the item ({_asks(world)})")
+
+
+def test_r6_an_ask_again_whose_task_was_never_stored_is_not_answered_requested(world, monkeypatch):
+    # The read-back counts only an OPEN task: the first ask, closed since,
+    # never answers for a second one whose write failed.
+    from api.routers import purchase_invoices as _pi
+    from database.repositories import task_repository as _tr
+
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    _run(_pi.request_cataloguing(_pi.CataloguingRequest(product_ids=[draft_id]), ACCOUNTANT))
+    (ask,) = _asks(world)
+    world.db.tasks.update_one({"task_id": ask["task_id"]}, {"$set": {"status": "COMPLETED"}})
+
+    def _down(self, *a, **k):
+        raise RuntimeError("tasks collection down")
+
+    monkeypatch.setattr(_tr.TaskRepository, "create", _down)
+    with pytest.raises(HTTPException) as refused:
+        _run(_pi.request_cataloguing(_pi.CataloguingRequest(product_ids=[draft_id]), ACCOUNTANT))
+    finding(
+        refused.value.status_code == 503,
+        f"A second ask whose task write failed was answered {refused.value.status_code}",
+    )
+
+
+def test_r6_a_sizeless_line_against_a_discarded_legacy_draft_brings_it_back(world):
+    # The other half of R2-15: a discarded draft keyed before eye size joined
+    # the key carries the very key a sizeless typed line makes. It stays the
+    # match (one row per key, never a second one) and the order brings it
+    # back -- never "in the catalogue by eye size", which a discarded draft
+    # is not (R1-98).
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    key = world.product(draft_id)["identity_key"]
+    world.db.products.update_one(
+        {"product_id": draft_id}, {"$set": {"identity_key": key.rsplit("|", 1)[0]}}
+    )
+    _discard(world, draft_id, po, grn)
+    po2 = world.raise_po(
+        [{"new_product": {**BOSS_TYPED, "size": None}, "quantity": 1, "unit_price": 1200}]
+    )
+    finding(
+        po2["items"][0]["product_id"] == draft_id,
+        "A sizeless line against a discarded legacy draft did not bring it back",
+    )
+    assert world.product(draft_id)["provisional"] is True
+    assert [p["product_id"] for p in world.products_named("Boss", "BOSS 1700")] == [draft_id]
+
+
+def test_r6_the_cataloguers_task_opens_needs_review(world):
+    # The task says where the work is: its link opens Catalogue > Needs
+    # review, where the ordered draft sits at the top.
+    world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    (task,) = [t for t in _open_tasks(world) if t.get("category") == "Catalogue"]
+    finding(task.get("link") == "/catalog/review", f"The cataloguer's task links to {task.get('link')!r}")
+
+
+def test_r6_a_catalogue_managers_every_breach_goes_to_the_admins():
+    # A catalogue manager works for the entity: a shop's store manager can
+    # neither open nor do their work, whatever the task's category.
+    from api.services.task_escalation import next_rung_role
+
+    for category in ("Catalogue", "Purchase", None):
+        finding(
+            next_rung_role(["CATALOG_MANAGER"], category) == "ADMIN",
+            f"A catalogue manager's {category} breach climbs to {next_rung_role(['CATALOG_MANAGER'], category)}",
+        )
+    # Anyone else's climbs the ladder as before.
+    assert next_rung_role(["SALES_STAFF"], "Catalogue") == "STORE_MANAGER"
+
+
+def test_r6_a_breach_never_merges_into_a_twin_already_closed(world):
+    # Two catalogue managers' tasks for one receipt. The first climbed to the
+    # admin, who closed it; the second's breach is the admin's again -- never
+    # closed into a task that is no longer open.
+    _seed_user(world, dict(ADMIN, full_name="Asha Admin"))
+    _seed_user(world, dict(CATALOGUER, user_id="u-cat-2", username="catalog.two"))
+    world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    by = {t["assigned_to"]: t for t in _open_tasks(world)}
+    first, second = by[CATALOGUER["user_id"]], by["u-cat-2"]
+    _run(_tasks.escalate_task(first["task_id"], None, CATALOGUER))
+    world.db.tasks.update_one({"task_id": first["task_id"]}, {"$set": {"status": "COMPLETED"}})
+    out = _run(_tasks.escalate_task(second["task_id"], None, dict(CATALOGUER, user_id="u-cat-2")))
+    stored = world.db.tasks.find_one({"task_id": second["task_id"]})
+    finding(
+        out["status"] == "ESCALATED" and stored["assigned_to"] == ADMIN["user_id"],
+        f"A breach merged into a closed twin: {out} / {stored['status']} {stored.get('assigned_to')}",
+    )
+
+
+def test_r6_a_task_outside_any_group_never_merges():
+    # Only tasks told to several people at once (an escalation_group) climb
+    # to one: a task outside any group is never closed into whatever else the
+    # person above happens to hold.
+    from datetime import datetime as _dt
+
+    from api.services.task_escalation import merge_into_twin
+
+    def _anything(_flt):
+        return {"task_id": "T-OTHER", "assigned_to": "u-admin", "status": "OPEN"}
+
+    task = {"task_id": "T-1", "assigned_to": "u-mgr-dhn2", "category": "Purchase"}
+    finding(
+        merge_into_twin(_anything, task, {"user_id": "u-admin"}, by="test", now=_dt.now()) is None,
+        "A task with no escalation group was closed into another task",
+    )
+    assert merge_into_twin(
+        _anything, {**task, "escalation_group": "grn_catalogue:G1"}, {"user_id": "u-admin"},
+        by="test", now=_dt.now(),
+    )
+
+
+def test_r6_not_received_is_for_the_receipts_own_shop(world):
+    # Store-scoped like accept and void: another shop's manager is told the
+    # receipt does not exist, and nothing on it changes.
+    po, boss, carrera, grn1, grn2 = _mixed_held_receipt(world)
+    world.finish_draft(boss, offer=2790)
+    stranger = dict(MANAGER, user_id="u-mgr-other", store_ids=["BV-OTHER"], active_store_id="BV-OTHER")
+    with pytest.raises(HTTPException) as refused:
+        _run(vd.drop_over_order(grn2["grn_id"], stranger))
+    finding(refused.value.status_code == 404, f"Another shop's manager got {refused.value.status_code}")
+    assert world.grn(grn2["grn_id"])["status"] == "PARTIALLY_ACCEPTED"
+
+
+def test_r6_a_unit_minted_before_receipt_numbers_still_counts_for_its_receipt(world):
+    # The origin rule's third branch: a unit minted before grn_id and
+    # grn_number were stamped (an accept that died half-way, back then) is
+    # found by its source, never minted a second time by the retry.
+    carrera = world.catalogue_frame("Carrera", "CA 8895", "807", "54", mrp=6990, offer=6490, cost=3155.76)
+    po = world.raise_po(
+        [
+            {
+                "product_id": carrera["product_id"],
+                "product_name": "Carrera CA 8895 807",
+                "sku": carrera["sku"],
+                "quantity": 2,
+                "unit_price": 3200,
+            }
+        ]
+    )
+    created = _run(
+        vd.create_grn(
+            vd.GRNCreate(
+                po_id=po["po_id"],
+                vendor_invoice_no="JOT/26-27/0991",
+                vendor_invoice_date="2026-09-28",
+                items=[
+                    vd.GRNItemCreate(
+                        product_id=carrera["product_id"], received_qty=2, accepted_qty=2,
+                        rejected_qty=0, tallied=True,
+                    )
+                ],
+                attachment_file_id="F-RECEIPT-PHOTO",
+                attachment_filename="bill.jpg",
+                attachment_mime="image/jpeg",
+            ),
+            MANAGER,
+        )
+    )
+    world.db.seed(
+        "stock_units",
+        [
+            {
+                "stock_id": f"S-LEGACY-{seq}",
+                "product_id": carrera["product_id"],
+                "store_id": STORE,
+                "status": "AVAILABLE",
+                "quantity": 1,
+                "source_type": "GRN",
+                "source_id": created["grn_id"],
+                "grn_line_index": 0,
+                "line_unit_seq": seq,
+            }
+            for seq in (0, 1)
+        ],
+    )
+    _run(vd.accept_grn(created["grn_id"], MANAGER))
+    units = world.units(carrera["product_id"])
+    finding(len(units) == 2, f"A retry minted the receipt again: {len(units)} units for 2 received")
+
+
+def test_r6_a_discarded_draft_switched_on_since_is_received_like_any_product(world):
+    # The receipt's DISCARDED_DRAFT refusal is for a draft still switched off:
+    # one finished and switched on since is an ordinary product, ordered and
+    # received like any other.
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    _discard(world, draft_id, po, grn)
+    world.finish_draft(draft_id, offer=2790)
+    _run(_products.update_product(draft_id, _products.ProductUpdate(is_active=True), CATALOGUER))
+    assert world.product(draft_id)["discarded_draft"] is True
+    po2 = world.raise_po(
+        [
+            {
+                "product_id": draft_id,
+                "product_name": "Boss 1700 C2",
+                "sku": world.product(draft_id)["sku"],
+                "quantity": 1,
+                "unit_price": 1200,
+            }
+        ]
+    )
+    try:
+        _receive(world, po2, [1], "JOT/26-27/0992")
+        refused = None
+    except HTTPException as exc:
+        refused = exc
+    finding(
+        refused is None and len(world.units(draft_id)) == 1,
+        f"A product switched on since its discard could not be received ({getattr(refused, 'detail', None)})",
+    )
+
+
+def _wiz_receipt(world, draft_id, status):
+    """A receipt naming the draft at WizOpt Pune, keyed in after the Dhanbad one."""
+    import datetime as _dt
+
+    world.db.seed(
+        "grns",
+        [
+            {
+                "grn_id": f"G-WIZ-{status}",
+                "grn_number": f"RCPT/WO-PUN-01/{status}",
+                "store_id": "WO-PUN-01",
+                "status": status,
+                "items": [{"product_id": draft_id, "accepted_qty": 1}],
+                "created_at": _dt.datetime(2099, 1, 1),  # a datetime, as BaseRepository.create stamps it
+            }
+        ],
+    )
+
+
+def _ask_without_a_shop(world, draft_id, asker):
+    from api.routers import purchase_invoices as _pi
+
+    _run(_pi.request_cataloguing(_pi.CataloguingRequest(product_ids=[draft_id]), asker))
+    return [t.get("assigned_to") for t in _asks(world)]
+
+
+@pytest.mark.parametrize(
+    "status, reach, told",
+    [
+        # A voided receipt names no shop: the live Dhanbad one does.
+        ("VOID", [STORE, "WO-PUN-01"], "u-cat-hq"),
+        # The LATEST live receipt's shop -- Pune's.
+        ("PENDING", [STORE, "WO-PUN-01"], "u-cat-wiz"),
+        # ...but never a shop the asker cannot open: the session shop then.
+        ("PENDING", [STORE], "u-cat-hq"),
+    ],
+)
+def test_r6_a_bills_ask_with_no_shop_follows_the_latest_live_receipt_the_asker_can_open(
+    world, status, reach, told
+):
+    _two_entities(world)
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    _wiz_receipt(world, draft_id, status)
+    asked = _ask_without_a_shop(world, draft_id, dict(ACCOUNTANT, store_ids=reach, active_store_id=STORE))
+    finding(asked == [told], f"A bill's ask ({status}, reach {reach}) went to {asked}")
+
+
+def test_r6_a_bills_ask_with_no_shop_at_all_is_refused(world):
+    # No bill shop, no receipt, no session shop: say which shop, never an ask
+    # routed to "No catalogue manager for None".
+    from api.routers import purchase_invoices as _pi
+
+    po = world.raise_po([{"new_product": dict(BOSS_TYPED), "quantity": 2, "unit_price": 1200}])
+    nobody = dict(ADMIN, store_ids=[], active_store_id=None)
+    with pytest.raises(HTTPException) as refused:
+        _run(
+            _pi.request_cataloguing(
+                _pi.CataloguingRequest(product_ids=[po["items"][0]["product_id"]]), nobody
+            )
+        )
+    finding(refused.value.status_code == 422, f"An ask with no shop at all got {refused.value.status_code}")
+    assert not _asks(world)
+
+
+def test_r6_the_po_timeline_says_what_a_receipt_still_holds(world):
+    # Receipt 2 put the Carrera on the shelf and still holds the Boss: its
+    # timeline row counts only the shelved unit and says the rest is held.
+    po, boss, carrera, grn1, grn2 = _mixed_held_receipt(world)
+    tl = _run(vd.get_po_timeline(po["po_id"], MANAGER))
+    details = [e["detail"] for e in tl["events"] if e.get("kind") == "on_shelf"]
+    finding(
+        details == ["1 units accepted into stock; 2 still held"],
+        f"The PO timeline reads {details}",
+    )
+
+
+def test_r6_a_held_receipt_is_never_voided_unchecked(world, monkeypatch):
+    # A held receipt may have put units on the shelf: with the stock store
+    # unreachable nobody can tell, so the void is refused, never waved through.
+    from api.routers.vendors import grn_void as _gv
+
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    monkeypatch.setattr(_gv, "get_stock_repository", lambda: None)
+    with pytest.raises(HTTPException) as refused:
+        _run(vd.void_grn(grn["grn_id"], MANAGER))
+    finding(refused.value.status_code == 503, f"A held receipt was voided unchecked ({refused.value.status_code})")
+    assert world.grn(grn["grn_id"])["status"] == "PARTIALLY_ACCEPTED"
+
+
+@pytest.mark.parametrize("field", ["created_by", "assigned_by"])
+def test_r6_below_manager_a_task_you_raised_or_handed_on_is_yours(world, field):
+    # Owner 2026-09-03: below store manager you see only your own tasks --
+    # the ones assigned to you, and the ones you raised or handed to someone.
+    _seed_user(world, SALES)
+    world.db.seed(
+        "tasks",
+        [
+            {
+                "task_id": "T-SALES",
+                "title": "Call the customer back",
+                "status": "OPEN",
+                "store_id": STORE,
+                "assigned_to": MANAGER["user_id"],
+                field: SALES["user_id"],
+            }
+        ],
+    )
+    out = _run(
+        _tasks.list_tasks(
+            status="OPEN", priority=None, assigned_to=None, task_type=None,
+            store_id=STORE, skip=0, limit=50, current_user=SALES,
+        )
+    )
+    finding(
+        [t.get("task_id") for t in out["tasks"]] == ["T-SALES"],
+        f"A salesperson cannot list the task they {field.split('_')[0]} ({out['tasks']})",
+    )
+
+
+def test_r6_a_copy_still_reading_ordered_is_guarded_as_a_draft(world):
+    # The discard guard knows an ordered draft by its catalogue copy too
+    # (needs_review + spine_product_id): a spine that lost its provisional
+    # flag -- edited outside the door -- is still guarded while its order is open.
+    _seed_user(world, ADMIN)
+    po = world.raise_po([{"new_product": dict(BOSS_TYPED), "quantity": 2, "unit_price": 1200}])
+    draft_id = po["items"][0]["product_id"]
+    world.db.products.update_one({"product_id": draft_id}, {"$set": {"provisional": False}})
+    refused = _delete_refusal(world, draft_id)
+    finding(
+        refused is not None and refused.status_code == 409 and po["po_number"] in str(refused.detail),
+        f"An ordered draft known by its copy was discarded with its order open ({refused})",
+    )
+
+
+def test_r6_a_finished_item_a_receipt_still_holds_is_never_deleted(world):
+    # Finished, the Boss is no draft -- but receipt 2 still holds 2 of it
+    # beyond the order: deleting it would strand those units behind a deleted
+    # product. The delete names the receipt.
+    _seed_user(world, ADMIN)
+    po, boss, carrera, grn1, grn2 = _mixed_held_receipt(world)
+    world.finish_draft(boss, offer=2790)
+    assert world.product(boss)["provisional"] is False
+    refused = _delete_refusal(world, boss)
+    finding(
+        refused is not None and refused.status_code == 409 and grn2["grn_number"] in str(refused.detail),
+        f"A finished item a receipt still holds was deleted ({refused})",
+    )
+
+
+def test_r6_not_received_refuses_when_it_cannot_count_the_shelf(world, monkeypatch):
+    # Every read fails closed: with the stock store unreachable nothing is
+    # dropped and the receipt stays as it was.
+    from api.routers.vendors import grn_void as _gv
+
+    po, boss, carrera, grn1, grn2 = _mixed_held_receipt(world)
+    world.finish_draft(boss, offer=2790)
+    before = world.grn(grn2["grn_id"])
+    monkeypatch.setattr(_gv, "get_stock_repository", lambda: None)
+    with pytest.raises(HTTPException) as refused:
+        _run(vd.drop_over_order(grn2["grn_id"], MANAGER))
+    finding(refused.value.status_code == 503, f"'Not received' with no stock store got {refused.value.status_code}")
+    after = world.grn(grn2["grn_id"])
+    assert (after["status"], after["items"], after.get("accept_lock_token")) == (
+        before["status"], before["items"], before.get("accept_lock_token"),
+    )
+
+
+def test_r6_not_received_on_a_second_box_keeps_the_catalogue_hold_and_its_task(world):
+    # Receipt 2 is a second count of the Boss box AND brings the Boss 1701,
+    # still waiting to be catalogued. "Not received" drops the 2 Boss -- the
+    # order has them already -- and nothing else: the 1701 stays held, with
+    # its cataloguer's task; only the store manager's task closes.
+    po, d_id, e_id = _two_drafts_po(world)
+    world.db.purchase_orders.update_one(
+        {"po_id": po["po_id"]},
+        {"$set": {"items": [dict(po["items"][0], quantity=2, ordered_qty=2), po["items"][1]]}},
+    )
+    _receive_some(world, po, {d_id: 2}, "JOT/26-27/0961")
+    grn2, _ = _receive_some(world, po, {d_id: 2, e_id: 1}, "JOT/26-27/0961-DUP")
+    gid = grn2["grn_id"]
+    world.finish_draft(d_id, offer=2790)
+    assert sorted(ln["reason"] for ln in world.grn(gid)["unresolved_lines"]) == [
+        "incomplete_catalog",
+        "over_order",
+    ]
+    out = _run(vd.drop_over_order(gid, MANAGER))
+    stored = world.grn(gid)
+    finding(
+        out["dropped_units"] == 2
+        and stored["status"] == "PARTIALLY_ACCEPTED"
+        and [(ln["product_id"], ln["reason"]) for ln in stored["unresolved_lines"]]
+        == [(e_id, "incomplete_catalog")],
+        f"The catalogue hold went with the drop: {stored['status']} {stored['unresolved_lines']}",
+    )
+    told = sorted(t["category"] for t in _open_tasks(world) if t.get("grn_id") == gid)
+    finding(told == ["Catalogue"], f"After 'Not received' the receipt's open tasks are {told}")
+    assert len(world.units(d_id)) == 2
+
+
+def test_r6_not_received_refreshes_what_the_order_reads_received(world):
+    # A line beyond the order that had put 1 unit on the shelf before it was
+    # held (an accept that died half-way): the order counted none of it while
+    # it was held. Cut to that unit, it counts -- the order reads 3 received,
+    # as the shelf does.
+    po, boss, carrera, grn1, grn2 = _mixed_held_receipt(world)
+    world.finish_draft(boss, offer=2790)
+    gid = grn2["grn_id"]
+    line = next(i for i, it in enumerate(world.grn(gid)["items"]) if it["product_id"] == boss)
+    world.db.seed(
+        "stock_units",
+        [
+            {
+                "stock_id": "S-HALF",
+                "product_id": boss,
+                "store_id": STORE,
+                "status": "AVAILABLE",
+                "quantity": 1,
+                "source_type": "GRN",
+                "source_id": gid,
+                "grn_id": gid,
+                "grn_line_index": line,
+                "line_unit_seq": 0,
+                "po_id": po["po_id"],
+            }
+        ],
+    )
+    assert _po_received(world, po)[1][boss] == 2
+    out = _run(vd.drop_over_order(gid, MANAGER))
+    assert out["dropped_units"] == 1
+    finding(
+        _po_received(world, po)[1][boss] == 3,
+        f"The order reads {_po_received(world, po)[1][boss]} Boss received with 3 on the shelf",
+    )
