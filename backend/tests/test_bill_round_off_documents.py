@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import os
 import sys
+
+import pytest
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -25,7 +27,17 @@ from tests.test_loyalty import patched_loyalty  # noqa: E402,F401  (fixture)
 # ============================================================================
 
 
-def test_invoice_payload_and_pdf_show_round_off(monkeypatch):
+@pytest.mark.parametrize(
+    "price, grand, round_off, taxable, tax, printed",
+    [
+        (1000.5, 1001.0, 0.5, 952.86, 47.64, "+ Rs 0.50"),
+        # Half of all bills round DOWN: their line must print a minus.
+        (1000.49, 1000.0, -0.49, 952.85, 47.64, "- Rs 0.49"),
+    ],
+)
+def test_invoice_payload_and_pdf_show_round_off(
+    monkeypatch, price, grand, round_off, taxable, tax, printed
+):
     from tests.test_invoice_pdf import _FakeCustomerRepo, _FakeStoreRepo
     from tests.test_invoice_pdf_statutory import _pdf_text
     from fastapi import FastAPI
@@ -39,12 +51,12 @@ def test_invoice_payload_and_pdf_show_round_off(monkeypatch):
     doc = {
         "order_id": "ORD-RO", "order_number": "ORD-RO-1", "store_id": "BV-TEST-01",
         "customer_id": "cust-pdf", "customer_name": "Asha Rao", "status": "CONFIRMED",
-        "grand_total": 1001.0, "round_off": 0.5, "amount_paid": 1001.0,
-        "balance_due": 0.0, "tax_amount": 47.64, "cart_discount_amount": 0.0,
+        "grand_total": grand, "round_off": round_off, "amount_paid": grand,
+        "balance_due": 0.0, "tax_amount": tax, "cart_discount_amount": 0.0,
         "items": [{"item_id": "l1", "item_type": "FRAME", "product_name": "Aviator",
-                   "hsn_code": "90031900", "quantity": 1, "unit_price": 1000.5,
-                   "item_total": 1000.5, "gst_rate": 5.0, "taxable_value": 952.86,
-                   "tax_amount": 47.64}],
+                   "hsn_code": "90031900", "quantity": 1, "unit_price": price,
+                   "item_total": price, "gst_rate": 5.0, "taxable_value": taxable,
+                   "tax_amount": tax}],
     }
 
     class _Repo:
@@ -81,15 +93,17 @@ def test_invoice_payload_and_pdf_show_round_off(monkeypatch):
     client = TestClient(app)
 
     j = client.get("/orders/ORD-RO/invoice").json()
-    assert j["roundOff"] == 0.5
-    assert j["grandTotal"] == 1001.0
+    assert j["roundOff"] == round_off
+    assert j["grandTotal"] == grand
     # The tax summary is the lines' own figures -- the round off is not in it.
-    assert j["taxTotals"]["taxable"] == 952.86
+    assert j["taxTotals"]["taxable"] == taxable
 
     text = _pdf_text(client.get("/orders/ORD-RO/invoice.pdf").content)
     assert "Round off" in text
-    assert "0.50" in text
-    assert "One Thousand One" in text  # amount in words is the rounded total
+    # The signed line itself (a bare "0.50" also matches the unit price).
+    assert printed in text
+    if grand == 1001.0:
+        assert "One Thousand One" in text  # amount in words is the rounded total
 
 
 # ============================================================================
