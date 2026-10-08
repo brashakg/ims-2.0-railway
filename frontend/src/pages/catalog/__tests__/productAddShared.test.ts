@@ -100,6 +100,17 @@ describe('Clone never copies the manufacturer barcodes', () => {
     expect(attributes.colour_code).toBe('BLK');
   });
 
+  // The server folds a key in any letter case or padding onto gtin / upc, so
+  // an old stored 'GTIN' is the same code: copied, it made C a second holder.
+  it('drops them under any spelling', () => {
+    const { attributes } = productToCloneValues({
+      ...source,
+      attributes: { colour_code: 'BLK', GTIN: '5901234123457', ' Upc ': '036000291452', Gtin: '' },
+    });
+    expect(attributes).toEqual({ colour_code: 'BLK', brand_name: 'Ray-Ban' });
+    for (const k of ['GTIN', ' Upc ', 'gTiN ']) expect(variantFieldRule('FR', k)).toBe('never');
+  });
+
   it('agrees with the variant rulebook, while Edit still loads them', () => {
     expect(variantFieldRule('FR', 'gtin')).toBe('never');
     expect(variantFieldRule('FR', 'upc')).toBe('never');

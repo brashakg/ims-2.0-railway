@@ -1,7 +1,7 @@
 import { CATEGORY_FIELDS, getCategoryFields } from './categoryFields';
 import type { ProductFormValues } from './formModel';
 import type { ProductDoc } from './cloneMapping';
-import { MANUFACTURER_BARCODE_KEYS, productToFormValues, str } from './cloneMapping';
+import { isManufacturerBarcodeKey, productToFormValues, str } from './cloneMapping';
 import { inferCategoryCode } from './inferCategory';
 
 // ============================================================================
@@ -57,8 +57,9 @@ const VARIANT_COPY_FLAGGED = new Set<string>([
 ]);
 
 // Identity/manufacturer codes are per-variant (or per-unit) — never copied.
+// (The maker's barcodes, in any spelling, via isManufacturerBarcodeKey.)
 const VARIANT_NEVER_KEYS = new Set<string>([
-  ...MANUFACTURER_BARCODE_KEYS, 'full_model_no', 'serial_no', 'sku', 'barcode',
+  'full_model_no', 'serial_no', 'sku', 'barcode',
   // batch-specific (CL medical shelf life) — a new variant has its own batch.
   'expiry_date',
   // provenance of the SIBLING's data (legacy Autopilot-era attr on old docs).
@@ -80,7 +81,7 @@ export function variantFieldRule(category: string, name: string): VariantFieldRu
   if (!name) return 'never';
   if (name === 'polarization') return 'never';
   if (VARIANT_COLOUR_RE.test(name)) return 'never';
-  if (VARIANT_NEVER_KEYS.has(name)) return 'never';
+  if (VARIANT_NEVER_KEYS.has(name) || isManufacturerBarcodeKey(name)) return 'never';
   if (VARIANT_COPY_FLAGGED.has(name)) return 'flag';
   if (VARIANT_COPY_SILENT.has(name)) return 'copy';
   return 'never'; // FAIL CLOSED: unknown keys are never silently copied.
