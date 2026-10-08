@@ -236,6 +236,8 @@ def _wire(monkeypatch, *, po=None, file_store=None, product_repo=None):
     import api.dependencies as deps
 
     monkeypatch.setattr(deps, "get_task_repository", lambda: task_repo)
+    # The staff-to-store lookup: the receiving store's accountant, by name (F33).
+    monkeypatch.setattr("api.services.task_triggers._person_holding", lambda role, store: f"{role.lower()}@{store}")
 
     # purchase_invoices side (invoice draft + match preview).
     monkeypatch.setattr(pi_mod, "get_grn_repository", lambda: grn_repo)
@@ -302,7 +304,7 @@ def test_express_happy_path_full_chain(monkeypatch):
     assert len(task_repo.created) == 1
     task = task_repo.created[0]
     assert task["task_id"] == res["accountant_task_id"]
-    assert task["assigned_to"] == "ACCOUNTANT"
+    assert task["assigned_to"] == "accountant@STORE-A"  # a person, not a title
     assert task["category"] == "Purchase"
     assert task["store_id"] == "STORE-A"
     assert task["source_ref"] == f"express_invoice:{res['grn_id']}"

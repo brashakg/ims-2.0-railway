@@ -9,6 +9,7 @@ from ._shared import (
     Optional,
     Query,
     _INVENTORY_ROLES,
+    _discontinued,
     _reorder_disabled,
     barcode_svc,
     get_current_user,
@@ -46,7 +47,8 @@ async def get_low_stock_alerts(
 
     Each item carries `auto_reorder_disabled` (per-product policy, see
     api/services/reorder_policy.py): True when the product master has
-    reorder_quantity <= 0 (the -1 "no auto-reorder" sentinel). The alert
+    reorder_quantity <= 0 (the -1 "no auto-reorder" sentinel) or the product
+    is discontinued, which `discontinued` says (reorder_policy). The alert
     list itself is UNCHANGED -- every low-stock product is still returned
     so managers see the state; the flag lets consumers (Reorder dashboard,
     Stock Replenishment suggestions) decide whether to propose a PO.
@@ -77,9 +79,27 @@ async def get_low_stock_alerts(
         except (AttributeError, TypeError, ValueError) as exc:
             logger.warning("[INVENTORY] low-stock reorder-policy join failed: %s", exc)
 
+    # Without the product master's identity every row printed "Unknown
+    # Product" (audit F48). Same join, named through the catalogue's one
+    # display-name formula, with brand and category.
+    from ...services.product_master import pim_display_name
+
     for item in items:
         pid = str(item.get("_id") or "")
-        item["auto_reorder_disabled"] = _reorder_disabled(products_by_id.get(pid, {}))
+        prod = products_by_id.get(pid, {})
+        item["auto_reorder_disabled"] = _reorder_disabled(prod)
+        # Why it is off, by the same rule (the Reorder dashboard labels it,
+        # never re-decides it): inactive, unless a provisional buy not yet
+        # switched on (reorder_policy.discontinued).
+        item["discontinued"] = _discontinued(prod)
+        item.update(
+            id=pid,
+            product_id=pid,
+            name=pim_display_name(prod) or "",
+            sku=prod.get("sku") or "",
+            brand=prod.get("brand") or "",
+            category=prod.get("category") or "",
+        )
 
     return {"items": items}
 

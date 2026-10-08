@@ -15,16 +15,131 @@ from ._shared import (
     _get_db,
     _normalize_invoice_no,
     can_access_store_scoped,
+    datetime,
     get_current_user,
     get_file_store,
     get_grn_repository,
     hashlib,
     io,
+    logger,
     require_roles,
     router,
+    timedelta,
+    uuid,
     validate_store_access,
 )
 from .models import GRN_SUBTYPE_DC, _GRN_SUBTYPES
+from .numbering import GRN_PLACEHOLDER_PREFIX, generate_grn_number, grn_number_pending
+
+
+# The placeholder a receipt carries between its insert and its number.
+_PLACEHOLDER_RE = "^" + GRN_PLACEHOLDER_PREFIX
+# A live request numbers its own row milliseconds after the insert; a row
+# still on the placeholder after this long lost its worker.
+_STRANDED_AFTER = timedelta(minutes=1)
+
+
+def _number_receipt(grn_repo, grn_id: str, store_id) -> Optional[str]:
+    """THE receipt numbering write, shared by the live create and the
+    stranded-receipt healer below (audit F28). Claim the row while it is still
+    on its placeholder, THEN mint, THEN write the number only onto a row still
+    on its placeholder under this claim. Whoever loses the row takes no
+    number, and a number already written is never overwritten. Returns the
+    number written, or None when another worker has (or had) the row.
+
+    A claim older than _STRANDED_AFTER belonged to a worker that died; it is
+    taken over. ponytail: a worker stalled longer than that between its claim
+    and its write spends one serial (the takeover numbers the row, the stalled
+    write lands nowhere); a counter reservation released on loss would close
+    it, if it is ever seen.
+
+    A repository without a collection (the in-memory test doubles) has one
+    worker and no healer: mint and write."""
+    coll = getattr(grn_repo, "collection", None)
+    if coll is None:
+        number = generate_grn_number(store_id)
+        return number if grn_repo.update(grn_id, {"grn_number": number}) else None
+    now = datetime.now()
+    claim = str(uuid.uuid4())
+    won = coll.update_one(
+        {
+            "grn_id": grn_id,
+            "grn_number": {"$regex": _PLACEHOLDER_RE},
+            "$or": [
+                {"numbering_claimed_at": {"$exists": False}},
+                {"numbering_claimed_at": {"$lt": now - _STRANDED_AFTER}},
+            ],
+        },
+        {"$set": {"numbering_claim": claim, "numbering_claimed_at": now}},
+    )
+    if not getattr(won, "modified_count", 0):
+        return None
+    number = generate_grn_number(store_id)
+    wrote = coll.update_one(
+        {"grn_id": grn_id, "numbering_claim": claim, "grn_number": {"$regex": _PLACEHOLDER_RE}},
+        {
+            "$set": {"grn_number": number},
+            "$unset": {"numbering_claim": "", "numbering_claimed_at": ""},
+        },
+    )
+    return number if getattr(wrote, "modified_count", 0) else None
+
+
+def _number_stranded_receipts(grn_repo, grn_id: Optional[str] = None) -> None:
+    """Number every receipt (only ``grn_id``, when given) whose worker died
+    between its insert and its number (a killed worker, a deploy mid-request),
+    so no row keeps PENDING/<grn_id> for good (audit F28). Runs at the start
+    of every receipt create and list (the pending receipts panel), and through
+    _receipt_numbered on every read of one receipt. A row younger than
+    _STRANDED_AFTER may still be numbered by its own request, so it is left
+    alone: until then the duplicate guard says the receipt is still getting
+    its number and accept refuses it (a placeholder must never reach a stock
+    unit). Each row goes through _number_receipt, the same claimed write the
+    live create uses, so a stalled create and this never both number a row.
+    Fail-soft: what it cannot do now, the next create or accept does."""
+    coll = getattr(grn_repo, "collection", None)
+    if coll is None:
+        return
+    stale = datetime.now() - _STRANDED_AFTER
+    query = {"grn_number": {"$regex": _PLACEHOLDER_RE}, "created_at": {"$lt": stale}}
+    if grn_id:
+        query["grn_id"] = grn_id
+    try:
+        rows = list(coll.find(query, {"_id": 0, "grn_id": 1, "store_id": 1}).limit(20))
+        for row in rows:
+            _number_receipt(grn_repo, row["grn_id"], row.get("store_id"))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[VENDOR] stranded receipt numbering skipped: %s", exc)
+
+
+def _receipt_numbered(grn_repo, grn: dict) -> dict:
+    """One receipt as a reader or an action sees it (audit F28): a receipt
+    still on its placeholder whose request died is numbered first, then read
+    back. A fresh one is still being numbered by its own request and comes
+    back on its placeholder (grn_number_pending says so)."""
+    if grn_number_pending(grn):
+        _number_stranded_receipts(grn_repo, grn.get("grn_id"))
+        grn = grn_repo.find_by_id(grn.get("grn_id")) or grn
+    return grn
+
+
+def _require_receipt_number(grn_repo, grn: dict) -> dict:
+    """_receipt_numbered, refusing a receipt that still has no number: accept
+    would stamp the placeholder on every unit, the audit row and the bill
+    draft, and void on its immutable audit, for good."""
+    grn = _receipt_numbered(grn_repo, grn)
+    if grn_number_pending(grn):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "GRN_NUMBER_PENDING",
+                "message": (
+                    "This goods receipt is still getting its receipt number. "
+                    "Wait a minute, then try again."
+                ),
+            },
+        )
+    return grn
 
 
 # ============================================================================
@@ -57,6 +172,7 @@ async def list_grns(
 
     if grn_repo is None:
         return {"grns": [], "total": 0}
+    _number_stranded_receipts(grn_repo)
 
     filter_dict: dict = {}
     if active_store:
@@ -83,11 +199,19 @@ async def list_grns(
             rng["$lte"] = date_to
         filter_dict["dc_date"] = rng
 
-    grns = grn_repo.find_many(filter_dict, skip=skip, limit=limit)
+    # A row still on its placeholder has no receipt number to show, void or
+    # accept by (a stranded one was numbered just above; a fresh one is still
+    # being numbered by its own request): it is left out until it has one,
+    # so the panel never names a PENDING/<id> placeholder (audit F28).
+    grns = [
+        g
+        for g in grn_repo.find_many(filter_dict, skip=skip, limit=limit) or []
+        if not grn_number_pending(g)
+    ]
 
-    _enrich_grn_names(grns or [])
+    _enrich_grn_names(grns)
 
-    return {"grns": grns or [], "total": len(grns) if grns else 0}
+    return {"grns": grns, "total": len(grns)}
 
 
 def _enrich_grn_names(grns: list) -> None:
@@ -304,6 +428,22 @@ def _duplicate_grn_detail(dup: dict, invoice_no) -> dict:
     """
     number = dup.get("grn_number") or dup.get("grn_id")
     status = dup.get("status") or "PENDING"
+    if grn_number_pending(dup):
+        # Saved, but its request has not given it a number yet (or died
+        # before it could): never hand out the placeholder (audit F28).
+        return {
+            "code": "GRN_DUPLICATE",
+            "grn_id": dup.get("grn_id"),
+            "grn_number": None,
+            "grn_status": status,
+            "message": (
+                f"A goods receipt for vendor invoice '{invoice_no}' was "
+                f"already saved and is still getting its receipt number - do "
+                f"not create it again. In a minute it shows numbered in the "
+                f"receiving screen's pending receipts panel; finish (accept) "
+                f"or void it there."
+            ),
+        }
     if status == "ACCEPTED":
         hint = (
             "its goods are already on the shelf. Do not receive this delivery "

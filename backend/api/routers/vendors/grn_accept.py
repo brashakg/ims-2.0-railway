@@ -26,6 +26,7 @@ from .numbering import (
     _grn_stock_audit,
     compute_po_receipt_state,
 )
+from .grn import _require_receipt_number
 from .grn_accept_lock import (
     _GRN_MINT_DUPLICATE,
     _advance_grn_terminal_status,
@@ -101,6 +102,11 @@ async def _accept_grn_impl(grn_id: str, current_user: dict) -> dict:
     # gates the stock mint + PO advance + audit writes below.
     if not can_access_store_scoped(grn.get("store_id"), current_user):
         raise HTTPException(status_code=404, detail="GRN not found")
+
+    # A receipt still on its PENDING/<id> placeholder has no number yet: a
+    # stranded one (its request died) is numbered here, a fresh one is refused
+    # until its own request has numbered it (audit F28).
+    grn = _require_receipt_number(grn_repo, grn)
 
     # PENDING is the normal first accept. PARTIALLY_ACCEPTED is re-accept after a
     # "Catalog now" -- some lines were held last time because their product was
