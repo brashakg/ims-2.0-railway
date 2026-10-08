@@ -48,6 +48,7 @@ import uuid
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional, Tuple
 
 from .gst_rates import (
@@ -636,7 +637,7 @@ def build_sku(category: Any, attributes: Dict[str, Any], db=None) -> str:
             f"Unknown product category '{category}'.", status=422, field="category"
         )
     a = attributes or {}
-    brand, model, colour, size = identity_parts(a)
+    brand, model, colour, size = identity_parts(a, category)
     # The SKU also reads a frame's `color_code` spelling and its eye size
     # (`lens_size` in the registry), which the duplicate key does not.
     colour = a.get("colour_code") or a.get("color_code") or colour
@@ -1048,7 +1049,43 @@ def _derive_brand_model_color_size(
     }
 
 
-def identity_parts(attributes: Dict[str, Any]) -> Tuple[Any, Any, Any, Any]:
+_CONTACT_LENSES = ("CONTACT_LENS", "COLORED_CONTACT_LENS")
+# A contact lens's power fields as the form records them: (label, key).
+_CL_POWER_FIELDS = (("", "power"), ("C", "cl_cyl"), ("X", "cl_axis"), ("A", "cl_add"))
+
+
+def _cl_power(attributes: Dict[str, Any]) -> Optional[str]:
+    """A contact lens's power as one identity part (owner 2026-09-28: CL power
+    is its own item): SPH, then C cylinder, X axis, A add, e.g.
+    M125/CM075/X180. A sign is a letter ('-' separates SKU parts): -1.25 is
+    M125, +1.25 and 1.25 are P125, 0 is PL (plano); in hundredths, so -1.25
+    is never -12.50 (M1250). A zero cylinder or add is none. Text that is not
+    a number is kept as typed."""
+    out = []
+    for label, key in _CL_POWER_FIELDS:
+        raw = str(attributes.get(key) if attributes.get(key) is not None else "").strip()
+        if not raw:
+            continue
+        try:
+            d = Decimal(raw)
+        except InvalidOperation:
+            d = None
+        if d is None or not d.is_finite():
+            out.append(label + raw)
+        elif key == "cl_axis":
+            out.append("X%d" % int(d))
+        elif d == 0:
+            if key == "power":
+                out.append("PL")
+        else:
+            hundredths = int((abs(d) * 100).to_integral_value())
+            out.append("%s%s%03d" % (label, "M" if d < 0 else "P", hundredths))
+    return "/".join(out) or None
+
+
+def identity_parts(
+    attributes: Dict[str, Any], category: Any = None
+) -> Tuple[Any, Any, Any, Any]:
     """(brand, model, colour, size): what tells one product from another --
     THE parts build_sku mints from and the duplicate key (compute_identity_key)
     folds, so a lens the guard calls new also gets a SKU of its own and the
@@ -1059,7 +1096,9 @@ def identity_parts(attributes: Dict[str, Any]) -> Tuple[Any, Any, Any, Any]:
     1.56 saved twice is still one product and the SKU mints no filler. The
     old form's filler model 'STD' (a lens with no sub-brand, stored in
     model_no/model_name) is no model, so an old row and the same lens entered
-    today get one key."""
+    today get one key. A contact lens (`category`) is told apart by its power
+    in the size's place (_cl_power): a second power of a model is a new
+    product, the same power twice is one."""
     ids = _derive_brand_model_color_size(attributes)
     a = attributes or {}
     model, colour = ids["model"], ids["color"] or a.get("coating")
@@ -1067,7 +1106,10 @@ def identity_parts(attributes: Dict[str, Any]) -> Tuple[Any, Any, Any, Any]:
         model = a.get("subbrand")
     if not model and not ids["color"]:
         model, colour = colour, None
-    return (ids["brand"], model, colour, ids["size"] or a.get("index"))
+    size = ids["size"] or a.get("index")
+    if resolve_category(category) in _CONTACT_LENSES:
+        size = _cl_power(a)
+    return (ids["brand"], model, colour, size)
 
 
 def normalise_identity_component(value: Any) -> str:
@@ -1595,7 +1637,7 @@ def normalise_payload(
     # Stamped only when brand+model are both present (the minimum that makes an
     # identity meaningful); categories without a brand/model -- e.g. SERVICES --
     # carry no identity_key and are not identity-deduped.
-    _ident = compute_identity_key(*identity_parts(attributes))
+    _ident = compute_identity_key(*identity_parts(attributes, canonical))
     if _ident:
         doc["identity_key"] = _ident
     if dc is not None:

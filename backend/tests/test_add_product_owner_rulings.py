@@ -615,6 +615,51 @@ def test_f13_an_old_std_lens_row_is_the_lens_entered_today(door):
     assert key == "acme|std|01"
 
 
+_OASYS = {"brand_name": "Acuvue", "model_name": "Oasys", "power": "-1.25",
+          "expiry_date": "2027-01-31"}
+
+
+def test_cl_power_is_its_own_item(door):
+    """Owner 2026-09-28: a contact lens's power is its own item. A second power
+    of the same model is a new product (under the SKU the Review previewed),
+    not the 409; the same power twice -- however it is spelt -- still is."""
+    first = door(_form_post("CL", _OASYS))
+    assert first["sku"] == "CL-ACUVUE-OASYS-M125"
+    for power in ({"power": "-1.50"}, {"power": "+1.25"}, {"power": "-12.50"},
+                  {"power": "0.00"}, {"cl_cyl": "-0.75", "cl_axis": "180"},
+                  {"cl_cyl": "-0.75", "cl_axis": "90"}, {"cl_add": "+2.00"}):
+        other = dict(_OASYS, **power)
+        created = door(_form_post("CL", other))
+        assert created["sku"] == _preview("CL", other), power
+        assert created["identity_key"] != first["identity_key"], power
+    assert _dup(door, _form_post("CL", dict(_OASYS, power="-1.250")))["sku"] == first["sku"]
+    toric = dict(_OASYS, cl_cyl="-0.75", cl_axis="180")
+    assert _dup(door, _form_post("CL", dict(toric, cl_cyl="-.75")))["sku"] == "CL-ACUVUE-OASYS-M125/CM075/X180"
+    # A colour contact lens too.
+    hazel = dict(_OASYS, colour_name="Hazel")
+    door(_form_post("CCL", hazel))
+    door(_form_post("CCL", dict(hazel, power="-2.00")))
+    _dup(door, _form_post("CCL", hazel))
+
+
+def test_cl_power_key_rebuild_matches_the_create_door(door):
+    """The key rebuild keys an existing contact lens with its power, a stored
+    plano 0 included, so re-entering that power is caught."""
+    from scripts import migrate_identity_key_tighten as mig
+
+    for pid, power in (("P-CL1", -1.25), ("P-CL0", 0.0)):
+        door.repo.collection.insert_one({
+            "product_id": pid, "sku": pid, "category": "CONTACT_LENS", "is_active": True,
+            "brand": "Acuvue", "model": "Oasys", "identity_key": "acuvue|oasys|",
+            "attributes": dict(_OASYS, power=power),
+        })
+    stats = mig.run(door.repo.collection, apply=True)
+    assert (stats["rewritten"], stats["collisions"]) == (2, 0)
+    assert door.repo.find_by_id("P-CL0")["identity_key"] == "acuvue|oasys||pl"
+    assert _dup(door, _form_post("CL", _OASYS))["sku"] == "P-CL1"
+    assert _dup(door, _form_post("CL", dict(_OASYS, power="0.00")))["sku"] == "P-CL0"
+
+
 def test_f13_guard_a_clash_still_gets_a_unique_sku(door):
     first = door(_form(brand="Carrera", model="CA8895", color="807"))
     # Same identity is a 409 at this door; a different size key is a new row
