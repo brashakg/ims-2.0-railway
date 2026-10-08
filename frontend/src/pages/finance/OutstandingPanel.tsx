@@ -8,7 +8,8 @@ import { formatCurrency } from './financeUtils';
 
 interface OutstandingPanelProps {
   outstanding: OutstandingReceivable[];
-  vendorPayments: VendorPaymentData[];
+  /** null = this reader may not see payables (ADMIN / ACCOUNTANT only). */
+  vendorPayments: VendorPaymentData[] | null;
 }
 
 export default function OutstandingPanel({ outstanding, vendorPayments }: OutstandingPanelProps) {
@@ -96,6 +97,7 @@ export default function OutstandingPanel({ outstanding, vendorPayments }: Outsta
       </div>
 
       {/* Vendor Payments */}
+      {vendorPayments && (
       <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
         <div className="bg-slate-50 px-6 py-4 border-b border-gray-200">
           <h3 className="text-gray-900 font-semibold">Vendor Payment Schedule</h3>
@@ -138,6 +140,7 @@ export default function OutstandingPanel({ outstanding, vendorPayments }: Outsta
           </table>
         </div>
       </div>
+      )}
     </div>
   );
 }

@@ -483,7 +483,7 @@ are the exact current gate (SUPERADMIN always implied).
 | `GET` | `/api/v1/finance/revenue` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `GET` | `/api/v1/finance/summary-month` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `GET` | `/api/v1/finance/tally/sales-jv` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/finance/vendor-payments` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
+| `GET` | `/api/v1/finance/vendor-payments` | SUPERADMIN, ADMIN, ACCOUNTANT |  |
 
 ### `/api/v1/follow-ups`
 
@@ -923,6 +923,17 @@ are the exact current gate (SUPERADMIN always implied).
 | `GET` | `/api/v1/returns/{return_id}` | AUTH |  |
 | `POST` | `/api/v1/returns/{return_id}/restock` | ADMIN, STORE_MANAGER, SALES_CASHIER, CASHIER |  |
 
+### `/api/v1/rtv-debit-notes`
+
+| Method | Path | Allowed | S |
+|---|---|---|---|
+| `GET` | `/api/v1/rtv-debit-notes` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT, WORKSHOP_STAFF | S |
+| `GET` | `/api/v1/rtv-debit-notes/` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT, WORKSHOP_STAFF | S |
+| `POST` | `/api/v1/rtv-debit-notes/issue` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
+| `GET` | `/api/v1/rtv-debit-notes/{debit_note_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT, WORKSHOP_STAFF | S |
+| `GET` | `/api/v1/rtv-debit-notes/{debit_note_id}/print` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT, WORKSHOP_STAFF | S |
+| `GET` | `/api/v1/rtv-debit-notes/{debit_note_id}/tally` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
+
 ### `/api/v1/settings`
 
 | Method | Path | Allowed | S |
@@ -1096,12 +1107,27 @@ are the exact current gate (SUPERADMIN always implied).
 
 | Method | Path | Allowed | S |
 |---|---|---|---|
-| `GET` | `/api/v1/vendor-returns` | AUTH |  |
-| `POST` | `/api/v1/vendor-returns` | AUTH |  |
-| `GET` | `/api/v1/vendor-returns/` | AUTH |  |
-| `POST` | `/api/v1/vendor-returns/` | AUTH |  |
-| `GET` | `/api/v1/vendor-returns/{return_id}` | AUTH |  |
-| `PATCH` | `/api/v1/vendor-returns/{return_id}/status` | AUTH |  |
+| `GET` | `/api/v1/vendor-returns` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT, WORKSHOP_STAFF | S |
+| `POST` | `/api/v1/vendor-returns` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
+| `GET` | `/api/v1/vendor-returns/` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT, WORKSHOP_STAFF | S |
+| `POST` | `/api/v1/vendor-returns/` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
+| `GET` | `/api/v1/vendor-returns/{return_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT, WORKSHOP_STAFF | S |
+| `PATCH` | `/api/v1/vendor-returns/{return_id}/status` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
+
+### `/api/v1/vendor-rma`
+
+| Method | Path | Allowed | S |
+|---|---|---|---|
+| `GET` | `/api/v1/vendor-rma` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
+| `GET` | `/api/v1/vendor-rma/` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
+| `POST` | `/api/v1/vendor-rma` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
+| `POST` | `/api/v1/vendor-rma/` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
+| `GET` | `/api/v1/vendor-rma/{rma_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
+| `POST` | `/api/v1/vendor-rma/{rma_id}/authorize` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
+| `POST` | `/api/v1/vendor-rma/{rma_id}/dispatch` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
+| `POST` | `/api/v1/vendor-rma/{rma_id}/credit-note` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
+| `POST` | `/api/v1/vendor-rma/{rma_id}/reject` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
+| `POST` | `/api/v1/vendor-rma/{rma_id}/close` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
 
 ### `/api/v1/vendors`
 
@@ -1112,28 +1138,31 @@ are the exact current gate (SUPERADMIN always implied).
 | `GET` | `/api/v1/vendors/` | AUTH |  |
 | `POST` | `/api/v1/vendors/` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `GET` | `/api/v1/vendors/ap-aging` | ADMIN, ACCOUNTANT |  |
-| `GET` | `/api/v1/vendors/grn` | AUTH |  |
+| `GET` | `/api/v1/vendors/grn` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
 | `POST` | `/api/v1/vendors/grn` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/vendors/grn/{grn_id}` | AUTH |  |
+| `GET` | `/api/v1/vendors/grn/{grn_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
 | `POST` | `/api/v1/vendors/grn/{grn_id}/accept` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `POST` | `/api/v1/vendors/grn/{grn_id}/escalate` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/vendors/purchase-orders` | AUTH |  |
+| `GET` | `/api/v1/vendors/purchase-orders` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `POST` | `/api/v1/vendors/purchase-orders` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/vendors/purchase-orders/{po_id}` | AUTH |  |
+| `GET` | `/api/v1/vendors/purchase-orders/{po_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `POST` | `/api/v1/vendors/purchase-orders/{po_id}/cancel` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `POST` | `/api/v1/vendors/purchase-orders/{po_id}/send` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/vendors/{vendor_id}` | AUTH |  |
+| `GET` | `/api/v1/vendors/purchase-orders/{po_id}/timeline` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
+| `GET` | `/api/v1/vendors/{vendor_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `PUT` | `/api/v1/vendors/{vendor_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/vendors/{vendor_id}/bills` | AUTH |  |
+| `GET` | `/api/v1/vendors/{vendor_id}/bills` | ADMIN, ACCOUNTANT |  |
 | `POST` | `/api/v1/vendors/{vendor_id}/bills` | ADMIN, ACCOUNTANT |  |
-| `GET` | `/api/v1/vendors/{vendor_id}/debit-notes` | AUTH |  |
+| `GET` | `/api/v1/vendors/{vendor_id}/debit-notes` | ADMIN, ACCOUNTANT |  |
 | `POST` | `/api/v1/vendors/{vendor_id}/debit-notes` | ADMIN, ACCOUNTANT |  |
-| `GET` | `/api/v1/vendors/{vendor_id}/ledger` | AUTH |  |
-| `GET` | `/api/v1/vendors/{vendor_id}/payments` | AUTH |  |
+| `GET` | `/api/v1/vendors/{vendor_id}/ledger` | ADMIN, ACCOUNTANT |  |
+| `GET` | `/api/v1/vendors/{vendor_id}/payments` | ADMIN, ACCOUNTANT |  |
 | `POST` | `/api/v1/vendors/{vendor_id}/payments` | ADMIN, ACCOUNTANT |  |
+| `GET` | `/api/v1/vendors/{vendor_id}/performance` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `POST` | `/api/v1/vendors/{vendor_id}/portal-token` | SUPERADMIN, ADMIN |  |
 | `DELETE` | `/api/v1/vendors/{vendor_id}/portal-token/{token_id}` | SUPERADMIN, ADMIN |  |
 | `GET` | `/api/v1/vendors/{vendor_id}/portal-tokens` | SUPERADMIN, ADMIN |  |
+| `GET` | `/api/v1/vendors/{vendor_id}/purchase-history` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 
 ### `/api/v1/vouchers`
 

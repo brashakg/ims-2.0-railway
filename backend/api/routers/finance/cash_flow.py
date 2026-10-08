@@ -12,6 +12,7 @@ from fastapi import Depends, Query
 from ..auth import get_current_user
 from ...dependencies import validate_store_access
 from ...services import ap_engine, cashflow
+from ...services.cost_mask import can_see_cost
 from ...services.salary_visibility import is_payroll_shaped_expense, is_salary_admin
 from ._shared import (
     PAID_STATUSES,
@@ -113,8 +114,17 @@ async def get_cash_flow(
     # Real cash paid to vendors this period (vendor_payments). AP is org-level,
     # so only fold it in for the org/owner view (no specific store selected) to
     # avoid double-attributing HQ payments to one store.
+    #
+    # Supplier payments, per vendor or in total, are ADMIN + ACCOUNTANT only
+    # (owner ruling 2026-09-29): services/cost_mask "payables", the one rule
+    # /finance/vendor-payments and the vendor ledger (AP_ROLES) answer.
+    # Anyone else never has the figure read, so it is in neither the key nor
+    # `outflows` / `net_cash_flow`, which would hand it straight back as
+    #     outflows - expense_outflow - purchase_outflow
+    # (the trap the payroll strip below documents).
+    ap_reader = can_see_cost(current_user, "payables")
     vendor_payment_outflow = 0.0
-    if not active_store:
+    if ap_reader and not active_store:
         try:
             vp = list(
                 db.get_collection("vendor_payments").aggregate(
@@ -183,8 +193,13 @@ async def get_cash_flow(
         "net_cash_flow": round(total_inflow - total_outflow, 2),
         "expense_outflow": expense_outflow,
         "purchase_outflow": purchase_outflow,
-        "vendor_payment_outflow": vendor_payment_outflow,
     }
+    if ap_reader:
+        body["vendor_payment_outflow"] = vendor_payment_outflow
+    elif not active_store:
+        # The org view's outflows leave supplier payments out for this reader:
+        # a flag, never a figure (as expenses_partially_restricted below).
+        body["vendor_payments_restricted"] = True
     if expenses_partially_restricted:
         # Same flag /pnl sets, and for the same reason: a short total must not
         # read as the truth. A flag, never a figure.
