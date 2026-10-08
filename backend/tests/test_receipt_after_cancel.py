@@ -372,3 +372,65 @@ def test_an_unreadable_receipt_list_refuses_the_accept(monkeypatch):
     out = _accept(b)
     assert isinstance(out, HTTPException) and out.status_code == 503, out
     assert _p2_units(stock) == 0
+
+
+def _parked(monkeypatch, fn_owner, name, park_on):
+    """Wrap `fn_owner.name` so the first call for which park_on(*args) is true
+    waits (on its own thread) until released. Returns (inside, release)."""
+    import threading
+
+    inside, release = threading.Event(), threading.Event()
+    real = getattr(fn_owner, name)
+
+    def wrapper(*args, **kw):
+        if not inside.is_set() and park_on(*args):
+            inside.set()
+            assert release.wait(10)
+        return real(*args, **kw)
+
+    monkeypatch.setattr(fn_owner, name, wrapper)
+    return inside, release
+
+
+def _in_background(gid):
+    import threading
+
+    out = {}
+    t = threading.Thread(target=lambda: out.setdefault("r", _accept(gid)))
+    t.start()
+    return t, out
+
+
+def test_a_receipt_in_flight_counts_whole_when_stock_rows_are_gone(monkeypatch):
+    """P2: 5 live, 1 cancelled. R0 is ACCEPTED for 3 but its stock rows are
+    gone (the order's own count still says 3), so 2 are open. B (2) is parked
+    after stocking its first unit; C (1) is accepted meanwhile and refused --
+    B's stocked unit is in no other count, so B counts whole."""
+    po = _po(_line("P1", "Frame X", 5),
+             _line("P2", "Ray-Ban", 5, ordered_qty=5, cancelled_qty=1, received_qty=3,
+                   line_status="PARTIAL"))
+    po["status"] = "PARTIALLY_RECEIVED"
+    po["received_qty_by_product"] = {"P2": 3}
+    grn_repo, _po_repo, stock, _t = _wire(monkeypatch, po=po)
+    _atomic_claims(grn_repo)
+    grn_repo.docs["R0"] = {"grn_id": "R0", "po_id": "PO-1", "status": "ACCEPTED",
+                           "store_id": "STORE-A", "items": _items("P2", 3)}
+    b = _create("normal", _items("P2", 2), _user(), inv="INV-B")["grn_id"]
+    c = _create("normal", _items("P2", 1), _user(), inv="INV-C")["grn_id"]
+    calls = {"n": 0}
+
+    def second_create(doc):
+        calls["n"] += 1
+        return calls["n"] == 2
+
+    inside, release = _parked(monkeypatch, stock, "create", second_create)
+    t, out_b = _in_background(b)
+    assert inside.wait(10), "B never reached its second unit"
+    try:
+        out = _accept(c)
+        assert isinstance(out, HTTPException) and out.status_code == 409, out
+    finally:
+        release.set()
+        t.join(15)
+    assert out_b["r"]["grn_status"] == "ACCEPTED", out_b
+    assert _p2_units(stock) == 2
