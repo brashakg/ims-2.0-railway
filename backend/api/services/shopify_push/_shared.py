@@ -307,7 +307,11 @@ def _product_brand(doc: Dict[str, Any]) -> Any:
     """A product's brand as the push gates read it: the spine's `brand`, else a
     Shopify-shaped `vendor`, else `attributes.brand_name` -- a CATALOG-door twin
     carries only the last, and the website gate fails closed on no brand."""
-    return doc.get("brand") or doc.get("vendor") or (doc.get("attributes") or {}).get("brand_name")
+    return (
+        doc.get("brand")
+        or doc.get("vendor")
+        or (doc.get("attributes") or {}).get("brand_name")
+    )
 
 
 def push_lock_reason(db, entity: str, doc: Dict[str, Any]) -> Optional[str]:
