@@ -1095,6 +1095,19 @@ def test_catalog_drawer_mrp_edit_on_a_child_lands_on_its_row_and_queues_the_pare
     _run(shopify_push.push_variant_prices(db, parent, ls.variants_for_product(db, parent)))
     assert _bulk_price_rows(spy)[B_GID]["barcode"] == new_gtin
 
+    # a stored 'GTIN' an unrelated drawer edit folds onto gtin is a written
+    # gtin too: it rides the same writer, never a twin the row disagrees with
+    folded = "5901234123457"
+    db["catalog_products"].update_one(
+        {"id": "tw-child"},
+        {"$unset": {"attributes.gtin": ""}, "$set": {"attributes.GTIN": folded}},
+    )
+    _run(cat.update_catalog_product(
+        "tw-child", cat.ProductUpdateInput(attributes={"size": "Large"}), current_user=ADMIN
+    ))
+    assert _twin(db, "tw-child")["attributes"]["gtin"] == folded
+    assert _row(db, CHILD_SKU)["gtin"] == folded
+
 
 def test_push_image_never_attaches_a_childs_photo_to_the_parents_listing(monkeypatch):
     """P3: push_image resolves the media target from the image's product

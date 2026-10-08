@@ -940,6 +940,41 @@ class TestBarcodeKeysInAnyLetterCase:
             asyncio.run(create_product(body, _ADMIN))
         assert ei.value.status_code == 409
 
+    def test_an_edit_that_folds_a_held_code_is_refused(self, mock_db, mirror_on):
+        """The panel's probe (round 8). A holds a code under 'GTIN', which the
+        one-holder check cannot see, so B was given it. An edit of A that does
+        not send gtin folds 'GTIN' onto A's gtin: the check must see that, or
+        two live products send one barcode to Shopify and Google."""
+        a = _create("KC-FOLD-A")["product_id"]
+        mock_db["products"].update_one(
+            {"product_id": a}, {"$set": {"attributes.GTIN": _VALID_A}}
+        )
+        b = _create("KC-FOLD-B")["product_id"]
+        _update(b, attributes={"gtin": _VALID_A})
+        with pytest.raises(HTTPException) as ei:
+            _update(a, attributes={"frame_material": "TR90"})
+        assert ei.value.status_code == 409
+        assert "KC-FOLD-B" in str(ei.value.detail)
+        attrs = mock_db["products"].find_one({"product_id": a})["attributes"]
+        assert "gtin" not in attrs and "frame_material" not in attrs
+
+    def test_a_gtin_the_fold_writes_drops_the_legacy_barcode(self, mock_db, mirror_on):
+        """A gtin the fold writes is a written gtin: the legacy products.barcode
+        goes (the one-holder rule would still find it there), and it ships."""
+        a = _create("KC-FOLD-L")["product_id"]
+        mock_db["products"].update_one(
+            {"product_id": a},
+            {"$set": {"attributes.GTIN": _VALID_A, "barcode": _UPC_A}},
+        )
+        _update(a, attributes={"frame_material": "TR90"})
+        spine = mock_db["products"].find_one({"product_id": a})
+        assert spine["attributes"]["gtin"] == _VALID_A
+        assert "GTIN" not in spine["attributes"] and "barcode" not in spine
+        twin = mock_db["catalog_products"].find_one(
+            {"id": spine.get("pim_product_id") or a}
+        )
+        assert _pushed_barcodes(mock_db, twin) == {"KC-FOLD-L": _VALID_A}
+
     def test_the_guard_folds_every_spelling_onto_the_one_key(self):
         from api.services.product_master import ProductMasterError, _guard_gtin_attribute
 

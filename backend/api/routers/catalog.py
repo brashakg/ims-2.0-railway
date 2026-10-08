@@ -2134,6 +2134,7 @@ async def update_catalog_product(
                 existing["gst_rate"] = gst_rate_for_category(canonical)
 
     # Update fields
+    gtin_written = False
     if product.attributes:
         # Catalog Dictionary parity with the spine PUT (products.py): when the
         # owner configured allowed values for a field, an attributes patch must
@@ -2151,18 +2152,16 @@ async def update_catalog_product(
             # manufacturer barcodes that reach Shopify and Google: the same
             # strict guard and one-holder rule as the spine doors.
             _typed = _pm._guard_gtin_attribute(_typed, strict=True)
-            if "gtin" in _typed:
-                _gtin_repo = get_product_repository()
-                # A spineless twin (an import) is its own holder: its id.
-                _pm.assert_gtin_free(
-                    _typed["gtin"],
-                    _gtin_repo,
-                    _spine_product_id(_gtin_repo, existing) or existing.get("id"),
-                )
             product.attributes = _typed
-            # Another stored spelling of a barcode key folds on and goes.
-            merged_attrs = _pm.fold_barcode_spellings(
-                {**(existing.get("attributes") or {}), **_typed}
+            # Another stored spelling of a barcode key folds on and goes; a
+            # gtin the fold makes is checked like a sent one, and written.
+            _gtin_repo = get_product_repository()
+            merged_attrs, gtin_written = _pm.merge_attributes_edit(
+                existing.get("attributes"),
+                _typed,
+                _gtin_repo,
+                # A spineless twin (an import) is its own holder: its id.
+                _spine_product_id(_gtin_repo, existing) or existing.get("id"),
             )
             merged_attrs = _pm.enforce_dictionary_values(
                 existing.get("category"), merged_attrs, db=_get_db()
@@ -2170,7 +2169,7 @@ async def update_catalog_product(
         except _pm.ProductMasterError as err:
             raise HTTPException(status_code=err.status, detail=err.message) from err
         existing["attributes"] = merged_attrs
-        if "gtin" in product.attributes:
+        if gtin_written:
             # The twin's top-level gtin is what the push sends as the variant
             # barcode (the same projection as the spine door's mirror).
             existing.update(_pm.twin_barcode_fields(merged_attrs.get("gtin")))
@@ -2429,7 +2428,7 @@ async def update_catalog_product(
             _patch = {k: v for k, v in _patch.items() if v is not None}
             if _patch:
                 _pr.update(_spine_id, _patch)
-            if product.attributes and "gtin" in product.attributes:
+            if gtin_written:
                 # Spine and twin hold ONE GTIN (Manage Barcode and the stock
                 # page read the spine's). Its own write, so a legacy spine
                 # whose attributes are not a dict cannot sink the price sync.
@@ -2474,7 +2473,7 @@ async def update_catalog_product(
         _row_patch: Dict[str, Any] = {}
         if product.pricing is not None and product.pricing.mrp is not None:
             _row_patch["mrp"] = product.pricing.mrp
-        if product.attributes and "gtin" in product.attributes:
+        if gtin_written:
             _row_patch["attributes"] = {
                 "gtin": (existing.get("attributes") or {}).get("gtin")
             }

@@ -48,7 +48,7 @@ import uuid
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .gst_rates import (
     gst_rate_for_category,
@@ -1434,6 +1434,31 @@ def assert_gtin_free(code: Any, product_repo, this_product_id: Optional[str]) ->
             status=409,
             field="gtin",
         )
+
+
+def merge_attributes_edit(
+    stored: Optional[Dict[str, Any]],
+    patch: Dict[str, Any],
+    product_repo,
+    this_product_id: Optional[str],
+) -> Tuple[Dict[str, Any], bool]:
+    """(the attributes a partial edit stores, whether that write sets the gtin).
+    THE merge for both attribute edit doors (the spine PUT, the catalogue review
+    editor), on a `patch` already through _guard_gtin_attribute. Another stored
+    spelling of a barcode key folds onto the one key (fold_barcode_spellings),
+    so a stored 'GTIN' becomes the gtin even when the edit never sent one. The
+    gtin is WRITTEN when the edit sent it or the fold made or changed it, and a
+    written gtin passes the one-holder check: a folded 'GTIN' another product
+    holds 409s exactly as a typed one does. The caller then runs the barcode
+    projections (twin gtin, spine attributes.gtin, legacy barcode) on it."""
+    stored = stored or {}
+    merged = fold_barcode_spellings({**stored, **patch})
+    written = "gtin" in patch or (merged.get("gtin") or "") != (
+        stored.get("gtin") or ""
+    )
+    if written:
+        assert_gtin_free(merged.get("gtin"), product_repo, this_product_id)
+    return merged, written
 
 
 def normalise_payload(

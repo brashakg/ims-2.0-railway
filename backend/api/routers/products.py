@@ -3431,23 +3431,20 @@ async def update_product(
             _patch = update_data["attributes"] or {}
             _patch = _pm.apply_field_casing(_patch, only=set(_patch.keys()))
             # The GTIN is the barcode that goes to Shopify and Google: the edit
-            # door refuses junk exactly like the create door (same guard, strict).
-            # Only the keys this submit carries are checked.
+            # door refuses junk exactly like the create door (same guard, strict)
+            # in the keys this submit carries. A stored barcode key in another
+            # spelling ('GTIN') folds onto the one key and leaves storage in
+            # this write, so Remove removes it; a gtin the fold makes passes
+            # the one-holder check like a sent one.
             try:
                 _patch = _pm._guard_gtin_attribute(_patch, strict=True)
+                update_data["attributes"], _gtin_written = _pm.merge_attributes_edit(
+                    existing.get("attributes"), _patch, repo, product_id
+                )
             except _pm.ProductMasterError as err:
                 raise HTTPException(
                     status_code=err.status, detail=_pm_error_detail(err)
                 ) from err
-            _refuse_barcode_held_by_another_product(
-                _patch.get("gtin"), repo, product_id
-            )
-            _gtin_written = "gtin" in _patch
-            # A stored barcode key in another spelling ('GTIN') folds onto the
-            # one key and leaves storage in this write, so Remove removes it.
-            update_data["attributes"] = _pm.fold_barcode_spellings(
-                {**(existing.get("attributes") or {}), **_patch}
-            )
             # Catalog Dictionary: the update path must enforce the same
             # owner-configured value lists as the create door (create runs it
             # inside normalise_payload; PUT does not go through that path).

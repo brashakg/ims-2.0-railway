@@ -808,11 +808,36 @@ def test_review_editor_takes_an_old_spelling_out_of_twin_and_spine(gtin_env, typ
     )
     patch = {"colour_code": "RED"} if typed is None else {"gtin": typed}
     _put("twin-g1", {"attributes": patch})
-    twin_attrs = catalog_mod.CATALOG_PRODUCTS["twin-g1"]["attributes"]
-    assert "GTIN" not in twin_attrs
-    assert twin_attrs["gtin"] == (_GTIN if typed is None else "")
-    if typed is not None:
-        assert "GTIN" not in gtin_env.find_by_id("spine-g1")["attributes"]
+    twin = catalog_mod.CATALOG_PRODUCTS["twin-g1"]
+    want = _GTIN if typed is None else ""
+    assert "GTIN" not in twin["attributes"] and twin["attributes"]["gtin"] == want
+    # The fold wrote the gtin, so every barcode projection ran: the twin's
+    # top-level gtin, the spine (Manage Barcode and the stock page read it)
+    # and the push all hold the one code.
+    assert (twin.get("gtin") or "") == want
+    spine_attrs = gtin_env.find_by_id("spine-g1")["attributes"]
+    assert "GTIN" not in spine_attrs and spine_attrs["gtin"] == want
+    assert _pushed_barcode(gtin_env, twin) == (want or None)
+
+
+def test_review_editor_checks_a_gtin_the_fold_makes(gtin_env):
+    """The panel's probe (round 8). Twin and spine hold the code under 'GTIN'
+    and OTHER-1 holds it; the editor sends only the changed keys
+    (reviewMapping.formValuesToCatalogUpdate). The fold makes it the twin's
+    gtin, so the one-holder rule must see it: 409, nothing written."""
+    gtin_env.create({"product_id": "spine-other", "sku": "OTHER-1",
+                     "attributes": {"gtin": _GTIN}})
+    catalog_mod.CATALOG_PRODUCTS["twin-g1"]["attributes"]["GTIN"] = _GTIN
+    gtin_env.collection.update_one(
+        {"product_id": "spine-g1"}, {"$set": {"attributes.GTIN": _GTIN}}
+    )
+    with pytest.raises(HTTPException) as exc:
+        _put("twin-g1", {"attributes": {"colour_code": "RED"}})
+    assert exc.value.status_code == 409
+    assert "OTHER-1" in str(exc.value.detail)
+    twin = catalog_mod.CATALOG_PRODUCTS["twin-g1"]
+    assert "gtin" not in twin["attributes"] and not twin.get("gtin")
+    assert "gtin" not in gtin_env.find_by_id("spine-g1")["attributes"]
 
 
 def test_promote_folds_the_twins_old_spelling(env):
@@ -841,3 +866,4 @@ def test_catalog_create_door_refuses_a_gtin_another_product_holds(gtin_env):
         asyncio.run(catalog_mod.create_catalog_product(inp, _user()))
     assert exc.value.status_code == 409
     assert "OTHER-1" in str(exc.value.detail)
+
