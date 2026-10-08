@@ -1734,14 +1734,16 @@ def test_a_short_split_leg_is_named_at_its_own_shop_at_booking_too(world):
 
 def test_only_the_short_leg_moves_and_to_a_shop_already_in_the_order(world):
     """Q4 + Q2: Ranchi cannot ship its OA leg; Bokaro (already in the order)
-    and Pune (more stock) both hold an OA. Ranchi's fulfillment order alone
-    moves -- to Bokaro, so the order ships from ONE location -- and the move
-    lifts its own hold."""
+    and BV Dhanbad (more stock, Bokaro's GSTIN, so the seller check passes it
+    too) both hold an OA. Ranchi's fulfillment order alone moves -- to
+    Bokaro, so the order ships from ONE location -- and the move lifts its
+    own hold. (Round 20: the rival was Pune, another GSTIN, which the seller
+    check already excluded -- most-stock-wins survived the test.)"""
     db = world["db"]
-    db.stores.update_one({"store_id": PUNE}, {"$set": {"shopify_location_id": LOC_PUN}})
+    _shop(db, "BV-DHN-01", "BV Dhanbad", "20AAAAA0000A1Z5", LOC_DHN)
     _stock(db, "BV-BOK-01", "P-RB", 1)
     _stock(db, "BV-BOK-01", "P-OA", 1)
-    _stock(db, PUNE, "P-OA", 3)
+    _stock(db, "BV-DHN-01", "P-OA", 3)
     world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 1)])
     world["shop"].fo(FO_2, LOC_RAN, lines=[(9001, 1)])
 
