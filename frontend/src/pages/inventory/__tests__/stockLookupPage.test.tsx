@@ -4,6 +4,9 @@
 //     screen showed "Rs 0" / "-" while the till charged Rs 12,990;
 //   - after a scan (Enter) the box is selected, so the next scan replaces the
 //     text instead of being appended to it ("...A2BV91...A3" matched nothing).
+// Round 7: the till REFUSES an offer above MRP and a zero or NaN price
+// (posPriceGuard), so those rows read '-'; a re-typed offer||mrp chain would
+// show Rs 15,990 / Rs 0 / Rs NaN, a price the till never charges.
 // Round 5: a shop the till does not count reads 'not tracked here', a lens
 // 'see Power Grid' - never a 0 the till would not keep.
 // Round 6: the line type is the till's own mapCategory (imported, never
@@ -67,7 +70,10 @@ describe('Stock lookup screen', () => {
     mockGet.mockResolvedValue({
       data: {
         store_id: 'S1',
-        items: [item('ZERO', 12990, 0), item('NONE', 12990, null), item('OFFER', 12990, 11990)],
+        items: [
+          item('ZERO', 12990, 0), item('NONE', 12990, null), item('OFFER', 12990, 11990),
+          item('OVER', 12990, 15990), item('NOPRICE', 0, 0), item('NAN', NaN, NaN),
+        ],
       },
     });
   });
@@ -80,6 +86,16 @@ describe('Stock lookup screen', () => {
     expect(priceOf('Frame ZERO')).toBe('₹12,990');
     expect(priceOf('Frame NONE')).toBe('₹12,990');
     expect(priceOf('Frame OFFER')).toBe('₹11,990');
+  });
+
+  it('shows no price where the till refuses it: offer above MRP, zero or NaN', async () => {
+    const box = renderPage();
+    fireEvent.change(box, { target: { value: 'CA8895' } });
+    fireEvent.submit(box.closest('form')!);
+    await waitFor(() => expect(screen.getByText('Frame OVER')).toBeTruthy());
+    expect(priceOf('Frame OVER')).toBe('-');
+    expect(priceOf('Frame NOPRICE')).toBe('-');
+    expect(priceOf('Frame NAN')).toBe('-');
   });
 
   it('selects the box after a scan so the next scan replaces it', async () => {
