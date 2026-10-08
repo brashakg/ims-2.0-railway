@@ -118,9 +118,10 @@ def assert_issuing_identity(
 
     Raises HTTPException(404) when the store could not be resolved (no name) so
     a document never prints with a blank, identity-less header. When
-    require_gstin is True (a GST tax document), additionally raises
-    HTTPException(400) when no GSTIN resolved for the store's state -- mirroring
-    orders.py get_invoice's 'store GSTIN is not configured' guard.
+    require_gstin is True (a GST document), additionally raises
+    HTTPException(400) when the store carries no GSTIN of its own -- mirroring
+    the invoice door's 'store GSTIN is not configured' guard -- or one its
+    company (``entity``) does not hold.
     """
     name = ""
     if isinstance(store, dict):
@@ -134,17 +135,25 @@ def assert_issuing_identity(
             "Configure the store under Organization before printing.",
         )
     if require_gstin:
-        from .print_legal import _gstin_for_state, _pick
+        from .org_validation import shop_gstin
+        from .print_legal import _pick
 
-        state_code = _pick(store, "state_code")
-        gstin, _ = _gstin_for_state(entity, state_code)
-        # Fall back to a GSTIN persisted directly on the store doc (org module
-        # derives + stores it) before failing.
-        if not gstin:
-            gstin = _pick(store, "gstin")
+        # The store's OWN GSTIN (the org module stamps it for the store's
+        # state) -- the one the invoice issues from -- and it must be THE
+        # shop's GSTIN (org_validation.shop_gstin: one its company holds), the
+        # one the printed header shows: never a company's name beside a
+        # number it does not hold (a shop moved to another company).
+        gstin = _pick(store, "gstin")
         if not gstin:
             raise HTTPException(
                 status_code=400,
                 detail="Store GSTIN is not configured for this state. "
                 "A GST document cannot be issued without it.",
+            )
+        if shop_gstin(entity, store) != gstin.upper():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Store GSTIN {gstin} is not a registration its company "
+                "holds for the store's state. Set the shop's GSTIN in "
+                "Organization before issuing a GST document.",
             )

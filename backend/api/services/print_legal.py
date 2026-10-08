@@ -719,31 +719,6 @@ def _brand_of(store: Optional[Dict[str, Any]]) -> str:
     return str(store.get("brand") or "").strip().upper()
 
 
-def _gstin_for_state(
-    entity: Optional[Dict[str, Any]], state_code: str
-) -> Tuple[str, str]:
-    """Return (gstin, state_name) for the entity's registration that matches
-    `state_code`. Falls back to the primary registration; finally to ("", "")."""
-    if not isinstance(entity, dict):
-        return "", ""
-    gstins = entity.get("gstins") or []
-    if not isinstance(gstins, list) or not gstins:
-        return "", ""
-
-    target = str(state_code or "").strip()
-    primary: Optional[Dict[str, Any]] = None
-    for g in gstins:
-        if not isinstance(g, dict):
-            continue
-        if target and str(g.get("state_code", "")).strip() == target:
-            return str(g.get("gstin", "")), str(g.get("state_name") or "")
-        if primary is None or g.get("is_primary"):
-            primary = g
-    if primary is None:
-        return "", ""
-    return str(primary.get("gstin", "")), str(primary.get("state_name") or "")
-
-
 def _apply_overrides(
     fields: Dict[str, Any], overrides: Optional[Dict[str, Any]]
 ) -> Dict[str, Any]:
@@ -780,7 +755,8 @@ def LegalHeader(  # noqa: N802 - intentionally mirror the JSX export name
     `entity` is the legal entity dict (from the `entities` collection or any
     equivalent shape: name/legal_name/pan/cin/registered_address/website +
     gstins list). `store` is the place-of-supply outlet (from the `stores`
-    collection: name/address/city/state/state_code/pincode/phone/email).
+    collection: name/address/city/state/state_code/pincode/phone/email + its
+    own `gstin`); the GSTIN printed is org_validation.shop_gstin of the two.
     `overrides` is the per-entity-per-template content override dict from
     `print_template_overrides` (see routers/print_overrides.py).
 
@@ -822,9 +798,17 @@ def LegalHeader(  # noqa: N802 - intentionally mirror the JSX export name
         part for part in store_addr_lines + [city, state_name_store, pincode] if part
     )
 
-    # ---- pick the GSTIN for the store state ------------------------------
-    gstin, state_name_gst = _gstin_for_state(entity, store_state_code)
-    state_name = state_name_gst or state_name_store
+    # ---- the seller GSTIN: THE shop's GSTIN (org_validation.shop_gstin) --
+    # store.gstin when its company holds it, else the company's registration
+    # for the shop's own state (a store linked to its entity afterwards: a
+    # transfer challan must carry the consignor's GSTIN, Rule 55), never the
+    # company's PRIMARY one, never a number the company printed beside it
+    # does not hold. A GST document prints only when this IS store.gstin,
+    # the one its invoice issued from (assert_issuing_identity(require_gstin)).
+    from .org_validation import shop_gstin
+
+    gstin = shop_gstin(entity if isinstance(entity, dict) else None, store) or ""
+    state_name = state_name_store
 
     # ---- logo (entity invoice identity, then per-brand default) -----------
     logo_url = _entity_logo(entity) or _BRAND_DEFAULT_LOGO.get(store_brand, "")

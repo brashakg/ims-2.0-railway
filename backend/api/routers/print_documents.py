@@ -103,8 +103,18 @@ async def delivery_challan_for_order(
 
     store = load_store(order.get("store_id"))
     entity = load_entity_for_store(store)
-    # Fail loudly rather than printing an identity-less challan.
-    assert_issuing_identity(store, entity=entity)
+    # Fail loudly rather than printing an identity-less challan: the seller
+    # GSTIN is the order's own shop's (store.gstin, the one its tax invoice
+    # issues from), and a routed online order is refused on THE seller check
+    # its booking held it on -- never printed under another state's GSTIN.
+    assert_issuing_identity(store, require_gstin=True, entity=entity)
+    from ..services.online_fulfillment_route import seller_problem
+
+    bad = seller_problem(order, store, load_store)
+    if bad:
+        raise HTTPException(
+            status_code=400, detail=f"Cannot print a delivery challan: {bad['message']}"
+        )
     overrides = load_overrides(entity, "delivery_challan") or load_overrides(
         entity, "tax_invoice"
     )

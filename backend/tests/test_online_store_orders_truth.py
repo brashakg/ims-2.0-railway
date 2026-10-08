@@ -134,8 +134,8 @@ class _Coll:
             if _match(d, filter_):
                 for kk, vv in (update.get("$set") or {}).items():
                     d[kk] = vv
-                return type("R", (), {"modified_count": 1})()
-        return type("R", (), {"modified_count": 0})()
+                return type("R", (), {"matched_count": 1, "modified_count": 1})()
+        return type("R", (), {"matched_count": 0, "modified_count": 0})()
 
 
 class _DB:

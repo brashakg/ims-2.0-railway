@@ -246,6 +246,12 @@ async def gst_report(
     cust_state_map: dict = {}
     raw_db = _get_raw_db()
     if raw_db is not None:
+        # A routed online order held on its seller (GSTIN) check is output tax
+        # of no return: GSTR-1/3B and Tally drop it, and so does this report
+        # (tally._filed_orders, the ONE rule).
+        from ..finance.tally import _filed_orders
+
+        orders = _filed_orders(raw_db, orders)
         try:
             store_doc = raw_db["stores"].find_one({"store_id": active_store})
             if store_doc:

@@ -1266,9 +1266,14 @@ def _issue_store_credit(
     bump_balance: bool = True,
     interstate: Optional[bool] = None,
     store_id: Optional[str] = None,
+    order_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Append an ISSUED credit-note ledger entry (the GSTR-1 CDNR source) and,
     by default, bump the customer's running store-credit balance.
+
+    ``order_id``: the order the note reverses, stamped on the row by a door
+    whose note has no returns doc (no RET- ref) -- the GST returns find its
+    parent there (reports.gst_itc._ledger_row_return_doc).
 
     Store attribution (`store_id`): the credit note must be booked under the
     SAME store -- hence the same GSTIN -- the parent invoice was filed under,
@@ -1349,6 +1354,8 @@ def _issue_store_credit(
     # and keep the legacy state-compare fallback.
     if isinstance(interstate, bool):
         entry["interstate"] = interstate
+    if order_id:
+        entry["order_id"] = order_id
 
     # Externally-settled (card/gateway refund): record the CDNR row but do NOT
     # add redeemable balance -> zero the delta, hold the balance, mark it.
@@ -1530,10 +1537,11 @@ def _audit_stock_transition(
 # ONLINE store.
 # ---------------------------------------------------------------------------
 # The refund's store is DERIVED FROM THE ORDER (see the IDOR guard in
-# create_return), and an online order's `store_id` is the VIRTUAL online billing
-# bucket -- shopify_ingest._online_store_id() stamps BV-ONLINE-01 while the
-# serialized units are claimed at a PHYSICAL fulfilment store
-# (_online_fulfillment_store_id / _claim_units_multistore). So for a return
+# create_return). Since multi-location PR 5 a live online order's `store_id` IS
+# its physical shipping shop, so it restocks there directly; but a LEGACY online
+# order's `store_id` is the VIRTUAL online billing bucket --
+# shopify_ingest._online_store_id() stamped BV-ONLINE-01 while the serialized
+# units were claimed at a PHYSICAL fulfilment store. So for a return
 # against an online order the restock below used to:
 #   * look for the original SOLD unit AT the online store -> never finds one
 #     (the online store owns no serialized stock at all), therefore
@@ -1543,7 +1551,7 @@ def _audit_stock_transition(
 # no shelf and no POS (PR #941 blocks POS on online stores) so nobody can ever
 # sell it, and it still counts toward the POOLED on-hand that
 # online_stock_writeback pushes to Shopify -- Shopify then offers a unit that no
-# shop can pick. Worse, shopify_ingest._available_stores_for_product does not
+# shop can pick. Worse, the (since deleted) claim-candidate reader did not
 # exclude online stores, so the next online sale silently CLAIMS the phantom
 # (claimed == expected -> no under-claim / oversell miss recorded).
 #
@@ -1580,8 +1588,9 @@ def _order_fulfilment_stores(
     candidate first. Empty for an in-store sale / a historical import that never
     ran the decrement. Pure; never raises.
 
-    Online fulfilment can SPAN SHOPS (shopify_ingest._claim_units_multistore
-    falls back to whichever store held the units, ON by default), so when a
+    A LEGACY online order can SPAN SHOPS (the pre-multi-location-PR-5 claim,
+    _claim_units_multistore, fell back per line to whichever store held the
+    units; a PR 5 order spans shops only when Shopify split it), so when a
     ``product_id`` is given the `fulfillment_breakdown` row for THAT product
     wins -- otherwise a two-shop order would book every returned unit back to
     one shop and leave the other shop's unit stranded SOLD."""
@@ -1633,12 +1642,15 @@ def _load_order_for_restock(order_id: Optional[str]) -> Optional[Dict[str, Any]]
 
 
 def _configured_online_fulfilment_store() -> Optional[str]:
-    """ONLINE_FULFILLMENT_STORE_ID -- the physical shop shopify_ingest draws
-    online stock from by default. Read here (not imported from shopify_ingest)
-    so the returns path has no import edge onto the ingest module."""
-    import os
+    """ONLINE_FULFILLMENT_STORE_ID through its ONE reader
+    (online_fulfillment_route.fallback_store_id; no import edge onto the
+    ingest module). Only a LEGACY online order reaches it: since
+    multi-location PR 5 a live online order is billed by its shipping shop,
+    a physical store, so its return restocks there directly (the first
+    branch of _resolve_restock_store)."""
+    from ..services.online_fulfillment_route import fallback_store_id
 
-    return (os.getenv("ONLINE_FULFILLMENT_STORE_ID") or "").strip() or None
+    return fallback_store_id()
 
 
 def _resolve_restock_store(
@@ -1678,7 +1690,24 @@ def _resolve_restock_store(
     Any candidate that is itself an ONLINE store is skipped at every step.
     """
     db = _get_db()
-    if not is_online_store(db, store_id):
+    # A routed online order whose route named NO shop (multi-location PR 5:
+    # dark, unread or unmapped with no fallback) claimed nothing: no unit left
+    # any shop, so a restock anywhere -- its billing bucket included, which
+    # may be a physical shop -- mints a phantom that is written back to
+    # Shopify and sold at the till. Loud instead: a human says where the goods are.
+    route = (order or {}).get("fulfillment_route")
+    if isinstance(route, dict) and not route.get("store_id"):
+        return {
+            "store_id": None,
+            "redirected_from": store_id,
+            "reason": _RESTOCK_ROUTE_UNRESOLVED,
+        }
+    # A physical shop restocks its own return -- unless its units left from
+    # ANOTHER shop (multi-location PR 5: Shopify split the order, and a leg
+    # shop -- possibly the only one that claimed anything -- is not the
+    # billing shop): each unit goes back to the shop it left from, exactly
+    # like a legacy online order.
+    if not is_online_store(db, store_id) and set(_order_fulfilment_stores(order)) <= {store_id}:
         return {
             "store_id": store_id,
             "redirected_from": None,
@@ -1715,8 +1744,8 @@ def _fulfilment_unit_queue(
     """ONE physical store id PER UNIT this product was actually shipped from,
     in breakdown order, honouring each row's ``qty``.
 
-    `_claim_units_multistore` splits a SINGLE order line across shops whenever
-    the preferred shop is short (fallback is ON by default), stamping one
+    The pre-PR-5 `_claim_units_multistore` split a SINGLE order line across
+    shops whenever the preferred shop was short, stamping one
     `fulfillment_breakdown` row per (product, store) with its qty. Routing at
     product granularity would send BOTH returned units of a 2-way split back to
     one shop -- minting a phantom there while the other shop's real unit stayed
@@ -2009,7 +2038,8 @@ def _restock_good_items(
         return result
 
     # F9 refinement -- ONLY on the redirected (online-order) path: an online
-    # order can be fulfilled from SEVERAL shops (_claim_units_multistore), so
+    # order booked before multi-location PR 5 (the deleted
+    # _claim_units_multistore), or one Shopify split, left SEVERAL shops, so
     # each UNIT goes back to the shop it actually left from. Two layers:
     #   * a per-UNIT queue expanded from fulfillment_breakdown's qty (so ONE
     #     line split 1+1 across two shops sends one unit to each), and
@@ -3065,6 +3095,16 @@ async def create_return(
                 ),
             )
         claimed.append(rl)
+
+    # The order's refund/return mark before any credit or restock (multi-
+    # location PR 5): a Re-map running on another worker never moves its
+    # claims under this return. Fail-soft.
+    try:
+        from ..services.online_fulfillment_route import mark_refund_or_return
+
+        mark_refund_or_return(_get_db(), resolved_order_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[RETURNS] order refund mark skipped: %s", exc)
 
     def _issue_credit_or_fail(
         amount: float,

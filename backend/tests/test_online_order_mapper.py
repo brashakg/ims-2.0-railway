@@ -232,6 +232,10 @@ def wired(monkeypatch):
     monkeypatch.setattr(deps, "get_product_repository", lambda: None)
     monkeypatch.setattr(deps, "get_store_repository", lambda: _StoreRepo())
     monkeypatch.setattr(deps, "get_customer_repository", lambda: customer_repo)
+    # The booking's route / stock-miss tasks (create_system_task) stay out of
+    # the app DB: on a local run nothing clears it, and the next test's
+    # dashboard read of `tasks` met them.
+    monkeypatch.setattr(deps, "get_task_repository", lambda: None)
 
     return {
         "db": db,
@@ -337,6 +341,10 @@ def test_reingest_does_not_duplicate_and_syncs_status(wired):
 def test_status_only_update_without_line_items_syncs_existing(wired):
     # First create the order.
     online_order_mapper.map_shopify_order(_frame_order(10003), wired["db"], topic="orders/create")
+    # No shop is named here (no routing read), so the order books HELD on
+    # SELLER_UNKNOWN; a human resolves and releases it. (A still-held order
+    # is never flipped to DELIVERED: the test below.)
+    wired["orders"].update_one({"shopify_order_id": "10003"}, {"$set": {"fulfillment_hold": False}})
 
     # An orders/updated that carries NO line_items (Shopify partial payload) must
     # still sync status of the order we already have, not create a new one.

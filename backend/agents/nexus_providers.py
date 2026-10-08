@@ -228,7 +228,7 @@ async def _shopify_fetch_orders(
     return orders, False
 
 
-def _catch_up_one(db, order: Dict[str, Any], sid: str, live: bool) -> tuple:
+async def _catch_up_one(db, order: Dict[str, Any], sid: str, live: bool) -> tuple:
     """One pulled order -> (bucket, reason). Bucket is one of already_in_ims /
     skipped_dark / mapped / failed. Never raises."""
     if not sid:
@@ -239,14 +239,16 @@ def _catch_up_one(db, order: Dict[str, Any], sid: str, live: bool) -> tuple:
             return "already_in_ims", None
         if not live:
             return "skipped_dark", None
+        from api.services.online_fulfillment_route import map_routed_order
         from api.services.online_order_mapper import map_shopify_order
 
         # webhook_id stays None on purpose: ingest's layer-2 guard registers any
         # id on first sight and answers "replayed" forever after, so a pull-side
         # id would turn one transient booking failure into a permanent stall.
         # The hard layer-1 order-id guard (pre-checked above, re-checked inside)
-        # is what makes this idempotent against a later real webhook.
-        result = map_shopify_order(order, db, webhook_id=None, topic="orders/create")
+        # is what makes this idempotent against a later real webhook. The create
+        # goes through the routing door like the webhook (multi-location PR 5).
+        result = await map_routed_order(order, db, webhook_id=None, topic="orders/create")
         status = result.get("status")
         if status == "created":
             # The orders/updated delivery that already followed on Shopify's
@@ -322,7 +324,7 @@ async def shopify_pull_orders(db, since_hours: int = SHOPIFY_PULL_FLOOR_HOURS) -
     for order in orders:
         sid = str(order.get("id") or "").strip()
         raw = copy.deepcopy(order)  # the mapper stamps _ims_* keys; the inbox keeps Shopify's body
-        bucket, reason = _catch_up_one(db, order, sid, live)
+        bucket, reason = await _catch_up_one(db, order, sid, live)
         if bucket == "already_in_ims":
             tally[bucket] += 1
             continue
@@ -1204,8 +1206,11 @@ def tally_build_day_voucher_xml_checked(
 ) -> tuple:
     """Reshape -> GATE -> build. The ONLY entry point an unattended caller may use.
 
-    Three gates run per order BEFORE a single byte of that order's XML exists:
+    The gates run per order BEFORE a single byte of that order's XML exists:
 
+      S. SELLER HOLD -- a routed online order held off the GST returns on its
+         seller (GSTIN) check (reports.gst_itc._order_held_off_returns, the
+         rule GSTR-1/3B apply) is quarantined, never booked.
       0. SELF-CONSISTENCY -- `_order_tax_statements_disagree`: a header tax and
          a per-line tax sum that differ by more than 50 paise, in EITHER
          direction (over-stating fabricates liability; under-stating hides it).
@@ -1263,8 +1268,21 @@ def tally_build_day_voucher_xml_checked(
     priced: List[Dict[str, Any]] = []
     rejected: List[Dict[str, Any]] = []
 
+    from api.routers.reports.gst_itc import _order_held_off_returns
+
     for original in orders or []:
         oid = _order_identity(original)
+
+        # SELLER HOLD: a routed online order its seller (GSTIN) check holds
+        # off the GST returns (GSTR-1/3B skip it; the invoice door refuses it)
+        # is no sale of this GSTIN until Re-map re-routes it -- quarantined
+        # here, never booked into the books GSTR-1 disagrees with.
+        held = _order_held_off_returns(db, original)
+        if held:
+            rejected.append(
+                {"order_id": oid, "reason": f"held on its seller (GSTIN) check: {held['message']}"}
+            )
+            continue
 
         # TWO-SIDED tax-statement check, BEFORE pricing: max() below only sees
         # under-booking, so a header that OVER-states the lines fabricates

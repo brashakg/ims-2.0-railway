@@ -12,6 +12,8 @@ from ..auth import require_roles
 from ...dependencies import (
     validate_store_access,
 )
+from ...utils.online_gst import order_place_of_supply
+from ...services.org_validation import resolve_state_code
 from ._shared import (
     _REPORT_FINANCE_ROLES,
     _cdnr_note_number,
@@ -29,7 +31,9 @@ from .gst_base import (
 from .gst_itc import (
     _cn_bucket_rate,
     _cn_foreign_store,
+    _cn_parent_held,
     _ledger_row_return_doc,
+    _order_held_off_returns,
     _return_interstate_flag,
     _transfer_b2b_rows,
     _transfer_outward_bills,
@@ -96,6 +100,7 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
     store_gstin = ""
     store_legal_name = ""
     store_state = ""
+    store_doc = None
 
     db = _get_raw_db()
     if db is not None:
@@ -141,6 +146,22 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
             }
 
             for order in orders_col.find(query):
+                # A routed online order its booking HELD on the seller check
+                # (no shop named, a shop or split leg without its own state's
+                # GSTIN, a split across GSTINs) is never filed under this
+                # GSTIN until Re-map re-routes it -- nor are its credit notes
+                # (below), nor is it in GSTR-3B or Tally (the same question).
+                held = _order_held_off_returns(db, order)
+                if held:
+                    validation_issues.append(
+                        {
+                            "level": "error",
+                            "invoice": order.get("invoice_number")
+                            or order.get("order_number"),
+                            "issue": "Not filed: " + held["message"],
+                        }
+                    )
+                    continue
                 cust_id = str(order.get("customer_id", ""))
                 cust_info = cust_map.get(cust_id, {})
                 customer_gstin = cust_info.get("gstin", "")
@@ -193,7 +214,17 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                 # STRING created_at untouched by design (unknown frame), which
                 # is exactly the old behaviour for the migrated orders.
                 invoice_date = ist_date_str(created_raw) if created_raw else month + "-01"
-                place_of_supply = customer_state or store_state or "Unknown"
+                # The order's OWN persisted place of supply first (an online
+                # order's delivery state -- the same record its IGST flag
+                # above comes from); the customer doc's state is a returning
+                # buyer's FIRST delivery state and filed IGST rows with the
+                # supplier's own state as the place of supply.
+                place_of_supply = (
+                    order_place_of_supply(order)
+                    or customer_state
+                    or store_state
+                    or "Unknown"
+                )
 
                 # HSN: pull from the first line item if available; fallback
                 # to 9004 (frames/lenses default per CBIC). GSTR-1 row-level
@@ -263,7 +294,14 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                     for rate, line_taxable, line_tax in _b2cs_rate_lines(
                         items, taxable_value, total_tax
                     ):
-                        key = f"{place_of_supply}|{rate}"
+                        # The portal's key: (supply type, place of supply,
+                        # rate), the place by its state CODE -- a POS row names
+                        # the state ('Jharkhand'), an online row its persisted
+                        # code ('20'); one consolidated row, never two.
+                        key = (
+                            f"{resolve_state_code(place_of_supply) or place_of_supply}"
+                            f"|{rate}|{is_inter_state}"
+                        )
                         if key not in b2cs_map:
                             b2cs_map[key] = {
                                 "placeOfSupply": place_of_supply,
@@ -346,6 +384,16 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
     # Per-report order->interstate cache, shared by the ledger pass and the
     # in-store returns pass so one refund can never resolve two heads.
     _cdnr_inter_cache: dict = {}
+    _held_cache: dict = {}  # order_id -> parent held on the seller check
+
+    def _held_cn_issue(ref, ret_doc) -> dict:
+        return {
+            "level": "error",
+            "invoice": str(ref or (ret_doc or {}).get("return_id") or ""),
+            "issue": "Not filed: this credit note reverses order "
+            f"{(ret_doc or {}).get('order_number') or (ret_doc or {}).get('order_id')}, "
+            "whose sale is held off this return on its seller (GSTIN) check.",
+        }
 
     if db is not None:
         # Process credit notes from returns/refunds in credit_note_ledger
@@ -399,6 +447,11 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                         # two GSTINs.
                         _ret_doc = _ledger_row_return_doc(db, entry)
                         if _cn_foreign_store(_ret_doc, active_store):
+                            continue
+                        # The refund of a sale this report refused to file
+                        # (held on the seller check) is not filed either.
+                        if _cn_parent_held(db, _ret_doc, _held_cache):
+                            validation_issues.append(_held_cn_issue(entry.get("ref"), _ret_doc))
                             continue
 
                         # Split CGST/SGST vs IGST: prefer the head stamped from
@@ -547,6 +600,9 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                         else:
                             continue
                     except (TypeError, ValueError):
+                        continue
+                    if _cn_parent_held(db, ret, _held_cache):
+                        validation_issues.append(_held_cn_issue(rid, ret))
                         continue
 
                     cust_id = str(ret.get("customer_id", ""))

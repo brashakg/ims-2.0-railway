@@ -25,6 +25,7 @@ from .gst_base import (
 )
 from .gst_itc import (
     _cn_foreign_store,
+    _cn_parent_held,
     _gstin_bound,
     _itc_from_vendor_bills,
     _itc_gstin_from_vendor_bills,
@@ -32,6 +33,7 @@ from .gst_itc import (
     _placement,
     _sum_heads,
     _ledger_row_return_doc,
+    _order_held_off_returns,
     _return_interstate_flag,
     _transfer_outward_bills,
 )
@@ -101,6 +103,7 @@ def _credit_note_totals(db, active_store, year, mon, last_day):
     # under IGST: the entity kept paying IGST on goods that came back, and the
     # max(0, ...) clamp downstream swallowed the CGST/SGST over-reversal.
     order_inter: dict = {}
+    held: dict = {}  # order_id -> parent held on the seller check
     store_state = ""
     try:
         st = db.get_collection("stores").find_one({"store_id": active_store}) or {}
@@ -142,6 +145,11 @@ def _credit_note_totals(db, active_store, year, mon, last_day):
                     # owns this reversal (its returns leg counts the return
                     # doc). Counting it here too reversed one refund under
                     # two GSTINs.
+                    continue
+                if _cn_parent_held(db, ret_doc, held):
+                    # The refund of a sale held off the returns on the seller
+                    # check (GSTR-1 files neither): no reversal of output tax
+                    # that was never declared.
                     continue
                 inter = row.get("interstate")
                 if not isinstance(inter, bool):
@@ -200,6 +208,8 @@ def _credit_note_totals(db, active_store, year, mon, last_day):
                 t = round(float(gb.get("tax") or 0.0), 2)
                 tv = round(float(gb.get("taxable") or 0.0), 2)
                 if t <= 0 and tv <= 0:
+                    continue
+                if _cn_parent_held(db, ret, held):  # its sale was not filed
                     continue
                 i, c, sg = _split(
                     t, _return_interstate_flag(db, ret, store_state, order_inter)
@@ -382,6 +392,12 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
                     "created_at": {"$gte": from_dt, "$lt": to_dt},
                 }
             ):
+                # A routed online order held on the seller check is not an
+                # outward supply of THIS GSTIN until Re-map re-routes it --
+                # the one question GSTR-1 and Tally ask too, so the returns
+                # of one GSTIN never disagree on it.
+                if _order_held_off_returns(db, order):
+                    continue
                 # Orders carry `tax_amount` + `grand_total`, NOT `taxable` /
                 # `taxable_amount`; derive taxable = grand_total - tax_amount.
                 taxable, tax = _order_taxable_and_tax(order)
