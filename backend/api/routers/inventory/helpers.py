@@ -161,6 +161,48 @@ def _parse_expiry(value) -> Optional[datetime]:
         return None
 
 
+def _had_the_window(arrived, now: datetime, days: int) -> bool:
+    """Has stock that arrived at ``arrived`` sat on the shelf for ``days`` days?
+
+    THE rule for a stock age verdict -- Aging's NEW grace, Alerts' DEAD_STOCK
+    and Non-moving all read it. A missing or unreadable arrival date is legacy
+    stock: old, it has had the window. ``arrived`` comes from
+    product_repository.group_with_oldest_arrival (opening stock is dated by
+    the day it was entered)."""
+    arrived = _parse_expiry(arrived)
+    return arrived is None or (now - arrived).days >= days
+
+
+def _shelf_by_product(stock_coll, store_id: Optional[str]) -> Dict[str, dict]:
+    """On-hand units per product at ``store_id`` (every shop when None) and when
+    the oldest arrived: {product_id: {quantity, oldest, undated}}.
+
+    The PHYSICAL question (a reserved frame is still on this shelf), through the
+    shared on-hand clause; one serialized row == one unit, a row with no
+    `quantity` counts as one. ``oldest`` is the arrival rule
+    (product_repository.group_with_oldest_arrival) that _had_the_window judges.
+    Non-moving and Alerts both read it."""
+    from database.repositories.product_repository import group_with_oldest_arrival
+
+    match = dict(_on_hand_status_clause(include_reserved=True))
+    if store_id:
+        match["store_id"] = store_id
+    return {
+        str(r["_id"]): r
+        for r in stock_coll.aggregate(
+            [
+                {"$match": match},
+                *group_with_oldest_arrival(
+                    {
+                        "_id": "$product_id",
+                        "quantity": {"$sum": {"$ifNull": ["$quantity", 1]}},
+                    }
+                ),
+            ]
+        )
+    }
+
+
 def compute_days_until_expiry(expiry, now: Optional[datetime] = None) -> Optional[int]:
     """Whole days from `now` until `expiry` (negative = already expired).
 

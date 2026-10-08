@@ -48,7 +48,13 @@ interface Product {
   // (legacy-enabled, nothing to show). <= 0 (the -1 sentinel) = the owner
   // explicitly DISABLED auto-reorder for this product.
   reorderQuantity: number | null;
+  // The server's verdict (reorder_policy.py, via /inventory/low-stock): the
+  // one reorder rule. Never re-decided here.
   autoReorderDisabled: boolean;
+  // The server's discontinued verdict (reorder_policy.discontinued: inactive,
+  // except a provisional buy not yet switched on or deleted): says WHY it is
+  // off, decides nothing.
+  discontinued: boolean;
   maxStock: number;
   leadTimeDays: number;
   averageSalesPerDay: number;
@@ -58,13 +64,23 @@ interface Product {
   unitCost?: number;
 }
 
-// Auto-reorder is OFF when the product master says so explicitly (value
-// present and <= 0, i.e. the -1 sentinel) or the low-stock feed flagged it.
+// Auto-reorder is OFF when the server's low-stock feed says so.
 const isAutoReorderOff = (p: Product) => p.autoReorderDisabled;
 
 // A row that auto-reorder can actually order: enabled AND a real qty >= 1.
-const hasOrderableQty = (p: Product) =>
+const hasOrderableQty = (p: Product): p is Product & { reorderQuantity: number } =>
   !isAutoReorderOff(p) && p.reorderQuantity != null && p.reorderQuantity >= 1;
+
+type LowStockRow = {
+  _id: string;
+  quantity: number;
+  reorder_point?: number | null;
+  stock_status?: string;
+  auto_reorder_disabled?: boolean;
+  discontinued?: boolean;
+};
+const lowStockRows = (data: unknown): LowStockRow[] =>
+  Array.isArray(data) ? data : (data as { items?: LowStockRow[] } | null)?.items ?? [];
 
 export function ReorderDashboard() {
   const { user, hasRole } = useAuth();
@@ -100,10 +116,10 @@ export function ReorderDashboard() {
         inventoryApi.getStock(storeId).catch(() => ({ items: [] })),
       ]);
 
-      // getLowStock returns { items: [{ _id: productId, quantity, reorder_point, auto_reorder_disabled }] }
-      // -- only products with a SET level at or under it (reorder_policy).
-      const lowStockItems: Array<{ _id: string; quantity: number; reorder_point: number; stock_status?: string; auto_reorder_disabled?: boolean }> =
-        Array.isArray(lowStockData) ? lowStockData : lowStockData?.items ?? [];
+      // getLowStock returns { items: [{ _id, quantity, reorder_point, stock_status,
+      // auto_reorder_disabled, discontinued }] } -- only products with a SET level
+      // at or under it (reorder_policy).
+      const lowStockItems = lowStockRows(lowStockData);
 
       // getStock returns { items: [...stock unit docs] }
       const stockUnits: Array<Record<string, any>> =
@@ -143,9 +159,6 @@ export function ReorderDashboard() {
           rawReorderQty == null || Number.isNaN(Number(rawReorderQty))
             ? null
             : Number(rawReorderQty);
-        const autoReorderDisabled =
-          (reorderQuantity != null && reorderQuantity <= 0) ||
-          item.auto_reorder_disabled === true;
 
         return {
           id: pid,
@@ -158,7 +171,8 @@ export function ReorderDashboard() {
           reorderPoint: typedLevel(item.reorder_point),
           status: toStatus(item.stock_status),
           reorderQuantity,
-          autoReorderDisabled,
+          autoReorderDisabled: item.auto_reorder_disabled === true,
+          discontinued: item.discontinued === true,
           maxStock: Number(raw.max_stock ?? raw.maximum_stock ?? 50),
           leadTimeDays: Number(raw.lead_time_days ?? raw.lead_time ?? 7),
           averageSalesPerDay: Number(raw.average_sales_per_day ?? raw.avg_daily_sales ?? 0),
@@ -214,27 +228,30 @@ export function ReorderDashboard() {
       }
     }
 
-    // Update local state to reflect what actually saved
-    if (levelSaved || productSaved) {
-      setProducts(products.map(p =>
+    // Every verdict (low / critical, auto-reorder off, discontinued) is the
+    // server's, read back rather than re-decided here: a discontinued product
+    // stays off whatever quantity was saved. A level change re-reads the list;
+    // a product-only save re-reads the row's auto-reorder flag (no answer
+    // keeps the last verdict).
+    if (levelSaved) {
+      void loadProducts();
+    } else if (productSaved) {
+      const fresh = await inventoryApi.getLowStock(user?.activeStoreId ?? '').catch(() => null);
+      const verdict = lowStockRows(fresh).find(i => i._id === data.productId);
+      setProducts(prev => prev.map(p =>
         p.id === data.productId
           ? {
               ...p,
-                            ...(productSaved
-                ? {
-                    reorderQuantity: data.reorderQuantity,
-                    autoReorderDisabled: data.reorderQuantity <= 0,
-                    maxStock: data.maxStock,
-                    leadTimeDays: data.leadTimeDays,
-                  }
-                : {}),
+              reorderQuantity: data.reorderQuantity,
+              autoReorderDisabled: verdict
+                ? verdict.auto_reorder_disabled === true
+                : p.autoReorderDisabled,
+              maxStock: data.maxStock,
+              leadTimeDays: data.leadTimeDays,
             }
           : p
       ));
     }
-
-    // The verdict (low / critical) is the server's: re-read it after a level change.
-    if (levelSaved) void loadProducts();
 
     if (failures.length > 0) {
       throw new Error(failures.join('; '));
@@ -250,11 +267,16 @@ export function ReorderDashboard() {
 
     const selectedItems = products.filter(p => selectedProducts.has(p.id));
 
-    // NEVER order a product the owner explicitly opted out of (-1 sentinel).
+    // NEVER order a product the server says is off. A discontinued one stays
+    // off whatever its settings, so it is never told to enable it there.
     const disabledItems = selectedItems.filter(isAutoReorderOff);
-    if (disabledItems.length > 0) {
+    const discontinuedCount = disabledItems.filter(p => p.discontinued).length;
+    if (discontinuedCount > 0) {
+      toast.error(`${discontinuedCount} product(s) skipped - discontinued, not reordered.`);
+    }
+    if (disabledItems.length > discontinuedCount) {
       toast.error(
-        `${disabledItems.length} product(s) skipped - auto-reorder is turned off for them. ` +
+        `${disabledItems.length - discontinuedCount} product(s) skipped - auto-reorder is turned off for them. ` +
         `Enable it via the settings icon to order.`
       );
     }
@@ -592,12 +614,11 @@ export function ReorderDashboard() {
                       </td>
                       <td className="px-4 py-3 text-center">
                         {isAutoReorderOff(product) ? (
-                          // Owner explicitly disabled auto-reorder (-1 sentinel).
                           <span className="px-2 py-1 bg-gray-100 text-gray-500 text-xs font-medium rounded-full whitespace-nowrap">
-                            Auto-reorder off
+                            {product.discontinued ? 'Discontinued - not reordered' : 'Auto-reorder off'}
                           </span>
-                        ) : product.reorderQuantity == null ? (
-                          // Never configured - show an honest dash, not a fake 20.
+                        ) : !hasOrderableQty(product) ? (
+                          // Nothing to order - show an honest dash, not a fake 20.
                           <span className="text-gray-400">&mdash;</span>
                         ) : (
                           <>
