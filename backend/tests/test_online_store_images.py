@@ -152,6 +152,24 @@ def test_update_patches_only_presentation_fields(repo):
     assert doc["assigned_to"] is None       # unchanged
 
 
+def test_update_never_touches_the_shopify_record(repo):
+    """The design photo press (shopify_push.media.push_image) is the ONLY
+    writer of a row's Shopify record: which media on the listing is this
+    photo, and whether IMS uploaded it. A catalogue edit through update()
+    must never overwrite it, or a later press could take down a photo IMS
+    never put up."""
+    iid = repo.create({"product_id": "P1", "url": "u"})["image_id"]
+    record = {
+        "shopify_image_id": "gid://shopify/MediaImage/60",
+        "shopify_image_src": "u",
+        "shopify_image_sent": "u",
+        "shopify_image_sent_id": "gid://shopify/MediaImage/61",
+    }
+    assert repo.update(iid, record) is False
+    doc = repo.get_by_id(iid)
+    assert all(doc.get(k) is None for k in record)
+
+
 def test_delete_removes_image(repo):
     iid = repo.create({"product_id": "P1", "url": "u"})["image_id"]
     assert repo.delete(iid) is True
