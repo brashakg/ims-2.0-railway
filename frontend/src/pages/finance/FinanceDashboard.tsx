@@ -9,6 +9,8 @@ import { Loader2, ArrowUpDown } from 'lucide-react';
 import clsx from 'clsx';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { PAYABLES_ROLES } from '../../components/common/CostCell';
+import { PurchaseShopGate } from '../purchase/purchaseShop';
 
 import type { TabType } from './financeTypes';
 import type {
@@ -182,6 +184,11 @@ export default function FinanceDashboard() {
   const canSeeStorePayroll = (user?.roles || []).some(
     (r) => r === 'ADMIN' || r === 'SUPERADMIN',
   );
+  // F60 (2026-09-28): per-vendor payables (GET /finance/vendor-payments) answer
+  // the accounts roles only (PAYABLES_ROLES), the same as the vendor ledger and
+  // /ap-aging. A manager gets no tab and no schedule rather than an empty list
+  // that reads as "we owe nobody".
+  const canSeePayables = (user?.roles || []).some((r) => PAYABLES_ROLES.includes(r));
 
   // Tab management
   const [activeTab, setActiveTab] = useState<TabType>('revenue-pl');
@@ -245,11 +252,12 @@ export default function FinanceDashboard() {
       const [rev, pnl, gst, out, cf, bud, vend] = await Promise.allSettled([
         financeApi.getRevenue({ period: 'month', store_id: storeId }),
         financeApi.getPnl({ store_id: storeId, from_date: dateFrom, to_date: dateTo }),
-        financeApi.getGstSummary(),
+        // Input tax from supplier bills: accounts only (R1), as the server.
+        canSeePayables ? financeApi.getGstSummary() : Promise.resolve(null),
         financeApi.getOutstanding({ store_id: storeId }),
         financeApi.getCashFlow({ period: 'month', store_id: storeId }),
         financeApi.getBudget(),
-        financeApi.getVendorPayments(),
+        canSeePayables ? financeApi.getVendorPayments(storeId) : Promise.resolve([]),
       ]);
 
       setRevenueData(rev.status === 'fulfilled' ? mapRevenue(rev.value) : []);
@@ -292,7 +300,9 @@ export default function FinanceDashboard() {
             ? financeApi.getPnlByStore({ from_date: dateFrom, to_date: dateTo })
             : Promise.resolve({ stores: [] }),
           financeApi.getPnlByCategory({ from_date: dateFrom, to_date: dateTo, store_id: storeId }),
-          financeApi.getGstReconciliation({ month: d.getMonth() + 1, year: d.getFullYear() }),
+          canSeePayables
+            ? financeApi.getGstReconciliation({ month: d.getMonth() + 1, year: d.getFullYear() })
+            : Promise.resolve({ entities: [] }),
         ]);
         setPnlByStore(ps2.status === 'fulfilled' ? (ps2.value?.stores || []) : []);
         setPnlByCategory(pc2.status === 'fulfilled' ? (pc2.value?.categories || []) : []);
@@ -437,6 +447,7 @@ export default function FinanceDashboard() {
           onDateToChange={setDateTo}
           activeTab={activeTab}
           onTabChange={setActiveTab}
+          canSeePayables={canSeePayables}
         />
 
         {/* Tab Content */}
@@ -581,10 +592,15 @@ export default function FinanceDashboard() {
             </>
           )}
           {activeTab === 'outstanding' && (
-            <OutstandingPanel outstanding={outstanding} vendorPayments={vendorPayments} />
+            <OutstandingPanel
+              outstanding={outstanding}
+              vendorPayments={canSeePayables ? vendorPayments : null}
+            />
           )}
           {activeTab === 'cash-flow' && (
-            <>
+            // R3: the server refuses a non-admin login with no shop; say so
+            // rather than show its refused read as a month of Rs 0.
+            <PurchaseShopGate>
               {/* "Total outflows" below is short by whatever was withheld from
                   this role. Say so above the number, not after it. */}
               <RestrictedTotalsNotice
@@ -593,7 +609,7 @@ export default function FinanceDashboard() {
                 className="mb-4"
               />
               <CashFlowPanel cashFlow={cashFlow} />
-            </>
+            </PurchaseShopGate>
           )}
           {activeTab === 'period' && (
             <PeriodManagement
@@ -615,7 +631,7 @@ export default function FinanceDashboard() {
               <BudgetPanel budgets={budgets} selectedYear={selectedYear} />
             </>
           )}
-          {activeTab === 'vendor-payments' && (
+          {activeTab === 'vendor-payments' && canSeePayables && (
             <VendorPayments vendorPayments={vendorPayments} />
           )}
           {activeTab === 'journal-entries' && <JournalEntriesPanel />}

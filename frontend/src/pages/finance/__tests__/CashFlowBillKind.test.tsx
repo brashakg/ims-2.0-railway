@@ -38,6 +38,15 @@ const apis = vi.hoisted(() => ({
 
 vi.mock('../../../services/api/vendorAp', () => apis);
 vi.mock('../../../context/ToastContext', () => ({ useToast: () => toastMock }));
+// The form names shops (the receipt list's and the money's: review r3 #14),
+// so it reads the login and the store list. A shop accountant here: the
+// receipts are his own shop's, so they carry no shop name.
+vi.mock('../../../context/AuthContext', () => ({
+  useAuth: () => ({ user: { id: 'u-acct', roles: ['ACCOUNTANT'], activeRole: 'ACCOUNTANT', activeStoreId: 'BV-DHN-01' } }),
+}));
+vi.mock('../../../hooks/usePOSQueries', () => ({
+  useStores: () => ({ data: [{ store_id: 'BV-DHN-01', store_name: 'Better Vision Dhanbad' }] }),
+}));
 
 import CashFlowPage from '../CashFlowPage';
 

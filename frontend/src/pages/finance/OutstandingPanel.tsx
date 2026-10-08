@@ -5,10 +5,13 @@
 import clsx from 'clsx';
 import type { OutstandingReceivable, VendorPaymentData } from './financeTypes';
 import { formatCurrency } from './financeUtils';
+import { SupplierFiguresShop, SupplierStatusBadge } from './VendorPayments';
+import { PurchaseShopGate } from '../purchase/purchaseShop';
 
 interface OutstandingPanelProps {
   outstanding: OutstandingReceivable[];
-  vendorPayments: VendorPaymentData[];
+  /** null = this reader may not see payables (ADMIN / ACCOUNTANT only). */
+  vendorPayments: VendorPaymentData[] | null;
 }
 
 export default function OutstandingPanel({ outstanding, vendorPayments }: OutstandingPanelProps) {
@@ -96,9 +99,12 @@ export default function OutstandingPanel({ outstanding, vendorPayments }: Outsta
       </div>
 
       {/* Vendor Payments */}
+      {vendorPayments && (
+      <PurchaseShopGate>
       <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
         <div className="bg-slate-50 px-6 py-4 border-b border-gray-200">
           <h3 className="text-gray-900 font-semibold">Vendor Payment Schedule</h3>
+          <SupplierFiguresShop />
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm text-slate-700">
@@ -119,18 +125,7 @@ export default function OutstandingPanel({ outstanding, vendorPayments }: Outsta
                   </td>
                   <td className="px-6 py-4 text-slate-600">{item.due_date}</td>
                   <td className="px-6 py-4 text-center">
-                    <span
-                      className={clsx(
-                        'px-3 py-1 rounded-full text-xs font-semibold inline-block',
-                        item.status === 'pending'
-                          ? 'bg-yellow-50/50 text-yellow-700 border border-yellow-700'
-                          : item.status === 'partial'
-                            ? 'bg-blue-50/50 text-blue-700 border border-blue-700'
-                            : 'bg-green-50/50 text-green-700 border border-green-700'
-                      )}
-                    >
-                      {item.status === 'pending' ? 'Pending' : 'Partial'}
-                    </span>
+                    <SupplierStatusBadge vendor={item} />
                   </td>
                 </tr>
               ))}
@@ -138,6 +133,8 @@ export default function OutstandingPanel({ outstanding, vendorPayments }: Outsta
           </table>
         </div>
       </div>
+      </PurchaseShopGate>
+      )}
     </div>
   );
 }

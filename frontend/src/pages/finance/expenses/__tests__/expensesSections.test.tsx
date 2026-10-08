@@ -50,6 +50,7 @@ vi.mock('../../../../services/api/expenses', async (importOriginal) => {
       getPettyCashSettlementPosition: vi.fn(),
       listPettyCashSettlements: vi.fn(),
       settlePettyCashDay: vi.fn(),
+      createExpense: vi.fn(),
     },
   };
 });
@@ -112,8 +113,8 @@ beforeEach(() => {
 
 // The REAL route table - the same URL-to-section mapping and gates the app
 // ships (financeRoutes.tsx), never a hand-copied one - under the REAL
-// ToastProvider, whose value changes identity on every toast (the layout's
-// load lists `toast`, so every toast re-runs it, as in the app).
+// ToastProvider (one stable value: a toast never re-runs the layout's load,
+// which lists `toast` in its deps).
 function renderRoute(path: string, roles: string[]) {
   currentRoles = roles;
   return render(
@@ -234,10 +235,12 @@ describe('each section keeps its old role gate, now on the route', () => {
   });
 });
 
-// A toast re-runs the layout's load. For a user with no expenses of their own
-// that reload used to swap the page for the spinner, which unmounted <Outlet/>
-// and wiped the open section: Day Settlement snapped back to today, an open
-// float modal vanished. The section must survive the reload.
+// A toast used to re-run the layout's load (the toast functions changed
+// identity on every toast), and for a user with no expenses of their own that
+// reload swapped the page for the spinner, which unmounted <Outlet/> and wiped
+// the open section: Day Settlement snapped back to today, an open float modal
+// vanished. A toast no longer reloads anything; a real reload (an expense
+// submitted) must still leave the open section as it was.
 describe('the open section survives a layout reload', () => {
   // A real network round-trip: the reload is in flight long enough to render.
   beforeEach(() => {
@@ -251,17 +254,22 @@ describe('the open section survives a layout reload', () => {
     fireEvent.click(await screen.findByRole('button', { name: /Count & settle/ }, FIND));
     fireEvent.change(screen.getByPlaceholderText('Count the box'), { target: { value: '3200' } });
     fireEvent.click(screen.getByRole('button', { name: 'Settle day' }));
-    await waitFor(() => expect(api.getExpenses).toHaveBeenCalledTimes(2)); // the toast's reload
-    await waitFor(() => expect(screen.getByLabelText(/Settlement day/)).toHaveValue('2025-01-15'));
+    await screen.findByText('Day settled — balanced', undefined, FIND); // the settle's toast
+    await new Promise((r) => { setTimeout(r, 300); });
+    expect(api.getExpenses).toHaveBeenCalledTimes(1); // the toast reloaded nothing
+    expect(screen.getByLabelText(/Settlement day/)).toHaveValue('2025-01-15');
     expect(api.getPettyCashSettlementPosition).toHaveBeenLastCalledWith('ZZ-STORE', '2025-01-15');
   });
 
-  it('an open Top-up modal keeps its amount when another toast fires', async () => {
+  it('an open Top-up modal keeps its amount through a layout reload', async () => {
+    api.createExpense.mockResolvedValue({ expense_id: 'EXP-NEW-1' });
     renderRoute('/finance/expenses/float', ['STORE_MANAGER']);
     fireEvent.click(await screen.findByRole('button', { name: /Top up/ }, FIND));
     fireEvent.change(screen.getByPlaceholderText('e.g. 5000'), { target: { value: '900' } });
-    // A toast from elsewhere on the page: submit the empty Add-expense form.
+    // A reload from elsewhere on the page: an expense submitted re-runs load.
     fireEvent.click(screen.getByRole('button', { name: /Add expense/ }));
+    fireEvent.change(screen.getByPlaceholderText('0'), { target: { value: '120' } });
+    fireEvent.change(screen.getByPlaceholderText('What was this for?'), { target: { value: 'ZZ tea' } });
     fireEvent.click(screen.getByRole('button', { name: 'Submit' }));
     await waitFor(() => expect(api.getExpenses).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(screen.getByPlaceholderText('e.g. 5000')).toHaveValue(900));

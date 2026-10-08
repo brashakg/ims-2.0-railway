@@ -45,6 +45,9 @@ export interface VendorReceiptRow {
   vendor_invoice_no?: string;
   created_at?: string;
   total_accepted?: number;
+  // The shop that received the goods. An admin's list covers every shop
+  // (no store_id sent), so the Bill form names it on each receipt.
+  store_id?: string | null;
 }
 
 export interface VendorPayment {
@@ -58,6 +61,12 @@ export interface VendorPayment {
   tds_amount?: number;
   reference?: string;
   notes?: string;
+  // The shop the money is booked to (F63). Sent only when an admin picks one;
+  // left out, the server books it to the bill's shop, else (an admin's money)
+  // the supplier's shop by its bills, else the caller's own shop. The POST
+  // answer carries the shop it was stamped with (null = no shop on record),
+  // which the Cash Flow drawer names in its toast.
+  store_id?: string | null;
 }
 
 export interface DebitNote {
@@ -68,6 +77,9 @@ export interface DebitNote {
   amount: number;
   date: string;
   reason: string;
+  grn_id?: string;
+  // As VendorPayment.store_id; a note naming a goods receipt is that receipt's shop's.
+  store_id?: string | null;
 }
 
 // ---- Purchase Invoice (first-class AP + ITC document) -------------------
@@ -322,10 +334,19 @@ export interface VendorLedger {
   aging: AgingResult;
 }
 
+// THE ONE 'WE OWE' RULE (audit F56): per supplier, its ledger balance. `owed`
+// = the sum of each supplier's balance above 0 (= the buckets added up = what
+// we owe); `advances` = the sum of each supplier's balance below 0 (money paid
+// ahead to suppliers), a figure APART -- never taken off `owed`: one
+// supplier's advance does not pay another's bills. The older keys stay:
+// `net_payable` is owed, `unallocated_credits` is advances. `owed` /
+// `advances` are optional only for an older server.
 export interface AgingResult {
   as_of: string;
   buckets: Record<string, number>;
   total_outstanding: number;
+  owed?: number;
+  advances?: number;
   unallocated_credits: number;
   net_payable: number;
   items?: Array<Record<string, unknown>>;
@@ -333,20 +354,37 @@ export interface AgingResult {
 
 export interface ApAgingByVendor {
   as_of: string;
-  totals: { buckets: Record<string, number>; total_outstanding: number; unallocated_credits: number; net_payable: number };
+  totals: {
+    buckets: Record<string, number>;
+    total_outstanding: number;
+    owed?: number;
+    advances?: number;
+    unallocated_credits: number;
+    net_payable: number;
+  };
   vendors: Array<{
     vendor_id: string;
     vendor_name?: string;
     buckets: Record<string, number>;
     total_outstanding: number;
+    owed?: number;
+    advances?: number;
+    // This supplier's own ledger balance, signed (below 0 = paid ahead).
+    balance?: number;
+    unallocated_credits?: number;
     net_payable: number;
   }>;
 }
 
 export interface OwnerDashboard {
   as_of: string;
+  // The shop every figure covers: null = every shop (ADMIN / SUPERADMIN),
+  // else the caller's own shop. AP aging and the forecast use the same scope.
+  store_id?: string | null;
   receivables: { total: number; buckets: Record<string, number>; overdue: number };
-  payables: { total: number; buckets: Record<string, number>; overdue: number; due_7d: number; due_30d: number; unallocated_credits: number };
+  // total = what we owe (THE ONE 'WE OWE' RULE above); advances = money paid
+  // ahead to suppliers, apart (unallocated_credits is its older name).
+  payables: { total: number; buckets: Record<string, number>; overdue: number; due_7d: number; due_30d: number; advances?: number; unallocated_credits: number };
   net_position: number;
   this_month: { revenue: number; expenses: number; vendor_payments: number; net_cash_flow: number };
   alerts: Array<{ level: string; message: string }>;

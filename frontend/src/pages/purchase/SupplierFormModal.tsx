@@ -172,9 +172,7 @@ export function SupplierFormModal({
         gstNumber: gstin ?? '',
         paymentTerms,
         creditLimit,
-        currentOutstanding: supplier?.currentOutstanding ?? 0,
         rating: supplier?.rating ?? 0,
-        totalPurchases: supplier?.totalPurchases ?? 0,
         lastPurchaseDate: supplier?.lastPurchaseDate ?? '',
         performance: supplier?.performance ?? {
           onTimeDelivery: 0,

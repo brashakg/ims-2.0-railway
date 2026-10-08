@@ -23,10 +23,10 @@ from ._shared import (
     io,
     logger,
     require_roles,
+    resolve_store_scope,
     router,
     timedelta,
     uuid,
-    validate_store_access,
 )
 from .models import GRN_SUBTYPE_DC, _GRN_SUBTYPES
 from .numbering import GRN_PLACEHOLDER_PREFIX, generate_grn_number, grn_number_pending
@@ -166,9 +166,9 @@ async def list_grns(
 ):
     """List GRNs with filters (incl. F9 Delivery-Challan filters)."""
     grn_repo = get_grn_repository()
-    active_store = validate_store_access(store_id, current_user) or current_user.get(
-        "active_store_id"
-    )
+    # One shop scope for every Purchase tab (F63): no shop chosen = all shops
+    # for an admin, the caller's own shop for everyone else.
+    active_store = resolve_store_scope(store_id, current_user)
 
     if grn_repo is None:
         return {"grns": [], "total": 0}
@@ -199,19 +199,27 @@ async def list_grns(
             rng["$lte"] = date_to
         filter_dict["dc_date"] = rng
 
+    # Newest first, and `total` is every matching receipt -- not the length of
+    # this page. Unsorted, the page was the first 50 ever received, so on all
+    # stores the tab held the chain's oldest receipts and its tile called 50
+    # the total (review round 2, #18). The screen says "latest N of M".
     # A row still on its placeholder has no receipt number to show, void or
     # accept by (a stranded one was numbered just above; a fresh one is still
     # being numbered by its own request): it is left out until it has one,
     # so the panel never names a PENDING/<id> placeholder (audit F28).
-    grns = [
-        g
-        for g in grn_repo.find_many(filter_dict, skip=skip, limit=limit) or []
-        if not grn_number_pending(g)
-    ]
+    # ponytail: a pending row on ANOTHER page still counts in `total` for the
+    # minute it takes to get its number.
+    page = grn_repo.find_many(filter_dict, sort=_GRN_NEWEST_FIRST, skip=skip, limit=limit) or []
+    grns = [g for g in page if not grn_number_pending(g)]
+    total = max(grn_repo.count(filter_dict) - (len(page) - len(grns)), skip + len(grns))
 
     _enrich_grn_names(grns)
 
-    return {"grns": grns, "total": len(grns)}
+    return {"grns": grns, "total": total}
+
+
+# Received-at descending; the id breaks a tie so pages never overlap.
+_GRN_NEWEST_FIRST = [("created_at", -1), ("_id", -1)]
 
 
 def _enrich_grn_names(grns: list) -> None:

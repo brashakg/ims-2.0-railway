@@ -47,6 +47,7 @@ import {
   CATEGORIES,
   getOnlineFor,
   onlineStatusIds,
+  unitsHeld,
   useFixturesMap,
   useInventoryStores,
   useLowStock,
@@ -55,6 +56,9 @@ import {
   useQuarantineUnlabeled,
   useStock,
 } from './inventoryQueries';
+// The Purchases report's whole-rupee rule (read-only import): the same
+// rendering the Suppliers card reads, so a small figure is never "Rs 0.0L".
+import { rupees } from '../purchase/PurchasesThisMonthSection';
 
 export interface InventoryContext {
   /** The store being viewed (layout store picker; follows the topbar store). */
@@ -121,8 +125,26 @@ export function InventoryLayout() {
   const onlineSummary = isOnlineStoreView ? onlineSummaryQ.data ?? null : null;
 
   const totalSKUs = inventory.length;
-  const totalValue = inventory.reduce(
-    (sum, item) => sum + ((item.offerPrice || item.mrp || 0) * (item.stock || 0)), 0);
+  // Audit F47: the headline is what the stock COST (the server's cost_value,
+  // sent to cost readers only); what it would SELL for is its own cell. Both
+  // count the same units -- every one we hold, on the shelf or reserved for an
+  // order (stock_value's rule, unitsHeld) -- so the pair can be compared, and
+  // both captions say so. A unit nobody priced adds nothing to the cost, so
+  // the tile says how many there are rather than look complete (review #34).
+  //
+  // Review r2 #22: neither tile has a figure until the list has LOADED -- while
+  // it loads, after it fails, or with no shop picked the rows are [] and the
+  // sums a confident Rs 0, so the tiles read a dash. Under a lakh a figure is
+  // whole rupees (Rs 4,000, never "Rs 0.0L"); from a lakh up, lakhs.
+  const stockLoaded = stockQ.isSuccess;
+  const costKnown =
+    stockLoaded && (inventory.length === 0 || inventory.some((i) => i.cost_value != null));
+  const costValue = inventory.reduce((sum, item) => sum + (item.cost_value || 0), 0);
+  const uncostedUnits = inventory.reduce((n, item) => n + (item.uncosted_units || 0), 0);
+  const sellingValue = inventory.reduce(
+    (sum, item) => sum + ((item.offerPrice || item.mrp || 0) * unitsHeld(item)), 0);
+  const tileMoney = (n: number) =>
+    Math.round(n) < 100000 ? rupees(n) : `₹ ${(n / 100000).toFixed(1)}L`;
   const onlineCount = inventory.reduce(
     (n, i) => (isOnlineRow(getOnlineFor(i, onlineStatusQ.data)) ? n + 1 : n), 0);
   // null = IMS could not read which listings are live: never "none synced".
@@ -358,8 +380,15 @@ export function InventoryLayout() {
           </div>
           <div>
             <div className="l">Stock value</div>
-            <div className="v">₹ {(totalValue / 100000).toFixed(1)}L</div>
-            <div className="d">total landed inventory</div>
+            <div className="v">{costKnown ? tileMoney(costValue) : '—'}</div>
+            {/* The price on the order when the goods were received, before GST
+                (grn_accept stamps it on each unit) -- not the bill's price. */}
+            <div className="d">at cost: price at receipt, ex GST · shelf + reserved</div>
+            {costKnown && uncostedUnits > 0 && (
+              <div className="d warn">
+                {uncostedUnits.toLocaleString('en-IN')} {uncostedUnits === 1 ? 'unit has' : 'units have'} no cost
+              </div>
+            )}
           </div>
           <div>
             <div className="l">Low stock</div>
@@ -374,9 +403,9 @@ export function InventoryLayout() {
             <div className="d">{onlineUnknown ? 'could not read the website' : onlineCount > 0 ? 'listed in Shopify' : 'none synced online'}</div>
           </div>
           <div>
-            <div className="l">Categories</div>
-            <div className="v">{CATEGORIES.length}</div>
-            <div className="d">incl. lenses, frames, CL</div>
+            <div className="l">Selling value</div>
+            <div className="v">{stockLoaded ? tileMoney(sellingValue) : '—'}</div>
+            <div className="d">at offer price (MRP if none) · shelf + reserved</div>
           </div>
           <div>
             <div className="l">View</div>

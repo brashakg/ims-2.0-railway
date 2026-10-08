@@ -5,7 +5,7 @@
 
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { CostCell } from '../common/CostCell';
+import { CostCell, PRODUCT_COST_ROLES } from '../common/CostCell';
 import {
   TrendingDown,
   AlertTriangle,
@@ -62,7 +62,31 @@ interface Product {
   supplierId?: string;
   supplierName?: string;
   unitCost?: number;
+  // F47: what this shop's units on hand were received at (the ledger row's
+  // unit_cost, per costed unit; cost readers only). The reorder cost falls back
+  // to it when the product carries no cost price -- see unitCostOf.
+  receiptCost?: number;
 }
+
+/** What one unit of a reorder line costs us -- the cost cell, the PO estimate
+ *  and the rate on a generated PO: the product's cost price, else what the
+ *  units on this shop's shelf were received at. null = no cost known. Never
+ *  the MRP or the offer price (review r2 #24): a selling price is not a cost,
+ *  and a PO's rate becomes the product's cost (vendors/gst
+ *  _promote_cost_from_rate). A cost of 0 is no cost, like the server's. */
+const unitCostOf = (p: Product): number | null => {
+  for (const v of [p.unitCost, p.receiptCost]) {
+    const n = Number(v);
+    if (v != null && Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
+};
+
+/** A line's cost at its order quantity; null when either is unknown. */
+const lineCost = (p: Product): number | null => {
+  const unit = unitCostOf(p);
+  return unit == null || p.reorderQuantity == null ? null : unit * p.reorderQuantity;
+};
 
 // Auto-reorder is OFF when the server's low-stock feed says so.
 const isAutoReorderOff = (p: Product) => p.autoReorderDisabled;
@@ -90,6 +114,8 @@ export function ReorderDashboard() {
   // Who may set a shop's level (the server's gate, one shared list): a
   // catalogue manager edits the product-wide fields only.
   const canSetShopLevel = hasRole(REORDER_LEVEL_ROLES);
+  // Who reads a cost on this screen (the server sends it to them alone).
+  const canSeeCost = hasRole(PRODUCT_COST_ROLES);
   const toast = useToast();
   const navigate = useNavigate();
 
@@ -166,6 +192,7 @@ export function ReorderDashboard() {
           name: raw.product_name ?? raw.name ?? raw.title ?? 'Unknown Product',
           brand: raw.brand ?? raw.brand_name ?? '',
           category: raw.category ?? '',
+          receiptCost: raw.unit_cost ?? undefined,
           currentStock,
           reservedStock,
           reorderPoint: typedLevel(item.reorder_point),
@@ -179,7 +206,10 @@ export function ReorderDashboard() {
           lastOrderDate: raw.last_order_date ?? raw.last_purchase_date ?? undefined,
           supplierId: raw.supplier_id ?? raw.vendor_id ?? undefined,
           supplierName: raw.supplier_name ?? raw.vendor_name ?? undefined,
-          unitCost: raw.unit_cost ?? raw.cost_price ?? raw.mrp ?? undefined,
+          // The ledger row's cost_price, present only for the product-cost roles
+          // (backend cost_mask). Never the MRP: that priced the estimate AND the
+          // generated PO lines at retail, and a PO rate becomes the product's cost.
+          unitCost: raw.cost_price ?? undefined,
         };
       });
 
@@ -333,21 +363,24 @@ export function ReorderDashboard() {
             sku: p.sku,
             // Safe: only hasOrderableQty rows reach here (real qty >= 1).
             quantity: p.reorderQuantity as number,
-            unit_price: p.unitCost ?? 0,
+            // A line with no known cost goes at 0 (a 0 rate never becomes the
+            // product's cost) -- never at the MRP (review r2 #24). Nothing
+            // can re-price a PO line today, so the toast says what happened
+            // and names no action.
+            unit_price: unitCostOf(p) ?? 0,
           })),
           notes: `Auto-generated from Reorder Dashboard`,
         });
         createdCount++;
       }
 
-      const totalCost = withSupplier.reduce(
-        (sum, p) => sum + ((p.unitCost ?? 0) * (p.reorderQuantity ?? 0)),
-        0
-      );
+      const unpriced = withSupplier.filter((p) => unitCostOf(p) == null).length;
+      const totalCost = withSupplier.reduce((sum, p) => sum + (lineCost(p) ?? 0), 0);
 
       toast.success(
         `${createdCount} Purchase Order(s) created for ${withSupplier.length} product(s)` +
-        (totalCost > 0 ? ` (Est. \u20B9${totalCost.toLocaleString('en-IN')})` : '')
+        (totalCost > 0 ? ` (Est. \u20B9${totalCost.toLocaleString('en-IN')} at cost)` : '') +
+        (unpriced > 0 ? ` - ${unpriced} line(s) have no cost and went on the PO at ₹0` : '')
       );
 
       setSelectedProducts(new Set());
@@ -396,11 +429,16 @@ export function ReorderDashboard() {
   const filteredProducts = getFilteredProducts();
   const criticalCount = products.filter(p => ['critical', 'out-of-stock'].includes(getStockStatus(p))).length;
   const lowCount = products.filter(p => getStockStatus(p) === 'low').length;
-  // Only rows auto-reorder can actually order contribute to the estimate.
-  const totalValue = filteredProducts.reduce(
-    (sum, p) => sum + (hasOrderableQty(p) ? (p.unitCost || 0) * (p.reorderQuantity ?? 0) : 0),
-    0
-  );
+  // Only rows auto-reorder can actually order contribute to the estimate, and
+  // only at a known cost: a line with no cost is left out and counted, never
+  // priced at its MRP (review r2 #24). null = there are lines to order but
+  // none has a cost -- a dash, not a confident Rs 0.
+  const orderableLines = filteredProducts.filter(hasOrderableQty);
+  const uncostedLines = orderableLines.filter((p) => lineCost(p) == null).length;
+  const totalValue: number | null =
+    orderableLines.length > 0 && uncostedLines === orderableLines.length
+      ? null
+      : orderableLines.reduce((sum, p) => sum + (lineCost(p) ?? 0), 0);
 
   return (
     <div className="space-y-4">
@@ -469,8 +507,15 @@ export function ReorderDashboard() {
             <div>
               <p className="text-sm text-gray-500">Est. PO Value</p>
               <p className="text-2xl font-bold text-green-600">
-                &#8377;{(totalValue / 100000).toFixed(1)}L
+                <CostCell value={totalValue} />
               </p>
+              {canSeeCost && (
+                <p className="text-xs text-gray-500">
+                  at cost
+                  {uncostedLines > 0 &&
+                    ` · ${uncostedLines} ${uncostedLines === 1 ? 'line has' : 'lines have'} no cost, not counted`}
+                </p>
+              )}
             </div>
           </div>
         </div>
@@ -623,12 +668,14 @@ export function ReorderDashboard() {
                         ) : (
                           <>
                             <span className="font-medium text-purple-600">{product.reorderQuantity}</span>
-                            {product.unitCost && (
-                              <p className="text-xs text-gray-500">
-                                {/* F35: cost masked to "-" for non-cost-visible roles */}
-                                <CostCell value={product.unitCost * product.reorderQuantity} />
-                              </p>
-                            )}
+                            <p className="text-xs text-gray-500">
+                              {/* F35: cost masked to "-" outside the product-cost
+                                  roles. A cost reader is told a line has no cost
+                                  -- never its MRP shown as one (review r2 #24). */}
+                              {lineCost(product) == null && canSeeCost
+                                ? 'no cost'
+                                : <CostCell value={lineCost(product)} />}
+                            </p>
                           </>
                         )}
                       </td>

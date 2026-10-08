@@ -17,6 +17,8 @@ import {
   type VendorReceiptRow,
 } from '../../services/api/vendorAp';
 import { useToast } from '../../context/ToastContext';
+import { useStores } from '../../hooks/usePOSQueries';
+import { PurchaseShopGate, PurchaseShopName, usePurchaseShop } from '../purchase/purchaseShop';
 import { istDayString } from '../../utils/datetime';
 
 const inr = (n?: number) => `₹${Math.round(n || 0).toLocaleString('en-IN')}`;
@@ -37,7 +39,18 @@ function errMsg(e: unknown, fb: string) {
 
 type Tab = 'overview' | 'forecast' | 'aging';
 
+/** R3: every figure here is one shop's or (admins) every shop's, and the
+ *  server refuses a non-admin login with no shop -- it reads the plain
+ *  message, and none of the three reads is sent. */
 export default function CashFlowPage() {
+  return (
+    <PurchaseShopGate>
+      <CashFlowScreen />
+    </PurchaseShopGate>
+  );
+}
+
+function CashFlowScreen() {
   const toast = useToast();
   const [tab, setTab] = useState<Tab>('overview');
   const [dash, setDash] = useState<OwnerDashboard | null>(null);
@@ -66,9 +79,12 @@ export default function CashFlowPage() {
   return (
     <div className="p-6 max-w-6xl mx-auto">
       <div className="flex items-center justify-between mb-4">
-        <h1 className="text-xl font-semibold text-gray-900 flex items-center gap-2">
-          <Banknote className="w-5 h-5" /> Cash Flow &amp; Payables
-        </h1>
+        <div>
+          <h1 className="text-xl font-semibold text-gray-900 flex items-center gap-2">
+            <Banknote className="w-5 h-5" /> Cash Flow &amp; Payables
+          </h1>
+          {dash && <PayablesShop storeId={dash.store_id} />}
+        </div>
         <button type="button" onClick={load} className="inline-flex items-center gap-1.5 text-sm text-gray-600 hover:bg-gray-100 rounded-lg px-3 py-1.5">
           <RefreshCw className="w-4 h-4" /> Refresh
         </button>
@@ -91,7 +107,12 @@ export default function CashFlowPage() {
           {tab === 'forecast' && forecast && (
             <Forecast forecast={forecast} openingCash={openingCash} setOpeningCash={setOpeningCash} onApply={load} />
           )}
-          {tab === 'aging' && aging && <Aging aging={aging} onVendor={(id, name) => setActiveVendor({ id, name })} />}
+          {tab === 'aging' && aging && (
+            <div className="space-y-2">
+              <PayablesShop storeId={dash?.store_id} testId="aging-shop" />
+              <Aging aging={aging} onVendor={(id, name) => setActiveVendor({ id, name })} />
+            </div>
+          )}
         </>
       )}
 
@@ -102,10 +123,29 @@ export default function CashFlowPage() {
   );
 }
 
-function Card({ label, value, sub, tone }: { label: string; value: string; sub?: string; tone?: 'good' | 'bad' | 'warn' }) {
+/** Which shop every figure on this page covers (audit F63): the server scopes
+ *  the owner dashboard, the forecast and AP aging alike -- every shop for an
+ *  admin, the caller's own shop for anyone else -- and says which in the
+ *  dashboard's store_id. Nothing when an older server leaves it out. */
+function PayablesShop({ storeId, testId = 'payables-shop' }: { storeId: string | null | undefined; testId?: string }) {
+  if (storeId === undefined) return null;
+  return (
+    <p className="text-xs text-gray-600 mt-0.5" data-testid={testId}>
+      {storeId ? (
+        <>
+          Shop: <span className="font-medium text-gray-900"><PurchaseShopName storeId={storeId} /></span>
+        </>
+      ) : (
+        'All shops'
+      )}
+    </p>
+  );
+}
+
+function Card({ label, value, sub, tone, testId }: { label: string; value: string; sub?: string; tone?: 'good' | 'bad' | 'warn'; testId?: string }) {
   const color = tone === 'good' ? 'text-green-700' : tone === 'bad' ? 'text-red-700' : tone === 'warn' ? 'text-amber-700' : 'text-gray-900';
   return (
-    <div className="bg-white border border-gray-200 rounded-lg p-4">
+    <div className="bg-white border border-gray-200 rounded-lg p-4" data-testid={testId}>
       <p className="text-xs text-gray-500 mb-1">{label}</p>
       <p className={`text-xl font-semibold ${color}`}>{value}</p>
       {sub && <p className="text-xs text-gray-400 mt-1">{sub}</p>}
@@ -113,12 +153,30 @@ function Card({ label, value, sub, tone }: { label: string; value: string; sub?:
   );
 }
 
+// THE ONE 'WE OWE' RULE (audit F56): what we owe is the sum of each
+// supplier's balance above 0 -- the aging bars added up. Money paid ahead to
+// suppliers (each supplier's balance below 0) is its own figure, never taken
+// off what we owe: one supplier's advance does not pay another's bills.
+// The older key names stand in for an older server.
+const paidAhead = (p: { advances?: number; unallocated_credits?: number }) =>
+  p.advances ?? p.unallocated_credits ?? 0;
+const paidAheadWords = (n: number) => `${inr(n)} paid ahead to suppliers`;
+
 function Overview({ dash }: { dash: OwnerDashboard }) {
+  const ahead = paidAhead(dash.payables);
   return (
     <div className="space-y-5">
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <Card label="Receivables (AR)" value={inr(dash.receivables.total)} sub={`${inr(dash.receivables.overdue)} overdue 30+d`} tone="good" />
-        <Card label="Payables (AP)" value={inr(dash.payables.total)} sub={`${inr(dash.payables.overdue)} overdue`} tone="bad" />
+        {/* F56: the headline, the bars and 'overdue' are what we owe on
+            bills; an advance is named apart, never subtracted. */}
+        <Card
+          label="Payables (AP)"
+          value={inr(dash.payables.total)}
+          sub={`${inr(dash.payables.overdue)} overdue${ahead > 0 ? ` · ${paidAheadWords(ahead)}, not taken off` : ''}`}
+          tone="bad"
+          testId="payables-card"
+        />
         <Card label="Net position" value={inr(dash.net_position)} sub="AR minus AP" tone={dash.net_position >= 0 ? 'good' : 'bad'} />
         <Card label="Due in 7 days (AP)" value={inr(dash.payables.due_7d)} sub={`${inr(dash.payables.due_30d)} in 30d`} tone="warn" />
       </div>
@@ -142,16 +200,23 @@ function Overview({ dash }: { dash: OwnerDashboard }) {
 
       <div className="grid grid-cols-2 gap-4">
         <BucketBars title="Receivables aging" buckets={dash.receivables.buckets} order={['0_30', '31_60', '61_90', '90_plus']} labels={{ '0_30': '0-30d', '31_60': '31-60d', '61_90': '61-90d', '90_plus': '90+ d' }} />
-        <BucketBars title="Payables aging" buckets={dash.payables.buckets} order={AP_BUCKETS} labels={AP_LABELS} />
+        <BucketBars
+          title="Payables aging"
+          buckets={dash.payables.buckets}
+          order={AP_BUCKETS}
+          labels={AP_LABELS}
+          note={ahead > 0 ? `We owe ${inr(dash.payables.total)}. Separately, ${paidAheadWords(ahead)}: each advance settles only that supplier's own bills, so it is not taken off what we owe.` : undefined}
+          testId="payables-aging"
+        />
       </div>
     </div>
   );
 }
 
-function BucketBars({ title, buckets, order, labels }: { title: string; buckets: Record<string, number>; order: string[]; labels: Record<string, string> }) {
+function BucketBars({ title, buckets, order, labels, note, testId }: { title: string; buckets: Record<string, number>; order: string[]; labels: Record<string, string>; note?: string; testId?: string }) {
   const max = Math.max(1, ...order.map((k) => buckets[k] || 0));
   return (
-    <div className="bg-white border border-gray-200 rounded-lg p-4">
+    <div className="bg-white border border-gray-200 rounded-lg p-4" data-testid={testId}>
       <p className="text-sm font-medium text-gray-700 mb-3">{title}</p>
       <div className="space-y-2">
         {order.map((k) => (
@@ -164,6 +229,7 @@ function BucketBars({ title, buckets, order, labels }: { title: string; buckets:
           </div>
         ))}
       </div>
+      {note && <p className="text-xs text-gray-500 mt-3">{note}</p>}
     </div>
   );
 }
@@ -226,6 +292,7 @@ function Forecast({ forecast, openingCash, setOpeningCash, onApply }: { forecast
 }
 
 function Aging({ aging, onVendor }: { aging: ApAgingByVendor; onVendor: (id: string, name: string) => void }) {
+  const ahead = paidAhead(aging.totals);
   return (
     <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
       <table className="w-full text-sm">
@@ -239,21 +306,36 @@ function Aging({ aging, onVendor }: { aging: ApAgingByVendor; onVendor: (id: str
         <tbody className="divide-y divide-gray-100">
           {aging.vendors.length === 0 ? (
             <tr><td colSpan={7} className="px-3 py-6 text-center text-gray-400">No outstanding payables.</td></tr>
-          ) : aging.vendors.map((v) => (
-            <tr key={v.vendor_id} className="hover:bg-gray-50 cursor-pointer" onClick={() => onVendor(v.vendor_id, v.vendor_name || v.vendor_id)}>
-              <td className="px-3 py-2 font-medium text-bv">{v.vendor_name || v.vendor_id}</td>
-              {AP_BUCKETS.map((b) => <td key={b} className="px-3 py-2 text-right text-gray-600">{inr(v.buckets[b])}</td>)}
-              <td className="px-3 py-2 text-right font-semibold text-gray-900">{inr(v.net_payable)}</td>
-            </tr>
-          ))}
+          ) : aging.vendors.map((v) => {
+            // A supplier we paid ahead shows its own advance; it owes nothing.
+            const owed = v.owed ?? v.net_payable;
+            const advance = paidAhead(v);
+            return (
+              <tr key={v.vendor_id} className="hover:bg-gray-50 cursor-pointer" onClick={() => onVendor(v.vendor_id, v.vendor_name || v.vendor_id)}>
+                <td className="px-3 py-2 font-medium text-bv">{v.vendor_name || v.vendor_id}</td>
+                {AP_BUCKETS.map((b) => <td key={b} className="px-3 py-2 text-right text-gray-600">{inr(v.buckets[b])}</td>)}
+                <td className="px-3 py-2 text-right font-semibold text-gray-900" data-testid="aging-vendor-owed">
+                  {owed <= 0 && advance > 0 ? <span className="font-medium text-blue-700">{inr(advance)} advance</span> : inr(owed)}
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
         {aging.vendors.length > 0 && (
           <tfoot className="bg-gray-50 font-medium">
-            <tr>
-              <td className="px-3 py-2">Total</td>
+            <tr data-testid="aging-total">
+              <td className="px-3 py-2">Total we owe</td>
               {AP_BUCKETS.map((b) => <td key={b} className="px-3 py-2 text-right">{inr(aging.totals.buckets[b])}</td>)}
-              <td className="px-3 py-2 text-right">{inr(aging.totals.net_payable)}</td>
+              <td className="px-3 py-2 text-right">{inr(aging.totals.owed ?? aging.totals.net_payable)}</td>
             </tr>
+            {ahead > 0 && (
+              <tr className="text-gray-600 font-normal" data-testid="aging-paid-ahead">
+                <td className="px-3 py-2" colSpan={AP_BUCKETS.length + 1}>
+                  Paid ahead to suppliers (each advance settles only that supplier&rsquo;s own bills; not taken off the total)
+                </td>
+                <td className="px-3 py-2 text-right">{inr(ahead)}</td>
+              </tr>
+            )}
           </tfoot>
         )}
       </table>
@@ -264,6 +346,11 @@ function Aging({ aging, onVendor }: { aging: ApAgingByVendor; onVendor: (id: str
 // ---------------------------------------------------------------------------
 // Vendor ledger drawer + record bill / payment / debit-note
 // ---------------------------------------------------------------------------
+// The ledger's balance counts rows dated up to today. Rows dated later (a
+// post-dated cheque, a bill keyed ahead) come back apart in `post_dated` --
+// recorded, shown, not yet counted -- with no running balance.
+type PostDatedEntry = Omit<VendorLedger['ledger']['entries'][number], 'balance'>;
+
 function VendorLedgerDrawer({ vendorId, vendorName, onClose, onChanged }: { vendorId: string; vendorName: string; onClose: () => void; onChanged: () => void }) {
   const toast = useToast();
   const [ledger, setLedger] = useState<VendorLedger | null>(null);
@@ -279,6 +366,7 @@ function VendorLedgerDrawer({ vendorId, vendorName, onClose, onChanged }: { vend
   useEffect(() => { load(); }, [load]);
 
   const refresh = () => { load(); onChanged(); };
+  const postDated = (ledger?.ledger as { post_dated?: PostDatedEntry[] } | undefined)?.post_dated ?? [];
 
   return (
     <div className="fixed inset-0 bg-black/30 flex justify-end z-50" onClick={onClose}>
@@ -293,7 +381,13 @@ function VendorLedgerDrawer({ vendorId, vendorName, onClose, onChanged }: { vend
           ) : ledger ? (
             <>
               <div className="grid grid-cols-1 tablet:grid-cols-3 gap-2 mb-4">
-                <Card label="Payable balance" value={inr(ledger.ledger.closing_balance)} tone="bad" />
+                {/* This supplier's own signed balance: below 0 we paid it ahead
+                    (read as its advance, as its AP Aging row does). */}
+                {ledger.ledger.closing_balance < 0 ? (
+                  <Card label="Payable balance" value={`${inr(-ledger.ledger.closing_balance)} advance`} sub="Paid ahead of this supplier's bills" testId="ledger-balance" />
+                ) : (
+                  <Card label="Payable balance" value={inr(ledger.ledger.closing_balance)} tone="bad" testId="ledger-balance" />
+                )}
                 <Card label="Billed" value={inr(ledger.ledger.total_billed)} />
                 <Card label="Paid" value={inr(ledger.ledger.total_paid)} sub={`TDS ${inr(ledger.ledger.total_tds)}`} />
               </div>
@@ -304,8 +398,11 @@ function VendorLedgerDrawer({ vendorId, vendorName, onClose, onChanged }: { vend
                 <button type="button" onClick={() => setRecording('debit')} className="inline-flex items-center gap-1 text-xs font-medium text-amber-700 bg-amber-50 hover:bg-amber-100 rounded-lg px-2.5 py-1.5"><Plus className="w-3 h-3" /> Debit note</button>
               </div>
 
+              {/* key: each kind mounts its own fresh form. Kept mounted across
+                  Payment -> Debit note, the amount and shop typed for one were
+                  saved for the other while the new form's boxes showed empty. */}
               {recording && (
-                <RecordForm kind={recording} vendorId={vendorId} onClose={() => setRecording(null)} onSaved={() => { setRecording(null); refresh(); }} />
+                <RecordForm key={recording} kind={recording} vendorId={vendorId} onClose={() => setRecording(null)} onSaved={() => { setRecording(null); refresh(); }} />
               )}
 
               <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Ledger</p>
@@ -327,6 +424,28 @@ function VendorLedgerDrawer({ vendorId, vendorName, onClose, onChanged }: { vend
                   ))}
                 </tbody>
               </table>
+
+              {postDated.length > 0 && (
+                <div className="mt-5" data-testid="ledger-post-dated">
+                  <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Post-dated: not in the balance yet</p>
+                  <p className="text-xs text-gray-500 mb-2">Recorded with a later date, such as a post-dated cheque. Each one counts on its own date.</p>
+                  <table className="w-full text-xs">
+                    <thead className="text-gray-400">
+                      <tr><th className="text-left py-1">Date</th><th className="text-left py-1">Type</th><th className="text-right py-1">Debit</th><th className="text-right py-1">Credit</th></tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                      {postDated.map((e, i) => (
+                        <tr key={i}>
+                          <td className="py-1 text-gray-600">{(e.date || '').slice(0, 10)}</td>
+                          <td className="py-1 text-gray-700">{e.type}<span className="text-gray-400"> {e.ref || ''}</span></td>
+                          <td className="py-1 text-right text-red-700">{e.debit ? inr(e.debit) : ''}</td>
+                          <td className="py-1 text-right text-green-700">{e.credit ? inr(e.credit) : ''}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </>
           ) : null}
         </div>
@@ -337,6 +456,7 @@ function VendorLedgerDrawer({ vendorId, vendorName, onClose, onChanged }: { vend
 
 function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: 'bill' | 'payment' | 'debit'; vendorId: string; onClose: () => void; onSaved: () => void }) {
   const toast = useToast();
+  const shopName = useShopNamer();
   const [saving, setSaving] = useState(false);
   const [f, setF] = useState<Record<string, string | number>>({});
   // The IST business day, like every other bill door: toISOString() is the
@@ -354,6 +474,12 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: 'bill' | 'paym
   const [receipts, setReceipts] = useState<VendorReceiptRow[] | null>(null);
   const [receiptsFailed, setReceiptsFailed] = useState(false);
   const [receiptId, setReceiptId] = useState('');
+  // The shop a payment / debit note is booked to (F63). '' = the supplier's
+  // shop by its bills: the server places an admin's money that names no bill
+  // there, never on the admin's own topbar shop, and its answer carries the
+  // shop it booked -- the toast names it (bookedTo). Only an admin can pick
+  // one (MoneyShopField); anyone else's money is their own shop's, server-side.
+  const [moneyShop, setMoneyShop] = useState('');
 
   useEffect(() => {
     if (kind !== 'bill' || billKind !== 'GOODS') return;
@@ -386,19 +512,23 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: 'bill' | 'paym
           bill_kind: billKind as 'GOODS' | 'SERVICES',
           grn_id: billKind === 'GOODS' ? receiptId : undefined,
         });
+        toast.success('Recorded');
       } else if (kind === 'payment') {
-        await vendorApApi.createPayment(vendorId, {
+        const saved = await vendorApApi.createPayment(vendorId, {
           amount: Number(f.amount) || 0, payment_date: String(f.payment_date || today),
           mode: String(f.mode || 'BANK'), tds_section: String(f.tds_section || 'NONE'),
           tds_amount: f.tds_amount !== undefined ? Number(f.tds_amount) : undefined,
           reference: String(f.reference || ''),
+          store_id: moneyShop || undefined,
         });
+        toast.success(bookedTo('Payment', saved, shopName));
       } else {
-        await vendorApApi.createDebitNote(vendorId, {
+        const saved = await vendorApApi.createDebitNote(vendorId, {
           amount: Number(f.amount) || 0, date: String(f.date || today), reason: String(f.reason || ''),
+          store_id: moneyShop || undefined,
         });
+        toast.success(bookedTo('Debit note', saved, shopName));
       }
-      toast.success('Recorded');
       onSaved();
     } catch (e) { toast.error(errMsg(e, 'Failed to record')); }
     finally { setSaving(false); }
@@ -423,27 +553,14 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: 'bill' | 'paym
             <option value="SERVICES">Services / expenses (rent, freight, job-work)</option>
           </select>
           {billKind === 'GOODS' && (
-            <div className="col-span-2">
-              <select className={cls} value={receiptId} onChange={(e) => setReceiptId(e.target.value)}>
-                <option value="">
-                  {receipts === null ? 'Loading receipts…' : 'Pick the goods receipt…'}
-                </option>
-                {(receipts ?? []).map((g) => (
-                  <option key={g.grn_id} value={g.grn_id}>
-                    {g.grn_number || g.grn_id}
-                    {g.grn_subtype === 'DELIVERY_CHALLAN' ? ` · DC ${g.dc_number || ''} ${g.dc_date || ''}` : g.vendor_invoice_no ? ` · inv ${g.vendor_invoice_no}` : ''}
-                  </option>
-                ))}
-              </select>
-              {receiptsFailed ? (
-                <p className="text-xs text-red-600 mt-1">Could not load this vendor&rsquo;s receipts — try again in a moment.</p>
-              ) : receipts !== null && receipts.length === 0 ? (
-                <p className="text-xs text-amber-700 mt-1">
-                  No unbilled goods receipts for this vendor at your store. Receive the goods first —
-                  bought without a PO? Log them as a Delivery Challan on the Goods Receipt screen, then record the bill here.
-                </p>
-              ) : null}
-            </div>
+            <ReceiptPicker
+              receipts={receipts}
+              failed={receiptsFailed}
+              value={receiptId}
+              onChange={setReceiptId}
+              className={cls}
+              shopName={shopName}
+            />
           )}
           <input className={cls} placeholder="Bill / invoice no" onChange={(e) => set('bill_number', e.target.value)} />
           <input className={cls} type="date" defaultValue={today} onChange={(e) => set('bill_date', e.target.value)} />
@@ -462,11 +579,13 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: 'bill' | 'paym
           </select>
           <input className={cls} type="number" placeholder="TDS amount (optional)" onChange={(e) => set('tds_amount', e.target.value)} />
           <input className={cls} placeholder="Reference / UTR" onChange={(e) => set('reference', e.target.value)} />
+          <MoneyShopField value={moneyShop} onChange={setMoneyShop} />
         </>}
         {kind === 'debit' && <>
           <input className={cls} type="number" placeholder="Amount" onChange={(e) => set('amount', e.target.value)} />
           <input className={cls} type="date" defaultValue={today} onChange={(e) => set('date', e.target.value)} />
           <input className={`${cls} col-span-2`} placeholder="Reason (e.g. rejected goods)" onChange={(e) => set('reason', e.target.value)} />
+          <MoneyShopField value={moneyShop} onChange={setMoneyShop} />
         </>}
       </div>
       <div className="flex justify-end mt-2">
@@ -475,5 +594,112 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: 'bill' | 'paym
         </button>
       </div>
     </div>
+  );
+}
+
+type ShopRow = { store_id?: string; store_name?: string; store_code?: string };
+
+/** A shop id -> its name from the store list (the PurchaseShopName rule: name,
+ *  else code, else the id until the list arrives), for text that cannot hold
+ *  a component -- a toast, an <option>. */
+function useShopNamer(): (storeId: string) => string {
+  const { data } = useStores();
+  const shops = (Array.isArray(data) ? data : []) as ShopRow[];
+  return (storeId) => {
+    const row = shops.find((s) => s.store_id === storeId);
+    return (row && (row.store_name || row.store_code || row.store_id)) || storeId;
+  };
+}
+
+/** The toast after a payment / debit note is saved: the shop the server
+ *  booked it to (F63) -- the shop picked, the bill's, or for an admin's money
+ *  that names neither the shop the server worked out -- so the admin sees
+ *  where it went. Null = the server stamped no shop, and the toast says so;
+ *  no store_id at all (an older server) says nothing it does not know. */
+function bookedTo(what: string, saved: { store_id?: string | null } | null | undefined, shopName: (id: string) => string) {
+  const shop = saved?.store_id;
+  if (shop) return `${what} recorded for ${shopName(shop)}`;
+  if (shop === null) return `${what} recorded with no shop on record`;
+  return 'Recorded';
+}
+
+/** The Bill form's goods-receipt list (owner ruling 15). The list is the
+ *  server's Purchase shop scope: an admin's covers every shop, so each
+ *  receipt names its shop and an empty list says it searched every store
+ *  (the invoice pickers' wording); anyone else's is their own shop's. */
+function ReceiptPicker({ receipts, failed, value, onChange, className, shopName }: {
+  receipts: VendorReceiptRow[] | null;
+  failed: boolean;
+  value: string;
+  onChange: (grnId: string) => void;
+  className: string;
+  shopName: (id: string) => string;
+}) {
+  const { canPick, ownStoreId } = usePurchaseShop();
+  // The shop the server searched: none named = every store for an admin, the
+  // caller's own shop for anyone else (a login with no shop: every store).
+  const searched = canPick ? undefined : ownStoreId;
+  return (
+    <div className="col-span-2">
+      <select className={className} value={value} onChange={(e) => onChange(e.target.value)} aria-label="Goods receipt">
+        <option value="">
+          {receipts === null ? 'Loading receipts…' : 'Pick the goods receipt…'}
+        </option>
+        {(receipts ?? []).map((g) => (
+          <option key={g.grn_id} value={g.grn_id}>
+            {g.grn_number || g.grn_id}
+            {g.grn_subtype === 'DELIVERY_CHALLAN' ? ` · DC ${g.dc_number || ''} ${g.dc_date || ''}` : g.vendor_invoice_no ? ` · inv ${g.vendor_invoice_no}` : ''}
+            {searched ? '' : ` · ${g.store_id ? `for ${shopName(g.store_id)}` : 'no shop on record'}`}
+          </option>
+        ))}
+      </select>
+      {failed ? (
+        <p className="text-xs text-red-600 mt-1">Could not load this vendor&rsquo;s receipts — try again in a moment.</p>
+      ) : receipts !== null && receipts.length === 0 ? (
+        <p className="text-xs text-amber-700 mt-1" data-testid="receipts-empty">
+          No unbilled goods receipts for this vendor {searched ? <>at <PurchaseShopName storeId={searched} /></> : 'in any store'}. Receive the goods first —
+          bought without a PO? Log them as a Delivery Challan on the Goods Receipt screen, then record the bill here.
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+/** Which shop's account a payment / debit note goes to (audit F63). An admin
+ *  may pick one of the shops (the Purchase shop list); left on the default,
+ *  nothing is sent and the server books it to the supplier's shop by its
+ *  bills. Anyone else is told, read-only, that it is their own shop's -- the
+ *  server stamps it so whatever is sent. Nothing for a login with no shop. */
+function MoneyShopField({ value, onChange }: { value: string; onChange: (shop: string) => void }) {
+  const { canPick, ownStoreId } = usePurchaseShop();
+  if (canPick) return <MoneyShopSelect value={value} onChange={onChange} />;
+  if (!ownStoreId) return null;
+  return (
+    <p className="col-span-2 text-xs text-gray-600" data-testid="money-shop">
+      Shop: <span className="font-medium text-gray-900"><PurchaseShopName storeId={ownStoreId} /></span>
+    </p>
+  );
+}
+
+function MoneyShopSelect({ value, onChange }: { value: string; onChange: (shop: string) => void }) {
+  const { data } = useStores();
+  const shops = (Array.isArray(data) ? data : []) as ShopRow[];
+  return (
+    <label className="col-span-2 flex items-center gap-2 text-xs text-gray-600">
+      Shop
+      <select
+        className="border border-gray-300 rounded px-2 py-1 text-sm flex-1 bg-white"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        aria-label="Shop this money is for"
+      >
+        <option value="">The supplier&rsquo;s shop (by its bills)</option>
+        {shops.filter((s) => s.store_id).map((s) => (
+          <option key={s.store_id} value={s.store_id}>
+            {s.store_name || s.store_code || s.store_id}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }

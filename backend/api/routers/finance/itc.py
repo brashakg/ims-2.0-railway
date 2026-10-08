@@ -11,6 +11,7 @@ from fastapi import Depends, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from ..auth import get_current_user
+from ...dependencies import resolve_store_scope
 from ...services import itc_reconcile, csv_safe
 from ._shared import _get_db, _require_finance_admin, router
 from .gst import _itc_eligible_bill
@@ -28,7 +29,11 @@ async def itc_register(
 
     When `period` (YYYY-MM) is given, only that period is returned in
     `periods[]` (totals still represent the full bill set so the FE can show
-    a "Total booked ITC" anchor)."""
+    a "Total booked ITC" anchor).
+
+    Shop scope (F63): ADMIN / SUPERADMIN read every shop's bills; any other
+    login only its own shop's (resolve_store_scope -- the rule every Purchase
+    tab and AP figure applies), so a Pune accountant never sees Dhanbad's."""
     _require_finance_admin(current_user)
     db = _get_db()
     if db is None:
@@ -53,6 +58,9 @@ async def itc_register(
     q: dict = {}
     if entity_id:
         q["recipient_entity_id"] = entity_id
+    scope = resolve_store_scope(None, current_user)
+    if scope:
+        q["store_id"] = scope
     try:
         raw_bills = list(
             db.get_collection("vendor_bills").find(
@@ -98,8 +106,9 @@ class Gstr2bReconcileBody(BaseModel):
     as_of: Optional[str] = None
 
 
-def _book_rows_from_db(db) -> List[dict]:
-    """Pull all vendor bills + their vendor GSTIN, formatted for the reconciler."""
+def _book_rows_from_db(db, store_id: Optional[str] = None) -> List[dict]:
+    """Pull the vendor bills (one shop's when `store_id` is given) + their
+    vendor GSTIN, formatted for the reconciler."""
     gstin_by_vendor: Dict[str, str] = {}
     try:
         for v in db.get_collection("vendors").find(
@@ -110,7 +119,9 @@ def _book_rows_from_db(db) -> List[dict]:
         pass
     rows = []
     try:
-        for b in db.get_collection("vendor_bills").find({}, {"_id": 0}):
+        for b in db.get_collection("vendor_bills").find(
+            {"store_id": store_id} if store_id else {}, {"_id": 0}
+        ):
             rows.append(
                 {
                     "gstin": gstin_by_vendor.get(b.get("vendor_id")),
@@ -135,14 +146,18 @@ async def gstr2b_reconcile(
     """Reconcile booked vendor bills against an uploaded GSTR-2B (rows parsed
     client-side from the portal download). Returns matched / mismatch /
     only-in-books (ITC at risk) / only-in-2B buckets, plus a sum-identity
-    summary (matched + mismatch + at-risk == total booked ITC)."""
+    summary (matched + mismatch + at-risk == total booked ITC).
+
+    The booked side is the caller's shop scope (F63, as /itc-register):
+    every shop for ADMIN / SUPERADMIN, else the caller's own shop."""
     _require_finance_admin(current_user)
     rows = [r.model_dump() for r in body.rows]
     db = _get_db()
     if db is None:
         return itc_reconcile.reconcile_gstr2b([], rows, as_of_iso=body.as_of)
+    scope = resolve_store_scope(None, current_user)
     return itc_reconcile.reconcile_gstr2b(
-        _book_rows_from_db(db), rows, as_of_iso=body.as_of
+        _book_rows_from_db(db, scope), rows, as_of_iso=body.as_of
     )
 
 
@@ -184,11 +199,13 @@ async def itc_export_csv(
 ):
     """CSV export of a single reconciliation bucket. POST instead of GET
     because the GSTR-2B rows live client-side (the FE keeps the upload in
-    memory; re-uploading on every download would be terrible UX)."""
+    memory; re-uploading on every download would be terrible UX). The booked
+    side is the caller's shop scope, as /gstr2b-reconcile."""
     _require_finance_admin(current_user)
     rows = [r.model_dump() for r in body.rows]
     db = _get_db()
-    book_rows = _book_rows_from_db(db) if db is not None else []
+    scope = resolve_store_scope(None, current_user)
+    book_rows = _book_rows_from_db(db, scope) if db is not None else []
     recon = itc_reconcile.reconcile_gstr2b(book_rows, rows, as_of_iso=body.as_of)
     bucket_rows = recon.get(bucket) or []
     headers = _ITC_CSV_HEADERS[bucket]

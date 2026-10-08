@@ -12,8 +12,8 @@ from ..auth import require_roles
 from ...dependencies import (
     validate_store_access,
 )
+from ...services.cost_mask import AP_ROLES
 from ._shared import (
-    _REPORT_FINANCE_ROLES,
     logger,
     router,
 )
@@ -587,9 +587,13 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
 async def gstr3b_report(
     month: str = Query(..., description="Tax period in YYYY-MM format"),
     store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
+    current_user: dict = Depends(require_roles(*AP_ROLES)),
 ):
-    """GSTR-3B summary return (IMS internal shape). See _compute_gstr3b."""
+    """GSTR-3B summary return (IMS internal shape). See _compute_gstr3b.
+
+    Owner ruling 2026-10-07 (R1): its Table 4 ITC and RCM are summed from
+    supplier bills, so it is the accounts roles' alone (cost_mask.AP_ROLES,
+    the one supplier-money rule; SUPERADMIN passes on its own)."""
     active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id") or "store-001"
     return _compute_gstr3b(month, active_store)
 
@@ -604,7 +608,7 @@ async def gstr3b_gstn_json(
     entity_id: Optional[str] = Query(
         None, description="Reserved — entity-level rollup not yet wired; store_id wins"
     ),
-    current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
+    current_user: dict = Depends(require_roles(*AP_ROLES)),  # R1, as above
 ):
     """GSTR-3B shaped for the GST portal's offline upload tool.
 

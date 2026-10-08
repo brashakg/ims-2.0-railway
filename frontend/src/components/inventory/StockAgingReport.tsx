@@ -21,6 +21,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { inventoryApi } from '../../services/api';
 import { exportToCSV as exportRowsToCSV } from '../../utils/exportUtils';
+import { rupees } from '../../pages/purchase/PurchasesThisMonthSection';
 
 interface AgingProduct {
   id: string;
@@ -29,7 +30,10 @@ interface AgingProduct {
   brand: string;
   category: string;
   quantity: number;
-  value: number;
+  /** At COST (audit F47); null for a login that is not shown cost. */
+  value: number | null;
+  /** Units with no cost: they add Rs 0 to `value` and are said, not hidden. */
+  uncostedUnits: number;
   // null = unknown arrival date (legacy stock): old by the server's one rule
   // (audit F54), so it ages as the oldest, never as 0 days.
   daysInStock: number | null;
@@ -76,7 +80,8 @@ export function StockAgingReport() {
         brand: p.brand || '',
         category: p.category || '',
         quantity: p.quantity || 0,
-        value: p.value || 0,
+        value: p.value ?? null,
+        uncostedUnits: p.uncostedUnits || 0,
         daysInStock: p.daysInStock ?? null,
         lastSaleDate: p.lastSaleDate || undefined,
         salesLast30Days: p.salesLast30Days || 0,
@@ -117,9 +122,19 @@ export function StockAgingReport() {
   const classACount = products.filter((p) => p.classification === 'A').length;
   const classBCount = products.filter((p) => p.classification === 'B').length;
   const classCCount = products.filter((p) => p.classification === 'C').length;
-  const slowMovingValue = products
+  const slowMovingValue = products.some((p) => p.value == null)
+    ? null
+    : products
+        .filter((p) => p.classification === 'C')
+        .reduce((sum, p) => sum + (p.value ?? 0), 0);
+  const slowMovingUncosted = products
     .filter((p) => p.classification === 'C')
-    .reduce((sum, p) => sum + p.value, 0);
+    .reduce((sum, p) => sum + p.uncostedUnits, 0);
+  // Review r3 #16: the inventory tiles' rule (InventoryLayout tileMoney) --
+  // under a lakh a figure is whole rupees (Rs 4,000, never "Rs 0.0L"); from a
+  // lakh up, lakhs.
+  const tiedCapitalText = (n: number) =>
+    Math.round(n) < 100000 ? rupees(n) : `₹${(n / 100000).toFixed(1)}L`;
   const knownAges = products.flatMap((p) => (p.daysInStock === null ? [] : [p.daysInStock]));
   const averageAge = knownAges.reduce((sum, d) => sum + d, 0) / knownAges.length || 0;
   const oldStockCount = products.filter((p) => p.daysInStock === null || p.daysInStock > 90).length;
@@ -166,7 +181,8 @@ export function StockAgingReport() {
       'Age Category': p.ageCategory,
       'Days In Stock': p.daysInStock ?? 'Unknown',
       Quantity: p.quantity,
-      'Value (Rs)': p.value,
+      'Value at cost (Rs)': p.value ?? '',
+      'Units with no cost': p.value == null ? '' : p.uncostedUnits,
       'Sales Last 30 Days': p.salesLast30Days,
       'Sales Last 90 Days': p.salesLast90Days,
       'Turnover Rate (x/yr)': p.turnoverRate.toFixed(2),
@@ -333,8 +349,14 @@ export function StockAgingReport() {
           </div>
           <div className="mt-2 pt-2 border-t border-red-200">
             <p className="text-xs text-red-700">
-              Tied Capital: ₹{(slowMovingValue / 100000).toFixed(1)}L
+              Tied capital (at cost):{' '}
+              {slowMovingValue == null ? '—' : tiedCapitalText(slowMovingValue)}
             </p>
+            {slowMovingValue != null && slowMovingUncosted > 0 && (
+              <p className="text-xs text-amber-700">
+                {slowMovingUncosted} {slowMovingUncosted === 1 ? 'unit has' : 'units have'} no cost
+              </p>
+            )}
           </div>
         </div>
       </div>
@@ -417,7 +439,7 @@ export function StockAgingReport() {
                     Quantity
                   </th>
                   <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">
-                    Value
+                    Value (cost)
                   </th>
                   <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">
                     Days in Stock
@@ -454,7 +476,17 @@ export function StockAgingReport() {
                         {product.quantity}
                       </td>
                       <td className="px-4 py-3 text-right text-sm text-gray-900">
-                        ₹{product.value.toLocaleString('en-IN')}
+                        {/* A row whose every unit has no cost is not worth Rs 0: say so. */}
+                        {product.value == null
+                          ? '—'
+                          : product.value === 0 && product.uncostedUnits > 0
+                            ? null
+                            : `₹${product.value.toLocaleString('en-IN')}`}
+                        {product.value != null && product.uncostedUnits > 0 && (
+                          <span className="block text-xs text-amber-700 whitespace-nowrap">
+                            {product.value > 0 ? `+${product.uncostedUnits} ` : ''}no cost
+                          </span>
+                        )}
                       </td>
                       <td className="px-4 py-3 text-center">
                         <div className="flex flex-col items-center gap-1">

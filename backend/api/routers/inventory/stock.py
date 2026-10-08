@@ -25,7 +25,7 @@ from ._shared import (
     timedelta,
     validate_store_access,
 )
-from ...services.cost_mask import can_see_cost, mask_cost_list
+from ...services.cost_mask import mask_cost_list
 from ...services.item_events import on_hand_match
 from ...utils.ist import ist_date_str_from_stored
 from .helpers import (
@@ -128,9 +128,13 @@ async def get_stock(
 
     # Mode 2: per-unit detail for one product. Consumers (e.g. transfer
     # picker that selects specific stock_ids) want the raw stock_units rows.
+    # A unit carries the cost it was received at (GRN / opening stock): the
+    # one product-cost rule decides who sees it, here and on the ledger rows.
     if product_id:
         stock = mask_cost_list(
-            stock_repo.find_by_product_store(product_id, active_store), current_user
+            stock_repo.find_by_product_store(product_id, active_store),
+            current_user,
+            "product",
         )
         return {"items": stock, "total": len(stock)}
 
@@ -146,8 +150,16 @@ async def get_stock(
         category=category,
         created_by=created_by,
         include_attribution=can_see_attribution,
+        shelf_cost=_shelf_cost(stock_repo, product_repo, active_store),
     )
-    return {"items": items, "total": len(items)}
+    # The count of units with no cost goes with the cost: one rule, the same
+    # context that masks the cost fields below.
+    from ...services.cost_mask import can_see_cost
+
+    if not can_see_cost(current_user, "product"):
+        for row in items:
+            row.pop("uncosted_units", None)
+    return {"items": mask_cost_list(items, current_user, "product"), "total": len(items)}
 
 
 def _last_grn_by_product(store_id: Optional[str]) -> Dict[str, Dict]:
@@ -228,6 +240,7 @@ def _build_store_ledger(
     category: Optional[str] = None,
     created_by: Optional[str] = None,
     include_attribution: bool = True,
+    shelf_cost: Optional[Dict[str, Dict]] = None,
 ) -> List[Dict]:
     """Per-product Stock Ledger rows for a store.
 
@@ -348,10 +361,18 @@ def _build_store_ledger(
 
     # ---- 3. Edge case - units exist for a product that's NOT in the
     # active catalog (deactivated SKU still on the shelf). Surface those
-    # rows too so the manager can see + clear them. ------------------
-    for pid, on_hand in on_hand_by_product.items():
+    # rows too so the manager can see + clear them. A product whose ONLY
+    # units here are RESERVED (a discontinued frame set aside for a
+    # customer's order) is held stock as much: the "Stock value at cost"
+    # tile sums these rows and the one stock-value rule counts reserved
+    # units, so it needs its row too (review r3 #6). ------------------
+    held_pids = list(on_hand_by_product) + [
+        pid for pid in reserved_by_product if pid not in on_hand_by_product
+    ]
+    for pid in held_pids:
         if pid in seen_pids:
             continue
+        on_hand = on_hand_by_product.get(pid, 0)
         product = product_repo.find_by_id(pid) or {"product_id": pid}
         # Respect the cataloguer filter on stranded rows too -- a unit whose
         # product was created by someone else must not leak into a filtered
@@ -382,7 +403,43 @@ def _build_store_ledger(
             )
         )
 
+    # F47: each row's units at cost (None when no shop is in view). Who sees
+    # them is cost_mask's answer, in get_stock -- never decided here.
+    if shelf_cost is not None:
+        for row in items:
+            row.update(_row_cost(shelf_cost.get(row["product_id"])))
     return items
+
+
+def _shelf_cost(
+    stock_repo, product_repo, store_id: Optional[str]
+) -> Optional[Dict[str, Dict]]:
+    """F47: what the units at this shop COST, per product -- the one stock
+    value rule (services/stock_value). None when no shop is in view. Who may
+    see it is not decided here: get_stock masks the rows (cost_mask
+    "product", the one product-cost rule)."""
+    from ...services import stock_value
+
+    if not store_id:
+        return None
+    return stock_value.by_product(
+        stock_value.shelf_units(stock_repo, product_repo, store_id)
+    )
+
+
+def _row_cost(held: Optional[Dict]) -> Dict:
+    """The cost fields of one ledger row, read off stock_value.by_product.
+
+    cost_value: the units on the shelf + reserved, at cost (the same units as
+    the row's stock + reserved). unit_cost: per COSTED unit, None when no unit
+    has a cost (never Rs 0). uncosted_units: units with no cost, so the screen
+    can say so instead of quietly valuing them at nothing."""
+    held = held or {}
+    return {
+        "cost_value": held.get("cost") or 0.0,
+        "unit_cost": held.get("unit_cost"),
+        "uncosted_units": held.get("uncosted_units") or 0,
+    }
 
 
 def _ledger_row(
@@ -510,7 +567,7 @@ async def list_units(
     own barcode, per physical piece. This is where those pieces are listed and
     their labels printed from. Each unit carries the label fields (brand, model,
     colour, size, MRP) so the label renderer needs no second fetch. cost_price
-    only for roles that already see cost (cost_mask.can_see_cost).
+    answers to the one product-cost rule (cost_mask "product"), as the ledger.
     """
     if not product_id and not grn_id:
         raise HTTPException(status_code=400, detail="Provide product_id or grn_id")
@@ -558,7 +615,6 @@ async def list_units(
     from ...services.product_master import existing_product_summary
 
     products: Dict[str, Dict] = {}
-    show_cost = can_see_cost(current_user)
     units = []
     for d in docs:
         pid = d.get("product_id") or ""
@@ -593,11 +649,10 @@ async def list_units(
             "colour": p.get("colour_code") or "",
             "size": p.get("size") or "",
             "mrp": p.get("mrp"),
+            "cost_price": d.get("cost_price"),
         }
-        if show_cost:
-            unit["cost_price"] = d.get("cost_price")
         units.append(unit)
-    return {"units": units, "total": len(units)}
+    return {"units": mask_cost_list(units, current_user, "product"), "total": len(units)}
 
 
 class BarcodePrintedRequest(BaseModel):

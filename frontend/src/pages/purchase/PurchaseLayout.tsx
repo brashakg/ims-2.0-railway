@@ -21,16 +21,27 @@ import {
   TrendingUp,
   AlertTriangle,
   PackageX,
+  CalendarDays,
 } from 'lucide-react';
 import { useIsOnlineStore } from '../../hooks/useIsOnlineStore';
+import { useAuth } from '../../context/AuthContext';
+import { NewOrdersDeliverTo, PurchaseShopGate, PurchaseShopLabel, PurchaseShopPicker, usePurchaseShop } from './purchaseShop';
+import { APPROVE_ROLES } from './invoices/shared';
+import { RETURN_READERS } from './purchaseRoles';
 
 const SECTIONS = [
   { path: '/purchase/orders', label: 'Purchase Orders', icon: FileText },
-  { path: '/purchase/invoices', label: 'Purchase Invoices', icon: Receipt },
+  // Supplier bills -- what we owe and have paid: the accounts roles only
+  // (owner ruling 2026-10-01; the route reads the same APPROVE_ROLES).
+  { path: '/purchase/invoices', label: 'Purchase Invoices', icon: Receipt, roles: APPROVE_ROLES },
   { path: '/purchase/variance', label: 'Variance', icon: PackageX },
   { path: '/purchase/suppliers', label: 'Suppliers', icon: Truck },
-  { path: '/purchase/vendor-returns', label: 'Vendor Returns', icon: AlertTriangle },
+  { path: '/purchase/vendor-returns', label: 'Vendor Returns', icon: AlertTriangle, roles: RETURN_READERS },
   { path: '/purchase/analytics', label: 'Analytics', icon: TrendingUp },
+  // Audit F56: what we ordered, received, were billed, paid and owe -- the
+  // supplier-balance readers only (APPROVE_ROLES = the API's _AP_ROLES; the
+  // route and the Suppliers card read the same list).
+  { path: '/purchase/this-month', label: 'This month', icon: CalendarDays, roles: APPROVE_ROLES },
 ];
 
 export function PurchaseLayout() {
@@ -39,6 +50,8 @@ export function PurchaseLayout() {
   const onlineStore = useIsOnlineStore();
   const { pathname } = useLocation();
   const navigate = useNavigate();
+  const { hasRole } = useAuth();
+  const { noShop } = usePurchaseShop();
 
   // Warm the sibling section chunks once the browser is idle, so the FIRST
   // click on any tab renders without the lazy-chunk download spinner (owner
@@ -56,12 +69,15 @@ export function PurchaseLayout() {
       void import('./SuppliersSection');
       void import('./VendorReturns');
       void import('./PurchaseAnalyticsSection');
+      void import('./PurchasesThisMonthSection');
     });
   }, []);
 
-  // Sections whose primary create action lives in the header.
-  const headerAction =
-    pathname === '/purchase/orders'
+  // Sections whose primary create action lives in the header. None for a
+  // login with no shop (R3): the gate below mounts no section to open.
+  const headerAction = noShop
+    ? null
+    : pathname === '/purchase/orders'
       ? 'New PO'
       : pathname === '/purchase/suppliers'
         ? 'New supplier'
@@ -76,17 +92,26 @@ export function PurchaseLayout() {
           <h1>Stock, from upstream.</h1>
           <div className="hint">Vendor ledger, purchase orders, GRN verification with quantity + price variance, payment aging, credit notes.</div>
         </div>
-        {/* Invoices page carries its own Create-from-GRN / Manual buttons; the
-            variance page is read-mostly (its own Dismiss action lives inline). */}
-        {headerAction && (
-          <button
-            onClick={() => navigate(`${pathname}?new=1`)}
-            className="btn sm primary"
-          >
-            <Plus className="w-4 h-4" />
-            {headerAction}
-          </button>
-        )}
+        <div className="flex flex-wrap items-center gap-3">
+          {/* Audit F63: admins read every tab across all stores or one shop;
+              everyone else is told which shop (their own) the tabs cover. */}
+          <PurchaseShopPicker />
+          <PurchaseShopLabel />
+          {/* Invoices page carries its own Create-from-GRN / Manual buttons; the
+              variance page is read-mostly (its own Dismiss action lives inline). */}
+          {headerAction && (
+            <button
+              onClick={() => navigate(`${pathname}?new=1`)}
+              className="btn sm primary"
+            >
+              <Plus className="w-4 h-4" />
+              {headerAction}
+            </button>
+          )}
+          {/* F63: whatever shop the filter shows, a new PO delivers to the
+              admin's own shop (W1.4) -- say which before he creates it. */}
+          {pathname === '/purchase/orders' && <NewOrdersDeliverTo />}
+        </div>
       </div>
 
       {/* W1.4 / OS-006: online-store warning — POs deliver to the active store. */}
@@ -105,11 +130,15 @@ export function PurchaseLayout() {
       )}
 
       {/* Section nav — real links, one URL per section. overflow-x-auto +
-          shrink-0 keep all six reachable on iPad portrait / phone widths
-          (the row is wider than 768px; it scrolls instead of clipping). */}
+          shrink-0 keep every tab reachable on iPad portrait / phone widths
+          (the row is wider than 768px; it scrolls instead of clipping).
+          gap-5: all seven tabs fit a 1024x768 landscape tablet. Measured in
+          headless Chromium with Inter 500 actually loaded: the row is 941px
+          at gap-5 in a 958px box (classic scrollbar); gap-6 was 965px and
+          clipped "This month". */}
       <div className="border-b border-gray-200 overflow-x-auto">
-        <nav className="flex gap-4 tablet:gap-8 w-max min-w-full">
-          {SECTIONS.map(({ path, label, icon: Icon }) => (
+        <nav className="flex gap-4 tablet:gap-5 w-max min-w-full">
+          {SECTIONS.filter((s) => !s.roles || hasRole(s.roles)).map(({ path, label, icon: Icon }) => (
             <NavLink
               key={path}
               to={path}
@@ -130,7 +159,9 @@ export function PurchaseLayout() {
         </nav>
       </div>
 
-      <Outlet />
+      <PurchaseShopGate>
+        <Outlet />
+      </PurchaseShopGate>
     </div>
   );
 }

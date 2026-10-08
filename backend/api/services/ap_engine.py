@@ -29,12 +29,14 @@ All amounts are floats rounded to 2 dp. Functions are defensive: missing or
 garbage fields coerce to 0 / are skipped so a malformed row never raises.
 """
 
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, timezone, date
 from typing import List, Optional, Dict
 
 # IST (TZ-P3): the as_of default must be the IST business day, not the UTC box
 # clock (00:00-05:30 IST would otherwise age bills against YESTERDAY).
 from api.utils.ist import now_ist_naive
+
+_IST = timezone(timedelta(hours=5, minutes=30))
 
 # --- TDS sections (rate %) -------------------------------------------------
 # Common sections an optical retailer hits when paying vendors / contractors.
@@ -112,10 +114,26 @@ def _f(v) -> float:
         return 0.0
 
 
+def _naive_ist(dt: datetime) -> datetime:
+    """An offset-aware instant as the naive IST wall clock; naive passes through.
+
+    Bill and payment dates are naive 'YYYY-MM-DD' (IST calendar), but some
+    writers stamp aware UTC strings (rebate_engine's credit note created_at).
+    Mixing the two in one sort or comparison raises TypeError, so every
+    parsed value leaves here naive, on the IST calendar the business uses.
+    """
+    if dt.tzinfo is None:
+        return dt
+    return dt.astimezone(_IST).replace(tzinfo=None)
+
+
 def parse_date(s) -> Optional[datetime]:
-    """Tolerant ISO parse for 'YYYY-MM-DD' or full ISO datetimes. None on junk."""
+    """Tolerant ISO parse for 'YYYY-MM-DD' or full ISO datetimes. None on junk.
+
+    Always naive (an aware value is converted to IST wall clock) so rows from
+    different writers can be sorted and compared together."""
     if isinstance(s, datetime):
-        return s
+        return _naive_ist(s)
     if not s or not isinstance(s, str):
         return None
     txt = s.strip()
@@ -123,7 +141,7 @@ def parse_date(s) -> Optional[datetime]:
         return None
     # Try full ISO first, then date-only.
     try:
-        return datetime.fromisoformat(txt.replace("Z", "+00:00"))
+        return _naive_ist(datetime.fromisoformat(txt.replace("Z", "+00:00")))
     except ValueError:
         pass
     try:
@@ -478,6 +496,12 @@ def bill_outstanding(
 ) -> float:
     """Outstanding on a single bill = total - allocated payments - allocated
     debit-notes. Only rows whose bill_id matches this bill count. Never < 0."""
+    return round(max(_bill_balance(bill, payments, debit_notes), 0.0), 2)
+
+
+def _bill_balance(bill: dict, payments: List[dict], debit_notes: List[dict]) -> float:
+    """bill_outstanding before the floor: negative = money allocated to the
+    bill beyond its total (an over-payment the ledger still counts)."""
     if not isinstance(bill, dict):
         return 0.0
     bid = bill.get("bill_id")
@@ -492,7 +516,7 @@ def bill_outstanding(
         for d in (debit_notes or [])
         if isinstance(d, dict) and d.get("bill_id") == bid
     )
-    return round(max(total - paid - dn, 0.0), 2)
+    return round(total - paid - dn, 2)
 
 
 # --- aging -----------------------------------------------------------------
@@ -506,23 +530,44 @@ def build_aging(
 ) -> dict:
     """AP aging for one vendor (or any flat list of bills).
 
-    Buckets each bill's OUTSTANDING amount by how far past its due date it is
-    as of `as_of_iso` (default: today). On-account credits (payments / debit
-    notes with no bill_id) cannot be aged against a bill, so they are summed
-    into `unallocated_credits` and netted off at the end.
+    Buckets what is still owed on each bill by how far past its due date it is
+    as of `as_of_iso` (default: today).
+
+    Money that names no bill in this set (an advance, an on-account payment, a
+    debit note with no bill) and money paid on a bill beyond its total settle
+    the SAME vendor's open bills, oldest due date first -- what an accountant
+    does with on-account money (F56). So `items`, every bucket and
+    `total_outstanding` are what is still owed after it, and an 'overdue' figure
+    can never exceed what we owe that vendor. Credit left over once all of a
+    vendor's bills are settled is that vendor's advance (paid ahead of its
+    bills).
+
+    THE ONE 'WE OWE' RULE (F56): per supplier, its ledger closing balance on
+    the as-of day is either owed (> 0: its open bills after its own credit) or
+    an advance (< 0: its credit beyond its bills) -- never both. So, over any
+    set of suppliers:
+      owed     = SUM of max(balance, 0) = total_outstanding = SUM(buckets)
+      advances = SUM of max(-balance, 0) = unallocated_credits
+    An advance is its own figure ('paid ahead to suppliers'). It is NEVER taken
+    off owed: one supplier's advance does not settle another supplier's bills,
+    so netting them (and flooring the difference at 0) hid what we owe.
+    `net_payable` is kept for older readers and is owed, nothing else.
     """
     as_of = parse_date(as_of_iso) or now_ist_naive()
-    buckets = {k: 0.0 for k in AGING_BUCKETS}
     items: List[dict] = []
-    total_out = 0.0
+    credit: Dict[object, float] = {}  # vendor_id -> money not yet set off a bill
+
+    def _credit(vendor_id, amount: float) -> None:
+        credit[vendor_id] = round(credit.get(vendor_id, 0.0) + amount, 2)
 
     bill_ids = {b.get("bill_id") for b in (bills or []) if isinstance(b, dict)}
 
     for b in bills or []:
         if not isinstance(b, dict):
             continue
-        out = bill_outstanding(b, payments, debit_notes)
+        out = _bill_balance(b, payments, debit_notes)
         if out <= 0:
+            _credit(b.get("vendor_id"), -out)  # over-paid: money with the supplier
             continue
         due_iso = b.get("due_date") or compute_due_date(
             b.get("bill_date"), b.get("credit_days", 0)
@@ -541,8 +586,6 @@ def build_aging(
         else:
             days_past = (as_of - due).days
             bucket = aging_bucket(days_past)
-        buckets[bucket] = round(buckets[bucket] + out, 2)
-        total_out = round(total_out + out, 2)
         items.append(
             {
                 "bill_id": b.get("bill_id"),
@@ -560,23 +603,44 @@ def build_aging(
             }
         )
 
-    # Credits that are not tied to any bill present in this set (advances /
-    # on-account payments / unallocated debit notes).
-    unallocated = 0.0
     for p in payments or []:
         if isinstance(p, dict) and p.get("bill_id") not in bill_ids:
-            unallocated += _payment_gross(p)
+            _credit(p.get("vendor_id"), _payment_gross(p))
     for d in debit_notes or []:
         if isinstance(d, dict) and d.get("bill_id") not in bill_ids:
-            unallocated += _f(d.get("amount"))
-    unallocated = round(unallocated, 2)
+            _credit(d.get("vendor_id"), _f(d.get("amount")))
+
+    # Each vendor's credit settles its own bills: undatable first (they bucket
+    # as 90+), then by due date, oldest first.
+    def _due_order(it):
+        due = parse_date(it["due_date"])
+        return (due is not None, due.date() if due else date.min)
+
+    for it in sorted(items, key=_due_order):
+        have = credit.get(it["vendor_id"], 0.0)
+        if have > 0:
+            used = min(have, it["outstanding"])
+            it["outstanding"] = round(it["outstanding"] - used, 2)
+            credit[it["vendor_id"]] = round(have - used, 2)
+    items = [it for it in items if it["outstanding"] > 0]
+
+    buckets = {k: 0.0 for k in AGING_BUCKETS}
+    for it in items:
+        buckets[it["bucket"]] = round(buckets[it["bucket"]] + it["outstanding"], 2)
+    total_out = round(sum(it["outstanding"] for it in items), 2)
+    unallocated = round(sum(credit.values()), 2)
 
     return {
         "as_of": as_of.date().isoformat(),
         "buckets": buckets,
         "total_outstanding": total_out,
+        # THE 'we owe' figure and the money paid ahead, apart (see above).
+        "owed": total_out,
+        "advances": unallocated,
+        # Older key, same figure as `advances`.
         "unallocated_credits": unallocated,
-        "net_payable": round(max(total_out - unallocated, 0.0), 2),
+        # Older key, same figure as `owed` (no advance is subtracted).
+        "net_payable": total_out,
         # Sort: undatable bills (-1) sort first (they are the most uncertain and
         # need attention), then by days_past_due descending (most overdue first).
         "items": sorted(
@@ -595,32 +659,35 @@ def build_aging_by_vendor(
     """Org-wide AP aging grouped by vendor, plus a grand-total summary.
 
     Returns {as_of, totals:{buckets,total_outstanding,...}, vendors:[...]}.
-    Each vendor row carries its own bucket split + outstanding.
+    Each vendor row carries its own bucket split + outstanding, and its own
+    signed ledger `balance` (owed - advances; below 0 = paid ahead). Every
+    vendor in the rows is a row -- one holding only an advance too.
+
+    The totals follow THE ONE 'WE OWE' RULE (build_aging): `owed` (= the
+    buckets added up = total_outstanding) is the sum of each supplier's
+    positive balance, and `advances` the sum of each supplier's money paid
+    ahead, a figure apart. One supplier's advance is never taken off what we
+    owe another (F56); `net_payable` (older key) is owed.
     """
-    by_vendor: dict = {}
-    for b in bills or []:
-        if isinstance(b, dict):
-            by_vendor.setdefault(b.get("vendor_id"), {"bills": []})["bills"].append(b)
+    bills, payments, debit_notes = (
+        [d for d in docs or [] if isinstance(d, dict)]
+        for docs in (bills, payments, debit_notes)
+    )
+    vendor_ids = dict.fromkeys(d.get("vendor_id") for d in bills + payments + debit_notes)
 
     vendor_rows: List[dict] = []
     totals = {k: 0.0 for k in AGING_BUCKETS}
     grand_out = 0.0
     grand_unalloc = 0.0
 
-    for vendor_id, grp in by_vendor.items():
-        v_payments = [
-            p
-            for p in (payments or [])
-            if isinstance(p, dict) and p.get("vendor_id") == vendor_id
-        ]
-        v_dn = [
-            d
-            for d in (debit_notes or [])
-            if isinstance(d, dict) and d.get("vendor_id") == vendor_id
-        ]
-        ag = build_aging(grp["bills"], v_payments, v_dn, as_of_iso)
+    for vendor_id in vendor_ids:
+        v_bills, v_payments, v_dn = (
+            [d for d in docs if d.get("vendor_id") == vendor_id]
+            for docs in (bills, payments, debit_notes)
+        )
+        ag = build_aging(v_bills, v_payments, v_dn, as_of_iso)
         name = next(
-            (b.get("vendor_name") for b in grp["bills"] if b.get("vendor_name")),
+            (d.get("vendor_name") for d in v_bills + v_payments + v_dn if d.get("vendor_name")),
             vendor_id,
         )
         vendor_rows.append(
@@ -629,24 +696,209 @@ def build_aging_by_vendor(
                 "vendor_name": name,
                 "buckets": ag["buckets"],
                 "total_outstanding": ag["total_outstanding"],
+                "owed": ag["owed"],
+                "advances": ag["advances"],
+                # This supplier's own ledger balance, signed (< 0 = advance).
+                "balance": round(ag["owed"] - ag["advances"], 2),
                 "unallocated_credits": ag["unallocated_credits"],
                 "net_payable": ag["net_payable"],
             }
         )
         for k in AGING_BUCKETS:
             totals[k] = round(totals[k] + ag["buckets"][k], 2)
-        grand_out = round(grand_out + ag["total_outstanding"], 2)
-        grand_unalloc = round(grand_unalloc + ag["unallocated_credits"], 2)
+        grand_out = round(grand_out + ag["owed"], 2)
+        grand_unalloc = round(grand_unalloc + ag["advances"], 2)
 
     return {
         "as_of": (parse_date(as_of_iso) or now_ist_naive()).date().isoformat(),
         "totals": {
             "buckets": totals,
             "total_outstanding": grand_out,
+            "owed": grand_out,
+            "advances": grand_unalloc,
             "unallocated_credits": grand_unalloc,
-            "net_payable": round(max(grand_out - grand_unalloc, 0.0), 2),
+            # Older key: owed. No supplier's advance comes off it.
+            "net_payable": grand_out,
         },
         "vendors": sorted(vendor_rows, key=lambda x: -x["net_payable"]),
+    }
+
+
+# --- whose rows: supplier bills only, and one shop's share -------------------
+
+
+def _day(value) -> str:
+    """'YYYY-MM-DD' of a stored date or instant ('' when undatable)."""
+    dt = parse_date(value)
+    return dt.date().isoformat() if dt else ""
+
+
+def ledger_day(doc: dict) -> str:
+    """'YYYY-MM-DD' a ledger row is entered on -- the date build_ledger sorts
+    by: a bill's bill_date, a payment's payment_date, a note's date, else the
+    row's created_at ('' when undatable)."""
+    return _day(
+        doc.get("bill_date") or doc.get("payment_date") or doc.get("date") or doc.get("created_at")
+    )
+
+
+def as_of_day(as_of_iso: Optional[str] = None) -> str:
+    """THE as-of day every payable figure is struck on: the day asked for,
+    never later than today (IST); today when none is asked. A row dated after
+    it (a post-dated cheque, a bill keyed ahead) has not happened yet."""
+    today = now_ist_naive().date().isoformat()
+    asked = _day(as_of_iso) if as_of_iso else ""
+    return min(asked, today) if asked else today
+
+
+def is_post_dated(doc: dict, as_of_iso: Optional[str] = None) -> bool:
+    """True for a row dated after the as-of day (default today): recorded, but
+    not yet counted in any 'what we owe' figure. Undated rows always count."""
+    return ledger_day(doc) > as_of_day(as_of_iso)
+
+
+def supplier_rows(
+    bills: List[dict],
+    payments: List[dict],
+    debit_notes: List[dict],
+    store_id: Optional[str] = None,
+) -> tuple:
+    """Every RECORDED (bill, payment, debit note) of the supplier ledger, with
+    no as-of cutoff -- what the payments / debit-notes lists and the ledger's
+    post-dated list show. supplier_ledger_rows is these rows struck on a day.
+
+    1. An inter-company transfer's mirror bill (source_transfer_id) is not a
+       supplier purchase: one of our companies 'bills' another for frames the
+       external supplier's bill already counts. It -- and any money naming it --
+       is left out (owner ruling D13: such a move is a valued challan).
+    2. `store_id` narrows the rows to one shop, and every row has exactly one
+       shop, decided from ALL the supplier's bills whatever their date -- so a
+       row's shop never depends on the day the figures are struck:
+         * a bill: the shop its goods landed in (its store_id);
+         * money naming a bill: that bill's shop (the money settles it, so the
+           bill and its money are always in the same shop's share);
+         * money naming none (an advance, an on-account payment, a debit note
+           with no bill): the shop stamped on it when it was recorded
+           (store_id; POST /vendors/{id}/payments and /debit-notes stamp it);
+         * a legacy row with no stamp: the shop of the same supplier's latest
+           bill dated on or before it, else of its earliest bill.
+       So the shops add up to the supplier ledger. A supplier that has never
+       billed and an unstamped row have no shop: such money counts under all
+       stores only.
+    """
+    bills, payments, debit_notes = (
+        [d for d in docs or [] if isinstance(d, dict)]
+        for docs in (bills, payments, debit_notes)
+    )
+    mirror = {b.get("bill_id") for b in bills if b.get("source_transfer_id")}
+    mirror.discard(None)  # a mirror bill with no id must not swallow on-account money
+    bills = [b for b in bills if not b.get("source_transfer_id")]
+    payments, debit_notes = (
+        [d for d in docs if d.get("bill_id") not in mirror]
+        for docs in (payments, debit_notes)
+    )
+    if not store_id:
+        return bills, payments, debit_notes
+
+    shop_of_bill = {b.get("bill_id"): b.get("store_id") for b in bills if b.get("bill_id")}
+    billed: Dict[object, list] = {}
+    for b in bills:
+        billed.setdefault(b.get("vendor_id"), []).append((ledger_day(b), b.get("store_id") or ""))
+    for history in billed.values():
+        history.sort(key=lambda r: (r[0] == "", r))
+
+    def _shop(money: dict) -> Optional[str]:
+        if money.get("bill_id") in shop_of_bill:
+            return shop_of_bill[money["bill_id"]]
+        if money.get("store_id"):
+            return money["store_id"]
+        dated = billed.get(money.get("vendor_id"))
+        if not dated:
+            return None
+        day = ledger_day(money)
+        before = [r for r in dated if r[0] and day and r[0] <= day]
+        return (before[-1] if before else dated[0])[1]
+
+    return (
+        [b for b in bills if b.get("store_id") == store_id],
+        [p for p in payments if _shop(p) == store_id],
+        [d for d in debit_notes if _shop(d) == store_id],
+    )
+
+
+def split_as_of(rows: tuple, as_of: Optional[str] = None) -> tuple:
+    """((bills, payments, notes) counted on the as-of day, (bills, payments,
+    notes) dated after it). Each row by its own ledger_day; undated rows count."""
+    cutoff = as_of_day(as_of)
+    counted = tuple([d for d in docs if ledger_day(d) <= cutoff] for docs in rows)
+    later = tuple([d for d in docs if ledger_day(d) > cutoff] for docs in rows)
+    return counted, later
+
+
+def supplier_ledger_rows(
+    bills: List[dict],
+    payments: List[dict],
+    debit_notes: List[dict],
+    store_id: Optional[str] = None,
+    as_of: Optional[str] = None,
+) -> tuple:
+    """THE (bills, payments, debit notes) every 'what we owe our suppliers'
+    figure is built from (F56/F63): supplier_rows (no transfer mirror bills;
+    with `store_id` one shop's share), struck on the as-of day -- only rows
+    dated on or before as_of_day (the day asked for, clamped to today) count;
+    undated rows always count. So the Purchases report, Cash Flow, AP aging,
+    the Suppliers card and the vendor ledger strike 'we owe' on the same day.
+
+    The cutoff applies to each row by its OWN date, after every row's shop is
+    known: a payment naming a bill keyed ahead is still that bill's shop's
+    money, never the shop of whatever earlier bill happens to be in range.
+    """
+    return split_as_of(supplier_rows(bills, payments, debit_notes, store_id), as_of)[0]
+
+
+def post_dated_entries(
+    bills: List[dict],
+    payments: List[dict],
+    debit_notes: List[dict],
+) -> List[dict]:
+    """The rows dated after the as-of day as ledger entries (build_ledger's
+    shape, chronological) with no running balance: recorded, so the ledger
+    shows them, but not counted in the balance until their day."""
+    entries = build_ledger(bills, payments, debit_notes)["entries"]
+    return [{k: v for k, v in e.items() if k != "balance"} for e in entries]
+
+
+def bill_as_of(
+    bill: dict,
+    payments: List[dict],
+    debit_notes: List[dict],
+    as_of: Optional[str] = None,
+) -> dict:
+    """One bill's figures on the ledger's as-of rule (default today).
+
+    outstanding     -- what is owed on it on the as-of day: its total less the
+                       money naming it dated on or before that day (floored at
+                       0) -- the figure the supplier ledger and AP aging count.
+    post_dated_money-- money naming it dated after that day (a post-dated
+                       cheque): recorded, not yet counted.
+    post_dated_until-- the latest such day, else None.
+    post_dated      -- the bill itself is dated after that day (keyed ahead).
+    """
+    bid = bill.get("bill_id")
+    mine = tuple(
+        [d for d in docs or [] if isinstance(d, dict) and d.get("bill_id") == bid]
+        for docs in (payments, debit_notes)
+    )
+    (pays, notes), (later_pays, later_notes) = split_as_of(mine, as_of)
+    later = later_pays + later_notes
+    return {
+        "outstanding": bill_outstanding(bill, pays, notes),
+        "post_dated_money": round(
+            sum(_payment_gross(p) for p in later_pays) + sum(_f(d.get("amount")) for d in later_notes),
+            2,
+        ),
+        "post_dated_until": max((ledger_day(d) for d in later), default=None),
+        "post_dated": is_post_dated(bill, as_of),
     }
 
 

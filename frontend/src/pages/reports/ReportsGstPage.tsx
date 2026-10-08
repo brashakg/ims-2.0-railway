@@ -13,11 +13,15 @@ import { FileText, Loader2 } from 'lucide-react';
 import { ReportCardsGrid } from './ReportCardsGrid';
 import { useReportsContext } from './ReportsLayout';
 import { useDiscountAnalysis } from './reportsQueries';
+import { useAuth } from '../../context/AuthContext';
+import { PAYABLES_ROLES } from '../../components/common/CostCell';
 
 export function ReportsGstPage() {
   const { storeId, startDate, endDate } = useReportsContext();
   const discQ = useDiscountAnalysis({ storeId, startDate, endDate });
   const discountAnalysis = discQ.data;
+  // GSTR-3B (input tax from supplier bills) is the accounts roles' (R1).
+  const canSeeInputTax = useAuth().hasRole(PAYABLES_ROLES);
 
   return (
     <>
@@ -31,15 +35,17 @@ export function ReportsGstPage() {
           <div>
             <h4 className="font-medium text-gray-900">GST Filing Data Ready</h4>
             <p className="text-sm text-gray-500 mt-1">
-              GST data for the period has been compiled. Download the reports for GSTR-1 and GSTR-3B filing.
+              GST data for the period has been compiled. Download the {canSeeInputTax ? 'reports for GSTR-1 and GSTR-3B' : 'report for GSTR-1'} filing.
             </p>
             <div className="flex gap-3 mt-3">
               <Link to="/reports/gstr1" className="btn-primary text-sm">
                 View GSTR-1
               </Link>
-              <Link to="/reports/gstr3b" className="btn-outline text-sm">
-                View GSTR-3B
-              </Link>
+              {canSeeInputTax && (
+                <Link to="/reports/gstr3b" className="btn-outline text-sm">
+                  View GSTR-3B
+                </Link>
+              )}
             </div>
           </div>
         </div>

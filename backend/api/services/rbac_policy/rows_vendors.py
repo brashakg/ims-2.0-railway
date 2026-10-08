@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Dict, List
 
+from ._core import ACCOUNTS
+
 ROWS: List[Dict[str, object]] = [
     # --- /api/v1/vendor-portal ---
     {
@@ -144,13 +146,13 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/rtv-debit-notes/{debit_note_id}/print",
-        "allowed": "AUTHENTICATED",
+        "allowed": ACCOUNTS,
         "store_scoped": True,
     },
     {
         "method": "GET",
         "path": "/api/v1/rtv-debit-notes/{debit_note_id}/tally",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": ACCOUNTS,
         "store_scoped": True,
     },
     # --- /api/v1/vendors ---
@@ -169,7 +171,7 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/vendors/ap-aging",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {"method": "GET", "path": "/api/v1/vendors/grn", "allowed": "AUTHENTICATED"},
     {
@@ -230,6 +232,14 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/vendors/grn/{grn_id}/document",
         "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
+    # Purchases this month (F56): per-vendor ordered / received / billed / paid /
+    # owed from the supplier ledger -- the supplier-balance readers only, the
+    # same set as /vendors/ap-aging; never a manager, never the counter.
+    {
+        "method": "GET",
+        "path": "/api/v1/vendors/purchases-this-month",
+        "allowed": ACCOUNTS,
+    },
     # Purchase Invoices (first-class AP+ITC; books the payable + ITC ledger).
     # Create/from-grn/book AND reads are accounting actions -> ACCOUNTANT/ADMIN.
     # (SUPERADMIN auto-passes via require_roles.) F1: reads expose supplier bill /
@@ -237,47 +247,47 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/vendors/purchase-invoices",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendors/purchase-invoices",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendors/purchase-invoices/",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendors/purchase-invoices/",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendors/purchase-invoices/from-grn/{grn_id}",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     # The form's live tax preview: what POST would book (same _bill_math),
     # nothing written -- same accounting gate as the booking it previews.
     {
         "method": "POST",
         "path": "/api/v1/vendors/purchase-invoices/preview",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     # F9: consolidate N Delivery Challans into a draft bulk invoice (accounting
     # action -> ACCOUNTANT/ADMIN, same gate as from-grn).
     {
         "method": "GET",
         "path": "/api/v1/vendors/purchase-invoices/from-dcs",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     # F9: stored DC bulk-tally detail (accounting read -> ACCOUNTANT/ADMIN).
     {
         "method": "GET",
         "path": "/api/v1/vendors/purchase-invoices/{invoice_id}/dc-match",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     # Phase 2: 3-way-match config + per-invoice match detail + exception override.
     # F1: config read (accounting policy) + match-detail read are now ACCOUNTANT/
@@ -285,17 +295,17 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/vendors/purchase-invoices/config",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "PUT",
         "path": "/api/v1/vendors/purchase-invoices/config",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendors/purchase-invoices/{invoice_id}/match",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     # Ruling 15: the invoice gate refuses an incomplete product, and the
     # accountant holds no products:write. This raises the cataloguing task for
@@ -303,12 +313,12 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/vendors/purchase-invoices/request-cataloguing",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendors/purchase-invoices/{invoice_id}/approve-exception",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     # F19: landed-cost capture / preview / one-way allocation. All three are
     # accounting actions on the bill's cost basis -> ACCOUNTANT/ADMIN (same
@@ -316,48 +326,48 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/vendors/purchase-invoices/{invoice_id}/landed-costs",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendors/purchase-invoices/{invoice_id}/landed-costs/preview",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendors/purchase-invoices/{invoice_id}/allocate-landed-costs",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendors/purchase-invoices/{invoice_id}",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     # S6: Accountant reconciliation ticks (inline recon sub-doc on vendor_bills).
     # Both write and read are accounting actions -> ACCOUNTANT/ADMIN.
     {
         "method": "POST",
         "path": "/api/v1/vendors/purchase-invoices/{invoice_id}/recon",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendors/purchase-invoices/{invoice_id}/recon",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     # S6: Accountant console worklists (stock-yet-to-receive, vendor returns,
     # pending scheme + return CNs). ACCOUNTANT/ADMIN read-only.
     {
         "method": "GET",
         "path": "/api/v1/vendors/recon/worklists",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     # P4: tick a scheme/rebate credit note as physically received (clears it from
     # the pending-scheme-CN worklist). ACCOUNTANT/ADMIN.
     {
         "method": "POST",
         "path": "/api/v1/vendors/recon/credit-notes/{credit_note_number}/mark-received",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",
@@ -416,7 +426,7 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/vendors/purchase-orders/{po_id}/dismiss-variance",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",
@@ -441,40 +451,42 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/vendors/{vendor_id}",
         "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
+    # F60: bills / debit notes / ledger / payments are what the owner owes a
+    # vendor -> ACCOUNTANT/ADMIN, the same gate as /ap-aging (their aggregate).
     {
         "method": "GET",
         "path": "/api/v1/vendors/{vendor_id}/bills",
-        "allowed": "AUTHENTICATED",
+        "allowed": ACCOUNTS,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendors/{vendor_id}/bills",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendors/{vendor_id}/debit-notes",
-        "allowed": "AUTHENTICATED",
+        "allowed": ACCOUNTS,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendors/{vendor_id}/debit-notes",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendors/{vendor_id}/ledger",
-        "allowed": "AUTHENTICATED",
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendors/{vendor_id}/payments",
-        "allowed": "AUTHENTICATED",
+        "allowed": ACCOUNTS,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendors/{vendor_id}/payments",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "POST",
@@ -521,11 +533,11 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/vendors/tds/threshold-status",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendors/tds/26q-export",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
 ]

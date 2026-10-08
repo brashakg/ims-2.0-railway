@@ -21,6 +21,11 @@ per object in the handler.
 
 No comms. No emoji (Windows cp1252). Money is paise-exact integers; responses
 carry both paise and a rupee display field.
+
+Supplier money (owner ruling 2026-10-01): a note's amounts are the accounts
+roles' alone (services/payables_mask). The JSON reads and the issue response
+drop them for anyone else; the print and the Tally export, which are nothing
+but those amounts, answer 403 to anyone else.
 """
 
 from __future__ import annotations
@@ -44,6 +49,11 @@ from ..services.rtv_debit_note import (
     paise_to_rupees,
     render_debit_note_html,
     tally_build_debit_note_xml,
+)
+from ..services.payables_mask import (
+    AP_ROLES,
+    require_payables,
+    strip_debit_note_money,
 )
 
 logger = logging.getLogger(__name__)
@@ -204,7 +214,9 @@ async def list_debit_notes(
         rows = eng.list(vendor_id=vendor_id, skip=skip, limit=limit)
     else:
         rows = eng.list(store_ids=list(reach), vendor_id=vendor_id, skip=skip, limit=limit)
-    return {"debit_notes": [_with_rupees(r) for r in rows], "total": len(rows)}
+    return strip_debit_note_money(
+        {"debit_notes": [_with_rupees(r) for r in rows], "total": len(rows)}, current_user
+    )
 
 
 @router.post("/issue", status_code=201)
@@ -234,11 +246,14 @@ async def issue_debit_note(
         seller=seller,
     )
     if not res.get("ok"):
-        raise _http_from_result(res)
-    return {
-        "idempotent": bool(res.get("idempotent")),
-        "debit_note": _with_rupees(res.get("debit_note")),
-    }
+        raise _http_from_result(strip_debit_note_money(res, current_user))
+    return strip_debit_note_money(
+        {
+            "idempotent": bool(res.get("idempotent")),
+            "debit_note": _with_rupees(res.get("debit_note")),
+        },
+        current_user,
+    )
 
 
 @router.get("/{debit_note_id}")
@@ -251,7 +266,7 @@ async def get_debit_note(
     if doc is None:
         raise HTTPException(status_code=404, detail="Debit note not found")
     validate_store_access(doc.get("store_id"), current_user)
-    return _with_rupees(doc)
+    return strip_debit_note_money(_with_rupees(doc), current_user)
 
 
 @router.get("/{debit_note_id}/print", response_class=HTMLResponse)
@@ -259,6 +274,7 @@ async def print_debit_note(
     debit_note_id: str, current_user: dict = Depends(get_current_user)
 ):
     """Printable GST debit-note HTML. Store-IDOR guarded."""
+    require_payables(current_user, "The debit note print")
     eng = _engine()
     doc = eng.get(debit_note_id)
     if doc is None:
@@ -267,13 +283,19 @@ async def print_debit_note(
     return HTMLResponse(content=render_debit_note_html(doc))
 
 
+# The Tally voucher IS the debit note's money: the accounts roles only (owner
+# ruling 2026-10-01, supplier money is ADMIN / SUPERADMIN / ACCOUNTANT's).
+_AP_ROLES = AP_ROLES
+
+
 @router.get("/{debit_note_id}/tally", response_class=PlainTextResponse)
 async def export_debit_note_tally(
     debit_note_id: str,
-    current_user: dict = Depends(require_roles(*_DEBIT_NOTE_ROLES)),
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
 ):
     """Tally import XML carrying the Debit Note voucher (balanced; debits ==
-    credits). Vendor/AP roles only. Store-IDOR guarded."""
+    credits). Accounts roles only. Store-IDOR guarded."""
+    require_payables(current_user, "The debit note Tally export")
     eng = _engine()
     doc = eng.get(debit_note_id)
     if doc is None:

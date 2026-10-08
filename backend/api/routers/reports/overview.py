@@ -19,6 +19,8 @@ from ...dependencies import (
     get_db,
     validate_store_access,
 )
+from ...services import stock_value
+from ...services.cost_mask import can_see_cost
 from ...services.name_resolver import order_actor_id, order_actor_name_map
 from ...services.reorder_policy import low_stock_rows
 from ._shared import (
@@ -165,13 +167,16 @@ async def inventory_report(
     stock_repo = get_stock_repository()
 
     if stock_repo is not None:
-        all_stock = stock_repo.find_many({"store_id": active_store}, limit=0)
+        # F47: the one stock-value rule -- units physically on the shelf at what
+        # they cost (services/stock_value); the counter reads no cost figure.
+        all_stock = stock_value.shelf_units(
+            stock_repo, get_product_repository(), active_store
+        )
+        show_cost = can_see_cost(current_user, "product")
         low_stock = low_stock_rows(get_product_repository(), stock_repo, store_id=active_store)
 
         total_items = len(all_stock)
-        total_value = sum(
-            (s.get("quantity", 0) * s.get("cost_price", 0)) for s in all_stock
-        )
+        total_value = stock_value.total(all_stock) if show_cost else None
         low_stock_count = len(low_stock) if low_stock else 0
         out_of_stock = len([s for s in all_stock if s.get("quantity", 0) <= 0])
 
@@ -182,13 +187,15 @@ async def inventory_report(
             if cat not in categories:
                 categories[cat] = {"name": cat, "count": 0, "value": 0}
             categories[cat]["count"] += 1
-            categories[cat]["value"] += item.get("quantity", 0) * item.get(
-                "cost_price", 0
-            )
+            categories[cat]["value"] += item["cost_value"]
+        for c in categories.values():
+            c["value"] = round(c["value"], 2) if show_cost else None
 
         return {
             "totalItems": total_items,
-            "totalValue": round(total_value, 2),
+            "totalValue": total_value,
+            # Units with no cost add Rs 0 to totalValue; said, not hidden.
+            "uncostedUnits": stock_value.uncosted(all_stock) if show_cost else None,
             "lowStock": low_stock_count,
             "outOfStock": out_of_stock,
             "categories": list(categories.values()),

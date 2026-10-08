@@ -7,9 +7,14 @@
 // by the very code the booking stores with. Its own copy previewed CGST + SGST
 // on a manual bill the server booked as IGST, called a junk-prefix GSTIN
 // inter-state, and rounded a paisa differently (panel on F6/F40).
+//
+// It also says, for an admin, which shop the bill books to: the server books
+// it to the receipt's shop, else to the booker's own active shop -- whatever
+// shop his Purchase filter shows. A manual bill raised while he viewed Pune
+// went to Dhanbad and vanished from the list, unannounced (review r2 #19).
 // ============================================================================
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Plus, X, Loader2, FileText, Trash2 } from 'lucide-react';
 import {
   purchaseInvoicesApi,
@@ -19,7 +24,7 @@ import {
   type PurchaseInvoicePreview,
 } from '../../../services/api/vendorAp';
 import { useToast } from '../../../context/ToastContext';
-import { useAuth } from '../../../context/AuthContext';
+import { PurchaseShopName, usePurchaseShop } from '../purchaseShop';
 import type { Supplier } from '../purchaseTypes';
 import { inr, GST_RATES, errMsg } from './shared';
 import { istDayString } from '../../../utils/datetime';
@@ -61,10 +66,12 @@ export function InvoiceFormDrawer({
   prefill: Partial<PurchaseInvoice>;
   initialLines: EditLine[];
   onClose: () => void;
-  onBooked: () => void;
+  /** `bookedAt`: the shop the server booked the bill to. */
+  onBooked: (bookedAt?: string) => void;
 }) {
   const toast = useToast();
-  const { user } = useAuth();
+  const { canPick, ownStoreId, storeId: viewing } = usePurchaseShop();
+  const shopNameRef = useRef<HTMLSpanElement>(null);
   // The IST day (owner ruling): toISOString() is the UTC day, yesterday from
   // 00:00 to 05:30 IST -- a bill booked on it lands in the previous month's
   // GSTR-3B on the 1st, or under that month's lock.
@@ -91,6 +98,11 @@ export function InvoiceFormDrawer({
   // a receipt-less goods bill — GRN_LINK_REQUIRED); SERVICES books as before.
   const prefillDcIds = (prefill as { linked_dc_ids?: string[] }).linked_dc_ids;
   const receiptLinked = locked || Boolean(prefillDcIds && prefillDcIds.length);
+  // The shop the server books this bill to (purchase_invoices create): the
+  // receipt's shop, else the booker's own active shop. A linked receipt whose
+  // shop the form was not told (the from-GRN deep link's draft names none)
+  // still books to the receipt's shop -- unknown here, so not named.
+  const bookedTo = prefill.store_id || (receiptLinked ? undefined : ownStoreId);
   const [billKind, setBillKind] = useState<'' | 'GOODS' | 'SERVICES'>('');
 
   const selectedVendor = useMemo(() => suppliers.find((s) => s.id === vendorId), [suppliers, vendorId]);
@@ -110,7 +122,7 @@ export function InvoiceFormDrawer({
     recipient_gstin: recipientGstin.trim() || undefined,
     po_id: prefill.po_id,
     grn_id: prefill.grn_id,
-    store_id: prefill.store_id ?? user?.activeStoreId,
+    store_id: prefill.store_id || ownStoreId,
     lines: validLines.map((l): PurchaseInvoiceLine => ({
       product_id: l.product_id,
       product_name: l.product_name.trim(),
@@ -175,9 +187,17 @@ export function InvoiceFormDrawer({
 
     setSaving(true);
     try {
-      await purchaseInvoicesApi.create(payload);
-      toast.success('Purchase invoice booked');
-      onBooked();
+      const booked = await purchaseInvoicesApi.create(payload);
+      const bookedAt = booked?.store_id || bookedTo;
+      // An admin booking to a shop other than the one his list shows (or on
+      // All stores) is told where it went, in the words of the line above.
+      const named = bookedAt === bookedTo ? shopNameRef.current?.textContent : null;
+      toast.success(
+        canPick && bookedAt && bookedAt !== viewing
+          ? `Purchase invoice booked to ${named || bookedAt}`
+          : 'Purchase invoice booked',
+      );
+      onBooked(bookedAt);
     } catch (e) {
       const blocked = blockedProductIds(e);
       toast.error(errMsg(e, 'Failed to book purchase invoice'));
@@ -210,6 +230,21 @@ export function InvoiceFormDrawer({
         </div>
 
         <div className="p-5 space-y-5">
+          {/* F63: for an admin, whatever shop his filter shows, where this
+              bill books to -- the NewOrdersDeliverTo pattern for bills. */}
+          {canPick && (bookedTo || receiptLinked) && (
+            <p className="text-sm text-gray-600">
+              Bills booked here go to{' '}
+              {bookedTo ? (
+                <span ref={shopNameRef} className="font-medium text-gray-900">
+                  <PurchaseShopName storeId={bookedTo} />
+                </span>
+              ) : (
+                'the shop that received the goods'
+              )}
+            </p>
+          )}
+
           {/* What is this bill for? (only asked when no receipt is linked) */}
           {!receiptLinked && (
             <div>

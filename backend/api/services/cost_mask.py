@@ -17,8 +17,32 @@ No emoji (Windows cp1252).
 """
 from typing import Dict, List
 
-COST_VISIBLE_ROLES = {"SUPERADMIN", "ADMIN", "ACCOUNTANT"}
-CATALOG_FORM_ROLES = {"CATALOG_MANAGER"}
+# The accounts roles. Defined ONCE, here: they see cost + margin, and they
+# alone see supplier payments -- the vendor ledger / bills / payments / debit
+# notes / ap-aging / TDS, the purchase-invoice and recon books (their
+# require_roles gates ARE this tuple), plus every finance read of the same
+# money and vendor rebates (they ask can_see_cost(user, "payables")); the
+# rbac_policy rows for all of them are rbac_policy._core.ACCOUNTS, built from
+# this tuple. SUPERADMIN passes every gate on its own.
+AP_ROLES = ("ADMIN", "ACCOUNTANT")
+COST_VISIBLE_ROLES = {"SUPERADMIN", *AP_ROLES}
+# The purchase roles: who buys, receives and pays suppliers, so who sees what
+# was paid and to whom. Defined ONCE, here: the purchase screens' route gate
+# (routers/vendors/_shared._VENDOR_ROLES) and the vendor-return, RTV debit-note
+# and RMA gates ARE this tuple, and the "purchase" context admits exactly it.
+# SUPERADMIN passes every require_roles gate on its own.
+PURCHASE_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
+# Who reads vendor returns and RTV debit notes: the purchase roles plus the
+# Vendor Returns screen's WORKSHOP_STAFF (logs the defective pair), who is shown
+# the item, quantity and reason only (mask_vendor_return / mask_debit_note).
+# Their read gates ARE this tuple.
+RETURN_READERS = (*PURCHASE_ROLES, "WORKSHOP_STAFF")
+# context -> the roles it admits on top of COST_VISIBLE_ROLES.
+_CONTEXT_ROLES = {
+    "purchase": set(PURCHASE_ROLES),
+    "product": {*PURCHASE_ROLES, "CATALOG_MANAGER"},
+    "payables": set(),  # supplier payments: the accounts roles alone
+}
 
 # Raw cost fields that may appear on product / stock / order-line payloads.
 _COST_FIELDS = {"cost_price", "cost_value", "cost_at_sale", "unit_cost"}
@@ -43,11 +67,7 @@ def _roles_of(user: dict) -> set:
 
 def can_see_cost(user: dict, context: str = "default") -> bool:
     roles = _roles_of(user)
-    if roles & COST_VISIBLE_ROLES:
-        return True
-    if context == "catalog_edit" and (roles & CATALOG_FORM_ROLES):
-        return True
-    return False
+    return bool(roles & (COST_VISIBLE_ROLES | _CONTEXT_ROLES.get(context, set())))
 
 
 def mask_cost(doc: dict, user: dict, context: str = "default") -> dict:

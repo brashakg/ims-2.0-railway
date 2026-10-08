@@ -9,17 +9,16 @@ import { useSearchParams } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { Search, Loader2, AlertTriangle } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
-import { useAuth } from '../../context/AuthContext';
+import { usePurchaseShop } from './purchaseShop';
 import { vendorsApi } from '../../services/api';
 import { PurchaseTable } from './PurchaseTable';
 import { PurchaseOrderForm } from './PurchaseOrderForm';
 import { PurchaseOrderDetail } from './PurchaseOrderDetail';
-import { useSuppliers, usePurchaseOrdersQuery, purchaseOrdersQueryKey } from './purchaseQueries';
+import { useSuppliers, usePurchaseOrdersQuery, purchaseOrdersQueryKey, type PurchaseOrderPage } from './purchaseQueries';
 import type { POStatus, PurchaseOrder } from './purchaseTypes';
 
 export function PurchaseOrdersSection() {
   const toast = useToast();
-  const { user } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
 
@@ -30,11 +29,14 @@ export function PurchaseOrdersSection() {
 
   // Cached across section switches (owner: switching felt like a reload).
   // First visit fetches; later visits render instantly + refresh in background.
-  const storeId = user?.activeStoreId;
+  const { storeId, ownStoreId, showShopOf } = usePurchaseShop(); // audit F63: one Purchase scope
   const suppliersQ = useSuppliers();
   const posQ = usePurchaseOrdersQuery(storeId);
   const suppliers = suppliersQ.data ?? [];
-  const purchaseOrders = posQ.data ?? [];
+  const purchaseOrders = posQ.data?.orders ?? [];
+  // Every order in scope, not the page's length (review round 2, #18): the
+  // server sends the newest page, and the screen says when it is a cut.
+  const totalOrders = posQ.data?.total ?? purchaseOrders.length;
   const isLoading = (suppliersQ.isPending || posQ.isPending);
   const loadError = suppliersQ.isError || posQ.isError
     ? 'Failed to load purchase data'
@@ -42,7 +44,9 @@ export function PurchaseOrdersSection() {
 
   // Cache writer for PO mutations: the list updates in place, no refetch flash.
   const patchPOs = (fn: (old: PurchaseOrder[]) => PurchaseOrder[]) =>
-    queryClient.setQueryData<PurchaseOrder[]>(purchaseOrdersQueryKey(storeId), (old) => fn(old ?? []));
+    queryClient.setQueryData<PurchaseOrderPage>(purchaseOrdersQueryKey(storeId), (old) =>
+      old ? { ...old, orders: fn(old.orders) } : old,
+    );
 
   // Header "New PO" button navigates to ?new=1 (see PurchaseLayout).
   useEffect(() => {
@@ -162,7 +166,15 @@ export function PurchaseOrdersSection() {
           <Loader2 className="w-8 h-8 animate-spin text-blue-600" />
         </div>
       ) : (
-        <PurchaseTable purchaseOrders={filteredPOs} onViewPO={setSelectedPO} />
+        <>
+          {purchaseOrders.length < totalOrders && (
+            <p className="text-xs text-gray-600 mt-3" data-testid="po-list-cut">
+              Latest {purchaseOrders.length} of {totalOrders} orders, newest first. Search and the
+              status filter look only in these {purchaseOrders.length}.
+            </p>
+          )}
+          <PurchaseTable purchaseOrders={filteredPOs} onViewPO={setSelectedPO} />
+        </>
       )}
 
       {/* Create PO Modal */}
@@ -170,10 +182,19 @@ export function PurchaseOrdersSection() {
         <PurchaseOrderForm
           suppliers={suppliers}
           suppliersLoading={suppliersQ.isPending}
-          existingPOCount={purchaseOrders.length}
+          existingPOCount={totalOrders}
           onClose={() => setShowCreatePO(false)}
           onCreated={(newPO) => {
-            patchPOs(prev => [newPO, ...prev]);
+            // A new PO delivers to the creator's own shop (W1.4): it joins that
+            // shop's list and the all-stores list, never the list of a shop
+            // an admin happens to be viewing -- which then shows its shop (F63).
+            for (const key of new Set([ownStoreId, undefined])) {
+              queryClient.setQueryData<PurchaseOrderPage>(
+                purchaseOrdersQueryKey(key),
+                (old) => old && { orders: [newPO, ...old.orders], total: old.total + 1 },
+              );
+            }
+            showShopOf(ownStoreId);
             setShowCreatePO(false);
           }}
         />

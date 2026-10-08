@@ -782,15 +782,21 @@ def _store_fence_coords(user: dict) -> list:
 
 
 def _default_active_store(user: dict) -> Optional[str]:
-    """Pick a sensible active store for an all-stores role (SUPERADMIN/ADMIN/
-    AREA_MANAGER) whose account has NO explicit store assignment, so the topbar
-    never shows a 'No store' pill and POS isn't dead-ended on first login.
+    """Pick a sensible active store for an all-stores role (SUPERADMIN/ADMIN)
+    whose account has NO explicit store assignment, so the topbar never shows
+    a 'No store' pill and POS isn't dead-ended on first login.
 
-    Prefers an active HQ store, else any active store, else any store. Returns
-    None (the prior behaviour) when the user is not an all-stores role, there is
-    no DB, or no stores exist. Fail-soft -- never blocks token issue."""
+    Prefers an active HQ store, else the first physical shop (never the
+    stockless ONLINE store -- every shop-scoped screen reads 0 there, F63), else
+    any active store, else any store. Returns None (the prior behaviour) when
+    the user is not an admin, there is no DB, or no stores exist.
+    Fail-soft -- never blocks token issue.
+
+    Owner ruling 2026-10-07 (R3): an AREA_MANAGER is not an admin. With no
+    shop assigned he gets no shop -- handing him one here made him read a shop
+    he was never given (resolve_store_scope never saw him as shop-less)."""
     roles = user.get("roles", []) or []
-    if not any(r in ("SUPERADMIN", "ADMIN", "AREA_MANAGER") for r in roles):
+    if not any(r in ("SUPERADMIN", "ADMIN") for r in roles):
         return None
     try:
         from database.connection import get_db
@@ -801,9 +807,12 @@ def _default_active_store(user: dict) -> Optional[str]:
     if db is None:
         return None
     try:
+        from ..services.stores_util import physical_stores
+
         coll = db.get_collection("stores")
         s = (
             coll.find_one({"is_active": True, "store_type": "HQ"}, {"_id": 0, "store_id": 1})
+            or next(iter(physical_stores(db)), None)
             or coll.find_one({"is_active": True}, {"_id": 0, "store_id": 1})
             or coll.find_one({}, {"_id": 0, "store_id": 1})
         )
@@ -1326,15 +1335,16 @@ def _resolve_refresh_claims(payload: dict, db_user: Optional[dict]) -> dict:
     roles = normalize_roles(roles)
 
     # Keep the active store only if it is still one of the user's stores (a
-    # reassigned store-level user falls back to their first remaining store).
+    # reassigned store-level user falls back to their first remaining store,
+    # and one left with NO store keeps none -- R3: never a shop he was not
+    # given, e.g. one an older login defaulted an area manager to).
     active_store = payload.get("active_store_id")
     if (
-        store_ids
-        and active_store
-        and active_store not in store_ids
+        active_store
+        and active_store not in (store_ids or [])
         and not any(r in ("ADMIN", "SUPERADMIN") for r in roles)
     ):
-        active_store = store_ids[0]
+        active_store = store_ids[0] if store_ids else None
     # Rotating refresh with no rider access token (claims empty): mirror
     # login's default rather than issuing a store-less token.
     if not active_store and store_ids:

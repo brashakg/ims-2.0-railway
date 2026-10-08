@@ -38,13 +38,16 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from ..dependencies import resolve_store_scope, user_store_scope
+from ..services import ap_engine
 from .auth import get_current_user, require_roles
+from ..services.cost_mask import AP_ROLES
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-# Same gate as purchase_invoices.py
-_AP_ROLES = ("ADMIN", "ACCOUNTANT")
+# The accounts roles (services/cost_mask), as purchase_invoices.py.
+_AP_ROLES = AP_ROLES
 
 # Statuses that mean a vendor return is still open/in-flight (not resolved)
 _OPEN_RETURN_STATUSES = {"created", "shipped", "received_by_vendor"}
@@ -108,8 +111,14 @@ class ReconUpdate(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _fetch_bill(db, invoice_id: str) -> dict:
-    """Return the vendor_bills doc or raise 404 / 503."""
+def _fetch_bill(db, invoice_id: str, current_user: dict) -> dict:
+    """Return the vendor_bills doc or raise 404 / 503.
+
+    The one Purchase shop scope (F63) holds here too: a bill outside the
+    caller's shop (ADMIN / SUPERADMIN reach every shop, everyone else only the
+    bill's own -- purchase_invoices._bill_in_scope_or_404) answers the same 404,
+    word for word, as a bill that does not exist, so a Pune accountant can
+    neither read nor tick a Dhanbad bill by typing its id."""
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
     try:
@@ -120,7 +129,10 @@ def _fetch_bill(db, invoice_id: str) -> dict:
         logger.error("[RECON] DB error fetching bill %s: %s", invoice_id, exc)
         raise HTTPException(status_code=503, detail="Database unavailable") from exc
     if not doc:
-        raise HTTPException(status_code=404, detail="Invoice not found")
+        raise HTTPException(status_code=404, detail="Purchase invoice not found")
+    from .purchase_invoices import _bill_in_scope_or_404
+
+    _bill_in_scope_or_404(doc, current_user)
     return doc
 
 
@@ -170,7 +182,7 @@ async def upsert_recon(
     404 if the invoice does not exist; 503 if the DB is down.
     """
     db = _get_db()
-    doc = _fetch_bill(db, invoice_id)
+    doc = _fetch_bill(db, invoice_id, current_user)
 
     actor_id = current_user.get("user_id") or current_user.get("id", "unknown")
     now = _now_iso()
@@ -208,7 +220,7 @@ async def get_recon(
     reconciliation has been done yet.  404 if the invoice does not exist.
     """
     db = _get_db()
-    doc = _fetch_bill(db, invoice_id)
+    doc = _fetch_bill(db, invoice_id, current_user)
     recon = dict(doc.get("recon") or {})
     # Ensure all 4 flag keys are present for a predictable frontend shape
     for flag in _RECON_FLAGS:
@@ -358,13 +370,44 @@ def _pending_vendor_returns_open(db, store_id: Optional[str]) -> list:
     return out
 
 
-def _pending_scheme_cns(db, vendor_id: Optional[str]) -> list:
+def _scheme_cns_in_shop(db, cns: list, store_id: Optional[str]) -> list:
+    """The credit notes of `cns` that are `store_id`'s, by THE supplier-ledger
+    row rule (ap_engine.supplier_ledger_rows): a note naming a bill is that
+    bill's shop's; one naming none (a volume rebate) the shop stamped on it,
+    else the shop of its supplier's bills -- the same shop the ledger, the
+    Purchases report and the debit-notes list put it in. No shop (all stores,
+    an admin's view) -> every note. A read failure -> none: a note is never
+    shown to a shop that cannot be shown to own it."""
+    if not store_id or not cns:
+        return list(cns or [])
+    vendor_ids = list({c.get("vendor_id") for c in cns if c.get("vendor_id")})
+    try:
+        # ALL the suppliers' bills, whole, as every other reader of the rule
+        # passes them (cash_flow, ap_payments), so a note finds its shop here
+        # exactly as it does on the ledger.
+        bills = list(
+            db.get_collection("vendor_bills").find(
+                {"vendor_id": {"$in": vendor_ids}}, {"_id": 0}
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[RECON] could not read bills to place scheme CNs: %s", exc)
+        return []
+    return ap_engine.supplier_ledger_rows(bills, [], cns, store_id)[2]
+
+
+def _pending_scheme_cns(
+    db, vendor_id: Optional[str], store_id: Optional[str] = None
+) -> list:
     """Scheme / volume-rebate credit notes that have not been marked received.
     These live in ``vendor_debit_notes`` (CREDIT_NOTES_COLLECTION in rebate_engine.py)
     with ``source == 'VOLUME_REBATE'``.  A CN is 'pending' if it has no
     ``cn_received_at`` field (the accountant physically receives the paper CN from
     the vendor and ticks it here; we do not currently auto-set this flag, so all
     VOLUME_REBATE CNs without cn_received_at are shown as pending).
+
+    `store_id` (the resolved Purchase shop, F63) keeps only that shop's notes
+    (_scheme_cns_in_shop); None = every shop.
     """
     if db is None:
         return []
@@ -374,7 +417,7 @@ def _pending_scheme_cns(db, vendor_id: Optional[str]) -> list:
     }
     if vendor_id:
         flt["vendor_id"] = vendor_id
-    rows = _safe_list(db, "vendor_debit_notes", flt)
+    rows = _scheme_cns_in_shop(db, _safe_list(db, "vendor_debit_notes", flt), store_id)
     out = []
     for r in rows:
         out.append(
@@ -420,10 +463,12 @@ async def get_recon_worklists(
       pending_credit_notes_return -- open vendor-return CNs not yet issued
     """
     db = _get_db()  # May be None when DB is down; each helper handles that.
+    # The one Purchase shop scope (F63): a Pune accountant never reads Dhanbad.
+    store_id = resolve_store_scope(store_id, current_user)
 
     stock_yet_to_receive = _stock_yet_to_receive(db, store_id)
     vendor_returns = _pending_vendor_returns_open(db, store_id)
-    pending_cns_scheme = _pending_scheme_cns(db, vendor_id)
+    pending_cns_scheme = _pending_scheme_cns(db, vendor_id, store_id)
     pending_cns_return = _pending_return_credit_notes(db, store_id)
 
     return {
@@ -432,6 +477,17 @@ async def get_recon_worklists(
         "pending_credit_notes_scheme": pending_cns_scheme,
         "pending_credit_notes_return": pending_cns_return,
     }
+
+
+def _scheme_cn_in_reach(db, cn: dict, current_user: dict) -> bool:
+    """ONE credit note in the caller's shop scope: ADMIN / SUPERADMIN reach
+    every shop; anyone else only a note whose shop -- by the ledger's row
+    rule, _scheme_cns_in_shop -- is one of theirs (the per-object reach of
+    can_access_store_scoped). A note no shop owns is an admin's only."""
+    is_cross, stores = user_store_scope(current_user)
+    if is_cross:
+        return True
+    return any(_scheme_cns_in_shop(db, [cn], s) for s in sorted(stores))
 
 
 @router.post("/recon/credit-notes/{credit_note_number}/mark-received", status_code=200)
@@ -457,7 +513,9 @@ async def mark_scheme_cn_received(
     except Exception as exc:  # noqa: BLE001
         logger.error("[RECON] DB error finding scheme CN %s: %s", credit_note_number, exc)
         raise HTTPException(status_code=503, detail="Database unavailable") from exc
-    if not existing:
+    # F63: a note outside the caller's shop (by the ledger's row rule) is the
+    # same 404 as a missing one -- a Pune accountant cannot tick Dhanbad's.
+    if not existing or not _scheme_cn_in_reach(db, existing, current_user):
         raise HTTPException(status_code=404, detail="Scheme credit note not found")
     now = _now_iso()
     try:

@@ -40,6 +40,7 @@ import { purchaseInvoicesApi, type PurchaseInvoice, type MatchStatus, type Excep
 import { PurchaseStatusChip } from '../../components/purchase/PurchaseStatusChip';
 import { byPerson } from './purchaseTypes';
 import { useAuth } from '../../context/AuthContext';
+import { PurchaseShopPicker, usePurchaseShop } from './purchaseShop';
 import { useToast } from '../../context/ToastContext';
 import type { UserRole } from '../../types';
 
@@ -974,10 +975,13 @@ function ReturnCnTable({ rows }: { rows: ReconWorklists['pending_credit_notes_re
 // ---- Main page ---------------------------------------------------------------
 
 export default function ReconConsole() {
-  const { user, hasRole } = useAuth();
+  const { hasRole } = useAuth();
   const toast = useToast();
-  const storeId = user?.activeStoreId;
+  const { storeId, canPick } = usePurchaseShop(); // audit F63: one Purchase scope
   const canApprove = hasRole(EXCEPTION_APPROVE_ROLES);
+  // Which shops an empty queue covers, said plainly (F63): never "this store"
+  // while the admin's picker is on all stores.
+  const queueWhere = !storeId ? 'in any store' : canPick ? 'for the shop picked above' : 'for your shop';
 
   // Queue: invoices + their recon blocks
   const [invoices, setInvoices] = useState<PurchaseInvoice[]>([]);
@@ -1248,7 +1252,8 @@ export default function ReconConsole() {
             One queue of purchase invoices — attest each (Reconciled / Tally / GST / Paid), batch-confirm auto-matched ones
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <PurchaseShopPicker />
           {invoices.length > 0 && (
             <span className="text-xs text-gray-500 bg-gray-100 px-2.5 py-1 rounded-full">
               {allDoneCount}/{invoices.length} fully reconciled
@@ -1342,7 +1347,7 @@ export default function ReconConsole() {
             <FileText size={28} className="mx-auto mb-2" />
             <p className="text-sm">
               {invoices.length === 0
-                ? 'No purchase invoices found for this store.'
+                ? `No purchase invoices found ${queueWhere}.`
                 : 'No invoices match this filter.'}
             </p>
           </div>

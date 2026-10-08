@@ -512,8 +512,11 @@ def test_router_raise_and_list(rt, db):
     # Pass the query params explicitly: calling the handler directly bypasses
     # FastAPI's Query-default resolution, so the raw Query objects must be
     # overridden with concrete values.
+    # The credit is supplier money -- the accounts roles' alone (owner ruling
+    # 2026-10-01; a manager's read is checked in
+    # test_supplier_money_masked_for_managers.py), so an ACCOUNTANT reads it.
     listed = _run(list_rmas(store_id=None, vendor_id=None, status=None, skip=0,
-                            limit=50, current_user=_user(["STORE_MANAGER"])))
+                            limit=50, current_user=_user(["ACCOUNTANT"])))
     assert listed["total"] == 1
     # rupee display field present alongside the paise integer
     assert listed["rmas"][0]["expected_credit_rupees"] == 3000.0

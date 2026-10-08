@@ -9,8 +9,11 @@ from ...dependencies import (
     get_product_repository,
     get_eye_test_repository,
     get_db,
+    resolve_store_scope,
     validate_store_access,
 )
+from ...services import stock_value
+from ...services.cost_mask import can_see_cost
 from ...services.reorder_policy import low_stock_rows
 from ._shared import (
     _REPORT_FINANCE_ROLES,
@@ -30,7 +33,10 @@ async def inventory_summary(
     current_user: dict = Depends(get_current_user),
 ):
     """Get inventory summary"""
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    # THE shop rule: an admin reads every shop when none is asked, anyone
+    # else their own -- and a non-admin login with no shop is refused (R3),
+    # never handed shelf_units(None), every shop's stock at cost.
+    active_store = resolve_store_scope(store_id, current_user)
     stock_repo = get_stock_repository()
 
     if stock_repo is None:
@@ -45,12 +51,13 @@ async def inventory_summary(
         }
 
     # Get all stock
-    all_stock = stock_repo.find_many({"store_id": active_store}, limit=0)
+    # F47: the one stock-value rule -- units physically on the shelf at what
+    # they cost (services/stock_value); the counter reads no cost figure.
+    all_stock = stock_value.shelf_units(stock_repo, get_product_repository(), active_store)
     low_stock = low_stock_rows(get_product_repository(), stock_repo, store_id=active_store)
 
-    total_value = sum(
-        (s.get("quantity", 0) * s.get("cost_price", 0)) for s in all_stock
-    )
+    show_cost = can_see_cost(current_user, "product")
+    total_value = stock_value.total(all_stock) if show_cost else None
 
     out_of_stock = [s for s in all_stock if s.get("quantity", 0) <= 0]
 
@@ -58,7 +65,9 @@ async def inventory_summary(
         "summary": {
             "total_items": len(all_stock),
             "total_quantity": sum(s.get("quantity", 0) for s in all_stock),
-            "total_value": round(total_value, 2),
+            "total_value": total_value,
+            # Units with no cost add Rs 0 to total_value; said, not hidden.
+            "uncosted_units": stock_value.uncosted(all_stock) if show_cost else None,
             "low_stock_count": len(low_stock) if low_stock else 0,
             "out_of_stock_count": len(out_of_stock),
         }
@@ -71,13 +80,14 @@ async def inventory_valuation(
     current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
 ):
     """Get inventory valuation by category (management report; store-scoped)."""
-    active_store = validate_store_access(store_id, current_user)
+    active_store = resolve_store_scope(store_id, current_user)  # R3: see summary
     stock_repo = get_stock_repository()
 
     if stock_repo is None:
         return {"valuation": {"by_category": [], "total": 0}}
 
-    all_stock = stock_repo.find_many({"store_id": active_store}, limit=0)
+    # F47: the one stock-value rule (services/stock_value).
+    all_stock = stock_value.shelf_units(stock_repo, get_product_repository(), active_store)
 
     # category lives on the product master, not the stock doc -> join it so the
     # by-category split is real (FRAME etc.) instead of everything in "Other".
@@ -90,16 +100,17 @@ async def inventory_valuation(
         if category not in by_category:
             by_category[category] = {"category": category, "quantity": 0, "value": 0}
         by_category[category]["quantity"] += item.get("quantity", 0)
-        by_category[category]["value"] += item.get("quantity", 0) * item.get(
-            "cost_price", 0
+        by_category[category]["value"] = round(
+            by_category[category]["value"] + item["cost_value"], 2
         )
 
-    total = sum(c["value"] for c in by_category.values())
+    total = stock_value.total(all_stock)
 
     return {
         "valuation": {
             "by_category": list(by_category.values()),
             "total": round(total, 2),
+            "uncosted_units": stock_value.uncosted(all_stock),
         }
     }
 

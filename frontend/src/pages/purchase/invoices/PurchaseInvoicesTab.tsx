@@ -24,11 +24,11 @@ import {
   type PurchaseInvoiceConfig,
 } from '../../../services/api/vendorAp';
 import { useToast } from '../../../context/ToastContext';
-import { useAuth } from '../../../context/AuthContext';
+import { usePurchaseShop } from '../purchaseShop';
 import type { Supplier } from '../purchaseTypes';
 import { inr, errMsg } from './shared';
 import { ExceptionsPanel } from './ExceptionsPanel';
-import { GrnPickerModal, DcPickerModal } from './pickers';
+import { GrnPickerModal, DcPickerModal, RowShop } from './pickers';
 import { InvoiceFormDrawer, blankLine, type EditLine } from './InvoiceFormDrawer';
 import { InvoiceDetailDrawer, MatchBadge, ConfigNote } from './InvoiceDetailDrawer';
 
@@ -36,7 +36,7 @@ import { InvoiceDetailDrawer, MatchBadge, ConfigNote } from './InvoiceDetailDraw
 // Tab root: list + GRN picker + invoice form
 // ============================================================================
 export function PurchaseInvoicesTab({ suppliers }: { suppliers: Supplier[] }) {
-  const { user } = useAuth();
+  const { storeId, showShopOf } = usePurchaseShop(); // audit F63: one Purchase scope
   const [invoices, setInvoices] = useState<PurchaseInvoice[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -55,7 +55,6 @@ export function PurchaseInvoicesTab({ suppliers }: { suppliers: Supplier[] }) {
     setLoading(true);
     setError(null);
     try {
-      const storeId = user?.activeStoreId;
       const res = await purchaseInvoicesApi.list(storeId ? { store_id: storeId } : {});
       setInvoices(res.purchase_invoices);
     } catch (e) {
@@ -63,9 +62,13 @@ export function PurchaseInvoicesTab({ suppliers }: { suppliers: Supplier[] }) {
     } finally {
       setLoading(false);
     }
-  }, [user?.activeStoreId]);
+  }, [storeId]);
 
-  useEffect(() => { load(); }, [load]);
+  // A booking reloads through this effect, once, AFTER showShopOf has moved an
+  // admin's filter to the bill's shop -- calling load() from onBooked would
+  // fetch the shop being left and race the reload of the new one.
+  const [bookings, setBookings] = useState(0);
+  useEffect(() => { load(); }, [load, bookings]);
 
   // Best-effort: fetch the active valuation method + tolerance once for the
   // read-only note. Never blocks the tab (getConfig is fail-soft -> null).
@@ -198,7 +201,7 @@ export function PurchaseInvoicesTab({ suppliers }: { suppliers: Supplier[] }) {
             }}
             onViewDetail={setDetailInvoice}
           />
-          <InvoiceList invoices={invoices} onOpen={setDetailInvoice} />
+          <InvoiceList invoices={invoices} onOpen={setDetailInvoice} showShop={!storeId} />
         </>
       )}
 
@@ -226,7 +229,13 @@ export function PurchaseInvoicesTab({ suppliers }: { suppliers: Supplier[] }) {
           prefill={form.prefill}
           initialLines={form.lines}
           onClose={() => setForm(null)}
-          onBooked={() => { setForm(null); load(); }}
+          onBooked={(bookedAt) => {
+            // A bill booked to another shop than the one an admin's list shows
+            // moves the list there, so it never vanishes (review r2 #19).
+            setForm(null);
+            showShopOf(bookedAt);
+            setBookings((n) => n + 1);
+          }}
         />
       )}
 
@@ -251,7 +260,14 @@ export function PurchaseInvoicesTab({ suppliers }: { suppliers: Supplier[] }) {
 // ============================================================================
 // List of booked / draft purchase invoices
 // ============================================================================
-function InvoiceList({ invoices, onOpen }: { invoices: PurchaseInvoice[]; onOpen: (pi: PurchaseInvoice) => void }) {
+// On All stores (no shop in scope) each bill names the shop it is booked to:
+// two shops' bills from one supplier otherwise read as identical rows, and an
+// admin could not tell which shop owes which (review r3 #10).
+function InvoiceList({ invoices, onOpen, showShop }: {
+  invoices: PurchaseInvoice[];
+  onOpen: (pi: PurchaseInvoice) => void;
+  showShop: boolean;
+}) {
   if (invoices.length === 0) {
     return (
       <div className="text-center py-12 bg-white border border-gray-200 rounded-lg">
@@ -302,6 +318,7 @@ function InvoiceList({ invoices, onOpen }: { invoices: PurchaseInvoice[]; onOpen
                 <td className="px-3 py-2">
                   <div className="font-medium text-gray-900">{pi.vendor_name || pi.vendor_id}</div>
                   <div className="text-xs text-gray-500">{pi.vendor_invoice_no}</div>
+                  {showShop && <RowShop storeId={pi.store_id} />}
                   {pi.itc_eligible === false && (
                     <span className="mt-0.5 inline-flex items-center px-1.5 py-0.5 rounded-full text-[11px] font-medium bg-amber-100 text-amber-800" title="This bill claims no input credit">No credit</span>
                   )}

@@ -49,8 +49,11 @@ FINANCIAL = [
     "/api/v1/reports/discount/analysis",
     "/api/v1/reports/finance/expense-vs-revenue",
     "/api/v1/reports/gstr1",
-    "/api/v1/reports/gstr3b",
 ]
+
+# Owner ruling 2026-10-07 (R1): GSTR-3B adds up input tax from supplier bills
+# (Table 4 ITC, RCM) -- the accounts roles only; managers keep the rest.
+INPUT_TAX = ["/api/v1/reports/gstr3b", "/api/v1/reports/gstr3b/gstn-json"]
 
 BLOCKED_ROLES = [["SALES_STAFF"], ["CASHIER"], ["OPTOMETRIST"]]
 ALLOWED_ROLES = [["ACCOUNTANT"], ["STORE_MANAGER"], ["AREA_MANAGER"]]
@@ -72,6 +75,18 @@ class TestFinancialReportGating:
 
     @pytest.mark.parametrize("path", FINANCIAL)
     def test_superadmin_allowed(self, client, auth_headers, path):
+        assert client.get(path, headers=auth_headers).status_code != 403
+
+
+class TestInputTaxReportIsAccountsOnly:
+    @pytest.mark.parametrize("path", INPUT_TAX)
+    @pytest.mark.parametrize("roles", BLOCKED_ROLES + [["STORE_MANAGER"], ["AREA_MANAGER"]])
+    def test_managers_and_counter_blocked(self, client, path, roles):
+        assert client.get(path, headers=_headers(roles)).status_code == 403
+
+    @pytest.mark.parametrize("path", INPUT_TAX)
+    def test_accounts_allowed(self, client, auth_headers, path):
+        assert client.get(path, headers=_headers(["ACCOUNTANT"])).status_code != 403
         assert client.get(path, headers=auth_headers).status_code != 403
 
 

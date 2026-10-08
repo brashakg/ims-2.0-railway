@@ -17,8 +17,11 @@ import clsx from 'clsx';
 import { useSearchParams } from 'react-router-dom';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
+import { usePurchaseShop } from './purchaseShop';
+import { RowShop } from './invoices/pickers';
 import api from '../../services/api/client';
 import { rtvDebitNotesApi, type DebitNote } from '../../services/api/rtvDebitNotes';
+import { PAYABLES_ROLES } from '../../components/common/CostCell';
 
 interface ReturnItem {
   product_id: string;
@@ -28,17 +31,21 @@ interface ReturnItem {
   unit_price: number;
 }
 
+// WORKSHOP_STAFF reads a return without its prices (server-side cost mask,
+// owner ruling 2026-09-29): the money keys are simply absent -> shown as "-".
+type ReturnLine = Omit<ReturnItem, 'unit_price'> & { unit_price?: number };
+
 interface VendorReturn {
   return_id: string;
   vendor_id: string;
   vendor_name: string;
   store_id: string;
-  items: ReturnItem[];
+  items: ReturnLine[];
   return_type: 'credit_note' | 'replacement';
   status: string;
-  total_value: number;
-  credit_note_number: string | null;
-  credit_note_amount: number | null;
+  total_value?: number;
+  credit_note_number?: string | null;
+  credit_note_amount?: number | null;
   created_at: string;
   created_by: string;
   notes: string;
@@ -50,6 +57,8 @@ interface Vendor {
   trade_name: string;
   mobile: string;
 }
+
+const rupees = (v?: number | null) => (v == null ? '-' : `₹${v.toLocaleString('en-IN')}`);
 
 const RETURN_REASONS = [
   { value: 'defective', label: 'Defective' },
@@ -84,10 +93,34 @@ const STATUS_LABELS: Record<string, string> = {
   cancelled: 'Cancelled',
 };
 
+// Supplier money (owner ruling 2026-10-01): the credit a supplier owes us on a
+// return (its value, the credit-note amount and number) and the GST debit
+// note's amounts are for PAYABLES_ROLES alone. The server already drops them
+// for anyone else; these copies keep them off the screen whatever it sends.
+function withoutReturnCredit(ret: VendorReturn): VendorReturn {
+  const out = { ...ret };
+  delete out.total_value;
+  delete out.credit_note_amount;
+  delete out.credit_note_number;
+  return out;
+}
+
+function withoutDebitNoteMoney(dn: DebitNote): DebitNote {
+  const out = { ...dn };
+  delete out.totals_rupees;
+  return out;
+}
+
 export function VendorReturns() {
   const toast = useToast();
   const { user } = useAuth();
-  const activeStoreId = user?.activeStoreId || '';
+  const activeStoreId = user?.activeStoreId || ''; // a new return is raised here
+  const { storeId: listScope, showShopOf } = usePurchaseShop(); // audit F63: lists read the one Purchase scope
+  // Supplier money is PAYABLES_ROLES' alone: everyone else reads the returns
+  // (items, quantities, reasons, status) without what the supplier owes on them.
+  const canSeePayables = (user?.roles || []).some((r) => PAYABLES_ROLES.includes(r));
+  const shownReturn = (r: VendorReturn) => (canSeePayables ? r : withoutReturnCredit(r));
+  const shownNote = (dn: DebitNote) => (canSeePayables ? dn : withoutDebitNoteMoney(dn));
   // F21: the Quarantine Queue "Create RTV" CTA deep-links here with ?stock_id=...
   // so the new return physically links that quarantined unit (backend backfills
   // rtv_vendor_id). Without reading it, the advertised one-click linkage was dead.
@@ -122,24 +155,24 @@ export function VendorReturns() {
         // Fetch vendor returns and vendors in parallel
         const [returnsResp, vendorsResp] = await Promise.all([
           api.get('/vendor-returns/', {
-            params: { store_id: activeStoreId || undefined, limit: 100 },
+            params: { store_id: listScope, limit: 100 },
           }),
           api.get('/vendors/', { params: { limit: 100 } }),
         ]);
 
-        setReturns(returnsResp.data.returns || []);
+        setReturns((returnsResp.data.returns || []).map(shownReturn));
         setVendors(vendorsResp.data.vendors || vendorsResp.data.items || []);
 
         // F20: map any already-issued debit notes to their source return so the
         // row shows "Issued" + serial (fail-soft: a load error just hides them).
         try {
           const dnResp = await rtvDebitNotesApi.list({
-            store_id: activeStoreId || undefined,
+            store_id: listScope,
             limit: 100,
           });
           const map: Record<string, DebitNote> = {};
           for (const dn of dnResp.debit_notes || []) {
-            if (dn.rtv_ref_id) map[dn.rtv_ref_id] = dn;
+            if (dn.rtv_ref_id) map[dn.rtv_ref_id] = shownNote(dn);
           }
           setDebitNotes(map);
         } catch {
@@ -153,7 +186,7 @@ export function VendorReturns() {
     };
 
     loadData();
-  }, [activeStoreId]);
+  }, [listScope]);
 
   const handleAddItem = () => {
     setItems([
@@ -201,11 +234,16 @@ export function VendorReturns() {
       setItems([{ product_id: '', product_name: '', quantity: 1, reason: 'defective', unit_price: 0 }]);
       setNotes('');
 
-      // Refresh the list
+      // Refresh the list -- an admin viewing another shop is shown the shop
+      // the return was raised at (the list reloads with it), so it never vanishes.
+      if (listScope && activeStoreId && listScope !== activeStoreId) {
+        showShopOf(activeStoreId);
+        return;
+      }
       const refreshResp = await api.get('/vendor-returns/', {
-        params: { store_id: activeStoreId || undefined, limit: 100 },
+        params: { store_id: listScope, limit: 100 },
       });
-      setReturns(refreshResp.data.returns || []);
+      setReturns((refreshResp.data.returns || []).map(shownReturn));
     } catch {
       toast.error('Failed to create vendor return');
     }
@@ -220,7 +258,7 @@ export function VendorReturns() {
   const handleUpdateStatus = async (returnId: string, newStatus: string) => {
     try {
       const resp = await api.patch(`/vendor-returns/${returnId}/status`, { status: newStatus });
-      const updated: VendorReturn = resp.data.return;
+      const updated: VendorReturn = shownReturn(resp.data.return);
       setReturns(prev => prev.map(r => r.return_id === returnId ? updated : r));
       toast.success(`Status updated to ${STATUS_LABELS[newStatus] || newStatus}`);
     } catch {
@@ -234,7 +272,7 @@ export function VendorReturns() {
     setDnBusy(returnId);
     try {
       const res = await rtvDebitNotesApi.issue(returnId, 'vendor_return');
-      setDebitNotes((prev) => ({ ...prev, [returnId]: res.debit_note }));
+      setDebitNotes((prev) => ({ ...prev, [returnId]: shownNote(res.debit_note) }));
       toast.success(
         res.idempotent
           ? `Debit note already issued: ${res.debit_note.debit_note_number}`
@@ -310,15 +348,22 @@ export function VendorReturns() {
             {returns.filter(r => r.status === 'received_by_vendor' || r.status === 'approved').length}
           </p>
         </div>
+        {/* What suppliers owe us across these returns: PAYABLES_ROLES only. */}
+        {canSeePayables && (
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <div className="flex items-center justify-between mb-2">
             <p className="text-gray-500 text-sm">Credit Value</p>
             <IndianRupee className="w-5 h-5 text-green-500" />
           </div>
           <p className="text-2xl font-bold text-green-600">
-            ₹{returns.reduce((sum, r) => sum + (r.credit_note_amount || 0), 0).toLocaleString('en-IN')}
+            {rupees(
+              returns.every((r) => r.total_value != null)
+                ? returns.reduce((sum, r) => sum + (r.credit_note_amount || 0), 0)
+                : null
+            )}
           </p>
         </div>
+        )}
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <div className="flex items-center justify-between mb-2">
             <p className="text-gray-500 text-sm">This Month</p>
@@ -385,9 +430,11 @@ export function VendorReturns() {
                       </span>
                     </div>
                     <p className="text-gray-500 text-sm">Return ID: {ret.return_id}</p>
+                    {/* On All stores each return names the shop it was raised at (r3 #10). */}
+                    {!listScope && <RowShop storeId={ret.store_id} />}
                   </div>
                   <div className="text-right">
-                    <p className="text-lg font-bold text-gray-900">₹{ret.total_value.toLocaleString('en-IN')}</p>
+                    <p className="text-lg font-bold text-gray-900">{rupees(ret.total_value)}</p>
                     <p className="text-gray-500 text-sm">{ret.items.length} item(s)</p>
                   </div>
                 </div>
@@ -410,10 +457,15 @@ export function VendorReturns() {
                         <div key={idx} className="flex justify-between items-center text-sm">
                           <div>
                             <p className="text-gray-600">{item.product_name}</p>
-                            <p className="text-gray-500 text-xs">Qty: {item.quantity} @ ₹{item.unit_price.toLocaleString('en-IN')}</p>
+                            <p className="text-gray-500 text-xs">
+                              Qty: {item.quantity}
+                              {item.unit_price != null && ` @ ${rupees(item.unit_price)}`}
+                            </p>
                           </div>
                           <div className="text-right">
-                            <p className="text-gray-600 font-medium">₹{(item.quantity * item.unit_price).toLocaleString('en-IN')}</p>
+                            <p className="text-gray-600 font-medium">
+                              {rupees(item.unit_price == null ? null : item.quantity * item.unit_price)}
+                            </p>
                             <p className="text-gray-500 text-xs">{RETURN_REASONS.find(r => r.value === item.reason)?.label}</p>
                           </div>
                         </div>
@@ -445,13 +497,12 @@ export function VendorReturns() {
                         {debitNotes[ret.return_id] ? (
                           <p className="text-gray-900 font-semibold">
                             {debitNotes[ret.return_id].debit_note_number}
-                            <span className="ml-2 text-gray-500 font-normal text-sm">
-                              ₹
-                              {(
-                                debitNotes[ret.return_id].totals_rupees?.grand_total ?? 0
-                              ).toLocaleString('en-IN')}
-                              {debitNotes[ret.return_id].is_inter_state ? ' (IGST)' : ' (CGST+SGST)'}
-                            </span>
+                            {debitNotes[ret.return_id].totals_rupees && (
+                              <span className="ml-2 text-gray-500 font-normal text-sm">
+                                {rupees(debitNotes[ret.return_id].totals_rupees?.grand_total)}
+                                {debitNotes[ret.return_id].is_inter_state ? ' (IGST)' : ' (CGST+SGST)'}
+                              </span>
+                            )}
                           </p>
                         ) : (
                           <p className="text-gray-400 text-sm">Not yet issued</p>
@@ -459,6 +510,9 @@ export function VendorReturns() {
                       </div>
                       <div className="flex gap-2">
                         {debitNotes[ret.return_id] ? (
+                          // Print + Export Tally are the note's amounts end to
+                          // end: PAYABLES_ROLES only (the server 403s the rest).
+                          canSeePayables && (
                           <>
                             <button
                               onClick={() =>
@@ -480,6 +534,7 @@ export function VendorReturns() {
                               Export Tally
                             </button>
                           </>
+                          )
                         ) : (
                           <button
                             disabled={dnBusy === ret.return_id}

@@ -21,6 +21,7 @@ from ._shared import (
     is_online_store,
     logger,
     require_roles,
+    resolve_store_scope,
     router,
     timedelta,
     uuid,
@@ -52,9 +53,9 @@ async def list_pos(
 ):
     """List purchase orders with filters"""
     po_repo = get_purchase_order_repository()
-    active_store = validate_store_access(store_id, current_user) or current_user.get(
-        "active_store_id"
-    )
+    # One shop scope for every Purchase tab (F63): no shop chosen = all shops
+    # for an admin, the caller's own shop for everyone else.
+    active_store = resolve_store_scope(store_id, current_user)
 
     if po_repo is None:
         return {"purchase_orders": [], "total": 0}
@@ -67,9 +68,18 @@ async def list_pos(
     if active_store:
         filter_dict["delivery_store_id"] = active_store
 
-    pos = po_repo.find_many(filter_dict, skip=skip, limit=limit)
+    # Newest first, and `total` is every matching order -- not the length of
+    # this page. Unsorted, the page was the first 50 ever raised, so on all
+    # stores the screens held the chain's oldest orders and called 50 a total
+    # (review round 2, #18). The screens say "latest N of M" when M > N.
+    pos = po_repo.find_many(filter_dict, sort=_PO_NEWEST_FIRST, skip=skip, limit=limit) or []
+    total = max(po_repo.count(filter_dict), skip + len(pos))
 
-    return {"purchase_orders": pos or [], "total": len(pos) if pos else 0}
+    return {"purchase_orders": pos, "total": total}
+
+
+# Raised-at descending; the id breaks a tie so pages never overlap.
+_PO_NEWEST_FIRST = [("created_at", -1), ("_id", -1)]
 
 
 # INV-9: Demand forecast -> nightly draft-PO suggestions

@@ -69,9 +69,19 @@ export function ReportsInventoryPage() {
                     <span className="font-medium text-gray-900">{stockCount.summary?.total_quantity || 0} units</span>
                   </div>
                   <div className="flex items-center justify-between">
-                    <span className="text-gray-500">Total Value:</span>
-                    <span className="font-medium text-gray-900">₹{((stockCount.summary?.total_value || 0) / 100000).toFixed(2)}L</span>
+                    <span className="text-gray-500">Total Value (at cost):</span>
+                    <span className="font-medium text-gray-900">
+                      {stockCount.summary?.total_value == null
+                        ? '—'
+                        : `₹${(stockCount.summary.total_value / 100000).toFixed(2)}L`}
+                    </span>
                   </div>
+                  {/* Units with no cost add Rs 0 to the value: said, not hidden. */}
+                  {(stockCount.summary?.uncosted_units || 0) > 0 && (
+                    <p className="text-xs text-amber-700 text-right">
+                      {stockCount.summary.uncosted_units} {stockCount.summary.uncosted_units === 1 ? 'unit has' : 'units have'} no cost
+                    </p>
+                  )}
                 </>
               ) : (
                 <p className="text-gray-500">No data available</p>

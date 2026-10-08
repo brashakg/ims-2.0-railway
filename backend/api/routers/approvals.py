@@ -13,6 +13,11 @@ Roles (mirrors rbac_policy POLICY):
   - create request / consume / my-requests / get  : any AUTHENTICATED maker
   - inbox                                          : approver + ACCOUNTANT (read-only)
   - approve / reject                               : _APPROVER_ROLES (+ SUPERADMIN)
+
+Supplier money (owner ruling 2026-10-01): an 'rtv' request's amount is the
+supplier credit recorded on a vendor RMA, so every read here (inbox, mine,
+get, the consume result) drops it for anyone outside the accounts roles
+(services/payables_mask.strip_approval_money). Other action types keep theirs.
 """
 
 from __future__ import annotations
@@ -24,7 +29,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from .auth import get_current_user, require_roles
+from ..dependencies import user_store_scope
 from ..services.approvals import ApprovalEngine
+from ..services.payables_mask import strip_approval_money
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -188,6 +195,7 @@ async def get_inbox(
         limit=200,
     )
     _resolve_names(rows)
+    rows = [strip_approval_money(r, current_user) for r in rows]
     return {"requests": rows, "total": len(rows)}
 
 
@@ -198,7 +206,21 @@ async def get_my_requests(
     """A maker's own requests + their status (and approval_token once approved)."""
     rows = _engine().list_mine(requested_by=current_user.get("user_id"), limit=200)
     _resolve_names(rows)
+    rows = [strip_approval_money(r, current_user) for r in rows]
     return {"requests": rows, "total": len(rows)}
+
+
+def _request_in_reach(eng: ApprovalEngine, doc: Dict[str, Any], user: Dict[str, Any]) -> bool:
+    """The caller may open this request: its maker or consumer, or by the
+    engine's shop rule over the caller's shops (their store_ids plus the
+    active shop, dependencies.user_store_scope)."""
+    uid = user.get("user_id")
+    if uid and uid in (doc.get("requested_by"), doc.get("consumed_by")):
+        return True
+    _cross, stores = user_store_scope(user)
+    # The engine's one shop rule, reused rather than copied.
+    # pylint: disable-next=protected-access
+    return eng._store_scope_ok(doc.get("store_id"), set(_roles(user)), sorted(stores))
 
 
 @router.get("/requests/{request_id}")
@@ -208,9 +230,17 @@ async def get_request(
 ):
     """Fetch one request. The approval_token is only revealed to the maker, the
     consumer, or an HQ role (ADMIN/SUPERADMIN) -- an unrelated approver sees the
-    request but not the spendable token."""
-    doc = _engine().get(request_id)
-    if not doc:
+    request but not the spendable token.
+
+    Shop scope (F63): a request is read by its maker / consumer, or by anyone
+    whose shops it is in by the engine's own rule (ApprovalEngine.
+    _store_scope_ok, the one approve / reject / the inbox apply: HQ every
+    shop, a shop-less request org-wide, else one of the caller's shops).
+    Anyone else gets the same 404 a missing request gets -- never another
+    shop's amount, context or reviewer by typing its id."""
+    eng = _engine()
+    doc = eng.get(request_id)
+    if not doc or not _request_in_reach(eng, doc, current_user):
         raise HTTPException(status_code=404, detail="Request not found")
     uid = current_user.get("user_id")
     roles = set(_roles(current_user))
@@ -222,7 +252,7 @@ async def get_request(
     if not can_see_token:
         out.pop("approval_token", None)
     _resolve_names([out])
-    return out
+    return strip_approval_money(out, current_user)
 
 
 @router.post("/requests/{request_id}/approve")
@@ -277,7 +307,7 @@ async def consume_request(
         amount=body.amount,
     )
     if res.get("ok"):
-        return res
+        return {**res, "request": strip_approval_money(res.get("request"), current_user)}
     err = res.get("error")
     code_map = {
         "already_consumed": 409,

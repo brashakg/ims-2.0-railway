@@ -12,6 +12,9 @@ import uuid
 from .auth import get_current_user, require_roles
 from ..dependencies import get_db, resolve_store_scope, validate_store_access
 
+from ..services.payables_mask import strip_vendor_return_credit
+from ..dependencies import can_access_store_scoped
+
 # A vendor return mints a debit/credit note -- a financial instrument against a
 # vendor. Restrict create + status changes to the same roles that manage vendors
 # / AP (mirrors vendors.py _VENDOR_ROLES); it was previously open to ANY
@@ -171,6 +174,9 @@ async def list_vendor_returns(
         returns = list(
             collection.find(filter_dict).sort("created_at", -1).skip(skip).limit(limit)
         )
+        # Supplier money (owner ruling 2026-10-01): the credit the supplier owes
+        # on a return is the accounts roles' (services/payables_mask).
+        returns = [strip_vendor_return_credit(r, current_user) for r in returns]
 
         # Clean up MongoDB _id field for response
         for ret in returns:
@@ -279,8 +285,10 @@ async def get_vendor_return(
     try:
         collection = db.get_collection("vendor_returns")
         return_doc = collection.find_one({"return_id": return_id})
+        # Supplier credit is the accounts roles' (services/payables_mask).
+        return_doc = strip_vendor_return_credit(return_doc, current_user)
 
-        if not return_doc:
+        if not return_doc or not can_access_store_scoped(return_doc.get("store_id"), current_user):
             raise HTTPException(status_code=404, detail="Return not found")
 
         # Clean up MongoDB _id field
@@ -414,7 +422,9 @@ async def update_return_status(
 
         return {
             "message": f"Return status updated to {status_update.status}",
-            "return": updated_doc,
+            # The credit just issued is the accounts roles' to read
+            # (owner ruling 2026-10-01, services/payables_mask).
+            "return": strip_vendor_return_credit(updated_doc, current_user),
         }
 
     except HTTPException:

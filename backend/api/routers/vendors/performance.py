@@ -10,9 +10,11 @@ from ._shared import (
     ist_date_str,
     logger,
     now_ist,
+    resolve_store_scope,
     router,
     timedelta,
 )
+from ...services.cost_mask import can_see_cost
 
 
 # ============================================================================
@@ -31,36 +33,21 @@ from ._shared import (
 # empty states.  No fabricated numbers (SYSTEM_INTENT).
 
 
-def _vendor_mtd_spend(db, vendor_id: str) -> float:
-    """Sum of this vendor's bills dated in the CURRENT calendar month (rupees).
+def _vendor_mtd_spend(db, vendor_id: str, current_user: dict) -> float:
+    """What this vendor billed us in the CURRENT IST month, in the caller's
+    shop (resolve_store_scope: every shop for an admin, else its own; 403 for
+    a non-admin login with no shop, R3) -- the Purchases report's `billed`,
+    from the same supplier ledger rows on the same as-of day (F56, one rule:
+    a bill keyed ahead to a later day is not billed yet). Fail-soft: no DB ->
+    0.0 (an honest zero, never a fabricated number per SYSTEM_INTENT).
 
-    Reads vendor_bills.total_amount where bill_date (fallback created_at) falls
-    in the current month. Fail-soft: missing DB / collection / parse error -> 0.0
-    (an honest zero, never a fabricated number per SYSTEM_INTENT)."""
+    BUG-104: the month is the IST month (bill_date is an IST business date)."""
+    from .purchases_report import billed_in_month  # call time: route order
+
+    scope = resolve_store_scope(None, current_user)
     if db is None:
         return 0.0
-    # BUG-104. The VALUE side (`bill_date`) is already an IST business-date
-    # string, so the month PREFIX it is matched against must be the IST month
-    # too. On the UTC clock, between 00:00 and 05:30 IST on the 1st this asked
-    # for LAST month and the vendor's month-to-date spend read as the previous
-    # month's total for five and a half hours every month.
-    month_prefix = now_ist().strftime("%Y-%m")  # "2026-06"
-    total = 0.0
-    try:
-        bills = db.get_collection("vendor_bills").find(
-            {"vendor_id": vendor_id},
-            {"_id": 0, "total_amount": 1, "bill_date": 1, "created_at": 1},
-        )
-        for b in bills:
-            when = str(b.get("bill_date") or b.get("created_at") or "")[:7]
-            if when == month_prefix:
-                try:
-                    total += float(b.get("total_amount") or 0)
-                except (TypeError, ValueError):
-                    pass
-    except Exception:  # noqa: BLE001
-        return 0.0
-    return round(total, 2)
+    return billed_in_month(db, vendor_id, scope, now_ist().strftime("%Y-%m"))
 
 
 def _vendor_qc_pass_rate(db, vendor_id: str):
@@ -153,8 +140,14 @@ async def vendor_performance(
 
     # MTD spend is independent of GRN history -- compute it up front so even a
     # vendor with no GRNs in the window still reports what we've billed this
-    # month. Fail-soft: any error -> 0.0 (honest, never fabricated).
-    mtd_spend = _vendor_mtd_spend(db, vendor_id)
+    # month. What a supplier billed us is supplier money (owner ruling
+    # 2026-10-01): the accounts roles alone get the key, and for anyone else
+    # the bills are not even read.
+    bills = (
+        {"mtd_spend": _vendor_mtd_spend(db, vendor_id, current_user)}
+        if can_see_cost(current_user, "payables")
+        else {}
+    )
     # QC pass-rate joins GRN QC (accepted/received) + workshop QC (job pass/fail)
     # for this vendor. Fail-soft: returns None when there is no QC signal at all.
     qc_pass_rate, qc_sample = _vendor_qc_pass_rate(db, vendor_id)
@@ -170,7 +163,7 @@ async def vendor_performance(
         "on_time_rate": None,
         "qc_pass_rate": qc_pass_rate,
         "qc_sample_size": qc_sample,
-        "mtd_spend": mtd_spend,
+        **bills,
         "overall_score": None,
         "insufficient_data": True,
         "note": "No GRN data found for this vendor in the selected window.",
@@ -279,7 +272,7 @@ async def vendor_performance(
             "on_time_rate": on_time_rate,
             "qc_pass_rate": qc_pass_rate,
             "qc_sample_size": qc_sample,
-            "mtd_spend": mtd_spend,
+            **bills,
             "on_time_grns": on_time_count,
             "grns_with_po_date": grns_with_po_date,
             "overall_score": overall_score,

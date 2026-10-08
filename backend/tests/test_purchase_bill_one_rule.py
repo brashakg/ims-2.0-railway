@@ -228,7 +228,10 @@ class TestTheShopsOwnRegistration:
             "items": [{"product_id": "P1", "product_name": "Frame X", "accepted_qty": 1}],
         }
         po = {"po_id": "POP", "items": [{"product_id": "P1", "unit_price": 1000.0, "tax_rate": 5.0}]}
-        cli = _app(db)  # the accountant sits at S1 (Jharkhand)
+        # The booker sits at S1 (Jharkhand) as an ADMIN: since F63 an
+        # accountant at S1 cannot reach PUNE's receipt (404,
+        # test_purchase_objects_by_id_scope).
+        cli = _app(db, roles=("ADMIN",))
         pi_router.get_grn_repository = lambda: _StubRepo(grn)
         pi_router.get_purchase_order_repository = lambda: _StubRepo(po)
 
@@ -242,6 +245,8 @@ class TestTheShopsOwnRegistration:
         doc = cli.post(_URL, json=body).json()
         assert doc["recipient_gstin"] == BUY_MH and doc["interstate"] is False
         assert (doc["cgst_total"], doc["sgst_total"], doc["igst_total"]) == (25.0, 25.0, 0.0)
+        # The draft names the shop the bill books to (the form says it).
+        assert draft["store_id"] == doc["store_id"] == "PUNE"
         po_verdict = _po_gst_parties(db.collections["vendors"][0], pune)["interstate"]
         assert po_verdict is doc["interstate"] is False
 
@@ -284,7 +289,7 @@ class TestTheRecipientIsNeverGuessed:
             "status": "ACCEPTED",
             "items": [{"product_id": "P1", "accepted_qty": 10}],
         }
-        cli = _app(db)
+        cli = _app(db, roles=("ADMIN",))  # at S1; F63: only HQ reaches S3
         pi_router.get_grn_repository = lambda: _StubRepo(grn)
         draft = cli.get(f"{_URL}/from-grn/G3")
         booked = cli.post(_URL, json=_invoice_body(grn_id="G3"))
@@ -305,13 +310,15 @@ class TestTheRecipientIsNeverGuessed:
             "status": "ACCEPTED",
             "items": [{"product_id": "P1", "accepted_qty": 10}],
         }
-        cli = _app(db)
+        # F63: a receipt with no shop is HQ's only, so an ADMIN at S1 books it.
+        cli = _app(db, roles=("ADMIN",))
         pi_router.get_grn_repository = lambda: _StubRepo(grn)
         draft = cli.get(f"{_URL}/from-grn/G0").json()
         doc = cli.post(_URL, json=_invoice_body(grn_id="G0")).json()
         assert draft["recipient_entity_id"] == doc["recipient_entity_id"] == "E1"
         assert draft["recipient_gstin"] == doc["recipient_gstin"] == BUY_JH
         assert draft["interstate"] is doc["interstate"] is True
+        assert draft["store_id"] == doc["store_id"] == "S1"
 
     def test_a_typed_gstin_is_checked_even_when_the_company_lists_none(self):
         """P16: a company with no registrations on file cannot vouch for a
@@ -360,7 +367,10 @@ class TestTheRecipientIsNeverGuessed:
                 "items": [{"product_id": "P1", "accepted_qty": 2}],
             }
         ]
-        r = _app(db).get(f"{_URL}/from-dcs", params={"dc_ids": "D1", "vendor_id": "V1"})
+        # An ADMIN at S1: since F63 an accountant at S1 cannot reach S2's DC.
+        r = _app(db, roles=("ADMIN",)).get(
+            f"{_URL}/from-dcs", params={"dc_ids": "D1", "vendor_id": "V1"}
+        )
         assert r.status_code == 200, r.text
         d = r.json()
         assert d["recipient_entity_id"] == "E2" and d["recipient_gstin"] == BUY_MH
@@ -496,6 +506,13 @@ class TestEveryDoorEveryReader:
         the Cash Flow '+ bill' door. Register 330, GSTR-3B (Cross-Check) 150
         before; every reader now says 330, in the same heads."""
         db, cli = self._world()
+
+        # The three screen bills land in S1 AND S2, so the booker is an ADMIN
+        # sitting at S1: since F63 an accountant at S1 cannot reach GC (S2).
+        async def _admin_at_s1():
+            return {"user_id": "u-admin", "roles": ["ADMIN"], "store_ids": [], "active_store_id": "S1"}
+
+        cli.app.dependency_overrides[get_current_user] = _admin_at_s1
         a = _book_from_grn(cli, "GA", "A-1")
         b = _book_from_grn(cli, "GB", "B-1")
         c = _book_from_grn(cli, "GC", "C-1")
@@ -597,8 +614,16 @@ class TestTheReceiptsShopOnEveryDoor:
     the other company's GSTR-3B."""
 
     def test_cash_flow_goods_bill_is_the_receipts_company(self):
-        """Mutant M1 (ap_bills `_receipt_store = None`) survived every suite."""
+        """Mutant M1 (ap_bills `_receipt_store = None`) survived every suite.
+        The booker sits at S2 as an ADMIN: since F63 a shop-bound accountant
+        at S2 cannot reach S1's receipt at all (404, test_supplier_ledger_
+        rows_round2), so only a cross-shop booker can expose the mutant."""
         _, cli = TestEveryDoorEveryReader()._world("S2")
+
+        async def _admin_at_s2():
+            return {"user_id": "u-admin", "roles": ["ADMIN"], "store_ids": [], "active_store_id": "S2"}
+
+        cli.app.dependency_overrides[get_current_user] = _admin_at_s2
         r = _door(cli, "V1", bill_number="G-1", bill_date="2026-05-09", taxable_amount=1000,
                   tax_amount=50, total_amount=1050, bill_kind="GOODS", grn_id="GA")
         assert r.status_code == 201, r.text
@@ -608,8 +633,15 @@ class TestTheReceiptsShopOnEveryDoor:
 
     def test_the_preview_of_a_receipt_bill_is_the_booking(self):
         """Mutant M7 (preview `grn_doc = None`) survived: the preview named
-        WizOpt's number while the booking stored Better Vision's."""
+        WizOpt's number while the booking stored Better Vision's. The booker
+        sits at S2 as an ADMIN: since F63 an accountant at S2 cannot reach
+        S1's receipt (404, test_purchase_objects_by_id_scope)."""
         _, cli = TestEveryDoorEveryReader()._world("S2")
+
+        async def _admin_at_s2():
+            return {"user_id": "u-admin", "roles": ["ADMIN"], "store_ids": [], "active_store_id": "S2"}
+
+        cli.app.dependency_overrides[get_current_user] = _admin_at_s2
         body = {"vendor_id": "V1", "grn_id": "GA", "lines": [
             {"product_id": "P1", "description": "Frame", "qty": 1, "unit_price": 1000, "gst_rate": 5}]}
         pv = cli.post(f"{_URL}/preview", json=body)
@@ -644,7 +676,8 @@ class TestTheReceiptsShopOnEveryDoor:
                 for gid, extra in (("DX1", {}), ("DX2", {"store_id": "PUNE"}))
             ]
         )
-        cli = _app(db)
+        # An ADMIN at S1: since F63 a shop-less DC and PUNE's are HQ's to bill.
+        cli = _app(db, roles=("ADMIN",))
         draft = cli.get(f"{_URL}/from-dcs", params={"dc_ids": "DX1,DX2", "vendor_id": "V1"})
         assert draft.status_code == 200, draft.text
         assert draft.json()["recipient_gstin"] == BUY_MH and draft.json()["interstate"] is False
@@ -1161,6 +1194,9 @@ class TestTheFormsShopDecidesPreviewAndBooking:
         _same_split(pv, doc)
         assert doc["recipient_gstin"] == BUY_JH and doc["interstate"] is True
         assert doc["igst_total"] == 120.01
+        # ... and the bill is stored under that same shop, not the token's:
+        # one bill never names one shop for its tax and another for its tabs.
+        assert doc["store_id"] == "S1"
 
     def test_a_shop_the_user_cannot_act_for_is_refused(self):
         db = self._world()

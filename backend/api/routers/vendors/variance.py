@@ -9,13 +9,14 @@ from ._shared import (
     Query,
     _AP_ROLES,
     _get_db,
+    can_access_store_scoped,
     datetime,
     get_audit_repository,
     get_grn_repository,
     get_purchase_order_repository,
     require_roles,
+    resolve_store_scope,
     router,
-    validate_store_access,
 )
 
 
@@ -135,7 +136,7 @@ async def po_grn_variance_report(
     if po_repo is None:
         return {"lines": [], "total": 0}
 
-    active_store = validate_store_access(store_id, current_user)
+    active_store = resolve_store_scope(store_id, current_user)  # one Purchase scope (F63)
 
     try:
         # limit=0 -> ALL open POs; the variance total + backorders must not be
@@ -193,7 +194,10 @@ async def dismiss_po_variance(
         raise HTTPException(status_code=503, detail="Purchase orders unavailable")
 
     po = po_repo.find_by_id(po_id)
-    if not po:
+    # F63: another shop's PO is the same 404 as a missing one -- a Pune
+    # accountant cannot annotate Dhanbad's order (the variance report never
+    # lists it to them either).
+    if not po or not can_access_store_scoped(po.get("delivery_store_id"), current_user):
         raise HTTPException(status_code=404, detail="Purchase order not found")
 
     reason = (body.reason or "").strip()
@@ -208,17 +212,34 @@ async def dismiss_po_variance(
     debit_note_suggested = False
     suggested_amount: Optional[float] = None
     if body.grn_id and body.bill_id:
+        db = grn_repo = grn = bill = None
+        read = True
         try:
             db = _get_db()
-            grn = None
             grn_repo = get_grn_repository()
             if grn_repo is not None:
                 grn = grn_repo.find_by_id(body.grn_id)
-            bill = None
             if db is not None:
                 bill = db.get_collection("vendor_bills").find_one(
                     {"bill_id": body.bill_id}, {"_id": 0}
                 )
+        except Exception:  # noqa: BLE001 - unreadable: no suggestion, as before
+            read = False
+            grn = bill = None
+        # F63: the receipt and the bill the suggestion is priced from must be
+        # ones the caller can open. Another shop's -- or one that does not
+        # exist -- is the same 404 its own detail route gives, so the answer
+        # never confirms another shop's receipt or bill, nor prices a
+        # suggestion off it.
+        if read and grn_repo is not None and not (
+            grn and can_access_store_scoped(grn.get("store_id"), current_user)
+        ):
+            raise HTTPException(status_code=404, detail="GRN not found")
+        if read and db is not None and not (
+            bill and can_access_store_scoped(bill.get("store_id"), current_user)
+        ):
+            raise HTTPException(status_code=404, detail="Purchase invoice not found")
+        try:
             accepted_qty = 0
             for it in (grn or {}).get("items", []) or []:
                 if isinstance(it, dict) and it.get("product_id") == body.product_id:

@@ -10,7 +10,13 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
 const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() }));
+vi.mock('../../../hooks/usePOSQueries', () => ({
+  // PurchaseShopName (the booking form / picker shop line) reads the store list.
+  useStores: () => ({ data: [] }),
+}));
 vi.mock('../../../context/ToastContext', () => ({ useToast: () => toast }));
+// The Purchase shop picker and shop names read the store list (react-query).
+vi.mock('../../../hooks/usePOSQueries', () => ({ useStores: () => ({ data: [] }) }));
 vi.mock('../../../context/AuthContext', () => ({
   useAuth: () => ({ user: { activeStoreId: 's1', roles: ['ADMIN'] }, hasRole: () => true }),
 }));

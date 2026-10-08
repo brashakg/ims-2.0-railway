@@ -575,7 +575,7 @@ async def get_grn(grn_id: str, current_user: dict = Depends(get_current_user)):
         return {"grn_id": grn_id}
 
     grn = grn_repo.find_by_id(grn_id)
-    if not grn:
+    if not grn or not can_access_store_scoped(grn.get("store_id"), current_user):
         raise HTTPException(status_code=404, detail="GRN not found")
     # A stranded receipt is numbered first; one its own request is still
     # numbering has no number to show yet, never its placeholder (audit F28).

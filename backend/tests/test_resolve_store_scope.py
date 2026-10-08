@@ -54,3 +54,47 @@ def test_area_manager_in_region_ok_out_of_region_403():
 def test_area_manager_omitted_pins_to_own_store():
     # AREA_MANAGER is not HQ-all: omitting scopes to their active store.
     assert resolve_store_scope(None, AREA) == "BV-PUN-01"
+
+
+# Owner ruling 2026-10-07 (R3): a login that is not ADMIN / SUPERADMIN and has
+# no shop must NOT read every shop. It used to: no active store -> None -> no
+# filter -> all stores, on every Purchase tab and finance read that asks this
+# rule. Fail closed, with a plain message.
+NO_SHOP = "Your login has no shop assigned - ask an admin to assign one."
+
+
+@pytest.mark.parametrize("role", ["STORE_MANAGER", "AREA_MANAGER", "ACCOUNTANT", "CATALOG_MANAGER"])
+@pytest.mark.parametrize("token", [{}, {"store_ids": [], "active_store_id": None}])
+def test_r3_a_non_admin_with_no_shop_reads_no_shop(role, token):
+    with pytest.raises(HTTPException) as ei:
+        resolve_store_scope(None, {"roles": [role], **token})
+    assert ei.value.status_code == 403
+    assert ei.value.detail == NO_SHOP
+
+
+def test_r3_a_non_admin_with_no_shop_cannot_name_one_either():
+    with pytest.raises(HTTPException) as ei:
+        resolve_store_scope("BV-PUN-01", {"roles": ["ACCOUNTANT"], "store_ids": []})
+    assert ei.value.status_code == 403
+
+
+@pytest.mark.parametrize("user", [{"roles": ["ADMIN"]}, {"roles": ["SUPERADMIN"]}])
+def test_r3_admins_with_no_shop_still_read_every_shop(user):
+    assert resolve_store_scope(None, user) is None
+
+
+@pytest.mark.parametrize("name,kw", [
+    ("get_sell_through_analysis", {"days": 30}),
+    ("get_overstock_analysis", {"overstocking_threshold": 3.0, "days": 30}),
+])
+def test_r3_a_catch_all_handler_passes_the_refusal_through(monkeypatch, name, kw):
+    """These two asked the rule inside `except Exception -> 500`: a login with
+    no shop (or one naming another shop) got a 500, not the plain 403."""
+    import asyncio
+    from unittest.mock import MagicMock
+    from api.routers.inventory import analytics
+
+    monkeypatch.setattr(analytics, "_get_db", lambda: MagicMock())
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(getattr(analytics, name)(store_id=None, current_user={"roles": ["STORE_MANAGER"]}, **kw))
+    assert (ei.value.status_code, ei.value.detail) == (403, NO_SHOP)

@@ -171,7 +171,10 @@ def test_build_row_carries_the_products_gst_identity():
 # router integration (fakes) -- shape + PUSH_LOCKED surfacing
 # ---------------------------------------------------------------------------
 
-_VIEWER = {"user_id": "u", "roles": ["CATALOG_MANAGER"]}
+# A shop of its own: a non-admin with none reads no shop's stock (owner ruling
+# 2026-10-07, R3 -- api.dependencies.resolve_store_scope 403s it).
+_VIEWER = {"user_id": "u", "roles": ["CATALOG_MANAGER"], "active_store_id": "BV-DHN-01",
+           "store_ids": ["BV-DHN-01"]}
 
 
 def _run(coro):

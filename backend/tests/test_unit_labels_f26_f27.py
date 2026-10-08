@@ -246,12 +246,13 @@ def test_units_view_by_receipt_never_leaks_another_shops_units(world):
     assert r.json()["units"] == []
 
 
-# Every role that reaches these reads, split by the cost rule (cost_mask.py:
-# SUPERADMIN / ADMIN / ACCOUNTANT see cost; everyone else never gets it). A
-# test that only sent STORE_MANAGER vs ADMIN let a leak to the counter roles
-# (SALES_STAFF, CASHIER) pass.
-_NO_COST_ROLES = ["SALES_STAFF", "CASHIER", "STORE_MANAGER", "CATALOG_MANAGER"]
-_COST_ROLES = ["ADMIN", "ACCOUNTANT"]
+# Every role that reaches these reads, split by the per-unit product-cost rule
+# (cost_mask "product", owner ruling 2026-09-28: the managers -- store, area,
+# catalogue -- see per-unit cost; counter staff never). A test that only sent
+# STORE_MANAGER vs ADMIN let a leak to the counter roles (SALES_STAFF, CASHIER)
+# pass.
+_NO_COST_ROLES = ["SALES_STAFF", "CASHIER", "OPTOMETRIST", "WORKSHOP_STAFF"]
+_COST_ROLES = ["ADMIN", "ACCOUNTANT", "STORE_MANAGER", "CATALOG_MANAGER"]
 
 
 def _as_role(role):

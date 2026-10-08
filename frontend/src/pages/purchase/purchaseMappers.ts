@@ -29,9 +29,7 @@ export function mapVendorToSupplier(v: any): Supplier {
     gstNumber: v.gstin ?? '',
     paymentTerms: v.credit_days ?? 30,
     creditLimit: v.credit_limit ?? 0,
-    currentOutstanding: v.current_outstanding ?? 0,
     rating: v.rating ?? 0,
-    totalPurchases: v.total_purchases ?? 0,
     lastPurchaseDate: v.last_purchase_date ?? '',
     performance: {
       onTimeDelivery: v.on_time_delivery ?? 0,
@@ -89,6 +87,7 @@ export function mapPOtoPurchaseOrder(po: any): PurchaseOrder {
     poNumber: po.po_number ?? '',
     supplierId: po.vendor_id ?? '',
     supplierName: po.vendor_name ?? '',
+    deliveryStoreId: po.delivery_store_id || undefined,
     date: po.created_at ? po.created_at.split('T')[0] : '',
     expectedDelivery: po.expected_date ?? '',
     status: (po.status ?? 'DRAFT') as POStatus,

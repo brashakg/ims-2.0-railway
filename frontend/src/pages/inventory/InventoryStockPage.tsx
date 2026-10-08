@@ -51,6 +51,7 @@ import {
   CATEGORIES,
   getOnlineFor,
   onlineStatusIds,
+  unitsHeld,
   useCataloguers,
   useFixturesMap,
   useOnlineStatus,
@@ -108,6 +109,9 @@ export function InventoryStockPage() {
   // Data (shared cache with the layout's stat strip).
   const stockQ = useStock(storeId || undefined, cataloguerFilter || undefined);
   const inventory = stockQ.data ?? [];
+  // Audit F47: managers + accounts see what each unit cost; the server sends
+  // cost only to them, so the column follows the data, never a role list here.
+  const showUnitCost = inventory.some((i) => i.cost_value != null);
   const isLoading = stockQ.isPending;
   const onlineStatusQ = useOnlineStatus(onlineStatusIds(inventory));
   const onlineStatus = onlineStatusQ.data;
@@ -217,7 +221,10 @@ export function InventoryStockPage() {
       const category = CATEGORIES.find(c => sameCategory(c.code, item.category))?.label || item.category;
       const online = getOnline(item);
       const status = getStockStatus(item).label;
-      const available = (item.stock || 0) - (item.reserved || 0);
+      // `stock` is already the units for sale (reserved ones are counted
+      // apart), so it IS the available figure; In Stock = everything the shop
+      // holds (shelf + reserved), the units the value tiles count (#39).
+      const available = item.stock || 0;
       lines.push([
         esc(item.name),
         esc(item.brand),
@@ -226,7 +233,7 @@ export function InventoryStockPage() {
         esc(category),
         esc(item.mrp ?? ''),
         esc(item.offerPrice ?? item.mrp ?? ''),
-        esc(item.stock ?? 0),
+        esc(unitsHeld(item)),
         esc(item.reserved ?? 0),
         esc(available),
         esc(online?.shares_item ? SHARES_ITEM_LABEL : online?.online ? 'Yes' : online && online.online === null ? 'Unverified' : 'No'),
@@ -472,6 +479,9 @@ export function InventoryStockPage() {
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Category</th>
                   <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase whitespace-nowrap">MRP</th>
                   <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Offer</th>
+                  {showUnitCost && (
+                    <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Cost / unit</th>
+                  )}
                   {/* Physical-only columns: an ONLINE store owns no stock and
                       has no on-floor zone, so these are hidden there. */}
                   {!isOnlineStoreView && (
@@ -582,11 +592,27 @@ export function InventoryStockPage() {
                       <td className="px-4 py-3 text-right text-sm font-medium text-gray-900">
                         {formatCurrency(item.offerPrice || item.mrp || 0)}
                       </td>
+                      {showUnitCost && (
+                        <td className="px-4 py-3 text-right text-sm text-gray-700">
+                          {/* Per COSTED unit; a unit nobody priced is said, never shown as Rs 0 (#34). */}
+                          {item.unit_cost != null ? formatCurrency(item.unit_cost) : !item.uncosted_units ? '—' : null}
+                          {(item.uncosted_units || 0) > 0 && (
+                            <span
+                              className="block text-xs text-amber-600 whitespace-nowrap"
+                              title="No cost on these units or their product: they add nothing to the stock value at cost"
+                            >
+                              {item.unit_cost != null ? `+${item.uncosted_units} ` : ''}no cost
+                            </span>
+                          )}
+                        </td>
+                      )}
                       {/* Physical-only cells (In-Store on-hand + on-floor Zone). */}
                       {!isOnlineStoreView && (
                         <>
-                          <td className="px-4 py-3 text-center">
-                            <span className="font-medium">{item.stock - (item.reserved || 0)}</span>
+                          {/* `stock` is the units for sale; reserved ones are counted
+                              apart, so the cell is stock + "N reserved" (#39). */}
+                          <td className="px-4 py-3 text-center" title={`${unitsHeld(item)} in the shop: ${item.stock || 0} for sale, ${item.reserved || 0} reserved`}>
+                            <span className="font-medium">{item.stock || 0}</span>
                             {item.reserved > 0 && (
                               <span className="text-xs text-amber-600 ml-1">+{item.reserved} reserved</span>
                             )}
@@ -745,14 +771,14 @@ export function InventoryStockPage() {
         const cat = CATEGORIES.find(c => sameCategory(c.code, detailItem.category));
         const online = getOnline(detailItem);
         const status = getStockStatus(detailItem);
-        const available = (detailItem.stock || 0) - (detailItem.reserved || 0);
+        const available = detailItem.stock || 0; // reserved is not inside stock (#39)
         const rows: Array<[string, string]> = [
           ['SKU', detailItem.sku || '-'],
           ['Units in the shop', String(unitsInShop(detailItem))],
           ['Category', cat?.label || detailItem.category],
           ['MRP', formatCurrency(detailItem.mrp || 0)],
           ['Offer price', formatCurrency(detailItem.offerPrice || detailItem.mrp || 0)],
-          ['In stock', String(detailItem.stock ?? 0)],
+          ['In stock', String(unitsHeld(detailItem))],
           ['Reserved', String(detailItem.reserved ?? 0)],
           ['Available', String(available)],
           [

@@ -3,13 +3,16 @@
 // Wave 1 split: the old /purchase tab container (PurchaseManagementPage) is
 // now a layout with one REAL page per section:
 //   /purchase/orders · /purchase/invoices · /purchase/variance ·
-//   /purchase/suppliers · /purchase/vendor-returns · /purchase/analytics
+//   /purchase/suppliers · /purchase/vendor-returns · /purchase/analytics ·
+//   /purchase/this-month
 // Legacy /purchase?tab=<x> deep-links (bookmarks, WhatsApp'd links, old
 // builds) forward via PurchaseTabRedirect below — no dead links.
 import { lazy } from 'react';
 import { Route, Navigate, useSearchParams } from 'react-router-dom';
 import { ProtectedRoute } from '../components/layout/ProtectedRoute';
 import type { UserRole } from '../types';
+import { APPROVE_ROLES } from '../pages/purchase/invoices/shared';
+import { RETURN_READERS } from '../pages/purchase/purchaseRoles';
 
 const PurchaseLayout = lazy(() => import('../pages/purchase/PurchaseLayout').then(m => ({ default: m.PurchaseLayout })));
 const PurchaseOrdersSection = lazy(() => import('../pages/purchase/PurchaseOrdersSection').then(m => ({ default: m.PurchaseOrdersSection })));
@@ -17,11 +20,15 @@ const PurchaseInvoicesSection = lazy(() => import('../pages/purchase/PurchaseInv
 const PurchaseVarianceTab = lazy(() => import('../pages/purchase/PurchaseVarianceTab').then(m => ({ default: m.PurchaseVarianceTab })));
 const SuppliersSection = lazy(() => import('../pages/purchase/SuppliersSection').then(m => ({ default: m.SuppliersSection })));
 const PurchaseAnalyticsSection = lazy(() => import('../pages/purchase/PurchaseAnalyticsSection').then(m => ({ default: m.PurchaseAnalyticsSection })));
+const PurchasesThisMonthSection = lazy(() => import('../pages/purchase/PurchasesThisMonthSection').then(m => ({ default: m.PurchasesThisMonthSection })));
 const GoodsReceiptNote = lazy(() => import('../pages/purchase/GoodsReceiptNote').then(m => ({ default: m.GoodsReceiptNote })));
 const GoodsReceiptCockpit = lazy(() => import('../pages/purchase/GoodsReceiptCockpit').then(m => ({ default: m.GoodsReceiptCockpit })));
 const VendorReturns = lazy(() => import('../pages/purchase/VendorReturns').then(m => ({ default: m.VendorReturns })));
 // Purchase S6: Accountant Reconciliation Console
 const ReconConsole = lazy(() => import('../pages/purchase/ReconConsole'));
+// Owner ruling 2026-10-07 (R3): the screens outside PurchaseLayout take its
+// no-shop gate too (lazy: the shop module stays out of the first download).
+const PurchaseShopGate = lazy(() => import('../pages/purchase/purchaseShop').then(m => ({ default: m.PurchaseShopGate })));
 
 // The module gate for the section pages — identical to the old /purchase gate.
 const PURCHASE_ROLES: UserRole[] = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'];
@@ -78,10 +85,13 @@ export const purchaseRoutes = (
           </ProtectedRoute>
         }
       />
+      {/* Purchase invoices are supplier bills -- what we owe and have paid
+          (owner ruling 2026-10-01): the accounts roles only, the same set as
+          every /vendors/purchase-invoices/* read (APPROVE_ROLES). */}
       <Route
         path="invoices"
         element={
-          <ProtectedRoute allowedRoles={PURCHASE_ROLES}>
+          <ProtectedRoute allowedRoles={APPROVE_ROLES}>
             <PurchaseInvoicesSection />
           </ProtectedRoute>
         }
@@ -102,12 +112,13 @@ export const purchaseRoutes = (
           </ProtectedRoute>
         }
       />
-      {/* Vendor Returns keeps its wider historical gate (WORKSHOP_STAFF logs
-          defective pairs; ACCOUNTANT is not in this flow). */}
+      {/* Vendor Returns: RETURN_READERS, the backend's read list -- the
+          purchase roles plus WORKSHOP_STAFF (logs defective pairs). The
+          ACCOUNTANT owns the debit notes (owner ruling 2026-10-07, R2). */}
       <Route
         path="vendor-returns"
         element={
-          <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'WORKSHOP_STAFF']}>
+          <ProtectedRoute allowedRoles={RETURN_READERS}>
             <VendorReturns />
           </ProtectedRoute>
         }
@@ -117,6 +128,16 @@ export const purchaseRoutes = (
         element={
           <ProtectedRoute allowedRoles={PURCHASE_ROLES}>
             <PurchaseAnalyticsSection />
+          </ProtectedRoute>
+        }
+      />
+      {/* Audit F56: Purchases this month -- the supplier-balance readers only,
+          the same set as GET /vendors/purchases-this-month. */}
+      <Route
+        path="this-month"
+        element={
+          <ProtectedRoute allowedRoles={APPROVE_ROLES}>
+            <PurchasesThisMonthSection />
           </ProtectedRoute>
         }
       />
@@ -137,7 +158,7 @@ export const purchaseRoutes = (
       path="purchase/grn"
       element={
         <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
-          <GoodsReceiptNote />
+          <PurchaseShopGate><GoodsReceiptNote /></PurchaseShopGate>
         </ProtectedRoute>
       }
     />
@@ -150,7 +171,7 @@ export const purchaseRoutes = (
       path="purchase/receive"
       element={
         <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
-          <GoodsReceiptCockpit />
+          <PurchaseShopGate><GoodsReceiptCockpit /></PurchaseShopGate>
         </ProtectedRoute>
       }
     />
@@ -162,7 +183,7 @@ export const purchaseRoutes = (
       path="purchase/recon-console"
       element={
         <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'ACCOUNTANT']}>
-          <ReconConsole />
+          <PurchaseShopGate><ReconConsole /></PurchaseShopGate>
         </ProtectedRoute>
       }
     />

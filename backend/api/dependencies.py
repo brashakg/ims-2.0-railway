@@ -151,13 +151,26 @@ def resolve_store_scope(store_id, current_user: dict):
 
     Callers use the returned value as the store filter: ``s = resolve_store_scope(
     store_id, user); if s: filter["store_id"] = s`` (None => no filter => all).
+
+    Owner ruling 2026-10-07 (R3): None is ONLY ever the admins' answer. Any
+    other login with no shop used to get it too -- and read every shop on
+    every caller -- so it fails closed here, once, with a plain 403.
     """
     if store_id:
         return validate_store_access(store_id, current_user)
     roles = set(current_user.get("roles") or [])
     if "SUPERADMIN" in roles or "ADMIN" in roles:
         return None
-    return current_user.get("active_store_id")
+    own = current_user.get("active_store_id")
+    if not own:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=403, detail=NO_SHOP_DETAIL)
+    return own
+
+
+# What a login with no shop is told by every read resolve_store_scope guards.
+NO_SHOP_DETAIL = "Your login has no shop assigned - ask an admin to assign one."
 
 
 def filter_docs_by_store(docs, current_user: dict, store_key: str = "store_id"):

@@ -212,10 +212,26 @@ def routed(db, monkeypatch):
 
 
 def _accountant(uid="ACC1"):
+    # A shop of its own (BV-1, where every fixture row below lives): a login
+    # that is not ADMIN / SUPERADMIN and has no shop reads no shop's figures
+    # (owner ruling 2026-10-07, R3 -- api.dependencies.resolve_store_scope).
     return {
         "user_id": uid,
         "full_name": "Books",
         "roles": ["ACCOUNTANT"],
+        "store_ids": ["BV-1"],
+        "active_store_id": "BV-1",
+    }
+
+
+def _admin(uid="ADM1"):
+    # F63: only ADMIN / SUPERADMIN may name any shop; a storeless ACCOUNTANT
+    # naming BV-1 is refused (403) like any other login asking for a shop it
+    # does not hold.
+    return {
+        "user_id": uid,
+        "full_name": "Owner",
+        "roles": ["ADMIN"],
         "store_ids": [],
         "active_store_id": None,
     }
@@ -254,6 +270,7 @@ def _expense(category, amount, store="BV-1", day="2026-06-05", status="APPROVED"
 def _bill(bill_id, total, due, vendor_id="V-1", vendor_name="Lens Co", critical=False):
     return {
         "bill_id": bill_id,
+        "store_id": "BV-1",
         "bill_number": f"INV-{bill_id}",
         "vendor_id": vendor_id,
         "vendor_name": vendor_name,
@@ -516,16 +533,17 @@ def test_store_id_filters_expenses_and_income_but_not_org_wide_ap(routed):
     routed["expenses"].docs.append(_expense("Rent", 30000.0, store="BV-2"))
     routed["orders"].docs.append(_order(40000.0, store="BV-2"))
     sv_all = asyncio.run(
-        fin.get_survival_cashflow(store_id=None, current_user=_accountant())
+        fin.get_survival_cashflow(store_id=None, current_user=_admin())
     )["survival"]
     sv_bv1 = asyncio.run(
-        fin.get_survival_cashflow(store_id="BV-1", current_user=_accountant())
+        fin.get_survival_cashflow(store_id="BV-1", current_user=_admin())
     )["survival"]
     assert sv_all["fixed_costs_paise"] == 8000000  # both stores' rent
     assert sv_bv1["fixed_costs_paise"] == 5000000  # BV-1 only
     assert sv_all["projected_income_paise"] == 20000000  # (60k+40k) doubled
     assert sv_bv1["projected_income_paise"] == 12000000
-    # Vendor bills carry no store_id -- AP stays org-wide under the filter.
+    # An ADMIN's AP stays org-wide under the filter (these bills carry no
+    # store_id; a shop accountant's AP narrows -- test_finance_ap_scope_round2).
     assert sv_bv1["must_pay_ap_paise"] == sv_all["must_pay_ap_paise"] == 1000000
 
 
@@ -695,14 +713,14 @@ def test_dedicated_route_stamps_scope_labels(routed):
     """End-to-end: the route passes store_scoped through from its store_id."""
     _seed_standard(routed)
     sv_all = asyncio.run(
-        fin.get_survival_cashflow(store_id=None, current_user=_accountant())
+        fin.get_survival_cashflow(store_id=None, current_user=_admin())
     )["survival"]
     sv_bv1 = asyncio.run(
-        fin.get_survival_cashflow(store_id="BV-1", current_user=_accountant())
+        fin.get_survival_cashflow(store_id="BV-1", current_user=_admin())
     )["survival"]
     assert sv_all["income_expense_scope"] == "ORG_WIDE"
     assert sv_bv1["income_expense_scope"] == "STORE"
-    # AP never narrows, regardless of the filter.
+    # An ADMIN's AP never narrows, regardless of the filter.
     assert sv_all["ap_scope"] == sv_bv1["ap_scope"] == "ORG_WIDE"
 
 
