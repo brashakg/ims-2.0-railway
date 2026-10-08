@@ -88,7 +88,9 @@ const REPORT_CARDS = [
   {
     id: 'gst-report',
     title: 'GST Report',
-    description: 'GSTR-1 and GSTR-3B data for filing',
+    // The card's one link is GSTR-1. GSTR-3B (input tax from supplier bills)
+    // is the accounts roles' (R1), offered on the filing card below to them.
+    description: 'GSTR-1 data for filing',
     icon: FileText,
     category: 'gst' as ReportSection,
   },

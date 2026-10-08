@@ -1,11 +1,12 @@
 // ============================================================================
-// IMS 2.0 - Finance dashboard: supplier figures follow the dashboard's shop,
+// IMS 2.0 - Finance dashboard: supplier figures say which shop they cover,
 // and one status rule reads a supplier's balance (review r1 #12 #37 #38)
 // ============================================================================
-// Every other Finance panel reads the shop picked at the top of the screen
-// (?store_id=activeStoreId). The supplier figures -- the Vendor Payments tab
-// and the Outstanding tab's payment schedule -- used to ask for every shop
-// with nothing on screen saying so, next to one shop's receivables.
+// The supplier figures -- the Vendor Payments tab and the Outstanding tab's
+// payment schedule -- used to ask for every shop with nothing on screen
+// saying so. They read the one Purchase shop scope (usePurchaseShop, as
+// Purchase > Suppliers): an accountant's own shop, named; an admin's every
+// shop (owner ruling 2026-09-28), labelled All shops.
 //
 // The balance is the supplier ledger's closing balance: below zero we paid
 // ahead (an advance), zero is settled. Outstanding used to badge both
@@ -98,7 +99,7 @@ function statusOf(vendor: string): string {
   return cells.map((c) => c.textContent || '').join('|');
 }
 
-describe('Finance dashboard - supplier figures follow the dashboard shop', () => {
+describe('Finance dashboard - supplier figures follow the Purchase shop scope', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     roles = ['ADMIN'];
@@ -106,24 +107,29 @@ describe('Finance dashboard - supplier figures follow the dashboard shop', () =>
     primeApi();
   });
 
-  it.each([['ADMIN'], ['ACCOUNTANT']])(
-    '%s: asks for the shop every other panel reads, and says which shop it is',
-    async (role) => {
-      roles = [role];
-      await openTab(/outstanding/i);
-      expect(api.getVendorPayments).toHaveBeenCalledWith('BV-DHN-01');
-      expect(api.getOutstanding).toHaveBeenCalledWith({ store_id: 'BV-DHN-01' });
-      const head = (await screen.findByText(/vendor payment schedule/i)).parentElement as HTMLElement;
-      expect(await within(head).findByText('Better Vision Dhanbad')).toBeInTheDocument();
-      expect(within(head).getByText(/^Shop:/)).toBeInTheDocument();
+  it('an accountant: his own shop, and says which shop it is', async () => {
+    roles = ['ACCOUNTANT'];
+    await openTab(/outstanding/i);
+    expect(api.getVendorPayments).toHaveBeenCalledWith('BV-DHN-01');
+    expect(api.getOutstanding).toHaveBeenCalledWith({ store_id: 'BV-DHN-01' });
+    const head = (await screen.findByText(/vendor payment schedule/i)).parentElement as HTMLElement;
+    expect(await within(head).findByText('Better Vision Dhanbad')).toBeInTheDocument();
+    expect(within(head).getByText(/^Shop:/)).toBeInTheDocument();
+  });
+
+  // Owner ruling 2026-09-28: admins see all shops. The supplier figures read
+  // the one Purchase shop scope (as Purchase > Suppliers), not the topbar
+  // shop, which has no all-stores choice.
+  it.each([[/vendor payments/i], [/outstanding/i]])(
+    'an admin with a topbar shop still reads every shop (%s)',
+    async (tab) => {
+      await openTab(tab);
+      expect(api.getVendorPayments).toHaveBeenCalled();
+      expect(api.getVendorPayments.mock.calls.every(([sid]) => !sid)).toBe(true);
+      expect(await screen.findByText('All shops')).toBeInTheDocument();
+      expect(screen.queryByText(/^Shop:/)).toBeNull();
     },
   );
-
-  it('Vendor Payments tab names the same shop', async () => {
-    await openTab(/vendor payments/i);
-    expect(api.getVendorPayments).toHaveBeenCalledWith('BV-DHN-01');
-    expect(await screen.findByText('Better Vision Dhanbad')).toBeInTheDocument();
-  });
 
   it('no shop picked: every shop is asked for and labelled as such', async () => {
     activeStoreId = '';
@@ -155,6 +161,7 @@ describe('Finance dashboard - supplier figures follow the dashboard shop', () =>
   );
 
   it('a shop missing from the store list is named by its id', async () => {
+    roles = ['ACCOUNTANT'];
     activeStoreId = 'BV-NEW-09';
     await openTab(/vendor payments/i);
     await waitFor(() => expect(getStores).toHaveBeenCalled());

@@ -483,6 +483,23 @@ def uncosted_world(uncosted_db, monkeypatch):
     return _World(TestClient(app), app)
 
 
+@pytest.fixture
+def uncosted_reports(uncosted_db, monkeypatch):
+    from database.repositories.product_repository import (
+        ProductRepository,
+        StockRepository,
+    )
+
+    stock = lambda: StockRepository(uncosted_db["stock_units"])  # noqa: E731
+    products = lambda: ProductRepository(uncosted_db["products"])  # noqa: E731
+    monkeypatch.setattr(reports_mod, "get_stock_repository", stock)
+    monkeypatch.setattr(reports_mod, "get_product_repository", products)
+    monkeypatch.setattr(reports_mod, "get_db", lambda: _DBProxy(uncosted_db))
+    app = FastAPI()
+    app.include_router(reports_mod.router, prefix="/reports")
+    return _World(TestClient(app), app)
+
+
 def _rows_by_pid(world, role):
     resp = world.get("/inventory/stock", role)
     assert resp.status_code == 200, resp.text
@@ -551,6 +568,49 @@ def test_r1_39_stock_is_the_shelf_reserved_is_apart_and_cost_covers_both(uncoste
     assert (row["stock"], row["reserved"]) == (3, 1)
     assert row["cost_value"] == pytest.approx(4000.0)  # 4 units x 1000, sold H5 not stock
     assert row["unit_cost"] == pytest.approx(1000.0)
+
+
+def test_f47_stock_aging_counts_the_units_with_no_cost(uncosted_world):
+    """Stock aging values at cost like the ledger: a unit with no cost adds
+    nothing, and is COUNTED (per product and beside Tied capital), never a
+    silent Rs 0 row."""
+    body = uncosted_world.get("/inventory/aging", "STORE_MANAGER").json()
+    rows = {p["id"]: p for p in body["products"]}
+    assert (rows["P-NOCOST"]["value"], rows["P-NOCOST"]["uncostedUnits"]) == (0.0, 2)
+    assert (rows["P-MIXED"]["value"], rows["P-MIXED"]["uncostedUnits"]) == (4000.0, 1)
+    assert rows["P-MASTER"]["uncostedUnits"] == 0
+    slow = [p for p in body["products"] if p["classification"] == "C"]
+    assert body["summary"]["slowMovingUncostedUnits"] == sum(
+        p["uncostedUnits"] for p in slow
+    ) == 3
+
+
+@pytest.mark.parametrize("role", COUNTER)
+def test_f47_the_counter_gets_no_uncosted_count_on_aging(uncosted_world, role):
+    body = uncosted_world.get("/inventory/aging", role).json()
+    assert body["summary"]["slowMovingUncostedUnits"] is None
+    assert all(p["uncostedUnits"] is None for p in body["products"])
+
+
+@pytest.mark.parametrize(
+    "path,params,count",
+    [
+        ("/reports/inventory", {}, lambda b: b["uncostedUnits"]),
+        ("/reports/inventory/summary", {}, lambda b: b["summary"]["uncosted_units"]),
+        ("/reports/inventory/valuation", {}, lambda b: b["valuation"]["uncosted_units"]),
+        (
+            "/reports/stock/count",
+            {"from_date": "2026-09-01", "to_date": "2026-09-29"},
+            lambda b: b["summary"]["uncosted_units"],
+        ),
+    ],
+)
+def test_f47_every_stock_value_report_counts_the_units_with_no_cost(
+    uncosted_reports, path, params, count
+):
+    resp = uncosted_reports.get(path, "ADMIN", **params)
+    assert resp.status_code == 200, resp.text
+    assert count(resp.json()) == 3
 
 
 def test_r1_34_the_one_rule_counts_uncosted_pieces():

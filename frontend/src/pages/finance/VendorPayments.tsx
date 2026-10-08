@@ -4,12 +4,11 @@
 
 import { useEffect, useState } from 'react';
 import clsx from 'clsx';
-import { useAuth } from '../../context/AuthContext';
 import { storeApi } from '../../services/api/stores';
 import { normalizeStore } from '../../utils/storeAccess';
 import type { VendorPaymentData } from './financeTypes';
 import { formatCurrency } from './financeUtils';
-import { PurchaseShopGate } from '../purchase/purchaseShop';
+import { PurchaseShopGate, usePurchaseShop } from '../purchase/purchaseShop';
 
 interface VendorPaymentsProps {
   vendorPayments: VendorPaymentData[];
@@ -35,13 +34,12 @@ export function SupplierStatusBadge({ vendor }: { vendor: VendorPaymentData }) {
   );
 }
 
-/** Which shop the supplier figures cover. The Finance dashboard reads every
- *  panel -- these too -- for the shop picked at the top of the screen
- *  (user.activeStoreId, sent as ?store_id); with no shop picked the server
- *  answers every shop. Named from the store list, its id until that arrives. */
+/** Which shop the supplier figures cover: the one Purchase shop scope
+ *  (usePurchaseShop) -- an admin's Purchase pick, every shop until he picks
+ *  one; anyone else's own shop. Named from the store list, its id until that
+ *  arrives. */
 export function SupplierFiguresShop() {
-  const { user } = useAuth();
-  const storeId = user?.activeStoreId || '';
+  const storeId = usePurchaseShop().storeId || '';
   // The name found for a shop id; a stale answer for another id is ignored.
   const [named, setNamed] = useState<{ id: string; name: string } | null>(null);
   const name = named?.id === storeId ? named.name : '';

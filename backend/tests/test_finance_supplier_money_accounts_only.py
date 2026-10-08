@@ -329,22 +329,17 @@ def test_a_pune_accountant_cannot_ask_for_dhanbad(finance):
 # ============================================================================
 
 
-@pytest.mark.parametrize("role", MANAGERS)
-def test_a_manager_with_no_shop_gets_no_supplier_payments_in_cash_flow(finance, role):
-    """The org view (no active shop) is the only view that ever folded supplier
-    payments in. A manager gets it WITHOUT them: no key, not inside outflows /
-    net_cash_flow, a flag instead of a figure."""
+@pytest.mark.parametrize("role", (*MANAGERS, "ACCOUNTANT"))
+def test_a_login_with_no_shop_gets_no_cash_flow_at_all(finance, role):
+    """Owner ruling 2026-10-07 (R3): the org view (every shop, supplier
+    payments folded in) is the admins' alone. A non-admin login with no shop
+    used to be handed it -- an accountant WITH every shop's supplier
+    payments -- by a second copy of the shop rule; the one rule
+    (resolve_store_scope) refuses it."""
     resp = finance("/cash-flow", _user(role))
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert "vendor_payment_outflow" not in body, body
-    assert body.get("vendor_payments_restricted") is True, body
-    assert body["expense_outflow"] == RENT
-    # The trap: the figure must not ride inside the totals either.
-    assert body["outflows"] == pytest.approx(body["expense_outflow"] + body["purchase_outflow"])
-    assert body["net_cash_flow"] == pytest.approx(body["inflows"] - body["outflows"])
-    assert PAID_THIS_MONTH not in _numbers(body), body
-    assert RENT + PAID_THIS_MONTH not in _numbers(body), body
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["detail"] == "Your login has no shop assigned - ask an admin to assign one."
+    assert PAID_THIS_MONTH not in _numbers(resp.json())
 
 
 @pytest.mark.parametrize("role", MANAGERS)
@@ -357,8 +352,8 @@ def test_a_managers_shop_view_carries_no_supplier_payments(finance, role):
     assert body["outflows"] == RENT
 
 
-@pytest.mark.parametrize("role", ["ADMIN", "SUPERADMIN", "ACCOUNTANT"])
-def test_the_accounts_roles_keep_supplier_payments_on_the_org_view(finance, role):
+@pytest.mark.parametrize("role", ["ADMIN", "SUPERADMIN"])
+def test_the_admins_keep_supplier_payments_on_the_org_view(finance, role):
     body = finance("/cash-flow", _user(role)).json()
     assert body["vendor_payment_outflow"] == PAID_THIS_MONTH
     assert body["outflows"] == pytest.approx(RENT + PAID_THIS_MONTH)

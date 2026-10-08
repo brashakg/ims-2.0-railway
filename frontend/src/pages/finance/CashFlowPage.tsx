@@ -18,7 +18,7 @@ import {
 } from '../../services/api/vendorAp';
 import { useToast } from '../../context/ToastContext';
 import { useStores } from '../../hooks/usePOSQueries';
-import { PurchaseShopName, usePurchaseShop } from '../purchase/purchaseShop';
+import { PurchaseShopGate, PurchaseShopName, usePurchaseShop } from '../purchase/purchaseShop';
 import { istDayString } from '../../utils/datetime';
 
 const inr = (n?: number) => `₹${Math.round(n || 0).toLocaleString('en-IN')}`;
@@ -39,7 +39,18 @@ function errMsg(e: unknown, fb: string) {
 
 type Tab = 'overview' | 'forecast' | 'aging';
 
+/** R3: every figure here is one shop's or (admins) every shop's, and the
+ *  server refuses a non-admin login with no shop -- it reads the plain
+ *  message, and none of the three reads is sent. */
 export default function CashFlowPage() {
+  return (
+    <PurchaseShopGate>
+      <CashFlowScreen />
+    </PurchaseShopGate>
+  );
+}
+
+function CashFlowScreen() {
   const toast = useToast();
   const [tab, setTab] = useState<Tab>('overview');
   const [dash, setDash] = useState<OwnerDashboard | null>(null);

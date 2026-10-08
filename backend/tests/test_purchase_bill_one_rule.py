@@ -1194,6 +1194,9 @@ class TestTheFormsShopDecidesPreviewAndBooking:
         _same_split(pv, doc)
         assert doc["recipient_gstin"] == BUY_JH and doc["interstate"] is True
         assert doc["igst_total"] == 120.01
+        # ... and the bill is stored under that same shop, not the token's:
+        # one bill never names one shop for its tax and another for its tabs.
+        assert doc["store_id"] == "S1"
 
     def test_a_shop_the_user_cannot_act_for_is_refused(self):
         db = self._world()
