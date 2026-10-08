@@ -1299,19 +1299,15 @@ def refund_or_return(db, order: Dict[str, Any]) -> Optional[str]:
     """Why Re-map must not move the order's stock claims: a refund or return
     is booked or queued against it (its mark, a returns row or a
     shopify_refund_review row), so money or goods already went back and what
-    the order still ships is a human's call (None: none is)."""
+    the order still ships is a human's call (None: none is). Raises when its
+    rows cannot be read: not provably safe, yet a later press gets past it."""
     sid = str(order.get("shopify_order_id") or "")
-    if order.get(REFUND_MARK):
+    if order.get(REFUND_MARK) or db.get_collection("returns").count_documents(
+        {"order_id": order.get("order_id")}
+    ) or db.get_collection("shopify_refund_review").count_documents(
+        {"$or": [{"order_id": order.get("order_id")}] + ([{"shopify_order_id": sid}] if sid else [])}
+    ):
         return "a refund or return is booked or queued against it -- resolve it by hand"
-    try:
-        if db.get_collection("returns").count_documents({"order_id": order.get("order_id")}) or (
-            db.get_collection("shopify_refund_review").count_documents(
-                {"$or": [{"order_id": order.get("order_id")}] + ([{"shopify_order_id": sid}] if sid else [])}
-            )
-        ):
-            return "a refund or return is booked or queued against it -- resolve it by hand"
-    except Exception as exc:  # noqa: BLE001 -- unreadable = not provably safe
-        return f"its refunds and returns could not be read ({exc})"
     return None
 
 
@@ -1320,7 +1316,8 @@ def _past_remap(db, order: Dict[str, Any]) -> Optional[str]:
     may): it is dead or gone -- not open, fulfilled in IMS or in Shopify --
     or money went back -- a refund or return booked or queued on it. None of
     these reverts: a fulfilment stays, the refund mark only counts up and
-    its rows stay (an unreadable read counts too: not provably safe)."""
+    its rows stay. Raises when the refunds and returns cannot be read (a
+    blip a later press gets past -- never a cause for good)."""
     status = str(order.get("status") or "").upper()
     if status not in ("CONFIRMED", "PROCESSING") or order.get("shopify_fulfillment_id"):
         return f"the order is {status or 'not open'} or already fulfilled"
@@ -1339,7 +1336,10 @@ def _remap_refusal(db, order: Dict[str, Any], took_over: bool) -> Optional[str]:
     stock write-back may not have run, settled claim or not."""
     if not took_over and not reroutable(order):
         return "the order is not held on its seller (GSTIN) check or a failed fulfillment-order move"
-    why = _past_remap(db, order)
+    try:
+        why = _past_remap(db, order)
+    except Exception as exc:  # noqa: BLE001 -- unreadable = not provably safe
+        return f"its refunds and returns could not be read ({exc})"
     if why:
         return why
     # The creator's claim has not settled (it stamps fulfillment_breakdown
@@ -1365,20 +1365,25 @@ def _sold_units(order_id: Optional[str]) -> Dict[tuple, List[str]]:
 
 def _claim_stands(order: Dict[str, Any]) -> bool:
     """The order's stamped claim (``fulfillment_breakdown``) is what it
-    holds: every unit it names is SOLD to it. False unstamped (a Re-map wrote
-    and died before its claim stamped), short (one gave units back and died
-    before its write) or unreadable."""
-    if "fulfillment_breakdown" not in order:
+    holds: every unit it names is SOLD to it, counted per (shop, product) --
+    the breakdown has a row per order line, and two lines of one frame name
+    two units. False unstamped (a Re-map wrote and died before its claim
+    stamped), short (one gave units back and died before its write),
+    unreadable, or on a dead order: what becomes of its units is its cancel
+    door's rule (``_dead_order_units``), which a stopped Re-map may not have
+    run yet."""
+    if "fulfillment_breakdown" not in order or str(order.get("status") or "").upper() in _DEAD:
         return False
     try:
         have = _sold_units(order.get("order_id"))
     except Exception as exc:  # noqa: BLE001
         logger.warning("[ONLINE_ROUTE] claim read skipped for %s: %s", order.get("order_id"), exc)
         return False
-    return all(
-        len(have.get((str(b.get("store_id")), str(b.get("product_id"))), [])) >= int(b.get("qty") or 0)
-        for b in order.get("fulfillment_breakdown") or []
-    )
+    need: Dict[tuple, int] = {}
+    for b in order.get("fulfillment_breakdown") or []:
+        key = (str(b.get("store_id")), str(b.get("product_id")))
+        need[key] = need.get(key, 0) + int(b.get("qty") or 0)
+    return all(len(have.get(key, [])) >= n for key, n in need.items())
 
 
 def _wanted(items: List[Dict[str, Any]], route: Dict[str, Any]) -> Dict[tuple, int]:
@@ -1541,10 +1546,11 @@ async def reroute_held_order(db, order_id: str) -> Dict[str, Any]:
     it; routing unreadable (dark included); the booking's claim not settled
     yet or a move on the wire; another Re-map mid-flight; the fresh route
     names no shop, would change the seller or fails the seller check. A
-    refused press that took over a crashed Re-map's UNSETTLED claim leaves
-    its lease stale -- unless no later press may re-route the order
-    (``_past_remap``): its claim is then settled as it stands
-    (``_settle_as_it_stands``) and the lease comes off."""
+    refused press that took over a crashed Re-map leaves its lease stale
+    (that run may have died before its claim or its tail) -- unless no later
+    press may re-route the order (``_past_remap``): its claim then stands or
+    is settled as it stands (``_settle_as_it_stands``) and the lease comes
+    off; or its claim stands with its move on the wire."""
     from datetime import datetime, timedelta, timezone
 
     from .shopify_ingest import _claim_online_units, _record_stock_miss
@@ -1562,13 +1568,29 @@ async def reroute_held_order(db, order_id: str) -> Dict[str, Any]:
     settled = True
 
     def refused(why: str, gone: bool = False) -> Dict[str, Any]:
-        """The refusal; an unsettled claim no later press may finish (``gone``,
-        or ``_past_remap`` on the order as it is now) is settled as it stands."""
+        """The refusal. A crashed Re-map's lease (``settled`` False) is let
+        go only once no later press has anything left to do, judged on the
+        order as it is now: none may re-route it (``gone``, or
+        ``_past_remap``) and its claim stands or is settled as it stands; or
+        its claim stands with its move on the wire (that run reached its
+        move, which stays SENDING). Any other cause -- the routing unread or
+        dark, the seller check, a write that missed, its refunds unreadable
+        -- a later press gets past, and the crashed run may have died before
+        its tail (its task closes, its moves, the stock write-back): the
+        lease stays STALE and the next press finishes it."""
         nonlocal settled
         if not settled:
             now_order = coll.find_one({"order_id": order_id})
-            if now_order and (gone or _past_remap(db, now_order)) and _settle_as_it_stands(db, now_order):
-                settled = True
+            try:
+                past = now_order and (gone or _past_remap(db, now_order))
+            except Exception as exc:  # noqa: BLE001 -- unreadable: a later press gets past it
+                logger.warning("[ONLINE_ROUTE] refund read skipped for %s: %s", order_id, exc)
+                past = None
+            if past:
+                settled = _claim_stands(now_order) or _settle_as_it_stands(db, now_order)
+            elif now_order and any(m.get("status") == "SENDING"
+                                   for m in (now_order.get("fulfillment_route") or {}).get("moves") or []):
+                settled = _claim_stands(now_order)
         return {
             "status": "refused",
             "order_id": order_id,
@@ -1585,15 +1607,14 @@ async def reroute_held_order(db, order_id: str) -> Dict[str, Any]:
             else _remap_refusal(db, order, False) or "the order could not be read"
         )
     took_over = bool(order.get("reroute_lease_at"))
-    # The lease comes off only once the claim is settled: a fresh press
-    # refused before its write touched nothing; a crashed Re-map whose claim
-    # stands (``_claim_stands``: stamped, every unit it names SOLD to the
-    # order) left nothing to claim; else this run's claim stamped, or settled
-    # as it stands (``refused``). Any other exit -- a takeover of an
-    # unsettled claim refused for a cause a later press gets past, a run
-    # stopped after its write -- leaves it STALE: the order stays marked
-    # (offered Re-map, never dispatched) and the next press carries on at once.
-    settled = was_settled = not took_over or _claim_stands(order)
+    # The lease comes off only once nothing is left for a later press: a
+    # fresh press refused before its write touched nothing; else this run's
+    # claim stamped and its dead-order rule ran, or ``refused`` let a crashed
+    # run's lease go. Any other exit -- a takeover refused for a cause a later
+    # press gets past, a run stopped after its write -- leaves it STALE: the
+    # order stays marked (offered Re-map, never dispatched) and the next
+    # press carries on at once.
+    settled = was_settled = not took_over
     try:
         why = _remap_refusal(db, order, took_over)
         if why:
@@ -1722,8 +1743,8 @@ async def reroute_held_order(db, order_id: str) -> Dict[str, Any]:
             {"order_id": order_id},
             {"$set": {"fulfillment_breakdown": breakdown, "fulfillment_stores": stores}},
         )
-        settled = True
         units = _dead_order_units(db, order_id)
+        settled = True  # stamped, and a dead order's units went by its door's rule
         if units:
             _close_tasks([f"online_fallback_ship:{order_id}:{s}" for s in stores],
                          "The order was cancelled while Re-map ran.")
