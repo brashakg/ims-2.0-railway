@@ -437,7 +437,7 @@ def route_order(
     hold_reason: Optional[str] = None
     if legs:
         home = _gstin(doc_of.get(assigned))  # the largest leg's shop bills
-        ships = _follow_split(legs, pid_of, stock, mapped, lambda t: fits(t, home))
+        ships = _follow_split(legs, pid_of, stock, mapped, lambda t: fits(t, home), held)
         target = ships[assigned]  # the largest fulfillment order's shop bills
         reason = "ASSIGNED" if target == assigned else "MOVED"
         split = [
@@ -589,13 +589,16 @@ def _shopify_split(fos, shop_of, pid_of, need) -> Optional[Dict[str, Dict[str, i
     return legs if got == need else None
 
 
-def _follow_split(legs, pid_of, stock, mapped, fits) -> Dict[str, str]:
+def _follow_split(legs, pid_of, stock, mapped, fits, held=None) -> Dict[str, str]:
     """Q4 on Shopify's split: ``{leg shop: the shop that claims and ships
     that leg}``. A leg shop holding its own part ships it. A leg shop SHORT
     for its own part hands the whole leg (its fulfillment orders move) to ONE
     mapped shop that holds it on top of what that shop already ships and
     ``fits`` the seller check (its own state's GSTIN, the billing shop's
-    GSTIN) -- a shop already in the order first (Q2: fewest locations), then
+    GSTIN) -- the shop holding more of the order's own units for the leg
+    first (``held``, route_order's Re-map rule: a retried failed move is
+    resent there, never hands the packed unit to another shop; 0 at
+    booking), then a shop already in the order (Q2: fewest locations), then
     the most stock -- never INTO a short shop or one failing ``fits`` (IMS
     never creates a seller hold itself). None does, or relocation is off: the
     leg stays, and its claim fails loud AT that shop."""
@@ -615,13 +618,21 @@ def _follow_split(legs, pid_of, stock, mapped, fits) -> Dict[str, str]:
             for p in set(have) | set(extra)
         )
 
+    def own(shop: str, w: Dict[str, int]) -> int:
+        """The order's own units at ``shop`` of ``w``'s items, beyond what it ships."""
+        return sum(
+            max(0, ((held or {}).get(p) or {}).get(shop, 0) - (load.get(shop) or {}).get(p, 0))
+            for p in w
+        )
+
     for s in sorted(legs, key=lambda s: (-sum(legs[s].values()), s)):
         if holds(s, {}) or not _relocation_enabled():
             continue
         cands = [t for t in mapped if t and t != s and holds(t, want[s]) and fits(t)]
         if not cands:
             continue
-        t = min(cands, key=lambda t: (not load.get(t), -sum(stock[p].get(t, 0) for p in want[s]), t))
+        t = min(cands, key=lambda t: (
+            -own(t, want[s]), not load.get(t), -sum(stock[p].get(t, 0) for p in want[s]), t))
         for p, q in want[s].items():
             load.setdefault(t, {})[p] = load.get(t, {}).get(p, 0) + q
         load[s] = {}

@@ -4509,3 +4509,99 @@ def test_a_refunds_read_that_fails_once_never_settles_a_crashed_claim(world, mon
     assert out["ok"] and out["result"]["status"] == "rerouted", out
     assert "the hold is lifted" in out["result"]["message"]
     assert _sold_at(db, oid) == ["BV-BOK-01", "BV-BOK-01"]
+
+
+# ---------------------------------------------------------------------------
+# R27 -- money panel, round 20
+# ---------------------------------------------------------------------------
+
+
+def test_remap_resends_a_failed_split_leg_move_to_the_shop_holding_its_unit(world, monkeypatch):
+    """[LOW] Round 20, item 1 (probe A): the split twin of R18's whole-order
+    rule. FO_2 (OA) was planned Ranchi -> Dhanbad, which claimed its OA, and
+    Shopify refused: MOVE_FAILED, Dhanbad tasked to ship. Bokaro then gets an
+    OA and the human presses Re-map, as the hold text says. Re-map sent FO_2
+    to Bokaro (already in the order), gave Dhanbad's claimed unit back and
+    closed its ship task. It resends the move to Dhanbad now: same unit."""
+    db = world["db"]
+    res, order = _split_leg_move_refused(world, 61270)
+    oid = res["order_id"]
+    _stock(db, "BV-BOK-01", "P-OA", 1)
+    world["shop"].move_error = None
+
+    out = _remap(world, monkeypatch, _order(61270, lines=(("RB-1234", 2), ("OA-5", 1))))
+
+    assert out["ok"] and out["result"]["status"] == "rerouted", out
+    assert world["shop"].moves()[-1] == {"id": FO_2, "newLocationId": LOC_DHN}
+    after = db.orders.find_one({"order_id": oid}, {"_id": 0})
+    assert after["store_id"] == "BV-BOK-01" and after["invoice_number"] == order["invoice_number"]
+    assert "U-BV-DHN-01-P-OA-0" in _units(db, oid)
+    assert db.stock_units.find_one({"stock_id": "U-BV-BOK-01-P-OA-0"})["status"] == "AVAILABLE"
+    assert f"online_fallback_ship:{oid}:BV-DHN-01" in world["tasks"].open_refs("online_fallback_ship:")
+    assert after["fulfillment_hold"] is False
+
+
+def test_remap_resends_a_failed_billing_leg_move_to_the_shop_that_bills_it(world, monkeypatch):
+    """[LOW] Round 20, item 1 (probe B): the short leg is the billing leg.
+    Shopify puts RB x2 on FO_1 at Bokaro (the largest, so it bills) and OA at
+    Ranchi. Bokaro has no RB, so Bokaro's leg moves to Dhanbad, which bills
+    and claims both RB; the move fails. Ranchi then gets 2 RB and the human
+    presses Re-map: it was REFUSED ('would now ship it from BV-RAN-01, not
+    from BV-DHN-01') -- the very retry the hold's text tells the human to
+    press. It resends FO_1 to Dhanbad now: same units, same invoice."""
+    db = world["db"]
+    _shop(db, "BV-DHN-01", "BV Dhanbad", "20AAAAA0000A1Z5", LOC_DHN)
+    _stock(db, "BV-DHN-01", "P-RB", 2)
+    _stock(db, "BV-RAN-01", "P-OA", 1)
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 2)])
+    world["shop"].fo(FO_2, LOC_RAN, lines=[(9001, 1)])
+    world["shop"].move_error = "Location does not stock the item"
+    payload = _order(61271, lines=(("RB-1234", 2), ("OA-5", 1)))
+    res, order = _book(world, payload)
+    oid = res["order_id"]
+    assert order["store_id"] == "BV-DHN-01" and "/BV-DHN-01/" in order["invoice_number"]
+    assert [p["code"] for p in order["fulfillment_route"]["problems"]] == ["MOVE_FAILED"]
+    assert route_mod.remappable(order)
+    _stock(db, "BV-RAN-01", "P-RB", 2)
+    world["shop"].move_error = None
+
+    out = _remap(world, monkeypatch, payload)
+
+    assert out["ok"] and out["result"]["status"] == "rerouted", out
+    assert world["shop"].moves()[-1] == {"id": FO_1, "newLocationId": LOC_DHN}
+    after = db.orders.find_one({"order_id": oid}, {"_id": 0})
+    assert after["store_id"] == "BV-DHN-01" and after["invoice_number"] == order["invoice_number"]
+    assert _units(db, oid) == ["U-BV-DHN-01-P-RB-0", "U-BV-DHN-01-P-RB-1", "U-BV-RAN-01-P-OA-0"]
+    assert db.stock_units.count_documents({"store_id": "BV-RAN-01", "status": "AVAILABLE"}) == 2
+    assert after["fulfillment_hold"] is False
+
+
+def test_remap_counts_a_shops_own_units_only_beyond_its_own_leg(world, monkeypatch):
+    """[LOW] Round 20, item 1, same-line variant: Shopify splits RB x3 --
+    FO_1 Bokaro (RB 2), FO_2 Ranchi (RB 1, short). Bokaro holds only its 2,
+    so FO_2 is planned to BV Dhanbad, which claims its RB; Shopify refuses.
+    Bokaro then gets a third RB and the human presses Re-map. Bokaro's two
+    units are its own leg's, not FO_2's: the move is resent to Dhanbad and
+    Dhanbad's claimed RB stays the order's."""
+    db = world["db"]
+    _shop(db, "BV-DHN-01", "BV Dhanbad", "20AAAAA0000A1Z5", LOC_DHN)
+    _stock(db, "BV-BOK-01", "P-RB", 2)
+    _stock(db, "BV-DHN-01", "P-RB", 1)
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 2)])
+    world["shop"].fo(FO_2, LOC_RAN, lines=[(9000, 1)])
+    world["shop"].move_error = "Location does not stock the item"
+    payload = _order(61273, lines=(("RB-1234", 3),))
+    res, order = _book(world, payload)
+    oid = res["order_id"]
+    assert world["shop"].moves() == [{"id": FO_2, "newLocationId": LOC_DHN}]
+    assert [p["code"] for p in order["fulfillment_route"]["problems"]] == ["MOVE_FAILED"]
+    db.stock_units.insert_one({"stock_id": "U-BOK-RB-NEW", "product_id": "P-RB",
+                               "store_id": "BV-BOK-01", "status": "AVAILABLE"})
+    world["shop"].move_error = None
+
+    out = _remap(world, monkeypatch, payload)
+
+    assert out["ok"] and out["result"]["status"] == "rerouted", out
+    assert world["shop"].moves()[-1] == {"id": FO_2, "newLocationId": LOC_DHN}
+    assert "U-BV-DHN-01-P-RB-0" in _units(db, oid)
+    assert db.stock_units.find_one({"stock_id": "U-BOK-RB-NEW"})["status"] == "AVAILABLE"
