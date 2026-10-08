@@ -1839,7 +1839,7 @@ def test_a_booking_that_errors_part_way_releases_the_line_it_booked(monkeypatch)
     lines = [ReturnLine(order_item_id=i, product_id=i, return_qty=1, unit_price=0.0) for i in "ab"]
     calls = []
 
-    def claim(oid, orig, qty, rid, units):
+    def claim(oid, orig, qty, rid, units, token):
         if orig["item_id"] == "b":
             raise RuntimeError("orders write down")
         calls.append(("claim", orig["item_id"]))
@@ -1847,7 +1847,7 @@ def test_a_booking_that_errors_part_way_releases_the_line_it_booked(monkeypatch)
 
     monkeypatch.setattr(returns_router, "_claim_returnable_qty", claim)
     monkeypatch.setattr(returns_router, "_release_returnable_qty",
-                        lambda oid, orig, qty, rid: calls.append(("release", orig["item_id"])))
+                        lambda oid, orig, qty, rid, token: calls.append(("release", orig["item_id"])))
     with pytest.raises(RuntimeError):
         shopify_refund._hold_returned_qty(order, lines, "R1")
     assert calls == [("claim", "a"), ("release", "a")]
@@ -2593,6 +2593,84 @@ def test_a_counter_claim_whose_reply_and_read_back_were_lost_is_taken_back(swept
     assert _doc(swept, oid)["items"][0]["returned_qty"] == 1
     assert _units(swept) == [("stk-1", "AVAILABLE")]
     _refused(swept, oid)
+
+
+class _ReleaseFails:
+    """The orders collection; the first release (a write that takes units
+    off a line) errors: `lands` -- it committed and its reply was lost; else
+    it never reached the server."""
+
+    def __init__(self, real, lands):
+        self.real, self.lands, self.failed = real, lands, False
+
+    def __getattr__(self, name):
+        return getattr(self.real, name)
+
+    def find_one_and_update(self, flt, update, *a, **kw):
+        if not self.failed and any(v < 0 for v in (update.get("$inc") or {}).values()):
+            self.failed = True
+            if self.lands:
+                self.real.find_one_and_update(flt, update, *a, **kw)
+            raise RuntimeError("release write failed")
+        return self.real.find_one_and_update(flt, update, *a, **kw)
+
+
+@pytest.mark.parametrize("lands", [False, True], ids=["write_lost", "reply_lost"])
+def test_a_release_that_errors_never_leaves_a_booking_no_door_owns(swept, monkeypatch, lands):
+    """The confirm booked the refund's frame, the stock write failed, and the
+    release of the booking errored too. Left on the line, the booking read to
+    every later door as this refund's frame restocked: the retry answered
+    "Restock applied" and Goods back "restocked" with stk-1 SOLD for good. It
+    is read back and taken back by its own token -- once, so a release whose
+    reply was lost takes nothing back twice."""
+    oid, rid = 60211 + lands, str(700411 + lands)
+    row = _one_unit_refund(swept, oid, int(rid), status="SHIPPED", awb=f"AWB{oid}")
+    lossy = _ReleaseFails(returns_router._orders_coll(), lands)
+    monkeypatch.setattr(returns_router, "_orders_coll", lambda: lossy)
+    real = returns_router._reactivate_original_unit
+    monkeypatch.setattr(returns_router, "_reactivate_original_unit", lambda *a, **kw: None)
+    undo_create = _create_fails_after(monkeypatch, swept["stock_repo"], 0)
+    assert shopify_refund.post_from_review(swept["db"], row)["restock_applied"] is False
+    assert lossy.failed and _units(swept) == [("stk-1", "SOLD")]
+    monkeypatch.setattr(returns_router, "_reactivate_original_unit", real)
+    undo_create()
+    line = _doc(swept, oid)["items"][0]
+    assert (line.get("returned_qty"), (line.get("restocked_refunds") or {}).get(rid)) == (0, 0)
+
+    assert _retry(swept["returns"].find_one({"shopify_refund_id": rid}))["restock_applied"] is True
+    _goods_back(swept["review"].find_one({"review_id": row["review_id"]}))
+    assert _units(swept) == [("stk-1", "AVAILABLE")], "one unit, once"
+    line = _doc(swept, oid)["items"][0]
+    assert (line.get("returned_qty"), line.get("restocked_refunds")) == (1, {rid: 1})
+
+
+def test_a_historical_booking_whose_task_and_release_both_failed_still_raises_its_task(swept,
+                                                                                      monkeypatch):
+    """The stock-in task insert fails and so does the release of the booking.
+    Left on the line, the next Goods back answered stock_in with no task, the
+    confirm finalized the restock, and no task ever asked for the frame."""
+    from fastapi import HTTPException
+
+    oid, rid = 60213, 700413
+    row = _historical_refund(swept, monkeypatch, oid, rid, status="DELIVERED")
+    tasks = swept["db"]["tasks"]
+    real = tasks.insert_one
+
+    def insert_down(doc, *a, **kw):
+        raise RuntimeError("tasks write down")
+
+    monkeypatch.setattr(tasks, "insert_one", insert_down)
+    lossy = _ReleaseFails(returns_router._orders_coll(), False)
+    monkeypatch.setattr(returns_router, "_orders_coll", lambda: lossy)
+    with pytest.raises(HTTPException) as no:
+        _goods_back(row)
+    assert no.value.status_code == 503 and lossy.failed
+    monkeypatch.setattr(tasks, "insert_one", real)
+    back = _goods_back(swept["review"].find_one({"review_id": row["review_id"]}))["result"]
+    [task] = _stock_in(swept, oid)
+    assert (back["status"], back["stock_in_task"]) == ("stock_in", task["task_id"])
+    _confirm(swept["review"].find_one({"review_id": row["review_id"]}))
+    assert _minted(swept) == [] and len(_stock_in(swept, oid)) == 1, "one frame, one task"
 
 
 def test_the_counter_refuses_while_the_returns_scan_blips(swept, monkeypatch):

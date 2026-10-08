@@ -1513,7 +1513,7 @@ def post_from_review(db, review: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
-_Held = List[Tuple[Dict[str, Any], float, str]]
+_Held = List[Tuple[Dict[str, Any], float, str, str]]
 
 
 def _restock_booked(
@@ -1578,10 +1578,11 @@ def _hold_returned_qty(order: Dict[str, Any], lines: List[Any], refund_id: str) 
         for orig, qty, units, pid in want.values():
             if qty <= 0:
                 continue
-            if not _claim_returnable_qty(order.get("order_id"), orig, qty, refund_id, units):
+            token = uuid.uuid4().hex
+            if not _claim_returnable_qty(order.get("order_id"), orig, qty, refund_id, units, token):
                 _release_unlanded(order, held, {}, refund_id)
                 return None
-            held.append((orig, qty, pid))
+            held.append((orig, qty, pid, token))
     except Exception:
         _release_unlanded(order, held, {}, refund_id)
         raise
@@ -1593,7 +1594,8 @@ def _release_unlanded(order: Dict[str, Any], held: _Held, result: Dict[str, Any]
     units it reactivated or minted: the line's returned_qty and the refund's
     mark drop by the units that did not land, so a landed unit is never
     restocked twice and a missing one is a restock not applied that the next
-    door (the retry, Goods back) puts back."""
+    door (the retry, Goods back) puts back. Each release goes by its claim's
+    token (returns._release_returnable_qty): once, read back on an error."""
     from ..routers.returns import _release_returnable_qty
 
     landed: Dict[str, float] = {}
@@ -1601,11 +1603,11 @@ def _release_unlanded(order: Dict[str, Any], held: _Held, result: Dict[str, Any]
         if isinstance(row, dict):
             pid = str(row.get("product_id") or "")
             landed[pid] = landed.get(pid, 0.0) + _f(row.get("reactivated")) + _f(row.get("minted"))
-    for orig, qty, pid in held:
+    for orig, qty, pid, token in held:
         keep = min(qty, landed.get(pid, 0.0))
         landed[pid] = landed.get(pid, 0.0) - keep
         if keep < qty:
-            _release_returnable_qty(order.get("order_id"), orig, qty - keep, refund_id)
+            _release_returnable_qty(order.get("order_id"), orig, qty - keep, refund_id, token)
 
 
 def _stock_in_task(order: Dict[str, Any], lines: List[Any], held: _Held, refund_id: str,
@@ -1628,7 +1630,7 @@ def _stock_in_task(order: Dict[str, Any], lines: List[Any], held: _Held, refund_
 
     out: Dict[str, Any] = {"applied": True, "restocked": [], "restock_stock_ids": [],
                            "restock_store_id": None, "restock_store_ids": []}
-    units = sum(qty for _, qty, _ in held)
+    units = sum(row[1] for row in held)
     if units <= 0:
         return out
     shop = _r._resolve_restock_store(order.get("store_id"), order.get("order_id"),

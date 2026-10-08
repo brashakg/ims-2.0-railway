@@ -555,6 +555,7 @@ def _claim_returnable_qty(
     return_qty: float,
     refund_id: Optional[str] = None,
     refund_qty: Optional[float] = None,
+    token: Optional[str] = None,
 ) -> bool:
     """Atomically reserve `return_qty` units against an order line's remaining
     returnable quantity -- the same guard-in-the-filter pattern as the voucher
@@ -624,8 +625,9 @@ def _claim_returnable_qty(
     # This attempt's own token, written in the SAME write as its units: the
     # one proof, read back after an ambiguous error, that THIS write landed
     # (a count cannot tell it from another door's booking in the meantime).
-    # ponytail: tokens are never pulled; a line gets one per claim.
-    token = uuid.uuid4().hex
+    # ponytail: tokens are never pulled but by a take-back or a release by
+    # token; a line gets one per claim. `token`: the caller's, to release by.
+    token = token or uuid.uuid4().hex
     update: Dict[str, Any] = {"$inc": {"items.$.returned_qty": return_qty},
                               "$addToSet": {"items.$.claim_tokens": token}}
     if refund_id:
@@ -677,12 +679,21 @@ def _release_returnable_qty(
     orig_line: Dict[str, Any],
     return_qty: float,
     refund_id: Optional[str] = None,
+    token: Optional[str] = None,
 ) -> None:
     """Undo a successful _claim_returnable_qty (decrement the element's
     returned_qty, and `refund_id`'s restock mark when given, by the same
     units: an earlier restock of that refund keeps its booking) when a later
     step of the SAME request fails and we must not leave a phantom
-    reservation. Best-effort + fail-soft -> never raises."""
+    reservation. Never raises.
+
+    `token`: the claim's own (a refund's booking). The release then matches
+    only while that token is on the line and pulls it in the same write, so
+    it lands once; an error is decided as the claim's is -- the token read
+    back gone means it landed, else (still there, or no answer) it is taken
+    back by its token once more. A booking left on the line reads to every
+    later door as this refund's units restocked: the unit stranded SOLD (a
+    historical frame with no stock-in task) behind their success."""
     if not order_id or return_qty <= 0:
         return
     coll = _orders_coll()
@@ -696,14 +707,29 @@ def _release_returnable_qty(
     update: Dict[str, Any] = {"$inc": {"items.$.returned_qty": -return_qty}}
     if refund_id:
         update["$inc"][f"items.$.restocked_refunds.{refund_id}"] = -return_qty
+    if token:
+        elem = {"claim_tokens": token}
+        update["$pull"] = {"items.$.claim_tokens": token}
+    match = {"order_id": order_id, "items": {"$elemMatch": elem}}
     try:
-        coll.find_one_and_update(
-            {"order_id": order_id, "items": {"$elemMatch": elem}},
-            update,
-            return_document=ReturnDocument.AFTER,
-        )
+        coll.find_one_and_update(match, update, return_document=ReturnDocument.AFTER)
+        return
     except Exception as exc:  # noqa: BLE001
         logger.warning("[RETURNS] returnable-qty release failed: %s", exc)
+    if not token:
+        return
+    try:
+        if coll.find_one(match) is None:
+            return
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        coll.find_one_and_update(match, update)
+    except Exception:  # noqa: BLE001
+        # ponytail: three misses in a row stay unknown (this ERROR), as the
+        # claim's do; a durable pending-release record if one ever shows.
+        logger.error("[RETURNS] release of claim %s on order %s: landed or not is unknown; "
+                     "a line carrying it holds %s units no door owns", token, order_id, return_qty)
 
 
 def _billed_unit_gross(line: Dict[str, Any]) -> Optional[float]:
