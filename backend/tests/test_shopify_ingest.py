@@ -180,6 +180,9 @@ def wired(monkeypatch):
         db.get_collection("stores").insert_one(
             {"store_id": sid, "store_code": sid, "store_type": "RETAIL", "is_active": True}
         )
+    # The shops' company: a shop's GSTIN must be one it holds (shop_gstin).
+    db.get_collection("entities").insert_one({"entity_id": "ENT-TEST", "gstins": [
+        {"gstin": f"{c}AAAAA0000A1Z5", "state_code": c} for c in ("20", "27")]})
 
     # No product master / no store doc in these tests: SKU lookup misses (so the
     # category hint path is used) and the store state is supplied by the test
@@ -197,6 +200,7 @@ def wired(monkeypatch):
                 "store_name": "Test Shop",
                 "gstin": f"{code}AAAAA0000A1Z5",
                 "state_code": code,
+                "entity_id": "ENT-TEST",
             }
 
     import api.dependencies as deps
@@ -204,6 +208,9 @@ def wired(monkeypatch):
     monkeypatch.setattr(deps, "get_order_repository", lambda: order_repo)
     monkeypatch.setattr(deps, "get_product_repository", lambda: None)
     monkeypatch.setattr(deps, "get_store_repository", lambda: _StoreRepo())
+    import api.services.print_identity as print_identity
+
+    monkeypatch.setattr(print_identity, "_db", lambda: db)
 
     return {"db": db, "orders": orders_coll, "store_state": store_state}
 

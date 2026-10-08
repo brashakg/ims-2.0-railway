@@ -161,6 +161,13 @@ _STORES = [
      "store_name": "Online", "store_type": "ONLINE", "is_active": True,
      "state_code": "20", "gstin": "20AAAAA0000A1Z5"},
 ]
+# Every shop's company (org_validation.shop_gstin: the seller check requires
+# a shop's GSTIN to be one its company holds). One company holding every
+# GSTIN these tests give a shop keeps each test on the rule it is about.
+_COMPANY = {"entity_id": "ENT-TEST", "legal_name": "BV Retail", "gstins": [
+    {"gstin": g, "state_code": g[:2]} for g in (
+        "20AAAAA0000A1Z5", "27AAAAA0000A1Z5", "27BBBBB0000B1Z5", "20CCCCC0000C1Z5",
+        "27CCCCC0000C1Z5", "20WWWWW0000W1Z5")]}
 _PRODUCTS = {"RB-1234": "P-RB", "OA-5": "P-OA"}
 
 
@@ -242,7 +249,8 @@ class _Shopify:
 @pytest.fixture
 def world(monkeypatch):
     db = mongomock.MongoClient()["ims_pr5"]
-    db.stores.insert_many([dict(s) for s in _STORES])
+    db.stores.insert_many([dict(s, entity_id="ENT-TEST") for s in _STORES])
+    db.entities.insert_one(dict(_COMPANY))
 
     from database.repositories.customer_repository import CustomerRepository
     from database.repositories.order_repository import OrderRepository
@@ -273,6 +281,9 @@ def world(monkeypatch):
     monkeypatch.setattr(orders_mod, "get_stock_repository", lambda: StockRepository(db.stock_units))
     monkeypatch.setattr(shopify_push, "_live_or_reason", lambda _db: (True, None))
     monkeypatch.setattr(shopify_push, "_graphql", shop.graphql)
+    import api.services.print_identity as print_identity
+
+    monkeypatch.setattr(print_identity, "_db", lambda: db)  # each shop's company
     # The after-sale Shopify stock write-back is PR 2's (tested there); keep it off the loop.
     import api.services.online_stock_writeback as wb
 
@@ -2082,7 +2093,36 @@ LOC_WO = "gid://shopify/Location/105"
 def _shop(db, store_id, name, gstin, loc):
     db.stores.insert_one({"store_id": store_id, "store_code": store_id, "store_name": name,
                           "store_type": "RETAIL", "is_active": True, "state_code": "20",
-                          "gstin": gstin, "shopify_location_id": loc})
+                          "gstin": gstin, "shopify_location_id": loc, "entity_id": "ENT-TEST"})
+
+
+def test_a_shop_invoicing_from_a_gstin_its_company_does_not_hold_is_held(world, monkeypatch):
+    """[LOW-MEDIUM] Dhanbad is moved to WizOpt on the Setup page (assignStore
+    sets only entity_id) and keeps Better Vision's 20AAAAA... on store.gstin;
+    WizOpt holds 20BBBBB.... The seller check read only store.gstin and its
+    state: the order was booked clean and invoiced under 20AAAAA... while
+    the shop's ITC (org_validation.shop_gstin) books on 20BBBBB.... The
+    check requires THE shop's GSTIN now: held until Organization sets it."""
+    db = world["db"]
+    db.entities.insert_one({"entity_id": "ENT-WO", "legal_name": "WizOpt", "gstins": [
+        {"gstin": "20BBBBB2222B1Z2", "state_code": "20"}]})
+    _shop(db, "BV-DHN-01", "BV Dhanbad", "20AAAAA0000A1Z5", LOC_DHN)
+    db.stores.update_one({"store_id": "BV-DHN-01"}, {"$set": {"entity_id": "ENT-WO"}})
+    _stock(db, "BV-DHN-01", "P-RB", 1)
+    world["shop"].fo(FO_1, LOC_DHN)
+
+    res, order = _book(world, _order(60190))
+
+    assert order["store_id"] == "BV-DHN-01" and _sold_at(db, res["order_id"]) == ["BV-DHN-01"]
+    [p] = order["fulfillment_route"]["problems"]
+    assert p["code"] == "SHOP_GSTIN_MISSING" and "20BBBBB2222B1Z2" in p["message"], p
+    assert order["fulfillment_hold"] is True and route_mod.seller_held(order)
+    assert "20BBBBB2222B1Z2" in _invoice_refusal(world, monkeypatch, res["order_id"])
+    assert getattr(_clear_hold(world, monkeypatch, res["order_id"]), "status_code", None) == 409
+
+    db.stores.update_one({"store_id": "BV-DHN-01"}, {"$set": {"gstin": "20BBBBB2222B1Z2"}})
+
+    assert _clear_hold(world, monkeypatch, res["order_id"])["released"] == ["SELLER"]
 
 
 def _gstin_missing_at_bokaro(world, order_id):

@@ -122,6 +122,22 @@ def test_gstin_is_the_stores_own_never_the_primary():
     assert LegalHeader(BV_ENTITY, karnataka, "delivery_challan")["gstin"] == ""
 
 
+def test_a_shop_moved_to_another_company_never_prints_the_old_companys_gstin():
+    """[LOW-MEDIUM] Pune is moved to Better Vision on the Setup page (only its
+    entity_id changes) and keeps WizOpt's 27AABFW... on store.gstin. The
+    header printed Better Vision's name beside WizOpt's number, while the
+    shop's ITC and purchases book on Better Vision's MH registration
+    (org_validation.shop_gstin). The header prints THE shop's GSTIN, and a
+    GST document refuses until store.gstin is that one."""
+    moved = dict(WIZ_STORE_MH, entity_id="ent-bv")
+
+    assert LegalHeader(BV_ENTITY, moved, "delivery_challan")["gstin"] == "27AABCB1234M1ZA"
+    with pytest.raises(HTTPException) as exc:
+        assert_issuing_identity(moved, require_gstin=True, entity=BV_ENTITY)
+    assert exc.value.status_code == 400 and "27AABFW5678N1Z3" in exc.value.detail
+    assert_issuing_identity(dict(moved, gstin="27AABCB1234M1ZA"), require_gstin=True, entity=BV_ENTITY)
+
+
 def test_logo_read_from_nested_invoice_identity():
     """The logo lives at entity.invoice.logo_url, not top-level logo_url."""
     assert _entity_logo(BV_ENTITY) == "https://cdn.example.com/bv-logo.png"

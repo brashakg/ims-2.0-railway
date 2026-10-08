@@ -666,8 +666,14 @@ def split_seller_problem(
 
 def _gstin_fault(doc: Optional[Dict[str, Any]]) -> Optional[str]:
     """Why a shop has no GSTIN of its OWN state (None: it has). The shop's
-    state is org_validation.shop_state_code -- the read the GST split uses."""
-    from .org_validation import gstin_state_code, shop_state_code
+    state is org_validation.shop_state_code -- the read the GST split uses --
+    and the GSTIN it invoices from (store.gstin) must be THE shop's GSTIN
+    (org_validation.shop_gstin: one its company holds), the one its ITC,
+    purchases and transfers book on: a shop moved to another company, or a
+    company's GSTIN corrected, leaves store.gstin naming another
+    registration."""
+    from .org_validation import gstin_state_code, shop_gstin, shop_state_code
+    from .print_identity import load_entity_for_store
 
     gstin = _gstin(doc)
     if not gstin:
@@ -677,6 +683,13 @@ def _gstin_fault(doc: Optional[Dict[str, Any]]) -> Optional[str]:
         return (
             f"is in state {state} but its GSTIN {gstin} is registered in "
             f"state {gstin_state_code(gstin)}"
+        )
+    own = shop_gstin(load_entity_for_store(doc), doc)
+    if own != gstin.upper():
+        return f"invoices from GSTIN {gstin}, which its company does not hold " + (
+            f"(its registration for the shop's state is {own})"
+            if own
+            else "(its company and its registrations could not be read, or it has none for the shop's state)"
         )
     return None
 

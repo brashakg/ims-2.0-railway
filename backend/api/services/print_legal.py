@@ -753,10 +753,10 @@ def LegalHeader(  # noqa: N802 - intentionally mirror the JSX export name
     """Build the data shape for the customer/vendor-facing statutory header.
 
     `entity` is the legal entity dict (from the `entities` collection or any
-    equivalent shape: name/legal_name/pan/cin/registered_address/website).
-    `store` is the place-of-supply outlet (from the `stores` collection:
-    name/address/city/state/state_code/pincode/phone/email + its own `gstin`,
-    the seller GSTIN printed).
+    equivalent shape: name/legal_name/pan/cin/registered_address/website +
+    gstins list). `store` is the place-of-supply outlet (from the `stores`
+    collection: name/address/city/state/state_code/pincode/phone/email + its
+    own `gstin`); the GSTIN printed is org_validation.shop_gstin of the two.
     `overrides` is the per-entity-per-template content override dict from
     `print_template_overrides` (see routers/print_overrides.py).
 
@@ -798,21 +798,16 @@ def LegalHeader(  # noqa: N802 - intentionally mirror the JSX export name
         part for part in store_addr_lines + [city, state_name_store, pincode] if part
     )
 
-    # ---- the seller GSTIN: the store's OWN (store.gstin, stamped by the org
-    # module for the store's state) -- the one GSTIN its tax invoice, GSTR-1
-    # and the e-invoice issue from. A store the org module never stamped (a
-    # store linked to its entity afterwards) prints its entity's registration
-    # for the store's OWN state -- a transfer challan must carry the
-    # consignor's GSTIN (Rule 55). Never the entity's PRIMARY one: that
-    # printed another state's GSTIN on the goods-movement document. A GST
-    # tax document never gets here without store.gstin
-    # (assert_issuing_identity(require_gstin=True), the invoice door).
-    gstin = _pick(store, "gstin")
-    if not gstin and isinstance(entity, dict):
-        from .org_validation import resolve_gstin_for_state, shop_state_code
+    # ---- the seller GSTIN: THE shop's GSTIN (org_validation.shop_gstin) --
+    # store.gstin when its company holds it, else the company's registration
+    # for the shop's own state (a store linked to its entity afterwards: a
+    # transfer challan must carry the consignor's GSTIN, Rule 55), never the
+    # company's PRIMARY one, never a number the company printed beside it
+    # does not hold. A GST document prints only when this IS store.gstin,
+    # the one its invoice issued from (assert_issuing_identity(require_gstin)).
+    from .org_validation import shop_gstin
 
-        reg = resolve_gstin_for_state(entity.get("gstins") or [], shop_state_code(store))
-        gstin = str((reg or {}).get("gstin") or "").strip()
+    gstin = shop_gstin(entity if isinstance(entity, dict) else None, store) or ""
     state_name = state_name_store
 
     # ---- logo (entity invoice identity, then per-brand default) -----------

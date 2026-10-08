@@ -97,6 +97,7 @@ _PHYSICAL_PROJECTION = {
     "gstin": 1,
     "state_code": 1,
     "state": 1,
+    "entity_id": 1,  # its company: the GSTIN must be one it holds
 }
 
 
@@ -104,7 +105,8 @@ def physical_stores(db) -> List[Dict[str, Any]]:
     """THE one reader of the physical shops (per-store Shopify locations,
     owner ruling 2026-09-06): every ACTIVE store that is not ONLINE, sorted by
     store_code, projected to ``{store_id, store_code, store_name, store_type,
-    shopify_location_id, shopify_location_name, gstin, state_code, state}``.
+    shopify_location_id, shopify_location_name, gstin, state_code, state,
+    entity_id}``.
 
     "Physical" has exactly one definition: ACTIVE and not ``_doc_is_online``,
     where active is ``is_active != False`` -- a MISSING flag is active, the
