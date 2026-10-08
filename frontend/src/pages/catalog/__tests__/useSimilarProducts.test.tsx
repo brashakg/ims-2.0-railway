@@ -188,4 +188,31 @@ describe('useSimilarProducts', () => {
     unmount();
     expect(capturedSignal?.aborted).toBe(true);
   });
+
+  it('sends the eye size and contact-lens power the duplicate key reads, as typed', async () => {
+    // The server keys a frame by its eye size and a contact lens by its power
+    // (product_master.identity_parts); without them the exact match missed
+    // the row the save 409s against. Nothing else of the form is sent.
+    const attributes = { lens_size: ' 54 ', power: '-1.25D', cl_axis: '', description: 'long text' };
+    const { rerender } = renderSimilar({ ...QUERY, attributes });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SIMILAR_DEBOUNCE_MS);
+    });
+    expect(getSimilar).toHaveBeenCalledWith(
+      { category: 'FR', brand: 'Ray-Ban', model_no: 'RB-2140', colour_code: undefined, size: undefined,
+        lens_size: '54', power: '-1.25D' },
+      expect.any(AbortSignal)
+    );
+    rerender({ q: { ...QUERY, attributes: { ...attributes } } }); // same values, new object
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SIMILAR_DEBOUNCE_MS);
+    });
+    expect(getSimilar).toHaveBeenCalledTimes(1); // never refires
+    rerender({ q: { ...QUERY, attributes: { ...attributes, power: '+1.25D' } } });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SIMILAR_DEBOUNCE_MS);
+    });
+    expect(getSimilar).toHaveBeenCalledTimes(2);
+    expect(getSimilar.mock.calls[1][0]).toMatchObject({ power: '+1.25D' });
+  });
 });

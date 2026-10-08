@@ -457,6 +457,8 @@ export const productApi = {
       model_no: string;
       colour_code?: string;
       size?: string;
+      // What else the duplicate key reads, as typed (SIMILAR_IDENTITY_KEYS).
+      [identityField: string]: string | undefined;
     },
     signal?: AbortSignal
   ): Promise<SimilarProductsResponse> => {

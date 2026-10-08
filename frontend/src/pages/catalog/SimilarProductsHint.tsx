@@ -34,6 +34,9 @@ export interface SimilarProductsHintProps {
   model: string;
   colour: string;
   size: string;
+  /** The form's attributes: the eye size and contact-lens power the
+   *  duplicate key also reads are sent from here (useSimilarProducts). */
+  attributes?: Record<string, string>;
   /** Variant mode: suppress the sibling strip for the locked brand/model but
    *  keep the exact-colour warning live. */
   variantMode?: boolean;
@@ -57,11 +60,12 @@ export function SimilarProductsHint({
   model,
   colour,
   size,
+  attributes,
   variantMode = false,
   onPickSibling,
   onOpenExisting,
 }: SimilarProductsHintProps) {
-  const { data, armed } = useSimilarProducts({ category, brand, model, colour, size });
+  const { data, armed } = useSimilarProducts({ category, brand, model, colour, size, attributes });
 
   // Render NOTHING unless armed with a completed response (null covers idle,
   // debouncing, in-flight and error states — the hook's contract).

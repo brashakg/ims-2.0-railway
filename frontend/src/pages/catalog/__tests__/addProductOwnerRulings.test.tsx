@@ -100,10 +100,13 @@ vi.mock('../../../services/api/catalog', () => ({
 }));
 // The page's strip is a stand-in chip that takes the page's own pick path; the
 // real strip (for the chip's size) is imported unmocked further down.
+// hint.props: what the page last handed the strip.
+const hint = vi.hoisted(() => ({ props: {} as Record<string, unknown> }));
 vi.mock('../SimilarProductsHint', () => ({
-  SimilarProductsHint: (p: { onPickSibling: (id: string) => void }) => (
-    <button type="button" onClick={() => p.onPickSibling('P-SRC')}>same model chip</button>
-  ),
+  SimilarProductsHint: (p: { onPickSibling: (id: string) => void }) => {
+    hint.props = p;
+    return <button type="button" onClick={() => p.onPickSibling('P-SRC')}>same model chip</button>;
+  },
 }));
 vi.mock('../useSimilarProducts', () => ({ useSimilarProducts: vi.fn() }));
 vi.mock('../../../constants/gstRuntime', () => ({
@@ -307,6 +310,17 @@ describe('F68 - Save + New keeps you typing', () => {
     await waitFor(() => expect(screen.getByLabelText(/^Model No/)).toHaveFocus());
     expect(reorderInput().value).toBe('2');
     expect(setShopLevel).toHaveBeenCalledWith('P-NEW', 'S1', 2);
+  });
+});
+
+describe('the similar strip is asked with what the duplicate key reads', () => {
+  it("hands the strip the form's attributes, so the eye size is sent", async () => {
+    // useSimilarProducts sends lens_size / the contact-lens power from these.
+    const user = userEvent.setup();
+    renderPage();
+    await sunglass(user);
+    fill(screen.getByLabelText(/^Lens Size/), '54');
+    expect(hint.props.attributes).toMatchObject({ lens_size: '54', model_no: 'RB4165' });
   });
 });
 

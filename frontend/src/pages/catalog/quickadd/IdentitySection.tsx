@@ -401,6 +401,7 @@ export function IdentitySection({ form }: { form: QuickAddForm }) {
                       model={attributes.model_no || attributes.model_name || ''}
                       colour={attributes.colour_code || ''}
                       size={attributes.size || ''}
+                      attributes={attributes}
                       variantMode={Boolean(variantCtx)}
                       onPickSibling={handleSimilarPick}
                       onOpenExisting={handleSimilarOpen}

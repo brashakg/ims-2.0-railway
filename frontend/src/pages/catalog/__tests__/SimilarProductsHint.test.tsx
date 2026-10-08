@@ -147,3 +147,13 @@ describe('SimilarProductsHint — exact-match warning', () => {
     expect(screen.queryByRole('button', { name: 'BLK' })).not.toBeInTheDocument();
   });
 });
+
+describe('SimilarProductsHint asks with what the duplicate key reads', () => {
+  it("passes the form's attributes on to the lookup (eye size, contact-lens power)", () => {
+    mockHook.mockReturnValue({ armed: false, data: null });
+    renderHint({ attributes: { lens_size: '54', power: '-1.25' } });
+    expect(mockHook).toHaveBeenCalledWith(
+      expect.objectContaining({ attributes: { lens_size: '54', power: '-1.25' } })
+    );
+  });
+});

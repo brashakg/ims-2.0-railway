@@ -2112,10 +2112,17 @@ async def get_similar_products(
     model_no: str = "",
     colour_code: str = "",
     size: str = "",
+    lens_size: str = "",
+    power: str = "",
+    cl_cyl: str = "",
+    cl_axis: str = "",
+    cl_add: str = "",
     current_user: dict = Depends(get_current_user),
 ):
     """Live as-you-type "similar products" check for the Add-Product form
-    (dup-detect council ruling, Phase 2).
+    (dup-detect council ruling, Phase 2). A frame's eye size (lens_size) and a
+    contact lens's power (power, cl_cyl, cl_axis, cl_add) are sent as typed:
+    the duplicate key reads them (product_master.identity_parts).
 
     Any authenticated catalog operator may call it (mirrors GET /products).
     The matching runs through product_master.find_similar_products, which
@@ -2141,6 +2148,13 @@ async def get_similar_products(
             model=model_no,
             colour=colour_code,
             size=size,
+            attributes={
+                "lens_size": lens_size,
+                "power": power,
+                "cl_cyl": cl_cyl,
+                "cl_axis": cl_axis,
+                "cl_add": cl_add,
+            },
         )
     except Exception as e:  # noqa: BLE001 - hint endpoint, never a blocker
         logger.warning("[SIMILAR] lookup failed: %s", e)
