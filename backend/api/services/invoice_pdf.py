@@ -450,6 +450,12 @@ def build_invoice_pdf(
     else:
         totals.append(["CGST", _rs(tt.get("cgst"))])
         totals.append(["SGST", _rs(tt.get("sgst"))])
+    round_off = _f(payload.get("roundOff"))
+    if round_off:
+        # Its own line, after the tax: round off is neither taxable nor tax.
+        totals.append(
+            ["Round off", ("+ " if round_off > 0 else "- ") + _rs(abs(round_off))]
+        )
     totals.append(["Grand Total", _rs(payload.get("grandTotal"))])
     totals.append(["Amount Paid", _rs(payload.get("amountPaid"))])
     totals.append(["Balance Due", _rs(payload.get("balanceDue"))])

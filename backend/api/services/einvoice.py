@@ -228,7 +228,10 @@ def _build_einvoice_json(order: Dict[str, Any]) -> Dict[str, Any]:
         "StCesVal": 0.0,
         "Discount": _n(order.get("discount_total")),
         "OthChrg": 0.0,
-        "RndOffAmt": 0.0,
+        # The bill's stored round off (owner ruling 2026-10-08): the IRP's own
+        # field, so TotInvVal (the rounded total) = AssVal + taxes + RndOffAmt
+        # while every taxable and tax figure above stays the lines' own.
+        "RndOffAmt": _n(order.get("round_off")),
         "TotInvVal": total,
         "TotInvValFc": 0.0,
     }

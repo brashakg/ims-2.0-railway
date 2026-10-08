@@ -263,6 +263,10 @@ def _assemble_invoice(order_id: str, current_user: dict):
             "orderNumber": order.get("order_number"),
             "customerName": order.get("customer_name"),
             "grandTotal": order.get("grand_total"),
+            # The bill's stored round off (owner ruling 2026-10-08), read --
+            # never re-derived -- so a reprint shows what was billed. 0 on
+            # bills made before the ruling.
+            "roundOff": order.get("round_off") or 0.0,
             "amountPaid": order.get("amount_paid"),
             "balanceDue": order.get("balance_due"),
             "items": items_formatted,

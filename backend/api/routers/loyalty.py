@@ -321,9 +321,12 @@ async def earn(
 
     # Authoritative earn basis: the order's taxable value (pre-GST, after all
     # discounts) = grand_total - tax_amount, both persisted at order create.
+    # The bill's round off is not taxable value either (owner ruling
+    # 2026-10-08), so it is backed out too.
     order_basis = max(
         round(
             float(order_doc.get("grand_total") or 0.0)
+            - float(order_doc.get("round_off") or 0.0)
             - float(order_doc.get("tax_amount") or 0.0),
             2,
         ),
