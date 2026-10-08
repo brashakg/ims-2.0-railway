@@ -4,9 +4,10 @@
 // ONE reading of POST /vendors/grn/{id}/accept for every receiving screen
 // (audit C1): a receipt that still HOLDS lines -- their product is not
 // catalogued yet, so accept minted nothing for them -- is never announced as a
-// green success. It says what reached the shelf and who finishes the rest: the
-// server has already given the catalogue manager a task, and finishing the
-// product puts the held units on the shelf by itself.
+// green success. It says what reached the shelf and what each held line waits
+// for (heldLinesSummary) -- naming no person the server may not have found:
+// only a line waiting to be catalogued goes on the shelf by itself, once its
+// product is finished (R1-91, R1-96).
 
 export interface GrnAcceptResult {
   units_added?: number;
@@ -28,10 +29,12 @@ export function reportGrnAccept(
 ): void {
   const units = res?.units_added ?? fallbackUnits;
   if (res?.grn_status === 'PARTIALLY_ACCEPTED') {
-    const held = res.unresolved_lines?.length || 'some';
+    const held = heldLinesSummary(res.unresolved_lines);
     toast.warning(
-      `GRN ${grnNumber}: ${units} unit(s) added to stock; ${held} line(s) wait to be catalogued. ` +
-        'The catalogue manager has a task — those units go on the shelf by themselves once the product is finished.',
+      `GRN ${grnNumber}: ${units} unit(s) added to stock; held: ${held.text}.` +
+        (held.catalogue
+          ? ' Lines waiting to be catalogued go on the shelf by themselves once their product is finished.'
+          : ''),
       12000,
     );
     return;
@@ -45,14 +48,18 @@ export function reportGrnAccept(
 /** What a held receipt is waiting for, read off the server's
  *  unresolved_lines[].reason: "over_order" lines are beyond what the PO
  *  ordered (a second receipt of the same box, say) and wait for the store
- *  manager; every other held line waits to be catalogued. */
-export function heldLinesSummary(lines: unknown): { text: string } {
+ *  manager; "not_catalogued" lines name no product the catalogue has, so
+ *  nothing finishes them by itself; every other held line waits to be
+ *  catalogued. `catalogue` counts those last ones. */
+export function heldLinesSummary(lines: unknown): { text: string; catalogue: number; over: number } {
   const held = (Array.isArray(lines) ? lines : []) as Array<{ reason?: string }>;
-  const over = held.filter((l) => l?.reason === 'over_order');
-  const catalogue = held.filter((l) => l?.reason !== 'over_order');
+  const over = held.filter((l) => l?.reason === 'over_order').length;
+  const unknown = held.filter((l) => l?.reason === 'not_catalogued').length;
+  const catalogue = held.length - over - unknown;
   const parts = [
-    catalogue.length ? `${catalogue.length} line(s) waiting to be catalogued` : '',
-    over.length ? `${over.length} line(s) beyond the order, for the store manager` : '',
+    catalogue ? `${catalogue} line(s) waiting to be catalogued` : '',
+    over ? `${over} line(s) beyond the order, for the store manager` : '',
+    unknown ? `${unknown} line(s) for a product not in the catalogue` : '',
   ].filter(Boolean);
-  return { text: parts.join(' · ') || 'some line(s) held' };
+  return { text: parts.join(' · ') || 'some line(s) held', catalogue, over };
 }
