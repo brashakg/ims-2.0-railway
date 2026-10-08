@@ -730,16 +730,19 @@ class TestGtinAttributeOnTheCreateDoor:
 
         p1 = _create("GT-C-1")["product_id"]
         _update(p1, attributes={"gtin": _UPC_A})
-        for typed in (_UPC_A, "0" + _UPC_A):
+        # The check reads the FOLDED key: a 'GTIN' / 'Gtin' key is the same
+        # barcode once the door folds it onto 'gtin'.
+        sends = [("gtin", _UPC_A), ("gtin", "0" + _UPC_A), ("GTIN", _UPC_A), ("Gtin", "0" + _UPC_A)]
+        for n, (key, typed) in enumerate(sends):
             body = ProductCreate(
-                sku=f"GT-C-2-{len(typed)}", category="FRAME", brand="B",
-                model=f"M-C2-{len(typed)}", color="Black", mrp=1000.0,
-                offer_price=900.0, attributes={"gtin": typed},
+                sku=f"GT-C-2-{n}", category="FRAME", brand="B",
+                model=f"M-C2-{n}", color="Black", mrp=1000.0,
+                offer_price=900.0, attributes={key: typed},
             )
             with pytest.raises(HTTPException) as ei:
                 asyncio.run(create_product(body, _ADMIN))
-            assert ei.value.status_code == 409, typed
-            assert "GT-C-1" in str(ei.value.detail), typed
+            assert ei.value.status_code == 409, (key, typed)
+            assert "GT-C-1" in str(ei.value.detail), (key, typed)
         holders = mock_db["products"].count_documents(
             {"attributes.gtin": {"$in": [_UPC_A, "0" + _UPC_A]}}
         )
