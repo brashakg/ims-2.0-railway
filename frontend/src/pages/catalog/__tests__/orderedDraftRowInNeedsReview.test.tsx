@@ -117,6 +117,14 @@ describe('an ordered draft in Needs review', () => {
     await waitFor(() => expect(where).toContain('edit=P-SPINE'));
   });
 
+  // R1-99: the queue holds a manager's ordered drafts too, not only imports.
+  it('the Needs-review tab is not labelled as imports only', async () => {
+    renderReview();
+    await screen.findByText('Boss BOSS 1700');
+    const tab = screen.getByRole('link', { name: /^Needs review/ });
+    expect(tab).not.toHaveTextContent(/imported/i);
+  });
+
   it('opened as the product doc itself, it is still the unfinished ordered draft', async () => {
     render(
       <MemoryRouter initialEntries={['/catalog?focus=P-SPINE']}>

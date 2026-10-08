@@ -608,8 +608,10 @@ export function CatalogManagerPage({
         >
           <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0" />
           <span className="text-sm text-amber-800">
-            <span className="font-semibold">{reviewCount.toLocaleString('en-IN')}</span> imported
-            product{reviewCount === 1 ? ' is' : 's are'} waiting for review
+            {/* Imports AND items a manager ordered before they were catalogued
+                (audit C1, R1-99): the queue is not only imports any more. */}
+            <span className="font-semibold">{reviewCount.toLocaleString('en-IN')}</span> product
+            {reviewCount === 1 ? ' is' : 's are'} waiting for review
           </span>
           <span className="ml-auto text-sm font-medium text-amber-700 underline">Review now</span>
         </Link>
@@ -621,7 +623,7 @@ export function CatalogManagerPage({
           Catalog
         </NavLink>
         <NavLink to="/catalog/review" className={({ isActive }) => segmentLink(isActive)}>
-          Needs review — imported
+          Needs review
           {reviewCount > 0 && (
             <span className="inline-flex items-center justify-center rounded-full bg-amber-500 px-1.5 py-px text-[10px] font-semibold text-white min-w-[1.25rem]">
               {reviewCount > 999 ? '999+' : reviewCount}
