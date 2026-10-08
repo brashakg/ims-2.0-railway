@@ -57,7 +57,7 @@ function overlays(): HTMLElement[] {
 function poPopup(): HTMLElement {
   // The popup is the overlay carrying the PO's own action bar.
   const el = overlays().find(
-    (o) => within(o).queryAllByRole('button', { name: /Submit for Approval/i }).length > 0,
+    (o) => within(o).queryAllByRole('button', { name: /Send to vendor/i }).length > 0,
   );
   expect(el, 'purchase-order popup not on screen').toBeTruthy();
   return el!;

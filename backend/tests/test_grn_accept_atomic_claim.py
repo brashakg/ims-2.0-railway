@@ -1795,6 +1795,9 @@ def test_accept_wedged_before_the_first_unit_mints_nothing_after_a_takeover(
         def update(self, *a, **k):
             return True
 
+        def update_if(self, *a, **k):  # the accept's hold on the order
+            return True
+
     monkeypatch.setattr(vd, "get_purchase_order_repository", lambda: _WedgingPoRepo())
 
     with pytest.raises(HTTPException) as err:

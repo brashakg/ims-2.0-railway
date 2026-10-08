@@ -2466,6 +2466,11 @@ async def update_admin_controls(
 # APPROVAL WORKFLOWS ENDPOINTS
 # ============================================================================
 
+# Owner ruling 2026-09-28: a purchase order has NO approval step (drafted, then
+# sent to the vendor). The old 'Purchase Order Approval' workflow promised one no
+# code ever enforced; it is out of the defaults and hidden if an admin saved it.
+_RETIRED_WORKFLOW_TYPES = {"PO_APPROVAL"}
+
 DEFAULT_APPROVAL_WORKFLOWS = [
     {
         "id": "wf-001",
@@ -2492,19 +2497,6 @@ DEFAULT_APPROVAL_WORKFLOWS = [
         "escalationTimeout": 4,
         "notifyOnRequest": True,
         "notifyOnApproval": True,
-    },
-    {
-        "id": "wf-003",
-        "type": "PO_APPROVAL",
-        "name": "Purchase Order Approval",
-        "description": "Purchase orders exceeding the configured amount threshold require approval.",
-        "isEnabled": True,
-        "thresholdType": "AMOUNT",
-        "thresholdValue": 50000,
-        "approverRoles": ["SUPERADMIN", "ADMIN", "AREA_MANAGER"],
-        "escalationTimeout": 8,
-        "notifyOnRequest": True,
-        "notifyOnApproval": False,
     },
     {
         "id": "wf-004",
@@ -2563,6 +2555,11 @@ async def get_approval_workflows(current_user: dict = Depends(get_current_user))
         doc = collection.find_one({"_id": "default"})
         if doc:
             doc.pop("_id", None)
+            doc["workflows"] = [
+                w
+                for w in doc.get("workflows") or []
+                if w.get("type") not in _RETIRED_WORKFLOW_TYPES
+            ]
             return doc
     return {"workflows": DEFAULT_APPROVAL_WORKFLOWS}
 

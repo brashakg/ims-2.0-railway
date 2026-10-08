@@ -14,13 +14,14 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, Query
 
 from .auth import require_roles
 from ..dependencies import get_product_repository, resolve_store_scope
 from ..services import buy_desk as _bd
+from ..services.po_variance_engine import AWAITING_DELIVERY_STATUSES
 from ..services import product_master as _pm
 from ..services import shopify_push as _sp
 
@@ -70,19 +71,25 @@ def _on_hand_map(db, product_ids: List[str], store_id: Optional[str]) -> Dict[st
         return {}
 
 
-def _on_order_map(db, product_ids: List[str]) -> Dict[str, int]:
-    """Open-PO qty per product = ordered - already-received, across POs not
-    CANCELLED/RECEIVED. Drafts count (they are intended orders)."""
+def _on_order_map(db, product_ids: List[str]) -> Tuple[Dict[str, int], Dict[str, int]]:
+    """(on_order, in_draft) per product: ordered - already-received.
+
+    Owner ruling D11 (2026-09-29): "on order" is ONLY what went to the vendor
+    (the same awaiting-delivery statuses the variance engine reads). A draft
+    nobody sent made the buyer skip a real reorder, so drafts are counted
+    apart, as "in draft", and are not netted out of the buy signal."""
     if db is None or not product_ids:
-        return {}
+        return {}, {}
     pid_set = set(product_ids)
-    out: Dict[str, int] = {}
+    on_order: Dict[str, int] = {}
+    in_draft: Dict[str, int] = {}
     try:
         cur = db.get_collection("purchase_orders").find(
-            {"status": {"$nin": ["CANCELLED", "RECEIVED"]}},
-            {"items": 1, "received_qty_by_product": 1, "_id": 0},
+            {"status": {"$in": [*AWAITING_DELIVERY_STATUSES, "DRAFT"]}},
+            {"status": 1, "items": 1, "received_qty_by_product": 1, "_id": 0},
         )
         for po in cur:
+            out = in_draft if po.get("status") == "DRAFT" else on_order
             received = po.get("received_qty_by_product") or {}
             for it in po.get("items") or []:
                 pid = it.get("product_id")
@@ -102,8 +109,8 @@ def _on_order_map(db, product_ids: List[str]) -> Dict[str, int]:
                     out[pid] = out.get(pid, 0) + open_qty
     except Exception as exc:  # noqa: BLE001
         logger.warning("[BUYDESK] on_order map failed: %s", exc)
-        return {}
-    return out
+        return {}, {}
+    return on_order, in_draft
 
 
 def _velocity_map(db, product_ids: List[str]) -> Dict[str, float]:
@@ -167,7 +174,7 @@ async def buy_desk_rows(
 
     product_ids = [p.get("product_id") for p in products if p.get("product_id")]
     on_hand = _on_hand_map(db, product_ids, store_id)
-    on_order = _on_order_map(db, product_ids)
+    on_order, in_draft = _on_order_map(db, product_ids)
     velocity = _velocity_map(db, product_ids)
 
     rows: List[Dict[str, Any]] = []
@@ -193,6 +200,7 @@ async def buy_desk_rows(
                 push_locked=locked,
                 on_hand=on_hand.get(pid, 0),
                 on_order=on_order.get(pid, 0),
+                in_draft=in_draft.get(pid, 0),
                 velocity_per_day=velocity.get(pid),
             )
         )

@@ -144,6 +144,22 @@ def compute_po_receipt_state(
     return "RECEIVED"
 
 
+def po_line_status(item: dict, received) -> str:
+    """A PO line's receiving status from what has arrived against it.
+
+    A line someone CANCELLED stays cancelled: a later receipt against another
+    line of the same order re-derives every line's status, and must not turn a
+    withdrawn line back into an 'OPEN' one that looks due.
+    """
+    if (item or {}).get("line_status") == "CANCELLED":
+        return "CANCELLED"
+    ordered = (item or {}).get("ordered_qty", (item or {}).get("quantity", 0)) or 0
+    recv = received or 0
+    if ordered and recv >= ordered:
+        return "RECEIVED"
+    return "PARTIAL" if recv > 0 else "OPEN"
+
+
 def grn_has_discrepancy(grn: dict, qty_tolerance: int = 0) -> bool:
     """True if a goods-receipt note shows a receiving variance worth a task.
 
@@ -249,35 +265,3 @@ def _grn_stock_audit(
         )
     except Exception:  # noqa: BLE001
         pass
-
-
-def _cumulative_received_by_product(grn_repo, po_id: str) -> dict:
-    """Sum accepted_qty per product across every ACCEPTED GRN for a PO.
-
-    This is the running on-hand-received tally used to decide whether the PO is
-    now fully or partially received. Fail-soft: any read error returns {} so the
-    caller degrades to "partial" rather than crashing the accept.
-    """
-    totals: dict = {}
-    if grn_repo is None or not po_id:
-        return totals
-    try:
-        accepted_grns = grn_repo.find_many(
-            {"po_id": po_id, "status": "ACCEPTED"}, limit=1000
-        )
-    except Exception:  # noqa: BLE001
-        return totals
-    for grn in accepted_grns or []:
-        if not isinstance(grn, dict):
-            continue
-        for item in grn.get("items", []) or []:
-            if not isinstance(item, dict):
-                continue
-            pid = item.get("product_id")
-            if pid is None:
-                continue
-            try:
-                totals[pid] = totals.get(pid, 0) + int(item.get("accepted_qty", 0) or 0)
-            except (TypeError, ValueError):
-                continue
-    return totals

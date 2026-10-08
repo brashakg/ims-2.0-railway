@@ -88,6 +88,17 @@ AGING_BUCKETS = ["current", "1_30", "31_60", "61_90", "90_plus"]
 BILL_KIND_GOODS = "GOODS"
 BILL_KIND_SERVICES = "SERVICES"
 
+# The way out for a goods bill that has no receipt to link, for BOTH doors.
+# Receiving is managers only (owner 2026-09-28) while the bill is booked by
+# ADMIN / ACCOUNTANT, so it names who logs the receipt -- the accountant can
+# no longer open the Goods Receipt screen themselves.
+NO_RECEIPT_WAY_OUT = (
+    "If the goods arrived without a purchase order, ask the shop's store "
+    "manager to log them as a Delivery Challan on the Goods Receipt screen "
+    "(tick 'This is a Delivery Challan', pick the vendor, add what arrived), "
+    "then bill against that receipt."
+)
+
 
 def normalize_bill_kind(value):
     """None when absent/blank (a legacy client or stored row); the canonical

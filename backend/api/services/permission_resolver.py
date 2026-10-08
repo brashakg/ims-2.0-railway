@@ -35,6 +35,7 @@ from __future__ import annotations
 from typing import Optional
 
 from .capabilities import (
+    CAPABILITY_PARENT,
     is_ungrantable,
     module_deny_to_capability_denies,
 )
@@ -82,17 +83,19 @@ def apply_user_permissions(
     cap_denies = _deny_set(permissions)
     cap_grants = _grant_set(permissions)
     module_denies = module_deny_to_capability_denies(module_access)
+    # The route's key, plus the generic key a carved key was carved out of.
+    keys = {capability, CAPABILITY_PARENT.get(capability, capability)}
 
     # --- Step 2 + 3: ANY deny wins (module-shim deny OR explicit capability
     # deny). Deny ALWAYS beats grant and beats the role default. ---
-    if capability in module_denies or capability in cap_denies:
+    if keys & (module_denies | cap_denies):
         return False
 
     # --- Step 0 (belt & braces) + Step 4: a GRANT adds a role-denied capability,
     # but an ungrantable capability is NEVER granted here even if one slipped
     # into the stored map. The grant only MATTERS when the role denied it
     # (role_allowed already True -> nothing to add). ---
-    if not role_allowed and capability in cap_grants and not is_ungrantable(capability):
+    if not role_allowed and keys & cap_grants and not is_ungrantable(capability):
         return True
 
     # --- Step 1: no override fired -> the role decision stands (DARK default). ---

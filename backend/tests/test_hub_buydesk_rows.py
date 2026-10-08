@@ -245,3 +245,61 @@ def test_rows_endpoint_assembles_and_surfaces_push_lock(monkeypatch):
     assert (
         by_id["P1"]["on_hand"] == 0 and by_id["P1"]["buy_signal"] is None
     )  # no velocity
+
+
+# ---------------------------------------------------------------------------
+# Owner ruling D11 (2026-09-29): "on order" counts ONLY orders actually SENT to
+# the vendor. A never-sent DRAFT made the buyer skip a real reorder (audit F62:
+# Havana showed 3-4 on order purely from draft PO 0004). Drafts show beside it
+# as "in draft" and are NOT netted out of the buy signal.
+# ---------------------------------------------------------------------------
+
+
+def test_on_order_is_only_what_went_to_the_vendor_drafts_show_as_in_draft(
+    monkeypatch,
+):
+    from datetime import datetime, timedelta
+
+    from tests.strict_fakes import StrictDB
+
+    db = StrictDB()
+    db.seed(
+        "purchase_orders",
+        [
+            {"po_id": "D", "status": "DRAFT", "items": [{"product_id": "P1", "quantity": 4}]},
+            {"po_id": "S", "status": "SENT", "items": [{"product_id": "P1", "quantity": 3}]},
+            {"po_id": "A", "status": "ACKNOWLEDGED", "items": [{"product_id": "P1", "quantity": 1}]},
+            {
+                "po_id": "PR",
+                "status": "PARTIALLY_RECEIVED",
+                "items": [{"product_id": "P1", "quantity": 5}],
+                "received_qty_by_product": {"P1": 3},
+            },
+            {"po_id": "C", "status": "CANCELLED", "items": [{"product_id": "P1", "quantity": 9}]},
+            {"po_id": "R", "status": "RECEIVED", "items": [{"product_id": "P1", "quantity": 9}]},
+        ],
+    )
+    # 30 sold in the last 30 days -> 1/day -> 14 needed over the lead time.
+    db.seed(
+        "orders",
+        [
+            {
+                "status": "CONFIRMED",
+                "created_at": datetime.utcnow() - timedelta(days=2),
+                "items": [{"product_id": "P1", "quantity": 30}],
+            }
+        ],
+    )
+    products = [{"product_id": "P1", "sku": "HAV-1", "catalog_status": "ACTIVE"}]
+    monkeypatch.setattr(bdr, "get_product_repository", lambda: _Repo(products))
+    monkeypatch.setattr(bdr, "_get_db", lambda: db)
+    monkeypatch.setattr(bdr._sp, "push_lock_reason", lambda db, entity, doc: None)
+
+    out = _run(bdr.buy_desk_rows(store_id=None, limit=200, skip=0, current_user=_VIEWER))
+    row = out["rows"][0]
+    # sent 3 + acknowledged 1 + part-received 5-3=2; the draft's 4 is NOT on order
+    assert row["on_order"] == 6
+    assert row["in_draft"] == 4
+    # 14 needed - 0 on hand - 6 on order = 8 (a draft nobody sent does not
+    # stop the reorder)
+    assert row["buy_signal"] == 8

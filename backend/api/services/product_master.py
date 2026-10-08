@@ -2428,6 +2428,33 @@ def clone_and_vary(
     return {"source_id": source_id, "created": created, "errors": errors}
 
 
+def find_existing_product(spine: Dict[str, Any], product_repo) -> Optional[Dict[str, Any]]:
+    """The product already on the spine that `spine` (a build_canonical_product
+    doc) would duplicate -- by SKU, by brand+model+colour identity, or by
+    barcode -- or None. The ONE duplicate rule: create_product refuses on it,
+    and a door that must know the answer before it writes (a PO line typed in
+    instead of picked) asks the same question here."""
+    if product_repo is None:
+        return None
+    existing = product_repo.find_by_sku(spine["sku"])
+    if (
+        existing is None
+        and spine.get("identity_key")
+        and hasattr(product_repo, "find_by_identity_key")
+    ):
+        existing = product_repo.find_by_identity_key(spine["identity_key"])
+    if (
+        existing is None
+        and spine.get("barcode")
+        and hasattr(product_repo, "find_by_barcode")
+    ):
+        try:
+            existing = product_repo.find_by_barcode(spine["barcode"])
+        except Exception:  # noqa: BLE001
+            existing = None
+    return existing
+
+
 def create_product(
     *,
     category: Any,
@@ -2528,22 +2555,7 @@ def create_product(
     # or by barcode (when one rides along). The DB unique indexes are the
     # race-safe backstop (handled at the create below). Pre-check first so the
     # common case returns the existing row for the FE to link to.
-    existing = product_repo.find_by_sku(spine["sku"])
-    if (
-        existing is None
-        and spine.get("identity_key")
-        and hasattr(product_repo, "find_by_identity_key")
-    ):
-        existing = product_repo.find_by_identity_key(spine["identity_key"])
-    if (
-        existing is None
-        and spine.get("barcode")
-        and hasattr(product_repo, "find_by_barcode")
-    ):
-        try:
-            existing = product_repo.find_by_barcode(spine["barcode"])
-        except Exception:  # noqa: BLE001
-            existing = None
+    existing = find_existing_product(spine, product_repo)
     if existing is not None:
         raise _duplicate_error(existing)
 

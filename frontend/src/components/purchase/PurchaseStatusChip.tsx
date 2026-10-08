@@ -5,7 +5,9 @@
 // internal PO / GRN / purchase-invoice statuses into the FIVE words the owner
 // signed off for the shop floor:
 //
-//   'Ordered'      -- PO exists but has not gone to the vendor yet
+//   'Draft'        -- PO exists but has not gone to the vendor yet (owner
+//                     2026-09-28 / D11: it is not "on order" until SENT, so
+//                     it is no longer called 'Ordered')
 //   'Sent'         -- PO is with the vendor (sent / acknowledged)
 //   'Box received' -- goods physically arrived (GRN recorded, incl. partial)
 //   'On shelf'     -- stock accepted into inventory
@@ -24,7 +26,7 @@ interface VocabEntry {
 }
 
 const VOCAB: Record<string, VocabEntry> = {
-  ordered: { label: 'Ordered', className: 'bg-gray-100 text-gray-700' },
+  draft: { label: 'Draft', className: 'bg-gray-100 text-gray-700' },
   sent: { label: 'Sent', className: 'bg-indigo-50 text-indigo-700' },
   box_received: { label: 'Box received', className: 'bg-amber-50 text-amber-700' },
   on_shelf: { label: 'On shelf', className: 'bg-green-50 text-green-700' },
@@ -33,9 +35,9 @@ const VOCAB: Record<string, VocabEntry> = {
 
 // Internal status -> vocabulary key, per document kind.
 const PO_MAP: Record<string, keyof typeof VOCAB> = {
-  DRAFT: 'ordered',
-  PENDING: 'ordered',
-  APPROVED: 'ordered',
+  DRAFT: 'draft',
+  PENDING: 'draft',
+  APPROVED: 'draft',
   SENT: 'sent',
   ACKNOWLEDGED: 'sent',
   ORDERED: 'sent',

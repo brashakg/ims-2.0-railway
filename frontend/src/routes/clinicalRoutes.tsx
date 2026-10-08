@@ -49,7 +49,7 @@ export const clinicalRoutes = (
     <Route
       path="clinical"
       element={
-        <ProtectedRoute allowedRoles={CLINICAL_MODULE_ROLES}>
+        <ProtectedRoute allowedRoles={CLINICAL_MODULE_ROLES} namesWhoCan={false}>
           <ClinicalLayout />
         </ProtectedRoute>
       }

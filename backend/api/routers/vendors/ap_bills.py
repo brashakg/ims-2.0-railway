@@ -253,11 +253,8 @@ async def create_vendor_bill(
                     "message": (
                         "This bill is for goods, so link the goods receipt "
                         "before recording it - the quantities have to be "
-                        "tallied before the purchase is final. If the goods "
-                        "arrived without a purchase order, log them as a "
-                        "Delivery Challan on the Goods Receipt screen (tick "
-                        "'This is a Delivery Challan', pick the vendor, add "
-                        "what arrived), then link that receipt here."
+                        "tallied before the purchase is final. "
+                        + ap_engine.NO_RECEIPT_WAY_OUT
                     ),
                 },
             )

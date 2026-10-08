@@ -455,6 +455,19 @@ def _grn_already_minted(stock_repo, flt: dict) -> int:
     raise RuntimeError("stock repository exposes no way to count minted units")
 
 
+def _receipt_units(stock_repo, grn_id, **match) -> int:
+    """Units goods receipt `grn_id` put in stock (narrowed by `match`),
+    WHEREVER THEY ARE NOW. A stock transfer rewrites a unit's source_type and
+    source_id (transfers._rehome) but never its grn_id, which the mint
+    stamps; a unit minted before that stamp has no grn_id and is matched the
+    old way. No unit fits both counts. Raises like _grn_already_minted, so
+    every caller fails closed. The accept's mint, its refusal advice, the void
+    and the order's count of what arrived all ask this."""
+    stamped = _grn_already_minted(stock_repo, {**match, "grn_id": grn_id})
+    legacy = {**match, "grn_id": None, "source_type": "GRN", "source_id": grn_id}
+    return stamped + _grn_already_minted(stock_repo, legacy)
+
+
 def _stock_create_raises_on_duplicate(stock_repo) -> bool:
     """Does this stock repository's create() accept raise_on_duplicate?
 

@@ -6,7 +6,7 @@ from ._shared import (
     _ATTACHMENT_INVALID_DETAIL,
     _GRN_DOCUMENT_KIND,
     _RECEIVABLE_PO_STATUSES,
-    _VENDOR_ROLES,
+    _RECEIVE_ROLES,
     _get_db,
     _normalize_invoice_no,
     can_access_store_scoped,
@@ -42,7 +42,7 @@ from ...services.purchase_numbering import po_label
 
 @router.post("/grn", status_code=201)
 async def create_grn(
-    grn: GRNCreate, current_user: dict = Depends(require_roles(*_VENDOR_ROLES))
+    grn: GRNCreate, current_user: dict = Depends(require_roles(*_RECEIVE_ROLES))
 ):
     """Create a new GRN (STANDARD) or log a Delivery Challan (F9 DC subtype)."""
     return await _create_grn_impl(grn, current_user)
@@ -56,7 +56,7 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
     attachment gate (F-S3 + BUG-010 file-exists), PO receivable check, F2
     store re-point to the PO's delivery store, per-store numbering and the DC
     guards -- without duplicating any control. Callers pass the authenticated
-    ``current_user`` their own ``require_roles(*_VENDOR_ROLES)`` gate produced.
+    ``current_user`` their own ``require_roles(*_RECEIVE_ROLES)`` gate produced.
     """
     grn_repo = get_grn_repository()
     po_repo = get_purchase_order_repository()
@@ -307,6 +307,31 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
                     ),
                     "lines": untallied,
                 },
+            )
+
+    # No cancelled unit enters stock: what this receipt would ACCEPT is held to
+    # the LIVE order, so units of a line (or part of one) the order has
+    # withdrawn are refused here and never reach the accept; grn_accept holds
+    # the same rule at accept time. Owner ruling 2026-10-08: a delivery that
+    # brought cancelled items CAN be logged when every cancelled item on it is
+    # REJECTED -- they are counted as received, never accepted.
+    if po is not None:
+        from .po_detail import _received_by_product, beyond_open_quantity
+
+        over = beyond_open_quantity(
+            po,
+            [it.model_dump() for it in grn.items],
+            lambda: _received_by_product(po),
+        )
+        if over:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "This order no longer has room for what you entered: "
+                    + ", ".join(over)
+                    + ". Those units were cancelled on the order, so they "
+                    "cannot go into stock - mark them rejected."
+                ),
             )
 
     # Calculate totals
