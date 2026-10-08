@@ -56,8 +56,8 @@ from .gst_rates import (
     resolve_gst_rate_strict,
 )
 from .gtin import (
-    MANUFACTURER_BARCODE_ATTRIBUTES,
     classify_gtin,
+    manufacturer_barcode_key,
     normalise_candidate,
     sanitise_gtin,
 )
@@ -1332,16 +1332,21 @@ def _guard_gtin_attribute(
 
     The `upc` attribute ('UPC (mfr)') is the same kind of code -- a UPC is a
     GTIN-12 -- and reaches Shopify as the ims.upc metafield and the
-    description's 'UPC Code' row, so it gets the same rule.
+    description's 'UPC Code' row, so it gets the same rule. Keys match in any
+    letter case ('GTIN', 'Upc' publish as ims.gtin / ims.upc too): such a key is
+    checked the same way and folded onto the one key, which wins when both
+    are sent.
     """
-    attrs = attributes or {}
-    for key in MANUFACTURER_BARCODE_ATTRIBUTES:
-        raw = attrs.get(key)
-        if not normalise_candidate(raw):
+    attrs: Dict[str, Any] = {}
+    for k, raw in (attributes or {}).items():
+        key = manufacturer_barcode_key(k)
+        if key is None:
+            attrs[k] = raw
             continue
         clean = sanitise_gtin(raw)
-        if clean:
-            attrs = {**attrs, key: clean}
+        if clean or not normalise_candidate(raw):
+            if k == key or key not in attrs:
+                attrs[key] = clean or raw
             continue
         reason = classify_gtin(raw)
         if strict:
@@ -1358,7 +1363,6 @@ def _guard_gtin_attribute(
             reason,
             raw,
         )
-        attrs = {k: v for k, v in attrs.items() if k != key}
     return attrs
 
 
@@ -2438,7 +2442,7 @@ def clone_and_vary(
     base_attrs = {
         k: v
         for k, v in _overlay_attributes(src).items()
-        if k not in MANUFACTURER_BARCODE_ATTRIBUTES
+        if manufacturer_barcode_key(k) is None
     }
     base_payload: Dict[str, Any] = {}
     for f in _CLONE_CATALOG_FIELDS:

@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from agents.nexus_providers import _as_shopify_gid
 from ..ecom_category_map import ims_to_shopify_type
-from ..gtin import MANUFACTURER_BARCODE_ATTRIBUTES, sanitise_gtin
+from ..gtin import manufacturer_barcode_key, sanitise_gtin
 from ..shopify_tag_gen import generate_attribute_tags, merge_tag_lists
 
 from ._shared import logger
@@ -157,6 +157,18 @@ mutation metafieldsDelete($metafields: [MetafieldIdentifierInput!]!) {
 """
 
 
+def _manufacturer_codes(attrs: Dict[str, Any]) -> Dict[str, Any]:
+    """{'gtin' / 'upc': the raw value} for each manufacturer-barcode attribute
+    the product holds, its key matched in any letter case ('GTIN', 'Upc'); the
+    exact key wins over another spelling. Both metafield builders read it."""
+    codes: Dict[str, Any] = {}
+    for k, v in attrs.items():
+        key = manufacturer_barcode_key(k)
+        if key and (k == key or key not in codes):
+            codes[key] = v
+    return codes
+
+
 def build_removed_metafields(product: Dict[str, Any]) -> List[Dict[str, Any]]:
     """The ims.* metafields to DELETE (without ownerId): each manufacturer
     barcode attribute (gtin / upc) the product holds EMPTY -- what Manage
@@ -169,8 +181,8 @@ def build_removed_metafields(product: Dict[str, Any]) -> List[Dict[str, Any]]:
         return []
     return [
         {"namespace": _METAFIELD_NAMESPACE, "key": key}
-        for key in MANUFACTURER_BARCODE_ATTRIBUTES
-        if key in attrs and not str(attrs[key] or "").strip()
+        for key, v in _manufacturer_codes(attrs).items()
+        if not str(v or "").strip()
     ]
 
 
@@ -181,12 +193,31 @@ def build_product_metafields(product: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     Pure + deterministic: scalar attributes only (dict/list/None/blank
     skipped), keys lowercased snake_case truncated to Shopify's 30-char key
-    limit, values stringified, sorted by key, capped at _MAX_METAFIELDS."""
+    limit, values stringified, sorted by key, capped at _MAX_METAFIELDS.
+
+    ims.gtin / ims.upc (their keys in any letter case) carry only a publishable
+    GTIN, sanitised (gtin.sanitise_gtin): never junk, never an in-store GS1
+    20-29 code. Not one, and the metafield is not sent."""
     attrs = product.get("attributes") or {}
     if not isinstance(attrs, dict):
         return []
-    rows: List[Dict[str, Any]] = []
+    codes = {
+        key: code
+        for key, raw in _manufacturer_codes(attrs).items()
+        if (code := sanitise_gtin(raw))
+    }
+    rows: List[Dict[str, Any]] = [
+        {
+            "namespace": _METAFIELD_NAMESPACE,
+            "key": key,
+            "type": "single_line_text_field",
+            "value": code,
+        }
+        for key, code in codes.items()
+    ]
     for k, v in attrs.items():
+        if manufacturer_barcode_key(k):
+            continue
         if v is None or isinstance(v, (dict, list, tuple)):
             continue
         value = str(v).strip()

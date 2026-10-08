@@ -807,3 +807,77 @@ class TestEveryDoorStoresTheGtinDigitsOnly:
         _update(pid, attributes={"gtin": typed, "upc": typed})
         attrs = mock_db["products"].find_one({"product_id": pid})["attributes"]
         assert (attrs["gtin"], attrs["upc"]) == (_EAN_SANITISED, _EAN_SANITISED)
+
+
+# A barcode attribute KEY in another letter case ('GTIN', 'Upc') publishes as
+# ims.gtin / ims.upc all the same (the push lower-cases keys), so it is guarded
+# like gtin / upc, and the metafields carry only a publishable GTIN.
+
+
+class TestBarcodeKeysInAnyLetterCase:
+    @pytest.mark.parametrize("key", ["GTIN", "Upc", " gtin "])
+    def test_an_in_store_code_under_another_spelling_is_refused(
+        self, mock_db, mirror_on, key
+    ):
+        from api.services.shopify_push.product_input import build_product_metafields
+
+        pid = _create(f"KC-{key.strip()}")["product_id"]
+        with pytest.raises(HTTPException) as ei:
+            _update(pid, attributes={key: _INTERNAL})
+        assert ei.value.status_code == 422
+        spine = mock_db["products"].find_one({"product_id": pid})
+        assert _INTERNAL not in str(spine.get("attributes"))
+        twin = mock_db["catalog_products"].find_one(
+            {"id": spine.get("pim_product_id") or pid}
+        )
+        assert _INTERNAL not in str(build_product_metafields(twin))
+
+    def test_a_good_code_under_another_spelling_is_the_one_gtin(
+        self, mock_db, mirror_on
+    ):
+        p1 = _create("KC-OK-1")["product_id"]
+        _update(p1, attributes={"GTIN": "4006381 333931"})
+        spine = mock_db["products"].find_one({"product_id": p1})
+        assert spine["attributes"]["gtin"] == _VALID_A
+        assert "GTIN" not in spine["attributes"]
+        twin = mock_db["catalog_products"].find_one(
+            {"id": spine.get("pim_product_id") or p1}
+        )
+        assert _pushed_barcodes(mock_db, twin) == {"KC-OK-1": _VALID_A}
+        p2 = _create("KC-OK-2")["product_id"]
+        with pytest.raises(HTTPException) as ei:
+            _update(p2, attributes={"Gtin": _VALID_A})
+        assert ei.value.status_code == 409
+
+    def test_the_guard_folds_every_spelling_onto_the_one_key(self):
+        from api.services.product_master import _guard_gtin_attribute
+
+        for attrs in ({"gtin": _VALID_A, "GTIN": _VALID_B}, {"GTIN": _VALID_B, "gtin": _VALID_A}):
+            assert _guard_gtin_attribute(attrs, strict=True) == {"gtin": _VALID_A}
+        assert _guard_gtin_attribute({"Upc": " 0360-0029-1452"}, strict=True) == {"upc": _UPC_A}
+        # A draft/import row drops a junk code under any spelling.
+        assert _guard_gtin_attribute({"GTIN": _INTERNAL, "frame_material": "TR90"}, strict=False) == {
+            "frame_material": "TR90"
+        }
+
+    def test_the_metafields_carry_only_a_publishable_gtin(self):
+        from api.services.shopify_push.product_input import (
+            build_product_metafields,
+            build_removed_metafields,
+        )
+
+        def mf(attrs):
+            return [(m["key"], m["value"]) for m in build_product_metafields({"attributes": attrs})]
+
+        # A stored in-store code (any spelling) never goes; a spaced UPC goes bare.
+        assert mf({"GTIN": _INTERNAL, "Upc": "0360-0029-1452", "frame_material": "Acetate"}) == [
+            ("frame_material", "Acetate"),
+            ("upc", _UPC_A),
+        ]
+        assert mf({"gtin": _INTERNAL}) == [] and mf({"upc": "TW003HG14"}) == []
+        # One ims.gtin, and the exact key wins over another spelling.
+        assert mf({"gtin": _VALID_A, "GTIN": _VALID_B}) == [("gtin", _VALID_A)]
+        assert mf({"GTIN": _VALID_B, "gtin": _VALID_A}) == [("gtin", _VALID_A)]
+        assert build_removed_metafields({"attributes": {"GTIN": ""}}) == [
+            {"namespace": "ims", "key": "gtin"}
+        ]

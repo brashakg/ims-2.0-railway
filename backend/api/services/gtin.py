@@ -61,6 +61,14 @@ _SEPARATORS = re.compile(r"[\s\-]+")
 # GTIN-12). Both are validated as GTINs and both publish as ims.* metafields.
 MANUFACTURER_BARCODE_ATTRIBUTES = ("gtin", "upc")
 
+
+def manufacturer_barcode_key(key: Any) -> Optional[str]:
+    """'gtin' / 'upc' when an attribute KEY names a manufacturer barcode in any
+    letter case or padding ('GTIN', ' Upc '), else None. The Shopify push
+    lower-cases keys into ims.* metafields, so 'GTIN' publishes as ims.gtin."""
+    k = str(key).strip().lower()
+    return k if k in MANUFACTURER_BARCODE_ATTRIBUTES else None
+
 _RESTRICTED_PREFIXES = frozenset(str(n) for n in range(20, 30))
 _RESTRICTED_UPC_PREFIXES = frozenset("0" + p for p in _RESTRICTED_PREFIXES)
 
