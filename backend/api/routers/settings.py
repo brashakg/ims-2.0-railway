@@ -2450,7 +2450,8 @@ def chain_default_credit_limit() -> float:
 class OperationalRules(BaseModel):
     model_config = ConfigDict(extra="forbid")
     auto_round_off: bool
-    default_credit_limit: float = Field(gt=0, allow_inf_nan=False)
+    # strict: a JSON true is refused, not read as 1.0 (a Rs 1 limit for all).
+    default_credit_limit: float = Field(gt=0, allow_inf_nan=False, strict=True)
 
 
 class AdminControls(BaseModel):

@@ -157,6 +157,8 @@ def test_superadmin_and_admin_may_edit_the_default_store_manager_may_not(db):
     _rules(default_credit_limit=0),
     _rules(default_credit_limit=-5),
     {"operational_rules": {"auto_round_off": True, "default_credit_limit": "Infinity"}},
+    # lax pydantic reads JSON true as 1.0 - a Rs 1 limit for every customer
+    {"operational_rules": {"auto_round_off": True, "default_credit_limit": True}},
 ])
 def test_removed_settings_and_a_non_positive_default_are_refused(db, body):
     r = _client(_user("SUPERADMIN")).put("/settings/admin-controls", json=body)
@@ -183,6 +185,20 @@ def test_credit_summary_reports_the_limit_in_force(db, monkeypatch):
     assert body["credit_limit"] == 150000.0
     assert body["ar_available"] == 110000.0
     assert body["limit_exceeded"] is False
+
+
+def test_credit_summary_reports_the_saved_default_not_a_copy(db, monkeypatch):
+    # The till screens show this number and warn before the sale with it, so it
+    # must be the saved default the till blocks at - not a second 1,50,000.
+    monkeypatch.setattr(customers_module, "get_customer_repository",
+                        lambda: _Customers({"customer_id": "C1"}, {"customer_id": "C2", "credit_limit": 70000}))
+    monkeypatch.setattr(customers_module, "_ar_outstanding", lambda cid, doc: 15000.0)
+    c = _client(_user("ADMIN"))
+    assert c.put("/settings/admin-controls", json=_rules(default_credit_limit=20000)).status_code == 200
+    body = c.get("/customers/C1/credit-summary").json()
+    assert (body["credit_limit"], body["ar_available"], body["limit_exceeded"]) == (20000.0, 5000.0, False)
+    # a limit of their own still wins in the summary
+    assert c.get("/customers/C2/credit-summary").json()["credit_limit"] == 70000.0
 
 
 # --- the ONE check: the till's CREDIT tender --------------------------------
