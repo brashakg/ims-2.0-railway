@@ -644,6 +644,60 @@ def _priced_return_lines(
     return out
 
 
+def _return_round_off(
+    order: Optional[Dict[str, Any]],
+    order_id: Optional[str],
+    lines: List[ReturnLine],
+) -> float:
+    """The share of the bill's round off this return gives back.
+
+    Owner ruling 2026-10-08: a FULL return refunds what was paid (the rounded
+    bill); a PARTIAL return refunds its lines at their real value and never
+    re-rounds the original. So the order's stored ``round_off`` goes back with
+    the return that brings back the LAST unit -- one return of everything, or
+    the final piece of several -- and with no other, and the returns of one
+    bill always add up to what the customer paid for it. 0 for a bill made
+    before the ruling (no ``round_off``).
+    """
+    round_off = float((order or {}).get("round_off") or 0.0)
+    if not round_off or not order_id:
+        return 0.0
+    idx = _order_line_index(order)
+    returning = [
+        (_resolve_original_line(ln, idx), float(ln.return_qty or 0)) for ln in lines
+    ]
+    for line in (order or {}).get("items") or []:
+        if not isinstance(line, dict):
+            continue
+        back_now = sum(q for orig, q in returning if orig is line)
+        already = _already_returned_qty(
+            order_id, line.get("item_id") or line.get("id"), line.get("product_id")
+        )
+        if already + back_now < _line_purchased_qty(line) - 1e-9:
+            return 0.0
+    return round(round_off, 2)
+
+
+def _price_return(
+    lines: List[ReturnLine],
+    order: Optional[Dict[str, Any]],
+    order_id: Optional[str],
+) -> tuple:
+    """THE refund pricing for a return, shared by the quote and the POST so the
+    two can never disagree: ``(priced_lines, gross_refund, round_off)``.
+    ``gross_refund`` is what the customer paid for the returned units -- the
+    lines' billed gross plus, on the return that completes the bill, its
+    round off. ``priced_lines`` stay the lines' own values (the GST reversal is
+    backed out of those, never out of the round off). 400 on a bad line."""
+    priced_lines = _priced_return_lines(lines, order)
+    try:
+        lines_gross = engine.returned_value(priced_lines)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    round_off = _return_round_off(order, order_id, lines)
+    return priced_lines, round(lines_gross + round_off, 2), round_off
+
+
 def _order_payment_method(order: Optional[Dict[str, Any]]) -> str:
     """Best-effort original payment method for defaulting a refund method."""
     if not order:
@@ -2583,11 +2637,9 @@ async def quote_return(
         raise HTTPException(status_code=400, detail="No returnable lines supplied")
 
     resolved_order_id = body.order_id or order.get("order_id")
-    priced_lines = _priced_return_lines(active_lines, order)
-    try:
-        gross_refund = engine.returned_value(priced_lines)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    priced_lines, gross_refund, refund_round_off = _price_return(
+        active_lines, order, resolved_order_id
+    )
 
     restocking_fee = round(float(body.restocking_fee or 0.0), 2)
     if body.return_type == "EXCHANGE":
@@ -2662,6 +2714,9 @@ async def quote_return(
         "order_id": resolved_order_id,
         "return_type": body.return_type,
         "gross_refund": gross_refund,
+        # The bill's round off this return gives back (0 unless it completes
+        # the bill) -- already inside gross_refund / net_refund.
+        "round_off": refund_round_off,
         "restocking_fee": restocking_fee,
         # THE authoritative figure the refund-tender split must sum to.
         "net_refund": net_amount,
@@ -2888,11 +2943,9 @@ async def create_return(
     #    `gst_rate` is recovered (see _priced_return_lines) and the NET
     #    unit_price grossed up by it. This fixes the under-refund bug where the
     #    bare net subtotal was returned, dropping the GST the customer paid.
-    priced_lines = _priced_return_lines(active_lines, order)
-    try:
-        gross_refund = engine.returned_value(priced_lines)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    priced_lines, gross_refund, refund_round_off = _price_return(
+        active_lines, order, resolved_order_id
+    )
 
     # Restocking fee: optional Rs deduction for damaged / opened goods. Only
     # meaningful on a refund (RETURN / CREDIT_NOTE); an EXCHANGE is a like-for-
@@ -3092,10 +3145,20 @@ async def create_return(
         1500 (reports.py SUBTRACTS the CDNR from hsn_by_rate, so a negative
         tax ADDS to the bucket)."""
         rate = float(gst_view.get("gst_rate") or 0)
-        _view_gross = float(gst_view.get("gross") or 0.0)
+        # What was PAID for the returned goods = the lines' gross plus the
+        # bill's round off this return carries. The credited share of it takes
+        # its share of the lines' tax; its share of the round off is neither
+        # taxable nor tax (owner ruling 2026-10-08). At round off 0 this is
+        # exactly the old split.
+        _view_gross = float(gst_view.get("gross") or 0.0) + refund_round_off
         _view_tax = float(gst_view.get("tax") or 0.0)
         tax = round(_view_tax * (amount / _view_gross), 2) if _view_gross > 0 else 0.0
-        taxable = round(amount - tax, 2)
+        _ro_share = (
+            round(refund_round_off * (amount / _view_gross), 2)
+            if _view_gross > 0
+            else 0.0
+        )
+        taxable = round(amount - tax - _ro_share, 2)
         entry = _issue_store_credit(
             customer_id,
             amount,
@@ -3319,6 +3382,8 @@ async def create_return(
         # optional restocking fee, and the resulting net refund. Persisted so
         # the credit note / GSTR-1 reversal is auditable.
         "gross_refund": gross_refund,
+        # The bill's round off this return gave back (inside gross_refund).
+        "round_off": refund_round_off,
         "restocking_fee": restocking_fee,
         "net_refund": net_amount,
         "gst_breakup": gst_view,
@@ -3433,6 +3498,8 @@ async def create_return(
         "return_type": body.return_type,
         "returned_value": ret_value,
         "gross_refund": gross_refund,
+        # The bill's round off this return gave back (inside gross_refund).
+        "round_off": refund_round_off,
         "restocking_fee": restocking_fee,
         "net_refund": net_amount,
         "gst_breakup": gst_view,
