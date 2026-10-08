@@ -1034,6 +1034,28 @@ def _raise_once(
     from ...services.task_triggers import create_system_task
 
     tasks = db.get_collection("tasks")
+    # A task still open says what is true NOW (R1-22): the first of two held
+    # items finished since it was raised leaves its "Finish 2 item(s)".
+    try:
+        tasks.update_many(
+            {
+                "source_ref": dedupe_ref,
+                "status": {"$in": _TASK_OPEN},
+                "$or": [
+                    {"title": {"$ne": task.get("title")}},
+                    {"description": {"$ne": task.get("description")}},
+                ],
+            },
+            {
+                "$set": {
+                    "title": task.get("title"),
+                    "description": task.get("description"),
+                    "updated_at": datetime.now(),
+                }
+            },
+        )
+    except Exception:  # noqa: BLE001 - stale words never stop the task being raised
+        logger.warning("[TASKS] could not refresh %s", dedupe_ref, exc_info=True)
     if ever and tasks.find_one({"source_ref": dedupe_ref}):
         return True
     repo = get_task_repository()

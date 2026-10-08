@@ -3443,3 +3443,21 @@ def test_r6_a_release_never_restamps_when_the_receipt_was_accepted(world):
         f"R1-21: the release restamped accepted_at ({first} -> {stored['accepted_at']})",
     )
     assert stored["last_accepted_at"] >= first
+
+
+def test_r6_the_cataloguers_task_says_what_is_still_held(world):
+    # R1-22: the first of two held items is finished; the task still read
+    # "Finish 2 item(s)" and named the finished one.
+    po, d_id, e_id = _two_drafts_po(world)
+    grn = _receive(world, po, [1, 1], "JOT/26-27/0911")
+    (task,) = [t for t in _open_tasks(world) if t.get("category") == "Catalogue"]
+    assert task["title"].startswith("Finish 2 item(s)")
+    world.finish_draft(d_id, offer=2790)
+    task = world.db.tasks.find_one({"task_id": task["task_id"]})
+    finding(
+        task["title"].startswith("Finish 1 item(s)")
+        and "BOSS 1701" in task["description"]
+        and "BOSS 1700 " not in task["description"],
+        f"R1-22: the open task reads {task['title']!r} / {task['description']!r}",
+    )
+    assert world.grn(grn["grn_id"])["status"] == "PARTIALLY_ACCEPTED"
