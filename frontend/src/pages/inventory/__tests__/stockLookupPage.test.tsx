@@ -166,6 +166,17 @@ describe('Stock lookup screen', () => {
     expect(shopCells('Frame P')).toEqual(cells);
   });
 
+  // Round 9: the screen reads the guard's lists the server sends, never a
+  // copy of today's sets: a guard that stopped counting FRAME (or a lens line)
+  // must change these cells with no screen release.
+  it.each([
+    ['FRAME', { not_counted_item_types: ['FRAME'], lens_grid_item_types: [] }, NOT_COUNTED],
+    ['OPTICAL_LENS', { not_counted_item_types: [], lens_grid_item_types: [] }, COUNTED],
+  ])('a %s product follows the lists the server sends', async (category, lists, cells) => {
+    await search({ items: [product('P', category)], ...lists }, 'Frame P');
+    expect(shopCells('Frame P')).toEqual(cells);
+  });
+
   // Round 7: the server caps the rows (50 hits, 200 per family), so a big
   // contact-lens model is cut; the screen says so instead of looking whole.
   // Round 8: 'products', not 'powers' (a frame list is cut too), and never
