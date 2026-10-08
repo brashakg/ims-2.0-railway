@@ -20,7 +20,7 @@ from api.services.cost_mask import mask_cost, mask_cost_list
 from ..services.online_catalog import (
     online_status_for_skus,
     online_summary,
-    product_online_state,
+    doc_online_state,
     reconcile_store_barcodes,
     online_mapping_available,
 )
@@ -1506,29 +1506,6 @@ def _next_sku_counter(prefix: str, db=None) -> int:
     return counter
 
 
-def generate_sku(category: ProductCategory, attributes: Dict[str, Any], db=None) -> str:
-    """Generate a unique SKU from category + attributes.
-
-    Pass `db` so the numeric counter is allocated ATOMICALLY + PERSISTENTLY
-    (see _next_sku_counter). The SKU still ends in a `find_by_sku` dedupe check
-    at the call site, so even if two products share brand/model/colour the
-    counter keeps them distinct.
-    """
-    prefix = category.value
-    counter = _next_sku_counter(prefix, db=db)
-
-    # Add brand code
-    brand = attributes.get("brand_name", "XX")[:2].upper()
-
-    # Add model/colour for uniqueness
-    model = attributes.get("model_no", attributes.get("model_name", ""))[:4].upper()
-    colour = attributes.get("colour_code", attributes.get("colour_name", ""))[
-        :3
-    ].upper()
-
-    return f"{prefix}-{brand}-{model}{colour}-{counter}"
-
-
 def generate_product_title(
     category: ProductCategory, attributes: Dict[str, Any]
 ) -> str:
@@ -1710,13 +1687,15 @@ async def list_catalog_products(
     if not isinstance(photo, str):
         photo = None
 
-    # Photo + online truth, ONE rule (online_catalog.product_online_state),
-    # stamped before the filters so the photo filter reads the same value the
-    # column shows.
+    # Photo + online truth, ONE rule (online_catalog.product_online_state,
+    # with THE push gate's verdict), stamped before the filters so the photo
+    # filter reads the same value the column shows.
+    db = _get_db()
     for p in products:
-        state = product_online_state(p)
+        state = doc_online_state(db, p)
         p["has_photo"] = state["has_photo"]
         p["online"] = state["online"]
+        p["online_note"] = state["note"]
     if photo:
         want = photo == "has"
         products = [p for p in products if p.get("has_photo") is want]
@@ -1844,10 +1823,15 @@ async def create_catalog_product(
     # HSN/category) -- same rules the canonical /products path enforces.
     gst_rate, hsn_code = _guard_catalog_pricing(product)
 
-    # Generate SKU and title. Pass the DB so the SKU counter is allocated
-    # atomically + persistently (not the per-worker in-memory dict).
+    # SKU: the ONE readable rule (product_master.build_sku, owner D5), made
+    # unique by the same collision suffix every door uses.
+    from ..dependencies import get_product_repository
+
     product_id = f"prod_{uuid.uuid4().hex[:12]}"
-    sku = generate_sku(product.category, product.attributes, db=_get_db())
+    sku = _pm.mint_unique_sku(
+        product.category.value, product.attributes,
+        product_repo=get_product_repository(), db=_get_db(),
+    )
     title = generate_product_title(product.category, product.attributes)
 
     # PRODUCTS-CONVERGENCE step-10: validate through the canonical registry AND
@@ -1861,8 +1845,6 @@ async def create_catalog_product(
     # the catalog/PIM door (which legitimately holds same-identity variants) and
     # to keep the native catalog_products doc (storefront/Shopify shape) below
     # unchanged.
-    from ..dependencies import get_product_repository
-
     try:
         _spine = _pm.build_canonical_product(
             {
@@ -3032,6 +3014,9 @@ async def import_products(
     # Resolve the DB once so each row's SKU counter is allocated atomically +
     # persistently (the per-worker in-memory dict would collide under concurrency).
     _bulk_db = _get_db()
+    from ..dependencies import get_product_repository
+
+    _bulk_repo = get_product_repository()
 
     for i, product in enumerate(products):
         try:
@@ -3080,7 +3065,10 @@ async def import_products(
                 continue
 
             product_id = f"prod_{uuid.uuid4().hex[:12]}"
-            sku = generate_sku(product.category, product.attributes, db=_bulk_db)
+            sku = _pm.mint_unique_sku(
+                product.category.value, product.attributes,
+                product_repo=_bulk_repo, db=_bulk_db,
+            )
             title = generate_product_title(product.category, product.attributes)
 
             product_data = {

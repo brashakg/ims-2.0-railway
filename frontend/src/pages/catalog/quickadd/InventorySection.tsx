@@ -69,7 +69,7 @@ export function InventorySection({ form }: { form: QuickAddForm }) {
               Set this shop&apos;s reorder level and you&apos;ll be alerted when its stock falls to it.
             </span>{' '}
             Left blank it is not set: no low-stock alert here. Every shop sets its own.{' '}
-            Stock is added via Goods Receipt (GRN), not here. The SKU is assigned when the
+            Stock is added via Goods Receipt (GRN), not here. The SKU (previewed in Review) is assigned when the
             product is created and the internal barcode at goods receipt — neither is typed.
           </p>
         </div>

@@ -79,12 +79,13 @@ export function ConfirmChip() {
   );
 }
 
-// Review rail row.
-export function ReviewRow({ label, value }: { label: string; value: string }) {
+// Review rail row. `wide` = the row spans the whole grid and the value wraps
+// instead of being cut off (for a value that must be read in full, the SKU).
+export function ReviewRow({ label, value, wide }: { label: string; value: string; wide?: boolean }) {
   return (
-    <dl className="flex items-center justify-between gap-3">
+    <dl className={`flex justify-between gap-3 ${wide ? 'col-span-full items-start' : 'items-center'}`}>
       <dt className="text-gray-500 shrink-0">{label}</dt>
-      <dd className="font-medium text-gray-900 text-right truncate">{value}</dd>
+      <dd className={`font-medium text-gray-900 text-right ${wide ? 'break-all' : 'truncate'}`}>{value}</dd>
     </dl>
   );
 }

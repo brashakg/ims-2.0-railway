@@ -27,9 +27,6 @@ export interface ProductFormValues {
   offerPrice?: string;
   costPrice?: string;
   discountCategory: string;
-  syncToShopify: boolean;
-  shopifyTags: string[];
-  publishPOS: boolean;
   // Uploaded product-image URLs (self-hosted, from productApi.uploadProductImage).
   // Optional so existing callers that don't collect images still type-check;
   // buildProductPayload defaults it to [].
@@ -156,15 +153,17 @@ export function buildProductPayload(values: ProductFormValues): CreateProductPay
 
   // ProductCreate requires top-level brand/model. The dynamic form collects
   // these under category-specific attribute names (brand_name, model_no /
-  // model_name); map them here. SKU is NOT a form field: the backend mints the
+  // model_name); map them here, and nothing else: a category with no model
+  // (Optical Lens) sends a blank one and the server's one rule
+  // (product_master.identity_parts: the sub-brand, coating and index) names
+  // it for the SKU (which the Review preview calls too), the model column,
+  // the display name and the duplicate guard. SKU is NOT a form field: the backend mints the
   // clean semantic SKU (product_master.mint_unique_sku) whenever none is sent,
   // so we OMIT it unless the operator explicitly supplied one (e.g. a legacy /
   // imported SKU under attributes.sku). We no longer fabricate a Date.now() SKU
   // — that ugly client SKU used to override the backend's clean one.
   const brand = String(attributes.brand_name || attributes.brand || '').trim();
-  const model = String(
-    attributes.model_no || attributes.model_name || attributes.subbrand || 'STD'
-  ).trim();
+  const model = String(attributes.model_no || attributes.model_name || '').trim();
   const suppliedSku = String(attributes.sku || '').trim();
 
   // Contact lenses: map CL attribute fields onto the top-level CL identity
@@ -233,13 +232,6 @@ export function buildProductPayload(values: ProductFormValues): CreateProductPay
     // Uploaded image URLs (durably stored + served by the backend). Empty when
     // the operator didn't add any.
     images: Array.isArray(values.images) ? values.images : [],
-    shopify: {
-      // Kept for future vendor sync (NEXUS pushes POS stock -> Shopify). We
-      // don't render our own storefront.
-      sync_to_shopify: values.syncToShopify,
-      shopify_tags: values.shopifyTags,
-      publish_to_pos: values.publishPOS,
-    },
   };
 }
 

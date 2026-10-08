@@ -23,7 +23,7 @@ from ._shared import (
     _live_or_reason,
     is_variant_of,
     logger,
-    push_lock_reason,
+    product_push_refusal,
 )
 from .transport import _graphql, _now
 from .queries import (
@@ -587,13 +587,14 @@ async def push_image(db, image: Dict[str, Any]) -> PushResult:
     existing_gid = image.get("shopify_image_id")
 
     # Hub Phase 5 push-lock (defense-in-depth, FIRST gate): an image attaches to
-    # its parent product, so a push-locked brand's image must NEVER reach Shopify
-    # either. push_product is already blocked for a locked brand (so the parent is
-    # normally never on Shopify), but this closes the legacy "product was on
-    # Shopify before its brand got locked" gap. Fail-CLOSED on a real lock match.
+    # its parent product, so a push-locked (or off-the-website, owner D6) brand's
+    # image must NEVER reach Shopify either. push_product is already blocked
+    # for such a brand (so the parent is normally never on Shopify), but this
+    # closes the "product was on Shopify before its brand got locked/switched
+    # off" gap. Fail-CLOSED.
     _parent = _resolve_product_doc(db, image.get("product_id"))
     if _parent is not None:
-        _img_lock = push_lock_reason(db, "product", _parent)
+        _img_lock = product_push_refusal(db, _parent)
         if _img_lock:
             return _blocked_result("image", iid, _img_lock)
 

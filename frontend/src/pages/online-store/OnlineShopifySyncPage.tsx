@@ -1206,7 +1206,8 @@ export default function OnlineShopifySyncPage() {
                           </span>
                         ) : null;
                       })()}
-                      {/* Push-locked SKUs the sweep excluded (from summary.products). */}
+                      {/* Products the sweep excluded (from summary.products): push-locked,
+                          or a brand Brand Master keeps off the website. */}
                       {(() => {
                         const blocked = Number(
                           (sweep.summary?.[ent.token]?.blocked_skipped ?? 0) as number,
@@ -1214,7 +1215,7 @@ export default function OnlineShopifySyncPage() {
                         return blocked > 0 ? (
                           <span
                             className="inline-flex items-center gap-1 text-amber-700"
-                            title="Push-locked SKUs skipped by this sweep"
+                            title="Skipped by this sweep: push-locked, or the brand is not for the website (Settings > Brand Master). They go out once the brand is ticked."
                           >
                             · {fmt(blocked)} blocked (skipped)
                           </span>

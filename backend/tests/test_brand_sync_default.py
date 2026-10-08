@@ -5,12 +5,13 @@ Covers the 2026-07-04 Brand Master upgrades:
 
   1. admin_catalog: BrandCreate persists sync_to_shopify_default (default
      False), BrandUpdate can flip it (incl. explicitly back to False).
-  2. catalog_dictionary.load_brand_sync_default: True only for an ACTIVE
-     brand doc with the flag True; fail-soft False otherwise.
-  3. GET /products/brand-options exposes sync_to_shopify_default per brand.
-  4. The FORM create door stamps `sync_to_shopify` on the spine: explicit
-     payload value wins; omitted -> brand default; unknown brand -> False.
-     (INTENT only -- nothing pushes to Shopify from IMS; BVI owns Shopify.)
+  2. (Gone: the loader that read the flag outside the push gate.)
+  3. GET /products/brand-options gives no website answer: that is the push
+     gate's alone (GET /products/website-verdict), and a second answer here
+     skipped the push lock.
+  4. (Moved: the brand default decides the website LIVE at push time and no
+     create door stores a copy -- owner 2026-09-29, D6; see
+     test_add_product_owner_rulings.py.)
   5. GET /products/brands (catalog.py) reads brand_masters, falling back to
      the legacy hardcoded BRANDS dict when the master is empty/unreadable.
   6. admin_catalog._attach_product_counts: one aggregation, case-insensitive
@@ -34,8 +35,6 @@ from api.routers import admin_catalog as ac  # noqa: E402
 from api.routers import catalog as cat  # noqa: E402
 from api.routers import products as prod_router  # noqa: E402
 from api.services import catalog_dictionary as cd  # noqa: E402
-from database.connection import MockCollection  # noqa: E402
-from database.repositories.product_repository import ProductRepository  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -158,118 +157,20 @@ class TestBrandCrudPersistsFlag:
 
 
 # ---------------------------------------------------------------------------
-# 2. Loader semantics
+# 3. /products/brand-options gives no second website answer
 # ---------------------------------------------------------------------------
 
 
-class TestLoadBrandSyncDefault:
-    def test_true_only_when_flag_true(self):
-        assert cd.load_brand_sync_default(_db(), "Ray-Ban") is True
-        assert cd.load_brand_sync_default(_db(), "ray-ban") is True  # ci match
-        assert cd.load_brand_sync_default(_db(), "Titan") is False
-        assert cd.load_brand_sync_default(_db(), "NoFlag") is False
-
-    def test_fail_soft_false(self):
-        assert cd.load_brand_sync_default(None, "Ray-Ban") is False
-        assert cd.load_brand_sync_default(_db(), "Unknown") is False
-        assert cd.load_brand_sync_default(_db(), "") is False
-
-        class _Boom:
-            def get_collection(self, name):
-                raise RuntimeError("down")
-
-        assert cd.load_brand_sync_default(_Boom(), "Ray-Ban") is False
-
-
-# ---------------------------------------------------------------------------
-# 3. /products/brand-options exposes the flag
-# ---------------------------------------------------------------------------
-
-
-class TestBrandOptionsExposesFlag:
-    def test_flag_included_per_brand(self, monkeypatch):
+class TestBrandOptionsHasNoWebsiteAnswer:
+    def test_no_website_flag_per_brand(self, monkeypatch):
         monkeypatch.setattr(deps, "get_db", lambda: _db())
         out = asyncio.run(prod_router.get_brand_options(
             category=None, current_user={"user_id": "u1"}
         ))
         by_name = {b["name"]: b for b in out["brands"]}
-        assert by_name["Ray-Ban"]["sync_to_shopify_default"] is True
-        assert by_name["Titan"]["sync_to_shopify_default"] is False
-        assert by_name["NoFlag"]["sync_to_shopify_default"] is False
-
-
-# ---------------------------------------------------------------------------
-# 4. Create door stamps sync_to_shopify on the spine
-# ---------------------------------------------------------------------------
-
-
-def _form_product(**over):
-    base = {
-        "category": "FRAME",
-        "brand": "Ray-Ban",
-        "model": "RB-2140",
-        "color": "BLK",
-        "mrp": 5000.0,
-        "offer_price": 4500.0,
-    }
-    base.update(over)
-    return prod_router.ProductCreate(**base)
-
-
-class TestCreateDoorSyncStamp:
-    @pytest.fixture(autouse=True)
-    def _mirror_off(self, monkeypatch):
-        monkeypatch.setenv("PM_MIRROR_ENABLED", "")
-        yield
-
-    def _create(self, monkeypatch, product):
-        repo = ProductRepository(MockCollection("products"))
-        monkeypatch.setattr(prod_router, "get_product_repository", lambda: repo)
-        monkeypatch.setattr(deps, "get_db", lambda: _db())
-        monkeypatch.setattr(deps, "get_audit_repository", lambda: None)
-        return prod_router._create_via_canonical_door(
-            product, {"user_id": "tester"}, source="FORM"
-        )
-
-    def test_brand_default_true_resolved_when_omitted(self, monkeypatch):
-        created = self._create(monkeypatch, _form_product())
-        assert created["sync_to_shopify"] is True  # Ray-Ban default True
-
-    def test_brand_default_false_resolved_when_omitted(self, monkeypatch):
-        created = self._create(
-            monkeypatch,
-            _form_product(brand="Titan", category="WRIST_WATCH",
-                          attributes={"dial_size": "42mm"}, model="Raga-1"),
-        )
-        assert created["sync_to_shopify"] is False
-
-    def test_explicit_value_wins_over_brand_default(self, monkeypatch):
-        created = self._create(
-            monkeypatch, _form_product(sync_to_shopify=False)
-        )
-        assert created["sync_to_shopify"] is False  # despite brand True
-
-    def test_unknown_brand_fails_soft_false(self, monkeypatch):
-        # An EMPTY Brand Master fails open at the dictionary gate (any brand
-        # is creatable) -- the sync default then resolves fail-soft to False.
-        repo = ProductRepository(MockCollection("products"))
-        monkeypatch.setattr(prod_router, "get_product_repository", lambda: repo)
-        monkeypatch.setattr(
-            deps, "get_db",
-            lambda: _FakeDb({cd.BRAND_COLLECTION: _FakeColl([])}),
-        )
-        monkeypatch.setattr(deps, "get_audit_repository", lambda: None)
-        created = prod_router._create_via_canonical_door(
-            _form_product(brand="Mystery"), {"user_id": "tester"}, source="FORM"
-        )
-        assert created["sync_to_shopify"] is False
-
-    def test_resolver_fail_soft_without_db(self, monkeypatch):
-        monkeypatch.setattr(deps, "get_db", lambda: None)
-        assert prod_router._resolve_sync_to_shopify(_form_product(), None) is False
-        assert prod_router._resolve_sync_to_shopify(
-            _form_product(sync_to_shopify=True), None
-        ) is True
+        assert by_name["Ray-Ban"] == {"name": "Ray-Ban", "subbrands": [], "tier": "PREMIUM"}
+        assert all("sync_to_shopify_default" not in b for b in out["brands"])
+        assert not hasattr(cd, "load_brand_sync_default")
 
 
 # ---------------------------------------------------------------------------

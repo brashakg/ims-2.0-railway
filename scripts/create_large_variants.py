@@ -23,7 +23,7 @@ WHAT IT DOES (per row of the input, in this order)
      must equal Shopify), attributes.size = "Large", category SMARTGLASSES,
      variant_of = the parent spine's product_id, name from the input's
      name_hint (else the child would share the base's display name on every
-     bill), the base photo, sync_to_shopify True. The door writes the spine
+     bill), the base photo. The door writes the spine
      (variant_of, size, identity_key ...|large), the child twin (born CLEAN,
      ecom.variant_of, no gid) and the parent-linked catalog_variants row.
   2. LINK the Shopify ids -- the Large variant's ProductVariant +
@@ -281,8 +281,8 @@ def build_payload(row: Dict[str, Any]):
     base = row["create_payload_base_fields"]
     payload = {k: base.get(k) for k in _PAYLOAD_KEYS}
     payload["variant_of"] = row["parent"]["product_id"]
-    extra = {"name": base["name_hint"], "images": list(base.get("images") or []),
-             "sync_to_shopify": bool(base.get("sync_to_shopify", True))}
+    # No website flag: the brand default decides it at push time (owner D6).
+    extra = {"name": base["name_hint"], "images": list(base.get("images") or [])}
     return payload, extra
 
 

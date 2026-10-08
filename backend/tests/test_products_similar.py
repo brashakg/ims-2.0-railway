@@ -241,6 +241,81 @@ def test_size_in_identity_when_present():
     assert len(res2["siblings"]) == 2
 
 
+def _door_doc(category, attrs):
+    """A stored row keyed by the create door itself (normalise_payload)."""
+    doc = pm.normalise_payload(
+        category=category, attributes=dict(attrs), mrp=1000.0, offer_price=900.0,
+        sku=None, cost_price=500.0,
+    )
+    doc["product_id"] = f"P-{doc['sku']}"
+    return doc
+
+
+def test_a_contact_lens_exact_match_is_its_power():
+    """The hint keys a contact lens the way the save does (identity_parts):
+    the same lens re-entered is the exact match the save would 409, never a
+    'click to add another variant' chip; the opposite power is a sibling."""
+    oasys = {"brand_name": "Acuvue", "model_name": "Oasys", "expiry_date": "2027-01-31"}
+    coll = _FakeProductsColl([_door_doc("CL", dict(oasys, power="-1.25"))])
+
+    def similar(**power):
+        return pm.find_similar_products(
+            coll, category="CL", brand="Acuvue", model="Oasys", colour="", size="",
+            attributes=power,
+        )
+
+    same = similar(power="-1.25D")
+    assert same["exact_match"]["sku"] == "CL-ACUVUE-OASYS-M125"
+    assert same["siblings"] == []
+    other = similar(power="+1.25")
+    assert other["exact_match"] is None
+    assert [s["sku"] for s in other["siblings"]] == ["CL-ACUVUE-OASYS-M125"]
+
+
+def test_a_frame_exact_match_reads_its_eye_size():
+    """Each frame eye size is its own variant (owner 2026-09-28): the 54 is
+    not 'this exact colour already exists' against the 52, the 52 is."""
+    carrera = {"brand_name": "Carrera", "model_no": "CA8895", "colour_code": "807"}
+    coll = _FakeProductsColl([_door_doc("FR", dict(carrera, lens_size="52"))])
+
+    def similar(lens_size):
+        return pm.find_similar_products(
+            coll, category="FR", brand="Carrera", model="CA8895", colour="807",
+            attributes={"lens_size": lens_size},
+        )
+
+    assert similar("52")["exact_match"]["sku"] == "FR-CARRERA-CA8895-807-52"
+    assert similar("54")["exact_match"] is None
+    assert [s["sku"] for s in similar("54")["siblings"]] == ["FR-CARRERA-CA8895-807-52"]
+
+
+def test_endpoint_passes_the_eye_size_and_power_on(monkeypatch):
+    """GET /products/similar hands lens_size and the power fields to the
+    lookup as typed -- the router folds nothing itself."""
+    import asyncio
+
+    from api.routers import products as prod_router
+
+    seen = {}
+
+    class _Db:
+        is_connected = True
+        db = type("M", (), {"get_collection": staticmethod(lambda name: None)})()
+
+    import database.connection as conn
+
+    monkeypatch.setattr(conn, "get_db", lambda: _Db())
+    monkeypatch.setattr(pm, "find_similar_products",
+                        lambda coll, **kw: seen.update(kw) or EMPTY)
+    asyncio.run(prod_router.get_similar_products(
+        category="CL", brand="Acuvue", model_no="Oasys", lens_size="54",
+        power="-1.25", cl_cyl="-0.75", cl_axis="180", cl_add="+1.00",
+        current_user={"user_id": "u"},
+    ))
+    assert seen["attributes"] == {"lens_size": "54", "power": "-1.25", "cl_cyl": "-0.75",
+                                  "cl_axis": "180", "cl_add": "+1.00"}
+
+
 def test_category_filters_siblings():
     coll = _FakeProductsColl(
         [

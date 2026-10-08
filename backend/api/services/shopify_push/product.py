@@ -21,7 +21,7 @@ from ._shared import (
     _live_or_reason,
     is_variant_of,
     price_on_update_enabled,
-    push_lock_reason,
+    product_push_refusal,
 )
 from .transport import _graphql, _user_errors
 from .queries import _PRODUCT_CREATE, _PRODUCT_UPDATE
@@ -81,11 +81,11 @@ async def push_product(
         re-scan). The sweep passes ``None`` (not ``False``) when it could not
         verify the config, so this fail-closed skip still applies."""
     pid = product.get("id") or product.get("product_id")
-    # Hub Phase 5: push-lock is the FIRST gate -- a locked brand is NEVER pushed,
-    # before the dark/live gate (fail-closed).
-    _lock = push_lock_reason(db, "product", product)
-    if _lock:
-        return _blocked_result("product", pid, _lock)
+    # FIRST gate, before the dark/live gate (fail-closed): a push-locked brand,
+    # or a brand Brand Master keeps off the website (owner D6, read live).
+    _refusal = product_push_refusal(db, product)
+    if _refusal:
+        return _blocked_result("product", pid, _refusal)
     # VARIANT-OF (owner ruling 2026-09-06): a size variant owns NO listing. Its
     # price, barcode and stock ride the PARENT's push (push_variant_prices /
     # sync_product_stock over the parent's catalog_variants rows); every

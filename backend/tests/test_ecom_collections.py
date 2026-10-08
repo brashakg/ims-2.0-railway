@@ -305,7 +305,7 @@ _COLLECTION_ROUTES = [
     ("PUT", "/api/v1/online-store/collections/{collection_id}"),
     ("DELETE", "/api/v1/online-store/collections/{collection_id}"),
     ("POST", "/api/v1/online-store/collections/{collection_id}/products"),
-    ("DELETE", "/api/v1/online-store/collections/{collection_id}/products/{sku}"),
+    ("DELETE", "/api/v1/online-store/collections/{collection_id}/products/{sku:path}"),
     ("PUT", "/api/v1/online-store/collections/{collection_id}/products/reorder"),
     ("GET", "/api/v1/online-store/collections/{collection_id}/resolved-products"),
 ]
@@ -328,7 +328,39 @@ def test_reorder_literal_beats_sku_param():
     assert reorder["path"].endswith("/products/reorder")
     sku_del = rbac.policy_for("DELETE", "/api/v1/online-store/collections/C1/products/SKU-9")
     assert sku_del is not None
-    assert sku_del["path"].endswith("/products/{sku}")
+    assert sku_del["path"].endswith("/products/{sku:path}")
+    # A SKU carrying '/' (decoded from %2F before routing) is the same row,
+    # not an un-catalogued path the enforcer would wave through.
+    assert rbac.policy_for(
+        "DELETE", "/api/v1/online-store/collections/C1/products/FR-X-M-1109/71"
+    ) == sku_del
+    assert rbac.check_access(
+        "DELETE", "/api/v1/online-store/collections/C1/products/FR-X-M-1109/71", ["SALES_STAFF"]
+    ) is False
+
+
+@pytest.mark.parametrize("sku", ["FR-X-M-1109/71", "RB-601/58-X", "PLAIN-SKU-1"])
+def test_remove_route_takes_a_sku_with_a_slash(client, auth_headers, monkeypatch, sku):
+    """The screen sends DELETE .../products/{encodeURIComponent(sku)}; Starlette
+    decodes %2F before routing, so a plain {sku} 404'd for every SKU with a
+    '/' (readable SKUs like FR-X-M-1109/71, legacy colour codes like 601/58)
+    and the product could never be taken out of a manual collection."""
+    from urllib.parse import quote
+
+    from api.routers import online_store_collections as osc
+
+    repo = EcomCollectionRepository(MockCollection("ecom_collections"))
+    cid = repo.create({"title": "Picks", "handle": "picks"})["collection_id"]
+    repo.add_product(cid, sku)
+    repo.add_product(cid, "KEEP-1")
+    monkeypatch.setattr(osc, "_repo", lambda: repo)
+    monkeypatch.setattr(osc, "_materialize", lambda _cid: None)
+    r = client.delete(
+        f"/api/v1/online-store/collections/{cid}/products/{quote(sku, safe='')}",
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+    assert [p["sku"] for p in repo.get_by_id(cid)["products"]] == ["KEEP-1"]
 
 
 def test_check_access_allows_ecom_roles_denies_others():

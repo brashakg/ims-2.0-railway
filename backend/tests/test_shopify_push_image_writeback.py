@@ -31,8 +31,14 @@ os.environ.setdefault("ENVIRONMENT", "test")
 
 import asyncio  # noqa: E402
 
+import pytest  # noqa: E402
+
 from database.connection import MockCollection  # noqa: E402
 from api.services import shopify_push  # noqa: E402
+
+# The image push asks the brand gate for its parent product (owner D6); these
+# tests are about the gid write-back, for a brand that IS for the website.
+pytestmark = pytest.mark.usefixtures("brand_is_for_the_website")
 
 
 def _run(coro):

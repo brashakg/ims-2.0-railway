@@ -81,7 +81,7 @@ class ProductMasterCreate(BaseModel):
     gst_rate: Optional[float] = None
     country_of_origin: Optional[str] = None
     warranty_months: Optional[int] = Field(default=None, ge=0)
-    weight_grams: Optional[float] = None
+    weight: Optional[float] = None
 
 
 class ProductMasterUpdate(BaseModel):
@@ -93,7 +93,7 @@ class ProductMasterUpdate(BaseModel):
     is_active: Optional[bool] = None
     country_of_origin: Optional[str] = None
     warranty_months: Optional[int] = Field(default=None, ge=0)
-    weight_grams: Optional[float] = None
+    weight: Optional[float] = None
 
 
 def _raise(err: "pm.ProductMasterError"):
@@ -151,8 +151,9 @@ async def sku_preview(
     body: SkuPreviewRequest,
     current_user: dict = Depends(require_roles(*_CATALOG_ROLES)),
 ):
-    """Deterministic SKU preview per the Excel rule (PREFIX+BRAND+MODEL+COLOR+
-    SIZE). Does NOT allocate a collision counter (preview is read-only)."""
+    """The SKU a new product will get (product_master.build_sku, the one minter:
+    CATEGORY-BRAND-MODEL-COLOUR-SIZE). The Add-product form shows this before
+    saving. Does NOT allocate a collision counter (preview is read-only)."""
     try:
         sku = pm.build_sku(body.category, body.attributes)
     except pm.ProductMasterError as err:
@@ -190,7 +191,7 @@ async def create_master_product(
             gst_rate=body.gst_rate,
             country_of_origin=body.country_of_origin,
             warranty_months=body.warranty_months,
-            weight_grams=body.weight_grams,
+            weight=body.weight,
             product_repo=get_product_repository(),
             # catalog_products PIM doc is written via the db path inside the
             # engine (no dedicated repo); the variant tier uses its repo.

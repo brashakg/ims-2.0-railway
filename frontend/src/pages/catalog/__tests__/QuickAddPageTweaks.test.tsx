@@ -48,6 +48,8 @@ vi.mock('../../../services/api/products', () => ({
   productApi: {
     getCategoryRegistry: vi.fn(async () => { throw new Error('offline'); }),
     getBrandOptions: vi.fn(async () => ({ brands: [] })),
+    previewSku: vi.fn(async () => ({ category: 'SUNGLASS', sku: '' })),
+    getWebsiteVerdict: vi.fn(async (brand: string) => ({ brand, online: true, reason: null })),
     getProduct: vi.fn(async () => SOURCE_PRODUCT),
     uploadProductImage: vi.fn(async () => ({ url: '/api/v1/products/image/f1' })),
     createProduct: (...a: unknown[]) => createProduct(...a),
@@ -97,9 +99,6 @@ const blankSunglass = (over: Partial<ProductFormValues> = {}): ProductFormValues
   gstRate: '18',
   mrp: '',
   discountCategory: '',
-  syncToShopify: false,
-  shopifyTags: [],
-  publishPOS: true,
   ...over,
 });
 
@@ -265,10 +264,10 @@ describe('5 - GST rate is text, and the value still posts', () => {
     const payload = createProduct.mock.calls[0][0] as Record<string, unknown>;
     expect(payload.gst_rate).toBe(18);
     expect(payload.hsn_code).toBe('900410');
-    // The posted shape is the one buildProductPayload has always produced.
+    // The posted shape: no 'shopify' block (POST /products never stored it).
     expect(Object.keys(payload).sort()).toEqual([
       'attributes', 'brand', 'category', 'cost_price', 'description', 'gst_rate',
-      'hsn_code', 'images', 'model', 'mrp', 'offer_price', 'shopify', 'weight',
+      'hsn_code', 'images', 'model', 'mrp', 'offer_price', 'weight',
     ]);
   });
 });
@@ -302,14 +301,18 @@ describe('8 - the review card uses registry labels', () => {
 });
 
 describe('9 + 12 - the Online strip', () => {
-  it('says in words what the POS switch waits on, and the tag box has a visible label', async () => {
+  it('has no website or POS switch (the brand default decides, D6), and no tag box that never saves', async () => {
     const user = userEvent.setup();
+    // A brand the push gate sends to the website (GET /products/website-verdict).
     renderPage();
-    expect(screen.getByText(/turn on Sync to Shopify first/)).toBeInTheDocument();
-    expect(screen.queryByLabelText('Shopify tags')).toBeNull();
+    expect(screen.queryByLabelText('Sync to Shopify')).toBeNull();
+    expect(screen.queryByLabelText('Publish to Shopify POS')).toBeNull();
 
-    await user.click(screen.getByLabelText('Sync to Shopify'));
-    expect(screen.queryByText(/turn on Sync to Shopify first/)).toBeNull();
-    expect(screen.getByLabelText('Shopify tags')).toBeInTheDocument();
+    await user.click(screen.getByText('Sunglass'));
+    fill(screen.getByLabelText(/^Brand Name/), 'Ray-Ban');
+    expect(await screen.findByText(/Website: yes - Ray-Ban/)).toBeInTheDocument();
+    // POST /products stores no Shopify tags, so the form offers no box for them.
+    expect(screen.queryByLabelText('Shopify tags')).toBeNull();
+    expect(screen.queryByPlaceholderText(/Type a tag/)).toBeNull();
   });
 });

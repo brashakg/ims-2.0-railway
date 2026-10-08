@@ -297,6 +297,21 @@ def _reset_auth_singletons():
 
 
 @pytest.fixture
+def brand_is_for_the_website(monkeypatch):
+    """The product's brand is one Settings > Brand Master sends to the website.
+
+    For suites that test the Shopify push's OTHER mechanics over fake DBs that
+    hold no brand_masters. The brand rule itself (owner D6: the brand default
+    always decides, push refused otherwise) is tested against real Brand Master
+    rows in test_add_product_owner_rulings.py."""
+    from api.services import catalog_dictionary
+
+    monkeypatch.setattr(
+        catalog_dictionary, "brand_website_refusal", lambda db, brand: None
+    )
+
+
+@pytest.fixture
 def auth_headers(client):
     """Get a valid JWT for an admin user by calling login.
     Falls back to creating a token directly if login requires a DB.

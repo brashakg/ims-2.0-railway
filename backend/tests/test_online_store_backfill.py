@@ -137,7 +137,7 @@ def test_a_queued_row_lands_in_a_status_bucket(db):
     assert db["catalog_products"].find_one({"id": "P1"})["ecom"]["status"] == "DRAFT"
 
 
-def test_the_queued_rows_are_exactly_what_the_sweep_will_walk(db):
+def test_the_queued_rows_are_exactly_what_the_sweep_will_walk(db, brand_is_for_the_website):
     """The backfill's promise is that pressing publish afterwards DOES
     something -- so what it stamps has to be the set the sweep selects."""
     coll = _seed(db, _row("P1"), _row("P2", images=[]), _row("P3"))

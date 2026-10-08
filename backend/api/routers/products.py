@@ -397,6 +397,7 @@ def _canonical_door_payload(
         "hsn_code": product.hsn_code,
         "gst_rate": product.gst_rate,
         "tags": product.tags,
+        "weight": product.weight,
         # Flat identity columns -- normalise_door_payload folds these into the
         # registry's attribute keys (brand->brand_name, model->model_no,
         # color->colour_code) so the required-field gate sees them.
@@ -417,32 +418,6 @@ def _form_extra_fields(product: "ProductCreate") -> dict:
         if v is not None:
             out[f] = v
     return out
-
-
-def _resolve_sync_to_shopify(product: "ProductCreate", db) -> bool:
-    """The `sync_to_shopify` INTENT to stamp on a new spine product.
-
-    NOTE: nothing pushes to Shopify from IMS anymore (IMS->Shopify is
-    retired; the BVI app owns Shopify) -- the stamp records the owner's
-    intent so the FUTURE BVI-side push knows which products to list.
-
-    An explicit payload value wins; when omitted (None) the brand's
-    Brand Master `sync_to_shopify_default` decides (case-insensitive name
-    match). FAIL-SOFT: unknown brand / no db / read trouble -> False
-    (never sync by accident)."""
-    explicit = getattr(product, "sync_to_shopify", None)
-    if explicit is not None:
-        return bool(explicit)
-    try:
-        from ..dependencies import get_db as _get_db_dep
-        from ..services import catalog_dictionary as _cd
-
-        db = db if db is not None else _get_db_dep()
-        if db is not None and getattr(db, "is_connected", False):
-            return _cd.load_brand_sync_default(db, product.brand)
-    except Exception:  # noqa: BLE001 - intent stamp must never block a create
-        pass
-    return False
 
 
 def _create_via_canonical_door(
@@ -474,10 +449,9 @@ def _create_via_canonical_door(
     except Exception:  # noqa: BLE001 - mirror is fail-soft; never block a create
         variant_repo = None
 
-    # Additive door columns + the resolved Shopify-sync INTENT (explicit
-    # payload value, else the brand's Brand Master default, fail-soft False).
+    # Additive door columns. (No website flag: the brand default decides it
+    # live at push time -- owner D6.)
     extra = _form_extra_fields(product)
-    extra["sync_to_shopify"] = _resolve_sync_to_shopify(product, db)
 
     try:
         return _pm.create_via_door(
@@ -576,6 +550,10 @@ class ProductCreate(BaseModel):
     # silently dropped it on every create and no IMS-born product ever carried a
     # description to Shopify. Optional + additive.
     description: Optional[str] = None
+    # Grams -- the same `weight` key PUT /products/{id} writes and the form
+    # reads back. Was never modelled here, so pydantic dropped it on every
+    # create and the same-model chip had no weight to copy (audit F69).
+    weight: Optional[float] = Field(default=None, ge=0)
     # Governed product tags (step-12). Accepts a list or a comma-separated
     # string; normalised (lowercase/trim/dedupe) server-side via the canonical
     # door so FORM/BULK/CATALOG all yield an identical `tags` array. Tags back
@@ -623,13 +601,8 @@ class ProductCreate(BaseModel):
     @classmethod
     def _validate_images(cls, v):
         return _clean_image_urls(v)
-
-    # Shopify-sync INTENT for the new product. NOTE: nothing pushes to
-    # Shopify from IMS anymore (IMS->Shopify is retired; the BVI app owns
-    # Shopify) -- this stamps the owner's intent for the FUTURE BVI-side
-    # push. None (default) = resolve from the brand's Brand Master
-    # `sync_to_shopify_default`; an explicit true/false is honoured as-is.
-    sync_to_shopify: Optional[bool] = None
+    # No `sync_to_shopify` here: the brand default always decides (owner
+    # 2026-09-29, D6); a stale client that still sends one is ignored.
 
 
 class ProductUpdate(BaseModel):
@@ -2075,8 +2048,9 @@ async def get_brand_options(
     canonical name like 'FRAME'; omit for all), each with its sub-brand names
     so the form can restrict the Sub Brand select per selected brand.
 
-    Shape: {"brands": [{"name": str, "subbrands": [str, ...], "tier": str|None,
-    "sync_to_shopify_default": bool}, ...]}.
+    Shape: {"brands": [{"name": str, "subbrands": [str, ...], "tier": str|None}, ...]}.
+    Whether a brand goes to the website is NOT here: that is the push gate's
+    answer alone (GET /products/website-verdict, owner D6).
     Fail-soft: db trouble -> {"brands": []}.
     """
     try:
@@ -2097,21 +2071,35 @@ async def get_brand_options(
             # tier: shown read-only in the form's Review (the product's
             # discount band derives from it at create time).
             tier = _cd.load_brand_tier(db, name)
-            brands.append(
-                {
-                    "name": name,
-                    "subbrands": subs,
-                    "tier": tier,
-                    # Default Shopify-sync INTENT for the brand (Settings ->
-                    # Brand Master); the create door stamps sync_to_shopify
-                    # from it when the payload doesn't say explicitly.
-                    "sync_to_shopify_default": _cd.load_brand_sync_default(db, name),
-                }
-            )
+            brands.append({"name": name, "subbrands": subs, "tier": tier})
         return {"brands": brands}
     except Exception as e:  # noqa: BLE001 - read-only projection, never a blocker
         logger.warning("[CATALOG-DICT] brand-options read failed: %s", e)
         return {"brands": []}
+
+
+@router.get("/website-verdict")
+async def get_website_verdict(
+    brand: str = "",
+    current_user: dict = Depends(get_current_user),
+):
+    """Whether a product of this brand goes to the website, and why not: THE
+    push gate's own answer (shopify_push.product_push_refusal: a push-locked
+    brand, or the brand's Settings > Brand Master default, owner D6), so the
+    Add/Edit form's read-only line can never disagree with the push. The form
+    works nothing out itself.
+
+    Shape: {"brand": str, "online": bool, "reason": str|None}. Fail-closed
+    like the gate: no db -> online false, reason says Brand Master could not
+    be read."""
+    from ..dependencies import get_db as _get_db_dep
+    from ..services.shopify_push import product_push_refusal
+
+    db = _get_db_dep()
+    if db is not None and not getattr(db, "is_connected", False):
+        db = None
+    reason = product_push_refusal(db, {"brand": brand})
+    return {"brand": brand, "online": reason is None, "reason": reason}
 
 
 # NOTE: registered here (with the other literal /products/* paths like
@@ -2124,10 +2112,17 @@ async def get_similar_products(
     model_no: str = "",
     colour_code: str = "",
     size: str = "",
+    lens_size: str = "",
+    power: str = "",
+    cl_cyl: str = "",
+    cl_axis: str = "",
+    cl_add: str = "",
     current_user: dict = Depends(get_current_user),
 ):
     """Live as-you-type "similar products" check for the Add-Product form
-    (dup-detect council ruling, Phase 2).
+    (dup-detect council ruling, Phase 2). A frame's eye size (lens_size) and a
+    contact lens's power (power, cl_cyl, cl_axis, cl_add) are sent as typed:
+    the duplicate key reads them (product_master.identity_parts).
 
     Any authenticated catalog operator may call it (mirrors GET /products).
     The matching runs through product_master.find_similar_products, which
@@ -2153,6 +2148,13 @@ async def get_similar_products(
             model=model_no,
             colour=colour_code,
             size=size,
+            attributes={
+                "lens_size": lens_size,
+                "power": power,
+                "cl_cyl": cl_cyl,
+                "cl_axis": cl_axis,
+                "cl_add": cl_add,
+            },
         )
     except Exception as e:  # noqa: BLE001 - hint endpoint, never a blocker
         logger.warning("[SIMILAR] lookup failed: %s", e)

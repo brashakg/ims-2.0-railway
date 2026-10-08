@@ -40,34 +40,38 @@ from typing import Any, Dict
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from api.services.product_master import compute_identity_key  # noqa: E402
+from api.services.product_master import (  # noqa: E402
+    ProductMasterError,
+    compute_identity_key,
+    identity_parts,
+)
 
 
 def _identity_of(doc: Dict[str, Any]):
-    """Read the identity fields the way the spine writes them.
-
-    Mirrors backfill_dedupe_prep._identity_of: the spine stores brand/model/
-    color/size at the top level, with attributes as the fallback for rows that
-    came in through the catalogue door.
+    """The key the create door stamps (product_master.normalise_payload:
+    compute_identity_key(*identity_parts(attributes, category)) -- the one
+    rule, never a copy here), read from the row's attributes. The top-level identity
+    columns only fill in what a row's attributes lack (an older row with
+    none). So an Optical Lens keeps its sub-brand, coating and index:
+    Crizal 1.56 HC and Crizal 1.67 HC are two products here too, and an old
+    lens row whose model is the former form's 'STD' filler gets the key the
+    same lens entered today gets (identity_parts reads 'STD' as no model).
+    A contact lens is keyed with its power; a stored 0 (plano) is a value.
     """
     attrs = doc.get("attributes") if isinstance(doc.get("attributes"), dict) else {}
-    brand = doc.get("brand") or doc.get("brand_name") or attrs.get("brand_name") or attrs.get("brand")
-    model = doc.get("model") or doc.get("model_no") or attrs.get("model_no") or attrs.get("model")
-    colour = (
-        doc.get("color")
-        or doc.get("colour")
-        or doc.get("colour_code")
-        or attrs.get("colour_code")
-        or attrs.get("color")
-    )
-    size = doc.get("size") or attrs.get("size")
-    return compute_identity_key(brand, model, colour, size)
+    top = {k: doc.get(k) for k in (
+        "brand", "brand_name", "model", "model_no", "model_name", "subbrand",
+        "color", "colour_code", "colour_name", "size", "coating", "index",
+    )}
+    return compute_identity_key(*identity_parts(
+        {**top, **{k: v for k, v in attrs.items() if v not in (None, "")}},
+        doc.get("category")))
 
 
 def run(products, *, apply: bool) -> Dict[str, Any]:
     rows = list(products.find({}))
     stats = {"scanned": len(rows), "unchanged": 0, "rewritten": 0,
-             "now_none": 0, "collisions": 0}
+             "now_none": 0, "collisions": 0, "unreadable": 0}
 
     planned: Dict[str, Any] = {}
     by_new = defaultdict(list)
@@ -75,7 +79,14 @@ def run(products, *, apply: bool) -> Dict[str, Any]:
     for doc in rows:
         pid = doc.get("product_id") or doc.get("_id")
         old = doc.get("identity_key")
-        new = _identity_of(doc)
+        try:
+            new = _identity_of(doc)
+        except ProductMasterError as exc:
+            # e.g. a contact lens whose stored power is not a number: a human
+            # fixes the row; the rest of the rebuild goes on.
+            stats["unreadable"] += 1
+            print(f"  [skip] {doc.get('sku')}: {exc.message} -- fix the row, keeping {old!r}")
+            continue
         if new is None:
             # Brand or model missing -> no identity at all. Leave whatever is
             # there alone; clearing it is a separate decision.
@@ -133,7 +144,7 @@ def main() -> int:
     stats = run(db["products"], apply=apply)
     print(
         "\nscanned={scanned} unchanged={unchanged} rewritten={rewritten} "
-        "no-identity={now_none} collisions={collisions}".format(**stats)
+        "no-identity={now_none} collisions={collisions} unreadable={unreadable}".format(**stats)
     )
     if not apply and stats["rewritten"]:
         print("\nRe-run with --apply to write these.")

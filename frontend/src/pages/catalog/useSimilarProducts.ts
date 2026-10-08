@@ -23,6 +23,11 @@ import { productApi, type SimilarProductsResponse } from '../../services/api/pro
 /** Council ruling: fire 400ms after the operator stops typing. */
 export const SIMILAR_DEBOUNCE_MS = 400;
 
+/** What else the server's duplicate key (product_master.identity_parts) reads
+ *  from the form: a frame's eye size and a contact lens's power. Sent as
+ *  typed; the server folds them, so the exact match is the save's 409. */
+export const SIMILAR_IDENTITY_KEYS = ['lens_size', 'power', 'cl_cyl', 'cl_axis', 'cl_add'] as const;
+
 export interface SimilarQueryInput {
   /** CATEGORIES picker code (SG/FR/...) — the backend resolves aliases. */
   category: string;
@@ -30,6 +35,8 @@ export interface SimilarQueryInput {
   model: string;
   colour: string;
   size: string;
+  /** The form's attributes: SIMILAR_IDENTITY_KEYS are sent from here. */
+  attributes?: Record<string, string>;
 }
 
 /** ARM rule (council-exact): brand AND model (>= 2 chars) both set — plus a
@@ -62,6 +69,12 @@ export function useSimilarProducts(
   const [data, setData] = useState<SimilarProductsResponse | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const armed = enabled && isSimilarQueryArmed(q);
+  // A string, so a fresh attributes object with the same values never refires.
+  const extrasKey = JSON.stringify(
+    Object.fromEntries(
+      SIMILAR_IDENTITY_KEYS.map((k) => [k, String(q.attributes?.[k] ?? '').trim()]).filter(([, v]) => v),
+    ),
+  );
 
   useEffect(() => {
     // Any watched-field change: abort the in-flight request and clear stale
@@ -82,6 +95,7 @@ export function useSimilarProducts(
             model_no: q.model.trim(),
             colour_code: q.colour.trim() || undefined,
             size: q.size.trim() || undefined,
+            ...(JSON.parse(extrasKey) as Record<string, string>),
           },
           controller.signal
         )
@@ -100,7 +114,7 @@ export function useSimilarProducts(
       abortRef.current?.abort();
       abortRef.current = null;
     };
-  }, [q.category, q.brand, q.model, q.colour, q.size, armed]);
+  }, [q.category, q.brand, q.model, q.colour, q.size, extrasKey, armed]);
 
   return { data, armed };
 }

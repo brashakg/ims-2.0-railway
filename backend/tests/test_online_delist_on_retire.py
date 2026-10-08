@@ -255,7 +255,7 @@ def test_delete_still_succeeds_when_the_take_down_fails(db, monkeypatch):
     assert rows[0]["severity"] == "WARNING"
     assert rows[0]["details"]["code"] == "DELIST_FAILED"
     assert rows[0]["details"]["trigger"] == "deleted"
-    assert product_online_state(saved)["online"] == "DELIST_FAILED"
+    assert product_online_state(saved, None)["online"] == "DELIST_FAILED"
 
 
 def test_delete_still_succeeds_when_the_take_down_raises(db, monkeypatch):
@@ -464,7 +464,7 @@ def test_reactivation_queues_the_twin_for_the_next_sync(db, spy):
     assert len(spy.calls) == 1, "reactivation never pushes by itself"
     # The Online column's queued flag (the row still carries its gid, so the
     # pre-existing display rule keeps calling it LIVE until the sweep lands).
-    assert product_online_state(saved)["queued"] is True
+    assert product_online_state(saved, None)["queued"] is True
 
 
 def test_reactivation_of_a_never_pushed_product_does_not_queue_it(db, spy):
@@ -483,13 +483,13 @@ def test_reactivation_of_a_never_pushed_product_does_not_queue_it(db, spy):
 # ===========================================================================
 def test_online_state_rule_reports_a_failed_take_down_and_hides_a_delisted_row():
     live = {"images": ["https://x/p.jpg"], "ecom": {"shopify_product_id": GID, "status": "PUBLISHED"}}
-    assert product_online_state(live)["online"] == "LIVE"
+    assert product_online_state(live, None)["online"] == "LIVE"
     failed = copy.deepcopy(live)
     failed["ecom"]["online_state"] = "DELIST_FAILED"
-    assert product_online_state(failed)["online"] == "DELIST_FAILED"
+    assert product_online_state(failed, None)["online"] == "DELIST_FAILED"
     delisted = copy.deepcopy(live)
     delisted["ecom"].update({"online_state": "DELISTED", "status": "DRAFT"})
-    assert product_online_state(delisted)["online"] == "OFF"
+    assert product_online_state(delisted, None)["online"] == "OFF"
 
 
 def test_a_successful_publish_clears_the_delist_marks(db):
