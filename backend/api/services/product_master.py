@@ -95,16 +95,28 @@ class ProductMasterError(Exception):
     offending attribute so the 422 body can point at it.
     """
 
-    def __init__(self, message: str, status: int = 422, field: Optional[str] = None):
+    def __init__(
+        self,
+        message: str,
+        status: int = 422,
+        field: Optional[str] = None,
+        code: Optional[str] = None,
+    ):
         super().__init__(message)
         self.message = message
         self.status = status
         self.field = field
-        # Optional machine code + conflict payload (Hub Phase 1 duplicate guard):
-        # a 409 carries `conflict = {product_id, sku, identity_key}` of the
-        # existing row so the caller/FE can link to it ("add stock / a variant").
-        self.code: Optional[str] = None
+        # Optional machine code (MISSING_FIELD, DUPLICATE_PRODUCT) + conflict
+        # payload (Hub Phase 1 duplicate guard): a 409 carries `conflict =
+        # {product_id, sku, identity_key}` of the existing row so the caller/FE
+        # can link to it ("add stock / a variant").
+        self.code: Optional[str] = code
         self.conflict: Optional[Dict[str, Any]] = None
+
+
+# The code on a "required field is empty" error: the catalogue create/import
+# doors answer only THAT with their historical "Missing required field: <f>".
+MISSING_FIELD = "MISSING_FIELD"
 
 
 # ===========================================================================
@@ -1557,6 +1569,7 @@ def normalise_payload(
                 "Cannot save product -- missing required: " + ", ".join(names),
                 status=422,
                 field=names[0],
+                code=MISSING_FIELD,
             )
 
     # Catalog Dictionary: when the owner has configured allowed values for a

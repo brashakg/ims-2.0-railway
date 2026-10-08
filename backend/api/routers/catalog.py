@@ -1884,8 +1884,9 @@ async def create_catalog_product(
         )
     except _pm.ProductMasterError as err:
         # Preserve the catalog door's historical 400 "Missing required field"
-        # contract for a missing-attr breach; surface other breaches verbatim.
-        if err.status == 422 and err.field and err.field != "category":
+        # contract for a missing field; surface other breaches (a junk GTIN /
+        # UPC, a value outside the Catalog Dictionary) verbatim.
+        if err.code == _pm.MISSING_FIELD:
             raise HTTPException(
                 status_code=400, detail=f"Missing required field: {err.field}"
             ) from err
@@ -3113,9 +3114,7 @@ async def import_products(
             except _pm.ProductMasterError as req_exc:
                 detail = (
                     f"Missing required field: {req_exc.field}"
-                    if req_exc.status == 422
-                    and req_exc.field
-                    and req_exc.field != "category"
+                    if req_exc.code == _pm.MISSING_FIELD
                     else req_exc.message
                 )
                 errors.append({"index": i, "error": detail})
