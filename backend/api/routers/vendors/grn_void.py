@@ -19,6 +19,7 @@ from .grn_accept_lock import (
     _GRN_TERMINAL_ACCEPT_STATUSES,
     _GRN_WRITE_ERROR,
     _claim_grn_for_accept,
+    _claimed_receipt,
     _grn_already_minted,
     _guarded_grn_write,
     _received_on,
@@ -427,13 +428,22 @@ async def drop_over_order(
     grn = grn_repo.find_by_id(grn_id)
     if not grn or not can_access_store_scoped(grn.get("store_id"), current_user):
         raise HTTPException(status_code=404, detail="GRN not found")
-    held = grn.get("unresolved_lines") or []
-    over = {ln.get("product_id") for ln in held if ln.get("reason") == "over_order"}
-    if grn.get("status") != "PARTIALLY_ACCEPTED" or not over:
-        raise HTTPException(
-            status_code=400,
-            detail="Nothing on this receipt is held beyond its order.",
-        )
+
+    def _over(g):
+        if g.get("status") != "PARTIALLY_ACCEPTED":
+            return set()
+        return {
+            ln.get("product_id")
+            for ln in g.get("unresolved_lines") or []
+            if ln.get("reason") == "over_order"
+        }
+
+    nothing_over = HTTPException(
+        status_code=400,
+        detail="Nothing on this receipt is held beyond its order.",
+    )
+    if not _over(grn):
+        raise nothing_over
     stock_repo = get_stock_repository()
     po_repo = get_purchase_order_repository()
     po_id = grn.get("po_id")
@@ -450,6 +460,14 @@ async def drop_over_order(
             detail="This receipt is being accepted right now. Refresh in a moment.",
         )
     try:
+        # Decided from the receipt as it stands under the claim: the read
+        # above predates it, and a catalogue save or an accept may have
+        # changed what is held since (panel P2).
+        grn = _claimed_receipt(grn_repo, grn_id, claim_token)
+        held = grn.get("unresolved_lines") or []
+        over = _over(grn)
+        if not over:
+            raise nothing_over
         try:
             ordered = _ordered_by_product(po_repo, po_id)
             items, still_over, dropped, to_shelve, room = [], [], 0, 0, {}

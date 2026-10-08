@@ -190,6 +190,22 @@ def _claim_grn_for_accept(grn_repo, grn_id: str, user_id) -> Optional[str]:
     return token
 
 
+def _claimed_receipt(grn_repo, grn_id: str, token: Optional[str]) -> dict:
+    """The receipt as it stands once this call holds its accept claim. A copy
+    read before the claim can predate a write another holder made under it --
+    'Not received' (drop_over_order) rewrites a receipt's lines -- so every
+    claim holder decides from this read, never from its caller's. Unreadable:
+    the claim is handed back and nothing is done (503)."""
+    doc = grn_repo.find_by_id(grn_id)
+    if not doc:
+        _release_grn_accept_claim(grn_repo, grn_id, token)
+        raise HTTPException(
+            status_code=503,
+            detail="Could not read this goods receipt again -- try again. Nothing was changed.",
+        )
+    return doc
+
+
 def _guarded_grn_write_retried(grn_repo, flt: dict, patch: dict, *, what, grn_id):
     """_guarded_grn_write, retried once on _GRN_WRITE_ERROR and LOUD if it still
     cannot be written.

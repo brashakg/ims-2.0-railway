@@ -34,6 +34,7 @@ from .grn_accept_lock import (
     _GRN_MINT_DUPLICATE,
     _advance_grn_terminal_status,
     _claim_grn_for_accept,
+    _claimed_receipt,
     _finalise_grn_accept_metadata,
     _grn_accept_conflict,
     _grn_accept_heartbeat_tick,
@@ -424,6 +425,9 @@ def _put_on_shelf(
     claim_token = _claim_grn_for_accept(grn_repo, grn_id, current_user.get("user_id"))
     if claim_token is None:
         raise _grn_accept_conflict(grn_repo, grn_id)
+    # The caller's copy was read before the claim: a 'Not received' that
+    # finished in between dropped lines this copy still accepts (panel P1).
+    grn = _claimed_receipt(grn_repo, grn_id, claim_token)
 
     deferred_releases: List[str] = []
     try:
