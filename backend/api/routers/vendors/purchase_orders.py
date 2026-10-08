@@ -14,7 +14,6 @@ from ._shared import (
     _po_catalog_gate_on,
     datetime,
     get_audit_repository,
-    get_current_user,
     get_product_repository,
     get_purchase_order_repository,
     get_vendor_repository,
@@ -48,7 +47,7 @@ async def list_pos(
     store_id: Optional[str] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
 ):
     """List purchase orders with filters"""
     po_repo = get_purchase_order_repository()
