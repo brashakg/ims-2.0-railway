@@ -765,8 +765,11 @@ def product_online_state(doc: Dict[str, Any], refusal: Optional[str]) -> Dict[st
                    BLOCKED  not live and no usable photo: the push refuses it
                    QUEUED   has a photo, waiting for a human to press push
                    OFF      not live, not queued
-      note      -- a LIVE listing the gate now refuses: it still sells (stock
-                   keeps syncing) but its price and images no longer sync.
+      note      -- the gate's own reason, whenever it refuses: a LIVE listing
+                   still sells (stock keeps syncing) but its price and images
+                   no longer sync; a NOT_FOR_WEBSITE row says which (a brand
+                   switched off, misspelt, renamed or inactive in Brand
+                   Master, a push-locked brand, a Brand Master read failure).
                    None otherwise.
 
     Pure; never raises."""
@@ -792,6 +795,7 @@ def product_online_state(doc: Dict[str, Any], refusal: Optional[str]) -> Dict[st
             note = "Price and images no longer sync: %s" % refusal
     elif refusal:
         online = "NOT_FOR_WEBSITE"
+        note = "Not for the website: %s" % refusal
     elif not has_photo:
         online = "BLOCKED"
     elif queued:

@@ -526,7 +526,7 @@ from api.services import catalog_dictionary as _cd  # noqa: E402
 from api.services.online_catalog import doc_online_state  # noqa: E402
 from api.routers import online_store_push as _push_router  # noqa: E402
 
-_REAL_SYNC_DEFAULT = _cd.load_brand_sync_default  # captured before any fixture patches it
+_REAL_BRAND_GATE = _cd.brand_website_refusal  # captured before any fixture patches it
 
 _CARRERA_TWIN = {
     "id": "T1", "sku": "FR-CARRERA-CA8895-807-54", "brand": "Carrera", "category": "FR",
@@ -547,7 +547,7 @@ def _brand_db(carrera_on=False, twins=(_CARRERA_TWIN,)):
 
 @pytest.fixture
 def real_brand_gate(monkeypatch):
-    monkeypatch.setattr(_cd, "load_brand_sync_default", _REAL_SYNC_DEFAULT)
+    monkeypatch.setattr(_cd, "brand_website_refusal", _REAL_BRAND_GATE)
 
 
 def test_a_brand_off_the_website_is_never_queued_on_any_screen(monkeypatch, real_brand_gate):
@@ -558,7 +558,9 @@ def test_a_brand_off_the_website_is_never_queued_on_any_screen(monkeypatch, real
     assert res.mode == shopify_push.MODE_BLOCKED and "not for the website" in res.reason
     # ... and so does every screen, with the same verdict.
     st = doc_online_state(db, twin)
-    assert (st["online"], st["queued"], st["note"]) == ("NOT_FOR_WEBSITE", False, None)
+    assert (st["online"], st["queued"]) == ("NOT_FOR_WEBSITE", False)
+    # The chip says why (the gate's own reason), not a fixed guess.
+    assert st["note"] == "Not for the website: " + res.reason
     assert catalog_counts(db)["pending"] == 0
     assert _push_router._product_counts(db)["pending"] == 0
     monkeypatch.setattr(catalog_mod, "_get_db", lambda: db)

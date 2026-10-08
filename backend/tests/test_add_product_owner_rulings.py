@@ -274,6 +274,62 @@ def test_f12_a_live_listing_whose_brand_is_switched_off_is_named_in_the_run(monk
     assert "still live" in run["failures"][0]["error"]
 
 
+def _verdict(monkeypatch, db, brand, locks=None):
+    """GET /products/website-verdict -- what the Add/Edit form's line reads."""
+    from api.services import policy_engine as pe
+
+    monkeypatch.setattr(deps, "get_db", lambda: db)
+    monkeypatch.setattr(pe, "get_policy", lambda key, default=None: (
+        locks if key == "ecom.shopify_push_locks" and locks is not None else default))
+    return _run(prod_router.get_website_verdict(brand=brand, current_user=_ADMIN))
+
+
+class _Up(StrictDB):
+    is_connected = True
+
+
+def _up_db():
+    db = _Up()
+    db.seed("brand_masters", [dict(b) for b in _BRANDS] + [
+        {"brand_id": "b3", "name": "Cartier", "is_active": True, "sync_to_shopify_default": True},
+        {"brand_id": "b4", "name": "Titan", "is_active": False, "sync_to_shopify_default": True},
+    ])
+    return db
+
+
+def test_f12_the_form_line_is_the_push_gate_answer(monkeypatch):
+    """The form works nothing out itself: the line is product_push_refusal's
+    verdict for the brand, so a push-locked brand with Brand Master ticked
+    reads 'no' on the form exactly as the push refuses it."""
+    db = _up_db()
+    assert _verdict(monkeypatch, db, "Ray-Ban") == {"brand": "Ray-Ban", "online": True, "reason": None}
+    assert _verdict(monkeypatch, db, "RAY-BAN")["online"] is True  # the gate's own casefold match
+    locked = _verdict(monkeypatch, db, "Cartier", locks={"brands": ["cartier"]})
+    assert locked["online"] is False and "push-locked" in locked["reason"]
+    assert locked["reason"] == sp.product_push_refusal(db, {"brand": "Cartier"})
+
+
+def test_f12_every_refusal_says_its_own_reason(monkeypatch):
+    """A misspelt or renamed brand, an inactive one and a Brand Master read
+    failure are never shown (on the form, the Catalog chip or the Buy Desk) as
+    a brand that is switched off."""
+    db = _up_db()
+    off = _verdict(monkeypatch, db, "Carrera")["reason"]
+    misspelt = _verdict(monkeypatch, db, "RayBan")["reason"]
+    inactive = _verdict(monkeypatch, db, "Titan")["reason"]
+    down = _verdict(monkeypatch, None, "Ray-Ban")["reason"]
+    assert "not for the website" in off
+    assert "not in Settings > Brand Master" in misspelt and "spelling" in misspelt
+    assert "inactive" in inactive
+    assert "could not be read" in down
+    assert len({off, misspelt, inactive, down}) == 4
+    # The Catalog / Buy Desk chip carries the same reason, not a fixed guess.
+    from api.services.online_catalog import doc_online_state
+
+    st = doc_online_state(db, {"brand": "RayBan", "images": ["https://cdn.example.com/p.jpg"]})
+    assert st["online"] == "NOT_FOR_WEBSITE" and misspelt in st["note"]
+
+
 # ---------------------------------------------------------------------------
 # F13 / D5 - readable SKU for new products, previewed by the same function
 # ---------------------------------------------------------------------------

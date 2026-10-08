@@ -307,7 +307,7 @@ def brand_is_for_the_website(monkeypatch):
     from api.services import catalog_dictionary
 
     monkeypatch.setattr(
-        catalog_dictionary, "load_brand_sync_default", lambda db, brand: True
+        catalog_dictionary, "brand_website_refusal", lambda db, brand: None
     )
 
 

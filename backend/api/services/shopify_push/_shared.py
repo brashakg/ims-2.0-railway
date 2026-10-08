@@ -342,8 +342,10 @@ def product_push_refusal(db, product: Dict[str, Any]) -> Optional[str]:
 
     A push-locked brand (above), or a brand Settings > Brand Master keeps off the
     website (owner ruling 2026-09-29, D6: the brand default ALWAYS decides,
-    read live -- products store no copy of it). Unknown brand / read trouble ->
-    refused (fail-closed, never list by accident).
+    read live -- products store no copy of it). Unknown, inactive brand / read
+    trouble -> refused (fail-closed, never list by accident), each with its own
+    reason (catalog_dictionary.brand_website_refusal). The Add/Edit form's
+    website line asks this same function (GET /products/website-verdict).
 
     Stock is deliberately NOT gated: a listing already live when its brand is
     switched off keeps a true stock count until someone takes it down (Online
@@ -356,9 +358,7 @@ def product_push_refusal(db, product: Dict[str, Any]) -> Optional[str]:
     brand = product.get("brand") or product.get("vendor") or (
         product.get("attributes") or {}
     ).get("brand_name")
-    if not catalog_dictionary.load_brand_sync_default(db, brand):
-        return "brand '%s' is not for the website (Settings > Brand Master)" % (brand or "-")
-    return None
+    return catalog_dictionary.brand_website_refusal(db, brand)
 
 
 def is_variant_of(doc: Any) -> bool:

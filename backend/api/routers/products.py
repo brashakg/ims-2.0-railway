@@ -2069,6 +2069,30 @@ async def get_brand_options(
         return {"brands": []}
 
 
+@router.get("/website-verdict")
+async def get_website_verdict(
+    brand: str = "",
+    current_user: dict = Depends(get_current_user),
+):
+    """Whether a product of this brand goes to the website, and why not: THE
+    push gate's own answer (shopify_push.product_push_refusal: a push-locked
+    brand, or the brand's Settings > Brand Master default, owner D6), so the
+    Add/Edit form's read-only line can never disagree with the push. The form
+    works nothing out itself.
+
+    Shape: {"brand": str, "online": bool, "reason": str|None}. Fail-closed
+    like the gate: no db -> online false, reason says Brand Master could not
+    be read."""
+    from ..dependencies import get_db as _get_db_dep
+    from ..services.shopify_push import product_push_refusal
+
+    db = _get_db_dep()
+    if db is not None and not getattr(db, "is_connected", False):
+        db = None
+    reason = product_push_refusal(db, {"brand": brand})
+    return {"brand": brand, "online": reason is None, "reason": reason}
+
+
 # NOTE: registered here (with the other literal /products/* paths like
 # /brand-options and /generate-description) so it stays ABOVE the
 # GET /products/{product_id} catch-all -- the literal path must win.

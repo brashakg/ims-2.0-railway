@@ -261,7 +261,9 @@ def test_rows_endpoint_assembles_and_surfaces_push_lock(monkeypatch):
     from api.services import catalog_dictionary
 
     monkeypatch.setattr(
-        catalog_dictionary, "load_brand_sync_default", lambda db, brand: brand != "Carrera"
+        catalog_dictionary,
+        "brand_website_refusal",
+        lambda db, brand: "brand 'Carrera' is off" if brand == "Carrera" else None,
     )
     out = _run(
         bdr.buy_desk_rows(store_id=None, limit=200, skip=0, current_user=_VIEWER)
@@ -270,9 +272,11 @@ def test_rows_endpoint_assembles_and_surfaces_push_lock(monkeypatch):
     by_id = {r["product_id"]: r for r in out["rows"]}
     assert by_id["P1"]["ecom_state"] == bd.ECOM_NOT_LISTED
     assert by_id["P2"]["ecom_state"] == bd.ECOM_PUSH_LOCKED
+    # A push-locked brand says so; Brand Master is not blamed for it.
+    assert by_id["P2"]["ecom_note"] == "Not for the website: locked"
     # Queued with a photo, but the gate refuses its brand: Not for website.
     assert by_id["P3"]["ecom_state"] == bd.ECOM_PUSH_LOCKED
-    assert by_id["P3"]["ecom_note"] is None
+    assert by_id["P3"]["ecom_note"] == "Not for the website: brand 'Carrera' is off"
     # LIVE on Shopify: never "Not for website" on a listing that still sells;
     # a plain note says its price and images no longer sync.
     assert by_id["P4"]["ecom_state"] == bd.ECOM_LIVE

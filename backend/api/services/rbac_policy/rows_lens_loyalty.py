@@ -80,6 +80,13 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/products/brand-options",
         "allowed": "AUTHENTICATED",
     },
+    # The Add/Edit form's read-only website line: the push gate's verdict for
+    # a brand (read-only, like brand-options).
+    {
+        "method": "GET",
+        "path": "/api/v1/products/website-verdict",
+        "allowed": "AUTHENTICATED",
+    },
     # Live "similar products" strip in the Add-Product form (dup-detect
     # Phase 2). Read-only hint any authenticated catalog operator can use;
     # mirrors GET /api/v1/products.
