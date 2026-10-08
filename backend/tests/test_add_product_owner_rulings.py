@@ -5,10 +5,10 @@ the owner set; the `guard` tests pin what the fix must not break.
 
 F12 / D6  The brand default ALWAYS decides whether a product goes to the
           website, read LIVE: shopify_push.product_push_refusal (through
-          catalog_dictionary.load_brand_sync_default) gates the product push,
+          catalog_dictionary.brand_website_refusal) gates the product push,
           the price push, the image push and the push-all queue. No product
           stores a copy (a stored flag went stale after a brand edit or a Brand
-          Master change).
+          Master change). The Add/Edit form shows that gate's verdict and reason.
 F13 / D5  New products get a readable SKU, category-brand-model-colour-size,
           e.g. FR-CARRERA-CA8895-807-54, from product_master.build_sku -- the
           one minter every door and POST /products/sku-preview use. Existing
@@ -586,6 +586,31 @@ def test_f13_guard_existing_sku_never_changes_on_edit():
     )
     after = repo.find_by_id("P-OLD")
     assert after["mrp"] == 9500.0  # the edit really landed
+    assert after["sku"] == "SGRAYBANRB3016001/58"
+
+
+def test_f13_guard_existing_sku_never_changes_on_the_edit_form_save(monkeypatch):
+    """The Edit form saves through PUT /products/{id}, not update_product: an
+    identity edit there keeps the old SKU too."""
+    repo = ProductRepository(StrictCollection("products"))
+    repo.collection.insert_one({
+        "product_id": "P-OLD", "sku": "SGRAYBANRB3016001/58", "category": "SUNGLASS",
+        "brand": "Ray-Ban", "model": "RB3016", "color": "001/58", "mrp": 9000.0,
+        "offer_price": 9000.0, "hsn_code": "900410", "gst_rate": 18.0,
+        "attributes": {"brand_name": "Ray-Ban", "model_no": "RB3016", "colour_code": "001/58"},
+        "is_active": True,
+    })
+    monkeypatch.setattr(prod_router, "get_product_repository", lambda: repo)
+    monkeypatch.setattr(deps, "get_db", lambda: _db())
+    monkeypatch.setattr(deps, "get_audit_repository", lambda: None)
+    _run(prod_router.update_product(
+        "P-OLD",
+        prod_router.ProductUpdate(model="RB3025", color="901/58", mrp=9500.0,
+                                  attributes={"model_no": "RB3025", "colour_code": "901/58"}),
+        _ADMIN,
+    ))
+    after = repo.find_by_id("P-OLD")
+    assert (after["mrp"], after["model"]) == (9500.0, "RB3025")  # the edit really landed
     assert after["sku"] == "SGRAYBANRB3016001/58"
 
 
