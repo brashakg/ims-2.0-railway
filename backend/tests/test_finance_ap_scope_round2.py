@@ -476,16 +476,12 @@ def test_a_post_dated_cheque_is_paid_on_its_day_and_not_before(world):
     assert report["totals"]["paid"] == pytest.approx(PUNE_GROSS_OCT + 500.0)
 
 
-@pytest.mark.parametrize(
-    "user",
-    [ADMIN, _user("ACCOUNTANT")],
-    ids=["ADMIN", "ACCOUNTANT with no shop"],
-)
-def test_the_cash_flow_org_view_pays_out_the_ledgers_cash(world, user):
-    """/finance/cash-flow's org view: October's supplier cash -- not the
-    post-dated cheque, not the transfer mirror's 3150, not 30 September's 200
-    (IST midnight of the 1st is 30 Sep in UTC: the old bound's day)."""
-    body = world.ok("/finance/cash-flow", user)
+def test_the_cash_flow_org_view_pays_out_the_ledgers_cash(world):
+    """/finance/cash-flow's org view (an admin's: no shop asked): October's
+    supplier cash -- not the post-dated cheque, not the transfer mirror's
+    3150, not 30 September's 200 (IST midnight of the 1st is 30 Sep in UTC:
+    the old bound's day)."""
+    body = world.ok("/finance/cash-flow", ADMIN)
     assert body["vendor_payment_outflow"] == pytest.approx(ALL_CASH_OCT)
     assert body["outflows"] == pytest.approx(
         body["expense_outflow"] + body["purchase_outflow"] + ALL_CASH_OCT

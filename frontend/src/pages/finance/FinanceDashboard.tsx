@@ -10,6 +10,7 @@ import clsx from 'clsx';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { PAYABLES_ROLES } from '../../components/common/CostCell';
+import { PurchaseShopGate } from '../purchase/purchaseShop';
 
 import type { TabType } from './financeTypes';
 import type {
@@ -275,12 +276,8 @@ export default function FinanceDashboard() {
       setBudgetRestricted(
         bud.status === 'fulfilled' && !!(bud.value as any)?.categories_partially_restricted,
       );
-      // /cash-flow's org view also leaves supplier payments out of "Total
-      // outflows" for anyone outside PAYABLES_ROLES, and says so with its own
-      // flag (vendor_payments_restricted): the same short total, the same notice.
       setCashFlowRestricted(
-        cf.status === 'fulfilled' &&
-          !!((cf.value as any)?.expenses_partially_restricted || (cf.value as any)?.vendor_payments_restricted),
+        cf.status === 'fulfilled' && !!(cf.value as any)?.expenses_partially_restricted,
       );
 
       // Reflect the real period-lock state for the selected month.
@@ -601,7 +598,9 @@ export default function FinanceDashboard() {
             />
           )}
           {activeTab === 'cash-flow' && (
-            <>
+            // R3: the server refuses a non-admin login with no shop; say so
+            // rather than show its refused read as a month of Rs 0.
+            <PurchaseShopGate>
               {/* "Total outflows" below is short by whatever was withheld from
                   this role. Say so above the number, not after it. */}
               <RestrictedTotalsNotice
@@ -610,7 +609,7 @@ export default function FinanceDashboard() {
                 className="mb-4"
               />
               <CashFlowPanel cashFlow={cashFlow} />
-            </>
+            </PurchaseShopGate>
           )}
           {activeTab === 'period' && (
             <PeriodManagement
