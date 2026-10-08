@@ -121,8 +121,8 @@ def _store_scope_filter(current_user: dict):
     resolves to the single ``active_store_id``, so an AREA_MANAGER holding
     three stores was silently narrowed to one; and when the value is None --
     ordinary for a store-scoped account with an empty ``store_ids``, since
-    ``auth._default_active_store`` only back-fills SUPERADMIN / ADMIN /
-    AREA_MANAGER -- the truthiness test dropped the filter ENTIRELY and
+    ``auth._default_active_store`` only back-fills SUPERADMIN / ADMIN --
+    the truthiness test dropped the filter ENTIRELY and
     returned every store's records.
 
     An empty reach now yields ``{"$in": []}``, which matches NOTHING: a
