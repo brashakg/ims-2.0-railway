@@ -777,3 +777,33 @@ class TestSearchFindsTheMakersCode:
         assert repo.count_search_products(_VALID_A) == 1
         found = asyncio.run(list_products(search=_VALID_A))["products"]
         assert [p["product_id"] for p in found] == [pid]
+
+
+# The GTIN is stored SANITISED at every write door (digits only), so a scan --
+# an exact match -- finds a code typed with spaces or hyphens.
+_SPACED = ("8 056597 720373", "805-6597-72037-3")
+_EAN_SANITISED = "8056597720373"
+
+
+class TestEveryDoorStoresTheGtinDigitsOnly:
+    @pytest.mark.parametrize("typed", _SPACED)
+    def test_the_create_door_stores_digits_and_a_scan_finds_it(self, mock_db, typed):
+        from api.routers.products import create_product, ProductCreate
+
+        body = ProductCreate(
+            sku="SAN-C", category="FRAME", brand="B", model="M-SAN-C",
+            color="Black", mrp=1000.0, offer_price=900.0,
+            attributes={"gtin": typed},
+        )
+        pid = asyncio.run(create_product(body, _ADMIN))["product_id"]
+        spine = mock_db["products"].find_one({"product_id": pid})
+        assert spine["attributes"]["gtin"] == _EAN_SANITISED
+        repo = ProductRepository(mock_db["products"])
+        assert repo.find_by_barcode(_EAN_SANITISED)["product_id"] == pid
+
+    @pytest.mark.parametrize("typed", _SPACED)
+    def test_the_edit_door_stores_gtin_and_upc_digits_only(self, mock_db, typed):
+        pid = _create("SAN-E")["product_id"]
+        _update(pid, attributes={"gtin": typed, "upc": typed})
+        attrs = mock_db["products"].find_one({"product_id": pid})["attributes"]
+        assert (attrs["gtin"], attrs["upc"]) == (_EAN_SANITISED, _EAN_SANITISED)

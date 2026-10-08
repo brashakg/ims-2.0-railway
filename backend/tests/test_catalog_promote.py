@@ -596,3 +596,14 @@ def test_an_imported_twin_approves_and_re_saves_its_own_gtin(shared_db):
     asyncio.run(catalog_mod.update_catalog_product(pid, inp, _user()))
     assert shared_db.catalog_products.find_one({"id": pid})["attributes"]["colour_code"] == "RED"
     assert _promote(pid)["pos_ready"] is True
+
+
+@pytest.mark.parametrize("typed", ["8 056597 720373", "805-6597-72037-3"])
+def test_an_imported_gtin_is_stored_digits_only_and_a_scan_finds_it(shared_db, typed):
+    """A GTIN is stored sanitised at every write door: a scan (an exact match)
+    of 8056597720373 missed a twin imported as '805-6597-72037-3'."""
+    assert _import_rows(typed)["created_count"] == 1
+    twin = shared_db.catalog_products.find_one({})
+    assert twin["attributes"]["gtin"] == "8056597720373"
+    repo = ProductRepository(shared_db.products)
+    assert repo.find_twin_by_barcode("8056597720373")["id"] == twin["id"]

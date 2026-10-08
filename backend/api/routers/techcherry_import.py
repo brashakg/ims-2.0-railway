@@ -37,7 +37,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from .auth import get_current_user
-from ..services.gtin import classify_gtin, gtin_spellings, normalise_candidate
+from ..services.gtin import gtin_spellings, sanitise_gtin
 from ..services.phone import normalize_indian_mobile
 from ..services.product_master import ProductMasterError, assert_gtin_free
 
@@ -290,8 +290,8 @@ def _map_product(
     # services/gtin.py). TechCherry's codes are mostly its own ('2510647'), so
     # one becomes the barcode only when it IS a GTIN. Omitted otherwise, never
     # "", so the unique sparse index on products.barcode is not hit.
-    if barcode and not classify_gtin(barcode):
-        doc["barcode"] = normalise_candidate(barcode)
+    if gtin := sanitise_gtin(barcode):
+        doc["barcode"] = gtin
     return doc
 
 

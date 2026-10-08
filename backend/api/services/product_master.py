@@ -58,8 +58,8 @@ from .gst_rates import (
 from .gtin import (
     MANUFACTURER_BARCODE_ATTRIBUTES,
     classify_gtin,
-    is_valid_gtin,
     normalise_candidate,
+    sanitise_gtin,
 )
 from .pricing_caps import evaluate_offer_price
 from .product_naming import (
@@ -1326,8 +1326,9 @@ def _guard_gtin_attribute(
     value and fixes or clears it -- silently discarding what someone just typed
     would be worse. DRAFT/IMPORT (bulk + clone doors): drop the value and log
     it, so one bad cell never blocks a 2,000-row import while still never
-    persisting garbage. Empty stays empty in both modes. A valid GTIN is kept
-    bare ('4006381 333931' -> '4006381333931'), so one GTIN is one value.
+    persisting garbage. Empty stays empty in both modes. A valid GTIN is stored
+    SANITISED, digits only ('8 056597 720373', '805-6597-72037-3' ->
+    '8056597720373'), so one GTIN is one value and a scan finds it.
 
     The `upc` attribute ('UPC (mfr)') is the same kind of code -- a UPC is a
     GTIN-12 -- and reaches Shopify as the ims.upc metafield and the
@@ -1338,8 +1339,9 @@ def _guard_gtin_attribute(
         raw = attrs.get(key)
         if not normalise_candidate(raw):
             continue
-        if is_valid_gtin(raw):
-            attrs = {**attrs, key: normalise_candidate(raw)}
+        clean = sanitise_gtin(raw)
+        if clean:
+            attrs = {**attrs, key: clean}
             continue
         reason = classify_gtin(raw)
         if strict:

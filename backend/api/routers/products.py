@@ -260,7 +260,7 @@ def _validate_product_barcode_or_400(barcode, repo, this_product_id: str):
         # Explicit clear -- nothing to validate.
         return None
 
-    from ..services.gtin import classify_gtin, normalise_candidate
+    from ..services.gtin import classify_gtin, sanitise_gtin
 
     reason = classify_gtin(code)
     if reason:
@@ -273,7 +273,7 @@ def _validate_product_barcode_or_400(barcode, repo, this_product_id: str):
                 "belong on units, not here."
             ),
         )
-    code = normalise_candidate(code)
+    code = sanitise_gtin(code)
     _refuse_barcode_held_by_another_product(code, repo, this_product_id)
     return code
 
