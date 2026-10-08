@@ -586,6 +586,35 @@ def test_f13_the_key_rebuild_tool_writes_the_create_door_key(door):
     _dup(door, _form_post("LS", _CRIZAL))
 
 
+def test_f13_an_old_std_lens_row_is_the_lens_entered_today(door):
+    """main's form sent model 'STD' for a lens with no sub-brand, and the door
+    folded it into model_no/model_name. The key rebuild and the create door
+    both read that filler as no model, so the same Hoya HC 1.56 entered today
+    is the 409 rescue onto the old row, never a silent second product."""
+    from scripts import migrate_identity_key_tighten as mig
+
+    door.repo.collection.insert_one({
+        "product_id": "P-LEGACY", "sku": "LSHOYASTDHC156", "category": "OPTICAL_LENS",
+        "brand": "Hoya", "model": "STD", "identity_key": "hoya|std|", "is_active": True,
+        "mrp": 1000.0, "offer_price": 900.0,
+        "attributes": {"brand_name": "Hoya", "model_no": "STD", "model_name": "STD",
+                       "coating": "HC", "index": "1.56"},
+    })
+    stats = mig.run(door.repo.collection, apply=True)
+    assert (stats["rewritten"], stats["collisions"]) == (1, 0)
+    assert door.repo.find_by_id("P-LEGACY")["identity_key"] == "hoya|hc||156"
+    hoya = {"brand_name": "Hoya", "index": "1.56", "coating": "HC"}
+    assert _dup(door, _form_post("LS", hoya))["sku"] == "LSHOYASTDHC156"
+    # A lens re-catalogued from that old row (clone) mints today's SKU.
+    assert pm.build_sku("LS", dict(hoya, model_no="STD")) == "LS-HOYA-HC-1.56"
+    # ... and its sub-brand, if it has one, still names it.
+    assert pm.identity_parts(dict(hoya, model_no="STD", subbrand="Nulux"))[1] == "Nulux"
+    # Guard: only a lens's filler. A coloured product's model is its model.
+    key = pm.compute_identity_key(*pm.identity_parts(
+        {"brand_name": "Acme", "model_no": "STD", "colour_code": "01"}))
+    assert key == "acme|std|01"
+
+
 def test_f13_guard_a_clash_still_gets_a_unique_sku(door):
     first = door(_form(brand="Carrera", model="CA8895", color="807"))
     # Same identity is a 409 at this door; a different size key is a new row

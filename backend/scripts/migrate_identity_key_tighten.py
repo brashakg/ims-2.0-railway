@@ -49,7 +49,9 @@ def _identity_of(doc: Dict[str, Any]):
     copy here), read from the row's attributes. The top-level identity
     columns only fill in what a row's attributes lack (an older row with
     none). So an Optical Lens keeps its sub-brand, coating and index:
-    Crizal 1.56 HC and Crizal 1.67 HC are two products here too.
+    Crizal 1.56 HC and Crizal 1.67 HC are two products here too, and an old
+    lens row whose model is the former form's 'STD' filler gets the key the
+    same lens entered today gets (identity_parts reads 'STD' as no model).
     """
     attrs = doc.get("attributes") if isinstance(doc.get("attributes"), dict) else {}
     top = {k: doc.get(k) for k in (

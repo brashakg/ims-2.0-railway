@@ -1056,10 +1056,15 @@ def identity_parts(attributes: Dict[str, Any]) -> Tuple[Any, Any, Any, Any]:
     its coating and index stand in (Crizal 1.56 HC and Crizal 1.67 HC are two
     products; the same Crizal 1.56 HC twice is one). A lens with no sub-brand
     is the brand's own line: its coating takes the model's place, so Hoya HC
-    1.56 saved twice is still one product and the SKU mints no filler."""
+    1.56 saved twice is still one product and the SKU mints no filler. The
+    old form's filler model 'STD' (a lens with no sub-brand, stored in
+    model_no/model_name) is no model, so an old row and the same lens entered
+    today get one key."""
     ids = _derive_brand_model_color_size(attributes)
     a = attributes or {}
     model, colour = ids["model"], ids["color"] or a.get("coating")
+    if not ids["color"] and str(model or "").strip().upper() == "STD":
+        model = a.get("subbrand")
     if not model and not ids["color"]:
         model, colour = colour, None
     return (ids["brand"], model, colour, ids["size"] or a.get("index"))
