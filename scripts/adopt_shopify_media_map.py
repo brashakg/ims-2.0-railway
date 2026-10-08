@@ -174,15 +174,14 @@ os.environ.setdefault("ENVIRONMENT", "script")
 
 from agents.nexus_providers import _as_shopify_gid  # noqa: E402
 from api.services import product_master as pm  # noqa: E402
-from api.services import shopify_push  # noqa: E402
 from api.services.shopify_push.media import (  # noqa: E402
     _file_name,
+    _listing_media,
     _writeback_media_map,
     match_media_to_photos,
     owned_media,
     product_photo_urls,
 )
-from api.services.shopify_push.queries import _PRODUCT_MEDIA_QUERY  # noqa: E402
 from database.repositories.product_repository import ProductRepository  # noqa: E402
 
 ACTOR = "system:adopt_shopify_media_map"
@@ -236,23 +235,18 @@ def _row(product_id: str) -> Dict[str, Any]:
 
 
 async def _media_nodes(db, gid: str, row: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
-    """The product's media nodes on Shopify -- a QUERY. None (with row.status
-    set) on a transport failure, a GraphQL error body or a missing product."""
+    """The product's media nodes on Shopify -- a QUERY through the one reader
+    (media._listing_media). None (with row.status set) on a transport failure,
+    a GraphQL error body, a malformed answer or a missing product."""
     try:
-        body = await shopify_push._graphql(db, _PRODUCT_MEDIA_QUERY, {"id": gid})
+        nodes = await _listing_media(db, gid)
     except Exception as exc:  # noqa: BLE001 -- retries spent / non-retryable 4xx / connect error
         row["status"] = "graphql_error"
         row["error"] = _redact(exc)
         return None
-    if body.get("errors"):
-        row["status"] = "graphql_error"
-        row["error"] = str(body["errors"])[:300]
-        return None
-    product = (body.get("data") or {}).get("product")
-    if product is None:
+    if nodes is None:
         row["status"] = "shopify_missing"
-        return None
-    return (product.get("media") or {}).get("nodes") or []
+    return nodes
 
 
 async def inspect(db, product_id: str, rules: tuple = ("exact",)) -> Dict[str, Any]:

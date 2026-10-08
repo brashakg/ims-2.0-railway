@@ -2114,9 +2114,12 @@ PRODUCT_IMAGE_SCHEMA = {
         "reviewed_by": {"bsonType": ["string", "null"]},   # who approved/rejected
         "approved_at": {"bsonType": ["date", "null"]},
         # Shopify-side identity (set on the Phase-5 push; null while PUSH-DARK):
-        # the media IMS put up for this row and the url it was made from.
+        # the media on the listing for this row, the url IMS uploaded it from
+        # (null when IMS found it there and cannot be sure it uploaded it), and
+        # the url IMS last sent (written before the attach).
         "shopify_image_id": {"bsonType": ["string", "null"]},
         "shopify_image_src": {"bsonType": ["string", "null"]},
+        "shopify_image_sent": {"bsonType": ["string", "null"]},
         "created_at": {"bsonType": "date"},
         "updated_at": {"bsonType": "date"},
     },

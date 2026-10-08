@@ -9,13 +9,17 @@ through ``shopify_push.push_image`` over the mocked transport (the package's
      the press reads the listing and skips when IMS's own copy is already
      there: the media id the row recorded, else the IMS file name (the CDN
      copy keeps the source file name -- measured on production 2026-09-06).
+     One media, one owner: a media the product's own photos or another
+     design row record is never this row's copy, whatever its name.
   2. Replacing a photo swaps it: the new one goes up first, and the old one
-     comes down only once the new one is confirmed on the listing. A failed
-     upload leaves the old one up.
+     comes down only once a read shows the new one READY on the listing. A
+     failed or unfinished upload leaves the old one up. Only a photo IMS
+     uploaded ever comes down.
   3. (tests/test_image_editing.py) a re-edit gets a new file name.
   4. When IMS cannot tell -- the listing read fails, a photo is still being
-     processed, two copies look alike -- it changes nothing and says so. It
-     never deletes a photo another part of IMS recorded.
+     processed, two copies look alike, the attach got no answer -- it changes
+     nothing more and says so in plain words. It never deletes a photo
+     another part of IMS recorded.
 
 The production shape the fake keeps: ``image.url`` is null until a media is
 READY, and the CDN url carries the source file name plus ``?v=``.
@@ -85,6 +89,12 @@ class _Listing:
 
     def ids(self):
         return [n["id"] for n in self.nodes]
+
+    def fail(self, mid):
+        """Shopify gives up fetching one media."""
+        for n in self.nodes:
+            if n["id"] == mid:
+                n["status"], n["image"] = "FAILED", None
 
     def sent(self, op):
         return [v for q, v in self.calls if op in q]
@@ -174,11 +184,13 @@ def _mutations(listing):
 
 def test_pressing_publish_twice_puts_the_photo_up_once(monkeypatch):
     listing = _Listing(_ready(_m(1), OWN))
-    db = _world(monkeypatch, listing)
+    db = _world(monkeypatch, listing, alt_text="Aviator, gold, front")
 
     first = _press(db)
     assert (first.ok, first.action, first.shopify_id) == (True, "create", _m(100))
     assert _row(db) == (_m(100), A)
+    sent = listing.sent("productCreateMedia")[0]["media"]
+    assert sent == [{"originalSource": A, "alt": "Aviator, gold, front", "mediaContentType": "IMAGE"}]
 
     second = _press(db)
     assert (second.ok, second.action, second.shopify_id) == (True, "noop", _m(100))
@@ -193,7 +205,10 @@ def test_a_lost_answer_is_found_by_its_file_name_and_never_sent_twice(monkeypatc
     listing = _Listing(_ready(_m(1), OWN))
     db = _world(monkeypatch, listing)
     listing.answer = "lost"
-    assert _press(db).ok is False
+    lost = _press(db)
+    assert lost.ok is False
+    assert lost.error.startswith("IMS could not tell whether the photo went up")
+    assert "Press Publish again" in lost.error and "ReadTimeout" not in lost.error
     assert _row(db) == (None, None)
 
     listing.answer = "ok"
@@ -276,7 +291,13 @@ def test_a_failed_upload_leaves_the_old_photo_up(monkeypatch, answer):
     listing, db = _pushed(monkeypatch)
     listing.answer = answer
     res = _press(db)
-    assert res.ok is False and res.error
+    assert res.ok is False
+    said = {
+        "refused": "IMS could not tell whether the photo went up",
+        "failed": "The photo did not go up: Shopify could not fetch the photograph",
+    }[answer]
+    assert res.error.startswith(said)
+    assert res.error.endswith(" The old photo stays up.")
     assert listing.sent("productDeleteMedia") == []
     assert _m(100) in listing.ids()
     assert _row(db) == (_m(100), A)
@@ -287,6 +308,7 @@ def test_the_old_photo_stays_until_the_new_one_is_confirmed_on_the_listing(monke
     listing.fail_reads = {2}  # the read after the upload
     first = _press(db)
     assert first.ok is False
+    assert first.error == shopify_push.media._NOT_CONFIRMED
     assert listing.sent("productDeleteMedia") == []
     assert _m(100) in listing.ids() and _m(101) in listing.ids()
     assert _row(db) == (_m(100), A)
@@ -322,19 +344,165 @@ def test_a_recorded_photo_shopify_could_not_fetch_is_put_up_again(monkeypatch):
     assert _row(db) == (_m(101), A)
 
 
-def test_a_photo_another_part_of_ims_records_is_never_taken_down(monkeypatch):
-    """The row's old photo is also the product's own photo (the product push
-    records it). Replacing the row's photo never takes it down."""
-    listing = _Listing(_ready(_m(1), OWN))
-    db = _world(monkeypatch, listing, url=OWN)
-    assert (_press(db).action, _row(db)) == ("noop", (_m(1), OWN))
-    db["product_images"].update_one({"image_id": "I1"}, {"$set": {"url": B}})
+def test_a_new_photo_still_processing_never_takes_the_old_one_down(monkeypatch):
+    """Production: the read right after the attach almost always shows the new
+    media PROCESSING (image.url null). The old photo stays until a read shows
+    the new one READY, so when Shopify then fails to fetch the new one the
+    listing still has the old one."""
+    listing, db = _pushed(monkeypatch)
+    listing.lands = "PROCESSING"
+    first = _press(db)
+    assert (first.ok, first.shopify_id) == (False, _m(101))
+    assert first.error == shopify_push.media._NOT_CONFIRMED
+    assert "the old photo stays up" in first.error and "Press Publish again" in first.error
+    assert listing.sent("productDeleteMedia") == []
+    assert _row(db) == (_m(100), A)
 
+    held = _press(db)  # still processing: nothing sent, nothing taken down
+    assert held.ok is False and "still processing" in held.error
+    assert len(listing.sent("productCreateMedia")) == 1
+
+    listing.fail(_m(101))  # Shopify could not fetch the new photo
+    assert _m(100) in listing.ids()
+    listing.lands = "READY"
+    again = _press(db)  # B goes up again; the swap finishes on a READY copy
+    assert (again.ok, again.action, again.shopify_id) == (True, "update", _m(102))
+    assert listing.sent("productDeleteMedia")[0]["mediaIds"] == [_m(100)]
+    assert _row(db) == (_m(102), B)
+
+
+def test_an_unfinished_swap_finishes_once_the_new_photo_is_ready(monkeypatch):
+    """The next press finds the new copy by its file name once READY, takes
+    the old one down, and records the new one as IMS's own upload (IMS sent
+    that url), so a later replacement takes it down too."""
+    listing, db = _pushed(monkeypatch)
+    listing.lands = "PROCESSING"
+    assert _press(db).ok is False
+    listing.ready()
+    done = _press(db)
+    assert (done.ok, done.action, done.shopify_id) == (True, "update", _m(101))
+    assert listing.ids() == [_m(1), _m(50), _m(101)]
+    assert _row(db) == (_m(101), B)
+
+    listing.lands = "READY"
+    db["product_images"].update_one(
+        {"image_id": "I1"}, {"$set": {"url": "https://store.example.com/P1/c0ffee77.png"}}
+    )
+    later = _press(db)
+    assert (later.ok, later.action, later.shopify_id) == (True, "update", _m(102))
+    assert listing.ids() == [_m(1), _m(50), _m(102)]
+
+
+@pytest.mark.parametrize("url", [OWN, "https://store.example.com/P1/front.jpg"])
+def test_the_products_own_photo_is_never_taken_for_the_design_photo(monkeypatch, url):
+    """The product push records media 1 (OWN). A design row with that very url,
+    or a different picture with the same file name, gets its own copy: it is
+    never reported as already there, and a catalogue photo change (which may
+    delete media 1) can never take the design photo down."""
+    listing = _Listing(_ready(_m(1), OWN))
+    db = _world(monkeypatch, listing, url=url)
     res = _press(db)
-    assert (res.ok, res.shopify_id) == (True, _m(100))
+    assert (res.ok, res.action, res.shopify_id) == (True, "create", _m(100))
+    assert [v["media"][0]["originalSource"] for v in listing.sent("productCreateMedia")] == [url]
+    assert _row(db) == (_m(100), url)
+
+    listing.nodes = [n for n in listing.nodes if n["id"] != _m(1)]  # the catalogue swaps its photo
+    assert (_press(db).action, listing.ids()) == ("noop", [_m(100)])
+
+
+def test_another_design_rows_photo_is_never_taken_for_this_one(monkeypatch):
+    """I1 is up as media 100. I2 is a different picture with the same file
+    name: it is never reported as already there but gets its own copy, so no
+    two rows record one media and replacing I1 later takes I1's photo down."""
+    listing = _Listing(_ready(_m(1), OWN))
+    db = _world(monkeypatch, listing)
+    db["product_images"].insert_one(
+        {
+            "image_id": "I2",
+            "product_id": "P1",
+            "url": "https://other.example.com/shoot/" + A.rsplit("/", 1)[-1],
+            "status": "APPROVED",
+            "shopify_image_id": None,
+        }
+    )
+    assert _press(db, "I1").shopify_id == _m(100)
+    second = _press(db, "I2")
+    assert (second.ok, second.action, second.shopify_id) == (True, "create", _m(101))
+    assert _row(db, "I2")[0] == _m(101)
+
+    db["product_images"].update_one({"image_id": "I1"}, {"$set": {"url": B}})
+    swap = _press(db, "I1")
+    assert (swap.ok, swap.action, swap.shopify_id) == (True, "update", _m(102))
+    assert listing.ids() == [_m(1), _m(101), _m(102)]
+
+
+@pytest.mark.parametrize(
+    "new_url",
+    [
+        "https://store.example.com/P1/9a8b7c6d.png",  # I2's media carries this name
+        "https://dropbox.example.com/reshoot/front.jpg",  # the product's own photo does
+    ],
+)
+def test_a_replacement_named_like_another_records_photo_still_goes_up(monkeypatch, new_url):
+    """The new url shares a file name with a media another IMS record owns:
+    that media is not the new photo, so the new photo is sent, and only the
+    row's own old photo comes down."""
+    listing, db = _pushed(monkeypatch)
+    sib = "https://other.example.com/x/9a8b7c6d.png"
+    listing.nodes.append(_ready(_m(200), sib))
+    db["product_images"].insert_one(
+        {
+            "image_id": "I2",
+            "product_id": "P1",
+            "url": sib,
+            "status": "APPROVED",
+            "shopify_image_id": _m(200),
+            "shopify_image_src": sib,
+        }
+    )
+    db["product_images"].update_one({"image_id": "I1"}, {"$set": {"url": new_url}})
+    res = _press(db)
+    assert (res.ok, res.action, res.shopify_id) == (True, "update", _m(101))
+    assert [v["media"][0]["originalSource"] for v in listing.sent("productCreateMedia")] == [new_url]
+    assert listing.sent("productDeleteMedia")[0]["mediaIds"] == [_m(100)]
+    assert listing.ids() == [_m(1), _m(50), _m(200), _m(101)]
+    assert _row(db) == (_m(101), new_url)
+
+
+def test_a_photo_another_part_of_ims_records_is_never_taken_down(monkeypatch):
+    """The row's record points at the product's own photo (media 1, which the
+    product push records). Replacing the row's photo puts up its own copy and
+    never takes media 1 down."""
+    listing = _Listing(_ready(_m(1), OWN))
+    db = _world(monkeypatch, listing, url=B, shopify_image_id=_m(1), shopify_image_src=OWN)
+    res = _press(db)
+    assert (res.ok, res.action, res.shopify_id) == (True, "create", _m(100))
     assert listing.sent("productDeleteMedia") == []
     assert listing.ids() == [_m(1), _m(100)]
     assert _row(db) == (_m(100), B)
+
+
+def test_a_photo_found_by_file_name_alone_is_never_taken_down(monkeypatch):
+    """The row's url is a person's own upload on the listing (media 50, put up
+    in the Shopify admin). The press finds it there and sends nothing, but a
+    file name does not prove IMS uploaded it: replacing the row's photo later
+    puts the new one up, keeps media 50 and says so."""
+    listing = _Listing(_ready(_m(1), OWN), {"id": _m(50), "status": "READY", "image": {"url": HAND}})
+    db = _world(monkeypatch, listing, url=HAND, source="SHOPIFY")
+    found = _press(db)
+    assert (found.ok, found.action, found.shopify_id) == (True, "noop", _m(50))
+    assert listing.sent("productCreateMedia") == []
+    assert _row(db) == (_m(50), None)
+
+    db["product_images"].update_one({"image_id": "I1"}, {"$set": {"url": B}})
+    res = _press(db)
+    assert (res.ok, res.shopify_id) == (False, _m(100))
+    assert res.error == shopify_push.media._OLD_KEPT
+    assert "The old one stays up" in res.error and "Shopify admin" in res.error
+    assert listing.sent("productDeleteMedia") == []
+    assert listing.ids() == [_m(1), _m(50), _m(100)]
+    assert _row(db) == (_m(100), B)
+    assert _press(db).action == "noop"
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +516,7 @@ def test_a_photo_another_part_of_ims_records_is_never_taken_down(monkeypatch):
         "raise",
         {"errors": [{"message": "Internal error"}]},
         {"data": {"product": None}},
+        {"data": {"product": {"id": P_GID, "media": None}}},  # malformed
     ],
 )
 def test_an_unreadable_listing_changes_nothing_and_says_so(monkeypatch, answer):
