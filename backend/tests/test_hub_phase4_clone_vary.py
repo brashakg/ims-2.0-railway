@@ -194,16 +194,20 @@ def test_clone_empty_variation_overrides_nothing():
     assert len(out["created"]) == 0 and len(out["errors"]) == 1
 
 
-def test_clone_never_copies_the_sources_manufacturer_barcodes():
+@pytest.mark.parametrize("gtin_key,upc_key", [("gtin", "upc"), ("GTIN", "Upc")])
+def test_clone_never_copies_the_sources_manufacturer_barcodes(gtin_key, upc_key):
     """A GTIN names ONE trade item: a new SKU never inherits the source's gtin
     / upc (with a GTIN on the source, every variation used to 409 on the
-    one-holder rule). A variation may still carry its own."""
+    one-holder rule). A variation may still carry its own. An old source
+    holding the key in another letter case ('GTIN') is the same barcode: the
+    one-holder check reads only attributes.gtin, so it could not catch a
+    copied 'GTIN' -- the clone must drop every spelling."""
     import mongomock
     from database.repositories.product_repository import ProductRepository
 
     repo = ProductRepository(mongomock.MongoClient().db.products)
     src = _source_frame()
-    src["attributes"].update({"gtin": "4006381333931", "upc": "036000291452"})
+    src["attributes"].update({gtin_key: "4006381333931", upc_key: "036000291452"})
     repo.create(src)
     out = pm.clone_and_vary(
         source_id="SRC-1",
@@ -217,5 +221,6 @@ def test_clone_never_copies_the_sources_manufacturer_barcodes():
         c["attributes"]["colour_code"]: repo.find_one({"product_id": c["product_id"]})["attributes"]
         for c in out["created"]
     }
-    assert "gtin" not in saved["RED"] and "upc" not in saved["RED"]
-    assert saved["BLU"]["gtin"] == "5901234123457" and "upc" not in saved["BLU"]
+    barcode_keys = {c: [k for k in a if k.strip().lower() in ("gtin", "upc")] for c, a in saved.items()}
+    assert barcode_keys == {"RED": [], "BLU": ["gtin"]}
+    assert saved["BLU"]["gtin"] == "5901234123457"
