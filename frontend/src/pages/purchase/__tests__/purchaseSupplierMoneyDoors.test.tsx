@@ -46,6 +46,9 @@ vi.mock('../../../hooks/usePOSQueries', () => ({ useStores: () => ({ data: [] })
 vi.mock('../PurchaseInvoicesSection', () => ({
   PurchaseInvoicesSection: () => <div>INVOICES SECTION</div>,
 }));
+vi.mock('../PurchasesThisMonthSection', () => ({
+  PurchasesThisMonthSection: () => <div>THIS MONTH SECTION</div>,
+}));
 vi.mock('../VendorReturns', () => ({
   VendorReturns: () => <div>VENDOR RETURNS SECTION</div>,
 }));
@@ -104,6 +107,37 @@ describe('Purchase Invoices - supplier bills are the accounts roles only', () =>
       openAt('/purchase/invoices', role);
       expect(await screen.findByText('INVOICES SECTION')).toBeInTheDocument();
       expect(screen.getByRole('link', { name: /Purchase Invoices/ })).toBeInTheDocument();
+    },
+  );
+});
+
+// Purchases this month is supplier money end to end (ordered, billed, paid,
+// owed): its tab and its address are PAYABLES_ROLES', as its API row is.
+describe('Purchases this month - the accounts roles only', () => {
+  it.each([['STORE_MANAGER'], ['AREA_MANAGER']])(
+    '%s: no This month tab, and the address bounces',
+    async (role) => {
+      openAt('/purchase/variance', role);
+      expect(await screen.findByText('VARIANCE SECTION')).toBeInTheDocument();
+      expect(screen.queryByRole('link', { name: /This month/ })).not.toBeInTheDocument();
+    },
+  );
+
+  it.each([['STORE_MANAGER'], ['AREA_MANAGER']])(
+    '%s: /purchase/this-month lands on unauthorized, never the report',
+    async (role) => {
+      openAt('/purchase/this-month', role);
+      expect(await screen.findByText('UNAUTHORIZED')).toBeInTheDocument();
+      expect(screen.queryByText('THIS MONTH SECTION')).not.toBeInTheDocument();
+    },
+  );
+
+  it.each([['ACCOUNTANT'], ['ADMIN'], ['SUPERADMIN']])(
+    '%s: the tab is offered and the report opens',
+    async (role) => {
+      openAt('/purchase/this-month', role);
+      expect(await screen.findByText('THIS MONTH SECTION')).toBeInTheDocument();
+      expect(screen.getByRole('link', { name: /This month/ })).toBeInTheDocument();
     },
   );
 });
