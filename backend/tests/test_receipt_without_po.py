@@ -619,6 +619,25 @@ def test_c7_a_bill_number_is_one_bill_per_financial_year(world):
     assert http.post("/vendors/grn", json=same_year).status_code == 409
     next_year = _walk_in_body(world, vendor_invoice_no="1", vendor_invoice_date="2027-04-01")
     assert http.post("/vendors/grn", json=next_year).status_code == 201, "a new year's bill 1"
+    # A supplier picked from the list, and a receipt written before the key
+    # carried the year (found through the supplier, not the key): the same.
+    world["db"].grns.insert_one(
+        {
+            "grn_id": "GRN-LEGACY-7",
+            "grn_subtype": "NO_PO",
+            "vendor_id": DEALER,
+            "store_id": STORE,
+            "status": "ACCEPTED",
+            "vendor_invoice_no": "7",
+            "vendor_invoice_no_norm": "7",
+            "vendor_invoice_date": "2026-09-01",
+            "created_at": "2026-09-01T10:00:00",
+        }
+    )
+    picked = _no_po_body(world, vendor_invoice_no="7", vendor_invoice_date="2026-10-01")
+    assert http.post("/vendors/grn", json=picked).status_code == 409
+    picked = _no_po_body(world, vendor_invoice_no="7", vendor_invoice_date="2027-04-01")
+    assert http.post("/vendors/grn", json=picked).status_code == 201
 
 
 def test_c7_a_po_supplier_reuses_its_serial_next_year_through_the_index(world):

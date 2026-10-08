@@ -219,8 +219,8 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
             raise HTTPException(
                 status_code=422,
                 detail=(
-                    "That supplier is not on file - pick one from the list, "
-                    "or type the dealer's name."
+                    "That supplier is not on file - pick one from the "
+                    "supplier list."
                 ),
             )
 

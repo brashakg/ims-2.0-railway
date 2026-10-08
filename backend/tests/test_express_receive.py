@@ -397,9 +397,12 @@ def test_express_zero_received_is_not_clean(monkeypatch):
     _assert_nothing_persisted(grn_repo, stock_repo)
 
 
-def test_express_rejects_delivery_challan(monkeypatch):
+@pytest.mark.parametrize("subtype", ["DELIVERY_CHALLAN", "NO_PO"])
+def test_express_rejects_delivery_challan(monkeypatch, subtype):
+    """Only a PO receipt is express-received: a challan or a buy without a
+    PO (D14) is refused, never quietly posted as a STANDARD receipt."""
     grn_repo, _po, stock_repo, _t = _wire(monkeypatch)
-    body = _body(grn_subtype="DELIVERY_CHALLAN")
+    body = _body(grn_subtype=subtype)
     with pytest.raises(HTTPException) as e:
         _run(body, _user())
     assert e.value.status_code == 400

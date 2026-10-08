@@ -13,7 +13,6 @@ from .models import (
     ExpressGRNCreate,
     GRNCreate,
     GRNItemCreate,
-    GRN_SUBTYPE_DC,
     GRN_SUBTYPE_STANDARD,
 )
 from .grn_create import _create_grn_impl
@@ -50,16 +49,18 @@ async def express_receive_grn(
     void it -- never a silently stranded PENDING GRN.
     """
     # 1) STANDARD-only: a Delivery Challan has no vendor invoice at receipt
-    # time, so there is nothing to draft/match -- express cannot apply.
-    if body.grn_subtype == GRN_SUBTYPE_DC:
+    # time, so there is nothing to draft/match -- express cannot apply; goods
+    # bought without a PO have no order to receive against. An allow-list, so
+    # a receipt kind added later is refused here, never posted as STANDARD.
+    if body.grn_subtype != GRN_SUBTYPE_STANDARD:
         raise HTTPException(
             status_code=400,
             detail={
                 "code": "EXPRESS_STANDARD_ONLY",
                 "message": (
                     "Express receive applies to STANDARD PO-backed receipts "
-                    "only. Log a Delivery Challan through the normal "
-                    "receiving screen."
+                    "only. Log a Delivery Challan, or goods bought without a "
+                    "PO, through the normal receiving screen."
                 ),
             },
         )
