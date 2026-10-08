@@ -119,9 +119,10 @@ def test_a_hyphen_slash_dot_or_underscore_starts_a_word(db, q, pids):
     assert _ids(db, q) == (pids, len(pids))
 
 
-def test_variant_is_a_code_matched_from_its_start(catalogue):
-    # One rule per field: the purchase-order box (#1170) also treats variant
-    # as a code, so "black" is not a word-start hit on "Matte Black".
+def test_a_legacy_colour_only_in_variant_is_matched_from_its_start(catalogue):
+    # SG-AVI is a legacy row: no minted name, its colour only in `variant`.
+    # variant is a code (one rule per field: the purchase-order box, #1170,
+    # treats it as one too), so "matte" starts it and "black" does not.
     assert _ids(catalogue, "matte") == (["SG-AVI"], 1)
     assert _ids(catalogue, "black") == ([], 0)
 
@@ -226,19 +227,63 @@ def _door(db, pid, category, **attrs):
 
 @pytest.mark.parametrize(
     "q, want",
-    [("Ray Ban Aviator", ["SG-SHAPE", "SG-NAME"]),
-     ("aviator", ["SG-SHAPE", "SG-NAME"]),
-     ("Ray Ban Aviator Classic", ["SG-NAME"]),
+    # "aviator": SG-MODEL's model_name STARTS with it, so it ranks first;
+    # SG-SHAPE has it only as a word of its title. "ban" starts neither
+    # field, so for "Ray Ban Aviator" both are word hits, in stored order.
+    [("Ray Ban Aviator", ["SG-SHAPE", "SG-MODEL"]),
+     ("aviator", ["SG-MODEL", "SG-SHAPE"]),
+     ("Ray Ban Aviator Classic", ["SG-MODEL"]),
      ("Acuvue Oasys", ["CL-SUB"]), ("acuvue", ["CL-SUB"])],
 )
 def test_a_door_made_product_is_found_by_the_words_the_till_shows(db, q, want):
+    from database.repositories.product_repository import ProductRepository
+
+    # No model_name: the door mints "Ray-Ban RB3025 Aviator Sunglasses" from
+    # the shape, and the shape itself is not searched -- so "Aviator" is
+    # found here ONLY through the title, by a word that is not its start.
     _door(db, "SG-SHAPE", "SUNGLASS", brand_name="Ray-Ban", model_no="RB3025",
-          colour_code="001", model_name="Aviator", shape="Aviator")
-    _door(db, "SG-NAME", "SUNGLASS", brand_name="Ray-Ban", model_no="RB3026",
+          colour_code="001", shape="Aviator")
+    shaped = db.products.find_one({"product_id": "SG-SHAPE"})
+    assert shaped["name"] == "Ray-Ban RB3025 Aviator Sunglasses"
+    assert "model_name" not in shaped["attributes"]
+    assert "attributes.shape" not in ProductRepository.SEARCH_FIELDS
+    # model_name is not in this one's title ("Ray-Ban RB3026 Sunglasses").
+    _door(db, "SG-MODEL", "SUNGLASS", brand_name="Ray-Ban", model_no="RB3026",
           colour_code="001", model_name="Aviator Classic")
     _door(db, "CL-SUB", "CONTACT_LENS", brand_name="Johnson & Johnson",
           subbrand="Acuvue", model_name="Oasys 1-Day")
     assert _ids(db, q) == (want, len(want))
+
+
+# Main's till rule, before 2026-10-08: each word STARTS brand, model, sku,
+# variant or barcode.
+_MAIN_FIELDS = ["brand", "model", "sku", "variant", "barcode"]
+
+
+def _main_ids(db, q):
+    from database.repositories.product_repository import ProductRepository
+
+    repo = ProductRepository(db.products)
+    query = repo._search_query(q, _MAIN_FIELDS, {"is_active": True}, word_fields=())
+    return [d["product_id"] for d in repo.find_many(query)]
+
+
+def test_a_title_word_finds_a_product_after_what_main_found(db):
+    # Stored FIRST, so only the ranking can put main's hit ahead of it.
+    _door(db, "SG-MBK", "SUNGLASS", brand_name="Ray-Ban", model_no="RB3025",
+          colour_code="002", shape="Aviator", frame_color="Matte Black")
+    assert db.products.find_one({"product_id": "SG-MBK"})["name"] == (
+        "Ray-Ban RB3025 Aviator Sunglasses - Matte Black")
+    db.products.insert_one(_p("SG-AVI", "Ray-Ban", "Aviator Classic",
+                              "SG-RB-0001", variant="Matte Black"))
+    # "black" is a word of the door-made title (deliberate: a colour word in
+    # the title finds it); main found nothing for it.
+    assert _main_ids(db, "black") == []
+    assert _ids(db, "black") == (["SG-MBK"], 1)
+    # "matte" already found the legacy row on main: main's list comes first,
+    # unchanged, and the new title-word hit after it.
+    assert _main_ids(db, "matte") == ["SG-AVI"]
+    assert _ids(db, "matte") == (["SG-AVI", "SG-MBK"], 2)
 
 
 def test_other_searches_keep_matching_from_the_field_start(db):
