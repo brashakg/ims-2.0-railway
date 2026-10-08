@@ -480,3 +480,52 @@ def test_an_accept_keeps_what_a_cancel_closed_over_shelved_units(monkeypatch):
     assert (p2["received_qty"], p2["line_status"]) == (2, "RECEIVED")
     assert po_repo.po["received_qty_by_product"]["P2"] == 2
     assert po_repo.po["items"][0]["received_qty"] == 3
+
+
+def test_the_claim_comes_before_the_read_a_parked_before_its_claim(monkeypatch):
+    """2 open. A's accept stops just before it claims; B runs to the end and
+    mints 2. A then claims, reads B's receipt and is refused -- had A read the
+    order BEFORE claiming, both would mint (4 against 2 open)."""
+    from api.routers.vendors import grn_accept as ga
+
+    grn_repo, stock, a, b = _two_pending_of_two(monkeypatch)
+    inside, release = _parked(monkeypatch, ga, "_claim_grn_for_accept",
+                              lambda _repo, gid, *_: gid == a)
+    t, out_a = _in_background(a)
+    assert inside.wait(10), "A never reached its claim"
+    try:
+        assert _accept(b)["grn_status"] == "ACCEPTED"
+    finally:
+        release.set()
+        t.join(15)
+    assert isinstance(out_a["r"], HTTPException) and out_a["r"].status_code == 409, out_a
+    assert _p2_units(stock) == 2
+
+
+def test_a_catalog_now_re_accept_in_flight_is_seen(monkeypatch):
+    """2 of P2 live (2 cancelled). R1 (P2 x2) is held -- P2 not catalogued
+    yet -- so it is PARTIALLY_ACCEPTED with nothing in stock. P2 is
+    catalogued and R1 accepted again; while it mints, R2 (P2 x2) is refused:
+    a held receipt being accepted again is in flight like a pending one."""
+    from api.services import product_master as pm
+
+    po = _po(_line("P2", "Ray-Ban", 2),
+             _line("P2", "Ray-Ban", 0, ordered_qty=0, cancelled_qty=2, line_status="CANCELLED"))
+    grn_repo, _po_repo, stock, _t = _wire(monkeypatch, po=po, product_repo=_Products("P2"))
+    _atomic_claims(grn_repo)
+    r1 = _create("normal", _items("P2", 2), _user(), inv="INV-A")["grn_id"]
+    r2 = _create("normal", _items("P2", 2), _user(), inv="INV-B")["grn_id"]
+    monkeypatch.setattr(pm, "compute_catalog_status", lambda prod: ("DRAFT", ["hsn_code"]))
+    assert _accept(r1)["grn_status"] == "PARTIALLY_ACCEPTED" and _p2_units(stock) == 0
+    monkeypatch.setattr(pm, "compute_catalog_status", lambda prod: ("ACTIVE", []))
+    inside, release = _parked(monkeypatch, stock, "create", lambda doc: True)
+    t, out_r1 = _in_background(r1)
+    assert inside.wait(10), "R1 never reached its first stock create"
+    try:
+        out = _accept(r2)
+        assert isinstance(out, HTTPException) and out.status_code == 409, out
+    finally:
+        release.set()
+        t.join(15)
+    assert out_r1["r"]["grn_status"] == "ACCEPTED", out_r1
+    assert _p2_units(stock) == 2
