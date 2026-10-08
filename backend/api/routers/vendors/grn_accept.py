@@ -27,6 +27,7 @@ from .po_detail import (
     _received_per_line,
     _refresh_received,
     beyond_open_quantity,
+    puts_nothing_in_stock,
 )
 from .numbering import (
     _grn_barcode,
@@ -195,10 +196,12 @@ def _hold_order_open_for_receipt(po_repo, grn) -> None:
     says so: once it finishes, this one either fits or gets the void /
     escalate advice."""
     po_id = grn.get("po_id")
-    if po_repo is None or not po_id:
+    items = grn.get("items") or []
+    if po_repo is None or not po_id or puts_nothing_in_stock(items):
+        # Every item rejected: no unit to hold the order for. Even a cancelled
+        # order takes it (owner ruling 2026-10-08 (c)) -- it puts nothing in.
         return
     gid = grn.get("grn_id")
-    items = grn.get("items") or []
     for _attempt in range(3):
         po = _order_or_503(po_repo, po_id)
         if not po:

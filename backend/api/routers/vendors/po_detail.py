@@ -454,6 +454,36 @@ def _qty(v) -> int:
         return 0
 
 
+def _cancelled_products(po: dict) -> set:
+    """The products the order has withdrawn units of (a line cancelled outright
+    or in part)."""
+    return {
+        it.get("product_id")
+        for it in po.get("items") or []
+        if it.get("line_status") == "CANCELLED" or _qty(it.get("cancelled_qty"))
+    }
+
+
+def puts_nothing_in_stock(lines) -> bool:
+    """A receipt that accepts no unit: every item on it rejected."""
+    return not any(_qty(line.get("accepted_qty")) for line in lines or [])
+
+
+def rejected_delivery_on_closed_order(po: dict, lines) -> bool:
+    """Owner ruling 2026-10-08 (c): a delivery that brought cancelled items CAN
+    be logged when every cancelled item on it is rejected. Once a cancel has
+    CLOSED the order -- RECEIVED because the rest was cancelled, or CANCELLED
+    -- nothing on it is due, so such a delivery is one that puts nothing into
+    stock. It is logged (receipt, discrepancy task, the paper trail a debit
+    note needs) though the order is no longer receivable; a closed order still
+    takes no unit into stock."""
+    status = po.get("status")
+    closed_by_cancel = status == "CANCELLED" or (
+        status == "RECEIVED" and bool(_cancelled_products(po))
+    )
+    return closed_by_cancel and puts_nothing_in_stock(lines)
+
+
 def beyond_open_quantity(po: dict, lines, received_of) -> list:
     """THE rule behind "no receipt against a cancelled quantity": the names of
     the products on `lines` that the LIVE order no longer has room for.
@@ -470,14 +500,12 @@ def beyond_open_quantity(po: dict, lines, received_of) -> list:
     product the order has cancelled units of, so an ordinary receipt never
     depends on it. Create and accept both call this."""
     live: dict = {}
-    cancelled: set = set()
+    cancelled = _cancelled_products(po)
     names: dict = {}
     for it in po.get("items") or []:
         pid = it.get("product_id")
         names.setdefault(pid, it.get("product_name") or it.get("sku") or pid)
         live[pid] = live.get(pid, 0) + _qty(it.get("quantity"))
-        if it.get("line_status") == "CANCELLED" or _qty(it.get("cancelled_qty")):
-            cancelled.add(pid)
     coming: dict = {}
     for line in lines or []:
         pid = line.get("product_id")

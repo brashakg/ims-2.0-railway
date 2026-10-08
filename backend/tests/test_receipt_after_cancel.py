@@ -706,6 +706,40 @@ def test_a_part_cancelled_line_takes_what_is_open_and_rejects_the_rest(monkeypat
     assert e.value.status_code == 400
 
 
+@pytest.mark.parametrize("closed_by", ["rest", "whole"])
+def test_cancelled_items_rejected_on_delivery_log_on_an_order_the_cancel_closed(
+    monkeypatch, closed_by
+):
+    """Ruling (c) once the cancel CLOSED the order. P1 x5 + P2 x3. 'rest':
+    P1 arrives, the rest is cancelled -> RECEIVED. 'whole': the whole order is
+    cancelled -> CANCELLED. The vendor ships the 3 cancelled P2 anyway, all
+    rejected: the receipt is logged and accepted (a discrepancy task, nothing
+    into stock, the order stays closed). One accepted P2 is still refused, by
+    the normal and the express door (which takes no rejection anyway)."""
+    grn_repo, po_repo, stock, tasks = _wire(
+        monkeypatch, po=_po(_line("P1", "Frame X", 5), _line("P2", "Ray-Ban", 3))
+    )
+    if closed_by == "rest":
+        assert _accept(_create("normal", _items("P1", 5), _user(), inv="INV-1")["grn_id"])[
+            "grn_status"] == "ACCEPTED"
+    asyncio.run(vendors_mod.cancel_po("PO-1", reason="vendor closed", current_user=_user()))
+    closed = "RECEIVED" if closed_by == "rest" else "CANCELLED"
+    assert po_repo.po["status"] == closed
+    one_in = [{"product_id": "P2", "received_qty": 3, "accepted_qty": 1, "rejected_qty": 2}]
+    for door, lines in (("normal", one_in), ("express", _items("P2", 3))):
+        with pytest.raises(HTTPException) as e:
+            _create(door, lines, _user(), inv="INV-10")
+        assert e.value.status_code == 400, door
+
+    rejected = [{"product_id": "P2", "received_qty": 3, "accepted_qty": 0, "rejected_qty": 3}]
+    gid = _create("normal", rejected, _user(), inv="INV-2")["grn_id"]
+    assert _accept(gid)["grn_status"] == "ACCEPTED"
+    assert grn_repo.docs[gid]["total_rejected"] == 3
+    assert _p2_units(stock) == 0
+    assert po_repo.po["status"] == closed
+    assert [t for t in tasks.created if t["title"].startswith("GRN discrepancy")]
+
+
 def _over_tasks(task_repo):
     return [t for t in task_repo.created if t["title"].startswith("Over-delivery")]
 

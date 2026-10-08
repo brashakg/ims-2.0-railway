@@ -141,7 +141,11 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
         if not po:
             raise HTTPException(status_code=404, detail="Purchase order not found")
 
-        if po.get("status") not in _RECEIVABLE_PO_STATUSES:
+        from .po_detail import rejected_delivery_on_closed_order
+
+        if po.get("status") not in _RECEIVABLE_PO_STATUSES and not (
+            rejected_delivery_on_closed_order(po, [it.model_dump() for it in grn.items])
+        ):
             raise HTTPException(
                 status_code=400, detail="PO is not in receivable status"
             )
