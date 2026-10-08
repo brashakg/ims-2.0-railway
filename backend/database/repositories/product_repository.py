@@ -75,10 +75,19 @@ class ProductRepository(BaseRepository):
 
     # THE TILL'S RULE (the default, and what POS, goods receipt, the command
     # palette, Returns and QuickShare get): every whitespace token must START
-    # one of these fields. `barcode` is ADDITIVE (Catalog Manager scanner
-    # passthrough). Unchanged by audit F21 -- owner rule: ask before touching
-    # POS, and a wider rule crowds a 24-result strip ('ray' is inside 'Gray').
-    SEARCH_FIELDS = ("brand", "model", "sku", "variant", "barcode")
+    # one of SEARCH_FIELDS -- or, in WORD_SEARCH_FIELDS, any word of it, so
+    # the till and the counter lookup find "Air Optix", "Acuvue Oasys" and
+    # "Ray Ban Aviator" (owner-approved 2026-10-08). `name` is the minted
+    # title the till card shows (it carries the shape: "Ray-Ban RB3025
+    # Aviator Sunglasses"); a SUNGLASS/FRAME's spine model is its model_no,
+    # so its model_name and a lens's subbrand ("Acuvue") are searched where
+    # they live. The codes (sku, variant, barcode) keep matching from their
+    # start; `barcode` is the Catalog Manager scanner passthrough. Not the
+    # wide rule: that crowds a 24-result strip ('ray' is inside 'Gray').
+    WORD_SEARCH_FIELDS = (
+        "brand", "model", "name", "attributes.model_name", "attributes.subbrand",
+    )
+    SEARCH_FIELDS = WORD_SEARCH_FIELDS + ("sku", "variant", "barcode")
 
     # THE WIDE RULE, opt-in (`anywhere=True`; the purchase-order product box,
     # audit F21). NAME fields match ANYWHERE and ignore spaces/hyphens: the
@@ -87,6 +96,10 @@ class ProductRepository(BaseRepository):
     # (every colour key product_master stores; the watch dial is spelt both
     # ways there). CODE fields match from their START -- a scanned barcode,
     # a typed SKU or the manufacturer's GTIN off the box is its beginning.
+    # Each word also takes the till's own clause (_product_search_query), so
+    # the wide rule keeps every row the till finds -- the minted title, model
+    # name and sub-brand by their word starts only: 'sgray' is not inside
+    # 'Sunglasses - Gray'.
     NAME_SEARCH_FIELDS = (
         "brand",
         "model",
@@ -247,8 +260,9 @@ class ProductRepository(BaseRepository):
 
     def _product_search_query(self, text: str, extra: Dict) -> Dict:
         """The WIDE product search query -- shared by the list and its count
-        so the two can never drift. It is a superset of the till's rule (an
-        unanchored name match includes the anchored one). ponytail: unanchored
+        so the two can never drift. Each word's $or holds the till's own
+        clause for it, so it is a superset of the till's rule (outside a query
+        of nothing but hyphens, which lists nothing). ponytail: unanchored
         regex scans the collection; fine at catalogue size, a text index if it
         ever is not."""
         clauses = []
@@ -264,6 +278,7 @@ class ProductRepository(BaseRepository):
             }
             ors = [{f: code} for f in self.CODE_SEARCH_FIELDS]
             ors += [{f: name} for f in self.NAME_SEARCH_FIELDS]
+            ors.append(self._search_token(tok, self.SEARCH_FIELDS))
             clauses.append({"$or": ors})
         if not clauses:
             # Nothing but hyphens and spaces ('--'): nothing to look for, so
@@ -289,24 +304,18 @@ class ProductRepository(BaseRepository):
             return self.search(
                 query, list(self.SEARCH_FIELDS), extra, skip=skip, limit=limit
             )
-        # What the till's rule finds comes FIRST, then what only the wide rule
-        # adds -- so no result limit can push a brand/model/SKU match off the
-        # list behind, say, thirty 'Gunmetal Gray' frames for 'ray'. Both
-        # halves sit INSIDE the wide query, so the list is exactly what
+        # What the till's rule finds from a field's START comes FIRST (an
+        # exact SKU, a scan, the brand), then the rest -- so no result limit
+        # can push it off the list behind, say, thirty 'Gunmetal Gray' frames
+        # for 'ray', or behind a model 'Aviator RB3025' for the SKU 'RB3025'.
+        # Both halves sit INSIDE the wide query, so the list is exactly what
         # count_search_products counts -- even where the till's rule finds
         # more ('  ' is everything to the till, nothing to the wide rule).
         wide_q = self._product_search_query(query, extra)
-        till_q = self._search_query(query, list(self.SEARCH_FIELDS), extra)
-        head_q = {"$and": [wide_q, till_q]}
-        head = self.find_many(head_q, skip=skip, limit=limit)
-        if len(head) >= limit:
-            return head
-        tail_q = {"$and": [wide_q, {"$nor": [till_q]}]}
-        return head + self.find_many(
-            tail_q,
-            skip=max(0, skip - self.count(head_q)),
-            limit=limit - len(head),
+        start_q = self._search_query(
+            query, list(self.SEARCH_FIELDS), extra, word_fields=()
         )
+        return self.find_ranked(wide_q, start_q, skip=skip, limit=limit)
 
     def count_search_products(
         self,

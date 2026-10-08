@@ -7,6 +7,7 @@ Abstract base class for all repositories
 from abc import ABC, abstractmethod
 from typing import List, Optional, Dict, Any, TypeVar, Generic
 from datetime import datetime
+import re
 import uuid
 
 T = TypeVar("T")
@@ -324,17 +325,16 @@ class BaseRepository(ABC, Generic[T]):
         Tokenized text search across fields.
 
         A multi-word query is split on whitespace; EVERY token must match at
-        least one of `fields` (case-insensitive prefix match), and ALL tokens
-        must match somewhere. This is how a cashier actually types -- e.g.
+        least one of `fields` (case-insensitive), and ALL tokens must match
+        somewhere. This is how a cashier actually types -- e.g.
         "Fastrack P357" finds a doc with brand="Fastrack" + model="P357BK1".
 
-        The old implementation matched the WHOLE phrase as one regex against
-        each field individually, so a cross-field multi-word query found
-        nothing (no single field contained "Fastrack P357"). Single-token
-        queries are unchanged (one token, OR across fields). Tokens are
-        regex-escaped and anchored with ^ so a SKU like "P357BK1" matches
-        P357BK1* but not RAY-P357BK1. Prefix matching via ^ enables the
-        database to use a compound index on (field, 1) instead of full scans.
+        A token matches a field from its START (^), so a SKU like "P357BK1"
+        matches P357BK1* but not RAY-P357BK1. In the repository's
+        WORD_SEARCH_FIELDS it may instead start ANY word of the field ("optix"
+        finds "Air Optix", "ban" finds "Ray-Ban"), and "ray" still never finds
+        "Spray" or "Gray"; the field-start hits come first, so a wider rule
+        never pushes an exact SKU or a scanned barcode down the list.
 
         Args:
             text: Search text (one or more whitespace-separated tokens)
@@ -348,10 +348,30 @@ class BaseRepository(ABC, Generic[T]):
         """
         try:
             query = self._search_query(text, fields, filter)
-            return self.find_many(query, skip=skip, limit=limit)
+            head_q = self._search_query(text, fields, filter, word_fields=())
+            if head_q == query:
+                return self.find_many(query, skip=skip, limit=limit)
+            return self.find_ranked(query, head_q, skip=skip, limit=limit)
         except Exception as e:
             print(f"Error searching {self.entity_name}s: {e}")
             return []
+
+    def find_ranked(
+        self, query: Dict, first: Dict, skip: int = 0, limit: int = 100
+    ) -> List[Dict]:
+        """One page of `query`'s hits, those also matching `first` ranked
+        first. Both halves sit inside `query`, so paging through returns every
+        hit exactly once and count(query) is the true total. limit=0 = all.
+        The one head-then-rest split: a ranked search calls this."""
+        head_q = {"$and": [query, first]}
+        head = self.find_many(head_q, skip=skip, limit=limit)
+        if limit and len(head) >= limit:
+            return head
+        return head + self.find_many(
+            {"$and": [query, {"$nor": [first]}]},
+            skip=max(0, skip - self.count(head_q)),
+            limit=limit - len(head) if limit else 0,
+        )
 
     def search_count(self, text: str, fields: List[str], filter: Dict = None) -> int:
         """Count of documents the SAME search() query would match (pre-slice),
@@ -362,11 +382,24 @@ class BaseRepository(ABC, Generic[T]):
             print(f"Error counting {self.entity_name} search: {e}")
             return 0
 
-    def _search_query(self, text: str, fields: List[str], filter: Dict = None) -> Dict:
-        """Build the tokenized-prefix search query search() executes. Shared
-        with search_count so the list and its total can never drift."""
-        import re
+    # Fields a search token may match at ANY word start (the rest match from
+    # their start). Set per repository, so a field has ONE rule wherever it is
+    # searched; none by default.
+    WORD_SEARCH_FIELDS: tuple = ()
 
+    # A word starts the field or follows a space or one of these breaks.
+    # ponytail: not index-assisted like ^ is; a scan is fine at catalogue
+    # size, a text index if it ever is not.
+    _WORD_BREAKS = "-/._"
+    _WORD_START = r"(?:^|[\s" + re.escape(_WORD_BREAKS) + "])"
+
+    def _search_query(
+        self, text: str, fields: List[str], filter: Dict = None, word_fields=None
+    ) -> Dict:
+        """Build the tokenized search query search() executes. Shared with
+        search_count so the list and its total can never drift. word_fields
+        defaults to the repository's WORD_SEARCH_FIELDS; () = from the start
+        only (search()'s first-ranked hits)."""
         tokens = [t for t in (text or "").split() if t]
         if not tokens:
             # Empty query -> apply only the caller's filter (match-all
@@ -374,18 +407,24 @@ class BaseRepository(ABC, Generic[T]):
             # behaviour where `$regex: ""` matched everything.
             return filter or {}
 
-        and_clauses = []
-        for tok in tokens:
-            # Anchor with ^ for prefix matching so indexes can be used.
-            # ^ prevents full scans and keeps the result semantics
-            # (e.g., searching "ray" no longer matches "spray" or "primary").
-            regex = {"$regex": "^" + re.escape(tok), "$options": "i"}
-            and_clauses.append({"$or": [{field: regex} for field in fields]})
-
-        query = {"$and": and_clauses}
+        query = {"$and": [self._search_token(t, fields, word_fields) for t in tokens]}
         if filter:
             query["$and"].append(filter)
         return query
+
+    def _search_token(self, tok: str, fields, word_fields=None) -> Dict:
+        """One typed word's clause, the one place the word rule is built: it
+        STARTS one of `fields`, or, in word_fields (default: the repository's
+        WORD_SEARCH_FIELDS), any word of it. A word made only of breaks ('-')
+        starts no word, so it matches from the field start only."""
+        if word_fields is None:
+            word_fields = self.WORD_SEARCH_FIELDS
+        esc = re.escape(tok)
+        start = {"$regex": "^" + esc, "$options": "i"}
+        word = {"$regex": self._WORD_START + esc, "$options": "i"}
+        if not tok.strip(self._WORD_BREAKS):
+            word = start
+        return {"$or": [{f: word if f in word_fields else start} for f in fields]}
 
     def aggregate(self, pipeline: List[Dict]) -> List[Dict]:
         """

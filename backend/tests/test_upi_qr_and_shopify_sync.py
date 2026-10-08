@@ -178,6 +178,8 @@ async def test_upi_qr_endpoint_400_when_no_vpa():
             await get_upi_qr("ord-1", current_user)
         assert exc_info.value.status_code == 400
         assert "upi_vpa" in exc_info.value.detail.lower() or "UPI VPA" in exc_info.value.detail
+        # The till names the screen that exists (owner-approved 2026-10-08).
+        assert "Organization (left menu)" in exc_info.value.detail
 
 
 # ===========================================================================
