@@ -28,6 +28,8 @@ interface ShopCount { store_id: string; store_name: string; available: number; i
 interface LookupItem {
   product_id: string; sku?: string; name?: string; brand?: string; model?: string;
   category?: string; color?: string; size?: string | number; mrp?: number; offer_price?: number;
+  /** The scanned/typed code named this product exactly (sku, barcode, GTIN, unit label). */
+  exact?: boolean;
   stores: ShopCount[];
 }
 interface LookupResult {
@@ -111,8 +113,10 @@ export default function StockLookupPage() {
         <>
         {data?.truncated && (
           <p className="text-sm text-amber-800 mb-2">
-            Showing {items.length.toLocaleString('en-IN')} of {(data.total ?? 0).toLocaleString('en-IN')} powers
-            {' '}- scan the box or type the power to narrow
+            Showing {items.length.toLocaleString('en-IN')} of {(data.total ?? 0).toLocaleString('en-IN')} products
+            {/* The search never matches a typed power (brand, model, SKU, barcode
+                only), so scanning is the one way to name a row exactly. */}
+            {items[0]?.exact ? ' - your exact match is first' : ' - scan the barcode to find one'}
           </p>
         )}
         <div className="overflow-x-auto border border-gray-200 rounded-lg">

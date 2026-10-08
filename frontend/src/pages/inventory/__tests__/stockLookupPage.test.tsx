@@ -167,10 +167,16 @@ describe('Stock lookup screen', () => {
 
   // Round 7: the server caps the rows (50 hits, 200 per family), so a big
   // contact-lens model is cut; the screen says so instead of looking whole.
-  const CUT = 'Showing 1 of 300 powers - scan the box or type the power to narrow';
-  it('says when the caps cut the list, and how big it is', async () => {
-    await search({ items: [product('P', 'CONTACT_LENS')], total: 300, truncated: true }, 'Frame P');
-    expect(screen.getByText(CUT)).toBeTruthy();
+  // Round 8: 'products', not 'powers' (a frame list is cut too), and never
+  // 'type the power' -- the search does not match one, so that advice ended
+  // in 'No product matches'. A counter who has just scanned is not told to scan.
+  it.each([
+    ['FRAME', undefined, 'Showing 1 of 60 products - scan the barcode to find one'],
+    ['CONTACT_LENS', false, 'Showing 1 of 60 products - scan the barcode to find one'],
+    ['CONTACT_LENS', true, 'Showing 1 of 60 products - your exact match is first'],
+  ])('says when the caps cut a %s list (exact: %s), and how big it is', async (category, exact, cut) => {
+    await search({ items: [{ ...product('P', category), exact }], total: 60, truncated: true }, 'Frame P');
+    expect(screen.getByText(cut)).toBeTruthy();
   });
   it('says nothing about a cut when the list is whole', async () => {
     await search({ items: [product('P', 'CONTACT_LENS')], total: 1, truncated: false }, 'Frame P');

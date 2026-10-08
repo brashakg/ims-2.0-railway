@@ -595,6 +595,9 @@ def test_d7b2_a_scanned_power_is_never_cut_from_a_big_family(call, mongo_db, lab
     pids = [i["product_id"] for i in items]
     assert target in pids, f"scanning {label}: the power is missing from {len(pids)} rows"
     assert pids[0] == target, f"scanning {label}: the scanned power is row {pids.index(target)}"
+    # Round 8: the screen reads `exact` to not tell a counter who has just
+    # scanned to scan; only the scanned power carries it.
+    assert [i["product_id"] for i in items if i.get("exact") is True] == [target], label
     assert _counts(items[0])[S2] == (1, 0), "and Bokaro's box of it is counted"
     assert len(pids) > 1, "its other powers still come with it"
 
@@ -619,6 +622,9 @@ def test_d7b2_a_family_cut_by_the_caps_says_how_big_it_is(call, mongo_db, label,
     shown = len(body["items"])
     assert shown < 300, f"by {label}: the caps still hold ({shown} rows)"
     assert (body.get("total"), body.get("truncated")) == (300, True), f"by {label}: {shown} rows shown"
+    # a name search names no power exactly; a scanned label names its one
+    exact = [i["product_id"] for i in body["items"] if i.get("exact") is True]
+    assert exact == (["P-CL-TARGET"] if query == _CL_TARGET_UNIT else []), f"by {label}: {exact}"
 
 
 def test_d7b2_a_search_cut_at_its_cap_says_so(call, mongo_db):

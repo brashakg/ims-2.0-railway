@@ -202,6 +202,9 @@ async def stock_lookup(
             continue
         seen.add(pid)
         item = {"product_id": pid, **{k: p.get(k) for k in _PRODUCT_FIELDS}}
+        # What the code named exactly (sku, barcode, GTIN, unit label): the
+        # screen does not tell a counter who has just scanned it to scan.
+        item["exact"] = pid in exact_ids
         item["stores"] = [
             {
                 "store_id": sid,
@@ -215,7 +218,7 @@ async def stock_lookup(
         ]
         items.append(item)
     # What the scan named first, then the model by colour and size.
-    items.sort(key=lambda i: (i["product_id"] not in exact_ids,
+    items.sort(key=lambda i: (not i["exact"],
                               *(str(i.get(k) or "") for k in ("brand", "model", "color", "size"))))
     # The caps (50 hits, 200 per family) cut a big contact-lens model: say so.
     return {"store_id": here, "items": items, "total": total, "truncated": total > len(items),
