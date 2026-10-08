@@ -297,6 +297,23 @@ def _assert_transfer_access(
         )
 
 
+def _in_callers_stores(transfers: List[Dict], current_user: dict) -> List[Dict]:
+    """The transfers touching the caller's stores, either side --
+    user_store_scope, the one store reach: SUPERADMIN / ADMIN see every
+    transfer, everyone else (AREA_MANAGER included) their own stores'. Every
+    transfer list and figure (list, /pending, both analytics) reads through
+    here, so none shows another region's transfers or their cost."""
+    is_cross_store, allowed_stores = user_store_scope(current_user)
+    if is_cross_store:
+        return transfers
+    return [
+        t
+        for t in transfers
+        if t.get("from_location_id") in allowed_stores
+        or t.get("to_location_id") in allowed_stores
+    ]
+
+
 def _mask_transfer_cost(transfer: Dict, current_user: dict) -> Dict:
     """D7: counter roles never see what the units cost. A transfer carries its
     units' own cost (each line's unit_cost, the total_value -- F51), so a
@@ -1072,16 +1089,7 @@ async def list_transfers(
     if priority:
         transfers = [t for t in transfers if t.get("priority") == priority]
 
-    # Filter by store access for non-superadmin users
-    user_roles = current_user.get("roles", [])
-    if not any(role in user_roles for role in ["SUPERADMIN", "ADMIN", "AREA_MANAGER"]):
-        user_stores = current_user.get("store_ids", [])
-        transfers = [
-            t
-            for t in transfers
-            if t.get("from_location_id") in user_stores
-            or t.get("to_location_id") in user_stores
-        ]
+    transfers = _in_callers_stores(transfers, current_user)
 
     # Sort by created date (newest first)
     transfers.sort(key=lambda x: x.get("created_at", ""), reverse=True)
@@ -1115,18 +1123,9 @@ async def get_pending_transfers(
 
     transfers = [t for t in transfers if t.get("status") in pending_statuses]
 
-    # IDOR guard: store-scoped callers (incl. AREA_MANAGER) only see pending
-    # transfers touching THEIR stores (either side). SUPERADMIN/ADMIN see all.
-    # Applied before the optional location_id narrowing so a foreign
-    # location_id can never widen a store user's view.
-    is_cross_store, allowed_stores = user_store_scope(current_user)
-    if not is_cross_store:
-        transfers = [
-            t
-            for t in transfers
-            if t.get("from_location_id") in allowed_stores
-            or t.get("to_location_id") in allowed_stores
-        ]
+    # IDOR guard: applied before the optional location_id narrowing so a
+    # foreign location_id can never widen a store user's view.
+    transfers = _in_callers_stores(transfers, current_user)
 
     if location_id:
         transfers = [
@@ -2016,7 +2015,7 @@ async def get_transfer_analytics(
     current_user: dict = Depends(get_current_user),
 ):
     """Get transfer analytics summary"""
-    transfers = _all_transfers()
+    transfers = _in_callers_stores(_all_transfers(), current_user)
 
     if location_id:
         transfers = [
@@ -2071,7 +2070,7 @@ async def get_location_transfer_analytics(
     location_id: str, current_user: dict = Depends(get_current_user)
 ):
     """Get transfer analytics for a specific location"""
-    transfers = _all_transfers()
+    transfers = _in_callers_stores(_all_transfers(), current_user)
 
     outgoing = [t for t in transfers if t.get("from_location_id") == location_id]
     incoming = [t for t in transfers if t.get("to_location_id") == location_id]

@@ -820,3 +820,37 @@ def test_f51_a_line_with_a_cost_less_unit_is_valued_at_0_not_short(db):
     assert (stored["items"][0]["quantity_shipped"], stored["items"][0]["unit_cost"]) == (2, 0.0)
     assert stored["total_value"] == 0.0
 
+
+def _analytics(user, location="ST-BOK-1"):
+    return (
+        _run(transfers.get_transfer_analytics(None, None, location, user))["summary"],
+        _run(transfers.get_location_transfer_analytics(location, user))["incoming"],
+    )
+
+
+def _listed(user):
+    return _run(transfers.list_transfers(
+        status=None, transfer_type=None, from_location_id=None, to_location_id=None,
+        store_id=None, priority=None, created_after=None, created_before=None,
+        limit=50, page=1, current_user=user,
+    ))["transfers"]
+
+
+def test_d7_transfer_figures_are_the_callers_stores_only(db):
+    """r4 #4-5: Dhanbad (Z) ships Bokaro (Y) 3700 at cost. A manager of
+    another shop (Bank More), and an area manager of another region (Pune),
+    see neither the transfer nor its value -- on the list, /pending and both
+    analytics (user_store_scope, like /pending). The sending shop's manager
+    sees the value on both analytics (D7, the 'product' cost context)."""
+    _shipped("ST-BOK-1")
+    for outsider in (_user("STORE_MANAGER", "ST-DHN-2"), _user("AREA_MANAGER", "ST-PUN-1")):
+        summary, incoming = _analytics(outsider)
+        assert (summary["total_transfers"], summary["total_value"]) == (0, 0)
+        assert (incoming["total"], incoming["value"]) == (0, 0)
+        assert _listed(outsider) == []
+        pending = _run(transfers.get_pending_transfers(None, outsider))
+        assert not any(pending.values())
+    summary, incoming = _analytics(SOURCE_MANAGER)
+    assert summary["total_value"] == incoming["value"] == pytest.approx(2 * UNIT_COST)
+    assert [t["to_location_id"] for t in _listed(_user("AREA_MANAGER", "ST-DHN-1"))] == ["ST-BOK-1"]
+
