@@ -576,8 +576,8 @@ export default function OnlineShopifySyncPage() {
       const p = (res.payload ?? {}) as Record<string, any>;
       const where = res.mode === 'LIVE' ? 'LIVE' : 'preview';
       const line =
-        `Stock (${where}): ${p.changed ?? 0} of ${p.candidates ?? 0} listings changed` +
-        (res.mode === 'LIVE' ? `, ${p.synced ?? 0} written` : ' — nothing sent');
+        `Stock (${where}): ${fmt(p.changed)} of ${fmt(p.candidates)} listings changed` +
+        (res.mode === 'LIVE' ? `, ${fmt(p.synced)} written` : ' — nothing sent');
       if (res.ok) {
         toast.success(line);
       } else {
@@ -842,9 +842,9 @@ export default function OnlineShopifySyncPage() {
           >
             <p>
               Last stock pass ({stockResult.mode === 'LIVE' ? 'LIVE' : 'preview'}):{' '}
-              {stockPayload?.changed ?? 0} of {stockPayload?.candidates ?? 0} listings changed
+              {fmt(stockPayload?.changed)} of {fmt(stockPayload?.candidates)} listings changed
               {stockResult.mode === 'LIVE'
-                ? `, ${stockPayload?.synced ?? 0} written, ${stockPayload?.failed ?? 0} failed`
+                ? `, ${fmt(stockPayload?.synced)} written, ${fmt(stockPayload?.failed)} failed`
                 : ' (nothing sent)'}
               {stockPayload?.stores_total != null
                 ? ` — ${stockPayload.stores_mapped ?? 0} of ${stockPayload.stores_total} shops mapped`

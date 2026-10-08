@@ -794,15 +794,15 @@ def test_R13_a_dead_sellable_online_read_on_the_unmapped_path_is_unknown_not_sil
     catalog read INSIDE it read as "not sellable online" and that except was
     mostly dead code.
 
-    ONE row, the sale door's words (`_target_error`), on both: the guard
-    stamps the unknown on the caller's summary (`_say_unknown`) and the
-    caller records it once; `online_status_for_skus(strict=True)` raises a
-    dead key lookup. Put the `logger.debug` back -> no row -> this fails.
+    ONE row, on both: the guard stamps the unknown on the caller's summary
+    (`_say_unknown`) in ITS OWN words -- the online-status read, never the
+    target read's "mapping ... nothing written" (#1172 rebuild: it also runs
+    after a write) -- and the caller records it once;
+    `online_status_for_skus(strict=True)` raises a dead key lookup. Put the `logger.debug` back -> no row -> this fails.
     Drop `strict` from the lookups inside `online_status_for_skus` -> the
     dead parent read reads as "not sellable", no row -> the second half
     fails."""
     from api.services import online_catalog as oc
-    from api.services.shopify_push.inventory import _target_error
 
     spy = _Spy()
     _live(monkeypatch, spy)
@@ -815,10 +815,12 @@ def test_R13_a_dead_sellable_online_read_on_the_unmapped_path_is_unknown_not_sil
     monkeypatch.setattr(oc, "online_status_for_skus", _raise)
     out = _run(wb.writeback_skus(db, ["SP-1-L"], "BV-A", source="sale"))
     assert spy.writes() == []
-    assert out["code"] == shopify_push.STOCK_ONHAND_UNKNOWN and out["error"] == _target_error(boom), out
+    assert out["code"] == shopify_push.STOCK_ONHAND_UNKNOWN, out
+    assert out["error"].startswith("whether the sold SKU(s) with no Shopify inventory item are on sale online could not be read")
+    assert "catalog read died" in out["error"] and "nothing written" not in out["error"], out["error"]
     runs = _runs(db)
     assert len(runs) == 1, "one row -- the guard stamps, the door records"
-    assert runs[0]["ok"] is False and runs[0]["error"] == f"STOCK_ONHAND_UNKNOWN: {_target_error(boom)}"
+    assert runs[0]["ok"] is False and runs[0]["error"] == f"STOCK_ONHAND_UNKNOWN: {out['error']}"
     monkeypatch.undo()
 
     # The built-in silence: SP-1-L has a size row (minted in IMS, no inventory

@@ -290,3 +290,159 @@ def test_2_a_stray_size_is_not_sold_out(monkeypatch):
     out = _sold_out(_listed(_db(a=0, b=0, c=0), online_stock=sent), _Spy(_responses()), monkeypatch)
     assert out["stray_skus"] == ["SP-1-X"] and out["set"] == 3, out
     assert out["sold_out"] is False
+
+
+# ---------------------------------------------------------------------------
+# 3. a read that died is unknown and named
+# ---------------------------------------------------------------------------
+
+
+def test_3_the_sweep_over_a_dead_catalogue_read_is_unknown_never_a_green_noop(monkeypatch):
+    """catalog_products cannot be read: the sweep used to answer ok, noop,
+    '0 of 0 listings changed'. Now ok=False, STOCK_ONHAND_UNKNOWN, the read is
+    named, no count is reported (the screens print '-'), a LIVE press stays
+    LIVE, and nothing is written."""
+    db = _listed(_db(a=2, b=1, c=0))
+    _kill(db, "catalog_products", lambda f: f == {}, "catalog read died")
+    spy = _Spy(_responses())
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.sync_stock_levels(db))
+    assert res.ok is False and res.code == shopify_push.STOCK_ONHAND_UNKNOWN, res
+    assert "catalogue" in res.error and "catalog read died" in res.error and "nothing written" in res.error
+    assert res.mode == "LIVE"
+    for count in ("candidates", "changed", "synced", "failed"):
+        assert (res.payload or {}).get(count) is None, (count, res.payload)
+    assert spy.writes() == []
+
+
+def test_3_the_sweep_over_a_dead_size_row_read_is_unknown_never_strays(monkeypatch):
+    """catalog_variants cannot be read: every listing shrank to its own SKU,
+    so every live size was named STOCK_BASELINE_STRAY ('delete it in Shopify
+    admin') and only the parent SKU was written. Now the pass is unknown and
+    writes nothing."""
+    sent = {"quantities": {"SP-1": {"BV-A": 2, "BV-B": 1, "BV-C": 0}, "SP-1-L": {"BV-A": 1, "BV-B": 0, "BV-C": 0}},
+            "tracked": True, "policy": "DENY"}
+    db = _listed(_db(a=1, b=1, c=0), online_stock=sent)
+    db.seed("catalog_variants", [{"sku": "SP-1-L", "parent_product_id": "cat-1", "shopify_inventory_item_id": INV_TWO}])
+    _kill(db, "catalog_variants", lambda f: f == {}, "variant read died")
+    spy = _Spy(_responses())
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.sync_stock_levels(db))
+    assert res.ok is False and res.code == shopify_push.STOCK_ONHAND_UNKNOWN, res
+    assert "variant read died" in res.error and "STOCK_BASELINE_STRAY" not in (res.error or "")
+    assert spy.writes() == []
+
+
+def _dead_size_rows(db):
+    """variant_rows_for_product's own reads (by parent link) die; the key
+    lookups ($or) and every other read answer."""
+    _kill(db, "catalog_variants", lambda f: "parent_product_id" in f or "parent_sku" in f, "size rows died")
+
+
+def test_3_a_dead_stray_check_on_the_writer_is_named_and_never_sold_out(monkeypatch):
+    """The writer's stray question (listing_strays) could not be read. It
+    used to answer 'no stray' -- green, and SOLD OUT on an all-0 pass. The
+    numbers still go out; the pass is not ok, coded unknown, and names the
+    check."""
+    db = _listed(_db(a=0, b=0, c=0))
+    _dead_size_rows(db)
+    spy = _Spy(_responses())
+    out = _sold_out(db, spy, monkeypatch)
+    assert out["set"] == 3 and len(spy.rows()) == 3, "a report never blocks the write"
+    assert out["ok"] is False and out["code"] == shopify_push.STOCK_ONHAND_UNKNOWN, out
+    assert "stray" in out["error"] and "size rows died" in out["error"], out["error"]
+    assert out["sold_out"] is False
+
+
+def test_3_a_dead_listing_read_on_a_sale_is_named_never_sold_out(monkeypatch):
+    """A sale of size SP-1-L: which listing it rides is read through its
+    parent. That read dying answered 'no listing' -- no last-sent record, no
+    stray question, and an all-0 pass read SOLD OUT. Now the numbers still go
+    out and the pass names the dead read. Read the listing fail-soft again ->
+    ok, SOLD OUT -> fails."""
+    db = _db(a=0, b=0, c=0, sku="SP-1-L")
+    db.seed("catalog_products", [_catalog_row("cat-1", "SP-1", gid=True, status="PUBLISHED")])
+    db.seed("catalog_variants", [{"sku": "SP-1-L", "parent_product_id": "cat-1", "shopify_inventory_item_id": INV_TWO}])
+    _kill(db, "catalog_products", lambda f: any("id" in c for c in f.get("$or", [])), "parent read died")
+    spy = _Spy(_responses())
+    _live(monkeypatch, spy)
+    out = _run(shopify_push.push_skus_stock(db, ["SP-1-L"], source="sale"))
+    assert out["set"] == 3 and (INV_TWO, LOC_A, 0) in spy.rows(), out
+    assert out["ok"] is False and out["code"] == shopify_push.STOCK_ONHAND_UNKNOWN, out
+    assert "parent read died" in out["error"] and out["sold_out"] is False, out
+
+
+def test_3_a_dead_stray_check_on_a_sale_with_no_target_is_named(monkeypatch):
+    """A sale of a SKU with no Shopify target asks the stray question from
+    the SKU side (stray_baseline_skus). Its read dying was 'no stray': no
+    row, no line. Now a not-ok row names it."""
+    db = _db(a=1, b=0, c=0, sku="SP-9")
+    db.seed("catalog_products", [])
+    _kill(db, "catalog_products", lambda f: "ecom.online_stock.quantities" in f, "baseline read died")
+    _live(monkeypatch, _Spy(_responses()))
+    out = _run(wb.writeback_skus(db, ["SP-9"], "BV-A", source="sale"))
+    assert out["code"] == shopify_push.STOCK_ONHAND_UNKNOWN, out
+    assert "stray" in out["error"] and "baseline read died" in out["error"], out["error"]
+    (row,) = list(db.get_collection("sync_runs").find({}))
+    assert row["ok"] is False and "baseline read died" in row["error"]
+
+
+def test_3_a_dead_online_status_read_names_that_read_and_claims_no_write(monkeypatch):
+    """A sale of a mapped SKU plus an unmapped one; the online-status read for
+    the unmapped one dies AFTER the mapped SKU was written. The line used to
+    say 'the inventory-item mapping could not be read -- nothing written'
+    (the wrong read, and a write had gone through)."""
+    from api.services import online_catalog as oc
+
+    db = _listed(_db(a=1, b=0, c=0))
+    db.seed("products", [{"product_id": "spine-9", "sku": "SP-9"}])
+    spy = _Spy(_responses())
+    _live(monkeypatch, spy)
+
+    def _dead(*a, **k):
+        raise RuntimeError("status read died")
+
+    monkeypatch.setattr(oc, "online_status_for_skus", _dead)
+    out = _run(wb.writeback_skus(db, ["SP-1", "SP-9"], "BV-A", source="sale"))
+    assert out["pushed"] == 1 and (INV_GID, LOC_A, 1) in spy.rows(), out
+    assert out["code"] == shopify_push.STOCK_ONHAND_UNKNOWN
+    assert "online" in out["error"] and "status read died" in out["error"], out["error"]
+    assert "nothing written" not in out["error"] and "inventory-item mapping" not in out["error"], out["error"]
+
+
+def test_3_the_scheduled_run_records_no_count_for_a_pass_that_counted_nothing(monkeypatch):
+    """The live-sync run summary stamped 0 for a stock pass whose payload
+    carried no count, so the Live sync card read '0 changed - 0 written'
+    over a pass that never counted. Unknown stays None (the card prints '-')."""
+    from api.services import shopify_live_sync as ls
+
+    async def _aborted(db, *, dry_run=False):  # noqa: ARG001
+        return shopify_push.PushResult(mode="LIVE", entity="stock", action="sync", ok=False,
+                                       code=shopify_push.STOCK_ONHAND_UNKNOWN, error="the catalogue could not be read",
+                                       payload={})
+
+    monkeypatch.setattr(shopify_push, "sync_stock_levels", _aborted)
+    monkeypatch.setattr(ls, "live_sync_config", lambda: {"enabled": True, "slots": ["01:00"], "max_products_per_run": 5})
+    monkeypatch.setattr(ls, "write_push_audit", lambda *a, **k: None)
+    run = _run(ls.sync_live_products(_listed(_db()), trigger="manual", actor="u"))
+    assert run["stock"]["ok"] is False and run["stock"]["code"] == shopify_push.STOCK_ONHAND_UNKNOWN
+    assert (run["stock"]["changed"], run["stock"]["synced"], run["stock"]["failed"]) == (None, None, None), run["stock"]
+
+
+def test_3_online_status_for_skus_threads_strict_to_each_key_lookup():
+    """The sale's online-status read (strict) has three key lookups; only the
+    pair together was pinned -- drop `strict` from either one alone and every
+    test stayed green. Each is pinned on its own here: the other lookups have
+    nothing to read. Drop `strict=strict` from either call -> its half fails."""
+    from api.services import online_catalog as oc
+
+    db = _listed(_db())
+    _kill(db, "catalog_products", lambda f: True, "products died")
+    with pytest.raises(RuntimeError, match="products died"):
+        oc.online_status_for_skus(db, ["SP-1"], strict=True)
+    db2 = _db()
+    db2.seed("catalog_products", [])
+    db2.seed("catalog_variants", [{"sku": "SP-1", "parent_product_id": "cat-1"}])
+    _kill(db2, "catalog_variants", lambda f: True, "variants died")
+    with pytest.raises(RuntimeError, match="variants died"):
+        oc.online_status_for_skus(db2, ["SP-1"], strict=True)

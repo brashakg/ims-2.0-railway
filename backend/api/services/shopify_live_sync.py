@@ -565,9 +565,11 @@ async def sync_live_products(
         "failures": failures,
         "stock": {
             "ok": bool(stock.get("ok")),
-            "changed": stock_payload.get("changed", 0),
-            "synced": stock_payload.get("synced", 0),
-            "failed": stock_payload.get("failed", 0),
+            # A pass that counted nothing (an unread catalogue) has no
+            # count: None, so the card prints "-", never "0 changed".
+            "changed": stock_payload.get("changed"),
+            "synced": stock_payload.get("synced"),
+            "failed": stock_payload.get("failed"),
             "code": stock.get("code"),
             "error": stock.get("error"),
         },

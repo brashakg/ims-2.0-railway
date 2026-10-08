@@ -380,21 +380,29 @@ def listing_strays(db, listing_ids: Iterable[str]) -> List[str]:
     hand. The sweep asks the same question of every listing it loops
     (round-7 P2); asked NOWHERE on the per-product doors, the 'Send to
     website' press, the drawer preview and the sale's own run row all read
-    green over a size the site kept selling (recheck round 1). Fail-soft: a
-    report never blocks a write, and the next sweep names what a failed read
-    here could not."""
+    green over a size the site kept selling (recheck round 1). STRICT: a dead
+    read RAISES -- "no stray" over a read that died is green (and SOLD OUT)
+    over a size the site may still sell; the caller names it in
+    ``_stray_unread``'s words and still writes."""
     from ..online_catalog import variant_rows_for_product
 
     out: set = set()
-    try:
-        coll = db["catalog_products"]
-        for pid in listing_ids:
-            doc = coll.find_one({"id": pid})
-            if doc:
-                out.update(baseline_strays(doc, product_skus(doc, variant_rows_for_product(db, doc))))
-    except Exception as exc:  # noqa: BLE001 -- a report never raises
-        logger.warning("[SHOPIFY_STOCK] stray read failed for the listing(s): %s", exc)
+    coll = db["catalog_products"]
+    for pid in listing_ids:
+        doc = coll.find_one({"id": pid})
+        if doc:
+            out.update(baseline_strays(doc, product_skus(doc, variant_rows_for_product(db, doc, strict=True))))
     return sorted(out)
+
+
+def _stray_unread(exc: Exception) -> str:
+    """The listing / stray-size check could not be read: said in its own
+    words, never "no stray" and never "nothing written" (the numbers still go
+    out)."""
+    return (
+        f"the stray-size check (which listing each SKU rides, and the sizes the "
+        f"website may still sell that IMS no longer lists) could not be read: {exc}"
+    )
 
 
 def stray_baseline_skus(db, skus: Iterable[str]) -> List[str]:
@@ -408,23 +416,21 @@ def stray_baseline_skus(db, skus: Iterable[str]) -> List[str]:
     Fail-soft: a report never blocks a write. ponytail: one scan of the
     listings that carry a baseline (121 docs today), only on a sale whose SKU
     has no target -- a query on a dynamic ``quantities.<sku>`` key scans the
-    same collection without an index and cannot take a dotted SKU."""
+    same collection without an index and cannot take a dotted SKU. STRICT, as
+    ``listing_strays``: a dead read raises and the sale names it."""
     from ..online_catalog import variant_rows_for_product
 
     wanted = {str(s) for s in skus if s}
     out: set = set()
     if not wanted:
         return []
-    try:
-        coll = db["catalog_products"]
-        for doc in coll.find({"ecom.online_stock.quantities": {"$exists": True}}):
-            carried = set((_last_sent(doc).get("quantities") or {}).keys())
-            if not (carried & wanted):
-                continue
-            strays = baseline_strays(doc, product_skus(doc, variant_rows_for_product(db, doc)))
-            out.update(s for s in strays if s in wanted)
-    except Exception as exc:  # noqa: BLE001 -- a report never raises
-        logger.warning("[SHOPIFY_STOCK] stray read failed for the SKU(s): %s", exc)
+    coll = db["catalog_products"]
+    for doc in coll.find({"ecom.online_stock.quantities": {"$exists": True}}):
+        carried = set((_last_sent(doc).get("quantities") or {}).keys())
+        if not (carried & wanted):
+            continue
+        strays = baseline_strays(doc, product_skus(doc, variant_rows_for_product(db, doc, strict=True)))
+        out.update(s for s in strays if s in wanted)
     return sorted(out)
 
 
@@ -1425,6 +1431,7 @@ def _rows_ok(
         or summary["unknown_stores"]
         or summary["orphan_stores"]
         or summary.get("stray_skus")
+        or summary.get("stray_unread")
         or locations.get("stray")
         or locations.get("dead")
         or summary.get("locations_unread")
@@ -1485,6 +1492,7 @@ async def push_skus_stock(
         "dead_locations": [],
         "locations_unread": False,
         "stray_skus": [],
+        "stray_unread": None,
         "sold_out": False,
     }
     if not distinct:
@@ -1560,9 +1568,16 @@ async def push_skus_stock(
     # written per listing below, and the stray question (a SKU the site still
     # shows a number for that the listing no longer lists) is asked per listing
     # HERE -- on the press, the drawer preview's twin, and the sale's own run
-    # row, not only on the sweep (recheck round 1).
-    by_product = {product_id: list(distinct)} if product_id else listings_for_skus(db, distinct)
-    summary["stray_skus"] = listing_strays(db, by_product)
+    # row, not only on the sweep (recheck round 1). STRICT: a dead read is
+    # UNKNOWN and named, never "no stray"; the numbers still go out.
+    by_product: Dict[str, List[str]] = {}
+    stray_unread: Optional[str] = None
+    try:
+        by_product = {product_id: list(distinct)} if product_id else listings_for_skus(db, distinct, strict=True)
+        summary["stray_skus"] = listing_strays(db, by_product)
+    except Exception as exc:  # noqa: BLE001 -- a report never blocks the write
+        stray_unread = _stray_unread(exc)
+    summary["stray_unread"] = stray_unread
     # INVARIANT 2, on THIS door too (round-5 P1 + first-push P1). This is the
     # door every first publish goes through (sync_product_stock) and every POS
     # sale goes through (writeback_skus), and it never asked Shopify's own
@@ -1582,11 +1597,16 @@ async def push_skus_stock(
         stray_locations=summary["unmapped_locations"],
         dead_locations=summary["dead_locations"],
         locations_unread=summary["locations_unread"],
-        unknown_error=(
-            _unknown_error(_labels(stores, summary["unknown_stores"]))
-            if summary["unknown_stores"]
-            else None
-        ),
+        unknown_error=" -- ALSO: ".join(
+            line
+            for line in (
+                _unknown_error(_labels(stores, summary["unknown_stores"]))
+                if summary["unknown_stores"]
+                else None,
+                stray_unread,
+            )
+            if line
+        ) or None,
         orphans=orphans,
         stray_skus=summary["stray_skus"],
         duplicate_targets=duplicate_targets,
@@ -2079,33 +2099,30 @@ async def sync_product_stock(
 
 
 def _gid_products_with_variants(db) -> List[Tuple[Dict[str, Any], List[Dict[str, Any]]]]:
-    """Every catalog product already on Shopify, with its variant rows."""
+    """Every catalog product already on Shopify, with its variant rows.
+    STRICT: either read dying RAISES. Fail-soft, a dead listings read was a
+    green "nothing to do" and a dead size-row read shrank every listing to
+    its own SKU -- naming every live size a stray to delete in Shopify admin
+    and writing none of them. ``sync_stock_levels`` says UNKNOWN instead."""
     out: List[Tuple[Dict[str, Any], List[Dict[str, Any]]]] = []
-    try:
-        # A size variant (is_variant_of) never owns a listing: its SKU rides
-        # the parent's row set below. Filtered even if a repair script ever
-        # stamps the parent gid on the child twin (a double stock write and a
-        # second ledger otherwise).
-        products = [
-            d
-            for d in db["catalog_products"].find({})
-            if (d.get("ecom") or {}).get("shopify_product_id") and not is_variant_of(d)
-        ]
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[SHOPIFY_STOCK] catalog read failed: %s", exc)
-        return []
+    # A size variant (is_variant_of) never owns a listing: its SKU rides
+    # the parent's row set below. Filtered even if a repair script ever
+    # stamps the parent gid on the child twin (a double stock write and a
+    # second ledger otherwise).
+    products = [
+        d
+        for d in db["catalog_products"].find({})
+        if (d.get("ecom") or {}).get("shopify_product_id") and not is_variant_of(d)
+    ]
     if not products:
         return []
     by_pid: Dict[str, List[Dict[str, Any]]] = {}
     by_sku: Dict[str, List[Dict[str, Any]]] = {}
-    try:
-        for v in db["catalog_variants"].find({}):
-            if v.get("parent_product_id"):
-                by_pid.setdefault(str(v["parent_product_id"]), []).append(v)
-            if v.get("parent_sku"):
-                by_sku.setdefault(str(v["parent_sku"]), []).append(v)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[SHOPIFY_STOCK] variant read failed: %s", exc)
+    for v in db["catalog_variants"].find({}):
+        if v.get("parent_product_id"):
+            by_pid.setdefault(str(v["parent_product_id"]), []).append(v)
+        if v.get("parent_sku"):
+            by_sku.setdefault(str(v["parent_sku"]), []).append(v)
     from ..online_catalog import merge_variant_rows
 
     for p in products:
@@ -2147,7 +2164,25 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
     from ..online_catalog import inventory_items_for_skus
     from ..online_stock_writeback import online_quantities_for_skus, orphan_stock_stores
 
-    pairs = _gid_products_with_variants(db)
+    try:
+        pairs = _gid_products_with_variants(db)
+    except Exception as exc:  # noqa: BLE001 -- the sweep never raises; it says UNKNOWN
+        # No count at all (the screens print "-", never "0 of 0"); a LIVE
+        # press stays LIVE, never "preview".
+        live, reason = _live_or_reason(db)
+        return PushResult(
+            mode=MODE_LIVE if live and not dry_run else MODE_SIMULATED,
+            entity="stock",
+            action="sync",
+            ok=False,
+            code=STOCK_ONHAND_UNKNOWN,
+            error=(
+                f"the catalogue (the listings on Shopify or their sizes) could not be "
+                f"read -- nothing written this pass: {exc}"
+            ),
+            reason=reason if not live else ("dry_run (Preview first)" if dry_run else None),
+            payload={},
+        )
     all_skus: List[str] = []
     for product, variants in pairs:
         for sku in product_skus(product, variants):

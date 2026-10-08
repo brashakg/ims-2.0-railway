@@ -614,17 +614,23 @@ def _name_baseline_strays(
     ``skipped_no_mapping`` with no row, no task, no line -- bettervision.in
     kept listing it until the sweep's all-pairs scan at the next tick, up to
     12 h. One question, one wording (``_stray_sku_error``), on both branches;
-    ``named`` is what the writer already said, never said twice. Fail-soft:
-    the read is the writer's own (``stray_baseline_skus``), a report never
-    blocks a sale."""
+    ``named`` is what the writer already said, never said twice. The read is
+    the writer's own (``stray_baseline_skus``, strict): a dead read is named
+    UNKNOWN on the sale's row, never "no stray"; a report never blocks a
+    sale."""
     from .shopify_push.inventory import (
         STOCK_BASELINE_STRAY,
         _stray_sku_error,
+        _stray_unread,
         stray_baseline_skus,
     )
 
     said = set(named)
-    strays = [s for s in stray_baseline_skus(db, skus) if s not in said]
+    try:
+        strays = [s for s in stray_baseline_skus(db, skus) if s not in said]
+    except Exception as exc:  # noqa: BLE001 -- the sale never raises
+        _say_unknown(summary, _stray_unread(exc))
+        return
     if not strays:
         return
     summary["stray_skus"] = strays
@@ -667,7 +673,15 @@ def _alert_unmapped_online(db, skus: List[str], summary: Dict[str, Any]) -> None
 
         statuses = online_catalog.online_status_for_skus(db, skus, strict=True)
     except Exception as exc:  # noqa: BLE001
-        _say_unknown(summary, exc)
+        # ITS OWN read, in its own words: it runs after the mapped SKUs were
+        # written, so "nothing written" / "the mapping could not be read" (the
+        # target read's line) was untrue here.
+        _say_unknown(
+            summary,
+            f"whether the sold SKU(s) with no Shopify inventory item are on sale "
+            f"online could not be read -- if they are, the website still shows "
+            f"their pre-sale number: {exc}",
+        )
         return
     online_unmapped = sorted(
         s for s in skus if (statuses.get(s) or {}).get("sellable_online")
@@ -826,22 +840,26 @@ def _unknown_run(db, summary: Dict[str, Any], exc: Exception) -> Dict[str, Any]:
     pre-move number until the next tick with every screen green; a second
     spelling of the row (recheck round 2) is how two doors come to answer the
     same failure differently. Never raises."""
-    _say_unknown(summary, exc)
+    from .shopify_push.inventory import _target_error
+
+    _say_unknown(summary, _target_error(exc))
     _record_run(db, summary)
     return summary
 
 
-def _say_unknown(summary: Dict[str, Any], exc: Exception) -> None:
-    """Stamp THE unknown verdict on a summary, in the writer's words. The dead
-    read leads (as a refusal Shopify answered leads on the writer); whatever
-    the summary already said rides under it as an ' -- ALSO:' line, never
-    lost. Split from ``_unknown_run`` for a guard that runs inside a door
-    which records its own row (``_alert_unmapped_online``): one row, not two."""
-    from .shopify_push.inventory import STOCK_ONHAND_UNKNOWN, _target_error
+def _say_unknown(summary: Dict[str, Any], line: str) -> None:
+    """Stamp THE unknown verdict on a summary; ``line`` names the read that
+    died, in its own words (a guard that runs AFTER the write must never say
+    "nothing written", nor blame the mapping read). The dead read leads (as a
+    refusal Shopify answered leads on the writer); whatever the summary
+    already said rides under it as an ' -- ALSO:' line, never lost. Split from
+    ``_unknown_run`` for a guard that runs inside a door which records its own
+    row (``_alert_unmapped_online``, ``_name_baseline_strays``): one row."""
+    from .shopify_push.inventory import STOCK_ONHAND_UNKNOWN
 
     prior = summary.get("error")
     summary["code"] = STOCK_ONHAND_UNKNOWN
-    summary["error"] = _target_error(exc) + (f" -- ALSO: {prior}" if prior else "")
+    summary["error"] = line + (f" -- ALSO: {prior}" if prior else "")
     logger.warning("[STOCK_WRITEBACK] %s", summary["error"])
 
 
