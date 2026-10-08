@@ -172,7 +172,7 @@ async def inventory_report(
         all_stock = stock_value.shelf_units(
             stock_repo, get_product_repository(), active_store
         )
-        show_cost = can_see_cost(current_user, "purchase")
+        show_cost = can_see_cost(current_user, "product")
         low_stock = low_stock_rows(get_product_repository(), stock_repo, store_id=active_store)
 
         total_items = len(all_stock)

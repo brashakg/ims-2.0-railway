@@ -917,3 +917,52 @@ def test_stock_aging_values_exactly_the_units_it_counts(aging_two_shops):
     # every unit valued, never one unit at three units' cost.
     (row,) = aging_two_shops(_shopless("ADMIN")).json()["products"]
     assert (row["quantity"], row["value"]) == (3, 9993.0)
+
+
+# ============================================================================
+# One product-cost answer per role across the stock router (panel 2026-10-08)
+# ============================================================================
+# The ledger rows asked cost_mask "purchase" (no catalogue manager) through
+# their own gate, the per-unit rows (?product_id=) and /inventory/units the
+# accounts-only default, the catalogue's product reads "product": a store
+# manager saw unit_cost on the row and lost cost_price one click deeper, and
+# the ledger kept its own list of WHICH fields are cost. Every stock-cost read
+# now answers to cost_mask "product" -- who AND which.
+
+
+def _cost_answers(world, role):
+    from api.services.cost_mask import _ALL_MASKED
+
+    row = _ledger_row(world, role)
+    units = world.get("/inventory/stock", role, product_id=PID).json()["items"]
+    labels = world.get("/inventory/units", role, product_id=PID).json()["units"]
+    aging = {p["id"]: p for p in _aging(world, role).json()["products"]}
+    return {
+        "ledger row": bool(_ALL_MASKED & {k for k, v in row.items() if v is not None}),
+        "per-unit rows": any(_ALL_MASKED & set(u) for u in units),
+        "units": any("cost_price" in u for u in labels),
+        "aging": aging[PID]["value"] is not None,
+    }
+
+
+@pytest.mark.parametrize(
+    "role", ["STORE_MANAGER", "AREA_MANAGER", "CATALOG_MANAGER", "ACCOUNTANT", "ADMIN", *COUNTER]
+)
+def test_one_product_cost_answer_on_every_stock_read(world, role):
+    from api.services.cost_mask import can_see_cost
+
+    want = can_see_cost(_user(role), "product")
+    answers = _cost_answers(world, role)
+    assert answers == dict.fromkeys(answers, want), (role, want, answers)
+
+
+def test_which_ledger_fields_are_cost_is_cost_mask_s(world, monkeypatch):
+    """#1161's unhiding check, on the ledger: take a field off cost_mask's
+    list and the counter's row carries exactly it -- the ledger keeps no list
+    of its own."""
+    from api.services import cost_mask
+
+    monkeypatch.setattr(cost_mask, "_ALL_MASKED", cost_mask._ALL_MASKED - {"cost_value"})
+    row = _ledger_row(world, "SALES_STAFF")
+    assert row.get("cost_value") == pytest.approx(AT_COST)
+    assert "unit_cost" not in row

@@ -17,8 +17,10 @@ None when none is).
 Readers: the stock ledger rows (cost_value / unit_cost / uncosted_units),
 Stock aging, and the report 'stock value' figures (/reports/inventory,
 /inventory/summary, /inventory/valuation, /stock/count). Who may see it:
-cost_mask.can_see_cost(user, "purchase") -- the buyers' rule (managers and
-accounts see what was paid), never the counter.
+cost_mask's "product" context -- the one product-cost rule, the same as each
+unit's and each product's cost (managers, accounts and the catalogue
+manager), never the counter. A figure that sums per-unit costs answers to
+the rule that shows those costs, so no reader gets two answers.
 No DB import; takes the repositories the caller already holds.
 """
 

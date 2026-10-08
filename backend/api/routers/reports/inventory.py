@@ -56,7 +56,7 @@ async def inventory_summary(
     all_stock = stock_value.shelf_units(stock_repo, get_product_repository(), active_store)
     low_stock = low_stock_rows(get_product_repository(), stock_repo, store_id=active_store)
 
-    show_cost = can_see_cost(current_user, "purchase")
+    show_cost = can_see_cost(current_user, "product")
     total_value = stock_value.total(all_stock) if show_cost else None
 
     out_of_stock = [s for s in all_stock if s.get("quantity", 0) <= 0]

@@ -134,7 +134,7 @@ async def get_stock_aging_report(
     from ...services import stock_value
     from ...services.cost_mask import can_see_cost
 
-    show_cost = can_see_cost(current_user, "purchase")
+    show_cost = can_see_cost(current_user, "product")
     shelf = (
         stock_value.by_product(
             stock_value.shelf_units(stock_repo, product_repo, active_store)

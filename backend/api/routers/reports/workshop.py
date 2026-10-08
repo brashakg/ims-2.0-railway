@@ -499,7 +499,7 @@ async def daily_stock_count(
     # F47: the one stock-value rule (services/stock_value); the counter reads
     # the counts but no cost figure.
     all_stock = stock_value.shelf_units(stock_repo, get_product_repository(), active_store)
-    show_cost = can_see_cost(current_user, "purchase")
+    show_cost = can_see_cost(current_user, "product")
 
     # category is on the product master, not the stock doc -> join it so the
     # per-category rows are real (FRAME etc.) instead of all under "Other".
