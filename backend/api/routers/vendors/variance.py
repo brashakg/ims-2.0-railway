@@ -8,6 +8,7 @@ from ._shared import (
     Optional,
     Query,
     _AP_ROLES,
+    _VENDOR_ROLES,
     _get_db,
     datetime,
     get_audit_repository,
@@ -29,11 +30,6 @@ from ._shared import (
 # NO order/POS/payment/AP mutation happens here -- the dismiss only annotates
 # PO metadata; the debit-note hint is a prompt the operator may ignore.
 # ============================================================================
-
-# Roles that may see the variance report (read). Adds STORE_MANAGER to the AP
-# pair so a store can chase its own late deliveries; SUPERADMIN auto-passes.
-_VARIANCE_READ_ROLES = ("ADMIN", "ACCOUNTANT", "STORE_MANAGER", "AREA_MANAGER")
-
 
 def _resolve_booked_bills(lines: list) -> None:
     """F8 P3: stamp booked_bill_id on each variance-report row, in place.
@@ -115,7 +111,9 @@ async def po_grn_variance_report(
     store_id: Optional[str] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
-    current_user: dict = Depends(require_roles(*_VARIANCE_READ_ROLES)),
+    # A purchase read: the purchase roles, so a store chases its own late
+    # deliveries (SUPERADMIN auto-passes).
+    current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
 ):
     """PO-ordered vs GRN-received variance + backorder report.
 
