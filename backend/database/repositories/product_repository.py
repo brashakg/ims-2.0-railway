@@ -7,7 +7,7 @@ Product and Stock data access operations
 import logging
 import re
 from typing import List, NamedTuple, Optional, Dict
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 
 from api.utils.ist import ist_today
 
@@ -27,6 +27,34 @@ _LEGACY = object()
 # guarded mark_sold so tightening it from an unguarded update cannot make a
 # legacy row silently unsellable.
 AVAILABLE_STATUS_VALUES = ["AVAILABLE", "available", "Available"]
+
+
+def group_with_oldest_arrival(group: Dict) -> List[Dict]:
+    """``group`` as a $group stage plus ``oldest``: when the oldest unit in the
+    group arrived on the shelf, or None when that is unknown.
+
+    $min skips a unit with no created_at, so 5 legacy units beside 1 received
+    today read as arrived today on Aging and Alerts while Non-moving, judging
+    unit by unit, called the same 5 old (audit F54). Unknown age is legacy
+    stock, so old (inventory.helpers._had_the_window): one undated unit makes
+    the whole group's ``oldest`` None.
+
+    Opening stock ages from the day it was entered, like any other unit
+    (owner ruling 2026-10-08): a shop's go-live stock is 0 days old on its
+    first day, not unknown and not 180+.
+
+    THE arrival rule: Aging, Alerts and Non-moving all group through here."""
+    dated = {"$ifNull": ["$created_at", False]}
+    return [
+        {
+            "$group": {
+                **group,
+                "oldest": {"$min": "$created_at"},
+                "undated": {"$sum": {"$cond": [dated, 0, 1]}},
+            }
+        },
+        {"$addFields": {"oldest": {"$cond": [{"$gt": ["$undated", 0]}, None, "$oldest"]}}},
+    ]
 
 
 class StockReleaseResult(NamedTuple):
@@ -82,6 +110,18 @@ class ProductRepository(BaseRepository):
     @property
     def id_field(self) -> str:
         return "product_id"
+
+    def update(self, id: str, data: Dict) -> bool:
+        """BaseRepository.update, plus: a write that switches the product on
+        stamps `switched_on_at`. A provisional buy (ruling 13) is born
+        inactive and keeps `provisional` for good, so this stamp is how
+        reorder_policy.discontinued() tells 'not switched on yet' from
+        'switched on, sold, switched off'. Every spine door that writes
+        is_active (catalog drawer, PUT /products, /products/master) writes
+        through here."""
+        if data.get("is_active") is True:
+            data["switched_on_at"] = datetime.now(timezone.utc)
+        return super().update(id, data)
 
     def find_by_sku(self, sku: str) -> Optional[Dict]:
         return self.find_one({"sku": sku})
