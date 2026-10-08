@@ -30,8 +30,9 @@ Fail loud, never pool, never silently skip:
     never blocks.
   * STOCK_ONHAND_UNKNOWN -- a shop whose on-hand read failed is written
     NOWHERE in that pass (unknown is never written as 0); every other shop's
-    true numbers still go out, and the baseline omits the unknown shop so the
-    next pass re-sends it.
+    true numbers still go out, and the baseline keeps the unknown shop's last
+    accepted number (what Shopify still shows there) so the next pass diffs
+    against it.
   * STOCK_TARGET_MISSING -- the SKU has no Shopify inventory item yet.
   * STOCK_ACTIVATION_FAILED -- Shopify said ITEM_NOT_STOCKED_AT_LOCATION, the
     item was activated at the chunk's locations, and the retry still failed.
@@ -756,16 +757,19 @@ def _writeback_stock(
     db,
     product_id: str,
     per_sku: Dict[str, Dict[str, int]],
+    mapped: Iterable[str],
     *,
     policy: Optional[str] = None,
     tracked: Optional[bool] = None,
 ) -> None:
-    """Persist what was just sent (ecom.online_stock) so the next levels pass
-    can diff against it: ``quantities = {sku: {store_id: qty}}``, read-merge-
-    write per SKU -- a POS write-back for one SKU REPLACES only that SKU's
-    per-store row, and a shop whose read failed is simply absent from it so
-    the next pass re-sends that shop. NEVER touches locally_modified.
-    Fail-soft."""
+    """Persist what was just accepted (ecom.online_stock) so the next levels
+    pass can diff against it: ``quantities = {sku: {store_id: qty}}``,
+    read-merge-write PER SHOP. A mapped shop not written this pass (its write
+    refused, its shelf unreadable) keeps its last accepted number -- what
+    Shopify still shows there, and what ``release_store_location`` must zero
+    when that shop's location is removed. A shop no longer in ``mapped``
+    leaves the row (kept, the listing would read "changed" on every pass).
+    NEVER touches locally_modified. Fail-soft."""
     try:
         coll = db["catalog_products"]
         doc = coll.find_one({"id": product_id})
@@ -780,8 +784,10 @@ def _writeback_stock(
             for sku, rows in dict(prev.get("quantities") or {}).items()
             if isinstance(rows, dict)
         }
+        keep = set(mapped)
         for sku, rows in per_sku.items():
-            quantities[sku] = {sid: int(q) for sid, q in rows.items()}
+            old = {sid: q for sid, q in (quantities.get(sku) or {}).items() if sid in keep}
+            quantities[sku] = {**old, **{sid: int(q) for sid, q in rows.items()}}
         ecom["online_stock"] = {
             "quantities": quantities,
             "policy": policy if policy is not None else prev.get("policy"),
@@ -1679,13 +1685,13 @@ async def push_skus_stock(
             sku, sid = key_of[(inv_gid, loc)]
             written_per_sku.setdefault(sku, {})[sid] = qty
     # What was accepted goes to the baseline -- per listing, only the SKUs
-    # written, only the shops written (a failed or unknown shop is omitted so
-    # the next pass re-sends it).
+    # written, only the shops written; a failed or unknown shop keeps the
+    # number it last had accepted (what Shopify still shows there).
     if written_per_sku:
         for pid, pid_skus in by_product.items():
             rows_for = {s: written_per_sku[s] for s in pid_skus if s in written_per_sku}
             if rows_for:
-                _writeback_stock(db, pid, rows_for, policy=policy, tracked=tracked)
+                _writeback_stock(db, pid, rows_for, mapped, policy=policy, tracked=tracked)
     # What Shopify ACCEPTED, not what was planned: the sync page prints these
     # as the per-shop "last written" numbers, and a refused chunk must not
     # read as written (the baseline above already only takes the accepted rows).

@@ -446,3 +446,36 @@ def test_3_online_status_for_skus_threads_strict_to_each_key_lookup():
     _kill(db2, "catalog_variants", lambda f: True, "variants died")
     with pytest.raises(RuntimeError, match="variants died"):
         oc.online_status_for_skus(db2, ["SP-1"], strict=True)
+
+
+# ---------------------------------------------------------------------------
+# 4. a shop whose write failed keeps its last-sent number
+# ---------------------------------------------------------------------------
+
+
+def test_4_a_failed_shop_keeps_its_last_sent_number_so_its_release_still_zeroes_it(monkeypatch):
+    """A sale at BV-A (2 -> 1) while BV-B's location refuses the write:
+    Shopify still shows BV-B's 1. The last-sent record used to REPLACE the
+    SKU's row with the shops written, dropping BV-B -- so once BV-B's unit
+    left the shelf, removing BV-B's location zeroed nothing and Shopify kept
+    selling a unit nobody has. Replace instead of merge -> fails."""
+    sent = {"quantities": {"SP-1": {"BV-A": 2, "BV-B": 1, "BV-C": 0}}, "tracked": True, "policy": "DENY"}
+    db = _listed(_db(a=1, b=1, c=0), online_stock=sent)
+    out = _sold_out(db, _RefuseAt(LOC_B, _responses()), monkeypatch)
+    assert out["code"] == shopify_push.STOCK_WRITE_FAILED and out["quantities"] == {"SP-1": {"BV-A": 1, "BV-C": 0}}
+    assert _baseline(db)["quantities"] == {"SP-1": {"BV-A": 1, "BV-B": 1, "BV-C": 0}}
+    db.get_collection("stock_units").update_one({"stock_id": "BV-B-u0"}, {"$set": {"status": "SOLD"}})
+    spy = _Spy(_responses())
+    _live(monkeypatch, spy)
+    rel = _run(shopify_push.release_store_location(db, "BV-B", LOC_B))
+    assert rel["ok"] is True and (INV_GID, LOC_B, 0) in spy.rows(), (rel, spy.rows())
+
+
+def test_4_a_shop_that_is_no_longer_mapped_leaves_the_record(monkeypatch):
+    """The merge keeps MAPPED shops only. BV-OLD (deactivated) is in the old
+    record; kept, every pass would see the listing as changed for ever."""
+    sent = {"quantities": {"SP-1": {"BV-A": 2, "BV-B": 1, "BV-C": 0, "BV-OLD": 4}}, "tracked": True, "policy": "DENY"}
+    db = _listed(_db(a=1, b=1, c=0), online_stock=sent)
+    out = _sold_out(db, _Spy(_responses()), monkeypatch)
+    assert out["ok"] is True, out
+    assert _baseline(db)["quantities"] == {"SP-1": {"BV-A": 1, "BV-B": 1, "BV-C": 0}}
