@@ -159,17 +159,23 @@ def test_codes_still_match_from_their_start(catalogue):
     assert _ids(catalogue, "AL-0001") == ([], 0)
 
 
+@pytest.mark.parametrize("params", [{}, {"match": "anywhere"}],
+                         ids=["till", "purchase-order"])
 @pytest.mark.parametrize("field", ["sku", "barcode"])
-def test_an_exact_code_still_comes_first(db, field):
+def test_an_exact_code_still_comes_first(db, field, params):
+    # The purchase-order box (match=anywhere) ranks the same way: only a
+    # field-start hit goes ahead of the rest, as on main, so a page of one
+    # (or the box's 20) never drops the exact code for an earlier word hit.
     code = "RB3025"
     db.products.insert_many([
         # Inserted FIRST, found only by word start ("RB3025" is its 2nd word).
         _p("SG-WORD", "Ray-Ban", f"Aviator {code}", "SG-RB-0007"),
         {**_p("SG-CODE", "Ray-Ban", "Classic", "SG-RB-0008"), field: code},
     ])
-    ids, total = _ids(db, code)
+    ids, total = _ids(db, code, **params)
     assert ids == ["SG-CODE", "SG-WORD"]
     assert total == 2
+    assert _ids(db, code, limit=1, **params) == (["SG-CODE"], 2)
 
 
 def test_pages_split_across_the_two_tiers_and_count_matches(db):

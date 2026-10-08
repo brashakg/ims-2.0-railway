@@ -298,15 +298,18 @@ class ProductRepository(BaseRepository):
             return self.search(
                 query, list(self.SEARCH_FIELDS), extra, skip=skip, limit=limit
             )
-        # What the till's rule finds comes FIRST, then what only the wide rule
-        # adds -- so no result limit can push a brand/model/SKU match off the
-        # list behind, say, thirty 'Gunmetal Gray' frames for 'ray'. Both
-        # halves sit INSIDE the wide query, so the list is exactly what
+        # What the till's rule finds from a field's START comes FIRST (an
+        # exact SKU, a scan, the brand), then the rest -- so no result limit
+        # can push it off the list behind, say, thirty 'Gunmetal Gray' frames
+        # for 'ray', or behind a model 'Aviator RB3025' for the SKU 'RB3025'.
+        # Both halves sit INSIDE the wide query, so the list is exactly what
         # count_search_products counts -- even where the till's rule finds
         # more ('  ' is everything to the till, nothing to the wide rule).
         wide_q = self._product_search_query(query, extra)
-        till_q = self._search_query(query, list(self.SEARCH_FIELDS), extra)
-        return self.find_ranked(wide_q, till_q, skip=skip, limit=limit)
+        start_q = self._search_query(
+            query, list(self.SEARCH_FIELDS), extra, word_fields=()
+        )
+        return self.find_ranked(wide_q, start_q, skip=skip, limit=limit)
 
     def count_search_products(
         self,
