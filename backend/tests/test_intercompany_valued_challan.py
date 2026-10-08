@@ -784,3 +784,39 @@ def test_d13_a_move_that_became_cannot_tell_after_ship_books_one_way(db, blank):
     assert bill["recipient_gstin"] == ""
     assert bill["vendor_gstin"] == ("" if blank == "both_shops" else GSTIN_Z_JH)
 
+
+def test_d13_challan_total_value_is_the_sum_of_its_lines(db):
+    """r4 #3: the tfoot's Value is the sum of the line values (frame 2 x 1850
+    + lens 1 x 1100 = 4,800.00 on 3 units), never Rs 0 -- the F51 defect --
+    or one line's figure."""
+    db["products"].insert_one({
+        "product_id": "P-LENS", "sku": "LN-1", "name": "Lens pair", "category": "LENS",
+        "hsn_code": "900150", "cost_price": 1200.0,
+    })
+    db["stock_units"].insert_one({
+        "stock_id": "SU-L1", "product_id": "P-LENS", "store_id": "ST-DHN-1",
+        "status": "AVAILABLE", "barcode": "BVLENS0001", "unit_cost": 1100.0,
+    })
+    lens = transfers.TransferItemInput(
+        product_id="P-LENS", sku="LN-1", product_name="Lens pair", quantity_requested=1,
+    )
+    t = _create("ST-BOK-1", extra=[lens])
+    _ship(t["id"])
+    html = _challan(t["id"])
+    foot = html[html.index("<tfoot>"): html.index("</tfoot>")]
+    assert _shows_amount(foot, 2 * UNIT_COST + 1100.0), foot
+    assert "<strong>3</strong>" in foot, foot
+
+
+def test_f51_a_line_with_a_cost_less_unit_is_valued_at_0_not_short(db):
+    """r4 #3: one of the two units carries no cost and the product has none
+    (a one-registration move, which the ship guard does not stop): the line's
+    rate is 0, so a valued paper would refuse -- never the costed unit's 1850
+    alone, nor 925 averaged with a phantom 0."""
+    db["stock_units"].update_one({"stock_id": "SU-2"}, {"$unset": {"unit_cost": "", "cost_price": ""}})
+    db["products"].update_one({}, {"$set": {"cost_price": 0}})
+    t = _shipped("ST-DHN-2")
+    stored = transfers._get_transfer(t["id"])
+    assert (stored["items"][0]["quantity_shipped"], stored["items"][0]["unit_cost"]) == (2, 0.0)
+    assert stored["total_value"] == 0.0
+
