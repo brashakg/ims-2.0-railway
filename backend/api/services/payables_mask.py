@@ -26,8 +26,6 @@ inline can_see_cost(user, "payables") check in routers/vendors/po_detail
 No DB access. No emoji (Windows cp1252).
 """
 
-import functools
-import inspect
 import re
 from typing import Any, Callable, Optional
 
@@ -165,39 +163,3 @@ def strip_approval_money(row: Any, user: Optional[dict]) -> Any:
     if isinstance(row.get("context"), dict):
         out["context"] = _without(row["context"], lambda k: bool(_CONTEXT_MONEY.search(k)))
     return out
-
-
-# --- Route decorator ---------------------------------------------------------
-
-
-def masks_supplier_money(strip: Callable[[Any, Optional[dict]], Any]):
-    """Run a JSON route's result -- and the dict detail of any HTTPException it
-    raises -- through ``strip(value, current_user)``.
-
-    Goes BETWEEN ``@router.<verb>(...)`` and ``async def`` so FastAPI registers
-    the wrapper; functools.wraps keeps the handler's signature and globals
-    visible to FastAPI through ``__wrapped__``, so Depends / Query are
-    unchanged. The handler finds the caller in its ``current_user`` argument
-    (no caller -> stripped). For a route whose return value is built on lines
-    another rule owns, this strips on top of it. Not for a route returning a
-    Response (HTML / XML): those use require_payables."""
-
-    def decorate(handler):
-        if not inspect.iscoroutinefunction(handler):
-            raise TypeError(f"{handler.__qualname__}: masks_supplier_money needs an async route")
-        signature = inspect.signature(handler)
-
-        @functools.wraps(handler)
-        async def wrapper(*args, **kwargs):
-            user = signature.bind_partial(*args, **kwargs).arguments.get("current_user")
-            try:
-                result = await handler(*args, **kwargs)
-            except HTTPException as exc:
-                if isinstance(exc.detail, (dict, list)):
-                    exc.detail = strip(exc.detail, user)
-                raise
-            return strip(result, user)
-
-        return wrapper
-
-    return decorate

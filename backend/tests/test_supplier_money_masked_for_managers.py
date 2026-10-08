@@ -292,25 +292,18 @@ def test_strips_never_mutate_what_they_were_given():
     assert pm.strip_debit_note_money(note, _user("ACCOUNTANT")) is note
 
 
-def test_route_decorator_refuses_a_sync_handler():
-    with pytest.raises(TypeError):
-        pm.masks_supplier_money(pm.strip_debit_note_money)(lambda current_user: {})
+def test_rtv_routes_are_their_own_module_s_functions():
+    """Panel 2026-10-08 (merge break with #1161): a decorator that wrapped
+    the list / issue / detail routes made each endpoint's __globals__
+    payables_mask's, so a check that reads a route's gate off its own module
+    (#1161's _route_gate_constant) found no gate there. The strip is called
+    inline; every route is the router module's own, unwrapped function."""
+    import api.routers.rtv_debit_notes as r
 
-
-def test_route_decorator_strips_results_and_error_details():
-    @pm.masks_supplier_money(pm.strip_debit_note_money)
-    async def handler(note_id: str, current_user: dict):
-        if note_id == "boom":
-            raise HTTPException(status_code=409, detail={"error": "x", "totals": {"t": 1}})
-        return {"debit_note_id": note_id, "totals": {"grand_total_paise": 9}}
-
-    # The caller is found whether passed by keyword or by position.
-    assert _run(handler("DN-1", current_user=_user("STORE_MANAGER"))) == {"debit_note_id": "DN-1"}
-    assert _run(handler("DN-1", _user("AREA_MANAGER"))) == {"debit_note_id": "DN-1"}
-    assert _run(handler("DN-1", _user("ACCOUNTANT")))["totals"] == {"grand_total_paise": 9}
-    with pytest.raises(HTTPException) as ei:
-        _run(handler("boom", _user("STORE_MANAGER")))
-    assert ei.value.detail == {"error": "x"}
+    for route in r.router.routes:
+        fn = route.endpoint
+        assert fn.__globals__ is vars(r), route.path
+        assert not hasattr(fn, "__wrapped__"), route.path
 
 
 # ============================================================================
