@@ -104,6 +104,21 @@ def test_a_multi_word_name_is_found(catalogue, q, pid):
     assert total == 1
 
 
+@pytest.mark.parametrize(
+    "q, pids",
+    [("ban", ["RB-HYP"]), ("71", ["OK-SLA"]), ("1109/71", ["OK-SLA"]),
+     ("ray", ["RB-HYP", "EY-DOT", "NE-UND"]), ("ray 71", [])],
+)
+def test_a_hyphen_slash_dot_or_underscore_starts_a_word(db, q, pids):
+    db.products.insert_many([
+        _p("RB-HYP", "Ray-Ban", "Clubmaster", "SG-RB-0002"),
+        _p("OK-SLA", "Oakley", "Holbrook 1109/71", "SG-OK-0001"),
+        _p("EY-DOT", "Eye.Ray", "Pilot", "SG-EY-0001"),
+        _p("NE-UND", "Neo_Ray", "Round", "SG-NE-0001"),
+    ])
+    assert _ids(db, q) == (pids, len(pids))
+
+
 def test_variant_is_a_code_matched_from_its_start(catalogue):
     # One rule per field: the purchase-order box (#1170) also treats variant
     # as a code, so "black" is not a word-start hit on "Matte Black".
@@ -156,6 +171,17 @@ def test_pages_split_across_the_two_tiers_and_count_matches(db):
     assert total1 == total2 == 2
 
 
+def test_a_page_never_holds_more_than_the_limit(db):
+    db.products.insert_many([
+        _p("SG-W1", "Ray-Ban", "Aviator RB3025", "SG-RB-0007"),
+        _p("SG-W2", "Ray-Ban", "Clubmaster RB3025", "SG-RB-0009"),
+        _p("SG-CODE", "Ray-Ban", "Classic", "RB3025"),
+    ])
+    assert _ids(db, "RB3025", skip=0, limit=2) == (["SG-CODE", "SG-W1"], 3)
+    assert _ids(db, "RB3025", skip=1, limit=2) == (["SG-W1", "SG-W2"], 3)
+    assert _ids(db, "RB3025", skip=2, limit=2) == (["SG-W2"], 3)
+
+
 def test_every_product_search_uses_the_same_rule(catalogue):
     # The rule is the repository's, not a call's: a plain search over the
     # product fields (as any other ranked search builds on) finds what the
@@ -165,3 +191,23 @@ def test_every_product_search_uses_the_same_rule(catalogue):
     repo = ProductRepository(catalogue.products)
     plain = repo.search("optix", list(repo.SEARCH_FIELDS), {"is_active": True})
     assert [d["product_id"] for d in plain] == ["CL-AIR"]
+
+
+@pytest.mark.parametrize("q", ["optix", "Air Optix", "ban", "oasys"])
+def test_the_fallback_mock_db_lists_what_it_counts(q):
+    # Local no-Mongo mode runs on MockCollection; a word-only hit sits in the
+    # $nor half of the ranked query, so the mock has to understand $nor.
+    from database.connection import MockCollection
+    from database.repositories.product_repository import ProductRepository
+
+    coll = MockCollection("products")
+    coll.insert_many([
+        _p("CL-AIR", "Alcon", "Air Optix Plus HydraGlyde", "CL-AL-0001"),
+        _p("CL-OAS", "Johnson & Johnson", "Acuvue Oasys 1-Day", "CL-JJ-0001"),
+        _p("SG-AVI", "Ray-Ban", "Aviator Classic", "SG-RB-0001"),
+    ])
+    repo = ProductRepository(coll)
+    expected = {"optix": ["CL-AIR"], "Air Optix": ["CL-AIR"], "ban": ["SG-AVI"],
+                "oasys": ["CL-OAS"]}[q]
+    assert [d["product_id"] for d in repo.search_products(q)] == expected
+    assert repo.count_search_products(q) == len(expected)
