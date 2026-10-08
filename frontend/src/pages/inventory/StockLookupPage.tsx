@@ -8,9 +8,9 @@
 // answer from an allow-list), so there is no cost to hide here. The price
 // shown is the till's own (posPriceGuard), never a re-typed chain. Where the
 // till does not count a product a 0 would be a limit the till does not keep,
-// so the cell says so instead: the till's own line type (mapCategory,
-// imported) checked against the sale guard's own lists (the server sends
-// them) and the shop's `tracked` (it holds a unit of it). A lens is counted
+// so the cell says 'Not stocked here' instead: the till's own line type
+// (mapCategory, imported) checked against the sale guard's own lists (the
+// server sends them) and the shop's `tracked` (it holds a unit of it). A lens is counted
 // by power in the Power Grid; only a role that may open it is sent there.
 
 import { useRef, useState, type FormEvent } from 'react';
@@ -167,7 +167,7 @@ export default function StockLookupPage() {
                           {c?.tracked && !notCounted.includes(lineType) ? (
                             <span className={n > 0 ? 'font-semibold text-gray-900' : 'text-gray-400'}>{n}</span>
                           ) : (
-                            <span className="text-xs text-gray-400">not tracked here</span>
+                            <span className="text-xs text-gray-400">Not stocked here</span>
                           )}
                           {(c?.in_transit ?? 0) > 0 && (
                             <div className="text-xs text-amber-700">+{c!.in_transit} on the way</div>

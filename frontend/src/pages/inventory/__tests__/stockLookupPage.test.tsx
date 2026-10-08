@@ -7,7 +7,8 @@
 // Round 7: the till REFUSES an offer above MRP and a zero or NaN price
 // (posPriceGuard), so those rows read '-'; a re-typed offer||mrp chain would
 // show Rs 15,990 / Rs 0 / Rs NaN, a price the till never charges.
-// Round 5: a shop the till does not count reads 'not tracked here', a lens
+// Round 5: a shop the till does not count reads 'Not stocked here' (owner
+// ruling 2026-10-08; it read 'not tracked here'), a lens
 // 'see Power Grid' - never a 0 the till would not keep.
 // Round 6: the line type is the till's own mapCategory (imported, never
 // re-typed: 'LENSES' and 'SVC' are its spellings too), checked against the
@@ -145,8 +146,8 @@ describe('Stock lookup screen', () => {
 
   // Every spelling below is one the till's mapCategory takes; the expected
   // cells are what the till does with it (GET /inventory/sellable).
-  const COUNTED = ['1', 'not tracked here'];
-  const NOT_COUNTED = ['not tracked here', 'not tracked here'];
+  const COUNTED = ['1', 'Not stocked here'];
+  const NOT_COUNTED = ['Not stocked here', 'Not stocked here'];
   const LENS_POINTER = ['counted by power - ask the optometrist or a manager'];
   it.each([
     ['FRAME', COUNTED],

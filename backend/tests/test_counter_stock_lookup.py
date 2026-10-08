@@ -748,7 +748,7 @@ def test_d7b3_in_transit_is_a_transferred_unit_on_its_way(call, mongo_db, label,
 # Round 5: where the till's sale guard does not count a product it sells any
 # quantity (orders/stock: tracked == 0 -> no check; a LENS line is the lens
 # grid's; a SERVICE line has no stock), and GET /inventory/sellable says None.
-# A 0 there is no limit, so the screen reads 'not tracked here', or the lens
+# A 0 there is no limit, so the screen reads 'Not stocked here', or the lens
 # pointer -- never 0.
 # Round 6: the item_type is the till's own (POS mapCategory, TypeScript; its
 # category -> item_type half is pinned by the screen's vitest). This corpus is
@@ -780,7 +780,7 @@ def test_d7b3_a_shop_the_till_does_not_count_is_not_tracked(call, mongo_db, monk
     # void, damaged, returned to the vendor or a legacy spelling is tracked
     # (the till refuses, /sellable says 0). One shop per lifecycle state and
     # per stored shape, each as that shop's SOLE row: a lookup that dropped
-    # any status from its tracked match would read 'not tracked' there. Each
+    # any status from its tracked match would read 'Not stocked here' there. Each
     # carries a ship-to stamp, as a received unit can keep one.
     sole = {s.value: {"status": s.value} for s in StockState}
     sole.update({label: shape for label, shape, _sell, _phys in _SHAPES})
@@ -818,7 +818,7 @@ def test_d7b3_a_shop_the_till_does_not_count_is_not_tracked(call, mongo_db, monk
         assert counted is (till is not None), (
             f"a {item_type or 'blank'} line at {shop} ({sole_shops.get(shop, 'seeded above')}): the till "
             f"{'limits it to ' + str(till) if till is not None else 'does not count it'}, "
-            f"the screen would {'show ' + str(cell.get('available')) if counted else 'say not tracked'}"
+            f"the screen would {'show ' + str(cell.get('available')) if counted else 'say Not stocked here'}"
         )
         if till is not None:
             assert cell["available"] == till
