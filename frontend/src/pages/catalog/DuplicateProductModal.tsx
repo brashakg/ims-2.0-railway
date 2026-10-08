@@ -51,6 +51,15 @@ function statusNote(info: DuplicateProductInfo): { text: string; tone: 'ok' | 'w
       tone: 'warn',
     };
   }
+  if (info.discarded_draft) {
+    // Same kind of product: the server already brought it back (provisional
+    // above). Another kind: say how to bring it back, never a dead "archived".
+    const kind = String(info.category || 'another category').toLowerCase();
+    return {
+      text: `A discarded draft, ordered before as ${kind} — choose ${kind} as the category to bring it back`,
+      tone: 'warn',
+    };
+  }
   if (info.is_active === false) return { text: 'Inactive (archived)', tone: 'warn' };
   if (String(info.catalog_status || '').toUpperCase() === 'DRAFT') {
     return { text: 'Draft — in your catalog, not sellable yet', tone: 'warn' };

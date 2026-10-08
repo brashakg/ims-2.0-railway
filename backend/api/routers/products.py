@@ -494,9 +494,44 @@ def _create_via_canonical_door(
             db=db,
         )
     except _pm.ProductMasterError as err:
+        if source == "FORM":
+            _revive_typed_discarded_draft(err, product, current_user, db)
         raise HTTPException(
             status_code=err.status, detail=_pm_error_detail(err)
         ) from err
+
+
+def _revive_typed_discarded_draft(err, product: "ProductCreate", current_user: dict, db) -> None:
+    """Add product meets the SAME answer the PO door gives (R1-64): an item
+    typed again as the same kind of product as a draft an admin discarded
+    gets that draft back (product_master.revive_discarded_draft) -- in Needs
+    review, provisional, at the MRP typed now -- and the 409 names it as the
+    ordered draft it is, so the popup leads to finishing it in the editor
+    instead of an "Inactive (archived)" dead end. Fail-soft: the 409 stands
+    as it was when the revive cannot run."""
+    conflict = getattr(err, "conflict", None) or {}
+    if err.status != 409 or not conflict.get("product_id"):
+        return
+    try:
+        from ..dependencies import get_audit_repository as _get_audit_repository
+
+        repo = get_product_repository()
+        found = repo.find_by_id(conflict["product_id"]) if repo is not None else None
+        if not _pm.revivable_discarded_draft(
+            found, category=_pm.resolve_category(product.category)
+        ):
+            return
+        if _pm.revive_discarded_draft(
+            conflict["product_id"],
+            repo,
+            db=db,
+            actor=current_user.get("user_id"),
+            mrp=product.mrp,
+            audit_repo=_get_audit_repository(),
+        ):
+            err.conflict = _pm.existing_product_summary(repo.find_by_id(conflict["product_id"]))
+    except Exception:  # noqa: BLE001 - the duplicate answer stands
+        logger.warning("[PRODUCTS] revive on Add product failed", exc_info=True)
 
 
 def _build_product_data(product: "ProductCreate", created_by, created_by_name=None) -> dict:

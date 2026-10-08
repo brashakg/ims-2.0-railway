@@ -383,3 +383,146 @@ async def escalate_grn(
         )
 
     return {"message": "GRN escalated to HQ", "grn_id": grn_id}
+
+
+# The receiving MANAGERS (owner 2026-09-28: receiving is managers only) -- and
+# the over-order task is the shop's store manager's (2026-09-29).
+_DROP_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER")
+
+
+@router.post("/grn/{grn_id}/drop-over-order")
+async def drop_over_order(
+    grn_id: str, current_user: dict = Depends(require_roles(*_DROP_ROLES))
+):
+    """'Not received' for the lines a receipt holds BEYOND its order (the
+    catalogue release's order cap, reason over_order): the vendor did not send
+    those extra units -- a second receipt of the same box, say. The way out
+    for a held receipt that already put other lines on the shelf, which a void
+    refuses (R1-13); "Add to stock" is the other answer, when the extra units
+    really came.
+
+    Each such line is cut to the units it put on the shelf (by their origin,
+    _received_on): accepted and received drop by the rest, recorded as
+    dropped_qty. Lines held for the catalogue stay held. Nothing left held ->
+    ACCEPTED. The PO's received counts are refreshed, the store manager's
+    over-order tasks close, and an audit row records who said so. Under the
+    accept claim, so no accept runs meanwhile; every read fails closed."""
+    grn_repo = get_grn_repository()
+    if grn_repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    grn = grn_repo.find_by_id(grn_id)
+    if not grn or not can_access_store_scoped(grn.get("store_id"), current_user):
+        raise HTTPException(status_code=404, detail="GRN not found")
+    held = grn.get("unresolved_lines") or []
+    over = {ln.get("product_id") for ln in held if ln.get("reason") == "over_order"}
+    if grn.get("status") != "PARTIALLY_ACCEPTED" or not over:
+        raise HTTPException(
+            status_code=400,
+            detail="Nothing on this receipt is held beyond its order.",
+        )
+    stock_repo = get_stock_repository()
+    if stock_repo is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Could not count what this receipt put on the shelf. Try again.",
+        )
+    claim_token = _claim_grn_for_accept(grn_repo, grn_id, current_user.get("user_id"))
+    if claim_token is None:
+        raise HTTPException(
+            status_code=409,
+            detail="This receipt is being accepted right now. Refresh in a moment.",
+        )
+    try:
+        items, dropped = [], 0
+        for idx, it in enumerate(grn.get("items") or []):
+            pid = it.get("product_id")
+            accepted = int(it.get("accepted_qty") or 0)
+            if pid not in over or accepted <= 0:
+                items.append(it)
+                continue
+            try:
+                on_shelf = _grn_already_minted(
+                    stock_repo, _received_on(grn, product_id=pid, grn_line_index=idx)
+                )
+            except Exception as exc:  # noqa: BLE001 - fail closed
+                raise HTTPException(
+                    status_code=503,
+                    detail="Could not count what this receipt put on the shelf. Try again.",
+                ) from exc
+            drop = max(0, accepted - on_shelf)
+            dropped += drop
+            items.append(
+                {
+                    **it,
+                    "accepted_qty": accepted - drop,
+                    "received_qty": max(0, int(it.get("received_qty") or 0) - drop),
+                    "dropped_qty": int(it.get("dropped_qty") or 0) + drop,
+                }
+            )
+        rest = [ln for ln in held if ln.get("reason") != "over_order"]
+        status = "PARTIALLY_ACCEPTED" if rest else "ACCEPTED"
+        patch = {
+            "items": items,
+            "unresolved_lines": rest,
+            "status": status,
+            "over_order_dropped_by": current_user.get("user_id"),
+            "over_order_dropped_at": datetime.now().isoformat(),
+        }
+        written = _guarded_grn_write(
+            grn_repo,
+            {"grn_id": grn_id, "status": "PARTIALLY_ACCEPTED", "accept_lock_token": claim_token},
+            {"$set": patch},
+        )
+        if written is None:
+            written = bool(grn_repo.update(grn_id, patch))
+        if written is not True:
+            raise HTTPException(
+                status_code=503 if written is _GRN_WRITE_ERROR else 409,
+                detail="The receipt changed while this ran. Refresh and check it before trying again.",
+            )
+        from .grn_accept import _complete_receipt_tasks, refresh_po_received
+        from ._shared import _get_db
+
+        po_status = refresh_po_received(
+            get_purchase_order_repository(), grn_repo, grn.get("po_id")
+        )
+        try:
+            _db = _get_db()
+            if _db is not None:
+                _complete_receipt_tasks(
+                    _db,
+                    grn_id,
+                    "The units held beyond the order were not received.",
+                    category="Purchase",
+                )
+        except Exception:  # noqa: BLE001 - a task problem never undoes the drop
+            logger.warning("[VENDOR] GRN %s: over-order tasks not closed", grn_id, exc_info=True)
+        try:
+            audit = get_audit_repository()
+            if audit is not None:
+                audit.create(
+                    {
+                        "action": "grn.over_order_dropped",
+                        "entity_type": "grn",
+                        "entity_id": grn_id,
+                        "user_id": current_user.get("user_id"),
+                        "detail": {
+                            "grn_number": grn.get("grn_number"),
+                            "po_id": grn.get("po_id"),
+                            "dropped_units": dropped,
+                            "products": sorted(str(p) for p in over),
+                        },
+                    }
+                )
+        except Exception:  # noqa: BLE001 - the audit never undoes the drop
+            logger.warning("[VENDOR] GRN %s: drop audit failed", grn_id, exc_info=True)
+        return {
+            "message": f"{dropped} unit(s) held beyond the order were marked not received",
+            "grn_id": grn_id,
+            "grn_status": status,
+            "dropped_units": dropped,
+            "po_status": po_status,
+            "unresolved_lines": rest,
+        }
+    finally:
+        _release_grn_accept_claim(grn_repo, grn_id, claim_token)

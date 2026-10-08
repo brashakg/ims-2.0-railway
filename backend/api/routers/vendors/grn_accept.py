@@ -180,10 +180,13 @@ def draft_discard_blockers(product_id: str) -> Optional[List[str]]:
                 "Purchase Orders first."
             )
         else:
+            # No door cancels the unreceived rest of one line yet (draft
+            # #1165 adds it): a person does, so the sentence names the person.
             blockers.append(
                 f"Purchase order {number} still expects it, and has already "
-                "received other goods, so it cannot be cancelled. Finish the item "
-                "in the product editor instead."
+                "received other goods, so the order itself cannot be cancelled. "
+                "Ask the purchase manager to cancel the rest of that line, or "
+                "finish the item in the product editor."
             )
     for g in _pm.strict_find_many(
         grn_repo,
@@ -314,11 +317,6 @@ def _hand_to_store_manager(db, grn_id: str, grn: dict, over: List[dict], product
     shop = _shop_label(db, store_id)
     receipt = grn.get("grn_number") or grn_id
     po = grn.get("po_number") or grn.get("po_id")
-    # A void is refused once a receipt has put anything on the shelf.
-    try:
-        voidable = not _grn_already_minted(get_stock_repository(), _received_on(grn))
-    except Exception:  # noqa: BLE001
-        voidable = False
     # Opens that vendor's "Receipts still waiting", where the receipt is voided.
     vendor_id = grn.get("vendor_id")
     link = "/purchase/receive" + (f"?vendor_id={quote(str(vendor_id))}" if vendor_id else "")
@@ -347,17 +345,13 @@ def _hand_to_store_manager(db, grn_id: str, grn: dict, over: List[dict], product
                 else ""
             )
         )
+        # Both answers work whatever else the receipt put on the shelf (a void
+        # does not, once it has: R1-14), so the advice never goes stale.
         description = (
             f"Receipt {receipt} at {shop} is holding more than its order needs "
-            f"({item}). "
-            + (
-                "If it is a second receipt of the same box, void it in Receive Goods "
-                "> Receipts still waiting. "
-                if voidable
-                else ""
-            )
-            + "If the vendor really sent the extra units, press 'Add to stock' on it "
-            "in Receive Goods > Receipts still waiting."
+            f"({item}). In Receive Goods > Receipts still waiting: if the vendor "
+            "did not send these extra units (a second receipt of the same box, "
+            "say), press 'Not received'; if they really did, press 'Add to stock'."
         )
         for uid, task_store in people or [(None, store_id)]:
             _raise_once(
@@ -443,9 +437,77 @@ def _put_on_shelf(
         raise
     # The receipt's cost finished a draft mid-accept (gst._finished_by_the_promote):
     # its OTHER held receipts go on the shelf now that this claim is handed back.
+    # And a line held for the catalogue whose product is complete NOW was
+    # finished while this claim was held: that save's release lost the claim
+    # to this accept (and swallowed its 409), so the release is run here, the
+    # claim handed back -- whichever of the two finishes last sees the other
+    # (R1-19, follow-ups 1 and 43).
+    product_repo = get_product_repository()
+    for ln in result.get("unresolved_lines") or []:
+        if ln.get("reason") != "incomplete_catalog" or product_repo is None:
+            continue
+        try:
+            now_prod = product_repo.find_by_id(ln.get("product_id"))
+        except Exception:  # noqa: BLE001 - the hold stands; 'Add to stock' retries
+            continue
+        if now_prod is not None and not _pm.compute_catalog_status(now_prod)[1]:
+            deferred_releases.append(ln["product_id"])
     for pid in dict.fromkeys(deferred_releases):
         release_held_receipts(pid)
     return result
+
+
+def refresh_po_received(po_repo, grn_repo, po_id) -> Optional[str]:
+    """Advance a PO's received state from its receipts: sum what every receipt
+    put on the shelf (_cumulative_received_by_product) and compare against
+    the ordered lines -- full receipt -> RECEIVED, otherwise PARTIALLY_RECEIVED.
+    Run by every accept and by dropping a receipt's units held beyond its
+    order. Fail-soft: answers the new status, or None with no PO to update."""
+    po_status = None
+    if po_repo is not None and po_id:
+        try:
+            po = po_repo.find_by_id(po_id)
+            received_by_product = _cumulative_received_by_product(grn_repo, po_id)
+            po_items = (po.get("items") if po else []) or []
+            po_status = compute_po_receipt_state(po_items, received_by_product)
+            # Map the cumulative per-product received qty down onto each PO line
+            # + derive the line residual status (drives the receiving cockpit's
+            # "open POs" / "pending not-received" panels).
+            updated_items = []
+            for it in po_items:
+                ordered = it.get("ordered_qty", it.get("quantity", 0)) or 0
+                recv = received_by_product.get(it.get("product_id"), 0)
+                updated_items.append(
+                    {
+                        **it,
+                        "received_qty": recv,
+                        "line_status": (
+                            "RECEIVED"
+                            if ordered and recv >= ordered
+                            else ("PARTIAL" if recv > 0 else "OPEN")
+                        ),
+                    }
+                )
+            po_repo.update(
+                po_id,
+                {
+                    "status": po_status,
+                    "items": updated_items,
+                    "received_qty_by_product": received_by_product,
+                    "total_received_qty": sum(received_by_product.values()),
+                    "last_received_at": datetime.now().isoformat(),
+                },
+            )
+        except Exception:  # noqa: BLE001
+            # Never lose the stock write on a PO-update failure. Best effort:
+            # at least flag the PO as partially received.
+            try:
+                po_repo.update(po_id, {"status": "PARTIALLY_RECEIVED"})
+                po_status = "PARTIALLY_RECEIVED"
+            except Exception:  # noqa: BLE001
+                pass
+
+    return po_status
 
 
 def _accept_grn_claimed(
@@ -825,7 +887,10 @@ def _accept_grn_claimed(
         grn_id,
         claim_token,
         {
-            "accepted_at": datetime.now().isoformat(),
+            # When the receipt was FIRST accepted: a later release or re-accept
+            # of its held lines never restamps it (R1-21); it is last_accepted_at.
+            "accepted_at": grn.get("accepted_at") or datetime.now().isoformat(),
+            "last_accepted_at": datetime.now().isoformat(),
             "accepted_by": user_id,
             "units_added": units_added,
             "unresolved_lines": unresolved_lines,
@@ -858,52 +923,8 @@ def _accept_grn_claimed(
             ),
         }
 
-    # Advance the PO received state. Sum the accepted qty across EVERY accepted
-    # GRN for this PO (this one is now ACCEPTED) and compare against the ordered
-    # lines: full receipt -> RECEIVED, otherwise PARTIALLY_RECEIVED. Fail-soft.
-    po_status = None
-    if po_repo is not None and po_id:
-        try:
-            po = po_repo.find_by_id(po_id)
-            received_by_product = _cumulative_received_by_product(grn_repo, po_id)
-            po_items = (po.get("items") if po else []) or []
-            po_status = compute_po_receipt_state(po_items, received_by_product)
-            # Map the cumulative per-product received qty down onto each PO line
-            # + derive the line residual status (drives the receiving cockpit's
-            # "open POs" / "pending not-received" panels).
-            updated_items = []
-            for it in po_items:
-                ordered = it.get("ordered_qty", it.get("quantity", 0)) or 0
-                recv = received_by_product.get(it.get("product_id"), 0)
-                updated_items.append(
-                    {
-                        **it,
-                        "received_qty": recv,
-                        "line_status": (
-                            "RECEIVED"
-                            if ordered and recv >= ordered
-                            else ("PARTIAL" if recv > 0 else "OPEN")
-                        ),
-                    }
-                )
-            po_repo.update(
-                po_id,
-                {
-                    "status": po_status,
-                    "items": updated_items,
-                    "received_qty_by_product": received_by_product,
-                    "total_received_qty": sum(received_by_product.values()),
-                    "last_received_at": datetime.now().isoformat(),
-                },
-            )
-        except Exception:  # noqa: BLE001
-            # Never lose the stock write on a PO-update failure. Best effort:
-            # at least flag the PO as partially received.
-            try:
-                po_repo.update(po_id, {"status": "PARTIALLY_RECEIVED"})
-                po_status = "PARTIALLY_RECEIVED"
-            except Exception:  # noqa: BLE001
-                pass
+    # Advance the PO received state (refresh_po_received). Fail-soft.
+    po_status = refresh_po_received(po_repo, grn_repo, po_id)
 
     _sync_catalogue_tasks(grn_id, grn, unresolved_lines, grn_status, product_repo)
 
@@ -1011,6 +1032,28 @@ def _raise_once(
     from ...services.task_triggers import create_system_task
 
     tasks = db.get_collection("tasks")
+    # A task still open says what is true NOW (R1-22): the first of two held
+    # items finished since it was raised leaves its "Finish 2 item(s)".
+    try:
+        tasks.update_many(
+            {
+                "source_ref": dedupe_ref,
+                "status": {"$in": _TASK_OPEN},
+                "$or": [
+                    {"title": {"$ne": task.get("title")}},
+                    {"description": {"$ne": task.get("description")}},
+                ],
+            },
+            {
+                "$set": {
+                    "title": task.get("title"),
+                    "description": task.get("description"),
+                    "updated_at": datetime.now(),
+                }
+            },
+        )
+    except Exception:  # noqa: BLE001 - stale words never stop the task being raised
+        logger.warning("[TASKS] could not refresh %s", dedupe_ref, exc_info=True)
     if ever and tasks.find_one({"source_ref": dedupe_ref}):
         return True
     repo = get_task_repository()

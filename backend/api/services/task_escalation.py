@@ -148,7 +148,9 @@ def merge_into_twin(
         return None
     if not twin:
         return None
-    note = f"Already with {uid} as task {twin.get('task_id')}."
+    # A person reads this note: their name, never a raw user id (R1-103).
+    who = target.get("full_name") or target.get("username") or target.get("name") or uid
+    note = f"Already with {who} as task {twin.get('task_id')}."
     return (
         {
             "status": "COMPLETED",

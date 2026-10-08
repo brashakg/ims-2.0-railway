@@ -1372,6 +1372,17 @@ async def escalate_task(
     target = await _escalate_reassign_notify(
         repo, task, reason="manual", by=by, now=now
     )
+    # The person above already holds this task's twin (merge_into_twin): it
+    # was closed into that one -- say so, never "no higher owner" (R1-50).
+    after = repo.find_by_id(task_id) or {}
+    if canon_status(after.get("status")) == "COMPLETED":
+        return {
+            "task_id": task_id,
+            "status": "COMPLETED",
+            "escalation_level": int(task.get("escalation_level", 0) or 0),
+            "escalated_to": None,
+            "message": after.get("completion_notes") or "Task closed into the one already above it",
+        }
     return {
         "task_id": task_id,
         "status": "ESCALATED",

@@ -115,6 +115,16 @@ describe('DuplicateProductModal', () => {
     expect(onAddVariant).not.toHaveBeenCalled();
   });
 
+  // R1-64: a draft an admin discarded, typed as another kind of product (the
+  // same kind is brought back by the server) -- never a dead "archived".
+  it('a discarded draft of another kind says how to bring it back', () => {
+    renderModal({
+      info: { ...INFO, category: 'FRAME', is_active: false, catalog_status: 'DRAFT', discarded_draft: true },
+    });
+    expect(screen.getByText(/A discarded draft, ordered before as frame/)).toBeInTheDocument();
+    expect(screen.queryByText(/Inactive \(archived\)/)).toBeNull();
+  });
+
   it('busy disables the actions and suppresses the Enter shortcut', () => {
     const { onAddVariant } = renderModal({ busy: true });
     fireEvent.keyDown(window, { key: 'Enter' });

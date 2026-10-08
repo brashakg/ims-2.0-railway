@@ -139,6 +139,17 @@ def _refuse_items_we_already_have(items, product_repo) -> dict:
                 # Round 5: a draft an admin discarded is ordered again -- the
                 # order gets that draft back once it is stored (create_po).
                 revive[idx] = found
+            elif _pm.revivable_discarded_draft(found):
+                # Discarded as another kind of product: typed as THAT kind it
+                # comes back; nobody can "switch it back on" (R2-17).
+                spec = _pm.category_spec(found.get("category"))
+                switched_off.append(
+                    {
+                        "line": idx,
+                        "existing": err.conflict,
+                        "discarded_as": spec.display if spec else found.get("category"),
+                    }
+                )
             elif found.get("is_active") is False and not found.get("provisional"):
                 # Deleted or switched off: "use it?" would order stock of a
                 # product nobody can sell. A person switches it back on first.
@@ -157,17 +168,25 @@ def _refuse_items_we_already_have(items, product_repo) -> dict:
         size = f", size {e['size']}" if e.get("size") else ""
         return f"{e.get('name') or e.get('sku')}{size} (SKU {e.get('sku')})"
 
+    def _way_back(m: dict) -> str:
+        if m.get("discarded_as"):
+            return (
+                f"{_named(m['existing'])} was ordered before as a "
+                f"{str(m['discarded_as']).lower()} and its draft was discarded: type "
+                f"it as a {str(m['discarded_as']).lower()} to order it again."
+            )
+        return (
+            f"In the catalogue but switched off: {_named(m['existing'])}. Ask the "
+            "catalogue manager to switch it back on, then order it."
+        )
+
     if switched_off:
         raise HTTPException(
             status_code=409,
             detail={
                 "code": "SWITCHED_OFF_IN_CATALOGUE",
-                "message": (
-                    "In the catalogue but switched off: "
-                    + ", ".join(_named(m["existing"]) for m in switched_off)
-                    + ". Ask the catalogue manager to switch it back on, then "
-                    "order it -- nothing was ordered."
-                ),
+                "message": " ".join(_way_back(m) for m in switched_off)
+                + " Nothing was ordered.",
                 "matches": switched_off,
             },
         )
@@ -519,7 +538,6 @@ async def create_po(
         )
 
     po_id = str(uuid.uuid4())
-    po_number = generate_po_number(po.delivery_store_id)
 
     # Validate vendor exists
     if vendor_repo is not None:
@@ -608,6 +626,11 @@ async def create_po(
         )
         it.sku = created.get("sku")
         it.new_product = None
+
+    # The number is taken only once every refusal above has passed (vendor,
+    # unknown product, already in the catalogue, eye size, an invalid typed
+    # line): a refused order never burns a consecutive PO number (R1-72).
+    po_number = generate_po_number(po.delivery_store_id)
 
     # Who supplies whom decides CGST+SGST vs IGST (owner: "GST should be
     # calculated according to interstate or intrastate as per GST norms").

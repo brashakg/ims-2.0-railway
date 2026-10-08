@@ -387,6 +387,19 @@ class TaskmasterAgent(JarvisAgent):
                             {"_id": task["_id"]},
                             {"$set": merged[0], "$push": {"history": merged[1]}},
                         )
+                        # Every TASKMASTER action records a before/after row --
+                        # closing a task into its twin too (R1-31).
+                        await self._audit_log(
+                            action="task_merged",
+                            target=str(task.get("task_id") or task.get("_id")),
+                            before=before,
+                            after={
+                                "status": merged[0]["status"],
+                                "assigned_to": task.get("assigned_to"),
+                                "completion_notes": merged[0]["completion_notes"],
+                            },
+                            tier=1,
+                        )
                         actions.append(
                             {"action": "task_merged", "task_id": task.get("task_id")}
                         )

@@ -2355,6 +2355,12 @@ def test_r5_a_receipt_that_accepted_none_of_the_draft_does_not_hold_it(world):
             "cancel that order" not in detail and "cannot be cancelled" in detail,
             f"R5: the refusal tells the admin to cancel an order cancel refuses ({detail})",
         )
+        # R1-5 (owner 2026-10-08): the way out is the rest of the LINE, which a
+        # person cancels until draft #1165's door lands -- said in plain words.
+        finding(
+            "ask the purchase manager to cancel the rest of that line" in detail.lower(),
+            f"R1-5: the refusal does not say the rest of the line can be cancelled ({detail})",
+        )
 
 
 def test_r5_the_discard_refuses_loudly_when_orders_cannot_be_read(world, monkeypatch):
@@ -3201,3 +3207,409 @@ def test_r5b_a_later_save_heals_a_stale_ordered_draft_copy_only(world):
         world.db.catalog_products.find_one({"id": "imp-1"})["needs_review"] is True,
         "R5b: saving an unrelated product cleared an import's needs_review",
     )
+
+
+# ---------------------------------------------------------------------------
+# Round 6 (2026-10-08): the open list after the cloud round
+# ---------------------------------------------------------------------------
+
+
+def _receive_some(world, po, qtys, invoice_no):
+    """Receive Goods for the lines named in `qtys` ({product_id: n}) only,
+    then "Add to stock"."""
+    created = _run(
+        vd.create_grn(
+            vd.GRNCreate(
+                po_id=po["po_id"],
+                vendor_invoice_no=invoice_no,
+                vendor_invoice_date="2026-09-28",
+                items=[
+                    vd.GRNItemCreate(
+                        product_id=pid, received_qty=q, accepted_qty=q, rejected_qty=0, tallied=True
+                    )
+                    for pid, q in qtys.items()
+                ],
+                attachment_file_id="F-RECEIPT-PHOTO",
+                attachment_filename="bill.jpg",
+                attachment_mime="image/jpeg",
+            ),
+            MANAGER,
+        )
+    )
+    accepted = _run(vd.accept_grn(created["grn_id"], MANAGER))
+    return created, accepted
+
+
+def _mixed_held_receipt(world):
+    """A PO for the typed Boss x2 and a catalogued Carrera x1. Receipt 1 brings
+    the Boss (held for the catalogue); receipt 2 -- a second count of the same
+    box -- brings Boss x2 AND the Carrera (shelved at once). Finishing the
+    Boss shelves receipt 1 and holds receipt 2's Boss line beyond the order:
+    one shelved line, one over-order line on ONE receipt (R1-13)."""
+    carrera = world.catalogue_frame(
+        "Carrera", "CA 8895", "807", "54", mrp=6990, offer=6490, cost=3155.76
+    )
+    po = world.raise_po(
+        [
+            {"new_product": dict(BOSS_TYPED), "quantity": 2, "unit_price": 1200},
+            {
+                "product_id": carrera["product_id"],
+                "product_name": "Carrera CA 8895 807",
+                "sku": carrera["sku"],
+                "quantity": 1,
+                "unit_price": 3200,
+            },
+        ]
+    )
+    boss = po["items"][0]["product_id"]
+    grn1, _ = _receive_some(world, po, {boss: 2}, "JOT/26-27/0901")
+    grn2, _ = _receive_some(
+        world, po, {boss: 2, carrera["product_id"]: 1}, "JOT/26-27/0901-DUP"
+    )
+    return po, boss, carrera["product_id"], grn1, grn2
+
+
+def _po_received(world, po):
+    stored = world.db.purchase_orders.find_one({"po_id": po["po_id"]})
+    return stored["status"], {it["product_id"]: it.get("received_qty") for it in stored["items"]}
+
+
+def _audit_rows(world, action):
+    return [
+        a
+        for name in world.db.list_collection_names()
+        for a in world.db.get_collection(name).find({"action": action})
+    ]
+
+
+def test_r6_a_held_receipts_shelved_lines_count_on_its_order(world):
+    po, boss, carrera, grn1, grn2 = _mixed_held_receipt(world)
+    # Receipt 2's Carrera is on the shelf although the receipt still holds Boss.
+    assert len(world.units(carrera)) == 1
+    status, received = _po_received(world, po)
+    finding(
+        received[carrera] == 1,
+        f"R1-13: the order reads {received[carrera]} Carrera received with 1 on the shelf",
+    )
+    world.finish_draft(boss, offer=2790)
+    held = world.grn(grn2["grn_id"])
+    assert held["status"] == "PARTIALLY_ACCEPTED"
+    assert [ln["reason"] for ln in held["unresolved_lines"]] == ["over_order"]
+    status, received = _po_received(world, po)
+    finding(
+        status == "RECEIVED" and received == {boss: 2, carrera: 1},
+        f"R1-13: every ordered unit is on the shelf but the order reads {status} {received}",
+    )
+
+
+def test_r6_units_beyond_the_order_are_marked_not_received(world):
+    _seed_user(world, ADMIN)
+    po, boss, carrera, grn1, grn2 = _mixed_held_receipt(world)
+    world.finish_draft(boss, offer=2790)
+    gid = grn2["grn_id"]
+    # A void is refused: the receipt put the Carrera on the shelf.
+    with pytest.raises(HTTPException) as refused:
+        _run(vd.void_grn(gid, MANAGER))
+    assert refused.value.status_code == 409
+    (task,) = _mgr_tasks(world, gid)
+    # R1-14: the advice works whatever else the receipt shelved -- no void.
+    finding(
+        "Not received" in task["description"] and "void" not in task["description"].lower(),
+        f"R1-14: the store manager's task advises {task['description']!r}",
+    )
+
+    out = _run(vd.drop_over_order(gid, MANAGER))
+    stored = world.grn(gid)
+    finding(
+        stored["status"] == "ACCEPTED" and out["dropped_units"] == 2,
+        f"R1-13: the receipt has no honest exit ({stored['status']}, {out})",
+    )
+    line = next(it for it in stored["items"] if it["product_id"] == boss)
+    assert (line["accepted_qty"], line["received_qty"], line["dropped_qty"]) == (0, 0, 2)
+    # What was on the shelf stays; nothing new is minted.
+    assert len(world.units(boss)) == 2 and len(world.units(carrera)) == 1
+    assert _po_received(world, po) == ("RECEIVED", {boss: 2, carrera: 1})
+    finding(not _mgr_tasks(world, gid), "R1-13: the store manager's task outlived the answer")
+    assert [a["user_id"] for a in _audit_rows(world, "grn.over_order_dropped")] == [MANAGER["user_id"]]
+    # Pressed twice: nothing is beyond the order any more.
+    with pytest.raises(HTTPException) as again:
+        _run(vd.drop_over_order(gid, MANAGER))
+    assert again.value.status_code == 400
+
+
+def test_r6_not_received_drops_only_what_is_beyond_the_order(world):
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    # Held only for the catalogue: nothing to drop.
+    with pytest.raises(HTTPException) as refused:
+        _run(vd.drop_over_order(grn["grn_id"], MANAGER))
+    assert refused.value.status_code == 400
+    assert world.grn(grn["grn_id"])["unresolved_lines"][0]["reason"] == "incomplete_catalog"
+
+
+def test_r6_not_received_is_for_the_receiving_managers_only():
+    from api.services.rbac_policy import rows_vendors
+
+    rows = [
+        r
+        for v in vars(rows_vendors).values()
+        if isinstance(v, list)
+        for r in v
+        if isinstance(r, dict) and str(r.get("path", "")).endswith("/grn/{grn_id}/drop-over-order")
+    ]
+    assert len(rows) == 1 and "ACCOUNTANT" not in rows[0]["allowed"]
+    assert vd._DROP_ROLES == ("ADMIN", "AREA_MANAGER", "STORE_MANAGER")
+
+
+def test_r6_a_product_finished_during_an_accept_is_released_after_it(world, monkeypatch):
+    # R1-19 (follow-ups 1 and 43): the cataloguer's save lands while a
+    # manager's "Add to stock" holds the receipt's claim. The save's release
+    # loses the claim (409, swallowed); the accept had read the product
+    # before the save and holds the line. Whoever finishes last must see the
+    # other: the units go on the shelf.
+    from api.routers.vendors import grn_accept as _ga
+
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    real_flip = _ga._advance_grn_terminal_status
+    saved = []
+
+    def _save_meanwhile(*a, **k):
+        # Still under the accept's claim: the line is held, nothing flipped.
+        if not saved:
+            # The cataloguer's request runs on its own (another worker): a
+            # thread with its own event loop.
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(1) as pool:
+                saved.append(pool.submit(world.finish_draft, draft_id, 2790).result())
+            # The save's own release lost the claim to this accept.
+            saved.append(len(world.units(draft_id)))
+        return real_flip(*a, **k)
+
+    monkeypatch.setattr(_ga, "_advance_grn_terminal_status", _save_meanwhile)
+    _run(vd.accept_grn(grn["grn_id"], MANAGER))
+    assert saved[1] == 0, "the save's release was not raced"
+    assert saved and saved[0]["catalog_status"] == "ACTIVE"
+    finding(
+        len(world.units(draft_id)) == 2 and world.grn(grn["grn_id"])["status"] == "ACCEPTED",
+        f"R1-19: a product finished during an accept left {len(world.units(draft_id))} "
+        f"of 2 units on the shelf ({world.grn(grn['grn_id'])['status']})",
+    )
+
+
+def test_r6_a_release_never_restamps_when_the_receipt_was_accepted(world):
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    first = world.grn(grn["grn_id"])["accepted_at"]
+    world.finish_draft(draft_id, offer=2790)
+    stored = world.grn(grn["grn_id"])
+    assert stored["status"] == "ACCEPTED"
+    finding(
+        stored["accepted_at"] == first,
+        f"R1-21: the release restamped accepted_at ({first} -> {stored['accepted_at']})",
+    )
+    assert stored["last_accepted_at"] >= first
+
+
+def test_r6_the_cataloguers_task_says_what_is_still_held(world):
+    # R1-22: the first of two held items is finished; the task still read
+    # "Finish 2 item(s)" and named the finished one.
+    po, d_id, e_id = _two_drafts_po(world)
+    grn = _receive(world, po, [1, 1], "JOT/26-27/0911")
+    (task,) = [t for t in _open_tasks(world) if t.get("category") == "Catalogue"]
+    assert task["title"].startswith("Finish 2 item(s)")
+    world.finish_draft(d_id, offer=2790)
+    task = world.db.tasks.find_one({"task_id": task["task_id"]})
+    finding(
+        task["title"].startswith("Finish 1 item(s)")
+        and "BOSS 1701" in task["description"]
+        and "BOSS 1700 " not in task["description"],
+        f"R1-22: the open task reads {task['title']!r} / {task['description']!r}",
+    )
+    assert world.grn(grn["grn_id"])["status"] == "PARTIALLY_ACCEPTED"
+
+
+def test_r6_a_manual_escalation_into_a_twin_says_so(world):
+    # R1-50 / R1-103: two catalogue managers' tasks for one receipt; the first
+    # went to the admin. Escalating the second by hand closes it into the
+    # admin's -- said by name, never "no higher owner found" or a raw id.
+    _seed_user(world, dict(ADMIN, full_name="Asha Admin"))
+    _seed_user(world, dict(CATALOGUER, user_id="u-cat-2", username="catalog.two"))
+    world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    by = {t["assigned_to"]: t for t in _open_tasks(world)}
+    first, second = by[CATALOGUER["user_id"]], by["u-cat-2"]
+    _run(_tasks.escalate_task(first["task_id"], None, CATALOGUER))
+    assert world.db.tasks.find_one({"task_id": first["task_id"]})["assigned_to"] == ADMIN["user_id"]
+    out = _run(_tasks.escalate_task(second["task_id"], None, dict(CATALOGUER, user_id="u-cat-2")))
+    finding(
+        out["status"] == "COMPLETED" and "no higher owner" not in out["message"],
+        f"R1-50: a manual escalation into its twin answered {out}",
+    )
+    finding(
+        "Asha Admin" in out["message"] and ADMIN["user_id"] not in out["message"],
+        f"R1-103: the merge note reads {out['message']!r}",
+    )
+
+
+def test_r6_the_taskmaster_audits_a_merge(world, monkeypatch):
+    # R1-31: every TASKMASTER action records a before/after row -- the merge too.
+    _seed_user(world, ADMIN)
+    _seed_user(world, dict(CATALOGUER, user_id="u-cat-2", username="catalog.two"))
+    world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    _escalate_after(world, monkeypatch, "taskmaster", hours=25)
+    rows = list(world.db.agent_audit_log.find({}))
+    finding(
+        sorted(r["action"] for r in rows) == ["task_escalation", "task_merged"],
+        f"R1-31: the TASKMASTER audit trail reads {[r['action'] for r in rows]}",
+    )
+
+
+def test_r6_a_refused_order_takes_no_po_number(world):
+    # R1-72: the number is consecutive per shop and FY; a refusal must not
+    # leave a hole in it.
+    world.catalogue_frame("Carrera", "CA 8895", "807", "54", mrp=6990, offer=6490, cost=3155.76)
+    first = world.raise_po([{"new_product": dict(BOSS_TYPED), "quantity": 1, "unit_price": 1200}])
+    refused = _refused_po(
+        world, [{"new_product": dict(CARRERA_TYPED), "quantity": 1, "unit_price": 3200}]
+    )
+    assert refused is not None and refused.status_code == 409
+    second = world.raise_po([{"new_product": dict(BOSS_1701), "quantity": 1, "unit_price": 1300}])
+    a, b = (int(p["po_number"].rsplit("/", 1)[-1]) for p in (first, second))
+    finding(
+        b == a + 1,
+        f"R1-72: a refused order burned a PO number ({first['po_number']} -> {second['po_number']})",
+    )
+
+
+def test_r6_a_sizeless_line_against_a_legacy_sized_frame_asks_for_the_eye_size(world):
+    # R2-15: a frame keyed before eye size joined the key carries the 3-part
+    # key a SIZELESS typed line makes; it is the 54 item (the migration re-keys
+    # it so), so both doors ask for the eye size, never "use it?".
+    _pre_deploy_frame(world, lens_size="54")
+    refused = _refused_po(
+        world, [{"new_product": {**CARRERA_TYPED, "size": None}, "quantity": 1, "unit_price": 3200}]
+    )
+    finding(
+        refused is not None
+        and refused.status_code == 422
+        and refused.detail.get("code") == "EYE_SIZE_NEEDED"
+        and "54" in refused.detail["message"],
+        f"R2-15: a sizeless line against a legacy 54 got {getattr(refused, 'detail', None)}",
+    )
+    with pytest.raises(HTTPException) as added:
+        world.catalogue_frame("Carrera", "CA 8895", "807", None, mrp=6990, offer=6490, cost=3100)
+    assert added.value.status_code == 422
+    assert len(world.products_named("Carrera", "CA 8895")) == 1
+
+
+def test_r6_a_discarded_draft_never_names_an_eye_size_the_catalogue_has(world):
+    # R1-98: the only sized Boss 1700 C2 is a discarded draft -- "in the
+    # catalogue by eye size (52)" is false; a sizeless Boss is its own item.
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    _discard(world, draft_id, po, grn)
+    po2 = world.raise_po(
+        [{"new_product": {**BOSS_TYPED, "size": None}, "quantity": 1, "unit_price": 1200}]
+    )
+    finding(
+        po2["items"][0]["product_id"] != draft_id,
+        "R1-98: a sizeless Boss was refused for the discarded 52",
+    )
+    assert world.product(draft_id)["discarded_draft"] is True
+
+
+def test_r6_a_discarded_draft_typed_as_another_kind_says_how_to_bring_it_back(world):
+    # R2-17: "ask the catalogue manager to switch it back on" was a dead end
+    # for a discarded draft -- typed as what it was, it comes back.
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    _discard(world, draft_id, po, grn)
+    refused = _refused_po(
+        world, [{"new_product": {**BOSS_TYPED, "category": "SG"}, "quantity": 1, "unit_price": 1200}]
+    )
+    msg = refused.detail["message"] if refused is not None else ""
+    finding(
+        "type it as a frame" in msg and "switch it back on" not in msg,
+        f"R2-17: the refusal reads {msg!r}",
+    )
+    # ...and typed as a frame, it is that draft again.
+    po3 = world.raise_po([{"new_product": dict(BOSS_TYPED), "quantity": 1, "unit_price": 1200}])
+    assert po3["items"][0]["product_id"] == draft_id
+
+
+def test_r6_add_product_brings_a_discarded_draft_back_like_the_po_door(world):
+    # R1-64: the PO door revives a discarded draft; Add product answered an
+    # "Inactive (archived)" duplicate with no way forward. Now both bring it
+    # back, and the popup leads to finishing it (provisional).
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    _discard(world, draft_id, po, grn)
+    with pytest.raises(HTTPException) as added:
+        world.catalogue_frame("Boss", "BOSS 1700", "C2", "52", mrp=3190, offer=2990, cost=1200)
+    existing = (added.value.detail or {}).get("existing") or {}
+    finding(
+        added.value.status_code == 409
+        and existing.get("product_id") == draft_id
+        and existing.get("provisional") is True,
+        f"R1-64: Add product answered {added.value.detail}",
+    )
+    revived = world.product(draft_id)
+    assert revived["provisional"] is True and revived["discarded_draft"] is False
+    assert revived["mrp"] == 3190
+    assert [p["product_id"] for p in world.products_named("Boss", "BOSS 1700")] == [draft_id]
+    # Finished in the editor, it switches on.
+    world.finish_draft(draft_id, offer=2990)
+    assert world.product(draft_id)["is_active"] is True
+
+
+def test_r6_add_product_of_a_discarded_draft_of_another_kind_says_so(world):
+    # R1-64, the other half: typed as another kind of product the draft stays
+    # discarded, and the popup is told it is one (not "Inactive (archived)").
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    _discard(world, draft_id, po, grn)
+    body = _products.ProductCreate(
+        category="SG",
+        brand="Boss",
+        model="BOSS 1700",
+        attributes={"brand_name": "Boss", "model_no": "BOSS 1700", "colour_code": "C2", "lens_size": "52"},
+        mrp=3190,
+        offer_price=2990,
+        cost_price=1200,
+    )
+    with pytest.raises(HTTPException) as added:
+        _run(_products.create_product(body, CATALOGUER, as_draft=False))
+    existing = (added.value.detail or {}).get("existing") or {}
+    assert existing.get("discarded_draft") is True and existing.get("provisional") is False
+    assert world.product(draft_id)["discarded_draft"] is True
+
+
+def test_r6_the_eye_size_rule_is_for_eye_size_categories_only(world):
+    # R2-19: an accessory keeps its own `size`; a sizeless one beside a sized
+    # one is its own item, never EYE_SIZE_NEEDED.
+    typed = {"category": "ACCESSORIES", "brand": "Zeiss", "model": "Lens Wipes", "mrp": 199}
+    world.raise_po([{"new_product": {**typed, "size": "M"}, "quantity": 5, "unit_price": 90}])
+    po = world.raise_po([{"new_product": dict(typed), "quantity": 5, "unit_price": 90}])
+    assert po["items"][0]["product_id"]
+    assert len(world.products_named("Zeiss", "Lens Wipes")) == 2
+
+
+def test_r6_the_one_time_script_raises_the_tasks_for_receipts_held_before_c1(world, monkeypatch):
+    # R1-34: a receipt held before this deploy raised nothing. The script finds
+    # it and raises its tasks through the accept's own door; dry run writes
+    # nothing; a second run raises nothing.
+    import importlib
+
+    from api.routers.vendors import grn_accept as _ga
+
+    monkeypatch.setattr(_ga, "_get_db", _ga._get_db)
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    monkeypatch.syspath_prepend(os.path.join(repo_root, "scripts"))
+    script = importlib.import_module("raise_held_receipt_tasks")
+
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    world.db.tasks.delete_many({})  # held before C1: nobody was told
+    assert [g["grn_id"] for g in script.run(world.db, commit=False)] == [grn["grn_id"]]
+    assert list(world.db.tasks.find({})) == []
+
+    script.run(world.db, commit=True)
+    told = [t for t in _open_tasks(world) if t.get("grn_id") == grn["grn_id"]]
+    finding(
+        [(t["assigned_to"], t["category"]) for t in told] == [(CATALOGUER["user_id"], "Catalogue")],
+        f"R1-34: the script raised {[(t.get('assigned_to'), t.get('title')) for t in told]}",
+    )
+    assert script.run(world.db, commit=False) == []

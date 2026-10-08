@@ -1166,6 +1166,9 @@ def existing_product_summary(existing: Dict[str, Any]) -> Dict[str, Any]:
         # FINISH this draft (its held stock goes on the shelf when he does),
         # not to add a second product or read it as archived.
         "provisional": bool(existing.get("provisional")),
+        # A draft an admin discarded: typed again as the SAME kind of product
+        # it comes back (revive_discarded_draft); the popup says so (R1-64).
+        "discarded_draft": revivable_discarded_draft(existing),
         "image_url": _first_image(),
     }
 
@@ -2715,13 +2718,19 @@ def _keyed_before_eye_size(
     for row in strict_find_many(product_repo, {"identity_key": sizeless}):
         if row.get("identity_key") != sizeless:
             continue
-        attrs = row.get("attributes") if isinstance(row.get("attributes"), dict) else {}
-        # Read as the migration and existing_product_summary read it: the
-        # derived eye size, else a legacy top-level `size`.
-        derived = _derive_brand_model_color_size(attrs, row.get("category"))["size"] or row.get("size")
-        if normalise_identity_component(derived) == typed_size:
+        if _row_eye_size(row) == typed_size:
             return row
     return None
+
+
+def _row_eye_size(row: Dict[str, Any]) -> str:
+    """A stored row's eye size, normalised -- read as the identity migration
+    and existing_product_summary read it: the derived size, else a legacy
+    top-level `size`. A row keyed before eye size joined the key that HAS one
+    is a sized item: the migration re-keys it with it."""
+    attrs = row.get("attributes") if isinstance(row.get("attributes"), dict) else {}
+    derived = _derive_brand_model_color_size(attrs, row.get("category"))["size"] or row.get("size")
+    return normalise_identity_component(derived)
 
 
 def identity_conflict(spine: Dict[str, Any], product_repo) -> Optional[ProductMasterError]:
@@ -2736,8 +2745,25 @@ def identity_conflict(spine: Dict[str, Any], product_repo) -> Optional[ProductMa
     apart from them, so it is never created as a sizeless twin."""
     existing = product_repo.find_by_sku(spine.get("sku"))
     key = spine.get("identity_key")
+    eye_item = _size_attribute_key(spine.get("category")) == "lens_size"
+    sizeless = not normalise_identity_component(spine.get("size"))
+    legacy_sized: List[Dict[str, Any]] = []
     if existing is None and key and hasattr(product_repo, "find_by_identity_key"):
         existing = product_repo.find_by_identity_key(key)
+        # A frame keyed before eye size joined the key still carries the 3-part
+        # key a SIZELESS typed line makes -- but it has an eye size, so it is a
+        # sized item (the migration re-keys it so): EYE_SIZE_NEEDED below,
+        # never "use it?" (R2-15). One answer before and after the migration.
+        # (A discarded draft there stays the match: its key is the typed one,
+        # and a second row on one key is never made.)
+        if (
+            existing is not None
+            and eye_item
+            and sizeless
+            and _row_eye_size(existing)
+            and not revivable_discarded_draft(existing)
+        ):
+            legacy_sized, existing = [existing], None
     if existing is None and key and hasattr(product_repo, "find_by_identity_key"):
         try:
             existing = _keyed_before_eye_size(spine, key, product_repo)
@@ -2755,24 +2781,28 @@ def identity_conflict(spine: Dict[str, Any], product_repo) -> Optional[ProductMa
             existing = None
     if existing is not None:
         return _duplicate_error(existing)
-    if (
-        not key
-        or normalise_identity_component(spine.get("size"))
-        or _size_attribute_key(spine.get("category")) != "lens_size"
-        or not hasattr(product_repo, "find_many")
-    ):
+    if not key or not sizeless or not eye_item:
         return None
     prefix = key + "|"
-    try:
-        rows = strict_find_many(
-            product_repo, {"identity_key": {"$regex": "^" + re.escape(prefix)}}
-        )
-    except Exception as exc:  # noqa: BLE001
-        # Fail loud: a swallowed read would answer "no sized rows" and let a
-        # sizeless twin through.
-        logger.error("[PRODUCT_MASTER] eye-size check could not read %s*: %s", prefix, exc)
-        return _catalogue_unreadable()
-    sized = [p for p in rows if str(p.get("identity_key") or "").startswith(prefix)]
+    rows: List[Dict[str, Any]] = []
+    if hasattr(product_repo, "find_many"):
+        try:
+            rows = strict_find_many(
+                product_repo, {"identity_key": {"$regex": "^" + re.escape(prefix)}}
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Fail loud: a swallowed read would answer "no sized rows" and let a
+            # sizeless twin through.
+            logger.error("[PRODUCT_MASTER] eye-size check could not read %s*: %s", prefix, exc)
+            return _catalogue_unreadable()
+    # A discarded draft is not in the catalogue: it never names an eye size
+    # the catalogue "has" (R1-98).
+    sized = legacy_sized + [
+        p
+        for p in rows
+        if str(p.get("identity_key") or "").startswith(prefix)
+        and not revivable_discarded_draft(p)
+    ]
     if not sized:
         return None
     sizes = sorted({str(existing_product_summary(p).get("size")) for p in sized})
