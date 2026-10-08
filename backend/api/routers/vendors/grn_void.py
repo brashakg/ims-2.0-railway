@@ -408,11 +408,12 @@ async def drop_over_order(
     shelf, _po_units_received); the rest leaves its accepted and received
     counts, recorded as dropped_qty. Kept units not yet on the shelf go there
     through THE one path (_put_on_shelf, order cap on) once this claim is
-    handed back. Lines held for the catalogue stay held. The PO's received
-    counts are refreshed, the store manager's over-order tasks close when
-    nothing is beyond the order any more, and an audit row records who said
-    so. Under the accept claim, so no accept runs meanwhile; every read fails
-    closed."""
+    handed back. Lines held for the catalogue stay held. A receipt left with
+    nothing held and nothing accepted put nothing on the shelf: it is VOID.
+    The PO's received counts are refreshed, the store manager's over-order
+    tasks close when nothing is beyond the order any more, and an audit row
+    records who said so. Under the accept claim, so no accept runs meanwhile;
+    every read fails closed."""
     from .grn_accept import (
         _complete_receipt_tasks,
         _ordered_by_product,
@@ -506,7 +507,11 @@ async def drop_over_order(
         except Exception as exc:  # noqa: BLE001 - fail closed
             raise unreadable from exc
         rest = [ln for ln in held if ln.get("reason") != "over_order"] + still_over
-        status = "PARTIALLY_ACCEPTED" if rest else "ACCEPTED"
+        # Nothing held and nothing kept: the receipt put nothing on the shelf
+        # (a second count of a box, say) -- VOID, as a void leaves it, never
+        # an ACCEPTED that reads "On shelf" for 0 units.
+        kept = any(int(it.get("accepted_qty") or 0) > 0 for it in items)
+        status = "PARTIALLY_ACCEPTED" if rest else ("ACCEPTED" if kept else "VOID")
         patch = {
             "items": items,
             # The header totals (vendor performance reads them) follow the lines.
@@ -517,6 +522,8 @@ async def drop_over_order(
             "over_order_dropped_by": current_user.get("user_id"),
             "over_order_dropped_at": datetime.now().isoformat(),
         }
+        if status == "VOID":
+            patch.update(voided_at=patch["over_order_dropped_at"], voided_by=current_user.get("user_id"))
         written = _guarded_grn_write(
             grn_repo,
             {"grn_id": grn_id, "status": "PARTIALLY_ACCEPTED", "accept_lock_token": claim_token},
