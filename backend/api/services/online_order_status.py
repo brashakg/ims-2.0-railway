@@ -280,6 +280,18 @@ def _raise_conflict_task(db, order: Dict[str, Any], fact: str, source: str) -> b
     except Exception:  # noqa: BLE001 -- release the marker so the next event retries
         logger.warning("[%s] status-conflict task insert failed for order=%s", source, oid,
                        exc_info=True)
+        # An error does not say the insert did not land (a reply lost after
+        # the commit; a standalone mongod retries no write): the order's one
+        # conflict task is read back first. Released after a landed insert,
+        # the next event claimed the marker again and raised a second task.
+        try:
+            if db.get_collection("tasks").find_one(
+                    {"task_type": "online_status_conflict", "order_id": oid}) is not None:
+                return True
+        except Exception:  # noqa: BLE001
+            # ponytail: an unread task releases (a second task only on two
+            # misses in a row), as the stock-in task's read-back does.
+            logger.debug("[%s] status-conflict task read-back failed", source, exc_info=True)
         try:
             db.get_collection("orders").update_one(
                 {"order_id": oid},

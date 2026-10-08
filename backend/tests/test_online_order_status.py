@@ -504,6 +504,34 @@ def test_a_lost_conflict_task_is_raised_by_the_next_event(swept, monkeypatch, le
     assert _tasks(swept, oid, "online_status_conflict") == 1
 
 
+def test_a_conflict_task_whose_reply_was_lost_is_one_task(swept, monkeypatch):
+    """Ruling 2's ONE task per order, forever. The insert commits and then
+    raises (a socket timeout after the write; a standalone mongod retries no
+    write). The marker was released on that error, so the sweep claimed it
+    again and raised a second task. The task is read back first: it landed."""
+    oid = 60167
+    _book(swept, oid)
+    _set(swept, oid, status="DELIVERED", fulfillment_status="FULFILLED")
+    tasks, lost = swept["db"]["tasks"], []
+    real = tasks.insert_one
+
+    def lands_then_raises(doc, *a, **kw):
+        out = real(doc, *a, **kw)
+        if not lost:
+            lost.append(doc)
+            raise RuntimeError("socket timeout after the commit")
+        return out
+
+    monkeypatch.setattr(tasks, "insert_one", lands_then_raises)
+    body = _pulled(oid, cancelled_at=CANCELLED_AT, fulfillment_status="fulfilled")
+    swept["real_map"](copy.deepcopy(body), swept["db"], webhook_id=f"c-{oid}", topic="orders/cancelled")
+    swept["state"]["orders"] = [body]
+    for _ in range(2):
+        swept["run"]()
+    assert lost and _doc(swept, oid)["status"] == "DELIVERED"
+    assert _tasks(swept, oid, "online_status_conflict") == 1
+
+
 def test_three_lost_races_write_nothing_and_say_so(swept, monkeypatch):
     from api.routers.orders import release
 
