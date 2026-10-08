@@ -161,6 +161,7 @@ from test_shopify_status_catchup import (  # noqa: E402,F401
 )
 
 from api.services import shopify_fulfillment, shopify_order_delete  # noqa: E402
+from test_shopify_webhooks_phase0 import _Cursor, _match  # noqa: E402
 
 LATER = "2026-09-06T02:00:00Z"
 
@@ -1138,16 +1139,61 @@ def test_an_unreadable_stock_answer_restocks_nothing(swept, monkeypatch):
     _two_unit_order_one_sold(swept, 60131)
     repo = swept["stock_repo"]
     creates = []
-    monkeypatch.setattr(repo, "find_many", lambda q: _raise_read())
+    _stock_read_fails(monkeypatch, repo, times=10**6)
     monkeypatch.setattr(repo, "create", lambda d: creates.append(d))
     shopify_refund.handle_shopify_refund(swept["db"], _refund_both(700331, 60131), webhook_id=None,
                                          topic="refunds/create")
 
     assert creates == [] and [(u["stock_id"], u["status"]) for u in repo.units] == [("stk-1", "SOLD")]
+    ret = swept["returns"].find_one({"shopify_refund_id": "700331"})
+    assert ret["restock_applied"] is False, "open: no SOLD answer is not 0 SOLD"
 
 
-def _raise_read():
-    raise RuntimeError("stock read down")
+@pytest.mark.parametrize("times", [1, 10**6])
+def test_a_failed_sold_read_under_auto_never_strands_the_unit(swept, monkeypatch, times):
+    """AUTO, one SOLD unit, a Shopify cancel refund, the SOLD find failing
+    once (a failover) or for good. Read through find_many, the failure was
+    "0 SOLD": the restock capped to nothing and finalized "applied", stk-1
+    SOLD for good and the retry answering 'Already restocked'. Now the unit
+    goes back -- at once, or by the retry the open restock leaves."""
+    monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "1")
+    _claim_unit(swept, _book(swept, 60132))
+    coll = _stock_read_fails(monkeypatch, swept["stock_repo"], times=times)
+    shopify_refund.handle_shopify_refund(swept["db"], _refund(700332, 60132), webhook_id=None,
+                                         topic="refunds/create")
+    ret = swept["returns"].find_one({"shopify_refund_id": "700332"})
+    if times > 1:
+        assert ret["restock_applied"] is False and _units(swept) == [("stk-1", "SOLD")]
+        coll.times = 0
+        assert _retry(ret)["restock_applied"] is True
+    assert _units(swept) == [("stk-1", "AVAILABLE")]
+
+
+class _FlakyUnits:
+    """The stock collection, over the fake's units: its first `times` SOLD
+    finds raise (a Mongo failover). A REAL StockRepository reads it, so a
+    failed read reaches the code the way production's does: find_many
+    swallows it into [] (BaseRepository.find_many), only the collection
+    raises. A fake find_many that raised hid the [] -- "0 SOLD" finalized the
+    restock "applied" with the unit still SOLD, and these tests stayed green."""
+
+    def __init__(self, repo, times):
+        self.repo, self.times = repo, times
+
+    def find(self, query=None, projection=None):
+        if self.times and (query or {}).get("status") == "SOLD":
+            self.times -= 1
+            raise RuntimeError("stock read down")
+        return _Cursor([u for u in self.repo.units if _match(u, query)])
+
+
+def _stock_read_fails(monkeypatch, repo, times=1):
+    from database.repositories.product_repository import StockRepository
+
+    coll = _FlakyUnits(repo, times)
+    monkeypatch.setattr(repo, "collection", coll, raising=False)
+    monkeypatch.setattr(repo, "find_many", StockRepository(coll).find_many)
+    return coll
 
 
 def test_a_refund_on_goods_out_waits_for_a_person_even_under_auto(swept, monkeypatch):
@@ -1262,18 +1308,6 @@ def _one_unit_refund(swept, oid, rid, **order_set):
     return swept["review"].find_one({"shopify_refund_id": str(rid)})
 
 
-def _read_fails_once(monkeypatch, repo):
-    real, calls = repo.find_many, []
-
-    def flaky(query):
-        calls.append(query)
-        if len(calls) == 1:
-            _raise_read()
-        return real(query)
-
-    monkeypatch.setattr(repo, "find_many", flaky)
-
-
 def _units(swept):
     return [(u["stock_id"], u["status"]) for u in swept["stock_repo"].units]
 
@@ -1281,7 +1315,7 @@ def _units(swept):
 def test_a_blip_in_the_sold_read_at_the_confirm_leaves_the_restock_open(swept, monkeypatch):
     row = _one_unit_refund(swept, 60160, 700360)
     assert [line["restock"] for line in row["proposed_restock"]] == [True]
-    _read_fails_once(monkeypatch, swept["stock_repo"])
+    _stock_read_fails(monkeypatch, swept["stock_repo"])
     res = shopify_refund.post_from_review(swept["db"], row)
 
     assert res["status"] == "credited" and res["restock_applied"] is False
@@ -1302,7 +1336,7 @@ def test_a_blip_in_the_sold_read_at_the_confirm_leaves_the_restock_open(swept, m
 def test_a_blip_in_the_sold_read_at_the_webhook_keeps_the_proposed_restock(swept, monkeypatch):
     doc = _book(swept, 60161)
     _claim_unit(swept, doc)
-    _read_fails_once(monkeypatch, swept["stock_repo"])
+    _stock_read_fails(monkeypatch, swept["stock_repo"])
     shopify_refund.handle_shopify_refund(swept["db"], _refund(700361, 60161), webhook_id=None,
                                          topic="refunds/create")
     row = swept["review"].find_one({"shopify_refund_id": "700361"})
@@ -1357,7 +1391,7 @@ def test_goods_back_that_cannot_read_the_stock_can_be_pressed_again(swept, monke
     from fastapi import HTTPException
 
     row = _one_unit_refund(swept, 60171, 700371, status="DELIVERED")
-    _read_fails_once(monkeypatch, swept["stock_repo"])
+    _stock_read_fails(monkeypatch, swept["stock_repo"])
     with pytest.raises(HTTPException) as first:
         _goods_back(row)
     assert first.value.status_code == 503 and _units(swept) == [("stk-1", "SOLD")]
@@ -1376,7 +1410,7 @@ def test_goods_back_that_cannot_read_the_stock_can_be_pressed_again(swept, monke
 def _open_restock(swept, monkeypatch, oid, rid):
     row = _one_unit_refund(swept, oid, rid, status="SHIPPED", awb=f"AWB{oid}")
     assert row["status"] == "PENDING" and [line["restock"] for line in row["proposed_restock"]] == [True]
-    _read_fails_once(monkeypatch, swept["stock_repo"])
+    _stock_read_fails(monkeypatch, swept["stock_repo"])
     res = shopify_refund.post_from_review(swept["db"], row)
     assert res["status"] == "credited" and res["restock_applied"] is False
     assert _units(swept) == [("stk-1", "SOLD")]
@@ -1406,7 +1440,7 @@ def test_goods_back_before_the_confirm_leaves_it_nothing_to_restock(swept):
 
 def test_a_restock_retry_that_cannot_read_the_stock_restocks_nothing(swept, monkeypatch):
     row, ret = _open_restock(swept, monkeypatch, 60173, 700373)
-    _read_fails_once(monkeypatch, swept["stock_repo"])
+    _stock_read_fails(monkeypatch, swept["stock_repo"])
     assert _retry(ret)["restock_applied"] is False
     assert _units(swept) == [("stk-1", "SOLD")]
     assert _retry(ret)["restock_applied"] is True, "left open, not stuck in progress"

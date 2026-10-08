@@ -443,7 +443,11 @@ def _cap_restock_to_sold_units(
 def _sold_units(order_id: Any, product_id: str) -> Optional[float]:
     """How many stock units of `product_id` this order still holds SOLD; None
     when the stock cannot be read. Read through the returns router's own
-    repository accessor."""
+    repository accessor, on its collection: the real repository's find_many
+    swallows a read error into [] -- a Mongo blip counted 0 SOLD, capped the
+    restock to nothing and finalized it "applied" with the unit still SOLD
+    (task_triggers.active_tasks reads its collection for the same reason; a
+    fake repo without one keeps find_many)."""
     if not order_id or not product_id:
         return 0.0
     try:
@@ -452,8 +456,10 @@ def _sold_units(order_id: Any, product_id: str) -> Optional[float]:
         repo = _r.get_stock_repository()
         if repo is None:
             return None
-        rows = repo.find_many({"order_id": order_id, "product_id": product_id, "status": "SOLD"})
-        return float(len(rows or []))
+        query = {"order_id": order_id, "product_id": product_id, "status": "SOLD"}
+        coll = getattr(repo, "collection", None)
+        rows = list(coll.find(query)) if coll is not None else (repo.find_many(query) or [])
+        return float(len(rows))
     except Exception:  # noqa: BLE001 -- no answer: the caller keeps the restock open
         logger.warning("[SHOPIFY_REFUND] SOLD-unit read failed for order=%s", order_id,
                        exc_info=True)
