@@ -341,9 +341,10 @@ export function ReorderDashboard() {
             sku: p.sku,
             // Safe: only hasOrderableQty rows reach here (real qty >= 1).
             quantity: p.reorderQuantity as number,
-            // A line with no known cost goes at 0, for the buyer to price on
-            // the PO (a 0 rate never becomes the product's cost) -- never at
-            // the MRP (review r2 #24).
+            // A line with no known cost goes at 0 (a 0 rate never becomes the
+            // product's cost) -- never at the MRP (review r2 #24). Nothing
+            // can re-price a PO line today, so the toast says what happened
+            // and names no action.
             unit_price: unitCostOf(p) ?? 0,
           })),
           notes: `Auto-generated from Reorder Dashboard`,
@@ -357,7 +358,7 @@ export function ReorderDashboard() {
       toast.success(
         `${createdCount} Purchase Order(s) created for ${withSupplier.length} product(s)` +
         (totalCost > 0 ? ` (Est. \u20B9${totalCost.toLocaleString('en-IN')} at cost)` : '') +
-        (unpriced > 0 ? ` - ${unpriced} line(s) have no cost: price them on the PO` : '')
+        (unpriced > 0 ? ` - ${unpriced} line(s) have no cost and went on the PO at ₹0` : '')
       );
 
       setSelectedProducts(new Set());

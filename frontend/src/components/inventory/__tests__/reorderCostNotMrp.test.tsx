@@ -172,7 +172,8 @@ describe('review r2 #24: a reorder line with no cost is never priced at its MRP'
     await waitFor(() => expect(toast.success).toHaveBeenCalledTimes(1));
     const said = String(toast.success.mock.calls[0][0]);
     expect(said).toContain('Est. ₹2,400 at cost');
-    expect(said).toContain('1 line(s) have no cost: price them on the PO');
+    expect(said).toContain('1 line(s) have no cost and went on the PO at ₹0');
+    expect(said).not.toMatch(/price them|edit the PO/); // no PO line can be re-priced today
     expect(said).not.toMatch(/17,400/);
   });
 });
