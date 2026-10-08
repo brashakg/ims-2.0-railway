@@ -3551,6 +3551,69 @@ def test_r6_a_discarded_draft_never_names_an_eye_size_the_catalogue_has(world):
     assert world.product(draft_id)["discarded_draft"] is True
 
 
+def test_r6_a_discarded_draft_typed_as_another_kind_says_how_to_bring_it_back(world):
+    # R2-17: "ask the catalogue manager to switch it back on" was a dead end
+    # for a discarded draft -- typed as what it was, it comes back.
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    _discard(world, draft_id, po, grn)
+    refused = _refused_po(
+        world, [{"new_product": {**BOSS_TYPED, "category": "SG"}, "quantity": 1, "unit_price": 1200}]
+    )
+    msg = refused.detail["message"] if refused is not None else ""
+    finding(
+        "type it as a frame" in msg and "switch it back on" not in msg,
+        f"R2-17: the refusal reads {msg!r}",
+    )
+    # ...and typed as a frame, it is that draft again.
+    po3 = world.raise_po([{"new_product": dict(BOSS_TYPED), "quantity": 1, "unit_price": 1200}])
+    assert po3["items"][0]["product_id"] == draft_id
+
+
+def test_r6_add_product_brings_a_discarded_draft_back_like_the_po_door(world):
+    # R1-64: the PO door revives a discarded draft; Add product answered an
+    # "Inactive (archived)" duplicate with no way forward. Now both bring it
+    # back, and the popup leads to finishing it (provisional).
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    _discard(world, draft_id, po, grn)
+    with pytest.raises(HTTPException) as added:
+        world.catalogue_frame("Boss", "BOSS 1700", "C2", "52", mrp=3190, offer=2990, cost=1200)
+    existing = (added.value.detail or {}).get("existing") or {}
+    finding(
+        added.value.status_code == 409
+        and existing.get("product_id") == draft_id
+        and existing.get("provisional") is True,
+        f"R1-64: Add product answered {added.value.detail}",
+    )
+    revived = world.product(draft_id)
+    assert revived["provisional"] is True and revived["discarded_draft"] is False
+    assert revived["mrp"] == 3190
+    assert [p["product_id"] for p in world.products_named("Boss", "BOSS 1700")] == [draft_id]
+    # Finished in the editor, it switches on.
+    world.finish_draft(draft_id, offer=2990)
+    assert world.product(draft_id)["is_active"] is True
+
+
+def test_r6_add_product_of_a_discarded_draft_of_another_kind_says_so(world):
+    # R1-64, the other half: typed as another kind of product the draft stays
+    # discarded, and the popup is told it is one (not "Inactive (archived)").
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    _discard(world, draft_id, po, grn)
+    body = _products.ProductCreate(
+        category="SG",
+        brand="Boss",
+        model="BOSS 1700",
+        attributes={"brand_name": "Boss", "model_no": "BOSS 1700", "colour_code": "C2", "lens_size": "52"},
+        mrp=3190,
+        offer_price=2990,
+        cost_price=1200,
+    )
+    with pytest.raises(HTTPException) as added:
+        _run(_products.create_product(body, CATALOGUER, as_draft=False))
+    existing = (added.value.detail or {}).get("existing") or {}
+    assert existing.get("discarded_draft") is True and existing.get("provisional") is False
+    assert world.product(draft_id)["discarded_draft"] is True
+
+
 def test_r6_the_eye_size_rule_is_for_eye_size_categories_only(world):
     # R2-19: an accessory keeps its own `size`; a sizeless one beside a sized
     # one is its own item, never EYE_SIZE_NEEDED.

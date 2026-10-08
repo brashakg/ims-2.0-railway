@@ -1166,6 +1166,9 @@ def existing_product_summary(existing: Dict[str, Any]) -> Dict[str, Any]:
         # FINISH this draft (its held stock goes on the shelf when he does),
         # not to add a second product or read it as archived.
         "provisional": bool(existing.get("provisional")),
+        # A draft an admin discarded: typed again as the SAME kind of product
+        # it comes back (revive_discarded_draft); the popup says so (R1-64).
+        "discarded_draft": revivable_discarded_draft(existing),
         "image_url": _first_image(),
     }
 
