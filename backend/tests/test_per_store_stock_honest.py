@@ -490,6 +490,25 @@ def test_3_a_dead_listing_read_on_a_sale_is_named_never_sold_out(monkeypatch):
     assert "parent read died" in out["error"] and out["sold_out"] is False, out
 
 
+def test_3_a_dead_stray_check_inside_the_sweep_is_named_never_a_green_pass(monkeypatch):
+    """The sweep's own reads answer, but one listing's size-row re-read dies
+    inside the loop (listing_strays, strict). Its numbers went out (written,
+    not failed), and its pass says STOCK_ONHAND_UNKNOWN with the stray line.
+    That code reached the run with NO line and ok=True: a green Push stock
+    toast and 'Stock pass: ok ... STOCK_ONHAND_UNKNOWN'. Now the run is not
+    ok and names the check. Drop the per-listing note -> ok, no line ->
+    fails."""
+    db = _listed(_db(a=2, b=1, c=0))
+    _dead_size_rows(db)
+    spy = _Spy(_responses())
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.sync_stock_levels(db))
+    assert (res.payload["synced"], res.payload["failed"]) == (1, 0), res.payload
+    assert (INV_GID, LOC_A, 2) in spy.rows()
+    assert res.ok is False and res.code == shopify_push.STOCK_ONHAND_UNKNOWN, res
+    assert "cat-1" in res.error and "stray" in res.error and "size rows died" in res.error, res.error
+
+
 @pytest.mark.parametrize("dead", ["last-sent stock", "size rows"])
 def test_3_a_dead_stray_check_on_a_sale_with_no_target_is_named(monkeypatch, dead):
     """A sale of SP-9, a SKU with no Shopify target that cat-1's last-sent

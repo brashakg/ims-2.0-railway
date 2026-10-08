@@ -2391,6 +2391,10 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
     failed = 0
     errors: List[str] = []
     failures: List[Tuple[Optional[str], str]] = []  # (the listing's own code, its line)
+    # Written, but the listing's OWN pass was not ok (e.g. its stray-size
+    # re-read died mid-loop): its code reaches the run, so its line and the
+    # red verdict do too -- never a code on a line that says ok.
+    notes: List[Tuple[Optional[str], str]] = []
     product_code: Optional[str] = None
     accepted: List[Dict[str, Any]] = []
     for product, variants, _skus, _mine in changed:
@@ -2425,6 +2429,9 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
             failures.append((res.get("code"), errors[-1]))
         else:
             synced += 1
+            if res.get("code") and not res.get("ok"):
+                pid = product.get("id") or product.get("product_id")
+                notes.append((res.get("code"), f"{pid}: {res.get('error') or res.get('code')}"))
         product_code = product_code or res.get("code")
     payload.update({
         "synced": synced,
@@ -2440,8 +2447,9 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
     })
     code, error = _verdict()
     code = code or product_code
-    if errors and not error:
-        error = "; ".join(errors[:3])
+    said = errors + [line for _c, line in notes]
+    if said and not error:
+        error = "; ".join(said[:3])
     else:
         # Every true rung is said (recheck round 2): a listing's OWN rung --
         # a code the run-level ladder did not state (tracking refused, a
@@ -2454,7 +2462,7 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
         # carries is cut.
         own = [
             line.removesuffix(f" -- ALSO: {error}")
-            for lcode, line in failures
+            for lcode, line in failures + notes
             if lcode and lcode != code
         ]
         if own:
@@ -2463,7 +2471,7 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
         mode=MODE_LIVE,
         entity="stock",
         action="sync" if changed else "noop",
-        ok=failed == 0 and _all_ok(),
+        ok=failed == 0 and not notes and _all_ok(),
         payload=payload,
         code=code,
         error=error,
