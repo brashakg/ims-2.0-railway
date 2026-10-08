@@ -173,6 +173,24 @@ def test_f12_brand_master_change_moves_the_push_at_once():
     assert _push(db, "Carrera").action == "create"
 
 
+def test_f12_only_an_active_brand_master_row_decides():
+    """Brand Master is unique by code, not name: a switched-off 'Ray-Ban'
+    that is inactive can sit beside the active one. Only the active row
+    decides, in either order."""
+    from api.services.catalog_dictionary import brand_website_refusal
+
+    def db(*rows):
+        d = StrictDB()
+        d.seed("brand_masters", [dict(_BRANDS[0], brand_id=f"b{i}", **r) for i, r in enumerate(rows)])
+        return d
+
+    on, off = {"sync_to_shopify_default": True}, {"sync_to_shopify_default": False}
+    retired = {"is_active": False}
+    assert brand_website_refusal(db({**retired, **on}, off), "Ray-Ban") == (
+        "brand 'Ray-Ban' is not for the website (Settings > Brand Master)")
+    assert brand_website_refusal(db({**retired, **off}, on), "Ray-Ban") is None
+
+
 def test_f12_a_brand_edit_moves_the_push(door):
     """Created as Ray-Ban (website yes), edited to Carrera (website no)."""
     photo = {"images": ["https://cdn.example.com/p.jpg"]}  # so only the brand can refuse
@@ -769,6 +787,21 @@ def test_f13_catalog_door_mints_the_same_sku(client, auth_headers):
     assert resp.status_code == 200, resp.text
     assert resp.json()["product"]["sku"] == "FR-CARRERA-CA8895-807-54"
     assert not hasattr(cat, "generate_sku")
+
+
+def test_f13_catalog_import_mints_the_same_sku(client, auth_headers):
+    """POST /catalog/products/import (the API-only bulk twin) mints through
+    the same minter too -- never a formula of its own."""
+    cat.CATALOG_PRODUCTS.clear()
+    resp = client.post(
+        "/api/v1/catalog/products/import",
+        json=[{"category": "FR", "attributes": dict(_CARRERA, colour_code="809"),
+               "pricing": {"mrp": 9000, "discount_category": "PREMIUM"}}],
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["created_count"] == 1, resp.json()
+    assert "FR-CARRERA-CA8895-809-54" in [p.get("sku") for p in cat._all_catalog_products()]
 
 
 def test_f13_guard_existing_sku_never_changes_on_edit():
