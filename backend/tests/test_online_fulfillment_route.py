@@ -3578,6 +3578,71 @@ def test_another_sender_of_a_remaps_move_never_reopens_its_closed_task(world, mo
     assert [t["status"] for t in world["tasks"].created if t["source_ref"] == ref] == ["COMPLETED"]
 
 
+@pytest.mark.parametrize("shopify", ["refuses", "takes"])
+def test_a_remap_never_closes_a_move_failed_task_while_another_sender_has_the_move(
+    world, monkeypatch, shopify
+):
+    """[LOW] MOVE_FAILED at Ranchi, its task still OPEN; the human presses
+    Re-map. An orders/updated delivery claims Re-map's PLANNED move (SENDING)
+    after Re-map stamped its claim and before Re-map's own send, and is still
+    waiting for Shopify when Re-map reads the route back: Re-map's send found
+    nothing PLANNED, the route carried no MOVE_FAILED yet, and the task was
+    closed ('Re-mapped: ... claimed again'). Shopify then refused the move:
+    held on MOVE_FAILED with no open task. The task stays OPEN while the move
+    is on the wire; the sender whose move lands closes it."""
+    from api.routers import online_store_orders as oso
+
+    payload, res, _o = _move_failed_at_ranchi(world, 60170 + (shopify == "takes"))
+    oid = res["order_id"]
+    ref = f"online_route:MOVE_FAILED:{oid}"
+    for t in world["tasks"].created:
+        if t["source_ref"] == ref:
+            t["status"] = "OPEN"
+    world["shop"].move_error = "Location does not stock the item" if shopify == "refuses" else None
+    gate, other = asyncio.Event(), {}
+    real_move, real_graphql = route_mod.move_fulfillment_orders, shopify_push._graphql
+
+    async def shopify_answers_late(db, query, variables):
+        if "imsFulfillmentOrderMove" in query:
+            await gate.wait()
+        return await real_graphql(db, query, variables)
+
+    async def the_delivery_claims_it_first(db, order_id):
+        other["task"] = asyncio.ensure_future(real_move(db, order_id))  # the delivery
+        while not any(m.get("status") == "SENDING" for m in (world["db"].orders.find_one(
+                {"order_id": order_id})["fulfillment_route"].get("moves") or [])):
+            await asyncio.sleep(0)
+        return await real_move(db, order_id)  # Re-map's own send: nothing PLANNED
+
+    monkeypatch.setattr(shopify_push, "_graphql", shopify_answers_late)
+    monkeypatch.setattr(route_mod, "move_fulfillment_orders", the_delivery_claims_it_first)
+    monkeypatch.setattr(oso, "_get_db", lambda: world["db"])
+    monkeypatch.setattr(oso, "_load_last_shopify_payload",
+                        lambda _db, _sid: (payload, f"WH-{payload['id']}", "orders/create"))
+    monkeypatch.setattr(oso, "_write_remap_audit", lambda *a, **k: None)
+
+    async def both():
+        out = await oso.remap_online_order(
+            str(payload["id"]), current_user={"user_id": "u1", "roles": ["ADMIN"]})
+        assert [t["status"] for t in world["tasks"].created if t["source_ref"] == ref] == ["OPEN"]
+        gate.set()
+        await other["task"]
+        return out
+
+    out = asyncio.run(both())
+
+    assert out["ok"], out
+    after = world["db"].orders.find_one({"order_id": oid}, {"_id": 0})
+    [task] = [t for t in world["tasks"].created if t["source_ref"] == ref]
+    if shopify == "refuses":
+        assert after["fulfillment_hold"] is True
+        assert after["stock_hold_reason"].startswith("IMS could not move")
+        assert task["status"] == "OPEN" and "completion_notes" not in task
+    else:
+        assert after["fulfillment_hold"] is False and "stock_hold_reason" not in after
+        assert task["status"] == "COMPLETED"
+
+
 def test_remap_keeps_an_rx_pending_order_held(world, monkeypatch):
     """[LOW, hollow] Round 13, item 9: Re-map lifts a seller hold whose cause
     is fixed, but an order still waiting for its prescription stays held --

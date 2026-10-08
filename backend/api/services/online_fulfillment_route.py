@@ -1145,6 +1145,11 @@ async def move_fulfillment_orders(db, order_id: str) -> Dict[str, Any]:
         # Only the NEW problem: the booking-time ones were tasked at booking,
         # and a human may already have closed them.
         raise_problem_tasks(db, {**order, "fulfillment_route": {**route, "problems": [problem]}})
+    if not failed and ours and any(code == "MOVE_FAILED" for code, _a in _tasked(route)):
+        # A Re-map's retried move landed, whoever sent it: the order's failed
+        # move is answered (Re-map leaves it open while the move is on the wire).
+        _close_tasks([f"online_route:MOVE_FAILED:{order_id}"],
+                     "Re-mapped: the fulfillment order moved and the order was routed again.")
     _stock_write_back(db, order)
     return {"moved": len(planned) - len(failed), "failed": len(failed)}
 
@@ -1799,11 +1804,14 @@ async def reroute_held_order(db, order_id: str) -> Dict[str, Any]:
             _stock_write_back(db, {**order, **update})
         # Every problem the order no longer has, once the move had its say (a
         # move failing again keeps its MOVE_FAILED task as it was) -- every
-        # one it was tasked for, a crashed Re-map's included.
+        # one it was tasked for, a crashed Re-map's included. A move another
+        # sender still has on the wire has not had its say: its MOVE_FAILED
+        # task stays as it is, and that sender closes it once the move lands.
         now_route = (coll.find_one({"order_id": order_id}) or {}).get("fulfillment_route") or route
+        on_wire = any(m.get("status") == "SENDING" for m in now_route.get("moves") or [])
         gone = {code for code, _about in tasked} - {
             p.get("code") for p in now_route.get("problems") or []
-        }
+        } - ({"MOVE_FAILED"} if on_wire else set())
         _close_tasks([f"online_route:{c}:{order_id}" for c in sorted(gone)], done)
     finally:
         coll.update_one(
