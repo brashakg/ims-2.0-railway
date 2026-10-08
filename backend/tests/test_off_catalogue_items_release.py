@@ -4290,3 +4290,430 @@ def test_r6_not_received_refreshes_what_the_order_reads_received(world):
         _po_received(world, po)[1][boss] == 3,
         f"The order reads {_po_received(world, po)[1][boss]} Boss received with 3 on the shelf",
     )
+
+
+# ---------------------------------------------------------------------------
+# Round 7: panel findings -- the claim holder's read, 'Not received' by the
+# units' origin, the origin stamp itself, the one release rule and the script
+# ---------------------------------------------------------------------------
+
+
+def _drive(coro):
+    """Run a handler coroutine that never suspends without an event loop, so a
+    door it reaches mid-way can run its own (asyncio.run): two requests
+    interleaved by hand."""
+    try:
+        coro.send(None)
+    except StopIteration as done:
+        return done.value
+    raise AssertionError("the handler suspended")
+
+
+def _d_and_e_twice(world):
+    """One PO for the typed Boss D x1 and Boss 1701 E x1, received twice (R1,
+    R2 = [1, 1]), D finished: R1's D is on the shelf, R2 holds D beyond the
+    order and E for the catalogue."""
+    po, d_id, e_id = _two_drafts_po(world)
+    r1 = _receive(world, po, [1, 1], "JOT/26-27/1001")
+    r2 = _receive(world, po, [1, 1], "JOT/26-27/1001-DUP")
+    world.finish_draft(d_id, offer=2790)
+    assert len(world.units(d_id)) == 1
+    assert sorted(ln["reason"] for ln in world.grn(r2["grn_id"])["unresolved_lines"]) == [
+        "incomplete_catalog",
+        "over_order",
+    ]
+    return po, d_id, e_id, r1, r2
+
+
+def test_r7_add_to_stock_never_shelves_what_not_received_just_dropped(world, monkeypatch):
+    # P1: manager A's "Add to stock" read R2 before manager B's "Not received"
+    # finished, and took the claim after it.
+    from api.routers.vendors import grn_accept as _ga
+
+    po, d_id, e_id, r1, r2 = _d_and_e_twice(world)
+    gid = r2["grn_id"]
+    real, dropped = _ga._claim_grn_for_accept, []
+
+    def b_drops_first(repo, grn_id, user_id):
+        if not dropped:
+            dropped.append(_run(vd.drop_over_order(gid, MANAGER)))
+        return real(repo, grn_id, user_id)
+
+    monkeypatch.setattr(_ga, "_claim_grn_for_accept", b_drops_first)
+    _drive(vd.accept_grn(gid, MANAGER))
+    assert dropped and dropped[0]["dropped_units"] == 1
+    line = world.grn(gid)["items"][0]
+    finding(
+        len(_any_status_units(world, d_id)) == 1 and line["accepted_qty"] == 0,
+        f"P1: {len(_any_status_units(world, d_id))} D units for a 1-unit order "
+        f"(R2's D line reads accepted {line['accepted_qty']})",
+    )
+    assert list(world.db.stock_units.find({"grn_id": gid, "grn_line_index": 0})) == []
+
+
+def test_r7_not_received_decides_from_the_receipt_under_its_claim(world, monkeypatch):
+    # P2: manager B's "Not received" read R2 (D beyond the order, E for the
+    # catalogue); the cataloguer finished E before B's claim, so E is beyond
+    # the order too by then.
+    from api.routers.vendors import grn_void as _gv
+
+    po, d_id, e_id, r1, r2 = _d_and_e_twice(world)
+    gid = r2["grn_id"]
+    real, finished = _gv._claim_grn_for_accept, []
+
+    def e_finished_first(repo, grn_id, user_id):
+        if not finished:
+            finished.append(world.finish_draft(e_id, offer=2890))
+        return real(repo, grn_id, user_id)
+
+    monkeypatch.setattr(_gv, "_claim_grn_for_accept", e_finished_first)
+    out = _drive(vd.drop_over_order(gid, MANAGER))
+    stored = world.grn(gid)
+    finding(
+        stored["unresolved_lines"] == [] and out["dropped_units"] == 2,
+        f"P2: R2 reads {stored['status']} {stored['unresolved_lines']} after 'Not received' ({out})",
+    )
+    assert len(world.units(d_id)) == 1 and len(world.units(e_id)) == 1
+    assert [t for t in _open_tasks(world) if t.get("grn_id") == gid] == []
+
+
+def test_r7_a_receipt_not_received_in_full_is_void_never_on_shelf(world):
+    # 'Nothing says On shelf for 0 units': the chip and the bill's receipt
+    # picker read the status, so a receipt 'Not received' left with nothing
+    # is VOID, as a void leaves it -- never ACCEPTED.
+    po, grn1, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    grn2, _ = _receive_again(world, po, "JOT/26-27/0701-DUP")
+    world.finish_draft(draft_id, offer=2790)
+    out = _run(vd.drop_over_order(grn2["grn_id"], MANAGER))
+    stored = world.grn(grn2["grn_id"])
+    finding(
+        (out["grn_status"], stored["status"], out["dropped_units"]) == ("VOID", "VOID", 2),
+        f"A receipt that put 0 units on the shelf reads {stored['status']} ({out})",
+    )
+    assert stored["voided_by"] == MANAGER["user_id"]
+    assert len(_any_status_units(world, draft_id)) == 2
+    assert _po_received(world, po) == ("RECEIVED", {draft_id: 2})
+    tl = _run(vd.get_po_timeline(po["po_id"], MANAGER))
+    assert [g["status"] for g in tl["grns"] if g["grn_id"] == grn2["grn_id"]] == ["VOID"]
+
+
+@pytest.mark.parametrize("since", ["sold", "moved shop"])
+def test_r7_not_received_after_the_first_box_was_sold_or_moved(world, monkeypatch, since):
+    # P3 (b), (c): the order's room counts every unit it put on the shelf by
+    # origin, in any status and at any shop.
+    po, grn1, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    grn2, _ = _receive_again(world, po, "JOT/26-27/0701-DUP")
+    world.finish_draft(draft_id, offer=2790)
+    if since == "sold":
+        world.db.stock_units.update_many({"product_id": draft_id}, {"$set": {"status": "SOLD"}})
+    else:
+        _transfer_out(world, monkeypatch, draft_id, 2)
+    out = _run(vd.drop_over_order(grn2["grn_id"], MANAGER))
+    finding(
+        out["dropped_units"] == 2 and world.grn(grn2["grn_id"])["unresolved_lines"] == [],
+        f"P3: after the first box was {since}, 'Not received' dropped {out['dropped_units']} of 2 "
+        f"and R2 still holds {world.grn(grn2['grn_id'])['unresolved_lines']}",
+    )
+    assert len(_any_status_units(world, draft_id)) == 2
+
+
+def test_r7_not_received_counts_a_held_lines_unit_moved_shop_as_received(world):
+    # P3 (a): one unit of R2's held Boss line went on the shelf (an accept
+    # that died half-way) and moved shop since: it is still received on that
+    # line, so only the other unit is marked not received.
+    po, boss, carrera, grn1, grn2 = _mixed_held_receipt(world)
+    world.finish_draft(boss, offer=2790)
+    gid = grn2["grn_id"]
+    line = next(i for i, it in enumerate(world.grn(gid)["items"]) if it["product_id"] == boss)
+    world.db.seed(
+        "stock_units",
+        [
+            {
+                "stock_id": "S-HALF-MOVED",
+                "product_id": boss,
+                "store_id": OTHER,
+                "status": "AVAILABLE",
+                "quantity": 1,
+                "source_type": "TRANSFER",
+                "source_id": "T-1",
+                "grn_id": gid,
+                "grn_line_index": line,
+                "line_unit_seq": 0,
+                "po_id": po["po_id"],
+            }
+        ],
+    )
+    out = _run(vd.drop_over_order(gid, MANAGER))
+    it = world.grn(gid)["items"][line]
+    finding(
+        (out["dropped_units"], it["accepted_qty"], it["dropped_qty"]) == (1, 1, 1),
+        f"P3: {out['dropped_units']} units marked not received; the line reads accepted "
+        f"{it['accepted_qty']} with its moved unit in stock",
+    )
+
+
+def _two_boss_lines_beyond_the_order(world, ordered):
+    """R2 holds two Boss lines beyond the order -- line 0 (2 accepted, 1 of
+    them already on the shelf) and line 2 (1 accepted) -- on an order for
+    `ordered` Boss that has put 3 on the shelf (R1's 2 and line 0's 1)."""
+    po, boss, carrera, grn1, grn2 = _mixed_held_receipt(world)
+    world.finish_draft(boss, offer=2790)
+    gid = grn2["grn_id"]
+    held = world.grn(gid)
+    assert [it["product_id"] for it in held["items"]] == [boss, carrera]
+    extra = dict(held["items"][0], received_qty=1, accepted_qty=1)
+    world.db.grns.update_one(
+        {"grn_id": gid},
+        {
+            "$set": {
+                "items": held["items"] + [extra],
+                "unresolved_lines": [
+                    {"product_id": boss, "accepted_qty": 2, "reason": "over_order"},
+                    {"product_id": boss, "accepted_qty": 1, "reason": "over_order"},
+                ],
+            }
+        },
+    )
+    world.db.seed(
+        "stock_units",
+        [
+            {
+                "stock_id": "S-HALF",
+                "product_id": boss,
+                "store_id": STORE,
+                "status": "AVAILABLE",
+                "quantity": 1,
+                "source_type": "GRN",
+                "source_id": gid,
+                "grn_id": gid,
+                "grn_line_index": 0,
+                "line_unit_seq": 0,
+                "po_id": po["po_id"],
+            }
+        ],
+    )
+    stored_po = world.db.purchase_orders.find_one({"po_id": po["po_id"]})
+    items = [dict(stored_po["items"][0], quantity=ordered, ordered_qty=ordered)] + stored_po["items"][1:]
+    world.db.purchase_orders.update_one({"po_id": po["po_id"]}, {"$set": {"items": items}})
+    return po, boss, grn1, gid
+
+
+@pytest.mark.parametrize("ordered, dropped", [(4, 1), (5, 0)])
+def test_r7_not_received_shares_the_orders_room_across_lines(world, ordered, dropped):
+    # P3 (d), (e): a unit already on a line takes none of the order's room,
+    # and what one line keeps the next cannot.
+    po, boss, grn1, gid = _two_boss_lines_beyond_the_order(world, ordered)
+    out = _run(vd.drop_over_order(gid, MANAGER))
+    finding(
+        out["dropped_units"] == dropped and len(_any_status_units(world, boss)) == 3 + 2 - dropped,
+        f"P3: {ordered} ordered, 3 on the shelf: 'Not received' dropped {out['dropped_units']} "
+        f"(want {dropped}); {len(_any_status_units(world, boss))} Boss units exist",
+    )
+    (row,) = _audit_rows(world, "grn.over_order_dropped")
+    assert row["detail"]["kept_units"] == 2 - dropped
+
+
+def test_r7_not_received_shelves_what_it_keeps_through_the_order_cap(world):
+    # P3 (sixth mutant): what 'Not received' keeps goes on the shelf through
+    # the one path WITH the order cap -- another receipt of the order going
+    # into stock at that moment holds it for the store manager again.
+    po, boss, grn1, gid = _two_boss_lines_beyond_the_order(world, 5)
+    world.db.grns.update_one(
+        {"grn_id": grn1["grn_id"]},
+        {"$set": {"accept_lock_at": vd.datetime.now().isoformat(), "accept_lock_token": "GACC-other"}},
+    )
+    out = _run(vd.drop_over_order(gid, MANAGER))
+    assert out["dropped_units"] == 0
+    held = world.grn(gid)
+    finding(
+        len(_any_status_units(world, boss)) == 3
+        and held["status"] == "PARTIALLY_ACCEPTED"
+        and {ln.get("busy") for ln in held["unresolved_lines"]} == {True},
+        f"The kept units went on the shelf past the order cap ({len(_any_status_units(world, boss))} "
+        f"Boss units, R2 {held['status']} {held['unresolved_lines']})",
+    )
+
+
+def test_r7_a_unit_found_by_its_receipt_id_when_the_number_is_shared(world, monkeypatch):
+    # P4: the ORIGIN stamp itself. Receipt numbers before #711 were shared
+    # (a VOID twin carries this one's), so only the grn_id stamped at mint
+    # names the Carrera once a transfer has rewritten its source.
+    po, grn, car_id, boss_id = _carrera_and_boss(world, [1, 2])
+    gid = grn["grn_id"]
+    shared = "GRN-BV--2606101432"
+    world.db.grns.update_one({"grn_id": gid}, {"$set": {"grn_number": shared}})
+    world.db.seed(
+        "grns",
+        [{"grn_id": "GRN-VOID-TWIN", "grn_number": shared, "status": "VOID", "store_id": STORE}],
+    )
+    world.db.stock_units.update_one({"product_id": car_id}, {"$set": {"grn_number": shared}})
+    _transfer_out(world, monkeypatch, car_id, 1)
+
+    _run(vd.accept_grn(gid, MANAGER))  # "Add to stock" again
+    finding(
+        len(_any_status_units(world, car_id)) == 1,
+        f"P4: {len(_any_status_units(world, car_id))} Carrera units for 1 received -- the "
+        "moved unit was not found by its receipt",
+    )
+    with pytest.raises(HTTPException) as refused:
+        _run(vd.void_grn(gid, MANAGER))
+    finding(refused.value.status_code == 409, f"P4: the void got {refused.value.status_code}")
+
+
+def test_r7_a_rate_that_finishes_a_catalogue_draft_releases_its_held_receipt(world):
+    # P5: a draft saved from Add product (not ordered) missing only its cost.
+    # The rate on a later order finishes it -- the same rule as the editor's
+    # save: the units its receipt holds go on the shelf.
+    body = _products.ProductCreate(
+        category="FR",
+        brand="Boss",
+        model="BOSS 1700",
+        attributes={
+            "brand_name": "Boss",
+            "model_no": "BOSS 1700",
+            "colour_code": "C2",
+            "lens_size": "52",
+        },
+        mrp=2990,
+        offer_price=2790,
+    )
+    pid = _run(_products.create_product(body, CATALOGUER, as_draft=True))["product_id"]
+    assert not world.product(pid).get("provisional")
+    line = {
+        "product_id": pid,
+        "product_name": "Boss 1700 C2",
+        "sku": world.product(pid)["sku"],
+        "quantity": 1,
+    }
+    po1 = world.raise_po([dict(line, unit_price=0)])
+    grn, accepted = world.receive_everything(po1)
+    assert accepted["grn_status"] == "PARTIALLY_ACCEPTED"
+    world.raise_po([dict(line, unit_price=2100)])
+    assert world.product(pid)["catalog_status"] == "ACTIVE"
+    finding(
+        len(world.units(pid)) == 1 and world.grn(grn["grn_id"])["status"] == "ACCEPTED",
+        f"P5: the rate finished the draft, yet {len(world.units(pid))} of 1 unit is on the shelf",
+    )
+    assert [t for t in _open_tasks(world) if t.get("grn_id") == grn["grn_id"]] == []
+
+
+def _load_script(monkeypatch):
+    import importlib
+
+    from api.routers.vendors import grn_accept as _ga
+
+    monkeypatch.setattr(_ga, "_get_db", _ga._get_db)
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    monkeypatch.syspath_prepend(os.path.join(repo_root, "scripts"))
+    return importlib.import_module("raise_held_receipt_tasks")
+
+
+def test_r7_the_script_releases_a_held_item_finished_before_it_ran(world, monkeypatch):
+    # P6: held and finished before this deploy (the old save released
+    # nothing): the script puts the units on the shelf -- never a task to
+    # finish a finished item.
+    from api.routers.vendors import grn_accept as _ga
+
+    script = _load_script(monkeypatch)
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    real = _ga.release_held_receipts
+    monkeypatch.setattr(_ga, "release_held_receipts", lambda pid: [])
+    world.finish_draft(draft_id, offer=2790)
+    monkeypatch.setattr(_ga, "release_held_receipts", real)
+    world.db.tasks.delete_many({})
+    assert world.grn(grn["grn_id"])["status"] == "PARTIALLY_ACCEPTED"
+
+    script.run(world.db, commit=True)
+    finding(
+        len(world.units(draft_id)) == 2 and world.grn(grn["grn_id"])["status"] == "ACCEPTED",
+        f"P6: the finished item's units stayed held ({len(world.units(draft_id))} on the shelf)",
+    )
+    told = [t["title"] for t in _open_tasks(world)]
+    finding(not told, f"P6: the script raised {told} for a finished item")
+
+
+def test_r7_the_script_asks_again_by_name_for_an_ask_raised_before(world, monkeypatch):
+    # An ask for cataloguing raised before this deploy is addressed to nobody
+    # (category 'Catalog'): no catalogue manager sees it, nothing closes it.
+    # The script asks again through the bill's own door and closes the old row.
+    script = _load_script(monkeypatch)
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    world.db.seed(
+        "tasks",
+        [
+            {
+                "task_id": "T-OLD-ASK",
+                "title": "Finish cataloguing 1 item(s) - a vendor bill is waiting",
+                "category": "Catalog",
+                "source": "SYSTEM",
+                "source_ref": f"catalogue-for-bill:{draft_id}",
+                "assigned_to": None,
+                "store_id": STORE,
+                "status": "OPEN",
+            }
+        ],
+    )
+    script.run(world.db, commit=False)
+    assert world.db.tasks.find_one({"task_id": "T-OLD-ASK"})["status"] == "OPEN"
+    script.run(world.db, commit=True)
+    assert world.db.tasks.find_one({"task_id": "T-OLD-ASK"})["status"] == "COMPLETED"
+
+    def asks():
+        return [
+            (t["assigned_to"], t["category"])
+            for t in _open_tasks(world)
+            if str(t.get("source_ref", "")).startswith("catalogue-for-bill:")
+        ]
+
+    finding(
+        asks() == [(CATALOGUER["user_id"], "Catalogue")],
+        f"The old ask reached {asks()} after the script",
+    )
+    # Finishing the item closes the ask raised again, as for any ask.
+    world.finish_draft(draft_id, offer=2790)
+    assert asks() == []
+
+
+def _similar_hint(world, brand, model, colour, size):
+    """GET /products/similar -- the live hint under Add product's model field."""
+    return _run(
+        _products.get_similar_products(
+            category="FR",
+            brand=brand,
+            model_no=model,
+            colour_code=colour,
+            size=size or "",
+            current_user=CATALOGUER,
+        )
+    )
+
+
+def test_r7_the_similar_hint_answers_as_save_does(world):
+    # One rule (Add product): the hint's "exact" is the door's identity_conflict.
+    # A frame keyed before eye size joined the key (every frame on prod until
+    # the migration runs), catalogued at eye size 54:
+    existing = _pre_deploy_frame(world, lens_size="54")
+    # typed without the eye size, Save answers 422 EYE_SIZE_NEEDED (r6 pin) --
+    sizeless = _similar_hint(world, "Carrera", "CA 8895", "807", None)
+    finding(
+        sizeless["exact_match"] is None and sizeless["eye_size_needed"] == ["54"],
+        f"The hint says {sizeless['exact_match']} / {sizeless.get('eye_size_needed')} where Save "
+        "asks for the eye size",
+    )
+    # -- typed with it, Save answers 409 naming it (r5 pin).
+    sized = _similar_hint(world, "Carrera", "CA 8895", "807", "54")
+    finding(
+        (sized["exact_match"] or {}).get("product_id") == existing["product_id"]
+        and not [s for s in sized["siblings"] if s["product_id"] == existing["product_id"]],
+        f"The hint gives no exact match where Save answers 409 ({sized})",
+    )
+    assert sized["eye_size_needed"] == []
+
+
+def test_r7_the_similar_hint_names_a_discarded_draft_as_one(world):
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    _discard(world, draft_id, po, grn)
+    hint = _similar_hint(world, "Boss", "BOSS 1700", "C2", "52")
+    assert (hint["exact_match"] or {}).get("product_id") == draft_id
+    # The screen reads this to say Save brings it back (no stock-list link).
+    assert hint["exact_match"]["discarded_draft"] is True
