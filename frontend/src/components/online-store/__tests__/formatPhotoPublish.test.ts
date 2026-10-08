@@ -30,7 +30,7 @@ describe('formatPhotoPublish', () => {
   it("shows the backend's own sentence when the press did not finish", () => {
     const error =
       'The new photo was sent, but IMS cannot see it finished on the website listing yet, ' +
-      'so the old photo stays up. Press Publish again in a few minutes to finish the swap.';
+      'so the old photo stays up. Press Publish again in a few minutes.';
     expect(formatPhotoPublish(label, live({ ok: false, action: 'update', error }))).toBe(
       `${label}: ${error}`,
     );

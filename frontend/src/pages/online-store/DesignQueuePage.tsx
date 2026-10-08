@@ -294,9 +294,10 @@ export default function DesignQueuePage() {
   // Publish (push) ONE approved image to Shopify. DARK by default -> a SIMULATED
   // dry-run; the returned mode (SIMULATED vs LIVE) is surfaced in the toast so a
   // dry-run is never mistaken for a live write. A non-APPROVED image returns
-  // ok=false action=skip (not an HTTP error) which we surface honestly. When a
-  // LIVE press names a photo on the listing (even one that also says the old
-  // photo stayed up) refresh the board + banner so the Synced chip + counts update.
+  // ok=false action=skip (not an HTTP error) which we surface honestly. After
+  // ANY live press refresh the board + banner: even a press that did not finish
+  // can change the photo's record (a new photo recorded while the old one stays
+  // up, a failed copy taken off), so the Synced chip + counts must re-read it.
   const publishImage = async (img: EcomProductImage) => {
     setPublishingId(img.id);
     try {
@@ -307,7 +308,7 @@ export default function DesignQueuePage() {
       } else {
         toast.warning(formatPhotoPublish(label, result));
       }
-      if (result.mode === 'LIVE' && result.shopify_id) {
+      if (result.mode === 'LIVE') {
         await load();
         bannerRef.current?.refresh();
       }

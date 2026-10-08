@@ -89,7 +89,7 @@ describe('Design Queue Publish toast', () => {
   it("shows only the backend's plain sentence when the swap is not finished", async () => {
     const error =
       'The new photo was sent, but IMS cannot see it finished on the website listing yet, ' +
-      'so the old photo stays up. Press Publish again in a few minutes to finish the swap.';
+      'so the old photo stays up. Press Publish again in a few minutes.';
     const t = await press({
       mode: 'LIVE',
       entity: 'image',
@@ -99,5 +99,19 @@ describe('Design Queue Publish toast', () => {
       error,
     });
     expect(t).toEqual({ kind: 'warning', msg: `Image "Aviator Gold": ${error}` });
+  });
+
+  it('re-reads the board after a LIVE press that did not finish', async () => {
+    // The press can record a new photo while the old one stays up and still
+    // answer ok=false: the board must re-read the row, not show a stale record.
+    await press({
+      mode: 'LIVE',
+      entity: 'image',
+      action: 'create',
+      ok: false,
+      shopify_id: 'gid://shopify/MediaImage/100',
+      error: 'The new photo is on the website. The old one stays up.',
+    });
+    await waitFor(() => expect(imagesApi.list).toHaveBeenCalledTimes(2));
   });
 });
