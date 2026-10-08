@@ -93,7 +93,21 @@ def test_auto_edit_success_moves_to_review(monkeypatch):
     assert res["auto_edit"] == "ok"
     assert res["provider"] == "fake" and res["storage"] == "fakestore"
     assert res["image"]["status"] == "REVIEW"
-    assert res["image"]["edited_url"] == "https://cdn.example/P1/I1.png"
+    edited = res["image"]["edited_url"]
+    assert edited.startswith("https://cdn.example/P1/I1-") and edited.endswith(".png")
+
+
+def test_a_re_edit_gets_a_new_file_name(monkeypatch):
+    """The website matches its copy of a photo by file name, so a re-edit
+    stored under the old name would never reach it."""
+    repo = _FakeImgRepo(
+        {"image_id": "I1", "product_id": "P1", "url": "https://x/raw.png", "status": "QUEUED"}
+    )
+    _wire(monkeypatch, repo, _FakeEditor())
+    first = _run(imod.auto_edit_image("I1", current_user=USER))["image"]["edited_url"]
+    repo.img["status"] = "REJECTED"  # sent back for a redo
+    second = _run(imod.auto_edit_image("I1", current_user=USER))["image"]["edited_url"]
+    assert first.rsplit("/", 1)[-1] != second.rsplit("/", 1)[-1]
 
 
 def test_auto_edit_approved_is_409(monkeypatch):
