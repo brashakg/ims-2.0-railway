@@ -1919,22 +1919,48 @@ def test_an_edit_keeps_a_still_unknown_rate_flagged(monkeypatch):
     assert kept["gst_source"] != "line"
 
 
-def test_an_edit_that_omits_the_rate_of_a_product_typed_at_two_rates_is_refused(monkeypatch):
-    """Two lines of one product typed at 5% and 12%: which one an omitted
-    rate meant is not known, so the server asks rather than guesses."""
+class _Catalogue5:
+    def find_by_id(self, pid):
+        return {"product_id": pid, "hsn_code": "9003", "gst_rate": 5}
+
+
+def test_an_edit_that_omits_the_rate_of_a_product_typed_at_two_rates(monkeypatch):
+    """Two lines of one product typed at 5% and 12%. An edit that keeps both
+    lines and omits the rates keeps each line's own; one that drops a line
+    cannot tell which rate the rest meant, so the server asks rather than
+    guesses."""
     po = _po(items=[_line("P1", "Carrera CA8895", 2, 1000, rate=5),
                     _line("P1", "Carrera CA8895", 1, 1000, rate=12)])
     for it in po["items"]:
         it.update(gst_source="line", gst_unresolved=False)
     repo, _ = _wire(monkeypatch, po)
+    _run(v.update_po("PO1", _edit_body([_ONE_LINE[0], {**_ONE_LINE[0], "quantity": 4}]), _user()))
+    assert [it["tax_rate"] for it in repo.pos["PO1"]["items"]] == [5, 12]
     with pytest.raises(HTTPException) as e:
-        _run(v.update_po("PO1", _edit_body([_ONE_LINE[0], _ONE_LINE[0]]), _user()))
+        _run(v.update_po("PO1", _edit_body([_ONE_LINE[0]]), _user()))
     assert e.value.status_code == 422
     assert [it["tax_rate"] for it in repo.pos["PO1"]["items"]] == [5, 12]
-    # Sending the rates settles it.
-    _run(v.update_po("PO1", _edit_body([{**_ONE_LINE[0], "gst_rate": 5},
-                                         {**_ONE_LINE[0], "gst_rate": 12, "quantity": 4}]), _user()))
-    assert [it["tax_rate"] for it in repo.pos["PO1"]["items"]] == [5, 12]
+    # Sending the rate settles it.
+    _run(v.update_po("PO1", _edit_body([{**_ONE_LINE[0], "gst_rate": 12}]), _user()))
+    assert [it["tax_rate"] for it in repo.pos["PO1"]["items"]] == [12]
+
+
+def test_a_typed_rate_beside_a_catalogue_line_of_the_same_product_is_kept(monkeypatch):
+    """P1 typed at 12% on line 1 and taken from the catalogue (5%) on line 2,
+    both HSN 9003. An API edit that changes only the notes and omits rate and
+    HSN on both lines keeps line 1 at 12%, and the timeline says only that the
+    notes changed."""
+    po = _po(items=[_line("P1", "Carrera CA8895", 2, 1000, rate=12),
+                    _line("P1", "Carrera CA8895", 1, 1000, rate=5)])
+    po["items"][0].update(gst_source="line", hsn="9003", gst_unresolved=False)
+    po["items"][1].update(gst_source="hsn", hsn="9003", gst_unresolved=False)
+    repo, _ = _wire(monkeypatch, po)
+    monkeypatch.setattr(v, "get_product_repository", lambda: _Catalogue5())
+    _run(v.update_po("PO1", _edit_body([_ONE_LINE[0], {**_ONE_LINE[0], "quantity": 1}],
+                                       notes="call first"), _user()))
+    a, b = repo.pos["PO1"]["items"]
+    assert (a["tax_rate"], a["line_tax"], b["tax_rate"]) == (12, 240, 5)
+    assert repo.pos["PO1"]["history"][-1]["detail"] == "notes changed"
 
 
 @pytest.mark.parametrize("sent,want", [

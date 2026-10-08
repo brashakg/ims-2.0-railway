@@ -1,5 +1,6 @@
 """Single purchase order: timeline, read, edit, send, cancel (whole or a line)."""
 
+from collections import Counter
 from datetime import timezone
 
 from ._shared import (
@@ -973,29 +974,38 @@ async def update_po(
     notes = (body.notes or None) if "notes" in given else (po.get("notes") or None)
 
     old_items = po.get("items") or []
-    # A line that OMITS its GST rate or HSN keeps the stored one of that
-    # product, as the form does by sending it back; an explicit value wins,
-    # and an explicit null or '' goes back to the catalogue's. Only a rate
-    # TYPED on the stored line is kept: any other was worked out, and is worked
-    # out again -- an UNRESOLVED line is stored at 0%, and keeping that would
-    # pin it at 0% and hide its "GST not settled" warning (the form leaves its
-    # rate out for exactly that line). So a product with any line not typed
-    # (None below) keeps nothing; one typed at two rates cannot tell which was
-    # meant, so the edit is refused.
+    # A line that OMITS its GST rate or HSN keeps its stored line's, as the
+    # form does by sending it back; an explicit value wins, and an explicit
+    # null or '' goes back to the catalogue's. Only a rate TYPED on the stored
+    # line is kept: any other was worked out, and is worked out again -- an
+    # UNRESOLVED line is stored at 0%, and keeping that would pin it at 0% and
+    # hide its "GST not settled" warning (the form leaves its rate out for
+    # exactly that line). The edit names no line, so a product's lines are
+    # matched in order (its 2nd line here is its 2nd stored line) -- only
+    # while the edit keeps as many lines of it; otherwise lines that differ
+    # cannot tell which was meant, and the edit is refused.
     stored: dict = {}
     for old in old_items:
-        pid = old.get("product_id")
         typed = old.get("tax_rate") if old.get("gst_source") == "line" else None
-        stored.setdefault((pid, "gst_rate"), set()).add(typed)
-        stored.setdefault((pid, "hsn"), set()).add(old.get("hsn") or None)
-    for line in body.items:
-        if line.new_product is not None:
-            continue
+        stored.setdefault(old.get("product_id"), []).append(
+            {"gst_rate": typed, "hsn": old.get("hsn") or None}
+        )
+    catalogued = [line for line in body.items if line.new_product is None]
+    sent = Counter(line.product_id for line in catalogued)
+    nth: Counter = Counter()
+    for line in catalogued:
+        olds = stored.get(line.product_id) or []
+        k = nth[line.product_id]
+        nth[line.product_id] += 1
         for field in ("gst_rate", "hsn"):
-            kept = stored.get((line.product_id, field)) or {None}
-            if field in line.model_fields_set or None in kept:
+            values = {old[field] for old in olds}
+            if field in line.model_fields_set:
                 continue
-            if len(kept) > 1:
+            if len(values) <= 1:
+                value = next(iter(values), None)
+            elif sent[line.product_id] == len(olds):
+                value = olds[k][field]
+            else:
                 raise HTTPException(
                     status_code=422,
                     detail=(
@@ -1004,7 +1014,8 @@ async def update_po(
                         "- send it for each of its lines."
                     ),
                 )
-            setattr(line, field, next(iter(kept)))
+            if value is not None:
+                setattr(line, field, value)
     computed, products, typed_in = price_po_lines(
         body.items, vendor, po.get("delivery_store_id"), current_user
     )
