@@ -14,6 +14,14 @@ from ...services.org_validation import itc_claimable, shop_gstins
 _DEAD_BILL = ["CANCELLED", "cancelled", "VOID", "voided"]
 
 
+def net_cash_due(output_tax: float, credit: float, rcm_tax: float) -> float:
+    """THE GSTR-3B cash rule: input credit sets off output tax down to zero (an
+    excess carries forward, never refunded here), and reverse-charge tax is
+    always paid in CASH on top -- credit can never set it off. GSTR-3B uses it
+    per head; the Finance GST summary on the month's totals."""
+    return max(0.0, output_tax - credit) + rcm_tax
+
+
 def _itc_store_scope(db, active_store):
     """(entity_id, gstin, shops) of the store whose return is being filed.
     `gstin` is THE shop's GSTIN (org_validation.shop_gstin -- the one the

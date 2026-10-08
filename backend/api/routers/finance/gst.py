@@ -126,7 +126,8 @@ async def get_gst_summary(
     # owed to the government in cash whatever its credit. Counting the credit
     # without the liability read net payable short by exactly this.
     rcm_tax = 0.0
-    from ..reports.gst_itc import _DEAD_BILL  # 3.1(d)'s own "dead bill"
+    # 3.1(d)'s own "dead bill", and GSTR-3B's own cash rule.
+    from ..reports.gst_itc import _DEAD_BILL, net_cash_due
 
     try:
         for _b in db.get_collection("vendor_bills").find(
@@ -169,7 +170,11 @@ async def get_gst_summary(
         _sales_orders, _store_state_map(db), _customer_state_map(db)
     )
     gst_collected = round(cgst + sgst + igst, 2)
-    net_payable = round(gst_collected + rcm_tax - gst_paid, 2)
+    # GSTR-3B's cash rule (net_cash_due): credit sets off the output tax down to
+    # zero and never the reverse-charge tax, which is paid in cash on top. The
+    # credit left over carries to next month (shown, so the panel adds up).
+    net_payable = round(net_cash_due(gst_collected, gst_paid, rcm_tax), 2)
+    credit_carried = round(max(0.0, gst_paid - gst_collected), 2)
 
     # Filing status. GSTR-1 is due the 11th and GSTR-3B the 20th of the month
     # AFTER the tax period. For December (m==12) that is January of the NEXT
@@ -192,6 +197,7 @@ async def get_gst_summary(
         # the CA can see what was excluded rather than wonder why ITC dropped.
         "gst_input_credit_excluded": gst_paid_excluded,
         "reverse_charge_tax": rcm_tax,
+        "gst_input_credit_carried_forward": credit_carried,
         "net_gst_payable": net_payable,
         "gstr1_due_date": gstr1_due.isoformat(),
         "gstr3b_due_date": gstr3b_due.isoformat(),

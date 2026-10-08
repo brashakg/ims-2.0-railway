@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from datetime import datetime
 
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
 os.environ.setdefault("ENVIRONMENT", "test")
@@ -176,6 +177,10 @@ def _payables():
 
 def _gstr3b():
     return reports._compute_gstr3b("2026-05", "S1")
+
+
+def _summary():
+    return asyncio.run(gst_mod.get_gst_summary(month=5, year=2026, current_user=dict(_ADMIN)))
 
 
 # ===========================================================================
@@ -403,15 +408,47 @@ class TestOtherReaders:
         )
         assert performance._vendor_mtd_spend(db, "V1") == 2180.0
 
-    def test_gst_summary_adds_the_rcm_liability_to_what_is_payable(self):
-        """The summary took the 180 as credit and never owed it: net payable
-        read 180 short."""
+    def test_gst_summary_owes_the_rcm_tax_in_cash_whatever_the_credit(self):
+        """No sales in May, one RCM freight bill of 1000 @ 18% with credit on.
+        Credit can never set off reverse-charge tax: the 180 is paid in cash,
+        the 180 of credit carries forward -- the figure GSTR-3B and the
+        Cross-Check give for the same month (it read 0)."""
         db, cli = _world()
         _book(cli, _bill("GTA-1", rcm=True))
-        out = asyncio.run(gst_mod.get_gst_summary(month=5, year=2026, current_user=dict(_ADMIN)))
+        out = _summary()
         assert out["gst_input_credit"] == 180.0
         assert out["reverse_charge_tax"] == 180.0
-        assert out["net_gst_payable"] == 0.0
+        assert out["gst_input_credit_carried_forward"] == 180.0
+        assert out["net_gst_payable"] == 180.0
+        cash = _gstr3b()["taxPaidCash"]
+        assert out["net_gst_payable"] == cash["integratedTax"] + cash["centralTax"] + cash["stateTax"]
+        assert out["net_gst_payable"] == _run_gst_cross_check(db, 5, 2026, "E1")["summary"]["gst_payable"]
+
+    def test_gst_summary_still_owes_the_rcm_tax_with_credit_switched_off(self):
+        """A blocked category: credit off. The 180 is still owed, none of it
+        is credit -- on the summary as on GSTR-3B."""
+        db, cli = _world()
+        _book(cli, _bill("GTA-1", rcm=True, credit=False))
+        out = _summary()
+        assert out["gst_input_credit"] == 0.0
+        assert out["reverse_charge_tax"] == 180.0
+        assert out["net_gst_payable"] == 180.0
+        assert out["net_gst_payable"] == _run_gst_cross_check(db, 5, 2026, "E1")["summary"]["gst_payable"]
+
+    def test_gst_summary_with_sales_adds_up(self):
+        """Collected 1000; credit 360 (180 RCM + 180 normal); RCM tax 180:
+        1000 - 360 + 180 = 820, and every line of it is on the summary."""
+        db, cli = _world()
+        _book(cli, _bill("GTA-1", rcm=True))
+        _book(cli, _bill("FR-1", rcm=False))
+        db["orders"].insert_one(
+            {"order_id": "O1", "store_id": "S1", "status": "COMPLETED", "tax_amount": 1000.0,
+             "grand_total": 6000.0, "created_at": datetime(2026, 5, 10, 6, 0)}
+        )
+        out = _summary()
+        assert (out["gst_collected"], out["gst_input_credit"], out["reverse_charge_tax"]) == (1000.0, 360.0, 180.0)
+        assert out["gst_input_credit_carried_forward"] == 0.0
+        assert out["net_gst_payable"] == 820.0
 
     def test_gst_summary_owes_nothing_on_a_cancelled_rcm_bill(self):
         db, _cli = _world()
@@ -419,7 +456,7 @@ class TestOtherReaders:
             {"bill_id": "X", "vendor_id": "V1", "bill_date": "2026-05-04", "status": "CANCELLED",
              "reverse_charge": True, "taxable_amount": 1000.0, "tax_amount": 180.0, "total_amount": 1000.0}
         )
-        out = asyncio.run(gst_mod.get_gst_summary(month=5, year=2026, current_user=dict(_ADMIN)))
+        out = _summary()
         assert out["reverse_charge_tax"] == 0.0
         assert out["net_gst_payable"] == 0.0
 

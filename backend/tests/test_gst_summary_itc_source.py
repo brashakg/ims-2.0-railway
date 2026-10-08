@@ -169,7 +169,13 @@ def test_summary_returns_a_complete_envelope_without_raising(
         "gstr3b_due_date",
     ):
         assert key in body, f"missing {key} in {sorted(body)}"
-    # net payable = output tax - claimable ITC
+    # net payable = GSTR-3B's cash: output tax less claimable ITC, never below
+    # zero (the excess carries forward), plus reverse-charge tax in cash.
     assert body["net_gst_payable"] == round(
-        body["gst_collected"] - body["gst_input_credit"], 2
+        max(0.0, body["gst_collected"] - body["gst_input_credit"])
+        + body["reverse_charge_tax"],
+        2,
+    )
+    assert body["gst_input_credit_carried_forward"] == round(
+        max(0.0, body["gst_input_credit"] - body["gst_collected"]), 2
     )

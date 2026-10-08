@@ -33,6 +33,7 @@ from .gst_itc import (
     _placement,
     _sum_heads,
     _ledger_row_return_doc,
+    net_cash_due,
     _return_interstate_flag,
     _transfer_outward_bills,
 )
@@ -497,9 +498,9 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
     # Net cash liability = (output tax - ITC) + reverse-charge tax. RCM is always
     # discharged in CASH (it cannot be set off against ITC), so it adds on top of
     # the output-minus-ITC cash. When there are no RCM bills these terms are 0.
-    cash_igst = max(0.0, out_igst - itc_igst) + rcm_igst
-    cash_cgst = max(0.0, out_cgst - itc_cgst) + rcm_cgst
-    cash_sgst = max(0.0, out_sgst - itc_sgst) + rcm_sgst
+    cash_igst = net_cash_due(out_igst, itc_igst, rcm_igst)
+    cash_cgst = net_cash_due(out_cgst, itc_cgst, rcm_cgst)
+    cash_sgst = net_cash_due(out_sgst, itc_sgst, rcm_sgst)
 
     def _r(v: float) -> float:
         return round(v, 2)
