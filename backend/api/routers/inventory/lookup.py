@@ -20,9 +20,13 @@ Every rule is reused, not re-typed:
   * sellable    -- StockRepository.sellable_filter, the filter find_available
                    and the sale guard count (AVAILABLE and in date), one unit
                    per stock_units row -- so this shop's figure is the till's;
-  * tracked     -- the sale guard's own `tracked` count
-                   (orders/stock._assert_serialized_stock_available): the shop
-                   holds a stock_units row of it, whatever its status. The
+  * tracked     -- the sale guard's `tracked` question
+                   (orders/stock._assert_serialized_stock_available): does the
+                   shop hold a stock_units row of it, whatever its status. The
+                   guard asks it inline in a till file, so this re-states its
+                   match; the real guard is the oracle for one shop per
+                   lifecycle state and stored shape, each its sole row
+                   (test_d7b3_a_shop_the_till_does_not_count_is_not_tracked). The
                    guard counts a line only there AND when the line's item_type
                    takes serialized stock. That item_type is the till's
                    (POS mapCategory, TypeScript), so the SCREEN puts it on each
@@ -186,7 +190,8 @@ async def stock_lookup(
     shop_ids = [str(s["store_id"]) for s in shops]
     available = sellable_by_product_shop(stock_repo, pids)
     in_transit = _in_transit_by_product_shop(stock_repo, pids, shop_ids)
-    # The guard's `tracked`: any stock_units row of it at the shop, any status.
+    # The guard's `tracked` match: any stock_units row of it at the shop, any
+    # status -- never filter this by status (pinned per state against the guard).
     tracked = set(_units_by_product_shop(stock_repo, {"product_id": {"$in": pids}}))
     not_counted, lens_grid = _guard_lists()
 

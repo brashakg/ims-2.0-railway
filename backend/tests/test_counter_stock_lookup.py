@@ -144,6 +144,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 import api.dependencies as deps  # noqa: E402
 from api.routers import inventory as inv_mod  # noqa: E402
 from api.routers.auth import ALGORITHM, SECRET_KEY, get_current_user  # noqa: E402
+from api.services.item_events import StockState  # noqa: E402
 from api.services.product_master import compute_identity_key  # noqa: E402
 from api.services.rbac_policy import check_access  # noqa: E402
 from api.services.rbac_policy._core import ALL_ROLES  # noqa: E402
@@ -765,18 +766,23 @@ def test_d7b3_a_shop_the_till_does_not_count_is_not_tracked(call, mongo_db, monk
         {"_id": pid, "product_id": pid, "sku": "SKU-TRACK-1", "brand": "Zeiss", "model": "TRK1",
          "category": "ANY", "mrp": 3000.0, "offer_price": 3000.0, "is_active": True}
     )
-    # Round 7: the guard's `tracked` is ANY status, so a shop that sold or
-    # reserved its last unit is tracked (the till refuses, /sellable says 0)
-    # -- a lookup that counted only AVAILABLE rows would read 'not tracked'.
-    sold, reserved, mixed = "S4-RANCHI", "S5-JAMSHEDPUR", "S6-NAGPUR"
+    # Round 7/8: the guard's `tracked` is ANY row, whatever its status, so a
+    # shop whose ONLY row of it is sold, reserved, shipped away, quarantined,
+    # void, damaged, returned to the vendor or a legacy spelling is tracked
+    # (the till refuses, /sellable says 0). One shop per lifecycle state and
+    # per stored shape, each as that shop's SOLE row: a lookup that dropped
+    # any status from its tracked match would read 'not tracked' there. Each
+    # carries a ship-to stamp, as a received unit can keep one.
+    sole = {s.value: {"status": s.value} for s in StockState}
+    sole.update({label: shape for label, shape, _sell, _phys in _SHAPES})
+    sole_shops = {f"SX-{i:02d}": label for i, label in enumerate(sole)}
     mongo_db["stores"].insert_many(
-        [{"store_id": s, "store_code": s, "store_name": s, "store_type": "RETAIL", "is_active": True}
-         for s in (sold, reserved, mixed)]
+        [{"store_id": s, "store_code": s, "store_name": label, "store_type": "RETAIL", "is_active": True}
+         for s, label in sole_shops.items()]
     )
     # Dhanbad: 2 boxes in date plus a sold, a reserved, an expired and a
     # shipped-away row; Bokaro: only an expired box (tracked, sells 0); Pune:
-    # no unit at all; Ranchi: only a SOLD row; Jamshedpur: only a RESERVED
-    # row; Nagpur: a unit shipped to Dhanbad and an expired box.
+    # no unit at all.
     mongo_db["stock_units"].insert_many(
         [
             _unit(pid, S1, expiry_date="2099-12-31"), _unit(pid, S1, expiry_date="2099-12-31"),
@@ -784,11 +790,8 @@ def test_d7b3_a_shop_the_till_does_not_count_is_not_tracked(call, mongo_db, monk
             _unit(pid, S1, expiry_date="2020-01-01"),
             _unit(pid, S1, "TRANSFERRED", transfer_to_store_id=S2),
             _unit(pid, S2, expiry_date="2020-01-01"),
-            _unit(pid, sold, "SOLD"),
-            _unit(pid, reserved, "RESERVED"),
-            _unit(pid, mixed, "TRANSFERRED", transfer_to_store_id=S1),
-            _unit(pid, mixed, expiry_date="2020-01-01"),
         ]
+        + [{**_unit(pid, s, None, transfer_to_store_id=S1), **sole[label]} for s, label in sole_shops.items()]
     )
 
     body = _ok(call(_user("CASHIER", S1), q="SKU-TRACK-1"))
@@ -796,7 +799,7 @@ def test_d7b3_a_shop_the_till_does_not_count_is_not_tracked(call, mongo_db, monk
     assert isinstance(not_counted, list), f"the guard's lists ride on the answer: {sorted(body)}"
     assert set(body.get("lens_grid_item_types") or []) <= set(not_counted), "a lens-grid line is never counted"
     item = _items(body)[pid]
-    for shop in (S1, S2, S3, sold, reserved, mixed):
+    for shop in (S1, S2, S3, *sole_shops):
         cell = _stores(item)[shop]
         till = _ok(call(_user("CASHIER", shop), "/inventory/sellable",
                         product_ids=pid, item_types=item_type))["sellable"][pid]
@@ -804,7 +807,7 @@ def test_d7b3_a_shop_the_till_does_not_count_is_not_tracked(call, mongo_db, monk
         # till's line type is one the guard counts.
         counted = bool(cell.get("tracked")) and item_type not in not_counted
         assert counted is (till is not None), (
-            f"a {item_type or 'blank'} line at {shop}: the till "
+            f"a {item_type or 'blank'} line at {shop} ({sole_shops.get(shop, 'seeded above')}): the till "
             f"{'limits it to ' + str(till) if till is not None else 'does not count it'}, "
             f"the screen would {'show ' + str(cell.get('available')) if counted else 'say not tracked'}"
         )
