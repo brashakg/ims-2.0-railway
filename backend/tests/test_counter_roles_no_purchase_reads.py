@@ -1298,15 +1298,18 @@ class _Cursor(list):
 
 
 class _BillDb:
-    """One PAID purchase bill on PO1, dated this month; every other collection
-    is empty."""
+    """One purchase bill (PAID unless given) on PO1, dated this month; every
+    other collection is empty."""
+
+    def __init__(self, status="PAID"):
+        self.status = status
 
     def get_collection(self, name):
         from api.routers.vendors._shared import now_ist
 
         bill = {
             "doc_type": "PURCHASE_INVOICE", "po_id": "PO1", "vendor_id": "V1",
-            "bill_id": "B1", "invoice_number": "INV-9", "status": "PAID",
+            "bill_id": "B1", "invoice_number": "INV-9", "status": self.status,
             "total": _BILL_TOTAL, "total_amount": _MTD_TOTAL,
             "bill_date": now_ist().strftime("%Y-%m-01"),
             "created_at": "2026-06-06T10:00:00",
@@ -1372,6 +1375,20 @@ def test_supplier_bill_money_on_the_purchase_screens_is_accounts_only(
     assert ("PAID" in tl.text) is sees, tl.text
     assert ("mtd_spend" in perf.json()) is sees, perf.text
     assert (str(_MTD_TOTAL) in perf.text) is sees, perf.text
+
+
+@pytest.mark.parametrize("role", ("STORE_MANAGER", "AREA_MANAGER", "ACCOUNTANT", "ADMIN"))
+def test_the_po_timeline_never_calls_an_unpaid_bill_settled(client, monkeypatch, role):
+    # The paid status is the payables rule's; a reader denied it must not be
+    # told it either way by the event's label (it said "Bill settled" for every
+    # bill, and only the hidden "(OUTSTANDING)" corrected it).
+    _bill_reads(monkeypatch)
+    monkeypatch.setattr(vendors_mod, "_get_db", lambda: _BillDb("OUTSTANDING"))
+    tl = client.get("/api/v1/vendors/purchase-orders/PO1/timeline", headers=_headers(role))
+    assert tl.status_code == 200, tl.text
+    (event,) = [e for e in tl.json()["events"] if e["ref"] == "INV-9"]
+    assert event["label"] == "Bill booked", event
+    assert ("OUTSTANDING" in event["detail"]) is (role in AP_ROLES), event
 
 
 def _supplier_payment_answers(monkeypatch, role):
@@ -1533,6 +1550,23 @@ def test_narrowing_the_purchase_rule_moves_every_purchase_read(
         assert _price_leaks(client, "AREA_MANAGER", path), path
     resp = client.get("/api/v1/vendors", headers=_headers("STORE_MANAGER"))
     assert set(resp.json()["vendors"][0]) == _NAME_KEYS
+
+
+def test_narrowing_the_purchase_rule_moves_the_vendor_search(
+    client, real_vendor_repo, monkeypatch
+):
+    # Which keys ?search may match (the GSTIN-oracle guard, section 5) is the
+    # purchase rule too: a written-out copy of it kept matching the gstin for a
+    # role the rule had dropped, and every other test stayed green.
+    assert _search(client, "STORE_MANAGER", "27AAPFU")
+    monkeypatch.setitem(
+        cost_mask_mod._CONTEXT_ROLES,
+        "purchase",
+        cost_mask_mod._CONTEXT_ROLES["purchase"] - {"STORE_MANAGER"},
+    )
+    assert _search(client, "STORE_MANAGER", "27AAPFU") == []
+    assert _search(client, "STORE_MANAGER", "acme")
+    assert _search(client, "AREA_MANAGER", "27AAPFU")
 
 
 def _without(seq, key):
