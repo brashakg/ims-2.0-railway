@@ -172,15 +172,18 @@ describe('Stock lookup screen', () => {
   // 'type the power' -- the search does not match one, so that advice ended
   // in 'No product matches'. A counter who has just scanned is not told to scan.
   it.each([
-    ['FRAME', undefined, 'Showing 1 of 60 products - scan the barcode to find one'],
-    ['CONTACT_LENS', false, 'Showing 1 of 60 products - scan the barcode to find one'],
-    ['CONTACT_LENS', true, 'Showing 1 of 60 products - your exact match is first'],
-  ])('says when the caps cut a %s list (exact: %s), and how big it is', async (category, exact, cut) => {
+    ['FRAME', undefined],
+    ['CONTACT_LENS', false],
+  ])('says when the caps cut a %s list (exact: %s), and how big it is', async (category, exact) => {
     await search({ items: [{ ...product('P', category), exact }], total: 60, truncated: true }, 'Frame P');
-    expect(screen.getByText(cut)).toBeTruthy();
+    expect(screen.getByText('Showing 1 of 60 products - scan the barcode to find one')).toBeTruthy();
   });
-  it('says nothing about a cut when the list is whole', async () => {
-    await search({ items: [product('P', 'CONTACT_LENS')], total: 1, truncated: false }, 'Frame P');
+  // Round 8 (D): no notice at all when the first row is the scanned code.
+  it.each([
+    ['the list is whole', { total: 1, truncated: false }, undefined],
+    ['the first row is the scanned code', { total: 60, truncated: true }, true],
+  ])('says nothing about a cut when %s', async (_why, cut, exact) => {
+    await search({ items: [{ ...product('P', 'CONTACT_LENS'), exact }], ...cut }, 'Frame P');
     expect(screen.queryByText(/^Showing/)).toBeNull();
   });
 

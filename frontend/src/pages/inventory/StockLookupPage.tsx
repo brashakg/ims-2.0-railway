@@ -111,12 +111,12 @@ export default function StockLookupPage() {
         <p className="text-sm text-gray-600">No product matches "{q}".</p>
       ) : items.length > 0 ? (
         <>
-        {data?.truncated && (
+        {/* The search never matches a typed power (brand, model, SKU, barcode
+            only), so scanning is the one way to name a row exactly; after a
+            scan its row is first and there is nothing to advise. */}
+        {data?.truncated && !items[0]?.exact && (
           <p className="text-sm text-amber-800 mb-2">
-            Showing {items.length.toLocaleString('en-IN')} of {(data.total ?? 0).toLocaleString('en-IN')} products
-            {/* The search never matches a typed power (brand, model, SKU, barcode
-                only), so scanning is the one way to name a row exactly. */}
-            {items[0]?.exact ? ' - your exact match is first' : ' - scan the barcode to find one'}
+            Showing {items.length.toLocaleString('en-IN')} of {(data.total ?? 0).toLocaleString('en-IN')} products - scan the barcode to find one
           </p>
         )}
         <div className="overflow-x-auto border border-gray-200 rounded-lg">
