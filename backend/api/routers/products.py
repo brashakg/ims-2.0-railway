@@ -15,6 +15,7 @@ import random
 import uuid
 from .auth import get_current_user, require_roles
 from ..dependencies import get_product_repository
+from ..services.cost_mask import can_see_cost, mask_cost, mask_cost_list
 from ..services.file_store import (
     get_file_store,
     ALLOWED_MIME_TYPES,
@@ -829,6 +830,17 @@ async def list_products(
     category: Optional[str] = Query(None),
     brand: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
+    match: Optional[str] = Query(
+        None,
+        pattern="^anywhere$",
+        description=(
+            "'anywhere' = the purchase-order product box's wide search: the "
+            "model number anywhere in the model, brands spelt with or without "
+            "spaces/hyphens, colour words, the GTIN (audit F21). Absent = the "
+            "till's rule: every word from the START of brand / model / SKU / "
+            "variant / barcode (POS, goods receipt and every other search box)."
+        ),
+    ),
     tag: Optional[str] = Query(
         None, description="Filter to products carrying this normalised tag"
     ),
@@ -883,6 +895,7 @@ async def list_products(
         created_by = None
     if not isinstance(photo, str):
         photo = None
+    anywhere = match == "anywhere"
 
     def _stamped(result: Dict[str, Any]) -> Dict[str, Any]:
         # Photo / online truth is stamped on EVERY response, cache hit or
@@ -930,9 +943,12 @@ async def list_products(
     # carry created_by/updated_by fields that are STRIPPED for staff, and the
     # two shapes must never cross-serve from the cache.
     _tier = "mgr" if can_see_attribution else "staff"
+    # Same for cost: counter roles get the rows without cost_price / landed_cost
+    # (F60, owner ruling 2026-09-29), so the cost tier is part of the key too.
+    _cost_tier = "cost" if can_see_cost(current_user, "product") else "nocost"
     cache_key = (
         f"products:{active_store}:{category}:{brand}:{search}:{tag}:{skip}:{limit}"
-        f":{is_active}:{created_by}:{_tier}:{photo}"
+        f":{is_active}:{created_by}:{_tier}:{photo}:{anywhere}:{_cost_tier}"
     )
     cached = cache.get(cache_key)
     if cached is not None:
@@ -974,9 +990,14 @@ async def list_products(
                 created_by=created_by,
                 skip=_skip,
                 limit=_limit,
+                anywhere=anywhere,
             )
             total_count = repo.count_search_products(
-                search, category, is_active=filtered_active, created_by=created_by
+                search,
+                category,
+                is_active=filtered_active,
+                created_by=created_by,
+                anywhere=anywhere,
             )
         elif brand:
             products = repo.find_by_brand(
@@ -1060,6 +1081,7 @@ async def list_products(
                     "updated_by_name",
                 ):
                     p.pop(_f, None)
+        products = mask_cost_list(products, current_user, "product")
 
         if _scan:
             # Stamp first (the filter reads the stamped value), then keep the
@@ -3302,7 +3324,7 @@ async def get_product_by_sku(sku: str, current_user: dict = Depends(get_current_
     if repo is not None:
         product = repo.find_by_sku(sku)
         if product is not None:
-            return product
+            return mask_cost(product, current_user, "product")
         raise HTTPException(status_code=404, detail="Product not found")
 
     return {"sku": sku}
@@ -3322,7 +3344,7 @@ async def get_product(product_id: str, current_user: dict = Depends(get_current_
                 imgs = product.get("images")
                 if isinstance(imgs, list) and imgs and isinstance(imgs[0], str):
                     product["image_url"] = imgs[0]
-            return product
+            return mask_cost(product, current_user, "product")
         raise HTTPException(status_code=404, detail="Product not found")
 
     return {"product_id": product_id}

@@ -42,6 +42,7 @@ import { byPerson } from './purchaseTypes';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import type { UserRole } from '../../types';
+import { PAYABLES_ROLES } from '../../components/common/CostCell';
 
 // ---- helpers ---------------------------------------------------------------
 
@@ -283,7 +284,7 @@ function NoteControl({
 // Same server contract as the Purchase Invoices tab: POST /{id}/approve-exception
 // with a mandatory reason (>= 10 chars, written to the immutable audit log).
 
-const EXCEPTION_APPROVE_ROLES: UserRole[] = ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'];
+const EXCEPTION_APPROVE_ROLES: UserRole[] = PAYABLES_ROLES;
 
 function ApproveExceptionModal({
   invoice,

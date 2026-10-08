@@ -8,7 +8,7 @@ Handles product creation, SKU generation, and Shopify sync.
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from pydantic import BaseModel, Field, field_validator
 from typing import Optional, Dict, Any, List, Union
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 import logging
 import uuid
@@ -1765,9 +1765,9 @@ async def list_catalog_products(
     start = (page - 1) * limit
     end = start + limit
 
-    # F35: strip cost/margin for roles that may not see it (CATALOG_MANAGER sees
-    # cost only on the edit form, not this operational list -> default context).
-    page_products = mask_cost_list(products[start:end], current_user)
+    # F35: per-unit cost answers to the one product-cost rule (services/
+    # cost_mask "product": the managers see it, counter roles never).
+    page_products = mask_cost_list(products[start:end], current_user, "product")
     return {
         "products": page_products,
         "total": total,
@@ -1785,8 +1785,8 @@ async def get_catalog_product(
     if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
 
-    # F35: product create/edit form -> CATALOG_MANAGER keeps cost (catalog_edit context).
-    product = mask_cost(product, current_user, context="catalog_edit")
+    # F35: the one product-cost rule, as on the list and /products.
+    product = mask_cost(product, current_user, "product")
     return {"product": product}
 
 
@@ -2046,7 +2046,7 @@ async def create_catalog_product(
         product_data["shopify"] = shopify_result
 
     return {
-        "product": mask_cost(product_data, current_user, context="catalog_edit"),
+        "product": mask_cost(product_data, current_user, "product"),
         "message": "Product created successfully",
         "shopify_sync": shopify_result,
     }
@@ -2468,7 +2468,7 @@ async def update_catalog_product(
         )
 
     return {
-        "product": mask_cost(existing, current_user, context="catalog_edit"),
+        "product": mask_cost(existing, current_user, "product"),
         "message": "Product updated successfully",
     }
 
@@ -2820,7 +2820,7 @@ async def delete_catalog_product(
         raise HTTPException(status_code=404, detail="Product not found")
 
     product["is_active"] = False
-    product["deleted_at"] = datetime.now().isoformat()
+    product["deleted_at"] = datetime.now(timezone.utc).isoformat()
     product["deleted_by"] = current_user.get("user_id")
 
     # NOT a catalogue edit: `is_active` / deleted_at / deleted_by appear in NO
@@ -2831,14 +2831,18 @@ async def delete_catalog_product(
     _save_catalog_product(product, mark_dirty=False)
 
     # Products-convergence: deactivate the SPINE twin too (shared id) so a
-    # soft-deleted catalog product can't still be sold at POS. Fail-soft.
+    # soft-deleted catalog product can't still be sold at POS, and stamp it
+    # deleted there too: is_active False alone reads like a provisional buy
+    # not switched on yet (reorder_policy.discontinued). Fail-soft.
     try:
         from ..dependencies import get_product_repository
 
         _pr = get_product_repository()
         _spine_id = _spine_product_id(_pr, product)
         if _pr is not None and _spine_id:
-            _pr.update(_spine_id, {"is_active": False})
+            _pr.update(
+                _spine_id, {"is_active": False, "deleted_at": product["deleted_at"]}
+            )
     except Exception:  # noqa: BLE001
         logger.warning(
             "[CATALOG] spine deactivate on delete skipped for %s",
