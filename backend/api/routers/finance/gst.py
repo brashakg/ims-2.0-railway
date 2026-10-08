@@ -28,6 +28,19 @@ from ._shared import (
 _ITC_PENDING_STATUSES = {"DRAFT", "PENDING", "CANCELLED", "REJECTED", "VOID"}
 
 
+def _bill_booked(bill: dict) -> bool:
+    """Whether a vendor bill is a booked purchase: received and not a draft /
+    pending / cancelled / rejected / void one. Whether it then claims credit
+    is _itc_eligible_bill's question."""
+    if not isinstance(bill, dict):
+        return False
+    # Not-yet-received: explicit received=False, or a pending-ish status.
+    if bill.get("received") is False:
+        return False
+    status = str(bill.get("status") or "").strip().upper()
+    return status not in _ITC_PENDING_STATUSES
+
+
 def _itc_eligible_bill(bill: dict) -> bool:
     """Whether a vendor bill's GST counts toward input credit (owner decision:
     received AND not 17(5)-blocked). DEFAULT-INCLUDE: a bill with no eligibility
@@ -38,16 +51,11 @@ def _itc_eligible_bill(bill: dict) -> bool:
     # 17(5) disallowed (food / motor vehicle / personal use ...) -> never ITC.
     if bool(bill.get("itc_blocked")):
         return False
-    # An explicit itc_eligible=False also blocks (operator marked it).
+    # An explicit itc_eligible=False also blocks (operator marked it; a bill
+    # for goods bought without a PO is stored so, D14).
     if bill.get("itc_eligible") is False:
         return False
-    # Not-yet-received: explicit received=False, or a pending-ish status.
-    if bill.get("received") is False:
-        return False
-    status = str(bill.get("status") or "").strip().upper()
-    if status in _ITC_PENDING_STATUSES:
-        return False
-    return True
+    return _bill_booked(bill)
 
 
 @router.get("/gst/summary")

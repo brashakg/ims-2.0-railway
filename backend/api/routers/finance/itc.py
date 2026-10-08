@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from ..auth import get_current_user
 from ...services import itc_reconcile, csv_safe
 from ._shared import _get_db, _require_finance_admin, router
-from .gst import _itc_eligible_bill
+from .gst import _bill_booked, _itc_eligible_bill
 
 # === GST input-tax-credit (ITC) reconciliation (ADMIN / ACCOUNTANT) ===
 
@@ -99,11 +99,14 @@ class Gstr2bReconcileBody(BaseModel):
 
 
 def _book_rows_from_db(db) -> List[dict]:
-    """Every vendor bill whose GST counts as input credit (the ONE rule the ITC
-    register uses, gst._itc_eligible_bill) + its vendor GSTIN, formatted for
-    the reconciler. A bill that claims no credit -- a walk-in "Bought without
-    PO" receipt's bill (D14), a 17(5)-blocked or draft bill -- is neither
-    "matched (claim)" nor "ITC at risk" on the GSTR-2B screen or its CSV."""
+    """Every booked vendor bill + its vendor GSTIN, formatted for the
+    reconciler, each saying whether its GST counts as input credit (the ONE
+    rule the ITC register uses, gst._itc_eligible_bill). A booked bill that
+    claims no credit -- a "Bought without PO" receipt's bill (D14), a
+    17(5)-blocked one -- is neither "matched (claim)" nor "ITC at risk", and
+    when its supplier filed it, it is its own "booked, no credit claimed"
+    line that answers that 2B row (never "not booked - book then claim").
+    A draft / cancelled bill is not booked, so it answers nothing."""
     gstin_by_vendor: Dict[str, str] = {}
     try:
         for v in db.get_collection("vendors").find(
@@ -115,10 +118,11 @@ def _book_rows_from_db(db) -> List[dict]:
     rows = []
     try:
         for b in db.get_collection("vendor_bills").find({}, {"_id": 0}):
-            if not _itc_eligible_bill(b):
+            if not _bill_booked(b):
                 continue
             rows.append(
                 {
+                    "claims_credit": _itc_eligible_bill(b),
                     "gstin": gstin_by_vendor.get(b.get("vendor_id")),
                     "invoice_no": b.get("bill_number"),
                     "taxable": b.get("taxable_amount"),
@@ -179,13 +183,23 @@ _ITC_CSV_HEADERS = {
         "days_old",
     ],
     "only_in_2b": ["gstin", "invoice_no", "taxable", "tax"],
+    "booked_no_credit": [
+        "vendor_name",
+        "gstin",
+        "invoice_no",
+        "bill_date",
+        "book_tax",
+        "portal_tax",
+    ],
 }
 
 
 @router.post("/itc-export")
 async def itc_export_csv(
     body: Gstr2bReconcileBody,
-    bucket: str = Query(..., pattern="^(matched|mismatch|only_in_books|only_in_2b)$"),
+    bucket: str = Query(
+        ..., pattern="^(matched|mismatch|only_in_books|only_in_2b|booked_no_credit)$"
+    ),
     current_user: dict = Depends(get_current_user),
 ):
     """CSV export of a single reconciliation bucket. POST instead of GET
