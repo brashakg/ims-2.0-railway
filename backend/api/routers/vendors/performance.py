@@ -3,16 +3,18 @@
 from ._shared import (
     Depends,
     Query,
+    _VENDOR_ROLES,
     _get_db,
     datetime,
-    get_current_user,
     get_vendor_repository,
     ist_date_str,
     logger,
     now_ist,
+    require_roles,
     router,
     timedelta,
 )
+from ...services.cost_mask import can_see_cost
 
 
 # ============================================================================
@@ -132,7 +134,7 @@ async def vendor_performance(
         le=24,
         description="Number of rolling months to include in the score window.",
     ),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
 ):
     """Return a performance score for the vendor over the last `months` months (INV-13).
 
@@ -153,8 +155,14 @@ async def vendor_performance(
 
     # MTD spend is independent of GRN history -- compute it up front so even a
     # vendor with no GRNs in the window still reports what we've billed this
-    # month. Fail-soft: any error -> 0.0 (honest, never fabricated).
-    mtd_spend = _vendor_mtd_spend(db, vendor_id)
+    # month. Fail-soft: any error -> 0.0 (honest, never fabricated). It sums
+    # supplier bills, so it is the one payables rule's (owner ruling
+    # 2026-09-29): anyone else gets no mtd_spend key at all.
+    bills = (
+        {"mtd_spend": _vendor_mtd_spend(db, vendor_id)}
+        if can_see_cost(current_user, "payables")
+        else {}
+    )
     # QC pass-rate joins GRN QC (accepted/received) + workshop QC (job pass/fail)
     # for this vendor. Fail-soft: returns None when there is no QC signal at all.
     qc_pass_rate, qc_sample = _vendor_qc_pass_rate(db, vendor_id)
@@ -170,7 +178,7 @@ async def vendor_performance(
         "on_time_rate": None,
         "qc_pass_rate": qc_pass_rate,
         "qc_sample_size": qc_sample,
-        "mtd_spend": mtd_spend,
+        **bills,
         "overall_score": None,
         "insufficient_data": True,
         "note": "No GRN data found for this vendor in the selected window.",
@@ -279,7 +287,7 @@ async def vendor_performance(
             "on_time_rate": on_time_rate,
             "qc_pass_rate": qc_pass_rate,
             "qc_sample_size": qc_sample,
-            "mtd_spend": mtd_spend,
+            **bills,
             "on_time_grns": on_time_count,
             "grns_with_po_date": grns_with_po_date,
             "overall_score": overall_score,
@@ -313,7 +321,7 @@ async def vendor_purchase_history(
         le=36,
         description="Rolling-months window for the purchase-history report.",
     ),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
 ):
     """Return purchase-history analytics for one vendor (INV-13).
 

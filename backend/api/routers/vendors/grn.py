@@ -23,7 +23,6 @@ from ._shared import (
     _normalize_invoice_no,
     can_access_store_scoped,
     datetime,
-    get_current_user,
     get_file_store,
     get_grn_repository,
     get_vendor_repository,
@@ -221,8 +220,7 @@ async def list_grns(
 
     _enrich_grn_names(grns)
     # The price paid on a line goes through the one cost rule (cost_mask).
-    for g in grns:
-        mask_receipt(g, current_user)
+    grns = [mask_receipt(g, current_user) for g in grns]
 
     return {"grns": grns, "total": len(grns)}
 

@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Dict, List
 
+from ._core import ACCOUNTS, PURCHASE, RETURN_READERS
+
 ROWS: List[Dict[str, object]] = [
     # --- /api/v1/vendor-portal ---
     {
@@ -30,153 +32,180 @@ ROWS: List[Dict[str, object]] = [
         "allowed": "PUBLIC",
     },
     # --- /api/v1/vendor-returns ---
-    {"method": "GET", "path": "/api/v1/vendor-returns", "allowed": "AUTHENTICATED"},
-    {"method": "POST", "path": "/api/v1/vendor-returns", "allowed": "AUTHENTICATED"},
-    {"method": "GET", "path": "/api/v1/vendor-returns/", "allowed": "AUTHENTICATED"},
-    {"method": "POST", "path": "/api/v1/vendor-returns/", "allowed": "AUTHENTICATED"},
+    # F60: reads carry unit costs -> the writers plus the Vendor Returns screen
+    # (WORKSHOP_STAFF logs defective pairs and reads them without prices or
+    # supplier identity: services/cost_mask). Store-scoped in the handler.
+    {
+        "method": "GET",
+        "path": "/api/v1/vendor-returns",
+        "allowed": RETURN_READERS,
+        "store_scoped": True,
+    },
+    # Writes = the handler's require_roles(*_VENDOR_RETURN_ROLES).
+    {
+        "method": "POST",
+        "path": "/api/v1/vendor-returns",
+        "allowed": PURCHASE,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/vendor-returns/",
+        "allowed": RETURN_READERS,
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/vendor-returns/",
+        "allowed": PURCHASE,
+    },
     {
         "method": "GET",
         "path": "/api/v1/vendor-returns/{return_id}",
-        "allowed": "AUTHENTICATED",
+        "allowed": RETURN_READERS,
+        "store_scoped": True,
     },
     {
         "method": "PATCH",
         "path": "/api/v1/vendor-returns/{return_id}/status",
-        "allowed": "AUTHENTICATED",
+        "allowed": PURCHASE,
     },
     # --- /api/v1/vendor-rma (N4 Vendor RMA + credit-note reconciliation) ---
     # An RMA + its vendor credit note are financial instruments against a
     # vendor; create + every lifecycle transition is gated to the same vendor/AP
     # role set vendor_returns hardened to (SUPERADMIN implicit via require_roles).
-    # GET list/detail are AUTHENTICATED but store-scoped per object in the
-    # handler (validate_store_access / resolve_store_scope), so a cashier can
-    # read but never authorize an RMA or record a credit.
+    # F60: GET list/detail carry the expected vendor credit, so they go to the
+    # same set (no screen reads RMAs), store-scoped per object in the handler.
     {
         "method": "GET",
         "path": "/api/v1/vendor-rma",
-        "allowed": "AUTHENTICATED",
+        "allowed": PURCHASE,
         "store_scoped": True,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendor-rma/",
-        "allowed": "AUTHENTICATED",
+        "allowed": PURCHASE,
         "store_scoped": True,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendor-rma",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
         "store_scoped": True,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendor-rma/",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
         "store_scoped": True,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendor-rma/{rma_id}",
-        "allowed": "AUTHENTICATED",
+        "allowed": PURCHASE,
         "store_scoped": True,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendor-rma/{rma_id}/authorize",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
         "store_scoped": True,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendor-rma/{rma_id}/dispatch",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
         "store_scoped": True,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendor-rma/{rma_id}/credit-note",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
         "store_scoped": True,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendor-rma/{rma_id}/reject",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
         "store_scoped": True,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendor-rma/{rma_id}/close",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
         "store_scoped": True,
     },
     # --- /api/v1/rtv-debit-notes (F20 GST debit note ON TOP of an RTV) ---
     # The GST-compliant debit-note DOCUMENT issued to a vendor when goods are
     # returned. Issuing + Tally export are gated to the same vendor/AP role set
     # vendor_returns / vendor_rma use (a cashier can NEVER issue a debit note).
-    # GET list/detail/print are AUTHENTICATED but store-scoped per object in the
-    # handler (validate_store_access / resolve_store_scope).
+    # F60: GET list/detail/print carry the vendor GSTIN and the note total, so
+    # they go to the Vendor Returns readers (cost_mask.RETURN_READERS),
+    # store-scoped per object in the handler.
     {
         "method": "GET",
         "path": "/api/v1/rtv-debit-notes",
-        "allowed": "AUTHENTICATED",
+        "allowed": RETURN_READERS,
         "store_scoped": True,
     },
     {
         "method": "GET",
         "path": "/api/v1/rtv-debit-notes/",
-        "allowed": "AUTHENTICATED",
+        "allowed": RETURN_READERS,
         "store_scoped": True,
     },
     {
         "method": "POST",
         "path": "/api/v1/rtv-debit-notes/issue",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
         "store_scoped": True,
     },
     {
         "method": "GET",
         "path": "/api/v1/rtv-debit-notes/{debit_note_id}",
-        "allowed": "AUTHENTICATED",
+        "allowed": RETURN_READERS,
         "store_scoped": True,
     },
     {
         "method": "GET",
         "path": "/api/v1/rtv-debit-notes/{debit_note_id}/print",
-        "allowed": "AUTHENTICATED",
+        "allowed": RETURN_READERS,
         "store_scoped": True,
     },
     {
         "method": "GET",
         "path": "/api/v1/rtv-debit-notes/{debit_note_id}/tally",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
         "store_scoped": True,
     },
     # --- /api/v1/vendors ---
+    # F60: the list stays AUTHENTICATED because the workshop job, vendor returns
+    # and the buy desk pick a vendor by name -- but the handler returns names
+    # only (no GSTIN / contacts / bank / terms) to anyone outside the purchase
+    # roles. Every other read below that carries cost or payable data is gated.
     {"method": "GET", "path": "/api/v1/vendors", "allowed": "AUTHENTICATED"},
     {
         "method": "POST",
         "path": "/api/v1/vendors",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
     {"method": "GET", "path": "/api/v1/vendors/", "allowed": "AUTHENTICATED"},
     {
         "method": "POST",
         "path": "/api/v1/vendors/",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendors/ap-aging",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     # F60: a GRN carries the supplier bill number / date + bill-scan id ->
     # the receiving roles, store-scoped in the handler.
     {
         "method": "GET",
         "path": "/api/v1/vendors/grn",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
         "store_scoped": True,
     },
     # Receiving goods into stock (log / accept / express / void / escalate a
@@ -200,7 +229,7 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/vendors/grn/{grn_id}",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
         "store_scoped": True,
     },
     {
@@ -239,7 +268,7 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/vendors/grn/{grn_id}/document",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
     # Purchase Invoices (first-class AP+ITC; books the payable + ITC ledger).
     # Create/from-grn/book AND reads are accounting actions -> ACCOUNTANT/ADMIN.
@@ -248,47 +277,47 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/vendors/purchase-invoices",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendors/purchase-invoices",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendors/purchase-invoices/",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendors/purchase-invoices/",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendors/purchase-invoices/from-grn/{grn_id}",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     # The form's live tax preview: what POST would book (same _bill_math),
     # nothing written -- same accounting gate as the booking it previews.
     {
         "method": "POST",
         "path": "/api/v1/vendors/purchase-invoices/preview",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     # F9: consolidate N Delivery Challans into a draft bulk invoice (accounting
     # action -> ACCOUNTANT/ADMIN, same gate as from-grn).
     {
         "method": "GET",
         "path": "/api/v1/vendors/purchase-invoices/from-dcs",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     # F9: stored DC bulk-tally detail (accounting read -> ACCOUNTANT/ADMIN).
     {
         "method": "GET",
         "path": "/api/v1/vendors/purchase-invoices/{invoice_id}/dc-match",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     # Phase 2: 3-way-match config + per-invoice match detail + exception override.
     # F1: config read (accounting policy) + match-detail read are now ACCOUNTANT/
@@ -296,17 +325,17 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/vendors/purchase-invoices/config",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "PUT",
         "path": "/api/v1/vendors/purchase-invoices/config",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendors/purchase-invoices/{invoice_id}/match",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     # Ruling 15: the invoice gate refuses an incomplete product, and the
     # accountant holds no products:write. This raises the cataloguing task for
@@ -314,12 +343,12 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/vendors/purchase-invoices/request-cataloguing",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendors/purchase-invoices/{invoice_id}/approve-exception",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     # F19: landed-cost capture / preview / one-way allocation. All three are
     # accounting actions on the bill's cost basis -> ACCOUNTANT/ADMIN (same
@@ -327,99 +356,100 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/vendors/purchase-invoices/{invoice_id}/landed-costs",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendors/purchase-invoices/{invoice_id}/landed-costs/preview",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendors/purchase-invoices/{invoice_id}/allocate-landed-costs",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendors/purchase-invoices/{invoice_id}",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     # S6: Accountant reconciliation ticks (inline recon sub-doc on vendor_bills).
     # Both write and read are accounting actions -> ACCOUNTANT/ADMIN.
     {
         "method": "POST",
         "path": "/api/v1/vendors/purchase-invoices/{invoice_id}/recon",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendors/purchase-invoices/{invoice_id}/recon",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     # S6: Accountant console worklists (stock-yet-to-receive, vendor returns,
     # pending scheme + return CNs). ACCOUNTANT/ADMIN read-only.
     {
         "method": "GET",
         "path": "/api/v1/vendors/recon/worklists",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     # P4: tick a scheme/rebate credit note as physically received (clears it from
     # the pending-scheme-CN worklist). ACCOUNTANT/ADMIN.
     {
         "method": "POST",
         "path": "/api/v1/vendors/recon/credit-notes/{credit_note_number}/mark-received",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
+    # F60: POs carry unit cost prices -> the purchase roles (the screens' gate).
     {
         "method": "GET",
         "path": "/api/v1/vendors/purchase-orders",
-        "allowed": "AUTHENTICATED",
+        "allowed": PURCHASE,
     },
     # Last-paid price lookup for the PO / Buy-Desk form (vendor roles; the
     # endpoint additionally store-scopes each PO it reads).
     {
         "method": "GET",
         "path": "/api/v1/vendors/last-cost",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
     # The tax head each vendor's purchase carries at a shop (the PO composer
     # and the Suppliers cards show it; same roles as the PO form itself).
     {
         "method": "GET",
         "path": "/api/v1/vendors/po-gst-heads",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendors/purchase-orders",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendors/purchase-orders/from-forecast",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendors/purchase-orders/{po_id}",
-        "allowed": "AUTHENTICATED",
+        "allowed": PURCHASE,
     },
     # PO lifecycle timeline (read-only; the endpoint store-scopes the PO like
-    # get_po). Any authenticated user, same as reading the PO itself.
+    # get_po). The purchase roles, same as reading the PO itself (F60).
     {
         "method": "GET",
         "path": "/api/v1/vendors/purchase-orders/{po_id}/timeline",
-        "allowed": "AUTHENTICATED",
+        "allowed": PURCHASE,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendors/purchase-orders/{po_id}/cancel",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendors/purchase-orders/{po_id}/send",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
     # F8 PO-vs-GRN variance: dismiss a variance/backorder line with a mandatory
     # justification (single-doc PO $push + one audit row). An accounting-style
@@ -427,7 +457,7 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/vendors/purchase-orders/{po_id}/dismiss-variance",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",
@@ -440,52 +470,54 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/vendors/variance-report",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendors/{vendor_id}",
-        "allowed": "AUTHENTICATED",
+        "allowed": PURCHASE,
     },
     {
         "method": "PUT",
         "path": "/api/v1/vendors/{vendor_id}",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
+    # F60: bills / debit notes / ledger / payments are what the owner owes a
+    # vendor -> ACCOUNTANT/ADMIN, the same gate as /ap-aging (their aggregate).
     {
         "method": "GET",
         "path": "/api/v1/vendors/{vendor_id}/bills",
-        "allowed": "AUTHENTICATED",
+        "allowed": ACCOUNTS,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendors/{vendor_id}/bills",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendors/{vendor_id}/debit-notes",
-        "allowed": "AUTHENTICATED",
+        "allowed": ACCOUNTS,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendors/{vendor_id}/debit-notes",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendors/{vendor_id}/ledger",
-        "allowed": "AUTHENTICATED",
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendors/{vendor_id}/payments",
-        "allowed": "AUTHENTICATED",
+        "allowed": ACCOUNTS,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendors/{vendor_id}/payments",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "POST",
@@ -506,12 +538,12 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/vendors/{vendor_id}/performance",
-        "allowed": "AUTHENTICATED",
+        "allowed": PURCHASE,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendors/{vendor_id}/purchase-history",
-        "allowed": "AUTHENTICATED",
+        "allowed": PURCHASE,
     },
     {
         "method": "GET",
@@ -521,22 +553,22 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/vendors/{vendor_id}/sku-aliases",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
     {
         "method": "DELETE",
         "path": "/api/v1/vendors/{vendor_id}/sku-aliases/{alias_id}",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": PURCHASE,
     },
     # FIN-11: TDS threshold status + quarterly 26Q/27EQ export
     {
         "method": "GET",
         "path": "/api/v1/vendors/tds/threshold-status",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendors/tds/26q-export",
-        "allowed": ["ACCOUNTANT", "ADMIN"],
+        "allowed": ACCOUNTS,
     },
 ]

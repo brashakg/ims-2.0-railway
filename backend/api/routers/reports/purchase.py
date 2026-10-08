@@ -11,6 +11,7 @@ from ...dependencies import (
     get_db,
     validate_store_access,
 )
+from ...services.cost_mask import mask_cost, mask_cost_list
 from ...services.reorder_policy import auto_reorder_disabled as _auto_reorder_disabled
 from ...services.reorder_policy import (
     is_low_stock,
@@ -375,10 +376,14 @@ async def purchase_recommendations(
         reverse=True,
     )
 
+    # Per-unit cost, the buy's cost and the margin on it answer to the one
+    # product-cost rule (services/cost_mask "product", owner rulings D7 /
+    # 2026-09-28): the managers see them, counter roles get the velocity and
+    # quantities only.
     return {
-        "recommendations": recs,
+        "recommendations": mask_cost_list(recs, current_user, "product"),
         "by_category": by_category_list,
-        "summary": summary,
+        "summary": mask_cost(summary, current_user, "product"),
         "params": {
             "store_id": active_store,
             "lookback_days": lookback_days,

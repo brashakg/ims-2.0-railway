@@ -12,7 +12,6 @@ from ._shared import (
     ap_engine,
     datetime,
     field_validator,
-    get_current_user,
     get_grn_repository,
     get_vendor_repository,
     logger,
@@ -458,7 +457,7 @@ async def create_vendor_bill(
 async def list_vendor_bills(
     vendor_id: str,
     status: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
 ):
     """List a vendor's bills (newest first)."""
     db = _get_db()
