@@ -264,6 +264,56 @@ def test_correction_note_taxable_excludes_the_round_off_change():
     assert note["taxable_amount"] == 190.48
 
 
+def _seed_rounded_up_invoice(order_repo):
+    """An invoiced 1200.50 frame bill: paid 1201, round off +0.50."""
+    line = dict(_edit_item(unit_price=1200.50), item_total=1200.50, gst_rate=5.0,
+                taxable_value=1143.33, tax_amount=57.17)
+    _seed_order(order_repo, items=[line], subtotal=1200.50, tax_amount=57.17,
+                grand_total=1201.0, round_off=0.5, amount_paid=1201.0,
+                invoice_number="INV/BOK-01/26-27/0901")
+
+
+def test_credit_note_door_keeps_the_round_off_change_out_of_taxable(
+    client, auth_headers, wired
+):
+    """The CREDIT direction through the real door: 1201 (+0.50) corrected to
+    1000 (-0.49). Taxable moved 1143.33 -> 952.85 = 190.48; the 0.99 round-off
+    change is part of the 201 note but never of its taxable value."""
+    _seed_rounded_up_invoice(wired["order_repo"])
+    r = client.put(
+        "/api/v1/orders/ord-16/superadmin-invoice-change",
+        json={"mode": "CREDIT_NOTE", "reason": "overcharged",
+              "items": [_edit_item(unit_price=1000.49)]},
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+    note = next(
+        d for d in wired["db"].get_collection("credit_note_ledger").docs
+        if d.get("note_type") == "CREDIT_NOTE"
+    )
+    assert (note["amount"], note["tax_amount"], note["taxable_amount"]) == (
+        201.0, 9.53, 190.48
+    )
+    # The original invoice and its round off stay as issued.
+    saved = wired["order_repo"].find_by_id("ord-16")
+    assert (saved["grand_total"], saved["round_off"]) == (1201.0, 0.5)
+
+
+def test_revised_invoice_stores_the_new_round_off(client, auth_headers, wired):
+    """A revised invoice carries its OWN round off next to its new total, or
+    every GST reader and the reprint use the original bill's figure."""
+    _seed_rounded_up_invoice(wired["order_repo"])
+    r = client.put(
+        "/api/v1/orders/ord-16/superadmin-invoice-change",
+        json={"mode": "REVISED_INVOICE", "reason": "wrong price",
+              "items": [_edit_item(unit_price=1000.49)]},
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+    saved = wired["order_repo"].find_by_id("ord-16")
+    assert (saved["grand_total"], saved["round_off"]) == (1000.0, -0.49)
+
+
 # ============================================================================
 # 5. One rule: the dead round-off settings keys are gone
 # ============================================================================
