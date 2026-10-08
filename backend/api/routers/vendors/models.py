@@ -452,10 +452,11 @@ def cancel_reason(v) -> str:
             or unicodedata.category(c) not in ("Cf", "Cc", "Zl", "Zp")
         )
     ).strip()
-    # Letters and digits count; a script's vowel sign counts only when it
-    # follows a counted character, so a run of bare marks is not a reason. An
-    # accent from the shared combining blocks is no letter of any script and
-    # never counts: 'a' with two accents is one letter.
+    # Letters and digits count; a script's vowel sign counts only as the FIRST
+    # mark after a counted character -- one mark per letter, so a letter
+    # padded with marks ('a' + two Hebrew points) is still one letter, while
+    # 'नहीं' counts 3. An accent from the shared combining blocks is no letter
+    # of any script and never counts: 'a' with two accents is one letter.
     def accent(ch):
         o = ord(ch)
         return any(lo <= o <= hi for lo, hi in (
@@ -464,17 +465,18 @@ def cancel_reason(v) -> str:
         ))
 
     counted = 0
-    after_base = False
+    mark_counts = False
     for c in text:
         cat = unicodedata.category(c)[0]
         if cat in "LN":
             counted += 1
-            after_base = True
+            mark_counts = True
         elif cat == "M":
-            if after_base and not accent(c):
+            if mark_counts and not accent(c):
                 counted += 1
+            mark_counts = False
         else:
-            after_base = False
+            mark_counts = False
     if counted < 3:
         raise ValueError(
             "Say why this is being cancelled (at least 3 letters or digits)."

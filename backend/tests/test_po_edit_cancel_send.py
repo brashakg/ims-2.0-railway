@@ -1988,7 +1988,9 @@ def test_a_form_edit_of_a_product_with_a_typed_and_an_unsettled_line(monkeypatch
      "a\u034f\u034f", "ab\u034f", "a\u180b\u180b", "ab\u180c", "ab\u180d", "ab\u180f",
      "ab\u17b4", "ab\u17b5",
      # accents are no letters: one letter with two accents, two with one
-     "a\u0301\u0301", "ab\u0301"],
+     "a\u0301\u0301", "ab\u0301",
+     # one mark per letter: a letter padded with a script's own marks
+     "a\u05b0\u05b0", "a\u064b\u064b", "a\u0483\u0483", "x\u093f\u093f"],
 )
 def test_a_reason_of_invisible_fillers_or_bare_marks_is_refused(blank):
     with pytest.raises(ValidationError):
