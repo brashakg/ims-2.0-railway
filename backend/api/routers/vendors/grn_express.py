@@ -3,7 +3,7 @@
 from ._shared import (
     Depends,
     HTTPException,
-    _VENDOR_ROLES,
+    _RECEIVE_ROLES,
     get_grn_repository,
     logger,
     require_roles,
@@ -23,7 +23,7 @@ from .grn_accept import _accept_grn_impl, _raise_book_bill_task
 @router.post("/grn/express", status_code=201)
 async def express_receive_grn(
     body: ExpressGRNCreate,
-    current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
+    current_user: dict = Depends(require_roles(*_RECEIVE_ROLES)),
 ):
     """One-shot receiving chain for a CLEAN delivery (procurement Phase 2).
 
@@ -231,19 +231,13 @@ async def express_receive_grn(
             grn_doc = _repo.find_by_id(grn_id) if _repo is not None else None
         except Exception:  # noqa: BLE001
             grn_doc = None
-        vendor_label = (
-            (draft or {}).get("vendor_name")
-            or (grn_doc or {}).get("vendor_name")
-            or (grn_doc or {}).get("vendor_id")
-            or "vendor"
-        )
         task = _raise_book_bill_task(
             grn_id,
             (grn_doc or {}).get("store_id"),
-            f"Book purchase invoice for GRN {grn_number} ({vendor_label})",
-            f"Express receive completed for goods receipt {grn_number} "
-            f"(vendor invoice {body.vendor_invoice_no}). Review the draft "
-            f"and book the purchase invoice."
+            grn_number,
+            "express receive",
+            "Express receive completed. Review the draft and book the "
+            "purchase invoice."
             + (
                 f" 3-way match preview: {match_preview['match_status']} "
                 f"({match_preview['exception_count']} exception(s))."

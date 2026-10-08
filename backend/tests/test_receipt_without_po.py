@@ -58,6 +58,7 @@ import api.dependencies as deps  # noqa: E402
 import database.connection as dbconn  # noqa: E402
 from api.routers import inventory as inv  # noqa: E402
 from api.routers import purchase_invoices as pi  # noqa: E402
+from api.routers import tasks as tasks_api  # noqa: E402
 from api.routers import vendors as vd  # noqa: E402
 from api.routers.auth import get_current_user  # noqa: E402
 from api.routers.finance import gst as fin_gst  # noqa: E402
@@ -220,6 +221,7 @@ def world(monkeypatch):
     app = FastAPI()
     app.include_router(vd.router, prefix="/vendors")
     app.include_router(inv.router, prefix="/inventory")
+    app.include_router(tasks_api.router, prefix="/tasks")
     who = {"user": MANAGER}
     app.dependency_overrides[get_current_user] = lambda: who["user"]
     http = TestClient(app)
@@ -231,7 +233,7 @@ def world(monkeypatch):
     return {"db": db, "files": files, "as_": as_}
 
 
-def _bill_photo(world, content=None):
+def _bill_photo(world, content=None, store=STORE):
     """A bill photo exactly as POST /vendors/grn/upload-doc stores it, sha256
     stamped. A fresh photo each call unless the same bytes are passed again."""
     content = content or b"\x89PNG cash memo " + uuid.uuid4().bytes
@@ -242,7 +244,7 @@ def _bill_photo(world, content=None):
         metadata={
             "kind": "grn_document",
             "uploaded_by": "u-mgr",
-            "store_id": STORE,
+            "store_id": store,
             "sha256": hashlib.sha256(content).hexdigest(),
         },
     )
@@ -480,17 +482,53 @@ def test_c7_two_posts_at_once_meet_the_bill_photo_index(world, monkeypatch):
     assert http.post("/vendors/grn", json=body).status_code == 201
     body["attachment_file_id"] = _bill_photo(world, memo)
 
-    real = gc._find_duplicate_no_po_grn
+    real = gc._find_duplicate_receipt
     calls = {"n": 0}
 
     def racing(*a, **kw):  # the pre-insert look-up misses the rival
         calls["n"] += 1
         return None if calls["n"] == 1 else real(*a, **kw)
 
-    monkeypatch.setattr(gc, "_find_duplicate_no_po_grn", racing)
+    monkeypatch.setattr(gc, "_find_duplicate_receipt", racing)
     raced = http.post("/vendors/grn", json=body)
     assert raced.status_code == 409, raced.text
     assert world["db"].grns.count_documents({}) == 1
+
+
+def test_c7_the_startup_index_copies_equal_the_schema(world):
+    """The atomic backstops are defined twice -- schemas.py INDEXES (what the
+    race tests build) and connection.ensure_indexes (what prod builds at
+    startup). Re-keying the startup copy left every test green; this compares
+    the two for both receipt indexes."""
+    from database.connection import DatabaseConnection
+    from database.schemas import get_all_indexes
+
+    built = {}
+
+    class _Coll:
+        def __init__(self, name):
+            self.name = name
+
+        def create_index(self, keys, **kw):
+            if self.name == "grns" and kw.get("name"):
+                built[kw["name"]] = (list(keys), kw.get("unique", False), kw.get("partialFilterExpression"))
+
+    class _DB:
+        def __getitem__(self, name):
+            return _Coll(name)
+
+    conn = DatabaseConnection()
+    saved = conn._db, conn._connected
+    try:
+        conn._db, conn._connected = _DB(), True
+        conn.ensure_indexes()
+    finally:
+        conn._db, conn._connected = saved
+    for spec in get_all_indexes()["grns"]:
+        if spec.get("name") in ("uniq_std_vendor_invoice_store", "uniq_nopo_bill_hash"):
+            want = (list(spec["keys"]), True, spec["partialFilterExpression"])
+            assert built[spec["name"]] == want, spec["name"]
+    assert {"uniq_std_vendor_invoice_store", "uniq_nopo_bill_hash"} <= set(built)
 
 
 def test_c7_the_same_bill_photo_uploaded_again_is_the_same_bill(world):
@@ -535,6 +573,152 @@ def test_c7_a_supplier_picked_or_typed_by_name_is_the_same_seller(world):
     other = _no_po_body(world, vendor_id=None, dealer_name="Sharma Optical")
     assert http.post("/vendors/grn", json=other).status_code == 201
     assert world["db"].grns.count_documents({}) == 3
+
+
+SHOP_B = "BV-NOPO-02"
+MANAGER_B = {**MANAGER, "user_id": "u-mgr-b", "store_ids": [SHOP_B], "active_store_id": SHOP_B}
+
+
+def _at_shop_b(world, **over):
+    body = _no_po_body(world, **over)
+    body["attachment_file_id"] = _bill_photo(world, store=SHOP_B)
+    return body
+
+
+def test_c7_one_dealer_bill_is_one_receipt_in_every_shop(world):
+    """Panel probe (round 3 fixed it inside one shop only): shop A receives
+    bill CASH-77 from supplier V-DEALER picked from the list; shop B posts the
+    same bill with the seller typed as 'Bank More Optical' (V-DEALER's trade
+    name) -> 201, while picked it was 409. Typed at A then picked at B was 201
+    too. One rule, every shop: the same seller however named, the same bill."""
+    world["db"].stores.insert_one({"store_id": SHOP_B, "store_name": "BV No-PO Shop B", "store_type": "RETAIL", "entity_id": ENTITY, "is_active": True})
+    a, b = world["as_"](MANAGER), world["as_"]
+    assert a.post("/vendors/grn", json=_no_po_body(world)).status_code == 201
+    typed = _at_shop_b(world, vendor_id=None, dealer_name="Bank More Optical")
+    res = b(MANAGER_B).post("/vendors/grn", json=typed)
+    assert res.status_code == 409, res.text
+    assert res.json()["detail"]["code"] == "GRN_DUPLICATE"
+    picked = _at_shop_b(world)
+    assert b(MANAGER_B).post("/vendors/grn", json=picked).status_code == 409
+    # The other order: typed at A, picked at B.
+    typed_a = _no_po_body(world, vendor_id=None, dealer_name="bank more optical traders", vendor_invoice_no="CASH-88")
+    assert world["as_"](MANAGER).post("/vendors/grn", json=typed_a).status_code == 201
+    picked_b = _at_shop_b(world, vendor_invoice_no="CASH-88")
+    assert world["as_"](MANAGER_B).post("/vendors/grn", json=picked_b).status_code == 409
+    assert world["db"].grns.count_documents({}) == 2
+
+
+def test_c7_a_bill_number_is_one_bill_per_financial_year(world):
+    """Panel probe: dealer 'Sharma Optical', bill '1' dated 2026-09-01 -> 201;
+    the same dealer's bill '1' dated 2027-05-01 -> 409, though invoice serials
+    restart every 1 April (GST rule 46). Inside one year it is the same bill."""
+    http = world["as_"](MANAGER)
+    first = _walk_in_body(world, vendor_invoice_no="1", vendor_invoice_date="2026-09-01")
+    assert http.post("/vendors/grn", json=first).status_code == 201
+    same_year = _walk_in_body(world, vendor_invoice_no="1", vendor_invoice_date="2027-03-31")
+    assert http.post("/vendors/grn", json=same_year).status_code == 409
+    next_year = _walk_in_body(world, vendor_invoice_no="1", vendor_invoice_date="2027-04-01")
+    assert http.post("/vendors/grn", json=next_year).status_code == 201, "a new year's bill 1"
+
+
+def test_c7_a_po_supplier_reuses_its_serial_next_year_through_the_index(world):
+    """The same rule for a PO receipt, and the atomic backstop agrees: the
+    uniq_std_vendor_invoice_store index is keyed on the bill's year + number,
+    so next year's INV-9 is not refused by the index either (that refusal
+    read as a 500 'Failed to save goods receipt')."""
+    from database.schemas import get_all_indexes
+
+    spec = next(i for i in get_all_indexes()["grns"] if i.get("name") == "uniq_std_vendor_invoice_store")
+    world["db"].grns.create_index(spec["keys"], unique=True, name=spec["name"], partialFilterExpression=spec["partialFilterExpression"])
+    world["db"].purchase_orders.insert_one(
+        {
+            "po_id": "PO-FY-1",
+            "po_number": "PO/FY/1",
+            "vendor_id": DEALER,
+            "delivery_store_id": STORE,
+            "status": "SENT",
+            "items": [{"product_id": FRAME, "quantity": 9, "unit_price": 3000.0}],
+        }
+    )
+
+    def po_receipt(date):
+        return {
+            "po_id": "PO-FY-1",
+            "vendor_invoice_no": "INV-9",
+            "vendor_invoice_date": date,
+            "attachment_file_id": _bill_photo(world),
+            "items": [{"product_id": FRAME, "received_qty": 1, "accepted_qty": 1, "rejected_qty": 0, "tallied": True}],
+        }
+
+    http = world["as_"](MANAGER)
+    assert http.post("/vendors/grn", json=po_receipt("2026-09-01")).status_code == 201
+    assert http.post("/vendors/grn", json=po_receipt("2026-11-01")).status_code == 409
+    nxt = http.post("/vendors/grn", json=po_receipt("2027-04-15"))
+    assert nxt.status_code == 201, nxt.text
+    keys = sorted(g["vendor_invoice_no_norm"] for g in world["db"].grns.find({}))
+    assert keys == ["2026-27|INV9", "2027-28|INV9"]
+
+
+def test_c7_a_voided_receipt_frees_its_bill(world):
+    """The sanctioned correction path: a receipt logged by mistake is voided
+    (it never put stock on the shelf), and the same bill -- same number, same
+    photo -- can then be received properly."""
+    http = world["as_"](MANAGER)
+    body = _walk_in_body(world)
+    first = http.post("/vendors/grn", json=body)
+    assert first.status_code == 201, first.text
+    assert http.post("/vendors/grn", json=body).status_code == 409
+    voided = http.post(f"/vendors/grn/{first.json()['grn_id']}/void")
+    assert voided.status_code == 200, voided.text
+    again = http.post("/vendors/grn", json=body)
+    assert again.status_code == 201, again.text
+
+
+def test_c7_the_seller_named_must_be_a_real_one(world):
+    """Panel probes: vendor_id 'NO-SUCH-VENDOR' -> 201 (the receipts list
+    showed no supplier and the bill could never be booked); dealer_name '...'
+    -> 201, and again with a new photo -> 201 (the seller key folded to
+    nothing). A line where nothing arrived is no purchase either."""
+    http = world["as_"](MANAGER)
+    ghost = http.post("/vendors/grn", json=_no_po_body(world, vendor_id="NO-SUCH-VENDOR"))
+    assert ghost.status_code == 422, ghost.text
+    assert "not on file" in ghost.text
+    dots = http.post("/vendors/grn", json=_no_po_body(world, vendor_id=None, dealer_name="..."))
+    assert dots.status_code == 422, dots.text
+    empty = _walk_in_body(world)
+    empty["items"][0].update(received_qty=0, accepted_qty=0, rejected_qty=0)
+    refused = http.post("/vendors/grn", json=empty)
+    assert refused.status_code == 422 and "how many arrived" in refused.text, refused.text
+    assert world["db"].grns.count_documents({}) == 0
+
+
+def test_c7_receiving_is_the_managers(world):
+    """Owner ruling 2026-09-28: receiving is MANAGERS ONLY. An ACCOUNTANT
+    could post a walk-in receipt at a cost they typed (201), accept it (200,
+    5 units minted) and then book its bill. The receiving doors and their
+    policy rows are the one _RECEIVE_ROLES list."""
+    from api.routers.vendors import _shared
+    from api.services import rbac_policy
+
+    http = world["as_"](ACCOUNTANT)
+    assert http.post("/vendors/grn", json=_walk_in_body(world)).status_code == 403
+    created = world["as_"](MANAGER).post("/vendors/grn", json=_walk_in_body(world))
+    grn_id = created.json()["grn_id"]
+    assert world["as_"](ACCOUNTANT).post(f"/vendors/grn/{grn_id}/accept").status_code == 403
+    assert world["db"].stock_units.count_documents({}) == 0
+    assert set(_shared._RECEIVE_ROLES) == {"ADMIN", "AREA_MANAGER", "STORE_MANAGER"}
+    for method, path in (
+        ("POST", "/api/v1/vendors/grn"),
+        ("POST", "/api/v1/vendors/grn/express"),
+        ("POST", "/api/v1/vendors/grn/{grn_id}/accept"),
+        ("POST", "/api/v1/vendors/grn/{grn_id}/void"),
+        ("POST", "/api/v1/vendors/grn/{grn_id}/escalate"),
+        ("POST", "/api/v1/vendors/grn/upload-doc"),
+        ("GET", "/api/v1/vendors/goods-receipt/cockpit"),
+    ):
+        for role in rbac_policy.ALL_ROLES:
+            want = role in _shared._RECEIVE_ROLES or role == "SUPERADMIN"
+            assert rbac_policy.check_access(method, path, [role]) == want, (method, path, role)
 
 
 def test_c7_a_long_walk_in_history_never_hides_a_recent_bill(world):
@@ -632,6 +816,62 @@ def test_c7_accept_sends_the_bill_to_accounts(world):
     assert {t.get("link") for t in tasks} == {f"/purchase/invoices/book?grn_id={grn_id}"}
 
 
+def test_c7_the_bill_task_names_no_dealer_to_the_counter(world):
+    """Panel probe: the task said 'Book the bill for RCPT/... - bought without
+    PO (Sharma Optical)' and '...bill CASH-77...', and it is stamped with the
+    shop -- GET /tasks and GET /tasks/{id} gave every counter role there the
+    dealer and the bill number (the home screen's priority tasks too)."""
+    grn_id, _barcode = _walk_in_on_the_shelf(world)
+    for role in ("SALES_STAFF", "CASHIER", "OPTOMETRIST", "WORKSHOP_STAFF"):
+        counter = {"user_id": f"u-{role.lower()}", "roles": [role], "store_ids": [STORE], "active_store_id": STORE}
+        listed = world["as_"](counter).get("/tasks", params={"status": "OPEN"})
+        assert listed.status_code == 200, listed.text
+        mine = [t for t in listed.json()["tasks"] if grn_id in str(t.get("link"))]
+        assert mine, (role, listed.text)  # the control: the task IS listed
+        one = world["as_"](counter).get(f"/tasks/{mine[0]['task_id']}")
+        for text in (listed.text, one.text):
+            assert "Sharma" not in text and "CASH-77" not in text and "CASH77" not in text, (role, text)
+    assert "bought without PO" in mine[0]["title"]
+
+
+def test_c7_no_bill_task_until_the_receipt_put_something_on_the_shelf(world):
+    """Panel probes: a receipt whose every unit was rejected (accept 200,
+    0 units) still sent accounts a 'book the bill' task no bill could ever
+    satisfy (over-billed); and a receipt held part-accepted (a line not yet
+    catalogued) must wait until the rest is on the shelf."""
+    http = world["as_"](MANAGER)
+    rejected = _walk_in_body(
+        world,
+        items=[{"product_id": FRAME, "received_qty": 2, "accepted_qty": 0, "rejected_qty": 2, "tallied": True, "unit_price": 3100.0}],
+    )
+    created = http.post("/vendors/grn", json=rejected)
+    assert created.status_code == 201, created.text
+    done = http.post(f"/vendors/grn/{created.json()['grn_id']}/accept")
+    assert done.status_code == 200 and done.json()["units_added"] == 0, done.text
+    assert done.json()["grn_status"] == "ACCEPTED"
+    assert world["db"].tasks.count_documents({}) == 0
+
+    new_frame = "P-FR-NOT-YET"
+    held = _walk_in_body(
+        world,
+        vendor_invoice_no="CASH-91",
+        items=[
+            {"product_id": FRAME, "received_qty": 1, "accepted_qty": 1, "rejected_qty": 0, "tallied": True, "unit_price": 3100.0},
+            {"product_id": new_frame, "received_qty": 1, "accepted_qty": 1, "rejected_qty": 0, "tallied": True, "unit_price": 900.0},
+        ],
+    )
+    created = http.post("/vendors/grn", json=held)
+    assert created.status_code == 201, created.text
+    grn_id = created.json()["grn_id"]
+    part = http.post(f"/vendors/grn/{grn_id}/accept")
+    assert part.json()["grn_status"] == "PARTIALLY_ACCEPTED", part.text
+    assert world["db"].tasks.count_documents({}) == 0
+    world["db"].products.insert_one({**_frame(new_frame, 900.0), "name": "Acme Round 1"})
+    rest = http.post(f"/vendors/grn/{grn_id}/accept")
+    assert rest.json()["grn_status"] == "ACCEPTED", rest.text
+    assert [t.get("link") for t in world["db"].tasks.find({})] == [f"/purchase/invoices/book?grn_id={grn_id}"]
+
+
 def test_c7_one_book_the_bill_task_for_every_receipt():
     """Express receive and a no-PO accept raise the same accounts task; it is
     built in ONE place (grn_accept._raise_book_bill_task), so who books and
@@ -703,6 +943,23 @@ def test_d14_line_bill_for_a_no_po_receipt_claims_no_itc(world):
     assert _itc_everywhere() == (310.0, 310.0, 310.0)
 
 
+def test_d14_the_form_preview_says_what_the_booking_stores(world):
+    """The Purchase Invoices form shows POST /preview's itc_eligible: it runs
+    the same one credit rule (org_validation.itc_claimable) with the same
+    receipt, so the form never promises credit the booking will not store."""
+    db = world["db"]
+    _seed_receipt(db, grn_id="GRN-NOPO-0009", subtype="NO_PO")
+    _seed_receipt(db, grn_id="GRN-STD-0010", subtype="STANDARD", po_id="PO-10")
+
+    def preview(grn_id):
+        body = _invoice_body(grn_id, "PREVIEW")
+        form = pi.PurchaseInvoicePreview(vendor_id=DEALER, lines=body.lines, grn_id=grn_id)
+        return _run(pi.preview_purchase_invoice(form, current_user=ACCOUNTANT))
+
+    assert preview("GRN-NOPO-0009")["itc_eligible"] is False
+    assert preview("GRN-STD-0010")["itc_eligible"] is True  # the control
+
+
 def test_d14_client_cannot_switch_itc_back_on(world):
     db = world["db"]
     _seed_receipt(db, grn_id="GRN-NOPO-0003", subtype="NO_PO")
@@ -762,10 +1019,13 @@ def test_d14_naming_a_challan_too_cannot_smuggle_the_credit_back(world):
 
 
 def test_d14_the_gstr2b_screen_counts_what_the_register_counts(world):
-    """Panel probe: the GSTR-2B reconcile fed EVERY vendor bill to the matcher,
-    so a walk-in bill (stored itc_eligible False, tax 310) whose dealer filed it
-    read "Matched (claim) Rs 310" -- and with no 2B row, "ITC at risk Rs 310"
-    -- while the register, /gst/summary and GSTR-3B all said 0."""
+    """Panel probes: the GSTR-2B reconcile fed EVERY vendor bill to the
+    matcher, so a walk-in bill (stored itc_eligible False, tax 310) whose
+    dealer filed it read "Matched (claim) Rs 310" -- and with no 2B row, "ITC
+    at risk Rs 310" -- while the register, /gst/summary and GSTR-3B all said 0.
+    Dropping it instead put the dealer's filed row under "In 2B, not booked -
+    book then claim": a booked bill that claims no credit is its own line,
+    and it answers its 2B row. A 17(5)-blocked bill reads the same."""
     db = world["db"]
     _seed_receipt(db, grn_id="GRN-STD-0301", subtype="STANDARD", po_id="PO-3")
     _seed_receipt(db, grn_id="GRN-NOPO-0302", subtype="NO_PO")
@@ -780,9 +1040,23 @@ def test_d14_the_gstr2b_screen_counts_what_the_register_counts(world):
     assert [r["invoice_no"] for r in filed["matched"]] == ["TAX-301"]
     assert filed["summary"]["itc_safe_to_claim"] == 310.0
     assert filed["summary"]["total_book_itc"] == _itc_everywhere()[0] == 310.0
+    assert filed["only_in_2b"] == [] and filed["summary"]["only_in_2b"] == 0
+    assert [r["invoice_no"] for r in filed["booked_no_credit"]] == ["CASH-302"]
+    assert filed["summary"]["booked_no_credit"] == 1
     unfiled = _run(fin_itc.gstr2b_reconcile(fin_itc.Gstr2bReconcileBody(rows=[]), current_user=ADMIN))
     assert [r["invoice_no"] for r in unfiled["only_in_books"]] == ["TAX-301"]
     assert unfiled["summary"]["itc_at_risk"] == 310.0
+    assert unfiled["booked_no_credit"] == []
+
+    # A 17(5)-blocked bill its supplier filed: booked, no credit -- never
+    # "book then claim". A cancelled bill is not booked: its row stays unbooked.
+    db.vendor_bills.update_one({"bill_number": "TAX-301"}, {"$set": {"itc_blocked": True}})
+    blocked = _run(fin_itc.gstr2b_reconcile(fin_itc.Gstr2bReconcileBody(rows=portal), current_user=ADMIN))
+    assert sorted(r["invoice_no"] for r in blocked["booked_no_credit"]) == ["CASH-302", "TAX-301"]
+    assert blocked["only_in_2b"] == [] and blocked["summary"]["total_book_itc"] == 0.0
+    db.vendor_bills.update_one({"bill_number": "TAX-301"}, {"$set": {"status": "CANCELLED"}})
+    cancelled = _run(fin_itc.gstr2b_reconcile(fin_itc.Gstr2bReconcileBody(rows=portal), current_user=ADMIN))
+    assert [r["invoice_no"] for r in cancelled["only_in_2b"]] == ["TAX-301"]
 
 
 def _walk_in_lines():
@@ -886,26 +1160,28 @@ def _walk_in_on_the_shelf(world):
 
 
 def test_c7_the_barcode_trace_shows_no_counter_what_was_paid(world):
-    """Panel probe: GET /inventory/barcode/{barcode}/trace was open to any
-    logged-in user with no store check and returned the raw receipt -- a
-    SALES_STAFF of another shop read the dealer 'Sharma Optical', bill
-    CASH-77, unit_price [3100, 420] and the unit's cost 3100."""
+    """Panel probe: GET /inventory/barcode/{barcode}/trace returned the raw
+    receipt and unit to any signed-in user -- a SALES_STAFF read the unit's
+    cost 3100 and each line's price paid [3100, 420]. The route stays open to
+    every signed-in role (the sale, transfer and return history carries no
+    cost); what was paid goes through the one cost rule (cost_mask)."""
     grn_id, barcode = _walk_in_on_the_shelf(world)
     url = f"/inventory/barcode/{barcode}/trace"
     for role in ("SALES_STAFF", "CASHIER", "OPTOMETRIST", "WORKSHOP_STAFF"):
-        for shop in (STORE, "BV-OTHER-99"):
-            counter = {"user_id": "u-counter", "roles": [role], "store_ids": [shop], "active_store_id": shop}
-            res = world["as_"](counter).get(url)
-            assert res.status_code == 403, (role, shop, res.text)
-            assert "3100" not in res.text and "Sharma" not in res.text
-    other_shop = {**MANAGER, "store_ids": ["BV-OTHER-99"], "active_store_id": "BV-OTHER-99"}
-    hidden = world["as_"](other_shop).get(url)
-    assert hidden.status_code == 200, hidden.text
-    assert hidden.json()["stock_unit"] is None and hidden.json()["purchase"] == []
-    assert "3100" not in hidden.text and "Sharma" not in hidden.text
-    mine = world["as_"](MANAGER).get(url).json()
-    assert mine["purchase"][0]["grn_id"] == grn_id
+        counter = {"user_id": "u-counter", "roles": [role], "store_ids": [STORE], "active_store_id": STORE}
+        res = world["as_"](counter).get(url)
+        assert res.status_code == 200, (role, res.text)
+        body = res.json()
+        assert body["stock_unit"]["barcode"] == barcode
+        assert body["purchase"][0]["grn_id"] == grn_id
+        assert not {"unit_cost", "cost_price"} & set(body["stock_unit"]), (role, body)
+        assert [sorted(it) for it in body["purchase"][0]["items"]] and all(
+            "unit_price" not in it for it in body["purchase"][0]["items"]
+        ), (role, body)
+    # The control: a role the cost rule admits reads both figures.
+    mine = world["as_"](ADMIN).get(url).json()
     assert mine["stock_unit"]["unit_cost"] == 3100.0
+    assert [ln["unit_price"] for ln in mine["purchase"][0]["items"]] == [3100.0, 420.0]
 
 
 def test_c7_the_policy_table_answers_as_the_receipt_readers_do(world):
@@ -915,8 +1191,8 @@ def test_c7_the_policy_table_answers_as_the_receipt_readers_do(world):
     give the handler's answer and mark the route store-scoped."""
     from api.services import rbac_policy
 
-    grn_id, barcode = _walk_in_on_the_shelf(world)
-    for url in ("/vendors/grn", f"/vendors/grn/{grn_id}", f"/inventory/barcode/{barcode}/trace"):
+    grn_id, _barcode = _walk_in_on_the_shelf(world)
+    for url in ("/vendors/grn", f"/vendors/grn/{grn_id}"):
         path = f"/api/v1{url}"
         assert rbac_policy.is_store_scoped("GET", path), path
         for role in rbac_policy.ALL_ROLES:

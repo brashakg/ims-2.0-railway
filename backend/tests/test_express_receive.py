@@ -311,7 +311,11 @@ def test_express_happy_path_full_chain(monkeypatch):
     assert task["payload"]["grn_id"] == res["grn_id"]
     assert task["payload"]["match_status"] == "MATCHED"
     assert "GRN-STORE-A" in task["title"]
-    assert "Acme" in task["title"]
+    # The task is stamped with the shop, so every role there lists it: it
+    # names the receipt, never the supplier or its bill number (accounts read
+    # both on the receipt the link opens).
+    assert "Acme" not in task["title"] + task["description"]
+    assert "INV-42" not in task["title"] + task["description"]
 
 
 def test_express_duplicate_accept_is_idempotent(monkeypatch):
@@ -589,16 +593,18 @@ def test_express_task_failure_never_rolls_back_receive(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 
-def test_express_gated_by_vendor_roles():
-    """The endpoint's Depends closure must gate on exactly _VENDOR_ROLES (the
-    same receiving roles as create/accept GRN -- owner decision)."""
+def test_express_gated_by_receiving_roles():
+    """The endpoint's Depends closure must gate on exactly _RECEIVE_ROLES (the
+    same receiving managers as create/accept GRN -- owner ruling 2026-09-28,
+    receiving is managers only)."""
     import inspect
 
     sig = inspect.signature(vendors_mod.express_receive_grn)
     dep_fn = sig.parameters["current_user"].default.dependency
     closures = [c.cell_contents for c in (dep_fn.__closure__ or [])]
     allowed = next(c for c in closures if isinstance(c, set))
-    assert allowed == set(vendors_mod._VENDOR_ROLES)
+    assert allowed == set(vendors_mod._RECEIVE_ROLES)
+    assert "ACCOUNTANT" not in allowed
 
 
 def test_rbac_row_catalogued():
@@ -607,4 +613,4 @@ def test_rbac_row_catalogued():
     rows = [p for p in rbac.POLICY if p.get("path") == "/api/v1/vendors/grn/express"]
     assert len(rows) == 1
     assert rows[0]["method"] == "POST"
-    assert sorted(rows[0]["allowed"]) == sorted(vendors_mod._VENDOR_ROLES)
+    assert sorted(rows[0]["allowed"]) == sorted(vendors_mod._RECEIVE_ROLES)

@@ -5,6 +5,7 @@ from ._shared import (
     Field,
     List,
     Optional,
+    _normalize_invoice_no,
     ap_engine,
     field_validator,
     model_validator,
@@ -343,11 +344,26 @@ class GRNCreate(BaseModel):
                     "Goods bought without a PO name no purchase order - "
                     "receive goods that have an order against that order"
                 )
-            self.dealer_name = (self.dealer_name or "").strip() or None
+            # A name is letters or digits: '...' folds to nothing, so it named
+            # nobody -- and gave the same-bill guard no seller to key on.
+            self.dealer_name = (
+                self.dealer_name.strip()
+                if _normalize_invoice_no(self.dealer_name)
+                else None
+            )
             if not ((self.vendor_id or "").strip() or self.dealer_name):
                 raise ValueError(
                     "Pick the supplier, or type the dealer's name, the goods "
                     "were bought from"
+                )
+            # Nothing arrived on a line means it is not a purchase: an all-zero
+            # receipt accepted nothing and sent accounts a bill to book that
+            # no bill could match.
+            empty = [n for n, it in enumerate(self.items, 1) if it.received_qty < 1]
+            if empty:
+                raise ValueError(
+                    "Enter how many arrived on every line (none on line "
+                    f"{', '.join(map(str, empty))})"
                 )
             no_cost = [n for n, it in enumerate(self.items, 1) if not it.unit_price]
             if no_cost:

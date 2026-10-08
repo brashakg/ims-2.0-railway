@@ -6,33 +6,38 @@ from ._shared import (
     _ATTACHMENT_INVALID_DETAIL,
     _GRN_DOCUMENT_KIND,
     _RECEIVABLE_PO_STATUSES,
+    _RECEIVE_ROLES,
     _VENDOR_ROLES,
     _get_db,
-    _normalize_invoice_no,
     can_access_store_scoped,
     datetime,
     get_audit_repository,
     get_file_store,
     get_grn_repository,
     get_purchase_order_repository,
+    get_vendor_repository,
     is_online_store,
     require_roles,
     router,
     uuid,
 )
-from .grn import _find_duplicate_no_po_grn
 from .models import GRNCreate, GRN_SUBTYPE_DC
 from .numbering import (
     classify_grn_line_variance,
     generate_grn_number,
     grn_has_discrepancy,
 )
-from .grn import _duplicate_grn_detail, _enrich_grn_names, _find_duplicate_standard_grn
+from .grn import (
+    _bill_key,
+    _duplicate_grn_detail,
+    _enrich_grn_names,
+    _find_duplicate_receipt,
+)
 
 
 @router.post("/grn", status_code=201)
 async def create_grn(
-    grn: GRNCreate, current_user: dict = Depends(require_roles(*_VENDOR_ROLES))
+    grn: GRNCreate, current_user: dict = Depends(require_roles(*_RECEIVE_ROLES))
 ):
     """Create a new GRN (STANDARD) or log a Delivery Challan (F9 DC subtype)."""
     return await _create_grn_impl(grn, current_user)
@@ -46,7 +51,7 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
     attachment gate (F-S3 + BUG-010 file-exists), PO receivable check, F2
     store re-point to the PO's delivery store, per-store numbering and the DC
     guards -- without duplicating any control. Callers pass the authenticated
-    ``current_user`` their own ``require_roles(*_VENDOR_ROLES)`` gate produced.
+    ``current_user`` their own ``require_roles(*_RECEIVE_ROLES)`` gate produced.
     """
     grn_repo = get_grn_repository()
     po_repo = get_purchase_order_repository()
@@ -204,6 +209,21 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
     # F9: the vendor a DC is for -- from the PO when linked, else the body field.
     vendor_id = (po.get("vendor_id") if po else None) or grn.vendor_id
 
+    # A receipt with no PO names its supplier itself, so it must be one on
+    # file: an invented or mistyped id put stock on the shelf under nobody
+    # (the receipts list showed no supplier) and its bill could never be
+    # booked (404 for that vendor, a vendor mismatch for any other).
+    if po is None and vendor_id:
+        vendor_repo = get_vendor_repository()
+        if vendor_repo is not None and not vendor_repo.find_by_id(vendor_id):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "That supplier is not on file - pick one from the list, "
+                    "or type the dealer's name."
+                ),
+            )
+
     # Now that the receiving store is final (re-pointed to the PO's delivery
     # store for a standard PO-backed GRN), mint the per-store GRN serial.
     grn_number = generate_grn_number(store_id)
@@ -257,22 +277,17 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
 
     # P0-1 (launch gate): the STANDARD twin of the DC guard above. A vendor
     # invoice number identifies ONE physical delivery + ONE bill, so a second
-    # non-VOID receipt carrying it (per PO or per vendor, case/punctuation
-    # folded) is a double-submit -- which used to double-mint the stock AND
-    # open the payable to being booked twice. The comment at the express 409
-    # admitted this hole ("_create_grn_impl has no duplicate guard for
-    # STANDARD receipts"); this closes it for BOTH doors, since express
-    # creates through this shared impl. A legitimately split delivery arrives
-    # with DIFFERENT invoice numbers per shipment and passes untouched. A
-    # "Bought without PO" receipt from a walk-in dealer (no vendor_id) is
-    # matched by its bill photo or the dealer's bill number instead (D14).
-    # The photo's content hash (upload-doc stamps it) makes the same bill
-    # uploaded again -- a new file id, the same bytes -- the same bill.
+    # non-VOID receipt carrying it is a double-submit -- which used to
+    # double-mint the stock AND open the payable to being booked twice. This
+    # closes it for BOTH doors, since express creates through this shared
+    # impl. A legitimately split delivery arrives with DIFFERENT invoice
+    # numbers per shipment and passes untouched. ONE rule for every kind of
+    # receipt and every shop (vendors.grn._find_duplicate_receipt): the same
+    # seller -- picked or typed -- and bill number in the same financial
+    # year, or (bought without PO, D14) the same bill photo by content hash.
     photo_sha = None if is_dc else (_attachment_meta or {}).get("sha256")
     if not is_dc:
-        dup = _find_duplicate_standard_grn(
-            grn_repo, grn.po_id, vendor_id, grn.vendor_invoice_no
-        ) or _find_duplicate_no_po_grn(grn_repo, grn, store_id, photo_sha=photo_sha)
+        dup = _find_duplicate_receipt(grn_repo, grn, vendor_id, photo_sha=photo_sha)
         if dup is not None:
             raise HTTPException(
                 status_code=409,
@@ -357,11 +372,12 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
         "dealer_name": grn.dealer_name,
         "store_id": store_id,
         "vendor_invoice_no": grn.vendor_invoice_no,
-        # Folded identity for the uniq_std_vendor_invoice_store partial unique
-        # index (the atomic backstop behind the racy check-then-insert guard
-        # above). None for a DC so DC rows never enter that index.
+        # The bill's identity -- financial year + folded number -- for the
+        # uniq_std_vendor_invoice_store partial unique index (the atomic
+        # backstop behind the racy check-then-insert guard above). None for a
+        # DC so DC rows never enter that index.
         "vendor_invoice_no_norm": (
-            (_normalize_invoice_no(grn.vendor_invoice_no) or None)
+            _bill_key(grn.vendor_invoice_no, grn.vendor_invoice_date, datetime.now())
             if not is_dc
             else None
         ),
@@ -438,14 +454,8 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
         if created is None and not is_dc:
             dup = None
             try:
-                dup = _find_duplicate_standard_grn(
-                    grn_repo,
-                    grn.po_id,
-                    vendor_id,
-                    grn.vendor_invoice_no,
-                    exclude_grn_id=grn_id,
-                ) or _find_duplicate_no_po_grn(
-                    grn_repo, grn, store_id, photo_sha=photo_sha, exclude_grn_id=grn_id
+                dup = _find_duplicate_receipt(
+                    grn_repo, grn, vendor_id, photo_sha=photo_sha, exclude_grn_id=grn_id
                 )
             except Exception:  # noqa: BLE001
                 dup = None

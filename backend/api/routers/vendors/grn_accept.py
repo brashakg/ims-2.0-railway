@@ -5,7 +5,7 @@ from ._shared import (
     HTTPException,
     List,
     Optional,
-    _VENDOR_ROLES,
+    _RECEIVE_ROLES,
     _get_db,
     _pm,
     can_access_store_scoped,
@@ -39,13 +39,12 @@ from .grn_accept_lock import (
     _release_grn_accept_claim,
     _stock_create_raises_on_duplicate,
 )
-from .grn import _enrich_grn_names
 from .models import GRN_SUBTYPE_NO_PO
 
 
 @router.post("/grn/{grn_id}/accept")
 async def accept_grn(
-    grn_id: str, current_user: dict = Depends(require_roles(*_VENDOR_ROLES))
+    grn_id: str, current_user: dict = Depends(require_roles(*_RECEIVE_ROLES))
 ):
     """Post a goods-receipt note: mint serialized stock for the accepted units,
     advance the PO to PARTIALLY_RECEIVED / RECEIVED, and write an audit trail.
@@ -77,20 +76,26 @@ async def accept_grn(
     return result
 
 
-def _raise_book_bill_task(grn_id, store_id, title, description, payload):
+def _raise_book_bill_task(grn_id, store_id, grn_number, kind, note, payload):
     """THE "book the bill for this receipt" task: one per receipt, to
     accounts, P2 Purchase, opening the booking screen on it. Express receive
-    and a "Bought without PO" accept both raise it here, so who books and
-    where the link points is said once. (The dedupe key keeps the name the
-    express receive gave it first.) Returns the task, or None."""
+    and a "Bought without PO" accept both raise it here, so who books, where
+    the link points and what the text says are said once. (The dedupe key
+    keeps the name the express receive gave it first.)
+
+    The text names the RECEIPT only, never the supplier or the bill number:
+    the task is stamped with the shop, so every role there lists it (GET
+    /tasks, the home screen's priority tasks), and who the shop bought from is
+    the purchase roles' -- accounts read both on the receipt the link opens.
+    Returns the task, or None."""
     from ...services.task_triggers import create_system_task
     from ...dependencies import get_task_repository
 
     link = f"/purchase/invoices/book?grn_id={grn_id}"
     return create_system_task(
         get_task_repository(),
-        title=title,
-        description=f"{description} Book it here: {link}",
+        title=f"Book the bill for receipt {grn_number} ({kind})",
+        description=f"{note} Book it here: {link}",
         priority="P2",
         category="Purchase",
         store_id=store_id,
@@ -103,26 +108,26 @@ def _raise_book_bill_task(grn_id, store_id, title, description, payload):
 def _send_no_po_bill_to_accounts(grn_id: str, result: dict) -> None:
     """D14: goods bought without a PO have no order behind them, so nothing
     else tells accounts a bill is waiting. Once the receipt is fully on the
-    shelf, raise one task to book it (the bill doors stamp it no-ITC).
-    Fail-soft: a task failure never undoes the receipt."""
+    shelf -- and put something there: a receipt whose every unit was
+    rejected has no bill to book (any bill line would be over-billed) --
+    raise one task to book it (the bill doors stamp it no-ITC). Fail-soft: a
+    task failure never undoes the receipt."""
     if result.get("grn_status") != "ACCEPTED":
         return
     try:
         grn = get_grn_repository().find_by_id(grn_id) or {}
         if grn.get("grn_subtype") != GRN_SUBTYPE_NO_PO:
             return
-        _enrich_grn_names([grn])
+        if not any(int(it.get("accepted_qty") or 0) > 0 for it in grn.get("items") or []):
+            return
         number = grn.get("grn_number") or grn_id
-        seller = grn.get("vendor_name") or grn.get("vendor_id") or "the dealer"
-        bill_no = grn.get("vendor_invoice_no")
         _raise_book_bill_task(
             grn_id,
             grn.get("store_id"),
-            f"Book the bill for {number} - bought without PO ({seller})",
-            f"Goods bought from {seller} without a purchase order are on the "
-            f"shelf (receipt {number}" + (f", bill {bill_no}" if bill_no else "")
-            + "). Book the bill against this receipt - it claims no input tax "
-            "credit.",
+            number,
+            "bought without PO",
+            "Goods bought without a purchase order are on the shelf. Book "
+            "the bill against this receipt - it claims no input tax credit.",
             {"grn_number": number},
         )
     except Exception as exc:  # noqa: BLE001
@@ -137,7 +142,7 @@ async def _accept_grn_impl(grn_id: str, current_user: dict) -> dict:
     store-scope guard, the PENDING/PARTIALLY_ACCEPTED status gate, idempotent
     per-(grn, line) stock minting, PO receipt math and the audit trail all run
     here unchanged for both callers. Callers pass the authenticated
-    ``current_user`` their own ``require_roles(*_VENDOR_ROLES)`` gate produced.
+    ``current_user`` their own ``require_roles(*_RECEIVE_ROLES)`` gate produced.
     """
     grn_repo = get_grn_repository()
     stock_repo = get_stock_repository()
