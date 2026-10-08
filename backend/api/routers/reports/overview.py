@@ -194,6 +194,8 @@ async def inventory_report(
         return {
             "totalItems": total_items,
             "totalValue": total_value,
+            # Units with no cost add Rs 0 to totalValue; said, not hidden.
+            "uncostedUnits": stock_value.uncosted(all_stock) if show_cost else None,
             "lowStock": low_stock_count,
             "outOfStock": out_of_stock,
             "categories": list(categories.values()),

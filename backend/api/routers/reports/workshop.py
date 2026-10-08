@@ -14,6 +14,7 @@ from ...dependencies import (
     get_stock_repository,
     get_product_repository,
     get_db,
+    resolve_store_scope,
     validate_store_access,
 )
 from ...services import stock_value
@@ -487,7 +488,9 @@ async def daily_stock_count(
     current_user: dict = Depends(get_current_user),
 ):
     """Daily stock count report"""
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    # THE shop rule (R3): a non-admin login with no shop is refused, never
+    # handed shelf_units(None) -- every shop's stock.
+    active_store = resolve_store_scope(store_id, current_user)
     stock_repo = get_stock_repository()
 
     if stock_repo is None:
@@ -531,6 +534,8 @@ async def daily_stock_count(
         "summary": {
             "total_items": total_items,
             "total_value": round(total_value, 2) if show_cost else None,
+            # Units with no cost add Rs 0 to total_value; said, not hidden.
+            "uncosted_units": stock_value.uncosted(all_stock) if show_cost else None,
             "total_quantity": sum(item.get("quantity", 0) for item in all_stock),
         },
     }

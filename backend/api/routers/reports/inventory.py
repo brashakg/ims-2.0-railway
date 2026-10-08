@@ -9,6 +9,7 @@ from ...dependencies import (
     get_product_repository,
     get_eye_test_repository,
     get_db,
+    resolve_store_scope,
     validate_store_access,
 )
 from ...services import stock_value
@@ -32,7 +33,10 @@ async def inventory_summary(
     current_user: dict = Depends(get_current_user),
 ):
     """Get inventory summary"""
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    # THE shop rule: an admin reads every shop when none is asked, anyone
+    # else their own -- and a non-admin login with no shop is refused (R3),
+    # never handed shelf_units(None), every shop's stock at cost.
+    active_store = resolve_store_scope(store_id, current_user)
     stock_repo = get_stock_repository()
 
     if stock_repo is None:
@@ -52,9 +56,8 @@ async def inventory_summary(
     all_stock = stock_value.shelf_units(stock_repo, get_product_repository(), active_store)
     low_stock = low_stock_rows(get_product_repository(), stock_repo, store_id=active_store)
 
-    total_value = (
-        stock_value.total(all_stock) if can_see_cost(current_user, "purchase") else None
-    )
+    show_cost = can_see_cost(current_user, "purchase")
+    total_value = stock_value.total(all_stock) if show_cost else None
 
     out_of_stock = [s for s in all_stock if s.get("quantity", 0) <= 0]
 
@@ -63,6 +66,8 @@ async def inventory_summary(
             "total_items": len(all_stock),
             "total_quantity": sum(s.get("quantity", 0) for s in all_stock),
             "total_value": total_value,
+            # Units with no cost add Rs 0 to total_value; said, not hidden.
+            "uncosted_units": stock_value.uncosted(all_stock) if show_cost else None,
             "low_stock_count": len(low_stock) if low_stock else 0,
             "out_of_stock_count": len(out_of_stock),
         }
@@ -75,7 +80,7 @@ async def inventory_valuation(
     current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
 ):
     """Get inventory valuation by category (management report; store-scoped)."""
-    active_store = validate_store_access(store_id, current_user)
+    active_store = resolve_store_scope(store_id, current_user)  # R3: see summary
     stock_repo = get_stock_repository()
 
     if stock_repo is None:
@@ -105,6 +110,7 @@ async def inventory_valuation(
         "valuation": {
             "by_category": list(by_category.values()),
             "total": round(total, 2),
+            "uncosted_units": stock_value.uncosted(all_stock),
         }
     }
 

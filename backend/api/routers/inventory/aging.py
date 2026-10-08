@@ -188,7 +188,11 @@ async def get_stock_aging_report(
         else:
             age_cat = "180+"
 
-        value = (shelf.get(pid) or {}).get("cost", 0.0) if show_cost else None
+        # A unit with no cost adds nothing to `value` but is counted, so the
+        # row says "N no cost" instead of reading Rs 0 (services/stock_value).
+        row_cost = shelf.get(pid) or {}
+        value = row_cost.get("cost", 0.0) if show_cost else None
+        uncosted_units = row_cost.get("uncosted_units", 0.0) if show_cost else None
 
         if classification and cls != classification:
             continue
@@ -204,6 +208,7 @@ async def get_stock_aging_report(
                 "category": product.get("category", ""),
                 "quantity": qty,
                 "value": value,
+                "uncostedUnits": uncosted_units,
                 "daysInStock": days_in_stock,
                 "lastSaleDate": (
                     last_sale.isoformat()
@@ -229,11 +234,9 @@ async def get_stock_aging_report(
     class_a = sum(1 for p in products if p["classification"] == "A")
     class_b = sum(1 for p in products if p["classification"] == "B")
     class_c = sum(1 for p in products if p["classification"] == "C")
-    slow_value = (
-        round(sum(p["value"] for p in products if p["classification"] == "C"), 2)
-        if show_cost
-        else None
-    )
+    slow = [p for p in products if p["classification"] == "C"]
+    slow_value = round(sum(p["value"] for p in slow), 2) if show_cost else None
+    slow_uncosted = sum(p["uncostedUnits"] for p in slow) if show_cost else None
     avg_age = sum(p["daysInStock"] for p in products) / max(total, 1)
 
     return {
@@ -244,6 +247,7 @@ async def get_stock_aging_report(
             "classB": class_b,
             "classC": class_c,
             "slowMovingValue": slow_value,
+            "slowMovingUncostedUnits": slow_uncosted,
             "averageAge": round(avg_age, 1),
             "oldStockCount": sum(1 for p in products if p["daysInStock"] > 90),
         },
