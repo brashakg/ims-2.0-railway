@@ -515,6 +515,25 @@ def bill_outstanding(
     return round(max(total - paid - dn, 0.0), 2)
 
 
+def bill_settlement(
+    bill: dict, payments: List[dict], debit_notes: List[dict]
+) -> dict:
+    """THE stored settlement of a bill: what the supplier is owed
+    (vendor_payable), what is left of it (bill_outstanding) and the status
+    that follows -- PAID when nothing is left, PARTIAL when some of it was
+    settled, else OUTSTANDING. A payment's status write and the reverse-charge
+    repair script both stamp this, so they can never disagree."""
+    owed = vendor_payable(bill)
+    out = bill_outstanding(bill, payments, debit_notes)
+    if out <= 0.01:
+        status = "PAID"
+    elif out < owed:
+        status = "PARTIAL"
+    else:
+        status = "OUTSTANDING"
+    return {"owed": owed, "outstanding": out, "status": status}
+
+
 # --- aging -----------------------------------------------------------------
 
 

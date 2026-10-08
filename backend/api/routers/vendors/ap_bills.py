@@ -134,17 +134,10 @@ def _recompute_bill_status(db, bill_id: Optional[str]) -> None:
                 {"bill_id": bill_id}, {"_id": 0}
             )
         )
-        out = ap_engine.bill_outstanding(bill, payments, debit_notes)
-        total = ap_engine.vendor_payable(bill)
-        if out <= 0.01:
-            status = "PAID"
-        elif out < total:
-            status = "PARTIAL"
-        else:
-            status = "OUTSTANDING"
+        st = ap_engine.bill_settlement(bill, payments, debit_notes)
         db.get_collection("vendor_bills").update_one(
             {"bill_id": bill_id},
-            {"$set": {"outstanding": out, "status": status}},
+            {"$set": {"outstanding": st["outstanding"], "status": st["status"]}},
         )
     except Exception:
         pass
@@ -464,6 +457,11 @@ async def list_vendor_bills(
     except Exception:
         bills = []
     bills.sort(key=lambda b: b.get("bill_date") or "", reverse=True)
+    # What the supplier is owed, as the invoice list reads it (an RCM bill
+    # booked before vendor_payable stored its GST in total_amount; its stored
+    # outstanding/status are restamped by scripts/repair_rcm_bill_payable.py).
+    for b in bills:
+        b["total_amount"] = ap_engine.vendor_payable(b)
     return {"bills": bills, "total": len(bills)}
 
 

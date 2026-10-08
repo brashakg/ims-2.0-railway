@@ -248,6 +248,21 @@ class TestReverseChargeBill:
         for k in ("igst_total", "cgst_total", "sgst_total", "taxable_total"):
             assert pv[k] == doc[k], k
 
+    def test_the_previewed_total_is_the_total_the_booking_accepts(self):
+        """`total` means one thing: the preview's total, echoed back, books;
+        the supplier's taxable+tax (1180) is refused, never booked at 1000."""
+        _db, cli = _world()
+        pv = cli.post(f"{_PI}/preview", json=_bill("GTA-1", rcm=True)).json()
+        assert pv["total"] == 1000.0
+        doc = _book(cli, {**_bill("GTA-1", rcm=True), "total": pv["total"]})
+        assert doc["total_amount"] == 1000.0
+        r = cli.post(_PI, json={**_bill("GTA-2", rcm=True), "total": 1180.0})
+        assert r.status_code == 400, r.text
+        assert "what the supplier is owed, 1000.0" in r.json()["detail"]
+        # A normal bill's total stays taxable + tax.
+        assert _book(cli, {**_bill("FR-1", rcm=False), "total": 1180.0})["total_amount"] == 1180.0
+        assert cli.post(_PI, json={**_bill("FR-2", rcm=False), "total": 1000.0}).status_code == 400
+
     def test_ap_aging_ledger_supplier_balance_and_payables_read_1000(self):
         _db, cli = _world()
         _book(cli, _bill("GTA-1", rcm=True))
@@ -493,3 +508,78 @@ class TestOtherReaders:
         ap_bills._recompute_bill_status(db, "LEG-1")
         stored = db["vendor_bills"].find_one({"bill_id": "LEG-1"})
         assert (stored["status"], stored["outstanding"]) == ("OUTSTANDING", 1000.0)
+
+
+# ===========================================================================
+# Bills booked before the rule: the one-time repair (scripts/)
+# ===========================================================================
+
+
+def _repair():
+    import importlib.util
+
+    path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "scripts", "repair_rcm_bill_payable.py",
+    )
+    spec = importlib.util.spec_from_file_location("repair_rcm_bill_payable", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class TestLegacyRepair:
+    """A legacy RCM bill (taxable 1000, total 1180) whose supplier was paid
+    the 1000 on his invoice was stored PARTIAL, 180 outstanding. Every
+    screen must read it PAID once the repair runs."""
+
+    def _legacy(self, db, **extra):
+        doc = {"bill_id": "LEG-1", "doc_type": "PURCHASE_INVOICE", "vendor_id": "V1",
+               "bill_number": "GTA-0", "bill_date": "2026-05-02", "due_date": "2026-06-01",
+               "reverse_charge": True, "taxable_amount": 1000.0, "tax_amount": 180.0,
+               "igst_total": 180.0, "total_amount": 1180.0, "total": 1180.0,
+               "outstanding": 180.0, "status": "PARTIAL"}
+        doc.update(extra)
+        db["vendor_bills"].insert_one(doc)
+        db["vendor_payments"].insert_one(
+            {"payment_id": "P1", "vendor_id": "V1", "bill_id": "LEG-1", "amount": 1000.0}
+        )
+
+    def test_the_repair_restamps_it_and_every_screen_agrees(self):
+        db, cli = _world()
+        self._legacy(db)
+        mod = _repair()
+        rows = mod.plan(db)
+        assert [r["set"] for r in rows] == [
+            {"total_amount": 1000.0, "total": 1000.0, "outstanding": 0.0, "status": "PAID"}
+        ]
+        assert db["vendor_bills"].find_one({"bill_id": "LEG-1"})["status"] == "PARTIAL"  # dry run wrote nothing
+        # Before the repair the supplier's bill list already reads the payable.
+        assert cli.get("/api/v1/vendors/V1/bills").json()["bills"][0]["total_amount"] == 1000.0
+        assert mod.apply(db, rows) == {"bills": 1, "bills_written": 1}
+
+        row = cli.get(_PI).json()["purchase_invoices"][0]
+        got = cli.get(f"{_PI}/LEG-1").json()
+        for d in (row, got):
+            assert (d["total_amount"], d["total"], d["outstanding"], d["status"]) == (1000.0, 1000.0, 0.0, "PAID")
+        assert cli.get(_PI, params={"status": "PAID"}).json()["total"] == 1
+        vb = cli.get("/api/v1/vendors/V1/bills").json()["bills"][0]
+        assert (vb["total_amount"], vb["outstanding"], vb["status"]) == (1000.0, 0.0, "PAID")
+        assert _aging(cli)["totals"]["total_outstanding"] == 0.0
+        assert mod.plan(db) == []  # a second run plans nothing
+
+    def test_the_repair_leaves_normal_cancelled_and_right_bills_alone(self):
+        db, cli = _world()
+        _book(cli, _bill("GTA-1", rcm=True))  # booked under the rule: already right
+        _book(cli, _bill("FR-1", rcm=False))
+        self._legacy(db, bill_id="X", status="CANCELLED")
+        assert _repair().plan(db) == []
+
+    def test_a_payment_landing_after_the_plan_is_never_overwritten(self):
+        db, _cli = _world()
+        self._legacy(db)
+        mod = _repair()
+        rows = mod.plan(db)
+        db["vendor_bills"].update_one({"bill_id": "LEG-1"}, {"$set": {"outstanding": 90.0}})
+        assert mod.apply(db, rows)["bills_written"] == 0
+        assert db["vendor_bills"].find_one({"bill_id": "LEG-1"})["outstanding"] == 90.0

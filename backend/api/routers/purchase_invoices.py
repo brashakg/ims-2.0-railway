@@ -1737,13 +1737,16 @@ async def create_purchase_invoice(
         db, vendor, body, grn_doc, current_user
     )
 
-    # Reconcile a client-supplied grand total against the server math.
-    if body.total is not None and abs(body.total - computed["total"]) > 1.0:
+    # Reconcile a client-supplied total against the server math. `total` means
+    # one thing at this door, the preview's and the booking's: what the supplier
+    # is owed (vendor_payable -- taxable value only on a reverse-charge bill).
+    if body.total is not None and abs(body.total - computed["vendor_payable"]) > 1.0:
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Invoice total {body.total} does not reconcile with the "
-                f"computed taxable+tax {computed['total']}."
+                f"Invoice total {body.total} does not reconcile with what the supplier is "
+                f"owed, {computed['vendor_payable']} (taxable value plus GST; "
+                f"the taxable value alone on a reverse-charge bill)."
             ),
         )
 
