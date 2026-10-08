@@ -76,7 +76,7 @@ class _FakeGRNRepo:
     def find_many(self, flt, limit=1000):
         out = []
         for d in self.docs.values():
-            if all(d.get(k) == v for k, v in (flt or {}).items()):
+            if matches(d, flt or {}):  # the PO refresh reads status $in
                 out.append(dict(d))
         return out[:limit]
 
