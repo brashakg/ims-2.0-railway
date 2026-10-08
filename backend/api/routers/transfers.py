@@ -810,6 +810,10 @@ def _apply_receive_stock_move(transfer: Dict) -> Dict:
         moved_here = 0
 
         def _rehome(sid, new_status):
+            # source_* becomes the transfer, but the unit's ORIGIN (grn_id,
+            # grn_line_index, line_unit_seq, po_id) is never touched: every
+            # "already received from this receipt" count reads it
+            # (vendors.grn_accept_lock._received_on).
             patch = {
                 "status": new_status,
                 "store_id": to_store,

@@ -241,7 +241,10 @@ def _grn_stock_audit(
 
 
 def _cumulative_received_by_product(grn_repo, po_id: str) -> dict:
-    """Sum accepted_qty per product across every ACCEPTED GRN for a PO.
+    """Sum accepted_qty per product across every GRN for a PO that put stock on
+    the shelf: each ACCEPTED one, and each PARTIALLY_ACCEPTED one less the
+    lines it is still holding (unresolved_lines) -- a held receipt's other
+    lines are on the shelf, and the order received them (audit C1, R1-13).
 
     This is the running on-hand-received tally used to decide whether the PO is
     now fully or partially received. Fail-soft: any read error returns {} so the
@@ -252,21 +255,29 @@ def _cumulative_received_by_product(grn_repo, po_id: str) -> dict:
         return totals
     try:
         accepted_grns = grn_repo.find_many(
-            {"po_id": po_id, "status": "ACCEPTED"}, limit=1000
+            {"po_id": po_id, "status": {"$in": ["ACCEPTED", "PARTIALLY_ACCEPTED"]}},
+            limit=1000,
         )
     except Exception:  # noqa: BLE001
         return totals
+
+    def _qty(row) -> int:
+        try:
+            return int((row or {}).get("accepted_qty", 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+
     for grn in accepted_grns or []:
         if not isinstance(grn, dict):
             continue
+        mine: dict = {}
         for item in grn.get("items", []) or []:
-            if not isinstance(item, dict):
-                continue
-            pid = item.get("product_id")
-            if pid is None:
-                continue
-            try:
-                totals[pid] = totals.get(pid, 0) + int(item.get("accepted_qty", 0) or 0)
-            except (TypeError, ValueError):
-                continue
+            if isinstance(item, dict) and item.get("product_id") is not None:
+                mine[item["product_id"]] = mine.get(item["product_id"], 0) + _qty(item)
+        if grn.get("status") == "PARTIALLY_ACCEPTED":
+            for held in grn.get("unresolved_lines") or []:
+                if isinstance(held, dict) and held.get("product_id") in mine:
+                    mine[held["product_id"]] -= _qty(held)
+        for pid, qty in mine.items():
+            totals[pid] = totals.get(pid, 0) + max(0, qty)
     return totals

@@ -1,5 +1,8 @@
 """POST /grn/{grn_id}/accept - the three-way match and the stock mint."""
 
+from datetime import timedelta
+from urllib.parse import quote
+
 from ._shared import (
     Depends,
     HTTPException,
@@ -27,6 +30,7 @@ from .numbering import (
     compute_po_receipt_state,
 )
 from .grn_accept_lock import (
+    _GRN_ACCEPT_LOCK_STALE_SECONDS,
     _GRN_MINT_DUPLICATE,
     _advance_grn_terminal_status,
     _claim_grn_for_accept,
@@ -36,6 +40,7 @@ from .grn_accept_lock import (
     _grn_already_minted,
     _grn_mint_unit,
     _grn_unit_index_present,
+    _received_on,
     _release_grn_accept_claim,
     _stock_create_raises_on_duplicate,
 )
@@ -84,8 +89,6 @@ async def _accept_grn_impl(grn_id: str, current_user: dict) -> dict:
     ``current_user`` their own ``require_roles(*_VENDOR_ROLES)`` gate produced.
     """
     grn_repo = get_grn_repository()
-    stock_repo = get_stock_repository()
-    po_repo = get_purchase_order_repository()
 
     if grn_repo is None:
         return {"message": "GRN accepted, stock added"}
@@ -101,6 +104,289 @@ async def _accept_grn_impl(grn_id: str, current_user: dict) -> dict:
     # gates the stock mint + PO advance + audit writes below.
     if not can_access_store_scoped(grn.get("store_id"), current_user):
         raise HTTPException(status_code=404, detail="GRN not found")
+
+    return _put_on_shelf(grn_repo, grn_id, grn, current_user)
+
+
+def held_receipts(product_id: str) -> List[dict]:
+    """The receipts holding units of `product_id` back (PARTIALLY_ACCEPTED with
+    it in unresolved_lines), oldest first."""
+    grn_repo = get_grn_repository()
+    if grn_repo is None or not product_id:
+        return []
+    return (
+        grn_repo.find_many(
+            {"status": "PARTIALLY_ACCEPTED", "unresolved_lines.product_id": product_id},
+            sort=[("created_at", 1)],
+        )
+        or []
+    )
+
+
+# A PO in one of these will never bring the item in again.
+_PO_DONE_STATUSES = ("CANCELLED", "RECEIVED", "CLOSED")
+# A PO in one of these can still be cancelled (po_detail.cancel_po refuses a
+# part-received one).
+_PO_CANCELLABLE_STATUSES = ("DRAFT", "SENT", "ACKNOWLEDGED")
+
+
+def _line_qty(it: dict, *keys) -> int:
+    for k in keys:
+        try:
+            if it.get(k) is not None:
+                return int(it.get(k) or 0)
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
+def draft_discard_blockers(product_id: str) -> Optional[List[str]]:
+    """What still brings `product_id` in, or still waits on it -- each as one
+    sentence a person can act on, naming only an action the server allows.
+
+      * an open order line for it that has not been received in full (order
+        not cancelled, not fully received, not closed);
+      * a receipt still waiting on it: PENDING with a line for it that is
+        accepting units, or PARTIALLY_ACCEPTED holding it. A finished receipt
+        whose line for it accepted nothing (all rejected) waits on nothing.
+
+    A draft one of these names is still coming in, or already here: discarding
+    it would leave a box arriving for -- or held behind -- a deleted product,
+    whose catalogue task points at a queue it is no longer in. None if the
+    question cannot be answered (no database): the caller refuses then."""
+    if not product_id:
+        return []
+    po_repo = get_purchase_order_repository()
+    grn_repo = get_grn_repository()
+    if po_repo is None or grn_repo is None:
+        return None
+    blockers: List[str] = []
+    # Strict reads (the raw collections): BaseRepository.find_many prints a
+    # read error and answers [] -- "nothing names it", a licence to discard.
+    # A read error raises; the delete answers 503.
+    for po in _pm.strict_find_many(
+        po_repo, {"items.product_id": product_id, "status": {"$nin": list(_PO_DONE_STATUSES)}}
+    ):
+        lines = [it for it in (po.get("items") or []) if it.get("product_id") == product_id]
+        if lines and all(
+            _line_qty(it, "received_qty") >= _line_qty(it, "ordered_qty", "quantity") > 0
+            for it in lines
+        ):
+            continue
+        number = po.get("po_number") or po.get("po_id")
+        if str(po.get("status") or "").upper() in _PO_CANCELLABLE_STATUSES:
+            blockers.append(
+                f"Purchase order {number} still orders it: cancel that order in "
+                "Purchase Orders first."
+            )
+        else:
+            # No door cancels the unreceived rest of one line yet (draft
+            # #1165 adds it): a person does, so the sentence names the person.
+            blockers.append(
+                f"Purchase order {number} still expects it, and has already "
+                "received other goods, so the order itself cannot be cancelled. "
+                "Ask the purchase manager to cancel the rest of that line, or "
+                "finish the item in the product editor."
+            )
+    for g in _pm.strict_find_many(
+        grn_repo,
+        {"items.product_id": product_id, "status": {"$in": ["PENDING", "PARTIALLY_ACCEPTED", "ESCALATED"]}},
+    ):
+        status = str(g.get("status") or "").upper()
+        if status == "PARTIALLY_ACCEPTED":
+            if not any(
+                (u or {}).get("product_id") == product_id for u in (g.get("unresolved_lines") or [])
+            ):
+                continue
+        elif not any(
+            it.get("product_id") == product_id and _line_qty(it, "accepted_qty") > 0
+            for it in (g.get("items") or [])
+        ):
+            continue
+        number = g.get("grn_number") or g.get("grn_id")
+        if status == "ESCALATED":
+            # No door settles an escalated receipt here (neither accept nor
+            # void takes one): name the action that works, nothing else.
+            blockers.append(
+                f"Receipt {number} names it and is escalated to head office, so it "
+                "can be neither accepted nor voided here: finish the item in the "
+                "product editor."
+            )
+        else:
+            blockers.append(
+                f"Receipt {number} is holding it: if none of that receipt's units "
+                "went on the shelf and they are going back, void it in Receive "
+                "Goods; otherwise finish the item in the product editor."
+            )
+    return blockers
+
+
+def release_held_receipts(product_id: str) -> List[dict]:
+    """Audit C1: finishing a product in the catalogue puts every unit a receipt
+    was holding for it on the shelf -- through _put_on_shelf, the SAME path
+    "Add to stock" runs, so there is one mint and one set of guards.
+
+    Called by the product door (PUT /products/{id}) once an edit leaves the
+    product catalogue-complete. The receipt is completed as the manager who
+    accepted it (receiving is managers-only; the cataloguer only finished the
+    product). Fail-soft per receipt: the catalogue save stands, the receipt
+    stays held and says so, and "Add to stock" retries it.
+
+    Oldest receipt first, and never past what its order asked for
+    (order_cap): a line that would put more of its product on the shelf than
+    the PO ordered (a second receipt of the same box, say) stays held for the
+    shop's store manager to void or accept -- a person decides, not the
+    cataloguer's save. The receipt's lines within the order still go on the
+    shelf."""
+    grn_repo = get_grn_repository()
+    try:
+        held = held_receipts(product_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[VENDOR] held-receipt lookup for %s failed: %s", product_id, exc)
+        return []
+    out: List[dict] = []
+    for grn in held:
+        gid = grn.get("grn_id")
+        actor = {"user_id": grn.get("accepted_by") or grn.get("created_by")}
+        try:
+            out.append(_put_on_shelf(grn_repo, gid, grn, actor, order_cap=True))
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "[VENDOR] GRN %s: releasing the units held for %s failed (%s) -- "
+                "the receipt stays held; 'Add to stock' retries it",
+                gid,
+                product_id,
+                exc,
+            )
+    return out
+
+
+def _ordered_by_product(po_repo, po_id) -> dict:
+    """What the PO ordered, per product. Raises when the PO cannot be read: the
+    order cap then holds the receipt back rather than guess."""
+    po = po_repo.find_by_id(po_id)
+    if po is None:
+        raise RuntimeError(f"PO {po_id} could not be read")
+    ordered: dict = {}
+    for it in po.get("items") or []:
+        pid = it.get("product_id")
+        ordered[pid] = ordered.get(pid, 0) + int(
+            it.get("ordered_qty", it.get("quantity", 0)) or 0
+        )
+    return ordered
+
+
+def _po_units_received(stock_repo, po_id, product_id) -> int:
+    """Every unit of `product_id` its PO has put on the shelf, by ORIGIN (po_id
+    is stamped at mint and a transfer never rewrites it), in any status, at any
+    shop -- what fills the order. Raises on a read error (fail closed)."""
+    return _grn_already_minted(stock_repo, {"po_id": po_id, "product_id": product_id})
+
+
+def _over_the_order(
+    grn_repo, stock_repo, grn_id, po_id, product_id, to_mint, ordered
+) -> Optional[dict]:
+    """None when `to_mint` more units of `product_id` keep its PO within what it
+    ordered; else the hold's details.
+
+    Runs UNDER this receipt's accept claim, and another receipt of the same
+    order that holds a live claim counts as over: of two catalogue saves racing
+    over two receipts of one order, the later check always sees the earlier
+    claim (or its minted units), so at most one shelves -- both may hold, and
+    the store manager accepts one.
+
+    Counts every unit this PO has put on the shelf, by its ORIGIN (po_id is
+    stamped at mint and a transfer never rewrites it -- _received_on), in ANY
+    status and at ANY shop: a unit sold or transferred since was still
+    received, so it still fills the order. Both counts fail closed (raise):
+    the receipt then stays held."""
+    on_shelf = _po_units_received(stock_repo, po_id, product_id)
+    live_since = (
+        datetime.now() - timedelta(seconds=_GRN_ACCEPT_LOCK_STALE_SECONDS)
+    ).isoformat()
+    busy = _grn_already_minted(
+        grn_repo,
+        {
+            "po_id": po_id,
+            "grn_id": {"$ne": grn_id},
+            "items.product_id": product_id,
+            "accept_lock_at": {"$gte": live_since},
+        },
+    )
+    want = ordered.get(product_id, 0)
+    if not busy and on_shelf + to_mint <= want:
+        return None
+    return {"ordered": want, "on_shelf": on_shelf, "busy": bool(busy)}
+
+
+def _hand_to_store_manager(db, grn_id: str, grn: dict, over: List[dict], product_repo) -> None:
+    """Lines held beyond the order (order_cap) are the shop's store manager's
+    to decide (owner 2026-09-29: a receipt problem is his task, by person).
+    One task per receipt, item and person: a second item found over the order
+    on the same receipt is never lost behind a task closed for the first."""
+    store_id = grn.get("store_id")
+    shop = _shop_label(db, store_id)
+    receipt = grn.get("grn_number") or grn_id
+    po = grn.get("po_number") or grn.get("po_id")
+    # Opens that vendor's "Receipts still waiting", where the receipt is voided.
+    vendor_id = grn.get("vendor_id")
+    link = "/purchase/receive" + (f"?vendor_id={quote(str(vendor_id))}" if vendor_id else "")
+    people, managers = _people_for(db, store_id, "STORE_MANAGER", entity_wide=False)
+    if managers:
+        title = f"Check receipt {receipt} at {shop}: more than PO {po} ordered"
+    else:
+        logger.error(
+            "[VENDOR] GRN %s holds more than its PO ordered at %s and NO store "
+            "manager covers that shop -- raising the task for the admins",
+            receipt,
+            store_id,
+        )
+        title = (
+            f"No store manager for {shop}: receipt {receipt} holds more than "
+            f"PO {po} ordered"
+        )
+    for o in over:
+        prod = product_repo.find_by_id(o["product_id"]) if product_repo else None
+        item = (
+            f"{_held_item_label(prod, o['product_id'])}: {o['accepted_qty']} held, "
+            f"PO ordered {o['ordered']}, {o['on_shelf']} already received on it"
+            + (
+                "; another receipt of this order was going into stock at that moment"
+                if o.get("busy")
+                else ""
+            )
+        )
+        # Both answers work whatever else the receipt put on the shelf (a void
+        # does not, once it has: R1-14), so the advice never goes stale.
+        description = (
+            f"Receipt {receipt} at {shop} is holding more than its order needs "
+            f"({item}). In Receive Goods > Receipts still waiting: if the vendor "
+            "did not send these extra units (a second receipt of the same box, "
+            "say), press 'Not received'; if they really did, press 'Add to stock'."
+        )
+        for uid, task_store in people or [(None, store_id)]:
+            _raise_once(
+                db,
+                dedupe_ref=f"grn_over_order:{grn_id}:{o['product_id']}:{uid or 'nobody'}",
+                title=title,
+                description=description,
+                category="Purchase",
+                store_id=task_store,
+                assigned_to=uid,
+                extra={"grn_id": grn_id, "link": link},
+            )
+
+
+def _put_on_shelf(
+    grn_repo, grn_id: str, grn: dict, current_user: dict, order_cap: bool = False
+) -> dict:
+    """THE one path that puts a receipt's accepted units on the shelf. "Add to
+    stock" (after its store-scope check), express receive and the catalogue
+    release (release_held_receipts) all run it. `order_cap` (the catalogue
+    release only -- a manager's "Add to stock" is a person deciding) holds any
+    line that would take its product past what the PO ordered."""
+    stock_repo = get_stock_repository()
+    po_repo = get_purchase_order_repository()
 
     # PENDING is the normal first accept. PARTIALLY_ACCEPTED is re-accept after a
     # "Catalog now" -- some lines were held last time because their product was
@@ -139,8 +425,9 @@ async def _accept_grn_impl(grn_id: str, current_user: dict) -> dict:
     if claim_token is None:
         raise _grn_accept_conflict(grn_repo, grn_id)
 
+    deferred_releases: List[str] = []
     try:
-        return _accept_grn_claimed(
+        result = _accept_grn_claimed(
             grn_id,
             grn,
             current_user,
@@ -149,6 +436,8 @@ async def _accept_grn_impl(grn_id: str, current_user: dict) -> dict:
             po_repo,
             claim_token,
             claimed_at,
+            order_cap=order_cap,
+            deferred_releases=deferred_releases,
         )
     except Exception:
         # Nothing was committed we can attribute to this call, or the accept
@@ -157,6 +446,79 @@ async def _accept_grn_impl(grn_id: str, current_user: dict) -> dict:
         # per-(grn, line) mint guard makes that retry idempotent.
         _release_grn_accept_claim(grn_repo, grn_id, claim_token)
         raise
+    # The receipt's cost finished a draft mid-accept (gst._finished_by_the_promote):
+    # its OTHER held receipts go on the shelf now that this claim is handed back.
+    # And a line held for the catalogue whose product is complete NOW was
+    # finished while this claim was held: that save's release lost the claim
+    # to this accept (and swallowed its 409), so the release is run here, the
+    # claim handed back -- whichever of the two finishes last sees the other
+    # (R1-19, follow-ups 1 and 43).
+    product_repo = get_product_repository()
+    for ln in result.get("unresolved_lines") or []:
+        if ln.get("reason") != "incomplete_catalog" or product_repo is None:
+            continue
+        try:
+            now_prod = product_repo.find_by_id(ln.get("product_id"))
+        except Exception:  # noqa: BLE001 - the hold stands; 'Add to stock' retries
+            continue
+        if now_prod is not None and not _pm.compute_catalog_status(now_prod)[1]:
+            deferred_releases.append(ln["product_id"])
+    for pid in dict.fromkeys(deferred_releases):
+        release_held_receipts(pid)
+    return result
+
+
+def refresh_po_received(po_repo, grn_repo, po_id) -> Optional[str]:
+    """Advance a PO's received state from its receipts: sum what every receipt
+    put on the shelf (_cumulative_received_by_product) and compare against
+    the ordered lines -- full receipt -> RECEIVED, otherwise PARTIALLY_RECEIVED.
+    Run by every accept and by dropping a receipt's units held beyond its
+    order. Fail-soft: answers the new status, or None with no PO to update."""
+    po_status = None
+    if po_repo is not None and po_id:
+        try:
+            po = po_repo.find_by_id(po_id)
+            received_by_product = _cumulative_received_by_product(grn_repo, po_id)
+            po_items = (po.get("items") if po else []) or []
+            po_status = compute_po_receipt_state(po_items, received_by_product)
+            # Map the cumulative per-product received qty down onto each PO line
+            # + derive the line residual status (drives the receiving cockpit's
+            # "open POs" / "pending not-received" panels).
+            updated_items = []
+            for it in po_items:
+                ordered = it.get("ordered_qty", it.get("quantity", 0)) or 0
+                recv = received_by_product.get(it.get("product_id"), 0)
+                updated_items.append(
+                    {
+                        **it,
+                        "received_qty": recv,
+                        "line_status": (
+                            "RECEIVED"
+                            if ordered and recv >= ordered
+                            else ("PARTIAL" if recv > 0 else "OPEN")
+                        ),
+                    }
+                )
+            po_repo.update(
+                po_id,
+                {
+                    "status": po_status,
+                    "items": updated_items,
+                    "received_qty_by_product": received_by_product,
+                    "total_received_qty": sum(received_by_product.values()),
+                    "last_received_at": datetime.now().isoformat(),
+                },
+            )
+        except Exception:  # noqa: BLE001
+            # Never lose the stock write on a PO-update failure. Best effort:
+            # at least flag the PO as partially received.
+            try:
+                po_repo.update(po_id, {"status": "PARTIALLY_RECEIVED"})
+                po_status = "PARTIALLY_RECEIVED"
+            except Exception:  # noqa: BLE001
+                pass
+
+    return po_status
 
 
 def _accept_grn_claimed(
@@ -168,6 +530,8 @@ def _accept_grn_claimed(
     po_repo,
     claim_token: Optional[str] = None,
     claimed_at=None,
+    order_cap: bool = False,
+    deferred_releases: Optional[List[str]] = None,
 ) -> dict:
     """The accept body, run ONLY by the caller that won the F8 claim.
 
@@ -203,6 +567,13 @@ def _accept_grn_claimed(
                     continue
         except Exception:  # noqa: BLE001
             po_unit_price = {}
+
+    # The catalogue release's order cap (_over_the_order), read under the claim.
+    ordered = (
+        _ordered_by_product(po_repo, po_id)
+        if order_cap and po_id and po_repo is not None
+        else None
+    )
 
     minted_stock_ids: List[str] = []
     units_added = 0
@@ -275,12 +646,9 @@ def _accept_grn_claimed(
             try:
                 already = _grn_already_minted(
                     stock_repo,
-                    {
-                        "source_type": "GRN",
-                        "source_id": grn_id,
-                        "product_id": product_id,
-                        "grn_line_index": line_index,
-                    },
+                    _received_on(
+                        grn, product_id=product_id, grn_line_index=line_index
+                    ),
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.error(
@@ -325,7 +693,8 @@ def _accept_grn_claimed(
                 # fills only a MISSING cost, then atomically restamps so a DRAFT
                 # whose only gap was cost_price becomes ACTIVE right here.
                 _promote_cost_from_rate(
-                    product_id, prod, line_cost, "GRN_PO", product_repo
+                    product_id, prod, line_cost, "GRN_PO", product_repo,
+                    deferred_releases=deferred_releases,
                 )
 
             # Hub Phase 2: only mint sellable AVAILABLE stock for a CATALOG-
@@ -344,6 +713,21 @@ def _accept_grn_claimed(
                             "product_id": product_id,
                             "accepted_qty": accepted_qty,
                             "reason": "incomplete_catalog",
+                        }
+                    )
+                    continue
+
+            if ordered is not None:
+                over = _over_the_order(
+                    grn_repo, stock_repo, grn_id, po_id, product_id, to_mint, ordered
+                )
+                if over:
+                    unresolved_lines.append(
+                        {
+                            "product_id": product_id,
+                            "accepted_qty": accepted_qty,
+                            "reason": "over_order",
+                            **over,
                         }
                     )
                     continue
@@ -400,6 +784,9 @@ def _accept_grn_claimed(
                         "barcode_printed": False,
                         "source_type": "GRN",
                         "source_id": grn_id,
+                        # The ORIGIN (_received_on): never rewritten by a
+                        # transfer, unlike source_type/source_id above.
+                        "grn_id": grn_id,
                         "grn_line_index": line_index,
                         "line_unit_seq": seq,
                         "grn_number": grn_number,
@@ -511,7 +898,10 @@ def _accept_grn_claimed(
         grn_id,
         claim_token,
         {
-            "accepted_at": datetime.now().isoformat(),
+            # When the receipt was FIRST accepted: a later release or re-accept
+            # of its held lines never restamps it (R1-21); it is last_accepted_at.
+            "accepted_at": grn.get("accepted_at") or datetime.now().isoformat(),
+            "last_accepted_at": datetime.now().isoformat(),
             "accepted_by": user_id,
             "units_added": units_added,
             "unresolved_lines": unresolved_lines,
@@ -544,52 +934,10 @@ def _accept_grn_claimed(
             ),
         }
 
-    # Advance the PO received state. Sum the accepted qty across EVERY accepted
-    # GRN for this PO (this one is now ACCEPTED) and compare against the ordered
-    # lines: full receipt -> RECEIVED, otherwise PARTIALLY_RECEIVED. Fail-soft.
-    po_status = None
-    if po_repo is not None and po_id:
-        try:
-            po = po_repo.find_by_id(po_id)
-            received_by_product = _cumulative_received_by_product(grn_repo, po_id)
-            po_items = (po.get("items") if po else []) or []
-            po_status = compute_po_receipt_state(po_items, received_by_product)
-            # Map the cumulative per-product received qty down onto each PO line
-            # + derive the line residual status (drives the receiving cockpit's
-            # "open POs" / "pending not-received" panels).
-            updated_items = []
-            for it in po_items:
-                ordered = it.get("ordered_qty", it.get("quantity", 0)) or 0
-                recv = received_by_product.get(it.get("product_id"), 0)
-                updated_items.append(
-                    {
-                        **it,
-                        "received_qty": recv,
-                        "line_status": (
-                            "RECEIVED"
-                            if ordered and recv >= ordered
-                            else ("PARTIAL" if recv > 0 else "OPEN")
-                        ),
-                    }
-                )
-            po_repo.update(
-                po_id,
-                {
-                    "status": po_status,
-                    "items": updated_items,
-                    "received_qty_by_product": received_by_product,
-                    "total_received_qty": sum(received_by_product.values()),
-                    "last_received_at": datetime.now().isoformat(),
-                },
-            )
-        except Exception:  # noqa: BLE001
-            # Never lose the stock write on a PO-update failure. Best effort:
-            # at least flag the PO as partially received.
-            try:
-                po_repo.update(po_id, {"status": "PARTIALLY_RECEIVED"})
-                po_status = "PARTIALLY_RECEIVED"
-            except Exception:  # noqa: BLE001
-                pass
+    # Advance the PO received state (refresh_po_received). Fail-soft.
+    po_status = refresh_po_received(po_repo, grn_repo, po_id)
+
+    _sync_catalogue_tasks(grn_id, grn, unresolved_lines, grn_status, product_repo)
 
     return {
         "message": (
@@ -615,3 +963,316 @@ def _accept_grn_claimed(
             ]
         ),
     }
+
+
+# ---------------------------------------------------------------------------
+# Audit C1: a receipt holding units tells a PERSON (owner 2026-09-03: tasks go
+# to people, never a title).
+# ---------------------------------------------------------------------------
+_TASK_OPEN = ["OPEN", "IN_PROGRESS", "ESCALATED"]
+
+
+def _people_for(db, store_id, role: str, *, entity_wide: bool) -> tuple:
+    """([(user id, task store)], True) for the active holders of `role` who
+    reach the receipt's shop -- or, with `entity_wide`, any shop of its legal
+    entity (a catalogue manager works for the entity, a store manager for his
+    shop) -- else ([(ADMIN -- failing that SUPERADMIN -- id, shop)], False):
+    nobody holds the job there, and that must be somebody's problem, not a
+    silent drawer.
+
+    The task store is one the person can OPEN -- the receipt's shop when it is
+    theirs, else their first store of that entity: the task list and the task
+    page are store-scoped (tasks._ensure_task_store_access), so a task stamped
+    with a shop outside their reach would be invisible to its own assignee."""
+    users = db.get_collection("users")
+    stores = db.get_collection("stores")
+    scope = {store_id}
+    store = stores.find_one({"store_id": store_id}) or {}
+    if entity_wide and store.get("entity_id"):
+        scope |= {
+            s.get("store_id") for s in stores.find({"entity_id": store["entity_id"]})
+        }
+    flt = {"roles": role, "is_active": True, "store_ids": {"$in": list(scope)}}
+    people = []
+    for u in users.find(flt):
+        mine = [s for s in (u.get("store_ids") or []) if s in scope]
+        if u.get("user_id") and mine:
+            people.append((u["user_id"], store_id if store_id in mine else mine[0]))
+    if people:
+        return people, True
+    for admin_role in ("ADMIN", "SUPERADMIN"):
+        people = [
+            (u["user_id"], store_id)
+            for u in users.find({"roles": admin_role, "is_active": True})
+            if u.get("user_id")
+        ]
+        if people:
+            return people, False
+    return [], False
+
+
+def _shop_label(db, store_id) -> str:
+    store = db.get_collection("stores").find_one({"store_id": store_id}) or {}
+    return f"{store['store_name']} ({store_id})" if store.get("store_name") else str(store_id)
+
+
+def _held_item_label(prod: Optional[dict], product_id: str) -> str:
+    """Brand model colour size (SKU) -- what the cataloguer searches by."""
+    if not prod:
+        return f"product {product_id} (not in the catalogue)"
+    attrs = prod.get("attributes") or {}
+    bits = [
+        prod.get("brand") or attrs.get("brand_name"),
+        prod.get("model") or attrs.get("model_no") or attrs.get("model_name"),
+        attrs.get("colour_code") or prod.get("color"),
+        attrs.get("lens_size") or attrs.get("size") or prod.get("size"),
+    ]
+    label = " ".join(str(b) for b in bits if b)
+    return f"{label} (SKU {prod.get('sku')})" if prod.get("sku") else label
+
+
+def _raise_once(
+    db, *, dedupe_ref: str, ever: bool = True, priority: str = "P2", **task
+) -> bool:
+    """ONE task per source_ref. `ever` (a receipt's tasks): once a person has
+    closed it, a re-press of "Add to stock" or the next catalogue save never
+    raises it again. Otherwise (a person ASKING, e.g. a bill's request for
+    cataloguing) one only while it is still open -- create_system_task's own
+    dedupe -- so asking again after it was closed reaches the person again."""
+    from ...dependencies import get_task_repository
+    from ...services.task_triggers import create_system_task
+
+    tasks = db.get_collection("tasks")
+    # A task still open says what is true NOW (R1-22): the first of two held
+    # items finished since it was raised leaves its "Finish 2 item(s)".
+    try:
+        tasks.update_many(
+            {
+                "source_ref": dedupe_ref,
+                "status": {"$in": _TASK_OPEN},
+                "$or": [
+                    {"title": {"$ne": task.get("title")}},
+                    {"description": {"$ne": task.get("description")}},
+                ],
+            },
+            {
+                "$set": {
+                    "title": task.get("title"),
+                    "description": task.get("description"),
+                    "updated_at": datetime.now(),
+                }
+            },
+        )
+    except Exception:  # noqa: BLE001 - stale words never stop the task being raised
+        logger.warning("[TASKS] could not refresh %s", dedupe_ref, exc_info=True)
+    if ever and tasks.find_one({"source_ref": dedupe_ref}):
+        return True
+    repo = get_task_repository()
+    create_system_task(repo, priority=priority, dedupe_ref=dedupe_ref, **task)
+    # create_system_task answers None both for "already open" and for a write
+    # it swallowed: whether the person now HAS the task is read back from the
+    # same store it was written to (a failed read reads "not told").
+    if repo is None:
+        return False
+    return any(
+        str(t.get("status", "")).upper() in _TASK_OPEN
+        for t in repo.find_many({"source_ref": dedupe_ref}) or []
+    )
+
+
+def _complete_receipt_tasks(db, grn_id, note: str, category: Optional[str] = None) -> None:
+    """Close the open system tasks raised for this receipt (both kinds, or one
+    `category`) -- the receipt no longer needs that person."""
+    flt = {"grn_id": grn_id, "source": "SYSTEM", "status": {"$in": _TASK_OPEN}}
+    if category:
+        flt["category"] = category
+    now = datetime.now()
+    db.get_collection("tasks").update_many(
+        flt,
+        {
+            "$set": {
+                "status": "COMPLETED",
+                "completed_at": now,
+                "updated_at": now,
+                "completed_by": "system",
+                "completion_notes": note,
+            },
+            "$push": {
+                "history": {"action": "completed", "by": "system", "notes": note, "at": now}
+            },
+        },
+    )
+
+
+def close_catalogue_asks(product_id: str, note: str) -> None:
+    """Close the asks for cataloguing (a vendor bill's, purchase_invoices.
+    request_cataloguing) that name `product_id` once nothing they name waits
+    any more: every product on the ask is catalogue-complete, or was
+    discarded. Called when a product is finished (PUT /products/{id}) or
+    discarded (catalog DELETE). An ask carries no receipt, so the receipt's
+    own closing (_complete_receipt_tasks) never reaches it. Fail-soft."""
+    try:
+        db = _get_db()
+        if db is None or not product_id:
+            return
+        tasks = db.get_collection("tasks")
+        products = db.get_collection("products")
+        now = datetime.now()
+        for t in tasks.find(
+            {
+                "category": "Catalogue",
+                "source": "SYSTEM",
+                "status": {"$in": _TASK_OPEN},
+                "product_ids": product_id,
+            }
+        ):
+            waiting = []
+            for pid in t.get("product_ids") or []:
+                prod = products.find_one({"product_id": pid}) or {}
+                if prod.get("discarded_draft") or not prod:
+                    continue
+                if _pm.compute_catalog_status(prod)[1]:
+                    waiting.append(pid)
+            if waiting:
+                continue
+            tasks.update_one(
+                {"task_id": t.get("task_id"), "status": {"$in": _TASK_OPEN}},
+                {
+                    "$set": {
+                        "status": "COMPLETED",
+                        "completed_at": now,
+                        "updated_at": now,
+                        "completed_by": "system",
+                        "completion_notes": note,
+                    },
+                    "$push": {
+                        "history": {"action": "completed", "by": "system", "notes": note, "at": now}
+                    },
+                },
+            )
+    except Exception:  # noqa: BLE001 - a task problem never undoes a save
+        logger.warning("[CATALOGUE] could not close the asks naming %s", product_id, exc_info=True)
+
+
+def _sync_catalogue_tasks(grn_id, grn, unresolved_lines, grn_status, product_repo):
+    """A receipt holding lines for the catalogue raises ONE task per catalogue
+    manager (once per receipt + person, ever -- _raise_once) naming the items,
+    the receipt and the shop; lines held beyond the order go to the store
+    manager (_hand_to_store_manager). Each person's task closes once nothing on
+    the receipt waits for them any more. Fail-soft: a task problem never undoes
+    a receipt."""
+    try:
+        db = _get_db()
+        if db is None:
+            return
+        if not unresolved_lines:
+            if grn_status == "ACCEPTED":
+                _complete_receipt_tasks(db, grn_id, "The held units are on the shelf.")
+            return
+        over = [ln for ln in unresolved_lines if ln.get("reason") == "over_order"]
+        if over:
+            _hand_to_store_manager(db, grn_id, grn, over, product_repo)
+        else:
+            _complete_receipt_tasks(
+                db, grn_id, "Nothing on the receipt is beyond its order now.", category="Purchase"
+            )
+        unresolved_lines = [ln for ln in unresolved_lines if ln not in over]
+        # A line whose product is not on the spine at all (a lens-catalogue id
+        # on an auto-PO, a deleted row) has nothing a catalogue manager can
+        # finish: no Needs-review row, no product editor, no release on save.
+        # It is never put on their list as work they can do; it fails loud.
+        unknown = [ln for ln in unresolved_lines if ln.get("reason") == "not_catalogued"]
+        if unknown:
+            logger.error(
+                "[VENDOR] GRN %s holds %d line(s) for products that do not exist "
+                "on the catalogue spine (%s) -- no catalogue task can finish them",
+                grn_id,
+                len(unknown),
+                ", ".join(str(ln.get("product_id")) for ln in unknown),
+            )
+        unresolved_lines = [ln for ln in unresolved_lines if ln not in unknown]
+        if not unresolved_lines:
+            _complete_receipt_tasks(
+                db,
+                grn_id,
+                "The items are finished; the store manager decides on the rest of this receipt.",
+                category="Catalogue",
+            )
+            return
+        store_id = grn.get("store_id")
+        shop = _shop_label(db, store_id)
+        receipt = grn.get("grn_number") or grn_id
+
+        def _line(ln):
+            prod = product_repo.find_by_id(ln["product_id"]) if product_repo else None
+            return f"{_held_item_label(prod, ln['product_id'])} x{ln.get('accepted_qty')}"
+
+        items = "; ".join(_line(ln) for ln in unresolved_lines)
+        n = len(unresolved_lines)
+        tell_catalogue_managers(
+            db,
+            store_id,
+            dedupe=f"grn_catalogue:{grn_id}",
+            title=f"Finish {n} item(s) held on receipt {receipt} at {shop}",
+            orphan_title=(
+                f"No catalogue manager for {shop}: receipt {receipt} is holding {n} item(s)"
+            ),
+            description=(
+                f"Receipt {receipt} at {shop} is holding these units until each "
+                f"product is finished in the catalogue: {items}. Finish them from "
+                "Catalogue > Needs review (they are at the top); the units go on "
+                "the shelf by themselves when you save."
+            ),
+            extra={"grn_id": grn_id, "link": "/catalog/review"},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[VENDOR] GRN %s catalogue task sync failed: %s", grn_id, exc)
+
+
+def tell_catalogue_managers(
+    db, store_id, *, dedupe: str, title: str, orphan_title: str, description: str,
+    extra: Optional[dict] = None, ever: bool = True,
+) -> int:
+    """THE door that tells the catalogue managers an item waits on them -- a
+    receipt holding units (_sync_catalogue_tasks), a vendor bill that cannot be
+    booked (purchase_invoices.request_cataloguing). One task per active
+    CATALOG_MANAGER of the shop's legal entity, BY NAME (owner 2026-09-30),
+    once per `dedupe` + person (_raise_once; `ever` False for an ask, which
+    reaches them again once the last one is closed), in a store that person
+    can open. Nobody holding the job there fails loud: logged, and raised for
+    the admins under `orphan_title` -- never a task nobody can see.
+
+    Escalates after a day (owner 2026-09-30), acknowledged or not: P3, whose
+    acknowledge clock is a day (task_sla.DEFAULT_SLA), due a day out with no
+    overdue grace (overdue_grace_minutes 0). The people's tasks share one
+    escalation_group, so they climb to ONE task at the next rung
+    (task_escalation.merge_into_twin)."""
+    people, are_cataloguers = _people_for(
+        db, store_id, "CATALOG_MANAGER", entity_wide=True
+    )
+    if not are_cataloguers:
+        logger.error(
+            "[CATALOGUE] %s: NO catalogue manager covers %s -- raising the task "
+            "for the admins",
+            title,
+            store_id,
+        )
+        title = orphan_title
+    told = 0
+    for uid, task_store in people or [(None, store_id)]:
+        told += _raise_once(
+            db,
+            dedupe_ref=f"{dedupe}:{uid or 'nobody'}",
+            ever=ever,
+            priority="P3",
+            due_at=datetime.now() + timedelta(days=1),
+            title=title,
+            description=description,
+            category="Catalogue",
+            store_id=task_store,
+            assigned_to=uid,
+            # Due a day out, and overdue THEN: pressing Acknowledge stops the
+            # P3 ack clock, and the P3 grace would add three more days.
+            extra={**(extra or {}), "escalation_group": dedupe, "overdue_grace_minutes": 0},
+        )
+    return told

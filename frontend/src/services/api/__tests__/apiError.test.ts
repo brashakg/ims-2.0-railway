@@ -72,6 +72,25 @@ describe('buildApiError — the one delivered error shape', () => {
     expect(e.status).toBe(503);
   });
 
+  // R2-18: the catalogue check's own safe stop arrives structured
+  // ({code, message, field}); its sentence is the one the buyer needs.
+  it('a structured 503 safe-stop keeps its message, still with no payload', () => {
+    const e = buildApiError(
+      axiosErr(503, {
+        detail: {
+          code: 'CATALOGUE_UNREADABLE',
+          message: 'Could not check the catalogue for this item, so nothing was created. Try again.',
+          field: 'lens_size',
+        },
+      }),
+    );
+    expect(e.message).toBe(
+      'Could not check the catalogue for this item, so nothing was created. Try again.',
+    );
+    expect(e.detail).toBeUndefined();
+    expect(e.status).toBe(503);
+  });
+
   it('a network error (no response) keeps the connection message and no status', () => {
     const e = buildApiError(axiosErr(undefined, undefined, 'Network Error'));
     expect(e.message).toBe(

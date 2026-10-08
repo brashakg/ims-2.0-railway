@@ -44,7 +44,7 @@ from ..services.task_sla import (
     should_escalate,
     sla_for,
 )
-from ..services.task_escalation import resolve_escalation_target
+from ..services.task_escalation import merge_into_twin, resolve_escalation_target
 from ..services.task_notify import notify_escalation
 from ..services.sop_checklist import (
     apply_item_toggle,
@@ -135,6 +135,30 @@ def _authorise_attachment(file_id: str, current_user: dict) -> None:
 _TASK_MANAGER_ROLES = {"STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"}
 
 
+def _user_roles(current_user: dict) -> set:
+    return {str(r).strip().upper() for r in (current_user.get("roles") or [])}
+
+
+def _is_task_manager(current_user: dict) -> bool:
+    return bool(_user_roles(current_user) & _TASK_MANAGER_ROLES)
+
+
+def _task_owner_values(current_user: dict) -> dict:
+    """THE rule for whose a task is: who may act on it (_ensure_task_actor) and,
+    for anyone below manager, the only tasks they see (list_tasks). Field ->
+    the values that make it yours: your id as assignee, assigner or creator,
+    and a task addressed to your TITLE (a system task such as express receive's
+    "Book purchase invoice", assigned_to "ACCOUNTANT") -- else nobody holding
+    that title would ever see it."""
+    uid = current_user.get("user_id")
+    ids = [uid] if uid else []
+    return {
+        "assigned_to": ids + sorted(_user_roles(current_user)),
+        "assigned_by": ids,
+        "created_by": ids,
+    }
+
+
 def _ensure_task_actor(task: dict, current_user: dict) -> None:
     """Object-level ownership guard for the MUTATING lifecycle actions (P2).
 
@@ -152,16 +176,11 @@ def _ensure_task_actor(task: dict, current_user: dict) -> None:
     403. This is the INNER gate; ``_ensure_task_store_access`` stays the outer
     one and must be called first.
     """
-    roles = {str(r).strip().upper() for r in (current_user.get("roles") or [])}
-    if roles & _TASK_MANAGER_ROLES:
+    if _is_task_manager(current_user):
         return
-    uid = current_user.get("user_id")
-    owners = {
-        task.get("assigned_to"),
-        task.get("assigned_by"),
-        task.get("created_by"),
-    }
-    if uid and uid in owners:
+    if any(
+        task.get(f) in vals for f, vals in _task_owner_values(current_user).items() if vals
+    ):
         return
     raise HTTPException(
         status_code=403,
@@ -368,7 +387,16 @@ def _escalate_and_reassign(
             user_repo.find_by_role,
             task.get("store_id"),
             assignee or {"user_id": task.get("assigned_to")},
+            category=task.get("category"),
         )
+
+    merged = merge_into_twin(repo.find_one, task, target, by=by, now=now)
+    if merged:
+        fields, entry = merged
+        repo.update(
+            task.get("task_id"), {**fields, "history": (task.get("history") or []) + [entry]}
+        )
+        return None
 
     new_level = task.get("escalation_level", 0) + 1
     history_entry = {
@@ -485,6 +513,20 @@ async def list_tasks(
             allowed = sorted(stores) + [None]
             filters["store_id"] = {"$in": allowed}
         # cross-store roles (SUPERADMIN/ADMIN): no store_id filter -> all stores.
+
+    # Owner ruling 2026-09-03 (pages/tasks/taskRoles.ts): a store's whole task
+    # list is for managers and above; everyone else sees ONLY their own -- the
+    # tasks _ensure_task_actor lets them act on. Enforced HERE, not in React:
+    # the Hub's "Priority tasks" asks for the whole store and used to show a
+    # cashier every task in the shop, a catalogue manager's included.
+    if not _is_task_manager(current_user):
+        mine = [
+            {f: {"$in": vals}} for f, vals in _task_owner_values(current_user).items() if vals
+        ]
+        if mine:
+            filters["$or"] = mine
+        else:
+            filters["task_id"] = {"$in": []}
 
     tasks = [
         _canon_task_out(t) for t in repo.find_many(filters, skip=skip, limit=limit)
@@ -1330,6 +1372,17 @@ async def escalate_task(
     target = await _escalate_reassign_notify(
         repo, task, reason="manual", by=by, now=now
     )
+    # The person above already holds this task's twin (merge_into_twin): it
+    # was closed into that one -- say so, never "no higher owner" (R1-50).
+    after = repo.find_by_id(task_id) or {}
+    if canon_status(after.get("status")) == "COMPLETED":
+        return {
+            "task_id": task_id,
+            "status": "COMPLETED",
+            "escalation_level": int(task.get("escalation_level", 0) or 0),
+            "escalated_to": None,
+            "message": after.get("completion_notes") or "Task closed into the one already above it",
+        }
     return {
         "task_id": task_id,
         "status": "ESCALATED",

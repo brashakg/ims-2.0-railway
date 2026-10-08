@@ -15,6 +15,7 @@ from ._shared import (
     get_current_user,
     get_file_store,
     get_grn_repository,
+    get_product_repository,
     get_purchase_order_repository,
     is_online_store,
     require_roles,
@@ -296,6 +297,31 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
                         "receipt."
                     ),
                     "lines": untallied,
+                },
+            )
+
+    # Round 5: a draft an admin discarded is not received behind its back --
+    # held, its catalogue task would point at a Needs-review queue it has left,
+    # and finishing it would put units of a deleted product on the shelf. The
+    # manager types the item on a new order, which brings the draft back.
+    product_repo = get_product_repository()
+    if product_repo is not None:
+        discarded = []
+        for it in grn.items:
+            found = product_repo.find_by_id(it.product_id) or {}
+            if found.get("discarded_draft") and found.get("is_active") is False:
+                discarded.append(found.get("name") or found.get("sku") or it.product_id)
+        if discarded:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "DISCARDED_DRAFT",
+                    "message": (
+                        f"{', '.join(discarded)} was discarded from the catalogue "
+                        "before it was finished, so it cannot be received. Type it "
+                        "on a new purchase order (that brings it back for the "
+                        "catalogue manager), or leave it off this receipt."
+                    ),
                 },
             )
 

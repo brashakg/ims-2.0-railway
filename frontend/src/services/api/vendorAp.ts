@@ -561,10 +561,13 @@ export const purchaseInvoicesApi = {
   // Ruling 15: the invoice gate refuses an incomplete product, and an
   // accountant holds no products:write. This raises the P2 task for the
   // cataloguer, naming each product and exactly what it is missing.
-  requestCataloguing: async (productIds: string[], note?: string) => {
+  // storeId: the BILL's shop -- its catalogue managers are asked, not those of
+  // the asker's session shop.
+  requestCataloguing: async (productIds: string[], note?: string, storeId?: string) => {
     const res = await api.post('/vendors/purchase-invoices/request-cataloguing', {
       product_ids: productIds,
       note,
+      store_id: storeId,
     });
     return res.data as {
       requested: Array<{ product_id: string; product: string; missing: string[] }>;

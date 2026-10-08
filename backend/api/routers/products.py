@@ -494,9 +494,44 @@ def _create_via_canonical_door(
             db=db,
         )
     except _pm.ProductMasterError as err:
+        if source == "FORM":
+            _revive_typed_discarded_draft(err, product, current_user, db)
         raise HTTPException(
             status_code=err.status, detail=_pm_error_detail(err)
         ) from err
+
+
+def _revive_typed_discarded_draft(err, product: "ProductCreate", current_user: dict, db) -> None:
+    """Add product meets the SAME answer the PO door gives (R1-64): an item
+    typed again as the same kind of product as a draft an admin discarded
+    gets that draft back (product_master.revive_discarded_draft) -- in Needs
+    review, provisional, at the MRP typed now -- and the 409 names it as the
+    ordered draft it is, so the popup leads to finishing it in the editor
+    instead of an "Inactive (archived)" dead end. Fail-soft: the 409 stands
+    as it was when the revive cannot run."""
+    conflict = getattr(err, "conflict", None) or {}
+    if err.status != 409 or not conflict.get("product_id"):
+        return
+    try:
+        from ..dependencies import get_audit_repository as _get_audit_repository
+
+        repo = get_product_repository()
+        found = repo.find_by_id(conflict["product_id"]) if repo is not None else None
+        if not _pm.revivable_discarded_draft(
+            found, category=_pm.resolve_category(product.category)
+        ):
+            return
+        if _pm.revive_discarded_draft(
+            conflict["product_id"],
+            repo,
+            db=db,
+            actor=current_user.get("user_id"),
+            mrp=product.mrp,
+            audit_repo=_get_audit_repository(),
+        ):
+            err.conflict = _pm.existing_product_summary(repo.find_by_id(conflict["product_id"]))
+    except Exception:  # noqa: BLE001 - the duplicate answer stands
+        logger.warning("[PRODUCTS] revive on Add product failed", exc_info=True)
 
 
 def _build_product_data(product: "ProductCreate", created_by, created_by_name=None) -> dict:
@@ -3556,7 +3591,9 @@ async def update_product(
                 _pm.mirror_update_to_catalog_twin(
                     product_id=product_id,
                     current=existing,
-                    patch=update_data,
+                    # status_fields: a finished provisional draft turns active
+                    # on its twin too, and leaves the Needs-review queue.
+                    patch={**update_data, **status_fields},
                     db=_gdb(),
                 )
             except Exception:  # noqa: BLE001
@@ -3585,7 +3622,25 @@ async def update_product(
             # so the resolver sees the post-update tags/category/brand + status.
             merged = {**existing, **update_data, **status_fields}
             _refresh_collections_after_product(merged)
-            return {"message": "Product updated", "product_id": product_id}
+            # Audit C1: an edit that leaves the product catalogue-complete puts
+            # the units receipts were holding for it on the shelf -- the same
+            # accept path "Add to stock" runs (grn_accept.release_held_receipts).
+            released = 0
+            if not _pm.compute_catalog_status(merged)[1]:
+                from .vendors.grn_accept import release_held_receipts
+
+                released = sum(
+                    int(r.get("units_added") or 0)
+                    for r in release_held_receipts(product_id)
+                )
+                from .vendors.grn_accept import close_catalogue_asks
+
+                close_catalogue_asks(product_id, "The item is catalogued.")
+            return {
+                "message": "Product updated",
+                "product_id": product_id,
+                "released_units": released,
+            }
 
         raise HTTPException(status_code=500, detail="Failed to update product")
 

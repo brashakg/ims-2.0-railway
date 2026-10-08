@@ -433,6 +433,58 @@ def _grn_accept_heartbeat_tick(grn_repo, grn_id: str, token, state: dict) -> Non
     state["confirmed_at"] = now
 
 
+def _received_on(grn: dict, **more) -> dict:
+    """THE filter for "the units receipt `grn` put on the shelf" (the per-line
+    repeat guard, the void check, the store manager's voidable flag) -- read by
+    the unit's ORIGIN, never its current source (owner 2026-10-01). A unit is
+    stamped at mint with the receipt and line it was received on (grn_id,
+    grn_number, grn_line_index, line_unit_seq, po_id) and nothing rewrites
+    those; a transfer re-homes it and rewrites source_type/source_id to the
+    transfer (transfers._rehome), so a count by source forgets that a
+    transferred unit was ever received.
+
+    A unit received before grn_id was stamped (any unit on prod at this deploy)
+    still carries the receipt's grn_number -- stamped at mint since #310 and
+    never rewritten -- so it is found whether or not it has been transferred,
+    then or at any time later. The source branch covers a unit minted before
+    grn_number was stamped and never transferred since.
+
+    Receipt numbers are not unique on prod (before #711 every BV-... shop
+    shared one minute-stamped series), so the number names a unit only when
+    it belongs to this receipt alone -- else another receipt's units would
+    block this one's void or stop its mint.
+
+    ponytail: a unit minted before #310 (2026-05-28) AND transferred since
+    matches no branch, nor does a pre-grn_id unit of a duplicated number that
+    has been transferred; backfill its grn_id if prod ever has one."""
+    grn_id = grn.get("grn_id")
+    origin = [{"grn_id": grn_id}, {"source_type": "GRN", "source_id": grn_id}]
+    number = grn.get("grn_number")
+    if number and _number_is_this_receipts_alone(number):
+        origin.append({"grn_number": number})
+    return {"$or": origin, **more}
+
+
+def _number_is_this_receipts_alone(number) -> bool:
+    """True when exactly one receipt carries `number`. A read error reads
+    True -- fail CLOSED: the number branch then still counts the units (at
+    worst one extra blocks a void or a mint, loudly), where dropping it would
+    let a moved legacy unit be received twice. No database reads False."""
+    try:
+        from ._shared import get_grn_repository
+
+        repo = get_grn_repository()
+        if repo is None:
+            return False
+        coll = getattr(repo, "collection", None)
+        if coll is not None and callable(getattr(coll, "count_documents", None)):
+            return int(coll.count_documents({"grn_number": number}) or 0) == 1
+        return len(repo.find_many({"grn_number": number}) or []) == 1
+    except Exception:  # noqa: BLE001
+        logger.error("[VENDOR] receipt-number uniqueness check failed for %s", number, exc_info=True)
+        return True
+
+
 def _grn_already_minted(stock_repo, flt: dict) -> int:
     """How many units this GRN LINE has already put into stock_units.
 

@@ -101,6 +101,30 @@ describe('DuplicateProductModal', () => {
     expect(onAddVariant).toHaveBeenCalledTimes(1);
   });
 
+  // Audit C3: the match is a manager's typed-in draft a receipt is holding
+  // stock for. The default (Enter / primary) is to FINISH that draft.
+  it('an ordered draft leads the cataloguer to finish it', () => {
+    const { onAddVariant, onOpenExisting } = renderModal({
+      info: { ...INFO, is_active: false, catalog_status: 'DRAFT', provisional: true },
+    });
+    expect(screen.getByText(/Ordered before it was catalogued/)).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: 'Enter' });
+    expect(onOpenExisting).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole('button', { name: /Finish the ordered item/ }));
+    expect(onOpenExisting).toHaveBeenCalledTimes(2);
+    expect(onAddVariant).not.toHaveBeenCalled();
+  });
+
+  // R1-64: a draft an admin discarded, typed as another kind of product (the
+  // same kind is brought back by the server) -- never a dead "archived".
+  it('a discarded draft of another kind says how to bring it back', () => {
+    renderModal({
+      info: { ...INFO, category: 'FRAME', is_active: false, catalog_status: 'DRAFT', discarded_draft: true },
+    });
+    expect(screen.getByText(/A discarded draft, ordered before as frame/)).toBeInTheDocument();
+    expect(screen.queryByText(/Inactive \(archived\)/)).toBeNull();
+  });
+
   it('busy disables the actions and suppresses the Enter shortcut', () => {
     const { onAddVariant } = renderModal({ busy: true });
     fireEvent.keyDown(window, { key: 'Enter' });

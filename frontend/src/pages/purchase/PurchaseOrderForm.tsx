@@ -13,6 +13,7 @@ import { FileText, X as XIcon, Loader2, Search } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import { vendorsApi, productApi } from '../../services/api';
+import { ApiError } from '../../services/api/client';
 import { usePoGstHeads } from '../../hooks/usePoGstHeads';
 import { PurchaseOrderComposer } from '../../components/purchase/PurchaseOrderComposer';
 import type {
@@ -21,6 +22,7 @@ import type {
 } from '../../components/purchase/PurchaseOrderComposer';
 import { CATEGORIES } from '../../domain/catalog/productAdd';
 import type { Supplier, PurchaseOrder, POItem } from './purchaseTypes';
+import { getCategoryFields } from '../../domain/catalog/productAdd/categoryFields';
 
 interface PickedProduct {
   productId: string;
@@ -145,6 +147,13 @@ const blankNewProduct = (): ComposerNewProduct => ({
   mrp: 0,
 });
 
+/** The size box a category's catalogue records -- a frame's eye size, an
+ *  accessory's size -- or none: anywhere else the server drops a size (audit
+ *  C2/C3), so the form neither shows one nor sends or echoes a hidden one. */
+function sizeFieldFor(category: string) {
+  return getCategoryFields(category).find((f) => f.name === 'lens_size' || f.name === 'size');
+}
+
 function NewProductFields({
   value,
   onChange,
@@ -155,6 +164,7 @@ function NewProductFields({
   onCancel: () => void;
 }) {
   const set = (patch: Partial<ComposerNewProduct>) => onChange({ ...value, ...patch });
+  const sizeField = sizeFieldFor(value.category);
   return (
     <div className="p-2 bg-amber-50 border border-amber-200 rounded-lg space-y-2">
       <div className="flex items-center justify-between">
@@ -205,14 +215,16 @@ function NewProductFields({
           aria-label="New item colour code"
           className="input-field text-sm"
         />
-        <input
-          type="text"
-          value={value.size}
-          onChange={(e) => set({ size: e.target.value })}
-          placeholder="Size"
-          aria-label="New item size"
-          className="input-field text-sm"
-        />
+        {sizeField && (
+          <input
+            type="text"
+            value={value.size}
+            onChange={(e) => set({ size: e.target.value })}
+            placeholder={sizeField.name === 'lens_size' ? 'Eye size' : 'Size'}
+            aria-label="New item size"
+            className="input-field text-sm"
+          />
+        )}
       </div>
       <input
         type="number"
@@ -447,6 +459,12 @@ function ProductSearchSelect({
   );
 }
 
+/** One line of the server's ALREADY_IN_CATALOGUE answer (create_po). */
+interface AlreadyInCatalogueMatch {
+  line: number;
+  existing: { product_id: string; sku: string; name?: string | null; size?: string | null };
+}
+
 interface PurchaseOrderFormProps {
   suppliers: Supplier[];
   existingPOCount: number;
@@ -530,27 +548,71 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
             onCancel={onClose}
             onSubmit={async (payload) => {
               const storeId = user?.activeStoreId ?? 'default';
-              const resp = await vendorsApi.createPurchaseOrder({
-                vendor_id: payload.vendorId,
-                delivery_store_id: storeId,
-                expected_date: payload.expectedDate || undefined,
-                notes: payload.notes || undefined,
-                items: payload.items.map((it) => ({
-                  product_id: it.product_id,
-                  product_name: it.product_name,
-                  sku: it.sku,
-                  new_product: it.new_product,
-                  quantity: it.quantity,
-                  unit_price: it.unit_price,
-                })),
-              });
+              let items = payload.items.map((it) => ({
+                product_id: it.product_id,
+                product_name: it.product_name,
+                sku: it.sku,
+                // A size typed under one category stays in the form's state after
+                // switching to a category with no size box: never sent, never
+                // echoed back in the "Use it?" question (R1-89).
+                new_product:
+                  it.new_product && !sizeFieldFor(it.new_product.category)
+                    ? { ...it.new_product, size: '' }
+                    : it.new_product,
+                quantity: it.quantity,
+                unit_price: it.unit_price,
+              }));
+              const send = () =>
+                vendorsApi.createPurchaseOrder({
+                  vendor_id: payload.vendorId,
+                  delivery_store_id: storeId,
+                  expected_date: payload.expectedDate || undefined,
+                  notes: payload.notes || undefined,
+                  items,
+                });
+              let resp: Awaited<ReturnType<typeof send>>;
+              try {
+                resp = await send();
+              } catch (err) {
+                // Audit C2: a typed-in line describes a product we already
+                // have. The server created nothing and names it; ask, then
+                // order THAT product instead of a hidden twin.
+                if (!(err instanceof ApiError) || err.code !== 'ALREADY_IN_CATALOGUE') throw err;
+                const matches =
+                  (err.detail as { matches?: AlreadyInCatalogueMatch[] } | undefined)?.matches ?? [];
+                const names = matches
+                  .map(
+                    ({ existing: e }) =>
+                      `${e.name || e.sku}${e.size ? `, size ${e.size}` : ''} (SKU ${e.sku})`,
+                  )
+                  .join(', ');
+                const typed = matches
+                  .map(({ line }) => {
+                    const np = items[line]?.new_product;
+                    return np
+                      ? [np.brand, np.model, np.colour, np.size && `size ${np.size}`].filter(Boolean).join(' ')
+                      : '';
+                  })
+                  .filter(Boolean)
+                  .join(', ');
+                if (!window.confirm(`You typed ${typed}. Already in the catalogue: ${names}. Use it?`)) {
+                  throw new Error('Not created. Pick the item from the catalogue, or correct what you typed.');
+                }
+                items = items.map((it, i) => {
+                  const e = matches.find((m) => m.line === i)?.existing;
+                  return e
+                    ? { ...it, new_product: undefined, product_id: e.product_id, product_name: e.name || e.sku, sku: e.sku }
+                    : it;
+                });
+                resp = await send();
+              }
 
-              const poItems: POItem[] = payload.items.map((it) => ({
-                productId: it.product_id ?? '',
+              const poItems: POItem[] = payload.items.map((it, i) => ({
+                productId: items[i].product_id ?? '',
                 productName:
-                  it.product_name ??
+                  items[i].product_name ??
                   `${it.new_product?.brand ?? ''} ${it.new_product?.model ?? ''}`.trim(),
-                sku: it.sku ?? '',
+                sku: items[i].sku ?? '',
                 quantity: it.quantity,
                 unitCost: it.unit_price,
                 taxRate: it.taxRate,

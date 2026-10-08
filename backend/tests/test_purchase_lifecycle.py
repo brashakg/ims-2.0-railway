@@ -482,7 +482,10 @@ class TestOrderAnUncataloguedItem:
         assert p["brand"] == "Ray-Ban"
         assert p["model"] == "RB3025"
         assert p["color"] == "G-15"
-        assert p["size"] == "58"
+        # A frame's eye size lands where the frame registry keeps it (the
+        # Add-Product form's lens_size), so the draft's identity_key is the
+        # one a catalogued frame carries (audit C2/C3).
+        assert p["attributes"]["lens_size"] == "58"
         assert p["mrp"] == 7990
         assert p["cost_price"] == 3200  # the PO rate is the provisional cost
         assert p["sku"]  # a real minted SKU, not a placeholder id
@@ -524,7 +527,9 @@ class TestOrderAnUncataloguedItem:
         assert "offer_price" in doc["done_gaps"]
         assert doc["is_active"] is False
 
-    def test_typing_an_item_we_already_stock_reuses_it_instead_of_twinning(self):
+    def test_typing_an_item_we_already_stock_is_answered_with_it_not_twinned(self):
+        # Audit C2: the server names the product we already have and creates
+        # nothing; the composer asks "use it?" and resends the line with it.
         repo = _ProductRepo()
         po_repo = _POCreateRepo()
         _raise_po(
@@ -533,13 +538,26 @@ class TestOrderAnUncataloguedItem:
             po_repo,
         )
         first_id = repo.rows[0]["product_id"]
-        _raise_po(
-            [{"new_product": dict(_NEW_FRAME), "quantity": 5, "unit_price": 3300}],
-            repo,
-            po_repo,
-        )
+        with pytest.raises(HTTPException) as exc:
+            _raise_po(
+                [{"new_product": dict(_NEW_FRAME), "quantity": 5, "unit_price": 3300}],
+                repo,
+                po_repo,
+            )
+        assert exc.value.status_code == 409
+        assert exc.value.detail["code"] == "ALREADY_IN_CATALOGUE"
+        assert exc.value.detail["matches"][0]["existing"]["product_id"] == first_id
         assert len(repo.rows) == 1, "a second spine row was minted for the same frame"
-        assert po_repo.created[1]["items"][0]["product_id"] == first_id
+        assert len(po_repo.created) == 1, "the refused order was saved anyway"
+
+    def test_two_lines_of_one_order_typing_the_same_item_share_one_product(self):
+        repo = _ProductRepo()
+        po_repo = _POCreateRepo()
+        line = {"new_product": dict(_NEW_FRAME), "quantity": 2, "unit_price": 3200}
+        _raise_po([dict(line), dict(line)], repo, po_repo)
+        assert len(repo.rows) == 1
+        items = po_repo.created[0]["items"]
+        assert items[0]["product_id"] == items[1]["product_id"] == repo.rows[0]["product_id"]
 
     def test_a_line_must_name_a_product_or_describe_one(self):
         with pytest.raises(Exception) as exc:
@@ -1141,8 +1159,10 @@ class _TaskRepo:
     def __init__(self):
         self.rows = []
 
-    def find_many(self, _flt):
-        return []
+    def find_many(self, flt):
+        # Reads what was written (the ask reads its task back to know the
+        # catalogue manager was really told).
+        return [r for r in self.rows if all(r.get(k) == v for k, v in (flt or {}).items())]
 
     def create(self, doc):
         self.rows.append(doc)
@@ -1188,7 +1208,7 @@ class TestAskingForCataloguing:
         ]
         assert len(tasks.rows) == 1
         task = tasks.rows[0]
-        assert task["category"] == "Catalog"
-        assert task["priority"] == "P2"
+        assert task["category"] == "Catalogue"  # the catalogue managers' door
+        assert task["priority"] == "P3"  # the door's SLA: escalates after a day
         assert "Ray-Ban RB3025: needs Selling Price" in task["description"]
         assert task["status"] == "OPEN"

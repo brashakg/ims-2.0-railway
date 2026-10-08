@@ -30,6 +30,9 @@ import pytest  # noqa: E402
 
 from fastapi import HTTPException  # noqa: E402
 from api.routers import vendors as vd  # noqa: E402
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from strict_fakes import matches  # noqa: E402
 from api.routers.vendors import POCreate, POItemCreate  # noqa: E402
 
 _ADMIN = {"user_id": "u-admin", "username": "admin", "roles": ["ADMIN"]}
@@ -94,7 +97,7 @@ class _StockRepo:
         return d
 
     def count(self, flt):
-        return sum(1 for r in self.rows if all(r.get(k) == v for k, v in flt.items()))
+        return sum(1 for r in self.rows if matches(r, flt))  # real $or semantics
 
     def find_many(self, flt, *a, **k):
         return [r for r in self.rows if all(r.get(k2) == v for k2, v in flt.items())]

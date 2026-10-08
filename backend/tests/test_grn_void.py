@@ -6,8 +6,10 @@ the PO stayed receivable, operators re-received, and duplicate PENDING GRNs
 piled up with no way to clear them (live-hit by the owner 2026-07-04, three
 identical GRNs). POST /vendors/grn/{id}/void closes that hole:
 
-  * PENDING-only -- an ACCEPTED/PARTIALLY_ACCEPTED GRN has minted stock and
-    must be corrected via a vendor return, so voiding it is 400.
+  * Nothing on the shelf only -- an ACCEPTED GRN has minted stock and must be
+    corrected via a vendor return, so voiding it is 400; a PARTIALLY_ACCEPTED
+    one is voidable only when the stock count proves it minted nothing (every
+    line held for the catalogue -- a second receipt of the same box).
   * Store-scoped like accept: a cross-store caller reads 404 (existence not
     disclosed).
   * The row is KEPT with status VOID (audit/numbering continuity); the accept
@@ -86,13 +88,46 @@ def test_void_accepted_grn_is_400(monkeypatch):
     assert repo.updated is None
 
 
-def test_void_partially_accepted_is_400_too(monkeypatch):
-    # PARTIALLY_ACCEPTED has already minted SOME stock -- not voidable.
+class _CountedStock:
+    """A stock repo that answers how many units the receipt already minted."""
+
+    def __init__(self, minted):
+        self.minted = minted
+
+    def count(self, flt):
+        return self.minted
+
+
+def test_void_partially_accepted_with_units_on_the_shelf_is_409(monkeypatch):
+    # A held receipt that DID put some lines on the shelf -- not voidable.
     repo = _FakeGRNRepo(_grn(status="PARTIALLY_ACCEPTED"))
     _patch(monkeypatch, repo)
+    monkeypatch.setattr(v, "get_stock_repository", lambda: _CountedStock(1))
     with pytest.raises(HTTPException) as exc:
         asyncio.run(void_grn("G1", current_user=_user()))
-    assert exc.value.status_code == 400
+    assert exc.value.status_code == 409
+    assert "vendor return" in str(exc.value.detail)
+    assert repo.updated is None
+
+
+def test_void_a_held_receipt_that_shelved_nothing(monkeypatch):
+    # Every line held for the catalogue (a second receipt of the same box):
+    # nothing reached the shelf, so the manager can void it.
+    repo = _FakeGRNRepo(_grn(status="PARTIALLY_ACCEPTED"))
+    _patch(monkeypatch, repo)
+    monkeypatch.setattr(v, "get_stock_repository", lambda: _CountedStock(0))
+    res = asyncio.run(void_grn("G1", current_user=_user()))
+    assert res["grn_status"] == "VOID"
+    assert repo.updated[1]["status"] == "VOID"
+
+
+def test_void_a_held_receipt_is_refused_when_stock_cannot_be_checked(monkeypatch):
+    repo = _FakeGRNRepo(_grn(status="PARTIALLY_ACCEPTED"))
+    _patch(monkeypatch, repo)
+    monkeypatch.setattr(v, "get_stock_repository", lambda: None)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(void_grn("G1", current_user=_user()))
+    assert exc.value.status_code == 503
     assert repo.updated is None
 
 

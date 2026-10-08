@@ -15,6 +15,7 @@ import { useToast } from '../../../context/ToastContext';
 import { useAuth } from '../../../context/AuthContext';
 import type { Supplier } from '../purchaseTypes';
 import { errMsg } from './shared';
+import { heldLinesSummary } from '../grnAcceptToast';
 import { istDayString } from '../../../utils/datetime';
 
 // ============================================================================
@@ -28,7 +29,6 @@ export function GrnPickerModal({
   onClose: () => void;
   onPick: (grnId: string) => Promise<void>;
 }) {
-  const toast = useToast();
   const { user } = useAuth();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [grns, setGrns] = useState<any[]>([]);
@@ -86,8 +86,9 @@ export function GrnPickerModal({
           ) : (
             <div className="space-y-2">
               {grns.map((g) => {
-                const heldLines: Array<{ product_id?: string }> = g.unresolved_lines || [];
+                const heldLines: unknown[] = g.unresolved_lines || [];
                 const held = g.status === 'PARTIALLY_ACCEPTED' || heldLines.length > 0;
+                const { text: heldText } = heldLinesSummary(heldLines);
                 return (
                 <div key={g.grn_id} className="flex items-center justify-between border border-gray-200 rounded-lg px-3 py-2 hover:bg-gray-50">
                   <div>
@@ -97,33 +98,13 @@ export function GrnPickerModal({
                     </div>
                     {held ? (
                       <div className="text-xs text-amber-700 mt-0.5">
-                        {heldLines.length || 'Some'} line(s) are waiting to be catalogued — this receipt
-                        cannot be invoiced until they are finished.
+                        Held: {heldText} — this receipt cannot be invoiced until they are resolved.
                       </div>
                     ) : null}
                   </div>
-                  {held ? (
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        const ids = heldLines.map((l) => l.product_id).filter(Boolean) as string[];
-                        if (ids.length === 0) { toast.error('Nothing to request on this receipt'); return; }
-                        setBusyId(g.grn_id);
-                        try {
-                          await purchaseInvoicesApi.requestCataloguing(ids);
-                          toast.success('Asked the cataloguer to finish these items');
-                        } catch (e) {
-                          toast.error(errMsg(e, 'Could not raise the cataloguing request'));
-                        } finally {
-                          setBusyId(null);
-                        }
-                      }}
-                      disabled={busyId === g.grn_id}
-                      className="btn sm disabled:opacity-60"
-                    >
-                      {busyId === g.grn_id ? <Loader2 className="w-4 h-4 animate-spin" /> : null} Ask for cataloguing
-                    </button>
-                  ) : (
+                  {/* A held receipt already gave each catalogue manager a task
+                      by name (grn_accept.tell_catalogue_managers): no second ask. */}
+                  {held ? null : (
                     <button type="button" onClick={() => pick(g.grn_id)} disabled={busyId === g.grn_id} className="btn sm primary disabled:opacity-60">
                       {busyId === g.grn_id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />} Invoice
                     </button>

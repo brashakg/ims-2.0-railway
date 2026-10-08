@@ -40,8 +40,8 @@ export interface SimilarProductsHintProps {
   /** Chip click -> the Phase 1 variant path (fetch + enterVariantMode). */
   onPickSibling: (productId: string) => void;
   /** "Open it" on the exact-match warning -> the same product-open path the
-   *  Phase 1 duplicate-rescue popup uses. */
-  onOpenExisting: (sku: string | null | undefined) => void;
+   *  Phase 1 duplicate-rescue popup uses (existingProductPath). */
+  onOpenExisting: (existing: SimilarProductSummary) => void;
 }
 
 function chipLabel(s: SimilarProductSummary): string {
@@ -82,19 +82,37 @@ export function SimilarProductsHint({
       {exact && (
         <p className="flex items-start gap-1.5 text-xs text-red-600" role="alert">
           <AlertTriangle className="w-3.5 h-3.5 mt-px shrink-0" />
-          <span>
-            This exact colour already exists — SKU{' '}
-            <span className="font-semibold">{exact.sku || 'unknown'}</span>.{' '}
-            <button
-              type="button"
-              tabIndex={-1}
-              onClick={() => onOpenExisting(exact.sku)}
-              className="underline font-medium hover:text-red-700"
-            >
-              Open it
-            </button>
-            , or enter a different colour.
-          </span>
+          {exact.provisional ? (
+            // Audit C3 (R1-85): a manager already ordered this exact item before
+            // it was catalogued -- it is finished, never added a second time.
+            <span>
+              This exact item was ordered before it was catalogued — SKU{' '}
+              <span className="font-semibold">{exact.sku || 'unknown'}</span>.{' '}
+              <button
+                type="button"
+                tabIndex={-1}
+                onClick={() => onOpenExisting(exact)}
+                className="underline font-medium hover:text-red-700"
+              >
+                Finish it
+              </button>
+              {' '}instead of adding it again.
+            </span>
+          ) : (
+            <span>
+              This exact colour already exists — SKU{' '}
+              <span className="font-semibold">{exact.sku || 'unknown'}</span>.{' '}
+              <button
+                type="button"
+                tabIndex={-1}
+                onClick={() => onOpenExisting(exact)}
+                className="underline font-medium hover:text-red-700"
+              >
+                Open it
+              </button>
+              , or enter a different colour.
+            </span>
+          )}
         </p>
       )}
       {siblings.length > 0 && (

@@ -202,6 +202,13 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/vendors/grn/{grn_id}/void",
         "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
+    # Audit C1 (R1-13): 'Not received' for a held receipt's units beyond its
+    # order -- the store manager's decision; receiving is MANAGERS ONLY.
+    {
+        "method": "POST",
+        "path": "/api/v1/vendors/grn/{grn_id}/drop-over-order",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+    },
     {
         "method": "POST",
         "path": "/api/v1/vendors/grn/{grn_id}/escalate",

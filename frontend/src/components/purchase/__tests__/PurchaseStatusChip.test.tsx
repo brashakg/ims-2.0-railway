@@ -36,6 +36,10 @@ describe('PurchaseStatusChip — GRN + invoice statuses', () => {
     expect(purchaseStatusVocab('ACCEPTED', 'grn')?.label).toBe('On shelf');
   });
 
+  it('never says "On shelf" for a receipt still holding lines (audit C1)', () => {
+    expect(purchaseStatusVocab('PARTIALLY_ACCEPTED', 'grn')?.label).toBe('Box received');
+  });
+
   it('maps booked/settled invoices to "Bill settled"', () => {
     expect(purchaseStatusVocab('BOOKED', 'invoice')?.label).toBe('Bill settled');
     expect(purchaseStatusVocab('SETTLED', 'invoice')?.label).toBe('Bill settled');

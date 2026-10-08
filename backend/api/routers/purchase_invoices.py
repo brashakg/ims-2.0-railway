@@ -63,6 +63,8 @@ from pydantic import BaseModel, Field, field_validator
 
 from .auth import get_current_user, require_roles
 from ..dependencies import (
+    can_access_store_scoped,
+    validate_store_access,
     get_vendor_repository,
     get_purchase_order_repository,
     get_grn_repository,
@@ -1489,6 +1491,9 @@ class CataloguingRequest(BaseModel):
 
     product_ids: List[str] = Field(..., min_length=1)
     note: Optional[str] = None
+    # The BILL's shop (the drawer's prefill.store_id): the catalogue managers
+    # of ITS legal entity are told, never those of the asker's session shop.
+    store_id: Optional[str] = None
 
 
 @router.post("/request-cataloguing", status_code=201)
@@ -1536,29 +1541,80 @@ async def request_cataloguing(
         + (", ".join(i["missing"]) if i["missing"] else "review")
         for i in items
     ]
+    # The catalogue managers BY NAME, through the one door a held receipt uses
+    # too -- a task with no assignee is one no catalogue manager's list shows.
+    store_id = _shop_for_the_ask(db, body, current_user, items)
     try:
-        from ..services.task_triggers import create_system_task
-        from ..dependencies import get_task_repository
+        from .vendors.grn_accept import tell_catalogue_managers
 
-        create_system_task(
-            get_task_repository(),
+        told = tell_catalogue_managers(
+            db,
+            store_id,
+            dedupe="catalogue-for-bill:"
+            + ",".join(sorted(i["product_id"] for i in items)),
             title=f"Finish cataloguing {len(items)} item(s) - a vendor bill is waiting",
+            orphan_title=(
+                f"No catalogue manager for {store_id}: {len(items)} item(s) "
+                "block a vendor bill"
+            ),
+            # An ask: asking again once the last task was closed asks again.
+            ever=False,
+            # Closed when the items are finished or discarded
+            # (grn_accept.close_catalogue_asks).
+            extra={"product_ids": [i["product_id"] for i in items]},
             description=(
                 "A purchase invoice cannot be booked until these products are "
                 "catalogue-complete:\n"
                 + "\n".join(lines)
                 + (f"\n\nNote: {body.note}" if body.note else "")
             ),
-            priority="P2",
-            category="Catalog",
-            store_id=current_user.get("active_store_id"),
-            dedupe_ref="catalogue-for-bill:"
-            + ",".join(sorted(i["product_id"] for i in items)),
         )
-    except Exception:  # noqa: BLE001 - asking must never 500 the screen
-        logger.warning("[PI] could not raise the cataloguing task", exc_info=True)
+        if not told:
+            raise RuntimeError("no task was stored for the ask")
+    except Exception as exc:  # noqa: BLE001
+        # Never a 201 "Cataloguing requested" for an ask nobody received.
+        logger.error("[PI] could not raise the cataloguing task", exc_info=True)
+        raise HTTPException(
+            status_code=503,
+            detail="The catalogue manager could not be asked. Try again.",
+        ) from exc
 
     return {"requested": items, "message": "Cataloguing requested"}
+
+
+def _shop_for_the_ask(db, body: "CataloguingRequest", current_user: dict, items) -> str:
+    """The shop whose catalogue managers a bill's ask goes to: the bill's
+    shop (checked against the asker's access), else the shop of the latest
+    receipt naming one of the products, else the asker's session shop. None
+    of them -> 422: an ask is never routed to 'No catalogue manager for None'
+    while a catalogue manager exists."""
+    if body.store_id:
+        return validate_store_access(body.store_id, current_user)
+    if db is not None:
+        try:
+            grn = db.get_collection("grns").find_one(
+                {
+                    "items.product_id": {"$in": [i["product_id"] for i in items]},
+                    "status": {"$ne": "VOID"},
+                },
+                {"_id": 0, "store_id": 1},
+                sort=[("created_at", -1)],
+            )
+            if (grn or {}).get("store_id") and can_access_store_scoped(
+                grn["store_id"], current_user
+            ):
+                return grn["store_id"]
+        except Exception:  # noqa: BLE001
+            logger.warning("[PI] receipt shop lookup for the ask failed", exc_info=True)
+    store_id = current_user.get("active_store_id") or next(
+        iter(current_user.get("store_ids") or []), None
+    )
+    if not store_id:
+        raise HTTPException(
+            status_code=422,
+            detail="Say which shop the bill is for, so its catalogue manager is asked.",
+        )
+    return store_id
 
 
 # ---------------------------------------------------------------------------

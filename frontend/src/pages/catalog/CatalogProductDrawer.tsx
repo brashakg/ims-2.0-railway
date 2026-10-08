@@ -156,6 +156,20 @@ export function docOffer(doc: Record<string, unknown>): number | null {
   return Number.isFinite(num) ? num : null;
 }
 
+/** An item a manager ordered before it was catalogued, not finished yet (audit
+ *  C1), whichever doc the drawer holds: the product itself is `provisional`
+ *  until it is finished (product_master: set at the PO door, cleared by the
+ *  finishing save), and its catalogue copy names that product
+ *  (spine_product_id) and carries needs_review for exactly as long -- the
+ *  product door sets and clears both (product_master._build_pim_doc /
+ *  mirror_update_to_catalog_twin). Not on sale, whatever the doc lacks. The
+ *  server's twin of the copy's half is catalog._refuse_ordered_draft. */
+export function isOrderedDraft(doc: Record<string, unknown>): boolean {
+  return (
+    Boolean(doc.provisional) || (Boolean(doc.spine_product_id) && Boolean(doc.needs_review))
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Small presentational bits (module level — never nested components).
 // ---------------------------------------------------------------------------
@@ -311,6 +325,7 @@ export function CatalogProductDrawer({
 
   const needsReview = Boolean(doc.needs_review);
   const inactive = doc.is_active === false;
+  const orderedDraft = isOrderedDraft(doc);
 
   const seedForm = useCallback((d: Record<string, unknown>) => {
     const attrs = (d.attributes || {}) as Record<string, unknown>;
@@ -536,6 +551,10 @@ export function CatalogProductDrawer({
               {isImported && needsReview ? (
                 <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700">
                   <AlertTriangle className="h-3 w-3" /> Needs review
+                </span>
+              ) : orderedDraft ? (
+                <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700">
+                  <AlertTriangle className="h-3 w-3" /> Ordered — finish it
                 </span>
               ) : inactive ? (
                 <span className="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-500">
@@ -976,21 +995,29 @@ export function CatalogProductDrawer({
             >
               <Pencil className="w-3.5 h-3.5" /> Edit
             </button>
-            <button
-              type="button"
-              onClick={() => navigate(`/catalog/add?clone=${encodeURIComponent(id)}`)}
-              className="btn-secondary flex items-center gap-1.5 text-sm"
-              title="Duplicate as a new SKU"
-            >
-              <CopyPlus className="w-3.5 h-3.5" /> Clone
-            </button>
-            <button
-              type="button"
-              onClick={() => navigate(`/catalog/buy-desk?add_product=${encodeURIComponent(id)}`)}
-              className="ml-auto flex items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
-            >
-              <ShoppingCart className="w-3.5 h-3.5" /> Order stock
-            </button>
+            {/* An unfinished draft is neither cloned (its gaps would copy) nor
+                ordered again (the Buy Desk cannot buy it): finish it first. */}
+            {!orderedDraft && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => navigate(`/catalog/add?clone=${encodeURIComponent(id)}`)}
+                  className="btn-secondary flex items-center gap-1.5 text-sm"
+                  title="Duplicate as a new SKU"
+                >
+                  <CopyPlus className="w-3.5 h-3.5" /> Clone
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    navigate(`/catalog/buy-desk?add_product=${encodeURIComponent(id)}`)
+                  }
+                  className="ml-auto flex items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                >
+                  <ShoppingCart className="w-3.5 h-3.5" /> Order stock
+                </button>
+              </>
+            )}
           </div>
         )}
       </div>
