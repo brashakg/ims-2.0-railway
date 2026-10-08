@@ -165,7 +165,9 @@ async def get_last_purchase_cost(
       2. only if there is none, the price on this vendor's newest order that was
          sent to it (sent, acknowledged, part- or fully received), dated when it
          was sent -- skipping a cancelled line, and an order whose receipts for
-         the product accepted nothing (a rejected delivery is no price paid).
+         the product received units but accepted none (a rejected delivery is
+         no price paid). A receipt line that arrived as 0 (short-shipped, still
+         due) is no delivery at all: that order still answers.
 
     A DRAFT was never agreed and a CANCELLED (or APPROVED / PENDING, never sent)
     order never bought, so none of them is ever a price paid: the form would put
@@ -226,12 +228,16 @@ async def get_last_purchase_cost(
         for grn in grns or []:
             if len(costs) >= len(wanted):
                 break
-            lines = {
-                it.get("product_id")
-                for it in grn.get("items", []) or []
-                if isinstance(it, dict)
+            items = [it for it in grn.get("items", []) or [] if isinstance(it, dict)]
+            lines = {it.get("product_id") for it in items}
+            # Delivered = units arrived. The /purchase/grn screen sends a 0 line
+            # for every PO item that did not come; the cockpit drops it. Both
+            # must leave that order's price standing.
+            received |= {
+                (grn.get("po_id"), it.get("product_id"))
+                for it in items
+                if (it.get("received_qty") or 0) > 0
             }
-            received |= {(grn.get("po_id"), pid) for pid in lines}
             # Only surface prices from stores the caller may see (cross-store
             # roles pass); never leak another store's negotiated cost.
             if not can_access_store_scoped(grn.get("store_id"), current_user):

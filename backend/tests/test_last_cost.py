@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pytest  # noqa: E402
 
 from api.routers import vendors as v  # noqa: E402
+from api.routers.vendors.models import GRNItemCreate  # noqa: E402
 from database.repositories.product_repository import StockRepository  # noqa: E402
 from database.repositories.vendor_repository import (  # noqa: E402
     GRNRepository,
@@ -87,7 +88,12 @@ class _World:
 
     def receive(self, n, po, lines, accepted_at, store="S1", status=None):
         """Log GRN-<n> against `po` and accept it through the REAL accept, then
-        pin its acceptance time (accept stamps the wall clock)."""
+        pin its acceptance time (accept stamps the wall clock). Every line must
+        pass the real GRNItemCreate: received_qty is required and equals
+        accepted + rejected, so a rejected line and a short-shipped 0 line are
+        told apart exactly as the receipt screens send them."""
+        for line in lines:
+            GRNItemCreate(**line)
         gid = f"G{n}"
         self.grns.collection.insert_one(
             {
@@ -128,8 +134,8 @@ def test_the_accepted_receipt_cost_wins_and_is_dated_by_acceptance(monkeypatch):
     po0 = w.po(0, 2900, sent_at="2026-05-21T10:00:00")
     po1 = w.po(1, 3100, sent_at="2026-09-03T10:00:00")
     w.po(5, 3500, sent_at="2026-10-01T10:00:00")
-    w.receive(0, po0, [{"product_id": "P1", "accepted_qty": 1}], "2026-06-01T11:00:00")
-    w.receive(1, po1, [{"product_id": "P1", "accepted_qty": 2}], "2026-09-12T16:30:00")
+    w.receive(0, po0, [{"product_id": "P1", "received_qty": 1, "accepted_qty": 1}], "2026-06-01T11:00:00")
+    w.receive(1, po1, [{"product_id": "P1", "received_qty": 2, "accepted_qty": 2}], "2026-09-12T16:30:00")
     assert w.pos.find_by_id("PO1")["status"] == "RECEIVED"
     hit = _costs()["P1"]
     assert hit["unit_price"] == 3100.0
@@ -145,7 +151,7 @@ def test_a_receipt_line_priced_on_its_own_keeps_that_price(monkeypatch):
     w.receive(
         1,
         po1,
-        [{"product_id": "P1", "accepted_qty": 2, "unit_price": 3050}],
+        [{"product_id": "P1", "received_qty": 2, "accepted_qty": 2, "unit_price": 3050}],
         "2026-09-12T16:30:00",
     )
     assert {u["unit_cost"] for u in w.stock.collection.docs} == {3050.0}
@@ -158,11 +164,11 @@ def test_a_receipt_with_a_held_line_still_counts(monkeypatch):
     w = _World(monkeypatch)
     po0 = w.po(0, 2900, sent_at="2026-05-21T10:00:00")
     po1 = w.po(1, 3100, sent_at="2026-09-03T10:00:00")
-    w.receive(0, po0, [{"product_id": "P1", "accepted_qty": 1}], "2026-06-01T11:00:00")
+    w.receive(0, po0, [{"product_id": "P1", "received_qty": 1, "accepted_qty": 1}], "2026-06-01T11:00:00")
     w.receive(
         1,
         po1,
-        [{"product_id": "P1", "accepted_qty": 2}],
+        [{"product_id": "P1", "received_qty": 2, "accepted_qty": 2}],
         "2026-09-12T16:30:00",
         status="PARTIALLY_ACCEPTED",
     )
@@ -226,7 +232,7 @@ def test_a_logged_but_unaccepted_receipt_leaves_the_order_standing(monkeypatch):
     # order is still the last price agreed.
     w = _World(monkeypatch)
     po5 = w.po(5, 3500, sent_at="2026-10-01T10:00:00")
-    w.receive(5, po5, [{"product_id": "P1", "accepted_qty": 2}], None, status="PENDING")
+    w.receive(5, po5, [{"product_id": "P1", "received_qty": 2, "accepted_qty": 2}], None, status="PENDING")
     assert _costs()["P1"]["unit_price"] == 3500.0
 
 
@@ -238,13 +244,13 @@ def test_an_all_rejected_receipt_is_not_a_price_paid(monkeypatch):
     po7 = w.po(7, 9999, sent_at="2026-09-20T10:00:00")
     po7["items"].append({"product_id": "P2", "quantity": 1, "unit_price": 500})
     w.pos.collection.update_one({"po_id": "PO7"}, {"$set": {"items": po7["items"]}})
-    w.receive(1, po1, [{"product_id": "P1", "accepted_qty": 2}], "2026-09-12T16:30:00")
+    w.receive(1, po1, [{"product_id": "P1", "received_qty": 2, "accepted_qty": 2}], "2026-09-12T16:30:00")
     w.receive(
         7,
         po7,
         [
-            {"product_id": "P1", "accepted_qty": 0, "rejected_qty": 2},
-            {"product_id": "P2", "accepted_qty": 1},
+            {"product_id": "P1", "received_qty": 2, "accepted_qty": 0, "rejected_qty": 2},
+            {"product_id": "P2", "received_qty": 1, "accepted_qty": 1},
         ],
         "2026-10-02T09:00:00",
     )
@@ -262,11 +268,41 @@ def test_an_order_whose_only_receipt_rejected_everything_does_not_count(monkeypa
     w.receive(
         7,
         po7,
-        [{"product_id": "P1", "accepted_qty": 0, "rejected_qty": 2}],
+        [{"product_id": "P1", "received_qty": 2, "accepted_qty": 0, "rejected_qty": 2}],
         "2026-10-02T09:00:00",
     )
     assert w.pos.find_by_id("PO7")["status"] == "PARTIALLY_RECEIVED"
     assert _costs() == {}
+
+
+_P1_TAKEN = {"product_id": "P1", "received_qty": 2, "accepted_qty": 2}
+
+
+@pytest.mark.parametrize(
+    "p2_line, price, po_number, date",
+    [
+        # /purchase/grn sends a line for every PO item: P2 arrived as 0.
+        ({"product_id": "P2", "received_qty": 0, "accepted_qty": 0}, 500.0, "PO-1", "2026-09-01T10:00:00"),
+        # The receiving cockpit drops a 0 line: same delivery, same answer.
+        (None, 500.0, "PO-1", "2026-09-01T10:00:00"),
+        # P2 arrived and was all rejected: PO-1's 500 was refused, not paid.
+        ({"product_id": "P2", "received_qty": 1, "accepted_qty": 0, "rejected_qty": 1}, 450.0, "PO-0", "2026-06-01T10:00:00"),
+    ],
+    ids=["grn-screen-zero-line", "cockpit-no-line", "rejected-line"],
+)
+def test_a_short_shipped_line_leaves_its_order_price_standing(monkeypatch, p2_line, price, po_number, date):
+    # PO-1 (P1 3100, P2 500) came in with P1 only; P2 is still due. A line that
+    # arrived as 0 is no delivery, so PO-1's 500 is still P2's last price agreed.
+    w = _World(monkeypatch)
+    w.po(0, 450, sent_at="2026-06-01T10:00:00", pid="P2")
+    po1 = w.po(1, 3100, sent_at="2026-09-01T10:00:00")
+    po1["items"].append({"product_id": "P2", "quantity": 1, "unit_price": 500})
+    w.pos.collection.update_one({"po_id": "PO1"}, {"$set": {"items": po1["items"]}})
+    w.receive(1, po1, [_P1_TAKEN] + ([p2_line] if p2_line else []), "2026-09-05T12:00:00")
+    assert w.pos.find_by_id("PO1")["status"] == "PARTIALLY_RECEIVED"
+    out = _costs("P1,P2")
+    assert out["P1"]["unit_price"] == 3100.0
+    assert (out["P2"]["unit_price"], out["P2"]["po_number"], out["P2"]["date"]) == (price, po_number, date)
 
 
 def test_cross_store_price_not_leaked(monkeypatch):
@@ -275,7 +311,7 @@ def test_cross_store_price_not_leaked(monkeypatch):
     w = _World(monkeypatch)
     po9 = w.po(9, 420, sent_at="2026-06-12T10:00:00", store="STORE-B")
     w.po(8, 450, sent_at="2026-06-30T10:00:00", store="STORE-B")
-    w.receive(9, po9, [{"product_id": "P1", "accepted_qty": 1}], "2026-06-20T10:00:00", store="STORE-B")
+    w.receive(9, po9, [{"product_id": "P1", "received_qty": 1, "accepted_qty": 1}], "2026-06-20T10:00:00", store="STORE-B")
     assert _costs(user=_user(active="STORE-A")) == {}
     # A cross-store role sees the receipt.
     assert _costs(user=_user(roles=("ADMIN",), active="STORE-A"))["P1"]["unit_price"] == 420.0
@@ -329,7 +365,7 @@ def _flood(w, n=101, pid="P9"):
     order a test makes, so the order list never hides one of those."""
     for i in range(n):
         po = w.po(f"F{i}", 100, sent_at="2025-12-01T09:00:00", pid=pid)
-        w.receive(f"F{i}", po, [{"product_id": pid, "accepted_qty": 1}], f"2026-05-01T10:{i // 60:02d}:{i % 60:02d}")
+        w.receive(f"F{i}", po, [{"product_id": pid, "received_qty": 1, "accepted_qty": 1}], f"2026-05-01T10:{i // 60:02d}:{i % 60:02d}")
 
 
 def test_a_receipt_older_than_100_receipts_of_other_products_still_wins(monkeypatch):
@@ -338,7 +374,7 @@ def test_a_receipt_older_than_100_receipts_of_other_products_still_wins(monkeypa
     # arrived -- it is not a price paid, however busy the vendor is.
     w = _World(monkeypatch)
     po1 = w.po(1, 3100, sent_at="2026-01-02T10:00:00")
-    w.receive(1, po1, [{"product_id": "P1", "accepted_qty": 2}], "2026-01-05T10:00:00")
+    w.receive(1, po1, [{"product_id": "P1", "received_qty": 2, "accepted_qty": 2}], "2026-01-05T10:00:00")
     _flood(w)
     w.po(2, 3500, sent_at="2026-10-01T10:00:00")
     hit = _costs()["P1"]
@@ -350,7 +386,7 @@ def test_a_receipt_older_than_100_receipts_of_other_products_still_wins(monkeypa
 def test_a_rejected_delivery_older_than_100_receipts_is_still_no_price(monkeypatch):
     w = _World(monkeypatch)
     po7 = w.po(7, 9999, sent_at="2026-01-02T10:00:00")
-    w.receive(7, po7, [{"product_id": "P1", "accepted_qty": 0, "rejected_qty": 2}], "2026-01-05T10:00:00")
+    w.receive(7, po7, [{"product_id": "P1", "received_qty": 2, "accepted_qty": 0, "rejected_qty": 2}], "2026-01-05T10:00:00")
     _flood(w)
     assert _costs() == {}
 
@@ -358,7 +394,7 @@ def test_a_rejected_delivery_older_than_100_receipts_is_still_no_price(monkeypat
 def test_a_receipt_line_price_older_than_100_receipts_is_kept(monkeypatch):
     w = _World(monkeypatch)
     po1 = w.po(1, 3100, sent_at="2026-01-02T10:00:00")
-    w.receive(1, po1, [{"product_id": "P1", "accepted_qty": 2, "unit_price": 3050}], "2026-01-05T10:00:00")
+    w.receive(1, po1, [{"product_id": "P1", "received_qty": 2, "accepted_qty": 2, "unit_price": 3050}], "2026-01-05T10:00:00")
     _flood(w)
     assert _costs()["P1"]["unit_price"] == 3050.0
 
@@ -368,7 +404,7 @@ def test_a_busy_line_on_the_same_form_never_hides_another_lines_receipt(monkeypa
     # 101 times since. P2's newer sent-not-arrived order is still no price paid.
     w = _World(monkeypatch)
     po2 = w.po(2, 500, sent_at="2026-01-02T10:00:00", pid="P2")
-    w.receive(2, po2, [{"product_id": "P2", "accepted_qty": 1}], "2026-01-05T10:00:00")
+    w.receive(2, po2, [{"product_id": "P2", "received_qty": 1, "accepted_qty": 1}], "2026-01-05T10:00:00")
     _flood(w, pid="P1")
     w.po(3, 900, sent_at="2026-10-01T10:00:00", pid="P2")
     out = _costs("P1,P2")
