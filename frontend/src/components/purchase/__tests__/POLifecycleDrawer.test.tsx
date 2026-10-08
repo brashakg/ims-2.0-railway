@@ -178,14 +178,19 @@ describe('POLifecycleDrawer — next-step derivation', () => {
     expect(onClose).toHaveBeenCalled();
   });
 
-  it('receivable status shows NO button for a non-receiving role', async () => {
-    currentRoles = ['SALES_STAFF'];
-    getPOTimeline.mockResolvedValue(makeTimeline({ status: 'SENT' }));
-    renderDrawer();
+  // ACCOUNTANT: receiving is managers only (owner ruling 2026-09-28) -- the
+  // accountant keeps bills and payments, and the receive doors answer 403.
+  it.each(['SALES_STAFF', 'ACCOUNTANT'])(
+    'receivable status shows NO button for a non-receiving role (%s)',
+    async (role) => {
+      currentRoles = [role];
+      getPOTimeline.mockResolvedValue(makeTimeline({ status: 'SENT' }));
+      renderDrawer();
 
-    await screen.findAllByTestId('po-timeline-event');
-    expect(screen.queryByRole('button', { name: /Receive/i })).not.toBeInTheDocument();
-  });
+      await screen.findAllByTestId('po-timeline-event');
+      expect(screen.queryByRole('button', { name: /Receive/i })).not.toBeInTheDocument();
+    },
+  );
 
   it('ACCEPTED GRN with no invoice -> "Book invoice" for an AP role', async () => {
     currentRoles = ['ACCOUNTANT'];

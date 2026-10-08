@@ -146,11 +146,69 @@ describe('C7 / D14 - bought without a PO', () => {
 
       fireEvent.click(mode());
       expect(billDate().value).toBe('2026-10-01');
+      // A bill is never dated after today: a slipped year would make the same
+      // bill a "new" one to the same-bill rule (the server refuses it too).
+      expect(billDate().max).toBe('2026-10-01');
       fireEvent.change(billDate(), { target: { value: '2026-09-14' } });
       // Out of the mode and back in (as after a posted receipt): a fresh bill.
       fireEvent.click(mode());
       fireEvent.click(mode());
       expect(billDate().value).toBe('2026-10-01');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('with "Bought without PO" ticked the card no longer asks for a purchase order', async () => {
+    render(<GoodsReceiptNote />);
+    await waitFor(() => expect(api.getGRNs).toHaveBeenCalled());
+    expect(screen.getByText('Select purchase order')).toBeInTheDocument();
+    expect(screen.getByText('Pick the order being received')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText(/Bought without (a )?PO/i, { selector: 'input' }));
+    expect(screen.queryByText('Select purchase order')).not.toBeInTheDocument();
+    expect(screen.queryByText(/PO precedes GRN/)).not.toBeInTheDocument();
+    expect(screen.queryByText('Pick the order being received')).not.toBeInTheDocument();
+    expect(screen.getByText('No PO · no GST credit claimed')).toBeInTheDocument();
+    expect(screen.getByText('Name the supplier or the dealer')).toBeInTheDocument();
+  });
+});
+
+describe('a PO receipt carries the date on the supplier invoice', () => {
+  it('sends the invoice date typed (IST today by default, never after today), not the UTC day it was keyed', async () => {
+    // 01:30 IST on 1 April is still 31 March in UTC: the day keyed used to
+    // decide the bill's financial year.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-03-31T20:00:00Z'));
+    try {
+      api.getPurchaseOrders.mockResolvedValue({
+        purchase_orders: [
+          {
+            po_id: 'PO-B',
+            po_number: 'PO/B',
+            status: 'SENT',
+            vendor_name: 'Frames Wala',
+            items: [{ product_id: 'P-FR1', product_name: 'Acme Aviator', quantity: 2 }],
+          },
+        ],
+      });
+      render(<GoodsReceiptNote />);
+      await waitFor(() => expect(screen.getByDisplayValue('Select a PO…')).toBeInTheDocument());
+      fireEvent.change(screen.getByDisplayValue('Select a PO…'), { target: { value: 'PO-B' } });
+      fireEvent.change(screen.getByPlaceholderText('e.g. JJ/24/04/2240'), { target: { value: 'INV-9' } });
+      const date = screen.getByLabelText('Vendor invoice date') as HTMLInputElement;
+      expect(date.value).toBe('2026-04-01');
+      expect(date.max).toBe('2026-04-01');
+      fireEvent.change(date, { target: { value: '2026-03-30' } });
+      fireEvent.click(screen.getAllByLabelText(/Tally line 1/)[0]);
+      fireEvent.click(screen.getByRole('button', { name: /Post GRN/i }));
+
+      await waitFor(() => expect(api.createGRN).toHaveBeenCalledTimes(1));
+      const body = api.createGRN.mock.calls[0][0];
+      expect(body.grn_subtype).toBe('STANDARD');
+      expect(body.po_id).toBe('PO-B');
+      expect(body.vendor_invoice_no).toBe('INV-9');
+      expect(body.vendor_invoice_date).toBe('2026-03-30');
     } finally {
       vi.useRealTimers();
     }

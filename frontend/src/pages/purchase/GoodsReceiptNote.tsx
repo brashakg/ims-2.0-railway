@@ -420,7 +420,13 @@ export function GoodsReceiptNote() {
           : isDcMode && !poNumber
             ? 'Pick the vendor (DC, no PO)'
             : 'Match PO & vendor invoice',
-        s: poNumber || (hasSource ? 'Receiving without a PO' : 'Pick the order being received'),
+        s:
+          poNumber ||
+          (hasSource
+            ? 'Receiving without a PO'
+            : isNoPo
+              ? 'Name the supplier or the dealer'
+              : 'Pick the order being received'),
       },
       {
         done: hasSource && hasLines && allTallied,
@@ -525,7 +531,9 @@ export function GoodsReceiptNote() {
         vendor_id: noPoDc || (isNoPo && dcVendorId) ? dcVendorId : undefined,
         dealer_name: isNoPo && !dcVendorId ? dealerName.trim() : undefined,
         vendor_invoice_no: vendorInvoiceNo || undefined,
-        vendor_invoice_date: isNoPo ? billDate || undefined : new Date().toISOString().split('T')[0],
+        // The date printed on the supplier's bill (its financial year decides
+        // whether the number is a new bill); a challan's invoice comes later.
+        vendor_invoice_date: isDcMode ? istToday() : billDate || undefined,
         attachment_file_id: isNoPo ? billPhoto?.file_id || undefined : undefined,
         attachment_filename: isNoPo ? billPhoto?.filename : undefined,
         attachment_mime: isNoPo ? billPhoto?.mime : undefined,
@@ -587,6 +595,7 @@ export function GoodsReceiptNote() {
       setIsNoPo(false);
       setDealerName('');
       setBillPhoto(null);
+      setBillDate(istToday());
       setDcNumber('');
       setDcVendorId('');
       setDcQuery('');
@@ -749,9 +758,13 @@ export function GoodsReceiptNote() {
           {/* PO selection */}
           <div className="card">
             <div className="card-head">
-              <h3>Select purchase order</h3>
+              <h3>{isNoPo ? 'Supplier or dealer & bill' : 'Select purchase order'}</h3>
               <span className="meta">
-                {isDcMode ? 'DC · invoice arrives later' : 'PO precedes GRN · GRN is the GST document'}
+                {isDcMode
+                  ? 'DC · invoice arrives later'
+                  : isNoPo
+                    ? 'No PO · no GST credit claimed'
+                    : 'PO precedes GRN · GRN is the GST document'}
               </span>
             </div>
             <div className="card-body">
@@ -859,6 +872,7 @@ export function GoodsReceiptNote() {
                       id="no-po-bill-date"
                       type="date"
                       value={billDate}
+                      max={istToday()}
                       onChange={(e) => setBillDate(e.target.value)}
                       className="input w-full"
                     />
@@ -979,6 +993,25 @@ export function GoodsReceiptNote() {
                       className="input w-full"
                     />
                   </div>
+                  {!isDcMode && (
+                    <div>
+                      <label
+                        htmlFor="po-bill-date"
+                        className="block text-xs font-medium mb-1"
+                        style={{ color: 'var(--ink-4)' }}
+                      >
+                        Vendor invoice date
+                      </label>
+                      <input
+                        id="po-bill-date"
+                        type="date"
+                        value={billDate}
+                        max={istToday()}
+                        onChange={(e) => setBillDate(e.target.value)}
+                        className="input w-full"
+                      />
+                    </div>
+                  )}
                 </div>
               )}
             </div>
