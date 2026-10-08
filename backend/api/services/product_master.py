@@ -1393,9 +1393,8 @@ def drop_legacy_spine_barcode(product_repo, product_id: Any) -> None:
     coll = getattr(product_repo, "collection", None)
     if coll is None or not product_id:
         return
-    attrs = (coll.find_one({"product_id": product_id}, {"attributes": 1}) or {}).get(
-        "attributes"
-    )
+    # No projection: the no-Mongo MockCollection.find_one takes a filter only.
+    attrs = (coll.find_one({"product_id": product_id}) or {}).get("attributes")
     unset = {"barcode": ""}
     if isinstance(attrs, dict):
         unset.update(
