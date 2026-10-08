@@ -1231,6 +1231,50 @@ def test_an_order_shipped_by_its_orders_body_alone_is_goods_out(swept, monkeypat
     assert [(u["stock_id"], u["status"]) for u in swept["stock_repo"].units] == [("stk-1", "SOLD")]
 
 
+@pytest.mark.parametrize("posture", ["auto", "queue"])
+def test_a_shipped_order_refunded_on_shopify_before_its_refund_lands_is_still_goods_out(
+        swept, monkeypatch, posture):
+    """The test above, with the other drain order: orders/updated (refunded)
+    lands BEFORE refunds/create, so the table has moved SHIPPED on to
+    REFUNDED. Shopify's fulfillment_status still says the frame left: AUTO
+    waits for a person and the queue shows the goods-out note. Read off the
+    status alone, AUTO put stk-1 back on the shelf while it was in transit."""
+    if posture == "auto":
+        monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "1")
+    _claim_unit(swept, _book(swept, 60143))
+    swept["real_map"](_pulled(60143, fulfillment_status="fulfilled"), swept["db"],
+                      webhook_id="ful-60143", topic="orders/fulfilled")
+    swept["real_map"](_pulled(60143, fulfillment_status="fulfilled", financial_status="refunded",
+                              updated_at=LATER), swept["db"], webhook_id="upd-60143",
+                      topic="orders/updated")
+    assert _doc(swept, 60143)["status"] == "REFUNDED"
+    res = shopify_refund.handle_shopify_refund(swept["db"], _refund(700343, 60143, restock_type="return"),
+                                               webhook_id=None, topic="refunds/create")
+
+    assert res["status"] == "queued"
+    row = swept["review"].find_one({"shopify_refund_id": "700343"})
+    assert "Goods are with the courier or the customer" in row["note"]
+    assert [(u["stock_id"], u["status"]) for u in swept["stock_repo"].units] == [("stk-1", "SOLD")]
+
+
+@pytest.mark.parametrize("left", [{"awb": "X-1"}, {"shopify_fulfillment_id": "X-1"},
+                                  {"fulfillment_status": "PARTIAL"}])
+def test_a_refunded_order_whose_goods_left_waits_for_a_person_under_auto(swept, monkeypatch, left):
+    """SHIPPED, then moved on to REFUNDED by an orders/updated drained before
+    refunds/create (return): the status no longer says goods out, and each of
+    these alone does (the booked order states no fulfillment_status unless
+    named). Dropped, AUTO put the frame in transit back on the shelf."""
+    monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "1")
+    _claim_unit(swept, _book(swept, 60144))
+    assert _doc(swept, 60144).get("fulfillment_status") in (None, "UNFULFILLED")
+    _set(swept, 60144, status="REFUNDED", **left)
+    res = shopify_refund.handle_shopify_refund(swept["db"], _refund(700344, 60144, restock_type="return"),
+                                               webhook_id=None, topic="refunds/create")
+
+    assert res["status"] == "queued"
+    assert [(u["stock_id"], u["status"]) for u in swept["stock_repo"].units] == [("stk-1", "SOLD")]
+
+
 _HANDED_OVER = {"status": "DELIVERED", "status_updated_by": "u1"}
 
 

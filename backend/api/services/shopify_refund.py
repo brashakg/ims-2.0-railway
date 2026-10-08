@@ -878,9 +878,13 @@ def handle_shopify_refund(
         else:
             note = "Awaiting accountant confirmation (SHOPIFY_REFUND_AUTO off)."
         # Goods out with the courier or the customer: a person decides, even
-        # under AUTO -- the units are not on any shelf to put back yet.
+        # under AUTO -- the units are not on any shelf to put back yet. Not the
+        # status alone: an orders/updated (refunded / cancelled) drained before
+        # this refund moves SHIPPED on to REFUNDED / CANCELLED, while Shopify's
+        # own fulfillment_status (and any parcel) still says the goods left.
         goods_out = bool(
             str(order.get("status") or "").strip().upper() in GOODS_OUT
+            or str(order.get("fulfillment_status") or "").strip().upper() in ("FULFILLED", "PARTIAL")
             or order.get("awb")
             or order.get("shopify_fulfillment_id")
         )
