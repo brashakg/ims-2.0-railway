@@ -21,6 +21,7 @@ import type {
   VendorPaymentData,
 } from './financeTypes';
 import { financeApi } from '../../services/api/finance';
+import { mapGst } from './financeUtils';
 
 // ---- Mappers: real finance.py responses -> dashboard panel types ----------
 // The backend returns aggregate/summary shapes; the panels expect these
@@ -70,26 +71,6 @@ function mapPnl(d: any, from: string, to: string): ProfitLossStatement | null {
           : null,
     period_start: from,
     period_end: to,
-  };
-}
-
-function mapGst(d: any): GSTSummaryData | null {
-  if (!d) return null;
-  // OS-010: igst_collected was hardcoded to 0, so the "IGST (inter-state)"
-  // card could never show the inter-state tax the backend computes.
-  // finance.py splits output tax into cgst/sgst/igst precisely so these
-  // cards reconcile to gst_collected — map the real value and derive the
-  // type from it.
-  const igst = Number(d.igst || 0);
-  return {
-    period: `${d.month ?? ''}/${d.year ?? ''}`,
-    cgst_collected: Number(d.cgst || 0),
-    sgst_collected: Number(d.sgst || 0),
-    igst_collected: igst,
-    total_gst: Number(d.gst_collected || 0),
-    gst_payable: Number(d.net_gst_payable || 0),
-    input_tax_credit: Number(d.gst_input_credit || 0),
-    gst_type: igst > 0 ? 'IGST' : 'CGST_SGST',
   };
 }
 

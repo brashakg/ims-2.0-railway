@@ -54,7 +54,7 @@ export default function GSTPanel({ gstSummary }: GSTPanelProps) {
           <p className="text-2xl font-bold mt-2">
             {formatCurrency(gstSummary.gst_payable)}
           </p>
-          <p className="text-xs text-gray-500 mt-2">Less Input Tax Credit</p>
+          <p className="text-xs text-gray-500 mt-2">Less input tax credit, plus reverse charge GST</p>
         </div>
       </div>
 
@@ -96,11 +96,30 @@ export default function GSTPanel({ gstSummary }: GSTPanelProps) {
               </span>
             </div>
             <div className="flex justify-between items-center p-4 bg-gray-50 rounded border border-gray-200">
-              <span className="text-gray-700">Input Tax Credit</span>
+              <span className="text-gray-700">Less: Input Tax Credit</span>
               <span className="text-gray-900 font-semibold">
                 {formatCurrency(gstSummary.input_tax_credit)}
               </span>
             </div>
+            {/* The breakdown adds up to Net GST Payable (GSTR-3B's cash): credit
+                never takes it below 0 -- the rest carries forward -- and never
+                pays reverse charge GST, which is paid in cash on top. */}
+            {gstSummary.credit_carried_forward > 0 && (
+              <div className="flex justify-between items-center p-4 bg-gray-50 rounded border border-gray-200">
+                <span className="text-gray-700">Plus: credit carried to next month</span>
+                <span className="text-gray-900 font-semibold">
+                  {formatCurrency(gstSummary.credit_carried_forward)}
+                </span>
+              </div>
+            )}
+            {gstSummary.reverse_charge_tax > 0 && (
+              <div className="flex justify-between items-center p-4 bg-gray-50 rounded border border-gray-200">
+                <span className="text-gray-700">Plus: reverse charge GST (paid in cash)</span>
+                <span className="text-gray-900 font-semibold">
+                  {formatCurrency(gstSummary.reverse_charge_tax)}
+                </span>
+              </div>
+            )}
             {/* Net payable keeps the one meaningful (danger) accent. */}
             <div className="flex justify-between items-center p-4 bg-red-50 rounded border border-red-200">
               <span className="text-red-700 font-medium">Net GST Payable</span>
