@@ -122,6 +122,12 @@ async def get_gst_summary(
     # so historical data never silently drops. gst_amount is the legacy alias.
     gst_paid = 0.0
     gst_paid_excluded = 0.0  # surfaced so the report can show what was held back
+    # Reverse charge: the shop's own GST on its RCM purchases (GSTR-3B 3.1(d)),
+    # owed to the government in cash whatever its credit. Counting the credit
+    # without the liability read net payable short by exactly this.
+    rcm_tax = 0.0
+    from ..reports.gst_itc import _DEAD_BILL  # 3.1(d)'s own "dead bill"
+
     try:
         for _b in db.get_collection("vendor_bills").find(
             {},
@@ -134,12 +140,15 @@ async def get_gst_summary(
                 "itc_blocked": 1,
                 "received": 1,
                 "itc_eligible": 1,
+                "reverse_charge": 1,
             },
         ):
             _bd = ap_engine.parse_date(_b.get("bill_date"))
             if _bd is None or not (bill_start <= _bd < bill_end):
                 continue
             _tax = float(_b.get("tax_amount") or _b.get("gst_amount") or 0)
+            if _b.get("reverse_charge") is True and _b.get("status") not in _DEAD_BILL:
+                rcm_tax += _tax
             if _itc_eligible_bill(_b):
                 gst_paid += _tax
             else:
@@ -147,8 +156,10 @@ async def get_gst_summary(
     except Exception:
         gst_paid = 0.0
         gst_paid_excluded = 0.0
+        rcm_tax = 0.0
     gst_paid = round(gst_paid, 2)
     gst_paid_excluded = round(gst_paid_excluded, 2)
+    rcm_tax = round(rcm_tax, 2)
 
     # Classify output tax into CGST/SGST (intra-state) vs IGST (inter-state) by
     # the same store-state-vs-customer-state rule as gst_reconciliation()/GSTR-1
@@ -158,7 +169,7 @@ async def get_gst_summary(
         _sales_orders, _store_state_map(db), _customer_state_map(db)
     )
     gst_collected = round(cgst + sgst + igst, 2)
-    net_payable = round(gst_collected - gst_paid, 2)
+    net_payable = round(gst_collected + rcm_tax - gst_paid, 2)
 
     # Filing status. GSTR-1 is due the 11th and GSTR-3B the 20th of the month
     # AFTER the tax period. For December (m==12) that is January of the NEXT
@@ -180,6 +191,7 @@ async def get_gst_summary(
         # ITC held back this period (not-yet-received or 17(5)-blocked bills) so
         # the CA can see what was excluded rather than wonder why ITC dropped.
         "gst_input_credit_excluded": gst_paid_excluded,
+        "reverse_charge_tax": rcm_tax,
         "net_gst_payable": net_payable,
         "gstr1_due_date": gstr1_due.isoformat(),
         "gstr3b_due_date": gstr3b_due.isoformat(),

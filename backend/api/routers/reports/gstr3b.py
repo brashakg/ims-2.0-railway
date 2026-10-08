@@ -28,6 +28,7 @@ from .gst_itc import (
     _gstin_bound,
     _itc_from_vendor_bills,
     _itc_gstin_from_vendor_bills,
+    _itc_match,
     _itc_store_scope,
     _placement,
     _sum_heads,
@@ -273,6 +274,23 @@ def _rcm_gstin_from_vendor_bills(db, active_store, year, mon, last_day):
     return 0.0, 0.0, 0.0, 0.0
 
 
+def _rcm_credit_from_vendor_bills(db, active_store, year, mon, last_day):
+    """Table 4(A)(3): the part of Table 4's credit that is reverse-charge tax
+    -- the reverse-charge bills Table 4 itself keeps (_itc_match: credit
+    cleared by org_validation.itc_claimable at booking, never a bill whose
+    credit was switched off). A slice of itcAvailable, never added to it.
+    Returns (igst, cgst, sgst); fail-soft -> zeros."""
+    if db is None:
+        return 0.0, 0.0, 0.0
+    try:
+        entity_id, store_gstin, shops = _itc_store_scope(db, active_store)
+        match = _itc_match(shops, entity_id, store_gstin, year, mon, last_day)
+        return _sum_heads(db, {**match, "reverse_charge": True})[:3]
+    except Exception:
+        pass
+    return 0.0, 0.0, 0.0
+
+
 def _compute_gstr3b(month: str, active_store: str) -> dict:
     """Compute the IMS GSTR-3B report dict for a (month, store).
 
@@ -327,6 +345,8 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
     rcm_taxable = 0.0
     # ...and its GSTIN-bound slice (R1), counted once per GSTIN by the Cross-Check.
     t_rcm = (0.0, 0.0, 0.0, 0.0)
+    # Table 4(A)(3): the reverse-charge part of the ITC above.
+    itc_rcm = (0.0, 0.0, 0.0)
 
     # Credit-note totals + the per-head excess the zero-clamp would otherwise
     # swallow SILENTLY (filled below when a DB is present).
@@ -472,6 +492,7 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
             db, active_store, year, mon, last_day
         )
         t_rcm = _rcm_gstin_from_vendor_bills(db, active_store, year, mon, last_day)
+        itc_rcm = _rcm_credit_from_vendor_bills(db, active_store, year, mon, last_day)
 
     # Net cash liability = (output tax - ITC) + reverse-charge tax. RCM is always
     # discharged in CASH (it cannot be set off against ITC), so it adds on top of
@@ -535,6 +556,14 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
             "integratedTax": _r(itc_igst),
             "centralTax": _r(itc_cgst),
             "stateTax": _r(itc_sgst),
+            "cess": 0.0,
+        },
+        # Table 4(A)(3): the reverse-charge part of itcAvailable (inside it,
+        # never on top); the portal upload files it apart from 4(A)(5).
+        "itcReverseCharge": {
+            "integratedTax": _r(itc_rcm[0]),
+            "centralTax": _r(itc_rcm[1]),
+            "stateTax": _r(itc_rcm[2]),
             "cess": 0.0,
         },
         # R1: itcAvailable split into the company-wide remainder (bills naming
