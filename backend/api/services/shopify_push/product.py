@@ -342,6 +342,11 @@ async def push_product(
         take_down = None
         if unconfirmed and was_live:
             take_down = await push_product_delist(db, product)
+        # Off the website ONLY when the Draft went out LIVE and Shopify took
+        # it. A refused one -- or one that ran dark because a gate input (the
+        # creds) went soft mid-press, a SIMULATED ok with nothing sent --
+        # leaves the listing on the website.
+        taken_down = take_down is not None and take_down.ok and take_down.mode == MODE_LIVE
         # THE PHOTOGRAPHS, IN THIS SAME PRESS. "Has a photo in IMS" and "has a
         # photo on Shopify" are different questions, and only the second one
         # protects the storefront -- photographs used to push on a SEPARATE,
@@ -388,6 +393,15 @@ async def push_product(
                 + seeded_gids,
                 minted_variant_gids=[g for g in seeded_gids if g not in confirmed],
             )
+        # NOT taken down, but the stock pass just re-sent tracked + the policy
+        # to every size, the new one included, and Shopify accepted it: the
+        # listing is live AND tracked, so the press takes the normal path
+        # below. Never "STILL LIVE ... set it to Draft" over a press that made
+        # it safe (one press, one answer: the last-sent record says tracked).
+        if take_down is not None and not taken_down and stock_summary and (
+            stock_summary.get("code") != STOCK_TRACKING_FAILED
+        ):
+            take_down = None
         # SALES-CHANNEL PUBLISH -- the third shut door. An ACTIVE product
         # published to NO channel is invisible on bettervision.in. This used to
         # be gated behind SHOPIFY_PUBLISH_ON_CREATE (default OFF) AND restricted
@@ -446,14 +460,14 @@ async def push_product(
                 "error": (
                     f"{why} -- the listing was taken OFF the website (Draft) so they "
                     f"cannot oversell; press Send to website again"
-                ) if take_down.ok else (
+                ) if taken_down else (
                     f"{why}, and taking the listing off the website FAILED "
-                    f"({take_down.error}) -- it is STILL LIVE and they may sell without "
-                    f"limit; set it to Draft in Shopify admin now"
+                    f"({take_down.error or take_down.reason}) -- it is STILL LIVE and "
+                    f"they may sell without limit; set it to Draft in Shopify admin now"
                 ),
                 # Off the website = withheld; still live = a failure, never
                 # "not made visible".
-                "reason": "publish_withheld" if take_down.ok else None,
+                "reason": "publish_withheld" if taken_down else None,
             }
         elif new_gid and payload.get("status") == "ACTIVE":
             if seed_summary is not None:

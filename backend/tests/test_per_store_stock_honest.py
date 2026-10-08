@@ -94,9 +94,10 @@ def _cat(db, pid="cat-1"):
 # ---------------------------------------------------------------------------
 
 
-def _live_listing_gets_size_l():
+def _live_listing_gets_size_l(status="PUBLISHED"):
     """cat-1 is LIVE (PUBLISHED, tracked) with sizes M and S on Shopify; IMS
-    has just added size L (no gid yet), one unit of it at BV-A."""
+    has just added size L (no gid yet), one unit of it at BV-A. `status`
+    DRAFT: the same listing on Shopify but never published."""
     db = _db(a=2, b=1, c=0)
     db.seed("products", [{"product_id": "spine-S", "sku": "SP-1-S"}, {"product_id": "spine-L", "sku": "SP-1-L"}])
     db.get_collection("stock_units").insert_one(
@@ -104,7 +105,7 @@ def _live_listing_gets_size_l():
     )
     sent = {"quantities": {"SP-1": {"BV-A": 2, "BV-B": 1, "BV-C": 0}, "SP-1-S": {"BV-A": 0, "BV-B": 0, "BV-C": 0}},
             "tracked": True, "policy": "DENY"}
-    db.seed("catalog_products", [_catalog_row("cat-1", "SP-1", gid=True, status="PUBLISHED",
+    db.seed("catalog_products", [_catalog_row("cat-1", "SP-1", gid=True, status=status,
                                               locally_modified=True, online_stock=sent)])
     variants = [
         {"sku": "SP-1", "parent_product_id": "cat-1", "price": 1500, "option_size": "M",
@@ -210,13 +211,28 @@ class _DraftRefused(_Spy):
         return await super().__call__(db, query, variables)
 
 
+class _DraftAndTrackingRefused(_DraftRefused, _ThrottledTracking):
+    """The take-down refused AND the stock pass's tracking re-send refused."""
+
+
+def _tracking_sent(spy):
+    """Every variant gid a tracking + policy re-send (productVariantsBulkUpdate
+    rows carrying inventoryPolicy) went out for."""
+    return {
+        r["id"] for c in spy.calls_for("productVariantsBulkUpdate")
+        for r in (c["variables"] or {}).get("variants") or [] if "inventoryPolicy" in r
+    }
+
+
 def test_1_a_refused_take_down_says_the_listing_is_still_live(monkeypatch):
-    """The take-down itself refused: the listing is STILL on the website with
-    a size that may sell without limit. Never "withheld / not made visible";
-    the press fails and tells the owner to set it to Draft in Shopify admin.
-    IMS keeps PUBLISHED (that is what the website shows)."""
+    """The take-down itself refused and the tracking re-send refused too: the
+    listing is STILL on the website with a size that may sell without limit.
+    Never "withheld / not made visible"; the press fails and tells the owner
+    to set it to Draft in Shopify admin. IMS keeps PUBLISHED (that is what
+    the website shows)."""
     db, variants, upd = _live_listing_gets_size_l()
-    spy = _DraftRefused(_responses(**{"productUpdate(": upd, "productVariantsBulkCreate": _created(tracked=None)}))
+    spy = _DraftAndTrackingRefused(
+        _responses(**{"productUpdate(": upd, "productVariantsBulkCreate": _created(tracked=None)}))
     _live(monkeypatch, spy)
     res = _run(shopify_push.push_product(db, _cat(db), variants))
     assert len(_drafts(spy)) == 1
@@ -224,6 +240,90 @@ def test_1_a_refused_take_down_says_the_listing_is_still_live(monkeypatch):
     assert "STILL LIVE" in res.error and "Shopify admin" in res.error and "SP-1-L" in res.error, res.error
     assert _cat(db)["ecom"]["status"] == "PUBLISHED"
     assert spy.calls_for("publishablePublish") == []
+
+
+def test_1_a_refused_take_down_whose_tracking_re_send_was_accepted_is_one_answer(monkeypatch):
+    """The take-down refused, but the same press's stock pass re-sent tracked
+    + DENY to every size -- L included -- and Shopify accepted it. The listing
+    is live and tracked (the last-sent record says so), so the press must not
+    send the owner into Shopify admin to take it off sale: it is the normal
+    live press. Drop the 'tracking confirmed after all' step -> STILL LIVE ->
+    fails."""
+    db, variants, upd = _live_listing_gets_size_l()
+    spy = _DraftRefused(_responses(**{"productUpdate(": upd, "productVariantsBulkCreate": _created(tracked=None)}))
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.push_product(db, _cat(db), variants))
+    assert len(_drafts(spy)) == 1
+    assert MINTED in _tracking_sent(spy) and res.stock["errors"] == []
+    assert _baseline(db)["tracked"] is True
+    assert res.ok is True and res.code is None, res
+    assert "STILL LIVE" not in (res.error or "") and "Shopify admin" not in (res.error or ""), res.error
+    assert _cat(db)["ecom"]["status"] == "PUBLISHED"
+
+
+class _CredsGoSoft(_Spy):
+    """The creds resolve True until the size is created, then False (an OAuth
+    re-mint failing after the token cache expired): the gate reads DARK, and
+    every later call dies the way the transport dies with no creds."""
+
+    def __init__(self, responses):
+        super().__init__(responses)
+        self.creds = True
+
+    async def __call__(self, db, query, variables):  # noqa: ARG002
+        if not self.creds:
+            self.calls.append({"query": query, "variables": variables})
+            raise ValueError("shopify creds missing at GraphQL call time")
+        out = await super().__call__(db, query, variables)
+        if "productVariantsBulkCreate" in query:
+            self.creds = False
+        return out
+
+
+def test_1_a_take_down_that_ran_dark_mid_press_is_still_live_never_taken_off(monkeypatch):
+    """Probe G. The creds go soft between the size's create and the
+    take-down: push_product_delist answers a SIMULATED ok with nothing sent.
+    No Draft went out, IMS keeps PUBLISHED with no taken_down_at, the listing
+    is on the website with an unconfirmed size -- so the press says STILL
+    LIVE, never 'taken OFF the website'. Accept a non-LIVE take-down's ok ->
+    'taken OFF' + publish_withheld -> fails."""
+    db, variants, upd = _live_listing_gets_size_l()
+    spy = _CredsGoSoft(_responses(**{"productUpdate(": upd,
+                                     "productVariantsBulkCreate": _created(tracked=None, policy=None)}))
+    _live(monkeypatch, spy)
+    monkeypatch.setattr(shopify_push, "_has_shopify_creds", lambda db, storefront_id="BV": spy.creds)
+    res = _run(shopify_push.push_product(db, _cat(db), variants))
+    assert _drafts(spy) == [] and spy.calls_for("publishablePublish") == []
+    ecom = _cat(db)["ecom"]
+    assert ecom["status"] == "PUBLISHED" and not ecom.get("taken_down_at"), ecom
+    assert res.ok is False and res.reason != "publish_withheld", res
+    assert "STILL LIVE" in res.error and "taken OFF" not in res.error and "creds" in res.error, res.error
+
+
+def test_1_a_draft_listing_with_an_unconfirmed_size_is_never_taken_down_and_every_new_size_is_tracked(monkeypatch):
+    """Probe H. A first publish of a listing that is on Shopify as a DRAFT
+    (never on the website). Shopify creates a size whose answer matches no
+    IMS row (Size=Large) and says tracked=false. Not live, so nothing to take
+    down: no Draft write, no taken_down_at, no 'taken OFF' line. The stock
+    pass re-sends tracked + DENY to EVERY size this press created -- the
+    unmatched one included -- before the publish. Count every gid as live
+    (drop `listing_visible`) -> a Draft + 'taken OFF' -> fails; drop the
+    unconfirmed sizes from the re-send -> /77 untracked on sale -> fails."""
+    db, variants, upd = _live_listing_gets_size_l(status="DRAFT")
+    node = {"id": MINTED, "selectedOptions": [{"name": "Size", "value": "Large"}],
+            "inventoryItem": {"id": INV_L, "tracked": False}, "inventoryPolicy": "DENY"}
+    spy = _Spy(_responses(**{"productUpdate(": upd,
+                             "productVariantsBulkCreate": _ok_body("productVariantsBulkCreate", productVariants=[node])}))
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.push_product(db, _cat(db), variants))
+    assert _drafts(spy) == [], "a listing that is not on the website is never 'taken down'"
+    assert not _cat(db)["ecom"].get("taken_down_at")
+    assert "taken OFF" not in (res.error or ""), res.error
+    sent = _tracking_sent(spy)
+    assert {VARIANT_GID, "gid://shopify/ProductVariant/6", MINTED} <= sent, sent
+    (pub,) = _index(spy, "publishablePublish")
+    assert max(_index(spy, "productVariantsBulkUpdate")) < pub
+    assert res.ok is True, res
 
 
 # ---------------------------------------------------------------------------
