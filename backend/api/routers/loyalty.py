@@ -272,6 +272,22 @@ async def get_ledger(
     return {"items": items, "total": total, "limit": limit, "skip": skip}
 
 
+
+def _earn_basis(order_doc: Dict[str, Any]) -> float:
+    """THE loyalty earn basis, for /earn and the post-edit re-gate alike: the
+    order's taxable value (pre-GST, after all discounts) = grand_total less
+    the bill's round off (owner ruling 2026-10-08: not taxable value) less
+    tax_amount, all persisted at order create. Never below 0."""
+    return max(
+        round(
+            float(order_doc.get("grand_total") or 0.0)
+            - float(order_doc.get("round_off") or 0.0)
+            - float(order_doc.get("tax_amount") or 0.0),
+            2,
+        ),
+        0.0,
+    )
+
 @router.post("/earn")
 async def earn(
     body: EarnRequest,
@@ -319,19 +335,8 @@ async def earn(
             detail="Order does not belong to this customer",
         )
 
-    # Authoritative earn basis: the order's taxable value (pre-GST, after all
-    # discounts) = grand_total - tax_amount, both persisted at order create.
-    # The bill's round off is not taxable value either (owner ruling
-    # 2026-10-08), so it is backed out too.
-    order_basis = max(
-        round(
-            float(order_doc.get("grand_total") or 0.0)
-            - float(order_doc.get("round_off") or 0.0)
-            - float(order_doc.get("tax_amount") or 0.0),
-            2,
-        ),
-        0.0,
-    )
+    # Authoritative earn basis: the order's taxable value (see _earn_basis).
+    order_basis = _earn_basis(order_doc)
     rupee_value = order_basis
     value_clamped = False
     if body.rupee_value is not None:
@@ -1879,14 +1884,7 @@ def regate_earn_after_edit(
             return {"ok": True, "clawed": 0, "skipped_reason": "nothing_earned"}
 
         settings = _settings_safe()
-        basis = max(
-            round(
-                float(order_doc.get("grand_total") or 0.0)
-                - float(order_doc.get("tax_amount") or 0.0),
-                2,
-            ),
-            0.0,
-        )
+        basis = _earn_basis(order_doc)
         tier = (earn_rows[0].get("tier_at_earn") if earn_rows else None) or (
             account.get("tier", "BRONZE")
         )

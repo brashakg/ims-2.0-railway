@@ -200,3 +200,35 @@ def test_loyalty_earn_basis_is_taxable_value_without_round_off(
     assert row["rupee_value"] == 10000.5
 
 
+
+
+def test_a_no_change_edit_keeps_points_earned_on_a_rounded_down_bill(
+    client, auth_headers, patched_loyalty, monkeypatch
+):
+    """/earn and the post-edit re-gate read ONE earn basis. Taxable 1000.30 +
+    GST 0.10 bills 1000 (round off -0.40). With a 1000 minimum the bill earns;
+    a superadmin edit that changes nothing must not then claw the points back
+    on a basis (1000 - 0.10 = 999.90) that forgot the round off."""
+    from api.routers import loyalty as loyalty_module
+    from api.routers.loyalty import regate_earn_after_edit
+    from database.repositories.loyalty_repository import DEFAULT_SETTINGS
+
+    monkeypatch.setattr(
+        loyalty_module, "_settings_safe",
+        lambda: {**DEFAULT_SETTINGS, "min_order_for_earn": 1000.0},
+    )
+    items = [{"category": "FRAME", "item_total": 1000.40}]
+    patched_loyalty["orders"].seed("ORD-RG", "cust-rg", 1000.0, 0.10, items)
+    order = patched_loyalty["orders"]._orders["ORD-RG"]
+    order["round_off"] = -0.40
+    r = client.post(
+        "/api/v1/loyalty/earn",
+        json={"customer_id": "cust-rg", "order_id": "ORD-RG"},
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+    earned = patched_loyalty["accounts"].find_by_id("cust-rg")["balance_points"]
+    assert earned > 0
+    out = regate_earn_after_edit(dict(order), user_id="sa-1")
+    assert out["ok"] and out.get("clawed", 0) == 0, out
+    assert patched_loyalty["accounts"].find_by_id("cust-rg")["balance_points"] == earned
