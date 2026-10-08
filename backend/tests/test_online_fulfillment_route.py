@@ -4777,6 +4777,57 @@ def test_a_stock_miss_recorded_while_clear_hold_runs_keeps_the_order_held(world,
     assert after["fulfillment_hold"] is True and route_mod.seller_held(after)
 
 
+def test_remap_two_lines_of_one_frame_claims_the_missing_unit(world, monkeypatch):
+    """[LOW] Round 22, item 2: RB-1234 x1 + RB-1234 x1 (two lines of one
+    frame, a contact-lens pair). Bokaro has no GSTIN and holds one RB, no shop
+    covers the order: booked 1 of 2, held SHOP_GSTIN_MISSING. Its GSTIN set
+    and a new RB in, Re-map keeps the claimed unit for ONE line and claims
+    the new one for the other -- never the one kept unit counted for both
+    (a silent under-claim: the new unit left on sale, the order dispatchable)."""
+    db = world["db"]
+    db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": {"gstin": ""}})
+    _stock(db, "BV-BOK-01", "P-RB", 1)
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 1), (9001, 1)])
+    payload = _order(62004, lines=(("RB-1234", 1), ("RB-1234", 1)))
+    res, order = _book(world, payload)
+    oid = res["order_id"]
+    assert [p["code"] for p in order["fulfillment_route"]["problems"]] == ["SHOP_GSTIN_MISSING"]
+    assert _units(db, oid) == ["U-BV-BOK-01-P-RB-0"]
+    db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": {"gstin": "20AAAAA0000A1Z5"}})
+    db.stock_units.insert_one({"stock_id": "U-NEW", "product_id": "P-RB",
+                               "store_id": "BV-BOK-01", "status": "AVAILABLE"})
+
+    out = _remap(world, monkeypatch, payload)
+
+    assert out["ok"] and out["result"]["status"] == "rerouted", out
+    assert _units(db, oid) == ["U-BV-BOK-01-P-RB-0", "U-NEW"]
+    after = db.orders.find_one({"order_id": oid}, {"_id": 0})
+    assert sum(r["qty"] for r in after["fulfillment_breakdown"]) == 2
+    assert after["fulfillment_hold"] is False
+    assert db.online_stock_miss.count_documents({"order_id": oid, "resolved": False}) == 0
+
+
+def test_a_split_whose_fo_counts_differ_from_the_invoice_never_overclaims(world):
+    """[LOW] Round 22, item 3: RB x1 (line 9000) + OA x1 (9001), but Shopify's
+    fulfillment orders carry RB x2 at Bokaro (the order was edited in Shopify
+    admin) and the OA at Ranchi. Bokaro holds RB x2, Ranchi the OA.
+    Shopify's split is followed only when it carries exactly the invoice's
+    IMS units: here the whole-order rule applies -- never 2 RB SOLD against a
+    1-RB invoice (a sellable frame off Bokaro's shelf and Shopify's count)."""
+    db = world["db"]
+    _stock(db, "BV-BOK-01", "P-RB", 2)
+    _stock(db, "BV-RAN-01", "P-OA", 1)
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 2)])
+    world["shop"].fo(FO_2, LOC_RAN, lines=[(9001, 1)])
+
+    res, order = _book(world, _order(62005, lines=(("RB-1234", 1), ("OA-5", 1))))
+
+    oid = res["order_id"]
+    assert not order["fulfillment_route"].get("split")
+    assert db.stock_units.count_documents({"order_id": oid, "product_id": "P-RB"}) == 1
+    assert db.stock_units.count_documents({"store_id": "BV-BOK-01", "status": "AVAILABLE"}) == 1
+
+
 @pytest.mark.parametrize("retry", ["both_resent", "human_moved_one"])
 def test_a_retried_move_never_retasks_a_move_a_human_closed(world, monkeypatch, retry):
     """[LOW] Round 22, item 4: Bokaro holds nothing and has two open
