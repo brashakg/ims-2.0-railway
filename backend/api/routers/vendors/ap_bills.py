@@ -135,7 +135,7 @@ def _recompute_bill_status(db, bill_id: Optional[str]) -> None:
             )
         )
         out = ap_engine.bill_outstanding(bill, payments, debit_notes)
-        total = float(bill.get("total_amount") or 0)
+        total = ap_engine.vendor_payable(bill)
         if out <= 0.01:
             status = "PAID"
         elif out < total:

@@ -4,6 +4,7 @@ from ._shared import (
     Depends,
     Query,
     _get_db,
+    ap_engine,
     datetime,
     get_current_user,
     get_vendor_repository,
@@ -49,15 +50,19 @@ def _vendor_mtd_spend(db, vendor_id: str) -> float:
     try:
         bills = db.get_collection("vendor_bills").find(
             {"vendor_id": vendor_id},
-            {"_id": 0, "total_amount": 1, "bill_date": 1, "created_at": 1},
+            {
+                "_id": 0,
+                "total_amount": 1,
+                "taxable_amount": 1,
+                "reverse_charge": 1,
+                "bill_date": 1,
+                "created_at": 1,
+            },
         )
         for b in bills:
             when = str(b.get("bill_date") or b.get("created_at") or "")[:7]
             if when == month_prefix:
-                try:
-                    total += float(b.get("total_amount") or 0)
-                except (TypeError, ValueError):
-                    pass
+                total += ap_engine.vendor_payable(b)
     except Exception:  # noqa: BLE001
         return 0.0
     return round(total, 2)

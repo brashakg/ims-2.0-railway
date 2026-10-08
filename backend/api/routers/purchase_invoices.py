@@ -1314,6 +1314,16 @@ def _bill_math(db, vendor, body, grn_doc, current_user):
         supplier_gstin,
         recipient.get("recipient_gstin"),
     )
+    # What the supplier is owed (THE rule, ap_engine.vendor_payable): on a
+    # reverse-charge bill the taxable value only -- its GST is the shop's own
+    # liability to the government (GSTR-3B 3.1(d)), booked in the tax heads.
+    computed["vendor_payable"] = ap_engine.vendor_payable(
+        {
+            "reverse_charge": bool(body.reverse_charge),
+            "taxable_amount": computed["taxable_total"],
+            "total_amount": computed["total"],
+        }
+    )
     return supplier_gstin, recipient, computed
 
 
@@ -1805,7 +1815,9 @@ async def create_purchase_invoice(
     invoice_id = str(uuid.uuid4())
     taxable_total = computed["taxable_total"]
     tax_total = computed["tax_total"]
-    total = computed["total"]
+    # The supplier's payable: total / total_amount / outstanding never carry
+    # a reverse-charge bill's GST (that stays in tax_amount and the heads).
+    total = computed["vendor_payable"]
 
     doc = {
         "bill_id": invoice_id,
@@ -2131,7 +2143,9 @@ async def preview_purchase_invoice(
         "sgst_total": computed["sgst_total"],
         "igst_total": computed["igst_total"],
         "tax_total": computed["tax_total"],
-        "total": computed["total"],
+        # The booking's total_amount: what the supplier is owed.
+        "reverse_charge": bool(body.reverse_charge),
+        "total": computed["vendor_payable"],
     }
 
 
@@ -2195,6 +2209,8 @@ async def list_purchase_invoices(
     )
     _stamp_bill_actor_names(db, rows)
     _stamp_receipt_numbers(db, rows)
+    for r in rows:
+        r["total_amount"] = ap_engine.vendor_payable(r)
     return {"purchase_invoices": rows, "total": len(rows)}
 
 
@@ -3111,4 +3127,7 @@ async def get_purchase_invoice(
     if not doc:
         raise HTTPException(status_code=404, detail="Purchase invoice not found")
     _stamp_bill_actor_names(db, [doc])
+    # What the supplier is owed, as every AP reader reads it (an RCM bill
+    # booked before vendor_payable stored its GST in total_amount).
+    doc["total_amount"] = ap_engine.vendor_payable(doc)
     return doc

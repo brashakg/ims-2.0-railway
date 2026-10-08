@@ -8,6 +8,7 @@ from ._shared import (
     _get_db,
     _pm,
     _po_catalog_gate_on,
+    ap_engine,
     can_access_store_scoped,
     datetime,
     get_current_user,
@@ -165,7 +166,9 @@ async def get_po_timeline(po_id: str, current_user: dict = Depends(get_current_u
                         "invoice_number": r.get("invoice_number")
                         or r.get("bill_number"),
                         "status": r.get("status"),
-                        "total": r.get("total"),
+                        # What the supplier is owed (an RCM bill's GST is
+                        # the shop's own, never the supplier's).
+                        "total": ap_engine.vendor_payable(r),
                         "created_at": r.get("created_at"),
                     }
                 )
