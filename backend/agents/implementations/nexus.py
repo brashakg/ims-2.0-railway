@@ -207,10 +207,13 @@ class NexusAgent(JarvisAgent):
             # Least-recently polled first (never polled sorts first): an order
             # the courier never reports DELIVERED (an RTO, an AWB Shiprocket
             # cannot track) stays SHIPPED, and without the rotation 50 of them
-            # would hold every slot and starve each later delivery.
+            # would hold every slot and starve each later delivery. An order
+            # with a parcel to track by tracked_awbs' rule (awb_filter), the
+            # webhook's: a live parcel's AWB in the parcel list while the
+            # order's own awb is empty is still asked about.
             shipped_with_awb = list(orders_coll.find({
                 "status": {"$in": list(moved_by(DELIVER))},
-                "awb": {"$exists": True, "$ne": ""},
+                **awb_filter({"$gt": ""}),
             }).sort("tracking_polled_at", 1).limit(50))
         except Exception as e:
             return SyncResult(ok=False, provider="shiprocket", kind="pull", error=str(e))

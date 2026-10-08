@@ -75,10 +75,12 @@ def tracked_awbs(order: Dict[str, Any]) -> list:
     return [order["awb"]] if order.get("awb") else []
 
 
-def awb_filter(awb: str) -> Dict[str, Any]:
+def awb_filter(awb: Any) -> Dict[str, Any]:
     """The orders query for the order an AWB belongs to, by tracked_awbs'
-    own rule."""
-    return {"$or": [{f"{PARCEL_AWBS}.awb": awb}, {"awb": awb, PARCEL_AWBS: {"$exists": False}}]}
+    own rule. `awb` may be a condition on it: {"$gt": ""} finds every order
+    tracked_awbs gives an AWB (the Shiprocket poll's)."""
+    return {"$or": [{PARCEL_AWBS: {"$elemMatch": {"awb": awb}}},
+                    {"awb": awb, PARCEL_AWBS: {"$exists": False}}]}
 
 
 def _write_parcel(orders, oid: Dict[str, Any], key: str, awb: Optional[str],

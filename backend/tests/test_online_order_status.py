@@ -874,20 +874,31 @@ def test_a_parcel_out_on_an_unshipped_order_is_delivered_by_either_courier_leg(s
 _HELD = {"rx_pending": True, "fulfillment_hold": True, "rx_hold_reasons": ["RX_MISSING"]}
 
 
+@pytest.mark.parametrize("leg", ["poll", "webhook"])
 @pytest.mark.parametrize("state", [
     {"status": "CANCELLED"}, {"status": "REFUNDED"}, {"status": "VOID"},
     {"status": "CONFIRMED", **_HELD}, {"status": "SHIPPED", **_HELD},
 ], ids=["cancelled", "refunded", "void", "rx_held_confirmed", "rx_held_shipped"])
-def test_the_shiprocket_webhook_asks_the_table_on_any_order_its_awb_finds(swept, state):
+def test_a_courier_delivered_asks_the_table_on_any_order_its_awb_finds(swept, monkeypatch, state, leg):
     """The webhook finds the order by its AWB alone, whatever its status: an
     order cancelled after its parcel was (the AWB stays on it), a refunded or
     voided one, one on an Rx hold. A courier DELIVERED moves none of them --
     the table keeps a finished order and withholds a held one (raising its
-    Rx task) -- where a bypass of the table would deliver each."""
+    Rx task) -- where a bypass of the table would deliver each. The poll
+    asks the table the same way: the held spectacle order it reads is never
+    delivered past its hold."""
     _book(swept, 60124)
     _set(swept, 60124, awb="AWB-C", **state)
     agent = nexus_module.NexusAgent(db=swept["db"])
-    asyncio.run(agent._handle_shiprocket_webhook({"awb": "AWB-C", "current_status": "DELIVERED"}))
+    if leg == "poll":
+        async def fake_track(db, awb):
+            return SyncResult(ok=True, provider="shiprocket", kind="pull",
+                              payload={"latest_status": "DELIVERED"})
+
+        monkeypatch.setattr(nexus_module, "shiprocket_track_awb", fake_track)
+        asyncio.run(agent._sync_shiprocket_outbound())
+    else:
+        asyncio.run(agent._handle_shiprocket_webhook({"awb": "AWB-C", "current_status": "DELIVERED"}))
 
     doc = _doc(swept, 60124)
     assert doc["status"] == state["status"]
@@ -896,6 +907,33 @@ def test_the_shiprocket_webhook_asks_the_table_on_any_order_its_awb_finds(swept,
 
 
 _T = "2026-09-06T{}:00Z".format
+
+
+def test_the_poll_asks_about_a_parcel_the_orders_own_awb_does_not_show(swept, monkeypatch):
+    """F1 (no tracking number yet, 03:00) took the order's tracking fields
+    over first; F2 (AWB-2, 02:00) is older, so it never does: the order's awb
+    stays empty while its parcel list tracks AWB-2. The poll picked orders by
+    that awb and reported "Checked 0 AWBs" on every run, so the courier's
+    DELIVERED never reached the table through it."""
+    oid = 60136
+    _book(swept, oid)
+    for fid, awb, at in ((1, None, _T("03:00")), (2, "AWB-2", _T("02:00"))):
+        shopify_fulfillment.reconcile_fulfillment(swept["db"], _fulfilment(
+            oid, fid, tracking_number=awb, status="success", created_at=at, updated_at=at),
+            topic="fulfillments/update")
+    doc = _doc(swept, oid)
+    assert doc["status"] == "SHIPPED" and not doc.get("awb")
+    assert shopify_fulfillment.tracked_awbs(doc) == ["AWB-2"]
+    asked = []
+
+    async def fake_track(db, awb):
+        asked.append(awb)
+        return SyncResult(ok=True, provider="shiprocket", kind="pull", payload={"latest_status": "DELIVERED"})
+
+    monkeypatch.setattr(nexus_module, "shiprocket_track_awb", fake_track)
+    res = asyncio.run(nexus_module.NexusAgent(db=swept["db"])._sync_shiprocket_outbound())
+    assert asked == ["AWB-2"] and "Checked 1 AWBs" in res.notes
+    assert _doc(swept, oid)["status"] == "DELIVERED"
 _SPLITS = {
     # A second parcel created by mistake and cancelled: the live one keeps the
     # order's tracking fields.
