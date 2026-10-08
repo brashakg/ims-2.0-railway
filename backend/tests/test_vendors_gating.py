@@ -4,9 +4,12 @@ IMS 2.0 — vendors router write gating
 Vendor / purchase-order / goods-receipt mutations had NO server-side role
 check — any authenticated user could create POs or accept GRNs (which adjust
 stock and vendor liability) by hitting the API directly, despite the frontend
-/purchase/* routes being restricted. The 8 write endpoints are now gated to
-the roles those routes allow (ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT;
-SUPERADMIN auto-passes). Reads intentionally stay open (they may feed
+/purchase/* routes being restricted. The 8 write endpoints are now gated:
+vendor and purchase-order writes to the purchase roles (ADMIN, AREA_MANAGER,
+STORE_MANAGER, ACCOUNTANT), and the goods-receipt writes -- log, accept,
+escalate -- to the receiving managers only (owner ruling 2026-09-28: ADMIN,
+AREA_MANAGER, STORE_MANAGER; the accountant keeps bills and payments).
+SUPERADMIN auto-passes. Reads intentionally stay open (they may feed
 inventory views for catalog/workshop roles).
 
 End-to-end via the conftest TestClient fixtures.
@@ -67,16 +70,20 @@ _GRN_BODY = {
 }
 
 # (method, path, json_body, query_params)
-WRITES = [
+PURCHASE_WRITES = [
     ("post", "/api/v1/vendors", _VENDOR_BODY, None),
     ("put", "/api/v1/vendors/v1", {"city": "Mumbai"}, None),
     ("post", "/api/v1/vendors/purchase-orders", _PO_BODY, None),
     ("post", "/api/v1/vendors/purchase-orders/po1/send", None, None),
     ("post", "/api/v1/vendors/purchase-orders/po1/cancel", None, {"reason": "dup"}),
+]
+# Receiving goods into stock -- managers only (_RECEIVE_ROLES).
+RECEIVING_WRITES = [
     ("post", "/api/v1/vendors/grn", _GRN_BODY, None),
     ("post", "/api/v1/vendors/grn/g1/accept", None, None),
     ("post", "/api/v1/vendors/grn/g1/escalate", None, {"note": "short"}),
 ]
+WRITES = PURCHASE_WRITES + RECEIVING_WRITES
 
 
 def _send(client, method, path, json_body, params, headers):
@@ -94,9 +101,19 @@ class TestVendorWriteGating:
         resp = _send(client, method, path, body, params, staff_headers)
         assert resp.status_code == 403
 
-    @pytest.mark.parametrize("method,path,body,params", WRITES)
+    @pytest.mark.parametrize("method,path,body,params", PURCHASE_WRITES)
     def test_accountant_allowed(self, client, method, path, body, params):
         resp = _send(client, method, path, body, params, _headers(["ACCOUNTANT"]))
+        assert resp.status_code != 403
+
+    @pytest.mark.parametrize("method,path,body,params", RECEIVING_WRITES)
+    def test_accountant_cannot_receive(self, client, method, path, body, params):
+        resp = _send(client, method, path, body, params, _headers(["ACCOUNTANT"]))
+        assert resp.status_code == 403
+
+    @pytest.mark.parametrize("method,path,body,params", RECEIVING_WRITES)
+    def test_store_manager_receives(self, client, method, path, body, params):
+        resp = _send(client, method, path, body, params, _headers(["STORE_MANAGER"]))
         assert resp.status_code != 403
 
     @pytest.mark.parametrize("method,path,body,params", WRITES)
