@@ -7,6 +7,7 @@ from ._shared import (
     Optional,
     Query,
     _SOLD_STATUSES,
+    _discontinued,
     _reorder_disabled,
     datetime,
     get_current_user,
@@ -17,8 +18,16 @@ from ._shared import (
 )
 from .helpers import (
     _get_db,
+    _had_the_window,
+    _shelf_by_product,
 )
-from ...services.reorder_policy import is_low_stock, on_hand, reorder_level
+from ...services.reorder_policy import (
+    DISCONTINUED_FIELDS,
+    is_low_stock,
+    low_stock_rows,
+    on_hand,
+    reorder_level,
+)
 
 # ============================================================================
 # 7. UNIFIED STOCK ALERTS  (feeds StockAlertsOverview.tsx)
@@ -29,9 +38,12 @@ from ...services.reorder_policy import is_low_stock, on_hand, reorder_level
 # catalogue, each product's units on hand AT THE SHOP (reorder_policy.on_hand)
 # and that shop's own reorder level (D12), joined to `orders.items` by barcode
 # for sales velocity. No level at the shop = no LOW_STOCK / REORDER_ALERT.
+# A product on the shop's low-stock list (reorder_policy.low_stock_rows, the
+# list GET /inventory/low-stock shows) is LOW_STOCK here too (audit F48).
 #
 # Each product yields AT MOST ONE alert, chosen by priority:
-#   REORDER_ALERT > LOW_STOCK > DEAD_STOCK > OVERSTOCK > FAST_MOVING
+#   REORDER_ALERT > LOW_STOCK (selling low) > DEAD_STOCK
+#     > LOW_STOCK (on the low-stock list) > OVERSTOCK > FAST_MOVING
 # so a fast seller about to run out is a REORDER, not also a FAST_MOVING.
 #
 # NOTE on order status: TechCherry historic orders are stamped status
@@ -76,6 +88,26 @@ def _summarise_alert_stats(alerts: List[dict]) -> dict:
     return stats
 
 
+def _low_stock(base, stock, cost, velocity, lead_time_days, suggestions_off, action):
+    """Fill `base` as a LOW_STOCK alert. No suggested restock qty when
+    auto-reorder is off or nothing has sold (nothing to size an order by)."""
+    recommended = (
+        0
+        if suggestions_off or velocity <= 0
+        else max(int(round(velocity * lead_time_days * 2 - stock)), 1)
+    )
+    base.update(
+        {
+            "alertType": "LOW_STOCK",
+            "severity": "MEDIUM",
+            "recommendedOrder": recommended,
+            "costImpact": round(recommended * cost, 2),
+            "actionRequired": action,
+        }
+    )
+    return base
+
+
 def _build_stock_alert(
     product: dict,
     sold_30: float,
@@ -84,6 +116,8 @@ def _build_stock_alert(
     dead_days: int,
     lead_time_days: int,
     store_id: Optional[str] = None,
+    low_stock: bool = False,
+    stocked_since: Optional[datetime] = None,
 ) -> Optional[dict]:
     """Pure classifier — given a product doc plus its sales signals, return a
     single frontend-shaped (camelCase) StockAlert dict, or None if the product
@@ -92,6 +126,13 @@ def _build_stock_alert(
     `stock_quantity` is the units on hand at `store_id`; the reorder level is
     that shop's own (reorder_policy). A shop with no level gets no LOW_STOCK
     or REORDER_ALERT (owner ruling D12: not set = no low-stock alert).
+
+    ``low_stock``: the product is on the shop's low-stock list (the ONE
+    low-stock rule, reorder_policy.low_stock_rows) -- Alerts says LOW_STOCK for
+    it too unless a stronger verdict (REORDER, selling low, DEAD_STOCK) applies
+    (audit F48). ``stocked_since``: when the oldest unit on the shelf arrived;
+    stock younger than the dead-stock window has not had the chance to sell
+    and is never called dead. None = unknown = old (helpers._had_the_window).
     """
     stock = int(product.get("stock_quantity", 0) or 0)
     cost = float(product.get("cost_price", 0) or 0)
@@ -101,8 +142,14 @@ def _build_stock_alert(
     # means auto-reorder is DISABLED for this product -- never emit a
     # REORDER_ALERT / restock suggestion for it. Informational alerts
     # (LOW_STOCK without a suggested qty, DEAD_STOCK, OVERSTOCK, FAST_MOVING)
-    # still apply. See api/services/reorder_policy.py.
+    # still apply. See api/services/reorder_policy.py, which also turns
+    # reorder off for a discontinued product (reorder_policy.discontinued).
     reorder_suggestions_off = _reorder_disabled(product)
+    # A discontinued product still on the shelf is scored only as DEAD_STOCK,
+    # or LOW_STOCK (no qty) while the low-stock list holds it: 'running low',
+    # 'keep well stocked' or 'excess units' is advice for a product the
+    # counter can still sell (audit F48).
+    discontinued = _discontinued(product)
 
     velocity = (sold_30 or 0) / 30.0  # units/day from the last 30 days
     days_without_movement = (now - last_sale).days if last_sale else None
@@ -165,30 +212,23 @@ def _build_stock_alert(
     # 2. LOW_STOCK — sells, getting low, but not yet reorder-critical.
     # When auto-reorder is disabled the alert stays (it is informational)
     # but with NO suggested restock qty (recommendedOrder 0, costImpact 0).
+    # Never for a discontinued product: it is not restocked, and the
+    # low-stock list leaves it out until it is at its level.
     if (
         has_level
+        and not discontinued
         and velocity > 0
         and projected is not None
         and projected <= lead_time_days * 2
     ):
-        recommended = (
-            0
-            if reorder_suggestions_off
-            else max(int(round(velocity * lead_time_days * 2 - stock)), 1)
+        return _low_stock(
+            base, stock, cost, velocity, lead_time_days, reorder_suggestions_off,
+            f"Stock running low (~{int(projected)} days left)",
         )
-        base.update(
-            {
-                "alertType": "LOW_STOCK",
-                "severity": "MEDIUM",
-                "recommendedOrder": recommended,
-                "costImpact": round(recommended * cost, 2),
-                "actionRequired": f"Stock running low (~{int(projected)} days left)",
-            }
-        )
-        return base
 
-    # 3. DEAD_STOCK — has stock but no movement in the dead-stock window
-    is_dead = stock > 0 and (
+    # 3. DEAD_STOCK — has stock but no movement in the dead-stock window, and
+    # the stock has been on the shelf for that whole window.
+    is_dead = stock > 0 and _had_the_window(stocked_since, now, dead_days) and (
         last_sale is None
         or (days_without_movement is not None and days_without_movement >= dead_days)
     )
@@ -216,8 +256,18 @@ def _build_stock_alert(
         )
         return base
 
+    # 3b. LOW_STOCK — on the low-stock list, so Alerts says so too. After
+    # DEAD_STOCK: 5 or fewer units covers most frame SKUs, and an unsold frame
+    # that has sat out the window is dead stock, not something to reorder.
+    if low_stock:
+        return _low_stock(
+            base, stock, cost, velocity, lead_time_days, reorder_suggestions_off,
+            f"Only {stock} left - "
+            + ("discontinued, not reordered" if discontinued else "at or below the low-stock level"),
+        )
+
     # 4/5. OVERSTOCK vs FAST_MOVING (both require active selling)
-    if stock > 0 and velocity > 0:
+    if stock > 0 and velocity > 0 and not discontinued:
         months_of_stock = stock / (velocity * 30.0)
         if months_of_stock >= 6:
             excess = max(int(round(stock - velocity * 30 * 3)), 0)  # beyond 3mo cover
@@ -315,14 +365,19 @@ async def get_stock_alerts(
         now = datetime.utcnow()
         thirty_cutoff = now - timedelta(days=30)
 
-        # The catalogue is shared (products carry no store_id); stock and
-        # the level are the shop's own.
+        # The catalogue is shared (products carry no store_id); stock and the
+        # level are the shop's own. Reading products.store_id and the legacy
+        # products.stock_quantity made every alert vanish once stock moved to
+        # the ledger (audit F48: "No Alerts" beside LOW STOCK 1). Inactive
+        # products are read too: one still on the shelf can be on the low-stock
+        # list, so it is scored here (see the loop below).
         products = list(
             products_coll.find(
-                {"is_active": {"$ne": False}},
+                {},
                 {
                     "_id": 0,
                     "product_id": 1,
+                    **{f: 1 for f in DISCONTINUED_FIELDS},
                     "name": 1,
                     "brand": 1,
                     "category": 1,
@@ -341,24 +396,47 @@ async def get_stock_alerts(
             orders_coll, active_store, thirty_cutoff
         )
 
-        # Units on hand per product at this shop (every shop when none).
+        # Units on hand per product at this shop (every shop when none): the
+        # count the low-stock list compares with its level (reorder_policy.
+        # on_hand), so the two screens cannot disagree (audit F48).
+        stock_units = db.get_collection("stock_units")
         units: Dict[str, int] = {}
-        for (pid, _shop), qty in on_hand(
-            db.get_collection("stock_units"), store_id=active_store
-        ).items():
+        for (pid, _shop), qty in on_hand(stock_units, store_id=active_store).items():
             units[pid] = units.get(pid, 0) + qty
+        # THE low-stock list for this shop (a level is a shop's own: none
+        # without a shop), and when each product's oldest unit arrived.
+        low_ids = (
+            {
+                r["product_id"]
+                for r in low_stock_rows(
+                    products_coll, stock_units, store_id=active_store
+                )
+            }
+            if active_store
+            else set()
+        )
+        shelf = _shelf_by_product(stock_units, active_store)
 
         alerts: List[dict] = []
         for p in products:
             barcode = p.get("barcode") or p.get("sku") or ""
+            pid = str(p.get("product_id") or "")
+            # A discontinued (inactive) product is scored only while it still
+            # has units here -- the low-stock list counts units whatever the
+            # catalogue flag, and the two screens must agree (audit F48). It
+            # never gets a reorder: the policy treats it as reorder-off.
+            if p.get("is_active") is False and not units.get(pid):
+                continue
             alert = _build_stock_alert(
-                {**p, "stock_quantity": units.get(str(p.get("product_id")), 0)},
+                {**p, "stock_quantity": units.get(pid, 0)},
                 sold_30=sales_30.get(barcode, 0),
                 last_sale=last_sales.get(barcode),
                 now=now,
                 dead_days=dead_days,
                 lead_time_days=lead_time_days,
                 store_id=active_store,
+                low_stock=pid in low_ids,
+                stocked_since=(shelf.get(pid) or {}).get("oldest"),
             )
             if alert:
                 alerts.append(alert)

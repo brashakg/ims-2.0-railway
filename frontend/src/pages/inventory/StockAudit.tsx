@@ -14,6 +14,8 @@ import clsx from 'clsx';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { inventoryApi } from '../../services/api';
+// Shop time: naive backend stamps are UTC (audit F53).
+import { formatDateIST, formatDateTimeIST } from '../../utils/datetime';
 import { StockCountScanningInterface } from '../../components/inventory/StockCountScanningInterface';
 
 interface StockAudit {
@@ -396,7 +398,7 @@ export function StockAudit() {
                     {audit.category && audit.category !== 'All' ? ` · ${audit.category}` : ''}
                   </div>
                   <div className="s">
-                    {audit.audit_number} · started {audit.created_at ? new Date(audit.created_at).toLocaleString('en-IN') : '—'}
+                    {audit.audit_number} · started {formatDateTimeIST(audit.created_at)}
                     {audit.created_by_name ? ` by ${audit.created_by_name}` : ''} · {audit.items_counted} SKUs counted
                   </div>
                 </div>
@@ -479,7 +481,7 @@ export function StockAudit() {
                       <div>
                         <p className="text-xs" style={{ color: 'var(--ink-4)' }}>Created</p>
                         <p className="font-medium" style={{ color: 'var(--ink)' }}>
-                          {audit.created_at ? new Date(audit.created_at).toLocaleDateString('en-IN') : '—'}
+                          {formatDateIST(audit.created_at)}
                         </p>
                       </div>
                       <div>
@@ -636,7 +638,7 @@ export function StockAudit() {
                                 {' '}· {audit.units_not_voided} left alone (moved during the count) — count those again.
                               </span>
                             )}
-                            {audit.reconciled_at ? ` · ${new Date(audit.reconciled_at).toLocaleString('en-IN')}` : ''}
+                            {audit.reconciled_at ? ` · ${formatDateTimeIST(audit.reconciled_at)}` : ''}
                           </p>
                         )}
 
