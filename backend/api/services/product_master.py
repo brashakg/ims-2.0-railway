@@ -638,10 +638,6 @@ def build_sku(category: Any, attributes: Dict[str, Any], db=None) -> str:
         )
     a = attributes or {}
     brand, model, colour, size = identity_parts(a, category)
-    # The SKU also reads a frame's `color_code` spelling and its eye size
-    # (`lens_size` in the registry), which the duplicate key does not.
-    colour = a.get("colour_code") or a.get("color_code") or colour
-    size = size or a.get("lens_size")
     segs = [
         *map(_sku_segment, (spec.prefix, brand, model)),
         _sku_segment(colour, keep_separators=True),
@@ -1043,6 +1039,7 @@ def _derive_brand_model_color_size(
         or attrs.get("model")
         or attrs.get("subbrand"),
         "color": attrs.get("colour_code")
+        or attrs.get("color_code")
         or attrs.get("colour_name")
         or attrs.get("color"),
         "size": attrs.get("size"),
@@ -1103,7 +1100,9 @@ def identity_parts(
     folds, so a lens the guard calls new also gets a SKU of its own and the
     Review preview is the SKU it saves. An Optical Lens has no colour or size:
     its coating and index stand in (Crizal 1.56 HC and Crizal 1.67 HC are two
-    products; the same Crizal 1.56 HC twice is one). A lens with no sub-brand
+    products; the same Crizal 1.56 HC twice is one). A frame's eye size
+    (lens_size) is its size: 52 and 54 are two products (owner 2026-09-28,
+    each eye size is its own variant). A lens with no sub-brand
     is the brand's own line: its coating takes the model's place, so Hoya HC
     1.56 saved twice is still one product and the SKU mints no filler. The
     old form's filler model 'STD' (a lens with no sub-brand, stored in
@@ -1118,7 +1117,7 @@ def identity_parts(
         model = a.get("subbrand")
     if not model and not ids["color"]:
         model, colour = colour, None
-    size = ids["size"] or a.get("index")
+    size = ids["size"] or a.get("lens_size") or a.get("index")
     if resolve_category(category) in _CONTACT_LENSES:
         size = _cl_power(a)
     return (ids["brand"], model, colour, size)

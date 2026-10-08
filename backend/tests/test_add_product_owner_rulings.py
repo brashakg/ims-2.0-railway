@@ -519,6 +519,23 @@ def test_f13_the_size_keeps_its_decimal_point(door):
     assert again["sku"] == created["sku"] + "B"
 
 
+def test_f13_each_frame_eye_size_is_its_own_product(door):
+    """Owner 2026-09-28: each frame eye size is its own variant. With the 52
+    saved, the Review previewed FR-CARRERA-CA8895-807-54 while the save 409'd
+    against the 52 (the SKU read the eye size, the duplicate key did not).
+    The 54 now saves under the SKU it previews; the 52 twice is the 409."""
+    c52 = dict(_CARRERA, lens_size="52")
+    first = door(_form_post("FR", c52))
+    assert first["sku"] == "FR-CARRERA-CA8895-807-52"
+    c54 = dict(_CARRERA, lens_size="54")
+    assert door(_form_post("FR", c54))["sku"] == _preview("FR", c54) == "FR-CARRERA-CA8895-807-54"
+    assert _dup(door, _form_post("FR", dict(c52, lens_size="52.0")))["sku"] == first["sku"]
+    # The SKU and the key read the same colour spelling too (color_code).
+    old = {"brand_name": "Carrera", "model_no": "CA8895", "color_code": "808"}
+    assert pm.compute_identity_key(*pm.identity_parts(old, "FR")) == "carrera|ca8895|808"
+    assert pm.build_sku("FR", old) == "FR-CARRERA-CA8895-808"
+
+
 def _dup(door, payload):
     from fastapi import HTTPException
 
