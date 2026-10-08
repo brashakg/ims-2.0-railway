@@ -96,9 +96,13 @@ class ProductRepository(BaseRepository):
     # (every colour key product_master stores; the watch dial is spelt both
     # ways there). CODE fields match from their START -- a scanned barcode,
     # a typed SKU or the manufacturer's GTIN off the box is its beginning.
-    # Every till word field is a wide name field, so the wide rule stays a
-    # superset of the till's and keeps every row the till finds.
-    NAME_SEARCH_FIELDS = WORD_SEARCH_FIELDS + (
+    # Each word also takes the till's own clause (_product_search_query), so
+    # the wide rule keeps every row the till finds -- the minted title, model
+    # name and sub-brand by their word starts only: 'sgray' is not inside
+    # 'Sunglasses - Gray'.
+    NAME_SEARCH_FIELDS = (
+        "brand",
+        "model",
         "color",
         "attributes.frame_color",
         "attributes.temple_color",
@@ -256,8 +260,9 @@ class ProductRepository(BaseRepository):
 
     def _product_search_query(self, text: str, extra: Dict) -> Dict:
         """The WIDE product search query -- shared by the list and its count
-        so the two can never drift. It is a superset of the till's rule (an
-        unanchored name match includes the anchored one). ponytail: unanchored
+        so the two can never drift. Each word's $or holds the till's own
+        clause for it, so it is a superset of the till's rule (outside a query
+        of nothing but hyphens, which lists nothing). ponytail: unanchored
         regex scans the collection; fine at catalogue size, a text index if it
         ever is not."""
         clauses = []
@@ -273,6 +278,7 @@ class ProductRepository(BaseRepository):
             }
             ors = [{f: code} for f in self.CODE_SEARCH_FIELDS]
             ors += [{f: name} for f in self.NAME_SEARCH_FIELDS]
+            ors.append(self._search_token(tok, self.SEARCH_FIELDS))
             clauses.append({"$or": ors})
         if not clauses:
             # Nothing but hyphens and spaces ('--'): nothing to look for, so

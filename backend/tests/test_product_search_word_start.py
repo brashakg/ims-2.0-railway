@@ -272,6 +272,21 @@ def test_a_door_made_product_is_found_by_the_words_the_till_shows(db, q, want):
     assert _ids(db, q) == (want, len(want))
 
 
+@pytest.mark.parametrize("q, want", [("SGRAY", ["SG-RB"]), ("sgo", ["SG-OK"])])
+def test_the_purchase_order_box_finds_a_title_word_only_from_its_start(db, q, want):
+    # "SGRAY" starts every door-made Ray-Ban sunglass SKU. The Oakley's title
+    # "Oakley OO9208 Sunglasses - Gray" holds "s - Gray", which the wide
+    # rule's spaces-and-hyphens-ignored match would read as "sgray"; the
+    # title is searched by the till's word rule only, so main's list stands.
+    _door(db, "SG-RB", "SUNGLASS", brand_name="Ray-Ban", model_no="RB3025",
+          colour_code="001", frame_color="Gold")
+    _door(db, "SG-OK", "SUNGLASS", brand_name="Oakley", model_no="OO9208",
+          colour_code="01", frame_color="Gray")
+    assert db.products.find_one({"product_id": "SG-RB"})["sku"].startswith("SGRAY")
+    assert db.products.find_one({"product_id": "SG-OK"})["name"].endswith("s - Gray")
+    assert _ids(db, q, match="anywhere") == (want, 1)
+
+
 # Main's till rule, before 2026-10-08: each word STARTS brand, model, sku,
 # variant or barcode.
 _MAIN_FIELDS = ["brand", "model", "sku", "variant", "barcode"]

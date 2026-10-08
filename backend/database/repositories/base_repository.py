@@ -7,6 +7,7 @@ Abstract base class for all repositories
 from abc import ABC, abstractmethod
 from typing import List, Optional, Dict, Any, TypeVar, Generic
 from datetime import datetime
+import re
 import uuid
 
 T = TypeVar("T")
@@ -398,11 +399,6 @@ class BaseRepository(ABC, Generic[T]):
         search_count so the list and its total can never drift. word_fields
         defaults to the repository's WORD_SEARCH_FIELDS; () = from the start
         only (search()'s first-ranked hits)."""
-        import re
-
-        if word_fields is None:
-            word_fields = self.WORD_SEARCH_FIELDS
-
         tokens = [t for t in (text or "").split() if t]
         if not tokens:
             # Empty query -> apply only the caller's filter (match-all
@@ -410,19 +406,21 @@ class BaseRepository(ABC, Generic[T]):
             # behaviour where `$regex: ""` matched everything.
             return filter or {}
 
-        and_clauses = []
-        for tok in tokens:
-            tok = re.escape(tok)
-            start = {"$regex": "^" + tok, "$options": "i"}
-            word = {"$regex": self._WORD_START + tok, "$options": "i"}
-            and_clauses.append(
-                {"$or": [{f: word if f in word_fields else start} for f in fields]}
-            )
-
-        query = {"$and": and_clauses}
+        query = {"$and": [self._search_token(t, fields, word_fields) for t in tokens]}
         if filter:
             query["$and"].append(filter)
         return query
+
+    def _search_token(self, tok: str, fields, word_fields=None) -> Dict:
+        """One typed word's clause, the one place the word rule is built: it
+        STARTS one of `fields`, or, in word_fields (default: the repository's
+        WORD_SEARCH_FIELDS), any word of it."""
+        if word_fields is None:
+            word_fields = self.WORD_SEARCH_FIELDS
+        esc = re.escape(tok)
+        start = {"$regex": "^" + esc, "$options": "i"}
+        word = {"$regex": self._WORD_START + esc, "$options": "i"}
+        return {"$or": [{f: word if f in word_fields else start} for f in fields]}
 
     def aggregate(self, pipeline: List[Dict]) -> List[Dict]:
         """
