@@ -6,10 +6,8 @@
 // lifecycle from GET /vendors/purchase-orders/{po_id}/timeline (PR #869):
 //   header  : PO number + vendor + PurchaseStatusChip
 //   timeline: chronological events in the owner vocabulary
-//             (Ordered / Sent / Box received / On shelf / Bill settled)
-//   lists   : raw linked GRNs + purchase invoices with their statuses (a
-//             bill's amount, paid state and the "Bill settled" event are
-//             supplier money: PAYABLES_ROLES only, owner ruling 2026-10-01)
+//             (Ordered / Sent / Box received / On shelf / Bill booked)
+//   lists   : raw linked GRNs + purchase invoices with their statuses
 //   footer  : ONE derived next-step action --
 //             DRAFT                      -> "Send to vendor" (parent callback;
 //                                           PurchaseTable routes it to the PO
@@ -77,7 +75,9 @@ export interface POTimelineGRN {
 export interface POTimelineInvoice {
   bill_id: string;
   invoice_number: string;
-  status: string;
+  /** status + total are supplier-bill money: the server sends them to the
+   *  accounts roles only (cost_mask "payables"); anyone else gets neither. */
+  status?: string | null;
   total?: number | null;
   created_at?: string | null;
 }
@@ -205,12 +205,6 @@ export function deriveNextStep(
 export function POLifecycleDrawer({ poId, poNumber, onClose, onSendToVendor }: POLifecycleDrawerProps) {
   const navigate = useNavigate();
   const { hasRole } = useAuth();
-  // Supplier money (owner ruling 2026-10-01): what a bill against this PO is
-  // for, whether it is paid, and the "Bill settled" event are the accounts
-  // roles' alone. The server already sends anyone else a bill with no total
-  // and a neutral BOOKED status; this keeps the drawer from stating a paid
-  // state it was never told.
-  const canSeePayables = hasRole(PAYABLES_ROLES);
   const closeRef = useRef<HTMLButtonElement | null>(null);
 
   const [timeline, setTimeline] = useState<POTimeline | null>(null);
@@ -265,9 +259,7 @@ export function POLifecycleDrawer({ poId, poNumber, onClose, onSendToVendor }: P
     navigate(nextStep.to);
   };
 
-  const events = (timeline?.events ?? []).filter(
-    (ev) => canSeePayables || String(ev.kind || '').toLowerCase() !== 'bill_settled',
-  );
+  const events = timeline?.events ?? [];
   const grns = timeline?.grns ?? [];
   const invoices = timeline?.invoices ?? [];
 
@@ -417,10 +409,10 @@ export function POLifecycleDrawer({ poId, poNumber, onClose, onSendToVendor }: P
                           <p className="text-sm font-medium text-gray-900 truncate">{inv.invoice_number}</p>
                           <p className="text-xs text-gray-500">
                             {fmtDateTime(inv.created_at)}
-                            {canSeePayables && typeof inv.total === 'number' && ` · ₹${inv.total.toLocaleString()}`}
+                            {typeof inv.total === 'number' && ` · ₹${inv.total.toLocaleString()}`}
                           </p>
                         </div>
-                        {canSeePayables && inv.status && <PurchaseStatusChip status={inv.status} kind="invoice" />}
+                        {inv.status && <PurchaseStatusChip status={inv.status} kind="invoice" />}
                       </div>
                     ))}
                   </div>

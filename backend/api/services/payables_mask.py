@@ -14,9 +14,14 @@ its own. Its helpers are PURE: each returns a copy without the supplier money
 and never mutates what it was given; an accounts caller gets the input back
 unchanged.
 
-Routes that also carry the cost rule (cost_mask.mask_debit_note /
-mask_vendor_return) apply these helpers on top, so either rule alone is
-enough to hide the money from a role it excludes.
+What this module does NOT do: hide the price paid per piece or the supplier
+from the workshop on a vendor return / debit note (owner ruling 2026-09-29).
+That is the cost rule's, and its projections (cost_mask.mask_vendor_return /
+mask_debit_note) arrive with #1161 -- not on this branch. Where both apply,
+these helpers run on top, so either rule alone hides the money from a role it
+excludes. The PO timeline's bill masking is NOT here either: it is the
+inline can_see_cost(user, "payables") check in routers/vendors/po_detail
+(#1161's text, one implementation).
 
 No DB access. No emoji (Windows cp1252).
 """
@@ -136,34 +141,6 @@ def strip_rma_credit(doc: Any, user: Optional[dict]) -> Any:
     if can_see_payables(user):
         return doc
     return _without(doc, _RMA_CREDIT.__contains__, _rma_note)
-
-
-# --- PO timeline (routers/vendors/po_detail) --------------------------------
-# A purchase invoice booked against the PO: its total and its paid state
-# (OUTSTANDING / PARTIAL / PAID) are supplier money. Anyone else reads that
-# the bill was booked -- the drawer's chip maps BOOKED to "Bill settled", the
-# word it shows for every bill.
-BILL_BOOKED = "BOOKED"
-BILL_BOOKED_DETAIL = "Purchase invoice booked"
-
-
-def strip_po_timeline_bills(body: Any, user: Optional[dict]) -> Any:
-    """A PO timeline without each bill's total and paid state, unless the
-    caller is an accounts role."""
-    if can_see_payables(user) or not isinstance(body, dict):
-        return body
-    out = dict(body)
-    out["invoices"] = [
-        {**{k: v for k, v in inv.items() if k != "total"}, "status": BILL_BOOKED}
-        if isinstance(inv, dict) else inv
-        for inv in body.get("invoices") or []
-    ]
-    out["events"] = [
-        {**ev, "detail": BILL_BOOKED_DETAIL}
-        if isinstance(ev, dict) and ev.get("kind") == "bill_settled" else ev
-        for ev in body.get("events") or []
-    ]
-    return out
 
 
 # --- Approvals (routers/approvals, services/approvals) ----------------------

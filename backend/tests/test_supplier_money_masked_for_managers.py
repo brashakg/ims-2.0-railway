@@ -772,8 +772,8 @@ def perf(monkeypatch):
 
     db = FakeDB()
     db.get_collection("vendor_bills").insert_one(
-        {"vendor_id": "V1", "total_amount": 1250.0,
-         "bill_date": business_now().strftime("%Y-%m-10")})
+        {"vendor_id": "V1", "store_id": "S1", "total_amount": 1250.0,
+         "bill_date": business_now().strftime("%Y-%m-01")})
     monkeypatch.setattr(v, "_get_db", lambda: db)
     monkeypatch.setattr(v, "get_vendor_repository", lambda: _VendorRepo())
     return SimpleNamespace(v=v, db=db)
@@ -808,6 +808,73 @@ def test_scorecard_keeps_spend_for_accounts(perf, role, grn_history):
     if grn_history:
         _with_grn(perf.db)
     assert _perf(perf, role)["mtd_spend"] == 1250.0
+
+
+# The scorecard's mtd_spend is the Purchases report's `billed`, one rule (F56):
+# the caller's own shop (F63, resolve_store_scope) and the supplier ledger's
+# as-of day -- a bill keyed ahead is not billed yet. It used to sum every
+# shop's bills dated anywhere in the month: a Pune accountant read Dhanbad's
+# 57000, an admin 57000 against the report's 50000.
+
+DHN, PUN = "BV-DHN-01", "WO-PUN-01"
+
+
+@pytest.fixture
+def jharkhand(monkeypatch):
+    mongomock = pytest.importorskip("mongomock")
+    from api.routers import vendors as v
+    from api.routers.auth import get_current_user
+    from api.utils.ist import now_ist_naive
+
+    today = now_ist_naive().date()
+    db = mongomock.MongoClient().db
+    db["vendors"].insert_one({"vendor_id": "V-JHK", "trade_name": "Jharkhand Optical"})
+    db["vendor_bills"].insert_many([
+        {"bill_id": "B-NOW", "vendor_id": "V-JHK", "store_id": DHN,
+         "bill_date": today.isoformat(), "total_amount": 50000.0, "status": "OUTSTANDING"},
+        # keyed ahead: dated tomorrow (this month or the next -- never billed today)
+        {"bill_id": "B-AHEAD", "vendor_id": "V-JHK", "store_id": DHN,
+         "bill_date": (today + timedelta(days=1)).isoformat(), "total_amount": 7000.0,
+         "status": "OUTSTANDING"},
+    ])
+    monkeypatch.setattr(v, "_get_db", lambda: db)
+    monkeypatch.setattr(v, "get_vendor_repository", lambda: _VendorRepo())
+    app = FastAPI()
+    app.include_router(v.router, prefix="/vendors")
+    client = TestClient(app)
+
+    def get(path, user):
+        app.dependency_overrides[get_current_user] = lambda: user
+        return client.get(path)
+
+    return get
+
+
+def _at(role, shop):
+    return {"user_id": f"u-{role}-{shop}", "roles": [role],
+            "store_ids": [shop] if shop else [], "active_store_id": shop}
+
+
+def _report_billed(jharkhand, user):
+    body = jharkhand("/vendors/purchases-this-month", user).json()
+    return next((r["billed"] for r in body["vendors"] if r["vendor_id"] == "V-JHK"), 0.0)
+
+
+@pytest.mark.parametrize(
+    "user,want",
+    [(_at("ADMIN", None), 50000.0), (_at("ACCOUNTANT", DHN), 50000.0), (_at("ACCOUNTANT", PUN), 0.0)],
+    ids=["admin-every-shop", "dhanbad-accountant", "pune-accountant"],
+)
+def test_scorecard_spend_is_the_reports_billed(jharkhand, user, want):
+    resp = jharkhand("/vendors/V-JHK/performance", user)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["mtd_spend"] == want == _report_billed(jharkhand, user)
+
+
+def test_scorecard_spend_refuses_an_accountant_with_no_shop(jharkhand):
+    resp = jharkhand("/vendors/V-JHK/performance", _at("ACCOUNTANT", None))
+    assert resp.status_code == 403, resp.text
+    assert "50000" not in resp.text
 
 
 # ============================================================================
@@ -854,8 +921,8 @@ def test_timeline_shows_a_booked_bill_without_money(timeline, role):
     body = _run(timeline.get_po_timeline("PO1", _user(role)))
     (inv,) = body["invoices"]
     assert inv["invoice_number"] == "INV-9" and inv["bill_id"] == "B1"
-    assert "total" not in inv
-    assert inv["status"] == "BOOKED"
+    assert "total" not in inv and "status" not in inv
+    assert _bill_event(body)["label"] == "Bill booked"  # never "settled": paid is money
     assert _bill_event(body)["detail"] == "Purchase invoice booked"
     assert not [s for s in _strings(body) if "PARTIAL" in s]
     # The rest of the life of the PO is unchanged.
