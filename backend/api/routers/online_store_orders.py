@@ -768,14 +768,17 @@ async def clear_rx_hold(
     # GSTIN, a split across GSTINs) is not a stock hold and no human can clear
     # it away: while the problem stands no tax invoice can be issued, so the
     # goods must not leave. Fix the cause (the shop's GSTIN in Organization,
-    # or the fulfillment orders + Re-map), then clear.
-    bad = stored_seller_problem(order, cause_only=True)
+    # or the fulfillment orders + Re-map), then clear. Judged ONLY on an
+    # order its booking put on that hold (seller_held): one it passed is
+    # never re-judged on today's shop records -- its Rx, stock or move hold
+    # releases as any other door reads it.
+    seller = seller_held(order)
+    bad = stored_seller_problem(order, cause_only=True) if seller else None
     if bad:
         raise HTTPException(
             status_code=409,
             detail=f"This hold cannot be cleared yet: {bad['message']}",
         )
-    seller = seller_held(order)
     # A stock miss under the seller hold (its own marker): the release lifts
     # only the seller part and the stock hold stands -- Re-map's own answer
     # (its claim comes up short, so it holds again). No unit was claimed.

@@ -3595,6 +3595,32 @@ def test_remap_keeps_an_rx_pending_order_held(world, monkeypatch):
     assert "stock_hold_reason" not in after
 
 
+@pytest.mark.parametrize("edit", [{"gstin": ""}, {"gstin": "27AAAAA0000A1Z5"}])
+def test_clear_hold_never_re_judges_an_order_its_booking_passed(world, monkeypatch, edit):
+    """[LOW] Booked CLEAN at Bokaro (no route problem), then held for its
+    prescription (Rx flag-and-hold). Organization later blanks Bokaro's
+    GSTIN, or sets another state's. Clear-hold re-ran the seller check on
+    every routed order and refused the Rx release ('Bokaro has no GSTIN'),
+    while the dispatch gate, the invoice door and the returns -- which read
+    the booking's verdict -- let the same order through: two answers. Only
+    a seller-held order is judged on today's shop records."""
+    db = world["db"]
+    _stock(db, "BV-BOK-01", "P-RB", 1)
+    world["shop"].fo(FO_1, LOC_BOK)
+    res, order = _book(world, _order(60160 + bool(edit["gstin"])))
+    assert order["fulfillment_route"]["problems"] == [] and not order.get("fulfillment_hold")
+    db.orders.update_one({"order_id": res["order_id"]},
+                         {"$set": {"rx_pending": True, "fulfillment_hold": True}})
+    db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": edit})
+
+    out = _clear_hold(world, monkeypatch, res["order_id"])
+
+    assert getattr(out, "status_code", None) is None and out["released"] == ["RX"], out
+    after = db.orders.find_one({"order_id": res["order_id"]}, {"_id": 0})
+    assert after["fulfillment_hold"] is False and after["rx_pending"] is False
+    assert route_mod.stored_seller_problem(after) is None  # the dispatch gate's answer
+
+
 def test_a_remap_still_short_leaves_the_stock_miss_task_open(world, monkeypatch):
     """[LOW] Shopify assigns Bokaro, which has no stock and no GSTIN: booked
     short (stock-miss task open) and seller-held. The GSTIN is fixed and
