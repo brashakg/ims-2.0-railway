@@ -30,7 +30,12 @@ It REPORTS, and never changes:
     same collection (for products, the legacy barcode field counts too);
   * every legacy products.barcode (main's old Manage Barcode wrote it; its
     Generate made random EAN-13s that pass the format check, so a valid one
-    is still not proven to be the maker's).
+    is still not proven to be the maker's);
+  * every attribute KEY that names a barcode in another letter case or with
+    padding ('GTIN', 'Upc', ' gtin '): main's PUT stored keys as sent, no
+    screen shows one, the one-holder check cannot see one, and it publishes as
+    ims.gtin / ims.upc when the exact key is absent. Its value counts towards
+    the duplicates.
 
 USAGE
 -----
@@ -52,7 +57,12 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "backend"))
 
-from api.services.gtin import classify_gtin, normalise_candidate, sanitise_gtin  # noqa: E402
+from api.services.gtin import (  # noqa: E402
+    classify_gtin,
+    manufacturer_barcode_key,
+    normalise_candidate,
+    sanitise_gtin,
+)
 
 # collection -> (the row's id field, the fields it rewrites, a field it only reports)
 COLLECTIONS: Dict[str, Dict[str, Any]] = {
@@ -83,7 +93,8 @@ def _value(doc: Dict[str, Any], path: str) -> Any:
 
 def normalise(coll, *, commit: bool) -> Dict[str, List[Any]]:
     """Print, and with ``commit`` apply, the rewrites for one collection, and
-    print the report. Returns {"rewrite", "invalid", "duplicates", "legacy"}.
+    print the report. Returns {"rewrite", "invalid", "duplicates", "legacy",
+    "spelling"}.
     Refuses (SystemExit) any collection not in COLLECTIONS. Explicit checks,
     not `assert`: `python -O` strips asserts."""
     name = getattr(coll, "name", None)
@@ -92,18 +103,36 @@ def normalise(coll, *, commit: bool) -> Dict[str, List[Any]]:
     cfg = COLLECTIONS[name]
     id_field, legacy = cfg["id"], cfg["legacy"]
     fields = list(cfg["fix"]) + ([legacy] if legacy else [])
-    flt = {"$or": [{f: {"$exists": True, "$nin": [None, ""]}} for f in fields]}
     top = {f.split(".")[0] for f in fields}
-    rows = list(coll.find(flt, {"_id": 0, id_field: 1, **{t: 1 for t in top}}))
+    ors = [{f: {"$exists": True, "$nin": [None, ""]}} for f in fields]
+    if "attributes" in top:
+        # A key in another spelling ('GTIN') has no fixed path to query by.
+        # ponytail: reads every row's attributes; fine at catalogue size.
+        ors.append({"attributes": {"$exists": True}})
+    rows = list(coll.find({"$or": ors}, {"_id": 0, id_field: 1, **{t: 1 for t in top}}))
 
-    out: Dict[str, List[Any]] = {"rewrite": [], "invalid": [], "duplicates": [], "legacy": []}
+    out: Dict[str, List[Any]] = {"rewrite": [], "invalid": [], "duplicates": [], "legacy": [], "spelling": []}
     holders: Dict[str, set] = {}
+    held = 0
     for doc in rows:
         rid = doc.get(id_field)
+        attrs = doc.get("attributes") if "attributes" in top else None
+        others = [
+            (f"attributes.{k}", raw)
+            for k, raw in (attrs.items() if isinstance(attrs, dict) else ())
+            if manufacturer_barcode_key(k) not in (None, k) and normalise_candidate(raw)
+        ]
+        for k, raw in others:
+            out["spelling"].append((rid, k, raw, classify_gtin(raw) or "valid"))
+            clean = sanitise_gtin(raw)
+            if clean:
+                holders.setdefault(clean.zfill(14), set()).add(rid)
+        found = bool(others)
         for f in fields:
             raw = _value(doc, f)
             if not normalise_candidate(raw):
                 continue
+            found = True
             clean = sanitise_gtin(raw)
             if f == legacy:
                 out["legacy"].append((rid, raw, classify_gtin(raw) or "passes the format check"))
@@ -113,9 +142,10 @@ def normalise(coll, *, commit: bool) -> Dict[str, List[Any]]:
                 out["rewrite"].append((rid, f, raw, clean))
             if clean:
                 holders.setdefault(clean.zfill(14), set()).add(rid)
+        held += found
     out["duplicates"] = sorted((g, sorted(map(str, ids))) for g, ids in holders.items() if len(ids) > 1)
 
-    print(f"== {name}: {len(rows)} row(s) hold a manufacturer barcode")
+    print(f"== {name}: {held} row(s) hold a manufacturer barcode")
     print(f"{len(out['rewrite'])} value(s) to store digits only:")
     for rid, f, raw, clean in out["rewrite"]:
         print(f"  {rid}  {f}  {raw!r} -> {clean!r}")
@@ -129,6 +159,10 @@ def normalise(coll, *, commit: bool) -> Dict[str, List[Any]]:
         print(f"{len(out['legacy'])} legacy {name}.{legacy} value(s) (REPORT ONLY, unverified):")
         for rid, raw, verdict in out["legacy"]:
             print(f"  {rid}  {str(raw)[:40]!r}  {verdict}")
+    if "attributes" in top:
+        print(f"{len(out['spelling'])} barcode key(s) in another spelling (REPORT ONLY; no screen shows one):")
+        for rid, k, raw, verdict in out["spelling"]:
+            print(f"  {rid}  {k!r}  {str(raw)[:40]!r}  {verdict}")
     if not commit:
         print("DRY RUN - nothing written. Re-run with --commit to store them digits only.")
         return out

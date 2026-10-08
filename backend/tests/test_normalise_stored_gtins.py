@@ -112,6 +112,31 @@ def test_the_catalogue_twin_and_variant_rows_are_stored_digits_only():
     assert rows.docs[0]["gtin"] == _EAN
 
 
+def test_a_barcode_key_in_another_spelling_is_reported_never_changed(capsys):
+    """Main's PUT stored keys as sent: a row can hold attributes.GTIN with no
+    attributes.gtin. No screen shows it and the one-holder check cannot see it,
+    so the dry run must list it (drop the `others` scan -> "0 row(s)" -> red)."""
+    coll = StrictCollection(
+        "products",
+        [
+            {"product_id": "P-CASE", "attributes": {"GTIN": "2000000000015"}},
+            {"product_id": "P-PAD", "attributes": {" upc ": _UPC, "frame_material": "TR90"}},
+            {"product_id": "P-EXACT", "attributes": {"upc": "0" + _UPC}},
+            {"product_id": "P-PLAIN", "attributes": {"frame_material": "TR90"}},
+        ],
+    )
+    before = copy.deepcopy(coll.docs)
+    out = script.normalise(coll, commit=True)
+    assert coll.docs == before
+    assert sorted(out["spelling"]) == [
+        ("P-CASE", "attributes.GTIN", "2000000000015", "RESTRICTED"),
+        ("P-PAD", "attributes. upc ", _UPC, "valid"),
+    ]
+    assert "== products: 3 row(s) hold a manufacturer barcode" in capsys.readouterr().out
+    # Its value counts towards the duplicates (one UPC, two rows).
+    assert out["duplicates"] == [(_UPC.zfill(14), ["P-EXACT", "P-PAD"])]
+
+
 def test_refuses_any_other_collection():
     other = StrictCollection("stock_units", [{"barcode": "8 056597 720373", "attributes": {"gtin": "8 056597 720373"}}])
     with pytest.raises(SystemExit, match="refusing"):
