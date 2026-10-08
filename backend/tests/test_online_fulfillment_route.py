@@ -4215,3 +4215,95 @@ def test_a_move_on_the_wire_never_undoes_what_landed_meanwhile(world, monkeypatc
     assert after["fulfillment_route"].get(route_mod.SELLER_RELEASED)
     assert not route_mod.seller_held(after) and after["fulfillment_hold"] is False
     assert [m["status"] for m in after["fulfillment_route"]["moves"]] == ["MOVED"]
+
+
+def _stale_lease(db, oid):
+    """A worker hard-killed mid-Re-map leaves its lease, which goes stale."""
+    db.orders.update_one({"order_id": oid}, {"$set": {"reroute_lease_at": "2000-01-01T00:00:00+00:00"}})
+
+
+def _open_miss_tasks(world, oid):
+    return [t["store_id"] for t in world["tasks"].created
+            if t["source_ref"] == f"online_stock_miss:{oid}" and t["status"] == "OPEN"]
+
+
+def test_a_settled_half_claim_tasks_the_shop_short_now(world, monkeypatch):
+    """[LOW] Round 19, item 3: Shopify splits RB -> Bokaro, OA -> Pune
+    (another GSTIN, no OA): booked short at Pune (its task) and held
+    SPLIT_SELLERS. The human moves FO_2 to Bokaro, which gets an OA; Re-map
+    writes the whole order at Bokaro and dies before its claim; a refund mark
+    lands. The takeover settled the claim as it stands, its miss naming
+    Bokaro -- but the one stock-miss task per order was Pune's, still open,
+    for a leg Pune no longer ships: Bokaro's manager was never told. The
+    settle answers the booking's miss as Re-map's own claim does."""
+    from api.services import shopify_ingest
+
+    db = world["db"]
+    db.stores.update_one({"store_id": PUNE}, {"$set": {"shopify_location_id": LOC_PUN}})
+    _stock(db, "BV-BOK-01", "P-RB", 1)
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 1)])
+    world["shop"].fo(FO_2, LOC_PUN, lines=[(9001, 1)])
+    payload = _order(61220, lines=(("RB-1234", 1), ("OA-5", 1)))
+    res, order = _book(world, payload)
+    oid = res["order_id"]
+    assert [p["code"] for p in order["fulfillment_route"]["problems"]] == ["SPLIT_SELLERS"]
+    assert _open_miss_tasks(world, oid) == [PUNE]
+    world["shop"].fos[1]["assignedLocation"]["location"]["id"] = LOC_BOK  # the human's move
+    _stock(db, "BV-BOK-01", "P-OA", 1)
+    real = shopify_ingest._claim_online_units
+
+    def die(*_a, **_k):
+        raise _Died()
+
+    monkeypatch.setattr(shopify_ingest, "_claim_online_units", die)
+    with pytest.raises(_Died):
+        asyncio.run(route_mod.reroute_held_order(db, oid))
+    monkeypatch.setattr(shopify_ingest, "_claim_online_units", real)
+    _stale_lease(db, oid)
+    route_mod.mark_refund_or_return(db, oid)
+
+    out = _remap(world, monkeypatch, payload)
+
+    assert not out["ok"], out
+    miss = db.online_stock_miss.find_one({"order_id": oid, "reason": "remap_stopped"})
+    assert miss and miss["store_id"] == "BV-BOK-01", miss
+    assert _open_miss_tasks(world, oid) == ["BV-BOK-01"]
+    booked = db.online_stock_miss.find_one({"order_id": oid, "store_id": PUNE})
+    assert booked["resolved"] is True and booked["resolution"] == "SUPERSEDED"
+
+
+def test_a_settled_claim_short_at_two_shops_tasks_the_first(world, monkeypatch):
+    """Round 19 follow-up (mutant S6): the shop the settle hands the miss to
+    when two are short. Split RB -> Bokaro, OA -> Pune, held; Shopify then
+    has the OA at Bokaro (the billing shop, its first fulfillment order) and
+    the RB at Ranchi. Re-map gives both units back, writes and dies before
+    its claim; a refund mark lands. Short at Bokaro and Ranchi: the miss and
+    its task are Bokaro's (the first), naming both."""
+    from api.services import shopify_ingest
+
+    db = world["db"]
+    payload, res, _o = _split_sellers(world, 61230, bokaro_oa=1)
+    oid = res["order_id"]
+    _stock(db, "BV-RAN-01", "P-RB", 1)
+    world["shop"].fos[0]["assignedLocation"]["location"]["id"] = LOC_RAN
+    world["shop"].fos[1]["assignedLocation"]["location"]["id"] = LOC_BOK
+    world["shop"].fos.reverse()
+    real = shopify_ingest._claim_online_units
+
+    def die(*_a, **_k):
+        raise _Died()
+
+    monkeypatch.setattr(shopify_ingest, "_claim_online_units", die)
+    with pytest.raises(_Died):
+        asyncio.run(route_mod.reroute_held_order(db, oid))
+    monkeypatch.setattr(shopify_ingest, "_claim_online_units", real)
+    assert _sold_at(db, oid) == []
+    _stale_lease(db, oid)
+    route_mod.mark_refund_or_return(db, oid)
+
+    out = _remap(world, monkeypatch, payload)
+
+    assert not out["ok"], out
+    miss = db.online_stock_miss.find_one({"order_id": oid, "reason": "remap_stopped"})
+    assert miss["store_id"] == "BV-BOK-01" and miss["detail"]["short_stores"] == ["BV-BOK-01", "BV-RAN-01"]
+    assert _open_miss_tasks(world, oid) == ["BV-BOK-01"]

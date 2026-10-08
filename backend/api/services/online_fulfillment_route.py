@@ -1413,6 +1413,50 @@ def _dead_order_units(db, order_id: Optional[str]) -> Optional[str]:
     return "its units stay with it for the refund's restock to put back"
 
 
+def _open_misses(db, order_id: Optional[str]) -> Optional[List[Any]]:
+    """The ids of the order's unresolved stock misses now -- read BEFORE a
+    Re-map's claim settles, for ``_answer_misses`` (None: unreadable)."""
+    try:
+        return [r["_id"] for r in db.get_collection("online_stock_miss").find(
+            {"order_id": order_id, "resolved": False})]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[ONLINE_ROUTE] stock-miss read skipped for %s: %s", order_id, exc)
+        return None
+
+
+def _answer_misses(db, order_id: Optional[str], ref: Any, booked: Optional[List[Any]], done: str) -> None:
+    """THE answer to the stock misses an order had before a Re-map's claim
+    settled (``booked``, ``_open_misses``; None: unread, left as they are),
+    Re-map's own claim or one settled as it stands: only a WHOLE claim
+    answers them (REROUTED, their task closed); still short, the new miss
+    supersedes them and the task is the shop's that is short NOW -- the
+    task is ONE per order (deduped), so the old shop's is closed first (a
+    shop still short keeps its one task as it was). Fail-soft."""
+    from datetime import datetime, timezone
+
+    from .shopify_ingest import raise_stock_miss_task
+
+    if booked is None:
+        return
+    misses = db.get_collection("online_stock_miss")
+    try:
+        short = list(misses.find({"order_id": order_id, "resolved": False, "_id": {"$nin": booked}}))
+        misses.update_many(
+            {"_id": {"$in": booked}},
+            {"$set": {"resolved": True, "resolution": "SUPERSEDED" if short else "REROUTED",
+                      "resolved_at": datetime.now(timezone.utc).isoformat()}},
+        )
+        miss_ref = f"online_stock_miss:{order_id}"
+        if not short:
+            _close_tasks([miss_ref], done)
+            return
+        at = short[0].get("store_id")
+        _close_tasks([miss_ref], f"The order is short at {at} now, which has the task.", keep_store=at)
+        raise_stock_miss_task(order_id, ref, at, short[0].get("reason"), short[0].get("detail"))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[ONLINE_ROUTE] stock-miss close skipped for %s: %s", order_id, exc)
+
+
 def _settle_as_it_stands(db, order: Dict[str, Any]) -> bool:
     """Settle a stopped Re-map's claim AS IT STANDS, for an order no later
     press may re-route (``_past_remap``): a dead order's units go by its
@@ -1420,8 +1464,9 @@ def _settle_as_it_stands(db, order: Dict[str, Any]) -> bool:
     units SOLD to it (where a return's or a refund's restock looks for them)
     and, for a live order short of what its route claims, the booking's own
     under-claim is recorded (``_record_stock_miss``: a stock hold with its
-    task -- clear-hold, once a human resolved it). False when it could not be
-    stamped (the claim stays unsettled)."""
+    task -- clear-hold, once a human resolved it), answered as Re-map's own
+    claim answers it (``_answer_misses``: the task goes to the shop short
+    now). False when it could not be stamped (the claim stays unsettled)."""
     from .shopify_ingest import _record_stock_miss
 
     oid = order.get("order_id")
@@ -1440,12 +1485,15 @@ def _settle_as_it_stands(db, order: Dict[str, Any]) -> bool:
         return True  # nothing ships for it
     want = _wanted(order.get("items") or [], order.get("fulfillment_route") or {})
     short = sorted({s for (s, p), q in want.items() if have.get((s, p), 0) < q})
+    booked = _open_misses(db, oid)
     if short:
         _record_stock_miss(db, oid, short[0], "remap_stopped", {
             "expected": sum(want.values()),
             "claimed": sum(min(have.get(k, 0), q) for k, q in want.items()),
             "short_stores": short,
         })
+    _answer_misses(db, oid, order.get("order_number") or oid, booked,
+                   "Re-map stopped; its claim, settled as it stands, is whole.")
     return True
 
 
@@ -1499,11 +1547,7 @@ async def reroute_held_order(db, order_id: str) -> Dict[str, Any]:
     (``_settle_as_it_stands``) and the lease comes off."""
     from datetime import datetime, timedelta, timezone
 
-    from .shopify_ingest import (
-        _claim_online_units,
-        _record_stock_miss,
-        raise_stock_miss_task,
-    )
+    from .shopify_ingest import _claim_online_units, _record_stock_miss
 
     coll = _orders(db)
     now = datetime.now(timezone.utc)
@@ -1667,12 +1711,7 @@ async def reroute_held_order(db, order_id: str) -> Dict[str, Any]:
         except Exception as exc:  # noqa: BLE001 -- nothing written: its units are its own again
             put_back()
             return refused(str(exc))
-        misses = db.get_collection("online_stock_miss")
-        try:
-            booked_misses = [r["_id"] for r in misses.find({"order_id": order_id, "resolved": False})]
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[ONLINE_ROUTE] stock-miss read skipped for %s: %s", order_id, exc)
-            booked_misses = None
+        booked_misses = _open_misses(db, order_id)
         kept: Dict[str, Dict[str, int]] = {}
         for (shop, pid), ids in keep.items():
             if ids:
@@ -1691,27 +1730,7 @@ async def reroute_held_order(db, order_id: str) -> Dict[str, Any]:
             _stock_write_back(db, {**order, **update})
             return refused(f"the order was cancelled while Re-map ran -- {units}")
         done = "Re-mapped: the order was routed and its stock claimed again."
-        if booked_misses is not None:
-            try:  # the booking's stock miss is answered only by a WHOLE claim
-                short = list(misses.find(
-                    {"order_id": order_id, "resolved": False, "_id": {"$nin": booked_misses}}))
-                misses.update_many(
-                    {"_id": {"$in": booked_misses}},
-                    {"$set": {"resolved": True, "resolution": "SUPERSEDED" if short else "REROUTED",
-                              "resolved_at": now.isoformat()}},
-                )
-                miss_ref = f"online_stock_miss:{order_id}"
-                if not short:
-                    _close_tasks([miss_ref], done)
-                else:
-                    # Still short: the task is the shop's that is short NOW (a
-                    # shop still short keeps its one task as it was).
-                    at = short[0].get("store_id")
-                    _close_tasks([miss_ref], f"Re-mapped: the order is short at {at} now, "
-                                 "which has the task.", keep_store=at)
-                    raise_stock_miss_task(order_id, ref, at, short[0].get("reason"), short[0].get("detail"))
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("[ONLINE_ROUTE] stock-miss close skipped for %s: %s", order_id, exc)
+        _answer_misses(db, order_id, ref, booked_misses, done)
         # A shop that no longer ships a unit of it must not pack one: every
         # shop's task, not only those of the stores read -- a Re-map carrying
         # on a crashed one reads the stores that one already rewrote.
