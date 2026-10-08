@@ -8,8 +8,9 @@ auto-logout setting is saved and read under ONE id.
      Settings > Operational Rules). Their own limit always wins. A credit
      sale over the limit stays BLOCKED - at the ONE check, the till's
      POST /orders/{id}/payments.
-  2. /admin/system/settings and /settings/system write the same document
-     the /health auto-logout reader reads.
+  2. Auto-logout has ONE door: /settings/system (SUPERADMIN-only writes)
+     writes the document /health reads. The ADMIN-open /admin/system/settings
+     pair is deleted, so an ADMIN cannot change auto-logout at all.
   3. The removed duplicates stay removed.
 
 Every Mongo answer comes from mongomock - no live DB.
@@ -267,27 +268,20 @@ def health(db, monkeypatch):
     main._reset_auto_logout_cache()
 
 
-def test_admin_system_settings_save_is_what_health_reads(health):
-    admin = _client(_user("ADMIN"))
-    assert admin.put("/admin/system/settings", json={"auto_logout_minutes": 30}).status_code == 200
-    assert health()["minutes"] == 30
-
-
-def test_settings_system_save_shows_on_admin_system_settings(health):
-    sa = _client(_user("SUPERADMIN"))
-    assert sa.put("/settings/system", json={"auto_logout_minutes": 25}).status_code == 200
+def test_superadmin_settings_system_save_is_what_health_reads(health):
+    assert _client(_user("SUPERADMIN")).put("/settings/system", json={"auto_logout_minutes": 25}).status_code == 200
     assert health()["minutes"] == 25
-    got = sa.get("/admin/system/settings").json()
-    assert got["auto_logout_minutes"] == 25
 
 
-def test_admin_system_settings_drops_the_duplicate_defaults(db):
-    got = _client(_user("ADMIN")).get("/admin/system/settings").json()
-    assert "low_stock_alert_enabled" not in got
-    # No second auto-logout default that disagrees with the 15 /health enforces.
-    assert "auto_logout_minutes" not in got
-    # Round-off is a separate job - its keys are untouched.
-    assert got["round_off_enabled"] is True and got["round_off_paise"] == 50
+def test_admin_cannot_change_auto_logout_through_any_door(health):
+    before = health()
+    admin = _client(_user("ADMIN"))
+    body = {"auto_logout_enabled": False, "auto_logout_minutes": 480, "maintenance_mode": True}
+    assert admin.put("/settings/system", json=body).status_code == 403
+    # The ADMIN-open second door (admin_extras GET/PUT /system/settings) is gone.
+    assert admin.put("/admin/system/settings", json=body).status_code == 404
+    assert admin.get("/admin/system/settings").status_code == 404
+    assert health() == before
 
 
 def _load_script():
@@ -341,11 +335,15 @@ def test_approval_workflows_drop_the_discount_and_credit_rows(db):
     assert types == {"REFUND_APPROVAL"}
 
 
-def test_the_inert_role_caps_copy_is_gone():
+@pytest.mark.parametrize("gone, kept", [
+    ("/api/v1/admin/discounts/role-caps", "/api/v1/admin/discounts/enforced-caps"),
+    ("/api/v1/admin/system/settings", "/api/v1/settings/system"),
+])
+def test_the_second_doors_are_gone_from_the_app_and_the_policy(gone, kept):
     from api.main import app
     from api.services.rbac_policy import POLICY
 
     paths = {getattr(r, "path", "") for r in app.routes}
-    assert "/api/v1/admin/discounts/role-caps" not in paths
-    assert "/api/v1/admin/discounts/enforced-caps" in paths  # the one rule stays
-    assert not [row for row in POLICY if row["path"] == "/api/v1/admin/discounts/role-caps"]
+    assert gone not in paths
+    assert kept in paths  # the one rule stays
+    assert not [row for row in POLICY if row["path"] == gone]

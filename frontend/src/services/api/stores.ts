@@ -391,13 +391,7 @@ export const adminSystemApi = {
     return response.data;
   },
 
-  getSettings: async () => {
-    const response = await api.get('/admin/system/settings');
-    return response.data;
-  },
-
-  updateSettings: async (settings: Record<string, unknown>) => {
-    const response = await api.put('/admin/system/settings', settings);
-    return response.data;
-  },
+  // getSettings / updateSettings removed (2026-10-08): nothing called them, and
+  // their /admin/system/settings door let ADMIN change auto-logout. System
+  // settings have one door: settingsApi -> /settings/system (SUPERADMIN writes).
 };

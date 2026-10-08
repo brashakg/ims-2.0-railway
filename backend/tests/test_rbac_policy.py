@@ -203,13 +203,12 @@ def test_loyalty_settings_superadmin_only():
 
 def test_admin_router_is_admin_gated():
     """The admin router (APIRouter-level _require_admin_role) gates its rows to
-    ADMIN/SUPERADMIN - including pricing/HSN/role-cap/system-backup writes."""
+    ADMIN/SUPERADMIN - including pricing/HSN/tier-discount/system-backup writes."""
     for method, path in (
         ("POST", "/api/v1/admin/brands"),
         ("POST", "/api/v1/admin/hsn"),
         ("POST", "/api/v1/admin/discounts/tier-discounts"),
         ("POST", "/api/v1/admin/system/backups"),
-        ("PUT", "/api/v1/admin/system/settings"),
     ):
         assert sorted(_allowed(method, path)) == ["ADMIN", "SUPERADMIN"], (method, path)
 

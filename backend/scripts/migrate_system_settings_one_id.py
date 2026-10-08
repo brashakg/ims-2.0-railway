@@ -2,10 +2,12 @@
 
 WHY
 ---
-/admin/system/settings used to save under _id "system_settings" while
+The old /admin/system/settings door saved under _id "system_settings" while
 /settings/system and the /health auto-logout reader use _id "default", so a
-value saved through that door was never read. Both doors now use "default"
-(owner ruling 2026-10-08). This script keeps any value saved under the old id.
+value saved through that door was never read. That door is deleted
+(2026-10-08); /settings/system is the one door. This script keeps any value
+saved under the old id. READ THE DRY RUN FIRST: that door was open to ADMIN,
+so an auto_logout_* value it saved becomes live for every user on --apply.
 
 SAFETY
 ------

@@ -9,10 +9,11 @@ but which had no backend route (every call 404'd). Mounted at
 Discount config is Mongo-backed (collections: discount_rules,
 tier_discounts, promo_codes); the role caps the till enforces are code
 constants, shown read-only by /discounts/enforced-caps. System endpoints are
-thin: status is computed live, settings persist to the system_settings
-singleton (the same document /settings/system writes and /health reads),
-audit-logs proxy the audit collection, and backup/export/import are
-honest minimal stubs (full DB backup belongs to infra, not the app).
+thin: status is computed live, audit-logs proxy the audit collection, and
+backup/export/import are honest minimal stubs (full DB backup belongs to
+infra, not the app). System SETTINGS have one door, /settings/system
+(SUPERADMIN-only writes, read by /health) - the unused ADMIN-open
+/system/settings pair here was deleted (2026-10-08).
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -269,41 +270,6 @@ async def get_system_status():
         status["database"] = "error"
         status["error"] = str(e)
     return status
-
-
-# ONE document for every system setting: /settings/system (settings.py) writes
-# it and the /health auto-logout reader (main.py) reads it. This door used to
-# save under _id "system_settings", which nothing read; values saved there are
-# folded in by scripts/migrate_system_settings_one_id.py.
-_SYSTEM_SETTINGS_ID = "default"
-
-
-@router.get("/system/settings")
-async def get_system_settings():
-    coll = _coll("system_settings")
-    defaults = {
-        "round_off_enabled": True,
-        "round_off_paise": 50,
-        "backup_reminder_days": 7,
-    }
-    if coll is not None:
-        doc = coll.find_one({"_id": _SYSTEM_SETTINGS_ID})
-        if doc:
-            doc.pop("_id", None)
-            defaults.update(doc)
-    return defaults
-
-
-@router.put("/system/settings")
-async def update_system_settings(settings: Dict[str, Any]):
-    coll = _coll("system_settings")
-    if coll is None:
-        raise HTTPException(status_code=503, detail="Database not available")
-    settings = {k: v for k, v in settings.items() if k != "_id"}
-    settings["updated_at"] = _now_iso()
-    coll.update_one({"_id": _SYSTEM_SETTINGS_ID}, {"$set": settings}, upsert=True)
-    doc = coll.find_one({"_id": _SYSTEM_SETTINGS_ID})
-    return _scrub(doc) or {}
 
 
 @router.get("/system/audit-logs")

@@ -482,16 +482,6 @@ ROWS: List[Dict[str, object]] = [
     },
     {
         "method": "GET",
-        "path": "/api/v1/admin/system/settings",
-        "allowed": ["ADMIN", "SUPERADMIN"],
-    },
-    {
-        "method": "PUT",
-        "path": "/api/v1/admin/system/settings",
-        "allowed": ["ADMIN", "SUPERADMIN"],
-    },
-    {
-        "method": "GET",
         "path": "/api/v1/admin/system/status",
         "allowed": ["ADMIN", "SUPERADMIN"],
     },
