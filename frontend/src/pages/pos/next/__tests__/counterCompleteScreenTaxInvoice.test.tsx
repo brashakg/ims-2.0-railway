@@ -159,6 +159,27 @@ describe('the general counter completion screen', () => {
     expect(screen.getByText('+₹0.50')).toBeTruthy();
   });
 
+  it('shows a rounded-down bill with a minus Round off, and lines that add up', async () => {
+    // Half of all bills round DOWN. 999.99 + 500.50 = 1500.49 bills Rs 1,500:
+    // the lines keep their paise so line + line - 0.49 reads as the Total.
+    getOrder.mockResolvedValue({
+      ...ORDER,
+      grandTotal: 1500,
+      amountPaid: 1500,
+      roundOff: -0.49,
+      items: [
+        { productName: 'Frame', quantity: 1, finalPrice: 999.99 },
+        { productName: 'Sunglass', quantity: 1, finalPrice: 500.5 },
+      ],
+    });
+    mount(<SaleCompleteScreen orderId="o-1" />);
+    await screen.findByText(/Asha Verma/);
+    expect(screen.getByText('−₹0.49')).toBeTruthy();
+    expect(screen.queryByText('+₹0.49')).toBeNull();
+    expect(screen.getByText('₹999.99')).toBeTruthy();
+    expect(screen.getByText('₹500.50')).toBeTruthy();
+  });
+
   it('shows no Round off line on a whole-rupee bill', async () => {
     mount(<SaleCompleteScreen orderId="o-1" />);
     await screen.findByText(/Asha Verma/);

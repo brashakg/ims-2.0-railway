@@ -514,6 +514,10 @@ export function CompletionScreen({
   const number = order?.orderNumber || orderNumber || orderId;
   const phone = order?.customerPhone || '';
   const balance = Number(order?.balanceDue || 0);
+  // The bill's stored round off. When the bill moved, the lines and discount
+  // show their paise too, so the figures visibly add up to the Total.
+  const roundOff = Number(order?.roundOff || 0);
+  const hasRoundOff = roundOff !== 0;
 
   const openDocumentPdf = async () => {
     setErrorMsg(null);
@@ -609,7 +613,7 @@ export function CompletionScreen({
                     {it.quantity ?? 1} x {it.productName || 'Item'}
                   </span>
                   <span className="text-sm text-gray-900 tabular-nums shrink-0">
-                    {inr(Number(it.finalPrice ?? it.unitPrice ?? 0), { withPaise: false })}
+                    {inr(Number(it.finalPrice ?? it.unitPrice ?? 0), { withPaise: hasRoundOff })}
                   </span>
                 </li>
               ))}
@@ -618,12 +622,12 @@ export function CompletionScreen({
             {/* Every figure below is the SERVER's -- no local arithmetic. */}
             <div className="mt-3 pt-3 border-t border-gray-200">
               {typeof order?.totalDiscount === 'number' && order.totalDiscount > 0 && (
-                <Stat label="Discount" value={inr(order.totalDiscount, { withPaise: false })} />
+                <Stat label="Discount" value={inr(order.totalDiscount, { withPaise: hasRoundOff })} />
               )}
-              {Number(order?.roundOff || 0) !== 0 && (
+              {hasRoundOff && (
                 <Stat
                   label="Round off"
-                  value={`${Number(order?.roundOff) > 0 ? '+' : '−'}${inr(Math.abs(Number(order?.roundOff)))}`}
+                  value={`${roundOff > 0 ? '+' : '−'}${inr(Math.abs(roundOff))}`}
                 />
               )}
               <Stat
