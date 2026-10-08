@@ -1893,6 +1893,29 @@ def test_an_edit_that_omits_the_rate_and_hsn_keeps_the_stored_ones(monkeypatch):
 
 
 
+def test_an_edit_that_omits_hsn_keeps_an_hsn_whose_rate_came_from_the_table(monkeypatch):
+    """Panel item 5. The line was typed with HSN 900410 and its 18% worked out
+    from the HSN table (gst_source 'hsn'); the catalogue says 9003 / 5%. An
+    API edit that omits HSN and rate keeps 900410 and its 18% -- it does not
+    revert to the catalogue's HSN and rate."""
+    from api.routers.vendors.gst import build_po_gst
+
+    def catalogue(pid):
+        return {"product_id": pid, "hsn_code": "9003", "gst_rate": 5}
+
+    stored = build_po_gst([{**_ONE_LINE[0], "hsn": "900410"}], catalogue, None, None)["items"][0]
+    assert (stored["gst_source"], stored["hsn"], stored["tax_rate"]) == ("hsn", "900410", 18.0)
+    repo, _ = _wire(monkeypatch, _po(items=[stored]))
+
+    class _Catalogue:
+        def find_by_id(self, pid):
+            return catalogue(pid)
+
+    monkeypatch.setattr(v, "get_product_repository", lambda: _Catalogue())
+    _run(v.update_po("PO1", _edit_body([{**_ONE_LINE[0], "quantity": 5}]), _user()))
+    kept = repo.pos["PO1"]["items"][0]
+    assert (kept["quantity"], kept["hsn"], kept["tax_rate"]) == (5, "900410", 18.0)
+
 def _unresolved_draft(monkeypatch, catalogued):
     """A draft line whose product had no HSN and no rate when it was made:
     stored at 0% and flagged unresolved. The form leaves its rate out."""
@@ -2015,6 +2038,9 @@ def test_a_form_edit_of_a_product_with_a_typed_and_an_unsettled_line(monkeypatch
     "blank",
     ["\u3164\u3164\u3164", "\u115f\u1160\uffa0", "\u0301\u0301\u0301", "\ufe0f\ufe0f\ufe0f",
      "ab\u3164", "a\ufe0f\u0301",
+     # each blank Hangul filler on its own: un-stripped, each is a letter
+     "ab\u115f", "ab\u1160", "ab\uffa0",
+     "\u115f\u115f\u115f", "\u1160\u1160\u1160", "\uffa0\uffa0\uffa0",
      # invisible marks that would count after a letter unless stripped
      "a\u034f\u034f", "ab\u034f", "a\u180b\u180b", "ab\u180c", "ab\u180d", "ab\u180f",
      "ab\u17b4", "ab\u17b5",
