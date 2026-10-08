@@ -1535,7 +1535,11 @@ def test_a_cancel_fails_closed_when_the_stock_table_cannot_be_read(monkeypatch):
     class _StockDown:
         collection = _Unreadable()
 
-    repo, audit = _wire(monkeypatch, _po(status="SENT"))
+    # A held receipt: what it put in stock is counted from the stock table
+    # (an ACCEPTED one counts by its own accepted quantity, with no read).
+    held = {"po_id": "PO1", "grn_id": "G1", "grn_number": "RCPT/0011",
+            "status": "ESCALATED", "items": [{"product_id": "P1", "accepted_qty": 2}]}
+    repo, audit = _wire(monkeypatch, _po(status="SENT"), grns=[held])
     monkeypatch.setattr(v, "get_stock_repository", lambda: _StockDown())
     with pytest.raises(HTTPException) as e:
         _run(v.cancel_po("PO1", reason="vendor closed down", current_user=_user()))
@@ -1888,6 +1892,7 @@ def test_an_edit_that_omits_the_rate_and_hsn_keeps_the_stored_ones(monkeypatch):
     assert (kept["tax_rate"], kept["hsn"]) == (18, "9005")
 
 
+
 def _unresolved_draft(monkeypatch, catalogued):
     """A draft line whose product had no HSN and no rate when it was made:
     stored at 0% and flagged unresolved. The form leaves its rate out."""
@@ -2028,3 +2033,35 @@ def test_a_reason_of_invisible_fillers_or_bare_marks_is_refused(blank):
 @pytest.mark.parametrize("ok", ["damaged in transit", "गलत माल", "नहीं", "café"])
 def test_real_reasons_still_pass(ok):
     assert v.POLineCancel(reason=ok).reason == ok
+
+
+
+def test_the_cancel_never_names_a_receipt_by_its_placeholder(monkeypatch):
+    """Panel item 9 (audit F28). A receipt whose request died is stranded on
+    PENDING/G-DEAD; another was logged a moment ago and is still getting its
+    number. The cancel waits for both, numbers the stranded one first (as the
+    receipts list does) and names it by that number; the fresh one is 'a
+    delivery logged just now'. No placeholder is ever handed out."""
+    from datetime import timedelta
+
+    import mongomock
+    from database.repositories.vendor_repository import GRNRepository
+
+    db = mongomock.MongoClient().db
+    for gid, minutes in (("G-DEAD", 5), ("G-LIVE", 0)):
+        db.grns.insert_one({
+            "grn_id": gid, "grn_number": f"PENDING/{gid}", "po_id": "PO1",
+            "store_id": "S1", "status": "PENDING", "grn_subtype": "STANDARD",
+            "created_at": datetime.now() - timedelta(minutes=minutes),
+        })
+    repo, audit = _wire(monkeypatch, _po(status="SENT"))
+    monkeypatch.setattr(v, "get_grn_repository", lambda: GRNRepository(db.grns))
+    monkeypatch.setattr(v, "generate_grn_number", lambda store: f"RCPT/{store}/26-27/0007")
+    with pytest.raises(HTTPException) as e:
+        _run(v.cancel_po("PO1", reason="vendor closed down", current_user=_user()))
+    assert e.value.status_code == 409
+    assert "PENDING/" not in e.value.detail
+    assert "RCPT/S1/26-27/0007 is logged but not accepted" in e.value.detail
+    assert "a delivery logged just now is logged but not accepted" in e.value.detail
+    assert db.grns.find_one({"grn_id": "G-DEAD"})["grn_number"] == "RCPT/S1/26-27/0007"
+    assert repo.updates == [] and audit.rows == []

@@ -260,16 +260,26 @@ def test_units_a_part_accepted_receipt_put_in_stock_count_at_the_next_accept(mon
 
 
 def test_units_of_an_escalated_receipt_count_at_the_next_accept(monkeypatch):
-    """3 of P2 live (1 cancelled up front). R0 (P2 x1) is accepted, then
-    escalated, so it drops out of the accepted sum; its unit is still on the
-    shelf. A (P2 x1) then B (P2 x2): 1 + 1 + 2 > 3, so B is refused."""
+    """3 of P2 live (1 cancelled up front). R0 (P2 x1 + P3 x1, P3 not
+    catalogue-complete) stocks its P2 and holds P3, then is escalated (an
+    ACCEPTED receipt cannot be: owner ruling R3), so it is in no accepted
+    sum; its unit is still on the shelf. A (P2 x1) then B (P2 x2): 1 + 1 + 2
+    > 3, so B is refused."""
+    from api.services import product_master as pm
+
+    monkeypatch.setattr(
+        pm, "compute_catalog_status",
+        lambda prod: ("DRAFT", ["hsn_code"]) if prod.get("product_id") == "P3" else ("ACTIVE", []),
+    )
     po = _po(_line("P2", "Ray-Ban", 3),
              _line("P2", "Ray-Ban", 0, ordered_qty=0, cancelled_qty=1, line_status="CANCELLED"))
-    grn_repo, _po_repo, stock, _t = _wire(monkeypatch, po=po)
+    po["items"].append(_line("P3", "Vogue", 1))
+    grn_repo, _po_repo, stock, _t = _wire(monkeypatch, po=po, product_repo=_Products("P2", "P3"))
     _atomic_claims(grn_repo)
-    r0 = _create("normal", _items("P2", 1), _user(), inv="INV-0")["grn_id"]
-    _accept(r0)
+    r0 = _create("normal", _items("P2", 1) + _items("P3", 1), _user(), inv="INV-0")["grn_id"]
+    assert _accept(r0)["grn_status"] == "PARTIALLY_ACCEPTED"
     asyncio.run(vendors_mod.escalate_grn(r0, note="price dispute", current_user=_user()))
+    assert grn_repo.docs[r0]["status"] == "ESCALATED"
     a = _create("normal", _items("P2", 1), _user(), inv="INV-A")["grn_id"]
     b = _create("normal", _items("P2", 2), _user(), inv="INV-B")["grn_id"]
     assert _accept(a)["grn_status"] == "ACCEPTED"
@@ -583,3 +593,268 @@ def test_a_held_receipt_with_stock_points_to_escalation_not_void(monkeypatch):
     assert grn_repo.docs[r1]["status"] == "PARTIALLY_ACCEPTED"
     asyncio.run(vendors_mod.escalate_grn(r1, note="no room left", current_user=_user()))
     vendors_mod._refuse_if_box_waiting("PO-1")  # escalated: no longer waiting
+
+
+# --------------------------------------------------------------------------- #
+# Review round 12 + owner rulings 2026-10-08.
+# --------------------------------------------------------------------------- #
+
+
+def _rehome(stock, product_id, to_store="STORE-B"):
+    """A completed stock transfer, as transfers._rehome writes it: the source
+    fields are rewritten, po_id and everything else kept."""
+    for u in stock.units:
+        if u["product_id"] == product_id and u.get("source_type") == "GRN":
+            u.update(source_type="TRANSFER", source_id="TRF-1", store_id=to_store,
+                     transfer_number="TRF/0001", from_store_id="STORE-A")
+
+
+def _incomplete(monkeypatch, *pids):
+    from api.services import product_master as pm
+
+    monkeypatch.setattr(
+        pm, "compute_catalog_status",
+        lambda prod: ("DRAFT", ["hsn_code"]) if prod.get("product_id") in pids else ("ACTIVE", []),
+    )
+
+
+def test_transferred_units_still_count_so_no_cancelled_unit_is_received(monkeypatch):
+    """Panel item 1. P2 ordered 6, 2 cancelled (4 live). R0 (P2 x2) is
+    accepted and its units moved to another shop; R1 (P2 x2 + P3 x1, P3 not
+    catalogue-complete) is accepted, P3 held, and its P2 moved too. Both
+    receipts' units count wherever they are: the order reads 4 arrived, R2
+    (P2 x2) is refused, and R1 accepted again after P3 is catalogued mints
+    P3 only -- never its moved P2 a second time."""
+    po = _po(_line("P2", "Ray-Ban", 4, ordered_qty=4, cancelled_qty=2), _line("P3", "Vogue", 1))
+    grn_repo, po_repo, stock, _t = _wire(monkeypatch, po=po, product_repo=_Products("P2", "P3"))
+    _atomic_claims(grn_repo)
+    _incomplete(monkeypatch, "P3")
+    r0 = _create("normal", _items("P2", 2), _user(), inv="INV-0")["grn_id"]
+    assert _accept(r0)["grn_status"] == "ACCEPTED"
+    _rehome(stock, "P2")
+    r1 = _create("normal", _items("P2", 2) + _items("P3", 1), _user(), inv="INV-1")["grn_id"]
+    r2 = _create("normal", _items("P2", 2), _user(), inv="INV-2")["grn_id"]  # 2 + 2 <= 4 then
+    assert _accept(r1)["grn_status"] == "PARTIALLY_ACCEPTED"
+    _rehome(stock, "P2")
+    assert po_repo.po["received_qty_by_product"]["P2"] == 4
+    out = _accept(r2)
+    assert isinstance(out, HTTPException) and out.status_code == 409, out
+    with pytest.raises(HTTPException) as e:  # logging it again is refused too
+        _create("normal", _items("P2", 2), _user(), inv="INV-3")
+    assert e.value.status_code == 400
+    _incomplete(monkeypatch)
+    assert _accept(r1)["grn_status"] == "ACCEPTED"
+    assert _p2_units(stock) == 4
+    assert len([u for u in stock.units if u["product_id"] == "P3"]) == 1
+
+
+def test_a_held_receipt_whose_units_were_transferred_cannot_be_voided(monkeypatch):
+    """Panel item 2. R1 (P1 x2 + P3 x1) put its 2 P1 in stock and held P3;
+    the 2 P1 then moved shops. The void still sees them and refuses, so the
+    same goods are never logged and received twice."""
+    po = _po(_line("P1", "Frame X", 2), _line("P3", "Vogue", 1))
+    grn_repo, _po_repo, stock, _t = _wire(monkeypatch, po=po, product_repo=_Products("P1", "P3"))
+    _atomic_claims(grn_repo)
+    _incomplete(monkeypatch, "P3")
+    r1 = _create("normal", _items("P1", 2) + _items("P3", 1), _user(), inv="INV-1")["grn_id"]
+    assert _accept(r1)["grn_status"] == "PARTIALLY_ACCEPTED"
+    _rehome(stock, "P1")
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(vendors_mod.void_grn(r1, current_user=_user()))
+    assert e.value.status_code == 409
+    assert grn_repo.docs[r1]["status"] == "PARTIALLY_ACCEPTED"
+
+
+def test_the_refusal_advises_escalation_for_a_held_receipt_whose_units_moved(monkeypatch):
+    """Panel item 2, second probe: R1's 3 P1 are in stock (then moved) and its
+    P2 line is held with no room left. The re-accept refusal must not advise
+    the void -- the void refuses it."""
+    grn_repo, stock, r1, _detail = _held_then_full(monkeypatch, with_p1=True)
+    _rehome(stock, "P1")
+    out = _accept(r1)
+    assert isinstance(out, HTTPException) and out.status_code == 409, out
+    assert "escalate" in out.detail and "Void this receipt" not in out.detail
+
+
+def test_a_cancelled_item_delivered_and_rejected_can_be_logged(monkeypatch):
+    """Owner ruling 2026-10-08 (R2): a delivery that includes cancelled items
+    is logged when every cancelled item on it is rejected; nothing cancelled
+    enters stock. Accepting one cancelled unit is still refused."""
+    grn_repo, _po_repo, stock, _t = _wire(monkeypatch, po=_fully_cancelled_p2())
+    one_in = [{"product_id": "P2", "received_qty": 3, "accepted_qty": 1, "rejected_qty": 2}]
+    with pytest.raises(HTTPException) as e:
+        _create("normal", _items("P1", 5) + one_in, _user(), inv="INV-10")
+    assert e.value.status_code == 400 and "rejected" in e.value.detail
+    rejected = [{"product_id": "P2", "received_qty": 3, "accepted_qty": 0, "rejected_qty": 3}]
+    gid = _create("normal", _items("P1", 5) + rejected, _user())["grn_id"]
+    assert _accept(gid)["grn_status"] == "ACCEPTED"
+    assert len([u for u in stock.units if u["product_id"] == "P1"]) == 5
+    assert _p2_units(stock) == 0
+
+
+def test_a_part_cancelled_line_takes_what_is_open_and_rejects_the_rest(monkeypatch):
+    """P2 ordered 3, 1 in, 1 cancelled: 1 still open. A box of 2 is logged
+    with 1 accepted and 1 rejected; 2 accepted is refused."""
+    po = _part_cancelled_p2()
+    po["items"][1].update(quantity=2, ordered_qty=2, cancelled_qty=1, line_status="PARTIAL")
+    grn_repo, _po_repo, stock, _t = _wire(monkeypatch, po=po)
+    split = [{"product_id": "P2", "received_qty": 2, "accepted_qty": 1, "rejected_qty": 1}]
+    gid = _create("normal", split, _user())["grn_id"]
+    assert _accept(gid)["grn_status"] == "ACCEPTED" and _p2_units(stock) == 1
+    with pytest.raises(HTTPException) as e:
+        _create("normal", _items("P2", 2), _user(), inv="INV-10")
+    assert e.value.status_code == 400
+
+
+def _over_tasks(task_repo):
+    return [t for t in task_repo.created if t["title"].startswith("Over-delivery")]
+
+
+def test_over_delivery_on_an_untouched_line_is_accepted_and_flagged(monkeypatch):
+    """Owner ruling 2026-10-08 (R1): P1 ordered 2, nothing cancelled. Two
+    receipts of 2 arrive: both are logged and accepted (4 in stock) and the
+    second raises one task for the shop's store manager naming the order,
+    the product and the 2 extra units. The first, which fits, raises none."""
+    po = _po(_line("P1", "Frame X", 2), _line("P3", "Vogue", 1))
+    grn_repo, po_repo, stock, tasks = _wire(monkeypatch, po=po)
+    a = _create("normal", _items("P1", 2), _user(), inv="INV-A")["grn_id"]
+    b = _create("normal", _items("P1", 2), _user(), inv="INV-B")["grn_id"]
+    assert _accept(a)["grn_status"] == "ACCEPTED"
+    assert _over_tasks(tasks) == []
+    assert _accept(b)["grn_status"] == "ACCEPTED"
+    assert len([u for u in stock.units if u["product_id"] == "P1"]) == 4
+    assert po_repo.po["received_qty_by_product"]["P1"] == 4
+    [task] = _over_tasks(tasks)
+    assert "PO-2601-1" in task["title"]
+    assert "Frame X: 2 more than ordered (4 received, 2 ordered)" in task["description"]
+    assert task["assigned_to"] == "store_manager@STORE-A"
+    assert task["store_id"] == "STORE-A" and task["source_ref"] == f"grn_over:{b}"
+
+
+def test_two_accepts_in_flight_on_an_untouched_line_both_mint(monkeypatch):
+    """R1: the in-flight guard is only for a product with cancelled units.
+    P1 ordered 2, untouched: A is parked in its mint while B is accepted --
+    B is not refused, both mint, and the over-delivery is flagged."""
+    po = _po(_line("P1", "Frame X", 2), _line("P3", "Vogue", 1))
+    grn_repo, _po_repo, stock, tasks = _wire(monkeypatch, po=po)
+    _atomic_claims(grn_repo)
+    a = _create("normal", _items("P1", 2), _user(), inv="INV-A")["grn_id"]
+    b = _create("normal", _items("P1", 2), _user(), inv="INV-B")["grn_id"]
+    inside, release = _parked(monkeypatch, stock, "create", lambda doc: True)
+    t, out_a = _in_background(a)
+    assert inside.wait(10), "A never reached its first stock create"
+    try:
+        assert _accept(b)["grn_status"] == "ACCEPTED"
+    finally:
+        release.set()
+        t.join(15)
+    assert out_a["r"]["grn_status"] == "ACCEPTED", out_a
+    assert len([u for u in stock.units if u["product_id"] == "P1"]) == 4
+    assert len(_over_tasks(tasks)) == 1
+
+
+def _p2_live_four(monkeypatch, qa, qb):
+    """P2 ordered 5, 1 cancelled: 4 live. Receipts A and B logged."""
+    po = _po(_line("P1", "Frame X", 5), _line("P2", "Ray-Ban", 4, ordered_qty=4, cancelled_qty=1))
+    grn_repo, _po_repo, stock, _t = _wire(monkeypatch, po=po)
+    _atomic_claims(grn_repo)
+    a = _create("normal", _items("P2", qa), _user(), inv="INV-A")["grn_id"]
+    b = _create("normal", _items("P2", qb), _user(), inv="INV-B")["grn_id"]
+    return grn_repo, stock, a, b
+
+
+def test_a_receipt_that_fits_beside_one_in_flight_is_accepted(monkeypatch):
+    """Panel item 8. A (2) and B (2) both fit the 4 live. A is parked after
+    stocking its first unit; B is accepted -- A's stocked unit is not counted
+    twice. 4 units, never more."""
+    grn_repo, stock, a, b = _p2_live_four(monkeypatch, 2, 2)
+    calls = {"n": 0}
+
+    def second_create(doc):
+        calls["n"] += 1
+        return calls["n"] == 2
+
+    inside, release = _parked(monkeypatch, stock, "create", second_create)
+    t, out_a = _in_background(a)
+    assert inside.wait(10), "A never reached its second unit"
+    try:
+        assert _accept(b)["grn_status"] == "ACCEPTED"
+    finally:
+        release.set()
+        t.join(15)
+    assert out_a["r"]["grn_status"] == "ACCEPTED", out_a
+    assert _p2_units(stock) == 4
+
+
+def test_a_refusal_caused_by_a_delivery_in_flight_says_try_again(monkeypatch):
+    """Panel item 8. A (3) is parked in its mint; B (2) would not fit once A
+    is in (3 + 2 > 4), but only because of A: B is told another delivery is
+    being accepted -- never to void a receipt that may still fit."""
+    grn_repo, stock, a, b = _p2_live_four(monkeypatch, 3, 2)
+    inside, release = _parked(monkeypatch, stock, "create", lambda doc: True)
+    t, out_a = _in_background(a)
+    assert inside.wait(10), "A never reached its first stock create"
+    try:
+        out = _accept(b)
+    finally:
+        release.set()
+        t.join(15)
+    assert isinstance(out, HTTPException) and out.status_code == 409, out
+    assert out.detail == (
+        "Another delivery for this order is being accepted right now - try again in a moment."
+    )
+    assert grn_repo.docs[b]["status"] == "PENDING" and _p2_units(stock) == 3
+
+
+@pytest.mark.parametrize("down", [True, False])
+def test_an_order_that_cannot_be_read_refuses_the_accept(monkeypatch, down):
+    """Panel item 7. P2 fully cancelled; R1 (P2 x3) was logged in the
+    cancel's window. The repository's read swallows a driver error into
+    None ('no such order'), which skipped the hold. Still down: 503; back on
+    the raw re-read: the cancelled order refuses it. Nothing minted."""
+    full = _po(_line("P1", "Frame X", 5), _line("P2", "Ray-Ban", 3))
+    grn_repo, po_repo, stock, _t = _wire(monkeypatch, po=full)
+    gid = _create("normal", _items("P2", 3), _user())["grn_id"]
+    po_repo.po.clear()
+    po_repo.po.update(copy.deepcopy(_fully_cancelled_p2()))
+    stored = po_repo.find_by_id("PO-1")
+
+    class _Coll:
+        def find_one(self, flt):
+            if down:
+                raise RuntimeError("socket timeout")
+            return copy.deepcopy(stored)
+
+    po_repo.collection = _Coll()
+    po_repo.find_by_id = lambda _pid: None  # what BaseRepository does on an error
+    out = _accept(gid)
+    assert isinstance(out, HTTPException) and out.status_code == (503 if down else 409), out
+    assert stock.units == [] and grn_repo.docs[gid]["status"] == "PENDING"
+
+
+def test_a_cancel_waits_on_an_unreadable_receipt_list(monkeypatch):
+    """Panel items 3 and 6. A receipt is minting; the cancel's look for a
+    waiting receipt errors. Through the real repository (whose find_many
+    turns an error into []) the cancel must answer 503 and write nothing."""
+    from database.repositories.vendor_repository import GRNRepository
+    from strict_fakes import StrictCollection
+
+    po = _po(_line("P1", "Frame X", 5), _line("P2", "Ray-Ban", 2))
+    fake, po_repo, _stock, _t = _wire(monkeypatch, po=po)
+    _create("normal", _items("P2", 2), _user())
+    real = GRNRepository(StrictCollection("grns", [copy.deepcopy(d) for d in fake.docs.values()]))
+
+    def find(*_a, **_k):
+        raise RuntimeError("socket timeout")
+
+    real.collection.find = find
+    monkeypatch.setattr(vendors_mod, "get_grn_repository", lambda: real)
+    before = copy.deepcopy(po_repo.po)
+    body = vendors_mod.POLineCancel(reason="vendor short", product_id="P2")
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(vendors_mod.cancel_po_line("PO-1", 1, body, _user()))
+    assert e.value.status_code == 503
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(vendors_mod.cancel_po("PO-1", reason="vendor closed", current_user=_user()))
+    assert e.value.status_code == 503
+    assert po_repo.po == before

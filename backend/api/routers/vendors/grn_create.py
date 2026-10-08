@@ -309,9 +309,12 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
                 },
             )
 
-    # No receipt against a cancelled quantity: held to the LIVE order, so goods
-    # for a line (or part of one) the order has withdrawn are refused here and
-    # never reach the accept. grn_accept holds the same rule at accept time.
+    # No cancelled unit enters stock: what this receipt would ACCEPT is held to
+    # the LIVE order, so units of a line (or part of one) the order has
+    # withdrawn are refused here and never reach the accept; grn_accept holds
+    # the same rule at accept time. Owner ruling 2026-10-08: a delivery that
+    # brought cancelled items CAN be logged when every cancelled item on it is
+    # REJECTED -- they are counted as received, never accepted.
     if po is not None:
         from .po_detail import _received_by_product, beyond_open_quantity
 
@@ -319,7 +322,6 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
             po,
             [it.model_dump() for it in grn.items],
             lambda: _received_by_product(po),
-            "received_qty",
         )
         if over:
             raise HTTPException(
@@ -328,7 +330,7 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
                     "This order no longer has room for what you entered: "
                     + ", ".join(over)
                     + ". Those units were cancelled on the order, so they "
-                    "cannot be received against it."
+                    "cannot go into stock - mark them rejected."
                 ),
             )
 

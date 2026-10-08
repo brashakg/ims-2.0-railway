@@ -41,9 +41,9 @@ from .grn_accept_lock import (
     _finalise_grn_accept_metadata,
     _grn_accept_conflict,
     _grn_accept_heartbeat_tick,
-    _grn_already_minted,
     _grn_mint_unit,
     _grn_unit_index_present,
+    _receipt_units,
     _release_grn_accept_claim,
     _stock_create_raises_on_duplicate,
 )
@@ -185,12 +185,22 @@ def _hold_order_open_for_receipt(po_repo, grn) -> None:
     moves the order's write stamp only while the order is still as it read it.
     A cancel that read the order before is refused by its own compare-and-set
     (reload, and the receipt shows); a cancel that landed first refuses this
-    accept -- no stock is minted against it."""
+    accept -- no stock is minted against it.
+
+    Another receipt of the order that an accept has claimed may be minting
+    right now, so it counts WHOLE (_received_by_product, in_flight_whole).
+    Each accept sets its claim BEFORE it reads here, so of two racing accepts
+    at least one sees the other -- both may, and then both are told to try
+    again, never both mint. A refusal that only that in-flight receipt causes
+    says so: once it finishes, this one either fits or gets the void /
+    escalate advice."""
     po_id = grn.get("po_id")
     if po_repo is None or not po_id:
         return
+    gid = grn.get("grn_id")
+    items = grn.get("items") or []
     for _attempt in range(3):
-        po = po_repo.find_by_id(po_id)
+        po = _order_or_503(po_repo, po_id)
         if not po:
             return
         if po.get("status") == "CANCELLED":
@@ -201,36 +211,22 @@ def _hold_order_open_for_receipt(po_repo, grn) -> None:
                     "it any more. Void this receipt."
                 ),
             )
-        def earlier_receipts() -> dict:
-            # The FULL quantity of every OTHER receipt that another accept has
-            # claimed: it may be minting right now. What it already put in
-            # stock may then count twice -- that only refuses, and only while
-            # that accept runs. Adding just its unstocked part was short
-            # whenever the accepted receipts or the order's count, not the
-            # stock, are the most (stock rows lost): the part it had stocked
-            # counted nowhere. Each accept sets its claim BEFORE it reads here,
-            # so of two racing accepts at least one sees the other (both may --
-            # then both are told to accept again, never both mint). Read
-            # FIRST: a claimed receipt leaves this list only once it is
-            # ACCEPTED or its accept has stopped with what it minted in stock,
-            # and both are read after this, so it is never missed in between.
-            coming: dict = {}
-            for other in _claimed_receipts_for_order(get_grn_repository(), po_id, grn):
-                for line in other.get("items") or []:
-                    pid = line.get("product_id")
-                    coming[pid] = coming.get(pid, 0) + _qty(line.get("accepted_qty"))
-            # Plus the count logging a receipt is held to (accepted receipts,
-            # the order's own count and the units actually in stock -- a
-            # part-accepted or escalated receipt's units are in no receipt
-            # sum), less this receipt's own units: its quantity already covers
-            # them on a retry or a re-accept after "Catalog now".
-            got = _received_by_product(po, leave_out_grn=grn.get("grn_id"))
-            for pid, qty in coming.items():
-                got[pid] = _qty(got.get(pid)) + qty
-            return got
 
-        over = beyond_open_quantity(po, grn.get("items") or [], earlier_receipts, "accepted_qty")
+        def received(whole):
+            return lambda: _received_by_product(
+                po, leave_out_grn=gid, in_flight_whole=whole
+            )
+
+        over = beyond_open_quantity(po, items, received(True))
         if over:
+            if not beyond_open_quantity(po, items, received(False)):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Another delivery for this order is being accepted right "
+                        "now - try again in a moment."
+                    ),
+                )
             raise HTTPException(
                 status_code=409,
                 detail=(
@@ -247,16 +243,40 @@ def _hold_order_open_for_receipt(po_repo, grn) -> None:
     )
 
 
+def _order_or_503(po_repo, po_id):
+    """The order this receipt is for, or None when there is no such order.
+    BaseRepository.find_by_id swallows a driver error into None, which read
+    as 'no order' and skipped the whole hold -- one transient error and a
+    receipt for a cancelled line was minted. So a None is checked against
+    the RAW collection, and a read that fails there answers 503. Only a
+    minimal mock whose collection has no find_one takes the None as is."""
+    po = po_repo.find_by_id(po_id)
+    finder = getattr(getattr(po_repo, "collection", None), "find_one", None)
+    if po or not callable(finder):
+        return po
+    try:
+        return finder({"po_id": po_id})
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Could not read the order this delivery is for, so nothing was "
+                "added to stock. Try again in a moment."
+            ),
+        ) from exc
+
+
 def _way_out_of(grn) -> str:
     """What clears a receipt the order no longer has room for. A void, while
     it has put nothing in stock (pending, or held for cataloguing with nothing
     minted) -- void takes both. Once it holds stock, a void would leave those
     units with no receipt behind them, so it can only be escalated; until
-    then every cancel on the order waits for it."""
+    then every cancel on the order waits for it. Its units are counted
+    wherever a transfer has moved them (_receipt_units)."""
     stock_repo = get_stock_repository()
     try:
-        shelved = stock_repo is not None and _grn_already_minted(
-            stock_repo, {"source_type": "GRN", "source_id": grn.get("grn_id")}
+        shelved = stock_repo is not None and _receipt_units(
+            stock_repo, grn.get("grn_id")
         )
     except Exception:  # noqa: BLE001 - unknown: never advise a void
         shelved = True
@@ -268,36 +288,59 @@ def _way_out_of(grn) -> str:
     )
 
 
-def _claimed_receipts_for_order(grn_repo, po_id, this_grn) -> list:
-    """Receipts of this order, other than `this_grn`, that hold an accept claim
-    but are not ACCEPTED yet (still minting, or held for a product that is not
-    catalogued). Fails CLOSED: an unreadable list must not let two accepts
-    both think the open quantity is theirs -- so it reads through the RAW
-    collection, because BaseRepository.find_many swallows a driver error into
-    [] ("nobody else in flight"); the same reason _grn_already_minted counts
-    through it. Only a minimal mock whose collection has no find uses
-    find_many."""
-    if grn_repo is None:
-        return []
-    finder = getattr(getattr(grn_repo, "collection", None), "find", None)
+def _flag_over_delivery(po, grn, received_by_product) -> None:
+    """Owner ruling 2026-10-08: a delivery that runs over what the order asks
+    for is ACCEPTED into stock and FLAGGED, never refused. Each product on
+    this receipt now received beyond its ordered quantity raises one task --
+    the order, the product, the extra units -- for the shop's purchase
+    manager: the store manager, who raises its orders (there is no separate
+    purchase role; owner ruling D17 sends a receipt problem to the shop's
+    store manager by name). The receipt's own discrepancy task at logging
+    compares only that receipt with the order, so a second delivery of a
+    fully received line went unflagged. Fail-soft: never undoes the receipt."""
     try:
-        if callable(finder):
-            rows = list(finder({"po_id": po_id}))
-        else:
-            rows = grn_repo.find_many({"po_id": po_id}, limit=1000) or []
+        ordered: dict = {}
+        names: dict = {}
+        for it in po.get("items") or []:
+            pid = it.get("product_id")
+            ordered[pid] = ordered.get(pid, 0) + _qty(it.get("quantity"))
+            names.setdefault(pid, it.get("product_name") or it.get("sku") or pid)
+        mine = {
+            line.get("product_id")
+            for line in grn.get("items") or []
+            if _qty(line.get("accepted_qty"))
+        }
+        extra = []
+        for pid in sorted(mine, key=str):
+            got, want = _qty(received_by_product.get(pid)), ordered.get(pid, 0)
+            if got > want:
+                extra.append(
+                    f"{names.get(pid, pid)}: {got - want} more than ordered "
+                    f"({got} received, {want} ordered)"
+                )
+        if not extra:
+            return
+        from ...dependencies import get_task_repository
+        from ...services.purchase_numbering import po_label
+        from ...services.task_triggers import create_system_task
+
+        po_ref = po_label(po.get("po_number"), po.get("po_id"))
+        create_system_task(
+            get_task_repository(),
+            title=f"Over-delivery on {po_ref}",
+            description=(
+                f"Goods receipt {grn.get('grn_number')} put more into stock than "
+                f"{po_ref} ordered - " + "; ".join(extra) + ". The extra units are "
+                "in stock. Agree them with the vendor (keep and bill, or return)."
+            ),
+            priority="P2",
+            category="Purchase",
+            store_id=grn.get("store_id"),
+            dedupe_ref=f"grn_over:{grn.get('grn_id')}",
+            assigned_to="STORE_MANAGER",
+        )
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(
-            status_code=503,
-            detail="Could not check the other deliveries on this order - try again.",
-        ) from exc
-    return [
-        r
-        for r in rows
-        if isinstance(r, dict)
-        and r.get("grn_id") != this_grn.get("grn_id")
-        and r.get("status") in ("PENDING", "PARTIALLY_ACCEPTED")
-        and r.get("accept_lock_at")
-    ]
+        logger.warning("[VENDOR] over-delivery flag skipped: %s", exc)
 
 
 def _accept_grn_claimed(
@@ -413,15 +456,13 @@ def _accept_grn_claimed(
             # (source_id, grn_line_index, line_unit_seq) is the DB-level
             # backstop, but it only lines up if the ordinals continue this
             # count -- so if we cannot verify what is already received, we STOP.
+            #
+            # Counted wherever the units are now (_receipt_units): a held
+            # receipt whose units were transferred before its re-accept must
+            # not mint them a second time.
             try:
-                already = _grn_already_minted(
-                    stock_repo,
-                    {
-                        "source_type": "GRN",
-                        "source_id": grn_id,
-                        "product_id": product_id,
-                        "grn_line_index": line_index,
-                    },
+                already = _receipt_units(
+                    stock_repo, grn_id, product_id=product_id, grn_line_index=line_index
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.error(
@@ -541,6 +582,9 @@ def _accept_grn_claimed(
                         "barcode_printed": False,
                         "source_type": "GRN",
                         "source_id": grn_id,
+                        # The origin a transfer never rewrites (it moves
+                        # source_type / source_id): _receipt_units counts by it.
+                        "grn_id": grn_id,
                         "grn_line_index": line_index,
                         "line_unit_seq": seq,
                         "grn_number": grn_number,
@@ -726,6 +770,7 @@ def _accept_grn_claimed(
                     },
                 ):
                     po_status = state
+                    _flag_over_delivery(po, grn, received_by_product)
                     break
             else:
                 logger.warning(

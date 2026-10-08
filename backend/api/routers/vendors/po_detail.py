@@ -26,10 +26,10 @@ from ._shared import (
     router,
 )
 from .gst import build_po_gst, po_gst_context
-from .grn_accept_lock import _grn_already_minted
+from .grn_accept_lock import _receipt_units
 from .models import POLineCancel, POUpdate, cancel_reason, expected_date_not_backdated
 from .numbering import (
-    _cumulative_received_by_product,
+    GRN_PLACEHOLDER_PREFIX,
     compute_po_receipt_state,
     po_line_status,
 )
@@ -442,7 +442,7 @@ def _qty(v) -> int:
         return 0
 
 
-def beyond_open_quantity(po: dict, lines, received_of, qty_key: str) -> list:
+def beyond_open_quantity(po: dict, lines, received_of) -> list:
     """THE rule behind "no receipt against a cancelled quantity": the names of
     the products on `lines` that the LIVE order no longer has room for.
 
@@ -450,10 +450,11 @@ def beyond_open_quantity(po: dict, lines, received_of, qty_key: str) -> list:
     cancelled outright), so the live quantity is the figure to hold a receipt
     to -- never a figure stamped when the receipt was logged. Only a product
     the order has cancelled units of is held to it; a delivery that merely
-    runs over an untouched line is a variance for the receiver to record, as
-    before. `qty_key` is the receipt's `received_qty` when logging it and its
-    `accepted_qty` when accepting it. `received_of()` returns the units
-    already received per product; it is only called when the receipt touches a
+    runs over an untouched line is accepted and flagged, never refused (owner
+    ruling 2026-10-08). A receipt line is held by its `accepted_qty` -- the
+    units that would go INTO STOCK -- so cancelled units that arrived and are
+    rejected refuse nothing. `received_of()` returns the units already
+    received per product; it is only called when the receipt touches a
     product the order has cancelled units of, so an ordinary receipt never
     depends on it. Create and accept both call this."""
     live: dict = {}
@@ -468,7 +469,7 @@ def beyond_open_quantity(po: dict, lines, received_of, qty_key: str) -> list:
     coming: dict = {}
     for line in lines or []:
         pid = line.get("product_id")
-        coming[pid] = coming.get(pid, 0) + _qty(line.get(qty_key))
+        coming[pid] = coming.get(pid, 0) + _qty(line.get("accepted_qty"))
     touched = {pid for pid, qty in coming.items() if qty and pid in cancelled}
     if not touched:
         return []
@@ -492,21 +493,48 @@ def _po_for_change(po_id: str, current_user: dict):
     return po_repo, po
 
 
+def _order_receipts(po_id) -> list:
+    """Every receipt logged against the order. Fails CLOSED (503): it reads
+    the RAW collection, because BaseRepository.find_many swallows a driver
+    error into [] -- 'nothing waiting', 'nothing arrived', 'nobody else
+    accepting' -- which let a cancel land while a receipt was minting and an
+    accept count no other delivery. Only a minimal mock whose collection has
+    no find uses find_many."""
+    grn_repo = get_grn_repository()
+    if grn_repo is None or not po_id:
+        return []
+    finder = getattr(getattr(grn_repo, "collection", None), "find", None)
+    try:
+        if callable(finder):
+            rows = list(finder({"po_id": po_id}))
+        else:
+            rows = grn_repo.find_many({"po_id": po_id}, limit=1000) or []
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=503,
+            detail="Could not check the deliveries on this order - try again.",
+        ) from exc
+    return [r for r in rows if isinstance(r, dict) and r.get("po_id") == po_id]
+
+
 def _refuse_if_box_waiting(po_id: str) -> None:
     """A receipt logged but not yet accepted re-derives the order's status the
     moment it is accepted -- it would flip a cancelled order back to received.
-    So a cancel waits until that box is accepted or voided."""
+    So a cancel waits until that box is accepted or voided. Each one is named
+    by its receipt number: one still on its PENDING/<id> placeholder whose
+    request died is numbered first (audit F28, as the receipts list does); a
+    fresh one still being numbered is never named by its placeholder."""
+    from .grn import _receipt_numbered
+
     grn_repo = get_grn_repository()
-    if grn_repo is None:
-        return
-    rows = grn_repo.find_many(
-        {"po_id": po_id, "status": {"$in": list(_WAITING_GRN)}}, limit=50
-    )
-    waiting = [
-        f"{g.get('grn_number') or g.get('grn_id')} {_WAITING_GRN[g['status']]}"
-        for g in rows or []
-        if g.get("status") in _WAITING_GRN
-    ]
+    waiting = []
+    for g in _order_receipts(po_id):
+        if g.get("status") not in _WAITING_GRN:
+            continue
+        name = _receipt_numbered(grn_repo, g).get("grn_number") or g.get("grn_id")
+        if str(name).startswith(GRN_PLACEHOLDER_PREFIX):
+            name = "a delivery logged just now"
+        waiting.append(f"{name} {_WAITING_GRN[g['status']]}")
     if waiting:
         raise HTTPException(
             status_code=409,
@@ -518,20 +546,16 @@ def _refuse_if_box_waiting(po_id: str) -> None:
         )
 
 
-def _units_minted_for(po_id: str, product_id: str, grn_id: Optional[str] = None) -> int:
-    """Units a goods receipt actually put in stock for this order and product
-    (only receipt `grn_id`'s when given), whatever that receipt's status is
-    now. A part-accepted receipt that was then ESCALATED counts in no receipt
-    sum, yet its units are on the shelf. Fails CLOSED (503): an unreadable
-    stock table must not make arrived stock look cancellable."""
+def _units_received(po_id: str, grn_id: str, product_id: str) -> int:
+    """Units receipt `grn_id` put in stock for this order and product,
+    wherever a transfer has moved them since (_receipt_units), whatever the
+    receipt's status is now. Fails CLOSED (503): an unreadable stock table
+    must not make arrived stock look cancellable."""
     stock_repo = get_stock_repository()
     if stock_repo is None:
         return 0
-    flt = {"source_type": "GRN", "po_id": po_id, "product_id": product_id}
-    if grn_id:
-        flt["source_id"] = grn_id
     try:
-        return _grn_already_minted(stock_repo, flt)
+        return _receipt_units(stock_repo, grn_id, po_id=po_id, product_id=product_id)
     except Exception as exc:  # noqa: BLE001
         logger.error("[VENDOR] PO %s: could not count received units: %s", po_id, exc)
         raise HTTPException(
@@ -543,32 +567,57 @@ def _units_minted_for(po_id: str, product_id: str, grn_id: Optional[str] = None)
         ) from exc
 
 
-def _received_by_product(po: dict, leave_out_grn: Optional[str] = None) -> dict:
-    """Units on the shelf per product: the most of the ACCEPTED receipts' sum
-    (the count grn_accept closes an order on), the units receipts actually
-    minted for this order (a part-accepted or escalated receipt is in no
-    receipt sum), and the order's own copy (grn_accept's fallback writes only
-    the status, so it can lag). Logging a receipt, accepting one, a cancel
-    and an accept's write-back of the order all ask this. The accept leaves
-    out the units the receipt being accepted already put in stock
-    (`leave_out_grn`) -- from the stock count, and from the order's own copy,
-    which an earlier write-back took from that count -- because its own
-    quantity already covers them."""
+def _received_by_product(
+    po: dict, leave_out_grn: Optional[str] = None, in_flight_whole: bool = False
+) -> dict:
+    """Units that arrived per product: a TRUE count, summed receipt by receipt.
+    An ACCEPTED receipt counts its accepted quantity (it put every line in
+    stock). Any other -- held for cataloguing, escalated, an accept that
+    stopped half-way -- counts the units it put in stock, wherever a transfer
+    has moved them since. The order's own copy is a floor: it was written from
+    this count and can only lag (grn_accept's fallback writes only the
+    status). Logging a receipt, accepting one, a cancel and an accept's
+    write-back of the order all ask this.
+
+    The accept leaves out the receipt being accepted (`leave_out_grn`) -- its
+    own quantity already covers its units -- and, `in_flight_whole`, counts a
+    receipt another accept holds a claim on WHOLE: it may be minting right
+    now. Both are set aside from the order's own copy by what they stocked,
+    which that copy may already hold."""
     po_id = po.get("po_id")
-    out = dict(_cumulative_received_by_product(get_grn_repository(), po_id))
+    out: dict = {}
+    aside: dict = {}
+    whole: dict = {}
+    for g in _order_receipts(po_id):
+        gid = g.get("grn_id")
+        status = g.get("status")
+        mine = bool(leave_out_grn) and gid == leave_out_grn
+        claimed = (
+            in_flight_whole
+            and status in ("PENDING", "PARTIALLY_ACCEPTED")
+            and bool(g.get("accept_lock_at"))
+        )
+        accepted: dict = {}
+        for line in g.get("items") or []:
+            pid = line.get("product_id")
+            accepted[pid] = accepted.get(pid, 0) + _qty(line.get("accepted_qty"))
+        for pid, qty in accepted.items():
+            if mine or claimed:
+                aside[pid] = aside.get(pid, 0) + _units_received(po_id, gid, pid)
+                if claimed and not mine:
+                    whole[pid] = whole.get(pid, 0) + qty
+                continue
+            if status != "ACCEPTED":
+                qty = _units_received(po_id, gid, pid)
+            out[pid] = out.get(pid, 0) + qty
     header = po.get("received_qty_by_product") or {}
-    minted: dict = {}
-    left_out: dict = {}
     for it in po.get("items") or []:
         pid = it.get("product_id")
-        if pid not in minted:
-            left_out[pid] = (
-                _units_minted_for(po_id, pid, leave_out_grn) if leave_out_grn else 0
-            )
-            minted[pid] = _units_minted_for(po_id, pid) - left_out[pid]
         stored = header.get(pid)
         stored = _qty(it.get("received_qty") if stored is None else stored)
-        out[pid] = max(_qty(out.get(pid)), _qty(stored - left_out[pid]), minted[pid])
+        out[pid] = max(_qty(out.get(pid)), stored - aside.get(pid, 0))
+    for pid, qty in whole.items():
+        out[pid] = _qty(out.get(pid)) + qty
     return out
 
 

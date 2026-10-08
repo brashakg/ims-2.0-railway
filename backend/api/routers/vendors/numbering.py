@@ -265,35 +265,3 @@ def _grn_stock_audit(
         )
     except Exception:  # noqa: BLE001
         pass
-
-
-def _cumulative_received_by_product(grn_repo, po_id: str) -> dict:
-    """Sum accepted_qty per product across every ACCEPTED GRN for a PO.
-
-    This is the running on-hand-received tally used to decide whether the PO is
-    now fully or partially received. Fail-soft: any read error returns {} so the
-    caller degrades to "partial" rather than crashing the accept.
-    """
-    totals: dict = {}
-    if grn_repo is None or not po_id:
-        return totals
-    try:
-        accepted_grns = grn_repo.find_many(
-            {"po_id": po_id, "status": "ACCEPTED"}, limit=1000
-        )
-    except Exception:  # noqa: BLE001
-        return totals
-    for grn in accepted_grns or []:
-        if not isinstance(grn, dict):
-            continue
-        for item in grn.get("items", []) or []:
-            if not isinstance(item, dict):
-                continue
-            pid = item.get("product_id")
-            if pid is None:
-                continue
-            try:
-                totals[pid] = totals.get(pid, 0) + int(item.get("accepted_qty", 0) or 0)
-            except (TypeError, ValueError):
-                continue
-    return totals
