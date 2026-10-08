@@ -4775,3 +4775,49 @@ def test_a_stock_miss_recorded_while_clear_hold_runs_keeps_the_order_held(world,
     assert "changed while the hold was being cleared" in out.detail
     after = db.orders.find_one({"order_id": oid}, {"_id": 0})
     assert after["fulfillment_hold"] is True and route_mod.seller_held(after)
+
+
+@pytest.mark.parametrize("retry", ["both_resent", "human_moved_one"])
+def test_a_retried_move_never_retasks_a_move_a_human_closed(world, monkeypatch, retry):
+    """[LOW] Round 22, item 4: Bokaro holds nothing and has two open
+    fulfillment orders, FO_1 (RB) and FO_3 (OA); Ranchi holds both. Shopify
+    refuses both moves: one MOVE_FAILED task, which the human closes. Re-map
+    resends both and FO_1 lands (``both_resent``), or the human moved FO_1 by
+    hand first (``human_moved_one``); FO_3 is refused again. The task gate
+    compared the whole failed set ('[FO_1, FO_3] -> BV-RAN-01'), so a new P1
+    task was raised for the very FO_3 -> Ranchi move the closed one named.
+    It compares per (fulfillment order, target) move now."""
+    db = world["db"]
+    _stock(db, "BV-RAN-01", "P-RB", 1)
+    _stock(db, "BV-RAN-01", "P-OA", 1)
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 1)])
+    world["shop"].fo(FO_3, LOC_BOK, lines=[(9001, 1)])
+    world["shop"].move_error = "Location does not stock the item"
+    payload = _order(62006 + (retry == "human_moved_one"), lines=(("RB-1234", 1), ("OA-5", 1)))
+    res, order = _book(world, payload)
+    oid = res["order_id"]
+    ref = f"online_route:MOVE_FAILED:{oid}"
+    assert [p["code"] for p in order["fulfillment_route"]["problems"]] == ["MOVE_FAILED"]
+    assert world["tasks"].refs(ref) == [ref]
+    for t in world["tasks"].created:
+        t["status"] = "COMPLETED"
+    if retry == "human_moved_one":
+        world["shop"].fos[0]["assignedLocation"]["location"]["id"] = LOC_RAN
+    else:
+        real = world["shop"].graphql
+
+        async def refuse_fo3(db_, query, variables):
+            world["shop"].move_error = (
+                "Location does not stock the item"
+                if "imsFulfillmentOrderMove" in query and variables.get("id") == FO_3 else None)
+            return await real(db_, query, variables)
+
+        monkeypatch.setattr(shopify_push, "_graphql", refuse_fo3)
+    sent = len(world["shop"].moves())
+
+    out = _remap(world, monkeypatch, payload)
+
+    assert out["ok"] and "still on hold" in out["message"], out
+    resent = [m["id"] for m in world["shop"].moves()[sent:]]
+    assert resent == ([FO_1, FO_3] if retry == "both_resent" else [FO_3]), resent
+    assert [t["status"] for t in world["tasks"].created if t["source_ref"] == ref] == ["COMPLETED"]

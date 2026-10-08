@@ -226,15 +226,17 @@ def _problem(code: str, message: str) -> Dict[str, str]:
     return {"code": code, "message": message}
 
 
-def _ident(p: Dict[str, Any]) -> tuple:
+def _idents(p: Dict[str, Any]) -> set:
     """What a route problem is ABOUT, for "the order already had it" (a human
-    may have closed its task): its code and subject -- a MOVE_FAILED is its
-    fulfillment orders and target shop, never Shopify's wording of the error."""
-    return (p.get("code"), p.get("about") or p.get("message"))
+    may have closed its task): its code and subject -- a MOVE_FAILED is one
+    per (fulfillment order, target shop) move it names, never Shopify's
+    wording of the error, so a retry failing fewer of them is no new task."""
+    about = p.get("about") or p.get("message")
+    return {(p.get("code"), a) for a in (about if isinstance(about, list) else [about])}
 
 
 def _tasked(route: Optional[Dict[str, Any]]) -> set:
-    """The ``_ident`` of every problem the order carried before its last
+    """The ``_idents`` of every problem the order carried before its last
     Re-map (kept on the route as ``tasked``): tasked once already, so never
     again -- by Re-map or by any other sender of the same move."""
     return {tuple(x) for x in (route or {}).get("tasked") or []}
@@ -1079,7 +1081,10 @@ async def move_fulfillment_orders(db, order_id: str) -> Dict[str, Any]:
         # Name the shop each move was for: on a split leg it is not the
         # order's billing shop (order.store_id), where a human would move it.
         to = ", ".join(sorted({str(m.get("to_store_id") or m.get("to_location_id")) for m in failed}))
-        problem = {"about": f"{sorted(m['fulfillment_order_id'] for m in failed)} -> {to}", **_problem(
+        problem = {"about": sorted(
+            f"{m['fulfillment_order_id']} -> {m.get('to_store_id') or m.get('to_location_id')}"
+            for m in failed
+        ), **_problem(
             "MOVE_FAILED",
             f"IMS could not move {len(failed)} fulfillment order(s) to {to}'s "
             f"Shopify location ({failed[0].get('error')}). The order is on hold: "
@@ -1136,7 +1141,7 @@ async def move_fulfillment_orders(db, order_id: str) -> Dict[str, Any]:
             _orders(db).update_one({"order_id": order_id, **flt}, upd)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[ONLINE_ROUTE] route write-back failed for %s: %s", order_id, exc)
-    if failed and ours and _ident(problem) not in _tasked(route):
+    if failed and ours and not _idents(problem) <= _tasked(route):
         # Only the NEW problem: the booking-time ones were tasked at booking,
         # and a human may already have closed them.
         raise_problem_tasks(db, {**order, "fulfillment_route": {**route, "problems": [problem]}})
@@ -1658,7 +1663,7 @@ async def reroute_held_order(db, order_id: str) -> Dict[str, Any]:
         old_route = order.get("fulfillment_route") or {}
         old = order.get("store_id")
         # Every problem tasked before -- a human may have closed its task.
-        tasked = _tasked(old_route) | {_ident(p) for p in old_route.get("problems") or []}
+        tasked = _tasked(old_route).union(*(_idents(p) for p in old_route.get("problems") or []))
 
         from ..dependencies import get_store_repository
         from ..routers.orders import get_stock_repository
@@ -1787,7 +1792,7 @@ async def reroute_held_order(db, order_id: str) -> Dict[str, Any]:
         # Only a problem the order did not have -- a human may have closed
         # the booking's tasks.
         raise_problem_tasks(db, {**order, **update, "fulfillment_route": {**route, "problems": [
-            p for p in route["problems"] if _ident(p) not in tasked]}})
+            p for p in route["problems"] if not _idents(p) <= tasked]}})
         if any(m.get("status") == "PLANNED" for m in route.get("moves") or []):
             await move_fulfillment_orders(db, order_id)  # writes stock back after the move
         else:
