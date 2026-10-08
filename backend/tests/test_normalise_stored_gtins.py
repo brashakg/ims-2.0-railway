@@ -11,6 +11,10 @@ Pins (each red when its rule is removed):
   * the write's filter carries the value it read: a value changed since the
     read is left alone (drop `f: raw` from the filter -> overwritten -> red);
   * duplicates are one GTIN in ANY spelling on more than one row;
+  * --commit folds a barcode key in another spelling onto gtin / upc (the
+    rule every write door applies), guarded on the attributes as read;
+  * a GTIN stored as a number is stored as its digit string;
+  * twin / variant-row `barcode` values are reported, never changed;
   * it refuses any other collection with SystemExit, never a bare `assert`.
 
 StrictCollection only -- no network, no production.
@@ -112,29 +116,96 @@ def test_the_catalogue_twin_and_variant_rows_are_stored_digits_only():
     assert rows.docs[0]["gtin"] == _EAN
 
 
-def test_a_barcode_key_in_another_spelling_is_reported_never_changed(capsys):
-    """Main's PUT stored keys as sent: a row can hold attributes.GTIN with no
-    attributes.gtin. No screen shows it and the one-holder check cannot see it,
-    so the dry run must list it (drop the `others` scan -> "0 row(s)" -> red)."""
-    coll = StrictCollection(
+def _spellings():
+    return StrictCollection(
         "products",
         [
             {"product_id": "P-CASE", "attributes": {"GTIN": "2000000000015"}},
             {"product_id": "P-PAD", "attributes": {" upc ": _UPC, "frame_material": "TR90"}},
             {"product_id": "P-EXACT", "attributes": {"upc": "0" + _UPC}},
             {"product_id": "P-PLAIN", "attributes": {"frame_material": "TR90"}},
+            # Quick Add's Remove on main: the exact key blank, the old spelling kept.
+            {"product_id": "P-RM", "attributes": {"gtin": "", "GTIN": _EAN}},
+            {"product_id": "P-NUM", "attributes": {"Gtin": int(_EAN)}},
         ],
     )
+
+
+def test_a_barcode_key_in_another_spelling_is_reported_by_the_dry_run(capsys):
+    """Main's PUT stored keys as sent: a row can hold attributes.GTIN with no
+    attributes.gtin. No screen shows it and the one-holder check cannot see it,
+    so the dry run must list it (drop the `others` scan -> "0 row(s)" -> red)."""
+    coll = _spellings()
     before = copy.deepcopy(coll.docs)
-    out = script.normalise(coll, commit=True)
+    out = script.normalise(coll, commit=False)
     assert coll.docs == before
     assert sorted(out["spelling"]) == [
         ("P-CASE", "attributes.GTIN", "2000000000015", "RESTRICTED"),
+        ("P-NUM", "attributes.Gtin", int(_EAN), "valid"),
         ("P-PAD", "attributes. upc ", _UPC, "valid"),
+        ("P-RM", "attributes.GTIN", _EAN, "valid"),
     ]
-    assert "== products: 3 row(s) hold a manufacturer barcode" in capsys.readouterr().out
-    # Its value counts towards the duplicates (one UPC, two rows).
-    assert out["duplicates"] == [(_UPC.zfill(14), ["P-EXACT", "P-PAD"])]
+    assert sorted(r[0] for r in out["fold"]) == ["P-CASE", "P-NUM", "P-PAD", "P-RM"]
+    assert "== products: 5 row(s) hold a manufacturer barcode" in capsys.readouterr().out
+    # Its value counts towards the duplicates (one UPC, two rows; one EAN, two).
+    assert out["duplicates"] == [
+        (_UPC.zfill(14), ["P-EXACT", "P-PAD"]),
+        (_EAN.zfill(14), ["P-NUM", "P-RM"]),
+    ]
+
+
+def test_commit_folds_every_other_spelling_onto_the_one_key():
+    """--commit stores what every write door now stores (fold_barcode_spellings):
+    the exact key wins, a valid code folds on digits only, a junk one goes, and
+    the other spelling is gone (skip the fold -> 'GTIN' still stored -> red)."""
+    coll = _spellings()
+    script.normalise(coll, commit=True)
+    assert _attrs(coll) == {
+        "P-CASE": {},
+        "P-PAD": {"upc": _UPC, "frame_material": "TR90"},
+        "P-EXACT": {"upc": "0" + _UPC},
+        "P-PLAIN": {"frame_material": "TR90"},
+        "P-RM": {"gtin": ""},
+        "P-NUM": {"gtin": _EAN},
+    }
+    assert script.normalise(coll, commit=True)["fold"] == []
+
+
+def test_a_fold_never_overwrites_attributes_changed_since_the_read():
+    coll = _spellings()
+    stale = copy.deepcopy(coll.docs)
+    coll.find = lambda *_a, **_k: copy.deepcopy(stale)
+    next(d for d in coll.docs if d["product_id"] == "P-PAD")["attributes"]["frame_material"] = "Metal"
+    script.normalise(coll, commit=True)
+    assert _attrs(coll)["P-PAD"] == {" upc ": _UPC, "frame_material": "Metal"}
+    assert _attrs(coll)["P-RM"] == {"gtin": ""}
+
+
+def test_a_gtin_stored_as_a_number_is_stored_as_its_digits():
+    coll = StrictCollection(
+        "products",
+        [
+            {"product_id": "P-INT", "attributes": {"gtin": int(_EAN)}},
+            # A UPC saved as a number lost its leading 0: reported, never guessed.
+            {"product_id": "P-UPC", "attributes": {"upc": int(_UPC)}},
+        ],
+    )
+    out = script.normalise(coll, commit=True)
+    assert out["rewrite"] == [("P-INT", "attributes.gtin", int(_EAN), _EAN)]
+    assert [(r[0], r[3]) for r in out["invalid"]] == [("P-UPC", "BADLEN")]
+    assert _attrs(coll) == {"P-INT": {"gtin": _EAN}, "P-UPC": {"upc": int(_UPC)}}
+
+
+def test_the_twin_and_variant_barcode_fields_are_reported_never_changed():
+    """The Shopify push falls back to a twin's / variant row's `barcode`."""
+    twins = StrictCollection("catalog_products", [{"id": "T-B", "barcode": "5260181590836"}])
+    rows = StrictCollection("catalog_variants", [{"sku": "S-B", "barcode": "2000000000015"}])
+    before = copy.deepcopy((twins.docs, rows.docs))
+    assert script.normalise(twins, commit=True)["legacy"] == [
+        ("T-B", "5260181590836", "passes the format check")
+    ]
+    assert script.normalise(rows, commit=True)["legacy"] == [("S-B", "2000000000015", "RESTRICTED")]
+    assert (twins.docs, rows.docs) == before
 
 
 def test_refuses_any_other_collection():

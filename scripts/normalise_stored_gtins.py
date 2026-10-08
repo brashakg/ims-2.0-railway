@@ -19,10 +19,19 @@ THREE collections, each checked by name before any read (SystemExit otherwise):
     catalog_products  attributes.gtin, attributes.upc, gtin
     catalog_variants  gtin
 
-It REWRITES only a stored string that holds a separator AND is a valid GTIN
-once the separators go, to that digits-only GTIN. The write's filter is the
-row's id plus the value it read, so a value changed since the read is left
-alone.
+It REWRITES only a stored value that is a valid GTIN once read as a digit
+string but is not stored as one - it holds a separator, or it was saved as a
+NUMBER - to that digits-only string. The write's filter is the row's id plus
+the value it read, so a value changed since the read is left alone.
+
+It FOLDS every attribute KEY that names a barcode in another letter case or
+with padding ('GTIN', 'Upc', ' gtin ') onto gtin / upc and removes the other
+spelling (services/gtin.py fold_barcode_spellings, the rule every write door
+now applies): main's PUT stored keys as sent, no screen shows one, the
+one-holder check cannot see one, a clone would carry it, and it publishes as
+ims.gtin / ims.upc when the exact key is absent. The exact key wins; a junk
+value under another spelling is dropped. The write's filter is the row's id
+plus the whole attributes as read.
 
 It REPORTS, and never changes:
   * invalid values (not a publishable GTIN, with the reason);
@@ -31,15 +40,15 @@ It REPORTS, and never changes:
   * every legacy products.barcode (main's old Manage Barcode wrote it; its
     Generate made random EAN-13s that pass the format check, so a valid one
     is still not proven to be the maker's);
-  * every attribute KEY that names a barcode in another letter case or with
-    padding ('GTIN', 'Upc', ' gtin '): main's PUT stored keys as sent, no
-    screen shows one, the one-holder check cannot see one, and it publishes as
-    ims.gtin / ims.upc when the exact key is absent. Its value counts towards
-    the duplicates.
+  * every catalog_products.barcode / catalog_variants.barcode (the Shopify
+    push falls back to it when the row has no gtin);
+  * each barcode key in another spelling, with its verdict (its value counts
+    towards the duplicates).
 
 USAGE
 -----
-Dry-run (DEFAULT - prints what it would rewrite and the report, writes nothing):
+Dry-run (DEFAULT - prints what it would rewrite and fold, and the report;
+writes nothing):
     railway run --service MongoDB -- ".venv\\Scripts\\python.exe" scripts/normalise_stored_gtins.py
 
 Act (only after the owner approves the dry run's counts):
@@ -59,6 +68,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 
 from api.services.gtin import (  # noqa: E402
     classify_gtin,
+    fold_barcode_spellings,
     manufacturer_barcode_key,
     normalise_candidate,
     sanitise_gtin,
@@ -67,8 +77,8 @@ from api.services.gtin import (  # noqa: E402
 # collection -> (the row's id field, the fields it rewrites, a field it only reports)
 COLLECTIONS: Dict[str, Dict[str, Any]] = {
     "products": {"id": "product_id", "fix": ("attributes.gtin", "attributes.upc"), "legacy": "barcode"},
-    "catalog_products": {"id": "id", "fix": ("attributes.gtin", "attributes.upc", "gtin"), "legacy": None},
-    "catalog_variants": {"id": "sku", "fix": ("gtin",), "legacy": None},
+    "catalog_products": {"id": "id", "fix": ("attributes.gtin", "attributes.upc", "gtin"), "legacy": "barcode"},
+    "catalog_variants": {"id": "sku", "fix": ("gtin",), "legacy": "barcode"},
 }
 
 
@@ -91,10 +101,14 @@ def _value(doc: Dict[str, Any], path: str) -> Any:
     return cur
 
 
+def _barcode_keys(attrs: Dict[str, Any]) -> Dict[str, Any]:
+    return {k: v for k, v in attrs.items() if manufacturer_barcode_key(k)}
+
+
 def normalise(coll, *, commit: bool) -> Dict[str, List[Any]]:
     """Print, and with ``commit`` apply, the rewrites for one collection, and
-    print the report. Returns {"rewrite", "invalid", "duplicates", "legacy",
-    "spelling"}.
+    print the report. Returns {"rewrite", "fold", "invalid", "duplicates",
+    "legacy", "spelling"}.
     Refuses (SystemExit) any collection not in COLLECTIONS. Explicit checks,
     not `assert`: `python -O` strips asserts."""
     name = getattr(coll, "name", None)
@@ -111,23 +125,28 @@ def normalise(coll, *, commit: bool) -> Dict[str, List[Any]]:
         ors.append({"attributes": {"$exists": True}})
     rows = list(coll.find({"$or": ors}, {"_id": 0, id_field: 1, **{t: 1 for t in top}}))
 
-    out: Dict[str, List[Any]] = {"rewrite": [], "invalid": [], "duplicates": [], "legacy": [], "spelling": []}
+    out: Dict[str, List[Any]] = {
+        "rewrite": [], "fold": [], "invalid": [], "duplicates": [], "legacy": [], "spelling": []
+    }
     holders: Dict[str, set] = {}
     held = 0
     for doc in rows:
         rid = doc.get(id_field)
         attrs = doc.get("attributes") if "attributes" in top else None
         others = [
-            (f"attributes.{k}", raw)
+            (k, raw)
             for k, raw in (attrs.items() if isinstance(attrs, dict) else ())
-            if manufacturer_barcode_key(k) not in (None, k) and normalise_candidate(raw)
+            if manufacturer_barcode_key(k) not in (None, k)
         ]
+        if others:
+            out["fold"].append((rid, attrs, fold_barcode_spellings(attrs)))
         for k, raw in others:
-            out["spelling"].append((rid, k, raw, classify_gtin(raw) or "valid"))
+            verdict = classify_gtin(raw) or ("valid" if normalise_candidate(raw) else "blank")
+            out["spelling"].append((rid, f"attributes.{k}", raw, verdict))
             clean = sanitise_gtin(raw)
             if clean:
                 holders.setdefault(clean.zfill(14), set()).add(rid)
-        found = bool(others)
+        found = any(normalise_candidate(raw) for _, raw in others)
         for f in fields:
             raw = _value(doc, f)
             if not normalise_candidate(raw):
@@ -138,7 +157,7 @@ def normalise(coll, *, commit: bool) -> Dict[str, List[Any]]:
                 out["legacy"].append((rid, raw, classify_gtin(raw) or "passes the format check"))
             elif not clean:
                 out["invalid"].append((rid, f, raw, classify_gtin(raw)))
-            elif isinstance(raw, str) and clean != raw:
+            elif clean != raw:
                 out["rewrite"].append((rid, f, raw, clean))
             if clean:
                 holders.setdefault(clean.zfill(14), set()).add(rid)
@@ -160,12 +179,25 @@ def normalise(coll, *, commit: bool) -> Dict[str, List[Any]]:
         for rid, raw, verdict in out["legacy"]:
             print(f"  {rid}  {str(raw)[:40]!r}  {verdict}")
     if "attributes" in top:
-        print(f"{len(out['spelling'])} barcode key(s) in another spelling (REPORT ONLY; no screen shows one):")
+        print(f"{len(out['spelling'])} barcode key(s) in another spelling (no screen shows one):")
         for rid, k, raw, verdict in out["spelling"]:
             print(f"  {rid}  {k!r}  {str(raw)[:40]!r}  {verdict}")
+        print(f"{len(out['fold'])} row(s) to fold them onto gtin / upc:")
+        for rid, before, after in out["fold"]:
+            print(f"  {rid}  {_barcode_keys(before)!r} -> {_barcode_keys(after)!r}")
     if not commit:
-        print("DRY RUN - nothing written. Re-run with --commit to store them digits only.")
+        print("DRY RUN - nothing written. Re-run with --commit to fold the keys and store them digits only.")
         return out
+    # Fold first: its filter is the whole attributes as read, which a rewrite
+    # below would change; a fold leaves the exact keys' values as they were.
+    folded = 0
+    for rid, before, after in out["fold"]:
+        if rid in (None, ""):
+            print(f"  skipped: a row with no {id_field} ({_barcode_keys(before)!r})")
+            continue
+        res = coll.update_one({id_field: rid, "attributes": before}, {"$set": {"attributes": after}})
+        folded += int(getattr(res, "modified_count", 0) or 0)
+    print(f"FOLDED {folded} of {len(out['fold'])}.")
     done = 0
     for rid, f, raw, clean in out["rewrite"]:
         if rid in (None, ""):
