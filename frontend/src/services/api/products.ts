@@ -96,7 +96,6 @@ export interface CreateProductPayload {
     // directly; the actual push happens from the Online Store module.
     sync_to_shopify: boolean;
     shopify_tags?: string[];
-    publish_to_pos?: boolean;
   };
 }
 

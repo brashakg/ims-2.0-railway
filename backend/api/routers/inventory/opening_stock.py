@@ -23,7 +23,6 @@ from ._shared import (
 from .helpers import (
     _get_db,
     _reject_stock_mint_on_online_store,
-    generate_barcode,
 )
 
 # ============================================================================
@@ -249,7 +248,6 @@ async def opening_stock_commit(
         raise HTTPException(status_code=503, detail="Inventory store not available")
 
     _db = _get_db()
-    _counter = _db.get_collection("counters") if _db is not None else None
 
     results = []
     units_added = 0
@@ -290,9 +288,7 @@ async def opening_stock_commit(
         cost_fields = _opening_stock_cost_fields(row)
         created_count = 0
         for _ in range(row.quantity):
-            barcode = barcode_svc.next_unit_ean13(_counter) or generate_barcode(
-                active_store or "STR", pid
-            )
+            barcode = barcode_svc.mint_unit_barcode(_db, active_store)
             stock_data = {
                 "product_id": pid,
                 "store_id": active_store,

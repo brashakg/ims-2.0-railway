@@ -440,3 +440,170 @@ def test_put_never_touches_review_flags(env):
     updated = catalog_mod.CATALOG_PRODUCTS[doc["id"]]
     assert updated["needs_review"] is True  # provably untouched
     assert updated["pos_ready"] is False  # promote stays the only door
+
+
+# ---------------------------------------------------------------------------
+# One maker code, one product: Approve and the bulk import are create doors too
+# (product_master.assert_gtin_free, normalised compare via find_by_barcode).
+# ---------------------------------------------------------------------------
+
+_HELD_UPC = "036000291452"  # the holder stores the 13-digit spelling
+
+
+def _gtin_holder_repo(monkeypatch):
+    """A real ProductRepository over mongomock (dotted $or/$in queries) where
+    another product already holds the GTIN, as 0036000291452."""
+    import mongomock
+
+    repo = ProductRepository(mongomock.MongoClient().db.products)
+    repo.collection.insert_one(
+        {"product_id": "spine-holder", "sku": "HOLD1", "attributes": {"gtin": "0" + _HELD_UPC}}
+    )
+    monkeypatch.setattr(deps_mod, "get_product_repository", lambda: repo)
+    return repo
+
+
+def _attrs_with_gtin(gtin):
+    return {"brand_name": "Vogue", "model_no": "VO5051", "colour_code": "BLK", "gtin": gtin}
+
+
+def test_promote_refuses_a_gtin_another_product_holds(env, monkeypatch):
+    repo = _gtin_holder_repo(monkeypatch)
+    doc = _bvi_doc(doc_id="clx0gtintwin", attributes=_attrs_with_gtin(_HELD_UPC))
+    catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
+
+    dry = _promote(doc["id"], dry_run=True)
+    assert dry["ok"] is False and dry["gaps"][0]["field"] == "gtin"
+    with pytest.raises(HTTPException) as exc:
+        _promote(doc["id"])
+    assert exc.value.status_code == 409
+    assert repo.find_one({"product_id": doc["id"]}) is None  # no spine
+    assert catalog_mod.CATALOG_PRODUCTS[doc["id"]]["needs_review"] is True
+
+
+def test_promote_with_a_free_gtin_still_approves(env, monkeypatch):
+    repo = _gtin_holder_repo(monkeypatch)
+    doc = _bvi_doc(doc_id="clx0gtinfree", attributes=_attrs_with_gtin("4006381333931"))
+    catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
+    assert _promote(doc["id"])["pos_ready"] is True
+    assert repo.find_one({"product_id": doc["id"]}) is not None
+
+
+def _import(gtin):
+    row = catalog_mod.ProductCreateInput(
+        category="FR",
+        attributes=_attrs_with_gtin(gtin),
+        pricing={"mrp": 5000.0, "offer_price": 4500.0},
+    )
+    return asyncio.run(catalog_mod.import_products([row], current_user=_user()))
+
+
+def test_import_refuses_a_row_whose_gtin_another_product_holds(env, monkeypatch):
+    _gtin_holder_repo(monkeypatch)
+    res = _import(_HELD_UPC)
+    assert res["created_count"] == 0
+    assert "already assigned" in res["errors"][0]["error"]
+    assert not catalog_mod.CATALOG_PRODUCTS
+
+
+def test_import_with_a_free_gtin_still_creates(env, monkeypatch):
+    _gtin_holder_repo(monkeypatch)
+    res = _import("4006381333931")
+    assert res["created_count"] == 1, res["errors"]
+
+
+def test_an_imported_then_approved_gtin_reaches_the_price_push(env, monkeypatch):
+    """Import and Approve write the GTIN as the gtin ATTRIBUTE only (no
+    top-level projection on the doc): the push reads the product's own GTIN
+    from that home, so it still ships as the variant barcode."""
+    from api.services.shopify_push.product_input import (
+        _variants_for_price_push,
+        build_variant_price_inputs,
+    )
+
+    _gtin_holder_repo(monkeypatch)
+    assert _import("4006381333931")["created_count"] == 1
+    (pid,) = catalog_mod.CATALOG_PRODUCTS
+    _promote(pid)
+    twin = dict(catalog_mod.CATALOG_PRODUCTS[pid])
+    assert not twin.get("gtin")
+    twin["ecom"] = {"shopify_variant_id": "gid://shopify/ProductVariant/1"}
+    rows, _ = build_variant_price_inputs(twin, _variants_for_price_push(twin, []))
+    assert rows[0]["barcode"] == "4006381333931"
+
+
+@pytest.fixture()
+def shared_db(env, monkeypatch):
+    """`env` on ONE mongomock db, as in production: the catalog door's twins
+    and the spine repo read and write the same database."""
+    import mongomock
+
+    db = mongomock.MongoClient().db
+    repo = ProductRepository(db.products)
+    monkeypatch.setattr(catalog_mod, "_get_db", lambda: db)
+    monkeypatch.setattr(deps_mod, "get_product_repository", lambda: repo)
+    return db
+
+
+def _import_rows(*gtins):
+    rows = [
+        catalog_mod.ProductCreateInput(
+            category="FR",
+            attributes={**_attrs_with_gtin(g), "model_no": f"VO{i}"},
+            pricing={"mrp": 5000.0, "offer_price": 4500.0},
+        )
+        for i, g in enumerate(gtins)
+    ]
+    return asyncio.run(catalog_mod.import_products(rows, current_user=_user()))
+
+
+def test_import_keeps_one_product_per_gtin_across_rows_and_batches(shared_db):
+    """The import writes only a catalog_products twin (no spine) and queues it
+    for the push, which sends the twin's gtin as its variant barcode: two rows
+    with one GTIN were two Shopify listings carrying the same barcode."""
+    res = _import_rows("4006381333931", "04006381333931")
+    assert res["created_count"] == 1
+    assert [e["index"] for e in res["errors"]] == [1]
+    assert "already assigned" in res["errors"][0]["error"]
+    again = _import_rows("4006381333931")
+    assert again["created_count"] == 0 and "already assigned" in again["errors"][0]["error"]
+    assert shared_db.catalog_products.count_documents({}) == 1
+
+
+def test_a_create_door_sees_an_imported_twins_gtin(shared_db):
+    """Quick Add / the catalog create door read only spines, so an imported
+    twin's GTIN was free to take."""
+    assert _import_rows("4006381333931")["created_count"] == 1
+    row = catalog_mod.ProductCreateInput(
+        category="FR",
+        attributes={**_attrs_with_gtin("4006381333931"), "model_no": "VO-NEW"},
+        pricing={"mrp": 5000.0, "offer_price": 4500.0},
+    )
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(catalog_mod.create_catalog_product(row, current_user=_user()))
+    assert exc.value.status_code == 409
+    assert shared_db.products.count_documents({}) == 0
+
+
+def test_an_imported_twin_approves_and_re_saves_its_own_gtin(shared_db):
+    """The twin itself is never the clash: Approve keys the check on its id,
+    and the review editor on a spineless twin passes the twin's id."""
+    assert _import_rows("4006381333931")["created_count"] == 1
+    (pid,) = [d["id"] for d in shared_db.catalog_products.find({})]
+    inp = catalog_mod.ProductUpdateInput(
+        attributes={"gtin": "4006381333931", "colour_code": "RED"}
+    )
+    asyncio.run(catalog_mod.update_catalog_product(pid, inp, _user()))
+    assert shared_db.catalog_products.find_one({"id": pid})["attributes"]["colour_code"] == "RED"
+    assert _promote(pid)["pos_ready"] is True
+
+
+@pytest.mark.parametrize("typed", ["8 056597 720373", "805-6597-72037-3"])
+def test_an_imported_gtin_is_stored_digits_only_and_a_scan_finds_it(shared_db, typed):
+    """A GTIN is stored sanitised at every write door: a scan (an exact match)
+    of 8056597720373 missed a twin imported as '805-6597-72037-3'."""
+    assert _import_rows(typed)["created_count"] == 1
+    twin = shared_db.catalog_products.find_one({})
+    assert twin["attributes"]["gtin"] == "8056597720373"
+    repo = ProductRepository(shared_db.products)
+    assert repo.find_twin_by_barcode("8056597720373")["id"] == twin["id"]

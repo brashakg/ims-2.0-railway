@@ -82,7 +82,10 @@ class TestMappers:
         assert doc is not None
         assert doc["brand"] == "RAYBAN"
         assert doc["category"] == "FRAME"
-        assert doc["barcode"] == "2510647"
+        # TechCherry's own code is the SKU, never the product barcode: that
+        # field holds only a manufacturer GTIN (owner ruling 2026-09-28).
+        assert doc["sku"] == "2510647"
+        assert "barcode" not in doc
         assert doc["mrp"] == 4790.0
         assert doc["cost_price"] == 2500.0
         assert doc["stock_quantity"] == 1
@@ -95,9 +98,18 @@ class TestMappers:
         row = {"Prod Name": "Generic frame", "Barcode": "NA", "Sale Prc": "500"}
         doc = _map_product(row, "BV-PUN-01", "techcherry")
         assert doc is not None
-        assert doc["barcode"] == ""
+        assert "barcode" not in doc
         # sku falls back to name when no barcode
         assert doc["sku"] == "Generic frame"
+
+    def test_product_mapper_keeps_a_real_gtin_as_the_barcode(self):
+        from api.routers.techcherry_import import _map_product
+        row = {"Prod Name": "Oakley frame", "Barcode": "4006381 333931", "Sale Prc": "900"}
+        doc = _map_product(row, "BV-PUN-01", "techcherry")
+        assert doc["barcode"] == "4006381333931"
+        # Our own in-store range (GS1 20-29) is never a manufacturer barcode.
+        row["Barcode"] = "2000000000015"
+        assert "barcode" not in _map_product(row, "BV-PUN-01", "techcherry")
 
     def test_product_mapper_skips_when_no_name_or_barcode(self):
         from api.routers.techcherry_import import _map_product
@@ -234,6 +246,29 @@ class TestPowerQuality:
         assert len(inserted) == 2
 
 
+    def test_reimporting_a_techcherry_coded_product_does_not_duplicate_it(
+        self, client, auth_headers, monkeypatch
+    ):
+        """The product barcode no longer carries TechCherry's own code, so the
+        re-import key is the SKU (which does): a second import of the same row
+        updates the first, it is not inserted twice."""
+        import mongomock
+        import api.routers.techcherry_import as tc
+
+        db = mongomock.MongoClient().db
+        monkeypatch.setattr(tc, "_get_db", lambda: db)
+        body = {
+            "type": "products",
+            "store_id": "BV-PUN-01",
+            "rows": [{"Prod Name": "RB6266", "Barcode": "2510647", "Sale Prc": "4790"}],
+        }
+        for _ in range(2):
+            r = client.post("/api/v1/admin/techcherry/import", json=body, headers=auth_headers)
+            assert r.status_code == 200, r.text
+        assert r.json()["inserted"] == 0
+        assert db.products.count_documents({"sku": "2510647"}) == 1
+
+
 # ----- endpoint auth ------------------------------------------------------
 
 
@@ -256,3 +291,69 @@ class TestEndpointAuth:
             headers=auth_headers,
         )
         assert r.status_code == 422  # Pydantic literal validation
+
+
+# ----- one product per manufacturer GTIN ------------------------------------
+
+
+class TestGtinOneHolder:
+    """The import is a door that writes products.barcode, so it obeys the same
+    one-holder rule (product_master.assert_gtin_free) as every other door."""
+
+    def _import(self, client, auth_headers, monkeypatch, rows, overwrite=True):
+        import mongomock
+        import api.routers.techcherry_import as tc
+
+        if not hasattr(self, "db"):
+            self.db = mongomock.MongoClient().db
+            # P1 holds the UPC-A 036000291452 in its 13-digit spelling.
+            self.db.products.insert_one(
+                {"product_id": "P1", "sku": "BV-P1",
+                 "attributes": {"gtin": "0036000291452"}}
+            )
+        monkeypatch.setattr(tc, "_get_db", lambda: self.db)
+        r = client.post(
+            "/api/v1/admin/techcherry/import",
+            json={"type": "products", "store_id": "BV-PUN-01", "rows": rows,
+                  "overwrite": overwrite},
+            headers=auth_headers,
+        )
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    def test_a_gtin_another_product_holds_is_not_imported(
+        self, client, auth_headers, monkeypatch
+    ):
+        out = self._import(
+            client, auth_headers, monkeypatch,
+            [{"Prod Name": "RB frame", "Barcode": "036000291452"}],
+        )
+        assert out["inserted"] == 0
+        assert len(out["errors"]) == 1
+        assert "RB frame" in out["errors"][0] and "BV-P1" in out["errors"][0]
+        assert self.db.products.count_documents({}) == 1
+
+    def test_a_free_gtin_still_imports_and_reimports(
+        self, client, auth_headers, monkeypatch
+    ):
+        rows = [{"Prod Name": "Faber", "Barcode": "4006381333931"}]
+        assert self._import(client, auth_headers, monkeypatch, rows)["inserted"] == 1
+        # Re-importing the row that holds it updates it: not a second holder.
+        again = self._import(client, auth_headers, monkeypatch, rows)
+        assert (again["updated"], again["errors"]) == (1, [])
+        assert self.db.products.count_documents({"barcode": "4006381333931"}) == 1
+
+    def test_the_holder_reimported_in_another_spelling_is_still_itself(
+        self, client, auth_headers, monkeypatch
+    ):
+        """'036000291452' and '0036000291452' are one GTIN: a re-import of the
+        row holding it, spelt the other way, updates it."""
+        import mongomock
+
+        self.db = mongomock.MongoClient().db
+        self.db.products.insert_one(
+            {"sku": "036000291452", "store_id": "BV-PUN-01", "barcode": "0036000291452"}
+        )
+        rows = [{"Prod Name": "RB frame", "Barcode": "036000291452"}]
+        out = self._import(client, auth_headers, monkeypatch, rows)
+        assert (out["updated"], out["errors"]) == (1, [])

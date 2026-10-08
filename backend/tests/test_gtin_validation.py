@@ -128,15 +128,45 @@ def test_bad_checksum_rejected():
 
 
 def test_restricted_gs1_prefix_rejected():
-    """GS1 20-29 is in-store / restricted distribution -- and is exactly the
-    range services/barcode.py mints our own store_barcode in, so it must never
-    escape as a public GTIN."""
-    from api.services.barcode import format_ean13
-
-    internal = format_ean13(4242, prefix="20")
+    """GS1 20-29 is in-store / restricted distribution -- the range IMS minted
+    its own unit barcodes in before the 2026-09-28 ruling (those units still
+    carry them), so it must never escape as a public GTIN."""
+    internal = "2000000042428"  # a well-formed 20-prefix EAN-13 (old IMS mint)
     assert check_digit_ok(internal) is True  # well-formed, but not publishable
     assert classify_gtin(internal) == REASON_RESTRICTED
     assert sanitise_gtin(internal) is None
+
+
+# A GTIN is ASCII 0-9. Python's \d also matches every other script's digits,
+# so the Devanagari form of a real EAN (a Hindi phone keyboard) passed every
+# door and was pushed to Shopify as a non-ASCII barcode -- and IMS's own old
+# in-store code, typed in Devanagari, slipped past the 20-29 guard.
+_DEVANAGARI = str.maketrans("0123456789", "\u0966\u0967\u0968\u0969\u096a\u096b\u096c\u096d\u096e\u096f")
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "4006381333931".translate(_DEVANAGARI),
+        "400638133393\uff11",  # a full-width final digit
+        "2000000000015".translate(_DEVANAGARI),  # our old in-store code
+    ],
+)
+def test_digits_from_other_scripts_are_not_a_gtin(raw):
+    assert classify_gtin(raw) == REASON_NONNUMERIC
+    assert check_digit_ok(raw) is False
+    assert sanitise_gtin(raw) is None
+
+
+# UPC-A number system 2 is GS1 restricted distribution. The same number written
+# as a GTIN-13 (a leading 0) or a GTIN-14 (a leading 00) is the SAME code and
+# must get the same verdict; reading the first two digits of the padded form
+# ('02') let it through and pushed it as the Shopify barcode.
+@pytest.mark.parametrize("code", ["212345678909", "0212345678909", "00212345678909"])
+def test_a_restricted_code_is_refused_at_every_length(code):
+    assert check_digit_ok(code) is True  # well-formed, but in-store only
+    assert classify_gtin(code) == REASON_RESTRICTED
+    assert sanitise_gtin(code) is None
 
 
 @pytest.mark.parametrize("raw", [None, "", "   ", "  -  "])
@@ -197,6 +227,30 @@ def test_draft_door_drops_the_bad_gtin():
 
     doc = normalise_payload(as_draft=True, **_payload("2511661"))
     assert "gtin" not in doc["attributes"]
+
+
+def _upc_payload(upc):
+    p = _payload("")
+    p["attributes"] = {**p["attributes"], "upc": upc}
+    return p
+
+
+@pytest.mark.parametrize("junk", ["2000000000015", "TW003HG14", "036000291453"])
+def test_the_upc_attribute_gets_the_gtin_rule(junk):
+    """'UPC (mfr)' is a second manufacturer-barcode box (ims.upc metafield,
+    the description's 'UPC Code' row) that nothing validated: our own 20-29
+    code, a model number or a wrong check digit was saved and published."""
+    from api.services.product_master import ProductMasterError, normalise_payload
+
+    with pytest.raises(ProductMasterError) as exc:
+        normalise_payload(**_upc_payload(junk))
+    assert exc.value.status == 422
+    assert exc.value.field == "upc"
+    assert "upc" not in normalise_payload(force_draft=True, **_upc_payload(junk))[
+        "attributes"
+    ]
+    doc = normalise_payload(**_upc_payload("0360-0029 1452"))
+    assert doc["attributes"]["upc"] == "036000291452"
 
 
 # ---------------------------------------------------------------------------
@@ -273,22 +327,11 @@ def test_push_sends_a_valid_barcode():
     assert rows[0]["barcode"] == VALID_EAN13
 
 
-def test_push_falls_through_junk_to_the_parent_products_valid_gtin():
-    """The old `or` chain stopped at the first TRUTHY value, so a junk variant
-    gtin shadowed a good product one. It now picks the first VALID value."""
-    from api.services.shopify_push import build_variant_seed_rows
-
-    rows = build_variant_seed_rows(
-        {"sku": "P1", "mrp": 5000, "offer_price": 4000, "gtin": VALID_EAN13},
-        [{"sku": "P1-A", "gtin": "2511661"}],
-    )
-    assert rows[0]["row"]["barcode"] == VALID_EAN13
-
-
-def test_push_never_leaks_our_internal_store_barcode_as_a_gtin():
-    """product['barcode'] is in the create-path fallback chain and often holds
-    the internally minted GS1 20-29 code -- it must not be published."""
-    from api.services.barcode import format_ean13
+def test_push_falls_through_junk_to_the_products_valid_gtin():
+    """The old `or` chain stopped at the first TRUTHY value, so a junk value
+    shadowed a good GTIN. It now picks the first VALID one. The product's own
+    variant (its self row) reads the PRODUCT's GTIN; a sibling row (P1-A) never
+    inherits it -- a GTIN names one trade item."""
     from api.services.shopify_push import build_variant_seed_rows
 
     rows = build_variant_seed_rows(
@@ -296,8 +339,61 @@ def test_push_never_leaks_our_internal_store_barcode_as_a_gtin():
             "sku": "P1",
             "mrp": 5000,
             "offer_price": 4000,
-            "barcode": format_ean13(99, prefix="20"),
+            "attributes": {"gtin": "2511661"},
+            "gtin": VALID_EAN13,
+        },
+        [{"sku": "P1", "gtin": "2511661"}, {"sku": "P1-A", "gtin": "2511661"}],
+    )
+    assert rows[0]["row"]["barcode"] == VALID_EAN13
+    assert "barcode" not in rows[1]["row"]
+
+
+def test_the_self_row_never_shadows_the_products_gtin():
+    """The product's own variant reads ONLY the product's GTIN (one home): a
+    copy left on its self row -- one the product has since removed or
+    replaced -- is never what ships."""
+    from api.services.shopify_push import build_variant_price_inputs
+
+    row = {"sku": "P1", "shopify_variant_id": "gid://shopify/ProductVariant/1",
+           "gtin": VALID_EAN13}
+    for gtin, sent in (("", None), ("4006381333931", "4006381333931")):
+        product = {"sku": "P1", "mrp": 5000, "attributes": {"gtin": gtin}}
+        rows, _ = build_variant_price_inputs(product, [dict(row)])
+        assert rows[0].get("barcode") == sent, gtin
+
+
+def test_push_never_leaks_our_internal_store_barcode_as_a_gtin():
+    """product['barcode'] is in the create-path fallback chain and often holds
+    the internally minted GS1 20-29 code -- it must not be published."""
+    from api.services.shopify_push import build_variant_seed_rows
+
+    rows = build_variant_seed_rows(
+        {
+            "sku": "P1",
+            "mrp": 5000,
+            "offer_price": 4000,
+            "barcode": "2000000000992",  # an old IMS-minted 20-prefix EAN-13
         },
         [{"sku": "P1-A"}],
     )
     assert "barcode" not in rows[0]["row"]
+
+
+def test_a_live_product_without_a_gtin_keeps_its_shopify_barcode():
+    """Decided 2026-10-01: IMS sends a barcode only when it holds a valid GTIN.
+    productVariantsBulkUpdate leaves an omitted field as Shopify has it, so a
+    price or copy edit on a live product with no GTIN in IMS (cleared, never
+    set, or junk) must OMIT the key -- sending "" would blank the barcode on
+    Shopify, including one typed in Shopify admin, and Google's GTIN match."""
+    from api.services.shopify_push import (
+        build_variant_price_inputs,
+        build_variant_seed_rows,
+    )
+
+    for gtin in (None, "", TAG_STRING):
+        product = {"sku": "P1", "mrp": 5000, "offer_price": 4000, "gtin": gtin}
+        rows, _ = build_variant_price_inputs(
+            product, [{"shopify_variant_id": "gid://shopify/ProductVariant/1", "gtin": gtin}]
+        )
+        assert "barcode" not in rows[0], gtin
+        assert "barcode" not in build_variant_seed_rows(product, [])[0]["row"], gtin

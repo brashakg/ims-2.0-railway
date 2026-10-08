@@ -1174,9 +1174,8 @@ class ShopifySyncInput(BaseModel):
     # The form's "Shopify tags" box -> the spine's governed `tags` + the twin's
     # ecom.seo.tags (product_master.set_twin_tags), the list the push sends.
     shopify_tags: List[str] = []
-    # publish_to_online_store removed in Phase 6.12 — we don't run our
-    # own storefront. Kept publish_to_pos for Shopify POS sync.
-    publish_to_pos: bool = True
+    # No POS channel flag: IMS is the till, a product never publishes to
+    # Shopify POS (owner ruling 2026-09-28).
 
 
 class SEOInput(BaseModel):
@@ -1885,8 +1884,9 @@ async def create_catalog_product(
         )
     except _pm.ProductMasterError as err:
         # Preserve the catalog door's historical 400 "Missing required field"
-        # contract for a missing-attr breach; surface other breaches verbatim.
-        if err.status == 422 and err.field and err.field != "category":
+        # contract for a missing field; surface other breaches (a junk GTIN /
+        # UPC, a value outside the Catalog Dictionary) verbatim.
+        if err.code == _pm.MISSING_FIELD:
             raise HTTPException(
                 status_code=400, detail=f"Missing required field: {err.field}"
             ) from err
@@ -1912,6 +1912,12 @@ async def create_catalog_product(
     # form AND catalog doors" flow. When there is no DB (_pr is None) the catalog
     # save below also falls back to in-memory, so there is no orphan to guard.
     _pr = get_product_repository()
+    # One product per manufacturer GTIN at this create door too (the same rule
+    # as the form and edit doors).
+    try:
+        _pm.assert_gtin_free((_spine.get("attributes") or {}).get("gtin"), _pr, None)
+    except _pm.ProductMasterError as err:
+        raise HTTPException(status_code=err.status, detail=err.message) from err
     if _pr is not None:
         try:
             _spine_created = _pr.create(_spine, raise_on_duplicate=True)
@@ -2129,11 +2135,13 @@ async def update_catalog_product(
                 existing["gst_rate"] = gst_rate_for_category(canonical)
 
     # Update fields
+    gtin_written = False
     if product.attributes:
         # Catalog Dictionary parity with the spine PUT (products.py): when the
         # owner configured allowed values for a field, an attributes patch must
         # match them (case-canonicalising). Fail-soft when no db.
-        merged_attrs = {**(existing.get("attributes") or {}), **product.attributes}
+        from ..dependencies import get_product_repository
+
         try:
             # Case ONLY what this submit carries. The merged dict below
             # holds every stored attribute, so casing that would rewrite
@@ -2141,13 +2149,31 @@ async def update_catalog_product(
             _typed = _pm.apply_field_casing(
                 product.attributes or {}, only=set((product.attributes or {}).keys())
             )
+            # The review editor's 'GTIN (mfr)' / 'UPC (mfr)' boxes are the
+            # manufacturer barcodes that reach Shopify and Google: the same
+            # strict guard and one-holder rule as the spine doors.
+            _typed = _pm._guard_gtin_attribute(_typed, strict=True)
             product.attributes = _typed
+            # Another stored spelling of a barcode key folds on and goes; a
+            # gtin the fold makes is checked like a sent one, and written.
+            _gtin_repo = get_product_repository()
+            merged_attrs, gtin_written = _pm.merge_attributes_edit(
+                existing.get("attributes"),
+                _typed,
+                _gtin_repo,
+                # A spineless twin (an import) is its own holder: its id.
+                _spine_product_id(_gtin_repo, existing) or existing.get("id"),
+            )
             merged_attrs = _pm.enforce_dictionary_values(
                 existing.get("category"), merged_attrs, db=_get_db()
             )
         except _pm.ProductMasterError as err:
             raise HTTPException(status_code=err.status, detail=err.message) from err
         existing["attributes"] = merged_attrs
+        if gtin_written:
+            # The twin's top-level gtin is what the push sends as the variant
+            # barcode (the same projection as the spine door's mirror).
+            existing.update(_pm.twin_barcode_fields(merged_attrs.get("gtin")))
         # Title regen is BEST-EFFORT: imported (BVI) docs store the canonical
         # long-form category ("FRAME"), which is not a ProductCategory short
         # code -- ProductCategory("FRAME") raises and previously 500'd any
@@ -2403,6 +2429,15 @@ async def update_catalog_product(
             _patch = {k: v for k, v in _patch.items() if v is not None}
             if _patch:
                 _pr.update(_spine_id, _patch)
+            if gtin_written:
+                # Spine and twin hold ONE GTIN (Manage Barcode and the stock
+                # page read the spine's). Its own write, so a legacy spine
+                # whose attributes are not a dict cannot sink the price sync.
+                _pr.update(
+                    _spine_id,
+                    {"attributes.gtin": (existing.get("attributes") or {}).get("gtin") or ""},
+                )
+                _pm.drop_legacy_spine_barcode(_pr, _spine_id)
     except Exception:  # noqa: BLE001
         logger.warning(
             "[CATALOG] spine sync on update skipped for %s", product_id, exc_info=True
@@ -2439,7 +2474,7 @@ async def update_catalog_product(
         _row_patch: Dict[str, Any] = {}
         if product.pricing is not None and product.pricing.mrp is not None:
             _row_patch["mrp"] = product.pricing.mrp
-        if product.attributes and "gtin" in product.attributes:
+        if gtin_written:
             _row_patch["attributes"] = {
                 "gtin": (existing.get("attributes") or {}).get("gtin")
             }
@@ -2665,6 +2700,10 @@ async def promote_catalog_product(
             product_repo=repo,
             db=db,
         )
+        # One product per manufacturer GTIN: Approve is a create door too.
+        _pm.assert_gtin_free(
+            (spine.get("attributes") or {}).get("gtin"), repo, product_id
+        )
     except _pm.ProductMasterError as err:
         if dry_run:
             return {
@@ -2746,6 +2785,13 @@ async def promote_catalog_product(
     }
     if minted_sku:
         stamp["sku"] = minted_sku
+    # The spine got the barcode keys folded (the door's guard); the twin's own
+    # copy of another spelling ('GTIN') goes in this same write.
+    _doc_attrs = doc.get("attributes")
+    if isinstance(_doc_attrs, dict):
+        _folded = _pm.fold_barcode_spellings(_doc_attrs)
+        if _folded != _doc_attrs:
+            stamp["attributes"] = _folded
     try:
         coll = _catalog_coll()
         if coll is not None:
@@ -3032,6 +3078,9 @@ async def import_products(
     # Resolve the DB once so each row's SKU counter is allocated atomically +
     # persistently (the per-worker in-memory dict would collide under concurrency).
     _bulk_db = _get_db()
+    from ..dependencies import get_product_repository
+
+    _gtin_repo = get_product_repository()
 
     for i, product in enumerate(products):
         try:
@@ -3058,12 +3107,14 @@ async def import_products(
                     },
                     source="CATALOG",
                 )
+                # One product per manufacturer GTIN, as at every create door.
+                _pm.assert_gtin_free(
+                    (_row_spine.get("attributes") or {}).get("gtin"), _gtin_repo, None
+                )
             except _pm.ProductMasterError as req_exc:
                 detail = (
                     f"Missing required field: {req_exc.field}"
-                    if req_exc.status == 422
-                    and req_exc.field
-                    and req_exc.field != "category"
+                    if req_exc.code == _pm.MISSING_FIELD
                     else req_exc.message
                 )
                 errors.append({"index": i, "error": detail})

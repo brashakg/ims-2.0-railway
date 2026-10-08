@@ -1150,6 +1150,7 @@ async def list_products(
             {"name": {"$regex": safe_search, "$options": "i"}},
             {"sku": {"$regex": safe_search, "$options": "i"}},
             {"barcode": {"$regex": safe_search, "$options": "i"}},
+            {"attributes.gtin": {"$regex": safe_search, "$options": "i"}},
         ]
     docs = list(coll.find(filter_).limit(200))
     return {"products": [_scrub(d) for d in docs if d], "total": len(docs)}

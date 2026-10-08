@@ -44,8 +44,15 @@ class _FakeRepo:
             return None
         return next((dict(r) for r in self.rows if r.get("identity_key") == key), None)
 
-    def find_by_barcode(self, bc):
-        return next((dict(r) for r in self.rows if r.get("barcode") == bc), None)
+    def find_by_barcode(self, bc, exclude_product_id=None):
+        return next(
+            (
+                dict(r)
+                for r in self.rows
+                if r.get("barcode") == bc and r.get("product_id") != exclude_product_id
+            ),
+            None,
+        )
 
     def create(self, data, *, raise_on_duplicate=False):
         # identity collision (Phase-1 dup guard backstop) -> simulate the index raise
@@ -185,3 +192,35 @@ def test_clone_empty_variation_overrides_nothing():
     )
     # clones source as-is -> collides with the source identity
     assert len(out["created"]) == 0 and len(out["errors"]) == 1
+
+
+@pytest.mark.parametrize("gtin_key,upc_key", [("gtin", "upc"), ("GTIN", "Upc")])
+def test_clone_never_copies_the_sources_manufacturer_barcodes(gtin_key, upc_key):
+    """A GTIN names ONE trade item: a new SKU never inherits the source's gtin
+    / upc (with a GTIN on the source, every variation used to 409 on the
+    one-holder rule). A variation may still carry its own. An old source
+    holding the key in another letter case ('GTIN') is the same barcode: the
+    one-holder check reads only attributes.gtin, so it could not catch a
+    copied 'GTIN' -- the clone must drop every spelling."""
+    import mongomock
+    from database.repositories.product_repository import ProductRepository
+
+    repo = ProductRepository(mongomock.MongoClient().db.products)
+    src = _source_frame()
+    src["attributes"].update({gtin_key: "4006381333931", upc_key: "036000291452"})
+    repo.create(src)
+    out = pm.clone_and_vary(
+        source_id="SRC-1",
+        variations=[{"colour_code": "RED"}, {"colour_code": "BLU", "gtin": "5901234123457"}],
+        actor="u-cat",
+        product_repo=repo,
+        db=None,
+    )
+    assert out["errors"] == [] and len(out["created"]) == 2
+    saved = {
+        c["attributes"]["colour_code"]: repo.find_one({"product_id": c["product_id"]})["attributes"]
+        for c in out["created"]
+    }
+    barcode_keys = {c: [k for k in a if k.strip().lower() in ("gtin", "upc")] for c, a in saved.items()}
+    assert barcode_keys == {"RED": [], "BLU": ["gtin"]}
+    assert saved["BLU"]["gtin"] == "5901234123457"

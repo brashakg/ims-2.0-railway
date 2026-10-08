@@ -12,7 +12,8 @@ The box calls GET /products?search=...&match=anywhere, which is
 ProductRepository.search_products(anywhere=True). The SAME endpoint without
 `match` is what the till, goods receipt, the command palette, Returns and
 QuickShare call, and for them NOTHING changes (owner rule: ask before touching
-POS): every word still has to START brand / model / SKU / variant / barcode.
+POS): every word still has to START brand / model / SKU / variant / barcode
+/ the maker's GTIN (attributes.gtin, where that code lives now).
 The wide rule would crowd the till -- 'ray' is inside 'Gunmetal Gray' -- so it
 is opt-in, and even there what the till's rule finds comes FIRST, so a result
 limit can never push it off the list.
@@ -350,9 +351,16 @@ def test_the_till_search_is_untouched(repo, q):
 
 
 def test_the_till_does_not_get_the_wide_matches(repo):
+    # No infix or wide match at the till: a model number's end, a colour word,
+    # or a middle chunk of a GTIN finds nothing.
     assert repo.search_products("8895") == []
     assert repo.search_products("black") == []
-    assert repo.search_products("8901234567893") == []
+    assert repo.search_products("4567893") == []
+    # The full maker's barcode typed at the till still finds its product: the
+    # GTIN lives in attributes.gtin now, matched from its start like barcode.
+    assert [d["product_id"] for d in repo.search_products("8901234567893")] == [
+        "P-WAT"
+    ]
 
 
 @pytest.fixture

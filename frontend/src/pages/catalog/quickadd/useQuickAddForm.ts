@@ -39,6 +39,7 @@ import {
   hsnImpliesCategoryRate,
   loadCategoryRegistry,
   overlayChangedFormValues,
+  productToCloneValues,
   productToFormValues,
   productToVariantFormValues,
   promoteGapsToFormErrors,
@@ -49,6 +50,7 @@ import {
   validateReviewForm,
   variantFieldRule,
   variantFlaggedFormFields,
+  withoutManufacturerBarcodes,
 } from '../productAddShared';
 import {
   readReviewQueue,
@@ -102,7 +104,6 @@ export function useQuickAddForm() {
   // Online (Shopify)
   const [syncToShopify, setSyncToShopify] = useState(false);
   const [shopifyTags, setShopifyTags] = useState<string[]>([]);
-  const [publishPOS, setPublishPOS] = useState(true);
 
   // Product images (Part 1): self-hosted URLs returned by the upload endpoint.
   const [images, setImages] = useState<string[]>([]);
@@ -301,7 +302,6 @@ export function useQuickAddForm() {
       discountCategory,
       syncToShopify,
       shopifyTags,
-      publishPOS,
       images,
       // Review-mode extras (ignored by buildProductPayload / create doors).
       name: displayName,
@@ -309,7 +309,7 @@ export function useQuickAddForm() {
     }),
     [
       selectedCategory, attributes, description, hsnCode, gstRate, weight, mrp,
-      offerPrice, costPrice, discountCategory, syncToShopify, shopifyTags, publishPOS,
+      offerPrice, costPrice, discountCategory, syncToShopify, shopifyTags,
       images, displayName, reviewTags,
     ]
   );
@@ -332,7 +332,6 @@ export function useQuickAddForm() {
       setEditLevels(null);
       setSyncToShopify(false);
       setShopifyTags([]);
-      setPublishPOS(true);
       setImages([]);
       setErrors({});
       setDisplayName('');
@@ -362,7 +361,6 @@ export function useQuickAddForm() {
     setDiscountCategory(v.discountCategory || '');
     setSyncToShopify(Boolean(v.syncToShopify));
     setShopifyTags(Array.isArray(v.shopifyTags) ? v.shopifyTags : []);
-    setPublishPOS(v.publishPOS !== false);
     setImages(Array.isArray(v.images) ? v.images : []);
     // Review extras — blank for every non-review prefill (template/clone/
     // variant all leave them undefined).
@@ -1089,7 +1087,8 @@ export function useQuickAddForm() {
       // A template load replaces the whole form — leave variant mode if active.
       setVariantCtx(null);
       setFlaggedFields(new Set());
-      applyFormValues(tpl.payload);
+      // A template starts a NEW SKU: never with a maker's barcode (same strip as Clone).
+      applyFormValues(withoutManufacturerBarcodes(tpl.payload));
       setTemplatesOpen(false);
       toast.success(`Loaded template "${tpl.name}". Edit and save as a new product.`);
       window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -1140,7 +1139,7 @@ export function useQuickAddForm() {
       // A clone replaces the whole form — leave variant mode if active.
       setVariantCtx(null);
       setFlaggedFields(new Set());
-      applyFormValues(productToFormValues(product));
+      applyFormValues(productToCloneValues(product));
       toast.success('Cloned into the form. Tweak the details and save as a NEW SKU.');
       window.scrollTo({ top: 0, behavior: 'smooth' });
     },
@@ -1436,7 +1435,6 @@ export function useQuickAddForm() {
     discountCategory,
     reorderLevel, setReorderLevel, setReorderBadInput, canSetReorderLevel, reorderShop,
     syncToShopify, setSyncToShopify, shopifyTags, setShopifyTags,
-    publishPOS, setPublishPOS,
     images, setImages,
     displayName, setDisplayName, reviewTags, setReviewTags,
     // options fed from the server

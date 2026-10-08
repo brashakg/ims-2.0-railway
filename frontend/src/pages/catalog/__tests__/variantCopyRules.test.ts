@@ -254,7 +254,6 @@ describe('productToVariantFormValues', () => {
     const seed = productToVariantFormValues(SG_PRODUCT);
     expect(seed.values.syncToShopify).toBe(false);
     expect(seed.values.shopifyTags).toEqual([]);
-    expect(seed.values.publishPOS).toBe(true);
     expect(seed.sourceProductId).toBe('P-1');
     expect(seed.sourceSku).toBe('SGRAYBANRB2140BLK');
     expect(seed.sourceLabel).toBe('Ray-Ban RB-2140');

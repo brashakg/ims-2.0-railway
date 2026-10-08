@@ -48,14 +48,21 @@ import uuid
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .gst_rates import (
     gst_rate_for_category,
     hsn_for_category,
     resolve_gst_rate_strict,
 )
-from .gtin import classify_gtin, is_valid_gtin, normalise_candidate
+from .gtin import (
+    MANUFACTURER_BARCODE_ATTRIBUTES,
+    classify_gtin,
+    fold_barcode_spellings,
+    manufacturer_barcode_key,
+    normalise_candidate,
+    sanitise_gtin,
+)
 from .pricing_caps import evaluate_offer_price
 from .product_naming import (
     build_handle,
@@ -88,16 +95,28 @@ class ProductMasterError(Exception):
     offending attribute so the 422 body can point at it.
     """
 
-    def __init__(self, message: str, status: int = 422, field: Optional[str] = None):
+    def __init__(
+        self,
+        message: str,
+        status: int = 422,
+        field: Optional[str] = None,
+        code: Optional[str] = None,
+    ):
         super().__init__(message)
         self.message = message
         self.status = status
         self.field = field
-        # Optional machine code + conflict payload (Hub Phase 1 duplicate guard):
-        # a 409 carries `conflict = {product_id, sku, identity_key}` of the
-        # existing row so the caller/FE can link to it ("add stock / a variant").
-        self.code: Optional[str] = None
+        # Optional machine code (MISSING_FIELD, DUPLICATE_PRODUCT) + conflict
+        # payload (Hub Phase 1 duplicate guard): a 409 carries `conflict =
+        # {product_id, sku, identity_key}` of the existing row so the caller/FE
+        # can link to it ("add stock / a variant").
+        self.code: Optional[str] = code
         self.conflict: Optional[Dict[str, Any]] = None
+
+
+# The code on a "required field is empty" error: the catalogue create/import
+# doors answer only THAT with their historical "Missing required field: <f>".
+MISSING_FIELD = "MISSING_FIELD"
 
 
 # ===========================================================================
@@ -1321,31 +1340,137 @@ def _guard_gtin_attribute(
     value and fixes or clears it -- silently discarding what someone just typed
     would be worse. DRAFT/IMPORT (bulk + clone doors): drop the value and log
     it, so one bad cell never blocks a 2,000-row import while still never
-    persisting garbage. Empty stays empty in both modes.
+    persisting garbage. Empty stays empty in both modes. A valid GTIN is stored
+    SANITISED, digits only ('8 056597 720373', '805-6597-72037-3' ->
+    '8056597720373'), so one GTIN is one value and a scan finds it.
+
+    The `upc` attribute ('UPC (mfr)') is the same kind of code -- a UPC is a
+    GTIN-12 -- and reaches Shopify as the ims.upc metafield and the
+    description's 'UPC Code' row, so it gets the same rule.
+
+    Keys match in any letter case ('GTIN', 'Upc' publish as ims.gtin / ims.upc
+    too) and fold onto the one key (gtin.fold_barcode_spellings, THE fold): the
+    exact key wins, and a junk code under another spelling is DROPPED and
+    logged in BOTH modes, never a 422. No screen shows a 'GTIN' key (the GTIN
+    box and Manage Barcode read 'gtin'), yet Quick Add sends every stored key
+    back, so a 422 on an old stored 'GTIN' left the product unsaveable with
+    nothing on screen to fix.
     """
-    attrs = attributes or {}
-    if "gtin" not in attrs:
-        return attrs
-    raw = attrs["gtin"]
-    if not normalise_candidate(raw) or is_valid_gtin(raw):
-        return attrs
-    reason = classify_gtin(raw)
-    if strict:
+    attrs = fold_barcode_spellings(attributes)
+    for key in MANUFACTURER_BARCODE_ATTRIBUTES:
+        if key not in attrs:
+            continue
+        raw = attrs[key]
+        clean = sanitise_gtin(raw)
+        if clean or not normalise_candidate(raw):
+            attrs[key] = clean or raw
+            continue
+        reason = classify_gtin(raw)
+        if strict:
+            raise ProductMasterError(
+                f"'{str(raw)[:40]}' is not a valid {key.upper()} ({reason}). A "
+                "GTIN/UPC is 8, 12, 13 or 14 digits with a valid check digit. "
+                "Leave it blank if the manufacturer barcode is unknown.",
+                status=422,
+                field=key,
+            )
+        logger.warning(
+            "[PM] dropping invalid %s: reason=%s value=%.60r", key, reason, raw
+        )
+        del attrs[key]
+    return attrs
+
+
+def twin_barcode_fields(gtin: Any) -> Dict[str, Any]:
+    """The catalog-twin (or catalog_variants row) fields the Shopify push reads
+    a barcode from, for the product's gtin attribute: the top-level `gtin`
+    and, when the GTIN is REMOVED, the legacy `barcode` too -- the push falls
+    back to it (variants.build_variant_seed_rows, the price push's
+    pseudo-variant), so leaving it would send the removed code again. ONE rule
+    for every door that moves the gtin attribute."""
+    if gtin:
+        return {"gtin": gtin}
+    return {"gtin": None, "barcode": None}
+
+
+def drop_legacy_spine_barcode(product_repo, product_id: Any) -> None:
+    """The gtin attribute is a product's ONE manufacturer-barcode home, so a
+    door that writes it drops the legacy products.barcode (main's old Manage
+    Barcode wrote there). Left behind, a removed code stayed on the product:
+    assert_gtin_free still found it and no screen could clear it. $unset, never
+    "" or None: products.barcode carries a unique sparse index. The gtin key
+    in another spelling ('GTIN') goes too: the gtin just written wins
+    (gtin.fold_barcode_spellings), and the catalogue editor writes the spine's
+    attributes.gtin alone, so nothing else would remove it."""
+    coll = getattr(product_repo, "collection", None)
+    if coll is None or not product_id:
+        return
+    # No projection: the no-Mongo MockCollection.find_one takes a filter only.
+    attrs = (coll.find_one({"product_id": product_id}) or {}).get("attributes")
+    unset = {"barcode": ""}
+    if isinstance(attrs, dict):
+        unset.update(
+            {
+                f"attributes.{k}": ""
+                for k in attrs
+                if k != "gtin" and manufacturer_barcode_key(k) == "gtin"
+            }
+        )
+    coll.update_one({"product_id": product_id}, {"$unset": unset})
+
+
+def assert_gtin_free(code: Any, product_repo, this_product_id: Optional[str]) -> None:
+    """409 when ANOTHER product already holds this manufacturer barcode.
+
+    THE uniqueness rule for both manufacturer-barcode fields (products.barcode
+    and the gtin attribute), at every door that sets one: create, the spine
+    edit and the catalogue review editor. ProductRepository.find_by_barcode
+    reads both fields in every spelling of the one GTIN. A GTIN names ONE
+    maker's item: two products holding it would go to Shopify/Google as the
+    same thing. `this_product_id` None (a create) clashes with any holder.
+    Catalogue twins count too (find_twin_by_barcode): the bulk import writes
+    only a twin, and the push sends a twin's gtin."""
+    if not normalise_candidate(code) or not hasattr(product_repo, "find_by_barcode"):
+        return
+    clash = product_repo.find_by_barcode(code, exclude_product_id=this_product_id)
+    if clash is None and hasattr(product_repo, "find_twin_by_barcode"):
+        clash = product_repo.find_twin_by_barcode(
+            code, exclude_product_id=this_product_id
+        )
+    if clash is not None:
+        holder = clash.get("sku") or clash.get("product_id") or clash.get("id")
         raise ProductMasterError(
-            f"'{str(raw)[:40]}' is not a valid GTIN ({reason}). A GTIN is 8, 12, "
-            "13 or 14 digits with a valid check digit. Leave it blank if the "
-            "manufacturer barcode is unknown.",
-            status=422,
+            f"Barcode '{normalise_candidate(code)[:40]}' is already assigned to "
+            f"another product ({holder}). "
+            "Barcodes must be unique.",
+            status=409,
             field="gtin",
         )
-    logger.warning(
-        "[PM] dropping invalid gtin on a draft/import row: reason=%s value=%.60r",
-        reason,
-        raw,
+
+
+def merge_attributes_edit(
+    stored: Optional[Dict[str, Any]],
+    patch: Dict[str, Any],
+    product_repo,
+    this_product_id: Optional[str],
+) -> Tuple[Dict[str, Any], bool]:
+    """(the attributes a partial edit stores, whether that write sets the gtin).
+    THE merge for both attribute edit doors (the spine PUT, the catalogue review
+    editor), on a `patch` already through _guard_gtin_attribute. Another stored
+    spelling of a barcode key folds onto the one key (fold_barcode_spellings),
+    so a stored 'GTIN' becomes the gtin even when the edit never sent one. The
+    gtin is WRITTEN when the edit sent it or the fold made or changed it, and a
+    written gtin passes the one-holder check: a folded 'GTIN' another product
+    holds 409s exactly as a typed one does. The caller then runs the barcode
+    projections (twin gtin, spine attributes.gtin, legacy barcode) on it."""
+    stored = stored or {}
+    merged = fold_barcode_spellings({**stored, **patch})
+    written = "gtin" in patch or (merged.get("gtin") or "") != (
+        stored.get("gtin") or ""
     )
-    cleaned = dict(attrs)
-    cleaned.pop("gtin", None)
-    return cleaned
+    if written:
+        assert_gtin_free(merged.get("gtin"), product_repo, this_product_id)
+    return merged, written
 
 
 def normalise_payload(
@@ -1444,6 +1569,7 @@ def normalise_payload(
                 "Cannot save product -- missing required: " + ", ".join(names),
                 status=422,
                 field=names[0],
+                code=MISSING_FIELD,
             )
 
     # Catalog Dictionary: when the owner has configured allowed values for a
@@ -2366,7 +2492,14 @@ def clone_and_vary(
     if src is None:
         raise ProductMasterError("Source product not found.", status=404)
 
-    base_attrs = _overlay_attributes(src)  # canonical attrs incl. legacy overlay
+    # canonical attrs incl. legacy overlay -- never the source's manufacturer
+    # barcodes: a GTIN names ONE trade item, so a new SKU never inherits one (a
+    # variation may still carry its own).
+    base_attrs = {
+        k: v
+        for k, v in _overlay_attributes(src).items()
+        if manufacturer_barcode_key(k) is None
+    }
     base_payload: Dict[str, Any] = {}
     for f in _CLONE_CATALOG_FIELDS:
         if src.get(f) is not None:
@@ -2546,6 +2679,9 @@ def create_product(
             existing = None
     if existing is not None:
         raise _duplicate_error(existing)
+    # The gtin attribute is the manufacturer barcode that goes to Shopify: one
+    # product per GTIN at create too, not only on edit.
+    assert_gtin_free((spine.get("attributes") or {}).get("gtin"), product_repo, None)
 
     # --- STEP 1: spine FIRST + alone (single-document atomic create) ---
     # raise_on_duplicate=True so a race lost to the unique index surfaces as a
@@ -2681,7 +2817,7 @@ def _mirror_variant_row_update(
     if "mrp" in patch:
         row_patch["mrp"] = patch["mrp"]
     if "gtin" in (patch.get("attributes") or {}):
-        row_patch["gtin"] = patch["attributes"].get("gtin") or None
+        row_patch.update(twin_barcode_fields(patch["attributes"].get("gtin")))
     variants = db.get_collection("catalog_variants")
     variants.update_one({"sku": sku}, {"$set": row_patch})
     if not mark_dirty:
@@ -2808,7 +2944,7 @@ def mirror_update_to_catalog_twin(
         if "gtin" in (patch.get("attributes") or {}):
             # Same projection as _build_pim_doc: the public barcode rides
             # top-level on the twin for the pseudo-variant.
-            cat_patch["gtin"] = patch["attributes"].get("gtin") or None
+            cat_patch.update(twin_barcode_fields(patch["attributes"].get("gtin")))
         # The photograph moves with the spine and QUEUES: it is the one field
         # the storefront shows more prominently than the price, and the push
         # reads it off the twin (see _build_pim_doc).

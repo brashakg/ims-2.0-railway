@@ -1652,3 +1652,53 @@ def test_a_bulk_press_counts_the_listings_that_went_live_sold_out_from_the_write
     monkeypatch.setattr(shopify_push, "push_product", _clean_with_a_unit)
     s2 = client.post("/api/v1/online-store/push/all-pending?entities=products", headers=auth_headers).json()["summary"]["products"]
     assert s2["pushed"] == 1 and "sold_out" not in s2, s2
+
+
+@pytest.mark.parametrize(
+    "attributes, deleted",
+    [
+        # Manage Barcode > Remove writes "": the ims.gtin metafield goes too.
+        ({"frame_material": "Metal", "gtin": "", "upc": None}, ["gtin", "upc"]),
+        # A held GTIN, or one never set, deletes nothing.
+        ({"frame_material": "Metal", "gtin": "4006381333931"}, []),
+        ({"frame_material": "Metal"}, []),
+    ],
+)
+def test_a_removed_manufacturer_barcode_leaves_its_metafield(monkeypatch, attributes, deleted):
+    """metafieldsSet only upserts and a blank attribute is skipped, so a GTIN
+    removed in IMS stayed on the live product as ims.gtin."""
+    gid = "gid://shopify/Product/111"
+    spy = _force_live(monkeypatch, {
+        "data": {
+            "productUpdate": {"product": {"id": gid, "handle": "rb"}, "userErrors": []},
+            "metafieldsSet": {"metafields": [], "userErrors": []},
+            "metafieldsDelete": {
+                "deletedMetafields": [{"key": k} for k in deleted], "userErrors": []
+            },
+        }
+    })
+    product = {"id": "P1", "title": "RB", "attributes": attributes,
+               "images": ["https://cdn.example.com/p.jpg"],
+               "ecom": {"status": "PUBLISHED", "shopify_product_id": gid}}
+    res = _run(shopify_push.push_product(_EngineDB(), product, []))
+    calls = [c for c in spy.calls if "metafieldsDelete" in c["query"]]
+    if not deleted:
+        assert calls == []
+        return
+    (call,) = calls
+    assert call["variables"]["metafields"] == [
+        {"namespace": "ims", "key": k, "ownerId": gid} for k in deleted
+    ]
+    assert res.metafields["deleted"] == len(deleted)
+
+
+def test_a_create_never_deletes_metafields(monkeypatch):
+    """A new product holds no metafields: nothing to delete."""
+    spy = _force_live(monkeypatch, {
+        "data": {"productCreate": {"product": {"id": "gid://shopify/Product/9"},
+                                   "userErrors": []}}
+    })
+    product = {"id": "P1", "title": "RB", "attributes": {"gtin": ""},
+               "images": ["https://cdn.example.com/p.jpg"], "ecom": {"status": "PUBLISHED"}}
+    _run(shopify_push.push_product(_EngineDB(), product, []))
+    assert not [c for c in spy.calls if "metafieldsDelete" in c["query"]]

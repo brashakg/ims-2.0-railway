@@ -31,6 +31,7 @@ from .product_input import (
     _variants_for_price_push,
     build_product_input,
     build_product_metafields,
+    build_removed_metafields,
     build_variant_price_inputs,
     ims_product_tags,
 )
@@ -286,9 +287,12 @@ async def push_product(
             )
         # Metafields ride AFTER the product write so the gid always exists.
         # Fail-soft: their errors are reported on the result, never flip ok.
+        # A removed manufacturer barcode also leaves its ims.* metafield (only
+        # an existing product can hold one).
+        removed = build_removed_metafields(product) if existing_gid else []
         mf_summary = None
-        if metafields and new_gid:
-            mf_summary = await _set_product_metafields(db, new_gid, metafields)
+        if (metafields or removed) and new_gid:
+            mf_summary = await _set_product_metafields(db, new_gid, metafields, removed)
         # VARIANT SEEDING -- the price-0.00 / no-SKU fix. ProductInput carries
         # neither, so on a CREATE the variants Shopify just minted are priced +
         # SKU'd here and their gids written back -- BOTH the ProductVariant gid

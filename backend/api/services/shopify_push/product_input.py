@@ -11,7 +11,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from agents.nexus_providers import _as_shopify_gid
 from ..ecom_category_map import ims_to_shopify_type
-from ..gtin import sanitise_gtin
+from ..gtin import (
+    MANUFACTURER_BARCODE_ATTRIBUTES,
+    fold_barcode_spellings,
+    manufacturer_barcode_key,
+    sanitise_gtin,
+)
 from ..shopify_tag_gen import generate_attribute_tags, merge_tag_lists
 
 from ._shared import logger
@@ -147,6 +152,42 @@ mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
 """
 
 
+_METAFIELDS_DELETE = """
+mutation metafieldsDelete($metafields: [MetafieldIdentifierInput!]!) {
+  metafieldsDelete(metafields: $metafields) {
+    deletedMetafields { key }
+    userErrors { field message }
+  }
+}
+"""
+
+
+def _manufacturer_codes(attrs: Dict[str, Any]) -> Dict[str, Any]:
+    """{'gtin' / 'upc': the value} for each manufacturer-barcode attribute the
+    product holds, its key in any letter case ('GTIN', 'Upc') read by THE fold
+    every write door stores with (gtin.fold_barcode_spellings), so the ims.*
+    metafields carry what the next save stores. Both metafield builders read it."""
+    folded = fold_barcode_spellings(attrs)
+    return {k: folded[k] for k in MANUFACTURER_BARCODE_ATTRIBUTES if k in folded}
+
+
+def build_removed_metafields(product: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The ims.* metafields to DELETE (without ownerId): each manufacturer
+    barcode attribute (gtin / upc) the product holds EMPTY -- what Manage
+    Barcode > Remove writes. build_product_metafields skips a blank value and
+    metafieldsSet only upserts, so a removed code stayed on the live product
+    as its ims.gtin metafield. Pure. (The variant barcode itself is left as
+    Shopify has it: IMS sends one only when it holds a valid GTIN.)"""
+    attrs = product.get("attributes") or {}
+    if not isinstance(attrs, dict):
+        return []
+    return [
+        {"namespace": _METAFIELD_NAMESPACE, "key": key}
+        for key, v in _manufacturer_codes(attrs).items()
+        if not str(v or "").strip()
+    ]
+
+
 def build_product_metafields(product: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Map the product's `attributes` dict (the canonical home of the
     category-specific fields) onto Shopify MetafieldsSetInput rows (without
@@ -154,12 +195,31 @@ def build_product_metafields(product: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     Pure + deterministic: scalar attributes only (dict/list/None/blank
     skipped), keys lowercased snake_case truncated to Shopify's 30-char key
-    limit, values stringified, sorted by key, capped at _MAX_METAFIELDS."""
+    limit, values stringified, sorted by key, capped at _MAX_METAFIELDS.
+
+    ims.gtin / ims.upc (their keys in any letter case) carry only a publishable
+    GTIN, sanitised (gtin.sanitise_gtin): never junk, never an in-store GS1
+    20-29 code. Not one, and the metafield is not sent."""
     attrs = product.get("attributes") or {}
     if not isinstance(attrs, dict):
         return []
-    rows: List[Dict[str, Any]] = []
+    codes = {
+        key: code
+        for key, raw in _manufacturer_codes(attrs).items()
+        if (code := sanitise_gtin(raw))
+    }
+    rows: List[Dict[str, Any]] = [
+        {
+            "namespace": _METAFIELD_NAMESPACE,
+            "key": key,
+            "type": "single_line_text_field",
+            "value": code,
+        }
+        for key, code in codes.items()
+    ]
     for k, v in attrs.items():
+        if manufacturer_barcode_key(k):
+            continue
         if v is None or isinstance(v, (dict, list, tuple)):
             continue
         value = str(v).strip()
@@ -182,14 +242,35 @@ def build_product_metafields(product: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 async def _set_product_metafields(
-    db, product_gid: str, metafields: List[Dict[str, Any]]
+    db,
+    product_gid: str,
+    metafields: List[Dict[str, Any]],
+    removed: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """LIVE-only: upsert the product's attribute metafields via metafieldsSet
-    (idempotent on owner+namespace+key), chunked at the Shopify per-call cap.
-    Fail-SOFT: a metafield error must never undo/fail the product push itself --
-    returns {"set": n, "errors": [...]} for the result/audit row."""
+    (idempotent on owner+namespace+key), chunked at the Shopify per-call cap,
+    after deleting the `removed` ones (build_removed_metafields; deleting one
+    that does not exist is a no-op). Fail-SOFT: a metafield error must never
+    undo/fail the product push itself -- returns {"set": n, "errors": [...]}
+    (plus "deleted": n when anything was removed) for the result/audit row."""
     set_count = 0
     errors: List[str] = []
+    out: Dict[str, Any] = {}
+    if removed:
+        try:
+            body = await _graphql(
+                db,
+                _METAFIELDS_DELETE,
+                {"metafields": [{**m, "ownerId": product_gid} for m in removed]},
+            )
+            field_obj = (body.get("data") or {}).get("metafieldsDelete") or {}
+            errors.extend(
+                f"{(e.get('field') or '?')}: {e.get('message')}"
+                for e in field_obj.get("userErrors") or []
+            )
+            out["deleted"] = len([d for d in field_obj.get("deletedMetafields") or [] if d])
+        except Exception as e:  # noqa: BLE001 -- fail-soft side channel
+            errors.append(str(e))
     for i in range(0, len(metafields), _METAFIELDS_PER_CALL):
         chunk = [
             {**m, "ownerId": product_gid}
@@ -206,7 +287,7 @@ async def _set_product_metafields(
             set_count += len(field_obj.get("metafields") or [])
         except Exception as e:  # noqa: BLE001 -- fail-soft side channel
             errors.append(str(e))
-    return {"set": set_count, "errors": errors}
+    return {"set": set_count, "errors": errors, **out}
 
 
 def _derive_options(variants: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -327,11 +408,8 @@ def _variants_for_price_push(
     an option-less row. UPDATE-only stays true: no stored default gid -> []
     (a clean noop downstream, never a create).
 
-    The pseudo carries the product's gtin AND barcode as SEPARATE candidate
-    fields (never pre-collapsed), so build_variant_price_inputs' _publishable_gtin
-    gate (#948) evaluates them exactly as for a real variant -- an internally
-    minted GS1 20-29 code in product.barcode is rejected, never shipped as a
-    public GTIN."""
+    The pseudo carries the product's own sku, so variant_barcode reads the
+    PRODUCT's GTIN for it -- no copy of the GTIN rides on the row."""
     rows = list(variants or [])
     if rows:
         return rows
@@ -339,12 +417,7 @@ def _variants_for_price_push(
     default_gid = ecom.get("shopify_variant_id")
     if not default_gid:
         return []
-    pseudo: Dict[str, Any] = {
-        "shopify_variant_id": default_gid,
-        "gtin": product.get("gtin"),
-        "barcode": product.get("barcode"),
-    }
-    return [pseudo]
+    return [{"shopify_variant_id": default_gid, "sku": product.get("sku")}]
 
 
 def _publishable_gtin(*candidates: Any) -> Optional[str]:
@@ -372,6 +445,32 @@ def _publishable_gtin(*candidates: Any) -> Optional[str]:
     return None
 
 
+def variant_barcode(
+    product: Dict[str, Any], row: Optional[Dict[str, Any]]
+) -> Optional[str]:
+    """THE barcode one Shopify variant of `product` carries, or None -- then the
+    key is OMITTED and Shopify keeps what it has (decided 2026-10-01: IMS never
+    blanks or changes a barcode unless it holds a valid publishable GTIN).
+
+    The product's OWN variant -- the SELF row the create door writes (sku ==
+    the product's sku; the price push's pseudo-variant is one too) or no row
+    at all (the seed's single default variant) -- carries the PRODUCT's GTIN:
+    the gtin attribute, then its top-level projection, then the legacy
+    barcode. One home; the row keeps no copy to fall out of sync. Any other
+    row (a size variant of the listing, a colour option) carries ONLY its own:
+    a GTIN names one trade item, so the parent's never lands on a sibling."""
+    if row is not None:
+        sku = str(row.get("sku") or "").strip()
+        if not sku or sku != str(product.get("sku") or "").strip():
+            return _publishable_gtin(row.get("gtin"), row.get("barcode"))
+    attrs = product.get("attributes")
+    return _publishable_gtin(
+        attrs.get("gtin") if isinstance(attrs, dict) else None,
+        product.get("gtin"),
+        product.get("barcode"),
+    )
+
+
 def build_variant_price_inputs(
     product: Dict[str, Any], variants: List[Dict[str, Any]]
 ) -> Tuple[List[Dict[str, Any]], int]:
@@ -379,9 +478,9 @@ def build_variant_price_inputs(
 
     Per variant: id (the stored shopify_variant_id gid), price (selling),
     compareAtPrice (mrp when > price, else EXPLICIT null so a stale
-    strikethrough on Shopify is cleared), barcode (the variant's `gtin` --
-    the two-barcode model: gtin/barcode IS the GTIN pushed to Shopify;
-    `store_barcode` is the physical join key and is NEVER pushed).
+    strikethrough on Shopify is cleared), barcode (variant_barcode -- the
+    GTIN pushed to Shopify; `store_barcode` is the physical join key and is
+    NEVER pushed).
 
     SKIPS (counted, returned as the second tuple member):
       - variants with no stored shopify_variant_id -- they get their gid when
@@ -404,7 +503,11 @@ def build_variant_price_inputs(
             "price": f"{price:.2f}",
             "compareAtPrice": f"{mrp:.2f}" if mrp > price else None,
         }
-        barcode = _publishable_gtin(v.get("gtin"), v.get("barcode"))
+        # Sent ONLY when IMS holds a publishable GTIN (decided 2026-10-01): an
+        # omitted barcode is left as Shopify has it, so a live product whose
+        # IMS twin has none -- most of the catalogue -- keeps the one typed in
+        # Shopify admin, and Google keeps its GTIN match. IMS never blanks it.
+        barcode = variant_barcode(product, v)
         if barcode:
             row["barcode"] = barcode
         rows.append(row)

@@ -19,10 +19,10 @@ from ._shared import (
     require_roles,
     router,
 )
+from ...services import barcode as barcode_svc
 from .gst import _promote_cost_from_rate
 from .numbering import (
     _cumulative_received_by_product,
-    _grn_barcode,
     _grn_stock_audit,
     compute_po_receipt_state,
 )
@@ -398,7 +398,9 @@ def _accept_grn_claimed(
                     {
                         "store_id": store_id,
                         "product_id": product_id,
-                        "barcode": _grn_barcode(store_id, product_id),
+                        "barcode": barcode_svc.mint_unit_barcode(
+                            _get_db(), store_id
+                        ),
                         "location_code": location_code,
                         "quantity": 1,
                         "status": "AVAILABLE",

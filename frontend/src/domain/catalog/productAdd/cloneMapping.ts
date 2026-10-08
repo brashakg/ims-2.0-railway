@@ -126,11 +126,37 @@ export function productToFormValues(product: ProductDoc): ProductFormValues {
     // Online flags are NOT cloned: a new SKU shouldn't inherit Shopify sync.
     syncToShopify: false,
     shopifyTags: [],
-    publishPOS: true,
     // Preserve the source product's images so the clone starts with them (the
     // operator can remove them before saving the new SKU).
     images: Array.isArray(product.images)
       ? (product.images as unknown[]).map((u) => str(u)).filter(Boolean)
       : [],
   };
+}
+
+/** A maker's barcode names ONE item, so a new SKU never inherits it: the server
+ *  refuses a GTIN another product holds (product_master.assert_gtin_free), and a
+ *  copied UPC would reach Shopify/Google as the source's. The variant rulebook
+ *  (variantRules) reads the same rule, isManufacturerBarcodeKey. */
+export const MANUFACTURER_BARCODE_KEYS = ['upc', 'gtin'];
+
+/** A key naming a maker's barcode in any letter case or padding ('GTIN',
+ *  ' Upc '): the server folds those onto gtin / upc (gtin.manufacturer_barcode_key),
+ *  so a copied 'GTIN' is the same code as a copied 'gtin'. */
+export function isManufacturerBarcodeKey(key: string): boolean {
+  return MANUFACTURER_BARCODE_KEYS.includes(key.trim().toLowerCase());
+}
+
+/** `values` minus the manufacturer barcodes: THE strip for every prefill that
+ *  starts a NEW SKU from another's data (Clone, a saved template). */
+export function withoutManufacturerBarcodes(values: ProductFormValues): ProductFormValues {
+  const attributes = Object.fromEntries(
+    Object.entries(values.attributes || {}).filter(([k]) => !isManufacturerBarcodeKey(k))
+  );
+  return { ...values, attributes };
+}
+
+/** The Clone prefill: every stored field except the manufacturer barcodes. */
+export function productToCloneValues(product: ProductDoc): ProductFormValues {
+  return withoutManufacturerBarcodes(productToFormValues(product));
 }

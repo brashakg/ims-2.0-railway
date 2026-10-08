@@ -9,6 +9,8 @@ import re
 from typing import List, NamedTuple, Optional, Dict
 from datetime import datetime, date, timedelta, timezone
 
+from api.services.barcode import unit_barcode_match
+from api.services.gtin import gtin_spellings
 from api.utils.ist import ist_today
 
 from .base_repository import BaseRepository
@@ -78,7 +80,11 @@ class ProductRepository(BaseRepository):
     # one of these fields. `barcode` is ADDITIVE (Catalog Manager scanner
     # passthrough). Unchanged by audit F21 -- owner rule: ask before touching
     # POS, and a wider rule crowds a 24-result strip ('ray' is inside 'Gray').
-    SEARCH_FIELDS = ("brand", "model", "sku", "variant", "barcode")
+    # `attributes.gtin` is where the maker's barcode now lives (Manage Barcode
+    # used to write `barcode`), so a full GTIN typed at the till keeps finding
+    # its product. It is a CODE field: matched from its START, like barcode --
+    # never word-start, never infix, and never in a word-matching field list.
+    SEARCH_FIELDS = ("brand", "model", "sku", "variant", "barcode", "attributes.gtin")
 
     # THE WIDE RULE, opt-in (`anywhere=True`; the purchase-order product box,
     # audit F21). NAME fields match ANYWHERE and ignore spaces/hyphens: the
@@ -133,13 +139,55 @@ class ProductRepository(BaseRepository):
             return None
         return self.find_one({"identity_key": identity_key})
 
-    def find_by_barcode(self, barcode: str) -> Optional[Dict]:
-        """Find a product by scan-to-sell barcode (Hub Phase 1 duplicate guard).
-        Makes the create-path barcode arm functional whenever a barcode rides
-        along (e.g. a bulk/import row); returns None for a blank value."""
-        if not barcode:
+    def find_by_barcode(
+        self, barcode: str, exclude_product_id: Optional[str] = None
+    ) -> Optional[Dict]:
+        """Find the product holding this manufacturer barcode (Hub Phase 1
+        duplicate guard + the create and edit doors' uniqueness check). It can
+        live in `barcode` or in the `gtin` attribute (what Manage Barcode and the
+        Add Product form write), so both are read, in every spelling of the one
+        GTIN (a UPC-A and its 13-digit form are one code). None for a blank
+        value. `exclude_product_id` is excluded IN the query: a find_one that
+        returned the product being edited would hide another holder."""
+        spellings = gtin_spellings(barcode)
+        if not spellings:
             return None
-        return self.find_one({"barcode": barcode})
+        query: Dict = {
+            "$or": [
+                {"barcode": {"$in": spellings}},
+                {"attributes.gtin": {"$in": spellings}},
+            ]
+        }
+        if exclude_product_id:
+            query["product_id"] = {"$ne": exclude_product_id}
+        return self.find_one(query)
+
+    def find_twin_by_barcode(
+        self, barcode: str, exclude_product_id: Optional[str] = None
+    ) -> Optional[Dict]:
+        """A catalog_products twin holding this manufacturer barcode that is
+        not `exclude_product_id`'s own (a spine id, or a spineless twin's id).
+        The bulk import writes a twin with no spine, and the Shopify push sends
+        a twin's gtin as its variant barcode, so the one-holder rule reads twins
+        too: every field the push reads a barcode from, in every spelling. A
+        spine's twin is keyed on its id or pim_product_id and shares its sku."""
+        spellings = gtin_spellings(barcode)
+        db = getattr(self.collection, "database", None)
+        if not spellings or db is None:
+            return None
+        query: Dict = {
+            "$or": [
+                {field: {"$in": spellings}}
+                for field in ("attributes.gtin", "gtin", "barcode")
+            ]
+        }
+        if exclude_product_id:
+            own = self.find_by_id(exclude_product_id) or {}
+            ids = [exclude_product_id, own.get("pim_product_id")]
+            query["id"] = {"$nin": [i for i in ids if i]}
+            if own.get("sku"):
+                query["sku"] = {"$ne": own["sku"]}
+        return db["catalog_products"].find_one(query)
 
     def _category_filter(
         self,
@@ -405,7 +453,7 @@ class StockRepository(BaseRepository):
         return "stock_id"
 
     def find_by_barcode(self, barcode: str) -> Optional[Dict]:
-        return self.find_one({"barcode": barcode})
+        return self.find_one(unit_barcode_match(barcode))
 
     def find_by_product_store(self, product_id: str, store_id: str) -> List[Dict]:
         return self.find_many(

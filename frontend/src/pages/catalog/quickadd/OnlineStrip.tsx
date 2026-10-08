@@ -1,17 +1,16 @@
-// Quick Add - ONLINE. The compact always-visible Shopify strip (sync switch,
-// the POS switch that says what it waits on, and the tag box). Hidden in
-// review mode - the imported doc's real online status is in the banner and
-// these create-time flags are not part of the review PUT.
+// Quick Add - ONLINE. The compact always-visible Shopify strip (sync switch
+// and the tag box). No Shopify POS switch: IMS is the till, so a new product
+// never publishes to Shopify's POS channel (owner ruling 2026-09-28, F74).
+// Hidden in review mode - the imported doc's real online status is in the
+// banner and these create-time flags are not part of the review PUT.
 // MOVED verbatim out of QuickAddPage.tsx (Wave 3 file diet).
 
 import { Globe, X } from 'lucide-react';
-import clsx from 'clsx';
 import type { QuickAddForm } from './useQuickAddForm';
 
 export function OnlineStrip({ form }: { form: QuickAddForm }) {
   const {
-    isReviewMode, syncToShopify, setSyncToShopify, publishPOS, setPublishPOS,
-    shopifyTags, setShopifyTags,
+    isReviewMode, syncToShopify, setSyncToShopify, shopifyTags, setShopifyTags,
   } = form;
 
   return (
@@ -36,29 +35,6 @@ export function OnlineStrip({ form }: { form: QuickAddForm }) {
               <span className="w-9 h-5 bg-gray-300 rounded-full peer peer-checked:after:translate-x-4 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-bv"></span>
             </span>
             <span className="text-sm text-gray-800">Sync to Shopify</span>
-          </label>
-          <label className={clsx('flex min-h-10 items-center gap-2', syncToShopify ? 'cursor-pointer' : 'cursor-not-allowed')}>
-            <span className="relative inline-flex items-center">
-              <input
-                type="checkbox"
-                title="Publish to Shopify POS"
-                aria-label="Publish to Shopify POS"
-                checked={publishPOS}
-                disabled={!syncToShopify}
-                onChange={(e) => setPublishPOS(e.target.checked)}
-                className="sr-only peer"
-              />
-              <span className={clsx(
-                "w-9 h-5 rounded-full peer peer-checked:after:translate-x-4 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-bv",
-                syncToShopify ? 'bg-gray-300' : 'bg-gray-200'
-              )}></span>
-            </span>
-            <span className={clsx('text-sm', syncToShopify ? 'text-gray-800' : 'text-gray-500')}>
-              Publish to Shopify POS
-            </span>
-            {!syncToShopify && (
-              <span className="text-xs text-gray-500">— turn on Sync to Shopify first</span>
-            )}
           </label>
         </div>
         {syncToShopify && (

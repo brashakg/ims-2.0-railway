@@ -22,6 +22,7 @@ import { useToast } from '../../context/ToastContext';
 import { inventoryApi } from '../../services/api';
 import { storeApi } from '../../services/api/stores';
 import { isOnlineStore } from '../../utils/storeMode';
+import { stockRowMatches } from '../../utils/stockSearch';
 
 interface StockTransferModalProps {
   isOpen: boolean;
@@ -46,6 +47,7 @@ interface StockItem {
   quantity: number;
   reservedQuantity: number;
   locationCode: string;
+  unitBarcodes: string[];
 }
 
 interface Store {
@@ -150,11 +152,14 @@ export function StockTransferModal({ isOpen, onClose, onTransferCreated }: Stock
           quantity: Number(item.stock ?? item.quantity ?? 0),
           reservedQuantity: Number(item.reservedQuantity ?? item.reserved_quantity ?? item.reserved ?? 0),
           locationCode: item.location || item.location_code || '',
+          unitBarcodes: item.unit_barcodes || [],
         } as StockItem))
         .filter((item: StockItem) => {
-          const matchesSearch =
-            item.productName?.toLowerCase().includes(query.toLowerCase()) ||
-            item.sku?.toLowerCase().includes(query.toLowerCase());
+          const matchesSearch = stockRowMatches(
+            query,
+            [item.productName, item.sku],
+            item.unitBarcodes,
+          );
 
           const notInTransfer = !transferItems.some(ti => ti.productId === item.productId);
           const hasAvailableQty = (item.quantity - item.reservedQuantity) > 0;

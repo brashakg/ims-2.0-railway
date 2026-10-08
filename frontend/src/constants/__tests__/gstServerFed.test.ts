@@ -370,7 +370,7 @@ describe('one product, one spelling of its HSN', () => {
     const payload = shared.buildProductPayload({
       category: 'CL', attributes: { brand_name: 'Acuvue', model_no: 'OASYS' },
       hsnCode: '', gstRate: '5', mrp: '1200', offerPrice: '', discountCategory: '',
-      syncToShopify: false, shopifyTags: [], publishPOS: true,
+      syncToShopify: false, shopifyTags: [],
     } as never);
     // '90013000' and '900130' are the same HSN spelled two ways. Two spellings
     // split one product across two rows of the invoice's HSN-wise summary and
