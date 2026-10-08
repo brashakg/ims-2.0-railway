@@ -253,10 +253,10 @@ class DatabaseConnection:
         _idx("products", "identity_key", unique=True, sparse=True, background=True)
         _idx("products", "is_active", background=True)
         _idx("products", [("store_id", 1), ("category", 1)], background=True)
-        # Prefix-search indexes for the searchable fields (brand, model, sku, variant).
-        # The search() method now anchors regex patterns with ^, enabling MongoDB to
-        # use these indexes instead of full collection scans. Compound indexes on each
-        # field + is_active for the most common filter pattern.
+        # Search indexes for the searchable fields (brand, model, sku, variant).
+        # search() anchors code fields with ^ so MongoDB can use these; brand,
+        # model and variant also match at any word start (product
+        # WORD_SEARCH_FIELDS), which scans. Compound indexes on each field + is_active for the common filter.
         _idx("products", [("brand", 1), ("is_active", 1)], background=True)
         _idx("products", [("model", 1), ("is_active", 1)], background=True)
         _idx("products", [("variant", 1), ("is_active", 1)], background=True)
@@ -1135,6 +1135,9 @@ class MockCollection:
             elif key == "$and":
                 # Handle $and operator
                 if not all(self._matches_filter(doc, cond) for cond in value):
+                    return False
+            elif key == "$nor":
+                if any(self._matches_filter(doc, cond) for cond in value):
                     return False
             elif isinstance(value, dict):
                 # Handle operators like $regex, $gt, $lt, etc.

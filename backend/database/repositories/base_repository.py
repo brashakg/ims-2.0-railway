@@ -319,22 +319,22 @@ class BaseRepository(ABC, Generic[T]):
         filter: Dict = None,
         skip: int = 0,
         limit: int = 100,
+        word_fields: tuple = (),
     ) -> List[Dict]:
         """
         Tokenized text search across fields.
 
         A multi-word query is split on whitespace; EVERY token must match at
-        least one of `fields` (case-insensitive prefix match), and ALL tokens
-        must match somewhere. This is how a cashier actually types -- e.g.
+        least one of `fields` (case-insensitive), and ALL tokens must match
+        somewhere. This is how a cashier actually types -- e.g.
         "Fastrack P357" finds a doc with brand="Fastrack" + model="P357BK1".
 
-        The old implementation matched the WHOLE phrase as one regex against
-        each field individually, so a cross-field multi-word query found
-        nothing (no single field contained "Fastrack P357"). Single-token
-        queries are unchanged (one token, OR across fields). Tokens are
-        regex-escaped and anchored with ^ so a SKU like "P357BK1" matches
-        P357BK1* but not RAY-P357BK1. Prefix matching via ^ enables the
-        database to use a compound index on (field, 1) instead of full scans.
+        A token matches a field from its START (^), so a SKU like "P357BK1"
+        matches P357BK1* but not RAY-P357BK1. In `word_fields` it may instead
+        start ANY word of the field ("optix" finds "Air Optix", "ban" finds
+        "Ray-Ban"), and "ray" still never finds "Spray" or "Gray"; the
+        field-start hits come first, so a wider rule never pushes an exact SKU
+        or a scanned barcode down the list.
 
         Args:
             text: Search text (one or more whitespace-separated tokens)
@@ -342,29 +342,52 @@ class BaseRepository(ABC, Generic[T]):
             filter: Additional filter
             skip / limit: pagination passthrough to find_many. Defaults match
                 find_many's own defaults so existing callers are unchanged.
+            word_fields: the subset of `fields` searched by word start.
 
         Returns:
             Matching documents
         """
         try:
-            query = self._search_query(text, fields, filter)
-            return self.find_many(query, skip=skip, limit=limit)
+            query = self._search_query(text, fields, filter, word_fields)
+            head_q = self._search_query(text, fields, filter)
+            if head_q == query:
+                return self.find_many(query, skip=skip, limit=limit)
+            # head_q is a subset of query: its hits first, then the rest of
+            # query -- together exactly what search_count counts.
+            head = self.find_many(head_q, skip=skip, limit=limit)
+            if limit and len(head) >= limit:
+                return head
+            tail_q = {"$and": [query, {"$nor": [head_q]}]}
+            return head + self.find_many(
+                tail_q,
+                skip=max(0, skip - self.count(head_q)),
+                limit=limit - len(head) if limit else 0,
+            )
         except Exception as e:
             print(f"Error searching {self.entity_name}s: {e}")
             return []
 
-    def search_count(self, text: str, fields: List[str], filter: Dict = None) -> int:
+    def search_count(
+        self, text: str, fields: List[str], filter: Dict = None, word_fields: tuple = ()
+    ) -> int:
         """Count of documents the SAME search() query would match (pre-slice),
         so a paginated caller can render a true total. Fail-soft 0."""
         try:
-            return self.count(self._search_query(text, fields, filter))
+            return self.count(self._search_query(text, fields, filter, word_fields))
         except Exception as e:
             print(f"Error counting {self.entity_name} search: {e}")
             return 0
 
-    def _search_query(self, text: str, fields: List[str], filter: Dict = None) -> Dict:
-        """Build the tokenized-prefix search query search() executes. Shared
-        with search_count so the list and its total can never drift."""
+    # A word starts the field or follows a space, hyphen, slash, dot or
+    # underscore. ponytail: not index-assisted like ^ is; a scan is fine at
+    # catalogue size, a text index if it ever is not.
+    _WORD_START = r"(?:^|[\s\-/._])"
+
+    def _search_query(
+        self, text: str, fields: List[str], filter: Dict = None, word_fields: tuple = ()
+    ) -> Dict:
+        """Build the tokenized search query search() executes. Shared with
+        search_count so the list and its total can never drift."""
         import re
 
         tokens = [t for t in (text or "").split() if t]
@@ -376,11 +399,12 @@ class BaseRepository(ABC, Generic[T]):
 
         and_clauses = []
         for tok in tokens:
-            # Anchor with ^ for prefix matching so indexes can be used.
-            # ^ prevents full scans and keeps the result semantics
-            # (e.g., searching "ray" no longer matches "spray" or "primary").
-            regex = {"$regex": "^" + re.escape(tok), "$options": "i"}
-            and_clauses.append({"$or": [{field: regex} for field in fields]})
+            tok = re.escape(tok)
+            start = {"$regex": "^" + tok, "$options": "i"}
+            word = {"$regex": self._WORD_START + tok, "$options": "i"}
+            and_clauses.append(
+                {"$or": [{f: word if f in word_fields else start} for f in fields]}
+            )
 
         query = {"$and": and_clauses}
         if filter:
