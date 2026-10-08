@@ -25,7 +25,7 @@ from ._shared import (
     timedelta,
     validate_store_access,
 )
-from ...services.cost_mask import can_see_cost, mask_cost_list
+from ...services.cost_mask import mask_cost_list
 from ...services.item_events import on_hand_match
 from ...utils.ist import ist_date_str_from_stored
 from .helpers import (
@@ -517,7 +517,7 @@ async def list_units(
     own barcode, per physical piece. This is where those pieces are listed and
     their labels printed from. Each unit carries the label fields (brand, model,
     colour, size, MRP) so the label renderer needs no second fetch. cost_price
-    only for the roles that see per-unit product cost (cost_mask "product").
+    answers to the one product-cost rule (cost_mask "product"), as the ledger.
     """
     if not product_id and not grn_id:
         raise HTTPException(status_code=400, detail="Provide product_id or grn_id")
@@ -565,7 +565,6 @@ async def list_units(
     from ...services.product_master import existing_product_summary
 
     products: Dict[str, Dict] = {}
-    show_cost = can_see_cost(current_user, "product")
     units = []
     for d in docs:
         pid = d.get("product_id") or ""
@@ -600,11 +599,10 @@ async def list_units(
             "colour": p.get("colour_code") or "",
             "size": p.get("size") or "",
             "mrp": p.get("mrp"),
+            "cost_price": d.get("cost_price"),
         }
-        if show_cost:
-            unit["cost_price"] = d.get("cost_price")
         units.append(unit)
-    return {"units": units, "total": len(units)}
+    return {"units": mask_cost_list(units, current_user, "product"), "total": len(units)}
 
 
 class BarcodePrintedRequest(BaseModel):
