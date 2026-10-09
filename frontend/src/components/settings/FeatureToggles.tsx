@@ -18,8 +18,6 @@ interface FeatureToggleConfig {
 
 const DEFAULT_FEATURES: FeatureToggleConfig[] = [
   { id: 'pos-quick-sale', label: 'POS Quick Sale', description: 'Enable quick sale mode in POS', enabled: true },
-  { id: 'eye-test-module', label: 'Eye Test Module', description: 'Enable clinical eye testing', enabled: true },
-  { id: 'workshop-module', label: 'Workshop Module', description: 'Enable workshop management', enabled: true },
   { id: 'loyalty-points', label: 'Loyalty Points', description: 'Enable customer loyalty program', enabled: false },
   { id: 'split-payments', label: 'Split Payments', description: 'Allow splitting payments across methods', enabled: true },
   { id: 'credit-billing', label: 'Credit Billing', description: 'Enable credit/invoice billing', enabled: true },

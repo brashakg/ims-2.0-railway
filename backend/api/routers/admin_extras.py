@@ -7,10 +7,13 @@ but which had no backend route (every call 404'd). Mounted at
 /api/v1/admin alongside admin_catalog.
 
 Discount config is Mongo-backed (collections: discount_rules,
-role_discount_caps, tier_discounts, promo_codes). System endpoints are
-thin: status is computed live, settings persist to a singleton doc,
-audit-logs proxy the audit collection, and backup/export/import are
-honest minimal stubs (full DB backup belongs to infra, not the app).
+tier_discounts, promo_codes); the role caps the till enforces are code
+constants, shown read-only by /discounts/enforced-caps. System endpoints are
+thin: status is computed live, audit-logs proxy the audit collection, and
+backup/export/import are honest minimal stubs (full DB backup belongs to
+infra, not the app). System SETTINGS have one door, /settings/system
+(SUPERADMIN-only writes, read by /health) - the unused ADMIN-open
+/system/settings pair here was deleted (2026-10-08).
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -106,50 +109,6 @@ async def get_discount_rules():
             doc.pop("_id", None)
             defaults.update(doc)
     return defaults
-
-
-@router.get("/discounts/role-caps")
-async def get_role_discount_caps():
-    """Per-role maximum discount %."""
-    defaults = {
-        "SUPERADMIN": 100,
-        "ADMIN": 100,
-        "AREA_MANAGER": 25,
-        "STORE_MANAGER": 20,
-        # SALES_CASHIER merged into SALES_STAFF (backlog #12); both were 10%.
-        "SALES_STAFF": 10,
-    }
-    coll = _coll("role_discount_caps")
-    if coll is not None:
-        for d in coll.find({}):
-            role = d.get("role")
-            if role:
-                defaults[role] = d.get("max_discount", defaults.get(role, 0))
-    return {"role_caps": defaults}
-
-
-class RoleCapBody(BaseModel):
-    role: str
-    max_discount: float = Field(..., ge=0, le=100)
-
-
-@router.post("/discounts/role-caps")
-async def set_role_discount_cap(body: RoleCapBody):
-    coll = _coll("role_discount_caps")
-    if coll is None:
-        raise HTTPException(status_code=503, detail="Database not available")
-    coll.update_one(
-        {"role": body.role},
-        {
-            "$set": {
-                "role": body.role,
-                "max_discount": body.max_discount,
-                "updated_at": _now_iso(),
-            }
-        },
-        upsert=True,
-    )
-    return {"role": body.role, "max_discount": body.max_discount}
 
 
 @router.get("/discounts/enforced-caps")
@@ -311,36 +270,6 @@ async def get_system_status():
         status["database"] = "error"
         status["error"] = str(e)
     return status
-
-
-@router.get("/system/settings")
-async def get_system_settings():
-    coll = _coll("system_settings")
-    defaults = {
-        "round_off_enabled": True,
-        "round_off_paise": 50,
-        "auto_logout_minutes": 480,
-        "low_stock_alert_enabled": True,
-        "backup_reminder_days": 7,
-    }
-    if coll is not None:
-        doc = coll.find_one({"_id": "system_settings"})
-        if doc:
-            doc.pop("_id", None)
-            defaults.update(doc)
-    return defaults
-
-
-@router.put("/system/settings")
-async def update_system_settings(settings: Dict[str, Any]):
-    coll = _coll("system_settings")
-    if coll is None:
-        raise HTTPException(status_code=503, detail="Database not available")
-    settings = {k: v for k, v in settings.items() if k != "_id"}
-    settings["updated_at"] = _now_iso()
-    coll.update_one({"_id": "system_settings"}, {"$set": settings}, upsert=True)
-    doc = coll.find_one({"_id": "system_settings"})
-    return _scrub(doc) or {}
 
 
 @router.get("/system/audit-logs")

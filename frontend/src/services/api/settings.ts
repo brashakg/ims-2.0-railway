@@ -372,17 +372,14 @@ export const settingsApi = {
     return response.data;
   },
 
-  // Admin Control Panel
+  // Operational Rules (/settings/rules): auto_round_off + default_credit_limit
   getAdminControls: async () => {
     const response = await api.get('/settings/admin-controls');
     return response.data;
   },
 
   updateAdminControls: async (controls: {
-    store_modules?: Record<string, Record<string, boolean>>;
-    discount_limits?: Array<{ roleId: string; maxDiscountPercent: number; requiresApproval: boolean; approvalThreshold: number }>;
-    operational_rules?: Record<string, boolean | number | string>;
-    role_permissions?: Record<string, Record<string, boolean>>;
+    operational_rules: Record<string, boolean | number>;
   }) => {
     const response = await api.put('/settings/admin-controls', controls);
     return response.data;
