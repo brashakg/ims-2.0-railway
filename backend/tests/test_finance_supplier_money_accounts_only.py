@@ -389,15 +389,20 @@ def test_an_accountant_with_no_shop_reads_no_shops_cash_flow(finance):
     gets the key (it may see the figure), and the figure is nothing."""
     body = finance("/cash-flow", _user("ACCOUNTANT")).json()
     assert (body["vendor_payment_outflow"], body["outflows"], body["inflows"]) == (0, 0, 0), body
-    # the same accountant holding Dhanbad reads Dhanbad's rent
+    # the same accountant holding Dhanbad reads Dhanbad's rent and the cash
+    # paid to Dhanbad's supplier (P-DHN, Rs 1,000) -- his shop's payments.
     own = finance("/cash-flow", _user("ACCOUNTANT", DHN, (DHN,))).json()
-    assert own["outflows"] == RENT
+    assert own["vendor_payment_outflow"] == 1000.0
+    assert own["outflows"] == pytest.approx(RENT + 1000.0)
 
 
-def test_an_admins_shop_view_still_folds_no_hq_payments_in(finance):
+def test_an_admins_shop_view_folds_in_that_shops_supplier_payments(finance):
+    # Every payment carries its shop: an admin who picks Dhanbad reads
+    # Dhanbad's Rs 1,000 (P-DHN), never Pune's Rs 240 -- the owner
+    # dashboard's 'Paid to vendors' for the same shop (one rule, F56/F63).
     body = finance("/cash-flow", _user("ADMIN", DHN, (DHN,)), store_id=DHN).json()
-    assert body["vendor_payment_outflow"] == 0.0
-    assert body["outflows"] == RENT
+    assert body["vendor_payment_outflow"] == 1000.0
+    assert body["outflows"] == pytest.approx(RENT + 1000.0)
 
 
 # ============================================================================

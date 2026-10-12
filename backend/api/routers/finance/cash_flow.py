@@ -114,9 +114,13 @@ async def get_cash_flow(
             ]
         )
     )
-    # Real cash paid to vendors this period (vendor_payments). AP is org-level,
-    # so only fold it in for the org/owner view (no specific store selected) to
-    # avoid double-attributing HQ payments to one store.
+    # Real cash paid to suppliers this period: THE supplier ledger's payment
+    # rows in THIS view's shop scope (_ap_rows(db, active_store)) -- every
+    # payment carries the shop it was made for (ap_payments._money_shop), so a
+    # shop's view counts that shop's payments and the org view all of them,
+    # the very figure the owner dashboard's 'Paid to vendors' and the
+    # Purchases report's `paid` read for the same shop. A no-shop login's
+    # NO_SHOP_SCOPE matches no payment: 0.
     #
     # Supplier payments, per vendor or in total, are ADMIN + ACCOUNTANT only
     # (owner ruling 2026-09-29): services/cost_mask "payables", the one rule
@@ -127,12 +131,11 @@ async def get_cash_flow(
     # (the trap the payroll strip below documents).
     ap_reader = can_see_cost(current_user, "payables")
     vendor_payment_outflow = 0.0
-    if ap_reader and not active_store:
+    if ap_reader:
         try:
             # THE supplier ledger's payment rows in this view's own shop scope
-            # (none here: the org view) -- the same rows, month and shop the
-            # Purchases report's `paid` and the owner dashboard's 'Paid to
-            # vendors' read. A raw payment_date >= aggregate counted a
+            # -- the same rows, month and shop the Purchases report's `paid`
+            # and the owner dashboard's 'Paid to vendors' read. A raw payment_date >= aggregate counted a
             # post-dated cheque before its day, money naming a transfer mirror
             # bill, and (start.date() of IST midnight in UTC is the day before
             # the 1st) the previous month's last day. Cash, not gross of TDS:

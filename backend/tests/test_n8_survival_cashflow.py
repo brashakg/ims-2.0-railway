@@ -545,7 +545,7 @@ def test_dedicated_route_shows_shortfall_when_income_collapses(routed):
     assert sv["surplus_paise"] == 0
 
 
-def test_store_id_filters_expenses_and_income_but_not_org_wide_ap(routed):
+def test_store_id_filters_expenses_income_and_ap_alike(routed):
     _seed_standard(routed)
     routed["expenses"].docs.append(_expense("Rent", 30000.0, store="BV-2"))
     routed["orders"].docs.append(_order(40000.0, store="BV-2"))
@@ -559,9 +559,11 @@ def test_store_id_filters_expenses_and_income_but_not_org_wide_ap(routed):
     assert sv_bv1["fixed_costs_paise"] == 5000000  # BV-1 only
     assert sv_all["projected_income_paise"] == 20000000  # (60k+40k) doubled
     assert sv_bv1["projected_income_paise"] == 12000000
-    # An ADMIN's AP stays org-wide under the filter (these bills carry no
-    # store_id; a shop accountant's AP narrows -- test_finance_ap_scope_round2).
+    # AP follows the same shop rule (F63): every shop's for the org view, the
+    # picked shop's for an admin who picks one -- every bill here is BV-1's,
+    # so BV-1's AP is all of it (test_finance_ap_scope_round2 splits shops).
     assert sv_bv1["must_pay_ap_paise"] == sv_all["must_pay_ap_paise"] == 1000000
+    assert sv_bv1["ap_scope"] == "STORE" and sv_all["ap_scope"] == "ORG_WIDE"
 
 
 def test_e2_policy_override_flows_through_the_route(routed, monkeypatch):
@@ -759,8 +761,9 @@ def test_dedicated_route_stamps_scope_labels(routed):
     )["survival"]
     assert sv_all["income_expense_scope"] == "ORG_WIDE"
     assert sv_bv1["income_expense_scope"] == "STORE"
-    # An ADMIN's AP never narrows, regardless of the filter.
-    assert sv_all["ap_scope"] == sv_bv1["ap_scope"] == "ORG_WIDE"
+    # AP narrows with the filter, like income (one shop rule, F63).
+    assert sv_all["ap_scope"] == "ORG_WIDE"
+    assert sv_bv1["ap_scope"] == "STORE"
 
 
 # ============================================================================

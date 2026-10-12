@@ -406,15 +406,23 @@ def test_a_pune_accountant_cannot_ask_survival_for_dhanbad(world):
     assert "BD1" not in resp.text and "5000" not in resp.text
 
 
-def test_an_admins_survival_ap_stays_org_wide_under_a_shop_filter(world):
+def test_an_admins_survival_ap_follows_his_shop_pick_like_ap_aging(world):
+    # ONE shop rule for AP (F63): an admin who picks Pune reads Pune's
+    # must-pay bills -- the figure AP aging gives him for the same pick --
+    # not every shop's beside Pune's income (two AP totals for one shop).
     whole = world.ok("/finance/survival-cashflow", ADMIN)
-    pune = world.ok("/finance/survival-cashflow", ADMIN, store_id=PUN)
-    for body in (whole, pune):
-        assert _survival_bills(body) == {"BP1", "BP2", "BP3", "BD1"}
-        assert _survival_ap_paise(body) == int((PUNE_OWED + DHN_OWED) * 100)
-        assert body["survival"]["ap_scope"] == "ORG_WIDE"
+    assert _survival_bills(whole) == {"BP1", "BP2", "BP3", "BD1"}
+    assert _survival_ap_paise(whole) == int((PUNE_OWED + DHN_OWED) * 100)
+    assert whole["survival"]["ap_scope"] == "ORG_WIDE"
     assert whole["survival"]["fixed_costs_paise"] == 70000  # both rents
-    assert pune["survival"]["fixed_costs_paise"] == 30000  # income/expenses narrow
+
+    pune = world.ok("/finance/survival-cashflow", ADMIN, store_id=PUN)
+    assert _survival_bills(pune) == {"BP1", "BP2", "BP3"}
+    assert _survival_ap_paise(pune) == int(PUNE_OWED * 100)
+    assert pune["survival"]["ap_scope"] == "STORE"
+    assert pune["survival"]["fixed_costs_paise"] == 30000
+    aging = world.ok("/vendors/ap-aging", ADMIN, store_id=PUN)
+    assert aging["totals"]["owed"] == pytest.approx(PUNE_OWED)
 
 
 def test_the_itc_register_is_the_callers_shop(world):

@@ -11,7 +11,7 @@ from ...utils.ist import now_ist_naive, ist_day_start_utc
 from typing import Optional
 from fastapi import Depends, Query
 from ..auth import get_current_user
-from ...dependencies import resolve_store_scope, user_store_scope
+from ...dependencies import resolve_store_scope
 from ...services import ap_engine
 from ...services import survival_cashflow
 from ...services import policy_engine
@@ -143,20 +143,20 @@ def _survival_scope(store_id: Optional[str], current_user: dict) -> dict:
     """The shops a caller's survival view covers, as _build_survival_payload
     keyword arguments: {"store_id": income + expenses, "ap_store_id": AP}.
 
-    The ONE shop rule (F63, api.dependencies.resolve_store_scope): an explicit
-    store_id another login does not hold 403s, and a dropped one is the
-    caller's own shop for everyone but ADMIN / SUPERADMIN.
-
-      * ADMIN / SUPERADMIN: income and expenses narrow to the shop asked for
-        (else every shop); AP stays org-wide -- vendor bills are entity-level
-        liabilities and the owner reads them whole.
-      * Everyone else (a shop's accountant): their own shop for all three, so
-        a Pune accountant never reads Dhanbad's supplier bills, income or
-        expenses, however the request is edited.
+    The ONE shop rule (F63, api.dependencies.resolve_store_scope) for all
+    three, AP included: an explicit store_id another login does not hold
+    403s, and a dropped one is the caller's own shop for everyone but ADMIN /
+    SUPERADMIN, who read every shop until they pick one. Every bill carries
+    its shop (F63), and every other payable figure -- AP aging, the supplier
+    card, the ledger, the Purchases report -- narrows an admin's picked shop
+    through the same ledger rows (ap_engine.supplier_ledger_rows); so does
+    this view's must-pay AP, so one shop's AP is one number on every screen.
+    A Pune accountant never reads Dhanbad's supplier bills, income or
+    expenses, however the request is edited; a non-admin with no shop reads
+    none (R4).
     """
     scope = resolve_store_scope(store_id, current_user)
-    every_shop, _ = user_store_scope(current_user)
-    return {"store_id": scope, "ap_store_id": None if every_shop else scope}
+    return {"store_id": scope, "ap_store_id": scope}
 
 
 def _build_survival_payload(
@@ -196,7 +196,7 @@ def _build_survival_payload(
     )
     if ap_store_id:
         # The builder labels AP org-wide by default; this view's AP is one
-        # shop's share (a shop accountant's own shop, F63), so say so.
+        # shop's share (the shop picked, or a shop login's own, F63), so say so.
         view["ap_scope"] = "STORE"
         view["scope_note"] = (
             "Income, fixed costs and must-pay vendor bills (AP) are all "

@@ -1324,7 +1324,14 @@ def test_cash_flow_supplier_payments_total_answers_to_the_vendor_payments_gate(
     monkeypatch.setattr(cash_flow_mod, "_get_db", lambda: _CashDb())
     # The supplier ledger's payments for the month (cash_flow reads them
     # through _ap_rows / _cash_paid_in_month, the one ledger rule).
-    monkeypatch.setattr(cash_flow_mod, "_ap_rows", lambda _db, _scope=None, *a: ([], ["P"], []))
+    # The ledger rows answer the scope they are asked for, as the real
+    # _ap_rows does: R4's reserved no-shop scope holds no payment.
+    from api.dependencies import is_no_shop_scope
+
+    monkeypatch.setattr(
+        cash_flow_mod, "_ap_rows",
+        lambda _db, scope=None, *a: ([], [] if is_no_shop_scope(scope) else ["P"], []),
+    )
     monkeypatch.setattr(cash_flow_mod, "_cash_paid_in_month", lambda paid, _m: _PAID_TO_VENDORS if paid else 0.0)
     # No store on the token or the query. resolve_store_scope (the one shop
     # rule) gives ADMIN / SUPERADMIN the org view, where AP is folded in; any
