@@ -5142,3 +5142,36 @@ def test_r8_a_legacy_letter_size_is_no_eye_size(world):
         f"Legacy 'M': a sizeless line was answered {getattr(sizeless, 'detail', None)}",
     )
 
+
+def test_r8_with_no_catalogue_manager_the_task_never_goes_to_a_deactivated_admin(world):
+    # R1-53: no catalogue manager covers the shop, so the task falls back to
+    # the admins -- an ACTIVE one ("never a task nobody can see"), else the
+    # superadmin.
+    world.db.users.update_one({"user_id": CATALOGUER["user_id"]}, {"$set": {"is_active": False}})
+    world.db.seed(
+        "users",
+        [
+            {"user_id": "u-admin-gone", "username": "admin.gone", "roles": ["ADMIN"],
+             "store_ids": [], "is_active": False},
+            {"user_id": "u-super", "username": "owner", "roles": ["SUPERADMIN"],
+             "store_ids": [], "is_active": True},
+        ],
+    )
+    world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    told = [t.get("assigned_to") for t in _open_tasks(world)]
+    finding(told == ["u-super"], f"R1-53: with no catalogue manager the task went to {told}")
+
+
+def test_r8_a_draft_ordered_again_at_a_new_mrp_shows_it_in_the_catalogue(world):
+    # R2-7 (M15): the revival writes the new MRP on the spine AND on the
+    # catalogue twin's pricing, which the catalogue screens read -- never the
+    # discarded draft's old price beside the new one.
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    _discard(world, draft_id, po, grn)
+    world.raise_po([{"new_product": {**BOSS_TYPED, "mrp": 3290}, "quantity": 1, "unit_price": 1200}])
+    twin = _twin_of(world, draft_id)
+    finding(
+        world.product(draft_id)["mrp"] == 3290 and (twin.get("pricing") or {}).get("mrp") == 3290,
+        f"M15: revived at MRP 3290, the spine reads {world.product(draft_id)['mrp']}, "
+        f"the catalogue {(twin.get('pricing') or {}).get('mrp')}",
+    )
