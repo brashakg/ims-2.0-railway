@@ -80,11 +80,12 @@ class ProductRepository(BaseRepository):
     # one of these fields. `barcode` is ADDITIVE (Catalog Manager scanner
     # passthrough). Unchanged by audit F21 -- owner rule: ask before touching
     # POS, and a wider rule crowds a 24-result strip ('ray' is inside 'Gray').
-    # `attributes.gtin` is where the maker's barcode now lives (Manage Barcode
-    # used to write `barcode`), so a full GTIN typed at the till keeps finding
-    # its product. It is a CODE field: matched from its START, like barcode --
-    # never word-start, never infix, and never in a word-matching field list.
-    SEARCH_FIELDS = ("brand", "model", "sku", "variant", "barcode", "attributes.gtin")
+    # The maker's GTIN (attributes.gtin, where Manage Barcode now writes it,
+    # or the legacy top-level gtin) is NOT a prefix field here: the till finds
+    # it only on the EXACT, complete code (_till_query), so '890' never lists
+    # every Indian-made product.
+    SEARCH_FIELDS = ("brand", "model", "sku", "variant", "barcode")
+    TILL_GTIN_FIELDS = ("attributes.gtin", "gtin")
 
     # THE WIDE RULE, opt-in (`anywhere=True`; the purchase-order product box,
     # audit F21). NAME fields match ANYWHERE and ignore spaces/hyphens: the
@@ -321,6 +322,19 @@ class ProductRepository(BaseRepository):
             clauses.append(extra)
         return {"$and": clauses}
 
+    def _till_query(self, text: str, extra: Dict) -> Dict:
+        """THE till's query: every word STARTS one of SEARCH_FIELDS, or the
+        whole text, through the one GTIN normaliser, IS a stored maker's GTIN
+        (any spelling of that one code; never a prefix of one)."""
+        words = self._search_query(text, list(self.SEARCH_FIELDS), extra)
+        spellings = gtin_spellings(text)
+        if not spellings:
+            return words
+        code: Dict = {
+            "$or": [{f: {"$in": spellings}} for f in self.TILL_GTIN_FIELDS]
+        }
+        return {"$or": [words, {"$and": [code, extra]} if extra else code]}
+
     def search_products(
         self,
         query: str,
@@ -334,8 +348,8 @@ class ProductRepository(BaseRepository):
     ) -> List[Dict]:
         extra = self._search_extra_filter(category, is_active, created_by)
         if not anywhere:
-            return self.search(
-                query, list(self.SEARCH_FIELDS), extra, skip=skip, limit=limit
+            return self.find_many(
+                self._till_query(query, extra), skip=skip, limit=limit
             )
         # What the till's rule finds comes FIRST, then what only the wide rule
         # adds -- so no result limit can push a brand/model/SKU match off the
@@ -344,7 +358,7 @@ class ProductRepository(BaseRepository):
         # count_search_products counts -- even where the till's rule finds
         # more ('  ' is everything to the till, nothing to the wide rule).
         wide_q = self._product_search_query(query, extra)
-        till_q = self._search_query(query, list(self.SEARCH_FIELDS), extra)
+        till_q = self._till_query(query, extra)
         head_q = {"$and": [wide_q, till_q]}
         head = self.find_many(head_q, skip=skip, limit=limit)
         if len(head) >= limit:
@@ -367,7 +381,7 @@ class ProductRepository(BaseRepository):
     ) -> int:
         extra = self._search_extra_filter(category, is_active, created_by)
         if not anywhere:
-            return self.search_count(query, list(self.SEARCH_FIELDS), extra)
+            return self.count(self._till_query(query, extra))
         return self.count(self._product_search_query(query, extra))
 
     def cataloguer_stats(self) -> List[Dict]:

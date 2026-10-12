@@ -12,8 +12,8 @@ The box calls GET /products?search=...&match=anywhere, which is
 ProductRepository.search_products(anywhere=True). The SAME endpoint without
 `match` is what the till, goods receipt, the command palette, Returns and
 QuickShare call, and for them NOTHING changes (owner rule: ask before touching
-POS): every word still has to START brand / model / SKU / variant / barcode
-/ the maker's GTIN (attributes.gtin, where that code lives now).
+POS): every word still has to START brand / model / SKU / variant / barcode,
+or the whole text IS a maker's GTIN (exact and complete, never a prefix).
 The wide rule would crowd the till -- 'ray' is inside 'Gunmetal Gray' -- so it
 is opt-in, and even there what the till's rule finds comes FIRST, so a result
 limit can never push it off the list.
@@ -351,16 +351,42 @@ def test_the_till_search_is_untouched(repo, q):
 
 
 def test_the_till_does_not_get_the_wide_matches(repo):
-    # No infix or wide match at the till: a model number's end, a colour word,
-    # or a middle chunk of a GTIN finds nothing.
+    # No infix or wide match at the till: a model number's end, a colour word.
     assert repo.search_products("8895") == []
     assert repo.search_products("black") == []
-    assert repo.search_products("4567893") == []
-    # The full maker's barcode typed at the till still finds its product: the
-    # GTIN lives in attributes.gtin now, matched from its start like barcode.
-    assert [d["product_id"] for d in repo.search_products("8901234567893")] == [
-        "P-WAT"
-    ]
+    # The maker's GTIN only on the EXACT, complete code: a leading chunk ('890'
+    # would list every Indian-made product on the 24-result strip), a middle
+    # chunk, or the code without its check digit finds nothing.
+    for chunk in ("890", "890123", "4567893", "890123456789"):
+        assert repo.search_products(chunk) == [], chunk
+        assert repo.count_search_products(chunk) == 0, chunk
+    # The full code finds it: as scanned, typed with separators (the one GTIN
+    # normaliser), or in its 14-digit spelling (one code, GS1).
+    for full in ("8901234567893", " 890-1234 56789-3 ", "08901234567893"):
+        hits = repo.search_products(full)
+        assert [d["product_id"] for d in hits] == ["P-WAT"], full
+        assert repo.count_search_products(full) == 1, full
+
+
+@pytest.fixture
+def legacy_gtin():
+    yield from _repo_over(
+        [
+            {"_id": "L-1", "product_id": "L-1", "sku": "WT-L1", "brand": "Titan",
+             "model": "T1", "gtin": "8901234567893", "is_active": True},
+            # Switched off: the till's active-only filter holds for a code too.
+            {"_id": "L-2", "product_id": "L-2", "sku": "WT-L2", "brand": "Titan",
+             "model": "T2", "gtin": "4006381333931", "is_active": False},
+        ]
+    )
+
+
+def test_the_till_finds_a_legacy_top_level_gtin_exactly(legacy_gtin):
+    hits = legacy_gtin.search_products("8901234567893")
+    assert [d["product_id"] for d in hits] == ["L-1"]
+    assert legacy_gtin.search_products("890") == []
+    assert legacy_gtin.search_products("4006381333931") == []
+    assert legacy_gtin.count_search_products("4006381333931") == 0
 
 
 @pytest.fixture
