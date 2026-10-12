@@ -455,17 +455,19 @@ def variant_barcode(
     The product's OWN variant -- the SELF row the create door writes (sku ==
     the product's sku; the price push's pseudo-variant is one too) or no row
     at all (the seed's single default variant) -- carries the PRODUCT's GTIN:
-    the gtin attribute, then its top-level projection, then the legacy
-    barcode. One home; the row keeps no copy to fall out of sync. Any other
-    row (a size variant of the listing, a colour option) carries ONLY its own:
-    a GTIN names one trade item, so the parent's never lands on a sibling."""
+    the gtin attribute (its key in any spelling, read by the SAME fold as the
+    ims.gtin metafield, so whenever ims.gtin is sent the variant carries that
+    same code), then its top-level projection, then the legacy barcode. One
+    home; the row keeps no copy to fall out of sync. Any other row (a size
+    variant of the listing, a colour option) carries ONLY its own: a GTIN
+    names one trade item, so the parent's never lands on a sibling."""
     if row is not None:
         sku = str(row.get("sku") or "").strip()
         if not sku or sku != str(product.get("sku") or "").strip():
             return _publishable_gtin(row.get("gtin"), row.get("barcode"))
     attrs = product.get("attributes")
     return _publishable_gtin(
-        attrs.get("gtin") if isinstance(attrs, dict) else None,
+        _manufacturer_codes(attrs).get("gtin") if isinstance(attrs, dict) else None,
         product.get("gtin"),
         product.get("barcode"),
     )

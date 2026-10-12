@@ -362,6 +362,30 @@ def test_the_self_row_never_shadows_the_products_gtin():
         assert rows[0].get("barcode") == sent, gtin
 
 
+def test_the_variant_barcode_reads_the_same_fold_as_the_metafield():
+    """Round 9 item 2, the panel's two probes. A twin holding only 'GTIN' sent
+    ims.gtin but no variant barcode; with a top-level gtin as well, Shopify
+    showed two different GTINs for one product. Both read THE fold now."""
+    from api.services.shopify_push import (
+        build_variant_price_inputs,
+        build_variant_seed_rows,
+    )
+    from api.services.shopify_push.product_input import build_product_metafields
+
+    for product in (
+        {"sku": "P1", "mrp": 5000, "attributes": {"GTIN": VALID_EAN13}},
+        {"sku": "P1", "mrp": 5000, "attributes": {"GTIN": VALID_EAN13},
+         "gtin": VALID_EAN13_B},
+    ):
+        meta = [m["value"] for m in build_product_metafields(product) if m["key"] == "gtin"]
+        rows, _ = build_variant_price_inputs(
+            product, [{"sku": "P1", "shopify_variant_id": "gid://shopify/ProductVariant/1"}]
+        )
+        seed = build_variant_seed_rows(product, [])[0]["row"]
+        assert meta == [VALID_EAN13]
+        assert rows[0].get("barcode") == seed.get("barcode") == VALID_EAN13
+
+
 def test_push_never_leaks_our_internal_store_barcode_as_a_gtin():
     """product['barcode'] is in the create-path fallback chain and often holds
     the internally minted GS1 20-29 code -- it must not be published."""
