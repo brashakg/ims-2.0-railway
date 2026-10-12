@@ -253,8 +253,10 @@ export function CatalogManagerPage({
   const page = Number.isFinite(pageRaw) && pageRaw > 0 ? pageRaw : 1;
 
   // Sort + filters + rows per page: the address is the state.
-  const [rowsMemory] = useState(storedRows);
-  const filtersKey = JSON.stringify(readFilters(searchParams, rowsMemory));
+  // This device's remembered size: state, so choosing a size (50 included,
+  // which the address leaves out as the default) is what the page reads.
+  const [rowsMemory, setRowsMemory] = useState(storedRows);
+  const filtersKey = JSON.stringify(readFilters(searchParams, rowsMemory, segment));
   const filters: CatalogFilters = useMemo(() => JSON.parse(filtersKey), [filtersKey]);
   const pageSize = filters.rows;
   const photo: PhotoFilter | undefined = photoPreset ?? (filters.photo || undefined);
@@ -291,10 +293,8 @@ export function CatalogManagerPage({
   const [facets, setFacets] = useState<CatalogFacets | null>(null);
 
   // ONE selection (flag / archive / restore on the catalog, Approve on the
-  // review queue). `picked` remembers the ticked rows' docs across pages so
-  // the Flag dialog can say who gets the tasks.
+  // review queue), kept across pages.
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const picked = useRef(new Map<string, Record<string, unknown>>());
   const [failMap, setFailMap] = useState<Record<string, string>>({});
   const [bulkRunning, setBulkRunning] = useState(false);
   const [flagType, setFlagType] = useState<FlagType>('needs_revision');
@@ -310,7 +310,6 @@ export function CatalogManagerPage({
 
   const clearSelection = useCallback(() => {
     setSelected(new Set());
-    picked.current.clear();
   }, []);
 
   /** Change the filters: written to the address, back to page 1, selection
@@ -320,7 +319,8 @@ export function CatalogManagerPage({
     (next: CatalogFilters | ((current: CatalogFilters) => CatalogFilters)) => {
       setSearchParams(
         (prev) => {
-          const f = typeof next === 'function' ? next(readFilters(prev, rowsMemory)) : next;
+          const f =
+            typeof next === 'function' ? next(readFilters(prev, rowsMemory, segment)) : next;
           const sp = writeFilters(f, prev);
           sp.delete('page');
           return sp;
@@ -330,7 +330,7 @@ export function CatalogManagerPage({
       clearSelection();
       setDrawerIdx(null);
     },
-    [setSearchParams, clearSelection, rowsMemory]
+    [setSearchParams, clearSelection, rowsMemory, segment]
   );
 
   // ---- Search debounce (300ms; Enter flushes for barcode scanners) --------
@@ -475,9 +475,10 @@ export function CatalogManagerPage({
         category: filters.category || undefined,
         brand: filters.brand || undefined,
         page,
+        address: searchParams.toString(),
       },
     });
-  }, [segment, loading, items, page, pageSize, total, filters]);
+  }, [segment, loading, items, page, pageSize, total, filters, searchParams]);
 
   // "Edit everything" (drawer / row action) → full cataloguing page with the
   // queue stashed at this item's position. `hash` = '#images' lands on the
@@ -496,11 +497,12 @@ export function CatalogManagerPage({
           category: filters.category || undefined,
           brand: filters.brand || undefined,
           page,
+          address: searchParams.toString(),
         },
       });
       navigate(`/catalog/add?review=${encodeURIComponent(id)}${hash}`);
     },
-    [items, page, pageSize, total, filters, navigate]
+    [items, page, pageSize, total, filters, navigate, searchParams]
   );
 
   // Row action. "Add photo" opens the ONE existing image upload (QuickAdd's
@@ -545,15 +547,13 @@ export function CatalogManagerPage({
   }, [searchParams]);
 
   // ---- Selection ------------------------------------------------------------
-  const toggleSelect = useCallback((pid: string, doc: Record<string, unknown>) => {
+  const toggleSelect = useCallback((pid: string) => {
     setSelected((prev) => {
       const next = new Set(prev);
       if (next.has(pid)) {
         next.delete(pid);
-        picked.current.delete(pid);
       } else if (next.size < BULK_CAP) {
         next.add(pid);
-        picked.current.set(pid, doc);
       }
       return next;
     });
@@ -565,16 +565,12 @@ export function CatalogManagerPage({
     setSelected((prev) => {
       const next = new Set(prev);
       if (allOnPage) {
-        for (const it of items) {
-          next.delete(docId(it.doc));
-          picked.current.delete(docId(it.doc));
-        }
+        for (const it of items) next.delete(docId(it.doc));
       } else {
         for (const it of items) {
           const id = docId(it.doc);
           if (!id || next.size >= BULK_CAP) continue;
           next.add(id);
-          picked.current.set(id, it.doc);
         }
       }
       return next;
@@ -599,17 +595,21 @@ export function CatalogManagerPage({
     const ok = window.confirm(
       `Restore ${ids.length} product${ids.length === 1 ? '' : 's'}?\n\n` +
         'They come back in the catalogue and at the till. They do NOT go back on the ' +
-        'website by themselves - publish them again from Online Store when they are ready.'
+        'website by themselves - publish them again from Online Store when they are ready. ' +
+        'One still on a listing that is live on the website comes back switched off.'
     );
     if (!ok) return;
     setBulkRunning(true);
     try {
       const res = await catalogBulkApi.restore(ids);
       const done = res.results.filter((r) => r.status === 'done').length;
+      const off = res.results.filter((r) => r.status === 'done' && r.switched_on === false);
       const no = res.results.filter((r) => r.status === 'refused');
       afterBulk(
-        `${done} restored` + (no.length ? ` - ${no.length} refused (${no[0].reason})` : ''),
-        no.length === 0
+        `${done} restored` +
+          (off.length ? ` - ${off.length} switched off. ${off[0].note}` : '') +
+          (no.length ? ` - ${no.length} refused (${no[0].reason})` : ''),
+        no.length === 0 && off.length === 0
       );
     } catch (e: unknown) {
       toast.error(e instanceof Error ? e.message : 'Could not restore the products.');
@@ -636,7 +636,6 @@ export function CatalogManagerPage({
         if (!prev.has(approvedId)) return prev;
         const next = new Set(prev);
         next.delete(approvedId);
-        picked.current.delete(approvedId);
         return next;
       });
       setTotal((t) => Math.max(0, t - 1));
@@ -979,7 +978,7 @@ export function CatalogManagerPage({
                           <input
                             type="checkbox"
                             checked={selected.has(pid)}
-                            onChange={() => toggleSelect(pid, doc)}
+                            onChange={() => toggleSelect(pid)}
                             className="h-3.5 w-3.5 accent-amber-500"
                             aria-label={`Select ${name}`}
                           />
@@ -1110,6 +1109,7 @@ export function CatalogManagerPage({
                   onChange={(e) => {
                     const rows = Number(e.target.value);
                     rememberRows(rows);
+                    setRowsMemory(rows);
                     setFilters({ ...filters, rows });
                   }}
                   className="input-field w-20"
@@ -1180,7 +1180,7 @@ export function CatalogManagerPage({
 
       {dialog === 'flag' && (
         <FlagDialog
-          docs={Array.from(selected).map((id) => picked.current.get(id) || { product_id: id })}
+          ids={Array.from(selected)}
           initialType={flagType}
           onClose={() => setDialog(null)}
           onDone={afterBulk}

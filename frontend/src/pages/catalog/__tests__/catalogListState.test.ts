@@ -13,6 +13,7 @@ import {
   addedColumn,
   clearFilters,
   dateChipLabel,
+  isDay,
   moreFiltersCount,
   quickPickOf,
   quickRange,
@@ -23,6 +24,7 @@ import {
   whenIST,
   writeFilters,
 } from '../catalogListState';
+import { backToQueueAddress } from '../reviewQueue';
 
 // 12 Oct 2026, 12:45 IST == 07:15 UTC.
 const NOW = new Date('2026-10-12T07:15:00Z');
@@ -176,7 +178,10 @@ describe('the ADDED column, India time', () => {
       addedColumn(
         {
           created_by: 'u1', created_by_name: 'Mansi Kumari', created_at: '2026-10-12T07:09:00',
-          updated_by: 'u2', updated_by_name: 'Akshay Ovhal', updated_at: '2026-10-11T05:00:00',
+          updated_by: 'u2', updated_by_name: 'Akshay Ovhal', last_edited_at: '2026-10-11T05:00:00',
+          // updated_at moves on writes that are not edits (archive, restore,
+          // a PO cost): the edit line never reads it.
+          updated_at: '2026-10-12T07:00:00',
         },
         NOW
       )
@@ -186,5 +191,60 @@ describe('the ADDED column, India time', () => {
     ).toEqual({ by: 'Mansi Kumari', when: '3 Oct, 10:47 am', edited: 'Not edited since' });
     // An imported row with no spine: honest dashes.
     expect(addedColumn({}, NOW)).toEqual({ by: '-', when: '-', edited: '-' });
+  });
+});
+
+describe('panel round', () => {
+  it('a day that does not exist falls back to not chosen', () => {
+    for (const day of ['2026-02-30', '2026-04-31', '2026-13-01', '0000-01-01']) {
+      expect(isDay(day)).toBe(false);
+      expect(readFilters(sp(`from=${day}&to=${day}`))).toMatchObject({ from: '', to: '' });
+    }
+    expect(isDay('2028-02-29')).toBe(true);
+    expect(isDay('0001-01-01')).toBe(true); // the server reads it as no lower bound
+  });
+
+  it('Last edited stays in the address before any day is picked', () => {
+    const f = { ...readFilters(sp('')), date_on: 'edited' as const };
+    const out = writeFilters(f, sp(''));
+    expect(out.toString()).toBe('date_on=edited');
+    const next = readFilters(writeFilters({ ...readFilters(out), from: '2026-10-01' }, out));
+    expect(toProductParams(next)).toMatchObject({ date_on: 'edited', date_from: '2026-10-01' });
+    // No day yet: nothing is sent, no chip, and Date added stays a plain address.
+    expect(toProductParams(readFilters(out)).date_on).toBeUndefined();
+    expect(activeChips(readFilters(out), { added: [], edited: [] })).toEqual([]);
+    expect(writeFilters(readFilters(sp('')), sp('')).toString()).toBe('');
+  });
+
+  it('the Needs review list keeps only the filters it applies', () => {
+    const f = readFilters(
+      sp('q=ray&sort=name_asc&brand=Oakley&category=SUNGLASS&photo=missing&rows=100' +
+        '&frame_color=Black&flag=any&added_by=u1&from=2026-10-01&inactive=1'),
+      null,
+      'review'
+    );
+    expect(f).toEqual({
+      ...readFilters(sp('')),
+      q: 'ray', sort: 'name_asc', brand: 'Oakley', category: 'SUNGLASS', photo: 'missing', rows: 100,
+    });
+    expect(activeChips(f, { added: [], edited: [] }).map((c) => c.label)).toEqual([
+      'Search: ray', 'Category: SUNGLASS', 'Brand: Oakley', 'Photo missing',
+    ]);
+  });
+
+  it('Back to queue returns to the review list as it was left', () => {
+    const stash = {
+      ids: ['A', 'B'],
+      index: 1,
+      filters: { page: 3, address: 'sort=name_asc&rows=25&page=3&brand=Oakley&focus=OLD' },
+    };
+    expect(backToQueueAddress(stash, 'B')).toBe(
+      '/catalog/review?sort=name_asc&rows=25&page=3&brand=Oakley&focus=B'
+    );
+    // A stash written before the address was kept: its page only.
+    expect(backToQueueAddress({ ids: [], index: 0, filters: { page: 3 } }, 'X y')).toBe(
+      '/catalog/review?page=3&focus=X+y'
+    );
+    expect(backToQueueAddress(null, 'X')).toBe('/catalog/review?focus=X');
   });
 });

@@ -269,6 +269,17 @@ export interface BulkRowResult {
   in_stock_units?: number;
   /** Archive dry run: live on the website (archiving takes it down). */
   live_online?: boolean;
+  /** Restore: false = back in the catalogue switched off (`note` says why). */
+  switched_on?: boolean;
+  note?: string;
+}
+
+/** Who gets a flag task (the server's own rule names them). */
+export interface FlagTaskTarget {
+  task_id: string | null;
+  assigned_to: string | null;
+  assigned_to_name: string | null;
+  product_count: number;
 }
 
 /** A flag as stored on the product (spine) doc. */
@@ -279,7 +290,8 @@ export interface ProductFlag {
   by?: string;
   by_name?: string;
   at?: string;
-  status: 'open' | 'fixed';
+  /** 'withdrawn' = its task was cancelled. */
+  status: 'open' | 'fixed' | 'withdrawn';
   fixed_by?: string | null;
   fixed_at?: string | null;
   task_id?: string | null;
@@ -306,17 +318,16 @@ export const catalogBulkApi = {
   },
 
   /** Flag products as needing work (ADMIN / SUPERADMIN / STORE_MANAGER).
-   *  One task per person who added them. */
-  flag: async (productIds: string[], type: string, note: string) => {
+   *  One task per person who added them. `apply: false` is the dialog's
+   *  preview: who would get the tasks, nothing written. */
+  flag: async (productIds: string[], type: string, note: string, apply = true) => {
     const response = await api.post('/catalog/flags', {
       product_ids: productIds,
       type,
       note: note || undefined,
+      apply,
     });
-    return response.data as {
-      results: BulkRowResult[];
-      tasks: Array<{ task_id: string | null; assigned_to: string | null; product_count: number }>;
-    };
+    return response.data as { results: BulkRowResult[]; tasks: FlagTaskTarget[] };
   },
 
   /** Mark fixed (the product edit page). */

@@ -64,7 +64,9 @@ vi.mock('../../../services/api/catalog', () => ({
 }));
 
 import { productApi } from '../../../services/api/products';
+import { catalogBulkApi, catalogProductsApi } from '../../../services/api/catalog';
 import { CatalogManagerPage } from '../CatalogManagerPage';
+import { backToQueueAddress, readReviewQueue } from '../reviewQueue';
 
 const getProducts = productApi.getProducts as unknown as ReturnType<typeof vi.fn>;
 const getFacets = productApi.getFacets as unknown as ReturnType<typeof vi.fn>;
@@ -286,5 +288,108 @@ describe('who sees which bulk button', () => {
     const bar = await tickFirstRow();
     expect(within(bar).getByText('Restore')).toBeTruthy();
     expect(within(bar).queryByText(/Flag 1 product/)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Panel round: orders and paths the first tests did not walk
+// ---------------------------------------------------------------------------
+
+const flagApi = catalogBulkApi.flag as unknown as ReturnType<typeof vi.fn>;
+const reviewList = catalogProductsApi.list as unknown as ReturnType<typeof vi.fn>;
+
+describe('the date range in its natural order', () => {
+  it('Last edited chosen BEFORE the days stays Last edited', async () => {
+    renderAt('?gender=Men'); // a More-filters choice opens the panel
+    await screen.findByTestId('catalog-table');
+    const range = screen.getByTestId('date-range');
+    fireEvent.change(within(range).getByLabelText('Date range'), { target: { value: 'edited' } });
+    await waitFor(() => expect(where().get('date_on')).toBe('edited'));
+    fireEvent.change(within(range).getByLabelText('From'), { target: { value: '2026-10-01' } });
+    await waitFor(() => expect(where().get('from')).toBe('2026-10-01'));
+    expect((within(range).getByLabelText('Date range') as HTMLSelectElement).value).toBe('edited');
+    await waitFor(() =>
+      expect(getProducts.mock.calls.at(-1)?.[0]).toMatchObject({
+        date_on: 'edited',
+        date_from: '2026-10-01',
+      })
+    );
+    expect(within(screen.getByTestId('filter-chips')).getByText('Edited from 1 Oct')).toBeTruthy();
+  });
+});
+
+describe('rows per page back to the default', () => {
+  it('a device that remembered 100 can choose 50 again', async () => {
+    window.localStorage.setItem('ims.catalog.rowsPerPage', '100');
+    renderAt('');
+    await waitFor(() => expect(getProducts.mock.calls.at(-1)?.[0]).toMatchObject({ limit: 100 }));
+    fireEvent.change(screen.getByLabelText('Rows per page'), { target: { value: '50' } });
+    await waitFor(() =>
+      expect(getProducts.mock.calls.at(-1)?.[0]).toMatchObject({ limit: 50, skip: 0 })
+    );
+    expect((screen.getByLabelText('Rows per page') as HTMLSelectElement).value).toBe('50');
+    expect(window.localStorage.getItem('ims.catalog.rowsPerPage')).toBe('50');
+    expect(where().get('rows')).toBeNull(); // 50 is the default: a plain address
+  });
+});
+
+describe('the Needs review page shows only the filters it applies', () => {
+  it('no chip for a filter that list never applied', async () => {
+    reviewList.mockReset();
+    reviewList.mockResolvedValue({ products: [], total: 0 });
+    render(
+      <MemoryRouter initialEntries={['/catalog/review?frame_color=Black&flag=any&brand=Oakley&sort=name_asc']}>
+        <Routes>
+          <Route path="/catalog/review" element={<CatalogManagerPage segment="review" />} />
+        </Routes>
+      </MemoryRouter>
+    );
+    await waitFor(() => expect(reviewList).toHaveBeenCalled());
+    expect(reviewList.mock.calls.at(-1)?.[0]).toMatchObject({ brand: 'Oakley', sort: 'name_asc' });
+    const chips = await screen.findByTestId('filter-chips');
+    expect(within(chips).getAllByText(/:/).map((c) => c.textContent)).toEqual(['Brand: Oakley']);
+  });
+
+  it('the review queue remembers the whole address for Back to queue', async () => {
+    reviewList.mockReset();
+    reviewList.mockResolvedValue({
+      products: [{ id: 'IMP-1', sku: 'IMP-1', title: 'Imported thing', needs_review: true }],
+      total: 120,
+    });
+    window.sessionStorage.clear();
+    render(
+      <MemoryRouter initialEntries={['/catalog/review?sort=name_asc&rows=25&page=3']}>
+        <Routes>
+          <Route path="/catalog/review" element={<CatalogManagerPage segment="review" />} />
+        </Routes>
+      </MemoryRouter>
+    );
+    await waitFor(() => expect(readReviewQueue()?.ids).toEqual(['IMP-1']));
+    const back = new URLSearchParams(
+      backToQueueAddress(readReviewQueue(), 'IMP-1').split('?')[1]
+    );
+    expect([back.get('sort'), back.get('rows'), back.get('page'), back.get('focus')]).toEqual([
+      'name_asc', '25', '3', 'IMP-1',
+    ]);
+  });
+});
+
+describe('the Flag dialog names who gets the tasks from the server', () => {
+  it("the server's answer, not the row's adder", async () => {
+    flagApi.mockReset();
+    // The adder has left: the server's own rule sends it to a catalogue manager.
+    flagApi.mockResolvedValue({
+      results: [{ product_id: 'P1', status: 'done' }],
+      tasks: [{ task_id: null, assigned_to: 'u-ak', assigned_to_name: 'Akshay Ovhal', product_count: 1 }],
+    });
+    renderAt('');
+    await screen.findByTestId('catalog-table');
+    fireEvent.click(screen.getByLabelText('Select Carrera 8035 Black'));
+    fireEvent.click(within(await screen.findByTestId('selection-bar')).getByText(/Flag 1 product/));
+    await waitFor(() =>
+      expect(screen.getByTestId('tasks-go-to').textContent).toBe('Tasks go to: Akshay Ovhal (1 product)')
+    );
+    // The preview is a dry run of the same door: nothing written.
+    expect(flagApi.mock.calls[0]).toEqual([['P1'], 'needs_revision', '', false]);
   });
 });

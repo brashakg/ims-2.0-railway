@@ -93,12 +93,30 @@ const TEXT_KEYS = [
 ] as const;
 
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
-const isDay = (s: string): boolean => DAY.test(s) && !Number.isNaN(Date.parse(`${s}T00:00:00Z`));
+/** A calendar day that exists. Date.parse rolls 2026-02-30 over to 2 March
+ *  instead of failing, so the day must survive the round trip unchanged;
+ *  year 0000 is no day either. */
+export const isDay = (s: string): boolean => {
+  if (!DAY.test(s) || s < '0001-01-01') return false;
+  const d = new Date(`${s}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
+};
+
+/** The Needs review list (imported docs, GET /catalog/products) applies
+ *  only these; every other filter is "not chosen" there, so no chip claims
+ *  a filter that list never applied (a shared link, or the legacy
+ *  /catalog?segment=review redirect, can carry any key). */
+const REVIEW_KEYS = ['q', 'sort', 'category', 'brand', 'photo', 'rows'] as const;
 
 /** Read the page address. Unknown or broken values fall back to "not
  *  chosen"; a From after To drops the range. `storedRows` is this device's
- *  remembered rows-per-page, used when the address has none. */
-export function readFilters(sp: URLSearchParams, storedRows?: number | null): CatalogFilters {
+ *  remembered rows-per-page, used when the address has none. `segment`
+ *  'review' keeps only what the Needs review list applies. */
+export function readFilters(
+  sp: URLSearchParams,
+  storedRows?: number | null,
+  segment: 'catalog' | 'review' = 'catalog'
+): CatalogFilters {
   const text = (k: string) => (sp.get(k) || '').trim().slice(0, 120);
   const sort = SORT_OPTIONS.some((o) => o.value === sp.get('sort'))
     ? (sp.get('sort') as SortKey)
@@ -132,6 +150,12 @@ export function readFilters(sp: URLSearchParams, storedRows?: number | null): Ca
     rows,
   } as CatalogFilters;
   for (const k of TEXT_KEYS) f[k] = text(k);
+  if (segment === 'review') {
+    const none = readFilters(new URLSearchParams(), rows);
+    const scoped = { ...none } as Record<string, unknown>;
+    for (const k of REVIEW_KEYS) scoped[k] = f[k];
+    return scoped as unknown as CatalogFilters;
+  }
   return f;
 }
 
@@ -145,7 +169,9 @@ export function writeFilters(f: CatalogFilters, prev: URLSearchParams): URLSearc
   };
   for (const k of TEXT_KEYS) put(k, f[k], false);
   put('sort', f.sort, f.sort === DEFAULT_SORT);
-  put('date_on', f.date_on, f.date_on === 'added' || (!f.from && !f.to));
+  // Kept even before any day is picked: choosing Last edited first and the
+  // days second must not fall back to Date added in between.
+  put('date_on', f.date_on, f.date_on === 'added');
   put('from', f.from, false);
   put('to', f.to, false);
   put('flag', f.flag, false);
@@ -260,7 +286,11 @@ export function relativeDay(day: string, now: Date = new Date()): string {
 }
 
 /** The ADDED column, both lines: who added it and when, then who last
- *  edited it or 'Not edited since'. Names are the server's (users first). */
+ *  edited it or 'Not edited since'. Names are the server's (users first);
+ *  the edit's day is the server's last_edited_at (catalog_list.
+ *  LAST_EDITED_AT), the same moment the Recently edited sort and the Last
+ *  edited range read -- never updated_at, which moves on writes that are
+ *  not edits. */
 export function addedColumn(
   doc: Record<string, unknown>,
   now: Date = new Date()
@@ -268,7 +298,7 @@ export function addedColumn(
   const by = String(doc.created_by_name || doc.created_by || '').trim() || '-';
   const when = whenIST(doc.created_at, now);
   const editor = String(doc.updated_by_name || doc.updated_by || '').trim();
-  const editedDay = istDayString(doc.updated_at as string);
+  const editedDay = istDayString(doc.last_edited_at as string);
   const edited =
     doc.updated_by && editedDay
       ? `Edited by ${editor}, ${relativeDay(editedDay, now)}`

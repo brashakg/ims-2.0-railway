@@ -21,6 +21,9 @@ export interface ReviewQueueFilters {
   /** The Catalog Manager grid page the ids came from (restores grid position
    *  on "Back to queue"). */
   page?: number;
+  /** The review list's whole address (query string): page, Sort by, rows
+   *  per page, search and filters -- "Back to queue" returns to it as it was. */
+  address?: string;
 }
 
 export interface ReviewQueueStash {
@@ -108,4 +111,17 @@ export function legacyReviewRedirect(search: string): string | null {
   sp.delete('segment');
   const rest = sp.toString();
   return `/catalog/review${rest ? `?${rest}` : ''}`;
+}
+
+/** "Back to queue": the review list's own address as the reviewer left it
+ *  (page, Sort by, rows per page, search, filters), with ?focus re-opening
+ *  this product's card. A stash from before `address` existed keeps just its
+ *  page. Pure. */
+export function backToQueueAddress(stash: ReviewQueueStash | null, focusId: string): string {
+  const f = stash?.filters;
+  const sp = new URLSearchParams(
+    typeof f?.address === 'string' ? f.address : f?.page && f.page > 1 ? `page=${f.page}` : ''
+  );
+  sp.set('focus', focusId);
+  return `/catalog/review?${sp.toString()}`;
 }

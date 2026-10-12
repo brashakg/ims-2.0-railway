@@ -11,7 +11,11 @@
 
 import { useEffect, useState } from 'react';
 import { Flag, Loader2, RotateCcw, Trash2 } from 'lucide-react';
-import { catalogBulkApi, type BulkRowResult } from '../../services/api/catalog';
+import {
+  catalogBulkApi,
+  type BulkRowResult,
+  type FlagTaskTarget,
+} from '../../services/api/catalog';
 import { FLAG_TYPES, type FlagType } from './catalogListState';
 
 function useEscape(onClose: () => void) {
@@ -55,27 +59,28 @@ function Dialog({
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
-/** "Mansi Kumari (3 products), Akshay Ovhal (1 product)" from the picked
- *  rows' adders. The server falls back to a catalogue manager when an adder
- *  has left; it says so in its answer. */
-export function tasksGoTo(docs: Array<Record<string, unknown>>): string {
-  const counts = new Map<string, number>();
-  for (const d of docs) {
-    const who = String(d.created_by_name || d.created_by || 'the catalogue manager');
-    counts.set(who, (counts.get(who) || 0) + 1);
-  }
-  return Array.from(counts.entries())
-    .map(([who, n]) => `${who} (${plural(n, 'product')})`)
+/** "Mansi Kumari (3 products), Akshay Ovhal (1 product)" -- from the
+ *  SERVER's answer (its one rule picks the person: the adder, or an active
+ *  catalogue manager when the adder has left), never re-derived here. */
+export function tasksGoTo(tasks: FlagTaskTarget[]): string {
+  return tasks
+    .map(
+      (t) =>
+        `${t.assigned_to_name || (t.assigned_to ? t.assigned_to : 'nobody yet')} (${plural(
+          t.product_count,
+          'product'
+        )})`
+    )
     .join(', ');
 }
 
 export function FlagDialog({
-  docs,
+  ids,
   initialType,
   onClose,
   onDone,
 }: {
-  docs: Array<Record<string, unknown>>;
+  ids: string[];
   initialType: FlagType;
   onClose: () => void;
   onDone: (message: string, ok: boolean) => void;
@@ -85,7 +90,32 @@ export function FlagDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const needsNote = type === 'other';
-  const n = docs.length;
+  const n = ids.length;
+
+  // Who gets the tasks: the server's preview (apply=false), the same rule
+  // the real flag uses. Asked again when the flag type changes (a product
+  // that already has this flag gets no task).
+  const askKey = `${ids.join(',')}|${type}`;
+  const [answer, setAnswer] = useState<{ key: string; tasks: FlagTaskTarget[] | 'error' } | null>(
+    null
+  );
+  useEffect(() => {
+    let alive = true;
+    const [idList, flagType] = askKey.split('|');
+    catalogBulkApi
+      .flag(idList.split(','), flagType, '', false)
+      .then((r) => {
+        if (alive) setAnswer({ key: askKey, tasks: r.tasks });
+      })
+      .catch(() => {
+        if (alive) setAnswer({ key: askKey, tasks: 'error' });
+      });
+    return () => {
+      alive = false;
+    };
+  }, [askKey]);
+  // Only the answer to the CURRENT question counts ("checking" meanwhile).
+  const preview = answer?.key === askKey ? answer.tasks : null;
 
   const submit = async () => {
     if (needsNote && !note.trim()) {
@@ -95,16 +125,12 @@ export function FlagDialog({
     setBusy(true);
     setError('');
     try {
-      const res = await catalogBulkApi.flag(
-        docs.map((d) => String(d.product_id)),
-        type,
-        note.trim()
-      );
+      const res = await catalogBulkApi.flag(ids, type, note.trim());
       const done = res.results.filter((r) => r.status === 'done').length;
       const already = res.results.filter((r) => r.status === 'already').length;
       const refused = res.results.filter((r) => r.status === 'refused').length;
       const parts = [`${plural(done, 'product')} flagged`];
-      if (res.tasks.length) parts.push(`${plural(res.tasks.length, 'task')} sent`);
+      if (res.tasks.length) parts.push(`tasks sent to ${tasksGoTo(res.tasks)}`);
       if (already) parts.push(`${already} already had this flag`);
       if (refused) parts.push(`${refused} could not be flagged`);
       onDone(parts.join(' - '), refused === 0);
@@ -157,8 +183,18 @@ export function FlagDialog({
           className="input-field h-auto py-2"
         />
       </label>
-      <p className="rounded-lg bg-gray-50 px-3 py-2 text-sm text-gray-700">
-        Tasks go to: <span className="font-semibold">{tasksGoTo(docs)}</span>
+      <p className="rounded-lg bg-gray-50 px-3 py-2 text-sm text-gray-700" data-testid="tasks-go-to">
+        {preview === null ? (
+          'Checking who gets the tasks...'
+        ) : preview === 'error' ? (
+          'Could not check who gets the tasks right now.'
+        ) : preview.length === 0 ? (
+          'No task: every product already has this flag.'
+        ) : (
+          <>
+            Tasks go to: <span className="font-semibold">{tasksGoTo(preview)}</span>
+          </>
+        )}
       </p>
       {error && (
         <p className="text-sm text-red-700" role="alert">
