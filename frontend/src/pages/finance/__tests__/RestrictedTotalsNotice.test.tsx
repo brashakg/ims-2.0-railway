@@ -104,6 +104,18 @@ const CASHFLOW_WHOLE = {
   net_cash_flow: 275550,
 };
 
+// What a store / area manager gets since the owner's 2026-10-12 ruling: the
+// paid-PO and vendor-payment totals are ADMIN + ACCOUNTANT only, so the outflows
+// leave them out and the body says so with its own flag (no figure, no key).
+const CASHFLOW_NO_SUPPLIERS = {
+  period: 'This month',
+  inflows: 300000,
+  outflows: 24450,
+  net_cash_flow: 275550,
+  expense_outflow: 24450,
+  vendor_payments_restricted: true,
+};
+
 function primeApi(pnl: unknown, budget: unknown, cashFlow: unknown = CASHFLOW_WHOLE) {
   api.getRevenue.mockResolvedValue({ total_revenue: 300000 });
   api.getPnl.mockResolvedValue(pnl);
@@ -269,6 +281,13 @@ describe('FinanceDashboard cash flow tab - the short outflow declares itself', (
     // and not just an unrendered tab.
     expect(await screen.findAllByText(/outflow/i)).not.toHaveLength(0);
     expect(screen.queryByTestId(NOTICE)).not.toBeInTheDocument();
+  });
+
+  it('shows the banner when what was paid to suppliers is left out', async () => {
+    primeApi(PNL_WHOLE, BUDGET_WHOLE, CASHFLOW_NO_SUPPLIERS);
+    await openCashFlowTab();
+    const notice = await screen.findByTestId(NOTICE);
+    expect(notice.textContent).toMatch(/cash outflow figures/i);
   });
 
   it('the cash flow banner follows the CASH FLOW flag, not the P&L flag', async () => {
