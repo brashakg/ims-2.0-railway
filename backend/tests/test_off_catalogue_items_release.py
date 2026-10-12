@@ -4793,3 +4793,42 @@ def test_r8_the_delete_refusal_names_what_settles_a_hold_beyond_the_order(world)
     po2, grn3, draft_id = world.order_and_receive(BOSS_1701, qty=1, cost=1300)
     refused = _delete_refusal(world, draft_id)
     assert "Finish the item" in str(refused.detail) and "Not received" not in str(refused.detail)
+
+
+def test_r8_a_draft_finished_by_a_failed_accept_still_releases_its_sibling(world, monkeypatch):
+    # Receipt A's cost finishes the draft, then A's status flip fails (a
+    # stepdown). The cost is written; A's retry promotes nothing, so the
+    # release the promote deferred must not die with the failed accept.
+    from api.routers.vendors import grn_accept as _ga
+
+    po = world.raise_po([{"new_product": dict(BOSS_TYPED), "quantity": 2, "unit_price": 1200}])
+    draft_id = po["items"][0]["product_id"]
+    a = _receive(world, world.db.purchase_orders.find_one({"po_id": po["po_id"]}), [1], "JOT/26-27/0831")
+    b = _receive(world, world.db.purchase_orders.find_one({"po_id": po["po_id"]}), [1], "JOT/26-27/0832")
+    world.db.products.update_one(
+        {"product_id": draft_id},
+        {"$set": {"catalog_status": "ACTIVE", "offer_price": 2790, "done_gaps": [], "cost_source": "PO_RATE"}},
+    )
+    real_flip = _ga._advance_grn_terminal_status
+    failed = []
+
+    def _stepdown(repo, gid, *a, **k):
+        if gid == a_id and not failed:
+            failed.append(gid)
+            raise RuntimeError("primary stepped down")
+        return real_flip(repo, gid, *a, **k)
+
+    a_id = a["grn_id"]
+    monkeypatch.setattr(_ga, "_advance_grn_terminal_status", _stepdown)
+    with pytest.raises(RuntimeError):
+        _run(vd.accept_grn(a_id, MANAGER))
+    assert failed == [a_id]
+    if world.grn(a_id)["status"] != "ACCEPTED":  # still waiting: the manager retries A
+        _run(vd.accept_grn(a_id, MANAGER))
+    statuses = [world.grn(g["grn_id"])["status"] for g in (a, b)]
+    catalogue = [t for t in _open_tasks(world) if t.get("category") == "Catalogue"]
+    finding(
+        statuses == ["ACCEPTED", "ACCEPTED"] and len(world.units(draft_id)) == 2 and not catalogue,
+        f"A failed accept lost the release: {statuses}, {len(world.units(draft_id))} units, "
+        f"{len(catalogue)} catalogue task(s) open",
+    )

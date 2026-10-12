@@ -464,6 +464,14 @@ def _put_on_shelf(
         # retry immediately instead of waiting out the stale window. The
         # per-(grn, line) mint guard makes that retry idempotent.
         _release_grn_accept_claim(grn_repo, grn_id, claim_token)
+        # A cost the promote already wrote stays written: the retry finds it in
+        # place and promotes nothing, so the draft it finished must release its
+        # other held receipts now, or they wait on a finished item for ever.
+        try:
+            for pid in dict.fromkeys(deferred_releases):
+                release_held_receipts(pid)
+        except Exception as exc:  # noqa: BLE001 - never mask the accept's error
+            logger.error("[VENDOR] GRN %s: deferred release failed: %s", grn_id, exc)
         raise
     # The receipt's cost finished a draft mid-accept (gst._finished_by_the_promote):
     # its OTHER held receipts go on the shelf now that this claim is handed back.
