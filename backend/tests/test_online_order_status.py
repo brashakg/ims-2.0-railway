@@ -3045,3 +3045,36 @@ def test_a_live_parcel_takes_the_display_over_a_newer_cancel(swept, probe):
         assert (doc["status"], doc["shopify_fulfillment_id"], doc["awb"], doc["fulfillment_status"],
                 doc["shipment_status"]) == ("DELIVERED", "2", "AWB-2", "FULFILLED", "delivered"), i
         assert shopify_fulfillment.tracked_awbs(doc) == ["AWB-2"]
+
+
+# ---------------------------------------------------------------------------
+# Round 23.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", ["confirm", "auto"])
+def test_a_historical_booking_that_cannot_be_written_says_what_its_rerun_does(swept, monkeypatch, path):
+    """The booking write error on an order from Shopify's order history. Its
+    re-run puts nothing back: it raises the stock-in task. A task saying the
+    re-run 'puts each unit back once; never add them by hand as well' sends
+    staff to re-run AND to add the frame the stock-in task then asks for --
+    what the 2026-10-01 ruling forbids."""
+    oid, rid = 60240 + (path == "auto"), 700440 + (path == "auto")
+    real = returns_router._orders_coll()
+    monkeypatch.setattr(returns_router, "_orders_coll", lambda: _ClaimDown(real))
+    if path == "auto":
+        monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "1")
+    # REFUNDED: not goods-out, so AUTO posts it (a goods-out refund is queued).
+    row = _historical_refund(swept, monkeypatch, oid, rid, status="REFUNDED")
+    if path == "confirm":
+        assert _confirm(row)["result"]["restock_applied"] is False
+    ret = swept["returns"].find_one({"shopify_refund_id": str(rid)})
+    assert (ret["status"], ret["restock_applied"]) == ("COMPLETED", False)
+    [blocked] = swept["db"]["tasks"].find({"source_ref": f"return_restock_blocked:{ret['return_id']}"})
+    text = blocked["description"]
+    assert "booked nothing" in text and "Shopify's order history" in text and "stock-in" in text
+    assert "puts each unit back" not in text and "by hand as well" not in text
+    monkeypatch.setattr(returns_router, "_orders_coll", lambda: real)
+    _retry(ret)
+    assert _minted(swept) == [] and len(_stock_in(swept, oid)) == 1, "one frame, one task"
+    assert swept["db"]["tasks"].find_one({"task_id": blocked["task_id"]})["status"] == "COMPLETED"
