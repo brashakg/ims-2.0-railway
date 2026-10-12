@@ -300,6 +300,18 @@ def test_the_purchase_order_box_finds_a_title_word_only_from_its_start(db, q, wa
     assert _ids(db, q, match="anywhere") == (want, 1)
 
 
+def test_guard_a_hyphen_free_sku_hit_never_takes_main_s_page_slot(db):
+    # Main's wide rule finds the 'Glass Gray' frame for "sgray" (a colour
+    # ignores its spaces anywhere); the readable SKU SG-RAYBAN-... is found
+    # only once its hyphens are ignored. That new hit ranks after main's,
+    # even stored first, so a page of one still shows the row main showed.
+    _door(db, "SG-RB", "SUNGLASS", brand_name="Ray-Ban", model_no="RB3025",
+          colour_code="001", frame_color="Gold")
+    _door(db, "FR-GG", "FRAME", brand_name="Vogue", model_no="VO5051",
+          colour_code="W44", frame_color="Glass Gray")
+    assert _ids(db, "sgray", match="anywhere", limit=1) == (["FR-GG"], 2)
+
+
 # Main's till rule, before 2026-10-08: each word STARTS brand, model, sku,
 # variant or barcode.
 _MAIN_FIELDS = ["brand", "model", "sku", "variant", "barcode"]
