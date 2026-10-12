@@ -571,6 +571,8 @@ export const purchaseInvoicesApi = {
     });
     return res.data as {
       requested: Array<{ product_id: string; product: string; missing: string[] }>;
+      asked: 'CATALOG_MANAGER' | 'ADMIN';
+      message: string;
     };
   },
   // F9 — open (unmatched, ACCEPTED) Delivery Challans for a vendor/date range,

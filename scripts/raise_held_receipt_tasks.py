@@ -199,7 +199,7 @@ def run(db, *, commit: bool) -> List[Dict[str, Any]]:
         if waiting and not t.get("store_id"):
             print(f"  {t.get('task_id')}: no shop on the old ask - left open; ask again from the bill")
             continue
-        if waiting and not ask_catalogue_managers(db, t.get("store_id"), _ask_items(db, waiting)):
+        if waiting and not ask_catalogue_managers(db, t.get("store_id"), _ask_items(db, waiting))[0]:
             print(f"  {t.get('task_id')}: NOT asked again (no task stored) - left open")
             continue
         complete_tasks(

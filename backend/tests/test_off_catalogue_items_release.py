@@ -5239,3 +5239,32 @@ def test_r9_a_deleted_catalogue_managers_task_climbs_to_the_admin_on_both_engine
         [t.get("assigned_to") for t in _open_tasks(world)] == [ADMIN["user_id"]],
         f"{engine}: the catalogue task went to {[t.get('assigned_to') for t in _open_tasks(world)]}",
     )
+
+
+def test_r9_a_bills_ask_with_no_catalogue_manager_goes_to_the_admins_and_says_so(world):
+    # None-found fails loud on the bill's path too: the admins get the orphan
+    # task, and the asker is told the admins were asked -- never that a
+    # cataloguer was.
+    from api.routers import purchase_invoices as _pi
+
+    _seed_user(world, ADMIN)
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    world.db.users.update_one({"user_id": CATALOGUER["user_id"]}, {"$set": {"is_active": False}})
+    out = _run(_pi.request_cataloguing(_pi.CataloguingRequest(product_ids=[draft_id]), ACCOUNTANT))
+    asks = [t for t in _open_tasks(world) if t.get("product_ids")]
+    finding(
+        [t.get("assigned_to") for t in asks] == [ADMIN["user_id"]]
+        and asks[0]["title"] == f"No catalogue manager for {STORE}: 1 item(s) block a vendor bill",
+        f"The bill's ask with no catalogue manager went to {[(t.get('assigned_to'), t.get('title')) for t in asks]}",
+    )
+    finding(
+        out.get("asked") == "ADMIN"
+        and "asked the admins" in out["message"]
+        and "catalogue manager to finish" not in out["message"],
+        f"The asker was told {out}",
+    )
+    # With a catalogue manager, the answer names them.
+    world.db.users.update_one({"user_id": CATALOGUER["user_id"]}, {"$set": {"is_active": True}})
+    world.db.tasks.delete_many({"product_ids": draft_id})
+    out = _run(_pi.request_cataloguing(_pi.CataloguingRequest(product_ids=[draft_id]), ACCOUNTANT))
+    assert out["asked"] == "CATALOG_MANAGER" and "catalogue manager" in out["message"], out

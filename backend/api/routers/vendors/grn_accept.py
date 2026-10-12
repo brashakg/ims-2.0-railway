@@ -1,6 +1,7 @@
 """POST /grn/{grn_id}/accept - the three-way match and the stock mint."""
 
 from datetime import timedelta
+from typing import Tuple
 from urllib.parse import quote
 
 from ._shared import (
@@ -1251,7 +1252,7 @@ def _sync_catalogue_tasks(grn_id, grn, unresolved_lines, grn_status, product_rep
 def tell_catalogue_managers(
     db, store_id, *, dedupe: str, title: str, orphan_title: str, description: str,
     extra: Optional[dict] = None, ever: bool = True,
-) -> int:
+) -> Tuple[int, bool]:
     """THE door that tells the catalogue managers an item waits on them -- a
     receipt holding units (_sync_catalogue_tasks), a vendor bill that cannot be
     booked (purchase_invoices.request_cataloguing). One task per active
@@ -1265,7 +1266,10 @@ def tell_catalogue_managers(
     acknowledge clock is a day (task_sla.DEFAULT_SLA), due a day out with no
     overdue grace (overdue_grace_minutes 0). The people's tasks share one
     escalation_group, so they climb to ONE task at the next rung
-    (task_escalation.merge_into_twin)."""
+    (task_escalation.merge_into_twin).
+
+    Answers (how many people now hold the task, whether they are catalogue
+    managers) -- False: nobody holds the job, the admins were told."""
     people, are_cataloguers = _people_for(
         db, store_id, "CATALOG_MANAGER", entity_wide=True
     )
@@ -1294,4 +1298,4 @@ def tell_catalogue_managers(
             # P3 ack clock, and the P3 grace would add three more days.
             extra={**(extra or {}), "escalation_group": dedupe, "overdue_grace_minutes": 0},
         )
-    return told
+    return told, are_cataloguers

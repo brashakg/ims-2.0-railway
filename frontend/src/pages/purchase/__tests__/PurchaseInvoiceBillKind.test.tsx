@@ -59,6 +59,12 @@ const SUPPLIER = {
   state: 'Maharashtra',
 } as never;
 
+const ASKED_CM = {
+  requested: [],
+  asked: 'CATALOG_MANAGER',
+  message: 'Asked the catalogue manager to finish these items - the bill can be booked after that',
+};
+
 async function openManualForm() {
   render(
     <MemoryRouter>
@@ -151,7 +157,7 @@ describe('manual invoice bill-kind declaration', () => {
       message: 'P-DRAFT is still missing Selling Price.',
       detail: { code: 'PRODUCT_NOT_CATALOGUED', lines: [{ product_id: 'P-DRAFT' }] },
     });
-    apis.purchaseInvoicesApi.requestCataloguing.mockResolvedValue({ requested: [] });
+    apis.purchaseInvoicesApi.requestCataloguing.mockResolvedValue(ASKED_CM);
     await openManualForm();
     fillManualHeaderAndLine();
     fireEvent.change(screen.getByDisplayValue(/Choose: goods, or services/), {
@@ -176,7 +182,7 @@ describe('manual invoice bill-kind declaration', () => {
       message: 'P-DRAFT is still missing Selling Price.',
       detail: { code: 'PRODUCT_NOT_CATALOGUED', lines: [{ product_id: 'P-DRAFT' }] },
     });
-    apis.purchaseInvoicesApi.requestCataloguing.mockResolvedValue({ requested: [] });
+    apis.purchaseInvoicesApi.requestCataloguing.mockResolvedValue(ASKED_CM);
     render(
       <MemoryRouter>
         <InvoiceFormDrawer
@@ -201,6 +207,28 @@ describe('manual invoice bill-kind declaration', () => {
     await waitFor(() =>
       expect(apis.purchaseInvoicesApi.requestCataloguing).toHaveBeenCalledWith(['P-DRAFT'], undefined, 'S2'),
     );
+  });
+
+  it('with no catalogue manager for the shop the toast says the admins were asked', async () => {
+    apis.purchaseInvoicesApi.create.mockRejectedValue({
+      code: 'PRODUCT_NOT_CATALOGUED',
+      message: 'P-DRAFT is still missing Selling Price.',
+      detail: { code: 'PRODUCT_NOT_CATALOGUED', lines: [{ product_id: 'P-DRAFT' }] },
+    });
+    apis.purchaseInvoicesApi.requestCataloguing.mockResolvedValue({
+      requested: [],
+      asked: 'ADMIN',
+      message: 'No catalogue manager covers this shop - asked the admins to finish these items',
+    });
+    await openManualForm();
+    fillManualHeaderAndLine();
+    fireEvent.change(screen.getByDisplayValue(/Choose: goods, or services/), {
+      target: { value: 'SERVICES' },
+    });
+    await previewSettled();
+    fireEvent.click(screen.getByRole('button', { name: /Book invoice/i }));
+    await waitFor(() => expect(toastMock.info).toHaveBeenCalledWith(expect.stringContaining('asked the admins')));
+    expect(toastMock.info).not.toHaveBeenCalledWith(expect.stringContaining('catalogue manager to finish'));
   });
 
   it('an ask nobody received is said, never swallowed', async () => {

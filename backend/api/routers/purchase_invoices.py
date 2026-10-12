@@ -56,7 +56,7 @@ via require_roles). Reads are AUTHENTICATED.
 import logging
 import uuid
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
@@ -1517,7 +1517,7 @@ async def request_cataloguing(
     items = _ask_items(db, body.product_ids)
     store_id = _shop_for_the_ask(db, body, current_user, items)
     try:
-        told = ask_catalogue_managers(db, store_id, items, body.note)
+        told, to_cataloguers = ask_catalogue_managers(db, store_id, items, body.note)
         if not told:
             raise RuntimeError("no task was stored for the ask")
     except Exception as exc:  # noqa: BLE001
@@ -1528,7 +1528,20 @@ async def request_cataloguing(
             detail="The catalogue manager could not be asked. Try again.",
         ) from exc
 
-    return {"requested": items, "message": "Cataloguing requested"}
+    # Says who was asked: with no catalogue manager for the shop the task
+    # went to the admins (tell_catalogue_managers), never "the cataloguer".
+    if to_cataloguers:
+        message = (
+            "Asked the catalogue manager to finish these items - "
+            "the bill can be booked after that"
+        )
+    else:
+        message = (
+            "No catalogue manager covers this shop - asked the admins to "
+            "finish these items; the bill can be booked after that"
+        )
+    return {"requested": items, "asked": "CATALOG_MANAGER" if to_cataloguers else "ADMIN",
+            "message": message}
 
 
 def _ask_items(db, product_ids) -> list:
@@ -1559,12 +1572,13 @@ def _ask_items(db, product_ids) -> list:
     return items
 
 
-def ask_catalogue_managers(db, store_id, items, note=None) -> int:
+def ask_catalogue_managers(db, store_id, items, note=None) -> Tuple[int, bool]:
     """THE ask for cataloguing: the catalogue managers BY NAME, through the
     one door a held receipt uses too -- a task with no assignee is one no
     catalogue manager's list shows. request_cataloguing runs it, and so does
     scripts/raise_held_receipt_tasks.py for an ask raised before that door.
-    Answers how many people now hold the task."""
+    Answers (how many people now hold the task, whether they are catalogue
+    managers -- False: the admins were told, nobody holds the job)."""
     from .vendors.grn_accept import tell_catalogue_managers
 
     lines = [
