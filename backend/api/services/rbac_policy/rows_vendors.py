@@ -569,11 +569,15 @@ ROWS: List[Dict[str, object]] = [
         "method": "GET",
         "path": "/api/v1/vendors/{vendor_id}/performance",
         "allowed": PURCHASE,
+        # F63 / R4: the caller's shop's orders and receipts (resolve_store_scope).
+        "store_scoped": True,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendors/{vendor_id}/purchase-history",
         "allowed": PURCHASE,
+        # F63 / R4: the caller's shop's orders and receipts (resolve_store_scope).
+        "store_scoped": True,
     },
     {
         "method": "GET",

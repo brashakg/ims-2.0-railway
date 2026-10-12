@@ -821,8 +821,10 @@ def perf(monkeypatch):
 
 
 def _with_grn(db):
+    # Received at the callers' shop: the scorecard's receipts follow the shop
+    # rule (F63) -- a manager's own shop's.
     db.get_collection("grns").insert_one(
-        {"grn_id": "G1", "vendor_id": "V1", "status": "ACCEPTED",
+        {"grn_id": "G1", "vendor_id": "V1", "status": "ACCEPTED", "store_id": "S1",
          "created_at": datetime.now(), "total_received": 4, "total_accepted": 4})
 
 

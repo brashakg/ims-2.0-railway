@@ -15,8 +15,19 @@ from ._shared import (
     router,
     timedelta,
 )
+from typing import Optional
+
 from ...dependencies import is_no_shop_scope
 from ...services.cost_mask import can_see_cost
+
+
+def _at_shop(scope: Optional[str], key: str = "store_id") -> dict:
+    """The shop filter for one collection, by THE shop rule's answer
+    (resolve_store_scope): None -> every shop (an admin with none picked); a
+    shop -> that shop; R4's reserved no-shop scope -> a filter no document
+    matches. POs carry their shop as delivery_store_id (the PO list's own
+    filter, purchase_orders.list); GRNs and workshop jobs as store_id."""
+    return {key: scope} if scope else {}
 
 
 # ============================================================================
@@ -58,7 +69,7 @@ def _vendor_mtd_spend(db, vendor_id: str, current_user: dict) -> float:
     return billed_in_month(db, vendor_id, scope, now_ist().strftime("%Y-%m"))
 
 
-def _vendor_qc_pass_rate(db, vendor_id: str):
+def _vendor_qc_pass_rate(db, vendor_id: str, scope: Optional[str] = None):
     """Quality pass-rate for a vendor, joining GRN QC + workshop QC outcomes.
 
     Two QC signals are unioned into one pass-rate:
@@ -70,7 +81,11 @@ def _vendor_qc_pass_rate(db, vendor_id: str):
 
     Returns (pass_rate, sample_size). pass_rate is units+jobs passed / total
     units+jobs evaluated, rounded to 4 dp; None when there is NO QC signal at
-    all. Fail-soft: any error -> (None, 0). No fabricated numbers."""
+    all. Fail-soft: any error -> (None, 0). No fabricated numbers.
+
+    ``scope`` is the caller's shop (resolve_store_scope): both signals are
+    that shop's receipts and jobs -- every shop only for an admin with none
+    picked, no shop for R4's no-shop login (F63: a manager keeps his shop)."""
     if db is None:
         return None, 0
     passed = 0
@@ -78,7 +93,7 @@ def _vendor_qc_pass_rate(db, vendor_id: str):
     # --- GRN QC (goods-receipt inspection outcome) ---
     try:
         grns = db.get_collection("grns").find(
-            {"vendor_id": vendor_id, "status": "ACCEPTED"},
+            {"vendor_id": vendor_id, "status": "ACCEPTED", **_at_shop(scope)},
             {"_id": 0, "total_received": 1, "total_accepted": 1},
         )
         for g in grns:
@@ -95,7 +110,7 @@ def _vendor_qc_pass_rate(db, vendor_id: str):
     # --- Workshop QC (lens jobs routed to this lab/vendor) ---
     try:
         jobs = db.get_collection("workshop_jobs").find(
-            {"vendor_id": vendor_id},
+            {"vendor_id": vendor_id, **_at_shop(scope)},
             {"_id": 0, "qc_passed": 1, "qc_waived": 1, "qc_history": 1},
         )
         for j in jobs:
@@ -127,6 +142,7 @@ async def vendor_performance(
         le=24,
         description="Number of rolling months to include in the score window.",
     ),
+    store_id: Optional[str] = None,
     current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
 ):
     """Return a performance score for the vendor over the last `months` months (INV-13).
@@ -141,7 +157,14 @@ async def vendor_performance(
     ``insufficient_data: true`` so callers know the rating has low confidence.
     Honest empty state: if the vendor has no GRN history an honest zero is
     returned, not a fabricated average.
+
+    Shop scope (F63, R4): the receipts, QC and punctuality are the caller's
+    shop's -- resolve_store_scope, the rule every Purchase tab applies: every
+    shop for an admin with none picked (?store_id narrows it), his own shop
+    for anyone else, none for a non-admin login with no shop. Only the
+    accounts roles' MTD spend stays org-wide (R8, _vendor_mtd_spend).
     """
+    scope = resolve_store_scope(store_id, current_user)
     db = _get_db()
     vendor_repo = get_vendor_repository()
     vendor = vendor_repo.find_by_id(vendor_id) if vendor_repo is not None else None
@@ -158,7 +181,7 @@ async def vendor_performance(
     )
     # QC pass-rate joins GRN QC (accepted/received) + workshop QC (job pass/fail)
     # for this vendor. Fail-soft: returns None when there is no QC signal at all.
-    qc_pass_rate, qc_sample = _vendor_qc_pass_rate(db, vendor_id)
+    qc_pass_rate, qc_sample = _vendor_qc_pass_rate(db, vendor_id, scope)
 
     empty = {
         "vendor_id": vendor_id,
@@ -199,6 +222,7 @@ async def vendor_performance(
                     "vendor_id": vendor_id,
                     "status": "ACCEPTED",
                     "created_at": {"$gte": cutoff},
+                    **_at_shop(scope),
                 },
                 {
                     "_id": 0,
@@ -314,6 +338,7 @@ async def vendor_purchase_history(
         le=36,
         description="Rolling-months window for the purchase-history report.",
     ),
+    store_id: Optional[str] = None,
     current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
 ):
     """Return purchase-history analytics for one vendor (INV-13).
@@ -325,7 +350,13 @@ async def vendor_purchase_history(
 
     Honest empty state: no fabricated numbers; all fields are derived from real
     PO + GRN data or explicitly null.
+
+    Shop scope (F63, R4): the caller's shop's orders and receipts, by THE
+    shop rule (resolve_store_scope) -- every shop for an admin with none
+    picked (?store_id narrows it), his own shop for anyone else, none for a
+    non-admin login with no shop (an explicit shop from it is a 403).
     """
+    scope = resolve_store_scope(store_id, current_user)
     db = _get_db()
     vendor_repo = get_vendor_repository()
     vendor = vendor_repo.find_by_id(vendor_id) if vendor_repo is not None else None
@@ -363,6 +394,7 @@ async def vendor_purchase_history(
                     "vendor_id": vendor_id,
                     "status": {"$nin": ["CANCELLED", "DRAFT"]},
                     "created_at": {"$gte": cutoff},
+                    **_at_shop(scope, "delivery_store_id"),
                 },
                 {
                     "_id": 0,
@@ -384,6 +416,7 @@ async def vendor_purchase_history(
                     "vendor_id": vendor_id,
                     "status": "ACCEPTED",
                     "created_at": {"$gte": cutoff},
+                    **_at_shop(scope),
                 },
                 {
                     "_id": 0,

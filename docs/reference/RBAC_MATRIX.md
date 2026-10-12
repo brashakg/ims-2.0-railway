@@ -1161,11 +1161,11 @@ are the exact current gate (SUPERADMIN always implied).
 | `GET` | `/api/v1/vendors/{vendor_id}/ledger` | ADMIN, ACCOUNTANT |  |
 | `GET` | `/api/v1/vendors/{vendor_id}/payments` | ADMIN, ACCOUNTANT |  |
 | `POST` | `/api/v1/vendors/{vendor_id}/payments` | ADMIN, ACCOUNTANT |  |
-| `GET` | `/api/v1/vendors/{vendor_id}/performance` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
+| `GET` | `/api/v1/vendors/{vendor_id}/performance` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
 | `POST` | `/api/v1/vendors/{vendor_id}/portal-token` | SUPERADMIN, ADMIN |  |
 | `DELETE` | `/api/v1/vendors/{vendor_id}/portal-token/{token_id}` | SUPERADMIN, ADMIN |  |
 | `GET` | `/api/v1/vendors/{vendor_id}/portal-tokens` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/vendors/{vendor_id}/purchase-history` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
+| `GET` | `/api/v1/vendors/{vendor_id}/purchase-history` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
 
 ### `/api/v1/vouchers`
 

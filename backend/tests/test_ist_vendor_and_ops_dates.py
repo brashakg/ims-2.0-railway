@@ -244,8 +244,10 @@ def _purchase_history(pos, grns, months=12):
         get_vendor_repository=lambda: _VendorRepo(),
     ):
         return asyncio.run(
+            # An ADMIN reads every shop's orders (these carry none); any
+            # other login its own shop's (F63), a login with none no shop's.
             vendors_mod.vendor_purchase_history(
-                vendor_id=VENDOR, months=months, current_user={}
+                vendor_id=VENDOR, months=months, current_user={"roles": ["ADMIN"]}
             )
         )
 
