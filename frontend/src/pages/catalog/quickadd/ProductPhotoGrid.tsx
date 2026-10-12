@@ -103,11 +103,14 @@ export function ProductPhotoGrid({
                   className="h-full w-full object-cover"
                   onError={(e) => { (e.currentTarget as HTMLImageElement).style.opacity = '0.3'; }}
                 />
-                <span className="absolute left-1.5 top-1.5 inline-flex h-6 min-w-6 items-center justify-center rounded-full bg-gray-900 px-1.5 text-xs font-bold text-white">
+                {/* `!` on purpose: inside <main> the light-theme rules in
+                    index.css repaint span.text-white near-black and bleach
+                    bg-gray-900. Guarded by e2e/tests/layout-photo-badges.spec.ts. */}
+                <span className="absolute left-1.5 top-1.5 inline-flex h-6 min-w-6 items-center justify-center rounded-full !bg-gray-900 px-1.5 text-xs font-bold !text-white">
                   {i + 1}
                 </span>
                 {i === 0 && (
-                  <span className="absolute bottom-1.5 left-1.5 rounded-full bg-bv px-2 py-0.5 text-[11px] font-semibold text-white">
+                  <span className="absolute bottom-1.5 left-1.5 rounded-full bg-bv px-2 py-0.5 text-[11px] font-semibold !text-white">
                     Main photo
                   </span>
                 )}
