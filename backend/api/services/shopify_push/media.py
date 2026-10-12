@@ -45,9 +45,12 @@ def product_photo_urls(product: Dict[str, Any]) -> List[str]:
     Shopify are both driven from THIS list, so the check and the payload can
     never disagree.
 
-    Field precedence mirrors the rest of the app (catalogue_pdf._image_url_of,
-    products.list_products' image_url alias): the singular `image_url`, then the
-    `images[]` array (strings or {url|src} dicts), then a bare `image`.
+    THE ORDER IS THE ``images[]`` ARRAY (owner 2026-10-12: "photo 1 is the
+    main photo on the website and at the till"; the product page reorders
+    it): the array (strings or {url|src} dicts) first, then the legacy
+    singular `image_url`, then a bare `image` -- the precedence of
+    product_master.main_photo, so a stale `image_url` never outranks photo 1
+    and a reorder in IMS reorders the Shopify media (sync_product_media).
 
     ONLY absolute http(s) URLs count. Shopify pulls the bytes over the internet
     from the URL we hand it; a private /uploads/... path is unfetchable, so
@@ -83,11 +86,11 @@ def product_photo_urls(product: Dict[str, Any]) -> List[str]:
         if url.lower().startswith(("http://", "https://")) and url not in out:
             out.append(url)
 
-    _add(product.get("image_url"))
     imgs = product.get("images")
     if isinstance(imgs, (list, tuple)):
         for item in imgs:
             _add(item)
+    _add(product.get("image_url"))
     _add(product.get("image"))
     return out
 
