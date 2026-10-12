@@ -901,6 +901,57 @@ def test_a_blank_or_junk_twin_gtin_never_reaches_the_spine(gtin_env):
     assert gtin_env.find_by_id("spine-g1")["attributes"]["gtin"] == _UPC
 
 
+def test_the_repair_writes_the_normalised_code_never_the_typed_one(gtin_env):
+    """Round 11. Main stored twin gtins as typed ('4006381 333931'). The
+    repair compared and wrote that raw string, so a price-only save put the
+    space on a spine that held the clean code, and the till's exact scan (and
+    the one-holder check) stopped finding the product."""
+    gtin_env.collection.update_one(
+        {"product_id": "spine-g1"},
+        {"$set": {"attributes.gtin": _GTIN, "barcode": _UPC, "is_active": True}},
+    )
+    catalog_mod.CATALOG_PRODUCTS["twin-g1"]["attributes"]["gtin"] = "4006381 333931"
+
+    def _till(code):
+        return [d["product_id"] for d in gtin_env.search_products(code)]
+
+    assert _till(_GTIN) == ["spine-g1"]
+    _put("twin-g1", {"pricing": {"mrp": 5200.0}})
+    spine = gtin_env.find_by_id("spine-g1")
+    assert spine["attributes"]["gtin"] == _GTIN
+    # One code in two spellings is no repair: a price-only save leaves every
+    # barcode where it was (a gtin write would drop the legacy one).
+    assert spine["barcode"] == _UPC
+    assert _till(_GTIN) == ["spine-g1"]
+    # A spine with no code takes the normalised one, never the typed spelling.
+    gtin_env.collection.update_one(
+        {"product_id": "spine-g1"}, {"$unset": {"attributes.gtin": ""}}
+    )
+    _put("twin-g1", {"pricing": {"mrp": 5300.0}})
+    assert gtin_env.find_by_id("spine-g1")["attributes"]["gtin"] == _GTIN
+    assert _till(_GTIN) == ["spine-g1"]
+
+
+@pytest.mark.parametrize("later", [{"is_active": False}, {"pricing": {"mrp": 5200.0}}])
+def test_the_repair_never_refuses_a_save_or_takes_a_code_another_product_holds(
+    gtin_env, caplog, later
+):
+    """Round 11. The twin holds a publishable gtin its spine lacks, and
+    ANOTHER product holds that code (main's review editor wrote twin gtins
+    with no uniqueness check). A take-down or a price fix touches no barcode:
+    it saves, and the repair is skipped -- never 409, and never the code onto
+    a second product (one GTIN, one product) -- with a warning in the log."""
+    catalog_mod.CATALOG_PRODUCTS["twin-g1"]["attributes"]["gtin"] = _GTIN
+    gtin_env.create({"product_id": "spine-other", "sku": "OTHER-1",
+                     "attributes": {"gtin": _GTIN}})
+    with caplog.at_level("WARNING"):
+        _put("twin-g1", later)
+    assert "gtin" not in gtin_env.find_by_id("spine-g1")["attributes"]
+    assert gtin_env.find_by_id("spine-other")["attributes"]["gtin"] == _GTIN
+    assert catalog_mod.CATALOG_PRODUCTS["twin-g1"]["attributes"]["gtin"] == _GTIN
+    assert "spine gtin repair skipped for twin-g1" in caplog.text
+
+
 @pytest.mark.parametrize("typed", ["", None])
 def test_review_editor_takes_an_old_spelling_out_of_twin_and_spine(gtin_env, typed):
     """Twin and spine hold the code under the old spelling 'GTIN'. A Remove

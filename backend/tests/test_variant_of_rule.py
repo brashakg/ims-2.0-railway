@@ -1108,6 +1108,19 @@ def test_catalog_drawer_mrp_edit_on_a_child_lands_on_its_row_and_queues_the_pare
     assert _twin(db, "tw-child")["attributes"]["gtin"] == folded
     assert _row(db, CHILD_SKU)["gtin"] == folded
 
+    # a spine a failed write left behind is repaired by the next save, and
+    # the row with it: the normalised code, never the twin's typed spelling
+    db["catalog_products"].update_one(
+        {"id": "tw-child"}, {"$set": {"attributes.gtin": "4006381 333931"}}
+    )
+    db["products"].update_one({"product_id": "sp-child"}, {"$unset": {"attributes.gtin": ""}})
+    _run(cat.update_catalog_product(
+        "tw-child", cat.ProductUpdateInput(pricing=cat.PricingPatchInput(mrp=47100.0)),
+        current_user=ADMIN,
+    ))
+    assert _spine(db, "sp-child")["attributes"]["gtin"] == new_gtin
+    assert _row(db, CHILD_SKU)["gtin"] == new_gtin
+
 
 def test_push_image_never_attaches_a_childs_photo_to_the_parents_listing(monkeypatch):
     """P3: push_image resolves the media target from the image's product

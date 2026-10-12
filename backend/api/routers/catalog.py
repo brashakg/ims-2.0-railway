@@ -1476,28 +1476,35 @@ def _spine_doc(repo, catalog_doc: Optional[Dict]) -> Optional[Dict]:
     return spine
 
 
-def _spine_gtin_behind(catalog_doc: Dict) -> bool:
-    """True when the twin holds a publishable gtin its spine's attributes.gtin
-    does not: a save whose spine write 503'd after the twin landed (the review
-    editor's retry then 409s, reloads and sends no gtin, so nothing else would
-    ever write it). Only toward a valid twin code: a blank or junk twin gtin
-    never blanks or replaces the spine's. The code passes the one-holder check
-    before it is written, as a typed one does."""
+def _spine_gtin_behind(catalog_doc: Dict) -> Optional[str]:
+    """The twin's publishable gtin, through the one GTIN normaliser, when its
+    spine's attributes.gtin does not hold it: a save whose spine write 503'd
+    after the twin landed (the review editor's retry then 409s, reloads and
+    sends no gtin, so nothing else would ever write it). None = nothing to
+    repair. Only toward a valid twin code: a blank or junk twin gtin never
+    blanks or replaces the spine's, and a twin typed with separators never
+    puts them on the spine (the till finds a code only as normalised). A code
+    another product holds is never written (one GTIN, one product) -- nor does
+    it refuse this save, which did not touch the barcode: skipped, logged."""
     attrs = catalog_doc.get("attributes")
-    twin_gtin = attrs.get("gtin") if isinstance(attrs, dict) else None
-    if not _pm.sanitise_gtin(twin_gtin):
-        return False
+    gtin = _pm.sanitise_gtin(attrs.get("gtin") if isinstance(attrs, dict) else None)
+    if not gtin:
+        return None
     from ..dependencies import get_product_repository
 
     repo = get_product_repository()
     spine = _spine_doc(repo, catalog_doc)
-    if spine is None or _pm.spine_holds_gtin(spine, twin_gtin):
-        return False
+    if spine is None or _pm.spine_holds_gtin(spine, gtin):
+        return None
     try:
-        _pm.assert_gtin_free(twin_gtin, repo, spine.get("product_id"))
+        _pm.assert_gtin_free(gtin, repo, spine.get("product_id"))
     except _pm.ProductMasterError as err:
-        raise HTTPException(status_code=err.status, detail=err.message) from err
-    return True
+        logger.warning(
+            "[CATALOG] spine gtin repair skipped for %s: %s",
+            catalog_doc.get("id"), err.message,
+        )
+        return None
+    return gtin
 
 
 def _next_sku_counter(prefix: str, db=None) -> int:
@@ -2232,10 +2239,14 @@ async def update_catalog_product(
                 merged_attrs.get("model_no") or merged_attrs.get("model_name") or ""
             ).strip()
 
+    # The code the spine (and a size variant's row) must take; None = none.
     # Any save -- this one may carry no gtin at all -- brings a spine left
     # behind by a failed spine write back in line with its twin (round 9).
-    if not gtin_written:
-        gtin_written = _spine_gtin_behind(existing)
+    spine_gtin = (
+        (existing.get("attributes") or {}).get("gtin") or ""
+        if gtin_written
+        else _spine_gtin_behind(existing)
+    )
 
     # Explicit operator name wins over the best-effort title regen for THIS
     # save (hence applied AFTER the attributes block; per-save only -- the
@@ -2471,14 +2482,12 @@ async def update_catalog_product(
         logger.warning(
             "[CATALOG] spine sync on update skipped for %s", product_id, exc_info=True
         )
-    if gtin_written and _pr is not None and _spine_id:
+    if spine_gtin is not None and _pr is not None and _spine_id:
         # Spine and twin hold ONE GTIN (Manage Barcode and the stock page read
         # the spine's). NOT fail-soft: a spine that silently kept its old code
         # -- or lost both -- is worse than a save that says so.
         try:
-            _pm.write_spine_gtin(
-                _pr, _spine_id, (existing.get("attributes") or {}).get("gtin") or ""
-            )
+            _pm.write_spine_gtin(_pr, _spine_id, spine_gtin)
         except _pm.ProductMasterError as err:
             raise HTTPException(status_code=err.status, detail=err.message) from err
 
@@ -2513,10 +2522,8 @@ async def update_catalog_product(
         _row_patch: Dict[str, Any] = {}
         if product.pricing is not None and product.pricing.mrp is not None:
             _row_patch["mrp"] = product.pricing.mrp
-        if gtin_written:
-            _row_patch["attributes"] = {
-                "gtin": (existing.get("attributes") or {}).get("gtin")
-            }
+        if spine_gtin is not None:
+            _row_patch["attributes"] = {"gtin": spine_gtin}
         if _row_patch:
             try:
                 _pm._mirror_variant_row_update(
