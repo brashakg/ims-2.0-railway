@@ -122,9 +122,10 @@ def _world() -> Any:
          "created_at": datetime(2026, 5, 10, 6, 0), "grand_total": 1180.0,
          "tax_amount": 180.0}
     )
-    # A purchase bill (company-wide: names no GSTIN) -- input credit 50 + 50.
+    # A purchase bill booked at Bokaro (F63: every bill carries its shop; it
+    # names no GSTIN, so GSTR-3B reads it company-wide) -- input credit 50 + 50.
     db["vendor_bills"].insert_one(
-        {"bill_id": "B-1", "bill_number": "PB-1", "vendor_id": "V1",
+        {"bill_id": "B-1", "store_id": "S1", "bill_number": "PB-1", "vendor_id": "V1",
          "bill_date": "2026-05-04", "invoice_date": "2026-05-04",
          "recipient_entity_id": "E1", "recipient_gstin": None,
          "taxable_amount": 1111.0, "tax_amount": 100.0, "cgst_total": 50.0,
@@ -133,7 +134,7 @@ def _world() -> Any:
     # A reverse-charge services bill (freight) -- Table 3.1(d) and, being
     # claimable, Table 4 too: 10 + 10 on a taxable value of 400.
     db["vendor_bills"].insert_one(
-        {"bill_id": "B-2", "bill_number": "RCM-1", "vendor_id": "V2",
+        {"bill_id": "B-2", "store_id": "S1", "bill_number": "RCM-1", "vendor_id": "V2",
          "bill_date": "2026-05-06", "invoice_date": "2026-05-06",
          "reverse_charge": True, "recipient_entity_id": "E1",
          "recipient_gstin": None, "taxable_amount": 400.0, "tax_amount": 20.0,
@@ -143,7 +144,7 @@ def _world() -> Any:
     # A 17(5)-blocked bill: held back from the summary's credit (shown to
     # accounts as gst_input_credit_excluded).
     db["vendor_bills"].insert_one(
-        {"bill_id": "B-3", "bill_number": "PB-3", "vendor_id": "V1",
+        {"bill_id": "B-3", "store_id": "S1", "bill_number": "PB-3", "vendor_id": "V1",
          "bill_date": "2026-05-08", "invoice_date": "2026-05-08",
          "recipient_entity_id": "E1", "recipient_gstin": None,
          "taxable_amount": 300.0, "tax_amount": 33.0, "cgst_total": 16.5,

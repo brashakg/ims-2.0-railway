@@ -10,7 +10,7 @@ from ...utils.ist import now_ist_naive, ist_today, ist_day_start_utc
 from typing import Optional
 from fastapi import Depends, Query
 from ..auth import get_current_user
-from ...dependencies import resolve_store_scope, validate_store_access
+from ...dependencies import resolve_store_scope
 from ...services import ap_engine, cashflow
 from ...services.cost_mask import can_see_cost
 from ...services.salary_visibility import is_payroll_shaped_expense, is_salary_admin
@@ -39,16 +39,12 @@ async def get_cash_flow(
     today = ist_today()
     start = ist_day_start_utc(today.replace(day=1))
 
-    active_store = validate_store_access(store_id, current_user) or current_user.get(
-        "active_store_id"
-    )
-    if not active_store:
-        # No shop asked and none active: the one shop rule decides. ADMIN /
-        # SUPERADMIN keep the org view (None); any other login reads its first
-        # own shop, or -- holding none (owner ruling 2026-10-12, R4) -- the
-        # reserved NO_SHOP_SCOPE, which matches no order, expense or PO, so it
-        # reads zero, never every shop's cash.
-        active_store = resolve_store_scope(None, current_user)
+    # THE shop rule (resolve_store_scope): every shop for an admin with none
+    # asked, else the caller's own shop. A non-admin login with no shop gets
+    # the reserved NO_SHOP_SCOPE (owner ruling 2026-10-12, R4), which matches
+    # no order, expense or payment, so it reads zero -- never the org view
+    # (every shop's outflows); a shop it names is a 403.
+    active_store = resolve_store_scope(store_id, current_user)
 
     # Inflows (from orders) -- scoped to the active store. created_at is a BSON
     # datetime; an .isoformat() string bound never matched, so inflow always
@@ -152,7 +148,7 @@ async def get_cash_flow(
     # THE CROSS-ROUTE SUBTRACTION, and the reason this strip exists at all.
     #
     # /pnl is payroll-EXCLUSIVE below salary-admin. This route totals THE SAME
-    # expenses collection over THE SAME store (validate_store_access above) for
+    # expenses collection over THE SAME store (resolve_store_scope above) for
     # THE SAME window (1st of the current month) -- a window /pnl will happily
     # be asked for. So a store manager who holds both responses does:
     #
@@ -200,10 +196,6 @@ async def get_cash_flow(
     }
     if ap_reader:
         body["vendor_payment_outflow"] = vendor_payment_outflow
-    elif not active_store:
-        # The org view's outflows leave supplier payments out for this reader:
-        # a flag, never a figure (as expenses_partially_restricted below).
-        body["vendor_payments_restricted"] = True
     if expenses_partially_restricted:
         # Same flag /pnl sets, and for the same reason: a short total must not
         # read as the truth. A flag, never a figure.

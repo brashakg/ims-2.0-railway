@@ -53,7 +53,6 @@ from ..services.rtv_debit_note import (
 )
 from ..services.payables_mask import (
     AP_ROLES,
-    masks_supplier_money,
     require_payables,
     strip_debit_note_money,
 )
@@ -198,7 +197,6 @@ def _http_from_result(res: dict) -> HTTPException:
 
 @router.get("")
 @router.get("/")
-@masks_supplier_money(strip_debit_note_money)
 async def list_debit_notes(
     store_id: Optional[str] = Query(None),
     vendor_id: Optional[str] = Query(None),
@@ -217,11 +215,12 @@ async def list_debit_notes(
         rows = eng.list(vendor_id=vendor_id, skip=skip, limit=limit)
     else:
         rows = eng.list(store_ids=list(reach), vendor_id=vendor_id, skip=skip, limit=limit)
-    return {"debit_notes": [_with_rupees(r) for r in rows], "total": len(rows)}
+    return strip_debit_note_money(
+        {"debit_notes": [_with_rupees(r) for r in rows], "total": len(rows)}, current_user
+    )
 
 
 @router.post("/issue", status_code=201)
-@masks_supplier_money(strip_debit_note_money)
 async def issue_debit_note(
     body: DebitNoteIssue,
     current_user: dict = Depends(require_roles(*AP_ROLES)),
@@ -250,6 +249,8 @@ async def issue_debit_note(
         actor=current_user.get("user_id"),
         seller=seller,
     )
+    # Only an accounts role gets this far (require_payables above), so the
+    # answer is never stripped: the caller may read every figure on it.
     if not res.get("ok"):
         raise _http_from_result(res)
     return {
@@ -259,7 +260,6 @@ async def issue_debit_note(
 
 
 @router.get("/{debit_note_id}")
-@masks_supplier_money(strip_debit_note_money)
 async def get_debit_note(
     debit_note_id: str, current_user: dict = Depends(get_current_user)
 ):
@@ -269,7 +269,7 @@ async def get_debit_note(
     if doc is None:
         raise HTTPException(status_code=404, detail="Debit note not found")
     validate_store_access(doc.get("store_id"), current_user)
-    return _with_rupees(doc)
+    return strip_debit_note_money(_with_rupees(doc), current_user)
 
 
 @router.get("/{debit_note_id}/print", response_class=HTMLResponse)

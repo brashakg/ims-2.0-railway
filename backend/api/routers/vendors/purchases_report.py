@@ -280,6 +280,39 @@ def _in_no_shop(db, as_of: str) -> Optional[tuple]:
     return _owed_and_ahead(round(b, 2) for b in left.values())
 
 
+def _as_of(month: str) -> str:
+    """THE as-of day of a 'YYYY-MM' month (ap_engine.as_of_day): its last day,
+    clamped to today for the month we are in."""
+    y, m = int(month[:4]), int(month[5:])
+    return ap_engine.as_of_day(date(y, m, monthrange(y, m)[1]).isoformat())
+
+
+def _month_figures(rows: tuple, month: str) -> dict:
+    """billed / paid / owed of ONE supplier's ledger rows (bills, payments,
+    notes) for `month`: the build_ledger entries, row for row -- a row's month
+    is its ledger day's. THE rule the report's columns and the vendor
+    scorecard's mtd_spend both read."""
+    out = {"billed": 0.0, "paid": 0.0, "owed": 0.0}
+    for entry in ap_engine.build_ledger(*rows)["entries"]:
+        out["owed"] += entry["credit"] - entry["debit"]
+        if ap_engine.ledger_day(entry)[:7] == month:
+            if entry["type"] == "BILL":
+                out["billed"] += entry["credit"]
+            elif entry["type"] == "PAYMENT":
+                out["paid"] += entry["debit"]
+    return out
+
+
+def billed_in_month(db, vendor_id: str, scope, month: str) -> float:
+    """What `vendor_id` billed us in `month` in shop `scope`
+    (resolve_store_scope's answer: None = every shop) -- this report's
+    `billed`, from the same ledger rows on the same as-of day (F56)."""
+    from ..finance import _ap_rows  # the one AP row loader (call time: no cycle)
+
+    rows = _by_vendor(_ap_rows(db, scope, _as_of(month))).get(vendor_id, ([], [], []))
+    return round(_month_figures(rows, month)["billed"], 2)
+
+
 @router.get("/purchases-this-month")
 async def purchases_this_month(
     month: Optional[str] = Query(None, description="YYYY-MM (IST); default this month"),
@@ -290,12 +323,11 @@ async def purchases_this_month(
     if not _MONTH.match(month):
         raise HTTPException(status_code=422, detail="month must be YYYY-MM")
     scope = resolve_store_scope(store_id, current_user)
-    month_end = date(int(month[:4]), int(month[5:]), monthrange(int(month[:4]), int(month[5:]))[1])
     # THE as-of day (ap_engine.as_of_day): the month's end, clamped to today
     # for the month we are in -- the day every other payable screen uses, so
     # a post-dated cheque is unpaid here exactly as it is there. Returned, so
     # the screen says 'owed as at <day>' instead of guessing the month's end.
-    as_of = ap_engine.as_of_day(month_end.isoformat())
+    as_of = _as_of(month)
     body = {
         "month": month,
         "store_id": scope,
@@ -372,13 +404,8 @@ async def purchases_this_month(
     for vid in set(ledgers) | set(rows):
         v_bills, v_pays, v_notes = ledgers.get(vid, ([], [], []))
         r = row(vid)
-        for entry in ap_engine.build_ledger(v_bills, v_pays, v_notes)["entries"]:
-            r["owed"] += entry["credit"] - entry["debit"]
-            if ap_engine.ledger_day(entry)[:7] == month:
-                if entry["type"] == "BILL":
-                    r["billed"] += entry["credit"]
-                elif entry["type"] == "PAYMENT":
-                    r["paid"] += entry["debit"]
+        for k, v in _month_figures((v_bills, v_pays, v_notes), month).items():
+            r[k] += v
         # The earliest due date of a bill still owed at the month's end, after
         # on-account money has settled the oldest (ap_engine.build_aging).
         dues = [

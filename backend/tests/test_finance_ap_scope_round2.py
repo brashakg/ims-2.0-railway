@@ -428,6 +428,22 @@ def test_the_itc_register_is_the_callers_shop(world):
     assert org["total_itc"] == pytest.approx(550.0)
 
 
+def test_the_gst_summary_input_credit_is_the_registers_for_the_same_shop(world):
+    """Panel 2026-10-08: the ITC register was the accountant's shop while the
+    GST summary added up every shop, so a Pune accountant read two input
+    credits for October. One shop rule: Pune's October bills are BP2 + BP3
+    (100 + 50); an admin reads every shop (+ Bokaro's transfer mirror 150)."""
+    def summary(user):
+        return world.ok("/finance/gst/summary", user, month=10, year=2026)["gst_input_credit"]
+
+    def register(user):
+        (oct_,) = world.ok("/finance/itc-register", user, period="2026-10")["periods"]
+        return oct_["tax"]
+
+    assert summary(ACCT_PUNE) == register(ACCT_PUNE) == pytest.approx(150.0)
+    assert summary(ADMIN) == register(ADMIN) == pytest.approx(300.0)
+
+
 def test_the_gstr2b_books_side_is_the_callers_shop(world):
     resp = world.post("/finance/gstr2b-reconcile", ACCT_PUNE, {"rows": [], "as_of": "2026-10-15"})
     assert resp.status_code == 200, resp.text

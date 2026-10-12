@@ -9,14 +9,20 @@ from ._shared import (
     get_current_user,
     get_product_repository,
     get_stock_repository,
+    resolve_store_scope,
     router,
     timedelta,
-    validate_store_access,
 )
+from .helpers import _had_the_window, _parse_expiry
+from database.repositories.product_repository import group_with_oldest_arrival
 
 # ============================================================================
 # STOCK AGING / NON-MOVING REPORT
 # ============================================================================
+
+# ponytail: one fixed grace (the first age bucket); a per-category grace is a
+# setting when a slow-selling category needs longer.
+_AGING_GRACE_DAYS = 30
 
 
 @router.get("/aging")
@@ -34,7 +40,12 @@ async def get_stock_aging_report(
     """
     stock_repo = get_stock_repository()
     product_repo = get_product_repository()
-    active_store = validate_store_access(store_id, current_user)
+    # THE shop rule (F63/R3): an admin with no shop asked reads every shop,
+    # anyone else their own, a non-admin with no shop is refused. The units
+    # counted and the units valued (stock_value.shelf_units) share this one
+    # scope, so a row's value is always the cost of the units it counts.
+    active_store = resolve_store_scope(store_id, current_user)
+    at_shop = {"store_id": active_store} if active_store else {}
 
     # Category-filter fix: normalise short codes / plurals to canonical.
     if category:
@@ -55,18 +66,17 @@ async def get_stock_aging_report(
     stock_pipeline = [
         {
             "$match": {
-                "store_id": active_store,
+                **at_shop,
                 **_on_hand_status_clause(include_reserved=True),
             }
         },
-        {
-            "$group": {
+        *group_with_oldest_arrival(
+            {
                 "_id": "$product_id",
                 "quantity": {"$sum": 1},
-                "oldest_date": {"$min": "$created_at"},
                 "total_value": {"$sum": {"$ifNull": ["$mrp", 0]}},
             }
-        },
+        ),
     ]
     stock_groups = stock_repo.aggregate(stock_pipeline)
 
@@ -87,7 +97,7 @@ async def get_stock_aging_report(
     sold_30d_pipeline = [
         {
             "$match": {
-                "store_id": active_store,
+                **at_shop,
                 "status": "SOLD",
                 "sold_at": {"$gte": thirty_days_ago},
             }
@@ -97,7 +107,7 @@ async def get_stock_aging_report(
     sold_90d_pipeline = [
         {
             "$match": {
-                "store_id": active_store,
+                **at_shop,
                 "status": "SOLD",
                 "sold_at": {"$gte": ninety_days_ago},
             }
@@ -105,7 +115,7 @@ async def get_stock_aging_report(
         {"$group": {"_id": "$product_id", "sales_90d": {"$sum": 1}}},
     ]
     last_sale_pipeline = [
-        {"$match": {"store_id": active_store, "status": "SOLD"}},
+        {"$match": {**at_shop, "status": "SOLD"}},
         {"$group": {"_id": "$product_id", "last_sale": {"$max": "$sold_at"}}},
     ]
 
@@ -124,7 +134,7 @@ async def get_stock_aging_report(
     from ...services import stock_value
     from ...services.cost_mask import can_see_cost
 
-    show_cost = can_see_cost(current_user, "purchase")
+    show_cost = can_see_cost(current_user, "product")
     shelf = (
         stock_value.by_product(
             stock_value.shelf_units(stock_repo, product_repo, active_store)
@@ -153,13 +163,13 @@ async def get_stock_aging_report(
             continue
 
         qty = sg.get("quantity", 0)
-        oldest = sg.get("oldest_date")
-        if isinstance(oldest, str):
-            try:
-                oldest = datetime.fromisoformat(oldest)
-            except Exception:
-                oldest = now
-        days_in_stock = (now - oldest).days if oldest else 0
+        oldest = _parse_expiry(sg.get("oldest"))  # None = unknown
+        # created_at is naive datetime.now() while `now` is utcnow(): on a box
+        # east of UTC this morning's receipt reads as -1 days (audit F54).
+        # Age is never negative. Unknown age is legacy stock, so old (the
+        # verdict below says so too): no day count to show (None), oldest
+        # bucket, never cut by min_days.
+        days_in_stock = max(0, (now - oldest).days) if oldest else None
 
         s30 = sales_30d.get(pid, 0)
         s90 = sales_90d.get(pid, 0)
@@ -168,8 +178,13 @@ async def get_stock_aging_report(
         # Turnover rate (annualized from 90-day sales)
         turnover = (s90 / max(qty, 1)) * (365 / 90) if qty > 0 else 0
 
-        # ABC classification based on turnover
-        if turnover >= 4:
+        # ABC classification based on turnover. Stock younger than the grace
+        # window that has not sold yet has not had its chance: no verdict
+        # (NEW), never "Slow Mover - consider discount/return" on the morning
+        # it arrived (audit F54).
+        if not _had_the_window(oldest, now, _AGING_GRACE_DAYS) and s90 == 0:
+            cls = "NEW"
+        elif turnover >= 4:
             cls = "A"
         elif turnover >= 1.5:
             cls = "B"
@@ -177,7 +192,9 @@ async def get_stock_aging_report(
             cls = "C"
 
         # Age category
-        if days_in_stock <= 30:
+        if days_in_stock is None:
+            age_cat = "180+"
+        elif days_in_stock <= 30:
             age_cat = "0-30"
         elif days_in_stock <= 60:
             age_cat = "31-60"
@@ -188,11 +205,15 @@ async def get_stock_aging_report(
         else:
             age_cat = "180+"
 
-        value = (shelf.get(pid) or {}).get("cost", 0.0) if show_cost else None
+        # A unit with no cost adds nothing to `value` but is counted, so the
+        # row says "N no cost" instead of reading Rs 0 (services/stock_value).
+        row_cost = shelf.get(pid) or {}
+        value = row_cost.get("cost", 0.0) if show_cost else None
+        uncosted_units = row_cost.get("uncosted_units", 0.0) if show_cost else None
 
         if classification and cls != classification:
             continue
-        if min_days is not None and days_in_stock < min_days:
+        if min_days is not None and days_in_stock is not None and days_in_stock < min_days:
             continue
 
         products.append(
@@ -204,6 +225,7 @@ async def get_stock_aging_report(
                 "category": product.get("category", ""),
                 "quantity": qty,
                 "value": value,
+                "uncostedUnits": uncosted_units,
                 "daysInStock": days_in_stock,
                 "lastSaleDate": (
                     last_sale.isoformat()
@@ -218,23 +240,23 @@ async def get_stock_aging_report(
             }
         )
 
-    # Sort: Slow movers first (C, then B, then A), then by days in stock desc
-    cls_order = {"C": 0, "B": 1, "A": 2}
-    products.sort(
-        key=lambda p: (cls_order.get(p["classification"], 1), -p["daysInStock"])
-    )
+    def _age(p):  # unknown age = oldest
+        return float("inf") if p["daysInStock"] is None else p["daysInStock"]
+
+    # Sort: Slow movers first (C, then B, then A, then NEW), then by days in stock desc
+    cls_order = {"C": 0, "B": 1, "A": 2, "NEW": 3}
+    products.sort(key=lambda p: (cls_order.get(p["classification"], 1), -_age(p)))
 
     # Summary stats
     total = len(products)
     class_a = sum(1 for p in products if p["classification"] == "A")
     class_b = sum(1 for p in products if p["classification"] == "B")
     class_c = sum(1 for p in products if p["classification"] == "C")
-    slow_value = (
-        round(sum(p["value"] for p in products if p["classification"] == "C"), 2)
-        if show_cost
-        else None
-    )
-    avg_age = sum(p["daysInStock"] for p in products) / max(total, 1)
+    slow = [p for p in products if p["classification"] == "C"]
+    slow_value = round(sum(p["value"] for p in slow), 2) if show_cost else None
+    slow_uncosted = sum(p["uncostedUnits"] for p in slow) if show_cost else None
+    known = [p["daysInStock"] for p in products if p["daysInStock"] is not None]
+    avg_age = sum(known) / max(len(known), 1)
 
     return {
         "products": products,
@@ -244,7 +266,8 @@ async def get_stock_aging_report(
             "classB": class_b,
             "classC": class_c,
             "slowMovingValue": slow_value,
+            "slowMovingUncostedUnits": slow_uncosted,
             "averageAge": round(avg_age, 1),
-            "oldStockCount": sum(1 for p in products if p["daysInStock"] > 90),
+            "oldStockCount": sum(1 for p in products if _age(p) > 90),
         },
     }

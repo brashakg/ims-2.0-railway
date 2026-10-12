@@ -12,6 +12,8 @@ import { Route, Navigate, useSearchParams } from 'react-router-dom';
 import { ProtectedRoute } from '../components/layout/ProtectedRoute';
 import type { UserRole } from '../types';
 import { APPROVE_ROLES } from '../pages/purchase/invoices/shared';
+import { RETURN_READERS } from '../pages/purchase/purchaseRoles';
+import { NoShopGate } from '../components/common/NoShopNotice';
 
 const PurchaseLayout = lazy(() => import('../pages/purchase/PurchaseLayout').then(m => ({ default: m.PurchaseLayout })));
 const PurchaseOrdersSection = lazy(() => import('../pages/purchase/PurchaseOrdersSection').then(m => ({ default: m.PurchaseOrdersSection })));
@@ -25,6 +27,9 @@ const GoodsReceiptCockpit = lazy(() => import('../pages/purchase/GoodsReceiptCoc
 const VendorReturns = lazy(() => import('../pages/purchase/VendorReturns').then(m => ({ default: m.VendorReturns })));
 // Purchase S6: Accountant Reconciliation Console
 const ReconConsole = lazy(() => import('../pages/purchase/ReconConsole'));
+// Owner ruling 2026-10-12 (R4): the screens outside PurchaseLayout take the
+// one no-shop gate too (NoShopGate: a login with no shop reads why, and no
+// list is requested), as PurchaseLayout does with NoShopNotice.
 
 // The module gate for the section pages — identical to the old /purchase gate.
 const PURCHASE_ROLES: UserRole[] = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'];
@@ -108,13 +113,13 @@ export const purchaseRoutes = (
           </ProtectedRoute>
         }
       />
-      {/* Vendor Returns keeps its wider historical gate (WORKSHOP_STAFF logs
-          defective pairs). ACCOUNTANT reads it too: the supplier credit and
-          the GST debit notes on these returns are the accounts roles' to see. */}
+      {/* Vendor Returns: RETURN_READERS, the backend's read list -- the
+          purchase roles plus WORKSHOP_STAFF (logs defective pairs). The
+          ACCOUNTANT owns the debit notes (owner ruling 2026-10-07, R2). */}
       <Route
         path="vendor-returns"
         element={
-          <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'WORKSHOP_STAFF']}>
+          <ProtectedRoute allowedRoles={RETURN_READERS}>
             <VendorReturns />
           </ProtectedRoute>
         }
@@ -154,7 +159,7 @@ export const purchaseRoutes = (
       path="purchase/grn"
       element={
         <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
-          <GoodsReceiptNote />
+          <NoShopGate title="Goods received"><GoodsReceiptNote /></NoShopGate>
         </ProtectedRoute>
       }
     />
@@ -167,7 +172,7 @@ export const purchaseRoutes = (
       path="purchase/receive"
       element={
         <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
-          <GoodsReceiptCockpit />
+          <NoShopGate title="Receive goods"><GoodsReceiptCockpit /></NoShopGate>
         </ProtectedRoute>
       }
     />
@@ -179,7 +184,7 @@ export const purchaseRoutes = (
       path="purchase/recon-console"
       element={
         <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'ACCOUNTANT']}>
-          <ReconConsole />
+          <NoShopGate title="Recon console"><ReconConsole /></NoShopGate>
         </ProtectedRoute>
       }
     />

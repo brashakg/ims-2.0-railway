@@ -7,6 +7,12 @@
 // the server (api.dependencies.resolve_store_scope: no store_id = all stores
 // for ADMIN/SUPERADMIN, the caller's own shop for anyone else, 403 for another
 // shop); this only carries the admin's pick between tabs.
+//
+// Owner ruling 2026-10-12 (R4): anyone else with NO shop gets no shop's data.
+// The server scopes them to no shop (resolve_store_scope: empty lists, a 403
+// worded NO_SHOP_MESSAGE for a shop they name); the screens say so through
+// the ONE no-shop rule, components/common/NoShopNotice (hasNoShop /
+// NoShopNotice / NoShopGate) -- not a second predicate or message here.
 
 import { create } from 'zustand';
 import { useAuth } from '../../context/AuthContext';
@@ -54,14 +60,20 @@ function OwnShop({ storeId }: { storeId: string }) {
   );
 }
 
-/** A shop's name from the store list; its id until the list arrives. The
- *  server's reserved no-shop id (a login with no shop, owner ruling
- *  2026-10-12, R4) is never a shop: it reads 'No shop assigned', not the id. */
+/** THE rule that turns a shop id into the name a screen prints: the store
+ *  list's name (else its code); its id until the list arrives. The server's
+ *  reserved no-shop id (a login with no shop, owner ruling 2026-10-12, R4) is
+ *  never a shop: it reads 'No shop assigned', not the id. */
+export function shopNameOf(storeId: string, stores: unknown): string {
+  if (storeId === NO_SHOP_SCOPE) return NO_SHOP_LABEL;
+  const row = ((Array.isArray(stores) ? stores : []) as StoreRow[]).find((s) => s.store_id === storeId);
+  return (row && storeName(row)) || storeId;
+}
+
+/** A shop's name from the store list (shopNameOf). */
 export function PurchaseShopName({ storeId }: { storeId: string }) {
   const { data } = useStores();
-  if (storeId === NO_SHOP_SCOPE) return <>{NO_SHOP_LABEL}</>;
-  const row = ((Array.isArray(data) ? data : []) as StoreRow[]).find((s) => s.store_id === storeId);
-  return <>{row ? storeName(row) : storeId}</>;
+  return <>{shopNameOf(storeId, data)}</>;
 }
 
 /** The admin's shop filter; renders nothing for anyone else. */

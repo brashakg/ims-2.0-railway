@@ -68,7 +68,9 @@ from pydantic import BaseModel, Field, field_validator
 
 from .auth import get_current_user, require_roles
 from ..dependencies import (
+    NO_SHOP_DETAIL,
     can_access_store_scoped,
+    is_no_shop_scope,
     resolve_store_scope,
     get_vendor_repository,
     get_purchase_order_repository,
@@ -82,13 +84,14 @@ from ..services import landed_cost as lc
 from ..services import purchase_invoice_engine as pinv
 from ..services import purchase_match as pmatch
 from ..services import product_master as _pm
+from ..services.cost_mask import AP_ROLES
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-# Money-out / books action: limited to ADMIN / ACCOUNTANT. SUPERADMIN auto-passes
-# via require_roles. Mirrors the _AP_ROLES gate on vendor bills/payments.
-_AP_ROLES = ("ADMIN", "ACCOUNTANT")
+# Money-out / books action: the accounts roles (services/cost_mask.AP_ROLES, the
+# vendor bills / payments gate). SUPERADMIN auto-passes via require_roles.
+_AP_ROLES = AP_ROLES
 
 
 def _get_db():
@@ -1152,7 +1155,10 @@ def _bill_shop(db, receipt_store_id, asked_store_id, current_user: dict):
             Dhanbad's GSTIN.
           - anyone else: the shop named when it is one of theirs
             (validate_store_access: another shop is 403), else their own
-            active shop, as before.
+            shop by the ONE shop rule (resolve_store_scope: the active shop,
+            else the first of store_ids). A login holding NO shop is refused
+            403 NO_SHOP_DETAIL (owner ruling 2026-10-12, R4), before anything
+            is written -- as ap_payments._money_shop refuses its money.
 
     Checked before anything is claimed or written. Returns (shop, picked):
     `picked` is True when the shop is the admin's pick, so _bill_recipient
@@ -1178,7 +1184,12 @@ def _bill_shop(db, receipt_store_id, asked_store_id, current_user: dict):
         return receipt_store_id, False
     cross_store, _ = user_store_scope(current_user)
     if not cross_store:
-        return asked or current_user.get("active_store_id"), False
+        if asked:
+            return asked, False
+        own = resolve_store_scope(None, current_user)
+        if is_no_shop_scope(own):
+            raise HTTPException(status_code=403, detail=NO_SHOP_DETAIL)
+        return own, False
     if not asked:
         raise HTTPException(status_code=422, detail=dict(BILL_SHOP_REQUIRED))
     found = True

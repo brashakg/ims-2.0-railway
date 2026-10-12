@@ -237,6 +237,10 @@ export default function FinanceDashboard() {
   const [periodLocked, setPeriodLocked] = useState(false);
 
   useEffect(() => {
+    // R4: a login with no shop is shown NoShopNotice below and reads nothing
+    // -- budgets and the period lock are not shop-scoped, so even they would
+    // hand it organisation data.
+    if (hasNoShop(user)) return;
     loadFinanceData();
     // user?.activeStoreId is load-bearing — without it the topbar store-switch
     // updates AuthContext but the finance data stays pinned to the old store.
@@ -252,6 +256,9 @@ export default function FinanceDashboard() {
       const [rev, pnl, gst, out, cf, bud, vend] = await Promise.allSettled([
         financeApi.getRevenue({ period: 'month', store_id: storeId }),
         financeApi.getPnl({ store_id: storeId, from_date: dateFrom, to_date: dateTo }),
+        // Everyone reads the GST summary: managers keep OUTPUT GST, and the
+        // server leaves the input-tax figures out for them (owner ruling
+        // 2026-10-12, R5).
         financeApi.getGstSummary(),
         financeApi.getOutstanding({ store_id: storeId }),
         financeApi.getCashFlow({ period: 'month', store_id: storeId }),
@@ -275,12 +282,8 @@ export default function FinanceDashboard() {
       setBudgetRestricted(
         bud.status === 'fulfilled' && !!(bud.value as any)?.categories_partially_restricted,
       );
-      // /cash-flow's org view also leaves supplier payments out of "Total
-      // outflows" for anyone outside PAYABLES_ROLES, and says so with its own
-      // flag (vendor_payments_restricted): the same short total, the same notice.
       setCashFlowRestricted(
-        cf.status === 'fulfilled' &&
-          !!((cf.value as any)?.expenses_partially_restricted || (cf.value as any)?.vendor_payments_restricted),
+        cf.status === 'fulfilled' && !!(cf.value as any)?.expenses_partially_restricted,
       );
 
       // Reflect the real period-lock state for the selected month.
@@ -303,7 +306,9 @@ export default function FinanceDashboard() {
             ? financeApi.getPnlByStore({ from_date: dateFrom, to_date: dateTo })
             : Promise.resolve({ stores: [] }),
           financeApi.getPnlByCategory({ from_date: dateFrom, to_date: dateTo, store_id: storeId }),
-          financeApi.getGstReconciliation({ month: d.getMonth() + 1, year: d.getFullYear() }),
+          canSeePayables
+            ? financeApi.getGstReconciliation({ month: d.getMonth() + 1, year: d.getFullYear() })
+            : Promise.resolve({ entities: [] }),
         ]);
         setPnlByStore(ps2.status === 'fulfilled' ? (ps2.value?.stores || []) : []);
         setPnlByCategory(pc2.status === 'fulfilled' ? (pc2.value?.categories || []) : []);

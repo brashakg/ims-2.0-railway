@@ -10,7 +10,7 @@ from ...utils.ist import now_ist, ist_day_start_utc
 from typing import Optional
 from fastapi import Depends
 from ..auth import get_current_user
-from ...dependencies import is_no_shop_scope, resolve_store_scope
+from ...dependencies import resolve_store_scope
 from ...services import ap_engine
 from ...services.payables_mask import can_see_payables
 from ._shared import (
@@ -80,6 +80,17 @@ async def get_gst_summary(
     year: Optional[int] = None,
     current_user: dict = Depends(get_current_user),
 ):
+    # The one shop rule (F63), as the ITC register and GSTR-2B books beside
+    # it: ADMIN / SUPERADMIN read every shop; any other login its own shop's
+    # sales tax (and, for an accounts role, input credit) -- never every
+    # shop's (panel 2026-10-08: one accountant read three input-credit totals
+    # for a month). A non-admin login with NO shop gets the reserved
+    # NO_SHOP_SCOPE (owner ruling 2026-10-12, R4), which matches no order and
+    # no bill: an empty summary, never every shop's GST (its Finance screen
+    # says why: NoShopNotice). GSTR-3B stays per GSTIN: it is the filing, and
+    # a GSTIN can cover more than one shop.
+    scope = resolve_store_scope(None, current_user)
+    at_shop = {"store_id": scope} if scope else {}
     db = _get_db()
     if db is None:
         return _output_side_only(
@@ -91,14 +102,11 @@ async def get_gst_summary(
             },
             current_user,
         )
-    # R5: a non-accounts caller's summary never reads the supplier bills.
+    # R5 (owner ruling 2026-10-12): the route stays open to the finance
+    # readers -- managers keep OUTPUT GST -- but a non-accounts caller's
+    # summary never reads the supplier bills, and _output_side_only drops the
+    # input-tax keys from what it returns.
     show_input = can_see_payables(current_user)
-    # R4 (owner ruling 2026-10-12): a non-admin login with NO shop sees NO
-    # shop. This summary is every shop's by design (OS-031), so the ONE shop
-    # rule's no-shop verdict is the scope it applies: such a login reads
-    # neither the sales nor the supplier bills -- an empty summary, never
-    # every shop's GST. (Its Finance screen says why: NoShopNotice.)
-    no_shop = is_no_shop_scope(resolve_store_scope(None, current_user))
     now = now_ist()
     m = month or now.month
     y = year or now.year
@@ -122,6 +130,7 @@ async def get_gst_summary(
     # uses _REVENUE_EXPR (grand_total) -- `$total` is a legacy field modern
     # orders don't carry, so summing it returned ~0.
     sales_match = {
+        **at_shop,
         "created_at": {"$gte": start, "$lt": end},
         "status": _REAL_ORDER_STATUS_FILTER,
     }
@@ -129,7 +138,7 @@ async def get_gst_summary(
     # classifier needs (the split happens below). The prior aggregation summed
     # total_tax then split it 50/50, which mis-stated every inter-state sale and
     # never reported IGST.
-    _sales_orders = [] if no_shop else list(
+    _sales_orders = list(
         db.get_collection("orders").find(
             sales_match,
             {
@@ -159,7 +168,7 @@ async def get_gst_summary(
     gst_paid_excluded = 0.0  # surfaced so the report can show what was held back
     try:
         for _b in db.get_collection("vendor_bills").find(
-            {},
+            at_shop,
             {
                 "_id": 0,
                 "bill_date": 1,
@@ -170,7 +179,7 @@ async def get_gst_summary(
                 "received": 1,
                 "itc_eligible": 1,
             },
-        ) if show_input and not no_shop else ():
+        ) if show_input else ():
             _bd = ap_engine.parse_date(_b.get("bill_date"))
             if _bd is None or not (bill_start <= _bd < bill_end):
                 continue

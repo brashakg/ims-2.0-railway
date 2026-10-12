@@ -45,13 +45,15 @@ beforeEach(() => {
   );
 });
 
-function open() {
+function open(path = '/purchase/this-month') {
   render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-      <MemoryRouter initialEntries={['/purchase/this-month']}>
+      <MemoryRouter initialEntries={[path]}>
         <Routes>
           <Route path="/purchase" element={<PurchaseLayout />}>
             <Route path="this-month" element={<div>report</div>} />
+            <Route path="orders" element={<div>report</div>} />
+            <Route path="suppliers" element={<div>report</div>} />
           </Route>
         </Routes>
       </MemoryRouter>
@@ -85,14 +87,46 @@ describe('the Purchase header names the shop a non-admin reads', () => {
     expect(label()).toBeNull();
   });
 
-  it('a login with no shop is not handed a made-up one', async () => {
-    roles = ['ACCOUNTANT'];
+  // It used to open the tab -- and the server handed it every shop. R4 (owner
+  // ruling 2026-10-12): the plain message (components/common/NoShopNotice),
+  // no tab, no list requested.
+  it.each([['ACCOUNTANT'], ['STORE_MANAGER']])('%s with no shop reads the message, not a tab', async (role) => {
+    roles = [role];
     activeStoreId = undefined;
     open();
-    // R4 (owner ruling 2026-10-12): it is told why instead of shown a section
-    // the server answers empty (components/common/NoShopNotice).
     expect(await screen.findByText(/No shop is assigned to this login/)).toBeInTheDocument();
     expect(screen.queryByText('report')).toBeNull();
     expect(label()).toBeNull();
+  });
+
+  // The header's create buttons sit outside the gate: they used to stay up
+  // next to the message and open nothing (no section is mounted).
+  it.each([
+    ['/purchase/orders', 'New PO'],
+    ['/purchase/suppliers', 'New supplier'],
+  ])('%s: no shop, no %s button', async (path, button) => {
+    roles = ['STORE_MANAGER'];
+    activeStoreId = undefined;
+    open(path);
+    await screen.findByText(/No shop is assigned to this login/);
+    expect(screen.queryByRole('button', { name: button })).toBeNull();
+  });
+
+  it.each([
+    ['/purchase/orders', 'New PO'],
+    ['/purchase/suppliers', 'New supplier'],
+  ])('%s: with a shop the %s button is there', async (path, button) => {
+    roles = ['STORE_MANAGER'];
+    activeStoreId = 'BV-DHN-01';
+    open(path);
+    expect(await screen.findByRole('button', { name: button })).toBeInTheDocument();
+  });
+
+  it('an admin with no shop still opens the tab on all stores', async () => {
+    roles = ['ADMIN'];
+    activeStoreId = undefined;
+    open();
+    expect(await screen.findByText('report')).toBeInTheDocument();
+    expect(screen.queryByText(/No shop is assigned to this login/)).toBeNull();
   });
 });

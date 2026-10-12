@@ -14,6 +14,7 @@ from ._shared import (
     require_roles,
     router,
 )
+from .grn import _require_receipt_number
 from .grn_accept_lock import (
     _GRN_TERMINAL_ACCEPT_STATUSES,
     _GRN_WRITE_ERROR,
@@ -65,6 +66,12 @@ async def void_grn(
                 "vendor return."
             ),
         )
+
+    # The void audit is immutable and the response names the receipt: a
+    # receipt still on its PENDING/<id> placeholder is numbered first (a
+    # stranded one) or refused until its own request has numbered it (audit
+    # F28), so neither ever carries the placeholder.
+    grn = _require_receipt_number(grn_repo, grn)
 
     # MUTUAL EXCLUSION WITH ACCEPT. Void takes the SAME guarded claim the accept
     # path uses, so the two can never interleave. A point-in-time stock gate is

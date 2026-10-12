@@ -73,9 +73,9 @@ export function ExpensesLayout() {
   const [formBill, setFormBill] = useState<File | null>(null);
   const [saving, setSaving] = useState(false);
 
-  // isLoading is the FIRST load only. A reload (every toast re-runs this: the
-  // ToastProvider's value changes identity) must never swap the tree for the
-  // spinner, or <Outlet/> unmounts and the open section loses its state.
+  // isLoading is the FIRST load only. A reload (after an expense is submitted
+  // or an action is taken) must never swap the tree for the spinner, or
+  // <Outlet/> unmounts and the open section loses its state.
   const load = useCallback(async () => {
     try {
       const pick = (r: any): ExpenseRecord[] => (r?.expenses || r || []) as ExpenseRecord[];

@@ -18,6 +18,7 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import { NoShopNotice } from '../common/NoShopNotice';
 import { useToast } from '../../context/ToastContext';
 import { inventoryApi } from '../../services/api';
 import { exportToCSV as exportRowsToCSV } from '../../utils/exportUtils';
@@ -32,12 +33,18 @@ interface AgingProduct {
   quantity: number;
   /** At COST (audit F47); null for a login that is not shown cost. */
   value: number | null;
-  daysInStock: number;
+  /** Units with no cost: they add Rs 0 to `value` and are said, not hidden. */
+  uncostedUnits: number;
+  // null = unknown arrival date (legacy stock): old by the server's one rule
+  // (audit F54), so it ages as the oldest, never as 0 days.
+  daysInStock: number | null;
   lastSaleDate?: string;
   salesLast30Days: number;
   salesLast90Days: number;
   turnoverRate: number;
-  classification: 'A' | 'B' | 'C'; // A=Fast, B=Medium, C=Slow
+  // A=Fast, B=Medium, C=Slow. NEW = younger than the grace window with no
+  // sales yet - no verdict until it has had its chance to sell (audit F54).
+  classification: 'A' | 'B' | 'C' | 'NEW';
   ageCategory: '0-30' | '31-60' | '61-90' | '91-180' | '180+';
 }
 
@@ -75,7 +82,8 @@ export function StockAgingReport() {
         category: p.category || '',
         quantity: p.quantity || 0,
         value: p.value ?? null,
-        daysInStock: p.daysInStock || 0,
+        uncostedUnits: p.uncostedUnits || 0,
+        daysInStock: p.daysInStock ?? null,
         lastSaleDate: p.lastSaleDate || undefined,
         salesLast30Days: p.salesLast30Days || 0,
         salesLast90Days: p.salesLast90Days || 0,
@@ -120,20 +128,24 @@ export function StockAgingReport() {
     : products
         .filter((p) => p.classification === 'C')
         .reduce((sum, p) => sum + (p.value ?? 0), 0);
+  const slowMovingUncosted = products
+    .filter((p) => p.classification === 'C')
+    .reduce((sum, p) => sum + p.uncostedUnits, 0);
   // Review r3 #16: the inventory tiles' rule (InventoryLayout tileMoney) --
   // under a lakh a figure is whole rupees (Rs 4,000, never "Rs 0.0L"); from a
   // lakh up, lakhs.
   const tiedCapitalText = (n: number) =>
     Math.round(n) < 100000 ? rupees(n) : `₹${(n / 100000).toFixed(1)}L`;
-  const averageAge =
-    products.reduce((sum, p) => sum + p.daysInStock, 0) / products.length || 0;
-  const oldStockCount = products.filter((p) => p.daysInStock > 90).length;
+  const knownAges = products.flatMap((p) => (p.daysInStock === null ? [] : [p.daysInStock]));
+  const averageAge = knownAges.reduce((sum, d) => sum + d, 0) / knownAges.length || 0;
+  const oldStockCount = products.filter((p) => p.daysInStock === null || p.daysInStock > 90).length;
 
   const getClassificationBadge = (classification: AgingProduct['classification']) => {
     const config = {
       A: { label: 'Fast Mover', color: 'bg-green-50 text-green-700 border-green-200' },
       B: { label: 'Medium Mover', color: 'bg-amber-50 text-amber-700 border-amber-200' },
       C: { label: 'Slow Mover', color: 'bg-red-50 text-red-700 border-red-200' },
+      NEW: { label: 'New stock', color: 'bg-gray-50 text-gray-700 border-gray-200' },
     };
 
     return (
@@ -145,7 +157,8 @@ export function StockAgingReport() {
     );
   };
 
-  const getAgeBadge = (days: number) => {
+  const getAgeBadge = (days: number | null) => {
+    if (days === null) return { color: 'text-red-600', icon: '⬤' };
     if (days <= 30) return { color: 'text-green-600', icon: '✓' };
     if (days <= 60) return { color: 'text-blue-600', icon: '○' };
     if (days <= 90) return { color: 'text-amber-600', icon: '△' };
@@ -167,9 +180,10 @@ export function StockAgingReport() {
       Category: p.category,
       Classification: p.classification,
       'Age Category': p.ageCategory,
-      'Days In Stock': p.daysInStock,
+      'Days In Stock': p.daysInStock ?? 'Unknown',
       Quantity: p.quantity,
       'Value at cost (Rs)': p.value ?? '',
+      'Units with no cost': p.value == null ? '' : p.uncostedUnits,
       'Sales Last 30 Days': p.salesLast30Days,
       'Sales Last 90 Days': p.salesLast90Days,
       'Turnover Rate (x/yr)': p.turnoverRate.toFixed(2),
@@ -183,6 +197,9 @@ export function StockAgingReport() {
 
   return (
     <div className="space-y-4">
+      {/* R4 (owner ruling 2026-10-12): a login with no shop reads an empty
+          report (the server scopes it to no shop) -- say why. */}
+      <NoShopNotice />
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
@@ -339,6 +356,11 @@ export function StockAgingReport() {
               Tied capital (at cost):{' '}
               {slowMovingValue == null ? '—' : tiedCapitalText(slowMovingValue)}
             </p>
+            {slowMovingValue != null && slowMovingUncosted > 0 && (
+              <p className="text-xs text-amber-700">
+                {slowMovingUncosted} {slowMovingUncosted === 1 ? 'unit has' : 'units have'} no cost
+              </p>
+            )}
           </div>
         </div>
       </div>
@@ -458,17 +480,29 @@ export function StockAgingReport() {
                         {product.quantity}
                       </td>
                       <td className="px-4 py-3 text-right text-sm text-gray-900">
-                        {product.value == null ? '—' : `₹${product.value.toLocaleString('en-IN')}`}
+                        {/* A row whose every unit has no cost is not worth Rs 0: say so. */}
+                        {product.value == null
+                          ? '—'
+                          : product.value === 0 && product.uncostedUnits > 0
+                            ? null
+                            : `₹${product.value.toLocaleString('en-IN')}`}
+                        {product.value != null && product.uncostedUnits > 0 && (
+                          <span className="block text-xs text-amber-700 whitespace-nowrap">
+                            {product.value > 0 ? `+${product.uncostedUnits} ` : ''}no cost
+                          </span>
+                        )}
                       </td>
                       <td className="px-4 py-3 text-center">
                         <div className="flex flex-col items-center gap-1">
                           <span
                             className={`text-xl font-bold ${ageBadge.color}`}
-                            title={`${product.daysInStock} days`}
+                            title={product.daysInStock === null ? 'Arrival date unknown (legacy stock)' : `${product.daysInStock} days`}
                           >
                             {ageBadge.icon}
                           </span>
-                          <span className="text-xs text-gray-500">{product.daysInStock}d</span>
+                          <span className="text-xs text-gray-500">
+                            {product.daysInStock === null ? 'Unknown' : `${product.daysInStock}d`}
+                          </span>
                         </div>
                       </td>
                       <td className="px-4 py-3 text-center">

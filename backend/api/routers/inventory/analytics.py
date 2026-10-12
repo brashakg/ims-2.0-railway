@@ -42,6 +42,10 @@ async def get_sell_through_analysis(
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection error")
 
+    # The shop rule runs OUTSIDE the try: its 403 (another shop, or a login
+    # with no shop -- owner ruling 2026-10-07, R3) must reach the caller,
+    # not turn into the 500 below.
+    active_store = resolve_store_scope(store_id, current_user)
     try:
         orders_coll = db.get_collection("orders")
         stock_coll = db.get_collection("stock_units")
@@ -53,7 +57,6 @@ async def get_sell_through_analysis(
         # aggregated across ALL stores. Resolve the caller's scope (None = all
         # stores for HQ roles; the caller's OWN store for store-level roles) and
         # apply it to both the sales and the stock side.
-        active_store = resolve_store_scope(store_id, current_user)
         _order_q = {
             "created_at": {"$gte": cutoff_date},
             "status": {"$in": _SOLD_STATUSES},
@@ -275,6 +278,10 @@ async def get_overstock_analysis(
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection error")
 
+    # The shop rule runs OUTSIDE the try: its 403 (another shop, or a login
+    # with no shop -- owner ruling 2026-10-07, R3) must reach the caller,
+    # not turn into the 500 below.
+    active_store = resolve_store_scope(store_id, current_user)
     try:
         orders_coll = db.get_collection("orders")
         stock_coll = db.get_collection("stock_units")
@@ -285,7 +292,6 @@ async def get_overstock_analysis(
         # Store-scope: honour the caller's reach (None = all stores for HQ roles;
         # own store for store-level) instead of ignoring ?store_id and reading
         # every store's sales + stock.
-        active_store = resolve_store_scope(store_id, current_user)
         _order_q = {
             "created_at": {"$gte": cutoff_date},
             "status": {"$in": _SOLD_STATUSES},

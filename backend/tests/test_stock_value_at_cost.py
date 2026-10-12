@@ -42,7 +42,7 @@ Contract pinned (the build follows it): the stock ledger rows carry
 report equals the same on-hand cost; aging values stock at cost.
 
 These were strict xfails while the finding was open; the fix (one rule,
-api/services/stock_value.py, seen through cost_mask.can_see_cost(user, "purchase"))
+api/services/stock_value.py, seen through cost_mask's "product" context)
 turned them into plain tests. A regression raises FindingStillOpen.
 
 Run: JWT_SECRET_KEY=test ENVIRONMENT=test python -m pytest
@@ -439,7 +439,9 @@ def _seed_uncosted(db) -> None:
         return {
             "_id": sid, "stock_id": sid, "product_id": pid, "store_id": STORE,
             "barcode": f"BV{sid}", "quantity": 1, "status": status,
-            "created_at": now - timedelta(days=10), **cost,
+            # Past the aging grace window (#1169, F54), so an unsold product
+            # gets its slow-mover verdict rather than NEW.
+            "created_at": now - timedelta(days=120), **cost,
         }
 
     db["stock_units"].insert_many(
@@ -480,6 +482,23 @@ def uncosted_world(uncosted_db, monkeypatch):
     monkeypatch.setattr(inv_mod, "_get_db", lambda: _DBProxy(uncosted_db))
     app = FastAPI()
     app.include_router(inv_mod.router, prefix="/inventory")
+    return _World(TestClient(app), app)
+
+
+@pytest.fixture
+def uncosted_reports(uncosted_db, monkeypatch):
+    from database.repositories.product_repository import (
+        ProductRepository,
+        StockRepository,
+    )
+
+    stock = lambda: StockRepository(uncosted_db["stock_units"])  # noqa: E731
+    products = lambda: ProductRepository(uncosted_db["products"])  # noqa: E731
+    monkeypatch.setattr(reports_mod, "get_stock_repository", stock)
+    monkeypatch.setattr(reports_mod, "get_product_repository", products)
+    monkeypatch.setattr(reports_mod, "get_db", lambda: _DBProxy(uncosted_db))
+    app = FastAPI()
+    app.include_router(reports_mod.router, prefix="/reports")
     return _World(TestClient(app), app)
 
 
@@ -551,6 +570,49 @@ def test_r1_39_stock_is_the_shelf_reserved_is_apart_and_cost_covers_both(uncoste
     assert (row["stock"], row["reserved"]) == (3, 1)
     assert row["cost_value"] == pytest.approx(4000.0)  # 4 units x 1000, sold H5 not stock
     assert row["unit_cost"] == pytest.approx(1000.0)
+
+
+def test_f47_stock_aging_counts_the_units_with_no_cost(uncosted_world):
+    """Stock aging values at cost like the ledger: a unit with no cost adds
+    nothing, and is COUNTED (per product and beside Tied capital), never a
+    silent Rs 0 row."""
+    body = uncosted_world.get("/inventory/aging", "STORE_MANAGER").json()
+    rows = {p["id"]: p for p in body["products"]}
+    assert (rows["P-NOCOST"]["value"], rows["P-NOCOST"]["uncostedUnits"]) == (0.0, 2)
+    assert (rows["P-MIXED"]["value"], rows["P-MIXED"]["uncostedUnits"]) == (4000.0, 1)
+    assert rows["P-MASTER"]["uncostedUnits"] == 0
+    slow = [p for p in body["products"] if p["classification"] == "C"]
+    assert body["summary"]["slowMovingUncostedUnits"] == sum(
+        p["uncostedUnits"] for p in slow
+    ) == 3
+
+
+@pytest.mark.parametrize("role", COUNTER)
+def test_f47_the_counter_gets_no_uncosted_count_on_aging(uncosted_world, role):
+    body = uncosted_world.get("/inventory/aging", role).json()
+    assert body["summary"]["slowMovingUncostedUnits"] is None
+    assert all(p["uncostedUnits"] is None for p in body["products"])
+
+
+@pytest.mark.parametrize(
+    "path,params,count",
+    [
+        ("/reports/inventory", {}, lambda b: b["uncostedUnits"]),
+        ("/reports/inventory/summary", {}, lambda b: b["summary"]["uncosted_units"]),
+        ("/reports/inventory/valuation", {}, lambda b: b["valuation"]["uncosted_units"]),
+        (
+            "/reports/stock/count",
+            {"from_date": "2026-09-01", "to_date": "2026-09-29"},
+            lambda b: b["summary"]["uncosted_units"],
+        ),
+    ],
+)
+def test_f47_every_stock_value_report_counts_the_units_with_no_cost(
+    uncosted_reports, path, params, count
+):
+    resp = uncosted_reports.get(path, "ADMIN", **params)
+    assert resp.status_code == 200, resp.text
+    assert count(resp.json()) == 3
 
 
 def test_r1_34_the_one_rule_counts_uncosted_pieces():
@@ -706,3 +768,217 @@ def test_r3_6_the_reserved_only_row_obeys_the_category_filter(reserved_only_worl
     assert frames.status_code == sunglasses.status_code == 200
     assert "P-OLD" in {r["product_id"] for r in frames.json()["items"]}
     assert "P-OLD" not in {r["product_id"] for r in sunglasses.json()["items"]}
+
+
+# ============================================================================
+# R3 on the stock-value reads: a login with no shop reads no shop's stock
+# ============================================================================
+# stock_value.shelf_units(None) is EVERY shop (the admins' all-shops view).
+# /reports/stock/count, /reports/inventory/summary and /valuation took their
+# shop from `validate_store_access(...) or active_store_id` -- None for a
+# non-admin with no shop -- so that login read every shop's stock at cost
+# (Dhanbad 3 x 1000 + Pune 5 x 2000 = 13000). The one shop rule
+# (resolve_store_scope) refuses it.
+
+_R3_READS = (
+    ("/reports/stock/count", {"from_date": "2026-09-01", "to_date": "2026-09-29"}),
+    ("/reports/inventory/summary", {}),
+    ("/reports/inventory/valuation", {}),
+)
+
+
+@pytest.fixture(scope="module")
+def two_shop_db():
+    mongomock = pytest.importorskip("mongomock")
+    db = mongomock.MongoClient()[f"ims_test_two_shop_{uuid.uuid4().hex[:8]}"]
+    db["products"].insert_one(
+        {"_id": "P", "product_id": "P", "sku": "FR-P", "name": "Frame P",
+         "category": "FRAME", "mrp": 9000.0, "is_active": True}
+    )
+    db["stock_units"].insert_many(
+        [
+            {"_id": f"{store}-{i}", "stock_id": f"{store}-{i}", "product_id": "P",
+             "store_id": store, "quantity": 1, "status": "AVAILABLE", "unit_cost": cost}
+            for store, n, cost in ((STORE, 3, 1000.0), (OTHER, 5, 2000.0))
+            for i in range(n)
+        ]
+    )
+    return db
+
+
+@pytest.fixture
+def two_shop_reports(two_shop_db, monkeypatch):
+    from database.repositories.product_repository import (
+        ProductRepository,
+        StockRepository,
+    )
+
+    monkeypatch.setattr(reports_mod, "get_stock_repository", lambda: StockRepository(two_shop_db["stock_units"]))
+    monkeypatch.setattr(reports_mod, "get_product_repository", lambda: ProductRepository(two_shop_db["products"]))
+    monkeypatch.setattr(reports_mod, "get_db", lambda: _DBProxy(two_shop_db))
+    app = FastAPI()
+    app.include_router(reports_mod.router, prefix="/reports")
+    client = TestClient(app)
+
+    def get(path, user, **params):
+        app.dependency_overrides[get_current_user] = lambda: user
+        return client.get(path, params=params)
+
+    return get
+
+
+def _shopless(role: str) -> dict:
+    return {"user_id": f"u-{role.lower()}", "roles": [role], "store_ids": [], "active_store_id": None}
+
+
+def _stock_value(body: dict) -> float:
+    return (body.get("summary") or {}).get("total_value") or (body.get("valuation") or {}).get("total")
+
+
+# Owner ruling 2026-10-12 (R4): a non-admin login with no shop sees NO shop --
+# the one rule (resolve_store_scope) scopes it to the reserved NO_SHOP_SCOPE,
+# which no unit carries, so these reads answer empty (never every shop's
+# Rs 13,000, never a refusal for the implicit read); naming a shop is a 403
+# that says why.
+
+
+@pytest.mark.parametrize("path,params", _R3_READS)
+@pytest.mark.parametrize("role", ["STORE_MANAGER", "AREA_MANAGER", "ACCOUNTANT"])
+def test_r4_a_login_with_no_shop_reads_no_shops_stock(two_shop_reports, path, params, role):
+    from api.dependencies import NO_SHOP_DETAIL
+
+    resp = two_shop_reports(path, _shopless(role), **params)
+    assert resp.status_code == 200, resp.text
+    assert not _stock_value(resp.json()), resp.json()
+    assert "13000" not in resp.text and "3000" not in resp.text
+    asked = two_shop_reports(path, _shopless(role), store_id=STORE, **params)
+    assert asked.status_code == 403, asked.text
+    assert asked.json()["detail"] == NO_SHOP_DETAIL
+
+
+@pytest.mark.parametrize("path,params", _R3_READS[:2])
+def test_r4_the_counter_with_no_shop_gets_no_counts_either(two_shop_reports, path, params):
+    resp = two_shop_reports(path, _shopless("SALES_STAFF"), **params)
+    assert resp.status_code == 200, resp.text
+    assert '"total_units":8' not in resp.text.replace(" ", ""), resp.text
+    assert "13000" not in resp.text
+
+
+@pytest.mark.parametrize("path,params", _R3_READS)
+def test_r3_shops_and_admins_still_read_their_stock(two_shop_reports, path, params):
+    dhn = {"user_id": "u-sm", "roles": ["STORE_MANAGER"], "store_ids": [STORE], "active_store_id": STORE}
+    assert _stock_value(two_shop_reports(path, dhn, **params).json()) == 3000.0
+    # An admin with no shop asked reads every shop (admins see all shops).
+    assert _stock_value(two_shop_reports(path, _shopless("ADMIN"), **params).json()) == 13000.0
+
+
+# Stock aging on the same shop rule (panel 2026-10-08). It took its shop from
+# validate_store_access -- None for a login with no shop -- so it COUNTED only
+# the units with no store_id (one legacy unit) while it VALUED every shop's
+# (shelf_units(None)): quantity 1 at Rs 9,993, Dhanbad's cost leaking into a
+# row that should read Rs 1,111, for managers and accounts alike.
+
+
+@pytest.fixture
+def aging_two_shops(monkeypatch):
+    mongomock = pytest.importorskip("mongomock")
+    from database.repositories.product_repository import (
+        ProductRepository,
+        StockRepository,
+    )
+
+    db = mongomock.MongoClient()[f"ims_test_aging_{uuid.uuid4().hex[:8]}"]
+    db["products"].insert_one(
+        {"_id": "P1", "product_id": "P1", "sku": "FR-P1", "name": "Frame P1",
+         "category": "FRAME", "mrp": 9000.0, "is_active": True}
+    )
+    old = datetime.utcnow() - timedelta(days=120)
+    db["stock_units"].insert_many(
+        [
+            {"_id": f"D{i}", "product_id": "P1", "store_id": STORE, "quantity": 1,
+             "status": "AVAILABLE", "unit_cost": 4441.0, "created_at": old}
+            for i in range(2)
+        ]
+        + [{"_id": "L1", "product_id": "P1", "quantity": 1, "status": "AVAILABLE",
+            "unit_cost": 1111.0, "created_at": old}]
+    )
+    monkeypatch.setattr(inv_mod, "get_stock_repository", lambda: StockRepository(db["stock_units"]))
+    monkeypatch.setattr(inv_mod, "get_product_repository", lambda: ProductRepository(db["products"]))
+    app = FastAPI()
+    app.include_router(inv_mod.router, prefix="/inventory")
+    client = TestClient(app)
+
+    def get(user):
+        app.dependency_overrides[get_current_user] = lambda: user
+        return client.get("/inventory/aging")
+
+    return get
+
+
+@pytest.mark.parametrize("role", ["STORE_MANAGER", "AREA_MANAGER", "ACCOUNTANT"])
+def test_r4_stock_aging_gives_a_login_with_no_shop_no_shops_stock(aging_two_shops, role):
+    """R4: an empty report (no shop's units counted or valued), not a 403 --
+    and never the legacy unit at every shop's cost."""
+    resp = aging_two_shops(_shopless(role))
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["products"] == [], resp.json()
+    assert "9993" not in resp.text and "8882" not in resp.text and "1111" not in resp.text
+
+
+def test_stock_aging_values_exactly_the_units_it_counts(aging_two_shops):
+    dhn = {"user_id": "u-sm", "roles": ["STORE_MANAGER"], "store_ids": [STORE], "active_store_id": STORE}
+    (row,) = aging_two_shops(dhn).json()["products"]
+    assert (row["quantity"], row["value"]) == (2, 8882.0)
+    # An admin with no shop asked reads every shop -- every unit counted is
+    # every unit valued, never one unit at three units' cost.
+    (row,) = aging_two_shops(_shopless("ADMIN")).json()["products"]
+    assert (row["quantity"], row["value"]) == (3, 9993.0)
+
+
+# ============================================================================
+# One product-cost answer per role across the stock router (panel 2026-10-08)
+# ============================================================================
+# The ledger rows asked cost_mask "purchase" (no catalogue manager) through
+# their own gate, the per-unit rows (?product_id=) and /inventory/units the
+# accounts-only default, the catalogue's product reads "product": a store
+# manager saw unit_cost on the row and lost cost_price one click deeper, and
+# the ledger kept its own list of WHICH fields are cost. Every stock-cost read
+# now answers to cost_mask "product" -- who AND which.
+
+
+def _cost_answers(world, role):
+    from api.services.cost_mask import _ALL_MASKED
+
+    row = _ledger_row(world, role)
+    units = world.get("/inventory/stock", role, product_id=PID).json()["items"]
+    labels = world.get("/inventory/units", role, product_id=PID).json()["units"]
+    aging = {p["id"]: p for p in _aging(world, role).json()["products"]}
+    return {
+        "ledger row": bool(_ALL_MASKED & {k for k, v in row.items() if v is not None}),
+        "per-unit rows": any(_ALL_MASKED & set(u) for u in units),
+        "units": any("cost_price" in u for u in labels),
+        "aging": aging[PID]["value"] is not None,
+    }
+
+
+@pytest.mark.parametrize(
+    "role", ["STORE_MANAGER", "AREA_MANAGER", "CATALOG_MANAGER", "ACCOUNTANT", "ADMIN", *COUNTER]
+)
+def test_one_product_cost_answer_on_every_stock_read(world, role):
+    from api.services.cost_mask import can_see_cost
+
+    want = can_see_cost(_user(role), "product")
+    answers = _cost_answers(world, role)
+    assert answers == dict.fromkeys(answers, want), (role, want, answers)
+
+
+def test_which_ledger_fields_are_cost_is_cost_mask_s(world, monkeypatch):
+    """#1161's unhiding check, on the ledger: take a field off cost_mask's
+    list and the counter's row carries exactly it -- the ledger keeps no list
+    of its own."""
+    from api.services import cost_mask
+
+    monkeypatch.setattr(cost_mask, "_ALL_MASKED", cost_mask._ALL_MASKED - {"cost_value"})
+    row = _ledger_row(world, "SALES_STAFF")
+    assert row.get("cost_value") == pytest.approx(AT_COST)
+    assert "unit_cost" not in row

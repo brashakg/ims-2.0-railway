@@ -66,6 +66,14 @@ def format_purchase_number(prefix: str, store_seg: str, fy_label: str, seq: int)
     return f"{prefix}/{store_seg}/{fy_label}/{int(seq):04d}"
 
 
+def po_label(po_number=None, po_id=None) -> str:
+    """How a purchase order is named in prose. A PO number already carries its
+    printed prefix (``PO/BV-DHN-02/26-27/0001``), so writing "PO " in front of
+    it printed "PO PO/..." (audit F33). Only a bare id gets the word."""
+    ref = str(po_number or po_id or "").strip()
+    return ref if ref.upper().startswith("PO") else f"PO {ref}".strip()
+
+
 def next_purchase_number(
     counters,
     *,

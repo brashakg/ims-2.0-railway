@@ -24,10 +24,11 @@ import { MemoryRouter, Routes, Route } from 'react-router-dom';
 vi.stubGlobal('requestIdleCallback', () => 0);
 
 let roles: string[] = ['STORE_MANAGER'];
+let shop: string | undefined = 'BV-DHN-01';
 
 vi.mock('../../../context/AuthContext', () => ({
   useAuth: () => ({
-    user: { id: 'u1', name: 'Tester', roles, activeStoreId: 'BV-DHN-01', storeIds: ['BV-DHN-01'] },
+    user: { id: 'u1', name: 'Tester', roles, activeStoreId: shop, storeIds: shop ? [shop] : [] },
     isAuthenticated: true,
     isLoading: false,
     // Same contract as AuthContext.hasRole: ADMIN / SUPERADMIN pass any check.
@@ -45,14 +46,21 @@ vi.mock('../../../hooks/usePOSQueries', () => ({ useStores: () => ({ data: [] })
 vi.mock('../PurchaseInvoicesSection', () => ({
   PurchaseInvoicesSection: () => <div>INVOICES SECTION</div>,
 }));
+vi.mock('../PurchasesThisMonthSection', () => ({
+  PurchasesThisMonthSection: () => <div>THIS MONTH SECTION</div>,
+}));
 vi.mock('../VendorReturns', () => ({
   VendorReturns: () => <div>VENDOR RETURNS SECTION</div>,
 }));
 vi.mock('../PurchaseVarianceTab', () => ({
   PurchaseVarianceTab: () => <div>VARIANCE SECTION</div>,
 }));
+vi.mock('../GoodsReceiptNote', () => ({ GoodsReceiptNote: () => <div>GRN SCREEN</div> }));
+vi.mock('../GoodsReceiptCockpit', () => ({ GoodsReceiptCockpit: () => <div>RECEIVE SCREEN</div> }));
+vi.mock('../ReconConsole', () => ({ default: () => <div>RECON SCREEN</div> }));
 
 import { purchaseRoutes } from '../../../routes/purchaseRoutes';
+import { NO_SHOP_MESSAGE } from '../../../components/common/NoShopNotice';
 
 function openAt(path: string, role: string) {
   roles = [role];
@@ -70,6 +78,7 @@ function openAt(path: string, role: string) {
 
 beforeEach(() => {
   roles = ['STORE_MANAGER'];
+  shop = 'BV-DHN-01';
 });
 
 describe('Purchase Invoices - supplier bills are the accounts roles only', () => {
@@ -103,6 +112,37 @@ describe('Purchase Invoices - supplier bills are the accounts roles only', () =>
   );
 });
 
+// Purchases this month is supplier money end to end (ordered, billed, paid,
+// owed): its tab and its address are PAYABLES_ROLES', as its API row is.
+describe('Purchases this month - the accounts roles only', () => {
+  it.each([['STORE_MANAGER'], ['AREA_MANAGER']])(
+    '%s: no This month tab, and the address bounces',
+    async (role) => {
+      openAt('/purchase/variance', role);
+      expect(await screen.findByText('VARIANCE SECTION')).toBeInTheDocument();
+      expect(screen.queryByRole('link', { name: /This month/ })).not.toBeInTheDocument();
+    },
+  );
+
+  it.each([['STORE_MANAGER'], ['AREA_MANAGER']])(
+    '%s: /purchase/this-month lands on unauthorized, never the report',
+    async (role) => {
+      openAt('/purchase/this-month', role);
+      expect(await screen.findByText('UNAUTHORIZED')).toBeInTheDocument();
+      expect(screen.queryByText('THIS MONTH SECTION')).not.toBeInTheDocument();
+    },
+  );
+
+  it.each([['ACCOUNTANT'], ['ADMIN'], ['SUPERADMIN']])(
+    '%s: the tab is offered and the report opens',
+    async (role) => {
+      openAt('/purchase/this-month', role);
+      expect(await screen.findByText('THIS MONTH SECTION')).toBeInTheDocument();
+      expect(screen.getByRole('link', { name: /This month/ })).toBeInTheDocument();
+    },
+  );
+});
+
 describe('Vendor Returns - the accounts roles reach the debit notes they own', () => {
   it.each([['ACCOUNTANT'], ['STORE_MANAGER'], ['AREA_MANAGER'], ['WORKSHOP_STAFF'], ['ADMIN']])(
     '%s: /purchase/vendor-returns opens',
@@ -116,4 +156,32 @@ describe('Vendor Returns - the accounts roles reach the debit notes they own', (
     openAt('/purchase/vendor-returns', role);
     expect(await screen.findByText('UNAUTHORIZED')).toBeInTheDocument();
   });
+});
+
+// Owner ruling 2026-10-12 (R4): a login with no shop opens no Purchase screen
+// -- the tabs inside the layout and the three outside it -- only the message
+// (components/common/NoShopNotice, the one no-shop rule).
+describe('Purchase - a login with no shop reads the message, never a screen', () => {
+  it.each([
+    ['/purchase/variance', 'STORE_MANAGER', 'VARIANCE SECTION'],
+    ['/purchase/vendor-returns', 'ACCOUNTANT', 'VENDOR RETURNS SECTION'],
+    ['/purchase/invoices', 'ACCOUNTANT', 'INVOICES SECTION'],
+    ['/purchase/grn', 'STORE_MANAGER', 'GRN SCREEN'],
+    ['/purchase/receive', 'STORE_MANAGER', 'RECEIVE SCREEN'],
+    ['/purchase/recon-console', 'ACCOUNTANT', 'RECON SCREEN'],
+  ])('%s as %s', async (path, role, screenText) => {
+    shop = undefined;
+    openAt(path, role);
+    expect(await screen.findByText(NO_SHOP_MESSAGE)).toBeInTheDocument();
+    expect(screen.queryByText(screenText)).not.toBeInTheDocument();
+  });
+
+  it.each([['/purchase/grn', 'GRN SCREEN'], ['/purchase/recon-console', 'RECON SCREEN']])(
+    'an admin with no shop still opens %s',
+    async (path, screenText) => {
+      shop = undefined;
+      openAt(path, 'ADMIN');
+      expect(await screen.findByText(screenText)).toBeInTheDocument();
+    },
+  );
 });

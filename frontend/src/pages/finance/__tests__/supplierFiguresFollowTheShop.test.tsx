@@ -52,6 +52,7 @@ vi.mock('../../../context/ToastContext', () => ({
 import FinanceDashboard from '../FinanceDashboard';
 import { financeApi } from '../../../services/api/finance';
 import { storeApi } from '../../../services/api/stores';
+import { NO_SHOP_MESSAGE } from '../../../components/common/NoShopNotice';
 
 const api = financeApi as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const getStores = storeApi.getStores as unknown as ReturnType<typeof vi.fn>;
@@ -133,6 +134,21 @@ describe('Finance dashboard - supplier figures follow the dashboard shop', () =>
     expect(api.getVendorPayments.mock.calls.every(([sid]) => !sid)).toBe(true);
     expect(await screen.findByText('All shops')).toBeInTheDocument();
     expect(screen.queryByText(/^Shop:/)).toBeNull();
+  });
+
+  // Owner ruling 2026-10-12 (R4): the server gives a non-admin login with no
+  // shop NO shop (empty reads). The dashboard used to print 'All shops' over
+  // 'Total Payable Rs 0' -- we owe nobody. It now shows the one no-shop
+  // notice in place of every panel and asks for no supplier figure at all.
+  it('an accountant with no shop reads the message, not an empty all-shops figure', async () => {
+    roles = ['ACCOUNTANT'];
+    activeStoreId = '';
+    render(<FinanceDashboard />);
+    expect(await screen.findByText(NO_SHOP_MESSAGE)).toBeInTheDocument();
+    expect(api.getVendorPayments).not.toHaveBeenCalled();
+    expect(screen.queryByText('All shops')).toBeNull();
+    expect(screen.queryByText('Total Payable')).toBeNull();
+    expect(screen.queryByText(/vendor payment schedule/i)).toBeNull();
   });
 
   it('a shop missing from the store list is named by its id', async () => {

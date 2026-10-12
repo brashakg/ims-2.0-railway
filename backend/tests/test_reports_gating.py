@@ -49,8 +49,14 @@ FINANCIAL = [
     "/api/v1/reports/discount/analysis",
     "/api/v1/reports/finance/expense-vs-revenue",
     "/api/v1/reports/gstr1",
+    # Owner ruling 2026-10-12 (R5): managers keep GSTR-3B's OUTPUT figures;
+    # the handler leaves Table 4 ITC / 3.1(d) RCM / cash paid out for them.
     "/api/v1/reports/gstr3b",
 ]
+
+# The GSTR-3B portal upload carries Table 4 input credit whole: the accounts
+# roles only (owner ruling 2026-10-12, R5).
+INPUT_TAX = ["/api/v1/reports/gstr3b/gstn-json"]
 
 BLOCKED_ROLES = [["SALES_STAFF"], ["CASHIER"], ["OPTOMETRIST"]]
 ALLOWED_ROLES = [["ACCOUNTANT"], ["STORE_MANAGER"], ["AREA_MANAGER"]]
@@ -72,6 +78,18 @@ class TestFinancialReportGating:
 
     @pytest.mark.parametrize("path", FINANCIAL)
     def test_superadmin_allowed(self, client, auth_headers, path):
+        assert client.get(path, headers=auth_headers).status_code != 403
+
+
+class TestInputTaxReportIsAccountsOnly:
+    @pytest.mark.parametrize("path", INPUT_TAX)
+    @pytest.mark.parametrize("roles", BLOCKED_ROLES + [["STORE_MANAGER"], ["AREA_MANAGER"]])
+    def test_managers_and_counter_blocked(self, client, path, roles):
+        assert client.get(path, headers=_headers(roles)).status_code == 403
+
+    @pytest.mark.parametrize("path", INPUT_TAX)
+    def test_accounts_allowed(self, client, auth_headers, path):
+        assert client.get(path, headers=_headers(["ACCOUNTANT"])).status_code != 403
         assert client.get(path, headers=auth_headers).status_code != 403
 
 

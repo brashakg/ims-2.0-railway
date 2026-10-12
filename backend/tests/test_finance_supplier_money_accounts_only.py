@@ -337,20 +337,31 @@ def test_a_pune_accountant_cannot_ask_for_dhanbad(finance):
 # ============================================================================
 
 
-@pytest.mark.parametrize("role", MANAGERS)
-def test_a_manager_with_no_shop_gets_no_supplier_payments_in_cash_flow(finance, role):
-    """A manager with no shop used to get the org view (every shop's rent),
-    minus the supplier payments. R4 (owner ruling 2026-10-12): a login with
-    NO shop sees NO shop -- no shop's cash at all, and still no supplier
-    payments: no key, not inside outflows / net_cash_flow."""
+@pytest.mark.parametrize("role", (*MANAGERS, "ACCOUNTANT"))
+def test_a_login_with_no_shop_gets_no_cash_flow_at_all(finance, role):
+    """The org view (every shop, supplier payments folded in) is the admins'
+    alone. A non-admin login with no shop used to be handed it -- an
+    accountant WITH every shop's supplier payments -- by a second copy of the
+    shop rule. R4 (owner ruling 2026-10-12): the one rule (resolve_store_scope)
+    gives it NO shop -- zero cash, no rent, no supplier payments (a manager has
+    no key at all; an accountant's reads 0) -- and naming a shop is a 403 that
+    says why."""
+    from api.dependencies import NO_SHOP_DETAIL
+
     resp = finance("/cash-flow", _user(role))
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert "vendor_payment_outflow" not in body, body
     assert (body["inflows"], body["expense_outflow"], body["outflows"]) == (0, 0, 0), body
     assert body["net_cash_flow"] == 0, body
     assert PAID_THIS_MONTH not in _numbers(body), body
     assert RENT not in _numbers(body), body
+    if role == "ACCOUNTANT":
+        assert body["vendor_payment_outflow"] == 0, body
+    else:
+        assert "vendor_payment_outflow" not in body, body
+    asked = finance("/cash-flow", _user(role), store_id=DHN)
+    assert asked.status_code == 403, asked.text
+    assert asked.json()["detail"] == NO_SHOP_DETAIL
 
 
 @pytest.mark.parametrize("role", MANAGERS)
@@ -364,9 +375,9 @@ def test_a_managers_shop_view_carries_no_supplier_payments(finance, role):
 
 
 # An ACCOUNTANT with no shop is not here any more (owner ruling 2026-10-12,
-# R4): it holds no shop, so it gets no org view -- see the next test.
+# R4): it holds no shop, so it gets no org view -- see the test above.
 @pytest.mark.parametrize("role", ["ADMIN", "SUPERADMIN"])
-def test_the_accounts_roles_keep_supplier_payments_on_the_org_view(finance, role):
+def test_the_admins_keep_supplier_payments_on_the_org_view(finance, role):
     body = finance("/cash-flow", _user(role)).json()
     assert body["vendor_payment_outflow"] == PAID_THIS_MONTH
     assert body["outflows"] == pytest.approx(RENT + PAID_THIS_MONTH)

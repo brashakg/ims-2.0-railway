@@ -30,7 +30,7 @@ import {
 } from '../../../services/api/vendorAp';
 import { useToast } from '../../../context/ToastContext';
 import { useStores } from '../../../hooks/usePOSQueries';
-import { PurchaseShopName, usePurchaseShop } from '../purchaseShop';
+import { PurchaseShopName, shopNameOf, usePurchaseShop } from '../purchaseShop';
 import type { Supplier } from '../purchaseTypes';
 import { inr, GST_RATES, errMsg } from './shared';
 import { istDayString } from '../../../utils/datetime';
@@ -482,11 +482,7 @@ type ShopRow = { store_id?: string; store_name?: string; store_code?: string };
  *  a component -- a toast, an <option>. */
 export function usePurchaseShopNamer(): (storeId: string) => string {
   const { data } = useStores();
-  const shops = (Array.isArray(data) ? data : []) as ShopRow[];
-  return (storeId) => {
-    const row = shops.find((s) => s.store_id === storeId);
-    return (row && (row.store_name || row.store_code || row.store_id)) || storeId;
-  };
+  return (storeId) => shopNameOf(storeId, data);
 }
 
 export function PurchaseShopField({ value, onChange, label, emptyLabel, required = false, className = '', testId }: {

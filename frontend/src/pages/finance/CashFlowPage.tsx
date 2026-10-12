@@ -39,6 +39,9 @@ function errMsg(e: unknown, fb: string) {
 
 type Tab = 'overview' | 'forecast' | 'aging';
 
+/** Every figure here is one shop's or (admins) every shop's. A non-admin
+ *  login with no shop never reaches this screen: its route is wrapped in
+ *  NoShopGate (routes/financeRoutes, owner ruling 2026-10-12 R4). */
 export default function CashFlowPage() {
   const toast = useToast();
   const [tab, setTab] = useState<Tab>('overview');

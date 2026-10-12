@@ -295,25 +295,18 @@ def test_strips_never_mutate_what_they_were_given():
     assert pm.strip_debit_note_money(note, _user("ACCOUNTANT")) is note
 
 
-def test_route_decorator_refuses_a_sync_handler():
-    with pytest.raises(TypeError):
-        pm.masks_supplier_money(pm.strip_debit_note_money)(lambda current_user: {})
+def test_rtv_routes_are_their_own_module_s_functions():
+    """Panel 2026-10-08 (merge break with #1161): a decorator that wrapped
+    the list / issue / detail routes made each endpoint's __globals__
+    payables_mask's, so a check that reads a route's gate off its own module
+    (#1161's _route_gate_constant) found no gate there. The strip is called
+    inline; every route is the router module's own, unwrapped function."""
+    import api.routers.rtv_debit_notes as r
 
-
-def test_route_decorator_strips_results_and_error_details():
-    @pm.masks_supplier_money(pm.strip_debit_note_money)
-    async def handler(note_id: str, current_user: dict):
-        if note_id == "boom":
-            raise HTTPException(status_code=409, detail={"error": "x", "totals": {"t": 1}})
-        return {"debit_note_id": note_id, "totals": {"grand_total_paise": 9}}
-
-    # The caller is found whether passed by keyword or by position.
-    assert _run(handler("DN-1", current_user=_user("STORE_MANAGER"))) == {"debit_note_id": "DN-1"}
-    assert _run(handler("DN-1", _user("AREA_MANAGER"))) == {"debit_note_id": "DN-1"}
-    assert _run(handler("DN-1", _user("ACCOUNTANT")))["totals"] == {"grand_total_paise": 9}
-    with pytest.raises(HTTPException) as ei:
-        _run(handler("boom", _user("STORE_MANAGER")))
-    assert ei.value.detail == {"error": "x"}
+    for route in r.router.routes:
+        fn = route.endpoint
+        assert fn.__globals__ is vars(r), route.path
+        assert not hasattr(fn, "__wrapped__"), route.path
 
 
 # ============================================================================
@@ -435,6 +428,83 @@ def test_rtv_list_strip_holds_through_fastapi(rtv):
     r = client.get("/api/v1/rtv-debit-notes?limit=10")
     assert r.status_code == 200, r.text
     assert r.json()["debit_notes"][0]["totals"]["grand_total_paise"] == 315000
+
+
+# ----------------------------------------------------------------------------
+# Owner ruling 2026-10-07 (R2): the ACCOUNTANT owns the debit notes. The
+# Vendor Returns screen admits them and they do the debit-note work through
+# the real routes; its gate is ONE list, the backend's RETURN_READERS.
+# ----------------------------------------------------------------------------
+
+_FRONTEND = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                         "frontend", "src")
+
+
+def _read(rel):
+    with open(os.path.join(_FRONTEND, rel), encoding="utf-8") as fh:
+        return fh.read()
+
+
+def test_r2_the_screens_reader_list_is_the_backends():
+    """frontend RETURN_READERS == services/cost_mask.RETURN_READERS + SUPERADMIN,
+    and every door to the screen reads it -- no written-out copy left."""
+    import re
+    from api.services.cost_mask import RETURN_READERS
+
+    m = re.search(r"RETURN_READERS[^=]*=\s*\[([^\]]*)\]", _read("pages/purchase/purchaseRoles.ts"))
+    assert m, "purchaseRoles.ts no longer declares RETURN_READERS"
+    assert set(re.findall(r"'([A-Z_]+)'", m.group(1))) == {"SUPERADMIN", *RETURN_READERS}
+    assert "ACCOUNTANT" in RETURN_READERS
+    for rel, door in (("routes/purchaseRoutes.tsx", 'path="vendor-returns"'),
+                      ("pages/purchase/PurchaseLayout.tsx", "path: '/purchase/vendor-returns'"),
+                      ("components/shell/CommandPalette.tsx", "route: '/purchase/vendor-returns'")):
+        code = _read(rel)
+        assert re.search(r"import\s*\{[^}]*\bRETURN_READERS\b", code), rel
+        gate = code[code.index(door):][:300]
+        assert "RETURN_READERS" in gate and "'ACCOUNTANT'" not in gate, (rel, gate)
+
+
+def test_r2_the_accountant_does_the_debit_note_work_through_the_routes(rtv, monkeypatch):
+    """List and open the return, issue the GST debit note, list / open / print
+    it and export it to Tally -- each through its real route (its require_roles
+    dependency included), and each route's rbac row admits the accountant.
+    Workshop staff keep the read-only, masked view."""
+    from api.routers import vendor_returns as vr
+    from api.routers.auth import get_current_user
+    from api.services import rbac_policy
+
+    monkeypatch.setattr(vr, "_get_db", lambda: rtv.db)
+    app = FastAPI()
+    app.include_router(vr.router, prefix="/api/v1/vendor-returns")
+    app.include_router(rtv.r.router, prefix="/api/v1/rtv-debit-notes")
+    who = {"role": "ACCOUNTANT"}
+    app.dependency_overrides[get_current_user] = lambda: _user(who["role"])
+    c = TestClient(app)
+    issue = {"source_type": "vendor_return", "rtv_id": "VR-1"}
+
+    r = c.post("/api/v1/rtv-debit-notes/issue", json=issue)
+    assert r.status_code == 201, r.text
+    assert r.json()["debit_note"]["totals_rupees"]["grand_total"] == 3150.0
+    dn = r.json()["debit_note"]["debit_note_id"]
+    reads = ("/api/v1/vendor-returns", "/api/v1/vendor-returns/VR-1", "/api/v1/rtv-debit-notes",
+             f"/api/v1/rtv-debit-notes/{dn}", f"/api/v1/rtv-debit-notes/{dn}/print",
+             f"/api/v1/rtv-debit-notes/{dn}/tally")
+    for path in reads:
+        assert c.get(path).status_code == 200, path
+    assert "3,150.00" in c.get(f"/api/v1/rtv-debit-notes/{dn}/print").text
+
+    for method, path in (("POST", "/api/v1/rtv-debit-notes/issue"),
+                         *(("GET", p.replace(dn, "{debit_note_id}").replace("VR-1", "{return_id}"))
+                           for p in reads)):
+        allowed = rbac_policy.policy_for(method, path)["allowed"]
+        assert allowed == "AUTHENTICATED" or "ACCOUNTANT" in allowed, (method, path, allowed)
+
+    who["role"] = "WORKSHOP_STAFF"
+    listed = c.get("/api/v1/rtv-debit-notes")
+    assert listed.status_code == 200 and not _keys(listed.json()) & DEBIT_NOTE_MONEY
+    assert c.post("/api/v1/rtv-debit-notes/issue", json=issue).status_code == 403
+    for path in reads[-2:]:
+        assert c.get(path).status_code == 403, path
 
 
 # ============================================================================
@@ -729,8 +799,8 @@ def perf(monkeypatch):
 
     db = FakeDB()
     db.get_collection("vendor_bills").insert_one(
-        {"vendor_id": "V1", "total_amount": 1250.0,
-         "bill_date": business_now().strftime("%Y-%m-10")})
+        {"vendor_id": "V1", "store_id": "S1", "total_amount": 1250.0,
+         "bill_date": business_now().strftime("%Y-%m-01")})
     monkeypatch.setattr(v, "_get_db", lambda: db)
     monkeypatch.setattr(v, "get_vendor_repository", lambda: _VendorRepo())
     return SimpleNamespace(v=v, db=db)
@@ -765,6 +835,81 @@ def test_scorecard_keeps_spend_for_accounts(perf, role, grn_history):
     if grn_history:
         _with_grn(perf.db)
     assert _perf(perf, role)["mtd_spend"] == 1250.0
+
+
+# The scorecard's mtd_spend is the Purchases report's `billed`, one rule (F56):
+# the supplier ledger's rows on its as-of day -- a bill keyed ahead is not
+# billed yet. It used to sum every bill dated anywhere in the month: an admin
+# read 57000 against the report's 50000. Its SCOPE is every shop, for an
+# accountant too (owner ruling 2026-10-12, R8: the scorecard is org-wide for
+# an accountant, as TDS and rebates) -- so a Pune accountant reads what
+# Jharkhand billed Dhanbad. The one exception is R4's: a login with no shop
+# reads no shop (Rs 0).
+
+DHN, PUN = "BV-DHN-01", "WO-PUN-01"
+
+
+@pytest.fixture
+def jharkhand(monkeypatch):
+    mongomock = pytest.importorskip("mongomock")
+    from api.routers import vendors as v
+    from api.routers.auth import get_current_user
+    from api.utils.ist import now_ist_naive
+
+    today = now_ist_naive().date()
+    db = mongomock.MongoClient().db
+    db["vendors"].insert_one({"vendor_id": "V-JHK", "trade_name": "Jharkhand Optical"})
+    db["vendor_bills"].insert_many([
+        {"bill_id": "B-NOW", "vendor_id": "V-JHK", "store_id": DHN,
+         "bill_date": today.isoformat(), "total_amount": 50000.0, "status": "OUTSTANDING"},
+        # keyed ahead: dated tomorrow (this month or the next -- never billed today)
+        {"bill_id": "B-AHEAD", "vendor_id": "V-JHK", "store_id": DHN,
+         "bill_date": (today + timedelta(days=1)).isoformat(), "total_amount": 7000.0,
+         "status": "OUTSTANDING"},
+    ])
+    monkeypatch.setattr(v, "_get_db", lambda: db)
+    monkeypatch.setattr(v, "get_vendor_repository", lambda: _VendorRepo())
+    app = FastAPI()
+    app.include_router(v.router, prefix="/vendors")
+    client = TestClient(app)
+
+    def get(path, user):
+        app.dependency_overrides[get_current_user] = lambda: user
+        return client.get(path)
+
+    return get
+
+
+def _at(role, shop):
+    return {"user_id": f"u-{role}-{shop}", "roles": [role],
+            "store_ids": [shop] if shop else [], "active_store_id": shop}
+
+
+def _report_billed(jharkhand, user):
+    body = jharkhand("/vendors/purchases-this-month", user).json()
+    return next((r["billed"] for r in body["vendors"] if r["vendor_id"] == "V-JHK"), 0.0)
+
+
+@pytest.mark.parametrize(
+    "user",
+    [_at("ADMIN", None), _at("ACCOUNTANT", DHN), _at("ACCOUNTANT", PUN)],
+    ids=["admin-every-shop", "dhanbad-accountant", "pune-accountant"],
+)
+def test_scorecard_spend_is_the_reports_billed_org_wide(jharkhand, user):
+    resp = jharkhand("/vendors/V-JHK/performance", user)
+    assert resp.status_code == 200, resp.text
+    # Every shop's bills on the ledger's as-of day: B-NOW, never B-AHEAD --
+    # the admin's report figure (the report itself is per shop, F63).
+    assert resp.json()["mtd_spend"] == 50000.0 == _report_billed(jharkhand, _at("ADMIN", None))
+
+
+def test_scorecard_spend_is_nothing_for_an_accountant_with_no_shop(jharkhand):
+    """R4: a non-admin login with no shop sees no shop -- the scorecard opens
+    (200) but its spend is no shop's, Rs 0, never every shop's 50000."""
+    resp = jharkhand("/vendors/V-JHK/performance", _at("ACCOUNTANT", None))
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["mtd_spend"] == 0
+    assert "50000" not in resp.text
 
 
 # ============================================================================
@@ -811,8 +956,8 @@ def test_timeline_shows_a_booked_bill_without_money(timeline, role):
     body = _run(timeline.get_po_timeline("PO1", _user(role)))
     (inv,) = body["invoices"]
     assert inv["invoice_number"] == "INV-9" and inv["bill_id"] == "B1"
-    assert "total" not in inv
-    assert inv["status"] == "BOOKED"
+    assert "total" not in inv and "status" not in inv
+    assert _bill_event(body)["label"] == "Bill booked"  # never "settled": paid is money
     assert _bill_event(body)["detail"] == "Purchase invoice booked"
     assert not [s for s in _strings(body) if "PARTIAL" in s]
     # The rest of the life of the PO is unchanged.

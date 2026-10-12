@@ -599,6 +599,8 @@ _TABS = {
 _CASES = {
     "admin opens Purchase (all stores)": (ADMIN, None, {DHN, PUN}),
     "admin picks Dhanbad": (ADMIN, DHN, {DHN}),
+    # Only a NON-admin with no shop reads no shop (owner ruling 2026-10-12, R4).
+    "admin with no shop (all stores)": (_user("ADMIN", None), None, {DHN, PUN}),
     "Pune accountant (own shop)": (ACCT_PUNE, None, {PUN}),
     "Pune accountant asks for Dhanbad": (ACCT_PUNE, DHN, 403),
 }
@@ -784,6 +786,61 @@ def test_f63_supplier_balances_obey_the_shop_asked_for(world):
     assert balances(ADMIN, DHN) == (200, {VA: 5540.0, VB: 0.0})
     assert balances(ACCT_PUNE, PUN) == (200, {VA: 0.0, VB: 2240.0})
     assert balances(ACCT_PUNE, DHN)[0] == 403
+
+
+# ============================================================================
+# Owner ruling 2026-10-12 (R4): a login with no shop reads no shop
+# ============================================================================
+# A store manager or accountant whose login has no shop used to read EVERY
+# shop on every Purchase tab: resolve_store_scope gave them no filter, the
+# same answer it gives an admin. The one rule now scopes them to NO shop --
+# every tab and finance read it scopes answers empty -- and naming a shop is a
+# 403 with the plain message (api.dependencies.NO_SHOP_DETAIL).
+
+_NO_SHOP_READS = {
+    **{tab: (path, extra) for tab, (path, extra, _key, _shop) in _TABS.items()},
+    "suppliers money": ("/finance/vendor-payments", {}),
+    "AP aging": ("/vendors/ap-aging", {}),
+    "supplier ledger": (f"/vendors/{VA}/ledger", {}),
+    "supplier bills": (f"/vendors/{VA}/bills", {}),
+    "owner dashboard": ("/finance/owner-dashboard", {}),
+    "cash-flow forecast": ("/finance/cash-flow-forecast", {}),
+    "ITC register": ("/finance/itc-register", {}),
+    "survival cash-flow": ("/finance/survival-cashflow", {}),
+}
+# The reads a store manager may open at all; the rest (supplier money, the
+# report, bills, recon) refuse the role before any shop is resolved.
+_MANAGER_READS = {"orders", "receiving", "returns", "variance"}
+
+
+@pytest.mark.parametrize("role", ["STORE_MANAGER", "ACCOUNTANT"])
+@pytest.mark.parametrize("read", list(_NO_SHOP_READS))
+def test_r4_a_login_with_no_shop_reads_no_shop(world, read, role):
+    path, extra = _NO_SHOP_READS[read]
+    resp = world.get(path, _user(role, None), **extra)
+    opens = role == "ACCOUNTANT" or read in _MANAGER_READS
+    if opens:
+        _open(
+            resp.status_code == 200,
+            f"R4: a {role} with no shop could not open {read}: {resp.status_code} {resp.text[:200]}",
+        )
+    else:
+        assert resp.status_code == 403, (read, role, resp.text[:200])
+    for shop in (DHN, PUN):
+        assert shop not in resp.text, (read, role, resp.text[:300])
+
+
+@pytest.mark.parametrize("role", ["STORE_MANAGER", "ACCOUNTANT"])
+@pytest.mark.parametrize("read", [t for t in _TABS if t != "recon"])
+def test_r4_a_login_with_no_shop_naming_one_is_told_why(world, read, role):
+    from api.dependencies import NO_SHOP_DETAIL
+
+    path, extra = _NO_SHOP_READS[read]
+    if role != "ACCOUNTANT" and read not in _MANAGER_READS:
+        pytest.skip("the role gate refuses this read before any shop is asked")
+    resp = world.get(path, _user(role, None), store_id=DHN, **extra)
+    assert resp.status_code == 403, (read, role, resp.text[:200])
+    assert resp.json()["detail"] == NO_SHOP_DETAIL, (read, role, resp.json())
 
 
 # ============================================================================

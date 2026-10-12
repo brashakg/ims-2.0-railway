@@ -17,12 +17,14 @@ and its no-shop verdict, is_no_shop_scope):
   * GET /reports/gstr3b and /reports/gstr3b/gstn-json -- a return is ONE
     shop's document, so a storeless non-admin is refused 403 in the owner's
     words (NO_SHOP_DETAIL), named shop or not, before anything is computed;
-  * GET /finance/gst/summary -- every shop's by design (OS-031); a storeless
-    non-admin gets the EMPTY summary (all zeros) and neither the sales nor the
-    supplier bills are read.
+  * GET /finance/gst/summary -- the caller's shop (F63, the one shop rule:
+    every shop for ADMIN / SUPERADMIN, else its own -- the OS-031 org-wide
+    reading for every login was retired when the parallel session's at_shop
+    filter was merged, panel 2026-10-08); a storeless non-admin is scoped to
+    NO_SHOP_SCOPE, which matches no sale and no bill: the EMPTY summary.
 Unchanged: ADMIN / SUPERADMIN (every shop; the GSTR-3B's old default shop),
-logins that hold a shop, and a multi-store login with no active shop -- which
-now gets its OWN first shop's return instead of store-001's.
+and a multi-store login with no active shop -- which now gets its OWN first
+shop's return instead of store-001's.
 
 Handlers run for real against mongomock; the last test goes through the live
 app (middleware + routers). No emoji (cp1252).
@@ -106,18 +108,18 @@ def _world() -> Any:
          "tax_amount": 360.0},
     ])
     db["vendor_bills"].insert_many([
-        {"bill_id": "B-1", "bill_number": "PB-1", "vendor_id": "V1",
+        {"bill_id": "B-1", "store_id": S1, "bill_number": "PB-1", "vendor_id": "V1",
          "bill_date": "2026-05-04", "invoice_date": "2026-05-04",
          "recipient_entity_id": "E1", "recipient_gstin": None,
          "taxable_amount": 1111.0, "tax_amount": 100.0, "cgst_total": 50.0,
          "sgst_total": 50.0, "igst_total": 0.0, "status": "OUTSTANDING"},
-        {"bill_id": "B-2", "bill_number": "RCM-1", "vendor_id": "V2",
+        {"bill_id": "B-2", "store_id": S1, "bill_number": "RCM-1", "vendor_id": "V2",
          "bill_date": "2026-05-06", "invoice_date": "2026-05-06",
          "reverse_charge": True, "recipient_entity_id": "E1",
          "recipient_gstin": None, "taxable_amount": 400.0, "tax_amount": 20.0,
          "cgst_total": 10.0, "sgst_total": 10.0, "igst_total": 0.0,
          "status": "OUTSTANDING"},
-        {"bill_id": "B-3", "bill_number": "PB-3", "vendor_id": "V1",
+        {"bill_id": "B-3", "store_id": S1, "bill_number": "PB-3", "vendor_id": "V1",
          "bill_date": "2026-05-08", "invoice_date": "2026-05-08",
          "recipient_entity_id": "E1", "recipient_gstin": None,
          "taxable_amount": 300.0, "tax_amount": 33.0, "cgst_total": 16.5,
@@ -158,7 +160,7 @@ def _client(router, prefix: str, user: Dict[str, Any]) -> TestClient:
 
 
 # ============================================================================
-# GET /finance/gst/summary -- every shop's by design; NO shop's for no shop
+# GET /finance/gst/summary -- the caller's shop; NO shop's for no shop
 # ============================================================================
 
 SUMMARY_URL = "/finance/gst/summary?month=5&year=2026"
@@ -185,11 +187,13 @@ def test_the_world_is_not_empty_admins_and_shop_logins_read_every_shop(summary_d
         body = _summary(admin)
         assert body["gst_collected"] == 540.0, body
         assert (body["gst_input_credit"], body["net_gst_payable"]) == (120.0, 420.0)
-    # A login that holds a shop keeps the org-wide figure (OS-031, unchanged).
+    # A login that holds a shop reads its OWN shop's (F63, the one shop rule;
+    # it used to read every shop's 540 -- OS-031, retired by the merge of the
+    # parallel session's at_shop filter, panel 2026-10-08).
     for role in NON_ADMIN_FINANCE:
-        assert _summary(_user(role, S1, (S1,)))["gst_collected"] == 540.0, role
-    # A multi-store login with no active shop holds shops: unchanged too.
-    assert _summary(_user("AREA_MANAGER", None, (S1, S0)))["gst_collected"] == 540.0
+        assert _summary(_user(role, S1, (S1,)))["gst_collected"] == 180.0, role
+    # A multi-store login with no active shop reads its first own shop.
+    assert _summary(_user("AREA_MANAGER", None, (S1, S0)))["gst_collected"] == 180.0
 
 
 @pytest.mark.parametrize("role", MANAGERS)
@@ -204,8 +208,7 @@ def test_a_storeless_manager_reads_an_empty_summary(summary_db, role):
         assert not {180.0, 360.0, 540.0} & set(
             v for v in body.values() if isinstance(v, (int, float))
         ), body
-        # Neither a sale nor a supplier bill was read for it.
-        assert "orders" not in summary_db.read, summary_db.read
+        # No supplier bill was read for it (R5); its sales read matched none.
         assert "vendor_bills" not in summary_db.read, summary_db.read
 
 
@@ -221,11 +224,9 @@ def test_a_storeless_accountant_reads_no_shops_output_or_input(summary_db):
             body["gst_input_credit_excluded"],
             body["net_gst_payable"],
         ) == (0.0, 0.0, 0.0), body
-        assert "orders" not in summary_db.read, summary_db.read
-        assert "vendor_bills" not in summary_db.read, summary_db.read
-    # The same accountant once it holds a shop: every figure (control).
+    # The same accountant once it holds a shop: its shop's figures (control).
     full = _summary(_user("ACCOUNTANT", S1, (S1,)))
-    assert (full["gst_collected"], full["gst_input_credit"]) == (540.0, 120.0)
+    assert (full["gst_collected"], full["gst_input_credit"]) == (180.0, 120.0)
 
 
 # ============================================================================

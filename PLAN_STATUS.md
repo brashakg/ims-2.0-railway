@@ -1,5 +1,7 @@
 # IMS 2.0 — live plan status
 
+Updated **2026-10-08**. Four more merged 2026-10-01 .. 10-08 (section 4t): per-shop reorder levels (**#1179**), multi-location **PR 4 of 6 (#1160)**, purchase bills that match their form (**#1167**) and the stock-screens fixes (**#1169**). On prod: the July pooled stock-parity task is closed; the trial runs of the reorder-level move and the product switched-on backfill both found nothing to change, so neither was applied. Still in build, none merged: purchase-order edit/cancel #1165, purchase-order form #1170, off-catalogue items #1171, counter stock lookup #1180, unit barcodes #1166, counter-role purchase access #1161, add-product #1174, the purchases report #1184, bought-without-PO #1183, the valued challan #1185, multi-location PR 5 #1163, online order status #1153, the till records the scanned unit #1181, and the owner's 2026-10-08 answers (multi-word search, round-off, default credit limit, reverse charge, admin-controls clean-up, the #1152/#1172 rebuilds).
+
 Updated **2026-10-01**. Seven more merged 2026-09-29 .. 10-01 (section 4s): the owner-approved till stock badge (**#1173**), unit labels for the TSC TE244 (**#1164**), four Wave 6 page splits built and reviewed in the cloud (settings admin editors **#1175**, payroll **#1176**, demand forecast **#1177**, loyalty **#1178**), and two CI/tooling fixes (**#1162**, **#1168**). Still in build, none merged: the procurement-audit fixes (purchase bills #1167, purchase-order edit/cancel #1165, purchase-order form #1170, off-catalogue items #1171, per-shop reorder levels #1179, counter stock lookup #1180, unit barcodes #1166, stock screens #1169, counter-role purchase access #1161, the purchases report, bought-without-PO and the valued inter-company challan), multi-location PRs 4 and 5 (#1160, #1163) and the online order status rules (#1153). Note: Vercel's free plan hit its daily deploy limit on 2026-10-01, so #1178 is merged but reaches the live site with the next deploy.
 
 Updated **2026-09-29**. Eight more merged 2026-09-27/28 (section 4r): Wave 6 items A1, A3, A4, A6 and the clinical and workshop router packages (**#1150, #1151, #1155-#1158**), multi-location **PR 3 of 6 (#1154)**, and this file (#1149). The procurement audit (catalogue → purchase order → goods receipt → purchase invoice → stock, walked as each role on an isolated copy of the database) is **DELIVERED**: 118 confirmed findings, 3 of them blockers; the owner answered every question it raised (three multiple-choice rounds, 2026-09-28/29). Its fixes are **IN BUILD, none merged**: purchase-order edit/cancel/send, counter-role access to purchase data, stock-side bugs with real unit labels for the TSC TE244, unit barcodes without hyphens and the approved till stock badge. Also in build: multi-location PRs 4 and 5, the online order status rules, and the #1141 follow-ups.
@@ -368,6 +370,15 @@ What the five page-split waves left, measured 2026-09-27 (owner page "Wave Six")
 | **#1176** | Wave 6 B14: payroll's salary sheet, advances and payslips get their own addresses inside HR; salary stays ADMIN/SUPERADMIN only. |
 | **#1177** | Wave 6 B13: the demand forecast's three panels get their own addresses; the reorder panel is kept (different data and rule from Inventory > Reorders). |
 | **#1178** | Wave 6 B12: loyalty's overview, tiers and rewards get their own addresses; four tabs that showed no real data are removed (checked one by one first). |
+
+## 4t. Merged 2026-10-01 .. 2026-10-08 (all squash-merged to main)
+
+| PR | What it does |
+|---|---|
+| **#1179** | Reorder levels are per shop: each shop sets its own level, and an unset level means no low-stock alert (owner ruling D12). Prod trial run of the move script: 0 products, 0 shop levels - nothing to move. |
+| **#1160** | Multi-location PR 4 of 6: the nightly stock check compares each shop with its own Shopify location and raises one drift task per shop. The old pooled July task was closed on prod after a trial run. |
+| **#1167** | A booked purchase bill matches its form: IGST stays IGST, the approve buttons work, a bill made from a receipt arrives with its lines filled, and every bill counts in GSTR-3B input credit. |
+| **#1169** | Stock screens: receipts show on Movements, low stock names the product, opening stock ages from the day it was entered (owner ruling 2026-10-08), stock-count times show in IST, a refused receipt takes no number, and purchase tasks go to a named person. Prod trial run of its backfill: 0 rows - nothing to write. |
 
 ## 5. Waiting on the owner
 

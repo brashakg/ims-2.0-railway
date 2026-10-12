@@ -100,6 +100,8 @@ class _TaskRepo:
 def task_repo(monkeypatch) -> _TaskRepo:
     repo = _TaskRepo()
     monkeypatch.setattr("api.dependencies.get_task_repository", lambda: repo)
+    # The staff-to-store lookup: this store's manager, by name (F33).
+    monkeypatch.setattr("api.services.task_triggers._person_holding", lambda role, store: f"{role.lower()}@{store}")
     return repo
 
 
@@ -241,7 +243,7 @@ def test_an_out_of_band_lock_raises_one_store_manager_task(db, task_repo):
     assert len(task_repo.docs) == 1
     task = task_repo.docs[0]
     assert task["source"] == "SYSTEM"
-    assert task["assigned_to"] == "STORE_MANAGER"
+    assert task["assigned_to"] == "store_manager@BV-1"  # a person, not a title
     assert task["store_id"] == "BV-1"
     assert task["source_ref"] == "till_variance:BV-1:2026-06-09"
     assert "SHORT" in task["title"]

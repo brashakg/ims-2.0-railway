@@ -271,10 +271,16 @@ class TestTheRecipientIsNeverGuessed:
         assert db.collections["vendor_bills"] == []
 
     def test_no_shop_picked_is_refused_too(self):
+        """An accountant whose login holds no shop: no shop to book the bill
+        to (purchase_invoices._bill_shop asks the one shop rule) -- refused in
+        the owner's words (R4, 2026-10-12), nothing written."""
+        from api.dependencies import NO_SHOP_DETAIL
+
         db = _two_companies()
         r = _app_as(db, None).post(_URL, json=_services())
-        assert r.status_code == 422, r.text
-        assert r.json()["detail"]["code"] == "RECIPIENT_UNRESOLVED"
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"] == NO_SHOP_DETAIL
+        assert db.collections["vendor_bills"] == []
 
     def test_a_receipt_shop_without_a_company_is_never_the_users_shops(self):
         """P15: goods received at S3 (no company on its store record) while
@@ -746,14 +752,17 @@ class TestNoCheckFailsOpen:
 
     def test_the_cash_flow_door_does_not_ask_for_a_gstin_it_has_no_box_for(self):
         """No shop picked, two companies: the refusal told the accountant to
-        'type our GSTIN', and the Cash Flow form has no such box."""
+        'type our GSTIN', and the Cash Flow form has no such box. A login with
+        no shop at all is now told why in the owner's words (R4: it holds no
+        shop to book to) -- still nothing about a GSTIN box."""
+        from api.dependencies import NO_SHOP_DETAIL
+
         _, cli = TestEveryDoorEveryReader()._world(None)
         r = _door(cli, "V1", bill_number="FR-1", bill_date="2026-05-09",
                   taxable_amount=1000, tax_amount=180, total_amount=1180, bill_kind="SERVICES")
-        assert r.status_code == 422, r.text
-        detail = r.json()["detail"]
-        assert detail["code"] == "RECIPIENT_UNRESOLVED"
-        assert "GSTIN" not in detail["message"] and "top bar" in detail["message"]
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"] == NO_SHOP_DETAIL
+        assert "GSTIN" not in r.json()["detail"]
 
     def test_an_unreadable_bill_list_never_reads_green(self, monkeypatch):
         """_itc_unplaced swallowed any read error and reported 0 bills, so the
@@ -1209,6 +1218,9 @@ class TestTheFormsShopDecidesPreviewAndBooking:
         _same_split(pv, doc)
         assert doc["recipient_gstin"] == BUY_JH and doc["interstate"] is True
         assert doc["igst_total"] == 120.01
+        # ... and the bill is stored under that same shop, not the token's:
+        # one bill never names one shop for its tax and another for its tabs.
+        assert doc["store_id"] == "S1"
 
     def test_a_shop_the_user_cannot_act_for_is_refused(self):
         db = self._world()

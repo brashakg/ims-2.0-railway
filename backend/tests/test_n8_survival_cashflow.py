@@ -217,6 +217,21 @@ def routed(db, monkeypatch):
 # The ORG view the route tests below read is ADMIN / SUPERADMIN's (_admin):
 # the same every-shop figures this accountant used to be handed.
 def _accountant(uid="ACC1"):
+    # A shop of its own (BV-1, where every fixture row below lives): a login
+    # that is not ADMIN / SUPERADMIN and has no shop reads no shop's figures
+    # (owner ruling 2026-10-12, R4 -- api.dependencies.resolve_store_scope);
+    # that login is _storeless_accountant() below. The org view is _admin()'s.
+    return {
+        "user_id": uid,
+        "full_name": "Books",
+        "roles": ["ACCOUNTANT"],
+        "store_ids": ["BV-1"],
+        "active_store_id": "BV-1",
+    }
+
+
+def _storeless_accountant(uid="ACC0"):
+    """An ACCOUNTANT whose login holds no shop at all (R4)."""
     return {
         "user_id": uid,
         "full_name": "Books",
@@ -272,6 +287,7 @@ def _expense(category, amount, store="BV-1", day="2026-06-05", status="APPROVED"
 def _bill(bill_id, total, due, vendor_id="V-1", vendor_name="Lens Co", critical=False):
     return {
         "bill_id": bill_id,
+        "store_id": "BV-1",
         "bill_number": f"INV-{bill_id}",
         "vendor_id": vendor_id,
         "vendor_name": vendor_name,
@@ -603,7 +619,7 @@ def test_r4_a_storeless_accountant_reads_no_shops_survival(routed):
     )["survival"]
     assert org["min_pay_total_paise"] == 6000000  # the world is not empty
     sv = asyncio.run(
-        fin.get_survival_cashflow(store_id=None, current_user=_accountant())
+        fin.get_survival_cashflow(store_id=None, current_user=_storeless_accountant())
     )["survival"]
     assert sv["fixed_costs_paise"] == 0
     assert sv["deferrable_expenses_paise"] == 0
@@ -611,7 +627,7 @@ def test_r4_a_storeless_accountant_reads_no_shops_survival(routed):
     assert sv["projected_income_paise"] == 0
     assert sv["essential_detail"] == [] and sv["deferrable_detail"] == []
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(fin.get_survival_cashflow(store_id="BV-1", current_user=_accountant()))
+        asyncio.run(fin.get_survival_cashflow(store_id="BV-1", current_user=_storeless_accountant()))
     assert exc.value.status_code == 403
 
 

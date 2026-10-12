@@ -829,6 +829,17 @@ async def list_products(
     category: Optional[str] = Query(None),
     brand: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
+    match: Optional[str] = Query(
+        None,
+        pattern="^anywhere$",
+        description=(
+            "'anywhere' = the purchase-order product box's wide search: the "
+            "model number anywhere in the model, brands spelt with or without "
+            "spaces/hyphens, colour words, the GTIN (audit F21). Absent = the "
+            "till's rule: every word from the START of brand / model / SKU / "
+            "variant / barcode (POS, goods receipt and every other search box)."
+        ),
+    ),
     tag: Optional[str] = Query(
         None, description="Filter to products carrying this normalised tag"
     ),
@@ -883,6 +894,7 @@ async def list_products(
         created_by = None
     if not isinstance(photo, str):
         photo = None
+    anywhere = match == "anywhere"
 
     def _stamped(result: Dict[str, Any]) -> Dict[str, Any]:
         # Photo / online truth is stamped on EVERY response, cache hit or
@@ -932,7 +944,7 @@ async def list_products(
     _tier = "mgr" if can_see_attribution else "staff"
     cache_key = (
         f"products:{active_store}:{category}:{brand}:{search}:{tag}:{skip}:{limit}"
-        f":{is_active}:{created_by}:{_tier}:{photo}"
+        f":{is_active}:{created_by}:{_tier}:{photo}:{anywhere}"
     )
     cached = cache.get(cache_key)
     if cached is not None:
@@ -974,9 +986,14 @@ async def list_products(
                 created_by=created_by,
                 skip=_skip,
                 limit=_limit,
+                anywhere=anywhere,
             )
             total_count = repo.count_search_products(
-                search, category, is_active=filtered_active, created_by=created_by
+                search,
+                category,
+                is_active=filtered_active,
+                created_by=created_by,
+                anywhere=anywhere,
             )
         elif brand:
             products = repo.find_by_brand(

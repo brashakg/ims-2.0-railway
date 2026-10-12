@@ -45,6 +45,13 @@ class _GRNRepo:
         self.created.append(doc)
         return doc
 
+    def update(self, grn_id, fields):
+        for d in self.created:
+            if d.get("grn_id") == grn_id:
+                d.update(fields)
+                return True
+        return False
+
 
 class _FileStore:
     """A live file store whose reads always find the attachment (gate passes).
