@@ -117,6 +117,7 @@ def _seed(db):
             "brand": "Ray-Ban",
             "mrp": 9999.0,
             "offer_price": 9999.0,
+            "gst_rate": 12,
             "cost_price": COST,
             "landed_cost": COST,
             "is_active": True,
@@ -322,6 +323,39 @@ def test_counter_role_reads_no_cost(client, shop, role, method, path, extra):
 def test_managers_still_read_the_cost(client, shop, role, method, path, extra):
     body = _get(client, role, method, path)
     assert _cost_keys(body, extra), (role, path, body)
+
+
+def _without_cost_keys(body):
+    """`body` without the keys _cost_keys names, at any depth (this file's rule)."""
+    if isinstance(body, dict):
+        return {k: _without_cost_keys(v) for k, v in body.items() if not _cost_keys({k: 0})}
+    if isinstance(body, list):
+        return [_without_cost_keys(v) for v in body]
+    return body
+
+
+# The till bills from the scan reply: a counter role's must be the manager's
+# with only the cost keys gone -- the joined product (name, MRP, offer price,
+# GST rate), the barcode, the status and the other-shop flag all kept.
+_SCANS = (
+    ("/api/v1/inventory/barcode/2900000000017", False),
+    (f"/api/v1/inventory/barcode/2900000000017?store_id={OTHER}", True),
+    ("/api/v1/inventory/stock/barcode/2900000000017", None),  # no product join
+)
+
+
+@pytest.mark.parametrize("role", COUNTER_ROLES)
+@pytest.mark.parametrize("path,foreign", _SCANS)
+def test_the_till_scans_for_counter_roles_as_for_managers(client, shop, role, path, foreign):
+    got = _get(client, role, "GET", path)
+    assert got == _without_cost_keys(_get(client, "ADMIN", "GET", path)), got
+    assert (got["barcode"], got["status"]) == ("2900000000017", "AVAILABLE"), got
+    if foreign is not None:
+        assert got["cross_store"] is foreign, got
+        p = got["product"]
+        assert (p["name"], p["mrp"], p["offer_price"], p["gst_rate"]) == (
+            "Aviator", 9999.0, 9999.0, 12
+        ), p
 
 
 def _narrow_product_rule(monkeypatch, role):
