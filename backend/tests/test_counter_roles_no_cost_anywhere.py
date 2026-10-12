@@ -143,6 +143,19 @@ def _seed(db):
     db.customers.insert_one(
         {"customer_id": "C1", "name": "Asha", "phone": "9876500001", "store_id": STORE}
     )
+    db.lens_catalog.insert_one(
+        {
+            "lens_line_id": "LL1",
+            "brand": "Essilor",
+            "series": "Crizal",
+            "index": 1.5,
+            "material": "CR39",
+            "lens_type": "SV",
+            "coating": "HC",
+            "cost_price": COST,
+            "is_active": True,
+        }
+    )
     db.orders.insert_one(
         {
             "order_id": "O1",
@@ -308,6 +321,9 @@ READS = [
     ("GET", "/api/v1/inventory/stock/barcode/2900000000017", ()),
     ("GET", "/api/v1/inventory/expiring", ()),
     ("GET", "/api/v1/inventory/barcode/2900000000017/trace", ()),
+    ("GET", "/api/v1/lens-catalog", ()),
+    ("GET", "/api/v1/lens-catalog/", ()),
+    ("GET", "/api/v1/lens-catalog/LL1", ()),
     ("GET", "/api/v1/reports/purchase/recommendations", ()),
     ("GET", f"/api/v1/inventory/stock-count?store_id={STORE}", ()),
     ("GET", "/api/v1/inventory/stock-count/SC1", ()),
@@ -442,6 +458,85 @@ def test_narrowing_the_product_rule_moves_every_shop_cost_read(
         assert not _cost_keys(body, extra), (dropped, path, _cost_keys(body, extra))
         assert not _figures_in(body), (dropped, path, body)
         assert _cost_keys(_get(client, "ADMIN", method, path), extra), path
+
+
+# ---------------------------------------------------------------------------
+# Serials: the unit, its warranty lookup (unit + the sold order) and the
+# manager-only sell / recall / return replies
+# ---------------------------------------------------------------------------
+_SERIAL_READERS = ("SALES_STAFF", "SALES_CASHIER", "CASHIER", "OPTOMETRIST")
+_SERIAL_READS = ("/api/v1/serials/SN12345", "/api/v1/serials/warranty/SN12345")
+
+
+def _serial_unit(db, serial, status, **over):
+    db.stock_units.insert_one(
+        {
+            "stock_id": f"U-{serial}",
+            "serial": serial,
+            "product_id": "P1",
+            "store_id": STORE,
+            "status": status,
+            "quantity": 1,
+            "cost_price": COST,
+            "unit_cost": COST,
+            "warranty_months": 12,
+            **over,
+        }
+    )
+
+
+@pytest.fixture
+def serials(shop, monkeypatch):
+    from api.routers import serial_tracking as st
+
+    # No Shopify write-back from a test (the per-shop stock sync).
+    monkeypatch.setattr(st, "_sync_online_stock", lambda *a, **k: None)
+    _serial_unit(shop, "SN12345", "SOLD", order_id="O1", sold_to_customer_id="C1",
+                 sold_at=datetime.now().isoformat())
+    return shop
+
+
+@pytest.mark.parametrize("role", _SERIAL_READERS)
+@pytest.mark.parametrize("path", _SERIAL_READS)
+def test_counter_roles_read_a_serial_without_cost(client, serials, role, path):
+    body = _get(client, role, "GET", path)
+    assert body["serial"] == "SN12345" and body["status"] == "SOLD", body
+    assert not _cost_keys(body), (role, path, _cost_keys(body))
+    assert not _figures_in(body), body
+    if "warranty" in path:  # the sold order still names what was sold
+        assert body["order"]["items"][0]["product_name"] == "Aviator", body
+
+
+@pytest.mark.parametrize("role", MANAGERS)
+@pytest.mark.parametrize("path", _SERIAL_READS)
+def test_managers_read_a_serial_with_its_cost(client, serials, role, path):
+    keys = _cost_keys(_get(client, role, "GET", path))
+    assert keys, (role, path)
+    if "warranty" in path:
+        assert "$.order.items[0].cost_at_sale" in keys, keys
+
+
+# (path, the unit's state before, body) -- STORE_MANAGER reaches all three.
+_SERIAL_WRITES = (
+    ("/api/v1/serials/SN-W/mark-sold", "IN_STOCK", {"order_id": "O1"}),
+    ("/api/v1/serials/SN-W/recall", "IN_STOCK", {"reason": "batch fault"}),
+    ("/api/v1/serials/SN-W/return", "SOLD", None),
+)
+
+
+@pytest.mark.parametrize("narrowed", (False, True))
+@pytest.mark.parametrize("path,before,body", _SERIAL_WRITES)
+def test_a_serial_write_answers_cost_by_the_product_rule(
+    client, serials, monkeypatch, path, before, body, narrowed
+):
+    if narrowed:
+        _narrow_product_rule(monkeypatch, "STORE_MANAGER")
+    _serial_unit(serials, "SN-W", before)
+    r = client.post(path, json=body, headers=_headers("STORE_MANAGER"))
+    assert r.status_code == 200, r.text
+    assert r.json()["serial"] == "SN-W" and r.json()["status"] != before, r.json()
+    assert bool(_cost_keys(r.json())) is not narrowed, r.json()
+    assert serials.stock_units.find_one({"serial": "SN-W"})["cost_price"] == COST
 
 
 @pytest.mark.parametrize("role", ("SALES_STAFF", "SALES_CASHIER"))
