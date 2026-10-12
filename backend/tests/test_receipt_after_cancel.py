@@ -1002,12 +1002,17 @@ def test_escalate_is_store_scoped(monkeypatch):
     assert grn_repo.docs[gid]["status"] == "PENDING"
 
 
-def test_a_one_unit_over_delivery_is_flagged(monkeypatch):
-    """R1 at its edge: P1 ordered 5, untouched; a receipt of 6 is accepted
-    and raises exactly one over-delivery task for the 1 extra unit."""
+@pytest.mark.parametrize("line", [None, "0"], ids=["unnamed", "first-line-named"])
+def test_a_one_unit_over_delivery_is_flagged(monkeypatch, line):
+    """R1 at its edge: P1 ordered 5 on the order's first line, untouched; a
+    receipt of 6 is accepted and raises exactly one over-delivery task for the
+    1 extra unit, whether or not the receipt line names that line."""
     po = _po(_line("P1", "Frame X", 5), _line("P3", "Vogue", 1))
     _grn_repo, _po_repo, stock, tasks = _wire(monkeypatch, po=po)
-    gid = _create("normal", _items("P1", 6), _user())["grn_id"]
+    items = _items("P1", 6)
+    if line is not None:
+        items[0]["po_item_id"] = line
+    gid = _create("normal", items, _user())["grn_id"]
     assert _accept(gid)["grn_status"] == "ACCEPTED"
     assert len([u for u in stock.units if u["product_id"] == "P1"]) == 6
     [task] = _over_tasks(tasks)
@@ -1035,45 +1040,98 @@ def _cl(qty, line=None):
     return row
 
 
+_TOLD_APART = (
+    "This order has a cancelled line for Acuvue, so extra units cannot be "
+    "told apart from the cancelled ones. Mark the extra rejected, or "
+    "receive it on a new order.")
+
+
 @pytest.mark.parametrize("lines", [
-    [_cl(5)],                    # names no line (the panel's CL1 probe)
-    [_cl(5, line="CL1")],        # an older screen: the product id names no line
+    [_cl(5)],
+    [_cl(5, line="CL1")],                  # an older screen sent the product id
     [_cl(4, line="1"), _cl(1, line="2")],  # one unit names the cancelled line
-    [_cl(5, line="3")],          # a line of another product names nothing
-    [_cl(2, line="0"), _cl(3)],  # the 2 named fit their line and take its room
-], ids=["unnamed", "product-id", "cancelled-line", "other-product", "named-fit"])
-def test_an_extra_that_cannot_be_told_from_the_cancelled_units_is_refused(monkeypatch, lines):
-    """4 of CL1 live, 2 cancelled (the -3.00 line). 5 accepted that cannot all
-    be put on an untouched line is refused -- owner ruling (a) wins when the
-    lines cannot be told apart -- and the refusal says only what is known:
-    the order has a cancelled line for the product."""
+    [_cl(5, line="3")],                    # a line of another product
+    [_cl(2, line="0"), _cl(3)],
+    [_cl(2, line="0"), _cl(3, line="1")],  # every unit names an untouched line
+    [_cl(3, line="0"), _cl(2, line="1")],  # the first line named, one over it
+], ids=["unnamed", "product-id", "cancelled-line", "other-product", "part-named",
+        "all-named", "first-line-over"])
+def test_an_extra_of_a_product_with_a_cancelled_line_is_refused(monkeypatch, lines):
+    """Owner ruling (a), held per PRODUCT: CL1 has 4 live and 2 cancelled (the
+    -3.00 line). A stock unit carries its product, never its order line, and
+    the receive screens list only the open lines, so a line a receipt names is
+    a screen default, never a choice between a cancelled line and an open one.
+    Whatever line it names, a 5th CL1 cannot be told apart from the cancelled
+    units: it is refused, and the refusal says only what is known."""
     grn_repo, _po_repo, stock, _t = _wire(monkeypatch, po=_cl_order())
     with pytest.raises(HTTPException) as e:
         _create("normal", lines, _user())
     assert e.value.status_code == 400
-    assert e.value.detail == (
-        "This order has a cancelled line for Acuvue, so extra units cannot be "
-        "told apart from the cancelled ones. Mark the extra rejected, or "
-        "receive it on a new order.")
+    assert e.value.detail == _TOLD_APART
     assert grn_repo.docs == {} and stock.units == []
 
 
-@pytest.mark.parametrize("lines", [
-    [_cl(2, line="0"), _cl(3, line="1")],
-    [_cl(3, line="1"), _cl(2)],  # the 2 unnamed fit the -1.00 line's room
-], ids=["all-named", "extra-named"])
-def test_an_extra_on_a_named_untouched_line_is_accepted_and_flagged(monkeypatch, lines):
-    """Ruling (b) per line: the receipt names its lines (the receive screens
-    send each line's position) -- 3 on -2.00, which ordered 2. The one extra
-    is on a line with no cancel, so it is accepted and flagged, never refused
-    -- at create and at accept. Only the named units that fit their line take
-    room, so 2 more that name no line still fit beside them."""
-    grn_repo, _po_repo, stock, tasks = _wire(monkeypatch, po=_cl_order())
-    gid = _create("normal", lines, _user())["grn_id"]
-    assert _accept(gid)["grn_status"] == "ACCEPTED"
-    assert len([u for u in stock.units if u["product_id"] == "CL1"]) == 5
-    [task] = _over_tasks(tasks)
-    assert "Acuvue: 1 more than ordered (5 received, 4 ordered)" in task["description"]
+def _cancelled_twin(cut=True):
+    """The panel's probe: Acuvue on line 0 (4, untouched) and on line 1 (5,
+    cancelled outright before anything arrived), Frame X on line 2. The cockpit
+    lists only lines 0 and 2, so every Acuvue unit received names line 0."""
+    twin = (_line("CL1", "Acuvue", 0, ordered_qty=5, cancelled_qty=5, line_status="CANCELLED")
+            if cut else _line("CL1", "Acuvue", 5))
+    po = _po(_line("CL1", "Acuvue", 4), twin)
+    po["items"].append(_line("P1", "Frame X", 1))
+    return po
+
+
+@pytest.mark.parametrize("kind", ["normal", "express"])
+def test_cancelled_units_named_to_the_open_line_are_refused_at_create(monkeypatch, kind):
+    """The vendor ignores the cancel and ships all 9 Acuvue; the receiver
+    enters 9 on the only Acuvue row, which names line 0. No cancelled unit
+    enters stock: refused, nothing logged, nothing minted."""
+    grn_repo, _po_repo, stock, _t = _wire(monkeypatch, po=_cancelled_twin())
+    with pytest.raises(HTTPException) as e:
+        _create(kind, [_cl(9, line="0")], _user())
+    assert e.value.status_code == 400
+    assert e.value.detail == _TOLD_APART
+    assert grn_repo.docs == {} and stock.units == []
+
+
+def test_cancelled_units_named_to_the_open_line_are_refused_at_accept(monkeypatch):
+    """The same 9, logged before line 1 was cancelled: the accept refuses them."""
+    grn_repo, po_repo, stock, _t = _wire(monkeypatch, po=_cancelled_twin(cut=False))
+    gid = _create("normal", [_cl(9, line="0")], _user())["grn_id"]
+    po_repo.po.clear()
+    po_repo.po.update(_cancelled_twin())
+    out = _accept(gid)
+    assert isinstance(out, HTTPException) and out.status_code == 409, out
+    assert stock.units == [] and grn_repo.docs[gid]["status"] == "PENDING"
+
+
+@pytest.mark.parametrize("order", ["named-first", "unnamed-first", "named-while-unnamed-mints"])
+def test_two_receipts_of_a_cut_product_never_stock_past_its_live_quantity(monkeypatch, order):
+    """4 Acuvue live. A names line 0 with 4; B names no line with 4 (a receipt
+    the old GRN screen logged with the product id, or an API caller). In
+    either order, and with A accepted while B is still minting, the second is
+    refused and 4 go into stock."""
+    grn_repo, _po_repo, stock, _t = _wire(monkeypatch, po=_cancelled_twin())
+    _atomic_claims(grn_repo)
+    a = _create("normal", [_cl(4, line="0")], _user(), inv="INV-A")["grn_id"]
+    b = _create("normal", [_cl(4)], _user(), inv="INV-B")["grn_id"]
+    if order == "named-while-unnamed-mints":
+        inside, release = _parked(monkeypatch, stock, "create", lambda doc: True)
+        t, out_b = _in_background(b)
+        assert inside.wait(10), "B never reached its first unit"
+        try:
+            out = _accept(a)
+        finally:
+            release.set()
+            t.join(15)
+        assert out_b["r"]["grn_status"] == "ACCEPTED", out_b
+    else:
+        first, second = (a, b) if order == "named-first" else (b, a)
+        assert _accept(first)["grn_status"] == "ACCEPTED"
+        out = _accept(second)
+    assert isinstance(out, HTTPException) and out.status_code == 409, out
+    assert len([u for u in stock.units if u["product_id"] == "CL1"]) == 4
 
 
 def _remembering_tasks(monkeypatch):
