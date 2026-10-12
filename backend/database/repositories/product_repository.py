@@ -187,7 +187,8 @@ class ProductRepository(BaseRepository):
         The bulk import writes a twin with no spine, and the Shopify push sends
         a twin's gtin as its variant barcode, so the one-holder rule reads twins
         too: every field the push reads a barcode from, in every spelling. A
-        spine's twin is keyed on its id or pim_product_id and shares its sku."""
+        spine's own twin is the one keyed on its id or pim_product_id -- never
+        one that merely shares its sku (an unrelated review-queue twin can)."""
         spellings = gtin_spellings(barcode)
         db = getattr(self.collection, "database", None)
         if not spellings or db is None:
@@ -202,8 +203,6 @@ class ProductRepository(BaseRepository):
             own = self.find_by_id(exclude_product_id) or {}
             ids = [exclude_product_id, own.get("pim_product_id")]
             query["id"] = {"$nin": [i for i in ids if i]}
-            if own.get("sku"):
-                query["sku"] = {"$ne": own["sku"]}
         return db["catalog_products"].find_one(query)
 
     def _category_filter(

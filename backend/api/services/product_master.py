@@ -1469,8 +1469,8 @@ def write_spine_gtin(product_repo, product_id: Any, gtin: str) -> None:
     the same write. ProductMasterError 503 when the write is not confirmed:
     the legacy barcode then stays where it was. update() answers
     modified_count > 0, so a write that changed nothing (the spine already held
-    this gtin and its updated_at landed in the same millisecond as the price
-    sync just before) answers False too: the stored code is the confirmation."""
+    this gtin and its updated_at landed in the same millisecond as the write
+    before it) answers False too: the stored code is the confirmation."""
     current = product_repo.find_by_id(product_id) or {}
     if isinstance(current.get("attributes"), dict):
         patch: Dict[str, Any] = {"attributes.gtin": gtin}
@@ -1480,8 +1480,8 @@ def write_spine_gtin(product_repo, product_id: Any, gtin: str) -> None:
         product_repo.find_by_id(product_id), gtin
     ):
         raise ProductMasterError(
-            "The catalogue copy was saved, but the billing product's barcode "
-            "could not be updated. Please save again.",
+            "The billing product's barcode could not be updated, so nothing "
+            "was saved. Please save again.",
             status=503,
             field="gtin",
         )

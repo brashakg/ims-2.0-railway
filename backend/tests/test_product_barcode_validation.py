@@ -232,7 +232,9 @@ class TestBarcodeValidatorPure:
 
     def test_a_products_own_twin_is_not_a_clash(self):
         """A spine's twin carries the same gtin; it is keyed on the spine's
-        pim_product_id (door-created), its product_id (legacy) or its sku."""
+        pim_product_id (door-created) or its product_id (legacy). A twin that
+        only shares the sku is another product (round 13): a review-queue
+        twin can, and its code is held."""
         from api.routers.products import _validate_product_barcode_or_400
 
         repo = _FakeRepo(
@@ -250,7 +252,9 @@ class TestBarcodeValidatorPure:
         )
         _validate_product_barcode_or_400(_VALID_A, repo, "p1")
         _validate_product_barcode_or_400(_VALID_B, repo, "p2")
-        _validate_product_barcode_or_400(_UPC_A, repo, "p3")
+        with pytest.raises(HTTPException) as ei:
+            _validate_product_barcode_or_400(_UPC_A, repo, "p3")
+        assert ei.value.status_code == 409
         # ... while another product's twin still clashes.
         repo.collection.database["catalog_products"].insert_one(
             {"id": "imp-9", "sku": "IMP-9", "gtin": _EAN_8}

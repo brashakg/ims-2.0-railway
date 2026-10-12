@@ -839,13 +839,10 @@ def test_review_editor_keeps_the_legacy_barcode_when_the_spine_write_fails(
 
 def test_a_spine_gtin_write_that_changes_nothing_is_no_failure(gtin_env, monkeypatch):
     """Round 9. BaseRepository.update answers modified_count > 0: re-saving the
-    gtin the spine already holds, in the same millisecond as the price sync
-    just before it (BSON keeps ms), changed nothing and 503'd a save that
-    worked. Frozen clock = the same millisecond."""
+    gtin the spine already holds, in the same millisecond as the spine write
+    before it (BSON keeps ms), changed nothing and 503'd a save that worked.
+    Frozen clock = the same millisecond."""
     import database.repositories.base_repository as base_repo
-
-    _put("twin-g1", {"attributes": {"gtin": _GTIN}})
-    gtin_env.collection.update_one({"product_id": "spine-g1"}, {"$set": {"barcode": _UPC}})
 
     class _SameMs(datetime):
         @classmethod
@@ -853,6 +850,8 @@ def test_a_spine_gtin_write_that_changes_nothing_is_no_failure(gtin_env, monkeyp
             return datetime(2026, 10, 1, 12, 0, 0)
 
     monkeypatch.setattr(base_repo, "datetime", _SameMs)
+    _put("twin-g1", {"attributes": {"gtin": _GTIN}})
+    gtin_env.collection.update_one({"product_id": "spine-g1"}, {"$set": {"barcode": _UPC}})
     _put("twin-g1", {"attributes": {"gtin": _GTIN}, "pricing": {"mrp": 5200.0}})
     spine = gtin_env.find_by_id("spine-g1")
     assert spine["attributes"]["gtin"] == _GTIN and spine["mrp"] == 5200.0
@@ -860,111 +859,55 @@ def test_a_spine_gtin_write_that_changes_nothing_is_no_failure(gtin_env, monkeyp
 
 
 @pytest.mark.parametrize(
-    "later", [{"attributes": {"colour_code": "RED"}}, {"pricing": {"mrp": 5200.0}}]
+    "later",
+    [
+        {"pricing": {"mrp": 5200.0}},
+        {"attributes": {"colour_code": "RED"}},
+        {"is_active": False},
+    ],
 )
-def test_the_next_save_repairs_a_spine_a_failed_gtin_write_left_behind(
-    gtin_env, monkeypatch, later
+def test_a_save_that_moves_no_barcode_writes_none(gtin_env, later):
+    """Round 13 (the panel's probes). The one-way repair copied the twin's
+    gtin onto the spine on ANY save, taking the twin as the newer copy: a
+    stale twin overwrote the code Manage Barcode had just put on the spine,
+    and a price fix rewrote barcodes it never touched. A save that moves no
+    barcode writes none, whichever copy holds what."""
+    catalog_mod.CATALOG_PRODUCTS["twin-g1"]["attributes"]["gtin"] = _GTIN
+    gtin_env.collection.update_one(
+        {"product_id": "spine-g1"},
+        {"$set": {"attributes.gtin": _UPC, "is_active": True}},
+    )
+    _put("twin-g1", later)
+    assert gtin_env.find_by_id("spine-g1")["attributes"]["gtin"] == _UPC
+    assert catalog_mod.CATALOG_PRODUCTS["twin-g1"]["attributes"]["gtin"] == _GTIN
+    # A spine with no code is not given the twin's either, and keeps its
+    # legacy barcode (a gtin write drops it).
+    gtin_env.collection.update_one(
+        {"product_id": "spine-g1"},
+        {"$unset": {"attributes.gtin": ""}, "$set": {"barcode": "96385074"}},
+    )
+    _put("twin-g1", later)
+    spine = gtin_env.find_by_id("spine-g1")
+    assert "gtin" not in spine["attributes"] and spine["barcode"] == "96385074"
+
+
+def test_a_refused_spine_gtin_write_saves_nothing_and_save_again_lands_it(
+    gtin_env, monkeypatch
 ):
-    """Round 9. The twin saves (new gtin, new updated_at) BEFORE the spine
-    write; when that 503s, the review editor's retry 409s on its old
-    updated_at, reloads, and its diff-only payload no longer carries the gtin.
-    So no later save wrote it: the push sent the code while the till and
-    Manage Barcode saw none, for good. Any later save now repairs it."""
+    """Round 13. With no repair, a gtin the review editor sends reaches the
+    spine in THAT save or not at all. The spine write runs before the twin's
+    and after every check: a refused one 503s with NOTHING saved, so the
+    client's retry or 'save again' -- the same payload and updated_at, no 409
+    and no reload that drops the gtin -- writes both copies, and the
+    take-down the save carried runs exactly once."""
+    gtin_env.collection.update_one(
+        {"product_id": "spine-g1"}, {"$set": {"is_active": True, "barcode": _UPC}}
+    )
     real_update = gtin_env.update
     refuse = {"on": True}
 
     def _refuse_gtin(pid, data):
         if refuse["on"] and any(k.startswith("attributes") for k in data):
-            return False
-        return real_update(pid, data)
-
-    monkeypatch.setattr(gtin_env, "update", _refuse_gtin)
-    with pytest.raises(HTTPException) as exc:
-        _put("twin-g1", {"attributes": {"gtin": _GTIN}})
-    assert exc.value.status_code == 503
-    assert catalog_mod.CATALOG_PRODUCTS["twin-g1"]["gtin"] == _GTIN
-    refuse["on"] = False
-    _put("twin-g1", later)
-    assert gtin_env.find_by_id("spine-g1")["attributes"]["gtin"] == _GTIN
-
-
-def test_a_blank_or_junk_twin_gtin_never_reaches_the_spine(gtin_env):
-    """The repair runs only toward a publishable twin code: a twin with no gtin
-    never blanks the spine's, and a stored junk one is never copied over."""
-    gtin_env.collection.update_one(
-        {"product_id": "spine-g1"}, {"$set": {"attributes.gtin": _UPC}}
-    )
-    _put("twin-g1", {"attributes": {"colour_code": "RED"}})
-    assert gtin_env.find_by_id("spine-g1")["attributes"]["gtin"] == _UPC
-    catalog_mod.CATALOG_PRODUCTS["twin-g1"]["attributes"]["gtin"] = "2000000000015"
-    _put("twin-g1", {"pricing": {"mrp": 5200.0}})
-    assert gtin_env.find_by_id("spine-g1")["attributes"]["gtin"] == _UPC
-
-
-def test_the_repair_writes_the_normalised_code_never_the_typed_one(gtin_env):
-    """Round 11. Main stored twin gtins as typed ('4006381 333931'). The
-    repair compared and wrote that raw string, so a price-only save put the
-    space on a spine that held the clean code, and the till's exact scan (and
-    the one-holder check) stopped finding the product."""
-    gtin_env.collection.update_one(
-        {"product_id": "spine-g1"},
-        {"$set": {"attributes.gtin": _GTIN, "barcode": _UPC, "is_active": True}},
-    )
-    catalog_mod.CATALOG_PRODUCTS["twin-g1"]["attributes"]["gtin"] = "4006381 333931"
-
-    def _till(code):
-        return [d["product_id"] for d in gtin_env.search_products(code)]
-
-    assert _till(_GTIN) == ["spine-g1"]
-    _put("twin-g1", {"pricing": {"mrp": 5200.0}})
-    spine = gtin_env.find_by_id("spine-g1")
-    assert spine["attributes"]["gtin"] == _GTIN
-    # One code in two spellings is no repair: a price-only save leaves every
-    # barcode where it was (a gtin write would drop the legacy one).
-    assert spine["barcode"] == _UPC
-    assert _till(_GTIN) == ["spine-g1"]
-    # A spine with no code takes the normalised one, never the typed spelling.
-    gtin_env.collection.update_one(
-        {"product_id": "spine-g1"}, {"$unset": {"attributes.gtin": ""}}
-    )
-    _put("twin-g1", {"pricing": {"mrp": 5300.0}})
-    assert gtin_env.find_by_id("spine-g1")["attributes"]["gtin"] == _GTIN
-    assert _till(_GTIN) == ["spine-g1"]
-
-
-def test_the_repair_reads_a_upc_a_and_its_13_digit_form_as_one_code(gtin_env):
-    """Round 12. The repair compared exact strings, so a spine holding the
-    13-digit form of its twin's UPC-A was 'behind': a price-only save rewrote
-    the spine's spelling and dropped its legacy barcode. One code, any
-    spelling (gtin_spellings, as the till and the one-holder check read it)."""
-    gtin_env.collection.update_one(
-        {"product_id": "spine-g1"},
-        {"$set": {"attributes.gtin": "0" + _UPC, "barcode": _GTIN}},
-    )
-    catalog_mod.CATALOG_PRODUCTS["twin-g1"]["attributes"]["gtin"] = _UPC
-    _put("twin-g1", {"pricing": {"mrp": 5200.0}})
-    spine = gtin_env.find_by_id("spine-g1")
-    assert spine["attributes"]["gtin"] == "0" + _UPC
-    assert spine["barcode"] == _GTIN and spine["mrp"] == 5200.0
-
-
-@pytest.mark.parametrize("sent", [{}, {"attributes": {"gtin": _GTIN}}])
-def test_a_failed_spine_gtin_write_never_skips_the_take_down(
-    gtin_env, monkeypatch, caplog, sent
-):
-    """Round 12. The spine gtin write ran BEFORE the take-down: when it failed,
-    the save 503'd with twin and spine already off, and the retry's was_active
-    was False, so it never delisted -- the website kept selling an item IMS had
-    switched off. The repair (this save sent no gtin) now saves and logs; a
-    gtin the save carried still 503s, but only after the take-down ran."""
-    catalog_mod.CATALOG_PRODUCTS["twin-g1"]["attributes"]["gtin"] = _GTIN
-    gtin_env.collection.update_one(
-        {"product_id": "spine-g1"}, {"$set": {"is_active": True}}
-    )
-    real_update = gtin_env.update
-
-    def _refuse_gtin(pid, data):
-        if any(k.startswith("attributes") for k in data):
             return False
         return real_update(pid, data)
 
@@ -975,37 +918,66 @@ def test_a_failed_spine_gtin_write_never_skips_the_take_down(
 
     monkeypatch.setattr(gtin_env, "update", _refuse_gtin)
     monkeypatch.setattr(catalog_mod._delist, "on_active_flip", _flip)
-    if sent:
-        with pytest.raises(HTTPException) as exc:
-            _put("twin-g1", {"is_active": False, **sent})
-        assert exc.value.status_code == 503
-    else:
-        with caplog.at_level("WARNING"):
-            _put("twin-g1", {"is_active": False})
-        assert "spine gtin repair failed for twin-g1" in caplog.text
-    assert flips == [(True, False)]
-    assert gtin_env.find_by_id("spine-g1")["is_active"] is False
-    assert "gtin" not in gtin_env.find_by_id("spine-g1")["attributes"]
+    loaded = catalog_mod.CATALOG_PRODUCTS["twin-g1"]["updated_at"]
+    payload = {
+        "attributes": {"gtin": _GTIN},
+        "is_active": False,
+        "expected_updated_at": loaded,
+    }
+    with pytest.raises(HTTPException) as exc:
+        _put("twin-g1", payload)
+    assert exc.value.status_code == 503
+    assert "nothing was saved" in exc.value.detail
+    twin = catalog_mod.CATALOG_PRODUCTS["twin-g1"]
+    assert twin["updated_at"] == loaded and twin["is_active"] is True
+    assert "gtin" not in twin["attributes"] and not twin.get("gtin")
+    spine = gtin_env.find_by_id("spine-g1")
+    assert "gtin" not in spine["attributes"] and spine["is_active"] is True
+    assert spine["barcode"] == _UPC and flips == []
+
+    refuse["on"] = False
+    _put("twin-g1", payload)
+    twin = catalog_mod.CATALOG_PRODUCTS["twin-g1"]
+    assert twin["attributes"]["gtin"] == _GTIN and twin["gtin"] == _GTIN
+    assert twin["is_active"] is False
+    spine = gtin_env.find_by_id("spine-g1")
+    assert spine["attributes"]["gtin"] == _GTIN and spine["is_active"] is False
+    assert "barcode" not in spine and flips == [(True, False)]
 
 
-@pytest.mark.parametrize("later", [{"is_active": False}, {"pricing": {"mrp": 5200.0}}])
-def test_the_repair_never_refuses_a_save_or_takes_a_code_another_product_holds(
-    gtin_env, caplog, later
-):
-    """Round 11. The twin holds a publishable gtin its spine lacks, and
-    ANOTHER product holds that code (main's review editor wrote twin gtins
-    with no uniqueness check). A take-down or a price fix touches no barcode:
-    it saves, and the repair is skipped -- never 409, and never the code onto
-    a second product (one GTIN, one product) -- with a warning in the log."""
-    catalog_mod.CATALOG_PRODUCTS["twin-g1"]["attributes"]["gtin"] = _GTIN
-    gtin_env.create({"product_id": "spine-other", "sku": "OTHER-1",
-                     "attributes": {"gtin": _GTIN}})
-    with caplog.at_level("WARNING"):
-        _put("twin-g1", later)
-    assert "gtin" not in gtin_env.find_by_id("spine-g1")["attributes"]
-    assert gtin_env.find_by_id("spine-other")["attributes"]["gtin"] == _GTIN
-    assert catalog_mod.CATALOG_PRODUCTS["twin-g1"]["attributes"]["gtin"] == _GTIN
-    assert "spine gtin repair skipped for twin-g1" in caplog.text
+def test_a_twin_sharing_only_a_sku_never_writes_or_excuses_that_spine(gtin_env):
+    """Round 13 (the panel's probe). A review-queue twin can share its sku
+    with an UNRELATED product's spine (promote 409s on exactly that). The
+    spine was resolved by sku alone, so this twin's saves wrote that
+    product's price and barcode, and that product's code passed the
+    one-holder check as this twin's own. Only a LINKED spine (its product_id
+    or pim_product_id is the twin's id) is the twin's."""
+    gtin_env.create({"product_id": "spine-other", "sku": "DUP1", "mrp": 9000.0,
+                     "attributes": {"gtin": _UPC}})
+    doc = _bvi_doc(doc_id="twin-imp", sku="DUP1")
+    doc["attributes"]["gtin"] = _GTIN
+    catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
+    _put("twin-imp", {"pricing": {"mrp": 5200.0}})
+    other = gtin_env.find_by_id("spine-other")
+    assert other["attributes"]["gtin"] == _UPC and other["mrp"] == 9000.0
+    # The other product's code is another holder's ...
+    with pytest.raises(HTTPException) as exc:
+        _put("twin-imp", {"attributes": {"gtin": _UPC}})
+    assert exc.value.status_code == 409 and "DUP1" in str(exc.value.detail)
+    # ... and a code nobody holds lands on the twin alone, saying so (a
+    # linked twin's answer does not).
+    res = _put("twin-imp", {"attributes": {"gtin": "96385074"}})
+    assert "catalogue copy only" in res["message"]
+    assert catalog_mod.CATALOG_PRODUCTS["twin-imp"]["gtin"] == "96385074"
+    assert gtin_env.find_by_id("spine-other")["attributes"]["gtin"] == _UPC
+    res = _put("twin-g1", {"attributes": {"gtin": _GTIN}})
+    assert "catalogue copy only" not in res["message"]
+    # The other way round: that spine's own edits see the twin as a holder.
+    gtin_env.collection.database["catalog_products"].insert_one(
+        {"id": "twin-imp", "sku": "DUP1", "attributes": {"gtin": "96385074"}}
+    )
+    clash = gtin_env.find_twin_by_barcode("96385074", exclude_product_id="spine-other")
+    assert clash["id"] == "twin-imp"
 
 
 @pytest.mark.parametrize("typed", ["", None])

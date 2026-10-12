@@ -1451,8 +1451,8 @@ def _spine_product_id(repo, catalog_doc: Optional[Dict]) -> Optional[str]:
     A legacy / convergence twin shares the spine id. A DOOR-created twin
     (product_master.create_product: 71 of 77 live products on the 08-30
     census, and every size variant) is keyed by the spine's pim_product_id
-    -- a DIFFERENT uuid -- so the id lookup misses, and the ONE product-per-
-    SKU rule resolves it by sku: the mirror image of the spine PUT's
+    -- a DIFFERENT uuid -- so the id lookup misses and the spine's
+    pim_product_id finds it: the mirror image of the spine PUT's
     pim_product_id-first twin lookup (product_master.mirror_update_to_
     catalog_twin). Until this, both doors' `_pr.update(<catalog id>, ...)`
     silently matched NO spine on a door-created product: the drawer's
@@ -1465,49 +1465,16 @@ def _spine_product_id(repo, catalog_doc: Optional[Dict]) -> Optional[str]:
 
 
 def _spine_doc(repo, catalog_doc: Optional[Dict]) -> Optional[Dict]:
-    """The spine doc _spine_product_id resolves (id, then sku), or None."""
-    if repo is None or not catalog_doc:
+    """The spine LINKED to this twin -- its product_id or its pim_product_id
+    is the twin's id -- or None. Never by sku alone: a review-queue twin can
+    share a sku with an UNRELATED product's spine (promote 409s on exactly
+    that), and the sku match wrote this twin's price, active flag and barcode
+    onto the other product and excused that product's barcode as this one's
+    own in the one-holder check."""
+    twin_id = (catalog_doc or {}).get("id")
+    if repo is None or not twin_id:
         return None
-    spine = None
-    if catalog_doc.get("id"):
-        spine = repo.find_by_id(catalog_doc["id"])
-    if spine is None and catalog_doc.get("sku"):
-        spine = repo.find_by_sku(catalog_doc["sku"])
-    return spine
-
-
-def _spine_gtin_behind(catalog_doc: Dict) -> Optional[str]:
-    """The twin's publishable gtin, through the one GTIN normaliser, when its
-    spine's attributes.gtin does not hold it: a save whose spine write 503'd
-    after the twin landed (the review editor's retry then 409s, reloads and
-    sends no gtin, so nothing else would ever write it). None = nothing to
-    repair. Only toward a valid twin code: a blank or junk twin gtin never
-    blanks or replaces the spine's, and a twin typed with separators never
-    puts them on the spine (the till finds a code only as normalised), while
-    a spine holding the code in another spelling (a UPC-A and its 13-digit
-    form) already holds it (spine_holds_gtin): nothing is rewritten or
-    dropped. A code another product holds is never written (one GTIN, one
-    product) -- nor does it refuse this save, which did not touch the
-    barcode: skipped, logged."""
-    attrs = catalog_doc.get("attributes")
-    gtin = _pm.sanitise_gtin(attrs.get("gtin") if isinstance(attrs, dict) else None)
-    if not gtin:
-        return None
-    from ..dependencies import get_product_repository
-
-    repo = get_product_repository()
-    spine = _spine_doc(repo, catalog_doc)
-    if spine is None or _pm.spine_holds_gtin(spine, gtin):
-        return None
-    try:
-        _pm.assert_gtin_free(gtin, repo, spine.get("product_id"))
-    except _pm.ProductMasterError as err:
-        logger.warning(
-            "[CATALOG] spine gtin repair skipped for %s: %s",
-            catalog_doc.get("id"), err.message,
-        )
-        return None
-    return gtin
+    return repo.find_by_id(twin_id) or repo.find_one({"pim_product_id": twin_id})
 
 
 def _next_sku_counter(prefix: str, db=None) -> int:
@@ -2242,13 +2209,11 @@ async def update_catalog_product(
                 merged_attrs.get("model_no") or merged_attrs.get("model_name") or ""
             ).strip()
 
-    # The code the spine (and a size variant's row) must take; None = none.
-    # Any save -- this one may carry no gtin at all -- brings a spine left
-    # behind by a failed spine write back in line with its twin (round 9).
+    # The code the spine (and a size variant's row) must take; None = this
+    # save moved no barcode, so it writes none: the twin is never "the newer
+    # copy" (a Manage Barcode edit lands on the spine first).
     spine_gtin = (
-        (existing.get("attributes") or {}).get("gtin") or ""
-        if gtin_written
-        else _spine_gtin_behind(existing)
+        (existing.get("attributes") or {}).get("gtin") or "" if gtin_written else None
     )
 
     # Explicit operator name wins over the best-effort title regen for THIS
@@ -2343,6 +2308,35 @@ async def update_catalog_product(
     existing["updated_by_name"] = current_user.get("full_name") or current_user.get(
         "username"
     )
+
+    # Spine and twin hold ONE GTIN (Manage Barcode, the till and the stock page
+    # read the spine's). Written FIRST, after every check: a refused write
+    # 503s with NOTHING saved, so the retry -- the same payload and updated_at
+    # -- redoes all of it, the take-down included. NOT fail-soft: a spine that
+    # silently kept its old code is worse than a save that says so. A twin
+    # with no LINKED spine keeps the code alone, and the answer says so.
+    _pr = _spine_id = None
+    try:
+        from ..dependencies import get_product_repository
+
+        _pr = get_product_repository()
+        _spine_id = _spine_product_id(_pr, existing)
+    except Exception:  # noqa: BLE001 -- fail-soft; a barcode save read it above
+        logger.warning(
+            "[CATALOG] spine lookup skipped for %s", product_id, exc_info=True
+        )
+    message = "Product updated successfully"
+    if spine_gtin is not None:
+        if _spine_id:
+            try:
+                _pm.write_spine_gtin(_pr, _spine_id, spine_gtin)
+            except _pm.ProductMasterError as err:
+                raise HTTPException(status_code=err.status, detail=err.message) from err
+        else:
+            message = (
+                "Saved on the catalogue copy only: no billing product is linked "
+                "to it, so the till and Manage Barcode do not have this barcode."
+            )
 
     # Promote is the ONLY writer of the review/promote flags (see the stamp in
     # promote_catalog_product): strip them from the WRITE (a copy -- the
@@ -2457,13 +2451,8 @@ async def update_catalog_product(
     # the write matched no spine. A category change is the one case where the
     # PUT moves hsn / gst without naming them (re-derived above): it travels.
     # Fail-soft: a spine-sync error never breaks the catalog save.
-    _pr = _spine_id = None
     try:
-        from ..dependencies import get_product_repository
-
-        _pr = get_product_repository()
-        _spine_id = _spine_product_id(_pr, existing)
-        if _pr is not None and _spine_id:
+        if _spine_id:
             _sent = product.pricing.model_dump(exclude_none=True) if product.pricing else {}
             _pricing = existing.get("pricing") or {}
             _patch: Dict[str, Any] = {
@@ -2542,26 +2531,9 @@ async def update_catalog_product(
             "[CATALOG] online price recompute skipped for %s", product_id, exc_info=True
         )
 
-    # Spine and twin hold ONE GTIN (Manage Barcode and the stock page read the
-    # spine's). LAST, after the take-down, the row mirror and the online price:
-    # a 503 here leaves nothing half-done that a retry would skip (the retry's
-    # was_active is already False, so it would never delist). A gtin this save
-    # carried is NOT fail-soft -- a spine that silently kept its old code, or
-    # lost both, is worse than a save that says so. The repair of one a failed
-    # write left behind is: this save touched no barcode, and the next retries.
-    if spine_gtin is not None and _pr is not None and _spine_id:
-        try:
-            _pm.write_spine_gtin(_pr, _spine_id, spine_gtin)
-        except _pm.ProductMasterError as err:
-            if gtin_written:
-                raise HTTPException(status_code=err.status, detail=err.message) from err
-            logger.warning(
-                "[CATALOG] spine gtin repair failed for %s: %s", product_id, err.message
-            )
-
     return {
         "product": mask_cost(existing, current_user, "product"),
-        "message": "Product updated successfully",
+        "message": message,
     }
 
 
