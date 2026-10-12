@@ -394,3 +394,51 @@ def test_live_app_accountant_still_exports(client):
     )
     assert r.status_code == 200, r.text
     assert "itc_elg" in r.json()
+
+
+# ============================================================================
+# ONE strip (services/payables_mask.strip_input_tax) for both payloads
+# ============================================================================
+
+
+class TestOneInputTaxStrip:
+    """R5 has one implementation: payables_mask.INPUT_TAX_KEYS + strip_input_tax.
+    Widening that ONE key set changes what a manager reads on BOTH routes --
+    a router that kept its own key list or its own strip would not move."""
+
+    def test_the_one_key_set_is_both_payloads_input_side(self):
+        from api.services import payables_mask
+
+        assert payables_mask.INPUT_TAX_KEYS == SUMMARY_INPUT_KEYS | GSTR3B_INPUT_KEYS
+
+    def test_widening_the_one_key_set_moves_both_routes(self, monkeypatch, finance_db, reports_db):
+        from api.services import payables_mask
+
+        before_summary = _finance_client("STORE_MANAGER").get(SUMMARY_URL).json()
+        before_3b = _reports_client("STORE_MANAGER").get(GSTR3B_URL).json()
+        assert "gst_collected" in before_summary and "taxPayable" in before_3b
+
+        monkeypatch.setattr(
+            payables_mask, "INPUT_TAX_KEYS",
+            payables_mask.INPUT_TAX_KEYS | {"gst_collected", "taxPayable"},
+        )
+        summary = _finance_client("STORE_MANAGER").get(SUMMARY_URL).json()
+        gstr3b = _reports_client("STORE_MANAGER").get(GSTR3B_URL).json()
+        assert "gst_collected" not in summary
+        assert "taxPayable" not in gstr3b
+        # The accounts roles are untouched by the key set.
+        assert "gst_collected" in _finance_client("ACCOUNTANT").get(SUMMARY_URL).json()
+
+    def test_no_router_keeps_a_copy_of_the_rule(self):
+        api_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "api")
+        copies = []
+        for root, _dirs, files in os.walk(api_dir):
+            for name in files:
+                if not name.endswith(".py") or name == "payables_mask.py":
+                    continue
+                path = os.path.join(root, name)
+                with open(path, encoding="utf-8") as fh:
+                    text = fh.read()
+                if re.search(r"_INPUT_TAX_KEYS\s*=|def _output_side_only\b", text):
+                    copies.append(os.path.relpath(path, api_dir))
+        assert copies == [], copies

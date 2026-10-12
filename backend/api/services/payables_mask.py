@@ -6,7 +6,8 @@ supplier, have paid it, or are owed by it: bills and their paid state, a
 supplier's monthly billing, the RTV GST debit note's amounts, a vendor
 return's credit, an RMA's expected / received credit and its variance, the
 amount on a Return-to-Vendor ('rtv') approval, and (owner ruling 2026-10-12)
-the unit price, rate and line value on a vendor return or RMA. Purchase-order
+the unit price, rate and line value on a vendor return or RMA, and the GST
+input tax on the GST summary and GSTR-3B (R5, strip_input_tax). Purchase-order
 totals and product cost prices elsewhere are NOT in it -- they follow the cost
 rule in cost_mask.
 
@@ -152,6 +153,44 @@ def strip_rma_credit(doc: Any, user: Optional[dict]) -> Any:
     if can_see_payables(user):
         return doc
     return _without(doc, _RMA_CREDIT.__contains__, _rma_note)
+
+
+# --- GST input tax (routers/finance/gst, routers/reports/gstr3b) ------------
+# Owner ruling 2026-10-12 (R5): GST INPUT tax -- the credit taken on supplier
+# bills -- is supplier money. The finance readers keep the sales-side
+# (output) figures; every input-tax figure, and every net that hands it back
+# by subtraction from the output figure beside it, is ABSENT for a
+# non-accounts caller (never 0). ONE key set for both payloads (their key
+# names do not collide) and ONE function: a new input-tax figure on either
+# payload is added here, once.
+INPUT_TAX_KEYS = frozenset({
+    # GET /finance/gst/summary
+    "gst_input_credit",
+    "gst_input_credit_excluded",
+    "net_gst_payable",
+    "tax_paid",
+    "net_gst_liability",
+    # GET /reports/gstr3b: Table 4 (ITC available, its company-wide / GSTIN
+    # split, ITC utilised), Table 3.1(d) (inward supplies on reverse charge --
+    # supplier bills) and the tax paid in cash (output - ITC + RCM).
+    "itcAvailable",
+    "itcAvailableRegular",
+    "itcAvailableGstin",
+    "itcUtilized",
+    "inwardSuppliesReverseChargeValue",
+    "inwardSuppliesReverseCharge",
+    "inwardSuppliesReverseChargeGstin",
+    "taxPaidCash",
+})
+
+
+def strip_input_tax(body: Any, user: Optional[dict]) -> Any:
+    """A GST summary / GSTR-3B without its input-tax figures, unless the
+    caller is an accounts role (R5). Top-level keys: both payloads carry
+    their input tax there."""
+    if can_see_payables(user) or not isinstance(body, dict):
+        return body
+    return {k: v for k, v in body.items() if k not in INPUT_TAX_KEYS}
 
 
 # --- Approvals (routers/approvals, services/approvals) ----------------------

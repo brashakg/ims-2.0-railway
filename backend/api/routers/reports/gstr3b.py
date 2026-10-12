@@ -15,7 +15,7 @@ from ...dependencies import (
     resolve_store_scope,
 )
 from ...services.cost_mask import AP_ROLES
-from ...services.payables_mask import can_see_payables
+from ...services.payables_mask import strip_input_tax
 from ._shared import (
     _REPORT_FINANCE_ROLES,
     logger,
@@ -40,32 +40,9 @@ from .gst_itc import (
     _transfer_outward_bills,
 )
 
-# Owner ruling 2026-10-12 (R5): GST INPUT tax -- the credit taken on supplier
-# bills -- is supplier money, shown to the accounts roles alone (the ONE
-# payables rule, payables_mask.can_see_payables). Everyone else the report
-# admits (the store / area managers) reads the sales side only: these keys of
-# _compute_gstr3b are ABSENT for them, never 0. Table 4 (ITC available, its
-# company-wide / GSTIN split, ITC utilised), Table 3.1(d) (inward supplies on
-# reverse charge -- supplier bills) and the tax paid in cash (output - ITC +
-# RCM: beside taxPayable it hands back the credit by subtraction).
-_INPUT_TAX_KEYS = frozenset({
-    "itcAvailable",
-    "itcAvailableRegular",
-    "itcAvailableGstin",
-    "itcUtilized",
-    "inwardSuppliesReverseChargeValue",
-    "inwardSuppliesReverseCharge",
-    "inwardSuppliesReverseChargeGstin",
-    "taxPaidCash",
-})
-
-
-def _output_side_only(report: dict, user: Optional[dict]) -> dict:
-    """``report`` unchanged for an accounts role; otherwise a copy without the
-    input-tax tables and the cash figure that would reveal them (R5)."""
-    if can_see_payables(user):
-        return report
-    return {k: v for k, v in report.items() if k not in _INPUT_TAX_KEYS}
+# Owner ruling 2026-10-12 (R5): Table 4 (ITC), 3.1(d) (RCM) and the cash
+# figure are the accounts roles'; the one strip is services/payables_mask.
+# strip_input_tax (keys and rule there).
 
 
 def _return_shop(store_id: Optional[str], current_user: dict) -> str:
@@ -644,7 +621,7 @@ async def gstr3b_report(
     Input tax (Table 4, 3.1(d), cash paid) is the accounts roles' (R5).
     A non-admin login with no shop is refused (R4, _return_shop)."""
     active_store = _return_shop(store_id, current_user)
-    return _output_side_only(_compute_gstr3b(month, active_store), current_user)
+    return strip_input_tax(_compute_gstr3b(month, active_store), current_user)
 
 
 @router.get("/gstr3b/gstn-json")

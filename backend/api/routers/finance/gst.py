@@ -12,7 +12,7 @@ from fastapi import Depends
 from ..auth import get_current_user
 from ...dependencies import resolve_store_scope
 from ...services import ap_engine
-from ...services.payables_mask import can_see_payables
+from ...services.payables_mask import can_see_payables, strip_input_tax
 from ._shared import (
     _REAL_ORDER_STATUS_FILTER,
     _customer_state_map,
@@ -24,27 +24,8 @@ from ._shared import (
 
 # === GST Management ===
 
-# Owner ruling 2026-10-12 (R5): GST INPUT tax -- the credit taken on supplier
-# bills -- is supplier money, shown to the accounts roles alone (the ONE
-# payables rule, payables_mask.can_see_payables). Anyone else reads the
-# sales-side (output) figures only: these keys are ABSENT for them, never 0.
-# The net (collected - input credit) goes too: with the output figure beside
-# it, the net hands back the input credit by subtraction.
-_INPUT_TAX_KEYS = frozenset({
-    "gst_input_credit",
-    "gst_input_credit_excluded",
-    "net_gst_payable",
-    "tax_paid",
-    "net_gst_liability",
-})
-
-
-def _output_side_only(body: dict, user: Optional[dict]) -> dict:
-    """``body`` unchanged for an accounts role; otherwise a copy without the
-    input-tax figures and the net that would reveal them (R5)."""
-    if can_see_payables(user):
-        return body
-    return {k: v for k, v in body.items() if k not in _INPUT_TAX_KEYS}
+# Owner ruling 2026-10-12 (R5): input tax is the accounts roles'; the one
+# strip is services/payables_mask.strip_input_tax (keys and rule there).
 
 
 # Bill statuses that mean "not yet received / not bookable for ITC". A bill in
@@ -93,7 +74,7 @@ async def get_gst_summary(
     at_shop = {"store_id": scope} if scope else {}
     db = _get_db()
     if db is None:
-        return _output_side_only(
+        return strip_input_tax(
             {
                 "tax_collected": 0,
                 "tax_paid": 0,
@@ -104,7 +85,7 @@ async def get_gst_summary(
         )
     # R5 (owner ruling 2026-10-12): the route stays open to the finance
     # readers -- managers keep OUTPUT GST -- but a non-accounts caller's
-    # summary never reads the supplier bills, and _output_side_only drops the
+    # summary never reads the supplier bills, and strip_input_tax drops the
     # input-tax keys from what it returns.
     show_input = can_see_payables(current_user)
     now = now_ist()
@@ -213,7 +194,7 @@ async def get_gst_summary(
     gstr1_due = datetime(due_year, due_month, 11)
     gstr3b_due = datetime(due_year, due_month, 20)
 
-    return _output_side_only({
+    return strip_input_tax({
         "month": m,
         "year": y,
         "gst_collected": gst_collected,
