@@ -56,16 +56,20 @@ def _authority(roles: Any) -> int:
 def next_rung_role(current_roles: Any, category: Any = None) -> Optional[str]:
     """Return the role to escalate TO given the current owner's roles.
 
-    A catalogue task (category "Catalogue") held by a catalogue manager goes
-    to the admins whatever else that person is: a store or area manager can
-    open neither Needs review nor the product editor. Their other tasks climb
-    the ladder of their highest rank.
+    A catalogue task (category "Catalogue") below the admins goes to the
+    admins, keyed on the task alone: a store or area manager can open neither
+    Needs review nor the product editor, and an owner whose roles cannot be
+    read (a failed lookup, a deleted user) must not fall to the shop's ladder.
+    A catalogue manager's other tasks go to the admins too; everyone else's
+    climb the ladder of their highest rank.
 
     None means the owner is already at the top (SUPERADMIN) -- nowhere left
     to escalate."""
     auth = _authority(current_roles)
+    if auth < 4 and str(category or "").strip().lower() == "catalogue":
+        return "ADMIN"
     entity = {str(r).strip().upper() for r in current_roles or []} & _ENTITY_ROLES
-    if entity and (auth == 1 or (str(category or "").strip().lower() == "catalogue" and auth < 4)):
+    if entity and auth == 1:
         return "ADMIN"
     if auth >= 5:  # SUPERADMIN
         return None

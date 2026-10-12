@@ -3912,8 +3912,9 @@ def test_r6_a_catalogue_managers_every_breach_goes_to_the_admins():
             next_rung_role(["CATALOG_MANAGER"], category) == "ADMIN",
             f"A catalogue manager's {category} breach climbs to {next_rung_role(['CATALOG_MANAGER'], category)}",
         )
-    # Anyone else's climbs the ladder as before.
-    assert next_rung_role(["SALES_STAFF"], "Catalogue") == "STORE_MANAGER"
+    # Anyone else's climbs the ladder as before -- except a catalogue task,
+    # which goes to the admins whoever holds it (next test).
+    assert next_rung_role(["SALES_STAFF"], "Purchase") == "STORE_MANAGER"
 
 
 def test_r6_a_breach_never_merges_into_a_twin_already_closed(world):
@@ -5187,3 +5188,54 @@ def test_merge_a_release_that_cannot_reach_the_receipts_never_undoes_the_save(mo
 
     monkeypatch.setattr(_grn_accept, "get_grn_repository", unreachable)
     assert _grn_accept.release_held_receipts("P-ANY") == []
+
+
+# ---------------------------------------------------------------------------
+# Round 9
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("holder", ["unreadable", "deleted", "no roles"])
+def test_r9_a_catalogue_task_whose_holder_cannot_be_read_goes_to_the_admins(
+    world, monkeypatch, holder
+):
+    # The catalogue rule keys on the task, not on its holder's roles: a
+    # failed user lookup or a deleted catalogue manager must never hand the
+    # task to the shop's store manager, who cannot open the catalogue.
+    from database.repositories.user_repository import UserRepository
+
+    _seed_user(world, ADMIN)
+    world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    (task,) = _open_tasks(world)
+    if holder == "unreadable":
+        def _boom(*a, **k):
+            raise RuntimeError("read timed out")
+
+        monkeypatch.setattr(UserRepository, "find_by_id", _boom)
+    elif holder == "deleted":
+        world.db.users.delete_one({"user_id": CATALOGUER["user_id"]})
+    else:
+        world.db.users.update_one({"user_id": CATALOGUER["user_id"]}, {"$set": {"roles": []}})
+    _tasks._escalate_and_reassign(
+        _deps.get_task_repository(), task, reason="ack SLA breached", by="TASKMASTER",
+        now=vd.datetime.now(),
+    )
+    after = world.db.tasks.find_one({"task_id": task["task_id"]})
+    finding(
+        after["assigned_to"] == ADMIN["user_id"],
+        f"A catalogue task whose holder is {holder} escalated to {after['assigned_to']}",
+    )
+
+
+@ENGINES
+def test_r9_a_deleted_catalogue_managers_task_climbs_to_the_admin_on_both_engines(
+    world, monkeypatch, engine
+):
+    _seed_user(world, ADMIN)
+    world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    world.db.users.delete_one({"user_id": CATALOGUER["user_id"]})
+    _escalate_after(world, monkeypatch, engine, hours=25)
+    finding(
+        [t.get("assigned_to") for t in _open_tasks(world)] == [ADMIN["user_id"]],
+        f"{engine}: the catalogue task went to {[t.get('assigned_to') for t in _open_tasks(world)]}",
+    )
