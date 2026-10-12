@@ -580,7 +580,7 @@ def _create_receive_mismatch_task(transfer: Dict, discrepancy: Dict) -> Optional
         return None
 
 
-def _apply_ship_stock_move(transfer: Dict) -> Dict:
+def _apply_ship_stock_move(transfer: Dict, products: Optional[Dict[str, Dict]] = None) -> Dict:
     """Move source on-hand OUT when a transfer ships.
 
     For each line, claim up to `_line_ship_qty` AVAILABLE units of that product
@@ -591,6 +591,8 @@ def _apply_ship_stock_move(transfer: Dict) -> Dict:
     Idempotent: if the transfer is already flagged `stock_shipped`, this is a
     no-op (returns the transfer untouched) so a double ship/POST cannot
     double-decrement. Fail-soft: no stock repo -> transfer returned unchanged.
+    `products`: the master rows ship_transfer read ONCE for its guard
+    (_ship_products) -- the stamp's only product source; never re-read here.
     """
     if transfer.get("stock_shipped"):
         return transfer
@@ -599,6 +601,7 @@ def _apply_ship_stock_move(transfer: Dict) -> Dict:
     if stock_repo is None:
         # DB down: advance the lifecycle without moving units (pre-fix behavior).
         return transfer
+    products = products or {}
 
     from_store = transfer.get("from_location_id")
     moved_total = 0
@@ -696,7 +699,7 @@ def _apply_ship_stock_move(transfer: Dict) -> Dict:
         # Reflect what actually left the floor (may be < requested if the source
         # didn't hold enough AVAILABLE units - we never move phantom stock).
         line["quantity_shipped"] = len(moved_ids)
-        _stamp_shipped_value(line, moved_units)
+        _stamp_shipped_value(line, moved_units, products.get(product_id) or {})
         moved_total += len(moved_ids)
         if moved_ids and product_id not in moved_pids:
             moved_pids.append(product_id)
@@ -740,13 +743,40 @@ def _unit_cost(unit: Dict, product: Dict) -> float:
     return _first_cost(unit.get("unit_cost"), unit.get("cost_price"), product.get("cost_price"))
 
 
-def _stamp_shipped_value(line: Dict, units: List[Dict]) -> None:
+def _ship_products(transfer: Dict) -> Dict[str, Dict]:
+    """{product_id: master row} for a transfer's lines, read ONCE per ship,
+    before any unit moves: the ship guard (_assert_valued_paper) and the ship
+    stamp (_stamp_shipped_value) answer from these same rows, so a unit the
+    guard lets leave is never stamped at 0 by a second read that failed. A
+    read error refuses the ship (503) -- nothing has moved yet."""
+    db = _get_db()
+    pids = [ln.get("product_id") for ln in transfer.get("items") or [] if ln.get("product_id")]
+    if db is None or not pids:
+        return {}
+    try:
+        return {
+            row["product_id"]: row
+            for row in db.get_collection("products").find(
+                {"product_id": {"$in": pids}},
+                {"_id": 0, "product_id": 1, "hsn_code": 1, "category": 1, "cost_price": 1},
+            )
+        }
+    except Exception as exc:  # noqa: BLE001 - refuse, never guess
+        logger.warning("[TRANSFER] product read for the ship failed: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail="IMS could not read the products just now. Nothing has moved; try again.",
+        ) from exc
+
+
+def _stamp_shipped_value(line: Dict, units: List[Dict], product: Dict) -> None:
     """F51 / D13: stamp on a line what LEFT the shop -- the units' barcodes,
     the product's HSN, and the units' OWN cost (unit_cost / cost_price, stamped
     on each unit at its goods receipt or opening stock) averaged into the
-    line's unit_cost. The product master's cost_price stands in only for a
-    unit that carries no cost of its own (owner 2026-09-28: shelf units carry
-    the product's cost); a unit with neither leaves the line at 0, so a valued
+    line's unit_cost. The product master's cost_price (`product`, the row
+    _ship_products read before the guard) stands in only for a unit that
+    carries no cost of its own (owner 2026-09-28: shelf units carry the
+    product's cost); a unit with neither leaves the line at 0, so a valued
     challan refuses instead of printing a short value (a move between two
     registrations never gets here: _assert_valued_paper stops it). A line that
     shipped nothing keeps no client-typed figure (a BOPIS line carries the SALE
@@ -754,20 +784,8 @@ def _stamp_shipped_value(line: Dict, units: List[Dict]) -> None:
     total_value and the FIN-3 mirror bill all price at this one rate through
     _line_value -- the challan on the units SHIPPED, the mirror bill on the
     units RECEIVED, so a short receipt books less than the challan shows (the
-    bill records both: qty_basis + challan_value; the CA decides). Fail-soft:
-    a product lookup error only loses the fallbacks -- the units have already
-    moved, so this never raises (a line stamped without an HSN is answered
-    again by _line_hsn wherever it is read)."""
-    product: Dict = {}
-    db = _get_db()
-    if db is not None and line.get("product_id"):
-        try:
-            product = db.get_collection("products").find_one(
-                {"product_id": line["product_id"]},
-                {"_id": 0, "hsn_code": 1, "category": 1, "cost_price": 1},
-            ) or {}
-        except Exception as exc:  # noqa: BLE001 - fail-soft
-            logger.warning("[TRANSFER] product lookup for the ship value failed: %s", exc)
+    bill records both: qty_basis + challan_value; the CA decides). No read
+    of its own, so nothing can fail here after the units moved."""
     line["hsn_code"] = _line_hsn(line, product)
     line["shipped_barcodes"] = [str(u["barcode"]) for u in units if u.get("barcode")]
     costs = [_unit_cost(u, product) for u in units]
@@ -1557,7 +1575,8 @@ async def ship_transfer(
             status_code=400,
             detail="Transfer must be approved or packed before shipping",
         )
-    src, dst, crosses = _assert_valued_paper(transfer)
+    products = _ship_products(transfer)
+    src, dst, crosses = _assert_valued_paper(transfer, products)
     # D13: the registrations the goods leave on, so the challan and the
     # mirror bill keep ship's answer (_transfer_registrations).
     transfer["gst_registrations"] = {
@@ -1589,7 +1608,7 @@ async def ship_transfer(
 
     # SYSTEM_INTENT 5: actually reduce source-store on-hand. Idempotent via the
     # `stock_shipped` flag set inside the helper, so a re-POST won't double-move.
-    transfer = _apply_ship_stock_move(transfer)
+    transfer = _apply_ship_stock_move(transfer, products)
 
     _append_status_history(
         transfer,
@@ -2262,16 +2281,17 @@ def _require_hsn(name: str, hsn: str) -> None:
         )
 
 
-def _assert_valued_paper(transfer: Dict) -> tuple:
+def _assert_valued_paper(transfer: Dict, products: Dict[str, Dict]) -> tuple:
     """D13: a move between two GST registrations travels on a VALUED delivery
     challan, so it ships only when that paper can be printed -- both GSTINs on
     file, at least one unit on the shelf to send (never a Rs 0 paper), an HSN
     and a cost for every line whose units may leave (_unit_cost, the rule the
-    ship stamp values them by). A move IMS cannot place (crosses None) is
-    refused as the data gap it is. Refused BEFORE any unit moves: once shipped,
-    the value is fixed (_stamp_shipped_value), so a cost entered afterwards
-    could not reach it. Returns the registrations, which ship stamps on the
-    transfer (_transfer_registrations)."""
+    ship stamp values them by, on the same product rows: `products`, from
+    _ship_products). A move IMS cannot place (crosses None) is refused as the
+    data gap it is. Refused BEFORE any unit moves: once shipped, the value is
+    fixed (_stamp_shipped_value), so a cost entered afterwards could not reach
+    it. Returns the registrations, which ship stamps on the transfer
+    (_transfer_registrations)."""
     db = _get_db()
     src, dst, crosses = registrations = _transfer_registrations(db, transfer)
     if crosses is False:
@@ -2293,9 +2313,7 @@ def _assert_valued_paper(transfer: Dict) -> tuple:
         if not on_shelf:
             continue
         in_stock = True
-        product = db.get_collection("products").find_one(
-            {"product_id": pid}, {"_id": 0, "cost_price": 1, "hsn_code": 1, "category": 1}
-        ) or {}
+        product = products.get(pid) or {}
         _require_hsn(line.get("product_name") or pid, _line_hsn(line, product))
         # ponytail: any cost-less unit on the shelf refuses, not only the ones
         # ship would pick; the fix (a product cost price) is the same.

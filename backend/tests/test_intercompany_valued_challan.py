@@ -647,26 +647,13 @@ def test_f51_a_line_that_shipped_nothing_prints_a_cost_not_the_client_figure(db)
 # ===========================================================================
 
 
-def test_d13_challan_and_mirror_bill_answer_one_hsn_when_the_ship_lookup_fails(db, monkeypatch):
-    """The ship-time product read is fail-soft. When only it fails, the line is
-    stamped with no HSN; the valued challan and the FIN-3 mirror bill must then
-    still print / book the SAME HSN (one rule, transfers._line_hsn), never a
-    blank paper beside a 900311 GSTR-1 row. (Only the read AFTER the units
-    moved fails: the ship guard's read before them is a refusal door.)"""
-    real = mongomock.collection.Collection.find_one
-
-    def flaky(self, filter=None, *args, **kwargs):
-        projection = args[0] if args else kwargs.get("projection")
-        moved = self.database["stock_units"].count_documents({"status": "TRANSFERRED"})
-        if self.name == "products" and projection and "hsn_code" in projection and moved:
-            raise RuntimeError("products read failed")
-        return real(self, filter, *args, **kwargs)
-
-    t = _create("ST-BOK-1")
-    with monkeypatch.context() as m:
-        m.setattr(mongomock.collection.Collection, "find_one", flaky)
-        _ship(t["id"])
-    assert transfers._get_transfer(t["id"])["items"][0]["hsn_code"] == "", "the read failed"
+def test_d13_challan_and_mirror_bill_answer_one_hsn_for_a_line_stamped_without_one(db):
+    """A line saved with no HSN (shipped before ship stamped one): the valued
+    challan and the FIN-3 mirror bill must still print / book the SAME HSN
+    (one rule, transfers._line_hsn), never a blank paper beside a 900311
+    GSTR-1 row."""
+    t = _shipped("ST-BOK-1")
+    db["stock_transfers"].update_one({"id": t["id"]}, {"$set": {"items.0.hsn_code": ""}})
     assert f"<td>{HSN}</td>" in _challan(t["id"])
     _receive_and_complete(t)
     (bill,) = db["vendor_bills"].find({"source_transfer_id": t["id"]})
@@ -1072,3 +1059,61 @@ def test_owner_every_transfer_action_reply_carries_the_routes_answer(db):
     other = _create("ST-DHN-2")  # unvalued: the area manager prints it
     cancelled = _run(transfers.cancel_transfer(other["id"], "Not needed", area))["transfer"]
     assert cancelled.get("can_print_challan") is _prints(other["id"], area) is True
+
+
+# ===========================================================================
+# Panel round 6
+# ===========================================================================
+
+def _products_fail(monkeypatch, after=0):
+    """Every read of `products` after the first `after` raises (a find_one
+    mongomock serves through find counts once)."""
+    seen = {"reads": 0, "inside": False}
+    for name in ("find", "find_one"):
+        real = getattr(mongomock.collection.Collection, name)
+
+        def flaky(self, *args, _real=real, **kwargs):
+            if self.name != "products" or seen["inside"]:
+                return _real(self, *args, **kwargs)
+            seen["reads"] += 1
+            if seen["reads"] > after:
+                raise RuntimeError("products read failed")
+            seen["inside"] = True
+            try:
+                return _real(self, *args, **kwargs)
+            finally:
+                seen["inside"] = False
+
+        monkeypatch.setattr(mongomock.collection.Collection, name, flaky)
+
+
+def test_d13_the_ship_guard_and_the_stamp_answer_from_one_product_read(db, monkeypatch):
+    """r6 #1: the units carry no cost of their own, so the product's 2000
+    values them. The guard and the stamp read the product separately, and
+    the stamp's read was fail-soft: when it failed the goods left stamped at
+    Rs 0 and their valued challan was refused for good. One read now, before
+    any unit moves: a read after it changes nothing."""
+    db["stock_units"].update_many({}, {"$unset": {"unit_cost": "", "cost_price": ""}})
+    t = _create("ST-BOK-1")
+    with monkeypatch.context() as m:
+        _products_fail(m, after=1)
+        _ship(t["id"])
+    stored = transfers._get_transfer(t["id"])
+    assert stored["items"][0]["unit_cost"] == pytest.approx(PRODUCT_COST)
+    assert stored["total_value"] == pytest.approx(2 * PRODUCT_COST)
+    assert _shows_amount(_challan(t["id"]), 2 * PRODUCT_COST)
+
+
+def test_d13_ship_refuses_when_it_cannot_read_the_products(db, monkeypatch):
+    """r6 #1: the one product read fails -> 503 before anything moves: no
+    unit claimed, the transfer still APPROVED, no verdict stamped."""
+    t = _create("ST-BOK-1")
+    with monkeypatch.context() as m:
+        _products_fail(m)
+        with pytest.raises(HTTPException) as exc:
+            _ship(t["id"])
+    assert exc.value.status_code == 503
+    assert db["stock_units"].count_documents({"status": "AVAILABLE"}) == 2
+    stored = db["stock_transfers"].find_one({"id": t["id"]})
+    assert stored["status"] == transfers.TransferStatus.APPROVED
+    assert "gst_registrations" not in stored
