@@ -66,9 +66,16 @@ vi.mock('../../../services/api/client', async (importOriginal) => ({
 vi.mock('../../../services/api/productTemplates', () => ({
   productTemplatesApi: { list: vi.fn(async () => ({ templates: [] })) },
 }));
+// The review editor (?review=) loads and saves through the catalog door.
+const catalogSpies = vi.hoisted(() => ({
+  get: vi.fn(),
+  update: vi.fn(),
+  promoteDryRun: vi.fn(),
+  list: vi.fn(),
+}));
 vi.mock('../../../services/api/catalog', () => ({
   CatalogRequestError: class CatalogRequestError extends Error { status = 0; },
-  catalogProductsApi: {},
+  catalogProductsApi: catalogSpies,
 }));
 vi.mock('../SimilarProductsHint', () => ({ SimilarProductsHint: () => null }));
 vi.mock('../../../constants/gstRuntime', () => ({
@@ -77,25 +84,51 @@ vi.mock('../../../constants/gstRuntime', () => ({
   resolveGstRate: () => 18,
 }));
 
-import { movePhoto } from '../quickadd/useProductImages';
+import { CatalogRequestError } from '../../../services/api/catalog';
+import { movePhoto, useProductImages } from '../quickadd/useProductImages';
 import { AngleGuide, ProductPhotoGrid } from '../quickadd/ProductPhotoGrid';
 import { docImages } from '../CatalogProductDrawer';
 import { QuickAddPage } from '../QuickAddPage';
+
+/** An imported product waiting in the review queue (photos A, B, C). */
+const REVIEW_DOC = {
+  id: 'CAT-1',
+  sku: 'SG-RAYB-4165-001',
+  title: 'Ray-Ban RB4165',
+  brand: 'Ray-Ban',
+  category: 'SUNGLASS',
+  attributes: { brand_name: 'Ray-Ban', model_no: 'RB4165' },
+  pricing: { mrp: 7890, offer_price: 7890 },
+  hsn_code: '900410',
+  gst_rate: 18,
+  images: [A, B, C],
+  needs_review: true,
+  pos_ready: false,
+  updated_at: '2026-10-12T10:00:00+05:30',
+};
 
 beforeEach(() => {
   Element.prototype.scrollIntoView = vi.fn() as unknown as typeof Element.prototype.scrollIntoView;
   window.scrollTo = vi.fn() as unknown as typeof window.scrollTo;
   for (const fn of Object.values(productSpies)) fn.mockClear();
+  catalogSpies.get.mockReset().mockResolvedValue(REVIEW_DOC);
+  catalogSpies.update.mockReset().mockImplementation(async (_id: string, body: object) => ({
+    product: { ...REVIEW_DOC, ...body },
+  }));
+  catalogSpies.promoteDryRun.mockReset().mockResolvedValue({ ok: true, gaps: [], duplicate_warnings: [] });
+  catalogSpies.list.mockReset().mockResolvedValue({ products: [], total: 0 });
+  window.sessionStorage.clear();
 });
 
-/** The grid wired exactly as the page wires it: one images array, moved by
- *  the same pure helper. */
+/** The grid with the page's own move handler (useProductImages.moveImage,
+ *  the one InventorySection passes as onMove) - no copy of the wiring. */
 function Harness({ initial }: { initial: string[] }) {
   const [images, setImages] = useState(initial);
+  const { moveImage } = useProductImages(setImages);
   return (
     <ProductPhotoGrid
       images={images}
-      onMove={(from, to) => setImages((prev) => movePhoto(prev, from, to))}
+      onMove={moveImage}
       onRemove={() => {}}
       onEdit={() => {}}
       editing={new Set()}
@@ -107,6 +140,22 @@ function Harness({ initial }: { initial: string[] }) {
 const shown = () => screen.getAllByRole('img').map((img) => img.getAttribute('src'));
 const tiles = () => screen.getAllByRole('listitem');
 const btn = (name: string) => screen.getByRole('button', { name });
+const tile = (n: number) => screen.getByAltText(`Photo ${n}`).closest('li') as HTMLElement;
+
+/** A mouse drag of photo `from` onto photo `to` (numbered as the screen
+ *  numbers them). It checks the two gates a real browser applies and a
+ *  synthetic event skips: the tile must be draggable, and its dragover must
+ *  be cancelled, or the browser never fires the drop at all. */
+function dragPhoto(from: number, to: number) {
+  const source = tile(from);
+  const target = tile(to);
+  const data = { setData: vi.fn(), effectAllowed: '', dropEffect: '' };
+  expect(source).toHaveAttribute('draggable', 'true');
+  fireEvent.dragStart(source, { dataTransfer: data });
+  expect(fireEvent.dragOver(target, { dataTransfer: data })).toBe(false);
+  fireEvent.drop(target, { dataTransfer: data });
+  fireEvent.dragEnd(source, { dataTransfer: data });
+}
 
 describe('movePhoto - the one move rule', () => {
   it('moves the first, a middle and the last photo', () => {
@@ -164,17 +213,9 @@ describe('the photo grid', () => {
 
   it('a drag and the buttons give the same array', async () => {
     const user = userEvent.setup();
-    const drag = (from: number, to: number) => {
-      const data = { setData: vi.fn(), effectAllowed: '', dropEffect: '' };
-      fireEvent.dragStart(tiles()[from], { dataTransfer: data });
-      fireEvent.dragOver(tiles()[to], { dataTransfer: data });
-      fireEvent.drop(tiles()[to], { dataTransfer: data });
-      fireEvent.dragEnd(tiles()[from], { dataTransfer: data });
-    };
-
     // last -> first
     const dragged = render(<Harness initial={[A, B, C]} />);
-    drag(2, 0);
+    dragPhoto(3, 1);
     const byDrag = shown();
     dragged.unmount();
     render(<Harness initial={[A, B, C]} />);
@@ -187,10 +228,7 @@ describe('the photo grid', () => {
   it('a drag from first to last matches Later twice', async () => {
     const user = userEvent.setup();
     const dragged = render(<Harness initial={[A, B, C]} />);
-    const data = { setData: vi.fn(), effectAllowed: '', dropEffect: '' };
-    fireEvent.dragStart(tiles()[0], { dataTransfer: data });
-    fireEvent.dragOver(tiles()[2], { dataTransfer: data });
-    fireEvent.drop(tiles()[2], { dataTransfer: data });
+    dragPhoto(1, 3);
     const byDrag = shown();
     dragged.unmount();
     render(<Harness initial={[A, B, C]} />);
@@ -244,5 +282,66 @@ describe('the add / edit page saves the new order', () => {
     const [id, body] = productSpies.updateProduct.mock.calls[0] as [string, { images: string[] }];
     expect(id).toBe('P-SRC');
     expect(body.images).toEqual([C, A, B]);
+  });
+
+  // Photo 3 dragged onto photo 1 must save what Earlier twice saves above,
+  // [C, A, B]. A swap would give [C, B, A]; adjacent moves cannot tell the
+  // two apart, so this is a long move through the real page wiring.
+  it('a drag from photo 3 onto photo 1 saves the same order as Earlier twice', async () => {
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={['/catalog/add?edit=P-SRC']}>
+        <QuickAddPage />
+      </MemoryRouter>,
+    );
+    await screen.findByRole('button', { name: 'Move photo 3 earlier' });
+
+    dragPhoto(3, 1);
+    await user.click(screen.getByRole('button', { name: /Save changes/ }));
+
+    await waitFor(() => expect(productSpies.updateProduct).toHaveBeenCalledTimes(1));
+    const [, body] = productSpies.updateProduct.mock.calls[0] as [string, { images: string[] }];
+    expect(body.images).toEqual([C, A, B]);
+  });
+});
+
+describe('the review editor offers the same reorder', () => {
+  const openReview = async () => {
+    render(
+      <MemoryRouter initialEntries={['/catalog/add?review=CAT-1']}>
+        <QuickAddPage />
+      </MemoryRouter>,
+    );
+    await screen.findByRole('button', { name: 'Move photo 3 earlier' });
+  };
+
+  it('a pure reorder is a change: Save fixes sends the photos in the new order', async () => {
+    const user = userEvent.setup();
+    await openReview();
+
+    await user.click(btn('Move photo 3 earlier'));
+    await user.click(screen.getByRole('button', { name: /Save fixes/ }));
+
+    await waitFor(() => expect(catalogSpies.update).toHaveBeenCalledTimes(1));
+    const [id, body] = catalogSpies.update.mock.calls[0] as [string, { images: string[] }];
+    expect(id).toBe('CAT-1');
+    expect(body.images).toEqual([A, C, B]);
+  });
+
+  it('when someone else saved first, the reload keeps the reorder for the next save', async () => {
+    const user = userEvent.setup();
+    const conflict = new CatalogRequestError('changed by someone else');
+    (conflict as unknown as { status: number }).status = 409;
+    catalogSpies.update.mockRejectedValueOnce(conflict);
+    await openReview();
+
+    await user.click(btn('Move photo 3 earlier'));
+    await user.click(screen.getByRole('button', { name: /Save fixes/ }));
+    await waitFor(() => expect(catalogSpies.get).toHaveBeenCalledTimes(2));
+    await user.click(screen.getByRole('button', { name: /Save fixes/ }));
+
+    await waitFor(() => expect(catalogSpies.update).toHaveBeenCalledTimes(2));
+    const [, body] = catalogSpies.update.mock.calls[1] as [string, { images: string[] }];
+    expect(body.images).toEqual([A, C, B]);
   });
 });
