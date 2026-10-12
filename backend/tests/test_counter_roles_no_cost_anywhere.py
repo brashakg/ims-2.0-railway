@@ -707,28 +707,46 @@ def test_the_return_create_door_admits_the_readers_and_its_row_says_so():
     assert set(vr._VENDOR_RETURN_ROLES) == set(PURCHASE_ROLES)
 
 
-def test_a_debit_note_is_refused_for_a_return_without_prices():
+def _issue_debit_note(**price):
     import mongomock
 
     from api.services.rtv_debit_note import DebitNoteEngine
 
-    eng = DebitNoteEngine(mongomock.MongoClient().db)
-    res = eng.issue(
-        {
-            "return_id": "VR-1",
-            "store_id": STORE,
-            "items": [
-                {"product_id": "P1", "product_name": "Aviator", "quantity": 1,
-                 "reason": "defective", "unit_price": None, "gst_rate": 5, "hsn": "9003"},
-            ],
-        },
+    line = {"product_id": "P1", "product_name": "Aviator", "quantity": 2,
+            "reason": "defective", "gst_rate": 5, "hsn": "9003", **price}
+    return DebitNoteEngine(mongomock.MongoClient().db).issue(
+        {"return_id": "VR-1", "store_id": STORE, "items": [line]},
         {"name": "Luxottica"},
         actor="u-1",
         seller={"gstin": "20AAAAA0000A1Z5", "name": "Better Vision"},
     )
+
+
+def test_a_debit_note_is_refused_for_a_return_without_prices():
+    res = _issue_debit_note(unit_price=None)
     assert res["ok"] is False and res["http"] == 422, res
     assert res["error"] == "line_without_price", res
     assert "price" in res["message"].lower()
+
+
+# Every key a return line is priced by -- a vendor RMA line carries only
+# unit_cost (routers/vendor_rma.py) -- issues a note at that price: the
+# no-price refusal and the line's price read one list.
+@pytest.mark.parametrize(
+    "price",
+    (
+        {"rate_paise": 12345},
+        {"unit_cost_paise": 12345},
+        {"unit_cost": 123.45},
+        {"rate": 123.45},
+        {"unit_price": 123.45},
+    ),
+)
+def test_a_priced_return_line_issues_its_debit_note_at_that_price(price):
+    res = _issue_debit_note(**price)
+    assert res["ok"] is True, res
+    (line,) = res["debit_note"]["lines"]
+    assert line["rate_paise"] == 12345 and line["taxable_paise"] == 24690, line
 
 
 # ---------------------------------------------------------------------------
