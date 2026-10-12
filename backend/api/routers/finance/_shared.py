@@ -629,9 +629,10 @@ def _require_finance_admin(current_user: dict) -> None:
 
 def _require_org_finance(current_user: dict) -> None:
     """THE gate of an ORG-WIDE finance view -- one that reads every shop and
-    applies no shop rule (the Tally sales JV and B2B invoices, the per-entity
-    GST reconciliation, the GST cross-check and its sign-off, bank
-    statements): the accounts roles (_require_finance_admin), and a login
+    applies no shop rule (the Tally sales JV and B2B invoices, the GST
+    cross-check and its sign-off, bank statements; the per-entity GST
+    reconciliation keeps it and reads the caller's shop by the one rule):
+    the accounts roles (_require_finance_admin), and a login
     that holds a shop. A non-admin login with NO shop sees no shop (owner
     ruling 2026-10-12, R4): an org-wide view has no empty, one-shop form to
     hand it -- a blank JV or reconciliation would read as a nil period -- so

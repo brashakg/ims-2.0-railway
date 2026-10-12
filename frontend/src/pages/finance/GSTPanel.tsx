@@ -8,6 +8,7 @@ import { PAYABLES_ROLES } from '../../components/common/CostCell';
 import type { GSTSummaryData } from './financeTypes';
 import { formatCurrency } from './financeUtils';
 import { PurchaseShopName } from '../purchase/purchaseShop';
+import { userSeesAllStores } from '../../utils/storeAccess';
 
 interface GSTPanelProps {
   gstSummary: GSTSummaryData | null;
@@ -25,7 +26,7 @@ const INPUT_TAX_NOTE =
 export default function GSTPanel({ gstSummary }: GSTPanelProps) {
   const { user } = useAuth();
   const canSeeInputTax = (user?.roles || []).some((r) => PAYABLES_ROLES.includes(r));
-  const isAdmin = (user?.roles || []).some((r) => r === 'ADMIN' || r === 'SUPERADMIN');
+  const isAdmin = userSeesAllStores(user?.roles);
   // The shop the server scopes a non-admin to: its active shop, else its first.
   const ownShop = user?.activeStoreId || (user?.storeIds || []).find((s) => !!s);
   if (!gstSummary) return null;
@@ -37,22 +38,24 @@ export default function GSTPanel({ gstSummary }: GSTPanelProps) {
           resolve_store_scope -- every shop for ADMIN / SUPERADMIN, else the
           login's own shop). It used to be org-wide for every role (OS-031);
           say which scope it is instead of letting the card imply the date
-          filters above. The per-GSTIN filable numbers live in the "GST
-          reconciliation by entity" table below. */}
+          filters above. The "GST reconciliation by entity" table below (the
+          accounts roles') reads the same shop scope (round 4). */}
       <div className="flex items-center gap-2 text-xs text-gray-500">
         <span className="inline-flex items-center rounded-full bg-gray-100 text-gray-600 border border-gray-200 px-2 py-0.5 font-medium">
           {isAdmin || !ownShop ? (
-            <>All entities &amp; stores · current month</>
+            <>All shops · current month</>
           ) : (
             <>
-              Shop: <PurchaseShopName storeId={ownShop} /> · current month
+              Your shop: <PurchaseShopName storeId={ownShop} /> · current month
             </>
           )}
         </span>
         <span>
           {isAdmin
             ? 'Not affected by the store or date filters above — per-entity figures are in the reconciliation table below.'
-            : 'Your own shop, this month — not affected by the date filters above.'}
+            : canSeeInputTax
+              ? 'Your own shop, this month — so is the reconciliation table below. Not affected by the date filters above.'
+              : 'Your own shop, this month — not affected by the date filters above.'}
         </span>
       </div>
 

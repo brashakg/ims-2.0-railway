@@ -12,6 +12,7 @@ from typing import Optional
 from fastapi import Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from ..auth import get_current_user
+from ...dependencies import resolve_store_scope
 from ...services.org_validation import shop_gstins
 from ._shared import (
     _REAL_ORDER_STATUS_FILTER,
@@ -39,9 +40,9 @@ async def get_gst_reconciliation(
 ):
     """GST output (sales tax) vs input credit (purchase tax), grouped by entity.
     You file the actual returns through Tally; this is the cross-check."""
-    # Org-wide, entity-grouped GST reconciliation is a filing/accounting view --
+    # Entity-grouped GST reconciliation is a filing/accounting view --
     # finance-admin only (owner decision 2026-06-16), so a single-store
-    # STORE_MANAGER/AREA_MANAGER cannot read every entity's GST position.
+    # STORE_MANAGER/AREA_MANAGER cannot read any entity's GST position.
     _require_org_finance(current_user)
     db = _get_db()
     now = now_ist()
@@ -56,6 +57,14 @@ async def get_gst_reconciliation(
     store_ids = None
     if entity_id:
         store_ids = [sid for sid, eid in s2e.items() if eid == entity_id]
+    # THE shop rule the GST summary cards above this table read
+    # (resolve_store_scope): ADMIN / SUPERADMIN every shop, an accountant
+    # his own shop -- so one tab never shows one login two scopes (a Pune
+    # accountant read Pune's input credit on the cards and every entity's in
+    # this table, round 4).
+    scope = resolve_store_scope(None, current_user)
+    if scope:
+        store_ids = [scope] if store_ids is None or scope in store_ids else []
 
     # Orders persist created_at as a BSON datetime; the previous .isoformat()
     # string bound matched nothing, so GST-collected per entity read zero.

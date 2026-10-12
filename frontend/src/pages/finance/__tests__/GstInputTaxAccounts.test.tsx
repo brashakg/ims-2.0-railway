@@ -15,6 +15,7 @@
 import { Suspense } from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 
 vi.mock('../../../services/api/finance', () => ({
@@ -126,6 +127,19 @@ describe.each([['ACCOUNTANT'], ['ADMIN'], ['SUPERADMIN']])('%s: keeps the input 
     render(<FinanceDashboard />);
     await waitFor(() => expect(api.getGstSummary).toHaveBeenCalled());
     expect(screen.getByRole('button', { name: /gst management/i })).toBeInTheDocument();
+  });
+
+  // Round 4: the cards say whose figures they are -- the server's one shop
+  // rule (resolve_store_scope) gives an admin every shop and an accountant
+  // his own shop, on the cards and the reconciliation table alike.
+  it('the GST cards say which shops they cover', async () => {
+    roles = [role];
+    render(<FinanceDashboard />);
+    await waitFor(() => expect(api.getGstSummary).toHaveBeenCalled());
+    await userEvent.setup().click(screen.getByRole('button', { name: /gst management/i }));
+    const admin = role !== 'ACCOUNTANT';
+    expect(await screen.findByText(admin ? /All shops · current month/ : /Your shop: .*current month/)).toBeInTheDocument();
+    expect(screen.queryByText(admin ? /Your shop:/ : /All shops/)).toBeNull();
   });
 
   it('GSTR-3B: menu entry and page', async () => {
