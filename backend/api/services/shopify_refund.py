@@ -1155,6 +1155,9 @@ def _post_credit_and_restock(
                     refund_id,
                 )
                 claimed = True
+                # A re-drive is the same return: its credit ref, its blocked
+                # task and its retry door name the doc's id, never a new one.
+                return_id = existing.get("return_id") or return_id
             else:
                 logger.warning("[SHOPIFY_REFUND] claim insert failed: %s", exc)
 

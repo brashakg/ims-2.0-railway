@@ -3078,3 +3078,33 @@ def test_a_historical_booking_that_cannot_be_written_says_what_its_rerun_does(sw
     _retry(ret)
     assert _minted(swept) == [] and len(_stock_in(swept, oid)) == 1, "one frame, one task"
     assert swept["db"]["tasks"].find_one({"task_id": blocked["task_id"]})["status"] == "COMPLETED"
+
+
+@pytest.mark.parametrize("historical", [False, True])
+def test_a_redriven_refund_is_the_same_return(swept, monkeypatch, historical):
+    """A guest order (no customer) cannot get its credit note, so its refund
+    finalizes CREDIT_FAILED and is confirmed again. Each attempt minted a new
+    return id: a booking write down twice raised TWO blocked tasks, the second
+    naming a return no doc has (its retry answered 404 and it stayed open
+    beside the stock-in task for good). A re-drive is the same return."""
+    oid, rid = 60242 + historical, 700442 + historical
+    if historical:
+        row = _historical_refund(swept, monkeypatch, oid, rid, status="DELIVERED", customer_id=None)
+    else:
+        row = _one_unit_refund(swept, oid, rid, customer_id=None)
+    real = returns_router._orders_coll()
+    monkeypatch.setattr(returns_router, "_orders_coll", lambda: _ClaimDown(real))
+    said = [shopify_refund.post_from_review(swept["db"], row) for _ in range(2)]
+    [ret] = swept["returns"].find({"shopify_refund_id": str(rid)})
+    assert [r["status"] for r in said] == ["credit_failed"] * 2
+    assert {r["return_id"] for r in said} == {ret["return_id"]}
+    blocked = [t for t in swept["db"]["tasks"].find({})
+               if str(t.get("source_ref")).startswith("return_restock_blocked:")]
+    assert [t["source_ref"] for t in blocked] == [f"return_restock_blocked:{ret['return_id']}"]
+    monkeypatch.setattr(returns_router, "_orders_coll", lambda: real)
+    assert shopify_refund.post_from_review(swept["db"], row)["return_id"] == ret["return_id"]
+    if historical:
+        assert _minted(swept) == [] and len(_stock_in(swept, oid)) == 1
+        assert swept["db"]["tasks"].find_one({"task_id": blocked[0]["task_id"]})["status"] == "COMPLETED"
+    else:
+        assert _units(swept) == [("stk-1", "AVAILABLE")]
