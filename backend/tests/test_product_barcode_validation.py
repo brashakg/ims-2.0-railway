@@ -735,6 +735,41 @@ class TestGtinAttributeOnTheEditDoor:
         )
         assert twin["gtin"] == _VALID_A
 
+    @pytest.mark.parametrize("sent", [{"gtin": _VALID_A}, {"upc": _UPC_A}])
+    def test_a_barcode_that_misses_the_catalogue_copy_is_no_success(
+        self, mock_db, monkeypatch, sent
+    ):
+        """Round 13. The twin mirror is fail-soft, so a Manage Barcode save
+        whose twin write failed said 'Barcode saved successfully!' with the new
+        code on the product and the old one on the copy the push sends. A
+        barcode lands on both or the save says so; other fields stay
+        fail-soft, and saving again lands it."""
+        import mongomock
+
+        pid = _create("GT-MISS")["product_id"]
+        spine = mock_db["products"].find_one({"product_id": pid})
+        twin_id = spine.get("pim_product_id") or pid
+        real = mongomock.collection.Collection.update_one
+        down = {"on": True}
+
+        def _twin_down(coll, *a, **k):
+            if down["on"] and coll.name == "catalog_products":
+                raise RuntimeError("catalogue copy unreachable")
+            return real(coll, *a, **k)
+
+        monkeypatch.setattr(mongomock.collection.Collection, "update_one", _twin_down)
+        with pytest.raises(HTTPException) as ei:
+            _update(pid, attributes=sent)
+        assert ei.value.status_code == 503
+        assert "not on its catalogue copy" in ei.value.detail
+        (key, code), = sent.items()
+        assert mock_db["products"].find_one({"product_id": pid})["attributes"][key] == code
+        assert key not in mock_db["catalog_products"].find_one({"id": twin_id})["attributes"]
+        assert _update(pid, mrp=1100.0)["product_id"] == pid  # not a barcode
+        down["on"] = False
+        _update(pid, attributes=sent)
+        assert mock_db["catalog_products"].find_one({"id": twin_id})["attributes"][key] == code
+
 
 class TestGtinAttributeOnTheCreateDoor:
     def test_create_refuses_a_gtin_another_product_holds(self, mock_db):

@@ -357,6 +357,7 @@ def _clean_image_urls(v):
 # persisted {product_id, sku} response shape + the additive FORM-only identity
 # columns (CL/spectacle power, variant, discount_category) are preserved.
 from ..services import product_master as _pm
+from ..services.gtin import MANUFACTURER_BARCODE_ATTRIBUTES
 
 # FORM/BULK-only optional top-level columns the canonical core doesn't model but
 # this door has always persisted (POS power-grid reads cl_power/sph/base_curve
@@ -3431,7 +3432,7 @@ async def update_product(
         # OPTICAL_LENS index/coating) can be filled and auto-promoted by the
         # restamp below. An explicit value in the patch wins; existing keys are
         # preserved. Persisted as the full merged attributes dict.
-        _gtin_written = False
+        _gtin_written = _barcode_moved = False
         if "attributes" in update_data:
             # Case ONLY the keys this submit carries, BEFORE the merge. Casing
             # the merged bag would rewrite every stored attribute on every
@@ -3451,6 +3452,13 @@ async def update_product(
                 )
                 update_data["attributes"], _gtin_written = _pm.merge_attributes_edit(
                     existing.get("attributes"), _patch, repo, product_id, _category
+                )
+                # A gtin / upc this save sent or moved must land on the twin too.
+                _stored = existing.get("attributes") or {}
+                _barcode_moved = any(
+                    k in _patch
+                    or (update_data["attributes"].get(k) or "") != (_stored.get(k) or "")
+                    for k in MANUFACTURER_BARCODE_ATTRIBUTES
                 )
             except _pm.ProductMasterError as err:
                 raise HTTPException(
@@ -3598,17 +3606,18 @@ async def update_product(
             # resolution, no upsert) -- this route used to carry its own copy,
             # which drifted from the /products/master door's (PR #1029
             # follow-up). Do not re-inline it here. Fail-soft: a mirror error
-            # never breaks the product save.
+            # never breaks the product save -- except a barcode's, below.
             try:
                 from ..dependencies import get_db as _gdb
 
-                _pm.mirror_update_to_catalog_twin(
+                _twin_ok = _pm.mirror_update_to_catalog_twin(
                     product_id=product_id,
                     current=existing,
                     patch=update_data,
                     db=_gdb(),
                 )
             except Exception:  # noqa: BLE001
+                _twin_ok = False
                 logger.warning(
                     "[PRODUCTS] catalog mirror on update skipped for %s",
                     product_id,
@@ -3634,6 +3643,15 @@ async def update_product(
             # so the resolver sees the post-update tags/category/brand + status.
             merged = {**existing, **update_data, **status_fields}
             _refresh_collections_after_product(merged)
+            # Manage Barcode: spine and twin hold ONE code (the twin's is the
+            # one the push sends). A twin that kept the old one is a failed
+            # save, never a success -- LAST, so the take-down above still ran.
+            if _barcode_moved and not _twin_ok:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Saved on the product but not on its catalogue copy "
+                    "- press Save again.",
+                )
             return {"message": "Product updated", "product_id": product_id}
 
         raise HTTPException(status_code=500, detail="Failed to update product")

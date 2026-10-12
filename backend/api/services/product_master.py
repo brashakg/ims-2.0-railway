@@ -2924,7 +2924,7 @@ def mirror_update_to_catalog_twin(
     patch: Dict[str, Any],
     db=None,
     mark_dirty: bool = True,
-) -> None:
+) -> bool:
     """THE spine-edit -> catalog-twin mirror rule (products convergence).
 
     ``mark_dirty=False`` is the explicit opt-out (the catalog door's
@@ -2976,14 +2976,16 @@ def mirror_update_to_catalog_twin(
         DRAFT only when ABSENT, so an edit can never demote a live product.
 
     Fail-soft: never raises; a mirror error is logged and the spine save
-    stands. Queuing is not publishing: a human still presses the push button.
+    stands -- False then (True = written, or nothing to write), so a door
+    whose field must land on both copies (Manage Barcode's gtin) can say it
+    did not. Queuing is not publishing: a human still presses the push button.
     """
     try:
         if db is None or not getattr(db, "is_connected", True):
-            return
+            return True
         cat = db.get_collection("catalog_products")
         if cat is None:
-            return
+            return True
         cat_patch: Dict[str, Any] = {}
         for key in ("mrp", "offer_price"):
             if key in patch:
@@ -3061,17 +3063,19 @@ def mirror_update_to_catalog_twin(
                 current=current, patch=patch, db=db, mark_dirty=mark_dirty
             )
         if not cat_patch:
-            return
+            return True
         if cat_patch.get("ecom.locally_modified"):
             if twin is None:
                 twin = cat.find_one({"id": twin_id}) or {}
             if not (twin.get("ecom") or {}).get("status"):
                 cat_patch["ecom.status"] = "DRAFT"
         cat.update_one({"id": twin_id}, {"$set": cat_patch})
+        return True
     except Exception:  # noqa: BLE001 -- the spine save must stand regardless
         logger.warning(
             "[PM] catalog twin mirror skipped for %s", product_id, exc_info=True
         )
+        return False
 
 
 def update_product(
