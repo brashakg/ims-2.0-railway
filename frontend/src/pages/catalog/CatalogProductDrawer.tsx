@@ -228,6 +228,8 @@ export function CatalogProductDrawer({
   // "Send to website" is a live-write affordance -> SUPERADMIN / ADMIN only,
   // mirroring the backend push gate (online_store_push.py _PUSH_ROLES).
   const canPush = hasRole(['SUPERADMIN', 'ADMIN']);
+  // The add / edit door's roles (catalogRoutes /catalog/add).
+  const canEdit = hasRole(['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']);
 
   // Local copy of the doc so a review-form save can refresh it in place.
   const [doc, setDoc] = useState<Record<string, unknown>>(item.doc);
@@ -966,24 +968,30 @@ export function CatalogProductDrawer({
           )}
         </div>
 
-        {/* Footer actions (spine products) */}
+        {/* Footer actions (spine products). Edit / Clone open the add-product
+            door, which only the catalogue roles may open; a store manager
+            (here to flag) sees the product without them. */}
         {!isImported && (
           <div className="border-t border-gray-200 px-5 py-3 flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => navigate(`/catalog/add?edit=${encodeURIComponent(id)}`)}
-              className="btn-primary flex items-center gap-1.5 text-sm"
-            >
-              <Pencil className="w-3.5 h-3.5" /> Edit
-            </button>
-            <button
-              type="button"
-              onClick={() => navigate(`/catalog/add?clone=${encodeURIComponent(id)}`)}
-              className="btn-secondary flex items-center gap-1.5 text-sm"
-              title="Duplicate as a new SKU"
-            >
-              <CopyPlus className="w-3.5 h-3.5" /> Clone
-            </button>
+            {canEdit && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => navigate(`/catalog/add?edit=${encodeURIComponent(id)}`)}
+                  className="btn-primary flex items-center gap-1.5 text-sm"
+                >
+                  <Pencil className="w-3.5 h-3.5" /> Edit
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigate(`/catalog/add?clone=${encodeURIComponent(id)}`)}
+                  className="btn-secondary flex items-center gap-1.5 text-sm"
+                  title="Duplicate as a new SKU"
+                >
+                  <CopyPlus className="w-3.5 h-3.5" /> Clone
+                </button>
+              </>
+            )}
             <button
               type="button"
               onClick={() => navigate(`/catalog/buy-desk?add_product=${encodeURIComponent(id)}`)}

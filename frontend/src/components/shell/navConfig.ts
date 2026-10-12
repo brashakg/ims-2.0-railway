@@ -126,7 +126,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { id: 'workshop', label: 'Workshop', to: '/workshop', icon: 'wrench', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'WORKSHOP_STAFF'] },
       // Catalog Manager: the browse/review landing at /catalog ("+ Add product"
       // inside it links on to /catalog/add — no second sidebar entry).
-      { id: 'catalog', label: 'Catalog', to: '/catalog', icon: 'tag', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
+      { id: 'catalog', label: 'Catalog', to: '/catalog', icon: 'tag', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'STORE_MANAGER'] },
       // Two work lists off the Catalog Manager (design 2026-08-30, built
       // 2026-09-04) — real addresses somebody can be SENT to, each with its
       // live size. Same gate as /catalog; the counts come from the server.
