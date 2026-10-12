@@ -11,8 +11,9 @@ ever worked.
 The box calls GET /products?search=...&match=anywhere, which is
 ProductRepository.search_products(anywhere=True). The SAME endpoint without
 `match` is what the till, goods receipt, the command palette, Returns and
-QuickShare call, and for them NOTHING changes (owner rule: ask before touching
-POS): every word still has to START brand / model / SKU / variant / barcode,
+QuickShare call, and for them NOTHING changes here: every word still has to
+START SKU / variant / barcode or a word of brand / model (the till's own rule,
+owner-approved 2026-10-08; test_product_search_word_start.py),
 or the whole text IS a maker's GTIN (exact and complete, never a prefix).
 The wide rule would crowd the till -- 'ray' is inside 'Gunmetal Gray' -- so it
 is opt-in, and even there what the till's rule finds comes FIRST, so a result
@@ -332,7 +333,7 @@ def test_regex_characters_are_matched_as_typed(lens, typed, expected):
 
 
 # ---------------------------------------------------------------------------
-# The till is untouched (owner rule: ask before touching POS)
+# The till keeps its own rule (owner rule: ask before touching POS)
 # ---------------------------------------------------------------------------
 
 LEGACY_FIELDS = ["brand", "model", "sku", "variant", "barcode"]
@@ -342,17 +343,29 @@ LEGACY_FIELDS = ["brand", "model", "sku", "variant", "barcode"]
     "q",
     ["ray", "Ray-Ban", "RB", "carrera CA", "SG-", "oak", "2000", "8895", "black", "blue"],
 )
-def test_the_till_search_is_untouched(repo, q):
+def test_the_till_lists_mains_results_first_in_mains_order(repo, q):
     """No `match`: POS, goods receipt, command palette, Returns, QuickShare.
-    The old rule exactly -- same rows, same order, same total."""
-    legacy = repo.search(q, LEGACY_FIELDS, {"is_active": True})
-    assert repo.search_products(q) == legacy, q
-    assert repo.count_search_products(q) == len(legacy), q
+    Main's till rule, written out here by hand (every word STARTS brand,
+    model, sku, variant or barcode), leads the list: same rows, same order;
+    a page of one is its first; the total counts the whole list."""
+    import re
+
+    words = [
+        {"$or": [{f: {"$regex": "^" + re.escape(w), "$options": "i"}}
+                 for f in LEGACY_FIELDS]}
+        for w in q.split()
+    ]
+    main = repo.find_many({"$and": words + [{"is_active": True}]})
+    hits = repo.search_products(q)
+    assert hits[: len(main)] == main, q
+    assert repo.search_products(q, limit=1) == (main or hits)[:1], q
+    assert repo.count_search_products(q) == len(hits), q
 
 
 def test_the_till_does_not_get_the_wide_matches(repo):
-    # No infix or wide match at the till: a model number's end, a colour word.
-    assert repo.search_products("8895") == []
+    # '8895' STARTS a word of 'CA 8895' (the till finds it since 2026-10-08);
+    # '895' is only inside it.
+    assert repo.search_products("895") == []
     assert repo.search_products("black") == []
     # The maker's GTIN only on the EXACT, complete code: a leading chunk ('890'
     # would list every Indian-made product on the 24-result strip), a middle
@@ -387,6 +400,69 @@ def test_the_till_finds_a_legacy_top_level_gtin_exactly(legacy_gtin):
     assert legacy_gtin.search_products("890") == []
     assert legacy_gtin.search_products("4006381333931") == []
     assert legacy_gtin.count_search_products("4006381333931") == 0
+
+
+def test_a_scanned_gtin_ranks_ahead_of_a_title_word_hit():
+    # A scan is main's till rule (tier 1), so the scanned product stays first
+    # on a page of one even behind a row whose TITLE only has a word that
+    # starts with the same digits (the 2026-10-08 word rule, tier 2).
+    for repo in _repo_over(
+        [
+            {"_id": "T-1", "product_id": "T-1", "sku": "AC-T1", "brand": "Case",
+             "model": "C1", "name": "Case 8901234567893", "is_active": True},
+            {"_id": "G-1", "product_id": "G-1", "sku": "WT-G1", "brand": "Titan",
+             "model": "G1", "attributes": {"gtin": "8901234567893"},
+             "is_active": True},
+        ]
+    ):
+        hits = repo.search_products("8901234567893", limit=1)
+        assert [d["product_id"] for d in hits] == ["G-1"]
+        assert repo.count_search_products("8901234567893") == 2
+
+
+@pytest.fixture
+def named():
+    """Door-shaped rows the till finds through name / subbrand: the lens's
+    'Acuvue' is its subbrand, the sunglass's 'Aviator' only in its minted
+    name (model_name is optional for SUNGLASS)."""
+    yield from _repo_over(
+        [
+            {
+                "_id": "P-JNJ",
+                "product_id": "P-JNJ",
+                "sku": "CL-JNJ-OASYS",
+                "brand": "Johnson & Johnson",
+                "model": "Oasys",
+                "attributes": {"subbrand": "Acuvue"},
+                "is_active": True,
+            },
+            {
+                "_id": "P-AVI",
+                "product_id": "P-AVI",
+                "sku": "SG-RAY-RB3025-001",
+                "brand": "Ray-Ban",
+                "model": "RB3025",
+                "name": "Ray-Ban RB3025 Aviator Sunglasses - Gold",
+                "is_active": True,
+            },
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    "q, expected",
+    [
+        ("acuvue", {"P-JNJ"}),
+        ("acuvue oasys", {"P-JNJ"}),
+        ("aviator", {"P-AVI"}),
+        ("ray ban aviator", {"P-AVI"}),
+    ],
+)
+def test_the_wide_search_keeps_every_row_the_till_finds(named, q, expected):
+    """The wide rule is a superset of the till's: the purchase-order box
+    must not lose 'Acuvue Oasys' or 'Ray Ban Aviator' that the till finds."""
+    assert {d["product_id"] for d in named.search_products(q)} == expected
+    assert _ids(named, q) == expected
 
 
 @pytest.fixture
@@ -484,7 +560,7 @@ def test_the_endpoint_opts_in_only_with_match_anywhere(repo, monkeypatch):
         out = asyncio.run(products_mod.list_products(**params))
         return {p["product_id"] for p in out["products"]}, out["total_count"]
 
-    assert _list(search="8895") == (set(), 0)
-    assert _list(search="8895", match="anywhere") == ({"P-CAR"}, 1)
+    assert _list(search="895") == (set(), 0)
+    assert _list(search="895", match="anywhere") == ({"P-CAR"}, 1)
     assert _list(search="  ", match="anywhere") == (set(), 0)
-    assert _list(search="8895") == (set(), 0)
+    assert _list(search="895") == (set(), 0)
