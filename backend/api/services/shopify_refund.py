@@ -1299,8 +1299,21 @@ def _post_credit_and_restock(
                 order=order,
             )) or {**restock_result, "applied": True}
         except Exception as exc:  # noqa: BLE001
+            # Restock OPEN is one rule: applied=False, a task, the retry. A
+            # booking or stock write that raised leaves it open (its claims
+            # are released), so it raises the same task as an unread order.
             logger.warning(
                 "[SHOPIFY_REFUND] restock failed (recorded, not applied): %s", exc
+            )
+            from ..routers.returns import _raise_restock_blocked_task
+
+            _raise_restock_blocked_task(
+                return_id or refund_id, order_id, billing_store,
+                [{"product_id": line.product_id, "sku": getattr(line, "sku", ""),
+                  "product_name": getattr(line, "product_name", "")}
+                 for line in return_lines if line.restock],
+                None, unread="or write this order's stock records",
+                historical=bool(order.get("historical")),
             )
 
     # Finalize: a credit note that SHOULD have issued (gross>0) but didn't must NOT

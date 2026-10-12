@@ -2891,3 +2891,50 @@ def test_a_fulfilled_body_older_than_the_parcels_cancel_ships_nothing(swept):
                    fulfillments=[_fulfilment(oid, 1, created_at=_T("01:03"), updated_at=_T("01:03"))])
     swept["real_map"](body, swept["db"], webhook_id="ful-late", topic="orders/fulfilled")
     assert _doc(swept, oid)["status"] == before
+
+
+# ---------------------------------------------------------------------------
+# Round 22.
+# ---------------------------------------------------------------------------
+
+
+class _ClaimDown:
+    """The orders collection with its booking write down (find_one_and_update
+    raises: an orders write error before the server sees it)."""
+
+    def __init__(self, real):
+        self.real = real
+
+    def __getattr__(self, name):
+        return getattr(self.real, name)
+
+    def find_one_and_update(self, *a, **kw):
+        raise RuntimeError("orders write down")
+
+
+@pytest.mark.parametrize("path", ["confirm", "auto"])
+def test_a_booking_that_cannot_be_written_raises_the_blocked_task(swept, monkeypatch, path):
+    """The confirm / AUTO post could not write the booking: the credit posted,
+    stk-1 stayed SOLD, and it only logged -- no task, so under AUTO (no review
+    row, the sweep never re-feeds a booked refund) the unit stayed SOLD for
+    good, and the confirm screen said 'A task has been raised'. Restock open is
+    one rule: applied=False, a task, the retry."""
+    oid, rid = 60220 + (path == "auto"), str(700420 + (path == "auto"))
+    real = returns_router._orders_coll()
+    monkeypatch.setattr(returns_router, "_orders_coll", lambda: _ClaimDown(real))
+    if path == "auto":
+        monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "1")
+        _claim_unit(swept, _book(swept, oid))
+        shopify_refund.handle_shopify_refund(swept["db"], _refund(int(rid), oid), webhook_id=None,
+                                             topic="refunds/create")
+        assert swept["review"].find_one({"shopify_refund_id": rid}) is None
+    else:
+        res = _confirm(_one_unit_refund(swept, oid, int(rid)))["result"]
+        assert (res["status"], res["restock_applied"]) == ("credited", False)
+    assert _units(swept) == [("stk-1", "SOLD")]
+    ret = swept["returns"].find_one({"shopify_refund_id": rid})
+    assert ret["restock_applied"] is False
+    [task] = swept["db"]["tasks"].find({"source_ref": f"return_restock_blocked:{ret['return_id']}"})
+    assert "Never add these units by hand" in task["description"]
+    monkeypatch.setattr(returns_router, "_orders_coll", lambda: real)
+    assert _retry(ret)["restock_applied"] is True and _units(swept) == [("stk-1", "AVAILABLE")]
