@@ -44,6 +44,10 @@ export interface SimilarProductsHintProps {
   /** "Open it" on the exact-match warning -> the same product-open path the
    *  Phase 1 duplicate-rescue popup uses (existingProductPath). */
   onOpenExisting: (existing: SimilarProductSummary) => void;
+  /** The product the editor has open (?edit=): never "similar" to itself. An
+   *  ordered draft being finished was told to "Finish it", and the link
+   *  reloaded the editor over the unsaved edits. */
+  selfId?: string | null;
 }
 
 function chipLabel(s: SimilarProductSummary): string {
@@ -62,6 +66,7 @@ export function SimilarProductsHint({
   variantMode = false,
   onPickSibling,
   onOpenExisting,
+  selfId = null,
 }: SimilarProductsHintProps) {
   const { data, armed } = useSimilarProducts({ category, brand, model, colour, size });
 
@@ -69,9 +74,9 @@ export function SimilarProductsHint({
   // debouncing, in-flight and error states — the hook's contract).
   if (!armed || !data) return null;
 
-  const exact = data.exact_match;
-  const eyeSizes = exact ? [] : data.eye_size_needed || [];
-  const siblings = variantMode ? [] : data.siblings || [];
+  const exact = data.exact_match && data.exact_match.product_id !== selfId ? data.exact_match : null;
+  const eyeSizes = data.exact_match ? [] : data.eye_size_needed || [];
+  const siblings = variantMode ? [] : (data.siblings || []).filter((s) => s.product_id !== selfId);
   if (!exact && eyeSizes.length === 0 && siblings.length === 0) return null;
 
   const colourCount = data.model_colour_count || siblings.length;

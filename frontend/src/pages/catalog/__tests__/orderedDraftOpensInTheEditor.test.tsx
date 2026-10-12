@@ -69,7 +69,7 @@ const similar = vi.fn(() => ({ data: null, armed: false }));
 vi.mock('../useSimilarProducts', () => ({ useSimilarProducts: () => similar() }));
 
 import { QuickAddPage } from '../QuickAddPage';
-import { DuplicateProductError } from '../../../services/api/products';
+import { DuplicateProductError, productApi } from '../../../services/api/products';
 
 // Every address the page went to: the editor consumes ?edit= once it has
 // loaded the product, so the last one alone would not show it.
@@ -140,5 +140,45 @@ describe('an item a manager already ordered', () => {
     expect(screen.getByRole('alert')).toHaveTextContent(/ordered before it was catalogued/);
     await user.click(screen.getByRole('button', { name: 'Finish it' }));
     await waitFor(() => expect(seen).toContain('/catalog/add?edit=P-DRAFT'));
+  });
+});
+
+// One-rule review: the editor's own item is never "similar" to itself. An
+// ordered draft opened to be finished was told "Finish it instead of adding
+// it again", and the link reloaded the editor over the unsaved edits.
+describe('finishing an ordered draft in the editor', () => {
+  const renderEditor = () => {
+    vi.mocked(productApi.getProduct).mockResolvedValueOnce({
+      ...DRAFT,
+      category: 'SG',
+      brand: 'Ray-Ban',
+      model: 'RB4165',
+      attributes: { brand_name: 'Ray-Ban', model_no: 'RB4165', colour_code: '601' },
+    } as never);
+    return render(
+      <MemoryRouter initialEntries={['/catalog/add?edit=P-DRAFT']}>
+        <QuickAddPage />
+        <Where />
+      </MemoryRouter>,
+    );
+  };
+
+  it('never tells the draft being finished to finish itself', async () => {
+    similar.mockReturnValue({
+      data: { exact_match: DRAFT, siblings: [], model_colour_count: 1 },
+      armed: true,
+    });
+    renderEditor();
+    await waitFor(() => expect(screen.getByLabelText(/^Model No/)).toHaveValue('RB4165'));
+    expect(screen.queryByText(/ordered before it was catalogued/)).toBeNull();
+  });
+
+  it('still names another ordered item with the same identity', async () => {
+    similar.mockReturnValue({
+      data: { exact_match: { ...DRAFT, product_id: 'P-OTHER' }, siblings: [], model_colour_count: 1 },
+      armed: true,
+    });
+    renderEditor();
+    expect(await screen.findByText(/ordered before it was catalogued/)).toBeTruthy();
   });
 });

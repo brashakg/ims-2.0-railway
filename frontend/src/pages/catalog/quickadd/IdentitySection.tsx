@@ -404,6 +404,7 @@ export function IdentitySection({ form }: { form: QuickAddForm }) {
                       variantMode={Boolean(variantCtx)}
                       onPickSibling={handleSimilarPick}
                       onOpenExisting={handleSimilarOpen}
+                      selfId={editMode?.kind === 'spine' ? editMode.id : null}
                     />
                   </Fragment>
                 );
