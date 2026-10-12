@@ -3,6 +3,8 @@
 // ============================================================================
 
 import { Percent } from 'lucide-react';
+import { useAuth } from '../../context/AuthContext';
+import { PAYABLES_ROLES } from '../../components/common/CostCell';
 import type { GSTSummaryData } from './financeTypes';
 import { formatCurrency } from './financeUtils';
 
@@ -10,7 +12,18 @@ interface GSTPanelProps {
   gstSummary: GSTSummaryData | null;
 }
 
+/** Owner ruling 2026-10-12 (R5): GST INPUT tax -- the credit taken on supplier
+ *  bills -- is for the accounts roles (PAYABLES_ROLES) only. GET
+ *  /finance/gst/summary leaves the input credit and the net payable (collected
+ *  minus that credit) out for anyone else, so their tiles are not drawn at all:
+ *  a manager reads the sales-side (output) figures, never a 0 or a "net" that
+ *  is really the gross. */
+const INPUT_TAX_NOTE =
+  'Input tax credit (from supplier bills) and net GST payable are shown to Admin and Accountant only.';
+
 export default function GSTPanel({ gstSummary }: GSTPanelProps) {
+  const { user } = useAuth();
+  const canSeeInputTax = (user?.roles || []).some((r) => PAYABLES_ROLES.includes(r));
   if (!gstSummary) return null;
 
   return (
@@ -49,13 +62,23 @@ export default function GSTPanel({ gstSummary }: GSTPanelProps) {
           <p className="text-xs text-gray-500 mt-2">State GST</p>
         </div>
 
-        <div className="bg-white border border-gray-200 rounded-lg p-6 text-gray-900">
-          <p className="text-gray-500 text-sm font-medium">Total GST Payable</p>
-          <p className="text-2xl font-bold mt-2">
-            {formatCurrency(gstSummary.gst_payable)}
-          </p>
-          <p className="text-xs text-gray-500 mt-2">Less Input Tax Credit</p>
-        </div>
+        {canSeeInputTax ? (
+          <div className="bg-white border border-gray-200 rounded-lg p-6 text-gray-900">
+            <p className="text-gray-500 text-sm font-medium">Total GST Payable</p>
+            <p className="text-2xl font-bold mt-2">
+              {formatCurrency(gstSummary.gst_payable)}
+            </p>
+            <p className="text-xs text-gray-500 mt-2">Less Input Tax Credit</p>
+          </div>
+        ) : (
+          <div className="bg-white border border-gray-200 rounded-lg p-6 text-gray-900">
+            <p className="text-gray-500 text-sm font-medium">Total GST Collected</p>
+            <p className="text-2xl font-bold mt-2">
+              {formatCurrency(gstSummary.total_gst)}
+            </p>
+            <p className="text-xs text-gray-500 mt-2">Sales-side (output) tax</p>
+          </div>
+        )}
       </div>
 
       {/* GST Breakdown */}
@@ -95,19 +118,27 @@ export default function GSTPanel({ gstSummary }: GSTPanelProps) {
                 {formatCurrency(gstSummary.total_gst)}
               </span>
             </div>
-            <div className="flex justify-between items-center p-4 bg-gray-50 rounded border border-gray-200">
-              <span className="text-gray-700">Input Tax Credit</span>
-              <span className="text-gray-900 font-semibold">
-                {formatCurrency(gstSummary.input_tax_credit)}
-              </span>
-            </div>
-            {/* Net payable keeps the one meaningful (danger) accent. */}
-            <div className="flex justify-between items-center p-4 bg-red-50 rounded border border-red-200">
-              <span className="text-red-700 font-medium">Net GST Payable</span>
-              <span className="text-red-700 font-bold text-lg">
-                {formatCurrency(gstSummary.gst_payable)}
-              </span>
-            </div>
+            {canSeeInputTax ? (
+              <>
+                <div className="flex justify-between items-center p-4 bg-gray-50 rounded border border-gray-200">
+                  <span className="text-gray-700">Input Tax Credit</span>
+                  <span className="text-gray-900 font-semibold">
+                    {formatCurrency(gstSummary.input_tax_credit)}
+                  </span>
+                </div>
+                {/* Net payable keeps the one meaningful (danger) accent. */}
+                <div className="flex justify-between items-center p-4 bg-red-50 rounded border border-red-200">
+                  <span className="text-red-700 font-medium">Net GST Payable</span>
+                  <span className="text-red-700 font-bold text-lg">
+                    {formatCurrency(gstSummary.gst_payable)}
+                  </span>
+                </div>
+              </>
+            ) : (
+              <p className="text-xs text-gray-500" data-testid="gst-input-tax-note">
+                {INPUT_TAX_NOTE}
+              </p>
+            )}
           </div>
         </div>
       </div>

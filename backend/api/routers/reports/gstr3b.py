@@ -1,6 +1,6 @@
 """GSTR-3B (summary return): credit notes, RCM, computation, endpoints."""
 
-from fastapi import Depends, Query
+from fastapi import Depends, HTTPException, Query
 from typing import Optional
 from datetime import date
 from ...utils.ist import (
@@ -10,8 +10,12 @@ from ...utils.ist import (
 from calendar import monthrange
 from ..auth import require_roles
 from ...dependencies import (
-    validate_store_access,
+    NO_SHOP_DETAIL,
+    is_no_shop_scope,
+    resolve_store_scope,
 )
+from ...services.cost_mask import AP_ROLES
+from ...services.payables_mask import can_see_payables
 from ._shared import (
     _REPORT_FINANCE_ROLES,
     logger,
@@ -35,6 +39,53 @@ from .gst_itc import (
     _return_interstate_flag,
     _transfer_outward_bills,
 )
+
+# Owner ruling 2026-10-12 (R5): GST INPUT tax -- the credit taken on supplier
+# bills -- is supplier money, shown to the accounts roles alone (the ONE
+# payables rule, payables_mask.can_see_payables). Everyone else the report
+# admits (the store / area managers) reads the sales side only: these keys of
+# _compute_gstr3b are ABSENT for them, never 0. Table 4 (ITC available, its
+# company-wide / GSTIN split, ITC utilised), Table 3.1(d) (inward supplies on
+# reverse charge -- supplier bills) and the tax paid in cash (output - ITC +
+# RCM: beside taxPayable it hands back the credit by subtraction).
+_INPUT_TAX_KEYS = frozenset({
+    "itcAvailable",
+    "itcAvailableRegular",
+    "itcAvailableGstin",
+    "itcUtilized",
+    "inwardSuppliesReverseChargeValue",
+    "inwardSuppliesReverseCharge",
+    "inwardSuppliesReverseChargeGstin",
+    "taxPaidCash",
+})
+
+
+def _output_side_only(report: dict, user: Optional[dict]) -> dict:
+    """``report`` unchanged for an accounts role; otherwise a copy without the
+    input-tax tables and the cash figure that would reveal them (R5)."""
+    if can_see_payables(user):
+        return report
+    return {k: v for k, v in report.items() if k not in _INPUT_TAX_KEYS}
+
+
+def _return_shop(store_id: Optional[str], current_user: dict) -> str:
+    """The shop whose GSTR-3B this is, by the ONE shop rule
+    (api.dependencies.resolve_store_scope): a named shop must be one of the
+    caller's (403 otherwise); omitted -> the caller's own shop (a multi-store
+    login with no active one: its first own shop, never another's).
+
+    R4 (owner ruling 2026-10-12): a non-admin login with NO shop sees NO shop.
+    A return is ONE shop's document -- there is no empty one to hand back (a
+    zero return reads as a nil return, and the portal file would be one) --
+    so such a login is refused in the owner's words, named shop or not. It
+    used to fall through to store-001 and read that shop's return. ADMIN /
+    SUPERADMIN keep their old default: the active shop, else store-001.
+    """
+    scope = resolve_store_scope(store_id, current_user)
+    if is_no_shop_scope(scope):
+        raise HTTPException(status_code=403, detail=NO_SHOP_DETAIL)
+    return scope or current_user.get("active_store_id") or "store-001"
+
 
 def _credit_note_totals(db, active_store, year, mon, last_day):
     """(igst, cgst, sgst, taxable) of credit notes issued in the period.
@@ -589,9 +640,11 @@ async def gstr3b_report(
     store_id: Optional[str] = Query(None),
     current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
 ):
-    """GSTR-3B summary return (IMS internal shape). See _compute_gstr3b."""
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id") or "store-001"
-    return _compute_gstr3b(month, active_store)
+    """GSTR-3B summary return (IMS internal shape). See _compute_gstr3b.
+    Input tax (Table 4, 3.1(d), cash paid) is the accounts roles' (R5).
+    A non-admin login with no shop is refused (R4, _return_shop)."""
+    active_store = _return_shop(store_id, current_user)
+    return _output_side_only(_compute_gstr3b(month, active_store), current_user)
 
 
 @router.get("/gstr3b/gstn-json")
@@ -604,16 +657,23 @@ async def gstr3b_gstn_json(
     entity_id: Optional[str] = Query(
         None, description="Reserved — entity-level rollup not yet wired; store_id wins"
     ),
-    current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
+    current_user: dict = Depends(require_roles(*AP_ROLES)),
 ):
     """GSTR-3B shaped for the GST portal's offline upload tool.
 
     Reuses _compute_gstr3b (no duplicated aggregation) and runs the pure
     mapping in services/gstn_export.py.
+
+    The accounts roles' alone (R5, owner ruling 2026-10-12): the upload IS the
+    return, Table 4 input credit included, and to_gstr3b_json writes Table 4
+    whatever it is handed -- an export without the credit would carry a zero
+    ITC that files as "no credit claimed". The filer is accounts; a manager is
+    refused rather than handed that document. So is an accountant login
+    with no shop (R4, _return_shop): it holds no shop whose return to file.
     """
     from ...services.gstn_export import to_gstr3b_json
 
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id") or "store-001"
+    active_store = _return_shop(store_id, current_user)
     period = _normalise_period(month, year)
     data = _compute_gstr3b(period, active_store)
     try:
