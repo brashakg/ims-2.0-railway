@@ -97,11 +97,25 @@ const STATUS_LABELS: Record<string, string> = {
 // return (its value, the credit-note amount and number) and the GST debit
 // note's amounts are for PAYABLES_ROLES alone. The server already drops them
 // for anyone else; these copies keep them off the screen whatever it sends.
+// Owner ruling 2026-10-12: so are a return line's unit price, rate and value --
+// anyone else reads the items, quantities and reasons only. Every key a line's
+// price can arrive under (the server's payables_mask._RETURN_LINE_PRICE) goes.
+const RETURN_LINE_PRICE_KEYS = [
+  'unit_price', 'unit_cost', 'unit_cost_paise', 'rate', 'rate_paise', 'line_expected_paise',
+];
+
+function withoutLinePrice(line: ReturnLine): ReturnLine {
+  const out: Record<string, unknown> = { ...line };
+  for (const key of RETURN_LINE_PRICE_KEYS) delete out[key];
+  return out as ReturnLine;
+}
+
 function withoutReturnCredit(ret: VendorReturn): VendorReturn {
   const out = { ...ret };
   delete out.total_value;
   delete out.credit_note_amount;
   delete out.credit_note_number;
+  if (Array.isArray(ret.items)) out.items = ret.items.map(withoutLinePrice);
   return out;
 }
 
@@ -117,7 +131,11 @@ export function VendorReturns() {
   const activeStoreId = user?.activeStoreId || ''; // a new return is raised here
   const { storeId: listScope, showShopOf } = usePurchaseShop(); // audit F63: lists read the one Purchase scope
   // Supplier money is PAYABLES_ROLES' alone: everyone else reads the returns
-  // (items, quantities, reasons, status) without what the supplier owes on them.
+  // (items, quantities, reasons, status) without what the supplier owes on them
+  // or what a line is priced at, and RECORDING that money -- issuing the credit,
+  // issuing the GST debit note -- is theirs too (owner ruling 2026-10-12). The
+  // managers keep the goods side: raise, approve, ship, received by vendor, and
+  // "replaced" on a replacement return.
   const canSeePayables = (user?.roles || []).some((r) => PAYABLES_ROLES.includes(r));
   const shownReturn = (r: VendorReturn) => (canSeePayables ? r : withoutReturnCredit(r));
   const shownNote = (dn: DebitNote) => (canSeePayables ? dn : withoutDebitNoteMoney(dn));
@@ -279,7 +297,7 @@ export function VendorReturns() {
           : `Debit note ${res.debit_note.debit_note_number} issued`,
       );
     } catch {
-      toast.error('Failed to issue debit note (vendor/AP role required)');
+      toast.error('Failed to issue debit note (ADMIN / ACCOUNTANT only)');
     } finally {
       setDnBusy(null);
     }
@@ -422,11 +440,13 @@ export function VendorReturns() {
                       )}>
                         {STATUS_LABELS[ret.status]}
                       </span>
+                      {/* Anything not typed 'replacement' is owed a credit --
+                          the server reads it so (update_return_status). */}
                       <span className={clsx(
                         'px-2 py-1 rounded text-xs font-semibold',
-                        ret.return_type === 'credit_note' ? 'bg-blue-50 text-blue-700' : 'bg-gray-100 text-gray-700'
+                        ret.return_type !== 'replacement' ? 'bg-blue-50 text-blue-700' : 'bg-gray-100 text-gray-700'
                       )}>
-                        {ret.return_type === 'credit_note' ? 'Credit Note' : 'Replacement'}
+                        {ret.return_type !== 'replacement' ? 'Credit Note' : 'Replacement'}
                       </span>
                     </div>
                     <p className="text-gray-500 text-sm">Return ID: {ret.return_id}</p>
@@ -535,7 +555,9 @@ export function VendorReturns() {
                             </button>
                           </>
                           )
-                        ) : (
+                        ) : canSeePayables ? (
+                          // Issuing the note records what the supplier owes us:
+                          // PAYABLES_ROLES only (the server 403s the rest).
                           <button
                             disabled={dnBusy === ret.return_id}
                             onClick={() => handleIssueDebitNote(ret.return_id)}
@@ -543,6 +565,8 @@ export function VendorReturns() {
                           >
                             {dnBusy === ret.return_id ? 'Issuing...' : 'Issue Debit Note'}
                           </button>
+                        ) : (
+                          <p className="text-gray-500 text-xs">Accounts issue the debit note</p>
                         )}
                       </div>
                     </div>
@@ -577,18 +601,35 @@ export function VendorReturns() {
                       )}
                       {ret.status === 'received_by_vendor' && (
                         <>
-                          <button
-                            onClick={() => handleUpdateStatus(ret.return_id, 'credit_issued')}
-                            className="flex-1 bg-green-600 hover:bg-green-700 text-white px-3 py-2 rounded text-sm font-medium transition"
-                          >
-                            Issue Credit
-                          </button>
-                          <button
-                            onClick={() => handleUpdateStatus(ret.return_id, 'replaced')}
-                            className="flex-1 bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 rounded text-sm font-medium transition"
-                          >
-                            Mark as Replaced
-                          </button>
+                          {/* Issuing the credit records the supplier's credit
+                              note and its amount: PAYABLES_ROLES only (owner
+                              ruling 2026-10-12; the server 403s the rest). */}
+                          {canSeePayables ? (
+                            <button
+                              onClick={() => handleUpdateStatus(ret.return_id, 'credit_issued')}
+                              className="flex-1 bg-green-600 hover:bg-green-700 text-white px-3 py-2 rounded text-sm font-medium transition"
+                            >
+                              Issue Credit
+                            </button>
+                          ) : (
+                            <p className="flex-1 self-center text-gray-500 text-xs">
+                              Accounts record the supplier's credit
+                            </p>
+                          )}
+                          {/* 'replaced' is the goods coming back only on a
+                              replacement return. On a credit-note return it
+                              closes the return for good WITHOUT the credit the
+                              supplier owes -- forgoing supplier money, so the
+                              accounts roles' call (the server refuses anyone
+                              else: vendor_returns.update_return_status). */}
+                          {(ret.return_type === 'replacement' || canSeePayables) && (
+                            <button
+                              onClick={() => handleUpdateStatus(ret.return_id, 'replaced')}
+                              className="flex-1 bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 rounded text-sm font-medium transition"
+                            >
+                              Mark as Replaced
+                            </button>
+                          )}
                         </>
                       )}
                     </div>

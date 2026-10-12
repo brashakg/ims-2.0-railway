@@ -11,8 +11,10 @@
 // status, the debit-note serial). The server strips the money for them; this
 // pins that the SCREEN never shows it either, even when an answer carries it,
 // and never offers the Print / Export Tally doors the server now refuses them.
-// Item unit prices follow the separate product-cost rule and are not asserted
-// here (the fixture prices the line so no line figure equals a credit figure).
+// Owner ruling 2026-10-12 adds a return line's price and the doors that RECORD
+// supplier money (Issue Credit, Issue Debit Note): VendorReturns.accountsRecord
+// .test.tsx pins those (the fixture here prices the line so no line figure
+// equals a credit figure).
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { ReactNode } from 'react';
@@ -127,7 +129,9 @@ describe('VendorReturns - a manager reads the return, not the supplier credit', 
     },
   );
 
-  it('STORE_MANAGER: a debit note issued from the screen comes back without its amount', async () => {
+  // Owner ruling 2026-10-12: issuing the debit note records supplier money, so
+  // a manager is no longer offered it (it used to issue and come back masked).
+  it('STORE_MANAGER: no Issue Debit Note door, so no note and no amount reach the screen', async () => {
     roles = ['STORE_MANAGER'];
     dnMock.list.mockResolvedValue({ debit_notes: [], total: 0 });
     dnMock.issue.mockResolvedValue({ debit_note: NOTE, idempotent: false });
@@ -139,8 +143,9 @@ describe('VendorReturns - a manager reads the return, not the supplier credit', 
       ),
     );
     fireEvent.click(await screen.findByText('Acme Optics'));
-    fireEvent.click(await screen.findByRole('button', { name: 'Issue Debit Note' }));
-    await screen.findByText('DN/26-27/0001');
+    await screen.findByText('Not yet issued');
+    expect(screen.queryByRole('button', { name: 'Issue Debit Note' })).not.toBeInTheDocument();
+    expect(dnMock.issue).not.toHaveBeenCalled();
     expect(document.body.textContent).not.toContain('7,350');
     expect(screen.queryByRole('button', { name: 'Print' })).not.toBeInTheDocument();
   });
