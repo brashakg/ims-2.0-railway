@@ -1211,3 +1211,33 @@ def test_d_the_key_rebuild_reads_a_row_as_the_edit_and_create_doors_do(door, cat
         model=flat.get("model") or attrs.get("model_no") or attrs.get("model_name"),
         color=flat.get("color"), attributes=dict(attrs), mrp=1000.0, offer_price=900.0)
     assert _dup(door, again)["product_id"] == "P-OLD"
+
+
+def test_d_a_power_edit_renames_the_lens_and_frees_no_name(door):
+    """The create door puts the power in a contact lens's name. A power edit
+    re-mints that name, so the bill line and the Shopify title say -1.50, and
+    a new -1.25 lens gets a name of its own. The SKU never moves."""
+    a = door(_form_post("CL", _FIT))
+    assert a["name"] == "Acuvue Oasys Contact Lenses -1.25 BC 8.4 DIA 14 Pack of 6"
+    twin_id = a.get("pim_product_id") or a["product_id"]
+    door.db.seed("catalog_products", [{"id": twin_id, "name": a["name"], "title": a["name"],
+                                       "ecom": {"status": "ACTIVE"}}])
+    _put(a["product_id"], brand="Acuvue", model="Oasys", attributes=dict(_FIT, power="-1.50"))
+    after = door.repo.find_by_id(a["product_id"])
+    assert after["name"] == "Acuvue Oasys Contact Lenses -1.50 BC 8.4 DIA 14 Pack of 6"
+    assert after["sku"] == a["sku"]
+    twin = door.db.get_collection("catalog_products").find_one({"id": twin_id})
+    assert (twin["title"], twin["ecom"]["locally_modified"]) == (after["name"], True)  # the Shopify title, queued
+    b = door(_form_post("CL", _FIT))
+    assert b["name"] == a["name"] != after["name"]
+    # A frame's colour is in its name too.
+    fr = door(_form_post("FR", dict(_CARRERA, colour_code="Black")))
+    _put(fr["product_id"], attributes={"colour_code": "Tortoise"})
+    assert door.repo.find_by_id(fr["product_id"])["name"].endswith("- Tortoise")
+
+
+def test_d_guard_a_typed_name_survives_an_identity_edit(door):
+    a = door(_form_post("CL", _FIT))
+    _put(a["product_id"], name="Oasys Trial Pack")
+    _put(a["product_id"], attributes={"power": "-1.50"})
+    assert door.repo.find_by_id(a["product_id"])["name"] == "Oasys Trial Pack"

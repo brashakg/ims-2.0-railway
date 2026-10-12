@@ -1310,6 +1310,17 @@ def identity_key_of(doc: Dict[str, Any]) -> Optional[str]:
     )
 
 
+def minted_name(doc: Dict[str, Any]) -> str:
+    """The name the create door mints for a product doc, its stored name aside.
+    A contact lens is named by the parts its SKU and key read (owner
+    2026-09-28: power, base curve, diameter and pack in the name too)."""
+    doc = doc or {}
+    detail = ""
+    if resolve_category(doc.get("category")) in _CONTACT_LENSES:
+        detail = " ".join(name for _, name in _cl_parts(doc.get("attributes") or {}))
+    return build_product_name({**doc, "name": None}, detail=detail)
+
+
 def rekey_on_edit(
     current: Dict[str, Any], patch: Dict[str, Any], product_repo=None
 ) -> None:
@@ -1317,19 +1328,22 @@ def rekey_on_edit(
     input: an eye size, a contact lens's power or fit, a colour...) re-keys it
     by the create rule, setting patch['identity_key'], and is refused (409
     DUPLICATE_PRODUCT, the create door's error) when ANOTHER product already
-    has that identity. `patch` is what the edit will $set (attributes already
-    merged). The SKU never moves: readable SKUs are for new products only
-    (owner 2026-09-28). An edit that touches no identity input is left alone,
-    so a stored lens whose old power is not a number can still have its price
-    changed; an edit that blanks the brand or model keeps the stored key
-    (ponytail: no $unset door, a unique sparse index refuses two null keys)."""
+    has that identity. A name the create door minted says what the product is
+    (a lens's power, a frame's colour), so it is re-minted with the key
+    (patch['name']); a typed name stays. The SKU never moves: readable SKUs
+    are for new products only (owner 2026-09-28). An edit that touches no
+    identity input is left alone, so a stored lens whose old power is not a
+    number can still have its price changed; an edit that blanks the brand or
+    model keeps the stored key (ponytail: no $unset door, a unique sparse
+    index refuses two null keys)."""
     if not any(k in patch for k in ("attributes", "brand", "model", "color", "size", "category")):
         return
+    merged = {**current, **patch}
     try:
         old = identity_key_of(current)
     except ProductMasterError:
         old = None  # a stored value that is not a number: the edit's key decides
-    new = identity_key_of({**current, **patch})
+    new = identity_key_of(merged)
     if new is None or new == old:
         return
     other = (
@@ -1340,6 +1354,13 @@ def rekey_on_edit(
     if other is not None and other.get("product_id") != current.get("product_id"):
         raise _duplicate_error(other)
     patch["identity_key"] = new
+    if "name" not in patch and current.get("name"):
+        try:
+            was_minted = current["name"] == minted_name(current)
+        except ProductMasterError:
+            was_minted = False
+        if was_minted:
+            patch["name"] = minted_name(merged) or current["name"]
 
 
 # Sibling cap for the live "similar products" strip (dup-detect Phase 2). The
@@ -1764,11 +1785,7 @@ def normalise_payload(
     # explicit door-supplied name (via extra_fields, e.g. a SERVICE's name)
     # is NEVER overwritten -- needs_name() only fires on a blank.
     if needs_name(doc):
-        # A contact lens is named by the parts its SKU and key read (owner
-        # 2026-09-28: power, base curve, diameter and pack in the name too).
-        minted = build_product_name(doc, detail=" ".join(
-            name for _, name in _cl_parts(attributes)
-        ) if canonical in _CONTACT_LENSES else "")
+        minted = minted_name(doc)
         if minted:
             doc["name"] = minted
     # --- Phase 0: stamp the catalog-done chokepoint on the spine ---
@@ -2974,7 +2991,7 @@ def mirror_update_to_catalog_twin(
         # -- went stale after an edit (prod 2026-09-06: one twin had already
         # drifted from its spine on attributes). model / hsn / gst / is_active
         # mirror for the PIM screens but queue nothing: no pushed payload
-        # reads them, and the spine never recomputes `name` on edit.
+        # reads them (a name that moves arrives as `name`, below).
         for key in (
             "hsn_code", "gst_rate", "is_active", "description",
             "brand", "model", "category", "attributes",
@@ -3007,9 +3024,9 @@ def mirror_update_to_catalog_twin(
         # as the Shopify title, and no edit ever recomputed it. On an explicit
         # rename re-derive it with the SAME formula the create door uses
         # (pim_display_name) and queue the twin only when the title actually
-        # changed. ONLY a rename: the spine never recomputes `name` on a
-        # brand / model edit (product_naming honours a set name verbatim), so
-        # nothing else can move the title.
+        # changed. A rename, or an identity edit that re-mints a minted name
+        # (rekey_on_edit: a lens's new power); product_naming honours a set
+        # name verbatim, so nothing else can move the title.
         twin: Optional[Dict[str, Any]] = None
         if "name" in patch:
             twin = cat.find_one({"id": twin_id}) or {}
