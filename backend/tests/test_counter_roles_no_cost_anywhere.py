@@ -147,6 +147,7 @@ def _seed(db):
         {
             "order_id": "O1",
             "order_number": "BV-O1",
+            "tracking_token": "TRACK-O1",  # else the first read backfills one
             "store_id": STORE,
             "customer_id": "C1",
             "customer_phone": "9876500001",
@@ -157,6 +158,33 @@ def _seed(db):
             "items": [
                 {
                     "item_id": "I1",
+                    "product_id": "P1",
+                    "product_name": "Aviator",
+                    "quantity": 1,
+                    "unit_price": 9999.0,
+                    "item_total": 9999.0,
+                    "cost_at_sale": COST,
+                }
+            ],
+        }
+    )
+    # Ready to collect, part-paid and past its promised day: on the delivery
+    # queue, the unpaid list and the overdue list.
+    db.orders.insert_one(
+        {
+            "order_id": "O3",
+            "order_number": "BV-O3",
+            "store_id": STORE,
+            "customer_id": "C1",
+            "customer_name": "Asha",
+            "status": "READY",
+            "payment_status": "PARTIAL",
+            "expected_delivery": "2000-01-01",
+            "grand_total": 9999.0,
+            "created_at": now,
+            "items": [
+                {
+                    "item_id": "I3",
                     "product_id": "P1",
                     "product_name": "Aviator",
                     "quantity": 1,
@@ -271,6 +299,10 @@ READS = [
     ("GET", "/api/v1/orders/O1", ()),
     ("GET", "/api/v1/orders/O2", ()),
     ("GET", "/api/v1/orders/O1/invoice", ()),
+    ("GET", "/api/v1/orders/pending/delivery", ()),
+    ("GET", "/api/v1/orders/unpaid/list", ()),
+    ("GET", "/api/v1/orders/overdue/list", ()),
+    ("GET", "/api/v1/orders/search?q=BV-O", ()),
     ("GET", "/api/v1/customers/C1/orders", ()),
     ("GET", "/api/v1/inventory/barcode/2900000000017", ()),
     ("GET", "/api/v1/inventory/stock/barcode/2900000000017", ()),
@@ -356,6 +388,32 @@ def test_the_till_scans_for_counter_roles_as_for_managers(client, shop, role, pa
         assert (p["name"], p["mrp"], p["offer_price"], p["gst_rate"]) == (
             "Aviator", 9999.0, 9999.0, 12
         ), p
+
+
+# The counter still gets the order lines it sells and hands over from (the
+# delivery surface, the sale-complete screen, the customer panel's history):
+# its reply is the manager's with only the cost keys gone.
+_ORDER_READS = (
+    ("/api/v1/orders/O1", lambda b: [b], "camel"),
+    ("/api/v1/orders/pending/delivery", lambda b: b["orders"], "camel"),
+    ("/api/v1/orders", lambda b: b["orders"], "camel"),
+    ("/api/v1/customers/C1/orders", lambda b: b["orders"], "snake"),
+)
+_LINE_KEYS = {
+    "camel": ("productName", "unitPrice", "quantity", "finalPrice"),
+    "snake": ("product_name", "unit_price", "quantity", "item_total"),
+}
+
+
+@pytest.mark.parametrize("role", COUNTER_ROLES)
+@pytest.mark.parametrize("path,orders_of,case", _ORDER_READS)
+def test_counter_roles_keep_the_order_lines(client, shop, role, path, orders_of, case):
+    got = _get(client, role, "GET", path)
+    assert got == _without_cost_keys(_get(client, "ADMIN", "GET", path)), got
+    lines = [ln for o in orders_of(got) for ln in o.get("items") or []]
+    assert lines, got
+    for ln in lines:
+        assert [ln[k] for k in _LINE_KEYS[case]] == ["Aviator", 9999.0, 1, 9999.0], ln
 
 
 def _narrow_product_rule(monkeypatch, role):
