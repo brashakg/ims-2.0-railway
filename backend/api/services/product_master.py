@@ -1299,10 +1299,12 @@ def _duplicate_error(existing: Dict[str, Any]) -> "ProductMasterError":
     return err
 
 
-def _identity_key_of(doc: Dict[str, Any]) -> Optional[str]:
-    """The duplicate key a stored product has by THE create rule: identity_parts
-    over its attributes, a legacy row's flat columns filling the gaps (the
-    create door folds them in the same way, normalise_door_payload)."""
+def identity_key_of(doc: Dict[str, Any]) -> Optional[str]:
+    """THE duplicate key a stored product has, by the create rule: identity_parts
+    over its attributes, a legacy row's flat brand/model/color/size filling the
+    gaps (_overlay_attributes; the FORM door folds them the same way,
+    normalise_door_payload). The edit door and the key rebuild
+    (scripts/migrate_identity_key_tighten.py) both read a row through here."""
     return compute_identity_key(
         *identity_parts(_overlay_attributes(doc), (doc or {}).get("category"))
     )
@@ -1324,10 +1326,10 @@ def rekey_on_edit(
     if not any(k in patch for k in ("attributes", "brand", "model", "color", "size", "category")):
         return
     try:
-        old = _identity_key_of(current)
+        old = identity_key_of(current)
     except ProductMasterError:
         old = None  # a stored value that is not a number: the edit's key decides
-    new = _identity_key_of({**current, **patch})
+    new = identity_key_of({**current, **patch})
     if new is None or new == old:
         return
     other = (

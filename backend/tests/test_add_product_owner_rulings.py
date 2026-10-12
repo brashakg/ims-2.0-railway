@@ -1185,3 +1185,29 @@ def test_d_colour_twins_and_packs_never_share_a_name_title_or_handle():
                              "model_no": "ModelXYZ Very Long Designation Edition",
                              "colour_code": "Metallic Rose Gold Gradient"})
     assert len(long_frame["name"]) <= pn.MAX_NAME_LEN
+
+
+@pytest.mark.parametrize("category,flat,attrs", [
+    # flat colour '601', attributes colour name only
+    ("SUNGLASS", {"color": "601"},
+     {"brand_name": "Ray-Ban", "model_no": "RB4165", "colour_name": "Black"}),
+    # flat model 'OASYS-1D', attributes model name only
+    ("CONTACT_LENS", {"model": "OASYS-1D"}, dict(_OASYS)),
+])
+def test_d_the_key_rebuild_reads_a_row_as_the_edit_and_create_doors_do(door, category, flat, attrs):
+    """A row whose flat columns and attributes disagree: the rebuild writes the
+    key the edit door (identity_key_of) and the FORM create door compute, so
+    the same product entered again is the 409, never a silent duplicate."""
+    from scripts import migrate_identity_key_tighten as mig
+
+    row = {"product_id": "P-OLD", "sku": "P-OLD", "category": category, "is_active": True,
+           "brand": attrs["brand_name"], "identity_key": "stale", "mrp": 1000.0,
+           "offer_price": 900.0, "attributes": dict(attrs), **flat}
+    door.repo.collection.insert_one(dict(row))
+    mig.run(door.repo.collection, apply=True)
+    assert door.repo.find_by_id("P-OLD")["identity_key"] == pm.identity_key_of(row)
+    again = prod_router.ProductCreate(
+        category=category, brand=attrs["brand_name"],
+        model=flat.get("model") or attrs.get("model_no") or attrs.get("model_name"),
+        color=flat.get("color"), attributes=dict(attrs), mrp=1000.0, offer_price=900.0)
+    assert _dup(door, again)["product_id"] == "P-OLD"

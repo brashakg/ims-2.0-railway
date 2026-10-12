@@ -42,30 +42,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from api.services.product_master import (  # noqa: E402
     ProductMasterError,
-    compute_identity_key,
-    identity_parts,
+    identity_key_of as _identity_of,
 )
 
-
-def _identity_of(doc: Dict[str, Any]):
-    """The key the create door stamps (product_master.normalise_payload:
-    compute_identity_key(*identity_parts(attributes, category)) -- the one
-    rule, never a copy here), read from the row's attributes. The top-level identity
-    columns only fill in what a row's attributes lack (an older row with
-    none). So an Optical Lens keeps its sub-brand, coating and index:
-    Crizal 1.56 HC and Crizal 1.67 HC are two products here too, and an old
-    lens row whose model is the former form's 'STD' filler gets the key the
-    same lens entered today gets (identity_parts reads 'STD' as no model).
-    A contact lens is keyed with its power; a stored 0 (plano) is a value.
-    """
-    attrs = doc.get("attributes") if isinstance(doc.get("attributes"), dict) else {}
-    top = {k: doc.get(k) for k in (
-        "brand", "brand_name", "model", "model_no", "model_name", "subbrand",
-        "color", "colour_code", "colour_name", "size", "coating", "index",
-    )}
-    return compute_identity_key(*identity_parts(
-        {**top, **{k: v for k, v in attrs.items() if v not in (None, "")}},
-        doc.get("category")))
+# _identity_of is the edit door's own rule (product_master.identity_key_of):
+# the create door's identity_parts over the row's attributes, its flat
+# brand/model/color/size filling the gaps exactly as the FORM door folds them.
+# Never a copy here: a rebuilt key the create door does not compute lets a new
+# entry of the same product past the 409.
 
 
 def run(products, *, apply: bool) -> Dict[str, Any]:
