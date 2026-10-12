@@ -845,8 +845,10 @@ async def list_products(
             "model number anywhere in the model, brands spelt with or without "
             "spaces/hyphens, colour words, the GTIN (audit F21). Absent = the "
             "till's rule: every word STARTS a word of brand / model / name / "
-            "model name / subbrand, or the start of SKU / variant / barcode "
-            "(POS, goods receipt and every other search box)."
+            "model name / subbrand, or the start of SKU / variant / barcode, "
+            "or the search is the maker's complete GTIN, exactly, in any "
+            "spelling of the one code (POS, goods receipt and every other "
+            "search box)."
         ),
     ),
     tag: Optional[str] = Query(
