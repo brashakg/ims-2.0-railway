@@ -1533,12 +1533,18 @@ def test_the_victims_filename_never_appears_in_body_or_headers(monkeypatch):
     )
 
     class _Repo:
-        def find_by_id(self, task_id):
-            return {
-                "task_id": task_id,
+        # The thief's OWN task (so the visibility door opens) carrying a
+        # foreign id: only the kind check can stop the stream now.
+        def find_one(self, flt):
+            from tests.strict_fakes import matches
+
+            doc = {
+                "task_id": "T-1",
                 "store_id": "S1",
+                "assigned_to": _THIEF["user_id"],
                 "attachment": {"file_id": victim_id, "filename": "harmless.jpg"},
             }
+            return doc if matches(doc, flt) else None
 
     monkeypatch.setattr(tasks_router, "get_file_store", lambda: store)
     monkeypatch.setattr(tasks_router, "get_task_repository", lambda: _Repo())
@@ -1574,12 +1580,16 @@ def test_a_task_attachment_you_uploaded_yourself_still_works(monkeypatch):
     )
 
     class _Repo:
-        def find_by_id(self, task_id):
-            return {
-                "task_id": task_id,
+        def find_one(self, flt):  # the caller's own task
+            from tests.strict_fakes import matches
+
+            doc = {
+                "task_id": "T-1",
                 "store_id": "S1",
+                "assigned_to": _THIEF["user_id"],
                 "attachment": {"file_id": mine, "filename": "mine.pdf"},
             }
+            return doc if matches(doc, flt) else None
 
     monkeypatch.setattr(tasks_router, "get_file_store", lambda: store)
     monkeypatch.setattr(tasks_router, "get_task_repository", lambda: _Repo())

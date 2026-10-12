@@ -16,12 +16,10 @@ import uuid
 
 from .auth import get_current_user, require_roles
 from ..dependencies import (
-    can_access_store_scoped,
     get_task_repository,
     get_user_repository,
     get_db,
     get_order_repository,
-    user_store_scope,
     validate_store_access,
 )
 from ..services.file_store import (
@@ -46,6 +44,7 @@ from ..services.task_sla import (
 )
 from ..services.task_escalation import resolve_escalation_target
 from ..services.task_notify import notify_escalation
+from ..services.task_visibility import overdue_filter, task_counts, visible
 from ..services.sop_checklist import (
     apply_item_toggle,
     completion_status,
@@ -68,22 +67,25 @@ VALID_STATUSES = {"OPEN", "IN_PROGRESS", "COMPLETED", "ESCALATED", "CANCELLED"}
 TERMINAL_STATUSES = {"COMPLETED", "CANCELLED"}
 
 
-def _ensure_task_store_access(task: dict, current_user: dict) -> None:
-    """Object-level store guard for the single-task endpoints (P2 IDOR).
+def _visible_task(repo, task_id: str, current_user: dict) -> dict:
+    """THE single-task door: the task, if the caller may see it (owner ruling
+    2026-10-12, services/task_visibility.py), else 404 -- never 403, so a
+    task id that exists but is not yours reads exactly like one that does not.
+    Seeing a task is what lets a person act on it: every read and every
+    lifecycle action opens the task through here."""
+    task = repo.find_one(visible({"task_id": task_id}, current_user))
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return task
 
-    A task stamped with a store_id may only be read / acted on by a caller
-    whose store reach covers that store (SUPERADMIN/ADMIN are cross-store via
-    can_access_store_scoped). A task with NO store_id is a GLOBAL/system task
-    -> any authenticated caller may proceed (it cannot leak another store's
-    data because it belongs to none).
-    """
-    store_id = task.get("store_id")
+
+def _shop_filter(store_id: Optional[str], current_user: dict) -> dict:
+    """An explicit ?store_id narrows a task list to that shop (403 if it is not
+    one of the caller's -- BUG-062); omitted, the visibility rule alone decides.
+    The list, the overdue list and the summary share it, so counts equal lists."""
     if not store_id:
-        return
-    if not can_access_store_scoped(store_id, current_user):
-        raise HTTPException(
-            status_code=403, detail="No access to this task's store"
-        )
+        return {}
+    return {"store_id": validate_store_access(store_id, current_user)}
 
 
 # The metadata.kind this router's own upload stamps. Anything else in the
@@ -127,46 +129,6 @@ def _authorise_attachment(file_id: str, current_user: dict) -> None:
             status_code=400,
             detail="attachment_file_id does not reference a file you uploaded",
         )
-
-
-# Manager-tier roles that may act on ANY task in a store they can reach
-# (the same rungs the escalation ladder climbs). A non-manager who is neither
-# the assignee nor the assigner/creator must not act on someone else's task.
-_TASK_MANAGER_ROLES = {"STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"}
-
-
-def _ensure_task_actor(task: dict, current_user: dict) -> None:
-    """Object-level ownership guard for the MUTATING lifecycle actions (P2).
-
-    ``_ensure_task_store_access`` only proves the caller is in the task's
-    store -- in a shared-POS store that lets ANY low-role staffer complete /
-    start / acknowledge / escalate / reassign a colleague's task, defeating
-    SLA accountability (live-proven: a non-assignee SALES_STAFF completed a
-    Store-Manager-owned task). Allow the action only if the caller is:
-      - the assignee (assigned_to), or
-      - the assigner / creator (assigned_by / created_by), or
-      - a manager-tier role (STORE_MANAGER / AREA_MANAGER / ADMIN / SUPERADMIN)
-        -- they have already passed the store gate, so they may manage their
-        store's tasks.
-    Anyone else (a plain SALES_STAFF / CASHIER who doesn't own the task) gets
-    403. This is the INNER gate; ``_ensure_task_store_access`` stays the outer
-    one and must be called first.
-    """
-    roles = {str(r).strip().upper() for r in (current_user.get("roles") or [])}
-    if roles & _TASK_MANAGER_ROLES:
-        return
-    uid = current_user.get("user_id")
-    owners = {
-        task.get("assigned_to"),
-        task.get("assigned_by"),
-        task.get("created_by"),
-    }
-    if uid and uid in owners:
-        return
-    raise HTTPException(
-        status_code=403,
-        detail="Only the assignee, the assigner, or a manager may act on this task",
-    )
 
 
 # ============================================================================
@@ -456,35 +418,11 @@ async def list_tasks(
         filters["assigned_to"] = assigned_to
     if task_type:
         filters["source"] = canon_source(task_type)
-    # Store scope. Two cases, both kept CONSISTENT with the single-task open
-    # gate (_ensure_task_store_access -> can_access_store_scoped) so the Hub
-    # list never surfaces a task the SAME caller would 403 on opening:
-    #
-    # (a) explicit ?store_id  -> validate_store_access (a store-scoped role
-    #     asking for ANOTHER store is 403'd; admins/area-managers pass per reach).
-    # (b) omitted store_id    -> admins see ALL stores (no store filter); a
-    #     store-scoped caller is constrained to the caller's FULL reach
-    #     (store_ids UNION active_store_id) PLUS global/no-store tasks via $in.
-    #
-    # The previous code filtered by a SINGLE value (active_store_id only), which
-    # diverged from the open-gate's full-reach model: a multi-store caller (e.g.
-    # AREA_MANAGER) could be shown an other-store row whose store wasn't their
-    # active one yet open fine, or shown nothing for stores in their reach. We
-    # now mirror the gate exactly. (BUG-062 / Hub-task-403.)
-    if store_id:
-        filters["store_id"] = validate_store_access(store_id, current_user)
-    else:
-        is_cross, stores = user_store_scope(current_user)
-        if not is_cross:
-            # A store-scoped caller may see: any of THEIR OWN stores, plus
-            # GLOBAL (no-store) system/HQ tasks -- which the single-task open
-            # gate (_ensure_task_store_access) lets ANY caller open (a task
-            # with no store_id belongs to no store, so it cannot leak another
-            # store's data). $in includes None so a null/missing store_id row
-            # matches. Worst case (empty reach) -> only global tasks, no leak.
-            allowed = sorted(stores) + [None]
-            filters["store_id"] = {"$in": allowed}
-        # cross-store roles (SUPERADMIN/ADMIN): no store_id filter -> all stores.
+    # Who sees what is the visibility rule (owner ruling 2026-10-12): below
+    # manager, only your own tasks and your role's at your shop -- the same
+    # rule GET /{task_id} opens with, so the list never shows a task that
+    # would 404 on opening. An explicit ?store_id narrows to that shop.
+    filters = visible({**filters, **_shop_filter(store_id, current_user)}, current_user)
 
     tasks = [
         _canon_task_out(t) for t in repo.find_many(filters, skip=skip, limit=limit)
@@ -642,13 +580,8 @@ async def download_task_file(
     if repo is None:
         raise HTTPException(status_code=503, detail="Database not available")
 
-    task = repo.find_by_id(task_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
-
-    # Same gate as GET /{task_id}: a task with no store_id is global (any caller);
-    # a store-stamped task only for callers whose reach covers that store.
-    _ensure_task_store_access(task, current_user)
+    # Same door as GET /{task_id}: only a task the caller may see.
+    task = _visible_task(repo, task_id, current_user)
 
     attachment = task.get("attachment") or {}
     file_id = attachment.get("file_id")
@@ -708,7 +641,9 @@ async def get_my_tasks(
     tasks = [
         _canon_task_out(t)
         for t in repo.find_many(
-            filters, sort=[("priority", 1), ("due_at", 1)], limit=0
+            visible(filters, current_user),
+            sort=[("priority", 1), ("due_at", 1)],
+            limit=0,
         )
     ]
     _enrich_assignee_names(tasks)
@@ -727,16 +662,10 @@ async def get_overdue_tasks(
     if repo is None:
         return {"tasks": []}
 
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
-
-    now = datetime.now()
-    filters: dict = {
-        "status": {"$in": ["OPEN", "IN_PROGRESS", "open", "in_progress"]},
-        "$or": [{"due_at": {"$lt": now}}, {"due_date": {"$lt": now}}],
-    }
-
-    if active_store:
-        filters["store_id"] = active_store
+    # Same scope as GET /tasks and GET /tasks/summary (counts equal lists).
+    filters = visible(
+        {**overdue_filter(), **_shop_filter(store_id, current_user)}, current_user
+    )
 
     # limit=0 -> unbounded (PR-#522 idiom): the default limit=100 silently hid
     # overdue tasks past the first 100 from the escalation view.
@@ -766,14 +695,7 @@ async def get_task(
     if repo is None:
         return {"task_id": task_id}
 
-    task = repo.find_by_id(task_id)
-
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
-
-    _ensure_task_store_access(task, current_user)
-
-    return _canon_task_out(task)
+    return _canon_task_out(_visible_task(repo, task_id, current_user))
 
 
 @router.patch("/{task_id}")
@@ -794,12 +716,7 @@ async def update_task(
     if repo is None:
         return {"task_id": task_id, "message": "Task updated"}
 
-    existing = repo.find_by_id(task_id)
-
-    if not existing:
-        raise HTTPException(status_code=404, detail="Task not found")
-
-    _ensure_task_store_access(existing, current_user)
+    existing = _visible_task(repo, task_id, current_user)
 
     current_status = canon_status(existing.get("status"))
 
@@ -882,13 +799,7 @@ async def complete_task(
     if repo is None:
         return {"task_id": task_id, "status": "COMPLETED"}
 
-    task = repo.find_by_id(task_id)
-
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
-
-    _ensure_task_store_access(task, current_user)
-    _ensure_task_actor(task, current_user)
+    task = _visible_task(repo, task_id, current_user)
 
     current_status = canon_status(task.get("status"))
 
@@ -1191,13 +1102,7 @@ async def acknowledge_task(
     if repo is None:
         return {"task_id": task_id, "message": "Task acknowledged"}
 
-    task = repo.find_by_id(task_id)
-
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
-
-    _ensure_task_store_access(task, current_user)
-    _ensure_task_actor(task, current_user)
+    task = _visible_task(repo, task_id, current_user)
 
     current_status = canon_status(task.get("status"))
 
@@ -1247,12 +1152,7 @@ async def escalate_task(
     if repo is None:
         return {"task_id": task_id, "status": "ESCALATED"}
 
-    task = repo.find_by_id(task_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
-
-    _ensure_task_store_access(task, current_user)
-    _ensure_task_actor(task, current_user)
+    task = _visible_task(repo, task_id, current_user)
 
     current_status = canon_status(task.get("status"))
     if current_status in TERMINAL_STATUSES:
@@ -1414,7 +1314,9 @@ async def auto_escalate_overdue_tasks(
 
     active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
 
-    filters = build_escalation_candidate_filter(active_store)
+    # Only the tasks the caller can see: a press from the floor must not
+    # escalate (and reassign) a colleague's task it may not even open.
+    filters = visible(build_escalation_candidate_filter(active_store), current_user)
     now = datetime.now()
     sla_cfg = _load_sla_config()
 
@@ -1573,7 +1475,7 @@ async def list_fake_closures(
         filters["store_id"] = active_store
 
     try:
-        candidates = repo.find_many(filters, limit=1000) or []
+        candidates = repo.find_many(visible(filters, current_user), limit=1000) or []
     except Exception:  # noqa: BLE001
         candidates = []
 
@@ -1605,7 +1507,7 @@ async def list_silent_tasks(
         filters["store_id"] = active_store
 
     try:
-        candidates = repo.find_many(filters, limit=1000) or []
+        candidates = repo.find_many(visible(filters, current_user), limit=1000) or []
     except Exception:  # noqa: BLE001
         candidates = []
 
@@ -1623,57 +1525,14 @@ async def get_task_summary(
     store_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """Get task summary by status"""
+    """Status + overdue counts of the tasks the caller can see -- the same
+    scope as GET /tasks and GET /tasks/overdue, so every count equals its list."""
     repo = get_task_repository()
 
     if repo is None:
         return {"summary": {}, "overdue_count": 0, "escalated_count": 0}
 
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
-
-    filters: dict = {}
-    if active_store:
-        filters["store_id"] = active_store
-
-    # Count by status -- tolerant of canonical UPPERCASE and legacy lowercase.
-    def _count(*variants: str) -> int:
-        return repo.count({**filters, "status": {"$in": list(variants)}})
-
-    open_ct = _count("OPEN", "open")
-    in_progress_ct = _count("IN_PROGRESS", "in_progress")
-    completed_ct = _count("COMPLETED", "completed")
-    escalated_ct = _count("ESCALATED", "escalated")
-
-    summary = {
-        "OPEN": open_ct,
-        "IN_PROGRESS": in_progress_ct,
-        "COMPLETED": completed_ct,
-        "ESCALATED": escalated_ct,
-    }
-
-    now = datetime.now()
-    overdue_count = repo.count(
-        {
-            **filters,
-            "status": {"$in": ["OPEN", "IN_PROGRESS", "open", "in_progress"]},
-            "$or": [{"due_at": {"$lt": now}}, {"due_date": {"$lt": now}}],
-        }
-    )
-
-    total = open_ct + in_progress_ct + completed_ct + escalated_ct
-
-    # Both the nested `summary` (canonical keys) and flat convenience keys the
-    # dashboard cards read directly (open = open + in-progress).
-    return {
-        "summary": summary,
-        "open": open_ct + in_progress_ct,
-        "completed": completed_ct,
-        "escalated": escalated_ct,
-        "overdue": overdue_count,
-        "overdue_count": overdue_count,
-        "escalated_count": escalated_ct,
-        "total": total,
-    }
+    return task_counts(repo, current_user, _shop_filter(store_id, current_user))
 
 
 # ============================================================================
@@ -2273,11 +2132,7 @@ async def start_task(
     repo = get_task_repository()
     if repo is None:
         return {"task_id": task_id, "status": "IN_PROGRESS"}
-    task = repo.find_by_id(task_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
-    _ensure_task_store_access(task, current_user)
-    _ensure_task_actor(task, current_user)
+    task = _visible_task(repo, task_id, current_user)
     existing = canon_status(task.get("status"))
     if existing == "IN_PROGRESS":
         return {
@@ -2314,11 +2169,7 @@ async def reassign_task(
     repo = get_task_repository()
     if repo is None:
         return {"task_id": task_id, "assigned_to": body.assigned_to}
-    task = repo.find_by_id(task_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
-    _ensure_task_store_access(task, current_user)
-    _ensure_task_actor(task, current_user)
+    task = _visible_task(repo, task_id, current_user)
     task_status = canon_status(task.get("status"))
     if task_status in TERMINAL_STATUSES:
         raise HTTPException(

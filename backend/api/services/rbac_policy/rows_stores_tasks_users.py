@@ -105,12 +105,6 @@ ROWS: List[Dict[str, object]] = [
     },
     {
         "method": "GET",
-        "path": "/api/v1/tasks/completion-stats",
-        "allowed": "AUTHENTICATED",
-    },
-    {"method": "GET", "path": "/api/v1/tasks/escalations", "allowed": "AUTHENTICATED"},
-    {
-        "method": "GET",
         "path": "/api/v1/tasks/integrity/fake-closures",
         "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
