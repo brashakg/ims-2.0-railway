@@ -1117,3 +1117,29 @@ def test_d13_ship_refuses_when_it_cannot_read_the_products(db, monkeypatch):
     stored = db["stock_transfers"].find_one({"id": t["id"]})
     assert stored["status"] == transfers.TransferStatus.APPROVED
     assert "gst_registrations" not in stored
+
+
+def test_d13_a_legacy_move_whose_shops_cannot_be_read_still_completes(db, monkeypatch):
+    """r6 #2: a crossing move shipped before ship stamped its verdict, whose
+    shops cannot be read at complete: the mirror bill is skipped (logged) and
+    complete still answers success -- the status flip is never blocked."""
+    t = _shipped("ST-BOK-1")
+    db["stock_transfers"].update_one({"id": t["id"]}, {"$unset": {"gst_registrations": ""}})
+    line_id = transfers._get_transfer(t["id"])["items"][0]["id"]
+    _run(transfers.receive_transfer(
+        t["id"], [transfers.TransferItemReceive(transfer_item_id=line_id, quantity_received=2)],
+        ADMIN,
+    ))
+    real = mongomock.collection.Collection.find_one
+
+    def flaky(self, *args, **kwargs):
+        if self.name == "stores":
+            raise RuntimeError("stores read failed")
+        return real(self, *args, **kwargs)
+
+    with monkeypatch.context() as m:
+        m.setattr(mongomock.collection.Collection, "find_one", flaky)
+        done = _run(transfers.complete_transfer(t["id"], None, ADMIN))
+    assert done["message"] == "Transfer completed"
+    assert transfers._get_transfer(t["id"])["status"] == transfers.TransferStatus.COMPLETED
+    assert db["vendor_bills"].count_documents({"source_transfer_id": t["id"]}) == 0
