@@ -644,16 +644,21 @@ def test_d7b2_a_family_cut_by_the_caps_says_how_big_it_is(call, mongo_db, label,
     assert exact == (["P-CL-TARGET"] if query == _CL_TARGET_UNIT else []), f"by {label}: {exact}"
 
 
-def test_d7b2_a_search_cut_at_its_cap_says_so(call, mongo_db):
+@pytest.mark.parametrize("query", ["Vogue", "aviator"])
+def test_d7b2_a_search_cut_at_its_cap_says_so(call, mongo_db, query):
     # 60 one-colour models of one brand: the 50-hit search cap cuts 10 that
-    # no hit's family brings back.
+    # no hit's family brings back. 'aviator' starts a word of the name only,
+    # which #1187's word rule finds and main's legacy prefix rule does not:
+    # below the cap the family counts every hit anyway, so only here does
+    # `total` prove it counts through search_products_filter itself.
     mongo_db["products"].insert_many([
         {"_id": f"P-VO-{i}", "product_id": f"P-VO-{i}", "sku": f"FR-VOGUE-{i:03d}", "brand": "Vogue",
-         "model": f"VO{i:04d}", "category": "FRAME", "color": "BLK", "size": "52", "mrp": 3000.0,
-         "is_active": True, "identity_key": compute_identity_key("Vogue", f"VO{i:04d}", "BLK", "52")}
+         "model": f"VO{i:04d}", "name": f"Vogue VO{i:04d} Aviator Frame", "category": "FRAME",
+         "color": "BLK", "size": "52", "mrp": 3000.0, "is_active": True,
+         "identity_key": compute_identity_key("Vogue", f"VO{i:04d}", "BLK", "52")}
         for i in range(60)
     ])
-    body = _ok(call(_user("CASHIER"), q="Vogue"))
+    body = _ok(call(_user("CASHIER"), q=query))
     assert (len(body["items"]), body.get("total"), body.get("truncated")) == (50, 60, True)
 
 
@@ -938,9 +943,17 @@ def test_d7b4_each_power_reads_its_own_power(call, mongo_db):
                                          ("sku", "SG-CARRERA-CA8895-807-54")])
 def test_d7b4_a_scanned_frame_brings_its_colours_and_sizes(call, mongo_db, label, query):
     _seed(mongo_db)
+    # An optical FRAME twin of P54 -- same brand, model, colour and size, so
+    # the same identity_key (brand|model|colour|size carries no category):
+    # only model_family_query's category keeps it out of the sunglass's family.
+    mongo_db["products"].insert_one(
+        _product("P-FR-807-54", "FR-CARRERA-CA8895-807-54", "Carrera CA8895 807/54", "807", "54",
+                 category="FRAME")
+    )
     items = _items(_ok(call(_user("SALES_STAFF"), q=query)))
     assert {P54, P56, P003} <= set(items), f"scan by {label}: {sorted(items)}"
     assert RB not in items
+    assert "P-FR-807-54" not in items, f"scan by {label}: a frame joined the sunglass's family"
 
 
 def test_d7b4_a_size_variant_comes_with_its_parent_whatever_its_model_spelling(call, mongo_db):
