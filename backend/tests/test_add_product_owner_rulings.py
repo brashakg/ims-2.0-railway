@@ -1013,3 +1013,81 @@ def test_a_the_hint_exact_match_is_the_row_the_save_409s_on(
     new = dict(attrs, **other)
     assert _hint(client, door, monkeypatch, staff_headers, category, new)["exact_match"] is None
     door(_form_post(category, new))
+
+
+# ---------------------------------------------------------------------------
+# B: an identity edit re-keys the product (and is refused as a duplicate)
+# ---------------------------------------------------------------------------
+
+
+def _put(product_id, **fields):
+    return _run(prod_router.update_product(
+        product_id, prod_router.ProductUpdate(**fields), _ADMIN,
+    ))
+
+
+def test_b_an_eye_size_edit_rekeys_the_frame(door):
+    """Edit 52 -> 54 through the Edit form's PUT: the key follows (the SKU
+    does not, owner: readable SKUs for new products only), so a second 54 is
+    the 409 and a new 52 is free; editing that 52 to 54 is refused too."""
+    from fastapi import HTTPException
+
+    first = door(_form_post("FR", dict(_CARRERA, lens_size="52")))
+    _put(first["product_id"], attributes={"lens_size": "54"})
+    after = door.repo.find_by_id(first["product_id"])
+    assert after["identity_key"] == pm.compute_identity_key("Carrera", "CA8895", "807", "54")
+    assert after["sku"] == first["sku"] == "FR-CARRERA-CA8895-807-52"
+    assert _dup(door, _form_post("FR", _CARRERA))["product_id"] == first["product_id"]
+    second = door(_form_post("FR", dict(_CARRERA, lens_size="52")))
+    with pytest.raises(HTTPException) as exc:
+        _put(second["product_id"], attributes={"lens_size": "54.0"})
+    assert exc.value.status_code == 409
+    assert exc.value.detail["code"] == "DUPLICATE_PRODUCT"
+    assert exc.value.detail["existing"]["product_id"] == first["product_id"]
+    assert door.repo.find_by_id(second["product_id"])["attributes"]["lens_size"] == "52"
+    # Re-saving its own identity (a price edit through the full form) is no clash.
+    _put(first["product_id"], attributes=dict(_CARRERA), mrp=1200.0)
+    assert door.repo.find_by_id(first["product_id"])["mrp"] == 1200.0
+
+
+@pytest.mark.parametrize("edit", [{"power": "-1.50"}, {"base_curve": "8.8"}, {"pack": "30"}])
+def test_b_a_contact_lens_power_or_fit_edit_rekeys_it(door, edit):
+    from fastapi import HTTPException
+
+    first = door(_form_post("CL", _FIT))
+    _put(first["product_id"], attributes=edit)
+    assert door.repo.find_by_id(first["product_id"])["identity_key"] == pm.compute_identity_key(
+        *pm.identity_parts(dict(_FIT, **edit), "CL"))
+    _dup(door, _form_post("CL", dict(_FIT, **edit)))
+    second = door(_form_post("CL", _FIT))  # the old lens is free again
+    with pytest.raises(HTTPException) as exc:
+        _put(second["product_id"], attributes=edit)
+    assert exc.value.status_code == 409
+
+
+def test_b_the_service_edit_door_rekeys_too(door):
+    """product_master.update_product (PUT /products/master/{id}'s core) runs
+    the same rule: a key that follows the edit, a 409 on another's identity."""
+    first = door(_form_post("FR", dict(_CARRERA, lens_size="52")))
+    second = door(_form_post("FR", dict(_CARRERA, lens_size="54")))
+    pm.update_product(product_id=first["product_id"],
+                      patch={"attributes": dict(_CARRERA, lens_size="56")},
+                      actor="u-admin", product_repo=door.repo)
+    assert door.repo.find_by_id(first["product_id"])["identity_key"].endswith("|56")
+    with pytest.raises(pm.ProductMasterError) as exc:
+        pm.update_product(product_id=second["product_id"],
+                          patch={"attributes": dict(_CARRERA, lens_size="56")},
+                          actor="u-admin", product_repo=door.repo)
+    assert (exc.value.status, exc.value.code) == (409, "DUPLICATE_PRODUCT")
+
+
+def test_b_guard_an_edit_that_touches_no_identity_leaves_a_bad_old_power_alone(door):
+    """A stored lens whose old power is not a number still takes a price edit."""
+    door.repo.collection.insert_one({
+        "product_id": "P-JUNK", "sku": "P-JUNK", "category": "CONTACT_LENS", "is_active": True,
+        "brand": "Acuvue", "model": "Oasys", "identity_key": "acuvue|oasys|junk",
+        "mrp": 1000.0, "offer_price": 900.0, "attributes": dict(_OASYS, power="ask"),
+    })
+    _put("P-JUNK", mrp=1100.0)
+    after = door.repo.find_by_id("P-JUNK")
+    assert (after["mrp"], after["identity_key"]) == (1100.0, "acuvue|oasys|junk")

@@ -1294,6 +1294,47 @@ def _duplicate_error(existing: Dict[str, Any]) -> "ProductMasterError":
     return err
 
 
+def _identity_key_of(doc: Dict[str, Any]) -> Optional[str]:
+    """The duplicate key a stored product has by THE create rule: identity_parts
+    over its attributes, a legacy row's flat columns filling the gaps (the
+    create door folds them in the same way, normalise_door_payload)."""
+    return compute_identity_key(
+        *identity_parts(_overlay_attributes(doc), (doc or {}).get("category"))
+    )
+
+
+def rekey_on_edit(
+    current: Dict[str, Any], patch: Dict[str, Any], product_repo=None
+) -> None:
+    """An edit that changes what tells a product apart (any identity_parts
+    input: an eye size, a contact lens's power or fit, a colour...) re-keys it
+    by the create rule, setting patch['identity_key'], and is refused (409
+    DUPLICATE_PRODUCT, the create door's error) when ANOTHER product already
+    has that identity. `patch` is what the edit will $set (attributes already
+    merged). The SKU never moves: readable SKUs are for new products only
+    (owner 2026-09-28). An edit that touches no identity input is left alone,
+    so a stored lens whose old power is not a number can still have its price
+    changed; an edit that blanks the brand or model keeps the stored key
+    (ponytail: no $unset door, a unique sparse index refuses two null keys)."""
+    if not any(k in patch for k in ("attributes", "brand", "model", "color", "size", "category")):
+        return
+    try:
+        old = _identity_key_of(current)
+    except ProductMasterError:
+        old = None  # a stored value that is not a number: the edit's key decides
+    new = _identity_key_of({**current, **patch})
+    if new is None or new == old:
+        return
+    other = (
+        product_repo.find_by_identity_key(new)
+        if hasattr(product_repo, "find_by_identity_key")
+        else None
+    )
+    if other is not None and other.get("product_id") != current.get("product_id"):
+        raise _duplicate_error(other)
+    patch["identity_key"] = new
+
+
 # Sibling cap for the live "similar products" strip (dup-detect Phase 2). The
 # strip is a hint, not a browser -- 12 chips is plenty; model_colour_count still
 # reports the TRUE distinct-colour total.
@@ -3057,6 +3098,8 @@ def update_product(
     # None-strip above (a caller intending to clear sends [] not None).
     if "tags" in (patch or {}) and patch.get("tags") is not None:
         clean["tags"] = normalise_tags(patch.get("tags"))
+
+    rekey_on_edit(current, clean, product_repo=product_repo)
 
     # Cataloguer attribution: stamp WHO edited (id + display name) on the doc.
     # Creation attribution is immutable -- a patch may never rewrite

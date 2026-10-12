@@ -3472,6 +3472,15 @@ async def update_product(
         if "tags" in update_data:
             update_data["tags"] = _pm.normalise_tags(update_data["tags"])
 
+        # An identity edit (eye size, CL power...) re-keys the product by the
+        # create rule; a clash with another product is the create door's 409.
+        try:
+            _pm.rekey_on_edit(existing, update_data, product_repo=repo)
+        except _pm.ProductMasterError as err:
+            raise HTTPException(
+                status_code=err.status, detail=_pm_error_detail(err)
+            ) from err
+
         update_data["updated_by"] = current_user.get("user_id")
         # Cataloguer attribution: the editor's display name rides next to the id
         # (JWT already carries the username). ALWAYS written when updated_by is
@@ -3495,10 +3504,12 @@ async def update_product(
             # shape -- keep the two in sync. Fail-soft: an audit hiccup never
             # blocks the product save.
             try:
+                # identity_key is derived from the edited fields (rekey_on_edit),
+                # a stamp like updated_by, never a field someone corrected.
                 _changed_keys = [
                     k
                     for k in update_data.keys()
-                    if k not in ("updated_by", "updated_by_name")
+                    if k not in ("updated_by", "updated_by_name", "identity_key")
                 ]
                 if _changed_keys:
                     from ..dependencies import (

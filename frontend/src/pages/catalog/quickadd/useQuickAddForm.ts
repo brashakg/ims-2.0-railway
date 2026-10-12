@@ -634,10 +634,11 @@ export function useQuickAddForm() {
       setIsSubmitting(true);
       try {
         if (editMode?.kind === 'spine') {
-          // EDIT-IN-PLACE: one validated PUT. Identity (SKU/barcode/category)
-          // is never sent — it is immutable through this door; the shop's
-          // reorder level follows as its own write, and the 409
-          // dup-rescue branch can't fire (PUT never throws DuplicateProductError).
+          // EDIT-IN-PLACE: one validated PUT. SKU/barcode/category are never
+          // sent — immutable through this door; the shop's reorder level
+          // follows as its own write. An edit that makes this product another
+          // one's twin (an eye size, a CL power) is the server's 409, shown as
+          // the error toast below (not the create's rescue popup).
           // (Review mode never reaches handleSubmit — it has its own fork.)
           const payload = buildProductPayload(values);
           await productApi.updateProduct(editMode.id, {
