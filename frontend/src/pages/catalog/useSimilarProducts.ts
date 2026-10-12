@@ -12,9 +12,9 @@
 //     until the identity is complete.
 //   * FIRE 400ms after the operator stops typing; every keystroke RESTARTS
 //     the timer and ABORTS the in-flight request (AbortController).
-//   * The last answer stays on screen until the fresh one lands (typing in a
-//     field below the strip must not make the form jump); disarming or a new
-//     category clears it at once. Never a loading state.
+//   * Any change clears the last answer at once: it was about what was typed
+//     before, and a chip of the old model would put the form in that model's
+//     variant mode. Never a loading state: nothing renders until fresh.
 
 import { useEffect, useRef, useState } from 'react';
 import { productApi, type SimilarProductsResponse } from '../../services/api/products';
@@ -57,14 +57,10 @@ export function useSimilarProducts(
       .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
   );
 
-  // Disarming or a new category: the old answer is about something else.
-  useEffect(() => {
-    setData(null);
-  }, [q.category, armed]);
-
   useEffect(() => {
     abortRef.current?.abort();
     abortRef.current = null;
+    setData(null);
     if (!armed) return undefined;
 
     const timer = window.setTimeout(() => {

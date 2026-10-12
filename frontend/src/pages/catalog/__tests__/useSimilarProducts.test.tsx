@@ -7,8 +7,9 @@
 //   * ARM once a category and a brand are set.
 //   * Fire 400ms after the operator stops typing; every keystroke RESTARTS
 //     the timer and ABORTS the in-flight request.
-//   * The last answer stays until the fresh one lands (no form jump); null
-//     while idle/errored/un-armed — the strip renders nothing then.
+//   * Any change clears the last answer at once (a chip never names a model
+//     no longer typed); null while idle/errored/un-armed — the strip renders
+//     nothing then.
 
 import { renderHook, act } from '@testing-library/react';
 import { vi, type Mock } from 'vitest';
@@ -139,17 +140,17 @@ describe('useSimilarProducts', () => {
     expect(result.current.data).toBeNull();
   });
 
-  it('keeps the last answer until the fresh one lands (the form never jumps)', async () => {
+  it('a retyped model clears the old answer at once: no chip of the old model to tap', async () => {
     const { result, rerender } = renderSimilar();
     await act(async () => {
       await vi.advanceTimersByTimeAsync(SIMILAR_DEBOUNCE_MS);
     });
     expect(result.current.data).toEqual(RESPONSE);
 
+    rerender({ q: withAttrs({ model_no: 'RB4165' }) });
+    expect(result.current.data).toBeNull(); // while debouncing and in flight
     const FRESH: SimilarProductsResponse = { exact_match: null, siblings: [], model_colour_count: 0 };
     getSimilar.mockResolvedValueOnce(FRESH);
-    rerender({ q: withAttrs({ usp_1: 'Light' }) }); // typing in a field below the strip
-    expect(result.current.data).toEqual(RESPONSE);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(SIMILAR_DEBOUNCE_MS);
     });
