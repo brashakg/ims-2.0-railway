@@ -42,9 +42,10 @@ async def get_sell_through_analysis(
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection error")
 
-    # The shop rule runs OUTSIDE the try: its 403 (another shop, or a login
-    # with no shop -- owner ruling 2026-10-07, R3) must reach the caller,
-    # not turn into the 500 below.
+    # The shop rule runs OUTSIDE the try: its 403 (another shop, or any shop
+    # named by a login with no shop -- R4) must reach the caller, not turn
+    # into the 500 below. A login with no shop that names none reads
+    # NO_SHOP_SCOPE: an empty answer (owner ruling 2026-10-12, R4).
     active_store = resolve_store_scope(store_id, current_user)
     try:
         orders_coll = db.get_collection("orders")
@@ -278,9 +279,10 @@ async def get_overstock_analysis(
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection error")
 
-    # The shop rule runs OUTSIDE the try: its 403 (another shop, or a login
-    # with no shop -- owner ruling 2026-10-07, R3) must reach the caller,
-    # not turn into the 500 below.
+    # The shop rule runs OUTSIDE the try: its 403 (another shop, or any shop
+    # named by a login with no shop -- R4) must reach the caller, not turn
+    # into the 500 below. A login with no shop that names none reads
+    # NO_SHOP_SCOPE: an empty answer (owner ruling 2026-10-12, R4).
     active_store = resolve_store_scope(store_id, current_user)
     try:
         orders_coll = db.get_collection("orders")

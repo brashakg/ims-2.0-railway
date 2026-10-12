@@ -488,8 +488,9 @@ async def daily_stock_count(
     current_user: dict = Depends(get_current_user),
 ):
     """Daily stock count report"""
-    # THE shop rule (R3): a non-admin login with no shop is refused, never
-    # handed shelf_units(None) -- every shop's stock.
+    # THE shop rule (R4, owner ruling 2026-10-12): a non-admin login with no
+    # shop reads NO_SHOP_SCOPE -- an empty count, a 403 for a shop it names --
+    # never shelf_units(None), every shop's stock.
     active_store = resolve_store_scope(store_id, current_user)
     stock_repo = get_stock_repository()
 

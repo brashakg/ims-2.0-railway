@@ -34,8 +34,9 @@ async def inventory_summary(
 ):
     """Get inventory summary"""
     # THE shop rule: an admin reads every shop when none is asked, anyone
-    # else their own -- and a non-admin login with no shop is refused (R3),
-    # never handed shelf_units(None), every shop's stock at cost.
+    # else their own -- and a non-admin login with no shop reads NO_SHOP_SCOPE
+    # (empty; a shop it names is a 403 -- owner ruling 2026-10-12, R4), never
+    # shelf_units(None), every shop's stock at cost.
     active_store = resolve_store_scope(store_id, current_user)
     stock_repo = get_stock_repository()
 
@@ -80,7 +81,7 @@ async def inventory_valuation(
     current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
 ):
     """Get inventory valuation by category (management report; store-scoped)."""
-    active_store = resolve_store_scope(store_id, current_user)  # R3: see summary
+    active_store = resolve_store_scope(store_id, current_user)  # R4: see summary
     stock_repo = get_stock_repository()
 
     if stock_repo is None:

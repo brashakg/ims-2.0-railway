@@ -40,8 +40,10 @@ async def get_stock_aging_report(
     """
     stock_repo = get_stock_repository()
     product_repo = get_product_repository()
-    # THE shop rule (F63/R3): an admin with no shop asked reads every shop,
-    # anyone else their own, a non-admin with no shop is refused. The units
+    # THE shop rule (F63, resolve_store_scope): an admin with no shop asked
+    # reads every shop, anyone else their own; a non-admin login with no shop
+    # reads none -- NO_SHOP_SCOPE, an empty list -- and a shop it names is a
+    # 403 (owner ruling 2026-10-12, R4). The units
     # counted and the units valued (stock_value.shelf_units) share this one
     # scope, so a row's value is always the cost of the units it counts.
     active_store = resolve_store_scope(store_id, current_user)

@@ -189,7 +189,8 @@ def test_the_world_is_not_empty_admins_and_shop_logins_read_every_shop(summary_d
         assert (body["gst_input_credit"], body["net_gst_payable"]) == (120.0, 420.0)
     # A login that holds a shop reads its OWN shop's (F63, the one shop rule;
     # it used to read every shop's 540 -- OS-031, retired by the merge of the
-    # parallel session's at_shop filter, panel 2026-10-08).
+    # parallel session's at_shop filter, panel 2026-10-08). Not yet an owner
+    # ruling: PLAN_STATUS section 5 records it as OPEN 2026-10-12.
     for role in NON_ADMIN_FINANCE:
         assert _summary(_user(role, S1, (S1,)))["gst_collected"] == 180.0, role
     # A multi-store login with no active shop reads its first own shop.

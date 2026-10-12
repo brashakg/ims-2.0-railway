@@ -69,7 +69,9 @@ async def get_gst_summary(
     # NO_SHOP_SCOPE (owner ruling 2026-10-12, R4), which matches no order and
     # no bill: an empty summary, never every shop's GST (its Finance screen
     # says why: NoShopNotice). GSTR-3B stays per GSTIN: it is the filing, and
-    # a GSTIN can cover more than one shop.
+    # a GSTIN can cover more than one shop. A shop login reading its OWN
+    # shop's sales tax (not the company's, as before) waits on the owner: no
+    # 2026-10-12 ruling covers it (PLAN_STATUS section 5, OPEN 2026-10-12).
     scope = resolve_store_scope(None, current_user)
     at_shop = {"store_id": scope} if scope else {}
     db = _get_db()
