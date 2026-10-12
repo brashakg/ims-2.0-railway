@@ -345,7 +345,8 @@ export const productApi = {
      *  number anywhere, brand spelt any way, colour words, GTIN -- audit F21).
      *  Omit for the till's rule: every word STARTS a word of the brand, model,
      *  product name, model name or sub-brand ("optix" finds "Air Optix"), or
-     *  the start of the SKU / variant / barcode; what the old rule (start of
+     *  the start of the SKU / variant / barcode, or the whole text is a
+     *  maker's GTIN (exact and complete); what the old rule (start of
      *  brand / model / SKU / variant / barcode) found is listed first. POS
      *  and every other search box omit it. */
     match?: 'anywhere';
