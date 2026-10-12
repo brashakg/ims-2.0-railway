@@ -118,12 +118,18 @@ def _make_db(stores=None, entities=None, bills=None):
 
 
 def test_mirror_skips_same_entity():
-    """Same entity on both sides -> no bill written."""
+    """Same entity on both sides, one registration -> no bill written. (The
+    company's GSTIN is on file: with none, IMS cannot tell the move stays on
+    one registration, and the mirror books it flagged -- see
+    test_intercompany_valued_challan.)"""
     db, bills = _make_db(
         stores={
             "store_a": {"store_id": "store_a", "entity_id": "ent_1", "state_code": "20"},
             "store_b": {"store_id": "store_b", "entity_id": "ent_1", "state_code": "20"},
-        }
+        },
+        entities={
+            "ent_1": {"entity_id": "ent_1", "gstins": [{"state_code": "20", "gstin": "20AAPFU0939F1ZV"}]},
+        },
     )
     transfer = {
         "id": "trf_001",
