@@ -4,9 +4,11 @@ Owner ruling 2026-10-01: "supplier balances should not be shown to anyone
 apart from admin superadmin and accountant". Supplier money is what we owe a
 supplier, have paid it, or are owed by it: bills and their paid state, a
 supplier's monthly billing, the RTV GST debit note's amounts, a vendor
-return's credit, an RMA's expected / received credit and its variance, and the
-amount on a Return-to-Vendor ('rtv') approval. Purchase-order totals and
-product cost prices are NOT in it -- they follow the cost rule in cost_mask.
+return's credit, an RMA's expected / received credit and its variance, the
+amount on a Return-to-Vendor ('rtv') approval, and (owner ruling 2026-10-12)
+the unit price, rate and line value on a vendor return or RMA. Purchase-order
+totals and product cost prices elsewhere are NOT in it -- they follow the cost
+rule in cost_mask.
 
 ONE rule decides who sees it: cost_mask.can_see_cost(user, "payables") (the
 accounts roles, AP_ROLES, plus SUPERADMIN). This module keeps no role list of
@@ -39,7 +41,9 @@ def can_see_payables(user: Optional[dict]) -> bool:
 def require_payables(user: Optional[dict], what: str) -> None:
     """403 unless the caller is an accounts role -- for a document that IS
     supplier money end to end (a print or an export cannot drop its amounts
-    and still be the document)."""
+    and still be the document), and for a write that RECORDS supplier money
+    (owner ruling 2026-10-12: an RMA credit note, an RMA write-off, a vendor
+    return's credit_issued, the RTV debit note's issue)."""
     if not can_see_payables(user):
         raise HTTPException(
             status_code=403, detail=f"{what} is ADMIN / ACCOUNTANT only"
@@ -83,14 +87,29 @@ def strip_debit_note_money(doc: Any, user: Optional[dict]) -> Any:
     return _without(doc, _DEBIT_NOTE_MONEY.__contains__)
 
 
+# --- Return lines (vendor returns + RMAs) ------------------------------------
+# Owner ruling 2026-10-12: on a vendor return or an RMA anyone outside the
+# accounts roles reads the items, quantities and reasons only -- no unit price,
+# no line value, no rate. (The per-unit cost a manager sees on stock and POs
+# follows the cost rule, cost_mask; on a return it is the basis of the
+# supplier's credit, so it is supplier money here.) Every key the code reads a
+# return line's price from -- the routers' own (vendor_returns unit_price,
+# vendor_rma unit_cost_paise) and the rupee / legacy forms the RTV debit-note
+# engine also reads off a return's lines (rtv_debit_note._norm_line:
+# unit_cost, rate, rate_paise) -- and the line value the RMA engine writes.
+_RETURN_LINE_PRICE = frozenset({
+    "unit_price", "unit_cost", "unit_cost_paise", "rate", "rate_paise",
+    "line_expected_paise",
+})
+
+
 # --- Vendor return (routers/vendor_returns) ---------------------------------
 # The credit the supplier owes us for the returned goods: total_value is the
 # credit-note amount once credit_issued (vendor_returns PATCH copies it), and
-# the credit-note number is that credit's reference. items[].unit_price is the
-# per-piece cost and follows the cost rule (cost_mask), not this one.
+# the credit-note number is that credit's reference; plus every line's price.
 _VENDOR_RETURN_CREDIT = frozenset({
     "total_value", "credit_note_amount", "credit_note_number",
-})
+}) | _RETURN_LINE_PRICE
 
 
 def strip_vendor_return_credit(doc: Any, user: Optional[dict]) -> Any:
@@ -104,14 +123,14 @@ def strip_vendor_return_credit(doc: Any, user: Optional[dict]) -> Any:
 # --- Vendor RMA (routers/vendor_rma) ----------------------------------------
 # Expected credit, every credit received (the total and each credit note's
 # amount), the variance between them and any written-off residual, in paise
-# and rupees; line_expected_paise is a line's share of the expected credit.
-# The per-unit cost (unit_cost_paise) follows the cost rule.
+# and rupees; line_expected_paise is a line's share of the expected credit;
+# plus every line's price (unit_cost_paise).
 _RMA_CREDIT = frozenset({
     "expected_credit_paise", "expected_credit_rupees",
     "received_credit_paise", "received_credit_rupees",
     "variance_paise", "variance_rupees",
     "written_off_paise", "line_expected_paise", "received_paise",
-})
+}) | _RETURN_LINE_PRICE
 # The engine writes the amount into its own status-history notes
 # (services/vendor_rma record_credit_note / close_rma); keep the event, drop
 # the figure. A note a person typed is theirs and passes as written.

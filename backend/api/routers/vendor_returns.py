@@ -12,8 +12,15 @@ import uuid
 from .auth import get_current_user, require_roles
 from ..dependencies import get_db, resolve_store_scope, validate_store_access
 
-from ..services.payables_mask import strip_vendor_return_credit
+from ..services.payables_mask import require_payables, strip_vendor_return_credit
 from ..dependencies import can_access_store_scoped
+
+# The transitions that RECORD supplier money: credit_issued writes the
+# credit-note number and amount. Owner ruling 2026-10-12: the accounts roles
+# alone (services/payables_mask.require_payables). Every other transition is
+# the goods side and stays with _VENDOR_RETURN_ROLES -- save 'replaced' on a
+# return owed a credit, which forgoes it (update_return_status).
+_CREDIT_TRANSITIONS = frozenset({"credit_issued"})
 
 # A vendor return mints a debit/credit note -- a financial instrument against a
 # vendor. Restrict create + status changes to the same roles that manage vendors
@@ -312,7 +319,11 @@ async def update_return_status(
     status_update: VendorReturnStatusUpdate,
     current_user: dict = Depends(require_roles(*_VENDOR_RETURN_ROLES)),
 ):
-    """Update vendor return status (incl. issuing a credit note). Vendor/AP roles only."""
+    """Update vendor return status (incl. issuing a credit note). Vendor/AP roles
+    only; issuing the credit note -- or closing a credit-note return as
+    'replaced', which forgoes that credit -- is the accounts roles' alone."""
+    if status_update.status in _CREDIT_TRANSITIONS:
+        require_payables(current_user, "Recording a vendor return's credit note")
     db = _get_db()
     if db is None:
         raise HTTPException(status_code=500, detail="Database not available")
@@ -324,6 +335,13 @@ async def update_return_status(
         if not return_doc:
             raise HTTPException(status_code=404, detail="Return not found")
         validate_store_access(return_doc.get("store_id"), current_user)
+        # A return not typed 'replacement' is owed a credit: closing it as
+        # 'replaced' ends it without that credit -- forgoing supplier money,
+        # the accounts roles' (owner ruling 2026-10-12, R2). On a replacement
+        # return, 'replaced' is the goods coming back: the managers'. Checked
+        # before any write; return_type is fixed at create.
+        if status_update.status == "replaced" and return_doc.get("return_type") != "replacement":
+            require_payables(current_user, "Closing a credit-note return as replaced")
 
         # Valid status transitions
         current_status = return_doc.get("status")

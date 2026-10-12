@@ -13,7 +13,10 @@ ONE rule (services/payables_mask -> cost_mask.can_see_cost(user, "payables")):
 SUPERADMIN / ADMIN / ACCOUNTANT see it unchanged; everyone else -- the store
 and area managers, and the counter roles where a route admits one -- gets the
 same response with the money keys ABSENT (checked at every depth), never a
-zero. The writes themselves are unchanged: a manager's write still lands.
+zero. A manager's goods-side writes still land; RECORDING the money (an RMA
+credit note or write-off, a return's credit_issued, the debit note's issue)
+is the accounts roles' alone since the owner's 2026-10-12 ruling -- held in
+tests/test_supplier_money_recorded_by_accounts.py.
 
 Every handler runs for real against an in-memory Mongo double; no network.
 No emoji (Windows cp1252).
@@ -362,17 +365,13 @@ def _dn_reads(rtv, role):
 
 
 @pytest.mark.parametrize("role", MANAGERS)
-def test_rtv_issue_response_has_no_money_for_a_manager(rtv, role):
-    res = _issue(rtv, role)
-    assert not _keys(res) & DEBIT_NOTE_MONEY, _keys(res) & DEBIT_NOTE_MONEY
-    assert res["debit_note"]["debit_note_number"].startswith("DN/BV/")
-    assert res["debit_note"]["lines"][0]["qty"] == 2
-    # The write itself is untouched: the stored note carries its amounts.
-    stored = rtv.db.get_collection("debit_notes").docs[0]
-    assert stored["totals"]["grand_total_paise"] == 315000
-    # ...and a manager's idempotent re-issue is stripped the same way.
-    again = _issue(rtv, role)
-    assert again["idempotent"] is True and not _keys(again) & DEBIT_NOTE_MONEY
+def test_rtv_issue_is_refused_to_a_manager(rtv, role):
+    # Owner ruling 2026-10-12: issuing the note RECORDS supplier money, so a
+    # manager no longer issues one at all (it used to land, stripped).
+    with pytest.raises(HTTPException) as ei:
+        _issue(rtv, role)
+    assert ei.value.status_code == 403
+    assert rtv.db.get_collection("debit_notes").docs == []
 
 
 @pytest.mark.parametrize("role", MANAGERS + COUNTER)
@@ -495,14 +494,34 @@ def test_vendor_return_reads_keep_credit_for_accounts(vret, role):
 
 
 @pytest.mark.parametrize("role", MANAGERS)
-def test_vendor_return_credit_issue_response_has_no_credit_for_a_manager(vret, role):
+def test_vendor_return_status_response_has_no_credit_for_a_manager(vret, role):
+    # Owner ruling 2026-10-12: issuing the credit (credit_issued) is the
+    # accounts roles' -- a manager is refused and nothing is written...
     body = vret.r.VendorReturnStatusUpdate(status="credit_issued")
-    res = _run(vret.r.update_return_status("VR-OPEN", body, current_user=_user(role)))
-    assert res["return"]["status"] == "credit_issued"
-    assert not _keys(res) & RETURN_CREDIT, _keys(res) & RETURN_CREDIT
-    # The credit itself was still issued and stored.
+    with pytest.raises(HTTPException) as ei:
+        _run(vret.r.update_return_status("VR-OPEN", body, current_user=_user(role)))
+    assert ei.value.status_code == 403
     stored = vret.db.get_collection("vendor_returns").find_one({"return_id": "VR-OPEN"})
-    assert stored["credit_note_amount"] == 3000.0 and stored["credit_note_number"]
+    assert stored["credit_note_amount"] is None and stored["credit_note_number"] is None
+    # ...nor may they close this credit-note return as 'replaced', forgoing
+    # the credit (owner ruling 2026-10-12)...
+    body = vret.r.VendorReturnStatusUpdate(status="replaced")
+    with pytest.raises(HTTPException) as ei:
+        _run(vret.r.update_return_status("VR-OPEN", body, current_user=_user(role)))
+    assert ei.value.status_code == 403
+    # ...while a goods-side transition still lands, its response stripped:
+    # 'replaced' on a replacement return.
+    vret.db.get_collection("vendor_returns").insert_one({
+        "return_id": "VR-SWAP", "vendor_id": "V1", "vendor_name": "GKB", "store_id": "S1",
+        "items": [{"product_id": "P3", "product_name": "Lens", "quantity": 1,
+                   "reason": "defective", "unit_price": 600.0}],
+        "return_type": "replacement", "status": "received_by_vendor",
+        "total_value": 600.0, "credit_note_number": None, "credit_note_amount": None,
+        "created_at": "2026-09-30T11:00:00", "status_history": [],
+    })
+    res = _run(vret.r.update_return_status("VR-SWAP", body, current_user=_user(role)))
+    assert res["return"]["status"] == "replaced"
+    assert not _keys(res) & RETURN_CREDIT, _keys(res) & RETURN_CREDIT
 
 
 def test_vendor_return_credit_issue_response_keeps_credit_for_accounts(vret):
@@ -538,9 +557,11 @@ def rma(monkeypatch):
     return SimpleNamespace(r=r, db=db)
 
 
-def _rma_to_credit(rma, role):
-    """raise -> authorize -> dispatch -> a Rs 1,000 credit on an Rs 3,000 RMA
-    (below the maker-checker tier), all as ``role``; returns every response."""
+def _rma_to_credit(rma, role, creditor=None):
+    """raise -> authorize -> dispatch as ``role`` (the goods side), then a Rs
+    1,000 credit on the Rs 3,000 RMA (below the maker-checker tier) recorded by
+    ``creditor`` -- ``role`` itself by default. Recording it is the accounts
+    roles' (owner ruling 2026-10-12). Returns every response."""
     r, user = rma.r, _user(role)
     raised = _run(r.raise_rma(r.RMACreate(
         vendor_id="V1", vendor_name="Zeiss", store_id="S1",
@@ -553,7 +574,7 @@ def _rma_to_credit(rma, role):
                                      current_user=user))
     credited = _run(r.record_credit_note(
         rid, r.RMACreditNote(credit_note_number="CN-Z1", received_amount=1000.0),
-        current_user=user))
+        current_user=_user(creditor or role)))
     return rid, [raised, authorized, dispatched, credited]
 
 
@@ -566,8 +587,9 @@ def _rma_reads(rma, rid, role):
 
 @pytest.mark.parametrize("role", MANAGERS)
 def test_rma_never_shows_a_manager_the_credit(rma, role):
-    rid, writes = _rma_to_credit(rma, role)
-    for res in writes:
+    # The manager does the goods side; the accountant records the credit.
+    rid, writes = _rma_to_credit(rma, role, creditor="ACCOUNTANT")
+    for res in writes[:3]:
         assert res["ok"] is True
         assert not _keys(res) & RMA_CREDIT, (res, _keys(res) & RMA_CREDIT)
 
@@ -587,9 +609,15 @@ def test_rma_never_shows_a_manager_the_credit(rma, role):
     assert ei.value.status_code == 409
     assert ei.value.detail == {"error": "variance_outstanding"}
 
+    # Writing the variance off records supplier money: refused to the manager
+    # (owner ruling 2026-10-12) and done by the accountant.
+    with pytest.raises(HTTPException) as ei:
+        _run(rma.r.close_rma(rid, rma.r.RMAClose(write_off_variance=True),
+                             current_user=_user(role)))
+    assert ei.value.status_code == 403
     closed = _run(rma.r.close_rma(rid, rma.r.RMAClose(write_off_variance=True),
-                                  current_user=_user(role)))
-    assert closed["status"] == "CLOSED" and not _keys(closed) & RMA_CREDIT
+                                  current_user=_user("ACCOUNTANT")))
+    assert closed["status"] == "CLOSED"
     _, detail = _rma_reads(rma, rid, role)
     assert not [s for s in _strings(detail) if " paise" in s]
     assert "closed; variance written off" in [h.get("notes") for h in detail["status_history"]]
@@ -654,6 +682,12 @@ _RMA_WRITES = {
                                         ("ACCOUNTANT", True)))
 def test_every_rma_write_result_goes_through_the_strip(rma, monkeypatch, write, role, shown):
     monkeypatch.setattr(rma.r, "_engine", lambda: _MoneyEngine())
+    if write == "credit-note" and not shown:
+        # Owner ruling 2026-10-12: a manager cannot record the credit at all.
+        with pytest.raises(HTTPException) as ei:
+            _run(_RMA_WRITES[write](rma.r, _user(role)))
+        assert ei.value.status_code == 403
+        return
     res = _run(_RMA_WRITES[write](rma.r, _user(role)))
     assert res["ok"] is True
     assert (RMA_CREDIT <= set(res)) is shown and bool(set(res) & RMA_CREDIT) is shown
@@ -830,13 +864,21 @@ def test_rtv_approval_amount_is_hidden_from_managers(appr, role):
     user = _user(role)
     inbox = _rows_by_action(_run(appr.r.get_inbox(store_id=None, status=None,
                                                    current_user=user)))
-    assert "amount" not in inbox["rtv"]
-    assert inbox["rtv"]["context"] == {"rma_id": "RMA-1"}
+    # Owner ruling 2026-10-12 (R1): an 'rtv' request is the accounts roles' to
+    # approve, so a manager's inbox no longer lists one at all
+    # (tests/test_rtv_approvals_accounts.py).
+    assert "rtv" not in inbox
     # Only supplier money goes: a refund's amount is not in the ruling.
     assert inbox["refund"]["amount"] == 999.0
 
-    one = _run(appr.r.get_request(appr.rtv_id, current_user=user))
-    assert "amount" not in one and one["context"] == {"rma_id": "RMA-1"}
+    if user["user_id"] == "u-store_manager":
+        # Its maker still opens it by id -- without the amount.
+        one = _run(appr.r.get_request(appr.rtv_id, current_user=user))
+        assert "amount" not in one and one["context"] == {"rma_id": "RMA-1"}
+    else:
+        with pytest.raises(HTTPException) as ei:
+            _run(appr.r.get_request(appr.rtv_id, current_user=user))
+        assert ei.value.status_code == 404
 
 
 def test_rtv_approval_amount_is_hidden_from_its_manager_maker(appr):
@@ -862,23 +904,28 @@ def _approve_in_place(appr):
                   "expires_at": datetime.now(timezone.utc) + timedelta(minutes=30)}})
 
 
-@pytest.mark.parametrize("role,shown", (("STORE_MANAGER", False), ("ACCOUNTANT", True)))
-def test_rtv_consume_result_follows_the_rule(appr, role, shown):
+def test_rtv_consume_result_follows_the_rule(appr):
     _approve_in_place(appr)
+    # Owner ruling 2026-10-12 (R1): a manager -- even the maker -- cannot spend
+    # an 'rtv' approval; it answers like a missing request and stays unspent.
+    with pytest.raises(HTTPException) as ei:
+        _run(appr.r.consume_request(
+            appr.rtv_id, appr.r.ConsumeAction(action_type="rtv", approval_token="tok-1"),
+            current_user=_user("STORE_MANAGER")))
+    assert ei.value.status_code == 404
     res = _run(appr.r.consume_request(
         appr.rtv_id, appr.r.ConsumeAction(action_type="rtv", approval_token="tok-1"),
-        current_user=_user(role)))
+        current_user=_user("ACCOUNTANT")))
     assert res["ok"] is True and res["request"]["status"] == "CONSUMED"
-    assert ("amount" in res["request"]) is shown
+    assert res["request"]["amount"] == 1500.0
 
 
-def test_rtv_bell_never_carries_the_amount(appr):
+def test_rtv_bell_never_reaches_a_manager(appr):
     bells = appr.db.get_collection("notifications").docs
     rtv_bells = [b for b in bells if b.get("request_id") == appr.rtv_id]
     refund_bells = [b for b in bells if b.get("request_id") == appr.refund_id]
-    # The manager-tier bell rings for the area manager (the maker is skipped).
-    assert [b["user_id"] for b in rtv_bells] == ["u-area_manager"]
-    assert "1500" not in rtv_bells[0]["message"]
-    assert rtv_bells[0]["message"].startswith("Return to Vendor for review")
+    # Owner ruling 2026-10-12 (R1): an 'rtv' bell rings for the accounts roles
+    # alone (none in this shop here) -- never for a store / area manager.
+    assert rtv_bells == []
     # A refund bell still names its amount.
     assert any("Rs 999.00" in b["message"] for b in refund_bells)

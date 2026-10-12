@@ -98,7 +98,9 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/vendor-rma/{rma_id}/credit-note",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        # Owner ruling 2026-10-12: recording supplier money is accounts-only
+        # (handler: require_roles(*AP_ROLES) + require_payables).
+        "allowed": ACCOUNTS,
         "store_scoped": True,
     },
     {
@@ -134,7 +136,9 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/rtv-debit-notes/issue",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        # Owner ruling 2026-10-12: recording supplier money is accounts-only
+        # (handler: require_roles(*AP_ROLES) + require_payables).
+        "allowed": ACCOUNTS,
         "store_scoped": True,
     },
     {

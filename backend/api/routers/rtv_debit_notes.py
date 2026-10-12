@@ -23,9 +23,10 @@ No comms. No emoji (Windows cp1252). Money is paise-exact integers; responses
 carry both paise and a rupee display field.
 
 Supplier money (owner ruling 2026-10-01): a note's amounts are the accounts
-roles' alone (services/payables_mask). The JSON reads and the issue response
-drop them for anyone else; the print and the Tally export, which are nothing
-but those amounts, answer 403 to anyone else.
+roles' alone (services/payables_mask). The JSON reads drop them for anyone
+else; the print and the Tally export, which are nothing but those amounts,
+answer 403 to anyone else. Issuing a note records that money, so the issue
+route is the accounts roles' too (owner ruling 2026-10-12).
 """
 
 from __future__ import annotations
@@ -223,11 +224,14 @@ async def list_debit_notes(
 @masks_supplier_money(strip_debit_note_money)
 async def issue_debit_note(
     body: DebitNoteIssue,
-    current_user: dict = Depends(require_roles(*_DEBIT_NOTE_ROLES)),
+    current_user: dict = Depends(require_roles(*AP_ROLES)),
 ):
     """Issue the GST debit note for an existing RTV (vendor_return / vendor_rma).
     Idempotent: re-issuing for the same RTV returns the first note (no new
-    serial). Store-IDOR guarded on the source RTV's store."""
+    serial). Store-IDOR guarded on the source RTV's store. The note IS the
+    supplier money it records: the accounts roles only (owner ruling
+    2026-10-12); the managers keep the goods side on the return / RMA."""
+    require_payables(current_user, "Issuing the RTV debit note")
     db = _get_db()
     eng = _engine()
     if eng._coll() is None:  # noqa: SLF001 - intentional fail-soft DB probe
