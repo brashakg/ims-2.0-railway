@@ -9,14 +9,24 @@ from pydantic import BaseModel, Field
 from typing import List, Optional, Literal
 from datetime import datetime
 import uuid
-from .auth import get_current_user, require_roles
+from .auth import require_roles
 from ..dependencies import get_db, resolve_store_scope, validate_store_access
+from ..services.cost_mask import PURCHASE_ROLES, RETURN_READERS, mask_vendor_return
 
 # A vendor return mints a debit/credit note -- a financial instrument against a
 # vendor. Restrict create + status changes to the same roles that manage vendors
-# / AP (mirrors vendors.py _VENDOR_ROLES); it was previously open to ANY
+# / AP (the purchase roles, services/cost_mask); it was previously open to ANY
 # authenticated user (down to a cashier).
-_VENDOR_RETURN_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
+_VENDOR_RETURN_ROLES = PURCHASE_ROLES
+
+# F60: a return carries the unit cost of each returned piece, so READS go to the
+# writers plus the Vendor Returns screen (/purchase/vendor-returns also admits
+# WORKSHOP_STAFF, who logs the defective pair). SALES_STAFF / CASHIER /
+# OPTOMETRIST have no screen and no read. rtv_debit_notes reads use this too.
+# Owner ruling 2026-09-29: WORKSHOP_STAFF sees the item, quantity and reason
+# only -- services/cost_mask strips the prices on every read. The tuple is
+# cost_mask.RETURN_READERS, so the rbac_policy rows are the same list.
+_VENDOR_RETURN_READERS = RETURN_READERS
 
 router = APIRouter()
 
@@ -143,7 +153,7 @@ async def list_vendor_returns(
     status: Optional[str] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_VENDOR_RETURN_READERS)),
 ):
     """List vendor returns with optional filters"""
     db = _get_db()
@@ -177,6 +187,7 @@ async def list_vendor_returns(
             if "_id" in ret:
                 del ret["_id"]
 
+        returns = [mask_vendor_return(r, current_user) for r in returns]
         return {"returns": returns, "total": total}
 
     except Exception as e:
@@ -269,7 +280,8 @@ async def create_vendor_return(
 
 @router.get("/{return_id}")
 async def get_vendor_return(
-    return_id: str, current_user: dict = Depends(get_current_user)
+    return_id: str,
+    current_user: dict = Depends(require_roles(*_VENDOR_RETURN_READERS)),
 ):
     """Get vendor return details"""
     db = _get_db()
@@ -282,12 +294,14 @@ async def get_vendor_return(
 
         if not return_doc:
             raise HTTPException(status_code=404, detail="Return not found")
+        # Same per-object store guard as the RMA / debit-note detail reads.
+        validate_store_access(return_doc.get("store_id"), current_user)
 
         # Clean up MongoDB _id field
         if "_id" in return_doc:
             del return_doc["_id"]
 
-        return return_doc
+        return mask_vendor_return(return_doc, current_user)
 
     except HTTPException:
         raise

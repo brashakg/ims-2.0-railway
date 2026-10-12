@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Dict, List
 
+from ._core import ACCOUNTS
+
 ROWS: List[Dict[str, object]] = [
     # --- /api/v1/expenses ---
     {"method": "GET", "path": "/api/v1/expenses", "allowed": "AUTHENTICATED"},
@@ -138,7 +140,7 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/finance/cash-flow-forecast",
-        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "POST",
@@ -182,7 +184,7 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/finance/gst/reconciliation",
         # Org-wide, entity-grouped GST recon = finance-admin only (owner decision
         # 2026-06-16; handler enforces _require_finance_admin).
-        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         # Accountant GST cross-check: GSTR-1/3B vs books side-by-side + sign-off.
@@ -190,12 +192,12 @@ ROWS: List[Dict[str, object]] = [
         # enforces _require_finance_admin).
         "method": "GET",
         "path": "/api/v1/finance/gst/cross-check",
-        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "POST",
         "path": "/api/v1/finance/gst/cross-check-signoff",
-        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",
@@ -205,17 +207,17 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/finance/gstr2b-reconcile",
-        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "POST",
         "path": "/api/v1/finance/itc-export",
-        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",
         "path": "/api/v1/finance/itc-register",
-        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",
@@ -225,7 +227,7 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/finance/owner-dashboard",
-        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         # N8 owner survival cash-flow: org-wide owner figures (AP + projected
@@ -235,7 +237,7 @@ ROWS: List[Dict[str, object]] = [
         # finance-role row above).
         "method": "GET",
         "path": "/api/v1/finance/survival-cashflow",
-        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",
