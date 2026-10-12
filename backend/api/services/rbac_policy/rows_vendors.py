@@ -69,6 +69,15 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/vendor-returns/{return_id}/status",
         "allowed": PURCHASE,
     },
+    {
+        "method": "PUT",
+        "path": "/api/v1/vendor-returns/{return_id}/prices",
+        # Owner rulings 2026-10-12 R2 + R3: a return's price is supplier
+        # money, the accounts roles' to write (handler: require_roles(
+        # *AP_ROLES) + require_payables). Store-scoped per object (404).
+        "allowed": ACCOUNTS,
+        "store_scoped": True,
+    },
     # --- /api/v1/vendor-rma (N4 Vendor RMA + credit-note reconciliation) ---
     # An RMA + its vendor credit note are financial instruments against a
     # vendor; create + every lifecycle transition is gated to the same vendor/AP
@@ -122,6 +131,15 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/vendor-rma/{rma_id}/credit-note",
         # Owner ruling 2026-10-12: recording supplier money is accounts-only
         # (handler: require_roles(*AP_ROLES) + require_payables).
+        "allowed": ACCOUNTS,
+        "store_scoped": True,
+    },
+    {
+        "method": "PUT",
+        "path": "/api/v1/vendor-rma/{rma_id}/prices",
+        # Owner rulings 2026-10-12 R2 + R3: pricing the lines sets the
+        # expected supplier credit -- the accounts roles' (handler:
+        # require_roles(*AP_ROLES) + require_payables).
         "allowed": ACCOUNTS,
         "store_scoped": True,
     },

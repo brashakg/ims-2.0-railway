@@ -611,7 +611,7 @@ def test_vendor_return_create_response_carries_no_credit(vret, role):
     body = r.VendorReturnCreate(
         vendor_id="V1", vendor_name="GKB", store_id="S1", return_type="credit_note",
         items=[r.ReturnItemCreate(product_id="P9", product_name="Lens", quantity=1,
-                                  reason="defective", unit_price=10.0)])
+                                  reason="defective")])
     res = _run(r.create_vendor_return(body, current_user=_user(role)))
     assert set(res) == {"return_id", "message"}
 
@@ -636,11 +636,20 @@ def _rma_to_credit(rma, role, creditor=None):
     ``creditor`` -- ``role`` itself by default. Recording it is the accounts
     roles' (owner ruling 2026-10-12). Returns every response."""
     r, user = rma.r, _user(role)
+    # The price per piece is the accounts roles' to enter (R2 + R3): an
+    # accounts role prices the line as it raises the RMA; a manager raises it
+    # unpriced and the accountant prices it.
+    by_accounts = role in ("ACCOUNTANT", "ADMIN", "SUPERADMIN")
     raised = _run(r.raise_rma(r.RMACreate(
         vendor_id="V1", vendor_name="Zeiss", store_id="S1",
         lines=[r.RMALineCreate(product_id="P1", product_name="Lens", quantity=2,
-                               reason="DEFECTIVE", unit_cost=1500.0)]), current_user=user))
+                               reason="DEFECTIVE",
+                               unit_cost=1500.0 if by_accounts else None)]),
+        current_user=user))
     rid = raised["rma_id"]
+    if not by_accounts:
+        _run(r.price_rma(rid, r.RMAPrices(unit_costs=[1500.0]),
+                         current_user=_user("ACCOUNTANT")))
     authorized = _run(r.authorize_rma(rid, r.RMAAuthorize(vendor_rma_number="Z-1"),
                                       current_user=user))
     dispatched = _run(r.dispatch_rma(rid, r.RMADispatch(carrier="DTDC", awb="AWB1"),
@@ -707,7 +716,9 @@ def test_rma_reject_result_carries_no_credit(rma, role):
     raised = _run(r.raise_rma(r.RMACreate(
         vendor_id="V1", vendor_name="Zeiss", store_id="S1",
         lines=[r.RMALineCreate(product_id="P1", product_name="Lens", quantity=1,
-                               reason="WRONG", unit_cost=900.0)]), current_user=_user(role)))
+                               reason="WRONG")]), current_user=_user(role)))
+    _run(r.price_rma(raised["rma_id"], r.RMAPrices(unit_costs=[900.0]),
+                     current_user=_user("ACCOUNTANT")))
     res = _run(r.reject_rma(raised["rma_id"], r.RMAReject(reason="sent back"),
                             current_user=_user(role)))
     assert res["status"] == "REJECTED" and not _keys(res) & RMA_CREDIT
@@ -725,7 +736,7 @@ class _MoneyEngine:
         return object()
 
     def get(self, rid):
-        return {"rma_id": rid, "store_id": "S1"}
+        return {"rma_id": rid, "store_id": "S1", "expected_credit_paise": 0}
 
     def _result(self, *_a, **_kw):
         return {"ok": True, "rma_id": "R1", "status": "X", **_ALL_RMA_MONEY}
@@ -737,7 +748,7 @@ _RMA_WRITES = {
     "raise": lambda r, u: r.raise_rma(r.RMACreate(
         vendor_id="V1", vendor_name="Z", store_id="S1",
         lines=[r.RMALineCreate(product_id="P1", product_name="L", quantity=1,
-                               reason="WRONG", unit_cost=1.0)]), current_user=u),
+                               reason="WRONG")]), current_user=u),
     "authorize": lambda r, u: r.authorize_rma(
         "R1", r.RMAAuthorize(vendor_rma_number="Z-1"), current_user=u),
     "dispatch": lambda r, u: r.dispatch_rma(

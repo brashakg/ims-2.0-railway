@@ -119,14 +119,18 @@ def debit_note_for_reader(doc: Any, user: Optional[dict]) -> Any:
 # --- Vendor RMA (routers/vendor_rma) ----------------------------------------
 # Expected credit, every credit received (the total and each credit note's
 # amount), the variance between them and any written-off residual, in paise
-# and rupees, and a line's share of the expected credit wherever it sits
-# (line_expected_paise). A line's PRICE (unit_cost_paise) is cut by the one
-# return-line allow-list above, not listed here.
+# and rupees, a line's share of the expected credit wherever it sits
+# (line_expected_paise), and who set the expected credit and when (priced_by /
+# priced_at: the accounts roles' pricing, owner rulings 2026-10-12 R2 + R3 --
+# a vendor return's allow-list hides the same two). A line's PRICE
+# (unit_cost_paise) is cut by the one return-line allow-list above, not
+# listed here.
 _RMA_CREDIT = frozenset({
     "expected_credit_paise", "expected_credit_rupees",
     "received_credit_paise", "received_credit_rupees",
     "variance_paise", "variance_rupees",
     "written_off_paise", "line_expected_paise", "received_paise",
+    "priced_by", "priced_at",
 })
 # The engine writes the amount into its own status-history notes
 # (services/vendor_rma record_credit_note / close_rma); keep the event, drop

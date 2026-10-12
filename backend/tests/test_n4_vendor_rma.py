@@ -500,15 +500,23 @@ def rt(monkeypatch, db):
 
 
 def test_router_raise_and_list(rt, db):
-    from api.routers.vendor_rma import raise_rma, list_rmas, RMACreate, RMALineCreate
+    from api.routers.vendor_rma import (
+        RMACreate, RMALineCreate, RMAPrices, list_rmas, price_rma, raise_rma,
+    )
 
+    # The manager raises the goods; the price per piece is the accounts
+    # roles' to enter (owner rulings 2026-10-12 R2 + R3).
     body = RMACreate(
         vendor_id="V1", vendor_name="Zeiss", store_id="S1",
         lines=[RMALineCreate(product_id="P1", product_name="Lens", quantity=2,
-                             reason="DEFECTIVE", unit_cost=1500.0)],
+                             reason="DEFECTIVE")],
     )
     res = _run(raise_rma(body, current_user=_user(["STORE_MANAGER"])))
     assert res["ok"] is True
+    assert res.get("expected_credit_paise") is None
+    priced = _run(price_rma(res["rma_id"], RMAPrices(unit_costs=[1500.0]),
+                            current_user=_user(["ACCOUNTANT"])))
+    assert priced["expected_credit_paise"] == 300000
     # Pass the query params explicitly: calling the handler directly bypasses
     # FastAPI's Query-default resolution, so the raw Query objects must be
     # overridden with concrete values.

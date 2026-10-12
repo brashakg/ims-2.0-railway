@@ -203,12 +203,20 @@ def rtv(monkeypatch):
 
 
 def _raise(rma, role="STORE_MANAGER", unit_cost=1500.0):
+    """``role`` raises the RMA -- the goods, no price (owner rulings 2026-10-12
+    R2 + R3: a return's price is the accounts roles' to write) -- and an
+    ACCOUNTANT prices its line at ``unit_cost`` (None leaves it unpriced).
+    Returns the raise response."""
     r = rma.r
-    return _run(r.raise_rma(r.RMACreate(
+    raised = _run(r.raise_rma(r.RMACreate(
         vendor_id="V1", vendor_name="Zeiss", store_id="S1",
         lines=[r.RMALineCreate(product_id="P1", product_name="Lens", quantity=2,
-                               reason="DEFECTIVE", unit_cost=unit_cost)]),
+                               reason="DEFECTIVE")]),
         current_user=_user(role)))
+    if unit_cost is not None:
+        _run(r.price_rma(raised["rma_id"], r.RMAPrices(unit_costs=[unit_cost]),
+                         current_user=_user("ACCOUNTANT")))
+    return raised
 
 
 def _dispatched(rma, role="STORE_MANAGER"):
@@ -430,7 +438,7 @@ def test_return_create_stays_with_managers(vret, role):
     res = _run(r.create_vendor_return(r.VendorReturnCreate(
         vendor_id="V1", vendor_name="GKB", store_id="S1", return_type="credit_note",
         items=[r.ReturnItemCreate(product_id="P9", product_name="Lens", quantity=1,
-                                  reason="defective", unit_price=10.0)]),
+                                  reason="defective")]),
         current_user=_user(role)))
     assert set(res) == {"return_id", "message"}
 
@@ -517,7 +525,7 @@ def test_http_goods_side_still_open_to_a_manager(http):
     r = http.client.post("/api/v1/vendor-rma", json={
         "vendor_id": "V1", "vendor_name": "Zeiss", "store_id": "S1",
         "lines": [{"product_id": "P1", "product_name": "Lens", "quantity": 1,
-                   "reason": "WRONG", "unit_cost": 100.0}]})
+                   "reason": "WRONG"}]})
     assert r.status_code == 201, r.text
     rid = r.json()["rma_id"]
     for step, body in (("authorize", {"vendor_rma_number": "Z-9"}),
@@ -673,13 +681,16 @@ def two(monkeypatch):
     monkeypatch.setattr(r, "_get_db", lambda: db)
     monkeypatch.setattr(appr_router, "_get_db", lambda: db)
     rma_ns = SimpleNamespace(r=r, db=db)
-    # A manager raises, authorizes and dispatches Rs 1,00,000 of goods.
+    # A manager raises, authorizes and dispatches 100 frames; the accountant
+    # prices them at Rs 1,000 each (Rs 1,00,000 expected).
     raised = _run(r.raise_rma(r.RMACreate(
         vendor_id="V1", vendor_name="Luxottica", store_id="S1",
         lines=[r.RMALineCreate(product_id="P1", product_name="Frame", quantity=100,
-                               reason="WARRANTY", unit_cost=1000.0)]),
+                               reason="WARRANTY")]),
         current_user=_user("STORE_MANAGER")))
     rid = raised["rma_id"]
+    _run(r.price_rma(rid, r.RMAPrices(unit_costs=[1000.0]),
+                     current_user=_SECOND_ACCOUNTANT))
     _run(r.authorize_rma(rid, r.RMAAuthorize(vendor_rma_number="L-1"),
                          current_user=_user("STORE_MANAGER")))
     _run(r.dispatch_rma(rid, r.RMADispatch(carrier="X", awb="W"),
@@ -993,7 +1004,7 @@ _RMA_WRITES = {
     "raise": lambda r, u: r.raise_rma(r.RMACreate(
         vendor_id="V1", vendor_name="Z", store_id="S1",
         lines=[r.RMALineCreate(product_id="P1", product_name="L", quantity=1,
-                               reason="WRONG", unit_cost=1.0)]), current_user=u),
+                               reason="WRONG")]), current_user=u),
     "authorize": lambda r, u: r.authorize_rma(
         "R1", r.RMAAuthorize(vendor_rma_number="Z-1"), current_user=u),
     "dispatch": lambda r, u: r.dispatch_rma(

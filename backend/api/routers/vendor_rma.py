@@ -26,7 +26,10 @@ here (reads, write results, the close refusal) goes through
 services/payables_mask.strip_rma_credit, which also drops each line's unit
 cost (owner ruling 2026-10-12: a manager reads items, quantities and reasons).
 RECORDING that money is the accounts roles' too (owner ruling 2026-10-12):
-the credit-note route is require_roles(*AP_ROLES), and a close that writes off
+so is PRICING the lines the expected credit is built from (R2 + R3): a
+manager raises an RMA without prices, a line price from anyone else is a 403,
+and the accounts roles price it on PUT /{rma_id}/prices; a credit note on an
+unpriced RMA is a 422. The credit-note route is require_roles(*AP_ROLES), and a close that writes off
 a variance or a reject of a DISPATCHED RMA (which forgoes its whole expected
 credit) is require_payables inline. The goods side -- raise, authorize,
 dispatch, reject before dispatch, close without a write-off -- stays with the
@@ -44,7 +47,7 @@ the request (SYSTEM_INTENT "Requester CANNOT approve own request").
 from __future__ import annotations
 
 import logging
-from typing import List, Optional, Literal
+from typing import Annotated, List, Optional, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -53,13 +56,16 @@ from .auth import require_roles
 from ..dependencies import get_db, resolve_store_scope, validate_store_access, user_store_scope
 from ..services.cost_mask import PURCHASE_ROLES
 from ..services.vendor_rma import (
+    PRICE_REQUIRED,
     VendorRMAEngine,
     RMA_REASONS,
     credit_requires_approval,
     paise_to_rupees,
+    rma_is_priced,
     rupees_to_paise,
     RMAStatus,
 )
+from ..services.rtv_debit_note import debit_note_issued
 from ..services.payables_mask import AP_ROLES, require_payables, strip_rma_credit
 
 logger = logging.getLogger(__name__)
@@ -110,8 +116,12 @@ class RMALineCreate(BaseModel):
     # (or negative) expected-credit amount (mirrors vendor_returns guards).
     quantity: int = Field(..., gt=0, le=100000)
     reason: RMAReason
-    # Rupee unit cost; converted to integer paise at the service edge.
-    unit_cost: float = Field(..., ge=0, le=10_000_000)
+    # Rupee unit cost; converted to integer paise at the service edge. The
+    # basis of the expected supplier credit: supplier money, the accounts
+    # roles' to write as well as to read (owner rulings 2026-10-12 R2 + R3).
+    # A manager raises the RMA without it; an accounts role prices it here or
+    # later (PUT /{rma_id}/prices).
+    unit_cost: Optional[float] = Field(None, ge=0, le=10_000_000)
 
 
 class RMACreate(BaseModel):
@@ -123,6 +133,11 @@ class RMACreate(BaseModel):
     po_id: Optional[str] = None
     grn_id: Optional[str] = None
     return_id: Optional[str] = None
+
+
+class RMAPrices(BaseModel):
+    # One rupee price per piece for each of the RMA's lines, in their order.
+    unit_costs: List[Annotated[float, Field(ge=0, le=10_000_000)]] = Field(..., min_length=1)
 
 
 class RMAAuthorize(BaseModel):
@@ -225,6 +240,10 @@ async def raise_rma(
     """Raise a DRAFT RMA against a vendor with line items. Vendor/AP roles only.
     Store-IDOR guarded on the RMA's store."""
     validate_store_access(body.store_id, current_user)
+    # A price on a line records the supplier money the expected credit is
+    # built from: the accounts roles' alone (R2 + R3). A manager sends none.
+    if any(ln.unit_cost is not None for ln in body.lines):
+        require_payables(current_user, "Pricing an RMA")
     eng = _engine()
     if eng._coll() is None:  # noqa: SLF001 - intentional fail-soft DB probe
         raise HTTPException(status_code=503, detail="Database not available")
@@ -331,6 +350,11 @@ async def record_credit_note(
     if doc is None:
         raise HTTPException(status_code=404, detail="RMA not found")
     validate_store_access(doc.get("store_id"), current_user)
+    # No credit is reconciled against an unknown expectation: the lines are
+    # priced first (PUT /{rma_id}/prices). Checked before the maker-checker
+    # tier, which reads the expected credit.
+    if not rma_is_priced(doc):
+        raise _http_from_result(dict(PRICE_REQUIRED))
 
     recv_paise = rupees_to_paise(body.received_amount)
     expected = int(doc.get("expected_credit_paise") or 0)
@@ -378,6 +402,38 @@ async def record_credit_note(
         actor=current_user.get("user_id"),
         notes=body.notes or "",
         approval_token=(body.approval_token or "").strip() or None,
+    )
+    if not res.get("ok"):
+        raise _http_from_result(res)
+    return strip_rma_credit(res, current_user)
+
+
+@router.put("/{rma_id}/prices")
+async def price_rma(
+    rma_id: str,
+    body: RMAPrices,
+    current_user: dict = Depends(require_roles(*AP_ROLES)),
+):
+    """Set the price per piece of each of an RMA's lines, and so its expected
+    credit. The accounts roles only (owner rulings 2026-10-12 R2 + R3: a
+    return's price is supplier money, the accounts roles' to write and to
+    read); a manager raises the RMA without it. Allowed until the first
+    credit note is recorded, and not under an issued GST debit note."""
+    require_payables(current_user, "Pricing an RMA")
+    eng = _engine()
+    doc = eng.get(rma_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="RMA not found")
+    validate_store_access(doc.get("store_id"), current_user)
+    if debit_note_issued(_get_db(), rma_id):
+        raise HTTPException(
+            status_code=409,
+            detail="The GST debit note was issued at this RMA's prices; they stay.",
+        )
+    res = eng.price_lines(
+        rma_id,
+        unit_costs_paise=[rupees_to_paise(cost) for cost in body.unit_costs],
+        actor=current_user.get("user_id"),
     )
     if not res.get("ok"):
         raise _http_from_result(res)

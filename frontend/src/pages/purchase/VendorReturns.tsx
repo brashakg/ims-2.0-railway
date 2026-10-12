@@ -23,17 +23,27 @@ import api from '../../services/api/client';
 import { rtvDebitNotesApi, type DebitNote } from '../../services/api/rtvDebitNotes';
 import { PAYABLES_ROLES } from '../../components/common/CostCell';
 
+// A return line. Its price per piece is the accounts roles' to enter and to
+// read (owner rulings 2026-10-12 R2 + R3): a manager raises the return with
+// none, and anyone outside the accounts roles reads it without one -- the
+// key is simply absent -> shown as "-". An accounts role prices an unpriced
+// return with "Set prices" (PUT /vendor-returns/{id}/prices).
 interface ReturnItem {
   product_id: string;
   product_name: string;
   quantity: number;
   reason: string;
-  unit_price: number;
+  unit_price?: number | null;
 }
 
-// WORKSHOP_STAFF reads a return without its prices (server-side cost mask,
-// owner ruling 2026-09-29): the money keys are simply absent -> shown as "-".
-type ReturnLine = Omit<ReturnItem, 'unit_price'> & { unit_price?: number };
+type ReturnLine = ReturnItem;
+
+const newLine = (): ReturnItem => ({ product_id: '', product_name: '', quantity: 1, reason: 'defective' });
+
+// Settled returns keep the prices they were settled at (the server refuses).
+const SETTLED = ['credit_issued', 'replaced', 'cancelled'];
+const isPriced = (ret: VendorReturn) =>
+  ret.items.length > 0 && ret.items.every((it) => it.unit_price != null);
 
 interface VendorReturn {
   return_id: string;
@@ -158,10 +168,12 @@ export function VendorReturns() {
   // Form state
   const [selectedVendor, setSelectedVendor] = useState('');
   const [returnType, setReturnType] = useState<'credit_note' | 'replacement'>('credit_note');
-  const [items, setItems] = useState<ReturnItem[]>([
-    { product_id: '', product_name: '', quantity: 1, reason: 'defective', unit_price: 0 },
-  ]);
+  const [items, setItems] = useState<ReturnItem[]>([newLine()]);
   const [notes, setNotes] = useState('');
+  // Accounts pricing an unpriced return (one input per line, in line order).
+  const [pricing, setPricing] = useState<VendorReturn | null>(null);
+  const [priceInputs, setPriceInputs] = useState<string[]>([]);
+  const [pricingBusy, setPricingBusy] = useState(false);
 
   // Load data on mount
   useEffect(() => {
@@ -206,10 +218,7 @@ export function VendorReturns() {
   }, [listScope]);
 
   const handleAddItem = () => {
-    setItems([
-      ...items,
-      { product_id: '', product_name: '', quantity: 1, reason: 'defective', unit_price: 0 },
-    ]);
+    setItems([...items, newLine()]);
   };
 
   const handleRemoveItem = (idx: number) => {
@@ -235,9 +244,12 @@ export function VendorReturns() {
         vendor_id: selectedVendor,
         vendor_name: vendor?.legal_name || selectedVendor,
         store_id: activeStoreId,
-        items: items.map(i => ({
+        // A line's price is sent only by an accounts role (the server refuses
+        // one from anyone else, R2 + R3); a blank price is left for later.
+        items: items.map(({ unit_price, ...i }) => ({
           ...i,
           product_id: i.product_id || i.product_name.toLowerCase().replace(/\s+/g, '-'),
+          ...(canSeePayables && unit_price != null ? { unit_price } : {}),
         })),
         return_type: returnType,
         notes,
@@ -248,7 +260,7 @@ export function VendorReturns() {
       setShowModal(false);
       setSelectedVendor('');
       setReturnType('credit_note');
-      setItems([{ product_id: '', product_name: '', quantity: 1, reason: 'defective', unit_price: 0 }]);
+      setItems([newLine()]);
       setNotes('');
 
       // Refresh the list -- an admin viewing another shop is shown the shop
@@ -266,7 +278,10 @@ export function VendorReturns() {
     }
   };
 
-  const totalValue = items.reduce((sum, item) => sum + item.quantity * item.unit_price, 0);
+  // The form's total, for an accounts role, once every line is priced.
+  const totalValue = items.every((item) => item.unit_price != null)
+    ? items.reduce((sum, item) => sum + item.quantity * (item.unit_price || 0), 0)
+    : null;
   const activeReturns = returns.filter(r => !['credit_issued', 'replaced', 'cancelled'].includes(r.status));
   const historyReturns = returns.filter(r => ['credit_issued', 'replaced', 'cancelled'].includes(r.status));
 
@@ -280,6 +295,34 @@ export function VendorReturns() {
       toast.success(`Status updated to ${STATUS_LABELS[newStatus] || newStatus}`);
     } catch {
       toast.error('Failed to update return status');
+    }
+  };
+
+  const openPricing = (ret: VendorReturn) => {
+    setPricing(ret);
+    setPriceInputs(ret.items.map((it) => (it.unit_price == null ? '' : String(it.unit_price))));
+  };
+
+  const handleSavePrices = async () => {
+    if (!pricing) return;
+    const prices = priceInputs.map((v) => (v.trim() === '' ? NaN : Number(v)));
+    if (prices.some((p) => !Number.isFinite(p) || p < 0)) {
+      toast.error("Enter every line's price per piece");
+      return;
+    }
+    setPricingBusy(true);
+    try {
+      const resp = await api.put(`/vendor-returns/${pricing.return_id}/prices`, {
+        unit_prices: prices,
+      });
+      const updated: VendorReturn = shownReturn(resp.data.return);
+      setReturns((prev) => prev.map((r) => (r.return_id === updated.return_id ? updated : r)));
+      toast.success('Prices set');
+      setPricing(null);
+    } catch {
+      toast.error('Failed to set the prices');
+    } finally {
+      setPricingBusy(false);
     }
   };
 
@@ -373,11 +416,7 @@ export function VendorReturns() {
             <IndianRupee className="w-5 h-5 text-green-500" />
           </div>
           <p className="text-2xl font-bold text-green-600">
-            {rupees(
-              returns.every((r) => r.total_value != null)
-                ? returns.reduce((sum, r) => sum + (r.credit_note_amount || 0), 0)
-                : null
-            )}
+            {rupees(returns.reduce((sum, r) => sum + (r.credit_note_amount || 0), 0))}
           </p>
         </div>
         )}
@@ -453,7 +492,9 @@ export function VendorReturns() {
                     {!listScope && <RowShop storeId={ret.store_id} />}
                   </div>
                   <div className="text-right">
-                    <p className="text-lg font-bold text-gray-900">{rupees(ret.total_value)}</p>
+                    <p className="text-lg font-bold text-gray-900">
+                      {canSeePayables && ret.total_value == null ? 'Not priced' : rupees(ret.total_value)}
+                    </p>
                     <p className="text-gray-500 text-sm">{ret.items.length} item(s)</p>
                   </div>
                 </div>
@@ -470,7 +511,21 @@ export function VendorReturns() {
                 <div className="border-t border-gray-200 px-6 py-4 bg-gray-50 space-y-4">
                   {/* Items */}
                   <div>
-                    <h4 className="font-semibold text-gray-900 mb-2">Items</h4>
+                    <div className="flex items-center justify-between mb-2">
+                      <h4 className="font-semibold text-gray-900">Items</h4>
+                      {/* Pricing the lines records the supplier money the
+                          credit and the debit note are built from: the
+                          accounts roles only, until the return is settled or
+                          its debit note issued (the server refuses after). */}
+                      {canSeePayables && !SETTLED.includes(ret.status) && !debitNotes[ret.return_id] && (
+                        <button
+                          onClick={() => openPricing(ret)}
+                          className="border border-gray-300 hover:bg-gray-100 text-gray-700 px-3 py-1.5 rounded text-sm font-medium transition"
+                        >
+                          {isPriced(ret) ? 'Edit prices' : 'Set prices'}
+                        </button>
+                      )}
+                    </div>
                     <div className="space-y-2">
                       {ret.items.map((item, idx) => (
                         <div key={idx} className="flex justify-between items-center text-sm">
@@ -558,7 +613,8 @@ export function VendorReturns() {
                           // Issuing the note records what the supplier owes us:
                           // PAYABLES_ROLES only (the server 403s the rest).
                           <button
-                            disabled={dnBusy === ret.return_id}
+                            disabled={dnBusy === ret.return_id || !isPriced(ret)}
+                            title={isPriced(ret) ? undefined : 'Set the prices first'}
                             onClick={() => handleIssueDebitNote(ret.return_id)}
                             className="bg-gray-900 hover:bg-gray-800 disabled:opacity-50 text-white px-3 py-1.5 rounded text-sm font-medium transition"
                           >
@@ -604,9 +660,13 @@ export function VendorReturns() {
                               note and its amount: PAYABLES_ROLES only (owner
                               ruling 2026-10-12; the server 403s the rest). */}
                           {canSeePayables ? (
+                            // The credit is the priced lines' value: none to
+                            // record until they are priced (the server 422s).
                             <button
+                              disabled={!isPriced(ret)}
+                              title={isPriced(ret) ? undefined : 'Set the prices first'}
                               onClick={() => handleUpdateStatus(ret.return_id, 'credit_issued')}
-                              className="flex-1 bg-green-600 hover:bg-green-700 text-white px-3 py-2 rounded text-sm font-medium transition"
+                              className="flex-1 bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white px-3 py-2 rounded text-sm font-medium transition"
                             >
                               Issue Credit
                             </button>
@@ -738,16 +798,26 @@ export function VendorReturns() {
                         </div>
                       </div>
                       <div className="grid grid-cols-2 gap-3">
+                        {/* The price per piece: the accounts roles' to enter
+                            (R2 + R3). A manager logs the goods only. */}
+                        {canSeePayables && (
                         <div>
                           <label className="block text-xs text-gray-500 mb-1">Unit Price</label>
                           <input
                             type="number"
                             min="0"
-                            value={item.unit_price}
-                            onChange={(e) => handleItemChange(idx, 'unit_price', parseFloat(e.target.value) || 0)}
+                            value={item.unit_price ?? ''}
+                            onChange={(e) =>
+                              handleItemChange(
+                                idx,
+                                'unit_price',
+                                e.target.value === '' ? undefined : parseFloat(e.target.value) || 0,
+                              )
+                            }
                             className="w-full px-3 py-2 bg-white border border-gray-300 rounded text-gray-900 text-sm outline-none focus:border-blue-500"
                           />
                         </div>
+                        )}
                         <div>
                           <label className="block text-xs text-gray-500 mb-1">Reason</label>
                           <select
@@ -788,13 +858,22 @@ export function VendorReturns() {
                 />
               </div>
 
-              {/* Total */}
-              <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
-                <div className="flex justify-between items-center">
-                  <p className="text-gray-600 font-medium">Total Return Value</p>
-                  <p className="text-2xl font-bold text-gray-900">₹{totalValue.toLocaleString('en-IN')}</p>
+              {/* Total: the supplier money the return is worth -- the accounts
+                  roles' alone (R3). A manager is told who prices it. */}
+              {canSeePayables ? (
+                <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
+                  <div className="flex justify-between items-center">
+                    <p className="text-gray-600 font-medium">Total Return Value</p>
+                    <p className="text-2xl font-bold text-gray-900">
+                      {totalValue == null ? 'Not priced' : rupees(totalValue)}
+                    </p>
+                  </div>
                 </div>
-              </div>
+              ) : (
+                <p className="text-gray-500 text-xs">
+                  Accounts set the price per piece and record the supplier's credit.
+                </p>
+              )}
             </div>
 
             {/* Modal Footer */}
@@ -810,6 +889,62 @@ export function VendorReturns() {
                 className="flex-1 px-4 py-2 bg-bv-red-600 hover:bg-bv-red-700 text-white rounded-lg font-medium transition"
               >
                 Create Return
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Set prices (accounts roles) */}
+      {pricing && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div
+            role="dialog"
+            aria-label="Set prices"
+            className="bg-white rounded-lg w-full max-w-lg max-h-[90dvh] overflow-y-auto border border-gray-200 shadow-2xl"
+          >
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
+              <h2 className="text-xl font-bold text-gray-900">Set prices</h2>
+              <button onClick={() => setPricing(null)} className="text-gray-500 hover:text-gray-700 transition">
+                <XIcon className="w-6 h-6" />
+              </button>
+            </div>
+            <div className="p-6 space-y-3">
+              <p className="text-gray-500 text-sm">
+                Price per piece for each line of {pricing.return_id}. The credit and the GST debit note are
+                built from these.
+              </p>
+              {pricing.items.map((it, idx) => (
+                <label key={idx} className="flex items-center justify-between gap-3 text-sm">
+                  <span className="text-gray-700">
+                    {it.product_name} <span className="text-gray-500">x {it.quantity}</span>
+                  </span>
+                  <input
+                    type="number"
+                    min="0"
+                    aria-label={`Price per piece for ${it.product_name}`}
+                    value={priceInputs[idx] ?? ''}
+                    onChange={(e) =>
+                      setPriceInputs((prev) => prev.map((v, i) => (i === idx ? e.target.value : v)))
+                    }
+                    className="w-36 px-3 py-2 bg-white border border-gray-300 rounded text-gray-900 text-sm outline-none focus:border-blue-500"
+                  />
+                </label>
+              ))}
+            </div>
+            <div className="flex gap-3 px-6 py-4 border-t border-gray-200 bg-gray-50">
+              <button
+                onClick={() => setPricing(null)}
+                className="flex-1 px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg font-medium transition border border-gray-300"
+              >
+                Cancel
+              </button>
+              <button
+                disabled={pricingBusy}
+                onClick={handleSavePrices}
+                className="flex-1 px-4 py-2 bg-bv-red-600 hover:bg-bv-red-700 disabled:opacity-50 text-white rounded-lg font-medium transition"
+              >
+                {pricingBusy ? 'Saving...' : 'Save prices'}
               </button>
             </div>
           </div>

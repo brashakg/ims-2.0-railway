@@ -1113,6 +1113,7 @@ are the exact current gate (SUPERADMIN always implied).
 | `POST` | `/api/v1/vendor-returns/` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `GET` | `/api/v1/vendor-returns/{return_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT, WORKSHOP_STAFF | S |
 | `PATCH` | `/api/v1/vendor-returns/{return_id}/status` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
+| `PUT` | `/api/v1/vendor-returns/{return_id}/prices` | ADMIN, ACCOUNTANT | S |
 
 ### `/api/v1/vendor-rma`
 
@@ -1126,6 +1127,7 @@ are the exact current gate (SUPERADMIN always implied).
 | `POST` | `/api/v1/vendor-rma/{rma_id}/authorize` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
 | `POST` | `/api/v1/vendor-rma/{rma_id}/dispatch` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
 | `POST` | `/api/v1/vendor-rma/{rma_id}/credit-note` | ADMIN, ACCOUNTANT | S |
+| `PUT` | `/api/v1/vendor-rma/{rma_id}/prices` | ADMIN, ACCOUNTANT | S |
 | `POST` | `/api/v1/vendor-rma/{rma_id}/reject` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
 | `POST` | `/api/v1/vendor-rma/{rma_id}/close` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
 

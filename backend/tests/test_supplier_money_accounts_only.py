@@ -759,6 +759,9 @@ _MOVED = (
     ("GET", "/api/v1/vendors/{vendor_id}/debit-notes"),
     ("GET", "/api/v1/vendors/{vendor_id}/ledger"),
     ("GET", "/api/v1/vendors/{vendor_id}/payments"),
+    # R2 + R3: a return's price is the accounts roles' to write.
+    ("PUT", "/api/v1/vendor-returns/{return_id}/prices"),
+    ("PUT", "/api/v1/vendor-rma/{rma_id}/prices"),
 )
 
 
