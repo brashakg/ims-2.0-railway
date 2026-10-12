@@ -47,7 +47,7 @@ import re
 import uuid
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from .gst_rates import (
@@ -3694,7 +3694,9 @@ def restamp_on_update(current: Dict[str, Any], patch: Dict[str, Any]) -> Dict[st
         # Needs review and the PIM doors' "finish it in the editor" refusal --
         # on its next save; its is_active is the cataloguer's, untouched.
         if (current or {}).get("provisional"):
-            return {"provisional": False}
+            # Still a PO-door buy for reorder_policy.discontinued: a finished
+            # row nobody switched on reads new, never 'Discontinued'.
+            return {"provisional": False, "bought_before_catalogued": True}
         return {}
 
     # prior is an explicit DRAFT: complete -> ACTIVE (auto-flip), else refresh gaps.
@@ -3708,7 +3710,14 @@ def restamp_on_update(current: Dict[str, Any], patch: Dict[str, Any]) -> Dict[st
             # it sellable. An is_active False sent in the same save wins -- but
             # either way it is finished: no longer an ordered draft.
             fields["provisional"] = False
+            # The PO-door mark reorder_policy.discontinued reads once
+            # `provisional` is gone: finished but never switched on is new.
+            fields["bought_before_catalogued"] = True
             if (patch or {}).get("is_active") is not False:
                 fields["is_active"] = True
+                # The restamp writes around ProductRepository.update, which is
+                # what stamps this: switched on here, so a later switch-off
+                # reads 'Discontinued' (reorder_policy.discontinued).
+                fields["switched_on_at"] = datetime.now(timezone.utc)
         return fields
     return {"catalog_status": CATALOG_STATUS_DRAFT, "done_gaps": gaps}
