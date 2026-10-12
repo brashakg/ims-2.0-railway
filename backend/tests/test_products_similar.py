@@ -140,16 +140,10 @@ def _coll_raybans():
 EMPTY = {"exact_match": None, "siblings": [], "model_colour_count": 0}
 
 
-def _similar(coll, **kw):
-    args = {
-        "category": "FRAME",
-        "brand": "Ray-Ban",
-        "model": "RB-2140",
-        "colour": None,
-        "size": None,
-    }
-    args.update(kw)
-    return pm.find_similar_products(coll, **args)
+def _similar(coll, category="FRAME", brand="Ray-Ban", model="RB-2140", colour=None, size=None):
+    """The lookup as the form asks it: the category and the typed attributes."""
+    attrs = {"brand_name": brand, "model_no": model, "colour_code": colour, "size": size}
+    return pm.find_similar_products(coll, category=category, attributes=attrs)
 
 
 # ===========================================================================
@@ -228,15 +222,11 @@ def test_size_in_identity_when_present():
         ]
     )
     # same colour, size 52 -> exact = the 52 row; the 54 row is a sibling
-    res = pm.find_similar_products(
-        coll, category="ACC", brand="acme", model="m1", colour="blk", size="52"
-    )
+    res = _similar(coll, category="ACC", brand="acme", model="m1", colour="blk", size="52")
     assert res["exact_match"]["size"] == "52"
     assert len(res["siblings"]) == 1
     # sizeless query -> 3-part key -> no exact, both rows are siblings
-    res2 = pm.find_similar_products(
-        coll, category="ACC", brand="acme", model="m1", colour="blk"
-    )
+    res2 = _similar(coll, category="ACC", brand="acme", model="m1", colour="blk")
     assert res2["exact_match"] is None
     assert len(res2["siblings"]) == 2
 
@@ -260,8 +250,7 @@ def test_a_contact_lens_exact_match_is_its_power():
 
     def similar(**power):
         return pm.find_similar_products(
-            coll, category="CL", brand="Acuvue", model="Oasys", colour="", size="",
-            attributes=power,
+            coll, category="CL", attributes=dict(oasys, **power),
         )
 
     same = similar(power="-1.25D")
@@ -280,8 +269,7 @@ def test_a_frame_exact_match_reads_its_eye_size():
 
     def similar(lens_size):
         return pm.find_similar_products(
-            coll, category="FR", brand="Carrera", model="CA8895", colour="807",
-            attributes={"lens_size": lens_size},
+            coll, category="FR", attributes=dict(carrera, lens_size=lens_size),
         )
 
     assert similar("52")["exact_match"]["sku"] == "FR-CARRERA-CA8895-807-52"
@@ -289,13 +277,10 @@ def test_a_frame_exact_match_reads_its_eye_size():
     assert [s["sku"] for s in similar("54")["siblings"]] == ["FR-CARRERA-CA8895-807-52"]
 
 
-def test_endpoint_passes_the_eye_size_and_power_on(monkeypatch):
-    """GET /products/similar hands lens_size and the power fields to the
-    lookup as typed -- the router folds nothing itself."""
-    import asyncio
-
-    from api.routers import products as prod_router
-
+def test_endpoint_hands_every_typed_attribute_on(client, staff_headers, monkeypatch):
+    """GET /products/similar hands the form's attributes (every parameter but
+    the category) to the lookup as typed -- the router keeps no list of what
+    the duplicate key reads and folds nothing itself."""
     seen = {}
 
     class _Db:
@@ -307,13 +292,13 @@ def test_endpoint_passes_the_eye_size_and_power_on(monkeypatch):
     monkeypatch.setattr(conn, "get_db", lambda: _Db())
     monkeypatch.setattr(pm, "find_similar_products",
                         lambda coll, **kw: seen.update(kw) or EMPTY)
-    asyncio.run(prod_router.get_similar_products(
-        category="CL", brand="Acuvue", model_no="Oasys", lens_size="54",
-        power="-1.25", cl_cyl="-0.75", cl_axis="180", cl_add="+1.00",
-        current_user={"user_id": "u"},
-    ))
-    assert seen["attributes"] == {"lens_size": "54", "power": "-1.25", "cl_cyl": "-0.75",
-                                  "cl_axis": "180", "cl_add": "+1.00"}
+    params = {"brand_name": "Acuvue", "model_name": "Oasys", "colour_name": "Hazel",
+              "power": "-1.25", "cl_axis": "180", "base_curve": "8.6", "pack": "6",
+              "subbrand": "Max"}
+    resp = client.get("/api/v1/products/similar", params={"category": "CCL", **params},
+                      headers=staff_headers)
+    assert resp.status_code == 200, resp.text
+    assert seen == {"category": "CCL", "attributes": params}
 
 
 def test_category_filters_siblings():
@@ -323,7 +308,7 @@ def test_category_filters_siblings():
             _spine_doc("Acme", "M9", "RED", category="SUNGLASS"),
         ]
     )
-    res = pm.find_similar_products(coll, category="FR", brand="Acme", model="M9")
+    res = _similar(coll, category="FR", brand="Acme", model="M9")
     assert {s["colour_code"] for s in res["siblings"]} == {"BLK"}
 
 
@@ -335,7 +320,7 @@ def test_category_filters_siblings():
 def test_siblings_capped_at_12_but_count_is_true_total():
     docs = [_spine_doc("Acme", "CAP", f"C{i:02d}") for i in range(15)]
     coll = _FakeProductsColl(docs)
-    res = pm.find_similar_products(coll, category="FRAME", brand="Acme", model="CAP")
+    res = _similar(coll, brand="Acme", model="CAP")
     assert len(res["siblings"]) == 12
     assert res["model_colour_count"] == 15
 
@@ -366,15 +351,11 @@ def test_sibling_summary_shape():
 
 
 def test_db_trouble_returns_empty_shape():
-    assert pm.find_similar_products(
-        _RaisingColl(), category="FRAME", brand="A", model="M1"
-    ) == EMPTY
+    assert _similar(_RaisingColl(), brand="A", model="M1") == EMPTY
 
 
 def test_no_collection_returns_empty_shape():
-    assert pm.find_similar_products(
-        None, category="FRAME", brand="A", model="M1"
-    ) == EMPTY
+    assert _similar(None, brand="A", model="M1") == EMPTY
 
 
 def test_unknown_category_or_missing_identity_returns_empty():

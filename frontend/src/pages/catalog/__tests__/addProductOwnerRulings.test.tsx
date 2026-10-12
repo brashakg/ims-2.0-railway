@@ -423,7 +423,7 @@ describe('F69 - the same-model chip', () => {
       },
     });
     render(
-      <RealHint category="SG" brand="Ray-Ban" model="RB4165" colour="" size=""
+      <RealHint category="SG" attributes={{ brand_name: 'Ray-Ban', model_no: 'RB4165' }}
         onPickSibling={vi.fn()} onOpenExisting={vi.fn()} />,
     );
     const chip = screen.getByRole('button', { name: /001/ });

@@ -4,18 +4,17 @@
 // The council-exact trigger rule for the Add-Product "similar products" strip,
 // extracted into a small testable hook:
 //
-//   * WATCH brand, model (model_no / model_name), colour_code and the size
-//     field. ARM only when brand AND model (>= 2 chars) are both set.
-//   * FIRE 400ms after the operator stops typing in ANY of the watched
-//     fields; every keystroke RESTARTS the timer and ABORTS the in-flight
-//     request (AbortController).
-//   * While waiting / fetching there is NO loading state to render — the
-//     strip simply shows nothing (stale data is cleared immediately on any
-//     input change so it can never mislead).
-//
-// The backend (GET /products/similar) matches through THE same normaliser
-// that builds the spine's duplicate identity_key, so the hook never folds or
-// normalises values itself — it sends what the operator typed.
+//   * SEND the category and the form's attributes as typed (blanks dropped).
+//     The server keys them with the create door's own identity_parts, so this
+//     hook keeps NO list of what the duplicate key reads (a hand-kept copy
+//     drifted: colour name, sub-brand, coating, index, contact-lens fit).
+//   * ARM once a category and a brand are set; the server answers "nothing"
+//     until the identity is complete.
+//   * FIRE 400ms after the operator stops typing; every keystroke RESTARTS
+//     the timer and ABORTS the in-flight request (AbortController).
+//   * The last answer stays on screen until the fresh one lands (typing in a
+//     field below the strip must not make the form jump); disarming or a new
+//     category clears it at once. Never a loading state.
 
 import { useEffect, useRef, useState } from 'react';
 import { productApi, type SimilarProductsResponse } from '../../services/api/products';
@@ -23,40 +22,21 @@ import { productApi, type SimilarProductsResponse } from '../../services/api/pro
 /** Council ruling: fire 400ms after the operator stops typing. */
 export const SIMILAR_DEBOUNCE_MS = 400;
 
-/** What else the server's duplicate key (product_master.identity_parts) reads
- *  from the form: a frame's eye size and a contact lens's power. Sent as
- *  typed; the server folds them, so the exact match is the save's 409. */
-export const SIMILAR_IDENTITY_KEYS = ['lens_size', 'power', 'cl_cyl', 'cl_axis', 'cl_add'] as const;
-
 export interface SimilarQueryInput {
   /** CATEGORIES picker code (SG/FR/...) — the backend resolves aliases. */
   category: string;
-  brand: string;
-  model: string;
-  colour: string;
-  size: string;
-  /** The form's attributes: SIMILAR_IDENTITY_KEYS are sent from here. */
-  attributes?: Record<string, string>;
+  /** The form's attributes, as typed. */
+  attributes: Record<string, string>;
 }
 
-/** ARM rule (council-exact): brand AND model (>= 2 chars) both set — plus a
- *  category, without which the endpoint has no field registry to match in. */
-export function isSimilarQueryArmed(q: {
-  category: string;
-  brand: string;
-  model: string;
-}): boolean {
-  return (
-    Boolean(String(q.category || '').trim()) &&
-    String(q.brand || '').trim().length > 0 &&
-    String(q.model || '').trim().length >= 2
-  );
+/** ARM rule: a category (the registry the key is read in) and a brand. */
+export function isSimilarQueryArmed(q: SimilarQueryInput): boolean {
+  return Boolean(String(q.category || '').trim()) && Boolean(String(q.attributes?.brand_name ?? '').trim());
 }
 
 export interface UseSimilarProductsResult {
-  /** The last completed response for the CURRENT inputs; null while idle,
-   *  debouncing, fetching, errored, or un-armed — null always means "render
-   *  nothing". */
+  /** The last completed response; null while idle, errored or un-armed —
+   *  null always means "render nothing". */
   data: SimilarProductsResponse | null;
   /** Whether the trigger rule is currently armed (for tests/diagnostics). */
   armed: boolean;
@@ -70,18 +50,21 @@ export function useSimilarProducts(
   const abortRef = useRef<AbortController | null>(null);
   const armed = enabled && isSimilarQueryArmed(q);
   // A string, so a fresh attributes object with the same values never refires.
-  const extrasKey = JSON.stringify(
-    Object.fromEntries(
-      SIMILAR_IDENTITY_KEYS.map((k) => [k, String(q.attributes?.[k] ?? '').trim()]).filter(([, v]) => v),
-    ),
+  const attrsKey = JSON.stringify(
+    Object.entries(q.attributes || {})
+      .map(([k, v]) => [k, String(v ?? '').trim()])
+      .filter(([, v]) => v)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
   );
 
+  // Disarming or a new category: the old answer is about something else.
   useEffect(() => {
-    // Any watched-field change: abort the in-flight request and clear stale
-    // data (never a spinner over the form — nothing renders until fresh).
+    setData(null);
+  }, [q.category, armed]);
+
+  useEffect(() => {
     abortRef.current?.abort();
     abortRef.current = null;
-    setData(null);
     if (!armed) return undefined;
 
     const timer = window.setTimeout(() => {
@@ -89,14 +72,7 @@ export function useSimilarProducts(
       abortRef.current = controller;
       productApi
         .getSimilarProducts(
-          {
-            category: q.category,
-            brand: q.brand.trim(),
-            model_no: q.model.trim(),
-            colour_code: q.colour.trim() || undefined,
-            size: q.size.trim() || undefined,
-            ...(JSON.parse(extrasKey) as Record<string, string>),
-          },
+          { category: q.category, ...Object.fromEntries(JSON.parse(attrsKey) as [string, string][]) },
           controller.signal
         )
         .then((res) => {
@@ -114,7 +90,7 @@ export function useSimilarProducts(
       abortRef.current?.abort();
       abortRef.current = null;
     };
-  }, [q.category, q.brand, q.model, q.colour, q.size, extrasKey, armed]);
+  }, [q.category, attrsKey, armed]);
 
   return { data, armed };
 }

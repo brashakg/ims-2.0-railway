@@ -4,8 +4,8 @@
 // The quiet as-you-type "similar products" strip rendered under the model
 // field of the Add-Product form. Contract (council ruling):
 //
-//   * Renders NOTHING while: not armed (brand + model >= 2 chars not both
-//     set), loading/debouncing, errored, or no matches — NEVER a spinner or
+//   * Renders NOTHING while: not armed (no category or brand yet), before
+//     the first answer, errored, or no matches — NEVER a spinner or
 //     placeholder over the form.
 //   * siblings only -> one quiet line: "This model exists in N colours:"
 //     followed by clickable chips. A chip click prefills the form through the
@@ -30,13 +30,9 @@ import type { SimilarProductSummary } from '../../services/api/products';
 export interface SimilarProductsHintProps {
   /** CATEGORIES picker code (SG/FR/...). */
   category: string;
-  brand: string;
-  model: string;
-  colour: string;
-  size: string;
-  /** The form's attributes: the eye size and contact-lens power the
-   *  duplicate key also reads are sent from here (useSimilarProducts). */
-  attributes?: Record<string, string>;
+  /** The form's attributes, sent as typed: the server decides what the
+   *  duplicate key reads (useSimilarProducts). */
+  attributes: Record<string, string>;
   /** Variant mode: suppress the sibling strip for the locked brand/model but
    *  keep the exact-colour warning live. */
   variantMode?: boolean;
@@ -56,16 +52,12 @@ function chipLabel(s: SimilarProductSummary): string {
 
 export function SimilarProductsHint({
   category,
-  brand,
-  model,
-  colour,
-  size,
   attributes,
   variantMode = false,
   onPickSibling,
   onOpenExisting,
 }: SimilarProductsHintProps) {
-  const { data, armed } = useSimilarProducts({ category, brand, model, colour, size, attributes });
+  const { data, armed } = useSimilarProducts({ category, attributes });
 
   // Render NOTHING unless armed with a completed response (null covers idle,
   // debouncing, in-flight and error states — the hook's contract).

@@ -968,3 +968,48 @@ def test_cl_an_axis_with_no_cylinder_is_no_part_of_the_lens(door):
     # ... with a cylinder the axis still tells two lenses apart.
     toric = door(_form_post("CL", dict(_OASYS, cl_cyl="-0.75", cl_axis="180")))
     assert toric["sku"] == "CL-ACUVUE-OASYS-M125/CM075/X180"
+
+
+# ---------------------------------------------------------------------------
+# A: the similar-products hint keys the form exactly as the save does
+# ---------------------------------------------------------------------------
+
+
+def _hint(client, door, monkeypatch, headers, category, attrs):
+    """GET /products/similar as the form asks it (the category and every typed
+    attribute), over the create door's own products."""
+    import database.connection as conn
+
+    class _Db:
+        is_connected = True
+        db = type("M", (), {"get_collection": staticmethod(lambda name: door.repo.collection)})()
+
+    monkeypatch.setattr(conn, "get_db", lambda: _Db())
+    resp = client.get("/api/v1/products/similar", params={"category": category, **attrs},
+                      headers=headers)
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+@pytest.mark.parametrize("category,attrs,other", [
+    ("CCL", dict(_FIT, colour_name="Hazel"), {"colour_name": "Grey"}),
+    ("CL", dict(_FIT, colour_name="Blue Tint"), {"colour_name": "Clear"}),
+    ("LS", {"brand_name": "Essilor", "subbrand": "Crizal", "coating": "HC", "index": "1.56"},
+     {"coating": "ARC"}),
+    ("LS", {"brand_name": "Hoya", "coating": "HC", "index": "1.56"}, {"index": "1.67"}),
+    ("CL", _FIT, {"pack": "30"}),
+])
+def test_a_the_hint_exact_match_is_the_row_the_save_409s_on(
+    client, staff_headers, door, monkeypatch, category, attrs, other
+):
+    """A Colour Contact Lens or Contact Lens told apart by its colour name, an
+    Optical Lens with no model (sub-brand, coating, index), a lens pack: the
+    hint's exact match is the very row the save then refuses, and a different
+    one is no exact match and saves."""
+    door(_form_post(category, attrs))
+    hint = _hint(client, door, monkeypatch, staff_headers, category, attrs)
+    assert hint["exact_match"] is not None
+    assert hint["exact_match"]["sku"] == _dup(door, _form_post(category, attrs))["sku"]
+    new = dict(attrs, **other)
+    assert _hint(client, door, monkeypatch, staff_headers, category, new)["exact_match"] is None
+    door(_form_post(category, new))

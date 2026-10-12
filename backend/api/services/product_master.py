@@ -1304,10 +1304,6 @@ def find_similar_products(
     products_collection,
     *,
     category: Any,
-    brand: Any,
-    model: Any,
-    colour: Any = None,
-    size: Any = None,
     attributes: Optional[Dict[str, Any]] = None,
     limit: int = SIMILAR_SIBLINGS_CAP,
 ) -> Dict[str, Any]:
@@ -1321,10 +1317,10 @@ def find_similar_products(
     it would 409 at create time. Never reimplement the folding here or in the
     browser.
 
-    The parts are the create door's own (identity_parts): `attributes` carries
-    what else the form typed that the key reads -- a frame's eye size
-    (lens_size), a contact lens's power (power, cl_cyl, cl_axis, cl_add) --
-    so the exact match is the row the save would 409 against.
+    `attributes` is the form's attributes as typed, keyed by the create
+    door's own identity_parts -- whatever it reads (an eye size, a contact
+    lens's power and fit, a colour name, a lens's sub-brand, coating and
+    index) -- so the exact match is the row the save would 409 against.
 
     Matching strategy (cheapest possible): stored docs carry `identity_key`
     (unique+sparse indexed), which was BUILT by compute_identity_key -- so an
@@ -1357,16 +1353,7 @@ def find_similar_products(
         canonical = resolve_category(category)
         if canonical is None:
             return empty
-        brand, model, colour, size = identity_parts(
-            {
-                "brand": brand,
-                "model_no": model,
-                "colour_code": colour,
-                "size": size,
-                **(attributes or {}),
-            },
-            canonical,
-        )
+        brand, model, colour, size = identity_parts(attributes or {}, canonical)
         b = normalise_identity_component(brand)
         m = normalise_identity_component(model)
         if not b or not m:

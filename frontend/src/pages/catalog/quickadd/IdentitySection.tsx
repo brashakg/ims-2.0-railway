@@ -397,10 +397,6 @@ export function IdentitySection({ form }: { form: QuickAddForm }) {
                     {renderField(f, i === 0)}
                     <SimilarProductsHint
                       category={selectedCategory}
-                      brand={attributes.brand_name || ''}
-                      model={attributes.model_no || attributes.model_name || ''}
-                      colour={attributes.colour_code || ''}
-                      size={attributes.size || ''}
                       attributes={attributes}
                       variantMode={Boolean(variantCtx)}
                       onPickSibling={handleSimilarPick}

@@ -451,15 +451,9 @@ export const productApi = {
   // module (not the api barrel) — the barrel re-export fails for new methods
   // (TS2614).
   getSimilarProducts: async (
-    params: {
-      category: string;
-      brand: string;
-      model_no: string;
-      colour_code?: string;
-      size?: string;
-      // What else the duplicate key reads, as typed (SIMILAR_IDENTITY_KEYS).
-      [identityField: string]: string | undefined;
-    },
+    // The category and the form's attributes as typed: the server keys them
+    // with the create door's own identity rule.
+    params: { category: string; [attribute: string]: string },
     signal?: AbortSignal
   ): Promise<SimilarProductsResponse> => {
     const response = await api.get('/products/similar', { params, signal });

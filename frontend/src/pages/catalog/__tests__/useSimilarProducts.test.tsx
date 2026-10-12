@@ -1,12 +1,14 @@
 // ============================================================================
 // IMS 2.0 - useSimilarProducts tests (dup-detect Phase 2 trigger logic)
 // ============================================================================
-// Locks the council-exact trigger contract:
-//   * ARM only when brand AND model (>= 2 chars) are both set (+ a category).
+// Locks the trigger contract:
+//   * SEND the category and the form's attributes as typed; the server's one
+//     identity rule decides what matters (no client list of identity keys).
+//   * ARM once a category and a brand are set.
 //   * Fire 400ms after the operator stops typing; every keystroke RESTARTS
 //     the timer and ABORTS the in-flight request.
-//   * data is null while idle/debouncing/fetching/errored/un-armed — the
-//     strip renders nothing in all of those states.
+//   * The last answer stays until the fresh one lands (no form jump); null
+//     while idle/errored/un-armed — the strip renders nothing then.
 
 import { renderHook, act } from '@testing-library/react';
 import { vi, type Mock } from 'vitest';
@@ -32,11 +34,12 @@ const RESPONSE: SimilarProductsResponse = {
 
 const QUERY: SimilarQueryInput = {
   category: 'FR',
-  brand: 'Ray-Ban',
-  model: 'RB-2140',
-  colour: '',
-  size: '',
+  attributes: { brand_name: 'Ray-Ban', model_no: 'RB-2140', colour_code: '' },
 };
+const withAttrs = (extra: Record<string, string>): SimilarQueryInput => ({
+  ...QUERY,
+  attributes: { ...QUERY.attributes, ...extra },
+});
 
 function renderSimilar(initial: SimilarQueryInput = QUERY) {
   return renderHook(({ q }: { q: SimilarQueryInput }) => useSimilarProducts(q), {
@@ -53,14 +56,14 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe('isSimilarQueryArmed (council arm rule)', () => {
-  it('arms only when brand AND model (>= 2 chars) are both set', () => {
-    expect(isSimilarQueryArmed({ category: 'FR', brand: 'Ray-Ban', model: 'RB' })).toBe(true);
-    expect(isSimilarQueryArmed({ category: 'FR', brand: '', model: 'RB-2140' })).toBe(false);
-    expect(isSimilarQueryArmed({ category: 'FR', brand: '  ', model: 'RB-2140' })).toBe(false);
-    expect(isSimilarQueryArmed({ category: 'FR', brand: 'Ray-Ban', model: 'R' })).toBe(false);
-    expect(isSimilarQueryArmed({ category: 'FR', brand: 'Ray-Ban', model: ' R ' })).toBe(false);
-    expect(isSimilarQueryArmed({ category: '', brand: 'Ray-Ban', model: 'RB-2140' })).toBe(false);
+describe('isSimilarQueryArmed (arm rule)', () => {
+  it('arms once a category and a brand are set', () => {
+    expect(isSimilarQueryArmed(QUERY)).toBe(true);
+    // An Optical Lens has no model: the server keys it on sub-brand, coating, index.
+    expect(isSimilarQueryArmed({ category: 'LS', attributes: { brand_name: 'Essilor' } })).toBe(true);
+    expect(isSimilarQueryArmed(withAttrs({ brand_name: '' }))).toBe(false);
+    expect(isSimilarQueryArmed(withAttrs({ brand_name: '  ' }))).toBe(false);
+    expect(isSimilarQueryArmed({ ...QUERY, category: '' })).toBe(false);
   });
 });
 
@@ -81,14 +84,14 @@ describe('useSimilarProducts', () => {
     });
     expect(getSimilar).toHaveBeenCalledTimes(1);
     expect(getSimilar).toHaveBeenCalledWith(
-      { category: 'FR', brand: 'Ray-Ban', model_no: 'RB-2140', colour_code: undefined, size: undefined },
+      { category: 'FR', brand_name: 'Ray-Ban', model_no: 'RB-2140' },
       expect.any(AbortSignal)
     );
     expect(result.current.data).toEqual(RESPONSE);
   });
 
   it('never calls the API while un-armed', async () => {
-    const { result } = renderSimilar({ ...QUERY, model: 'R' });
+    const { result } = renderSimilar(withAttrs({ brand_name: '' }));
     expect(result.current.armed).toBe(false);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(SIMILAR_DEBOUNCE_MS * 3);
@@ -102,11 +105,11 @@ describe('useSimilarProducts', () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(SIMILAR_DEBOUNCE_MS - 100);
     });
-    rerender({ q: { ...QUERY, colour: 'B' } });
+    rerender({ q: withAttrs({ colour_code: 'B' }) });
     await act(async () => {
       await vi.advanceTimersByTimeAsync(SIMILAR_DEBOUNCE_MS - 100);
     });
-    rerender({ q: { ...QUERY, colour: 'BL' } });
+    rerender({ q: withAttrs({ colour_code: 'BL' }) });
     expect(getSimilar).not.toHaveBeenCalled(); // two restarts, never fired
 
     await act(async () => {
@@ -131,30 +134,46 @@ describe('useSimilarProducts', () => {
     expect(getSimilar).toHaveBeenCalledTimes(1);
     expect(capturedSignal?.aborted).toBe(false);
 
-    rerender({ q: { ...QUERY, colour: 'X' } }); // keystroke while in flight
+    rerender({ q: withAttrs({ colour_code: 'X' }) }); // keystroke while in flight
     expect(capturedSignal?.aborted).toBe(true);
     expect(result.current.data).toBeNull();
   });
 
-  it('clears data immediately on the next keystroke (no stale strip)', async () => {
+  it('keeps the last answer until the fresh one lands (the form never jumps)', async () => {
     const { result, rerender } = renderSimilar();
     await act(async () => {
       await vi.advanceTimersByTimeAsync(SIMILAR_DEBOUNCE_MS);
     });
     expect(result.current.data).toEqual(RESPONSE);
 
-    rerender({ q: { ...QUERY, colour: 'R' } });
-    expect(result.current.data).toBeNull(); // cleared before the refetch lands
+    const FRESH: SimilarProductsResponse = { exact_match: null, siblings: [], model_colour_count: 0 };
+    getSimilar.mockResolvedValueOnce(FRESH);
+    rerender({ q: withAttrs({ usp_1: 'Light' }) }); // typing in a field below the strip
+    expect(result.current.data).toEqual(RESPONSE);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SIMILAR_DEBOUNCE_MS);
+    });
+    expect(result.current.data).toEqual(FRESH);
   });
 
-  it('disarming (model shortened below 2 chars) clears data and stops firing', async () => {
+  it('a new category clears the answer at once', async () => {
+    const { result, rerender } = renderSimilar();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SIMILAR_DEBOUNCE_MS);
+    });
+    expect(result.current.data).toEqual(RESPONSE);
+    rerender({ q: { ...QUERY, category: 'SG' } });
+    expect(result.current.data).toBeNull();
+  });
+
+  it('disarming (brand cleared) clears data and stops firing', async () => {
     const { result, rerender } = renderSimilar();
     await act(async () => {
       await vi.advanceTimersByTimeAsync(SIMILAR_DEBOUNCE_MS);
     });
     expect(result.current.data).toEqual(RESPONSE);
 
-    rerender({ q: { ...QUERY, model: 'R' } });
+    rerender({ q: withAttrs({ brand_name: '' }) });
     expect(result.current.armed).toBe(false);
     expect(result.current.data).toBeNull();
     await act(async () => {
@@ -189,30 +208,33 @@ describe('useSimilarProducts', () => {
     expect(capturedSignal?.aborted).toBe(true);
   });
 
-  it('sends the eye size and contact-lens power the duplicate key reads, as typed', async () => {
-    // The server keys a frame by its eye size and a contact lens by its power
-    // (product_master.identity_parts); without them the exact match missed
-    // the row the save 409s against. Nothing else of the form is sent.
-    const attributes = { lens_size: ' 54 ', power: '-1.25D', cl_axis: '', description: 'long text' };
-    const { rerender } = renderSimilar({ ...QUERY, attributes });
+  it("sends every typed attribute and keeps no list of the key's inputs", async () => {
+    // The server keys the form with the create door's own identity_parts; a
+    // client list of what it reads drifted (colour name, sub-brand, coating,
+    // index, contact-lens fit). Blanks are dropped, values trimmed.
+    const attributes = {
+      brand_name: 'Acuvue', model_name: 'Oasys', colour_name: ' Hazel ', power: '-1.25D',
+      base_curve: '8.6', diameter: '14.2', pack: '6', cl_axis: '', subbrand: 'Max',
+    };
+    const { rerender } = renderSimilar({ category: 'CCL', attributes });
     await act(async () => {
       await vi.advanceTimersByTimeAsync(SIMILAR_DEBOUNCE_MS);
     });
     expect(getSimilar).toHaveBeenCalledWith(
-      { category: 'FR', brand: 'Ray-Ban', model_no: 'RB-2140', colour_code: undefined, size: undefined,
-        lens_size: '54', power: '-1.25D' },
+      { category: 'CCL', brand_name: 'Acuvue', model_name: 'Oasys', colour_name: 'Hazel',
+        power: '-1.25D', base_curve: '8.6', diameter: '14.2', pack: '6', subbrand: 'Max' },
       expect.any(AbortSignal)
     );
-    rerender({ q: { ...QUERY, attributes: { ...attributes } } }); // same values, new object
+    rerender({ q: { category: 'CCL', attributes: { ...attributes } } }); // same values, new object
     await act(async () => {
       await vi.advanceTimersByTimeAsync(SIMILAR_DEBOUNCE_MS);
     });
     expect(getSimilar).toHaveBeenCalledTimes(1); // never refires
-    rerender({ q: { ...QUERY, attributes: { ...attributes, power: '+1.25D' } } });
+    rerender({ q: { category: 'CCL', attributes: { ...attributes, pack: '30' } } });
     await act(async () => {
       await vi.advanceTimersByTimeAsync(SIMILAR_DEBOUNCE_MS);
     });
     expect(getSimilar).toHaveBeenCalledTimes(2);
-    expect(getSimilar.mock.calls[1][0]).toMatchObject({ power: '+1.25D' });
+    expect(getSimilar.mock.calls[1][0]).toMatchObject({ pack: '30' });
   });
 });
