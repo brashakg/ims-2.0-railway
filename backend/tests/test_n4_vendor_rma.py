@@ -546,7 +546,9 @@ def test_router_cross_store_create_403(rt, db):
     assert ei.value.status_code == 403
 
 
-def test_router_cross_store_read_403(rt, engine):
+def test_router_cross_store_read_is_not_found(rt, engine):
+    """Another shop's RMA is the 404 a missing one gets (audit F63, round 4
+    P5): never a 403 that confirms it exists and names its shop."""
     from fastapi import HTTPException
 
     from api.routers.vendor_rma import get_rma
@@ -554,7 +556,7 @@ def test_router_cross_store_read_403(rt, engine):
     rma_id = _seed_rma(engine, store_id="S2")
     with pytest.raises(HTTPException) as ei:
         _run(get_rma(rma_id, current_user=_user(["STORE_MANAGER"], store_ids=["S1"], active="S1")))
-    assert ei.value.status_code == 403
+    assert (ei.value.status_code, ei.value.detail) == (404, "RMA not found")
 
 
 def test_router_admin_reads_cross_store(rt, engine):
