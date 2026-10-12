@@ -38,7 +38,7 @@ async def get_order(order_id: str, current_user: dict = Depends(get_current_user
                 except Exception:  # noqa: BLE001
                     pass
             _stamp_status_actor_names([order])
-            return order_to_frontend(order)
+            return order_to_frontend(order, current_user)
         raise HTTPException(status_code=404, detail="Order not found")
 
     return {"id": order_id}

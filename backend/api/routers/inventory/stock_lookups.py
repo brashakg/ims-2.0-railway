@@ -27,6 +27,7 @@ from .models import (
 from pydantic import StrictInt
 
 from ._shared import BaseModel, Field, _STOCK_MANAGER_ROLES
+from ...services.cost_mask import mask_cost
 from ...services.reorder_policy import (
     LEVELS_FIELD,
     MAX_LEVEL,
@@ -259,7 +260,10 @@ async def get_stock_by_barcode_short(
             product.pop("_id", None)
             stock["product"] = product
 
-    return stock
+    # The till scan: the unit's cost and the joined product's cost / landed
+    # cost go to the roles that see product cost only (owner ruling
+    # 2026-10-12); the counter gets everything else it bills from.
+    return mask_cost(stock, current_user, "product")
 
 
 @router.get("/expiring")
@@ -287,7 +291,7 @@ async def get_stock_by_barcode(
     if repo is not None:
         stock = repo.find_by_barcode(barcode)
         if stock:
-            return stock
+            return mask_cost(stock, current_user, "product")
         raise HTTPException(status_code=404, detail="Stock item not found")
 
     return {"barcode": barcode}

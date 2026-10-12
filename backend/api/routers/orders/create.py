@@ -409,6 +409,7 @@ async def create_order(
                 _pdoc_by_pid.get(_pid),
                 is_admin=is_admin,
                 role_cap=user_discount_cap,
+                user=current_user,
             )
             _loyalty_eff = _line_gate["loyalty_eff"]
 
