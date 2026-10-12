@@ -97,8 +97,8 @@ def _run(coro):
 # ---------------------------------------------------------------------------
 class _FakeGrnColl:
     """Stand-in for the `grns` pymongo collection with REAL find_one_and_update
-    semantics for the operators the F8 claim filter uses ($in / $exists / $lt /
-    $or / $ne). Single doc is enough -- the claim is single-document by design."""
+    semantics for the operators the F8 claim and heartbeat filters use ($in /
+    $exists / $lt / $gte / $or / $ne). Single doc is enough -- the claim is single-document by design."""
 
     def __init__(self, doc):
         self.doc = doc
@@ -127,6 +127,9 @@ class _FakeGrnColl:
                             return False
                     elif op == "$lt":
                         if cur is None or not cur < operand:
+                            return False
+                    elif op == "$gte":
+                        if cur is None or not cur >= operand:
                             return False
                     else:  # pragma: no cover - guard against silent test drift
                         raise AssertionError(f"unsupported operator {op}")
@@ -783,6 +786,29 @@ def test_midloop_takeover_with_neither_guard_would_double_mint(wired, monkeypatc
     _run(vd.accept_grn("GRN-1", _ADMIN))
 
     assert len(stock_repo.rows) == 20, "unguarded takeover over-mints"
+
+
+def test_a_worker_woken_past_the_stale_window_stops_though_nobody_took_over(
+    wired, monkeypatch
+):
+    """A claim past the stale window is dead by the rule the order's count uses
+    (another delivery of the order is no longer told to wait for it), so its
+    worker must not mint again even with its own token still on the receipt.
+    Wedged after its first unit, its stamp ages past the window, nobody claims
+    the receipt: on waking it stops -- 1 unit, not 5."""
+    grn_repo, stock_repo = wired(_grn(qty=5))
+    monkeypatch.setattr(vd, "_GRN_ACCEPT_HEARTBEAT_SECONDS", 0)
+
+    def _wedge():
+        grn_repo.doc["accept_lock_at"] = _aged_lock()
+
+    stock_repo.after_hook = _wedge
+    stock_repo.after_n = 1
+    with pytest.raises(HTTPException) as err:
+        _run(vd.accept_grn("GRN-1", _ADMIN))
+
+    assert err.value.status_code == 409
+    assert len(stock_repo.rows) == 1
 
 
 def test_heartbeat_keeps_a_live_accept_from_being_declared_stale(wired, monkeypatch):

@@ -25,7 +25,7 @@ from ._shared import (
     router,
 )
 from .gst import build_po_gst, po_gst_context
-from .grn_accept_lock import _receipt_units
+from .grn_accept_lock import _accept_lock_live, _receipt_units
 from .models import POLineCancel, POUpdate, cancel_reason, expected_date_not_backdated
 from .numbering import (
     GRN_PLACEHOLDER_PREFIX,
@@ -622,8 +622,10 @@ def _received_by_product(
     The accept leaves out the receipt being accepted (`leave_out_grn`) -- its
     own quantity already covers its units -- and, `in_flight_whole`, counts a
     receipt another accept holds a claim on WHOLE: it may be minting right
-    now. Both are set aside from the order's own copy by what they stocked,
-    which that copy may already hold."""
+    now. A claim past the stale window is dead (its worker was killed, and the
+    heartbeat stops one that wakes), so that receipt counts what it stocked.
+    Both are set aside from the order's own copy by what they stocked, which
+    that copy may already hold."""
     po_id = po.get("po_id")
     out: dict = {}
     aside: dict = {}
@@ -635,7 +637,7 @@ def _received_by_product(
         claimed = (
             in_flight_whole
             and status in ("PENDING", "PARTIALLY_ACCEPTED")
-            and bool(g.get("accept_lock_at"))
+            and _accept_lock_live(g.get("accept_lock_at"))
         )
         accepted: dict = {}
         for line in g.get("items") or []:

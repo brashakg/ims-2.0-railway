@@ -51,6 +51,22 @@ _GRN_TERMINAL_ACCEPT_STATUSES = ("ACCEPTED", "PARTIALLY_ACCEPTED")
 # 5-minute worst case on the shop floor instead of 30.
 _GRN_ACCEPT_LOCK_STALE_SECONDS = 300
 
+
+def _accept_lock_cutoff() -> str:
+    """A claim stamped before this is DEAD (its worker was killed: a deploy, an
+    OOM). ONE rule, three readers: the claim takes such a receipt over, the
+    heartbeat of a worker whose own stamp got this old stops it before another
+    unit, and the order's count (po_detail._received_by_product) no longer
+    treats it as being accepted right now. ISO text, compared as stored."""
+    return (
+        datetime.now() - timedelta(seconds=_GRN_ACCEPT_LOCK_STALE_SECONDS)
+    ).isoformat()
+
+
+def _accept_lock_live(locked_at) -> bool:
+    """True while an accept claim stamped at `locked_at` is held by a worker."""
+    return bool(locked_at) and str(locked_at) >= _accept_lock_cutoff()
+
 # Heartbeat cadence for a long accept: re-stamp the lock at least this often, in
 # units minted or in wall-clock seconds, whichever comes first. The seconds arm
 # is the one that matters after a stall: the very next unit past a multi-minute
@@ -135,9 +151,7 @@ def _claim_grn_for_accept(grn_repo, grn_id: str, user_id) -> Optional[str]:
     receiving must never be blocked by an infrastructure gap -- same convention
     as is_online_store and the marketing.py claim fallback."""
     token = "GACC-" + uuid.uuid4().hex[:16]
-    stale_cutoff = (
-        datetime.now() - timedelta(seconds=_GRN_ACCEPT_LOCK_STALE_SECONDS)
-    ).isoformat()
+    stale_cutoff = _accept_lock_cutoff()
     flt = {
         "grn_id": grn_id,
         "status": {"$in": list(_GRN_ACCEPTABLE_STATUSES)},
@@ -366,9 +380,17 @@ def _grn_accept_heartbeat_tick(grn_repo, grn_id: str, token, state: dict) -> Non
     # write comes back with a DEFINITE answer, so an errored heartbeat re-arms
     # the fence on the very next unit instead of buying the worker another 25
     # units / 10 seconds of unfenced minting.
+    # Still ours AND still live: a worker that was wedged past the stale window
+    # is dead by the same rule the claim and the order's count use, so it stops
+    # here even when nobody took the receipt over -- another delivery of the
+    # order may have been accepted meanwhile, counting this one as dead.
     res = _guarded_grn_write(
         grn_repo,
-        {"grn_id": grn_id, "accept_lock_token": token},
+        {
+            "grn_id": grn_id,
+            "accept_lock_token": token,
+            "accept_lock_at": {"$gte": _accept_lock_cutoff()},
+        },
         {"$set": {"accept_lock_at": now.isoformat()}},
     )
     if res is None:

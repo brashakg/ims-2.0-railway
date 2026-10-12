@@ -840,6 +840,28 @@ def test_a_refusal_caused_by_a_delivery_in_flight_says_try_again(monkeypatch):
     assert grn_repo.docs[b]["status"] == "PENDING" and _p2_units(stock) == 3
 
 
+def test_a_receipt_whose_accept_died_before_minting_does_not_block_one_that_fits(
+    monkeypatch,
+):
+    """P2: 4 live. A (3) had its accept killed before its first unit (a
+    deploy, an OOM): its claim is left on it and nothing is in stock. While
+    that claim is inside the stale window B (2) is told to try again; past
+    it the claim is dead (the claim itself would take A over), so B, which
+    fits (0 + 2 <= 4), is accepted."""
+    from datetime import datetime
+
+    grn_repo, stock, a, b = _p2_live_four(monkeypatch, 3, 2)
+    grn_repo.docs[a].update(
+        accept_lock_at=datetime.now().isoformat(), accept_lock_token="GACC-dead"
+    )
+    out = _accept(b)
+    assert isinstance(out, HTTPException) and out.status_code == 409, out
+    assert "being accepted right now" in out.detail
+    grn_repo.docs[a]["accept_lock_at"] = "2020-01-01T00:00:00"
+    assert _accept(b)["grn_status"] == "ACCEPTED"
+    assert _p2_units(stock) == 2
+
+
 @pytest.mark.parametrize("down", [True, False])
 def test_an_order_that_cannot_be_read_refuses_the_accept(monkeypatch, down):
     """Panel item 7. P2 fully cancelled; R1 (P2 x3) was logged in the
