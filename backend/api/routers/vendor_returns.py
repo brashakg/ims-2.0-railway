@@ -155,6 +155,18 @@ def _link_stock_units_to_rtv(db, stock_ids, return_id, store_id, actor_id) -> No
             continue
 
 
+def _return_in_reach(collection, return_id: str, current_user: dict) -> dict:
+    """THE per-object store guard of a vendor return -- the detail and the
+    status change both ask it. A return outside the caller's shops (another
+    shop's, or a legacy one stamped with no shop) is "not found": a 404 that
+    never confirms the id exists or names its shop, and never a write to a
+    return the detail hides. Admins reach every return."""
+    return_doc = collection.find_one({"return_id": return_id})
+    if not return_doc or not can_access_store_scoped(return_doc.get("store_id"), current_user):
+        raise HTTPException(status_code=404, detail="Return not found")
+    return return_doc
+
+
 # ============================================================================
 # ENDPOINTS
 # ============================================================================
@@ -306,14 +318,7 @@ async def get_vendor_return(
         raise HTTPException(status_code=500, detail="Database not available")
 
     try:
-        collection = db.get_collection("vendor_returns")
-        return_doc = collection.find_one({"return_id": return_id})
-
-        # ONE per-object store guard: another shop's return reads as not found
-        # (404 -- it never confirms the id exists), as every by-id purchase
-        # object on this branch does.
-        if not return_doc or not can_access_store_scoped(return_doc.get("store_id"), current_user):
-            raise HTTPException(status_code=404, detail="Return not found")
+        return_doc = _return_in_reach(db.get_collection("vendor_returns"), return_id, current_user)
 
         # Clean up MongoDB _id field
         if "_id" in return_doc:
@@ -347,11 +352,7 @@ async def update_return_status(
 
     try:
         collection = db.get_collection("vendor_returns")
-        return_doc = collection.find_one({"return_id": return_id})
-
-        if not return_doc:
-            raise HTTPException(status_code=404, detail="Return not found")
-        validate_store_access(return_doc.get("store_id"), current_user)
+        return_doc = _return_in_reach(collection, return_id, current_user)
         # A return not typed 'replacement' is owed a credit: closing it as
         # 'replaced' ends it without that credit -- forgoing supplier money,
         # the accounts roles' (owner ruling 2026-10-12, R2). On a replacement
