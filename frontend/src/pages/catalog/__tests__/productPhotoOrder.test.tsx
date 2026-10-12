@@ -45,6 +45,8 @@ const known: Record<string, (...a: unknown[]) => unknown> = {
   getCategoryRegistry: async () => { throw new Error('offline'); },
   getBrandOptions: async () => ({ brands: [] }),
   getProduct: async () => PRODUCT,
+  // An upload of the file named 'front' comes back as A, and so on.
+  uploadProductImage: async (f: unknown) => ({ url: `/api/v1/products/image/${(f as File).name}` }),
   // The catalog list (GET /products): photo 1 is C; an old single image
   // field still names A.
   getProducts: async () => ({ products: [{ ...PRODUCT, images: [C, A], image_url: A }], total_count: 1 }),
@@ -334,6 +336,39 @@ describe('the add / edit page saves the new order', () => {
 
     await waitFor(() => expect(productSpies.updateProduct).toHaveBeenCalledTimes(1));
     const [, body] = productSpies.updateProduct.mock.calls[0] as [string, { images: string[] }];
+    expect(body.images).toEqual([C, A, B]);
+  });
+
+  // The first save of a NEW product (no ?edit=) - the catalogue rebuild path.
+  // Photo 1 on screen must be photo 1 in the create body.
+  it('a new product is created with its photos in the order the grid shows', async () => {
+    const user = userEvent.setup();
+    const fill = (label: RegExp, value: string) => fireEvent.change(screen.getByLabelText(label), { target: { value } });
+    render(
+      <MemoryRouter initialEntries={['/catalog/add']}>
+        <QuickAddPage />
+      </MemoryRouter>,
+    );
+    await user.click(screen.getByText('Sunglass'));
+    fill(/^Brand Name/, 'Ray-Ban');
+    fill(/^Model No/, 'RB4165');
+    fill(/^Colour Code/, '601');
+    fill(/^MRP/, '7890');
+    await user.upload(
+      screen.getByTitle('Upload product images'),
+      ['front', 'angled', 'side'].map((n) => new File(['x'], n, { type: 'image/png' })),
+    );
+    await screen.findByRole('button', { name: 'Move photo 3 earlier' });
+    const grid = () => screen.getAllByAltText(/^Photo \d+$/).map((img) => img.getAttribute('src'));
+    expect(grid()).toEqual([A, B, C]);
+
+    await user.click(btn('Move photo 3 earlier'));
+    await user.click(btn('Move photo 2 earlier'));
+    expect(grid()).toEqual([C, A, B]);
+    await user.click(screen.getByRole('button', { name: /Save product/ }));
+
+    await waitFor(() => expect(productSpies.createProduct).toHaveBeenCalledTimes(1));
+    const [body] = productSpies.createProduct.mock.calls[0] as [{ images: string[] }];
     expect(body.images).toEqual([C, A, B]);
   });
 });
