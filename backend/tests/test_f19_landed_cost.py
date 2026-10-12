@@ -174,7 +174,7 @@ def db() -> FakeDB:
 
 def _acct(uid="AC1"):
     # An accountant works in a shop, and every route on one bill holds him to it
-    # (F63, purchase_invoices._bill_in_scope_or_404); the seeded bill is S1's.
+    # (F63, dependencies.in_reach_or_404); the seeded bill is S1's.
     return {
         "user_id": uid,
         "full_name": "Accountant",

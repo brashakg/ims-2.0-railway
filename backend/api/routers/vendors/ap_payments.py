@@ -23,11 +23,11 @@ from .ap_bills import (
     _recompute_bill_status,
     _rejected_goods_hold,
 )
-from ._shared import can_access_store_scoped
+from ._shared import in_reach_or_404
 from ...dependencies import NO_SHOP_DETAIL, is_no_shop_scope
 
 # The answer for a named bill that is not there for the caller -- the words
-# purchase_invoices._bill_in_scope_or_404 uses, so another shop's bill and a
+# every bill read by id answers (in_reach_or_404), so another shop's bill and a
 # bill that does not exist answer alike.
 _NO_BILL = "Purchase invoice not found"
 
@@ -37,25 +37,20 @@ def _named_bill_in_scope_or_404(
 ) -> None:
     """The one Purchase shop scope (F63) on the bill a payment or debit note
     names: ADMIN / SUPERADMIN reach every shop, everyone else only the bill's
-    own shop (purchase_invoices._bill_in_scope_or_404, the rule every bill
+    own shop (in_reach_or_404, the rule every bill
     read by id applies). Another shop's bill, another supplier's, or none at
     all answers the SAME 404 -- so the door never confirms another shop's bill
     exists -- before anything is written. No bill named (on account): nothing
     to check. Returns the bill (None when none is named)."""
     if not bill_id or db is None:
         return None
-    from ..purchase_invoices import _bill_in_scope_or_404
-
     try:
         bill = db.get_collection("vendor_bills").find_one(
             {"bill_id": bill_id, "vendor_id": vendor_id}, {"_id": 0}
         )
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Database unavailable") from exc
-    if bill is None:
-        raise HTTPException(status_code=404, detail=_NO_BILL)
-    _bill_in_scope_or_404(bill, current_user)
-    return bill
+    return in_reach_or_404(bill, current_user, _NO_BILL)
 
 
 def _named_receipt_in_scope_or_404(
@@ -63,7 +58,7 @@ def _named_receipt_in_scope_or_404(
 ) -> Optional[dict]:
     """The same shop rule (F63) on the goods receipt a debit note names: the
     receipt must exist, be THIS supplier's, and be in the caller's reach
-    (can_access_store_scoped: ADMIN / SUPERADMIN every shop, everyone else
+    (in_reach_or_404: ADMIN / SUPERADMIN every shop, everyone else
     their own; a receipt with no shop, only an admin). Anything else is the
     SAME 404 a missing receipt gets -- create_vendor_bill's words -- before
     anything is written. Without it a Pune accountant's note naming Dhanbad's
@@ -79,13 +74,9 @@ def _named_receipt_in_scope_or_404(
         )
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Database unavailable") from exc
-    if (
-        not grn
-        or grn.get("vendor_id") != vendor_id
-        or not can_access_store_scoped(grn.get("store_id"), current_user)
-    ):
-        raise HTTPException(status_code=404, detail=f"GRN {grn_id} not found")
-    return grn
+    if grn and grn.get("vendor_id") != vendor_id:
+        grn = None  # another supplier's receipt: the same 404 as a missing one
+    return in_reach_or_404(grn, current_user, f"GRN {grn_id} not found")
 
 
 def _shop_by_the_suppliers_bills(db, vendor_id: str, money: dict) -> Optional[str]:

@@ -38,7 +38,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
-from ..dependencies import resolve_store_scope, user_store_scope
+from ..dependencies import in_reach_or_404, resolve_store_scope, user_store_scope
 from ..services import ap_engine
 from .auth import get_current_user, require_roles
 from ..services.cost_mask import AP_ROLES
@@ -116,7 +116,7 @@ def _fetch_bill(db, invoice_id: str, current_user: dict) -> dict:
 
     The one Purchase shop scope (F63) holds here too: a bill outside the
     caller's shop (ADMIN / SUPERADMIN reach every shop, everyone else only the
-    bill's own -- purchase_invoices._bill_in_scope_or_404) answers the same 404,
+    bill's own -- dependencies.in_reach_or_404) answers the same 404,
     word for word, as a bill that does not exist, so a Pune accountant can
     neither read nor tick a Dhanbad bill by typing its id."""
     if db is None:
@@ -128,12 +128,7 @@ def _fetch_bill(db, invoice_id: str, current_user: dict) -> dict:
     except Exception as exc:
         logger.error("[RECON] DB error fetching bill %s: %s", invoice_id, exc)
         raise HTTPException(status_code=503, detail="Database unavailable") from exc
-    if not doc:
-        raise HTTPException(status_code=404, detail="Purchase invoice not found")
-    from .purchase_invoices import _bill_in_scope_or_404
-
-    _bill_in_scope_or_404(doc, current_user)
-    return doc
+    return in_reach_or_404(doc, current_user, "Purchase invoice not found")
 
 
 def _build_recon_block(existing: dict, body: ReconUpdate, actor_id: str, now: str) -> dict:
