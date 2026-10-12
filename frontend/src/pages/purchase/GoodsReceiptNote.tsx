@@ -181,7 +181,8 @@ export function GoodsReceiptNote() {
   // D14 — "Bought without PO": a cash buy from a local dealer. The supplier
   // (a dealer not on the list is quick-added as one, owner 2026-10-12), each
   // line's cost, the bill photo, the bill number/date if any. Posts a NO_PO
-  // receipt; its bill books under that supplier and claims no GST credit.
+  // receipt; its bill books under that supplier, claiming GST credit only
+  // when the supplier is GST-registered (owner 2026-10-13).
   const [isNoPo, setIsNoPo] = useState(false);
   const [addingDealer, setAddingDealer] = useState(false);
   // Today in IST (toISOString is the UTC day -- yesterday before 05:30 IST).
@@ -279,12 +280,15 @@ export function GoodsReceiptNote() {
 
   // Load the vendor list the first time DC mode is switched on. Fail-soft with
   // a visible error state — with no vendors the no-PO path cannot post, and a
-  // silent empty dropdown would read as "no vendors exist".
+  // silent empty dropdown would read as "no vendors exist". EVERY supplier,
+  // switched off or not, up to the server's 1000: the dealer quick-add refuses
+  // a name already on file, so every supplier on file must be pickable here
+  // (the server's default first 50 hid the newest walk-in dealers).
   useEffect(() => {
     if (!(isDcMode || isNoPo) || dcVendors.length > 0) return;
     let cancelled = false;
     vendorsApi
-      .getVendors({ is_active: true })
+      .getVendors({ limit: 1000 })
       .then((resp: any) => {
         if (cancelled) return;
         const rows: any[] = Array.isArray(resp) ? resp : resp?.vendors || [];
@@ -763,7 +767,7 @@ export function GoodsReceiptNote() {
                 {isDcMode
                   ? 'DC · invoice arrives later'
                   : isNoPo
-                    ? 'No PO · no GST credit claimed'
+                    ? 'No PO · GST credit only from a registered dealer'
                     : 'PO precedes GRN · GRN is the GST document'}
               </span>
             </div>
@@ -815,7 +819,7 @@ export function GoodsReceiptNote() {
                     setDcResults([]);
                   }}
                 />
-                Bought without PO (local dealer, cash bill) — no GST credit is claimed
+                Bought without PO (local dealer, cash bill) — GST credit only from a GST-registered dealer
               </label>
               {isNoPo && (
                 <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4 mb-4">
@@ -1406,7 +1410,7 @@ export function GoodsReceiptNote() {
           <div className="flex items-center gap-3 flex-wrap">
             <span className="text-xs" style={{ color: 'var(--ink-4)' }}>
               {isNoPo
-                ? `Posting adds ${totals.rec} unit${totals.rec === 1 ? '' : 's'} to this store's stock at the cost typed · accounts get a task to book the bill (no GST credit).`
+                ? `Posting adds ${totals.rec} unit${totals.rec === 1 ? '' : 's'} to this store's stock at the cost typed · accounts get a task to book the bill.`
                 : noPoDc
                 ? `Posting this Delivery Challan adds ${totals.rec} unit${totals.rec === 1 ? '' : 's'} to this store's stock · the receipt is what the vendor's bill will link to.`
                 : `Posting against ${poNumber || 'the selected PO'} adds ${totals.rec} unit${totals.rec === 1 ? '' : 's'} to this store's stock · the PO is marked partially / fully received · variance raises a debit note.`}

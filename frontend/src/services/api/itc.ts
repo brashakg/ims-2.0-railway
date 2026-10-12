@@ -37,8 +37,8 @@ export interface ReconcileSummary {
   mismatch: number;
   only_in_books: number;
   only_in_2b: number;
-  /** Bills the supplier filed that are booked but claim no credit (bought
-   *  without a PO, or 17(5)-blocked) -- they answer their 2B row. */
+  /** Bills the supplier filed that are booked but claim no credit (switched
+   *  off, or 17(5)-blocked) -- they answer their 2B row, tax gap or not. */
   booked_no_credit?: number;
   itc_safe_to_claim: number;
   itc_in_mismatch: number;

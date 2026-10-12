@@ -229,8 +229,8 @@ export function InvoiceFormDrawer({
                   purchase is final. Close this form and use <span className="font-semibold">Create from GRN</span> (a
                   PO-backed or &lsquo;Bought without PO&rsquo; receipt) or <span className="font-semibold">Match DCs to Invoice</span> (Delivery
                   Challans). Goods bought without a PO from a local dealer? Ask the shop&rsquo;s store manager to receive
-                  them on the Goods Receipt screen with &lsquo;Bought without PO&rsquo; ticked first — that bill claims no GST
-                  credit. A supplier&rsquo;s delivery challan is logged there as a Delivery Challan.
+                  them on the Goods Receipt screen with &lsquo;Bought without PO&rsquo; ticked first — that bill claims GST
+                  credit only from a GST-registered dealer. A supplier&rsquo;s delivery challan is logged there as a Delivery Challan.
                 </div>
               )}
             </div>
@@ -292,9 +292,8 @@ export function InvoiceFormDrawer({
             </div>
             {pv && pv.itc_eligible === false && (
               <p className="text-xs font-medium text-amber-800">
-                {claimCredit
-                  ? 'No input credit: the supplier has no valid GSTIN'
-                  : 'No input credit: switched off'}
+                {/* The server's reason, as sent: the credit rule lives there. */}
+                {pv.itc_reason ? `No input credit: ${pv.itc_reason}` : 'No input credit'}
               </p>
             )}
           </div>

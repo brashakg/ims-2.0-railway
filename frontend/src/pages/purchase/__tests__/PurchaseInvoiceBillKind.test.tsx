@@ -140,8 +140,9 @@ describe('manual invoice bill-kind declaration', () => {
       target: { value: 'GOODS' },
     });
     const wall = await screen.findByText(/Delivery Challan/);
-    // D14: a walk-in buy is received as 'Bought without PO' (no GST credit),
-    // never steered into a challan, whose bill claims full credit.
+    // D14: a walk-in buy is received as 'Bought without PO' (credit only from a
+    // registered dealer, G2), never steered into a challan, whose bill claims
+    // full credit.
     expect(wall.textContent).toMatch(/Bought without PO/);
     expect(wall.textContent).not.toMatch(/Log them as a Delivery Challan/);
     expect(screen.getByRole('button', { name: /Book invoice/i })).toBeDisabled();

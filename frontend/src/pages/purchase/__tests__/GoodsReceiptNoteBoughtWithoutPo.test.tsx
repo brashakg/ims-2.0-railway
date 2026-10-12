@@ -179,7 +179,8 @@ describe('C7 / D14 - bought without a PO', () => {
     expect(screen.queryByText('Select purchase order')).not.toBeInTheDocument();
     expect(screen.queryByText(/PO precedes GRN/)).not.toBeInTheDocument();
     expect(screen.queryByText('Pick the order being received')).not.toBeInTheDocument();
-    expect(screen.getByText('No PO · no GST credit claimed')).toBeInTheDocument();
+    // G2 (owner 2026-10-13): a registered dealer's walk-in bill claims credit.
+    expect(screen.getByText('No PO · GST credit only from a registered dealer')).toBeInTheDocument();
     expect(screen.getByText('Pick the supplier, or add the dealer')).toBeInTheDocument();
     // The typed dealer name of round 4 is gone: the seller is a supplier.
     expect(screen.queryByPlaceholderText(/Sharma Optical/)).not.toBeInTheDocument();
@@ -197,6 +198,17 @@ describe('a walk-in dealer is a supplier (owner 2026-10-12)', () => {
     fireEvent.change(screen.getByLabelText(/Bill photo/i), { target: { files: [photo] } });
     await screen.findByText(/Attached: cash-memo.png/);
   }
+
+  it('the supplier list is every supplier on file, switched off or not (round 6)', async () => {
+    // The quick-add refuses a name already on file among ALL suppliers; the
+    // list was the server's first 50 active ones, so a later or switched-off
+    // dealer could be neither picked nor added.
+    render(<GoodsReceiptNote />);
+    await waitFor(() => expect(api.getGRNs).toHaveBeenCalled());
+    fireEvent.click(screen.getByLabelText(/Bought without (a )?PO/i, { selector: 'input' }));
+    await waitFor(() => expect(api.getVendors).toHaveBeenCalled());
+    expect(api.getVendors).toHaveBeenCalledWith({ limit: 1000 });
+  });
 
   it('no supplier picked: Post is refused on the client and nothing reaches the server', async () => {
     render(<GoodsReceiptNote />);

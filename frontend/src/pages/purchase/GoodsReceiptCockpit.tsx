@@ -775,7 +775,7 @@ export function GoodsReceiptCockpit() {
               <p className="text-xs mt-2" style={{ color: 'var(--ink-4)' }}>
                 Goods bought without a PO from a local dealer (tick
                 &lsquo;Bought without PO&rsquo; &mdash; each item&rsquo;s cost and the
-                bill photo; no GST credit is claimed), and goods that arrived
+                bill photo; GST credit only from a GST-registered dealer), and goods that arrived
                 with a delivery challan (tax invoice to follow), are logged on
                 the{' '}
                 <Link

@@ -366,7 +366,7 @@ export default function ItcReconcilePage() {
             exporting={exporting === 'only_in_2b'}
           />
           <Bucket
-            title="Booked, no credit claimed (bought without PO or blocked)"
+            title="Booked, no credit claimed (switched off, unregistered supplier or blocked)"
             rows={result.booked_no_credit ?? []}
             cols={['vendor_name', 'invoice_no', 'gstin', 'book_tax', 'portal_tax']}
             onExport={() => downloadBucket('booked_no_credit')}

@@ -712,7 +712,7 @@ export interface CreatedPurchaseOrder {
 
 export const vendorsApi = {
   // Vendors
-  getVendors: async (params?: { search?: string; is_active?: boolean }) => {
+  getVendors: async (params?: { search?: string; is_active?: boolean; limit?: number }) => {
     const response = await api.get('/vendors', { params });
     return response.data;
   },

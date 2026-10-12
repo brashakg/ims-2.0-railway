@@ -562,10 +562,19 @@ describe('round 11 - a bill with no tax head is not shown as CGST+SGST', () => {
 
 describe('round 14 - the credit verdict is visible and settable', () => {
   it('shows "no valid GSTIN" when the preview says no credit, and nothing when it says credit', async () => {
-    routePosts(preview({ itc_eligible: false }));
+    routePosts(preview({ itc_eligible: false, itc_reason: 'the supplier has no valid GSTIN' }));
     await openManualServicesBill({ name: 'Freight', qty: '1', price: '1000', rate: '18' });
     expect(await screen.findByText('No input credit: the supplier has no valid GSTIN')).toBeTruthy();
     expect(screen.queryByText('No input credit: switched off')).toBeNull();
+  });
+
+  it("says the server's reason as sent, never one of its own (round 6)", async () => {
+    // The form kept its own copy of the credit rule's reasons and told a
+    // registered dealer's walk-in bill 'the supplier has no valid GSTIN'.
+    routePosts(preview({ itc_eligible: false, itc_reason: 'a reason only the server knows' }));
+    await openManualServicesBill({ name: 'Freight', qty: '1', price: '1000', rate: '18' });
+    expect(await screen.findByText('No input credit: a reason only the server knows')).toBeTruthy();
+    expect(screen.queryByText(/no valid GSTIN|switched off/)).toBeNull();
   });
 
   it('shows no line when the preview says the credit is claimable', async () => {
@@ -593,7 +602,7 @@ describe('round 14 - the credit verdict is visible and settable', () => {
     expect(previewCalls().at(-1)?.[1].itc_eligible).toBe(true);
     expect(previewCalls().at(-1)?.[1].reverse_charge).not.toBe(true);
 
-    routePosts(preview({ itc_eligible: false }));
+    routePosts(preview({ itc_eligible: false, itc_reason: 'switched off' }));
     const before = previewCalls().length;
     fireEvent.click(screen.getByRole('switch', { name: /Claim input credit/ }));
     expect(await screen.findByText('No input credit: switched off')).toBeTruthy();
@@ -608,7 +617,7 @@ describe('round 14 - the credit verdict is visible and settable', () => {
   });
 
   it('the form offers no Reverse charge tick and never sends reverse_charge true', async () => {
-    routePosts(preview({ itc_eligible: false }));
+    routePosts(preview({ itc_eligible: false, itc_reason: 'the supplier has no valid GSTIN' }));
     await openManualServicesBill({ name: 'Freight', qty: '1', price: '1000', rate: '18' });
     await screen.findByText('No input credit: the supplier has no valid GSTIN');
     expect(screen.queryByRole('checkbox', { name: /Reverse charge/ })).toBeNull();

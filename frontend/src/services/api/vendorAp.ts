@@ -277,8 +277,10 @@ export interface PurchaseInvoicePreview {
   supplier_state?: string | null;
   supply_place_recipient?: string | null;
   interstate: boolean;
-  // Will the booking claim input credit? The server's one itc_claimable verdict.
+  // Will the booking claim input credit? The server's one itc_claimable verdict,
+  // and why not when it will not (shown as sent -- the form keeps no reasons).
   itc_eligible?: boolean;
+  itc_reason?: string | null;
   lines: Array<{ taxable: number; gst_rate: number; cgst: number; sgst: number; igst: number; line_total: number }>;
   taxable_total: number;
   cgst_total: number;

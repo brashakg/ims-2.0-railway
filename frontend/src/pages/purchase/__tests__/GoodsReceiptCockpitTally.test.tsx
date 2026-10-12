@@ -229,7 +229,7 @@ describe('GoodsReceiptCockpit two-step receive - ruling 14 (the tally)', () => {
     const door = await screen.findByRole('button', { name: /Bought without PO/i }, { timeout: 5000 });
     fireEvent.click(door);
     // ...and the note it opens sends that buy to the classic screen's mode
-    // (no GST credit), not only challan goods.
+    // (credit only from a registered dealer), not only challan goods.
     const link = await screen.findByRole('link', { name: /classic GRN screen/i });
     expect(link.parentElement?.textContent).toMatch(/Bought without PO/);
   });

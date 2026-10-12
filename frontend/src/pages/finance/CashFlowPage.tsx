@@ -441,8 +441,8 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: 'bill' | 'paym
                 <p className="text-xs text-amber-700 mt-1">
                   No unbilled goods receipts for this vendor at your store. The shop&rsquo;s store manager receives
                   the goods first — bought without a PO from a local dealer? They tick &lsquo;Bought without PO&rsquo; on
-                  the Goods Receipt screen and pick the dealer (adding it as a supplier if new; that bill claims no GST
-                  credit); a supplier&rsquo;s delivery challan is logged there as a Delivery Challan. Then record the
+                  the Goods Receipt screen and pick the dealer (adding it as a supplier if new; that bill claims GST
+                  credit only from a GST-registered dealer); a supplier&rsquo;s delivery challan is logged there as a Delivery Challan. Then record the
                   bill here, under that supplier.
                 </p>
               ) : null}
