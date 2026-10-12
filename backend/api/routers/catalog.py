@@ -2878,16 +2878,36 @@ async def delete_catalog_product(
     if _spine_id:
         from .vendors.grn_accept import held_receipts
 
-        holding = [g.get("grn_number") or g.get("grn_id") for g in held_receipts(_spine_id)]
+        holding = held_receipts(_spine_id)
         if holding:
+            # The advice per receipt, from why it holds the item: a line beyond
+            # its order is settled by the store manager's 'Not received' (or
+            # 'Add to stock'), whatever else that receipt shelved -- finishing
+            # the item does nothing for it (as his own task says, R1-14).
+            def _why(g: dict) -> str:
+                number = g.get("grn_number") or g.get("grn_id")
+                reasons = {
+                    (ln or {}).get("reason")
+                    for ln in g.get("unresolved_lines") or []
+                    if (ln or {}).get("product_id") == _spine_id
+                }
+                if reasons == {"over_order"}:
+                    return (
+                        f"Receipt {number} holds more of this item than its order "
+                        "asked for: the store manager presses 'Not received' in "
+                        "Receive Goods (or 'Add to stock' if the vendor really "
+                        "sent them)."
+                    )
+                return (
+                    f"Receipt {number} is holding units of this item. Finish the "
+                    "item in the product editor -- or, if none of that receipt's "
+                    "units went on the shelf and they are going back, void it in "
+                    "Receive Goods."
+                )
+
             raise HTTPException(
                 status_code=409,
-                detail=(
-                    f"Receipt {', '.join(holding)} is holding units of this item. "
-                    "Finish the item in the product editor -- or, if none of that "
-                    "receipt's units went on the shelf and they are going back, "
-                    "void it in Receive Goods, then delete the item."
-                ),
+                detail=" ".join(_why(g) for g in holding) + " Then delete the item.",
             )
     # Round 5: a DRAFT (ordered before it was catalogued) is not discarded
     # while an open order line still expects it or a receipt still waits on it

@@ -4771,3 +4771,25 @@ def test_r8_only_a_receiving_manager_decides_the_units_beyond_the_order(world):
     assert world.grn(gid)["status"] == "ACCEPTED"
     assert _mgr_tasks(world, gid) == []
 
+
+def test_r8_the_delete_refusal_names_what_settles_a_hold_beyond_the_order(world):
+    # The refusal said "finish the item, or void the receipt" for every hold.
+    # Beyond its order the item is finished and the receipt shelved the
+    # Carrera (no void): only 'Not received' / 'Add to stock' settle it.
+    po, boss, carrera, grn1, grn2 = _mixed_held_receipt(world)
+    world.finish_draft(boss, offer=2790)
+    _seed_user(world, ADMIN)
+    refused = _delete_refusal(world, boss)
+    assert refused is not None and refused.status_code == 409
+    detail = str(refused.detail)
+    finding(
+        grn2["grn_number"] in detail
+        and "Not received" in detail
+        and "Finish the item" not in detail
+        and "void" not in detail.lower(),
+        f"The delete refusal for a hold beyond the order reads {detail!r}",
+    )
+    # A hold for the catalogue still says to finish the item.
+    po2, grn3, draft_id = world.order_and_receive(BOSS_1701, qty=1, cost=1300)
+    refused = _delete_refusal(world, draft_id)
+    assert "Finish the item" in str(refused.detail) and "Not received" not in str(refused.detail)
