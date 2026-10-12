@@ -1370,6 +1370,56 @@ def test_r5_received_counts_units_in_stock_never_held_lines_or_serial_rows(stock
     )
 
 
+@pytest.fixture
+def off_status(monkeypatch):
+    """Receipts whose status no longer says 'accepted' while their units are
+    on the shelf: G-ESC escalated after its 15 Sep accept (an escalate had no
+    status precondition), G-STOP left PENDING by an accept that minted one
+    unit on 20 Sep and stopped. G-VOID put nothing in stock."""
+
+    def seed(db):
+        db["vendors"].insert_one({"vendor_id": V_HOLD, "legal_name": "Held Frames", "trade_name": "Held Frames"})
+        db["purchase_orders"].insert_one({
+            "po_id": "PO-S", "po_number": "PO-S", "vendor_id": V_HOLD, "delivery_store_id": DHN,
+            "status": "PARTIALLY_RECEIVED", "total_amount": 0.0, "sent_at": "2026-07-01T10:00:00",
+            "items": [{"product_id": "P-A", "quantity": 9, "unit_price": 100.0, "tax_rate": 0.0}],
+        })
+        db["grns"].insert_many([
+            {"grn_id": g, "grn_number": g, "vendor_id": V_HOLD, "store_id": DHN, "po_id": "PO-S",
+             "status": status, **({"accepted_at": at} if at else {}),
+             "items": [{"product_id": "P-A", "accepted_qty": q}]}
+            for g, status, at, q in (
+                ("G-ESC", "ESCALATED", "2026-09-15T06:00:00", 3),
+                ("G-STOP", "PENDING", None, 2),
+                ("G-VOID", "VOID", None, 5),
+            )
+        ])
+        db["stock_units"].insert_many([
+            {"source_type": "GRN", "source_id": g, "product_id": "P-A", "created_at": at,
+             "grn_line_index": 0, "line_unit_seq": i, "store_id": DHN, "status": "AVAILABLE"}
+            for g, at, n in (("G-ESC", datetime(2026, 9, 15, 6, 0), 3), ("G-STOP", datetime(2026, 9, 20, 6, 0), 1))
+            for i in range(n)
+        ])
+
+    gen = _fresh_db(seed)
+    db = next(gen)
+    _today(monkeypatch, "2026-10-05")
+    yield _make_world(db, monkeypatch)
+    next(gen, None)
+
+
+def test_received_is_the_stock_whatever_the_receipts_status_says(off_status):
+    """Panel 2026-10-13: Received counted a receipt's goods only while its
+    status read ACCEPTED / PARTIALLY_ACCEPTED, so escalating an accepted
+    receipt took its goods out of Received while they sat on the shelf.
+    September: G-ESC's 3 units 300 + G-STOP's 1 unit 100 = 400."""
+    _open(
+        _received(off_status, "2026-09") == 400.0,
+        f"F56: September Received {_received(off_status, '2026-09')}, want 400 (the units in stock)",
+    )
+    assert _received(off_status, "2026-10") == 0.0
+
+
 # ============================================================================
 # Round 6 (review round 3 #1, report side): THE ONE 'WE OWE' RULE -- owed adds
 # only the suppliers we owe; money paid ahead to another supplier is its own

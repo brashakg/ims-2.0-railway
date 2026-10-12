@@ -65,8 +65,6 @@ from ...utils.ist import ist_date_str_from_stored, now_ist_naive
 
 _MONTH = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 _FIGURES = ("ordered", "received", "billed", "paid", "owed")
-# Goods have been accepted into stock on a receipt in either state.
-_ACCEPTED = ("ACCEPTED", "PARTIALLY_ACCEPTED")
 
 
 def _month_of(value) -> str:
@@ -370,15 +368,17 @@ async def purchases_this_month(
     # (_put_in_stock), incl. GST, at the price _received_line gives the line
     # (the order's, else the receipt line's own). A line with no price anywhere
     # counts 0 and is counted in unpriced_receipt_lines, so the screen can say
-    # so. A receipt can only have put units in stock up to its LAST accept
-    # (accepted_at, rewritten by every accept), so one last accepted before
-    # this month is out -- unless it still waits on cataloguing
-    # (PARTIALLY_ACCEPTED): a re-accept that stopped half-way can have added
-    # units without restamping it.
+    # so. The stock is the truth, never the receipt's status: a receipt
+    # escalated after it was accepted, or left PENDING by an accept that
+    # stopped half-way, still put its units on the shelf (panel finding: an
+    # escalate zeroed a closed receipt's Received while its units sat in
+    # stock). Only an ACCEPTED receipt's accepted_at bounds its units -- that
+    # accept finished last, after every mint -- so one ACCEPTED before this
+    # month is out; any other status is read for its units.
     grns = [
         g
-        for g in _find(db, "grns", {**shop, "status": {"$in": list(_ACCEPTED)}})
-        if g.get("status") == "PARTIALLY_ACCEPTED" or _month_of(g.get("accepted_at")) >= month
+        for g in _find(db, "grns", shop)
+        if g.get("status") != "ACCEPTED" or _month_of(g.get("accepted_at")) >= month
     ]
     units = _minted_units(db, grns)
     po_ids = list({g.get("po_id") for g in grns if g.get("po_id")})
