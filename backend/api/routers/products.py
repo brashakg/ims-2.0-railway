@@ -2179,25 +2179,25 @@ async def get_similar_products(
     "siblings": [summary, ...] (cap 12), "model_colour_count": N}. FAIL-SOFT: any DB trouble returns the empty
     shape with 200 -- the FE strip simply doesn't render; never a 5xx.
     """
-    # The service's own empty answer: one shape, whatever the DB says.
-    empty = {"exact_match": None, "eye_size_needed": [], "siblings": [], "model_colour_count": 0}
+    coll = None
     try:
         from database.connection import get_db
 
         db = get_db()
-        if not (db and getattr(db, "is_connected", False)):
-            return empty
-        return _pm.find_similar_products(
-            db.db.get_collection("products"),
-            category=category,
-            brand=brand,
-            model=model_no,
-            colour=colour_code,
-            size=size,
-        )
+        if db and getattr(db, "is_connected", False):
+            coll = db.db.get_collection("products")
     except Exception as e:  # noqa: BLE001 - hint endpoint, never a blocker
         logger.warning("[SIMILAR] lookup failed: %s", e)
-        return empty
+    # One empty answer: the service's, which it gives when there is no
+    # collection (a second copy here drifted once already -- eye_size_needed).
+    return _pm.find_similar_products(
+        coll,
+        category=category,
+        brand=brand,
+        model=model_no,
+        colour=colour_code,
+        size=size,
+    )
 
 
 class DescriptionGenerateRequest(BaseModel):
