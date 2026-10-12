@@ -1075,3 +1075,62 @@ def test_an_extra_on_a_named_untouched_line_is_accepted_and_flagged(monkeypatch,
     [task] = _over_tasks(tasks)
     assert "Acuvue: 1 more than ordered (5 received, 4 ordered)" in task["description"]
 
+
+def _remembering_tasks(monkeypatch):
+    """The real task repository on mongomock, so the per-receipt dedupe of
+    create_system_task runs as it does in production."""
+    import mongomock
+    import api.dependencies as deps
+    from database.repositories.task_repository import TaskRepository
+
+    coll = mongomock.MongoClient().db.tasks
+    repo = TaskRepository(coll)
+    monkeypatch.setattr(deps, "get_task_repository", lambda: repo)
+    return coll
+
+
+@pytest.mark.parametrize("first,second", [
+    ("read", "read"), ("unread", "read"), ("read", "unread")])
+def test_an_over_delivery_reaching_stock_on_a_re_accept_is_flagged(monkeypatch, first, second):
+    """The panel's held-receipt probe. P1 x5 and P2 x3, untouched. Receipt R
+    brings P1 7 and P2 5 while P2 is not catalogued: the first accept stocks
+    7 P1 (2 over) and holds P2. P2 is catalogued and R accepted again: 5 P2
+    go in (2 over). The one task for R names BOTH products. 'unread': that
+    accept's count could not be read -- a 'check needed' task never hides a
+    later real flag, and never replaces one."""
+    from api.routers.vendors import grn_accept
+    from api.services import product_master as pm
+
+    po = _po(_line("P1", "Frame X", 5), _line("P2", "Lens Y", 3))
+    _grn_repo, _po_repo, stock, _t = _wire(monkeypatch, po=po, product_repo=_Products("P1", "P2"))
+    tasks = _remembering_tasks(monkeypatch)
+    gid = _create("normal", _items("P1", 7) + _items("P2", 5), _user())["grn_id"]
+    real_count = grn_accept._received_by_product
+
+    def count_when(mode):
+        def count(po, **kw):
+            if not kw and mode == "unread":
+                raise HTTPException(status_code=503, detail="receipts unreadable")
+            return real_count(po, **kw)
+        monkeypatch.setattr(grn_accept, "_received_by_product", count)
+
+    monkeypatch.setattr(
+        pm, "compute_catalog_status",
+        lambda prod: ("DRAFT", ["hsn_code"]) if prod.get("product_id") == "P2" else ("ACTIVE", []),
+    )
+    count_when(first)
+    assert _accept(gid)["grn_status"] == "PARTIALLY_ACCEPTED"
+    monkeypatch.setattr(pm, "compute_catalog_status", lambda prod: ("ACTIVE", []))
+    count_when(second)
+    assert _accept(gid)["grn_status"] == "ACCEPTED"
+    assert _p2_units(stock) == 5
+
+    [task] = list(tasks.find({"source_ref": f"grn_over:{gid}"}))
+    assert task["title"] == "Over-delivery on PO-2601-1"
+    text = task["description"]
+    assert "Frame X: 2 more than ordered (7 received, 5 ordered)" in text
+    if second == "read":
+        assert "Lens Y: 2 more than ordered (5 received, 3 ordered)" in text
+        assert "could not be read" not in text
+    else:
+        assert "could not be read" in text

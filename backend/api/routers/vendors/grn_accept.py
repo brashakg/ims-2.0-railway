@@ -291,16 +291,19 @@ def _way_out_of(grn) -> str:
     )
 
 
+_CHECK_NEEDED = "Over-delivery check needed on"
+
+
 def _flag_over_delivery(po_repo, po_id, grn, counted) -> None:
     """Owner ruling 2026-10-08: a delivery that runs over what the order asks
-    for is ACCEPTED into stock and FLAGGED, never refused. Each product on
-    this receipt now received beyond its ordered quantity raises one task --
-    the order, the product, the extra units -- for the shop's purchase
-    manager: the store manager, who raises its orders (there is no separate
-    purchase role; owner ruling D17 sends a receipt problem to the shop's
-    store manager by name). The receipt's own discrepancy task at logging
-    compares only that receipt with the order, so a second delivery of a
-    fully received line went unflagged.
+    for is ACCEPTED into stock and FLAGGED, never refused. Every product on
+    this receipt now received beyond its ordered quantity is named in the
+    receipt's one task -- the order, the product, the extra units -- for the
+    shop's purchase manager: the store manager, who raises its orders (there
+    is no separate purchase role; owner ruling D17 sends a receipt problem to
+    the shop's store manager by name). The receipt's own discrepancy task at
+    logging compares only that receipt with the order, so a second delivery
+    of a fully received line went unflagged.
 
     `counted` is the (order, count) the write-back read, whether or not its
     write landed -- the flag needs the count, never the write. When the count
@@ -325,7 +328,7 @@ def _flag_over_delivery(po_repo, po_id, grn, counted) -> None:
         po_ref = _po_ref(grn.get("po_number"), po_id)
         _raise_over_delivery_task(
             grn,
-            f"Over-delivery check needed on {po_ref}",
+            f"{_CHECK_NEEDED} {po_ref}",
             f"Goods receipt {grn.get('grn_number')} put units into stock, but "
             f"what {po_ref} has received could not be read to compare it with "
             "the order. Check whether this delivery ran over what was ordered.",
@@ -369,19 +372,40 @@ def _po_ref(po_number, po_id) -> str:
 
 def _raise_over_delivery_task(grn, title: str, description: str) -> None:
     """The one task an over-delivery (or a check that could not run) raises,
-    for the shop's store manager; deduped per receipt. Fail-soft."""
+    for the shop's store manager: ONE per receipt. A receipt accepted again
+    (a held line catalogued) can put a second product over; its count is
+    cumulative, so the new text names every product over so far and REPLACES
+    the open task's -- the flag is never lost behind the first one. A check
+    that could not run never replaces a real flag; it is added to it.
+    Fail-soft."""
     try:
         from ...dependencies import get_task_repository
-        from ...services.task_triggers import create_system_task
+        from ...services.task_triggers import active_tasks, create_system_task
 
+        repo = get_task_repository()
+        ref = f"grn_over:{grn.get('grn_id')}"
+        try:
+            open_ = active_tasks(repo, ref) if repo is not None else []
+        except Exception:  # noqa: BLE001 - unread: file it; the create dedupes
+            open_ = []
+        if open_:
+            task = open_[0]
+            was, said = str(task.get("title") or ""), str(task.get("description") or "")
+            if title.startswith(_CHECK_NEEDED) and not was.startswith(_CHECK_NEEDED):
+                if description in said:
+                    return
+                title, description = was, f"{said} {description}"
+            if (title, description) != (was, said):
+                repo.update(task["task_id"], {"title": title, "description": description})
+            return
         create_system_task(
-            get_task_repository(),
+            repo,
             title=title,
             description=description,
             priority="P2",
             category="Purchase",
             store_id=grn.get("store_id"),
-            dedupe_ref=f"grn_over:{grn.get('grn_id')}",
+            dedupe_ref=ref,
             assigned_to="STORE_MANAGER",
         )
     except Exception as exc:  # noqa: BLE001
