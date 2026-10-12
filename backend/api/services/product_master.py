@@ -1331,9 +1331,10 @@ def rekey_on_edit(
     has that identity. A name the create door minted says what the product is
     (a lens's power, a frame's colour), so it is re-minted with the key
     (patch['name']); a typed name stays. The SKU never moves: readable SKUs
-    are for new products only (owner 2026-09-28). An edit that touches no
-    identity input is left alone, so a stored lens whose old power is not a
-    number can still have its price changed; an edit that blanks the brand or
+    are for new products only (owner 2026-09-28). A stored value that is not a
+    number (main's free-text power) blocks no edit that leaves it as it is:
+    the Edit form re-sends the whole attributes bag with a price change, so
+    the key and the name stay as stored. An edit that blanks the brand or
     model keeps the stored key (ponytail: no $unset door, a unique sparse
     index refuses two null keys)."""
     if not any(k in patch for k in ("attributes", "brand", "model", "color", "size", "category")):
@@ -1343,7 +1344,15 @@ def rekey_on_edit(
         old = identity_key_of(current)
     except ProductMasterError:
         old = None  # a stored value that is not a number: the edit's key decides
-    new = identity_key_of(merged)
+    try:
+        new = identity_key_of(merged)
+    except ProductMasterError:
+        after, before = _overlay_attributes(merged), _overlay_attributes(current)
+        # A value this edit typed is still the 422 naming it.
+        identity_parts({k: v for k, v in after.items() if v != before.get(k)}, merged.get("category"))
+        # ponytail: the bad value is the stored one, untouched, so the key
+        # cannot be read; key and name stay as stored until it is fixed.
+        return
     if new is None or new == old:
         return
     other = (

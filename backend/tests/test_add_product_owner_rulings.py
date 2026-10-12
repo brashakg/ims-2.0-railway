@@ -1241,3 +1241,32 @@ def test_d_guard_a_typed_name_survives_an_identity_edit(door):
     _put(a["product_id"], name="Oasys Trial Pack")
     _put(a["product_id"], attributes={"power": "-1.50"})
     assert door.repo.find_by_id(a["product_id"])["name"] == "Oasys Trial Pack"
+
+
+@pytest.mark.parametrize("bad", [
+    {"power": "ask"}, {"power": "-1.25 SPH"}, {"base_curve": "8.6mm"},
+    {"diameter": "14.2 mm"}, {"pack": "6 lenses"}, {"pack": "Pack of 6"},
+])
+def test_d_the_edit_form_saves_a_price_on_a_lens_with_an_old_bad_value(door, bad):
+    """main's form took power as free text, so a stored lens can hold a value
+    that is not a number. The Edit form sends brand, model and the whole loaded
+    attributes bag with every save: a price edit still saves, the key stays."""
+    from fastapi import HTTPException
+
+    attrs = dict(_FIT, **bad)
+    door.repo.collection.insert_one({
+        "product_id": "P-JUNK", "sku": "P-JUNK", "category": "CONTACT_LENS", "is_active": True,
+        "brand": "Acuvue", "model": "Oasys", "identity_key": "acuvue|oasys|junk", "name": "Old Lens",
+        "mrp": 1000.0, "offer_price": 900.0, "attributes": dict(attrs),
+    })
+    _put("P-JUNK", brand="Acuvue", model="Oasys", attributes=dict(attrs), mrp=1100.0)
+    after = door.repo.find_by_id("P-JUNK")
+    assert (after["mrp"], after["identity_key"], after["name"]) == (1100.0, "acuvue|oasys|junk", "Old Lens")
+    # Guard: a bad value the edit TYPES is still the 422 naming it.
+    with pytest.raises(HTTPException) as exc:
+        _put("P-JUNK", attributes=dict(attrs, cl_add="lots"))
+    assert exc.value.status_code == 422
+    # ... and fixing the bad value re-keys the lens.
+    _put("P-JUNK", attributes=dict(_FIT))
+    assert door.repo.find_by_id("P-JUNK")["identity_key"] == pm.compute_identity_key(
+        *pm.identity_parts(_FIT, "CL"))
