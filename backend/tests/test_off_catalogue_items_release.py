@@ -5090,3 +5090,55 @@ def test_r8_the_auto_escalate_answer_counts_a_merge_as_a_merge(world, monkeypatc
         stored == ["COMPLETED", "ESCALATED"] and body["escalated"] == 1 and body.get("merged") == 1,
         f"R1-50: stored {stored}, the answer reads {body}",
     )
+
+
+def _legacy_frame_sized(world, size):
+    """A frame keyed before eye size joined the key, whose only size is the
+    legacy `size` text (no lens_size): '52-18-140', or a letter 'M'."""
+    made = world.catalogue_frame("Carrera", "CA 8895", "807", "54", mrp=6990, offer=6490, cost=3155.76)
+    stored = world.product(made["product_id"])
+    attrs = {k: v for k, v in (stored.get("attributes") or {}).items() if k != "lens_size"}
+    world.db.products.update_one(
+        {"product_id": made["product_id"]},
+        {"$set": {"identity_key": "carrera|ca8895|807", "size": size, "attributes": {**attrs, "size": size}}},
+    )
+    return made
+
+
+def test_r8_a_legacy_composite_size_reads_as_its_eye_size_and_a_letter_as_none(world):
+    # One-rule review (MEDIUM): '52-18-140' was read as eye size "5218140" --
+    # Save asked for an eye size the form cannot type, and typing 52 made a
+    # twin. The eye size is the leading number (52); 'M' is none at all.
+    legacy = _legacy_frame_sized(world, "52-18-140")
+    sizeless = _refused_po(
+        world, [{"new_product": {**CARRERA_TYPED, "size": None}, "quantity": 1, "unit_price": 3200}]
+    )
+    typed = _refused_po(world, [{"new_product": {**CARRERA_TYPED, "size": "52"}, "quantity": 1, "unit_price": 3200}])
+    finding(
+        sizeless is not None
+        and sizeless.detail.get("code") == "EYE_SIZE_NEEDED"
+        and sizeless.detail["lines"][0]["sizes"] == ["52"]
+        and typed is not None
+        and typed.status_code == 409
+        and typed.detail["matches"][0]["existing"]["product_id"] == legacy["product_id"]
+        and len(world.products_named("Carrera", "CA 8895")) == 1,
+        f"Legacy 52-18-140: sizeless -> {getattr(sizeless, 'detail', None)}; typed 52 -> "
+        f"{getattr(typed, 'detail', None)}; rows {[p.get('identity_key') for p in world.products_named('Carrera', 'CA 8895')]}",
+    )
+    from scripts.migrate_identity_key_tighten import _identity_of
+
+    assert _identity_of(world.product(legacy["product_id"])) == "carrera|ca8895|807|52"
+
+
+def test_r8_a_legacy_letter_size_is_no_eye_size(world):
+    legacy = _legacy_frame_sized(world, "M")
+    sizeless = _refused_po(
+        world, [{"new_product": {**CARRERA_TYPED, "size": None}, "quantity": 1, "unit_price": 3200}]
+    )
+    finding(
+        sizeless is not None
+        and sizeless.status_code == 409
+        and sizeless.detail["matches"][0]["existing"]["product_id"] == legacy["product_id"],
+        f"Legacy 'M': a sizeless line was answered {getattr(sizeless, 'detail', None)}",
+    )
+

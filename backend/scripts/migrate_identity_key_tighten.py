@@ -48,7 +48,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from api.services.product_master import (  # noqa: E402
     _derive_brand_model_color_size,
+    _size_attribute_key,
     compute_identity_key,
+    frame_size_of,
 )
 
 
@@ -65,7 +67,13 @@ def _identity_of(doc: Dict[str, Any]):
         "brand": doc.get("brand"),
         "model": doc.get("model"),
         "color": doc.get("color") or doc.get("colour"),
-        "size": doc.get("size"),
+        # A frame's legacy top-level "52-18-140" is eye size 52, as the
+        # derivation reads it from the attributes (frame_size_of).
+        "size": (
+            frame_size_of(doc.get("size"))
+            if _size_attribute_key(doc.get("category")) == "lens_size"
+            else doc.get("size")
+        ),
     }
     ids = {k: ids.get(k) or top.get(k) for k in top}
     return compute_identity_key(ids["brand"], ids["model"], ids["color"], ids["size"])

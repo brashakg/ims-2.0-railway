@@ -1017,15 +1017,37 @@ def set_twin_tags(doc: Dict[str, Any], tags: Any) -> List[str]:
     return clean
 
 
+_EYE_SIZE = re.compile(r"\s*(\d{2,3})(?!\d)")
+_EYE_BRIDGE_TEMPLE = re.compile(r"\s*\d{2,3}\s*[-/xX]\s*\d{1,2}(\s*[-/xX]\s*\d{2,3})?\s*$")
+
+
+def eye_size_of(value: Any) -> Optional[str]:
+    """A stored size read as an EYE size, the number Add product's eye-size box
+    takes: the leading 2-3 digit number -- 52, "52", "52.0" and "52-18-140" all
+    read "52" -- or nothing for a value that is not one ("M", "Large")."""
+    found = _EYE_SIZE.match(str(value)) if value not in (None, "") else None
+    return str(int(found.group(1))) if found else None
+
+
+def frame_size_of(value: Any) -> Any:
+    """A frame's / sunglass's size as its identity reads it: a legacy
+    eye-bridge-temple text ("52-18-140", "52/18") is its eye size, "52" -- the
+    item typed with eye size 52 -- and any other value is kept as stored."""
+    if value not in (None, "") and _EYE_BRIDGE_TEMPLE.match(str(value)):
+        return eye_size_of(value)
+    return value
+
+
 def _derive_brand_model_color_size(
     attributes: Dict[str, Any], category: Any = None
 ) -> Dict[str, Optional[str]]:
     """Map category attribute keys onto the spine identity columns -- THE one
     reading of an item's brand, model, colour and size (the identity key, the
     "already exists" summary, the variant option and the identity migration
-    all read it)."""
+    all read it). An eye-size category's size reads by frame_size_of."""
     attrs = attributes or {}
     size_key = _size_attribute_key(category) or "size"
+    size = attrs.get(size_key) or attrs.get("size") or attrs.get("lens_size")
     return {
         "brand": attrs.get("brand_name") or attrs.get("brand"),
         "model": attrs.get("model_no") or attrs.get("model_name") or attrs.get("model"),
@@ -1036,8 +1058,9 @@ def _derive_brand_model_color_size(
         # is its registry's lens_size, and `size` (which left their registry)
         # can still hold a legacy "52-18-140" beside it -- read first, it keyed
         # the frame apart from the same frame typed with eye size 52 (C2).
-        # Each eye size is its own item (owner 09-28).
-        "size": attrs.get(size_key) or attrs.get("size") or attrs.get("lens_size"),
+        # Each eye size is its own item (owner 09-28). A legacy row with only
+        # "52-18-140" is the 52 item.
+        "size": frame_size_of(size) if size_key == "lens_size" else size,
     }
 
 
@@ -2744,13 +2767,14 @@ def _keyed_before_eye_size(
 
 
 def _row_eye_size(row: Dict[str, Any]) -> str:
-    """A stored row's eye size, normalised -- read as the identity migration
-    and existing_product_summary read it: the derived size, else a legacy
-    top-level `size`. A row keyed before eye size joined the key that HAS one
-    is a sized item: the migration re-keys it with it."""
+    """A stored row's EYE size, normalised: the derived size, else a legacy
+    top-level `size`, read by eye_size_of. A row keyed before eye size joined
+    the key that HAS one is a sized item: the migration re-keys it with it.
+    One whose size is no eye size ("M") is not -- Save never asks for a size
+    the eye-size box cannot take, and a sizeless line matches it by its key."""
     attrs = row.get("attributes") if isinstance(row.get("attributes"), dict) else {}
     derived = _derive_brand_model_color_size(attrs, row.get("category"))["size"] or row.get("size")
-    return normalise_identity_component(derived)
+    return normalise_identity_component(eye_size_of(derived))
 
 
 def identity_conflict(spine: Dict[str, Any], product_repo) -> Optional[ProductMasterError]:
@@ -2827,7 +2851,8 @@ def identity_conflict(spine: Dict[str, Any], product_repo) -> Optional[ProductMa
     ]
     if not sized:
         return None
-    sizes = sorted({str(existing_product_summary(p).get("size")) for p in sized})
+    # The eye sizes Add product can type (eye_size_of), never a legacy text.
+    sizes = sorted({_row_eye_size(p) or str(existing_product_summary(p).get("size")) for p in sized})
     name = " ".join(
         str(v) for v in (spine.get("brand"), spine.get("model"), spine.get("color")) if v
     )
