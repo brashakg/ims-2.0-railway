@@ -24,6 +24,7 @@ from ..dependencies import (
 # W1.4 / OS-032: shared ONLINE store-type detector -- a transfer must never
 # land stock on a pooled, stockless ONLINE store.
 from ..services import org_validation as ov
+from ..services.cost_mask import mask_cost
 from ..services.purchase_invoice_engine import classify_supply
 from ..services.stores_util import is_online_store
 
@@ -184,6 +185,14 @@ class TransferApproval(BaseModel):
 
 STOCK_TRANSFERS: Dict[str, Dict] = {}
 TRANSFER_COUNTER = {"count": 1000}
+
+
+def _for(user: Dict, body: Dict) -> Dict:
+    """A transfer reply as `user` may read it: a line's unit_cost and the
+    transfer's total_value (and a location's outgoing / incoming value) are at
+    cost, so they go to the roles services/cost_mask "product" admits only
+    (owner ruling D7)."""
+    return mask_cost(body, user, "product", extra=("total_value", "value"))
 
 
 def _get_db():
@@ -970,13 +979,13 @@ async def list_transfers(
     start = (page - 1) * limit
     end = start + limit
 
-    return {
+    return _for(current_user, {
         "transfers": transfers[start:end],
         "total": total,
         "page": page,
         "limit": limit,
         "total_pages": (total + limit - 1) // limit,
-    }
+    })
 
 
 @router.get("/pending")
@@ -1016,7 +1025,7 @@ async def get_pending_transfers(
             or t.get("to_location_id") == location_id
         ]
 
-    return {
+    return _for(current_user, {
         "pending_approval": [
             t for t in transfers if t.get("status") == TransferStatus.PENDING_APPROVAL
         ],
@@ -1029,7 +1038,7 @@ async def get_pending_transfers(
         "pending_receipt": [
             t for t in transfers if t.get("status") == TransferStatus.PARTIALLY_RECEIVED
         ],
-    }
+    })
 
 
 @router.get("/{transfer_id}")
@@ -1044,7 +1053,7 @@ async def get_transfer(
     # IDOR guard: both parties (source + destination stores) may read.
     _assert_transfer_access(transfer, current_user, side="either")
 
-    return {"transfer": transfer}
+    return _for(current_user, {"transfer": transfer})
 
 
 @router.post("")
@@ -1186,10 +1195,10 @@ async def create_transfer(
 
     _save_transfer(transfer_data)
 
-    return {
+    return _for(current_user, {
         "transfer": transfer_data,
         "message": f"Transfer {transfer_number} created successfully",
-    }
+    })
 
 
 @router.put("/{transfer_id}")
@@ -1223,7 +1232,7 @@ async def update_transfer(
     transfer["updated_at"] = datetime.now().isoformat()
 
     _save_transfer(transfer)
-    return {"transfer": transfer, "message": "Transfer updated successfully"}
+    return _for(current_user, {"transfer": transfer, "message": "Transfer updated successfully"})
 
 
 @router.post("/{transfer_id}/approve")
@@ -1276,7 +1285,7 @@ async def approve_transfer(
     )
 
     _save_transfer(transfer)
-    return {"transfer": transfer, "message": message}
+    return _for(current_user, {"transfer": transfer, "message": message})
 
 
 @router.post("/{transfer_id}/start-picking")
@@ -1319,7 +1328,7 @@ async def start_picking(
     )
 
     _save_transfer(transfer)
-    return {"transfer": transfer, "message": "Picking started"}
+    return _for(current_user, {"transfer": transfer, "message": "Picking started"})
 
 
 @router.post("/{transfer_id}/complete-picking")
@@ -1372,7 +1381,7 @@ async def complete_picking(
     )
 
     _save_transfer(transfer)
-    return {"transfer": transfer, "message": "Picking completed, ready for shipment"}
+    return _for(current_user, {"transfer": transfer, "message": "Picking completed, ready for shipment"})
 
 
 @router.post("/{transfer_id}/ship")
@@ -1444,14 +1453,14 @@ async def ship_transfer(
     )
 
     _save_transfer(transfer)
-    return {
+    return _for(current_user, {
         "transfer": transfer,
         "message": "Transfer shipped",
         "tracking": {
             "number": transfer.get("tracking_number"),
             "url": transfer.get("tracking_url"),
         },
-    }
+    })
 
 
 @router.post("/{transfer_id}/receive")
@@ -1648,7 +1657,7 @@ async def receive_transfer(
             transfer["discrepancy_task_id"] = discrepancy_task_id
 
     _save_transfer(transfer)
-    return {
+    return _for(current_user, {
         "transfer": transfer,
         "message": "Items received",
         "summary": {
@@ -1659,7 +1668,7 @@ async def receive_transfer(
             "surplus": surplus,
             "discrepancy_task_id": discrepancy_task_id,
         },
-    }
+    })
 
 
 @router.post("/{transfer_id}/complete")
@@ -1714,7 +1723,7 @@ async def complete_transfer(
     # Fail-soft -- never blocks the status flip.
     _book_mirror_purchase(transfer)
 
-    return {"transfer": transfer, "message": "Transfer completed"}
+    return _for(current_user, {"transfer": transfer, "message": "Transfer completed"})
 
 
 def _transfer_has_moved_stock(transfer: Dict) -> bool:
@@ -1873,7 +1882,7 @@ async def cancel_transfer(
                 ea_request_id,
             )
 
-    return {"transfer": transfer, "message": "Transfer cancelled"}
+    return _for(current_user, {"transfer": transfer, "message": "Transfer cancelled"})
 
 
 # ============================================================================
@@ -1914,7 +1923,7 @@ async def get_transfer_analytics(
     total_value = sum(t.get("total_value", 0) for t in transfers)
     total_items = sum(t.get("total_items", 0) for t in transfers)
 
-    return {
+    return _for(current_user, {
         "summary": {
             "total_transfers": total_transfers,
             "completed": completed,
@@ -1934,7 +1943,7 @@ async def get_transfer_analytics(
             p.value: len([t for t in transfers if t.get("priority") == p.value])
             for p in TransferPriority
         },
-    }
+    })
 
 
 @router.get("/analytics/location/{location_id}")
@@ -1947,7 +1956,7 @@ async def get_location_transfer_analytics(
     outgoing = [t for t in transfers if t.get("from_location_id") == location_id]
     incoming = [t for t in transfers if t.get("to_location_id") == location_id]
 
-    return {
+    return _for(current_user, {
         "location_id": location_id,
         "outgoing": {
             "total": len(outgoing),
@@ -1974,7 +1983,7 @@ async def get_location_transfer_analytics(
             ),
             "value": sum(t.get("total_value", 0) for t in incoming),
         },
-    }
+    })
 
 
 # ============================================================================

@@ -11,6 +11,7 @@ from typing import Optional
 from datetime import datetime
 import uuid
 from ..auth import require_roles
+from ...services.cost_mask import mask_cost
 from ...services import spoilage_analytics
 from ...dependencies import get_db, get_workshop_repository, get_audit_repository
 from ._shared import (
@@ -347,12 +348,19 @@ async def rework_job(
             "[WORKSHOP] SPOILAGE audit insert failed for %s: %s", job_id, audit_exc
         )
 
-    return {
-        "job_id": job_id,
-        "status": "IN_PROGRESS",
-        "rework_count": rework_count,
-        "remake_reason_code": code,
-        "spoilage_category": category,
-        "spoilage_cost_paise": cost_paise,
-        "message": f"Job sent for rework (attempt #{rework_count})",
-    }
+    # The spoilage cost is priced from the lens's cost: the roles that see
+    # product cost only (owner ruling D7) -- workshop staff send the rework
+    # and never see what it cost.
+    return mask_cost(
+        {
+            "job_id": job_id,
+            "status": "IN_PROGRESS",
+            "rework_count": rework_count,
+            "remake_reason_code": code,
+            "spoilage_category": category,
+            "spoilage_cost_paise": cost_paise,
+            "message": f"Job sent for rework (attempt #{rework_count})",
+        },
+        current_user,
+        "product",
+    )
