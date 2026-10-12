@@ -905,6 +905,7 @@ def test_a_junk_upc_with_no_upc_box_never_blocks_a_save_or_an_approve(env):
     catalog_mod.CATALOG_PRODUCTS[doc["id"]]["attributes"]["upc"] = "NA"
     _promote(doc["id"])
     assert "upc" not in env["repo"].find_by_id(doc["id"])["attributes"]
+    assert "upc" not in catalog_mod.CATALOG_PRODUCTS[doc["id"]]["attributes"]
     # A FRAME shows the box: there the junk is still refused, so it gets fixed.
     frame = _bvi_doc(doc_id="clx0rvframe1", sku="RVFR1")
     frame["attributes"]["upc"] = "NA"
@@ -912,6 +913,22 @@ def test_a_junk_upc_with_no_upc_box_never_blocks_a_save_or_an_approve(env):
     with pytest.raises(HTTPException) as exc:
         _promote(frame["id"])
     assert exc.value.status_code == 422
+
+
+def test_promote_stores_the_sanitised_codes_on_both_copies(env):
+    """Round 9 item 4 (probe P4). Approve stored '4006381333931' on the spine
+    and left the twin's '4006381 333931': the one-holder twin lookup and the
+    spine disagreed. Both copies hold the guard's value after Approve."""
+    doc = _bvi_doc(doc_id="clx0rvsan1", sku="RVSAN1")
+    doc["attributes"].update({"gtin": "4006381 333931", "upc": " 0360-0029-1452"})
+    catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
+    _promote(doc["id"])
+    want = {"gtin": _GTIN, "upc": _UPC}
+    spine_attrs = env["repo"].find_by_id(doc["id"])["attributes"]
+    twin_attrs = catalog_mod.CATALOG_PRODUCTS[doc["id"]]["attributes"]
+    assert {k: spine_attrs.get(k) for k in want} == want
+    assert {k: twin_attrs.get(k) for k in want} == want
+    assert twin_attrs["colour_code"] == "BLK"  # the rest of the bag untouched
 
 
 def test_catalog_create_door_refuses_a_gtin_another_product_holds(gtin_env):

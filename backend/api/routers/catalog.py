@@ -2790,13 +2790,21 @@ async def promote_catalog_product(
     }
     if minted_sku:
         stamp["sku"] = minted_sku
-    # The spine got the barcode keys folded (the door's guard); the twin's own
-    # copy of another spelling ('GTIN') goes in this same write.
+    # The twin's manufacturer barcodes (gtin / upc, in any spelling) become
+    # EXACTLY what the spine stored through the door's guard -- folded,
+    # sanitised, junk with no box dropped -- in this same write: one value on
+    # both copies, so find_twin_by_barcode and the spine agree.
     _doc_attrs = doc.get("attributes")
     if isinstance(_doc_attrs, dict):
-        _folded = _pm.fold_barcode_spellings(_doc_attrs)
-        if _folded != _doc_attrs:
-            stamp["attributes"] = _folded
+        _spine_attrs = spine.get("attributes") or {}
+        _twin_attrs = {
+            k: v for k, v in _doc_attrs.items() if not _pm.manufacturer_barcode_key(k)
+        }
+        _twin_attrs.update(
+            {k: v for k, v in _spine_attrs.items() if _pm.manufacturer_barcode_key(k)}
+        )
+        if _twin_attrs != _doc_attrs:
+            stamp["attributes"] = _twin_attrs
     try:
         coll = _catalog_coll()
         if coll is not None:
