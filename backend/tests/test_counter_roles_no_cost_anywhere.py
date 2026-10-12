@@ -317,11 +317,39 @@ def test_counter_role_reads_no_cost(client, shop, role, method, path, extra):
     assert not _figures_in(body), (role, path, body)
 
 
-@pytest.mark.parametrize("role", ("STORE_MANAGER", "AREA_MANAGER", "ADMIN"))
+@pytest.mark.parametrize("role", MANAGERS)
 @pytest.mark.parametrize("method,path,extra", READS)
 def test_managers_still_read_the_cost(client, shop, role, method, path, extra):
     body = _get(client, role, method, path)
     assert _cost_keys(body, extra), (role, path, body)
+
+
+def _narrow_product_rule(monkeypatch, role):
+    """cost_mask's "product" context without `role`: the one rule changed."""
+    from api.services import cost_mask
+
+    monkeypatch.setitem(
+        cost_mask._CONTEXT_ROLES,
+        "product",
+        cost_mask._CONTEXT_ROLES["product"] - {role},
+    )
+
+
+# Every read above answers cost_mask's "product" context (owner ruling
+# 2026-10-12), not its own role set or another context: change the rule there
+# and every read must follow. STORE_MANAGER is in the "purchase" context too,
+# CATALOG_MANAGER only in "product", so a read asking either the wrong context
+# or a written-out copy keeps answering one of them and fails here.
+@pytest.mark.parametrize("dropped", ("STORE_MANAGER", "CATALOG_MANAGER"))
+def test_narrowing_the_product_rule_moves_every_shop_cost_read(
+    client, shop, monkeypatch, dropped
+):
+    _narrow_product_rule(monkeypatch, dropped)
+    for method, path, extra in [*READS, BLIND]:
+        body = _get(client, dropped, method, path)
+        assert not _cost_keys(body, extra), (dropped, path, _cost_keys(body, extra))
+        assert not _figures_in(body), (dropped, path, body)
+        assert _cost_keys(_get(client, "ADMIN", method, path), extra), path
 
 
 @pytest.mark.parametrize("role", ("SALES_STAFF", "SALES_CASHIER"))
@@ -380,8 +408,20 @@ def _open_count(db, count_id):
     )
 
 
-@pytest.mark.parametrize("role,sees", [("WORKSHOP_STAFF", False), ("STORE_MANAGER", True)])
-def test_completing_a_count_answers_cost_to_managers_only(client, shop, role, sees):
+# (role, sees cost, the product rule narrowed to leave that role out)
+_WRITE_CASES = [
+    ("WORKSHOP_STAFF", False, False),
+    ("STORE_MANAGER", True, False),
+    ("STORE_MANAGER", False, True),
+]
+
+
+@pytest.mark.parametrize("role,sees,narrowed", _WRITE_CASES)
+def test_completing_a_count_answers_cost_to_managers_only(
+    client, shop, monkeypatch, role, sees, narrowed
+):
+    if narrowed:
+        _narrow_product_rule(monkeypatch, role)
     _open_count(shop, f"SC-{role}")
     r = client.post(
         f"/api/v1/inventory/stock-count/SC-{role}/complete", headers=_headers(role)
@@ -411,12 +451,14 @@ def _qc_failed_job(db, job_id):
     )
 
 
-@pytest.mark.parametrize("role,sees", [("WORKSHOP_STAFF", False), ("STORE_MANAGER", True)])
+@pytest.mark.parametrize("role,sees,narrowed", _WRITE_CASES)
 def test_a_rework_answers_its_spoilage_cost_to_managers_only(
-    client, shop, monkeypatch, role, sees
+    client, shop, monkeypatch, role, sees, narrowed
 ):
     from api.routers.workshop import qc as qc_mod
 
+    if narrowed:
+        _narrow_product_rule(monkeypatch, role)
     monkeypatch.setattr(qc_mod, "get_db", lambda: _Conn(shop))
     _qc_failed_job(shop, f"J-{role}")
     r = client.post(
@@ -479,6 +521,15 @@ def test_below_cost_error_still_names_the_cost_to_managers(client, doors, role):
     for detail in _below_cost_on_both_doors(client, doors, role):
         assert "below cost" in detail.lower(), detail
         assert str(_DOOR_COST) in detail, detail
+
+
+def test_the_below_cost_error_follows_the_product_rule(client, doors, monkeypatch):
+    # The figure goes to whoever cost_mask's "product" context admits, not a
+    # copy of it or another context: narrow it and the manager gets the
+    # counter's words (the sale is still blocked, _below_cost_on_both_doors).
+    _narrow_product_rule(monkeypatch, "STORE_MANAGER")
+    for detail in _below_cost_on_both_doors(client, doors, "STORE_MANAGER"):
+        assert detail == _BELOW_COST_TO_COUNTER, detail
 
 
 # ---------------------------------------------------------------------------
