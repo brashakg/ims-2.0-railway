@@ -3564,6 +3564,8 @@ async def update_product(
         # purchasable product's price. Mirrors the service-layer update_product
         # None-strip. A field is CLEARED with its empty value ("" / []), never null.
         update_data = {k: v for k, v in update_data.items() if v is not None}
+        if _catalog_list.switches_on_archived(existing, update_data.get("is_active")):
+            raise HTTPException(status_code=409, detail=_catalog_list.USE_RESTORE)
         # Pre-write snapshot for the take-down / republish rule below: read
         # BEFORE repo.update (an in-memory repo hands back the live dict).
         _was_active = existing.get("is_active", True)

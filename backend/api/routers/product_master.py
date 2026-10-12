@@ -29,6 +29,7 @@ from ..dependencies import (
     get_db,
 )
 from ..services import product_master as pm
+from ..services import catalog_list as _catalog_list
 from ..services import online_delist as _delist
 
 router = APIRouter()
@@ -225,6 +226,9 @@ async def update_master_product(
         if "is_active" in patch and repo is not None
         else None
     )
+    # Only Restore brings an archived product back (one rule).
+    if _catalog_list.switches_on_archived(before, patch.get("is_active")):
+        raise HTTPException(status_code=409, detail=_catalog_list.USE_RESTORE)
     # Snapshot the flag BEFORE the write (an in-memory repo hands back the
     # live dict, which the update below mutates).
     was_active = before.get("is_active", True) if before is not None else None

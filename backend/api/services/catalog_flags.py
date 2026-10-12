@@ -114,16 +114,21 @@ def _product_label(doc: Dict[str, Any]) -> str:
 
 
 def _assignee(created_by: Optional[str]) -> Optional[str]:
-    """The PERSON who added the product (owner rule: tasks go to people, not
-    titles); when that user is gone (unknown or switched off), an active
-    CATALOG_MANAGER through the task person helper; else nobody."""
+    """THE rule for who gets a flag task: the PERSON who added the product
+    (owner rule: tasks go to people, not titles) when they are active and may
+    clear a flag (clears_flags -- a catalogue manager or an admin), so the
+    person the task names can open it, Mark fixed and close it. Anyone else
+    -- gone, switched off, or a role that can neither open nor close a flag
+    task (an area manager or accountant who bought it on a PO, a store
+    manager, a counter role) -- hands it to an active CATALOG_MANAGER through
+    the task person helper; else nobody."""
     if created_by and created_by not in ("system", "SYSTEM"):
         try:
             users = _deps().get_user_repository()
             user = users.find_by_id(created_by) if users is not None else None
         except Exception:  # noqa: BLE001
             user = None
-        if user and user.get("is_active", True) is not False:
+        if user and user.get("is_active", True) is not False and clears_flags(user):
             return created_by
     from .task_triggers import _person_holding
 

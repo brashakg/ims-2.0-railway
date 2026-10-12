@@ -854,3 +854,166 @@ def test_a_copy_edit_on_a_twin_reaches_its_spine(env):
     assert spine["updated_by"] == "u-mansi" and spine["edited_at"] is not None
     rows = {r["id"]: r for r in _imported(ADMIN, "edited")}
     assert rows["T-P2"]["updated_by"] == "u-mansi"
+
+
+# ---------------------------------------------------------------------------
+# Round 4: one way back from an archive; restore puts it back as it was; a
+# flag task goes only to someone who can open and close it, and stays there
+# ---------------------------------------------------------------------------
+
+
+def _switch_on_by_every_door(env, twin_id, spine_id):
+    """PUT is_active true through each edit door; the status codes."""
+    from fastapi import HTTPException
+
+    from api.routers import product_master as pm_router
+    from api.routers.product_master import ProductMasterUpdate
+    from api.routers.products import ProductUpdate
+
+    codes = [env["call"](CAT_MGR, "PUT", f"/api/v1/catalog/products/{twin_id}",
+                         json={"is_active": True}).status_code]
+    for door in (
+        lambda: products_mod.update_product(spine_id, ProductUpdate(is_active=True), current_user=ADMIN),
+        lambda: pm_router.update_master_product(
+            spine_id, ProductMasterUpdate(is_active=True), current_user=ADMIN),
+    ):
+        try:
+            asyncio.run(door())
+            codes.append(200)
+        except HTTPException as exc:
+            codes.append(exc.status_code)
+            assert exc.detail == "This product is archived - use Restore"
+    return codes
+
+
+def test_only_restore_brings_an_archived_product_back(env, monkeypatch):
+    from api.routers import product_master as pm_router
+
+    monkeypatch.setattr(pm_router, "get_product_repository",
+                        lambda: ProductRepository(env["db"].products))
+    _archive(env, ["P1"])
+    res = env["call"](CAT_MGR, "PUT", "/api/v1/catalog/products/T-P1", json={"is_active": True})
+    assert res.status_code == 409 and res.json()["detail"] == "This product is archived - use Restore"
+    assert _switch_on_by_every_door(env, "T-P1", "P1") == [409, 409, 409]
+    spine = env["db"].products.find_one({"product_id": "P1"})
+    assert spine["is_active"] is False and spine["deleted_at"]
+    assert env["db"].catalog_products.find_one({"id": "T-P1"})["is_active"] is False
+    assert "P1" not in _list(_user("u-c", "CASHIER"), search="Carrera")  # the till
+    # An archived spine whose twin was never stamped is refused through the twin too.
+    env["db"].catalog_products.update_one({"id": "T-P1"}, {"$set": {"deleted_at": None}})
+    assert env["call"](CAT_MGR, "PUT", "/api/v1/catalog/products/T-P1",
+                       json={"is_active": True}).status_code == 409
+    # Restore is the way back; then the switch is an ordinary edit again.
+    assert _restore(env, ["P1"]).json()["results"][0]["status"] == "done"
+    assert env["db"].products.find_one({"product_id": "P1"})["is_active"] is True
+    # Switching OFF an archived product, and switching on one that is merely
+    # off (the drawer's Not-for-POS switch), stay ordinary edits.
+    _archive(env, ["P2"])
+    assert env["call"](CAT_MGR, "PUT", "/api/v1/catalog/products/T-P2",
+                       json={"is_active": False}).status_code == 200
+    env["db"].products.update_one({"product_id": "P3"}, {"$set": {"is_active": False}})
+    asyncio.run(products_mod.update_product(
+        "P3", products_mod.ProductUpdate(is_active=True), current_user=ADMIN))
+    assert env["db"].products.find_one({"product_id": "P3"})["is_active"] is True
+
+
+def test_restore_puts_a_product_back_exactly_as_it_was(env):
+    db = env["db"]
+    # P2 was switched off before it was archived (a provisional PO buy is
+    # born inactive); P1 was on sale.
+    db.products.update_one({"product_id": "P2"}, {"$set": {"is_active": False}})
+    db.catalog_products.update_one({"id": "T-P2"}, {"$set": {"is_active": False}})
+    _archive(env, ["P1", "P2"])
+    rows = {r["product_id"]: r for r in _restore(env, ["P1", "P2"]).json()["results"]}
+    assert rows["P1"]["switched_on"] is True and "note" not in rows["P1"]
+    assert rows["P2"]["switched_on"] is False
+    assert rows["P2"]["note"] == "Back in the catalogue switched off, as it was before it was archived."
+    p2 = db.products.find_one({"product_id": "P2"})
+    assert p2["is_active"] is False and p2["deleted_at"] is None
+    assert not p2.get("active_before_archive")
+    assert db.catalog_products.find_one({"id": "T-P2"})["is_active"] is False
+    assert db.products.find_one({"product_id": "P1"})["is_active"] is True
+    assert "P2" not in _list(_user("u-c", "CASHIER"), search="Carrera")  # never on sale
+    (audit,) = [a for a in db.audit_logs.find({"entity_id": "P2"})
+                if a.get("action") == "product.restored"]
+    assert audit["switched_on"] is False
+    # Deleting it again while archived (now switched off) never forgets
+    # that it was on sale.
+    _archive(env, ["P1"])
+    asyncio.run(catalog_mod.delete_catalog_product("T-P1", current_user=ADMIN))
+    assert _restore(env, ["P1"]).json()["results"][0]["switched_on"] is True
+    # A product archived before this was remembered comes back on, as before.
+    db.products.update_one({"product_id": "P3"}, {"$set": {
+        "is_active": False, "deleted_at": "2026-10-01T00:00:00+00:00"}})
+    assert _restore(env, ["P3"]).json()["results"][0]["switched_on"] is True
+    assert db.products.find_one({"product_id": "P3"})["is_active"] is True
+
+
+def test_the_review_drawers_restore_is_the_restore_door(env):
+    db = env["db"]
+    # An import with no spine, archived by the single Delete door.
+    db.catalog_products.insert_one({"id": "T-IMP", "sku": "IMP-1", "title": "Imported",
+                                    "needs_review": True, "is_active": True})
+    asyncio.run(catalog_mod.delete_catalog_product("T-IMP", current_user=ADMIN))
+    assert db.catalog_products.find_one({"id": "T-IMP"})["deleted_at"]
+    assert env["call"](ADMIN, "PUT", "/api/v1/catalog/products/T-IMP",
+                       json={"is_active": True}).status_code == 409
+    row = _restore(env, ["T-IMP"]).json()["results"][0]
+    assert (row["status"], row["switched_on"]) == ("done", True)
+    twin = db.catalog_products.find_one({"id": "T-IMP"})
+    assert twin["is_active"] is True and twin["deleted_at"] is None
+    # A twin id with a spine restores the spine too (the till's truth).
+    _archive(env, ["P2"])
+    assert _restore(env, ["T-P2"]).json()["results"][0]["status"] == "done"
+    p2 = db.products.find_one({"product_id": "P2"})
+    assert p2["deleted_at"] is None and p2["is_active"] is True
+
+
+@pytest.mark.parametrize("role", ["AREA_MANAGER", "ACCOUNTANT", "STORE_MANAGER", "SALES_STAFF"])
+def test_a_flag_task_goes_only_to_someone_who_can_open_and_close_it(env, role):
+    db = env["db"]
+    # Bought on a PO by someone who cannot clear flags: the PO door stamps
+    # them as the adder.
+    db.users.insert_one({"user_id": "u-buyer", "full_name": "Buyer", "roles": [role],
+                         "is_active": True})
+    db.products.insert_one(_spine("P9", "u-buyer", is_active=False))
+    db.products.insert_one(_spine("P8", "u-admin"))
+    body = _flag(env, ADMIN, ["P9", "P8"]).json()
+    people = {t["assigned_to"] for t in body["tasks"]}
+    assert len(people) == 2 and "u-admin" in people  # an adder who clears flags keeps theirs
+    assert people - {"u-admin"} <= {"u-mansi", "u-akshay"}
+    (task,) = [t for t in db.tasks.find({}) if "P9" in t["payload"]["product_ids"]]
+    who = _user(task["assigned_to"], "CATALOG_MANAGER")
+    assert env["call"](who, "GET", f"/api/v1/tasks/{task['task_id']}").status_code == 200
+    res = env["call"](who, "PATCH", f"/api/v1/tasks/{task['task_id']}/complete",
+                      json={"completion_notes": "Fixed"})
+    assert res.status_code == 200, res.text
+    assert _flags(db, "P9")[0]["status"] == "fixed"
+
+
+def test_a_flag_task_never_climbs_the_escalation_ladder(env):
+    from datetime import timedelta
+
+    from api.services.task_sla import should_escalate
+
+    db = env["db"]
+    db.users.insert_one({"user_id": "u-area", "full_name": "Area", "roles": ["AREA_MANAGER"],
+                         "is_active": True})
+    _flag(env, ADMIN, ["P1"])
+    (task,) = list(db.tasks.find({}))
+    tid, owner = task["task_id"], task["assigned_to"]
+    later = datetime.now() + timedelta(days=30)
+    assert should_escalate(task, now=later) == (False, "")
+    # Unacknowledged for days: the SLA scan leaves it with its cataloguer.
+    db.tasks.update_one({"task_id": tid},
+                        {"$set": {"created_at": datetime.now() - timedelta(days=5)}})
+    res = env["call"](ADMIN, "POST", "/api/v1/tasks/auto-escalate-overdue")
+    assert res.status_code == 200, res.text
+    after = db.tasks.find_one({"task_id": tid})
+    assert (after["status"], after["assigned_to"]) == ("OPEN", owner)
+    res = env["call"](ADMIN, "POST", f"/api/v1/tasks/{tid}/escalate")
+    assert res.status_code == 400 and "not escalated" in res.json()["detail"]
+    assert db.tasks.find_one({"task_id": tid})["assigned_to"] == owner
+    # Any other task still climbs: the rule is the flag task's alone.
+    other = dict(task, payload={"kind": "something_else"})
+    assert should_escalate(other, now=later)[0] is True

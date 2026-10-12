@@ -1300,6 +1300,16 @@ async def escalate_task(
     _ensure_task_store_access(task, current_user)
     _ensure_task_actor(task, current_user)
 
+    from ..services import catalog_flags
+
+    if catalog_flags.is_flag_task(task):
+        # The same rule as the SLA scan (task_sla.should_escalate): it stays
+        # with the people who may clear a flag.
+        raise HTTPException(
+            status_code=400,
+            detail="A catalogue flag task stays with the catalogue team - it is not escalated.",
+        )
+
     current_status = canon_status(task.get("status"))
     if current_status in TERMINAL_STATUSES:
         raise HTTPException(

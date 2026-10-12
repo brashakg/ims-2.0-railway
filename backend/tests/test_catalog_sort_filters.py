@@ -628,3 +628,77 @@ def test_every_offered_value_is_one_the_list_takes(db):
     )
     assert res.status_code == 200, res.text
     assert [p["product_id"] for p in res.json()["products"]] == ["P08"]
+
+
+# ---------------------------------------------------------------------------
+# Round 4: rules the earlier fixtures could not tell apart
+# ---------------------------------------------------------------------------
+
+
+def test_a_filter_without_a_sort_lists_recently_edited_first(db):
+    # Full Rim: P01 (added 11 Oct 18:40, never edited), P02 (added 11 Oct
+    # 18:20, edited 12 Oct), P04 (added 10 Oct). Newest first would be P01,
+    # P02, P04; recently edited puts P02 first.
+    out = _list(is_active="true", frame_type="full rim")
+    assert _ids(out) == ["P02", "P01", "P04"]
+
+
+def test_a_blank_last_editor_is_never_edited(db):
+    # updated_by '' (never a person): 'Never edited' lists it, the option
+    # counts it, and its last edit is its add moment, not the later write.
+    db["products"].insert_one(dict(_extra("P08"), updated_by="", updated_at=utc(2026, 10, 12, 9, 0)))
+    out = _list(sort="name_asc", is_active="true", updated_by="none")
+    assert _ids(out) == ["P01", "P07", "P08", "P03", "P04"]
+    never = [o for o in _facets()["updated_by"] if o["value"] == "none"]
+    assert never[0]["count"] == out["total_count"] == 5
+    row = {p["product_id"]: p for p in out["products"]}["P08"]
+    assert row["last_edited_at"] == utc(2026, 10, 3, 5, 0)
+
+
+def test_brand_a_z_ignores_case(db):
+    db["products"].insert_one(dict(_extra("P08"), brand="bolle", name="Bolle Cobalt"))
+    out = _list(sort="brand_asc", is_active="true")
+    assert _ids(out) == ["P08", "P01", "P07", "P03", "P04", "P02"]
+
+
+def test_the_name_sort_falls_back_to_the_title_then_the_model(db):
+    # A spine row with no name (one made before every door minted a name).
+    no_name = {k: v for k, v in _extra("P08").items() if k != "name"}
+    db["products"].insert_one(dict(no_name, title="Bolle Cobalt", model="zz8"))
+    db["products"].insert_one(dict({k: v for k, v in _extra("P09").items() if k != "name"},
+                                   model="Zeal 1"))
+    out = _list(sort="name_asc", is_active="true")
+    assert _ids(out) == ["P08", "P01", "P07", "P03", "P04", "P02", "P09"]
+
+
+def test_missing_photos_pages_the_photo_filtered_list_in_the_chosen_sort(db):
+    # P01 and P04 have a usable photo; P02, P07 and P03 have none.
+    for pid in ("P01", "P04"):
+        db["products"].update_one({"product_id": pid},
+                                  {"$set": {"images": [f"https://cdn.example.com/{pid}.jpg"]}})
+    for photo, expected in (("missing", ["P02", "P07", "P03"]), ("has", ["P01", "P04"])):
+        seen = []
+        for skip in (0, 2, 4):
+            out = _list(sort="edited", is_active="true", photo=photo, skip=skip, limit=2)
+            assert out["total_count"] == len(expected), photo
+            seen += _ids(out)
+        assert seen == expected, photo
+
+
+def test_a_flag_on_an_inactive_product_reaches_its_cataloguer(db):
+    # P05 is inactive (a provisional PO buy is born inactive); P06 is
+    # archived. Akshay added P03 and P05.
+    akshay = {"user_id": "u-akshay", "username": "akshay", "roles": ["CATALOG_MANAGER"]}
+    flag = {"flag_id": "f9", "type": "photo_redo", "status": "open", "note": "Shoot again"}
+    for pid in ("P05", "P06"):
+        db["products"].update_one({"product_id": pid}, {"$set": {"flags": [flag]}})
+    banner = _facets(user=akshay)["flags"]
+    assert banner["open"] == 3 and banner["mine"] == 2  # P03 + P05; never the archived P06
+    assert banner["by_type"] == {"price_check": 1, "photo_redo": 2}
+    mine = _list(user=akshay, sort="name_asc", is_active="true", flag="mine")
+    assert _ids(mine) == ["P05", "P03"] and mine["total_count"] == 2
+    assert _ids(_list(sort="name_asc", is_active="true", flag="photo_redo")) == ["P05", "P04"]
+    assert sorted(_ids(_list(sort="name_asc", is_active="true", flag="any"))) == ["P03", "P04", "P05"]
+    # The other filters keep Include inactive's meaning.
+    assert _facets(user=akshay)["total"] == 5
+    assert "P05" not in _ids(_list(sort="name_asc", is_active="true", gender="men"))

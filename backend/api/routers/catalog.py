@@ -2264,6 +2264,23 @@ async def update_catalog_product(
     # second shallow copy preserves the original values.
     pre_edit = dict(existing)
 
+    # Only Restore brings an archived product back (catalog_list.
+    # switches_on_archived): the twin or the spine it would switch on. A
+    # spine that cannot be read is not written either (the mirror below is
+    # fail-soft too), so only the twin decides then.
+    if product.is_active is True:
+        _spine = None
+        try:
+            from ..dependencies import get_product_repository
+
+            _repo = get_product_repository()
+            _sid = _spine_product_id(_repo, existing)
+            _spine = _repo.find_by_id(_sid) if _sid else None
+        except Exception:  # noqa: BLE001
+            logger.warning("[CATALOG] spine read for the archive check skipped", exc_info=True)
+        if any(_catalog_list.switches_on_archived(d, True) for d in (existing, _spine)):
+            raise HTTPException(status_code=409, detail=_catalog_list.USE_RESTORE)
+
     # Additive optimistic concurrency (full-page review editor): the client
     # echoes the updated_at it loaded; a mismatch means another reviewer saved
     # in between, so 409 instead of silently clobbering their fixes. Compared
@@ -3022,6 +3039,9 @@ async def _archive_product(
     deleted_at = datetime.now(timezone.utc).isoformat()
     if product is not None:
         product.pop("_id", None)  # a twin read raw from Mongo; never $set _id
+        if not product.get("deleted_at"):
+            # Restore puts it back exactly as it was (_restore_product).
+            product[ACTIVE_BEFORE_ARCHIVE] = product.get("is_active", True) is not False
         product["is_active"] = False
         product["deleted_at"] = deleted_at
         product["deleted_by"] = actor.get("user_id")
@@ -3044,16 +3064,17 @@ async def _archive_product(
         _pr = get_product_repository()
         spine_id = spine_id or _spine_product_id(_pr, product)
         if _pr is not None and spine_id:
+            _patch: Dict[str, Any] = {
+                "is_active": False,
+                "deleted_at": deleted_at,
+                "deleted_by": actor.get("user_id"),
+            }
+            _before = _pr.find_by_id(spine_id) or {}
+            if not _before.get("deleted_at"):
+                _patch[ACTIVE_BEFORE_ARCHIVE] = _before.get("is_active", True) is not False
             # Not a catalogue edit either: no updated_by, so the last edit
             # stays where it was (ProductRepository.update).
-            _pr.update(
-                spine_id,
-                {
-                    "is_active": False,
-                    "deleted_at": deleted_at,
-                    "deleted_by": actor.get("user_id"),
-                },
-            )
+            _pr.update(spine_id, _patch)
     except Exception:  # noqa: BLE001
         logger.warning(
             "[CATALOG] spine deactivate on delete skipped for %s",
@@ -3071,6 +3092,13 @@ async def _archive_product(
         await _delist.delist_if_live(_get_db(), product, reason="deleted", actor=actor)
 
 
+# Whether the product was switched on when it was archived (archive writes
+# it, restore reads and clears it): a restore puts it back as it was.
+ACTIVE_BEFORE_ARCHIVE = "active_before_archive"
+
+RESTORED_AS_BEFORE = (
+    "Back in the catalogue switched off, as it was before it was archived."
+)
 RESTORED_SWITCHED_OFF = (
     "Back in the catalogue switched off: it is on a listing that is live on "
     "the website, so switching it on puts it back on sale there."
@@ -3100,34 +3128,50 @@ def _live_skus(skus: List[str]) -> Optional[set]:
 
 
 def _restore_product(
-    product: Optional[Dict], spine: Dict, actor: Dict, *, on_website: Optional[bool]
+    product: Optional[Dict],
+    spine: Optional[Dict],
+    actor: Dict,
+    *,
+    on_website: Optional[bool],
 ) -> Optional[str]:
-    """Undo _archive_product: deleted_at / deleted_by cleared, active again
-    in the catalogue and at the till, an audit row written. NOT re-published
-    online (owner 2026-10-12: a first publish stays a human press) -- the
-    twin is saved clean and no republish is queued, and the take-down marker
+    """THE way back from _archive_product (the Catalog page's Restore and the
+    Needs-review drawer's): deleted_at / deleted_by cleared, the product put
+    back EXACTLY as it was before the archive -- switched on only if it was
+    on then (a product switched off before it was archived comes back
+    switched off) -- and an audit row written. NOT re-published online
+    (owner 2026-10-12: a first publish stays a human press) -- the twin is
+    saved clean and no republish is queued, and the take-down marker
     (ecom.taken_down_at) stays. One case cannot be both: a product whose SKU
     is on a listing live on the website (a size whose parent listing is up,
     or a take-down that failed). Its is_active is the only thing keeping it
     off sale there (online_stock_writeback lists an inactive spine at 0), so
     it comes back SWITCHED OFF and the returned note says why; `on_website`
-    None (the read failed) does the same. Not a catalogue edit."""
-    spine_id = spine.get("product_id")
-    active = on_website is False
+    None (the read failed) does the same. `spine` None: an import with no
+    spine (the twin alone). Not a catalogue edit."""
+    spine_id = (spine or {}).get("product_id")
+    # Archived before this was remembered: switched on, as restore did then.
+    was_active = (spine or product or {}).get(ACTIVE_BEFORE_ARCHIVE) is not False
+    active = was_active and on_website is False
     if product is not None:
         product.pop("_id", None)
         product["is_active"] = active
         product["deleted_at"] = None
         product["deleted_by"] = None
+        product[ACTIVE_BEFORE_ARCHIVE] = None
         _save_catalog_product(product, mark_dirty=False)
     from ..dependencies import get_audit_repository, get_db, get_product_repository
     from ..services.name_resolver import actor_name
 
     _pr = get_product_repository()
-    if _pr is not None:
+    if _pr is not None and spine_id:
         _pr.update(
             spine_id,
-            {"is_active": active, "deleted_at": None, "deleted_by": None},
+            {
+                "is_active": active,
+                "deleted_at": None,
+                "deleted_by": None,
+                ACTIVE_BEFORE_ARCHIVE: None,
+            },
         )
     try:
         audit_repo = get_audit_repository()
@@ -3139,7 +3183,7 @@ def _restore_product(
                     "user_id": actor.get("user_id"),
                     "actor_name": actor_name(get_db(), actor),
                     "entity_type": "product",
-                    "entity_id": spine_id,
+                    "entity_id": spine_id or (product or {}).get("id"),
                     "switched_on": active,
                     "timestamp": datetime.now(timezone.utc),
                     "ts": datetime.now(timezone.utc).isoformat(),
@@ -3150,6 +3194,8 @@ def _restore_product(
         logger.warning("[CATALOG] restore audit row skipped for %s", spine_id, exc_info=True)
     if active:
         return None
+    if not was_active:
+        return RESTORED_AS_BEFORE
     return RESTORED_SWITCHED_OFF if on_website else RESTORED_UNCHECKED
 
 
@@ -3252,9 +3298,11 @@ async def bulk_restore_products(
     body: BulkProductIds,
     current_user: dict = Depends(require_roles("ADMIN")),
 ):
-    """Restore archived products (Catalog page, Flags: Archived): active again
-    in the catalogue and at the till, NOT re-published online. Per-product
-    results: done / refused with the reason."""
+    """Restore archived products (_restore_product: back as they were before
+    the archive, NOT re-published online) -- the ONE way back from an
+    archive. An id is a spine product_id (Catalog page, Flags: Archived) or
+    a catalog twin id (the Needs-review drawer), with or without a spine.
+    Per-product results: done / refused with the reason."""
     from ..dependencies import get_product_repository
 
     repo = get_product_repository()
@@ -3262,26 +3310,39 @@ async def bulk_restore_products(
         raise HTTPException(status_code=503, detail="The catalogue is not reachable")
     db = _get_db()
     ids = list(dict.fromkeys(p for p in body.product_ids if p))
-    spines = {p: repo.find_by_id(p) for p in ids}
+
+    def _pair(pid: str):
+        spine = repo.find_by_id(pid)
+        if spine is not None:
+            return spine, None
+        twin = _get_catalog_product(pid)
+        sid = _spine_product_id(repo, twin)
+        return (repo.find_by_id(sid) if sid else None), (dict(twin) if twin else None)
+
+    pairs = {p: _pair(p) for p in ids}
     live_skus = (
-        _live_skus([s.get("sku") for s in spines.values() if s]) if body.apply else set()
+        _live_skus([(s or t).get("sku") for s, t in pairs.values() if s or t])
+        if body.apply
+        else set()
     )
     results = []
     for pid in ids:
-        spine = spines[pid]
-        if spine is None:
+        spine, twin = pairs[pid]
+        doc = spine or twin  # the spine is the truth when there is one
+        if doc is None:
             results.append({"product_id": pid, "status": "refused", "reason": "Product not found"})
-        elif not spine.get("deleted_at"):
+        elif not doc.get("deleted_at"):
             results.append({"product_id": pid, "status": "refused", "reason": "Not archived"})
         elif not body.apply:
             results.append({"product_id": pid, "status": "ready"})
         else:
-            twin = _delist._resolve_twin(_delist._raw_db(db), spine)
+            if twin is None:
+                twin = _delist._resolve_twin(_delist._raw_db(db), spine)
             note = _restore_product(
                 twin,
                 spine,
                 current_user,
-                on_website=None if live_skus is None else spine.get("sku") in live_skus,
+                on_website=None if live_skus is None else doc.get("sku") in live_skus,
             )
             row: Dict[str, Any] = {
                 "product_id": pid,

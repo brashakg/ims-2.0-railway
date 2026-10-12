@@ -104,6 +104,16 @@ NEVER_EDITED = "none"
 ARCHIVED = {"deleted_at": {"$nin": [None, ""]}}
 NOT_ARCHIVED = {"deleted_at": None}
 
+USE_RESTORE = "This product is archived - use Restore"
+
+
+def switches_on_archived(doc: Optional[Dict[str, Any]], is_active: Any) -> bool:
+    """THE rule for an archived product (deleted_at set): only Restore brings
+    it back. True when a write would switch one on any other way -- every
+    edit door refuses it (409, USE_RESTORE), so the till never sells a
+    product the Catalog list hides."""
+    return is_active is True and bool((doc or {}).get("deleted_at"))
+
 
 def open_flag(type_: Optional[str] = None) -> Dict[str, Any]:
     """Products with an OPEN flag (of `type_` when given)."""
@@ -197,7 +207,10 @@ def list_query(
         clauses.append(ARCHIVED)
     else:
         clauses.append(NOT_ARCHIVED)
-        if is_active is not None:
+        # A flag reaches its cataloguer whether the product is on sale or not
+        # (a provisional PO buy is born inactive): the Flags filter lists
+        # flagged products active or not, as the banner counts them.
+        if is_active is not None and not flag:
             clauses.append({"is_active": is_active})
     if category:
         clauses.append({"category": category})
@@ -297,13 +310,12 @@ def facets(db, collection, *, include_inactive: bool, me: str, is_admin: bool) -
     """The filter options for the current catalogue: distinct values with
     counts. Counted over exactly the rows the list shows with no other filter
     (not archived; active only unless Include inactive), so picking 'Black
-    (179)' alone lists 179 products.
+    (179)' alone lists 179 products. The open-flag counts (the red banner,
+    the Flags options) cover every product that is not archived, active or
+    not -- exactly what the Flags filter lists (list_query).
 
     ponytail: one projected read counted in Python -- fine to tens of
     thousands of rows; a $facet pipeline if the catalogue ever outgrows it."""
-    scope: Dict[str, Any] = dict(NOT_ARCHIVED)
-    if not include_inactive:
-        scope["is_active"] = True
     proj = {
         "_id": 0,
         "brand": 1,
@@ -313,8 +325,10 @@ def facets(db, collection, *, include_inactive: bool, me: str, is_admin: bool) -
         "updated_by": 1,
         "updated_by_name": 1,
         "flags": 1,
+        "is_active": 1,
     }
-    rows = list(collection.find(scope, proj))
+    every = list(collection.find(NOT_ARCHIVED, proj))
+    rows = every if include_inactive else [r for r in every if r.get("is_active") is True]
     stamp_people(db, rows)
 
     out: Dict[str, Any] = {"total": len(rows), "brand": _value_options(r.get("brand") for r in rows)}
@@ -345,7 +359,7 @@ def facets(db, collection, *, include_inactive: bool, me: str, is_admin: bool) -
     open_any = 0
     mine = 0
     by_type: Counter = Counter()
-    for r in rows:
+    for r in every:
         open_types = {
             f.get("type")
             for f in (r.get("flags") or [])
