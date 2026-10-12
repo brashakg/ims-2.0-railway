@@ -571,7 +571,7 @@ def test_a_failed_website_check_restores_switched_off(env, monkeypatch):
     def _dead(*a, **k):
         raise RuntimeError("catalog_products unavailable")
 
-    monkeypatch.setattr(inventory, "skus_on_live_listings", _dead)
+    monkeypatch.setattr(inventory, "skus_on_sale_online", _dead)
     row = _restore(env, ["P2"]).json()["results"][0]
     assert row["switched_on"] is False and "could not be checked" in row["note"]
     assert env["db"].products.find_one({"product_id": "P2"})["is_active"] is False
@@ -594,7 +594,7 @@ def test_a_dead_website_read_never_says_nothing_is_live(env, monkeypatch):
     def _dead(*a, **k):
         raise RuntimeError("catalog_products unavailable")
 
-    monkeypatch.setattr(inventory, "skus_on_live_listings", _dead)
+    monkeypatch.setattr(inventory, "skus_on_sale_online", _dead)
     res = _archive(env, ["P1"], apply=False)
     assert res.status_code == 503
     assert "Could not check the website" in res.json()["detail"]
@@ -698,3 +698,159 @@ def test_imported_rows_with_equal_keys_come_in_id_order(env):
         db.catalog_products.insert_one({"id": tid, "sku": tid, "title": "Same", "is_active": True})
     for sort in ("name_asc", "name_desc", "newest", "edited"):
         assert [r["id"] for r in _imported(ADMIN, sort)] == ["T-Z1", "T-Z2", "T-Z3"], sort
+
+
+# ---------------------------------------------------------------------------
+# Who sees a flag task, who closes it (one rule: catalog_flags.clears_flags)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("role", ["SALES_STAFF", "OPTOMETRIST", "WORKSHOP_STAFF", "CASHIER"])
+def test_counter_roles_never_open_list_or_cancel_a_flag_task(env, role):
+    _flag(env, ADMIN, ["P1"])
+    (task,) = list(env["db"].tasks.find({}))
+    tid = task["task_id"]
+    counter = _user("u-c", role)
+    res = env["call"](counter, "PATCH", f"/api/v1/tasks/{tid}", json={"status": "CANCELLED"})
+    assert res.status_code == 403
+    assert [f["status"] for f in _flags(env["db"], "P1")] == ["open"]
+    assert env["db"].tasks.find_one({"task_id": tid})["status"] == "OPEN"
+    assert env["call"](counter, "GET", f"/api/v1/tasks/{tid}").status_code == 403
+    listed = env["call"](counter, "GET", "/api/v1/tasks").json()["tasks"]
+    assert tid not in [t["task_id"] for t in listed]
+    # The people who handle flags still see it.
+    for user in (ADMIN, CAT_MGR, STORE_MGR):
+        listed = env["call"](user, "GET", "/api/v1/tasks").json()["tasks"]
+        assert tid in [t["task_id"] for t in listed]
+
+
+@pytest.mark.parametrize("role", ["STORE_MANAGER", "AREA_MANAGER"])
+def test_closing_a_flag_task_takes_the_people_who_mark_fixed(env, role):
+    _flag(env, ADMIN, ["P1"])
+    (task,) = list(env["db"].tasks.find({}))
+    tid = task["task_id"]
+    mgr = _user("u-m", role)
+    res = env["call"](mgr, "PATCH", f"/api/v1/tasks/{tid}/complete",
+                      json={"completion_notes": "done"})
+    assert res.status_code == 403
+    assert [f["status"] for f in _flags(env["db"], "P1")] == ["open"]
+    cancel = env["call"](mgr, "PATCH", f"/api/v1/tasks/{tid}", json={"status": "CANCELLED"})
+    assert cancel.status_code == 403
+    assert [f["status"] for f in _flags(env["db"], "P1")] == ["open"]
+
+
+# ---------------------------------------------------------------------------
+# The archive dialog: what is on sale online, and a dead stock read
+# ---------------------------------------------------------------------------
+
+
+def test_the_dry_run_calls_a_live_listing_live_without_an_inventory_item(env):
+    # T-P2 is PUBLISHED with a gid but IMS never recorded its inventory item:
+    # the take-down still runs on it, so the dialog must say it is live.
+    env["db"].catalog_products.update_one(
+        {"id": "T-P2"},
+        {"$set": {"ecom.status": "PUBLISHED",
+                  "ecom.shopify_product_id": "gid://shopify/Product/778"}},
+    )
+    rows = {r["product_id"]: r for r in _archive(env, ["P2"], apply=False).json()["results"]}
+    assert rows["P2"]["live_online"] is True
+    _archive(env, ["P2"])
+    assert [c["id"] for c in env["spy"].calls] == ["T-P2"]
+
+
+def test_the_dry_run_calls_a_listing_with_a_shared_inventory_item_live(env):
+    # T-P2 claims T-P1's inventory item: the stock writer sends neither, yet
+    # both listings are up on the website.
+    db = env["db"]
+    ecom = dict(db.catalog_products.find_one({"id": "T-P1"})["ecom"])
+    ecom["shopify_product_id"] = "gid://shopify/Product/779"
+    db.catalog_products.update_one({"id": "T-P2"}, {"$set": {"ecom": ecom}})
+    rows = {r["product_id"]: r for r in _archive(env, ["P1", "P2"], apply=False).json()["results"]}
+    assert rows["P1"]["live_online"] is True and rows["P2"]["live_online"] is True
+
+
+def test_a_dead_stock_read_never_says_no_units_at_the_shops(env, monkeypatch):
+    from api.services import item_events
+
+    def _dead(*a, **k):
+        raise RuntimeError("stock_units unavailable")
+
+    monkeypatch.setattr(item_events, "on_hand_match", _dead)
+    res = _archive(env, ["P1"], apply=False)
+    assert res.status_code == 503
+    assert "Could not check the stock at the shops" in res.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Counter roles never read attribution or flags, by any product door
+# ---------------------------------------------------------------------------
+
+
+_PRIVATE = ("created_by", "created_by_name", "updated_by", "updated_by_name", "deleted_by",
+            "flags")
+
+
+@pytest.mark.parametrize("role", ["CASHIER", "SALES_STAFF"])
+def test_no_product_door_hands_a_counter_role_attribution_or_flags(env, role):
+    _flag(env, ADMIN, ["P1"], note="MRP looks low")
+    env["db"].products.update_one({"product_id": "P1"}, {"$set": {"updated_by": "u-mansi"}})
+    _archive(env, ["P2"])
+    counter = _user("u-c", role)
+    docs = list(_rows(counter).values())  # the legacy default path lists archived rows too
+    docs.append(asyncio.run(products_mod.get_product("P1", current_user=counter)))
+    docs.append(asyncio.run(products_mod.get_product_by_sku("SKU-P1", current_user=counter)))
+    docs.append(asyncio.run(products_mod.get_product("P2", current_user=counter)))
+    assert {d["product_id"] for d in docs} >= {"P1", "P2"}
+    for d in docs:
+        assert not [f for f in _PRIVATE if f in d], d["product_id"]
+    # The cataloguer ladder still reads them.
+    admin_p1 = asyncio.run(products_mod.get_product("P1", current_user=ADMIN))
+    assert admin_p1["flags"][0]["note"] == "MRP looks low"
+    assert admin_p1["created_by"] == "u-mansi"
+    assert asyncio.run(products_mod.get_product("P2", current_user=ADMIN))["deleted_by"] == "u-admin"
+
+
+# ---------------------------------------------------------------------------
+# The review list (imports with no spine yet): its own dates and edits
+# ---------------------------------------------------------------------------
+
+
+def _three_imports(db):
+    db.catalog_products.delete_many({})
+    for tid, day in (("T-A", 1), ("T-B", 9), ("T-C", 5)):
+        db.catalog_products.insert_one({
+            "id": tid, "sku": f"IMP-{tid}", "title": f"Import {tid}", "needs_review": True,
+            "is_active": True, "migrated_at": datetime(2026, 10, day, 6, 0),
+        })
+
+
+def test_imports_with_no_spine_sort_on_their_import_date(env):
+    _three_imports(env["db"])
+    legacy = [r["id"] for r in _imported(ADMIN, None)]
+    assert legacy == ["T-B", "T-C", "T-A"]
+    assert [r["id"] for r in _imported(ADMIN, "newest")] == legacy
+    assert [r["id"] for r in _imported(ADMIN, "edited")] == legacy  # none edited yet
+    rows = _imported(ADMIN, "oldest")
+    assert [r["id"] for r in rows] == ["T-A", "T-C", "T-B"]
+    assert [r["created_at"].day for r in rows] == [1, 5, 9]  # the Added column's day
+    assert all(r["created_by"] is None for r in rows)  # who added it is never guessed
+
+
+def test_an_edit_saved_on_an_import_is_its_last_edit(env):
+    _three_imports(env["db"])
+    res = env["call"](CAT_MGR, "PUT", "/api/v1/catalog/products/T-A", json={"name": "Import A fixed"})
+    assert res.status_code == 200, res.text
+    rows = _imported(ADMIN, "edited")
+    assert [r["id"] for r in rows] == ["T-A", "T-B", "T-C"]
+    assert rows[0]["updated_by"] == "u-mansi" and rows[0]["updated_by_name"] == "Mansi Kumari"
+    assert rows[0]["last_edited_at"] is not None
+
+
+def test_a_copy_edit_on_a_twin_reaches_its_spine(env):
+    res = env["call"](CAT_MGR, "PUT", "/api/v1/catalog/products/T-P2",
+                      json={"name": "Frame P2 renamed"})
+    assert res.status_code == 200, res.text
+    spine = env["db"].products.find_one({"product_id": "P2"})
+    assert spine["updated_by"] == "u-mansi" and spine["edited_at"] is not None
+    rows = {r["id"]: r for r in _imported(ADMIN, "edited")}
+    assert rows["T-P2"]["updated_by"] == "u-mansi"

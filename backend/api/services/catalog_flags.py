@@ -52,6 +52,28 @@ FIXER_ROLES = ("ADMIN", "CATALOG_MANAGER")
 TASK_KIND = "catalog_flag"
 
 
+def _roles(user: Optional[Dict[str, Any]]) -> set:
+    return {str(r).strip().upper() for r in ((user or {}).get("roles") or [])}
+
+
+def is_flag_task(task: Optional[Dict[str, Any]]) -> bool:
+    return ((task or {}).get("payload") or {}).get("kind") == TASK_KIND
+
+
+def handles_flags(user: Optional[Dict[str, Any]]) -> bool:
+    """Who sees a flag task at all (its note, its products): the people who
+    raise flags and the people who clear them. Counter roles never handle
+    flags (owner ruling)."""
+    return bool(_roles(user) & {"SUPERADMIN", *FLAGGER_ROLES, *FIXER_ROLES})
+
+
+def clears_flags(user: Optional[Dict[str, Any]]) -> bool:
+    """THE rule for who may clear a flag, by every door: Mark fixed (POST
+    /catalog/flags/fix, require_roles(*FIXER_ROLES)) and closing its task on
+    the Tasks screen (complete = fixed, cancel = withdrawn)."""
+    return bool(_roles(user) & {"SUPERADMIN", *FIXER_ROLES})
+
+
 def _deps():
     from .. import dependencies as deps
 

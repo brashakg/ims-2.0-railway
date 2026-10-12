@@ -890,14 +890,16 @@ async def list_products(
     # one of them routes through services/catalog_list (one query for the
     # page AND its count, sorted on the server across the whole result).
     sort: Optional[str] = Query(None, pattern=_catalog_list.SORT_PATTERN),
-    frame_color: Optional[str] = Query(None, max_length=80),
-    lens_colour: Optional[str] = Query(None, max_length=80),
-    gender: Optional[str] = Query(None, max_length=80),
-    shape: Optional[str] = Query(None, max_length=80),
-    frame_type: Optional[str] = Query(None, max_length=80),
-    frame_material: Optional[str] = Query(None, max_length=80),
+    frame_color: Optional[str] = Query(None, max_length=_catalog_list.VALUE_MAX),
+    lens_colour: Optional[str] = Query(None, max_length=_catalog_list.VALUE_MAX),
+    gender: Optional[str] = Query(None, max_length=_catalog_list.VALUE_MAX),
+    shape: Optional[str] = Query(None, max_length=_catalog_list.VALUE_MAX),
+    frame_type: Optional[str] = Query(None, max_length=_catalog_list.VALUE_MAX),
+    frame_material: Optional[str] = Query(None, max_length=_catalog_list.VALUE_MAX),
     updated_by: Optional[str] = Query(
-        None, max_length=80, description="Last edited by this user_id; 'none' = never edited."
+        None,
+        max_length=_catalog_list.VALUE_MAX,
+        description="Last edited by this user_id; 'none' = never edited.",
     ),
     date_on: Optional[str] = Query(None, pattern="^(added|edited)$"),
     date_from: Optional[str] = Query(
@@ -990,10 +992,7 @@ async def list_products(
     # nor the attribution fields on the returned docs -- otherwise any staff
     # account could reconstruct the exact roster + per-user counts that
     # GET /products/cataloguers deliberately withholds from them.
-    can_see_attribution = bool(
-        set(current_user.get("roles") or [])
-        & ({"SUPERADMIN"} | set(_CATALOGUER_VIEW_ROLES))
-    )
+    can_see_attribution = _sees_attribution(current_user)
     if (created_by or new["updated_by"]) and not can_see_attribution:
         raise HTTPException(
             status_code=403,
@@ -1180,21 +1179,7 @@ async def list_products(
                 if isinstance(imgs, list) and imgs and isinstance(imgs[0], str):
                     p["image_url"] = imgs[0]
 
-        # Attribution stripping for non-manager callers (panel finding 4):
-        # covers the newly stamped names AND the pre-existing raw created_by
-        # user_id, so the roster stays non-derivable from this endpoint. The
-        # catalogue flags (notes for the cataloguers) go with them: the till
-        # and the other counter screens get the rows exactly as before.
-        if not can_see_attribution:
-            for p in products:
-                for _f in (
-                    "created_by",
-                    "created_by_name",
-                    "updated_by",
-                    "updated_by_name",
-                    "flags",
-                ):
-                    p.pop(_f, None)
+        _strip_attribution(products, current_user)
         products = mask_cost_list(products, current_user, "product")
 
         if _scan:
@@ -2440,6 +2425,35 @@ _CATALOGUER_VIEW_ROLES = (
     "CATALOG_MANAGER",
 )
 
+# What only the cataloguer ladder sees on a product (panel finding 4): who
+# added, edited or archived it (the roster GET /products/cataloguers
+# withholds) and its catalogue flags (notes for the cataloguers). The till
+# and the other counter screens get every other field exactly as before.
+_ATTRIBUTION_ONLY = (
+    "created_by",
+    "created_by_name",
+    "updated_by",
+    "updated_by_name",
+    "deleted_by",
+    "flags",
+)
+
+
+def _sees_attribution(current_user: dict) -> bool:
+    return bool(
+        set(current_user.get("roles") or []) & ({"SUPERADMIN"} | set(_CATALOGUER_VIEW_ROLES))
+    )
+
+
+def _strip_attribution(products: List[Dict[str, Any]], current_user: dict):
+    """THE strip, in place, for every door that hands out a product doc
+    (GET /products, /products/{id}, /products/sku/{sku}). Returns the list."""
+    if not _sees_attribution(current_user):
+        for p in products:
+            for f in _ATTRIBUTION_ONLY:
+                p.pop(f, None)
+    return products
+
 
 @router.get("/facets")
 async def catalog_facets(
@@ -3472,6 +3486,7 @@ async def get_product_by_sku(sku: str, current_user: dict = Depends(get_current_
     if repo is not None:
         product = repo.find_by_sku(sku)
         if product is not None:
+            _strip_attribution([product], current_user)
             return mask_cost(product, current_user, "product")
         raise HTTPException(status_code=404, detail="Product not found")
 
@@ -3492,6 +3507,7 @@ async def get_product(product_id: str, current_user: dict = Depends(get_current_
                 imgs = product.get("images")
                 if isinstance(imgs, list) and imgs and isinstance(imgs[0], str):
                     product["image_url"] = imgs[0]
+            _strip_attribution([product], current_user)
             return mask_cost(product, current_user, "product")
         raise HTTPException(status_code=404, detail="Product not found")
 

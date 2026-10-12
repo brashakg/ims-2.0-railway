@@ -1681,11 +1681,11 @@ def _twin_mrp(p: Dict) -> float:
 
 
 # The imported (review) segment's Sort by: the same eight choices as
-# services/catalog_list.SORTS. Each key reads (twin, its spine's facts): the
-# dates are the SPINE's -- the very values the Added column shows on the same
-# row (_spine_facts) -- never the twin's own, which carry no dates in prod.
-# "edited" is the spine's last_edited_at (catalog_list.LAST_EDITED_AT). A row
-# with no spine has no dates: '-' in the column, '' here.
+# services/catalog_list.SORTS. Each key reads (twin, the row's facts): the
+# dates are the very values the Added column shows on the same row
+# (_row_facts) -- its spine's, or for an import with no spine yet its own
+# import date and its own last edit. "edited" is last_edited_at
+# (catalog_list.last_edited_at, the one rule).
 _IMPORTED_SORTS = {
     "edited": (lambda p, s: _iso(s.get("last_edited_at")), True),
     "newest": (lambda p, s: _iso(s.get("created_at")), True),
@@ -1711,12 +1711,59 @@ _ATTRIBUTION_FIELDS = (
 )
 
 
-def _spine_facts(docs: List[Dict]) -> List[Dict]:
-    """THE added / edited facts of each imported row (same order), read from
-    its spine (pim_product_id / product_id, then sku) in one batched read,
-    with the spine's last_edited_at computed by catalog_list.LAST_EDITED_AT.
-    {} for a row with no spine (or when the read fails): the page shows '-'
-    honestly, and the sort reads the same nothing."""
+# An imported row's "added" moment when it has no spine: the import date
+# (the 4,393 BVI docs carry migrated_at, no created_at) -- _catalog_sort_key's
+# coalesce, the legacy newest-first order.
+_TWIN_ADDED = {"$ifNull": ["$created_at", "$migrated_at"]}
+
+
+def _own_facts(docs: List[Dict]) -> Dict[str, Dict]:
+    """{twin id: its own facts} for imports with no spine yet: the import date
+    and the last edit saved on the twin itself (PUT /catalog/products/{id}
+    stamps it through catalog_list.edit_stamp), in one read. Who ADDED it is
+    never guessed from the twin. {} when the read fails."""
+    coll = _catalog_coll()
+    ids = [d.get("id") for d in docs if d.get("id")]
+    if coll is None or not ids:
+        return {}
+    proj = {
+        "_id": 0,
+        "id": 1,
+        "updated_by": 1,
+        "updated_by_name": 1,
+        "updated_at": 1,
+        "created_at": _TWIN_ADDED,
+        "last_edited_at": _catalog_list.last_edited_at(_TWIN_ADDED),
+    }
+    try:
+        return {
+            str(r["id"]): r
+            for r in coll.aggregate([{"$match": {"id": {"$in": ids}}}, {"$project": proj}])
+        }
+    except Exception:  # noqa: BLE001 -- the column just shows '-'
+        logger.warning("[CATALOG] imported-row facts read failed", exc_info=True)
+        return {}
+
+
+def _row_facts(docs: List[Dict]) -> List[Dict]:
+    """THE added / edited facts of each imported row (same order): its
+    spine's (_spine_facts) when it has one -- every edit of the row reaches
+    the spine (the twin PUT stamps it) -- else its own (_own_facts). {} when
+    neither is readable: the page shows '-' honestly, the sort reads the same
+    nothing."""
+    spine = _spine_facts(docs)
+    if spine is None:
+        return [{} for _ in docs]
+    own = _own_facts([d for d, s in zip(docs, spine) if not s])
+    return [s or own.get(str(d.get("id") or "")) or {} for d, s in zip(docs, spine)]
+
+
+def _spine_facts(docs: List[Dict]) -> Optional[List[Dict]]:
+    """The added / edited facts of each imported row's spine (same order),
+    read by pim_product_id / product_id, then sku, in one batched read, with
+    the spine's last_edited_at computed by catalog_list.LAST_EDITED_AT. {}
+    for a row with no spine; None when the read fails (unknown, never "no
+    spine")."""
     from ..dependencies import get_product_repository
 
     repo = get_product_repository()
@@ -1751,7 +1798,7 @@ def _spine_facts(docs: List[Dict]) -> List[Dict]:
                 by_sku.setdefault(str(s["sku"]), s)
     except Exception:  # noqa: BLE001 -- the column just shows '-'
         logger.warning("[CATALOG] spine attribution read failed", exc_info=True)
-        return [{} for _ in docs]
+        return None
     return [
         by_key.get(str(d.get("id") or "")) or by_sku.get(str(d.get("sku") or "")) or {}
         for d in docs
@@ -1759,8 +1806,8 @@ def _spine_facts(docs: List[Dict]) -> List[Dict]:
 
 
 def _stamp_spine_attribution(docs: List[Dict], facts: List[Dict]) -> None:
-    """Put each row's spine facts (_spine_facts, same order) on it, in place,
-    and the names from users (catalog_list.stamp_people)."""
+    """Put each row's facts (_row_facts, same order) on it, in place, and the
+    names from users (catalog_list.stamp_people)."""
     from ..dependencies import get_db
 
     for d, spine in zip(docs, facts):
@@ -1810,7 +1857,8 @@ async def list_catalog_products(
         description=(
             "The Catalog page's Sort by (owner 2026-10-12). Absent = the "
             "legacy newest-first order. Given, the rows also carry who added "
-            "/ last edited them, read from their spine (manager roles)."
+            "/ last edited them, from their spine or, for an import with no "
+            "spine yet, its own import date and edit (manager roles)."
         ),
     ),
     current_user: dict = Depends(get_current_user),
@@ -1876,10 +1924,10 @@ async def list_catalog_products(
     if sort:
         # The whole filtered list, then the page; the id breaks ties (a stable
         # sort keeps the id order among equal keys, reversed or not) so pages
-        # never overlap. The dates are the spine's, as the column shows them.
+        # never overlap. The dates are the row's facts, as the column shows.
         key, reverse = _IMPORTED_SORTS[sort]
         rows = sorted(
-            zip(products, _spine_facts(products)), key=lambda t: str(t[0].get("id") or "")
+            zip(products, _row_facts(products)), key=lambda t: str(t[0].get("id") or "")
         )
         rows.sort(key=lambda t: key(*t), reverse=reverse)
         products = [p for p, _ in rows]
@@ -2395,13 +2443,14 @@ async def update_catalog_product(
 
     existing["updated_at"] = datetime.now().isoformat()
     # Per-user attribution (multiple staff catalogue in parallel): WHO made
-    # this edit, for performance tracking and mistake tracing. Same fields
-    # convention as the other routers' created_by_name; created_by is never
-    # overwritten here.
-    existing["updated_by"] = current_user.get("user_id")
-    existing["updated_by_name"] = current_user.get("full_name") or current_user.get(
-        "username"
+    # this edit and WHEN -- THE edit stamp (catalog_list.edit_stamp), the
+    # fields the review list reads for an import with no spine yet.
+    # created_by is never overwritten here.
+    _edit = _catalog_list.edit_stamp(
+        current_user.get("user_id"),
+        current_user.get("full_name") or current_user.get("username"),
     )
+    existing.update(_edit)
 
     # Promote is the ONLY writer of the review/promote flags (see the stamp in
     # promote_catalog_product): strip them from the WRITE (a copy -- the
@@ -2537,15 +2586,11 @@ async def update_catalog_product(
             if product.is_active is not None:
                 _patch["is_active"] = existing.get("is_active")
             _patch = {k: v for k, v in _patch.items() if v is not None}
-            if _patch:
-                # A person's change to the product: the spine records who and
-                # when (catalog_list.edit_stamp; the Catalog page reads it).
-                _patch.update(
-                    _catalog_list.edit_stamp(
-                        current_user.get("user_id"), current_user.get("username")
-                    )
-                )
-                _pr.update(_spine_id, _patch)
+            # A person's change to the product, whatever it touched: the
+            # spine records who and when (the same stamp as the twin above),
+            # so the Catalog page and the review list read ONE last edit.
+            _patch.update(_edit)
+            _pr.update(_spine_id, _patch)
     except Exception:  # noqa: BLE001
         logger.warning(
             "[CATALOG] spine sync on update skipped for %s", product_id, exc_info=True
@@ -3037,18 +3082,18 @@ RESTORED_UNCHECKED = (
 
 
 def _live_skus(skus: List[str]) -> Optional[set]:
-    """THE "is this SKU's listing live on the website" reader
-    (shopify_push.inventory.skus_on_live_listings: a size is judged by its
-    PARENT's listing, a failed take-down is still live) for the archive and
-    restore doors. None when the read failed: unknown, never "nothing is
-    live"."""
-    from ..services.shopify_push.inventory import skus_on_live_listings
+    """THE "is this SKU on sale on the website" reader for the archive and
+    restore doors (shopify_push.inventory.skus_on_sale_online: its listing is
+    up -- a size judged by its PARENT's, a failed take-down still up -- even
+    where the stock writer could not address it). None when the read failed:
+    unknown, never "nothing is live"."""
+    from ..services.shopify_push.inventory import skus_on_sale_online
 
     keys = [k for k in skus if k]
     if not keys:
         return set()
     try:
-        return skus_on_live_listings(_get_db(), keys, strict=True)
+        return skus_on_sale_online(_get_db(), keys, strict=True)
     except Exception:  # noqa: BLE001
         logger.warning("[CATALOG] live-listing read failed", exc_info=True)
         return None
@@ -3116,24 +3161,28 @@ class BulkProductIds(BaseModel):
     apply: bool = False
 
 
-def _in_stock_units(product_ids: List[str]) -> Dict[str, int]:
+def _in_stock_units(product_ids: List[str]) -> Optional[Dict[str, int]]:
     """Units still physically at the shops, per product (the one on-hand
-    rule, reserved units included -- they are on a shelf)."""
+    rule, reserved units included -- they are on a shelf). None when the
+    read failed: unknown, never "no units" (as _live_skus)."""
     from ..services.item_events import on_hand_match
 
+    if not product_ids:
+        return {}
     db = _get_db()
     out: Dict[str, int] = {}
-    if db is None or not product_ids:
-        return out
     try:
+        if db is None:
+            raise RuntimeError("the database is not reachable")
         for unit in db["stock_units"].find(
             {"$and": [{"product_id": {"$in": product_ids}}, on_hand_match(include_reserved=True)]},
             {"product_id": 1},
         ):
             pid = unit.get("product_id")
             out[pid] = out.get(pid, 0) + 1
-    except Exception:  # noqa: BLE001 -- the dialog just says nothing on stock
+    except Exception:  # noqa: BLE001
         logger.warning("[CATALOG] stock read for the archive dialog failed", exc_info=True)
+        return None
     return out
 
 
@@ -3165,13 +3214,19 @@ async def bulk_archive_products(
         pid for pid, s in spines.items() if s and live_skus and s.get("sku") in live_skus
     }
     stock = _in_stock_units(ids)
+    if stock is None and not body.apply:
+        # Nor "none of them has units left at the shops" on a dead read.
+        raise HTTPException(
+            status_code=503,
+            detail="Could not check the stock at the shops right now. Try again in a minute.",
+        )
     db = _get_db()
     results = []
     for pid in ids:
         spine = spines[pid]
         row: Dict[str, Any] = {
             "product_id": pid,
-            "in_stock_units": stock.get(pid, 0),
+            "in_stock_units": None if stock is None else stock.get(pid, 0),
             "live_online": pid in live,
         }
         if spine is None:

@@ -45,13 +45,19 @@ from .name_resolver import user_name_map
 # into edited_at before any later write that is not an edit can move it; a
 # product never edited counts by its created_at (owner ruling 2026-10-12:
 # Recently edited is the default sort).
-LAST_EDITED_AT: Dict[str, Any] = {
-    "$cond": [
-        {"$gt": [{"$ifNull": ["$updated_by", ""]}, ""]},
-        {"$ifNull": ["$edited_at", "$updated_at"]},
-        "$created_at",
-    ]
-}
+def last_edited_at(added: Any = "$created_at") -> Dict[str, Any]:
+    """The rule as a Mongo expression; `added` is where the row keeps its add
+    moment (an import with no spine keeps its import date, catalog.py)."""
+    return {
+        "$cond": [
+            {"$gt": [{"$ifNull": ["$updated_by", ""]}, ""]},
+            {"$ifNull": ["$edited_at", "$updated_at"]},
+            added,
+        ]
+    }
+
+
+LAST_EDITED_AT: Dict[str, Any] = last_edited_at()
 
 
 def edit_stamp(user_id: Optional[str], name: Optional[str]) -> Dict[str, Any]:
@@ -107,9 +113,24 @@ def open_flag(type_: Optional[str] = None) -> Dict[str, Any]:
     return {"flags": {"$elemMatch": cond}}
 
 
+# What a value is trimmed of, in the options' grouping AND the list's match
+# (one set): every character Python's strip() or the browser's trim() calls
+# a space. Spelled out, never \s -- MongoDB's \s is ASCII only (PCRE without
+# UCP), so 'Black' + a non-breaking space would count under Black in the
+# options yet not list under it.
+_WS = "".join(chr(c) for c in range(0x3001) if chr(c).isspace()) + chr(0xFEFF)
+_WS_RUN = "[" + _WS + "]*"
+
+# The longest value a filter takes (GET /products Query max_length) and so
+# the longest the options offer: an option the list then refuses would be a
+# 422 where the count promised rows. The page keeps 120 characters of each
+# address value too (catalogListState.readFilters).
+VALUE_MAX = 120
+
+
 def same_value(text: str) -> Dict[str, Any]:
-    """The stored value equals `text`, trimmed and case-insensitive."""
-    return {"$regex": r"^\s*" + re.escape(text.strip()) + r"\s*$", "$options": "i"}
+    """The stored value equals `text`, trimmed (_WS) and case-insensitive."""
+    return {"$regex": "^" + _WS_RUN + re.escape(text.strip(_WS)) + _WS_RUN + "$", "$options": "i"}
 
 
 def _day(text: Optional[str]) -> Optional[date]:
@@ -254,15 +275,18 @@ def stamp_people(db, docs: Iterable[Dict[str, Any]]) -> None:
 
 def _value_options(values: Iterable[Any]) -> List[Dict[str, Any]]:
     """Distinct values with counts, grouped the way same_value matches them;
-    each option shows its most common spelling."""
+    each option shows its most common spelling. A value longer than
+    VALUE_MAX is no option (no filter could take it). ponytail: such a
+    product still lists unfiltered; nothing in the catalogue comes close."""
     counts: Counter = Counter()
     spellings: Dict[str, Counter] = defaultdict(Counter)
     for v in values:
-        if not isinstance(v, str) or not v.strip():
+        v = v.strip(_WS) if isinstance(v, str) else ""
+        if not v or len(v) > VALUE_MAX:
             continue
-        key = v.strip().lower()
+        key = v.lower()
         counts[key] += 1
-        spellings[key][v.strip()] += 1
+        spellings[key][v] += 1
     opts = [
         {"value": spellings[k].most_common(1)[0][0], "count": n} for k, n in counts.items()
     ]

@@ -579,3 +579,52 @@ def test_last_edited_is_one_rule_a_write_that_is_not_an_edit_moves_nothing(db, c
     cache.store.clear()  # (an edit door busts the list cache)
     rows = _list(sort="edited", is_active="true")["products"]
     assert rows[0]["product_id"] == "P03" and rows[0]["updated_by_name"] == "Mansi Kumari"
+
+
+# ---------------------------------------------------------------------------
+# An option the server offers is always one its list takes
+# ---------------------------------------------------------------------------
+
+
+def _extra(pid, **attrs):
+    return {
+        "product_id": pid, "sku": f"SKU-{pid}", "name": f"Frame {pid}", "brand": "Carrera",
+        "category": "FRAME", "mrp": 1000, "is_active": True, "attributes": attrs,
+        "created_by": "u-mansi", "created_at": utc(2026, 10, 3, 5, 0),
+    }
+
+
+def test_a_value_with_a_unicode_space_counts_and_lists_alike(db):
+    import re
+
+    db["products"].insert_one(_extra("P08", frame_color="Black "))
+    db["products"].insert_one(_extra("P09", frame_color="　black﻿"))
+    # The match read the way MongoDB reads it: PCRE without UCP, where \s is
+    # ASCII only (mongomock's Python re would hide the difference).
+    pat = re.compile(catalog_list.same_value("Black")["$regex"], re.I | re.ASCII)
+    for ch in catalog_list._WS:
+        assert pat.match("Black" + ch) and pat.match(ch + "black"), hex(ord(ch))
+    black = [o for o in _facets()["frame_color"] if o["value"].lower() == "black"]
+    assert [o["count"] for o in black] == [5]
+    assert _list(sort="edited", frame_color=black[0]["value"])["total_count"] == 5
+
+
+def test_every_offered_value_is_one_the_list_takes(db):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from api.routers.auth import get_current_user
+
+    longest = "Acetate " + "x" * (catalog_list.VALUE_MAX - 8)
+    db["products"].insert_one(_extra("P08", frame_material=longest))
+    db["products"].insert_one(_extra("P09", frame_material=longest + "y"))
+    offered = [o["value"] for o in _facets()["frame_material"]]
+    assert longest in offered and longest + "y" not in offered
+    app = FastAPI()
+    app.include_router(products_mod.router, prefix="/api/v1/products")
+    app.dependency_overrides[get_current_user] = lambda: ADMIN
+    res = TestClient(app).get(
+        "/api/v1/products", params={"frame_material": longest, "sort": "edited"}
+    )
+    assert res.status_code == 200, res.text
+    assert [p["product_id"] for p in res.json()["products"]] == ["P08"]
