@@ -54,6 +54,8 @@ import hashlib
 import uuid
 from datetime import datetime, timezone
 
+from .cost_mask import mask_cost
+
 COLLECTION = "blind_stock_takes"
 ADJUSTMENT_COLLECTION = "stock_adjustment_proposals"
 TOLERANCE_KEY = "inventory.blind_count_tolerance_units"
@@ -180,19 +182,23 @@ def redact_for_counter(session, user, reopen_roles=None):
     on-hand / variance / summary while the session is OPEN *or REOPENED* (no
     anchoring -- a reopened session is being RE-counted blind, so the prior
     lock's revealed figures must stay hidden from the counter). After a manager
-    LOCK the reveal is visible to everyone (the count is done)."""
+    LOCK the reveal is visible to everyone (the count is done) -- in units: the
+    unit cost and the variance at cost go to the roles that see product cost
+    only (services/cost_mask, owner ruling D7), before and after the lock."""
     if session is None:
         return None
-    if session.get("status") not in (STATUS_OPEN, STATUS_REOPENED):
-        return session
-    if _is_manager(user, reopen_roles):
-        return session
+    if session.get("status") not in (STATUS_OPEN, STATUS_REOPENED) or _is_manager(
+        user, reopen_roles
+    ):
+        return mask_cost(session, user, "product")
     out = {k: v for k, v in session.items() if k not in _REVEAL_FIELDS}
+    # No expected figure, no verdict and no variance of any kind (units or
+    # value) before the lock.
     out["items"] = [{kk: vv for kk, vv in (it or {}).items()
-                     if kk not in ("expected", "variance_units", "verdict", "variance_value_paise")}
+                     if kk not in ("expected", "verdict") and not kk.startswith("variance")}
                     for it in (session.get("items") or [])]
     out["_blind_redacted"] = True
-    return out
+    return mask_cost(out, user, "product")
 
 
 class BlindStockTakeEngine:

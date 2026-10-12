@@ -17,6 +17,7 @@ import {
   Target,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import { PRODUCT_COST_ROLES } from '../common/CostCell';
 import { inventoryApi } from '../../services/api/inventory';
 import clsx from 'clsx';
 
@@ -47,15 +48,19 @@ interface AlertStats {
   high: number;
   medium: number;
   low: number;
-  deadStockValue: number;
-  recommendedRestockValue: number;
+  // At cost: absent for a role that does not see product cost (owner ruling D7).
+  deadStockValue?: number;
+  recommendedRestockValue?: number;
 }
 
 type AlertFilter = 'all' | 'DEAD_STOCK' | 'LOW_STOCK' | 'REORDER_ALERT' | 'FAST_MOVING' | 'OVERSTOCK';
 type SeverityFilter = 'all' | 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW';
 
 export function StockAlertsOverview() {
-  const { user } = useAuth();
+  const { user, hasRole } = useAuth();
+  // Dead-stock / restock value and each alert's impact are at cost: the
+  // managers only (counter staff -- workshop -- open this screen too).
+  const showCost = hasRole(PRODUCT_COST_ROLES);
   const [alerts, setAlerts] = useState<StockAlert[]>([]);
   const [stats, setStats] = useState<AlertStats>({
     totalAlerts: 0,
@@ -173,14 +178,18 @@ export function StockAlertsOverview() {
           <p className="text-xs font-semibold text-orange-700 uppercase tracking-wider">High</p>
           <p className="figure text-3xl text-orange-900 mt-2">{stats.high}</p>
         </div>
-        <div className="bg-green-50 border border-green-200 rounded-lg p-4">
-          <p className="text-xs font-semibold text-green-700 uppercase tracking-wider">Dead Stock Value</p>
-          <p className="figure text-2xl text-green-900 mt-2">₹{(stats.deadStockValue / 1000).toFixed(0)}K</p>
-        </div>
-        <div className="bg-purple-50 border border-purple-200 rounded-lg p-4">
-          <p className="text-xs font-semibold text-purple-700 uppercase tracking-wider">Restock Value</p>
-          <p className="figure text-2xl text-purple-900 mt-2">₹{(stats.recommendedRestockValue / 1000).toFixed(0)}K</p>
-        </div>
+        {showCost && (
+          <>
+            <div className="bg-green-50 border border-green-200 rounded-lg p-4">
+              <p className="text-xs font-semibold text-green-700 uppercase tracking-wider">Dead Stock Value</p>
+              <p className="figure text-2xl text-green-900 mt-2">₹{((stats.deadStockValue ?? 0) / 1000).toFixed(0)}K</p>
+            </div>
+            <div className="bg-purple-50 border border-purple-200 rounded-lg p-4">
+              <p className="text-xs font-semibold text-purple-700 uppercase tracking-wider">Restock Value</p>
+              <p className="figure text-2xl text-purple-900 mt-2">₹{((stats.recommendedRestockValue ?? 0) / 1000).toFixed(0)}K</p>
+            </div>
+          </>
+        )}
       </div>
 
       {/* Filters */}
@@ -302,7 +311,7 @@ export function StockAlertsOverview() {
                     )}
                   </div>
 
-                  {alert.costImpact && (
+                  {showCost && !!alert.costImpact && (
                     <div className="text-sm opacity-75">
                       <span className="font-medium">Financial Impact: </span>
                       ₹{alert.costImpact.toLocaleString('en-IN')}
