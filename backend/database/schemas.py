@@ -921,6 +921,22 @@ INDEXES = {
             },
             "name": "uniq_nopo_bill_hash",
         },
+        # D14: one live "Bought without PO" receipt per supplier bill -- the
+        # supplier + the bill's identity (vendor_invoice_no_norm, financial
+        # year + folded number) in ANY shop, as the app rule reads it. The
+        # atomic twin of the number half of _find_duplicate_receipt for two
+        # walk-in receipts of one numbered bill (uniq_std_vendor_invoice_store
+        # is STANDARD-only and per shop). A VOID frees it.
+        {
+            "keys": [("vendor_id", 1), ("vendor_invoice_no_norm", 1)],
+            "unique": True,
+            "partialFilterExpression": {
+                "grn_subtype": "NO_PO",
+                "vendor_invoice_no_norm": {"$type": "string"},
+                "status": {"$in": ["PENDING", "PARTIALLY_ACCEPTED", "ACCEPTED"]},
+            },
+            "name": "uniq_nopo_vendor_bill",
+        },
     ],
     "tasks": [
         {"keys": [("task_number", 1)], "unique": True},

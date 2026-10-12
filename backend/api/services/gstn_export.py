@@ -472,7 +472,7 @@ def to_gstr3b_json(
 
     `data` is the dict returned by reports.py::gstr3b_report. Returns a
     dict with keys: gstin, ret_period, sup_details, inter_sup, itc_elg,
-    intr_ltax. Fails soft to an all-zero skeleton.
+    inward_sup, intr_ltax. Fails soft to an all-zero skeleton.
     """
     data = data or {}
 
@@ -483,6 +483,8 @@ def to_gstr3b_json(
     outward = data.get("outwardTaxableSupplies") or {}
     zero = data.get("zeroRatedSupplies") or {}
     itc = data.get("itcAvailable") or {}
+    inelg = data.get("itcIneligible") or {}
+    inward = data.get("inwardExemptNilNonGst") or {}
 
     # 3.1(a) — Outward taxable supplies (other than zero/nil/exempt)
     osup_det = {
@@ -534,6 +536,18 @@ def to_gstr3b_json(
             }
         ],
         "itc_net": dict(itc_block),
+        # 4(D) Ineligible ITC: (1) s.17(5) blocked, (2) others -- the GST paid
+        # on purchase bills that claim no input credit (G3).
+        "itc_inelg": [
+            {"ty": "RUL", "iamt": 0.0, "camt": 0.0, "samt": 0.0, "csamt": 0.0},
+            {
+                "ty": "OTH",
+                "iamt": _num(inelg.get("integratedTax")),
+                "camt": _num(inelg.get("centralTax")),
+                "samt": _num(inelg.get("stateTax")),
+                "csamt": _num(inelg.get("cess")),
+            },
+        ],
     }
 
     out: Dict[str, Any] = {
@@ -565,6 +579,19 @@ def to_gstr3b_json(
             "uin_details": [],
         },
         "itc_elg": itc_elg,
+        # Table 5 -- exempt, nil-rated, non-GST and composition inward
+        # supplies (purchases from unregistered suppliers reported with them,
+        # owner 2026-10-13 G3); IMS records no non-GST purchase separately.
+        "inward_sup": {
+            "isup_details": [
+                {
+                    "ty": "GST",
+                    "inter": _num(inward.get("interState")),
+                    "intra": _num(inward.get("intraState")),
+                },
+                {"ty": "NONGST", "inter": 0.0, "intra": 0.0},
+            ]
+        },
         "intr_ltax": {
             # 5.1 — Interest & late fee.
             "intr_details": {

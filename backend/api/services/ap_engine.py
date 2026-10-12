@@ -89,9 +89,10 @@ BILL_KIND_GOODS = "GOODS"
 BILL_KIND_SERVICES = "SERVICES"
 
 # The way out for a goods bill that has no receipt to link, for BOTH doors.
-# A walk-in / local-dealer buy goes on a "Bought without PO" receipt, which
-# claims no input credit (D14) -- telling staff to log it as a Delivery
-# Challan, as these doors used to, booked full credit on it. Receiving is the
+# A walk-in / local-dealer buy goes on a "Bought without PO" receipt, whose
+# bill claims credit only from a GST-registered dealer (G2) -- telling staff
+# to log it as a Delivery Challan, as these doors used to, booked full credit
+# on any. Receiving is the
 # store manager's (owner 2026-09-28), so it says who logs the receipt.
 NO_RECEIPT_WAY_OUT = (
     "If the goods were bought without a purchase order (a local or walk-in "
@@ -99,7 +100,8 @@ NO_RECEIPT_WAY_OUT = (
     "Goods Receipt screen with 'Bought without PO' ticked (the dealer - added "
     "as a supplier if new -, each item's cost and a photo of the bill), then "
     "bill against that receipt under that supplier - "
-    "it claims no GST input credit. Goods a supplier delivered on a delivery "
+    "it claims GST input credit only from a GST-registered dealer. Goods a "
+    "supplier delivered on a delivery "
     "challan are logged there as a Delivery Challan instead."
 )
 
@@ -120,9 +122,10 @@ def normalize_bill_kind(value):
 
 
 # Owner ruling D14 (2026-09-29): goods bought from a local / walk-in dealer
-# without a purchase order arrive on a "Bought without PO" receipt, and a bill
-# booked against one claims NO input tax credit -- whatever the client sent
-# (org_validation.itc_claimable, the one credit rule, reads it).
+# without a purchase order arrive on a "Bought without PO" receipt; a bill
+# booked against one claims input credit only from a GST-registered supplier,
+# whatever the client sent (owner 2026-10-13, G2; org_validation.itc_claimable,
+# the one credit rule, reads it).
 GRN_SUBTYPE_NO_PO = "NO_PO"
 
 

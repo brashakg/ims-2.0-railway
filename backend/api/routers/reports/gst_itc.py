@@ -4,7 +4,7 @@ import re
 from datetime import date
 
 from ...services.ap_engine import iso_bill_date
-from ...services.org_validation import itc_claimable, shop_gstins
+from ...services.org_validation import has_valid_gstin, itc_claimable, shop_gstins
 
 # ============================================================================
 # GST RETURNS - GSTR-3B (Summary Return)
@@ -216,6 +216,45 @@ def _itc_gstin_from_vendor_bills(db, active_store, year, mon, last_day):
     except Exception:
         pass
     return 0.0, 0.0, 0.0
+
+
+def _no_credit_inward(db, active_store, year, mon, last_day) -> dict:
+    """GSTR-3B Table 5 and Table 4(D) (owner 2026-10-13, G3), from the
+    purchase bills _placement puts on this GSTIN's return -- the placement
+    Table 4 reads, so every bill is on one return. A stock-transfer mirror is
+    not a purchase (whether a GSTIN-less shop's transfer carries tax is still
+    the CA's open question) and stays out of both.
+      * Table 5 (exempt, nil-rated, non-GST and composition inward supplies):
+        the taxable value of a bill from an unregistered supplier (no valid
+        GSTIN on the bill, not reverse charge) or one that charged no GST (a
+        composition dealer's, an exempt or nil-rated one), inter-/intra-state
+        by the bill's stored head.
+      * Table 4(D) (ineligible ITC): the GST on a bill that claims no input
+        credit -- paid, never claimed. Exactly the bills Table 4 (_itc_match)
+        leaves out, so a bill's tax is in one of the two.
+    Returns {"inter", "intra", "igst", "cgst", "sgst"}; fail-soft zeros."""
+    out = dict.fromkeys(("inter", "intra", "igst", "cgst", "sgst"), 0.0)
+    if db is None:
+        return out
+    try:
+        entity_id, store_gstin, shops = _itc_store_scope(db, active_store)
+        placed = {
+            **_placement(shops, entity_id, store_gstin, year, mon, last_day),
+            "source_transfer_id": None,
+        }
+        for b in db["vendor_bills"].find(placed, {"_id": 0}):
+            tax = b.get("tax_amount")
+            no_gst = tax is not None and float(tax or 0) <= 0
+            if not b.get("reverse_charge") and (
+                no_gst or not has_valid_gstin(b.get("vendor_gstin"))
+            ):
+                side = "inter" if b.get("interstate") else "intra"
+                out[side] += float(b.get("taxable_amount") or 0)
+        heads = _sum_heads(db, {**placed, "itc_eligible": False})
+        out["igst"], out["cgst"], out["sgst"] = heads[:3]
+    except Exception:
+        return dict.fromkeys(out, 0.0)
+    return {k: round(v, 2) for k, v in out.items()}
 
 
 def _itc_unplaced(db, year, mon, last_day, entity_id=None) -> dict:

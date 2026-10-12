@@ -837,7 +837,7 @@ class DebitNoteEngine:
         """{product_id: the goods receipt the returned units came in on} --
         key None for every line when the RTV names its receipt (an RMA's
         grn_id), else read off the units linked to the return (rtv_vendor_id).
-        Fail-soft {}: the supplier's GSTIN alone then decides.
+        Fail-soft {}.
 
         ponytail: one receipt per product (the first linked unit's); a return
         mixing one product's walk-in and PO units would need a line per unit."""
@@ -861,6 +861,57 @@ class DebitNoteEngine:
             return out
         except Exception:  # noqa: BLE001
             return {}
+
+    def _latest_receipt(self, rtv_doc: Dict[str, Any], product_id) -> Optional[Dict[str, Any]]:
+        """A return that links no units (the New-return form sends none unless
+        opened from one): the supplier's latest live receipt of that product.
+
+        ponytail: the latest receipt stands in for the unit's own; a supplier
+        who sold one product both on a PO and walk-in needs the unit linked."""
+        if self._db is None or not product_id or not rtv_doc.get("vendor_id"):
+            return None
+        try:
+            q: Dict[str, Any] = {
+                "vendor_id": rtv_doc["vendor_id"],
+                "items.product_id": product_id,
+                "status": {"$ne": "VOID"},
+            }
+            if rtv_doc.get("store_id"):
+                q["store_id"] = rtv_doc["store_id"]
+            rows = list(
+                self._db.get_collection("grns").find(q, {"_id": 0}).sort("created_at", -1).limit(1)
+            )
+            return rows[0] if rows else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _credit_claimed(self, receipt: Optional[Dict[str, Any]], vendor: Dict[str, Any]) -> bool:
+        """Did the returned goods' bill claim input credit? The bill booked
+        against their receipt answers from its STORED flag -- what the ITC
+        register counted (finance.gst._itc_eligible_bill: reverse charge, the
+        GSTIN on the bill, credit switched off, 17(5) blocked) -- never
+        re-decided from today's supplier master. No bill booked yet: THE
+        credit rule (org_validation.itc_claimable) on the supplier and the
+        receipt, as the booking will decide it."""
+        from api.routers.finance.gst import _bill_booked, _itc_eligible_bill
+
+        from .org_validation import itc_claimable
+
+        gid = (receipt or {}).get("grn_id")
+        if gid and self._db is not None:
+            try:
+                bills = [
+                    b
+                    for b in self._db.get_collection("vendor_bills").find(
+                        {"$or": [{"grn_id": gid}, {"linked_dc_ids": gid}]}, {"_id": 0}
+                    )
+                    if _bill_booked(b)
+                ]
+            except Exception:  # noqa: BLE001
+                bills = []
+            if bills:
+                return any(_itc_eligible_bill(b) for b in bills)
+        return itc_claimable((vendor or {}).get("gstin"), receipt=receipt)
 
     def issue(
         self,
@@ -914,14 +965,13 @@ class DebitNoteEngine:
         # The note reverses the credit the returned goods' bill claimed -- and
         # a bill that claimed none (a "Bought without PO" walk-in buy, D14, or
         # an unregistered supplier's) has none to reverse (owner 2026-10-12):
-        # those lines carry the amount only. THE credit rule decides, per line,
-        # from the receipt the returned units came in on.
-        from .org_validation import itc_claimable
-
+        # those lines carry the amount only. Per line, from the receipt the
+        # returned units came in on (_credit_claimed).
         receipt_of = self._receipts_of(rtv_doc)
         for ln in enriched:
-            receipt = receipt_of.get(ln.get("product_id"), receipt_of.get(None))
-            ln["claims_credit"] = itc_claimable((vendor or {}).get("gstin"), receipt=receipt)
+            pid = ln.get("product_id")
+            receipt = receipt_of.get(pid, receipt_of.get(None)) or self._latest_receipt(rtv_doc, pid)
+            ln["claims_credit"] = self._credit_claimed(receipt, vendor)
 
         entity_id = rtv_doc.get("entity_id") or (seller or {}).get("entity_id")
         serial = next_debit_note_number(self._db, entity_id)

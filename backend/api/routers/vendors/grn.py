@@ -390,8 +390,9 @@ def _find_duplicate_receipt(grn_repo, grn, vendor_id, photo_sha=None, exclude_gr
         same_bill, which both bill doors use too): the same purchase order's
         number, or the same supplier's number in the same financial year.
     A VOIDed receipt frees its bill (the sanctioned correction path). The
-    atomic twins: uniq_std_vendor_invoice_store (supplier + bill_key + shop)
-    and uniq_nopo_bill_hash.
+    atomic twins: uniq_std_vendor_invoice_store (supplier + bill_key + shop),
+    uniq_nopo_vendor_bill (supplier + bill_key, walk-in receipts) and
+    uniq_nopo_bill_hash.
 
     ponytail: candidates are the newest 500 receipts carrying this bill
     number (either key shape), plus the PO's and the supplier's receipts for

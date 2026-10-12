@@ -20,7 +20,46 @@ from ._shared import (
     uuid,
 )
 from ...services.cost_mask import VENDOR_NAME_KEYS, can_see_cost, mask_vendor
+from ...services.org_validation import has_valid_gstin
 from .models import VendorCreate, VendorUpdate
+
+
+def _name_clash(vendor_repo, record: dict, self_id=None):
+    """THE one-dealer-one-supplier rule of both vendor doors (create and
+    update): a supplier with no GSTIN is known by its name alone, so no two
+    suppliers share a folded trade / legal name when EITHER has no GSTIN. A
+    walk-in dealer quick-added at receiving (owner 2026-10-12) who was already
+    on file -- with or without a GSTIN typed this time -- or a supplier renamed
+    onto another's name, or stripped of its GSTIN beside a namesake, made one
+    seller two, and each half's bill numbers were checked only against itself:
+    one bill booked twice. Two registered suppliers are two taxpayers (the
+    GSTIN guard keeps those apart). Returns the supplier it clashes with, or
+    None.
+
+    ponytail: scans every vendor; index a folded name if the list ever grows
+    to thousands."""
+
+    def names(v) -> set:
+        trade = _normalize_invoice_no(v.get("trade_name"))
+        return {trade, _normalize_invoice_no(v.get("legal_name"))} - {""}
+
+    mine = names(record)
+    registered = has_valid_gstin(record.get("gstin"))
+    for v in vendor_repo.find_many({}, limit=10_000) or []:
+        if (self_id and v.get("vendor_id") == self_id) or not mine & names(v):
+            continue
+        if not (registered and has_valid_gstin(v.get("gstin"))):
+            return v
+    return None
+
+
+def _name_clash_detail(v) -> str:
+    return (
+        f"A supplier named '{v.get('trade_name') or v.get('legal_name')}' "
+        "is already on file - pick it from the supplier list (add the GSTIN "
+        "to that supplier if it has one; add the town to the name only if "
+        "this is a different dealer)."
+    )
 
 
 # ============================================================================
@@ -37,7 +76,10 @@ async def list_vendors(
     search: Optional[str] = Query(None),
     is_active: Optional[bool] = Query(None),
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=100),
+    # Up to 1000: the receiving screen lists every supplier (a walk-in dealer
+    # the quick-add refuses to make twice must be pickable). ponytail: one
+    # page; a search box when suppliers outgrow it.
+    limit: int = Query(50, ge=1, le=1000),
     current_user: dict = Depends(get_current_user),
 ):
     """List all vendors with optional search"""
@@ -87,29 +129,9 @@ async def create_vendor(
                 raise HTTPException(
                     status_code=400, detail="Vendor with this GSTIN already exists"
                 )
-        else:
-            # A supplier with no GSTIN is known by its name alone. A second
-            # record under a name already on file (a walk-in dealer quick-added
-            # at receiving, owner 2026-10-12, who was on the list) made one
-            # seller two -- each half's bill numbers checked only against
-            # itself, so one bill could be booked twice.
-            # ponytail: scans every vendor; index a folded name if the list
-            # ever grows to thousands.
-            def names(v) -> set:
-                trade = _normalize_invoice_no(v.get("trade_name"))
-                return {trade, _normalize_invoice_no(v.get("legal_name"))} - {""}
-
-            mine = names(vendor.model_dump())
-            for v in vendor_repo.find_many({}, limit=10_000) or []:
-                if mine & names(v):
-                    raise HTTPException(
-                        status_code=400,
-                        detail=(
-                            f"A supplier named '{v.get('trade_name') or v.get('legal_name')}' "
-                            "is already on file - pick it from the supplier list (add "
-                            "the town to the name if this is a different dealer)."
-                        ),
-                    )
+        clash = _name_clash(vendor_repo, vendor.model_dump())
+        if clash is not None:
+            raise HTTPException(status_code=400, detail=_name_clash_detail(clash))
 
         state_code, state_name = derive_vendor_state(vendor.gstin, vendor.state)
         vendor_repo.create(
@@ -188,6 +210,13 @@ async def update_vendor(
                 raise HTTPException(
                     status_code=400, detail="Vendor with this GSTIN already exists"
                 )
+
+        # The same one-dealer-one-supplier rule as create: an edit must not
+        # rename a supplier onto a namesake, or clear its GSTIN beside one.
+        if update_data.keys() & {"gstin", *VENDOR_NAME_KEYS}:
+            clash = _name_clash(vendor_repo, {**existing, **update_data}, vendor_id)
+            if clash is not None:
+                raise HTTPException(status_code=400, detail=_name_clash_detail(clash))
 
         # Keep state / state_code in step with the GSTIN whenever either one is
         # touched, so an edit can never leave a vendor whose typed state and

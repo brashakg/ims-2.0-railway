@@ -832,6 +832,22 @@ class DatabaseConnection:
             name="uniq_nopo_bill_hash",
             background=True,
         )
+        # D14: one live "Bought without PO" receipt per supplier bill (supplier
+        # + financial year + folded number, any shop) -- the atomic twin of
+        # the number half of _find_duplicate_receipt for walk-in receipts
+        # (schemas.py uniq_nopo_vendor_bill). New subtype: no rows can block it.
+        _idx(
+            "grns",
+            [("vendor_id", 1), ("vendor_invoice_no_norm", 1)],
+            unique=True,
+            partialFilterExpression={
+                "grn_subtype": "NO_PO",
+                "vendor_invoice_no_norm": {"$type": "string"},
+                "status": {"$in": ["PENDING", "PARTIALLY_ACCEPTED", "ACCEPTED"]},
+            },
+            name="uniq_nopo_vendor_bill",
+            background=True,
+        )
 
         # Vendor bills / purchase invoices (AP + ITC). bill_id UNIQUE sparse;
         # (vendor_id, bill_number) is NON-unique on purpose -- the duplicate-

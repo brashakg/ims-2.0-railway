@@ -15,8 +15,9 @@ Pure, DB-free helpers for the purchase-side GST:
       - only_in_2b     -> supplier reported it but you have no bill booked
                           -> missing purchase entry (book it, then claim)
       - booked_no_credit -> supplier reported it and the bill IS booked, but
-                          it claims no credit (bought without a PO, D14, or
-                          17(5)-blocked): nothing to claim, nothing to book
+                          it claims no credit (credit switched off, or an
+                          unregistered supplier's): nothing to book, nothing
+                          to claim; a tax gap shows beside it
 
     The sum identity (P0 #1): every rupee booked must land somewhere -- the
     return now reports itc_safe + itc_in_mismatch + itc_at_risk == total
@@ -168,10 +169,11 @@ def reconcile_gstr2b(
     late, and is otherwise not "at risk" here -- it belongs to its own
     period's 2B. Without a period every booked bill is compared.
 
-    A booked bill that claims no credit counts in no ITC total; it only
-    answers its own 2B row (booked_no_credit) when the tax agrees -- a
-    different tax is another bill (the supplier's own bill under the same
-    number stays "in 2B, not booked").
+    A booked bill that claims no credit counts in no ITC total; it answers
+    its own 2B row (booked_no_credit) whatever the tax -- the supplier, number
+    and year ARE the bill (the bill doors refuse a second one), so a tax gap is
+    a difference on that bill, shown beside it (book_tax / portal_tax), never
+    "in 2B, not booked" sending accounts to book it again.
 
     Sum identity (P0 #1): total booked ITC == itc_safe + itc_in_mismatch +
     itc_at_risk. The pre-fix code dropped mismatched book_tax from BOTH the
@@ -209,13 +211,11 @@ def reconcile_gstr2b(
             }
         )
 
-    def take(key, fy, tax=None):
-        """The first 2B row not yet answered under `key` in year `fy` (and,
-        when `tax` is given, carrying that tax) -- marked answered."""
+    def take(key, fy):
+        """The first 2B row not yet answered under `key` in year `fy` --
+        marked answered."""
         for e in b2.get(key, ()):
             if e["seen"] or (fy is not None and e["fy"] is not None and fy != e["fy"]):
-                continue
-            if tax is not None and abs(e["tax"] - tax) > tax_tolerance:
                 continue
             e["seen"] = True
             return e
@@ -238,7 +238,7 @@ def reconcile_gstr2b(
         fy = bill_fy(bill_date)
         book_tax = _f(row.get("tax"))
         if row.get("claims_credit") is False:
-            hit = take(key, fy, tax=book_tax)
+            hit = take(key, fy)
             if hit:
                 no_credit.append(
                     {

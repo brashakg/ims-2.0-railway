@@ -586,6 +586,19 @@ def dc_bulk_match(
 # ---------------------------------------------------------------------------
 
 
+def landed_unit_cost(unit_price, gst_rate, claims_credit) -> float:
+    """THE stock cost of a unit bought at ``unit_price`` before GST: that
+    price when its bill claims input credit (the GST comes back as credit),
+    else the price plus its GST at ``gst_rate`` percent -- tax that cannot be
+    claimed is part of what the goods cost (owner 2026-10-13, G1, for goods
+    bought without a PO). Receiving (the cost the units go on the shelf at)
+    and booking the bill (the valuation true-up) both cost through this."""
+    price = _f(unit_price)
+    if claims_credit:
+        return price
+    return round(price * (1 + _f(gst_rate) / 100), 2)
+
+
 def moving_average_cost(
     old_qty,
     old_cost,

@@ -7,8 +7,11 @@ accounts get no task. Owner ruling D14 (2026-09-29): a "Bought without PO"
 receipt -- the supplier (a walk-in dealer not on the list is quick-added as
 one, owner 2026-10-12), items, quantities, each item's cost, the bill
 number/date if there is one, the bill photo, expiry -- that puts
-the units on the shelf through the SAME receive/accept door as a PO receipt,
-and books NO input tax credit: GSTR-3B and the ITC register never count it.
+the units on the shelf through the SAME receive/accept door as a PO receipt.
+Its bill claims input tax credit only from a GST-registered supplier (owner
+2026-10-13, G2); where it claims none, the GST paid is part of the stock cost
+(G1) and GSTR-3B reports it in Table 4(D), the purchase from an unregistered
+supplier in Table 5 (G3).
 The receipt shows in the receipts list and on Movements labelled "Bought
 without PO". (Who may receive -- managers only, ruling 2026-09-28 -- is the
 shared receiving gate, which #1165 narrows for every kind of receipt at once.)
@@ -22,13 +25,16 @@ THE CONTRACT THESE TESTS PIN:
     receipt. Stored as grn_subtype "NO_PO". A cost typed on a PO receipt's
     line is dropped: that receipt is costed at the order's price.
   * POST /vendors/grn/{id}/accept is the ONE minting door: units are
-    source_type GRN, carry the line's unit_price as unit_cost/cost_price
-    (cost_source GRN_WALKIN, which becomes the product's cost: the latest
-    price paid wins) and the line's expiry; accounts get a "book the bill"
-    task.
+    source_type GRN, carry the line's unit_price -- plus its GST when the
+    supplier is unregistered (no credit to claim it back, G1) -- as
+    unit_cost/cost_price (cost_source GRN_WALKIN, which becomes the product's
+    cost: the latest price paid wins) and the line's expiry; accounts get a
+    "book the bill" task.
   * A bill booked against it -- line-detail purchase-invoice door OR the
-    header-only AP bill door -- is stored itc_eligible False whatever the client
-    sent, so the ITC register, /gst/summary and GSTR-3B Table 4 never count it.
+    header-only AP bill door -- claims credit only when its supplier has a
+    valid GSTIN (G2), whatever the client sent; the draft offers each line's
+    GST rate. GSTR-3B puts the GST of a bill claiming none in Table 4(D) and
+    an unregistered supplier's purchase in Table 5 (G3).
   * GET /vendors/grn?grn_subtype=NO_PO lists only these receipts, naming the
     supplier; the Movements ledger labels them "Bought without PO".
 
@@ -376,17 +382,25 @@ def test_c7_only_a_no_po_receipt_takes_a_typed_cost():
     assert po_receipt.items[0].unit_price is None
 
 
-def test_d14_the_itc_rule_itself():
-    """One rule for both bill doors: no credit on a no-PO receipt's bill, and
-    an operator's own "no credit" on any other bill still stands."""
-    from api.services.org_validation import itc_claimable
+def test_g2_the_credit_rule_itself():
+    """Owner ruling 2026-10-13 (G2, reversing D14's 'no credit on any no-PO
+    bill'): one rule for every bill door -- a walk-in bill claims credit from
+    a GST-registered supplier, never from an unregistered one (reverse charge
+    or not); an operator's own "no credit" still stands; and the rule gives
+    the reason the booking form shows."""
+    from api.services.org_validation import itc_claimable, itc_refusal
 
-    reg = "20AACCD5678E1ZX"
-    assert itc_claimable(reg, False, True, {"grn_subtype": "NO_PO"}) is False
-    assert itc_claimable(reg, True, True, {"grn_subtype": "NO_PO"}) is False
-    assert itc_claimable(reg, False, True, {"grn_subtype": "STANDARD"}) is True
+    reg = DEALER_GSTIN
+    no_po, po = {"grn_subtype": "NO_PO"}, {"grn_subtype": "STANDARD"}
+    assert itc_claimable(reg, False, True, no_po) is True
+    assert itc_claimable(None, False, True, no_po) is False
+    assert itc_claimable(None, True, True, no_po) is False
+    assert itc_refusal(None, True, True, no_po) == "the supplier has no valid GSTIN"
+    # A PO receipt's reverse-charge bill from an unregistered supplier claims.
+    assert itc_claimable(None, True, True, po) is True
     assert itc_claimable(reg) is True
-    assert itc_claimable(reg, False, False, {"grn_subtype": "STANDARD"}) is False
+    assert itc_refusal(reg, False, False, po) == "switched off"
+    assert itc_refusal(reg, False, True, no_po) is None
 
 
 def test_c7_no_po_receipt_needs_the_bill_photo(world):
@@ -447,6 +461,67 @@ def test_c7_a_dealer_on_file_is_not_added_twice(world):
     assert add("Sharma Optical Pune").status_code == 201
     assert add("Bank More Optical", gstin="20AABCB9999C1ZO").status_code == 201
     assert world["db"].vendors.count_documents({}) == 4
+
+
+def _add_supplier(http, name, gstin=None):
+    return http.post(
+        "/vendors",
+        json={
+            "legal_name": name,
+            "trade_name": name,
+            "gstin_status": "REGISTERED" if gstin else "UNREGISTERED",
+            "gstin": gstin,
+            "address": "",
+            "city": "Dhanbad",
+            "state": "20",
+            "mobile": "9800000000",
+        },
+    )
+
+
+def test_c7_one_dealer_stays_one_supplier_through_every_vendor_door(world):
+    """Panel probes (round 6): the name rule ran only on a POST with no
+    GSTIN. The quick-add of 'Sharma Optical' WITH a GSTIN, Sharma on file
+    without one, made a second record (201) whose bill '1' booked a second
+    time; a PUT renaming 'Verma Optical' to 'Sharma Optical' (200), or
+    clearing a registered supplier's GSTIN beside a namesake, did the same.
+    One rule (master._name_clash) on create and update: names clash when
+    either supplier has no GSTIN. Two registered namesakes are two
+    taxpayers."""
+    http = world["as_"](MANAGER)
+    res = _add_supplier(http, "Sharma Optical", gstin="20AABCB9999C1ZO")
+    assert res.status_code == 400 and "already on file" in res.text, res.text
+    verma = _add_supplier(http, "Verma Optical")
+    assert verma.status_code == 201, verma.text
+    verma_id = verma.json()["vendor_id"]
+    res = http.put(f"/vendors/{verma_id}", json={"trade_name": "Sharma Optical", "legal_name": "Sharma Optical"})
+    assert res.status_code == 400 and "already on file" in res.text, res.text
+    assert http.put(f"/vendors/{verma_id}", json={"mobile": "9800000001"}).status_code == 200
+    twin = _add_supplier(http, "Bank More Optical", gstin="20AABCB9999C1ZO")
+    assert twin.status_code == 201, twin.text
+    res = http.put(f"/vendors/{twin.json()['vendor_id']}", json={"gstin": None})
+    assert res.status_code == 400 and "already on file" in res.text, res.text
+    names = sorted(v["trade_name"] for v in world["db"].vendors.find({}, {"_id": 0}))
+    assert names == ["Bank More Optical", "Bank More Optical", "Sharma Optical", "Verma Optical"]
+
+
+def test_c7_every_supplier_the_quick_add_refuses_can_be_picked(world):
+    """Panel probe (round 6): the receiving screen's supplier list was the
+    server's first 50 active suppliers, while the quick-add refuses a name
+    on file among ALL of them -- past 50 (or switched off), a walk-in dealer
+    could be neither picked nor added. The list now serves up to 1000 (the
+    screen asks for all, active or not)."""
+    db = world["db"]
+    db.vendors.insert_many(
+        [{"vendor_id": f"V-{n:03d}", "trade_name": f"Dealer {n}", "legal_name": f"Dealer {n}", "is_active": True} for n in range(120)]
+    )
+    db.vendors.update_one({"vendor_id": SHARMA}, {"$set": {"is_active": False}})
+    http = world["as_"](MANAGER)
+    assert _add_supplier(http, "Sharma Optical").status_code == 400
+    listed = http.get("/vendors", params={"limit": 1000})
+    assert listed.status_code == 200, listed.text
+    ids = {v["vendor_id"] for v in listed.json()["vendors"]}
+    assert {SHARMA, DEALER, "V-119"} <= ids and len(ids) == 122
 
 
 def test_c7_every_line_must_carry_its_cost(world):
@@ -548,6 +623,35 @@ def test_c7_two_posts_at_once_meet_the_bill_photo_index(world, monkeypatch):
     assert world["db"].grns.count_documents({}) == 1
 
 
+def test_c7_two_walk_in_posts_of_one_numbered_bill_meet_the_number_index(world, monkeypatch):
+    """Panel probe (round 6): two posts of one dealer's numbered bill, each
+    with its OWN photo, at the same moment both passed the look-up and both
+    inserted -- the number index is STANDARD-only, so the bill's stock went
+    on the shelf twice. uniq_nopo_vendor_bill (supplier + the bill's year and
+    number, any shop) makes the second a 409."""
+    from api.routers.vendors import grn_create as gc
+    from database.schemas import get_all_indexes
+
+    spec = next(i for i in get_all_indexes()["grns"] if i.get("name") == "uniq_nopo_vendor_bill")
+    world["db"].grns.create_index(
+        spec["keys"], unique=True, name=spec["name"], partialFilterExpression=spec["partialFilterExpression"]
+    )
+    http = world["as_"](MANAGER)
+    assert http.post("/vendors/grn", json=_walk_in_body(world)).status_code == 201
+
+    real = gc._find_duplicate_receipt
+    calls = {"n": 0}
+
+    def racing(*a, **kw):  # the pre-insert look-up misses the rival
+        calls["n"] += 1
+        return None if calls["n"] == 1 else real(*a, **kw)
+
+    monkeypatch.setattr(gc, "_find_duplicate_receipt", racing)
+    raced = http.post("/vendors/grn", json=_walk_in_body(world))  # its own photo
+    assert raced.status_code == 409, raced.text
+    assert world["db"].grns.count_documents({}) == 1
+
+
 def test_c7_the_startup_index_copies_equal_the_schema(world):
     """The atomic backstops are defined twice -- schemas.py INDEXES (what the
     race tests build) and connection.ensure_indexes (what prod builds at
@@ -577,7 +681,7 @@ def test_c7_the_startup_index_copies_equal_the_schema(world):
         conn.ensure_indexes()
     finally:
         conn._db, conn._connected = saved
-    names = ("uniq_std_vendor_invoice_store", "uniq_nopo_bill_hash", "uniq_vendor_bill_number_key")
+    names = ("uniq_std_vendor_invoice_store", "uniq_nopo_bill_hash", "uniq_nopo_vendor_bill", "uniq_vendor_bill_number_key")
     for spec in get_all_indexes()["grns"] + get_all_indexes()["vendor_bills"]:
         if spec.get("name") in names:
             want = (list(spec["keys"]), True, spec["partialFilterExpression"])
@@ -1011,9 +1115,9 @@ def test_c7_one_book_the_bill_task_for_every_receipt():
 # ===========================================================================
 
 
-def _invoice_body(grn_id, number, *, rate=5.0):
+def _invoice_body(grn_id, number, *, rate=5.0, vendor=DEALER):
     return pi.PurchaseInvoiceCreate(
-        vendor_id=DEALER,
+        vendor_id=vendor,
         invoice_number=number,
         invoice_date="2026-09-14",
         grn_id=grn_id,
@@ -1045,70 +1149,72 @@ def _itc_everywhere():
     )
 
 
-def test_d14_line_bill_for_a_no_po_receipt_claims_no_itc(world):
+def test_g2_a_walk_in_bill_claims_credit_only_from_a_registered_dealer(world):
+    """G2: the line-detail door stores a walk-in bill's credit by the one rule
+    -- V-DEALER's (valid GSTIN) claims Rs 310 like its PO bill; unregistered
+    Sharma's claims none, whatever the client sent (credit on, reverse
+    charge). The register, /gst/summary and GSTR-3B Table 4 count only the
+    claiming bills (round-6 D14 stored every walk-in bill with no credit)."""
     db = world["db"]
     _seed_receipt(db, grn_id="GRN-STD-0001", subtype="STANDARD", po_id="PO-1")
     _seed_receipt(db, grn_id="GRN-NOPO-0002", subtype="NO_PO")
+    _seed_receipt(db, grn_id="GRN-NOPO-0003", subtype="NO_PO", vendor_id=SHARMA)
 
     _run(pi.create_purchase_invoice(_invoice_body("GRN-STD-0001", "TAX-1"), current_user=ACCOUNTANT))
     # The client says nothing about ITC (the body default is True).
     _run(pi.create_purchase_invoice(_invoice_body("GRN-NOPO-0002", "CASH-2"), current_user=ACCOUNTANT))
+    sharma = _invoice_body("GRN-NOPO-0003", "1", vendor=SHARMA)
+    sharma.itc_eligible = sharma.reverse_charge = True
+    _run(pi.create_purchase_invoice(sharma, current_user=ACCOUNTANT))
 
-    std = db.vendor_bills.find_one({"grn_id": "GRN-STD-0001"}, {"_id": 0})
-    walk_in = db.vendor_bills.find_one({"grn_id": "GRN-NOPO-0002"}, {"_id": 0})
-    assert std["tax_amount"] == 310.0 and walk_in["tax_amount"] == 310.0
-    assert walk_in["itc_eligible"] is False
-    # Control: the PO receipt's bill IS counted, so a zero is not a blind reader.
-    assert _itc_everywhere() == (310.0, 310.0, 310.0)
+    bills = {b["grn_id"]: b for b in db.vendor_bills.find({}, {"_id": 0})}
+    assert [bills[g]["tax_amount"] for g in ("GRN-STD-0001", "GRN-NOPO-0002", "GRN-NOPO-0003")] == [310.0] * 3
+    assert bills["GRN-NOPO-0002"]["itc_eligible"] is True
+    assert bills["GRN-NOPO-0003"]["itc_eligible"] is False
+    assert _itc_everywhere() == (620.0, 620.0, 620.0)
 
 
-def test_d14_the_form_preview_says_what_the_booking_stores(world):
-    """The Purchase Invoices form shows POST /preview's itc_eligible: it runs
-    the same one credit rule (org_validation.itc_claimable) with the same
-    receipt, so the form never promises credit the booking will not store."""
+def test_g2_the_form_preview_says_what_the_booking_stores_and_why(world):
+    """The Purchase Invoices form shows POST /preview's itc_eligible and its
+    reason: the same one credit rule (org_validation.itc_refusal) with the
+    same receipt, so the form never promises credit the booking will not
+    store -- nor explains a refusal by a rule of its own (round 6: it told a
+    registered dealer's walk-in bill 'the supplier has no valid GSTIN')."""
     db = world["db"]
     _seed_receipt(db, grn_id="GRN-NOPO-0009", subtype="NO_PO")
-    _seed_receipt(db, grn_id="GRN-STD-0010", subtype="STANDARD", po_id="PO-10")
+    _seed_receipt(db, grn_id="GRN-NOPO-0011", subtype="NO_PO", vendor_id=SHARMA)
 
-    def preview(grn_id):
-        body = _invoice_body(grn_id, "PREVIEW")
-        form = pi.PurchaseInvoicePreview(vendor_id=DEALER, lines=body.lines, grn_id=grn_id)
-        return _run(pi.preview_purchase_invoice(form, current_user=ACCOUNTANT))
+    def preview(grn_id, vendor=DEALER, credit=True):
+        body = _invoice_body(grn_id, "PREVIEW", vendor=vendor)
+        form = pi.PurchaseInvoicePreview(vendor_id=vendor, lines=body.lines, grn_id=grn_id, itc_eligible=credit)
+        out = _run(pi.preview_purchase_invoice(form, current_user=ACCOUNTANT))
+        return out["itc_eligible"], out["itc_reason"]
 
-    assert preview("GRN-NOPO-0009")["itc_eligible"] is False
-    assert preview("GRN-STD-0010")["itc_eligible"] is True  # the control
-
-
-def test_d14_client_cannot_switch_itc_back_on(world):
-    db = world["db"]
-    _seed_receipt(db, grn_id="GRN-NOPO-0003", subtype="NO_PO")
-    body = _invoice_body("GRN-NOPO-0003", "CASH-3")
-    body.itc_eligible = True
-    _run(pi.create_purchase_invoice(body, current_user=ACCOUNTANT))
-    bill = db.vendor_bills.find_one({"grn_id": "GRN-NOPO-0003"}, {"_id": 0})
-    assert bill["itc_eligible"] is False
-    assert _itc_everywhere() == (0.0, 0.0, 0.0)
+    assert preview("GRN-NOPO-0009") == (True, None)
+    assert preview("GRN-NOPO-0011", SHARMA) == (False, "the supplier has no valid GSTIN")
+    assert preview("GRN-NOPO-0009", credit=False) == (False, "switched off")
 
 
-def test_d14_header_only_bill_door_claims_no_itc_either(world):
+def test_g2_the_header_only_bill_door_follows_the_same_rule(world):
     db = world["db"]
     _seed_receipt(db, grn_id="GRN-NOPO-0004", subtype="NO_PO")
-    bill = vd.VendorBillCreate(
-        bill_number="CASH-4",
-        bill_date="2026-09-14",
-        taxable_amount=6200.0,
-        tax_amount=310.0,
-        total_amount=6510.0,
-        grn_id="GRN-NOPO-0004",
-    )
-    _run(vd.create_vendor_bill(DEALER, bill, current_user=ACCOUNTANT))
-    stored = db.vendor_bills.find_one({"grn_id": "GRN-NOPO-0004"}, {"_id": 0})
-    assert stored is not None
-    assert stored["itc_eligible"] is False
+    _seed_receipt(db, grn_id="GRN-NOPO-0005", subtype="NO_PO", vendor_id=SHARMA)
+    for vendor, grn_id in ((DEALER, "GRN-NOPO-0004"), (SHARMA, "GRN-NOPO-0005")):
+        bill = vd.VendorBillCreate(
+            bill_number=f"CASH-{grn_id[-1]}",
+            bill_date="2026-09-14",
+            taxable_amount=6200.0,
+            tax_amount=310.0,
+            total_amount=6510.0,
+            grn_id=grn_id,
+        )
+        _run(vd.create_vendor_bill(vendor, bill, current_user=ACCOUNTANT))
+    stored = {b["grn_id"]: b["itc_eligible"] for b in db.vendor_bills.find({}, {"_id": 0})}
+    assert stored == {"GRN-NOPO-0004": True, "GRN-NOPO-0005": False}
     reg = _run(fin_itc.itc_register(period=MONTH, entity_id=None, current_user=ADMIN))
     summary = _run(fin_gst.get_gst_summary(month=9, year=2026, current_user=ADMIN))
-    assert float(reg.get("total_itc") or 0) == 0.0
-    assert float(summary.get("gst_input_credit") or 0) == 0.0
+    assert float(reg.get("total_itc") or 0) == 310.0
+    assert float(summary.get("gst_input_credit") or 0) == 310.0
 
 
 def _bill_index(world):
@@ -1296,40 +1402,44 @@ def test_d14_naming_a_challan_too_cannot_smuggle_the_credit_back(world):
 
 def test_d14_the_gstr2b_screen_counts_what_the_register_counts(world):
     """Panel probes: the GSTR-2B reconcile fed EVERY vendor bill to the
-    matcher, so a walk-in bill (stored itc_eligible False, tax 310) whose
-    dealer filed it read "Matched (claim) Rs 310" -- and with no 2B row, "ITC
-    at risk Rs 310" -- while the register, /gst/summary and GSTR-3B all said 0.
-    Dropping it instead put the dealer's filed row under "In 2B, not booked -
-    book then claim": a booked bill that claims no credit is its own line,
-    and it answers its 2B row. A 17(5)-blocked bill reads the same."""
+    matcher, so a bill stored with no credit whose supplier filed it read
+    "Matched (claim)" -- and with no 2B row, "ITC at risk" -- while the
+    register, /gst/summary and GSTR-3B all said 0. Dropping it instead put the
+    filed row under "In 2B, not booked - book then claim": a booked bill that
+    claims no credit is its own line, and it answers its 2B row. A
+    registered dealer's walk-in bill claims credit like any bill (G2): in 2B,
+    it is safe to claim. A 17(5)-blocked bill reads as no credit."""
     db = world["db"]
     _seed_receipt(db, grn_id="GRN-STD-0301", subtype="STANDARD", po_id="PO-3")
     _seed_receipt(db, grn_id="GRN-NOPO-0302", subtype="NO_PO")
+    _seed_receipt(db, grn_id="GRN-NOPO-0303", subtype="NO_PO")
     _run(pi.create_purchase_invoice(_invoice_body("GRN-STD-0301", "TAX-301"), current_user=ACCOUNTANT))
     _run(pi.create_purchase_invoice(_invoice_body("GRN-NOPO-0302", "CASH-302"), current_user=ACCOUNTANT))
+    off = _invoice_body("GRN-NOPO-0303", "CASH-303")
+    off.itc_eligible = False
+    _run(pi.create_purchase_invoice(off, current_user=ACCOUNTANT))
     portal = [
         fin_itc.Gstr2bRow(gstin=DEALER_GSTIN, invoice_no=n, taxable=6200.0, tax=310.0)
-        for n in ("TAX-301", "CASH-302")
+        for n in ("TAX-301", "CASH-302", "CASH-303")
     ]
     filed = _run(fin_itc.gstr2b_reconcile(fin_itc.Gstr2bReconcileBody(rows=portal), current_user=ADMIN))
-    # Control: the PO receipt's bill matches, so the walk-in's absence is the rule.
-    assert [r["invoice_no"] for r in filed["matched"]] == ["TAX-301"]
-    assert filed["summary"]["itc_safe_to_claim"] == 310.0
-    assert filed["summary"]["total_book_itc"] == _itc_everywhere()[0] == 310.0
+    assert sorted(r["invoice_no"] for r in filed["matched"]) == ["CASH-302", "TAX-301"]
+    assert filed["summary"]["itc_safe_to_claim"] == 620.0
+    assert filed["summary"]["total_book_itc"] == _itc_everywhere()[0] == 620.0
     assert filed["only_in_2b"] == [] and filed["summary"]["only_in_2b"] == 0
-    assert [r["invoice_no"] for r in filed["booked_no_credit"]] == ["CASH-302"]
+    assert [r["invoice_no"] for r in filed["booked_no_credit"]] == ["CASH-303"]
     assert filed["summary"]["booked_no_credit"] == 1
     unfiled = _run(fin_itc.gstr2b_reconcile(fin_itc.Gstr2bReconcileBody(rows=[]), current_user=ADMIN))
-    assert [r["invoice_no"] for r in unfiled["only_in_books"]] == ["TAX-301"]
-    assert unfiled["summary"]["itc_at_risk"] == 310.0
+    assert sorted(r["invoice_no"] for r in unfiled["only_in_books"]) == ["CASH-302", "TAX-301"]
+    assert unfiled["summary"]["itc_at_risk"] == 620.0
     assert unfiled["booked_no_credit"] == []
 
     # A 17(5)-blocked bill its supplier filed: booked, no credit -- never
     # "book then claim". A cancelled bill is not booked: its row stays unbooked.
     db.vendor_bills.update_one({"bill_number": "TAX-301"}, {"$set": {"itc_blocked": True}})
     blocked = _run(fin_itc.gstr2b_reconcile(fin_itc.Gstr2bReconcileBody(rows=portal), current_user=ADMIN))
-    assert sorted(r["invoice_no"] for r in blocked["booked_no_credit"]) == ["CASH-302", "TAX-301"]
-    assert blocked["only_in_2b"] == [] and blocked["summary"]["total_book_itc"] == 0.0
+    assert sorted(r["invoice_no"] for r in blocked["booked_no_credit"]) == ["CASH-303", "TAX-301"]
+    assert blocked["only_in_2b"] == [] and blocked["summary"]["total_book_itc"] == 310.0
     db.vendor_bills.update_one({"bill_number": "TAX-301"}, {"$set": {"status": "CANCELLED"}})
     cancelled = _run(fin_itc.gstr2b_reconcile(fin_itc.Gstr2bReconcileBody(rows=portal), current_user=ADMIN))
     assert [r["invoice_no"] for r in cancelled["only_in_2b"]] == ["TAX-301"]
@@ -1359,6 +1469,42 @@ def test_c7_the_bill_draft_carries_the_price_paid(world):
         LENS: 420.0,
     }
     assert draft["taxable_total"] == 2 * 3100.0 + 3 * 420.0
+    # Round 6 (HIGH, the root of 'in 2B, not booked'): the draft read a GST
+    # rate only off a PO line, so every walk-in line drafted at 0% and a
+    # registered dealer's bill booked with no tax against its 2B row. Each
+    # line now takes the PO-line rate rule (the HSN's rate, before the
+    # catalogued one): frame 900311 and contact lens 900130, both 5%.
+    assert {ln["product_id"]: ln["gst_rate"] for ln in draft["lines"]} == {FRAME: 5.0, LENS: 5.0}
+    assert draft["tax_total"] == 373.0
+
+
+def test_g2_a_dealers_walk_in_bill_booked_as_drafted_meets_its_2b_row(world):
+    """Panel probe (round 6, HIGH): V-DEALER's walk-in receipt CASH-77,
+    accepted, its bill booked exactly as /from-grn offers it, the dealer's 2B
+    row CASH-77 carrying the bill's tax: the screen said 'in 2B, not booked -
+    book then claim' (and booking again 409s). Drafted at each line's rate,
+    the bill claims its credit (G2) and matches its row."""
+    db = world["db"]
+    grn_id = _on_the_shelf(world)
+    draft = _run(pi.draft_invoice_from_grn(grn_id, current_user=ACCOUNTANT))
+    body = pi.PurchaseInvoiceCreate(
+        vendor_id=draft["vendor_id"],
+        invoice_number=draft["invoice_number"],
+        invoice_date=draft["invoice_date"],
+        grn_id=grn_id,
+        recipient_entity_id=ENTITY,
+        lines=[
+            pi.PurchaseInvoiceLine(**{k: ln[k] for k in ("product_id", "description", "hsn", "qty", "unit_price", "gst_rate")})
+            for ln in draft["lines"]
+        ],
+    )
+    _run(pi.create_purchase_invoice(body, current_user=ACCOUNTANT))
+    bill = db.vendor_bills.find_one({"grn_id": grn_id}, {"_id": 0})
+    assert bill["itc_eligible"] is True and bill["tax_amount"] == 373.0
+    row = {"gstin": DEALER_GSTIN, "invoice_no": "CASH-77", "taxable": 7460.0, "tax": 373.0, "invoice_date": "2026-09-14"}
+    out = _reconcile([row], "2026-09")
+    assert [m["invoice_no"] for m in out["matched"]] == ["CASH-77"], out
+    assert out["only_in_2b"] == [] and out["summary"]["itc_safe_to_claim"] == 373.0
 
 
 def test_c7_the_bill_is_held_to_the_price_paid(world):
@@ -1506,9 +1652,10 @@ def test_c7_the_barcode_trace_shows_no_counter_what_was_paid(world):
         assert [sorted(it) for it in body["purchase"][0]["items"]] and all(
             "unit_price" not in it for it in body["purchase"][0]["items"]
         ), (role, body)
-    # The control: a role the cost rule admits reads both figures.
+    # The control: a role the cost rule admits reads both figures (unregistered
+    # Sharma's frame went on the shelf at 3100 + its 5% GST, G1).
     mine = world["as_"](ADMIN).get(url).json()
-    assert mine["stock_unit"]["unit_cost"] == 3100.0
+    assert mine["stock_unit"]["unit_cost"] == 3255.0
     assert [ln["unit_price"] for ln in mine["purchase"][0]["items"]] == [3100.0, 420.0]
 
 
@@ -1576,58 +1723,138 @@ def test_c7_the_barcode_trace_is_every_signed_in_roles(client):
         assert res.json()["barcode"] == "BV-NO-SUCH-UNIT"
 
 
-def _return_of(world, return_id, stock_id):
+def _return_of(world, return_id, stock_id, vendor=DEALER):
     """A vendor return whose unit `stock_id` went back (rtv_vendor_id linked,
     as POST /vendor-returns links a quarantined unit)."""
     db = world["db"]
     db.stock_units.update_one({"stock_id": stock_id}, {"$set": {"status": "QUARANTINED", "rtv_vendor_id": return_id}})
     unit = db.stock_units.find_one({"stock_id": stock_id})
-    return {"return_id": return_id, "vendor_id": DEALER, "store_id": STORE}, unit["product_id"]
+    return {"return_id": return_id, "vendor_id": vendor, "store_id": STORE}, unit["product_id"]
 
 
-def test_r5_a_walk_in_return_reverses_no_credit(world):
-    """Owner ruling 2026-10-12: a vendor return of goods bought without a PO
-    carries NO GST reversal -- their bill claimed no credit (D14), so the
-    debit note reversing Input CGST / SGST credited a ledger never debited.
-    It carries the amount only, and asks the one credit rule
-    (org_validation.itc_claimable) per line, from the receipt the returned
-    unit came in on. A PO receipt's unit still reverses its credit."""
+def test_r5_a_walk_in_return_reverses_only_the_credit_its_bill_claimed(world):
+    """Owner rulings 2026-10-12 (R5) and 2026-10-13 (G2): a vendor return
+    reverses GST only where the returned goods' bill claimed it -- the debit
+    note reversing Input CGST / SGST that was never claimed credits a ledger
+    never debited. Walk-in goods from unregistered Sharma: amount only. From
+    registered V-DEALER they claim credit like a PO receipt's (G2) and reverse
+    it -- unless the bill was booked with credit switched off. Each line by
+    the receipt its unit came in on."""
     from api.services.rtv_debit_note import DebitNoteEngine, tally_build_debit_note_xml
 
     db = world["db"]
-    walk_in = _on_the_shelf(world)  # V-DEALER is registered: only the receipt says "no credit"
-    _seed_receipt(db, grn_id="GRN-STD-0501", subtype="STANDARD", po_id="PO-501")
-    db.stock_units.insert_one({"stock_id": "SU-PO-1", "product_id": LENS, "source_type": "GRN", "source_id": "GRN-STD-0501", "store_id": STORE})
-    frame_unit = db.stock_units.find_one({"source_id": walk_in, "product_id": FRAME})["stock_id"]
-    vendor = db.vendors.find_one({"vendor_id": DEALER}, {"_id": 0})
     seller = {"entity_id": ENTITY, "name": "BV Test Optical Pvt Ltd", "gstin": SHOP_GSTIN, "state_code": "20"}
+    frame = [{"product_id": FRAME, "product_name": "Acme Aviator", "quantity": 1, "unit_price": 3100.0}]
 
     def note(rtv, lines):
+        vendor = db.vendors.find_one({"vendor_id": rtv["vendor_id"]}, {"_id": 0})
         res = DebitNoteEngine(db).issue(rtv, vendor, actor="u-acct", seller=seller, lines=lines)
         assert res["ok"], res
         return res["debit_note"]
 
-    rtv, pid = _return_of(world, "VR-WALKIN", frame_unit)
-    walked = note(rtv, [{"product_id": pid, "product_name": "Acme Aviator", "quantity": 1, "unit_price": 3100.0}])
+    def frame_unit(grn_id):
+        return db.stock_units.find_one({"source_id": grn_id, "product_id": FRAME})["stock_id"]
+
+    sharma = _on_the_shelf(world, vendor_id=SHARMA)
+    walked = note(_return_of(world, "VR-SHARMA", frame_unit(sharma), SHARMA)[0], frame)
     assert walked["totals"]["tax_paise"] == 0
     assert walked["totals"]["grand_total_paise"] == walked["totals"]["taxable_paise"] == 310000
     assert "Input CGST" not in tally_build_debit_note_xml(walked)
 
-    rtv, pid = _return_of(world, "VR-PO", "SU-PO-1")
-    po = note(rtv, [{"product_id": pid, "product_name": "Acme Daily", "quantity": 1, "unit_price": 400.0}])
-    assert po["totals"]["tax_paise"] == 4800  # 12% of Rs 400, reversed
-    assert "Input CGST" in tally_build_debit_note_xml(po)
+    dealer = _on_the_shelf(world, vendor_invoice_no="CASH-51")
+    claimed = note(_return_of(world, "VR-DEALER", frame_unit(dealer))[0], frame)
+    assert claimed["totals"]["tax_paise"] == 15500  # 5% of Rs 3100, reversed
+    assert "Input CGST" in tally_build_debit_note_xml(claimed)
 
+    off_grn = _on_the_shelf(world, vendor_invoice_no="CASH-52")
+    off = _invoice_body(off_grn, "CASH-52")
+    off.itc_eligible = False
+    _run(pi.create_purchase_invoice(off, current_user=ACCOUNTANT))
+    _seed_receipt(db, grn_id="GRN-STD-0501", subtype="STANDARD", po_id="PO-501")
+    db.stock_units.insert_one({"stock_id": "SU-PO-1", "product_id": LENS, "source_type": "GRN", "source_id": "GRN-STD-0501", "store_id": STORE})
     # One return of both: each line by its own receipt.
-    db.stock_units.update_many({"stock_id": {"$in": [frame_unit, "SU-PO-1"]}}, {"$set": {"rtv_vendor_id": "VR-MIXED"}})
+    db.stock_units.update_many({"stock_id": {"$in": [frame_unit(off_grn), "SU-PO-1"]}}, {"$set": {"rtv_vendor_id": "VR-MIXED"}})
     mixed = note(
         {"return_id": "VR-MIXED", "vendor_id": DEALER, "store_id": STORE},
-        [
-            {"product_id": FRAME, "product_name": "Acme Aviator", "quantity": 1, "unit_price": 3100.0},
-            {"product_id": LENS, "product_name": "Acme Daily", "quantity": 1, "unit_price": 400.0},
-        ],
+        frame + [{"product_id": LENS, "product_name": "Acme Daily", "quantity": 1, "unit_price": 400.0}],
     )
     assert [ln["tax_paise"] for ln in mixed["lines"]] == [0, 4800]
+
+
+_SELLER = {"entity_id": ENTITY, "name": "BV Test Optical Pvt Ltd", "gstin": SHOP_GSTIN, "state_code": "20"}
+_ONE_LENS = [{"product_id": LENS, "product_name": "Acme Daily", "quantity": 1, "unit_price": 400.0}]
+
+
+def _lens_return(db, rid, vendor_id, grn_id, *, bill=None, linked=True):
+    """One CONTACT_LENS (12%) at Rs 400 back to `vendor_id`, received on PO
+    receipt `grn_id`, with `bill` (stored fields) booked against it; the
+    debit note's tax in paise."""
+    from api.services.rtv_debit_note import DebitNoteEngine
+
+    lens_line = {"product_id": LENS, "received_qty": 1, "accepted_qty": 1, "rejected_qty": 0, "unit_price": 400.0}
+    _seed_receipt(db, grn_id=grn_id, subtype="STANDARD", vendor_id=vendor_id, po_id=f"PO-{grn_id}", items=[lens_line])
+    if bill is not None:
+        db.vendor_bills.insert_one({"bill_id": f"B-{grn_id}", "vendor_id": vendor_id, "grn_id": grn_id, "status": "OUTSTANDING", **bill})
+    if linked:
+        db.stock_units.insert_one(
+            {"stock_id": f"SU-{grn_id}", "product_id": LENS, "source_type": "GRN", "source_id": grn_id, "store_id": STORE, "rtv_vendor_id": rid}
+        )
+    vendor = db.vendors.find_one({"vendor_id": vendor_id}, {"_id": 0})
+    rtv = {"return_id": rid, "vendor_id": vendor_id, "store_id": STORE}
+    res = DebitNoteEngine(db).issue(rtv, vendor, actor="u-acct", seller=_SELLER, lines=_ONE_LENS)
+    assert res["ok"], res
+    return res["debit_note"]["totals"]["tax_paise"]
+
+
+def test_r5_the_debit_note_reverses_what_the_bill_booked(world):
+    """Panel probe (round 6): the note re-asked the credit rule on TODAY's
+    supplier master and the receipt, leaving out what the bill stored. A
+    dealer's PO bill booked with credit, the dealer's GSTIN cleared later:
+    tax 0 where Rs 48 credit was claimed and never reversed. An unregistered
+    supplier's reverse-charge bill (credit claimed): tax 0. And a bill booked
+    with credit off or 17(5)-blocked still had 'credit' reversed. The bill
+    against the receipt answers from its stored flag (_itc_eligible_bill, the
+    register's reader); only with no bill booked does the credit rule decide."""
+    db = world["db"]
+    # Unregistered Sharma: reverse charge claimed the credit -> reversed.
+    assert _lens_return(db, "VR-RCM", SHARMA, "GRN-STD-0610", bill={"itc_eligible": True, "reverse_charge": True}) == 4800
+    # Unregistered Sharma, no bill booked yet: the credit rule -> nothing claimable.
+    assert _lens_return(db, "VR-URD", SHARMA, "GRN-STD-0611") == 0
+    # Registered dealer, credit switched off on the bill / 17(5)-blocked: none to reverse.
+    assert _lens_return(db, "VR-OFF", DEALER, "GRN-STD-0612", bill={"itc_eligible": False, "vendor_gstin": DEALER_GSTIN}) == 0
+    blocked = {"itc_eligible": True, "itc_blocked": True, "vendor_gstin": DEALER_GSTIN}
+    assert _lens_return(db, "VR-BLK", DEALER, "GRN-STD-0613", bill=blocked) == 0
+    # A cancelled bill booked nothing: the credit rule decides (a registered dealer's PO receipt).
+    assert _lens_return(db, "VR-CXL", DEALER, "GRN-STD-0614", bill={"itc_eligible": False, "status": "CANCELLED"}) == 4800
+    # The dealer's registration cancelled after the bill claimed credit: still reversed.
+    db.vendors.update_one({"vendor_id": DEALER}, {"$set": {"gstin": None}})
+    assert _lens_return(db, "VR-GONE", DEALER, "GRN-STD-0601", bill={"itc_eligible": True, "vendor_gstin": DEALER_GSTIN}) == 4800
+
+
+def test_r5_a_return_naming_no_units_finds_their_receipt(world):
+    """Panel probe (round 6): the New-return form links no units unless it
+    was opened from one, and the note then decided by the supplier's GSTIN
+    alone -- V-DEALER's walk-in frame, its bill booked with no credit,
+    reversed Rs 155 'Input CGST' never claimed (R5). With no unit linked the
+    supplier's latest receipt of that product stands in, and its bill
+    answers."""
+    from api.services.rtv_debit_note import DebitNoteEngine, tally_build_debit_note_xml
+
+    db = world["db"]
+    frame_only = [it for it in _no_po_body(world)["items"] if it["product_id"] == FRAME]
+    grn_id = _on_the_shelf(world, items=frame_only)
+    off = _invoice_body(grn_id, "CASH-77")
+    off.itc_eligible = False
+    _run(pi.create_purchase_invoice(off, current_user=ACCOUNTANT))
+    vendor = db.vendors.find_one({"vendor_id": DEALER}, {"_id": 0})
+    rtv = {"return_id": "VR-NOLINK", "vendor_id": DEALER, "store_id": STORE}
+    line = [{"product_id": FRAME, "product_name": "Acme Aviator", "quantity": 1, "unit_price": 3100.0}]
+    res = DebitNoteEngine(db).issue(rtv, vendor, actor="u-acct", seller=_SELLER, lines=line)
+    assert res["ok"], res
+    assert res["debit_note"]["totals"]["tax_paise"] == 0
+    assert "Input CGST" not in tally_build_debit_note_xml(res["debit_note"])
+    # The dealer's PO lens, returned with no unit linked: its credit is reversed.
+    assert _lens_return(db, "VR-NOLINK-PO", DEALER, "GRN-STD-0620", linked=False) == 4800
 
 
 def _booked(db, bill_id, number, date, *, vendor=DEALER, gstin=DEALER_GSTIN, tax=310.0, credit=True):
@@ -1690,10 +1917,15 @@ def test_c7_a_walk_in_bill_answers_only_its_own_2b_row(world):
     """Panel probe (round 5, problem 4): a walk-in bill '1' (Rs 310, no
     credit) booked under a stand-in supplier took that supplier's GSTIN, and
     the no-credit branch marked the supplier's OWN 2B row '1' (Rs 1200, not
-    booked) as seen without comparing tax -- the Rs 1200 credit vanished from
-    'In 2B, not booked - book then claim'. A bill reaches the reconciler
-    under the GSTIN it was booked with (its own supplier's, or none), and a
-    no-credit bill answers a 2B row only when the tax agrees."""
+    booked) as seen -- the Rs 1200 credit vanished from 'In 2B, not booked -
+    book then claim'. A bill reaches the reconciler under the GSTIN it was
+    booked with (its own supplier's, or none).
+
+    Round 6 (HIGH): a bill claiming no credit then answered its own 2B row
+    only when the tax agreed, so any gap read 'in 2B, not booked - book then
+    claim' for a bill already booked (booking it again 409s). The supplier,
+    number and year ARE the bill: it answers its row whatever the tax, the
+    gap shown beside it."""
     db = world["db"]
     sharma = _on_the_shelf(world, vendor_id=SHARMA, vendor_invoice_no="1")
     _line_bill(sharma, "1", "2026-09-14", vendor=SHARMA)
@@ -1706,10 +1938,103 @@ def test_c7_a_walk_in_bill_answers_only_its_own_2b_row(world):
     db.vendors.update_one({"vendor_id": SHARMA}, {"$set": {"gstin": "20AABCB9999C1ZO"}})
     out = _reconcile([{**theirs, "gstin": "20AABCB9999C1ZO", "tax": 310.0}], "2026-09")
     assert out["booked_no_credit"] == [] and len(out["only_in_2b"]) == 1
-    # A registered dealer's walk-in bill (no credit) and its 2B row: the tax decides.
+    # A registered dealer's walk-in bill '1', booked with credit switched off,
+    # against the dealer's row '1' of another tax: its own line, gap beside it.
     walk_in = _on_the_shelf(world, vendor_invoice_no="1")
-    _line_bill(walk_in, "1", "2026-09-14")
+    off = _invoice_body(walk_in, "1")
+    off.itc_eligible = False
+    _run(pi.create_purchase_invoice(off, current_user=ACCOUNTANT))
     out = _reconcile([theirs], "2026-09")
-    assert out["booked_no_credit"] == [] and [r["tax"] for r in out["only_in_2b"]] == [1200.0]
-    out = _reconcile([{**theirs, "taxable": 6200.0, "tax": 310.0}], "2026-09")
-    assert [b["invoice_no"] for b in out["booked_no_credit"]] == ["1"] and out["only_in_2b"] == []
+    assert [(b["invoice_no"], b["book_tax"], b["portal_tax"]) for b in out["booked_no_credit"]] == [("1", 310.0, 1200.0)]
+    assert out["only_in_2b"] == [] and out["summary"]["only_in_2b"] == 0
+
+
+# ===========================================================================
+# G1 / G3 (owner 2026-10-13): GST that is never claimed is cost, and is filed
+# ===========================================================================
+
+
+def test_g1_an_unregistered_dealers_walk_in_is_costed_with_its_gst(world):
+    """G1: a walk-in buy whose bill will claim no input credit (THE credit
+    rule on its supplier: unregistered Sharma) goes on the shelf at the price
+    paid plus its GST at the line's rate (the PO-line rule, HSN first) --
+    frame 3100 + 5% = 3255, lens 420 + 5% = 441 --
+    and, the latest price paid winning (R3), that full cost is the product's.
+    A registered dealer's walk-in claims the GST back: cost before GST."""
+    db = world["db"]
+    sharma = _on_the_shelf(world, vendor_id=SHARMA)
+    cost = {u["product_id"]: u["unit_cost"] for u in db.stock_units.find({"source_id": sharma})}
+    assert cost == {FRAME: 3255.0, LENS: 441.0}
+    assert db.products.find_one({"product_id": FRAME})["cost_price"] == 3255.0
+    # The receipt keeps the price paid: the bill is matched against it.
+    assert [it["unit_price"] for it in db.grns.find_one({"grn_id": sharma})["items"]] == [3100.0, 420.0]
+
+    dealer = _on_the_shelf(world, vendor_invoice_no="CASH-99")
+    cost = {u["product_id"]: u["unit_cost"] for u in db.stock_units.find({"source_id": dealer})}
+    assert cost == {FRAME: 3100.0, LENS: 420.0}
+    assert db.products.find_one({"product_id": FRAME})["cost_price"] == 3100.0
+
+
+def test_g1_a_walk_in_bill_booked_without_credit_costs_its_gst(world):
+    """G1 at the bill: booking trues the product's cost up to what the bill
+    says (the valuation true-up). A registered dealer's walk-in bill booked
+    with credit switched off claims none, so its GST is cost: 3100 + 5%.
+    Booked with credit, the cost stays before GST."""
+    db = world["db"]
+    grn_id = _on_the_shelf(world)
+    off = _invoice_body(grn_id, "CASH-77")
+    off.itc_eligible = False
+    _run(pi.create_purchase_invoice(off, current_user=ACCOUNTANT))
+    frame = db.products.find_one({"product_id": FRAME})
+    assert (frame["cost_price"], frame["cost_source"]) == (3255.0, "PURCHASE_INVOICE")
+
+    other = _on_the_shelf(world, vendor_invoice_no="CASH-78")
+    _run(pi.create_purchase_invoice(_invoice_body(other, "CASH-78"), current_user=ACCOUNTANT))
+    assert db.products.find_one({"product_id": FRAME})["cost_price"] == 3100.0
+
+
+def _three_b(world):
+    from api.services.gstn_export import to_gstr3b_json
+
+    data = r3b._compute_gstr3b(MONTH, STORE)
+    return data, to_gstr3b_json(data)
+
+
+def test_g3_table_5_reports_the_unregistered_and_no_gst_buys(world):
+    """G3: GSTR-3B Table 5 (exempt, nil, non-GST and composition inward
+    supplies) carries the purchase from an unregistered supplier (Sharma's
+    walk-in bill, Rs 6200) and a bill that charged no GST (exempt, nil-rated
+    or a composition dealer's: Rs 6200 at 0%), intra-state here; a
+    registered dealer's taxed bill is not there. The portal JSON's inward_sup says the same."""
+    db = world["db"]
+    sharma = _on_the_shelf(world, vendor_id=SHARMA, vendor_invoice_no="1")
+    _line_bill(sharma, "1", "2026-09-14", vendor=SHARMA)
+    dealer = _on_the_shelf(world, vendor_invoice_no="CASH-91")
+    _line_bill(dealer, "CASH-91", "2026-09-14")
+    nil = _on_the_shelf(world, vendor_invoice_no="CASH-92")
+    _run(pi.create_purchase_invoice(_invoice_body(nil, "CASH-92", rate=0.0), current_user=ACCOUNTANT))
+    data, portal = _three_b(world)
+    assert data["inwardExemptNilNonGst"] == {"interState": 0.0, "intraState": 12400.0}
+    gst_row = portal["inward_sup"]["isup_details"][0]
+    assert (gst_row["ty"], gst_row["inter"], gst_row["intra"]) == ("GST", 0.0, 12400.0)
+
+
+def test_g3_table_4d_reports_the_gst_paid_and_never_claimed(world):
+    """G3: GSTR-3B Table 4(D) (ineligible ITC) carries the GST on every bill
+    that claims no input credit -- unregistered Sharma's walk-in bill (Rs 310)
+    and a registered dealer's booked with credit switched off (Rs 310) --
+    exactly the bills Table 4 leaves out (its Rs 310: the claiming bill). The
+    portal JSON's itc_elg.itc_inelg 'others' row says the same."""
+    sharma = _on_the_shelf(world, vendor_id=SHARMA, vendor_invoice_no="1")
+    _line_bill(sharma, "1", "2026-09-14", vendor=SHARMA)
+    off_grn = _on_the_shelf(world, vendor_invoice_no="CASH-93")
+    off = _invoice_body(off_grn, "CASH-93")
+    off.itc_eligible = False
+    _run(pi.create_purchase_invoice(off, current_user=ACCOUNTANT))
+    claimed = _on_the_shelf(world, vendor_invoice_no="CASH-94")
+    _line_bill(claimed, "CASH-94", "2026-09-14")
+    data, portal = _three_b(world)
+    assert data["itcIneligible"] == {"integratedTax": 0.0, "centralTax": 310.0, "stateTax": 310.0, "cess": 0.0}
+    assert data["itcAvailable"]["centralTax"] + data["itcAvailable"]["stateTax"] == 310.0
+    others = portal["itc_elg"]["itc_inelg"][1]
+    assert (others["ty"], others["camt"], others["samt"]) == ("OTH", 310.0, 310.0)

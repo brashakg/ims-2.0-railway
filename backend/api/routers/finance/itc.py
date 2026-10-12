@@ -106,10 +106,11 @@ def _book_rows_from_db(db) -> List[dict]:
     """Every booked vendor bill + its vendor GSTIN, formatted for the
     reconciler, each saying whether its GST counts as input credit (the ONE
     rule the ITC register uses, gst._itc_eligible_bill). A booked bill that
-    claims no credit -- a "Bought without PO" receipt's bill (D14), a
-    17(5)-blocked one -- is neither "matched (claim)" nor "ITC at risk", and
-    when its supplier filed it, it is its own "booked, no credit claimed"
-    line that answers that 2B row (never "not booked - book then claim").
+    claims no credit -- credit switched off, an unregistered supplier's
+    (a walk-in dealer's among them, G2), a 17(5)-blocked one -- is neither
+    "matched (claim)" nor "ITC at risk", and when its supplier filed it, it is
+    its own "booked, no credit claimed" line that answers that 2B row, tax gap
+    or not (never "not booked - book then claim").
     A draft / cancelled bill is not booked, so it answers nothing.
 
     Each bill reaches the reconciler under the GSTIN it was booked with (both

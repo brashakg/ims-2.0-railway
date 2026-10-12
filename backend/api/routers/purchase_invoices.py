@@ -987,16 +987,32 @@ def _apply_valuation_trueup(db, invoice_doc, computed, config) -> Optional[list]
         if db is None or not pids:
             return None
         store_id = None
+        grn = None
         # Prefer the receiving store from the linked GRN for the on-hand scope.
         grn_id = invoice_doc.get("grn_id")
         if grn_id:
             try:
                 grn = db.get_collection("grns").find_one(
-                    {"grn_id": grn_id}, {"_id": 0, "store_id": 1}
+                    {"grn_id": grn_id}, {"_id": 0, "store_id": 1, "grn_subtype": 1}
                 )
                 store_id = (grn or {}).get("store_id")
             except Exception:
                 store_id = None
+        # G1: a walk-in buy's bill that claims no input credit costs its goods
+        # at the price plus the GST it cannot claim back -- the same rule its
+        # units went on the shelf by (purchase_match.landed_unit_cost).
+        if (grn or {}).get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO and (
+            invoice_doc.get("itc_eligible") is False
+        ):
+            lines = [
+                {
+                    **ln,
+                    "unit_price": pmatch.landed_unit_cost(
+                        ln.get("unit_price"), ln.get("gst_rate"), False
+                    ),
+                }
+                for ln in lines
+            ]
         product_state = _product_state_for_valuation(
             db, pids, store_id, exclude_grn_id=grn_id
         )
@@ -1079,12 +1095,20 @@ def _draft_lines(db, receipt: dict, po: Optional[dict]) -> list:
     the name and HSN the receipt and its PO lack taken from the catalogue: a
     receipt line stores only product_id + quantities and a DC has no PO, so the
     DC door opened every line blank and the form would not book until each
-    name was retyped. Fail-soft: a catalogue miss leaves the line as it was."""
+    name was retyped. A "Bought without PO" receipt has no PO line to carry a
+    GST rate either: its lines take THE PO-line rate rule (vendors.gst.
+    _po_line_gst_rate -- the HSN's rate, else the catalogued one), the rate
+    its units were costed at, never a 0% that booked a registered dealer's
+    bill with no tax. Fail-soft: a catalogue miss leaves the line as it was."""
+    from .vendors.gst import _po_line_gst_rate
+
     lines = pinv.lines_from_grn(receipt, po)
+    walk_in = (receipt or {}).get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO
     missing = {
         ln["product_id"]
         for ln in lines
-        if ln.get("product_id") and not (ln.get("description") and ln.get("hsn"))
+        if ln.get("product_id")
+        and (walk_in or not (ln.get("description") and ln.get("hsn")))
     }
     if not missing or db is None:
         return lines
@@ -1092,7 +1116,7 @@ def _draft_lines(db, receipt: dict, po: Optional[dict]) -> list:
     for pid in missing:
         try:
             products[pid] = db.get_collection("products").find_one(
-                {"product_id": pid}, {"_id": 0, "name": 1, "hsn_code": 1}
+                {"product_id": pid}, {"_id": 0, "name": 1, "hsn_code": 1, "gst_rate": 1}
             ) or {}
         except Exception:
             products[pid] = {}
@@ -1100,6 +1124,10 @@ def _draft_lines(db, receipt: dict, po: Optional[dict]) -> list:
         p = products.get(ln.get("product_id")) or {}
         ln["description"] = ln.get("description") or p.get("name")
         ln["hsn"] = ln.get("hsn") or p.get("hsn_code")
+        if walk_in and p:
+            rate = _po_line_gst_rate({"hsn": ln.get("hsn")}, p)[0]
+            if rate is not None:
+                ln["gst_rate"] = float(rate)
     return lines
 
 
@@ -1700,7 +1728,8 @@ async def create_purchase_invoice(
     # A genuine no-order purchase (goods bought over the counter, no PO) has a
     # way out the UI can actually WALK: the Goods Receipt screen's "Bought
     # without PO" mode (supplier, cost per line, bill photo), whose receipt is
-    # linkable from every billing door and claims no input credit (D14). A
+    # linkable from every billing door and claims input credit only from a
+    # GST-registered supplier (G2). A
     # supplier's delivery on a challan keeps the Delivery-Challan mode.
     if not body.grn_id and not body.linked_dc_ids:
         if (
@@ -1930,8 +1959,9 @@ async def create_purchase_invoice(
         "tds": round(body.tds, 2),
         # Round 12 item 6: no valid supplier GSTIN on the invoice, no input
         # credit -- decided here, once, so the register, GSTR-3B and the
-        # Cross-Check all read it from the stored flag. D14: nor on a bill for
-        # goods bought without a PO (the receipt says so).
+        # Cross-Check all read it from the stored flag. A bill for goods
+        # bought without a PO claims it only from a registered supplier (G2;
+        # the receipt says which it is).
         "itc_eligible": ov.itc_claimable(
             supplier_gstin, body.reverse_charge, body.itc_eligible, grn_doc
         ),
@@ -2174,11 +2204,15 @@ async def preview_purchase_invoice(
     supplier_gstin, recipient, computed = _bill_math(
         db, vendor, body, grn_doc, current_user
     )
+    # The verdict AND its reason from the one rule: the form shows the reason
+    # as sent, so it never explains a refusal by a rule of its own.
+    refusal = ov.itc_refusal(
+        supplier_gstin, body.reverse_charge, body.itc_eligible, grn_doc
+    )
     return {
         "vendor_gstin": supplier_gstin,
-        "itc_eligible": ov.itc_claimable(
-            supplier_gstin, body.reverse_charge, body.itc_eligible, grn_doc
-        ),
+        "itc_eligible": refusal is None,
+        "itc_reason": refusal,
         "recipient_entity_id": recipient.get("recipient_entity_id"),
         "recipient_gstin": recipient.get("recipient_gstin"),
         "supplier_state": computed["supplier_state"],

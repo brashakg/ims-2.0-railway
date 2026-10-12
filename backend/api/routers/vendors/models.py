@@ -271,7 +271,8 @@ GRN_SUBTYPE_DC = "DELIVERY_CHALLAN"
 # PO. The supplier on file (a dealer not on the list is quick-added as one,
 # owner 2026-10-12), a cost on every line, the bill photo (same
 # mandatory-document gate as STANDARD), bill number/date if any.
-# Its bill books no input tax credit (org_validation.itc_claimable).
+# Its bill claims input credit only from a GST-registered supplier
+# (org_validation.itc_claimable, owner 2026-10-13 G2).
 GRN_SUBTYPE_NO_PO = ap_engine.GRN_SUBTYPE_NO_PO
 _GRN_SUBTYPES = (GRN_SUBTYPE_STANDARD, GRN_SUBTYPE_DC, GRN_SUBTYPE_NO_PO)
 
