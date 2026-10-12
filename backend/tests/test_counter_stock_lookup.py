@@ -681,6 +681,21 @@ def test_d7b2_an_answer_the_caps_did_not_cut_is_not_flagged(call, mongo_db):
     assert (body.get("total"), body.get("truncated")) == (len(body["items"]), False), body.get("total")
 
 
+def test_d7b2_total_counts_the_tills_search_not_the_wide_one(call, mongo_db):
+    # `total` counts search_products_filter as search_products lists it (the
+    # till's word-start rule), never the purchase box's wide rule
+    # (anywhere=True), which finds 'CA8895' INSIDE 'XCA8895'. Counted that
+    # way the accessory makes 3 rows read 'Showing 3 of 4'.
+    _seed(mongo_db)
+    mongo_db["products"].insert_one(
+        {"_id": "P-XCA", "product_id": "P-XCA", "sku": "AC-GENERIC-XCA8895", "brand": "Generic",
+         "model": "XCA8895", "category": "ACCESSORIES", "is_active": True}
+    )
+    body = _ok(call(_user("CASHIER"), q="CA8895"))
+    assert sorted(_items(body)) == sorted([P54, P56, P003])
+    assert (body.get("total"), body.get("truncated")) == (3, False)
+
+
 # ============================================================================
 # D7b-3  this shop, every other shop, in transit -- the till's own count
 # ============================================================================
@@ -946,14 +961,20 @@ def test_d7b4_a_scanned_frame_brings_its_colours_and_sizes(call, mongo_db, label
     # An optical FRAME twin of P54 -- same brand, model, colour and size, so
     # the same identity_key (brand|model|colour|size carries no category):
     # only model_family_query's category keeps it out of the sunglass's family.
-    mongo_db["products"].insert_one(
+    # And CA88951, another model whose number starts with CA8895: only the
+    # trailing '|' of model_family_query's 'brand|model|' keeps it out.
+    mongo_db["products"].insert_many([
         _product("P-FR-807-54", "FR-CARRERA-CA8895-807-54", "Carrera CA8895 807/54", "807", "54",
-                 category="FRAME")
-    )
+                 category="FRAME"),
+        _product("P-CA88951", "SG-CARRERA-CA88951-807-54", "Carrera CA88951 Aviator - Gold", "807",
+                 "54", model="CA88951",
+                 attributes={"brand_name": "Carrera", "model_no": "CA88951", "colour_code": "807"}),
+    ])
     items = _items(_ok(call(_user("SALES_STAFF"), q=query)))
     assert {P54, P56, P003} <= set(items), f"scan by {label}: {sorted(items)}"
     assert RB not in items
     assert "P-FR-807-54" not in items, f"scan by {label}: a frame joined the sunglass's family"
+    assert "P-CA88951" not in items, f"scan by {label}: CA88951 read as a colour of CA8895"
 
 
 def test_d7b4_a_size_variant_comes_with_its_parent_whatever_its_model_spelling(call, mongo_db):
