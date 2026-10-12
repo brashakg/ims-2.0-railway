@@ -15,7 +15,7 @@ keeps the org-wide view (an owner question, like R8).
 import os
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 
 os.environ.setdefault("JWT_SECRET_KEY", "test")
 os.environ.setdefault("ENVIRONMENT", "test")
@@ -32,11 +32,12 @@ from api.routers.auth import get_current_user  # noqa: E402
 from api.routers.finance import bank_statement, gst_crosscheck, tally  # noqa: E402
 
 DHN, PUN = "BV-DHN-01", "WO-PUN-01"
-from tests.ist_business_day import business_day  # noqa: E402
-
-# The IST business day the JV window is asked for (orders are stamped with
-# datetime.utcnow(), the stored frame).
-TODAY = business_day()
+# The JV window: the day before to the day after now. It holds the orders
+# below (stamped datetime.utcnow()) whether the export reads a date as a UTC
+# or an IST day -- this file tests the shop rule, not the day boundary, and
+# an IST-today window missed them from 00:00 to 05:30 IST every night.
+_NOW = datetime.utcnow()
+FROM, TO = ((_NOW + timedelta(days=d)).date().isoformat() for d in (-1, 1))
 
 
 def _user(role, shops=()):
@@ -50,8 +51,8 @@ NO_SHOP_ACCOUNTANT = _user("ACCOUNTANT")
 
 # Every org-wide view: (method, path, json body or None)
 ORG_VIEWS = (
-    ("GET", f"/finance/tally/sales-jv?from_date={TODAY}&to_date={TODAY}", None),
-    ("GET", f"/finance/tally/sales-jv?from_date={TODAY}&to_date={TODAY}&store_id={DHN}", None),
+    ("GET", f"/finance/tally/sales-jv?from_date={FROM}&to_date={TO}", None),
+    ("GET", f"/finance/tally/sales-jv?from_date={FROM}&to_date={TO}&store_id={DHN}", None),
     ("GET", "/finance/gst/reconciliation", None),
     ("GET", "/finance/gst/cross-check", None),
     ("POST", "/finance/gst/cross-check-signoff",
@@ -108,7 +109,7 @@ def test_a_login_with_no_shop_is_refused_every_org_wide_view(world, method, path
 
 
 def test_the_sales_jv_no_longer_hands_a_login_with_no_shop_every_shops_vouchers(world):
-    path = f"/finance/tally/sales-jv?from_date={TODAY}&to_date={TODAY}"
+    path = f"/finance/tally/sales-jv?from_date={FROM}&to_date={TO}"
     assert world(NO_SHOP_ACCOUNTANT, "GET", path).status_code == 403
     # The org view is the accounts roles' with a shop, and an admin's.
     for user in (_user("ACCOUNTANT", [PUN]), _user("ADMIN"), _user("SUPERADMIN")):
