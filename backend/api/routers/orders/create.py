@@ -779,6 +779,7 @@ async def create_order(
             order_has_cart_discount=bool(
                 cart_discount_percent > 0 or cart_discount_amount > 0
             ),
+            user=current_user,
         )
 
         # Resolve delivery date — explicit date > expected_delivery_days

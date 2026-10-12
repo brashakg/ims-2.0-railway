@@ -226,6 +226,7 @@ async def add_order_item(
                 _f(cart_discount_percent) > 0
                 or _f(order.get("cart_discount_amount")) > 0
             ),
+            user=current_user,
         )
 
         # ------------------------------------------------------------------

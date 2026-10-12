@@ -14,9 +14,10 @@ Role policy (DECISIONS sec 9, owner rulings 2026-09-28 / D7 / 2026-09-29):
     route answers alike, and the frontend CostCell's PRODUCT_COST_ROLES is
     this set. The same context answers every figure worked out from that
     cost at the shop (owner ruling 2026-10-12): an order line's cost_at_sale,
-    the till scan's unit and product, the below-cost price error, stock
-    counts, stock value at cost, stock alerts, transfers and workshop remake
-    cost -- the managers keep them, counter roles never get the key.
+    the till scan's unit and product, a serial and its warranty lookup, a
+    lens line, the below-cost and cost-floor price errors, stock counts,
+    stock value at cost, stock alerts, transfers and workshop remake cost --
+    the managers keep them, counter roles never get the key.
   * What was paid and to whom (context="purchase"): PURCHASE_ROLES. A vendor
     return / RTV debit note shows anyone else the item, quantity and reason
     only, and a vendor shows only VENDOR_NAME_KEYS (the vendor list, a debit
