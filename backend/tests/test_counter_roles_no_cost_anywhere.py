@@ -21,7 +21,7 @@ import json
 import os
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -135,6 +135,8 @@ def _seed(db):
             "cost_price": COST,
             "unit_cost": COST,
             "created_at": now,
+            # Inside /inventory/expiring's window (an ISO date, as add_stock writes it).
+            "expiry_date": (now + timedelta(days=5)).date().isoformat(),
         }
     )
     db.customers.insert_one(
@@ -271,6 +273,7 @@ READS = [
     ("GET", "/api/v1/customers/C1/orders", ()),
     ("GET", "/api/v1/inventory/barcode/2900000000017", ()),
     ("GET", "/api/v1/inventory/stock/barcode/2900000000017", ()),
+    ("GET", "/api/v1/inventory/expiring", ()),
     ("GET", "/api/v1/inventory/barcode/2900000000017/trace", ()),
     ("GET", "/api/v1/reports/purchase/recommendations", ()),
     ("GET", f"/api/v1/inventory/stock-count?store_id={STORE}", ()),

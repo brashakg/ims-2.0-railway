@@ -27,7 +27,7 @@ from .models import (
 from pydantic import StrictInt
 
 from ._shared import BaseModel, Field, _STOCK_MANAGER_ROLES
-from ...services.cost_mask import mask_cost
+from ...services.cost_mask import mask_cost, mask_cost_list
 from ...services.reorder_policy import (
     LEVELS_FIELD,
     MAX_LEVEL,
@@ -275,8 +275,10 @@ async def get_expiring_stock(
     active_store = current_user.get("active_store_id")
 
     if repo is not None:
+        # Raw units carry cost_price / unit_cost (opening stock writes both):
+        # the roles that see product cost only, as the till scans above.
         items = repo.find_expiring(active_store, days)
-        return {"items": items}
+        return {"items": mask_cost_list(items, current_user, "product")}
 
     return {"items": []}
 
