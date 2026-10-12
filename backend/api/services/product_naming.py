@@ -20,7 +20,8 @@ e.g.  "Ray-Ban RB3025 Aviator Sunglasses - Polished Gold"
 
 Every input degrades gracefully -- a missing brand/model/shape/colour simply
 drops from the string; the result is title-cased, single-spaced, deterministic
-and clamped to MAX_NAME_LEN (70) characters. Tokens that carry a digit (model
+and clamped to MAX_NAME_LEN (70) characters (a contact lens's power and fit,
+and a stored name, are never cut: build_product_name). Tokens that carry a digit (model
 numbers like RB3025, sizes like 52) are preserved verbatim so title-casing can
 never mangle a model number into "Rb3025".
 
@@ -308,11 +309,11 @@ def smart_title(text: str) -> str:
     return _smart_title(text)
 
 
-def _clamp(text: str, limit: int) -> str:
-    """Clamp to `limit` chars on a word boundary, trimming a dangling
-    separator/hyphen so a truncated title never ends in ' -'."""
+def _clamp(text: str, limit: Optional[int]) -> str:
+    """Clamp to `limit` chars (None: no limit) on a word boundary, trimming a
+    dangling separator/hyphen so a truncated title never ends in ' -'."""
     text = _WS_RE.sub(" ", text).strip()
-    if len(text) <= limit:
+    if limit is None or len(text) <= limit:
         return text
     cut = text[:limit]
     if " " in cut:
@@ -388,16 +389,19 @@ def build_product_name(product: Dict[str, Any], detail: str = "") -> str:
     "{Brand} {Model} {Shape} {Gender} {Category-word} {Detail} - {Colour}",
     title-cased, single-spaced, <= MAX_NAME_LEN. Missing pieces drop out.
     `detail` is what the create door says tells this product from its model's
-    others (a contact lens's power and fit, product_master._cl_parts). An
-    explicit name / title on the doc (or attributes.name for a SERVICE) is
-    honoured verbatim (cleaned + clamped) rather than rebuilt.
+    others (a contact lens's power and fit, product_master._cl_parts): a name
+    carrying one is never cut, or three colours (or a 6- and a 30-pack) of one
+    lens would share a name, a Shopify title and a handle. An explicit name /
+    title on the doc (or attributes.name for a SERVICE) is honoured verbatim
+    (cleaned, never cut, so the SEO title and handle are the bill line's name)
+    rather than rebuilt.
     """
     if not isinstance(product, dict):
         return ""
 
     explicit = _explicit_name(product)
     if explicit:
-        return _clamp(_smart_title(explicit), MAX_NAME_LEN)
+        return _clamp(_smart_title(explicit), None)
 
     a = _attrs(product)
     brand = _brand(product)
@@ -430,7 +434,7 @@ def build_product_name(product: Dict[str, Any], detail: str = "") -> str:
     else:
         name = core
 
-    return _clamp(_smart_title(name), MAX_NAME_LEN)
+    return _clamp(_smart_title(name), None if detail else MAX_NAME_LEN)
 
 
 def build_seo_title(product: Dict[str, Any]) -> str:

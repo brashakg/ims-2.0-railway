@@ -1157,3 +1157,31 @@ def test_d_an_optical_lens_never_takes_a_leftover_eye_size(door):
     # lens index or coating.
     frame = {"brand_name": "Carrera", "model_no": "CA8895", "index": "1.67", "coating": "HC"}
     assert pm.build_sku("SG", frame) == "SG-CARRERA-CA8895"
+
+
+def test_d_colour_twins_and_packs_never_share_a_name_title_or_handle():
+    """The 70-character clamp cut the colour (and the pack) off a contact
+    lens's name, so three colours of one lens shared a name, a Shopify title
+    and a handle. What tells one lens from another is never cut."""
+    from api.services import product_naming as pn
+
+    def mint(category, attrs):
+        return pm.normalise_payload(category=category, attributes=attrs, mrp=1000.0, offer_price=900.0)
+
+    ccl = {"brand_name": "Freshlook", "model_name": "Colorblends", "power": "-1.25",
+           "base_curve": "8.6", "diameter": "14.5", "pack": "2", "expiry_date": "2027-01-31"}
+    toric = {"brand_name": "Acuvue", "model_name": "Oasys for Astigmatism", "power": "-1.25",
+             "cl_cyl": "-0.75", "cl_axis": "180", "base_curve": "8.6", "diameter": "14.5",
+             "expiry_date": "2027-01-31"}
+    docs = [mint("CCL", dict(ccl, colour_name=c)) for c in ("Brilliant Blue", "Gemstone Green", "Hazel")]
+    docs += [mint("CL", dict(toric, pack=p)) for p in ("6", "30")]
+    assert docs[0]["name"].endswith("-1.25 BC 8.6 DIA 14.5 Pack of 2 - Brilliant Blue")
+    assert docs[-1]["name"].endswith("Pack of 30")
+    for read in (lambda d: d["name"], pn.build_seo_title, pn.build_handle):
+        seen = [read(d) for d in docs]
+        assert len(set(seen)) == len(seen), seen
+    # Guard: a frame's name is still clamped.
+    long_frame = mint("FR", {"brand_name": "Superlongbrandname International Optical House",
+                             "model_no": "ModelXYZ Very Long Designation Edition",
+                             "colour_code": "Metallic Rose Gold Gradient"})
+    assert len(long_frame["name"]) <= pn.MAX_NAME_LEN
