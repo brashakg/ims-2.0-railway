@@ -45,6 +45,9 @@ const known: Record<string, (...a: unknown[]) => unknown> = {
   getCategoryRegistry: async () => { throw new Error('offline'); },
   getBrandOptions: async () => ({ brands: [] }),
   getProduct: async () => PRODUCT,
+  // The catalog list (GET /products): photo 1 is C; an old single image
+  // field still names A.
+  getProducts: async () => ({ products: [{ ...PRODUCT, images: [C, A], image_url: A }], total_count: 1 }),
 };
 const productSpies = vi.hoisted(() => ({}) as Record<string, ReturnType<typeof vi.fn>>);
 vi.mock('../../../services/api/products', () => ({
@@ -52,6 +55,7 @@ vi.mock('../../../services/api/products', () => ({
   productApi: new Proxy({}, {
     get: (_t, key: string) => (productSpies[key] ??= vi.fn(known[key] ?? (async () => ({})))),
   }),
+  catalogApi: { getOnlineSummary: vi.fn(async () => ({ catalog: null })) },
 }));
 vi.mock('../../../services/api/client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../services/api/client')>()),
@@ -87,7 +91,7 @@ vi.mock('../../../constants/gstRuntime', () => ({
 import { CatalogRequestError } from '../../../services/api/catalog';
 import { movePhoto, useProductImages } from '../quickadd/useProductImages';
 import { AngleGuide, ProductPhotoGrid } from '../quickadd/ProductPhotoGrid';
-import { docImages } from '../CatalogProductDrawer';
+import { CatalogManagerPage } from '../CatalogManagerPage';
 import { QuickAddPage } from '../QuickAddPage';
 
 /** An imported product waiting in the review queue (photos A, B, C). */
@@ -198,6 +202,27 @@ describe('the photo grid', () => {
     }
   });
 
+  // The numbers and the disabled ends belong to the PLACE, not the photo:
+  // after a move they must read the new order, not the order the page opened in.
+  it('after a move the numbers and the disabled ends follow the new order', async () => {
+    const user = userEvent.setup();
+    render(<Harness initial={[A, B, C]} />);
+    const expectPlaces = () => {
+      tiles().forEach((t, i) => expect(within(t).getByText(String(i + 1))).toBeInTheDocument());
+      expect(btn('Move photo 1 earlier')).toBeDisabled();
+      expect(btn('Move photo 3 later')).toBeDisabled();
+      for (const name of ['Move photo 1 later', 'Move photo 2 earlier', 'Move photo 2 later', 'Move photo 3 earlier']) {
+        expect(btn(name)).toBeEnabled();
+      }
+    };
+    await user.click(btn('Move photo 3 earlier'));
+    expect(shown()).toEqual([A, C, B]);
+    expectPlaces();
+    await user.click(btn('Move photo 1 later'));
+    expect(shown()).toEqual([C, A, B]);
+    expectPlaces();
+  });
+
   it('moves the first, a middle and the last photo with the buttons', async () => {
     const user = userEvent.setup();
     render(<Harness initial={[A, B, C]} />);
@@ -259,8 +284,14 @@ describe('the angle guide', () => {
 });
 
 describe('the catalog list thumbnail', () => {
-  it('is photo 1 even when an old single image field disagrees', () => {
-    expect(docImages({ images: [C, A], image_url: A })[0]).toBe(C);
+  it('is photo 1 even when an old single image field disagrees', async () => {
+    render(
+      <MemoryRouter initialEntries={['/catalog']}>
+        <CatalogManagerPage />
+      </MemoryRouter>,
+    );
+    const thumb = await screen.findByRole('button', { name: 'View images of Ray-Ban RB4165' });
+    expect(within(thumb).getByRole('img')).toHaveAttribute('src', C);
   });
 });
 

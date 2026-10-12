@@ -34,6 +34,9 @@ os.environ.setdefault("ENVIRONMENT", "test")
 import pytest  # noqa: E402
 
 from api.routers import products as products_mod  # noqa: E402
+from database.connection import MockCollection  # noqa: E402
+from database.repositories.audit_repository import AuditRepository  # noqa: E402
+from database.repositories.product_repository import ProductRepository  # noqa: E402
 from api.services import catalogue_pdf  # noqa: E402
 from api.services import product_master as pm  # noqa: E402
 from api.services import shopify_live_sync as ls  # noqa: E402
@@ -44,6 +47,7 @@ from api.services.shopify_push import PushResult  # noqa: E402
 from test_online_push_dirty_flag import (  # noqa: E402
     _DB,
     _edit_spine,
+    _frame_payload,
     _pm_edit,
     _pm_spine_repo,
     _run,
@@ -61,7 +65,7 @@ from test_shopify_media_title_sync import (  # noqa: E402
     gates,  # noqa: F401 -- fixture
 )
 from test_shopify_live_sync import world  # noqa: E402,F401 -- fixture
-from test_catalog_review_put import _bvi_doc, _put, env  # noqa: E402,F401
+from test_catalog_review_put import _bvi_doc, _promote, _put, env  # noqa: E402,F401
 from test_cataloguing_scorecard_qc import (  # noqa: E402
     FakeDB as _QcDB,
     _product as _qc_product,
@@ -129,6 +133,25 @@ def test_the_product_master_door_keeps_the_order_and_queues_the_twin(db):
     assert twin["ecom"]["locally_modified"] is True
 
 
+def test_a_new_product_keeps_the_order_it_was_created_with_on_its_twin(db):
+    """POST /products: the add page reordered the photos before the FIRST
+    save. The twin (what the first publish sends to Shopify) is born in the
+    order sent, the same as the spine (what the till and the list show)."""
+    sent = [SIDE, FRONT, ANGLED]
+    created = pm.create_via_door(
+        _frame_payload(),
+        source="FORM",
+        actor="u1",
+        extra_fields={"images": list(sent)},
+        product_repo=ProductRepository(MockCollection("products")),
+        audit_repo=AuditRepository(MockCollection("audit_logs")),
+        db=db,
+    )
+
+    assert created["images"] == sent
+    assert _twin(db, created["pim_product_id"])["images"] == sent
+
+
 def test_the_review_editor_save_keeps_the_order_and_queues_the_row(env):
     """The imported-product review mode saves through PUT /catalog/products."""
     doc = _bvi_doc(doc_id="clx0photos01", images=[FRONT, ANGLED, SIDE])
@@ -139,6 +162,21 @@ def test_the_review_editor_save_keeps_the_order_and_queues_the_row(env):
     saved = catalog_mod.CATALOG_PRODUCTS[doc["id"]]
     assert saved["images"] == [SIDE, ANGLED, FRONT]
     assert saved["ecom"]["locally_modified"] is True
+
+
+def test_approve_after_a_review_reorder_gives_the_till_the_same_order(env):
+    """Review editor: 'Move photo 3 earlier', then Approve. Approve promotes
+    the twin onto a new spine row; the spine (the till, the list) must hold
+    the reviewer's order, the same as the twin (the website)."""
+    doc = _bvi_doc(doc_id="clx0photos02", sku="RVPH2", images=[FRONT, ANGLED, SIDE])
+    catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
+
+    _put(doc["id"], {"images": [FRONT, SIDE, ANGLED]})
+    _promote(doc["id"])
+
+    twin = catalog_mod.CATALOG_PRODUCTS[doc["id"]]
+    assert twin["images"] == [FRONT, SIDE, ANGLED]
+    assert env["repo"].find_by_id(doc["id"])["images"] == [FRONT, SIDE, ANGLED]
 
 
 # ===========================================================================
