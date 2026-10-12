@@ -97,17 +97,16 @@ const STATUS_LABELS: Record<string, string> = {
 // return (its value, the credit-note amount and number) and the GST debit
 // note's amounts are for PAYABLES_ROLES alone. The server already drops them
 // for anyone else; these copies keep them off the screen whatever it sends.
-// Owner ruling 2026-10-12: so are a return line's unit price, rate and value --
-// anyone else reads the items, quantities and reasons only. Every key a line's
-// price can arrive under (the server's payables_mask._RETURN_LINE_PRICE) goes.
-const RETURN_LINE_PRICE_KEYS = [
-  'unit_price', 'unit_cost', 'unit_cost_paise', 'rate', 'rate_paise', 'line_expected_paise',
-];
+// Owner ruling 2026-10-12 (R3): so are a return line's unit price, rate and
+// value -- anyone else reads the items, quantities and reasons only. An
+// allow-list, the server's own (cost_mask._RETURN_ITEM_KEYS, the one cut for
+// every return line), so a price under any name stays off the screen.
+const RETURN_LINE_KEYS = ['product_id', 'product_name', 'quantity', 'reason'] as const;
 
 function withoutLinePrice(line: ReturnLine): ReturnLine {
-  const out: Record<string, unknown> = { ...line };
-  for (const key of RETURN_LINE_PRICE_KEYS) delete out[key];
-  return out as ReturnLine;
+  const out: Record<string, unknown> = {};
+  for (const key of RETURN_LINE_KEYS) if (key in line) out[key] = line[key];
+  return out as unknown as ReturnLine;
 }
 
 function withoutReturnCredit(ret: VendorReturn): VendorReturn {

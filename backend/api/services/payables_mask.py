@@ -35,7 +35,12 @@ from typing import Any, Callable, Optional
 
 from fastapi import HTTPException
 
-from .cost_mask import AP_ROLES, can_see_cost, mask_debit_note  # noqa: F401  (AP_ROLES re-exported)
+from .cost_mask import (  # noqa: F401  (AP_ROLES re-exported)
+    AP_ROLES,
+    can_see_cost,
+    mask_debit_note,
+    return_line_for_reader,
+)
 
 
 def can_see_payables(user: Optional[dict]) -> bool:
@@ -101,34 +106,28 @@ def debit_note_for_reader(doc: Any, user: Optional[dict]) -> Any:
     return strip_debit_note_money(mask_debit_note(doc, user), user)
 
 
-# --- Return lines (RMAs) -------------------------------------------------------
+# --- Return lines -------------------------------------------------------------
 # Owner ruling 2026-10-12 (R3): on a vendor return or an RMA anyone outside the
 # accounts roles reads the items, quantities and reasons only -- no unit price,
-# no line value, no rate. (A vendor return gets that from its one projection,
-# cost_mask.mask_vendor_return; an RMA from strip_rma_credit below.) (The per-unit cost a manager sees on stock and POs
-# follows the cost rule, cost_mask; on a return it is the basis of the
-# supplier's credit, so it is supplier money here.) Every key the code reads a
-# return line's price from -- the routers' own (vendor_returns unit_price,
-# vendor_rma unit_cost_paise) and the rupee / legacy forms the RTV debit-note
-# engine also reads off a return's lines (rtv_debit_note._norm_line:
-# unit_cost, rate, rate_paise) -- and the line value the RMA engine writes.
-_RETURN_LINE_PRICE = frozenset({
-    "unit_price", "unit_cost", "unit_cost_paise", "rate", "rate_paise",
-    "line_expected_paise",
-})
+# no line value, no rate. ONE allow-list cuts every return line, a vendor
+# return's (cost_mask.mask_vendor_return) and an RMA's (strip_rma_credit
+# below): cost_mask.return_line_for_reader. (The per-unit cost a manager sees
+# on stock and POs follows the cost rule, cost_mask; on a return it is the
+# basis of the supplier's credit, so it is supplier money here.)
 
 
 # --- Vendor RMA (routers/vendor_rma) ----------------------------------------
 # Expected credit, every credit received (the total and each credit note's
 # amount), the variance between them and any written-off residual, in paise
-# and rupees; line_expected_paise is a line's share of the expected credit;
-# plus every line's price (unit_cost_paise).
+# and rupees, and a line's share of the expected credit wherever it sits
+# (line_expected_paise). A line's PRICE (unit_cost_paise) is cut by the one
+# return-line allow-list above, not listed here.
 _RMA_CREDIT = frozenset({
     "expected_credit_paise", "expected_credit_rupees",
     "received_credit_paise", "received_credit_rupees",
     "variance_paise", "variance_rupees",
     "written_off_paise", "line_expected_paise", "received_paise",
-}) | _RETURN_LINE_PRICE
+})
 # The engine writes the amount into its own status-history notes
 # (services/vendor_rma record_credit_note / close_rma); keep the event, drop
 # the figure. A note a person typed is theirs and passes as written.
@@ -147,12 +146,36 @@ def _rma_note(key: str, value: Any) -> Any:
     return value
 
 
+def _rma_for_reader(node: Any) -> Any:
+    """``node`` without the RMA credit at any depth, its notes' figures
+    rewritten, and every ``lines`` list cut by the one return-line allow-list."""
+    if isinstance(node, dict):
+        out = {}
+        for key, value in node.items():
+            if isinstance(key, str) and key in _RMA_CREDIT:
+                continue
+            if key == "lines" and isinstance(value, list):
+                out[key] = [
+                    return_line_for_reader(ln) if isinstance(ln, dict) else ln
+                    for ln in value
+                ]
+                continue
+            if not isinstance(value, (dict, list)):
+                value = _rma_note(key, value)
+            out[key] = _rma_for_reader(value)
+        return out
+    if isinstance(node, list):
+        return [_rma_for_reader(item) for item in node]
+    return node
+
+
 def strip_rma_credit(doc: Any, user: Optional[dict]) -> Any:
     """A vendor RMA, an RMA write result or an RMA error detail without the
-    supplier credit, unless the caller is an accounts role."""
+    supplier credit and with its lines cut to item, quantity and reason,
+    unless the caller is an accounts role."""
     if can_see_payables(user):
         return doc
-    return _without(doc, _RMA_CREDIT.__contains__, _rma_note)
+    return _rma_for_reader(doc)
 
 
 # --- GST input tax (routers/finance/gst, routers/reports/gstr3b) ------------
