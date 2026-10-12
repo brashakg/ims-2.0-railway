@@ -160,6 +160,20 @@ def can_access_store_scoped(store_id, current_user: dict) -> bool:
     return bool(store_id) and store_id in stores
 
 
+def in_reach_or_404(doc, current_user: dict, detail: str):
+    """THE by-id store guard of a purchase-side object (audit F63): a missing
+    object and one outside the caller's shops -- another shop's, or a legacy
+    one stamped with no shop -- get the SAME 404, so a guessed id never
+    confirms that it exists or names its shop (validate_store_access's 403
+    'No access to store X' did both). Admins reach every object. Returns
+    `doc`."""
+    from fastapi import HTTPException
+
+    if not doc or not can_access_store_scoped(doc.get("store_id"), current_user):
+        raise HTTPException(status_code=404, detail=detail)
+    return doc
+
+
 def resolve_store_scope(store_id, current_user: dict):
     """Authorise + resolve the store filter for a LIST/aggregation endpoint that
     accepts an optional ?store_id (BUG-062 tail).

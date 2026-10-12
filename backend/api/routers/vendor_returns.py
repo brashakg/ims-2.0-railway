@@ -11,7 +11,7 @@ from datetime import datetime
 import uuid
 from .auth import require_roles
 from ..dependencies import (
-    can_access_store_scoped,
+    in_reach_or_404,
     get_db,
     resolve_store_scope,
     validate_store_access,
@@ -193,10 +193,7 @@ def _return_in_reach(collection, return_id: str, current_user: dict) -> dict:
     shop's, or a legacy one stamped with no shop) is "not found": a 404 that
     never confirms the id exists or names its shop, and never a write to a
     return the detail hides. Admins reach every return."""
-    return_doc = collection.find_one({"return_id": return_id})
-    if not return_doc or not can_access_store_scoped(return_doc.get("store_id"), current_user):
-        raise HTTPException(status_code=404, detail="Return not found")
-    return return_doc
+    return in_reach_or_404(collection.find_one({"return_id": return_id}), current_user, "Return not found")
 
 
 # ============================================================================

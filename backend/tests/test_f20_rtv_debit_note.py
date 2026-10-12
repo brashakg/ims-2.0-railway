@@ -13,7 +13,7 @@ Covers the F20 acceptance list:
   - totals = sum(line taxable) + tax
   - builds off an existing RTV / vendor-return (and a vendor_rma)
   - Tally Debit Note voucher XML is balanced (debits == credits)
-  - store/entity-scope 403; cashier 403
+  - store scope (another shop's id: 404, as a missing one); cashier 403
   - idempotent (re-issue returns the same note, no double-serial)
 
 CI-robust: every accessor monkeypatched + docs seeded; no whole-JSON substring.
@@ -562,7 +562,7 @@ def test_fail_soft_no_db():
 
 
 # ============================================================================
-# 7. Router: RBAC (cashier 403) + store-scope 403 + idempotent issue
+# 7. Router: RBAC (cashier 403) + store-scope 404 + idempotent issue
 # ============================================================================
 
 
@@ -618,19 +618,20 @@ def test_router_reissue_idempotent(rt, db):
     assert len(db.get_collection("debit_notes").docs) == 1
 
 
-def test_router_cross_store_issue_403(rt, db):
+def test_router_cross_store_issue_is_not_found(rt, db):
     from fastapi import HTTPException
     from api.routers.rtv_debit_notes import issue_debit_note, DebitNoteIssue
 
     _seed_return(db, return_id="VR-S2", store_id="S2")  # not the caller's store
     body = DebitNoteIssue(source_type="vendor_return", rtv_id="VR-S2")
     # An accountant (who may issue: owner ruling 2026-10-12) bound to S1 -- so
-    # the 403 is the store guard, not the role.
+    # the refusal is the store guard, not the role. Another shop's return is
+    # the 404 a missing one gets (audit F63, round 4 P5): never a 403 that
+    # confirms it exists and names its shop.
     with pytest.raises(HTTPException) as ei:
         _run(issue_debit_note(body, current_user=_user(["ACCOUNTANT"],
                                                        store_ids=["S1"], active="S1")))
-    assert ei.value.status_code == 403
-    assert "S2" in str(ei.value.detail)
+    assert (ei.value.status_code, ei.value.detail) == (404, "source RTV not found")
     assert db.get_collection("debit_notes").docs == []
 
 

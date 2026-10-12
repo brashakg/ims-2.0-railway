@@ -313,6 +313,54 @@ def test_an_rma_debit_note_waits_for_the_price(world):
 
 
 # ============================================================================
+# Round 4 P5 (audit F63): another shop's RMA, debit note or return id is the
+# 404 a missing id gets -- never a 403 'No access to store X' that confirms
+# the record exists and names its shop -- on every by-id read and write.
+# ============================================================================
+
+
+def test_another_shops_rma_debit_note_or_return_answers_like_a_missing_id(world):
+    acct = _user("ACCOUNTANT")
+    rid = _create_return(world, _user("STORE_MANAGER")).json()["return_id"]
+    world.call(acct, "PUT", f"/vendor-returns/{rid}/prices", json={"unit_prices": [100.0]})
+    r = world.call(acct, "POST", "/rtv-debit-notes/issue",
+                   json={"source_type": "vendor_return", "rtv_id": rid})
+    assert r.status_code == 201, r.text
+    dn_id = r.json()["debit_note"]["debit_note_id"]
+    rma = _raise_rma(world, _user("STORE_MANAGER")).json()["rma_id"]
+    # A second priced Dhanbad return with no debit note yet (the issue door).
+    other = {**_stored_return(world, rid), "return_id": "VR-UNISSUED"}
+    other.pop("_id")
+    world.db["vendor_returns"].insert_one(other)
+
+    pune = _user("ACCOUNTANT", PUN)
+    doors = (
+        ("GET", "/vendor-rma/{}", None),
+        ("POST", "/vendor-rma/{}/authorize", {"vendor_rma_number": "Z-1"}),
+        ("POST", "/vendor-rma/{}/dispatch", {"carrier": "DTDC", "awb": "A1"}),
+        ("PUT", "/vendor-rma/{}/prices", {"unit_costs": [1.0]}),
+        ("POST", "/vendor-rma/{}/credit-note", {"credit_note_number": "CN", "received_amount": 1.0}),
+        ("POST", "/vendor-rma/{}/reject", {"reason": "no"}),
+        ("POST", "/vendor-rma/{}/close", {}),
+    )
+    for method, path, body in doors:
+        seen = world.call(pune, method, path.format(rma), json=body)
+        missing = world.call(pune, method, path.format("RMA-NOPE"), json=body)
+        assert (seen.status_code, seen.json()) == (missing.status_code, missing.json())             == (404, {"detail": "RMA not found"}), (path, seen.text)
+    for path in ("/rtv-debit-notes/{}", "/rtv-debit-notes/{}/print", "/rtv-debit-notes/{}/tally"):
+        seen = world.call(pune, "GET", path.format(dn_id))
+        missing = world.call(pune, "GET", path.format("DN-NOPE"))
+        assert (seen.status_code, seen.json()) == (missing.status_code, missing.json())             == (404, {"detail": "Debit note not found"}), (path, seen.text)
+    for rtv_id in ("VR-UNISSUED", "VR-NOPE"):
+        r = world.call(pune, "POST", "/rtv-debit-notes/issue",
+                       json={"source_type": "vendor_return", "rtv_id": rtv_id})
+        assert (r.status_code, r.json()) == (404, {"detail": "source RTV not found"}), r.text
+    # Nothing was written for the other shop.
+    assert _stored_rma(world, rma)["status"] == "DRAFT"
+    assert world.db["debit_notes"].count_documents({}) == 1
+
+
+# ============================================================================
 # The pricing doors' policy rows are the accounts roles, as their code gates
 # ============================================================================
 

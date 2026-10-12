@@ -14,8 +14,9 @@ RBAC: same vendor/AP role set as vendor_returns (ADMIN / AREA_MANAGER /
 STORE_MANAGER / ACCOUNTANT + SUPERADMIN via require_roles). A cashier / sales /
 workshop / optometrist role can NEVER authorize an RMA or record a credit.
 
-Store scope: every write validates ``validate_store_access`` on the RMA's store
-(mirrors the merged vendor_returns IDOR guard); the list endpoint uses
+Store scope: every by-id read and write asks ``in_reach_or_404`` (another
+shop's RMA is the 404 a missing one gets, as a vendor return's is); a new RMA
+validates its shop with ``validate_store_access``; the list endpoint uses
 ``resolve_store_scope``.
 
 Money: paisa-exact integers end-to-end. Rupee inputs are converted at the schema
@@ -53,7 +54,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from .auth import require_roles
-from ..dependencies import get_db, resolve_store_scope, validate_store_access, user_store_scope
+from ..dependencies import (
+    get_db,
+    in_reach_or_404,
+    resolve_store_scope,
+    validate_store_access,
+    user_store_scope,
+)
 from ..services.cost_mask import PURCHASE_ROLES
 from ..services.vendor_rma import (
     PRICE_REQUIRED,
@@ -279,10 +286,7 @@ async def get_rma(
 ):
     """Get a single RMA. Store-IDOR guarded (cross-store -> 403)."""
     eng = _engine()
-    doc = eng.get(rma_id)
-    if doc is None:
-        raise HTTPException(status_code=404, detail="RMA not found")
-    validate_store_access(doc.get("store_id"), current_user)
+    doc = in_reach_or_404(eng.get(rma_id), current_user, "RMA not found")
     return strip_rma_credit(_with_rupees(doc), current_user)
 
 
@@ -294,10 +298,7 @@ async def authorize_rma(
 ):
     """Record the vendor's RMA authorization number; DRAFT -> AUTHORIZED."""
     eng = _engine()
-    doc = eng.get(rma_id)
-    if doc is None:
-        raise HTTPException(status_code=404, detail="RMA not found")
-    validate_store_access(doc.get("store_id"), current_user)
+    doc = in_reach_or_404(eng.get(rma_id), current_user, "RMA not found")
     res = eng.authorize(
         rma_id,
         vendor_rma_number=body.vendor_rma_number,
@@ -317,10 +318,7 @@ async def dispatch_rma(
 ):
     """Record courier dispatch (carrier / AWB / date); AUTHORIZED -> DISPATCHED."""
     eng = _engine()
-    doc = eng.get(rma_id)
-    if doc is None:
-        raise HTTPException(status_code=404, detail="RMA not found")
-    validate_store_access(doc.get("store_id"), current_user)
+    doc = in_reach_or_404(eng.get(rma_id), current_user, "RMA not found")
     res = eng.dispatch(
         rma_id,
         carrier=body.carrier,
@@ -346,10 +344,7 @@ async def record_credit_note(
     Recording supplier money: the accounts roles only (owner ruling 2026-10-12)."""
     require_payables(current_user, "Recording a supplier credit note")
     eng = _engine()
-    doc = eng.get(rma_id)
-    if doc is None:
-        raise HTTPException(status_code=404, detail="RMA not found")
-    validate_store_access(doc.get("store_id"), current_user)
+    doc = in_reach_or_404(eng.get(rma_id), current_user, "RMA not found")
     # No credit is reconciled against an unknown expectation: the lines are
     # priced first (PUT /{rma_id}/prices). Checked before the maker-checker
     # tier, which reads the expected credit.
@@ -421,10 +416,7 @@ async def price_rma(
     credit note is recorded, and not under an issued GST debit note."""
     require_payables(current_user, "Pricing an RMA")
     eng = _engine()
-    doc = eng.get(rma_id)
-    if doc is None:
-        raise HTTPException(status_code=404, detail="RMA not found")
-    validate_store_access(doc.get("store_id"), current_user)
+    doc = in_reach_or_404(eng.get(rma_id), current_user, "RMA not found")
     if debit_note_issued(_get_db(), rma_id):
         raise HTTPException(
             status_code=409,
@@ -459,10 +451,7 @@ async def reject_rma(
     RMA forgoes its expected credit, so that is the accounts roles' alone
     (owner ruling 2026-10-12)."""
     eng = _engine()
-    doc = eng.get(rma_id)
-    if doc is None:
-        raise HTTPException(status_code=404, detail="RMA not found")
-    validate_store_access(doc.get("store_id"), current_user)
+    doc = in_reach_or_404(eng.get(rma_id), current_user, "RMA not found")
     actor = current_user.get("user_id")
     status = doc.get("status")
     if status in _REJECT_BEFORE_DISPATCH:
@@ -498,10 +487,7 @@ async def close_rma(
     if body.write_off_variance:
         require_payables(current_user, "Writing off an RMA's credit variance")
     eng = _engine()
-    doc = eng.get(rma_id)
-    if doc is None:
-        raise HTTPException(status_code=404, detail="RMA not found")
-    validate_store_access(doc.get("store_id"), current_user)
+    doc = in_reach_or_404(eng.get(rma_id), current_user, "RMA not found")
     res = eng.close_rma(
         rma_id,
         actor=current_user.get("user_id"),

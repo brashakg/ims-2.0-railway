@@ -11,7 +11,7 @@ It REUSES (no fork):
   * the FY-scoped atomic serial + CGST/SGST/IGST split + Tally Debit-Note voucher
     from ``services/rtv_debit_note`` (which themselves mirror the sales-invoice
     serial + splitter + the Receipt-voucher builder),
-  * the vendor/AP RBAC role set + the store-IDOR guard (validate_store_access /
+  * the vendor/AP RBAC role set + the store-IDOR guard (in_reach_or_404 /
     resolve_store_scope) from vendor_returns / vendor_rma.
 
 RBAC: issue, print and the Tally export are the accounts roles' (ADMIN /
@@ -45,8 +45,8 @@ from .auth import require_roles
 from .vendor_returns import _VENDOR_RETURN_READERS
 from ..dependencies import (
     get_db,
+    in_reach_or_404,
     resolve_store_scope,
-    validate_store_access,
     user_store_scope,
 )
 from ..services.rtv_debit_note import (
@@ -236,10 +236,7 @@ async def issue_debit_note(
     if eng._coll() is None:  # noqa: SLF001 - intentional fail-soft DB probe
         raise HTTPException(status_code=503, detail="Database not available")
 
-    rtv = _load_rtv(db, body.source_type, body.rtv_id)
-    if rtv is None:
-        raise HTTPException(status_code=404, detail="source RTV not found")
-    validate_store_access(rtv.get("store_id"), current_user)
+    rtv = in_reach_or_404(_load_rtv(db, body.source_type, body.rtv_id), current_user, "source RTV not found")
 
     vendor = _load_vendor(db, rtv.get("vendor_id"))
     seller = _load_seller(db, rtv.get("store_id"), rtv.get("entity_id"))
@@ -264,12 +261,9 @@ async def get_debit_note(
     debit_note_id: str,
     current_user: dict = Depends(require_roles(*_VENDOR_RETURN_READERS)),
 ):
-    """Get a single debit note. Store-IDOR guarded (cross-store -> 403)."""
+    """Get a single debit note. Another shop's is the 404 a missing one gets."""
     eng = _engine()
-    doc = eng.get(debit_note_id)
-    if doc is None:
-        raise HTTPException(status_code=404, detail="Debit note not found")
-    validate_store_access(doc.get("store_id"), current_user)
+    doc = in_reach_or_404(eng.get(debit_note_id), current_user, "Debit note not found")
     return debit_note_for_reader(_with_rupees(doc), current_user)
 
 
@@ -289,10 +283,7 @@ async def print_debit_note(
     """Printable GST debit-note HTML. Accounts roles only. Store-IDOR guarded."""
     require_payables(current_user, "The debit note print")
     eng = _engine()
-    doc = eng.get(debit_note_id)
-    if doc is None:
-        raise HTTPException(status_code=404, detail="Debit note not found")
-    validate_store_access(doc.get("store_id"), current_user)
+    doc = in_reach_or_404(eng.get(debit_note_id), current_user, "Debit note not found")
     return HTMLResponse(content=render_debit_note_html(doc))
 
 
@@ -305,10 +296,7 @@ async def export_debit_note_tally(
     credits). Accounts roles only. Store-IDOR guarded."""
     require_payables(current_user, "The debit note Tally export")
     eng = _engine()
-    doc = eng.get(debit_note_id)
-    if doc is None:
-        raise HTTPException(status_code=404, detail="Debit note not found")
-    validate_store_access(doc.get("store_id"), current_user)
+    doc = in_reach_or_404(eng.get(debit_note_id), current_user, "Debit note not found")
     try:
         xml = tally_build_debit_note_xml(doc)
     except ValueError as e:
