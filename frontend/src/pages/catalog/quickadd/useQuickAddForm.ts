@@ -52,6 +52,7 @@ import {
 } from '../productAddShared';
 import {
   backToQueueAddress,
+  queueSort,
   readReviewQueue,
   writeReviewQueue,
   removeFromReviewQueue,
@@ -754,6 +755,8 @@ export function useQuickAddForm() {
         const res = await catalogProductsApi.list({
           needs_review: true,
           is_active: 'all',
+          // The queue's own order (the review list's Sort by), never a second one.
+          sort: queueSort(readReviewQueue()),
           limit: 2,
         });
         const ids = (res.products || [])
@@ -1336,6 +1339,7 @@ export function useQuickAddForm() {
           const res = await catalogProductsApi.list({
             needs_review: true,
             is_active: 'all',
+            sort: queueSort(readReviewQueue()),
             limit: 2,
           });
           const ids = (res.products || [])

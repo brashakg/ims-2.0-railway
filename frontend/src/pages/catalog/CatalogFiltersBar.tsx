@@ -5,7 +5,7 @@
 // page address by the page (catalogListState); the options and their counts
 // come from the server (GET /products/facets), never a hard-coded list.
 
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import { Search, SlidersHorizontal, X } from 'lucide-react';
 import clsx from 'clsx';
 import type { CatalogFacets } from '../../services/api/products';
@@ -13,6 +13,7 @@ import { CATEGORY_BROWSE_OPTIONS } from '../../utils/categoryNormalize';
 import {
   ATTRIBUTE_FILTERS,
   FLAG_TYPES,
+  isDay,
   QUICK_DATES,
   SORT_OPTIONS,
   activeChips,
@@ -75,6 +76,76 @@ function OptionSelect({
   );
 }
 
+/** Chrome reports a year still being typed as 0002, 0020, 0202: no day yet.
+ *  A value already applied (the address) is never "still typing". */
+const typing = (v: string, applied: string) => v !== applied && v !== '' && v < '1000';
+
+/** From / To, India days, both included. Each box keeps what is typed in it
+ *  (a box reset to the address mid-year would wipe the digits), and the pair
+ *  is applied once both are whole days in order; From after To says so and
+ *  applies nothing. The address changing from outside (a chip's X, Clear
+ *  all, a quick pick) puts the boxes back to it, and the message goes with
+ *  the value that caused it. */
+function DayRange({
+  from,
+  to,
+  onApply,
+  children,
+}: {
+  from: string;
+  to: string;
+  onApply: (from: string, to: string) => void;
+  /** Shown after the boxes, before the message. */
+  children?: ReactNode;
+}) {
+  const [draft, setDraft] = useState({ from, to });
+  const [applied, setApplied] = useState({ from, to });
+  if (applied.from !== from || applied.to !== to) {
+    setApplied({ from, to });
+    setDraft({ from, to });
+  }
+  const ordered = (d: { from: string; to: string }) => !(d.from && d.to && d.from > d.to);
+  const whole = (d: { from: string; to: string }) =>
+    !typing(d.from, from) && !typing(d.to, to) && [d.from, d.to].every((v) => !v || isDay(v));
+  const change = (next: { from: string; to: string }) => {
+    setDraft(next);
+    if (whole(next) && ordered(next) && (next.from !== from || next.to !== to)) {
+      onApply(next.from, next.to);
+    }
+  };
+  const refused = whole(draft) && !ordered(draft);
+  return (
+    <>
+      <label className={label}>
+        <span>From</span>
+        <input
+          type="date"
+          value={draft.from}
+          max={draft.to || undefined}
+          onChange={(e) => change({ ...draft, from: e.target.value })}
+          className="input-field w-40 normal-case tracking-normal"
+        />
+      </label>
+      <label className={label}>
+        <span>To</span>
+        <input
+          type="date"
+          value={draft.to}
+          min={draft.from || undefined}
+          onChange={(e) => change({ ...draft, to: e.target.value })}
+          className="input-field w-40 normal-case tracking-normal"
+        />
+      </label>
+      {children}
+      {refused && (
+        <p className="basis-full text-sm text-red-700" role="alert">
+          The From date is after the To date. Pick a From date on or before the To date.
+        </p>
+      )}
+    </>
+  );
+}
+
 export interface CatalogFiltersBarProps {
   segment: 'catalog' | 'review';
   filters: CatalogFilters;
@@ -103,20 +174,10 @@ export function CatalogFiltersBar({
   isAdmin,
 }: CatalogFiltersBarProps) {
   const [moreOpen, setMoreOpen] = useState(() => moreFiltersCount(f) > 0);
-  const [dateError, setDateError] = useState('');
   const spine = segment === 'catalog';
   const set = (patch: Partial<CatalogFilters>) => onChange({ ...f, ...patch });
   const moreCount = moreFiltersCount(f);
   const quick = quickPickOf(f);
-
-  const setDates = (from: string, to: string) => {
-    if (from && to && from > to) {
-      setDateError('The From date is after the To date. Pick a From date on or before the To date.');
-      return;
-    }
-    setDateError('');
-    set({ from, to });
-  };
 
   const people = {
     added: facets?.created_by || [],
@@ -225,7 +286,6 @@ export function CatalogFiltersBar({
               <select
                 value={quick}
                 onChange={(e) => {
-                  setDateError('');
                   const pick = e.target.value as QuickDate;
                   set({ ...quickRange(pick), date_on: 'added' });
                 }}
@@ -238,7 +298,7 @@ export function CatalogFiltersBar({
                 ))}
                 {quick === 'custom' && (
                   <option value="custom" disabled>
-                    Date range (More filters)
+                    Custom range
                   </option>
                 )}
               </select>
@@ -322,45 +382,19 @@ export function CatalogFiltersBar({
                 <option value="edited">Last edited</option>
               </select>
             </label>
-            <label className={label}>
-              <span>From</span>
-              <input
-                type="date"
-                value={f.from}
-                max={f.to || undefined}
-                onChange={(e) => setDates(e.target.value, f.to)}
-                className="input-field w-40 normal-case tracking-normal"
-              />
-            </label>
-            <label className={label}>
-              <span>To</span>
-              <input
-                type="date"
-                value={f.to}
-                min={f.from || undefined}
-                onChange={(e) => setDates(f.from, e.target.value)}
-                className="input-field w-40 normal-case tracking-normal"
-              />
-            </label>
-            <span className="pb-2 text-xs text-gray-500">Both days included, India time.</span>
-            {(f.from || f.to) && (
-              <button
-                type="button"
-                onClick={() => {
-                  setDateError('');
-                  set({ from: '', to: '', date_on: 'added' });
-                }}
-                className="pb-2 text-sm font-medium text-blue-700 underline"
-              >
-                Clear dates
-              </button>
-            )}
+            <DayRange from={f.from} to={f.to} onApply={(from, to) => set({ from, to })}>
+              <span className="pb-2 text-xs text-gray-500">Both days included, India time.</span>
+              {(f.from || f.to) && (
+                <button
+                  type="button"
+                  onClick={() => set({ from: '', to: '', date_on: 'added' })}
+                  className="pb-2 text-sm font-medium text-blue-700 underline"
+                >
+                  Clear dates
+                </button>
+              )}
+            </DayRange>
           </div>
-          {dateError && (
-            <p className="text-sm text-red-700" role="alert">
-              {dateError}
-            </p>
-          )}
         </div>
       )}
 
@@ -405,10 +439,7 @@ export function CatalogFiltersBar({
           ))}
           <button
             type="button"
-            onClick={() => {
-              setDateError('');
-              onChange(clearFilters(f));
-            }}
+            onClick={() => onChange(clearFilters(f))}
             className="ml-1 text-xs font-medium text-blue-700 underline"
           >
             Clear all

@@ -265,8 +265,9 @@ export interface BulkRowResult {
   status: 'ready' | 'done' | 'refused' | 'already';
   reason?: string;
   name?: string;
-  /** Archive dry run: units still physically at the shops. */
-  in_stock_units?: number;
+  /** Archive dry run: units still physically at the shops (null when an
+   *  applied archive could not read them; a dry run answers 503 instead). */
+  in_stock_units?: number | null;
   /** Archive dry run: live on the website (archiving takes it down). */
   live_online?: boolean;
   /** Restore: false = back in the catalogue switched off (`note` says why). */

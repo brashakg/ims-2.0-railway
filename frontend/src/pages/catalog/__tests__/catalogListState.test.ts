@@ -24,7 +24,7 @@ import {
   whenIST,
   writeFilters,
 } from '../catalogListState';
-import { backToQueueAddress } from '../reviewQueue';
+import { backToQueueAddress, queueSort } from '../reviewQueue';
 
 // 12 Oct 2026, 12:45 IST == 07:15 UTC.
 const NOW = new Date('2026-10-12T07:15:00Z');
@@ -246,5 +246,34 @@ describe('panel round', () => {
       '/catalog/review?page=3&focus=X+y'
     );
     expect(backToQueueAddress(null, 'X')).toBe('/catalog/review?focus=X');
+  });
+});
+
+describe('panel round: chips, Archived, the review queue order', () => {
+  it("removing a Last edited range's chip puts Date range back to Date added", () => {
+    const f = readFilters(sp('date_on=edited&from=2026-10-01&to=2026-10-12'));
+    expect(f.date_on).toBe('edited');
+    const out = removeChip(f, 'dates');
+    expect([out.from, out.to, out.date_on]).toEqual(['', '', 'added']);
+    expect(writeFilters(out, sp('date_on=edited&from=2026-10-01')).get('date_on')).toBeNull();
+  });
+
+  it('Flags: Archived only for an admin; anyone else reads not chosen', () => {
+    expect(readFilters(sp('flag=archived')).flag).toBe('');
+    expect(readFilters(sp('flag=archived'), null, 'catalog', true).flag).toBe('archived');
+    expect(readFilters(sp('flag=any')).flag).toBe('any');
+  });
+
+  it('the review queue sorts newest first unless the address says otherwise', () => {
+    expect(readFilters(sp(''), null, 'review').sort).toBe('newest');
+    expect(readFilters(sp('sort=edited'), null, 'review').sort).toBe('edited');
+    const review = readFilters(sp(''), null, 'review');
+    expect(writeFilters(review, sp(''), 'review').get('sort')).toBeNull();
+    expect(writeFilters({ ...review, sort: 'edited' }, sp(''), 'review').get('sort')).toBe('edited');
+    expect(queueSort(null)).toBe('newest');
+    expect(queueSort({ ids: [], index: 0, filters: { address: 'sort=name_asc&page=2' } })).toBe(
+      'name_asc'
+    );
+    expect(queueSort({ ids: [], index: 0, filters: { address: 'sort=bogus' } })).toBe('newest');
   });
 });

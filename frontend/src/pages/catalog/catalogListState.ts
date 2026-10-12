@@ -23,6 +23,10 @@ export const SORT_OPTIONS = [
 export type SortKey = (typeof SORT_OPTIONS)[number]['value'];
 /** Owner ruling 2026-10-12: Recently edited is the default. */
 export const DEFAULT_SORT: SortKey = 'edited';
+/** The Needs review queue keeps its order of before: newest import first,
+ *  the order the review editor also walks when it fetches the next item. */
+export const defaultSort = (segment: 'catalog' | 'review' = 'catalog'): SortKey =>
+  segment === 'review' ? 'newest' : DEFAULT_SORT;
 
 /** The five flag types (backend services/catalog_flags.FLAG_TYPES). */
 export const FLAG_TYPES = [
@@ -111,18 +115,23 @@ const REVIEW_KEYS = ['q', 'sort', 'category', 'brand', 'photo', 'rows'] as const
 /** Read the page address. Unknown or broken values fall back to "not
  *  chosen"; a From after To drops the range. `storedRows` is this device's
  *  remembered rows-per-page, used when the address has none. `segment`
- *  'review' keeps only what the Needs review list applies. */
+ *  'review' keeps only what the Needs review list applies. Flags: Archived
+ *  is the admins' option (`canSeeArchived`); for anyone else it is "not
+ *  chosen", never a list the server refuses. */
 export function readFilters(
   sp: URLSearchParams,
   storedRows?: number | null,
-  segment: 'catalog' | 'review' = 'catalog'
+  segment: 'catalog' | 'review' = 'catalog',
+  canSeeArchived = false
 ): CatalogFilters {
+  // 120 characters: the server's own cap on a filter value (catalog_list.
+  // VALUE_MAX), so every option it offers survives the address.
   const text = (k: string) => (sp.get(k) || '').trim().slice(0, 120);
   const sort = SORT_OPTIONS.some((o) => o.value === sp.get('sort'))
     ? (sp.get('sort') as SortKey)
-    : DEFAULT_SORT;
+    : defaultSort(segment);
   const flagRaw = sp.get('flag') || '';
-  const flag = (['any', 'mine', 'archived'].includes(flagRaw) ||
+  const flag = (['any', 'mine', ...(canSeeArchived ? ['archived'] : [])].includes(flagRaw) ||
   FLAG_TYPES.some((f) => f.value === flagRaw)
     ? flagRaw
     : '') as FlagFilter;
@@ -161,14 +170,18 @@ export function readFilters(
 
 /** Write the filters into the address, keeping every other key (page,
  *  focus). Defaults are left out so a plain /catalog stays plain. */
-export function writeFilters(f: CatalogFilters, prev: URLSearchParams): URLSearchParams {
+export function writeFilters(
+  f: CatalogFilters,
+  prev: URLSearchParams,
+  segment: 'catalog' | 'review' = 'catalog'
+): URLSearchParams {
   const sp = new URLSearchParams(prev);
   const put = (k: string, v: string | boolean | number, isDefault: boolean) => {
     if (isDefault || v === '' || v === false) sp.delete(k);
     else sp.set(k, v === true ? '1' : String(v));
   };
   for (const k of TEXT_KEYS) put(k, f[k], false);
-  put('sort', f.sort, f.sort === DEFAULT_SORT);
+  put('sort', f.sort, f.sort === defaultSort(segment));
   // Kept even before any day is picked: choosing Last edited first and the
   // days second must not fall back to Date added in between.
   put('date_on', f.date_on, f.date_on === 'added');

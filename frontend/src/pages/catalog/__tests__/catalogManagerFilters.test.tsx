@@ -393,3 +393,77 @@ describe('the Flag dialog names who gets the tasks from the server', () => {
     expect(flagApi.mock.calls[0]).toEqual([['P1'], 'needs_revision', '', false]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Panel round: typing a day, a message that outlives its value, Archived for
+// non-admins, the review queue's own order
+// ---------------------------------------------------------------------------
+
+describe('typing a To date with the keyboard', () => {
+  it('a half-typed year is kept in the box, never refused, applied once whole', async () => {
+    renderAt('?gender=Men&from=2026-10-01');
+    await screen.findByTestId('catalog-table');
+    const to = within(screen.getByTestId('date-range')).getByLabelText('To') as HTMLInputElement;
+    // What Chrome reports while 12/10/2026 is typed into the box, digit by digit.
+    for (const partial of ['0002-10-12', '0020-10-12', '0202-10-12']) {
+      fireEvent.change(to, { target: { value: partial } });
+      expect(to.value).toBe(partial);
+      expect(screen.queryByRole('alert')).toBeNull();
+      expect(where().get('to')).toBeNull();
+    }
+    fireEvent.change(to, { target: { value: '2026-10-12' } });
+    await waitFor(() => expect(where().get('to')).toBe('2026-10-12'));
+    expect(where().get('from')).toBe('2026-10-01');
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it("a refused range's message goes when its value goes (the chip's X)", async () => {
+    renderAt('?gender=Men&from=2026-10-02&to=2026-10-11');
+    await screen.findByTestId('catalog-table');
+    const range = screen.getByTestId('date-range');
+    fireEvent.change(within(range).getByLabelText('From'), { target: { value: '2026-10-20' } });
+    expect(await screen.findByRole('alert')).toBeTruthy();
+    expect(where().get('from')).toBe('2026-10-02');
+    fireEvent.change(screen.getByLabelText('Sort by'), { target: { value: 'mrp_desc' } });
+    await waitFor(() => expect(where().get('sort')).toBe('mrp_desc'));
+    fireEvent.click(screen.getByLabelText('Remove Added 2 Oct - 11 Oct filter'));
+    await waitFor(() => expect(where().get('from')).toBeNull());
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect((within(range).getByLabelText('From') as HTMLInputElement).value).toBe('');
+  });
+});
+
+describe('Flags: Archived is the admins’ option only', () => {
+  it.each([['CATALOG_MANAGER'], ['STORE_MANAGER']])(
+    'a shared ?flag=archived falls back to not chosen for %s',
+    async (role) => {
+      auth.roles = [role];
+      renderAt('?flag=archived');
+      await screen.findByTestId('catalog-table');
+      expect(getProducts.mock.calls.at(-1)?.[0].flag).toBeUndefined();
+      expect(screen.queryByText(/Archived \(deleted\)/)).toBeNull();
+      expect(screen.queryByText('Could not load the catalog.')).toBeNull();
+    }
+  );
+});
+
+describe('the Needs review queue keeps its newest-first order', () => {
+  it('no Sort by in the address asks for newest first and says so', async () => {
+    reviewList.mockReset();
+    reviewList.mockResolvedValue({
+      products: [{ id: 'IMP-1', sku: 'IMP-1', title: 'Imported thing', needs_review: true }],
+      total: 1,
+    });
+    render(
+      <MemoryRouter initialEntries={['/catalog/review']}>
+        <Routes>
+          <Route path="/catalog/review" element={<CatalogManagerPage segment="review" />} />
+        </Routes>
+      </MemoryRouter>
+    );
+    await waitFor(() => expect(reviewList).toHaveBeenCalled());
+    expect(reviewList.mock.calls.at(-1)?.[0]).toMatchObject({ sort: 'newest' });
+    expect((await screen.findByTestId('result-line')).textContent).toContain('newest first');
+    expect((screen.getByLabelText('Sort by') as HTMLSelectElement).value).toBe('newest');
+  });
+});

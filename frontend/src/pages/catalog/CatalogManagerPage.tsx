@@ -256,7 +256,7 @@ export function CatalogManagerPage({
   // This device's remembered size: state, so choosing a size (50 included,
   // which the address leaves out as the default) is what the page reads.
   const [rowsMemory, setRowsMemory] = useState(storedRows);
-  const filtersKey = JSON.stringify(readFilters(searchParams, rowsMemory, segment));
+  const filtersKey = JSON.stringify(readFilters(searchParams, rowsMemory, segment, isAdmin));
   const filters: CatalogFilters = useMemo(() => JSON.parse(filtersKey), [filtersKey]);
   const pageSize = filters.rows;
   const photo: PhotoFilter | undefined = photoPreset ?? (filters.photo || undefined);
@@ -320,8 +320,10 @@ export function CatalogManagerPage({
       setSearchParams(
         (prev) => {
           const f =
-            typeof next === 'function' ? next(readFilters(prev, rowsMemory, segment)) : next;
-          const sp = writeFilters(f, prev);
+            typeof next === 'function'
+              ? next(readFilters(prev, rowsMemory, segment, isAdmin))
+              : next;
+          const sp = writeFilters(f, prev, segment);
           sp.delete('page');
           return sp;
         },
@@ -330,7 +332,7 @@ export function CatalogManagerPage({
       clearSelection();
       setDrawerIdx(null);
     },
-    [setSearchParams, clearSelection, rowsMemory, segment]
+    [setSearchParams, clearSelection, rowsMemory, segment, isAdmin]
   );
 
   // ---- Search debounce (300ms; Enter flushes for barcode scanners) --------

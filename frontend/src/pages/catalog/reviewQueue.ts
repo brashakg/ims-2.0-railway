@@ -12,6 +12,8 @@
 // two queues). Everything here fails soft — a missing/corrupt stash just
 // degrades to the editor's single-item fallback fetch.
 
+import { readFilters, type SortKey } from './catalogListState';
+
 export const REVIEW_QUEUE_KEY = 'ims.review.queue';
 
 export interface ReviewQueueFilters {
@@ -124,4 +126,13 @@ export function backToQueueAddress(stash: ReviewQueueStash | null, focusId: stri
   );
   sp.set('focus', focusId);
   return `/catalog/review?${sp.toString()}`;
+}
+
+/** The review list's Sort by as the reviewer left it (its address; newest
+ *  import first when none): the editor fetching the next waiting item walks
+ *  the queue in the same order as the list. Pure. */
+export function queueSort(stash: ReviewQueueStash | null): SortKey {
+  const address = stash?.filters?.address;
+  return readFilters(new URLSearchParams(typeof address === 'string' ? address : ''), null, 'review')
+    .sort;
 }
