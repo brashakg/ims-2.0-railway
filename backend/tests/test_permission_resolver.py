@@ -189,5 +189,8 @@ def test_a_stored_vendor_returns_write_override_still_answers_the_create_door():
     assert A(True, cap, {"deny": {"vendor-returns:write": True}}, None) is False
     assert A(False, cap, {"grant": {"vendor-returns:write": True}}, None) is True
     assert A(True, cap, {"deny": {"vendor-returns:create": True}}, None) is False
+    # A 'vendors' module deny names vendor-returns:write, so the same parent
+    # link is what blocks the create door for it (no second copy of the rule).
+    assert A(True, cap, None, {"vendors": False}) is False
     # A create deny alone leaves approve / ship / credit (write) to the role.
     assert A(True, "vendor-returns:write", {"deny": {"vendor-returns:create": True}}, None) is True
