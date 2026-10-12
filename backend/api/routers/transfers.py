@@ -1266,6 +1266,17 @@ async def create_transfer(
             detail="Transfer must contain at least one item",
         )
 
+    # Owner ruling 2026-10-13: never to another company from a shop with no
+    # GSTIN on file (asked again at ship, _gstin_gap).
+    db = _get_db()
+    gap = _gstinless_sender(
+        transfer.from_location_name,
+        _shop_gst(db, transfer.from_location_id),
+        _shop_gst(db, transfer.to_location_id),
+    )
+    if gap:
+        raise HTTPException(status_code=400, detail=gap)
+
     transfer_id = f"trf_{uuid.uuid4().hex[:12]}"
     transfer_number = generate_transfer_number()
 
@@ -2249,10 +2260,27 @@ def _transfer_registrations(db, transfer: Dict) -> tuple:
     return src, dst, None if (src[0] or dst[0]) else False
 
 
+def _gstinless_sender(from_name: str, src: tuple, dst: tuple) -> str:
+    """Owner ruling 2026-10-13: stock goes to ANOTHER of our companies only
+    from a shop with its GSTIN on file. The refusal when it does not, else ''.
+    Asked at create, and at ship and the challan through _gstin_gap (a GSTIN
+    removed after create); a same-company move is not this rule's."""
+    if src[0] and dst[0] and src[0] != dst[0] and not src[1]:
+        return (
+            f"{from_name or 'The sending shop'} has no GSTIN on file - add it in "
+            "Organization before sending stock to another company."
+        )
+    return ""
+
+
 def _gstin_gap(transfer: Dict, src: tuple, dst: tuple) -> str:
     """The refusal for a move IMS cannot place (_transfer_registrations
     None), naming the store(s) with no GSTIN on file -- ship and the challan
-    give this one reason."""
+    give this one reason (the owner's own words for a sender with no GSTIN,
+    _gstinless_sender)."""
+    sender = _gstinless_sender(transfer.get("from_location_name") or "", src, dst)
+    if sender:
+        return sender
     missing = [
         name or "A store"
         for name, side in (

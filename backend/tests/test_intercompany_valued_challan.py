@@ -601,11 +601,12 @@ def test_d13_a_unit_with_no_cost_anywhere_stops_the_ship(db):
 @pytest.mark.parametrize("side", ["consignor", "consignee"])
 def test_d13_ship_is_refused_when_a_side_has_no_gstin(db, side):
     """The paper must be printable before the goods leave: no GSTIN on one
-    side of a registration-crossing move -> refused, nothing moved."""
+    side of a registration-crossing move (lost after create) -> refused,
+    nothing moved."""
     store_id, entity_id = ("ST-DHN-1", "ENT-Z") if side == "consignor" else ("ST-BOK-1", "ENT-Y")
+    t = _create("ST-BOK-1")
     db["stores"].update_one({"store_id": store_id}, {"$set": {"gstin": ""}})
     db["entities"].update_one({"entity_id": entity_id}, {"$set": {"gstins": []}})
-    t = _create("ST-BOK-1")
     with pytest.raises(HTTPException) as exc:
         _ship(t["id"])
     assert exc.value.status_code == 400
@@ -1064,6 +1065,45 @@ def test_owner_every_transfer_action_reply_carries_the_routes_answer(db):
 # ===========================================================================
 # Panel round 6
 # ===========================================================================
+
+_OWNER_NO_GSTIN = (
+    "Hirapur Dhanbad has no GSTIN on file - add it in Organization before "
+    "sending stock to another company."
+)
+
+
+def _blank_hirapur(db):
+    """Hirapur (company Z) with no GSTIN on file; Bank More keeps Z's."""
+    db["stores"].update_one(
+        {"store_id": "ST-DHN-1"}, {"$set": {"gstin": "", "state": "", "state_code": ""}}
+    )
+
+
+def test_owner_no_transfer_to_another_company_from_a_shop_without_a_gstin(db):
+    """Owner ruling 2026-10-13: Hirapur (Z) with no GSTIN on file cannot send
+    stock to Bokaro (Y): refused at create, in the owner's words, and nothing
+    is saved. A move inside company Z is not this rule's: it is created."""
+    _blank_hirapur(db)
+    with pytest.raises(HTTPException) as exc:
+        _create("ST-BOK-1")
+    assert (exc.value.status_code, exc.value.detail) == (400, _OWNER_NO_GSTIN)
+    assert db["stock_transfers"].count_documents({}) == 0
+    assert _create("ST-DHN-2")["status"] == transfers.TransferStatus.APPROVED
+
+
+def test_owner_a_gstin_removed_after_create_stops_the_ship_in_the_owners_words(db):
+    """Created while Hirapur's GSTIN was on file, then removed: ship refuses
+    with the same words (and the challan gives ship's answer); nothing moves."""
+    t = _create("ST-BOK-1")
+    _blank_hirapur(db)
+    with pytest.raises(HTTPException) as ship:
+        _ship(t["id"])
+    assert (ship.value.status_code, ship.value.detail) == (400, _OWNER_NO_GSTIN)
+    assert db["stock_units"].count_documents({"status": "AVAILABLE"}) == 2
+    with pytest.raises(HTTPException) as paper:
+        _challan(t["id"])
+    assert (paper.value.status_code, paper.value.detail) == (400, _OWNER_NO_GSTIN)
+
 
 def _products_fail(monkeypatch, after=0):
     """Every read of `products` after the first `after` raises (a find_one
