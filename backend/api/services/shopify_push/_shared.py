@@ -59,7 +59,9 @@ class PushResult:
 
     mode         SIMULATED (dry-run, no network) | LIVE (a real Shopify write).
     entity       product | variant | variant-prices | collection | menu | image.
-    action       create | update | skip | noop (what we did / would do).
+    action       create | update | skip | noop (what we did / would do); the
+                 design photo press (media.push_image) also answers
+                 processing | dedupe.
     target_id    the IMS doc id we were asked to push.
     ok           True unless an error occurred (a SIMULATED dry-run is ok=True).
     shopify_id   the Shopify gid (set on a LIVE write OR echoed if already mapped).

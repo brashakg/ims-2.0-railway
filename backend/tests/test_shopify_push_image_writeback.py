@@ -102,17 +102,18 @@ def test_writeback_uses_primary_key_when_image_id_present():
             "url": "u",
             "shopify_image_id": None,
             "shopify_image_sent": "u",
-            "shopify_image_sent_id": "gid://shopify/MediaImage/1",
+            "shopify_image_answers": [{"id": "gid://shopify/MediaImage/1", "url": "u"}],
         }
     )
     doc = db["product_images"].find_one({"image_id": "I1"})
-    ok = shopify_push._writeback_image(db, doc, "gid://shopify/MediaImage/1", "u")
+    ok = shopify_push._writeback_image(db, doc, "gid://shopify/MediaImage/1")
     assert ok is True
     saved = db["product_images"].find_one({"image_id": "I1"})
     assert saved["shopify_image_id"] == "gid://shopify/MediaImage/1"
-    assert saved["shopify_image_src"] == "u"
     # the send is resolved: no other row may treat it as still on its way
-    assert (saved["shopify_image_sent"], saved["shopify_image_sent_id"]) == (None, None)
+    assert saved["shopify_image_sent"] is None
+    # the proof stays: Shopify answered IMS's send of "u" with media 1
+    assert saved["shopify_image_answers"] == [{"id": "gid://shopify/MediaImage/1", "url": "u"}]
 
 
 def test_writeback_falls_back_to_natural_key_when_image_id_null():
@@ -128,7 +129,7 @@ def test_writeback_falls_back_to_natural_key_when_image_id_null():
         }
     )
     doc = db["product_images"].find_one({"product_id": "P1"})
-    ok = shopify_push._writeback_image(db, doc, "gid://shopify/MediaImage/2", doc["url"])
+    ok = shopify_push._writeback_image(db, doc, "gid://shopify/MediaImage/2")
     assert ok is True
     saved = db["product_images"].find_one({"product_id": "P1"})
     assert saved["shopify_image_id"] == "gid://shopify/MediaImage/2"
@@ -139,7 +140,7 @@ def test_writeback_returns_false_when_no_stable_key():
     caller then fails loudly instead of writing blindly)."""
     db = _EngineDB()
     ok = shopify_push._writeback_image(
-        db, {"image_id": None, "product_id": None, "url": None}, "gid://x/1", "u"
+        db, {"image_id": None, "product_id": None, "url": None}, "gid://x/1"
     )
     assert ok is False
 
@@ -195,7 +196,7 @@ def test_push_image_live_fails_loud_when_writeback_cannot_persist(monkeypatch):
     reports ok=False (not a silent ok=True) with the gid preserved for audit --
     the safeguard that stops an un-recorded create from being re-pushed."""
     _force_live(monkeypatch, _MEDIA_OK)
-    monkeypatch.setattr(shopify_push, "_writeback_image", lambda db, image, gid, src: False)
+    monkeypatch.setattr(shopify_push, "_writeback_image", lambda db, image, gid: False)
     db = _EngineDB()
     db["catalog_products"].insert_one(
         {"id": "P1", "ecom": {"shopify_product_id": "gid://shopify/Product/111"}}

@@ -161,9 +161,8 @@ def test_update_never_touches_the_shopify_record(repo):
     iid = repo.create({"product_id": "P1", "url": "u"})["image_id"]
     record = {
         "shopify_image_id": "gid://shopify/MediaImage/60",
-        "shopify_image_src": "u",
         "shopify_image_sent": "u",
-        "shopify_image_sent_id": "gid://shopify/MediaImage/61",
+        "shopify_image_answers": [{"id": "gid://shopify/MediaImage/61", "url": "u"}],
     }
     assert repo.update(iid, record) is False
     doc = repo.get_by_id(iid)
