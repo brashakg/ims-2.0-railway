@@ -129,14 +129,16 @@ def finished_held_items(db, g) -> List[str]:
 
 def unaddressed_bill_asks(db) -> List[Dict[str, Any]]:
     """Open asks for cataloguing raised before the asks went to people by
-    name: category 'Catalog', nobody assigned."""
+    name: category 'Catalog' (an ask raised by name is 'Catalogue'). Raised
+    for nobody -- but the escalation ladder hands an open one, after its
+    clock, to the store manager and up, who cannot catalogue: whoever holds it
+    now, it is still an ask no catalogue manager was given."""
     return list(
         db["tasks"].find(
             {
                 "category": "Catalog",
                 "source": "SYSTEM",
                 "source_ref": {"$regex": "^catalogue-for-bill:"},
-                "assigned_to": None,
                 "status": {"$in": ["OPEN", "IN_PROGRESS", "ESCALATED"]},
             }
         )
@@ -157,7 +159,7 @@ def run(db, *, commit: bool) -> List[Dict[str, Any]]:
             + (f"; {len(done)} item(s) already finished: released first" if done else "")
         )
     asks = unaddressed_bill_asks(db)
-    print(f"{len(asks)} vendor-bill ask(s) for cataloguing addressed to nobody:")
+    print(f"{len(asks)} vendor-bill ask(s) for cataloguing never given to a catalogue manager:")
     for t in asks:
         ids = str(t.get("source_ref")).split(":", 1)[1].split(",")
         waiting = asks_still_waiting(db, ids)

@@ -4861,3 +4861,36 @@ def test_r8_only_a_receiving_manager_voids_a_receipt_held_beyond_its_order(world
     out = _run(vd.void_grn(gid, MANAGER))
     assert out["grn_status"] == "VOID" and _mgr_tasks(world, gid) == []
 
+
+def test_r8_the_script_finds_an_old_ask_the_ladder_already_handed_on(world, monkeypatch):
+    # An old ask breaches its clock before the deploy and the ladder hands it
+    # to the store manager (assigned_to set, ESCALATED). It is still an ask no
+    # catalogue manager was given: the script asks them and closes it.
+    script = _load_script(monkeypatch)
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    world.db.seed(
+        "tasks",
+        [
+            {
+                "task_id": "T-OLD-ESC",
+                "title": "Finish cataloguing 1 item(s) - a vendor bill is waiting",
+                "category": "Catalog",
+                "source": "SYSTEM",
+                "source_ref": f"catalogue-for-bill:{draft_id}",
+                "assigned_to": MANAGER["user_id"],
+                "store_id": STORE,
+                "status": "ESCALATED",
+            }
+        ],
+    )
+    script.run(world.db, commit=True)
+    old = world.db.tasks.find_one({"task_id": "T-OLD-ESC"})
+    asked = [
+        t["assigned_to"]
+        for t in _open_tasks(world)
+        if str(t.get("source_ref", "")).startswith("catalogue-for-bill:")
+    ]
+    finding(
+        old["status"] == "COMPLETED" and asked == [CATALOGUER["user_id"]],
+        f"An escalated old ask stayed {old['status']} with {old['assigned_to']}; asked {asked}",
+    )
