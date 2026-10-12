@@ -4717,3 +4717,22 @@ def test_r7_the_similar_hint_names_a_discarded_draft_as_one(world):
     assert (hint["exact_match"] or {}).get("product_id") == draft_id
     # The screen reads this to say Save brings it back (no stock-list link).
     assert hint["exact_match"]["discarded_draft"] is True
+
+
+def test_merge_a_discarded_draft_reads_discontinued_and_its_revival_reads_new(world):
+    # Merging main (#1169): the catalog DELETE stamps deleted_at on the spine so
+    # reorder_policy.discontinued retires it. The revive must clear it, or a
+    # draft ordered again reads 'Discontinued' (no low-stock alert, no reorder).
+    from api.services.reorder_policy import discontinued
+
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    assert discontinued(world.product(draft_id)) is False  # a new buy
+    _discard(world, draft_id, po, grn)
+    assert world.product(draft_id).get("deleted_at")
+    assert discontinued(world.product(draft_id)) is True
+    world.raise_po([{"new_product": dict(BOSS_TYPED), "quantity": 1, "unit_price": 1200}])
+    spine = world.product(draft_id)
+    finding(
+        spine["provisional"] is True and not spine.get("deleted_at") and discontinued(spine) is False,
+        f"merge: a revived draft still reads discontinued ({spine.get('deleted_at')})",
+    )
